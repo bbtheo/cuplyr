@@ -27,8 +27,10 @@ R lost ground to Python partly due to performance. This closes the gap without l
 
 **v0.0.0.9000 (Vision stage)** – Nothing works, expanding fast.
 
-- 🚧 `filter()`, `select()`, `mutate()`, `arrange()`
-- 🚧 `group_by()`, `summarise()`, joins
+- ✅ `filter()`, `select()`, `mutate()`
+- 🚧 `group_by()`, `arrange()`, `summarise()`
+- 🚧 `left_join()`, `right_join()`, `inner_join()`, `full_join()`
+- 🚧 rolling joins, with complex `join_by()` logic
 - 🚧 Lazy eval, AST optimization, full tests
 - 🚧 Window functions, string ops 
 - 🚧 Multi-GPU, streaming 

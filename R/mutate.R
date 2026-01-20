@@ -1,16 +1,78 @@
-# Mutate verb for tbl_gpu
-
 #' Create or modify columns in a GPU table
 #'
-#' @param .data A tbl_gpu object
-#' @param ... Name-value pairs of expressions (e.g., z = x + y)
-#' @return A tbl_gpu with new/modified columns
+#' Adds new columns or modifies existing columns in a GPU table using
+#' arithmetic expressions, similar to `dplyr::mutate()`. All computations
+#' are performed on the GPU for maximum performance.
+#'
+#' @param .data A `tbl_gpu` object created by [tbl_gpu()].
+#' @param ... Name-value pairs of expressions. The name gives the column name
+#'   (new or existing), and the value is an arithmetic expression involving
+#'   existing columns and/or scalar values.
+#'
+#' @return A `tbl_gpu` object with the new or modified columns. If a column
+#'   name already exists, it is replaced. New columns are appended.
+#'
+#' @details
+#' ## Supported arithmetic operators
+#' \itemize{
+#'   \item `+` - addition
+#'   \item `-` - subtraction
+#'   \item `*` - multiplication
+#'   \item `/` - division
+#'   \item `^` - exponentiation (power)
+#' }
+#'
+#' ## Column replacement behavior
+#' When the output column name matches an existing column, the existing
+#' column is replaced in-place (preserving column order). For example,
+#' `mutate(x = x + 1)` will modify `x` rather than creating a duplicate.
+#'
+#' ## Current limitations
+#' \itemize{
+#'   \item Only binary operations are supported (col op value or col op col)
+#'   \item Complex expressions like `(x + y) * z` are not yet supported
+#'   \item Functions like `sqrt()`, `log()`, `abs()` are not yet implemented
+#'   \item Result type is always FLOAT64 (double precision)
+#' }
+#'
+#' ## Performance
+#' GPU arithmetic operations are highly vectorized and can process
+#' billions of elements per second. Memory bandwidth is typically
+#' the limiting factor, not compute.
+#'
+#' @seealso
+#' \code{\link{filter.tbl_gpu}} for filtering rows,
+#' \code{\link{select.tbl_gpu}} for selecting columns,
+#' \code{\link{collect.tbl_gpu}} for retrieving results
+#'
 #' @export
 #' @importFrom dplyr mutate
+#'
 #' @examples
-#' if (interactive()) {
-#'   gpu_df <- tbl_gpu(mtcars)
-#'   gpu_df |> mutate(kpl = mpg * 0.425)
+#' if (has_gpu()) {
+#'   gpu_mtcars <- tbl_gpu(mtcars)
+#'
+#'   # Add a new column
+#'   result <- gpu_mtcars |>
+#'     mutate(kpl = mpg * 0.425) |>
+#'     collect()
+#'
+#'   # Modify an existing column
+#'   adjusted <- gpu_mtcars |>
+#'     mutate(mpg = mpg + 5) |>
+#'     collect()
+#'
+#'   # Combine two columns
+#'   gpu_cars <- tbl_gpu(cars)
+#'   result <- gpu_cars |>
+#'     mutate(ratio = dist / speed) |>
+#'     collect()
+#'
+#'   # Chain multiple mutations
+#'   result <- gpu_mtcars |>
+#'     mutate(power_weight = hp / wt) |>
+#'     mutate(efficiency = mpg * power_weight) |>
+#'     collect()
 #' }
 mutate.tbl_gpu <- function(.data, ...) {
   dots <- rlang::enquos(...)
@@ -27,12 +89,21 @@ mutate.tbl_gpu <- function(.data, ...) {
   result
 }
 
-# Parse and execute a single mutate expression
+# Internal: Parse and execute a single mutate expression
+#
+# Parses a quosure containing an arithmetic expression and calls the
+# appropriate GPU binary operation function.
+#
+# @param .data A tbl_gpu object
+# @param new_name Name for the output column
+# @param expr A quosure with an arithmetic expression
+# @return A tbl_gpu with the new/modified column
+# @keywords internal
 mutate_one <- function(.data, new_name, expr) {
   expr_chr <- rlang::quo_text(expr)
 
   # Parse simple arithmetic: col op value or col op col
-  # Supported: +, -, *, /, ^
+  # Find the first operator
   ops <- c("+", "-", "*", "/", "^")
   op_found <- NULL
   op_pos <- NULL
@@ -48,7 +119,8 @@ mutate_one <- function(.data, new_name, expr) {
   }
 
   if (is.null(op_found)) {
-    stop("mutate() only supports arithmetic: +, -, *, /, ^")
+    stop("mutate() only supports arithmetic operations: +, -, *, /, ^\n",
+         "Expression: ", expr_chr, call. = FALSE)
   }
 
   lhs <- trimws(substr(expr_chr, 1, op_pos - 1))
@@ -58,7 +130,9 @@ mutate_one <- function(.data, new_name, expr) {
   rhs_idx <- tryCatch(col_index(.data, rhs), error = function(e) NULL)
 
   if (is.null(lhs_idx)) {
-    stop("Column '", lhs, "' not found in mutate expression")
+    stop("Column '", lhs, "' not found.\n",
+         "Available columns: ", paste(.data$schema$names, collapse = ", "),
+         call. = FALSE)
   }
 
   if (!is.null(rhs_idx)) {
@@ -67,10 +141,11 @@ mutate_one <- function(.data, new_name, expr) {
   } else {
     # Column to scalar operation
     value <- tryCatch(eval(parse(text = rhs)), error = function(e) {
-      stop("Cannot parse value: ", rhs)
+      stop("Cannot parse value: ", rhs, call. = FALSE)
     })
     if (!is.numeric(value) || length(value) != 1) {
-      stop("mutate() currently only supports numeric scalar operations")
+      stop("mutate() currently only supports numeric scalar operations.\n",
+           "Got: ", class(value)[1], " of length ", length(value), call. = FALSE)
     }
     new_ptr <- gpu_mutate_binary_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
   }
@@ -79,7 +154,7 @@ mutate_one <- function(.data, new_name, expr) {
   existing_idx <- match(new_name, .data$schema$names)
 
   if (!is.na(existing_idx)) {
-    # Replace existing column: select columns with new one in place of old
+    # Replace existing column: reorder to put new column in original position
     n_orig <- length(.data$schema$names)
     new_col_idx <- n_orig  # 0-based index of newly appended column
 

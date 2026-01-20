@@ -1,17 +1,69 @@
-# Filter verb for tbl_gpu
-
 #' Filter rows of a GPU table
 #'
-#' @param .data A tbl_gpu object
-#' @param ... Filter expressions (e.g., x > 0, y == 5)
-#' @param .preserve Ignored (for compatibility)
-#' @return A filtered tbl_gpu
+#' Selects rows from a GPU table where conditions are TRUE, similar to
+#' `dplyr::filter()`. Filtering is performed entirely on the GPU for
+#' maximum performance on large datasets.
+#'
+#' @param .data A `tbl_gpu` object created by [tbl_gpu()].
+#' @param ... Logical expressions to filter by. Each expression should be
+#'   a comparison of the form `column <op> value` or `column <op> column`.
+#'   Multiple conditions are combined with AND (all must be TRUE).
+#' @param .preserve Ignored. Included for compatibility with dplyr generic.
+#'
+#' @return A `tbl_gpu` object containing only rows where all conditions are TRUE.
+#'   The GPU memory for the filtered result is newly allocated.
+#'
+#' @details
+#' ## Supported comparison operators
+#' \itemize{
+#'   \item `==` - equal to
+#'   \item `!=` - not equal to
+#'   \item `>` - greater than
+#'   \item `>=` - greater than or equal to
+#'   \item `<` - less than
+#'   \item `<=` - less than or equal to
+#' }
+#'
+#' ## Current limitations
+#' \itemize
+#'   \item Only simple comparisons are supported (column op value/column)
+#'   \item Compound expressions with `&` or `|` are not yet supported
+#'   \item String comparisons are not yet implemented
+#'   \item Only numeric scalar values on the right-hand side
+#' }
+#'
+#' ## Performance
+#' Filtering on GPU is highly parallel and can process billions of rows
+#' per second. For best performance, chain multiple filter conditions
+#' rather than using compound expressions.
+#'
+#' @seealso
+#' \code{\link{mutate.tbl_gpu}} for creating new columns,
+#' \code{\link{select.tbl_gpu}} for selecting columns,
+#' \code{\link{collect.tbl_gpu}} for retrieving results
+#'
 #' @export
 #' @importFrom dplyr filter
+#'
 #' @examples
-#' if (interactive()) {
-#'   gpu_df <- tbl_gpu(mtcars)
-#'   gpu_df |> filter(mpg > 20)
+#' if (has_gpu()) {
+#'   gpu_mtcars <- tbl_gpu(mtcars)
+#'
+#'   # Filter with single condition
+#'   efficient_cars <- gpu_mtcars |>
+#'     filter(mpg > 25)
+#'
+#'   # Multiple conditions (combined with AND)
+#'   result <- gpu_mtcars |>
+#'     filter(mpg > 20) |>
+#'     filter(cyl == 4) |>
+#'     collect()
+#'
+#'   # Compare two columns
+#'   gpu_cars <- tbl_gpu(cars)
+#'   fast_stops <- gpu_cars |>
+#'     filter(dist < speed) |>
+#'     collect()
 #' }
 filter.tbl_gpu <- function(.data, ..., .preserve = FALSE) {
   dots <- rlang::enquos(...)
@@ -26,12 +78,20 @@ filter.tbl_gpu <- function(.data, ..., .preserve = FALSE) {
   result
 }
 
-# Parse and execute a single filter expression
+# Internal: Parse and execute a single filter expression
+#
+# Parses a quosure containing a comparison expression and calls the
+# appropriate GPU filter function.
+#
+# @param .data A tbl_gpu object
+# @param expr A quosure with a comparison expression
+# @return A filtered tbl_gpu object
+# @keywords internal
 filter_one <- function(.data, expr) {
   expr_chr <- rlang::quo_text(expr)
 
   # Parse simple comparison: col op value or col op col
-  # Supported: ==, !=, >, >=, <, <=
+  # Order matters: check two-char operators before single-char
   ops <- c("==", "!=", ">=", "<=", ">", "<")
   op_found <- NULL
   for (op in ops) {
@@ -42,12 +102,14 @@ filter_one <- function(.data, expr) {
   }
 
   if (is.null(op_found)) {
-    stop("filter() only supports comparisons: ==, !=, >, >=, <, <=")
+    stop("filter() only supports comparisons: ==, !=, >, >=, <, <=\n",
+         "Expression: ", expr_chr, call. = FALSE)
   }
 
   parts <- strsplit(expr_chr, op_found, fixed = TRUE)[[1]]
   if (length(parts) != 2) {
-    stop("Invalid filter expression: ", expr_chr)
+    stop("Invalid filter expression: ", expr_chr,
+         "\nExpected format: column ", op_found, " value", call. = FALSE)
   }
 
   lhs <- trimws(parts[1])
@@ -57,7 +119,9 @@ filter_one <- function(.data, expr) {
   rhs_idx <- tryCatch(col_index(.data, rhs), error = function(e) NULL)
 
   if (is.null(lhs_idx)) {
-    stop("Column '", lhs, "' not found in filter expression")
+    stop("Column '", lhs, "' not found.\n",
+         "Available columns: ", paste(.data$schema$names, collapse = ", "),
+         call. = FALSE)
   }
 
   if (!is.null(rhs_idx)) {
@@ -66,10 +130,11 @@ filter_one <- function(.data, expr) {
   } else {
     # Column to scalar comparison
     value <- tryCatch(eval(parse(text = rhs)), error = function(e) {
-      stop("Cannot parse value: ", rhs)
+      stop("Cannot parse value: ", rhs, call. = FALSE)
     })
     if (!is.numeric(value) || length(value) != 1) {
-      stop("filter() currently only supports numeric scalar comparisons")
+      stop("filter() currently only supports numeric scalar comparisons.\n",
+           "Got: ", class(value)[1], " of length ", length(value), call. = FALSE)
     }
     new_ptr <- gpu_filter_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
   }
