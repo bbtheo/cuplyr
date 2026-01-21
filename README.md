@@ -25,7 +25,7 @@ R lost ground to Python partly due to performance. This closes the gap without l
 
 ## Status
 
-**v0.0.0.9000 (Vision stage)** – Nothing works, expanding fast.
+**v0.0.0.9000 (Pre-pre-alpha stage)** – Almost nothing works, expanding fast.
 
 - ✅ `filter()`, `select()`, `mutate()`
 - 🚧 `group_by()`, `arrange()`, `summarise()`
