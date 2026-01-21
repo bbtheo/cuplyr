@@ -19,7 +19,7 @@ tbl_gpu(sales_data) %>%
 
 Your GPU sits idle. Your dplyr code hits walls at 100M rows. This fixes both.
 
-cuplr is a dplyr backend that targets GPUs the same way dbplyr targets databases. Write R, execute on GPU. 100M row groupby? 30 seconds on CPU, 0.8 seconds on GPU.
+cuplr is a dplyr backend that targets GPUs the same way dbplyr targets databases. Write R, execute on GPU. 100M row groupby? XX seconds on CPU, YY seconds on GPU.
 
 R lost ground to Python partly due to performance. This closes the gap without leaving the ecosystem.
 
