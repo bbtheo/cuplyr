@@ -10,6 +10,8 @@
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/table/table.hpp>
+#include <cudf/groupby.hpp>
+#include <cudf/aggregation.hpp>
 #include <rmm/device_buffer.hpp>
 #include <rmm/mr/per_device_resource.hpp>
 #include <cuda_runtime.h>
@@ -433,6 +435,78 @@ cudf::binary_operator get_arith_op(const std::string& op) {
 }
 
 // [[Rcpp::export]]
+SEXP gpu_compare_scalar(SEXP xptr, int col_idx, std::string op, double value) {
+    using namespace cuplr;
+
+    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
+    cudf::table_view view = get_table_view(ptr);
+
+    if (col_idx < 0 || col_idx >= view.num_columns()) {
+        Rcpp::stop("Column index out of bounds");
+    }
+
+    cudf::column_view col = view.column(col_idx);
+
+    // Create scalar for comparison
+    auto scalar = cudf::make_numeric_scalar(cudf::data_type{cudf::type_id::FLOAT64});
+    static_cast<cudf::numeric_scalar<double>*>(scalar.get())->set_value(value);
+
+    // Perform comparison to get boolean column
+    auto bool_col = cudf::binary_operation(
+        col, *scalar, get_compare_op(op),
+        cudf::data_type{cudf::type_id::BOOL8}
+    );
+
+    // Cast to INT32 so it can be summed
+    auto int_col = cudf::cast(bool_col->view(), cudf::data_type{cudf::type_id::INT32});
+
+    // Build result table with all original columns plus the new comparison column
+    std::vector<std::unique_ptr<cudf::column>> result_columns;
+    for (int i = 0; i < view.num_columns(); ++i) {
+        result_columns.push_back(std::make_unique<cudf::column>(view.column(i)));
+    }
+    result_columns.push_back(std::move(int_col));
+
+    auto result = std::make_unique<cudf::table>(std::move(result_columns));
+    return make_gpu_table_xptr(std::move(result));
+}
+
+// [[Rcpp::export]]
+SEXP gpu_compare_cols(SEXP xptr, int col_idx, std::string op, int col_idx2) {
+    using namespace cuplr;
+
+    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
+    cudf::table_view view = get_table_view(ptr);
+
+    if (col_idx < 0 || col_idx >= view.num_columns() ||
+        col_idx2 < 0 || col_idx2 >= view.num_columns()) {
+        Rcpp::stop("Column index out of bounds");
+    }
+
+    cudf::column_view col1 = view.column(col_idx);
+    cudf::column_view col2 = view.column(col_idx2);
+
+    // Perform comparison to get boolean column
+    auto bool_col = cudf::binary_operation(
+        col1, col2, get_compare_op(op),
+        cudf::data_type{cudf::type_id::BOOL8}
+    );
+
+    // Cast to INT32 so it can be summed
+    auto int_col = cudf::cast(bool_col->view(), cudf::data_type{cudf::type_id::INT32});
+
+    // Build result table with all original columns plus the new comparison column
+    std::vector<std::unique_ptr<cudf::column>> result_columns;
+    for (int i = 0; i < view.num_columns(); ++i) {
+        result_columns.push_back(std::make_unique<cudf::column>(view.column(i)));
+    }
+    result_columns.push_back(std::move(int_col));
+
+    auto result = std::make_unique<cudf::table>(std::move(result_columns));
+    return make_gpu_table_xptr(std::move(result));
+}
+
+// [[Rcpp::export]]
 SEXP gpu_filter_scalar(SEXP xptr, int col_idx, std::string op, double value) {
     using namespace cuplr;
 
@@ -485,6 +559,105 @@ SEXP gpu_filter_col(SEXP xptr, int col_idx, std::string op, int col_idx2) {
     // Apply boolean mask to filter table
     auto result = cudf::apply_boolean_mask(view, mask->view());
 
+    return make_gpu_table_xptr(std::move(result));
+}
+
+// [[Rcpp::export]]
+SEXP gpu_copy_column(SEXP xptr, int col_idx) {
+    using namespace cuplr;
+
+    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
+    cudf::table_view view = get_table_view(ptr);
+
+    if (col_idx < 0 || col_idx >= view.num_columns()) {
+        Rcpp::stop("Column index out of bounds");
+    }
+
+    // Build new table with all columns plus a copy of the specified column
+    std::vector<std::unique_ptr<cudf::column>> columns;
+    for (int i = 0; i < view.num_columns(); ++i) {
+        columns.push_back(std::make_unique<cudf::column>(view.column(i)));
+    }
+    // Append copy of the specified column
+    columns.push_back(std::make_unique<cudf::column>(view.column(col_idx)));
+
+    auto result = std::make_unique<cudf::table>(std::move(columns));
+    return make_gpu_table_xptr(std::move(result));
+}
+
+// [[Rcpp::export]]
+SEXP gpu_filter_bool(SEXP xptr, bool keep_all) {
+    using namespace cuplr;
+
+    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
+    cudf::table_view view = get_table_view(ptr);
+
+    if (keep_all) {
+        // Return copy of entire table
+        std::vector<std::unique_ptr<cudf::column>> columns;
+        for (int i = 0; i < view.num_columns(); ++i) {
+            columns.push_back(std::make_unique<cudf::column>(view.column(i)));
+        }
+        auto result = std::make_unique<cudf::table>(std::move(columns));
+        return make_gpu_table_xptr(std::move(result));
+    } else {
+        // Return empty table with same schema
+        auto result = cudf::empty_like(view);
+        return make_gpu_table_xptr(std::move(result));
+    }
+}
+
+// [[Rcpp::export]]
+SEXP gpu_filter_mask(SEXP xptr, LogicalVector mask) {
+    using namespace cuplr;
+
+    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
+    cudf::table_view view = get_table_view(ptr);
+
+    size_type n = view.num_rows();
+    if (mask.size() != n) {
+        Rcpp::stop("Mask length (%d) must match table rows (%d)", mask.size(), n);
+    }
+
+    // Convert R logical vector to BOOL8 column on GPU
+    std::vector<int8_t> bool_data(n);
+    std::vector<uint8_t> validity(bitmask_allocation_size_bytes(n), 0xFF);
+    size_type null_count = 0;
+
+    for (size_type i = 0; i < n; ++i) {
+        if (LogicalVector::is_na(mask[i])) {
+            // Treat NA as FALSE for filtering
+            bool_data[i] = 0;
+            validity[i / 8] &= ~(1 << (i % 8));
+            null_count++;
+        } else {
+            bool_data[i] = mask[i] ? 1 : 0;
+        }
+    }
+
+    // Copy to device
+    rmm::device_buffer data(n * sizeof(int8_t),
+                           rmm::cuda_stream_view(),
+                           rmm::mr::get_current_device_resource_ref());
+    cudaMemcpy(data.data(), bool_data.data(), n * sizeof(int8_t), cudaMemcpyHostToDevice);
+
+    rmm::device_buffer null_mask;
+    if (null_count > 0) {
+        null_mask = rmm::device_buffer(validity.data(), validity.size(),
+                                       rmm::cuda_stream_view(),
+                                       rmm::mr::get_current_device_resource_ref());
+    }
+
+    auto mask_col = std::make_unique<cudf::column>(
+        cudf::data_type{cudf::type_id::BOOL8},
+        n,
+        std::move(data),
+        std::move(null_mask),
+        null_count
+    );
+
+    // Apply boolean mask
+    auto result = cudf::apply_boolean_mask(view, mask_col->view());
     return make_gpu_table_xptr(std::move(result));
 }
 
@@ -679,4 +852,156 @@ List gpu_info() {
         Named("free_memory") = static_cast<double>(free_mem),
         Named("multiprocessors") = prop.multiProcessorCount
     );
+}
+
+// Helper: Create a groupby aggregation based on type string
+std::unique_ptr<cudf::groupby_aggregation> get_groupby_agg(const std::string& agg_type) {
+    if (agg_type == "sum") {
+        return cudf::make_sum_aggregation<cudf::groupby_aggregation>();
+    } else if (agg_type == "mean") {
+        return cudf::make_mean_aggregation<cudf::groupby_aggregation>();
+    } else if (agg_type == "min") {
+        return cudf::make_min_aggregation<cudf::groupby_aggregation>();
+    } else if (agg_type == "max") {
+        return cudf::make_max_aggregation<cudf::groupby_aggregation>();
+    } else if (agg_type == "n") {
+        return cudf::make_count_aggregation<cudf::groupby_aggregation>(cudf::null_policy::INCLUDE);
+    } else if (agg_type == "std") {
+        return cudf::make_std_aggregation<cudf::groupby_aggregation>();
+    } else if (agg_type == "variance") {
+        return cudf::make_variance_aggregation<cudf::groupby_aggregation>();
+    } else {
+        Rcpp::stop("Unknown aggregation type: " + agg_type);
+    }
+    return nullptr;  // Unreachable
+}
+
+// [[Rcpp::export]]
+SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
+                   IntegerVector agg_col_indices, CharacterVector agg_types) {
+    using namespace cuplr;
+
+    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
+    cudf::table_view view = get_table_view(ptr);
+
+    int num_aggs = agg_col_indices.size();
+    int num_groups = group_indices.size();
+
+    // Validate indices
+    for (int i = 0; i < num_groups; ++i) {
+        if (group_indices[i] < 0 || group_indices[i] >= view.num_columns()) {
+            Rcpp::stop("Group column index out of bounds: " +
+                       std::to_string(group_indices[i]));
+        }
+    }
+    for (int i = 0; i < num_aggs; ++i) {
+        if (agg_col_indices[i] < 0 || agg_col_indices[i] >= view.num_columns()) {
+            Rcpp::stop("Aggregation column index out of bounds: " +
+                       std::to_string(agg_col_indices[i]));
+        }
+    }
+
+    // Handle ungrouped summarise (aggregate over all rows)
+    if (num_groups == 0) {
+        // For ungrouped case, create a single-column keys table with constant value
+        // We'll use a simpler approach: create results directly
+
+        std::vector<std::unique_ptr<cudf::column>> result_columns;
+
+        for (int i = 0; i < num_aggs; ++i) {
+            std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
+            cudf::column_view col = view.column(agg_col_indices[i]);
+
+            if (agg_type == "n") {
+                // Count all rows
+                int64_t count = view.num_rows();
+                rmm::device_buffer data(sizeof(int64_t),
+                                       rmm::cuda_stream_view(),
+                                       rmm::mr::get_current_device_resource_ref());
+                cudaMemcpy(data.data(), &count, sizeof(int64_t), cudaMemcpyHostToDevice);
+                result_columns.push_back(std::make_unique<cudf::column>(
+                    cudf::data_type{cudf::type_id::INT64},
+                    1,
+                    std::move(data),
+                    rmm::device_buffer{},
+                    0
+                ));
+            } else {
+                // Create a single-value key column for groupby
+                std::vector<int32_t> keys_data(view.num_rows(), 0);
+                rmm::device_buffer keys_buf(keys_data.size() * sizeof(int32_t),
+                                            rmm::cuda_stream_view(),
+                                            rmm::mr::get_current_device_resource_ref());
+                cudaMemcpy(keys_buf.data(), keys_data.data(),
+                          keys_data.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
+
+                auto keys_col = std::make_unique<cudf::column>(
+                    cudf::data_type{cudf::type_id::INT32},
+                    view.num_rows(),
+                    std::move(keys_buf),
+                    rmm::device_buffer{},
+                    0
+                );
+
+                std::vector<cudf::column_view> keys_views = { keys_col->view() };
+                cudf::table_view keys_table(keys_views);
+
+                cudf::groupby::groupby gb(keys_table);
+
+                std::vector<cudf::groupby::aggregation_request> requests;
+                cudf::groupby::aggregation_request req;
+                req.values = col;
+                req.aggregations.push_back(get_groupby_agg(agg_type));
+                requests.push_back(std::move(req));
+
+                auto [result_keys, result_aggs] = gb.aggregate(requests);
+
+                // Extract the aggregation result
+                result_columns.push_back(std::move(result_aggs[0].results[0]));
+            }
+        }
+
+        auto result = std::make_unique<cudf::table>(std::move(result_columns));
+        return make_gpu_table_xptr(std::move(result));
+    }
+
+    // Build the keys table from group columns
+    std::vector<cudf::column_view> keys_views;
+    for (int i = 0; i < num_groups; ++i) {
+        keys_views.push_back(view.column(group_indices[i]));
+    }
+    cudf::table_view keys_table(keys_views);
+
+    // Create the groupby object
+    cudf::groupby::groupby gb(keys_table);
+
+    // Build aggregation requests
+    std::vector<cudf::groupby::aggregation_request> requests;
+    for (int i = 0; i < num_aggs; ++i) {
+        std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
+
+        cudf::groupby::aggregation_request req;
+        req.values = view.column(agg_col_indices[i]);
+        req.aggregations.push_back(get_groupby_agg(agg_type));
+        requests.push_back(std::move(req));
+    }
+
+    // Perform the aggregation
+    auto [result_keys, result_aggs] = gb.aggregate(requests);
+
+    // Build the result table: group keys + aggregation results
+    std::vector<std::unique_ptr<cudf::column>> result_columns;
+
+    // Add group key columns
+    for (int i = 0; i < result_keys->num_columns(); ++i) {
+        result_columns.push_back(std::make_unique<cudf::column>(result_keys->get_column(i)));
+    }
+
+    // Add aggregation result columns
+    for (size_t i = 0; i < result_aggs.size(); ++i) {
+        result_columns.push_back(std::move(result_aggs[i].results[0]));
+    }
+
+    auto result = std::make_unique<cudf::table>(std::move(result_columns));
+    return make_gpu_table_xptr(std::move(result));
 }

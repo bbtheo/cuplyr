@@ -102,6 +102,11 @@ mutate.tbl_gpu <- function(.data, ...) {
 mutate_one <- function(.data, new_name, expr) {
   expr_chr <- rlang::quo_text(expr)
 
+  # Check if expression is just a column name (simple copy)
+  if (expr_chr %in% .data$schema$names) {
+    return(mutate_copy_column(.data, new_name, expr_chr))
+  }
+
   # Parse simple arithmetic: col op value or col op col
   # Find the first operator
   ops <- c("+", "-", "*", "/", "^")
@@ -119,7 +124,7 @@ mutate_one <- function(.data, new_name, expr) {
   }
 
   if (is.null(op_found)) {
-    stop("mutate() only supports arithmetic operations: +, -, *, /, ^\n",
+    stop("mutate() only supports column copies or arithmetic operations: +, -, *, /, ^\n",
          "Expression: ", expr_chr, call. = FALSE)
   }
 
@@ -172,6 +177,53 @@ mutate_one <- function(.data, new_name, expr) {
     new_schema <- .data$schema
     new_schema$names <- c(new_schema$names, new_name)
     new_schema$types <- c(new_schema$types, "FLOAT64")
+  }
+
+  new_tbl_gpu(
+    ptr = new_ptr,
+    schema = new_schema,
+    groups = .data$groups
+  )
+}
+
+# Internal: Copy a column with a new name
+#
+# @param .data A tbl_gpu object
+# @param new_name Name for the new column
+# @param source_col Name of the column to copy
+# @return A tbl_gpu with the copied column
+# @keywords internal
+mutate_copy_column <- function(.data, new_name, source_col) {
+  source_idx <- col_index(.data, source_col)
+  source_type <- .data$schema$types[source_idx + 1L]  # col_index returns 0-based
+
+  # Check if we're replacing an existing column
+  existing_idx <- match(new_name, .data$schema$names)
+
+  if (!is.na(existing_idx)) {
+    # Replacing existing column with a copy
+    # Copy the source column, then select to put it in the right place
+    new_ptr <- gpu_copy_column(.data$ptr, source_idx)
+
+    n_orig <- length(.data$schema$names)
+    new_col_idx <- n_orig  # 0-based index of newly appended column
+
+    # Build new column order: replace old column position with new column
+    indices <- seq_len(n_orig) - 1L  # 0-based
+    indices[existing_idx] <- new_col_idx
+    indices <- indices[indices != new_col_idx | seq_along(indices) == existing_idx]
+
+    new_ptr <- gpu_select(new_ptr, as.integer(indices))
+
+    new_schema <- .data$schema
+    new_schema$types[existing_idx] <- source_type
+  } else {
+    # Adding new column as copy
+    new_ptr <- gpu_copy_column(.data$ptr, source_idx)
+
+    new_schema <- .data$schema
+    new_schema$names <- c(new_schema$names, new_name)
+    new_schema$types <- c(new_schema$types, source_type)
   }
 
   new_tbl_gpu(
