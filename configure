@@ -16,15 +16,15 @@ find_cudf() {
         return 0
     fi
 
-    # Try conda environment
-    if [ -n "$CONDA_PREFIX" ] && [ -f "$CONDA_PREFIX/include/cudf/cudf.hpp" ]; then
+    # Try conda environment (check for types.hpp - the main cudf header in RAPIDS 25.x+)
+    if [ -n "$CONDA_PREFIX" ] && [ -f "$CONDA_PREFIX/include/cudf/types.hpp" ]; then
         echo "$CONDA_PREFIX"
         return 0
     fi
 
     # Try common installation paths
     for path in /usr/local /opt/rapids /opt/conda /usr; do
-        if [ -f "$path/include/cudf/cudf.hpp" ]; then
+        if [ -f "$path/include/cudf/types.hpp" ]; then
             echo "$path"
             return 0
         fi

@@ -27,5 +27,9 @@ R/RcppExports.R
 .DS_Store
 Thumbs.db
 
+# pixi
+.pixi/
+
 #other
 test_script.R
+scratchpad/

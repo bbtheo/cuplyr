@@ -1,0 +1,35 @@
+[workspace]
+name = "cuplr"
+version = "0.1.0"
+description = "GPU-accelerated dplyr backend via RAPIDS libcudf"
+channels = ["rapidsai", "conda-forge", "nvidia"]
+platforms = ["linux-64"]
+
+[dependencies]
+# RAPIDS C++ libraries (from conda - includes headers)
+libcudf = ">=25.12"
+librmm = ">=25.12"
+libkvikio = ">=25.12"
+
+# CUDA toolkit
+cuda-toolkit = ">=12.0,<13"
+cuda-nvcc = ">=12.0,<13"
+
+[tasks]
+configure = { cmd = "./configure", description = "Detect paths, generate Makevars" }
+install = { cmd = "R CMD INSTALL .", description = "Install R package" }
+test = { cmd = "R -e 'testthat::test_package(\"cuplr\")'", description = "Run tests" }
+check = { cmd = "R CMD check --no-manual .", description = "R CMD check" }
+clean = { cmd = "rm -f src/*.o src/*.so src/Makevars 2>/dev/null || true", description = "Clean artifacts" }
+dev = { cmd = "./configure && R CMD INSTALL .", depends-on = ["clean"], description = "Clean rebuild" }
+bench = { cmd = "Rscript inst/benchmarks/run_benchmarks.R", description = "Run benchmarks" }
+
+[tasks.build]
+cmd = "R CMD build ."
+depends-on = ["configure"]
+description = "Build source tarball"
+
+[tasks.full-check]
+cmd = "R CMD build . && R CMD check cuplr_*.tar.gz --as-cran"
+depends-on = ["configure"]
+description = "Full CRAN-style check"

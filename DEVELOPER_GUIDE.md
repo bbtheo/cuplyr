@@ -824,6 +824,55 @@ PKG_LIBS = -L$(CUDF_LIB) -lcudf -L$(CUDA_HOME)/lib64 -lcudart \
 
 ## 7. Build System & Packaging
 
+### Quick Start with pixi (Recommended)
+
+The recommended way to set up your development environment is using [pixi](https://pixi.sh/), which provides fast, reproducible dependency management for RAPIDS C++ libraries.
+
+**One-time setup:**
+
+```bash
+# Install pixi
+curl -fsSL https://pixi.sh/install.sh | bash
+
+# Install direnv for auto-activation (optional but recommended)
+sudo pacman -S direnv  # Arch
+# or: sudo apt install direnv  # Ubuntu/Debian
+
+# Add to ~/.bashrc or ~/.zshrc
+echo 'eval "$(direnv hook bash)"' >> ~/.bashrc
+source ~/.bashrc
+
+# In the project directory
+direnv allow .
+```
+
+**Development workflow:**
+
+```bash
+cd cuplr                    # Environment auto-activates via direnv
+
+pixi run dev                # Clean rebuild (configure + install)
+pixi run test               # Run test suite
+pixi run bench              # Run benchmarks
+pixi run check              # R CMD check
+```
+
+**Available pixi tasks:**
+
+| Task | Description |
+|------|-------------|
+| `pixi run configure` | Detect CUDA/libcudf paths, generate Makevars |
+| `pixi run install` | Install R package |
+| `pixi run dev` | Clean rebuild (configure + install) |
+| `pixi run test` | Run test suite |
+| `pixi run bench` | Run benchmarks |
+| `pixi run check` | R CMD check |
+| `pixi run clean` | Remove build artifacts |
+| `pixi run build` | Build source tarball |
+| `pixi run full-check` | Full CRAN-style check |
+
+The `pixi.lock` file ensures reproducible builds across machines. Commit it to version control.
+
 ### DESCRIPTION File
 
 ```
