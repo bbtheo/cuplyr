@@ -31,5 +31,7 @@ Thumbs.db
 .pixi/
 
 #other
-test_script.R
 scratchpad/
+
+#becnhmark data
+benchmark_data/
