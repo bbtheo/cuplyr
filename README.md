@@ -1,8 +1,8 @@
 # cuplr
 
-**GPU-accelerated dplyr. Same code, runs 30-50x faster.**
+**dplyr backend for GPU acceleration via RAPIDS cuDF**
 
-Write tidyverse, get GPU speed. A new [cuDF](https://github.com/rapidsai/cudf) backend for R, no rewrites.
+cuplr brings GPU computing to R's tidyverse by implementing a dplyr backend powered by [RAPIDS cuDF](https://github.com/rapidsai/cudf), NVIDIA's GPU DataFrame library. Use familiar dplyr syntax while leveraging GPU acceleration for data manipulation.
 
 ```r
 library(cuplr)
@@ -15,41 +15,54 @@ tbl_gpu(sales_data) %>%
   collect()
 ```
 
-## Why
+## About
 
-Your GPU sits idle. Your dplyr code hits walls at 100M rows. This fixes both.
+cuplr translates dplyr operations into cuDF execution on NVIDIA GPUs. It follows the same backend pattern as dbplyr: write standard R code, execute on GPU hardware. This approach can significantly speed up operations on larger datasets (typically >10M rows) without requiring code rewrites.
 
-cuplr is a dplyr backend that targets GPUs the same way dbplyr targets databases. Write R, execute on GPU. 100M row groupby? XX seconds on CPU, YY seconds on GPU.
-
-R lost ground to Python partly due to performance. This closes the gap without leaving the ecosystem.
+**Built on [RAPIDS cuDF](https://rapids.ai/)**: cuDF is an open-source GPU DataFrame library developed by NVIDIA's RAPIDS team. It provides highly optimized CUDA kernels for data manipulation operations, backed by Apache Arrow's columnar memory format. cuplr acts as an R interface to this GPU-accelerated compute engine.
 
 ## Status
 
-**v0.0.0.9000 (Pre-pre-alpha stage)** – Almost nothing works, expanding fast.
+**v0.0.0.9000 – Early development**
 
-- ✅ `filter()`, `select()`, `mutate()`
+This is experimental software under active development. Many features are incomplete or untested.
+
+- ✅ `filter()`, `select()`, `mutate()` (basic operations)
 - 🚧 `group_by()`, `arrange()`, `summarise()`
 - 🚧 `left_join()`, `right_join()`, `inner_join()`, `full_join()`
-- 🚧 rolling joins, with complex `join_by()` logic
-- 🚧 Lazy eval, AST optimization, full tests
-- 🚧 Window functions, string ops 
-- 🚧 Multi-GPU, streaming 
+- 🚧 Complex joins with `join_by()`
+- 🚧 Expression optimization and lazy evaluation
+- 🚧 Window functions, string operations
+- 🚧 Comprehensive test coverage
+- 🚧 Multi-GPU support, out-of-core computation
+
+Contributions and feedback welcome.
 
 ## Architecture
 
 - **R layer**: S3 methods implementing dplyr generics
-- **Parser**: R quosures → internal AST
-- **Optimizer**: Fuses ops, pushes predicates
-- **Native**: Rcpp bindings to RAPIDS libcudf
-- **Execution**: libcudf handles GPU compute
-- **Interop**: Arrow C Data Interface for zero-copy
+- **Expression parser**: R quosures → internal AST
+- **Query optimizer**: Operation fusion and predicate pushdown
+- **Native bindings**: Rcpp interface to libcudf C++ API
+- **Execution**: cuDF GPU kernels via libcudf
+- **Memory**: Arrow C Data Interface for zero-copy transfer
 
-Full details in `DEVELOPER_GUIDE.md`
+See `DEVELOPER_GUIDE.md` for implementation details.
+
+## Requirements
+
+- NVIDIA GPU with CUDA support
+- RAPIDS cuDF installation (see [RAPIDS installation guide](https://rapids.ai/start.html))
+- R ≥ 4.0
+
+## Acknowledgments
+
+This project is built on [RAPIDS cuDF](https://github.com/rapidsai/cudf) by NVIDIA and the RAPIDS AI team. cuDF provides the core GPU execution engine and algorithms that make this possible.
 
 ---
 
 **License**: Apache 2.0  
-**Lead**: [@bbtheo](https://github.com/bbtheo)  
-**Docs**: See `DEVELOPER_GUIDE.md`
+**Maintainer**: [@bbtheo](https://github.com/bbtheo)  
+**Documentation**: `DEVELOPER_GUIDE.md`
 
-Questions? Open an issue or discussion.
+Questions? Open an issue or start a discussion.
