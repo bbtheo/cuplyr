@@ -130,13 +130,13 @@ std::unique_ptr<column> character_to_gpu(CharacterVector x) {
     // Copy data to device
     rmm::device_buffer data(concatenated.size(),
                             rmm::cuda_stream_view(),
-                            rmm::mr::get_current_device_resource());
+                            rmm::mr::get_current_device_resource_ref());
     cudaMemcpy(data.data(), concatenated.data(), concatenated.size(), cudaMemcpyHostToDevice);
 
     // Copy offsets to device
     rmm::device_buffer offsets_buf(offsets.data(), offsets.size() * sizeof(int32_t),
                                    rmm::cuda_stream_view(),
-                                   rmm::mr::get_current_device_resource());
+                                   rmm::mr::get_current_device_resource_ref());
 
     // Create offsets column
     auto offsets_col = std::make_unique<column>(
@@ -162,7 +162,7 @@ std::unique_ptr<column> character_to_gpu(CharacterVector x) {
     if (null_count > 0) {
         null_mask = rmm::device_buffer(validity.data(), validity.size(),
                                        rmm::cuda_stream_view(),
-                                       rmm::mr::get_current_device_resource());
+                                       rmm::mr::get_current_device_resource_ref());
     }
 
     // Create STRING column with offsets as child

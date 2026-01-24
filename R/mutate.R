@@ -80,6 +80,7 @@ mutate.tbl_gpu <- function(.data, ...) {
   if (length(dots) == 0) return(.data)
 
   result <- .data
+  
   for (i in seq_along(dots)) {
     new_name <- names(dots)[i]
     expr <- dots[[i]]

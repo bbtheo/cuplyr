@@ -138,7 +138,7 @@ preprocess_agg_expressions <- function(.data, dots) {
   agg_functions <- c("sum", "mean", "min", "max", "n", "sd", "var", "count")
 
   # Counter for temporary column names
- temp_col_counter <- 0
+  temp_col_counter <- 0
 
   for (i in seq_along(dots)) {
     expr <- dots[[i]]
@@ -214,7 +214,7 @@ create_temp_column <- function(.data, col_name, expr_text) {
   op_type <- NULL
 
   # Check comparison operators first
- for (op in compare_ops) {
+  for (op in compare_ops) {
     if (grepl(op, expr_text, fixed = TRUE)) {
       op_found <- op
       op_type <- "compare"
@@ -406,5 +406,5 @@ get_agg_result_type <- function(agg_type, input_type) {
     "std" = "FLOAT64",   # Std dev is always float
     "variance" = "FLOAT64",  # Variance is always float
     "FLOAT64"  # Default to float64
- )
+  )
 }
