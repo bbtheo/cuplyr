@@ -323,3 +323,79 @@ gpu_memory_state <- function() {
     used_gb = (info$total_memory - info$free_memory) / 1e9
   )
 }
+
+#' Force GPU memory cleanup
+#'
+#' Triggers R garbage collection to free GPU memory held by unreferenced
+#' `tbl_gpu` objects. Use this between operations when GPU memory is limited
+#' or before large allocations.
+#'
+#' @param verbose Logical. If TRUE, prints memory freed. Default FALSE.
+#'
+#' @return Invisibly returns a list with memory state before and after cleanup,
+#'   and the amount freed in bytes and gigabytes.
+#'
+#' @details
+#' GPU memory is automatically freed when `tbl_gpu` objects are garbage
+#' collected by R. However, R's garbage collector doesn't know about GPU
+#' memory pressure and may not run immediately. This function forces
+#' garbage collection and allows time for GPU cleanup.
+#'
+#' Call this function:
+#' \itemize{
+#'   \item Between benchmark iterations
+#'   \item After removing large GPU objects with `rm()`
+#'   \item When you see out-of-memory errors
+#'   \item Before allocating large new GPU tables
+#' }
+#'
+#' @seealso
+#' \code{\link{gpu_memory_state}} for checking current memory usage
+#'
+#' @export
+#' @examples
+#' if (has_gpu()) {
+#'   # Create and discard a GPU table
+#'   gpu_df <- tbl_gpu(data.frame(x = runif(1000000)))
+#'   rm(gpu_df)
+#'
+#'   # Force cleanup
+#'   gpu_gc(verbose = TRUE)
+#' }
+gpu_gc <- function(verbose = FALSE, aggressive = TRUE) {
+  before <- gpu_memory_state()
+
+  if (aggressive) {
+    # Multiple GC passes with delays to ensure finalizers run
+    for (i in 1:5) {
+      gc(verbose = FALSE, full = TRUE)
+      Sys.sleep(0.2)
+    }
+  } else {
+    gc(verbose = FALSE, full = TRUE)
+    Sys.sleep(0.1)
+    gc(verbose = FALSE, full = TRUE)
+  }
+
+  after <- gpu_memory_state()
+
+  freed_bytes <- after$free_bytes - before$free_bytes
+  freed_gb <- freed_bytes / 1e9
+
+  if (verbose && !is.na(freed_bytes)) {
+    if (freed_gb >= 0.01) {
+      message(sprintf("GPU memory freed: %.2f GB", freed_gb))
+    } else if (freed_bytes > 0) {
+      message(sprintf("GPU memory freed: %.0f bytes", freed_bytes))
+    } else {
+      message("No GPU memory freed")
+    }
+  }
+
+  invisible(list(
+    before = before,
+    after = after,
+    freed_bytes = freed_bytes,
+    freed_gb = freed_gb
+  ))
+}
