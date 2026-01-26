@@ -125,29 +125,29 @@ run_benchmark(
 gpu_gc(T)
 
 # Mutate (uses :=, needs copy)
-#run_benchmark(
-#  "Mutate",
-#  dplyr_expr = function(d) {
-#    d |>
-#      mutate(tip_pct = tip_amount / fare_amount * 100,
-#             total = fare_amount + tip_amount + tolls_amount)
-#  },
-#  dt_expr = function(d) {
-#    d[, `:=`(tip_pct = tip_amount / fare_amount * 100,
-#             total = fare_amount + tip_amount + tolls_amount)]
-#  },
-#  cuplr_expr = function(d) {
-#    d |>
-#      mutate(tip_pct = tip_amount / fare_amount) |>
-#      mutate(tip_pct = tip_pct * 100) |>
-#      mutate(total = fare_amount + tip_amount) |>
-#      mutate(total = total + tolls_amount) |>
-#      collect()
-#  },
-#  data = data,
-#  data_dt = data_dt,
-#  dt_modifies = TRUE
-#)
+run_benchmark(
+  "Mutate",
+  dplyr_expr = function(d) {
+    d |>
+      mutate(tip_pct = tip_amount / fare_amount * 100,
+             total = fare_amount + tip_amount + tolls_amount)
+  },
+  dt_expr = function(d) {
+    d[, `:=`(tip_pct = tip_amount / fare_amount * 100,
+             total = fare_amount + tip_amount + tolls_amount)]
+  },
+  cuplr_expr = function(d) {
+    d |>
+      mutate(tip_pct = tip_amount / fare_amount) |>
+      mutate(tip_pct = tip_pct * 100) |>
+      mutate(total = fare_amount + tip_amount) |>
+      mutate(total = total + tolls_amount) |>
+      collect()
+  },
+  data = data,
+  data_dt = data_dt,
+  dt_modifies = TRUE
+)
 
 # Filter (read-only, no copy needed)
 run_benchmark(
