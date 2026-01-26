@@ -102,8 +102,45 @@ test_that("tbl_gpu() handles logical columns", {
   df <- data.frame(x = c(TRUE, FALSE, TRUE))
   gpu_df <- tbl_gpu(df)
 
-  # Logicals are stored as BOOL8 (via INT32)
-  expect_true(gpu_df$schema$types %in% c("BOOL8", "INT32"))
+  expect_equal(unname(gpu_df$schema$types), "BOOL8")
+
+  result <- collect(gpu_df)
+  expect_equal(result$x, df$x)
+})
+
+test_that("tbl_gpu() handles Date columns", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = as.Date(c("2024-01-01", "2024-01-02", NA)))
+  gpu_df <- tbl_gpu(df)
+
+  expect_equal(unname(gpu_df$schema$types), "TIMESTAMP_DAYS")
+
+  result <- collect(gpu_df)
+  expect_true(inherits(result$x, "Date"))
+  expect_equal(result$x, df$x)
+})
+
+test_that("tbl_gpu() handles POSIXct columns", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = as.POSIXct(c("2024-01-01 00:00:00", "2024-01-02 12:34:56"), tz = "UTC"))
+  gpu_df <- tbl_gpu(df)
+
+  expect_equal(unname(gpu_df$schema$types), "TIMESTAMP_MICROSECONDS")
+
+  result <- collect(gpu_df)
+  expect_true(inherits(result$x, "POSIXct"))
+  expect_equal(result$x, df$x)
+})
+
+test_that("tbl_gpu() maps factor columns to DICTIONARY32", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = factor(c("a", "b", "a")))
+  gpu_df <- tbl_gpu(df)
+
+  expect_equal(unname(gpu_df$schema$types), "DICTIONARY32")
 })
 
 test_that("tbl_gpu() handles NA values in numeric columns", {

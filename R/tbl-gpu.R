@@ -26,7 +26,7 @@
 #'   \item `numeric` -> FLOAT64
 #'   \item `integer` -> INT32
 #'   \item `character` -> STRING
-#'   \item `logical` -> BOOL8 (stored as INT32)
+#'   \item `logical` -> BOOL8
 #'   \item `Date` -> TIMESTAMP_DAYS
 #'   \item `POSIXct` -> TIMESTAMP_MICROSECONDS
 #' }

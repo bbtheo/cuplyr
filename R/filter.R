@@ -90,6 +90,16 @@ filter.tbl_gpu <- function(.data, ..., .preserve = FALSE) {
 filter_one <- function(.data, expr) {
   expr_chr <- rlang::quo_text(expr)
 
+  # Try to evaluate the expression first to check for boolean literal/vector
+  eval_result <- tryCatch({
+    rlang::eval_tidy(expr)
+  }, error = function(e) NULL)
+
+  # Check if it's a logical value (TRUE/FALSE or logical vector)
+  if (!is.null(eval_result) && is.logical(eval_result)) {
+    return(filter_logical(.data, eval_result))
+  }
+
   # Parse simple comparison: col op value or col op col
   # Order matters: check two-char operators before single-char
   ops <- c("==", "!=", ">=", "<=", ">", "<")
@@ -103,6 +113,7 @@ filter_one <- function(.data, expr) {
 
   if (is.null(op_found)) {
     stop("filter() only supports comparisons: ==, !=, >, >=, <, <=\n",
+         "Or logical values: TRUE, FALSE, logical vectors\n",
          "Expression: ", expr_chr, call. = FALSE)
   }
 
@@ -137,6 +148,47 @@ filter_one <- function(.data, expr) {
            "Got: ", class(value)[1], " of length ", length(value), call. = FALSE)
     }
     new_ptr <- gpu_filter_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
+  }
+
+  new_tbl_gpu(
+    ptr = new_ptr,
+    schema = .data$schema,
+    groups = .data$groups
+  )
+}
+
+# Internal: Filter by logical value or vector
+#
+# @param .data A tbl_gpu object
+# @param logical_val A logical scalar or vector
+# @return A filtered tbl_gpu object
+# @keywords internal
+filter_logical <- function(.data, logical_val) {
+  n_rows <- dim(.data)[1]
+
+  if (length(logical_val) == 1) {
+    # Single boolean: TRUE keeps all rows, FALSE keeps none
+    if (isTRUE(logical_val)) {
+      new_ptr <- gpu_filter_bool(.data$ptr, TRUE)
+    } else {
+      new_ptr <- gpu_filter_bool(.data$ptr, FALSE)
+    }
+  } else {
+    # Logical vector: use as mask
+    if (length(logical_val) != n_rows) {
+      stop("Logical vector length (", length(logical_val),
+           ") must match number of rows (", n_rows, ")", call. = FALSE)
+    }
+
+    # Check for all TRUE or all FALSE (optimize common cases)
+    if (all(logical_val, na.rm = TRUE) && !any(is.na(logical_val))) {
+      new_ptr <- gpu_filter_bool(.data$ptr, TRUE)
+    } else if (!any(logical_val, na.rm = TRUE)) {
+      new_ptr <- gpu_filter_bool(.data$ptr, FALSE)
+    } else {
+      # Mixed: apply mask
+      new_ptr <- gpu_filter_mask(.data$ptr, logical_val)
+    }
   }
 
   new_tbl_gpu(

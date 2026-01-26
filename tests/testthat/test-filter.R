@@ -176,6 +176,61 @@ test_that("filter() with all matching rows returns all rows", {
   expect_equal(nrow(result), 32)
 })
 
+test_that("filter() with scalar TRUE returns all rows", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars)
+  filtered <- dplyr::filter(gpu_df, TRUE)
+
+  expect_data_on_gpu(filtered)
+  expect_equal(dim(filtered)[1], 32)
+
+  result <- collect(filtered)
+  expect_equal(nrow(result), 32)
+  expect_equal(result, mtcars, ignore_attr = TRUE)
+})
+
+test_that("filter() with scalar FALSE returns no rows", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars)
+  filtered <- dplyr::filter(gpu_df, FALSE)
+
+  expect_data_on_gpu(filtered)
+  expect_equal(dim(filtered)[1], 0)
+  expect_equal(dim(filtered)[2], 11)
+
+  result <- collect(filtered)
+  expect_equal(nrow(result), 0)
+  expect_equal(names(result), names(mtcars))
+})
+
+test_that("filter() with vector of TRUE returns all rows", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars)
+  filtered <- dplyr::filter(gpu_df, rep(TRUE, nrow(mtcars)))
+
+  expect_data_on_gpu(filtered)
+  expect_equal(dim(filtered)[1], 32)
+
+  result <- collect(filtered)
+  expect_equal(nrow(result), 32)
+})
+
+test_that("filter() with vector of FALSE returns no rows", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars)
+  filtered <- dplyr::filter(gpu_df, rep(FALSE, nrow(mtcars)))
+
+  expect_data_on_gpu(filtered)
+  expect_equal(dim(filtered)[1], 0)
+
+  result <- collect(filtered)
+  expect_equal(nrow(result), 0)
+})
+
 test_that("filter() with no conditions returns unchanged table", {
   skip_if_no_gpu()
 

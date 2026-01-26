@@ -1,55 +1,87 @@
 # cuplr
 
-**GPU-accelerated dplyr. Same code, runs 30-50x faster.**
+**dplyr backend for GPU acceleration via RAPIDS cuDF**
 
-Write tidyverse, get GPU speed. A new [cuDF](https://github.com/rapidsai/cudf) backend for R, no rewrites.
+cuplr implements a dplyr backend powered by [RAPIDS cuDF](https://github.com/rapidsai/cudf), NVIDIA's GPU DataFrame library. It allows users to write standard dplyr code while executing operations on GPU hardware.
 
 ```r
 library(cuplr)
 
-tbl_gpu(sales_data) %>%
-  filter(year >= 2020, amount > 0) %>%
-  mutate(revenue = amount * price) %>%
-  group_by(region, quarter) %>%
-  summarise(total = sum(revenue)) %>%
+tbl_gpu(sales_data) |>
+  filter(year >= 2020, amount > 0) |>
+  mutate(revenue = amount * price) |>
+  group_by(region, quarter) |>
+  summarise(total = sum(revenue)) |>
+  arrange(desc(total)) |>
   collect()
 ```
 
-## Why
+## About
 
-Your GPU sits idle. Your dplyr code hits walls at 100M rows. This fixes both.
+cuplr translates dplyr operations into cuDF execution on NVIDIA GPUs. It follows the same backend pattern as dbplyr: write standard R code, execute on GPU hardware. This approach can provide significant speedups on larger datasets (typically >10M rows) without requiring major code changes.
 
-cuplr is a dplyr backend that targets GPUs the same way dbplyr targets databases. Write R, execute on GPU. 100M row groupby? XX seconds on CPU, YY seconds on GPU.
+**Built on [RAPIDS cuDF](https://rapids.ai/)**: cuDF is an open-source GPU DataFrame library developed by NVIDIA's RAPIDS team. It provides optimized CUDA kernels for data manipulation operations, backed by Apache Arrow's columnar memory format. cuplr provides an R interface to this execution engine.
 
-R lost ground to Python partly due to performance. This closes the gap without leaving the ecosystem.
 
 ## Status
 
-**v0.0.0.9000 (Pre-pre-alpha stage)** – Almost nothing works, expanding fast.
+**v0.0.1 – Early development**
 
-- ✅ `filter()`, `select()`, `mutate()`
-- 🚧 `group_by()`, `arrange()`, `summarise()`
-- 🚧 `left_join()`, `right_join()`, `inner_join()`, `full_join()`
-- 🚧 rolling joins, with complex `join_by()` logic
-- 🚧 Lazy eval, AST optimization, full tests
-- 🚧 Window functions, string ops 
-- 🚧 Multi-GPU, streaming 
+This is experimental software under active development.
+
+### Supported operations
+
+- `filter()` – row filtering with comparison and logical operators
+- `select()` – column selection and reordering
+- `mutate()` – column transformations and arithmetic
+- `arrange()` – row sorting with `desc()` support, NA handling follows dplyr conventions
+- `group_by()` + `summarise()` – grouped aggregations (`sum`, `mean`, `min`, `max`, `n`)
+- `collect()` – transfer results back to R
+
+### Supported column types
+
+- `numeric` (double) -> FLOAT64
+- `integer` -> INT32
+- `character` -> STRING
+- `logical` -> BOOL8
+- `Date` -> TIMESTAMP_DAYS
+- `POSIXct` -> TIMESTAMP_MICROSECONDS
+- `factor` -> DICTIONARY32
+
+### Not yet implemented
+
+- `left_join()`, `right_join()`, `inner_join()`, `full_join()`
+- Complex joins with `join_by()`
+- Expression optimization and lazy evaluation
+- Window functions, string operations
+- Multi-GPU support, out-of-core computation
+
+Contributions and feedback are welcome.
 
 ## Architecture
 
 - **R layer**: S3 methods implementing dplyr generics
-- **Parser**: R quosures → internal AST
-- **Optimizer**: Fuses ops, pushes predicates
-- **Native**: Rcpp bindings to RAPIDS libcudf
-- **Execution**: libcudf handles GPU compute
-- **Interop**: Arrow C Data Interface for zero-copy
+- **Expression parser**: R quosures to internal AST
+- **Query optimizer**: Operation fusion and predicate pushdown
+- **Native bindings**: Rcpp interface to libcudf C++ API
+- **Execution**: cuDF GPU kernels via libcudf
+- **Memory**: Arrow C Data Interface for zero-copy transfer
 
-Full details in `DEVELOPER_GUIDE.md`
+See `DEVELOPER_GUIDE.md` for implementation details.
+
+## Requirements
+
+- NVIDIA GPU with CUDA support
+- RAPIDS cuDF installation (see [RAPIDS installation guide](https://rapids.ai/start.html))
+- R >= 4.0
+
+## Acknowledgments
+
+This project is built on [RAPIDS cuDF](https://github.com/rapidsai/cudf) by NVIDIA and the RAPIDS AI team.
 
 ---
 
-**License**: Apache 2.0  
-**Lead**: [@bbtheo](https://github.com/bbtheo)  
-**Docs**: See `DEVELOPER_GUIDE.md`
+**License**: Apache 2.0
+**Maintainer**: [@bbtheo](https://github.com/bbtheo)
+**Documentation**: `DEVELOPER_GUIDE.md`
 
-Questions? Open an issue or discussion.

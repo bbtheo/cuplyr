@@ -7,6 +7,8 @@
 **Target CUDA Toolkit**: 12.x
 **Target R Version**: 4.3+
 
+**Status note:** Sections marked as *Roadmap* describe planned architecture that is not implemented in the current codebase. The current implementation executes eagerly (no AST optimizer).
+
 ---
 
 ## Table of Contents
@@ -19,7 +21,7 @@
 6. [Binding Strategy & C++ Glue](#6-binding-strategy--c-glue)
 7. [Build System & Packaging](#7-build-system--packaging)
 8. [Minimal Working Prototype](#8-minimal-working-prototype)
-9. [Lazy Translation & AST Approach](#9-lazy-translation--ast-approach)
+9. [Roadmap: Lazy Translation & AST Approach (Not Implemented)](#9-roadmap-lazy-translation--ast-approach-not-implemented)
 10. [Testing & Validation](#10-testing--validation)
 11. [Debugging, Logging & Observability](#11-debugging-logging--observability)
 12. [Performance & Optimization](#12-performance--optimization)
@@ -157,7 +159,7 @@ R --version | head -1
 ┌─────────────────────────────────────────────────────────────────┐
 │                   Translation Layer (AST)                        │
 │  • Capture quosures from dplyr verbs                            │
-│  • Build operation AST (lazy pipeline)                          │
+│  • Build operation AST (lazy pipeline, planned)                 │
 │  • Query optimization (predicate pushdown, projection pruning)  │
 │  • Lower AST nodes to libcudf operation sequence                │
 └─────────────────────────────────────────────────────────────────┘
@@ -198,7 +200,7 @@ R --version | head -1
 - Convert R expressions to an internal AST representation
 - Map R functions to libcudf equivalents
 - Perform optimizations before execution
-- Support both eager and lazy execution modes
+- Eager execution is implemented; lazy/AST mode is roadmap only
 
 #### Native Layer
 - Wrap `std::unique_ptr<cudf::table>` in `Rcpp::XPtr`
@@ -305,9 +307,9 @@ R --version | head -1
 ```r
 # Class structure
 # A tbl_gpu object contains:
-# - ptr: Rcpp::XPtr to cudf::table (or NULL if lazy)
+# - ptr: Rcpp::XPtr to cudf::table (currently always materialized)
 # - schema: list(names = character(), types = character())
-# - lazy_ops: list of unevaluated operations (AST nodes)
+# - lazy_ops: reserved for future lazy/AST work (unused today)
 # - groups: character vector of grouping column names
 
 new_tbl_gpu <- function(ptr = NULL, schema = list(), lazy_ops = list(), groups = character()) {
@@ -366,8 +368,8 @@ data
 | `character` | `character()` | `STRING` | UTF-8 encoded |
 | `Date` | `new_date()` | `TIMESTAMP_DAYS` | |
 | `POSIXct` | `new_datetime()` | `TIMESTAMP_MICROSECONDS` | |
-| `factor` | `factor()` | `DICTIONARY32` | |
-| `integer64` | `bit64::integer64()` | `INT64` | Requires bit64 |
+| `factor` | `factor()` | `INT32` | Levels not preserved |
+| `integer64` | `bit64::integer64()` | `INT64` | Ingestion not implemented; INT64 mostly produced by summarise |
 
 ### GPU Type Detection
 
@@ -381,8 +383,8 @@ if (inherits(x, "POSIXct")) return("TIMESTAMP_MICROSECONDS")
 return("FLOAT64")
 }
 if (is.character(x)) return("STRING")
-if (is.factor(x)) return("DICTIONARY32")
-if (inherits(x, "integer64")) return("INT64")
+if (is.factor(x)) return("INT32")  # factor levels not preserved on GPU
+if (inherits(x, "integer64")) return("INT64")  # ingestion not implemented in C++
 stop("Unsupported type: ", typeof(x))
 }
 
@@ -390,17 +392,21 @@ r_type_from_gpu <- function(gpu_type) {
 switch(gpu_type,
 "BOOL8" = logical(),
 "INT32" = integer(),
-"INT64" = bit64::integer64(),
+"INT64" = double(),  # precision warning for values > 2^53
 "FLOAT32" = double(),
 "FLOAT64" = double(),
 "STRING" = character(),
 "TIMESTAMP_DAYS" = vctrs::new_date(),
 "TIMESTAMP_MICROSECONDS" = vctrs::new_datetime(),
-"DICTIONARY32" = factor(),
 stop("Unsupported GPU type: ", gpu_type)
 )
 }
 ```
+
+**Current implementation notes:**
+- Factors are transferred as `INT32` (levels are not preserved).
+- `integer64` columns are not ingested by `df_to_gpu()`; they must be pre-cast.
+- `INT64` columns collected to R are returned as `numeric` with a warning when values exceed 2^53.
 
 ### NA/NULL Handling
 
@@ -502,7 +508,7 @@ inline cudf::table& get_table_ref(Rcpp::XPtr<GpuTablePtr> xptr) {
 ### Data Transfer: R data.frame → GPU
 
 ```cpp
-// src/transfer.cpp
+// src/transfer_io.cpp
 #include "gpu_table.hpp"
 #include <cudf/column/column_factories.hpp>
 #include <cudf/types.hpp>
@@ -661,7 +667,7 @@ SEXP df_to_gpu(DataFrame df) {
 ### GPU → R data.frame Transfer
 
 ```cpp
-// src/transfer.cpp (continued)
+// src/transfer_io.cpp (continued)
 
 // [[Rcpp::export]]
 DataFrame gpu_to_df(SEXP xptr, CharacterVector names) {
@@ -824,26 +830,80 @@ PKG_LIBS = -L$(CUDF_LIB) -lcudf -L$(CUDA_HOME)/lib64 -lcudart \
 
 ## 7. Build System & Packaging
 
+### Quick Start with pixi (Recommended)
+
+The recommended way to set up your development environment is using [pixi](https://pixi.sh/), which provides fast, reproducible dependency management for RAPIDS C++ libraries.
+
+**One-time setup:**
+
+```bash
+# Install pixi
+curl -fsSL https://pixi.sh/install.sh | bash
+
+# Install direnv for auto-activation (optional but recommended)
+sudo pacman -S direnv  # Arch
+# or: sudo apt install direnv  # Ubuntu/Debian
+
+# Add to ~/.bashrc or ~/.zshrc
+echo 'eval "$(direnv hook bash)"' >> ~/.bashrc
+source ~/.bashrc
+
+# In the project directory
+direnv allow .
+```
+
+**Development workflow (local loop):**
+
+```bash
+cd cuplr                    # Environment auto-activates via direnv
+
+pixi run configure          # Regenerate Makevars when paths change
+pixi run install            # Rebuild package after C++ changes
+pixi run load-dev           # Fast reload for R-only changes
+pixi run test               # Run test suite
+pixi run bench              # Run benchmarks
+pixi run check              # R CMD check
+```
+
+**Available pixi tasks:**
+
+| Task | Description |
+|------|-------------|
+| `pixi run configure` | Detect CUDA/libcudf paths, generate Makevars |
+| `pixi run install` | Install R package |
+| `pixi run load-dev` | Load package in dev mode (no install) |
+| `pixi run dev` | Clean rebuild (configure + install) |
+| `pixi run test` | Run test suite |
+| `pixi run bench` | Run benchmarks |
+| `pixi run check` | R CMD check |
+| `pixi run clean` | Remove build artifacts |
+| `pixi run build` | Build source tarball |
+| `pixi run full-check` | Full CRAN-style check |
+
+The `pixi.lock` file ensures reproducible builds across machines. Commit it to version control.
+
+**Header drift note:** In this environment `bitmask_allocation_size_bytes` lives in `cudf/null_mask.hpp`. If a cudf header is missing, search the include tree under `$CONDA_PREFIX/include/cudf`.
+
 ### DESCRIPTION File
 
 ```
 Package: cuplr
 Title: GPU-Accelerated Data Manipulation with dplyr Syntax
-Version: 0.1.0
+Version: 0.0.1
 Authors@R: c(
-    person("Your", "Name", email = "you@example.com", role = c("aut", "cre")),
+    person("Theo", "Blauberg", email = "theo.blauberg@outlook.com", role = c("aut", "cre")),
     person("RAPIDS Team", role = "cph", comment = "libcudf library")
   )
 Description: Provides a dplyr backend that executes operations on NVIDIA GPUs
     using the RAPIDS libcudf library. Supports filter, select, mutate, arrange,
     group_by, summarise, and join operations with familiar tidyverse syntax
     while achieving significant speedups on large datasets.
-License: Apache License (>= 2.0)
-URL: https://github.com/yourorg/cuplr
-BugReports: https://github.com/yourorg/cuplr/issues
+License: Apache License (>= 2)
+URL: https://github.com/bbtheo/cuplr
+BugReports: https://github.com/bbtheo/cuplr/issues
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.1
+RoxygenNote: 7.3.3
 SystemRequirements:
     NVIDIA GPU with Compute Capability >= 6.0,
     CUDA Toolkit >= 12.0,
@@ -857,7 +917,9 @@ Imports:
     vctrs (>= 0.6.0),
     pillar (>= 1.9.0),
     glue (>= 1.6.0),
-    cli (>= 3.6.0)
+    cli (>= 3.6.0),
+    tidyselect (>= 1.2.0),
+    tibble (>= 3.2.0)
 Suggests:
     testthat (>= 3.0.0),
     bench,
@@ -876,50 +938,47 @@ NeedsCompilation: yes
 ```
 # Generated by roxygen2: do not edit by hand
 
-# Imports
-import(dplyr)
-importFrom(Rcpp, sourceCpp)
-importFrom(rlang, enquo, enquos, eval_tidy, quo_get_expr, is_quosure)
-importFrom(vctrs, vec_ptype2, vec_cast)
-importFrom(pillar, tbl_sum, tbl_format_header)
-importFrom(glue, glue)
-importFrom(cli, cli_abort, cli_warn)
+# Generated by roxygen2: do not edit by hand
 
-# Exports
-export(tbl_gpu)
+S3method("names<-",tbl_gpu)
+S3method(collect,tbl_gpu)
+S3method(dim,tbl_gpu)
+S3method(filter,tbl_gpu)
+S3method(group_by,tbl_gpu)
+S3method(group_vars,tbl_gpu)
+S3method(groups,tbl_gpu)
+S3method(mutate,tbl_gpu)
+S3method(names,tbl_gpu)
+S3method(print,tbl_gpu)
+S3method(select,tbl_gpu)
+S3method(summarise,tbl_gpu)
+S3method(summarize,tbl_gpu)
+S3method(tbl_gpu,data.frame)
+S3method(tbl_gpu,tbl_gpu)
+S3method(ungroup,tbl_gpu)
 export(as_tbl_gpu)
+export(gpu_details)
+export(gpu_memory_state)
+export(gpu_memory_usage)
+export(gpu_object_info)
+export(gpu_size_comparison)
+export(has_gpu)
 export(is_tbl_gpu)
-export(collect)
-export(compute)
-export(gpu_info)
-
-# S3 Methods
-S3method(print, tbl_gpu)
-S3method(dim, tbl_gpu)
-S3method(names, tbl_gpu)
-S3method(as.data.frame, tbl_gpu)
-S3method(collect, tbl_gpu)
-S3method(compute, tbl_gpu)
-
-# dplyr verb methods
-S3method(filter, tbl_gpu)
-S3method(select, tbl_gpu)
-S3method(mutate, tbl_gpu)
-S3method(arrange, tbl_gpu)
-S3method(group_by, tbl_gpu)
-S3method(ungroup, tbl_gpu)
-S3method(summarise, tbl_gpu)
-S3method(summarize, tbl_gpu)
-S3method(left_join, tbl_gpu)
-S3method(inner_join, tbl_gpu)
-S3method(right_join, tbl_gpu)
-S3method(distinct, tbl_gpu)
-S3method(slice, tbl_gpu)
-S3method(head, tbl_gpu)
-S3method(tail, tbl_gpu)
-S3method(rename, tbl_gpu)
-
-# Internal C++ functions
+export(show_gpu)
+export(tbl_gpu)
+export(verify_gpu_data)
+importFrom(Rcpp,sourceCpp)
+importFrom(dplyr,collect)
+importFrom(dplyr,filter)
+importFrom(dplyr,group_by)
+importFrom(dplyr,group_vars)
+importFrom(dplyr,groups)
+importFrom(dplyr,mutate)
+importFrom(dplyr,select)
+importFrom(dplyr,summarise)
+importFrom(dplyr,summarize)
+importFrom(dplyr,ungroup)
+importFrom(rlang,"%||%")
 useDynLib(cuplr, .registration = TRUE)
 ```
 
@@ -1191,30 +1250,33 @@ cuplr/
 ├── configure
 ├── R/
 │   ├── zzz.R
-│   ├── tbl_gpu.R
-│   ├── dplyr-filter.R
-│   ├── dplyr-select.R
-│   ├── dplyr-mutate.R
-│   ├── dplyr-arrange.R
-│   ├── dplyr-group.R
-│   ├── dplyr-summarise.R
-│   ├── dplyr-join.R
+│   ├── tbl-gpu.R
 │   ├── collect.R
+│   ├── filter.R
+│   ├── mutate.R
+│   ├── select.R
+│   ├── group-by.R
+│   ├── summarise.R
+│   ├── gpu.R
+│   ├── gpu-memory.R
+│   ├── print.R
 │   └── utils.R
 ├── src/
 │   ├── Makevars.in
-│   ├── init.cpp
 │   ├── gpu_table.hpp
-│   ├── transfer.cpp
-│   ├── filter.cpp
-│   ├── sort.cpp
-│   ├── groupby.cpp
+│   ├── cuda_utils.hpp
+│   ├── ops_common.hpp
+│   ├── transfer_io.cpp
+│   ├── ops_filter.cpp
+│   ├── ops_compare.cpp
+│   ├── ops_mutate.cpp
+│   ├── ops_select.cpp
+│   ├── ops_groupby.cpp
+│   ├── gpu_info.cpp
 │   └── RcppExports.cpp
 ├── inst/
 │   ├── docker/
 │   │   └── Dockerfile
-│   └── benchmarks/
-│       └── run_benchmarks.R
 ├── tests/
 │   └── testthat/
 │       ├── test-basic.R
@@ -1235,17 +1297,8 @@ NULL
 .onLoad <- function(libname, pkgname) {
   # Check GPU availability
   gpu_ok <- tryCatch(
-    {
-      .Call(`_cuplr_check_gpu`)
-      TRUE
-    },
-    error = function(e) {
-      packageStartupMessage(
-        "cuplr: No GPU detected or CUDA unavailable. ",
-        "GPU operations will fail."
-      )
-      FALSE
-    }
+    gpu_is_available(),
+    error = function(e) FALSE
   )
 
   # Set package options
@@ -1262,17 +1315,29 @@ NULL
 }
 
 .onAttach <- function(libname, pkgname) {
-  if (getOption("cuplr.gpu_available", FALSE)) {
-    info <- gpu_info()
-    packageStartupMessage(
-      "cuplr: Using GPU '", info$name, "' with ",
-      round(info$memory_total / 1e9, 1), " GB memory"
+  info <- tryCatch(gpu_info(), error = function(e) list(available = FALSE))
+
+  if (isTRUE(info$available)) {
+    total_gb <- round(info$total_memory / 1e9, 1)
+    free_gb <- round(info$free_memory / 1e9, 1)
+
+    msg <- paste0(
+      "cuplr: GPU-accelerated data manipulation\n",
+      "GPU: ", info$name, " (", info$compute_capability, ")\n",
+      "Memory: ", free_gb, " GB free / ", total_gb, " GB total"
+    )
+  } else {
+    msg <- paste0(
+      "cuplr: GPU-accelerated data manipulation\n",
+      "WARNING: No GPU detected. Package will not function correctly."
     )
   }
+
+  packageStartupMessage(msg)
 }
 ```
 
-### R/tbl_gpu.R - Core Class
+### R/tbl-gpu.R - Core Class
 
 ```r
 #' Create a GPU-backed tibble
@@ -1395,273 +1460,151 @@ gpu_type_from_r <- function(x) {
     return("FLOAT64")
   }
   if (is.character(x)) return("STRING")
-  if (is.factor(x)) return("DICTIONARY32")
+  if (is.factor(x)) return("INT32")
   if (inherits(x, "integer64")) return("INT64")
   "UNKNOWN"
 }
 ```
 
-### R/dplyr-filter.R
+### R/filter.R
 
 ```r
 #' @importFrom dplyr filter
-#' @importFrom rlang enquos quo_get_expr eval_tidy
 #' @export
 filter.tbl_gpu <- function(.data, ..., .preserve = FALSE) {
-  dots <- enquos(...)
+  dots <- rlang::enquos(...)
 
-  if (length(dots) == 0) {
-    return(.data)
+  if (length(dots) == 0) return(.data)
+
+  result <- .data
+  for (expr in dots) {
+    result <- filter_one(result, expr)
   }
 
-  # For lazy mode, store operation
- if (getOption("cuplr.lazy", TRUE) && length(.data$lazy_ops) > 0) {
-    .data$lazy_ops <- c(.data$lazy_ops, list(
-      list(op = "filter", args = dots)
-    ))
-    return(.data)
-  }
-
-  # Eager execution
-  for (quo in dots) {
-    .data <- execute_filter(.data, quo)
-  }
-
-  .data
+  result
 }
 
-execute_filter <- function(.data, quo) {
-  expr <- quo_get_expr(quo)
+filter_one <- function(.data, expr) {
+  expr_chr <- rlang::quo_text(expr)
 
-  # Parse simple comparison: col > value
-  if (is.call(expr) && length(expr) == 3) {
-    op <- as.character(expr[[1]])
-    lhs <- expr[[2]]
-    rhs <- expr[[3]]
+  eval_result <- tryCatch({
+    rlang::eval_tidy(expr)
+  }, error = function(e) NULL)
 
-    # Check if LHS is column name
-    if (is.symbol(lhs)) {
-      col_name <- as.character(lhs)
-      col_idx <- match(col_name, .data$schema$names) - 1L  # 0-indexed
-
-      if (is.na(col_idx)) {
-        cli::cli_abort("Column '{col_name}' not found in GPU table")
-      }
-
-      # Evaluate RHS
-      value <- eval_tidy(rhs)
-
-      # Map R operator to C++ function
-      new_ptr <- switch(op,
-        ">"  = .Call(`_cuplr_gpu_filter_gt`, .data$ptr, col_idx, value),
-        ">=" = .Call(`_cuplr_gpu_filter_gte`, .data$ptr, col_idx, value),
-        "<"  = .Call(`_cuplr_gpu_filter_lt`, .data$ptr, col_idx, value),
-        "<=" = .Call(`_cuplr_gpu_filter_lte`, .data$ptr, col_idx, value),
-        "==" = .Call(`_cuplr_gpu_filter_eq`, .data$ptr, col_idx, value),
-        "!=" = .Call(`_cuplr_gpu_filter_neq`, .data$ptr, col_idx, value),
-        cli::cli_abort("Unsupported filter operator: {op}")
-      )
-
-      new_tbl_gpu(
-        ptr = new_ptr,
-        schema = .data$schema,
-        groups = .data$groups
-      )
-    } else {
-      cli::cli_abort("Complex filter expressions not yet supported")
-    }
-  } else {
-    cli::cli_abort("Unsupported filter expression type")
+  if (!is.null(eval_result) && is.logical(eval_result)) {
+    return(filter_logical(.data, eval_result))
   }
+
+  ops <- c("==", "!=", ">=", "<=", ">", "<")
+  op_found <- NULL
+  for (op in ops) {
+    if (grepl(op, expr_chr, fixed = TRUE)) {
+      op_found <- op
+      break
+    }
+  }
+
+  if (is.null(op_found)) {
+    stop("filter() only supports comparisons: ==, !=, >, >=, <, <=",
+         call. = FALSE)
+  }
+
+  parts <- strsplit(expr_chr, op_found, fixed = TRUE)[[1]]
+  lhs <- trimws(parts[1])
+  rhs <- trimws(parts[2])
+
+  lhs_idx <- tryCatch(col_index(.data, lhs), error = function(e) NULL)
+  rhs_idx <- tryCatch(col_index(.data, rhs), error = function(e) NULL)
+
+  if (is.null(lhs_idx)) {
+    stop("Column '", lhs, "' not found.", call. = FALSE)
+  }
+
+  if (!is.null(rhs_idx)) {
+    new_ptr <- gpu_filter_col(.data$ptr, lhs_idx, op_found, rhs_idx)
+  } else {
+    value <- tryCatch(eval(parse(text = rhs)), error = function(e) {
+      stop("Cannot parse value: ", rhs, call. = FALSE)
+    })
+    new_ptr <- gpu_filter_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
+  }
+
+  new_tbl_gpu(ptr = new_ptr, schema = .data$schema, groups = .data$groups)
 }
 ```
 
 ### R/collect.R
 
 ```r
-#' Materialize GPU table to R data frame
-#'
-#' @param x A `tbl_gpu` object
-#' @param ... Additional arguments (unused)
-#' @return A data frame
 #' @export
 collect.tbl_gpu <- function(x, ...) {
-  # Execute any pending lazy operations first
-  if (length(x$lazy_ops) > 0) {
-    x <- compute(x)
-  }
-
   if (is.null(x$ptr)) {
-    cli::cli_abort("Cannot collect: GPU table has no data pointer")
+    stop("Cannot collect: GPU table pointer is NULL.", call. = FALSE)
   }
 
-  # Transfer from GPU to R
-  df <- .Call(`_cuplr_gpu_to_df`, x$ptr, x$schema$names)
+  df <- gpu_collect(x$ptr, x$schema$names)
+  result <- tibble::as_tibble(df)
 
-  # Apply type conversions
-  for (i in seq_along(df)) {
-    gpu_type <- x$schema$types[i]
-    if (gpu_type == "TIMESTAMP_DAYS") {
-      df[[i]] <- as.Date(df[[i]], origin = "1970-01-01")
-    } else if (gpu_type == "TIMESTAMP_MICROSECONDS") {
-      df[[i]] <- as.POSIXct(df[[i]] / 1e6, origin = "1970-01-01")
+  if (any(x$schema$types == "INT64")) {
+    int64_cols <- which(x$schema$types == "INT64")
+    for (col_idx in int64_cols) {
+      col_name <- x$schema$names[col_idx]
+      values <- result[[col_name]]
+      if (is.numeric(values) && any(abs(values) > 2^53, na.rm = TRUE)) {
+        warning(
+          "INT64 values may lose precision when collected into R numeric vectors.",
+          call. = FALSE
+        )
+        break
+      }
     }
-  }
-
-  tibble::as_tibble(df)
-}
-
-#' Execute lazy operations and keep result on GPU
-#'
-#' @param x A `tbl_gpu` object
-#' @param ... Additional arguments (unused)
-#' @return A `tbl_gpu` object with operations materialized
-#' @export
-compute.tbl_gpu <- function(x, ...) {
-  if (length(x$lazy_ops) == 0) {
-    return(x)
-  }
-
-  if (getOption("cuplr.verbose", FALSE)) {
-    message("cuplr: Executing ", length(x$lazy_ops), " lazy operations")
-  }
-
-  # Execute operations in order
-  result <- x
-  result$lazy_ops <- list()  # Clear lazy ops for execution
-
-  for (op in x$lazy_ops) {
-    result <- execute_lazy_op(result, op)
   }
 
   result
 }
-
-execute_lazy_op <- function(.data, op) {
-  switch(op$op,
-    "filter" = {
-      for (quo in op$args) {
-        .data <- execute_filter(.data, quo)
-      }
-      .data
-    },
-    "select" = execute_select(.data, op$args),
-    "mutate" = execute_mutate(.data, op$args),
-    "arrange" = execute_arrange(.data, op$args),
-    "group_by" = execute_group_by(.data, op$args),
-    "summarise" = execute_summarise(.data, op$args),
-    cli::cli_abort("Unknown lazy operation: {op$op}")
-  )
-}
 ```
 
-### src/init.cpp - Registration
+### RcppExports.cpp - Registration
 
-```cpp
-// src/init.cpp
-#include <Rcpp.h>
-#include <R_ext/Rdynload.h>
+Registration is auto-generated by Rcpp. There is no hand-written `src/init.cpp`.
+Whenever you add or move `// [[Rcpp::export]]` functions, run:
 
-// Forward declarations
-SEXP _cuplr_check_gpu();
-SEXP _cuplr_df_to_gpu(SEXP df);
-SEXP _cuplr_gpu_to_df(SEXP xptr, SEXP names);
-SEXP _cuplr_gpu_dim(SEXP xptr);
-SEXP _cuplr_gpu_filter_gt(SEXP xptr, SEXP col_idx, SEXP value);
-SEXP _cuplr_gpu_filter_gte(SEXP xptr, SEXP col_idx, SEXP value);
-SEXP _cuplr_gpu_filter_lt(SEXP xptr, SEXP col_idx, SEXP value);
-SEXP _cuplr_gpu_filter_lte(SEXP xptr, SEXP col_idx, SEXP value);
-SEXP _cuplr_gpu_filter_eq(SEXP xptr, SEXP col_idx, SEXP value);
-SEXP _cuplr_gpu_filter_neq(SEXP xptr, SEXP col_idx, SEXP value);
-SEXP _cuplr_gpu_info();
-
-static const R_CallMethodDef CallEntries[] = {
-    {"_cuplr_check_gpu", (DL_FUNC) &_cuplr_check_gpu, 0},
-    {"_cuplr_df_to_gpu", (DL_FUNC) &_cuplr_df_to_gpu, 1},
-    {"_cuplr_gpu_to_df", (DL_FUNC) &_cuplr_gpu_to_df, 2},
-    {"_cuplr_gpu_dim", (DL_FUNC) &_cuplr_gpu_dim, 1},
-    {"_cuplr_gpu_filter_gt", (DL_FUNC) &_cuplr_gpu_filter_gt, 3},
-    {"_cuplr_gpu_filter_gte", (DL_FUNC) &_cuplr_gpu_filter_gte, 3},
-    {"_cuplr_gpu_filter_lt", (DL_FUNC) &_cuplr_gpu_filter_lt, 3},
-    {"_cuplr_gpu_filter_lte", (DL_FUNC) &_cuplr_gpu_filter_lte, 3},
-    {"_cuplr_gpu_filter_eq", (DL_FUNC) &_cuplr_gpu_filter_eq, 3},
-    {"_cuplr_gpu_filter_neq", (DL_FUNC) &_cuplr_gpu_filter_neq, 3},
-    {"_cuplr_gpu_info", (DL_FUNC) &_cuplr_gpu_info, 0},
-    {NULL, NULL, 0}
-};
-
-extern "C" void R_init_cuplr(DllInfo *dll) {
-    R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
-    R_useDynamicSymbols(dll, FALSE);
-}
+```r
+Rcpp::compileAttributes()
 ```
 
-### tests/testthat/test-basic.R
+### tests/testthat/ (examples)
 
 ```r
 test_that("tbl_gpu can be created from data.frame", {
-  skip_if_not(getOption("cuplr.gpu_available", FALSE), "No GPU available")
-
-  df <- data.frame(
-    x = c(1, 2, 3, 4, 5),
-    y = c(10.5, 20.5, 30.5, 40.5, 50.5)
-  )
-
-  gpu_df <- tbl_gpu(df)
-
-  expect_s3_class(gpu_df, "tbl_gpu")
-  expect_equal(dim(gpu_df), c(5L, 2L))
-  expect_equal(names(gpu_df), c("x", "y"))
-})
-
-test_that("collect returns data to R", {
-  skip_if_not(getOption("cuplr.gpu_available", FALSE), "No GPU available")
+  skip_if_no_gpu()
 
   df <- data.frame(x = 1:5, y = 6:10)
   gpu_df <- tbl_gpu(df)
-  result <- collect(gpu_df)
 
-  expect_s3_class(result, "tbl_df")
-  expect_equal(result$x, 1:5)
-  expect_equal(result$y, 6:10)
+  expect_valid_tbl_gpu(gpu_df)
+  expect_equal(dim(gpu_df), c(5L, 2L))
 })
 
 test_that("filter works with simple comparisons", {
-  skip_if_not(getOption("cuplr.gpu_available", FALSE), "No GPU available")
+  skip_if_no_gpu()
 
   df <- data.frame(x = 1:10, y = 11:20)
   gpu_df <- tbl_gpu(df)
 
-  result <- gpu_df %>%
-    filter(x > 5) %>%
-    collect()
-
-  expected <- df %>%
-    dplyr::filter(x > 5)
+  result <- collect(dplyr::filter(gpu_df, x > 5))
+  expected <- dplyr::filter(df, x > 5)
 
   expect_equal(result$x, expected$x)
   expect_equal(result$y, expected$y)
-})
-
-test_that("NA values are preserved through round-trip", {
-  skip_if_not(getOption("cuplr.gpu_available", FALSE), "No GPU available")
-
-  df <- data.frame(
-    x = c(1, NA, 3, NA, 5),
-    y = c(NA, 2.5, NA, 4.5, 5.5)
-  )
-
-  gpu_df <- tbl_gpu(df)
-  result <- collect(gpu_df)
-
-  expect_equal(is.na(result$x), is.na(df$x))
-  expect_equal(is.na(result$y), is.na(df$y))
 })
 ```
 
 ---
 
-## 9. Lazy Translation & AST Approach
+## 9. Roadmap: Lazy Translation & AST Approach (Not Implemented)
+
+This section is a forward-looking design. The current codebase does not ship AST files (`R/ast.R`, `R/optimizer.R`, `R/lower.R`) and does not execute lazily. Keep these notes for future work only.
 
 ### AST Node Definitions
 
@@ -3528,7 +3471,7 @@ gpu_table <- function(...) {
 }
 ```
 
-### Migration Guide Template
+### Migration Guide Template (Planned)
 
 ```markdown
 ## Migrating from cuplr 0.x to 1.0
@@ -3543,7 +3486,7 @@ gpu_table <- function(...) {
    tbl_gpu(df)
    ```
 
-2. **Lazy evaluation default**: Operations are now lazy by default
+2. **Lazy evaluation default (planned)**: Operations become lazy by default
    ```r
    # Old (eager)
    result <- tbl_gpu(df) %>% filter(x > 10)
@@ -3600,43 +3543,33 @@ cuplr/
 ├── .Rbuildignore              # Build exclusions
 ├── R/
 │   ├── zzz.R                  # Package hooks
-│   ├── tbl_gpu.R              # Core class definition
-│   ├── dplyr-filter.R         # filter() implementation
-│   ├── dplyr-select.R         # select() implementation
-│   ├── dplyr-mutate.R         # mutate() implementation
-│   ├── dplyr-arrange.R        # arrange() implementation
-│   ├── dplyr-group.R          # group_by/ungroup implementation
-│   ├── dplyr-summarise.R      # summarise() implementation
-│   ├── dplyr-join.R           # join implementations
-│   ├── collect.R              # collect/compute implementation
-│   ├── ast.R                  # AST node definitions
-│   ├── parse_expr.R           # Expression parser
-│   ├── optimizer.R            # Query optimizer
-│   ├── lower.R                # AST to libcudf lowering
-│   ├── arrow_interop.R        # Arrow integration
-│   ├── logging.R              # Verbose mode logging
-│   ├── diagnostics.R          # GPU info and monitoring
-│   ├── safety.R               # Memory limits and safety
-│   ├── sanitize.R             # Expression validation
-│   ├── compat.R               # Version compatibility
+│   ├── tbl-gpu.R              # Core class definition
+│   ├── collect.R              # collect() implementation
+│   ├── filter.R               # filter() implementation
+│   ├── mutate.R               # mutate() implementation
+│   ├── select.R               # select() implementation
+│   ├── group-by.R             # group_by/ungroup implementation
+│   ├── summarise.R            # summarise() implementation
+│   ├── gpu.R                  # GPU availability/details
+│   ├── gpu-memory.R           # Memory inspection/GC helpers
+│   ├── print.R                # tbl_gpu printing
 │   └── utils.R                # Utility functions
 ├── src/
 │   ├── Makevars.in            # Build template
-│   ├── init.cpp               # R registration
 │   ├── gpu_table.hpp          # XPtr wrapper header
-│   ├── transfer.cpp           # R <-> GPU data transfer
-│   ├── filter.cpp             # Filter operations
-│   ├── sort.cpp               # Sort operations
-│   ├── groupby.cpp            # GroupBy operations
-│   ├── join.cpp               # Join operations
-│   ├── binary_ops.cpp         # Binary operations
-│   ├── arrow_interop.cpp      # Arrow C Data Interface
-│   ├── diagnostics.cpp        # GPU info
+│   ├── cuda_utils.hpp         # CUDA error helpers
+│   ├── ops_common.hpp         # Shared op helpers
+│   ├── transfer_io.cpp        # R <-> GPU data transfer
+│   ├── ops_filter.cpp         # Filter operations
+│   ├── ops_compare.cpp        # Compare ops for summarise temp cols
+│   ├── ops_mutate.cpp         # Mutate operations
+│   ├── ops_select.cpp         # Select operations
+│   ├── ops_groupby.cpp        # Groupby/summarise ops
+│   ├── gpu_info.cpp           # GPU info/availability
 │   └── RcppExports.cpp        # Generated exports
 ├── inst/
 │   ├── docker/
 │   │   └── Dockerfile         # Development container
-│   └── benchmarks/
 │       ├── run_benchmarks.R   # Benchmark suite
 │       └── results/           # Benchmark output
 ├── tests/
@@ -3942,3 +3875,4 @@ result <- tbl_gpu(df) %>%
 **Last Updated**: 2025
 **RAPIDS Target**: 25.12+
 **Maintainer**: [Your Name]
+§

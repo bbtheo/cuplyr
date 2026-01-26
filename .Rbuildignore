@@ -1,1 +1,11 @@
 ^LICENSE\.md$
+^\.pixi$
+^pixi\.toml$
+^pixi\.lock$
+^\.envrc$
+^benchmark$
+^scratchpad$
+^data$
+^.*\.Rproj$
+^\.Rproj\.user$
+

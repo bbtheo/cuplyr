@@ -26,3 +26,12 @@ R/RcppExports.R
 # OS
 .DS_Store
 Thumbs.db
+
+# pixi
+.pixi/
+
+#other
+scratchpad/
+
+#becnhmark data
+benchmark_data/

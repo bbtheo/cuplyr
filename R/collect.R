@@ -13,7 +13,7 @@
 #'     \item FLOAT64/FLOAT32 -> numeric (double)
 #'     \item INT32/INT64 -> integer or numeric
 #'     \item STRING -> character
-#'     \item BOOL8 -> integer (0/1)
+#'     \item BOOL8 -> logical (TRUE/FALSE)
 #'   }
 #'
 #' @details
@@ -60,5 +60,23 @@ collect.tbl_gpu <- function(x, ...) {
   }
 
   df <- gpu_collect(x$ptr, x$schema$names)
-  tibble::as_tibble(df)
+  result <- tibble::as_tibble(df)
+
+  if (any(x$schema$types == "INT64")) {
+    int64_cols <- which(x$schema$types == "INT64")
+    for (col_idx in int64_cols) {
+      col_name <- x$schema$names[col_idx]
+      values <- result[[col_name]]
+      if (is.numeric(values) && any(abs(values) > 2^53, na.rm = TRUE)) {
+        warning(
+          "INT64 values may lose precision when collected into R numeric vectors. ",
+          "Consider converting to integer64 or avoid values > 2^53.",
+          call. = FALSE
+        )
+        break
+      }
+    }
+  }
+
+  result
 }

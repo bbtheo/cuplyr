@@ -426,3 +426,46 @@ test_that("mutate() with multiple expressions in single call works", {
   expect_equal(result$col1, mtcars$mpg + 10)
   expect_equal(result$col2, mtcars$cyl * 2)
 })
+
+# =============================================================================
+# Column Copy Tests
+# =============================================================================
+
+test_that("mutate() can copy a column with a new name", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars)
+  mutated <- dplyr::mutate(gpu_df, am_2 = am)
+
+  expect_data_on_gpu(mutated)
+
+  result <- collect(mutated)
+
+  # New column should exist
+
+  expect_true("am_2" %in% names(result))
+
+  # Values should be identical to original column
+  expect_equal(result$am_2, mtcars$am)
+
+  # Original column should still exist
+  expect_true("am" %in% names(result))
+  expect_equal(result$am, mtcars$am)
+
+  # Should have one more column than original
+  expect_equal(ncol(result), ncol(mtcars) + 1)
+})
+
+test_that("mutate() can copy multiple columns with new names", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars)
+  mutated <- dplyr::mutate(gpu_df,
+                           mpg_copy = mpg,
+                           cyl_copy = cyl)
+
+  result <- collect(mutated)
+
+  expect_equal(result$mpg_copy, mtcars$mpg)
+  expect_equal(result$cyl_copy, mtcars$cyl)
+})
