@@ -80,10 +80,20 @@ mutate.tbl_gpu <- function(.data, ...) {
   if (length(dots) == 0) return(.data)
 
   result <- .data
-  
+
   for (i in seq_along(dots)) {
     new_name <- names(dots)[i]
     expr <- dots[[i]]
+
+    # Handle unnamed expressions: use expression text as column name (dplyr behavior)
+    if (is.null(new_name) || new_name == "") {
+      new_name <- rlang::quo_text(expr)
+      # Warn user about auto-generated name
+      warning("Unnamed mutate expression '", new_name, "' will use expression as column name.\n",
+              "Consider using explicit names: mutate(name = ", new_name, ")",
+              call. = FALSE)
+    }
+
     result <- mutate_one(result, new_name, expr)
   }
 
@@ -141,9 +151,15 @@ mutate_one <- function(.data, new_name, expr) {
          call. = FALSE)
   }
 
+  existing_idx <- match(new_name, .data$schema$names)
+
   if (!is.null(rhs_idx)) {
     # Column to column operation
-    new_ptr <- gpu_mutate_binary_cols(.data$ptr, lhs_idx, op_found, rhs_idx)
+    if (!is.na(existing_idx)) {
+      new_ptr <- gpu_mutate_binary_cols_replace(.data$ptr, lhs_idx, op_found, rhs_idx, existing_idx - 1L)
+    } else {
+      new_ptr <- gpu_mutate_binary_cols(.data$ptr, lhs_idx, op_found, rhs_idx)
+    }
   } else {
     # Column to scalar operation
     value <- tryCatch(eval(parse(text = rhs)), error = function(e) {
@@ -153,24 +169,14 @@ mutate_one <- function(.data, new_name, expr) {
       stop("mutate() currently only supports numeric scalar operations.\n",
            "Got: ", class(value)[1], " of length ", length(value), call. = FALSE)
     }
-    new_ptr <- gpu_mutate_binary_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
+    if (!is.na(existing_idx)) {
+      new_ptr <- gpu_mutate_binary_scalar_replace(.data$ptr, lhs_idx, op_found, as.double(value), existing_idx - 1L)
+    } else {
+      new_ptr <- gpu_mutate_binary_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
+    }
   }
 
-  # Check if we're replacing an existing column
-  existing_idx <- match(new_name, .data$schema$names)
-
   if (!is.na(existing_idx)) {
-    # Replace existing column: reorder to put new column in original position
-    n_orig <- length(.data$schema$names)
-    new_col_idx <- n_orig  # 0-based index of newly appended column
-
-    # Build new column order: replace old column position with new column
-    indices <- seq_len(n_orig) - 1L  # 0-based
-    indices[existing_idx] <- new_col_idx
-    indices <- indices[indices != new_col_idx | seq_along(indices) == existing_idx]
-
-    new_ptr <- gpu_select(new_ptr, as.integer(indices))
-
     new_schema <- .data$schema
     new_schema$types[existing_idx] <- "FLOAT64"
   } else {
@@ -203,19 +209,7 @@ mutate_copy_column <- function(.data, new_name, source_col) {
 
   if (!is.na(existing_idx)) {
     # Replacing existing column with a copy
-    # Copy the source column, then select to put it in the right place
-    new_ptr <- gpu_copy_column(.data$ptr, source_idx)
-
-    n_orig <- length(.data$schema$names)
-    new_col_idx <- n_orig  # 0-based index of newly appended column
-
-    # Build new column order: replace old column position with new column
-    indices <- seq_len(n_orig) - 1L  # 0-based
-    indices[existing_idx] <- new_col_idx
-    indices <- indices[indices != new_col_idx | seq_along(indices) == existing_idx]
-
-    new_ptr <- gpu_select(new_ptr, as.integer(indices))
-
+    new_ptr <- gpu_copy_column_replace(.data$ptr, source_idx, existing_idx - 1L)
     new_schema <- .data$schema
     new_schema$types[existing_idx] <- source_type
   } else {
