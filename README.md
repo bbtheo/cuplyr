@@ -82,6 +82,8 @@ This project is built on [RAPIDS cuDF](https://github.com/rapidsai/cudf) by NVID
 ---
 
 **License**: Apache 2.0
+
 **Maintainer**: [@bbtheo](https://github.com/bbtheo)
+
 **Documentation**: `DEVELOPER_GUIDE.md`
 
