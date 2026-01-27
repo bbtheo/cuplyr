@@ -1,4 +1,4 @@
-# cuplr
+# cuplr <img src="man/figures/logo.png" align="right" height="138" />
 
 **dplyr backend for GPU acceleration via RAPIDS cuDF**
 
