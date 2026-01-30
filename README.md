@@ -27,7 +27,7 @@ cuplyr translates dplyr operations into cuDF execution on NVIDIA GPUs. It follow
 
 **v0.1.0**
 
-This is experimental software under active development.
+This is experimental software under active development. Breaking changes should be expected.
 
 ### Supported operations
 
@@ -35,6 +35,7 @@ This is experimental software under active development.
 - `filter()` – row filtering with comparison and logical operators
 - `select()` – column selection and reordering
 - `mutate()` – column transformations and arithmetic
+<<<<<<< HEAD
 - `arrange()` – row sorting with `desc()` support
 - `group_by()` / `ungroup()` – grouping for aggregation
 - `summarise()` – grouped aggregations (`sum`, `mean`, `min`, `max`, `n`, `sd`, `var`)
@@ -47,6 +48,11 @@ This is experimental software under active development.
 - `bind_cols()` – horizontal concatenation
 
 **Execution control**
+=======
+- `arrange()` – row sorting with `desc()` support, NA handling follows dplyr conventions
+- `group_by()` + `summarise()` – grouped aggregations (`sum`, `mean`, `min`, `max`, `n`)
+- `left_join()`, `right_join()`, `inner_join()`, `full_join()` – GPU joins on key columns
+>>>>>>> bc90422 (adding join functionality)
 - `collect()` – transfer results back to R
 - `compute()` – execute lazy operations, keep on GPU
 - `tbl_gpu(..., lazy = TRUE)` – enable lazy evaluation with AST optimization
@@ -151,5 +157,4 @@ This project is built on [RAPIDS cuDF](https://github.com/rapidsai/cudf) by NVID
 
 **Maintainer**: [@bbtheo](https://github.com/bbtheo)
 
-**Documentation**: See `CLAUDE.md` for developer notes
-
+**Documentation**: `DEVELOPER_GUIDE.md`

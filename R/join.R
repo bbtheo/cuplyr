@@ -20,7 +20,11 @@ parse_join_by <- function(by, x, y) {
   }
 
   if (is.character(by) && !is.null(names(by))) {
-    return(list(left = names(by), right = unname(by)))
+    left_cols <- names(by)
+    right_cols <- unname(by)
+    empty_names <- left_cols == ""
+    left_cols[empty_names] <- right_cols[empty_names]
+    return(list(left = left_cols, right = right_cols))
   }
 
   stop("Invalid `by` specification. Use NULL, character vector, or named vector.",
@@ -95,6 +99,72 @@ build_join_schema <- function(left_schema, right_schema, join_spec,
   list(names = info$names, types = info$types)
 }
 
+estimate_gpu_bytes <- function(nrow, types) {
+  bytes_per_type <- vapply(types, function(type) {
+    switch(type,
+      "FLOAT64" = 8,
+      "FLOAT32" = 4,
+      "INT64" = 8,
+      "INT32" = 4,
+      "INT16" = 2,
+      "INT8" = 1,
+      "BOOL8" = 1,
+      "STRING" = 32,
+      "TIMESTAMP_DAYS" = 4,
+      "TIMESTAMP_MICROSECONDS" = 8,
+      "TIMESTAMP_NANOSECONDS" = 8,
+      "DICTIONARY32" = 4,
+      8
+    )
+  }, numeric(1))
+
+  data_bytes <- sum(nrow * bytes_per_type)
+  mask_bytes <- ceiling(nrow / 8) * length(types)
+
+  data_bytes + mask_bytes
+}
+
+warn_if_join_too_large <- function(join_type, x, y, join_spec, suffix, keep) {
+  dims_x <- tryCatch(dim(x), error = function(e) NULL)
+  dims_y <- tryCatch(dim(y), error = function(e) NULL)
+  if (is.null(dims_x) || is.null(dims_y)) {
+    return(invisible(NULL))
+  }
+
+  n_left <- dims_x[1]
+  n_right <- dims_y[1]
+
+  est_rows <- switch(join_type,
+    "left" = n_left,
+    "right" = n_right,
+    "inner" = min(n_left, n_right),
+    "full" = n_left + n_right,
+    n_left
+  )
+
+  schema <- build_join_schema(x$schema, y$schema, join_spec,
+                              suffix = suffix, keep = keep)
+  est_bytes <- estimate_gpu_bytes(est_rows, schema$types)
+
+  mem <- gpu_memory_state()
+  if (!isTRUE(mem$available) || is.na(mem$free_bytes)) {
+    return(invisible(NULL))
+  }
+
+  if (est_bytes > mem$free_bytes * 0.8) {
+    warning(
+      sprintf(
+        "Join output is estimated at ~%.2f GB with only %.2f GB free on GPU. ",
+        est_bytes / 1e9,
+        mem$free_bytes / 1e9
+      ),
+      "Many-to-many joins can exceed this estimate; consider filtering or ",
+      "calling gpu_gc() before joining.",
+      call. = FALSE
+    )
+  }
+}
+
 left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
                               suffix = c(".x", ".y"), ..., keep = FALSE,
                               na_matches = "na") {
@@ -152,7 +222,12 @@ left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
     integer(0)
   }
 
-  new_ptr <- gpu_left_join(x$ptr, y$ptr, left_key_idx, right_key_idx, right_drop_idx)
+  warn_if_join_too_large("left", x, y, join_spec, suffix, keep)
+
+  new_ptr <- wrap_gpu_call(
+    "left_join",
+    gpu_left_join(x$ptr, y$ptr, left_key_idx, right_key_idx, right_drop_idx)
+  )
   new_schema <- build_join_schema(x$schema, y$schema, join_spec,
                                   suffix = suffix, keep = keep)
 
@@ -222,7 +297,12 @@ inner_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
     integer(0)
   }
 
-  new_ptr <- gpu_inner_join(x$ptr, y$ptr, left_key_idx, right_key_idx, right_drop_idx)
+  warn_if_join_too_large("inner", x, y, join_spec, suffix, keep)
+
+  new_ptr <- wrap_gpu_call(
+    "inner_join",
+    gpu_inner_join(x$ptr, y$ptr, left_key_idx, right_key_idx, right_drop_idx)
+  )
   new_schema <- build_join_schema(x$schema, y$schema, join_spec,
                                   suffix = suffix, keep = keep)
 
@@ -292,7 +372,12 @@ full_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
     integer(0)
   }
 
-  new_ptr <- gpu_full_join(x$ptr, y$ptr, left_key_idx, right_key_idx, right_drop_idx)
+  warn_if_join_too_large("full", x, y, join_spec, suffix, keep)
+
+  new_ptr <- wrap_gpu_call(
+    "full_join",
+    gpu_full_join(x$ptr, y$ptr, left_key_idx, right_key_idx, right_drop_idx)
+  )
   new_schema <- build_join_schema(x$schema, y$schema, join_spec,
                                   suffix = suffix, keep = keep)
 
