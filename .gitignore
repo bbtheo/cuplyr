@@ -31,6 +31,7 @@ Thumbs.db
 
 #other
 scratchpad/
+pkgdown/
 
 #becnhmark data
 benchmark_data/
