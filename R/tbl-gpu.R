@@ -83,7 +83,7 @@ tbl_gpu <- function(data, ..., lazy = NULL) {
 #' @rdname tbl_gpu
 #' @export
 tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
-  ptr <- df_to_gpu(data)
+  ptr <- wrap_gpu_call("tbl_gpu", df_to_gpu(data))
 
   schema <- list(
     names = names(data),

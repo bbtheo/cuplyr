@@ -77,7 +77,7 @@ select.tbl_gpu <- function(.data, ...) {
 
   # Eager path: execute immediately
   indices <- as.integer(vars) - 1L
-  new_ptr <- gpu_select(.data$ptr, indices)
+  new_ptr <- wrap_gpu_call("select", gpu_select(.data$ptr, indices))
 
   new_schema <- list(
     names = current_schema$names[vars],

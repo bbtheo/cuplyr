@@ -28,3 +28,19 @@ col_index <- function(x, name) {
   if (is.na(idx)) stop("Column '", name, "' not found")
   idx - 1L
 }
+
+# Wrap GPU calls with a clearer error message for allocation failures
+wrap_gpu_call <- function(op_name, expr) {
+  tryCatch(
+    expr,
+    error = function(e) {
+      msg <- conditionMessage(e)
+      stop(
+        "GPU operation '", op_name, "' failed. This is often caused by insufficient device memory. ",
+        "Try filtering inputs, calling gpu_gc(), or reducing the workload.\n",
+        "Original error: ", msg,
+        call. = FALSE
+      )
+    }
+  )
+}

@@ -53,6 +53,7 @@ This repo mixes R and C++ (Rcpp) for GPU-backed dplyr-like operations using libc
 - **Rcpp exports need regeneration** after moving/adding functions: run `Rcpp::compileAttributes()` or `devtools::document()`.
 - **INT64 precision**: `gpu_collect()` returns doubles; warn when values exceed 2^53.
 - **Memory growth**: each GPU op tends to allocate new tables. Replacement mutate paths are optimized, but GC still matters.
+- **Join memory warnings**: joins estimate output size and warn when close to available GPU memory; actual allocation can still fail.
 - **String columns**: Arrow-style storage (offsets + char data). When slicing, offsets and chars must be kept in sync.
 - **Join ordering**: cuDF join outputs are unordered; we stable-sort join maps by left_map (then right_map) in `src/ops_join.cpp` to match dplyr.
 - **Join unmatched rows**: cuDF uses `JoinNoMatch` sentinel; gather treats negatives as wraparound. Current fix sanitizes join maps on CPU (replace with `nrows`) before gather and uses `out_of_bounds_policy::NULLIFY`.
