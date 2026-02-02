@@ -156,9 +156,15 @@ mutate_one <- function(.data, new_name, expr) {
   if (!is.null(rhs_idx)) {
     # Column to column operation
     if (!is.na(existing_idx)) {
-      new_ptr <- gpu_mutate_binary_cols_replace(.data$ptr, lhs_idx, op_found, rhs_idx, existing_idx - 1L)
+      new_ptr <- wrap_gpu_call(
+        "mutate_binary_cols_replace",
+        gpu_mutate_binary_cols_replace(.data$ptr, lhs_idx, op_found, rhs_idx, existing_idx - 1L)
+      )
     } else {
-      new_ptr <- gpu_mutate_binary_cols(.data$ptr, lhs_idx, op_found, rhs_idx)
+      new_ptr <- wrap_gpu_call(
+        "mutate_binary_cols",
+        gpu_mutate_binary_cols(.data$ptr, lhs_idx, op_found, rhs_idx)
+      )
     }
   } else {
     # Column to scalar operation
@@ -170,9 +176,15 @@ mutate_one <- function(.data, new_name, expr) {
            "Got: ", class(value)[1], " of length ", length(value), call. = FALSE)
     }
     if (!is.na(existing_idx)) {
-      new_ptr <- gpu_mutate_binary_scalar_replace(.data$ptr, lhs_idx, op_found, as.double(value), existing_idx - 1L)
+      new_ptr <- wrap_gpu_call(
+        "mutate_binary_scalar_replace",
+        gpu_mutate_binary_scalar_replace(.data$ptr, lhs_idx, op_found, as.double(value), existing_idx - 1L)
+      )
     } else {
-      new_ptr <- gpu_mutate_binary_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
+      new_ptr <- wrap_gpu_call(
+        "mutate_binary_scalar",
+        gpu_mutate_binary_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
+      )
     }
   }
 
@@ -209,12 +221,18 @@ mutate_copy_column <- function(.data, new_name, source_col) {
 
   if (!is.na(existing_idx)) {
     # Replacing existing column with a copy
-    new_ptr <- gpu_copy_column_replace(.data$ptr, source_idx, existing_idx - 1L)
+    new_ptr <- wrap_gpu_call(
+      "copy_column_replace",
+      gpu_copy_column_replace(.data$ptr, source_idx, existing_idx - 1L)
+    )
     new_schema <- .data$schema
     new_schema$types[existing_idx] <- source_type
   } else {
     # Adding new column as copy
-    new_ptr <- gpu_copy_column(.data$ptr, source_idx)
+    new_ptr <- wrap_gpu_call(
+      "copy_column",
+      gpu_copy_column(.data$ptr, source_idx)
+    )
 
     new_schema <- .data$schema
     new_schema$names <- c(new_schema$names, new_name)

@@ -137,7 +137,10 @@ filter_one <- function(.data, expr) {
 
   if (!is.null(rhs_idx)) {
     # Column to column comparison
-    new_ptr <- gpu_filter_col(.data$ptr, lhs_idx, op_found, rhs_idx)
+    new_ptr <- wrap_gpu_call(
+      "filter_col",
+      gpu_filter_col(.data$ptr, lhs_idx, op_found, rhs_idx)
+    )
   } else {
     # Column to scalar comparison
     value <- tryCatch(eval(parse(text = rhs)), error = function(e) {
@@ -147,7 +150,10 @@ filter_one <- function(.data, expr) {
       stop("filter() currently only supports numeric scalar comparisons.\n",
            "Got: ", class(value)[1], " of length ", length(value), call. = FALSE)
     }
-    new_ptr <- gpu_filter_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
+    new_ptr <- wrap_gpu_call(
+      "filter_scalar",
+      gpu_filter_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
+    )
   }
 
   new_tbl_gpu(
@@ -169,9 +175,9 @@ filter_logical <- function(.data, logical_val) {
   if (length(logical_val) == 1) {
     # Single boolean: TRUE keeps all rows, FALSE keeps none
     if (isTRUE(logical_val)) {
-      new_ptr <- gpu_filter_bool(.data$ptr, TRUE)
+      new_ptr <- wrap_gpu_call("filter_bool_true", gpu_filter_bool(.data$ptr, TRUE))
     } else {
-      new_ptr <- gpu_filter_bool(.data$ptr, FALSE)
+      new_ptr <- wrap_gpu_call("filter_bool_false", gpu_filter_bool(.data$ptr, FALSE))
     }
   } else {
     # Logical vector: use as mask
@@ -182,12 +188,12 @@ filter_logical <- function(.data, logical_val) {
 
     # Check for all TRUE or all FALSE (optimize common cases)
     if (all(logical_val, na.rm = TRUE) && !any(is.na(logical_val))) {
-      new_ptr <- gpu_filter_bool(.data$ptr, TRUE)
+      new_ptr <- wrap_gpu_call("filter_bool_all_true", gpu_filter_bool(.data$ptr, TRUE))
     } else if (!any(logical_val, na.rm = TRUE)) {
-      new_ptr <- gpu_filter_bool(.data$ptr, FALSE)
+      new_ptr <- wrap_gpu_call("filter_bool_all_false", gpu_filter_bool(.data$ptr, FALSE))
     } else {
       # Mixed: apply mask
-      new_ptr <- gpu_filter_mask(.data$ptr, logical_val)
+      new_ptr <- wrap_gpu_call("filter_mask", gpu_filter_mask(.data$ptr, logical_val))
     }
   }
 

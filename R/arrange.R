@@ -125,7 +125,10 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE) {
     descending <- c(group_descending, descending[keep])
   }
 
-  new_ptr <- gpu_arrange(.data$ptr, col_indices, descending)
+  new_ptr <- wrap_gpu_call(
+    "arrange",
+    gpu_arrange(.data$ptr, col_indices, descending)
+  )
 
   new_tbl_gpu(
     ptr = new_ptr,

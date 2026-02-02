@@ -32,6 +32,7 @@ This repo mixes R and C++ (Rcpp) for GPU-backed dplyr-like operations using libc
 - `R/mutate.R`, `R/filter.R`, `R/select.R`, `R/arrange.R`, `R/summarise.R`: dplyr verbs.
 - `R/collect.R`: pulls data back to R and warns on INT64 precision.
 - `R/gpu-memory.R`: memory reporting and GC helpers.
+- `R/utils.R`: shared helpers (type mapping, `wrap_gpu_call()` for clearer GPU errors).
 
 ## Known Sharp Edges (things that were hard)
 - **cudf header names differ by version.** `bitmask_allocation_size_bytes` lives in `cudf/null_mask.hpp` in this environment. Avoid `cudf/bitmask.hpp`.
@@ -40,6 +41,7 @@ This repo mixes R and C++ (Rcpp) for GPU-backed dplyr-like operations using libc
 - **Rcpp exports need regeneration** after moving/adding functions: run `Rcpp::compileAttributes()` or `devtools::document()`.
 - **INT64 precision**: `gpu_collect()` returns doubles; warn when values exceed 2^53.
 - **Memory growth**: each GPU op tends to allocate new tables. Replacement mutate paths are optimized, but GC still matters.
+- **Join memory warnings**: joins estimate output size and warn when close to available GPU memory; actual allocation can still fail.
 
 ## Debugging Local Build Failures
 - If a cudf header can’t be found, check `pixi` environment paths and `src/Makevars`.

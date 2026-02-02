@@ -59,7 +59,7 @@ collect.tbl_gpu <- function(x, ...) {
          call. = FALSE)
   }
 
-  df <- gpu_collect(x$ptr, x$schema$names)
+  df <- wrap_gpu_call("collect", gpu_collect(x$ptr, x$schema$names))
   result <- tibble::as_tibble(df)
 
   if (any(x$schema$types == "INT64")) {

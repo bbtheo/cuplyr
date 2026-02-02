@@ -93,11 +93,14 @@ summarise.tbl_gpu <- function(.data, ..., .groups = "drop") {
   }
 
   # Call C++ function to perform the grouped aggregation
-  result_ptr <- gpu_summarise(
-    working_data$ptr,
-    group_indices,
-    agg_info$col_indices,
-    agg_info$agg_types
+  result_ptr <- wrap_gpu_call(
+    "summarise",
+    gpu_summarise(
+      working_data$ptr,
+      group_indices,
+      agg_info$col_indices,
+      agg_info$agg_types
+    )
   )
 
   # Build the result schema
@@ -267,25 +270,37 @@ create_temp_column <- function(.data, col_name, expr_text) {
     if (rhs_is_col) {
       # Column to column comparison
       rhs_idx <- match(rhs, .data$schema$names) - 1L
-      new_ptr <- gpu_compare_cols(.data$ptr, lhs_idx, op_found, rhs_idx)
+      new_ptr <- wrap_gpu_call(
+        "summarise_compare_cols",
+        gpu_compare_cols(.data$ptr, lhs_idx, op_found, rhs_idx)
+      )
     } else {
       # Column to scalar comparison
       value <- tryCatch(eval(parse(text = rhs)), error = function(e) {
         stop("Cannot parse value: ", rhs, call. = FALSE)
       })
-      new_ptr <- gpu_compare_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
+      new_ptr <- wrap_gpu_call(
+        "summarise_compare_scalar",
+        gpu_compare_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
+      )
     }
     new_type <- "INT32"  # Boolean stored as int for summing
   } else {
     # Arithmetic operation
     if (rhs_is_col) {
       rhs_idx <- match(rhs, .data$schema$names) - 1L
-      new_ptr <- gpu_mutate_binary_cols(.data$ptr, lhs_idx, op_found, rhs_idx)
+      new_ptr <- wrap_gpu_call(
+        "summarise_mutate_binary_cols",
+        gpu_mutate_binary_cols(.data$ptr, lhs_idx, op_found, rhs_idx)
+      )
     } else {
       value <- tryCatch(eval(parse(text = rhs)), error = function(e) {
         stop("Cannot parse value: ", rhs, call. = FALSE)
       })
-      new_ptr <- gpu_mutate_binary_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
+      new_ptr <- wrap_gpu_call(
+        "summarise_mutate_binary_scalar",
+        gpu_mutate_binary_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
+      )
     }
     new_type <- "FLOAT64"
   }
