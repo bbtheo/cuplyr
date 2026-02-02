@@ -35,24 +35,9 @@ This is experimental software under active development. Breaking changes should 
 - `filter()` – row filtering with comparison and logical operators
 - `select()` – column selection and reordering
 - `mutate()` – column transformations and arithmetic
-<<<<<<< HEAD
-- `arrange()` – row sorting with `desc()` support
-- `group_by()` / `ungroup()` – grouping for aggregation
-- `summarise()` – grouped aggregations (`sum`, `mean`, `min`, `max`, `n`, `sd`, `var`)
-
-**Joins**
-- `inner_join()`, `left_join()`, `right_join()`, `full_join()`
-
-**Combining tables**
-- `bind_rows()` – vertical concatenation with schema unification
-- `bind_cols()` – horizontal concatenation
-
-**Execution control**
-=======
 - `arrange()` – row sorting with `desc()` support, NA handling follows dplyr conventions
 - `group_by()` + `summarise()` – grouped aggregations (`sum`, `mean`, `min`, `max`, `n`)
 - `left_join()`, `right_join()`, `inner_join()`, `full_join()` – GPU joins on key columns
->>>>>>> bc90422 (adding join functionality)
 - `collect()` – transfer results back to R
 - `compute()` – execute lazy operations, keep on GPU
 - `tbl_gpu(..., lazy = TRUE)` – enable lazy evaluation with AST optimization
@@ -146,6 +131,7 @@ Benchmarks on 50 million rows (synthetic taxi data):
 **Hardware**: Intel Core i9-12900K (16 cores), NVIDIA RTX 5070 (12 GB VRAM)
 
 GPU acceleration benefits grow with data size. For datasets under 1M rows, CPU-based solutions may be faster due to GPU transfer overhead.
+
 
 ## Acknowledgments
 
