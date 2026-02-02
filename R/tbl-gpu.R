@@ -95,7 +95,7 @@ new_tbl_gpu <- function(ptr = NULL,
       lazy_ops = lazy_ops,
       groups = groups
     ),
-    class = c("tbl_gpu", "tbl_lazy", "tbl")
+    class = c("tbl_gpu", "tbl")
   )
 }
 
