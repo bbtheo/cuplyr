@@ -51,9 +51,7 @@ SEXP gpu_mutate_batch(SEXP xptr, Rcpp::List expressions, Rcpp::List input_schema
     // For computed columns, we keep the unique_ptr in owned_columns
     std::map<std::string, cudf::column_view> col_views;
     std::vector<std::unique_ptr<cudf::column>> owned_columns;
-
-    // Map to track which output columns replace existing ones
-    std::map<std::string, std::unique_ptr<cudf::column>*> output_col_ptrs;
+    std::map<std::string, size_t> output_col_indices;
 
     // Initialize with input columns (views, not copies)
     for (int i = 0; i < view.num_columns(); ++i) {
@@ -137,7 +135,7 @@ SEXP gpu_mutate_batch(SEXP xptr, Rcpp::List expressions, Rcpp::List input_schema
 
         // Store ownership
         owned_columns.push_back(std::move(new_col));
-        output_col_ptrs[output_col] = &owned_columns.back();
+        output_col_indices[output_col] = owned_columns.size() - 1;
     }
 
     // Build final table
@@ -154,12 +152,15 @@ SEXP gpu_mutate_batch(SEXP xptr, Rcpp::List expressions, Rcpp::List input_schema
     std::set<std::string> added_outputs;
 
     auto take_output_column = [&](const std::string& name) -> std::unique_ptr<cudf::column> {
-        auto it = output_col_ptrs.find(name);
-        if (it == output_col_ptrs.end() || it->second == nullptr || it->second->get() == nullptr) {
+        auto it = output_col_indices.find(name);
+        if (it == output_col_indices.end()) {
             return nullptr;
         }
-        auto& ptr = *(it->second);
-        return std::move(ptr);
+        size_t idx = it->second;
+        if (idx >= owned_columns.size() || owned_columns[idx] == nullptr) {
+            return nullptr;
+        }
+        return std::move(owned_columns[idx]);
     };
 
     // First, process input columns (replace or copy)
