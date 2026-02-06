@@ -21,6 +21,22 @@ test_that("select() with single column works", {
   expect_equal(dim(selected)[2], 1)
 })
 
+test_that("select() matches dplyr in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  df <- mtcars
+  expected <- dplyr::select(df, mpg, cyl, hp)
+
+  results <- with_exec_modes(df, function(tbl, mode) {
+    tbl |>
+      dplyr::select(mpg, cyl, hp) |>
+      collect()
+  })
+
+  expect_equal(tibble::as_tibble(results$eager), tibble::as_tibble(expected))
+  expect_equal(tibble::as_tibble(results$lazy), tibble::as_tibble(expected))
+})
+
 test_that("select() with multiple columns works", {
   skip_if_no_gpu()
 

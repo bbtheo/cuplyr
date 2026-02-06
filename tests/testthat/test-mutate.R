@@ -88,6 +88,42 @@ test_that("mutate() with column-to-column division works", {
   expect_equal(result$power_weight, mtcars$hp / mtcars$wt, tolerance = 1e-10)
 })
 
+test_that("mutate() handles nested arithmetic with parentheses", {
+  skip_if_no_gpu()
+
+  df <- data.frame(
+    fare_amount = c(10, 20, 40),
+    tip_amount = c(1, 2, 8),
+    tolls_amount = c(0, 1, 2),
+    VendorID = c(1, 2, 1)
+  )
+  gpu_df <- tbl_gpu(df)
+
+  mutated <- dplyr::mutate(gpu_df, tip_pct = (tip_amount / fare_amount) * 100)
+  result <- collect(mutated)
+
+  expect_equal(result$tip_pct, (df$tip_amount / df$fare_amount) * 100,
+               tolerance = 1e-10)
+})
+
+test_that("mutate() handles nested arithmetic with parentheses in lazy mode", {
+  skip_if_no_gpu()
+
+  df <- data.frame(
+    fare_amount = c(10, 20, 40),
+    tip_amount = c(1, 2, 8),
+    tolls_amount = c(0, 1, 2),
+    VendorID = c(1, 2, 1)
+  )
+  gpu_df <- tbl_gpu(df, lazy = TRUE)
+
+  mutated <- dplyr::mutate(gpu_df, tip_pct = (tip_amount / fare_amount) * 100)
+  result <- collect(mutated)
+
+  expect_equal(result$tip_pct, (df$tip_amount / df$fare_amount) * 100,
+               tolerance = 1e-10)
+})
+
 test_that("mutate() with column-to-column multiplication works", {
   skip_if_no_gpu()
 
@@ -173,6 +209,42 @@ test_that("chained mutate() operations work", {
 
   expect_equal(result$power_weight, expected_pw, tolerance = 1e-10)
   expect_equal(result$efficiency, expected_eff, tolerance = 1e-10)
+})
+
+test_that("mutate() supports chained addition of multiple columns", {
+  skip_if_no_gpu()
+
+  df <- data.frame(a = c(1, 2, 3), b = c(10, 20, 30), c = c(100, 200, 300))
+  expected <- df |>
+    dplyr::mutate(total = a + b + c)
+
+  results <- with_exec_modes(df, function(tbl, mode) {
+    tbl |>
+      dplyr::mutate(total = a + b + c) |>
+      collect()
+  })
+
+  expect_equal(tibble::as_tibble(results$eager), tibble::as_tibble(expected))
+  expect_equal(tibble::as_tibble(results$lazy), tibble::as_tibble(expected))
+})
+
+test_that("mutate() matches dplyr in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  df <- mtcars
+  expected <- df |>
+    dplyr::mutate(kpl = mpg * 0.425) |>
+    dplyr::mutate(ratio = hp / wt)
+
+  results <- with_exec_modes(df, function(tbl, mode) {
+    tbl |>
+      dplyr::mutate(kpl = mpg * 0.425) |>
+      dplyr::mutate(ratio = hp / wt) |>
+      collect()
+  })
+
+  expect_equal(tibble::as_tibble(results$eager), tibble::as_tibble(expected))
+  expect_equal(tibble::as_tibble(results$lazy), tibble::as_tibble(expected))
 })
 
 test_that("mutate() can use previously created column", {

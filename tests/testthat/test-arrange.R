@@ -25,6 +25,23 @@ test_that("arrange() sorts ascending by default", {
   expect_equal(result$x, c(1, 2, 3))
 })
 
+test_that("arrange() matches dplyr in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = c(3, 1, 2), y = c("c", "a", "b"))
+  expected <- df |>
+    dplyr::arrange(dplyr::desc(x), y)
+
+  results <- with_exec_modes(df, function(tbl, mode) {
+    tbl |>
+      dplyr::arrange(dplyr::desc(x), y) |>
+      collect()
+  })
+
+  expect_equal(tibble::as_tibble(results$eager), tibble::as_tibble(expected))
+  expect_equal(tibble::as_tibble(results$lazy), tibble::as_tibble(expected))
+})
+
 test_that("arrange() sorts descending with desc()", {
   skip_if_no_gpu()
 

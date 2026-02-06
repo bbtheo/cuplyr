@@ -53,6 +53,27 @@ test_that("collect() returns correct data values", {
   }
 })
 
+test_that("collect() matches dplyr in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  df <- mtcars
+  expected <- df |>
+    dplyr::filter(mpg > 20) |>
+    dplyr::mutate(kpl = mpg * 0.425) |>
+    dplyr::select(mpg, kpl, hp)
+
+  results <- with_exec_modes(df, function(tbl, mode) {
+    tbl |>
+      dplyr::filter(mpg > 20) |>
+      dplyr::mutate(kpl = mpg * 0.425) |>
+      dplyr::select(mpg, kpl, hp) |>
+      collect()
+  })
+
+  expect_equal(tibble::as_tibble(results$eager), tibble::as_tibble(expected))
+  expect_equal(tibble::as_tibble(results$lazy), tibble::as_tibble(expected))
+})
+
 # =============================================================================
 # Type Conversion Tests
 # =============================================================================

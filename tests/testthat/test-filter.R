@@ -25,6 +25,23 @@ test_that("filter() with > operator works", {
   expect_true(nrow(result) < 32)
 })
 
+test_that("filter() matches dplyr in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  df <- mtcars
+  expected <- dplyr::filter(df, mpg > 20, cyl == 4)
+
+  results <- with_exec_modes(df, function(tbl, mode) {
+    tbl |>
+      dplyr::filter(mpg > 20) |>
+      dplyr::filter(cyl == 4) |>
+      collect()
+  })
+
+  expect_equal(tibble::as_tibble(results$eager), tibble::as_tibble(expected))
+  expect_equal(tibble::as_tibble(results$lazy), tibble::as_tibble(expected))
+})
+
 test_that("filter() with >= operator works", {
   skip_if_no_gpu()
 

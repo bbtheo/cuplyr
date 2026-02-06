@@ -21,6 +21,27 @@ test_that("group_by() assigns single column", {
   expect_data_on_gpu(grouped)
 })
 
+test_that("group_by() matches dplyr in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  df <- mtcars
+  expected <- df |>
+    dplyr::group_by(cyl) |>
+    dplyr::summarise(avg_mpg = mean(mpg), .groups = "drop") |>
+    dplyr::arrange(cyl)
+
+  results <- with_exec_modes(df, function(tbl, mode) {
+    tbl |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(avg_mpg = mean(mpg)) |>
+      dplyr::arrange(cyl) |>
+      collect()
+  })
+
+  expect_equal(tibble::as_tibble(results$eager), tibble::as_tibble(expected))
+  expect_equal(tibble::as_tibble(results$lazy), tibble::as_tibble(expected))
+})
+
 test_that("group_by() assigns multiple columns", {
   skip_if_no_gpu()
 
