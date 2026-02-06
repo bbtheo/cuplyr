@@ -76,51 +76,65 @@
 arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE) {
   dots <- rlang::enquos(...)
 
-
   if (length(dots) == 0) {
     return(.data)
   }
 
-  # Parse sort specifications
-  sort_specs <- lapply(dots, parse_arrange_expr, .data = .data)
+  # Get current schema
+  current_schema <- if (!is.null(.data$lazy_ops) && .data$exec_mode == "lazy") {
+    infer_schema(.data$lazy_ops)
+  } else {
+    .data$schema
+  }
 
+  # Parse sort specifications
+  sort_specs <- lapply(dots, parse_arrange_expr, .data = .data, schema = current_schema)
+
+  # Validate columns exist
+  for (spec in sort_specs) {
+    if (!spec$col_name %in% current_schema$names) {
+      stop("Column '", spec$col_name, "' not found.\n",
+           "Available columns: ", paste(current_schema$names, collapse = ", "),
+           call. = FALSE)
+    }
+  }
+
+  # Handle .by_group
+  groups_for_arrange <- character()
+  if (isTRUE(.by_group) && length(.data$groups) > 0) {
+    groups_for_arrange <- .data$groups
+  }
+
+  # Lazy path: build AST (arrange is a barrier)
+  if (.data$exec_mode == "lazy") {
+    return(arrange_lazy(.data, sort_specs, groups_for_arrange))
+  }
+
+  # Eager path: execute immediately
   col_indices <- integer(length(sort_specs))
   descending <- logical(length(sort_specs))
 
   for (i in seq_along(sort_specs)) {
     spec <- sort_specs[[i]]
-    col_idx <- match(spec$col_name, .data$schema$names)
-    if (is.na(col_idx)) {
-      stop("Column '", spec$col_name, "' not found.\n",
-           "Available columns: ", paste(.data$schema$names, collapse = ", "),
-           call. = FALSE)
-    }
-    col_indices[i] <- col_idx - 1L  # 0-indexed for C++
+    col_indices[i] <- match(spec$col_name, current_schema$names) - 1L
     descending[i] <- spec$descending
   }
 
-  # Handle grouped arrange (.by_group = TRUE prepends group columns)
-  if (isTRUE(.by_group) && length(.data$groups) > 0) {
-    group_indices <- match(.data$groups, .data$schema$names) - 1L
-
-    # Check if user explicitly specified ordering for any group columns
+  # Handle grouped arrange
+  if (length(groups_for_arrange) > 0) {
+    group_indices <- match(groups_for_arrange, current_schema$names) - 1L
     user_col_names <- vapply(sort_specs, `[[`, character(1), "col_name")
 
-    # Build descending vector for group columns, respecting user's explicit ordering
-    group_descending <- logical(length(.data$groups))
-    for (i in seq_along(.data$groups)) {
-      grp <- .data$groups[i]
+    group_descending <- logical(length(groups_for_arrange))
+    for (i in seq_along(groups_for_arrange)) {
+      grp <- groups_for_arrange[i]
       user_idx <- match(grp, user_col_names)
       if (!is.na(user_idx)) {
-        # User explicitly specified this group column - use their ordering
         group_descending[i] <- sort_specs[[user_idx]]$descending
       }
-      # Otherwise default FALSE (ascending) is already set
     }
 
-    # Remove user columns that are group columns (they're handled above)
-    keep <- !user_col_names %in% .data$groups
-
+    keep <- !user_col_names %in% groups_for_arrange
     col_indices <- c(group_indices, col_indices[keep])
     descending <- c(group_descending, descending[keep])
   }
@@ -129,9 +143,23 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE) {
 
   new_tbl_gpu(
     ptr = new_ptr,
-    schema = .data$schema,
-    groups = .data$groups
+    schema = current_schema,
+    groups = .data$groups,
+    exec_mode = .data$exec_mode
   )
+}
+
+# Lazy arrange: build AST node (arrange is a barrier)
+arrange_lazy <- function(.data, sort_specs, groups) {
+  # Initialize AST if needed
+  if (is.null(.data$lazy_ops)) {
+    .data$lazy_ops <- ast_source(.data$schema)
+  }
+
+  # Add arrange node (this is a barrier)
+  .data$lazy_ops <- ast_arrange(.data$lazy_ops, sort_specs, groups)
+
+  .data
 }
 
 # Internal: Parse a single arrange expression
@@ -140,10 +168,14 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE) {
 # Supports: bare column names, desc(column), and -column.
 #
 # @param quo A quosure containing an arrange expression
-# @param .data The tbl_gpu object (for context, currently unused)
+# @param .data The tbl_gpu object (for context)
+# @param schema The current schema (for lazy mode)
 # @return A list with `col_name` (character) and `descending` (logical)
 # @keywords internal
-parse_arrange_expr <- function(quo, .data) {
+parse_arrange_expr <- function(quo, .data, schema = NULL) {
+  if (is.null(schema)) {
+    schema <- .data$schema
+  }
   expr <- rlang::quo_get_expr(quo)
 
   if (is.symbol(expr)) {
