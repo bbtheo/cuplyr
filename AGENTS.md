@@ -13,7 +13,20 @@ This repo mixes R and C++ (Rcpp) for GPU-backed dplyr-like operations using libc
 - `pixi run load-dev`: tight inner loop for R changes or quick checks.
 - `pixi run install`: after C++ changes or when exports changed.
 - `pixi run dev`: when you suspect stale artifacts (clean + rebuild).
-- `pixi run test`: after feature changes; requires GPU.
+- `pixi run test`: always run after implementing a feature (requires GPU).
+
+## Core Data Structures
+- `tbl_gpu` is a list with `ptr` (externalptr), `schema` (`names` + `types`), `groups`, and optional `lazy_ops`.
+
+## Type Mappings (R -> GPU)
+- logical -> `BOOL8`
+- integer -> `INT32`
+- double -> `FLOAT64`
+- character -> `STRING`
+- Date -> `TIMESTAMP_DAYS`
+- POSIXct -> `TIMESTAMP_MICROSECONDS`
+- factor -> `INT32` (codes only)
+- integer64 -> `FLOAT64` (precision loss > 2^53, warn)
 
 ## Current C++ Layout (split from transfer.cpp)
 - `src/transfer_io.cpp`: R <-> GPU conversion, collect/head/df_to_gpu.
@@ -40,6 +53,7 @@ This repo mixes R and C++ (Rcpp) for GPU-backed dplyr-like operations using libc
 - **Rcpp exports need regeneration** after moving/adding functions: run `Rcpp::compileAttributes()` or `devtools::document()`.
 - **INT64 precision**: `gpu_collect()` returns doubles; warn when values exceed 2^53.
 - **Memory growth**: each GPU op tends to allocate new tables. Replacement mutate paths are optimized, but GC still matters.
+- **String columns**: Arrow-style storage (offsets + char data). When slicing, offsets and chars must be kept in sync.
 - **Join ordering**: cuDF join outputs are unordered; we stable-sort join maps by left_map (then right_map) in `src/ops_join.cpp` to match dplyr.
 - **Join unmatched rows**: cuDF uses `JoinNoMatch` sentinel; gather treats negatives as wraparound. Current fix sanitizes join maps on CPU (replace with `nrows`) before gather and uses `out_of_bounds_policy::NULLIFY`.
 - **cuDF gather API**: this environment’s `cudf::gather` signature has no `negative_index_policy`.
