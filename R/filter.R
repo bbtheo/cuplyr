@@ -70,12 +70,110 @@ filter.tbl_gpu <- function(.data, ..., .preserve = FALSE) {
 
   if (length(dots) == 0) return(.data)
 
+  # Lazy path: build AST instead of executing
+ if (.data$exec_mode == "lazy") {
+    return(filter_lazy(.data, dots))
+  }
+
+  # Eager path: execute immediately
   result <- .data
   for (expr in dots) {
     result <- filter_one(result, expr)
   }
 
   result
+}
+
+# Lazy filter: build AST node
+filter_lazy <- function(.data, dots) {
+  # Parse all filter expressions into predicates
+  predicates <- list()
+
+  for (expr in dots) {
+    parsed <- parse_filter_expr(expr, .data)
+    if (is.null(parsed)) {
+      # Opaque expression - fall back to eager
+      warning("Opaque filter expression, falling back to eager execution",
+              call. = FALSE)
+      .data <- as_eager(.data)
+      for (e in dots) {
+        .data <- filter_one(.data, e)
+      }
+      return(as_lazy(.data))
+    }
+    predicates <- c(predicates, parsed)
+  }
+
+  # Initialize AST if needed
+  if (is.null(.data$lazy_ops)) {
+    .data$lazy_ops <- ast_source(.data$schema)
+  }
+
+  # Add filter node
+  .data$lazy_ops <- ast_filter(.data$lazy_ops, predicates)
+
+  # Schema unchanged by filter
+  .data
+}
+
+# Parse a filter expression into predicate structure(s)
+parse_filter_expr <- function(expr, .data) {
+  expr_chr <- rlang::quo_text(expr)
+  expr_obj <- rlang::quo_get_expr(expr)
+
+  # Handle boolean literals without evaluating in a data mask
+  if (identical(expr_obj, TRUE)) {
+    return(list())  # TRUE = no filter needed
+  }
+  if (identical(expr_obj, FALSE)) {
+    # FALSE = filter everything - create impossible predicate
+    if (length(.data$schema$names) > 0) {
+      return(list(make_predicate(.data$schema$names[1], "!=", .data$schema$names[1],
+                                 is_col_compare = TRUE)))
+    }
+    return(list())
+  }
+
+  # Parse comparison expression
+  ops <- c("==", "!=", ">=", "<=", ">", "<")
+  op_found <- NULL
+
+  for (op in ops) {
+    if (grepl(op, expr_chr, fixed = TRUE)) {
+      op_found <- op
+      break
+    }
+  }
+
+  if (is.null(op_found)) {
+    return(NULL)  # Opaque expression
+  }
+
+  parts <- strsplit(expr_chr, op_found, fixed = TRUE)[[1]]
+  if (length(parts) != 2) {
+    return(NULL)
+  }
+
+  lhs <- trimws(parts[1])
+  rhs <- trimws(parts[2])
+
+  # Validate LHS is a column
+  if (!lhs %in% .data$schema$names) {
+    return(NULL)
+  }
+
+  # Check if RHS is a column
+  if (rhs %in% .data$schema$names) {
+    return(list(make_predicate(lhs, op_found, rhs, is_col_compare = TRUE)))
+  }
+
+  # Try to parse RHS as value
+  value <- tryCatch(eval(parse(text = rhs)), error = function(e) NULL)
+  if (is.null(value) || !is.numeric(value) || length(value) != 1) {
+    return(NULL)
+  }
+
+  list(make_predicate(lhs, op_found, value, is_col_compare = FALSE))
 }
 
 # Internal: Parse and execute a single filter expression
@@ -89,20 +187,38 @@ filter.tbl_gpu <- function(.data, ..., .preserve = FALSE) {
 # @keywords internal
 filter_one <- function(.data, expr) {
   expr_chr <- rlang::quo_text(expr)
+  expr_obj <- rlang::quo_get_expr(expr)
+  ops <- c("==", "!=", ">=", "<=", ">", "<")
 
-  # Try to evaluate the expression first to check for boolean literal/vector
-  eval_result <- tryCatch({
-    rlang::eval_tidy(expr)
-  }, error = function(e) NULL)
+  # Handle literal TRUE/FALSE without evaluation
+  if (identical(expr_obj, TRUE) || identical(expr_obj, FALSE)) {
+    return(filter_logical(.data, expr_obj))
+  }
 
-  # Check if it's a logical value (TRUE/FALSE or logical vector)
-  if (!is.null(eval_result) && is.logical(eval_result)) {
-    return(filter_logical(.data, eval_result))
+  # If expression is a symbol not matching a column, allow logical vectors
+  if (rlang::is_symbol(expr_obj)) {
+    sym <- as.character(expr_obj)
+    if (!sym %in% .data$schema$names) {
+      eval_result <- tryCatch(rlang::eval_tidy(expr), error = function(e) NULL)
+      if (!is.null(eval_result) && is.logical(eval_result)) {
+        return(filter_logical(.data, eval_result))
+      }
+    }
+  }
+
+  # Allow non-comparison calls to be evaluated as logical vectors
+  if (rlang::is_call(expr_obj)) {
+    call_name <- rlang::call_name(expr_obj)
+    if (is.null(call_name) || !call_name %in% ops) {
+      eval_result <- tryCatch(rlang::eval_tidy(expr), error = function(e) NULL)
+      if (!is.null(eval_result) && is.logical(eval_result)) {
+        return(filter_logical(.data, eval_result))
+      }
+    }
   }
 
   # Parse simple comparison: col op value or col op col
   # Order matters: check two-char operators before single-char
-  ops <- c("==", "!=", ">=", "<=", ">", "<")
   op_found <- NULL
   for (op in ops) {
     if (grepl(op, expr_chr, fixed = TRUE)) {
@@ -159,7 +275,8 @@ filter_one <- function(.data, expr) {
   new_tbl_gpu(
     ptr = new_ptr,
     schema = .data$schema,
-    groups = .data$groups
+    groups = .data$groups,
+    exec_mode = .data$exec_mode
   )
 }
 
@@ -200,6 +317,7 @@ filter_logical <- function(.data, logical_val) {
   new_tbl_gpu(
     ptr = new_ptr,
     schema = .data$schema,
-    groups = .data$groups
+    groups = .data$groups,
+    exec_mode = .data$exec_mode
   )
 }

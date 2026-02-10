@@ -77,6 +77,11 @@ summarise.tbl_gpu <- function(.data, ..., .groups = "drop") {
          call. = FALSE)
   }
 
+  # Lazy path: build AST instead of executing
+  if (.data$exec_mode == "lazy") {
+    return(summarise_lazy(.data, dots, .groups = .groups))
+  }
+
   # Pre-process: create temporary columns for expressions inside agg functions
   preprocess_result <- preprocess_agg_expressions(.data, dots)
   working_data <- preprocess_result$data
@@ -114,14 +119,87 @@ summarise.tbl_gpu <- function(.data, ..., .groups = "drop") {
   new_tbl_gpu(
     ptr = result_ptr,
     schema = list(names = result_names, types = result_types),
-    lazy_ops = list(),
-    groups = character()  # Result is ungrouped
+    lazy_ops = NULL,
+    groups = character(),  # Result is ungrouped
+    exec_mode = .data$exec_mode
   )
 }
 
 #' @rdname summarise.tbl_gpu
 #' @export
 summarize.tbl_gpu <- summarise.tbl_gpu
+
+# Lazy summarise: build AST node
+summarise_lazy <- function(.data, dots, .groups = "drop") {
+  current_schema <- if (!is.null(.data$lazy_ops)) {
+    infer_schema(.data$lazy_ops)
+  } else {
+    .data$schema
+  }
+
+  agg_functions <- c("sum", "mean", "min", "max", "n", "sd", "var", "count")
+  aggregations <- list()
+
+  for (i in seq_along(dots)) {
+    expr <- dots[[i]]
+    expr_text <- rlang::quo_text(expr)
+    output_col <- names(dots)[i]
+
+    if (is.null(output_col) || output_col == "") {
+      output_col <- expr_text
+      warning("Unnamed summarise expression '", output_col,
+              "' will use expression as column name.",
+              call. = FALSE)
+    }
+
+    if (grepl("^n\\(\\)$", trimws(expr_text))) {
+      aggregations <- c(aggregations, list(make_aggregation(output_col, NA_character_, "n")))
+      next
+    }
+
+    match_result <- regmatches(
+      expr_text,
+      regexec("^([a-zA-Z_][a-zA-Z0-9_]*)\\(([^)]+)\\)$", expr_text)
+    )[[1]]
+
+    if (length(match_result) != 3) {
+      warning("Opaque summarise expression, falling back to eager execution: ",
+              expr_text, call. = FALSE)
+      .data <- as_eager(.data)
+      return(rlang::exec(summarise.tbl_gpu, .data, !!!dots, .groups = .groups))
+    }
+
+    func_name <- match_result[2]
+    col_name <- trimws(match_result[3])
+
+    if (!func_name %in% agg_functions) {
+      warning("Unsupported summarise function '", func_name,
+              "', falling back to eager execution.", call. = FALSE)
+      .data <- as_eager(.data)
+      return(rlang::exec(summarise.tbl_gpu, .data, !!!dots, .groups = .groups))
+    }
+
+    col_idx <- match(col_name, current_schema$names)
+    if (is.na(col_idx)) {
+      stop("Column '", col_name, "' not found.",
+           "\nAvailable columns: ", paste(current_schema$names, collapse = ", "),
+           call. = FALSE)
+    }
+
+    input_type <- current_schema$types[col_idx]
+    aggregations <- c(aggregations, list(make_aggregation(output_col, col_name,
+                                                          func_name, input_type)))
+  }
+
+  if (is.null(.data$lazy_ops)) {
+    .data$lazy_ops <- ast_source(.data$schema)
+  }
+
+  .data$lazy_ops <- ast_summarise(.data$lazy_ops, aggregations, .data$groups)
+  .data$schema <- infer_schema(.data$lazy_ops)
+  .data$groups <- character()
+  .data
+}
 
 # Internal: Pre-process aggregation expressions
 #
@@ -313,7 +391,8 @@ create_temp_column <- function(.data, col_name, expr_text) {
       types = c(.data$schema$types, new_type)
     ),
     lazy_ops = .data$lazy_ops,
-    groups = .data$groups
+    groups = .data$groups,
+    exec_mode = .data$exec_mode
   )
 }
 

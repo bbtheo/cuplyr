@@ -1,83 +1,7 @@
-#' Join two GPU tables
-#'
-#' These functions provide GPU-accelerated implementations of dplyr's
-#' mutating joins. They combine columns from two GPU tables based on
-#' matching keys.
-#'
-#' @param x A `tbl_gpu` object (left table).
-#' @param y A `tbl_gpu` object (right table), or a data frame if `copy = TRUE`.
-#' @param by A join specification created with [dplyr::join_by()], or a character
-#'   vector of variables to join by. If `NULL`, the default, performs a natural
-#'   join using all variables with common names.
-#' @param copy If `y` is not a `tbl_gpu` and `copy = TRUE`, it will be converted
-#'   to a GPU table. If `FALSE` (the default), an error is thrown.
-#' @param suffix Character vector of length 2 specifying suffixes to add to
-#'   disambiguate column names from `x` and `y`. Default is `c(".x", ".y")`.
-#' @param keep Should the join keys from both tables be preserved in the output?
-#'   Default is `FALSE`, which drops the join key columns from `y` when they
-#'   have the same name as the corresponding column in `x`.
-#' @param na_matches Should NA values match other NA values? Default is `"na"`
-#'   which treats NA as a value. `"never"` is not yet supported.
-#' @param ... Additional arguments (currently unused).
-#'
-#' @return A `tbl_gpu` object containing the joined data.
-#'
-#' @details
-#' ## Join Types
-#' - `left_join()`: Returns all rows from `x`, and all columns from `x` and `y`.
-#'   Rows in `x` with no match in `y` will have NA values in the new columns.
-#' - `right_join()`: Returns all rows from `y`, and all columns from `x` and `y`.
-#'   Rows in `y` with no match in `x` will have NA values in the new columns.
-#' - `inner_join()`: Returns all rows from `x` where there are matching values
-#'   in `y`, and all columns from `x` and `y`.
-#' - `full_join()`: Returns all rows and columns from both `x` and `y`. Rows
-#'   without matches are filled with NA values.
-#'
-#' ## Performance
-#' GPU joins can be significantly faster than CPU joins for large datasets.
-#' The join algorithm uses hash-based matching on the GPU.
-#'
-#' ## Grouping
-#' Joins drop any existing grouping. Use `group_by()` after joining to
-#' re-establish groups.
-#'
-#' @seealso
-#' [dplyr::left_join()], [dplyr::right_join()], [dplyr::inner_join()],
-#' [dplyr::full_join()] for the dplyr equivalents.
-#'
-#' @examples
-#' if (has_gpu()) {
-#'   left_df <- data.frame(key = 1:3, x = c("a", "b", "c"))
-#'   right_df <- data.frame(key = 2:4, y = c("x", "y", "z"))
-#'
-#'   gpu_left <- tbl_gpu(left_df)
-#'   gpu_right <- tbl_gpu(right_df)
-#'
-#'   # Left join - keeps all rows from left table
-#'   result <- left_join(gpu_left, gpu_right, by = "key") |> collect()
-#'
-#'   # Inner join - keeps only matching rows
-#'   result <- inner_join(gpu_left, gpu_right, by = "key") |> collect()
-#'
-#'   # Join with different key names
-#'   df1 <- data.frame(id = 1:3, val = letters[1:3])
-#'   df2 <- data.frame(key = 2:4, other = LETTERS[1:3])
-#'   result <- tbl_gpu(df1) |>
-#'     left_join(tbl_gpu(df2), by = c("id" = "key")) |>
-#'     collect()
-#' }
-#'
-#' @name join
-NULL
+# Join operations for tbl_gpu
 
-# -----------------------------------------------------------------------------
-# Helper Functions
-# -----------------------------------------------------------------------------
-
-#' Parse the `by` argument into left/right column lists
-#' @noRd
+# Parse join specification
 parse_join_by <- function(by, x, y) {
-  # Case 1: by = NULL -> natural join (common columns)
   if (is.null(by)) {
     common <- intersect(x$schema$names, y$schema$names)
     if (length(common) == 0) {
@@ -87,66 +11,55 @@ parse_join_by <- function(by, x, y) {
     return(list(left = common, right = common))
   }
 
-  # Case 2: by = c("a", "b") -> same column names in both tables
-  # Case 3: by = c("a" = "b") -> left$a joins to right$b
-  if (is.character(by)) {
-    if (is.null(names(by))) {
-      return(list(left = by, right = by))
-    } else {
-      left_cols <- names(by)
-      right_cols <- unname(by)
-      empty_names <- left_cols == ""
-      left_cols[empty_names] <- right_cols[empty_names]
-      if (length(left_cols) != length(right_cols)) {
-        stop("`by` must map left and right columns 1:1.", call. = FALSE)
-      }
-      return(list(left = left_cols, right = right_cols))
-    }
-  }
-
   if (inherits(by, "dplyr_join_by")) {
     stop("`join_by()` is not supported yet for tbl_gpu joins.", call. = FALSE)
   }
 
-  stop("Unsupported `by` specification. Use a character vector or NULL.",
+  if (is.character(by) && is.null(names(by))) {
+    return(list(left = by, right = by))
+  }
+
+  if (is.character(by) && !is.null(names(by))) {
+    left_cols <- names(by)
+    right_cols <- unname(by)
+    empty_names <- left_cols == ""
+    left_cols[empty_names] <- right_cols[empty_names]
+    return(list(left = left_cols, right = right_cols))
+  }
+
+  stop("Invalid `by` specification. Use NULL, character vector, or named vector.",
        call. = FALSE)
 }
 
-#' Validate columns exist in table
-#' @noRd
 validate_join_cols <- function(cols, tbl, side) {
   missing <- setdiff(cols, tbl$schema$names)
   if (length(missing) > 0) {
-    stop(sprintf("%s table missing join columns: %s\nAvailable: %s",
-                 side, paste(missing, collapse = ", "),
-                 paste(tbl$schema$names, collapse = ", ")),
+    stop(side, " join columns not found: ", paste(missing, collapse = ", "),
          call. = FALSE)
   }
-  if (anyDuplicated(cols)) {
-    stop(sprintf("%s join columns must be unique.", side), call. = FALSE)
+  if (length(unique(cols)) != length(cols)) {
+    stop(side, " join columns must be unique.", call. = FALSE)
   }
 }
 
-#' Validate key column types are compatible
-#' @noRd
 validate_key_types <- function(x, y, join_spec) {
   left_types <- x$schema$types[match(join_spec$left, x$schema$names)]
   right_types <- y$schema$types[match(join_spec$right, y$schema$names)]
 
-  # Define compatible type groups
-  numeric_types <- c("INT32", "INT64", "FLOAT32", "FLOAT64")
+  numeric_types <- c("INT8", "INT16", "INT32", "INT64", "FLOAT32", "FLOAT64", "BOOL8")
 
   for (i in seq_along(left_types)) {
     lt <- left_types[i]
     rt <- right_types[i]
 
-    # Same type is always ok
-    if (lt == rt) next
+    if (identical(lt, rt)) {
+      next
+    }
 
-    # Numeric types are compatible with each other
-    if (lt %in% numeric_types && rt %in% numeric_types) next
+    if (lt %in% numeric_types && rt %in% numeric_types) {
+      next
+    }
 
-    # Otherwise incompatible
     stop(sprintf(
       "Key column type mismatch: %s (%s) vs %s (%s). Cannot join incompatible types.",
       join_spec$left[i], lt, join_spec$right[i], rt
@@ -154,53 +67,38 @@ validate_key_types <- function(x, y, join_spec) {
   }
 }
 
-#' Build result schema after join
-#' @noRd
-build_join_schema <- function(x, y, join_spec, suffix = c(".x", ".y"), keep = FALSE) {
-  left_names <- x$schema$names
-  left_types <- x$schema$types
+build_join_output_info <- function(left_schema, right_schema, join_spec,
+                                   suffix = c(".x", ".y"), keep = FALSE) {
+  left_names <- left_schema$names
+  right_names <- right_schema$names
 
-  # Determine which right columns to drop
- # Only drop right key columns when: keep = FALSE AND names match
-  drop_right <- join_spec$right[!keep & join_spec$left == join_spec$right]
-  right_drop_idx <- match(drop_right, y$schema$names)
-  right_keep_idx <- setdiff(seq_along(y$schema$names), right_drop_idx)
-  right_names <- y$schema$names[right_keep_idx]
-  right_types <- y$schema$types[right_keep_idx]
+  drop_right <- if (!isTRUE(keep)) join_spec$right else character(0)
 
-  # Handle name conflicts with suffix
-  conflicts <- intersect(left_names, right_names)
-  if (length(conflicts) > 0) {
-    left_names[left_names %in% conflicts] <- paste0(
-      left_names[left_names %in% conflicts], suffix[1]
-    )
-    right_names[right_names %in% conflicts] <- paste0(
-      right_names[right_names %in% conflicts], suffix[2]
-    )
-  }
+  right_keep <- setdiff(right_names, drop_right)
+  conflicts <- intersect(left_names, right_keep)
+
+  left_out <- ifelse(left_names %in% conflicts,
+                     paste0(left_names, suffix[1]),
+                     left_names)
+  right_out <- ifelse(right_keep %in% conflicts,
+                      paste0(right_keep, suffix[2]),
+                      right_keep)
 
   list(
-    names = c(left_names, right_names),
-    types = c(left_types, right_types)
+    names = c(left_out, right_out),
+    types = c(left_schema$types, right_schema$types[match(right_keep, right_names)]),
+    origin = c(rep("left", length(left_out)), rep("right", length(right_out))),
+    source_names = c(left_names, right_keep)
   )
 }
 
-#' Compute which right columns to drop (0-based indices for C++)
-#' @noRd
-get_right_drop_indices <- function(y, join_spec, keep) {
-  if (keep) {
-    return(integer(0))
-  }
-  # Only drop when left and right key names match
-  drop_cols <- join_spec$right[join_spec$left == join_spec$right]
-  if (length(drop_cols) == 0) {
-    return(integer(0))
-  }
-  match(drop_cols, y$schema$names) - 1L
+build_join_schema <- function(left_schema, right_schema, join_spec,
+                              suffix = c(".x", ".y"), keep = FALSE) {
+  info <- build_join_output_info(left_schema, right_schema, join_spec,
+                                 suffix = suffix, keep = keep)
+  list(names = info$names, types = info$types)
 }
 
-#' Estimate GPU bytes for a result based on row count + column types
-#' @noRd
 estimate_gpu_bytes <- function(nrow, types) {
   bytes_per_type <- vapply(types, function(type) {
     switch(type,
@@ -226,8 +124,6 @@ estimate_gpu_bytes <- function(nrow, types) {
   data_bytes + mask_bytes
 }
 
-#' Warn if estimated join output may exceed available GPU memory
-#' @noRd
 warn_if_join_too_large <- function(join_type, x, y, join_spec, suffix, keep) {
   dims_x <- tryCatch(dim(x), error = function(e) NULL)
   dims_y <- tryCatch(dim(y), error = function(e) NULL)
@@ -246,7 +142,8 @@ warn_if_join_too_large <- function(join_type, x, y, join_spec, suffix, keep) {
     n_left
   )
 
-  schema <- build_join_schema(x, y, join_spec, suffix, keep)
+  schema <- build_join_schema(x$schema, y$schema, join_spec,
+                              suffix = suffix, keep = keep)
   est_bytes <- estimate_gpu_bytes(est_rows, schema$types)
 
   mem <- gpu_memory_state()
@@ -268,218 +165,264 @@ warn_if_join_too_large <- function(join_type, x, y, join_spec, suffix, keep) {
   }
 }
 
-# -----------------------------------------------------------------------------
-# S3 Methods
-# -----------------------------------------------------------------------------
-
-#' @rdname join
-#' @export
-#' @importFrom dplyr left_join
 left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
-                              suffix = c(".x", ".y"), keep = FALSE,
-                              na_matches = c("na", "never"), ...) {
-  na_matches <- match.arg(na_matches)
-  if (na_matches != "na") {
+                              suffix = c(".x", ".y"), ..., keep = FALSE,
+                              na_matches = "na") {
+  if (!is_tbl_gpu(y)) {
+    if (isTRUE(copy)) {
+      y <- tbl_gpu(y)
+    } else {
+      stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
+    }
+  }
+
+  if (!identical(na_matches, "na")) {
     stop("`na_matches = \"never\"` is not supported yet for tbl_gpu joins.",
          call. = FALSE)
   }
 
-  if (!is_tbl_gpu(y)) {
-    if (copy) {
-      y <- tbl_gpu(y)
-    } else {
-      stop("y must be a tbl_gpu. Use `copy = TRUE` to convert automatically.",
-           call. = FALSE)
-    }
-  }
-
   join_spec <- parse_join_by(by, x, y)
-
-  # Informative message for natural join (matches dplyr behavior)
-  if (is.null(by)) {
-    message("Joining with `by = join_by(",
-            paste(join_spec$left, collapse = ", "), ")`")
-  }
-
   validate_join_cols(join_spec$left, x, "Left")
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
-  warn_if_join_too_large("left", x, y, join_spec, suffix, keep)
+
+  if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
+    left_ast <- if (!is.null(x$lazy_ops)) x$lazy_ops else ast_source(x$schema)
+    right_ast <- if (!is.null(y$lazy_ops)) y$lazy_ops else ast_source(y$schema)
+
+    left_ast <- set_ast_source_ptr(left_ast, x$ptr)
+    right_ast <- set_ast_source_ptr(right_ast, y$ptr)
+
+    join_ast <- ast_join("left", left_ast, right_ast, join_spec,
+                         keep = keep, suffix = suffix, na_matches = na_matches)
+
+    left_schema <- infer_schema(left_ast)
+    right_schema <- infer_schema(right_ast)
+    new_schema <- build_join_schema(left_schema, right_schema, join_spec,
+                                    suffix = suffix, keep = keep)
+
+    return(new_tbl_gpu(
+      ptr = NULL,
+      schema = new_schema,
+      lazy_ops = join_ast,
+      groups = character(),
+      exec_mode = "lazy"
+    ))
+  }
+
+  if (!is.null(x$lazy_ops)) x <- compute(x)
+  if (!is.null(y$lazy_ops)) y <- compute(y)
 
   left_key_idx <- match(join_spec$left, x$schema$names) - 1L
   right_key_idx <- match(join_spec$right, y$schema$names) - 1L
-  right_drop_idx <- get_right_drop_indices(y, join_spec, keep)
+  right_drop <- if (!isTRUE(keep)) join_spec$right else character(0)
+  right_drop_idx <- if (length(right_drop) > 0) {
+    match(right_drop, y$schema$names) - 1L
+  } else {
+    integer(0)
+  }
+
+  warn_if_join_too_large("left", x, y, join_spec, suffix, keep)
 
   new_ptr <- wrap_gpu_call(
     "left_join",
     gpu_left_join(x$ptr, y$ptr, left_key_idx, right_key_idx, right_drop_idx)
   )
-  new_schema <- build_join_schema(x, y, join_spec, suffix, keep)
+  new_schema <- build_join_schema(x$schema, y$schema, join_spec,
+                                  suffix = suffix, keep = keep)
 
   new_tbl_gpu(
     ptr = new_ptr,
     schema = new_schema,
-    groups = character()
+    lazy_ops = NULL,
+    groups = character(),
+    exec_mode = "eager"
   )
 }
 
-#' @rdname join
-#' @export
-#' @importFrom dplyr right_join
-right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
-                               suffix = c(".x", ".y"), keep = FALSE,
-                               na_matches = c("na", "never"), ...) {
-  na_matches <- match.arg(na_matches)
-  if (na_matches != "na") {
-    stop("`na_matches = \"never\"` is not supported yet for tbl_gpu joins.",
-         call. = FALSE)
-  }
-
-  if (!is_tbl_gpu(y)) {
-    if (copy) {
-      y <- tbl_gpu(y)
-    } else {
-      stop("y must be a tbl_gpu. Use `copy = TRUE` to convert automatically.",
-           call. = FALSE)
-    }
-  }
-
-  # Implement via swapped left_join
-  # Reverse the by specification
-  by_reversed <- by
-  if (is.character(by) && !is.null(names(by)) && any(names(by) != "")) {
-    by_reversed <- setNames(names(by), by)
-    empty <- names(by_reversed) == ""
-    by_reversed[empty] <- by[empty]
-  }
-
-  # Note: suffix is reversed because we're swapping x and y
-  out <- left_join(y, x, by = by_reversed, copy = FALSE,
-                   suffix = rev(suffix), keep = keep,
-                   na_matches = na_matches, ...)
-
-  # Reorder columns to match dplyr right_join output: x columns first, then y columns
-  # Must account for potential suffix modifications to column names
-  out_names <- out$schema$names
-  x_orig_names <- x$schema$names
-
-  # Find the actual output names for x columns (may have suffix applied)
-  x_names_in_output <- character(length(x_orig_names))
-  for (i in seq_along(x_orig_names)) {
-    nm <- x_orig_names[i]
-    if (nm %in% out_names) {
-      x_names_in_output[i] <- nm
-    } else if (paste0(nm, suffix[1]) %in% out_names) {
-      x_names_in_output[i] <- paste0(nm, suffix[1])
-    } else {
-      # Column was a join key that got dropped
-      x_names_in_output[i] <- NA_character_
-    }
-  }
-
-  x_cols_present <- x_names_in_output[!is.na(x_names_in_output)]
-  y_cols_in_output <- setdiff(out_names, x_cols_present)
-
-  desired_order <- c(x_cols_present, y_cols_in_output)
-  select(out, dplyr::all_of(desired_order))
-}
-
-#' @rdname join
-#' @export
-#' @importFrom dplyr inner_join
 inner_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
-                               suffix = c(".x", ".y"), keep = FALSE,
-                               na_matches = c("na", "never"), ...) {
-  na_matches <- match.arg(na_matches)
-  if (na_matches != "na") {
-    stop("`na_matches = \"never\"` is not supported yet for tbl_gpu joins.",
-         call. = FALSE)
-  }
-
+                               suffix = c(".x", ".y"), ..., keep = FALSE,
+                               na_matches = "na") {
   if (!is_tbl_gpu(y)) {
-    if (copy) {
+    if (isTRUE(copy)) {
       y <- tbl_gpu(y)
     } else {
-      stop("y must be a tbl_gpu. Use `copy = TRUE` to convert automatically.",
-           call. = FALSE)
+      stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
     }
+  }
+
+  if (!identical(na_matches, "na")) {
+    stop("`na_matches = \"never\"` is not supported yet for tbl_gpu joins.",
+         call. = FALSE)
   }
 
   join_spec <- parse_join_by(by, x, y)
-
-  if (is.null(by)) {
-    message("Joining with `by = join_by(",
-            paste(join_spec$left, collapse = ", "), ")`")
-  }
-
   validate_join_cols(join_spec$left, x, "Left")
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
-  warn_if_join_too_large("inner", x, y, join_spec, suffix, keep)
+
+  if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
+    left_ast <- if (!is.null(x$lazy_ops)) x$lazy_ops else ast_source(x$schema)
+    right_ast <- if (!is.null(y$lazy_ops)) y$lazy_ops else ast_source(y$schema)
+
+    left_ast <- set_ast_source_ptr(left_ast, x$ptr)
+    right_ast <- set_ast_source_ptr(right_ast, y$ptr)
+
+    join_ast <- ast_join("inner", left_ast, right_ast, join_spec,
+                         keep = keep, suffix = suffix, na_matches = na_matches)
+
+    left_schema <- infer_schema(left_ast)
+    right_schema <- infer_schema(right_ast)
+    new_schema <- build_join_schema(left_schema, right_schema, join_spec,
+                                    suffix = suffix, keep = keep)
+
+    return(new_tbl_gpu(
+      ptr = NULL,
+      schema = new_schema,
+      lazy_ops = join_ast,
+      groups = character(),
+      exec_mode = "lazy"
+    ))
+  }
+
+  if (!is.null(x$lazy_ops)) x <- compute(x)
+  if (!is.null(y$lazy_ops)) y <- compute(y)
 
   left_key_idx <- match(join_spec$left, x$schema$names) - 1L
   right_key_idx <- match(join_spec$right, y$schema$names) - 1L
-  right_drop_idx <- get_right_drop_indices(y, join_spec, keep)
+  right_drop <- if (!isTRUE(keep)) join_spec$right else character(0)
+  right_drop_idx <- if (length(right_drop) > 0) {
+    match(right_drop, y$schema$names) - 1L
+  } else {
+    integer(0)
+  }
+
+  warn_if_join_too_large("inner", x, y, join_spec, suffix, keep)
 
   new_ptr <- wrap_gpu_call(
     "inner_join",
     gpu_inner_join(x$ptr, y$ptr, left_key_idx, right_key_idx, right_drop_idx)
   )
-  new_schema <- build_join_schema(x, y, join_spec, suffix, keep)
+  new_schema <- build_join_schema(x$schema, y$schema, join_spec,
+                                  suffix = suffix, keep = keep)
 
   new_tbl_gpu(
     ptr = new_ptr,
     schema = new_schema,
-    groups = character()
+    lazy_ops = NULL,
+    groups = character(),
+    exec_mode = "eager"
   )
 }
 
-#' @rdname join
-#' @export
-#' @importFrom dplyr full_join
 full_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
-                              suffix = c(".x", ".y"), keep = FALSE,
-                              na_matches = c("na", "never"), ...) {
-  na_matches <- match.arg(na_matches)
-  if (na_matches != "na") {
+                              suffix = c(".x", ".y"), ..., keep = FALSE,
+                              na_matches = "na") {
+  if (!is_tbl_gpu(y)) {
+    if (isTRUE(copy)) {
+      y <- tbl_gpu(y)
+    } else {
+      stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
+    }
+  }
+
+  if (!identical(na_matches, "na")) {
     stop("`na_matches = \"never\"` is not supported yet for tbl_gpu joins.",
          call. = FALSE)
   }
 
-  if (!is_tbl_gpu(y)) {
-    if (copy) {
-      y <- tbl_gpu(y)
-    } else {
-      stop("y must be a tbl_gpu. Use `copy = TRUE` to convert automatically.",
-           call. = FALSE)
-    }
-  }
-
   join_spec <- parse_join_by(by, x, y)
-
-  if (is.null(by)) {
-    message("Joining with `by = join_by(",
-            paste(join_spec$left, collapse = ", "), ")`")
-  }
-
   validate_join_cols(join_spec$left, x, "Left")
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
-  warn_if_join_too_large("full", x, y, join_spec, suffix, keep)
+
+  if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
+    left_ast <- if (!is.null(x$lazy_ops)) x$lazy_ops else ast_source(x$schema)
+    right_ast <- if (!is.null(y$lazy_ops)) y$lazy_ops else ast_source(y$schema)
+
+    left_ast <- set_ast_source_ptr(left_ast, x$ptr)
+    right_ast <- set_ast_source_ptr(right_ast, y$ptr)
+
+    join_ast <- ast_join("full", left_ast, right_ast, join_spec,
+                         keep = keep, suffix = suffix, na_matches = na_matches)
+
+    left_schema <- infer_schema(left_ast)
+    right_schema <- infer_schema(right_ast)
+    new_schema <- build_join_schema(left_schema, right_schema, join_spec,
+                                    suffix = suffix, keep = keep)
+
+    return(new_tbl_gpu(
+      ptr = NULL,
+      schema = new_schema,
+      lazy_ops = join_ast,
+      groups = character(),
+      exec_mode = "lazy"
+    ))
+  }
+
+  if (!is.null(x$lazy_ops)) x <- compute(x)
+  if (!is.null(y$lazy_ops)) y <- compute(y)
 
   left_key_idx <- match(join_spec$left, x$schema$names) - 1L
   right_key_idx <- match(join_spec$right, y$schema$names) - 1L
-  right_drop_idx <- get_right_drop_indices(y, join_spec, keep)
+  right_drop <- if (!isTRUE(keep)) join_spec$right else character(0)
+  right_drop_idx <- if (length(right_drop) > 0) {
+    match(right_drop, y$schema$names) - 1L
+  } else {
+    integer(0)
+  }
+
+  warn_if_join_too_large("full", x, y, join_spec, suffix, keep)
 
   new_ptr <- wrap_gpu_call(
     "full_join",
     gpu_full_join(x$ptr, y$ptr, left_key_idx, right_key_idx, right_drop_idx)
   )
-  new_schema <- build_join_schema(x, y, join_spec, suffix, keep)
+  new_schema <- build_join_schema(x$schema, y$schema, join_spec,
+                                  suffix = suffix, keep = keep)
 
   new_tbl_gpu(
     ptr = new_ptr,
     schema = new_schema,
-    groups = character()
+    lazy_ops = NULL,
+    groups = character(),
+    exec_mode = "eager"
   )
+}
+
+right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
+                               suffix = c(".x", ".y"), ..., keep = FALSE,
+                               na_matches = "na") {
+  if (!is_tbl_gpu(y)) {
+    if (isTRUE(copy)) {
+      y <- tbl_gpu(y)
+    } else {
+      stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
+    }
+  }
+
+  if (!identical(na_matches, "na")) {
+    stop("`na_matches = \"never\"` is not supported yet for tbl_gpu joins.",
+         call. = FALSE)
+  }
+
+  join_spec <- parse_join_by(by, x, y)
+
+  # Swap for left_join implementation
+  by_swapped <- list(left = join_spec$right, right = join_spec$left)
+  out <- left_join(y, x, by = by_swapped, copy = copy,
+                   suffix = rev(suffix), keep = TRUE, na_matches = na_matches)
+
+  desired <- build_join_schema(x$schema, y$schema, join_spec,
+                               suffix = suffix, keep = keep)$names
+  current <- out$schema$names
+  idx <- match(desired, current)
+  if (any(is.na(idx))) {
+    stop("Right join column reordering failed. Missing columns: ",
+         paste(desired[is.na(idx)], collapse = ", "), call. = FALSE)
+  }
+
+  out <- dplyr::select(out, dplyr::all_of(desired))
+  out$schema$names <- desired
+  out
 }

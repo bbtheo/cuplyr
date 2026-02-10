@@ -13,7 +13,20 @@ This repo mixes R and C++ (Rcpp) for GPU-backed dplyr-like operations using libc
 - `pixi run load-dev`: tight inner loop for R changes or quick checks.
 - `pixi run install`: after C++ changes or when exports changed.
 - `pixi run dev`: when you suspect stale artifacts (clean + rebuild).
-- `pixi run test`: after feature changes; requires GPU.
+- `pixi run test`: always run after implementing a feature (requires GPU).
+
+## Core Data Structures
+- `tbl_gpu` is a list with `ptr` (externalptr), `schema` (`names` + `types`), `groups`, `exec_mode` (`"eager"`/`"lazy"`), and `lazy_ops` (AST node or `NULL`).
+
+## Type Mappings (R -> GPU)
+- logical -> `BOOL8`
+- integer -> `INT32`
+- double -> `FLOAT64`
+- character -> `STRING`
+- Date -> `TIMESTAMP_DAYS`
+- POSIXct -> `TIMESTAMP_MICROSECONDS`
+- factor -> `INT32` (codes only)
+- integer64 -> `FLOAT64` (precision loss > 2^53, warn)
 
 ## Current C++ Layout (split from transfer.cpp)
 - `src/transfer_io.cpp`: R <-> GPU conversion, collect/head/df_to_gpu.
@@ -42,11 +55,17 @@ This repo mixes R and C++ (Rcpp) for GPU-backed dplyr-like operations using libc
 - **INT64 precision**: `gpu_collect()` returns doubles; warn when values exceed 2^53.
 - **Memory growth**: each GPU op tends to allocate new tables. Replacement mutate paths are optimized, but GC still matters.
 - **Join memory warnings**: joins estimate output size and warn when close to available GPU memory; actual allocation can still fail.
+- **String columns**: Arrow-style storage (offsets + char data). When slicing, offsets and chars must be kept in
+- **Join ordering**: cuDF join outputs are unordered; we stable-sort join maps by left_map (then right_map) in `src/ops_join.cpp` to match dplyr.
+- **Join unmatched rows**: cuDF uses `JoinNoMatch` sentinel; gather treats negatives as wraparound. Current fix sanitizes join maps on CPU (replace with `nrows`) before gather and uses `out_of_bounds_policy::NULLIFY`.
+- **cuDF gather API**: this environment’s `cudf::gather` signature has no `negative_index_policy`.
+- **Join headers**: join APIs live under `cudf/join/join.hpp` in this env (not `cudf/join.hpp`).
 
 ## Debugging Local Build Failures
 - If a cudf header can’t be found, check `pixi` environment paths and `src/Makevars`.
 - Run `pixi run configure` after updating CUDA/cudf libs.
 - Use `rg --files -g '*bitmask*' $CONDA_PREFIX/include/cudf` to locate moved headers.
+- Join build errors: confirm `#include <cudf/join/join.hpp>` and avoid device-side Thrust unless compiling with nvcc.
 
 ## Adding New GPU Ops (local loop)
 1) Implement in appropriate `src/ops_*.cpp` file.
@@ -59,9 +78,38 @@ This repo mixes R and C++ (Rcpp) for GPU-backed dplyr-like operations using libc
 - Update collect/head conversion for new cudf types.
 - Add tests for round-trip behavior.
 
+## Joins (AST + optimizer notes)
+- Lazy joins build an `ast_join` with two inputs; source pointers are attached via `set_ast_source_ptr()` before lowering.
+- `infer_schema.ast_join` uses `build_join_schema()` in `R/join.R`.
+- Filter pushdown across joins:
+  - Inner: left-only -> left, right-only -> right.
+  - Left: only left-only pushed.
+  - Right: only right-only pushed.
+  - Full: no side-only pushdown.
+- Projection/dead-column pruning across joins uses `build_join_output_info()` to map output columns back to left/right sources.
+- Right join is implemented via swapped left join + column reorder; ensure desired column names exist before `gpu_select`.
+
 ## Code Review Quick Checklist (saves time)
 - **Type alignment:** `R/utils.R` and `src/transfer_io.cpp` must agree on type mapping.
 - **Head/collect parity:** If a type is supported in `gpu_collect()`, ensure `gpu_head()` uses the same conversion path.
 - **Arrange semantics:** Confirm stable sort support in libcudf, NA ordering, and group-prepend behavior in `R/arrange.R`.
 - **Rcpp exports:** If new C++ functions exist, verify `R/RcppExports.R` and `src/RcppExports.cpp` are updated.
 - **Tests:** New verb features should have matching `tests/testthat/test-*.R` coverage and use `skip_if_no_gpu()`.
+- **Joins:** Verify left-table order, right-key dropping (`keep = FALSE` drops right keys even when names differ), and join pushdown rules.
+
+## Bugfix Workflow
+- **Test-first (STRICT):** When a bug is reported, always add a failing test that reproduces it *before* implementing the fix. If the test passes unexpectedly, revert the fix, confirm failure, then re-apply.
+
+## Recent Session Notes
+- **Exec mode field:** `tbl_gpu` now includes `exec_mode`; tests/structure checks must allow it (see helper updates).
+- **Exec mode propagation:** constructors created by verbs now explicitly carry forward `.data$exec_mode` (to avoid option/env-driven mode drift).
+- **`lazy_ops` invariant:** no pending work should be `NULL` (not `list()`). Legacy empty-list values are normalized to `NULL` in `new_tbl_gpu()` and `compute()`.
+- **`lazy_ops` validation:** non-empty invalid `lazy_ops` objects now fail fast with a clear error in compute/optimizer paths.
+- **Bind generic fallback:** `bind_rows.default` / `bind_cols.default` now delegate to dplyr for non-`tbl_gpu` inputs; `tbl_gpu` methods remain GPU-backed.
+- **Lazy vs eager tests:** Added cross-mode comparisons using `tibble::as_tibble()` to avoid rownames/class mismatches.
+- **Filter parsing:** Boolean literal fast-path avoids `eval_tidy` without a data mask to prevent name-collision bugs.
+- **Mutate parsing:** Supports left-associative `+`/`-` chains (e.g., `a + b + c`) by lowering to sequential ops.
+- **Optimizer barriers:** Barrier reattachment uses a helper to avoid R copy-on-modify pitfalls.
+- **Benchmarking:** `benchmark/benchmark_memory.R` compares lazy vs eager memory/time using synthetic taxi data.
+- **Filter pushdown benchmark:** `benchmark/benchmark_filter_pushdown.R` compares auto vs manual filter placement and reports GPU memory deltas.
+- **Join tests:** `tests/testthat/test-join.R` includes eager/lazy joins, multi-key, renamed keys, and edge-case comparisons vs base dplyr.

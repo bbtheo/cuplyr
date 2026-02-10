@@ -53,25 +53,63 @@
 #'     collect()
 #' }
 select.tbl_gpu <- function(.data, ...) {
+  # Get current schema (from AST or base)
+  current_schema <- if (!is.null(.data$lazy_ops) && .data$exec_mode == "lazy") {
+    infer_schema(.data$lazy_ops)
+  } else {
+    .data$schema
+  }
+
   # tidyselect needs a named vector
-  name_vec <- setNames(.data$schema$names, .data$schema$names)
+  name_vec <- setNames(current_schema$names, current_schema$names)
   vars <- tidyselect::eval_select(rlang::expr(c(...)), name_vec)
 
   if (length(vars) == 0) {
     stop("select() resulted in no columns.", call. = FALSE)
   }
 
+  selected_cols <- current_schema$names[vars]
+
+  # Lazy path: build AST instead of executing
+  if (.data$exec_mode == "lazy") {
+    return(select_lazy(.data, selected_cols, current_schema, vars))
+  }
+
+  # Eager path: execute immediately
   indices <- as.integer(vars) - 1L
   new_ptr <- wrap_gpu_call("select", gpu_select(.data$ptr, indices))
 
   new_schema <- list(
-    names = .data$schema$names[vars],
-    types = .data$schema$types[vars]
+    names = current_schema$names[vars],
+    types = current_schema$types[vars]
   )
 
   new_tbl_gpu(
     ptr = new_ptr,
     schema = new_schema,
-    groups = intersect(.data$groups, new_schema$names)
+    groups = intersect(.data$groups, new_schema$names),
+    exec_mode = .data$exec_mode
   )
+}
+
+# Lazy select: build AST node
+select_lazy <- function(.data, selected_cols, current_schema, vars) {
+  # Initialize AST if needed
+  if (is.null(.data$lazy_ops)) {
+    .data$lazy_ops <- ast_source(.data$schema)
+  }
+
+  # Add select node
+  .data$lazy_ops <- ast_select(.data$lazy_ops, selected_cols)
+
+  # Update schema
+  .data$schema <- list(
+    names = current_schema$names[vars],
+    types = current_schema$types[vars]
+  )
+
+  # Update groups (remove any that are no longer selected)
+  .data$groups <- intersect(.data$groups, selected_cols)
+
+  .data
 }

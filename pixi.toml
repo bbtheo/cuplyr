@@ -18,7 +18,7 @@ cuda-nvcc = ">=12.0,<13"
 [tasks]
 configure = { cmd = "./configure", description = "Detect paths, generate Makevars" }
 install = { cmd = "R CMD INSTALL .", description = "Install R package" }
-test = { cmd = "R -e 'testthat::test_package(\"cuplyr\")'", description = "Run tests" }
+test = { cmd = "R -e 'devtools::test(reporter = \"summary\")'", description = "Run tests" }
 check = { cmd = "R CMD check --no-manual .", description = "R CMD check" }
 clean = { cmd = "rm -f src/*.o src/*.so src/Makevars 2>/dev/null || true", description = "Clean artifacts" }
 dev = { cmd = "./configure && R CMD INSTALL .", depends-on = ["clean"], description = "Clean rebuild" }

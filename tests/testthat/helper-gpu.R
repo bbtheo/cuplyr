@@ -233,8 +233,8 @@ verify_no_r_copy <- function(x) {
     return(FALSE)
   }
 
-  # Check the structure - should only have ptr, schema, lazy_ops, groups
-  expected_fields <- c("ptr", "schema", "lazy_ops", "groups")
+  # Check the structure - should only have ptr, schema, lazy_ops, groups, exec_mode
+  expected_fields <- c("ptr", "schema", "lazy_ops", "groups", "exec_mode")
   actual_fields <- names(unclass(x))
 
   # Verify no extra fields that might contain data
@@ -332,6 +332,25 @@ create_test_data <- function(nrow = 100, include_na = FALSE) {
   df
 }
 
+# =============================================================================
+# Exec Mode Helpers
+# =============================================================================
+
+#' Run a function in both eager and lazy execution modes
+#'
+#' @param data Data frame to load to GPU
+#' @param fn Function that receives (tbl, mode) and returns a result
+#' @return Named list with results for "eager" and "lazy"
+with_exec_modes <- function(data, fn) {
+  results <- list()
+  for (mode in c("eager", "lazy")) {
+    tbl <- tbl_gpu(data, lazy = identical(mode, "lazy"))
+    results[[mode]] <- fn(tbl, mode)
+  }
+  results
+}
+
+
 #' Create a large test data frame for memory testing
 #'
 #' @param nrow Number of rows (default 1 million)
@@ -426,14 +445,14 @@ expect_valid_tbl_gpu <- function(x) {
 
   # Use unclass to get actual list elements (names.tbl_gpu returns column names)
   list_names <- names(unclass(x))
-  expect_true(all(c("ptr", "schema", "lazy_ops", "groups") %in% list_names))
+  expect_true(all(c("ptr", "schema", "lazy_ops", "groups", "exec_mode") %in% list_names))
 
   expect_true(inherits(x$ptr, "externalptr"))
   expect_true(is.list(x$schema))
   expect_true(all(c("names", "types") %in% names(x$schema)))
   expect_type(x$schema$names, "character")
   expect_type(x$schema$types, "character")
-  expect_type(x$lazy_ops, "list")
+  expect_true(is.null(x$lazy_ops) || is.list(x$lazy_ops))
   expect_type(x$groups, "character")
 
   invisible(x)

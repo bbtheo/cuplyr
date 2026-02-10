@@ -76,7 +76,8 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE, .drop = TRUE) {
     ptr = .data$ptr,
     schema = .data$schema,
     lazy_ops = .data$lazy_ops,
-    groups = new_groups
+    groups = new_groups,
+    exec_mode = .data$exec_mode
   )
 }
 
@@ -111,7 +112,8 @@ ungroup.tbl_gpu <- function(x, ...) {
     ptr = x$ptr,
     schema = x$schema,
     lazy_ops = x$lazy_ops,
-    groups = character()
+    groups = character(),
+    exec_mode = x$exec_mode
   )
 }
 

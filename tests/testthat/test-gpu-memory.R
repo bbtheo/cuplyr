@@ -82,8 +82,10 @@ test_that("tbl_gpu stores only external pointer, not data", {
   expect_equal(length(gpu_df$schema$types), 5)
 
   # No other large data structures
-  expect_type(gpu_df$lazy_ops, "list")
-  expect_length(gpu_df$lazy_ops, 0)
+  expect_true(is.null(gpu_df$lazy_ops) || is.list(gpu_df$lazy_ops))
+  if (is.list(gpu_df$lazy_ops)) {
+    expect_length(gpu_df$lazy_ops, 0)
+  }
   expect_type(gpu_df$groups, "character")
 })
 

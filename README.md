@@ -2,35 +2,36 @@
 
 #### dplyr backend for GPU acceleration via RAPIDS cuDF
 
-cuplyr implements a dplyr backend powered by [RAPIDS cuDF](https://github.com/rapidsai/cudf), NVIDIA's GPU DataFrame library. It allows users to write standard dplyr code while executing operations on GPU hardware.
+cuplyr implements a dplyr backend powered by [RAPIDS cuDF](https://github.com/rapidsai/cudf), NVIDIA's GPU DataFrame library. Write standard dplyr code, execute on GPU hardware.
 
 ```r
 library(cuplyr)
 
-tbl_gpu(sales_data) |>
+tbl_gpu(sales_data, lazy = TRUE) |>
   filter(year >= 2020, amount > 0) |>
   mutate(revenue = amount * price) |>
   group_by(region, quarter) |>
   summarise(total = sum(revenue)) |>
+  inner_join(regions, by = "region") |>
   arrange(desc(total)) |>
   collect()
 ```
 
 ## About
 
-cuplyr translates dplyr operations into cuDF execution on NVIDIA GPUs. It follows the same backend pattern as dbplyr: write standard R code, execute on GPU hardware. This approach can provide significant speedups on larger datasets (typically >10M rows) without requiring major code changes.
+cuplyr translates dplyr operations into cuDF execution on NVIDIA GPUs. It follows the same backend pattern as dbplyr: write standard R code, execute on GPU hardware. This approach can provide significant speedups on larger datasets (typically >1M rows) without requiring major code changes.
 
 **Built on [RAPIDS cuDF](https://rapids.ai/)**: cuDF is an open-source GPU DataFrame library developed by NVIDIA's RAPIDS team. It provides optimized CUDA kernels for data manipulation operations, backed by Apache Arrow's columnar memory format. cuplyr provides an R interface to this execution engine.
 
-
 ## Status
 
-**v0.0.1 – Early development**
+**v0.1.0**
 
 This is experimental software under active development. Breaking changes should be expected.
 
 ### Supported operations
 
+**Data manipulation**
 - `filter()` – row filtering with comparison and logical operators
 - `select()` – column selection and reordering
 - `mutate()` – column transformations and arithmetic
@@ -38,196 +39,99 @@ This is experimental software under active development. Breaking changes should 
 - `group_by()` + `summarise()` – grouped aggregations (`sum`, `mean`, `min`, `max`, `n`)
 - `left_join()`, `right_join()`, `inner_join()`, `full_join()` – GPU joins on key columns
 - `collect()` – transfer results back to R
+- `compute()` – execute lazy operations, keep on GPU
+- `tbl_gpu(..., lazy = TRUE)` – enable lazy evaluation with AST optimization
+
+### Lazy evaluation
+
+Lazy mode defers execution until `collect()` or `compute()`, enabling automatic optimizations:
+- Projection pruning (drop unused columns early)
+- Filter pushdown (move filters closer to data sources)
+- Mutate fusion (combine consecutive transformations)
+
+```r
+# Enable globally
+options(cuplyr.exec_mode = "lazy")
+
+# Or per-table
+tbl_gpu(data, lazy = TRUE)
+```
 
 ### Supported column types
 
-- `numeric` (double) -> FLOAT64
-- `integer` -> INT32
-- `character` -> STRING
-- `logical` -> BOOL8
-- `Date` -> TIMESTAMP_DAYS
-- `POSIXct` -> TIMESTAMP_MICROSECONDS
-- `factor` -> DICTIONARY32
+| R Type | GPU Type |
+|--------|----------|
+| numeric (double) | FLOAT64 |
+| integer | INT32 |
+| character | STRING |
+| logical | BOOL8 |
+| Date | TIMESTAMP_DAYS |
+| POSIXct | TIMESTAMP_MICROSECONDS |
+| factor | INT32 (codes) |
 
 ### Not yet implemented
 
 - Complex joins with `join_by()`
-- Expression optimization and lazy evaluation
-- Window functions, string operations
-- Multi-GPU support, out-of-core computation
+- Window functions
+- String operations
+- Multi-GPU support
 
 Contributions and feedback are welcome.
 
 ## Architecture
 
 - **R layer**: S3 methods implementing dplyr generics
-- **Expression parser**: R quosures to internal AST
-- **Query optimizer**: Operation fusion and predicate pushdown
+- **AST optimizer**: Projection pruning, filter pushdown, operation fusion
 - **Native bindings**: Rcpp interface to libcudf C++ API
 - **Execution**: cuDF GPU kernels via libcudf
-- **Memory**: Arrow C Data Interface for zero-copy transfer
-
-See `DEVELOPER_GUIDE.md` for implementation details.
-
-## Requirements
-
-- **GPU**: NVIDIA with Compute Capability 6.0+ (Pascal generation, 2016 or newer)
-- **Driver**: NVIDIA driver 525.60.13 or newer
-- **CUDA**: 12.0 or newer
-- **OS**: Linux x86_64 (native), Windows/macOS (via Docker)
-- **R**: 4.3.0 or newer
-- **RAPIDS**: libcudf 25.12 or newer
-
-> **Note**: cuplyr requires an NVIDIA GPU with CUDA support. AMD and Intel GPUs are not supported. Windows and macOS users can run cuplyr via Docker containers.
+- **Memory**: GPU-resident data with automatic cleanup via R garbage collection
 
 ## Installation
 
-### Quick Start (Docker)
+### Requirements
 
-The fastest way to try cuplyr on any platform with an NVIDIA GPU:
+- NVIDIA GPU with Compute Capability >= 6.0
+- CUDA Toolkit >= 12.0
+- RAPIDS libcudf >= 25.12
+- R >= 4.3
 
-```bash
-# Pull RAPIDS base image and start container
-docker run --gpus all -it rapidsai/base:25.12-cuda12-py3.11 bash
-
-# Inside the container, install R and dependencies
-apt-get update && apt-get install -y r-base r-base-dev
-
-# Install R package dependencies
-R -e 'install.packages(c("Rcpp", "dplyr", "rlang", "vctrs", "pillar", "glue", "cli", "tidyselect", "tibble"))'
-
-# Install cuplyr from GitHub
-R -e 'install.packages("remotes"); remotes::install_github("bbtheo/cuplyr")'
-```
-
-### Linux: Native Installation
-
-#### Option 1: Pixi (Recommended)
-
-[Pixi](https://pixi.sh) manages all CUDA and RAPIDS dependencies automatically:
+### Using pixi (recommended)
 
 ```bash
-# Install pixi
-curl -fsSL https://pixi.sh/install.sh | bash
+# Install pixi if not already installed (https://pixi.sh)
+# curl -fsSL https://pixi.sh/install.sh | bash
 
-# Clone and enter the repository
 git clone https://github.com/bbtheo/cuplyr.git
 cd cuplyr
-
-# Configure and install (handles all dependencies)
-pixi run configure
 pixi run install
-
-# Verify installation
-pixi run r -e 'library(cuplyr); gpu_info()'
 ```
 
-#### Option 2: Conda
-
-For users with an existing conda environment:
+### From source
 
 ```bash
-# Create environment with RAPIDS
-conda create -n cuplyr-env -c rapidsai -c conda-forge -c nvidia \
-  libcudf=25.12 librmm=25.12 cuda-toolkit=12.8 r-base=4.3
-
-conda activate cuplyr-env
-
-# Set environment variables
-export CUDA_HOME=$CONDA_PREFIX
-export CUDF_HOME=$CONDA_PREFIX
-
-# Clone and install
 git clone https://github.com/bbtheo/cuplyr.git
 cd cuplyr
-./configure
+
+# Ensure CUDA and cuDF are available, then:
 R CMD INSTALL .
 ```
 
-### Windows & macOS: Docker
+## Performance
 
-cuplyr requires NVIDIA CUDA, which is only natively available on Linux. Windows and macOS users should use Docker:
+Benchmarks on 50 million rows (synthetic taxi data):
 
-**Windows**: Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) with WSL2 backend and enable GPU support in settings.
+| Operation | dplyr | data.table | cuplyr | vs dplyr | vs data.table |
+|-----------|-------|------------|--------|----------|---------------|
+| Group & Summarise | 625 ms | 389 ms | 35 ms | **18x** | **11x** |
+| Filter | 930 ms | 962 ms | 247 ms | **4x** | **4x** |
+| Complete Workflow | 2529 ms | 1158 ms | 42 ms | **60x** | **28x** |
 
-**macOS**: Docker GPU passthrough is limited. Consider using a cloud GPU instance (see below).
+*Complete workflow: filter + mutate + group_by + summarise*
 
-Once Docker is configured, follow the Quick Start instructions above.
+**Hardware**: Intel Core i9-12900K (16 cores), NVIDIA RTX 5070 (12 GB VRAM)
 
-### Cloud Platforms
+GPU acceleration benefits grow with data size. For datasets under 1M rows, CPU-based solutions may be faster due to GPU transfer overhead.
 
-cuplyr works on any cloud platform with NVIDIA GPUs:
-
-- **AWS**: Use P3/P4 instances with the RAPIDS AMI
-- **GCP**: Use A2/G2 instances with Deep Learning VM
-- **Google Colab**: Free GPU access (limited memory)
-
-See the [RAPIDS installation guide](https://docs.rapids.ai/install) for cloud-specific instructions.
-
-## Verifying Installation
-
-After installation, verify cuplyr is working:
-
-```r
-library(cuplyr)
-
-# Check GPU detection
-gpu_info()
-
-# Test basic operations
-tbl_gpu(mtcars) |>
-  filter(mpg > 20) |>
-  select(mpg, cyl, hp) |>
-  collect()
-```
-
-## Troubleshooting
-
-### Driver & GPU Issues
-
-| Problem | Diagnosis | Solution |
-|---------|-----------|----------|
-| "No GPU detected" | `nvidia-smi` fails | Install/update NVIDIA driver (525+) |
-| "CUDA version mismatch" | Driver too old for CUDA 12 | Update driver to 525.60.13 or newer |
-| "Insufficient compute capability" | GPU too old | Need Pascal+ GPU (GTX 1000 series, 2016+) |
-
-### Build & Configuration Issues
-
-| Problem | Diagnosis | Solution |
-|---------|-----------|----------|
-| "CUDA not found" | `echo $CUDA_HOME` empty | `export CUDA_HOME=/usr/local/cuda` |
-| "cudf/types.hpp not found" | libcudf missing | Install via conda/pixi or set `CUDF_HOME` |
-| "configure script fails" | Missing RAPIDS libs | Ensure rmm, kvikio in same prefix as cudf |
-| "undefined reference to cudf::" | Link error | Verify `CUDF_LIB` path in Makevars |
-| "C++20 required" | Old compiler | Need GCC 11+ with C++20 support |
-
-### Runtime Issues
-
-| Problem | Diagnosis | Solution |
-|---------|-----------|----------|
-| "libcudf.so not found" | Library path issue | Check `LD_LIBRARY_PATH` includes cudf lib dir |
-| "CUDA out of memory" | GPU memory full | Use smaller data, call `gc()`, check `gpu_memory_state()` |
-| "illegal memory access" | CUDA kernel crash | Often driver/toolkit mismatch; reinstall CUDA |
-
-### Diagnostic Commands
-
-```bash
-# Check GPU and driver
-nvidia-smi
-
-# Check CUDA version
-nvcc --version
-
-# Check library linking
-ldd $(R RHOME)/library/cuplyr/libs/cuplyr.so | grep cudf
-```
-
-```r
-# Inside R
-library(cuplyr)
-gpu_info()
-gpu_memory_state()
-```
 
 ## Acknowledgments
 
