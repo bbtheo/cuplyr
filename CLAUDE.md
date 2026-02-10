@@ -41,27 +41,38 @@ list(
 | `src/ops_common.hpp` | `get_compare_op()`, `get_binary_op()` |
 | `src/transfer_io.cpp` | `df_to_gpu()`, `gpu_collect()`, `gpu_head()`, `gpu_dim()` |
 | `src/ops_filter.cpp` | `gpu_filter_scalar()`, `gpu_filter_col()`, `gpu_filter_mask()` |
+| `src/ops_filter_fused.cpp` | `gpu_filter_fused()` for multi-predicate AND masks |
 | `src/ops_mutate.cpp` | `gpu_mutate_binary_*()`, `gpu_copy_column*()` |
+| `src/ops_mutate_batch.cpp` | `gpu_mutate_batch()` for fused mutate expressions |
 | `src/ops_select.cpp` | `gpu_select()` |
 | `src/ops_groupby.cpp` | `gpu_summarise()` |
 | `src/ops_arrange.cpp` | `gpu_arrange()` |
 | `src/ops_compare.cpp` | comparison ops for summarise temp columns |
 | `src/ops_join.cpp` | join logic with stable-sort for dplyr ordering |
+| `src/ops_bind.cpp` | `gpu_bind_rows_aligned()`, `gpu_bind_cols_impl()` |
 | `src/gpu_info.cpp` | device availability/info |
 
 ### R Files
 | File | Purpose |
 |------|---------|
-| `R/tbl-gpu.R` | `tbl_gpu()`, `new_tbl_gpu()`, `is_tbl_gpu()` |
+| `R/tbl-gpu.R` | `tbl_gpu()`, `new_tbl_gpu()`, `is_tbl_gpu()`, `resolve_exec_mode()` |
 | `R/utils.R` | `gpu_type_from_r()`, `col_index()` |
 | `R/filter.R` | filter verb with boolean literal fast-path |
 | `R/mutate.R` | mutate verb with left-associative chain support |
 | `R/select.R` | select verb |
 | `R/arrange.R` | arrange verb |
+| `R/group-by.R` | `group_by()`, `ungroup()`, `group_vars()` |
 | `R/summarise.R` | summarise/groupby verb |
 | `R/join.R` | join verbs, `build_join_schema()`, `build_join_output_info()` |
+| `R/bind.R` | `bind_rows()`, `bind_cols()` with schema unification |
 | `R/collect.R` | pulls data to R, warns on INT64 precision loss |
+| `R/compute.R` | `compute()`, `collapse()`, `as_lazy()`, `as_eager()`, `show_query()` |
+| `R/ast.R` | AST node constructors (`ast_source`, `ast_filter`, etc.) |
+| `R/optimizer.R` | AST optimization passes (projection, filter pushdown, fusion) |
+| `R/lower.R` | `lower_and_execute()` AST to GPU execution |
 | `R/gpu-memory.R` | memory reporting and GC helpers |
+| `R/gpu.R` | `has_gpu()`, `gpu_details()` |
+| `R/print.R` | `print.tbl_gpu()` method |
 
 ### Benchmark Files
 | File | Purpose |
@@ -193,17 +204,34 @@ test_that("<verb>() basic case works", {
 - `collect()` triggers AST lowering and execution
 
 ### Optimizer Passes
-The optimizer transforms the AST before execution:
+The optimizer transforms the AST before execution. Pass order matters:
 
-**Filter Pushdown**: Moves filters closer to data sources
-- Inner join: left-only predicates -> left, right-only -> right
-- Left join: only left-only predicates pushed
-- Right join: only right-only predicates pushed
-- Full join: no side-only pushdown allowed
+1. **Projection Pruning** (`push_down_projections`): Inserts `select` nodes to drop unused columns early
+   - `build_join_output_info()` maps output columns back to left/right sources
+   - Dead columns are dropped before expensive operations
 
-**Projection Pruning**: Removes unused columns early
-- `build_join_output_info()` maps output columns back to left/right sources
-- Dead columns are dropped before expensive operations
+2. **Mutate Fusion** (`fuse_mutates`): Combines consecutive mutate nodes
+   - Guards: max 8 expressions, max 4 intermediates, max 3 reuses
+   - Uses topological sort for dependent expressions
+
+3. **Dead Column Pruning** (`prune_dead_columns`): Removes unused mutate outputs
+   - Walks root to leaves tracking required columns
+   - Empty mutate nodes are eliminated
+
+4. **Filter Pushdown** (`push_down_filters`): Moves filters closer to data sources
+   - Pushes across mutate when predicates don't depend on outputs
+   - Join pushdown rules:
+     - Inner join: left-only predicates -> left, right-only -> right
+     - Left join: only left-only predicates pushed
+     - Right join: only right-only predicates pushed
+     - Full join: no side-only pushdown allowed
+
+5. **Filter Reordering** (`reorder_filters`): Executes cheaper filters first
+   - Collects consecutive filter chains
+   - Sorts by `estimated_cost` field
+
+6. **Filter Fusion** (`fuse_filters`): Marks filters for single-kernel AND-mask
+   - Max 4 simple predicates for fusion
 
 ### Join-Specific Notes
 - Lazy joins build `ast_join` with two inputs
@@ -309,6 +337,13 @@ String columns use offset-based storage (Apache Arrow format):
 ### Mutate Parsing
 - Supports left-associative `+`/`-` chains (e.g., `a + b + c`) by lowering to sequential ops
 
+### Bind Operations
+- `bind_rows()` computes unified schema via `compute_unified_schema()`
+- Type promotion hierarchy: BOOL8 < INT32 < INT64 < FLOAT64; STRING is widest
+- Missing columns filled with nulls via `gpu_make_null_column()`
+- `bind_cols()` uses `vctrs::vec_as_names()` for name repair when available
+- Both operations materialize lazy tables before binding
+
 ## Debugging Build Failures
 
 - If a cudf header can't be found, check pixi environment paths and `src/Makevars`
@@ -365,6 +400,7 @@ Before merging, verify:
 - [ ] **Rcpp exports**: If new C++ functions exist, `R/RcppExports.R` and `src/RcppExports.cpp` are updated
 - [ ] **Tests**: New features have matching `tests/testthat/test-*.R` coverage with `skip_if_no_gpu()`
 - [ ] **Joins**: Left-table order preserved, right-key dropping correct, pushdown rules followed
+- [ ] **Binds**: Type promotion correct, null columns for missing, lazy tables materialized
 
 ## Development Mandates
 
@@ -384,3 +420,4 @@ Before merging, verify:
 | Null handling | `<cudf/null_mask.hpp>` | `bitmask_allocation_size_bytes` |
 | Scalars | `<cudf/scalar/scalar.hpp>`, `<cudf/scalar/scalar_factories.hpp>` | `make_numeric_scalar` |
 | Joins | `<cudf/join/join.hpp>` | `inner_join`, `left_join`, `full_join` |
+| Concatenation | `<cudf/concatenate.hpp>` | `concatenate` (for bind_rows/bind_cols) |

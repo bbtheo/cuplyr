@@ -16,7 +16,7 @@ This repo mixes R and C++ (Rcpp) for GPU-backed dplyr-like operations using libc
 - `pixi run test`: always run after implementing a feature (requires GPU).
 
 ## Core Data Structures
-- `tbl_gpu` is a list with `ptr` (externalptr), `schema` (`names` + `types`), `groups`, and optional `lazy_ops`.
+- `tbl_gpu` is a list with `ptr` (externalptr), `schema` (`names` + `types`), `groups`, `exec_mode` (`"eager"`/`"lazy"`), and `lazy_ops` (AST node or `NULL`).
 
 ## Type Mappings (R -> GPU)
 - logical -> `BOOL8`
@@ -100,6 +100,10 @@ This repo mixes R and C++ (Rcpp) for GPU-backed dplyr-like operations using libc
 
 ## Recent Session Notes
 - **Exec mode field:** `tbl_gpu` now includes `exec_mode`; tests/structure checks must allow it (see helper updates).
+- **Exec mode propagation:** constructors created by verbs now explicitly carry forward `.data$exec_mode` (to avoid option/env-driven mode drift).
+- **`lazy_ops` invariant:** no pending work should be `NULL` (not `list()`). Legacy empty-list values are normalized to `NULL` in `new_tbl_gpu()` and `compute()`.
+- **`lazy_ops` validation:** non-empty invalid `lazy_ops` objects now fail fast with a clear error in compute/optimizer paths.
+- **Bind generic fallback:** `bind_rows.default` / `bind_cols.default` now delegate to dplyr for non-`tbl_gpu` inputs; `tbl_gpu` methods remain GPU-backed.
 - **Lazy vs eager tests:** Added cross-mode comparisons using `tibble::as_tibble()` to avoid rownames/class mismatches.
 - **Filter parsing:** Boolean literal fast-path avoids `eval_tidy` without a data mask to prevent name-collision bugs.
 - **Mutate parsing:** Supports left-associative `+`/`-` chains (e.g., `a + b + c`) by lowering to sequential ops.
