@@ -45,6 +45,7 @@ This repo mixes R and C++ (Rcpp) for GPU-backed dplyr-like operations using libc
 - `R/mutate.R`, `R/filter.R`, `R/select.R`, `R/arrange.R`, `R/summarise.R`: dplyr verbs.
 - `R/collect.R`: pulls data back to R and warns on INT64 precision.
 - `R/gpu-memory.R`: memory reporting and GC helpers.
+- `R/utils.R`: shared helpers (type mapping, `wrap_gpu_call()` for clearer GPU errors).
 
 ## Known Sharp Edges (things that were hard)
 - **cudf header names differ by version.** `bitmask_allocation_size_bytes` lives in `cudf/null_mask.hpp` in this environment. Avoid `cudf/bitmask.hpp`.
@@ -54,7 +55,7 @@ This repo mixes R and C++ (Rcpp) for GPU-backed dplyr-like operations using libc
 - **INT64 precision**: `gpu_collect()` returns doubles; warn when values exceed 2^53.
 - **Memory growth**: each GPU op tends to allocate new tables. Replacement mutate paths are optimized, but GC still matters.
 - **Join memory warnings**: joins estimate output size and warn when close to available GPU memory; actual allocation can still fail.
-- **String columns**: Arrow-style storage (offsets + char data). When slicing, offsets and chars must be kept in sync.
+- **String columns**: Arrow-style storage (offsets + char data). When slicing, offsets and chars must be kept in
 - **Join ordering**: cuDF join outputs are unordered; we stable-sort join maps by left_map (then right_map) in `src/ops_join.cpp` to match dplyr.
 - **Join unmatched rows**: cuDF uses `JoinNoMatch` sentinel; gather treats negatives as wraparound. Current fix sanitizes join maps on CPU (replace with `nrows`) before gather and uses `out_of_bounds_policy::NULLIFY`.
 - **cuDF gather API**: this environment’s `cudf::gather` signature has no `negative_index_policy`.
