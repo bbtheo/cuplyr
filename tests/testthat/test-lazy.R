@@ -28,6 +28,63 @@ test_that("resolve_exec_mode uses option when explicit is NULL", {
   expect_equal(resolve_exec_mode(NULL), "eager")
 })
 
+test_that("grouping metadata verbs preserve exec_mode", {
+  old_opt <- getOption("cuplyr.exec_mode")
+  on.exit(options(cuplyr.exec_mode = old_opt))
+  options(cuplyr.exec_mode = "lazy")
+
+  tbl <- new_tbl_gpu(
+    ptr = NULL,
+    schema = list(names = "a", types = "INT32"),
+    lazy_ops = NULL,
+    groups = character(),
+    exec_mode = "eager"
+  )
+
+  grouped <- group_by(tbl, a)
+  expect_identical(grouped$exec_mode, "eager")
+
+  ungrouped <- ungroup(grouped)
+  expect_identical(ungrouped$exec_mode, "eager")
+})
+
+test_that("has_pending_ops treats empty list lazy_ops as no pending ops", {
+  tbl <- new_tbl_gpu(
+    ptr = NULL,
+    schema = list(names = "a", types = "INT32"),
+    lazy_ops = list(),
+    groups = character(),
+    exec_mode = "eager"
+  )
+
+  expect_false(has_pending_ops(tbl))
+})
+
+test_that("compute accepts legacy empty-list lazy_ops", {
+  tbl <- new_tbl_gpu(
+    ptr = NULL,
+    schema = list(names = "a", types = "INT32"),
+    lazy_ops = list(),
+    groups = character(),
+    exec_mode = "lazy"
+  )
+
+  out <- compute(tbl)
+  expect_null(out$lazy_ops)
+})
+
+test_that("compute validates non-empty invalid lazy_ops shape", {
+  tbl <- new_tbl_gpu(
+    ptr = NULL,
+    schema = list(names = "a", types = "INT32"),
+    lazy_ops = list(invalid = TRUE),
+    groups = character(),
+    exec_mode = "lazy"
+  )
+
+  expect_error(compute(tbl), "lazy_ops.*AST|Invalid lazy_ops")
+})
+
 test_that("tbl_gpu respects lazy parameter", {
   skip_if_no_gpu()
 

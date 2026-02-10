@@ -54,7 +54,7 @@
 #' }
 collect.tbl_gpu <- function(x, ...) {
   # Handle lazy evaluation: compute first if there are pending ops
-  if (is_tbl_gpu(x) && identical(x$exec_mode, "lazy") && !is.null(x$lazy_ops)) {
+  if (is_tbl_gpu(x) && identical(x$exec_mode, "lazy") && has_pending_ops(x)) {
     x <- compute(x)
   }
 

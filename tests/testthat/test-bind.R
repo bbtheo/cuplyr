@@ -7,6 +7,36 @@ test_that("bind_rows and bind_cols register S3 methods for tbl_gpu", {
   expect_true(is.function(getS3method("bind_cols", "tbl_gpu", optional = TRUE)))
 })
 
+test_that("bind_rows delegates to dplyr for non-tbl_gpu inputs", {
+  df1 <- data.frame(x = 1:2, y = c("a", "b"))
+  df2 <- data.frame(x = 3:4, y = c("c", "d"))
+
+  expect_equal(
+    bind_rows(df1, df2),
+    dplyr::bind_rows(df1, df2)
+  )
+
+  expect_equal(
+    bind_rows(list(df1, df2)),
+    dplyr::bind_rows(list(df1, df2))
+  )
+})
+
+test_that("bind_cols delegates to dplyr for non-tbl_gpu inputs", {
+  df1 <- data.frame(x = 1:2)
+  df2 <- data.frame(y = c("a", "b"))
+
+  expect_equal(
+    bind_cols(df1, df2),
+    dplyr::bind_cols(df1, df2)
+  )
+
+  expect_equal(
+    bind_cols(list(df1, df2)),
+    dplyr::bind_cols(list(df1, df2))
+  )
+})
+
 # =============================================================================
 # bind_rows: Stacks tables vertically (row concatenation)
 # =============================================================================

@@ -21,6 +21,9 @@
 #' @keywords internal
 optimize_ast <- function(ast) {
   if (is.null(ast)) return(NULL)
+  if (!inherits(ast, "ast_node")) {
+    stop("Invalid lazy_ops: expected an AST node or NULL.", call. = FALSE)
+  }
 
   # Handle barriers: optimize segments separately
   ast <- optimize_with_barriers(ast)

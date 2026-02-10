@@ -116,8 +116,9 @@ summarise.tbl_gpu <- function(.data, ..., .groups = "drop") {
   new_tbl_gpu(
     ptr = result_ptr,
     schema = list(names = result_names, types = result_types),
-    lazy_ops = list(),
-    groups = character()  # Result is ungrouped
+    lazy_ops = NULL,
+    groups = character(),  # Result is ungrouped
+    exec_mode = .data$exec_mode
   )
 }
 
@@ -375,7 +376,8 @@ create_temp_column <- function(.data, col_name, expr_text) {
       types = c(.data$schema$types, new_type)
     ),
     lazy_ops = .data$lazy_ops,
-    groups = .data$groups
+    groups = .data$groups,
+    exec_mode = .data$exec_mode
   )
 }
 

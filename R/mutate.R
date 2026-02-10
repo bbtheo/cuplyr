@@ -492,7 +492,12 @@ mutate_apply_col_scalar <- function(.data, output_col, lhs_col, op, scalar) {
   expr_step <- make_mutate_expr(output_col, lhs_col, op, scalar = scalar,
                                 input_types = lhs_type)
   new_schema <- update_schema_for_expr(.data$schema, expr_step)
-  new_tbl_gpu(ptr = new_ptr, schema = new_schema, groups = .data$groups)
+  new_tbl_gpu(
+    ptr = new_ptr,
+    schema = new_schema,
+    groups = .data$groups,
+    exec_mode = .data$exec_mode
+  )
 }
 
 mutate_apply_col_col <- function(.data, output_col, lhs_col, op, rhs_col) {
@@ -525,7 +530,12 @@ mutate_apply_col_col <- function(.data, output_col, lhs_col, op, rhs_col) {
   expr_step <- make_mutate_expr(output_col, c(lhs_col, rhs_col), op,
                                 input_types = c(lhs_type, rhs_type))
   new_schema <- update_schema_for_expr(.data$schema, expr_step)
-  new_tbl_gpu(ptr = new_ptr, schema = new_schema, groups = .data$groups)
+  new_tbl_gpu(
+    ptr = new_ptr,
+    schema = new_schema,
+    groups = .data$groups,
+    exec_mode = .data$exec_mode
+  )
 }
 
 mutate_eval_expr <- function(.data, output_col, expr) {
@@ -644,7 +654,12 @@ mutate_one <- function(.data, new_name, expr) {
       }
 
       new_schema <- update_schema_for_expr(.data_step$schema, expr_step)
-      new_tbl_gpu(ptr = new_ptr, schema = new_schema, groups = .data_step$groups)
+      new_tbl_gpu(
+        ptr = new_ptr,
+        schema = new_schema,
+        groups = .data_step$groups,
+        exec_mode = .data_step$exec_mode
+      )
     }
 
     result <- .data
@@ -736,7 +751,8 @@ mutate_one <- function(.data, new_name, expr) {
   new_tbl_gpu(
     ptr = new_ptr,
     schema = new_schema,
-    groups = .data$groups
+    groups = .data$groups,
+    exec_mode = .data$exec_mode
   )
 }
 
@@ -771,6 +787,7 @@ mutate_copy_column <- function(.data, new_name, source_col) {
   new_tbl_gpu(
     ptr = new_ptr,
     schema = new_schema,
-    groups = .data$groups
+    groups = .data$groups,
+    exec_mode = .data$exec_mode
   )
 }

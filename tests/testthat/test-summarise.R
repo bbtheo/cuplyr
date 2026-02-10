@@ -25,6 +25,16 @@ test_that("summarise() with sum() works ungrouped", {
   expect_equal(result$total, 15)
 })
 
+test_that("eager summarise result has no pending lazy ops", {
+  skip_if_no_gpu()
+
+  out <- tbl_gpu(data.frame(x = 1:5)) |>
+    dplyr::summarise(total = sum(x))
+
+  expect_null(out$lazy_ops)
+  expect_false(has_pending_ops(out))
+})
+
 test_that("summarise() matches dplyr in eager and lazy modes", {
   skip_if_no_gpu()
 

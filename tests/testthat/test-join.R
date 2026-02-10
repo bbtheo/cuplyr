@@ -15,6 +15,17 @@ test_that("left_join() works", {
   expect_equal(as.data.frame(result), as.data.frame(expected))
 })
 
+test_that("eager join result has no pending lazy ops", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(id = c(1, 2, 3), x = c(10, 20, 30))
+  right_df <- data.frame(id = c(2, 3, 4), y = c(200, 300, 400))
+
+  out <- dplyr::left_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "id")
+  expect_null(out$lazy_ops)
+  expect_false(has_pending_ops(out))
+})
+
 test_that("inner_join() works", {
   skip_if_no_gpu()
 

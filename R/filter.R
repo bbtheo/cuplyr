@@ -269,7 +269,8 @@ filter_one <- function(.data, expr) {
   new_tbl_gpu(
     ptr = new_ptr,
     schema = .data$schema,
-    groups = .data$groups
+    groups = .data$groups,
+    exec_mode = .data$exec_mode
   )
 }
 
@@ -310,6 +311,7 @@ filter_logical <- function(.data, logical_val) {
   new_tbl_gpu(
     ptr = new_ptr,
     schema = .data$schema,
-    groups = .data$groups
+    groups = .data$groups,
+    exec_mode = .data$exec_mode
   )
 }

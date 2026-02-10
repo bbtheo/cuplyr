@@ -54,6 +54,15 @@ compute.tbl_gpu <- function(x, ..., name = NULL) {
     stop("compute() requires a tbl_gpu object", call. = FALSE)
   }
 
+  # Backward compatibility: older objects may store no pending ops as list().
+  if (is.list(x$lazy_ops) && length(x$lazy_ops) == 0) {
+    x$lazy_ops <- NULL
+  }
+
+  if (!is.null(x$lazy_ops) && !inherits(x$lazy_ops, "ast_node")) {
+    stop("Invalid lazy_ops: expected an AST node or NULL.", call. = FALSE)
+  }
+
   # Nothing to do if no pending ops or in eager mode
   if (is.null(x$lazy_ops) || x$exec_mode == "eager") {
     return(x)
@@ -137,7 +146,7 @@ as_eager <- function(.data) {
   }
 
   # Compute pending ops first
-  if (!is.null(.data$lazy_ops)) {
+  if (has_pending_ops(.data)) {
     .data <- compute(.data)
   }
 
@@ -201,7 +210,7 @@ is_lazy <- function(.data) {
 #'
 #' @export
 has_pending_ops <- function(.data) {
-  is_tbl_gpu(.data) && !is.null(.data$lazy_ops)
+  is_tbl_gpu(.data) && inherits(.data$lazy_ops, "ast_node")
 }
 
 #' Show pending operations for a lazy tbl_gpu
@@ -217,6 +226,8 @@ show_query <- function(.data) {
 
   if (is.null(.data$lazy_ops)) {
     cat("No pending operations (eager mode or already computed)\n")
+  } else if (!inherits(.data$lazy_ops, "ast_node")) {
+    cat("Invalid pending operations object (expected AST node)\n")
   } else {
     cat("Pending operations:\n")
     print(.data$lazy_ops)

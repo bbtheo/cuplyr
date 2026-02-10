@@ -126,8 +126,15 @@ new_tbl_gpu <- function(ptr = NULL,
                         lazy_ops = NULL,
                         groups = character(),
                         exec_mode = NULL) {
+  if (is.list(lazy_ops) && length(lazy_ops) == 0) {
+    lazy_ops <- NULL
+  }
+
   if (is.null(exec_mode)) {
-    exec_mode <- resolve_exec_mode()
+    exec_mode <- "eager"
+  }
+  if (!exec_mode %in% c("lazy", "eager")) {
+    stop("exec_mode must be 'lazy' or 'eager'.", call. = FALSE)
   }
 
   structure(

@@ -159,7 +159,7 @@ left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   new_tbl_gpu(
     ptr = new_ptr,
     schema = new_schema,
-    lazy_ops = list(),
+    lazy_ops = NULL,
     groups = character(),
     exec_mode = "eager"
   )
@@ -229,7 +229,7 @@ inner_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   new_tbl_gpu(
     ptr = new_ptr,
     schema = new_schema,
-    lazy_ops = list(),
+    lazy_ops = NULL,
     groups = character(),
     exec_mode = "eager"
   )
@@ -299,7 +299,7 @@ full_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   new_tbl_gpu(
     ptr = new_ptr,
     schema = new_schema,
-    lazy_ops = list(),
+    lazy_ops = NULL,
     groups = character(),
     exec_mode = "eager"
   )

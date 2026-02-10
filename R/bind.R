@@ -29,6 +29,13 @@ bind_cols.tbl_gpu <- function(..., .name_repair = c("unique", "universal",
   bind_cols_gpu(dots, .name_repair = .name_repair)
 }
 
+#' @export
+bind_cols.default <- function(..., .name_repair = c("unique", "universal",
+                                                     "check_unique", "minimal")) {
+  .name_repair <- match.arg(.name_repair)
+  dplyr::bind_cols(..., .name_repair = .name_repair)
+}
+
 
 #' Bind multiple data frames/tables by row
 #'
@@ -48,6 +55,11 @@ bind_rows <- function(..., .id = NULL) {
 bind_rows.tbl_gpu <- function(..., .id = NULL) {
   dots <- list(...)
   bind_rows_gpu(dots, .id = .id)
+}
+
+#' @export
+bind_rows.default <- function(..., .id = NULL) {
+  dplyr::bind_rows(..., .id = .id)
 }
 
 
@@ -78,7 +90,7 @@ bind_cols_gpu <- function(dots, .name_repair = "unique") {
   # Convert any data.frames to tbl_gpu
   dots <- lapply(dots, function(x) {
     if (is.data.frame(x) && !is_tbl_gpu(x)) {
-      tbl_gpu(x)
+      tbl_gpu(x, lazy = FALSE)
     } else if (!is_tbl_gpu(x)) {
       stop("All inputs must be tbl_gpu or data.frame", call. = FALSE)
     } else {
@@ -92,8 +104,7 @@ bind_cols_gpu <- function(dots, .name_repair = "unique") {
 
   # Materialize any lazy tables
   dots <- lapply(dots, function(x) {
-    if (!is.null(x$lazy_ops) && length(x$lazy_ops) > 0 &&
-        identical(x$exec_mode, "lazy")) {
+    if (identical(x$exec_mode, "lazy") && has_pending_ops(x)) {
       compute(x)
     } else {
       x
@@ -160,7 +171,7 @@ bind_rows_gpu <- function(dots, .id = NULL) {
   # Convert any data.frames to tbl_gpu
   dots <- lapply(dots, function(x) {
     if (is.data.frame(x) && !is_tbl_gpu(x)) {
-      tbl_gpu(x)
+      tbl_gpu(x, lazy = FALSE)
     } else if (!is_tbl_gpu(x)) {
       stop("All inputs must be tbl_gpu or data.frame", call. = FALSE)
     } else {
@@ -170,8 +181,7 @@ bind_rows_gpu <- function(dots, .id = NULL) {
 
   # Materialize any lazy tables
   dots <- lapply(dots, function(x) {
-    if (!is.null(x$lazy_ops) && length(x$lazy_ops) > 0 &&
-        identical(x$exec_mode, "lazy")) {
+    if (identical(x$exec_mode, "lazy") && has_pending_ops(x)) {
       compute(x)
     } else {
       x
@@ -457,7 +467,7 @@ add_id_column <- function(result, id_col_name, original_tables, source_names) {
   # Create data frame with .id column and transfer to GPU
   id_df <- data.frame(x = id_values, stringsAsFactors = FALSE)
   names(id_df) <- id_col_name
-  id_tbl <- tbl_gpu(id_df)
+  id_tbl <- tbl_gpu(id_df, lazy = FALSE)
 
   # Bind .id column at front
   bind_cols(id_tbl, result, .name_repair = "minimal")
