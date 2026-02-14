@@ -85,9 +85,18 @@ tbl_gpu <- function(data, ..., lazy = NULL) {
 tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
   ptr <- wrap_gpu_call("tbl_gpu", df_to_gpu(data))
 
+  # Build schema with factor levels for round-trip fidelity
+  factor_levels <- lapply(data, function(col) {
+    if (is.factor(col)) levels(col) else NULL
+  })
+  names(factor_levels) <- names(data)
+  # Remove NULL entries to keep schema compact
+  factor_levels <- Filter(Negate(is.null), factor_levels)
+
   schema <- list(
     names = names(data),
-    types = vapply(data, gpu_type_from_r, character(1))
+    types = vapply(data, gpu_type_from_r, character(1)),
+    factor_levels = if (length(factor_levels) > 0) factor_levels else NULL
   )
 
   exec_mode <- resolve_exec_mode(lazy)
