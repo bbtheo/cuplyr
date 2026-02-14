@@ -11,7 +11,7 @@ vignette: >
 knitr::opts_chunk$set(
   collapse = TRUE,
   comment = "#>",
-  eval = cuplyr::has_gpu()
+  eval = identical(Sys.getenv("CUPLYR_VIGNETTE_EVAL"), "true") && cuplyr::has_gpu()
 )
 ```
 

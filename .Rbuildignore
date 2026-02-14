@@ -19,4 +19,8 @@
 ^DEVELOPER_GUIDE\.md$
 ^CLAUDE\.md$
 ^test_script\.R$
-^configure$
+^_pkgdown\.yml$
+^docs$
+^docs/
+^\.github$
+^\.github/

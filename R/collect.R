@@ -70,6 +70,16 @@ collect.tbl_gpu <- function(x, ...) {
   df <- wrap_gpu_call("collect", gpu_collect(x$ptr, final_schema$names))
   result <- tibble::as_tibble(df)
 
+  # Restore factor columns using stored levels
+  if (!is.null(final_schema$factor_levels)) {
+    for (col_name in names(final_schema$factor_levels)) {
+      if (col_name %in% names(result)) {
+        lvls <- final_schema$factor_levels[[col_name]]
+        result[[col_name]] <- factor(lvls[result[[col_name]]], levels = lvls)
+      }
+    }
+  }
+
   if (any(final_schema$types == "INT64")) {
     int64_cols <- which(final_schema$types == "INT64")
     for (col_idx in int64_cols) {

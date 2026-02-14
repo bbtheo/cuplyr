@@ -85,9 +85,18 @@ tbl_gpu <- function(data, ..., lazy = NULL) {
 tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
   ptr <- wrap_gpu_call("tbl_gpu", df_to_gpu(data))
 
+  # Build schema with factor levels for round-trip fidelity
+  factor_levels <- lapply(data, function(col) {
+    if (is.factor(col)) levels(col) else NULL
+  })
+  names(factor_levels) <- names(data)
+  # Remove NULL entries to keep schema compact
+  factor_levels <- Filter(Negate(is.null), factor_levels)
+
   schema <- list(
     names = names(data),
-    types = vapply(data, gpu_type_from_r, character(1))
+    types = vapply(data, gpu_type_from_r, character(1)),
+    factor_levels = if (length(factor_levels) > 0) factor_levels else NULL
   )
 
   exec_mode <- resolve_exec_mode(lazy)
@@ -260,10 +269,37 @@ names.tbl_gpu <- function(x) {
 #' Set column names of a GPU table
 #'
 #' @param x A `tbl_gpu` object.
-#' @param value A character vector of new column names.
+#' @param value A character vector of new column names. Must have the same
+#'   length as the number of columns, contain no `NA` values, and no empty
+#'   strings.
 #' @return The modified `tbl_gpu` object.
 #' @export
 `names<-.tbl_gpu` <- function(x, value) {
+  n_cols <- length(x$schema$names)
+
+  if (!is.character(value)) {
+    stop(
+      "`value` must be a character vector, not ", typeof(value), ".",
+      call. = FALSE
+    )
+  }
+
+  if (length(value) != n_cols) {
+    stop(
+      "`value` must have length ", n_cols, " (number of columns), not ",
+      length(value), ".",
+      call. = FALSE
+    )
+  }
+
+  if (anyNA(value)) {
+    stop("`value` must not contain NA values.", call. = FALSE)
+  }
+
+  if (any(value == "")) {
+    stop("`value` must not contain empty strings.", call. = FALSE)
+  }
+
   x$schema$names <- value
   x
 }

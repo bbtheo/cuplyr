@@ -1,3 +1,21 @@
+# cuplyr 0.1.1
+
+## Bug fixes
+
+* `collect()` now correctly restores factor columns with their original levels. Previously, factor columns were returned as integer codes instead of factors (#3).
+
+* `names<-()` now validates the replacement value before assignment. It errors if the new names have wrong length, contain `NA` values, empty strings, or are not character (#4).
+
+## Build system
+
+* Fixed CCCL (CUDA Core Compute Libraries) header detection for RAPIDS 25.12+ in pixi/conda environments where headers are located in a `rapids/` subdirectory. The configure script now automatically detects `<cuda/stream_ref>` and related headers.
+
+* Reordered include paths so CUDF/RMM headers take precedence over system CUDA headers, ensuring consistent CCCL versions.
+
+## Documentation
+
+* Added pkgdown documentation site with vignettes for getting started, complex analysis workflows, and query optimization.
+
 # cuplyr 0.1.0
 
 ## Lazy evaluation

@@ -357,6 +357,46 @@ test_that("names<-.tbl_gpu() can set column names", {
   expect_equal(names(gpu_df), c("new1", "new2", "new3"))
 })
 
+test_that("names<-.tbl_gpu() errors on wrong length", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars)
+  expect_error(
+    names(gpu_df) <- c("a", "b", "c"),
+    "length"
+  )
+})
+
+test_that("names<-.tbl_gpu() errors on non-character input", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars[, 1:3])
+  expect_error(
+    names(gpu_df) <- 1:3,
+    "character"
+  )
+})
+
+test_that("names<-.tbl_gpu() errors on NA names", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars[, 1:3])
+  expect_error(
+    names(gpu_df) <- c("a", NA, "c"),
+    "NA"
+  )
+})
+
+test_that("names<-.tbl_gpu() errors on empty string names", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars[, 1:3])
+  expect_error(
+    names(gpu_df) <- c("a", "", "c"),
+    "empty"
+  )
+})
+
 # =============================================================================
 # print() Method Tests
 # =============================================================================

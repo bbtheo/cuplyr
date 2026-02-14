@@ -203,6 +203,45 @@ test_that("collect() preserves NA positions correctly", {
 # Mixed Column Type Tests
 # =============================================================================
 
+test_that("collect() converts factor columns correctly", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = factor(c("a", "b", "a", "c")))
+  gpu_df <- tbl_gpu(df)
+  result <- collect(gpu_df)
+
+  expect_s3_class(result$x, "factor")
+  expect_equal(levels(result$x), levels(df$x))
+  expect_equal(as.character(result$x), as.character(df$x))
+})
+
+test_that("collect() preserves factor with custom levels", {
+  skip_if_no_gpu()
+
+  df <- data.frame(
+    x = factor(c("low", "high", "medium"), levels = c("low", "medium", "high"))
+  )
+  gpu_df <- tbl_gpu(df)
+  result <- collect(gpu_df)
+
+  expect_s3_class(result$x, "factor")
+  expect_equal(levels(result$x), c("low", "medium", "high"))
+  expect_equal(as.character(result$x), c("low", "high", "medium"))
+})
+
+test_that("collect() handles factor with NA values", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = factor(c("a", NA, "b", NA, "a")))
+  gpu_df <- tbl_gpu(df)
+  result <- collect(gpu_df)
+
+  expect_s3_class(result$x, "factor")
+  expect_true(is.na(result$x[2]))
+  expect_true(is.na(result$x[4]))
+  expect_equal(as.character(result$x[c(1, 3, 5)]), c("a", "b", "a"))
+})
+
 test_that("collect() handles mixed column types", {
   skip_if_no_gpu()
 
