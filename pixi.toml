@@ -14,6 +14,7 @@ libkvikio = ">=25.12"
 # CUDA toolkit
 cuda-toolkit = ">=12.0,<13"
 cuda-nvcc = ">=12.0,<13"
+pandoc = ">=3.0"
 
 [tasks]
 configure = { cmd = "./configure", description = "Detect paths, generate Makevars" }
@@ -25,6 +26,7 @@ dev = { cmd = "./configure && R CMD INSTALL .", depends-on = ["clean"], descript
 bench = { cmd = "Rscript inst/benchmarks/run_benchmarks.R", description = "Run benchmarks" }
 r = { cmd = "R", description = "Start R with pixi environment" }
 load-dev = { cmd = "R -e 'devtools::load_all()'", description = "Load package in dev mode" }
+pkgdown = { cmd = "XDG_CACHE_HOME=/tmp Rscript scripts/build_pkgdown.R", description = "Build pkgdown site into docs/" }
 
 [tasks.build]
 cmd = "R CMD build ."

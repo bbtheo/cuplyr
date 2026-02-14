@@ -27,7 +27,7 @@ generate_taxi_data <- function(n_rows = 1000000) {
 }
 
 # Generate data as data.table first
-data_dt <- generate_taxi_data(n_rows = 10000000)
+data_dt <- generate_taxi_data(n_rows = 25000000)
 data <- as.data.frame(data_dt)  # Convert to data.frame for dplyr
 
 # Create DuckDB in-memory database
@@ -136,8 +136,7 @@ run_benchmark(
   duck_expr = function(d) {
     d |>
       group_by(VendorID) |>
-      summarise(mean_fare = mean(fare_amount, na.rm = TRUE), total_trips = n()) |> 
-      collect()
+      summarise(mean_fare = mean(fare_amount, na.rm = TRUE), total_trips = n())
   },
   cuplyr_expr = function(d) {
     d |>
@@ -266,6 +265,14 @@ invisible(data |>
   dplyr::summarise(avg_fare_per_mile = mean(fare_per_mile, na.rm = TRUE),
                    avg_tip = mean(tip_amount, na.rm = TRUE),
                    trips = dplyr::n(), .groups = "drop"))
+invisible(data_duck |>
+  dplyr::filter(fare_amount > 0, trip_distance > 0) |>
+  dplyr::mutate(fare_per_mile = fare_amount / trip_distance) |>
+  dplyr::group_by(VendorID, payment_type) |>
+  dplyr::summarise(avg_fare_per_mile = mean(fare_per_mile, na.rm = TRUE),
+                   avg_tip = mean(tip_amount, na.rm = TRUE),
+                   trips = dplyr::n(), .groups = "drop") |>
+  dplyr::collect())
 gc()
 
 # Benchmark cuplyr with full round-trip
@@ -286,8 +293,22 @@ for (i in seq_len(N_ITER)) {
   gpu_gc()
 }
 
-# Compare with dplyr baseline (already timed above, reuse median)
-dplyr_baseline <- 535.0 / 1000  # from previous run, or re-run:
+# Benchmark DuckDB with result materialization (query + collect)
+duck_transfer_times <- numeric(N_ITER)
+for (i in seq_len(N_ITER)) {
+  duck_transfer_times[i] <- system.time({
+    result <- data_duck |>
+      dplyr::filter(fare_amount > 0, trip_distance > 0) |>
+      dplyr::mutate(fare_per_mile = fare_amount / trip_distance) |>
+      dplyr::group_by(VendorID, payment_type) |>
+      dplyr::summarise(avg_fare_per_mile = mean(fare_per_mile, na.rm = TRUE),
+                       avg_tip = mean(tip_amount, na.rm = TRUE),
+                       trips = dplyr::n(), .groups = "drop") |>
+      dplyr::collect()
+  })["elapsed"]
+  rm(result)
+}
+
 dplyr_transfer_times <- numeric(N_ITER)
 for (i in seq_len(N_ITER)) {
   dplyr_transfer_times[i] <- system.time({
@@ -305,12 +326,19 @@ cat(sprintf("  dplyr:              median %7.1f ms (range: %.1f - %.1f)\n",
             median(dplyr_transfer_times) * 1000,
             min(dplyr_transfer_times) * 1000,
             max(dplyr_transfer_times) * 1000))
+cat(sprintf("  duckdb (collect):   median %7.1f ms (range: %.1f - %.1f)\n",
+            median(duck_transfer_times) * 1000,
+            min(duck_transfer_times) * 1000,
+            max(duck_transfer_times) * 1000))
 cat(sprintf("  cuplyr (with xfer): median %7.1f ms (range: %.1f - %.1f)\n",
             median(cuplyr_transfer_times) * 1000,
             min(cuplyr_transfer_times) * 1000,
             max(cuplyr_transfer_times) * 1000))
-cat(sprintf("  speedup vs dplyr: %.1fx\n",
+cat(sprintf("  speedup vs dplyr: duckdb %.1fx | cuplyr %.1fx\n",
+            median(dplyr_transfer_times) / median(duck_transfer_times),
             median(dplyr_transfer_times) / median(cuplyr_transfer_times)))
+cat(sprintf("  speedup vs duckdb: cuplyr %.1fx\n",
+            median(duck_transfer_times) / median(cuplyr_transfer_times)))
 
 gpu_gc(T)
 

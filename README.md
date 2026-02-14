@@ -118,19 +118,27 @@ R CMD INSTALL .
 
 ## Performance
 
-Benchmarks on 50 million rows (synthetic taxi data):
+Benchmark code lives in `benchmark/benchmark.R`.
 
-| Operation | dplyr | data.table | cuplyr | vs dplyr | vs data.table |
-|-----------|-------|------------|--------|----------|---------------|
-| Group & Summarise | 625 ms | 389 ms | 35 ms | **18x** | **11x** |
-| Filter | 930 ms | 962 ms | 247 ms | **4x** | **4x** |
-| Complete Workflow | 2529 ms | 1158 ms | 42 ms | **60x** | **28x** |
+Benchmarks on 25 million rows (synthetic taxi data, median of 10 iterations):
+
+| Operation | dplyr | data.table | DuckDB | cuplyr | cuplyr vs dplyr | cuplyr vs data.table | cuplyr vs DuckDB |
+|-----------|-------|------------|--------|--------|------------------|----------------------|------------------|
+| Group & Summarise | 310.5 ms | 190.0 ms | 67.0 ms | 4.0 ms | **77.6x** | **47.5x** | **16.7x** |
+| Filter | 444.0 ms | 479.0 ms | 585.0 ms | 11.0 ms | **40.4x** | **43.5x** | **53.2x** |
+| Complete Workflow | 1237.0 ms | 574.5 ms | 126.5 ms | 20.0 ms | **61.9x** | **28.7x** | **6.3x** |
 
 *Complete workflow: filter + mutate + group_by + summarise*
 
 **Hardware**: Intel Core i9-12900K (16 cores), NVIDIA RTX 5070 (12 GB VRAM)
 
-GPU acceleration benefits grow with data size. For datasets under 1M rows, CPU-based solutions may be faster due to GPU transfer overhead.
+End-to-end workflow including materialization/transfer:
+
+| Workflow | dplyr | DuckDB (collect) | cuplyr (with GPU transfer) | cuplyr vs dplyr | cuplyr vs DuckDB |
+|----------|-------|------------------|-----------------------------|-----------------|------------------|
+| Complete Workflow + transfer | 1175.0 ms | 133.5 ms | 1213.0 ms | 1.0x | 0.1x |
+
+GPU acceleration benefits grow with data size and compute intensity. For transfer-heavy workloads or smaller datasets, CPU-based engines can still be faster.
 
 
 ## Acknowledgments
