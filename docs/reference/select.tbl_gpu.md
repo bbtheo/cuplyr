@@ -29,11 +29,7 @@ select(.data, ...)
 
   - Range: `select(x:z)` (not yet supported)
 
-  - Helpers:
-    [`starts_with()`](https://tidyselect.r-lib.org/reference/starts_with.html),
-    [`ends_with()`](https://tidyselect.r-lib.org/reference/starts_with.html),
-    [`contains()`](https://tidyselect.r-lib.org/reference/starts_with.html),
-    etc.
+  - Helpers: `starts_with()`, `ends_with()`, `contains()`, etc.
 
 ## Value
 

@@ -45,9 +45,9 @@ Unlike operations like
 [`dplyr::filter()`](https://dplyr.tidyverse.org/reference/filter.html)
 or
 [`dplyr::mutate()`](https://dplyr.tidyverse.org/reference/mutate.html),
-[`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html) does
-not perform any GPU computation. It simply records which columns should
-be used for grouping in subsequent aggregation operations.
+`group_by()` does not perform any GPU computation. It simply records
+which columns should be used for grouping in subsequent aggregation
+operations.
 
 The actual groupby computation happens when you call
 [`dplyr::summarise()`](https://dplyr.tidyverse.org/reference/summarise.html)

@@ -49,8 +49,7 @@ columns and computed aggregations.
 
 - `max(x)` - Maximum value
 
-- [`n()`](https://dplyr.tidyverse.org/reference/context.html) - Count of
-  rows in each group
+- `n()` - Count of rows in each group
 
 - `sd(x)` - Standard deviation
 

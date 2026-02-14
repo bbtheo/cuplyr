@@ -1,5 +1,34 @@
 # Changelog
 
+## cuplyr 0.1.1
+
+### Bug fixes
+
+- [`collect()`](https://dplyr.tidyverse.org/reference/compute.html) now
+  correctly restores factor columns with their original levels.
+  Previously, factor columns were returned as integer codes instead of
+  factors ([\#3](https://github.com/bbtheo/cuplyr/issues/3)).
+
+- `names<-()` now validates the replacement value before assignment. It
+  errors if the new names have wrong length, contain `NA` values, empty
+  strings, or are not character
+  ([\#4](https://github.com/bbtheo/cuplyr/issues/4)).
+
+### Build system
+
+- Fixed CCCL (CUDA Core Compute Libraries) header detection for RAPIDS
+  25.12+ in pixi/conda environments where headers are located in a
+  `rapids/` subdirectory. The configure script now automatically detects
+  `<cuda/stream_ref>` and related headers.
+
+- Reordered include paths so CUDF/RMM headers take precedence over
+  system CUDA headers, ensuring consistent CCCL versions.
+
+### Documentation
+
+- Added pkgdown documentation site with vignettes for getting started,
+  complex analysis workflows, and query optimization.
+
 ## cuplyr 0.1.0
 
 ### Lazy evaluation
@@ -29,11 +58,17 @@
 - [`collapse()`](https://dplyr.tidyverse.org/reference/compute.html)
   inserts an optimization barrier without executing.
 
-- `as_lazy()` and `as_eager()` switch execution modes mid-pipeline.
+- [`as_lazy()`](https://bbtheo.github.io/cuplyr/reference/as_lazy.md)
+  and
+  [`as_eager()`](https://bbtheo.github.io/cuplyr/reference/as_eager.md)
+  switch execution modes mid-pipeline.
 
-- `is_lazy()` and `has_pending_ops()` check the current execution state.
+- [`is_lazy()`](https://bbtheo.github.io/cuplyr/reference/is_lazy.md)
+  and
+  [`has_pending_ops()`](https://bbtheo.github.io/cuplyr/reference/has_pending_ops.md)
+  check the current execution state.
 
-- [`show_query()`](https://dplyr.tidyverse.org/reference/explain.html)
+- [`show_query()`](https://bbtheo.github.io/cuplyr/reference/show_query.md)
   displays the pending operation tree for debugging.
 
 ### Join operations
@@ -53,12 +88,12 @@
 ### Bind operations
 
 - Added
-  [`bind_rows()`](https://dplyr.tidyverse.org/reference/bind_rows.html)
+  [`bind_rows()`](https://bbtheo.github.io/cuplyr/reference/bind_rows.md)
   for vertically combining GPU tables with automatic schema unification
   and type promotion.
 
 - Added
-  [`bind_cols()`](https://dplyr.tidyverse.org/reference/bind_cols.html)
+  [`bind_cols()`](https://bbtheo.github.io/cuplyr/reference/bind_cols.md)
   for horizontally combining GPU tables with `.name_repair` for
   duplicate column handling.
 
@@ -139,8 +174,8 @@ NVIDIA’s libcudf library.
 - [`gpu_memory_state()`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_state.md)
   returns current GPU memory usage (total, free, used).
 
-- `gpu_gc()` forces garbage collection to free GPU memory from
-  unreferenced tables.
+- [`gpu_gc()`](https://bbtheo.github.io/cuplyr/reference/gpu_gc.md)
+  forces garbage collection to free GPU memory from unreferenced tables.
 
 - [`gpu_object_info()`](https://bbtheo.github.io/cuplyr/reference/gpu_object_info.md)
   returns detailed information about a GPU table.

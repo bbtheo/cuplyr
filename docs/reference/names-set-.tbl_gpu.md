@@ -17,7 +17,8 @@ names(x) <- value
 
 - value:
 
-  A character vector of new column names.
+  A character vector of new column names. Must have the same length as
+  the number of columns, contain no `NA` values, and no empty strings.
 
 ## Value
 

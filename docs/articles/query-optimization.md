@@ -475,7 +475,8 @@ show_query(pipeline)
 
 ### Understanding the Output
 
-The [`show_query()`](https://dplyr.tidyverse.org/reference/explain.html)
+The
+[`show_query()`](https://bbtheo.github.io/cuplyr/reference/show_query.md)
 output shows:
 
 - Node type and key metadata
@@ -654,5 +655,6 @@ result <- tbl_gpu(big_data, lazy = TRUE) |>
 
 - [`vignette("getting-started")`](https://bbtheo.github.io/cuplyr/articles/getting-started.md) -
   Basic cuplyr usage
-- `?optimize_ast` - Internal optimizer documentation
+- [`?optimize_ast`](https://bbtheo.github.io/cuplyr/reference/optimize_ast.md) -
+  Internal optimizer documentation
 - RAPIDS cuDF documentation for GPU-specific optimizations

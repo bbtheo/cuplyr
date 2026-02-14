@@ -732,6 +732,7 @@ overhead. The GPU advantage becomes clear with millions of rows.
 5.  **Use hybrid GPU/CPU** - GPU for aggregation, R for complex logic
 6.  **Monitor memory** with
     [`gpu_memory_state()`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_state.md)
-    and `gpu_gc()`
+    and
+    [`gpu_gc()`](https://bbtheo.github.io/cuplyr/reference/gpu_gc.md)
 7.  **Encapsulate patterns** in reusable functions
 8.  **Handle errors gracefully** in production pipelines

@@ -51,7 +51,7 @@ if (has_gpu()) {
   cat("GPU data:", round(comparison$gpu_bytes / 1024, 1), "KB\n")
   cat("Ratio:", round(comparison$ratio, 1), "x\n")
 }
-#> R object: 3.2 KB
+#> R object: 3.3 KB
 #> GPU data: 79.3 KB
-#> Ratio: 24.8 x
+#> Ratio: 24.1 x
 ```

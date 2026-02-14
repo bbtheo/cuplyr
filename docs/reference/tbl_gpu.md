@@ -3,22 +3,19 @@
 Transfers an R data frame to GPU memory using NVIDIA's libcudf library,
 enabling high-performance data manipulation operations. The resulting
 `tbl_gpu` object can be used with dplyr verbs like
-[`filter()`](https://dplyr.tidyverse.org/reference/filter.html),
-[`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html),
-[`select()`](https://dplyr.tidyverse.org/reference/select.html), and
-collected back to R with
-[`collect()`](https://dplyr.tidyverse.org/reference/compute.html).
+[`filter()`](https://rdrr.io/r/stats/filter.html), `mutate()`,
+`select()`, and collected back to R with `collect()`.
 
 ## Usage
 
 ``` r
-tbl_gpu(data, ...)
+tbl_gpu(data, ..., lazy = NULL)
 
 # S3 method for class 'data.frame'
-tbl_gpu(data, ...)
+tbl_gpu(data, ..., lazy = NULL)
 
 # S3 method for class 'tbl_gpu'
-tbl_gpu(data, ...)
+tbl_gpu(data, ..., lazy = NULL)
 ```
 
 ## Arguments
@@ -32,6 +29,20 @@ tbl_gpu(data, ...)
 
   Additional arguments passed to methods (currently unused).
 
+- lazy:
+
+  Logical or character. Controls execution mode:
+
+  - `TRUE` or `"lazy"` - Operations are deferred until
+    collect()/compute()
+
+  - `FALSE` or `"eager"` - Operations execute immediately (default)
+
+  - `NULL` - Use session option or environment variable
+
+  Can also be set via `options(cuplyr.exec_mode = "lazy")` or
+  environment variable `CUPLYR_EXEC_MODE=lazy`.
+
 ## Value
 
 A `tbl_gpu` object containing:
@@ -40,15 +51,33 @@ A `tbl_gpu` object containing:
 
 - `schema` - List with column names and types
 
-- `lazy_ops` - Pending operations (for future lazy evaluation)
+- `lazy_ops` - AST for pending operations (lazy mode only)
 
-- `groups` - Grouping variables (for future group_by support)
+- `groups` - Grouping variables
+
+- `exec_mode` - Execution mode ("lazy" or "eager")
 
 ## Details
 
 The data is immediately copied to GPU memory when `tbl_gpu()` is called.
 GPU memory is automatically freed when the R object is garbage
 collected.
+
+### Execution Modes
+
+In **eager mode** (default), each dplyr verb executes immediately on the
+GPU. This is simple but can lead to unnecessary intermediate
+allocations.
+
+In **lazy mode**, operations build an AST (Abstract Syntax Tree) that is
+optimized and executed only when `collect()` or `compute()` is called.
+This enables optimizations like:
+
+- Projection pruning (only load needed columns)
+
+- Mutate fusion (combine multiple mutates)
+
+- Filter reordering (cheapest filters first)
 
 Column type mappings from R to GPU:
 
@@ -58,7 +87,7 @@ Column type mappings from R to GPU:
 
 - `character` -\> STRING
 
-- `logical` -\> BOOL8 (stored as INT32)
+- `logical` -\> BOOL8
 
 - `Date` -\> TIMESTAMP_DAYS
 
@@ -68,6 +97,8 @@ Column type mappings from R to GPU:
 
 [`collect.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/collect.tbl_gpu.md)
 to transfer data back to R,
+[`compute.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/compute.tbl_gpu.md)
+to execute and keep on GPU,
 [`filter.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/filter.tbl_gpu.md),
 [`mutate.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/mutate.tbl_gpu.md),
 [`select.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/select.tbl_gpu.md)
@@ -77,15 +108,18 @@ for data manipulation
 
 ``` r
 if (has_gpu()) {
-  # Transfer mtcars to GPU
+  # Transfer mtcars to GPU (eager mode)
   gpu_mtcars <- tbl_gpu(mtcars)
   print(gpu_mtcars)
 
-  # Chain operations
-  result <- gpu_mtcars |>
+  # Lazy mode - operations deferred until collect()
+  result <- tbl_gpu(mtcars, lazy = TRUE) |>
     filter(mpg > 20) |>
     mutate(kpl = mpg * 0.425) |>
     collect()
+
+  # Set lazy mode globally
+  options(cuplyr.exec_mode = "lazy")
 }
 #> Rows: 32
 #> Columns: 11
@@ -100,5 +134,5 @@ if (has_gpu()) {
 #> $ am   <dbl> 1, 1, 1, 0, 0, 0, 0, 0, 0, 0
 #> $ gear <dbl> 4, 4, 4, 3, 3, 3, 3, 4, 4, 4
 #> $ carb <dbl> 4, 4, 1, 1, 2, 1, 4, 2, 2, 4
-#> Error in collect(mutate(filter(gpu_mtcars, mpg > 20), kpl = mpg * 0.425)): could not find function "collect"
+#> Error in collect(mutate(filter(tbl_gpu(mtcars, lazy = TRUE), mpg > 20),     kpl = mpg * 0.425)): could not find function "collect"
 ```

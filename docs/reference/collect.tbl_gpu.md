@@ -34,7 +34,7 @@ to R types:
 
 - STRING -\> character
 
-- BOOL8 -\> integer (0/1)
+- BOOL8 -\> logical (TRUE/FALSE)
 
 ## Details
 

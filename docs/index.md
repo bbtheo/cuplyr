@@ -44,37 +44,23 @@ should be expected.
 ### Supported operations
 
 **Data manipulation** -
-[`filter()`](https://dplyr.tidyverse.org/reference/filter.html) – row
-filtering with comparison and logical operators -
-[`select()`](https://dplyr.tidyverse.org/reference/select.html) – column
-selection and reordering -
-[`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) – column
-transformations and arithmetic -
-[`arrange()`](https://dplyr.tidyverse.org/reference/arrange.html) – row
-sorting with [`desc()`](https://dplyr.tidyverse.org/reference/desc.html)
-support, NA handling follows dplyr conventions -
-[`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html) +
-[`summarise()`](https://dplyr.tidyverse.org/reference/summarise.html) –
-grouped aggregations (`sum`, `mean`, `min`, `max`, `n`) -
-[`left_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html),
-[`right_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html),
-[`inner_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html),
-[`full_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html)
-– GPU joins on key columns -
-[`collect()`](https://dplyr.tidyverse.org/reference/compute.html) –
-transfer results back to R -
-[`compute()`](https://dplyr.tidyverse.org/reference/compute.html) –
-execute lazy operations, keep on GPU - `tbl_gpu(..., lazy = TRUE)` –
-enable lazy evaluation with AST optimization
+[`filter()`](https://rdrr.io/r/stats/filter.html) – row filtering with
+comparison and logical operators - `select()` – column selection and
+reordering - `mutate()` – column transformations and arithmetic -
+`arrange()` – row sorting with `desc()` support, NA handling follows
+dplyr conventions - `group_by()` + `summarise()` – grouped aggregations
+(`sum`, `mean`, `min`, `max`, `n`) - `left_join()`, `right_join()`,
+`inner_join()`, `full_join()` – GPU joins on key columns - `collect()` –
+transfer results back to R - `compute()` – execute lazy operations, keep
+on GPU - `tbl_gpu(..., lazy = TRUE)` – enable lazy evaluation with AST
+optimization
 
 ### Lazy evaluation
 
-Lazy mode defers execution until
-[`collect()`](https://dplyr.tidyverse.org/reference/compute.html) or
-[`compute()`](https://dplyr.tidyverse.org/reference/compute.html),
-enabling automatic optimizations: - Projection pruning (drop unused
-columns early) - Filter pushdown (move filters closer to data sources) -
-Mutate fusion (combine consecutive transformations)
+Lazy mode defers execution until `collect()` or `compute()`, enabling
+automatic optimizations: - Projection pruning (drop unused columns
+early) - Filter pushdown (move filters closer to data sources) - Mutate
+fusion (combine consecutive transformations)
 
 ``` r
 
@@ -99,8 +85,7 @@ tbl_gpu(data, lazy = TRUE)
 
 ### Not yet implemented
 
-- Complex joins with
-  [`join_by()`](https://dplyr.tidyverse.org/reference/join_by.html)
+- Complex joins with `join_by()`
 - Window functions
 - String operations
 - Multi-GPU support
