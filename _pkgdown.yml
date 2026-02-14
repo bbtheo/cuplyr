@@ -1,0 +1,25 @@
+url: https://bbtheo.github.io/cuplyr/
+
+template:
+  bootstrap: 5
+
+home:
+  title: cuplyr
+  description: GPU-accelerated dplyr backend powered by RAPIDS libcudf.
+
+navbar:
+  structure:
+    left: [reference, articles, news]
+    right: [search, github]
+  components:
+    github:
+      icon: fa-github
+      aria-label: GitHub repository
+      href: https://github.com/bbtheo/cuplyr
+
+articles:
+  - title: Guides
+    contents:
+      - getting-started
+      - query-optimization
+      - complex-analysis
