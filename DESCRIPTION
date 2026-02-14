@@ -1,6 +1,6 @@
 Package: cuplyr
 Title: GPU-Accelerated Data Manipulation with dplyr Syntax
-Version: 0.1.0
+Version: 0.1.1
 Authors@R: c(
     person("Theo", "Blauberg", email = "theo.blauberg@outlook.com", role = c("aut", "cre")),
     person("RAPIDS Team", role = "cph", comment = "libcudf library")
