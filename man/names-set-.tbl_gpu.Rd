@@ -9,7 +9,9 @@
 \arguments{
 \item{x}{A \code{tbl_gpu} object.}
 
-\item{value}{A character vector of new column names.}
+\item{value}{A character vector of new column names. Must have the same
+length as the number of columns, contain no \code{NA} values, and no empty
+strings.}
 }
 \value{
 The modified \code{tbl_gpu} object.

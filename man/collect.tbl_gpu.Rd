@@ -18,7 +18,7 @@ Column types are converted back to R types:
 \item FLOAT64/FLOAT32 -> numeric (double)
 \item INT32/INT64 -> integer or numeric
 \item STRING -> character
-\item BOOL8 -> integer (0/1)
+\item BOOL8 -> logical (TRUE/FALSE)
 }
 }
 \description{

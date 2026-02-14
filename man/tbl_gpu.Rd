@@ -6,25 +6,35 @@
 \alias{tbl_gpu.tbl_gpu}
 \title{Create a GPU-backed data frame}
 \usage{
-tbl_gpu(data, ...)
+tbl_gpu(data, ..., lazy = NULL)
 
-\method{tbl_gpu}{data.frame}(data, ...)
+\method{tbl_gpu}{data.frame}(data, ..., lazy = NULL)
 
-\method{tbl_gpu}{tbl_gpu}(data, ...)
+\method{tbl_gpu}{tbl_gpu}(data, ..., lazy = NULL)
 }
 \arguments{
 \item{data}{A data frame or tibble to transfer to GPU memory. Supported
 column types include: numeric (double), integer, character, and logical.}
 
 \item{...}{Additional arguments passed to methods (currently unused).}
+
+\item{lazy}{Logical or character. Controls execution mode:
+\itemize{
+\item \code{TRUE} or \code{"lazy"} - Operations are deferred until collect()/compute()
+\item \code{FALSE} or \code{"eager"} - Operations execute immediately (default)
+\item \code{NULL} - Use session option or environment variable
+}
+Can also be set via \code{options(cuplyr.exec_mode = "lazy")} or
+environment variable \code{CUPLYR_EXEC_MODE=lazy}.}
 }
 \value{
 A \code{tbl_gpu} object containing:
 \itemize{
 \item \code{ptr} - External pointer to the GPU table
 \item \code{schema} - List with column names and types
-\item \code{lazy_ops} - Pending operations (for future lazy evaluation)
-\item \code{groups} - Grouping variables (for future group_by support)
+\item \code{lazy_ops} - AST for pending operations (lazy mode only)
+\item \code{groups} - Grouping variables
+\item \code{exec_mode} - Execution mode ("lazy" or "eager")
 }
 }
 \description{
@@ -36,32 +46,50 @@ enabling high-performance data manipulation operations. The resulting
 \details{
 The data is immediately copied to GPU memory when \code{tbl_gpu()} is called.
 GPU memory is automatically freed when the R object is garbage collected.
+\subsection{Execution Modes}{
+
+In \strong{eager mode} (default), each dplyr verb executes immediately on the GPU.
+This is simple but can lead to unnecessary intermediate allocations.
+
+In \strong{lazy mode}, operations build an AST (Abstract Syntax Tree) that is
+optimized and executed only when \code{collect()} or \code{compute()} is called.
+This enables optimizations like:
+\itemize{
+\item Projection pruning (only load needed columns)
+\item Mutate fusion (combine multiple mutates)
+\item Filter reordering (cheapest filters first)
+}
 
 Column type mappings from R to GPU:
 \itemize{
 \item \code{numeric} -> FLOAT64
 \item \code{integer} -> INT32
 \item \code{character} -> STRING
-\item \code{logical} -> BOOL8 (stored as INT32)
+\item \code{logical} -> BOOL8
 \item \code{Date} -> TIMESTAMP_DAYS
 \item \code{POSIXct} -> TIMESTAMP_MICROSECONDS
 }
 }
+}
 \examples{
 if (has_gpu()) {
-  # Transfer mtcars to GPU
+  # Transfer mtcars to GPU (eager mode)
   gpu_mtcars <- tbl_gpu(mtcars)
   print(gpu_mtcars)
 
-  # Chain operations
-  result <- gpu_mtcars |>
+  # Lazy mode - operations deferred until collect()
+  result <- tbl_gpu(mtcars, lazy = TRUE) |>
     filter(mpg > 20) |>
     mutate(kpl = mpg * 0.425) |>
     collect()
+
+  # Set lazy mode globally
+  options(cuplyr.exec_mode = "lazy")
 }
 }
 \seealso{
 \code{\link{collect.tbl_gpu}} to transfer data back to R,
+\code{\link{compute.tbl_gpu}} to execute and keep on GPU,
 \code{\link{filter.tbl_gpu}}, \code{\link{mutate.tbl_gpu}},
 \code{\link{select.tbl_gpu}} for data manipulation
 }
