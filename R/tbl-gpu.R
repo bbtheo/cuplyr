@@ -269,10 +269,37 @@ names.tbl_gpu <- function(x) {
 #' Set column names of a GPU table
 #'
 #' @param x A `tbl_gpu` object.
-#' @param value A character vector of new column names.
+#' @param value A character vector of new column names. Must have the same
+#'   length as the number of columns, contain no `NA` values, and no empty
+#'   strings.
 #' @return The modified `tbl_gpu` object.
 #' @export
 `names<-.tbl_gpu` <- function(x, value) {
+  n_cols <- length(x$schema$names)
+
+  if (!is.character(value)) {
+    stop(
+      "`value` must be a character vector, not ", typeof(value), ".",
+      call. = FALSE
+    )
+  }
+
+  if (length(value) != n_cols) {
+    stop(
+      "`value` must have length ", n_cols, " (number of columns), not ",
+      length(value), ".",
+      call. = FALSE
+    )
+  }
+
+  if (anyNA(value)) {
+    stop("`value` must not contain NA values.", call. = FALSE)
+  }
+
+  if (any(value == "")) {
+    stop("`value` must not contain empty strings.", call. = FALSE)
+  }
+
   x$schema$names <- value
   x
 }
