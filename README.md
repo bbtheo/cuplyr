@@ -142,15 +142,6 @@ Benchmarks on 25 million rows (synthetic taxi data, median of 10 iterations):
 
 **Hardware**: Intel Core i9-12900K (16 cores), NVIDIA RTX 5070 (12 GB VRAM)
 
-End-to-end workflow including materialization/transfer:
-
-| Workflow | dplyr | DuckDB (collect) | cuplyr (with GPU transfer) | cuplyr vs dplyr | cuplyr vs DuckDB |
-|----------|-------|------------------|-----------------------------|-----------------|------------------|
-| Complete Workflow + transfer | 1175.0 ms | 133.5 ms | 1213.0 ms | 1.0x | 0.1x |
-
-GPU acceleration benefits grow with data size and compute intensity. For transfer-heavy workloads or smaller datasets, CPU-based engines can still be faster.
-
-
 ## Acknowledgments
 
 This project is built on [RAPIDS cuDF](https://github.com/rapidsai/cudf) by NVIDIA and the RAPIDS AI team.
