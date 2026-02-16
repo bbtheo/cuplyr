@@ -71,6 +71,9 @@ mkdir -p "${STAGE_PKG_DIR}"
 rsync -a --delete \
   --exclude '.git' \
   --exclude '.pixi' \
+  --exclude '.claude' \
+  --exclude 'docs' \
+  --exclude 'benchmark' \
   --exclude 'benchmark_data' \
   --exclude 'scratchpad' \
   "${REPO_ROOT}/" "${STAGE_PKG_DIR}/"
