@@ -94,7 +94,7 @@ Contributions and feedback are welcome.
 
 The fastest way to try cuplyr is on Google Colab with a free GPU:
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/bbtheo/cuplyr/blob/master/notebooks/install_cuplyr.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/bbtheo/cuplyr/blob/dev/notebooks/install_cuplyr.ipynb)
 
 The notebook handles all RAPIDS dependencies and builds cuplyr from source.
 
