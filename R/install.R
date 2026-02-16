@@ -248,31 +248,51 @@ install_via_conda <- function(src_dir, conda_prefix, configure_args,
     disable_cuda_stubs(file.path(conda_prefix, "lib"))
   }
 
+  prefix_has_cudf <- function(prefix) {
+    header <- file.path(prefix, "include", "cudf", "types.hpp")
+    lib <- c(
+      file.path(prefix, "lib", "libcudf.so"),
+      file.path(prefix, "lib64", "libcudf.so")
+    )
+    file.exists(header) && any(file.exists(lib))
+  }
+
   # Check if RAPIDS already in this prefix
-  has_cudf <- file.exists(file.path(conda_prefix, "include", "cudf", "types.hpp"))
+  has_cudf <- prefix_has_cudf(conda_prefix)
 
   if (!has_cudf) {
     message("Installing RAPIDS packages into ", conda_prefix, " ...")
-    base_args <- c(
+    base_create_args <- c(
       "create", "-y", "-p", conda_prefix,
       "-c", "rapidsai", "-c", "conda-forge", "-c", "nvidia"
     )
-    conda_arg_sets <- list(
-      c(base_args, "libcudf=25.12", "librmm=25.12", "libkvikio=25.12", "spdlog", "fmt"),
-      c(base_args, "libcudf", "librmm", "libkvikio", "spdlog", "fmt")
+    create_arg_sets <- list(
+      c(base_create_args, "libcudf=25.12", "librmm=25.12", "libkvikio=25.12", "spdlog", "fmt"),
+      c(base_create_args, "libcudf", "librmm", "libkvikio", "spdlog", "fmt")
+    )
+
+    base_install_args <- c(
+      "install", "-y", "-p", conda_prefix,
+      "-c", "rapidsai", "-c", "conda-forge", "-c", "nvidia"
+    )
+    install_arg_sets <- list(
+      c(base_install_args, "libcudf-dev=25.12", "librmm-dev=25.12", "libkvikio-dev=25.12"),
+      c(base_install_args, "libcudf-dev", "librmm-dev", "libkvikio-dev")
     )
 
     if (dry_run) {
-      message("[dry-run] Would run: ", conda_cmd, " ", paste(conda_arg_sets[[1]], collapse = " "))
+      message("[dry-run] Would run: ", conda_cmd, " ", paste(create_arg_sets[[1]], collapse = " "))
       message("[dry-run] Fallback if solve fails: ", conda_cmd, " ",
-              paste(conda_arg_sets[[2]], collapse = " "))
+              paste(create_arg_sets[[2]], collapse = " "))
+      message("[dry-run] If headers are missing, would also run: ", conda_cmd, " ",
+              paste(install_arg_sets[[1]], collapse = " "))
     } else {
       solved <- FALSE
       last_status <- NA_integer_
-      last_args <- conda_arg_sets[[length(conda_arg_sets)]]
+      last_args <- create_arg_sets[[length(create_arg_sets)]]
 
-      for (i in seq_along(conda_arg_sets)) {
-        conda_args <- conda_arg_sets[[i]]
+      for (i in seq_along(create_arg_sets)) {
+        conda_args <- create_arg_sets[[i]]
         if (i > 1) {
           message("Retrying conda solve with relaxed RAPIDS constraints...")
         }
@@ -283,16 +303,39 @@ install_via_conda <- function(src_dir, conda_prefix, configure_args,
         last_status <- as.integer(status)
         last_args <- conda_args
 
-        if (isTRUE(last_status == 0L)) {
+        if (!isTRUE(last_status == 0L)) {
+          next
+        }
+
+        if (prefix_has_cudf(conda_prefix)) {
           solved <- TRUE
           break
         }
+
+        message("Conda solve succeeded but libcudf headers/libraries were not found; trying dev packages...")
+        for (install_args in install_arg_sets) {
+          status <- system2(conda_cmd, install_args,
+                            stdout = if (verbose) "" else FALSE,
+                            stderr = if (verbose) "" else FALSE)
+          last_status <- as.integer(status)
+          last_args <- install_args
+
+          if (isTRUE(last_status == 0L) && prefix_has_cudf(conda_prefix)) {
+            solved <- TRUE
+            break
+          }
+        }
+        if (solved) break
       }
 
       if (!solved) {
         stop(
-          conda_cmd, " create failed (exit code ", last_status, ").\n",
-          "Try running manually:\n  ",
+          conda_cmd, " dependency setup did not produce usable libcudf headers/libraries",
+          " under ", conda_prefix, " (last exit code ", last_status, ").\n",
+          "Expected files:\n",
+          "  ", file.path(conda_prefix, "include", "cudf", "types.hpp"), "\n",
+          "  ", file.path(conda_prefix, "lib", "libcudf.so"), " (or lib64)\n",
+          "Last command:\n  ",
           conda_cmd, " ", paste(last_args, collapse = " "),
           call. = FALSE
         )

@@ -63,13 +63,20 @@ test_that("install_via_conda() retries with relaxed package constraints", {
       sprintf("  touch %s", shQuote(state_file)),
       "  exit 2",
       "fi",
+      "mkdir -p \"$CUPLYR_TEST_PREFIX/include/cudf\"",
+      "mkdir -p \"$CUPLYR_TEST_PREFIX/lib\"",
+      "touch \"$CUPLYR_TEST_PREFIX/include/cudf/types.hpp\"",
+      "touch \"$CUPLYR_TEST_PREFIX/lib/libcudf.so\"",
       "exit 0"
     ),
     mamba_path
   )
   Sys.chmod(mamba_path, mode = "0755")
 
-  withr::local_envvar(c(PATH = paste(fake_bin, Sys.getenv("PATH"), sep = ":")))
+  withr::local_envvar(c(
+    PATH = paste(fake_bin, Sys.getenv("PATH"), sep = ":"),
+    CUPLYR_TEST_PREFIX = conda_prefix
+  ))
 
   testthat::local_mocked_bindings(
     detect_environment = function(override = "") "container",
@@ -93,4 +100,46 @@ test_that("install_via_conda() retries with relaxed package constraints", {
   expect_match(calls[2], "(^| )libcudf( |$)")
   expect_match(calls[2], "(^| )librmm( |$)")
   expect_match(calls[2], "(^| )libkvikio( |$)")
+})
+
+test_that("install_via_conda() errors clearly when libcudf artifacts are missing", {
+  src_dir <- tempfile("cuplyr-src-")
+  dir.create(src_dir, recursive = TRUE, showWarnings = FALSE)
+  on.exit(unlink(src_dir, recursive = TRUE, force = TRUE), add = TRUE)
+
+  conda_prefix <- tempfile("cuplyr-conda-")
+  on.exit(unlink(conda_prefix, recursive = TRUE, force = TRUE), add = TRUE)
+
+  fake_bin <- tempfile("cuplyr-bin-")
+  dir.create(fake_bin, recursive = TRUE, showWarnings = FALSE)
+  on.exit(unlink(fake_bin, recursive = TRUE, force = TRUE), add = TRUE)
+
+  mamba_path <- file.path(fake_bin, "mamba")
+  writeLines(
+    c(
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      "exit 0"
+    ),
+    mamba_path
+  )
+  Sys.chmod(mamba_path, mode = "0755")
+
+  withr::local_envvar(c(PATH = paste(fake_bin, Sys.getenv("PATH"), sep = ":")))
+
+  testthat::local_mocked_bindings(
+    detect_environment = function(override = "") "container",
+    run_in_dir = function(dir, cmd, args = character(), verbose = FALSE) 0L
+  )
+
+  expect_error(
+    install_via_conda(
+      src_dir = src_dir,
+      conda_prefix = conda_prefix,
+      configure_args = character(),
+      dry_run = FALSE,
+      verbose = FALSE
+    ),
+    "libcudf headers/libraries"
+  )
 })
