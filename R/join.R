@@ -165,6 +165,8 @@ warn_if_join_too_large <- function(join_type, x, y, join_spec, suffix, keep) {
   }
 }
 
+#' @export
+#' @importFrom dplyr left_join
 left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
                               suffix = c(".x", ".y"), ..., keep = FALSE,
                               na_matches = "na") {
@@ -240,6 +242,8 @@ left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   )
 }
 
+#' @export
+#' @importFrom dplyr inner_join
 inner_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
                                suffix = c(".x", ".y"), ..., keep = FALSE,
                                na_matches = "na") {
@@ -315,6 +319,8 @@ inner_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   )
 }
 
+#' @export
+#' @importFrom dplyr full_join
 full_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
                               suffix = c(".x", ".y"), ..., keep = FALSE,
                               na_matches = "na") {
@@ -390,6 +396,8 @@ full_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   )
 }
 
+#' @export
+#' @importFrom dplyr right_join
 right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
                                suffix = c(".x", ".y"), ..., keep = FALSE,
                                na_matches = "na") {
