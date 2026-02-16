@@ -385,6 +385,12 @@ install_via_conda <- function(src_dir, conda_prefix, configure_args,
     }
     message("Real driver found at: ", driver_lib)
     configure_cloud_library_paths(driver_lib, conda_prefix)
+
+    # Register paths via ldconfig so library() can find them after process startup
+    register_library_paths(c(
+      file.path(conda_prefix, "lib"),
+      driver_lib
+    ))
   }
 
   # Configure
@@ -453,6 +459,12 @@ install_via_system <- function(src_dir, configure_args, dry_run, verbose) {
     driver_lib <- find_real_driver_lib()
     if (!is.null(driver_lib)) {
       configure_cloud_library_paths(driver_lib, conda_prefix)
+
+      # Register paths via ldconfig so library() can find them after process startup
+      register_library_paths(c(
+        file.path(conda_prefix, "lib"),
+        driver_lib
+      ))
     }
   }
 
@@ -626,6 +638,36 @@ configure_cloud_library_paths <- function(driver_lib, conda_prefix) {
   Sys.setenv(LD_LIBRARY_PATH = lib_path)
   # R CMD INSTALL test-load subprocess respects R_LD_LIBRARY_PATH
   Sys.setenv(R_LD_LIBRARY_PATH = lib_path)
+}
+
+#' Register library paths via ldconfig for runtime dlopen()
+#'
+#' Writes library paths to /etc/ld.so.conf.d/cuplyr-rapids.conf and runs ldconfig.
+#' This ensures the dynamic linker finds conda's newer libstdc++ even when
+#' LD_LIBRARY_PATH changes after process startup don't affect dlopen().
+#'
+#' @param paths Character vector of library directories to register.
+#' @return Logical: TRUE if ldconfig succeeded, FALSE otherwise.
+#' @keywords internal
+register_library_paths <- function(paths) {
+  conf <- "/etc/ld.so.conf.d/cuplyr-rapids.conf"
+  paths <- paths[nzchar(paths) & dir.exists(paths)]
+  if (length(paths) == 0) return(invisible(FALSE))
+
+  ok <- tryCatch({
+    writeLines(paths, conf)
+    status <- system2("ldconfig", stdout = FALSE, stderr = FALSE)
+    if (is.null(status)) status <- 0L
+    status == 0L
+  }, error = function(e) {
+    message("Warning: Could not run ldconfig (may need sudo): ", conditionMessage(e))
+    FALSE
+  })
+
+  if (ok) {
+    message("Registered ", length(paths), " library path(s) via ldconfig")
+  }
+  invisible(ok)
 }
 
 #' Patch Makevars for Colab/cloud: add conda lib and driver to RUNPATH

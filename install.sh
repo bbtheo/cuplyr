@@ -276,6 +276,11 @@ install_conda() {
     # CRITICAL ORDER: conda lib FIRST (newer libstdc++), then driver, then CUDA
     export LD_LIBRARY_PATH="$prefix/lib:$driver_lib:$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
     export R_LD_LIBRARY_PATH="$prefix/lib:$driver_lib:$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+
+    # Register paths via ldconfig so library() can find them after process startup
+    log "Registering library paths via ldconfig..."
+    printf '%s\n' "$prefix/lib" "$driver_lib" > /etc/ld.so.conf.d/cuplyr-rapids.conf 2>/dev/null || true
+    ldconfig 2>/dev/null || vlog "Warning: Could not run ldconfig (may need sudo)"
   fi
 
   log "Configuring cuplyr..."
