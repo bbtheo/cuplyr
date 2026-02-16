@@ -273,7 +273,9 @@ install_conda() {
       exit 1
     fi
     log "Real driver found at: $driver_lib"
-    export LD_LIBRARY_PATH="$driver_lib:$CUDA_HOME/lib64:$prefix/lib:${LD_LIBRARY_PATH:-}"
+    # CRITICAL ORDER: conda lib FIRST (newer libstdc++), then driver, then CUDA
+    export LD_LIBRARY_PATH="$prefix/lib:$driver_lib:$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+    export R_LD_LIBRARY_PATH="$prefix/lib:$driver_lib:$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
   fi
 
   log "Configuring cuplyr..."
@@ -285,11 +287,13 @@ install_conda() {
   cd "$SRC_DIR"
   run ./configure
 
-  # Cloud: patch Makevars to prepend driver RUNPATH
+  # Cloud: patch Makevars to prepend conda lib and driver RUNPATH
   if [ -n "$driver_lib" ] && [ -f "src/Makevars" ]; then
-    log "Patching Makevars for cloud driver path..."
-    # Prepend -Wl,--enable-new-dtags -Wl,-rpath,$driver_lib to PKG_LIBS
-    sed -i.bak "s|^PKG_LIBS=|PKG_LIBS=-Wl,--enable-new-dtags -Wl,-rpath,$driver_lib |" src/Makevars
+    log "Patching Makevars for cloud library paths..."
+    # Prepend conda lib (libstdc++) and driver lib (libcuda.so.1) to RUNPATH
+    sed -i.bak "s|^PKG_LIBS=|PKG_LIBS=-Wl,--enable-new-dtags -Wl,-rpath,$prefix/lib -Wl,-rpath,$driver_lib |" src/Makevars
+    # Clean stale build artifacts to force relink
+    rm -f src/*.o src/*.so 2>/dev/null || true
   fi
 
   log "Building cuplyr..."

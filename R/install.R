@@ -397,9 +397,16 @@ install_via_conda <- function(src_dir, conda_prefix, configure_args,
     )
   }
 
-  # Cloud: patch Makevars to put real driver FIRST in RUNPATH
+  # Cloud: patch Makevars to add conda lib and driver to RUNPATH
   if (env %in% c("colab", "cloud_gpu") && !is.null(driver_lib)) {
     patch_makevars_for_cloud(src_dir, driver_lib)
+    # Clean stale build artifacts to force relink with new RUNPATH
+    src_files <- list.files(file.path(src_dir, "src"),
+                            pattern = "\\.(o|so)$", full.names = TRUE)
+    if (length(src_files) > 0) {
+      unlink(src_files)
+      message("Cleaned ", length(src_files), " stale build artifacts")
+    }
   }
 
   # Build
@@ -464,6 +471,13 @@ install_via_system <- function(src_dir, configure_args, dry_run, verbose) {
   # Cloud: patch Makevars
   if (env %in% c("colab", "cloud_gpu") && !is.null(driver_lib)) {
     patch_makevars_for_cloud(src_dir, driver_lib)
+    # Clean stale build artifacts to force relink with new RUNPATH
+    src_files <- list.files(file.path(src_dir, "src"),
+                            pattern = "\\.(o|so)$", full.names = TRUE)
+    if (length(src_files) > 0) {
+      unlink(src_files)
+      message("Cleaned ", length(src_files), " stale build artifacts")
+    }
   }
 
   # Build
@@ -591,8 +605,8 @@ disable_cuda_stubs <- function(lib_dir) {
 
 #' Configure LD_LIBRARY_PATH for cloud environments
 #'
-#' Sets LD_LIBRARY_PATH with the real driver path first, so it takes
-#' priority over any RAPIDS stubs.
+#' Sets LD_LIBRARY_PATH with conda lib FIRST (for newer libstdc++),
+#' then driver path (for libcuda.so.1), then CUDA runtime.
 #'
 #' @param driver_lib Path to directory with real libcuda.so.1.
 #' @param conda_prefix RAPIDS/conda prefix.
@@ -600,17 +614,21 @@ disable_cuda_stubs <- function(lib_dir) {
 configure_cloud_library_paths <- function(driver_lib, conda_prefix) {
   cuda_home <- Sys.getenv("CUDA_HOME", "/usr/local/cuda")
   current <- Sys.getenv("LD_LIBRARY_PATH")
+  # CRITICAL ORDER: conda lib FIRST to find newer libstdc++
   parts <- unique(c(
+    file.path(conda_prefix, "lib"),
     driver_lib,
     file.path(cuda_home, "lib64"),
-    file.path(conda_prefix, "lib"),
     strsplit(current, ":", fixed = TRUE)[[1]]
   ))
   parts <- parts[nzchar(parts)]
-  Sys.setenv(LD_LIBRARY_PATH = paste(parts, collapse = ":"))
+  lib_path <- paste(parts, collapse = ":")
+  Sys.setenv(LD_LIBRARY_PATH = lib_path)
+  # R CMD INSTALL test-load subprocess respects R_LD_LIBRARY_PATH
+  Sys.setenv(R_LD_LIBRARY_PATH = lib_path)
 }
 
-#' Patch Makevars for Colab/cloud: put driver FIRST in RUNPATH
+#' Patch Makevars for Colab/cloud: add conda lib and driver to RUNPATH
 #' @param src_dir Source directory containing src/Makevars.
 #' @param driver_lib Real driver library path.
 #' @keywords internal
@@ -629,21 +647,31 @@ patch_makevars_for_cloud <- function(src_dir, driver_lib) {
     )
   }
 
-  # Prepend driver_lib to RUNPATH, preserving existing PKG_LIBS content
+  # Prepend conda lib (for libstdc++) and driver lib to RUNPATH
   pkg_libs_idx <- grep("^PKG_LIBS=", mk)
   if (length(pkg_libs_idx) > 0) {
+    conda_prefix <- Sys.getenv("CONDA_PREFIX", "")
+    conda_lib <- if (nzchar(conda_prefix)) file.path(conda_prefix, "lib") else ""
+
     # Extract existing flags (everything after PKG_LIBS=)
     existing <- sub("^PKG_LIBS=", "", mk[pkg_libs_idx[1]])
-    # Prepend driver RUNPATH before existing flags
-    mk[pkg_libs_idx[1]] <- sprintf(
-      "PKG_LIBS=-Wl,--enable-new-dtags -Wl,-rpath,%s %s",
-      driver_lib,
-      existing
-    )
+
+    # Prepend conda lib FIRST (libstdc++), then driver lib (libcuda.so.1)
+    if (nzchar(conda_lib)) {
+      mk[pkg_libs_idx[1]] <- sprintf(
+        "PKG_LIBS=-Wl,--enable-new-dtags -Wl,-rpath,%s -Wl,-rpath,%s %s",
+        conda_lib, driver_lib, existing
+      )
+    } else {
+      mk[pkg_libs_idx[1]] <- sprintf(
+        "PKG_LIBS=-Wl,--enable-new-dtags -Wl,-rpath,%s %s",
+        driver_lib, existing
+      )
+    }
   }
 
   writeLines(mk, makevars)
-  message("Patched src/Makevars: driver RUNPATH = ", driver_lib)
+  message("Patched src/Makevars: RUNPATH prepended with conda lib and driver")
   invisible(TRUE)
 }
 
@@ -661,7 +689,20 @@ run_in_dir <- function(dir, cmd, args = character(), verbose = FALSE) {
   on.exit(setwd(old_wd), add = TRUE)
   setwd(dir)
 
-  system2(cmd, args,
-          stdout = if (verbose) "" else FALSE,
-          stderr = if (verbose) "" else FALSE)
+  if (verbose) {
+    system2(cmd, args, stdout = "", stderr = "")
+  } else {
+    # Capture output to show on failure
+    out <- system2(cmd, args, stdout = TRUE, stderr = TRUE)
+    status <- attr(out, "status")
+    if (is.null(status)) status <- 0L
+    if (status != 0L) {
+      # Show tail of output for debugging
+      n <- length(out)
+      start <- max(1L, n - 80L)
+      message("\n--- Last ", n - start + 1L, " lines of output ---")
+      message(paste(out[start:n], collapse = "\n"))
+    }
+    status
+  }
 }
