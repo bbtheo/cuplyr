@@ -253,25 +253,47 @@ install_via_conda <- function(src_dir, conda_prefix, configure_args,
 
   if (!has_cudf) {
     message("Installing RAPIDS packages into ", conda_prefix, " ...")
-    conda_args <- c(
+    base_args <- c(
       "create", "-y", "-p", conda_prefix,
-      "-c", "rapidsai", "-c", "conda-forge", "-c", "nvidia",
-      "libcudf>=25.12", "librmm>=25.12", "libkvikio>=25.12",
-      "spdlog", "fmt",
-      "cuda-toolkit>=12.0,<13"
+      "-c", "rapidsai", "-c", "conda-forge", "-c", "nvidia"
+    )
+    conda_arg_sets <- list(
+      c(base_args, "libcudf=25.12", "librmm=25.12", "libkvikio=25.12", "spdlog", "fmt"),
+      c(base_args, "libcudf", "librmm", "libkvikio", "spdlog", "fmt")
     )
 
     if (dry_run) {
-      message("[dry-run] Would run: ", conda_cmd, " ", paste(conda_args, collapse = " "))
+      message("[dry-run] Would run: ", conda_cmd, " ", paste(conda_arg_sets[[1]], collapse = " "))
+      message("[dry-run] Fallback if solve fails: ", conda_cmd, " ",
+              paste(conda_arg_sets[[2]], collapse = " "))
     } else {
-      status <- system2(conda_cmd, conda_args,
+      solved <- FALSE
+      last_status <- NA_integer_
+      last_args <- conda_arg_sets[[length(conda_arg_sets)]]
+
+      for (i in seq_along(conda_arg_sets)) {
+        conda_args <- conda_arg_sets[[i]]
+        if (i > 1) {
+          message("Retrying conda solve with relaxed RAPIDS constraints...")
+        }
+
+        status <- system2(conda_cmd, conda_args,
                           stdout = if (verbose) "" else FALSE,
                           stderr = if (verbose) "" else FALSE)
-      if (status != 0) {
+        last_status <- as.integer(status)
+        last_args <- conda_args
+
+        if (isTRUE(last_status == 0L)) {
+          solved <- TRUE
+          break
+        }
+      }
+
+      if (!solved) {
         stop(
-          conda_cmd, " create failed (exit code ", status, ").\n",
+          conda_cmd, " create failed (exit code ", last_status, ").\n",
           "Try running manually:\n  ",
-          conda_cmd, " ", paste(conda_args, collapse = " "),
+          conda_cmd, " ", paste(last_args, collapse = " "),
           call. = FALSE
         )
       }
@@ -432,12 +454,8 @@ detect_environment <- function(override = Sys.getenv("CUPLYR_ENV")) {
             paste(valid, collapse = ", "))
   }
 
-  # Container (check first — containers may run on cloud)
-  if (file.exists("/.dockerenv") || nzchar(Sys.getenv("KUBERNETES_SERVICE_HOST"))) {
-    return("container")
-  }
-
-  # Colab (require 2+ signals to avoid false positives)
+  # Colab (require 2+ signals to avoid false positives). Check before generic
+  # container markers because Colab itself runs in containers.
   colab_signals <- c(
     file.exists("/content"),
     nzchar(Sys.getenv("COLAB_RELEASE_TAG")),
@@ -446,6 +464,11 @@ detect_environment <- function(override = Sys.getenv("CUPLYR_ENV")) {
   )
   if (sum(colab_signals) >= 2) {
     return("colab")
+  }
+
+  # Container
+  if (file.exists("/.dockerenv") || nzchar(Sys.getenv("KUBERNETES_SERVICE_HOST"))) {
+    return("container")
   }
 
   # Generic cloud GPU: nvidia-smi works but driver in non-standard path

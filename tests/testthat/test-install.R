@@ -27,3 +27,70 @@ test_that("get_source_dir() finds cloned child cuplyr directory", {
 
   expect_equal(detected, normalizePath(src_dir))
 })
+
+test_that("detect_environment() prioritizes Colab signals over container marker", {
+  withr::local_envvar(c(
+    COLAB_RELEASE_TAG = "test-colab",
+    COLAB_GPU = "1",
+    KUBERNETES_SERVICE_HOST = ""
+  ))
+
+  expect_equal(detect_environment(), "colab")
+})
+
+test_that("install_via_conda() retries with relaxed package constraints", {
+  src_dir <- tempfile("cuplyr-src-")
+  dir.create(src_dir, recursive = TRUE, showWarnings = FALSE)
+  on.exit(unlink(src_dir, recursive = TRUE, force = TRUE), add = TRUE)
+
+  conda_prefix <- tempfile("cuplyr-conda-")
+  on.exit(unlink(conda_prefix, recursive = TRUE, force = TRUE), add = TRUE)
+
+  fake_bin <- tempfile("cuplyr-bin-")
+  dir.create(fake_bin, recursive = TRUE, showWarnings = FALSE)
+  on.exit(unlink(fake_bin, recursive = TRUE, force = TRUE), add = TRUE)
+
+  log_file <- file.path(fake_bin, "mamba.log")
+  state_file <- file.path(fake_bin, "mamba.state")
+
+  mamba_path <- file.path(fake_bin, "mamba")
+  writeLines(
+    c(
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      sprintf("echo \"$@\" >> %s", shQuote(log_file)),
+      sprintf("if [ ! -f %s ]; then", shQuote(state_file)),
+      sprintf("  touch %s", shQuote(state_file)),
+      "  exit 2",
+      "fi",
+      "exit 0"
+    ),
+    mamba_path
+  )
+  Sys.chmod(mamba_path, mode = "0755")
+
+  withr::local_envvar(c(PATH = paste(fake_bin, Sys.getenv("PATH"), sep = ":")))
+
+  testthat::local_mocked_bindings(
+    detect_environment = function(override = "") "container",
+    run_in_dir = function(dir, cmd, args = character(), verbose = FALSE) 0L
+  )
+
+  expect_no_error(
+    install_via_conda(
+      src_dir = src_dir,
+      conda_prefix = conda_prefix,
+      configure_args = character(),
+      dry_run = FALSE,
+      verbose = FALSE
+    )
+  )
+
+  calls <- readLines(log_file, warn = FALSE)
+  expect_length(calls, 2)
+  expect_match(calls[1], "libcudf=25\\.12")
+  expect_false(grepl("cuda-toolkit", calls[1]))
+  expect_match(calls[2], "(^| )libcudf( |$)")
+  expect_match(calls[2], "(^| )librmm( |$)")
+  expect_match(calls[2], "(^| )libkvikio( |$)")
+})
