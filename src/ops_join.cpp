@@ -5,7 +5,13 @@
 #include "cuda_utils.hpp"
 #include "gpu_table.hpp"
 
+#if __has_include(<cudf/join/join.hpp>)
 #include <cudf/join/join.hpp>
+#elif __has_include(<cudf/join.hpp>)
+#include <cudf/join.hpp>
+#else
+#error "cuDF join headers not found (expected cudf/join/join.hpp or cudf/join.hpp)"
+#endif
 #include <cudf/copying.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/table/table_view.hpp>
@@ -59,7 +65,8 @@ std::unique_ptr<cudf::table> build_join_result(
             "copy join map to host");
 
         for (auto& v : host) {
-            if (v == cudf::JoinNoMatch) v = nrows;
+            // Join "no match" sentinels are negative across cuDF versions.
+            if (v < 0) v = nrows;
         }
 
         rmm::device_uvector<cudf::size_type> out(map.size(), stream);
