@@ -2,11 +2,23 @@
 # configure - Detect CUDA and libcudf, generate src/Makevars
 
 echo "Configuring cuplyr..."
+echo ""
 
 # Default paths
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 CUDF_HOME="${CUDF_HOME:-}"
 CONDA_PREFIX="${CONDA_PREFIX:-}"
+
+# Detect Linux distro for remediation hints
+detect_distro() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        echo "$ID"
+    else
+        echo "unknown"
+    fi
+}
+DISTRO=$(detect_distro)
 
 # Function to find libcudf
 find_cudf() {
@@ -44,23 +56,134 @@ if [ ! -d "$CUDA_HOME" ]; then
 fi
 
 if [ ! -f "$CUDA_HOME/include/cuda.h" ]; then
-    echo "ERROR: CUDA not found. Please set CUDA_HOME environment variable."
-    echo "       Example: export CUDA_HOME=/usr/local/cuda"
+    echo "ERROR: CUDA toolkit not found."
+    echo ""
+    echo "Searched: CUDA_HOME=$CUDA_HOME and common paths"
+    echo "  (/usr/local/cuda, /opt/cuda, /opt/conda/targets/x86_64-linux, /usr/lib/cuda)"
+    echo ""
+    echo "To fix, install the CUDA toolkit:"
+    case "$DISTRO" in
+        ubuntu|debian)
+            echo "  sudo apt-get install nvidia-cuda-toolkit"
+            echo "  # or install from NVIDIA: https://developer.nvidia.com/cuda-downloads" ;;
+        fedora|rhel|centos|rocky|alma)
+            echo "  sudo dnf install cuda-toolkit"
+            echo "  # or install from NVIDIA: https://developer.nvidia.com/cuda-downloads" ;;
+        arch|manjaro)
+            echo "  sudo pacman -S cuda" ;;
+        *)
+            echo "  Visit: https://developer.nvidia.com/cuda-downloads" ;;
+    esac
+    echo ""
+    echo "Or set CUDA_HOME manually:"
+    echo "  export CUDA_HOME=/path/to/cuda"
+    echo ""
+    echo "Using pixi? Run: pixi run configure"
+    exit 1
+fi
+
+# Find CUDA driver library (prefer system driver libcuda.so.1 over toolkit stubs)
+find_cuda_driver_lib() {
+    if command -v ldconfig >/dev/null 2>&1; then
+        local driver_lib
+        driver_lib=$(ldconfig -p 2>/dev/null | awk '/libcuda\.so\.1/{print $NF; exit}')
+        if [ -n "$driver_lib" ] && [ -f "$driver_lib" ]; then
+            dirname "$driver_lib"
+            return 0
+        fi
+    fi
+
+    for path in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib/wsl/lib "$CUDA_HOME/lib64" "$CUDA_HOME/lib"; do
+        if [ -f "$path/libcuda.so.1" ] || [ -f "$path/libcuda.so" ]; then
+            echo "$path"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Find CUDA runtime library path (libcudart)
+find_cuda_runtime_lib() {
+    for path in "$CUDA_HOME/lib64" "$CUDA_HOME/lib" "$CONDA_PREFIX/lib64" "$CONDA_PREFIX/lib"; do
+        if [ -n "$path" ] && [ -f "$path/libcudart.so" ]; then
+            echo "$path"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+CUDA_DRIVER_LIB=$(find_cuda_driver_lib)
+if [ -z "$CUDA_DRIVER_LIB" ]; then
+    echo "ERROR: libcuda.so.1 not found (NVIDIA driver library)."
+    echo ""
+    echo "This means the NVIDIA GPU driver is not installed or not visible."
+    echo ""
+    echo "To fix:"
+    case "$DISTRO" in
+        ubuntu|debian)
+            echo "  sudo apt-get install nvidia-driver-535"
+            echo "  # or use: sudo ubuntu-drivers autoinstall" ;;
+        fedora|rhel|centos|rocky|alma)
+            echo "  sudo dnf install nvidia-driver" ;;
+        arch|manjaro)
+            echo "  sudo pacman -S nvidia" ;;
+        *)
+            echo "  Install NVIDIA driver from: https://www.nvidia.com/Download/index.aspx" ;;
+    esac
+    echo ""
+    echo "After installing, verify with: nvidia-smi"
+    echo ""
+    echo "If driver IS installed but not found, check:"
+    echo "  ldconfig -p | grep libcuda"
+    echo "  ls /usr/lib/x86_64-linux-gnu/libcuda.so* /usr/lib64/libcuda.so*"
+    exit 1
+fi
+
+CUDA_RUNTIME_LIB=$(find_cuda_runtime_lib)
+if [ -z "$CUDA_RUNTIME_LIB" ]; then
+    echo "ERROR: libcudart.so not found (CUDA runtime library)."
+    echo ""
+    echo "Searched: CUDA_HOME=$CUDA_HOME/lib64, CONDA_PREFIX=$CONDA_PREFIX/lib"
+    echo ""
+    echo "This usually means the CUDA toolkit is incomplete."
+    echo "Reinstall the CUDA toolkit or set CUDA_HOME to the correct path."
+    echo ""
+    echo "Using pixi? Run: pixi run configure"
     exit 1
 fi
 
 echo "Found CUDA at: $CUDA_HOME"
 echo "CUDA version: $($CUDA_HOME/bin/nvcc --version | grep release | awk '{print $6}')"
+echo "Using CUDA driver lib path: $CUDA_DRIVER_LIB"
+echo "Using CUDA runtime lib path: $CUDA_RUNTIME_LIB"
 
 # Detect libcudf
 CUDF_PREFIX=$(find_cudf)
 if [ -z "$CUDF_PREFIX" ]; then
-    echo "ERROR: libcudf not found. Please install RAPIDS or set CUDF_HOME."
+    echo "ERROR: libcudf not found (RAPIDS cuDF C++ library)."
     echo ""
-    echo "Installation options:"
-    echo "  1. Conda: conda install -c rapidsai -c conda-forge -c nvidia libcudf"
-    echo "  2. Pip:   pip install libcudf-cu12"
-    echo "  3. Set:   export CUDF_HOME=/path/to/cudf"
+    echo "Searched:"
+    echo "  CUDF_HOME=$CUDF_HOME"
+    echo "  CONDA_PREFIX=$CONDA_PREFIX"
+    echo "  /usr/local, /opt/rapids, /opt/conda, /usr"
+    echo ""
+    echo "Install options (pick one):"
+    echo ""
+    echo "  1. Recommended (pixi - handles everything):"
+    echo "     pixi run install"
+    echo ""
+    echo "  2. Conda/Mamba:"
+    echo "     mamba install -c rapidsai -c conda-forge -c nvidia libcudf librmm"
+    echo "     # Then re-run: ./configure"
+    echo ""
+    echo "  3. Manual (set path to existing install):"
+    echo "     export CUDF_HOME=/path/to/cudf"
+    echo "     ./configure"
+    echo ""
+    echo "For more details: https://github.com/bbtheo/cuplyr#installation"
     exit 1
 fi
 
@@ -139,6 +262,8 @@ done
 
 # Generate Makevars from template
 sed -e "s|@CUDA_HOME@|$CUDA_HOME|g" \
+    -e "s|@CUDA_DRIVER_LIB@|$CUDA_DRIVER_LIB|g" \
+    -e "s|@CUDA_RUNTIME_LIB@|$CUDA_RUNTIME_LIB|g" \
     -e "s|@CUDF_INCLUDE@|$CUDF_INCLUDE|g" \
     -e "s|@CUDF_LIB@|$CUDF_LIB|g" \
     -e "s|@RMM_INCLUDE@|$RMM_INCLUDE|g" \
