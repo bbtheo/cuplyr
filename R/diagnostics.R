@@ -24,6 +24,7 @@
 #' @seealso [check_deps()] for pre-install checks,
 #'   [verify_installation()] for post-install verification
 #'
+#' @importFrom cli col_green
 #' @export
 #' @examples
 #' # Full diagnostics
@@ -174,9 +175,10 @@ diagnostics <- function(redact = TRUE) {
     cat("  Available: ", "YES\n")
     cat("  Name:      ", info$gpu$name %||% "unknown", "\n")
     cat("  Compute:   ", info$gpu$compute_capability %||% "unknown", "\n")
-    total_gb <- round((info$gpu$total_memory %||% 0) / 1e9, 1)
-    free_gb <- round((info$gpu$free_memory %||% 0) / 1e9, 1)
-    cat("  Memory:    ", total_gb, "GB total, ", free_gb, "GB free\n")
+    # Use GiB (binary) not GB (SI) to match GPU spec sheets
+    total_gib <- round((info$gpu$total_memory %||% 0) / (1024^3), 1)
+    free_gib <- round((info$gpu$free_memory %||% 0) / (1024^3), 1)
+    cat("  Memory:    ", total_gib, "GiB total, ", free_gib, "GiB free\n")
   } else {
     cat("  Available:  NO\n")
     if (!is.null(info$gpu$error)) {

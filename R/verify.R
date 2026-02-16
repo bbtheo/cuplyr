@@ -27,6 +27,7 @@
 #' @seealso [check_deps()] for pre-install dependency checks,
 #'   [diagnostics()] for full system diagnostics
 #'
+#' @importFrom cli col_green col_red
 #' @export
 #' @examples
 #' \dontrun{
@@ -98,8 +99,9 @@ verify_installation <- function() {
       stringsAsFactors = FALSE
     )
     gpu_df <- tbl_gpu(test_df)
+    # Simple filter without tidy eval complexity - we're testing GPU path, not rlang
     result_df <- gpu_df |>
-      dplyr::filter(rlang::.data[["x"]] > 2) |>
+      dplyr::filter(x > 2) |>
       dplyr::collect()
 
     # Verify results

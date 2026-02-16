@@ -31,6 +31,7 @@
 #' @seealso [verify_installation()] for post-install verification,
 #'   [diagnostics()] for full system diagnostics
 #'
+#' @importFrom cli col_green col_red col_yellow symbol
 #' @export
 #' @examples
 #' # Human-readable output
@@ -323,12 +324,23 @@ print_deps_text <- function(result, verbose = FALSE) {
 }
 
 deps_to_json <- function(result) {
+  # Properly escape JSON strings
+  escape_json <- function(s) {
+    # Order matters: backslash first, then others
+    s <- gsub("\\", "\\\\", s, fixed = TRUE)   # \ -> \\
+    s <- gsub('"', '\\"', s, fixed = TRUE)     # " -> \"
+    s <- gsub("\n", "\\n", s, fixed = TRUE)    # newline -> \n
+    s <- gsub("\r", "\\r", s, fixed = TRUE)    # CR -> \r
+    s <- gsub("\t", "\\t", s, fixed = TRUE)    # tab -> \t
+    s
+  }
+
   checks_json <- vapply(result$checks, function(c) {
-    val <- if (is.na(c$value)) "null" else paste0('"', c$value, '"')
+    val <- if (is.na(c$value)) "null" else paste0('"', escape_json(c$value), '"')
     ok_str <- if (is.na(c$ok)) "null" else if (c$ok) "true" else "false"
     sprintf('    "%s": {"ok": %s, "value": %s, "message": "%s"}',
             gsub(" ", "_", tolower(c$name)),
-            ok_str, val, gsub('"', '\\"', c$message))
+            ok_str, val, escape_json(c$message))
   }, character(1))
 
   paste0('{\n  "ok": ', if (result$ok) "true" else "false",

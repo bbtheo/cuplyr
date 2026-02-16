@@ -122,6 +122,11 @@ detect_install_method <- function(verbose = FALSE) {
   }
 
   # 3. System dependencies present?
+  # Suppress console output from check_deps (we only need the result)
+  deps <- suppressMessages(capture.output(
+    check_deps(format = "text", verbose = FALSE),
+    type = "output"
+  ))
   deps <- check_deps(format = "text", verbose = FALSE)
   if (isTRUE(deps$checks$cuda$ok) && isTRUE(deps$checks$cudf$ok)) {
     if (verbose) message("CUDA and cuDF found on system")
@@ -368,6 +373,7 @@ install_via_conda <- function(src_dir, conda_prefix, configure_args,
   }, add = TRUE)
 
   # Cloud: set up driver paths before configure
+  driver_lib <- NULL
   if (env %in% c("colab", "cloud_gpu")) {
     driver_lib <- find_real_driver_lib()
     if (is.null(driver_lib)) {
@@ -392,11 +398,8 @@ install_via_conda <- function(src_dir, conda_prefix, configure_args,
   }
 
   # Cloud: patch Makevars to put real driver FIRST in RUNPATH
-  if (env %in% c("colab", "cloud_gpu")) {
-    driver_lib <- driver_lib %||% find_real_driver_lib()
-    if (!is.null(driver_lib)) {
-      patch_makevars_for_cloud(src_dir, driver_lib)
-    }
+  if (env %in% c("colab", "cloud_gpu") && !is.null(driver_lib)) {
+    patch_makevars_for_cloud(src_dir, driver_lib)
   }
 
   # Build
@@ -436,6 +439,7 @@ install_via_system <- function(src_dir, configure_args, dry_run, verbose) {
   }
 
   # Cloud: disable stubs and configure paths
+  driver_lib <- NULL
   if (env %in% c("colab", "cloud_gpu")) {
     conda_prefix <- Sys.getenv("CONDA_PREFIX", "/opt/rapids")
     disable_cuda_stubs(file.path(conda_prefix, "lib"))
@@ -458,11 +462,8 @@ install_via_system <- function(src_dir, configure_args, dry_run, verbose) {
   }
 
   # Cloud: patch Makevars
-  if (env %in% c("colab", "cloud_gpu")) {
-    driver_lib <- driver_lib %||% find_real_driver_lib()
-    if (!is.null(driver_lib)) {
-      patch_makevars_for_cloud(src_dir, driver_lib)
-    }
+  if (env %in% c("colab", "cloud_gpu") && !is.null(driver_lib)) {
+    patch_makevars_for_cloud(src_dir, driver_lib)
   }
 
   # Build
@@ -628,20 +629,18 @@ patch_makevars_for_cloud <- function(src_dir, driver_lib) {
     )
   }
 
-  # Rewrite PKG_LIBS: driver_lib FIRST in RUNPATH
-  mk <- sub(
-    "^PKG_LIBS=(.*)$",
-    sprintf(
-      paste0(
-        "PKG_LIBS=-Wl,--enable-new-dtags ",
-        "-Wl,-rpath,%s ",
-        "-L$(CUDF_LIB) -Wl,-rpath,$(CUDF_LIB) -Wl,-rpath,$(RAPIDS_RPATHS) -lcudf ",
-        "-L$(CUDA_HOME)/lib64 -Wl,-rpath,$(CUDA_HOME)/lib64 -lcudart"
-      ),
-      driver_lib
-    ),
-    mk
-  )
+  # Prepend driver_lib to RUNPATH, preserving existing PKG_LIBS content
+  pkg_libs_idx <- grep("^PKG_LIBS=", mk)
+  if (length(pkg_libs_idx) > 0) {
+    # Extract existing flags (everything after PKG_LIBS=)
+    existing <- sub("^PKG_LIBS=", "", mk[pkg_libs_idx[1]])
+    # Prepend driver RUNPATH before existing flags
+    mk[pkg_libs_idx[1]] <- sprintf(
+      "PKG_LIBS=-Wl,--enable-new-dtags -Wl,-rpath,%s %s",
+      driver_lib,
+      existing
+    )
+  }
 
   writeLines(mk, makevars)
   message("Patched src/Makevars: driver RUNPATH = ", driver_lib)

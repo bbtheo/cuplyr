@@ -98,3 +98,30 @@ test_that("check_libcudf() succeeds when headers and library exist", {
   result <- check_libcudf(search_paths = tmp)
   expect_true(result$ok)
 })
+
+test_that("deps_to_json() escapes special characters correctly", {
+  # Create a check result with special characters in message
+  result <- list(
+    ok = TRUE,
+    checks = list(
+      test = list(
+        ok = TRUE,
+        name = "Test Check",
+        value = "test\"value\\with\nspecial\tchars",
+        message = "Message with \"quotes\" and\nnewlines\tand\\backslashes"
+      )
+    )
+  )
+
+  json_str <- deps_to_json(result)
+
+  # Should contain properly escaped sequences
+  expect_match(json_str, '\\\\"quotes\\\\"', fixed = FALSE)
+  expect_match(json_str, '\\\\n', fixed = FALSE)
+  expect_match(json_str, '\\\\t', fixed = FALSE)
+  expect_match(json_str, '\\\\\\\\', fixed = FALSE)
+
+  # Should be valid JSON structure
+  expect_match(json_str, '\\{\\s*"ok":\\s*true')
+  expect_match(json_str, '"checks":\\s*\\{')
+})

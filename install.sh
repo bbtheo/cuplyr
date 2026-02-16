@@ -67,7 +67,8 @@ run() {
     if $VERBOSE; then
       "$@"
     else
-      "$@" > /dev/null 2>&1
+      # Suppress stdout but preserve stderr for errors
+      "$@" > /dev/null
     fi
   fi
 }
@@ -120,35 +121,160 @@ install_pixi() {
   run pixi run install
 }
 
+# --- Detect environment ---
+detect_env() {
+  # Colab detection (need 2+ signals)
+  local colab_signals=0
+  [ -d "/content" ] && colab_signals=$((colab_signals + 1))
+  [ -n "${COLAB_RELEASE_TAG:-}" ] && colab_signals=$((colab_signals + 1))
+  [ -n "${COLAB_GPU:-}" ] && colab_signals=$((colab_signals + 1))
+  [ -f "/usr/local/share/jupyter/kernels/ir" ] && colab_signals=$((colab_signals + 1))
+  if [ "$colab_signals" -ge 2 ]; then
+    echo "colab"
+    return
+  fi
+
+  # Container
+  if [ -f "/.dockerenv" ] || [ -n "${KUBERNETES_SERVICE_HOST:-}" ]; then
+    echo "container"
+    return
+  fi
+
+  # Cloud GPU (non-standard driver path)
+  if has_cmd nvidia-smi; then
+    if [ -f "/usr/lib64-nvidia/libcuda.so.1" ] || [ -f "/usr/lib/nvidia/libcuda.so.1" ]; then
+      if [ ! -f "/usr/lib/x86_64-linux-gnu/libcuda.so.1" ]; then
+        echo "cloud_gpu"
+        return
+      fi
+    fi
+  fi
+
+  echo "local"
+}
+
+# --- Find real NVIDIA driver ---
+find_real_driver() {
+  for p in /usr/lib64-nvidia /usr/lib/x86_64-linux-gnu; do
+    if [ -f "$p/libcuda.so.1" ]; then
+      local size
+      size=$(stat -c %s "$p/libcuda.so.1" 2>/dev/null || echo 0)
+      # Real driver is 30MB+, stubs are <1MB
+      if [ "$size" -ge 1000000 ]; then
+        echo "$p"
+        return
+      fi
+    fi
+  done
+  echo ""
+}
+
+# --- Disable CUDA stubs ---
+disable_stubs() {
+  local lib_dir="$1"
+  for stub_name in libcuda.so libcuda.so.1; do
+    for loc in "$lib_dir/stubs" "$lib_dir"; do
+      local stub_path="$loc/$stub_name"
+      if [ -f "$stub_path" ]; then
+        local size
+        size=$(stat -c %s "$stub_path" 2>/dev/null || echo 0)
+        # Only disable if it's a stub (small file)
+        if [ "$size" -lt 1000000 ]; then
+          vlog "Disabling stub: $stub_path"
+          mv "$stub_path" "$stub_path.disabled" 2>/dev/null || true
+        fi
+      fi
+    done
+  done
+}
+
 # --- Install via conda ---
 install_conda() {
   log "Installing via conda..."
+
+  local env
+  env=$(detect_env)
+  vlog "Environment: $env"
 
   local conda_cmd
   if has_cmd mamba; then conda_cmd="mamba"; else conda_cmd="conda"; fi
 
   local prefix="${CONDA_PREFIX_ARG:-${CONDA_PREFIX:-}}"
   if [ -z "$prefix" ]; then
-    prefix="/opt/rapids"
-    # Fall back to temp if /opt is not writable
-    if ! mkdir -p "$prefix" 2>/dev/null; then
+    if [ "$env" = "colab" ] || [ "$env" = "cloud_gpu" ]; then
+      prefix="/opt/rapids"
+    else
       prefix="$(mktemp -d)/cuplyr-rapids"
+    fi
+  fi
+
+  # Cloud: disable stubs before anything
+  if [ "$env" = "colab" ] || [ "$env" = "cloud_gpu" ]; then
+    if [ -d "$prefix/lib" ]; then
+      log "Disabling CUDA stubs..."
+      disable_stubs "$prefix/lib"
     fi
   fi
 
   # Check if RAPIDS already installed
   if [ ! -f "$prefix/include/cudf/types.hpp" ]; then
     log "Installing RAPIDS packages into $prefix ..."
-    run "$conda_cmd" create -y -p "$prefix" \
-      -c rapidsai -c conda-forge -c nvidia \
-      "libcudf>=25.12" "librmm>=25.12" "libkvikio>=25.12" \
-      spdlog fmt "cuda-toolkit>=12.0,<13"
+
+    # Try pinned versions first, fall back to unpinned
+    local solved=0
+    for attempt in 1 2; do
+      if [ "$attempt" -eq 1 ]; then
+        vlog "Trying pinned RAPIDS 25.12..."
+        run "$conda_cmd" create -y -p "$prefix" \
+          -c rapidsai -c conda-forge -c nvidia \
+          "libcudf=25.12" "librmm=25.12" "libkvikio=25.12" spdlog fmt && solved=1
+      else
+        log "Retrying with unpinned RAPIDS versions..."
+        run "$conda_cmd" create -y -p "$prefix" \
+          -c rapidsai -c conda-forge -c nvidia \
+          libcudf librmm libkvikio spdlog fmt && solved=1
+      fi
+
+      if [ "$solved" -eq 1 ]; then
+        # Check for dev packages if headers missing
+        if [ ! -f "$prefix/include/cudf/types.hpp" ]; then
+          vlog "Installing -dev packages..."
+          run "$conda_cmd" install -y -p "$prefix" \
+            -c rapidsai -c conda-forge -c nvidia \
+            libcudf-dev librmm-dev libkvikio-dev || true
+        fi
+        [ -f "$prefix/include/cudf/types.hpp" ] && break
+        solved=0
+      fi
+    done
+
+    if [ "$solved" -eq 0 ] || [ ! -f "$prefix/include/cudf/types.hpp" ]; then
+      echo "ERROR: Failed to install RAPIDS packages with usable headers/libraries" >&2
+      exit 1
+    fi
+
+    # Disable stubs again (conda may recreate them)
+    if [ "$env" = "colab" ] || [ "$env" = "cloud_gpu" ]; then
+      disable_stubs "$prefix/lib"
+    fi
   else
     log "RAPIDS packages found at $prefix"
   fi
 
   export CONDA_PREFIX="$prefix"
   export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+
+  # Cloud: configure library paths
+  local driver_lib=""
+  if [ "$env" = "colab" ] || [ "$env" = "cloud_gpu" ]; then
+    driver_lib=$(find_real_driver)
+    if [ -z "$driver_lib" ]; then
+      echo "ERROR: Could not find real NVIDIA driver" >&2
+      exit 1
+    fi
+    log "Real driver found at: $driver_lib"
+    export LD_LIBRARY_PATH="$driver_lib:$CUDA_HOME/lib64:$prefix/lib:${LD_LIBRARY_PATH:-}"
+  fi
 
   log "Configuring cuplyr..."
   if $DRY_RUN; then
@@ -158,6 +284,13 @@ install_conda() {
   fi
   cd "$SRC_DIR"
   run ./configure
+
+  # Cloud: patch Makevars to prepend driver RUNPATH
+  if [ -n "$driver_lib" ] && [ -f "src/Makevars" ]; then
+    log "Patching Makevars for cloud driver path..."
+    # Prepend -Wl,--enable-new-dtags -Wl,-rpath,$driver_lib to PKG_LIBS
+    sed -i.bak "s|^PKG_LIBS=|PKG_LIBS=-Wl,--enable-new-dtags -Wl,-rpath,$driver_lib |" src/Makevars
+  fi
 
   log "Building cuplyr..."
   run R CMD INSTALL .
