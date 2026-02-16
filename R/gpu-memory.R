@@ -122,7 +122,7 @@ gpu_object_info <- function(x) {
     column_types = character(0),
     estimated_gpu_bytes = NA_real_,
     estimated_gpu_mb = NA_real_,
-    r_object_bytes = as.numeric(object.size(x)),
+    r_object_bytes = as.numeric(utils::object.size(x)),
     data_on_gpu = FALSE,
     pointer_valid = FALSE
   )
@@ -212,7 +212,7 @@ verify_gpu_data <- function(x) {
   }
 
   # Check 5: R object should be lightweight (no data copy)
-  r_size <- as.numeric(object.size(x))
+  r_size <- as.numeric(utils::object.size(x))
   ncol <- length(x$schema$names)
   max_expected <- 10000 + ncol * 200  # Base + per-column metadata
 
@@ -254,7 +254,7 @@ verify_gpu_data <- function(x) {
 #'   cat("Ratio:", round(comparison$ratio, 1), "x\n")
 #' }
 gpu_size_comparison <- function(x) {
-  r_bytes <- as.numeric(object.size(x))
+  r_bytes <- as.numeric(utils::object.size(x))
   gpu_bytes <- gpu_memory_usage(x)
 
   list(
@@ -331,6 +331,9 @@ gpu_memory_state <- function() {
 #' or before large allocations.
 #'
 #' @param verbose Logical. If TRUE, prints memory freed. Default FALSE.
+#' @param aggressive Logical. If TRUE (default), runs multiple GC passes with
+#'   short delays to more aggressively trigger finalizers. If FALSE, runs a
+#'   lighter cleanup pass.
 #'
 #' @return Invisibly returns a list with memory state before and after cleanup,
 #'   and the amount freed in bytes and gigabytes.

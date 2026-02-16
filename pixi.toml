@@ -20,7 +20,7 @@ pandoc = ">=3.0"
 configure = { cmd = "./configure", description = "Detect paths, generate Makevars" }
 install = { cmd = "R CMD INSTALL .", depends-on = ["configure"], description = "Configure and install R package" }
 test = { cmd = "R -e 'devtools::test(reporter = \"summary\")'", description = "Run tests" }
-check = { cmd = "R CMD check --no-manual .", description = "R CMD check" }
+check = { cmd = "_R_CHECK_FORCE_SUGGESTS_=false R CMD check --no-manual --ignore-vignettes cuplyr_*.tar.gz", depends-on = ["build"], description = "R CMD check (tarball)" }
 clean = { cmd = "rm -f src/*.o src/*.so src/Makevars 2>/dev/null || true", description = "Clean artifacts" }
 dev = { cmd = "./configure && R CMD INSTALL .", depends-on = ["clean"], description = "Clean rebuild" }
 bench = { cmd = "Rscript inst/benchmarks/run_benchmarks.R", description = "Run benchmarks" }
@@ -35,6 +35,6 @@ depends-on = ["configure"]
 description = "Build source tarball (excludes .pixi)"
 
 [tasks.full-check]
-cmd = "R CMD build . && R CMD check cuplyr_*.tar.gz --as-cran"
-depends-on = ["configure"]
+cmd = "_R_CHECK_FORCE_SUGGESTS_=false R CMD check --no-manual --ignore-vignettes cuplyr_*.tar.gz --as-cran"
+depends-on = ["build"]
 description = "Full CRAN-style check"

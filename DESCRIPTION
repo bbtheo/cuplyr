@@ -1,5 +1,5 @@
 Package: cuplyr
-Title: GPU-Accelerated Data Manipulation with dplyr Syntax
+Title: GPU-Accelerated Data Manipulation with Dplyr Syntax
 Version: 0.1.1.9000
 Authors@R: c(
     person("Theo", "Blauberg", email = "theo.blauberg@outlook.com", role = c("aut", "cre")),
@@ -26,8 +26,6 @@ Imports:
     dplyr (>= 1.1.0),
     rlang (>= 1.1.0),
     vctrs (>= 0.6.0),
-    pillar (>= 1.9.0),
-    glue (>= 1.6.0),
     cli (>= 3.6.0),
     tidyselect (>= 1.2.0),
     tibble (>= 3.2.0)

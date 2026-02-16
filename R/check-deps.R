@@ -67,7 +67,8 @@ check_deps <- function(format = c("text", "json"), verbose = FALSE) {
   # 6. GPU access (only if cuplyr is loaded)
   checks$gpu <- check_gpu_access()
 
-  all_ok <- all(vapply(checks, function(c) isTRUE(c$ok), logical(1)))
+  # Treat NA checks as "not evaluated" (non-fatal), but fail on explicit FALSE.
+  all_ok <- !any(vapply(checks, function(c) identical(c$ok, FALSE), logical(1)))
 
   result <- list(ok = all_ok, checks = checks)
 
@@ -157,33 +158,63 @@ check_cuda_toolkit <- function() {
   )
 }
 
-check_libcudf <- function() {
-  conda_prefix <- Sys.getenv("CONDA_PREFIX", "")
-  cudf_home <- Sys.getenv("CUDF_HOME", "")
+check_libcudf <- function(search_paths = NULL) {
+  if (is.null(search_paths)) {
+    conda_prefix <- Sys.getenv("CONDA_PREFIX", "")
+    cudf_home <- Sys.getenv("CUDF_HOME", "")
 
-  search_paths <- c(
-    if (nzchar(cudf_home)) cudf_home,
-    if (nzchar(conda_prefix)) conda_prefix,
-    "/usr/local", "/opt/rapids", "/opt/conda", "/usr"
-  )
+    search_paths <- c(
+      if (nzchar(cudf_home)) cudf_home,
+      if (nzchar(conda_prefix)) conda_prefix,
+      "/usr/local", "/opt/rapids", "/opt/conda", "/usr"
+    )
+  }
+
+  search_paths <- unique(search_paths[nzchar(search_paths)])
+  header_only_paths <- character()
 
   for (path in search_paths) {
     header <- file.path(path, "include", "cudf", "types.hpp")
-    if (file.exists(header)) {
+    libcudf <- c(
+      file.path(path, "lib", "libcudf.so"),
+      file.path(path, "lib64", "libcudf.so")
+    )
+
+    has_header <- file.exists(header)
+    has_library <- any(file.exists(libcudf))
+
+    if (has_header && has_library) {
       return(list(
         ok = TRUE,
         name = "libcudf",
         value = path,
-        message = paste0("Found at ", path)
+        message = paste0("Found headers and libcudf.so at ", path)
       ))
     }
+
+    if (has_header && !has_library) {
+      header_only_paths <- c(header_only_paths, path)
+    }
+  }
+
+  if (length(header_only_paths) > 0) {
+    return(list(
+      ok = FALSE,
+      name = "libcudf",
+      value = header_only_paths[1],
+      message = paste0(
+        "Found cuDF headers but libcudf.so is missing under: ",
+        paste(unique(header_only_paths), collapse = ", "),
+        ". Check RAPIDS runtime libraries and CONDA_PREFIX/CUDF_HOME."
+      )
+    ))
   }
 
   list(
     ok = FALSE,
     name = "libcudf",
     value = NA_character_,
-    message = "libcudf headers not found. Install RAPIDS or set CUDF_HOME/CONDA_PREFIX."
+    message = "libcudf headers/libraries not found. Install RAPIDS or set CUDF_HOME/CONDA_PREFIX."
   )
 }
 
@@ -204,8 +235,7 @@ check_r_version <- function() {
 }
 
 check_r_packages <- function() {
-  required <- c("Rcpp", "dplyr", "rlang", "vctrs", "pillar", "glue", "cli",
-                 "tidyselect", "tibble")
+  required <- c("Rcpp", "dplyr", "rlang", "vctrs", "cli", "tidyselect", "tibble")
 
   missing <- character()
   for (pkg in required) {

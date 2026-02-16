@@ -24,3 +24,12 @@
 ^docs/
 ^\.github$
 ^\.github/
+^src/Makevars$
+^CONTRIBUTING\.md$
+^install\.sh$
+^notebooks$
+^notebooks/
+^pkgdown$
+^pkgdown/
+^scripts$
+^scripts/

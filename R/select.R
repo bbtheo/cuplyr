@@ -61,7 +61,7 @@ select.tbl_gpu <- function(.data, ...) {
   }
 
   # tidyselect needs a named vector
-  name_vec <- setNames(current_schema$names, current_schema$names)
+  name_vec <- stats::setNames(current_schema$names, current_schema$names)
   vars <- tidyselect::eval_select(rlang::expr(c(...)), name_vec)
 
   if (length(vars) == 0) {

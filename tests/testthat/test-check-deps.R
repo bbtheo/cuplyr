@@ -54,3 +54,47 @@ test_that("check_deps() GPU access works when cuplyr is loaded", {
   result <- check_deps()
   expect_true(result$checks$gpu$ok)
 })
+
+test_that("check_deps() treats skipped GPU check as non-fatal", {
+  make_check <- function(ok, name, message = "ok") {
+    list(ok = ok, name = name, value = "test", message = message)
+  }
+
+  testthat::local_mocked_bindings(
+    check_nvidia_driver = function() make_check(TRUE, "NVIDIA Driver"),
+    check_cuda_toolkit = function() make_check(TRUE, "CUDA Toolkit"),
+    check_libcudf = function() make_check(TRUE, "libcudf"),
+    check_r_version = function() make_check(TRUE, "R Version"),
+    check_r_packages = function() make_check(TRUE, "R Packages"),
+    check_gpu_access = function() make_check(NA, "GPU Access", "cuplyr not yet installed (skipped)")
+  )
+
+  result <- suppressMessages(check_deps(verbose = FALSE))
+  expect_true(result$ok)
+  expect_true(is.na(result$checks$gpu$ok))
+})
+
+test_that("check_libcudf() requires shared library presence", {
+  tmp <- tempfile("cuplyr-cudf-")
+  dir.create(file.path(tmp, "include", "cudf"), recursive = TRUE, showWarnings = FALSE)
+  on.exit(unlink(tmp, recursive = TRUE, force = TRUE), add = TRUE)
+
+  file.create(file.path(tmp, "include", "cudf", "types.hpp"))
+
+  result <- check_libcudf(search_paths = tmp)
+  expect_false(result$ok)
+  expect_match(result$message, "libcudf", ignore.case = TRUE)
+})
+
+test_that("check_libcudf() succeeds when headers and library exist", {
+  tmp <- tempfile("cuplyr-cudf-")
+  dir.create(file.path(tmp, "include", "cudf"), recursive = TRUE, showWarnings = FALSE)
+  dir.create(file.path(tmp, "lib"), recursive = TRUE, showWarnings = FALSE)
+  on.exit(unlink(tmp, recursive = TRUE, force = TRUE), add = TRUE)
+
+  file.create(file.path(tmp, "include", "cudf", "types.hpp"))
+  file.create(file.path(tmp, "lib", "libcudf.so"))
+
+  result <- check_libcudf(search_paths = tmp)
+  expect_true(result$ok)
+})

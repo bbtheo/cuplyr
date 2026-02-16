@@ -472,6 +472,16 @@ List gpu_head(SEXP xptr, int n, CharacterVector col_names) {
                            "gpu_head float memcpy");
                 NumericVector rv(nrow);
                 for (int j = 0; j < nrow; ++j) rv[j] = temp[j];
+                if (head_col.null_count() > 0 && head_col.null_mask() != nullptr) {
+                    std::vector<uint8_t> validity(bitmask_allocation_size_bytes(nrow));
+                    check_cuda(cudaMemcpy(validity.data(), head_col.null_mask(), validity.size(), cudaMemcpyDeviceToHost),
+                               "gpu_head float null_mask memcpy");
+                    for (int j = 0; j < nrow; ++j) {
+                        if (!(validity[j / 8] & (1 << (j % 8)))) {
+                            rv[j] = NA_REAL;
+                        }
+                    }
+                }
                 result[i] = rv;
                 break;
             }
@@ -487,6 +497,16 @@ List gpu_head(SEXP xptr, int n, CharacterVector col_names) {
                            "gpu_head int64 memcpy");
                 NumericVector rv(nrow);
                 for (int j = 0; j < nrow; ++j) rv[j] = static_cast<double>(temp[j]);
+                if (head_col.null_count() > 0 && head_col.null_mask() != nullptr) {
+                    std::vector<uint8_t> validity(bitmask_allocation_size_bytes(nrow));
+                    check_cuda(cudaMemcpy(validity.data(), head_col.null_mask(), validity.size(), cudaMemcpyDeviceToHost),
+                               "gpu_head int64 null_mask memcpy");
+                    for (int j = 0; j < nrow; ++j) {
+                        if (!(validity[j / 8] & (1 << (j % 8)))) {
+                            rv[j] = NA_REAL;
+                        }
+                    }
+                }
                 result[i] = rv;
                 break;
             }
@@ -668,6 +688,16 @@ List gpu_collect(SEXP xptr, CharacterVector col_names) {
                            "gpu_collect float memcpy");
                 NumericVector rv(nrow);
                 for (int j = 0; j < nrow; ++j) rv[j] = temp[j];
+                if (col.null_count() > 0 && col.null_mask() != nullptr) {
+                    std::vector<uint8_t> validity(bitmask_allocation_size_bytes(nrow));
+                    check_cuda(cudaMemcpy(validity.data(), col.null_mask(), validity.size(), cudaMemcpyDeviceToHost),
+                               "gpu_collect float null_mask memcpy");
+                    for (int j = 0; j < nrow; ++j) {
+                        if (!(validity[j / 8] & (1 << (j % 8)))) {
+                            rv[j] = NA_REAL;
+                        }
+                    }
+                }
                 result[i] = rv;
                 break;
             }
@@ -683,6 +713,16 @@ List gpu_collect(SEXP xptr, CharacterVector col_names) {
                            "gpu_collect int64 memcpy");
                 NumericVector rv(nrow);
                 for (int j = 0; j < nrow; ++j) rv[j] = static_cast<double>(temp[j]);
+                if (col.null_count() > 0 && col.null_mask() != nullptr) {
+                    std::vector<uint8_t> validity(bitmask_allocation_size_bytes(nrow));
+                    check_cuda(cudaMemcpy(validity.data(), col.null_mask(), validity.size(), cudaMemcpyDeviceToHost),
+                               "gpu_collect int64 null_mask memcpy");
+                    for (int j = 0; j < nrow; ++j) {
+                        if (!(validity[j / 8] & (1 << (j % 8)))) {
+                            rv[j] = NA_REAL;
+                        }
+                    }
+                }
                 result[i] = rv;
                 break;
             }

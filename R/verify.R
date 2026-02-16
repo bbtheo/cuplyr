@@ -99,7 +99,7 @@ verify_installation <- function() {
     )
     gpu_df <- tbl_gpu(test_df)
     result_df <- gpu_df |>
-      dplyr::filter(x > 2) |>
+      dplyr::filter(rlang::.data[["x"]] > 2) |>
       dplyr::collect()
 
     # Verify results

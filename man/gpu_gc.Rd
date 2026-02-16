@@ -8,6 +8,10 @@ gpu_gc(verbose = FALSE, aggressive = TRUE)
 }
 \arguments{
 \item{verbose}{Logical. If TRUE, prints memory freed. Default FALSE.}
+
+\item{aggressive}{Logical. If TRUE (default), runs multiple GC passes with
+short delays to more aggressively trigger finalizers. If FALSE, runs a
+lighter cleanup pass.}
 }
 \value{
 Invisibly returns a list with memory state before and after cleanup,

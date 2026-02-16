@@ -199,6 +199,56 @@ test_that("collect() preserves NA positions correctly", {
   expect_equal(which(is.na(result$b)), c(1, 3, 5))
 })
 
+test_that("collect() preserves NA in INT64 columns", {
+  skip_if_no_gpu()
+
+  ptr <- gpu_make_null_column(3L, "INT64")
+  gpu_df <- new_tbl_gpu(
+    ptr = ptr,
+    schema = list(names = "x", types = "INT64"),
+    lazy_ops = NULL,
+    groups = character(),
+    exec_mode = "eager"
+  )
+
+  result <- collect(gpu_df)
+  expect_true(all(is.na(result$x)))
+})
+
+test_that("collect() preserves NA in FLOAT32 columns", {
+  skip_if_no_gpu()
+
+  ptr <- gpu_make_null_column(3L, "FLOAT32")
+  gpu_df <- new_tbl_gpu(
+    ptr = ptr,
+    schema = list(names = "x", types = "FLOAT32"),
+    lazy_ops = NULL,
+    groups = character(),
+    exec_mode = "eager"
+  )
+
+  result <- collect(gpu_df)
+  expect_true(all(is.na(result$x)))
+})
+
+test_that("gpu_head() preserves NA in INT64 columns", {
+  skip_if_no_gpu()
+
+  ptr <- gpu_make_null_column(3L, "INT64")
+  result <- gpu_head(ptr, 3L, "x")
+
+  expect_true(all(is.na(result$x)))
+})
+
+test_that("gpu_head() preserves NA in FLOAT32 columns", {
+  skip_if_no_gpu()
+
+  ptr <- gpu_make_null_column(3L, "FLOAT32")
+  result <- gpu_head(ptr, 3L, "x")
+
+  expect_true(all(is.na(result$x)))
+})
+
 # =============================================================================
 # Mixed Column Type Tests
 # =============================================================================

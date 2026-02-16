@@ -377,14 +377,14 @@ create_large_test_data <- function(nrow = 1e6, ncol = 10) {
 #' @param info Additional info for error message
 expect_data_on_gpu <- function(x, info = NULL) {
   act <- quasi_label(rlang::enquo(x), arg = "x")
-
-  if (!verify_data_on_gpu(x)) {
-    fail(sprintf(
+  expect_true(
+    verify_data_on_gpu(x),
+    info = sprintf(
       "%s does not have valid data on GPU.%s",
       act$lab,
       if (!is.null(info)) paste0("\n", info) else ""
-    ))
-  }
+    )
+  )
 
   invisible(x)
 }
@@ -401,14 +401,15 @@ expect_lightweight_r_object <- function(x, max_bytes = 100000) {
   ncol <- length(x$schema$names)
   adjusted_max <- max_bytes + ncol * 500
 
-  if (r_size > adjusted_max) {
-    fail(sprintf(
+  expect_true(
+    r_size <= adjusted_max,
+    info = sprintf(
       "%s R object size (%s) exceeds maximum (%s).\nThis suggests data may have been copied to R memory.",
       act$lab,
       format_bytes(r_size),
       format_bytes(adjusted_max)
-    ))
-  }
+    )
+  )
 
   invisible(x)
 }
@@ -420,18 +421,15 @@ expect_lightweight_r_object <- function(x, max_bytes = 100000) {
 #' @param min_bytes Minimum expected allocation
 expect_gpu_memory_allocated <- function(before, after, min_bytes = 0) {
   diff <- gpu_memory_diff(before, after)
-
-  if (is.na(diff)) {
-    fail("Could not measure GPU memory difference")
-  }
-
-  if (diff < min_bytes) {
-    fail(sprintf(
+  expect_false(is.na(diff), info = "Could not measure GPU memory difference")
+  expect_true(
+    diff >= min_bytes,
+    info = sprintf(
       "Expected at least %s GPU memory allocation, but only %s was allocated",
       format_bytes(min_bytes),
       format_bytes(diff)
-    ))
-  }
+    )
+  )
 
   invisible(diff)
 }

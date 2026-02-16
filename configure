@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # configure - Detect CUDA and libcudf, generate src/Makevars
 
 echo "Configuring cuplyr..."
@@ -83,18 +83,45 @@ if [ ! -f "$CUDA_HOME/include/cuda.h" ]; then
 fi
 
 # Find CUDA driver library (prefer system driver libcuda.so.1 over toolkit stubs)
+is_real_libcuda() {
+    local lib_path="$1"
+
+    # Reject known stub/compat locations.
+    case "$lib_path" in
+        *"/stubs/"*|*"/compat/"*|*"/targets/"*)
+            return 1
+            ;;
+    esac
+
+    # Real driver libraries are typically much larger than stubs.
+    local size
+    size=$(stat -Lc%s "$lib_path" 2>/dev/null || echo 0)
+    if [ "$size" -lt 1000000 ]; then
+        return 1
+    fi
+
+    return 0
+}
+
 find_cuda_driver_lib() {
     if command -v ldconfig >/dev/null 2>&1; then
         local driver_lib
         driver_lib=$(ldconfig -p 2>/dev/null | awk '/libcuda\.so\.1/{print $NF; exit}')
-        if [ -n "$driver_lib" ] && [ -f "$driver_lib" ]; then
+        if [ -n "$driver_lib" ] && [ -f "$driver_lib" ] && is_real_libcuda "$driver_lib"; then
             dirname "$driver_lib"
             return 0
         fi
     fi
 
-    for path in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib/wsl/lib "$CUDA_HOME/lib64" "$CUDA_HOME/lib"; do
-        if [ -f "$path/libcuda.so.1" ] || [ -f "$path/libcuda.so" ]; then
+    for path in /usr/lib64-nvidia /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib/wsl/lib "$CUDA_HOME/lib64" "$CUDA_HOME/lib"; do
+        local candidate=""
+        if [ -f "$path/libcuda.so.1" ]; then
+            candidate="$path/libcuda.so.1"
+        elif [ -f "$path/libcuda.so" ]; then
+            candidate="$path/libcuda.so"
+        fi
+
+        if [ -n "$candidate" ] && is_real_libcuda "$candidate"; then
             echo "$path"
             return 0
         fi

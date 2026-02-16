@@ -112,6 +112,10 @@ ensure_source() {
 # --- Install via pixi ---
 install_pixi() {
   log "Installing via pixi..."
+  if $DRY_RUN; then
+    echo "[dry-run] (cd \"$SRC_DIR\" && pixi run install)"
+    return
+  fi
   cd "$SRC_DIR"
   run pixi run install
 }
@@ -147,6 +151,11 @@ install_conda() {
   export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 
   log "Configuring cuplyr..."
+  if $DRY_RUN; then
+    echo "[dry-run] (cd \"$SRC_DIR\" && ./configure)"
+    echo "[dry-run] (cd \"$SRC_DIR\" && R CMD INSTALL .)"
+    return
+  fi
   cd "$SRC_DIR"
   run ./configure
 
@@ -164,6 +173,12 @@ install_system() {
     echo "Set CUDA_HOME or install CUDA, then retry." >&2
     echo "Or use: ./install.sh --method=conda" >&2
     exit 1
+  fi
+
+  if $DRY_RUN; then
+    echo "[dry-run] (cd \"$SRC_DIR\" && ./configure)"
+    echo "[dry-run] (cd \"$SRC_DIR\" && R CMD INSTALL .)"
+    return
   fi
 
   cd "$SRC_DIR"
@@ -196,7 +211,7 @@ main() {
         message("Installing missing R packages: ", paste(missing, collapse = ", "))
         install.packages(missing, repos = "https://cloud.r-project.org")
       }
-    ' || true
+    '
   fi
 
   # Detect method

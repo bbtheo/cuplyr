@@ -207,7 +207,9 @@ lower_arrange <- function(ast, source_ptr) {
 #' @keywords internal
 lower_head <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
-  gpu_head(input_ptr, ast$n)
+  input_schema <- infer_schema(ast$input)
+  head_df <- gpu_head(input_ptr, ast$n, input_schema$names)
+  df_to_gpu(head_df)
 }
 
 #' Lower summarise node
