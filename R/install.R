@@ -146,20 +146,34 @@ detect_install_method <- function(verbose = FALSE) {
 
 get_source_dir <- function(repo, ref, dry_run, verbose) {
   if (is.null(repo)) {
-    # Assume current directory or find it
-    if (file.exists("DESCRIPTION") && file.exists("configure")) {
-      return(getwd())
+    is_cuplyr_source <- function(path) {
+      desc <- file.path(path, "DESCRIPTION")
+      if (!file.exists(desc)) {
+        return(FALSE)
+      }
+
+      pkg <- tryCatch(unname(as.character(read.dcf(desc, fields = "Package")[1, 1])),
+                      error = function(e) NA_character_)
+      if (!identical(pkg, "cuplyr")) {
+        return(FALSE)
+      }
+
+      file.exists(file.path(path, "configure"))
     }
-    # Check if we're in a subdirectory
-    for (parent in c(".", "..", "../..")) {
-      desc <- file.path(parent, "DESCRIPTION")
-      if (file.exists(desc)) {
-        pkg <- read.dcf(desc, fields = "Package")[1, 1]
-        if (identical(pkg, "cuplyr")) {
-          return(normalizePath(parent))
-        }
+
+    # Search current dir, direct children (common in Colab), then parents.
+    child_dirs <- tryCatch(
+      list.dirs(".", recursive = FALSE, full.names = FALSE),
+      error = function(e) character()
+    )
+    candidates <- unique(c(".", "cuplyr", child_dirs, "..", "../.."))
+
+    for (candidate in candidates) {
+      if (is_cuplyr_source(candidate)) {
+        return(normalizePath(candidate))
       }
     }
+
     stop(
       "No cuplyr source tree found in current directory.\n",
       "Either cd to the cuplyr directory or pass repo = 'https://github.com/bbtheo/cuplyr.git'",
