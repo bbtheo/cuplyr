@@ -393,7 +393,10 @@ expect_equal(
 
 ## Code Review Checklist
 
-Before merging, verify:
+Before merging dev to master, verify:
+- [ ] **Branch references**: Update Colab links back to `master` branch:
+  - `README.md`: Change `blob/dev` to `blob/master` in Colab badge URLs
+  - `notebooks/install_cuplyr.ipynb`: Change git clone from `-b dev` to remove the flag (or use `-b master`)
 - [ ] **Type alignment**: `R/utils.R` and `src/transfer_io.cpp` agree on type mapping
 - [ ] **Head/collect parity**: If a type is supported in `gpu_collect()`, ensure `gpu_head()` uses the same conversion path
 - [ ] **Arrange semantics**: Stable sort support, NA ordering, group-prepend behavior
@@ -407,6 +410,8 @@ Before merging, verify:
 **Test-first bugfixes (STRICT)**: When a bug is reported, always add a failing test that reproduces it *before* implementing the fix. If the test passes unexpectedly, revert the fix, confirm failure, then re-apply.
 
 **Run tests after every feature (STRICT)**: After implementing any feature or fix, always run `pixi run test` before considering the work complete. Do not skip this step. If tests fail, fix the issue before moving on.
+
+**Roxygen2 for exports (STRICT)**: NEVER edit the NAMESPACE file by hand. Always use `#' @export` roxygen tags on functions and run `devtools::document()` (or `pixi run load-dev` which triggers it) to regenerate NAMESPACE. The same applies to `@importFrom` directives. Manual NAMESPACE edits will be overwritten.
 
 ## cuDF Header Quick Reference
 
