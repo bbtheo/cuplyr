@@ -868,6 +868,128 @@ validate_cloud_loader_resolution <- function(conda_prefix, verbose = FALSE) {
 
 
 # =============================================================================
+# Diagnostic helpers
+# =============================================================================
+
+#' Diagnose dynamic linker configuration for cuplyr
+#'
+#' Prints diagnostic information about how the cuplyr shared library will
+#' resolve its dependencies (libstdc++, libcudf, libcuda). Useful when
+#' `library(cuplyr)` fails with missing symbol errors.
+#'
+#' @param verbose If TRUE, print full ldd output.
+#' @return Invisibly returns a list with diagnostic results.
+#'
+#' @export
+#' @examples
+#' \dontrun{
+#' diagnose_loader()
+#' }
+diagnose_loader <- function(verbose = FALSE) {
+  cat("=== cuplyr Dynamic Linker Diagnostics ===\n\n")
+
+  # Find cuplyr.so
+  so_path <- find_installed_cuplyr_so()
+  if (is.null(so_path)) {
+    cat("✗ cuplyr shared library not found\n")
+    cat("  Expected under: ", paste(.libPaths(), collapse = ", "), "\n")
+    cat("  Run install_cuplyr() first.\n")
+    return(invisible(list(found = FALSE)))
+  }
+  cat("✓ cuplyr.so found:\n")
+  cat("  ", so_path, "\n\n")
+
+  # Check RUNPATH/RPATH
+  if (has_command("readelf")) {
+    cat("RUNPATH/RPATH:\n")
+    runpath <- system2("readelf", c("-d", so_path), stdout = TRUE, stderr = TRUE)
+    runpath_lines <- grep("RPATH|RUNPATH", runpath, value = TRUE)
+    if (length(runpath_lines) > 0) {
+      cat("  ", paste(runpath_lines, collapse = "\n  "), "\n")
+    } else {
+      cat("  (none set)\n")
+    }
+    cat("\n")
+  }
+
+  # Check ldd resolution
+  if (has_command("ldd")) {
+    cat("Dependency resolution (ldd):\n")
+    ldd_out <- system2("ldd", so_path, stdout = TRUE, stderr = TRUE)
+
+    # Key libraries
+    for (lib in c("libstdc\\+\\+\\.so\\.6", "libcudf\\.so", "libcuda\\.so\\.1", "libcudart\\.so")) {
+      lib_line <- grep(lib, ldd_out, value = TRUE)
+      if (length(lib_line) > 0) {
+        cat("  ", lib_line[1], "\n")
+      }
+    }
+
+    if (verbose) {
+      cat("\nFull ldd output:\n")
+      cat("  ", paste(ldd_out, collapse = "\n  "), "\n")
+    }
+    cat("\n")
+
+    # Check for issues
+    unresolved <- grep("not found", ldd_out, value = TRUE)
+    if (length(unresolved) > 0) {
+      cat("✗ Unresolved dependencies:\n")
+      cat("  ", paste(unresolved, collapse = "\n  "), "\n\n")
+    }
+  }
+
+  # Check conda libstdc++ for GLIBCXX_3.4.31
+  conda_prefix <- Sys.getenv("CONDA_PREFIX", "/opt/rapids")
+  conda_stdc <- file.path(conda_prefix, "lib", "libstdc++.so.6")
+  if (file.exists(conda_stdc) && has_command("strings")) {
+    cat("RAPIDS libstdc++ version check:\n")
+    cat("  Path: ", conda_stdc, "\n")
+    glibcxx <- system2("strings", conda_stdc, stdout = TRUE, stderr = TRUE)
+    has_3_4_31 <- any(grepl("GLIBCXX_3\\.4\\.31", glibcxx))
+    if (has_3_4_31) {
+      cat("  ✓ Contains GLIBCXX_3.4.31\n")
+    } else {
+      cat("  ✗ GLIBCXX_3.4.31 NOT found (RAPIDS may be outdated)\n")
+    }
+    cat("\n")
+  }
+
+  # Check ldconfig cache
+  if (has_command("ldconfig")) {
+    cat("System linker cache (ldconfig -p | grep libstdc++):\n")
+    cache <- system2("ldconfig", "-p", stdout = TRUE, stderr = TRUE)
+    stdc_lines <- grep("libstdc\\+\\+\\.so\\.6", cache, value = TRUE)
+    if (length(stdc_lines) > 0) {
+      cat("  ", paste(head(stdc_lines, 5), collapse = "\n  "), "\n")
+    } else {
+      cat("  (not found in cache)\n")
+    }
+    cat("\n")
+  }
+
+  # Current environment
+  cat("Current environment:\n")
+  cat("  LD_LIBRARY_PATH (first 3 entries):\n")
+  ld_path <- Sys.getenv("LD_LIBRARY_PATH")
+  if (nzchar(ld_path)) {
+    ld_parts <- strsplit(ld_path, ":", fixed = TRUE)[[1]]
+    cat("    ", paste(head(ld_parts, 3), collapse = "\n    "), "\n")
+  } else {
+    cat("    (not set)\n")
+  }
+  cat("\n")
+
+  cat("=== End Diagnostics ===\n")
+
+  invisible(list(
+    found = TRUE,
+    so_path = so_path
+  ))
+}
+
+
+# =============================================================================
 # Helpers
 # =============================================================================
 
