@@ -1,0 +1,69 @@
+{% set version = environ.get("CUPLYR_VERSION", "0.1.1.9000") %}
+
+package:
+  name: r-cuplyr
+  version: {{ version }}
+
+source:
+  path: ..
+
+build:
+  number: 0
+  skip: true  # [not linux]
+  script_env:
+    - CUPLYR_ALLOW_CUDA_STUBS
+    - CUPLYR_CUDA_MIN_VERSION
+  script: |
+    export CUPLYR_ALLOW_CUDA_STUBS=${CUPLYR_ALLOW_CUDA_STUBS:-1}
+    export CUPLYR_CUDA_MIN_VERSION=${CUPLYR_CUDA_MIN_VERSION:-12.2}
+    export CUDF_HOME="${PREFIX}"
+    if [ -d "${PREFIX}/targets/x86_64-linux" ]; then
+      export CUDA_HOME="${PREFIX}/targets/x86_64-linux"
+    fi
+
+    ./configure
+    ${R} CMD INSTALL --build .
+
+requirements:
+  host:
+    - r-base >=4.3
+    - r-rcpp >=1.0.12
+    - r-dplyr >=1.1
+    - r-rlang >=1.1
+    - r-vctrs >=0.6
+    - r-cli >=3.6
+    - r-tidyselect >=1.2
+    - r-tibble >=3.2
+    - libcudf >=25.12
+    - librmm >=25.12
+    - libkvikio >=25.12
+    - cuda-toolkit >=12.2,<13
+    - cuda-nvcc >=12.2,<13
+  run:
+    - r-base >=4.3
+    - r-rcpp >=1.0.12
+    - r-dplyr >=1.1
+    - r-rlang >=1.1
+    - r-vctrs >=0.6
+    - r-cli >=3.6
+    - r-tidyselect >=1.2
+    - r-tibble >=3.2
+    - libcudf >=25.12
+    - librmm >=25.12
+    - libkvikio >=25.12
+    - cuda-toolkit >=12.2,<13
+
+test:
+  commands:
+    - ${R} -q -e "library(cuplyr); stopifnot(utils::packageVersion('cuplyr') >= '0.0.1')"
+
+about:
+  home: https://github.com/bbtheo/cuplyr
+  dev_url: https://github.com/bbtheo/cuplyr
+  summary: GPU-accelerated data manipulation with dplyr syntax via RAPIDS libcudf.
+  license: Apache-2.0
+  license_file: LICENSE.md
+
+extra:
+  recipe-maintainers:
+    - bbtheo

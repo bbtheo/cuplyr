@@ -1,0 +1,87 @@
+name: Install Matrix
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      method:
+        description: "Install path to run"
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - pixi
+          - conda
+          - system
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: "${{ matrix.method }}"
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.method == 'all' || inputs.method == matrix.method }}
+    strategy:
+      fail-fast: false
+      matrix:
+        method: [pixi, conda, system]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.3'
+
+      - name: Install R build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcurl4-openssl-dev \
+            libssl-dev \
+            libxml2-dev
+
+      - name: Setup pixi
+        if: ${{ matrix.method == 'pixi' }}
+        uses: prefix-dev/setup-pixi@v0
+
+      - name: Install via pixi
+        if: ${{ matrix.method == 'pixi' }}
+        env:
+          CUPLYR_ALLOW_CUDA_STUBS: "1"
+          CUPLYR_CUDA_MIN_VERSION: "12.2"
+        run: |
+          pixi run install
+          pixi run -- R -q -e "library(cuplyr); stopifnot(utils::packageVersion('cuplyr') >= '0.0.1')"
+
+      - name: Setup Miniconda (mamba)
+        if: ${{ matrix.method == 'conda' }}
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-variant: Mambaforge
+          use-mamba: true
+          auto-update-conda: true
+          activate-environment: base
+          channels: rapidsai,conda-forge,nvidia
+          channel-priority: strict
+
+      - name: Install via conda path
+        if: ${{ matrix.method == 'conda' }}
+        env:
+          CUPLYR_ALLOW_CUDA_STUBS: "1"
+          CUPLYR_CUDA_MIN_VERSION: "12.2"
+        run: |
+          ./install.sh --method=conda --verbose
+          R -q -e "library(cuplyr); stopifnot(utils::packageVersion('cuplyr') >= '0.0.1')"
+
+      - name: System path dry-run
+        if: ${{ matrix.method == 'system' }}
+        run: |
+          ./install.sh --method=system --dry-run --verbose
