@@ -15,7 +15,6 @@ This vignette explains:
 4.  When and why optimization matters
 
 ``` r
-
 library(cuplyr)
 library(dplyr)
 ```
@@ -27,7 +26,6 @@ node in the AST. The tree grows from bottom (source data) to top (final
 operation).
 
 ``` r
-
 # Create a lazy pipeline
 pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
   filter(mpg > 20) |>
@@ -45,7 +43,7 @@ Each dplyr verb creates a specific node type:
 
 | Verb | AST Node | Description |
 |----|----|----|
-| [`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md) | `source` | Leaf node with schema metadata |
+| [`tbl_gpu()`](../reference/tbl_gpu.md) | `source` | Leaf node with schema metadata |
 | [`filter()`](https://dplyr.tidyverse.org/reference/filter.html) | `filter` | Row filtering predicates |
 | [`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) | `mutate` | Column transformations |
 | [`select()`](https://dplyr.tidyverse.org/reference/select.html) | `select` | Column projection |
@@ -60,7 +58,6 @@ Each dplyr verb creates a specific node type:
 Each operation wraps the previous one:
 
 ``` r
-
 # This pipeline:
 tbl_gpu(mtcars, lazy = TRUE) |>
   filter(mpg > 20) |>
@@ -105,7 +102,6 @@ early.
 ### Before Optimization
 
 ``` r
-
 # User writes:
 tbl_gpu(mtcars, lazy = TRUE) |>
   mutate(power_ratio = hp / wt) |>
@@ -121,7 +117,6 @@ The optimizer inserts a `select` node below the `mutate` to fetch only
 the columns needed (`mpg`, `hp`, `wt`):
 
 ``` r
-
 # Optimized execution order:
 # 1. Select only mpg, hp, wt from source
 # 2. Compute power_ratio = hp / wt
@@ -145,7 +140,6 @@ are combined when safe.
 ### Before Optimization
 
 ``` r
-
 # User writes (or code generates):
 tbl_gpu(mtcars, lazy = TRUE) |>
   mutate(a = hp + 10) |>
@@ -159,7 +153,6 @@ tbl_gpu(mtcars, lazy = TRUE) |>
 ### After Optimization
 
 ``` r
-
 # Fused into single mutate:
 # mutate(a = hp + 10, b = wt * 2, c = a + b)
 
@@ -180,7 +173,6 @@ Fusion is blocked when:
 When fusing creates dependencies, expressions are topologically sorted:
 
 ``` r
-
 # Input expressions:
 #   c = a + b
 #   a = hp + 10
@@ -200,7 +192,6 @@ no longer be used. This pass removes them.
 ### Example
 
 ``` r
-
 # User writes:
 tbl_gpu(mtcars, lazy = TRUE) |>
   mutate(
@@ -241,7 +232,6 @@ columns are **not** produced by that mutate.
 #### Can Push
 
 ``` r
-
 # This filter can be pushed down:
 pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
   mutate(power_ratio = hp / wt) |>
@@ -256,7 +246,6 @@ pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
 #### Cannot Push
 
 ``` r
-
 # This filter cannot be pushed:
 pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
   mutate(power_ratio = hp / wt) |>
@@ -275,7 +264,6 @@ Filters can also push below
 select keeps the predicate columns:
 
 ``` r
-
 # Original:
 tbl_gpu(data, lazy = TRUE) |>
   select(a, b, c) |>
@@ -299,7 +287,6 @@ The filter pushdown algorithm:
 3.  Repeat until no more pushdowns are possible
 
 ``` r
-
 # Implementation sketch (from optimizer.R):
 push_down_filters <- function(ast) {
   # Get columns used in filter predicates
@@ -356,7 +343,6 @@ cost.
 ### Example
 
 ``` r
-
 # User writes:
 filter(expensive_col > other_col, cheap_col > 10)
 
@@ -378,7 +364,6 @@ Simple scalar predicates can be fused into a single GPU kernel call.
 ### Before Fusion
 
 ``` r
-
 # Multiple filter conditions:
 filter(a > 10, b < 20, c == 5)
 
@@ -388,7 +373,6 @@ filter(a > 10, b < 20, c == 5)
 ### After Fusion
 
 ``` r
-
 # Fused: single kernel with AND-mask
 
 # One kernel computes:
@@ -425,7 +409,6 @@ them:
 Consider:
 
 ``` r
-
 tbl_gpu(data, lazy = TRUE) |>
   arrange(x) |>           # Barrier: establishes order
   mutate(rank = row_number()) |>  # Depends on order
@@ -443,7 +426,6 @@ The optimizer handles barriers by:
 3.  Reconnecting the optimized segments
 
 ``` r
-
 # Pipeline with barrier:
 tbl_gpu(data, lazy = TRUE) |>
   filter(a > 10) |>
@@ -464,7 +446,6 @@ tbl_gpu(data, lazy = TRUE) |>
 View the pending AST before optimization:
 
 ``` r
-
 pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
   mutate(a = hp + 10) |>
   filter(mpg > 20) |>
@@ -475,9 +456,7 @@ show_query(pipeline)
 
 ### Understanding the Output
 
-The
-[`show_query()`](https://bbtheo.github.io/cuplyr/reference/show_query.md)
-output shows:
+The [`show_query()`](../reference/show_query.md) output shows:
 
 - Node type and key metadata
 - Tree structure via indentation
@@ -489,7 +468,6 @@ output shows:
 ### Example 1: Filter Pushdown in Action
 
 ``` r
-
 # Without lazy mode: operations execute in written order
 eager_result <- tbl_gpu(mtcars) |>
   mutate(
@@ -517,7 +495,6 @@ identical(eager_result, lazy_result)
 ### Example 2: Complex Pipeline Optimization
 
 ``` r
-
 # A realistic analytics query
 result <- tbl_gpu(mtcars, lazy = TRUE) |>
   # Step 1: Feature engineering
@@ -558,7 +535,6 @@ In this example, the optimizer:
 ### Example 3: When Pushdown Doesn’t Help
 
 ``` r
-
 # Filter depends on computed column - cannot push
 result <- tbl_gpu(mtcars, lazy = TRUE) |>
   mutate(power_ratio = hp / wt) |>
@@ -574,7 +550,6 @@ nrow(result)
 ### 1. Use Lazy Mode for Complex Pipelines
 
 ``` r
-
 # Enable lazy mode for optimization benefits
 tbl_gpu(data, lazy = TRUE) |>
   # ... complex pipeline ...
@@ -584,7 +559,6 @@ tbl_gpu(data, lazy = TRUE) |>
 ### 2. Filter on Source Columns When Possible
 
 ``` r
-
 # Good: filter uses source columns
 tbl_gpu(data, lazy = TRUE) |>
   filter(status == "active", date > cutoff) |>  # Can push down
@@ -601,7 +575,6 @@ tbl_gpu(data, lazy = TRUE) |>
 Write filters in logical order. The optimizer will reorder by cost:
 
 ``` r
-
 # Write for readability
 filter(
   department == "Engineering",   # May be expensive
@@ -617,7 +590,6 @@ filter(
 If you need to prevent optimization across a boundary:
 
 ``` r
-
 tbl_gpu(data, lazy = TRUE) |>
   filter(x > 10) |>
   mutate(y = f(x)) |>
@@ -641,7 +613,6 @@ For most workloads, simply use lazy mode and write natural dplyr code.
 The optimizer handles the rest.
 
 ``` r
-
 # Just write natural dplyr:
 result <- tbl_gpu(big_data, lazy = TRUE) |>
   mutate(derived = complex_expr) |>
@@ -653,8 +624,8 @@ result <- tbl_gpu(big_data, lazy = TRUE) |>
 
 ## Further Reading
 
-- [`vignette("getting-started")`](https://bbtheo.github.io/cuplyr/articles/getting-started.md) -
+- [`vignette("getting-started")`](../articles/getting-started.md) -
   Basic cuplyr usage
-- [`?optimize_ast`](https://bbtheo.github.io/cuplyr/reference/optimize_ast.md) -
-  Internal optimizer documentation
+- [`?optimize_ast`](../reference/optimize_ast.md) - Internal optimizer
+  documentation
 - RAPIDS cuDF documentation for GPU-specific optimizations

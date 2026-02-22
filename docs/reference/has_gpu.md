@@ -28,10 +28,8 @@ This function checks:
 
 ## See also
 
-[`gpu_details`](https://bbtheo.github.io/cuplyr/reference/gpu_details.md)
-for detailed GPU information,
-[`show_gpu`](https://bbtheo.github.io/cuplyr/reference/show_gpu.md) for
-formatted GPU info display
+[`gpu_details`](gpu_details.md) for detailed GPU information,
+[`show_gpu`](show_gpu.md) for formatted GPU info display
 
 ## Examples
 

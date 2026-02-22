@@ -8,7 +8,6 @@ already know cuplyr - the same verbs work with the same syntax, just
 faster on large datasets.
 
 ``` r
-
 library(cuplyr)
 library(dplyr)
 ```
@@ -31,8 +30,7 @@ cases.
 
 The typical cuplyr workflow has three steps:
 
-1.  **Transfer data to GPU** with
-    [`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md)
+1.  **Transfer data to GPU** with [`tbl_gpu()`](../reference/tbl_gpu.md)
 2.  **Process with dplyr verbs** (filter, mutate, summarise, etc.)
 3.  **Bring results back** with
     [`collect()`](https://dplyr.tidyverse.org/reference/compute.html)
@@ -40,7 +38,6 @@ The typical cuplyr workflow has three steps:
 ### Creating a GPU Table
 
 ``` r
-
 # Transfer a data frame to GPU memory
 gpu_cars <- tbl_gpu(mtcars)
 
@@ -55,7 +52,6 @@ The data is now in GPU memory. The original R data frame is unchanged.
 Use familiar dplyr verbs exactly as you would normally:
 
 ``` r
-
 # Filter rows
 efficient_cars <- gpu_cars |>
   filter(mpg > 25)
@@ -89,7 +85,6 @@ Operations build up on the GPU. Use
 bring results back to R:
 
 ``` r
-
 # Bring the grouped summary back to R
 result <- by_cyl |>
   collect()
@@ -102,7 +97,6 @@ result
 Here’s a realistic workflow analyzing the mtcars dataset:
 
 ``` r
-
 analysis <- tbl_gpu(mtcars) |>
   # Keep only cars with reasonable fuel economy
 
@@ -135,7 +129,6 @@ You can chain as many operations as needed. cuplyr handles the execution
 efficiently:
 
 ``` r
-
 # Complex pipeline
 result <- tbl_gpu(mtcars) |>
   filter(cyl %in% c(4, 6)) |>
@@ -158,7 +151,6 @@ head(result)
 Filter rows based on conditions:
 
 ``` r
-
 # Comparison operators
 filter(x > 10)
 filter(x >= 10)
@@ -179,7 +171,6 @@ filter(col_a > col_b)
 Select and reorder columns:
 
 ``` r
-
 # By name
 select(mpg, cyl, hp)
 
@@ -200,7 +191,6 @@ select(contains("p"))
 Create or modify columns:
 
 ``` r
-
 # Arithmetic operations
 mutate(kpl = mpg * 0.425)
 mutate(power_ratio = hp / wt)
@@ -222,7 +212,6 @@ mutate(mpg = mpg * 0.425)  # Converts to km/L in place
 Sort rows:
 
 ``` r
-
 # Ascending (default)
 arrange(mpg)
 
@@ -238,7 +227,6 @@ arrange(cyl, desc(mpg))
 Grouped aggregations:
 
 ``` r
-
 # Available aggregation functions
 group_by(cyl) |>
   summarise(
@@ -279,7 +267,6 @@ cuplyr supports two execution modes:
 Operations execute immediately. Simple and predictable:
 
 ``` r
-
 # Default: eager execution
 eager_tbl <- tbl_gpu(mtcars)
 is_lazy(eager_tbl)  # FALSE
@@ -297,7 +284,6 @@ result <- eager_tbl |>
 Operations are deferred and optimized before execution:
 
 ``` r
-
 # Enable lazy execution
 lazy_tbl <- tbl_gpu(mtcars, lazy = TRUE)
 is_lazy(lazy_tbl)  # TRUE
@@ -317,7 +303,7 @@ result <- pipeline |> collect()
 
 Lazy mode enables query optimization like filter pushdown and operation
 fusion. See
-[`vignette("query-optimization")`](https://bbtheo.github.io/cuplyr/articles/query-optimization.md)
+[`vignette("query-optimization")`](../articles/query-optimization.md)
 for details.
 
 ## Controlling Execution
@@ -327,7 +313,6 @@ for details.
 Execute pending operations but keep data on GPU:
 
 ``` r
-
 # Useful when branching into multiple analyses
 base_data <- tbl_gpu(mtcars, lazy = TRUE) |>
   filter(mpg > 15) |>
@@ -344,7 +329,6 @@ analysis_b <- base_data |> filter(cyl == 6) |> collect()
 Inspect pending operations in lazy mode:
 
 ``` r
-
 lazy_pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
   filter(mpg > 20) |>
   mutate(x = hp * 2)
@@ -360,7 +344,6 @@ a `tbl_gpu` object is no longer referenced, its GPU memory is freed.
 Check GPU memory usage:
 
 ``` r
-
 # Current memory state
 gpu_memory_state()
 ```
@@ -368,7 +351,6 @@ gpu_memory_state()
 Force garbage collection if needed:
 
 ``` r
-
 # Clean up unreferenced GPU objects
 gpu_gc()
 ```
@@ -383,7 +365,6 @@ gpu_gc()
 5.  **Collect late** - Only transfer final results to R
 
 ``` r
-
 # Good: filter and select early
 result <- tbl_gpu(mtcars, lazy = TRUE) |>
   filter(mpg > 20) |>                    # Reduce rows first
@@ -399,7 +380,6 @@ result <- tbl_gpu(mtcars, lazy = TRUE) |>
 cuplyr validates operations and provides informative errors:
 
 ``` r
-
 # Referencing non-existent column
 try({
   tbl_gpu(mtcars) |>
@@ -415,17 +395,16 @@ try({
 
 ## Next Steps
 
-- [`vignette("query-optimization")`](https://bbtheo.github.io/cuplyr/articles/query-optimization.md) -
+- [`vignette("query-optimization")`](../articles/query-optimization.md) -
   Deep dive into the AST optimizer
 - `vignette("performance-tips")` - Maximizing GPU performance
-- Package documentation:
-  [`?tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md),
+- Package documentation: [`?tbl_gpu`](../reference/tbl_gpu.md),
   [`?compute`](https://dplyr.tidyverse.org/reference/compute.html),
-  [`?gpu_memory_state`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_state.md)
+  [`?gpu_memory_state`](../reference/gpu_memory_state.md)
 
 ## System Requirements
 
-- NVIDIA GPU with CUDA support (Compute Capability \>= 6.0)
-- CUDA Toolkit \>= 12.0
+- NVIDIA GPU with CUDA support (Compute Capability \>= 7.0)
+- CUDA Toolkit \>= 12.2
 - RAPIDS cuDF \>= 25.12
 - R \>= 4.3.0

@@ -33,9 +33,9 @@
 
 ### Lazy evaluation
 
-- [`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md)
-  gains a `lazy` argument to enable deferred execution. Operations build
-  an AST (Abstract Syntax Tree) that is optimized and executed only when
+- [`tbl_gpu()`](../reference/tbl_gpu.md) gains a `lazy` argument to
+  enable deferred execution. Operations build an AST (Abstract Syntax
+  Tree) that is optimized and executed only when
   [`collect()`](https://dplyr.tidyverse.org/reference/compute.html) or
   [`compute()`](https://dplyr.tidyverse.org/reference/compute.html) is
   called. Set globally with `options(cuplyr.exec_mode = "lazy")` or
@@ -58,18 +58,16 @@
 - [`collapse()`](https://dplyr.tidyverse.org/reference/compute.html)
   inserts an optimization barrier without executing.
 
-- [`as_lazy()`](https://bbtheo.github.io/cuplyr/reference/as_lazy.md)
-  and
-  [`as_eager()`](https://bbtheo.github.io/cuplyr/reference/as_eager.md)
-  switch execution modes mid-pipeline.
+- [`as_lazy()`](../reference/as_lazy.md) and
+  [`as_eager()`](../reference/as_eager.md) switch execution modes
+  mid-pipeline.
 
-- [`is_lazy()`](https://bbtheo.github.io/cuplyr/reference/is_lazy.md)
-  and
-  [`has_pending_ops()`](https://bbtheo.github.io/cuplyr/reference/has_pending_ops.md)
-  check the current execution state.
+- [`is_lazy()`](../reference/is_lazy.md) and
+  [`has_pending_ops()`](../reference/has_pending_ops.md) check the
+  current execution state.
 
-- [`show_query()`](https://bbtheo.github.io/cuplyr/reference/show_query.md)
-  displays the pending operation tree for debugging.
+- [`show_query()`](../reference/show_query.md) displays the pending
+  operation tree for debugging.
 
 ### Join operations
 
@@ -87,15 +85,13 @@
 
 ### Bind operations
 
-- Added
-  [`bind_rows()`](https://bbtheo.github.io/cuplyr/reference/bind_rows.md)
-  for vertically combining GPU tables with automatic schema unification
-  and type promotion.
+- Added [`bind_rows()`](../reference/bind_rows.md) for vertically
+  combining GPU tables with automatic schema unification and type
+  promotion.
 
-- Added
-  [`bind_cols()`](https://bbtheo.github.io/cuplyr/reference/bind_cols.md)
-  for horizontally combining GPU tables with `.name_repair` for
-  duplicate column handling.
+- Added [`bind_cols()`](../reference/bind_cols.md) for horizontally
+  combining GPU tables with `.name_repair` for duplicate column
+  handling.
 
 - Both bind functions automatically materialize lazy tables before
   binding.
@@ -107,18 +103,17 @@ NVIDIA’s libcudf library.
 
 ### Core functionality
 
-- [`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md)
-  transfers R data frames to GPU memory, returning a `tbl_gpu` object
-  that works with dplyr verbs.
+- [`tbl_gpu()`](../reference/tbl_gpu.md) transfers R data frames to GPU
+  memory, returning a `tbl_gpu` object that works with dplyr verbs.
 
 - [`collect()`](https://dplyr.tidyverse.org/reference/compute.html)
   transfers GPU data back to R as a tibble.
 
-- [`as_tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/as_tbl_gpu.md)
-  coerces data frames to GPU tables.
+- [`as_tbl_gpu()`](../reference/as_tbl_gpu.md) coerces data frames to
+  GPU tables.
 
-- [`is_tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/is_tbl_gpu.md)
-  tests if an object is a GPU table.
+- [`is_tbl_gpu()`](../reference/is_tbl_gpu.md) tests if an object is a
+  GPU table.
 
 ### dplyr verbs
 
@@ -168,28 +163,28 @@ NVIDIA’s libcudf library.
 
 ### GPU memory utilities
 
-- [`gpu_memory_usage()`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_usage.md)
-  estimates GPU memory footprint of a `tbl_gpu` object.
+- [`gpu_memory_usage()`](../reference/gpu_memory_usage.md) estimates GPU
+  memory footprint of a `tbl_gpu` object.
 
-- [`gpu_memory_state()`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_state.md)
-  returns current GPU memory usage (total, free, used).
+- [`gpu_memory_state()`](../reference/gpu_memory_state.md) returns
+  current GPU memory usage (total, free, used).
 
-- [`gpu_gc()`](https://bbtheo.github.io/cuplyr/reference/gpu_gc.md)
-  forces garbage collection to free GPU memory from unreferenced tables.
+- [`gpu_gc()`](../reference/gpu_gc.md) forces garbage collection to free
+  GPU memory from unreferenced tables.
 
-- [`gpu_object_info()`](https://bbtheo.github.io/cuplyr/reference/gpu_object_info.md)
-  returns detailed information about a GPU table.
+- [`gpu_object_info()`](../reference/gpu_object_info.md) returns
+  detailed information about a GPU table.
 
-- [`verify_gpu_data()`](https://bbtheo.github.io/cuplyr/reference/verify_gpu_data.md)
-  confirms data resides on GPU, not in R memory.
+- [`verify_gpu_data()`](../reference/verify_gpu_data.md) confirms data
+  resides on GPU, not in R memory.
 
-- [`gpu_size_comparison()`](https://bbtheo.github.io/cuplyr/reference/gpu_size_comparison.md)
+- [`gpu_size_comparison()`](../reference/gpu_size_comparison.md)
   compares R object size vs GPU data size.
 
 ### GPU information
 
-- [`has_gpu()`](https://bbtheo.github.io/cuplyr/reference/has_gpu.md)
-  checks if a compatible GPU is available.
+- [`has_gpu()`](../reference/has_gpu.md) checks if a compatible GPU is
+  available.
 
-- [`gpu_details()`](https://bbtheo.github.io/cuplyr/reference/gpu_details.md)
-  returns GPU device information (name, compute capability, memory).
+- [`gpu_details()`](../reference/gpu_details.md) returns GPU device
+  information (name, compute capability, memory).

@@ -46,10 +46,9 @@ immediately.
 
 ## See also
 
-[`collect.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/collect.tbl_gpu.md)
-to bring data back to R,
-[`collapse.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/collapse.tbl_gpu.md)
-to add optimization barrier without executing
+[`collect.tbl_gpu`](collect.tbl_gpu.md) to bring data back to R,
+[`collapse.tbl_gpu`](collapse.tbl_gpu.md) to add optimization barrier
+without executing
 
 ## Examples
 

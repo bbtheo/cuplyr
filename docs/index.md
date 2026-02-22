@@ -2,12 +2,14 @@
 
 #### dplyr backend for GPU acceleration via RAPIDS cuDF
 
+[![Open In
+Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/bbtheo/cuplyr/blob/install/notebooks/install_cuplyr.ipynb)
+
 cuplyr implements a dplyr backend powered by [RAPIDS
 cuDF](https://github.com/rapidsai/cudf), NVIDIA’s GPU DataFrame library.
 Write standard dplyr code, execute on GPU hardware.
 
 ``` r
-
 library(cuplyr)
 
 tbl_gpu(sales_data, lazy = TRUE) |>
@@ -63,7 +65,6 @@ early) - Filter pushdown (move filters closer to data sources) - Mutate
 fusion (combine consecutive transformations)
 
 ``` r
-
 # Enable globally
 options(cuplyr.exec_mode = "lazy")
 
@@ -104,33 +105,79 @@ Contributions and feedback are welcome.
 
 ## Installation
 
+### Which path is right for me?
+
+| I want to…                         | Do this                               |
+|------------------------------------|---------------------------------------|
+| **Try it out** (no local GPU)      | [Open in Colab](#try-on-google-colab) |
+| **Use it** (I have an NVIDIA GPU)  | [Quick install](#quick-install)       |
+| **Contribute** (modify C++/R code) | [Developer setup](#developer-setup)   |
+
 ### Requirements
 
-- NVIDIA GPU with Compute Capability \>= 6.0
-- CUDA Toolkit \>= 12.0
-- RAPIDS libcudf \>= 25.12
-- R \>= 4.3
+| Component      | Version                             |
+|----------------|-------------------------------------|
+| NVIDIA GPU     | Compute Capability \>= 7.0 (Volta+) |
+| CUDA Toolkit   | \>= 12.2                            |
+| RAPIDS libcudf | \>= 25.12                           |
+| R              | \>= 4.3                             |
+| OS             | Linux x86_64 only                   |
 
-### Using pixi (recommended)
+### Try on Google Colab
+
+The fastest way to try cuplyr — no local setup required:
+
+[![Open In
+Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/bbtheo/cuplyr/blob/install/notebooks/install_cuplyr.ipynb)
+
+### Quick install
+
+**Option A: One-liner** (auto-detects pixi, conda, or system CUDA)
 
 ``` bash
-# Install pixi if not already installed (https://pixi.sh)
-# curl -fsSL https://pixi.sh/install.sh | bash
+git clone https://github.com/bbtheo/cuplyr.git && cd cuplyr && ./install.sh
+```
 
+**Option B: From R** (if you have CUDA + cuDF on your system)
+
+``` r
+# Install R dependencies first
+install.packages(c("Rcpp", "dplyr", "rlang", "vctrs", "pillar", "glue", "cli", "tidyselect", "tibble"))
+
+# Then from the cuplyr directory:
+cuplyr::install_cuplyr(method = "system")
+```
+
+**Option C: Using pixi** (reproducible, manages all CUDA/RAPIDS deps)
+
+``` bash
+# Install pixi: curl -fsSL https://pixi.sh/install.sh | bash
 git clone https://github.com/bbtheo/cuplyr.git
 cd cuplyr
 pixi run install
 ```
 
-### From source
+### Verify installation
 
-``` bash
-git clone https://github.com/bbtheo/cuplyr.git
-cd cuplyr
-
-# Ensure CUDA and cuDF are available, then:
-R CMD INSTALL .
+``` r
+library(cuplyr)
+verify_installation()
+# Or check dependencies first:
+check_deps()
 ```
+
+### Troubleshooting
+
+``` r
+# Full diagnostics for bug reports
+diagnostics()
+```
+
+### Developer setup
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor workflow
+using `pixi shell`. GitHub Actions trigger/run instructions are in
+[docs/github-actions-runbook.md](docs/github-actions-runbook.md).
 
 ## Performance
 
@@ -149,16 +196,6 @@ iterations):
 
 **Hardware**: Intel Core i9-12900K (16 cores), NVIDIA RTX 5070 (12 GB
 VRAM)
-
-End-to-end workflow including materialization/transfer:
-
-| Workflow | dplyr | DuckDB (collect) | cuplyr (with GPU transfer) | cuplyr vs dplyr | cuplyr vs DuckDB |
-|----|----|----|----|----|----|
-| Complete Workflow + transfer | 1175.0 ms | 133.5 ms | 1213.0 ms | 1.0x | 0.1x |
-
-GPU acceleration benefits grow with data size and compute intensity. For
-transfer-heavy workloads or smaller datasets, CPU-based engines can
-still be faster.
 
 ## Acknowledgments
 

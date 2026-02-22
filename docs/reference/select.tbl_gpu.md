@@ -15,8 +15,7 @@ select(.data, ...)
 
 - .data:
 
-  A `tbl_gpu` object created by
-  [`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md).
+  A `tbl_gpu` object created by [`tbl_gpu()`](tbl_gpu.md).
 
 - ...:
 
@@ -49,12 +48,9 @@ memory usage and improve performance of subsequent operations.
 
 ## See also
 
-[`filter.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/filter.tbl_gpu.md)
-for filtering rows,
-[`mutate.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/mutate.tbl_gpu.md)
-for creating columns,
-[`collect.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/collect.tbl_gpu.md)
-for retrieving results
+[`filter.tbl_gpu`](filter.tbl_gpu.md) for filtering rows,
+[`mutate.tbl_gpu`](mutate.tbl_gpu.md) for creating columns,
+[`collect.tbl_gpu`](collect.tbl_gpu.md) for retrieving results
 
 ## Examples
 

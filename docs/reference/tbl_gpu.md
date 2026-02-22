@@ -95,14 +95,11 @@ Column type mappings from R to GPU:
 
 ## See also
 
-[`collect.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/collect.tbl_gpu.md)
-to transfer data back to R,
-[`compute.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/compute.tbl_gpu.md)
-to execute and keep on GPU,
-[`filter.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/filter.tbl_gpu.md),
-[`mutate.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/mutate.tbl_gpu.md),
-[`select.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/select.tbl_gpu.md)
-for data manipulation
+[`collect.tbl_gpu`](collect.tbl_gpu.md) to transfer data back to R,
+[`compute.tbl_gpu`](compute.tbl_gpu.md) to execute and keep on GPU,
+[`filter.tbl_gpu`](filter.tbl_gpu.md),
+[`mutate.tbl_gpu`](mutate.tbl_gpu.md),
+[`select.tbl_gpu`](select.tbl_gpu.md) for data manipulation
 
 ## Examples
 

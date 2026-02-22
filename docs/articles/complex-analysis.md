@@ -8,7 +8,6 @@ branching analyses, working with different data types, and patterns for
 handling large datasets efficiently.
 
 ``` r
-
 library(cuplyr)
 library(dplyr)
 ```
@@ -23,7 +22,6 @@ progressively more complex workflows.
 We’ll create a synthetic sales dataset to demonstrate these patterns:
 
 ``` r
-
 set.seed(42)
 n <- 10000
 
@@ -50,7 +48,6 @@ Let’s compute revenue with discounts applied, then analyze by multiple
 dimensions:
 
 ``` r
-
 revenue_analysis <- gpu_sales |>
  # Step 1: Calculate derived metrics
  mutate(
@@ -80,7 +77,6 @@ head(revenue_analysis, 10)
 Compute group-level statistics and compare to overall metrics:
 
 ``` r
-
 # Overall metrics
 overall_stats <- gpu_sales |>
  mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
@@ -117,7 +113,6 @@ materialize intermediate results and branch efficiently.
 ### Creating a Shared Base
 
 ``` r
-
 # Prepare base data (filter and add computed columns)
 base_analysis <- gpu_sales |>
  mutate(
@@ -134,7 +129,6 @@ base_analysis <- gpu_sales |>
 ### Branch 1: Regional Performance
 
 ``` r
-
 regional_performance <- base_analysis |>
  group_by(region) |>
  summarise(
@@ -156,7 +150,6 @@ regional_performance
 ### Branch 2: Category Deep-Dive
 
 ``` r
-
 category_analysis <- base_analysis |>
  group_by(product_category) |>
  summarise(
@@ -177,7 +170,6 @@ category_analysis
 ### Branch 3: Discount Effectiveness
 
 ``` r
-
 discount_analysis <- base_analysis |>
  group_by(discount_pct) |>
  summarise(
@@ -202,7 +194,6 @@ temporal data.
 ### Date-Based Filtering
 
 ``` r
-
 # Filter to Q1 2023
 q1_sales <- gpu_sales |>
  filter(
@@ -220,7 +211,6 @@ For date component extraction (year, month, day), compute these in R
 before transferring or use integer arithmetic:
 
 ``` r
-
 # Add date components in R, then transfer
 sales_with_dates <- sales_data |>
  mutate(
@@ -246,7 +236,6 @@ monthly_trend
 ### Quarterly Analysis
 
 ``` r
-
 quarterly_analysis <- tbl_gpu(sales_with_dates, lazy = TRUE) |>
  mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
  group_by(quarter, region) |>
@@ -265,7 +254,6 @@ quarterly_analysis
 ### Customer Segmentation by Purchase Behavior
 
 ``` r
-
 customer_segments <- gpu_sales |>
  mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
  group_by(customer_id) |>
@@ -295,7 +283,6 @@ table(customer_segments$segment)
 ### Product Performance Tiers
 
 ``` r
-
 category_performance <- gpu_sales |>
  mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
  group_by(product_category) |>
@@ -321,7 +308,6 @@ category_performance
 Compare metrics across time periods:
 
 ``` r
-
 # Add period indicator in R
 sales_with_period <- sales_data |>
  mutate(
@@ -345,7 +331,6 @@ period_comparison
 ### Region-to-Region Comparison
 
 ``` r
-
 region_metrics <- gpu_sales |>
  mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
  group_by(region) |>
@@ -372,7 +357,6 @@ region_metrics
 When working with very large data, minimize memory usage:
 
 ``` r
-
 # Pattern 1: Filter early, select only needed columns
 result <- tbl_gpu(huge_data, lazy = TRUE) |>
  filter(status == "active") |>      # Reduce rows first
@@ -398,7 +382,6 @@ result <- base |>
 ### Monitoring Memory Usage
 
 ``` r
-
 # Check GPU memory state
 gpu_memory_state()
 
@@ -414,7 +397,6 @@ efficiently:
 ### Pass 1: Compute Aggregates
 
 ``` r
-
 # First pass: get category totals
 category_totals <- gpu_sales |>
  mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
@@ -428,7 +410,6 @@ category_totals
 ### Pass 2: Detailed Analysis with Context
 
 ``` r
-
 # Add category totals back to data (in R)
 sales_enriched <- sales_data |>
  left_join(category_totals, by = "product_category")
@@ -455,7 +436,6 @@ regional_share
 Encapsulate common patterns in functions:
 
 ``` r
-
 #' Calculate revenue metrics by grouping columns
 #'
 #' @param gpu_data A tbl_gpu object with sales data
@@ -493,7 +473,6 @@ head(by_both, 10)
 ### Parameterized Analysis
 
 ``` r
-
 #' Analyze high-value transactions
 #'
 #' @param gpu_data A tbl_gpu object
@@ -530,7 +509,6 @@ Some operations are better suited for R. Use a hybrid approach:
 ### GPU for Heavy Lifting
 
 ``` r
-
 # Heavy aggregation on GPU
 aggregated <- gpu_sales |>
  mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
@@ -548,7 +526,6 @@ nrow(aggregated)  # Much smaller than original
 ### R for Complex Logic
 
 ``` r
-
 # Complex categorization in R
 final_analysis <- aggregated |>
  mutate(
@@ -580,7 +557,6 @@ final_analysis
 Robust pipelines handle edge cases:
 
 ``` r
-
 safe_analysis <- function(data, min_rows = 100) {
  # Validate input
  if (!is.data.frame(data)) {
@@ -624,7 +600,6 @@ safe_analysis(sales_data)
 Create a comprehensive summary:
 
 ``` r
-
 create_sales_dashboard <- function(gpu_data) {
  # Overall metrics
  overall <- gpu_data |>
@@ -678,7 +653,6 @@ print(dashboard$by_region)
 Compare GPU vs CPU performance on your data:
 
 ``` r
-
 library(bench)
 
 # Benchmark: GPU vs CPU for aggregation
@@ -717,9 +691,9 @@ overhead. The GPU advantage becomes clear with millions of rows.
 
 ## Next Steps
 
-- [`vignette("getting-started")`](https://bbtheo.github.io/cuplyr/articles/getting-started.md) -
+- [`vignette("getting-started")`](../articles/getting-started.md) -
   Basic cuplyr usage
-- [`vignette("query-optimization")`](https://bbtheo.github.io/cuplyr/articles/query-optimization.md) -
+- [`vignette("query-optimization")`](../articles/query-optimization.md) -
   Understanding the optimizer
 - Package documentation for specific functions
 
@@ -731,8 +705,7 @@ overhead. The GPU advantage becomes clear with millions of rows.
 4.  **Prepare date components in R** before transfer
 5.  **Use hybrid GPU/CPU** - GPU for aggregation, R for complex logic
 6.  **Monitor memory** with
-    [`gpu_memory_state()`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_state.md)
-    and
-    [`gpu_gc()`](https://bbtheo.github.io/cuplyr/reference/gpu_gc.md)
+    [`gpu_memory_state()`](../reference/gpu_memory_state.md) and
+    [`gpu_gc()`](../reference/gpu_gc.md)
 7.  **Encapsulate patterns** in reusable functions
 8.  **Handle errors gracefully** in production pipelines

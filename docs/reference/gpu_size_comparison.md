@@ -33,10 +33,8 @@ A list with:
 
 ## See also
 
-[`verify_gpu_data`](https://bbtheo.github.io/cuplyr/reference/verify_gpu_data.md)
-for boolean verification,
-[`gpu_object_info`](https://bbtheo.github.io/cuplyr/reference/gpu_object_info.md)
-for detailed information
+[`verify_gpu_data`](verify_gpu_data.md) for boolean verification,
+[`gpu_object_info`](gpu_object_info.md) for detailed information
 
 ## Examples
 

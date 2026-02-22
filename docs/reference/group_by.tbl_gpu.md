@@ -16,8 +16,7 @@ group_by(.data, ..., .add = FALSE, .drop = TRUE)
 
 - .data:
 
-  A `tbl_gpu` object created by
-  [`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md).
+  A `tbl_gpu` object created by [`tbl_gpu()`](tbl_gpu.md).
 
 - ...:
 
@@ -56,10 +55,8 @@ operations before executing the expensive groupby operation.
 
 ## See also
 
-[`summarise.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/summarise.tbl_gpu.md)
-for aggregating grouped data,
-[`ungroup.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/ungroup.tbl_gpu.md)
-for removing grouping
+[`summarise.tbl_gpu`](summarise.tbl_gpu.md) for aggregating grouped
+data, [`ungroup.tbl_gpu`](ungroup.tbl_gpu.md) for removing grouping
 
 ## Examples
 

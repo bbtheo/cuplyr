@@ -12,7 +12,7 @@ show_gpu()
 ## Value
 
 Invisibly returns the GPU info list (same as
-[`gpu_details()`](https://bbtheo.github.io/cuplyr/reference/gpu_details.md)).
+[`gpu_details()`](gpu_details.md)).
 
 ## Details
 
@@ -26,10 +26,8 @@ Output includes:
 
 ## See also
 
-[`has_gpu`](https://bbtheo.github.io/cuplyr/reference/has_gpu.md) for
-availability check,
-[`gpu_details`](https://bbtheo.github.io/cuplyr/reference/gpu_details.md)
-for programmatic access
+[`has_gpu`](has_gpu.md) for availability check,
+[`gpu_details`](gpu_details.md) for programmatic access
 
 ## Examples
 
@@ -40,7 +38,7 @@ show_gpu()
 #> Device:       NVIDIA GeForce RTX 5070 
 #> Compute:      12.0 
 #> Memory:       12.3 GB total
-#>               11 GB free
-#>               1.3 GB used
+#>               10.9 GB free
+#>               1.4 GB used
 #> SMs:          1 
 ```

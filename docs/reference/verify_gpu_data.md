@@ -35,10 +35,8 @@ This function performs multiple verification steps:
 
 ## See also
 
-[`gpu_object_info`](https://bbtheo.github.io/cuplyr/reference/gpu_object_info.md)
-for detailed object information,
-[`tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md) for
-creating GPU tables
+[`gpu_object_info`](gpu_object_info.md) for detailed object information,
+[`tbl_gpu`](tbl_gpu.md) for creating GPU tables
 
 ## Examples
 

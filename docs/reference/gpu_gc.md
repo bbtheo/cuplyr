@@ -16,6 +16,12 @@ gpu_gc(verbose = FALSE, aggressive = TRUE)
 
   Logical. If TRUE, prints memory freed. Default FALSE.
 
+- aggressive:
+
+  Logical. If TRUE (default), runs multiple GC passes with short delays
+  to more aggressively trigger finalizers. If FALSE, runs a lighter
+  cleanup pass.
+
 ## Value
 
 Invisibly returns a list with memory state before and after cleanup, and
@@ -41,8 +47,8 @@ Call this function:
 
 ## See also
 
-[`gpu_memory_state`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_state.md)
-for checking current memory usage
+[`gpu_memory_state`](gpu_memory_state.md) for checking current memory
+usage
 
 ## Examples
 
@@ -55,5 +61,5 @@ if (has_gpu()) {
   # Force cleanup
   gpu_gc(verbose = TRUE)
 }
-#> GPU memory freed: 8912896 bytes
+#> GPU memory freed: 8519680 bytes
 ```

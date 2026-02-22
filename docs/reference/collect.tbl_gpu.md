@@ -15,8 +15,7 @@ collect(x, ...)
 
 - x:
 
-  A `tbl_gpu` object created by
-  [`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md).
+  A `tbl_gpu` object created by [`tbl_gpu()`](tbl_gpu.md).
 
 - ...:
 
@@ -57,11 +56,9 @@ time.
 
 ## See also
 
-[`tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md) for
-creating GPU tables,
-[`filter.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/filter.tbl_gpu.md),
-[`select.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/select.tbl_gpu.md)
-for reducing data
+[`tbl_gpu`](tbl_gpu.md) for creating GPU tables,
+[`filter.tbl_gpu`](filter.tbl_gpu.md),
+[`select.tbl_gpu`](select.tbl_gpu.md) for reducing data
 
 ## Examples
 

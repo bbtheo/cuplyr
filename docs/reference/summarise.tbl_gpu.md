@@ -67,10 +67,8 @@ rows, returning a single-row table.
 
 ## See also
 
-[`group_by.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/group_by.tbl_gpu.md)
-for grouping data,
-[`collect.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/collect.tbl_gpu.md)
-for retrieving results
+[`group_by.tbl_gpu`](group_by.tbl_gpu.md) for grouping data,
+[`collect.tbl_gpu`](collect.tbl_gpu.md) for retrieving results
 
 ## Examples
 
