@@ -8,6 +8,33 @@ echo ""
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 CUDF_HOME="${CUDF_HOME:-}"
 CONDA_PREFIX="${CONDA_PREFIX:-}"
+CUDA_MIN_VERSION="${CUPLYR_CUDA_MIN_VERSION:-12.2}"
+
+# Allow CUDA stub linking in non-GPU builder environments.
+# Modes:
+#   - explicit on: CUPLYR_ALLOW_CUDA_STUBS=1/true/yes
+#   - explicit off: CUPLYR_ALLOW_CUDA_STUBS=0/false/no
+#   - auto (default): enabled on common CI/builder environments
+allow_cuda_stubs() {
+    local mode="${CUPLYR_ALLOW_CUDA_STUBS:-auto}"
+    case "$mode" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        0|false|FALSE|no|NO|off|OFF) return 1 ;;
+    esac
+
+    if [ -n "${CONDA_BUILD:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ] || [ "${CI:-}" = "true" ] || [ "${CI:-}" = "TRUE" ] || [ "${CI:-}" = "1" ]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# Compare semantic versions (major.minor), returns true if current >= required.
+version_at_least() {
+    local current="$1"
+    local required="$2"
+    [ "$(printf '%s\n%s\n' "$required" "$current" | sort -V | head -n1)" = "$required" ]
+}
 
 # Detect Linux distro for remediation hints
 detect_distro() {
@@ -23,9 +50,24 @@ DISTRO=$(detect_distro)
 # Function to find libcudf
 find_cudf() {
     # Check if CUDF_HOME is set first (for pip installs)
-    if [ -n "$CUDF_HOME" ] && [ -d "$CUDF_HOME" ]; then
-        echo "$CUDF_HOME"
-        return 0
+    if [ -n "$CUDF_HOME" ]; then
+        if [ -d "$CUDF_HOME" ] && [ -f "$CUDF_HOME/include/cudf/types.hpp" ]; then
+            echo "$CUDF_HOME"
+            return 0
+        fi
+
+        if [ -d "$CUDF_HOME" ] && [[ "$CUDF_HOME" == */site-packages/libcudf ]]; then
+            local pip_prefix
+            pip_prefix="$(dirname "$(dirname "$(dirname "$(dirname "$CUDF_HOME")")")")"
+            if [ -f "$pip_prefix/include/cudf/types.hpp" ]; then
+                echo "$pip_prefix"
+                return 0
+            fi
+        fi
+
+        echo "WARNING: CUDF_HOME is set but does not look like a valid cuDF prefix: $CUDF_HOME" >&2
+        echo "         Expected: \$CUDF_HOME/include/cudf/types.hpp" >&2
+        echo "         If CUDF_HOME is stale, unset it and rely on CONDA_PREFIX." >&2
     fi
 
     # Try conda environment (check for types.hpp - the main cudf header in RAPIDS 25.x+)
@@ -82,6 +124,27 @@ if [ ! -f "$CUDA_HOME/include/cuda.h" ]; then
     exit 1
 fi
 
+if [ ! -x "$CUDA_HOME/bin/nvcc" ]; then
+    echo "ERROR: nvcc not found at $CUDA_HOME/bin/nvcc."
+    echo ""
+    echo "This usually means the CUDA toolkit is incomplete."
+    echo "Install a full toolkit (including nvcc) and retry."
+    exit 1
+fi
+
+CUDA_VERSION=$("$CUDA_HOME/bin/nvcc" --version | sed -n 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n1)
+if [ -z "$CUDA_VERSION" ]; then
+    echo "ERROR: Could not parse CUDA version from nvcc output."
+    echo "Expected a 'release X.Y' entry from: $CUDA_HOME/bin/nvcc --version"
+    exit 1
+fi
+
+if ! version_at_least "$CUDA_VERSION" "$CUDA_MIN_VERSION"; then
+    echo "ERROR: CUDA $CUDA_VERSION found, but cuplyr requires CUDA >= $CUDA_MIN_VERSION"
+    echo "       with RAPIDS libcudf >= 25.12."
+    exit 1
+fi
+
 # Find CUDA driver library (prefer system driver libcuda.so.1 over toolkit stubs)
 is_real_libcuda() {
     local lib_path="$1"
@@ -130,9 +193,42 @@ find_cuda_driver_lib() {
     return 1
 }
 
+# Find CUDA stub libcuda for build-time linking when no real driver is available.
+find_cuda_stub_lib() {
+    local candidates=(
+        "$CUDA_HOME/lib64/stubs"
+        "$CUDA_HOME/lib/stubs"
+        "$CUDA_HOME/targets/x86_64-linux/lib/stubs"
+    )
+
+    if [ -n "$CONDA_PREFIX" ]; then
+        candidates+=(
+            "$CONDA_PREFIX/lib64/stubs"
+            "$CONDA_PREFIX/lib/stubs"
+            "$CONDA_PREFIX/targets/x86_64-linux/lib/stubs"
+        )
+    fi
+
+    for path in "${candidates[@]}"; do
+        if [ -n "$path" ] && [ -d "$path" ]; then
+            if [ -f "$path/libcuda.so" ] || [ -f "$path/libcuda.so.1" ]; then
+                echo "$path"
+                return 0
+            fi
+        fi
+    done
+
+    return 1
+}
+
 # Find CUDA runtime library path (libcudart)
 find_cuda_runtime_lib() {
-    for path in "$CUDA_HOME/lib64" "$CUDA_HOME/lib" "$CONDA_PREFIX/lib64" "$CONDA_PREFIX/lib"; do
+    local candidates=("$CUDA_HOME/lib64" "$CUDA_HOME/lib")
+    if [ -n "$CONDA_PREFIX" ]; then
+        candidates+=("$CONDA_PREFIX/lib64" "$CONDA_PREFIX/lib")
+    fi
+
+    for path in "${candidates[@]}"; do
         if [ -n "$path" ] && [ -f "$path/libcudart.so" ]; then
             echo "$path"
             return 0
@@ -143,30 +239,45 @@ find_cuda_runtime_lib() {
 }
 
 CUDA_DRIVER_LIB=$(find_cuda_driver_lib)
+CUDA_DRIVER_RPATH="$CUDA_DRIVER_LIB"
 if [ -z "$CUDA_DRIVER_LIB" ]; then
-    echo "ERROR: libcuda.so.1 not found (NVIDIA driver library)."
-    echo ""
-    echo "This means the NVIDIA GPU driver is not installed or not visible."
-    echo ""
-    echo "To fix:"
-    case "$DISTRO" in
-        ubuntu|debian)
-            echo "  sudo apt-get install nvidia-driver-535"
-            echo "  # or use: sudo ubuntu-drivers autoinstall" ;;
-        fedora|rhel|centos|rocky|alma)
-            echo "  sudo dnf install nvidia-driver" ;;
-        arch|manjaro)
-            echo "  sudo pacman -S nvidia" ;;
-        *)
-            echo "  Install NVIDIA driver from: https://www.nvidia.com/Download/index.aspx" ;;
-    esac
-    echo ""
-    echo "After installing, verify with: nvidia-smi"
-    echo ""
-    echo "If driver IS installed but not found, check:"
-    echo "  ldconfig -p | grep libcuda"
-    echo "  ls /usr/lib/x86_64-linux-gnu/libcuda.so* /usr/lib64/libcuda.so*"
-    exit 1
+    if allow_cuda_stubs; then
+        CUDA_DRIVER_LIB=$(find_cuda_stub_lib)
+        if [ -n "$CUDA_DRIVER_LIB" ]; then
+            CUDA_DRIVER_RPATH=""
+            echo "WARNING: Real libcuda.so.1 not found; using CUDA stubs for build-time linking."
+            echo "         Runtime requires a real NVIDIA driver on target systems."
+        fi
+    fi
+
+    if [ -z "$CUDA_DRIVER_LIB" ]; then
+        echo "ERROR: libcuda.so.1 not found (NVIDIA driver library)."
+        echo ""
+        echo "This means the NVIDIA GPU driver is not installed or not visible."
+        echo ""
+        echo "To fix:"
+        case "$DISTRO" in
+            ubuntu|debian)
+                echo "  sudo apt-get install nvidia-driver-535"
+                echo "  # or use: sudo ubuntu-drivers autoinstall" ;;
+            fedora|rhel|centos|rocky|alma)
+                echo "  sudo dnf install nvidia-driver" ;;
+            arch|manjaro)
+                echo "  sudo pacman -S nvidia" ;;
+            *)
+                echo "  Install NVIDIA driver from: https://www.nvidia.com/Download/index.aspx" ;;
+        esac
+        echo ""
+        echo "After installing, verify with: nvidia-smi"
+        echo ""
+        echo "If driver IS installed but not found, check:"
+        echo "  ldconfig -p | grep libcuda"
+        echo "  ls /usr/lib/x86_64-linux-gnu/libcuda.so* /usr/lib64/libcuda.so*"
+        echo ""
+        echo "If this is a non-GPU CI/binary builder, allow stub linking:"
+        echo "  CUPLYR_ALLOW_CUDA_STUBS=1 ./configure"
+        exit 1
+    fi
 fi
 
 CUDA_RUNTIME_LIB=$(find_cuda_runtime_lib)
@@ -183,8 +294,13 @@ if [ -z "$CUDA_RUNTIME_LIB" ]; then
 fi
 
 echo "Found CUDA at: $CUDA_HOME"
-echo "CUDA version: $($CUDA_HOME/bin/nvcc --version | grep release | awk '{print $6}')"
-echo "Using CUDA driver lib path: $CUDA_DRIVER_LIB"
+echo "CUDA version: $CUDA_VERSION"
+echo "Using CUDA driver link path: $CUDA_DRIVER_LIB"
+if [ -n "$CUDA_DRIVER_RPATH" ]; then
+    echo "Using CUDA driver runtime path: $CUDA_DRIVER_RPATH"
+else
+    echo "Using CUDA driver runtime path: (system default lookup)"
+fi
 echo "Using CUDA runtime lib path: $CUDA_RUNTIME_LIB"
 
 # Detect libcudf
@@ -258,16 +374,44 @@ fi
 
 # Find all RAPIDS library directories (for transitive dependencies)
 RAPIDS_BASE="$(dirname "$CUDF_PREFIX")"
-RAPIDS_RPATHS="$CUDF_LIB"
+RAPIDS_RPATHS=""
+
+append_rapids_rpath() {
+    local path="$1"
+    if [ -z "$path" ] || [ ! -d "$path" ]; then
+        return 1
+    fi
+    case ":$RAPIDS_RPATHS:" in
+        *":$path:"*) return 1 ;;
+    esac
+    if [ -z "$RAPIDS_RPATHS" ]; then
+        RAPIDS_RPATHS="$path"
+    else
+        RAPIDS_RPATHS="$RAPIDS_RPATHS:$path"
+    fi
+    return 0
+}
+
+# Keep conda base lib first so transitive libstdc++ resolution prefers RAPIDS.
+if [ -n "$CONDA_PREFIX" ] && [ -d "$CONDA_PREFIX/lib" ]; then
+    if append_rapids_rpath "$CONDA_PREFIX/lib"; then
+        echo "Added conda base library to RUNPATH: $CONDA_PREFIX/lib"
+    fi
+fi
+
+append_rapids_rpath "$CUDF_LIB"
 for pkg in librmm libkvikio rapids_logger; do
     for libdir in "$RAPIDS_BASE/$pkg/lib64" "$RAPIDS_BASE/$pkg/lib"; do
         if [ -d "$libdir" ]; then
-            RAPIDS_RPATHS="$RAPIDS_RPATHS:$libdir"
-            echo "Found $pkg library at: $libdir"
+            if append_rapids_rpath "$libdir"; then
+                echo "Found $pkg library at: $libdir"
+            fi
             break
         fi
     done
 done
+
+echo "Final RAPIDS RUNPATH directories: $RAPIDS_RPATHS"
 
 # Verify libcudf shared library exists
 if [ ! -f "$CUDF_LIB/libcudf.so" ]; then
@@ -287,9 +431,15 @@ for lib in librmm.so libkvikio.so librapids_logger.so; do
     done
 done
 
+CUDA_DRIVER_RPATH_FLAG=""
+if [ -n "$CUDA_DRIVER_RPATH" ]; then
+    CUDA_DRIVER_RPATH_FLAG="-Wl,-rpath,$CUDA_DRIVER_RPATH"
+fi
+
 # Generate Makevars from template
 sed -e "s|@CUDA_HOME@|$CUDA_HOME|g" \
     -e "s|@CUDA_DRIVER_LIB@|$CUDA_DRIVER_LIB|g" \
+    -e "s|@CUDA_DRIVER_RPATH_FLAG@|$CUDA_DRIVER_RPATH_FLAG|g" \
     -e "s|@CUDA_RUNTIME_LIB@|$CUDA_RUNTIME_LIB|g" \
     -e "s|@CUDF_INCLUDE@|$CUDF_INCLUDE|g" \
     -e "s|@CUDF_LIB@|$CUDF_LIB|g" \

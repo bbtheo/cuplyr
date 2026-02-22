@@ -74,6 +74,16 @@ test_that("check_deps() treats skipped GPU check as non-fatal", {
   expect_true(is.na(result$checks$gpu$ok))
 })
 
+test_that("CUDA version helpers enforce minimum version", {
+  expect_equal(
+    parse_cuda_release_version("Cuda compilation tools, release 12.1, V12.1.105"),
+    "12.1"
+  )
+  expect_false(is_cuda_version_supported("12.1", required = "12.2"))
+  expect_true(is_cuda_version_supported("12.2", required = "12.2"))
+  expect_true(is_cuda_version_supported("13.0", required = "12.2"))
+})
+
 test_that("check_libcudf() requires shared library presence", {
   tmp <- tempfile("cuplyr-cudf-")
   dir.create(file.path(tmp, "include", "cudf"), recursive = TRUE, showWarnings = FALSE)

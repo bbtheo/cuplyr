@@ -208,6 +208,15 @@ install_conda() {
     fi
   fi
 
+  # Dry-run path: print intended commands and exit before filesystem checks.
+  if $DRY_RUN; then
+    echo "[dry-run] $conda_cmd create -y -p \"$prefix\" -c rapidsai -c conda-forge -c nvidia libcudf=25.12 librmm=25.12 libkvikio=25.12 spdlog fmt"
+    echo "[dry-run] $conda_cmd install -y -p \"$prefix\" -c rapidsai -c conda-forge -c nvidia libcudf-dev librmm-dev libkvikio-dev"
+    echo "[dry-run] (cd \"$SRC_DIR\" && CONDA_PREFIX=\"$prefix\" ./configure)"
+    echo "[dry-run] (cd \"$SRC_DIR\" && R CMD INSTALL .)"
+    return
+  fi
+
   # Cloud: disable stubs before anything
   if [ "$env" = "colab" ] || [ "$env" = "cloud_gpu" ]; then
     if [ -d "$prefix/lib" ]; then
@@ -284,11 +293,6 @@ install_conda() {
   fi
 
   log "Configuring cuplyr..."
-  if $DRY_RUN; then
-    echo "[dry-run] (cd \"$SRC_DIR\" && ./configure)"
-    echo "[dry-run] (cd \"$SRC_DIR\" && R CMD INSTALL .)"
-    return
-  fi
   cd "$SRC_DIR"
   run ./configure
 
@@ -309,18 +313,18 @@ install_conda() {
 install_system() {
   log "Installing from system dependencies..."
 
+  if $DRY_RUN; then
+    echo "[dry-run] (cd \"$SRC_DIR\" && ./configure)"
+    echo "[dry-run] (cd \"$SRC_DIR\" && R CMD INSTALL .)"
+    return
+  fi
+
   # Quick checks
   if [ ! -f "${CUDA_HOME:-/usr/local/cuda}/include/cuda.h" ]; then
     echo "ERROR: CUDA toolkit not found." >&2
     echo "Set CUDA_HOME or install CUDA, then retry." >&2
     echo "Or use: ./install.sh --method=conda" >&2
     exit 1
-  fi
-
-  if $DRY_RUN; then
-    echo "[dry-run] (cd \"$SRC_DIR\" && ./configure)"
-    echo "[dry-run] (cd \"$SRC_DIR\" && R CMD INSTALL .)"
-    return
   fi
 
   cd "$SRC_DIR"

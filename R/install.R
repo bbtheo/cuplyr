@@ -425,11 +425,16 @@ install_via_conda <- function(src_dir, conda_prefix, configure_args,
     )
   }
 
+  if (env %in% c("colab", "cloud_gpu")) {
+    validate_cloud_loader_resolution(conda_prefix, verbose = verbose)
+  }
+
   invisible(TRUE)
 }
 
 install_via_system <- function(src_dir, configure_args, dry_run, verbose) {
   env <- detect_environment()
+  conda_prefix <- Sys.getenv("CONDA_PREFIX", "/opt/rapids")
   message("Installing from system dependencies... (environment: ", env, ")")
 
   # Pre-flight check
@@ -454,7 +459,6 @@ install_via_system <- function(src_dir, configure_args, dry_run, verbose) {
   # Cloud: disable stubs and configure paths
   driver_lib <- NULL
   if (env %in% c("colab", "cloud_gpu")) {
-    conda_prefix <- Sys.getenv("CONDA_PREFIX", "/opt/rapids")
     disable_cuda_stubs(file.path(conda_prefix, "lib"))
     driver_lib <- find_real_driver_lib()
     if (!is.null(driver_lib)) {
@@ -496,6 +500,10 @@ install_via_system <- function(src_dir, configure_args, dry_run, verbose) {
   status <- run_in_dir(src_dir, "R", c("CMD", "INSTALL", "."), verbose = verbose)
   if (status != 0) {
     stop("R CMD INSTALL failed (exit code ", status, ").", call. = FALSE)
+  }
+
+  if (env %in% c("colab", "cloud_gpu")) {
+    validate_cloud_loader_resolution(conda_prefix, verbose = verbose)
   }
 
   invisible(TRUE)
@@ -714,6 +722,147 @@ patch_makevars_for_cloud <- function(src_dir, driver_lib) {
 
   writeLines(mk, makevars)
   message("Patched src/Makevars: RUNPATH prepended with conda lib and driver")
+  invisible(TRUE)
+}
+
+#' Find installed cuplyr shared object path
+#' @return Path to installed cuplyr shared object, or NULL if not found.
+#' @keywords internal
+find_installed_cuplyr_so <- function() {
+  ext <- .Platform$dynlib.ext
+  pkg_dir <- tryCatch(system.file(package = "cuplyr"), error = function(e) "")
+  if (nzchar(pkg_dir)) {
+    so <- file.path(pkg_dir, "libs", paste0("cuplyr", ext))
+    if (file.exists(so)) {
+      return(so)
+    }
+  }
+
+  candidates <- file.path(.libPaths(), "cuplyr", "libs", paste0("cuplyr", ext))
+  candidates <- candidates[file.exists(candidates)]
+  if (length(candidates) > 0) {
+    return(candidates[[1]])
+  }
+
+  NULL
+}
+
+#' Validate cloud runtime loader resolution after install
+#'
+#' Confirms cuplyr.so RUNPATH includes conda lib and that ldd resolves
+#' libstdc++.so.6 from the conda prefix (not system path).
+#'
+#' @param conda_prefix RAPIDS/conda prefix.
+#' @param verbose Logical; print pass details.
+#' @keywords internal
+validate_cloud_loader_resolution <- function(conda_prefix, verbose = FALSE) {
+  conda_lib <- file.path(conda_prefix, "lib")
+  if (!dir.exists(conda_lib)) {
+    stop(
+      "Post-build loader validation failed: conda lib directory not found: ",
+      conda_lib,
+      call. = FALSE
+    )
+  }
+
+  if (!has_command("readelf") || !has_command("ldd")) {
+    stop(
+      "Post-build loader validation failed: missing required tools (`readelf`, `ldd`).\n",
+      "Install binutils/libc-bin and retry installation.",
+      call. = FALSE
+    )
+  }
+
+  so_path <- find_installed_cuplyr_so()
+  if (is.null(so_path)) {
+    stop(
+      "Post-build loader validation failed: could not locate installed cuplyr shared library.\n",
+      "Expected under: ", paste(.libPaths(), collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  readelf_out <- system2("readelf", c("-d", so_path), stdout = TRUE, stderr = TRUE)
+  readelf_status <- attr(readelf_out, "status")
+  if (is.null(readelf_status)) readelf_status <- 0L
+  if (readelf_status != 0L) {
+    stop(
+      "Post-build loader validation failed: `readelf -d` errored for ", so_path, ".\n",
+      paste(utils::tail(readelf_out, 20), collapse = "\n"),
+      call. = FALSE
+    )
+  }
+
+  runpath_lines <- grep("RPATH|RUNPATH", readelf_out, value = TRUE)
+  if (length(runpath_lines) == 0L) {
+    stop(
+      "Post-build loader validation failed: no RPATH/RUNPATH found in ", so_path, ".\n",
+      paste(utils::tail(readelf_out, 20), collapse = "\n"),
+      call. = FALSE
+    )
+  }
+  if (!any(grepl(conda_lib, runpath_lines, fixed = TRUE))) {
+    stop(
+      "Post-build loader validation failed: cuplyr RUNPATH does not include conda lib path.\n",
+      "Expected to include: ", conda_lib, "\n",
+      "Found:\n", paste(runpath_lines, collapse = "\n"),
+      call. = FALSE
+    )
+  }
+
+  ldd_out <- system2("ldd", so_path, stdout = TRUE, stderr = TRUE)
+  ldd_status <- attr(ldd_out, "status")
+  if (is.null(ldd_status)) ldd_status <- 0L
+  if (ldd_status != 0L) {
+    stop(
+      "Post-build loader validation failed: `ldd` errored for ", so_path, ".\n",
+      paste(utils::tail(ldd_out, 20), collapse = "\n"),
+      call. = FALSE
+    )
+  }
+
+  stdc_line <- grep("libstdc\\+\\+\\.so\\.6", ldd_out, value = TRUE)
+  if (length(stdc_line) == 0L) {
+    stop(
+      "Post-build loader validation failed: libstdc++.so.6 not listed by ldd.\n",
+      paste(ldd_out, collapse = "\n"),
+      call. = FALSE
+    )
+  }
+  stdc_line <- stdc_line[[1]]
+  if (grepl("not found", stdc_line, fixed = TRUE)) {
+    stop(
+      "Post-build loader validation failed: libstdc++.so.6 unresolved.\n",
+      stdc_line,
+      call. = FALSE
+    )
+  }
+
+  stdc_path <- sub(".*=>\\s*([^[:space:]]+).*", "\\1", stdc_line, perl = TRUE)
+  if (!nzchar(stdc_path) || identical(stdc_path, stdc_line)) {
+    fields <- strsplit(trimws(stdc_line), "\\s+")[[1]]
+    stdc_path <- if (length(fields) >= 1) fields[[1]] else ""
+  }
+
+  stdc_path_norm <- normalizePath(stdc_path, winslash = "/", mustWork = FALSE)
+  conda_prefix_norm <- normalizePath(conda_prefix, winslash = "/", mustWork = FALSE)
+  if (!startsWith(stdc_path_norm, paste0(conda_prefix_norm, "/"))) {
+    stop(
+      "Post-build loader validation failed: libstdc++.so.6 resolves outside conda prefix.\n",
+      "Resolved: ", stdc_path_norm, "\n",
+      "Expected prefix: ", conda_prefix_norm, "\n",
+      "ldd line: ", stdc_line,
+      call. = FALSE
+    )
+  }
+
+  if (verbose) {
+    message("Post-build loader validation passed")
+    message("  cuplyr.so: ", so_path)
+    message("  libstdc++.so.6: ", stdc_path_norm)
+    message("  RUNPATH entries:\n", paste(runpath_lines, collapse = "\n"))
+  }
+
   invisible(TRUE)
 }
 

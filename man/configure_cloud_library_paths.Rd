@@ -12,7 +12,7 @@ configure_cloud_library_paths(driver_lib, conda_prefix)
 \item{conda_prefix}{RAPIDS/conda prefix.}
 }
 \description{
-Sets LD_LIBRARY_PATH with the real driver path first, so it takes
-priority over any RAPIDS stubs.
+Sets LD_LIBRARY_PATH with conda lib FIRST (for newer libstdc++),
+then driver path (for libcuda.so.1), then CUDA runtime.
 }
 \keyword{internal}

@@ -2,7 +2,7 @@
 % Please edit documentation in R/install.R
 \name{patch_makevars_for_cloud}
 \alias{patch_makevars_for_cloud}
-\title{Patch Makevars for Colab/cloud: put driver FIRST in RUNPATH}
+\title{Patch Makevars for Colab/cloud: add conda lib and driver to RUNPATH}
 \usage{
 patch_makevars_for_cloud(src_dir, driver_lib)
 }
@@ -12,6 +12,6 @@ patch_makevars_for_cloud(src_dir, driver_lib)
 \item{driver_lib}{Real driver library path.}
 }
 \description{
-Patch Makevars for Colab/cloud: put driver FIRST in RUNPATH
+Patch Makevars for Colab/cloud: add conda lib and driver to RUNPATH
 }
 \keyword{internal}
