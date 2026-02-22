@@ -413,6 +413,8 @@ Before merging dev to master, verify:
 
 **Roxygen2 for exports (STRICT)**: NEVER edit the NAMESPACE file by hand. Always use `#' @export` roxygen tags on functions and run `devtools::document()` (or `pixi run load-dev` which triggers it) to regenerate NAMESPACE. The same applies to `@importFrom` directives. Manual NAMESPACE edits will be overwritten.
 
+**Scratchpad for non-publishable docs (STRICT)**: When writing plans, post-mortems, analysis documents, or any other content that is not meant to be committed to the repository, always write them to the `scratchpad/` directory. Examples: `scratchpad/post_mortem.md`, `scratchpad/analysis.md`, `scratchpad/plan.md`. This keeps the repository clean and separates working documents from production code/docs.
+
 ## cuDF Header Quick Reference
 
 | Operation | Header | Key Functions |
