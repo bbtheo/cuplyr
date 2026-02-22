@@ -650,7 +650,7 @@ configure_cloud_library_paths <- function(driver_lib, conda_prefix) {
 
 #' Register library paths via ldconfig for runtime dlopen()
 #'
-#' Writes library paths to /etc/ld.so.conf.d/cuplyr-rapids.conf and runs ldconfig.
+#' Writes library paths to /etc/ld.so.conf.d/00-cuplyr-rapids.conf and runs ldconfig.
 #' This ensures the dynamic linker finds conda's newer libstdc++ even when
 #' LD_LIBRARY_PATH changes after process startup don't affect dlopen().
 #'
@@ -658,7 +658,7 @@ configure_cloud_library_paths <- function(driver_lib, conda_prefix) {
 #' @return Logical: TRUE if ldconfig succeeded, FALSE otherwise.
 #' @keywords internal
 register_library_paths <- function(paths) {
-  conf <- "/etc/ld.so.conf.d/cuplyr-rapids.conf"
+  conf <- "/etc/ld.so.conf.d/00-cuplyr-rapids.conf"
   paths <- paths[nzchar(paths) & dir.exists(paths)]
   if (length(paths) == 0) return(invisible(FALSE))
 
