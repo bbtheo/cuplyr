@@ -2,9 +2,6 @@
 
 #### dplyr backend for GPU acceleration via RAPIDS cuDF
 
-[![Open In
-Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/bbtheo/cuplyr/blob/install/notebooks/install_cuplyr.ipynb)
-
 cuplyr implements a dplyr backend powered by [RAPIDS
 cuDF](https://github.com/rapidsai/cudf), NVIDIA’s GPU DataFrame library.
 Write standard dplyr code, execute on GPU hardware.
@@ -109,7 +106,6 @@ Contributions and feedback are welcome.
 
 | I want to…                         | Do this                               |
 |------------------------------------|---------------------------------------|
-| **Try it out** (no local GPU)      | [Open in Colab](#try-on-google-colab) |
 | **Use it** (I have an NVIDIA GPU)  | [Quick install](#quick-install)       |
 | **Contribute** (modify C++/R code) | [Developer setup](#developer-setup)   |
 
@@ -122,13 +118,6 @@ Contributions and feedback are welcome.
 | RAPIDS libcudf | \>= 25.12                           |
 | R              | \>= 4.3                             |
 | OS             | Linux x86_64 only                   |
-
-### Try on Google Colab
-
-The fastest way to try cuplyr — no local setup required:
-
-[![Open In
-Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/bbtheo/cuplyr/blob/install/notebooks/install_cuplyr.ipynb)
 
 ### Quick install
 

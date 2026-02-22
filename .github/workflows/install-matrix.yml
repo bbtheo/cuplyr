@@ -25,11 +25,10 @@ jobs:
   install:
     name: "${{ matrix.method }}"
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.method == 'all' || inputs.method == matrix.method }}
     strategy:
       fail-fast: false
       matrix:
-        method: [pixi, conda, system]
+        method: ${{ fromJSON(github.event_name == 'workflow_dispatch' && github.event.inputs.method != 'all' && format('["{0}"]', github.event.inputs.method) || '["pixi","conda","system"]') }}
 
     steps:
       - name: Checkout
