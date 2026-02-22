@@ -403,7 +403,7 @@ try({
 
 ## System Requirements
 
-- NVIDIA GPU with CUDA support (Compute Capability >= 6.0)
-- CUDA Toolkit >= 12.0
+- NVIDIA GPU with CUDA support (Compute Capability >= 7.0)
+- CUDA Toolkit >= 12.2
 - RAPIDS cuDF >= 25.12
 - R >= 4.3.0

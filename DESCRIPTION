@@ -16,8 +16,8 @@ Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.3
 SystemRequirements:
-    NVIDIA GPU with Compute Capability >= 6.0,
-    CUDA Toolkit >= 12.0,
+    NVIDIA GPU with Compute Capability >= 7.0 (Volta or newer),
+    CUDA Toolkit >= 12.2,
     RAPIDS libcudf >= 25.12
 Depends:
     R (>= 4.3.0)

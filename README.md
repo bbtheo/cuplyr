@@ -103,7 +103,7 @@ Contributions and feedback are welcome.
 | Component | Version |
 |-----------|---------|
 | NVIDIA GPU | Compute Capability >= 7.0 (Volta+) |
-| CUDA Toolkit | >= 12.0 |
+| CUDA Toolkit | >= 12.2 |
 | RAPIDS libcudf | >= 25.12 |
 | R | >= 4.3 |
 | OS | Linux x86_64 only |
@@ -160,6 +160,7 @@ diagnostics()
 ### Developer setup
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor workflow using `pixi shell`.
+GitHub Actions trigger/run instructions are in [docs/github-actions-runbook.md](docs/github-actions-runbook.md).
 
 ## Performance
 

@@ -30,7 +30,8 @@ The following checks are performed:
 \enumerate{
 \item \strong{NVIDIA Driver}: Verifies \code{nvidia-smi} is available and reports
 driver version
-\item \strong{CUDA Toolkit}: Checks for \code{nvcc} and reports CUDA version
+\item \strong{CUDA Toolkit}: Checks for \code{nvcc}, validates CUDA >= 12.2, and
+reports CUDA version
 \item \strong{libcudf}: Looks for cudf headers in standard paths
 \item \strong{R Version}: Checks R >= 4.3.0
 \item \strong{R Packages}: Verifies required R packages are installed

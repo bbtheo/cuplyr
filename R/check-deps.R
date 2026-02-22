@@ -20,7 +20,8 @@
 #' \enumerate{
 #'   \item **NVIDIA Driver**: Verifies `nvidia-smi` is available and reports
 #'     driver version
-#'   \item **CUDA Toolkit**: Checks for `nvcc` and reports CUDA version
+#'   \item **CUDA Toolkit**: Checks for `nvcc`, validates CUDA >= 12.2, and
+#'     reports CUDA version
 #'   \item **libcudf**: Looks for cudf headers in standard paths
 #'   \item **R Version**: Checks R >= 4.3.0
 #'   \item **R Packages**: Verifies required R packages are installed
@@ -119,7 +120,30 @@ check_nvidia_driver <- function() {
   )
 }
 
+parse_cuda_release_version <- function(version_out) {
+  release_line <- grep("release", version_out, value = TRUE)
+  if (length(release_line) == 0) {
+    return(NA_character_)
+  }
+
+  m <- regmatches(release_line, regexpr("[0-9]+\\.[0-9]+", release_line))
+  if (length(m) == 0) {
+    return(NA_character_)
+  }
+
+  m[1]
+}
+
+is_cuda_version_supported <- function(version, required = "12.2") {
+  if (is.na(version) || !nzchar(version)) {
+    return(FALSE)
+  }
+  utils::compareVersion(version, required) >= 0
+}
+
 check_cuda_toolkit <- function() {
+  required <- "12.2"
+
   # Try CUDA_HOME/bin/nvcc first, then PATH
   cuda_home <- Sys.getenv("CUDA_HOME", "/usr/local/cuda")
   nvcc <- file.path(cuda_home, "bin", "nvcc")
@@ -142,20 +166,29 @@ check_cuda_toolkit <- function() {
     error = function(e) NULL
   )
 
-  version <- NA_character_
-  if (!is.null(version_out)) {
-    release_line <- grep("release", version_out, value = TRUE)
-    if (length(release_line) > 0) {
-      m <- regmatches(release_line, regexpr("[0-9]+\\.[0-9]+", release_line))
-      if (length(m) > 0) version <- m[1]
-    }
+  version <- if (!is.null(version_out)) parse_cuda_release_version(version_out) else NA_character_
+
+  if (is.na(version)) {
+    return(list(
+      ok = FALSE,
+      name = "CUDA Toolkit",
+      value = NA_character_,
+      message = paste0("Could not parse CUDA version from nvcc output (need >= ", required, ").")
+    ))
   }
 
+  ok <- is_cuda_version_supported(version, required = required)
+
   list(
-    ok = TRUE,
+    ok = ok,
     name = "CUDA Toolkit",
     value = version,
-    message = paste0("CUDA ", version, " at ", dirname(dirname(nvcc)))
+    message = if (ok) {
+      paste0("CUDA ", version, " at ", dirname(dirname(nvcc)))
+    } else {
+      paste0("CUDA ", version, " at ", dirname(dirname(nvcc)),
+             " (need >= ", required, ")")
+    }
   )
 }
 

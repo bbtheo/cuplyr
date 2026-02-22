@@ -12,8 +12,8 @@ librmm = ">=25.12"
 libkvikio = ">=25.12"
 
 # CUDA toolkit
-cuda-toolkit = ">=12.0,<13"
-cuda-nvcc = ">=12.0,<13"
+cuda-toolkit = ">=12.2,<13"
+cuda-nvcc = ">=12.2,<13"
 pandoc = ">=3.0"
 
 [tasks]
