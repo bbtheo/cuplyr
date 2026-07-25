@@ -17,6 +17,7 @@
 #include <cudf/table/table_view.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/null_mask.hpp>
+#include <cudf/replace.hpp>
 #include <cudf/utilities/span.hpp>
 #include <cudf/sorting.hpp>
 #include <rmm/mr/device/per_device_resource.hpp>
@@ -51,7 +52,9 @@ std::unique_ptr<cudf::table> build_join_result(
     const cudf::table_view& right_view,
     const rmm::device_uvector<cudf::size_type>& left_map_in,
     const rmm::device_uvector<cudf::size_type>& right_map_in,
-    const std::vector<cudf::size_type>& right_keep_cols) {
+    const std::vector<cudf::size_type>& right_keep_cols,
+    const std::vector<cudf::size_type>& left_key_cols = {},
+    const std::vector<cudf::size_type>& right_key_cols = {}) {
 
     auto stream = cudf::get_default_stream();
     auto mr = rmm::mr::get_current_device_resource();
@@ -112,8 +115,43 @@ std::unique_ptr<cudf::table> build_join_result(
         stream, mr
     );
 
+    // Full-join key coalescing (scratchpad/unification_design.md Part C, P1):
+    // right-only rows have no left source row, so left_map points out of
+    // bounds and left_gathered's key columns come back NULL for them, even
+    // though the right table's own key columns (which build_join_result's
+    // caller has NOT included in right_keep_cols, since keep = FALSE drops
+    // them) hold the real values for those exact rows. Gather the right
+    // table's raw key columns via the same right_map (before they were
+    // dropped) and coalesce them into the left-gathered key columns so
+    // right-only rows get the key filled in from the right side, matching
+    // dplyr's full_join() contract. Only full_join() passes non-empty
+    // left_key_cols/right_key_cols; left/inner joins are unaffected (and for
+    // those join types every left-gathered key value is already non-null, so
+    // this would be a no-op anyway).
+    std::vector<std::unique_ptr<cudf::column>> coalesced_keys;
+    if (!left_key_cols.empty()) {
+        auto right_key_view = select_table_view(right_view, right_key_cols);
+        auto right_key_gathered = cudf::gather(
+            right_key_view, right_map_view,
+            cudf::out_of_bounds_policy::NULLIFY,
+            stream, mr
+        );
+        auto right_key_cols_vec = right_key_gathered->release();
+        coalesced_keys.reserve(left_key_cols.size());
+        for (size_t i = 0; i < left_key_cols.size(); ++i) {
+            coalesced_keys.push_back(cudf::replace_nulls(
+                left_gathered->view().column(left_key_cols[i]),
+                right_key_cols_vec[i]->view(),
+                stream, mr));
+        }
+    }
+
     auto left_cols = left_gathered->release();
     auto right_cols = right_gathered->release();
+
+    for (size_t i = 0; i < left_key_cols.size(); ++i) {
+        left_cols[left_key_cols[i]] = std::move(coalesced_keys[i]);
+    }
 
     std::vector<std::unique_ptr<cudf::column>> result_cols;
     result_cols.reserve(left_cols.size() + right_cols.size());
@@ -229,7 +267,21 @@ SEXP gpu_full_join(SEXP xptr_left,
         left_key_view, right_key_view, cudf::null_equality::EQUAL);
 
     auto right_keep = compute_right_keep_cols(right_view, right_drop);
-    auto result = build_join_result(left_view, right_view, *left_map, *right_map, right_keep);
+
+    // Only coalesce when the right table's key columns were actually dropped
+    // (i.e. `keep = FALSE`, dplyr's default). With `keep = TRUE` both tables'
+    // raw key columns survive uncombined in the output, and the left copy
+    // must stay exactly as gathered (NA for right-only rows) -- coalescing
+    // it would silently corrupt the `keep = TRUE` contract.
+    std::vector<cudf::size_type> coalesce_left_keys;
+    std::vector<cudf::size_type> coalesce_right_keys;
+    if (!right_drop.empty()) {
+        coalesce_left_keys = left_keys;
+        coalesce_right_keys = right_keys;
+    }
+
+    auto result = build_join_result(left_view, right_view, *left_map, *right_map, right_keep,
+                                    coalesce_left_keys, coalesce_right_keys);
 
     return make_gpu_table_xptr(std::move(result));
 }

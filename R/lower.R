@@ -267,13 +267,11 @@ lower_join <- function(ast, source_ptr) {
     "right" = {
       # Implement right join via swapped left join, then reorder columns.
       # Shared with the eager path in right_join.tbl_gpu() (R/join.R) via
-      # build_right_join_via_left() / resolve_right_join_select_idx(). Note:
-      # right_join.tbl_gpu() currently never builds an ast_join("right", ...)
-      # node itself (it delegates to left_join() + select() on live tbl_gpu
-      # objects, so the lazy path for right_join() is lowered as a "left"
-      # join wrapped in a "select"), so this branch is not currently
-      # reachable -- kept in sync with the shared helpers' contract in case
-      # something builds an ast_join("right", ...) node directly in future.
+      # build_right_join_via_left() / resolve_right_join_select_idx() --
+      # right_join.tbl_gpu() builds this exact ast_join("right", ...) node
+      # whenever either input is lazy, so this branch is the live lazy path
+      # and must stay in lockstep with the eager one (including the
+      # keep = FALSE join-key coalescing fix in build_right_join_via_left()).
       plan <- build_right_join_via_left(left_schema, right_schema, ast$by,
                                         suffix = ast$suffix, keep = ast$keep)
       out <- gpu_left_join(right_ptr, left_ptr, right_key_idx, left_key_idx,

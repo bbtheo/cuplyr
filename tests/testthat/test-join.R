@@ -170,8 +170,9 @@ test_that("join results match dplyr in eager and lazy modes (edge cases)", {
 # on tbl_gpu, and compare both against the dplyr oracle. `arrange_by`, when
 # given, sorts all three results before comparing so row-order differences
 # (legitimate for full/right joins) don't cause spurious failures. `ignore_cols`
-# drops columns from the comparison entirely -- used to work around the known
-# join-key-coalescing bug documented below (search this file for "BUG:").
+# drops columns from the comparison entirely -- available for callers that
+# need to exclude a column for reasons unrelated to join-key coalescing (that
+# gap is fixed; see src/ops_join.cpp and R/join.R).
 compare_join_modes <- function(left_df, right_df, join_fn, by, ...,
                                 arrange_by = NULL, ignore_cols = NULL) {
   expected <- join_fn(left_df, right_df, by = by, ...)
@@ -206,25 +207,19 @@ compare_join_modes <- function(left_df, right_df, join_fn, by, ...,
   expect_equal(lazy_df, expected_df)
 }
 
-# BUG: gpu full_join() does not coalesce the join-key column for rows that
-# only exist in the right table. dplyr's contract (and the default `keep =
-# FALSE` docs) is that unmatched right-only rows get the join key filled in
-# from the right table; cuplyr instead leaves it NA.
+# join-key coalescing: full_join() must fill the join-key column for rows
+# that only exist in the right table, exactly like dplyr does. dplyr's
+# contract (and the default `keep = FALSE` docs) is that unmatched
+# right-only rows get the join key filled in from the right table.
 #
-# Root cause (src/ops_join.cpp, gpu_full_join()/build_join_result()): the
-# right table's join-key columns are unconditionally dropped via
-# `right_drop_cols` before the gather step (this is correct for left/inner
-# join, where the left key column is always non-null), then the left table's
-# columns -- including the key -- are gathered via `left_map` with
-# `out_of_bounds_policy::NULLIFY`. For a right-only row, `left_map` points
-# out of bounds, so the key column comes back NULL with no fallback source
-# once the right key was already dropped.
-#
-# This is a real, pre-existing bug discovered while adding this test-first
-# coverage (scratchpad/todo.md Phase 0). Per the task's test-first mandate,
-# it is documented here and NOT fixed in this task -- see the dedicated BUG
-# test immediately below, which pins the current (wrong) behavior.
-test_that("full_join() BUG: join key is not coalesced for right-only rows", {
+# Fix (src/ops_join.cpp, build_join_result()): for full_join() only, the
+# right table's join-key columns are gathered via `right_map` *before*
+# `right_drop_cols` drops them, and `cudf::replace_nulls()` coalesces each
+# gathered left-key column with its corresponding right-key column. Right-only
+# rows (where `left_map` points out of bounds and the left-gathered key is
+# NULL) get the key filled in from the right side; left/inner joins and
+# `keep = TRUE` full joins are unaffected.
+test_that("full_join() coalesces the join key for right-only rows", {
   skip_if_no_gpu()
 
   left_df <- data.frame(id = c(1, 2, 3), x = c(10, 20, 30))
@@ -234,14 +229,12 @@ test_that("full_join() BUG: join key is not coalesced for right-only rows", {
     collect()
   result <- result[order(result$x, result$y, na.last = TRUE), ]
 
-  # Correct dplyr behavior would give id 1, 2, 3, 4 here (see expected below).
   expected <- dplyr::full_join(left_df, right_df, by = "id")
   expect_equal(expected$id, c(1, 2, 3, 4))
 
-  # BUG: cuplyr currently produces NA instead of the coalesced value (4) for
-  # the right-only row. When this is fixed, this expectation should be
-  # updated to `c(1, 2, 3, 4)` and the coalescing note above removed.
-  expect_equal(result$id, c(1, 2, 3, NA))
+  # The right-only row (id = 4) must be coalesced from the right table's key,
+  # not left NA.
+  expect_equal(result$id, c(1, 2, 3, 4))
 })
 
 test_that("full_join() basic case matches dplyr oracle", {
@@ -250,11 +243,8 @@ test_that("full_join() basic case matches dplyr oracle", {
   left_df <- data.frame(id = c(1, 2, 3), x = c(10, 20, 30))
   right_df <- data.frame(id = c(2, 3, 4), y = c(200, 300, 400))
 
-  # BUG: the "id" column is excluded from comparison due to the join-key
-  # coalescing bug documented above (unmatched right-only row gets NA instead
-  # of 4). Non-key columns are still compared exactly.
   compare_join_modes(left_df, right_df, dplyr::full_join, by = "id",
-                     arrange_by = c("x", "y"), ignore_cols = "id")
+                     arrange_by = c("x", "y"))
 })
 
 test_that("full_join() fills unmatched rows with NA on both sides", {
@@ -266,13 +256,11 @@ test_that("full_join() fills unmatched rows with NA on both sides", {
   result <- dplyr::full_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "id") |>
     collect()
 
-  # Select rows by non-key columns (id has the coalescing bug documented
-  # above for the right-only row, so it can't be used as a reliable filter).
-  row1 <- result[!is.na(result$x) & result$x == 10, ]
+  row1 <- result[result$id == 1, ]
   expect_equal(row1$x, 10)
   expect_true(is.na(row1$y))
 
-  row4 <- result[!is.na(result$y) & result$y == 400, ]
+  row4 <- result[result$id == 4, ]
   expect_true(is.na(row4$x))
   expect_equal(row4$y, 400)
 
@@ -289,9 +277,8 @@ test_that("full_join() works with multi-column keys", {
   left_df <- data.frame(k1 = c(1, 1, 2), k2 = c(10, 20, 10), x = c(5, 6, 7))
   right_df <- data.frame(k1 = c(1, 2, 2), k2 = c(10, 10, 30), y = c(50, 70, 80))
 
-  # BUG: same join-key coalescing bug as above, applied to both key columns.
   compare_join_modes(left_df, right_df, dplyr::full_join, by = c("k1", "k2"),
-                     arrange_by = c("x", "y"), ignore_cols = c("k1", "k2"))
+                     arrange_by = c("x", "y"))
 })
 
 test_that("full_join() works with renamed keys", {
@@ -300,9 +287,8 @@ test_that("full_join() works with renamed keys", {
   left_df <- data.frame(a = c(1, 2, 3), x = c(10, 20, 30))
   right_df <- data.frame(b = c(2, 3, 4), y = c(200, 300, 400))
 
-  # BUG: same join-key coalescing bug; output key column is "a" (left's name).
   compare_join_modes(left_df, right_df, dplyr::full_join, by = c("a" = "b"),
-                     arrange_by = c("x", "y"), ignore_cols = "a")
+                     arrange_by = c("x", "y"))
 })
 
 test_that("full_join() applies suffixes on non-key name collisions", {
@@ -318,9 +304,8 @@ test_that("full_join() applies suffixes on non-key name collisions", {
   expect_equal(sort(names(result)), sort(names(expected)))
   expect_true(all(c("val.x", "val.y") %in% names(result)))
 
-  # BUG: same join-key coalescing bug as above.
   compare_join_modes(left_df, right_df, dplyr::full_join, by = "id",
-                     arrange_by = c("val.x", "val.y"), ignore_cols = "id")
+                     arrange_by = c("val.x", "val.y"))
 })
 
 test_that("full_join() with keep = TRUE retains both key columns", {
@@ -341,17 +326,14 @@ test_that("full_join() with keep = TRUE retains both key columns", {
 test_that("full_join() with empty inputs returns expected shape", {
   skip_if_no_gpu()
 
-  # Left side empty: every output row is right-only, so this hits the
-  # join-key coalescing BUG documented above for every single row.
+  # Left side empty: every output row is right-only.
   left_df <- data.frame(id = numeric(0), x = numeric(0))
   right_df <- data.frame(id = c(1, 2), y = c(10, 20))
 
   compare_join_modes(left_df, right_df, dplyr::full_join, by = "id",
-                     arrange_by = "y", ignore_cols = "id")
+                     arrange_by = "y")
 
-  # Right side empty: every output row is left-only, so the key column is
-  # sourced entirely from the left table and the coalescing bug doesn't
-  # apply here -- this direction can be compared exactly, id included.
+  # Right side empty: every output row is left-only.
   left_df2 <- data.frame(id = c(1, 2), x = c(10, 20))
   right_df2 <- data.frame(id = numeric(0), y = numeric(0))
 
@@ -384,25 +366,24 @@ test_that("full_join() with empty inputs returns expected shape", {
 # come back suffixed (`"id.x"`/`"id.y"`) and never literally match the
 # single unsuffixed name a `keep = FALSE` right join wants.
 #
-# Residual, separate BUG (not fixed here, see notes on individual tests
-# below): because the swapped join keeps every row of the *original right*
-# table and NA-fills unmatched columns from the *original left* table, the
-# `keep = FALSE` key column -- by dplyr's naming convention, always sourced
-# from the *left* table's raw key copy -- is `NA` instead of coalesced with
-# the right table's value for right-only rows (rows that only exist in the
-# right table, i.e. the "unmatched" rows a right join exists to keep). This
-# is the same shape of gap as the documented `full_join()` join-key
-# coalescing bug above (src/ops_join.cpp) and is intentionally left alone.
+# Also fixed here: the `keep = FALSE` key column's *values*. Because the
+# swapped join keeps every row of the *original right* table and NA-fills
+# unmatched columns from the *original left* table, naively sourcing the
+# single output key column from the *left* table's raw key copy (dplyr's
+# naming convention: `by = c(x_col = y_col)` displays it under `x_col`'s
+# name) would leave it `NA` for right-only rows -- the same shape of gap as
+# `full_join()`'s join-key coalescing bug. Since a right_join is driven
+# entirely by the right table, `build_right_join_via_left()` re-points the
+# `keep = FALSE` key column's value source to the right (y) table's raw key
+# copy, which is always present, while keeping the left-derived display name.
 test_that("right_join() basic case matches dplyr oracle", {
   skip_if_no_gpu()
 
   left_df <- data.frame(id = c(1, 2, 3), x = c(10, 20, 30))
   right_df <- data.frame(id = c(2, 3, 4), y = c(200, 300, 400))
 
-  # BUG: "id" is excluded from comparison -- the right-only row (id = 4) gets
-  # NA instead of the coalesced value 4 (see key-coalescing note above).
   compare_join_modes(left_df, right_df, dplyr::right_join, by = "id",
-                     arrange_by = c("x", "y"), ignore_cols = "id")
+                     arrange_by = c("x", "y"))
 })
 
 test_that("right_join() fills unmatched left rows with NA", {
@@ -417,10 +398,9 @@ test_that("right_join() fills unmatched left rows with NA", {
   # Every row in right_df must appear (right_join preserves right rows)
   expect_equal(nrow(result), nrow(right_df))
 
-  # Identify the unmatched row by its non-key columns -- "id" has the
-  # key-coalescing BUG documented above for this row, so it can't be used as
-  # a reliable filter (it's NA here instead of 4).
-  row4 <- result[!is.na(result$y) & result$y == 400, ]
+  # Identify the unmatched row by id (now correctly coalesced from y's key).
+  row4 <- result[result$id == 4, ]
+  expect_equal(nrow(row4), 1)
   expect_true(is.na(row4$x))
   expect_equal(row4$y, 400)
 
@@ -436,10 +416,8 @@ test_that("right_join() works with multi-column keys", {
   left_df <- data.frame(k1 = c(1, 1, 2), k2 = c(10, 20, 10), x = c(5, 6, 7))
   right_df <- data.frame(k1 = c(1, 2, 2), k2 = c(10, 10, 30), y = c(50, 70, 80))
 
-  # BUG: same join-key coalescing bug as above, applied to both key columns
-  # (right-only row k1 = 2, k2 = 30 gets NA for both instead of 2, 30).
   compare_join_modes(left_df, right_df, dplyr::right_join, by = c("k1", "k2"),
-                     arrange_by = c("x", "y"), ignore_cols = c("k1", "k2"))
+                     arrange_by = c("x", "y"))
 })
 
 test_that("right_join() works with renamed keys", {
@@ -448,11 +426,8 @@ test_that("right_join() works with renamed keys", {
   left_df <- data.frame(a = c(1, 2, 3), x = c(10, 20, 30))
   right_df <- data.frame(b = c(2, 3, 4), y = c(200, 300, 400))
 
-  # BUG: same join-key coalescing bug; output key column is "a" (left's
-  # name, per dplyr's `by = c(x_col = y_col)` naming convention), NA instead
-  # of 4 for the right-only row (b = 4).
   compare_join_modes(left_df, right_df, dplyr::right_join, by = c("a" = "b"),
-                     arrange_by = c("x", "y"), ignore_cols = "a")
+                     arrange_by = c("x", "y"))
 })
 
 test_that("right_join() applies suffixes on non-key name collisions", {
@@ -468,9 +443,8 @@ test_that("right_join() applies suffixes on non-key name collisions", {
   expect_equal(sort(names(result)), sort(names(expected)))
   expect_true(all(c("val.x", "val.y") %in% names(result)))
 
-  # BUG: same join-key coalescing bug as above.
   compare_join_modes(left_df, right_df, dplyr::right_join, by = "id",
-                     arrange_by = c("val.x", "val.y"), ignore_cols = "id")
+                     arrange_by = c("val.x", "val.y"))
 })
 
 test_that("right_join() with keep = TRUE retains both key columns", {
@@ -498,17 +472,15 @@ test_that("right_join() with keep = TRUE retains both key columns", {
 test_that("right_join() with empty inputs returns expected shape", {
   skip_if_no_gpu()
 
-  # Left side empty: every output row is right-only, so this hits the
-  # join-key coalescing BUG documented above for every single row.
+  # Left side empty: every output row is right-only.
   left_df <- data.frame(id = numeric(0), x = numeric(0))
   right_df <- data.frame(id = c(1, 2), y = c(10, 20))
 
   compare_join_modes(left_df, right_df, dplyr::right_join, by = "id",
-                     arrange_by = "y", ignore_cols = "id")
+                     arrange_by = "y")
 
   # Right side empty: right_join keeps only right's rows, so the result is
-  # empty too -- vacuously no unmatched-row coalescing to go wrong, this
-  # direction can be compared exactly, id included.
+  # empty too.
   left_df2 <- data.frame(id = c(1, 2), x = c(10, 20))
   right_df2 <- data.frame(id = numeric(0), y = numeric(0))
 

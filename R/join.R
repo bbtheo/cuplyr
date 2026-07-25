@@ -154,12 +154,35 @@ build_right_join_via_left <- function(left_schema, right_schema, join_spec,
   desired_info <- build_join_output_info(left_schema, right_schema, join_spec,
                                          suffix = suffix, keep = keep)
 
+  desired_origin <- desired_info$origin
+  desired_source <- desired_info$source_names
+
+  if (!isTRUE(keep)) {
+    # `keep = FALSE`'s single output key column carries x's (the original
+    # left table's) display name and position, per dplyr's `by = c(x = y)`
+    # naming convention -- that part of desired_info is correct as-is.
+    # But because a right_join is driven by y (every row of y survives) and
+    # the swapped left_join(y, x) NA-fills x's columns for right-only rows,
+    # sourcing that key column's *values* from x (as build_join_output_info
+    # naturally does, since it's the left-origin copy) reproduces the
+    # coalescing gap documented in scratchpad/unification_design.md Part C:
+    # right-only rows would get NA instead of the key value. y's raw key
+    # column is always present (right_join keeps every y row), so re-point
+    # just the key columns' value source to the right (y) side; the display
+    # name/type contract (desired_names/desired_types) is untouched.
+    source_in_left <- ifelse(desired_info$origin == "left",
+                             desired_info$source_names, NA_character_)
+    key_pos <- match(join_spec$left, source_in_left)
+    desired_origin[key_pos] <- "right"
+    desired_source[key_pos] <- join_spec$right
+  }
+
   list(
     swapped_by = swapped_by,
     desired_names = desired_info$names,
     desired_types = desired_info$types,
-    desired_origin = desired_info$origin,
-    desired_source = desired_info$source_names
+    desired_origin = desired_origin,
+    desired_source = desired_source
   )
 }
 
@@ -183,15 +206,17 @@ build_right_join_via_left <- function(left_schema, right_schema, join_spec,
 #' are relative to *its* call (`"left"` = original `y`, `"right"` = original
 #' `x`), so they're translated back before comparing.
 #'
-#' Caveat: because the swapped join is a left join keeping every row of the
-#' original right table (`y`), for `keep = FALSE` the desired key column is
-#' always resolved to the copy sourced from the original *left* table (`x`)
-#' -- matching dplyr's naming convention for `by = c(x_col = y_col)` -- which
-#' is `NULL` for right-only rows (`x` has no matching row at all). A fully
-#' correct implementation would coalesce that with the always-present `y`
-#' copy for such rows; this mirrors the same-shaped, already-known
-#' `full_join()` join-key-coalescing gap (see `src/ops_join.cpp` /
-#' `test-join.R`) and is intentionally not addressed here.
+#' Key-coalescing note: because the swapped join is a left join keeping every
+#' row of the original right table (`y`), the copy of the key column sourced
+#' from the original *left* table (`x`) is `NULL` for right-only rows (`x`
+#' has no matching row at all). [build_right_join_via_left()] handles this by
+#' re-pointing the `keep = FALSE` key column's *source* (not its display
+#' name, which still follows dplyr's `by = c(x_col = y_col)` convention) to
+#' the always-present `y` copy for such rows, so `desired_origin`/
+#' `desired_source` here already reflect the coalesced source -- this
+#' function just needs to find the matching raw column, whichever side it
+#' now points at. This mirrors the same-shaped `full_join()` join-key
+#' coalescing fix in `src/ops_join.cpp` (see `test-join.R`).
 #'
 #' @param plan The list returned by [build_right_join_via_left()].
 #' @param left_schema,right_schema Schemas of the original (unswapped) left
