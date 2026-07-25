@@ -265,21 +265,17 @@ lower_join <- function(ast, source_ptr) {
     "inner" = gpu_inner_join(left_ptr, right_ptr, left_key_idx, right_key_idx, right_drop_idx),
     "full" = gpu_full_join(left_ptr, right_ptr, left_key_idx, right_key_idx, right_drop_idx),
     "right" = {
-      # Implement right join via swapped left join, then reorder columns
+      # Implement right join via swapped left join, then reorder columns.
+      # Shared with the eager path in right_join.tbl_gpu() (R/join.R) via
+      # build_right_join_via_left() / resolve_right_join_select_idx().
+      plan <- build_right_join_via_left(left_schema, right_schema, ast$by,
+                                        suffix = ast$suffix, keep = ast$keep)
       out <- gpu_left_join(right_ptr, left_ptr, right_key_idx, left_key_idx,
                            integer(0))
-      out_schema <- build_join_schema(right_schema, left_schema,
-                                      list(left = ast$by$right, right = ast$by$left),
-                                      suffix = rev(ast$suffix), keep = TRUE)
-      desired <- build_join_schema(left_schema, right_schema, ast$by,
-                                   suffix = ast$suffix, keep = ast$keep)$names
-      idx <- match(desired, out_schema$names) - 1L
-      if (any(is.na(idx))) {
-        stop("Right join column reordering failed. Missing columns: ",
-             paste(desired[is.na(idx)], collapse = ", "),
-             call. = FALSE)
-      }
-      gpu_select(out, idx)
+      current_names <- build_join_schema(right_schema, left_schema, plan$swapped_by,
+                                         suffix = rev(ast$suffix), keep = TRUE)$names
+      idx <- resolve_right_join_select_idx(plan$desired_names, current_names)
+      gpu_select(out, idx - 1L)
     },
     stop("Unknown join type: ", ast$join_type, call. = FALSE)
   )

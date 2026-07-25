@@ -99,6 +99,71 @@ build_join_schema <- function(left_schema, right_schema, join_spec,
   list(names = info$names, types = info$types)
 }
 
+#' Build the join spec and desired output schema for right_join(),
+#' implemented via a swapped left_join()
+#'
+#' `right_join(x, y)` is implemented as `left_join(y, x)` with the key sides
+#' swapped and `keep = TRUE` forced (so both original key columns survive the
+#' join uncombined), followed by reordering/selecting down to the column set
+#' and names a native right join would produce. This helper computes the two
+#' pieces of that plan that are pure functions of the input schemas (i.e. that
+#' don't require the swapped join to have actually run yet), shared by both
+#' callers:
+#'   - `right_join.tbl_gpu()` (eager path, this file), which executes the
+#'     swapped join via the `left_join()` S3 generic on live `tbl_gpu` objects
+#'   - `lower_join()` (`R/lower.R`), which lowers a lazy `ast_join` node by
+#'     calling `gpu_left_join()` directly on raw GPU table pointers
+#'
+#' Callers are responsible for running the swapped join and then resolving
+#' the reorder/select against its *actual* resulting column names via
+#' [resolve_right_join_select_idx()] -- in that order, matching the original,
+#' non-shared implementations this replaces (the swapped join must run first;
+#' only then can columns be selected out of its result).
+#'
+#' @param left_schema Schema of the (original) left table.
+#' @param right_schema Schema of the (original) right table.
+#' @param join_spec List with `left`/`right` character vectors of join key
+#'   column names, as returned by `parse_join_by()`.
+#' @param suffix Suffix pair for non-key name collisions, as in `right_join()`.
+#' @param keep Whether to keep both key columns, as in `right_join()`.
+#' @return A list with:
+#'   - `swapped_by`: the join spec to pass to `left_join(y, x, by = ...)`
+#'   - `desired_names`: the output column names a native right join would have
+#' @keywords internal
+build_right_join_via_left <- function(left_schema, right_schema, join_spec,
+                                      suffix = c(".x", ".y"), keep = FALSE) {
+  swapped_by <- list(left = join_spec$right, right = join_spec$left)
+
+  desired_names <- build_join_schema(left_schema, right_schema, join_spec,
+                                     suffix = suffix, keep = keep)$names
+
+  list(swapped_by = swapped_by, desired_names = desired_names)
+}
+
+#' Resolve the column reorder/select for a right-join-via-swapped-left-join
+#'
+#' Given the desired final output column names (from
+#' [build_right_join_via_left()]) and the actual column names produced by the
+#' already-executed swapped `left_join()`, returns the 1-based indices that
+#' select/reorder the latter into the former, erroring if any desired column
+#' is missing (which should not happen for valid inputs -- this is a
+#' consistency check).
+#'
+#' @param desired_names Character vector, target output column names.
+#' @param current_names Character vector, actual column names of the
+#'   executed swapped join's result.
+#' @return Integer vector, 1-based indices into `current_names`.
+#' @keywords internal
+resolve_right_join_select_idx <- function(desired_names, current_names) {
+  idx <- match(desired_names, current_names)
+  if (any(is.na(idx))) {
+    stop("Right join column reordering failed. Missing columns: ",
+         paste(desired_names[is.na(idx)], collapse = ", "),
+         call. = FALSE)
+  }
+  idx
+}
+
 estimate_gpu_bytes <- function(nrow, types) {
   bytes_per_type <- vapply(types, function(type) {
     switch(type,
@@ -416,21 +481,15 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
 
   join_spec <- parse_join_by(by, x, y)
 
-  # Swap for left_join implementation
-  by_swapped <- list(left = join_spec$right, right = join_spec$left)
-  out <- left_join(y, x, by = by_swapped, copy = copy,
+  plan <- build_right_join_via_left(x$schema, y$schema, join_spec,
+                                    suffix = suffix, keep = keep)
+
+  out <- left_join(y, x, by = plan$swapped_by, copy = copy,
                    suffix = rev(suffix), keep = TRUE, na_matches = na_matches)
 
-  desired <- build_join_schema(x$schema, y$schema, join_spec,
-                               suffix = suffix, keep = keep)$names
-  current <- out$schema$names
-  idx <- match(desired, current)
-  if (any(is.na(idx))) {
-    stop("Right join column reordering failed. Missing columns: ",
-         paste(desired[is.na(idx)], collapse = ", "), call. = FALSE)
-  }
+  resolve_right_join_select_idx(plan$desired_names, out$schema$names)
 
-  out <- dplyr::select(out, dplyr::all_of(desired))
-  out$schema$names <- desired
+  out <- dplyr::select(out, dplyr::all_of(plan$desired_names))
+  out$schema$names <- plan$desired_names
   out
 }
