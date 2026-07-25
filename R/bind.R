@@ -357,15 +357,10 @@ align_to_schema <- function(tbl, target_schema) {
     current_types <- unname(tbl$schema$types)
   }
 
-  # Now handle type coercion for each column (skip STRING - can't cast to STRING)
+  # Now handle type coercion for each column
   for (i in seq_along(target_names)) {
     target_name <- target_names[i]
     target_type <- target_types[i]
-
-    # Skip STRING columns - cudf::cast doesn't support string output
-    if (target_type == "STRING") {
-      next
-    }
 
     current_idx <- match(target_name, current_names)
     current_type <- current_types[current_idx]
@@ -439,7 +434,26 @@ cast_column <- function(tbl, col_name, target_type) {
     stop("Column not found: ", col_name, call. = FALSE)
   }
 
-  new_ptr <- gpu_cast_column(tbl$ptr, col_idx, target_type)
+  new_ptr <- if (identical(target_type, "STRING")) {
+    current_type <- tbl$schema$types[[col_idx + 1L]]
+    # DICTIONARY32 columns are factors: the GPU column physically stores
+    # integer codes (see CLAUDE.md type mapping), not the label strings.
+    # gpu_cast_to_string() only sees the physical column, so casting a
+    # factor here would silently emit its numeric codes as strings (e.g.
+    # "2") instead of its labels (e.g. "m"). Refuse loudly instead of
+    # guessing; proper support needs factor_levels-aware conversion, which
+    # is out of scope here.
+    if (identical(current_type, "DICTIONARY32")) {
+      stop("bind_rows(): cannot combine factor column '", col_name,
+           "' with an incompatible type by promoting to STRING - this ",
+           "would silently convert factor codes to strings instead of ",
+           "their labels. Convert the factor to character first (e.g. ",
+           "as.character()) if this is intended.", call. = FALSE)
+    }
+    gpu_cast_to_string(tbl$ptr, col_idx)
+  } else {
+    gpu_cast_column(tbl$ptr, col_idx, target_type)
+  }
 
   new_types <- tbl$schema$types
   new_types[col_idx + 1L] <- target_type

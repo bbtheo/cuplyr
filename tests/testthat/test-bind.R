@@ -224,6 +224,148 @@ test_that("bind_rows promotes logical to double", {
 })
 
 # =============================================================================
+# bind_rows: promotion to STRING (P2 - schema/data corruption bug)
+#
+# promote_types()/compute_unified_schema() treat STRING as the widest type,
+# so binding a numeric/logical column against a character column of the
+# same name declares a STRING schema. align_to_schema() used to silently
+# `next` past STRING targets ("cudf::cast doesn't support string output"),
+# leaving the schema claiming STRING while the GPU column stayed numeric.
+# gpu_bind_rows_aligned() then rejects the physical type mismatch between
+# the two tables' same-named column -- so the bug currently surfaces as a
+# hard error ("Type mismatch at column ...: table 1 has type <N>, table 2
+# has type 23 [STRING]"), not silent corruption, but the root cause is the
+# same silent-skip.
+#
+# NOTE on oracle parity: under the installed dplyr/vctrs (dplyr 1.2.1 /
+# vctrs 0.7.3), dplyr::bind_rows() no longer coerces mismatched numeric
+# vs. character columns to character at all -- it throws a
+# `vctrs_error_incompatible_type`. So there is no runnable dplyr oracle for
+# these cases any more (this differs from older dplyr, which used to coerce
+# with a warning). Expected values below are therefore hand-verified against
+# R's own `as.character()`, which is what cudf's string converters are
+# expected to match for integers/booleans and for "nice" (non-integer-valued)
+# doubles.
+# =============================================================================
+
+test_that("dplyr::bind_rows() no longer coerces mismatched types (documents oracle divergence)", {
+  df1 <- data.frame(x = 1:2)
+  df2 <- data.frame(x = c("a", "b"), stringsAsFactors = FALSE)
+
+  # This is not a cuplyr bug -- it pins down *why* we can't use
+  # dplyr::bind_rows() as a live oracle for the STRING-promotion tests below.
+  expect_error(dplyr::bind_rows(df1, df2), class = "vctrs_error_incompatible_type")
+})
+
+test_that("bind_rows promotes integer + character to STRING with correct values", {
+  skip_if_no_gpu()
+
+  df1 <- data.frame(x = 1:3)
+  df2 <- data.frame(x = c("p", "q"), stringsAsFactors = FALSE)
+
+  result_tbl <- bind_rows(tbl_gpu(df1), tbl_gpu(df2))
+  expect_equal(result_tbl$schema$types[[1]], "STRING")
+
+  result <- result_tbl |> collect()
+
+  expect_type(result$x, "character")
+  expect_equal(result$x, c(as.character(1:3), "p", "q"))
+})
+
+test_that("bind_rows promotes double + character to STRING with correct values", {
+  skip_if_no_gpu()
+
+  # Non-whole-number values are used here so cudf's from_floats() output
+  # matches R's as.character() exactly (see the dedicated divergence test
+  # below for whole-number doubles, where cudf appends a trailing ".0").
+  df1 <- data.frame(x = c(1.5, 2.25, 3.75))
+  df2 <- data.frame(x = c("p", "q"), stringsAsFactors = FALSE)
+
+  result_tbl <- bind_rows(tbl_gpu(df1), tbl_gpu(df2))
+  expect_equal(result_tbl$schema$types[[1]], "STRING")
+
+  result <- result_tbl |> collect()
+
+  expect_type(result$x, "character")
+  expect_equal(result$x, c(as.character(c(1.5, 2.25, 3.75)), "p", "q"))
+})
+
+test_that("bind_rows STRING-casting a whole-number double diverges from R's as.character() (documented)", {
+  skip_if_no_gpu()
+
+  # cudf::strings::from_floats() always emits a decimal point (e.g. "4.0",
+  # "100.0"), whereas R's as.character() drops it for whole numbers ("4",
+  # "100"). This is a real, verified formatting divergence between cudf and
+  # R; normalizing it away would require post-processing every cast float
+  # string, which is out of scope for the STRING-promotion fix. We pin cudf's
+  # actual behavior here instead of silently disagreeing with it.
+  df1 <- data.frame(x = c(4, 100))
+  df2 <- data.frame(x = c("p", "q"), stringsAsFactors = FALSE)
+
+  result <- bind_rows(tbl_gpu(df1), tbl_gpu(df2)) |> collect()
+
+  expect_equal(result$x, c("4.0", "100.0", "p", "q"))
+  # ... while R itself would have produced "4", "100":
+  expect_equal(as.character(c(4, 100)), c("4", "100"))
+})
+
+test_that("bind_rows promotes logical + character to STRING with correct values", {
+  skip_if_no_gpu()
+
+  df1 <- data.frame(x = c(TRUE, FALSE, TRUE))
+  df2 <- data.frame(x = c("p", "q"), stringsAsFactors = FALSE)
+
+  result_tbl <- bind_rows(tbl_gpu(df1), tbl_gpu(df2))
+  expect_equal(result_tbl$schema$types[[1]], "STRING")
+
+  result <- result_tbl |> collect()
+
+  expect_type(result$x, "character")
+  expect_equal(result$x, c("TRUE", "FALSE", "TRUE", "p", "q"))
+})
+
+test_that("bind_rows promotes character + integer to STRING regardless of table order", {
+  skip_if_no_gpu()
+
+  # Same as the integer+character case but with the character table first,
+  # so the unified schema's declared type ("STRING", taken from table 1's
+  # own column) still requires casting *table 2's* integer column.
+  df1 <- data.frame(x = c("p", "q"), stringsAsFactors = FALSE)
+  df2 <- data.frame(x = 1:3)
+
+  result <- bind_rows(tbl_gpu(df1), tbl_gpu(df2)) |> collect()
+
+  expect_type(result$x, "character")
+  expect_equal(result$x, c("p", "q", as.character(1:3)))
+})
+
+test_that("bind_rows factor + character: skipped as a numeric-parity case, errors loudly instead", {
+  skip_if_no_gpu()
+
+  # Design-doc P2 asks for a factor+character case "if factors promote to
+  # STRING in compute_unified_schema; if factors are INT32 here, skip and
+  # note it." Factors here are schema-tagged "DICTIONARY32" (not "INT32"),
+  # but their *physical* GPU column is INT32 codes (per CLAUDE.md's type
+  # table and confirmed in transfer_io.cpp) -- the same physical
+  # representation as a plain integer column. compute_unified_schema() does
+  # promote factor + character to STRING (the STRING-is-widest rule is
+  # unconditional), so naively reusing the integer string-cast path here
+  # would silently convert factor *codes* to strings (e.g. "2") instead of
+  # their *labels* (e.g. "m") -- a second, distinct silent-corruption bug.
+  # That's a separate, harder fix (factor_levels-aware string conversion)
+  # that is out of scope for this STRING-promotion fix, so cast_column()
+  # explicitly refuses this case instead of guessing. This test locks down
+  # that loud refusal instead of a numeric-parity comparison.
+  df1 <- data.frame(x = factor(c("m", "f", "m")))
+  df2 <- data.frame(x = c("a", "b"), stringsAsFactors = FALSE)
+
+  expect_error(
+    bind_rows(tbl_gpu(df1), tbl_gpu(df2)),
+    "factor column 'x'.*STRING|cannot combine factor"
+  )
+})
+
+# =============================================================================
 # bind_rows: .id parameter optionally adds a column identifying source table
 # =============================================================================
 

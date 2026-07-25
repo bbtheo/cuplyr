@@ -11,6 +11,10 @@
 #include <cudf/unary.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/strings/strings_column_view.hpp>
+#include <cudf/strings/convert/convert_integers.hpp>
+#include <cudf/strings/convert/convert_floats.hpp>
+#include <cudf/strings/convert/convert_booleans.hpp>
+#include <cudf/scalar/scalar.hpp>
 
 #include <vector>
 #include <string>
@@ -277,6 +281,83 @@ SEXP gpu_cast_column(SEXP xptr, int col_idx, std::string target_type) {
     for (cudf::size_type i = 0; i < view.num_columns(); ++i) {
         if (i == col_idx) {
             columns.push_back(std::move(casted));
+        } else {
+            columns.push_back(std::make_unique<cudf::column>(view.column(i)));
+        }
+    }
+
+    auto result = std::make_unique<cudf::table>(std::move(columns));
+    return make_gpu_table_xptr(std::move(result));
+}
+
+// Cast a column to STRING for bind_rows() schema unification.
+//
+// promote_types() in R/bind.R treats STRING as the "widest" type, so
+// compute_unified_schema() may declare a STRING target for a column whose
+// tables hold e.g. INT32/FLOAT64/BOOL8 physically. align_to_schema() must
+// actually cast those columns to STRING (previously it silently skipped
+// this, leaving the schema claiming STRING while the GPU column stayed
+// numeric -- gpu_bind_rows_aligned() would then reject the mismatch, or
+// worse, silently misinterpret the raw bytes).
+//
+// Only types with a real string_view converter in cudf are supported.
+// Types with no (or a semantically ambiguous) converter -- timestamps,
+// and DICTIONARY32 (factor codes, which would round-trip as numeric code
+// strings rather than factor labels) -- error loudly instead of guessing.
+// [[Rcpp::export]]
+SEXP gpu_cast_to_string(SEXP xptr, int col_idx) {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
+    cudf::table_view view = get_table_view(ptr);
+
+    if (col_idx < 0 || col_idx >= view.num_columns()) {
+        Rcpp::stop("Column index out of bounds: %d", col_idx);
+    }
+
+    cudf::column_view source_col = view.column(col_idx);
+    cudf::type_id tid = source_col.type().id();
+
+    std::unique_ptr<cudf::column> string_col;
+
+    switch (tid) {
+        case cudf::type_id::STRING: {
+            // Already STRING - just copy through.
+            string_col = std::make_unique<cudf::column>(source_col);
+            break;
+        }
+        case cudf::type_id::INT8:
+        case cudf::type_id::INT16:
+        case cudf::type_id::INT32:
+        case cudf::type_id::INT64: {
+            string_col = cudf::strings::from_integers(source_col);
+            break;
+        }
+        case cudf::type_id::FLOAT32:
+        case cudf::type_id::FLOAT64: {
+            string_col = cudf::strings::from_floats(source_col);
+            break;
+        }
+        case cudf::type_id::BOOL8: {
+            cudf::string_scalar true_str("TRUE");
+            cudf::string_scalar false_str("FALSE");
+            string_col = cudf::strings::from_booleans(source_col, true_str, false_str);
+            break;
+        }
+        default: {
+            Rcpp::stop("Cannot cast column %d to STRING for bind_rows(): no string "
+                       "converter available for cudf type id %d (e.g. TIMESTAMP_* and "
+                       "DICTIONARY32/factor columns are not supported -- factor columns "
+                       "would round-trip as numeric codes, not their labels)",
+                       col_idx, static_cast<int>(tid));
+        }
+    }
+
+    // Rebuild the table with the string column in place of the source column.
+    std::vector<std::unique_ptr<cudf::column>> columns;
+    for (cudf::size_type i = 0; i < view.num_columns(); ++i) {
+        if (i == col_idx) {
+            columns.push_back(std::move(string_col));
         } else {
             columns.push_back(std::make_unique<cudf::column>(view.column(i)));
         }
