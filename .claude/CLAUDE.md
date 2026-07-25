@@ -296,9 +296,12 @@ if (view.num_rows() > static_cast<cudf::size_type>(INT32_MAX)) {
 ## Known Issues & Sharp Edges
 
 ### Environment-Specific cuDF Issues
-- **Header locations differ by version**: `bitmask_allocation_size_bytes` is in `cudf/null_mask.hpp`, NOT `cudf/bitmask.hpp`
-- **Join headers**: Use `<cudf/join/join.hpp>`, not `<cudf/join.hpp>`
-- **cuDF gather API**: This environment's `cudf::gather` has no `negative_index_policy` parameter
+_Installed version: cuDF 25.12.0 (see `cudf/version_config.hpp`; conda pkg `libcudf-25.12.00`)._
+- **Header locations differ by version**: `bitmask_allocation_size_bytes` is in `cudf/null_mask.hpp`. There is no `cudf/bitmask.hpp` file in this version at all.
+- **Join headers**: Use `<cudf/join/join.hpp>`, not `<cudf/join.hpp>`. That header declares `inner_join`, `left_join`, `full_join`, and `cross_join`. It also still declares free-function `left_semi_join`/`left_anti_join`, but both are marked `[[deprecated]]` in favor of the object-oriented API below.
+  - Non-deprecated semi/anti joins: `<cudf/join/filtered_join.hpp>`, class `cudf::filtered_join` — construct once from a build table, then call `.semi_join(probe)` / `.anti_join(probe)` (each returns a `device_uvector<size_type>` of left-table indices).
+  - Condition/mixed joins: `<cudf/join/conditional_join.hpp>` (AST-predicate joins) and `<cudf/join/mixed_join.hpp>` (equality keys + AST residual condition).
+- **cuDF gather API**: `cudf::gather()` (in `cudf/copying.hpp`) takes an `out_of_bounds_policy bounds_policy` parameter (`NULLIFY` or `DONT_CHECK`, default `DONT_CHECK`) but has **no** `negative_index_policy` parameter — that enum only exists on the detail-namespace overload in `cudf/detail/gather.hpp`, not on the public API.
 - **Avoid device-side Thrust** unless compiling with nvcc
 
 ### Type Consistency
@@ -349,7 +352,7 @@ String columns use offset-based storage (Apache Arrow format):
 - If a cudf header can't be found, check pixi environment paths and `src/Makevars`
 - Run `pixi run configure` after updating CUDA/cudf libs
 - Use `rg --files -g '*bitmask*' $CONDA_PREFIX/include/cudf` to locate moved headers
-- Join build errors: confirm `#include <cudf/join/join.hpp>` and avoid device-side Thrust unless compiling with nvcc
+- Join build errors: confirm `#include <cudf/join/join.hpp>` for inner/left/full/cross join; use `#include <cudf/join/filtered_join.hpp>` (`cudf::filtered_join`) for semi/anti join since the free `left_semi_join`/`left_anti_join` functions are deprecated; avoid device-side Thrust unless compiling with nvcc
 - GPU not detected is common in CI or local dev; tests use `skip_if_no_gpu()`
 - Rcpp exports need regeneration after moving/adding functions: run `Rcpp::compileAttributes()` or `devtools::document()`
 
@@ -426,5 +429,17 @@ Before merging dev to master, verify:
 | Aggregation | `<cudf/aggregation.hpp>`, `<cudf/groupby.hpp>` | `groupby::aggregate` |
 | Null handling | `<cudf/null_mask.hpp>` | `bitmask_allocation_size_bytes` |
 | Scalars | `<cudf/scalar/scalar.hpp>`, `<cudf/scalar/scalar_factories.hpp>` | `make_numeric_scalar` |
-| Joins | `<cudf/join/join.hpp>` | `inner_join`, `left_join`, `full_join` |
+| Joins | `<cudf/join/join.hpp>` | `inner_join`, `left_join`, `full_join`, `cross_join` |
+| Semi/anti joins | `<cudf/join/filtered_join.hpp>` | `filtered_join` class: `.semi_join()`, `.anti_join()` (free `left_semi_join`/`left_anti_join` in `join.hpp` are `[[deprecated]]`) |
+| Conditional/mixed joins | `<cudf/join/conditional_join.hpp>`, `<cudf/join/mixed_join.hpp>` | AST-predicate and equality+condition joins |
 | Concatenation | `<cudf/concatenate.hpp>` | `concatenate` (for bind_rows/bind_cols) |
+| Distinct/duplicates | `<cudf/stream_compaction.hpp>` | `distinct`, `distinct_indices`, `stable_distinct`, `unique_count`, `distinct_count` |
+| Rank | `<cudf/sorting.hpp>` | `rank` |
+| Scan (column) | `<cudf/reduction.hpp>` | `scan` |
+| Scan/shift (grouped) | `<cudf/groupby.hpp>` | `groupby::scan`, `groupby::sort_scan`, `groupby::shift` |
+| Conditional copy | `<cudf/copying.hpp>` | `copy_if_else` |
+| Null/value replace | `<cudf/replace.hpp>` | `replace_nulls`, `find_and_replace_all`, `clamp` |
+| AST expression eval | `<cudf/transform.hpp>`, `<cudf/ast/expressions.hpp>` | `compute_column` (+ `ast::literal`, `ast::column_reference`, `ast::operation`, `ast::tree`) |
+| Strings | `<cudf/strings/*.hpp>` | e.g. `case.hpp`, `find.hpp`, `replace.hpp`, `split/`, `convert/` |
+| Datetime | `<cudf/datetime.hpp>` | datetime component extraction/arithmetic |
+| Sampling/slicing | `<cudf/copying.hpp>` | `slice`, `split`, `sample`, `shift` |
