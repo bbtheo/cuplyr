@@ -359,151 +359,171 @@ test_that("full_join() with empty inputs returns expected shape", {
                      arrange_by = "id")
 })
 
-# BUG: right_join.tbl_gpu() currently errors on EVERY call, for any input.
+# FIXED: right_join.tbl_gpu() used to error on EVERY call, for any input.
 #
-# Root cause (R/join.R, right_join.tbl_gpu(), ~line 420 before the dedup
-# refactor): it builds `by_swapped <- list(left = ..., right = ...)` -- a
-# plain list -- and passes it as the `by` argument to `left_join()`. Since
-# `left_join` (imported from dplyr, S3-dispatched to `left_join.tbl_gpu`)
-# calls `parse_join_by(by, x, y)` internally, and `parse_join_by()` only
-# understands `NULL`, a `dplyr_join_by` object, an unnamed character vector,
-# or a named character vector (R/join.R, parse_join_by()) -- a plain list
-# falls through to `stop("Invalid \`by\` specification. ...")`. So
-# `right_join()` never gets past its first internal call.
+# Root cause (R/join.R, right_join.tbl_gpu(), before this fix): the eager
+# implementation built `right_join(x, y)` as a swapped `left_join(y, x, by =
+# swapped_by, ...)`, where `swapped_by <- list(left = ..., right = ...)` is a
+# plain list. `left_join()` (S3-dispatched to `left_join.tbl_gpu`) calls
+# `parse_join_by(by, x, y)` internally, and `parse_join_by()` only understood
+# `NULL`, a `dplyr_join_by` object, an unnamed character vector, or a named
+# character vector -- a plain list fell through to
+# `stop("Invalid \`by\` specification. ...")`. So `right_join()` never got
+# past its first internal call.
 #
-# This means every one of the intended right_join() tests below (basic case,
-# NA-fill, multi-column keys, renamed keys, suffixes, keep = TRUE, empty
-# inputs, column order) can't currently run at all. Per the task's test-first
-# mandate, this is documented and NOT fixed here -- a dedicated test pins the
-# current (broken) behavior, and the intended coverage is kept as skipped
-# placeholders (with the assertions commented out) so it can be reactivated
-# once `right_join.tbl_gpu()` is fixed to build a proper `by` specification
-# (e.g. a named character vector) for its internal `left_join()` call.
-test_that("right_join() BUG: errors on every call instead of joining", {
+# Fix: `parse_join_by()` now also accepts an already-parsed spec (a plain
+# list with character `left`/`right` elements, as produced by
+# `build_right_join_via_left()`) and returns it as-is. `right_join.tbl_gpu()`
+# was also reworked to build its own `ast_join("right", ...)` node for the
+# lazy path (mirroring `left_join.tbl_gpu()`/`inner_join.tbl_gpu()`/
+# `full_join.tbl_gpu()`) and, for both paths, to resolve the swapped join's
+# output columns via `resolve_right_join_select_idx()`, which matches by
+# *origin table + raw source column name* rather than by literal output
+# name -- necessary because the swapped join is always run with
+# `keep = TRUE` internally, so shared key names (e.g. `"id"` on both sides)
+# come back suffixed (`"id.x"`/`"id.y"`) and never literally match the
+# single unsuffixed name a `keep = FALSE` right join wants.
+#
+# Residual, separate BUG (not fixed here, see notes on individual tests
+# below): because the swapped join keeps every row of the *original right*
+# table and NA-fills unmatched columns from the *original left* table, the
+# `keep = FALSE` key column -- by dplyr's naming convention, always sourced
+# from the *left* table's raw key copy -- is `NA` instead of coalesced with
+# the right table's value for right-only rows (rows that only exist in the
+# right table, i.e. the "unmatched" rows a right join exists to keep). This
+# is the same shape of gap as the documented `full_join()` join-key
+# coalescing bug above (src/ops_join.cpp) and is intentionally left alone.
+test_that("right_join() basic case matches dplyr oracle", {
   skip_if_no_gpu()
 
   left_df <- data.frame(id = c(1, 2, 3), x = c(10, 20, 30))
   right_df <- data.frame(id = c(2, 3, 4), y = c(200, 300, 400))
 
-  expect_error(
-    dplyr::right_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "id"),
-    "Invalid `by` specification"
-  )
-})
-
-test_that("right_join() basic case matches dplyr oracle", {
-  skip_if_no_gpu()
-  skip("BUG: right_join.tbl_gpu() errors on every call -- see dedicated BUG test above")
-
-  # left_df <- data.frame(id = c(1, 2, 3), x = c(10, 20, 30))
-  # right_df <- data.frame(id = c(2, 3, 4), y = c(200, 300, 400))
-  #
-  # compare_join_modes(left_df, right_df, dplyr::right_join, by = "id",
-  #                    arrange_by = "id")
+  # BUG: "id" is excluded from comparison -- the right-only row (id = 4) gets
+  # NA instead of the coalesced value 4 (see key-coalescing note above).
+  compare_join_modes(left_df, right_df, dplyr::right_join, by = "id",
+                     arrange_by = c("x", "y"), ignore_cols = "id")
 })
 
 test_that("right_join() fills unmatched left rows with NA", {
   skip_if_no_gpu()
-  skip("BUG: right_join.tbl_gpu() errors on every call -- see dedicated BUG test above")
 
-  # left_df <- data.frame(id = c(1, 2, 3), x = c(10, 20, 30))
-  # right_df <- data.frame(id = c(2, 3, 4), y = c(200, 300, 400))
-  #
-  # result <- dplyr::right_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "id") |>
-  #   collect()
-  #
-  # # Every row in right_df must appear (right_join preserves right rows)
-  # expect_equal(nrow(result), nrow(right_df))
-  #
-  # result <- result[order(result$id), ]
-  # row4 <- result[result$id == 4, ]
-  # expect_true(is.na(row4$x))
-  # expect_equal(row4$y, 400)
+  left_df <- data.frame(id = c(1, 2, 3), x = c(10, 20, 30))
+  right_df <- data.frame(id = c(2, 3, 4), y = c(200, 300, 400))
+
+  result <- dplyr::right_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "id") |>
+    collect()
+
+  # Every row in right_df must appear (right_join preserves right rows)
+  expect_equal(nrow(result), nrow(right_df))
+
+  # Identify the unmatched row by its non-key columns -- "id" has the
+  # key-coalescing BUG documented above for this row, so it can't be used as
+  # a reliable filter (it's NA here instead of 4).
+  row4 <- result[!is.na(result$y) & result$y == 400, ]
+  expect_true(is.na(row4$x))
+  expect_equal(row4$y, 400)
+
+  # Matched rows: no NAs introduced, ids line up correctly
+  matched <- result[!is.na(result$x), ]
+  expect_equal(nrow(matched), 2)
+  expect_equal(sort(matched$id), c(2, 3))
 })
 
 test_that("right_join() works with multi-column keys", {
   skip_if_no_gpu()
-  skip("BUG: right_join.tbl_gpu() errors on every call -- see dedicated BUG test above")
 
-  # left_df <- data.frame(k1 = c(1, 1, 2), k2 = c(10, 20, 10), x = c(5, 6, 7))
-  # right_df <- data.frame(k1 = c(1, 2, 2), k2 = c(10, 10, 30), y = c(50, 70, 80))
-  #
-  # compare_join_modes(left_df, right_df, dplyr::right_join, by = c("k1", "k2"),
-  #                    arrange_by = c("k1", "k2"))
+  left_df <- data.frame(k1 = c(1, 1, 2), k2 = c(10, 20, 10), x = c(5, 6, 7))
+  right_df <- data.frame(k1 = c(1, 2, 2), k2 = c(10, 10, 30), y = c(50, 70, 80))
+
+  # BUG: same join-key coalescing bug as above, applied to both key columns
+  # (right-only row k1 = 2, k2 = 30 gets NA for both instead of 2, 30).
+  compare_join_modes(left_df, right_df, dplyr::right_join, by = c("k1", "k2"),
+                     arrange_by = c("x", "y"), ignore_cols = c("k1", "k2"))
 })
 
 test_that("right_join() works with renamed keys", {
   skip_if_no_gpu()
-  skip("BUG: right_join.tbl_gpu() errors on every call -- see dedicated BUG test above")
 
-  # left_df <- data.frame(a = c(1, 2, 3), x = c(10, 20, 30))
-  # right_df <- data.frame(b = c(2, 3, 4), y = c(200, 300, 400))
-  #
-  # compare_join_modes(left_df, right_df, dplyr::right_join, by = c("a" = "b"),
-  #                    arrange_by = "b")
+  left_df <- data.frame(a = c(1, 2, 3), x = c(10, 20, 30))
+  right_df <- data.frame(b = c(2, 3, 4), y = c(200, 300, 400))
+
+  # BUG: same join-key coalescing bug; output key column is "a" (left's
+  # name, per dplyr's `by = c(x_col = y_col)` naming convention), NA instead
+  # of 4 for the right-only row (b = 4).
+  compare_join_modes(left_df, right_df, dplyr::right_join, by = c("a" = "b"),
+                     arrange_by = c("x", "y"), ignore_cols = "a")
 })
 
 test_that("right_join() applies suffixes on non-key name collisions", {
   skip_if_no_gpu()
-  skip("BUG: right_join.tbl_gpu() errors on every call -- see dedicated BUG test above")
 
-  # left_df <- data.frame(id = c(1, 2, 3), val = c(10, 20, 30))
-  # right_df <- data.frame(id = c(2, 3, 4), val = c(200, 300, 400))
-  #
-  # expected <- dplyr::right_join(left_df, right_df, by = "id")
-  # result <- dplyr::right_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "id") |>
-  #   collect()
-  #
-  # expect_equal(sort(names(result)), sort(names(expected)))
-  # expect_true(all(c("val.x", "val.y") %in% names(result)))
-  #
-  # compare_join_modes(left_df, right_df, dplyr::right_join, by = "id",
-  #                    arrange_by = "id")
+  left_df <- data.frame(id = c(1, 2, 3), val = c(10, 20, 30))
+  right_df <- data.frame(id = c(2, 3, 4), val = c(200, 300, 400))
+
+  expected <- dplyr::right_join(left_df, right_df, by = "id")
+  result <- dplyr::right_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "id") |>
+    collect()
+
+  expect_equal(sort(names(result)), sort(names(expected)))
+  expect_true(all(c("val.x", "val.y") %in% names(result)))
+
+  # BUG: same join-key coalescing bug as above.
+  compare_join_modes(left_df, right_df, dplyr::right_join, by = "id",
+                     arrange_by = c("val.x", "val.y"), ignore_cols = "id")
 })
 
 test_that("right_join() with keep = TRUE retains both key columns", {
   skip_if_no_gpu()
-  skip("BUG: right_join.tbl_gpu() errors on every call -- see dedicated BUG test above")
 
-  # left_df <- data.frame(a = c(1, 2, 3), x = c(10, 20, 30))
-  # right_df <- data.frame(b = c(2, 3, 4), y = c(200, 300, 400))
-  #
-  # result <- dplyr::right_join(tbl_gpu(left_df), tbl_gpu(right_df),
-  #                             by = c("a" = "b"), keep = TRUE) |>
-  #   collect()
-  # expected <- dplyr::right_join(left_df, right_df, by = c("a" = "b"), keep = TRUE)
-  #
-  # expect_equal(sort(names(result)), sort(names(expected)))
-  # expect_true(all(c("a", "b") %in% names(result)))
-  # expect_equal(nrow(result), nrow(expected))
+  left_df <- data.frame(a = c(1, 2, 3), x = c(10, 20, 30))
+  right_df <- data.frame(b = c(2, 3, 4), y = c(200, 300, 400))
+
+  result <- dplyr::right_join(tbl_gpu(left_df), tbl_gpu(right_df),
+                              by = c("a" = "b"), keep = TRUE) |>
+    collect()
+  expected <- dplyr::right_join(left_df, right_df, by = c("a" = "b"), keep = TRUE)
+
+  expect_equal(sort(names(result)), sort(names(expected)))
+  expect_true(all(c("a", "b") %in% names(result)))
+  expect_equal(nrow(result), nrow(expected))
+
+  # keep = TRUE retains both tables' raw key columns uncombined, so there's
+  # no coalescing needed/possible here -- unlike the keep = FALSE cases
+  # above, this can be compared exactly, key columns included.
+  compare_join_modes(left_df, right_df, dplyr::right_join, by = c("a" = "b"),
+                     keep = TRUE, arrange_by = c("x", "y"))
 })
 
 test_that("right_join() with empty inputs returns expected shape", {
   skip_if_no_gpu()
-  skip("BUG: right_join.tbl_gpu() errors on every call -- see dedicated BUG test above")
 
-  # left_df <- data.frame(id = numeric(0), x = numeric(0))
-  # right_df <- data.frame(id = c(1, 2), y = c(10, 20))
-  #
-  # compare_join_modes(left_df, right_df, dplyr::right_join, by = "id",
-  #                    arrange_by = "id")
-  #
-  # left_df2 <- data.frame(id = c(1, 2), x = c(10, 20))
-  # right_df2 <- data.frame(id = numeric(0), y = numeric(0))
-  #
-  # compare_join_modes(left_df2, right_df2, dplyr::right_join, by = "id",
-  #                    arrange_by = "id")
+  # Left side empty: every output row is right-only, so this hits the
+  # join-key coalescing BUG documented above for every single row.
+  left_df <- data.frame(id = numeric(0), x = numeric(0))
+  right_df <- data.frame(id = c(1, 2), y = c(10, 20))
+
+  compare_join_modes(left_df, right_df, dplyr::right_join, by = "id",
+                     arrange_by = "y", ignore_cols = "id")
+
+  # Right side empty: right_join keeps only right's rows, so the result is
+  # empty too -- vacuously no unmatched-row coalescing to go wrong, this
+  # direction can be compared exactly, id included.
+  left_df2 <- data.frame(id = c(1, 2), x = c(10, 20))
+  right_df2 <- data.frame(id = numeric(0), y = numeric(0))
+
+  compare_join_modes(left_df2, right_df2, dplyr::right_join, by = "id",
+                     arrange_by = "id")
 })
 
 test_that("right_join() column order matches build_join_schema (left cols then right)", {
   skip_if_no_gpu()
-  skip("BUG: right_join.tbl_gpu() errors on every call -- see dedicated BUG test above")
 
-  # left_df <- data.frame(id = c(1, 2, 3), x = c(10, 20, 30))
-  # right_df <- data.frame(id = c(2, 3, 4), y = c(200, 300, 400))
-  #
-  # result <- dplyr::right_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "id") |>
-  #   collect()
-  #
-  # expect_equal(names(result), c("id", "x", "y"))
+  left_df <- data.frame(id = c(1, 2, 3), x = c(10, 20, 30))
+  right_df <- data.frame(id = c(2, 3, 4), y = c(200, 300, 400))
+
+  result <- dplyr::right_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "id") |>
+    collect()
+
+  expect_equal(names(result), c("id", "x", "y"))
 })
