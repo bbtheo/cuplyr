@@ -42,8 +42,7 @@ list(
 | `src/transfer_io.cpp` | `df_to_gpu()`, `gpu_collect()`, `gpu_head()`, `gpu_dim()` |
 | `src/ops_filter.cpp` | `gpu_filter_scalar()`, `gpu_filter_col()`, `gpu_filter_mask()` |
 | `src/ops_filter_fused.cpp` | `gpu_filter_fused()` for multi-predicate AND masks |
-| `src/ops_mutate.cpp` | `gpu_mutate_binary_*()`, `gpu_copy_column*()` |
-| `src/ops_mutate_batch.cpp` | `gpu_mutate_batch()` for fused mutate expressions |
+| `src/ops_mutate_batch.cpp` | `gpu_mutate_batch()` — sole mutate execution path (copy/col-scalar/col-col, fused) |
 | `src/ops_select.cpp` | `gpu_select()` |
 | `src/ops_groupby.cpp` | `gpu_summarise()` |
 | `src/ops_arrange.cpp` | `gpu_arrange()` |

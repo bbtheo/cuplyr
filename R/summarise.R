@@ -364,23 +364,31 @@ create_temp_column <- function(.data, col_name, expr_text) {
     }
     new_type <- "INT32"  # Boolean stored as int for summing
   } else {
-    # Arithmetic operation
+    # Arithmetic operation. Routed through the same gpu_mutate_batch() path
+    # as mutate() (D6): build a single make_mutate_expr() step and lower it
+    # via one-expression batch call rather than the deleted
+    # gpu_mutate_binary_cols()/gpu_mutate_binary_scalar() kernels.
     if (rhs_is_col) {
       rhs_idx <- match(rhs, .data$schema$names) - 1L
-      new_ptr <- wrap_gpu_call(
-        "summarise_mutate_binary_cols",
-        gpu_mutate_binary_cols(.data$ptr, lhs_idx, op_found, rhs_idx)
+      expr_step <- make_mutate_expr(
+        col_name, c(lhs, rhs), op_found,
+        input_types = c(.data$schema$types[lhs_idx + 1L],
+                         .data$schema$types[rhs_idx + 1L])
       )
     } else {
       value <- tryCatch(eval(parse(text = rhs)), error = function(e) {
         stop("Cannot parse value: ", rhs, call. = FALSE)
       })
-      new_ptr <- wrap_gpu_call(
-        "summarise_mutate_binary_scalar",
-        gpu_mutate_binary_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
+      expr_step <- make_mutate_expr(
+        col_name, lhs, op_found, scalar = as.double(value),
+        input_types = .data$schema$types[lhs_idx + 1L]
       )
     }
-    new_type <- "FLOAT64"
+    new_ptr <- wrap_gpu_call(
+      "summarise_mutate_batch",
+      gpu_mutate_batch(.data$ptr, list(expr_step), .data$schema)
+    )
+    new_type <- expr_step$output_type
   }
 
   # Create new tbl_gpu with added column
