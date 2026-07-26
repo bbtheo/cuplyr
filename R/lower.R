@@ -100,76 +100,7 @@ lower_mutate <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
   input_schema <- infer_schema(ast$input)
 
-  if (length(ast$expressions) == 1) {
-    lower_single_mutate(input_ptr, ast$expressions[[1]], input_schema)
-  } else if (length(ast$expressions) > 1 && exists("gpu_mutate_batch", mode = "function")) {
-    # Use batched mutate if available
-    gpu_mutate_batch(input_ptr, ast$expressions, input_schema)
-  } else {
-    # Fallback: apply expressions sequentially
-    result <- input_ptr
-    current_schema <- input_schema
-
-    for (expr in ast$expressions) {
-      result <- lower_single_mutate(result, expr, current_schema)
-      # Update schema for next expression
-      current_schema <- update_schema_after_mutate(current_schema, expr)
-    }
-    result
-  }
-}
-
-#' Lower a single mutate expression
-#' @keywords internal
-lower_single_mutate <- function(ptr, expr, schema) {
-  output_col <- expr$output_col
-  input_cols <- expr$input_cols
-  op <- expr$op
-
-  existing_idx <- match(output_col, schema$names)
-  is_replace <- !is.na(existing_idx)
-  replace_idx <- if (is_replace) existing_idx - 1L else -1L
-
-  if (op == "copy") {
-    source_idx <- match(input_cols[1], schema$names) - 1L
-    if (is_replace) {
-      gpu_copy_column_replace(ptr, source_idx, replace_idx)
-    } else {
-      gpu_copy_column(ptr, source_idx)
-    }
-  } else if (!is.null(expr$scalar)) {
-    # Column op scalar
-    col_idx <- match(input_cols[1], schema$names) - 1L
-    if (is_replace) {
-      gpu_mutate_binary_scalar_replace(ptr, col_idx, op, expr$scalar, replace_idx)
-    } else {
-      gpu_mutate_binary_scalar(ptr, col_idx, op, expr$scalar)
-    }
-  } else {
-    # Column op column
-    col_idx1 <- match(input_cols[1], schema$names) - 1L
-    col_idx2 <- match(input_cols[2], schema$names) - 1L
-    if (is_replace) {
-      gpu_mutate_binary_cols_replace(ptr, col_idx1, op, col_idx2, replace_idx)
-    } else {
-      gpu_mutate_binary_cols(ptr, col_idx1, op, col_idx2)
-    }
-  }
-}
-
-#' Update schema after a mutate expression
-#' @keywords internal
-update_schema_after_mutate <- function(schema, expr) {
-  existing_idx <- match(expr$output_col, schema$names)
-
-  if (!is.na(existing_idx)) {
-    schema$types[existing_idx] <- expr$output_type
-  } else {
-    schema$names <- c(schema$names, expr$output_col)
-    schema$types <- c(schema$types, expr$output_type)
-  }
-
-  schema
+  gpu_mutate_batch(input_ptr, ast$expressions, input_schema)
 }
 
 #' Lower arrange node

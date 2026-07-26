@@ -183,6 +183,21 @@ test_that("mutate() column replacement preserves column order", {
   expect_equal(result$b, c(8, 10, 12))
 })
 
+test_that("lazy single-expression replace-in-place mutate matches dplyr (S5a)", {
+  skip_if_no_gpu()
+
+  # lower_mutate() always routes through gpu_mutate_batch(), even for a
+  # single expression that replaces an existing column in place -- this
+  # exercises that path against the dplyr oracle.
+  df <- data.frame(x = c(1, 2, 3, 4, 5))
+
+  pipeline <- function(d) {
+    d |> dplyr::mutate(x = x * 2)
+  }
+
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
 # =============================================================================
 # Chained Mutations
 # =============================================================================
