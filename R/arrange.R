@@ -81,88 +81,29 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE) {
   }
 
   # Get current schema
-  current_schema <- if (!is.null(.data$lazy_ops) && .data$exec_mode == "lazy") {
-    infer_schema(.data$lazy_ops)
-  } else {
-    .data$schema
-  }
+  schema <- current_schema(.data)
 
   # Parse sort specifications
-  sort_specs <- lapply(dots, parse_arrange_expr, .data = .data, schema = current_schema)
+  sort_specs <- lapply(dots, parse_arrange_expr, .data = .data, schema = schema)
 
   # Validate columns exist
   for (spec in sort_specs) {
-    if (!spec$col_name %in% current_schema$names) {
+    if (!spec$col_name %in% schema$names) {
       stop("Column '", spec$col_name, "' not found.\n",
-           "Available columns: ", paste(current_schema$names, collapse = ", "),
+           "Available columns: ", paste(schema$names, collapse = ", "),
            call. = FALSE)
     }
   }
 
-  # Handle .by_group
+  # Handle .by_group: group columns are prepended ascending (D8, matches
+  # dplyr's arrange.grouped_df); the user's own desc() on a group column
+  # survives as a later no-op tiebreaker via lower_arrange()'s dedup logic.
   groups_for_arrange <- character()
   if (isTRUE(.by_group) && length(.data$groups) > 0) {
     groups_for_arrange <- .data$groups
   }
 
-  # Lazy path: build AST (arrange is a barrier)
-  if (.data$exec_mode == "lazy") {
-    return(arrange_lazy(.data, sort_specs, groups_for_arrange))
-  }
-
-  # Eager path: execute immediately
-  col_indices <- integer(length(sort_specs))
-  descending <- logical(length(sort_specs))
-
-  for (i in seq_along(sort_specs)) {
-    spec <- sort_specs[[i]]
-    col_indices[i] <- match(spec$col_name, current_schema$names) - 1L
-    descending[i] <- spec$descending
-  }
-
-  # Handle grouped arrange
-  if (length(groups_for_arrange) > 0) {
-    group_indices <- match(groups_for_arrange, current_schema$names) - 1L
-    user_col_names <- vapply(sort_specs, `[[`, character(1), "col_name")
-
-    group_descending <- logical(length(groups_for_arrange))
-    for (i in seq_along(groups_for_arrange)) {
-      grp <- groups_for_arrange[i]
-      user_idx <- match(grp, user_col_names)
-      if (!is.na(user_idx)) {
-        group_descending[i] <- sort_specs[[user_idx]]$descending
-      }
-    }
-
-    keep <- !user_col_names %in% groups_for_arrange
-    col_indices <- c(group_indices, col_indices[keep])
-    descending <- c(group_descending, descending[keep])
-  }
-
-  new_ptr <- wrap_gpu_call(
-    "arrange",
-    gpu_arrange(.data$ptr, col_indices, descending)
-  )
-
-  new_tbl_gpu(
-    ptr = new_ptr,
-    schema = current_schema,
-    groups = .data$groups,
-    exec_mode = .data$exec_mode
-  )
-}
-
-# Lazy arrange: build AST node (arrange is a barrier)
-arrange_lazy <- function(.data, sort_specs, groups) {
-  # Initialize AST if needed
-  if (is.null(.data$lazy_ops)) {
-    .data$lazy_ops <- ast_source(.data$schema)
-  }
-
-  # Add arrange node (this is a barrier)
-  .data$lazy_ops <- ast_arrange(.data$lazy_ops, sort_specs, groups)
-
-  .data
+  push_op(.data, ast_arrange(input_node(.data), sort_specs, groups_for_arrange))
 }
 
 # Internal: Parse a single arrange expression

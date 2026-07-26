@@ -187,17 +187,15 @@ lower_arrange <- function(ast, source_ptr) {
     descending[i] <- isTRUE(spec$descending)
   }
 
-  # Handle grouped arrange
+  # Handle grouped arrange (.by_group = TRUE): dplyr's arrange.grouped_df
+  # always prepends the group columns ASCENDING ahead of the user's own sort
+  # keys (D8), even if the user's dots already sort by one of those columns
+  # (possibly with desc()) -- that user key simply becomes a later, no-op
+  # tiebreaker since the ascending group prepend already fully orders it.
   if (length(ast$groups) > 0) {
     group_indices <- match(ast$groups, input_schema$names) - 1L
-    # Prepend group columns (not already in sort)
-    sort_col_names <- vapply(ast$sort_specs, `[[`, character(1), "col_name")
-    new_groups <- setdiff(ast$groups, sort_col_names)
-    if (length(new_groups) > 0) {
-      new_indices <- match(new_groups, input_schema$names) - 1L
-      col_indices <- c(new_indices, col_indices)
-      descending <- c(rep(FALSE, length(new_indices)), descending)
-    }
+    col_indices <- c(group_indices, col_indices)
+    descending <- c(rep(FALSE, length(group_indices)), descending)
   }
 
   gpu_arrange(input_ptr, col_indices, descending)

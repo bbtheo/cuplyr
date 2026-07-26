@@ -466,3 +466,63 @@ test_that("arrange() handles larger datasets", {
     expect_true(all(diff(subset_y) >= 0))
   }
 })
+
+# =============================================================================
+# Oracle parity tests (D8: .by_group prepends group keys ASCENDING regardless
+# of the user's desc() on them; the user's own desc(g) survives as a later
+# no-op tiebreaker -- verified empirically against dplyr::arrange.grouped_df)
+# =============================================================================
+
+test_that("arrange(desc(g), x, .by_group = TRUE) sorts groups ascending (D8)", {
+  skip_if_no_gpu()
+
+  # g's ascending order (1, 2) differs from descending order (2, 1), so this
+  # exercises the actual behavior change: dplyr ignores the user's desc(g)
+  # for group-key placement and always sorts groups ascending.
+  df <- data.frame(
+    g = c(2, 2, 1, 1),
+    x = c(1, 2, 3, 4)
+  )
+
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(g) |>
+      dplyr::arrange(dplyr::desc(g), x, .by_group = TRUE)
+  }
+
+  expect_same_as_dplyr(df, pipeline)
+})
+
+test_that("arrange(desc(g), x, .by_group = TRUE) sorts groups ascending in lazy mode (D8)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(
+    g = c(2, 2, 1, 1),
+    x = c(1, 2, 3, 4)
+  )
+
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(g) |>
+      dplyr::arrange(dplyr::desc(g), x, .by_group = TRUE)
+  }
+
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("arrange() with multiple desc() keys matches dplyr in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  df <- data.frame(
+    x = c(1, 1, 2, 2, 3),
+    y = c(3, 1, 2, 4, 1),
+    z = c("a", "b", "a", "b", "a")
+  )
+
+  pipeline <- function(d) {
+    d |> dplyr::arrange(dplyr::desc(x), y, dplyr::desc(z))
+  }
+
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
