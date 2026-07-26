@@ -367,6 +367,40 @@ test_that("select() works with large datasets", {
   expect_equal(result$col5, df$col5)
 })
 
+test_that("select() of a factor column preserves factor_levels (D3)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(
+    f = factor(c("low", "high", "medium"), levels = c("low", "medium", "high")),
+    x = 1:3
+  )
+  gpu_df <- tbl_gpu(df, lazy = FALSE)
+
+  selected <- dplyr::select(gpu_df, f, x)
+
+  expect_equal(names(selected$schema$factor_levels), "f")
+  expect_equal(selected$schema$factor_levels$f, levels(df$f))
+
+  result <- collect(selected)
+  expect_s3_class(result$f, "factor")
+  expect_equal(levels(result$f), levels(df$f))
+  expect_equal(as.character(result$f), as.character(df$f))
+})
+
+test_that("select() with tidyselect helper matches dplyr in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  df <- mtcars
+
+  pipeline <- function(tbl) {
+    tbl |>
+      dplyr::select(mpg, dplyr::starts_with("c"))
+  }
+
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
 test_that("select() reduces memory footprint", {
   skip_if_no_gpu()
 
