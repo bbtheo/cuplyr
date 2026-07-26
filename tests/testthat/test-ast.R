@@ -181,6 +181,42 @@ test_that("infer_mutate_output_type preserves INT32 for non-division", {
   expect_equal(result, "INT32")
 })
 
+test_that("infer_mutate_output_type: BOOL8 + BOOL8 -> INT32 (D5 rule 5)", {
+  # Matches R: typeof(TRUE + TRUE) is "integer".
+  result <- infer_mutate_output_type("+", c("BOOL8", "BOOL8"), NULL)
+  expect_equal(result, "INT32")
+})
+
+test_that("infer_mutate_output_type: INT32 + INT64 -> INT64 (D5 rule 5)", {
+  result <- infer_mutate_output_type("+", c("INT32", "INT64"), NULL)
+  expect_equal(result, "INT64")
+})
+
+test_that("infer_mutate_output_type: ^ always promotes to FLOAT64 (D5 rule 4)", {
+  # Matches R: typeof(2L^2L) is "double", even for INT32/INT32 or INT64 inputs.
+  expect_equal(infer_mutate_output_type("^", c("INT32", "INT32"), NULL), "FLOAT64")
+  expect_equal(infer_mutate_output_type("^", "INT64", 2L), "FLOAT64")
+})
+
+test_that("infer_mutate_output_type errors on STRING input (D5 rule 2)", {
+  expect_error(
+    infer_mutate_output_type("+", c("STRING", "INT32"), NULL),
+    "mutate\\(\\) does not support arithmetic on STRING columns"
+  )
+})
+
+test_that("infer_mutate_output_type errors on TIMESTAMP_* input (D5 rule 2)", {
+  expect_error(
+    infer_mutate_output_type("+", c("TIMESTAMP_DAYS", "INT32"), NULL),
+    "mutate\\(\\) does not support arithmetic on TIMESTAMP_DAYS columns"
+  )
+})
+
+test_that("infer_mutate_output_type: integer scalar keeps INT32, double scalar promotes", {
+  expect_equal(infer_mutate_output_type("+", "INT32", 1L), "INT32")
+  expect_equal(infer_mutate_output_type("+", "INT32", 1), "FLOAT64")
+})
+
 # Helper Function Tests
 
 test_that("find_calls extracts function names", {

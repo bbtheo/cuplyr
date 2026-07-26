@@ -495,22 +495,47 @@ test_that("mutate() with int_col / 2L is FLOAT64 (division always promotes)", {
   expect_equal(result$new_col, df$int_col / 2L)
 })
 
-test_that("mutate() with int_col ^ 2L currently yields INT32 (S5c will retighten to FLOAT64)", {
+test_that("mutate() with int_col ^ 2L is FLOAT64 (power always promotes)", {
   skip_if_no_gpu()
 
-  # dplyr::mutate(int_col ^ 2L) actually returns a double (R's `^` always
-  # returns double, per D5 rule 4), so INT32 here is a KNOWN, tracked
-  # divergence -- not the target behavior. infer_mutate_output_type()
-  # doesn't special-case `^` yet (only `/` is forced to FLOAT64); until S5c
-  # adds that rule, INT32 ^ <int scalar> promotes exactly like `+`/`-`/`*`
-  # do. This test pins the CURRENT behavior so S5c's fix shows up as a
-  # deliberate, visible diff here instead of a silent behavior change.
+  # S5c: `^` now follows D5 rule 4 and always promotes to FLOAT64, matching
+  # R's own `2L^2L` -> double. This flips the S5b-pinned INT32 behavior.
   df <- data.frame(int_col = 1:10)
   gpu_df <- tbl_gpu(df)
 
   mutated <- dplyr::mutate(gpu_df, new_col = int_col ^ 2L)
 
-  expect_equal(unname(mutated$schema$types[2]), "INT32")
+  expect_equal(unname(mutated$schema$types[2]), "FLOAT64")
+
+  result <- collect(mutated)
+  expect_equal(result$new_col, df$int_col ^ 2L)
+})
+
+test_that("mutate() logical arithmetic type parity with dplyr (oracle, eager)", {
+  skip_if_no_gpu()
+
+  # BOOL8 + BOOL8 -> INT32 (D5 rule 5), matching R's `TRUE + TRUE == 2L`.
+  # Verified empirically that gpu_mutate_batch()'s cudf::binary_operation
+  # path accepts BOOL8 operands with an INT32 output type.
+  df <- data.frame(flag = c(TRUE, FALSE, TRUE, TRUE))
+
+  pipeline <- function(d) {
+    d |> dplyr::mutate(s = flag + flag)
+  }
+
+  expect_same_as_dplyr(df, pipeline, ignore_col_types = FALSE)
+})
+
+test_that("mutate() logical arithmetic type parity with dplyr (oracle, lazy)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(flag = c(TRUE, FALSE, TRUE, TRUE))
+
+  pipeline <- function(d) {
+    d |> dplyr::mutate(s = flag + flag)
+  }
+
+  expect_same_as_dplyr_lazy(df, pipeline, ignore_col_types = FALSE)
 })
 
 test_that("mutate() type parity with dplyr for integer-preserving arithmetic (oracle, eager)", {

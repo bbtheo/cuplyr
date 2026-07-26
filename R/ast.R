@@ -194,36 +194,76 @@ make_mutate_expr <- function(output_col, input_cols, op, scalar = NULL,
 
 #' Infer output type for a mutate expression
 #'
+#' Implements D5's ordered promotion rules (see
+#' `scratchpad/unification_design.md`). Note this deliberately mirrors R's own
+#' arithmetic promotion, not SQL/cudf defaults: `2L^2L` is a double in R, and
+#' `TRUE+TRUE` is an integer, and dplyr agrees with both.
+#'
 #' @param op The operation
 #' @param input_types Types of input columns
 #' @param scalar Scalar value if any
 #' @return GPU type string
 #' @keywords internal
 infer_mutate_output_type <- function(op, input_types, scalar) {
+  # Rule 6 (checked first as a guard): unknown/no input type information.
+  # In practice every production call site in R/mutate.R supplies
+  # input_types; this only fires for defensive/test-only callers that omit
+  # it, so checking it up front (rather than only as a final fallback) can't
+  # diverge from any real call.
   if (is.null(input_types)) {
     return("FLOAT64")
   }
 
+  # Rule 1: copy preserves the source column's type exactly.
   if (op == "copy") {
     return(input_types[1])
   }
 
-  # Arithmetic with any FLOAT64 -> FLOAT64
-  if (any(input_types == "FLOAT64") || is.double(scalar)) {
-    return("FLOAT64")
+  # Rule 2: no arithmetic on STRING/DICTIONARY32/TIMESTAMP_* columns.
+  is_unsupported <- input_types == "STRING" |
+    input_types == "DICTIONARY32" |
+    grepl("^TIMESTAMP_", input_types)
+  if (any(is_unsupported)) {
+    bad_type <- input_types[is_unsupported][1]
+    stop("mutate() does not support arithmetic on ", bad_type, " columns",
+         call. = FALSE)
   }
 
-  # INT32 op INT32 -> INT32 (except division)
-  if (all(input_types == "INT32") && op != "/") {
-    return("INT32")
-  }
-
-  # Division always produces FLOAT64
+  # Rule 3: division always promotes to FLOAT64 (dplyr: `1L/2L` is double).
   if (op == "/") {
     return("FLOAT64")
   }
 
-  # Default to FLOAT64 for safety
+  # Rule 4: power always promotes to FLOAT64 (R: `2L^2L` is double).
+  if (op == "^") {
+    return("FLOAT64")
+  }
+
+  # Rule 5: +, -, *, %%, %/% promote over input types plus the scalar's own
+  # R type (double -> FLOAT64, integer -> INT32; NULL if no scalar/not
+  # numeric-typed, which drops out of the union below).
+  if (op %in% c("+", "-", "*", "%%", "%/%")) {
+    scalar_type <- if (is.double(scalar)) {
+      "FLOAT64"
+    } else if (is.integer(scalar)) {
+      "INT32"
+    } else {
+      NULL
+    }
+    all_types <- c(input_types, scalar_type)
+
+    if (any(all_types == "FLOAT64" | all_types == "FLOAT32")) {
+      return("FLOAT64")
+    }
+    if (any(all_types == "INT64")) {
+      return("INT64")
+    }
+    # Anything else (INT32, BOOL8, INT16, INT8, ...) promotes to INT32.
+    # This covers BOOL8, matching R's `TRUE + TRUE == 2L`.
+    return("INT32")
+  }
+
+  # Rule 6: unrecognized operation -> FLOAT64 for safety.
   "FLOAT64"
 }
 
