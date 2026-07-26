@@ -19,6 +19,19 @@
 #     'pkgload::load_all(quiet=TRUE); testthat::test_file("tests/testthat/test-perf-regression.R")'
 
 # =============================================================================
+# GPU warm-up (file start)
+# =============================================================================
+#
+# Force GPU clocks out of idle (P8) before any benchmark in this file is
+# timed -- see perf_warm_gpu() in helper-perf.R for why. Idempotent per
+# process; expect_no_perf_regression() also calls this defensively so
+# benchmarks are protected even if this file-level call is skipped (e.g.
+# test_file() run without going through the whole suite).
+if (identical(Sys.getenv("CUPLYR_PERF"), "1") && has_gpu()) {
+  perf_warm_gpu()
+}
+
+# =============================================================================
 # Shared test data (built once per test-file run, not per benchmark)
 # =============================================================================
 
