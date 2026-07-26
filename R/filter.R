@@ -70,56 +70,59 @@ filter.tbl_gpu <- function(.data, ..., .preserve = FALSE) {
 
   if (length(dots) == 0) return(.data)
 
-  # Lazy path: build AST instead of executing
- if (.data$exec_mode == "lazy") {
-    return(filter_lazy(.data, dots))
-  }
-
-  # Eager path: execute immediately
-  result <- .data
-  for (expr in dots) {
-    result <- filter_one(result, expr)
-  }
-
-  result
-}
-
-# Lazy filter: build AST node
-filter_lazy <- function(.data, dots) {
-  # Parse all filter expressions into predicates
+  # Schema is stable across this whole call: filter() never adds/removes
+  # columns, so a single current_schema() snapshot is valid for every dot,
+  # even across an intervening eval-mask fallback materialization.
+  schema <- current_schema(.data)
   predicates <- list()
 
-  for (expr in dots) {
-    parsed <- parse_filter_expr(expr, .data)
+  for (quo in dots) {
+    parsed <- parse_filter_expr(quo, schema)
+
     if (is.null(parsed)) {
-      # Opaque expression - fall back to eager
-      warning("Opaque filter expression, falling back to eager execution",
-              call. = FALSE)
-      .data <- as_eager(.data)
-      for (e in dots) {
-        .data <- filter_one(.data, e)
+      # Opaque expression (not a comparison shape): flush any predicates
+      # accumulated so far into a real ast_filter node, then fall back to
+      # CPU-side evaluation of this expression (D4).
+      if (length(predicates) > 0) {
+        .data <- push_op(.data, ast_filter(input_node(.data), predicates))
+        predicates <- list()
       }
-      return(as_lazy(.data))
+      .data <- filter_eval_mask(.data, quo)
+    } else {
+      # Comparison predicate(s) (including the no-op TRUE case, which
+      # contributes an empty list, and the impossible FALSE predicate):
+      # accumulate into a single ast_filter node's predicate list, the
+      # same structure filter_lazy() used to build.
+      predicates <- c(predicates, parsed)
     }
-    predicates <- c(predicates, parsed)
   }
 
-  # Initialize AST if needed
-  if (is.null(.data$lazy_ops)) {
-    .data$lazy_ops <- ast_source(.data$schema)
+  if (length(predicates) > 0) {
+    .data <- push_op(.data, ast_filter(input_node(.data), predicates))
   }
 
-  # Add filter node
-  .data$lazy_ops <- ast_filter(.data$lazy_ops, predicates)
-
-  # Schema unchanged by filter
   .data
 }
 
 # Parse a filter expression into predicate structure(s)
-parse_filter_expr <- function(expr, .data) {
-  expr_chr <- rlang::quo_text(expr)
-  expr_obj <- rlang::quo_get_expr(expr)
+#
+# Shared by eager and lazy modes (D1/S4). Returns:
+#   - list() for a literal TRUE (no filter needed)
+#   - list(<predicate>) for a literal FALSE (impossible predicate) or a
+#     recognized `column <op> value`/`column <op> column` comparison
+#   - NULL if the expression is not a comparison shape (caller falls back
+#     to filter_eval_mask())
+# stop()s for the two diagnosable cases that used to live in filter_one():
+# an unknown LHS column, and a non-numeric/non-scalar RHS value -- both
+# with their exact original message text.
+#
+# @param quo A quosure containing a filter expression
+# @param schema The current schema (names/types) to validate against
+# @return A list of predicate structures, or NULL
+# @keywords internal
+parse_filter_expr <- function(quo, schema) {
+  expr_chr <- rlang::quo_text(quo)
+  expr_obj <- rlang::quo_get_expr(quo)
 
   # Handle boolean literals without evaluating in a data mask
   if (identical(expr_obj, TRUE)) {
@@ -127,8 +130,8 @@ parse_filter_expr <- function(expr, .data) {
   }
   if (identical(expr_obj, FALSE)) {
     # FALSE = filter everything - create impossible predicate
-    if (length(.data$schema$names) > 0) {
-      return(list(make_predicate(.data$schema$names[1], "!=", .data$schema$names[1],
+    if (length(schema$names) > 0) {
+      return(list(make_predicate(schema$names[1], "!=", schema$names[1],
                                  is_col_compare = TRUE)))
     }
     return(list())
@@ -157,160 +160,88 @@ parse_filter_expr <- function(expr, .data) {
   lhs <- trimws(parts[1])
   rhs <- trimws(parts[2])
 
-  # Validate LHS is a column
-  if (!lhs %in% .data$schema$names) {
-    return(NULL)
+  # Validate LHS is a column (diagnosable case moved in from filter_one())
+  if (!lhs %in% schema$names) {
+    stop("Column '", lhs, "' not found.\n",
+         "Available columns: ", paste(schema$names, collapse = ", "),
+         call. = FALSE)
   }
 
   # Check if RHS is a column
-  if (rhs %in% .data$schema$names) {
+  if (rhs %in% schema$names) {
     return(list(make_predicate(lhs, op_found, rhs, is_col_compare = TRUE)))
   }
 
   # Try to parse RHS as value
   value <- tryCatch(eval(parse(text = rhs)), error = function(e) NULL)
-  if (is.null(value) || !is.numeric(value) || length(value) != 1) {
-    return(NULL)
+  if (is.null(value)) {
+    return(NULL)  # Can't parse RHS at all - opaque, fall back
+  }
+  if (!is.numeric(value) || length(value) != 1) {
+    # Diagnosable case moved in from filter_one()
+    stop("filter() currently only supports numeric scalar comparisons.\n",
+         "Got: ", class(value)[1], " of length ", length(value), call. = FALSE)
   }
 
   list(make_predicate(lhs, op_found, value, is_col_compare = FALSE))
 }
 
-# Internal: Parse and execute a single filter expression
+# Internal: CPU-eval fallback for filter expressions that aren't a
+# recognized comparison shape.
 #
-# Parses a quosure containing a comparison expression and calls the
-# appropriate GPU filter function.
+# Materializes any pending lazy operations first (so the fallback always
+# operates on a real GPU table), eval_tidy()s the quosure (no explicit data
+# mask - matches the historical behavior of only supporting expressions
+# that evaluate directly, e.g. `rep(TRUE, n)`, not column references),
+# validates the result is logical, and applies it via gpu_filter_bool()
+# (scalar/uniform case) or gpu_filter_mask() (mixed mask), same as the
+# renamed-from filter_logical() did. Notifies via cuplyr_fallback_notify()
+# (D4: silent by default).
 #
 # @param .data A tbl_gpu object
-# @param expr A quosure with a comparison expression
+# @param quo A quosure whose evaluated result must be logical
 # @return A filtered tbl_gpu object
 # @keywords internal
-filter_one <- function(.data, expr) {
-  expr_chr <- rlang::quo_text(expr)
-  expr_obj <- rlang::quo_get_expr(expr)
-  ops <- c("==", "!=", ">=", "<=", ">", "<")
-
-  # Handle literal TRUE/FALSE without evaluation
-  if (identical(expr_obj, TRUE) || identical(expr_obj, FALSE)) {
-    return(filter_logical(.data, expr_obj))
+filter_eval_mask <- function(.data, quo) {
+  if (identical(.data$exec_mode, "lazy") && has_pending_ops(.data)) {
+    .data <- compute(.data)
   }
 
-  # If expression is a symbol not matching a column, allow logical vectors
-  if (rlang::is_symbol(expr_obj)) {
-    sym <- as.character(expr_obj)
-    if (!sym %in% .data$schema$names) {
-      eval_result <- tryCatch(rlang::eval_tidy(expr), error = function(e) NULL)
-      if (!is.null(eval_result) && is.logical(eval_result)) {
-        return(filter_logical(.data, eval_result))
-      }
-    }
-  }
+  expr_chr <- rlang::quo_text(quo)
+  eval_result <- tryCatch(rlang::eval_tidy(quo), error = function(e) NULL)
 
-  # Allow non-comparison calls to be evaluated as logical vectors
-  if (rlang::is_call(expr_obj)) {
-    call_name <- rlang::call_name(expr_obj)
-    if (is.null(call_name) || !call_name %in% ops) {
-      eval_result <- tryCatch(rlang::eval_tidy(expr), error = function(e) NULL)
-      if (!is.null(eval_result) && is.logical(eval_result)) {
-        return(filter_logical(.data, eval_result))
-      }
-    }
-  }
-
-  # Parse simple comparison: col op value or col op col
-  # Order matters: check two-char operators before single-char
-  op_found <- NULL
-  for (op in ops) {
-    if (grepl(op, expr_chr, fixed = TRUE)) {
-      op_found <- op
-      break
-    }
-  }
-
-  if (is.null(op_found)) {
+  if (is.null(eval_result) || !is.logical(eval_result)) {
     stop("filter() only supports comparisons: ==, !=, >, >=, <, <=\n",
          "Or logical values: TRUE, FALSE, logical vectors\n",
          "Expression: ", expr_chr, call. = FALSE)
   }
 
-  parts <- strsplit(expr_chr, op_found, fixed = TRUE)[[1]]
-  if (length(parts) != 2) {
-    stop("Invalid filter expression: ", expr_chr,
-         "\nExpected format: column ", op_found, " value", call. = FALSE)
-  }
+  cuplyr_fallback_notify("filter", expr_chr)
 
-  lhs <- trimws(parts[1])
-  rhs <- trimws(parts[2])
-
-  lhs_idx <- tryCatch(col_index(.data, lhs), error = function(e) NULL)
-  rhs_idx <- tryCatch(col_index(.data, rhs), error = function(e) NULL)
-
-  if (is.null(lhs_idx)) {
-    stop("Column '", lhs, "' not found.\n",
-         "Available columns: ", paste(.data$schema$names, collapse = ", "),
-         call. = FALSE)
-  }
-
-  if (!is.null(rhs_idx)) {
-    # Column to column comparison
-    new_ptr <- wrap_gpu_call(
-      "filter_col",
-      gpu_filter_col(.data$ptr, lhs_idx, op_found, rhs_idx)
-    )
-  } else {
-    # Column to scalar comparison
-    value <- tryCatch(eval(parse(text = rhs)), error = function(e) {
-      stop("Cannot parse value: ", rhs, call. = FALSE)
-    })
-    if (!is.numeric(value) || length(value) != 1) {
-      stop("filter() currently only supports numeric scalar comparisons.\n",
-           "Got: ", class(value)[1], " of length ", length(value), call. = FALSE)
-    }
-    new_ptr <- wrap_gpu_call(
-      "filter_scalar",
-      gpu_filter_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
-    )
-  }
-
-  new_tbl_gpu(
-    ptr = new_ptr,
-    schema = .data$schema,
-    groups = .data$groups,
-    exec_mode = .data$exec_mode
-  )
-}
-
-# Internal: Filter by logical value or vector
-#
-# @param .data A tbl_gpu object
-# @param logical_val A logical scalar or vector
-# @return A filtered tbl_gpu object
-# @keywords internal
-filter_logical <- function(.data, logical_val) {
   n_rows <- dim(.data)[1]
 
-  if (length(logical_val) == 1) {
+  if (length(eval_result) == 1) {
     # Single boolean: TRUE keeps all rows, FALSE keeps none
-    if (isTRUE(logical_val)) {
+    if (isTRUE(eval_result)) {
       new_ptr <- wrap_gpu_call("filter_bool_true", gpu_filter_bool(.data$ptr, TRUE))
     } else {
       new_ptr <- wrap_gpu_call("filter_bool_false", gpu_filter_bool(.data$ptr, FALSE))
     }
   } else {
     # Logical vector: use as mask
-    if (length(logical_val) != n_rows) {
-      stop("Logical vector length (", length(logical_val),
+    if (length(eval_result) != n_rows) {
+      stop("Logical vector length (", length(eval_result),
            ") must match number of rows (", n_rows, ")", call. = FALSE)
     }
 
     # Check for all TRUE or all FALSE (optimize common cases)
-    if (all(logical_val, na.rm = TRUE) && !any(is.na(logical_val))) {
+    if (all(eval_result, na.rm = TRUE) && !any(is.na(eval_result))) {
       new_ptr <- wrap_gpu_call("filter_bool_all_true", gpu_filter_bool(.data$ptr, TRUE))
-    } else if (!any(logical_val, na.rm = TRUE)) {
+    } else if (!any(eval_result, na.rm = TRUE)) {
       new_ptr <- wrap_gpu_call("filter_bool_all_false", gpu_filter_bool(.data$ptr, FALSE))
     } else {
       # Mixed: apply mask
-      new_ptr <- wrap_gpu_call("filter_mask", gpu_filter_mask(.data$ptr, logical_val))
+      new_ptr <- wrap_gpu_call("filter_mask", gpu_filter_mask(.data$ptr, eval_result))
     }
   }
 

@@ -32,8 +32,8 @@ current_schema <- function(.data) {
 #'
 #' - lazy + pending ops: returns `.data$lazy_ops` as-is.
 #' - lazy + no pending ops: returns a fresh `ast_source(.data$schema)`,
-#'   matching the existing lazy-verb convention (e.g. `filter_lazy()`,
-#'   `select_lazy()`) of leaving the source pointer unset; `compute()`/
+#'   matching the historical lazy-verb convention (e.g. the now-deleted
+#'   `filter_lazy()`, `select_lazy()`) of leaving the source pointer unset; `compute()`/
 #'   `collect()` supply `.data$ptr` as the lowering fallback `source_ptr`.
 #' - eager: returns a fresh `ast_source(.data$schema, source_ptr = .data$ptr)`
 #'   so `push_op()` can call `lower_and_execute()` immediately without a

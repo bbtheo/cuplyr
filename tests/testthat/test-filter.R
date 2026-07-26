@@ -196,6 +196,12 @@ test_that("filter() with all matching rows returns all rows", {
 test_that("filter() with scalar TRUE returns all rows", {
   skip_if_no_gpu()
 
+  # S4 note: filter(TRUE) is now a genuine no-op (parse_filter_expr()
+  # returns an empty predicate list, so no ast_filter node is pushed and
+  # `.data` is returned unchanged -- same GPU pointer as the input). None
+  # of the assertions below check pointer/object freshness, so no
+  # relaxation was needed here; see test-filter.R's "creates new GPU
+  # allocation (immutable)" test below for the case that does.
   gpu_df <- tbl_gpu(mtcars)
   filtered <- dplyr::filter(gpu_df, TRUE)
 
@@ -435,4 +441,127 @@ test_that("filter() works with large datasets", {
 
   result <- collect(filtered)
   expect_true(all(result$col1 > 0.5))
+})
+
+# =============================================================================
+# Lazy variants of TRUE / FALSE / vector-mask cases (S4)
+# =============================================================================
+
+test_that("filter() with scalar TRUE returns all rows (lazy)", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars, lazy = TRUE)
+  filtered <- dplyr::filter(gpu_df, TRUE)
+
+  expect_data_on_gpu(filtered)
+  expect_equal(dim(filtered)[1], 32)
+
+  result <- collect(filtered)
+  expect_equal(nrow(result), 32)
+  expect_equal(result, mtcars, ignore_attr = TRUE)
+})
+
+test_that("filter() with scalar FALSE returns no rows (lazy)", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars, lazy = TRUE)
+  filtered <- dplyr::filter(gpu_df, FALSE)
+
+  # FALSE builds a real (impossible) predicate, so this stays a pending AST
+  # node rather than executing immediately. dim() reads gpu_dim() off the
+  # *unmaterialized* source pointer for lazy tables with pending ops (a
+  # pre-existing, orthogonal limitation, not introduced by S4) so only the
+  # column count is meaningful before collect()/compute(); row count is
+  # checked after materializing.
+  expect_data_on_gpu(filtered)
+  expect_true(has_pending_ops(filtered))
+  expect_equal(dim(filtered)[2], 11)
+
+  result <- collect(filtered)
+  expect_equal(nrow(result), 0)
+  expect_equal(names(result), names(mtcars))
+})
+
+test_that("filter() with vector of TRUE returns all rows (lazy)", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars, lazy = TRUE)
+  filtered <- dplyr::filter(gpu_df, rep(TRUE, nrow(mtcars)))
+
+  expect_data_on_gpu(filtered)
+  expect_equal(dim(filtered)[1], 32)
+
+  result <- collect(filtered)
+  expect_equal(nrow(result), 32)
+})
+
+test_that("filter() with vector of FALSE returns no rows (lazy)", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars, lazy = TRUE)
+  filtered <- dplyr::filter(gpu_df, rep(FALSE, nrow(mtcars)))
+
+  expect_data_on_gpu(filtered)
+  expect_equal(dim(filtered)[1], 0)
+
+  result <- collect(filtered)
+  expect_equal(nrow(result), 0)
+})
+
+# =============================================================================
+# Oracle parity (S4)
+# =============================================================================
+
+test_that("filter() column-vs-column predicate chain matches dplyr (eager and lazy)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(
+    x = c(5, 3, 8, 1, 9, 4),
+    y = c(2, 4, 1, 6, 3, 4),
+    z = c(1, 10, 2, 3, 20, 5)
+  )
+
+  pipeline <- function(d) {
+    d |> dplyr::filter(x > y, z <= 5)
+  }
+
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+# =============================================================================
+# Fallback notifier (D4)
+# =============================================================================
+
+test_that("filter() vector-mask fallback warns under cuplyr.fallback = 'warn'", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "warn")
+
+  gpu_df <- tbl_gpu(mtcars)
+
+  expect_warning(
+    dplyr::filter(gpu_df, rep(TRUE, nrow(mtcars))),
+    "fell back to CPU evaluation"
+  )
+})
+
+test_that("filter() vector-mask fallback errors under cuplyr.fallback = 'error'", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+
+  gpu_df <- tbl_gpu(mtcars)
+
+  expect_error(
+    dplyr::filter(gpu_df, rep(TRUE, nrow(mtcars))),
+    "fell back to CPU evaluation"
+  )
+})
+
+test_that("filter() vector-mask fallback is silent by default", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = NULL)
+
+  gpu_df <- tbl_gpu(mtcars)
+
+  expect_no_warning(dplyr::filter(gpu_df, rep(TRUE, nrow(mtcars))))
 })
