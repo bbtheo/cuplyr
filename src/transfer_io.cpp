@@ -468,8 +468,10 @@ List gpu_head(SEXP xptr, int n, CharacterVector col_names) {
                 break;
             case type_id::FLOAT32: {
                 std::vector<float> temp(nrow);
-                check_cuda(cudaMemcpy(temp.data(), head_col.data<float>(), nrow * sizeof(float), cudaMemcpyDeviceToHost),
-                           "gpu_head float memcpy");
+                if (nrow > 0) {
+                    check_cuda(cudaMemcpy(temp.data(), head_col.data<float>(), nrow * sizeof(float), cudaMemcpyDeviceToHost),
+                               "gpu_head float memcpy");
+                }
                 NumericVector rv(nrow);
                 for (int j = 0; j < nrow; ++j) rv[j] = temp[j];
                 if (head_col.null_count() > 0 && head_col.null_mask() != nullptr) {
@@ -493,8 +495,10 @@ List gpu_head(SEXP xptr, int n, CharacterVector col_names) {
                 break;
             case type_id::INT64: {
                 std::vector<int64_t> temp(nrow);
-                check_cuda(cudaMemcpy(temp.data(), head_col.data<int64_t>(), nrow * sizeof(int64_t), cudaMemcpyDeviceToHost),
-                           "gpu_head int64 memcpy");
+                if (nrow > 0) {
+                    check_cuda(cudaMemcpy(temp.data(), head_col.data<int64_t>(), nrow * sizeof(int64_t), cudaMemcpyDeviceToHost),
+                               "gpu_head int64 memcpy");
+                }
                 NumericVector rv(nrow);
                 for (int j = 0; j < nrow; ++j) rv[j] = static_cast<double>(temp[j]);
                 if (head_col.null_count() > 0 && head_col.null_mask() != nullptr) {
@@ -512,8 +516,10 @@ List gpu_head(SEXP xptr, int n, CharacterVector col_names) {
             }
             case type_id::TIMESTAMP_DAYS: {
                 std::vector<int32_t> temp(nrow);
-                check_cuda(cudaMemcpy(temp.data(), head_col.data<int32_t>(), nrow * sizeof(int32_t), cudaMemcpyDeviceToHost),
-                           "gpu_head date memcpy");
+                if (nrow > 0) {
+                    check_cuda(cudaMemcpy(temp.data(), head_col.data<int32_t>(), nrow * sizeof(int32_t), cudaMemcpyDeviceToHost),
+                               "gpu_head date memcpy");
+                }
                 NumericVector rv(nrow);
                 for (int j = 0; j < nrow; ++j) rv[j] = static_cast<double>(temp[j]);
                 rv.attr("class") = "Date";
@@ -522,8 +528,10 @@ List gpu_head(SEXP xptr, int n, CharacterVector col_names) {
             }
             case type_id::TIMESTAMP_MICROSECONDS: {
                 std::vector<int64_t> temp(nrow);
-                check_cuda(cudaMemcpy(temp.data(), head_col.data<int64_t>(), nrow * sizeof(int64_t), cudaMemcpyDeviceToHost),
-                           "gpu_head posixct memcpy");
+                if (nrow > 0) {
+                    check_cuda(cudaMemcpy(temp.data(), head_col.data<int64_t>(), nrow * sizeof(int64_t), cudaMemcpyDeviceToHost),
+                               "gpu_head posixct memcpy");
+                }
                 NumericVector rv(nrow);
                 for (int j = 0; j < nrow; ++j) rv[j] = static_cast<double>(temp[j]) / 1e6;
                 rv.attr("class") = CharacterVector::create("POSIXct", "POSIXt");
@@ -684,8 +692,10 @@ List gpu_collect(SEXP xptr, CharacterVector col_names) {
                 break;
             case type_id::FLOAT32: {
                 std::vector<float> temp(nrow);
-                check_cuda(cudaMemcpy(temp.data(), col.data<float>(), nrow * sizeof(float), cudaMemcpyDeviceToHost),
-                           "gpu_collect float memcpy");
+                if (nrow > 0) {
+                    check_cuda(cudaMemcpy(temp.data(), col.data<float>(), nrow * sizeof(float), cudaMemcpyDeviceToHost),
+                               "gpu_collect float memcpy");
+                }
                 NumericVector rv(nrow);
                 for (int j = 0; j < nrow; ++j) rv[j] = temp[j];
                 if (col.null_count() > 0 && col.null_mask() != nullptr) {
@@ -709,8 +719,10 @@ List gpu_collect(SEXP xptr, CharacterVector col_names) {
                 break;
             case type_id::INT64: {
                 std::vector<int64_t> temp(nrow);
-                check_cuda(cudaMemcpy(temp.data(), col.data<int64_t>(), nrow * sizeof(int64_t), cudaMemcpyDeviceToHost),
-                           "gpu_collect int64 memcpy");
+                if (nrow > 0) {
+                    check_cuda(cudaMemcpy(temp.data(), col.data<int64_t>(), nrow * sizeof(int64_t), cudaMemcpyDeviceToHost),
+                               "gpu_collect int64 memcpy");
+                }
                 NumericVector rv(nrow);
                 for (int j = 0; j < nrow; ++j) rv[j] = static_cast<double>(temp[j]);
                 if (col.null_count() > 0 && col.null_mask() != nullptr) {
@@ -728,8 +740,10 @@ List gpu_collect(SEXP xptr, CharacterVector col_names) {
             }
             case type_id::TIMESTAMP_DAYS: {
                 std::vector<int32_t> temp(nrow);
-                check_cuda(cudaMemcpy(temp.data(), col.data<int32_t>(), nrow * sizeof(int32_t), cudaMemcpyDeviceToHost),
-                           "gpu_collect date memcpy");
+                if (nrow > 0) {
+                    check_cuda(cudaMemcpy(temp.data(), col.data<int32_t>(), nrow * sizeof(int32_t), cudaMemcpyDeviceToHost),
+                               "gpu_collect date memcpy");
+                }
                 NumericVector rv(nrow);
                 for (int j = 0; j < nrow; ++j) rv[j] = static_cast<double>(temp[j]);
                 // Handle NAs
@@ -749,8 +763,10 @@ List gpu_collect(SEXP xptr, CharacterVector col_names) {
             }
             case type_id::TIMESTAMP_MICROSECONDS: {
                 std::vector<int64_t> temp(nrow);
-                check_cuda(cudaMemcpy(temp.data(), col.data<int64_t>(), nrow * sizeof(int64_t), cudaMemcpyDeviceToHost),
-                           "gpu_collect posixct memcpy");
+                if (nrow > 0) {
+                    check_cuda(cudaMemcpy(temp.data(), col.data<int64_t>(), nrow * sizeof(int64_t), cudaMemcpyDeviceToHost),
+                               "gpu_collect posixct memcpy");
+                }
                 NumericVector rv(nrow);
                 for (int j = 0; j < nrow; ++j) rv[j] = static_cast<double>(temp[j]) / 1e6;
                 // Handle NAs
