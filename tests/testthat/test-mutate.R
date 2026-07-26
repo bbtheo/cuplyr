@@ -455,8 +455,116 @@ test_that("mutate() result type is FLOAT64", {
 
   mutated <- dplyr::mutate(gpu_df, new_col = int_col + 1)
 
-  # Result type should be FLOAT64
+  # Result type should be FLOAT64 because the literal `1` is a double in R
+  # (dplyr agrees: `1:10 + 1` is also double). See D5 rule 5 /
+  # infer_mutate_output_type().
   expect_equal(unname(mutated$schema$types[2]), "FLOAT64")
+})
+
+test_that("mutate() preserves INT32 for int_col + 1L (integer literal scalar)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(int_col = 1:10)
+  gpu_df <- tbl_gpu(df)
+
+  mutated <- dplyr::mutate(gpu_df, new_col = int_col + 1L)
+
+  # Unlike `int_col + 1` above, an integer literal scalar keeps
+  # INT32 + INT32 -> INT32 (D5 rule 5): this is the S5b milestone -- mutate
+  # type inference now flows uniformly through make_mutate_expr() /
+  # infer_mutate_output_type() in both exec modes, so eager no longer
+  # hard-codes FLOAT64.
+  expect_equal(unname(mutated$schema$types[2]), "INT32")
+
+  result <- collect(mutated)
+  expect_type(result$new_col, "integer")
+  expect_equal(result$new_col, df$int_col + 1L)
+})
+
+test_that("mutate() with int_col / 2L is FLOAT64 (division always promotes)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(int_col = 1:10)
+  gpu_df <- tbl_gpu(df)
+
+  mutated <- dplyr::mutate(gpu_df, new_col = int_col / 2L)
+
+  expect_equal(unname(mutated$schema$types[2]), "FLOAT64")
+
+  result <- collect(mutated)
+  expect_equal(result$new_col, df$int_col / 2L)
+})
+
+test_that("mutate() with int_col ^ 2L currently yields INT32 (S5c will retighten to FLOAT64)", {
+  skip_if_no_gpu()
+
+  # dplyr::mutate(int_col ^ 2L) actually returns a double (R's `^` always
+  # returns double, per D5 rule 4), so INT32 here is a KNOWN, tracked
+  # divergence -- not the target behavior. infer_mutate_output_type()
+  # doesn't special-case `^` yet (only `/` is forced to FLOAT64); until S5c
+  # adds that rule, INT32 ^ <int scalar> promotes exactly like `+`/`-`/`*`
+  # do. This test pins the CURRENT behavior so S5c's fix shows up as a
+  # deliberate, visible diff here instead of a silent behavior change.
+  df <- data.frame(int_col = 1:10)
+  gpu_df <- tbl_gpu(df)
+
+  mutated <- dplyr::mutate(gpu_df, new_col = int_col ^ 2L)
+
+  expect_equal(unname(mutated$schema$types[2]), "INT32")
+})
+
+test_that("mutate() type parity with dplyr for integer-preserving arithmetic (oracle, eager)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = 1:10, y = 10:1)
+
+  pipeline <- function(d) {
+    d |> dplyr::mutate(z = x + 1L)
+  }
+
+  # The milestone this step unlocks: mutate() type parity WITHOUT the
+  # ignore_col_types = TRUE escape hatch, because both x and the output are
+  # now INT32/integer end to end.
+  expect_same_as_dplyr(df, pipeline, ignore_col_types = FALSE)
+})
+
+test_that("mutate() type parity with dplyr for integer-preserving arithmetic (oracle, lazy)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = 1:10, y = 10:1)
+
+  pipeline <- function(d) {
+    d |> dplyr::mutate(z = x + 1L)
+  }
+
+  expect_same_as_dplyr_lazy(df, pipeline, ignore_col_types = FALSE)
+})
+
+test_that("mutate() chained expression in a single call matches dplyr (oracle, eager)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = c(1, 2, 3), y = c(10, 20, 30))
+
+  pipeline <- function(d) {
+    # `b` references `a`, created earlier in the SAME mutate() call -- this
+    # exercises the current_schema()-threading in mutate.tbl_gpu() that lets
+    # later dots see earlier dots' output columns/types.
+    d |> dplyr::mutate(a = x + y, b = a * 2)
+  }
+
+  expect_same_as_dplyr(df, pipeline)
+})
+
+test_that("mutate() chained expression in a single call matches dplyr (oracle, lazy)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = c(1, 2, 3), y = c(10, 20, 30))
+
+  pipeline <- function(d) {
+    d |> dplyr::mutate(a = x + y, b = a * 2)
+  }
+
+  expect_same_as_dplyr_lazy(df, pipeline)
 })
 
 test_that("mutate() handles division by zero", {

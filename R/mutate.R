@@ -79,13 +79,15 @@ mutate.tbl_gpu <- function(.data, ...) {
 
   if (length(dots) == 0) return(.data)
 
-  # Lazy path: build AST instead of executing
-  if (.data$exec_mode == "lazy") {
-    return(mutate_lazy(.data, dots))
-  }
-
-  # Eager path: execute immediately
-  result <- .data
+  # Schema accumulates across dots within this call so a later expression can
+  # reference an earlier one's output (e.g. `mutate(a = x + y, b = a * 2)`).
+  # This mirrors what infer_schema.ast_mutate() will independently recompute
+  # from the finished `expressions` list once push_op() calls infer_schema();
+  # keeping a running local copy here is only needed to validate/parse later
+  # dots against the right column set, not to set `.data$schema` directly
+  # (push_op() owns that per D1/D3).
+  schema <- current_schema(.data)
+  expressions <- list()
 
   for (i in seq_along(dots)) {
     new_name <- names(dots)[i]
@@ -100,69 +102,27 @@ mutate.tbl_gpu <- function(.data, ...) {
               call. = FALSE)
     }
 
-    result <- mutate_one(result, new_name, expr)
-  }
-
-  result
-}
-
-# Lazy mutate: build AST node
-mutate_lazy <- function(.data, dots) {
-  expressions <- list()
-
-  # Get current schema (from AST or base)
-  current_schema <- if (!is.null(.data$lazy_ops)) {
-    infer_schema(.data$lazy_ops)
-  } else {
-    .data$schema
-  }
-
-  for (i in seq_along(dots)) {
-    new_name <- names(dots)[i]
-    expr <- dots[[i]]
-
-    if (is.null(new_name) || new_name == "") {
-      new_name <- rlang::quo_text(expr)
-      warning("Unnamed mutate expression '", new_name, "' will use expression as column name.\n",
-              "Consider using explicit names: mutate(name = ", new_name, ")",
-              call. = FALSE)
-    }
-
-    parsed <- parse_mutate_exprs(new_name, expr, current_schema)
+    parsed <- parse_mutate_exprs(new_name, expr, schema)
 
     if (is.null(parsed)) {
-      # Opaque expression - fall back to eager
-      warning("Opaque mutate expression '", new_name, "', falling back to eager execution",
-              call. = FALSE)
-      .data <- as_eager(.data)
-      for (j in seq_along(dots)) {
-        nm <- names(dots)[j]
-        if (is.null(nm) || nm == "") nm <- rlang::quo_text(dots[[j]])
-        .data <- mutate_one(.data, nm, dots[[j]])
-      }
-      return(as_lazy(.data))
+      stop("mutate() only supports column copies or arithmetic operations: +, -, *, /, ^\n",
+           "Expression: ", rlang::quo_text(expr), call. = FALSE)
     }
 
     expressions <- c(expressions, parsed)
 
-    # Update schema for subsequent expressions
+    # Update the running schema so subsequent dots see this dot's output(s).
     for (expr_step in parsed) {
-      current_schema <- update_schema_for_expr(current_schema, expr_step)
+      schema <- update_schema_for_expr(schema, expr_step)
     }
   }
 
-  # Initialize AST if needed
-  if (is.null(.data$lazy_ops)) {
-    .data$lazy_ops <- ast_source(.data$schema)
-  }
-
-  # Add mutate node
-  .data$lazy_ops <- ast_mutate(.data$lazy_ops, expressions)
-
-  # Update schema
-  .data$schema <- current_schema
-
-  .data
+  # One ast_mutate node carries every expression from every dot (including
+  # the synthetic intermediate steps a single dot may expand into via the
+  # tree/linear-chain parsers below) -- the same shape mutate_lazy() used to
+  # build, which fuse_mutates()/lower_mutate()'s gpu_mutate_batch() call
+  # consume as a single fused execution.
+  push_op(.data, ast_mutate(input_node(.data), expressions))
 }
 
 # Parse a mutate expression into expression structure
@@ -198,9 +158,15 @@ parse_mutate_expr <- function(new_name, expr, schema) {
   lhs <- trimws(substr(expr_chr, 1, op_pos - 1))
   rhs <- trimws(substr(expr_chr, op_pos + 1, nchar(expr_chr)))
 
-  # Validate LHS is a column
+  # Validate LHS is a column. This is the last-resort parser in the
+  # tree -> linear -> here fallback chain (parse_mutate_exprs()), so an
+  # unknown LHS at this point is a diagnosable user error, not a genuinely
+  # opaque expression -- stop() with the exact message the now-deleted
+  # mutate_one() used to raise here.
   if (!lhs %in% schema$names) {
-    return(NULL)
+    stop("Column '", lhs, "' not found.\n",
+         "Available columns: ", paste(schema$names, collapse = ", "),
+         call. = FALSE)
   }
 
   lhs_type <- schema$types[match(lhs, schema$names)]
@@ -212,10 +178,17 @@ parse_mutate_expr <- function(new_name, expr, schema) {
                             input_types = c(lhs_type, rhs_type)))
   }
 
-  # Try to parse RHS as scalar
-  value <- tryCatch(eval(parse(text = rhs)), error = function(e) NULL)
-  if (is.null(value) || !is.numeric(value) || length(value) != 1) {
-    return(NULL)
+  # Try to parse RHS as scalar. Same rationale as above: once we know LHS is
+  # a real column and an operator was found, a bad RHS is diagnosable, so we
+  # stop() with mutate_one()'s exact former messages rather than returning
+  # NULL (which would otherwise be misreported as "only supports column
+  # copies or arithmetic operations").
+  value <- tryCatch(eval(parse(text = rhs)), error = function(e) {
+    stop("Cannot parse value: ", rhs, call. = FALSE)
+  })
+  if (!is.numeric(value) || length(value) != 1) {
+    stop("mutate() currently only supports numeric scalar operations.\n",
+         "Got: ", class(value)[1], " of length ", length(value), call. = FALSE)
   }
 
   make_mutate_expr(new_name, lhs, op_found, scalar = value,
@@ -441,7 +414,7 @@ update_schema_for_expr <- function(schema, expr) {
 }
 
 # -----------------------------------------------------------------------------
-# Structured mutate evaluation (eager path)
+# Nested-expression node parsing (shared by parse_mutate_exprs_tree())
 # -----------------------------------------------------------------------------
 
 parse_mutate_node <- function(expr) {
@@ -468,344 +441,4 @@ parse_mutate_node <- function(expr) {
     }
   }
   NULL
-}
-
-mutate_apply_col_scalar <- function(.data, output_col, lhs_col, op, scalar) {
-  existing_idx <- match(output_col, .data$schema$names)
-  is_replace <- !is.na(existing_idx)
-  replace_idx <- if (is_replace) existing_idx - 1L else -1L
-  col_idx <- match(lhs_col, .data$schema$names)
-  if (is.na(col_idx)) {
-    stop("Column '", lhs_col, "' not found.\n",
-         "Available columns: ", paste(.data$schema$names, collapse = ", "),
-         call. = FALSE)
-  }
-  col_idx <- col_idx - 1L
-
-  if (is_replace) {
-    new_ptr <- gpu_mutate_binary_scalar_replace(.data$ptr, col_idx, op, scalar, replace_idx)
-  } else {
-    new_ptr <- gpu_mutate_binary_scalar(.data$ptr, col_idx, op, scalar)
-  }
-
-  lhs_type <- .data$schema$types[match(lhs_col, .data$schema$names)]
-  expr_step <- make_mutate_expr(output_col, lhs_col, op, scalar = scalar,
-                                input_types = lhs_type)
-  new_schema <- update_schema_for_expr(.data$schema, expr_step)
-  new_tbl_gpu(
-    ptr = new_ptr,
-    schema = new_schema,
-    groups = .data$groups,
-    exec_mode = .data$exec_mode
-  )
-}
-
-mutate_apply_col_col <- function(.data, output_col, lhs_col, op, rhs_col) {
-  existing_idx <- match(output_col, .data$schema$names)
-  is_replace <- !is.na(existing_idx)
-  replace_idx <- if (is_replace) existing_idx - 1L else -1L
-  col_idx1 <- match(lhs_col, .data$schema$names)
-  col_idx2 <- match(rhs_col, .data$schema$names)
-  if (is.na(col_idx1)) {
-    stop("Column '", lhs_col, "' not found.\n",
-         "Available columns: ", paste(.data$schema$names, collapse = ", "),
-         call. = FALSE)
-  }
-  if (is.na(col_idx2)) {
-    stop("Column '", rhs_col, "' not found.\n",
-         "Available columns: ", paste(.data$schema$names, collapse = ", "),
-         call. = FALSE)
-  }
-  col_idx1 <- col_idx1 - 1L
-  col_idx2 <- col_idx2 - 1L
-
-  if (is_replace) {
-    new_ptr <- gpu_mutate_binary_cols_replace(.data$ptr, col_idx1, op, col_idx2, replace_idx)
-  } else {
-    new_ptr <- gpu_mutate_binary_cols(.data$ptr, col_idx1, op, col_idx2)
-  }
-
-  lhs_type <- .data$schema$types[match(lhs_col, .data$schema$names)]
-  rhs_type <- .data$schema$types[match(rhs_col, .data$schema$names)]
-  expr_step <- make_mutate_expr(output_col, c(lhs_col, rhs_col), op,
-                                input_types = c(lhs_type, rhs_type))
-  new_schema <- update_schema_for_expr(.data$schema, expr_step)
-  new_tbl_gpu(
-    ptr = new_ptr,
-    schema = new_schema,
-    groups = .data$groups,
-    exec_mode = .data$exec_mode
-  )
-}
-
-mutate_eval_expr <- function(.data, output_col, expr) {
-  node <- parse_mutate_node(expr)
-  if (is.null(node)) return(NULL)
-
-  if (node$type == "col") {
-    return(mutate_copy_column(.data, output_col, node$name))
-  }
-  if (node$type == "scalar") {
-    return(NULL)
-  }
-
-  lhs_node <- parse_mutate_node(node$lhs)
-  rhs_node <- parse_mutate_node(node$rhs)
-  if (is.null(lhs_node) || is.null(rhs_node)) return(NULL)
-
-  op <- node$op
-
-  if (lhs_node$type == "call" && rhs_node$type == "call") {
-    return(NULL)
-  }
-
-  if (lhs_node$type == "call") {
-    data_step <- mutate_eval_expr(.data, output_col, node$lhs)
-    if (is.null(data_step)) return(NULL)
-
-    if (rhs_node$type == "col") {
-      return(mutate_apply_col_col(data_step, output_col, output_col, op, rhs_node$name))
-    }
-    if (rhs_node$type == "scalar") {
-      return(mutate_apply_col_scalar(data_step, output_col, output_col, op, rhs_node$value))
-    }
-  }
-
-  if (rhs_node$type == "call") {
-    data_step <- mutate_eval_expr(.data, output_col, node$rhs)
-    if (is.null(data_step)) return(NULL)
-
-    if (lhs_node$type == "col") {
-      return(mutate_apply_col_col(data_step, output_col, lhs_node$name, op, output_col))
-    }
-    if (lhs_node$type == "scalar") {
-      if (op %in% c("+", "*")) {
-        return(mutate_apply_col_scalar(data_step, output_col, output_col, op, lhs_node$value))
-      }
-      return(NULL)
-    }
-  }
-
-  if (lhs_node$type == "col" && rhs_node$type == "col") {
-    return(mutate_apply_col_col(.data, output_col, lhs_node$name, op, rhs_node$name))
-  }
-
-  if (lhs_node$type == "col" && rhs_node$type == "scalar") {
-    return(mutate_apply_col_scalar(.data, output_col, lhs_node$name, op, rhs_node$value))
-  }
-
-  if (lhs_node$type == "scalar" && rhs_node$type == "col") {
-    if (op %in% c("+", "*")) {
-      return(mutate_apply_col_scalar(.data, output_col, rhs_node$name, op, lhs_node$value))
-    }
-  }
-
-  NULL
-}
-
-# Internal: Parse and execute a single mutate expression
-#
-# Parses a quosure containing an arithmetic expression and calls the
-# appropriate GPU binary operation function.
-#
-# @param .data A tbl_gpu object
-# @param new_name Name for the output column
-# @param expr A quosure with an arithmetic expression
-# @return A tbl_gpu with the new/modified column
-# @keywords internal
-mutate_one <- function(.data, new_name, expr) {
-  expr_chr <- rlang::quo_text(expr)
-  expr_obj <- rlang::quo_get_expr(expr)
-
-  linear <- parse_linear_mutate_exprs(new_name, expr, .data$schema)
-  if (!is.null(linear)) {
-    apply_expr <- function(.data_step, expr_step) {
-      output_col <- expr_step$output_col
-      input_cols <- expr_step$input_cols
-      op <- expr_step$op
-      existing_idx <- match(output_col, .data_step$schema$names)
-      is_replace <- !is.na(existing_idx)
-      replace_idx <- if (is_replace) existing_idx - 1L else -1L
-
-      if (op == "copy") {
-        source_idx <- match(input_cols[1], .data_step$schema$names) - 1L
-        if (is_replace) {
-          new_ptr <- gpu_copy_column_replace(.data_step$ptr, source_idx, replace_idx)
-        } else {
-          new_ptr <- gpu_copy_column(.data_step$ptr, source_idx)
-        }
-      } else if (!is.null(expr_step$scalar)) {
-        col_idx <- match(input_cols[1], .data_step$schema$names) - 1L
-        if (is_replace) {
-          new_ptr <- gpu_mutate_binary_scalar_replace(.data_step$ptr, col_idx, op,
-                                                      expr_step$scalar, replace_idx)
-        } else {
-          new_ptr <- gpu_mutate_binary_scalar(.data_step$ptr, col_idx, op, expr_step$scalar)
-        }
-      } else {
-        col_idx1 <- match(input_cols[1], .data_step$schema$names) - 1L
-        col_idx2 <- match(input_cols[2], .data_step$schema$names) - 1L
-        if (is_replace) {
-          new_ptr <- gpu_mutate_binary_cols_replace(.data_step$ptr, col_idx1, op,
-                                                    col_idx2, replace_idx)
-        } else {
-          new_ptr <- gpu_mutate_binary_cols(.data_step$ptr, col_idx1, op, col_idx2)
-        }
-      }
-
-      new_schema <- update_schema_for_expr(.data_step$schema, expr_step)
-      new_tbl_gpu(
-        ptr = new_ptr,
-        schema = new_schema,
-        groups = .data_step$groups,
-        exec_mode = .data_step$exec_mode
-      )
-    }
-
-    result <- .data
-    for (expr_step in linear) {
-      result <- apply_expr(result, expr_step)
-    }
-    return(result)
-  }
-
-  # Try structured evaluation for nested arithmetic expressions
-  structured <- mutate_eval_expr(.data, new_name, expr_obj)
-  if (!is.null(structured)) {
-    return(structured)
-  }
-
-  # Check if expression is just a column name (simple copy)
-  if (expr_chr %in% .data$schema$names) {
-    return(mutate_copy_column(.data, new_name, expr_chr))
-  }
-
-  # Parse simple arithmetic: col op value or col op col
-  # Find the first operator
-  ops <- c("+", "-", "*", "/", "^")
-  op_found <- NULL
-  op_pos <- NULL
-
-  for (op in ops) {
-    pos <- regexpr(op, expr_chr, fixed = TRUE)
-    if (pos > 0) {
-      if (is.null(op_pos) || pos < op_pos) {
-        op_found <- op
-        op_pos <- pos
-      }
-    }
-  }
-
-  if (is.null(op_found)) {
-    stop("mutate() only supports column copies or arithmetic operations: +, -, *, /, ^\n",
-         "Expression: ", expr_chr, call. = FALSE)
-  }
-
-  lhs <- trimws(substr(expr_chr, 1, op_pos - 1))
-  rhs <- trimws(substr(expr_chr, op_pos + 1, nchar(expr_chr)))
-
-  lhs_idx <- tryCatch(col_index(.data, lhs), error = function(e) NULL)
-  rhs_idx <- tryCatch(col_index(.data, rhs), error = function(e) NULL)
-
-  if (is.null(lhs_idx)) {
-    stop("Column '", lhs, "' not found.\n",
-         "Available columns: ", paste(.data$schema$names, collapse = ", "),
-         call. = FALSE)
-  }
-
-  existing_idx <- match(new_name, .data$schema$names)
-
-  if (!is.null(rhs_idx)) {
-    # Column to column operation
-    if (!is.na(existing_idx)) {
-      new_ptr <- wrap_gpu_call(
-        "mutate_binary_cols_replace",
-        gpu_mutate_binary_cols_replace(.data$ptr, lhs_idx, op_found, rhs_idx, existing_idx - 1L)
-      )
-    } else {
-      new_ptr <- wrap_gpu_call(
-        "mutate_binary_cols",
-        gpu_mutate_binary_cols(.data$ptr, lhs_idx, op_found, rhs_idx)
-      )
-    }
-  } else {
-    # Column to scalar operation
-    value <- tryCatch(eval(parse(text = rhs)), error = function(e) {
-      stop("Cannot parse value: ", rhs, call. = FALSE)
-    })
-    if (!is.numeric(value) || length(value) != 1) {
-      stop("mutate() currently only supports numeric scalar operations.\n",
-           "Got: ", class(value)[1], " of length ", length(value), call. = FALSE)
-    }
-    if (!is.na(existing_idx)) {
-      new_ptr <- wrap_gpu_call(
-        "mutate_binary_scalar_replace",
-        gpu_mutate_binary_scalar_replace(.data$ptr, lhs_idx, op_found, as.double(value), existing_idx - 1L)
-      )
-    } else {
-      new_ptr <- wrap_gpu_call(
-        "mutate_binary_scalar",
-        gpu_mutate_binary_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
-      )
-    }
-  }
-
-  if (!is.na(existing_idx)) {
-    new_schema <- .data$schema
-    new_schema$types[existing_idx] <- "FLOAT64"
-  } else {
-    # Adding new column
-    new_schema <- .data$schema
-    new_schema$names <- c(new_schema$names, new_name)
-    new_schema$types <- c(new_schema$types, "FLOAT64")
-  }
-
-  new_tbl_gpu(
-    ptr = new_ptr,
-    schema = new_schema,
-    groups = .data$groups,
-    exec_mode = .data$exec_mode
-  )
-}
-
-# Internal: Copy a column with a new name
-#
-# @param .data A tbl_gpu object
-# @param new_name Name for the new column
-# @param source_col Name of the column to copy
-# @return A tbl_gpu with the copied column
-# @keywords internal
-mutate_copy_column <- function(.data, new_name, source_col) {
-  source_idx <- col_index(.data, source_col)
-  source_type <- .data$schema$types[source_idx + 1L]  # col_index returns 0-based
-
-  # Check if we're replacing an existing column
-  existing_idx <- match(new_name, .data$schema$names)
-
-  if (!is.na(existing_idx)) {
-    # Replacing existing column with a copy
-    new_ptr <- wrap_gpu_call(
-      "copy_column_replace",
-      gpu_copy_column_replace(.data$ptr, source_idx, existing_idx - 1L)
-    )
-    new_schema <- .data$schema
-    new_schema$types[existing_idx] <- source_type
-  } else {
-    # Adding new column as copy
-    new_ptr <- wrap_gpu_call(
-      "copy_column",
-      gpu_copy_column(.data$ptr, source_idx)
-    )
-
-    new_schema <- .data$schema
-    new_schema$names <- c(new_schema$names, new_name)
-    new_schema$types <- c(new_schema$types, source_type)
-  }
-
-  new_tbl_gpu(
-    ptr = new_ptr,
-    schema = new_schema,
-    groups = .data$groups,
-    exec_mode = .data$exec_mode
-  )
 }
