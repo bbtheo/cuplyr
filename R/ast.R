@@ -101,6 +101,23 @@ ast_barrier <- function(input) {
   ast_node("barrier", input = input)
 }
 
+#' Create a distinct AST node
+#'
+#' @param input Input AST node (any dot expressions that compute new key
+#'   columns, e.g. `distinct(df, z = x + 1)`, are already lowered into an
+#'   `ast_mutate` wrapping this node by `distinct.tbl_gpu()` -- this node
+#'   only ever does the dedup step)
+#' @param key_cols Character vector of column names to dedup on, in the
+#'   exact order the `.keep_all = FALSE` output should have (group columns,
+#'   if any, already prepended by the caller)
+#' @param keep_all Logical, `TRUE` to keep every column of `input` (dplyr's
+#'   `.keep_all = TRUE`), `FALSE` to project down to just `key_cols`
+#' @return An ast_distinct node
+#' @keywords internal
+ast_distinct <- function(input, key_cols, keep_all = FALSE) {
+  ast_node("distinct", input = input, key_cols = key_cols, keep_all = keep_all)
+}
+
 #' Create a join AST node
 #'
 #' @param type Join type: "inner", "left", "right", "full"
@@ -340,6 +357,18 @@ infer_schema.ast_barrier <- function(node) {
 }
 
 #' @export
+infer_schema.ast_distinct <- function(node) {
+  input_schema <- infer_schema(node$input)
+
+  if (isTRUE(node$keep_all)) {
+    return(input_schema)
+  }
+
+  idx <- match(node$key_cols, input_schema$names)
+  list(names = input_schema$names[idx], types = input_schema$types[idx])
+}
+
+#' @export
 infer_schema.ast_summarise <- function(node) {
   input_schema <- infer_schema(node$input)
 
@@ -420,12 +449,20 @@ is_opaque_expression <- function(expr_text) {
 
 #' Check if an AST node is an optimization barrier
 #'
+#' `distinct` is treated as a barrier like `summarise`/`arrange`: the
+#' simplest safe choice, since a filter above a `distinct` node may reference
+#' columns the `distinct` projected away (`.keep_all = FALSE`), and pushing
+#' it below would change which columns are visible to it. Optimization
+#' opportunity for later: a filter referencing only surviving key columns
+#' (or any column when `.keep_all = TRUE`) could safely push below distinct,
+#' the same way filter pushdown already works across `select`.
+#'
 #' @param node An AST node
 #' @return TRUE if node is a barrier
 #' @keywords internal
 is_barrier <- function(node) {
   if (is.null(node)) return(FALSE)
-  node$type %in% c("arrange", "barrier", "summarise")
+  node$type %in% c("arrange", "barrier", "summarise", "distinct")
 }
 
 #' Get the depth of an AST tree
@@ -517,6 +554,9 @@ print.ast_node <- function(x, ..., indent = 0) {
     },
     "join" = {
       cat(" [", x$join_type, " join]", sep = "")
+    },
+    "distinct" = {
+      cat(" [", length(x$key_cols), " keys, keep_all=", x$keep_all, "]", sep = "")
     }
   )
 
@@ -549,6 +589,7 @@ ast_to_string <- function(node) {
     "summarise" = paste0("summarise[", length(node$aggregations), "]"),
     "barrier" = "barrier",
     "join" = paste0("join[", node$join_type, "]"),
+    "distinct" = paste0("distinct[", paste(node$key_cols, collapse = ","), "]"),
     node$type
   )
 

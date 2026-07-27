@@ -2,7 +2,6 @@
 % Please edit documentation in R/fallback.R
 \name{fallback-verbs}
 \alias{fallback-verbs}
-\alias{distinct.tbl_gpu}
 \alias{transmute.tbl_gpu}
 \alias{reframe.tbl_gpu}
 \alias{rowwise.tbl_gpu}
@@ -51,8 +50,6 @@
 \alias{sample_frac.tbl_gpu}
 \title{CPU fallback methods for dplyr verbs without a GPU-native implementation}
 \usage{
-\method{distinct}{tbl_gpu}(.data, ..., .keep_all = FALSE)
-
 \method{transmute}{tbl_gpu}(.data, ...)
 
 \method{reframe}{tbl_gpu}(.data, ..., .by = NULL)

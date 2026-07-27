@@ -8,7 +8,7 @@ gpu_fallback(verb_name, .data, expr_fn, ..., as_is = FALSE)
 }
 \arguments{
 \item{verb_name}{Character, the verb name to use in the fallback
-notification (e.g. \code{"distinct"}, \code{"slice_min"}), gated by
+notification (e.g. \code{"transmute"}, \code{"slice_min"}), gated by
 \code{options(cuplyr.fallback = )} (see \code{\link[=cuplyr_fallback_notify]{cuplyr_fallback_notify()}}).}
 
 \item{.data}{A \code{tbl_gpu} object.}

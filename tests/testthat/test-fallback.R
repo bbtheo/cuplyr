@@ -33,7 +33,6 @@ fallback_sweep_pipelines <- function() {
   y_small <- tibble::tibble(g = c(1, 3))
 
   list(
-    distinct = list(fn = function(d) dplyr::distinct(d, g), arrange_by = "g"),
     transmute = list(fn = function(d) dplyr::transmute(d, z = x * 2)),
     reframe = list(fn = function(d) dplyr::reframe(d, mx = max(x), .by = g), arrange_by = "g"),
     rowwise = list(fn = function(d) dplyr::rowwise(d)),
@@ -376,16 +375,16 @@ test_that("fallback verbs materialize pending lazy ops and restore lazy exec_mod
   expect_true(is_lazy(lazy_gt))
   expect_true(has_pending_ops(lazy_gt))
 
-  result <- lazy_gt |> dplyr::distinct(g)
+  result <- lazy_gt |> dplyr::transmute(z = x * 2)
 
   expect_true(is_tbl_gpu(result))
   expect_true(is_lazy(result))
   expect_false(has_pending_ops(result))
 
-  oracle <- dplyr::distinct(dplyr::filter(df, x > 10), g)
+  oracle <- dplyr::transmute(dplyr::filter(df, x > 10), z = x * 2)
   expect_equal(
-    dplyr::arrange(collect(result), g),
-    dplyr::arrange(oracle, g)
+    dplyr::arrange(collect(result), z),
+    dplyr::arrange(oracle, z)
   )
 })
 
@@ -394,7 +393,7 @@ test_that("eager fallback input stays eager after re-upload", {
   df <- fallback_df()
   gt <- tbl_gpu(df, lazy = FALSE)
 
-  result <- gt |> dplyr::distinct(g)
+  result <- gt |> dplyr::transmute(z = x * 2)
 
   expect_true(is_tbl_gpu(result))
   expect_false(is_lazy(result))
@@ -420,7 +419,7 @@ test_that("options(cuplyr.fallback = 'warn') warns for a fallback verb", {
   withr::local_options(cuplyr.fallback = "warn")
   gt <- tbl_gpu(fallback_df())
 
-  expect_warning(gt |> dplyr::distinct(g), "distinct.*fell back to CPU evaluation")
+  expect_warning(gt |> dplyr::transmute(z = x * 2), "transmute.*fell back to CPU evaluation")
 })
 
 test_that("options(cuplyr.fallback = 'error') stops for a fallback verb", {
@@ -428,7 +427,7 @@ test_that("options(cuplyr.fallback = 'error') stops for a fallback verb", {
   withr::local_options(cuplyr.fallback = "error")
   gt <- tbl_gpu(fallback_df())
 
-  expect_error(gt |> dplyr::distinct(g), "distinct.*fell back to CPU evaluation")
+  expect_error(gt |> dplyr::transmute(z = x * 2), "transmute.*fell back to CPU evaluation")
 })
 
 test_that("fallback verbs are silent by default", {
@@ -436,7 +435,7 @@ test_that("fallback verbs are silent by default", {
   withr::local_options(cuplyr.fallback = NULL)
   gt <- tbl_gpu(fallback_df())
 
-  expect_no_warning(gt |> dplyr::distinct(g))
+  expect_no_warning(gt |> dplyr::transmute(z = x * 2))
 })
 
 test_that("GPU-native verbs never trigger a fallback notification", {
@@ -455,4 +454,16 @@ test_that("GPU-native verbs never trigger a fallback notification", {
       dplyr::ungroup() |>
       collect()
   })
+})
+
+test_that("distinct() is GPU-native and never triggers a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gt <- tbl_gpu(fallback_df())
+
+  expect_no_error(gt |> dplyr::distinct())
+  expect_no_error(gt |> dplyr::distinct(g))
+  expect_no_error(gt |> dplyr::distinct(g, .keep_all = TRUE))
+  expect_no_error(gt |> dplyr::distinct(z = x + 1))
+  expect_no_error(gt |> dplyr::group_by(g) |> dplyr::distinct(x))
 })

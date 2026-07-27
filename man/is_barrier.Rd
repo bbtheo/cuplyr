@@ -13,6 +13,12 @@ is_barrier(node)
 TRUE if node is a barrier
 }
 \description{
-Check if an AST node is an optimization barrier
+\code{distinct} is treated as a barrier like \code{summarise}/\code{arrange}: the
+simplest safe choice, since a filter above a \code{distinct} node may reference
+columns the \code{distinct} projected away (\code{.keep_all = FALSE}), and pushing
+it below would change which columns are visible to it. Optimization
+opportunity for later: a filter referencing only surviving key columns
+(or any column when \code{.keep_all = TRUE}) could safely push below distinct,
+the same way filter pushdown already works across \code{select}.
 }
 \keyword{internal}

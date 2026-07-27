@@ -22,6 +22,7 @@ lower_and_execute <- function(ast, source_ptr) {
     "arrange" = lower_arrange(ast, source_ptr),
     "summarise" = lower_summarise(ast, source_ptr),
     "join" = lower_join(ast, source_ptr),
+    "distinct" = lower_distinct(ast, source_ptr),
     "barrier" = lower_and_execute(ast$input, source_ptr),
     stop("Unknown AST node type: ", ast$type, call. = FALSE)
   )
@@ -166,6 +167,32 @@ lower_summarise <- function(ast, source_ptr) {
   }
 
   gpu_summarise(input_ptr, group_indices, agg_col_indices, agg_fns)
+}
+
+#' Lower distinct node
+#'
+#' `gpu_distinct()` (`src/ops_distinct.cpp`) always returns every column of
+#' its input, deduped on `ast$key_cols` (`cudf::stable_distinct()`, which
+#' preserves input row order and keeps the first occurrence of each key --
+#' matching dplyr's contract exactly). `ast$key_cols`'s positions in the
+#' (already-mutated, if the caller had computed key expressions) input
+#' schema are unchanged by the dedup itself, so the same `key_idx` used to
+#' build the dedup key can be reused to project down to just those columns,
+#' in the caller's requested order, for the `.keep_all = FALSE` case.
+#' @keywords internal
+lower_distinct <- function(ast, source_ptr) {
+  input_ptr <- lower_and_execute(ast$input, source_ptr)
+  input_schema <- infer_schema(ast$input)
+
+  key_idx <- match(ast$key_cols, input_schema$names) - 1L
+
+  result_ptr <- gpu_distinct(input_ptr, key_idx)
+
+  if (!isTRUE(ast$keep_all)) {
+    result_ptr <- gpu_select(result_ptr, key_idx)
+  }
+
+  result_ptr
 }
 
 #' Lower join node

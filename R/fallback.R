@@ -20,7 +20,7 @@
 #' real dplyr verb), and re-uploads the result via [tbl_gpu()].
 #'
 #' @param verb_name Character, the verb name to use in the fallback
-#'   notification (e.g. `"distinct"`, `"slice_min"`), gated by
+#'   notification (e.g. `"transmute"`, `"slice_min"`), gated by
 #'   `options(cuplyr.fallback = )` (see [cuplyr_fallback_notify()]).
 #' @param .data A `tbl_gpu` object.
 #' @param expr_fn A function of one argument (a tibble, already grouped if
@@ -105,7 +105,10 @@ collect_other_side <- function(y) {
 }
 
 # =============================================================================
-# distinct() / transmute() / reframe() / rowwise()
+# transmute() / reframe() / rowwise()
+#
+# distinct() moved to R/distinct.R (GPU-native, Phase 3) -- see ast_distinct
+# (R/ast.R), lower_distinct() (R/lower.R), gpu_distinct() (src/ops_distinct.cpp).
 # =============================================================================
 
 #' CPU fallback methods for dplyr verbs without a GPU-native implementation
@@ -141,16 +144,6 @@ collect_other_side <- function(y) {
 #' @name fallback-verbs
 #' @keywords internal
 NULL
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr distinct
-distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
-  dots <- rlang::enquos(...)
-  gpu_fallback("distinct", .data, function(tbl) {
-    rlang::inject(dplyr::distinct(tbl, !!!dots, .keep_all = .keep_all))
-  })
-}
 
 #' @rdname fallback-verbs
 #' @export
