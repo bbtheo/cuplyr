@@ -166,6 +166,41 @@ ast_slice <- function(input, mode, amount = NULL, is_prop = NULL,
            with_ties = with_ties, na_rm = na_rm)
 }
 
+#' Create a rename AST node
+#'
+#' Schema-only: `old_names[i]` in the *input* schema becomes `new_names[i]`
+#' in the output schema; every other column (position, type, and GPU
+#' column data) is untouched. This is the one AST node type where lowering
+#' does no GPU work at all (see `lower_rename()`, `R/lower.R`) -- column
+#' names live entirely in the R-side schema (`$schema$names`), never on the
+#' underlying `cudf::table`/`GpuTablePtr` itself (confirmed by
+#' `gpu_collect()`, `src/transfer_io.cpp`, which takes the R-side names as
+#' a parameter and applies them positionally to the physical columns), so a
+#' pure rename never needs to touch the GPU pointer.
+#'
+#' Used directly by `rename()`/`rename_with()` (`R/rename.R`), and stacked
+#' on top of an `ast_select()` node by `select()` (the `new = old` rename
+#' fix, `R/select.R`) and `relocate()` (`R/relocate.R`) whenever their
+#' tidyselect resolution renames a column.
+#'
+#' Treated as an optimizer barrier (see `is_barrier()` below): the simplest
+#' safe choice, since letting a filter/projection above a rename push below
+#' it would need to translate column references through `old_names`/
+#' `new_names` -- correct but not worth the complexity for a schema-only
+#' verb. Optimization opportunity for later: translate `required_cols`/
+#' `pred$cols` through the name map instead of blocking pushdown entirely.
+#'
+#' @param input Input AST node
+#' @param old_names Character vector of column names (in `input`'s output
+#'   schema) being renamed
+#' @param new_names Character vector of the same length: `new_names[i]` is
+#'   what `old_names[i]` becomes
+#' @return An ast_rename node
+#' @keywords internal
+ast_rename <- function(input, old_names, new_names) {
+  ast_node("rename", input = input, old_names = old_names, new_names = new_names)
+}
+
 #' Create a join AST node
 #'
 #' @param type Join type: "inner", "left", "right", "full"
@@ -405,6 +440,15 @@ infer_schema.ast_barrier <- function(node) {
 }
 
 #' @export
+infer_schema.ast_rename <- function(node) {
+  input_schema <- infer_schema(node$input)
+  result_names <- input_schema$names
+  idx <- match(node$old_names, result_names)
+  result_names[idx] <- node$new_names
+  list(names = result_names, types = input_schema$types)
+}
+
+#' @export
 infer_schema.ast_distinct <- function(node) {
   input_schema <- infer_schema(node$input)
 
@@ -524,12 +568,17 @@ is_opaque_expression <- function(expr_text) {
 #' filter that would change which rows `slice_head()` sees) would change
 #' the result.
 #'
+#' `rename` is a barrier for the reasons documented on `ast_rename()`
+#' above: the simplest safe choice for a schema-only rename, avoiding the
+#' need to translate column references through its name map for anything
+#' pushed across it.
+#'
 #' @param node An AST node
 #' @return TRUE if node is a barrier
 #' @keywords internal
 is_barrier <- function(node) {
   if (is.null(node)) return(FALSE)
-  node$type %in% c("arrange", "barrier", "summarise", "distinct", "slice")
+  node$type %in% c("arrange", "barrier", "summarise", "distinct", "slice", "rename")
 }
 
 #' Get the depth of an AST tree
@@ -627,6 +676,9 @@ print.ast_node <- function(x, ..., indent = 0) {
     },
     "slice" = {
       cat(" [mode=", x$mode, "]", sep = "")
+    },
+    "rename" = {
+      cat(" [", length(x$old_names), " renamed]", sep = "")
     }
   )
 
@@ -661,6 +713,7 @@ ast_to_string <- function(node) {
     "join" = paste0("join[", node$join_type, "]"),
     "distinct" = paste0("distinct[", paste(node$key_cols, collapse = ","), "]"),
     "slice" = paste0("slice[", node$mode, "]"),
+    "rename" = paste0("rename[", paste(node$old_names, "->", node$new_names, collapse = ","), "]"),
     node$type
   )
 

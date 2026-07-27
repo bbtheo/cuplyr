@@ -231,50 +231,15 @@ slice_sample.tbl_gpu <- function(.data, ..., n, prop, by = NULL,
 
 # =============================================================================
 # rename() / rename_with() / relocate() / pull()
+#
+# Moved to R/rename.R, R/relocate.R, R/pull.R (GPU-native/schema-only,
+# Phase 3 task 3) -- see ast_rename (R/ast.R), lower_rename() (R/lower.R).
+# rename()/rename_with() build an ast_rename node directly; relocate()
+# reuses ast_select (a plain column reorder) and stacks an ast_rename node
+# on top only when the relocate also renamed a column; pull() is a
+# terminal verb with no AST node (materializes + collects, then picks out
+# the requested column in R).
 # =============================================================================
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr rename
-rename.tbl_gpu <- function(.data, ...) {
-  dots <- rlang::enquos(...)
-  gpu_fallback("rename", .data, function(tbl) {
-    rlang::inject(dplyr::rename(tbl, !!!dots))
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr rename_with
-rename_with.tbl_gpu <- function(.data, .fn, .cols = dplyr::everything(), ...) {
-  cols_quo <- rlang::enquo(.cols)
-  gpu_fallback("rename_with", .data, function(tbl) {
-    rlang::inject(dplyr::rename_with(tbl, .fn, .cols = !!cols_quo, ...))
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr relocate
-relocate.tbl_gpu <- function(.data, ..., .before = NULL, .after = NULL) {
-  dots <- rlang::enquos(...)
-  before_quo <- rlang::enquo(.before)
-  after_quo <- rlang::enquo(.after)
-  gpu_fallback("relocate", .data, function(tbl) {
-    rlang::inject(dplyr::relocate(tbl, !!!dots, .before = !!before_quo, .after = !!after_quo))
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr pull
-pull.tbl_gpu <- function(.data, var = -1, name = NULL, ...) {
-  var_quo <- rlang::enquo(var)
-  name_quo <- rlang::enquo(name)
-  gpu_fallback("pull", .data, function(tbl) {
-    rlang::inject(dplyr::pull(tbl, var = !!var_quo, name = !!name_quo, ...))
-  }, as_is = TRUE)
-}
 
 # =============================================================================
 # count() / tally() / add_count()

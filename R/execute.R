@@ -61,14 +61,27 @@ input_node <- function(.data) {
 #' eager `select()` of a factor column dropped `factor_levels`, causing
 #' `collect()` to return integer codes instead of a factor.
 #'
+#' @param node The AST node being applied (used to translate factor_levels
+#'   keys through a `rename` node's name map, see `ast_rename()`,
+#'   `R/ast.R` -- without this, a renamed factor column's levels would be
+#'   silently dropped here since its key in `input_schema$factor_levels`
+#'   is the OLD name, which no longer appears in `surviving_names`)
 #' @param input_schema The schema of the op's input (pre-op)
 #' @param surviving_names Character vector of column names in the new schema
 #' @return A named list of factor levels, or `NULL` if none survive
 #' @keywords internal
-propagate_factor_levels <- function(input_schema, surviving_names) {
+propagate_factor_levels <- function(node, input_schema, surviving_names) {
   factor_levels <- input_schema$factor_levels
   if (is.null(factor_levels) || length(factor_levels) == 0) {
     return(NULL)
+  }
+
+  if (identical(node$type, "rename")) {
+    nm <- names(factor_levels)
+    idx <- match(nm, node$old_names)
+    renamed <- !is.na(idx)
+    nm[renamed] <- node$new_names[idx[renamed]]
+    names(factor_levels) <- nm
   }
 
   factor_levels <- factor_levels[names(factor_levels) %in% surviving_names]
@@ -88,6 +101,12 @@ propagate_factor_levels <- function(input_schema, surviving_names) {
 #' today's per-verb behavior (select drops de-selected group columns;
 #' filter/mutate/arrange preserve all of them).
 #'
+#' `rename` needs one extra step before that final `intersect()`: a
+#' group column that got renamed (e.g. `rename(gdf, grp = g)` where `g` is
+#' grouped) must be translated to its NEW name first, or the plain
+#' `intersect()` would miss it entirely (`schema$names` has the new name,
+#' `groups` still has the old one) and silently drop the grouping.
+#'
 #' @param node The AST node being applied
 #' @param groups Character vector of the input's group columns
 #' @param schema The node's output schema (post-op), as from `infer_schema()`
@@ -96,6 +115,12 @@ propagate_factor_levels <- function(input_schema, surviving_names) {
 propagate_groups <- function(node, groups, schema) {
   if (node$type %in% c("summarise", "join")) {
     return(character())
+  }
+
+  if (identical(node$type, "rename")) {
+    idx <- match(groups, node$old_names)
+    renamed <- !is.na(idx)
+    groups[renamed] <- node$new_names[idx[renamed]]
   }
 
   intersect(groups, schema$names)
@@ -117,7 +142,7 @@ push_op <- function(.data, node) {
   input_schema <- current_schema(.data)
 
   new_schema <- infer_schema(node)
-  new_schema$factor_levels <- propagate_factor_levels(input_schema, new_schema$names)
+  new_schema$factor_levels <- propagate_factor_levels(node, input_schema, new_schema$names)
 
   new_groups <- propagate_groups(node, .data$groups, new_schema)
 

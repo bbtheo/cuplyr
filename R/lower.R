@@ -24,6 +24,7 @@ lower_and_execute <- function(ast, source_ptr) {
     "join" = lower_join(ast, source_ptr),
     "distinct" = lower_distinct(ast, source_ptr),
     "slice" = lower_slice(ast, source_ptr),
+    "rename" = lower_rename(ast, source_ptr),
     "barrier" = lower_and_execute(ast$input, source_ptr),
     stop("Unknown AST node type: ", ast$type, call. = FALSE)
   )
@@ -231,6 +232,19 @@ lower_slice <- function(ast, source_ptr) {
     },
     stop("Unknown slice mode: ", ast$mode, call. = FALSE)
   )
+}
+
+#' Lower rename node
+#'
+#' Pure schema-only passthrough: column names live entirely in the R-side
+#' schema (see `ast_rename()`, `R/ast.R`), never on the underlying GPU
+#' table, so there is no GPU call to make here at all -- this simply lowers
+#' `ast$input` and returns its pointer unchanged. `push_op()`
+#' (`R/execute.R`) is what actually applies the new (renamed) schema to the
+#' resulting `tbl_gpu`, via `infer_schema()`.
+#' @keywords internal
+lower_rename <- function(ast, source_ptr) {
+  lower_and_execute(ast$input, source_ptr)
 }
 
 #' Lower join node

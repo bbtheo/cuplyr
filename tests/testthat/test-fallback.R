@@ -54,9 +54,11 @@ fallback_sweep_pipelines <- function() {
       },
       arrange_by = c("g", "x")
     ),
-    rename = list(fn = function(d) dplyr::rename(d, y = x)),
-    rename_with = list(fn = function(d) dplyr::rename_with(d, toupper, s)),
-    relocate = list(fn = function(d) dplyr::relocate(d, s)),
+    # rename()/rename_with()/relocate()/pull() are GPU-native now (Phase 3
+    # task 3, see R/rename.R, R/relocate.R, R/pull.R, test-dplyr-rename.R,
+    # test-dplyr-relocate.R, test-dplyr-pull.R) -- no longer part of this
+    # fallback sweep. See the "never triggers a fallback notification"
+    # block below instead.
     count = list(fn = function(d) dplyr::count(d, g), arrange_by = "g"),
     tally = list(fn = function(d) dplyr::tally(dplyr::group_by(d, g)), arrange_by = "g"),
     add_count = list(fn = function(d) dplyr::add_count(d, g)),
@@ -131,17 +133,6 @@ test_that("glimpse() prints structure and returns the original tbl_gpu", {
   expect_true(any(grepl("Rows:", out)))
   expect_true(any(grepl("g", out)))
   expect_identical(result, gt)
-})
-
-test_that("pull() returns a plain vector matching dplyr", {
-  skip_if_no_gpu()
-  df <- fallback_df()
-  gt <- tbl_gpu(df)
-
-  result <- gt |> dplyr::pull(x)
-
-  expect_false(is_tbl_gpu(result))
-  expect_equal(result, dplyr::pull(df, x))
 })
 
 test_that("nest_join() returns a plain data frame with a list-column, not a tbl_gpu", {
@@ -413,7 +404,12 @@ test_that("factor columns round-trip through a fallback verb", {
   )
   gt <- tbl_gpu(df)
 
-  result <- gt |> dplyr::rename(grp = g) |> collect()
+  # rename() is GPU-native now (Phase 3 task 3, R/rename.R) -- its own
+  # factor round-trip is covered directly in test-dplyr-rename.R. Use
+  # transmute() here instead, which is still a genuine CPU fallback verb,
+  # to keep this test actually exercising gpu_fallback()'s factor
+  # restoration path.
+  result <- gt |> dplyr::transmute(f, grp = g) |> collect()
 
   expect_true(is.factor(result$f))
   expect_equal(levels(result$f), c("lo", "hi"))
@@ -472,4 +468,16 @@ test_that("distinct() is GPU-native and never triggers a fallback notification",
   expect_no_error(gt |> dplyr::distinct(g, .keep_all = TRUE))
   expect_no_error(gt |> dplyr::distinct(z = x + 1))
   expect_no_error(gt |> dplyr::group_by(g) |> dplyr::distinct(x))
+})
+
+test_that("rename()/rename_with()/relocate() are GPU-native and never trigger a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gt <- tbl_gpu(fallback_df())
+
+  expect_no_error(gt |> dplyr::rename(y2 = x))
+  expect_no_error(gt |> dplyr::rename_with(toupper))
+  expect_no_error(gt |> dplyr::relocate(s))
+  expect_no_error(gt |> dplyr::select(renamed = x, g))
+  expect_no_error(gt |> dplyr::pull(x))
 })
