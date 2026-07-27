@@ -26,16 +26,51 @@
 #'
 #' ## Current limitations
 #' \itemize{
-#'   \item Only simple comparisons are supported (column op value/column)
-#'   \item Compound expressions with `&` or `|` are not yet supported
-#'   \item String comparisons are not yet implemented
-#'   \item Only numeric scalar values on the right-hand side
+#'   \item Only simple comparisons are parsed directly into a GPU predicate
+#'     (column op value/column)
+#'   \item String comparisons are not parsed directly into a GPU predicate
+#'   \item Only numeric scalar values on the right-hand side are parsed
+#'     directly into a GPU predicate
+#' }
+#'
+#' ## `TRUE`/`FALSE` literals
+#' `filter(TRUE)` is a no-op: it returns `.data` unchanged (no GPU work is
+#' performed). `filter(FALSE)` returns an empty (zero-row) result.
+#'
+#' ## Expressions that aren't a simple comparison (CPU fallback)
+#' Compound expressions with `&`/`|`, calls like `between()` or `%in%`, and
+#' other shapes that don't match `column op value`/`column op column`
+#' still are not parsed into a GPU predicate at the parser level. Such an
+#' expression is handed to a CPU-side fallback: it's evaluated with
+#' `rlang::eval_tidy()` and, if the result is a logical scalar or vector,
+#' applied back to the GPU table as a boolean mask (materializing first,
+#' via `compute()`, if `.data` is lazy with pending operations). Because
+#' this evaluation happens with *no data mask*, it can only succeed for
+#' expressions that evaluate to a logical value on their own without
+#' referencing table columns -- e.g. a pre-computed logical vector or
+#' `filter(rep(TRUE, n))`. An expression that references a table column
+#' (e.g. `filter(mpg > 20 & cyl == 4)` or `filter(cyl %in% c(4, 6))`) will
+#' still error, now with the "only supports comparisons" message, since the
+#' column symbol can't resolve outside the table. This fallback path is
+#' legitimate, supported behavior for the cases it does cover, not an
+#' error condition -- see `getOption("cuplyr.fallback")` below to be
+#' notified when it's used.
+#'
+#' ## `options(cuplyr.fallback = ...)`
+#' Controls whether the CPU fallback described above (used by `filter()`
+#' and by `summarise()`'s temp-column preprocessing) notifies the caller.
+#' One of:
+#' \itemize{
+#'   \item `"silent"` (default) - no notification
+#'   \item `"warn"` - emits a `warning()` naming the verb and expression
+#'   \item `"error"` - `stop()`s instead of falling back
 #' }
 #'
 #' ## Performance
 #' Filtering on GPU is highly parallel and can process billions of rows
-#' per second. For best performance, chain multiple filter conditions
-#' rather than using compound expressions.
+#' per second. For best performance, prefer simple comparisons (parsed
+#' directly into a GPU predicate) over expressions that require the CPU
+#' fallback.
 #'
 #' @seealso
 #' \code{\link{mutate.tbl_gpu}} for creating new columns,

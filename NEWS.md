@@ -1,3 +1,37 @@
+# cuplyr (development version)
+
+## Unified eager/lazy execution
+
+* Every dplyr verb now builds a single AST node and routes through one shared execution path (`push_op()`/`push_join()` in `R/execute.R`, `lower_and_execute()` in `R/lower.R`) regardless of whether the table is eager or lazy. This collapsed a number of eager/lazy divergences that previously produced different results depending on execution mode; see the fixes below.
+
+## Bug fixes
+
+* `right_join()` now works at all; previously it errored on every call due to an internal argument-parsing mismatch.
+
+* `full_join()` and `right_join()` now coalesce join key columns for unmatched rows instead of leaving them `NA`. For example, `full_join(x, y, by = "id")` now populates `id` from `y` for rows that only matched on the right side.
+
+* `bind_rows()` now actually casts columns that get type-promoted to `STRING` (e.g. combining a numeric column in one table with a character column in another). Previously the promoted column kept its original GPU type while the schema claimed `STRING`, causing a type-mismatch failure.
+
+* `mutate()` no longer silently promotes integer arithmetic to `FLOAT64`. `+`, `-`, `*`, `%%`, and `%/%` now preserve `INT32`/`INT64` when every input column and literal involved is integer or logical (matching R/dplyr, e.g. `TRUE + TRUE` is `2L`). Note that `INT32` results can now wrap around on overflow instead of silently promoting to a wider type, matching plain integer arithmetic semantics. `/` and `^` continue to always promote to `FLOAT64` (matching R: `1L / 2L` and `2L ^ 2L` are both doubles).
+
+* `arrange(..., .by_group = TRUE)` now sorts prepended group columns in ascending order to match `dplyr::arrange.grouped_df()`, even when the user's own expression wraps a group column in `desc()` (e.g. `arrange(desc(g), x, .by_group = TRUE)` now sorts `g` ascending, `x` per the user's spec).
+
+* `filter(TRUE)` is now a true no-op: it returns `.data` unchanged without doing GPU work, instead of round-tripping through a filter kernel.
+
+* Lazy `summarise()` with `sd()`/`var()` no longer errors. Lazily evaluated aggregations now translate to the same cudf function names (`std`/`variance`) that the eager path always used.
+
+* `summarise()` now accepts namespaced aggregation calls, e.g. `dplyr::n()` and `stats::sd(mpg)`, in both eager and lazy modes.
+
+* `summarise(n = n())` now always returns an integer (`INT32`) column, matching `dplyr`. Previously, ungrouped `n()` silently returned a double due to a schema/GPU-column type mismatch.
+
+* `summarise()` with an unnamed aggregation expression (e.g. `summarise(mean(mpg))`) now auto-names the output column from the expression text and warns, matching `mutate()`'s existing behavior for unnamed expressions. This had regressed to silently doing neither in either mode.
+
+* Eager `select()` of a factor column now round-trips as a factor through `collect()`. Previously the eager path dropped factor level metadata, so `collect()` returned integer codes instead of factor labels.
+
+## New features
+
+* Added the `cuplyr.fallback` option to control whether `filter()`'s and `summarise()`'s CPU-evaluation fallback paths notify the caller. One of `"silent"` (default), `"warn"`, or `"error"`.
+
 # cuplyr 0.1.1
 
 ## Bug fixes

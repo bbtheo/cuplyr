@@ -56,19 +56,20 @@ list(
 |------|---------|
 | `R/tbl-gpu.R` | `tbl_gpu()`, `new_tbl_gpu()`, `is_tbl_gpu()`, `resolve_exec_mode()` |
 | `R/utils.R` | `gpu_type_from_r()`, `col_index()` |
-| `R/filter.R` | filter verb with boolean literal fast-path |
-| `R/mutate.R` | mutate verb with left-associative chain support |
-| `R/select.R` | select verb |
-| `R/arrange.R` | arrange verb |
-| `R/group-by.R` | `group_by()`, `ungroup()`, `group_vars()` |
-| `R/summarise.R` | summarise/groupby verb |
-| `R/join.R` | join verbs, `build_join_schema()`, `build_join_output_info()` |
+| `R/execute.R` | unified execution helpers: `push_op()` (the sole exec_mode branch point), `input_node()`, `current_schema()`, `propagate_groups()`, `propagate_factor_levels()`, `auto_name_dots()`, `cuplyr_fallback_notify()`, join analogues `join_input_node()`/`push_join()` |
+| `R/filter.R` | filter verb — parses simple comparisons into predicates, builds one `ast_filter` node via `push_op()`; opaque expressions fall back to a CPU-eval boolean mask (`filter_eval_mask()`) |
+| `R/mutate.R` | mutate verb — parses expressions into `make_mutate_expr()` structs, builds one `ast_mutate` node via `push_op()`; type inference lives in `R/ast.R::infer_mutate_output_type()` |
+| `R/select.R` | select verb — parses tidyselect, builds one `ast_select` node via `push_op()` |
+| `R/arrange.R` | arrange verb — parses sort specs (incl. `.by_group`), builds one `ast_arrange` node via `push_op()` |
+| `R/group-by.R` | `group_by()`, `ungroup()`, `group_vars()` — metadata-only, no AST node |
+| `R/summarise.R` | summarise/groupby verb — `parse_aggregations()` builds aggregation structs (cudf-accepted function names), builds one `ast_summarise` node via `push_op()`; temp-column preprocessing for expressions inside agg calls |
+| `R/join.R` | join verbs — parse join spec, dispatch through `push_join()` (join analogue of `push_op()`); `build_join_schema()`, `build_join_output_info()` |
 | `R/bind.R` | `bind_rows()`, `bind_cols()` with schema unification |
 | `R/collect.R` | pulls data to R, warns on INT64 precision loss |
-| `R/compute.R` | `compute()`, `collapse()`, `as_lazy()`, `as_eager()`, `show_query()` |
-| `R/ast.R` | AST node constructors (`ast_source`, `ast_filter`, etc.) |
-| `R/optimizer.R` | AST optimization passes (projection, filter pushdown, fusion) |
-| `R/lower.R` | `lower_and_execute()` AST to GPU execution |
+| `R/compute.R` | `compute()`, `collapse()`, `as_lazy()`, `as_eager()`, `show_query()` — `compute()` is the only caller of `optimize_ast()` |
+| `R/ast.R` | AST node constructors (`ast_source`, `ast_filter`, etc.) and `infer_schema()` methods |
+| `R/optimizer.R` | AST optimization passes (projection, filter pushdown, fusion) — runs only via `compute()`, never on the eager single-op path |
+| `R/lower.R` | `lower_and_execute()` — the single execution path for every AST node in both eager and lazy modes |
 | `R/gpu-memory.R` | memory reporting and GC helpers |
 | `R/gpu.R` | `has_gpu()`, `gpu_details()` |
 | `R/print.R` | `print.tbl_gpu()` method |
@@ -196,6 +197,26 @@ test_that("<verb>() basic case works", {
 ```
 
 ## AST & Lazy Evaluation
+
+### One execution path
+Every verb follows the same shape: parse its arguments, build **one** AST
+node wrapping `input_node(.data)`, and hand it to `push_op()` (or, for
+joins, `push_join()`) in `R/execute.R`. `push_op()` is the *only* place
+that branches on `exec_mode`:
+- **lazy**: the node is stored as the new `$lazy_ops`; no GPU work happens.
+- **eager**: the node is lowered and executed immediately via
+  `lower_and_execute()` (`R/lower.R`), with no optimizer pass — a
+  single-op AST has nothing to optimize, and running the optimizer eagerly
+  risks routing a multi-predicate filter through the fused kernel
+  incorrectly (see design decision D2 in
+  `scratchpad/unification_design.md` if present).
+
+`optimize_ast()` (`R/optimizer.R`) only ever runs from `compute()`, which
+is invoked by `collect()`/`show_query()`/explicit `compute()` calls on a
+lazy table with pending ops. `R/lower.R::lower_and_execute()` is the single
+execution path for every AST node in both schedules — there are no
+separate eager/lazy implementations (`*_lazy()`/`*_one()` functions) per
+verb any more.
 
 ### Lazy Mode Mechanics
 - Lazy tables defer execution by building an AST in `$lazy_ops`

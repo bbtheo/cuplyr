@@ -47,7 +47,34 @@ column is replaced in-place (preserving column order). For example,
 \item Only binary operations are supported (col op value or col op col)
 \item Complex expressions like \code{(x + y) * z} are not yet supported
 \item Functions like \code{sqrt()}, \code{log()}, \code{abs()} are not yet implemented
-\item Result type is always FLOAT64 (double precision)
+}
+}
+
+\subsection{Result type (type promotion)}{
+
+The output column's GPU type is inferred from the operation and its
+inputs (column type(s) and, for col-scalar expressions, the R literal's
+type), applied in this order:
+\itemize{
+\item A plain column copy (\code{mutate(y = x)}) preserves the source
+column's type exactly.
+\item Arithmetic on \code{STRING}, factor (\code{DICTIONARY32}), or \code{Date}/
+\code{POSIXct} (\verb{TIMESTAMP_*}) columns is an error: cuplyr does not
+support arithmetic on those types.
+\item \code{/} always promotes to \code{FLOAT64} (matching R/dplyr: \code{1L / 2L}
+is a double).
+\item \code{^} always promotes to \code{FLOAT64} (matching R: \code{2L ^ 2L} is a
+double).
+\item \code{+}, \code{-}, \code{*}, \code{\%\%}, \code{\%/\%} preserve integer types: the result is
+\code{INT32} when every input column and R literal involved is integer
+or logical (\code{TRUE + TRUE} is \code{2L}, matching R). Note this means
+\code{INT32} arithmetic can silently wrap around on overflow (as in
+plain R/C++ integer arithmetic) rather than promoting to a wider
+type. If any input is \code{FLOAT64}/\code{FLOAT32}, the result is
+\code{FLOAT64}; otherwise if any input is \code{INT64}, the result is
+\code{INT64}. A bare R numeric literal (e.g. the \code{1} in
+\code{mutate(y = int_col + 1)}) is a \emph{double} in R, so it promotes the
+result to \code{FLOAT64} -- write \code{1L} to keep an integer result.
 }
 }
 

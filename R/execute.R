@@ -222,6 +222,44 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches) {
   )
 }
 
+#' Auto-name unnamed dots, warning as dplyr's verbs do
+#'
+#' `mutate()` and `summarise()` both accept unnamed expressions (e.g.
+#' `mutate(mpg * 2)`) and, matching dplyr, fall back to the expression's
+#' deparsed text as the output column name -- while warning that an explicit
+#' name would be clearer. Historically this logic was duplicated verbatim
+#' inside both `mutate.tbl_gpu()` (twice -- once for its since-deleted eager
+#' path, once for its since-deleted lazy path) and `summarise_lazy()` (now
+#' also deleted); this is the single shared implementation, parameterized by
+#' `verb` so each caller's warning names itself correctly.
+#'
+#' @param dots A list of quosures, as returned by `rlang::enquos(...)`
+#' @param verb Character, the verb name to use in the warning text (e.g.
+#'   `"mutate"`, `"summarise"`)
+#' @return `dots`, with `names(dots)` filled in for any unnamed entries
+#' @keywords internal
+auto_name_dots <- function(dots, verb) {
+  dot_names <- names(dots)
+  if (is.null(dot_names)) {
+    dot_names <- rep("", length(dots))
+  }
+
+  for (i in seq_along(dots)) {
+    new_name <- dot_names[i]
+
+    if (is.na(new_name) || new_name == "") {
+      new_name <- rlang::quo_text(dots[[i]])
+      warning("Unnamed ", verb, " expression '", new_name, "' will use expression as column name.\n",
+              "Consider using explicit names: ", verb, "(name = ", new_name, ")",
+              call. = FALSE)
+      dot_names[i] <- new_name
+    }
+  }
+
+  names(dots) <- dot_names
+  dots
+}
+
 #' Notify about a CPU-eval fallback, gated by `options(cuplyr.fallback = )`
 #'
 #' Per D4: default is silent (keeps existing eager behavior unchanged,

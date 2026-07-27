@@ -272,3 +272,44 @@ test_that("cuplyr_fallback_notify() errors under 'error'", {
     "cuplyr: summarise\\(\\) fell back to CPU evaluation for: sum\\(x > 3\\)"
   )
 })
+
+# =============================================================================
+# auto_name_dots()
+# =============================================================================
+
+test_that("auto_name_dots() leaves already-named dots untouched", {
+  dots <- rlang::quos(a = x + 1, b = y * 2)
+
+  expect_no_warning(result <- auto_name_dots(dots, "mutate"))
+  expect_equal(names(result), c("a", "b"))
+})
+
+test_that("auto_name_dots() names unnamed dots from expression text and warns (mutate)", {
+  dots <- rlang::quos(mpg * 2)
+
+  expect_warning(
+    result <- auto_name_dots(dots, "mutate"),
+    "Unnamed mutate expression 'mpg \\* 2' will use expression as column name"
+  )
+  expect_equal(names(result), "mpg * 2")
+})
+
+test_that("auto_name_dots() names unnamed dots from expression text and warns (summarise)", {
+  dots <- rlang::quos(mean(mpg))
+
+  expect_warning(
+    result <- auto_name_dots(dots, "summarise"),
+    "Unnamed summarise expression 'mean\\(mpg\\)' will use expression as column name"
+  )
+  expect_equal(names(result), "mean(mpg)")
+})
+
+test_that("auto_name_dots() handles a mix of named and unnamed dots", {
+  dots <- rlang::quos(a = x + 1, y * 2, b = z - 1)
+
+  expect_warning(
+    result <- auto_name_dots(dots, "mutate"),
+    "Unnamed mutate expression"
+  )
+  expect_equal(names(result), c("a", "y * 2", "b"))
+})

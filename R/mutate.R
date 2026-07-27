@@ -32,7 +32,32 @@
 #'   \item Only binary operations are supported (col op value or col op col)
 #'   \item Complex expressions like `(x + y) * z` are not yet supported
 #'   \item Functions like `sqrt()`, `log()`, `abs()` are not yet implemented
-#'   \item Result type is always FLOAT64 (double precision)
+#' }
+#'
+#' ## Result type (type promotion)
+#' The output column's GPU type is inferred from the operation and its
+#' inputs (column type(s) and, for col-scalar expressions, the R literal's
+#' type), applied in this order:
+#' \itemize{
+#'   \item A plain column copy (`mutate(y = x)`) preserves the source
+#'     column's type exactly.
+#'   \item Arithmetic on `STRING`, factor (`DICTIONARY32`), or `Date`/
+#'     `POSIXct` (`TIMESTAMP_*`) columns is an error: cuplyr does not
+#'     support arithmetic on those types.
+#'   \item `/` always promotes to `FLOAT64` (matching R/dplyr: `1L / 2L`
+#'     is a double).
+#'   \item `^` always promotes to `FLOAT64` (matching R: `2L ^ 2L` is a
+#'     double).
+#'   \item `+`, `-`, `*`, `%%`, `%/%` preserve integer types: the result is
+#'     `INT32` when every input column and R literal involved is integer
+#'     or logical (`TRUE + TRUE` is `2L`, matching R). Note this means
+#'     `INT32` arithmetic can silently wrap around on overflow (as in
+#'     plain R/C++ integer arithmetic) rather than promoting to a wider
+#'     type. If any input is `FLOAT64`/`FLOAT32`, the result is
+#'     `FLOAT64`; otherwise if any input is `INT64`, the result is
+#'     `INT64`. A bare R numeric literal (e.g. the `1` in
+#'     `mutate(y = int_col + 1)`) is a *double* in R, so it promotes the
+#'     result to `FLOAT64` -- write `1L` to keep an integer result.
 #' }
 #'
 #' ## Performance
@@ -86,21 +111,14 @@ mutate.tbl_gpu <- function(.data, ...) {
   # keeping a running local copy here is only needed to validate/parse later
   # dots against the right column set, not to set `.data$schema` directly
   # (push_op() owns that per D1/D3).
+  dots <- auto_name_dots(dots, "mutate")
+
   schema <- current_schema(.data)
   expressions <- list()
 
   for (i in seq_along(dots)) {
     new_name <- names(dots)[i]
     expr <- dots[[i]]
-
-    # Handle unnamed expressions: use expression text as column name (dplyr behavior)
-    if (is.null(new_name) || new_name == "") {
-      new_name <- rlang::quo_text(expr)
-      # Warn user about auto-generated name
-      warning("Unnamed mutate expression '", new_name, "' will use expression as column name.\n",
-              "Consider using explicit names: mutate(name = ", new_name, ")",
-              call. = FALSE)
-    }
 
     parsed <- parse_mutate_exprs(new_name, expr, schema)
 

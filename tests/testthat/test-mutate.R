@@ -689,3 +689,37 @@ test_that("mutate() can copy multiple columns with new names", {
   expect_equal(result$mpg_copy, mtcars$mpg)
   expect_equal(result$cyl_copy, mtcars$cyl)
 })
+
+# =============================================================================
+# Unnamed expression auto-naming (S10)
+# =============================================================================
+
+test_that("mutate() warns and auto-names an unnamed expression (eager)", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars, lazy = FALSE)
+
+  expect_warning(
+    mutated <- dplyr::mutate(gpu_df, mpg * 2),
+    "Unnamed mutate expression 'mpg \\* 2' will use expression as column name"
+  )
+
+  result <- collect(mutated)
+  expect_true("mpg * 2" %in% names(result))
+  expect_equal(result[["mpg * 2"]], mtcars$mpg * 2)
+})
+
+test_that("mutate() warns and auto-names an unnamed expression (lazy)", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars, lazy = TRUE)
+
+  expect_warning(
+    mutated <- dplyr::mutate(gpu_df, mpg * 2),
+    "Unnamed mutate expression 'mpg \\* 2' will use expression as column name"
+  )
+
+  result <- collect(mutated)
+  expect_true("mpg * 2" %in% names(result))
+  expect_equal(result[["mpg * 2"]], mtcars$mpg * 2)
+})

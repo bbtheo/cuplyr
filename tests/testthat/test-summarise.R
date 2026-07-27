@@ -437,6 +437,40 @@ test_that("summarise() accepts stats::sd() (namespaced call) in eager and lazy m
 })
 
 # =============================================================================
+# Unnamed expression auto-naming (S10)
+# =============================================================================
+
+test_that("summarise() warns and auto-names an unnamed aggregation (eager)", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars, lazy = FALSE)
+
+  expect_warning(
+    result <- dplyr::summarise(gpu_df, mean(mpg)),
+    "Unnamed summarise expression 'mean\\(mpg\\)' will use expression as column name"
+  )
+
+  collected <- collect(result)
+  expect_true("mean(mpg)" %in% names(collected))
+  expect_equal(collected[["mean(mpg)"]], mean(mtcars$mpg))
+})
+
+test_that("summarise() warns and auto-names an unnamed aggregation (lazy)", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars, lazy = TRUE)
+
+  expect_warning(
+    result <- dplyr::summarise(gpu_df, mean(mpg)),
+    "Unnamed summarise expression 'mean\\(mpg\\)' will use expression as column name"
+  )
+
+  collected <- collect(result)
+  expect_true("mean(mpg)" %in% names(collected))
+  expect_equal(collected[["mean(mpg)"]], mean(mtcars$mpg))
+})
+
+# =============================================================================
 # Result Structure
 # =============================================================================
 

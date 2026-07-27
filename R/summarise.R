@@ -77,6 +77,8 @@ summarise.tbl_gpu <- function(.data, ..., .groups = "drop") {
          call. = FALSE)
   }
 
+  dots <- auto_name_dots(dots, "summarise")
+
   # Pre-process: create temporary columns for expressions inside agg functions
   # (e.g. sum(carb == 4)). Per D4, if a temp column is needed and .data is
   # lazy with pending ops, this materializes (compute()) before creating the
