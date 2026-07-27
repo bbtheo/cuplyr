@@ -117,13 +117,14 @@ build_join_schema <- function(left_schema, right_schema, join_spec,
 #' join uncombined), followed by reordering/selecting down to the column set
 #' and names a native right join would produce. This helper computes the two
 #' pieces of that plan that are pure functions of the input schemas (i.e. that
-#' don't require the swapped join to have actually run yet), shared by both
-#' callers:
-#'   - `right_join.tbl_gpu()` (eager path, this file), which executes the
-#'     swapped join by calling `gpu_left_join()` directly on the live
-#'     `tbl_gpu` pointers
-#'   - `lower_join()` (`R/lower.R`), which lowers a lazy `ast_join` node by
-#'     calling `gpu_left_join()` directly on raw GPU table pointers
+#' don't require the swapped join to have actually run yet).
+#'
+#' `right_join.tbl_gpu()` (this file) always builds a `"right"`-typed
+#' `ast_join` node and hands it to `push_join()` (`R/execute.R`), which
+#' lowers it -- in both the eager and lazy schedules -- via `lower_join()`'s
+#' `"right"` case (`R/lower.R`). That is the single caller of this helper: it
+#' calls `gpu_left_join()` on the swapped sides, then this helper's plan
+#' (via `resolve_right_join_select_idx()`) to reorder/rename the raw output.
 #'
 #' Unlike the swapped join itself, the reorder/select plan resolved by
 #' [resolve_right_join_select_idx()] is a pure function of the schemas too --
@@ -334,58 +335,8 @@ left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
 
-  if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
-    left_ast <- if (!is.null(x$lazy_ops)) x$lazy_ops else ast_source(x$schema)
-    right_ast <- if (!is.null(y$lazy_ops)) y$lazy_ops else ast_source(y$schema)
-
-    left_ast <- set_ast_source_ptr(left_ast, x$ptr)
-    right_ast <- set_ast_source_ptr(right_ast, y$ptr)
-
-    join_ast <- ast_join("left", left_ast, right_ast, join_spec,
-                         keep = keep, suffix = suffix, na_matches = na_matches)
-
-    left_schema <- infer_schema(left_ast)
-    right_schema <- infer_schema(right_ast)
-    new_schema <- build_join_schema(left_schema, right_schema, join_spec,
-                                    suffix = suffix, keep = keep)
-
-    return(new_tbl_gpu(
-      ptr = NULL,
-      schema = new_schema,
-      lazy_ops = join_ast,
-      groups = character(),
-      exec_mode = "lazy"
-    ))
-  }
-
-  if (!is.null(x$lazy_ops)) x <- compute(x)
-  if (!is.null(y$lazy_ops)) y <- compute(y)
-
-  left_key_idx <- match(join_spec$left, x$schema$names) - 1L
-  right_key_idx <- match(join_spec$right, y$schema$names) - 1L
-  right_drop <- if (!isTRUE(keep)) join_spec$right else character(0)
-  right_drop_idx <- if (length(right_drop) > 0) {
-    match(right_drop, y$schema$names) - 1L
-  } else {
-    integer(0)
-  }
-
-  warn_if_join_too_large("left", x, y, join_spec, suffix, keep)
-
-  new_ptr <- wrap_gpu_call(
-    "left_join",
-    gpu_left_join(x$ptr, y$ptr, left_key_idx, right_key_idx, right_drop_idx)
-  )
-  new_schema <- build_join_schema(x$schema, y$schema, join_spec,
-                                  suffix = suffix, keep = keep)
-
-  new_tbl_gpu(
-    ptr = new_ptr,
-    schema = new_schema,
-    lazy_ops = NULL,
-    groups = character(),
-    exec_mode = "eager"
-  )
+  push_join("left", x, y, join_spec, suffix = suffix, keep = keep,
+           na_matches = na_matches)
 }
 
 #' @export
@@ -411,58 +362,8 @@ inner_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
 
-  if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
-    left_ast <- if (!is.null(x$lazy_ops)) x$lazy_ops else ast_source(x$schema)
-    right_ast <- if (!is.null(y$lazy_ops)) y$lazy_ops else ast_source(y$schema)
-
-    left_ast <- set_ast_source_ptr(left_ast, x$ptr)
-    right_ast <- set_ast_source_ptr(right_ast, y$ptr)
-
-    join_ast <- ast_join("inner", left_ast, right_ast, join_spec,
-                         keep = keep, suffix = suffix, na_matches = na_matches)
-
-    left_schema <- infer_schema(left_ast)
-    right_schema <- infer_schema(right_ast)
-    new_schema <- build_join_schema(left_schema, right_schema, join_spec,
-                                    suffix = suffix, keep = keep)
-
-    return(new_tbl_gpu(
-      ptr = NULL,
-      schema = new_schema,
-      lazy_ops = join_ast,
-      groups = character(),
-      exec_mode = "lazy"
-    ))
-  }
-
-  if (!is.null(x$lazy_ops)) x <- compute(x)
-  if (!is.null(y$lazy_ops)) y <- compute(y)
-
-  left_key_idx <- match(join_spec$left, x$schema$names) - 1L
-  right_key_idx <- match(join_spec$right, y$schema$names) - 1L
-  right_drop <- if (!isTRUE(keep)) join_spec$right else character(0)
-  right_drop_idx <- if (length(right_drop) > 0) {
-    match(right_drop, y$schema$names) - 1L
-  } else {
-    integer(0)
-  }
-
-  warn_if_join_too_large("inner", x, y, join_spec, suffix, keep)
-
-  new_ptr <- wrap_gpu_call(
-    "inner_join",
-    gpu_inner_join(x$ptr, y$ptr, left_key_idx, right_key_idx, right_drop_idx)
-  )
-  new_schema <- build_join_schema(x$schema, y$schema, join_spec,
-                                  suffix = suffix, keep = keep)
-
-  new_tbl_gpu(
-    ptr = new_ptr,
-    schema = new_schema,
-    lazy_ops = NULL,
-    groups = character(),
-    exec_mode = "eager"
-  )
+  push_join("inner", x, y, join_spec, suffix = suffix, keep = keep,
+           na_matches = na_matches)
 }
 
 #' @export
@@ -488,58 +389,8 @@ full_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
 
-  if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
-    left_ast <- if (!is.null(x$lazy_ops)) x$lazy_ops else ast_source(x$schema)
-    right_ast <- if (!is.null(y$lazy_ops)) y$lazy_ops else ast_source(y$schema)
-
-    left_ast <- set_ast_source_ptr(left_ast, x$ptr)
-    right_ast <- set_ast_source_ptr(right_ast, y$ptr)
-
-    join_ast <- ast_join("full", left_ast, right_ast, join_spec,
-                         keep = keep, suffix = suffix, na_matches = na_matches)
-
-    left_schema <- infer_schema(left_ast)
-    right_schema <- infer_schema(right_ast)
-    new_schema <- build_join_schema(left_schema, right_schema, join_spec,
-                                    suffix = suffix, keep = keep)
-
-    return(new_tbl_gpu(
-      ptr = NULL,
-      schema = new_schema,
-      lazy_ops = join_ast,
-      groups = character(),
-      exec_mode = "lazy"
-    ))
-  }
-
-  if (!is.null(x$lazy_ops)) x <- compute(x)
-  if (!is.null(y$lazy_ops)) y <- compute(y)
-
-  left_key_idx <- match(join_spec$left, x$schema$names) - 1L
-  right_key_idx <- match(join_spec$right, y$schema$names) - 1L
-  right_drop <- if (!isTRUE(keep)) join_spec$right else character(0)
-  right_drop_idx <- if (length(right_drop) > 0) {
-    match(right_drop, y$schema$names) - 1L
-  } else {
-    integer(0)
-  }
-
-  warn_if_join_too_large("full", x, y, join_spec, suffix, keep)
-
-  new_ptr <- wrap_gpu_call(
-    "full_join",
-    gpu_full_join(x$ptr, y$ptr, left_key_idx, right_key_idx, right_drop_idx)
-  )
-  new_schema <- build_join_schema(x$schema, y$schema, join_spec,
-                                  suffix = suffix, keep = keep)
-
-  new_tbl_gpu(
-    ptr = new_ptr,
-    schema = new_schema,
-    lazy_ops = NULL,
-    groups = character(),
-    exec_mode = "eager"
-  )
+  push_join("full", x, y, join_spec, suffix = suffix, keep = keep,
+           na_matches = na_matches)
 }
 
 #' @export
@@ -567,65 +418,13 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
 
   # right_join(x, y) is implemented as a swapped left_join(y, x) (keeping
   # every row of y, NA-filling unmatched x columns), reordered/renamed down
-  # to the column set and names a native right join would produce. This
-  # mirrors left_join.tbl_gpu()/inner_join.tbl_gpu()/full_join.tbl_gpu()'s
-  # lazy/eager branching, but builds the plan via the shared helpers
-  # (build_right_join_via_left() / resolve_right_join_select_idx()) so both
-  # paths -- and lower_join()'s "right" case in R/lower.R, which performs the
-  # analogous swap + positional gpu_select() for lazily-lowered joins --
-  # agree on the resulting schema.
-  if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
-    left_ast <- if (!is.null(x$lazy_ops)) x$lazy_ops else ast_source(x$schema)
-    right_ast <- if (!is.null(y$lazy_ops)) y$lazy_ops else ast_source(y$schema)
-
-    left_ast <- set_ast_source_ptr(left_ast, x$ptr)
-    right_ast <- set_ast_source_ptr(right_ast, y$ptr)
-
-    join_ast <- ast_join("right", left_ast, right_ast, join_spec,
-                         keep = keep, suffix = suffix, na_matches = na_matches)
-
-    left_schema <- infer_schema(left_ast)
-    right_schema <- infer_schema(right_ast)
-    new_schema <- build_join_schema(left_schema, right_schema, join_spec,
-                                    suffix = suffix, keep = keep)
-
-    return(new_tbl_gpu(
-      ptr = NULL,
-      schema = new_schema,
-      lazy_ops = join_ast,
-      groups = character(),
-      exec_mode = "lazy"
-    ))
-  }
-
-  if (!is.null(x$lazy_ops)) x <- compute(x)
-  if (!is.null(y$lazy_ops)) y <- compute(y)
-
-  left_key_idx <- match(join_spec$left, x$schema$names) - 1L
-  right_key_idx <- match(join_spec$right, y$schema$names) - 1L
-
-  warn_if_join_too_large("right", x, y, join_spec, suffix, keep)
-
-  plan <- build_right_join_via_left(x$schema, y$schema, join_spec,
-                                    suffix = suffix, keep = keep)
-
-  # Swapped left_join(y, x): every row of y is kept, x's columns are
-  # NA-filled where unmatched. Always run with both raw key columns intact
-  # (no drop) -- resolve_right_join_select_idx() picks/renames the ones the
-  # final schema needs.
-  swapped_ptr <- wrap_gpu_call(
-    "right_join",
-    gpu_left_join(y$ptr, x$ptr, right_key_idx, left_key_idx, integer(0))
-  )
-
-  idx <- resolve_right_join_select_idx(plan, x$schema, y$schema, suffix)
-  new_ptr <- wrap_gpu_call("select", gpu_select(swapped_ptr, idx - 1L))
-
-  new_tbl_gpu(
-    ptr = new_ptr,
-    schema = list(names = plan$desired_names, types = plan$desired_types),
-    lazy_ops = NULL,
-    groups = character(),
-    exec_mode = "eager"
-  )
+  # to the column set and names a native right join would produce. This is
+  # just another "right"-typed ast_join node -- push_join() (R/execute.R)
+  # dispatches it through the same unified eager/lazy path as the other join
+  # types, and lower_join()'s "right" case (R/lower.R) performs the actual
+  # swap + positional gpu_select() using the shared plan helpers
+  # (build_right_join_via_left() / resolve_right_join_select_idx()), so both
+  # schedules agree on the resulting schema.
+  push_join("right", x, y, join_spec, suffix = suffix, keep = keep,
+           na_matches = na_matches)
 }

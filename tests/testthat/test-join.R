@@ -499,3 +499,51 @@ test_that("right_join() column order matches build_join_schema (left cols then r
 
   expect_equal(names(result), c("id", "x", "y"))
 })
+
+# =============================================================================
+# Mixed-mode joins (one side eager, one side lazy)
+#
+# push_join() (R/execute.R) treats a join as lazy whenever *either* side is
+# lazy -- this pins that behavior: a mixed-mode join always produces a lazy
+# tbl_gpu (pending ops, no materialized ptr) regardless of which side is
+# eager, and collect() on it still matches the dplyr oracle. This mirrors
+# the pre-unification behavior (the `identical(x$exec_mode, "lazy") ||
+# identical(y$exec_mode, "lazy")` branch already existed per-verb before
+# S8; this test now pins it against the shared push_join() path).
+# =============================================================================
+
+test_that("left_join() with eager x and lazy y produces a lazy result matching dplyr", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(id = c(1, 2, 3), x = c(10, 20, 30))
+  right_df <- data.frame(id = c(2, 3, 4), y = c(200, 300, 400))
+
+  out <- dplyr::left_join(tbl_gpu(left_df), tbl_gpu(right_df, lazy = TRUE),
+                          by = "id")
+
+  expect_true(is_lazy(out))
+  expect_true(has_pending_ops(out))
+
+  result <- collect(out)
+  expected <- dplyr::left_join(left_df, right_df, by = "id")
+
+  expect_equal(as.data.frame(result), as.data.frame(expected))
+})
+
+test_that("left_join() with lazy x and eager y produces a lazy result matching dplyr", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(id = c(1, 2, 3), x = c(10, 20, 30))
+  right_df <- data.frame(id = c(2, 3, 4), y = c(200, 300, 400))
+
+  out <- dplyr::left_join(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df),
+                          by = "id")
+
+  expect_true(is_lazy(out))
+  expect_true(has_pending_ops(out))
+
+  result <- collect(out)
+  expected <- dplyr::left_join(left_df, right_df, by = "id")
+
+  expect_equal(as.data.frame(result), as.data.frame(expected))
+})

@@ -142,6 +142,86 @@ push_op <- function(.data, node) {
   )
 }
 
+#' Build one side of a join's AST, always anchoring the source pointer
+#'
+#' Like `input_node()`, but *unconditionally* attaches `tbl$ptr` to the leaf
+#' `ast_source` node, even when `tbl` is lazy with no pending ops (the case
+#' where `input_node()` deliberately leaves the pointer unset and relies on
+#' `lower_and_execute()`'s single `source_ptr` argument as a fallback, filled
+#' in later by `compute()`/`collect()`). A join has *two* independent input
+#' trees, so that single-fallback mechanism can't serve both leaves --
+#' instead, each side's own concrete GPU pointer must be anchored explicitly
+#' at construction time. This is safe because `tbl$ptr` is always a valid
+#' pointer to that side's own (possibly stale, pre-pending-ops) base table:
+#' `push_op()` carries it forward unchanged across lazy operations, only
+#' `compute()`/`collect()` ever replace it.
+#'
+#' @param tbl A `tbl_gpu` object (one side of a join)
+#' @return An `ast_node` with its leaf `source_ptr` set to `tbl$ptr`
+#' @keywords internal
+join_input_node <- function(tbl) {
+  node <- if (has_pending_ops(tbl)) tbl$lazy_ops else ast_source(tbl$schema)
+  set_ast_source_ptr(node, tbl$ptr)
+}
+
+#' Apply a two-input join AST node, dispatching on exec_mode
+#'
+#' The join analogue of `push_op()` (D1). Joins can't reuse `push_op()`
+#' as-is because it is built around a single `.data` input: it reads exactly
+#' one `exec_mode`/`ptr`/`schema` to decide the schedule. A join has two
+#' independent inputs (`x`/`y`) whose *either* side being lazy forces the
+#' whole join lazy (mirroring the pre-unification behavior), and whose eager
+#' execution needs both sides' pointers anchored -- see `join_input_node()`.
+#' Per D3, joins always drop groups (`character()`) and never carry
+#' `factor_levels` (this matches `build_join_schema()`, which never
+#' propagated them).
+#'
+#' @param join_type One of `"left"`, `"inner"`, `"full"`, `"right"`
+#' @param x,y The two `tbl_gpu` join inputs
+#' @param join_spec List with `left`/`right` key column names, as returned by
+#'   `parse_join_by()`
+#' @param suffix,keep,na_matches As documented on the join verbs
+#' @return A new `tbl_gpu`
+#' @keywords internal
+push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches) {
+  join_ast <- ast_join(
+    join_type,
+    join_input_node(x),
+    join_input_node(y),
+    join_spec,
+    keep = keep,
+    suffix = suffix,
+    na_matches = na_matches
+  )
+
+  new_schema <- infer_schema(join_ast)
+
+  if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
+    return(new_tbl_gpu(
+      ptr = NULL,
+      schema = new_schema,
+      lazy_ops = join_ast,
+      groups = character(),
+      exec_mode = "lazy"
+    ))
+  }
+
+  warn_if_join_too_large(join_type, x, y, join_spec, suffix, keep)
+
+  new_ptr <- wrap_gpu_call(
+    paste0(join_type, "_join"),
+    lower_and_execute(join_ast, x$ptr)
+  )
+
+  new_tbl_gpu(
+    ptr = new_ptr,
+    schema = new_schema,
+    lazy_ops = NULL,
+    groups = character(),
+    exec_mode = "eager"
+  )
+}
+
 #' Notify about a CPU-eval fallback, gated by `options(cuplyr.fallback = )`
 #'
 #' Per D4: default is silent (keeps existing eager behavior unchanged,
