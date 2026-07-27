@@ -200,80 +200,17 @@ glimpse.tbl_gpu <- function(x, width = NULL, ...) {
 
 # =============================================================================
 # slice() family
+#
+# slice()/slice_head()/slice_tail()/slice_min()/slice_max() moved to
+# R/slice.R (GPU-native for ungrouped input, Phase 3 task 2) -- see
+# ast_slice (R/ast.R), lower_slice() (R/lower.R), src/ops_slice.cpp. Each of
+# those verbs still calls through to gpu_fallback() itself for the cases
+# that remain out of scope: grouped input, on-the-fly `by=`/`.by=`
+# grouping, and (for slice()) index expressions the GPU-native path can't
+# evaluate without a data mask. slice_sample() is untouched here: it always
+# uses the CPU fallback regardless of grouping (needs dplyr's own RNG
+# stream reproduced bit-for-bit -- a separate task).
 # =============================================================================
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr slice
-slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
-  dots <- rlang::enquos(...)
-  by_quo <- rlang::enquo(.by)
-  gpu_fallback("slice", .data, function(tbl) {
-    rlang::inject(dplyr::slice(tbl, !!!dots, .by = !!by_quo, .preserve = .preserve))
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr slice_head
-slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
-  dots <- rlang::enquos(...)
-  by_quo <- rlang::enquo(by)
-  np <- list()
-  if (!missing(n)) np$n <- n
-  if (!missing(prop)) np$prop <- prop
-  gpu_fallback("slice_head", .data, function(tbl) {
-    rlang::inject(dplyr::slice_head(tbl, !!!dots, !!!np, by = !!by_quo))
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr slice_tail
-slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
-  dots <- rlang::enquos(...)
-  by_quo <- rlang::enquo(by)
-  np <- list()
-  if (!missing(n)) np$n <- n
-  if (!missing(prop)) np$prop <- prop
-  gpu_fallback("slice_tail", .data, function(tbl) {
-    rlang::inject(dplyr::slice_tail(tbl, !!!dots, !!!np, by = !!by_quo))
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr slice_min
-slice_min.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
-                               with_ties = TRUE, na_rm = FALSE) {
-  order_quo <- rlang::enquo(order_by)
-  dots <- rlang::enquos(...)
-  by_quo <- rlang::enquo(by)
-  np <- list()
-  if (!missing(n)) np$n <- n
-  if (!missing(prop)) np$prop <- prop
-  gpu_fallback("slice_min", .data, function(tbl) {
-    rlang::inject(dplyr::slice_min(tbl, order_by = !!order_quo, !!!dots, !!!np,
-                                    by = !!by_quo, with_ties = with_ties, na_rm = na_rm))
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr slice_max
-slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
-                               with_ties = TRUE, na_rm = FALSE) {
-  order_quo <- rlang::enquo(order_by)
-  dots <- rlang::enquos(...)
-  by_quo <- rlang::enquo(by)
-  np <- list()
-  if (!missing(n)) np$n <- n
-  if (!missing(prop)) np$prop <- prop
-  gpu_fallback("slice_max", .data, function(tbl) {
-    rlang::inject(dplyr::slice_max(tbl, order_by = !!order_quo, !!!dots, !!!np,
-                                    by = !!by_quo, with_ties = with_ties, na_rm = na_rm))
-  })
-}
 
 #' @rdname fallback-verbs
 #' @export

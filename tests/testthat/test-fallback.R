@@ -36,9 +36,15 @@ fallback_sweep_pipelines <- function() {
     transmute = list(fn = function(d) dplyr::transmute(d, z = x * 2)),
     reframe = list(fn = function(d) dplyr::reframe(d, mx = max(x), .by = g), arrange_by = "g"),
     rowwise = list(fn = function(d) dplyr::rowwise(d)),
-    slice = list(fn = function(d) dplyr::slice(d, 1:2)),
-    slice_head = list(fn = function(d) dplyr::slice_head(d, n = 2)),
-    slice_tail = list(fn = function(d) dplyr::slice_tail(d, n = 2)),
+    # slice()/slice_head()/slice_tail() are GPU-native for ungrouped input
+    # (Phase 3 task 2, see R/slice.R and test-dplyr-slice.R for that
+    # coverage) -- grouped here so this sweep still exercises their
+    # fallback path.
+    slice = list(fn = function(d) dplyr::group_by(d, g) |> dplyr::slice(1), arrange_by = "g"),
+    slice_head = list(fn = function(d) dplyr::group_by(d, g) |> dplyr::slice_head(n = 1), arrange_by = "g"),
+    slice_tail = list(fn = function(d) dplyr::group_by(d, g) |> dplyr::slice_tail(n = 1), arrange_by = "g"),
+    # slice_min()/slice_max() are GPU-native for a plain, ungrouped
+    # order_by, but `by = g` forces the fallback even on ungrouped input.
     slice_min = list(fn = function(d) dplyr::slice_min(d, x, n = 1, by = g), arrange_by = "g"),
     slice_max = list(fn = function(d) dplyr::slice_max(d, x, n = 1, by = g), arrange_by = "g"),
     slice_sample = list(

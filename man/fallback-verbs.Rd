@@ -6,11 +6,6 @@
 \alias{reframe.tbl_gpu}
 \alias{rowwise.tbl_gpu}
 \alias{glimpse.tbl_gpu}
-\alias{slice.tbl_gpu}
-\alias{slice_head.tbl_gpu}
-\alias{slice_tail.tbl_gpu}
-\alias{slice_min.tbl_gpu}
-\alias{slice_max.tbl_gpu}
 \alias{slice_sample.tbl_gpu}
 \alias{rename.tbl_gpu}
 \alias{rename_with.tbl_gpu}
@@ -57,34 +52,6 @@
 \method{rowwise}{tbl_gpu}(.data, ...)
 
 \method{glimpse}{tbl_gpu}(x, width = NULL, ...)
-
-\method{slice}{tbl_gpu}(.data, ..., .by = NULL, .preserve = FALSE)
-
-\method{slice_head}{tbl_gpu}(.data, ..., n, prop, by = NULL)
-
-\method{slice_tail}{tbl_gpu}(.data, ..., n, prop, by = NULL)
-
-\method{slice_min}{tbl_gpu}(
-  .data,
-  order_by,
-  ...,
-  n,
-  prop,
-  by = NULL,
-  with_ties = TRUE,
-  na_rm = FALSE
-)
-
-\method{slice_max}{tbl_gpu}(
-  .data,
-  order_by,
-  ...,
-  n,
-  prop,
-  by = NULL,
-  with_ties = TRUE,
-  na_rm = FALSE
-)
 
 \method{slice_sample}{tbl_gpu}(.data, ..., n, prop, by = NULL, weight_by = NULL, replace = FALSE)
 

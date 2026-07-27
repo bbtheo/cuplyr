@@ -59,9 +59,29 @@ optimize_with_barriers <- function(ast) {
     # No barrier: optimize entire subtree
     optimize_segment(ast)
   } else {
-    # Optimize from root to barrier, then recurse below barrier
+    # `extract_segment_above_barrier()` truncates the segment's bottom
+    # node's `$input` to NULL (the barrier itself, and everything below
+    # it, is optimized separately -- see the recursive call a few lines
+    # down). That truncation means `infer_schema()` can no longer be
+    # called on any node *within* the segment without hitting the severed
+    # NULL and returning an empty schema (`infer_schema.NULL()`) instead
+    # of the barrier's real output schema -- which is exactly what
+    # `push_down_projections()`/`prune_dead_columns()` do internally
+    # whenever they're handed a NULL `required_cols` (their signal to
+    # infer it from the ast they were just given). So `required_cols`
+    # MUST be precomputed here, from the real (untruncated) `ast`, and
+    # threaded through explicitly -- letting `optimize_segment()` compute
+    # its own default from `segment_root` would silently produce an empty
+    # required-columns set and `push_down_projections()` would insert a
+    # zero-column `ast_select` on top of the segment (found via the
+    # slice()-composes-with-filter oracle test, but equally reproducible
+    # with any pre-existing barrier, e.g. `arrange() |> filter()` in lazy
+    # mode -- this was a latent, pre-existing bug in the barrier-splitting
+    # logic itself, not specific to any one barrier type).
+    required_cols <- infer_schema(ast)$names
+
     segment_root <- extract_segment_above_barrier(ast, barrier_node)
-    optimized_segment <- optimize_segment(segment_root)
+    optimized_segment <- optimize_segment(segment_root, required_cols)
 
     # Reconnect: find the bottom of optimized segment and attach barrier
     barrier_node$input <- optimize_with_barriers(barrier_node$input)
@@ -73,15 +93,20 @@ optimize_with_barriers <- function(ast) {
 #' Optimize a single segment (no barriers)
 #'
 #' @param ast Root of segment
+#' @param required_cols Columns required by whatever consumes this
+#'   segment's output (`NULL` means "infer from `ast` itself", correct
+#'   only when `ast` is a genuine, untruncated subtree -- see the caller
+#'   comment in `optimize_with_barriers()` for why a barrier-truncated
+#'   segment must instead pass this explicitly)
 #' @return Optimized segment
 #' @keywords internal
-optimize_segment <- function(ast) {
+optimize_segment <- function(ast, required_cols = NULL) {
   if (is.null(ast)) return(NULL)
 
   ast |>
-    push_down_projections() |>
+    push_down_projections(required_cols) |>
     fuse_mutates() |>
-    prune_dead_columns() |>
+    prune_dead_columns(required_cols) |>
     push_down_filters() |>
     reorder_filters()
 }

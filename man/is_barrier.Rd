@@ -21,4 +21,12 @@ opportunity for later: a filter referencing only surviving key columns
 (or any column when \code{.keep_all = TRUE}) could safely push below distinct,
 the same way filter pushdown already works across \code{select}.
 }
+\details{
+\code{slice} (the whole family: \code{slice()}/\code{slice_head()}/\code{slice_tail()}/
+\code{slice_min()}/\code{slice_max()}) is a barrier for the same reason \code{arrange}
+is: it's a row-selection op whose result depends on the current row
+order/content, so reordering or pushing other ops across it (e.g. a
+filter that would change which rows \code{slice_head()} sees) would change
+the result.
+}
 \keyword{internal}

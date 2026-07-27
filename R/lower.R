@@ -23,6 +23,7 @@ lower_and_execute <- function(ast, source_ptr) {
     "summarise" = lower_summarise(ast, source_ptr),
     "join" = lower_join(ast, source_ptr),
     "distinct" = lower_distinct(ast, source_ptr),
+    "slice" = lower_slice(ast, source_ptr),
     "barrier" = lower_and_execute(ast$input, source_ptr),
     stop("Unknown AST node type: ", ast$type, call. = FALSE)
   )
@@ -193,6 +194,43 @@ lower_distinct <- function(ast, source_ptr) {
   }
 
   result_ptr
+}
+
+#' Lower slice node
+#'
+#' Dispatches on `ast$mode` to the matching C++ entry point
+#' (`src/ops_slice.cpp`). `nrow`-dependent resolution (the `n=`/`prop=`
+#' clamp, and `slice()`'s index-vector validation/negative-index handling)
+#' happens entirely in C++, since the input's actual row count is only
+#' available once `ast$input` has actually been lowered/executed -- it
+#' can't be computed from `infer_schema()` (which only tracks
+#' names/types, not row counts) at R-side parse time, and a lazy AST may
+#' not even have a concrete row count until this point in the pipeline
+#' runs. See `src/ops_common.hpp::compute_slice_size()`.
+#' @keywords internal
+lower_slice <- function(ast, source_ptr) {
+  input_ptr <- lower_and_execute(ast$input, source_ptr)
+
+  switch(ast$mode,
+    "head" = gpu_slice_head(input_ptr, ast$amount, ast$is_prop),
+    "tail" = gpu_slice_tail(input_ptr, ast$amount, ast$is_prop),
+    "index" = gpu_slice_indices(input_ptr, ast$raw_indices),
+    "rank" = {
+      input_schema <- infer_schema(ast$input)
+      col_idx <- match(ast$order_col, input_schema$names) - 1L
+
+      result_ptr <- gpu_slice_rank(input_ptr, col_idx, ast$descending, ast$amount,
+                                   ast$is_prop, ast$with_ties, ast$na_rm)
+
+      if (isTRUE(ast$order_is_temp)) {
+        keep_idx <- setdiff(seq_along(input_schema$names) - 1L, col_idx)
+        result_ptr <- gpu_select(result_ptr, keep_idx)
+      }
+
+      result_ptr
+    },
+    stop("Unknown slice mode: ", ast$mode, call. = FALSE)
+  )
 }
 
 #' Lower join node

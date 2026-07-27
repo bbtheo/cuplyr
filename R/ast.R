@@ -118,6 +118,54 @@ ast_distinct <- function(input, key_cols, keep_all = FALSE) {
   ast_node("distinct", input = input, key_cols = key_cols, keep_all = keep_all)
 }
 
+#' Create a slice AST node
+#'
+#' One node type covers the whole slice family (`slice()`/`slice_head()`/
+#' `slice_tail()`/`slice_min()`/`slice_max()`), distinguished by `mode` --
+#' unlike most other verbs (which each get their own `ast_*` constructor),
+#' these four share the same "select a subset of rows, in some order,
+#' from a single input" shape and (mostly) the same `n=`/`prop=` sizing
+#' rule, so one node with a mode-specific field set avoids four
+#' near-identical constructors/lowering functions/optimizer barrier
+#' entries. `slice_sample()` and every *grouped* variant are out of scope
+#' for this node (Phase 3 scope decision, see `R/slice.R`) and keep using
+#' the CPU fallback (`R/fallback.R`) instead.
+#'
+#' @param input Input AST node
+#' @param mode One of `"head"`, `"tail"`, `"index"`, `"rank"`
+#' @param amount For `mode` `"head"`/`"tail"`/`"rank"`: the raw (unresolved)
+#'   `n`/`prop` value (sign preserved; resolved against the actual row
+#'   count only at lowering time, see `src/ops_common.hpp::compute_slice_size()`)
+#' @param is_prop For `mode` `"head"`/`"tail"`/`"rank"`: `TRUE` if `amount`
+#'   is a `prop`, `FALSE` if it's an `n`
+#' @param raw_indices For `mode` `"index"`: the unresolved numeric index
+#'   vector from `slice()`'s dots (may contain 0/NA/duplicates/out-of-range/
+#'   negative values -- fully resolved only at lowering time, since negative
+#'   indices and out-of-range dropping both need the actual row count)
+#' @param order_col For `mode` `"rank"`: the column name (in `input`'s
+#'   output schema) to rank by -- always a real column name, even when
+#'   `order_by` was a computed expression (see `order_is_temp`)
+#' @param order_is_temp For `mode` `"rank"`: `TRUE` if `order_col` is a
+#'   synthetic column added by a wrapping `ast_mutate` (computed
+#'   `order_by`, e.g. `slice_min(df, x + y)`) that must NOT appear in the
+#'   final output -- mirrors `distinct()`'s same computed-key pattern
+#'   (`R/distinct.R`)
+#' @param descending For `mode` `"rank"`: `FALSE` for `slice_min()`, `TRUE`
+#'   for `slice_max()`
+#' @param with_ties,na_rm For `mode` `"rank"`: as documented on
+#'   `slice_min()`/`slice_max()`
+#' @return An ast_slice node
+#' @keywords internal
+ast_slice <- function(input, mode, amount = NULL, is_prop = NULL,
+                      raw_indices = NULL, order_col = NULL,
+                      order_is_temp = FALSE, descending = NULL,
+                      with_ties = NULL, na_rm = NULL) {
+  ast_node("slice", input = input, mode = mode, amount = amount, is_prop = is_prop,
+           raw_indices = raw_indices, order_col = order_col,
+           order_is_temp = order_is_temp, descending = descending,
+           with_ties = with_ties, na_rm = na_rm)
+}
+
 #' Create a join AST node
 #'
 #' @param type Join type: "inner", "left", "right", "full"
@@ -369,6 +417,18 @@ infer_schema.ast_distinct <- function(node) {
 }
 
 #' @export
+infer_schema.ast_slice <- function(node) {
+  input_schema <- infer_schema(node$input)
+
+  if (identical(node$mode, "rank") && isTRUE(node$order_is_temp)) {
+    idx <- input_schema$names != node$order_col
+    return(list(names = input_schema$names[idx], types = input_schema$types[idx]))
+  }
+
+  input_schema
+}
+
+#' @export
 infer_schema.ast_summarise <- function(node) {
   input_schema <- infer_schema(node$input)
 
@@ -457,12 +517,19 @@ is_opaque_expression <- function(expr_text) {
 #' (or any column when `.keep_all = TRUE`) could safely push below distinct,
 #' the same way filter pushdown already works across `select`.
 #'
+#' `slice` (the whole family: `slice()`/`slice_head()`/`slice_tail()`/
+#' `slice_min()`/`slice_max()`) is a barrier for the same reason `arrange`
+#' is: it's a row-selection op whose result depends on the current row
+#' order/content, so reordering or pushing other ops across it (e.g. a
+#' filter that would change which rows `slice_head()` sees) would change
+#' the result.
+#'
 #' @param node An AST node
 #' @return TRUE if node is a barrier
 #' @keywords internal
 is_barrier <- function(node) {
   if (is.null(node)) return(FALSE)
-  node$type %in% c("arrange", "barrier", "summarise", "distinct")
+  node$type %in% c("arrange", "barrier", "summarise", "distinct", "slice")
 }
 
 #' Get the depth of an AST tree
@@ -557,6 +624,9 @@ print.ast_node <- function(x, ..., indent = 0) {
     },
     "distinct" = {
       cat(" [", length(x$key_cols), " keys, keep_all=", x$keep_all, "]", sep = "")
+    },
+    "slice" = {
+      cat(" [mode=", x$mode, "]", sep = "")
     }
   )
 
@@ -590,6 +660,7 @@ ast_to_string <- function(node) {
     "barrier" = "barrier",
     "join" = paste0("join[", node$join_type, "]"),
     "distinct" = paste0("distinct[", paste(node$key_cols, collapse = ","), "]"),
+    "slice" = paste0("slice[", node$mode, "]"),
     node$type
   )
 
