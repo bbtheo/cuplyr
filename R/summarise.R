@@ -77,134 +77,49 @@ summarise.tbl_gpu <- function(.data, ..., .groups = "drop") {
          call. = FALSE)
   }
 
-  # Lazy path: build AST instead of executing
-  if (.data$exec_mode == "lazy") {
-    return(summarise_lazy(.data, dots, .groups = .groups))
-  }
-
   # Pre-process: create temporary columns for expressions inside agg functions
+  # (e.g. sum(carb == 4)). Per D4, if a temp column is needed and .data is
+  # lazy with pending ops, this materializes (compute()) before creating the
+  # temp column and notifies via cuplyr_fallback_notify().
   preprocess_result <- preprocess_agg_expressions(.data, dots)
   working_data <- preprocess_result$data
   processed_dots <- preprocess_result$dots
 
-  # Parse the aggregation expressions (now with simple column refs)
-  agg_info <- parse_agg_expressions(working_data, processed_dots)
+  # Parse the aggregation expressions (now with simple column refs), emitting
+  # aggregation structs that carry the cudf-accepted function name (fixes
+  # lazy sd()/var(), which used to reach C++ as "sd"/"var" and error out).
+  aggregations <- parse_aggregations(current_schema(working_data), processed_dots)
 
-  # Get group column indices (0-based for C++)
-  group_indices <- if (length(.data$groups) > 0) {
-    match(.data$groups, working_data$schema$names) - 1L
-  } else {
-    integer(0)
-  }
-
-  # Call C++ function to perform the grouped aggregation
-  result_ptr <- wrap_gpu_call(
-    "summarise",
-    gpu_summarise(
-      working_data$ptr,
-      group_indices,
-      agg_info$col_indices,
-      agg_info$agg_types
-    )
-  )
-
-  # Build the result schema
-  # First the group columns, then the aggregation results
-  result_names <- c(.data$groups, names(dots))
-  result_types <- c(
-    .data$schema$types[match(.data$groups, .data$schema$names)],
-    agg_info$result_types
-  )
-
-  new_tbl_gpu(
-    ptr = result_ptr,
-    schema = list(names = result_names, types = result_types),
-    lazy_ops = NULL,
-    groups = character(),  # Result is ungrouped
-    exec_mode = .data$exec_mode
-  )
+  push_op(working_data, ast_summarise(input_node(working_data), aggregations,
+                                      working_data$groups))
 }
 
 #' @rdname summarise.tbl_gpu
 #' @export
 summarize.tbl_gpu <- summarise.tbl_gpu
 
-# Lazy summarise: build AST node
-summarise_lazy <- function(.data, dots, .groups = "drop") {
-  current_schema <- if (!is.null(.data$lazy_ops)) {
-    infer_schema(.data$lazy_ops)
-  } else {
-    .data$schema
-  }
-
-  agg_functions <- c("sum", "mean", "min", "max", "n", "sd", "var", "count")
-  aggregations <- list()
-
-  for (i in seq_along(dots)) {
-    expr <- dots[[i]]
-    expr_text <- rlang::quo_text(expr)
-    output_col <- names(dots)[i]
-
-    if (is.null(output_col) || output_col == "") {
-      output_col <- expr_text
-      warning("Unnamed summarise expression '", output_col,
-              "' will use expression as column name.",
-              call. = FALSE)
-    }
-
-    if (grepl("^n\\(\\)$", trimws(expr_text))) {
-      aggregations <- c(aggregations, list(make_aggregation(output_col, NA_character_, "n")))
-      next
-    }
-
-    match_result <- regmatches(
-      expr_text,
-      regexec("^([a-zA-Z_][a-zA-Z0-9_]*)\\(([^)]+)\\)$", expr_text)
-    )[[1]]
-
-    if (length(match_result) != 3) {
-      warning("Opaque summarise expression, falling back to eager execution: ",
-              expr_text, call. = FALSE)
-      .data <- as_eager(.data)
-      return(rlang::exec(summarise.tbl_gpu, .data, !!!dots, .groups = .groups))
-    }
-
-    func_name <- match_result[2]
-    col_name <- trimws(match_result[3])
-
-    if (!func_name %in% agg_functions) {
-      warning("Unsupported summarise function '", func_name,
-              "', falling back to eager execution.", call. = FALSE)
-      .data <- as_eager(.data)
-      return(rlang::exec(summarise.tbl_gpu, .data, !!!dots, .groups = .groups))
-    }
-
-    col_idx <- match(col_name, current_schema$names)
-    if (is.na(col_idx)) {
-      stop("Column '", col_name, "' not found.",
-           "\nAvailable columns: ", paste(current_schema$names, collapse = ", "),
-           call. = FALSE)
-    }
-
-    input_type <- current_schema$types[col_idx]
-    aggregations <- c(aggregations, list(make_aggregation(output_col, col_name,
-                                                          func_name, input_type)))
-  }
-
-  if (is.null(.data$lazy_ops)) {
-    .data$lazy_ops <- ast_source(.data$schema)
-  }
-
-  .data$lazy_ops <- ast_summarise(.data$lazy_ops, aggregations, .data$groups)
-  .data$schema <- infer_schema(.data$lazy_ops)
-  .data$groups <- character()
-  .data
+# Internal: Strip a leading `pkg::` qualifier from an aggregation call's
+# text (e.g. `dplyr::n()` -> `n()`, `stats::sd(mpg)` -> `sd(mpg)`), so the
+# shape-matching regexes below (and in parse_aggregations()) see the bare
+# call regardless of how the user namespaced it.
+#
+# @param expr_text Character, expression text from rlang::quo_text()
+# @return Character, with any leading `identifier::` removed
+# @keywords internal
+strip_ns_prefix <- function(expr_text) {
+  sub("^[a-zA-Z_][a-zA-Z0-9_.]*::", "", trimws(expr_text))
 }
 
 # Internal: Pre-process aggregation expressions
 #
 # Detects expressions inside aggregation functions (e.g., sum(carb == 4))
 # and creates temporary columns for them using mutate operations.
+#
+# Per D4: if a dot needs a temp column and `.data` is lazy with pending
+# operations, this materializes (`compute()`) once, up front, before
+# building any temp column, and notifies via `cuplyr_fallback_notify()` --
+# `create_temp_column()` always operates on a materialized GPU pointer
+# rather than reaching into an in-progress AST.
 #
 # @param .data A tbl_gpu object
 # @param dots Quosures from summarise()
@@ -215,26 +130,21 @@ preprocess_agg_expressions <- function(.data, dots) {
   new_dots <- vector("list", length(dots))
   names(new_dots) <- names(dots)
 
-  # Supported aggregation functions
-  agg_functions <- c("sum", "mean", "min", "max", "n", "sd", "var", "count")
-
-  # Counter for temporary column names
-  temp_col_counter <- 0
-
   for (i in seq_along(dots)) {
     expr <- dots[[i]]
     expr_text <- rlang::quo_text(expr)
+    match_text <- strip_ns_prefix(expr_text)
 
     # Check for n() which has no column argument
-    if (grepl("^n\\(\\)$", trimws(expr_text))) {
+    if (grepl("^n\\(\\)$", match_text)) {
       new_dots[[i]] <- expr
       next
     }
 
     # Parse function(argument) pattern
     match_result <- regmatches(
-      expr_text,
-      regexec("^([a-zA-Z_][a-zA-Z0-9_]*)\\((.+)\\)$", expr_text)
+      match_text,
+      regexec("^([a-zA-Z_][a-zA-Z0-9_]*)\\((.+)\\)$", match_text)
     )[[1]]
 
     if (length(match_result) != 3) {
@@ -245,8 +155,9 @@ preprocess_agg_expressions <- function(.data, dots) {
     func_name <- match_result[2]
     arg_text <- trimws(match_result[3])
 
-    # Check if argument is a simple column name
-    if (arg_text %in% working_data$schema$names) {
+    # Check if argument is a simple column name (a pure schema lookup: safe
+    # to call even while lazy ops are still pending, no GPU work involved).
+    if (arg_text %in% current_schema(working_data)$names) {
       # Simple column reference, keep as-is
       new_dots[[i]] <- expr
       next
@@ -262,9 +173,15 @@ preprocess_agg_expressions <- function(.data, dots) {
       next
     }
 
-    # Create a temporary column name
-    temp_col_counter <- temp_col_counter + 1
-    temp_col_name <- paste0(".temp_agg_", temp_col_counter)
+    # Materialize before building the temp column if lazy ops are pending.
+    if (has_pending_ops(working_data)) {
+      working_data <- compute(working_data)
+      cuplyr_fallback_notify("summarise", expr_text)
+    }
+
+    # Create a temporary column name (index-based, so it stays unique even
+    # though not every dot ends up needing one).
+    temp_col_name <- paste0(".temp_agg_", i)
 
     # Parse the expression and create the temporary column via mutate
     # We need to handle comparison operators (==, !=, >, <, >=, <=)
@@ -404,39 +321,56 @@ create_temp_column <- function(.data, col_name, expr_text) {
   )
 }
 
-# Internal: Parse aggregation expressions
+# Internal: Parse aggregation expressions into make_aggregation() structs
 #
-# Extracts column indices, aggregation types, and result types from
-# summarise expressions.
+# The one parser used by both eager and lazy scheduling (D1): given a
+# schema and quosures already simplified by preprocess_agg_expressions()
+# (so every dot's argument is either a bare column name or the no-arg
+# n()), validates function/column names -- raising the same three
+# diagnosable errors the pre-unification eager parser did, verbatim -- and
+# emits aggregation structs (via make_aggregation(), which also folds in
+# former get_agg_result_type()'s result-type inference) carrying the
+# *cudf*-accepted function name. This is the fix for lazy sd()/var(),
+# which used to reach C++ as "sd"/"var" (gpu_summarise()/get_groupby_agg()
+# in src/ops_groupby.cpp only accept "std"/"variance") and error out with
+# "Unknown aggregation type"; the eager path already translated these
+# names and continues to do so here.
 #
-# @param .data A tbl_gpu object
-# @param dots Quosures from summarise()
-# @return List with col_indices, agg_types, and result_types
+# A leading `pkg::` qualifier (`dplyr::n()`, `stats::sd(mpg)`, ...) is
+# stripped before shape-matching so namespaced aggregation calls resolve
+# the same way as their bare equivalents.
+#
+# @param schema Current schema (list(names=, types=))
+# @param dots Quosures from summarise(), already temp-column-preprocessed
+# @return List of aggregation structs (see make_aggregation())
 # @keywords internal
-parse_agg_expressions <- function(.data, dots) {
-  col_indices <- integer(length(dots))
-  agg_types <- character(length(dots))
-  result_types <- character(length(dots))
-
-  # Supported aggregation functions and their types
+parse_aggregations <- function(schema, dots) {
+  # dplyr-facing aggregation function names (order matches the historical
+  # error message from parse_agg_expressions()) and their cudf-accepted
+  # equivalents (src/ops_groupby.cpp::get_groupby_agg()).
   agg_functions <- c("sum", "mean", "min", "max", "n", "sd", "var", "count")
+  agg_fn_map <- c(
+    sum = "sum", mean = "mean", min = "min", max = "max",
+    n = "n", sd = "std", var = "variance", count = "n"
+  )
+
+  aggregations <- vector("list", length(dots))
 
   for (i in seq_along(dots)) {
     expr <- dots[[i]]
     expr_text <- rlang::quo_text(expr)
+    match_text <- strip_ns_prefix(expr_text)
 
     # Check for n() which has no column argument
-    if (grepl("^n\\(\\)$", trimws(expr_text))) {
-      col_indices[i] <- 0L  # Use first column (ignored for count)
-      agg_types[i] <- "n"
-      result_types[i] <- "INT64"
+    if (grepl("^n\\(\\)$", match_text)) {
+      aggregations[[i]] <- make_aggregation(names(dots)[i], NA_character_, "n")
       next
     }
 
     # Parse function(column) pattern
     match_result <- regmatches(
-      expr_text,
-      regexec("^([a-zA-Z_][a-zA-Z0-9_]*)\\(([^)]+)\\)$", expr_text)
+      match_text,
+      regexec("^([a-zA-Z_][a-zA-Z0-9_]*)\\(([^)]+)\\)$", match_text)
     )[[1]]
 
     if (length(match_result) != 3) {
@@ -456,57 +390,18 @@ parse_agg_expressions <- function(.data, dots) {
     }
 
     # Validate column
-    col_idx <- match(col_name, .data$schema$names)
+    col_idx <- match(col_name, schema$names)
     if (is.na(col_idx)) {
       stop("Column '", col_name, "' not found.",
-           "\nAvailable columns: ", paste(.data$schema$names, collapse = ", "),
+           "\nAvailable columns: ", paste(schema$names, collapse = ", "),
            call. = FALSE)
     }
 
-    col_indices[i] <- col_idx - 1L  # Convert to 0-based
+    input_type <- schema$types[col_idx]
+    cudf_fn <- unname(agg_fn_map[func_name])
 
-    # Map function to aggregation type
-    agg_types[i] <- switch(func_name,
-      "sum" = "sum",
-      "mean" = "mean",
-      "min" = "min",
-      "max" = "max",
-      "sd" = "std",
-      "var" = "variance",
-      "count" = "n",
-      func_name
-    )
-
-    # Determine result type
-    input_type <- .data$schema$types[col_idx]
-    result_types[i] <- get_agg_result_type(agg_types[i], input_type)
+    aggregations[[i]] <- make_aggregation(names(dots)[i], col_name, cudf_fn, input_type)
   }
 
-  list(
-    col_indices = col_indices,
-    agg_types = agg_types,
-    result_types = result_types
-  )
-}
-
-# Internal: Determine result type for an aggregation
-#
-# @param agg_type The aggregation type (sum, mean, etc.)
-# @param input_type The input column type
-# @return The expected result type
-# @keywords internal
-get_agg_result_type <- function(agg_type, input_type) {
-  switch(agg_type,
-    "sum" = {
-      # Sum promotes integers to int64, keeps float64
-      if (input_type %in% c("INT32", "INT64")) "INT64" else "FLOAT64"
-    },
-    "mean" = "FLOAT64",  # Mean is always float
-    "min" = input_type,  # Min/max preserve type
-    "max" = input_type,
-    "n" = "INT64",       # Count is always int64
-    "std" = "FLOAT64",   # Std dev is always float
-    "variance" = "FLOAT64",  # Variance is always float
-    "FLOAT64"  # Default to float64
-  )
+  aggregations
 }

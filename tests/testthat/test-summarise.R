@@ -285,6 +285,106 @@ test_that("summarise() with var() works", {
 })
 
 # =============================================================================
+# S6: lazy sd()/var() and namespaced aggregation calls (eager/lazy unification)
+# =============================================================================
+
+test_that("summarise() with sd() matches dplyr in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) d |> dplyr::summarise(sd_mpg = sd(mpg))
+
+  expect_same_as_dplyr(mtcars, pipeline, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, ignore_col_types = TRUE)
+})
+
+test_that("summarise() with var() matches dplyr in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) d |> dplyr::summarise(var_mpg = var(mpg))
+
+  expect_same_as_dplyr(mtcars, pipeline, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, ignore_col_types = TRUE)
+})
+
+test_that("summarise() with grouped sd()/var() matches dplyr in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(sd_mpg = sd(mpg), var_hp = var(hp), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+})
+
+test_that("lazy summarise() with sum() of a comparison expression matches dplyr (temp-column path)", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    d |>
+      dplyr::filter(mpg > 0) |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(high_carb = sum(carb > 3), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+})
+
+test_that("lazy summarise() temp-column path materializes pending ops and notifies fallback", {
+  skip_if_no_gpu()
+
+  withr::local_options(cuplyr.fallback = "warn")
+
+  gpu_df <- tbl_gpu(mtcars, lazy = TRUE) |>
+    dplyr::filter(mpg > 0)
+
+  expect_warning(
+    result <- gpu_df |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(high_carb = sum(carb > 3)) |>
+      collect(),
+    "fell back to CPU evaluation"
+  )
+
+  expect_equal(nrow(result), 3)
+})
+
+test_that("summarise() accepts dplyr::n() (namespaced call) in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  pipeline_ungrouped <- function(d) d |> dplyr::summarise(count = dplyr::n())
+  pipeline_grouped <- function(d) {
+    d |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(count = dplyr::n(), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline_ungrouped, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline_ungrouped, ignore_col_types = TRUE)
+  expect_same_as_dplyr(mtcars, pipeline_grouped, arrange_by = "cyl", ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline_grouped, arrange_by = "cyl", ignore_col_types = TRUE)
+})
+
+test_that("summarise() accepts stats::sd() (namespaced call) in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  pipeline_ungrouped <- function(d) d |> dplyr::summarise(sd_mpg = stats::sd(mpg))
+  pipeline_grouped <- function(d) {
+    d |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(sd_mpg = stats::sd(mpg), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline_ungrouped, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline_ungrouped, ignore_col_types = TRUE)
+  expect_same_as_dplyr(mtcars, pipeline_grouped, arrange_by = "cyl", ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline_grouped, arrange_by = "cyl", ignore_col_types = TRUE)
+})
+
+# =============================================================================
 # Result Structure
 # =============================================================================
 
