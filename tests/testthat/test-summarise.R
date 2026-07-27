@@ -108,6 +108,58 @@ test_that("summarise() with n() works ungrouped", {
   expect_equal(result$count, 32)
 })
 
+test_that("summarise(n = n()) declares a schema type matching the actual GPU column type (S7)", {
+  skip_if_no_gpu()
+
+  # Ground truth (see R/summarise.R::make_aggregation() / src/ops_groupby.cpp
+  # gpu_summarise()): both the grouped (cudf groupby count aggregation, which
+  # yields cudf::size_type = INT32) and ungrouped (explicit scalar column,
+  # built as INT32 in the C++) paths produce an INT32 "n" column, in both
+  # eager and lazy exec modes. The schema declaration in make_aggregation()
+  # ("n" -> "INT32") must match this for both.
+  df <- data.frame(g = rep(1:2, 5), x = 1:10)
+
+  for (mode in c("eager", "lazy")) {
+    tbl <- tbl_gpu(df, lazy = identical(mode, "lazy"))
+
+    # --- ungrouped ---
+    res_ungrouped <- tbl |> dplyr::summarise(count = n())
+    if (identical(mode, "lazy")) res_ungrouped <- compute(res_ungrouped)
+    count_idx <- match("count", res_ungrouped$schema$names)
+    expect_equal(unname(res_ungrouped$schema$types[count_idx]), "INT32",
+                 info = paste(mode, "ungrouped: schema$types"))
+    expect_equal(unname(gpu_col_types(res_ungrouped$ptr)[count_idx]), "int",
+                 info = paste(mode, "ungrouped: actual GPU column type"))
+    expect_type(collect(res_ungrouped)$count, "integer")
+
+    # --- grouped ---
+    res_grouped <- tbl |> dplyr::group_by(g) |> dplyr::summarise(count = n())
+    if (identical(mode, "lazy")) res_grouped <- compute(res_grouped)
+    count_idx_g <- match("count", res_grouped$schema$names)
+    expect_equal(unname(res_grouped$schema$types[count_idx_g]), "INT32",
+                 info = paste(mode, "grouped: schema$types"))
+    expect_equal(unname(gpu_col_types(res_grouped$ptr)[count_idx_g]), "int",
+                 info = paste(mode, "grouped: actual GPU column type"))
+    expect_type(collect(res_grouped)$count, "integer")
+  }
+})
+
+test_that("summarise(n = n()) matches dplyr's integer type exactly, ungrouped and grouped (S7)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(g = rep(1:2, 5), x = 1:10)
+
+  pipeline_ungrouped <- function(d) dplyr::summarise(d, count = dplyr::n())
+  pipeline_grouped <- function(d) {
+    d |> dplyr::group_by(g) |> dplyr::summarise(count = dplyr::n(), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(df, pipeline_ungrouped, ignore_col_types = FALSE)
+  expect_same_as_dplyr(df, pipeline_grouped, arrange_by = "g", ignore_col_types = FALSE)
+  expect_same_as_dplyr_lazy(df, pipeline_ungrouped, ignore_col_types = FALSE)
+  expect_same_as_dplyr_lazy(df, pipeline_grouped, arrange_by = "g", ignore_col_types = FALSE)
+})
+
 test_that("summarise() with multiple aggregations works ungrouped", {
   skip_if_no_gpu()
 

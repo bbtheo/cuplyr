@@ -73,14 +73,20 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
             cudf::column_view col = view.column(agg_col_indices[i]);
 
             if (agg_type == "n") {
-                int64_t count = view.num_rows();
-                rmm::device_buffer data(sizeof(int64_t),
+                // cudf::size_type (view.num_rows()) is already int32_t, so this
+                // narrows nothing; INT32 also matches the grouped path's cudf
+                // count aggregation (size_type) and dplyr's n() (integer),
+                // keeping schema declaration ("n" -> INT32 in make_aggregation(),
+                // R/ast.R) consistent with the actual GPU column in both the
+                // grouped and ungrouped paths.
+                int32_t count = view.num_rows();
+                rmm::device_buffer data(sizeof(int32_t),
                                        rmm::cuda_stream_view(),
                                        rmm::mr::get_current_device_resource_ref());
-                check_cuda(cudaMemcpy(data.data(), &count, sizeof(int64_t), cudaMemcpyHostToDevice),
+                check_cuda(cudaMemcpy(data.data(), &count, sizeof(int32_t), cudaMemcpyHostToDevice),
                            "gpu_summarise count memcpy");
                 result_columns.push_back(std::make_unique<cudf::column>(
-                    cudf::data_type{cudf::type_id::INT64},
+                    cudf::data_type{cudf::type_id::INT32},
                     1,
                     std::move(data),
                     rmm::device_buffer{},
