@@ -17,6 +17,9 @@ infer_mutate_output_type(op, input_types, scalar)
 GPU type string
 }
 \description{
-Infer output type for a mutate expression
+Implements D5's ordered promotion rules (see
+\code{scratchpad/unification_design.md}). Note this deliberately mirrors R's own
+arithmetic promotion, not SQL/cudf defaults: \code{2L^2L} is a double in R, and
+\code{TRUE+TRUE} is an integer, and dplyr agrees with both.
 }
 \keyword{internal}

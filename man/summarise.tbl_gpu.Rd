@@ -10,7 +10,7 @@
 \method{summarize}{tbl_gpu}(.data, ..., .groups = "drop")
 }
 \arguments{
-\item{.data}{A grouped \code{tbl_gpu} object created by \code{\link[dplyr:group_by]{dplyr::group_by()}}.}
+\item{.data}{A grouped \code{tbl_gpu} object created by \code{\link[dplyr:group_by]{group_by()}}.}
 
 \item{...}{Name-value pairs of summary functions. The name will be the
 name of the variable in the result. The value must be a single aggregation
@@ -24,7 +24,7 @@ A \code{tbl_gpu} object with one row per group containing the grouping
 columns and computed aggregations.
 }
 \description{
-Computes aggregations on groups defined by \code{\link[dplyr:group_by]{dplyr::group_by()}}. Operations are
+Computes aggregations on groups defined by \code{\link[dplyr:group_by]{group_by()}}. Operations are
 performed entirely on the GPU for maximum performance.
 }
 \details{

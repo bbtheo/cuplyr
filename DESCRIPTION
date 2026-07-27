@@ -14,7 +14,6 @@ URL: https://github.com/bbtheo/cuplyr, https://bbtheo.github.io/cuplyr/
 BugReports: https://github.com/bbtheo/cuplyr/issues
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.3
 SystemRequirements:
     NVIDIA GPU with Compute Capability >= 7.0 (Volta or newer),
     CUDA Toolkit >= 12.2,
@@ -44,3 +43,4 @@ LinkingTo:
     Rcpp
 Config/testthat/edition: 3
 NeedsCompilation: yes
+Config/roxygen2/version: 8.0.0

@@ -19,19 +19,19 @@ will add to existing groups.}
 }
 \value{
 A grouped \code{tbl_gpu} object. The object has the same data but with
-grouping columns recorded for use by \code{\link[dplyr:summarise]{dplyr::summarise()}}.
+grouping columns recorded for use by \code{\link[dplyr:summarise]{summarise()}}.
 }
 \description{
-Marks columns to group by for subsequent operations like \code{\link[dplyr:summarise]{dplyr::summarise()}}.
+Marks columns to group by for subsequent operations like \code{\link[dplyr:summarise]{summarise()}}.
 The grouping is stored as metadata and does not perform any computation
 until an aggregation is requested.
 }
 \details{
-Unlike operations like \code{\link[dplyr:filter]{dplyr::filter()}} or \code{\link[dplyr:mutate]{dplyr::mutate()}}, \code{group_by()} does not
+Unlike operations like \code{\link[=filter]{filter()}} or \code{\link[dplyr:mutate]{mutate()}}, \code{group_by()} does not
 perform any GPU computation. It simply records which columns should be
 used for grouping in subsequent aggregation operations.
 
-The actual groupby computation happens when you call \code{\link[dplyr:summarise]{dplyr::summarise()}} on the
+The actual groupby computation happens when you call \code{\link[dplyr:summarise]{summarise()}} on the
 grouped table. This lazy approach allows you to chain multiple operations
 before executing the expensive groupby operation.
 }

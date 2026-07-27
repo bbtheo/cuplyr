@@ -20,11 +20,8 @@ lower_and_execute <- function(ast, source_ptr) {
     "filter" = lower_filter(ast, source_ptr),
     "mutate" = lower_mutate(ast, source_ptr),
     "arrange" = lower_arrange(ast, source_ptr),
-    "head" = lower_head(ast, source_ptr),
     "summarise" = lower_summarise(ast, source_ptr),
     "join" = lower_join(ast, source_ptr),
-    "group_by" = lower_and_execute(ast$input, source_ptr),
-    "ungroup" = lower_and_execute(ast$input, source_ptr),
     "barrier" = lower_and_execute(ast$input, source_ptr),
     stop("Unknown AST node type: ", ast$type, call. = FALSE)
   )
@@ -130,15 +127,6 @@ lower_arrange <- function(ast, source_ptr) {
   }
 
   gpu_arrange(input_ptr, col_indices, descending)
-}
-
-#' Lower head node
-#' @keywords internal
-lower_head <- function(ast, source_ptr) {
-  input_ptr <- lower_and_execute(ast$input, source_ptr)
-  input_schema <- infer_schema(ast$input)
-  head_df <- gpu_head(input_ptr, ast$n, input_schema$names)
-  df_to_gpu(head_df)
 }
 
 #' Lower summarise node

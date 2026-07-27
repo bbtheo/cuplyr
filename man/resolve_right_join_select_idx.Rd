@@ -4,23 +4,50 @@
 \alias{resolve_right_join_select_idx}
 \title{Resolve the column reorder/select for a right-join-via-swapped-left-join}
 \usage{
-resolve_right_join_select_idx(desired_names, current_names)
+resolve_right_join_select_idx(plan, left_schema, right_schema, suffix)
 }
 \arguments{
-\item{desired_names}{Character vector, target output column names.}
+\item{plan}{The list returned by \code{\link[=build_right_join_via_left]{build_right_join_via_left()}}.}
 
-\item{current_names}{Character vector, actual column names of the
-executed swapped join's result.}
+\item{left_schema, right_schema}{Schemas of the original (unswapped) left
+and right tables.}
+
+\item{suffix}{Suffix pair as passed to \code{right_join()}.}
 }
 \value{
-Integer vector, 1-based indices into \code{current_names}.
+Integer vector, 1-based indices into the swapped join's raw output
+columns that select/reorder/rename it into \code{plan$desired_names}.
 }
 \description{
-Given the desired final output column names (from
-\code{\link[=build_right_join_via_left]{build_right_join_via_left()}}) and the actual column names produced by the
-already-executed swapped \code{left_join()}, returns the 1-based indices that
-select/reorder the latter into the former, erroring if any desired column
-is missing (which should not happen for valid inputs -- this is a
-consistency check).
+The swapped \code{left_join(y, x, ...)} used to implement \code{right_join(x, y)} is
+always executed with \code{keep = TRUE} internally (so both original join-key
+columns survive, uncombined), regardless of what the caller's \code{keep}
+actually requested. That means its raw output column names never contain
+a bare, unsuffixed key name when the two tables' keys share a name -- only
+the suffixed variants (e.g. \code{"id.x"}/\code{"id.y"}) do. A plain name-based match
+of \code{\link[=build_right_join_via_left]{build_right_join_via_left()}}'s \code{desired_names} (which, for
+\code{keep = FALSE}, wants a single unsuffixed key column) against those raw
+names would therefore always fail to find it.
+}
+\details{
+Instead, this matches columns by \emph{origin} (which original table, \code{x} or
+\code{y}, they are sourced from) and \emph{raw source name} -- a pair that uniquely
+identifies a physical column regardless of what suffix it ends up
+displayed with. The desired schema's origins are relative to the
+original, unswapped \code{x}/\code{y}; the swapped join's own output-info origins
+are relative to \emph{its} call (\code{"left"} = original \code{y}, \code{"right"} = original
+\code{x}), so they're translated back before comparing.
+
+Key-coalescing note: because the swapped join is a left join keeping every
+row of the original right table (\code{y}), the copy of the key column sourced
+from the original \emph{left} table (\code{x}) is \code{NULL} for right-only rows (\code{x}
+has no matching row at all). \code{\link[=build_right_join_via_left]{build_right_join_via_left()}} handles this by
+re-pointing the \code{keep = FALSE} key column's \emph{source} (not its display
+name, which still follows dplyr's \code{by = c(x_col = y_col)} convention) to
+the always-present \code{y} copy for such rows, so \code{desired_origin}/
+\code{desired_source} here already reflect the coalesced source -- this
+function just needs to find the matching raw column, whichever side it
+now points at. This mirrors the same-shaped \code{full_join()} join-key
+coalescing fix in \code{src/ops_join.cpp} (see \code{test-join.R}).
 }
 \keyword{internal}

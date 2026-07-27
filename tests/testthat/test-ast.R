@@ -240,13 +240,13 @@ test_that("is_barrier identifies barrier nodes", {
   source <- ast_source(list(names = "x", types = "FLOAT64"))
   filter_node <- ast_filter(source, list())
   arrange_node <- ast_arrange(source, list())
-  head_node <- ast_head(source, 10)
+  summarise_node <- ast_summarise(source, list(), groups = character())
   barrier_node <- ast_barrier(source)
 
   expect_false(is_barrier(source))
   expect_false(is_barrier(filter_node))
   expect_true(is_barrier(arrange_node))
-  expect_true(is_barrier(head_node))
+  expect_true(is_barrier(summarise_node))
   expect_true(is_barrier(barrier_node))
 })
 

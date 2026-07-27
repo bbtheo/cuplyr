@@ -81,25 +81,6 @@ ast_arrange <- function(input, sort_specs, groups = character()) {
   ast_node("arrange", input = input, sort_specs = sort_specs, groups = groups)
 }
 
-#' Create a group_by AST node (metadata only)
-#'
-#' @param input Input AST node
-#' @param groups Character vector of grouping columns
-#' @return An ast_group_by node
-#' @keywords internal
-ast_group_by <- function(input, groups) {
-  ast_node("group_by", input = input, groups = groups)
-}
-
-#' Create an ungroup AST node (metadata only)
-#'
-#' @param input Input AST node
-#' @return An ast_ungroup node
-#' @keywords internal
-ast_ungroup <- function(input) {
- ast_node("ungroup", input = input)
-}
-
 #' Create a summarise AST node
 #'
 #' @param input Input AST node
@@ -109,16 +90,6 @@ ast_ungroup <- function(input) {
 #' @keywords internal
 ast_summarise <- function(input, aggregations, groups) {
   ast_node("summarise", input = input, aggregations = aggregations, groups = groups)
-}
-
-#' Create a head/limit AST node
-#'
-#' @param input Input AST node
-#' @param n Number of rows to keep
-#' @return An ast_head node
-#' @keywords internal
-ast_head <- function(input, n) {
-  ast_node("head", input = input, n = n)
 }
 
 #' Create a barrier AST node (optimization fence)
@@ -352,21 +323,6 @@ infer_schema.ast_arrange <- function(node) {
 }
 
 #' @export
-infer_schema.ast_group_by <- function(node) {
-  infer_schema(node$input)
-}
-
-#' @export
-infer_schema.ast_ungroup <- function(node) {
-  infer_schema(node$input)
-}
-
-#' @export
-infer_schema.ast_head <- function(node) {
-  infer_schema(node$input)
-}
-
-#' @export
 infer_schema.ast_barrier <- function(node) {
   infer_schema(node$input)
 }
@@ -457,7 +413,7 @@ is_opaque_expression <- function(expr_text) {
 #' @keywords internal
 is_barrier <- function(node) {
   if (is.null(node)) return(FALSE)
-  node$type %in% c("arrange", "head", "barrier", "summarise")
+  node$type %in% c("arrange", "barrier", "summarise")
 }
 
 #' Get the depth of an AST tree
@@ -547,9 +503,6 @@ print.ast_node <- function(x, ..., indent = 0) {
       cat(" [", length(x$groups), " groups, ",
           length(x$aggregations), " aggs]", sep = "")
     },
-    "head" = {
-      cat(" [n=", x$n, "]", sep = "")
-    },
     "join" = {
       cat(" [", x$join_type, " join]", sep = "")
     }
@@ -582,9 +535,6 @@ ast_to_string <- function(node) {
     "select" = paste0("select[", paste(node$columns, collapse = ","), "]"),
     "arrange" = paste0("arrange[", length(node$sort_specs), "]"),
     "summarise" = paste0("summarise[", length(node$aggregations), "]"),
-    "head" = paste0("head[", node$n, "]"),
-    "group_by" = paste0("group_by[", paste(node$groups, collapse = ","), "]"),
-    "ungroup" = "ungroup",
     "barrier" = "barrier",
     "join" = paste0("join[", node$join_type, "]"),
     node$type

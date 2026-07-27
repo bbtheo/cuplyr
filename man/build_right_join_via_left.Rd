@@ -30,6 +30,11 @@ A list with:
 \itemize{
 \item \code{swapped_by}: the join spec to pass to \code{left_join(y, x, by = ...)}
 \item \code{desired_names}: the output column names a native right join would have
+\item \code{desired_types}: the output column GPU types, parallel to \code{desired_names}
+\item \code{desired_origin}: for each \code{desired_names} entry, whether it is
+sourced from the original \code{"left"} (\code{x}) or \code{"right"} (\code{y}) table
+\item \code{desired_source}: for each \code{desired_names} entry, the raw column name
+in its origin table's schema (before any suffixing)
 }
 }
 \description{
@@ -38,20 +43,21 @@ swapped and \code{keep = TRUE} forced (so both original key columns survive the
 join uncombined), followed by reordering/selecting down to the column set
 and names a native right join would produce. This helper computes the two
 pieces of that plan that are pure functions of the input schemas (i.e. that
-don't require the swapped join to have actually run yet), shared by both
-callers:
-\itemize{
-\item \code{right_join.tbl_gpu()} (eager path, this file), which executes the
-swapped join via the \code{left_join()} S3 generic on live \code{tbl_gpu} objects
-\item \code{lower_join()} (\code{R/lower.R}), which lowers a lazy \code{ast_join} node by
-calling \code{gpu_left_join()} directly on raw GPU table pointers
-}
+don't require the swapped join to have actually run yet).
 }
 \details{
-Callers are responsible for running the swapped join and then resolving
-the reorder/select against its \emph{actual} resulting column names via
-\code{\link[=resolve_right_join_select_idx]{resolve_right_join_select_idx()}} -- in that order, matching the original,
-non-shared implementations this replaces (the swapped join must run first;
-only then can columns be selected out of its result).
+\code{right_join.tbl_gpu()} (this file) always builds a \code{"right"}-typed
+\code{ast_join} node and hands it to \code{push_join()} (\code{R/execute.R}), which
+lowers it -- in both the eager and lazy schedules -- via \code{lower_join()}'s
+\code{"right"} case (\code{R/lower.R}). That is the single caller of this helper: it
+calls \code{gpu_left_join()} on the swapped sides, then this helper's plan
+(via \code{resolve_right_join_select_idx()}) to reorder/rename the raw output.
+
+Unlike the swapped join itself, the reorder/select plan resolved by
+\code{\link[=resolve_right_join_select_idx]{resolve_right_join_select_idx()}} is a pure function of the schemas too --
+it matches desired output columns to the swapped join's (formulaic, always
+\code{keep = TRUE}) raw output columns by origin table + raw source name, not
+by the swapped join's actual runtime column names -- so callers may
+compute it before or after actually running the swapped join.
 }
 \keyword{internal}

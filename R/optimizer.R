@@ -197,10 +197,6 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       ast$input <- push_down_projections(ast$input, needed, ast$groups)
       ast
     },
-    "group_by" = {
-      ast$input <- push_down_projections(ast$input, required_cols, ast$groups)
-      ast
-    },
     "select" = {
       ast$input <- push_down_projections(ast$input, ast$columns, group_cols)
       ast
@@ -419,10 +415,6 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
       agg_inputs <- agg_inputs[!is.na(agg_inputs)]
       needed <- union(ast$groups, agg_inputs)
       ast$input <- prune_dead_columns(ast$input, needed, ast$groups)
-      ast
-    },
-    "group_by" = {
-      ast$input <- prune_dead_columns(ast$input, required_cols, ast$groups)
       ast
     },
     "select" = {
