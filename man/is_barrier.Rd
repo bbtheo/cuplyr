@@ -28,5 +28,10 @@ is: it's a row-selection op whose result depends on the current row
 order/content, so reordering or pushing other ops across it (e.g. a
 filter that would change which rows \code{slice_head()} sees) would change
 the result.
+
+\code{rename} is a barrier for the reasons documented on \code{ast_rename()}
+above: the simplest safe choice for a schema-only rename, avoiding the
+need to translate column references through its name map for anything
+pushed across it.
 }
 \keyword{internal}

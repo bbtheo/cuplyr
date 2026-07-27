@@ -4,7 +4,14 @@
 \alias{mutate.tbl_gpu}
 \title{Create or modify columns in a GPU table}
 \usage{
-\method{mutate}{tbl_gpu}(.data, ...)
+\method{mutate}{tbl_gpu}(
+  .data,
+  ...,
+  .by = NULL,
+  .keep = c("all", "used", "unused", "none"),
+  .before = NULL,
+  .after = NULL
+)
 }
 \arguments{
 \item{.data}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
@@ -12,10 +19,27 @@
 \item{...}{Name-value pairs of expressions. The name gives the column name
 (new or existing), and the value is an expression involving existing
 columns and/or scalar values (see "Supported expressions" below).}
+
+\item{.by}{Optional on-the-fly grouping columns (tidyselect). Forces a
+CPU fallback (grouped/windowed mutate expressions aren't GPU-native
+yet -- see \code{scratchpad/todo.md} Phase 5); use \code{\link[dplyr:group_by]{dplyr::group_by()}}
+beforehand for the GPU-native path instead.}
+
+\item{.keep}{One of \code{"all"} (default), \code{"used"}, \code{"unused"}, \code{"none"};
+controls which of \code{.data}'s \emph{other} columns (besides ones \code{...}
+creates or modifies, and group columns, both of which are always kept)
+survive in the output -- see "\code{.keep} semantics" below.}
+
+\item{.before, .after}{Optionally, control where new columns should
+appear, using the same tidyselect syntax as \code{\link[=relocate.tbl_gpu]{relocate.tbl_gpu()}}.
+Only genuinely \emph{new} columns are repositioned; a modified existing
+column stays at its original position.}
 }
 \value{
 A \code{tbl_gpu} object with the new or modified columns. If a column
-name already exists, it is replaced. New columns are appended.
+name already exists, it is replaced. New columns are appended (subject
+to \code{.before}/\code{.after}), and \code{.data}'s other columns are kept or dropped
+per \code{.keep}.
 }
 \description{
 Adds new columns or modifies existing columns in a GPU table using
@@ -23,6 +47,30 @@ expressions, similar to \code{dplyr::mutate()}. All computations are
 performed on the GPU for maximum performance.
 }
 \details{
+\subsection{\code{.keep} semantics}{
+
+Verified empirically against dplyr 1.2.1 (dplyr's own docs understate the
+exact rule): the columns created or modified by \code{...} (i.e. every dot's
+output column, whether new or an existing name being replaced) and every
+group column are \strong{always} kept, regardless of \code{.keep}. \code{.keep} only
+controls which \emph{other} (untouched, non-group) columns of \code{.data} survive
+alongside them:
+\itemize{
+\item \code{"all"} (default): every other column.
+\item \code{"used"}: other columns that are referenced as an \emph{input} to any
+of \code{...}'s expressions (union across all dots).
+\item \code{"unused"}: other columns NOT referenced as an input to any
+expression -- the complement of \code{"used"}.
+\item \code{"none"}: no other columns at all.
+}
+Column order: \code{.data}'s original columns keep their original relative
+order (modified columns don't move), and genuinely new columns are
+appended at the end (or repositioned via \code{.before}/\code{.after}); the final
+set is then filtered down according to \code{.keep}, preserving that same
+relative order. This differs from \code{\link[dplyr:transmute]{transmute()}}, whose output order is
+the literal \code{...} dot order (see \code{transmute()}'s own docs).
+}
+
 \subsection{Supported expressions}{
 
 \code{mutate()} parses its arguments through the same expression IR that

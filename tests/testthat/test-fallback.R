@@ -33,7 +33,11 @@ fallback_sweep_pipelines <- function() {
   y_small <- tibble::tibble(g = c(1, 3))
 
   list(
-    transmute = list(fn = function(d) dplyr::transmute(d, z = x * 2)),
+    # transmute()/glimpse() are GPU-native now (Phase 3 task 4, see
+    # R/mutate.R, R/glimpse.R, test-dplyr-transmute.R) -- no longer part of
+    # this fallback sweep. reframe() takes over as this file's vehicle for
+    # the cross-cutting fallback behaviors below (materialization/exec_mode,
+    # factor round-trip, the cuplyr.fallback option).
     reframe = list(fn = function(d) dplyr::reframe(d, mx = max(x), .by = g), arrange_by = "g"),
     rowwise = list(fn = function(d) dplyr::rowwise(d)),
     # slice()/slice_head()/slice_tail() are GPU-native for ungrouped input
@@ -123,17 +127,6 @@ for (.nm in names(fallback_pipelines)) {
 #    frame (metadata queries, list results, list-column results, superseded
 #    sampling verbs) -- one per remaining registered fallback verb.
 # =============================================================================
-
-test_that("glimpse() prints structure and returns the original tbl_gpu", {
-  skip_if_no_gpu()
-  gt <- tbl_gpu(fallback_df())
-
-  out <- capture.output(result <- dplyr::glimpse(gt))
-
-  expect_true(any(grepl("Rows:", out)))
-  expect_true(any(grepl("g", out)))
-  expect_identical(result, gt)
-})
 
 test_that("nest_join() returns a plain data frame with a list-column, not a tbl_gpu", {
   skip_if_no_gpu()
@@ -372,13 +365,15 @@ test_that("fallback verbs materialize pending lazy ops and restore lazy exec_mod
   expect_true(is_lazy(lazy_gt))
   expect_true(has_pending_ops(lazy_gt))
 
-  result <- lazy_gt |> dplyr::transmute(z = x * 2)
+  # transmute() is GPU-native now (Phase 3 task 4, R/mutate.R) -- reframe()
+  # takes over as this test's fallback vehicle.
+  result <- lazy_gt |> dplyr::reframe(z = max(x), .by = g)
 
   expect_true(is_tbl_gpu(result))
   expect_true(is_lazy(result))
   expect_false(has_pending_ops(result))
 
-  oracle <- dplyr::transmute(dplyr::filter(df, x > 10), z = x * 2)
+  oracle <- dplyr::reframe(dplyr::filter(df, x > 10), z = max(x), .by = g)
   expect_equal(
     dplyr::arrange(collect(result), z),
     dplyr::arrange(oracle, z)
@@ -390,7 +385,7 @@ test_that("eager fallback input stays eager after re-upload", {
   df <- fallback_df()
   gt <- tbl_gpu(df, lazy = FALSE)
 
-  result <- gt |> dplyr::transmute(z = x * 2)
+  result <- gt |> dplyr::reframe(z = max(x), .by = g)
 
   expect_true(is_tbl_gpu(result))
   expect_false(is_lazy(result))
@@ -405,11 +400,12 @@ test_that("factor columns round-trip through a fallback verb", {
   gt <- tbl_gpu(df)
 
   # rename() is GPU-native now (Phase 3 task 3, R/rename.R) -- its own
-  # factor round-trip is covered directly in test-dplyr-rename.R. Use
-  # transmute() here instead, which is still a genuine CPU fallback verb,
-  # to keep this test actually exercising gpu_fallback()'s factor
-  # restoration path.
-  result <- gt |> dplyr::transmute(f, grp = g) |> collect()
+  # factor round-trip is covered directly in test-dplyr-rename.R.
+  # transmute() is GPU-native now too (Phase 3 task 4, R/mutate.R). Use
+  # reframe() here instead, which is still a genuine CPU fallback verb, to
+  # keep this test actually exercising gpu_fallback()'s factor restoration
+  # path.
+  result <- gt |> dplyr::reframe(f, grp = g) |> collect()
 
   expect_true(is.factor(result$f))
   expect_equal(levels(result$f), c("lo", "hi"))
@@ -421,7 +417,10 @@ test_that("options(cuplyr.fallback = 'warn') warns for a fallback verb", {
   withr::local_options(cuplyr.fallback = "warn")
   gt <- tbl_gpu(fallback_df())
 
-  expect_warning(gt |> dplyr::transmute(z = x * 2), "transmute.*fell back to CPU evaluation")
+  expect_warning(
+    gt |> dplyr::reframe(z = max(x), .by = g),
+    "reframe.*fell back to CPU evaluation"
+  )
 })
 
 test_that("options(cuplyr.fallback = 'error') stops for a fallback verb", {
@@ -429,7 +428,10 @@ test_that("options(cuplyr.fallback = 'error') stops for a fallback verb", {
   withr::local_options(cuplyr.fallback = "error")
   gt <- tbl_gpu(fallback_df())
 
-  expect_error(gt |> dplyr::transmute(z = x * 2), "transmute.*fell back to CPU evaluation")
+  expect_error(
+    gt |> dplyr::reframe(z = max(x), .by = g),
+    "reframe.*fell back to CPU evaluation"
+  )
 })
 
 test_that("fallback verbs are silent by default", {
@@ -437,7 +439,7 @@ test_that("fallback verbs are silent by default", {
   withr::local_options(cuplyr.fallback = NULL)
   gt <- tbl_gpu(fallback_df())
 
-  expect_no_warning(gt |> dplyr::transmute(z = x * 2))
+  expect_no_warning(gt |> dplyr::reframe(z = max(x), .by = g))
 })
 
 test_that("GPU-native verbs never trigger a fallback notification", {
@@ -480,4 +482,16 @@ test_that("rename()/rename_with()/relocate() are GPU-native and never trigger a 
   expect_no_error(gt |> dplyr::relocate(s))
   expect_no_error(gt |> dplyr::select(renamed = x, g))
   expect_no_error(gt |> dplyr::pull(x))
+})
+
+test_that("transmute()/glimpse() are GPU-native and never trigger a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gt <- tbl_gpu(fallback_df())
+
+  expect_no_error(gt |> dplyr::transmute(z = x * 2))
+  expect_no_error(gt |> dplyr::transmute(z = x * 2, g))
+  expect_no_error(gt |> dplyr::mutate(z = x * 2, .keep = "used"))
+  expect_no_error(gt |> dplyr::mutate(z = x * 2, .after = g))
+  expect_no_error(capture.output(dplyr::glimpse(gt)))
 })

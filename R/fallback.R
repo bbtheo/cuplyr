@@ -105,10 +105,13 @@ collect_other_side <- function(y) {
 }
 
 # =============================================================================
-# transmute() / reframe() / rowwise()
+# reframe() / rowwise()
 #
 # distinct() moved to R/distinct.R (GPU-native, Phase 3) -- see ast_distinct
 # (R/ast.R), lower_distinct() (R/lower.R), gpu_distinct() (src/ops_distinct.cpp).
+# transmute() moved to R/mutate.R, and glimpse() to R/glimpse.R (both
+# GPU-native, Phase 3 task 4) -- see transmute.tbl_gpu()/parse_mutate_dots()
+# (R/mutate.R) and glimpse.tbl_gpu() (R/glimpse.R).
 # =============================================================================
 
 #' CPU fallback methods for dplyr verbs without a GPU-native implementation
@@ -147,16 +150,6 @@ NULL
 
 #' @rdname fallback-verbs
 #' @export
-#' @importFrom dplyr transmute
-transmute.tbl_gpu <- function(.data, ...) {
-  dots <- rlang::enquos(...)
-  gpu_fallback("transmute", .data, function(tbl) {
-    rlang::inject(dplyr::transmute(tbl, !!!dots))
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
 #' @importFrom dplyr reframe
 reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
   dots <- rlang::enquos(...)
@@ -174,28 +167,6 @@ rowwise.tbl_gpu <- function(.data, ...) {
   gpu_fallback("rowwise", .data, function(tbl) {
     rlang::inject(dplyr::rowwise(tbl, !!!dots))
   })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr glimpse
-glimpse.tbl_gpu <- function(x, width = NULL, ...) {
-  materialized <- if (has_pending_ops(x)) compute(x) else x
-
-  cuplyr_fallback_notify("glimpse", "glimpse()")
-
-  tbl <- collect(materialized)
-  if (length(materialized$groups) > 0) {
-    tbl <- dplyr::group_by(tbl, !!!rlang::syms(materialized$groups))
-  }
-
-  dplyr::glimpse(tbl, width = width, ...)
-
-  # glimpse() is a side-effecting print method: like dplyr's own
-  # glimpse.data.frame(), it returns its input unchanged (invisibly) rather
-  # than a transformed result, so there is nothing to re-upload -- return the
-  # original tbl_gpu so pipe chains continue to operate on GPU.
-  invisible(x)
 }
 
 # =============================================================================

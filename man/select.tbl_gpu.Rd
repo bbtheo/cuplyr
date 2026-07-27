@@ -16,11 +16,13 @@ to keep. Supports:
 \item Negative selection: \code{select(-x)} (not yet supported)
 \item Range: \code{select(x:z)} (not yet supported)
 \item Helpers: \code{starts_with()}, \code{ends_with()}, \code{contains()}, etc.
+\item Renaming while selecting: \code{select(new_name = old_name)}
 }}
 }
 \value{
 A \code{tbl_gpu} object containing only the selected columns.
-Column order matches the order specified in the selection.
+Column order matches the order specified in the selection; any
+\code{new = old} selections are renamed in the result.
 }
 \description{
 Keeps only the specified columns from a GPU table, similar to
@@ -29,6 +31,15 @@ Keeps only the specified columns from a GPU table, similar to
 \details{
 Column selection creates a new GPU table with only the selected columns.
 The original data remains in GPU memory until garbage collected.
+\subsection{Renaming}{
+
+\code{select(new_name = old_name)} both selects and renames \code{old_name}. This
+is schema-only (see \code{\link[=rename.tbl_gpu]{rename.tbl_gpu()}}): the underlying selection still
+runs as one \code{gpu_select()} gather, with the rename applied on top of it
+as a separate, schema-only \code{\link[=ast_rename]{ast_rename()}} step whenever the tidyselect
+resolution renamed a column.
+}
+
 \subsection{Performance}{
 
 Select operations involve copying column data to a new table structure.

@@ -4,9 +4,15 @@
 \alias{propagate_factor_levels}
 \title{Restrict factor level metadata to columns that survive an op}
 \usage{
-propagate_factor_levels(input_schema, surviving_names)
+propagate_factor_levels(node, input_schema, surviving_names)
 }
 \arguments{
+\item{node}{The AST node being applied (used to translate factor_levels
+keys through a \code{rename} node's name map, see \code{ast_rename()},
+\code{R/ast.R} -- without this, a renamed factor column's levels would be
+silently dropped here since its key in \code{input_schema$factor_levels}
+is the OLD name, which no longer appears in \code{surviving_names})}
+
 \item{input_schema}{The schema of the op's input (pre-op)}
 
 \item{surviving_names}{Character vector of column names in the new schema}

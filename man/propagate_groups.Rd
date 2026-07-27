@@ -23,4 +23,11 @@ appear in the node's (post-op) schema. This single rule reproduces
 today's per-verb behavior (select drops de-selected group columns;
 filter/mutate/arrange preserve all of them).
 }
+\details{
+\code{rename} needs one extra step before that final \code{intersect()}: a
+group column that got renamed (e.g. \code{rename(gdf, grp = g)} where \code{g} is
+grouped) must be translated to its NEW name first, or the plain
+\code{intersect()} would miss it entirely (\code{schema$names} has the new name,
+\code{groups} still has the old one) and silently drop the grouping.
+}
 \keyword{internal}

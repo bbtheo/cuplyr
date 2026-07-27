@@ -791,3 +791,251 @@ test_that("mutate() all-NA column arithmetic matches dplyr (lazy)", {
   pipeline <- function(d) dplyr::mutate(d, w = all_na + x, is_missing = is.na(all_na))
   expect_same_as_dplyr_lazy(df, pipeline)
 })
+
+# =============================================================================
+# .keep / .before / .after control args (Phase 3, task 4)
+#
+# Semantics verified empirically against dplyr 1.2.1 before implementation
+# (see R/mutate.R's roxygen "`.keep` semantics" section for the full write
+# up): columns created or modified by `...` and every group column are
+# ALWAYS kept, regardless of `.keep`; `.keep` only controls which *other*
+# columns of `.data` additionally survive ("all" = all of them, "used" =
+# referenced as an input to any expression, "unused" = the complement,
+# "none" = none). Column order: original columns keep their original
+# relative position (a modified column does NOT move); genuinely new
+# columns are appended at the end, or repositioned via `.before`/`.after`
+# (only the new ones move -- a modified EXISTING column stays put even
+# when `.before`/`.after` is given).
+# =============================================================================
+
+keep_position_df <- function() {
+  tibble::tibble(a = 1:4, b = 5:8, c = 9:12, d = 13:16)
+}
+
+test_that("mutate() .keep='all' (default) keeps every column matches dplyr (eager)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = a + b)
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(names(result$gpu), c("a", "b", "c", "d", "e"))
+})
+
+test_that("mutate() .keep='used' keeps created/modified + input columns matches dplyr (eager)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = a + b, .keep = "used")
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(names(result$gpu), c("a", "b", "e"))
+})
+
+test_that("mutate() .keep='used' keeps created/modified + input columns matches dplyr (lazy)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = a + b, .keep = "used")
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("mutate() .keep='used' with a column that is BOTH used and modified matches dplyr (eager)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  # b is used as an input AND replaced in place -- must appear exactly
+  # once, not duplicated, and no new column is created.
+  pipeline <- function(d) dplyr::mutate(d, b = a + b, .keep = "used")
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(names(result$gpu), c("a", "b"))
+})
+
+test_that("mutate() .keep='used' with a column that is BOTH used and modified matches dplyr (lazy)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, b = a + b, .keep = "used")
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("mutate() .keep='unused' keeps created/modified + unreferenced columns matches dplyr (eager)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = a + b, .keep = "unused")
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(names(result$gpu), c("c", "d", "e"))
+})
+
+test_that("mutate() .keep='unused' keeps created/modified + unreferenced columns matches dplyr (lazy)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = a + b, .keep = "unused")
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("mutate() .keep='unused' with a column that is BOTH used and modified matches dplyr (eager)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, b = a + b, .keep = "unused")
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(names(result$gpu), c("b", "c", "d"))
+})
+
+test_that("mutate() .keep='none' keeps only created/modified columns matches dplyr (eager)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = a + b, .keep = "none")
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(names(result$gpu), "e")
+})
+
+test_that("mutate() .keep='none' keeps only created/modified columns matches dplyr (lazy)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = a + b, .keep = "none")
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("mutate() .keep='none' with a bare column dot keeps that column matches dplyr (eager)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = a + b, d, .keep = "none")
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(names(result$gpu), c("d", "e"))
+})
+
+test_that("mutate() .keep='none' with a bare column dot keeps that column matches dplyr (lazy)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = a + b, d, .keep = "none")
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("mutate() .keep='none' on a grouped table always retains group columns matches dplyr (eager)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) d |> dplyr::group_by(a) |> dplyr::mutate(e = b + c, .keep = "none")
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(names(result$gpu), c("a", "e"))
+})
+
+test_that("mutate() .keep='none' on a grouped table always retains group columns matches dplyr (lazy)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) d |> dplyr::group_by(a) |> dplyr::mutate(e = b + c, .keep = "none")
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("mutate() .keep='unused' on a grouped table always retains group columns matches dplyr (eager)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) d |> dplyr::group_by(a) |> dplyr::mutate(e = b + c, .keep = "unused")
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(names(result$gpu), c("a", "d", "e"))
+})
+
+test_that("mutate() .after positions a new column matches dplyr (eager)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = a + 1, .after = b)
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(names(result$gpu), c("a", "b", "e", "c", "d"))
+})
+
+test_that("mutate() .after positions a new column matches dplyr (lazy)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = a + 1, .after = b)
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("mutate() .before positions a new column matches dplyr (eager)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = a + 1, .before = b)
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(names(result$gpu), c("a", "e", "b", "c", "d"))
+})
+
+test_that("mutate() .before positions a new column matches dplyr (lazy)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = a + 1, .before = b)
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("mutate() .after does NOT move a modified existing column matches dplyr (eager)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  # a is modified in place, not new -- .after must not relocate it.
+  pipeline <- function(d) dplyr::mutate(d, a = a + 1, .after = c)
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(names(result$gpu), c("a", "b", "c", "d"))
+})
+
+test_that("mutate() .after moves only NEW columns when mixed with a modification matches dplyr (eager)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = a + 1, b = b * 2, .after = c)
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(names(result$gpu), c("a", "b", "c", "e", "d"))
+})
+
+test_that("mutate() .after with multiple new columns moves them together in dot order matches dplyr (eager)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = a + 1, f = b + 1, .after = a)
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(names(result$gpu), c("a", "e", "f", "b", "c", "d"))
+})
+
+test_that("mutate() .after with multiple new columns moves them together in dot order matches dplyr (lazy)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = a + 1, f = b + 1, .after = a)
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("mutate() .after combined with .keep='used' filters the repositioned list matches dplyr (eager)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  # e uses c; .after=a positions e right after a in the "keep=all" order
+  # (a, e, b, c, d); .keep="used" then filters that list down to {c, e},
+  # preserving their RELATIVE order from the positioned list -- i.e. "e"
+  # before "c", not the reverse.
+  pipeline <- function(d) dplyr::mutate(d, e = c + 1, .after = a, .keep = "used")
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(names(result$gpu), c("e", "c"))
+})
+
+test_that("mutate() .after combined with .keep='used' filters the repositioned list matches dplyr (lazy)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) dplyr::mutate(d, e = c + 1, .after = a, .keep = "used")
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("mutate() on a grouped table with .after keeps the group column in place matches dplyr (eager)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  pipeline <- function(d) d |> dplyr::group_by(b) |> dplyr::mutate(e = a + 1, .after = a)
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(names(result$gpu), c("a", "e", "b", "c", "d"))
+})
+
+test_that("mutate() errors when both .before and .after are supplied", {
+  skip_if_no_gpu()
+  gt <- tbl_gpu(keep_position_df())
+  expect_error(
+    dplyr::mutate(gt, e = a + 1, .before = b, .after = c),
+    "Can't supply both"
+  )
+})
+
+test_that("mutate() .by= forces the CPU fallback (grouped/windowed mutate not GPU-native yet)", {
+  skip_if_no_gpu()
+  df <- keep_position_df()
+  withr::local_options(cuplyr.fallback = "warn")
+  gt <- tbl_gpu(df)
+
+  expect_warning(
+    result <- dplyr::mutate(gt, e = a + b, .by = a),
+    "mutate.*fell back to CPU evaluation"
+  )
+  oracle <- dplyr::mutate(df, e = a + b, .by = a)
+  expect_equal(tibble::as_tibble(collect(result)), oracle)
+})

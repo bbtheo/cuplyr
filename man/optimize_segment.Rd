@@ -4,10 +4,16 @@
 \alias{optimize_segment}
 \title{Optimize a single segment (no barriers)}
 \usage{
-optimize_segment(ast)
+optimize_segment(ast, required_cols = NULL)
 }
 \arguments{
 \item{ast}{Root of segment}
+
+\item{required_cols}{Columns required by whatever consumes this
+segment's output (\code{NULL} means "infer from \code{ast} itself", correct
+only when \code{ast} is a genuine, untruncated subtree -- see the caller
+comment in \code{optimize_with_barriers()} for why a barrier-truncated
+segment must instead pass this explicitly)}
 }
 \value{
 Optimized segment

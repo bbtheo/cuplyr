@@ -2,15 +2,9 @@
 % Please edit documentation in R/fallback.R
 \name{fallback-verbs}
 \alias{fallback-verbs}
-\alias{transmute.tbl_gpu}
 \alias{reframe.tbl_gpu}
 \alias{rowwise.tbl_gpu}
-\alias{glimpse.tbl_gpu}
 \alias{slice_sample.tbl_gpu}
-\alias{rename.tbl_gpu}
-\alias{rename_with.tbl_gpu}
-\alias{relocate.tbl_gpu}
-\alias{pull.tbl_gpu}
 \alias{count.tbl_gpu}
 \alias{tally.tbl_gpu}
 \alias{add_count.tbl_gpu}
@@ -45,23 +39,11 @@
 \alias{sample_frac.tbl_gpu}
 \title{CPU fallback methods for dplyr verbs without a GPU-native implementation}
 \usage{
-\method{transmute}{tbl_gpu}(.data, ...)
-
 \method{reframe}{tbl_gpu}(.data, ..., .by = NULL)
 
 \method{rowwise}{tbl_gpu}(.data, ...)
 
-\method{glimpse}{tbl_gpu}(x, width = NULL, ...)
-
 \method{slice_sample}{tbl_gpu}(.data, ..., n, prop, by = NULL, weight_by = NULL, replace = FALSE)
-
-\method{rename}{tbl_gpu}(.data, ...)
-
-\method{rename_with}{tbl_gpu}(.data, .fn, .cols = dplyr::everything(), ...)
-
-\method{relocate}{tbl_gpu}(.data, ..., .before = NULL, .after = NULL)
-
-\method{pull}{tbl_gpu}(.data, var = -1, name = NULL, ...)
 
 \method{count}{tbl_gpu}(x, ..., wt = NULL, sort = FALSE, name = NULL)
 
