@@ -12,8 +12,9 @@ test_that("ast_source creates valid source node", {
 })
 
 test_that("ast_filter creates valid filter node", {
-  source <- ast_source(list(names = "x", types = "FLOAT64"))
-  pred <- make_predicate("x", ">", 5)
+  schema <- list(names = "x", types = "FLOAT64")
+  source <- ast_source(schema)
+  pred <- make_predicate(ir_call(">", list(ir_col("x"), ir_lit(5, "FLOAT64"))), schema)
   node <- ast_filter(source, list(pred))
 
   expect_s3_class(node, "ast_filter")
@@ -75,8 +76,9 @@ test_that("infer_schema.ast_source returns schema", {
 })
 
 test_that("infer_schema.ast_filter preserves schema", {
-  source <- ast_source(list(names = c("x", "y"), types = c("FLOAT64", "INT32")))
-  node <- ast_filter(source, list(make_predicate("x", ">", 0)))
+  schema <- list(names = c("x", "y"), types = c("FLOAT64", "INT32"))
+  source <- ast_source(schema)
+  node <- ast_filter(source, list(make_predicate(ir_call(">", list(ir_col("x"), ir_lit(0, "FLOAT64"))), schema)))
 
   result <- infer_schema(node)
   expect_equal(result$names, c("x", "y"))
@@ -128,22 +130,24 @@ test_that("infer_schema.ast_summarise returns group + agg columns", {
 # Predicate and Expression Structure Tests
 
 test_that("make_predicate creates valid structure", {
-  pred <- make_predicate("col", ">=", 10)
+  schema <- list(names = "col", types = "FLOAT64")
+  ir <- ir_call(">=", list(ir_col("col"), ir_lit(10, "FLOAT64")))
+  pred <- make_predicate(ir, schema)
 
-  expect_equal(pred$col_name, "col")
-  expect_equal(pred$op, ">=")
-  expect_equal(pred$value, 10)
-  expect_false(pred$is_col_compare)
-  expect_equal(pred$estimated_cost, 1L)
+  expect_equal(pred$ir, ir)
+  expect_equal(pred$cols, "col")
+  expect_equal(pred$estimated_cost, ir_cost(ir))
   expect_true(pred$is_deterministic)
+  expect_true(pred$na_sensitive)
 })
 
 test_that("make_predicate handles column comparison", {
-  pred <- make_predicate("a", "==", "b", is_col_compare = TRUE)
+  schema <- list(names = c("a", "b"), types = c("FLOAT64", "FLOAT64"))
+  ir <- ir_call("==", list(ir_col("a"), ir_col("b")))
+  pred <- make_predicate(ir, schema)
 
-  expect_equal(pred$value, "b")
-  expect_true(pred$is_col_compare)
-  expect_equal(pred$estimated_cost, 2L)
+  expect_equal(pred$cols, c("a", "b"))
+  expect_equal(pred$estimated_cost, ir_cost(ir))
 })
 
 test_that("make_mutate_expr creates valid structure", {
@@ -273,8 +277,9 @@ test_that("ast_count counts nodes correctly", {
 })
 
 test_that("ast_to_string produces readable output", {
-  source <- ast_source(list(names = c("x", "y"), types = c("FLOAT64", "INT32")))
-  filter_node <- ast_filter(source, list(make_predicate("x", ">", 0)))
+  schema <- list(names = c("x", "y"), types = c("FLOAT64", "INT32"))
+  source <- ast_source(schema)
+  filter_node <- ast_filter(source, list(make_predicate(ir_call(">", list(ir_col("x"), ir_lit(0, "FLOAT64"))), schema)))
 
   str <- ast_to_string(filter_node)
   expect_true(grepl("filter", str))
@@ -283,8 +288,9 @@ test_that("ast_to_string produces readable output", {
 
 # Print method test
 test_that("print.ast_node works without error", {
-  source <- ast_source(list(names = c("x", "y"), types = c("FLOAT64", "INT32")))
-  filter_node <- ast_filter(source, list(make_predicate("x", ">", 0)))
+  schema <- list(names = c("x", "y"), types = c("FLOAT64", "INT32"))
+  source <- ast_source(schema)
+  filter_node <- ast_filter(source, list(make_predicate(ir_call(">", list(ir_col("x"), ir_lit(0, "FLOAT64"))), schema)))
   mutate_node <- ast_mutate(filter_node, list(make_mutate_expr("z", "x", "*", scalar = 2)))
 
   expect_output(print(mutate_node), "ast_mutate")

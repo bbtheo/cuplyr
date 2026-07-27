@@ -6,11 +6,16 @@
 # 3. Dead column pruning (drop unused mutate outputs)
 # 4. Filter pushdown (across mutate when safe)
 # 5. Filter reordering
-# 6. Filter fusion
+#
+# Filter fusion is no longer a separate pass (Phase 1 expression-engine
+# cutover, task T3): `lower_filter()` always folds every predicate in a
+# filter node into one `&`-combined expression and evaluates it as a single
+# `compute_column()` kernel, so a filter node with N predicates is already
+# exactly one kernel with no `ast$fused` flag needed.
 #
 # Pass order matters! Run in sequence:
 # projection -> mutate fusion -> dead column pruning -> filter pushdown
-# -> filter reorder -> filter fusion
+# -> filter reorder
 
 #' Optimize an AST for GPU execution
 #'
@@ -78,8 +83,7 @@ optimize_segment <- function(ast) {
     fuse_mutates() |>
     prune_dead_columns() |>
     push_down_filters() |>
-    reorder_filters() |>
-    fuse_filters()
+    reorder_filters()
 }
 
 #' Find the next barrier node walking down from root
@@ -169,14 +173,11 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       }
     },
     "filter" = {
-      pred_cols <- unique(unlist(lapply(ast$predicates, `[[`, "col_name")))
-      rhs_cols <- unlist(lapply(ast$predicates, function(p) {
-        if (isTRUE(p$is_col_compare)) p$value else NULL
-      }))
-      needed <- union(required_cols, union(pred_cols, rhs_cols))
+      pred_cols <- unique(unlist(lapply(ast$predicates, `[[`, "cols")))
+      needed <- union(required_cols, pred_cols)
       ast$input <- push_down_projections(ast$input, needed, group_cols)
 
-      extra_cols <- setdiff(union(pred_cols, rhs_cols), required_cols)
+      extra_cols <- setdiff(pred_cols, required_cols)
       if (length(extra_cols) > 0) {
         ast_select(ast, required_cols)
       } else {
@@ -377,11 +378,8 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
       ast
     },
     "filter" = {
-      pred_cols <- unique(unlist(lapply(ast$predicates, `[[`, "col_name")))
-      rhs_cols <- unlist(lapply(ast$predicates, function(p) {
-        if (isTRUE(p$is_col_compare)) p$value else NULL
-      }))
-      needed <- union(required_cols, union(pred_cols, rhs_cols))
+      pred_cols <- unique(unlist(lapply(ast$predicates, `[[`, "cols")))
+      needed <- union(required_cols, pred_cols)
       ast$input <- prune_dead_columns(ast$input, needed, group_cols)
       ast
     },
@@ -482,11 +480,7 @@ push_down_filters <- function(ast) {
     return(ast)
   }
 
-  pred_cols <- unique(unlist(lapply(ast$predicates, `[[`, "col_name")))
-  rhs_cols <- unlist(lapply(ast$predicates, function(p) {
-    if (isTRUE(p$is_col_compare)) p$value else NULL
-  }))
-  filter_cols <- unique(c(pred_cols, rhs_cols))
+  filter_cols <- unique(unlist(lapply(ast$predicates, `[[`, "cols")))
 
   if (input$type == "mutate") {
     mutate_outputs <- vapply(input$expressions, `[[`, character(1), "output_col")
@@ -520,11 +514,7 @@ push_down_filters <- function(ast) {
                                    suffix = input$suffix, keep = input$keep)
 
     classify_predicate <- function(pred) {
-      cols <- pred$col_name
-      if (isTRUE(pred$is_col_compare)) {
-        cols <- c(cols, pred$value)
-      }
-      sides <- unique(info$origin[match(cols, info$names)])
+      sides <- unique(info$origin[match(pred$cols, info$names)])
       sides <- sides[!is.na(sides)]
       if (length(sides) != 1) return("both")
       sides
@@ -614,37 +604,4 @@ reorder_filters <- function(ast) {
   result <- ast_filter(current, all_preds)
   result$input <- reorder_filters(result$input)
   result
-}
-
-# -----------------------------------------------------------------------------
-# Pass 6: Filter Fusion
-# -----------------------------------------------------------------------------
-
-#' Mark filter nodes for fused AND-mask lowering
-#'
-#' @param ast Root AST node
-#' @return AST with fused flags set
-#' @keywords internal
-fuse_filters <- function(ast) {
-  if (is.null(ast)) return(NULL)
-
-  if (ast$type != "filter" || length(ast$predicates) <= 1) {
-    if (!is.null(ast$input)) {
-      ast$input <- fuse_filters(ast$input)
-    }
-    return(ast)
-  }
-
-  all_simple <- all(vapply(ast$predicates, function(p) {
-    !isTRUE(p$is_col_compare) && p$op %in% c("==", "!=", ">", ">=", "<", "<=")
-  }, logical(1)))
-
-  if (all_simple && length(ast$predicates) <= 4) {
-    ast$fused <- TRUE
-  } else {
-    ast$fused <- FALSE
-  }
-
-  ast$input <- fuse_filters(ast$input)
-  ast
 }

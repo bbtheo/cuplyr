@@ -36,8 +36,8 @@ test_that("reorder_filters orders predicates by estimated cost", {
   schema <- list(names = c("a", "b", "c"), types = c("FLOAT64", "FLOAT64", "FLOAT64"))
   source <- ast_source(schema)
 
-  pred_expensive <- make_predicate("a", "==", "b", is_col_compare = TRUE)
-  pred_cheap <- make_predicate("c", ">", 5)
+  pred_expensive <- make_predicate(ir_call("==", list(ir_col("a"), ir_col("b"))), schema)
+  pred_cheap <- make_predicate(ir_call(">", list(ir_col("c"), ir_lit(5, "FLOAT64"))), schema)
 
   filter1 <- ast_filter(source, list(pred_expensive))
   filter2 <- ast_filter(filter1, list(pred_cheap))
@@ -46,7 +46,7 @@ test_that("reorder_filters orders predicates by estimated cost", {
 
   expect_s3_class(reordered, "ast_filter")
   expect_equal(length(reordered$predicates), 2)
-  expect_equal(reordered$predicates[[1]]$col_name, "c")
+  expect_equal(reordered$predicates[[1]]$cols, "c")
 })
 
 test_that("push_down_filters moves filter below mutate when safe", {
@@ -54,7 +54,7 @@ test_that("push_down_filters moves filter below mutate when safe", {
   source <- ast_source(schema)
   expr <- make_mutate_expr("c", "a", "+", scalar = 1, input_types = "FLOAT64")
   mutate_node <- ast_mutate(source, list(expr))
-  pred <- make_predicate("b", ">", 5)
+  pred <- make_predicate(ir_call(">", list(ir_col("b"), ir_lit(5, "FLOAT64"))), schema)
   filter_node <- ast_filter(mutate_node, list(pred))
 
   pushed <- push_down_filters(filter_node)
@@ -69,7 +69,7 @@ test_that("push_down_filters does not move filter when it depends on mutate outp
   source <- ast_source(schema)
   expr <- make_mutate_expr("b", "a", "+", scalar = 1, input_types = "FLOAT64")
   mutate_node <- ast_mutate(source, list(expr))
-  pred <- make_predicate("b", ">", 5)
+  pred <- make_predicate(ir_call(">", list(ir_col("b"), ir_lit(5, "FLOAT64"))), schema)
   filter_node <- ast_filter(mutate_node, list(pred))
 
   pushed <- push_down_filters(filter_node)
@@ -82,7 +82,7 @@ test_that("push_down_filters moves filter below select when safe", {
   schema <- list(names = c("a", "b", "c"), types = c("FLOAT64", "FLOAT64", "FLOAT64"))
   source <- ast_source(schema)
   select_node <- ast_select(source, c("a", "b"))
-  pred <- make_predicate("a", ">", 5)
+  pred <- make_predicate(ir_call(">", list(ir_col("a"), ir_lit(5, "FLOAT64"))), schema)
   filter_node <- ast_filter(select_node, list(pred))
 
   pushed <- push_down_filters(filter_node)
@@ -96,7 +96,7 @@ test_that("push_down_filters does not move filter below select if column dropped
   schema <- list(names = c("a", "b", "c"), types = c("FLOAT64", "FLOAT64", "FLOAT64"))
   source <- ast_source(schema)
   select_node <- ast_select(source, c("b"))
-  pred <- make_predicate("a", ">", 5)
+  pred <- make_predicate(ir_call(">", list(ir_col("a"), ir_lit(5, "FLOAT64"))), schema)
   filter_node <- ast_filter(select_node, list(pred))
 
   pushed <- push_down_filters(filter_node)
@@ -112,8 +112,9 @@ test_that("push_down_filters moves side-only filters below inner join", {
   right <- ast_source(right_schema)
   join <- ast_join("inner", left, right, by = list(left = "k", right = "k"))
 
-  pred_left <- make_predicate("a", ">", 1)
-  pred_right <- make_predicate("b", "<", 5)
+  join_schema <- list(names = c("k", "a", "b"), types = c("INT32", "FLOAT64", "FLOAT64"))
+  pred_left <- make_predicate(ir_call(">", list(ir_col("a"), ir_lit(1, "FLOAT64"))), join_schema)
+  pred_right <- make_predicate(ir_call("<", list(ir_col("b"), ir_lit(5, "FLOAT64"))), join_schema)
   filter_node <- ast_filter(join, list(pred_left, pred_right))
 
   pushed <- push_down_filters(filter_node)
@@ -130,7 +131,8 @@ test_that("push_down_filters does not move right-only filters below left join", 
   right <- ast_source(right_schema)
   join <- ast_join("left", left, right, by = list(left = "k", right = "k"))
 
-  pred_right <- make_predicate("b", "<", 5)
+  join_schema <- list(names = c("k", "a", "b"), types = c("INT32", "FLOAT64", "FLOAT64"))
+  pred_right <- make_predicate(ir_call("<", list(ir_col("b"), ir_lit(5, "FLOAT64"))), join_schema)
   filter_node <- ast_filter(join, list(pred_right))
 
   pushed <- push_down_filters(filter_node)
@@ -146,8 +148,9 @@ test_that("push_down_filters respects renamed join keys", {
   right <- ast_source(right_schema)
   join <- ast_join("inner", left, right, by = list(left = "a", right = "b"))
 
-  pred_left <- make_predicate("x", ">", 1)
-  pred_right <- make_predicate("y", "<", 5)
+  join_schema <- list(names = c("a", "x", "b", "y"), types = c("INT32", "FLOAT64", "INT32", "FLOAT64"))
+  pred_left <- make_predicate(ir_call(">", list(ir_col("x"), ir_lit(1, "FLOAT64"))), join_schema)
+  pred_right <- make_predicate(ir_call("<", list(ir_col("y"), ir_lit(5, "FLOAT64"))), join_schema)
   filter_node <- ast_filter(join, list(pred_left, pred_right))
 
   pushed <- push_down_filters(filter_node)
@@ -157,25 +160,34 @@ test_that("push_down_filters respects renamed join keys", {
   expect_s3_class(pushed$right, "ast_filter")
 })
 
-test_that("fuse_filters marks simple predicates as fused", {
+test_that("consecutive filters merge into one predicate list", {
+  # Phase 1 expression-engine cutover (task T3): fuse_filters()/ast$fused
+  # are gone -- lower_filter() always folds every predicate in a single
+  # filter node into one `&`-combined expression, so a filter node with N
+  # predicates is already exactly one fused GPU kernel. reorder_filters()
+  # is what merges *consecutive* filter nodes (from separate filter() dots
+  # or calls) into that single node.
   schema <- list(names = c("a", "b"), types = c("FLOAT64", "FLOAT64"))
   source <- ast_source(schema)
 
-  pred1 <- make_predicate("a", ">", 1)
-  pred2 <- make_predicate("b", "<=", 3)
-  filter_node <- ast_filter(source, list(pred1, pred2))
+  pred1 <- make_predicate(ir_call(">", list(ir_col("a"), ir_lit(1, "FLOAT64"))), schema)
+  pred2 <- make_predicate(ir_call("<=", list(ir_col("b"), ir_lit(3, "FLOAT64"))), schema)
+  filter1 <- ast_filter(source, list(pred1))
+  filter2 <- ast_filter(filter1, list(pred2))
 
-  fused <- fuse_filters(filter_node)
+  merged <- reorder_filters(filter2)
 
-  expect_true(isTRUE(fused$fused))
+  expect_s3_class(merged, "ast_filter")
+  expect_equal(length(merged$predicates), 2)
+  expect_s3_class(merged$input, "ast_source")
 })
 
 test_that("optimize_ast does not reorder across barriers", {
   schema <- list(names = c("a", "b"), types = c("FLOAT64", "FLOAT64"))
   source <- ast_source(schema)
 
-  pred1 <- make_predicate("a", ">", 1)
-  pred2 <- make_predicate("b", "<", 5)
+  pred1 <- make_predicate(ir_call(">", list(ir_col("a"), ir_lit(1, "FLOAT64"))), schema)
+  pred2 <- make_predicate(ir_call("<", list(ir_col("b"), ir_lit(5, "FLOAT64"))), schema)
 
   filter1 <- ast_filter(source, list(pred1))
   arrange_node <- ast_arrange(filter1, list(list(col_name = "a", descending = FALSE)))

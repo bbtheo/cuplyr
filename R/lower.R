@@ -37,58 +37,30 @@ lower_select <- function(ast, source_ptr) {
 }
 
 #' Lower filter node
+#'
+#' Task T3 (Phase 1 expression-engine cutover, `scratchpad/phase1_expression_engine.md`
+#' section 5): every predicate in the node is a `cuplyr_ir` node (see
+#' `R/ir.R`, `R/ast.R::make_predicate()`). All of them are folded together
+#' with `&` into a single expression -- one filter node is always exactly
+#' one fused GPU kernel now, regardless of how many predicates it holds, so
+#' there is no separate "fused vs sequential" branch (and no `ast$fused`
+#' flag) to check.
 #' @keywords internal
 lower_filter <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
-
-  # Cache schema once
   input_schema <- infer_schema(ast$input)
 
-  if (isTRUE(ast$fused) && length(ast$predicates) > 1) {
-    # Fused filter: single mask operation
-    lower_filter_fused(input_ptr, ast$predicates, input_schema)
-  } else {
-    # Sequential filters
-    result <- input_ptr
-    for (pred in ast$predicates) {
-      col_idx <- match(pred$col_name, input_schema$names) - 1L
-      if (isTRUE(pred$is_col_compare)) {
-        rhs_idx <- match(pred$value, input_schema$names) - 1L
-        result <- gpu_filter_col(result, col_idx, pred$op, rhs_idx)
-      } else {
-        result <- gpu_filter_scalar(result, col_idx, pred$op, pred$value)
-      }
-    }
-    result
-  }
-}
-
-#' Lower fused filter (AND mask)
-#' @keywords internal
-lower_filter_fused <- function(ptr, predicates, schema) {
-  # Build predicate specs for C++
-  col_indices <- integer(length(predicates))
-  ops <- character(length(predicates))
-  values <- numeric(length(predicates))
-
-  for (i in seq_along(predicates)) {
-    pred <- predicates[[i]]
-    col_indices[i] <- match(pred$col_name, schema$names) - 1L
-    ops[i] <- pred$op
-    values[i] <- as.numeric(pred$value)
+  if (length(ast$predicates) == 0) {
+    return(input_ptr)
   }
 
-  # Call fused filter (falls back to sequential if not available)
-  if (exists("gpu_filter_fused", mode = "function")) {
-    gpu_filter_fused(ptr, col_indices, ops, values)
-  } else {
-    # Fallback to sequential
-    result <- ptr
-    for (i in seq_along(predicates)) {
-      result <- gpu_filter_scalar(result, col_indices[i], ops[i], values[i])
-    }
-    result
+  combined_ir <- ast$predicates[[1]]$ir
+  for (pred in ast$predicates[-1]) {
+    combined_ir <- ir_call("&", list(combined_ir, pred$ir))
   }
+
+  bound_ir <- ir_bind(combined_ir, input_schema)
+  gpu_filter_expr(input_ptr, bound_ir)
 }
 
 #' Lower mutate node

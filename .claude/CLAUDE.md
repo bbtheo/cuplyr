@@ -40,9 +40,10 @@ list(
 | `src/cuda_utils.hpp` | `check_cuda()` error helper |
 | `src/ops_common.hpp` | `get_compare_op()`, `get_binary_op()` |
 | `src/transfer_io.cpp` | `df_to_gpu()`, `gpu_collect()`, `gpu_head()`, `gpu_dim()` |
-| `src/ops_filter.cpp` | `gpu_filter_scalar()`, `gpu_filter_col()`, `gpu_filter_mask()` |
-| `src/ops_filter_fused.cpp` | `gpu_filter_fused()` for multi-predicate AND masks |
-| `src/ops_mutate_batch.cpp` | `gpu_mutate_batch()` — sole mutate execution path (copy/col-scalar/col-col, fused) |
+| `src/ops_filter.cpp` | `gpu_filter_scalar()`, `gpu_filter_col()`, `gpu_filter_bool()`, `gpu_filter_mask()` |
+| `src/expr_eval.hpp` | Expression-IR evaluator shared by filter/mutate (`eval_ctx`, `ast_expressible()`, `build_ast()`, `materialize()`, `apply_handler()`) |
+| `src/ops_expr.cpp` | `gpu_compute_column()`, `gpu_filter_expr()`, `gpu_mutate_expr()` — the IR entry points |
+| `src/ops_mutate_batch.cpp` | `gpu_mutate_batch()` — legacy mutate execution path (copy/col-scalar/col-col, fused) |
 | `src/ops_select.cpp` | `gpu_select()` |
 | `src/ops_groupby.cpp` | `gpu_summarise()` |
 | `src/ops_arrange.cpp` | `gpu_arrange()` |
@@ -57,7 +58,8 @@ list(
 | `R/tbl-gpu.R` | `tbl_gpu()`, `new_tbl_gpu()`, `is_tbl_gpu()`, `resolve_exec_mode()` |
 | `R/utils.R` | `gpu_type_from_r()`, `col_index()` |
 | `R/execute.R` | unified execution helpers: `push_op()` (the sole exec_mode branch point), `input_node()`, `current_schema()`, `propagate_groups()`, `propagate_factor_levels()`, `auto_name_dots()`, `cuplyr_fallback_notify()`, join analogues `join_input_node()`/`push_join()` |
-| `R/filter.R` | filter verb — parses simple comparisons into predicates, builds one `ast_filter` node via `push_op()`; opaque expressions fall back to a CPU-eval boolean mask (`filter_eval_mask()`) |
+| `R/ir.R` | Expression IR shared by filter/mutate: `ir_parse_quo()`, `ir_cols()`, `ir_cost()`, `ir_is_const()`, `ir_bind()`, `ir_infer_type()`, `ir_call_registry` |
+| `R/filter.R` | filter verb — parses expressions via `ir_parse_quo()` into `make_predicate()` records, builds one `ast_filter` node via `push_op()`; constant expressions (TRUE/FALSE/vectors) are evaluated in R, not the GPU IR path; unparseable expressions fall back to a CPU-eval boolean mask (`filter_eval_mask()`) |
 | `R/mutate.R` | mutate verb — parses expressions into `make_mutate_expr()` structs, builds one `ast_mutate` node via `push_op()`; type inference lives in `R/ast.R::infer_mutate_output_type()` |
 | `R/select.R` | select verb — parses tidyselect, builds one `ast_select` node via `push_op()` |
 | `R/arrange.R` | arrange verb — parses sort specs (incl. `.by_group`), builds one `ast_arrange` node via `push_op()` |
@@ -250,8 +252,10 @@ The optimizer transforms the AST before execution. Pass order matters:
    - Collects consecutive filter chains
    - Sorts by `estimated_cost` field
 
-6. **Filter Fusion** (`fuse_filters`): Marks filters for single-kernel AND-mask
-   - Max 4 simple predicates for fusion
+There is no separate filter-fusion pass: `lower_filter()` always folds every
+predicate in a filter node together with `&` into one IR expression and
+evaluates it as a single `gpu_filter_expr()`/`compute_column()` kernel, so a
+filter node with N predicates is already exactly one fused kernel.
 
 ### Join-Specific Notes
 - Lazy joins build `ast_join` with two inputs
@@ -355,7 +359,10 @@ String columns use offset-based storage (Apache Arrow format):
 - **Right key dropping**: `keep = FALSE` drops right keys even when names differ
 
 ### Filter Parsing
-- Boolean literal fast-path avoids `eval_tidy` without a data mask to prevent name-collision bugs
+- Expressions parse through `ir_parse_quo()` (`R/ir.R`) into `make_predicate()` records (`ir`, `cols`, `estimated_cost`, `is_deterministic`, `na_sensitive`); optimizer passes read `pred$cols`, never the IR tree directly
+- Constant expressions (`ir_is_const()` — no column reference anywhere, e.g. `TRUE`, `FALSE`, `rep(TRUE, n)`) never reach the GPU IR path: they're evaluated in R (`eval_tidy` on the original quosure, not the constant-folded IR) so an n-row mask always has a real column to broadcast against; `TRUE` is a genuine no-op, `FALSE`/`NA` build an impossible predicate (`ir_lit_from_r(FALSE)`) that still flows through the normal lazy `push_op()`/`ast_filter` path
+- Comparing a non-STRING column against a STRING literal (or vice versa) is caught by `check_filter_comparison_types()` before lowering, with a message naming the column and its type
+- Expressions the IR doesn't recognize fall back to a CPU-eval boolean mask (`filter_eval_mask()`), with no data mask (only expressions that evaluate standalone, e.g. `rep(TRUE, n)`, can succeed there)
 
 ### Mutate Parsing
 - Supports left-associative `+`/`-` chains (e.g., `a + b + c`) by lowering to sequential ops

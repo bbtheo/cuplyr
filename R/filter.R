@@ -24,24 +24,24 @@
 #'   \item `<=` - less than or equal to
 #' }
 #'
-#' ## Current limitations
-#' \itemize{
-#'   \item Only simple comparisons are parsed directly into a GPU predicate
-#'     (column op value/column)
-#'   \item String comparisons are not parsed directly into a GPU predicate
-#'   \item Only numeric scalar values on the right-hand side are parsed
-#'     directly into a GPU predicate
-#' }
+#' ## Expression support
+#' `filter()` parses its arguments through an internal expression IR (see
+#' `R/ir.R`) that lowers to a single fused GPU kernel per `filter()` call
+#' (all comparisons in the call are combined with `&`, one kernel per
+#' fused mask). Beyond the six comparisons above, this also covers
+#' `&`/`|`/`!`, `is.na()`, `between()`, `%in%`, column-vs-column
+#' comparisons, and string-column comparisons. Comparing a column against a
+#' literal of an incompatible type (e.g. a numeric column against a
+#' character literal) errors immediately, naming the column and its type,
+#' rather than silently falling back or producing a GPU-side type error.
 #'
 #' ## `TRUE`/`FALSE` literals
 #' `filter(TRUE)` is a no-op: it returns `.data` unchanged (no GPU work is
 #' performed). `filter(FALSE)` returns an empty (zero-row) result.
 #'
-#' ## Expressions that aren't a simple comparison (CPU fallback)
-#' Compound expressions with `&`/`|`, calls like `between()` or `%in%`, and
-#' other shapes that don't match `column op value`/`column op column`
-#' still are not parsed into a GPU predicate at the parser level. Such an
-#' expression is handed to a CPU-side fallback: it's evaluated with
+#' ## Expressions the IR doesn't understand (CPU fallback)
+#' An expression shape the IR doesn't recognize (see `R/ir.R`'s
+#' `ir_parse_quo()`) is handed to a CPU-side fallback: it's evaluated with
 #' `rlang::eval_tidy()` and, if the result is a logical scalar or vector,
 #' applied back to the GPU table as a boolean mask (materializing first,
 #' via `compute()`, if `.data` is lazy with pending operations). Because
@@ -49,12 +49,12 @@
 #' expressions that evaluate to a logical value on their own without
 #' referencing table columns -- e.g. a pre-computed logical vector or
 #' `filter(rep(TRUE, n))`. An expression that references a table column
-#' (e.g. `filter(mpg > 20 & cyl == 4)` or `filter(cyl %in% c(4, 6))`) will
-#' still error, now with the "only supports comparisons" message, since the
-#' column symbol can't resolve outside the table. This fallback path is
-#' legitimate, supported behavior for the cases it does cover, not an
-#' error condition -- see `getOption("cuplyr.fallback")` below to be
-#' notified when it's used.
+#' but doesn't parse (a rare shape once `&`/`|`/`%in%`/`between()`/string
+#' comparisons are all IR-parseable) will still error with the "only
+#' supports comparisons" message, since the column symbol can't resolve
+#' outside the table. This fallback path is legitimate, supported behavior
+#' for the cases it does cover, not an error condition -- see
+#' `getOption("cuplyr.fallback")` below to be notified when it's used.
 #'
 #' ## `options(cuplyr.fallback = ...)`
 #' Controls whether the CPU fallback described above (used by `filter()`
@@ -111,114 +111,146 @@ filter.tbl_gpu <- function(.data, ..., .preserve = FALSE) {
   schema <- current_schema(.data)
   predicates <- list()
 
-  for (quo in dots) {
-    parsed <- parse_filter_expr(quo, schema)
-
-    if (is.null(parsed)) {
-      # Opaque expression (not a comparison shape): flush any predicates
-      # accumulated so far into a real ast_filter node, then fall back to
-      # CPU-side evaluation of this expression (D4).
-      if (length(predicates) > 0) {
-        .data <- push_op(.data, ast_filter(input_node(.data), predicates))
-        predicates <- list()
-      }
-      .data <- filter_eval_mask(.data, quo)
-    } else {
-      # Comparison predicate(s) (including the no-op TRUE case, which
-      # contributes an empty list, and the impossible FALSE predicate):
-      # accumulate into a single ast_filter node's predicate list, the
-      # same structure filter_lazy() used to build.
-      predicates <- c(predicates, parsed)
+  flush_predicates <- function() {
+    if (length(predicates) > 0) {
+      .data <<- push_op(.data, ast_filter(input_node(.data), predicates))
+      predicates <<- list()
     }
   }
 
-  if (length(predicates) > 0) {
-    .data <- push_op(.data, ast_filter(input_node(.data), predicates))
+  for (quo in dots) {
+    ir <- parse_filter_ir(quo, schema)
+
+    if (is.null(ir)) {
+      # Opaque expression (the IR doesn't understand this shape): flush any
+      # predicates accumulated so far into a real ast_filter node, then
+      # fall back to CPU-side evaluation of this expression (D4).
+      flush_predicates()
+      .data <- filter_eval_mask(.data, quo)
+      next
+    }
+
+    if (ir_is_const(ir)) {
+      # A constant expression (ir_cols() empty -- no column reference
+      # anywhere in the subtree, e.g. TRUE, FALSE, `1 > 2`, `rep(TRUE, n)`):
+      # section 3's design decision is that these never reach the IR/GPU
+      # expression path. `compute_column()`/`gpu_filter_expr()` need a real
+      # per-row column to broadcast an n-row mask against; a schema-less
+      # constant subtree gives them nothing to anchor that broadcast to.
+      # Evaluate in R instead (on the original quosure, not the already-
+      # constant-folded IR) and route to the same no-op / impossible-
+      # predicate / mask-apply paths the pre-IR parser used.
+      value <- tryCatch(rlang::eval_tidy(quo), error = function(e) NULL)
+
+      if (is.logical(value) && length(value) == 1 && isTRUE(value)) {
+        next  # TRUE: genuine no-op, contributes nothing (D4/S4 semantics)
+      }
+
+      if (is.logical(value) && length(value) == 1) {
+        # FALSE or NA: an impossible predicate. This is accumulated as a
+        # normal predicate (preserving laziness exactly like any other
+        # predicate, replacing the deleted "col != col" synthesis) rather
+        # than executed eagerly: a bare FALSE literal never reaches
+        # compute_column()'s AST-build path -- gpu_filter_expr()'s
+        # materialize() has a dedicated `lit` branch that broadcasts a
+        # literal scalar directly across the table's real row count, no
+        # AST tree involved.
+        predicates <- c(predicates, list(make_predicate(ir_lit_from_r(FALSE), schema)))
+        next
+      }
+
+      # Anything else constant (a non-logical value, or a logical vector
+      # such as `rep(TRUE, n)`): same CPU-eval fallback as an opaque
+      # expression -- filter_eval_mask() has the exact error/mask-apply
+      # logic for these shapes already.
+      flush_predicates()
+      .data <- filter_eval_mask(.data, quo)
+      next
+    }
+
+    check_filter_comparison_types(ir, schema)
+    predicates <- c(predicates, list(make_predicate(ir, schema)))
   }
+
+  flush_predicates()
 
   .data
 }
 
-# Parse a filter expression into predicate structure(s)
-#
-# Shared by eager and lazy modes (D1/S4). Returns:
-#   - list() for a literal TRUE (no filter needed)
-#   - list(<predicate>) for a literal FALSE (impossible predicate) or a
-#     recognized `column <op> value`/`column <op> column` comparison
-#   - NULL if the expression is not a comparison shape (caller falls back
-#     to filter_eval_mask())
-# stop()s for the two diagnosable cases that used to live in filter_one():
-# an unknown LHS column, and a non-numeric/non-scalar RHS value -- both
-# with their exact original message text.
+# ir_parse_quo() throws (rather than returning NULL) when a constant-folded
+# subtree evaluates to a vector outside %in%'s RHS position
+# (ir_lit_from_r()'s scalar-only rule, section 1.2 of
+# scratchpad/phase1_expression_engine.md) -- exactly right for mutate(),
+# where a bare vector literal is always a user error, but filter() has
+# always accepted a directly-evaluable logical vector as a mask
+# (`filter(rep(TRUE, n))`), which must still fall back to CPU evaluation
+# rather than error at parse time. Catch specifically that "expected a
+# scalar" shape and treat it like any other unsupported/opaque expression
+# (NULL, triggering the fallback in filter.tbl_gpu()); anything else (e.g.
+# "not found", or the `&&`/`||` guard) propagates as a real error.
 #
 # @param quo A quosure containing a filter expression
-# @param schema The current schema (names/types) to validate against
-# @return A list of predicate structures, or NULL
+# @param schema The current schema (names/types) to parse against
+# @return An IR node, or NULL if unsupported
 # @keywords internal
-parse_filter_expr <- function(quo, schema) {
-  expr_chr <- rlang::quo_text(quo)
-  expr_obj <- rlang::quo_get_expr(quo)
-
-  # Handle boolean literals without evaluating in a data mask
-  if (identical(expr_obj, TRUE)) {
-    return(list())  # TRUE = no filter needed
-  }
-  if (identical(expr_obj, FALSE)) {
-    # FALSE = filter everything - create impossible predicate
-    if (length(schema$names) > 0) {
-      return(list(make_predicate(schema$names[1], "!=", schema$names[1],
-                                 is_col_compare = TRUE)))
+parse_filter_ir <- function(quo, schema) {
+  tryCatch(
+    ir_parse_quo(quo, schema),
+    error = function(e) {
+      msg <- conditionMessage(e)
+      if (grepl("scalar", msg, fixed = TRUE) && grepl("length", msg, fixed = TRUE)) {
+        return(NULL)
+      }
+      stop(e)
     }
-    return(list())
+  )
+}
+
+# Diagnosable filter()-specific type check: comparing a non-STRING column
+# against a STRING literal (or vice versa) used to be caught by the old
+# parser's "numeric scalar" RHS-type guard; the IR parses this shape
+# successfully (both `col` and `lit` are valid nodes), so without this
+# check it would reach the GPU and fail with a raw cudf type-mismatch
+# error instead of a clear message naming the column and its type
+# (scratchpad/phase1_expression_engine.md section 4's error-contract
+# ledger). Recurses through the whole IR subtree since a single filter()
+# dot may already parse into a compound `&`/`|` expression under the IR
+# cutover.
+#
+# @param ir An IR node
+# @param schema The current schema (names/types)
+# @return `invisible(NULL)`; `stop()`s on a detected mismatch
+# @keywords internal
+check_filter_comparison_types <- function(ir, schema) {
+  if (is.null(ir) || !identical(ir$kind, "call")) {
+    return(invisible(NULL))
   }
 
-  # Parse comparison expression
-  ops <- c("==", "!=", ">=", "<=", ">", "<")
-  op_found <- NULL
-
-  for (op in ops) {
-    if (grepl(op, expr_chr, fixed = TRUE)) {
-      op_found <- op
-      break
+  cmp_ops <- c("==", "!=", "<", "<=", ">", ">=")
+  if (ir$op %in% cmp_ops && length(ir$args) == 2) {
+    check_pair <- function(col_node, lit_node) {
+      if (!identical(col_node$kind, "col") || !identical(lit_node$kind, "lit")) {
+        return(invisible(NULL))
+      }
+      if (is.null(lit_node$type) || !identical(lit_node$type, "STRING")) {
+        return(invisible(NULL))
+      }
+      col_type <- schema$types[match(col_node$name, schema$names)]
+      if (is.na(col_type) || identical(col_type, "STRING")) {
+        return(invisible(NULL))
+      }
+      stop("Cannot compare column '", col_node$name, "' (", col_type,
+           ") with a character literal.", call. = FALSE)
     }
+    check_pair(ir$args[[1]], ir$args[[2]])
+    check_pair(ir$args[[2]], ir$args[[1]])
   }
 
-  if (is.null(op_found)) {
-    return(NULL)  # Opaque expression
+  for (arg in ir$args) {
+    check_filter_comparison_types(arg, schema)
   }
 
-  parts <- strsplit(expr_chr, op_found, fixed = TRUE)[[1]]
-  if (length(parts) != 2) {
-    return(NULL)
-  }
-
-  lhs <- trimws(parts[1])
-  rhs <- trimws(parts[2])
-
-  # Validate LHS is a column (diagnosable case moved in from filter_one())
-  if (!lhs %in% schema$names) {
-    stop("Column '", lhs, "' not found.\n",
-         "Available columns: ", paste(schema$names, collapse = ", "),
-         call. = FALSE)
-  }
-
-  # Check if RHS is a column
-  if (rhs %in% schema$names) {
-    return(list(make_predicate(lhs, op_found, rhs, is_col_compare = TRUE)))
-  }
-
-  # Try to parse RHS as value
-  value <- tryCatch(eval(parse(text = rhs)), error = function(e) NULL)
-  if (is.null(value)) {
-    return(NULL)  # Can't parse RHS at all - opaque, fall back
-  }
-  if (!is.numeric(value) || length(value) != 1) {
-    # Diagnosable case moved in from filter_one()
-    stop("filter() currently only supports numeric scalar comparisons.\n",
-         "Got: ", class(value)[1], " of length ", length(value), call. = FALSE)
-  }
-
-  list(make_predicate(lhs, op_found, value, is_col_compare = FALSE))
+  invisible(NULL)
 }
 
 # Internal: CPU-eval fallback for filter expressions that aren't a

@@ -373,23 +373,31 @@ test_that("filter() errors on non-numeric comparison value", {
 
   gpu_df <- tbl_gpu(mtcars)
 
-  # Character value should error
+  # Comparing a numeric column against a character literal is a clear type
+  # mismatch, caught before reaching the GPU (S5, Phase 1 expression-engine
+  # cutover: check_filter_comparison_types() in R/filter.R). The pre-IR
+  # parser's "numeric scalar" message is gone -- this is a genuine error
+  # contract change (scratchpad/phase1_expression_engine.md section 4).
   expect_error(
     dplyr::filter(gpu_df, mpg > "twenty"),
-    "numeric scalar"
+    "Cannot compare column 'mpg'"
   )
 })
 
-test_that("filter() errors on unsupported operator", {
+test_that("filter() with %in% works (IR cutover, task T3)", {
   skip_if_no_gpu()
 
+  # %in% used to fall back to the "only supports comparisons" error; the
+  # Phase 1 expression-engine cutover parses it directly into a GPU
+  # predicate (ir_call_registry's "%in%" entry, already implemented in T2),
+  # so this is now rewritten as a correctness test rather than an error
+  # pin (scratchpad/phase1_expression_engine.md section 4 / task T3 item 7).
   gpu_df <- tbl_gpu(mtcars)
+  filtered <- dplyr::filter(gpu_df, cyl %in% c(4, 6))
 
-  # %in% is not supported
-  expect_error(
-    dplyr::filter(gpu_df, cyl %in% c(4, 6)),
-    "only supports"
-  )
+  result <- collect(filtered)
+  expect_true(all(result$cyl %in% c(4, 6)))
+  expect_equal(nrow(result), sum(mtcars$cyl %in% c(4, 6)))
 })
 
 # =============================================================================
@@ -523,6 +531,76 @@ test_that("filter() column-vs-column predicate chain matches dplyr (eager and la
 
   pipeline <- function(d) {
     d |> dplyr::filter(x > y, z <= 5)
+  }
+
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+# =============================================================================
+# IR cutover smoke tests (task T3): a handful of compound-predicate shapes
+# that were previously opaque (CPU-fallback or error) and now parse
+# directly into one fused GPU predicate. Comprehensive coverage (string
+# comparisons, is.na()/between() oracle parity, arbitrary nesting) is
+# task T4's job (test-dplyr-filter.R); these just prove the cutover is
+# live in the same commit that made it live.
+# =============================================================================
+
+test_that("filter() with a single & expression in one dot works", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars)
+  filtered <- dplyr::filter(gpu_df, mpg > 20 & cyl == 4)
+
+  result <- collect(filtered)
+  expect_true(all(result$mpg > 20 & result$cyl == 4))
+  expect_equal(nrow(result), sum(mtcars$mpg > 20 & mtcars$cyl == 4))
+})
+
+test_that("filter() with a single | expression in one dot works", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars)
+  filtered <- dplyr::filter(gpu_df, cyl == 4 | cyl == 8)
+
+  result <- collect(filtered)
+  expect_true(all(result$cyl == 4 | result$cyl == 8))
+  expect_equal(nrow(result), sum(mtcars$cyl == 4 | mtcars$cyl == 8))
+})
+
+test_that("filter() with is.na() works", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = c(1, NA, 3, NA, 5))
+  gpu_df <- tbl_gpu(df)
+  filtered <- dplyr::filter(gpu_df, is.na(x))
+
+  result <- collect(filtered)
+  expect_equal(nrow(result), 2)
+})
+
+test_that("filter() with between() works", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars)
+  filtered <- dplyr::filter(gpu_df, dplyr::between(mpg, 15, 20))
+
+  result <- collect(filtered)
+  expect_true(all(result$mpg >= 15 & result$mpg <= 20))
+  expect_equal(nrow(result), sum(mtcars$mpg >= 15 & mtcars$mpg <= 20))
+})
+
+test_that("filter() combines multiple dots and a compound expression into one fused predicate", {
+  skip_if_no_gpu()
+
+  df <- data.frame(
+    x = c(5, 3, 8, 1, 9, 4),
+    y = c(2, 4, 1, 6, 3, 4),
+    z = c(1, 10, 2, 3, 20, 5)
+  )
+
+  pipeline <- function(d) {
+    d |> dplyr::filter(x > y, z <= 5 | z > 15)
   }
 
   expect_same_as_dplyr(df, pipeline)
