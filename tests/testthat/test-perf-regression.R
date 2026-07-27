@@ -69,7 +69,7 @@ test_that("perf: filter_chain_eager", {
     gpu_df |>
       dplyr::filter(x > 0.25, y <= 0.9, z > 0.1) |>
       collect()
-  })
+  }, calibration = "kernel")
 })
 
 test_that("perf: filter_chain_lazy", {
@@ -80,7 +80,7 @@ test_that("perf: filter_chain_lazy", {
     gpu_df |>
       dplyr::filter(x > 0.25, y <= 0.9, z > 0.1) |>
       collect()
-  })
+  }, calibration = "kernel")
 })
 
 # =============================================================================
@@ -95,7 +95,7 @@ test_that("perf: mutate_chain_eager", {
     gpu_df |>
       dplyr::mutate(a = x + y, b = a * 2, c = b - z) |>
       collect()
-  })
+  }, calibration = "kernel")
 })
 
 test_that("perf: mutate_chain_lazy", {
@@ -106,7 +106,7 @@ test_that("perf: mutate_chain_lazy", {
     gpu_df |>
       dplyr::mutate(a = x + y, b = a * 2, c = b - z) |>
       collect()
-  })
+  }, calibration = "kernel")
 })
 
 # =============================================================================
@@ -121,7 +121,7 @@ test_that("perf: select_eager", {
     gpu_df |>
       dplyr::select(id, x, grp) |>
       collect()
-  })
+  }, calibration = "kernel")
 })
 
 test_that("perf: select_lazy", {
@@ -132,7 +132,7 @@ test_that("perf: select_lazy", {
     gpu_df |>
       dplyr::select(id, x, grp) |>
       collect()
-  })
+  }, calibration = "kernel")
 })
 
 # =============================================================================
@@ -147,7 +147,7 @@ test_that("perf: arrange_multikey_eager", {
     gpu_df |>
       dplyr::arrange(grp, dplyr::desc(id), x) |>
       collect()
-  })
+  }, calibration = "kernel")
 })
 
 test_that("perf: arrange_multikey_lazy", {
@@ -158,7 +158,7 @@ test_that("perf: arrange_multikey_lazy", {
     gpu_df |>
       dplyr::arrange(grp, dplyr::desc(id), x) |>
       collect()
-  })
+  }, calibration = "kernel")
 })
 
 # =============================================================================
@@ -174,7 +174,7 @@ test_that("perf: summarise_grouped_eager", {
       dplyr::group_by(grp) |>
       dplyr::summarise(m = mean(x), s = sum(y), n = n(), .groups = "drop") |>
       collect()
-  })
+  }, calibration = "kernel")
 })
 
 test_that("perf: summarise_grouped_lazy", {
@@ -186,11 +186,24 @@ test_that("perf: summarise_grouped_lazy", {
       dplyr::group_by(grp) |>
       dplyr::summarise(m = mean(x), s = sum(y), n = n(), .groups = "drop") |>
       collect()
-  })
+  }, calibration = "kernel")
 })
 
 # =============================================================================
 # left_join()
+#
+# Calibration class: "transfer". perf_big_df's `id` is sampled uniformly
+# from 1:5000 over 1e6 rows (~200 rows/id); perf_join_probe_df's `id` is
+# sampled uniformly from the same 1:5000 range over 5e4 rows (~10 rows/id).
+# A left join therefore fans out to roughly 200*10 = 2000 matches per id
+# across 5000 ids -- on the order of 1e7 output rows, ~10x the row count of
+# transfer_roundtrip's collect() (1e6 rows). At recorded baseline times
+# (~0.44s for the join vs ~0.01-0.03s for filter/mutate/select/arrange on
+# the same-sized 1e6-row input, and ~0.056s for transfer_roundtrip's plain
+# 1e6-row round trip), the join's cost scales with the size of the
+# *collected* result, not the input -- i.e. it is dominated by the
+# device->host transfer of a ~10x-larger result, not by kernel work. That
+# makes it a transfer-bound benchmark despite doing a hash join internally.
 # =============================================================================
 
 test_that("perf: join_left_eager", {
@@ -202,7 +215,7 @@ test_that("perf: join_left_eager", {
     gpu_df |>
       dplyr::left_join(gpu_probe, by = "id") |>
       collect()
-  })
+  }, calibration = "transfer")
 })
 
 test_that("perf: join_left_lazy", {
@@ -214,7 +227,7 @@ test_that("perf: join_left_lazy", {
     gpu_df |>
       dplyr::left_join(gpu_probe, by = "id") |>
       collect()
-  })
+  }, calibration = "transfer")
 })
 
 # =============================================================================
@@ -233,11 +246,15 @@ test_that("perf: fused_pipeline_lazy", {
       dplyr::filter(b > 0) |>
       dplyr::select(id, grp, a, b) |>
       collect()
-  })
+  }, calibration = "kernel")
 })
 
 # =============================================================================
 # Transfer layer (guards df -> GPU -> R round trip in isolation)
+#
+# Calibration class: "transfer" -- this benchmark *is* the transfer probe's
+# shape (tbl_gpu() construction + collect(), no compute in between), so it
+# is the canonical transfer-bound case.
 # =============================================================================
 
 test_that("perf: transfer_roundtrip", {
@@ -246,5 +263,5 @@ test_that("perf: transfer_roundtrip", {
   expect_no_perf_regression("transfer_roundtrip", function() {
     tbl_gpu(perf_big_df) |>
       collect()
-  })
+  }, calibration = "transfer")
 })

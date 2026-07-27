@@ -85,17 +85,29 @@ perf_time <- function(fn, iterations = 5, warmup = 2) {
 # fire on ambient drift alone. Two mechanisms address this:
 #
 #   - perf_warm_gpu(): force the clocks out of idle before anything is timed.
-#   - perf_current_calibration(): measure a fixed, deterministic workload
-#     alongside the real benchmarks and use current/baseline drift on *that*
-#     workload to scale the acceptable threshold for every other benchmark.
+#   - perf_current_calibration()/perf_current_calibration_transfer(): measure
+#     fixed, deterministic workloads alongside the real benchmarks and use
+#     current/baseline drift on *those* workloads to scale the acceptable
+#     threshold for every other benchmark.
 #
-# Both are cached per R process (via perf_state) so repeated expect_no_perf_
-# regression() calls within one `testthat::test_file()` run only pay the
-# warm-up/calibration cost once, keeping the ambient conditions the same for
-# every benchmark. Use `force = TRUE` (or reset perf_state) to bypass.
+# Two calibration probes, not one: the original kernel-heavy/transfer-light
+# calibration workload tracks GPU clock state well, but is blind to a
+# separate ambient condition -- host/PCIe transfer speed -- that can drift
+# independently of GPU clocks (observed directly: transfer-bound benchmarks
+# running 2-5x slower than baseline while the kernel calibration scale sat
+# at ~1.07x). Benchmarks now declare which ambient condition dominates them
+# (`calibration = "kernel"` or `"transfer"` in expect_no_perf_regression())
+# and are scaled against the matching probe.
+#
+# Both probes are cached per R process (via perf_state) so repeated
+# expect_no_perf_regression() calls within one `testthat::test_file()` run
+# only pay the warm-up/calibration cost once, keeping the ambient conditions
+# the same for every benchmark. Use `force = TRUE` (or reset perf_state) to
+# bypass.
 perf_state <- new.env(parent = emptyenv())
 perf_state$warmed <- FALSE
 perf_state$calib_median <- NULL
+perf_state$calib_transfer_median <- NULL
 
 # =============================================================================
 # GPU warm-up
@@ -202,6 +214,63 @@ perf_current_calibration <- function(force = FALSE) {
     perf_state$calib_median <- perf_calibration_time()
   }
   perf_state$calib_median
+}
+
+# =============================================================================
+# Ambient calibration -- transfer probe
+# =============================================================================
+#
+# The kernel calibration above (filter/mutate/arrange on a preallocated
+# table) is deliberately transfer-light: the input table is built once
+# outside the timed closure, and the result never leaves the GPU. That makes
+# it a poor proxy for benchmarks dominated by host<->device copies (a fresh
+# tbl_gpu() construction, a collect() of a large result). This probe times
+# exactly that shape instead -- transfer in, transfer out, no compute -- so
+# transfer-bound benchmarks scale against transfer ambient conditions rather
+# than GPU-kernel ambient conditions.
+
+#' Data for the transfer-calibration workload
+#'
+#' Preallocated once (outside the timed closure, like perf_calibration_data())
+#' so only the tbl_gpu()/collect() round trip is measured. Distinct seed/size
+#' from every other fixture in this file so it can't accidentally alias one.
+#' @keywords internal
+perf_calibration_transfer_data <- function() {
+  set.seed(20260203)
+  n <- 2e6
+  data.frame(
+    id = sample.int(500L, n, replace = TRUE),
+    v = runif(n),
+    w = rnorm(n)
+  )
+}
+
+#' Time the fixed transfer-calibration workload (median of 5, like perf_time() defaults)
+#'
+#' tbl_gpu() construction (host->device) immediately followed by collect()
+#' (device->host), with no compute step in between -- the workload is
+#' dominated by transfer bandwidth/latency, not kernel execution, so its
+#' current/baseline drift tracks host/PCIe-side ambient conditions rather
+#' than GPU clock state.
+#' @keywords internal
+perf_calibration_transfer_time <- function() {
+  df <- perf_calibration_transfer_data()
+
+  perf_time(function() {
+    tbl_gpu(df) |>
+      collect()
+  })
+}
+
+#' Current-session transfer-calibration median, cached per process
+#'
+#' @param force Re-measure even if already cached this process.
+#' @keywords internal
+perf_current_calibration_transfer <- function(force = FALSE) {
+  if (force || is.null(perf_state$calib_transfer_median)) {
+    perf_state$calib_transfer_median <- perf_calibration_transfer_time()
+  }
+  perf_state$calib_transfer_median
 }
 
 # =============================================================================
@@ -388,39 +457,54 @@ perf_git_commit <- function() {
 #'
 #' Skipped entirely unless CUPLYR_PERF=1 (perf checks are opt-in: they are
 #' slow and machine-specific). With CUPLYR_PERF_RECORD=1, times `fn` and
-#' (re)writes the baseline entry for `id` (plus the shared `_calibration`
-#' entry, see below) instead of checking anything.
+#' (re)writes the baseline entry for `id` (plus the shared `_calibration` and
+#' `_calibration_transfer` entries, see below) instead of checking anything.
 #'
 #' Ambient robustness: GPU clock state (P8 idle vs boosted) can swing every
-#' timing in a session by ~2-3x with zero code change, which would otherwise
-#' make this gate fire on drift alone. Two defenses:
+#' timing in a session by ~2-3x with zero code change, and host/PCIe
+#' transfer speed can independently drift by 2-5x on its own -- either would
+#' otherwise make this gate fire on drift alone, with zero code change.
+#' Defenses:
 #'
 #'   1. perf_warm_gpu() runs before any timing (cached per-process) to force
 #'      clocks out of idle.
-#'   2. A fixed ambient-calibration workload (perf_current_calibration()) is
-#'      timed the same way `fn` is. `scale = current_calib / baseline_calib`
-#'      estimates how much faster/slower *this session* is than the session
-#'      the baseline was recorded in, purely from ambient state, and the
-#'      threshold is widened/narrowed by that scale before comparing to
-#'      `fn`'s time. A scale outside [0.5, 4] is clamped (with a warning); a
-#'      scale outside [0.25, 8] means the machine state is too different to
-#'      judge anything, so the check is skipped entirely rather than risking
-#'      a false pass/fail.
+#'   2. Two fixed ambient-calibration workloads are timed the same way `fn`
+#'      is: a kernel-heavy/transfer-light one (perf_current_calibration())
+#'      and a transfer-heavy one (perf_current_calibration_transfer()). Each
+#'      benchmark declares via `calibration` which probe dominates its own
+#'      timing, and `scale = current_calib / baseline_calib` (computed from
+#'      the matching probe only) estimates how much faster/slower *this
+#'      session* is than the session the baseline was recorded in, purely
+#'      from ambient state. The threshold is widened/narrowed by that scale
+#'      before comparing to `fn`'s time. A scale outside [0.5, 4] is clamped
+#'      (with a warning); a scale outside [0.25, 8] means the machine state
+#'      is too different to judge anything, so the check is skipped
+#'      entirely rather than risking a false pass/fail. These clamps are
+#'      applied identically regardless of which probe is in play.
 #'
 #' @param id Stable, descriptive benchmark identifier (used as the JSON key).
-#'   Must not be "_calibration" -- that key is reserved for the calibration
-#'   baseline entry.
+#'   Must not be "_calibration" or "_calibration_transfer" -- those keys are
+#'   reserved for the calibration baseline entries.
 #' @param fn Zero-argument closure representing the full pipeline, ending in
 #'   collect() (or compute()) so lazy pipelines actually execute.
 #' @param max_ratio Maximum allowed scale-adjusted current/baseline ratio
 #'   before failing.
 #' @param iterations Timed iterations passed through to perf_time().
-expect_no_perf_regression <- function(id, fn, max_ratio = 1.5, iterations = 5) {
+#' @param calibration Which ambient probe dominates this benchmark's timing:
+#'   `"kernel"` (default) for GPU-compute-heavy/transfer-light benchmarks
+#'   (filter/mutate/select/arrange/summarise chains, fused pipelines), or
+#'   `"transfer"` for benchmarks dominated by host<->device copies (a raw
+#'   round trip, or a join whose collected result is much larger than its
+#'   inputs).
+expect_no_perf_regression <- function(id, fn, max_ratio = 1.5, iterations = 5,
+                                       calibration = c("kernel", "transfer")) {
+  calibration <- match.arg(calibration)
+
   if (!identical(Sys.getenv("CUPLYR_PERF"), "1")) {
     testthat::skip("perf checks are opt-in; set CUPLYR_PERF=1 to run them")
   }
-  if (identical(id, "_calibration")) {
-    stop("'_calibration' is a reserved benchmark id", call. = FALSE)
+  if (identical(id, "_calibration") || identical(id, "_calibration_transfer")) {
+    stop("'_calibration'/'_calibration_transfer' are reserved benchmark ids", call. = FALSE)
   }
 
   perf_warm_gpu()
@@ -430,6 +514,7 @@ expect_no_perf_regression <- function(id, fn, max_ratio = 1.5, iterations = 5) {
   if (identical(Sys.getenv("CUPLYR_PERF_RECORD"), "1")) {
     median_s <- perf_time(fn, iterations = iterations)
     calib_median <- perf_current_calibration()
+    calib_transfer_median <- perf_current_calibration_transfer()
 
     baseline <- perf_read_baseline(baseline_path)
     baseline[[id]] <- list(
@@ -444,11 +529,17 @@ expect_no_perf_regression <- function(id, fn, max_ratio = 1.5, iterations = 5) {
       commit = perf_git_commit(),
       iterations = 5
     )
+    baseline[["_calibration_transfer"]] <- list(
+      median_s = calib_transfer_median,
+      recorded_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z", tz = "UTC"),
+      commit = perf_git_commit(),
+      iterations = 5
+    )
     perf_write_baseline(baseline_path, baseline)
 
     testthat::skip(sprintf(
-      "baseline recorded for '%s': %.4fs (%d iterations, calibration=%.4fs) -> %s",
-      id, median_s, iterations, calib_median, baseline_path
+      "baseline recorded for '%s': %.4fs (%d iterations, calibration=%.4fs, calibration_transfer=%.4fs) -> %s",
+      id, median_s, iterations, calib_median, calib_transfer_median, baseline_path
     ))
   }
 
@@ -462,30 +553,43 @@ expect_no_perf_regression <- function(id, fn, max_ratio = 1.5, iterations = 5) {
     ))
   }
 
-  calib_entry <- baseline[["_calibration"]]
-  if (is.null(calib_entry) || is.null(calib_entry$median_s)) {
-    testthat::skip(sprintf(
+  if (calibration == "transfer") {
+    calib_key <- "_calibration_transfer"
+    current_calib_fn <- perf_current_calibration_transfer
+    missing_calib_msg <- sprintf(
+      "baseline lacks transfer calibration; re-record with CUPLYR_PERF=1 CUPLYR_PERF_RECORD=1 for '%s'",
+      id
+    )
+  } else {
+    calib_key <- "_calibration"
+    current_calib_fn <- perf_current_calibration
+    missing_calib_msg <- sprintf(
       "no '_calibration' baseline (baseline file predates ambient-calibration support); re-record with CUPLYR_PERF=1 CUPLYR_PERF_RECORD=1 for '%s'",
       id
-    ))
+    )
+  }
+
+  calib_entry <- baseline[[calib_key]]
+  if (is.null(calib_entry) || is.null(calib_entry$median_s)) {
+    testthat::skip(missing_calib_msg)
   }
 
   baseline_calib <- as.numeric(calib_entry$median_s)
-  current_calib <- perf_current_calibration()
+  current_calib <- current_calib_fn()
   raw_scale <- current_calib / baseline_calib
 
   if (raw_scale < 0.25 || raw_scale > 8) {
     testthat::skip(sprintf(
-      "[perf] %s: ambient calibration scale %.3fx (current=%.4fs, baseline=%.4fs) is far outside [0.25x, 8x] -- machine state too different from the baseline session to judge; skipping",
-      id, raw_scale, current_calib, baseline_calib
+      "[perf] %s: ambient %s-calibration scale %.3fx (current=%.4fs, baseline=%.4fs) is far outside [0.25x, 8x] -- machine state too different from the baseline session to judge; skipping",
+      id, calibration, raw_scale, current_calib, baseline_calib
     ))
   }
 
   scale <- raw_scale
   if (raw_scale < 0.5 || raw_scale > 4) {
     warning(sprintf(
-      "[perf] %s: ambient calibration scale %.3fx is outside the normal [0.5x, 4x] range (current=%.4fs, baseline=%.4fs); clamping scale for this check",
-      id, raw_scale, current_calib, baseline_calib
+      "[perf] %s: ambient %s-calibration scale %.3fx is outside the normal [0.5x, 4x] range (current=%.4fs, baseline=%.4fs); clamping scale for this check",
+      id, calibration, raw_scale, current_calib, baseline_calib
     ), call. = FALSE)
     scale <- max(0.5, min(4, raw_scale))
   }
@@ -498,8 +602,8 @@ expect_no_perf_regression <- function(id, fn, max_ratio = 1.5, iterations = 5) {
 
   # Emit on pass as well as failure so perf runs are auditable from logs.
   message(sprintf(
-    "[perf] %s: current=%.4fs baseline=%.4fs raw_ratio=%.3fx scale=%.3fx adjusted_ratio=%.3fx (max_ratio=%.2fx, commit=%s)",
-    id, current_s, baseline_s, raw_ratio, scale, adjusted_ratio, max_ratio, entry$commit %||% "unknown"
+    "[perf] %s (calibration=%s): current=%.4fs baseline=%.4fs raw_ratio=%.3fx scale=%.3fx adjusted_ratio=%.3fx (max_ratio=%.2fx, commit=%s)",
+    id, calibration, current_s, baseline_s, raw_ratio, scale, adjusted_ratio, max_ratio, entry$commit %||% "unknown"
   ))
 
   testthat::expect_lt(
