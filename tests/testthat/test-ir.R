@@ -476,9 +476,19 @@ test_that("ir_infer_type() preserves argument type for unary minus", {
   expect_equal(ir_infer_type(ir, schema), "INT32")
 })
 
-test_that("ir_infer_type() defaults a bare NA literal to FLOAT64 in isolation", {
+test_that("ir_infer_type() defaults a bare NA literal to BOOL8 in isolation", {
+  # T6 finding (phase1_expression_engine.md task T6, dplyr-oracle mutate
+  # coverage): this was pinned at FLOAT64 during T1, on the theory that an
+  # isolated bare NA is always asked as part of a call's arg_types where
+  # FLOAT64 is a promotion-union no-op. Empirically wrong for the OTHER
+  # place this default is reached: `mutate(y = NA)`, a bare NA as an entire
+  # top-level expression with no enclosing call at all -- `typeof(NA)` is
+  # "logical" in R, and dplyr's `mutate(y = NA)` produces a logical column.
+  # Corrected to BOOL8; the promotion-union case is now handled separately
+  # by ir_infer_type()'s "call" branch, which substitutes a sibling arg's
+  # type for an isolated NA before it ever reaches a `type` function.
   ir <- ir_lit_from_r(NA)
-  expect_equal(ir_infer_type(ir, list(names = character(), types = character())), "FLOAT64")
+  expect_equal(ir_infer_type(ir, list(names = character(), types = character())), "BOOL8")
 })
 
 # -----------------------------------------------------------------------------

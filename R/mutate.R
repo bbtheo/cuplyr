@@ -69,8 +69,17 @@
 #'     `BOOL8`.
 #'   \item `sqrt()`, `log()`, `exp()`, `floor()`, `ceiling()`, `sin()`,
 #'     `cos()`, `tan()` always promote to `FLOAT64` (matching R, e.g.
-#'     `floor(1L)` is a double). `abs()` and `round()` preserve the
-#'     argument's type.
+#'     `floor(1L)` is a double) -- as does `round()`, for the same reason
+#'     (`typeof(round(1L))` is also a double in R, unlike `abs()` below).
+#'   \item `abs()` preserves the argument's type, except a logical column,
+#'     which promotes to `INT32` (matching R: `typeof(abs(TRUE))` is
+#'     `"integer"`, not `"logical"`).
+#'   \item A bare `NA` (untyped) is `BOOL8` when it's an entire mutate
+#'     expression by itself (`mutate(y = NA)`, matching `typeof(NA)`); as an
+#'     operand inside an arithmetic expression (`mutate(y = int_col + NA)`)
+#'     it's a type no-op instead, adopting the other operand's type
+#'     (matching R: `1L + NA` is an integer, not a double). A typed NA
+#'     literal (`NA_real_`, `NA_integer_`, ...) always keeps its own type.
 #' }
 #'
 #' ## Not yet supported

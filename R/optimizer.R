@@ -187,7 +187,23 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
     "mutate" = {
       expr_inputs <- unique(unlist(lapply(ast$expressions, `[[`, "input_cols")))
       outputs <- vapply(ast$expressions, `[[`, character(1), "output_col")
-      needed <- union(setdiff(required_cols, outputs), expr_inputs)
+      # Only genuinely NEW output columns can be safely dropped from the
+      # requirement passed upstream -- an output whose name already exists
+      # in the input schema is a REPLACE-in-place (e.g. `mutate(s = sin(x))`
+      # when `s` is an existing column), and lower_mutate()/gpu_mutate_expr()
+      # rely on that name still being present (at its original position) in
+      # the immediate input schema to recognize it as a replacement rather
+      # than an append. Dropping it here (as this code used to do
+      # unconditionally) let this "source" case insert an ast_select that
+      # silently removed the replaced column from the projected source
+      # table -- gpu_mutate_expr() then appended the new value at the END
+      # instead of replacing in place, while the (unoptimized) inferred
+      # schema used to label the collected result still expected the
+      # original column order, producing a silent column-value rotation
+      # bug (found via the T6 oracle tests -- see test-dplyr-mutate.R).
+      input_schema_names <- infer_schema(ast$input)$names
+      new_outputs <- setdiff(outputs, input_schema_names)
+      needed <- union(setdiff(required_cols, new_outputs), expr_inputs)
       ast$input <- push_down_projections(ast$input, needed, group_cols)
       ast
     },

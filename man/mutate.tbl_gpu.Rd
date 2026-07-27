@@ -84,8 +84,17 @@ result to \code{FLOAT64} -- write \code{1L} to keep an integer result.
 \code{BOOL8}.
 \item \code{sqrt()}, \code{log()}, \code{exp()}, \code{floor()}, \code{ceiling()}, \code{sin()},
 \code{cos()}, \code{tan()} always promote to \code{FLOAT64} (matching R, e.g.
-\code{floor(1L)} is a double). \code{abs()} and \code{round()} preserve the
-argument's type.
+\code{floor(1L)} is a double) -- as does \code{round()}, for the same reason
+(\code{typeof(round(1L))} is also a double in R, unlike \code{abs()} below).
+\item \code{abs()} preserves the argument's type, except a logical column,
+which promotes to \code{INT32} (matching R: \code{typeof(abs(TRUE))} is
+\code{"integer"}, not \code{"logical"}).
+\item A bare \code{NA} (untyped) is \code{BOOL8} when it's an entire mutate
+expression by itself (\code{mutate(y = NA)}, matching \code{typeof(NA)}); as an
+operand inside an arithmetic expression (\code{mutate(y = int_col + NA)})
+it's a type no-op instead, adopting the other operand's type
+(matching R: \code{1L + NA} is an integer, not a double). A typed NA
+literal (\code{NA_real_}, \code{NA_integer_}, ...) always keeps its own type.
 }
 }
 

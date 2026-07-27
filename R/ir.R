@@ -440,13 +440,17 @@ ir_infer_type <- function(ir, schema) {
   }
 
   if (ir$kind == "lit") {
-    # A bare NA (type = NULL) defaults to FLOAT64 when asked in isolation;
-    # in practice it's asked as part of a call's arg_types, where its
-    # contribution is a no-op for infer_mutate_output_type()'s promotion
-    # union (which is exactly why FLOAT64 -- the union identity value for
-    # the promotion rules in section 1.3 -- is a safe default here too).
+    # A bare NA (type = NULL) defaults to BOOL8 when asked in isolation --
+    # matching `typeof(NA)` ("logical") in R, so `mutate(y = NA)` types `y`
+    # as a logical column exactly like dplyr (T6 finding: this used to
+    # default to FLOAT64 on the theory that it's always asked as part of a
+    # call's arg_types where its contribution is a promotion-union no-op;
+    # empirically wrong for a bare NA as an entire top-level mutate
+    # expression, which never reaches a call node at all). See the "call"
+    # branch below for the sibling-adoption logic that keeps this default
+    # from over-eagerly promoting a *nested* NA in e.g. `x + NA`.
     if (is.null(ir$type)) {
-      return("FLOAT64")
+      return("BOOL8")
     }
     return(ir$type)
   }
@@ -457,6 +461,25 @@ ir_infer_type <- function(ir, schema) {
   }
 
   arg_types <- vapply(ir$args, ir_infer_type, character(1), schema = schema)
+
+  # A bare, untyped NA literal argument (kind="lit", na=TRUE, type=NULL) is
+  # a type no-op in R's arithmetic: `1L + NA` is integer, not double (NA is
+  # coerced to the OTHER operand's type, it never forces a promotion). Since
+  # each arg's type is inferred independently above, an isolated NA arg
+  # would otherwise surface as the "in isolation" BOOL8 default from the
+  # branch above and incorrectly feed into infer_mutate_output_type()'s
+  # promotion union. Substitute it with a sibling arg's type first (mirrors
+  # src/expr_eval.hpp's resolve_static_type(), which does the same
+  # adoption when building the actual AST) -- T6 finding: without this,
+  # `mutate(y = int_col + NA)` came back FLOAT64 instead of matching
+  # dplyr's INT32.
+  is_isolated_na <- vapply(ir$args, function(a) {
+    identical(a$kind, "lit") && isTRUE(a$na) && is.null(a$type)
+  }, logical(1))
+  if (any(is_isolated_na) && !all(is_isolated_na)) {
+    arg_types[is_isolated_na] <- arg_types[!is_isolated_na][1]
+  }
+
   entry$type(arg_types)
 }
 
@@ -485,6 +508,17 @@ type_arith_op <- function(op) {
 type_bool8 <- function(arg_types) "BOOL8"
 type_float64 <- function(arg_types) "FLOAT64"
 type_arg1 <- function(arg_types) arg_types[1]
+
+# abs() preserves its argument's type -- EXCEPT a logical (BOOL8) argument,
+# which R promotes to integer (`typeof(abs(TRUE))` is "integer", not
+# "logical"; base R's abs() coerces via as.integer()/as.double() before
+# taking the absolute value, it never returns a logical). Verified against
+# the dplyr oracle (T6 finding; phase1_expression_engine.md section 1.3's
+# "abs, round | argument type" table entry was correct for abs() only on
+# the non-logical case).
+type_abs <- function(arg_types) {
+  if (identical(arg_types[1], "BOOL8")) "INT32" else arg_types[1]
+}
 
 # Unary `-x` preserves the argument's type (section 1.3); binary `x - y`
 # defers to infer_mutate_output_type() like the other D5-governed ops
@@ -580,12 +614,18 @@ ir_call_registry <- list(
   ),
 
   "exp" = list(arity = 1L, parse = NULL, type = type_float64, lower = list(ast_op = "EXP")),
-  "abs" = list(arity = 1L, parse = NULL, type = type_arg1, lower = list(ast_op = "ABS")),
+  "abs" = list(arity = 1L, parse = NULL, type = type_abs, lower = list(ast_op = "ABS")),
   "floor" = list(arity = 1L, parse = NULL, type = type_float64, lower = list(ast_op = "FLOOR")),
   "ceil" = list(arity = 1L, parse = NULL, type = type_float64, lower = list(ast_op = "CEIL")),
   "sin" = list(arity = 1L, parse = NULL, type = type_float64, lower = list(ast_op = "SIN")),
   "cos" = list(arity = 1L, parse = NULL, type = type_float64, lower = list(ast_op = "COS")),
   "tan" = list(arity = 1L, parse = NULL, type = type_float64, lower = list(ast_op = "TAN")),
 
-  "round" = list(arity = NA_integer_, parse = NULL, type = type_arg1, lower = list(handler = "round"))
+  # round() ALWAYS returns a double in R, regardless of the input's type
+  # (`typeof(round(1L))`, `typeof(round(TRUE))`, `typeof(round(1L, 2))` are
+  # all "double") -- unlike abs(), which does preserve non-BOOL8 input
+  # types. Verified against the dplyr oracle (T6 finding; corrects
+  # phase1_expression_engine.md section 1.3's table, which grouped round()
+  # with abs() as "argument type" -- empirically wrong for round()).
+  "round" = list(arity = NA_integer_, parse = NULL, type = type_float64, lower = list(handler = "round"))
 )
