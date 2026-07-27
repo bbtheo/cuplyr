@@ -1024,3 +1024,35 @@ test_that("summarise() with min/max of arithmetic expressions works", {
     expect_equal(gpu_row$max_mpg_10, r_row$max_mpg_10, tolerance = 1e-10)
   }
 })
+
+# =============================================================================
+# NA group keys
+# =============================================================================
+
+test_that("summarise() keeps an NA group key as its own group (not dropped)", {
+  skip_if_no_gpu()
+
+  # Bug found while implementing count()/tally() (Phase 3 task 5): cudf's
+  # groupby::groupby constructor defaults to null_policy::EXCLUDE (silently
+  # DROPS every row whose group key is null), while dplyr's group_by()/
+  # summarise() always treats NA as its own group, same as every other
+  # value. gpu_summarise() (src/ops_groupby.cpp) must pass
+  # null_policy::INCLUDE explicitly.
+  df <- data.frame(g = c(1, NA, NA, 2, NA), x = c(1, 2, 3, 4, 5))
+  gpu_df <- tbl_gpu(df)
+
+  result <- gpu_df |>
+    dplyr::group_by(g) |>
+    dplyr::summarise(n = dplyr::n(), .groups = "drop") |>
+    collect()
+
+  oracle <- df |>
+    dplyr::group_by(g) |>
+    dplyr::summarise(n = dplyr::n(), .groups = "drop")
+
+  expect_equal(nrow(result), nrow(oracle))
+  expect_equal(
+    dplyr::arrange(tibble::as_tibble(result), g),
+    dplyr::arrange(tibble::as_tibble(oracle), g)
+  )
+})

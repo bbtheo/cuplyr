@@ -213,41 +213,16 @@ slice_sample.tbl_gpu <- function(.data, ..., n, prop, by = NULL,
 # =============================================================================
 
 # =============================================================================
-# count() / tally() / add_count()
-# =============================================================================
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr count
-count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL) {
-  dots <- rlang::enquos(...)
-  wt_quo <- rlang::enquo(wt)
-  gpu_fallback("count", x, function(tbl) {
-    rlang::inject(dplyr::count(tbl, !!!dots, wt = !!wt_quo, sort = sort, name = name))
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr tally
-tally.tbl_gpu <- function(x, wt = NULL, sort = FALSE, name = NULL) {
-  wt_quo <- rlang::enquo(wt)
-  gpu_fallback("tally", x, function(tbl) {
-    rlang::inject(dplyr::tally(tbl, wt = !!wt_quo, sort = sort, name = name))
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr add_count
-add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL) {
-  dots <- rlang::enquos(...)
-  wt_quo <- rlang::enquo(wt)
-  gpu_fallback("add_count", x, function(tbl) {
-    rlang::inject(dplyr::add_count(tbl, !!!dots, wt = !!wt_quo, sort = sort, name = name))
-  })
-}
-
+# count() / tally() / add_count() / add_tally()
+#
+# Moved to R/count.R (GPU-native, Phase 3 task 5) -- see count.tbl_gpu(),
+# tally.tbl_gpu(), add_count.tbl_gpu() (all sugar over group_by()/
+# summarise()/mutate()/arrange(), no CPU round-trip) and
+# grouped_aggregate_mutate() (R/mutate.R) for add_count()'s join-back
+# broadcast. add_tally() is a plain (non-generic) dplyr function and needs
+# no tbl_gpu method at all: R/group-by.R's tbl_vars.tbl_gpu() plus the
+# grouped-aggregate mutate() support are enough for the real
+# dplyr::add_tally() to work transparently.
 # =============================================================================
 # Two-table verbs: joins without a GPU-native path, set operations, rows_*
 # =============================================================================

@@ -114,7 +114,15 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                 std::vector<cudf::column_view> keys_views = { keys_col->view() };
                 cudf::table_view keys_table(keys_views);
 
-                cudf::groupby::groupby gb(keys_table);
+                // null_policy::INCLUDE: cudf::groupby's default
+                // (null_policy::EXCLUDE) silently drops every row whose
+                // group key is null, but dplyr's group_by()/summarise()
+                // always treats NA as its own group like any other value
+                // (verified empirically, see test-summarise.R's "keeps an
+                // NA group key" test and test-dplyr-count.R's NA-key
+                // tests -- add_count()'s join-back broadcast, R/mutate.R,
+                // depends on this too).
+                cudf::groupby::groupby gb(keys_table, cudf::null_policy::INCLUDE);
 
                 std::vector<cudf::groupby::aggregation_request> requests;
                 cudf::groupby::aggregation_request req;
@@ -138,7 +146,11 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     }
     cudf::table_view keys_table(keys_views);
 
-    cudf::groupby::groupby gb(keys_table);
+    // null_policy::INCLUDE: see the comment on the other groupby::groupby
+    // construction above -- dplyr's group_by()/summarise() always treats
+    // NA as its own group; cudf's default (null_policy::EXCLUDE) would
+    // silently drop every row whose group key is null.
+    cudf::groupby::groupby gb(keys_table, cudf::null_policy::INCLUDE);
 
     std::vector<cudf::groupby::aggregation_request> requests;
     for (int i = 0; i < num_aggs; ++i) {

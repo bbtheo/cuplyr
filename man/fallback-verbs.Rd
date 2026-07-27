@@ -5,9 +5,6 @@
 \alias{reframe.tbl_gpu}
 \alias{rowwise.tbl_gpu}
 \alias{slice_sample.tbl_gpu}
-\alias{count.tbl_gpu}
-\alias{tally.tbl_gpu}
-\alias{add_count.tbl_gpu}
 \alias{semi_join.tbl_gpu}
 \alias{anti_join.tbl_gpu}
 \alias{nest_join.tbl_gpu}
@@ -44,12 +41,6 @@
 \method{rowwise}{tbl_gpu}(.data, ...)
 
 \method{slice_sample}{tbl_gpu}(.data, ..., n, prop, by = NULL, weight_by = NULL, replace = FALSE)
-
-\method{count}{tbl_gpu}(x, ..., wt = NULL, sort = FALSE, name = NULL)
-
-\method{tally}{tbl_gpu}(x, wt = NULL, sort = FALSE, name = NULL)
-
-\method{add_count}{tbl_gpu}(x, ..., wt = NULL, sort = FALSE, name = NULL)
 
 \method{semi_join}{tbl_gpu}(x, y, by = NULL, copy = FALSE, ...)
 

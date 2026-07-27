@@ -63,9 +63,10 @@ fallback_sweep_pipelines <- function() {
     # test-dplyr-relocate.R, test-dplyr-pull.R) -- no longer part of this
     # fallback sweep. See the "never triggers a fallback notification"
     # block below instead.
-    count = list(fn = function(d) dplyr::count(d, g), arrange_by = "g"),
-    tally = list(fn = function(d) dplyr::tally(dplyr::group_by(d, g)), arrange_by = "g"),
-    add_count = list(fn = function(d) dplyr::add_count(d, g)),
+    # count()/tally()/add_count() are GPU-native now too (Phase 3 task 5,
+    # see R/count.R, test-dplyr-count.R) -- no longer part of this fallback
+    # sweep either. See the "never triggers a fallback notification" block
+    # below instead.
     semi_join = list(fn = function(d) dplyr::semi_join(d, y_small, by = "g")),
     anti_join = list(fn = function(d) dplyr::anti_join(d, y_small, by = "g")),
     cross_join = list(
@@ -494,4 +495,20 @@ test_that("transmute()/glimpse() are GPU-native and never trigger a fallback not
   expect_no_error(gt |> dplyr::mutate(z = x * 2, .keep = "used"))
   expect_no_error(gt |> dplyr::mutate(z = x * 2, .after = g))
   expect_no_error(capture.output(dplyr::glimpse(gt)))
+})
+
+test_that("count()/tally()/add_count()/add_tally() are GPU-native and never trigger a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gt <- tbl_gpu(fallback_df())
+
+  expect_no_error(gt |> dplyr::count(g))
+  expect_no_error(gt |> dplyr::count())
+  expect_no_error(gt |> dplyr::count(g, wt = x, sort = TRUE))
+  expect_no_error(gt |> dplyr::group_by(g) |> dplyr::tally())
+  expect_no_error(gt |> dplyr::add_count(g))
+  # add_tally() is a plain (non-generic) dplyr function -- it works
+  # transparently via tbl_vars.tbl_gpu()/group_vars.tbl_gpu()/mutate()/
+  # arrange(), with no tbl_gpu-specific code of its own (R/count.R).
+  expect_no_error(gt |> dplyr::group_by(g) |> dplyr::add_tally())
 })

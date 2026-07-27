@@ -149,8 +149,16 @@ literal (\code{NA_real_}, \code{NA_integer_}, ...) always keeps its own type.
 \subsection{Not yet supported}{
 
 \itemize{
-\item Aggregates or window functions inside a mutate expression (e.g.
-\code{mutate(y = x - mean(x))}, \code{mutate(r = row_number())}) -- planned
+\item Aggregates or window functions inside a mutate expression, WITH
+ONE narrow exception: a dot that is exactly \code{n()} or \verb{sum(<expr>)}
+(optionally \verb{sum(<expr>, na.rm = TRUE)}) and nothing else -- e.g.
+\code{mutate(y = n())}, \code{mutate(total = sum(x))} -- broadcasts that one
+whole-table (or, if \code{x} is grouped, per-group) aggregate to every
+row (added to support \code{dplyr::add_tally()}/\code{add_count()}, see
+\code{R/count.R}). Anything more elaborate -- combining an aggregate with
+other operations (\code{mutate(y = x - mean(x))}), \code{row_number()}, other
+aggregate functions (\code{mean()}, \code{min()}, \code{max()}, ...) -- is still a
+hard error; full grouped-mutate/window-function support is planned
 for a later phase (see \code{scratchpad/phase1_expression_engine.md}
 section 6)
 \item String manipulation (concatenation, case conversion, substr,

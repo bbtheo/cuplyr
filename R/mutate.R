@@ -120,8 +120,16 @@
 #'
 #' ## Not yet supported
 #' \itemize{
-#'   \item Aggregates or window functions inside a mutate expression (e.g.
-#'     `mutate(y = x - mean(x))`, `mutate(r = row_number())`) -- planned
+#'   \item Aggregates or window functions inside a mutate expression, WITH
+#'     ONE narrow exception: a dot that is exactly `n()` or `sum(<expr>)`
+#'     (optionally `sum(<expr>, na.rm = TRUE)`) and nothing else -- e.g.
+#'     `mutate(y = n())`, `mutate(total = sum(x))` -- broadcasts that one
+#'     whole-table (or, if `x` is grouped, per-group) aggregate to every
+#'     row (added to support `dplyr::add_tally()`/`add_count()`, see
+#'     `R/count.R`). Anything more elaborate -- combining an aggregate with
+#'     other operations (`mutate(y = x - mean(x))`), `row_number()`, other
+#'     aggregate functions (`mean()`, `min()`, `max()`, ...) -- is still a
+#'     hard error; full grouped-mutate/window-function support is planned
 #'     for a later phase (see `scratchpad/phase1_expression_engine.md`
 #'     section 6)
 #'   \item String manipulation (concatenation, case conversion, substr,
@@ -193,6 +201,38 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
         .before = !!before_quo, .after = !!after_quo
       ))
     }))
+  }
+
+  # Narrow aggregate broadcast: `mutate(x, name = n())` / `mutate(x, name =
+  # sum(expr))` -- a (per-group, if `x` is grouped; whole-table otherwise)
+  # aggregate broadcast to every row, keeping all rows (unlike summarise()).
+  # Full grouped-mutate/window-function support (aggregates combined with
+  # other expressions, multiple aggregate dots, other aggregate functions
+  # like mean()/min()/max()) is Phase 5 material and NOT handled here; this
+  # fires ONLY for the single-dot, bare-`n()`-or-`sum(<expr>[, na.rm =
+  # TRUE])` shape. It was added so that `dplyr::add_tally()` and our own
+  # `add_count.tbl_gpu()` (R/count.R, both of which call straight through to
+  # `mutate()` with exactly this shape, see dplyr's `tally_n()`) work
+  # without a CPU fallback; it also incidentally covers the same shape for
+  # a plain, directly-written `mutate(x, name = n())`/`mutate(x, name =
+  # sum(y))` call (grouped or not), which is otherwise a hard error (see
+  # this file's "Not yet supported" roxygen section) -- a strict parity
+  # improvement, not scope creep, since it's the exact same mechanism.
+  # See R/count.R and `grouped_aggregate_mutate()` below for the empirical
+  # verification that the grouped case's `left_join()` broadcast is safe
+  # (NA-key matching, row-order preservation); the ungrouped case broadcasts
+  # a single collected scalar instead (see `grouped_aggregate_mutate()`).
+  if (length(dots) == 1 &&
+      identical(.keep, "all") &&
+      rlang::quo_is_null(before_quo) && rlang::quo_is_null(after_quo)) {
+    grouped_agg <- match_grouped_aggregate_dot(dots[[1]])
+    if (!is.null(grouped_agg)) {
+      dot_name <- names(dots)
+      if (is.null(dot_name) || is.na(dot_name) || identical(dot_name, "")) {
+        dot_name <- rlang::quo_text(dots[[1]])
+      }
+      return(grouped_aggregate_mutate(.data, dot_name, grouped_agg))
+    }
   }
 
   if (!rlang::quo_is_null(before_quo) && !rlang::quo_is_null(after_quo)) {
@@ -455,4 +495,146 @@ transmute.tbl_gpu <- function(.data, ...) {
   final_order <- c(missing_groups, dot_output_cols)
 
   push_op(result, ast_select(input_node(result), final_order))
+}
+
+# Internal: Detect the narrow "grouped aggregate broadcast" mutate() shape
+#
+# Matches a single dot's raw (unevaluated) expression against exactly two
+# shapes, after stripping one leading `pkg::` qualifier from the call head
+# (same convention as `decompose_agg_call()`, R/summarise.R):
+#   - `n()` (zero arguments)
+#   - `sum(<expr>)` or `sum(<expr>, na.rm = TRUE)` (one or two arguments;
+#     a two-arg call is only matched when the second argument is exactly
+#     `na.rm = TRUE` -- our own aggregation already always excludes NA, see
+#     R/summarise.R's "NA handling" docs, so `na.rm = TRUE` is accepted and
+#     discarded, while `na.rm = FALSE` -- a genuinely different semantic we
+#     don't implement -- correctly fails to match and falls through to the
+#     ordinary mutate() IR path, which will itself raise the "only supports
+#     column copies, arithmetic, ..." error for a bare `sum()` call)
+#
+# This is deliberately narrow: no other aggregate functions (mean(), min(),
+# max(), ...) and no combining an aggregate with other operations
+# (`n() + 1`, `sum(x) / n()`) are recognized -- see the call site in
+# mutate.tbl_gpu() for why (full grouped-mutate/window-function support is
+# Phase 5 material; this exists only to let `dplyr::add_tally()`'s and
+# `add_count.tbl_gpu()`'s internal `mutate(x, name := n()-or-sum(wt))` call
+# succeed without a CPU fallback).
+#
+# @param quo A quosure (one mutate() dot)
+# @return `list(kind = "n", arg = NULL)`, `list(kind = "sum", arg = <lang>)`,
+#   or `NULL` if the shape doesn't match
+# @keywords internal
+match_grouped_aggregate_dot <- function(quo) {
+  expr <- rlang::quo_get_expr(quo)
+  if (!is.call(expr)) {
+    return(NULL)
+  }
+
+  head <- expr[[1]]
+  if (is.call(head) && length(head) == 3 && identical(head[[1]], as.name("::"))) {
+    head <- head[[3]]
+  }
+  if (!is.symbol(head)) {
+    return(NULL)
+  }
+
+  fn <- as.character(head)
+  n_args <- length(expr) - 1L
+
+  if (identical(fn, "n") && n_args == 0) {
+    return(list(kind = "n", arg = NULL))
+  }
+
+  if (identical(fn, "sum") && n_args %in% c(1L, 2L)) {
+    if (n_args == 2L) {
+      arg_name <- names(expr)[3]
+      is_na_rm_true <- (is.null(arg_name) || is.na(arg_name) || identical(arg_name, "na.rm")) &&
+        isTRUE(tryCatch(eval(expr[[3]]), error = function(e) NA))
+      if (!isTRUE(is_na_rm_true)) {
+        return(NULL)
+      }
+    }
+    return(list(kind = "sum", arg = expr[[2]]))
+  }
+
+  NULL
+}
+
+# Internal: Compute a grouped aggregate broadcast to every row
+#
+# Implements the shape `match_grouped_aggregate_dot()` recognizes: compute
+# the aggregate per-group via `summarise()` (reusing the same IR-based
+# aggregation sub-expression machinery, so `sum(<arbitrary-expr>)` works
+# exactly as it does in summarise()), then LEFT JOIN the (one-row-per-group)
+# result back onto the original (all-rows) data on the group columns to
+# broadcast the aggregate to every row -- while preserving row order and
+# NA-key matching:
+#   - Row order: `left_join()`'s left-table row order is preserved (stable
+#     sort of the join maps by `left_map`, see R/join.R/src/ops_join.cpp),
+#     exactly matching mutate()'s row-order-preserving contract.
+#   - NA keys: the join's null equality is unconditionally `EQUAL` (see
+#     `src/ops_join.cpp`), matching `group_by()`/`summarise()`'s own
+#     NA-values-form-their-own-group semantics -- an NA key in `.data`
+#     matches the NA-keyed row of the summary, exactly as dplyr's own
+#     grouped mutate would.
+#
+# If `output_name` replaces an EXISTING column (e.g. `mutate(gdf, x =
+# sum(x))`), that column is dropped from the join's left side first, so the
+# join doesn't produce a suffixed duplicate -- then the final column order
+# is restored to the original position (replace) or appended (new column),
+# matching plain mutate()'s own column-order contract.
+#
+# @param .data A `tbl_gpu` (grouped or not; checked by the caller)
+# @param output_name Character, the output column name
+# @param agg `list(kind = "n"|"sum", arg = NULL or a language object)`, as
+#   returned by `match_grouped_aggregate_dot()`
+# @return A new `tbl_gpu`, grouped the same as `.data`
+# @keywords internal
+grouped_aggregate_mutate <- function(.data, output_name, agg) {
+  group_cols <- .data$groups
+
+  agg_call <- if (identical(agg$kind, "n")) {
+    quote(n())
+  } else {
+    rlang::call2("sum", agg$arg)
+  }
+
+  if (length(group_cols) == 0) {
+    # Ungrouped: a real dplyr::mutate(ungrouped_df, name := n()) broadcasts
+    # ONE whole-table aggregate to every row -- there are no keys to join
+    # on. Compute it once (summarise() to a single row, then collect() the
+    # one scalar value -- forcing materialization, the same one-time-collect
+    # tradeoff preprocess_agg_expressions() already accepts for summarise()'s
+    # own temp columns, R/summarise.R) and inject it as an ordinary literal
+    # mutate() dot -- which already handles replace-vs-append column
+    # ordering correctly via the normal IR path, so no extra plumbing is
+    # needed for this branch (and no infinite recursion: a bare scalar
+    # literal doesn't match `match_grouped_aggregate_dot()`).
+    one_row <- rlang::inject(dplyr::summarise(.data, !!output_name := !!agg_call))
+    scalar_value <- collect(one_row)[[output_name]][[1]]
+    return(dplyr::mutate(.data, !!output_name := !!scalar_value))
+  }
+
+  schema <- current_schema(.data)
+  key_summary <- rlang::inject(dplyr::summarise(.data, !!output_name := !!agg_call))
+
+  is_replace <- output_name %in% schema$names
+  join_input <- .data
+  if (is_replace) {
+    keep_names <- setdiff(schema$names, output_name)
+    join_input <- dplyr::select(.data, dplyr::all_of(keep_names))
+  }
+
+  joined <- dplyr::left_join(join_input, key_summary, by = group_cols)
+
+  final_order <- if (is_replace) schema$names else c(schema$names, output_name)
+  result <- dplyr::select(joined, dplyr::all_of(final_order))
+
+  new_tbl_gpu(
+    ptr = result$ptr,
+    schema = result$schema,
+    lazy_ops = result$lazy_ops,
+    groups = group_cols,
+    exec_mode = result$exec_mode
+  )
 }
