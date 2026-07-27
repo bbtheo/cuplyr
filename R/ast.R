@@ -148,22 +148,30 @@ make_predicate <- function(ir, schema) {
 
 #' Create a mutate expression structure
 #'
+#' Section 3 of `scratchpad/phase1_expression_engine.md`: the IR cutover's
+#' mutate expression record. `ir` is the parsed expression IR (see
+#' `R/ir.R`); `input_cols`/`output_type` are cached from `ir_cols()`/
+#' `ir_infer_type()` since every optimizer pass
+#' (`fuse_mutates`/`try_fuse_mutate_pair`/`toposort_expressions`/
+#' `prune_dead_columns`/`push_down_projections`) reads only those two fields
+#' plus `output_col` -- none of them walk the IR tree themselves. `op`/
+#' `scalar`/`input_types` are gone: only `lower_mutate()` (via
+#' `gpu_mutate_expr()`) ever needed them, and it now reads `ir` directly.
+#'
 #' @param output_col Output column name
-#' @param input_cols Character vector of input column names
-#' @param op Operation: "+", "-", "*", "/", "^", "copy", or function name
-#' @param scalar Numeric scalar or NULL
-#' @param input_types Character vector of input column types
-#' @return An expression list structure
+#' @param ir An IR node (the parsed mutate expression)
+#' @param schema List with `names`/`types`, used to resolve `output_type`
+#'   via [ir_infer_type()] (which delegates to [infer_mutate_output_type()]
+#'   unchanged for arithmetic ops, per section 1.3)
+#' @return An expression list structure: `list(output_col, ir, input_cols,
+#'   output_type)`
 #' @keywords internal
-make_mutate_expr <- function(output_col, input_cols, op, scalar = NULL,
-                              input_types = NULL) {
+make_mutate_expr <- function(output_col, ir, schema) {
   list(
     output_col = output_col,
-    input_cols = input_cols,
-    op = op,
-    scalar = scalar,
-    input_types = input_types,
-    output_type = infer_mutate_output_type(op, input_types, scalar)
+    ir = ir,
+    input_cols = ir_cols(ir),
+    output_type = ir_infer_type(ir, schema)
   )
 }
 

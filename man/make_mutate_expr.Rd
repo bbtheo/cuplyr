@@ -4,23 +4,29 @@
 \alias{make_mutate_expr}
 \title{Create a mutate expression structure}
 \usage{
-make_mutate_expr(output_col, input_cols, op, scalar = NULL, input_types = NULL)
+make_mutate_expr(output_col, ir, schema)
 }
 \arguments{
 \item{output_col}{Output column name}
 
-\item{input_cols}{Character vector of input column names}
+\item{ir}{An IR node (the parsed mutate expression)}
 
-\item{op}{Operation: "+", "-", "*", "/", "^", "copy", or function name}
-
-\item{scalar}{Numeric scalar or NULL}
-
-\item{input_types}{Character vector of input column types}
+\item{schema}{List with \code{names}/\code{types}, used to resolve \code{output_type}
+via \code{\link[=ir_infer_type]{ir_infer_type()}} (which delegates to \code{\link[=infer_mutate_output_type]{infer_mutate_output_type()}}
+unchanged for arithmetic ops, per section 1.3)}
 }
 \value{
-An expression list structure
+An expression list structure: \code{list(output_col, ir, input_cols, output_type)}
 }
 \description{
-Create a mutate expression structure
+Section 3 of \code{scratchpad/phase1_expression_engine.md}: the IR cutover's
+mutate expression record. \code{ir} is the parsed expression IR (see
+\code{R/ir.R}); \code{input_cols}/\code{output_type} are cached from \code{ir_cols()}/
+\code{ir_infer_type()} since every optimizer pass
+(\code{fuse_mutates}/\code{try_fuse_mutate_pair}/\code{toposort_expressions}/
+\code{prune_dead_columns}/\code{push_down_projections}) reads only those two fields
+plus \code{output_col} -- none of them walk the IR tree themselves. \code{op}/
+\code{scalar}/\code{input_types} are gone: only \code{lower_mutate()} (via
+\code{gpu_mutate_expr()}) ever needed them, and it now reads \code{ir} directly.
 }
 \keyword{internal}

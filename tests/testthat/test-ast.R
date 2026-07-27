@@ -24,8 +24,9 @@ test_that("ast_filter creates valid filter node", {
 })
 
 test_that("ast_mutate creates valid mutate node", {
-  source <- ast_source(list(names = "x", types = "FLOAT64"))
-  expr <- make_mutate_expr("y", "x", "*", scalar = 2, input_types = "FLOAT64")
+  schema <- list(names = "x", types = "FLOAT64")
+  source <- ast_source(schema)
+  expr <- make_mutate_expr("y", ir_call("*", list(ir_col("x"), ir_lit_from_r(2))), schema)
   node <- ast_mutate(source, list(expr))
 
   expect_s3_class(node, "ast_mutate")
@@ -95,8 +96,9 @@ test_that("infer_schema.ast_select subsets schema", {
 })
 
 test_that("infer_schema.ast_mutate adds new columns", {
-  source <- ast_source(list(names = "x", types = "FLOAT64"))
-  expr <- make_mutate_expr("y", "x", "*", scalar = 2, input_types = "FLOAT64")
+  schema <- list(names = "x", types = "FLOAT64")
+  source <- ast_source(schema)
+  expr <- make_mutate_expr("y", ir_call("*", list(ir_col("x"), ir_lit_from_r(2))), schema)
   node <- ast_mutate(source, list(expr))
 
   result <- infer_schema(node)
@@ -105,8 +107,9 @@ test_that("infer_schema.ast_mutate adds new columns", {
 })
 
 test_that("infer_schema.ast_mutate replaces existing columns", {
-  source <- ast_source(list(names = c("x", "y"), types = c("INT32", "INT32")))
-  expr <- make_mutate_expr("x", "y", "/", scalar = 2, input_types = "INT32")
+  schema <- list(names = c("x", "y"), types = c("INT32", "INT32"))
+  source <- ast_source(schema)
+  expr <- make_mutate_expr("x", ir_call("/", list(ir_col("y"), ir_lit_from_r(2))), schema)
   node <- ast_mutate(source, list(expr))
 
   result <- infer_schema(node)
@@ -151,26 +154,32 @@ test_that("make_predicate handles column comparison", {
 })
 
 test_that("make_mutate_expr creates valid structure", {
-  expr <- make_mutate_expr("out", c("a", "b"), "+", input_types = c("FLOAT64", "INT32"))
+  schema <- list(names = c("a", "b"), types = c("FLOAT64", "INT32"))
+  ir <- ir_call("+", list(ir_col("a"), ir_col("b")))
+  expr <- make_mutate_expr("out", ir, schema)
 
   expect_equal(expr$output_col, "out")
   expect_equal(expr$input_cols, c("a", "b"))
-  expect_equal(expr$op, "+")
-  expect_null(expr$scalar)
+  expect_equal(expr$ir, ir)
   expect_equal(expr$output_type, "FLOAT64")
 })
 
 test_that("make_mutate_expr handles scalar operations", {
-  expr <- make_mutate_expr("out", "x", "*", scalar = 2.5, input_types = "INT32")
+  schema <- list(names = "x", types = "INT32")
+  ir <- ir_call("*", list(ir_col("x"), ir_lit_from_r(2.5)))
+  expr <- make_mutate_expr("out", ir, schema)
 
-  expect_equal(expr$scalar, 2.5)
   expect_equal(expr$output_type, "FLOAT64")  # scalar is double
 })
 
 test_that("make_mutate_expr copy operation preserves type", {
-  expr <- make_mutate_expr("out", "x", "copy", input_types = "INT32")
+  # A "copy" mutate (mutate(out = x)) is just a bare column-reference IR
+  # node now -- ir_infer_type() for a `col` node returns the schema's type
+  # directly, so copy-type preservation falls out of the general rule
+  # without a dedicated "copy" op.
+  schema <- list(names = "x", types = "INT32")
+  expr <- make_mutate_expr("out", ir_col("x"), schema)
 
-  expect_equal(expr$op, "copy")
   expect_equal(expr$output_type, "INT32")
 })
 
@@ -291,7 +300,8 @@ test_that("print.ast_node works without error", {
   schema <- list(names = c("x", "y"), types = c("FLOAT64", "INT32"))
   source <- ast_source(schema)
   filter_node <- ast_filter(source, list(make_predicate(ir_call(">", list(ir_col("x"), ir_lit(0, "FLOAT64"))), schema)))
-  mutate_node <- ast_mutate(filter_node, list(make_mutate_expr("z", "x", "*", scalar = 2)))
+  mutate_expr <- make_mutate_expr("z", ir_call("*", list(ir_col("x"), ir_lit_from_r(2))), schema)
+  mutate_node <- ast_mutate(filter_node, list(mutate_expr))
 
   expect_output(print(mutate_node), "ast_mutate")
   expect_output(print(mutate_node), "ast_filter")

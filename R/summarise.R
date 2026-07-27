@@ -283,31 +283,29 @@ create_temp_column <- function(.data, col_name, expr_text) {
     }
     new_type <- "INT32"  # Boolean stored as int for summing
   } else {
-    # Arithmetic operation. Routed through the same gpu_mutate_batch() path
-    # as mutate() (D6): build a single make_mutate_expr() step and lower it
-    # via one-expression batch call rather than the deleted
-    # gpu_mutate_binary_cols()/gpu_mutate_binary_scalar() kernels.
+    # Arithmetic operation. Routed through gpu_mutate_expr() -- the same IR
+    # evaluator mutate() uses (Phase 1 T5) -- via a single ir_call() step,
+    # rather than the deleted gpu_mutate_batch()/ops_mutate_batch.cpp path.
+    # (T7 is expected to replace this whole function with a proper
+    # ir_parse_quo() call; this is the minimal migration needed now that
+    # make_mutate_expr()'s signature/gpu_mutate_batch() are gone.)
     if (rhs_is_col) {
-      rhs_idx <- match(rhs, .data$schema$names) - 1L
-      expr_step <- make_mutate_expr(
-        col_name, c(lhs, rhs), op_found,
-        input_types = c(.data$schema$types[lhs_idx + 1L],
-                         .data$schema$types[rhs_idx + 1L])
-      )
+      ir <- ir_call(op_found, list(ir_col(lhs), ir_col(rhs)))
     } else {
       value <- tryCatch(eval(parse(text = rhs)), error = function(e) {
         stop("Cannot parse value: ", rhs, call. = FALSE)
       })
-      expr_step <- make_mutate_expr(
-        col_name, lhs, op_found, scalar = as.double(value),
-        input_types = .data$schema$types[lhs_idx + 1L]
-      )
+      ir <- ir_call(op_found, list(ir_col(lhs), ir_lit_from_r(value)))
     }
+
+    new_type <- ir_infer_type(ir, .data$schema)
+    bound_ir <- ir_bind(ir, .data$schema)
+
     new_ptr <- wrap_gpu_call(
-      "summarise_mutate_batch",
-      gpu_mutate_batch(.data$ptr, list(expr_step), .data$schema)
+      "summarise_mutate_expr",
+      gpu_mutate_expr(.data$ptr, list(bound_ir), col_name, new_type,
+                       .data$schema$names)
     )
-    new_type <- expr_step$output_type
   }
 
   # Create new tbl_gpu with added column

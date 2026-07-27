@@ -7,6 +7,22 @@
 lower_mutate(ast, source_ptr)
 }
 \description{
-Lower mutate node
+Task T5 (Phase 1 expression-engine cutover, \code{scratchpad/phase1_expression_engine.md}
+section 5): each expression's IR is bound (\code{ir_bind()}) against a running
+index map that mirrors \code{gpu_mutate_expr()}'s contract (\code{src/ops_expr.cpp}):
+expression \code{i}'s top-level result always lands at ctx index \code{n_input + i},
+so a \code{col} node referencing an \emph{earlier} expression's output (however many
+\code{mutate()} calls it originally came from -- \code{fuse_mutates()} may have
+merged several \code{ast_mutate} nodes into this one) must bind to that
+\emph{appended} index, never the original input column's position.
+}
+\details{
+\code{index_names}/\code{index_types} track this: they start as the input schema,
+and after each expression, any stale (superseded) occurrence of its
+output name is blanked to \code{NA} -- so a subsequent \code{match()} can't find the
+old position -- before the name is appended at the new slot. This keeps
+\code{match(name, index_names)} always returning the single live occurrence,
+whose 0-based position is exactly the ctx index \code{gpu_mutate_expr()} will
+place that expression's result at.
 }
 \keyword{internal}

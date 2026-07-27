@@ -64,12 +64,50 @@ lower_filter <- function(ast, source_ptr) {
 }
 
 #' Lower mutate node
+#'
+#' Task T5 (Phase 1 expression-engine cutover, `scratchpad/phase1_expression_engine.md`
+#' section 5): each expression's IR is bound (`ir_bind()`) against a running
+#' index map that mirrors `gpu_mutate_expr()`'s contract (`src/ops_expr.cpp`):
+#' expression `i`'s top-level result always lands at ctx index `n_input + i`,
+#' so a `col` node referencing an *earlier* expression's output (however many
+#' `mutate()` calls it originally came from -- `fuse_mutates()` may have
+#' merged several `ast_mutate` nodes into this one) must bind to that
+#' *appended* index, never the original input column's position.
+#'
+#' `index_names`/`index_types` track this: they start as the input schema,
+#' and after each expression, any stale (superseded) occurrence of its
+#' output name is blanked to `NA` -- so a subsequent `match()` can't find the
+#' old position -- before the name is appended at the new slot. This keeps
+#' `match(name, index_names)` always returning the single live occurrence,
+#' whose 0-based position is exactly the ctx index `gpu_mutate_expr()` will
+#' place that expression's result at.
 #' @keywords internal
 lower_mutate <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
   input_schema <- infer_schema(ast$input)
 
-  gpu_mutate_batch(input_ptr, ast$expressions, input_schema)
+  index_names <- input_schema$names
+  index_types <- input_schema$types
+  bound_exprs <- vector("list", length(ast$expressions))
+
+  for (i in seq_along(ast$expressions)) {
+    expr <- ast$expressions[[i]]
+
+    lookup_schema <- list(names = index_names, types = index_types)
+    bound_exprs[[i]] <- ir_bind(expr$ir, lookup_schema)
+
+    stale <- which(index_names == expr$output_col)
+    if (length(stale) > 0) {
+      index_names[stale] <- NA_character_
+    }
+    index_names <- c(index_names, expr$output_col)
+    index_types <- c(index_types, expr$output_type)
+  }
+
+  out_names <- vapply(ast$expressions, `[[`, character(1), "output_col")
+  out_types <- vapply(ast$expressions, `[[`, character(1), "output_type")
+
+  gpu_mutate_expr(input_ptr, bound_exprs, out_names, out_types, input_schema$names)
 }
 
 #' Lower arrange node

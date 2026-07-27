@@ -186,7 +186,7 @@ test_that("mutate() column replacement preserves column order", {
 test_that("lazy single-expression replace-in-place mutate matches dplyr (S5a)", {
   skip_if_no_gpu()
 
-  # lower_mutate() always routes through gpu_mutate_batch(), even for a
+  # lower_mutate() always routes through gpu_mutate_expr(), even for a
   # single expression that replaces an existing column in place -- this
   # exercises that path against the dplyr oracle.
   df <- data.frame(x = c(1, 2, 3, 4, 5))
@@ -412,11 +412,19 @@ test_that("mutate() errors on non-existent column", {
 test_that("mutate() errors on non-numeric scalar", {
   skip_if_no_gpu()
 
+  # Phase 1 expression-engine cutover (T5): `mpg + "ten"` now parses fine as
+  # IR (a `+` call over a column and a STRING literal) -- the error moves
+  # from parse time to type-inference time, via infer_mutate_output_type()'s
+  # existing STRING rejection (D5 rule 2, pinned verbatim at test-ast.R:205-
+  # 209), reached through ir_infer_type(). See
+  # scratchpad/phase1_expression_engine.md section 4's error-contract
+  # ledger: the message changes, but the underlying "no arithmetic on
+  # non-numeric input" rejection survives.
   gpu_df <- tbl_gpu(mtcars)
 
   expect_error(
     dplyr::mutate(gpu_df, new_col = mpg + "ten"),
-    "numeric scalar"
+    "does not support arithmetic on STRING"
   )
 })
 
@@ -431,14 +439,32 @@ test_that("mutate() errors on vector scalar", {
   )
 })
 
+test_that("mutate() no longer errors on %% (now supported by the expression engine)", {
+  skip_if_no_gpu()
+
+  # Phase 1 expression-engine cutover (T5): mutate() and filter() share the
+  # same ir_parse_quo() parser, and %% has been in ir_call_registry (PYMOD)
+  # since T1/T2 -- so this now WORKS instead of erroring. See
+  # scratchpad/phase1_expression_engine.md section 4's error-contract
+  # ledger (test-mutate.R:440 "CHANGES").
+  gpu_df <- tbl_gpu(mtcars)
+  mutated <- dplyr::mutate(gpu_df, new_col = mpg %% 5)
+
+  result <- collect(mutated)
+  expect_equal(result$new_col, mtcars$mpg %% 5, tolerance = 1e-10)
+})
+
 test_that("mutate() errors on unsupported operation", {
   skip_if_no_gpu()
 
   gpu_df <- tbl_gpu(mtcars)
 
-  # %% is not supported
+  # strsplit() has no ir_call_registry entry and its argument references a
+  # real column, so ir_parse_quo() can't constant-fold it either -- a
+  # genuinely opaque expression, replacing the old %% example (which the
+  # IR now understands, see the test above).
   expect_error(
-    dplyr::mutate(gpu_df, new_col = mpg %% 5),
+    dplyr::mutate(gpu_df, new_col = strsplit(mpg, "")),
     "only supports"
   )
 })
@@ -515,8 +541,8 @@ test_that("mutate() logical arithmetic type parity with dplyr (oracle, eager)", 
   skip_if_no_gpu()
 
   # BOOL8 + BOOL8 -> INT32 (D5 rule 5), matching R's `TRUE + TRUE == 2L`.
-  # Verified empirically that gpu_mutate_batch()'s cudf::binary_operation
-  # path accepts BOOL8 operands with an INT32 output type.
+  # Verified empirically that gpu_mutate_expr()'s compute_column() path
+  # accepts BOOL8 operands with an INT32 output type.
   df <- data.frame(flag = c(TRUE, FALSE, TRUE, TRUE))
 
   pipeline <- function(d) {
@@ -722,4 +748,107 @@ test_that("mutate() warns and auto-names an unnamed expression (lazy)", {
   result <- collect(mutated)
   expect_true("mpg * 2" %in% names(result))
   expect_equal(result[["mpg * 2"]], mtcars$mpg * 2)
+})
+
+# =============================================================================
+# Expression-engine smoke tests (Phase 1 T5) -- the full capability wave
+# (arbitrary nesting, round(), log(x, base), multi-dot chains, ...) is
+# T6's job; these just spot-check that the ir_parse_quo() cutover carries
+# mutate() the same expressive surface filter() already has.
+# =============================================================================
+
+test_that("mutate() nested arithmetic ((x+y)*z-1) matches dplyr (oracle, eager)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = c(1, 2, 3), y = c(10, 20, 30), z = c(2, 3, 4))
+
+  pipeline <- function(d) {
+    d |> dplyr::mutate(w = (x + y) * z - 1)
+  }
+
+  expect_same_as_dplyr(df, pipeline)
+})
+
+test_that("mutate() nested arithmetic ((x+y)*z-1) matches dplyr (oracle, lazy)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = c(1, 2, 3), y = c(10, 20, 30), z = c(2, 3, 4))
+
+  pipeline <- function(d) {
+    d |> dplyr::mutate(w = (x + y) * z - 1)
+  }
+
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("mutate() %% and %/% match dplyr (oracle, eager)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = c(-7, 7, 10, -10), y = c(3, 3, 4, 4))
+
+  pipeline <- function(d) {
+    d |> dplyr::mutate(m = x %% y, fd = x %/% y)
+  }
+
+  expect_same_as_dplyr(df, pipeline)
+})
+
+test_that("mutate() %% and %/% match dplyr (oracle, lazy)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = c(-7, 7, 10, -10), y = c(3, 3, 4, 4))
+
+  pipeline <- function(d) {
+    d |> dplyr::mutate(m = x %% y, fd = x %/% y)
+  }
+
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("mutate() sqrt/log/abs match dplyr (oracle, eager)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = c(1, 4, 9, 16), y = c(-2, -1, 1, 2))
+
+  pipeline <- function(d) {
+    d |> dplyr::mutate(s = sqrt(x), l = log(x), a = abs(y))
+  }
+
+  expect_same_as_dplyr(df, pipeline)
+})
+
+test_that("mutate() sqrt/log/abs match dplyr (oracle, lazy)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = c(1, 4, 9, 16), y = c(-2, -1, 1, 2))
+
+  pipeline <- function(d) {
+    d |> dplyr::mutate(s = sqrt(x), l = log(x), a = abs(y))
+  }
+
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("mutate() scalar-on-left (10 - x) matches dplyr (oracle, eager)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = c(1, 2, 3, 4))
+
+  pipeline <- function(d) {
+    d |> dplyr::mutate(y = 10 - x)
+  }
+
+  expect_same_as_dplyr(df, pipeline)
+})
+
+test_that("mutate() scalar-on-left (10 - x) matches dplyr (oracle, lazy)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = c(1, 2, 3, 4))
+
+  pipeline <- function(d) {
+    d |> dplyr::mutate(y = 10 - x)
+  }
+
+  expect_same_as_dplyr_lazy(df, pipeline)
 })

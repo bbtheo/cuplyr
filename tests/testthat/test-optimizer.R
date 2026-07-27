@@ -3,7 +3,7 @@
 test_that("push_down_projections inserts select nodes for required columns", {
   schema <- list(names = c("a", "b", "c"), types = c("FLOAT64", "FLOAT64", "FLOAT64"))
   source <- ast_source(schema)
-  expr <- make_mutate_expr("d", "a", "+", scalar = 1, input_types = "FLOAT64")
+  expr <- make_mutate_expr("d", ir_call("+", list(ir_col("a"), ir_lit_from_r(1))), schema)
   mutate_node <- ast_mutate(source, list(expr))
   select_node <- ast_select(mutate_node, "d")
 
@@ -19,8 +19,8 @@ test_that("push_down_projections inserts select nodes for required columns", {
 test_that("fuse_mutates merges consecutive mutate nodes", {
   schema <- list(names = c("a", "b"), types = c("FLOAT64", "FLOAT64"))
   source <- ast_source(schema)
-  expr1 <- make_mutate_expr("c", "a", "+", scalar = 1, input_types = "FLOAT64")
-  expr2 <- make_mutate_expr("d", "b", "*", scalar = 2, input_types = "FLOAT64")
+  expr1 <- make_mutate_expr("c", ir_call("+", list(ir_col("a"), ir_lit_from_r(1))), schema)
+  expr2 <- make_mutate_expr("d", ir_call("*", list(ir_col("b"), ir_lit_from_r(2))), schema)
 
   lower <- ast_mutate(source, list(expr1))
   upper <- ast_mutate(lower, list(expr2))
@@ -52,7 +52,7 @@ test_that("reorder_filters orders predicates by estimated cost", {
 test_that("push_down_filters moves filter below mutate when safe", {
   schema <- list(names = c("a", "b"), types = c("FLOAT64", "FLOAT64"))
   source <- ast_source(schema)
-  expr <- make_mutate_expr("c", "a", "+", scalar = 1, input_types = "FLOAT64")
+  expr <- make_mutate_expr("c", ir_call("+", list(ir_col("a"), ir_lit_from_r(1))), schema)
   mutate_node <- ast_mutate(source, list(expr))
   pred <- make_predicate(ir_call(">", list(ir_col("b"), ir_lit(5, "FLOAT64"))), schema)
   filter_node <- ast_filter(mutate_node, list(pred))
@@ -67,7 +67,7 @@ test_that("push_down_filters moves filter below mutate when safe", {
 test_that("push_down_filters does not move filter when it depends on mutate output", {
   schema <- list(names = c("a", "b"), types = c("FLOAT64", "FLOAT64"))
   source <- ast_source(schema)
-  expr <- make_mutate_expr("b", "a", "+", scalar = 1, input_types = "FLOAT64")
+  expr <- make_mutate_expr("b", ir_call("+", list(ir_col("a"), ir_lit_from_r(1))), schema)
   mutate_node <- ast_mutate(source, list(expr))
   pred <- make_predicate(ir_call(">", list(ir_col("b"), ir_lit(5, "FLOAT64"))), schema)
   filter_node <- ast_filter(mutate_node, list(pred))

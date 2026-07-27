@@ -10,8 +10,8 @@
 \item{.data}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
 
 \item{...}{Name-value pairs of expressions. The name gives the column name
-(new or existing), and the value is an arithmetic expression involving
-existing columns and/or scalar values.}
+(new or existing), and the value is an expression involving existing
+columns and/or scalar values (see "Supported expressions" below).}
 }
 \value{
 A \code{tbl_gpu} object with the new or modified columns. If a column
@@ -19,18 +19,34 @@ name already exists, it is replaced. New columns are appended.
 }
 \description{
 Adds new columns or modifies existing columns in a GPU table using
-arithmetic expressions, similar to \code{dplyr::mutate()}. All computations
-are performed on the GPU for maximum performance.
+expressions, similar to \code{dplyr::mutate()}. All computations are
+performed on the GPU for maximum performance.
 }
 \details{
-\subsection{Supported arithmetic operators}{
+\subsection{Supported expressions}{
 
+\code{mutate()} parses its arguments through the same expression IR that
+\code{filter()} uses (see \code{R/ir.R}), lowered to \code{cudf::compute_column()} under
+the hood. The IR understands:
 \itemize{
-\item \code{+} - addition
-\item \code{-} - subtraction
-\item \code{*} - multiplication
-\item \code{/} - division
-\item \code{^} - exponentiation (power)
+\item Arithmetic: \code{+}, \code{-}, \code{*}, \code{/}, \code{^}, \code{\%\%}, \code{\%/\%}, unary \code{-},
+arbitrarily nested (\code{(x + y) * z - 1}), and scalar-on-either-side
+(\code{mutate(y = 10 - x)})
+\item Comparisons and logic: \code{==}, \code{!=}, \code{<}, \code{<=}, \code{>}, \code{>=}, \code{&},
+\code{|}, \code{!}, \code{xor()} -- these produce a \code{BOOL8} column, e.g.
+\code{mutate(is_big = x > 100)}
+\item \code{is.na()}, \code{between(x, lo, hi)}, \code{\%in\%}
+\item Math functions: \code{sqrt()}, \code{log()} (including \code{log(x, base)}),
+\code{log2()}, \code{log10()}, \code{exp()}, \code{abs()}, \code{floor()}, \code{ceiling()},
+\code{sin()}, \code{cos()}, \code{tan()}, \code{round(x)}/\code{round(x, digits)} (banker's
+rounding, matching R)
+\item Plain column copies (\code{mutate(y = x)})
+\item A later dot in the same \code{mutate()} call referencing an earlier
+dot's output column (\code{mutate(a = x + y, b = a * 2)})
+\item The \code{.data}/\code{.env} pronouns, and ordinary R symbols (a bare name
+that matches a column resolves to that column; otherwise it's
+evaluated as an environment variable -- "columns shadow the
+environment")
 }
 }
 
@@ -41,30 +57,19 @@ column is replaced in-place (preserving column order). For example,
 \code{mutate(x = x + 1)} will modify \code{x} rather than creating a duplicate.
 }
 
-\subsection{Current limitations}{
-
-\itemize{
-\item Only binary operations are supported (col op value or col op col)
-\item Complex expressions like \code{(x + y) * z} are not yet supported
-\item Functions like \code{sqrt()}, \code{log()}, \code{abs()} are not yet implemented
-}
-}
-
 \subsection{Result type (type promotion)}{
 
 The output column's GPU type is inferred from the operation and its
-inputs (column type(s) and, for col-scalar expressions, the R literal's
-type), applied in this order:
+inputs (column type(s) and, for a column-scalar expression, the R
+literal's own type), applied in this order:
 \itemize{
 \item A plain column copy (\code{mutate(y = x)}) preserves the source
 column's type exactly.
 \item Arithmetic on \code{STRING}, factor (\code{DICTIONARY32}), or \code{Date}/
 \code{POSIXct} (\verb{TIMESTAMP_*}) columns is an error: cuplyr does not
 support arithmetic on those types.
-\item \code{/} always promotes to \code{FLOAT64} (matching R/dplyr: \code{1L / 2L}
-is a double).
-\item \code{^} always promotes to \code{FLOAT64} (matching R: \code{2L ^ 2L} is a
-double).
+\item \code{/} and \code{^} always promote to \code{FLOAT64} (matching R/dplyr:
+\code{1L / 2L} and \code{2L ^ 2L} are both doubles).
 \item \code{+}, \code{-}, \code{*}, \code{\%\%}, \code{\%/\%} preserve integer types: the result is
 \code{INT32} when every input column and R literal involved is integer
 or logical (\code{TRUE + TRUE} is \code{2L}, matching R). Note this means
@@ -75,7 +80,31 @@ type. If any input is \code{FLOAT64}/\code{FLOAT32}, the result is
 \code{INT64}. A bare R numeric literal (e.g. the \code{1} in
 \code{mutate(y = int_col + 1)}) is a \emph{double} in R, so it promotes the
 result to \code{FLOAT64} -- write \code{1L} to keep an integer result.
+\item Comparisons, logic, \code{is.na()}, \code{between()}, \code{\%in\%} all produce
+\code{BOOL8}.
+\item \code{sqrt()}, \code{log()}, \code{exp()}, \code{floor()}, \code{ceiling()}, \code{sin()},
+\code{cos()}, \code{tan()} always promote to \code{FLOAT64} (matching R, e.g.
+\code{floor(1L)} is a double). \code{abs()} and \code{round()} preserve the
+argument's type.
 }
+}
+
+\subsection{Not yet supported}{
+
+\itemize{
+\item Aggregates or window functions inside a mutate expression (e.g.
+\code{mutate(y = x - mean(x))}, \code{mutate(r = row_number())}) -- planned
+for a later phase (see \code{scratchpad/phase1_expression_engine.md}
+section 6)
+\item String manipulation (concatenation, case conversion, substr,
+regex, ...) -- only string \emph{comparison} is supported
+\item \code{if_else()}/\code{case_when()}/\code{coalesce()} -- planned for a later
+phase
+}
+An expression shape the IR doesn't recognize is currently a hard error
+(unlike \code{filter()}, which falls back to CPU evaluation for some
+unrecognized shapes) -- a CPU fallback for \code{mutate()} is planned for a
+later phase.
 }
 
 \subsection{Performance}{
