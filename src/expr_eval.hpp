@@ -653,6 +653,21 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         cudf::size_type x_idx = materialize(x_node, ctx);
         cudf::column_view x_col = ctx.cols[x_idx];
 
+        // Empty RHS set (`c()` parses to a NULL-valued literal; a typed
+        // empty vector like `numeric(0)`/`character(0)` parses to a
+        // zero-length-but-typed literal): R's `%in%` is always FALSE for
+        // every element -- including NA (`NA %in% c()` is FALSE) -- with
+        // no error, matching `match(x, character(0))` always returning "no
+        // match". There is no haystack type to resolve or upload in this
+        // case, so short-circuit before touching `set_node["type"]` at all
+        // (T4 finding: this used to reach the NumericVector(NULL) coercion
+        // below and throw "Not compatible with requested type").
+        SEXP set_value_check = set_node["value"];
+        if (Rf_isNull(set_value_check) || Rf_xlength(set_value_check) == 0) {
+            cudf::numeric_scalar<bool> false_scalar(false, true);
+            return cudf::make_column_from_scalar(false_scalar, x_col.size());
+        }
+
         SEXP set_type_sexp = set_node["type"];
         std::string set_type = Rf_isNull(set_type_sexp) ? "FLOAT64" : Rcpp::as<std::string>(set_type_sexp);
         SEXP set_value = set_node["value"];
@@ -835,6 +850,26 @@ inline cudf::size_type materialize(Rcpp::List node, eval_ctx& ctx) {
         std::vector<std::unique_ptr<cudf::scalar>> scalars;
         cudf::ast::expression const& root = build_ast(node, tree, scalars, ctx, "");
         auto result = cudf::compute_column(ctx.view(), root);
+
+        // xor() output-type surprise (T4 finding, not covered by T2's
+        // empirical checks): "xor" lowers to BITWISE_XOR (section 2.3), and
+        // libcudf's AST evaluator derives BITWISE_XOR's output type via
+        // `decltype(lhs ^ rhs)` on the operand's native C++ type -- for
+        // `bool` operands, `^` integer-promotes both sides to `int` before
+        // applying it, so the *declared* AST return type for BOOL8 ^ BOOL8
+        // is INT32, not BOOL8, even though ir_call_registry's "xor" entry
+        // (correctly) declares BOOL8. Every other bool_ops entry
+        // (comparisons, &, |, !, is.na) comes back genuine BOOL8 already,
+        // so this cast is scoped to "xor" only -- the 0/1 INT32 values are
+        // a faithful bitwise encoding of the boolean result (with the null
+        // mask preserved by compute_column's own null propagation), so a
+        // plain value cast (no semantic reinterpretation) is all that's
+        // needed. Without this, `gpu_filter_expr()`'s "mask must be BOOL8"
+        // check rejects any predicate built from `xor()` outright.
+        if (op == "xor" && result->type().id() != cudf::type_id::BOOL8) {
+            result = cudf::cast(result->view(), cudf::data_type{cudf::type_id::BOOL8});
+        }
+
         return ctx.push(std::move(result));
     }
 

@@ -2,42 +2,94 @@
 #'
 #' Selects rows from a GPU table where conditions are TRUE, similar to
 #' `dplyr::filter()`. Filtering is performed entirely on the GPU for
-#' maximum performance on large datasets.
+#' maximum performance on large datasets, and matches dplyr's row-keeping
+#' and three-valued-logic (`NA`) semantics exactly (see "NA semantics"
+#' below).
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
-#' @param ... Logical expressions to filter by. Each expression should be
-#'   a comparison of the form `column <op> value` or `column <op> column`.
-#'   Multiple conditions are combined with AND (all must be TRUE).
+#' @param ... Logical expressions to filter by (see "Supported expressions"
+#'   below for the full surface). Multiple expressions, whether passed as
+#'   separate dots or combined with `&` within one dot, are always combined
+#'   with AND (a row is kept only if every expression is TRUE for it).
 #' @param .preserve Ignored. Included for compatibility with dplyr generic.
 #'
 #' @return A `tbl_gpu` object containing only rows where all conditions are TRUE.
 #'   The GPU memory for the filtered result is newly allocated.
 #'
 #' @details
-#' ## Supported comparison operators
-#' \itemize{
-#'   \item `==` - equal to
-#'   \item `!=` - not equal to
-#'   \item `>` - greater than
-#'   \item `>=` - greater than or equal to
-#'   \item `<` - less than
-#'   \item `<=` - less than or equal to
-#' }
-#'
-#' ## Expression support
+#' ## Supported expressions
 #' `filter()` parses its arguments through an internal expression IR (see
-#' `R/ir.R`) that lowers to a single fused GPU kernel per `filter()` call
-#' (all comparisons in the call are combined with `&`, one kernel per
-#' fused mask). Beyond the six comparisons above, this also covers
-#' `&`/`|`/`!`, `is.na()`, `between()`, `%in%`, column-vs-column
-#' comparisons, and string-column comparisons. Comparing a column against a
-#' literal of an incompatible type (e.g. a numeric column against a
-#' character literal) errors immediately, naming the column and its type,
-#' rather than silently falling back or producing a GPU-side type error.
+#' `R/ir.R`) that lowers every predicate in the call to a **single fused GPU
+#' kernel** (`cudf::compute_column()` under the hood) -- one kernel per
+#' `filter()` call, no matter how many dots or how deeply the predicate is
+#' nested. The IR understands:
+#' \itemize{
+#'   \item Comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=` -- against a
+#'     literal, another column, an environment variable, or an arithmetic
+#'     expression (`(x - y) > 0`)
+#'   \item Logic: `&`, `|`, `!`, `xor()`, arbitrarily nested
+#'     (`x > 2 & (y < 5 | z == 1)`); `&&`/`||` are rejected with a message
+#'     pointing at `&`/`|` (matching dplyr 1.1+)
+#'   \item `is.na()`
+#'   \item `%in%`, including a set containing `NA` (R's never-NA rule: a
+#'     value that itself is `NA` is TRUE for `%in%` iff the set contains
+#'     `NA`, never `NA` itself) and an empty set (`character(0)`, `c()`,
+#'     etc. -- always FALSE, for every row, including `NA` rows)
+#'   \item `between(x, lo, hi)` (dplyr's definition: `x >= lo & x <= hi`,
+#'     including its `NA` propagation)
+#'   \item String-column comparisons (`==`/`!=`/`<`/`<=`/`>`/`>=`), against
+#'     a literal or another string column
+#'   \item Column-vs-column comparisons for every operator above
+#'   \item Math on columns inside a predicate (`+ - * / %% %/% ^`, `sqrt`,
+#'     `log`, `abs`, etc. -- the same set `mutate()` supports)
+#'   \item The `.data`/`.env` pronouns, and ordinary R symbols (a bare name
+#'     that matches a column resolves to that column; otherwise it's
+#'     evaluated as an environment variable -- "columns shadow the
+#'     environment")
+#' }
+#' Comparing a column against a literal of an incompatible type (e.g. a
+#' numeric column against a character literal) errors immediately, naming
+#' the column and its type, rather than silently falling back or producing
+#' a raw GPU-side type error.
 #'
-#' ## `TRUE`/`FALSE` literals
-#' `filter(TRUE)` is a no-op: it returns `.data` unchanged (no GPU work is
-#' performed). `filter(FALSE)` returns an empty (zero-row) result.
+#' ## NA semantics
+#' `filter()` keeps a row iff its combined predicate is non-missing *and*
+#' TRUE -- identical to dplyr (`cudf::apply_boolean_mask()`'s "non-null AND
+#' true" rule matches `dplyr::filter()`'s own row-keeping rule exactly).
+#' Concretely:
+#' \itemize{
+#'   \item `filter(x > 5)` drops rows where `x` is `NA` (the comparison is
+#'     `NA`, and `NA` isn't kept), same as dplyr
+#'   \item `&`/`|` use R's three-valued logic, not C's: `NA & FALSE` is
+#'     `FALSE`, `NA | TRUE` is `TRUE`, `NA & TRUE`/`NA | FALSE`/`NA & NA`/
+#'     `NA | NA` are all `NA` (`cudf::ast_operator::NULL_LOGICAL_AND`/
+#'     `NULL_LOGICAL_OR`, chosen specifically because they match)
+#'   \item `filter(x > 2 | is.na(x))` is the idiom for "keep NA rows too"
+#'     -- works exactly as it does in dplyr
+#'   \item `%in%` never produces `NA` (see "Supported expressions" above) --
+#'     this is R's `%in%`/`match()` semantics, not null-propagating
+#'   \item `filter(TRUE)` is a no-op (returns `.data` unchanged, no GPU
+#'     work); `filter(FALSE)` and `filter(NA)` both return a zero-row
+#'     result (a bare `NA` predicate is `FALSE`-equivalent for row-keeping,
+#'     same as dplyr)
+#' }
+#' One documented, deliberate divergence from dplyr: cuDF's floating-point
+#' `NaN` is not the same value as SQL/cuDF null, so `is.na()` on a *computed*
+#' `NaN` (e.g. `0/0`) returns `FALSE` on the GPU where R's `is.na(NaN)` is
+#' `TRUE`. `NA` values ingested from R (including in a `FLOAT64` column)
+#' are unaffected -- they round-trip as genuine GPU nulls and behave
+#' identically to dplyr in every case above.
+#'
+#' ## Not yet supported
+#' \itemize{
+#'   \item Aggregates or window functions inside a filter predicate (e.g.
+#'     `filter(x > mean(x))`, `filter(row_number() == 1)`) -- planned for a
+#'     later phase (window functions need group-aware evaluation that
+#'     `compute_column()` cannot do; see `scratchpad/phase1_expression_engine.md`
+#'     section 6)
+#'   \item Arbitrary R functions with no cuDF equivalent -- these fall back
+#'     to CPU evaluation, see below
+#' }
 #'
 #' ## Expressions the IR doesn't understand (CPU fallback)
 #' An expression shape the IR doesn't recognize (see `R/ir.R`'s
@@ -49,12 +101,12 @@
 #' expressions that evaluate to a logical value on their own without
 #' referencing table columns -- e.g. a pre-computed logical vector or
 #' `filter(rep(TRUE, n))`. An expression that references a table column
-#' but doesn't parse (a rare shape once `&`/`|`/`%in%`/`between()`/string
-#' comparisons are all IR-parseable) will still error with the "only
-#' supports comparisons" message, since the column symbol can't resolve
-#' outside the table. This fallback path is legitimate, supported behavior
-#' for the cases it does cover, not an error condition -- see
-#' `getOption("cuplyr.fallback")` below to be notified when it's used.
+#' but doesn't parse (a rare shape given how much of dplyr's filter surface
+#' the IR now covers) will still error with the "only supports comparisons"
+#' message, since the column symbol can't resolve outside the table. This
+#' fallback path is legitimate, supported behavior for the cases it does
+#' cover, not an error condition -- see `getOption("cuplyr.fallback")`
+#' below to be notified when it's used.
 #'
 #' ## `options(cuplyr.fallback = ...)`
 #' Controls whether the CPU fallback described above (used by `filter()`
@@ -68,9 +120,9 @@
 #'
 #' ## Performance
 #' Filtering on GPU is highly parallel and can process billions of rows
-#' per second. For best performance, prefer simple comparisons (parsed
-#' directly into a GPU predicate) over expressions that require the CPU
-#' fallback.
+#' per second. For best performance, prefer expressions the IR parses
+#' directly into a GPU predicate (the entire "Supported expressions" list
+#' above) over expressions that require the CPU fallback.
 #'
 #' @seealso
 #' \code{\link{mutate.tbl_gpu}} for creating new columns,
@@ -235,7 +287,15 @@ check_filter_comparison_types <- function(ir, schema) {
       if (is.null(lit_node$type) || !identical(lit_node$type, "STRING")) {
         return(invisible(NULL))
       }
-      col_type <- schema$types[match(col_node$name, schema$names)]
+      # unname(): `schema$types[match(...)]` is a *named* single-element
+      # subset (name = the matched column), and identical() considers the
+      # "names" attribute significant -- identical(c(s = "STRING"),
+      # "STRING") is FALSE even though the values are equal. Without
+      # unname() here, every STRING-column-vs-STRING-literal comparison
+      # (a completely valid, supported shape) fell through to the stop()
+      # below instead of returning early (T4 oracle-testing finding: this
+      # broke every string filter comparison against a literal).
+      col_type <- unname(schema$types[match(col_node$name, schema$names)])
       if (is.na(col_type) || identical(col_type, "STRING")) {
         return(invisible(NULL))
       }

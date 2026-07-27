@@ -4,21 +4,22 @@
 \alias{make_predicate}
 \title{Create a filter predicate structure}
 \usage{
-make_predicate(col_name, op, value, is_col_compare = FALSE)
+make_predicate(ir, schema)
 }
 \arguments{
-\item{col_name}{Column name for LHS}
+\item{ir}{An IR node (the parsed predicate expression)}
 
-\item{op}{Comparison operator}
-
-\item{value}{Scalar value or column name for RHS}
-
-\item{is_col_compare}{TRUE if RHS is a column name}
+\item{schema}{List with \code{names}/\code{types}, kept for signature parity with
+\code{\link[=make_mutate_expr]{make_mutate_expr()}} (not currently read: \code{ir_cols()}/\code{ir_cost()} don't
+need a schema)}
 }
 \value{
-A predicate list structure
+A predicate list structure: \code{list(ir, cols, estimated_cost, is_deterministic, na_sensitive)}
 }
 \description{
-Create a filter predicate structure
+Section 3 of \code{scratchpad/phase1_expression_engine.md}: the IR cutover's
+predicate record. \code{ir} is the parsed expression IR (see \code{R/ir.R}); \code{cols}
+is cached from \code{ir_cols()} since every optimizer filter pass needs it and
+none of them need to walk the IR tree themselves.
 }
 \keyword{internal}

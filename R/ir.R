@@ -70,6 +70,15 @@ ir_call <- function(op, args, meta = list()) {
 #' `allow_vector = TRUE` (the `%in%` RHS set-argument position); otherwise
 #' it's a diagnosable user error.
 #'
+#' A length-0 vector is legal in the `allow_vector = TRUE` position too:
+#' `x %in% numeric(0)` (or `character(0)`, etc.) is well-defined, ordinary R
+#' -- always `FALSE`, for every element including `NA` -- not a user error,
+#' so it must not be rejected here (T4 correctness finding: this used to
+#' `stop()` for *any* length-0 vector, `allow_vector` or not, which broke
+#' `filter(x %in% <empty vector>)` parity with dplyr; the `%in%` handler in
+#' `src/expr_eval.hpp` special-cases an empty/`NULL` RHS set to "always
+#' FALSE" to match).
+#'
 #' @param value An R value (atomic length 1, an atomic vector, or `NULL`)
 #' @param allow_vector `TRUE` iff a length != 1 vector is acceptable here
 #'   (used for `%in%`'s RHS)
@@ -87,10 +96,6 @@ ir_lit_from_r <- function(value, allow_vector = FALSE) {
       stop("Expected a numeric scalar, but got a value of length ", n,
            ". (Vector literals are only supported on the right-hand side ",
            "of %in%.)", call. = FALSE)
-    }
-    if (n == 0) {
-      stop("Expected a literal of length >= 1, but got length 0.",
-           call. = FALSE)
     }
     return(ir_lit(value = value, type = gpu_type_from_r(value), na = FALSE))
   }

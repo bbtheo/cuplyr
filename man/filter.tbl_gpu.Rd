@@ -9,9 +9,10 @@
 \arguments{
 \item{.data}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
 
-\item{...}{Logical expressions to filter by. Each expression should be
-a comparison of the form \verb{column <op> value} or \verb{column <op> column}.
-Multiple conditions are combined with AND (all must be TRUE).}
+\item{...}{Logical expressions to filter by (see "Supported expressions"
+below for the full surface). Multiple expressions, whether passed as
+separate dots or combined with \code{&} within one dot, are always combined
+with AND (a row is kept only if every expression is TRUE for it).}
 
 \item{.preserve}{Ignored. Included for compatibility with dplyr generic.}
 }
@@ -22,44 +23,95 @@ The GPU memory for the filtered result is newly allocated.
 \description{
 Selects rows from a GPU table where conditions are TRUE, similar to
 \code{dplyr::filter()}. Filtering is performed entirely on the GPU for
-maximum performance on large datasets.
+maximum performance on large datasets, and matches dplyr's row-keeping
+and three-valued-logic (\code{NA}) semantics exactly (see "NA semantics"
+below).
 }
 \details{
-\subsection{Supported comparison operators}{
+\subsection{Supported expressions}{
+
+\code{filter()} parses its arguments through an internal expression IR (see
+\code{R/ir.R}) that lowers every predicate in the call to a \strong{single fused GPU
+kernel} (\code{cudf::compute_column()} under the hood) -- one kernel per
+\code{filter()} call, no matter how many dots or how deeply the predicate is
+nested. The IR understands:
+\itemize{
+\item Comparisons: \code{==}, \code{!=}, \code{<}, \code{<=}, \code{>}, \code{>=} -- against a
+literal, another column, an environment variable, or an arithmetic
+expression (\code{(x - y) > 0})
+\item Logic: \code{&}, \code{|}, \code{!}, \code{xor()}, arbitrarily nested
+(\code{x > 2 & (y < 5 | z == 1)}); \code{&&}/\code{||} are rejected with a message
+pointing at \code{&}/\code{|} (matching dplyr 1.1+)
+\item \code{is.na()}
+\item \code{\%in\%}, including a set containing \code{NA} (R's never-NA rule: a
+value that itself is \code{NA} is TRUE for \code{\%in\%} iff the set contains
+\code{NA}, never \code{NA} itself) and an empty set (\code{character(0)}, \code{c()},
+etc. -- always FALSE, for every row, including \code{NA} rows)
+\item \code{between(x, lo, hi)} (dplyr's definition: \code{x >= lo & x <= hi},
+including its \code{NA} propagation)
+\item String-column comparisons (\code{==}/\code{!=}/\code{<}/\code{<=}/\code{>}/\code{>=}), against
+a literal or another string column
+\item Column-vs-column comparisons for every operator above
+\item Math on columns inside a predicate (\verb{+ - * / \%\% \%/\% ^}, \code{sqrt},
+\code{log}, \code{abs}, etc. -- the same set \code{mutate()} supports)
+\item The \code{.data}/\code{.env} pronouns, and ordinary R symbols (a bare name
+that matches a column resolves to that column; otherwise it's
+evaluated as an environment variable -- "columns shadow the
+environment")
+}
+Comparing a column against a literal of an incompatible type (e.g. a
+numeric column against a character literal) errors immediately, naming
+the column and its type, rather than silently falling back or producing
+a raw GPU-side type error.
+}
+
+\subsection{NA semantics}{
+
+\code{filter()} keeps a row iff its combined predicate is non-missing \emph{and}
+TRUE -- identical to dplyr (\code{cudf::apply_boolean_mask()}'s "non-null AND
+true" rule matches \code{dplyr::filter()}'s own row-keeping rule exactly).
+Concretely:
+\itemize{
+\item \code{filter(x > 5)} drops rows where \code{x} is \code{NA} (the comparison is
+\code{NA}, and \code{NA} isn't kept), same as dplyr
+\item \code{&}/\code{|} use R's three-valued logic, not C's: \code{NA & FALSE} is
+\code{FALSE}, \code{NA | TRUE} is \code{TRUE}, \code{NA & TRUE}/\code{NA | FALSE}/\code{NA & NA}/
+\code{NA | NA} are all \code{NA} (\verb{cudf::ast_operator::NULL_LOGICAL_AND}/
+\code{NULL_LOGICAL_OR}, chosen specifically because they match)
+\item \code{filter(x > 2 | is.na(x))} is the idiom for "keep NA rows too"
+-- works exactly as it does in dplyr
+\item \code{\%in\%} never produces \code{NA} (see "Supported expressions" above) --
+this is R's \code{\%in\%}/\code{match()} semantics, not null-propagating
+\item \code{filter(TRUE)} is a no-op (returns \code{.data} unchanged, no GPU
+work); \code{filter(FALSE)} and \code{filter(NA)} both return a zero-row
+result (a bare \code{NA} predicate is \code{FALSE}-equivalent for row-keeping,
+same as dplyr)
+}
+One documented, deliberate divergence from dplyr: cuDF's floating-point
+\code{NaN} is not the same value as SQL/cuDF null, so \code{is.na()} on a \emph{computed}
+\code{NaN} (e.g. \code{0/0}) returns \code{FALSE} on the GPU where R's \code{is.na(NaN)} is
+\code{TRUE}. \code{NA} values ingested from R (including in a \code{FLOAT64} column)
+are unaffected -- they round-trip as genuine GPU nulls and behave
+identically to dplyr in every case above.
+}
+
+\subsection{Not yet supported}{
 
 \itemize{
-\item \code{==} - equal to
-\item \code{!=} - not equal to
-\item \code{>} - greater than
-\item \code{>=} - greater than or equal to
-\item \code{<} - less than
-\item \code{<=} - less than or equal to
+\item Aggregates or window functions inside a filter predicate (e.g.
+\code{filter(x > mean(x))}, \code{filter(row_number() == 1)}) -- planned for a
+later phase (window functions need group-aware evaluation that
+\code{compute_column()} cannot do; see \code{scratchpad/phase1_expression_engine.md}
+section 6)
+\item Arbitrary R functions with no cuDF equivalent -- these fall back
+to CPU evaluation, see below
 }
 }
 
-\subsection{Current limitations}{
+\subsection{Expressions the IR doesn't understand (CPU fallback)}{
 
-\itemize{
-\item Only simple comparisons are parsed directly into a GPU predicate
-(column op value/column)
-\item String comparisons are not parsed directly into a GPU predicate
-\item Only numeric scalar values on the right-hand side are parsed
-directly into a GPU predicate
-}
-}
-
-\subsection{\code{TRUE}/\code{FALSE} literals}{
-
-\code{filter(TRUE)} is a no-op: it returns \code{.data} unchanged (no GPU work is
-performed). \code{filter(FALSE)} returns an empty (zero-row) result.
-}
-
-\subsection{Expressions that aren't a simple comparison (CPU fallback)}{
-
-Compound expressions with \code{&}/\code{|}, calls like \code{between()} or \code{\%in\%}, and
-other shapes that don't match \verb{column op value}/\verb{column op column}
-still are not parsed into a GPU predicate at the parser level. Such an
-expression is handed to a CPU-side fallback: it's evaluated with
+An expression shape the IR doesn't recognize (see \code{R/ir.R}'s
+\code{ir_parse_quo()}) is handed to a CPU-side fallback: it's evaluated with
 \code{rlang::eval_tidy()} and, if the result is a logical scalar or vector,
 applied back to the GPU table as a boolean mask (materializing first,
 via \code{compute()}, if \code{.data} is lazy with pending operations). Because
@@ -67,12 +119,12 @@ this evaluation happens with \emph{no data mask}, it can only succeed for
 expressions that evaluate to a logical value on their own without
 referencing table columns -- e.g. a pre-computed logical vector or
 \code{filter(rep(TRUE, n))}. An expression that references a table column
-(e.g. \code{filter(mpg > 20 & cyl == 4)} or \code{filter(cyl \%in\% c(4, 6))}) will
-still error, now with the "only supports comparisons" message, since the
-column symbol can't resolve outside the table. This fallback path is
-legitimate, supported behavior for the cases it does cover, not an
-error condition -- see \code{getOption("cuplyr.fallback")} below to be
-notified when it's used.
+but doesn't parse (a rare shape given how much of dplyr's filter surface
+the IR now covers) will still error with the "only supports comparisons"
+message, since the column symbol can't resolve outside the table. This
+fallback path is legitimate, supported behavior for the cases it does
+cover, not an error condition -- see \code{getOption("cuplyr.fallback")}
+below to be notified when it's used.
 }
 
 \subsection{\code{options(cuplyr.fallback = ...)}}{
@@ -90,9 +142,9 @@ One of:
 \subsection{Performance}{
 
 Filtering on GPU is highly parallel and can process billions of rows
-per second. For best performance, prefer simple comparisons (parsed
-directly into a GPU predicate) over expressions that require the CPU
-fallback.
+per second. For best performance, prefer expressions the IR parses
+directly into a GPU predicate (the entire "Supported expressions" list
+above) over expressions that require the CPU fallback.
 }
 }
 \examples{

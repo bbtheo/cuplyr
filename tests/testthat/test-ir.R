@@ -90,8 +90,18 @@ test_that("ir_lit_from_r() allows length > 1 when allow_vector = TRUE", {
   expect_equal(node$type, "FLOAT64")
 })
 
-test_that("ir_lit_from_r() rejects length 0 even with allow_vector", {
-  expect_error(ir_lit_from_r(numeric(0), allow_vector = TRUE), "length")
+test_that("ir_lit_from_r() rejects length 0 without allow_vector", {
+  expect_error(ir_lit_from_r(numeric(0)), "length")
+})
+
+test_that("ir_lit_from_r() allows length 0 when allow_vector = TRUE (T4: %in% empty set)", {
+  # `x %in% numeric(0)` is well-defined, ordinary R (always FALSE) -- not a
+  # user error -- so the %in% RHS position must accept a length-0 vector
+  # just like any other length != 1 vector. See src/expr_eval.hpp's %in%
+  # handler for the "always FALSE" lowering this feeds.
+  node <- ir_lit_from_r(numeric(0), allow_vector = TRUE)
+  expect_equal(node$value, numeric(0))
+  expect_equal(node$type, "FLOAT64")
 })
 
 # -----------------------------------------------------------------------------
