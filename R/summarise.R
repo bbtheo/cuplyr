@@ -6,7 +6,9 @@
 #' @param .data A grouped `tbl_gpu` object created by [group_by()].
 #' @param ... Name-value pairs of summary functions. The name will be the
 #'   name of the variable in the result. The value must be a single aggregation
-#'   expression in the form `fun(column)`.
+#'   expression in the form `fun(column)`, where `column` can also be any
+#'   expression the internal expression IR understands (see "Aggregation
+#'   sub-expressions" below).
 #' @param .groups Controls grouping structure of the result. Currently only
 #'   "drop" is supported (default).
 #'
@@ -24,6 +26,19 @@
 #'   \item `sd(x)` - Standard deviation
 #'   \item `var(x)` - Variance
 #' }
+#'
+#' ## Aggregation sub-expressions
+#' `column` is not limited to a bare column name: any expression the same
+#' expression IR that powers [filter.tbl_gpu()]/[mutate.tbl_gpu()] understands
+#' is computed as a hidden temporary column first, then aggregated. This
+#' covers comparisons and logic (`sum(carb > 3 & wt < 4)`), arithmetic
+#' (`mean(hp / wt)`), and math functions (`mean(sqrt(hp))`, `sum(carb %% 2 ==
+#' 0)`), arbitrarily nested -- the same surface documented in
+#' \code{\link{mutate.tbl_gpu}}. A comparison/logical sub-expression is
+#' summed as `TRUE`/`FALSE` -> `1`/`0`, matching R's own coercion
+#' (`sum(c(TRUE, TRUE))` is `2L`). An expression shape the IR doesn't
+#' recognize raises the same "Invalid aggregation expression" error as any
+#' other unsupported aggregation shape.
 #'
 #' ## NA handling
 #' By default, NA values are excluded from aggregations. This matches
@@ -112,10 +127,50 @@ strip_ns_prefix <- function(expr_text) {
   sub("^[a-zA-Z_][a-zA-Z0-9_.]*::", "", trimws(expr_text))
 }
 
+# Internal: decompose an aggregation dot's raw expression into a bare
+# `fn(arg)` (or no-arg `fn()`) shape, stripping one leading `pkg::`
+# qualifier from the call head, e.g. `dplyr::n()` -> list(fn_name = "n",
+# arg = NULL), `stats::sd(mpg)` -> list(fn_name = "sd", arg = quote(mpg)).
+# Returns `NULL` if `expr` isn't a call, its head isn't a (possibly
+# namespaced) bare symbol, or it has more than one argument (multi-arg
+# aggregations like `quantile(x, 0.5)` aren't supported -- left alone here,
+# parse_aggregations() raises the actual diagnosable error for these).
+#
+# @param expr A language object (rlang::quo_get_expr() of a summarise() dot)
+# @return `list(fn_name, arg)` (`arg` is `NULL` for a no-arg call), or `NULL`
+# @keywords internal
+decompose_agg_call <- function(expr) {
+  if (!is.call(expr)) {
+    return(NULL)
+  }
+
+  head <- expr[[1]]
+  if (is.call(head) && length(head) == 3 && identical(head[[1]], as.name("::"))) {
+    head <- head[[3]]  # strip namespace: pkg::fn -> fn
+  }
+  if (!is.symbol(head)) {
+    return(NULL)
+  }
+
+  n_args <- length(expr) - 1L
+  if (n_args == 0) {
+    return(list(fn_name = as.character(head), arg = NULL))
+  }
+  if (n_args == 1) {
+    return(list(fn_name = as.character(head), arg = expr[[2]]))
+  }
+  NULL
+}
+
 # Internal: Pre-process aggregation expressions
 #
-# Detects expressions inside aggregation functions (e.g., sum(carb == 4))
-# and creates temporary columns for them using mutate operations.
+# Detects expressions inside aggregation functions (e.g., sum(carb == 4),
+# mean(sqrt(x)), sum(x %% 2 == 0)) and creates temporary columns for them
+# via the expression IR (R/ir.R) -- the same evaluator filter()/mutate()
+# use. Since the aggregation's argument is parsed with `ir_parse_quo()`,
+# any expression shape the IR understands is now a valid aggregation
+# sub-expression (T7 widens this from the previous single-operator-only
+# regex whitelist to "ir_parse_quo() succeeds").
 #
 # Per D4: if a dot needs a temp column and `.data` is lazy with pending
 # operations, this materializes (`compute()`) once, up front, before
@@ -133,187 +188,105 @@ preprocess_agg_expressions <- function(.data, dots) {
   names(new_dots) <- names(dots)
 
   for (i in seq_along(dots)) {
-    expr <- dots[[i]]
-    expr_text <- rlang::quo_text(expr)
-    match_text <- strip_ns_prefix(expr_text)
+    quo <- dots[[i]]
+    raw_expr <- rlang::quo_get_expr(quo)
+    env <- rlang::quo_get_env(quo)
 
-    # Check for n() which has no column argument
-    if (grepl("^n\\(\\)$", match_text)) {
-      new_dots[[i]] <- expr
+    decomposed <- decompose_agg_call(raw_expr)
+
+    if (is.null(decomposed) || is.null(decomposed$arg)) {
+      # Not a `fn(single_arg)` shape (includes bare `n()`), or not a call
+      # at all: nothing to preprocess. parse_aggregations() validates the
+      # shape (and raises its own diagnosable error) from here.
+      new_dots[[i]] <- quo
       next
     }
 
-    # Parse function(argument) pattern
-    match_result <- regmatches(
-      match_text,
-      regexec("^([a-zA-Z_][a-zA-Z0-9_]*)\\((.+)\\)$", match_text)
-    )[[1]]
+    arg_expr <- decomposed$arg
 
-    if (length(match_result) != 3) {
-      new_dots[[i]] <- expr
+    # A bare column reference (the common case, e.g. sum(mpg)) needs no
+    # temp column -- and is safe to check even while lazy ops are still
+    # pending, since it's a pure schema lookup with no GPU work involved.
+    if (is.symbol(arg_expr) && as.character(arg_expr) %in% current_schema(working_data)$names) {
+      new_dots[[i]] <- quo
       next
     }
 
-    func_name <- match_result[2]
-    arg_text <- trimws(match_result[3])
+    arg_quo <- rlang::new_quosure(arg_expr, env)
+    ir <- ir_parse_quo(arg_quo, current_schema(working_data))
 
-    # Check if argument is a simple column name (a pure schema lookup: safe
-    # to call even while lazy ops are still pending, no GPU work involved).
-    if (arg_text %in% current_schema(working_data)$names) {
-      # Simple column reference, keep as-is
-      new_dots[[i]] <- expr
-      next
-    }
-
-    # Argument is an expression - need to create a temporary column
-    # Check if it contains comparison or arithmetic operators
-    has_operator <- grepl("==|!=|>=|<=|>|<|\\+|-|\\*|/|\\^", arg_text)
-
-    if (!has_operator) {
-      # Not an expression we can handle, keep as-is (will error later if invalid)
-      new_dots[[i]] <- expr
+    if (is.null(ir) || ir_is_const(ir)) {
+      # Either genuinely unparseable by the expression IR, or a constant
+      # subtree with no column reference at all (e.g. `sum(5)`): neither is
+      # a temp-column shape. Leave the dot untouched -- parse_aggregations()
+      # raises the actual diagnosable error for these rare/degenerate
+      # shapes (a literal that isn't a valid column reference).
+      new_dots[[i]] <- quo
       next
     }
 
     # Materialize before building the temp column if lazy ops are pending.
     if (has_pending_ops(working_data)) {
       working_data <- compute(working_data)
-      cuplyr_fallback_notify("summarise", expr_text)
+      cuplyr_fallback_notify("summarise", rlang::quo_text(quo))
     }
 
     # Create a temporary column name (index-based, so it stays unique even
     # though not every dot ends up needing one).
     temp_col_name <- paste0(".temp_agg_", i)
 
-    # Parse the expression and create the temporary column via mutate
-    # We need to handle comparison operators (==, !=, >, <, >=, <=)
-    # and arithmetic operators (+, -, *, /, ^)
-    working_data <- create_temp_column(working_data, temp_col_name, arg_text)
+    working_data <- create_temp_column(working_data, temp_col_name, ir)
 
-    # Create a new quosure with the temp column name
-    new_expr_text <- paste0(func_name, "(", temp_col_name, ")")
-    new_dots[[i]] <- rlang::parse_quo(new_expr_text, env = rlang::base_env())
+    # Create a new quosure with the temp column name, e.g. `sum(.temp_agg_3)`.
+    new_dots[[i]] <- rlang::new_quosure(
+      as.call(list(as.name(decomposed$fn_name), as.name(temp_col_name))),
+      rlang::base_env()
+    )
   }
 
   list(data = working_data, dots = new_dots)
 }
 
-# Internal: Create a temporary column from an expression
+# Internal: Create a temporary column from a parsed IR expression
 #
-# @param .data A tbl_gpu object
+# One IR-based implementation for every aggregation sub-expression shape
+# (comparison, arithmetic, logical, math function, arbitrarily nested) --
+# built via a single `ir_call`-equivalent step through `gpu_mutate_expr()`,
+# the same evaluator entry point `mutate()` uses.
+#
+# @param .data A tbl_gpu object (already materialized -- no pending lazy
+#   ops; `preprocess_agg_expressions()` guarantees this)
 # @param col_name Name for the new column
-# @param expr_text Expression text (e.g., "carb == 4")
-# @return Modified tbl_gpu with new column
+# @param ir A parsed (not yet bound) IR node, non-const (references at
+#   least one column)
+# @return Modified tbl_gpu with the new column appended
 # @keywords internal
-create_temp_column <- function(.data, col_name, expr_text) {
-  # Detect comparison operators (order matters - check two-char first)
-  compare_ops <- c("==", "!=", ">=", "<=", ">", "<")
-  arith_ops <- c("+", "-", "*", "/", "^")
+create_temp_column <- function(.data, col_name, ir) {
+  schema <- .data$schema
+  inferred_type <- ir_infer_type(ir, schema)
 
-  op_found <- NULL
-  op_type <- NULL
+  # A boolean-producing expression (comparisons, &/|/!, is.na(), between(),
+  # %in%, ...) is declared as INT32 here, matching R's own coercion of
+  # logical values in arithmetic contexts (`sum(c(TRUE, TRUE))` is `2L`, an
+  # integer, not logical) -- exactly what sum() (the overwhelmingly common
+  # aggregation over a comparison, e.g. `sum(carb > 3)`) expects downstream
+  # via make_aggregation()'s INT32->INT64 promotion rule. gpu_mutate_expr()
+  # performs the actual GPU-side cast (BOOL8 -> INT32) since the declared
+  # output type differs from the computed one (src/ops_expr.cpp).
+  new_type <- if (identical(inferred_type, "BOOL8")) "INT32" else inferred_type
 
-  # Check comparison operators first
-  for (op in compare_ops) {
-    if (grepl(op, expr_text, fixed = TRUE)) {
-      op_found <- op
-      op_type <- "compare"
-      break
-    }
-  }
+  bound_ir <- ir_bind(ir, schema)
 
-  # If no comparison op, check arithmetic
-  if (is.null(op_found)) {
-    for (op in arith_ops) {
-      # For arithmetic, need to be careful with negative numbers
-      # Use regex to find operator not at start
-      pattern <- paste0("(?<!^)", gsub("([+*^])", "\\\\\\1", op))
-      if (grepl(pattern, expr_text, perl = TRUE)) {
-        op_found <- op
-        op_type <- "arith"
-        break
-      }
-    }
-  }
+  new_ptr <- wrap_gpu_call(
+    "summarise_mutate_expr",
+    gpu_mutate_expr(.data$ptr, list(bound_ir), col_name, new_type, schema$names)
+  )
 
-  if (is.null(op_found)) {
-    stop("Cannot parse expression: ", expr_text,
-         "\nExpected a comparison or arithmetic expression.",
-         call. = FALSE)
-  }
-
-  # Split on operator
-  parts <- strsplit(expr_text, op_found, fixed = TRUE)[[1]]
-  if (length(parts) != 2) {
-    stop("Invalid expression: ", expr_text, call. = FALSE)
-  }
-
-  lhs <- trimws(parts[1])
-  rhs <- trimws(parts[2])
-
-  # Determine if lhs/rhs are columns or values
-  lhs_is_col <- lhs %in% .data$schema$names
-  rhs_is_col <- rhs %in% .data$schema$names
-
-  if (!lhs_is_col && !rhs_is_col) {
-    stop("Expression must reference at least one column: ", expr_text, call. = FALSE)
-  }
-
-  # Get column index (0-based)
-  lhs_idx <- if (lhs_is_col) match(lhs, .data$schema$names) - 1L else NULL
-
-  if (op_type == "compare") {
-    # For comparison, result is boolean (0/1 for summing)
-    if (rhs_is_col) {
-      # Column to column comparison
-      rhs_idx <- match(rhs, .data$schema$names) - 1L
-      new_ptr <- wrap_gpu_call(
-        "summarise_compare_cols",
-        gpu_compare_cols(.data$ptr, lhs_idx, op_found, rhs_idx)
-      )
-    } else {
-      # Column to scalar comparison
-      value <- tryCatch(eval(parse(text = rhs)), error = function(e) {
-        stop("Cannot parse value: ", rhs, call. = FALSE)
-      })
-      new_ptr <- wrap_gpu_call(
-        "summarise_compare_scalar",
-        gpu_compare_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
-      )
-    }
-    new_type <- "INT32"  # Boolean stored as int for summing
-  } else {
-    # Arithmetic operation. Routed through gpu_mutate_expr() -- the same IR
-    # evaluator mutate() uses (Phase 1 T5) -- via a single ir_call() step,
-    # rather than the deleted gpu_mutate_batch()/ops_mutate_batch.cpp path.
-    # (T7 is expected to replace this whole function with a proper
-    # ir_parse_quo() call; this is the minimal migration needed now that
-    # make_mutate_expr()'s signature/gpu_mutate_batch() are gone.)
-    if (rhs_is_col) {
-      ir <- ir_call(op_found, list(ir_col(lhs), ir_col(rhs)))
-    } else {
-      value <- tryCatch(eval(parse(text = rhs)), error = function(e) {
-        stop("Cannot parse value: ", rhs, call. = FALSE)
-      })
-      ir <- ir_call(op_found, list(ir_col(lhs), ir_lit_from_r(value)))
-    }
-
-    new_type <- ir_infer_type(ir, .data$schema)
-    bound_ir <- ir_bind(ir, .data$schema)
-
-    new_ptr <- wrap_gpu_call(
-      "summarise_mutate_expr",
-      gpu_mutate_expr(.data$ptr, list(bound_ir), col_name, new_type,
-                       .data$schema$names)
-    )
-  }
-
-  # Create new tbl_gpu with added column
   new_tbl_gpu(
     ptr = new_ptr,
     schema = list(
-      names = c(.data$schema$names, col_name),
-      types = c(.data$schema$types, new_type)
+      names = c(schema$names, col_name),
+      types = c(schema$types, new_type)
     ),
     lazy_ops = .data$lazy_ops,
     groups = .data$groups,

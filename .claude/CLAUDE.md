@@ -38,16 +38,14 @@ list(
 |------|---------|
 | `src/gpu_table.hpp` | `GpuTablePtr`, `make_gpu_table_xptr()`, `get_table_view()` |
 | `src/cuda_utils.hpp` | `check_cuda()` error helper |
-| `src/ops_common.hpp` | `get_compare_op()`, `get_binary_op()` |
+| `src/ops_common.hpp` | `get_compare_op()` (used by `expr_eval.hpp`'s string-comparison handler) |
 | `src/transfer_io.cpp` | `df_to_gpu()`, `gpu_collect()`, `gpu_head()`, `gpu_dim()` |
-| `src/ops_filter.cpp` | `gpu_filter_scalar()`, `gpu_filter_col()`, `gpu_filter_bool()`, `gpu_filter_mask()` |
-| `src/expr_eval.hpp` | Expression-IR evaluator shared by filter/mutate (`eval_ctx`, `ast_expressible()`, `build_ast()`, `materialize()`, `apply_handler()`) |
+| `src/ops_filter.cpp` | `gpu_filter_bool()`, `gpu_filter_mask()` — CPU-eval fallback mask application only; every IR-parseable predicate now goes through `gpu_filter_expr()` (`ops_expr.cpp`) |
+| `src/expr_eval.hpp` | Expression-IR evaluator shared by filter/mutate/summarise temp columns (`eval_ctx`, `ast_expressible()`, `build_ast()`, `materialize()`, `apply_handler()`) |
 | `src/ops_expr.cpp` | `gpu_compute_column()`, `gpu_filter_expr()`, `gpu_mutate_expr()` — the IR entry points |
-| `src/ops_mutate_batch.cpp` | `gpu_mutate_batch()` — legacy mutate execution path (copy/col-scalar/col-col, fused) |
 | `src/ops_select.cpp` | `gpu_select()` |
 | `src/ops_groupby.cpp` | `gpu_summarise()` |
 | `src/ops_arrange.cpp` | `gpu_arrange()` |
-| `src/ops_compare.cpp` | comparison ops for summarise temp columns |
 | `src/ops_join.cpp` | join logic with stable-sort for dplyr ordering |
 | `src/ops_bind.cpp` | `gpu_bind_rows_aligned()`, `gpu_bind_cols_impl()` |
 | `src/gpu_info.cpp` | device availability/info |
@@ -365,7 +363,13 @@ String columns use offset-based storage (Apache Arrow format):
 - Expressions the IR doesn't recognize fall back to a CPU-eval boolean mask (`filter_eval_mask()`), with no data mask (only expressions that evaluate standalone, e.g. `rep(TRUE, n)`, can succeed there)
 
 ### Mutate Parsing
-- Supports left-associative `+`/`-` chains (e.g., `a + b + c`) by lowering to sequential ops
+- Expressions parse through `ir_parse_quo()` (`R/ir.R`) into `make_mutate_expr()` records (`output_col`, `ir`, `input_cols`, `output_type`), lowered to a single `gpu_mutate_expr()` call per `mutate()` node; arbitrary nesting (`(x + y) * z - 1`), scalar-on-either-side, and later dots referencing earlier dots' outputs are all handled by the IR/evaluator, not by special-cased chain lowering
+- An expression shape the IR doesn't recognize is a hard error (no CPU fallback for `mutate()`, unlike `filter()`)
+
+### Summarise Aggregation Sub-Expressions
+- `create_temp_column()` (`R/summarise.R`) is a single IR-based implementation: any sub-expression `ir_parse_quo()` understands is valid inside an aggregation call (`sum(x > 3 & y < 2)`, `mean(sqrt(x))`, `sum(x %% 2 == 0)`, etc.), built via one `gpu_mutate_expr()` call, same as `mutate()`
+- A `BOOL8`-inferred sub-expression (comparisons, `&`/`|`/`!`, `is.na()`, ...) is declared `INT32` for the temp column so `sum()` promotes to `INT64` like R's `sum(logical)`; `gpu_mutate_expr()` performs the actual GPU-side cast
+- `preprocess_agg_expressions()` decomposes the aggregation call's raw expression (not text) via `decompose_agg_call()`, so a bare column reference needs no temp column and any unparseable shape falls through to `parse_aggregations()`'s existing diagnosable error
 
 ### Bind Operations
 - `bind_rows()` computes unified schema via `compute_unified_schema()`

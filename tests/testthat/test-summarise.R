@@ -437,6 +437,117 @@ test_that("summarise() accepts stats::sd() (namespaced call) in eager and lazy m
 })
 
 # =============================================================================
+# Widened aggregation sub-expressions (Phase 1 T7 -- create_temp_column() is
+# now a single IR-based implementation, so any expression shape ir_parse_quo()
+# understands is a valid aggregation argument, not just one bare operator)
+# =============================================================================
+
+test_that("summarise() accepts a compound logical sub-expression (sum(x > 3 & y < 2)) ungrouped", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    dplyr::summarise(d, high_carb_light = sum(carb > 3 & wt < 4))
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, ignore_col_types = TRUE)
+})
+
+test_that("summarise() accepts a compound logical sub-expression (sum(x > 3 & y < 2)) grouped", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(high_carb_light = sum(carb > 3 & wt < 4), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+})
+
+test_that("summarise() accepts a math-function sub-expression (mean(sqrt(x))) ungrouped", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    dplyr::summarise(d, mean_sqrt_hp = mean(sqrt(hp)))
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, ignore_col_types = TRUE)
+})
+
+test_that("summarise() accepts a math-function sub-expression (mean(sqrt(x))) grouped", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(mean_sqrt_hp = mean(sqrt(hp)), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+})
+
+test_that("summarise() accepts a modulo comparison sub-expression (sum(x %% 2 == 0)) ungrouped", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    dplyr::summarise(d, even_carb = sum(carb %% 2 == 0))
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, ignore_col_types = TRUE)
+})
+
+test_that("summarise() accepts a modulo comparison sub-expression (sum(x %% 2 == 0)) grouped", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(even_carb = sum(carb %% 2 == 0), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+})
+
+test_that("summarise() accepts a column-vs-column arithmetic sub-expression (mean(x / y)) ungrouped", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    dplyr::summarise(d, power_weight = mean(hp / wt))
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, ignore_col_types = TRUE)
+})
+
+test_that("summarise() accepts a column-vs-column arithmetic sub-expression (mean(x / y)) grouped", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(power_weight = mean(hp / wt), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+})
+
+test_that("summarise() raises a diagnosable error for a genuinely unparseable aggregation sub-expression", {
+  skip_if_no_gpu()
+
+  expect_error(
+    tbl_gpu(mtcars) |> dplyr::summarise(x = sum(paste0(carb))),
+    "Invalid aggregation expression"
+  )
+})
+
+# =============================================================================
 # Unnamed expression auto-naming (S10)
 # =============================================================================
 

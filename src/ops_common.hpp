@@ -18,17 +18,6 @@ inline cudf::binary_operator get_compare_op(const std::string& op) {
     Rcpp::stop("Unknown comparison operator: %s", op.c_str());
 }
 
-inline cudf::binary_operator get_arith_op(const std::string& op) {
-    if (op == "+") return cudf::binary_operator::ADD;
-    if (op == "-") return cudf::binary_operator::SUB;
-    if (op == "*") return cudf::binary_operator::MUL;
-    if (op == "/") return cudf::binary_operator::TRUE_DIV;
-    if (op == "%/%") return cudf::binary_operator::FLOOR_DIV;
-    if (op == "%%") return cudf::binary_operator::MOD;
-    if (op == "^") return cudf::binary_operator::POW;
-    Rcpp::stop("Unknown arithmetic operator: %s", op.c_str());
-}
-
 } // namespace cuplyr
 
 #endif // CUPLYR_OPS_COMMON_HPP

@@ -14,7 +14,9 @@
 
 \item{...}{Name-value pairs of summary functions. The name will be the
 name of the variable in the result. The value must be a single aggregation
-expression in the form \code{fun(column)}.}
+expression in the form \code{fun(column)}, where \code{column} can also be any
+expression the internal expression IR understands (see "Aggregation
+sub-expressions" below).}
 
 \item{.groups}{Controls grouping structure of the result. Currently only
 "drop" is supported (default).}
@@ -39,6 +41,20 @@ performed entirely on the GPU for maximum performance.
 \item \code{sd(x)} - Standard deviation
 \item \code{var(x)} - Variance
 }
+}
+
+\subsection{Aggregation sub-expressions}{
+
+\code{column} is not limited to a bare column name: any expression the same
+expression IR that powers \code{\link[=filter.tbl_gpu]{filter.tbl_gpu()}}/\code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}} understands
+is computed as a hidden temporary column first, then aggregated. This
+covers comparisons and logic (\code{sum(carb > 3 & wt < 4)}), arithmetic
+(\code{mean(hp / wt)}), and math functions (\code{mean(sqrt(hp))}, \code{sum(carb \%\% 2 == 0)}), arbitrarily nested -- the same surface documented in
+\code{\link{mutate.tbl_gpu}}. A comparison/logical sub-expression is
+summed as \code{TRUE}/\code{FALSE} -> \code{1}/\code{0}, matching R's own coercion
+(\code{sum(c(TRUE, TRUE))} is \code{2L}). An expression shape the IR doesn't
+recognize raises the same "Invalid aggregation expression" error as any
+other unsupported aggregation shape.
 }
 
 \subsection{NA handling}{

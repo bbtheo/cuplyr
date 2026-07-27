@@ -4,7 +4,21 @@
 
 * Every dplyr verb now builds a single AST node and routes through one shared execution path (`push_op()`/`push_join()` in `R/execute.R`, `lower_and_execute()` in `R/lower.R`) regardless of whether the table is eager or lazy. This collapsed a number of eager/lazy divergences that previously produced different results depending on execution mode; see the fixes below.
 
+## Expression engine
+
+`filter()`, `mutate()`, and the expressions inside `summarise()`'s aggregation calls now all parse through one shared rlang-based expression IR (`R/ir.R`) lowered to `cudf::compute_column()` (`src/expr_eval.hpp`), replacing three separate special-cased parsers. This is a large capability jump for all three verbs:
+
+* `filter()` now understands `&`, `|`, `!`, `xor()`, arbitrarily nested and combined with comparisons; `%in%` (including a set containing `NA` and an empty set); `is.na()`; `between()`; string-column comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`) against a literal or another string column; and math on columns inside a predicate (`+ - * / %% %/% ^`, `sqrt`, `log`, `abs`, etc.) — the same surface `mutate()` supports. `&&`/`||` are now rejected with a message pointing at `&`/`|`, matching dplyr 1.1+.
+
+* `mutate()` now understands arbitrarily nested arithmetic (`(x + y) * z - 1`), scalar-on-either-side expressions (`10 - x`), `%%`/`%/%`, math functions (`sqrt`, `log`/`log(x, base)`, `log2`, `log10`, `exp`, `abs`, `floor`, `ceiling`, `sin`, `cos`, `tan`, `round()`), comparisons and logical operators, `is.na()`/`between()`/`%in%`, `NA` literals (typed and bare), and later dots referencing earlier dots' output columns.
+
+* `summarise()`'s aggregation calls (e.g. `sum(...)`, `mean(...)`) now accept any sub-expression the IR understands, not just a single comparison or arithmetic operator — e.g. `sum(carb > 3 & wt < 4)`, `mean(sqrt(hp))`, `sum(carb %% 2 == 0)` all now work, in both eager and lazy modes, grouped and ungrouped.
+
+* Each of `filter()`/`mutate()`'s multi-expression calls now lowers to exactly one fused GPU kernel (one `compute_column()` call), regardless of how many predicates/expressions or how deeply nested — previously each operator in a chain was a separate kernel launch.
+
 ## Bug fixes
+
+* Fixed a silent data-corruption bug in the lazy-mode projection-pushdown optimizer: `push_down_projections()` could drop a *replaced* (not newly-created) column from the upstream projection when a lazy `mutate()` overwrote an existing column it didn't itself read as an input. This broke `gpu_mutate_expr()`'s replace-in-place name matching, silently appending the new value at the end instead — rotating column values across the table with no error and no warning. Found via the T6 `mutate()` dplyr-oracle test suite; only genuinely new output columns can be pruned from the upstream requirement now.
 
 * `right_join()` now works at all; previously it errored on every call due to an internal argument-parsing mismatch.
 
