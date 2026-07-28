@@ -55,6 +55,7 @@
 #include <cudf/ast/expressions.hpp>
 #include <cudf/binaryop.hpp>
 #include <cudf/column/column_factories.hpp>
+#include <cudf/copying.hpp>
 #include <cudf/replace.hpp>
 #include <cudf/round.hpp>
 #include <cudf/scalar/scalar.hpp>
@@ -279,6 +280,45 @@ inline cudf::type_id type_by_promotion_rank(int rank) {
 }
 
 // -----------------------------------------------------------------------------
+// unify_value_types() (Phase 4): best-effort mirror of R/ir.R's
+// ir_unify_types(), used by if_else()/case_when()/coalesce()'s handlers (and
+// resolve_static_type()'s branches for them, below) to pick a common cudf
+// type across their "value position" arguments so copy_if_else()/
+// replace_nulls() -- both of which require their operands to share EXACTLY
+// the same cudf type -- never see a mismatch. This is deliberately
+// non-throwing/best-effort: the R side (ir_unify_types(), called eagerly at
+// mutate() parse time via make_mutate_expr() -> ir_infer_type()) is the
+// strict gatekeeper for genuinely incompatible combinations (e.g. STRING vs
+// FLOAT64); by the time a node reaches here that check has already passed,
+// so a STRING/non-STRING mix is only handled defensively (falls through to
+// STRING, since a real mismatch would already have been rejected on the R
+// side before ever reaching lowering).
+// -----------------------------------------------------------------------------
+
+inline cudf::data_type unify_value_types(const std::vector<cudf::data_type>& types) {
+    bool any_string = false;
+    bool all_string = true;
+    for (const auto& t : types) {
+        if (t.id() == cudf::type_id::STRING) {
+            any_string = true;
+        } else {
+            all_string = false;
+        }
+    }
+    if (any_string) {
+        return cudf::data_type{cudf::type_id::STRING};
+    }
+    (void)all_string;
+
+    int best = 0;
+    for (const auto& t : types) {
+        int r = promotion_rank(t.id());
+        if (r > best) best = r;
+    }
+    return cudf::data_type{type_by_promotion_rank(best)};
+}
+
+// -----------------------------------------------------------------------------
 // resolve_static_type(): best-effort static type inference, see the "1." /
 // "3." deviation notes at the top of this file. Mirrors the op-class table
 // in scratchpad/phase1_expression_engine.md section 1.3 / R/ir.R's registry
@@ -319,6 +359,38 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
     }
 
     if (op == "abs" || op == "round") {
+        return resolve_static_type(args[0], ctx);
+    }
+
+    // Phase 4: if_else()/case_when()/coalesce() unify their "value position"
+    // args (never `cond`); na_if() just keeps `x`'s own type. Mirrors R/ir.R's
+    // type_if_else()/type_case_when()/type_coalesce()/type_na_if() exactly
+    // (see unify_value_types()'s own doc comment for why this can't throw
+    // here the way the R side does).
+    if (op == "if_else") {
+        std::vector<cudf::data_type> value_types;
+        value_types.push_back(resolve_static_type(args[1], ctx));
+        value_types.push_back(resolve_static_type(args[2], ctx));
+        if (args.size() == 4) value_types.push_back(resolve_static_type(args[3], ctx));
+        return unify_value_types(value_types);
+    }
+    if (op == "case_when") {
+        int n_when = (args.size() - 1) / 2;
+        std::vector<cudf::data_type> value_types;
+        for (int i = 0; i < n_when; ++i) {
+            value_types.push_back(resolve_static_type(args[2 * i + 1], ctx));
+        }
+        value_types.push_back(resolve_static_type(args[args.size() - 1], ctx));
+        return unify_value_types(value_types);
+    }
+    if (op == "coalesce") {
+        std::vector<cudf::data_type> value_types;
+        for (int i = 0; i < args.size(); ++i) {
+            value_types.push_back(resolve_static_type(args[i], ctx));
+        }
+        return unify_value_types(value_types);
+    }
+    if (op == "na_if") {
         return resolve_static_type(args[0], ctx);
     }
 
@@ -763,6 +835,247 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         }
 
         return cudf::round_decimal(x_col, places, cudf::rounding_method::HALF_EVEN);
+    }
+
+    // ---- if_else(cond, yes, no, missing=): copy_if_else + a second pass
+    // for NA-condition rows (Phase 4) ----
+    if (op == "if_else") {
+        Rcpp::List cond_node = args[0];
+        Rcpp::List yes_node = args[1];
+        Rcpp::List no_node = args[2];
+        bool has_missing = args.size() == 4;
+
+        cudf::size_type cond_idx = materialize(cond_node, ctx);
+        cudf::column_view cond_col = ctx.cols[cond_idx];
+        if (cond_col.type().id() != cudf::type_id::BOOL8) {
+            Rcpp::stop("if_else(): `condition` must be logical, not %s",
+                       expr_type_to_str(cond_col.type()).c_str());
+        }
+
+        // Unify yes/no/missing to one common cudf type (mirrors R/ir.R's
+        // type_if_else()/ir_unify_types(), which already rejected a
+        // genuinely incompatible mix -- e.g. STRING vs FLOAT64 -- at parse
+        // time; this is a permissive best-effort mirror, see
+        // unify_value_types()'s own doc comment).
+        std::vector<cudf::data_type> value_types;
+        value_types.push_back(resolve_static_type(yes_node, ctx));
+        value_types.push_back(resolve_static_type(no_node, ctx));
+        Rcpp::List missing_node;
+        if (has_missing) {
+            missing_node = args[3];
+            value_types.push_back(resolve_static_type(missing_node, ctx));
+        }
+        cudf::data_type target = unify_value_types(value_types);
+        std::string target_str = expr_type_to_str(target);
+
+        // Build one of yes/no/missing as either a scalar (literal, built
+        // directly at the target type) or a column (materialize + cast to
+        // target if needed) -- picks the right one of copy_if_else()'s 4
+        // scalar/column overloads (section 2.2's "dispatch on materialized
+        // vs literal args").
+        auto build_scalar_operand = [&](Rcpp::List node) {
+            return build_scalar(target_str, node["value"], ir_lit_is_na(node));
+        };
+        auto build_column_operand = [&](Rcpp::List node) -> cudf::column_view {
+            cudf::size_type idx = materialize(node, ctx);
+            if (ctx.cols[idx].type().id() != target.id()) {
+                auto casted = cudf::cast(ctx.cols[idx], target);
+                idx = ctx.push(std::move(casted));
+            }
+            return ctx.cols[idx];
+        };
+
+        bool yes_is_lit = ir_kind(yes_node) == "lit";
+        bool no_is_lit = ir_kind(no_node) == "lit";
+
+        std::unique_ptr<cudf::scalar> yes_scalar;
+        std::unique_ptr<cudf::scalar> no_scalar;
+        cudf::column_view yes_col;
+        cudf::column_view no_col;
+        if (yes_is_lit) yes_scalar = build_scalar_operand(yes_node); else yes_col = build_column_operand(yes_node);
+        if (no_is_lit) no_scalar = build_scalar_operand(no_node); else no_col = build_column_operand(no_node);
+
+        std::unique_ptr<cudf::column> base;
+        if (!yes_is_lit && !no_is_lit) {
+            base = cudf::copy_if_else(yes_col, no_col, cond_col);
+        } else if (!yes_is_lit && no_is_lit) {
+            base = cudf::copy_if_else(yes_col, *no_scalar, cond_col);
+        } else if (yes_is_lit && !no_is_lit) {
+            base = cudf::copy_if_else(*yes_scalar, no_col, cond_col);
+        } else {
+            base = cudf::copy_if_else(*yes_scalar, *no_scalar, cond_col);
+        }
+
+        // A NULL `cond` element must produce NA (or `missing`, if supplied)
+        // in the OUTPUT -- NOT silently fall through to the `no` branch the
+        // way copy_if_else()'s own null-mask rule made `base` do above
+        // (verified empirically: `if_else(c(TRUE,FALSE,NA), 1, 2)` is
+        // `(1, 2, NA)`, not `(1, 2, 2)` -- a NA condition is genuinely
+        // distinct from a FALSE one for if_else(), unlike for case_when()
+        // below). `is.na(cond)` is itself always non-null/valid (IS_NULL
+        // never produces a null result), so this second copy_if_else always
+        // takes exactly one of its two operands per row, unconditionally
+        // overwriting every NA-cond row of `base`.
+        cudf::ast::column_reference cond_ref(cond_idx);
+        cudf::ast::operation is_null_op(cudf::ast::ast_operator::IS_NULL, cond_ref);
+        auto is_null_mask = cudf::compute_column(ctx.view(), is_null_op);
+
+        if (has_missing) {
+            bool missing_is_lit = ir_kind(missing_node) == "lit";
+            if (missing_is_lit) {
+                auto missing_scalar = build_scalar_operand(missing_node);
+                return cudf::copy_if_else(*missing_scalar, base->view(), is_null_mask->view());
+            }
+            cudf::column_view missing_col = build_column_operand(missing_node);
+            return cudf::copy_if_else(missing_col, base->view(), is_null_mask->view());
+        }
+
+        auto na_scalar = build_scalar(target_str, R_NilValue, true);
+        return cudf::copy_if_else(*na_scalar, base->view(), is_null_mask->view());
+    }
+
+    // ---- case_when(cond1 ~ val1, ..., condN ~ valN, default): right-to-left
+    // chained copy_if_else (Phase 4) ----
+    if (op == "case_when") {
+        int n_args = args.size();
+        int n_when = (n_args - 1) / 2;
+
+        std::vector<cudf::data_type> value_types;
+        for (int i = 0; i < n_when; ++i) {
+            Rcpp::List val_node = args[2 * i + 1];
+            value_types.push_back(resolve_static_type(val_node, ctx));
+        }
+        Rcpp::List default_node = args[n_args - 1];
+        value_types.push_back(resolve_static_type(default_node, ctx));
+        cudf::data_type target = unify_value_types(value_types);
+        std::string target_str = expr_type_to_str(target);
+
+        auto value_as_column = [&](Rcpp::List node) -> cudf::column_view {
+            if (ir_kind(node) == "lit") {
+                auto s = build_scalar(target_str, node["value"], ir_lit_is_na(node));
+                auto col = cudf::make_column_from_scalar(*s, ctx.view().num_rows());
+                return ctx.cols[ctx.push(std::move(col))];
+            }
+            cudf::size_type idx = materialize(node, ctx);
+            if (ctx.cols[idx].type().id() != target.id()) {
+                auto casted = cudf::cast(ctx.cols[idx], target);
+                idx = ctx.push(std::move(casted));
+            }
+            return ctx.cols[idx];
+        };
+
+        cudf::column_view acc = value_as_column(default_node);
+
+        // Right-to-left chained copy_if_else (design doc section 6): a NULL
+        // cond element automatically takes the accumulated "else" side per
+        // copy_if_else's documented null-mask rule ("output[i] =
+        // (mask.valid(i) and mask[i]) ? lhs : rhs[i]", cudf/copying.hpp) --
+        // exactly dplyr's "NA condition treated as no match, fall through
+        // to the next clause (or default)" semantics. Verified empirically
+        // this needs NO replace_nulls(cond, FALSE) adjustment, unlike
+        // if_else() above (whose NA-condition rows must become a DISTINCT
+        // NA/missing value, not fall through).
+        std::vector<std::unique_ptr<cudf::column>> owned_accs;
+        for (int i = n_when - 1; i >= 0; --i) {
+            Rcpp::List cond_node = args[2 * i];
+            Rcpp::List val_node = args[2 * i + 1];
+
+            cudf::size_type cond_idx = materialize(cond_node, ctx);
+            cudf::column_view cond_col = ctx.cols[cond_idx];
+            if (cond_col.type().id() != cudf::type_id::BOOL8) {
+                Rcpp::stop("case_when(): each condition must be logical, not %s",
+                           expr_type_to_str(cond_col.type()).c_str());
+            }
+
+            cudf::column_view val_col = value_as_column(val_node);
+            auto next = cudf::copy_if_else(val_col, acc, cond_col);
+            acc = next->view();
+            owned_accs.push_back(std::move(next));
+        }
+
+        if (owned_accs.empty()) {
+            // Defensive only: the R parser (ir_parse_case_when()) requires
+            // at least one `~` clause, so n_when == 0 never actually reaches
+            // here.
+            return std::make_unique<cudf::column>(acc);
+        }
+        return std::move(owned_accs.back());
+    }
+
+    // ---- coalesce(...): left-folded replace_nulls (Phase 4) ----
+    if (op == "coalesce") {
+        int n = args.size();
+        std::vector<cudf::data_type> value_types;
+        for (int i = 0; i < n; ++i) value_types.push_back(resolve_static_type(args[i], ctx));
+        cudf::data_type target = unify_value_types(value_types);
+        std::string target_str = expr_type_to_str(target);
+
+        auto value_as_column = [&](Rcpp::List node) -> cudf::column_view {
+            if (ir_kind(node) == "lit") {
+                auto s = build_scalar(target_str, node["value"], ir_lit_is_na(node));
+                auto col = cudf::make_column_from_scalar(*s, ctx.view().num_rows());
+                return ctx.cols[ctx.push(std::move(col))];
+            }
+            cudf::size_type idx = materialize(node, ctx);
+            if (ctx.cols[idx].type().id() != target.id()) {
+                auto casted = cudf::cast(ctx.cols[idx], target);
+                idx = ctx.push(std::move(casted));
+            }
+            return ctx.cols[idx];
+        };
+
+        cudf::column_view acc = value_as_column(args[0]);
+        if (n == 1) {
+            return std::make_unique<cudf::column>(acc);  // nothing to fold; still a fresh column
+        }
+
+        std::unique_ptr<cudf::column> result;
+        for (int i = 1; i < n; ++i) {
+            cudf::column_view next = value_as_column(args[i]);
+            result = cudf::replace_nulls(i == 1 ? acc : result->view(), next);
+        }
+        return result;
+    }
+
+    // ---- na_if(x, y): x with NA wherever x == y (Phase 4) ----
+    if (op == "na_if") {
+        Rcpp::List x_node = args[0];
+        Rcpp::List y_node = args[1];
+
+        cudf::size_type x_idx = materialize(x_node, ctx);
+        cudf::column_view x_col = ctx.cols[x_idx];
+        cudf::data_type x_type = x_col.type();
+        std::string x_type_str = expr_type_to_str(x_type);
+
+        // na_if()'s output ALWAYS keeps x's own type (verified empirically:
+        // na_if(1:3, 2) -- an integer x against a double literal y -- stays
+        // integer); y is cast to match x for the comparison, never the
+        // other way around.
+        std::unique_ptr<cudf::column> mask;
+        if (ir_kind(y_node) == "lit") {
+            auto y_scalar = build_scalar(x_type_str, y_node["value"], ir_lit_is_na(y_node));
+            mask = cudf::binary_operation(x_col, *y_scalar, cudf::binary_operator::EQUAL,
+                                           cudf::data_type{cudf::type_id::BOOL8});
+        } else {
+            cudf::size_type y_idx = materialize(y_node, ctx);
+            cudf::column_view y_col = ctx.cols[y_idx];
+            if (y_col.type().id() != x_type.id()) {
+                auto casted = cudf::cast(y_col, x_type);
+                y_idx = ctx.push(std::move(casted));
+                y_col = ctx.cols[y_idx];
+            }
+            mask = cudf::binary_operation(x_col, y_col, cudf::binary_operator::EQUAL,
+                                           cudf::data_type{cudf::type_id::BOOL8});
+        }
+
+        // Wherever x == y (mask TRUE): NA of x's own type. A NULL mask
+        // (either side null, including x already being NA) automatically
+        // takes the rhs (x itself) per copy_if_else's null-mask rule --
+        // exactly na_if()'s "pre-existing NA rows in x stay NA; a
+        // comparison against NA is never TRUE" behavior (verified
+        // empirically: na_if(c(1,NA,3), 3) is (1, NA, NA)).
+        auto na_scalar = build_scalar(x_type_str, R_NilValue, true);
+        return cudf::copy_if_else(*na_scalar, x_col, mask->view());
     }
 
     // ---- string ==/!=/</<=/>/>=: binary_operation + get_compare_op() ----

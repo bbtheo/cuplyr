@@ -42,6 +42,11 @@
 #'   \item Column-vs-column comparisons for every operator above
 #'   \item Math on columns inside a predicate (`+ - * / %% %/% ^`, `sqrt`,
 #'     `log`, `abs`, etc. -- the same set `mutate()` supports)
+#'   \item `if_else()`, `case_when()`, `coalesce()`, `na_if()` -- the same
+#'     conditional/vector functions `mutate()` supports (see its own docs
+#'     for the exact type-unification rules), usable anywhere inside a
+#'     predicate, including as the whole predicate itself (e.g.
+#'     `filter(case_when(x > 1 ~ TRUE, .default = FALSE))`)
 #'   \item The `.data`/`.env` pronouns, and ordinary R symbols (a bare name
 #'     that matches a column resolves to that column; otherwise it's
 #'     evaluated as an environment variable -- "columns shadow the

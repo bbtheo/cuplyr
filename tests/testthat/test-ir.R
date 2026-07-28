@@ -569,3 +569,172 @@ test_that("ir_deparse() renders a readable expression", {
 test_that("ir_deparse() renders NA literals as 'NA'", {
   expect_equal(ir_deparse(ir_lit_from_r(NA)), "NA")
 })
+
+# -----------------------------------------------------------------------------
+# Phase 4: if_else()/case_when()/coalesce()/na_if() -- parse shapes and type
+# inference, pure R (no GPU). See test-dplyr-if-else.R/test-dplyr-case-when.R/
+# test-dplyr-coalesce.R/test-dplyr-na-if.R for the GPU oracle-parity coverage
+# of these same ops' runtime values.
+# -----------------------------------------------------------------------------
+
+test_that("if_else() parses to an ir_call with cond/yes/no", {
+  ir <- ir_parse_quo(quo_in(quote(if_else(x > 1, x, y))), schema_xyz)
+
+  expect_equal(ir$kind, "call")
+  expect_equal(ir$op, "if_else")
+  expect_length(ir$args, 3)
+  expect_equal(ir$args[[1]]$op, ">")
+  expect_equal(ir$args[[2]]$name, "x")
+  expect_equal(ir$args[[3]]$name, "y")
+})
+
+test_that("if_else() with missing= parses to a 4-arg ir_call", {
+  ir <- ir_parse_quo(quo_in(quote(if_else(x > 1, x, y, missing = 0))), schema_xyz)
+  expect_length(ir$args, 4)
+})
+
+test_that("if_else() rejects the wrong arg count (falls back)", {
+  ir <- ir_parse_quo(quo_in(quote(if_else(x > 1, x))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("if_else() unifies int/double value types to FLOAT64, matching dplyr", {
+  schema <- list(names = "x", types = "BOOL8")
+  ir <- ir_call("if_else", list(ir_col("x"), ir_lit_from_r(1L), ir_lit_from_r(2.5)))
+  expect_equal(ir_infer_type(ir, schema), "FLOAT64")
+})
+
+test_that("if_else() preserves INT32 when both value args are integer", {
+  schema <- list(names = "x", types = "BOOL8")
+  ir <- ir_call("if_else", list(ir_col("x"), ir_lit_from_r(1L), ir_lit_from_r(2L)))
+  expect_equal(ir_infer_type(ir, schema), "INT32")
+})
+
+test_that("if_else() errors combining STRING and FLOAT64 value args", {
+  schema <- list(names = "x", types = "BOOL8")
+  ir <- ir_call("if_else", list(ir_col("x"), ir_lit_from_r("a"), ir_lit_from_r(1)))
+  expect_error(ir_infer_type(ir, schema), "if_else")
+})
+
+test_that("if_else() adopts a bare NA value arg's type from its sibling at parse time", {
+  ir <- ir_parse_quo(quo_in(quote(if_else(x > 1, x, NA))), schema_xyz)
+  # ir_resolve_value_nas() should have already typed the NA literal (the
+  # 3rd arg, `no`) as FLOAT64 (x's type in schema_xyz) -- so a later
+  # ir_infer_type() walk sees a normal typed literal, not an isolated NA.
+  expect_equal(ir$args[[3]]$type, "FLOAT64")
+  expect_true(ir$args[[3]]$na)
+})
+
+test_that("case_when() parses formula dots into an interleaved cond/val ir_call", {
+  ir <- ir_parse_quo(quo_in(quote(case_when(x < 2 ~ "a", x < 4 ~ "b"))), schema_xyz)
+
+  expect_equal(ir$kind, "call")
+  expect_equal(ir$op, "case_when")
+  expect_equal(ir$meta$n_when, 2)
+  # args: cond1, val1, cond2, val2, default (synthesized NA)
+  expect_length(ir$args, 5)
+  expect_equal(ir$args[[1]]$op, "<")
+  expect_equal(ir$args[[2]]$value, "a")
+  expect_equal(ir$args[[3]]$op, "<")
+  expect_equal(ir$args[[4]]$value, "b")
+  expect_true(ir$args[[5]]$na)  # no .default= supplied: synthesized NA
+})
+
+test_that("case_when() with .default= uses it as the trailing default arg", {
+  ir <- ir_parse_quo(quo_in(quote(case_when(x < 2 ~ "a", .default = "z"))), schema_xyz)
+  expect_length(ir$args, 3)
+  expect_equal(ir$args[[3]]$value, "z")
+})
+
+test_that("case_when() falls back (NULL) for an unsupported named arg like .ptype=", {
+  ir <- ir_parse_quo(quo_in(quote(case_when(x < 2 ~ 1, .ptype = double()))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("case_when() falls back (NULL) for a one-sided formula", {
+  ir <- ir_parse_quo(quo_in(quote(case_when(~"a"))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("case_when() type unification promotes int/double RHS mix to FLOAT64", {
+  schema <- list(names = "x", types = "BOOL8")
+  ir <- ir_call(
+    "case_when",
+    list(ir_col("x"), ir_lit_from_r(1L), ir_lit_from_r(2.5)),
+    meta = list(n_when = 1)
+  )
+  expect_equal(ir_infer_type(ir, schema), "FLOAT64")
+})
+
+test_that("case_when() errors combining STRING and numeric RHS values", {
+  schema <- list(names = "x", types = "BOOL8")
+  ir <- ir_call(
+    "case_when",
+    list(ir_col("x"), ir_lit_from_r("a"), ir_lit_from_r(1)),
+    meta = list(n_when = 1)
+  )
+  expect_error(ir_infer_type(ir, schema), "case_when")
+})
+
+test_that("coalesce() parses a variadic arg list", {
+  ir <- ir_parse_quo(quo_in(quote(coalesce(x, y, 0))), schema_xyz)
+  expect_equal(ir$op, "coalesce")
+  expect_length(ir$args, 3)
+})
+
+test_that("coalesce() requires at least one argument", {
+  ir <- ir_parse_quo(quo_in(quote(coalesce())), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("coalesce() type unification promotes int/double mix to FLOAT64", {
+  schema <- list(names = character(), types = character())
+  ir <- ir_call("coalesce", list(ir_lit_from_r(1L), ir_lit_from_r(2.5)))
+  expect_equal(ir_infer_type(ir, schema), "FLOAT64")
+})
+
+test_that("coalesce() errors combining STRING and numeric args", {
+  schema <- list(names = character(), types = character())
+  ir <- ir_call("coalesce", list(ir_lit_from_r("a"), ir_lit_from_r(1)))
+  expect_error(ir_infer_type(ir, schema), "coalesce")
+})
+
+test_that("na_if() parses a 2-arg column/scalar call", {
+  ir <- ir_parse_quo(quo_in(quote(na_if(x, 2))), schema_xyz)
+  expect_equal(ir$op, "na_if")
+  expect_length(ir$args, 2)
+})
+
+test_that("na_if() rejects the wrong arg count (falls back)", {
+  ir <- ir_parse_quo(quo_in(quote(na_if(x))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("na_if() output type is always x's own type, never promoted by y", {
+  schema <- list(names = "i", types = "INT32")
+  ir <- ir_call("na_if", list(ir_col("i"), ir_lit_from_r(2.5)))
+  expect_equal(ir_infer_type(ir, schema), "INT32")
+})
+
+test_that("na_if() errors at parse time on a STRING y against a numeric x", {
+  schema <- list(names = c("x", "s"), types = c("FLOAT64", "STRING"))
+  expect_error(
+    ir_parse_quo(quo_in(quote(na_if(x, s))), schema),
+    "na_if"
+  )
+})
+
+test_that("na_if() errors at parse time on a typed NA_character_ y against a numeric x", {
+  schema <- list(names = "x", types = "FLOAT64")
+  expect_error(
+    ir_parse_quo(quo_in(quote(na_if(x, NA_character_))), schema),
+    "na_if"
+  )
+})
+
+test_that("na_if() accepts a bare untyped NA for y without error", {
+  schema <- list(names = "x", types = "FLOAT64")
+  ir <- ir_parse_quo(quo_in(quote(na_if(x, NA))), schema)
+  expect_equal(ir$op, "na_if")
+  expect_equal(ir$args[[2]]$type, "FLOAT64")
+})

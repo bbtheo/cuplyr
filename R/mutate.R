@@ -65,6 +65,24 @@
 #'     `log2()`, `log10()`, `exp()`, `abs()`, `floor()`, `ceiling()`,
 #'     `sin()`, `cos()`, `tan()`, `round(x)`/`round(x, digits)` (banker's
 #'     rounding, matching R)
+#'   \item `if_else(cond, yes, no, missing = NULL)` -- strict-but-promoting
+#'     type unification across `yes`/`no`/`missing` (int/double/logical mix
+#'     freely, like dplyr's vctrs-based common type; `STRING` only unifies
+#'     with `STRING`). A `NA` condition produces `NA` (or `missing`, if
+#'     supplied) in the output, matching dplyr exactly (this is NOT the same
+#'     as treating a `NA` condition like `FALSE`)
+#'   \item `case_when(cond1 ~ val1, cond2 ~ val2, ..., .default = val)` --
+#'     first-match-wins; a `NA` condition is treated as no match (falls
+#'     through to the next clause, or `.default`); unmatched rows become a
+#'     typed `NA` when `.default` isn't supplied; the same value-type
+#'     unification rule as `if_else()` applies across every `val_i` plus
+#'     `.default`. `.ptype=`/`.size=`/`.unmatched=` are not yet supported.
+#'   \item `coalesce(...)` -- first non-NA value per row, left to right,
+#'     across any number of columns/scalars; same value-type unification
+#'     rule as `if_else()`
+#'   \item `na_if(x, y)` -- `x` with `NA` wherever `x == y`; the output
+#'     always keeps `x`'s own type exactly (unlike `if_else()`/`coalesce()`,
+#'     `y` is never promoted into the result, only compared against)
 #'   \item Plain column copies (`mutate(y = x)`)
 #'   \item A later dot in the same `mutate()` call referencing an earlier
 #'     dot's output column (`mutate(a = x + y, b = a * 2)`)
@@ -134,8 +152,8 @@
 #'     section 6)
 #'   \item String manipulation (concatenation, case conversion, substr,
 #'     regex, ...) -- only string *comparison* is supported
-#'   \item `if_else()`/`case_when()`/`coalesce()` -- planned for a later
-#'     phase
+#'   \item `case_when()`'s `.ptype=`/`.size=`/`.unmatched=` arguments, and
+#'     `case_match()` -- planned for a later phase
 #' }
 #' An expression shape the IR doesn't recognize is currently a hard error
 #' (unlike `filter()`, which falls back to CPU evaluation for some
@@ -309,8 +327,9 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE) {
       stop(
         verb, "() only supports column copies, arithmetic (+, -, *, /, ^, ",
         "%%, %/%), comparisons (==, !=, <, <=, >, >=), logical operators ",
-        "(&, |, !, xor), is.na(), between(), %in%, and sqrt()/log()/log2()/",
-        "log10()/exp()/abs()/floor()/ceiling()/sin()/cos()/tan()/round().\n",
+        "(&, |, !, xor), is.na(), between(), %in%, sqrt()/log()/log2()/",
+        "log10()/exp()/abs()/floor()/ceiling()/sin()/cos()/tan()/round(), ",
+        "and if_else()/case_when()/coalesce()/na_if().\n",
         "Expression: ", rlang::quo_text(expr),
         call. = FALSE
       )

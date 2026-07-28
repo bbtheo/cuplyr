@@ -232,6 +232,16 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
            call. = FALSE)
     }
 
+    # case_when()'s dots are `~` formulas, not ordinary expressions the
+    # generic per-arg parse loop below understands (a formula's LHS/RHS need
+    # pulling apart before recursing, and `.default=` is a named value
+    # argument, not a formula at all) -- so it's special-cased here, before
+    # canonical/registry dispatch, the same way `&&`/`||` are. See
+    # ir_parse_case_when()'s own docs for exactly what it accepts.
+    if (identical(fn_name, "case_when")) {
+      return(ir_parse_case_when(expr, env, schema))
+    }
+
     canonical <- ir_op_alias(fn_name)
     args_raw <- as.list(expr)[-1]
 
@@ -292,6 +302,102 @@ ir_parse_quo <- function(quo, schema) {
   expr <- rlang::quo_get_expr(quo)
   env <- rlang::quo_get_env(quo)
   ir_parse_expr(expr, env, schema, allow_vector = FALSE)
+}
+
+#' Parse a `case_when()` call into IR (Phase 4)
+#'
+#' `case_when(cond1 ~ val1, cond2 ~ val2, ..., .default = val)` dots are
+#' two-sided formulas (`~` calls), not ordinary expressions -- so unlike
+#' every other `ir_call_registry` entry, this is invoked directly from
+#' `ir_parse_expr()`'s call-handling branch (see the `identical(fn_name,
+#' "case_when")` check there) rather than going through the registry's
+#' generic per-arg parse loop. Recognizes exactly: any number of two-sided
+#' `cond ~ value` clauses, plus an optional `.default = value` named
+#' argument. Returns `NULL` (unsupported, caller falls back per the normal
+#' contract) for anything else this Phase-4 wave doesn't implement yet:
+#' `.ptype=`, `.size=`, `.unmatched=`, one-sided formulas, non-formula dots,
+#' or zero clauses.
+#'
+#' Normalizes into a single flat `ir_call("case_when", args)` where `args`
+#' is `list(cond1, val1, cond2, val2, ..., valN, default)` -- always
+#' terminated by a default (a bare untyped-NA literal is synthesized when
+#' the user didn't supply `.default=`, matching dplyr's "unmatched rows are
+#' a typed NA" rule). `meta$n_when` records the clause count for
+#' diagnostics/`show_query()`; the C++ side derives the same count from
+#' `length(args)` being odd (`2 * n_when + 1`), so `meta` isn't load-bearing
+#' there.
+#'
+#' Bare untyped `NA` literals among the value positions (any `val_i` or the
+#' `.default`/synthesized default) are resolved against a sibling value's
+#' type via [ir_resolve_value_nas()] -- the same value-position type
+#' adoption if_else()/coalesce() use, generalized to `case_when`'s N+1
+#' value slots.
+#'
+#' @param expr The raw `case_when(...)` call
+#' @param env The quosure's environment (conditions/values are parsed
+#'   against this, exactly like any other IR subtree)
+#' @param schema List with `names`/`types`
+#' @return An `ir_call("case_when", ...)` node, or `NULL` if unsupported
+#' @keywords internal
+ir_parse_case_when <- function(expr, env, schema) {
+  args_raw <- as.list(expr)[-1]
+  arg_names <- names(args_raw)
+  if (is.null(arg_names)) {
+    arg_names <- rep("", length(args_raw))
+  }
+
+  # .ptype=/.size=/.unmatched=/etc.: not implemented this wave -- fall back.
+  unsupported_named <- setdiff(arg_names[nzchar(arg_names)], ".default")
+  if (length(unsupported_named) > 0) {
+    return(NULL)
+  }
+
+  default_pos <- which(arg_names == ".default")
+  default_raw <- if (length(default_pos) == 1) args_raw[[default_pos]] else NULL
+  clause_raw <- if (length(default_pos) == 1) args_raw[-default_pos] else args_raw
+
+  if (length(clause_raw) == 0) {
+    return(NULL)  # nothing to match against
+  }
+
+  conds <- vector("list", length(clause_raw))
+  vals <- vector("list", length(clause_raw))
+
+  for (i in seq_along(clause_raw)) {
+    f <- clause_raw[[i]]
+    if (!rlang::is_call(f, "~") || length(f) != 3) {
+      return(NULL)  # not a two-sided formula: unsupported shape
+    }
+    cond_ir <- ir_parse_expr(f[[2]], env, schema)
+    if (is.null(cond_ir)) {
+      return(NULL)
+    }
+    val_ir <- ir_parse_expr(f[[3]], env, schema)
+    if (is.null(val_ir)) {
+      return(NULL)
+    }
+    conds[[i]] <- cond_ir
+    vals[[i]] <- val_ir
+  }
+
+  default_ir <- if (!is.null(default_raw)) {
+    parsed_default <- ir_parse_expr(default_raw, env, schema)
+    if (is.null(parsed_default)) {
+      return(NULL)
+    }
+    parsed_default
+  } else {
+    ir_lit(value = NULL, type = NULL, na = TRUE)  # synthesized untyped NA
+  }
+
+  values <- ir_resolve_value_nas(c(vals, list(default_ir)), schema)
+  n_when <- length(conds)
+
+  interleaved <- vector("list", n_when * 2L)
+  interleaved[seq(1L, n_when * 2L, by = 2L)] <- conds
+  interleaved[seq(2L, n_when * 2L, by = 2L)] <- values[seq_len(n_when)]
+
+  ir_call("case_when", c(interleaved, values[n_when + 1L]), meta = list(n_when = n_when))
 }
 
 # -----------------------------------------------------------------------------
@@ -531,6 +637,127 @@ type_minus <- function(arg_types) {
   infer_mutate_output_type("-", arg_types, NULL)
 }
 
+# -----------------------------------------------------------------------------
+# Phase 4: value-position type unification (if_else/case_when/coalesce) and
+# the shared bare-NA-adoption helper they (and na_if) all need.
+#
+# Verified empirically against dplyr 1.2.1 (see the Phase 4 task's trap
+# list): `if_else()`/`case_when()`/`coalesce()` unify their "value position"
+# arguments (if_else's yes/no/missing; case_when's val_i's + default;
+# coalesce's whole arg list) via a vctrs-style common type, NOT the strict
+# "must be identical type" rule -- e.g. `if_else(cond, 1L, 2.5)` succeeds as
+# a double (dplyr's vctrs::vec_ptype2() freely promotes across
+# integer/double/logical), it only errors on a genuinely incompatible mix
+# like character vs double. This mirrors -- but is not literally the same
+# function as -- infer_mutate_output_type()'s D5 arithmetic promotion
+# (BOOL8 < INT32 < INT64 < FLOAT64); STRING here can only unify with STRING
+# (no numeric<->STRING promotion path exists either way).
+# -----------------------------------------------------------------------------
+
+ir_value_type_rank <- c(BOOL8 = 1L, INT32 = 2L, INT64 = 3L, FLOAT64 = 4L)
+
+# @param types Character vector of GPU types for every "value position" arg
+#   of an if_else()/case_when()/coalesce() call (already resolved -- no
+#   remaining bare/isolated NA placeholders, see ir_resolve_value_nas())
+# @param op_name Verb name, for the error message
+# @return The unified GPU type
+# @keywords internal
+ir_unify_types <- function(types, op_name) {
+  uniq <- unique(types)
+  if (length(uniq) == 0) {
+    return("BOOL8")  # typeof(NA) in R, when every value position was an isolated NA
+  }
+  if (length(uniq) == 1) {
+    return(uniq)
+  }
+
+  if ("STRING" %in% uniq) {
+    stop(op_name, "(): can't combine ",
+         paste(paste0("<", uniq, ">"), collapse = " and "),
+         " -- STRING values can't be combined with a non-STRING value.",
+         call. = FALSE)
+  }
+
+  ranks <- ir_value_type_rank[uniq]
+  if (anyNA(ranks)) {
+    stop(op_name, "(): can't unify types ", paste(uniq, collapse = ", "), call. = FALSE)
+  }
+
+  names(ranks)[which.max(ranks)]
+}
+
+type_if_else <- function(arg_types) {
+  ir_unify_types(arg_types[-1], "if_else")  # drop cond's own (BOOL8) type
+}
+
+type_case_when <- function(arg_types) {
+  n <- length(arg_types)
+  value_idx <- c(seq(2L, n - 1L, by = 2L), n)  # val_1, val_2, ..., default
+  ir_unify_types(arg_types[value_idx], "case_when")
+}
+
+type_coalesce <- function(arg_types) {
+  ir_unify_types(arg_types, "coalesce")
+}
+
+# na_if()'s output keeps `x`'s own type exactly (verified empirically: e.g.
+# `na_if(1:3, 2)` -- an integer `x` against a double literal `y` -- stays
+# integer; `y` is just compared against, never promoted into the result).
+type_na_if <- function(arg_types) {
+  arg_types[1]
+}
+
+#' Resolve a bare untyped `NA` literal's type from a sibling value-position arg
+#'
+#' `if_else()`/`case_when()`/`coalesce()`/`na_if()` each have several "value
+#' position" argument slots that must share a common output type (if_else's
+#' yes/no/missing; case_when's val_i's + default; coalesce's whole arg list;
+#' na_if's x/y). A bare, untyped `NA` in one of those slots (e.g. `if_else(
+#' cond, x, NA)`) must adopt a *sibling* value-position arg's type -- exactly
+#' like arithmetic's `1L + NA` being integer, generalized from 2 args to N
+#' (section 1.2/1.3).
+#'
+#' This is done here, at PARSE time (mutating each isolated node's own
+#' `type` field directly, in place), rather than relying on
+#' [ir_infer_type()]'s own generic isolated-NA substitution (which already
+#' exists for arithmetic's 2-arg case): that generic mechanism picks the
+#' FIRST non-isolated arg among a call node's ENTIRE `args` list, which for
+#' `if_else` would incorrectly be `cond` (always the first arg, always
+#' non-isolated, and NOT a value-position arg) rather than a true sibling
+#' value. Calling this here on ONLY the value-position args (never `cond`)
+#' avoids that pitfall entirely, and once it runs, the isolated node's
+#' `type` field is no longer `NULL` -- so `ir_infer_type()`'s later generic
+#' walk of the finished node is a no-op for these args, as intended.
+#'
+#' A typed `NA` (e.g. `NA_character_`, `NA_integer_`) is untouched: it
+#' already carries its own `type` and is not "isolated" by this function's
+#' definition (matching dplyr: `na_if(numeric_x, NA_character_)` still
+#' errors, only a bare untyped `NA` adopts a sibling's type).
+#'
+#' @param nodes A list of IR nodes -- the "value position" args only (e.g.
+#'   if_else()'s yes/no/missing, never its cond)
+#' @param schema List with `names`/`types`
+#' @return `nodes`, with every isolated bare-NA node's `type` field filled
+#'   in from the first non-isolated sibling's inferred type (returned
+#'   unchanged if none, or all, of `nodes` are isolated)
+#' @keywords internal
+ir_resolve_value_nas <- function(nodes, schema) {
+  is_isolated_na <- vapply(nodes, function(n) {
+    identical(n$kind, "lit") && isTRUE(n$na) && is.null(n$type)
+  }, logical(1))
+
+  if (!any(is_isolated_na) || all(is_isolated_na)) {
+    return(nodes)
+  }
+
+  fallback_type <- ir_infer_type(nodes[[which(!is_isolated_na)[1]]], schema)
+
+  for (i in which(is_isolated_na)) {
+    nodes[[i]]$type <- fallback_type
+  }
+  nodes
+}
+
 #' Registry of supported expression-IR operations
 #'
 #' See the module-level comment above and section 6 of
@@ -627,5 +854,85 @@ ir_call_registry <- list(
   # types. Verified against the dplyr oracle (T6 finding; corrects
   # phase1_expression_engine.md section 1.3's table, which grouped round()
   # with abs() as "argument type" -- empirically wrong for round()).
-  "round" = list(arity = NA_integer_, parse = NULL, type = type_float64, lower = list(handler = "round"))
+  "round" = list(arity = NA_integer_, parse = NULL, type = type_float64, lower = list(handler = "round")),
+
+  # --- Phase 4: conditional & vector functions ---
+  # `if_else(cond, yes, no, missing = NULL)`: 3 or 4 positional args (the
+  # `arity = NA` + validating `parse` hook is the same pattern `log(x[,
+  # base])` already uses above). `ir_resolve_value_nas()` fixes up a bare
+  # untyped NA among yes/no/missing before the call node is built (never
+  # touching `cond`, see that function's own docs for why that matters).
+  "if_else" = list(
+    arity = NA_integer_,
+    parse = function(args, schema) {
+      if (length(args) < 3 || length(args) > 4) {
+        return(NULL)  # wrong arg count: not this shape, fall back
+      }
+      cond <- args[[1]]
+      values <- ir_resolve_value_nas(args[-1], schema)
+      ir_call("if_else", c(list(cond), values))
+    },
+    type = type_if_else,
+    lower = list(handler = "if_else")
+  ),
+
+  # `case_when(...)` itself never reaches this entry's `parse`/generic
+  # per-arg loop -- see `ir_parse_case_when()`, invoked directly from
+  # `ir_parse_expr()`'s call-handling branch because its dots are `~`
+  # formulas. This entry exists only so `ir_infer_type()` can look up
+  # `type`/`lower` for the `ir_call("case_when", ...)` node
+  # `ir_parse_case_when()` builds.
+  "case_when" = list(
+    arity = NA_integer_,
+    parse = NULL,
+    type = type_case_when,
+    lower = list(handler = "case_when")
+  ),
+
+  # `coalesce(...)`: variadic, at least one argument.
+  "coalesce" = list(
+    arity = NA_integer_,
+    parse = function(args, schema) {
+      if (length(args) < 1) {
+        return(NULL)
+      }
+      values <- ir_resolve_value_nas(args, schema)
+      ir_call("coalesce", values)
+    },
+    type = type_coalesce,
+    lower = list(handler = "coalesce")
+  ),
+
+  # `na_if(x, y)`: output keeps x's own type (type_na_if); a STRING/
+  # non-STRING mismatch between x and y is diagnosed here, at parse time,
+  # with a message naming both sides and their types (mirroring dplyr's own
+  # "Can't convert `y` <type> to match type of `x` <type>." wording) rather
+  # than surfacing as a raw cudf type error later.
+  "na_if" = list(
+    arity = 2L,
+    parse = function(args, schema) {
+      resolved <- ir_resolve_value_nas(args, schema)
+      x <- resolved[[1]]
+      y <- resolved[[2]]
+      # unname(): a `col` node's type comes back from ir_infer_type() as
+      # schema$types[idx] -- a NAMED single-element subset when
+      # current_schema()'s own $types vector is named (as it is for any
+      # real tbl_gpu), and identical() treats a "names" attribute as
+      # significant (identical(c(s = "STRING"), "STRING") is FALSE even
+      # though the values are equal). Same landmine, same fix, as
+      # check_filter_comparison_types()'s existing unname() call
+      # (R/filter.R) -- without it, every na_if() STRING/non-STRING
+      # mismatch silently skipped this check and only surfaced as a raw
+      # cudf cast error at GPU-execution time instead.
+      x_type <- unname(ir_infer_type(x, schema))
+      y_type <- unname(ir_infer_type(y, schema))
+      if (identical(x_type, "STRING") != identical(y_type, "STRING")) {
+        stop("na_if(): can't convert `y` (", y_type, ") to match the type of ",
+             "`x` (", x_type, ").", call. = FALSE)
+      }
+      ir_call("na_if", list(x, y))
+    },
+    type = type_na_if,
+    lower = list(handler = "na_if")
+  )
 )
