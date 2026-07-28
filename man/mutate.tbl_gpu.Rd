@@ -20,10 +20,14 @@
 (new or existing), and the value is an expression involving existing
 columns and/or scalar values (see "Supported expressions" below).}
 
-\item{.by}{Optional on-the-fly grouping columns (tidyselect). Forces a
-CPU fallback (grouped/windowed mutate expressions aren't GPU-native
-yet -- see \code{scratchpad/todo.md} Phase 5); use \code{\link[dplyr:group_by]{dplyr::group_by()}}
-beforehand for the GPU-native path instead.}
+\item{.by}{Optional on-the-fly grouping columns (tidyselect), GPU-native
+(Phase 5, task W6): \code{mutate(df, y = mean(x), .by = g)} behaves
+identically to \code{df |> group_by(g) |> mutate(y = mean(x)) |> ungroup()}
+-- same window-function machinery, same row-order-preservation
+contract, but the \emph{result} is always ungrouped (\code{.by} never leaves
+grouping metadata behind, unlike \code{\link[dplyr:group_by]{dplyr::group_by()}}). Supplying
+\code{.by} when \code{.data} is already grouped (via \code{group_by()}) is an error,
+matching dplyr exactly.}
 
 \item{.keep}{One of \code{"all"} (default), \code{"used"}, \code{"unused"}, \code{"none"};
 controls which of \code{.data}'s \emph{other} columns (besides ones \code{...}

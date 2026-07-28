@@ -8,10 +8,14 @@
 #' @param ... Name-value pairs of expressions. The name gives the column name
 #'   (new or existing), and the value is an expression involving existing
 #'   columns and/or scalar values (see "Supported expressions" below).
-#' @param .by Optional on-the-fly grouping columns (tidyselect). Forces a
-#'   CPU fallback (grouped/windowed mutate expressions aren't GPU-native
-#'   yet -- see `scratchpad/todo.md` Phase 5); use [dplyr::group_by()]
-#'   beforehand for the GPU-native path instead.
+#' @param .by Optional on-the-fly grouping columns (tidyselect), GPU-native
+#'   (Phase 5, task W6): `mutate(df, y = mean(x), .by = g)` behaves
+#'   identically to `df |> group_by(g) |> mutate(y = mean(x)) |> ungroup()`
+#'   -- same window-function machinery, same row-order-preservation
+#'   contract, but the *result* is always ungrouped (`.by` never leaves
+#'   grouping metadata behind, unlike [dplyr::group_by()]). Supplying
+#'   `.by` when `.data` is already grouped (via `group_by()`) is an error,
+#'   matching dplyr exactly.
 #' @param .keep One of `"all"` (default), `"used"`, `"unused"`, `"none"`;
 #'   controls which of `.data`'s *other* columns (besides ones `...`
 #'   creates or modifies, and group columns, both of which are always kept)
@@ -303,26 +307,35 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   before_quo <- rlang::enquo(.before)
   after_quo <- rlang::enquo(.after)
 
-  if (!rlang::quo_is_null(by_quo)) {
-    # On-the-fly `.by=` grouping isn't GPU-native yet (grouped/windowed
-    # mutate expressions are Phase 5 material, see scratchpad/todo.md) --
-    # same scope decision slice.tbl_gpu() makes for its own `.by=`.
-    return(gpu_fallback("mutate", .data, function(tbl) {
-      rlang::inject(dplyr::mutate(
-        tbl, !!!dots, .by = !!by_quo, .keep = .keep,
-        .before = !!before_quo, .after = !!after_quo
-      ))
-    }))
-  }
+  # Phase 5, task W6: `.by=` resolution. resolve_by() (R/execute.R) errors
+  # immediately if `.data` is already grouped (matching dplyr's own
+  # "Can't supply `.by`..." message verbatim) -- checked up front, before
+  # any dots-related early return, since dplyr raises this error even for
+  # a zero-dot call (verified empirically). `verb_groups` is what actually
+  # drives the window-function machinery below: `by_cols` when `.by=` was
+  # supplied, `.data$groups` otherwise (identical to `group_by()`-driven
+  # mutate). The result is ALWAYS ungrouped when `.by=` was used -- this
+  # falls out automatically, with no special-casing needed, because
+  # resolve_by() already guarantees `.data` itself is ungrouped in that
+  # case, and push_op()'s propagate_groups() only ever propagates
+  # `.data$groups` (never `verb_groups`) into the result.
+  by_given <- !rlang::quo_is_null(by_quo)
+  by_cols <- resolve_by(.data, by_quo, ".by")
+  verb_groups <- if (by_given) by_cols else .data$groups
 
   # Narrow aggregate broadcast: `mutate(x, name = n())` / `mutate(x, name =
   # sum(expr))` -- a (per-group, if `x` is grouped; whole-table otherwise)
   # aggregate broadcast to every row, keeping all rows (unlike summarise()).
-  # Full grouped-mutate/window-function support (aggregates combined with
-  # other expressions, multiple aggregate dots, other aggregate functions
-  # like mean()/min()/max()) is Phase 5 material and NOT handled here; this
-  # fires ONLY for the single-dot, bare-`n()`-or-`sum(<expr>[, na.rm =
-  # TRUE])` shape. It was added so that `dplyr::add_tally()` and our own
+  # This narrow left-join-based path predates the general window-function
+  # machinery (Phase 5 W1-W4) and is now a strict subset of it: `n()`/
+  # `sum()` are themselves "agg"-kind window calls (R/ir.R's registry), so
+  # `parse_mutate_dots()` already flags this exact shape's IR as
+  # `has_window`, routing it through `mutate_window()` below. To avoid
+  # double-pathing the same shape, this narrow branch is skipped entirely
+  # when `.by=` was supplied -- `mutate_window()` already threads
+  # `verb_groups` correctly for that case (see below) -- and fires only for
+  # the pre-existing group_by()-or-ungrouped case, unchanged from before.
+  # It was added so that `dplyr::add_tally()` and our own
   # `add_count.tbl_gpu()` (R/count.R, both of which call straight through to
   # `mutate()` with exactly this shape, see dplyr's `tally_n()`) work
   # without a CPU fallback; it also incidentally covers the same shape for
@@ -334,7 +347,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   # verification that the grouped case's `left_join()` broadcast is safe
   # (NA-key matching, row-order preservation); the ungrouped case broadcasts
   # a single collected scalar instead (see `grouped_aggregate_mutate()`).
-  if (length(dots) == 1 &&
+  if (!by_given && length(dots) == 1 &&
       identical(.keep, "all") &&
       rlang::quo_is_null(before_quo) && rlang::quo_is_null(after_quo)) {
     grouped_agg <- match_grouped_aggregate_dot(dots[[1]])
@@ -358,7 +371,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 
   orig_schema <- current_schema(.data)
   orig_names <- orig_schema$names
-  orig_groups <- .data$groups
+  orig_groups <- verb_groups
 
   expressions <- parse_mutate_dots(dots, orig_schema, "mutate")
 
@@ -371,7 +384,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   if (isTRUE(attr(expressions, "has_window"))) {
     return(mutate_window(
       .data, dots, expressions, orig_schema, orig_names, orig_groups,
-      .keep, before_quo, after_quo
+      .keep, before_quo, after_quo, by_quo
     ))
   }
 
@@ -442,13 +455,24 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 #   accounting is needed for `.keep="used"` to correctly count "x" as used
 #   even though the actual GPU computation reads a `..win*..` temp column,
 #   never "x" directly, once decomposed
-# @param orig_schema,orig_names,orig_groups `.data`'s schema/names/groups
-#   before this call
+# @param orig_schema,orig_names `.data`'s schema/names before this call
+# @param orig_groups The EFFECTIVE group columns to window over -- Phase 5
+#   task W6's `verb_groups`: `by_cols` when `.by=` was supplied,
+#   `.data$groups` otherwise (mutate.tbl_gpu() already resolved this before
+#   calling here). Threaded straight into every ast_window() stage's
+#   group_cols argument below, and into mutate_keep_select_node()'s
+#   always-keep set (an on-the-fly `.by=` column is always kept in the
+#   output, exactly like a `group_by()` column, verified empirically)
 # @param keep,before_quo,after_quo As in mutate.tbl_gpu()
+# @param by_quo The `.by=` quosure, as captured by mutate.tbl_gpu()
+#   (`rlang::enquo(.by)`) -- only used if this call's plan turns out
+#   unlowerable and we must re-run the original `dplyr::mutate()` call on
+#   the CPU (mutate_window_fallback()), so that fallback re-run honors
+#   `.by=` too
 # @return A new tbl_gpu
 # @keywords internal
 mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, orig_groups,
-                           keep, before_quo, after_quo) {
+                           keep, before_quo, after_quo, by_quo) {
   exprs_raw <- stats::setNames(
     lapply(expressions, `[[`, "ir"),
     vapply(expressions, `[[`, character(1), "output_col")
@@ -463,7 +487,7 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
     all(vapply(plan$all_specs, window_spec_lowerable, logical(1)))
 
   if (!all_lowerable) {
-    return(mutate_window_fallback(.data, dots, keep, before_quo, after_quo))
+    return(mutate_window_fallback(.data, dots, keep, before_quo, after_quo, by_quo))
   }
 
   result <- .data
@@ -560,21 +584,20 @@ plan_mutate_window_batches <- function(exprs, schema) {
 # way a window spec used to become unlowerable, is now rejected at PARSE
 # time instead -- see apply_order_override(), R/ir.R -- which is a hard
 # mutate() error, not this fallback). Kept for forward-compatibility rather
-# than deleted. Mirrors the `.by=` fallback branch in mutate.tbl_gpu() (same
-# rlang::inject()-of-the-original-dots shape) -- `.by` is always NULL here
-# (mutate.tbl_gpu() already returned earlier if it weren't), so it's simply
-# omitted from the re-injected call, matching dplyr::mutate()'s own default.
+# than deleted. Re-injects `.by=` (Phase 5 task W6) so the CPU re-run
+# honors on-the-fly grouping too, exactly as the real call would have.
 #
 # @param .data The original tbl_gpu
 # @param dots The original (already rlang::enquos()'d) dots
 # @param keep,before_quo,after_quo As in mutate.tbl_gpu()
+# @param by_quo The `.by=` quosure, as captured by mutate.tbl_gpu()
 # @return A new tbl_gpu (via gpu_fallback(), which also emits the
 #   cuplyr_fallback_notify() notification)
 # @keywords internal
-mutate_window_fallback <- function(.data, dots, keep, before_quo, after_quo) {
+mutate_window_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo) {
   gpu_fallback("mutate", .data, function(tbl) {
     rlang::inject(dplyr::mutate(
-      tbl, !!!dots, .keep = keep,
+      tbl, !!!dots, .by = !!by_quo, .keep = keep,
       .before = !!before_quo, .after = !!after_quo
     ))
   })

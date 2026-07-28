@@ -285,6 +285,47 @@ auto_name_dots <- function(dots, verb) {
   dots
 }
 
+#' Resolve a verb's `.by=`/`by=` quosure into group column names
+#'
+#' Implements `scratchpad/phase5_window_design.md` section 6: the shared
+#' resolution logic for on-the-fly grouping across `mutate()`/`filter()`
+#' (and, from task W7 onward, the `slice()` family). `.by=`/`by=` is
+#' mutually exclusive with an already-grouped `.data` -- verified
+#' empirically against dplyr 1.2.1, both `mutate()` and `filter()` raise
+#' the identical message below verbatim (including the backticks) when
+#' `.data` is grouped and `.by=` is also supplied.
+#'
+#' @param .data A `tbl_gpu` object
+#' @param by_quo A quosure for the verb's `.by=`/`by=` argument, as
+#'   returned by `rlang::enquo(.by)` -- NOT yet evaluated
+#' @param arg_name Character scalar, the argument's name as written in the
+#'   verb's own signature (`".by"` for `mutate()`/`filter()`/`slice()`,
+#'   `"by"` for the `slice_*()` family) -- interpolated into the
+#'   grouped-`.data` error message so it names the argument the caller
+#'   actually used
+#' @return A character vector of column names: `character()` when `by_quo`
+#'   is NULL (absent or explicit `.by = NULL`, matching dplyr: both behave
+#'   identically, see the roxygen on the calling verb), otherwise the
+#'   tidyselect-resolved column names in selection order (via
+#'   `tidyselect::eval_select()`'s own `names()`, so `c(g, h)`,
+#'   `starts_with("g")`, etc. all work exactly as they do for real
+#'   dplyr's own `.by=`)
+#' @keywords internal
+resolve_by <- function(.data, by_quo, arg_name = ".by") {
+  if (rlang::quo_is_null(by_quo)) {
+    return(character())
+  }
+
+  if (length(.data$groups) > 0) {
+    stop("Can't supply `", arg_name, "` when `.data` is a grouped data frame.",
+         call. = FALSE)
+  }
+
+  nm <- current_schema(.data)$names
+  loc <- tidyselect::eval_select(by_quo, stats::setNames(nm, nm))
+  names(loc)
+}
+
 #' Notify about a CPU-eval fallback, gated by `options(cuplyr.fallback = )`
 #'
 #' Per D4: default is silent (keeps existing eager behavior unchanged,

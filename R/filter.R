@@ -11,6 +11,13 @@
 #'   below for the full surface). Multiple expressions, whether passed as
 #'   separate dots or combined with `&` within one dot, are always combined
 #'   with AND (a row is kept only if every expression is TRUE for it).
+#' @param .by Optional on-the-fly grouping columns (tidyselect), GPU-native
+#'   (Phase 5, task W6): `filter(df, x > mean(x), .by = g)` behaves
+#'   identically to `df |> group_by(g) |> filter(x > mean(x)) |> ungroup()`
+#'   -- same window/aggregate-predicate machinery as `group_by()`-driven
+#'   filtering, and the result is always ungrouped. Supplying `.by` when
+#'   `.data` is already grouped (via `group_by()`) is an error, matching
+#'   dplyr exactly.
 #' @param .preserve Ignored. Included for compatibility with dplyr generic.
 #'
 #' @return A `tbl_gpu` object containing only rows where all conditions are TRUE.
@@ -65,11 +72,11 @@
 #'     `cumall()`/`cumany()`/`consecutive_id()`, `ntile()`,
 #'     `mean()`/`sum()`/`min()`/`max()`/`n()`/`sd()`/`var()`/`first()`/
 #'     `last()`/`nth()` -- the same set `mutate()` supports (see its own
-#'     docs for exact semantics/argument support), evaluated per `group_by()`
-#'     group when `.data` is grouped (`.by=` is not yet supported for
-#'     `filter()`, a later phase). A grouped filter -- like dplyr's own --
-#'     preserves the ORIGINAL row order in the result, it does not reorder
-#'     into group-key order.
+#'     docs for exact semantics/argument support), evaluated per group when
+#'     `.data` is grouped (via `group_by()` or the on-the-fly `.by=`
+#'     argument, Phase 5 task W6 -- identical semantics either way). A
+#'     grouped filter -- like dplyr's own -- preserves the ORIGINAL row
+#'     order in the result, it does not reorder into group-key order.
 #' }
 #' Comparing a column against a literal of an incompatible type (e.g. a
 #' numeric column against a character literal) errors immediately, naming
@@ -121,8 +128,6 @@
 #'
 #' ## Not yet supported
 #' \itemize{
-#'   \item `.by=` on-the-fly grouping combined with a window/aggregate
-#'     predicate (a later phase; use `group_by()` first instead)
 #'   \item Arbitrary R functions with no cuDF equivalent -- these fall back
 #'     to CPU evaluation, see below
 #' }
@@ -188,8 +193,23 @@
 #'     filter(dist < speed) |>
 #'     collect()
 #' }
-filter.tbl_gpu <- function(.data, ..., .preserve = FALSE) {
+filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   dots <- rlang::enquos(...)
+  by_quo <- rlang::enquo(.by)
+
+  # Phase 5, task W6: `.by=` resolution -- checked up front (before the
+  # zero-dots early return just below), matching dplyr's own behavior of
+  # raising the grouped-`.data` error even for a zero-dot filter() call
+  # (verified empirically). See resolve_by()'s own docs (R/execute.R) for
+  # the exact error text and tidyselect semantics. `verb_groups` is `by_cols`
+  # when `.by=` was supplied, `.data$groups` otherwise -- identical to
+  # mutate.tbl_gpu()'s own resolution -- and threads straight into the
+  # window-predicate planning below exactly like a `group_by()` column
+  # would; the result is always ungrouped when `.by=` was used, which falls
+  # out automatically since resolve_by() already guarantees `.data` itself
+  # is ungrouped in that case.
+  by_cols <- resolve_by(.data, by_quo, ".by")
+  verb_groups <- if (!rlang::quo_is_null(by_quo)) by_cols else .data$groups
 
   if (length(dots) == 0) return(.data)
 
@@ -203,7 +223,6 @@ filter.tbl_gpu <- function(.data, ..., .preserve = FALSE) {
   orig_data <- .data
   schema <- current_schema(.data)
   orig_names <- schema$names
-  verb_groups <- .data$groups
 
   # First pass: parse every dot up front (no push_op()/GPU work yet) so we
   # know, before touching `.data` at all, whether any dot needs the window
@@ -264,7 +283,7 @@ filter.tbl_gpu <- function(.data, ..., .preserve = FALSE) {
       # nothing has been pushed onto `.data` yet at this point, so falling
       # back to CPU evaluation of the WHOLE call, from the pristine
       # original table and dots, is safe.
-      return(filter_window_fallback(orig_data, dots))
+      return(filter_window_fallback(orig_data, dots, by_quo))
     }
 
     for (stage in plan$stages) {
@@ -383,8 +402,9 @@ filter.tbl_gpu <- function(.data, ..., .preserve = FALSE) {
 # @param exprs A *named* list of per-dot window-bearing IR nodes (only the
 #   dots identified by `window_idx` in filter.tbl_gpu(), not every dot)
 # @param schema `.data`'s schema before this filter() call
-# @param group_cols Character vector, `.data$groups` (the `.by=` variant is
-#   Phase 5 task W6, not handled here)
+# @param group_cols Character vector, the effective group columns to window
+#   over -- `verb_groups` from filter.tbl_gpu() (Phase 5 task W6): `by_cols`
+#   when `.by=` was supplied, `.data$groups` otherwise
 # @return `plan_window_stages()`'s result list, or `NULL` if planning
 #   errored or produced an unlowerable spec
 # @keywords internal
@@ -421,12 +441,15 @@ filter_plan_window <- function(exprs, schema, group_cols) {
 # @param dots The original (already rlang::enquos()'d) dots, every one of
 #   them (not just the window-bearing ones), so the re-run dplyr::filter()
 #   call reproduces the exact original semantics
+# @param by_quo The `.by=` quosure, as captured by filter.tbl_gpu()
+#   (Phase 5 task W6) -- re-injected so the CPU re-run honors on-the-fly
+#   grouping too, exactly as the real call would have
 # @return A new tbl_gpu (via gpu_fallback(), which also emits the
 #   cuplyr_fallback_notify() notification)
 # @keywords internal
-filter_window_fallback <- function(.data, dots) {
+filter_window_fallback <- function(.data, dots, by_quo) {
   gpu_fallback("filter", .data, function(tbl) {
-    rlang::inject(dplyr::filter(tbl, !!!dots))
+    rlang::inject(dplyr::filter(tbl, !!!dots, .by = !!by_quo))
   })
 }
 

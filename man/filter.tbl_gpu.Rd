@@ -4,7 +4,7 @@
 \alias{filter.tbl_gpu}
 \title{Filter rows of a GPU table}
 \usage{
-\method{filter}{tbl_gpu}(.data, ..., .preserve = FALSE)
+\method{filter}{tbl_gpu}(.data, ..., .by = NULL, .preserve = FALSE)
 }
 \arguments{
 \item{.data}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
@@ -13,6 +13,14 @@
 below for the full surface). Multiple expressions, whether passed as
 separate dots or combined with \code{&} within one dot, are always combined
 with AND (a row is kept only if every expression is TRUE for it).}
+
+\item{.by}{Optional on-the-fly grouping columns (tidyselect), GPU-native
+(Phase 5, task W6): \code{filter(df, x > mean(x), .by = g)} behaves
+identically to \code{df |> group_by(g) |> filter(x > mean(x)) |> ungroup()}
+-- same window/aggregate-predicate machinery as \code{group_by()}-driven
+filtering, and the result is always ungrouped. Supplying \code{.by} when
+\code{.data} is already grouped (via \code{group_by()}) is an error, matching
+dplyr exactly.}
 
 \item{.preserve}{Ignored. Included for compatibility with dplyr generic.}
 }
@@ -77,11 +85,11 @@ comparisons in the same dot (\code{filter(x > mean(x) & y < 5)}):
 \code{cumall()}/\code{cumany()}/\code{consecutive_id()}, \code{ntile()},
 \code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{n()}/\code{sd()}/\code{var()}/\code{first()}/
 \code{last()}/\code{nth()} -- the same set \code{mutate()} supports (see its own
-docs for exact semantics/argument support), evaluated per \code{group_by()}
-group when \code{.data} is grouped (\verb{.by=} is not yet supported for
-\code{filter()}, a later phase). A grouped filter -- like dplyr's own --
-preserves the ORIGINAL row order in the result, it does not reorder
-into group-key order.
+docs for exact semantics/argument support), evaluated per group when
+\code{.data} is grouped (via \code{group_by()} or the on-the-fly \verb{.by=}
+argument, Phase 5 task W6 -- identical semantics either way). A
+grouped filter -- like dplyr's own -- preserves the ORIGINAL row
+order in the result, it does not reorder into group-key order.
 }
 Comparing a column against a literal of an incompatible type (e.g. a
 numeric column against a character literal) errors immediately, naming
@@ -139,8 +147,6 @@ identically to dplyr in every case above.
 \subsection{Not yet supported}{
 
 \itemize{
-\item \verb{.by=} on-the-fly grouping combined with a window/aggregate
-predicate (a later phase; use \code{group_by()} first instead)
 \item Arbitrary R functions with no cuDF equivalent -- these fall back
 to CPU evaluation, see below
 }

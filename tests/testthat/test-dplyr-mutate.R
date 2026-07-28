@@ -1026,16 +1026,13 @@ test_that("mutate() errors when both .before and .after are supplied", {
   )
 })
 
-test_that("mutate() .by= forces the CPU fallback (grouped/windowed mutate not GPU-native yet)", {
+test_that("mutate() .by= is GPU-native (Phase 5, task W6) -- no CPU fallback", {
   skip_if_no_gpu()
   df <- keep_position_df()
-  withr::local_options(cuplyr.fallback = "warn")
+  withr::local_options(cuplyr.fallback = "error")
   gt <- tbl_gpu(df)
 
-  expect_warning(
-    result <- dplyr::mutate(gt, e = a + b, .by = a),
-    "mutate.*fell back to CPU evaluation"
-  )
+  result <- expect_no_error(dplyr::mutate(gt, e = a + b, .by = a))
   oracle <- dplyr::mutate(df, e = a + b, .by = a)
-  expect_equal(tibble::as_tibble(collect(result)), oracle)
+  expect_equal(tibble::as_tibble(collect(result)), tibble::as_tibble(oracle))
 })
