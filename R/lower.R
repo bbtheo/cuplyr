@@ -363,7 +363,18 @@ lower_window <- function(ast, source_ptr) {
   gpu_window(input_ptr, frames, group_indices)
 }
 
-#' Reject any window spec whose kind W2's C++ kernel doesn't implement yet
+#' Is a window spec in W2/W3's lowerable set?
+#'
+#' The non-throwing predicate half of `validate_window_spec_w2()` (below),
+#' factored out so Phase 5 task W3's `mutate()` wiring (`R/mutate.R`,
+#' `mutate_window()`) can check every spec a decomposition plan produces
+#' *before* pushing any AST node -- a window call whose spec isn't lowerable
+#' yet (any `"rank"` spec other than bare `row_number()`, or the entire
+#' `"agg"` family, both W4 work) must fall back to `gpu_fallback()` cleanly,
+#' never surface `validate_window_spec_w2()`'s internal-error text to a
+#' user, and never partially push GPU ops before discovering the need to
+#' fall back (see `scratchpad/phase5_window_design.md` section 1.3's "Never
+#' half-lower").
 #'
 #' See `lower_window()`'s own docs and section 2.2's RANK-spec constraint
 #' ("a rank spec's value col must equal the frame's sole order col"): bare
@@ -374,17 +385,34 @@ lower_window <- function(ast, source_ptr) {
 #' none is needed for a COUNT_ALL scan) -- every other `"rank"` spec
 #' (`row_number(x)`, `min_rank()`, `dense_rank()`, `percent_rank()`,
 #' `cume_dist()`) and the entire `"agg"` family are W4 work.
+#'
+#' @param spec A `window_spec()` structure (`R/window.R`)
+#' @return `TRUE`/`FALSE`
+#' @keywords internal
+window_spec_w3_lowerable <- function(spec) {
+  if (identical(spec$fn, "row_number") && length(spec$order_cols) == 0) {
+    return(TRUE)
+  }
+
+  entry <- ir_call_registry[[spec$fn]]
+  kind <- if (!is.null(entry)) entry$window$kind else NULL
+  identical(kind, "shift") || identical(kind, "scan")
+}
+
+#' Reject any window spec whose kind W2's C++ kernel doesn't implement yet
+#'
+#' See `window_spec_w3_lowerable()`'s docs for the shared predicate this
+#' wraps with user-facing (well, internal-error-facing: see that function's
+#' docs) `stop()` calls.
 #' @keywords internal
 validate_window_spec_w2 <- function(spec) {
+  if (window_spec_w3_lowerable(spec)) {
+    return(invisible(TRUE))
+  }
+
   entry <- ir_call_registry[[spec$fn]]
   kind <- if (!is.null(entry)) entry$window$kind else NULL
 
-  if (identical(spec$fn, "row_number") && length(spec$order_cols) == 0) {
-    return(invisible(TRUE))
-  }
-  if (identical(kind, "shift") || identical(kind, "scan")) {
-    return(invisible(TRUE))
-  }
   if (identical(kind, "rank")) {
     stop("internal: window kind 'rank' (fn = '", spec$fn, "') is not implemented ",
          "until Phase 5 W4 (ranked row_number()/min_rank()/dense_rank()/",

@@ -120,11 +120,44 @@
 #'     yet supported.
 #'   \item Plain column copies (`mutate(y = x)`)
 #'   \item A later dot in the same `mutate()` call referencing an earlier
-#'     dot's output column (`mutate(a = x + y, b = a * 2)`)
+#'     dot's output column (`mutate(a = x + y, b = a * 2)`), INCLUDING one
+#'     that's itself a window function's output (`mutate(a = cumsum(x), b =
+#'     lag(a))`)
 #'   \item The `.data`/`.env` pronouns, and ordinary R symbols (a bare name
 #'     that matches a column resolves to that column; otherwise it's
 #'     evaluated as an environment variable -- "columns shadow the
 #'     environment")
+#'   \item Cumulative and offset window functions, GPU-native for both
+#'     ungrouped and grouped (`group_by()`) tables, arbitrarily nested with
+#'     any of the above (`mutate(y = x - lag(x))`,
+#'     `mutate(z = lag(cumsum(x)))`):
+#'     \itemize{
+#'       \item `row_number()` (bare form only -- sequential position, or
+#'         per-group position under `group_by()`; `row_number(x)`, ranking
+#'         by a value, is not yet supported -- see "Not yet supported" below)
+#'       \item `lag(x, n = 1, default = NA)` / `lead(x, n = 1, default =
+#'         NA)` -- row-order-preserving shift; `order_by=` is not yet
+#'         supported (uses the table's/group's current row order)
+#'       \item `cumsum()`/`cummax()`/`cummin()`/`cumprod()` -- matching R's
+#'         own NA-propagation (`cumsum(c(1, 2, NA, 4))` is `1, 3, NA, NA`:
+#'         once an NA is seen, every later cumulative value in that group is
+#'         NA too)
+#'       \item `cummean()` (`cumsum(x) / row_number()`), `cumall()`/
+#'         `cumany()` (tri-state-encoded `cummin()`/`cummax()`), and
+#'         `consecutive_id()` (single-column only; a run-length group id
+#'         that increments whenever the input value changes, treating
+#'         adjacent `NA`s as unchanged) -- all built from the primitives
+#'         above
+#'     }
+#'     Every one of these is evaluated within each `group_by()` group when
+#'     `.data` is grouped (matching `dplyr`'s own grouped-mutate semantics:
+#'     row order is always preserved in the output, unlike grouped
+#'     `slice()`). A dot combining one of these with an aggregate
+#'     (`mutate(y = x - mean(x))`), a ranking function other than bare
+#'     `row_number()` (`min_rank()`, `dense_rank()`, `percent_rank()`,
+#'     `cume_dist()`, `row_number(x)`), or `ntile()` still falls back to CPU
+#'     evaluation (see "Not yet supported" below) -- planned for a later
+#'     phase.
 #' }
 #'
 #' ## Column replacement behavior
@@ -173,18 +206,23 @@
 #'
 #' ## Not yet supported
 #' \itemize{
-#'   \item Aggregates or window functions inside a mutate expression, WITH
-#'     ONE narrow exception: a dot that is exactly `n()` or `sum(<expr>)`
-#'     (optionally `sum(<expr>, na.rm = TRUE)`) and nothing else -- e.g.
-#'     `mutate(y = n())`, `mutate(total = sum(x))` -- broadcasts that one
-#'     whole-table (or, if `x` is grouped, per-group) aggregate to every
-#'     row (added to support `dplyr::add_tally()`/`add_count()`, see
-#'     `R/count.R`). Anything more elaborate -- combining an aggregate with
-#'     other operations (`mutate(y = x - mean(x))`), `row_number()`, other
-#'     aggregate functions (`mean()`, `min()`, `max()`, ...) -- is still a
-#'     hard error; full grouped-mutate/window-function support is planned
-#'     for a later phase (see `scratchpad/phase1_expression_engine.md`
-#'     section 6)
+#'   \item Aggregate functions (`mean()`, `min()`, `max()`, `sd()`, `var()`,
+#'     `first()`, `last()`, `nth()`) and ranking functions other than bare
+#'     `row_number()` (`row_number(x)`, `min_rank()`, `dense_rank()`,
+#'     `percent_rank()`, `cume_dist()`, and `ntile()`, which desugars into
+#'     both) used inside a mutate expression -- WITH ONE narrow exception: a
+#'     dot that is exactly `n()` or `sum(<expr>)` (optionally `sum(<expr>,
+#'     na.rm = TRUE)`) and nothing else -- e.g. `mutate(y = n())`,
+#'     `mutate(total = sum(x))` -- broadcasts that one whole-table (or, if
+#'     `x` is grouped, per-group) aggregate to every row (added to support
+#'     `dplyr::add_tally()`/`add_count()`, see `R/count.R`). Any OTHER use of
+#'     these functions -- alone (`mutate(r = min_rank(x))`), combined with
+#'     other operations (`mutate(y = x - mean(x))`), or mixed into an
+#'     otherwise-native window expression (`mutate(y = cumsum(x) - mean(x))`)
+#'     -- currently falls back to CPU evaluation (notified per
+#'     `options(cuplyr.fallback = )`, see [cuplyr_fallback_notify()]) rather
+#'     than erroring; GPU-native support for these is planned for a later
+#'     phase (see `scratchpad/phase5_window_design.md`)
 #'   \item String manipulation (concatenation, case conversion, substr,
 #'     regex, ...) -- only string *comparison* is supported
 #'   \item `case_when()`'s/`case_match()`'s `.ptype=`/`.size=`/`.unmatched=`
@@ -192,10 +230,12 @@
 #'     vector-lookup-table interface and `unmatched=`/`ptype=`, and
 #'     `when_all()`'s/`when_any()`'s `size=` -- planned for a later phase
 #' }
-#' An expression shape the IR doesn't recognize is currently a hard error
-#' (unlike `filter()`, which falls back to CPU evaluation for some
-#' unrecognized shapes) -- a CPU fallback for `mutate()` is planned for a
-#' later phase.
+#' An expression shape the IR doesn't recognize at all (no window function,
+#' no aggregate, not one of the arithmetic/comparison/string-comparison
+#' shapes listed above) is a hard error (unlike `filter()`, which falls back
+#' to CPU evaluation for some unrecognized shapes) -- a general CPU fallback
+#' for `mutate()` covering every unrecognized shape (not just window/
+#' aggregate ones) is planned for a later phase.
 #'
 #' ## Performance
 #' GPU arithmetic operations are highly vectorized and can process
@@ -305,6 +345,19 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 
   expressions <- parse_mutate_dots(dots, orig_schema, "mutate")
 
+  # Phase 5, task W3: any dot containing a window-function call (row_number(),
+  # lag()/lead(), cumsum()/cummax()/cummin()/cumprod(), and their R desugars
+  # cummean()/cumall()/cumany()/consecutive_id()) routes the WHOLE mutate()
+  # call through mutate_window() instead of the plain single-ast_mutate path
+  # below -- see that function's own docs and
+  # scratchpad/phase5_window_design.md section 1.3.
+  if (isTRUE(attr(expressions, "has_window"))) {
+    return(mutate_window(
+      .data, dots, expressions, orig_schema, orig_names, orig_groups,
+      .keep, before_quo, after_quo
+    ))
+  }
+
   # One ast_mutate node carries every expression from every dot -- lowered
   # to a single gpu_mutate_expr() call by lower_mutate() (R/lower.R), and a
   # fusion target for fuse_mutates()/toposort_expressions() (R/optimizer.R)
@@ -328,6 +381,185 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   push_op(result, select_node)
 }
 
+# Internal: window-bearing mutate() dispatch (Phase 5, task W3)
+#
+# Called from mutate.tbl_gpu() whenever at least one dot's parsed IR
+# contains a window-function call. Implements
+# scratchpad/phase5_window_design.md section 1.3's AST emission sequence
+# (pre-mutate -> ast_window per stage -> the verb's own node -> trailing
+# select dropping temps), generalized to interleave per BATCH (see
+# window_batches()/plan_mutate_window_batches() below) rather than emitting
+# every stage before a single combined final ast_mutate: a later batch's
+# window-call arguments may reference an EARLIER batch's own dot output by
+# name (e.g. `mutate(a = cumsum(x), b = lag(a))` -- this is exactly what
+# forces "b" into its own batch, per window_batches()'s chunking rule), which
+# requires "a" to already be a REAL materialized column (not just a schema
+# entry) by the time "b"'s own window stage runs -- so each batch's own dots
+# must be materialized via their own ast_mutate node before the NEXT batch's
+# stages are pushed. Section 1.3's pseudocode is the correct picture for the
+# (overwhelmingly common) single-batch case; interleaving generalizes it
+# correctly for the cross-batch case without changing behavior when there is
+# only one batch.
+#
+# Two-pass structure (plan, then emit) is mandatory, not just tidy: emitting
+# AST nodes via push_op() executes immediately in eager mode, so we cannot
+# discover mid-emission that some spec isn't lowerable yet and "undo" partial
+# GPU work -- every spec across every batch must be validated BEFORE any
+# push_op() call (see plan_mutate_window_batches()/window_spec_w3_lowerable(),
+# R/lower.R). This is the "detect at plan time... never half-lower"
+# requirement from the design doc.
+#
+# @param .data The original tbl_gpu (BEFORE this mutate() call)
+# @param dots The original (already rlang::enquos()'d) dots -- needed
+#   verbatim for the CPU fallback path, which re-runs the real
+#   dplyr::mutate() call
+# @param expressions parse_mutate_dots()'s result: one make_mutate_expr()
+#   struct per dot, built from the RAW (window-containing) per-dot IR,
+#   parsed against `orig_schema` with the usual left-to-right dot-visibility
+#   schema threading. Used here only as the source of per-dot raw IR (via
+#   `$ir`) -- and, unchanged, handed straight to mutate_keep_select_node()
+#   for `.keep`/`.before`/`.after` accounting, exactly as the non-window
+#   path does: `$output_col`/`$input_cols` (dot output names / the USER's
+#   own referenced columns, e.g. "x" for `cumsum(x)`) are identical whether
+#   or not the dot happens to contain a window call, so no separate
+#   accounting is needed for `.keep="used"` to correctly count "x" as used
+#   even though the actual GPU computation reads a `..win*..` temp column,
+#   never "x" directly, once decomposed
+# @param orig_schema,orig_names,orig_groups `.data`'s schema/names/groups
+#   before this call
+# @param keep,before_quo,after_quo As in mutate.tbl_gpu()
+# @return A new tbl_gpu
+# @keywords internal
+mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, orig_groups,
+                           keep, before_quo, after_quo) {
+  exprs_raw <- stats::setNames(
+    lapply(expressions, `[[`, "ir"),
+    vapply(expressions, `[[`, character(1), "output_col")
+  )
+
+  plan <- tryCatch(
+    plan_mutate_window_batches(exprs_raw, orig_schema),
+    error = function(e) NULL
+  )
+
+  all_lowerable <- !is.null(plan) &&
+    all(vapply(plan$all_specs, window_spec_w3_lowerable, logical(1)))
+
+  if (!all_lowerable) {
+    return(mutate_window_fallback(.data, dots, keep, before_quo, after_quo))
+  }
+
+  result <- .data
+  for (batch_plan in plan$batch_plans) {
+    for (stage in batch_plan$stages) {
+      if (length(stage$pre) > 0) {
+        result <- push_op(result, ast_mutate(input_node(result), stage$pre))
+      }
+      result <- push_op(result, ast_window(input_node(result), stage$specs, orig_groups))
+    }
+    result <- push_op(result, ast_mutate(input_node(result), batch_plan$expressions))
+  }
+
+  select_node <- mutate_keep_select_node(
+    result, orig_names, orig_groups, expressions, keep, before_quo, after_quo
+  )
+  if (is.null(select_node)) {
+    return(result)
+  }
+
+  push_op(result, select_node)
+}
+
+# Internal: pure planning pass for mutate_window() -- no push_op()/GPU work
+#
+# Splits `exprs` into window_batches() and, for each batch in order, drives
+# decompose_window_group() (R/window.R) to a fixed point, then builds that
+# batch's OWN final expressions (make_mutate_expr() per dot, from the
+# batch's window-free "post" IR) threading the schema across the batch's
+# dots exactly as mutate()'s own non-window loop does (parse_mutate_dots()/
+# update_schema_for_expr()) -- so a later dot in the SAME batch that plainly
+# references an earlier dot's output (no window call of its own, e.g.
+# `mutate(a = cumsum(x), c = a * 2)`) resolves correctly.
+#
+# `..win<k>..`/`..winarg<k>..` temp name counters (`win_n`/`winarg_n`) are
+# threaded across batches (not reset per batch) so names stay sequential
+# and collision-free across the whole plan, mirroring plan_window_stages()'s
+# own single-call threading.
+#
+# @param exprs A named list of per-dot RAW (window-containing) IR, in
+#   verb-call order (see window_batches()'s own docs for the naming
+#   requirement)
+# @param schema `.data`'s schema before any dot of this mutate() call
+# @return `list(batch_plans, all_specs)`: `batch_plans` is a list (one per
+#   batch, in order) of `list(stages = <window_spec()-bearing stage list,
+#   from decompose_window_group()>, expressions = <list of
+#   make_mutate_expr() structs, one per dot in this batch>)`; `all_specs` is
+#   the flat list of every window_spec() produced across every stage of
+#   every batch, for window_spec_w3_lowerable() validation
+# @keywords internal
+plan_mutate_window_batches <- function(exprs, schema) {
+  batches <- window_batches(exprs)
+
+  schema_cursor <- schema
+  win_n <- 0L
+  winarg_n <- 0L
+  batch_plans <- vector("list", length(batches))
+  all_specs <- list()
+
+  for (bi in seq_along(batches)) {
+    batch_idx <- batches[[bi]]
+    batch_exprs <- exprs[batch_idx]
+
+    decomposed <- decompose_window_group(batch_exprs, schema_cursor, win_n, winarg_n)
+    win_n <- decomposed$win_n
+    winarg_n <- decomposed$winarg_n
+
+    for (stage in decomposed$stages) {
+      all_specs <- c(all_specs, stage$specs)
+    }
+
+    batch_schema <- decomposed$schema
+    batch_expressions <- vector("list", length(batch_idx))
+    for (k in seq_along(batch_idx)) {
+      nm <- names(exprs)[batch_idx[k]]
+      step <- make_mutate_expr(nm, decomposed$post[[k]], batch_schema)
+      batch_expressions[[k]] <- step
+      batch_schema <- update_schema_for_expr(batch_schema, step)
+    }
+
+    batch_plans[[bi]] <- list(stages = decomposed$stages, expressions = batch_expressions)
+    schema_cursor <- batch_schema
+  }
+
+  list(batch_plans = batch_plans, all_specs = all_specs)
+}
+
+# Internal: CPU fallback for a window-bearing mutate() call whose plan isn't
+# (yet) fully lowerable -- e.g. any dot using mean()/sum()/n()/min()/max()/
+# sd()/var()/first()/last()/nth() (the "agg" family) or a ranked function
+# (min_rank()/dense_rank()/percent_rank()/cume_dist()/row_number(x)) (the
+# rest of the "rank" family), both W4 work; or ntile(), which desugars into
+# both an agg-kind and a rank-kind spec. Mirrors the `.by=` fallback branch
+# in mutate.tbl_gpu() (same rlang::inject()-of-the-original-dots shape) --
+# `.by` is always NULL here (mutate.tbl_gpu() already returned earlier if it
+# weren't), so it's simply omitted from the re-injected call, matching
+# dplyr::mutate()'s own default.
+#
+# @param .data The original tbl_gpu
+# @param dots The original (already rlang::enquos()'d) dots
+# @param keep,before_quo,after_quo As in mutate.tbl_gpu()
+# @return A new tbl_gpu (via gpu_fallback(), which also emits the
+#   cuplyr_fallback_notify() notification)
+# @keywords internal
+mutate_window_fallback <- function(.data, dots, keep, before_quo, after_quo) {
+  gpu_fallback("mutate", .data, function(tbl) {
+    rlang::inject(dplyr::mutate(
+      tbl, !!!dots, .keep = keep,
+      .before = !!before_quo, .after = !!after_quo
+    ))
+  })
+}
+
 # Parse mutate()/transmute()'s `...` dots into a list of mutate expression
 # structures (see make_mutate_expr(), R/ast.R). Shared by both verbs: they
 # differ only in what they do with the finished `expressions` list
@@ -347,12 +579,22 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 #   real `dplyr::transmute()` (verified empirically: dplyr never warns for
 #   an unnamed transmute dot, not even a bare column reference, which is
 #   transmute's single most common idiom, e.g. `transmute(df, a = x + 1, y)`)
-# @return A list of expression structures, one per dot
+# @return A list of expression structures, one per dot. Carries an extra
+#   `"has_window"` attribute (Phase 5, task W3): `TRUE` iff any dot's parsed
+#   IR contains a window-function call anywhere (`ir_has_window()`) --
+#   `mutate.tbl_gpu()` reads this to decide whether to route the whole call
+#   through `mutate_window()` instead of pushing `expressions` straight into
+#   a single `ast_mutate()` node (which would later hit `ir_bind()`'s window
+#   guard at lowering time). `transmute.tbl_gpu()` ignores the attribute --
+#   window-function support inside `transmute()` is not yet wired (W3 scope
+#   is `mutate()` only, per `scratchpad/phase5_window_design.md` section 8's
+#   W3 row).
 # @keywords internal
 parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE) {
   dots <- if (warn_unnamed) auto_name_dots(dots, verb) else name_dots_silently(dots)
 
   expressions <- list()
+  has_window <- FALSE
 
   for (i in seq_along(dots)) {
     new_name <- names(dots)[i]
@@ -367,11 +609,18 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE) {
         "(&, |, !, xor), is.na(), between(), near(), %in%, sqrt()/log()/log2()/",
         "log10()/exp()/abs()/floor()/ceiling()/sin()/cos()/tan()/round(), ",
         "if_else()/case_when()/coalesce()/na_if()/case_match()/recode_values()/",
-        "replace_values()/replace_when()/when_all()/when_any() (some named ",
-        "arguments of these are not yet supported -- see ?mutate.tbl_gpu).\n",
+        "replace_values()/replace_when()/when_all()/when_any(), or cumulative/",
+        "offset window functions (row_number(), lag()/lead(), cumsum()/cummax()/",
+        "cummin()/cumprod()/cummean()/cumall()/cumany(), consecutive_id()) ",
+        "(some named arguments of these are not yet supported -- see ",
+        "?mutate.tbl_gpu).\n",
         "Expression: ", rlang::quo_text(expr),
         call. = FALSE
       )
+    }
+
+    if (ir_has_window(ir)) {
+      has_window <- TRUE
     }
 
     step <- make_mutate_expr(new_name, ir, schema)
@@ -381,6 +630,7 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE) {
     schema <- update_schema_for_expr(schema, step)
   }
 
+  attr(expressions, "has_window") <- has_window
   expressions
 }
 

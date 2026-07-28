@@ -302,6 +302,65 @@ ir_extract_windows <- function(ir, schema, state) {
 }
 
 # -----------------------------------------------------------------------------
+# window_batches() -- the multi-dot chunking split, extracted for reuse
+# (section 1.2)
+# -----------------------------------------------------------------------------
+
+#' Split a named list of per-dot expressions into window-decomposition batches
+#'
+#' Pure index-partitioning: implements section 1.2's chunking rule in
+#' isolation from [plan_window_stages()]'s own stage-building loop, so a
+#' verb's own AST-emission wiring (`R/mutate.R`'s `mutate_window()`, and the
+#' analogous `R/filter.R`/`R/slice.R` wiring from W5/W6/W7 onward) can drive
+#' [decompose_window_group()] batch-by-batch itself -- interleaving each
+#' batch's own materializing verb node between batches, which
+#' [plan_window_stages()]'s single flat call cannot do (see that function's
+#' docs: it folds each batch's dot outputs into its *own* running schema
+#' bookkeeping only, it never emits or knows about AST nodes) -- while
+#' [plan_window_stages()] keeps using this exact same split for its own
+#' (non-interleaved, single-verb-node-per-call) callers, e.g.
+#' `test-window-plan.R`'s hand-built-AST-free assertions.
+#'
+#' Dots are processed in order and batched together UNLESS a later dot's
+#' window-call arguments reference an earlier dot's OWN output column name
+#' (from the *current* batch) -- see [window_arg_cols()].
+#'
+#' @param exprs A *named* list of IR nodes, one per dot, in verb-call order
+#'   (see [plan_window_stages()]'s own `exprs` parameter docs for the naming
+#'   requirement -- this function assumes it, it does not itself validate)
+#' @return A list of integer vectors, each a contiguous run of 1-based
+#'   indices into `exprs` forming one batch, in order; `list()` if `exprs`
+#'   is empty
+#' @keywords internal
+window_batches <- function(exprs) {
+  n <- length(exprs)
+  if (n == 0) {
+    return(list())
+  }
+  out_names <- names(exprs)
+
+  batches <- list()
+  i <- 1L
+  while (i <= n) {
+    group_end <- i
+    group_names <- out_names[i]
+    while (group_end < n) {
+      next_window_cols <- window_arg_cols(exprs[[group_end + 1L]])
+      if (any(next_window_cols %in% group_names)) {
+        break
+      }
+      group_end <- group_end + 1L
+      group_names <- c(group_names, out_names[group_end])
+    }
+
+    batches[[length(batches) + 1L]] <- i:group_end
+    i <- group_end + 1L
+  }
+
+  batches
+}
+
+# -----------------------------------------------------------------------------
 # plan_window_stages() -- the multi-pass driver + multi-dot chunking
 # (section 1.2)
 # -----------------------------------------------------------------------------
@@ -439,35 +498,20 @@ plan_window_stages <- function(exprs, schema, group_cols = character()) {
   win_n <- 0L
   winarg_n <- 0L
 
-  i <- 1L
-  while (i <= n) {
-    # Grow the current batch: start with dot i alone, then keep including
-    # subsequent dots as long as none of THEIR window-call arguments
-    # reference an output name produced by a dot already in this batch.
-    group_end <- i
-    group_names <- out_names[i]
-    while (group_end < n) {
-      next_window_cols <- window_arg_cols(exprs[[group_end + 1L]])
-      if (any(next_window_cols %in% group_names)) {
-        break
-      }
-      group_end <- group_end + 1L
-      group_names <- c(group_names, out_names[group_end])
-    }
-
-    group_exprs <- exprs[i:group_end]
+  for (batch_idx in window_batches(exprs)) {
+    group_exprs <- exprs[batch_idx]
     decomposed <- decompose_window_group(group_exprs, running_schema, win_n, winarg_n)
     win_n <- decomposed$win_n
     winarg_n <- decomposed$winarg_n
 
     stages <- c(stages, decomposed$stages)
     for (k in seq_along(group_exprs)) {
-      post[[i + k - 1L]] <- decomposed$post[[k]]
+      post[[batch_idx[k]]] <- decomposed$post[[k]]
     }
 
     running_schema <- decomposed$schema
     for (k in seq_along(group_exprs)) {
-      nm <- out_names[i + k - 1L]
+      nm <- out_names[batch_idx[k]]
       out_type <- ir_infer_type(decomposed$post[[k]], running_schema)
       # update_schema_for_expr() (R/mutate.R) replaces-in-place when `nm`
       # already exists (a dot redefining an existing column) instead of
@@ -476,8 +520,6 @@ plan_window_stages <- function(exprs, schema, group_cols = character()) {
       # would produce.
       running_schema <- update_schema_for_expr(running_schema, list(output_col = nm, output_type = out_type))
     }
-
-    i <- group_end + 1L
   }
 
   list(stages = stages, post = post, schema = running_schema, group_cols = group_cols)

@@ -143,11 +143,42 @@ for \code{when_all()}) rather than propagating it -- e.g.
 yet supported.
 \item Plain column copies (\code{mutate(y = x)})
 \item A later dot in the same \code{mutate()} call referencing an earlier
-dot's output column (\code{mutate(a = x + y, b = a * 2)})
+dot's output column (\code{mutate(a = x + y, b = a * 2)}), INCLUDING one
+that's itself a window function's output (\code{mutate(a = cumsum(x), b = lag(a))})
 \item The \code{.data}/\code{.env} pronouns, and ordinary R symbols (a bare name
 that matches a column resolves to that column; otherwise it's
 evaluated as an environment variable -- "columns shadow the
 environment")
+\item Cumulative and offset window functions, GPU-native for both
+ungrouped and grouped (\code{group_by()}) tables, arbitrarily nested with
+any of the above (\code{mutate(y = x - lag(x))},
+\code{mutate(z = lag(cumsum(x)))}):
+\itemize{
+\item \code{row_number()} (bare form only -- sequential position, or
+per-group position under \code{group_by()}; \code{row_number(x)}, ranking
+by a value, is not yet supported -- see "Not yet supported" below)
+\item \code{lag(x, n = 1, default = NA)} / \code{lead(x, n = 1, default = NA)} -- row-order-preserving shift; \verb{order_by=} is not yet
+supported (uses the table's/group's current row order)
+\item \code{cumsum()}/\code{cummax()}/\code{cummin()}/\code{cumprod()} -- matching R's
+own NA-propagation (\code{cumsum(c(1, 2, NA, 4))} is \verb{1, 3, NA, NA}:
+once an NA is seen, every later cumulative value in that group is
+NA too)
+\item \code{cummean()} (\code{cumsum(x) / row_number()}), \code{cumall()}/
+\code{cumany()} (tri-state-encoded \code{cummin()}/\code{cummax()}), and
+\code{consecutive_id()} (single-column only; a run-length group id
+that increments whenever the input value changes, treating
+adjacent \code{NA}s as unchanged) -- all built from the primitives
+above
+}
+Every one of these is evaluated within each \code{group_by()} group when
+\code{.data} is grouped (matching \code{dplyr}'s own grouped-mutate semantics:
+row order is always preserved in the output, unlike grouped
+\code{slice()}). A dot combining one of these with an aggregate
+(\code{mutate(y = x - mean(x))}), a ranking function other than bare
+\code{row_number()} (\code{min_rank()}, \code{dense_rank()}, \code{percent_rank()},
+\code{cume_dist()}, \code{row_number(x)}), or \code{ntile()} still falls back to CPU
+evaluation (see "Not yet supported" below) -- planned for a later
+phase.
 }
 }
 
@@ -202,18 +233,22 @@ literal (\code{NA_real_}, \code{NA_integer_}, ...) always keeps its own type.
 \subsection{Not yet supported}{
 
 \itemize{
-\item Aggregates or window functions inside a mutate expression, WITH
-ONE narrow exception: a dot that is exactly \code{n()} or \verb{sum(<expr>)}
-(optionally \verb{sum(<expr>, na.rm = TRUE)}) and nothing else -- e.g.
-\code{mutate(y = n())}, \code{mutate(total = sum(x))} -- broadcasts that one
-whole-table (or, if \code{x} is grouped, per-group) aggregate to every
-row (added to support \code{dplyr::add_tally()}/\code{add_count()}, see
-\code{R/count.R}). Anything more elaborate -- combining an aggregate with
-other operations (\code{mutate(y = x - mean(x))}), \code{row_number()}, other
-aggregate functions (\code{mean()}, \code{min()}, \code{max()}, ...) -- is still a
-hard error; full grouped-mutate/window-function support is planned
-for a later phase (see \code{scratchpad/phase1_expression_engine.md}
-section 6)
+\item Aggregate functions (\code{mean()}, \code{min()}, \code{max()}, \code{sd()}, \code{var()},
+\code{first()}, \code{last()}, \code{nth()}) and ranking functions other than bare
+\code{row_number()} (\code{row_number(x)}, \code{min_rank()}, \code{dense_rank()},
+\code{percent_rank()}, \code{cume_dist()}, and \code{ntile()}, which desugars into
+both) used inside a mutate expression -- WITH ONE narrow exception: a
+dot that is exactly \code{n()} or \verb{sum(<expr>)} (optionally \verb{sum(<expr>, na.rm = TRUE)}) and nothing else -- e.g. \code{mutate(y = n())},
+\code{mutate(total = sum(x))} -- broadcasts that one whole-table (or, if
+\code{x} is grouped, per-group) aggregate to every row (added to support
+\code{dplyr::add_tally()}/\code{add_count()}, see \code{R/count.R}). Any OTHER use of
+these functions -- alone (\code{mutate(r = min_rank(x))}), combined with
+other operations (\code{mutate(y = x - mean(x))}), or mixed into an
+otherwise-native window expression (\code{mutate(y = cumsum(x) - mean(x))})
+-- currently falls back to CPU evaluation (notified per
+\code{options(cuplyr.fallback = )}, see \code{\link[=cuplyr_fallback_notify]{cuplyr_fallback_notify()}}) rather
+than erroring; GPU-native support for these is planned for a later
+phase (see \code{scratchpad/phase5_window_design.md})
 \item String manipulation (concatenation, case conversion, substr,
 regex, ...) -- only string \emph{comparison} is supported
 \item \code{case_when()}'s/\code{case_match()}'s \verb{.ptype=}/\verb{.size=}/\verb{.unmatched=}
@@ -221,10 +256,12 @@ arguments, \code{recode_values()}'s/\code{replace_values()}'s \verb{from=}/\verb
 vector-lookup-table interface and \verb{unmatched=}/\verb{ptype=}, and
 \code{when_all()}'s/\code{when_any()}'s \verb{size=} -- planned for a later phase
 }
-An expression shape the IR doesn't recognize is currently a hard error
-(unlike \code{filter()}, which falls back to CPU evaluation for some
-unrecognized shapes) -- a CPU fallback for \code{mutate()} is planned for a
-later phase.
+An expression shape the IR doesn't recognize at all (no window function,
+no aggregate, not one of the arithmetic/comparison/string-comparison
+shapes listed above) is a hard error (unlike \code{filter()}, which falls back
+to CPU evaluation for some unrecognized shapes) -- a general CPU fallback
+for \code{mutate()} covering every unrecognized shape (not just window/
+aggregate ones) is planned for a later phase.
 }
 
 \subsection{Performance}{

@@ -7,14 +7,8 @@
 validate_window_spec_w2(spec)
 }
 \description{
-See \code{lower_window()}'s own docs and section 2.2's RANK-spec constraint
-("a rank spec's value col must equal the frame's sole order col"): bare
-\code{row_number()} (no value column at all, i.e. \code{R/window.R}'s
-\code{extract_one_window_call()} only sets \code{order_cols} for a \code{"rank"}-kind
-spec that HAS a value column) is the one \code{"rank"}-kind spec that
-trivially satisfies this (it has no order col to compare against, and
-none is needed for a COUNT_ALL scan) -- every other \code{"rank"} spec
-(\code{row_number(x)}, \code{min_rank()}, \code{dense_rank()}, \code{percent_rank()},
-\code{cume_dist()}) and the entire \code{"agg"} family are W4 work.
+See \code{window_spec_w3_lowerable()}'s docs for the shared predicate this
+wraps with user-facing (well, internal-error-facing: see that function's
+docs) \code{stop()} calls.
 }
 \keyword{internal}
