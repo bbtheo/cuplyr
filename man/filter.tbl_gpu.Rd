@@ -68,11 +68,42 @@ instead of \code{&} (e.g. \code{filter(when_any(x > 10, y < 0))})
 that matches a column resolves to that column; otherwise it's
 evaluated as an environment variable -- "columns shadow the
 environment")
+\item Window/aggregate functions (Phase 5, task W5), usable anywhere
+inside a predicate, including combined with plain column
+comparisons in the same dot (\code{filter(x > mean(x) & y < 5)}):
+\code{row_number()}/\code{row_number(x)}, \code{min_rank()}/\code{dense_rank()}/
+\code{percent_rank()}/\code{cume_dist()}, \code{lag()}/\code{lead()},
+\code{cumsum()}/\code{cummax()}/\code{cummin()}/\code{cumprod()}/\code{cummean()}/
+\code{cumall()}/\code{cumany()}/\code{consecutive_id()}, \code{ntile()},
+\code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{n()}/\code{sd()}/\code{var()}/\code{first()}/
+\code{last()}/\code{nth()} -- the same set \code{mutate()} supports (see its own
+docs for exact semantics/argument support), evaluated per \code{group_by()}
+group when \code{.data} is grouped (\verb{.by=} is not yet supported for
+\code{filter()}, a later phase). A grouped filter -- like dplyr's own --
+preserves the ORIGINAL row order in the result, it does not reorder
+into group-key order.
 }
 Comparing a column against a literal of an incompatible type (e.g. a
 numeric column against a character literal) errors immediately, naming
 the column and its type, rather than silently falling back or producing
 a raw GPU-side type error.
+}
+
+\subsection{Multi-dot semantics with window/aggregate predicates}{
+
+Multiple dots (or multiple \code{&}-joined predicates within one dot) are
+always combined with AND, and -- confirmed empirically against real
+dplyr, since this is easy to get wrong -- every dot's predicate is
+evaluated against the SAME, ORIGINAL (pre-\code{filter()}) data, never
+against a progressively-narrowed intermediate result. Concretely,
+\code{filter(x > 0, cumsum(x) < 10)} computes \code{cumsum(x)} over every row of
+the original table, then ANDs that mask with \code{x > 0} -- it does NOT
+filter to \code{x > 0} first and then compute \code{cumsum()} only over the
+surviving rows (which would generally give a different, smaller
+cumulative sum and therefore a different result). \code{cuplyr} reproduces
+this exactly: every window-bearing dot's temp columns are computed
+against the table as it stood when \code{filter()} was called, before any
+dot's predicate (window-derived or plain) has removed a single row.
 }
 
 \subsection{NA semantics}{
@@ -108,11 +139,8 @@ identically to dplyr in every case above.
 \subsection{Not yet supported}{
 
 \itemize{
-\item Aggregates or window functions inside a filter predicate (e.g.
-\code{filter(x > mean(x))}, \code{filter(row_number() == 1)}) -- planned for a
-later phase (window functions need group-aware evaluation that
-\code{compute_column()} cannot do; see \code{scratchpad/phase1_expression_engine.md}
-section 6)
+\item \verb{.by=} on-the-fly grouping combined with a window/aggregate
+predicate (a later phase; use \code{group_by()} first instead)
 \item Arbitrary R functions with no cuDF equivalent -- these fall back
 to CPU evaluation, see below
 }

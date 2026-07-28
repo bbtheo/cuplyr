@@ -56,11 +56,40 @@
 #'     that matches a column resolves to that column; otherwise it's
 #'     evaluated as an environment variable -- "columns shadow the
 #'     environment")
+#'   \item Window/aggregate functions (Phase 5, task W5), usable anywhere
+#'     inside a predicate, including combined with plain column
+#'     comparisons in the same dot (`filter(x > mean(x) & y < 5)`):
+#'     `row_number()`/`row_number(x)`, `min_rank()`/`dense_rank()`/
+#'     `percent_rank()`/`cume_dist()`, `lag()`/`lead()`,
+#'     `cumsum()`/`cummax()`/`cummin()`/`cumprod()`/`cummean()`/
+#'     `cumall()`/`cumany()`/`consecutive_id()`, `ntile()`,
+#'     `mean()`/`sum()`/`min()`/`max()`/`n()`/`sd()`/`var()`/`first()`/
+#'     `last()`/`nth()` -- the same set `mutate()` supports (see its own
+#'     docs for exact semantics/argument support), evaluated per `group_by()`
+#'     group when `.data` is grouped (`.by=` is not yet supported for
+#'     `filter()`, a later phase). A grouped filter -- like dplyr's own --
+#'     preserves the ORIGINAL row order in the result, it does not reorder
+#'     into group-key order.
 #' }
 #' Comparing a column against a literal of an incompatible type (e.g. a
 #' numeric column against a character literal) errors immediately, naming
 #' the column and its type, rather than silently falling back or producing
 #' a raw GPU-side type error.
+#'
+#' ## Multi-dot semantics with window/aggregate predicates
+#' Multiple dots (or multiple `&`-joined predicates within one dot) are
+#' always combined with AND, and -- confirmed empirically against real
+#' dplyr, since this is easy to get wrong -- every dot's predicate is
+#' evaluated against the SAME, ORIGINAL (pre-`filter()`) data, never
+#' against a progressively-narrowed intermediate result. Concretely,
+#' `filter(x > 0, cumsum(x) < 10)` computes `cumsum(x)` over every row of
+#' the original table, then ANDs that mask with `x > 0` -- it does NOT
+#' filter to `x > 0` first and then compute `cumsum()` only over the
+#' surviving rows (which would generally give a different, smaller
+#' cumulative sum and therefore a different result). `cuplyr` reproduces
+#' this exactly: every window-bearing dot's temp columns are computed
+#' against the table as it stood when `filter()` was called, before any
+#' dot's predicate (window-derived or plain) has removed a single row.
 #'
 #' ## NA semantics
 #' `filter()` keeps a row iff its combined predicate is non-missing *and*
@@ -92,11 +121,8 @@
 #'
 #' ## Not yet supported
 #' \itemize{
-#'   \item Aggregates or window functions inside a filter predicate (e.g.
-#'     `filter(x > mean(x))`, `filter(row_number() == 1)`) -- planned for a
-#'     later phase (window functions need group-aware evaluation that
-#'     `compute_column()` cannot do; see `scratchpad/phase1_expression_engine.md`
-#'     section 6)
+#'   \item `.by=` on-the-fly grouping combined with a window/aggregate
+#'     predicate (a later phase; use `group_by()` first instead)
 #'   \item Arbitrary R functions with no cuDF equivalent -- these fall back
 #'     to CPU evaluation, see below
 #' }
@@ -167,10 +193,93 @@ filter.tbl_gpu <- function(.data, ..., .preserve = FALSE) {
 
   if (length(dots) == 0) return(.data)
 
-  # Schema is stable across this whole call: filter() never adds/removes
-  # columns, so a single current_schema() snapshot is valid for every dot,
-  # even across an intervening eval-mask fallback materialization.
+  # Schema is stable across this whole call for every PLAIN dot: filter()
+  # never adds/removes real columns. The one exception is Phase 5's
+  # window-predicate handling directly below: when at least one dot's IR
+  # contains a window-function call, the schema is temporarily extended
+  # with `..win*..`/`..winarg*..` temp columns for the remainder of this
+  # call; a trailing ast_select drops them again before returning, so the
+  # table's real, user-visible schema is unaffected either way.
+  orig_data <- .data
   schema <- current_schema(.data)
+  orig_names <- schema$names
+  verb_groups <- .data$groups
+
+  # First pass: parse every dot up front (no push_op()/GPU work yet) so we
+  # know, before touching `.data` at all, whether any dot needs the window
+  # path below. Doing this classification BEFORE the per-dot loop's
+  # ir_is_const() check (further down) matters, not just for staging: a
+  # bare window call like `n()` has zero column ARGUMENTS of its own
+  # (ir_cols() only walks `$args`), so `ir_is_const(ir_parse_quo(quo(n() >
+  # 2)))` would itself read TRUE -- without routing window calls through
+  # this dedicated path first, `filter(n() > 2)` fell into the
+  # constant-expression branch instead (eval_tidy()-ing `n() > 2` with no
+  # table in scope, which either errors or silently misbehaves) rather than
+  # being planned as a real window predicate. This was the crash this task
+  # fixes (see the regression test): checking ir_has_window() here, before
+  # any const-folding logic ever runs, routes it correctly instead.
+  parsed <- vector("list", length(dots))
+  window_idx <- integer()
+
+  for (i in seq_along(dots)) {
+    ir <- parse_filter_ir(dots[[i]], schema)
+    # `parsed[i] <- list(ir)`, NOT `parsed[[i]] <- ir`: the latter, when
+    # `ir` is NULL (an opaque expression the IR doesn't understand -- a
+    # perfectly ordinary, common case, see the opaque-dot branch below),
+    # *deletes* that list element instead of storing NULL in it (R's
+    # `x[[i]] <- NULL` list-element-removal special case), silently
+    # shrinking `parsed` below `length(dots)` and desyncing every
+    # subsequent index -- caught by the crash-regression/opaque-dot tests.
+    parsed[i] <- list(ir)
+    if (!is.null(ir) && ir_has_window(ir)) {
+      window_idx <- c(window_idx, i)
+    }
+  }
+
+  # Phase 5, task W5: at least one dot's predicate contains a window call
+  # (mean(x), n(), row_number(), cumsum(x), lag(x), ...). dplyr's multi-dot
+  # semantics (verified empirically -- see this file's roxygen "Multi-dot
+  # semantics" section): every dot's predicate is evaluated against the
+  # SAME, ORIGINAL (pre-filter()) data, then ANDed together -- never
+  # sequential/progressive narrowing, where a later dot's window aggregate
+  # would "see" an earlier dot's already-filtered rows. We reproduce this by
+  # planning and materializing EVERY window dot's temp columns up front,
+  # against `.data` exactly as it stood at function entry -- before any
+  # predicate (plain or window-derived) has removed a single row -- and
+  # only afterward building/pushing ONE combined ast_filter node folding in
+  # every dot's (possibly rewritten) predicate, in original dot order.
+  if (length(window_idx) > 0) {
+    window_exprs <- stats::setNames(
+      parsed[window_idx],
+      paste0("..filterwin", seq_along(window_idx), "..")
+    )
+
+    plan <- filter_plan_window(window_exprs, schema, verb_groups)
+
+    if (is.null(plan)) {
+      # The plan failed outright, or produced a window spec gpu_window()
+      # can't lower (window_spec_lowerable(), R/lower.R -- unreachable for
+      # any window kind currently in the registry, kept here defensively
+      # for a future kind). "Never half-lower" (design doc section 1.3):
+      # nothing has been pushed onto `.data` yet at this point, so falling
+      # back to CPU evaluation of the WHOLE call, from the pristine
+      # original table and dots, is safe.
+      return(filter_window_fallback(orig_data, dots))
+    }
+
+    for (stage in plan$stages) {
+      if (length(stage$pre) > 0) {
+        .data <- push_op(.data, ast_mutate(input_node(.data), stage$pre))
+      }
+      .data <- push_op(.data, ast_window(input_node(.data), stage$specs, verb_groups))
+    }
+
+    for (k in seq_along(window_idx)) {
+      parsed[window_idx[k]] <- plan$post[k]
+    }
+    schema <- plan$schema
+  }
+
   predicates <- list()
 
   flush_predicates <- function() {
@@ -180,8 +289,9 @@ filter.tbl_gpu <- function(.data, ..., .preserve = FALSE) {
     }
   }
 
-  for (quo in dots) {
-    ir <- parse_filter_ir(quo, schema)
+  for (i in seq_along(dots)) {
+    quo <- dots[[i]]
+    ir <- parsed[[i]]
 
     if (is.null(ir)) {
       # Opaque expression (the IR doesn't understand this shape): flush any
@@ -236,7 +346,88 @@ filter.tbl_gpu <- function(.data, ..., .preserve = FALSE) {
 
   flush_predicates()
 
+  if (length(window_idx) > 0) {
+    # Drop every `..win*../..winarg*..` temp column introduced by the
+    # window-planning block above, restoring the table's real,
+    # user-visible schema (section 1.3's "trailing select" step).
+    .data <- push_op(.data, ast_select(input_node(.data), orig_names))
+  }
+
   .data
+}
+
+# Internal: plan + validate the window stages for filter()'s window-bearing
+# dots (Phase 5, task W5).
+#
+# A thin wrapper around plan_window_stages() (R/window.R) -- the exact same
+# planning machinery mutate_window()/plan_mutate_window_batches() (R/
+# mutate.R) drives -- that additionally validates every produced spec is
+# lowerable (window_spec_lowerable(), R/lower.R), mirroring mutate_window()'s
+# own two-pass "plan then validate, only emit if everything checks out"
+# shape: `filter.tbl_gpu()` must never push a single AST node before it
+# knows the WHOLE plan can be lowered (never half-lower).
+#
+# Unlike mutate()'s multi-dot chunking (window_batches()'s "does a later
+# dot's window-call argument reference an earlier dot's OWN output column"
+# rule), filter() dots never define a named output column for another dot
+# to reference -- each dot is an independent boolean predicate -- so every
+# window-bearing dot here is always planned jointly, in one batch (sharing
+# CSE across dots, e.g. two dots both calling `mean(x)` still produce a
+# single temp column). `exprs`' names are purely internal bookkeeping
+# plan_window_stages() requires (never surfaced as a real column, since the
+# trailing ast_select in filter.tbl_gpu() always restores the pre-window
+# column set) -- they exist only so plan_window_stages()'s own chunking
+# logic has something to compare against, which never actually splits
+# anything here for exactly the reason above.
+#
+# @param exprs A *named* list of per-dot window-bearing IR nodes (only the
+#   dots identified by `window_idx` in filter.tbl_gpu(), not every dot)
+# @param schema `.data`'s schema before this filter() call
+# @param group_cols Character vector, `.data$groups` (the `.by=` variant is
+#   Phase 5 task W6, not handled here)
+# @return `plan_window_stages()`'s result list, or `NULL` if planning
+#   errored or produced an unlowerable spec
+# @keywords internal
+filter_plan_window <- function(exprs, schema, group_cols) {
+  plan <- tryCatch(plan_window_stages(exprs, schema, group_cols), error = function(e) NULL)
+  if (is.null(plan)) {
+    return(NULL)
+  }
+
+  all_specs <- unlist(lapply(plan$stages, `[[`, "specs"), recursive = FALSE)
+  if (length(all_specs) > 0 && !all(vapply(all_specs, window_spec_lowerable, logical(1)))) {
+    return(NULL)
+  }
+
+  plan
+}
+
+# Internal: whole-call CPU fallback for a window-bearing filter() call whose
+# plan isn't (yet) fully lowerable (Phase 5, task W5).
+#
+# Mirrors mutate_window_fallback() (R/mutate.R): as of Phase 5 task W4,
+# every window kind has C++ support (window_spec_lowerable()), so this is
+# only reachable for a genuinely new, not-yet-implemented window kind added
+# by some FUTURE phase -- there is currently no dplyr syntax that reaches
+# it. Unlike filter_eval_mask() (which evaluates a single quosure with NO
+# data mask, and so can never work for a window call referencing real table
+# columns), this re-runs the real dplyr::filter() call, with every original
+# dot, on the CPU via gpu_fallback() -- the only correct way to evaluate a
+# window/aggregate predicate that cuplyr can't lower natively.
+#
+# @param .data The ORIGINAL tbl_gpu (BEFORE this filter() call -- nothing
+#   has been pushed onto it yet, see the "never half-lower" comment at the
+#   call site)
+# @param dots The original (already rlang::enquos()'d) dots, every one of
+#   them (not just the window-bearing ones), so the re-run dplyr::filter()
+#   call reproduces the exact original semantics
+# @return A new tbl_gpu (via gpu_fallback(), which also emits the
+#   cuplyr_fallback_notify() notification)
+# @keywords internal
+filter_window_fallback <- function(.data, dots) {
+  gpu_fallback("filter", .data, function(tbl) {
+    rlang::inject(dplyr::filter(tbl, !!!dots))
+  })
 }
 
 # ir_parse_quo() throws (rather than returning NULL) when a constant-folded
