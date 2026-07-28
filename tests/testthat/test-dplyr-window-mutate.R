@@ -408,6 +408,47 @@ test_that("mean()/sum()/min()/max() propagate NA per group (na.rm = FALSE defaul
   expect_same_as_dplyr_lazy(df, pipeline)
 })
 
+test_that("sum(x, na.rm = TRUE) excludes NA per group, matching dplyr (Phase 5, task W9)", {
+  # sum()'s ordinary registry entry only accepts the bare 1-arg form; the
+  # 2-arg `sum(x, na.rm = TRUE)` shape is parsed by ir_parse_sum_call()
+  # (R/ir.R), which desugars `x` to `coalesce(x, 0)` before the window sum
+  # -- found while deleting the narrow grouped_aggregate_mutate() path
+  # (Phase 5 task W9), which real, unmodified dplyr::add_tally(wt = )
+  # depends on (dplyr:::tally_n() unconditionally emits
+  # `base::sum(wt, na.rm = TRUE)`) -- see test-dplyr-count.R's own
+  # "add_count(wt = ) with NA in the weight column" test for the
+  # user-facing regression this was written to catch.
+  skip_if_no_gpu()
+  df <- data.frame(g = c("a", "a", "a", "b", "b"), x = c(1, 2, NA, 4, 5))
+  pipeline <- function(d) {
+    d |> dplyr::group_by(g) |> dplyr::mutate(s = sum(x, na.rm = TRUE))
+  }
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_equal(result$gpu$s[result$gpu$g == "a"], rep(3, 3))
+  expect_same_as_dplyr_lazy(df, pipeline)
+
+  ungrouped_pipeline <- function(d) dplyr::mutate(d, s = sum(x, na.rm = TRUE))
+  expect_same_as_dplyr(df, ungrouped_pipeline)
+  expect_same_as_dplyr_lazy(df, ungrouped_pipeline)
+})
+
+test_that("sum(x, na.rm = FALSE) is a no-op, matching dplyr's own default", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c("a", "a", "a"), x = c(1, 2, NA))
+  pipeline <- function(d) d |> dplyr::group_by(g) |> dplyr::mutate(s = sum(x, na.rm = FALSE))
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_true(all(is.na(result$gpu$s)))
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("sum(x, na.rm = TRUE) with all-NA group gives 0, matching dplyr", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c("a", "a", "b"), x = c(NA_real_, NA_real_, 5))
+  pipeline <- function(d) d |> dplyr::group_by(g) |> dplyr::mutate(s = sum(x, na.rm = TRUE))
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
 # =============================================================================
 # sd()/var() -- agg family, incl. single-row-group NA
 # =============================================================================

@@ -11,6 +11,15 @@
 #'   sub-expressions" below).
 #' @param .groups Controls grouping structure of the result. Currently only
 #'   "drop" is supported (default).
+#' @param .by Optional on-the-fly grouping columns (tidyselect), GPU-native
+#'   (Phase 5, task W9). Unlike `mutate()`/`filter()`'s `.by=` (which behave
+#'   exactly like `group_by()`), `summarise(.by=)` has one genuinely
+#'   different rule verified empirically against dplyr 1.2.1: groups are
+#'   emitted in FIRST-APPEARANCE order (the order each distinct `.by`
+#'   combination first appears in `.data`), not sorted group-key order --
+#'   see "`.by` group order" below. The result is always ungrouped (same as
+#'   a `group_by()`-driven `summarise()`). Supplying `.by` when `.data` is
+#'   already grouped (via `group_by()`) is an error, matching dplyr exactly.
 #'
 #' @return A `tbl_gpu` object with one row per group containing the grouping
 #'   columns and computed aggregations.
@@ -48,6 +57,19 @@
 #' If `.data` is not grouped, summarise will compute aggregations over all
 #' rows, returning a single-row table.
 #'
+#' ## `.by` group order
+#' Verified empirically against dplyr 1.2.1: `summarise(.by=)` emits one row
+#' per distinct `.by` combination in the order that combination FIRST
+#' appears in `.data` -- e.g. `summarise(tibble(g = c("b","a","b")), n =
+#' n(), .by = g)` returns `g` in the order `c("b", "a")`, not `c("a", "b")`.
+#' This differs from `group_by(g) |> summarise(...)`, whose group order is
+#' cuDF's own (unspecified, hash-groupby-derived) order. Implemented via a
+#' desugar (`summarise_by_desugar()`): an ungrouped `row_number()` marks
+#' each row's original position, a grouped summarise computes the user's
+#' aggregations plus `min()` of that position per group, and the result is
+#' sorted by that minimum (each group's first-appearance position) before
+#' the helper column is dropped.
+#'
 #' @seealso
 #' \code{\link{group_by.tbl_gpu}} for grouping data,
 #' \code{\link{collect.tbl_gpu}} for retrieving results
@@ -83,7 +105,18 @@
 #'     ) |>
 #'     collect()
 #' }
-summarise.tbl_gpu <- function(.data, ..., .groups = "drop") {
+summarise.tbl_gpu <- function(.data, ..., .groups = "drop", .by = NULL) {
+  by_quo <- rlang::enquo(.by)
+
+  # Phase 5, task W9: `.by=` resolution -- checked up front (before the
+  # zero-dots error just below), matching mutate()/filter()'s own `.by=`
+  # resolution order: resolve_by() (R/execute.R) errors immediately if
+  # `.data` is already grouped, and this must fire even when `...` is empty
+  # (verified empirically: `summarise(group_by(df, g), .by = g)` raises the
+  # grouped-`.data` error, it does NOT reach summarise()'s own "requires at
+  # least one aggregation expression" check first).
+  by_cols <- resolve_by(.data, by_quo, ".by")
+  by_given <- !rlang::quo_is_null(by_quo)
 
   dots <- rlang::enquos(...)
 
@@ -94,6 +127,25 @@ summarise.tbl_gpu <- function(.data, ..., .groups = "drop") {
 
   dots <- auto_name_dots(dots, "summarise")
 
+  if (by_given) {
+    return(summarise_by_desugar(.data, dots, by_cols))
+  }
+
+  summarise_core(.data, dots)
+}
+
+# Internal: the shared aggregation pipeline -- temp-column preprocessing,
+# aggregation parsing, one ast_summarise push -- used both by the ordinary
+# group_by()-or-ungrouped path and by summarise_by_desugar()'s own internal
+# grouped summarise call (with its extra `..summarise_first..` dot already
+# appended).
+#
+# @param .data A tbl_gpu (its own `$groups` drive the aggregation)
+# @param dots Already auto_name_dots()'d aggregation quosures
+# @return A new (ungrouped -- ast_summarise always drops groups, see
+#   propagate_groups(), R/execute.R) tbl_gpu
+# @keywords internal
+summarise_core <- function(.data, dots) {
   # Pre-process: create temporary columns for expressions inside agg functions
   # (e.g. sum(carb == 4)). Per D4, if a temp column is needed and .data is
   # lazy with pending ops, this materializes (compute()) before creating the
@@ -109,6 +161,57 @@ summarise.tbl_gpu <- function(.data, ..., .groups = "drop") {
 
   push_op(working_data, ast_summarise(input_node(working_data), aggregations,
                                       working_data$groups))
+}
+
+# Internal: `.by=` desugar for summarise() (Phase 5, task W9)
+#
+# scratchpad/phase5_window_design.md section 6:
+#   1. mutate(..rowid.. = row_number()) -- an UNGROUPED window call (safe:
+#      resolve_by() already guarantees `.data` itself carries no groups
+#      when `.by=` is supplied, so this is never a grouped row_number()).
+#   2. Group by `by_cols` and run the user's own aggregation dots PLUS one
+#      extra `..first.. = min(..rowid..)` aggregation -- the smallest
+#      original row index surviving in each group is exactly that group's
+#      first-appearance position (every row of a group shares the same
+#      grouped-summarise result, so `min()` over the whole group is safe
+#      even though only one row's rowid "matters").
+#   3. arrange(..first..) orders the one-row-per-group result by that
+#      first-appearance position -- reproducing dplyr's empirically-verified
+#      `.by=` group order (see summarise.tbl_gpu()'s own roxygen).
+#   4. Drop `..first..`. The result is already ungrouped (ast_summarise
+#      always drops groups), matching dplyr's own `.by=` contract.
+#
+# @param .data A tbl_gpu, confirmed ungrouped by resolve_by() before this is
+#   ever called
+# @param dots The already-auto_name_dots()'d aggregation quosures (`...`)
+# @param by_cols Character vector, the resolved `.by=` columns
+# @return A new (ungrouped) tbl_gpu, one row per distinct `by_cols`
+#   combination, in first-appearance order
+# @keywords internal
+summarise_by_desugar <- function(.data, dots, by_cols) {
+  reserved_names <- c(current_schema(.data)$names, names(dots))
+
+  rowid_name <- unique_temp_name("..summarise_rowid..", reserved_names)
+  with_rowid <- dplyr::mutate(.data, !!rowid_name := dplyr::row_number())
+
+  # Set groups directly (equivalent to group_by(by_cols), but avoids a
+  # round trip through the group_by() generic for a purely internal step).
+  grouped <- new_tbl_gpu(
+    ptr = with_rowid$ptr,
+    schema = with_rowid$schema,
+    lazy_ops = with_rowid$lazy_ops,
+    groups = by_cols,
+    exec_mode = with_rowid$exec_mode
+  )
+
+  first_name <- unique_temp_name("..summarise_first..", c(reserved_names, rowid_name))
+  dots[[first_name]] <- rlang::new_quosure(
+    rlang::call2("min", as.name(rowid_name)), rlang::base_env()
+  )
+
+  result <- summarise_core(grouped, dots)
+  result <- dplyr::arrange(result, !!rlang::sym(first_name))
+  dplyr::select(result, -dplyr::all_of(first_name))
 }
 
 #' @rdname summarise.tbl_gpu

@@ -1,5 +1,25 @@
 # cuplyr (development version)
 
+## Window functions, grouped mutate/filter/slice, and `.by=` (Phase 5)
+
+`mutate()`, `filter()`, `slice()`/`slice_head()`/`slice_tail()`/`slice_min()`/`slice_max()`/`slice_sample()`, and `summarise()` all gained GPU-native support for window functions, per-group computation, and on-the-fly (`.by=`) grouping — all lowered through a new expression-decomposition layer (`R/window.R`) and a single new C++ kernel (`src/ops_window.cpp`, `gpu_window()`) shared by every window-bearing call, grouped or not.
+
+* **Window functions in `mutate()`/`filter()`**, arbitrarily nested with ordinary arithmetic/comparisons and with each other (`mutate(y = x - lag(x))`, `mutate(z = lag(cumsum(x)))`, `filter(x > mean(x))`):
+  * `row_number()` / `row_number(x)`, `min_rank()`/`dense_rank()`/`percent_rank()`/`cume_dist()`, `ntile()`.
+  * `lag()`/`lead()` (`n=`, `default=`, `order_by=`).
+  * `cumsum()`/`cummax()`/`cummin()`/`cumprod()`/`cummean()`/`cumall()`/`cumany()`, matching R's own `NA`-propagation (`cumsum(c(1, 2, NA, 4))` is `1, 3, NA, NA`).
+  * `consecutive_id()` (single-column).
+  * `mean()`/`sum()`/`min()`/`max()`/`n()`/`sd()`/`var()` broadcast to every row of their group (or the whole table, ungrouped) — matching R's own `na.rm = FALSE` default (any `NA` in a group makes the *whole* group's result `NA`); `sum(x, na.rm = TRUE)` is also understood, excluding `NA` per group.
+  * `first()`/`last()`/`nth()`, `order_by()`/`with_order()`.
+  * Every one of these is evaluated per `group_by()` group when `.data` is grouped, with `mutate()`'s row order always preserved; a grouped `filter()` predicate is likewise evaluated against every row of the ORIGINAL (pre-filter) group before any row is dropped, and the result preserves original row order (never reordered into group-key order).
+* **`.by=`** on `mutate()`/`filter()`/`summarise()`: on-the-fly grouping without `group_by()`, e.g. `mutate(df, y = mean(x), .by = g)`. Behaves like `group_by(g) |> mutate(...) |> ungroup()` for `mutate()`/`filter()`; `summarise(.by=)` has one genuine difference from `group_by()`-driven `summarise()` — it emits one row per distinct `.by` combination in FIRST-APPEARANCE order (the order each combination first appears in the data), not sorted/hash-groupby order. The result is always ungrouped; supplying `.by=` on an already-`group_by()`-grouped table is an error, matching dplyr's own message exactly.
+* **Grouped `slice()` family** (`slice()`, `slice_head()`/`slice_tail()`, `slice_min()`/`slice_max()` with `with_ties=`/`na_rm=`), both via `group_by()` and `.by=`/`by=`. Grouped output reorders into group order (ascending group-key for `group_by()`, first-appearance order for `by=`/`.by=`); `slice()` itself is native only for a strictly increasing, duplicate-free positive index vector or an all-negative one — anything requiring row duplication or reordering (e.g. `slice(c(3, 1))`) still falls back to CPU evaluation.
+* **`slice_sample()`** (`n=`/`prop=`, `replace=`, ungrouped/grouped/`by=`) is now GPU-native with exact `set.seed()` RNG parity: index generation runs on the CPU (consuming R's RNG stream call-for-call the same way `dplyr::slice_sample()` does internally), the actual row gather runs on the GPU. `weight_by=` still falls back to CPU evaluation.
+* Two real bugs found and fixed along the way:
+  * A rank-family window frame with a *descending* order and `NA`s in the ranked column silently mis-ranked every non-null row (offset by the group's own null count) — `src/ops_window.cpp` now flips null placement with sort direction, matching real dplyr's "`NA`s sort last regardless of direction" rule.
+  * `cuplyr`'s own `arrange(desc(x))` was already found to place `NA`s FIRST where real dplyr places them LAST regardless of direction — a pre-existing, unrelated divergence surfaced by this work; tracked for a Phase 6 fix (see `scratchpad/todo.md`), not fixed here.
+* The narrow `mutate(x, n = n())`/`mutate(x, s = sum(<expr>))` broadcast that only existed to support `add_count()`/`add_tally()` has been removed now that the general window/aggregate machinery covers the same shapes (and richer ones, e.g. `n() + 1`) natively, with no join and no CPU round-trip.
+
 ## Transparent CPU fallback layer (Phase 2)
 
 Every dplyr generic that doesn't yet have a GPU-native `tbl_gpu` method now works anyway, via a transparent CPU fallback: `R/fallback.R`'s `gpu_fallback()` materializes any pending lazy operations, `collect()`s to a tibble (restoring `group_by()` structure from the table's own grouping so grouped semantics apply exactly as on a real `grouped_df`), runs the real dplyr verb on the CPU, and re-uploads the result via `tbl_gpu()` — restoring grouping (read back from the verb's actual result, since some verbs change it), execution mode (a lazy input stays lazy), and factor levels.

@@ -38,10 +38,10 @@ Like \code{\link[=count.tbl_gpu]{count.tbl_gpu()}}, but keeps every row and colu
 the per-group count as a new column (broadcast to every row in the
 group) instead of collapsing to one row per group. Sugar over
 \code{\link[=group_by.tbl_gpu]{group_by.tbl_gpu()}} and a grouped-aggregate \code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}} (which
-computes the per-group count via \code{summarise()} and broadcasts it back
-with a \code{left_join()} on the grouping columns -- see
-\code{grouped_aggregate_mutate()}, R/mutate.R, for the empirical verification
-that this is safe for NA keys and preserves row order).
+natively broadcasts the per-group count/sum to every row via \code{mutate()}'s
+general window/aggregate machinery, Phase 5 -- NA keys are grouped
+together correctly and original row order is preserved, see
+\code{R/window.R}/\code{src/ops_window.cpp}).
 }
 \examples{
 if (has_gpu()) {

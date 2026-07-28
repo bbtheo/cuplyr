@@ -5,9 +5,10 @@
 # is NOT implemented here at all: it's a plain (non-generic) function in
 # dplyr 1.2 that calls tbl_vars()/group_vars()/mutate()/arrange() internally
 # (all generics/functions tbl_gpu already supports, see R/group-by.R's
-# tbl_vars.tbl_gpu() and R/mutate.R's grouped_aggregate_mutate()), so the
-# real `dplyr::add_tally()` works transparently on a tbl_gpu with no
-# tbl_gpu-specific code at all.
+# tbl_vars.tbl_gpu() and mutate()'s general window/aggregate machinery,
+# Phase 5, which natively handles its internal `mutate(x, name := n()-or-
+# sum(wt))` call), so the real `dplyr::add_tally()` works transparently on a
+# tbl_gpu with no tbl_gpu-specific code at all.
 #
 # Semantics verified empirically against dplyr 1.2.1 (see
 # tests/testthat/test-dplyr-count.R and the session notes in
@@ -65,12 +66,15 @@
 #     starts_with() in this position -- group_by()'s `...` is data-masked,
 #     not selecting, so `count(df, starts_with("x"))` errors in real dplyr
 #     too. Not supported here either, for the same reason.)
-#   - add_count()'s per-row broadcast is verified safe via a real join-back
-#     (`grouped_aggregate_mutate()`, R/mutate.R): NA keys match correctly
-#     (the join's null_equality is unconditionally EQUAL, see
-#     src/ops_join.cpp) and original row order is preserved (left_join()
-#     stable-sorts by left_map). See test-dplyr-count.R's dedicated NA-key
-#     tests.
+#   - add_count()'s per-row broadcast goes through mutate()'s general
+#     window/aggregate machinery (Phase 5, R/window.R/src/ops_window.cpp) --
+#     as of Phase 5 task W9, this REPLACED the narrow join-back-based
+#     `grouped_aggregate_mutate()` this used to route through, once the
+#     general window path covered the exact same `n()`/`sum(<expr>)` shape
+#     natively. NA keys are grouped together correctly (cudf's groupby uses
+#     `null_policy::INCLUDE`, see src/ops_groupby.cpp) and original row
+#     order is preserved (the window kernel's scatter-back step,
+#     src/ops_window.cpp). See test-dplyr-count.R's dedicated NA-key tests.
 #   - `.drop` (count()'s factor-levels arg): accepted, ignored -- same
 #     "compatibility only" stance as group_by.tbl_gpu()'s own `.drop`;
 #     factor group fidelity is Phase 11 (see scratchpad/todo.md).
@@ -158,17 +162,31 @@ resolve_agg_name <- function(name, vars) {
 }
 
 # Build the (unevaluated) aggregation call for count()/tally()/add_count():
-# `n()` if no weight column, `sum(<wt-expr>)` otherwise (our own sum()
-# aggregation already excludes NA by default, the exact equivalent of
-# dplyr's `sum(wt, na.rm = TRUE)`; see this file's header comment).
+# `n()` if no weight column, `sum(<wt-expr>)` otherwise.
+#
+# `for_mutate`: `count()`/`tally()` (via `summarise()`, whose own real
+# groupby aggregation always excludes NA unconditionally -- see
+# R/summarise.R's own "NA handling" docs) pass `FALSE` and get the bare
+# `sum(<wt-expr>)` form; `add_count()` (via `mutate()`'s general
+# window/aggregate machinery, Phase 5) needs the NA-excluding behavior
+# spelled out explicitly as `sum(<wt-expr>, na.rm = TRUE)`, since that
+# family's own default is `na.rm = FALSE` (matching R's own `sum()`
+# default -- see `ir_parse_sum_call()`, R/ir.R, for the na.rm=TRUE
+# desugar this exercises) -- both forms are the exact equivalent of
+# dplyr's own `dplyr:::tally_n()`'s unconditional `sum(wt, na.rm = TRUE)`.
 #
 # @param wt_quo A quosure, as returned by rlang::enquo(wt) -- possibly NULL
 #   (rlang::quo_is_null())
-# @return A language object: `quote(n())` or `sum(<wt-expr>)`
+# @param for_mutate Logical, `TRUE` for add_count()'s mutate()-based call
+# @return A language object: `quote(n())`, `sum(<wt-expr>)`, or
+#   `sum(<wt-expr>, na.rm = TRUE)`
 # @keywords internal
-build_count_agg_call <- function(wt_quo) {
+build_count_agg_call <- function(wt_quo, for_mutate = FALSE) {
   if (rlang::quo_is_null(wt_quo)) {
     return(quote(n()))
+  }
+  if (for_mutate) {
+    return(rlang::call2("sum", rlang::quo_get_expr(wt_quo), na.rm = TRUE))
   }
   rlang::call2("sum", rlang::quo_get_expr(wt_quo))
 }
@@ -317,10 +335,10 @@ tally.tbl_gpu <- function(x, wt = NULL, sort = FALSE, name = NULL) {
 #' the per-group count as a new column (broadcast to every row in the
 #' group) instead of collapsing to one row per group. Sugar over
 #' [group_by.tbl_gpu()] and a grouped-aggregate [mutate.tbl_gpu()] (which
-#' computes the per-group count via `summarise()` and broadcasts it back
-#' with a `left_join()` on the grouping columns -- see
-#' `grouped_aggregate_mutate()`, R/mutate.R, for the empirical verification
-#' that this is safe for NA keys and preserves row order).
+#' natively broadcasts the per-group count/sum to every row via `mutate()`'s
+#' general window/aggregate machinery, Phase 5 -- NA keys are grouped
+#' together correctly and original row order is preserved, see
+#' `R/window.R`/`src/ops_window.cpp`).
 #'
 #' @param x A `tbl_gpu` object created by [tbl_gpu()].
 #' @param ... Column names or expressions to group by, as
@@ -374,7 +392,7 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
 
   all_cols <- current_schema(grouped)$names
   agg_name <- resolve_agg_name(name, all_cols)
-  agg_call <- build_count_agg_call(wt_quo)
+  agg_call <- build_count_agg_call(wt_quo, for_mutate = TRUE)
 
   result <- rlang::inject(dplyr::mutate(grouped, !!agg_name := !!agg_call))
 

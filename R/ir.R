@@ -167,6 +167,25 @@ expr_has_column_ref <- function(expr, schema) {
 # recursive step) and an `allow_vector` flag threaded down only to the
 # `%in%` RHS argument position.
 ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
+  # Case 0: a quosure embedded INSIDE the expression tree (as opposed to
+  # the top-level quosure ir_parse_quo() itself unwraps) -- unwrap to its
+  # own expr/env and recurse. This arises whenever a language tree is built
+  # by unquoting an already-captured quosure into another call, e.g.
+  # `rlang::expr(base::sum(!!wt, na.rm = TRUE))` where `wt <-
+  # rlang::enquo(wt_arg)` (exactly what real, unmodified
+  # `dplyr:::tally_n()` does for `add_tally(wt = )`/`add_count(wt = )`'s
+  # internal `mutate()` call, Phase 5 task W9) -- `!!wt` splices the
+  # quosure OBJECT itself into that argument position (a one-sided
+  # formula, `is.call()`-true but with head `` ` ~` ``, not the wrapped
+  # function's own name), not just its bare expression. Ordinary tidy-eval
+  # (`rlang::eval_tidy()`) resolves nested quosures like this
+  # transparently; this walker doesn't use tidy-eval for structural
+  # dispatch (it inspects the raw language tree directly), so it needs this
+  # explicit unwrap instead.
+  if (rlang::is_quosure(expr)) {
+    return(ir_parse_expr(rlang::quo_get_expr(expr), rlang::quo_get_env(expr), schema, allow_vector))
+  }
+
   # Case 1: "(" is transparent.
   if (rlang::is_call(expr, "(") && length(expr) == 2) {
     return(ir_parse_expr(expr[[2]], env, schema, allow_vector))
@@ -289,6 +308,16 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
     }
     if (identical(fn_name, "with_order")) {
       return(ir_parse_with_order_call(expr, env, schema))
+    }
+
+    # Phase 5, task W9: `sum()`'s ordinary registry entry only accepts the
+    # bare 1-arg form (see ir_parse_sum_call()'s own docs for why the 2-arg
+    # `sum(x, na.rm = TRUE)` shape needs real argument-NAME inspection the
+    # generic per-arg registry loop below can't do) -- special-cased here
+    # alongside lag()/lead()/first()/last()/nth()/ntile() above, for the
+    # same reason.
+    if (identical(fn_name, "sum")) {
+      return(ir_parse_sum_call(expr, env, schema))
     }
 
     canonical <- ir_op_alias(fn_name)
@@ -1369,6 +1398,71 @@ ir_parse_ntile <- function(expr, env, schema) {
     ir_lit(value = NULL, type = "INT32", na = TRUE),
     bins
   ))
+}
+
+#' Parse `sum(x)` / `sum(x, na.rm = <literal>)` (Phase 5, task W9)
+#'
+#' `sum()`'s ordinary registry entry (`arity = 1L`, agg-family window kind)
+#' only accepts the bare single-argument form -- the overwhelmingly common
+#' shape, and the one this window-agg family's `na.rm = FALSE` default (see
+#' `src/ops_window.cpp`'s "sticky-NA"-style whole-group-NA-propagation
+#' rule, matching R's own `sum()` default) is built for. But real,
+#' unmodified `dplyr::add_tally(wt = )` (a plain, non-generic dplyr
+#' function we don't control -- `dplyr:::tally_n()`) UNCONDITIONALLY emits
+#' `base::sum(<wt>, na.rm = TRUE)` as its internal `mutate()` dot,
+#' regardless of whether the weight column actually has any NAs -- so this
+#' 2-arg shape must parse too, or `add_tally(wt = )` hard-errors. (This is
+#' the Phase 5 task W9 fix-forward found while deleting
+#' `grouped_aggregate_mutate()`, which used to accept this exact shape via
+#' a real NA-excluding `summarise()`-then-join-back call.)
+#'
+#' `na.rm = TRUE` desugars `x` to `coalesce(x, 0)` before the window `sum`
+#' call: replacing every `NA` with the additive identity is exactly
+#' equivalent to excluding it from the sum (matching what R's own
+#' `sum(x, na.rm = TRUE)` computes), and since the desugared column has no
+#' nulls left at all, the window kernel's whole-group-NA rule never fires
+#' -- so no C++ change is needed. `na.rm = FALSE` (if named explicitly) is
+#' a pure no-op, since propagating NA is already this family's own default.
+#'
+#' A second argument with any other name (or a non-literal-logical value)
+#' doesn't match this shape -- returns `NULL`, same as any other
+#' unsupported call shape (`mutate()` hard-errors on it; `filter()` falls
+#' back to CPU evaluation).
+#'
+#' @keywords internal
+ir_parse_sum_call <- function(expr, env, schema) {
+  args_raw <- as.list(expr)[-1]
+  if (length(args_raw) == 0 || length(args_raw) > 2) {
+    return(NULL)
+  }
+
+  x_ir <- ir_parse_expr(args_raw[[1]], env, schema)
+  if (is.null(x_ir)) {
+    return(NULL)
+  }
+
+  if (length(args_raw) == 1) {
+    return(ir_call("sum", list(x_ir)))
+  }
+
+  arg_names <- names(args_raw)
+  if (is.null(arg_names) || !identical(arg_names, c("", "na.rm"))) {
+    return(NULL)  # only the exact `sum(x, na.rm = <literal>)` shape matches
+  }
+
+  na_rm_val <- tryCatch(
+    rlang::eval_tidy(rlang::new_quosure(args_raw[[2]], env)),
+    error = function(e) NULL
+  )
+  if (!is.logical(na_rm_val) || length(na_rm_val) != 1 || is.na(na_rm_val)) {
+    return(NULL)
+  }
+
+  if (isTRUE(na_rm_val)) {
+    x_ir <- ir_call("coalesce", list(x_ir, ir_lit_from_r(0L)))
+  }
+
+  ir_call("sum", list(x_ir))
 }
 
 # -----------------------------------------------------------------------------

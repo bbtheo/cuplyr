@@ -195,6 +195,131 @@ test_that("filter(.by=) with multi-column tidyselect matches dplyr", {
 })
 
 # =============================================================================
+# summarise(.by=): first-appearance group order (Phase 5, task W9)
+# =============================================================================
+#
+# Unlike mutate()/filter()'s `.by=` (which behave EXACTLY like group_by()),
+# summarise(.by=) emits rows in each group's FIRST-APPEARANCE order in
+# `.data` -- verified empirically against dplyr 1.2.1 (see
+# summarise_by_desugar(), R/summarise.R). No `arrange_by=` is needed in
+# these oracle comparisons (unlike group_by()|>summarise(), whose group
+# order is cuDF's own unspecified hash-groupby order and always needs
+# arrange_by= to compare) -- .by='s order is exactly reproducible.
+
+test_that("summarise(.by=) emits groups in first-appearance order, not sorted key order", {
+  skip_if_no_gpu()
+  # "b" appears before "a" in the data -- group_by()|>summarise() would sort
+  # ("a" before "b"); .by= must NOT.
+  df <- data.frame(g = c("b", "a", "b", "a", "b"), x = c(10, 20, 30, 40, 50))
+
+  pipeline <- function(d) dplyr::summarise(d, s = sum(x), .by = g)
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(result$gpu$g, c("b", "a"))
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("summarise(.by=) with multiple aggregations matches dplyr", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c("b", "a", "b", "a", "b"), x = c(10, 20, 30, 40, 50))
+
+  pipeline <- function(d) {
+    dplyr::summarise(d, m = mean(x), s = sum(x), n = dplyr::n(), .by = g)
+  }
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("summarise(.by=) with multi-column tidyselect matches dplyr, first-appearance order", {
+  skip_if_no_gpu()
+  df <- data.frame(
+    g = c("b", "a", "b", "a"), h = c(1, 2, 1, 2), x = c(10, 20, 30, 40)
+  )
+
+  pipeline <- function(d) dplyr::summarise(d, s = sum(x), .by = c(g, h))
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(result$gpu$g, c("b", "a"))
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("summarise(.by=) result is always ungrouped (group_vars empty)", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c("a", "a", "b", "b"), x = c(1, 2, 3, 4))
+  gdf <- tbl_gpu(df)
+
+  result <- dplyr::summarise(gdf, s = sum(x), .by = g)
+  expect_identical(result$groups, character())
+  expect_identical(dplyr::group_vars(result), character())
+})
+
+test_that("summarise(.by=) on a grouped tbl_gpu errors, matching dplyr's exact message", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c("a", "a", "b", "b"), x = c(1, 2, 3, 4))
+
+  gdf <- dplyr::group_by(tbl_gpu(df), g)
+  odf <- dplyr::group_by(dplyr::as_tibble(df), g)
+
+  oracle_msg <- tryCatch(
+    dplyr::summarise(odf, s = sum(x), .by = g),
+    error = function(e) conditionMessage(e)
+  )
+  expect_match(oracle_msg, "Can't supply `.by` when `.data` is a grouped data frame.", fixed = TRUE)
+
+  expect_error(
+    dplyr::summarise(gdf, s = sum(x), .by = g),
+    "Can't supply `.by` when `.data` is a grouped data frame.",
+    fixed = TRUE
+  )
+})
+
+test_that("summarise(.by=) grouped-error fires even with zero dots", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c("a", "b"), x = c(1, 2))
+  gdf <- dplyr::group_by(tbl_gpu(df), g)
+
+  expect_error(
+    dplyr::summarise(gdf, .by = g),
+    "Can't supply `.by` when `.data` is a grouped data frame.",
+    fixed = TRUE
+  )
+})
+
+test_that("summarise(.by=) with a nonexistent column raises a tidyselect error", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c("a", "b"), x = c(1, 2))
+  gdf <- tbl_gpu(df)
+
+  expect_error(dplyr::summarise(gdf, s = sum(x), .by = zzz), "doesn't exist")
+})
+
+test_that("summarise(.by=) with a computed aggregation sub-expression matches dplyr", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c("b", "a", "b", "a", "b"), x = c(10, 20, 30, 40, 50))
+
+  pipeline <- function(d) dplyr::summarise(d, s = sum(x > 25), .by = g)
+  result <- expect_same_as_dplyr(df, pipeline)
+  expect_identical(result$gpu$g, c("b", "a"))
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("summarise(.by=) never triggers a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  df <- data.frame(g = c("b", "a", "b", "a", "b"), x = c(10, 20, 30, 40, 50))
+  gdf <- tbl_gpu(df)
+
+  expect_no_error(gdf |> dplyr::summarise(s = sum(x), .by = g) |> collect())
+})
+
+test_that("summarise(.by=) on a 0-row table matches dplyr", {
+  skip_if_no_gpu()
+  df <- data.frame(g = character(0), x = numeric(0))
+
+  pipeline <- function(d) dplyr::summarise(d, s = sum(x), .by = g)
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+# =============================================================================
 # .by = NULL (explicit) is identical to omitting .by
 # =============================================================================
 
@@ -214,6 +339,15 @@ test_that("filter(.by = NULL) is identical to omitting .by (whole-table aggregat
   pipeline <- function(d) dplyr::filter(d, x > mean(x), .by = NULL)
   expect_same_as_dplyr(df, pipeline)
   expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("summarise(.by = NULL) is identical to omitting .by (group_by()-driven)", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c("a", "a", "b", "b"), x = c(1, 2, 3, 4))
+
+  pipeline <- function(d) dplyr::group_by(d, g) |> dplyr::summarise(s = sum(x), .by = NULL)
+  expect_same_as_dplyr(df, pipeline, arrange_by = "g")
+  expect_same_as_dplyr_lazy(df, pipeline, arrange_by = "g")
 })
 
 # =============================================================================

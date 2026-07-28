@@ -3,11 +3,11 @@
 #
 # Native implementation: sugar over the existing group_by()/summarise()/
 # mutate()/arrange() machinery -- no new AST node, no new C++ binding (see
-# R/count.R, and grouped_aggregate_mutate()/match_grouped_aggregate_dot() in
-# R/mutate.R for add_count()'s per-row broadcast). `add_tally()` is a plain
-# (non-generic) dplyr function; it needs no tbl_gpu-specific code at all,
-# only R/group-by.R's `tbl_vars.tbl_gpu()` plus the grouped-aggregate
-# mutate() support (see the dedicated tests below).
+# R/count.R; add_count()'s per-row broadcast is mutate()'s general
+# window/aggregate machinery, Phase 5 -- see R/window.R/src/ops_window.cpp).
+# `add_tally()` is a plain (non-generic) dplyr function; it needs no
+# tbl_gpu-specific code at all, only R/group-by.R's `tbl_vars.tbl_gpu()`
+# plus mutate()'s window/aggregate support (see the dedicated tests below).
 #
 # Semantics verified empirically against dplyr 1.2.1 before implementation
 # (see R/count.R's own header comment for the full narrative):
@@ -34,8 +34,13 @@
 #
 # A previously-discovered bug fixed as a side effect while enabling
 # add_count()/add_tally(): mutate()'s "aggregates aren't yet supported"
-# restriction now has one narrow, explicit exception (a single dot that's
-# exactly `n()` or `sum(<expr>)`), see R/mutate.R's `match_grouped_aggregate_dot()`.
+# restriction had one narrow, explicit exception (a single dot that's
+# exactly `n()` or `sum(<expr>)`, `match_grouped_aggregate_dot()`/
+# `grouped_aggregate_mutate()`, R/mutate.R) until Phase 5 task W9 deleted
+# it: `n()`/`sum()` are themselves "agg"-kind window calls, so the general
+# window/aggregate machinery (Phase 5 W1-W4) already covers this exact
+# shape (and any richer one, e.g. `n() + 1`), making the narrow path
+# redundant.
 #
 # Row order caveat (matches the rest of this codebase's own convention,
 # e.g. test-summarise.R): our native groupby's row order is NOT guaranteed
@@ -398,6 +403,18 @@ test_that("add_count() with wt = matches dplyr", {
   expect_same_as_dplyr(df, pipeline, arrange_by = c("g", "s", "x"))
 })
 
+test_that("add_count(wt = ) with NA in the weight column excludes NA, matching dplyr", {
+  # dplyr's own tally_n()/add_tally() is `sum(wt, na.rm = TRUE)` -- verify
+  # add_count()'s per-row broadcast (via mutate()'s general aggregate-window
+  # path, Phase 5 task W9) still excludes NA weights per group, the same way
+  # count(wt=)'s own summarise()-based path already does (see the "count(wt
+  # = ) excludes NA weights" test above).
+  skip_if_no_gpu()
+  df <- tibble::tibble(g = c(1, 1, 2, 2), w = c(1, NA, 3, 4))
+  pipeline <- function(d) dplyr::add_count(d, g, wt = w)
+  expect_same_as_dplyr(df, pipeline, arrange_by = c("g", "w"))
+})
+
 test_that("add_count() restores the ORIGINAL grouping (not the temporary .add'd dots)", {
   skip_if_no_gpu()
   df <- count_df()
@@ -564,9 +581,12 @@ test_that("tbl_nongroup_vars() works transparently via tbl_vars()/group_vars()",
 })
 
 # =============================================================================
-# Narrow grouped-aggregate mutate() support (added to enable add_count()/
-# add_tally(); see match_grouped_aggregate_dot()/grouped_aggregate_mutate(),
-# R/mutate.R)
+# Grouped-aggregate mutate() support (enables add_count()/add_tally()'s
+# internal `mutate(x, name := n()-or-sum(wt))` call) -- originally a narrow
+# join-back-based special case (`match_grouped_aggregate_dot()`/
+# `grouped_aggregate_mutate()`, R/mutate.R), deleted in Phase 5 task W9 once
+# the general window/aggregate machinery (Phase 5 W1-W4) covered the exact
+# same shapes natively, with no join and no CPU round-trip.
 # =============================================================================
 
 test_that("mutate(gdf, name = n()) broadcasts the per-group count, matching dplyr", {
@@ -601,10 +621,9 @@ test_that("mutate(gdf, x = sum(x)) replacing an existing column matches dplyr", 
 test_that("mutate() combining an aggregate with another op is GPU-native (Phase 5, task W4)", {
   # Phase 5, task W3: n()/mean() are window-class registry entries (the
   # "agg" family, see R/lower.R's window_spec_lowerable()), so any dot
-  # using them outside match_grouped_aggregate_dot()'s narrow bare-`n()`-or-
-  # `sum(<expr>)` fast path routed through mutate_window() -- which, at W3
-  # time, still fell back to CPU evaluation for the "agg" family (only the
-  # scan/shift families were GPU-native then). As of Phase 5 task W4, the
+  # using them routed through mutate_window() -- which, at W3 time, still
+  # fell back to CPU evaluation for the "agg" family (only the scan/shift
+  # families were GPU-native then). As of Phase 5 task W4, the
   # "agg" family (mean()/sum()/min()/max()/n()/sd()/var()/first()/last()/
   # nth()) is GPU-native too, so `n() + 1` and `mean(x)` combined with
   # other ops now compute natively, with NO fallback -- flipped from the

@@ -190,6 +190,51 @@ test_that("perf: summarise_grouped_lazy", {
 })
 
 # =============================================================================
+# Window functions (Phase 5) - grouped mutate()
+#
+# Calibration class: "kernel" -- like the other grouped-mutate/summarise
+# benchmarks above, these are compute-heavy (a groupby-scan or groupby-
+# aggregate pass over 1M rows, ~200 rows/group across 20 groups) and
+# transfer-light (result stays the same 1M-row shape as the input, no
+# fan-out like the join benchmarks below). Missing baseline entries for
+# these 3 new ids skip cleanly (see helper-perf.R) until first recorded --
+# added in Phase 5 task W9 per the design doc's perf policy.
+# =============================================================================
+
+test_that("perf: window_scan_grouped_lazy", {
+  skip_if_no_gpu()
+
+  expect_no_perf_regression("window_scan_grouped_lazy", function() {
+    tbl_gpu(perf_big_df, lazy = TRUE) |>
+      dplyr::group_by(grp) |>
+      dplyr::mutate(c = cumsum(x), r = dplyr::row_number()) |>
+      collect()
+  }, calibration = "kernel")
+})
+
+test_that("perf: window_agg_broadcast_lazy", {
+  skip_if_no_gpu()
+
+  expect_no_perf_regression("window_agg_broadcast_lazy", function() {
+    tbl_gpu(perf_big_df, lazy = TRUE) |>
+      dplyr::group_by(id) |>
+      dplyr::mutate(d = x - mean(x)) |>
+      collect()
+  }, calibration = "kernel")
+})
+
+test_that("perf: window_rank_grouped_lazy", {
+  skip_if_no_gpu()
+
+  expect_no_perf_regression("window_rank_grouped_lazy", function() {
+    tbl_gpu(perf_big_df, lazy = TRUE) |>
+      dplyr::group_by(grp) |>
+      dplyr::mutate(r = dplyr::min_rank(x)) |>
+      collect()
+  }, calibration = "kernel")
+})
+
+# =============================================================================
 # left_join()
 #
 # Calibration class: "transfer". perf_big_df's `id` is sampled uniformly

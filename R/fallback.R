@@ -203,12 +203,13 @@ rowwise.tbl_gpu <- function(.data, ...) {
 #
 # Moved to R/count.R (GPU-native, Phase 3 task 5) -- see count.tbl_gpu(),
 # tally.tbl_gpu(), add_count.tbl_gpu() (all sugar over group_by()/
-# summarise()/mutate()/arrange(), no CPU round-trip) and
-# grouped_aggregate_mutate() (R/mutate.R) for add_count()'s join-back
-# broadcast. add_tally() is a plain (non-generic) dplyr function and needs
-# no tbl_gpu method at all: R/group-by.R's tbl_vars.tbl_gpu() plus the
-# grouped-aggregate mutate() support are enough for the real
-# dplyr::add_tally() to work transparently.
+# summarise()/mutate()/arrange(), no CPU round-trip). add_count()'s
+# per-row broadcast is mutate()'s general window/aggregate machinery
+# (Phase 5; the narrow join-back-based grouped_aggregate_mutate() this used
+# to route through was deleted in Phase 5 task W9). add_tally() is a plain
+# (non-generic) dplyr function and needs no tbl_gpu method at all:
+# R/group-by.R's tbl_vars.tbl_gpu() plus mutate()'s window/aggregate
+# support are enough for the real dplyr::add_tally() to work transparently.
 # =============================================================================
 # Two-table verbs: joins without a GPU-native path, set operations, rows_*
 # =============================================================================

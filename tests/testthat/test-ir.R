@@ -1181,3 +1181,81 @@ test_that("ntile(x, 0) (non-positive n) falls back", {
   ir <- ir_parse_quo(quo_in(quote(ntile(x, 0))), schema_xyz)
   expect_null(ir)
 })
+
+# =============================================================================
+# sum(x, na.rm = ) -- Phase 5, task W9 (ir_parse_sum_call())
+# =============================================================================
+
+test_that("sum(x) (1-arg) parses to a bare window call, unchanged", {
+  ir <- ir_parse_quo(quo_in(quote(sum(x))), schema_xyz)
+  expect_equal(ir$op, "sum")
+  expect_equal(ir$args[[1]]$kind, "col")
+  expect_equal(ir$args[[1]]$name, "x")
+})
+
+test_that("sum(x, na.rm = TRUE) desugars x to coalesce(x, 0)", {
+  ir <- ir_parse_quo(quo_in(quote(sum(x, na.rm = TRUE))), schema_xyz)
+  expect_equal(ir$op, "sum")
+  expect_equal(ir$args[[1]]$op, "coalesce")
+  expect_equal(ir$args[[1]]$args[[1]]$name, "x")
+  expect_equal(ir$args[[1]]$args[[2]]$value, 0L)
+})
+
+test_that("sum(x, na.rm = FALSE) is a pure no-op (same as bare sum(x))", {
+  ir <- ir_parse_quo(quo_in(quote(sum(x, na.rm = FALSE))), schema_xyz)
+  expect_equal(ir$op, "sum")
+  expect_equal(ir$args[[1]]$kind, "col")
+  expect_equal(ir$args[[1]]$name, "x")
+})
+
+test_that("sum(x, foo = TRUE) (wrong second-arg name) falls back", {
+  ir <- ir_parse_quo(quo_in(quote(sum(x, foo = TRUE))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("sum(x, na.rm = y > 0) (non-literal-logical na.rm) falls back", {
+  ir <- ir_parse_quo(quo_in(quote(sum(x, na.rm = y > 0))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("sum(x, TRUE) (unnamed second arg) falls back", {
+  ir <- ir_parse_quo(quo_in(quote(sum(x, TRUE))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("sum() (0 args) falls back", {
+  ir <- ir_parse_quo(quo_in(quote(sum())), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("sum(x, na.rm = TRUE, extra = 1) (3 args) falls back", {
+  ir <- ir_parse_quo(quo_in(quote(sum(x, na.rm = TRUE, extra = 1))), schema_xyz)
+  expect_null(ir)
+})
+
+# =============================================================================
+# Quosure embedded inside an expression tree (Phase 5, task W9): arises from
+# `rlang::expr(fn(!!some_quosure))`, exactly what real dplyr:::tally_n()
+# does internally for add_tally(wt=)/add_count(wt=) -- see
+# ir_parse_expr()'s "Case 0" docs.
+# =============================================================================
+
+test_that("a quosure embedded as a call argument is transparently unwrapped", {
+  wt <- rlang::quo(x)
+  embedded_call <- rlang::expr(base::sum(!!wt, na.rm = TRUE))
+  ir <- ir_parse_quo(rlang::new_quosure(embedded_call, rlang::current_env()), schema_xyz)
+  expect_equal(ir$op, "sum")
+  expect_equal(ir$args[[1]]$op, "coalesce")
+  expect_equal(ir$args[[1]]$args[[1]]$name, "x")
+})
+
+test_that("an embedded quosure resolves against its OWN environment, not the outer call's", {
+  local_env <- new.env()
+  local_env$outer_var <- 42
+  wt <- rlang::new_quosure(quote(outer_var), local_env)
+  embedded_call <- rlang::expr(base::sum(!!wt))
+  ir <- ir_parse_quo(rlang::new_quosure(embedded_call, rlang::empty_env()), schema_xyz)
+  expect_equal(ir$op, "sum")
+  expect_equal(ir$args[[1]]$kind, "lit")
+  expect_equal(ir$args[[1]]$value, 42)
+})

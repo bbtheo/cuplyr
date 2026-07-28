@@ -5,9 +5,9 @@
 \alias{summarize.tbl_gpu}
 \title{Summarise groups in a GPU table}
 \usage{
-\method{summarise}{tbl_gpu}(.data, ..., .groups = "drop")
+\method{summarise}{tbl_gpu}(.data, ..., .groups = "drop", .by = NULL)
 
-\method{summarize}{tbl_gpu}(.data, ..., .groups = "drop")
+\method{summarize}{tbl_gpu}(.data, ..., .groups = "drop", .by = NULL)
 }
 \arguments{
 \item{.data}{A grouped \code{tbl_gpu} object created by \code{\link[dplyr:group_by]{group_by()}}.}
@@ -20,6 +20,16 @@ sub-expressions" below).}
 
 \item{.groups}{Controls grouping structure of the result. Currently only
 "drop" is supported (default).}
+
+\item{.by}{Optional on-the-fly grouping columns (tidyselect), GPU-native
+(Phase 5, task W9). Unlike \code{mutate()}/\code{filter()}'s \verb{.by=} (which behave
+exactly like \code{group_by()}), \code{summarise(.by=)} has one genuinely
+different rule verified empirically against dplyr 1.2.1: groups are
+emitted in FIRST-APPEARANCE order (the order each distinct \code{.by}
+combination first appears in \code{.data}), not sorted group-key order --
+see "\code{.by} group order" below. The result is always ungrouped (same as
+a \code{group_by()}-driven \code{summarise()}). Supplying \code{.by} when \code{.data} is
+already grouped (via \code{group_by()}) is an error, matching dplyr exactly.}
 }
 \value{
 A \code{tbl_gpu} object with one row per group containing the grouping
@@ -67,6 +77,20 @@ the default behavior of R's base aggregation functions.
 
 If \code{.data} is not grouped, summarise will compute aggregations over all
 rows, returning a single-row table.
+}
+
+\subsection{\code{.by} group order}{
+
+Verified empirically against dplyr 1.2.1: \code{summarise(.by=)} emits one row
+per distinct \code{.by} combination in the order that combination FIRST
+appears in \code{.data} -- e.g. \code{summarise(tibble(g = c("b","a","b")), n = n(), .by = g)} returns \code{g} in the order \code{c("b", "a")}, not \code{c("a", "b")}.
+This differs from \code{group_by(g) |> summarise(...)}, whose group order is
+cuDF's own (unspecified, hash-groupby-derived) order. Implemented via a
+desugar (\code{summarise_by_desugar()}): an ungrouped \code{row_number()} marks
+each row's original position, a grouped summarise computes the user's
+aggregations plus \code{min()} of that position per group, and the result is
+sorted by that minimum (each group's first-appearance position) before
+the helper column is dropped.
 }
 }
 \examples{
