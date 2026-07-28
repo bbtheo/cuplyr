@@ -377,9 +377,20 @@ infer_mutate_output_type <- function(op, input_types, scalar) {
 #' @param input_col Input column name
 #' @param fn Aggregation function name (sum, mean, min, max, n)
 #' @param input_type Input column type
+#' @param na_rm Logical scalar (Phase 6, task 6.1). `FALSE` (the default,
+#'   matching R's own `na.rm = FALSE` default for `mean()`/`sum()`/`min()`/
+#'   `max()`/`sd()`/`var()`) means a group with ANY null input value must
+#'   produce a NULL aggregation result for the WHOLE group -- cudf's own
+#'   groupby MEAN/SUM/MIN/MAX/STD/VARIANCE aggregations always exclude
+#'   nulls, so `gpu_summarise()` (`src/ops_groupby.cpp`) applies an extra
+#'   whole-group-null propagation step when this is `FALSE` and the input
+#'   column actually has nulls (same technique as the window-aggregate
+#'   path, `src/ops_window.cpp`, W4). `TRUE` means "use cudf's native
+#'   null-excluding behavior as-is" -- no extra step. Meaningless for `n()`
+#'   (counts rows regardless of nulls, matching dplyr already).
 #' @return An aggregation list structure
 #' @keywords internal
-make_aggregation <- function(output_col, input_col, fn, input_type = NULL) {
+make_aggregation <- function(output_col, input_col, fn, input_type = NULL, na_rm = FALSE) {
   output_type <- switch(fn,
     "n" = "INT32",
     "sum" = if (!is.null(input_type) && input_type == "INT32") "INT64" else "FLOAT64",
@@ -394,7 +405,8 @@ make_aggregation <- function(output_col, input_col, fn, input_type = NULL) {
     input_col = input_col,
     fn = fn,
     input_type = input_type,
-    output_type = output_type
+    output_type = output_type,
+    na_rm = isTRUE(na_rm)
   )
 }
 

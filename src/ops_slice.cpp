@@ -212,10 +212,11 @@ SEXP gpu_slice_rank(SEXP xptr, int order_col_idx, bool descending, double amount
     // last). cudf's null_order is a *value* convention (AFTER = "null
     // compares as larger than everything", BEFORE = "smaller than
     // everything"), so achieving "last" in both sort directions means
-    // flipping the null_order together with the column order -- the mirror
-    // image of what R/lower.R::lower_arrange() does for plain arrange()
-    // (which wants dplyr's actual "NA first when descending" behavior and
-    // so uses AFTER unconditionally).
+    // flipping the null_order together with the column order -- the same
+    // technique src/ops_arrange.cpp's gpu_arrange() now uses too (Phase 6:
+    // plain arrange(desc(x)) used to place NA FIRST, a real divergence from
+    // dplyr that predated this comment; ops_arrange.cpp's null_order was
+    // fixed to flip with direction the same way this function already did).
     cudf::null_order null_prec = descending ? cudf::null_order::BEFORE : cudf::null_order::AFTER;
 
     cudf::rank_method method = with_ties ? cudf::rank_method::MIN : cudf::rank_method::FIRST;

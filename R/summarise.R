@@ -50,8 +50,15 @@
 #' other unsupported aggregation shape.
 #'
 #' ## NA handling
-#' By default, NA values are excluded from aggregations. This matches
-#' the default behavior of R's base aggregation functions.
+#' `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()` all match R's own
+#' `na.rm = FALSE` default (Phase 6, task 6.1): if a group contains ANY `NA`
+#' in the aggregated column, the WHOLE group's result is `NA` for that
+#' aggregation -- e.g. `summarise(m = mean(x))` is `NA` for a group with even
+#' one `NA` value of `x`, matching real dplyr exactly. Pass `na.rm = TRUE`
+#' explicitly (e.g. `sum(x, na.rm = TRUE)`) to exclude `NA` values instead
+#' (cudf's own native aggregation behavior). `n()` is unaffected by
+#' `na.rm=` (it counts every row regardless of nulls, like dplyr's own
+#' `n()`).
 #'
 #' ## Ungrouped summarise
 #' If `.data` is not grouped, summarise will compute aggregations over all
@@ -146,6 +153,16 @@ summarise.tbl_gpu <- function(.data, ..., .groups = "drop", .by = NULL) {
 #   propagate_groups(), R/execute.R) tbl_gpu
 # @keywords internal
 summarise_core <- function(.data, dots) {
+  # Phase 6, task 6.1 (Fix A): extract and strip any `na.rm = <literal>`
+  # named argument BEFORE temp-column preprocessing -- this must happen
+  # first so a sub-expression call like `sum(sqrt(x), na.rm = TRUE)` is
+  # reduced to the `fn(single_arg)` shape preprocess_agg_expressions() (and
+  # parse_aggregations()'s own regex) already understand, with na.rm
+  # tracked out-of-band per dot instead of embedded in the call shape.
+  extracted <- lapply(dots, extract_na_rm)
+  na_rm_flags <- vapply(extracted, `[[`, logical(1), "na_rm")
+  dots <- lapply(extracted, `[[`, "quo")
+
   # Pre-process: create temporary columns for expressions inside agg functions
   # (e.g. sum(carb == 4)). Per D4, if a temp column is needed and .data is
   # lazy with pending ops, this materializes (compute()) before creating the
@@ -157,10 +174,70 @@ summarise_core <- function(.data, dots) {
   # Parse the aggregation expressions (now with simple column refs), emitting
   # aggregation structs that carry the cudf-accepted function name (fixes
   # lazy sd()/var(), which used to reach C++ as "sd"/"var" and error out).
-  aggregations <- parse_aggregations(current_schema(working_data), processed_dots)
+  aggregations <- parse_aggregations(current_schema(working_data), processed_dots, na_rm_flags)
 
   push_op(working_data, ast_summarise(input_node(working_data), aggregations,
                                       working_data$groups))
+}
+
+# Internal: Extract and strip an `na.rm = <literal>` named argument from a
+# single summarise() aggregation dot (Phase 6, task 6.1, Fix A)
+#
+# Real dplyr's `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()` all default to
+# `na.rm = FALSE` (verified empirically against dplyr 1.2.1: any NA in a
+# group makes the WHOLE group's aggregation result NA). cudf's own groupby
+# aggregations always exclude nulls, so this default requires an extra
+# whole-group-null propagation step in `gpu_summarise()`
+# (`src/ops_groupby.cpp`) -- `na_rm = FALSE` (the R-side default emitted
+# when no `na.rm=` is present) requests that step; `na.rm = TRUE` opts back
+# into cudf's native (NA-excluding) behavior directly, no extra step.
+#
+# Mirrors `ir_parse_sum_call()`'s (R/ir.R) validation style: `na.rm`'s value
+# is resolved via `eval_tidy()` in the dot's own environment (so a bound
+# variable like `na.rm = drop_na` works, not just a literal `TRUE`/`FALSE`
+# token), but unlike `ir_parse_sum_call()` (which returns `NULL` to signal
+# "try a different shape" to its caller, since mutate()/filter() have
+# fallback paths), an unevaluable or non-logical `na.rm` is a hard error
+# here -- summarise()'s aggregation parsing has no CPU fallback (see this
+# file's own module docs).
+#
+# @param quo A quosure, one summarise() dot (post `auto_name_dots()`)
+# @return `list(quo = <possibly rewritten quosure, na.rm stripped>, na_rm =
+#   logical(1))`
+# @keywords internal
+extract_na_rm <- function(quo) {
+  expr <- rlang::quo_get_expr(quo)
+  env <- rlang::quo_get_env(quo)
+
+  if (!is.call(expr)) {
+    return(list(quo = quo, na_rm = FALSE))
+  }
+
+  arg_names <- names(expr)
+  if (is.null(arg_names)) {
+    return(list(quo = quo, na_rm = FALSE))
+  }
+
+  na_rm_pos <- which(arg_names == "na.rm")
+  if (length(na_rm_pos) == 0) {
+    return(list(quo = quo, na_rm = FALSE))
+  }
+  if (length(na_rm_pos) > 1) {
+    stop("Multiple na.rm= arguments in aggregation expression: ",
+         rlang::quo_text(quo), call. = FALSE)
+  }
+
+  na_rm_val <- tryCatch(
+    rlang::eval_tidy(rlang::new_quosure(expr[[na_rm_pos]], env)),
+    error = function(e) NULL
+  )
+  if (!is.logical(na_rm_val) || length(na_rm_val) != 1 || is.na(na_rm_val)) {
+    stop("na.rm= must evaluate to a single TRUE or FALSE in aggregation expression: ",
+         rlang::quo_text(quo), call. = FALSE)
+  }
+
+  stripped_expr <- expr[-na_rm_pos]
+  list(quo = rlang::new_quosure(stripped_expr, env), na_rm = isTRUE(na_rm_val))
 }
 
 # Internal: `.by=` desugar for summarise() (Phase 5, task W9)
@@ -418,9 +495,13 @@ create_temp_column <- function(.data, col_name, ir) {
 #
 # @param schema Current schema (list(names=, types=))
 # @param dots Quosures from summarise(), already temp-column-preprocessed
+# @param na_rm_flags Logical vector, same length/order as `dots` (Phase 6,
+#   task 6.1): each dot's already-extracted `na.rm` value (see
+#   `extract_na_rm()`), `FALSE` when not supplied by the user, matching R's
+#   own default
 # @return List of aggregation structs (see make_aggregation())
 # @keywords internal
-parse_aggregations <- function(schema, dots) {
+parse_aggregations <- function(schema, dots, na_rm_flags = rep(FALSE, length(dots))) {
   # dplyr-facing aggregation function names (order matches the historical
   # error message from parse_agg_expressions()) and their cudf-accepted
   # equivalents (src/ops_groupby.cpp::get_groupby_agg()).
@@ -476,7 +557,8 @@ parse_aggregations <- function(schema, dots) {
     input_type <- schema$types[col_idx]
     cudf_fn <- unname(agg_fn_map[func_name])
 
-    aggregations[[i]] <- make_aggregation(names(dots)[i], col_name, cudf_fn, input_type)
+    aggregations[[i]] <- make_aggregation(names(dots)[i], col_name, cudf_fn, input_type,
+                                          na_rm = isTRUE(na_rm_flags[i]))
   }
 
   aggregations

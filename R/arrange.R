@@ -23,8 +23,10 @@
 #' - Sorting is stable: ties preserve their original relative order
 #'
 #' ## NA handling
-#' - `NA` values are placed last for ascending order
-#' - `NA` values are placed first for descending order
+#' - `NA` values are always placed last, for both ascending order and
+#'   `desc()`/descending order, matching dplyr exactly (verified empirically
+#'   against dplyr 1.2.1; fixed in Phase 6 -- older versions of this package
+#'   placed `NA` first for descending sorts, a divergence from dplyr)
 #'
 #' ## Memory usage
 #' The arrange operation requires approximately 2x the table size in GPU memory:

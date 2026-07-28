@@ -96,14 +96,28 @@
 #     literal original row order when a `by=` column's groups are already
 #     contiguous in the input (the common case, but not the general rule).
 #     Result is always ungrouped, matching `.by=`'s general contract.
-#   - `arrange(desc(x))` in cuplyr, unlike real dplyr 1.2.1 (which sorts NA
-#     last for BOTH directions), currently sorts NA FIRST for descending
-#     order (a pre-existing divergence from real dplyr, outside this task's
-#     scope) -- `slice_grouped_native()` therefore builds its OWN NA-last
-#     sort key for `order_by` (an `is.na()` indicator column as the primary
-#     sort key, ahead of `order_by` itself) rather than relying on a plain
-#     `desc(order_by)` arrange, and does not attempt to fix the general
-#     `arrange()` divergence.
+#   - (Historical note, resolved in Phase 6 task 6.1) `arrange(desc(x))` in
+#     cuplyr used to diverge from real dplyr 1.2.1 (which sorts NA last for
+#     BOTH directions) by sorting NA FIRST for descending order --
+#     `slice_grouped_native()` was written against that buggy behavior and
+#     so builds its OWN NA-last sort key for `order_by` (an `is.na()`
+#     indicator column, `..slice_na..`, as an explicit sort key ahead of
+#     `order_by` itself) rather than relying on a plain `desc(order_by)`
+#     arrange. Phase 6 task 6.1 fixed `gpu_arrange()`
+#     (src/ops_arrange.cpp) to flip `null_order` with direction, so a plain
+#     `arrange(order_col, descending = descending)` now ALSO places NA last
+#     on its own -- making the explicit `..slice_na..` sort key redundant
+#     for ordering purposes (its presence ahead of `order_col` no longer
+#     changes the result: `order_col`'s own null placement already groups
+#     every NA row last, in original relative order, before this key would
+#     even apply). It is deliberately NOT removed from `sort_specs` here:
+#     `..slice_na..` is still independently required (unchanged) to build
+#     `..slice_valid..`/`..slice_nn..` for the `with_ties` rank-boundary
+#     count below, and folding the sort-key removal into this fix would
+#     touch tie-breaking behavior in a hand-built multi-stage desugar with
+#     no oracle coverage isolating that specific change -- lower risk to
+#     leave the now-redundant key in place than to verify its removal is
+#     truly a no-op across every mode/with_ties/na_rm combination.
 
 #' Classify a call's effective grouping for the slice() family
 #'

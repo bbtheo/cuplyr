@@ -138,9 +138,15 @@ test_that("arrange() places NA last for ascending sort", {
   expect_true(is.na(result$x[4]))
 })
 
-test_that("arrange() places NA first for descending sort", {
+test_that("arrange() places NA last for descending sort", {
   skip_if_no_gpu()
 
+  # Phase 6 task 6.1 (Fix B): this test used to pin the WRONG behavior as
+  # intended -- cuplyr's gpu_arrange() (src/ops_arrange.cpp) used to place
+  # NA FIRST for descending sorts, diverging from real dplyr 1.2.1, which
+  # places NA LAST regardless of sort direction (verified empirically; see
+  # test-dplyr-arrange.R for the full oracle-test coverage of this fix).
+  # The old pin (`is.na(result$x[1])`) has been corrected to match dplyr.
   df <- data.frame(x = c(2, NA, 1, 3))
   gpu_df <- tbl_gpu(df)
 
@@ -148,8 +154,8 @@ test_that("arrange() places NA first for descending sort", {
     dplyr::arrange(dplyr::desc(x)) |>
     collect()
 
-  expect_true(is.na(result$x[1]))
-  expect_equal(result$x[2:4], c(3, 2, 1))
+  expect_equal(result$x[1:3], c(3, 2, 1))
+  expect_true(is.na(result$x[4]))
 })
 
 test_that("arrange() handles all-NA column", {

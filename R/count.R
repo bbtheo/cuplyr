@@ -162,33 +162,33 @@ resolve_agg_name <- function(name, vars) {
 }
 
 # Build the (unevaluated) aggregation call for count()/tally()/add_count():
-# `n()` if no weight column, `sum(<wt-expr>)` otherwise.
+# `n()` if no weight column, `sum(<wt-expr>, na.rm = TRUE)` otherwise.
 #
-# `for_mutate`: `count()`/`tally()` (via `summarise()`, whose own real
-# groupby aggregation always excludes NA unconditionally -- see
-# R/summarise.R's own "NA handling" docs) pass `FALSE` and get the bare
-# `sum(<wt-expr>)` form; `add_count()` (via `mutate()`'s general
-# window/aggregate machinery, Phase 5) needs the NA-excluding behavior
-# spelled out explicitly as `sum(<wt-expr>, na.rm = TRUE)`, since that
-# family's own default is `na.rm = FALSE` (matching R's own `sum()`
-# default -- see `ir_parse_sum_call()`, R/ir.R, for the na.rm=TRUE
-# desugar this exercises) -- both forms are the exact equivalent of
-# dplyr's own `dplyr:::tally_n()`'s unconditional `sum(wt, na.rm = TRUE)`.
+# `for_mutate` is now a no-op kept only for call-site clarity/back-compat:
+# BOTH `count()`/`tally()` (via `summarise()`) and `add_count()` (via
+# `mutate()`'s window/aggregate machinery) need na.rm=TRUE spelled out
+# explicitly -- this is the exact equivalent of dplyr's own
+# `dplyr:::tally_n()`'s unconditional `sum(wt, na.rm = TRUE)`. Before Phase
+# 6 task 6.1 (Fix A), `summarise()`'s own real groupby aggregation always
+# excluded NA unconditionally (a bug -- it didn't honor R's na.rm = FALSE
+# default at all), so a bare `sum(<wt-expr>)` happened to already behave
+# like na.rm=TRUE for the `count()`/`tally()` call site; now that
+# `summarise()` honors na.rm=FALSE by default (matching R and dplyr), that
+# implicit behavior is gone, and na.rm=TRUE must be explicit here too, same
+# as `add_count()` already required (see `ir_parse_sum_call()`, R/ir.R, for
+# the mutate()-side na.rm=TRUE desugar this exercises there).
 #
 # @param wt_quo A quosure, as returned by rlang::enquo(wt) -- possibly NULL
 #   (rlang::quo_is_null())
-# @param for_mutate Logical, `TRUE` for add_count()'s mutate()-based call
-# @return A language object: `quote(n())`, `sum(<wt-expr>)`, or
-#   `sum(<wt-expr>, na.rm = TRUE)`
+# @param for_mutate Logical, unused (kept for call-site clarity) -- both
+#   branches now build the identical `sum(<wt-expr>, na.rm = TRUE)` call
+# @return A language object: `quote(n())`, or `sum(<wt-expr>, na.rm = TRUE)`
 # @keywords internal
 build_count_agg_call <- function(wt_quo, for_mutate = FALSE) {
   if (rlang::quo_is_null(wt_quo)) {
     return(quote(n()))
   }
-  if (for_mutate) {
-    return(rlang::call2("sum", rlang::quo_get_expr(wt_quo), na.rm = TRUE))
-  }
-  rlang::call2("sum", rlang::quo_get_expr(wt_quo))
+  rlang::call2("sum", rlang::quo_get_expr(wt_quo), na.rm = TRUE)
 }
 
 #' Count observations by group

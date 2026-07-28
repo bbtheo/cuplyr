@@ -1,5 +1,16 @@
 # cuplyr (development version)
 
+## NA-semantics parity fixes: `summarise()` `na.rm=` and `arrange(desc())` NA placement (Phase 6, task 6.1)
+
+Two live correctness divergences from dplyr, both found during Phase 5, are fixed:
+
+* **`summarise()` aggregations now honor R's own `na.rm = FALSE` default.** `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()` previously always used cudf's native NA-excluding behavior regardless of the user's call, silently diverging from dplyr whenever a group contained an `NA` (e.g. `summarise(m = mean(x))` returned the NA-excluded mean instead of `NA`). `summarise()` now propagates `NA` to the WHOLE group's result when any input value is `NA`, matching dplyr exactly (`src/ops_groupby.cpp`'s `gpu_summarise()`, using the same MAX(is_null) + `copy_if_else()` technique the window-aggregate path already used, W4).
+  * `na.rm = TRUE` is now also a supported, parsed argument (e.g. `sum(x, na.rm = TRUE)`, including on IR sub-expressions like `sum(sqrt(x), na.rm = TRUE)`), opting back into cudf's native NA-excluding behavior explicitly.
+  * `n()` is unaffected (it counts rows regardless of nulls, matching dplyr already).
+  * `count()`/`tally()`'s own `wt=` weighted sum (routed through `summarise()`) now passes `na.rm = TRUE` explicitly, since it can no longer rely on `summarise()`'s own (buggy) default to exclude `NA` weights.
+  * Known follow-up gap, not fixed here: `na.rm = TRUE` on a group that is ENTIRELY `NA` returns `NA` for `sum()`/`mean()`/`min()`/`max()`, where base R's own empty-vector reductions give `0`/`NaN`/`Inf`/`-Inf` respectively (cudf's null-excluding aggregation returns `NULL` for a wholly-excluded group) — tracked in `scratchpad/workflow_state.md`'s "Parked / discovered" section, with a pinned regression test (`test-dplyr-summarise.R`) marking the current (divergent) behavior for a future fix to flip.
+* **`arrange(desc(x))` now places `NA` LAST**, matching dplyr exactly (previously placed `NA` FIRST for any descending sort key — a pre-existing divergence found during Phase 5's W7 grouped-slice work, `src/ops_arrange.cpp`'s `gpu_arrange()` flips `null_order` with sort direction now, the same technique already used by the window rank kernel (W7) and `ops_slice.cpp`'s `gpu_slice_rank()`). Applies to every column type (numeric, string, ...) and every position in a multi-key sort, including mixed ascending/descending keys and `.by_group = TRUE`. `test-arrange.R`'s old tests, which had pinned the previous (wrong) behavior as intended, are corrected.
+
 ## Window functions, grouped mutate/filter/slice, and `.by=` (Phase 5)
 
 `mutate()`, `filter()`, `slice()`/`slice_head()`/`slice_tail()`/`slice_min()`/`slice_max()`/`slice_sample()`, and `summarise()` all gained GPU-native support for window functions, per-group computation, and on-the-fly (`.by=`) grouping — all lowered through a new expression-decomposition layer (`R/window.R`) and a single new C++ kernel (`src/ops_window.cpp`, `gpu_window()`) shared by every window-bearing call, grouped or not.
@@ -17,7 +28,7 @@
 * **`slice_sample()`** (`n=`/`prop=`, `replace=`, ungrouped/grouped/`by=`) is now GPU-native with exact `set.seed()` RNG parity: index generation runs on the CPU (consuming R's RNG stream call-for-call the same way `dplyr::slice_sample()` does internally), the actual row gather runs on the GPU. `weight_by=` still falls back to CPU evaluation.
 * Two real bugs found and fixed along the way:
   * A rank-family window frame with a *descending* order and `NA`s in the ranked column silently mis-ranked every non-null row (offset by the group's own null count) — `src/ops_window.cpp` now flips null placement with sort direction, matching real dplyr's "`NA`s sort last regardless of direction" rule.
-  * `cuplyr`'s own `arrange(desc(x))` was already found to place `NA`s FIRST where real dplyr places them LAST regardless of direction — a pre-existing, unrelated divergence surfaced by this work; tracked for a Phase 6 fix (see `scratchpad/todo.md`), not fixed here.
+  * `cuplyr`'s own `arrange(desc(x))` was already found to place `NA`s FIRST where real dplyr places them LAST regardless of direction — a pre-existing, unrelated divergence surfaced by this work; fixed in Phase 6, task 6.1 (see this file's own "NA-semantics parity fixes" section, above).
 * The narrow `mutate(x, n = n())`/`mutate(x, s = sum(<expr>))` broadcast that only existed to support `add_count()`/`add_tally()` has been removed now that the general window/aggregate machinery covers the same shapes (and richer ones, e.g. `n() + 1`) natively, with no join and no CPU round-trip.
 
 ## Transparent CPU fallback layer (Phase 2)

@@ -158,10 +158,16 @@ lower_summarise <- function(ast, source_ptr) {
 
   agg_col_indices <- integer(length(ast$aggregations))
   agg_fns <- character(length(ast$aggregations))
+  # Phase 6, task 6.1 (Fix A): per-aggregation na.rm flag, threaded through
+  # to gpu_summarise() (src/ops_groupby.cpp) so it knows which aggregations
+  # need the extra whole-group-null propagation step (na_rm == FALSE, R's
+  # own default) vs. cudf's native null-excluding behavior (na_rm == TRUE).
+  na_rm_flags <- logical(length(ast$aggregations))
 
   for (i in seq_along(ast$aggregations)) {
     agg <- ast$aggregations[[i]]
     agg_fns[i] <- agg$fn
+    na_rm_flags[i] <- isTRUE(agg$na_rm)
     if (agg$fn == "n") {
       agg_col_indices[i] <- 0L  # n() doesn't need a column
     } else {
@@ -169,7 +175,7 @@ lower_summarise <- function(ast, source_ptr) {
     }
   }
 
-  gpu_summarise(input_ptr, group_indices, agg_col_indices, agg_fns)
+  gpu_summarise(input_ptr, group_indices, agg_col_indices, agg_fns, na_rm_flags)
 }
 
 #' Lower distinct node
