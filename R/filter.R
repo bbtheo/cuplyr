@@ -36,17 +36,22 @@
 #'     `NA`, never `NA` itself) and an empty set (`character(0)`, `c()`,
 #'     etc. -- always FALSE, for every row, including `NA` rows)
 #'   \item `between(x, lo, hi)` (dplyr's definition: `x >= lo & x <= hi`,
-#'     including its `NA` propagation)
+#'     including its `NA` propagation), `near(x, y, tol = )`
+#'     (`abs(x - y) < tol`, matching `dplyr::near()` exactly)
 #'   \item String-column comparisons (`==`/`!=`/`<`/`<=`/`>`/`>=`), against
 #'     a literal or another string column
 #'   \item Column-vs-column comparisons for every operator above
 #'   \item Math on columns inside a predicate (`+ - * / %% %/% ^`, `sqrt`,
 #'     `log`, `abs`, etc. -- the same set `mutate()` supports)
-#'   \item `if_else()`, `case_when()`, `coalesce()`, `na_if()` -- the same
-#'     conditional/vector functions `mutate()` supports (see its own docs
-#'     for the exact type-unification rules), usable anywhere inside a
-#'     predicate, including as the whole predicate itself (e.g.
-#'     `filter(case_when(x > 1 ~ TRUE, .default = FALSE))`)
+#'   \item `if_else()`, `case_when()`, `coalesce()`, `na_if()`,
+#'     `case_match()`, `recode_values()`, `replace_values()`,
+#'     `replace_when()` -- the same conditional/vector functions `mutate()`
+#'     supports (see its own docs for the exact type-unification rules),
+#'     usable anywhere inside a predicate, including as the whole predicate
+#'     itself (e.g. `filter(case_when(x > 1 ~ TRUE, .default = FALSE))`)
+#'   \item `when_any(...)`/`when_all(...)` -- particularly useful inside
+#'     `filter()` to combine several comma-separated conditions with `|`
+#'     instead of `&` (e.g. `filter(when_any(x > 10, y < 0))`)
 #'   \item The `.data`/`.env` pronouns, and ordinary R symbols (a bare name
 #'     that matches a column resolves to that column; otherwise it's
 #'     evaluated as an environment variable -- "columns shadow the

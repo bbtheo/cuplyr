@@ -738,3 +738,136 @@ test_that("na_if() accepts a bare untyped NA for y without error", {
   expect_equal(ir$op, "na_if")
   expect_equal(ir$args[[2]]$type, "FLOAT64")
 })
+
+# -----------------------------------------------------------------------------
+# Phase 4 wave 2: near()/case_match()/recode_values()/replace_values()/
+# replace_when()/when_all()/when_any() -- parse shapes and type inference,
+# pure R (no GPU). See test-dplyr-near.R/test-dplyr-case-match.R/
+# test-dplyr-recode-values.R/test-dplyr-when.R for the GPU oracle-parity
+# coverage of these same ops' runtime values.
+# -----------------------------------------------------------------------------
+
+test_that("near() desugars to abs(x - y) < tol at parse time", {
+  ir <- ir_parse_quo(quo_in(quote(near(x, y))), schema_xyz)
+  expect_equal(ir$op, "<")
+  expect_equal(ir$args[[1]]$op, "abs")
+  expect_equal(ir$args[[1]]$args[[1]]$op, "-")
+  expect_true(ir$args[[2]]$kind == "lit")
+  expect_equal(ir$args[[2]]$value, sqrt(.Machine$double.eps))
+})
+
+test_that("near() with an explicit tol uses it instead of the default", {
+  ir <- ir_parse_quo(quo_in(quote(near(x, y, tol = 0.5))), schema_xyz)
+  expect_equal(ir$args[[2]]$value, 0.5)
+})
+
+test_that("near() rejects the wrong arg count (falls back)", {
+  ir <- ir_parse_quo(quo_in(quote(near(x))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("case_match() desugars to a case_when node with %in% conditions", {
+  ir <- ir_parse_quo(quo_in(quote(case_match(x, c(1, 3) ~ "a", .default = "z"))), schema_xyz)
+  expect_equal(ir$op, "case_when")
+  expect_equal(ir$meta$n_when, 1)
+  expect_equal(ir$args[[1]]$op, "%in%")
+  expect_equal(ir$args[[1]]$args[[1]]$name, "x")
+  expect_equal(ir$args[[1]]$args[[2]]$value, c(1, 3))
+  expect_equal(ir$args[[2]]$value, "a")
+  expect_equal(ir$args[[3]]$value, "z")
+})
+
+test_that("case_match() with a column-referencing LHS is unsupported (falls back)", {
+  ir <- ir_parse_quo(quo_in(quote(case_match(x, y ~ "a"))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("case_match() with an unsupported named arg (.ptype=) falls back", {
+  ir <- ir_parse_quo(quo_in(quote(case_match(x, 1 ~ "a", .ptype = character()))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("case_match() errors at parse time on a STRING LHS against a numeric x", {
+  expect_error(
+    ir_parse_quo(quo_in(quote(case_match(x, "a" ~ 1))), schema_xyz),
+    "case_match"
+  )
+})
+
+test_that("recode_values() desugars identically to case_match(), with default= instead of .default=", {
+  ir <- ir_parse_quo(quo_in(quote(recode_values(x, c(1, 3) ~ "a", default = "z"))), schema_xyz)
+  expect_equal(ir$op, "case_when")
+  expect_equal(ir$args[[2]]$value, "a")
+  expect_equal(ir$args[[3]]$value, "z")
+})
+
+test_that("recode_values() with an unsupported named arg (unmatched=) falls back", {
+  ir <- ir_parse_quo(quo_in(quote(recode_values(x, 1 ~ "a", unmatched = "error"))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("replace_values() desugars to a replace_when node with %in% conditions and x as arg[1]", {
+  ir <- ir_parse_quo(quo_in(quote(replace_values(x, c(1, 3) ~ 0))), schema_xyz)
+  expect_equal(ir$op, "replace_when")
+  expect_equal(ir$args[[1]]$name, "x")
+  expect_equal(ir$args[[2]]$op, "%in%")
+  expect_equal(ir$args[[3]]$value, 0)
+})
+
+test_that("replace_values() output type is always x's own type (type_replace_when)", {
+  schema <- list(names = "i", types = "INT32")
+  ir <- ir_call("replace_when", list(ir_col("i"), ir_call("%in%", list(ir_col("i"), ir_lit_from_r(2))), ir_lit_from_r(99.5)))
+  expect_equal(ir_infer_type(ir, schema), "INT32")
+})
+
+test_that("replace_values() with from=/to= is unsupported this wave (falls back)", {
+  ir <- ir_parse_quo(quo_in(quote(replace_values(x, from = 1, to = 2))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("replace_when() parses boolean-condition clauses with x as arg[1]", {
+  ir <- ir_parse_quo(quo_in(quote(replace_when(x, x > 1 ~ 99))), schema_xyz)
+  expect_equal(ir$op, "replace_when")
+  expect_equal(ir$args[[1]]$name, "x")
+  expect_equal(ir$args[[2]]$op, ">")
+  expect_equal(ir$args[[3]]$value, 99)
+})
+
+test_that("replace_when() errors at parse time on a STRING replacement value against a numeric x", {
+  expect_error(
+    ir_parse_quo(quo_in(quote(replace_when(x, x > 1 ~ "a"))), schema_xyz),
+    "replace_when"
+  )
+})
+
+test_that("when_any()/when_all() desugar to a folded chain of |/&", {
+  ir_any <- ir_parse_quo(quo_in(quote(when_any(x > 1, y > 1, z > 1))), schema_xyz)
+  expect_equal(ir_any$op, "|")
+
+  ir_all <- ir_parse_quo(quo_in(quote(when_all(x > 1, y > 1, z > 1))), schema_xyz)
+  expect_equal(ir_all$op, "&")
+})
+
+test_that("when_any(na_rm = TRUE) wraps each input in coalesce(., FALSE)", {
+  ir <- ir_parse_quo(quo_in(quote(when_any(x > 1, y > 1, na_rm = TRUE))), schema_xyz)
+  expect_equal(ir$op, "|")
+  expect_equal(ir$args[[1]]$op, "coalesce")
+  expect_false(ir$args[[1]]$args[[2]]$value)
+})
+
+test_that("when_all(na_rm = TRUE) wraps each input in coalesce(., TRUE)", {
+  ir <- ir_parse_quo(quo_in(quote(when_all(x > 1, y > 1, na_rm = TRUE))), schema_xyz)
+  expect_equal(ir$op, "&")
+  expect_equal(ir$args[[1]]$op, "coalesce")
+  expect_true(ir$args[[1]]$args[[2]]$value)
+})
+
+test_that("when_any() with zero dots is unsupported this wave (falls back)", {
+  ir <- ir_parse_quo(quo_in(quote(when_any())), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("when_any()'s size= is unsupported this wave (falls back)", {
+  ir <- ir_parse_quo(quo_in(quote(when_any(x > 1, size = 3))), schema_xyz)
+  expect_null(ir)
+})

@@ -60,7 +60,11 @@
 #'   \item Comparisons and logic: `==`, `!=`, `<`, `<=`, `>`, `>=`, `&`,
 #'     `|`, `!`, `xor()` -- these produce a `BOOL8` column, e.g.
 #'     `mutate(is_big = x > 100)`
-#'   \item `is.na()`, `between(x, lo, hi)`, `%in%`
+#'   \item `is.na()`, `between(x, lo, hi)`, `near(x, y, tol = )`
+#'     (`abs(x - y) < tol`, matching `dplyr::near()`'s own definition
+#'     exactly), `%in%` (including a bare `NA` on the right-hand side,
+#'     e.g. `x %in% NA`, matching `NA %in% NA` being `TRUE` in base R --
+#'     not the same as an *empty* set, which is always `FALSE`)
 #'   \item Math functions: `sqrt()`, `log()` (including `log(x, base)`),
 #'     `log2()`, `log10()`, `exp()`, `abs()`, `floor()`, `ceiling()`,
 #'     `sin()`, `cos()`, `tan()`, `round(x)`/`round(x, digits)` (banker's
@@ -83,6 +87,37 @@
 #'   \item `na_if(x, y)` -- `x` with `NA` wherever `x == y`; the output
 #'     always keeps `x`'s own type exactly (unlike `if_else()`/`coalesce()`,
 #'     `y` is never promoted into the result, only compared against)
+#'   \item `case_match(.x, old_values ~ new_value, ..., .default = val)` --
+#'     matches `.x` by VALUE against each clause's (possibly multi-element)
+#'     left-hand side, first match wins; `NA` on a clause's left-hand side
+#'     matches `.x`'s own `NA` elements (base R's `NA %in% NA` is `TRUE`);
+#'     unmatched rows become `.default` (typed `NA` if not supplied), with
+#'     the same value-type unification rule as `case_when()` across every
+#'     `new_value` plus `.default`. Deprecated upstream in dplyr 1.2 in
+#'     favor of `recode_values()`/`replace_values()`, but still supported
+#'     here. `.ptype=` is not yet supported.
+#'   \item `recode_values(x, old_values ~ new_value, ..., default = val)` --
+#'     the non-deprecated equivalent of `case_match()` above (identical
+#'     semantics, `default` instead of `.default`). The `from=`/`to=`
+#'     vector-lookup-table interface and `unmatched=`/`ptype=` are not yet
+#'     supported.
+#'   \item `replace_values(x, old_values ~ new_value, ...)` -- like
+#'     `recode_values()`, but TYPE STABLE: the output always keeps `x`'s own
+#'     type (every `new_value` is cast to it, never unified/promoted), and
+#'     unmatched rows keep their original `x` value (there is no
+#'     `default=`). The `from=`/`to=` interface is not yet supported.
+#'   \item `replace_when(x, cond1 ~ val1, cond2 ~ val2, ...)` -- like
+#'     `case_when()`, but boolean-condition clauses feeding the same
+#'     type-stable-to-`x` / "unmatched rows keep `x`" behavior as
+#'     `replace_values()` (a `NA` condition is treated as no match, same as
+#'     `case_when()`)
+#'   \item `when_all(..., na_rm = FALSE)` / `when_any(..., na_rm = FALSE)`
+#'     -- elementwise `&`/`|` generalized to any number of logical inputs
+#'     (`when_any(x, y, z)` is `x | y | z`). `na_rm = TRUE` treats `NA` as
+#'     each operator's identity element (`FALSE` for `when_any()`, `TRUE`
+#'     for `when_all()`) rather than propagating it -- e.g.
+#'     `when_any(NA, NA, na_rm = TRUE)` is `FALSE`, not `NA`. `size=` is not
+#'     yet supported.
 #'   \item Plain column copies (`mutate(y = x)`)
 #'   \item A later dot in the same `mutate()` call referencing an earlier
 #'     dot's output column (`mutate(a = x + y, b = a * 2)`)
@@ -152,8 +187,10 @@
 #'     section 6)
 #'   \item String manipulation (concatenation, case conversion, substr,
 #'     regex, ...) -- only string *comparison* is supported
-#'   \item `case_when()`'s `.ptype=`/`.size=`/`.unmatched=` arguments, and
-#'     `case_match()` -- planned for a later phase
+#'   \item `case_when()`'s/`case_match()`'s `.ptype=`/`.size=`/`.unmatched=`
+#'     arguments, `recode_values()`'s/`replace_values()`'s `from=`/`to=`
+#'     vector-lookup-table interface and `unmatched=`/`ptype=`, and
+#'     `when_all()`'s/`when_any()`'s `size=` -- planned for a later phase
 #' }
 #' An expression shape the IR doesn't recognize is currently a hard error
 #' (unlike `filter()`, which falls back to CPU evaluation for some
@@ -327,9 +364,11 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE) {
       stop(
         verb, "() only supports column copies, arithmetic (+, -, *, /, ^, ",
         "%%, %/%), comparisons (==, !=, <, <=, >, >=), logical operators ",
-        "(&, |, !, xor), is.na(), between(), %in%, sqrt()/log()/log2()/",
+        "(&, |, !, xor), is.na(), between(), near(), %in%, sqrt()/log()/log2()/",
         "log10()/exp()/abs()/floor()/ceiling()/sin()/cos()/tan()/round(), ",
-        "and if_else()/case_when()/coalesce()/na_if().\n",
+        "if_else()/case_when()/coalesce()/na_if()/case_match()/recode_values()/",
+        "replace_values()/replace_when()/when_all()/when_any() (some named ",
+        "arguments of these are not yet supported -- see ?mutate.tbl_gpu).\n",
         "Expression: ", rlang::quo_text(expr),
         call. = FALSE
       )

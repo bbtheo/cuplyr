@@ -394,6 +394,13 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
         return resolve_static_type(args[0], ctx);
     }
 
+    // replace_when(x, cond1 ~ val1, ...): type-stable to x (arg 0) -- see
+    // R/ir.R's type_replace_when()/ir_parse_replace_when()/
+    // ir_parse_replace_values() (Phase 4 wave 2).
+    if (op == "replace_when") {
+        return resolve_static_type(args[0], ctx);
+    }
+
     if (op == "+" || op == "-" || op == "*" || op == "%%" || op == "%/%") {
         // Approximates infer_mutate_output_type() for the purpose of typing an
         // intermediate literal only -- the real output_type always comes from R.
@@ -734,10 +741,54 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         // case, so short-circuit before touching `set_node["type"]` at all
         // (T4 finding: this used to reach the NumericVector(NULL) coercion
         // below and throw "Not compatible with requested type").
+        //
+        // A BARE SCALAR NA RHS (`x %in% NA`, i.e. an isolated untyped-NA
+        // literal node -- `ir_lit_from_r()`'s `na = TRUE, value = NULL`
+        // shape) is a DIFFERENT case from the above and must NOT take this
+        // shortcut, even though it also has a NULL `value` field: it is a
+        // genuine one-element set *containing NA*, not an empty set (base
+        // R: `NA %in% NA` is TRUE, `1 %in% NA` is FALSE -- distinct from
+        // `1 %in% c()` also being FALSE but for an entirely different
+        // reason). Phase 4 wave 2 finding: this was a real pre-existing
+        // bug -- every prior caller of `%in%` always supplied a length>1 or
+        // explicitly-typed RHS, so a bare scalar `NA` RHS never actually
+        // reached this handler before `case_match()`/`replace_values()`'s
+        // `NA ~ value` clauses started desugaring into exactly this shape
+        // (see R/ir.R's `ir_parse_value_match_clauses()`). Handled in the
+        // dedicated branch just below instead of falling into the vector
+        // RHS switch (there is no `value` payload to convert).
+        bool set_is_na_scalar = ir_lit_is_na(set_node);
         SEXP set_value_check = set_node["value"];
-        if (Rf_isNull(set_value_check) || Rf_xlength(set_value_check) == 0) {
+        bool set_is_empty = !set_is_na_scalar &&
+            (Rf_isNull(set_value_check) || Rf_xlength(set_value_check) == 0);
+        if (set_is_empty) {
             cudf::numeric_scalar<bool> false_scalar(false, true);
             return cudf::make_column_from_scalar(false_scalar, x_col.size());
+        }
+
+        if (set_is_na_scalar) {
+            // A one-element haystack containing only NA: x's own NA rows
+            // match (TRUE), every non-NA row does not (FALSE) -- no vector
+            // conversion helper applies since there's no `value` to read,
+            // so build the length-1 null column directly via build_scalar().
+            // A DECLARED type (e.g. `NA_character_`, na=TRUE but type
+            // non-NULL) is honored; a genuinely untyped bare NA adopts x's
+            // own type directly (rather than the generic FLOAT64 default
+            // used elsewhere) so the cast below is always a same-type
+            // no-op -- a lossy cross-type cast attempt (e.g. FLOAT64 NA ->
+            // STRING) could otherwise fail outright.
+            SEXP set_type_sexp = set_node["type"];
+            std::string set_type = Rf_isNull(set_type_sexp)
+                ? expr_type_to_str(x_col.type())
+                : Rcpp::as<std::string>(set_type_sexp);
+            auto null_scalar = build_scalar(set_type, R_NilValue, true);
+            auto haystack = cudf::make_column_from_scalar(*null_scalar, 1);
+            if (haystack->type().id() != x_col.type().id()) {
+                haystack = cudf::cast(haystack->view(), x_col.type());
+            }
+            auto contains_result = cudf::contains(haystack->view(), x_col);
+            cudf::numeric_scalar<bool> fill_value(true, true);  // haystack contains NA
+            return cudf::replace_nulls(contains_result->view(), fill_value);
         }
 
         SEXP set_type_sexp = set_node["type"];
@@ -1076,6 +1127,77 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         // empirically: na_if(c(1,NA,3), 3) is (1, NA, NA)).
         auto na_scalar = build_scalar(x_type_str, R_NilValue, true);
         return cudf::copy_if_else(*na_scalar, x_col, mask->view());
+    }
+
+    // ---- replace_when(x, cond1 ~ val1, ..., condN ~ valN): right-to-left
+    // chained copy_if_else, TYPE STABLE to `x` (Phase 4 wave 2) ----
+    //
+    // Backs BOTH replace_when() (boolean conditions, built directly by
+    // R/ir.R's ir_parse_replace_when()) and replace_values() (value-match
+    // conditions desugared to `x %in% old_values_i` by
+    // ir_parse_replace_values()) -- both produce the exact same
+    // "replace_when" node shape: `args = [x, cond_1, val_1, ..., cond_N,
+    // val_N]`, x doubling as both the initial accumulator ("default" for
+    // unmatched rows) and the type target every val_i is cast to. This is
+    // structurally identical to case_when()'s own handler above, with two
+    // differences: (1) no unify_value_types() call -- the target type is
+    // simply x's own (resolve_static_type(args[0])), never promoted; (2)
+    // there's no separate "default" argument at the end of `args` -- x
+    // itself (args[0]) serves as both.
+    if (op == "replace_when") {
+        Rcpp::List x_node = args[0];
+        int n_args = args.size();
+        int n_when = (n_args - 1) / 2;
+
+        cudf::data_type target = resolve_static_type(x_node, ctx);
+        std::string target_str = expr_type_to_str(target);
+
+        auto value_as_column = [&](Rcpp::List node) -> cudf::column_view {
+            if (ir_kind(node) == "lit") {
+                auto s = build_scalar(target_str, node["value"], ir_lit_is_na(node));
+                auto col = cudf::make_column_from_scalar(*s, ctx.view().num_rows());
+                return ctx.cols[ctx.push(std::move(col))];
+            }
+            cudf::size_type idx = materialize(node, ctx);
+            if (ctx.cols[idx].type().id() != target.id()) {
+                auto casted = cudf::cast(ctx.cols[idx], target);
+                idx = ctx.push(std::move(casted));
+            }
+            return ctx.cols[idx];
+        };
+
+        cudf::column_view acc = value_as_column(x_node);
+
+        // Right-to-left chained copy_if_else, exactly case_when()'s own
+        // fold: a NULL cond element automatically falls through to the
+        // accumulated "else" side per copy_if_else()'s documented null-mask
+        // rule -- matches both replace_when()'s own docs ("NA values in the
+        // LHS conditions are treated like FALSE") and replace_values()'s
+        // %in%-desugared conditions (which are themselves already never-NA,
+        // see the %in% handler above).
+        std::vector<std::unique_ptr<cudf::column>> owned_accs;
+        for (int i = n_when - 1; i >= 0; --i) {
+            Rcpp::List cond_node = args[2 * i + 1];
+            Rcpp::List val_node = args[2 * i + 2];
+
+            cudf::size_type cond_idx = materialize(cond_node, ctx);
+            cudf::column_view cond_col = ctx.cols[cond_idx];
+            if (cond_col.type().id() != cudf::type_id::BOOL8) {
+                Rcpp::stop("replace_when()/replace_values(): each condition must be logical, not %s",
+                           expr_type_to_str(cond_col.type()).c_str());
+            }
+
+            cudf::column_view val_col = value_as_column(val_node);
+            auto next = cudf::copy_if_else(val_col, acc, cond_col);
+            acc = next->view();
+            owned_accs.push_back(std::move(next));
+        }
+
+        if (owned_accs.empty()) {
+            // Defensive only: both R parsers require at least one clause.
+            return std::make_unique<cudf::column>(acc);
+        }
+        return std::move(owned_accs.back());
     }
 
     // ---- string ==/!=/</<=/>/>=: binary_operation + get_compare_op() ----

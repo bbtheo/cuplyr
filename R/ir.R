@@ -242,6 +242,30 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       return(ir_parse_case_when(expr, env, schema))
     }
 
+    # Phase 4 wave 2: case_match()/recode_values()/replace_values()/
+    # replace_when()'s dots are ALSO `~` formulas (case_match()/
+    # recode_values() additionally take a leading `.x`/`x` vector argument
+    # before the formulas), and when_all()/when_any()'s dots need their
+    # `na_rm=`/`size=` named controls pulled out before the remaining dots
+    # are parsed as ordinary logical expressions -- none of that fits the
+    # generic per-arg parse loop below, so all are special-cased here
+    # exactly like case_when() above. See each parse function's own docs.
+    if (identical(fn_name, "case_match")) {
+      return(ir_parse_case_match(expr, env, schema))
+    }
+    if (identical(fn_name, "recode_values")) {
+      return(ir_parse_recode_values(expr, env, schema))
+    }
+    if (identical(fn_name, "replace_values")) {
+      return(ir_parse_replace_values(expr, env, schema))
+    }
+    if (identical(fn_name, "replace_when")) {
+      return(ir_parse_replace_when(expr, env, schema))
+    }
+    if (fn_name %in% c("when_all", "when_any")) {
+      return(ir_parse_when_reduce(expr, env, schema, fn_name))
+    }
+
     canonical <- ir_op_alias(fn_name)
     args_raw <- as.list(expr)[-1]
 
@@ -398,6 +422,407 @@ ir_parse_case_when <- function(expr, env, schema) {
   interleaved[seq(2L, n_when * 2L, by = 2L)] <- values[seq_len(n_when)]
 
   ir_call("case_when", c(interleaved, values[n_when + 1L]), meta = list(n_when = n_when))
+}
+
+# -----------------------------------------------------------------------------
+# Phase 4 wave 2: case_match()/recode_values()/replace_values()/
+# replace_when()/when_all()/when_any() -- verified empirically against
+# dplyr 1.2.1 first (see the Phase 4 wave 2 task notes/scratchpad/todo.md).
+#
+# case_match()/recode_values(): "match .x/x by VALUE against a set of old
+# values" desugars EXACTLY into `%in%` conditions feeding a `case_when()`
+# chain -- `case_match(x, c(1,3) ~ "a", .default = "z")` is, at the IR
+# level, indistinguishable from `case_when(x %in% c(1,3) ~ "a", .default =
+# "z")`. This reuses `%in%`'s own NA-matching semantics verbatim (`NA %in%
+# NA` is TRUE in base R, so `case_match(x, NA ~ "unknown", ...)` correctly
+# replaces x's own NA elements) -- which required a real pre-existing `%in%`
+# handler bug fix (a bare scalar `NA` literal RHS, e.g. `x %in% NA`, was
+# wrongly routed into the "empty RHS set" always-FALSE shortcut instead of
+# matching x's NA rows; see `src/expr_eval.hpp`'s `%in%` handler). Because
+# both fully reduce to an existing "case_when" node, neither needs its own
+# registry entry, `type` function, or C++ handler.
+#
+# replace_values()/replace_when(): same idea (value-match / boolean-cond
+# clauses respectively) but TYPE STABLE to `x` (dplyr's own docs: "type
+# stable, unlike case_match()") and with `x` itself as the implicit,
+# non-overridable "default" for unmatched rows -- case_when()'s own type
+# rule (vctrs common-type unify across every value + default) is WRONG for
+# this, so both lower through a dedicated "replace_when" IR op instead (see
+# `type_replace_when()` below and the `replace_when` handler in
+# `src/expr_eval.hpp`).
+#
+# when_all()/when_any(): `when_any(x, y, z)` is `x | y | z` generalized to N
+# inputs (`when_all()` the `&` analogue) -- fully desugars into a folded
+# chain of the existing `|`/`&` ops, needing no IR op of its own at all.
+# `na_rm = TRUE` does NOT simply drop NAs from the *result*; verified
+# empirically it treats NA as each operator's identity element instead
+# (`when_any(NA, NA, na_rm = TRUE)` is `FALSE`, not `NA`; `when_all(NA, NA,
+# na_rm = TRUE)` is `TRUE`) -- implemented by `coalesce()`-ing every input
+# against that identity value before folding, reusing coalesce()'s existing
+# handler too.
+#
+# Every one of these follows wave 1's own scope-narrowing precedent: any
+# named argument this wave doesn't implement (recode_values()'s
+# `from=`/`to=`/`unmatched=`/`ptype=`, case_match()'s `.ptype=`,
+# replace_values()'s `from=`/`to=`, when_all()/when_any()'s `size=`) being
+# present at all makes the parse function return `NULL` (caller falls
+# back/errors), exactly like case_when()'s own `.ptype=`/`.size=`/
+# `.unmatched=` handling above.
+# -----------------------------------------------------------------------------
+
+# na_if()'s output keeps `x`'s own type; replace_when()/replace_values() are
+# the same idea generalized to N clauses -- the result is always `x`'s own
+# type (arg 1), never a vctrs-style unify across the replacement values.
+type_replace_when <- function(arg_types) {
+  arg_types[1]
+}
+
+#' Shared clause-parsing helper for case_match()/recode_values() (Phase 4 wave 2)
+#'
+#' Both functions share an identical clause shape once "match by value" is
+#' expressed as `%in%`: `f(x, old_values_1 ~ new_value_1, ..., <default_key>
+#' = value)`. Builds `x %in% old_values_i` as each clause's condition
+#' (reusing the existing `%in%` op verbatim, including its NA-matching
+#' semantics) and hands the interleaved cond/value list to `ir_call(
+#' "case_when", ...)` directly -- case_match()/recode_values() are, at the
+#' IR level, indistinguishable from case_when() once desugared this way.
+#'
+#' Only the two-sided-formula clause interface is implemented this wave:
+#' recode_values()'s `from=`/`to=`/`unmatched=`/`ptype=` vector-lookup-table
+#' interface, and case_match()'s `.ptype=`, are NOT implemented -- ANY named
+#' argument other than `default_key` present in the call makes this return
+#' `NULL` (caller falls back).
+#'
+#' A clause's LHS ("old value(s)") must resolve to a literal (a constant, a
+#' `c(...)` vector, or an environment lookup) -- an LHS referencing a column
+#' is unsupported this wave (mirrors `%in%`'s own RHS restriction, since
+#' that's exactly the op this desugars into). A STRING-vs-non-STRING type
+#' mismatch between `x` and a clause's LHS is diagnosed here (mirroring
+#' `na_if()`'s own STRING compatibility check) rather than surfacing as a
+#' raw cudf cast error at lowering time.
+#'
+#' @param expr The raw `case_match(...)`/`recode_values(...)` call
+#' @param env The quosure's environment
+#' @param schema List with `names`/`types`
+#' @param default_key `".default"` (case_match) or `"default"`
+#'   (recode_values) -- the one named control argument this wave supports
+#' @return An `ir_call("case_when", ...)` node, or `NULL` if unsupported
+#' @keywords internal
+ir_parse_value_match_clauses <- function(expr, env, schema, default_key) {
+  args_raw <- as.list(expr)[-1]
+  if (length(args_raw) < 1) {
+    return(NULL)  # need at least `.x`/`x`
+  }
+  arg_names <- names(args_raw)
+  if (is.null(arg_names)) {
+    arg_names <- rep("", length(args_raw))
+  }
+
+  # First positional (unnamed) argument is .x/x -- case_match()/
+  # recode_values() both always take it first and unnamed in every
+  # realistic call site (the same simplifying assumption if_else()/
+  # case_when() already make for their own positional args).
+  if (nzchar(arg_names[1])) {
+    return(NULL)
+  }
+  x_raw <- args_raw[[1]]
+  rest_raw <- args_raw[-1]
+  rest_names <- arg_names[-1]
+
+  unsupported_named <- setdiff(rest_names[nzchar(rest_names)], default_key)
+  if (length(unsupported_named) > 0) {
+    return(NULL)
+  }
+
+  default_pos <- which(rest_names == default_key)
+  default_raw <- if (length(default_pos) == 1) rest_raw[[default_pos]] else NULL
+  clause_raw <- if (length(default_pos) == 1) rest_raw[-default_pos] else rest_raw
+
+  if (length(clause_raw) == 0) {
+    return(NULL)  # nothing to match against
+  }
+
+  x_ir <- ir_parse_expr(x_raw, env, schema)
+  if (is.null(x_ir)) {
+    return(NULL)
+  }
+  x_type <- unname(ir_infer_type(x_ir, schema))
+
+  conds <- vector("list", length(clause_raw))
+  vals <- vector("list", length(clause_raw))
+
+  for (i in seq_along(clause_raw)) {
+    f <- clause_raw[[i]]
+    if (!rlang::is_call(f, "~") || length(f) != 3) {
+      return(NULL)  # not a two-sided formula: unsupported shape
+    }
+    lhs_ir <- ir_parse_expr(f[[2]], env, schema, allow_vector = TRUE)
+    if (is.null(lhs_ir) || !identical(lhs_ir$kind, "lit")) {
+      return(NULL)  # non-literal (e.g. column-referencing) LHS: unsupported
+    }
+    if (!isTRUE(lhs_ir$na)) {
+      lhs_type <- unname(ir_infer_type(lhs_ir, schema))
+      if (identical(x_type, "STRING") != identical(lhs_type, "STRING")) {
+        stop("case_match()/recode_values(): can't convert the matched value (",
+             lhs_type, ") to match the type of `x` (", x_type, ").", call. = FALSE)
+      }
+    }
+    val_ir <- ir_parse_expr(f[[3]], env, schema)
+    if (is.null(val_ir)) {
+      return(NULL)
+    }
+    conds[[i]] <- ir_call("%in%", list(x_ir, lhs_ir))
+    vals[[i]] <- val_ir
+  }
+
+  default_ir <- if (!is.null(default_raw)) {
+    parsed_default <- ir_parse_expr(default_raw, env, schema)
+    if (is.null(parsed_default)) {
+      return(NULL)
+    }
+    parsed_default
+  } else {
+    ir_lit(value = NULL, type = NULL, na = TRUE)  # synthesized untyped NA
+  }
+
+  values <- ir_resolve_value_nas(c(vals, list(default_ir)), schema)
+  n_when <- length(conds)
+
+  interleaved <- vector("list", n_when * 2L)
+  interleaved[seq(1L, n_when * 2L, by = 2L)] <- conds
+  interleaved[seq(2L, n_when * 2L, by = 2L)] <- values[seq_len(n_when)]
+
+  ir_call("case_when", c(interleaved, values[n_when + 1L]), meta = list(n_when = n_when))
+}
+
+#' Parse `case_match(.x, old_values ~ new_value, ..., .default=, .ptype=)`
+#'
+#' See [ir_parse_value_match_clauses()] -- `case_match()` is deprecated in
+#' dplyr 1.2.1 in favor of `recode_values()`/`replace_values()` (verified:
+#' calling it emits a lifecycle warning), but is still exported and
+#' functional, and is explicitly in this wave's scope, so it's implemented
+#' identically to `recode_values()`'s formula interface, just with `.default`
+#' as the named key instead of `default`.
+#'
+#' @keywords internal
+ir_parse_case_match <- function(expr, env, schema) {
+  ir_parse_value_match_clauses(expr, env, schema, default_key = ".default")
+}
+
+#' Parse `recode_values(x, old_values ~ new_value, ..., default=, unmatched=, ptype=)`
+#'
+#' See [ir_parse_value_match_clauses()]. `from=`/`to=`/`unmatched=`/`ptype=`
+#' are not implemented this wave.
+#'
+#' @keywords internal
+ir_parse_recode_values <- function(expr, env, schema) {
+  ir_parse_value_match_clauses(expr, env, schema, default_key = "default")
+}
+
+#' Parse `replace_values(x, old_values ~ new_value, ..., from=, to=)`
+#'
+#' Value-match clauses like [ir_parse_value_match_clauses()] (`x %in%
+#' old_values_i`), but TYPE STABLE: the result always keeps `x`'s own type,
+#' and unmatched rows keep `x` itself (there is no `.default=`/`default=`
+#' argument at all) -- expressed as a dedicated `ir_call("replace_when",
+#' ...)` node (see `type_replace_when()` and this file's module comment
+#' above) rather than reusing `case_when`'s node, since case_when's own
+#' common-type-unify rule is wrong here.
+#'
+#' Only the two-sided-formula clause interface is implemented this wave:
+#' `from=`/`to=` (the vector-lookup-table interface) being present at all
+#' makes this return `NULL` (fall back).
+#'
+#' @keywords internal
+ir_parse_replace_values <- function(expr, env, schema) {
+  args_raw <- as.list(expr)[-1]
+  if (length(args_raw) < 2) {
+    return(NULL)  # need x + at least one clause
+  }
+  arg_names <- names(args_raw)
+  if (is.null(arg_names)) {
+    arg_names <- rep("", length(args_raw))
+  }
+  if (nzchar(arg_names[1])) {
+    return(NULL)
+  }
+  if (any(nzchar(arg_names[-1]))) {
+    return(NULL)  # from=/to=: not implemented this wave
+  }
+
+  x_raw <- args_raw[[1]]
+  clause_raw <- args_raw[-1]
+
+  x_ir <- ir_parse_expr(x_raw, env, schema)
+  if (is.null(x_ir)) {
+    return(NULL)
+  }
+  x_type <- unname(ir_infer_type(x_ir, schema))
+
+  interleaved <- vector("list", length(clause_raw) * 2L)
+  for (i in seq_along(clause_raw)) {
+    f <- clause_raw[[i]]
+    if (!rlang::is_call(f, "~") || length(f) != 3) {
+      return(NULL)
+    }
+    lhs_ir <- ir_parse_expr(f[[2]], env, schema, allow_vector = TRUE)
+    if (is.null(lhs_ir) || !identical(lhs_ir$kind, "lit")) {
+      return(NULL)
+    }
+    if (!isTRUE(lhs_ir$na)) {
+      lhs_type <- unname(ir_infer_type(lhs_ir, schema))
+      if (identical(x_type, "STRING") != identical(lhs_type, "STRING")) {
+        stop("replace_values(): can't convert the matched value (", lhs_type,
+             ") to match the type of `x` (", x_type, ").", call. = FALSE)
+      }
+    }
+    val_ir <- ir_parse_expr(f[[3]], env, schema)
+    if (is.null(val_ir)) {
+      return(NULL)
+    }
+    if (!(identical(val_ir$kind, "lit") && isTRUE(val_ir$na) && is.null(val_ir$type))) {
+      val_type <- unname(ir_infer_type(val_ir, schema))
+      if (identical(x_type, "STRING") != identical(val_type, "STRING")) {
+        stop("replace_values(): can't convert a replacement value (", val_type,
+             ") to match the type of `x` (", x_type, ").", call. = FALSE)
+      }
+    }
+    interleaved[[2 * i - 1]] <- ir_call("%in%", list(x_ir, lhs_ir))
+    interleaved[[2 * i]] <- val_ir
+  }
+
+  ir_call("replace_when", c(list(x_ir), interleaved), meta = list(n_when = length(clause_raw)))
+}
+
+#' Parse `replace_when(x, cond1 ~ val1, ..., condN ~ valN)`
+#'
+#' Boolean-condition clauses -- exactly `case_when()`'s own clause shape,
+#' see [ir_parse_case_when()] -- but TYPE STABLE to `x`, with `x` itself as
+#' the implicit, non-overridable final "default" (unmatched rows keep their
+#' original `x` value; there is no `.default=`/`default=` argument at all).
+#' Lowered via the same dedicated "replace_when" op as
+#' [ir_parse_replace_values()].
+#'
+#' No named arguments are supported this wave (the real `replace_when()`
+#' signature is just `replace_when(x, ...)` anyway) -- any named dot present
+#' makes this return `NULL` (fall back).
+#'
+#' @keywords internal
+ir_parse_replace_when <- function(expr, env, schema) {
+  args_raw <- as.list(expr)[-1]
+  if (length(args_raw) < 2) {
+    return(NULL)  # need x + at least one clause
+  }
+  arg_names <- names(args_raw)
+  if (is.null(arg_names)) {
+    arg_names <- rep("", length(args_raw))
+  }
+  if (nzchar(arg_names[1])) {
+    return(NULL)
+  }
+  if (any(nzchar(arg_names[-1]))) {
+    return(NULL)  # no named controls supported this wave
+  }
+
+  x_raw <- args_raw[[1]]
+  clause_raw <- args_raw[-1]
+
+  x_ir <- ir_parse_expr(x_raw, env, schema)
+  if (is.null(x_ir)) {
+    return(NULL)
+  }
+  x_type <- unname(ir_infer_type(x_ir, schema))
+
+  interleaved <- vector("list", length(clause_raw) * 2L)
+  for (i in seq_along(clause_raw)) {
+    f <- clause_raw[[i]]
+    if (!rlang::is_call(f, "~") || length(f) != 3) {
+      return(NULL)
+    }
+    cond_ir <- ir_parse_expr(f[[2]], env, schema)
+    if (is.null(cond_ir)) {
+      return(NULL)
+    }
+    val_ir <- ir_parse_expr(f[[3]], env, schema)
+    if (is.null(val_ir)) {
+      return(NULL)
+    }
+    if (!(identical(val_ir$kind, "lit") && isTRUE(val_ir$na) && is.null(val_ir$type))) {
+      val_type <- unname(ir_infer_type(val_ir, schema))
+      if (identical(x_type, "STRING") != identical(val_type, "STRING")) {
+        stop("replace_when(): can't convert a replacement value (", val_type,
+             ") to match the type of `x` (", x_type, ").", call. = FALSE)
+      }
+    }
+    interleaved[[2 * i - 1]] <- cond_ir
+    interleaved[[2 * i]] <- val_ir
+  }
+
+  ir_call("replace_when", c(list(x_ir), interleaved), meta = list(n_when = length(clause_raw)))
+}
+
+#' Parse `when_all(..., na_rm=FALSE, size=NULL)` / `when_any(...)`
+#'
+#' See this file's module comment above for the full empirical rationale.
+#' Fully desugars at parse time into a right-folded chain of the existing
+#' `|`/`&` ops -- no new IR op, registry entry, or C++ handler needed.
+#'
+#' `size=` (only meaningful for the zero-input edge case) is NOT implemented
+#' this wave -- its presence, or zero dots, makes this return `NULL`.
+#'
+#' @param fn_name `"when_all"` or `"when_any"`
+#' @keywords internal
+ir_parse_when_reduce <- function(expr, env, schema, fn_name) {
+  args_raw <- as.list(expr)[-1]
+  arg_names <- names(args_raw)
+  if (is.null(arg_names)) {
+    arg_names <- rep("", length(args_raw))
+  }
+
+  unsupported_named <- setdiff(arg_names[nzchar(arg_names)], "na_rm")
+  if (length(unsupported_named) > 0) {
+    return(NULL)  # size=: not implemented this wave
+  }
+
+  na_rm_pos <- which(arg_names == "na_rm")
+  na_rm <- FALSE
+  if (length(na_rm_pos) == 1) {
+    na_rm_raw <- args_raw[[na_rm_pos]]
+    na_rm_val <- tryCatch(
+      rlang::eval_tidy(rlang::new_quosure(na_rm_raw, env)),
+      error = function(e) NULL
+    )
+    if (!is.logical(na_rm_val) || length(na_rm_val) != 1 || is.na(na_rm_val)) {
+      return(NULL)
+    }
+    na_rm <- na_rm_val
+  }
+
+  dot_raw <- if (length(na_rm_pos) == 1) args_raw[-na_rm_pos] else args_raw
+  dot_names <- if (length(na_rm_pos) == 1) arg_names[-na_rm_pos] else arg_names
+  if (any(nzchar(dot_names))) {
+    return(NULL)  # dots should be positional
+  }
+  if (length(dot_raw) == 0) {
+    return(NULL)  # zero-input edge case: not implemented this wave
+  }
+
+  fold_op <- if (identical(fn_name, "when_all")) "&" else "|"
+  identity_value <- identical(fn_name, "when_all")  # TRUE for &, FALSE for |
+
+  parsed <- vector("list", length(dot_raw))
+  for (i in seq_along(dot_raw)) {
+    node <- ir_parse_expr(dot_raw[[i]], env, schema)
+    if (is.null(node)) {
+      return(NULL)
+    }
+    if (na_rm) {
+      node <- ir_call("coalesce", list(node, ir_lit_from_r(identity_value)))
+    }
+    parsed[[i]] <- node
+  }
+
+  Reduce(function(a, b) ir_call(fold_op, list(a, b)), parsed)
 }
 
 # -----------------------------------------------------------------------------
@@ -934,5 +1359,44 @@ ir_call_registry <- list(
     },
     type = type_na_if,
     lower = list(handler = "na_if")
+  ),
+
+  # --- Phase 4 wave 2: near(), replace_when() (case_match()/recode_values()/
+  # replace_values()/when_all()/when_any() all fully desugar at parse time
+  # into "case_when"/"&"/"|" nodes -- see the module comment above
+  # ir_parse_value_match_clauses() and never reach the registry under their
+  # own op name at all) ---
+
+  # `near(x, y, tol = .Machine$double.eps^0.5)`: verified against dplyr's
+  # own source (`dplyr:::near`) -- `abs(x - y) < tol`, nothing more. Always
+  # desugared at parse time (like `between`/`log2`/`log10` above), so "near"
+  # never reaches lowering under its own op name.
+  "near" = list(
+    arity = NA_integer_,
+    parse = function(args, schema) {
+      if (length(args) < 2 || length(args) > 3) {
+        return(NULL)  # wrong arg count: not this shape, fall back
+      }
+      x <- args[[1]]
+      y <- args[[2]]
+      tol <- if (length(args) == 3) args[[3]] else ir_lit_from_r(sqrt(.Machine$double.eps))
+      ir_call("<", list(ir_call("abs", list(ir_call("-", list(x, y)))), tol))
+    },
+    type = type_bool8,
+    lower = NULL  # always desugared at parse time; never lowered as "near"
+  ),
+
+  # `replace_when(x, ...)`/`replace_values(x, ...)`: never reach this
+  # entry's `parse` -- both are built directly by their own dedicated parse
+  # functions (`ir_parse_replace_when()`/`ir_parse_replace_values()`), since
+  # `x` (arg 1) is a required leading positional argument the generic
+  # per-arg registry loop has no special handling for. This entry exists
+  # only so `ir_infer_type()`/lowering can look up `type`/`lower` for the
+  # `ir_call("replace_when", ...)` node those parse functions build.
+  "replace_when" = list(
+    arity = NA_integer_,
+    parse = NULL,
+    type = type_replace_when,
+    lower = list(handler = "replace_when")
   )
 )
