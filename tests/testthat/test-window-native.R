@@ -2,11 +2,14 @@
 #
 # scratchpad/phase5_window_design.md section 2.2: the six-step stable-sort /
 # gather / groupby-scan-or-shift / scatter-back algorithm, implemented in
-# src/ops_window.cpp. No verb is wired to window functions yet (that's
-# W3/W5/W6/W7), so every test here hand-builds an `ast_window` node (via
-# `window_spec()`, R/window.R) and drives it through `push_op()`/
-# `lower_and_execute()` directly -- the same pattern test-execute.R uses for
-# hand-built `ast_select` nodes.
+# src/ops_window.cpp. This file predates mutate() being wired to window
+# functions (that's W3, plus W5/W6/W7 for filter()/`.by=`/slice()), so every
+# test here hand-builds an `ast_window` node (via `window_spec()`,
+# R/window.R) and drives it through `push_op()`/`lower_and_execute()`
+# directly -- the same pattern test-execute.R uses for hand-built
+# `ast_select` nodes -- rather than going through the mutate() verb (see
+# test-dplyr-rank.R/test-dplyr-window-mutate.R/test-dplyr-order-by.R for
+# the oracle-parity coverage of the actual verb wiring).
 #
 # This file also implements the four W2 empirical checks from the design
 # doc (E1/E2/E5/E6 -- E3/E4 are W4's, the rank/agg families):
@@ -327,24 +330,47 @@ test_that("is_barrier() treats window as a barrier", {
 })
 
 # -----------------------------------------------------------------------------
-# Defensive rejections (W2 scope: shift + scan families only)
+# Rank + agg families (Phase 5, task W4) via hand-built AST nodes
 # -----------------------------------------------------------------------------
+#
+# These two specs used to be rejected here (W2/W3 scope: shift + scan
+# families only) -- now that src/ops_window.cpp implements every window
+# kind, lower_window() accepts them directly; see test-dplyr-rank.R and
+# test-dplyr-window-mutate.R for the full oracle-parity coverage of these
+# families through the actual mutate() verb wiring. Kept here too since
+# this file drives the C++ kernel directly (bypassing R/window.R's
+# decomposition), same as every other test in it.
 
-test_that("lower_window() rejects a ranked row_number(x) spec (W4 scope)", {
+test_that("lower_window() accepts a ranked row_number(x) spec", {
   skip_if_no_gpu()
 
   df <- data.frame(x = c(3, 1, 2))
   spec <- window_spec("rn", "row_number", value_col = "x", order_cols = "x",
                        order_desc = FALSE, output_type = "INT32")
 
-  expect_error(run_window(df, list(spec)), "W4")
+  result <- run_window(df, list(spec))
+  expect_equal(result$rn, c(3L, 1L, 2L))
 })
 
-test_that("lower_window() rejects an agg-family spec (mean(), W4 scope)", {
+test_that("lower_window() accepts an agg-family spec (mean())", {
   skip_if_no_gpu()
 
   df <- data.frame(x = c(3, 1, 2))
   spec <- window_spec("m", "mean", value_col = "x", output_type = "FLOAT64")
 
-  expect_error(run_window(df, list(spec)), "W4")
+  result <- run_window(df, list(spec))
+  expect_equal(result$m, rep(2, 3))
+})
+
+# -----------------------------------------------------------------------------
+# Defensive rejection: a genuinely unrecognized window fn
+# -----------------------------------------------------------------------------
+
+test_that("lower_window() rejects a spec with an unrecognized window fn", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = c(3, 1, 2))
+  spec <- window_spec("z", "not_a_real_window_fn", value_col = "x", output_type = "FLOAT64")
+
+  expect_error(run_window(df, list(spec)), "unrecognized")
 })

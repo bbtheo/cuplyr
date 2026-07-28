@@ -598,34 +598,24 @@ test_that("mutate(gdf, x = sum(x)) replacing an existing column matches dplyr", 
   expect_identical(names(result$gpu), names(count_df()))
 })
 
-test_that("mutate() combining an aggregate with another op falls back to CPU (Phase 5, task W3)", {
+test_that("mutate() combining an aggregate with another op is GPU-native (Phase 5, task W4)", {
   # Phase 5, task W3: n()/mean() are window-class registry entries (the
-  # "agg" family, see R/lower.R's window_spec_w3_lowerable()), so any dot
+  # "agg" family, see R/lower.R's window_spec_lowerable()), so any dot
   # using them outside match_grouped_aggregate_dot()'s narrow bare-`n()`-or-
-  # `sum(<expr>)` fast path now routes through mutate_window() and falls
-  # back to CPU evaluation cleanly (with a cuplyr_fallback_notify()
-  # notification) instead of hard-erroring -- full GPU-native aggregate/
-  # rank-family window support is W4 work. See
-  # test-dplyr-window-mutate.R's fallback section for the dedicated
-  # coverage this behavior gets; this test just confirms the pre-existing
-  # "still errors" contract was deliberately superseded, not silently
-  # regressed.
+  # `sum(<expr>)` fast path routed through mutate_window() -- which, at W3
+  # time, still fell back to CPU evaluation for the "agg" family (only the
+  # scan/shift families were GPU-native then). As of Phase 5 task W4, the
+  # "agg" family (mean()/sum()/min()/max()/n()/sd()/var()/first()/last()/
+  # nth()) is GPU-native too, so `n() + 1` and `mean(x)` combined with
+  # other ops now compute natively, with NO fallback -- flipped from the
+  # W3-era fallback assertion to a native parity check here.
   skip_if_no_gpu()
   df <- count_df()
-  withr::local_options(cuplyr.fallback = "warn")
-  gt <- tbl_gpu(df) |> dplyr::group_by(g)
+  pipeline1 <- function(d) d |> dplyr::group_by(g) |> dplyr::mutate(y = dplyr::n() + 1)
+  expect_same_as_dplyr(df, pipeline1)
+  expect_same_as_dplyr_lazy(df, pipeline1)
 
-  expect_warning(
-    result1 <- dplyr::mutate(gt, y = dplyr::n() + 1),
-    "mutate.*fell back to CPU evaluation"
-  )
-  oracle1 <- dplyr::group_by(df, g) |> dplyr::mutate(y = dplyr::n() + 1)
-  expect_equal(tibble::as_tibble(collect(result1)), tibble::as_tibble(dplyr::ungroup(oracle1)))
-
-  expect_warning(
-    result2 <- dplyr::mutate(gt, y = mean(x)),
-    "mutate.*fell back to CPU evaluation"
-  )
-  oracle2 <- dplyr::group_by(df, g) |> dplyr::mutate(y = mean(x))
-  expect_equal(tibble::as_tibble(collect(result2)), tibble::as_tibble(dplyr::ungroup(oracle2)))
+  pipeline2 <- function(d) d |> dplyr::group_by(g) |> dplyr::mutate(y = mean(x))
+  expect_same_as_dplyr(df, pipeline2)
+  expect_same_as_dplyr_lazy(df, pipeline2)
 })

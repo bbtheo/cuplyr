@@ -29,10 +29,11 @@ column) name of the window function's "value" argument, or
 \code{row_number()})}
 
 \item{order_cols}{Character vector of order-by column names for this
-spec's frame (empty for W1: only rank-family calls with a value
-argument set this, to \code{value_col} itself, since ranking a column
-inherently orders by that same column -- real \verb{order_by=} support is
-W4)}
+spec's frame: rank-family calls with a value argument default this to
+\code{value_col} itself (ranking a column inherently orders by that same
+column), UNLESS an explicit \verb{order_by=}/\code{order_by()}/\code{with_order()}
+override (Phase 5 W4, \code{R/ir.R}'s \code{apply_order_override()}) is
+present, in which case that wins for ANY window kind (shift/rank/agg)}
 
 \item{order_desc}{Logical vector, parallel to \code{order_cols}, \code{TRUE} for
 descending}

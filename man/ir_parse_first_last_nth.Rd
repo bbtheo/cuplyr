@@ -7,11 +7,15 @@
 ir_parse_first_last_nth(expr, env, schema, fn_name)
 }
 \description{
-Only the bare \code{x} (and, for \code{nth()}, a constant-integer \code{n}) shape is
-implemented this wave: any of \verb{order_by=}/\verb{default=}/\verb{na_rm=} being
-present at all -- even at its own default value -- makes this return
-\code{NULL} (see the module note above; agg-family window lowering with a
-real \code{order_by} frame is W4 work). Builds a window-class
-\code{ir_call(fn_name, list(x_ir))} node (\code{nth()} additionally carries \verb{meta = list(n = <int>)}, the (1-based, possibly negative) element position).
+The bare \code{x} (and, for \code{nth()}, a constant-integer \code{n}) shape, plus
+\verb{order_by=} (Phase 5 W4: see \code{\link[=ir_parse_order_ref]{ir_parse_order_ref()}}/
+\code{\link[=apply_order_override]{apply_order_override()}} -- \code{first(x, order_by = y)} re-frames this
+spec's frame to be ordered by \code{y}, matching dplyr's own
+"first/last/nth row of the group IN \code{order_by}'s ORDER, not the
+group's current order" semantics, verified empirically against dplyr
+1.2.1). \verb{default=}/\verb{na_rm=} being present at all -- even at their own
+default value -- still makes this return \code{NULL} (not implemented this
+wave). Builds a window-class \code{ir_call(fn_name, list(x_ir), meta = list(order_override = ))} node (\code{nth()} additionally carries \verb{n = <int>},
+the (1-based, possibly negative) element position).
 }
 \keyword{internal}

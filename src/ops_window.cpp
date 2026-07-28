@@ -1,14 +1,26 @@
 // src/ops_window.cpp
 //
-// GPU-native window functions (Phase 5, task W2): the "shift" family
-// (lag()/lead()) and the "scan" family (cumsum()/cummax()/cummin()/
-// cumprod(), plus bare row_number()'s no-order COUNT_ALL form). Every
-// other window kind (ranked row_number(x)/min_rank()/dense_rank()/
-// percent_rank()/cume_dist(), and the whole "agg" family --
-// mean()/sum()/min()/max()/n()/sd()/var()/first()/last()/nth()) is W4
-// work -- R/lower.R::validate_window_spec_w2() rejects those before this
-// file is ever reached, so this file only has to implement the fn set
-// above.
+// GPU-native window functions.
+//
+// Phase 5 task W2 implemented the "shift" family (lag()/lead()) and the
+// "scan" family (cumsum()/cummax()/cummin()/cumprod(), plus bare
+// row_number()'s no-order COUNT_ALL form).
+//
+// Phase 5 task W4 (this file, extended -- see R/lower.R::
+// validate_window_spec(), which now accepts every window kind) adds:
+//   - the "rank" family: row_number(x)/min_rank()/dense_rank()/
+//     percent_rank()/cume_dist(), via groupby SCAN + make_rank_aggregation()
+//     (still one gb.scan() call, alongside the W2 scan family -- RANK only
+//     works with scan algorithms). Section 2.2's constraint applies: a rank
+//     spec's value column must equal the frame's sole order column (checked
+//     both R-side, when the spec is built, and defensively here).
+//   - the "agg" family: mean()/sum()/min()/max()/n()/sd()/var() (plain
+//     per-group aggregates) and first()/last()/nth() (via
+//     make_nth_element_aggregation(), honoring an order_by frame when one
+//     is supplied) -- both computed via ONE gb.aggregate() call per frame,
+//     then broadcast back out to every row of that group via
+//     cudf::repeat(), see section 4's "aggregate + repeat + scatter" note
+//     and empirical check E4 (recorded in the W4 commit message).
 //
 // This is the six-step algorithm from
 // scratchpad/phase5_window_design.md section 2.2, implemented EXACTLY:
@@ -45,7 +57,12 @@
 // whole perm/gather/scan/scatter round trip), E2 (grouped row_number()
 // with duplicate + NA group keys), E5 (cudf group-scan NA IS non-sticky
 // before the fix; the fix reproduces R's sticky semantics), E6 (lag()/
-// lead() fill type + NA default). E3/E4 are W4's (rank/agg families).
+// lead() fill type + NA default). W4 adds E3 (min_rank()/dense_rank()/
+// percent_rank()/cume_dist() with ties + NAs match dplyr exactly, incl.
+// percent_rank()'s (rank-1)/(n_non_NA-1) denominator and all-NA groups)
+// and E4 (gb.aggregate() result row i <-> sorted group i: the repeat()
+// broadcast validated against dplyr's own grouped mean() on shuffled data
+// with duplicate + NA keys) -- both recorded in the W4 commit message.
 
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
@@ -56,8 +73,10 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/copying.hpp>
+#include <cudf/filling.hpp>
 #include <cudf/groupby.hpp>
 #include <cudf/scalar/scalar.hpp>
+#include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/sorting.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/table/table_view.hpp>
@@ -68,6 +87,7 @@
 #include <algorithm>
 #include <climits>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -76,6 +96,17 @@
 #include <Rcpp.h>
 
 using namespace Rcpp;
+
+namespace cuplyr {
+// Defined in src/ops_groupby.cpp (external linkage, namespace cuplyr):
+// reused here so mean()/sum()/min()/max()/n()/sd()/var() window
+// aggregations pick EXACTLY summarise()'s own cudf aggregation choice
+// (ddof=1 for std/variance, null_policy::INCLUDE for count, ...) --
+// R/ast.R::make_aggregation()'s output-type table (reused verbatim by the
+// "agg"-kind registry entries in R/ir.R) documents the type side of this
+// same contract.
+std::unique_ptr<cudf::groupby_aggregation> get_groupby_agg(const std::string& agg_type);
+}  // namespace cuplyr
 
 namespace {
 
@@ -128,6 +159,73 @@ std::unique_ptr<cudf::groupby_scan_aggregation> make_cum_scan_agg(const std::str
     if (fn == "cummin")  return cudf::make_min_aggregation<cudf::groupby_scan_aggregation>();
     if (fn == "cumprod") return cudf::make_product_aggregation<cudf::groupby_scan_aggregation>();
     Rcpp::stop("gpu_window: internal: unknown scan fn '%s'", fn.c_str());
+}
+
+// --- Phase 5 W4: rank family (scan-based, via make_rank_aggregation()) ---
+
+bool is_rank_fn(const std::string& fn) {
+    return fn == "row_number" || fn == "min_rank" || fn == "dense_rank" ||
+           fn == "percent_rank" || fn == "cume_dist";
+}
+
+// dplyr <-> cudf::rank_method/rank_percentage mapping, verified empirically
+// against dplyr 1.2.1 (scratchpad/phase5_window_design.md section 4 + the
+// W4 commit message's E3 check): row_number(x) is ties="sequential"
+// (rank_method::FIRST); min_rank()/dense_rank() are MIN/DENSE; percent_rank()
+// is `(min_rank(x)-1)/(n_non_NA-1)` == MIN method + ONE_NORMALIZED;
+// cume_dist() is `rank(ties="max")/n_non_NA` == MAX method +
+// ZERO_NORMALIZED. All five use null_policy::EXCLUDE (dplyr's own
+// `incomplete = "na"` default: an NA input value gets an NA rank).
+std::unique_ptr<cudf::groupby_scan_aggregation> make_rank_scan_agg(
+        const std::string& fn, cudf::order col_order, cudf::null_order null_prec) {
+    if (fn == "row_number") {
+        return cudf::make_rank_aggregation<cudf::groupby_scan_aggregation>(
+            cudf::rank_method::FIRST, col_order, cudf::null_policy::EXCLUDE, null_prec,
+            cudf::rank_percentage::NONE);
+    }
+    if (fn == "min_rank") {
+        return cudf::make_rank_aggregation<cudf::groupby_scan_aggregation>(
+            cudf::rank_method::MIN, col_order, cudf::null_policy::EXCLUDE, null_prec,
+            cudf::rank_percentage::NONE);
+    }
+    if (fn == "dense_rank") {
+        return cudf::make_rank_aggregation<cudf::groupby_scan_aggregation>(
+            cudf::rank_method::DENSE, col_order, cudf::null_policy::EXCLUDE, null_prec,
+            cudf::rank_percentage::NONE);
+    }
+    if (fn == "percent_rank") {
+        return cudf::make_rank_aggregation<cudf::groupby_scan_aggregation>(
+            cudf::rank_method::MIN, col_order, cudf::null_policy::EXCLUDE, null_prec,
+            cudf::rank_percentage::ONE_NORMALIZED);
+    }
+    if (fn == "cume_dist") {
+        return cudf::make_rank_aggregation<cudf::groupby_scan_aggregation>(
+            cudf::rank_method::MAX, col_order, cudf::null_policy::EXCLUDE, null_prec,
+            cudf::rank_percentage::ZERO_NORMALIZED);
+    }
+    Rcpp::stop("gpu_window: internal: unknown rank fn '%s'", fn.c_str());
+}
+
+// --- Phase 5 W4: agg family (aggregate + cudf::repeat() broadcast) ---
+
+bool is_agg_fn(const std::string& fn) {
+    return fn == "mean" || fn == "sum" || fn == "min" || fn == "max" ||
+           fn == "n" || fn == "sd" || fn == "var";
+}
+
+bool is_nth_fn(const std::string& fn) {
+    return fn == "first" || fn == "last" || fn == "nth";
+}
+
+// window's registry names ("sd"/"var") differ from the cudf-accepted
+// names get_groupby_agg() (src/ops_groupby.cpp) expects ("std"/"variance")
+// -- R/summarise.R's parse_aggregations() makes the exact same translation
+// for summarise()'s own sd()/var(). sum/mean/min/max/n pass through
+// unchanged.
+std::string window_agg_cudf_name(const std::string& fn) {
+    if (fn == "sd")  return "std";
+    if (fn == "var") return "variance";
+    return fn;
 }
 
 void check_row_limit(const cudf::table_view& view) {
@@ -290,27 +388,53 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                                   key_col_order, key_null_prec);
 
         // --- Step 5: compute, per spec, aligned with `work_view`'s row
-        // order. Split into the scan family (row_number()'s COUNT_ALL form
-        // + cumsum/cummax/cummin/cumprod) and the shift family
-        // (lag()/lead()). ---
+        // order. Split into: the scan family (row_number()'s COUNT_ALL form
+        // + cumsum/cummax/cummin/cumprod), the rank family (row_number(x)/
+        // min_rank/dense_rank/percent_rank/cume_dist -- ALSO scan-based, see
+        // the file-level comment), the shift family (lag()/lead()), and the
+        // agg family (mean/sum/min/max/n/sd/var/first/last/nth). ---
         std::vector<int> scan_spec_indices;
+        std::vector<int> rank_spec_indices;
         std::vector<int> shift_spec_indices;
+        std::vector<int> agg_spec_indices;
         for (size_t i = 0; i < specs.size(); ++i) {
-            const std::string& fn = specs[i].fn;
-            if (fn == "row_number" || is_cum_scan_fn(fn)) {
+            const WindowSpec& sp = specs[i];
+            const std::string& fn = sp.fn;
+            if (fn == "row_number" && !sp.has_value) {
                 scan_spec_indices.push_back(static_cast<int>(i));
+            } else if (is_cum_scan_fn(fn)) {
+                scan_spec_indices.push_back(static_cast<int>(i));
+            } else if (is_rank_fn(fn)) {
+                // fn == "row_number" with a value column lands here (ranked
+                // row_number(x)), not in scan_spec_indices above.
+                rank_spec_indices.push_back(static_cast<int>(i));
             } else if (fn == "lag" || fn == "lead") {
                 shift_spec_indices.push_back(static_cast<int>(i));
+            } else if (is_agg_fn(fn) || is_nth_fn(fn)) {
+                agg_spec_indices.push_back(static_cast<int>(i));
             } else {
-                Rcpp::stop("gpu_window: unsupported window fn '%s' (W2 scope: the scan and "
-                           "shift families only)", fn.c_str());
+                Rcpp::stop("gpu_window: unsupported window fn '%s'", fn.c_str());
+            }
+        }
+
+        // Section 2.2's RANK-spec constraint, enforced defensively in C++
+        // (R/window.R's extract_one_window_call() already enforces it when
+        // building the spec): the presorted RANK scan branch assumes the
+        // order-by column is already sorted within each group, which step 1
+        // only guarantees when the ranked column IS this frame's sole order
+        // column.
+        for (int si : rank_spec_indices) {
+            const WindowSpec& sp = specs[static_cast<size_t>(si)];
+            if (order_idx_r.size() != 1 || sp.value_idx != order_idx_r[0]) {
+                Rcpp::stop("gpu_window: internal: rank spec's value column must equal "
+                           "the frame's sole order column (fn = '%s')", sp.fn.c_str());
             }
         }
 
         // Results, in `specs`/`work_view` order (NOT yet scattered back).
         std::vector<std::unique_ptr<cudf::column>> spec_results(specs.size());
 
-        if (!scan_spec_indices.empty()) {
+        if (!scan_spec_indices.empty() || !rank_spec_indices.empty()) {
             struct ScanJob {
                 int spec_index;
                 int primary_request_idx;
@@ -364,6 +488,27 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 scan_jobs.push_back(job);
             }
 
+            for (int si : rank_spec_indices) {
+                const WindowSpec& sp = specs[static_cast<size_t>(si)];
+                ScanJob job{si, -1, -1};
+
+                // The ranked column is this frame's sole order column (just
+                // checked above), so its cudf::order/null_order are exactly
+                // `order_col_orders[0]` / the AFTER null precedence every
+                // sort key uses (step 1).
+                cudf::size_type pos = value_pos.at(sp.value_idx);
+                cudf::column_view value_view = work_view.column(pos);
+
+                cudf::groupby::scan_request req;
+                req.values = value_view;
+                req.aggregations.push_back(
+                    make_rank_scan_agg(sp.fn, order_col_orders[0], cudf::null_order::AFTER));
+                job.primary_request_idx = static_cast<int>(requests.size());
+                requests.push_back(std::move(req));
+
+                scan_jobs.push_back(job);
+            }
+
             auto scan_pair = gb.scan(requests);
             auto& scan_results = scan_pair.second;
 
@@ -385,6 +530,228 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 }
 
                 spec_results[static_cast<size_t>(job.spec_index)] = std::move(result);
+            }
+        }
+
+        // percent_rank()'s (rank-1)/(n_valid-1) denominator: cudf's own
+        // ONE_NORMALIZED implementation returns 0 (not NaN) for a group
+        // whose valid (non-null) value count is exactly 1 (0/0 clamped to
+        // 0 internally), but dplyr returns NaN for every valid row of such
+        // a singleton-valid group (empirically verified against dplyr
+        // 1.2.1, part of the W4 commit's E3 check: `percent_rank(c(5))` is
+        // `NaN`, not `0`; a NULL row in that same group correctly stays NA
+        // either way and is left untouched here via the `orig_valid` mask
+        // below). Patched via a small side gb.aggregate() call (the
+        // group's valid-value count + its row count, broadcast via
+        // cudf::repeat() exactly like the agg family below), run only when
+        // this frame actually has a percent_rank spec.
+        for (int si : rank_spec_indices) {
+            if (specs[static_cast<size_t>(si)].fn != "percent_rank") {
+                continue;
+            }
+
+            cudf::size_type pos = value_pos.at(specs[static_cast<size_t>(si)].value_idx);
+            cudf::column_view value_view = work_view.column(pos);
+
+            std::vector<cudf::groupby::aggregation_request> pr_requests(2);
+            pr_requests[0].values = value_view;
+            pr_requests[0].aggregations.push_back(
+                cudf::make_count_aggregation<cudf::groupby_aggregation>(cudf::null_policy::EXCLUDE));
+            pr_requests[1].values = keys_view.column(0);
+            pr_requests[1].aggregations.push_back(
+                cudf::make_count_aggregation<cudf::groupby_aggregation>(cudf::null_policy::INCLUDE));
+
+            auto pr_agg_pair = gb.aggregate(pr_requests);
+            auto& pr_agg_results = pr_agg_pair.second;
+
+            std::vector<cudf::column_view> pr_pre_repeat = {pr_agg_results[0].results[0]->view()};
+            cudf::table_view pr_pre_repeat_tbl(pr_pre_repeat);
+            auto pr_repeated = cudf::repeat(pr_pre_repeat_tbl, pr_agg_results[1].results[0]->view());
+
+            cudf::numeric_scalar<int32_t> one_i32(1, true);
+            auto is_singleton = cudf::binary_operation(
+                pr_repeated->get_column(0).view(), one_i32, cudf::binary_operator::EQUAL,
+                cudf::data_type{cudf::type_id::BOOL8});
+
+            auto orig_valid = cudf::is_valid(spec_results[static_cast<size_t>(si)]->view());
+
+            auto should_patch = cudf::binary_operation(
+                is_singleton->view(), orig_valid->view(), cudf::binary_operator::LOGICAL_AND,
+                cudf::data_type{cudf::type_id::BOOL8});
+
+            cudf::numeric_scalar<double> nan_scalar(std::numeric_limits<double>::quiet_NaN(), true);
+            spec_results[static_cast<size_t>(si)] = cudf::copy_if_else(
+                nan_scalar, spec_results[static_cast<size_t>(si)]->view(), should_patch->view());
+        }
+
+        if (!agg_spec_indices.empty()) {
+            // Phase 5 W4 "agg" family: mean()/sum()/min()/max()/n()/sd()/
+            // var() (plain per-group aggregates) and first()/last()/nth()
+            // (via make_nth_element_aggregation(), honoring an order_by
+            // frame when this frame has order columns -- `work_view`'s
+            // per-group row order already reflects that ordering, or, when
+            // absent, the group's ORIGINAL row order, since step 1's sort is
+            // stable). ONE gb.aggregate() call computes every spec in this
+            // frame plus a COUNT_ALL request (the per-group row count),
+            // then ONE cudf::repeat() call broadcasts every result back out
+            // to `work_view`'s row count in lockstep -- see the file-level
+            // comment and empirical check E4 (recorded in the W4 commit
+            // message): a single groupby object (`gb`, built with
+            // sorted::YES) always takes cudf's SORT aggregation path
+            // (verified against groupby::dispatch_aggregation() in cudf's
+            // own source: `_keys_are_sorted == sorted::YES` skips the hash
+            // path unconditionally), so gb.aggregate()'s result row i is
+            // exactly sorted-group i -- the same group order the COUNT_ALL
+            // request itself enumerates, which is what makes the
+            // repeat()-into-`work_view`-order step correct with NO further
+            // permutation bookkeeping.
+            struct AggJob {
+                int spec_index;
+                int request_idx;
+            };
+
+            std::vector<cudf::groupby::aggregation_request> requests;
+            std::vector<AggJob> agg_jobs;
+
+            cudf::groupby::aggregation_request count_req;
+            count_req.values = keys_view.column(0);
+            count_req.aggregations.push_back(
+                cudf::make_count_aggregation<cudf::groupby_aggregation>(cudf::null_policy::INCLUDE));
+            int count_request_idx = static_cast<int>(requests.size());
+            requests.push_back(std::move(count_req));
+
+            for (int si : agg_spec_indices) {
+                const WindowSpec& sp = specs[static_cast<size_t>(si)];
+                cudf::groupby::aggregation_request req;
+
+                if (sp.fn == "n") {
+                    // n() ignores its own (absent) value argument -- the
+                    // exact same COUNT_ALL computation as `count_req`
+                    // above, just under this spec's own request slot so
+                    // the generic per-request extraction below stays
+                    // uniform.
+                    req.values = keys_view.column(0);
+                    req.aggregations.push_back(
+                        cudf::make_count_aggregation<cudf::groupby_aggregation>(cudf::null_policy::INCLUDE));
+                } else if (is_nth_fn(sp.fn)) {
+                    if (!sp.has_value) {
+                        Rcpp::stop("gpu_window: first()/last()/nth() require a value column");
+                    }
+                    cudf::size_type pos = value_pos.at(sp.value_idx);
+                    req.values = work_view.column(pos);
+
+                    // dplyr 1-based/negative `nth(x, k)` <-> cudf's own
+                    // negative-indexing NTH_ELEMENT convention (verified
+                    // empirically against dplyr 1.2.1): k > 0 -> cudf index
+                    // k-1; k < 0 -> cudf index k UNCHANGED (dplyr's
+                    // nth(x, -1) IS cudf's n=-1, both mean "last element");
+                    // first()/last() are the fixed n=0/n=-1 special cases.
+                    cudf::size_type n;
+                    if (sp.fn == "first") {
+                        n = 0;
+                    } else if (sp.fn == "last") {
+                        n = -1;
+                    } else {
+                        if (!sp.has_n) {
+                            Rcpp::stop("gpu_window: nth() requires an element position");
+                        }
+                        n = sp.n > 0 ? sp.n - 1 : sp.n;
+                    }
+                    req.aggregations.push_back(
+                        cudf::make_nth_element_aggregation<cudf::groupby_aggregation>(
+                            n, cudf::null_policy::INCLUDE));
+                } else {
+                    if (!sp.has_value) {
+                        Rcpp::stop("gpu_window: '%s' requires a value column", sp.fn.c_str());
+                    }
+                    cudf::size_type pos = value_pos.at(sp.value_idx);
+                    req.values = work_view.column(pos);
+                    req.aggregations.push_back(cuplyr::get_groupby_agg(window_agg_cudf_name(sp.fn)));
+                }
+
+                agg_jobs.push_back(AggJob{si, static_cast<int>(requests.size())});
+                requests.push_back(std::move(req));
+            }
+
+            auto agg_pair = gb.aggregate(requests);
+            auto& agg_results = agg_pair.second;
+
+            cudf::column_view counts_view =
+                agg_results[static_cast<size_t>(count_request_idx)].results[0]->view();
+
+            std::vector<cudf::column_view> pre_repeat_views;
+            pre_repeat_views.reserve(agg_jobs.size());
+            for (const auto& job : agg_jobs) {
+                pre_repeat_views.push_back(agg_results[static_cast<size_t>(job.request_idx)].results[0]->view());
+            }
+            cudf::table_view pre_repeat_tbl(pre_repeat_views);
+
+            auto repeated = cudf::repeat(pre_repeat_tbl, counts_view);
+            std::vector<std::unique_ptr<cudf::column>> repeated_cols = repeated->release();
+
+            for (size_t k = 0; k < agg_jobs.size(); ++k) {
+                spec_results[static_cast<size_t>(agg_jobs[k].spec_index)] = std::move(repeated_cols[k]);
+            }
+
+            // na.rm=FALSE propagation: R's mean()/sum()/min()/max()/sd()/
+            // var() all default to na.rm=FALSE, so a group with ANY null
+            // value makes the WHOLE group's result NA -- unlike cudf's own
+            // MEAN/SUM/MIN/MAX/STD/VARIANCE groupby aggregations, which
+            // always exclude nulls (verified empirically against dplyr
+            // 1.2.1: `group_by(g) |> mutate(m = mean(x))` is NA for every
+            // row of a group containing an NA `x`, not just the NA row
+            // itself). n() is unaffected (it counts ALL rows regardless of
+            // nulls, matching dplyr exactly already); first()/last()/nth()
+            // are also unaffected (na_rm=FALSE for those means "don't skip
+            // NA when picking a position", which `null_policy::INCLUDE`
+            // above already implements -- only an unrelated OTHER row's
+            // NA must NOT affect these three, and it doesn't: they don't
+            // reduce over the whole group). This is a real, otherwise
+            // silent divergence from dplyr; `R/summarise.R`'s existing
+            // mean()/sum()/min()/max() aggregations share the exact same
+            // gap (out of scope here -- tracked separately).
+            for (int si : agg_spec_indices) {
+                const WindowSpec& sp = specs[static_cast<size_t>(si)];
+                bool na_propagates = sp.fn == "mean" || sp.fn == "sum" || sp.fn == "min" ||
+                                      sp.fn == "max" || sp.fn == "sd" || sp.fn == "var";
+                if (!na_propagates) {
+                    continue;
+                }
+
+                cudf::size_type pos = value_pos.at(sp.value_idx);
+                cudf::column_view value_view = work_view.column(pos);
+                if (!value_view.has_nulls()) {
+                    continue;  // nothing to propagate
+                }
+
+                auto null_indicator_bool = cudf::is_null(value_view);
+                auto null_indicator_i8 = cudf::cast(null_indicator_bool->view(),
+                                                     cudf::data_type{cudf::type_id::INT8});
+
+                std::vector<cudf::groupby::aggregation_request> any_null_requests(1);
+                any_null_requests[0].values = null_indicator_i8->view();
+                any_null_requests[0].aggregations.push_back(
+                    cudf::make_max_aggregation<cudf::groupby_aggregation>());
+
+                auto any_null_pair = gb.aggregate(any_null_requests);
+                cudf::column_view any_null_per_group = any_null_pair.second[0].results[0]->view();
+
+                std::vector<cudf::column_view> any_null_pre_repeat = {any_null_per_group};
+                cudf::table_view any_null_pre_repeat_tbl(any_null_pre_repeat);
+                // `counts_view` (this frame's per-group row count, computed
+                // above) is reused here so the broadcast expands into the
+                // exact same sorted-row blocks as every other agg-family
+                // result.
+                auto any_null_repeated = cudf::repeat(any_null_pre_repeat_tbl, counts_view);
+
+                cudf::numeric_scalar<int8_t> zero_i8_b(0, true);
+                auto has_any_null = cudf::binary_operation(
+                    any_null_repeated->get_column(0).view(), zero_i8_b, cudf::binary_operator::NOT_EQUAL,
+                    cudf::data_type{cudf::type_id::BOOL8});
+
+                auto null_scalar = cudf::make_empty_scalar_like(spec_results[static_cast<size_t>(si)]->view());
+                spec_results[static_cast<size_t>(si)] = cudf::copy_if_else(
+                    *null_scalar, spec_results[static_cast<size_t>(si)]->view(), has_any_null->view());
             }
         }
 

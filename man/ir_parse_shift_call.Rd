@@ -7,14 +7,23 @@
 ir_parse_shift_call(expr, env, schema, fn_name)
 }
 \description{
-Builds a window-class \code{ir_call(fn_name, list(x_ir), meta = list(n = , default = ))} node (never lowered directly -- see the \link{ir_call_registry}
-entry / \code{\link[=ir_bind]{ir_bind()}}'s guard). \code{n} must be a non-negative whole-number
-constant (dplyr itself requires this); \code{default}, if supplied, must be a
-CONSTANT expression -- evaluable via \code{\link[=ir_eval_constant]{ir_eval_constant()}} with no data
-mask, so \code{default = -1}, \code{default = 2L + 3L}, or any other
-column-free expression all work (not just a bare literal token), but
-\code{default = first(x)} (a real, column-referencing dplyr default) is not
-implemented this wave. \verb{order_by=} is not implemented this wave (see
-module note above) -- supplying it at all makes this return \code{NULL}.
+Builds a window-class \code{ir_call(fn_name, list(x_ir), meta = list(n = , default = , order_override = ))} node (never lowered directly -- see the
+\link{ir_call_registry} entry / \code{\link[=ir_bind]{ir_bind()}}'s guard). \code{n} must be a
+non-negative whole-number constant (dplyr itself requires this);
+\code{default}, if supplied, must be a CONSTANT expression -- evaluable via
+\code{\link[=ir_eval_constant]{ir_eval_constant()}} with no data mask, so \code{default = -1}, `default = 2L
+\itemize{
+\item 3L\verb{, or any other column-free expression all work (not just a bare literal token), but }default = first(x)` (a real, column-referencing
+dplyr default) is not implemented this wave.
+}
+}
+\details{
+\verb{order_by=}, when supplied, must resolve via \code{\link[=ir_parse_order_ref]{ir_parse_order_ref()}} (a
+bare column, \code{desc(column)}, or \code{-column}); anything else (a general
+expression) is not implemented this wave and returns \code{NULL} (Phase 5
+W4: \verb{order_by=} re-frames this spec's own frame exactly like
+\code{order_by()}/\code{with_order()} would if wrapped around the same call --
+see \code{\link[=apply_order_override]{apply_order_override()}}'s docs -- so \code{lag(x, order_by = y)} and
+\code{order_by(y, lag(x))} produce the same \code{meta$order_override}).
 }
 \keyword{internal}

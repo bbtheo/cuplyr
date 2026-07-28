@@ -127,17 +127,18 @@
 #'     that matches a column resolves to that column; otherwise it's
 #'     evaluated as an environment variable -- "columns shadow the
 #'     environment")
-#'   \item Cumulative and offset window functions, GPU-native for both
-#'     ungrouped and grouped (`group_by()`) tables, arbitrarily nested with
-#'     any of the above (`mutate(y = x - lag(x))`,
-#'     `mutate(z = lag(cumsum(x)))`):
+#'   \item Window functions, GPU-native for both ungrouped and grouped
+#'     (`group_by()`) tables, arbitrarily nested with any of the above
+#'     (`mutate(y = x - lag(x))`, `mutate(z = lag(cumsum(x)))`,
+#'     `mutate(centered = x - mean(x))`):
 #'     \itemize{
-#'       \item `row_number()` (bare form only -- sequential position, or
-#'         per-group position under `group_by()`; `row_number(x)`, ranking
-#'         by a value, is not yet supported -- see "Not yet supported" below)
-#'       \item `lag(x, n = 1, default = NA)` / `lead(x, n = 1, default =
-#'         NA)` -- row-order-preserving shift; `order_by=` is not yet
-#'         supported (uses the table's/group's current row order)
+#'       \item `row_number()` (sequential position) / `row_number(x)`
+#'         (ranked position, ties broken by original position) --
+#'         per-group under `group_by()`
+#'       \item `lag(x, n = 1, default = NA, order_by = NULL)` / `lead(...)`
+#'         -- row-order-preserving shift; `order_by=` (a bare column,
+#'         `desc(column)`, or `-column`) re-frames the shift to follow that
+#'         ordering instead of the table's/group's current row order
 #'       \item `cumsum()`/`cummax()`/`cummin()`/`cumprod()` -- matching R's
 #'         own NA-propagation (`cumsum(c(1, 2, NA, 4))` is `1, 3, NA, NA`:
 #'         once an NA is seen, every later cumulative value in that group is
@@ -148,16 +149,39 @@
 #'         that increments whenever the input value changes, treating
 #'         adjacent `NA`s as unchanged) -- all built from the primitives
 #'         above
+#'       \item `min_rank()`/`dense_rank()`/`percent_rank()`/`cume_dist()` --
+#'         ties/`NA` handling matches dplyr exactly (`NA` input -> `NA`
+#'         rank; `percent_rank()` is `(min_rank(x) - 1) / (n_non_NA - 1)`,
+#'         `NaN` for a group with exactly one non-`NA` value, matching
+#'         dplyr's own `NaN`, not `NA`; `cume_dist()` is
+#'         `rank(x, ties = "max") / n_non_NA`)
+#'       \item `mean()`/`sum()`/`min()`/`max()`/`n()`/`sd()`/`var()` --
+#'         one aggregate broadcast to every row of its group (or the whole
+#'         table, ungrouped); `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()`
+#'         match R's own `na.rm = FALSE` default (ANY `NA` in the group
+#'         makes the WHOLE group's result `NA`); `n()` always counts every
+#'         row regardless of `NA`s
+#'       \item `first(x, order_by = NULL)` / `last(x, order_by = NULL)` /
+#'         `nth(x, n, order_by = NULL)` -- the first/last/`n`th row of the
+#'         group in its current row order, or in `order_by`'s order when
+#'         supplied; negative `n` counts from the end (`nth(x, -1)` ==
+#'         `last(x)`); an out-of-range `n` gives `NA`; `default=`/`na_rm=`
+#'         are not yet supported
+#'       \item `ntile(x = row_number(), n)` -- desugars into `row_number()`/
+#'         `sum()`, so it's native as a consequence of those being native
+#'       \item `order_by(order_by, call)` / `with_order(order_by, fun, x)`
+#'         -- re-frame a directly-wrapped `row_number()`/`lag()`/`lead()`/
+#'         `cumsum()`/`cummax()`/`cummin()`/`cumprod()`/rank-family call's
+#'         ordering (matching dplyr exactly, including that both of these
+#'         genuinely error, in dplyr itself, when wrapped around an
+#'         aggregate like `mean()`/`first()`/`n()` -- cuplyr matches that by
+#'         rejecting the same shape as unsupported rather than silently
+#'         ignoring the requested ordering)
 #'     }
 #'     Every one of these is evaluated within each `group_by()` group when
 #'     `.data` is grouped (matching `dplyr`'s own grouped-mutate semantics:
 #'     row order is always preserved in the output, unlike grouped
-#'     `slice()`). A dot combining one of these with an aggregate
-#'     (`mutate(y = x - mean(x))`), a ranking function other than bare
-#'     `row_number()` (`min_rank()`, `dense_rank()`, `percent_rank()`,
-#'     `cume_dist()`, `row_number(x)`), or `ntile()` still falls back to CPU
-#'     evaluation (see "Not yet supported" below) -- planned for a later
-#'     phase.
+#'     `slice()`).
 #' }
 #'
 #' ## Column replacement behavior
@@ -206,23 +230,16 @@
 #'
 #' ## Not yet supported
 #' \itemize{
-#'   \item Aggregate functions (`mean()`, `min()`, `max()`, `sd()`, `var()`,
-#'     `first()`, `last()`, `nth()`) and ranking functions other than bare
-#'     `row_number()` (`row_number(x)`, `min_rank()`, `dense_rank()`,
-#'     `percent_rank()`, `cume_dist()`, and `ntile()`, which desugars into
-#'     both) used inside a mutate expression -- WITH ONE narrow exception: a
-#'     dot that is exactly `n()` or `sum(<expr>)` (optionally `sum(<expr>,
-#'     na.rm = TRUE)`) and nothing else -- e.g. `mutate(y = n())`,
-#'     `mutate(total = sum(x))` -- broadcasts that one whole-table (or, if
-#'     `x` is grouped, per-group) aggregate to every row (added to support
-#'     `dplyr::add_tally()`/`add_count()`, see `R/count.R`). Any OTHER use of
-#'     these functions -- alone (`mutate(r = min_rank(x))`), combined with
-#'     other operations (`mutate(y = x - mean(x))`), or mixed into an
-#'     otherwise-native window expression (`mutate(y = cumsum(x) - mean(x))`)
-#'     -- currently falls back to CPU evaluation (notified per
-#'     `options(cuplyr.fallback = )`, see [cuplyr_fallback_notify()]) rather
-#'     than erroring; GPU-native support for these is planned for a later
-#'     phase (see `scratchpad/phase5_window_design.md`)
+#'   \item `order_by()`/`with_order()` wrapping a general expression (only a
+#'     bare column, `desc(column)`, or `-column` is understood as the
+#'     ordering argument -- `order_by(a + b, cumsum(x))` is not yet
+#'     supported), or wrapping anything other than a SINGLE directly-nested
+#'     window call (`order_by(y, cumsum(x) + lag(x))` is not yet supported;
+#'     `order_by(y, lag(cumsum(x)))` IS supported, since `lag()` is the
+#'     single directly-wrapped call there)
+#'   \item Multi-column `consecutive_id(a, b, ...)` -- single-column only
+#'   \item Rolling/sliding-window functions (`slider::slide_*()` and
+#'     similar) -- planned for a later phase
 #'   \item String manipulation (concatenation, case conversion, substr,
 #'     regex, ...) -- only string *comparison* is supported
 #'   \item `case_when()`'s/`case_match()`'s `.ptype=`/`.size=`/`.unmatched=`
@@ -405,7 +422,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 # AST nodes via push_op() executes immediately in eager mode, so we cannot
 # discover mid-emission that some spec isn't lowerable yet and "undo" partial
 # GPU work -- every spec across every batch must be validated BEFORE any
-# push_op() call (see plan_mutate_window_batches()/window_spec_w3_lowerable(),
+# push_op() call (see plan_mutate_window_batches()/window_spec_lowerable(),
 # R/lower.R). This is the "detect at plan time... never half-lower"
 # requirement from the design doc.
 #
@@ -443,7 +460,7 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
   )
 
   all_lowerable <- !is.null(plan) &&
-    all(vapply(plan$all_specs, window_spec_w3_lowerable, logical(1)))
+    all(vapply(plan$all_specs, window_spec_lowerable, logical(1)))
 
   if (!all_lowerable) {
     return(mutate_window_fallback(.data, dots, keep, before_quo, after_quo))
@@ -495,7 +512,7 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
 #   from decompose_window_group()>, expressions = <list of
 #   make_mutate_expr() structs, one per dot in this batch>)`; `all_specs` is
 #   the flat list of every window_spec() produced across every stage of
-#   every batch, for window_spec_w3_lowerable() validation
+#   every batch, for window_spec_lowerable() validation
 # @keywords internal
 plan_mutate_window_batches <- function(exprs, schema) {
   batches <- window_batches(exprs)
@@ -535,15 +552,18 @@ plan_mutate_window_batches <- function(exprs, schema) {
 }
 
 # Internal: CPU fallback for a window-bearing mutate() call whose plan isn't
-# (yet) fully lowerable -- e.g. any dot using mean()/sum()/n()/min()/max()/
-# sd()/var()/first()/last()/nth() (the "agg" family) or a ranked function
-# (min_rank()/dense_rank()/percent_rank()/cume_dist()/row_number(x)) (the
-# rest of the "rank" family), both W4 work; or ntile(), which desugars into
-# both an agg-kind and a rank-kind spec. Mirrors the `.by=` fallback branch
-# in mutate.tbl_gpu() (same rlang::inject()-of-the-original-dots shape) --
-# `.by` is always NULL here (mutate.tbl_gpu() already returned earlier if it
-# weren't), so it's simply omitted from the re-injected call, matching
-# dplyr::mutate()'s own default.
+# (yet) fully lowerable. As of Phase 5 task W4, every window kind (shift/
+# rank/scan/agg) has C++ support (see window_spec_lowerable(), R/lower.R),
+# so this is only reachable for a genuinely NEW, not-yet-implemented window
+# kind added by some FUTURE phase -- there is currently no dplyr syntax that
+# reaches it (an order_by()/with_order()-wrapped agg-kind call, the other
+# way a window spec used to become unlowerable, is now rejected at PARSE
+# time instead -- see apply_order_override(), R/ir.R -- which is a hard
+# mutate() error, not this fallback). Kept for forward-compatibility rather
+# than deleted. Mirrors the `.by=` fallback branch in mutate.tbl_gpu() (same
+# rlang::inject()-of-the-original-dots shape) -- `.by` is always NULL here
+# (mutate.tbl_gpu() already returned earlier if it weren't), so it's simply
+# omitted from the re-injected call, matching dplyr::mutate()'s own default.
 #
 # @param .data The original tbl_gpu
 # @param dots The original (already rlang::enquos()'d) dots
@@ -609,9 +629,12 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE) {
         "(&, |, !, xor), is.na(), between(), near(), %in%, sqrt()/log()/log2()/",
         "log10()/exp()/abs()/floor()/ceiling()/sin()/cos()/tan()/round(), ",
         "if_else()/case_when()/coalesce()/na_if()/case_match()/recode_values()/",
-        "replace_values()/replace_when()/when_all()/when_any(), or cumulative/",
-        "offset window functions (row_number(), lag()/lead(), cumsum()/cummax()/",
-        "cummin()/cumprod()/cummean()/cumall()/cumany(), consecutive_id()) ",
+        "replace_values()/replace_when()/when_all()/when_any(), or window ",
+        "functions (row_number()/lag()/lead()/cumsum()/cummax()/cummin()/",
+        "cumprod()/cummean()/cumall()/cumany()/consecutive_id(), ",
+        "min_rank()/dense_rank()/percent_rank()/cume_dist()/ntile(), ",
+        "mean()/sum()/min()/max()/n()/sd()/var()/first()/last()/nth(), ",
+        "order_by()/with_order()) ",
         "(some named arguments of these are not yet supported -- see ",
         "?mutate.tbl_gpu).\n",
         "Expression: ", rlang::quo_text(expr),

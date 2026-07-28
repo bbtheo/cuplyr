@@ -149,16 +149,18 @@ that's itself a window function's output (\code{mutate(a = cumsum(x), b = lag(a)
 that matches a column resolves to that column; otherwise it's
 evaluated as an environment variable -- "columns shadow the
 environment")
-\item Cumulative and offset window functions, GPU-native for both
-ungrouped and grouped (\code{group_by()}) tables, arbitrarily nested with
-any of the above (\code{mutate(y = x - lag(x))},
-\code{mutate(z = lag(cumsum(x)))}):
+\item Window functions, GPU-native for both ungrouped and grouped
+(\code{group_by()}) tables, arbitrarily nested with any of the above
+(\code{mutate(y = x - lag(x))}, \code{mutate(z = lag(cumsum(x)))},
+\code{mutate(centered = x - mean(x))}):
 \itemize{
-\item \code{row_number()} (bare form only -- sequential position, or
-per-group position under \code{group_by()}; \code{row_number(x)}, ranking
-by a value, is not yet supported -- see "Not yet supported" below)
-\item \code{lag(x, n = 1, default = NA)} / \code{lead(x, n = 1, default = NA)} -- row-order-preserving shift; \verb{order_by=} is not yet
-supported (uses the table's/group's current row order)
+\item \code{row_number()} (sequential position) / \code{row_number(x)}
+(ranked position, ties broken by original position) --
+per-group under \code{group_by()}
+\item \code{lag(x, n = 1, default = NA, order_by = NULL)} / \code{lead(...)}
+-- row-order-preserving shift; \verb{order_by=} (a bare column,
+\code{desc(column)}, or \code{-column}) re-frames the shift to follow that
+ordering instead of the table's/group's current row order
 \item \code{cumsum()}/\code{cummax()}/\code{cummin()}/\code{cumprod()} -- matching R's
 own NA-propagation (\code{cumsum(c(1, 2, NA, 4))} is \verb{1, 3, NA, NA}:
 once an NA is seen, every later cumulative value in that group is
@@ -169,16 +171,39 @@ NA too)
 that increments whenever the input value changes, treating
 adjacent \code{NA}s as unchanged) -- all built from the primitives
 above
+\item \code{min_rank()}/\code{dense_rank()}/\code{percent_rank()}/\code{cume_dist()} --
+ties/\code{NA} handling matches dplyr exactly (\code{NA} input -> \code{NA}
+rank; \code{percent_rank()} is \code{(min_rank(x) - 1) / (n_non_NA - 1)},
+\code{NaN} for a group with exactly one non-\code{NA} value, matching
+dplyr's own \code{NaN}, not \code{NA}; \code{cume_dist()} is
+\code{rank(x, ties = "max") / n_non_NA})
+\item \code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{n()}/\code{sd()}/\code{var()} --
+one aggregate broadcast to every row of its group (or the whole
+table, ungrouped); \code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{sd()}/\code{var()}
+match R's own \code{na.rm = FALSE} default (ANY \code{NA} in the group
+makes the WHOLE group's result \code{NA}); \code{n()} always counts every
+row regardless of \code{NA}s
+\item \code{first(x, order_by = NULL)} / \code{last(x, order_by = NULL)} /
+\code{nth(x, n, order_by = NULL)} -- the first/last/\code{n}th row of the
+group in its current row order, or in \code{order_by}'s order when
+supplied; negative \code{n} counts from the end (\code{nth(x, -1)} ==
+\code{last(x)}); an out-of-range \code{n} gives \code{NA}; \verb{default=}/\verb{na_rm=}
+are not yet supported
+\item \code{ntile(x = row_number(), n)} -- desugars into \code{row_number()}/
+\code{sum()}, so it's native as a consequence of those being native
+\item \code{order_by(order_by, call)} / \code{with_order(order_by, fun, x)}
+-- re-frame a directly-wrapped \code{row_number()}/\code{lag()}/\code{lead()}/
+\code{cumsum()}/\code{cummax()}/\code{cummin()}/\code{cumprod()}/rank-family call's
+ordering (matching dplyr exactly, including that both of these
+genuinely error, in dplyr itself, when wrapped around an
+aggregate like \code{mean()}/\code{first()}/\code{n()} -- cuplyr matches that by
+rejecting the same shape as unsupported rather than silently
+ignoring the requested ordering)
 }
 Every one of these is evaluated within each \code{group_by()} group when
 \code{.data} is grouped (matching \code{dplyr}'s own grouped-mutate semantics:
 row order is always preserved in the output, unlike grouped
-\code{slice()}). A dot combining one of these with an aggregate
-(\code{mutate(y = x - mean(x))}), a ranking function other than bare
-\code{row_number()} (\code{min_rank()}, \code{dense_rank()}, \code{percent_rank()},
-\code{cume_dist()}, \code{row_number(x)}), or \code{ntile()} still falls back to CPU
-evaluation (see "Not yet supported" below) -- planned for a later
-phase.
+\code{slice()}).
 }
 }
 
@@ -233,22 +258,16 @@ literal (\code{NA_real_}, \code{NA_integer_}, ...) always keeps its own type.
 \subsection{Not yet supported}{
 
 \itemize{
-\item Aggregate functions (\code{mean()}, \code{min()}, \code{max()}, \code{sd()}, \code{var()},
-\code{first()}, \code{last()}, \code{nth()}) and ranking functions other than bare
-\code{row_number()} (\code{row_number(x)}, \code{min_rank()}, \code{dense_rank()},
-\code{percent_rank()}, \code{cume_dist()}, and \code{ntile()}, which desugars into
-both) used inside a mutate expression -- WITH ONE narrow exception: a
-dot that is exactly \code{n()} or \verb{sum(<expr>)} (optionally \verb{sum(<expr>, na.rm = TRUE)}) and nothing else -- e.g. \code{mutate(y = n())},
-\code{mutate(total = sum(x))} -- broadcasts that one whole-table (or, if
-\code{x} is grouped, per-group) aggregate to every row (added to support
-\code{dplyr::add_tally()}/\code{add_count()}, see \code{R/count.R}). Any OTHER use of
-these functions -- alone (\code{mutate(r = min_rank(x))}), combined with
-other operations (\code{mutate(y = x - mean(x))}), or mixed into an
-otherwise-native window expression (\code{mutate(y = cumsum(x) - mean(x))})
--- currently falls back to CPU evaluation (notified per
-\code{options(cuplyr.fallback = )}, see \code{\link[=cuplyr_fallback_notify]{cuplyr_fallback_notify()}}) rather
-than erroring; GPU-native support for these is planned for a later
-phase (see \code{scratchpad/phase5_window_design.md})
+\item \code{order_by()}/\code{with_order()} wrapping a general expression (only a
+bare column, \code{desc(column)}, or \code{-column} is understood as the
+ordering argument -- \code{order_by(a + b, cumsum(x))} is not yet
+supported), or wrapping anything other than a SINGLE directly-nested
+window call (\code{order_by(y, cumsum(x) + lag(x))} is not yet supported;
+\code{order_by(y, lag(cumsum(x)))} IS supported, since \code{lag()} is the
+single directly-wrapped call there)
+\item Multi-column \code{consecutive_id(a, b, ...)} -- single-column only
+\item Rolling/sliding-window functions (\verb{slider::slide_*()} and
+similar) -- planned for a later phase
 \item String manipulation (concatenation, case conversion, substr,
 regex, ...) -- only string \emph{comparison} is supported
 \item \code{case_when()}'s/\code{case_match()}'s \verb{.ptype=}/\verb{.size=}/\verb{.unmatched=}

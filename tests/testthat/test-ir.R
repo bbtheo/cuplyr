@@ -992,8 +992,22 @@ test_that("lead(x, n = 3, default = -1) sets both meta fields", {
   expect_equal(ir$meta$default$value, -1)
 })
 
-test_that("lag(x, order_by = y) is unsupported this wave (falls back)", {
+test_that("lag(x, order_by = y) parses to a window call with an order_override (Phase 5, W4)", {
   ir <- ir_parse_quo(quo_in(quote(lag(x, order_by = y))), schema_xyz)
+  expect_false(is.null(ir))
+  expect_identical(ir$kind, "call")
+  expect_identical(ir$op, "lag")
+  expect_identical(ir$meta$order_override, list(col = "y", desc = FALSE))
+})
+
+test_that("lag(x, order_by = desc(y)) parses with a descending order_override", {
+  ir <- ir_parse_quo(quo_in(quote(lag(x, order_by = desc(y)))), schema_xyz)
+  expect_false(is.null(ir))
+  expect_identical(ir$meta$order_override, list(col = "y", desc = TRUE))
+})
+
+test_that("lag(x, order_by = x + y) (non-column order_by) falls back", {
+  ir <- ir_parse_quo(quo_in(quote(lag(x, order_by = x + y))), schema_xyz)
   expect_null(ir)
 })
 
@@ -1028,8 +1042,15 @@ test_that("nth(x, -1) (negative element position) is accepted", {
   expect_equal(ir$meta$n, -1L)
 })
 
-test_that("first(x, order_by = y) is unsupported this wave (falls back)", {
+test_that("first(x, order_by = y) parses to a window call with an order_override (Phase 5, W4)", {
   ir <- ir_parse_quo(quo_in(quote(first(x, order_by = y))), schema_xyz)
+  expect_false(is.null(ir))
+  expect_identical(ir$op, "first")
+  expect_identical(ir$meta$order_override, list(col = "y", desc = FALSE))
+})
+
+test_that("first(x, order_by = x + y) (non-column order_by) falls back", {
+  ir <- ir_parse_quo(quo_in(quote(first(x, order_by = x + y))), schema_xyz)
   expect_null(ir)
 })
 

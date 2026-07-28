@@ -22,13 +22,17 @@ columns) is simply the spec's position in \code{ast$specs} -- the same order
 the two always agree on where a given spec's result lands in the final
 schema.
 
-W2 scope only: the "shift" family (\code{lag()}/\code{lead()}) and the "scan"
-family (\code{cumsum()}/\code{cummax()}/\code{cummin()}/\code{cumprod()}, plus bare
-\code{row_number()}'s no-order COUNT_ALL form) -- see
-\code{validate_window_spec_w2()}. Every other window kind (any \code{"rank"} spec
-other than bare \code{row_number()}, and the entire \code{"agg"} family) is W4
-work and hits a hard internal error here (never a user-facing message:
-no verb decomposes an expression into one of those specs yet, so
-reaching this function with one is a cuplyr bug, not a user mistake).
+As of Phase 5 task W4, every window kind is lowerable: the "shift"
+family (\code{lag()}/\code{lead()}), the "scan" family (\code{cumsum()}/\code{cummax()}/
+\code{cummin()}/\code{cumprod()}, plus bare \code{row_number()}'s no-order COUNT_ALL
+form), the "rank" family (\code{row_number(x)}/\code{min_rank()}/\code{dense_rank()}/
+\code{percent_rank()}/\code{cume_dist()}), and the "agg" family
+(\code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{n()}/\code{sd()}/\code{var()}/\code{first()}/
+\code{last()}/\code{nth()}) -- see \code{validate_window_spec()}. A spec whose \code{fn}
+isn't recognized AT ALL (no registry entry, or a registry entry with a
+\code{NULL} \code{window} field) hits a hard internal error here (never a
+user-facing message: no verb decomposes an expression into an
+unrecognized spec, so reaching this function with one is a cuplyr bug,
+not a user mistake).
 }
 \keyword{internal}

@@ -306,14 +306,18 @@ lower_join <- function(ast, source_ptr) {
 #' the two always agree on where a given spec's result lands in the final
 #' schema.
 #'
-#' W2 scope only: the "shift" family (`lag()`/`lead()`) and the "scan"
-#' family (`cumsum()`/`cummax()`/`cummin()`/`cumprod()`, plus bare
-#' `row_number()`'s no-order COUNT_ALL form) -- see
-#' `validate_window_spec_w2()`. Every other window kind (any `"rank"` spec
-#' other than bare `row_number()`, and the entire `"agg"` family) is W4
-#' work and hits a hard internal error here (never a user-facing message:
-#' no verb decomposes an expression into one of those specs yet, so
-#' reaching this function with one is a cuplyr bug, not a user mistake).
+#' As of Phase 5 task W4, every window kind is lowerable: the "shift"
+#' family (`lag()`/`lead()`), the "scan" family (`cumsum()`/`cummax()`/
+#' `cummin()`/`cumprod()`, plus bare `row_number()`'s no-order COUNT_ALL
+#' form), the "rank" family (`row_number(x)`/`min_rank()`/`dense_rank()`/
+#' `percent_rank()`/`cume_dist()`), and the "agg" family
+#' (`mean()`/`sum()`/`min()`/`max()`/`n()`/`sd()`/`var()`/`first()`/
+#' `last()`/`nth()`) -- see `validate_window_spec()`. A spec whose `fn`
+#' isn't recognized AT ALL (no registry entry, or a registry entry with a
+#' `NULL` `window` field) hits a hard internal error here (never a
+#' user-facing message: no verb decomposes an expression into an
+#' unrecognized spec, so reaching this function with one is a cuplyr bug,
+#' not a user mistake).
 #' @keywords internal
 lower_window <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
@@ -325,7 +329,7 @@ lower_window <- function(ast, source_ptr) {
   }
 
   for (spec in specs) {
-    validate_window_spec_w2(spec)
+    validate_window_spec(spec)
   }
 
   group_indices <- if (length(ast$group_cols) > 0) {
@@ -363,68 +367,48 @@ lower_window <- function(ast, source_ptr) {
   gpu_window(input_ptr, frames, group_indices)
 }
 
-#' Is a window spec in W2/W3's lowerable set?
+#' Is a window spec lowerable by `src/ops_window.cpp`'s `gpu_window()`?
 #'
-#' The non-throwing predicate half of `validate_window_spec_w2()` (below),
-#' factored out so Phase 5 task W3's `mutate()` wiring (`R/mutate.R`,
+#' The non-throwing predicate half of `validate_window_spec()` (below),
+#' factored out so `mutate()`'s window wiring (`R/mutate.R`,
 #' `mutate_window()`) can check every spec a decomposition plan produces
 #' *before* pushing any AST node -- a window call whose spec isn't lowerable
-#' yet (any `"rank"` spec other than bare `row_number()`, or the entire
-#' `"agg"` family, both W4 work) must fall back to `gpu_fallback()` cleanly,
-#' never surface `validate_window_spec_w2()`'s internal-error text to a
-#' user, and never partially push GPU ops before discovering the need to
-#' fall back (see `scratchpad/phase5_window_design.md` section 1.3's "Never
+#' (an unrecognized `fn`, i.e. a genuine cuplyr bug rather than a
+#' user-facing shape) must fall back to `gpu_fallback()` cleanly, never
+#' surface `validate_window_spec()`'s internal-error text to a user, and
+#' never partially push GPU ops before discovering the need to fall back
+#' (see `scratchpad/phase5_window_design.md` section 1.3's "Never
 #' half-lower").
 #'
-#' See `lower_window()`'s own docs and section 2.2's RANK-spec constraint
-#' ("a rank spec's value col must equal the frame's sole order col"): bare
-#' `row_number()` (no value column at all, i.e. `R/window.R`'s
-#' `extract_one_window_call()` only sets `order_cols` for a `"rank"`-kind
-#' spec that HAS a value column) is the one `"rank"`-kind spec that
-#' trivially satisfies this (it has no order col to compare against, and
-#' none is needed for a COUNT_ALL scan) -- every other `"rank"` spec
-#' (`row_number(x)`, `min_rank()`, `dense_rank()`, `percent_rank()`,
-#' `cume_dist()`) and the entire `"agg"` family are W4 work.
+#' As of Phase 5 task W4, every window `fn` with a registry `window` entry
+#' is lowerable (`"shift"`, `"rank"`, `"scan"`, and `"agg"` kinds all have
+#' C++ support in `gpu_window()`) -- this predicate now only guards against
+#' an `fn` with NO registry entry at all, or a registry entry whose
+#' `window` field is `NULL` (not a window-class op), which should be
+#' unreachable in practice (nothing in `R/window.R`'s decomposition
+#' machinery can produce such a spec) but is checked defensively so a
+#' bug surfaces as a clear internal error instead of silently mis-executing.
 #'
 #' @param spec A `window_spec()` structure (`R/window.R`)
 #' @return `TRUE`/`FALSE`
 #' @keywords internal
-window_spec_w3_lowerable <- function(spec) {
-  if (identical(spec$fn, "row_number") && length(spec$order_cols) == 0) {
-    return(TRUE)
-  }
-
+window_spec_lowerable <- function(spec) {
   entry <- ir_call_registry[[spec$fn]]
   kind <- if (!is.null(entry)) entry$window$kind else NULL
-  identical(kind, "shift") || identical(kind, "scan")
+  identical(kind, "shift") || identical(kind, "rank") ||
+    identical(kind, "scan") || identical(kind, "agg")
 }
 
-#' Reject any window spec whose kind W2's C++ kernel doesn't implement yet
+#' Reject any window spec `gpu_window()` doesn't implement
 #'
-#' See `window_spec_w3_lowerable()`'s docs for the shared predicate this
-#' wraps with user-facing (well, internal-error-facing: see that function's
-#' docs) `stop()` calls.
+#' See `window_spec_lowerable()`'s docs for the shared predicate this
+#' wraps with an internal-error `stop()` call.
 #' @keywords internal
-validate_window_spec_w2 <- function(spec) {
-  if (window_spec_w3_lowerable(spec)) {
+validate_window_spec <- function(spec) {
+  if (window_spec_lowerable(spec)) {
     return(invisible(TRUE))
   }
 
-  entry <- ir_call_registry[[spec$fn]]
-  kind <- if (!is.null(entry)) entry$window$kind else NULL
-
-  if (identical(kind, "rank")) {
-    stop("internal: window kind 'rank' (fn = '", spec$fn, "') is not implemented ",
-         "until Phase 5 W4 (ranked row_number()/min_rank()/dense_rank()/",
-         "percent_rank()/cume_dist()); W2 only supports bare row_number() ",
-         "(the no-order COUNT_ALL form).", call. = FALSE)
-  }
-  if (identical(kind, "agg")) {
-    stop("internal: window kind 'agg' (fn = '", spec$fn, "') is not implemented ",
-         "until Phase 5 W4 (mean()/sum()/min()/max()/n()/sd()/var()/first()/",
-         "last()/nth()); W2 only supports the scan and shift families.",
-         call. = FALSE)
-  }
   stop("internal: lower_window() received an unrecognized window fn '",
        spec$fn, "'.", call. = FALSE)
 }
