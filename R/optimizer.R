@@ -264,6 +264,25 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       ast$right <- push_down_projections(ast$right, right_needed, group_cols)
       ast
     },
+    # Defensive (`window` is a barrier -- see `is_barrier()`, R/ast.R --
+    # so in the current architecture this branch is never reached via the
+    # normal barrier-splitting entry point in `optimize_with_barriers()`,
+    # exactly like the pre-existing "arrange"/"summarise"/"distinct"/"slice"
+    # cases above/below, which are barriers too). Per
+    # `scratchpad/phase5_window_design.md` section 2.1: union every spec's
+    # `value_col`/`order_cols` plus the node's own `group_cols` into the
+    # required set and never insert a select (a window spec's result
+    # depends on the full row set/order, not a droppable projection).
+    "window" = {
+      spec_cols <- unique(unlist(
+        lapply(ast$specs, function(s) c(s$value_col, s$order_cols)),
+        use.names = FALSE
+      ))
+      spec_cols <- spec_cols[!is.na(spec_cols)]
+      needed <- union(union(required_cols, ast$group_cols), spec_cols)
+      ast$input <- push_down_projections(ast$input, needed, ast$group_cols)
+      ast
+    },
     {
       if (!is.null(ast$input)) {
         ast$input <- push_down_projections(ast$input, required_cols, group_cols)
@@ -484,6 +503,18 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
 
       ast$left <- prune_dead_columns(ast$left, left_needed, group_cols)
       ast$right <- prune_dead_columns(ast$right, right_needed, group_cols)
+      ast
+    },
+    # Defensive, same rationale as push_down_projections()'s "window" case
+    # above: union in every spec's referenced columns, never drop anything.
+    "window" = {
+      spec_cols <- unique(unlist(
+        lapply(ast$specs, function(s) c(s$value_col, s$order_cols)),
+        use.names = FALSE
+      ))
+      spec_cols <- spec_cols[!is.na(spec_cols)]
+      needed <- union(union(required_cols, ast$group_cols), spec_cols)
+      ast$input <- prune_dead_columns(ast$input, needed, ast$group_cols)
       ast
     },
     {

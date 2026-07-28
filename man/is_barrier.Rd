@@ -33,5 +33,11 @@ the result.
 above: the simplest safe choice for a schema-only rename, avoiding the
 need to translate column references through its name map for anything
 pushed across it.
+
+\code{window} (\code{scratchpad/phase5_window_design.md} section 2.1) is a barrier:
+every window spec's result depends on the FULL row set (which rows exist)
+and the current row order (frames are built from a stable sort of
+group+order columns) -- nothing may be pushed across it, the same
+reasoning as \code{arrange}/\code{slice}.
 }
 \keyword{internal}

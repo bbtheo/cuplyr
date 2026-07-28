@@ -166,6 +166,27 @@ ast_slice <- function(input, mode, amount = NULL, is_prop = NULL,
            with_ties = with_ties, na_rm = na_rm)
 }
 
+#' Create a window AST node
+#'
+#' One node per window-decomposition "stage" (`scratchpad/phase5_window_design.md`
+#' section 2): evaluates every `window_spec()` in `specs` (`R/window.R`)
+#' against `input`'s current row set/order and APPENDS one new column per
+#' spec (never replaces an existing column -- temp names guarantee this).
+#' Built by a verb's own window-wiring (`R/mutate.R`/`R/filter.R`/`R/slice.R`,
+#' from W3/W5/W6/W7 onward) or, in W2, by hand for `test-window-native.R`.
+#'
+#' @param input Input AST node
+#' @param specs List of `window_spec()` structures (`R/window.R`)
+#' @param group_cols Character vector of group-by column names --
+#'   `character()` for an ungrouped window (section 3: lowering substitutes
+#'   a constant key column and skips the sort when there's also no
+#'   `order_cols` on every spec)
+#' @return An ast_window node
+#' @keywords internal
+ast_window <- function(input, specs, group_cols = character()) {
+  ast_node("window", input = input, specs = specs, group_cols = group_cols)
+}
+
 #' Create a rename AST node
 #'
 #' Schema-only: `old_names[i]` in the *input* schema becomes `new_names[i]`
@@ -505,6 +526,19 @@ infer_schema.ast_join <- function(node) {
 }
 
 #' @export
+infer_schema.ast_window <- function(node) {
+  input_schema <- infer_schema(node$input)
+
+  out_names <- vapply(node$specs, `[[`, character(1), "output_col")
+  out_types <- vapply(node$specs, `[[`, character(1), "output_type")
+
+  list(
+    names = c(input_schema$names, out_names),
+    types = c(input_schema$types, out_types)
+  )
+}
+
+#' @export
 infer_schema.NULL <- function(node) {
   list(names = character(0), types = character(0))
 }
@@ -573,12 +607,18 @@ is_opaque_expression <- function(expr_text) {
 #' need to translate column references through its name map for anything
 #' pushed across it.
 #'
+#' `window` (`scratchpad/phase5_window_design.md` section 2.1) is a barrier:
+#' every window spec's result depends on the FULL row set (which rows exist)
+#' and the current row order (frames are built from a stable sort of
+#' group+order columns) -- nothing may be pushed across it, the same
+#' reasoning as `arrange`/`slice`.
+#'
 #' @param node An AST node
 #' @return TRUE if node is a barrier
 #' @keywords internal
 is_barrier <- function(node) {
   if (is.null(node)) return(FALSE)
-  node$type %in% c("arrange", "barrier", "summarise", "distinct", "slice", "rename")
+  node$type %in% c("arrange", "barrier", "summarise", "distinct", "slice", "rename", "window")
 }
 
 #' Get the depth of an AST tree
@@ -679,6 +719,9 @@ print.ast_node <- function(x, ..., indent = 0) {
     },
     "rename" = {
       cat(" [", length(x$old_names), " renamed]", sep = "")
+    },
+    "window" = {
+      cat(" [", length(x$specs), " specs]", sep = "")
     }
   )
 
@@ -714,6 +757,7 @@ ast_to_string <- function(node) {
     "distinct" = paste0("distinct[", paste(node$key_cols, collapse = ","), "]"),
     "slice" = paste0("slice[", node$mode, "]"),
     "rename" = paste0("rename[", paste(node$old_names, "->", node$new_names, collapse = ","), "]"),
+    "window" = paste0("window[", length(node$specs), "]"),
     node$type
   )
 

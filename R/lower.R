@@ -25,6 +25,7 @@ lower_and_execute <- function(ast, source_ptr) {
     "distinct" = lower_distinct(ast, source_ptr),
     "slice" = lower_slice(ast, source_ptr),
     "rename" = lower_rename(ast, source_ptr),
+    "window" = lower_window(ast, source_ptr),
     "barrier" = lower_and_execute(ast$input, source_ptr),
     stop("Unknown AST node type: ", ast$type, call. = FALSE)
   )
@@ -286,5 +287,160 @@ lower_join <- function(ast, source_ptr) {
       gpu_select(out, idx - 1L)
     },
     stop("Unknown join type: ", ast$join_type, call. = FALSE)
+  )
+}
+
+#' Lower window node
+#'
+#' Phase 5, task W2 (`scratchpad/phase5_window_design.md` section 2.1):
+#' binds every spec's `value_col`/`order_cols` (and the node's own
+#' `group_cols`) to 0-based indices against `ast$input`'s schema, groups the
+#' specs into "frames" keyed by `(order_cols, order_desc)`, and hands ONE
+#' `gpu_window()` call (`src/ops_window.cpp`) to the C++ side: the
+#' six-step stable-sort / gather / groupby-scan-or-shift / scatter-back
+#' algorithm (section 2.2).
+#'
+#' `out_pos` (each spec's 0-based position among the node's own appended
+#' columns) is simply the spec's position in `ast$specs` -- the same order
+#' `infer_schema.ast_window()` (`R/ast.R`) appends spec output columns in, so
+#' the two always agree on where a given spec's result lands in the final
+#' schema.
+#'
+#' W2 scope only: the "shift" family (`lag()`/`lead()`) and the "scan"
+#' family (`cumsum()`/`cummax()`/`cummin()`/`cumprod()`, plus bare
+#' `row_number()`'s no-order COUNT_ALL form) -- see
+#' `validate_window_spec_w2()`. Every other window kind (any `"rank"` spec
+#' other than bare `row_number()`, and the entire `"agg"` family) is W4
+#' work and hits a hard internal error here (never a user-facing message:
+#' no verb decomposes an expression into one of those specs yet, so
+#' reaching this function with one is a cuplyr bug, not a user mistake).
+#' @keywords internal
+lower_window <- function(ast, source_ptr) {
+  input_ptr <- lower_and_execute(ast$input, source_ptr)
+  input_schema <- infer_schema(ast$input)
+
+  specs <- ast$specs
+  if (length(specs) == 0) {
+    return(input_ptr)
+  }
+
+  for (spec in specs) {
+    validate_window_spec_w2(spec)
+  }
+
+  group_indices <- if (length(ast$group_cols) > 0) {
+    match(ast$group_cols, input_schema$names) - 1L
+  } else {
+    integer(0)
+  }
+
+  # Group specs into frames keyed by (order_cols, order_desc), preserving
+  # each frame's first-appearance order (irrelevant for correctness --
+  # gpu_window() assembles the output purely from each spec's own
+  # out_pos -- but keeps `show_query()`/debugging output deterministic).
+  frame_keys <- vapply(specs, function(s) {
+    paste(c(s$order_cols, ifelse(s$order_desc, "D", "A")), collapse = "")
+  }, character(1))
+  uniq_keys <- unique(frame_keys)
+
+  frames <- lapply(uniq_keys, function(k) {
+    member_idx <- which(frame_keys == k)
+    s0 <- specs[[member_idx[1]]]
+
+    order_idx <- if (length(s0$order_cols) > 0) {
+      match(s0$order_cols, input_schema$names) - 1L
+    } else {
+      integer(0)
+    }
+
+    cpp_specs <- lapply(member_idx, function(i) {
+      build_window_cpp_spec(specs[[i]], i - 1L, input_schema)
+    })
+
+    list(order_idx = order_idx, order_desc = s0$order_desc, specs = cpp_specs)
+  })
+
+  gpu_window(input_ptr, frames, group_indices)
+}
+
+#' Reject any window spec whose kind W2's C++ kernel doesn't implement yet
+#'
+#' See `lower_window()`'s own docs and section 2.2's RANK-spec constraint
+#' ("a rank spec's value col must equal the frame's sole order col"): bare
+#' `row_number()` (no value column at all, i.e. `R/window.R`'s
+#' `extract_one_window_call()` only sets `order_cols` for a `"rank"`-kind
+#' spec that HAS a value column) is the one `"rank"`-kind spec that
+#' trivially satisfies this (it has no order col to compare against, and
+#' none is needed for a COUNT_ALL scan) -- every other `"rank"` spec
+#' (`row_number(x)`, `min_rank()`, `dense_rank()`, `percent_rank()`,
+#' `cume_dist()`) and the entire `"agg"` family are W4 work.
+#' @keywords internal
+validate_window_spec_w2 <- function(spec) {
+  entry <- ir_call_registry[[spec$fn]]
+  kind <- if (!is.null(entry)) entry$window$kind else NULL
+
+  if (identical(spec$fn, "row_number") && length(spec$order_cols) == 0) {
+    return(invisible(TRUE))
+  }
+  if (identical(kind, "shift") || identical(kind, "scan")) {
+    return(invisible(TRUE))
+  }
+  if (identical(kind, "rank")) {
+    stop("internal: window kind 'rank' (fn = '", spec$fn, "') is not implemented ",
+         "until Phase 5 W4 (ranked row_number()/min_rank()/dense_rank()/",
+         "percent_rank()/cume_dist()); W2 only supports bare row_number() ",
+         "(the no-order COUNT_ALL form).", call. = FALSE)
+  }
+  if (identical(kind, "agg")) {
+    stop("internal: window kind 'agg' (fn = '", spec$fn, "') is not implemented ",
+         "until Phase 5 W4 (mean()/sum()/min()/max()/n()/sd()/var()/first()/",
+         "last()/nth()); W2 only supports the scan and shift families.",
+         call. = FALSE)
+  }
+  stop("internal: lower_window() received an unrecognized window fn '",
+       spec$fn, "'.", call. = FALSE)
+}
+
+#' Translate one R-side `window_spec()` into the plain list `gpu_window()`
+#' (`src/ops_window.cpp`) expects
+#'
+#' `default_value`/`default_valid` collapse `window_spec()`'s `default`
+#' field (an IR literal node, or `NULL`) into the shape `build_scalar()`
+#' (`src/expr_eval.hpp`) already accepts elsewhere: no default supplied,
+#' and an explicit `default = NA` (`spec$default$na`), both mean the same
+#' thing for `lag()`/`lead()` (an invalid/NA fill scalar of the value
+#' column's own type) -- so both collapse to `default_valid = FALSE`,
+#' `default_value = NULL`.
+#'
+#' @param spec A `window_spec()` structure
+#' @param out_pos 0-based position of this spec among the whole
+#'   `ast_window` node's appended columns
+#' @param schema The node input's schema (`list(names=, types=)`)
+#' @return A plain list: `list(fn, value_idx, out_type, out_pos, n,
+#'   default_value, default_valid, na_rm)`
+#' @keywords internal
+build_window_cpp_spec <- function(spec, out_pos, schema) {
+  value_idx <- if (is.na(spec$value_col)) {
+    NA_integer_
+  } else {
+    match(spec$value_col, schema$names) - 1L
+  }
+
+  default_value <- NULL
+  default_valid <- FALSE
+  if (!is.null(spec$default) && !isTRUE(spec$default$na)) {
+    default_value <- spec$default$value
+    default_valid <- TRUE
+  }
+
+  list(
+    fn = spec$fn,
+    value_idx = value_idx,
+    out_type = spec$output_type,
+    out_pos = as.integer(out_pos),
+    n = if (is.na(spec$n)) NA_integer_ else as.integer(spec$n),
+    default_value = default_value,
+    default_valid = default_valid,
+    na_rm = isTRUE(spec$na_rm)
   )
 }
