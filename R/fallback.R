@@ -172,33 +172,19 @@ rowwise.tbl_gpu <- function(.data, ...) {
 # =============================================================================
 # slice() family
 #
-# slice()/slice_head()/slice_tail()/slice_min()/slice_max() moved to
-# R/slice.R (GPU-native for ungrouped input, Phase 3 task 2) -- see
-# ast_slice (R/ast.R), lower_slice() (R/lower.R), src/ops_slice.cpp. Each of
-# those verbs still calls through to gpu_fallback() itself for the cases
-# that remain out of scope: grouped input, on-the-fly `by=`/`.by=`
-# grouping, and (for slice()) index expressions the GPU-native path can't
-# evaluate without a data mask. slice_sample() is untouched here: it always
-# uses the CPU fallback regardless of grouping (needs dplyr's own RNG
-# stream reproduced bit-for-bit -- a separate task).
+# slice()/slice_head()/slice_tail()/slice_min()/slice_max()/slice_sample()
+# moved to R/slice.R (GPU-native for ungrouped input, Phase 3 task 2;
+# grouped/`by=` Phase 5 task W7; slice_sample() Phase 5 task W8) -- see
+# ast_slice (R/ast.R), lower_slice() (R/lower.R), src/ops_slice.cpp, and
+# (for slice_sample()) slice_sample_native() in R/slice.R, which has no
+# AST node at all. Each of those verbs still calls through to
+# gpu_fallback() itself for the cases that remain out of scope: grouped
+# input, on-the-fly `by=`/`.by=` grouping, and (for slice()) index
+# expressions the GPU-native path can't evaluate without a data mask;
+# slice_sample() falls back only for `weight_by=` (needs arbitrary R-side
+# probability weighting `sample.int()` doesn't need to reproduce here,
+# since gpu_fallback() re-runs real dplyr, which already gets it right).
 # =============================================================================
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr slice_sample
-slice_sample.tbl_gpu <- function(.data, ..., n, prop, by = NULL,
-                                  weight_by = NULL, replace = FALSE) {
-  dots <- rlang::enquos(...)
-  by_quo <- rlang::enquo(by)
-  weight_quo <- rlang::enquo(weight_by)
-  np <- list()
-  if (!missing(n)) np$n <- n
-  if (!missing(prop)) np$prop <- prop
-  gpu_fallback("slice_sample", .data, function(tbl) {
-    rlang::inject(dplyr::slice_sample(tbl, !!!dots, !!!np, by = !!by_quo,
-                                       weight_by = !!weight_quo, replace = replace))
-  })
-}
 
 # =============================================================================
 # rename() / rename_with() / relocate() / pull()

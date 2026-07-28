@@ -19,8 +19,11 @@
 # `slice()` index vector with duplicates/reordering (the grouped desugar's
 # `rn %in% i` predicate can only express a subset-membership test, not an
 # arbitrary per-group reordering/duplication); `slice_min()`/`slice_max()`
-# with an `order_by` expression the IR can't parse; `slice_sample()`
-# (Phase 5 W8) -- see the dispatch section at the bottom of this file.
+# with an `order_by` expression the IR can't parse. `slice_sample()` (Phase
+# 5 W8) is GPU-native for ungrouped/group_by()/by= (CPU-side RNG index
+# generation + GPU gather, R/slice.R::slice_sample_native()), falling back
+# only for `weight_by=` -- see test-dplyr-slice-sample.R for its dedicated
+# coverage.
 #
 # Semantics below were verified empirically against dplyr 1.2.1 (and
 # cross-checked against dplyr's own `get_slice_size()`/`slice_rank_idx()`
@@ -731,18 +734,7 @@ test_that("grouped slice_min() with an order_by expression the IR can't parse fa
   expect_equal(tibble::as_tibble(result), tibble::as_tibble(dplyr::ungroup(oracle)))
 })
 
-test_that("slice_sample() still always falls back, ungrouped, group_by()-grouped, or by=", {
-  skip_if_no_gpu()
-  df <- oracle_slice_df()
-  gt <- tbl_gpu(df)
-
-  withr::local_options(cuplyr.fallback = "warn")
-  expect_warning(collect(dplyr::slice_sample(gt, n = 2)), "fell back to CPU evaluation")
-
-  grouped_df <- tibble::tibble(g = c(1, 1, 2, 2), x = c(10, 20, 30, 40))
-  ggt <- tbl_gpu(grouped_df) |> dplyr::group_by(g)
-  expect_warning(collect(dplyr::slice_sample(ggt, n = 1)), "fell back to CPU evaluation")
-
-  ugt <- tbl_gpu(grouped_df)
-  expect_warning(collect(dplyr::slice_sample(ugt, n = 1, by = g)), "fell back to CPU evaluation")
-})
+# slice_sample() is GPU-native (ungrouped, group_by()-grouped, and by=) as
+# of Phase 5 task W8 -- see test-dplyr-slice-sample.R for its full
+# parity/dispatch coverage (including the `weight_by=` fallback case,
+# which is the only shape that still falls back to CPU).

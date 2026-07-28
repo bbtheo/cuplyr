@@ -4,7 +4,6 @@
 \alias{fallback-verbs}
 \alias{reframe.tbl_gpu}
 \alias{rowwise.tbl_gpu}
-\alias{slice_sample.tbl_gpu}
 \alias{semi_join.tbl_gpu}
 \alias{anti_join.tbl_gpu}
 \alias{nest_join.tbl_gpu}
@@ -39,8 +38,6 @@
 \method{reframe}{tbl_gpu}(.data, ..., .by = NULL)
 
 \method{rowwise}{tbl_gpu}(.data, ...)
-
-\method{slice_sample}{tbl_gpu}(.data, ..., n, prop, by = NULL, weight_by = NULL, replace = FALSE)
 
 \method{semi_join}{tbl_gpu}(x, y, by = NULL, copy = FALSE, ...)
 

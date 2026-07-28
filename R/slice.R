@@ -1,10 +1,15 @@
 # GPU-native slice() family (Phase 3 task 2: ungrouped; Phase 5 task W7:
-# grouped/`by=`/`.by=`)
+# grouped/`by=`/`.by=`; Phase 5 task W8: slice_sample())
 #
-# Covers slice()/slice_head()/slice_tail()/slice_min()/slice_max(), for
-# ungrouped input, `group_by()`-grouped input, and on-the-fly `by=`/`.by=`
-# grouping. `slice_sample()` stays on the CPU fallback (R/fallback.R) --
-# it needs dplyr's own RNG stream reproduced bit-for-bit (Phase 5 task W8).
+# Covers slice()/slice_head()/slice_tail()/slice_min()/slice_max()/
+# slice_sample(), for ungrouped input, `group_by()`-grouped input, and
+# on-the-fly `by=`/`.by=` grouping. `slice_sample()`'s native path
+# (bottom of this file) is architecturally different from the other four:
+# there is no AST node at all -- indices are generated on the CPU (to
+# reproduce dplyr's own R-level RNG stream bit-for-bit) and only the
+# final gather runs on the GPU, via the existing `gpu_slice_indices()`
+# primitive. `weight_by=` still always falls back to CPU (R/fallback.R
+# no longer defines `slice_sample.tbl_gpu` -- it moved here).
 #
 # `slice_group_mode()` below is the single place that classifies a call's
 # grouping ("none" / "group_by" / "by"), shared by all four verbs. "none"
@@ -896,4 +901,227 @@ head.tbl_gpu <- function(x, n = 6L, ...) {
 #' @export
 tail.tbl_gpu <- function(x, n = 6L, ...) {
   slice_tail.tbl_gpu(x, n = n)
+}
+
+# -----------------------------------------------------------------------------
+# slice_sample() (Phase 5, task W8)
+# -----------------------------------------------------------------------------
+
+# Resolve `slice_sample()`'s per-table/per-group sample size, matching
+# dplyr's own `get_slice_size(allow_outsize = replace)` contract exactly
+# (`dplyr:::get_slice_size`, verified empirically against dplyr 1.2.1):
+# for a NON-NEGATIVE `amount`, `replace = TRUE` skips the `[0, n]` clamp
+# entirely (oversampling with replacement is allowed to produce a result
+# LARGER than `n`); for a NEGATIVE `amount`, the clamp always applies,
+# `replace` or not -- this asymmetry is real dplyr behavior, not a cuplyr
+# simplification (`get_slice_size()`'s `n < 0`/`prop < 0` branches never
+# consult `allow_outsize` at all). `prop`'s raw amount is `prop * n`
+# (computed against the SAME `n` that gets clamped against, matching
+# dplyr's `!!slice_input$prop * n` substitution); `n`'s raw amount is
+# `amount` itself.
+#
+# @param amount Numeric scalar, as resolved by `resolve_slice_amount()`
+# @param is_prop Logical scalar, as resolved by `resolve_slice_amount()`
+# @param n Integer scalar: the table's (or group's) actual row count
+# @param replace Logical scalar, `slice_sample()`'s own `replace=` argument
+# @return An integer scalar, the number of rows to draw for this
+#   table/group
+# @keywords internal
+compute_slice_sample_size <- function(amount, is_prop, n, replace) {
+  raw <- if (isTRUE(is_prop)) amount * n else amount
+
+  if (amount >= 0) {
+    if (isTRUE(replace)) {
+      floor(raw)
+    } else {
+      max(0, min(floor(raw), n))
+    }
+  } else {
+    max(0, min(ceiling(n + raw), n))
+  }
+}
+
+#' GPU-native `slice_sample()` (Phase 5, task W8)
+#'
+#' Reproduces dplyr's own RNG stream bit-for-bit by generating row indices
+#' on the CPU with the exact same `sample.int()` call sequence real dplyr
+#' makes, then gathering those indices on the GPU via the existing
+#' `gpu_slice_indices()` primitive (Phase 3.2) -- there is no AST node for
+#' `slice_sample()` at all, unlike every other verb in this package: the
+#' index vector is the whole point (it must be generated on the CPU to
+#' consume R's global RNG state the same way real dplyr does), so there is
+#' nothing left for a lazy AST/optimizer to defer.
+#'
+#' Semantics verified empirically against dplyr 1.2.1 before implementing
+#' (`dplyr:::slice_sample.data.frame`, `dplyr:::sample_int`,
+#' `dplyr:::get_slice_size`, `dplyr:::compute_by_groups`, source read via
+#' `getAnywhere()`/`print()`):
+#'   - Ungrouped: exactly one `sample.int(nrow, size, replace = replace)`
+#'     call (`dplyr:::sample_int`'s own body: `if (size == 0L) integer(0)
+#'     else sample.int(n, size, prob = wt, replace = replace)`, `wt` always
+#'     `NULL` here since `weight_by=` never reaches this function -- see
+#'     below).
+#'   - `group_by()`-grouped: dplyr iterates groups in ASCENDING GROUP-KEY
+#'     order (NA-key group last) -- the same order `dplyr::group_by()`
+#'     itself produces (confirmed by literally calling
+#'     `dplyr::group_by()`/`dplyr::group_rows()` on the collected group
+#'     columns here, so this can never drift from real dplyr's own
+#'     ordering). One `sample.int()` call per group, in that order,
+#'     consuming the RNG stream in that same order; the resulting rows are
+#'     concatenated in the SAME order (group-key order), matching real
+#'     dplyr's own output row order exactly (confirmed empirically: this
+#'     is genuinely a reordering relative to input row order, same as the
+#'     other grouped `slice_*()` verbs' W7 finding). Output stays grouped
+#'     by the same columns, matching real dplyr.
+#'   - `by=`: dplyr's own `compute_by_groups()` groups via
+#'     `vctrs::vec_group_loc()`, which orders groups by FIRST-APPEARANCE
+#'     position in the input -- NOT ascending group-key order (confirmed
+#'     empirically with a case where ascending-key order and
+#'     first-appearance order differ: the RNG draw order AND the output
+#'     row order both follow first-appearance order, not ascending key,
+#'     and NOT a final sort-by-original-row-position either). This
+#'     CORRECTS `scratchpad/phase5_window_design.md` §7's own text ("`by=`
+#'     => sort() final indices (original row order)"), which was written
+#'     before this empirical check and turns out to describe neither the
+#'     RNG order nor the output order dplyr actually uses -- the real rule
+#'     is exactly the grouped case's rule, just with a different (first-
+#'     appearance, not ascending-key) group ordering source, i.e. exactly
+#'     analogous to `summarise(.by=)`'s and W7's grouped-`slice()`'s
+#'     already-documented first-appearance rule. Implemented here via
+#'     `vctrs::vec_group_loc()` directly (the identical function
+#'     `compute_by_groups()` itself calls), rather than reimplementing
+#'     first-appearance grouping by hand, to remove any group-order
+#'     divergence risk. Output is always ungrouped, matching `by=`'s
+#'     general contract.
+#'   - `n=`/`prop=` resolution: see `compute_slice_sample_size()`'s own
+#'     docs for the exact (and slightly asymmetric) `replace=`-dependent
+#'     clamp rule, verified against `dplyr:::get_slice_size()`'s source.
+#'     Oversampling `n` without `replace` does NOT error -- it silently
+#'     clamps to the table's (or group's) own row count, same as
+#'     `slice_head()`/`slice_tail()`.
+#'   - `weight_by=` always falls back to CPU (see `slice_sample.tbl_gpu()`
+#'     below) -- `gpu_fallback()` re-runs the real `dplyr::slice_sample()`
+#'     call, which already reproduces the identical `sample.int(...,
+#'     prob = wt)` behavior, so there is nothing to gain (and real
+#'     complexity to lose, since `wt` needs the ACTUAL data values, not
+#'     just group columns) from a native path for this case.
+#'
+#' @param .data A `tbl_gpu` object (already materialized if it had pending
+#'   lazy ops -- the caller is responsible for calling `compute()` first,
+#'   since CPU-side index generation needs a real row count/grouping,
+#'   which a lazy AST doesn't have)
+#' @param gm A `list(mode, group_cols)` as returned by `slice_group_mode()`
+#' @param amount,is_prop As resolved by `resolve_slice_amount()`
+#' @param replace Logical scalar, `slice_sample()`'s own `replace=`
+#' @return A new (always eager) `tbl_gpu`
+#' @keywords internal
+slice_sample_native <- function(.data, gm, amount, is_prop, replace) {
+  materialized <- if (has_pending_ops(.data)) compute(.data) else .data
+  schema <- materialized$schema
+
+  if (identical(gm$mode, "none")) {
+    nrow <- gpu_dim(materialized$ptr)[1]
+    size <- compute_slice_sample_size(amount, is_prop, nrow, replace)
+    idx <- if (size == 0L) integer(0) else sample.int(nrow, size, replace = replace)
+    out_groups <- character()
+  } else {
+    group_cols <- gm$group_cols
+
+    # "select() + collect() ONLY the group columns" -- built directly from
+    # the existing gpu_select()/collect() primitives rather than routing
+    # through the dplyr::select() S3 generic, since this is an internal
+    # projection with no user-facing meaning of its own.
+    key_col_idx <- match(group_cols, schema$names) - 1L
+    key_ptr <- gpu_select(materialized$ptr, key_col_idx)
+    key_schema <- list(names = group_cols, types = schema$types[key_col_idx + 1L])
+    key_tbl <- collect(new_tbl_gpu(ptr = key_ptr, schema = key_schema))
+
+    rows_list <- if (identical(gm$mode, "group_by")) {
+      dplyr::group_rows(dplyr::group_by(key_tbl, !!!rlang::syms(group_cols)))
+    } else {
+      vctrs::vec_group_loc(key_tbl)$loc
+    }
+
+    idx <- integer(0)
+    for (rows in rows_list) {
+      gsize <- length(rows)
+      size <- compute_slice_sample_size(amount, is_prop, gsize, replace)
+      local_idx <- if (size == 0L) integer(0) else sample.int(gsize, size, replace = replace)
+      idx <- c(idx, rows[local_idx])
+    }
+
+    out_groups <- if (identical(gm$mode, "group_by")) group_cols else character()
+  }
+
+  new_ptr <- gpu_slice_indices(materialized$ptr, as.double(idx))
+  new_tbl_gpu(ptr = new_ptr, schema = schema, groups = out_groups)
+}
+
+#' Sample rows
+#'
+#' Keeps a random sample of rows of a GPU table, similar to
+#' `dplyr::slice_sample()`. Ungrouped, `group_by()`-grouped, and `by=`
+#' calls all run entirely on the GPU for the actual row gather (Phase 5,
+#' task W8): row indices are generated on the CPU (to reproduce dplyr's
+#' own RNG stream bit-for-bit, see `slice_sample_native()`'s own docs for
+#' the full recipe/group-ordering rules), then gathered via
+#' `gpu_slice_indices()`. `weight_by=` still transparently falls back to
+#' CPU evaluation (see [gpu_fallback()]) -- weighted sampling needs the
+#' actual (potentially computed) column values, not just row counts/group
+#' columns.
+#'
+#' @param .data A `tbl_gpu` object created by [tbl_gpu()].
+#' @param ... Not used; for extensibility, must be empty.
+#' @param n Number of rows to sample. Default `1` if neither `n` nor
+#'   `prop` is supplied. Negative values are clamped like
+#'   [slice_head.tbl_gpu()]'s `n`. With `replace = TRUE`, a non-negative
+#'   `n`/`prop` is NOT clamped to the table's (or group's) row count --
+#'   oversampling with replacement is allowed and produces a larger
+#'   result; without `replace`, oversampling silently clamps (no error).
+#' @param prop Proportion of rows to sample (`n = prop * nrow(.data)`,
+#'   subject to the same clamp rule as `n`).
+#' @param by Optional on-the-fly grouping columns, GPU-native (Phase 5,
+#'   task W8): row indices are drawn (and the result ordered) by each
+#'   group's FIRST-APPEARANCE position in `.data` (see
+#'   `slice_sample_native()`'s own docs), and the result is always
+#'   ungrouped. Supplying `by` when `.data` is already grouped (via
+#'   `group_by()`) is an error, matching dplyr.
+#' @param weight_by Sampling weights. Always falls back to CPU evaluation
+#'   (see [gpu_fallback()]) -- not GPU-native.
+#' @param replace Whether to sample with replacement.
+#'
+#' @return A `tbl_gpu` object with the sampled rows.
+#'
+#' @export
+#' @importFrom dplyr slice_sample
+slice_sample.tbl_gpu <- function(.data, ..., n, prop, by = NULL,
+                                  weight_by = NULL, replace = FALSE) {
+  dots <- rlang::enquos(...)
+  by_quo <- rlang::enquo(by)
+  weight_quo <- rlang::enquo(weight_by)
+  np <- list()
+  if (!missing(n)) np$n <- n
+  if (!missing(prop)) np$prop <- prop
+
+  # resolve_by() (via slice_group_mode()) raises dplyr's own
+  # "Can't supply `by`..." error when `.data` is already grouped -- that
+  # error is real, correct behavior and must propagate, not be swallowed
+  # into a fallback, so this call is deliberately OUTSIDE any tryCatch()
+  # (same pattern as slice_head.tbl_gpu() etc.).
+  gm <- slice_group_mode(.data, by_quo, "by")
+
+  if (length(dots) == 0 && rlang::quo_is_null(weight_quo)) {
+    amt <- tryCatch(resolve_slice_amount(np$n, np$prop), error = function(e) NULL)
+    if (!is.null(amt)) {
+      was_lazy <- identical(.data$exec_mode, "lazy")
+      result <- slice_sample_native(.data, gm, amt$amount, amt$is_prop, replace)
+      if (was_lazy) result <- as_lazy(result)
+      return(result)
+    }
+  }
+
+  gpu_fallback("slice_sample", .data, function(tbl) {
+    rlang::inject(dplyr::slice_sample(tbl, !!!dots, !!!np, by = !!by_quo,
+                                       weight_by = !!weight_quo, replace = replace))
+  })
 }
