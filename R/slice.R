@@ -132,18 +132,16 @@ resolve_slice_dots <- function(dots) {
 # under the user's own name -- this one is always dropped again before the
 # result is returned, see R/lower.R::lower_slice()'s `mode == "rank"` case).
 #
+# A thin wrapper around unique_temp_name() (R/window.R), which generalizes
+# this exact collision-avoidance scheme (Phase 5 task W1: window
+# decomposition needs the identical logic for its own `..win*..`/
+# `..winarg*..` temp columns, so the one implementation now lives there).
+#
 # @param existing_names Character vector of names already in use
 # @return A character scalar not in `existing_names`
 # @keywords internal
 unique_slice_order_name <- function(existing_names) {
-  base <- "..slice_order_by.."
-  name <- base
-  i <- 0L
-  while (name %in% existing_names) {
-    i <- i + 1L
-    name <- paste0(base, i)
-  }
-  name
+  unique_temp_name("..slice_order_by..", existing_names)
 }
 
 # Resolve slice_min()/slice_max()'s `order_by` quosure against the IR

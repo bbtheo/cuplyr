@@ -266,6 +266,25 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       return(ir_parse_when_reduce(expr, env, schema, fn_name))
     }
 
+    # Phase 5 (window functions): lag()/lead() (n=/default=/order_by= named
+    # controls), first()/last()/nth() (order_by=/default=/na_rm=), and
+    # ntile() (x= is optional with a non-trivial default, and its
+    # "supplied or not" distinction changes the desugar -- see
+    # ir_parse_ntile()'s own docs) all need real argument-name-aware
+    # matching the generic per-arg registry loop below can't do (it only
+    # ever sees positional args, see ir_parse_shift_call()'s own docs) --
+    # so, like case_when()/case_match()/etc. above, these are special-cased
+    # here, before registry dispatch.
+    if (fn_name %in% c("lag", "lead")) {
+      return(ir_parse_shift_call(expr, env, schema, fn_name))
+    }
+    if (fn_name %in% c("first", "last", "nth")) {
+      return(ir_parse_first_last_nth(expr, env, schema, fn_name))
+    }
+    if (identical(fn_name, "ntile")) {
+      return(ir_parse_ntile(expr, env, schema))
+    }
+
     canonical <- ir_op_alias(fn_name)
     args_raw <- as.list(expr)[-1]
 
@@ -826,6 +845,273 @@ ir_parse_when_reduce <- function(expr, env, schema, fn_name) {
 }
 
 # -----------------------------------------------------------------------------
+# Phase 5 (window functions, scratchpad/phase5_window_design.md section 1.1):
+# lag()/lead(), first()/last()/nth(), ntile() -- parsed via dedicated
+# top-level dispatch (see the `fn_name %in% c(...)` checks in
+# ir_parse_expr()'s call-handling branch above), not the registry's generic
+# per-arg loop, because they have named controls that can be supplied out of
+# position or omitted entirely (`lag(x, default = 0)` skipping `n=`,
+# `nth(x, k, order_by = y)`, ...) -- something the generic loop can't
+# express, since it only ever sees `as.list(expr)[-1]` positionally (see
+# ir_parse_case_when()'s sibling functions above for the file's established
+# "named args need dedicated dispatch" precedent). Argument matching itself
+# reuses rlang::call_match() (rlang >= 1.1.0, already a hard dependency)
+# against a small prototype function whose formals mirror the real dplyr
+# signature -- this gets R's own argument-matching semantics (named,
+# positional, or mixed, in any order) for free, rather than hand-rolling it.
+#
+# None of `order_by=`/`with_order()` is implemented this wave (see the W1
+# task scope note in scratchpad/phase5_window_design.md's sequencing
+# table: "order_by()/with_order() hooks" is W4 work) -- any call supplying
+# it, even a value that happens to equal the default, is treated as
+# unsupported and falls back (this can't distinguish "explicitly passed
+# order_by = NULL" from "omitted", but that distinction has no observable
+# effect anyway since both mean "no ordering").
+# -----------------------------------------------------------------------------
+
+#' Evaluate a raw (unparsed) expression as a constant in `env`
+#'
+#' No data mask is supplied, so a genuine column reference (or anything
+#' else that isn't resolvable from `env` alone) raises an ordinary R
+#' error, caught here and reported as "not a constant" (`ok = FALSE`)
+#' rather than propagating -- the same "no data mask" trick
+#' `resolve_slice_dots()` (`R/slice.R`) already relies on to distinguish
+#' plain R values from column references.
+#'
+#' @param raw_expr A language object (not a quosure)
+#' @param env The environment to evaluate against
+#' @return `list(ok = <logical>, value = <the evaluated R value, or NULL>)`
+#' @keywords internal
+ir_eval_constant <- function(raw_expr, env) {
+  tryCatch(
+    list(ok = TRUE, value = rlang::eval_tidy(rlang::new_quosure(raw_expr, env))),
+    error = function(e) list(ok = FALSE, value = NULL)
+  )
+}
+
+#' Parse `lag(x, n = 1L, default = NULL, order_by = NULL)` / `lead(...)`
+#'
+#' Builds a window-class `ir_call(fn_name, list(x_ir), meta = list(n = ,
+#' default = ))` node (never lowered directly -- see the [ir_call_registry]
+#' entry / [ir_bind()]'s guard). `n` must be a non-negative whole-number
+#' constant (dplyr itself requires this); `default`, if supplied, must be a
+#' CONSTANT expression -- evaluable via [ir_eval_constant()] with no data
+#' mask, so `default = -1`, `default = 2L + 3L`, or any other
+#' column-free expression all work (not just a bare literal token), but
+#' `default = first(x)` (a real, column-referencing dplyr default) is not
+#' implemented this wave. `order_by=` is not implemented this wave (see
+#' module note above) -- supplying it at all makes this return `NULL`.
+#'
+#' @keywords internal
+ir_parse_shift_call <- function(expr, env, schema, fn_name) {
+  proto <- function(x, n = 1L, default = NULL, order_by = NULL) NULL
+  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  if (is.null(present)) {
+    return(NULL)
+  }
+  present_args <- as.list(present)[-1]
+
+  if (!is.null(present_args$order_by)) {
+    return(NULL)  # order_by=: not implemented this wave (W4)
+  }
+  if (is.null(present_args$x)) {
+    return(NULL)
+  }
+
+  x_ir <- ir_parse_expr(present_args$x, env, schema)
+  if (is.null(x_ir)) {
+    return(NULL)
+  }
+
+  n_value <- 1L
+  if (!is.null(present_args$n)) {
+    n_eval <- ir_eval_constant(present_args$n, env)
+    n_val <- n_eval$value
+    if (!n_eval$ok || !is.numeric(n_val) || length(n_val) != 1 || is.na(n_val) ||
+        n_val != round(n_val) || n_val < 0) {
+      return(NULL)
+    }
+    n_value <- as.integer(n_val)
+  }
+
+  default_ir <- NULL
+  if (!is.null(present_args$default)) {
+    default_eval <- ir_eval_constant(present_args$default, env)
+    if (!default_eval$ok) {
+      return(NULL)  # non-constant default: not implemented this wave
+    }
+    default_val <- default_eval$value
+    if (!is.null(default_val)) {
+      if (!is.atomic(default_val) || length(default_val) != 1) {
+        return(NULL)  # non-scalar default: not implemented this wave
+      }
+      default_ir <- ir_lit_from_r(default_val)
+    }
+  }
+
+  ir_call(fn_name, list(x_ir), meta = list(n = n_value, default = default_ir))
+}
+
+#' Parse `first(x, ...)` / `last(x, ...)` / `nth(x, n, ...)`
+#'
+#' Only the bare `x` (and, for `nth()`, a constant-integer `n`) shape is
+#' implemented this wave: any of `order_by=`/`default=`/`na_rm=` being
+#' present at all -- even at its own default value -- makes this return
+#' `NULL` (see the module note above; agg-family window lowering with a
+#' real `order_by` frame is W4 work). Builds a window-class
+#' `ir_call(fn_name, list(x_ir))` node (`nth()` additionally carries `meta
+#' = list(n = <int>)`, the (1-based, possibly negative) element position).
+#'
+#' @keywords internal
+ir_parse_first_last_nth <- function(expr, env, schema, fn_name) {
+  proto <- if (identical(fn_name, "nth")) {
+    function(x, n, order_by = NULL, default = NULL, na_rm = FALSE) NULL
+  } else {
+    function(x, order_by = NULL, default = NULL, na_rm = FALSE) NULL
+  }
+
+  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  if (is.null(present)) {
+    return(NULL)
+  }
+  present_args <- as.list(present)[-1]
+
+  if (!is.null(present_args$order_by) || !is.null(present_args$default) ||
+      !is.null(present_args$na_rm)) {
+    return(NULL)  # not implemented this wave
+  }
+  if (is.null(present_args$x)) {
+    return(NULL)
+  }
+
+  x_ir <- ir_parse_expr(present_args$x, env, schema)
+  if (is.null(x_ir)) {
+    return(NULL)
+  }
+
+  if (identical(fn_name, "nth")) {
+    if (is.null(present_args$n)) {
+      return(NULL)
+    }
+    n_eval <- ir_eval_constant(present_args$n, env)
+    n_val <- n_eval$value
+    if (!n_eval$ok || !is.numeric(n_val) || length(n_val) != 1 || is.na(n_val) ||
+        n_val != round(n_val) || n_val == 0) {
+      return(NULL)
+    }
+    return(ir_call("nth", list(x_ir), meta = list(n = as.integer(n_val))))
+  }
+
+  ir_call(fn_name, list(x_ir))
+}
+
+#' Parse `ntile(x = row_number(), n)`
+#'
+#' Fully desugars at parse time into dplyr's own `ntile()` algorithm
+#' (verified against `dplyr:::ntile`'s actual body, not just its docs;
+#' cross-checked numerically against a battery of cases including ties, a
+#' non-multiple group size, all-`NA`, and a zero-row input) expressed in
+#' plain IR plus two nested window calls -- `row_number(x)` (or bare
+#' `row_number()` when `x` is omitted) and, only when `x` is supplied,
+#' `sum(if_else(is.na(x), 0L, 1L))` (the non-missing count; when `x` is
+#' omitted, dplyr's own `len` is just the group size, i.e. plain `n()`).
+#' Both are ordinary window-class `ir_call` nodes at this point -- their
+#' actual extraction into `..win*..` temp columns happens later, in
+#' `R/window.R`'s `ir_extract_windows()`/`plan_window_stages()`, not here.
+#'
+#' Whether `x` was actually supplied changes the desugar (dplyr's own
+#' source only re-ranks `x` -- `x <- row_number(x)` -- when it's NOT the
+#' default), so this dispatches on `rlang::call_match(..., defaults =
+#' FALSE)` (which omits an unsupplied formal entirely, unlike `defaults =
+#' TRUE`) rather than merely on whether `x`'s resolved value looks like
+#' `row_number()`.
+#'
+#' `n` must be a constant, positive, whole-number scalar (dplyr's own
+#' `check_number_whole()` requirement); `n` missing entirely (dplyr's `n`
+#' has no default) falls back, since there's nothing sensible to build.
+#'
+#' The division-then-floor steps in dplyr's own formula (`(x + (larger_size
+#' - 1L)) / larger_size`, then a final `as.integer(floor(bins))`) are
+#' expressed here via `%/%` (floor division) directly instead: every
+#' numerator/denominator pair in both branches is non-negative by
+#' construction (ranks start at 1, sizes are always >= 1), and floor
+#' division equals true-division-then-floor for non-negative operands, so
+#' this produces exactly the same result while keeping the whole expression
+#' integer-typed throughout (matching ntile()'s own always-integer output)
+#' instead of needing a separate cast step the IR has no primitive for.
+#'
+#' @keywords internal
+ir_parse_ntile <- function(expr, env, schema) {
+  proto <- function(x = row_number(), n) NULL
+  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  if (is.null(present)) {
+    return(NULL)
+  }
+  present_args <- as.list(present)[-1]
+
+  if (is.null(present_args$n)) {
+    return(NULL)  # n is mandatory (no default); dplyr itself errors here
+  }
+  n_eval <- ir_eval_constant(present_args$n, env)
+  n_val <- n_eval$value
+  if (!n_eval$ok || !is.numeric(n_val) || length(n_val) != 1 || is.na(n_val) ||
+      n_val != round(n_val) || n_val <= 0) {
+    return(NULL)
+  }
+  n_lit <- ir_lit_from_r(as.integer(n_val))
+
+  x_supplied <- !is.null(present_args$x)
+
+  if (x_supplied) {
+    x_ir <- ir_parse_expr(present_args$x, env, schema)
+    if (is.null(x_ir)) {
+      return(NULL)
+    }
+    rn <- ir_call("row_number", list(x_ir))
+    indicator <- ir_call("if_else", list(
+      ir_call("is.na", list(x_ir)), ir_lit_from_r(0L), ir_lit_from_r(1L)
+    ))
+    len <- ir_call("sum", list(indicator))
+  } else {
+    rn <- ir_call("row_number", list())
+    len <- ir_call("n", list())
+  }
+
+  n_larger         <- ir_call("%%", list(len, n_lit))
+  size             <- ir_call("/", list(len, n_lit))
+  larger_size      <- ir_call("ceil", list(size))
+  smaller_size     <- ir_call("floor", list(size))
+  larger_threshold <- ir_call("*", list(larger_size, n_larger))
+
+  branch_a <- ir_call("%/%", list(
+    ir_call("+", list(rn, ir_call("-", list(larger_size, ir_lit_from_r(1L))))),
+    larger_size
+  ))
+  branch_b <- ir_call("+", list(
+    ir_call("%/%", list(
+      ir_call("+", list(
+        ir_call("-", list(rn, larger_threshold)),
+        ir_call("-", list(smaller_size, ir_lit_from_r(1L)))
+      )),
+      smaller_size
+    )),
+    n_larger
+  ))
+
+  bins <- ir_call("if_else", list(
+    ir_call("<=", list(rn, larger_threshold)),
+    branch_a,
+    branch_b
+  ))
+
+  ir_call("if_else", list(
+    ir_call("==", list(len, ir_lit_from_r(0L))),
+    ir_lit(value = NULL, type = "INT32", na = TRUE),
+    bins
+  ))
+}
+
+# -----------------------------------------------------------------------------
 # Tree Helpers
 # -----------------------------------------------------------------------------
 
@@ -877,6 +1163,45 @@ ir_is_const <- function(ir) {
   length(ir_cols(ir)) == 0
 }
 
+#' Does an IR (sub)tree contain a window-function call anywhere?
+#'
+#' Phase 5 (window functions, `scratchpad/phase5_window_design.md` section
+#' 1.1): `TRUE` iff any `call` node in the subtree has a non-`NULL` `window`
+#' field in its [ir_call_registry] entry. Used by [ir_bind()]'s window
+#' guard, by the decomposition machinery in `R/window.R`
+#' (`ir_extract_windows()`/`plan_window_stages()`), and will be used by the
+#' as-yet-unwired grouped `mutate()`/`filter()` (W3/W5) to detect when a
+#' parsed expression needs the window decomposition path at all.
+#'
+#' Accepts either a single IR node (identified by the `cuplyr_ir` class
+#' every [ir_col()]/[ir_lit()]/[ir_call()] node carries) or a plain
+#' (possibly unnamed) list of IR nodes -- e.g. a call node's own `$args` --
+#' so callers can check a call's argument list directly without unpacking
+#' it first.
+#'
+#' @param ir An IR node, a list of IR nodes, or `NULL`
+#' @return Logical scalar
+#' @keywords internal
+ir_has_window <- function(ir) {
+  if (is.null(ir)) {
+    return(FALSE)
+  }
+
+  if (inherits(ir, "cuplyr_ir")) {
+    if (!identical(ir$kind, "call")) {
+      return(FALSE)
+    }
+    entry <- ir_call_registry[[ir$op]]
+    if (!is.null(entry) && !is.null(entry$window)) {
+      return(TRUE)
+    }
+    return(any(vapply(ir$args, ir_has_window, logical(1))))
+  }
+
+  # A plain list of IR nodes (e.g. a call node's `$args`).
+  any(vapply(ir, ir_has_window, logical(1)))
+}
+
 #' Bind 0-based column indices onto every `col` node in an IR tree
 #'
 #' Per section 2.1's decision, indices are resolved against a schema only
@@ -908,6 +1233,23 @@ ir_bind <- function(ir, schema) {
 
   if (ir$kind == "lit") {
     return(ir)
+  }
+
+  # Phase 5 (window functions) invariant: a window-class op (registry entry
+  # has a non-NULL `window` field, see ir_call_registry's window entries and
+  # ir_has_window()) must NEVER reach lowering directly -- it can only ever
+  # appear as an intermediate node that R/window.R's ir_extract_windows()/
+  # plan_window_stages() rewrites away (into an ir_col() reference to a
+  # materialized window-spec's output column) before a verb's own
+  # ast_mutate()/ast_filter()/etc. node is built. Nothing in the package
+  # wires window ops into a verb yet (W1 is dormant), so this guard should
+  # be unreachable in practice; it exists so that a future verb (or a
+  # currently-live mutate()/filter() call that now happens to *parse*
+  # successfully because "mean"/"lag"/etc. are registry entries) fails
+  # loudly here instead of silently mis-executing as an ordinary AST op.
+  entry <- ir_call_registry[[ir$op]]
+  if (!is.null(entry) && !is.null(entry$window)) {
+    stop("internal: window op '", ir$op, "' reached lowering", call. = FALSE)
   }
 
   ir$args <- lapply(ir$args, ir_bind, schema = schema)
@@ -1038,7 +1380,19 @@ type_arith_op <- function(op) {
 }
 type_bool8 <- function(arg_types) "BOOL8"
 type_float64 <- function(arg_types) "FLOAT64"
+type_int32 <- function(arg_types) "INT32"
 type_arg1 <- function(arg_types) arg_types[1]
+
+# Window-class `sum()`'s output type -- reuses make_aggregation()'s own
+# switch verbatim (R/ast.R): INT32 promotes to INT64, everything else
+# (including INT64 itself, matching that function's existing behavior)
+# defaults to FLOAT64. Phase 5 (window functions) note: this intentionally
+# mirrors that pre-existing table rather than "fixing" it, per
+# scratchpad/phase5_window_design.md section 4's "output types reuse
+# make_aggregation()'s table verbatim" instruction.
+type_window_sum <- function(arg_types) {
+  if (identical(arg_types[1], "INT32")) "INT64" else "FLOAT64"
+}
 
 # abs() preserves its argument's type -- EXCEPT a logical (BOOL8) argument,
 # which R promotes to integer (`typeof(abs(TRUE))` is "integer", not
@@ -1183,11 +1537,130 @@ ir_resolve_value_nas <- function(nodes, schema) {
   nodes
 }
 
+# -----------------------------------------------------------------------------
+# Phase 5 (window functions): cummean()/cumall()/cumany()/consecutive_id()
+# registry `parse` hooks -- these are ordinary registry entries (single
+# positional `x`, no ambiguous named controls), so unlike lag()/lead()/
+# first()/last()/nth()/ntile() above they need no dedicated top-level
+# dispatch: the registry's own generic per-arg loop in ir_parse_expr()
+# already parses their one argument correctly before calling `entry$parse`.
+#
+# Each fully desugars into plain IR containing nested window-class calls
+# (cumsum/cummin/cummax/row_number/sum/n) -- see R/window.R's
+# ir_extract_windows()/plan_window_stages() for how those get decomposed
+# into actual `..win*..` temp columns later; nothing here needs to know
+# about that. Every formula below was verified empirically against dplyr
+# 1.2.1 (not re-derived from the design doc's table alone) via a battery of
+# hand-checked cases including NA-adjacency runs and ties; see the W1 task
+# notes for the exact cases run.
+# -----------------------------------------------------------------------------
+
+#' Desugar `cummean(x)` into `cumsum(x) / row_number()`
+#'
+#' Verified against dplyr 1.2.1: `cummean(c(1,2,NA,4))` is `1, 1.5, NA, NA`
+#' -- i.e. cummean inherits cumsum()'s own (sticky, once cudf's scan gets
+#' its Phase-5 sticky-NA fix in W2 -- see phase5_window_design.md section
+#' 4) NA propagation for free, simply by dividing by row_number() (which is
+#' never NA), with no special-casing needed here.
+#'
+#' @keywords internal
+ir_parse_cummean <- function(args, schema) {
+  ir_call("/", list(ir_call("cumsum", list(args[[1]])), ir_call("row_number", list())))
+}
+
+#' Desugar `cumall(x)`/`cumany(x)` into a tri-state `cummin`/`cummax` encoding
+#'
+#' Verified against dplyr 1.2.1: `cumall(c(T,T,NA,T,F,T))` is `T,T,NA,NA,
+#' F,F`; `cumany(c(F,NA,T,F))` is `F,NA,T,T` -- both are exactly `cummin`/
+#' `cummax` (respectively) over the tri-state encoding FALSE=0, NA=1,
+#' TRUE=2, then decoded back to BOOL8 (`scratchpad/phase5_window_design.md`
+#' section 0's ground truth table, cross-checked directly here rather than
+#' taken on faith).
+#'
+#' `if_else()`'s bare-NA value-position adoption (`ir_resolve_value_nas()`)
+#' is applied explicitly to the decode step's `yes`/`no` pair here, exactly
+#' as if_else()'s own registry `parse` hook would -- this desugar builds
+#' `ir_call("if_else", ...)` nodes directly rather than routing back through
+#' `ir_parse_expr()`, so that adoption has to be done by hand.
+#'
+#' @param scan_op `"cummin"` (cumall) or `"cummax"` (cumany)
+#' @keywords internal
+ir_parse_cumall_cumany <- function(args, schema, scan_op) {
+  x <- args[[1]]
+  encoded <- ir_call("if_else", list(
+    ir_call("is.na", list(x)),
+    ir_lit_from_r(1L),
+    ir_call("if_else", list(x, ir_lit_from_r(2L), ir_lit_from_r(0L)))
+  ))
+  s <- ir_call(scan_op, list(encoded))
+  decode_values <- ir_resolve_value_nas(
+    list(ir_lit(value = NULL, type = NULL, na = TRUE), ir_call("==", list(s, ir_lit_from_r(2L)))),
+    schema
+  )
+  ir_call("if_else", c(list(ir_call("==", list(s, ir_lit_from_r(1L)))), decode_values))
+}
+
+#' Desugar single-column `consecutive_id(x)` into a two-stage `lag`/
+#' `row_number`/`cumsum` formula
+#'
+#' Multi-column `consecutive_id(a, b, ...)` is not implemented this wave
+#' (returns `NULL`, i.e. falls back) -- this is enforced for free by the
+#' registry entry's `arity = 1L` (a 2+-arg call fails the generic arity
+#' check in `ir_parse_expr()` before `parse` is ever invoked), so this
+#' function itself only ever sees exactly one argument.
+#'
+#' Verified against dplyr 1.2.1, INCLUDING NA-adjacency (the tricky part:
+#' two consecutive `NA`s are treated as "the same value", i.e. NOT a new
+#' group, which the `is.na(x) & is.na(lx)` disjunct captures):
+#' `consecutive_id(c(1,NA,NA,2))` is `1,2,2,3`; `consecutive_id(c(NA,NA,1,
+#' 1,NA))` is `1,1,2,2,3`; `consecutive_id(c(1,2,2,NA,NA,2))` is
+#' `1,2,2,3,3,4`.
+#'
+#' Builds `cumsum(if_else(rn==1L, 1L, if_else(same_as_prev, 0L, 1L)))`
+#' where `rn = row_number()` and `same_as_prev = coalesce(x == lag(x),
+#' FALSE) | (is.na(x) & is.na(lag(x)))`. `lag(x)`/`row_number()` are
+#' themselves window calls nested inside `cumsum()`'s argument -- exactly
+#' the "nested window calls needing 2 decomposition passes" shape `R/
+#' window.R`'s `ir_extract_windows()`/`plan_window_stages()` handles
+#' generically (see test-window-plan.R), so this desugar doesn't need to
+#' know anything about staging itself.
+#'
+#' @keywords internal
+ir_parse_consecutive_id <- function(args, schema) {
+  x <- args[[1]]
+  lx <- ir_call("lag", list(x), meta = list(n = 1L, default = NULL))
+  rn <- ir_call("row_number", list())
+
+  same_as_prev <- ir_call("|", list(
+    ir_call("coalesce", list(ir_call("==", list(x, lx)), ir_lit_from_r(FALSE))),
+    ir_call("&", list(ir_call("is.na", list(x)), ir_call("is.na", list(lx))))
+  ))
+
+  increment <- ir_call("if_else", list(
+    ir_call("==", list(rn, ir_lit_from_r(1L))),
+    ir_lit_from_r(1L),
+    ir_call("if_else", list(same_as_prev, ir_lit_from_r(0L), ir_lit_from_r(1L)))
+  ))
+
+  ir_call("cumsum", list(increment))
+}
+
 #' Registry of supported expression-IR operations
 #'
 #' See the module-level comment above and section 6 of
 #' `scratchpad/phase1_expression_engine.md` for the extension contract this
 #' implements. Each entry: `list(arity, parse, type, lower)`.
+#'
+#' Phase 5 (`scratchpad/phase5_window_design.md` section 1.1) adds a fifth
+#' field, `window`: `NULL` for every pre-Phase-5 entry (unchanged), or
+#' `list(kind = "shift"|"rank"|"scan"|"agg")` for a window-class op. `window`
+#' non-`NULL` and `lower` non-`NULL` are mutually exclusive -- a window-class
+#' entry always has `lower = NULL` (window ops are never `ir_call` handlers
+#' in `src/expr_eval.hpp`, see this file's own module comment for that
+#' boundary, and are structurally prevented from reaching lowering at all
+#' by [ir_bind()]'s guard). `ir_infer_type()` needs no change: a window
+#' entry's `type` function is looked up and called exactly like any other
+#' entry's.
 #'
 #' @keywords internal
 ir_call_registry <- list(
@@ -1398,5 +1871,143 @@ ir_call_registry <- list(
     parse = NULL,
     type = type_replace_when,
     lower = list(handler = "replace_when")
-  )
+  ),
+
+  # --- Phase 5 (window functions): window-class entries ---
+  # See scratchpad/phase5_window_design.md sections 1.1/4. Every entry here
+  # has `lower = NULL` (window ops never reach lowering under their own op
+  # name -- ir_bind()'s guard enforces this defensively) and a `window`
+  # field carrying the broad C++ lowering family ("shift"/"rank"/"scan"/
+  # "agg") that R/window.R's ir_extract_windows() reads (only for "rank",
+  # to decide whether the value column doubles as the frame's order
+  # column) -- the family itself has no other R-side effect this wave;
+  # W2/W4 are where each family actually gets lowered.
+  #
+  # lag()/lead(): parsed by ir_parse_shift_call() (dedicated dispatch,
+  # never via this entry's own `parse`/generic loop -- see that function's
+  # docs for why named args force this). `type = type_arg1`: the shifted
+  # value keeps x's own type (the fill default, when absent, is an invalid
+  # scalar of that same type -- W2's C++ concern, not this entry's).
+  "lag" = list(arity = NA_integer_, parse = NULL, type = type_arg1,
+               lower = NULL, window = list(kind = "shift")),
+  "lead" = list(arity = NA_integer_, parse = NULL, type = type_arg1,
+                lower = NULL, window = list(kind = "shift")),
+
+  # row_number(): 0- or 1-arg (dplyr: bare `row_number()` inside a mutate/
+  # filter is sequential position; `row_number(x)` ranks by x, ties broken
+  # by original position -- rank_method::FIRST). Needs its own `parse` hook
+  # (arity = NA) purely to re-validate the 0-or-1 arg count, since the
+  # registry's generic arity check only fires for a single fixed arity;
+  # the args themselves are ordinary positional parses, so no dedicated
+  # top-level dispatch is needed (unlike lag()/lead()'s named controls).
+  "row_number" = list(
+    arity = NA_integer_,
+    parse = function(args, schema) {
+      if (length(args) > 1) {
+        return(NULL)
+      }
+      ir_call("row_number", args)
+    },
+    type = type_int32,
+    lower = NULL,
+    window = list(kind = "rank")
+  ),
+  "min_rank" = list(arity = 1L, parse = NULL, type = type_int32,
+                     lower = NULL, window = list(kind = "rank")),
+  "dense_rank" = list(arity = 1L, parse = NULL, type = type_int32,
+                       lower = NULL, window = list(kind = "rank")),
+  "percent_rank" = list(arity = 1L, parse = NULL, type = type_float64,
+                         lower = NULL, window = list(kind = "rank")),
+  "cume_dist" = list(arity = 1L, parse = NULL, type = type_float64,
+                      lower = NULL, window = list(kind = "rank")),
+
+  # cumsum/cummax/cummin/cumprod: single-arg scan family. cumsum's type
+  # reuses "+"'s own D5 promotion function verbatim (calling
+  # infer_mutate_output_type("+", arg_types, NULL) with a single input type
+  # gives exactly BOOL8/INT32 -> INT32, INT64 -> INT64, else FLOAT64 --
+  # dplyr's own cumsum() promotion, confirmed by inspection of that
+  # function's Rule 5 branch); cummax/cummin preserve the argument's type
+  # (matching base R); cumprod always returns FLOAT64 (matching base R:
+  # `typeof(cumprod(1:3))` is "double").
+  "cumsum" = list(arity = 1L, parse = NULL, type = type_arith_op("+"),
+                   lower = NULL, window = list(kind = "scan")),
+  "cummax" = list(arity = 1L, parse = NULL, type = type_arg1,
+                   lower = NULL, window = list(kind = "scan")),
+  "cummin" = list(arity = 1L, parse = NULL, type = type_arg1,
+                   lower = NULL, window = list(kind = "scan")),
+  "cumprod" = list(arity = 1L, parse = NULL, type = type_float64,
+                    lower = NULL, window = list(kind = "scan")),
+
+  # mean/sum/min/max/n/sd/var: agg-family window entries (aggregate +
+  # broadcast, see phase5_window_design.md section 4). These double as
+  # summarise()'s own aggregation function names, but summarise()'s parser
+  # (parse_aggregations(), R/summarise.R) never reaches ir_call_registry at
+  # all -- it has its own independent dispatch table -- so registering
+  # these here only affects expressions parsed via ir_parse_quo() (mutate()/
+  # filter(), and summarise()'s temp-column sub-expression preprocessing,
+  # which parses the *argument* of an aggregation call, never the
+  # aggregation function name itself). Output types reuse
+  # make_aggregation()'s own table verbatim (R/ast.R) except where that
+  # table doesn't cover a case at all (sum(): type_window_sum reimplements
+  # its exact switch branch, since arg_types here come from a window call's
+  # own arg rather than an aggregation struct's `input_type` field).
+  "mean" = list(arity = 1L, parse = NULL, type = type_float64,
+                 lower = NULL, window = list(kind = "agg")),
+  "sum" = list(arity = 1L, parse = NULL, type = type_window_sum,
+                lower = NULL, window = list(kind = "agg")),
+  "min" = list(arity = 1L, parse = NULL, type = type_arg1,
+                lower = NULL, window = list(kind = "agg")),
+  "max" = list(arity = 1L, parse = NULL, type = type_arg1,
+                lower = NULL, window = list(kind = "agg")),
+  "n" = list(arity = 0L, parse = NULL, type = type_int32,
+              lower = NULL, window = list(kind = "agg")),
+  "sd" = list(arity = 1L, parse = NULL, type = type_float64,
+               lower = NULL, window = list(kind = "agg")),
+  "var" = list(arity = 1L, parse = NULL, type = type_float64,
+                lower = NULL, window = list(kind = "agg")),
+
+  # first()/last()/nth(): agg-family, but order-sensitive (dplyr's own
+  # "first"/"last"/"nth row *of the group, in its current order*" -- W1
+  # only supports the no-order_by/no-default/no-na_rm shape, hence the
+  # dedicated dispatch in ir_parse_first_last_nth(); type = type_arg1
+  # (preserves the argument's own type, per phase5_window_design.md
+  # section 4's "-> arg type", NOT make_aggregation()'s generic table,
+  # which doesn't cover these three functions at all).
+  "first" = list(arity = NA_integer_, parse = NULL, type = type_arg1,
+                  lower = NULL, window = list(kind = "agg")),
+  "last" = list(arity = NA_integer_, parse = NULL, type = type_arg1,
+                 lower = NULL, window = list(kind = "agg")),
+  "nth" = list(arity = NA_integer_, parse = NULL, type = type_arg1,
+                lower = NULL, window = list(kind = "agg")),
+
+  # --- Phase 5: pure parse-time desugars that happen to produce window IR
+  # (window = NULL / lower = NULL, exactly like "between"/"log2"/"near"
+  # above -- these op names never survive to appear in a finished tree
+  # under their own name, only the window-class calls their `parse` hooks
+  # build do) ---
+  "cummean" = list(arity = 1L, parse = ir_parse_cummean, type = type_float64,
+                    lower = NULL, window = NULL),
+  "cumall" = list(
+    arity = 1L,
+    parse = function(args, schema) ir_parse_cumall_cumany(args, schema, "cummin"),
+    type = type_bool8,
+    lower = NULL,
+    window = NULL
+  ),
+  "cumany" = list(
+    arity = 1L,
+    parse = function(args, schema) ir_parse_cumall_cumany(args, schema, "cummax"),
+    type = type_bool8,
+    lower = NULL,
+    window = NULL
+  ),
+  "consecutive_id" = list(arity = 1L, parse = ir_parse_consecutive_id, type = type_int32,
+                           lower = NULL, window = NULL)
+
+  # ntile() is dispatched directly from ir_parse_expr() (ir_parse_ntile()),
+  # never through this registry at all (its "x supplied or not" distinction
+  # needs raw-call inspection the generic per-arg loop can't provide) -- so,
+  # unlike cummean()/cumall()/cumany()/consecutive_id() above, it has no
+  # entry here; ir_infer_type()/ir_bind() never need to look up "ntile" as
+  # an op name, since it never appears in a finished tree either.
 )

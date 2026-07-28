@@ -48,12 +48,22 @@ value that itself is \code{NA} is TRUE for \code{\%in\%} iff the set contains
 \code{NA}, never \code{NA} itself) and an empty set (\code{character(0)}, \code{c()},
 etc. -- always FALSE, for every row, including \code{NA} rows)
 \item \code{between(x, lo, hi)} (dplyr's definition: \code{x >= lo & x <= hi},
-including its \code{NA} propagation)
+including its \code{NA} propagation), \code{near(x, y, tol = )}
+(\code{abs(x - y) < tol}, matching \code{dplyr::near()} exactly)
 \item String-column comparisons (\code{==}/\code{!=}/\code{<}/\code{<=}/\code{>}/\code{>=}), against
 a literal or another string column
 \item Column-vs-column comparisons for every operator above
 \item Math on columns inside a predicate (\verb{+ - * / \%\% \%/\% ^}, \code{sqrt},
 \code{log}, \code{abs}, etc. -- the same set \code{mutate()} supports)
+\item \code{if_else()}, \code{case_when()}, \code{coalesce()}, \code{na_if()},
+\code{case_match()}, \code{recode_values()}, \code{replace_values()},
+\code{replace_when()} -- the same conditional/vector functions \code{mutate()}
+supports (see its own docs for the exact type-unification rules),
+usable anywhere inside a predicate, including as the whole predicate
+itself (e.g. \code{filter(case_when(x > 1 ~ TRUE, .default = FALSE))})
+\item \code{when_any(...)}/\code{when_all(...)} -- particularly useful inside
+\code{filter()} to combine several comma-separated conditions with \code{|}
+instead of \code{&} (e.g. \code{filter(when_any(x > 10, y < 0))})
 \item The \code{.data}/\code{.env} pronouns, and ordinary R symbols (a bare name
 that matches a column resolves to that column; otherwise it's
 evaluated as an environment variable -- "columns shadow the

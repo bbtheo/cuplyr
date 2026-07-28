@@ -83,11 +83,64 @@ arbitrarily nested (\code{(x + y) * z - 1}), and scalar-on-either-side
 \item Comparisons and logic: \code{==}, \code{!=}, \code{<}, \code{<=}, \code{>}, \code{>=}, \code{&},
 \code{|}, \code{!}, \code{xor()} -- these produce a \code{BOOL8} column, e.g.
 \code{mutate(is_big = x > 100)}
-\item \code{is.na()}, \code{between(x, lo, hi)}, \code{\%in\%}
+\item \code{is.na()}, \code{between(x, lo, hi)}, \code{near(x, y, tol = )}
+(\code{abs(x - y) < tol}, matching \code{dplyr::near()}'s own definition
+exactly), \code{\%in\%} (including a bare \code{NA} on the right-hand side,
+e.g. \code{x \%in\% NA}, matching \code{NA \%in\% NA} being \code{TRUE} in base R --
+not the same as an \emph{empty} set, which is always \code{FALSE})
 \item Math functions: \code{sqrt()}, \code{log()} (including \code{log(x, base)}),
 \code{log2()}, \code{log10()}, \code{exp()}, \code{abs()}, \code{floor()}, \code{ceiling()},
 \code{sin()}, \code{cos()}, \code{tan()}, \code{round(x)}/\code{round(x, digits)} (banker's
 rounding, matching R)
+\item \code{if_else(cond, yes, no, missing = NULL)} -- strict-but-promoting
+type unification across \code{yes}/\code{no}/\code{missing} (int/double/logical mix
+freely, like dplyr's vctrs-based common type; \code{STRING} only unifies
+with \code{STRING}). A \code{NA} condition produces \code{NA} (or \code{missing}, if
+supplied) in the output, matching dplyr exactly (this is NOT the same
+as treating a \code{NA} condition like \code{FALSE})
+\item \code{case_when(cond1 ~ val1, cond2 ~ val2, ..., .default = val)} --
+first-match-wins; a \code{NA} condition is treated as no match (falls
+through to the next clause, or \code{.default}); unmatched rows become a
+typed \code{NA} when \code{.default} isn't supplied; the same value-type
+unification rule as \code{if_else()} applies across every \code{val_i} plus
+\code{.default}. \verb{.ptype=}/\verb{.size=}/\verb{.unmatched=} are not yet supported.
+\item \code{coalesce(...)} -- first non-NA value per row, left to right,
+across any number of columns/scalars; same value-type unification
+rule as \code{if_else()}
+\item \code{na_if(x, y)} -- \code{x} with \code{NA} wherever \code{x == y}; the output
+always keeps \code{x}'s own type exactly (unlike \code{if_else()}/\code{coalesce()},
+\code{y} is never promoted into the result, only compared against)
+\item \code{case_match(.x, old_values ~ new_value, ..., .default = val)} --
+matches \code{.x} by VALUE against each clause's (possibly multi-element)
+left-hand side, first match wins; \code{NA} on a clause's left-hand side
+matches \code{.x}'s own \code{NA} elements (base R's \code{NA \%in\% NA} is \code{TRUE});
+unmatched rows become \code{.default} (typed \code{NA} if not supplied), with
+the same value-type unification rule as \code{case_when()} across every
+\code{new_value} plus \code{.default}. Deprecated upstream in dplyr 1.2 in
+favor of \code{recode_values()}/\code{replace_values()}, but still supported
+here. \verb{.ptype=} is not yet supported.
+\item \code{recode_values(x, old_values ~ new_value, ..., default = val)} --
+the non-deprecated equivalent of \code{case_match()} above (identical
+semantics, \code{default} instead of \code{.default}). The \verb{from=}/\verb{to=}
+vector-lookup-table interface and \verb{unmatched=}/\verb{ptype=} are not yet
+supported.
+\item \code{replace_values(x, old_values ~ new_value, ...)} -- like
+\code{recode_values()}, but TYPE STABLE: the output always keeps \code{x}'s own
+type (every \code{new_value} is cast to it, never unified/promoted), and
+unmatched rows keep their original \code{x} value (there is no
+\verb{default=}). The \verb{from=}/\verb{to=} interface is not yet supported.
+\item \code{replace_when(x, cond1 ~ val1, cond2 ~ val2, ...)} -- like
+\code{case_when()}, but boolean-condition clauses feeding the same
+type-stable-to-\code{x} / "unmatched rows keep \code{x}" behavior as
+\code{replace_values()} (a \code{NA} condition is treated as no match, same as
+\code{case_when()})
+\item \code{when_all(..., na_rm = FALSE)} / \code{when_any(..., na_rm = FALSE)}
+-- elementwise \code{&}/\code{|} generalized to any number of logical inputs
+(\code{when_any(x, y, z)} is \code{x | y | z}). \code{na_rm = TRUE} treats \code{NA} as
+each operator's identity element (\code{FALSE} for \code{when_any()}, \code{TRUE}
+for \code{when_all()}) rather than propagating it -- e.g.
+\code{when_any(NA, NA, na_rm = TRUE)} is \code{FALSE}, not \code{NA}. \verb{size=} is not
+yet supported.
 \item Plain column copies (\code{mutate(y = x)})
 \item A later dot in the same \code{mutate()} call referencing an earlier
 dot's output column (\code{mutate(a = x + y, b = a * 2)})
@@ -163,8 +216,10 @@ for a later phase (see \code{scratchpad/phase1_expression_engine.md}
 section 6)
 \item String manipulation (concatenation, case conversion, substr,
 regex, ...) -- only string \emph{comparison} is supported
-\item \code{if_else()}/\code{case_when()}/\code{coalesce()} -- planned for a later
-phase
+\item \code{case_when()}'s/\code{case_match()}'s \verb{.ptype=}/\verb{.size=}/\verb{.unmatched=}
+arguments, \code{recode_values()}'s/\code{replace_values()}'s \verb{from=}/\verb{to=}
+vector-lookup-table interface and \verb{unmatched=}/\verb{ptype=}, and
+\code{when_all()}'s/\code{when_any()}'s \verb{size=} -- planned for a later phase
 }
 An expression shape the IR doesn't recognize is currently a hard error
 (unlike \code{filter()}, which falls back to CPU evaluation for some

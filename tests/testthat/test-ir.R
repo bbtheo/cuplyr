@@ -380,8 +380,12 @@ test_that("an unregistered call referencing a column returns NULL (fallback)", {
 })
 
 test_that("a column-free call constant-folds via eval_tidy", {
+  # prod() (unlike max()/min()/sum()/mean(), Phase 5 window-class registry
+  # entries as of this task) is still genuinely unregistered, so this
+  # exercises the "call not in ir_call_registry at all" constant-fold
+  # branch, not a registered function's own arg-parsing path.
   schema <- list(names = "x", types = "FLOAT64")
-  ir <- ir_parse_quo(quo_in(quote(max(c(1, 2)))), schema)
+  ir <- ir_parse_quo(quo_in(quote(prod(c(1, 2)))), schema)
 
   expect_equal(ir$kind, "lit")
   expect_equal(ir$value, 2)
@@ -869,5 +873,290 @@ test_that("when_any() with zero dots is unsupported this wave (falls back)", {
 
 test_that("when_any()'s size= is unsupported this wave (falls back)", {
   ir <- ir_parse_quo(quo_in(quote(when_any(x > 1, size = 3))), schema_xyz)
+  expect_null(ir)
+})
+
+# -----------------------------------------------------------------------------
+# Phase 5 (window functions, scratchpad/phase5_window_design.md sections 0-1):
+# registry window= entries, ir_has_window(), ir_bind()'s window guard, and
+# the parse-hook desugars that PRODUCE window IR (cummean/cumall/cumany/
+# consecutive_id/ntile). Pure R, no GPU: this file's own module comment
+# ("dormant in Phase 1 task T1... nothing else in the package calls
+# ir_parse_quo()") still applies -- window functions are additionally
+# dormant on top of that, since no verb is wired to plan_window_stages()
+# yet (see test-window-plan.R for that machinery's own tests).
+# -----------------------------------------------------------------------------
+
+test_that("window-class registry entries exist with window non-NULL and lower NULL", {
+  window_ops <- c(
+    "lag", "lead", "row_number", "min_rank", "dense_rank", "percent_rank",
+    "cume_dist", "cumsum", "cummax", "cummin", "cumprod",
+    "mean", "sum", "min", "max", "n", "sd", "var", "first", "last", "nth"
+  )
+  for (op in window_ops) {
+    entry <- ir_call_registry[[op]]
+    expect_false(is.null(entry), info = op)
+    expect_false(is.null(entry$window), info = op)
+    expect_null(entry$lower, info = op)
+  }
+})
+
+test_that("window-class registry entries' `kind` matches the section 4 lowering family", {
+  expect_equal(ir_call_registry[["lag"]]$window$kind, "shift")
+  expect_equal(ir_call_registry[["lead"]]$window$kind, "shift")
+  expect_equal(ir_call_registry[["row_number"]]$window$kind, "rank")
+  expect_equal(ir_call_registry[["min_rank"]]$window$kind, "rank")
+  expect_equal(ir_call_registry[["dense_rank"]]$window$kind, "rank")
+  expect_equal(ir_call_registry[["percent_rank"]]$window$kind, "rank")
+  expect_equal(ir_call_registry[["cume_dist"]]$window$kind, "rank")
+  expect_equal(ir_call_registry[["cumsum"]]$window$kind, "scan")
+  expect_equal(ir_call_registry[["cummax"]]$window$kind, "scan")
+  expect_equal(ir_call_registry[["cummin"]]$window$kind, "scan")
+  expect_equal(ir_call_registry[["cumprod"]]$window$kind, "scan")
+  expect_equal(ir_call_registry[["mean"]]$window$kind, "agg")
+  expect_equal(ir_call_registry[["sum"]]$window$kind, "agg")
+  expect_equal(ir_call_registry[["n"]]$window$kind, "agg")
+  expect_equal(ir_call_registry[["first"]]$window$kind, "agg")
+  expect_equal(ir_call_registry[["last"]]$window$kind, "agg")
+  expect_equal(ir_call_registry[["nth"]]$window$kind, "agg")
+})
+
+test_that("desugar-only entries (cummean/cumall/cumany/consecutive_id) have window=NULL", {
+  for (op in c("cummean", "cumall", "cumany", "consecutive_id")) {
+    entry <- ir_call_registry[[op]]
+    expect_false(is.null(entry), info = op)
+    expect_null(entry$window, info = op)
+    expect_null(entry$lower, info = op)
+  }
+  # ntile() never appears in the registry at all -- it's dispatched
+  # directly from ir_parse_expr(), see ir_parse_ntile()'s own docs.
+  expect_null(ir_call_registry[["ntile"]])
+})
+
+test_that("ir_parse_quo() parses a bare window call (mean(x)) into a window ir_call", {
+  ir <- ir_parse_quo(quo_in(quote(mean(x))), schema_xyz)
+  expect_equal(ir$kind, "call")
+  expect_equal(ir$op, "mean")
+  expect_equal(ir$args[[1]]$name, "x")
+})
+
+test_that("ir_parse_quo() parses row_number() with 0 args", {
+  ir <- ir_parse_quo(quo_in(quote(row_number())), schema_xyz)
+  expect_equal(ir$op, "row_number")
+  expect_equal(length(ir$args), 0)
+})
+
+test_that("ir_parse_quo() parses row_number(x) with 1 arg", {
+  ir <- ir_parse_quo(quo_in(quote(row_number(x))), schema_xyz)
+  expect_equal(ir$op, "row_number")
+  expect_equal(ir$args[[1]]$name, "x")
+})
+
+test_that("ir_parse_quo() rejects row_number() with 2 args", {
+  ir <- ir_parse_quo(quo_in(quote(row_number(x, y))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("n() parses with 0 args", {
+  ir <- ir_parse_quo(quo_in(quote(n())), schema_xyz)
+  expect_equal(ir$op, "n")
+  expect_equal(length(ir$args), 0)
+})
+
+test_that("lag(x) defaults n=1L, default=NULL", {
+  ir <- ir_parse_quo(quo_in(quote(lag(x))), schema_xyz)
+  expect_equal(ir$op, "lag")
+  expect_equal(ir$args[[1]]$name, "x")
+  expect_equal(ir$meta$n, 1L)
+  expect_null(ir$meta$default)
+})
+
+test_that("lag(x, 2) and lag(x, n = 2) both set meta$n = 2L", {
+  ir1 <- ir_parse_quo(quo_in(quote(lag(x, 2))), schema_xyz)
+  ir2 <- ir_parse_quo(quo_in(quote(lag(x, n = 2))), schema_xyz)
+  expect_equal(ir1$meta$n, 2L)
+  expect_equal(ir2$meta$n, 2L)
+})
+
+test_that("lag(x, default = 0) works even though n= is skipped (named-arg matching)", {
+  ir <- ir_parse_quo(quo_in(quote(lag(x, default = 0))), schema_xyz)
+  expect_equal(ir$op, "lag")
+  expect_equal(ir$meta$n, 1L)
+  expect_equal(ir$meta$default$value, 0)
+})
+
+test_that("lead(x, n = 3, default = -1) sets both meta fields", {
+  ir <- ir_parse_quo(quo_in(quote(lead(x, n = 3, default = -1))), schema_xyz)
+  expect_equal(ir$op, "lead")
+  expect_equal(ir$meta$n, 3L)
+  expect_equal(ir$meta$default$value, -1)
+})
+
+test_that("lag(x, order_by = y) is unsupported this wave (falls back)", {
+  ir <- ir_parse_quo(quo_in(quote(lag(x, order_by = y))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("lag(x, n = 2.5) (non-whole n) falls back", {
+  ir <- ir_parse_quo(quo_in(quote(lag(x, n = 2.5))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("lag(x, default = y) (non-constant default) falls back", {
+  ir <- ir_parse_quo(quo_in(quote(lag(x, default = y))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("first(x)/last(x) parse to bare window calls", {
+  ir_first <- ir_parse_quo(quo_in(quote(first(x))), schema_xyz)
+  expect_equal(ir_first$op, "first")
+  expect_equal(ir_first$args[[1]]$name, "x")
+
+  ir_last <- ir_parse_quo(quo_in(quote(last(x))), schema_xyz)
+  expect_equal(ir_last$op, "last")
+})
+
+test_that("nth(x, 2) sets meta$n = 2L", {
+  ir <- ir_parse_quo(quo_in(quote(nth(x, 2))), schema_xyz)
+  expect_equal(ir$op, "nth")
+  expect_equal(ir$args[[1]]$name, "x")
+  expect_equal(ir$meta$n, 2L)
+})
+
+test_that("nth(x, -1) (negative element position) is accepted", {
+  ir <- ir_parse_quo(quo_in(quote(nth(x, -1))), schema_xyz)
+  expect_equal(ir$meta$n, -1L)
+})
+
+test_that("first(x, order_by = y) is unsupported this wave (falls back)", {
+  ir <- ir_parse_quo(quo_in(quote(first(x, order_by = y))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("nth(x) missing n falls back", {
+  ir <- ir_parse_quo(quo_in(quote(nth(x))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("ir_has_window() is TRUE for a bare window call", {
+  expect_true(ir_has_window(ir_call("mean", list(ir_col("x")))))
+})
+
+test_that("ir_has_window() is FALSE for ordinary arithmetic", {
+  expect_false(ir_has_window(ir_call("+", list(ir_col("x"), ir_col("y")))))
+})
+
+test_that("ir_has_window() is TRUE when a window call is nested deep inside ordinary arithmetic", {
+  ir <- ir_parse_quo(quo_in(quote(x - mean(x) * 2)), schema_xyz)
+  expect_true(ir_has_window(ir))
+})
+
+test_that("ir_has_window() is TRUE for doubly-nested window calls (lag(cumsum(x)))", {
+  ir <- ir_parse_quo(quo_in(quote(lag(cumsum(x)))), schema_xyz)
+  expect_true(ir_has_window(ir))
+})
+
+test_that("ir_has_window() works on a plain node list (a call's $args)", {
+  args <- list(ir_col("x"), ir_call("mean", list(ir_col("y"))))
+  expect_true(ir_has_window(args))
+  expect_false(ir_has_window(list(ir_col("x"), ir_lit_from_r(1))))
+})
+
+test_that("ir_has_window(NULL) / ir_has_window(list()) are FALSE", {
+  expect_false(ir_has_window(NULL))
+  expect_false(ir_has_window(list()))
+})
+
+test_that("ir_bind() stops with an internal error on a bare window call", {
+  ir <- ir_call("mean", list(ir_col("x")))
+  expect_error(ir_bind(ir, schema_xyz), "internal: window op 'mean' reached lowering")
+})
+
+test_that("ir_bind() stops on a window call nested inside ordinary arithmetic", {
+  ir <- ir_parse_quo(quo_in(quote(x - cumsum(x))), schema_xyz)
+  expect_error(ir_bind(ir, schema_xyz), "internal: window op 'cumsum' reached lowering")
+})
+
+test_that("ir_bind() is unaffected for ordinary (non-window) expressions", {
+  ir <- ir_parse_quo(quo_in(quote(x + y * 2)), schema_xyz)
+  bound <- ir_bind(ir, schema_xyz)
+  expect_equal(bound$args[[1]]$index, 0L)
+})
+
+test_that("cummean(x) desugars to cumsum(x) / row_number()", {
+  ir <- ir_parse_quo(quo_in(quote(cummean(x))), schema_xyz)
+  expect_equal(ir$op, "/")
+  expect_equal(ir$args[[1]]$op, "cumsum")
+  expect_equal(ir$args[[1]]$args[[1]]$name, "x")
+  expect_equal(ir$args[[2]]$op, "row_number")
+  expect_equal(length(ir$args[[2]]$args), 0)
+})
+
+test_that("cumall(x) desugars to the tri-state cummin encoding", {
+  ir <- ir_parse_quo(quo_in(quote(cumall(x))), schema_xyz)
+  expect_equal(ir$op, "if_else")
+  # cond: s == 1L, where s = cummin(encoded)
+  cond <- ir$args[[1]]
+  expect_equal(cond$op, "==")
+  s <- cond$args[[1]]
+  expect_equal(s$op, "cummin")
+  encoded <- s$args[[1]]
+  expect_equal(encoded$op, "if_else")
+  expect_equal(encoded$args[[1]]$op, "is.na")
+  # yes-branch is the bare (adopted-type) NA literal
+  expect_true(ir$args[[2]]$na)
+  expect_equal(ir$args[[2]]$type, "BOOL8")
+  # no-branch: s == 2L
+  expect_equal(ir$args[[3]]$op, "==")
+})
+
+test_that("cumany(x) desugars to the tri-state cummax encoding", {
+  ir <- ir_parse_quo(quo_in(quote(cumany(x))), schema_xyz)
+  s <- ir$args[[1]]$args[[1]]
+  expect_equal(s$op, "cummax")
+})
+
+test_that("consecutive_id(x) desugars to cumsum() with lag()/row_number() nested inside", {
+  ir <- ir_parse_quo(quo_in(quote(consecutive_id(x))), schema_xyz)
+  expect_equal(ir$op, "cumsum")
+  expect_true(ir_has_window(ir))
+
+  # The nested lag(x) and row_number() are buried inside the increment
+  # expression -- confirm both are reachable via window_arg_cols()-style
+  # inspection (ir_has_window on the increment subtree).
+  increment <- ir$args[[1]]
+  expect_true(ir_has_window(increment))
+})
+
+test_that("consecutive_id(a, b) (multi-column) falls back (NULL)", {
+  ir <- ir_parse_quo(quo_in(quote(consecutive_id(x, y))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("ntile(x, 3) desugars with row_number(x)/sum(...) nested window calls", {
+  ir <- ir_parse_quo(quo_in(quote(ntile(x, 3))), schema_xyz)
+  expect_true(ir_has_window(ir))
+  # Outermost shape: if_else(len == 0, NA, bins)
+  expect_equal(ir$op, "if_else")
+  expect_equal(ir$args[[1]]$op, "==")
+  len_node <- ir$args[[1]]$args[[1]]
+  expect_equal(len_node$op, "sum")
+})
+
+test_that("ntile(n = 3) (x omitted) uses bare row_number()/n() instead of ranking", {
+  ir <- ir_parse_quo(quo_in(quote(ntile(n = 3))), schema_xyz)
+  expect_true(ir_has_window(ir))
+  len_node <- ir$args[[1]]$args[[1]]
+  expect_equal(len_node$op, "n")
+  expect_equal(length(len_node$args), 0)
+})
+
+test_that("ntile() with missing n falls back", {
+  ir <- ir_parse_quo(quo_in(quote(ntile(x))), schema_xyz)
+  expect_null(ir)
+})
+
+test_that("ntile(x, 0) (non-positive n) falls back", {
+  ir <- ir_parse_quo(quo_in(quote(ntile(x, 0))), schema_xyz)
   expect_null(ir)
 })

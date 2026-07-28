@@ -11,4 +11,16 @@ See the module-level comment above and section 6 of
 \code{scratchpad/phase1_expression_engine.md} for the extension contract this
 implements. Each entry: \code{list(arity, parse, type, lower)}.
 }
+\details{
+Phase 5 (\code{scratchpad/phase5_window_design.md} section 1.1) adds a fifth
+field, \code{window}: \code{NULL} for every pre-Phase-5 entry (unchanged), or
+\code{list(kind = "shift"|"rank"|"scan"|"agg")} for a window-class op. \code{window}
+non-\code{NULL} and \code{lower} non-\code{NULL} are mutually exclusive -- a window-class
+entry always has \code{lower = NULL} (window ops are never \code{ir_call} handlers
+in \code{src/expr_eval.hpp}, see this file's own module comment for that
+boundary, and are structurally prevented from reaching lowering at all
+by \code{\link[=ir_bind]{ir_bind()}}'s guard). \code{ir_infer_type()} needs no change: a window
+entry's \code{type} function is looked up and called exactly like any other
+entry's.
+}
 \keyword{internal}
