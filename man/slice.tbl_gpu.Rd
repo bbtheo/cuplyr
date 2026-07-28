@@ -10,14 +10,19 @@
 \item{.data}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
 
 \item{...}{Integer row positions, e.g. \code{slice(df, 1:3)}. Duplicates and
-reordering are allowed for positive indices (\code{slice(df, c(3, 1, 1))});
-negative indices drop those rows instead; \code{0}/\code{NA} are silently
-dropped; out-of-range positions are silently dropped; positive and
-negative indices cannot be mixed.}
+reordering are allowed for positive indices when \code{.data} is ungrouped
+and \verb{.by=} isn't supplied (\code{slice(df, c(3, 1, 1))}); grouped/\verb{.by=}
+calls only run natively for a strictly increasing, duplicate-free
+positive index vector (falling back to CPU otherwise); negative
+indices drop those rows instead (order/duplicates never matter here,
+grouped or not); \code{0}/\code{NA} are silently dropped; out-of-range positions
+are silently dropped; positive and negative indices cannot be mixed.}
 
-\item{.by}{Optional on-the-fly grouping columns (forces the CPU
-fallback; use \code{\link[dplyr:group_by]{dplyr::group_by()}} beforehand for the GPU-native
-ungrouped path).}
+\item{.by}{Optional on-the-fly grouping columns, GPU-native (Phase 5,
+task W7): result rows are ordered by each group's FIRST-APPEARANCE
+position in \code{.data} (see module docs), and the result is always
+ungrouped. Supplying \code{.by} when \code{.data} is already grouped (via
+\code{group_by()}) is an error, matching dplyr.}
 
 \item{.preserve}{Passed through to the CPU fallback when triggered.}
 }
@@ -26,10 +31,15 @@ A \code{tbl_gpu} object with the selected rows.
 }
 \description{
 Keeps rows of a GPU table by integer position, similar to
-\code{dplyr::slice()}. Ungrouped calls with plain, data-independent index
-expressions (no \verb{.by=}) run entirely on the GPU (\code{cudf::gather()});
-everything else (grouped input, \verb{.by=}, or an index expression the
+\code{dplyr::slice()}. Ungrouped, \code{group_by()}-grouped, and \verb{.by=} calls with
+plain, data-independent index expressions all run entirely on the GPU
+(Phase 5, task W7): ungrouped via a direct \code{cudf::gather()}; grouped/
+\verb{.by=} via a per-group \code{row_number()} desugar (R/slice.R's module docs),
+restricted to a strictly increasing positive index vector or any set of
+negative indices (arbitrary duplication/reordering is ungrouped-only --
+see \code{...}'s docs below). Everything else (an index expression the
 GPU-native path can't evaluate without a data mask, e.g. one that
-references a column or \code{n()}) transparently falls back to CPU
-evaluation (see \code{\link[=gpu_fallback]{gpu_fallback()}}).
+references a column or \code{n()}, or a grouped/\verb{.by=} index vector with
+duplicates/reordering) transparently falls back to CPU evaluation (see
+\code{\link[=gpu_fallback]{gpu_fallback()}}).
 }

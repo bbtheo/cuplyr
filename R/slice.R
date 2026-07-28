@@ -1,25 +1,39 @@
-# GPU-native slice() family (Phase 3, task 2)
+# GPU-native slice() family (Phase 3 task 2: ungrouped; Phase 5 task W7:
+# grouped/`by=`/`.by=`)
 #
-# Covers ungrouped slice()/slice_head()/slice_tail()/slice_min()/slice_max().
-# `slice_sample()` and every *grouped* variant (including on-the-fly
-# `by=`/`.by=` grouping) stay on the CPU fallback (R/fallback.R):
-#   - grouped slice needs per-group row offsets (group boundary/segment
-#     machinery) that doesn't exist yet -- a later, Phase-5-adjacent task.
-#   - slice_sample() needs dplyr's own RNG stream reproduced bit-for-bit
-#     (CPU-side index generation + GPU gather) -- a separate task.
+# Covers slice()/slice_head()/slice_tail()/slice_min()/slice_max(), for
+# ungrouped input, `group_by()`-grouped input, and on-the-fly `by=`/`.by=`
+# grouping. `slice_sample()` stays on the CPU fallback (R/fallback.R) --
+# it needs dplyr's own RNG stream reproduced bit-for-bit (Phase 5 task W8).
 #
-# `slice_use_native()` below is the single place that decides native vs.
-# fallback for all four verbs, so the dispatch logic isn't duplicated
-# four times.
+# `slice_group_mode()` below is the single place that classifies a call's
+# grouping ("none" / "group_by" / "by"), shared by all four verbs. "none"
+# keeps using the dedicated ungrouped C++ kernels (`gpu_slice_head()`/
+# `gpu_slice_tail()`/`gpu_slice_indices()`/`gpu_slice_rank()`,
+# `src/ops_slice.cpp`) unchanged from Phase 3.2. "group_by"/"by" route
+# through `slice_grouped_native()`, a pure-R *desugar* built with ZERO new
+# GPU primitives: it composes the existing window/mutate/filter/arrange/
+# select AST machinery (Phase 5 W1-W6) into the same handful of ops for
+# every grouped slice_* shape (see that function's own docs for the full
+# node sequence). Only genuinely unsupported grouped shapes -- an
+# `order_by` expression the IR can't parse, or a `slice(i)` index vector
+# with duplicates/reordering (dplyr's own arbitrary per-group gather can't
+# be expressed as a single membership predicate) -- still fall back to CPU.
 #
 # Row-count-dependent resolution (the n=/prop= clamp for head/tail/rank,
 # and slice()'s index-vector validation/negative-index handling) is
-# deliberately NOT done here in R: for a lazy pipeline, the input's actual
-# row count isn't known until upstream ops actually execute, so it can't be
-# computed at parse time. Instead the *raw*, unresolved amount/indices are
-# stored on the AST node (see R/ast.R::ast_slice()) and resolved in C++ at
-# lowering time, once the real input table (and its real row count) exists
-# -- see R/lower.R::lower_slice() and src/ops_common.hpp::compute_slice_size().
+# deliberately NOT done here in R for the UNGROUPED path: for a lazy
+# pipeline, the input's actual row count isn't known until upstream ops
+# actually execute, so it can't be computed at parse time. Instead the
+# *raw*, unresolved amount/indices are stored on the AST node (see
+# R/ast.R::ast_slice()) and resolved in C++ at lowering time, once the real
+# input table (and its real row count) exists -- see R/lower.R::lower_slice()
+# and src/ops_common.hpp::compute_slice_size(). The GROUPED path (below)
+# can't reuse that C++ resolution (there is no single scalar `nrow` -- every
+# group has its own size), so it expresses the identical clamp rule as a
+# per-row IR expression instead (`slice_grouped_native()`'s "size" mutate
+# step), broadcasting each group's own row count (a real window-computed
+# column, not a compile-time scalar) through the same formula.
 #
 # Semantics (verified empirically against dplyr 1.2.1 before implementation,
 # cross-checked against dplyr's own `get_slice_size()`/`slice_rank_idx()`
@@ -28,11 +42,17 @@
 #     slice(-(1:2)) (negative = drop), slice(0) (empty), out-of-range
 #     indices silently dropped, mixing positive/negative errors, NA dropped,
 #     fractional indices error, slice() with no dots returns 0 rows (dplyr's
-#     own behavior: `vec_c()` of zero chunks is `integer(0)`).
+#     own behavior: `vec_c()` of zero chunks is `integer(0)`). This full
+#     generality (arbitrary reordering/duplication of positive indices) is
+#     ungrouped-only; the grouped desugar (below) only handles a strictly
+#     increasing, duplicate-free positive index vector, or any set of
+#     negative indices (order/duplicates never matter for a "drop these"
+#     set) -- anything else falls back to CPU.
 #   - slice_head()/slice_tail(): `n=`/`prop=` resolve via
 #     clamp(0, floor(amount), nrow) when amount >= 0, else
 #     clamp(0, ceiling(nrow + amount), nrow) -- prop is `amount * nrow`
 #     substituted into that same rule. Default (neither given) is n = 1.
+#     Grouped: `nrow` is each GROUP's own row count, not the whole table's.
 #   - slice_min()/slice_max(): same n=/prop= rule as above (confirmed
 #     negative `n` is accepted, not just for head/tail). `with_ties = TRUE`
 #     (default) uses SQL-RANK()-style tie cutoff (the result can exceed
@@ -45,19 +65,68 @@
 #     order -- confirmed empirically. A computed `order_by` (e.g.
 #     `slice_min(df, x + y)`) never appears as an output column, matching
 #     dplyr.
+#   - Grouped (`group_by()`) output for EVERY slice_* variant is reordered
+#     into ascending GROUP-KEY order (NA-key group sorted last -- matching
+#     `arrange(group_cols)`'s own ascending-NA-last convention), with each
+#     group's own surviving rows kept in their original relative order (or,
+#     for slice_min()/slice_max(), in `order_by` order, NA last regardless
+#     of direction). This is a genuine reordering relative to the input's
+#     physical row order (confirmed empirically: unsorted/interleaved group
+#     values still come back sorted 1, 2, 3, NA).
+#   - `by=`/`.by=` output for EVERY slice_* variant -- including
+#     slice_min()/slice_max(), NOT just the positional variants -- is
+#     ordered by each GROUP's FIRST-APPEARANCE position in the original
+#     (pre-slice) table, NOT ascending group-key order, and NOT the literal
+#     original row order of the surviving rows either (confirmed
+#     empirically with a case where a group's surviving row is physically
+#     LATER in the table than another group's, yet the first group still
+#     comes first in the output because ITS group label appeared earlier)
+#     -- exactly analogous to `summarise(.by=)`'s already-documented
+#     first-appearance rule (section 6 of
+#     `scratchpad/phase5_window_design.md`), extended here to `slice()`.
+#     This is a correction to that design doc's own assumption ("`.by`
+#     preserves original row order") for the min/max case, and clarifies it
+#     for the positional case: the row order that's "preserved" is the
+#     group's first-appearance order, which only happens to coincide with
+#     literal original row order when a `by=` column's groups are already
+#     contiguous in the input (the common case, but not the general rule).
+#     Result is always ungrouped, matching `.by=`'s general contract.
+#   - `arrange(desc(x))` in cuplyr, unlike real dplyr 1.2.1 (which sorts NA
+#     last for BOTH directions), currently sorts NA FIRST for descending
+#     order (a pre-existing divergence from real dplyr, outside this task's
+#     scope) -- `slice_grouped_native()` therefore builds its OWN NA-last
+#     sort key for `order_by` (an `is.na()` indicator column as the primary
+#     sort key, ahead of `order_by` itself) rather than relying on a plain
+#     `desc(order_by)` arrange, and does not attempt to fix the general
+#     `arrange()` divergence.
 
-# Decide whether the ungrouped GPU-native slice path applies. Shared by
-# slice()/slice_head()/slice_tail()/slice_min()/slice_max() (never by
-# slice_sample(), which always uses the fallback regardless of grouping).
-#
-# @param .data A `tbl_gpu` object
-# @param by_quo A quosure for the verb's `by=`/`.by=` argument (on-the-fly
-#   grouping forces the fallback exactly like pre-existing `group_by()`
-#   grouping does, since neither has group-offset machinery yet)
-# @return `TRUE` if the native path should be attempted
-# @keywords internal
-slice_use_native <- function(.data, by_quo) {
-  length(.data$groups) == 0 && rlang::quo_is_null(by_quo)
+#' Classify a call's effective grouping for the slice() family
+#'
+#' Shared by all five verbs (Phase 5, task W7): resolves `by=`/`.by=` via
+#' `resolve_by()` (which itself raises dplyr's own "Can't supply `by`..."
+#' error when `.data` is already grouped) and returns which of three
+#' dispatch paths applies.
+#'
+#' @param .data A `tbl_gpu` object
+#' @param by_quo A quosure for the verb's `by=`/`.by=` argument
+#' @param arg_name Character scalar, `"by"` or `".by"` (interpolated into
+#'   `resolve_by()`'s grouped-`.data` error message, see its own docs)
+#' @return `list(mode = "none"|"group_by"|"by", group_cols = <chr>)`:
+#'   `"none"` when `.data` is ungrouped and no `by=`/`.by=` was supplied
+#'   (the existing Phase 3.2 ungrouped native path applies); `"group_by"`
+#'   when `.data` is `group_by()`-grouped; `"by"` when `by=`/`.by=` was
+#'   supplied (which implies `.data` itself is ungrouped, since
+#'   `resolve_by()` would otherwise have already errored)
+#' @keywords internal
+slice_group_mode <- function(.data, by_quo, arg_name) {
+  by_cols <- resolve_by(.data, by_quo, arg_name)
+  if (length(by_cols) > 0) {
+    return(list(mode = "by", group_cols = by_cols))
+  }
+  if (length(.data$groups) > 0) {
+    return(list(mode = "group_by", group_cols = .data$groups))
+  }
+  list(mode = "none", group_cols = character())
 }
 
 # Resolve a verb's `n=`/`prop=` pair into `list(amount, is_prop)`, matching
@@ -172,25 +241,346 @@ resolve_slice_order <- function(order_quo, schema) {
   list(extra_mutate = list(step), order_col = temp_name)
 }
 
+# -----------------------------------------------------------------------------
+# Grouped/`by=` slice() family (Phase 5, task W7)
+# -----------------------------------------------------------------------------
+
+# Classify slice()'s raw (unresolved) index vector for the GROUPED/`by=`
+# native path. Unlike the ungrouped path (`gpu_slice_indices()`, which
+# supports ANY combination of duplicates/reordering for positive indices
+# via a direct per-row gather), the grouped desugar expresses "keep these
+# positions" as an IR predicate over a per-group `row_number()` column
+# (`rn %in% i` / `!(rn %in% -i)`), which can only reproduce a
+# SUBSET-membership test, never an arbitrary reordering/duplication of the
+# kept rows. So only two shapes are supported natively here: a strictly
+# increasing, duplicate-free positive index vector (`rn %in% i` alone
+# already preserves per-group row order -- identical to what dplyr
+# produces for this shape), and any set of negative indices (order/
+# duplicates never matter for a "drop these" set). Anything else --
+# unsorted/duplicated positive indices, mixed signs, non-whole numbers --
+# returns `NULL`, the caller's "fall back to CPU" signal: `gpu_fallback()`
+# re-runs the real `dplyr::slice()` call, which raises the identical
+# mixed-sign/fractional errors dplyr itself would, so this function does
+# not need to replicate those error messages itself.
+#
+# @param raw_indices A numeric vector (may contain 0/NA/fractional/mixed
+#   sign values), as returned by `resolve_slice_dots()`
+# @return `list(kind = "positive"|"negative", vals = <integer>)`, or `NULL`
+# @keywords internal
+classify_slice_indices <- function(raw_indices) {
+  vals <- raw_indices[!is.na(raw_indices) & raw_indices != 0]
+
+  if (any(vals != floor(vals))) {
+    return(NULL)
+  }
+  if (length(vals) == 0) {
+    # Nothing left after dropping 0/NA (including the "no dots at all"
+    # case): always native, regardless of sign convention -- `rn %in%
+    # integer(0)` is FALSE for every row, giving the 0-row result dplyr's
+    # own `vec_c()`-of-zero-chunks contract produces.
+    return(list(kind = "positive", vals = integer(0)))
+  }
+
+  has_pos <- any(vals > 0)
+  has_neg <- any(vals < 0)
+  if (has_pos && has_neg) {
+    return(NULL)
+  }
+
+  if (has_neg) {
+    return(list(kind = "negative", vals = as.integer(-vals)))
+  }
+
+  if (length(vals) > 1 && !all(diff(vals) > 0)) {
+    return(NULL)
+  }
+
+  list(kind = "positive", vals = as.integer(vals))
+}
+
+#' GPU-native grouped/`by=` slice() family desugar (Phase 5, task W7)
+#'
+#' Implements every `group_by()`-grouped or `by=`/`.by=` on-the-fly-grouped
+#' `slice()`/`slice_head()`/`slice_tail()`/`slice_min()`/`slice_max()` call
+#' by composing the existing window/mutate/filter/arrange/select AST
+#' machinery (Phase 5 W1-W6) -- ZERO new GPU primitives. See this file's
+#' module docs for the empirically-verified semantics this reproduces
+#' (group order, NA handling, `by=`'s first-appearance rule).
+#'
+#' The node sequence, in order (only the parts relevant to `mode`/
+#' `group_mode` are actually emitted):
+#' \enumerate{
+#'   \item (`mode == "rank"`, computed `order_by`) `ast_mutate`: materialize
+#'     the computed `order_by` expression under a temp name.
+#'   \item (`mode == "rank"`) `ast_mutate`: `..slice_na.. = is.na(order_col)`
+#'     -- the NA-last sort key `order_by` needs (see module docs on why a
+#'     plain `desc(order_col)` arrange can't be used here).
+#'   \item (`group_mode == "by"`) `ast_window` (UNGROUPED): `..slice_rowid..
+#'     = row_number()` over the whole table, then `ast_window` (grouped):
+#'     `..slice_first.. = min(..slice_rowid..)` -- each group's own
+#'     first-appearance position, broadcast to every row of that group.
+#'   \item `ast_arrange`: group order key first (`group_cols` ascending for
+#'     `group_mode == "group_by"`; `..slice_first..` ascending for `"by"`),
+#'     then (`mode == "rank"` only) `..slice_na..` ascending, then
+#'     `order_col` in the requested direction.
+#'   \item (`mode == "rank" && with_ties`) `ast_mutate`:
+#'     `..slice_valid.. = if_else(..slice_na.., 0L, 1L)`.
+#'   \item `ast_window` (grouped by `group_cols`): whichever of
+#'     `..slice_gs.. = n()`, `..slice_rn.. = row_number()` (frame:
+#'     `group_cols`, no order -- physically pre-arranged above, so bare
+#'     `row_number()` already reproduces `order_col`'s ranking for rank
+#'     mode), `..slice_mr.. = min_rank(order_col)` (frame: `group_cols`,
+#'     `order_col` in the requested direction), `..slice_nn.. =
+#'     sum(..slice_valid..)` are needed for this `mode`/`with_ties`
+#'     combination.
+#'   \item (needs `..slice_gs..`) `ast_mutate`: `..slice_size.. =` the same
+#'     `n=`/`prop=` clamp rule `compute_slice_size()` (C++) uses for the
+#'     ungrouped path, expressed as IR (`gs` is a real per-group column
+#'     here, not a compile-time scalar).
+#'   \item `ast_filter`: the mode-specific predicate (see module docs'
+#'     desugar table).
+#'   \item `ast_select`: back down to the ORIGINAL column set (captured
+#'     before any of the above), dropping every `..slice_*..`/computed-
+#'     `order_by` temp column in one step.
+#' }
+#'
+#' Two-pass (plan, then emit): every failure mode that triggers a CPU
+#' fallback (`order_by` the IR can't parse, an unsupported `slice()` index
+#' shape) is checked BEFORE any `push_op()` call, so a rejected call never
+#' partially executes GPU work ("never half-lower").
+#'
+#' @param .data A `tbl_gpu` object (grouped, or ungrouped with `by=`/`.by=`
+#'   already resolved by the caller)
+#' @param group_mode `"group_by"` or `"by"`, as returned by
+#'   `slice_group_mode()`
+#' @param group_cols Character vector of group column names
+#' @param mode One of `"head"`, `"tail"`, `"index"`, `"rank"`
+#' @param amount,is_prop For `mode` `"head"`/`"tail"`/`"rank"`: as resolved
+#'   by `resolve_slice_amount()`
+#' @param raw_indices For `mode == "index"`: as returned by
+#'   `resolve_slice_dots()`
+#' @param order_quo For `mode == "rank"`: a quosure for `order_by`
+#' @param descending For `mode == "rank"`: `FALSE` for `slice_min()`,
+#'   `TRUE` for `slice_max()`
+#' @param with_ties,na_rm For `mode == "rank"`: as documented on
+#'   `slice_min()`/`slice_max()`
+#' @return A new `tbl_gpu`, or `NULL` if this call needs the CPU fallback
+#'   (caller's responsibility to re-run the real dplyr verb)
+#' @keywords internal
+slice_grouped_native <- function(.data, group_mode, group_cols, mode,
+                                  amount = NULL, is_prop = NULL,
+                                  raw_indices = NULL,
+                                  order_quo = NULL, descending = NULL,
+                                  with_ties = NULL, na_rm = NULL) {
+  orig_names <- current_schema(.data)$names
+
+  # ---- Plan phase: resolve everything that can fail, before any push_op() ----
+  order_col <- NULL
+  order_extra_mutate <- NULL
+  if (identical(mode, "rank")) {
+    resolved <- tryCatch(resolve_slice_order(order_quo, current_schema(.data)),
+                         error = function(e) NULL)
+    if (is.null(resolved)) {
+      return(NULL)
+    }
+    order_col <- resolved$order_col
+    order_extra_mutate <- resolved$extra_mutate
+  }
+
+  idx_plan <- NULL
+  if (identical(mode, "index")) {
+    idx_plan <- classify_slice_indices(raw_indices)
+    if (is.null(idx_plan)) {
+      return(NULL)
+    }
+  }
+
+  # ---- Emit phase ----
+  result <- .data
+
+  if (identical(mode, "rank") && !is.null(order_extra_mutate)) {
+    result <- push_op(result, ast_mutate(input_node(result), order_extra_mutate))
+  }
+
+  na_key_name <- NULL
+  if (identical(mode, "rank")) {
+    schema <- current_schema(result)
+    na_key_name <- unique_temp_name("..slice_na..", schema$names)
+    na_step <- make_mutate_expr(na_key_name, ir_call("is.na", list(ir_col(order_col))), schema)
+    result <- push_op(result, ast_mutate(input_node(result), list(na_step)))
+  }
+
+  # Group-order key: group_by() sorts by group_cols ascending (NA-key group
+  # last); by=/.by= sorts by each group's FIRST-APPEARANCE position instead
+  # (verified empirically -- see module docs) via min(row_number()) per
+  # group, never the raw group-key value.
+  order_key_name <- NULL
+  if (identical(group_mode, "by")) {
+    schema <- current_schema(result)
+    rowid_name <- unique_temp_name("..slice_rowid..", schema$names)
+    rowid_spec <- window_spec(rowid_name, fn = "row_number", output_type = "INT32")
+    result <- push_op(result, ast_window(input_node(result), list(rowid_spec), character()))
+
+    schema <- current_schema(result)
+    first_name <- unique_temp_name("..slice_first..", schema$names)
+    first_spec <- window_spec(first_name, fn = "min", value_col = rowid_name, output_type = "INT32")
+    result <- push_op(result, ast_window(input_node(result), list(first_spec), group_cols))
+
+    order_key_name <- first_name
+  }
+
+  sort_specs <- if (!is.null(order_key_name)) {
+    list(list(col_name = order_key_name, descending = FALSE))
+  } else {
+    lapply(group_cols, function(g) list(col_name = g, descending = FALSE))
+  }
+
+  if (identical(mode, "rank")) {
+    sort_specs <- c(sort_specs,
+                    list(list(col_name = na_key_name, descending = FALSE)),
+                    list(list(col_name = order_col, descending = isTRUE(descending))))
+  }
+
+  result <- push_op(result, ast_arrange(input_node(result), sort_specs, groups = character()))
+
+  # Window stage: n()/row_number() (frame: group_cols, no order) cover
+  # head/tail/index/rank(with_ties=FALSE); min_rank(order_col)/count-valid
+  # cover rank(with_ties=TRUE). Physically pre-arranging (above) rather
+  # than passing order_col into THIS frame is what makes bare
+  # row_number() reproduce order_col's ranking for rank mode.
+  need_gs <- mode %in% c("head", "tail", "rank")
+  need_rn <- mode %in% c("head", "tail", "index") || (identical(mode, "rank") && !isTRUE(with_ties))
+  need_mr_nn <- identical(mode, "rank") && isTRUE(with_ties)
+
+  schema <- current_schema(result)
+  gs_name <- if (need_gs) unique_temp_name("..slice_gs..", schema$names) else NULL
+  rn_name <- if (need_rn) {
+    unique_temp_name("..slice_rn..", c(schema$names, gs_name))
+  } else {
+    NULL
+  }
+
+  valid_name <- NULL
+  if (need_mr_nn) {
+    schema <- current_schema(result)
+    valid_name <- unique_temp_name("..slice_valid..", schema$names)
+    valid_ir <- ir_call("if_else", list(ir_col(na_key_name), ir_lit_from_r(0L), ir_lit_from_r(1L)))
+    valid_step <- make_mutate_expr(valid_name, valid_ir, schema)
+    result <- push_op(result, ast_mutate(input_node(result), list(valid_step)))
+  }
+
+  window_specs <- list()
+  if (need_gs) {
+    window_specs <- c(window_specs, list(window_spec(gs_name, fn = "n", output_type = "INT32")))
+  }
+  if (need_rn) {
+    window_specs <- c(window_specs, list(window_spec(rn_name, fn = "row_number", output_type = "INT32")))
+  }
+
+  mr_name <- NULL
+  nn_name <- NULL
+  if (need_mr_nn) {
+    schema <- current_schema(result)
+    mr_name <- unique_temp_name("..slice_mr..", schema$names)
+    nn_name <- unique_temp_name("..slice_nn..", c(schema$names, mr_name))
+    window_specs <- c(window_specs, list(
+      window_spec(mr_name, fn = "min_rank", value_col = order_col,
+                  order_cols = order_col, order_desc = isTRUE(descending),
+                  output_type = "INT32"),
+      window_spec(nn_name, fn = "sum", value_col = valid_name,
+                  output_type = type_window_sum("INT32"))
+    ))
+  }
+
+  result <- push_op(result, ast_window(input_node(result), window_specs, group_cols))
+
+  # Size (IR, per group): the same n=/prop= clamp rule
+  # src/ops_common.hpp::compute_slice_size() uses for the ungrouped path,
+  # expressed here as a real mutate expression since each group's own size
+  # (`gs`) is a real per-row (broadcast) column, not a scalar known at plan
+  # time.
+  size_name <- NULL
+  if (need_gs) {
+    schema <- current_schema(result)
+    size_name <- unique_temp_name("..slice_size..", schema$names)
+    amount_lit <- ir_lit_from_r(as.double(amount))
+    raw_ir <- if (isTRUE(is_prop)) {
+      ir_call("*", list(amount_lit, ir_col(gs_name)))
+    } else {
+      amount_lit
+    }
+    size_ir <- ir_call("if_else", list(
+      ir_call(">=", list(raw_ir, ir_lit_from_r(0))),
+      ir_call("floor", list(raw_ir)),
+      ir_call("+", list(ir_col(gs_name), ir_call("ceil", list(raw_ir))))
+    ))
+    size_step <- make_mutate_expr(size_name, size_ir, schema)
+    result <- push_op(result, ast_mutate(input_node(result), list(size_step)))
+  }
+
+  # Filter predicate, per mode (module docs' desugar table).
+  pred <- switch(mode,
+    "head" = ir_call("<=", list(ir_col(rn_name), ir_col(size_name))),
+    "tail" = ir_call(">", list(ir_col(rn_name), ir_call("-", list(ir_col(gs_name), ir_col(size_name))))),
+    "index" = {
+      if (identical(idx_plan$kind, "positive")) {
+        ir_call("%in%", list(ir_col(rn_name), ir_lit_from_r(idx_plan$vals, allow_vector = TRUE)))
+      } else {
+        ir_call("!", list(ir_call("%in%", list(ir_col(rn_name), ir_lit_from_r(idx_plan$vals, allow_vector = TRUE)))))
+      }
+    },
+    "rank" = {
+      base_pred <- if (isTRUE(with_ties)) {
+        ir_call("<=", list(
+          ir_call("coalesce", list(ir_col(mr_name), ir_call("+", list(ir_col(nn_name), ir_lit_from_r(1L))))),
+          ir_col(size_name)
+        ))
+      } else {
+        ir_call("<=", list(ir_col(rn_name), ir_col(size_name)))
+      }
+      if (isTRUE(na_rm)) {
+        ir_call("&", list(base_pred, ir_call("!", list(ir_col(na_key_name)))))
+      } else {
+        base_pred
+      }
+    }
+  )
+
+  schema <- current_schema(result)
+  result <- push_op(result, ast_filter(input_node(result), list(make_predicate(pred, schema))))
+
+  push_op(result, ast_select(input_node(result), orig_names))
+}
+
 #' Select rows by position
 #'
 #' Keeps rows of a GPU table by integer position, similar to
-#' `dplyr::slice()`. Ungrouped calls with plain, data-independent index
-#' expressions (no `.by=`) run entirely on the GPU (`cudf::gather()`);
-#' everything else (grouped input, `.by=`, or an index expression the
+#' `dplyr::slice()`. Ungrouped, `group_by()`-grouped, and `.by=` calls with
+#' plain, data-independent index expressions all run entirely on the GPU
+#' (Phase 5, task W7): ungrouped via a direct `cudf::gather()`; grouped/
+#' `.by=` via a per-group `row_number()` desugar (R/slice.R's module docs),
+#' restricted to a strictly increasing positive index vector or any set of
+#' negative indices (arbitrary duplication/reordering is ungrouped-only --
+#' see `...`'s docs below). Everything else (an index expression the
 #' GPU-native path can't evaluate without a data mask, e.g. one that
-#' references a column or `n()`) transparently falls back to CPU
-#' evaluation (see [gpu_fallback()]).
+#' references a column or `n()`, or a grouped/`.by=` index vector with
+#' duplicates/reordering) transparently falls back to CPU evaluation (see
+#' [gpu_fallback()]).
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
 #' @param ... Integer row positions, e.g. `slice(df, 1:3)`. Duplicates and
-#'   reordering are allowed for positive indices (`slice(df, c(3, 1, 1))`);
-#'   negative indices drop those rows instead; `0`/`NA` are silently
-#'   dropped; out-of-range positions are silently dropped; positive and
-#'   negative indices cannot be mixed.
-#' @param .by Optional on-the-fly grouping columns (forces the CPU
-#'   fallback; use [dplyr::group_by()] beforehand for the GPU-native
-#'   ungrouped path).
+#'   reordering are allowed for positive indices when `.data` is ungrouped
+#'   and `.by=` isn't supplied (`slice(df, c(3, 1, 1))`); grouped/`.by=`
+#'   calls only run natively for a strictly increasing, duplicate-free
+#'   positive index vector (falling back to CPU otherwise); negative
+#'   indices drop those rows instead (order/duplicates never matter here,
+#'   grouped or not); `0`/`NA` are silently dropped; out-of-range positions
+#'   are silently dropped; positive and negative indices cannot be mixed.
+#' @param .by Optional on-the-fly grouping columns, GPU-native (Phase 5,
+#'   task W7): result rows are ordered by each group's FIRST-APPEARANCE
+#'   position in `.data` (see module docs), and the result is always
+#'   ungrouped. Supplying `.by` when `.data` is already grouped (via
+#'   `group_by()`) is an error, matching dplyr.
 #' @param .preserve Passed through to the CPU fallback when triggered.
 #'
 #' @return A `tbl_gpu` object with the selected rows.
@@ -200,13 +590,16 @@ resolve_slice_order <- function(order_quo, schema) {
 slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(.by)
+  gm <- slice_group_mode(.data, by_quo, ".by")
 
-  if (slice_use_native(.data, by_quo)) {
-    idx <- tryCatch(resolve_slice_dots(dots), error = function(e) NULL)
-    if (!is.null(idx)) {
-      node <- ast_slice(input_node(.data), mode = "index", raw_indices = idx)
-      return(push_op(.data, node))
+  idx <- tryCatch(resolve_slice_dots(dots), error = function(e) NULL)
+  if (!is.null(idx)) {
+    result <- if (identical(gm$mode, "none")) {
+      push_op(.data, ast_slice(input_node(.data), mode = "index", raw_indices = idx))
+    } else {
+      slice_grouped_native(.data, gm$mode, gm$group_cols, mode = "index", raw_indices = idx)
     }
+    if (!is.null(result)) return(result)
   }
 
   gpu_fallback("slice", .data, function(tbl) {
@@ -217,18 +610,25 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 #' Select the first rows
 #'
 #' Keeps the first `n` (or `prop` fraction of) rows of a GPU table, similar
-#' to `dplyr::slice_head()`. Ungrouped calls (no `by=`) run entirely on the
-#' GPU (`cudf::slice()`); grouped input or `by=` transparently falls back
-#' to CPU evaluation (see [gpu_fallback()]).
+#' to `dplyr::slice_head()`. Ungrouped, `group_by()`-grouped, and `by=`
+#' calls all run entirely on the GPU (Phase 5, task W7): ungrouped via
+#' `cudf::slice()`; grouped/`by=` via a per-group window desugar (see
+#' R/slice.R's module docs for the exact group-ordering/NA-handling rules).
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
 #' @param ... Not used; for extensibility, must be empty.
 #' @param n Number of rows to keep. Negative `n` keeps all but the last
-#'   `abs(n)` rows. Clamped to `[0, nrow(.data)]`. Default `1` if neither
-#'   `n` nor `prop` is supplied.
+#'   `abs(n)` rows. Clamped to `[0, nrow(.data)]` (grouped: `[0,
+#'   group_size]`, per group). Default `1` if neither `n` nor `prop` is
+#'   supplied.
 #' @param prop Proportion of rows to keep (`floor(prop * nrow(.data))`,
-#'   clamped like `n`). Exactly one of `n`/`prop` may be supplied.
-#' @param by Optional on-the-fly grouping columns (forces the CPU fallback).
+#'   clamped like `n`; grouped: `floor(prop * group_size)`, per group).
+#'   Exactly one of `n`/`prop` may be supplied.
+#' @param by Optional on-the-fly grouping columns, GPU-native (Phase 5,
+#'   task W7): result rows are ordered by each group's FIRST-APPEARANCE
+#'   position in `.data` (see module docs), and the result is always
+#'   ungrouped. Supplying `by` when `.data` is already grouped (via
+#'   `group_by()`) is an error, matching dplyr.
 #'
 #' @return A `tbl_gpu` object with the first rows selected.
 #'
@@ -237,19 +637,25 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
+  gm <- slice_group_mode(.data, by_quo, "by")
   np <- list()
   if (!missing(n)) np$n <- n
   if (!missing(prop)) np$prop <- prop
 
-  if (length(dots) == 0 && slice_use_native(.data, by_quo)) {
+  if (length(dots) == 0) {
     amt <- tryCatch(
       resolve_slice_amount(np$n, np$prop),
       error = function(e) NULL
     )
     if (!is.null(amt)) {
-      node <- ast_slice(input_node(.data), mode = "head",
-                        amount = amt$amount, is_prop = amt$is_prop)
-      return(push_op(.data, node))
+      result <- if (identical(gm$mode, "none")) {
+        push_op(.data, ast_slice(input_node(.data), mode = "head",
+                                 amount = amt$amount, is_prop = amt$is_prop))
+      } else {
+        slice_grouped_native(.data, gm$mode, gm$group_cols, mode = "head",
+                              amount = amt$amount, is_prop = amt$is_prop)
+      }
+      if (!is.null(result)) return(result)
     }
   }
 
@@ -261,9 +667,9 @@ slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
 #' Select the last rows
 #'
 #' Keeps the last `n` (or `prop` fraction of) rows of a GPU table, similar
-#' to `dplyr::slice_tail()`. Ungrouped calls (no `by=`) run entirely on the
-#' GPU (`cudf::slice()`); grouped input or `by=` transparently falls back
-#' to CPU evaluation (see [gpu_fallback()]).
+#' to `dplyr::slice_tail()`. Ungrouped, `group_by()`-grouped, and `by=`
+#' calls all run entirely on the GPU (Phase 5, task W7) -- see
+#' [slice_head.tbl_gpu()] for the shared dispatch/grouping semantics.
 #'
 #' @inheritParams slice_head.tbl_gpu
 #'
@@ -274,19 +680,25 @@ slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
 slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
+  gm <- slice_group_mode(.data, by_quo, "by")
   np <- list()
   if (!missing(n)) np$n <- n
   if (!missing(prop)) np$prop <- prop
 
-  if (length(dots) == 0 && slice_use_native(.data, by_quo)) {
+  if (length(dots) == 0) {
     amt <- tryCatch(
       resolve_slice_amount(np$n, np$prop),
       error = function(e) NULL
     )
     if (!is.null(amt)) {
-      node <- ast_slice(input_node(.data), mode = "tail",
-                        amount = amt$amount, is_prop = amt$is_prop)
-      return(push_op(.data, node))
+      result <- if (identical(gm$mode, "none")) {
+        push_op(.data, ast_slice(input_node(.data), mode = "tail",
+                                 amount = amt$amount, is_prop = amt$is_prop))
+      } else {
+        slice_grouped_native(.data, gm$mode, gm$group_cols, mode = "tail",
+                              amount = amt$amount, is_prop = amt$is_prop)
+      }
+      if (!is.null(result)) return(result)
     }
   }
 
@@ -298,17 +710,22 @@ slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
 #' Select rows with the smallest values of a variable
 #'
 #' Keeps the `n` (or `prop` fraction of) rows with the smallest `order_by`
-#' values, similar to `dplyr::slice_min()`. Ungrouped calls with a plain
-#' `order_by` (a bare column, or an expression the mutate/filter IR
-#' recognizes) run entirely on the GPU (`cudf::rank()` + sort + filter);
-#' grouped input, `by=`, or an unsupported `order_by` expression
+#' values, similar to `dplyr::slice_min()`. Ungrouped, `group_by()`-grouped,
+#' and `by=` calls with a plain `order_by` (a bare column, or an expression
+#' the mutate/filter IR recognizes) all run entirely on the GPU (Phase 5,
+#' task W7): ungrouped via `cudf::rank()` + sort + filter; grouped/`by=`
+#' via a per-group window desugar (see R/slice.R's module docs for the
+#' exact group-ordering rules, including `by=`'s first-appearance-order
+#' rule, which applies here too, not just to the positional slice_*()s).
+#' An unsupported `order_by` expression (one the IR can't parse) still
 #' transparently falls back to CPU evaluation (see [gpu_fallback()]).
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
 #' @param order_by Column (or IR-supported expression) to rank by.
 #' @param ... Not used; for extensibility, must be empty.
 #' @param n,prop As for [slice_head.tbl_gpu()].
-#' @param by Optional on-the-fly grouping columns (forces the CPU fallback).
+#' @param by Optional on-the-fly grouping columns, GPU-native (Phase 5,
+#'   task W7) -- see [slice_head.tbl_gpu()]'s `by` docs.
 #' @param with_ties If `TRUE` (the default), ties at the cutoff are all
 #'   kept (the result can have more than `n` rows); if `FALSE`, ties are
 #'   broken by original row position and the result has exactly `n` rows
@@ -319,7 +736,8 @@ slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
 #'   `NA` rows are always excluded.
 #'
 #' @return A `tbl_gpu` object with the selected rows, in ascending
-#'   `order_by` order.
+#'   `order_by` order (grouped: ascending `order_by` order within each
+#'   group's own block).
 #'
 #' @export
 #' @importFrom dplyr slice_min
@@ -328,13 +746,19 @@ slice_min.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   order_quo <- rlang::enquo(order_by)
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
+  gm <- slice_group_mode(.data, by_quo, "by")
   np <- list()
   if (!missing(n)) np$n <- n
   if (!missing(prop)) np$prop <- prop
 
-  if (length(dots) == 0 && slice_use_native(.data, by_quo)) {
-    result <- slice_rank_native(.data, order_quo, np, descending = FALSE,
-                                with_ties = with_ties, na_rm = na_rm)
+  if (length(dots) == 0) {
+    result <- if (identical(gm$mode, "none")) {
+      slice_rank_native(.data, order_quo, np, descending = FALSE,
+                        with_ties = with_ties, na_rm = na_rm)
+    } else {
+      slice_rank_grouped(.data, gm, order_quo, np, descending = FALSE,
+                         with_ties = with_ties, na_rm = na_rm)
+    }
     if (!is.null(result)) return(result)
   }
 
@@ -364,13 +788,19 @@ slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   order_quo <- rlang::enquo(order_by)
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
+  gm <- slice_group_mode(.data, by_quo, "by")
   np <- list()
   if (!missing(n)) np$n <- n
   if (!missing(prop)) np$prop <- prop
 
-  if (length(dots) == 0 && slice_use_native(.data, by_quo)) {
-    result <- slice_rank_native(.data, order_quo, np, descending = TRUE,
-                                with_ties = with_ties, na_rm = na_rm)
+  if (length(dots) == 0) {
+    result <- if (identical(gm$mode, "none")) {
+      slice_rank_native(.data, order_quo, np, descending = TRUE,
+                        with_ties = with_ties, na_rm = na_rm)
+    } else {
+      slice_rank_grouped(.data, gm, order_quo, np, descending = TRUE,
+                         with_ties = with_ties, na_rm = na_rm)
+    }
     if (!is.null(result)) return(result)
   }
 
@@ -380,7 +810,26 @@ slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   })
 }
 
-# Shared native-path builder for slice_min()/slice_max(): resolves
+# Shared grouped/`by=` native-path builder for slice_min()/slice_max():
+# resolves n=/prop= (the only part `slice_grouped_native()` itself can't
+# resolve without knowing `mode` up front) and delegates to
+# `slice_grouped_native(mode = "rank")`, or returns `NULL` (caller falls
+# back to CPU) if `n=`/`prop=` are invalid.
+#
+# @keywords internal
+slice_rank_grouped <- function(.data, gm, order_quo, np, descending, with_ties, na_rm) {
+  amt <- tryCatch(resolve_slice_amount(np$n, np$prop), error = function(e) NULL)
+  if (is.null(amt)) {
+    return(NULL)
+  }
+
+  slice_grouped_native(.data, gm$mode, gm$group_cols, mode = "rank",
+                       amount = amt$amount, is_prop = amt$is_prop,
+                       order_quo = order_quo, descending = descending,
+                       with_ties = with_ties, na_rm = na_rm)
+}
+
+# Shared ungrouped native-path builder for slice_min()/slice_max(): resolves
 # order_by/n/prop and builds+pushes the `ast_slice(mode = "rank")` node, or
 # returns `NULL` (caller falls back to CPU) if `order_by` isn't something
 # the IR recognizes, or `n=`/`prop=` are invalid.

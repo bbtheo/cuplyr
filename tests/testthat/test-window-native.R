@@ -363,6 +363,60 @@ test_that("lower_window() accepts an agg-family spec (mean())", {
 })
 
 # -----------------------------------------------------------------------------
+# Regression (Phase 5, task W7): a DESCENDING rank-family frame with NA
+# values in the ranked column used to silently mis-rank the non-NA rows,
+# offset by the group's own NA count -- e.g. min_rank(x, order_desc = TRUE)
+# on x = c(3, 2, 1, NA, NA) gave 3, 4, 5 instead of the correct 1, 2, 3.
+#
+# Root cause: step 1's physical pre-sort (src/ops_window.cpp) used
+# null_order::AFTER unconditionally for every sort key, including a
+# DESCENDING order column -- but cudf's null_order is a physical-placement
+# convention (AFTER = nulls compare larger), so AFTER + DESCENDING actually
+# places nulls FIRST, not last (mirroring the same "NA first when
+# descending" quirk src/ops_arrange.cpp's own comment describes for plain
+# arrange()). The RANK family's presorted scan aggregation then counted
+# those (physically relocated to the front) NA rows toward its running
+# position tally even though `null_policy::EXCLUDE` excludes them from the
+# OUTPUT, silently offsetting every non-NA rank by the NA count. This
+# combination (`order_desc = TRUE` on a column containing NA) was
+# unreachable from any dplyr-facing verb before Phase 5 W7 (mutate()'s own
+# `min_rank()`/`dense_rank()` never reach a descending frame -- see
+# `apply_order_override()`'s docs, R/ir.R -- so nothing exercised it until
+# `slice_max(..., with_ties = TRUE)`'s grouped desugar built one directly),
+# hence no earlier test caught it. Fixed by flipping the order column's own
+# null precedence together with its sort direction (BEFORE for descending,
+# AFTER for ascending -- same fix `src/ops_slice.cpp::gpu_slice_rank()`
+# already applied for the ungrouped slice_min()/slice_max() path), both in
+# step 1's physical sort and in the RANK aggregation's own null_prec
+# argument (which must match whatever step 1 actually used).
+test_that("[W7 regression] min_rank() with a DESCENDING frame and NA values ranks correctly", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = c(3, 2, 1, NA, NA))
+  spec <- window_spec("mr", "min_rank", value_col = "x", order_cols = "x",
+                       order_desc = TRUE, output_type = "INT32")
+
+  result <- run_window(df, list(spec))
+  expect_equal(result$mr, c(1L, 2L, 3L, NA, NA))
+})
+
+test_that("[W7 regression] min_rank() DESCENDING with NA matches dplyr, grouped", {
+  skip_if_no_gpu()
+
+  df <- data.frame(g = c(1, 1, 1, 1, 1, 2, 2, 2), x = c(3, NA, 1, NA, 2, 5, NA, 1))
+  expected <- dplyr::mutate(
+    dplyr::group_by(df, g),
+    mr = dplyr::min_rank(dplyr::desc(x))
+  )$mr
+
+  spec <- window_spec("mr", "min_rank", value_col = "x", order_cols = "x",
+                       order_desc = TRUE, output_type = "INT32")
+  result <- run_window(df, list(spec), group_cols = "g")
+
+  expect_equal(result$mr, as.integer(expected))
+})
+
+# -----------------------------------------------------------------------------
 # Defensive rejection: a genuinely unrecognized window fn
 # -----------------------------------------------------------------------------
 

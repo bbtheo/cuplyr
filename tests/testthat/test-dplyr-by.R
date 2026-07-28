@@ -9,8 +9,14 @@
 # metadata behind), and supplying `.by=` on an already-`group_by()`-grouped
 # table is a hard error, matching dplyr's own message verbatim.
 #
-# The `slice()` family's own `by=`/`.by=` is task W7 (not covered here) --
-# see test-dplyr-slice.R for its existing (fallback-based) `by=` coverage.
+# The `slice()` family's own `by=`/`.by=` (Phase 5, task W7) is GPU-native
+# too (R/slice.R::slice_grouped_native()) -- see test-dplyr-slice.R for the
+# bulk of its oracle coverage (including the group-ordering semantics,
+# which differ from mutate()/filter()'s `.by=` -- slice's own `by=` orders
+# output by each group's FIRST-APPEARANCE position, not literal original
+# row order). This file adds the `by=`-on-a-grouped-`.data` error check for
+# slice_head()/slice_min(), for parity with the mutate()/filter() checks
+# above.
 
 # =============================================================================
 # mutate(.by=): window aggregates, scan/shift, ranks
@@ -271,6 +277,50 @@ test_that("filter(.by=) grouped-error fires even with zero dots", {
   )
 })
 
+test_that("slice_head(by=) on a grouped tbl_gpu errors, matching dplyr's exact message", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c("a", "a", "b", "b"), x = c(1, 2, 3, 4))
+
+  gdf <- dplyr::group_by(tbl_gpu(df), g)
+  odf <- dplyr::group_by(dplyr::as_tibble(df), g)
+
+  oracle_msg <- tryCatch(
+    dplyr::slice_head(odf, n = 1, by = g),
+    error = function(e) conditionMessage(e)
+  )
+  expect_match(oracle_msg, "Can't supply `by` when `.data` is a grouped data frame.", fixed = TRUE)
+
+  expect_error(
+    dplyr::slice_head(gdf, n = 1, by = g),
+    "Can't supply `by` when `.data` is a grouped data frame.",
+    fixed = TRUE
+  )
+})
+
+test_that("slice_min(by=) on a grouped tbl_gpu errors, matching dplyr's exact message", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c("a", "a", "b", "b"), x = c(1, 2, 3, 4))
+  gdf <- dplyr::group_by(tbl_gpu(df), g)
+
+  expect_error(
+    dplyr::slice_min(gdf, x, n = 1, by = g),
+    "Can't supply `by` when `.data` is a grouped data frame.",
+    fixed = TRUE
+  )
+})
+
+test_that("slice(.by=) on a grouped tbl_gpu errors, matching dplyr's exact message", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c("a", "a", "b", "b"), x = c(1, 2, 3, 4))
+  gdf <- dplyr::group_by(tbl_gpu(df), g)
+
+  expect_error(
+    dplyr::slice(gdf, 1, .by = g),
+    "Can't supply `.by` when `.data` is a grouped data frame.",
+    fixed = TRUE
+  )
+})
+
 # =============================================================================
 # Errors: `.by=` referencing a nonexistent column (tidyselect error)
 # =============================================================================
@@ -318,6 +368,40 @@ test_that("filter(.by=) with window/aggregate predicates never triggers a fallba
   expect_no_error(gdf |> dplyr::filter(x > mean(x), .by = g) |> collect())
   expect_no_error(gdf |> dplyr::filter(dplyr::row_number() == 1, .by = g) |> collect())
   expect_no_error(gdf |> dplyr::filter(x > 1, .by = g) |> collect())
+})
+
+test_that("slice_head(by=)/slice_min(by=) never trigger a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  df <- data.frame(g = c("a", "a", "b", "b", "b"), x = c(1, 2, 3, 4, 5))
+  gdf <- tbl_gpu(df)
+
+  expect_no_error(gdf |> dplyr::slice_head(n = 1, by = g) |> collect())
+  expect_no_error(gdf |> dplyr::slice_min(x, n = 1, by = g) |> collect())
+})
+
+# =============================================================================
+# slice_head()/slice_min()(by=): oracle parity, ungrouped result
+# (bulk of slice()-family by= coverage lives in test-dplyr-slice.R; these
+# two mirror this file's own mutate()/filter() layout for easy comparison)
+# =============================================================================
+
+test_that("slice_head(by=) matches dplyr and comes back ungrouped", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c("b", "a", "b", "a", "b"), x = c(10, 20, 30, 40, 50))
+
+  pipeline <- function(d) dplyr::slice_head(d, n = 1, by = g)
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("slice_min(by=) matches dplyr and comes back ungrouped", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c("b", "a", "b", "a", "b"), x = c(10, 5, 30, 2, 1))
+
+  pipeline <- function(d) dplyr::slice_min(d, x, n = 1, by = g)
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
 })
 
 # =============================================================================

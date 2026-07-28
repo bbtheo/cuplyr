@@ -24,7 +24,8 @@
 
 \item{n, prop}{As for \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}}.}
 
-\item{by}{Optional on-the-fly grouping columns (forces the CPU fallback).}
+\item{by}{Optional on-the-fly grouping columns, GPU-native (Phase 5,
+task W7) -- see \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}}'s \code{by} docs.}
 
 \item{with_ties}{If \code{TRUE} (the default), ties at the cutoff are all
 kept (the result can have more than \code{n} rows); if \code{FALSE}, ties are
@@ -38,13 +39,18 @@ result once \code{n}/\code{prop} reaches past the non-\code{NA} count. If \code{
 }
 \value{
 A \code{tbl_gpu} object with the selected rows, in ascending
-\code{order_by} order.
+\code{order_by} order (grouped: ascending \code{order_by} order within each
+group's own block).
 }
 \description{
 Keeps the \code{n} (or \code{prop} fraction of) rows with the smallest \code{order_by}
-values, similar to \code{dplyr::slice_min()}. Ungrouped calls with a plain
-\code{order_by} (a bare column, or an expression the mutate/filter IR
-recognizes) run entirely on the GPU (\code{cudf::rank()} + sort + filter);
-grouped input, \verb{by=}, or an unsupported \code{order_by} expression
+values, similar to \code{dplyr::slice_min()}. Ungrouped, \code{group_by()}-grouped,
+and \verb{by=} calls with a plain \code{order_by} (a bare column, or an expression
+the mutate/filter IR recognizes) all run entirely on the GPU (Phase 5,
+task W7): ungrouped via \code{cudf::rank()} + sort + filter; grouped/\verb{by=}
+via a per-group window desugar (see R/slice.R's module docs for the
+exact group-ordering rules, including \verb{by=}'s first-appearance-order
+rule, which applies here too, not just to the positional slice_*()s).
+An unsupported \code{order_by} expression (one the IR can't parse) still
 transparently falls back to CPU evaluation (see \code{\link[=gpu_fallback]{gpu_fallback()}}).
 }

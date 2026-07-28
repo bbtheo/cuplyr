@@ -24,7 +24,8 @@
 
 \item{n, prop}{As for \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}}.}
 
-\item{by}{Optional on-the-fly grouping columns (forces the CPU fallback).}
+\item{by}{Optional on-the-fly grouping columns, GPU-native (Phase 5,
+task W7) -- see \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}}'s \code{by} docs.}
 
 \item{with_ties}{If \code{TRUE} (the default), ties at the cutoff are all
 kept (the result can have more than \code{n} rows); if \code{FALSE}, ties are

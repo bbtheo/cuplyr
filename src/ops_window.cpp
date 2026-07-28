@@ -26,7 +26,12 @@
 // scratchpad/phase5_window_design.md section 2.2, implemented EXACTLY:
 //
 //   1. sort_keys = [group cols] ++ [order cols]; ASCENDING for every group
-//      col, per-spec order for order cols; null_order::AFTER for every key.
+//      col, per-spec order for order cols; null_order::AFTER for every group
+//      col, and (fixed post-W6 -- see the "nulls sort LAST regardless of
+//      direction" comment at this step's call site below) null_order::AFTER
+//      for an ASCENDING order col but BEFORE for a DESCENDING one, so nulls
+//      land last within a group's frame regardless of sort direction,
+//      matching real dplyr's own order()/arrange() convention.
 //   2. need_sort = !(group_indices.empty() && order_idx.empty()).
 //      perm = need_sort ? stable_sorted_order(sort_keys, ...) : nullptr.
 //      STABLE is mandatory: cumsum()/lag()/row_number() must follow
@@ -306,8 +311,29 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
         }
         cudf::size_type n_group_cols = static_cast<cudf::size_type>(group_col_views.size());
 
+        // Per order-col null precedence: nulls sort LAST regardless of
+        // direction (matching real dplyr's own arrange()/order() convention
+        // -- confirmed empirically against dplyr 1.2.1, including
+        // arrange(desc(x)), which also places NA last, not first). cudf's
+        // null_order is a physical-placement convention, not a "null is a
+        // large/small value" one: null_order::AFTER means nulls compare as
+        // larger than every value, so for ASCENDING that puts them last, but
+        // for DESCENDING (largest first) that puts them FIRST instead --
+        // achieving "last" in both directions means flipping null_order
+        // together with column order (the same fix already applied in
+        // src/ops_slice.cpp::gpu_slice_rank() for the ungrouped slice_min()/
+        // slice_max() path). Getting this wrong here is silent, not a
+        // compile/runtime error: a mismatched null_order still produces a
+        // valid-looking permutation, it just physically misplaces the null
+        // rows relative to what every downstream computation (the RANK
+        // family's presorted scan especially) assumes -- caught empirically
+        // while building Phase 5 W7's slice_min()/slice_max() grouped
+        // desugar (min_rank(order_col, order_desc = TRUE) on a column with
+        // nulls silently produced ranks offset by the group's null count,
+        // e.g. 3,4,5 instead of 1,2,3, until this fix).
         std::vector<cudf::column_view> order_col_views;
         std::vector<cudf::order> order_col_orders;
+        std::vector<cudf::null_order> order_col_null_precs;
         for (int i = 0; i < order_idx_r.size(); ++i) {
             int idx = order_idx_r[i];
             if (idx < 0 || idx >= n_input) {
@@ -316,6 +342,7 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
             order_col_views.push_back(view.column(idx));
             bool desc = (i < order_desc_r.size()) && static_cast<bool>(order_desc_r[i]);
             order_col_orders.push_back(desc ? cudf::order::DESCENDING : cudf::order::ASCENDING);
+            order_col_null_precs.push_back(desc ? cudf::null_order::BEFORE : cudf::null_order::AFTER);
         }
         cudf::size_type n_order_cols = static_cast<cudf::size_type>(order_col_views.size());
 
@@ -361,7 +388,8 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
             std::vector<cudf::order> col_orders(static_cast<size_t>(n_group_cols), cudf::order::ASCENDING);
             col_orders.insert(col_orders.end(), order_col_orders.begin(), order_col_orders.end());
             std::vector<cudf::null_order> null_precs(
-                static_cast<size_t>(n_group_cols + n_order_cols), cudf::null_order::AFTER);
+                static_cast<size_t>(n_group_cols), cudf::null_order::AFTER);
+            null_precs.insert(null_precs.end(), order_col_null_precs.begin(), order_col_null_precs.end());
 
             // STABLE is mandatory: cumsum()/lag()/row_number() must follow
             // ORIGINAL row order within a group.
@@ -494,15 +522,16 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
 
                 // The ranked column is this frame's sole order column (just
                 // checked above), so its cudf::order/null_order are exactly
-                // `order_col_orders[0]` / the AFTER null precedence every
-                // sort key uses (step 1).
+                // `order_col_orders[0]` / `order_col_null_precs[0]` -- the
+                // SAME (possibly direction-flipped, nulls-last) null
+                // precedence step 1's physical sort used for this column.
                 cudf::size_type pos = value_pos.at(sp.value_idx);
                 cudf::column_view value_view = work_view.column(pos);
 
                 cudf::groupby::scan_request req;
                 req.values = value_view;
                 req.aggregations.push_back(
-                    make_rank_scan_agg(sp.fn, order_col_orders[0], cudf::null_order::AFTER));
+                    make_rank_scan_agg(sp.fn, order_col_orders[0], order_col_null_precs[0]));
                 job.primary_request_idx = static_cast<int>(requests.size());
                 requests.push_back(std::move(req));
 

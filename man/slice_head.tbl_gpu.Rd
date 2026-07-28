@@ -12,20 +12,26 @@
 \item{...}{Not used; for extensibility, must be empty.}
 
 \item{n}{Number of rows to keep. Negative \code{n} keeps all but the last
-\code{abs(n)} rows. Clamped to \verb{[0, nrow(.data)]}. Default \code{1} if neither
-\code{n} nor \code{prop} is supplied.}
+\code{abs(n)} rows. Clamped to \verb{[0, nrow(.data)]} (grouped: \verb{[0, group_size]}, per group). Default \code{1} if neither \code{n} nor \code{prop} is
+supplied.}
 
 \item{prop}{Proportion of rows to keep (\code{floor(prop * nrow(.data))},
-clamped like \code{n}). Exactly one of \code{n}/\code{prop} may be supplied.}
+clamped like \code{n}; grouped: \code{floor(prop * group_size)}, per group).
+Exactly one of \code{n}/\code{prop} may be supplied.}
 
-\item{by}{Optional on-the-fly grouping columns (forces the CPU fallback).}
+\item{by}{Optional on-the-fly grouping columns, GPU-native (Phase 5,
+task W7): result rows are ordered by each group's FIRST-APPEARANCE
+position in \code{.data} (see module docs), and the result is always
+ungrouped. Supplying \code{by} when \code{.data} is already grouped (via
+\code{group_by()}) is an error, matching dplyr.}
 }
 \value{
 A \code{tbl_gpu} object with the first rows selected.
 }
 \description{
 Keeps the first \code{n} (or \code{prop} fraction of) rows of a GPU table, similar
-to \code{dplyr::slice_head()}. Ungrouped calls (no \verb{by=}) run entirely on the
-GPU (\code{cudf::slice()}); grouped input or \verb{by=} transparently falls back
-to CPU evaluation (see \code{\link[=gpu_fallback]{gpu_fallback()}}).
+to \code{dplyr::slice_head()}. Ungrouped, \code{group_by()}-grouped, and \verb{by=}
+calls all run entirely on the GPU (Phase 5, task W7): ungrouped via
+\code{cudf::slice()}; grouped/\verb{by=} via a per-group window desugar (see
+R/slice.R's module docs for the exact group-ordering/NA-handling rules).
 }
