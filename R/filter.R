@@ -70,9 +70,10 @@
 #'     `percent_rank()`/`cume_dist()`, `lag()`/`lead()`,
 #'     `cumsum()`/`cummax()`/`cummin()`/`cumprod()`/`cummean()`/
 #'     `cumall()`/`cumany()`/`consecutive_id()`, `ntile()`,
-#'     `mean()`/`sum()`/`min()`/`max()`/`n()`/`sd()`/`var()`/`first()`/
-#'     `last()`/`nth()` -- the same set `mutate()` supports (see its own
-#'     docs for exact semantics/argument support), evaluated per group when
+#'     `mean()`/`sum()`/`min()`/`max()`/`n()`/`sd()`/`var()`/`median()`/
+#'     `n_distinct()`/`first()`/`last()`/`nth()` -- the same set `mutate()`
+#'     supports (see its own docs for exact semantics/argument support),
+#'     evaluated per group when
 #'     `.data` is grouped (via `group_by()` or the on-the-fly `.by=`
 #'     argument, Phase 5 task W6 -- identical semantics either way). A
 #'     grouped filter -- like dplyr's own -- preserves the ORIGINAL row

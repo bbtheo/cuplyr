@@ -231,8 +231,30 @@ std::unique_ptr<cudf::groupby_scan_aggregation> make_rank_scan_agg(
 // --- Phase 5 W4: agg family (aggregate + cudf::repeat() broadcast) ---
 
 bool is_agg_fn(const std::string& fn) {
+    // Phase 6, task 6.2: median()/n_distinct() join this list, reusing
+    // get_groupby_agg() (src/ops_groupby.cpp, genuinely shared source
+    // between the summarise() and window-mutate() paths) with NO other
+    // change needed here beyond this membership check + (for median())
+    // the na.rm=FALSE propagation list a few lines below -- verified
+    // empirically (test-dplyr-summarise.R's window-parity oracle tests)
+    // against dplyr 1.2.1's own `group_by(g) |> mutate(m = median(x))` /
+    // `mutate(nd = n_distinct(x))`. Like every other function in this list,
+    // neither supports a na.rm=/na_rm= ARGUMENT in mutate() context (no
+    // window "agg" function does) -- median() always gets the na.rm=FALSE
+    // whole-group-null propagation below; n_distinct() always counts NA as
+    // its own distinct value (get_groupby_agg()'s fixed
+    // null_policy::INCLUDE overload for "n_distinct", see that function's
+    // own docs). quantile()/first()/last()/nth()/any()/all() are NOT
+    // added here: quantile() needs a probability parameter the WindowSpec/
+    // registry shape doesn't carry, and any()/all() have no
+    // groupby_aggregation instantiation in cudf at all (see
+    // combine_any_all()'s docs in src/ops_groupby.cpp) -- both would need
+    // real new plumbing, not just a membership check, so neither is
+    // attempted this wave (first()/last()/nth() already have their OWN,
+    // separate, pre-existing window support below, unrelated to this task).
     return fn == "mean" || fn == "sum" || fn == "min" || fn == "max" ||
-           fn == "n" || fn == "sd" || fn == "var";
+           fn == "n" || fn == "sd" || fn == "var" ||
+           fn == "median" || fn == "n_distinct";
 }
 
 bool is_nth_fn(const std::string& fn) {
@@ -772,26 +794,29 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
             }
 
             // na.rm=FALSE propagation: R's mean()/sum()/min()/max()/sd()/
-            // var() all default to na.rm=FALSE, so a group with ANY null
-            // value makes the WHOLE group's result NA -- unlike cudf's own
-            // MEAN/SUM/MIN/MAX/STD/VARIANCE groupby aggregations, which
-            // always exclude nulls (verified empirically against dplyr
-            // 1.2.1: `group_by(g) |> mutate(m = mean(x))` is NA for every
-            // row of a group containing an NA `x`, not just the NA row
-            // itself). n() is unaffected (it counts ALL rows regardless of
-            // nulls, matching dplyr exactly already); first()/last()/nth()
-            // are also unaffected (na_rm=FALSE for those means "don't skip
-            // NA when picking a position", which `null_policy::INCLUDE`
-            // above already implements -- only an unrelated OTHER row's
-            // NA must NOT affect these three, and it doesn't: they don't
-            // reduce over the whole group). This is a real, otherwise
-            // silent divergence from dplyr; `R/summarise.R`'s existing
-            // mean()/sum()/min()/max() aggregations share the exact same
-            // gap (out of scope here -- tracked separately).
+            // var()/median() (Phase 6, task 6.2: median() verified
+            // empirically against dplyr 1.2.1 to share this exact rule --
+            // `group_by(g) |> mutate(m = median(x))` is NA for every row of
+            // a group containing an NA `x`) all default to na.rm=FALSE, so
+            // a group with ANY null value makes the WHOLE group's result NA
+            // -- unlike cudf's own MEAN/SUM/MIN/MAX/STD/VARIANCE/MEDIAN
+            // groupby aggregations, which always exclude nulls. n() is
+            // unaffected (it counts ALL rows regardless of nulls, matching
+            // dplyr exactly already); n_distinct() is also unaffected (NA
+            // is its own distinct value via null_policy::INCLUDE baked
+            // directly into the aggregation itself -- see
+            // get_groupby_agg()'s own "n_distinct" branch docs -- not a
+            // post-hoc propagation step); first()/last()/nth() are also
+            // unaffected (na_rm=FALSE for those means "don't skip NA when
+            // picking a position", which `null_policy::INCLUDE` above
+            // already implements -- only an unrelated OTHER row's NA must
+            // NOT affect these three, and it doesn't: they don't reduce
+            // over the whole group).
             for (int si : agg_spec_indices) {
                 const WindowSpec& sp = specs[static_cast<size_t>(si)];
                 bool na_propagates = sp.fn == "mean" || sp.fn == "sum" || sp.fn == "min" ||
-                                      sp.fn == "max" || sp.fn == "sd" || sp.fn == "var";
+                                      sp.fn == "max" || sp.fn == "sd" || sp.fn == "var" ||
+                                      sp.fn == "median";
                 if (!na_propagates) {
                     continue;
                 }

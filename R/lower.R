@@ -163,11 +163,17 @@ lower_summarise <- function(ast, source_ptr) {
   # need the extra whole-group-null propagation step (na_rm == FALSE, R's
   # own default) vs. cudf's native null-excluding behavior (na_rm == TRUE).
   na_rm_flags <- logical(length(ast$aggregations))
+  # Phase 6, task 6.2: per-aggregation extra scalar shape parameter --
+  # quantile()'s probability, nth()'s (possibly negative) element
+  # position, NA_real_ for every other function -- see make_aggregation()'s
+  # own docs.
+  agg_extra <- numeric(length(ast$aggregations))
 
   for (i in seq_along(ast$aggregations)) {
     agg <- ast$aggregations[[i]]
     agg_fns[i] <- agg$fn
     na_rm_flags[i] <- isTRUE(agg$na_rm)
+    agg_extra[i] <- if (is.null(agg$extra)) NA_real_ else agg$extra
     if (agg$fn == "n") {
       agg_col_indices[i] <- 0L  # n() doesn't need a column
     } else {
@@ -175,7 +181,7 @@ lower_summarise <- function(ast, source_ptr) {
     }
   }
 
-  gpu_summarise(input_ptr, group_indices, agg_col_indices, agg_fns, na_rm_flags)
+  gpu_summarise(input_ptr, group_indices, agg_col_indices, agg_fns, na_rm_flags, agg_extra)
 }
 
 #' Lower distinct node

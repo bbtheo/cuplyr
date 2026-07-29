@@ -1,5 +1,43 @@
 # cuplyr (development version)
 
+## New `summarise()` aggregations: `median()`/`quantile()`/`n_distinct()`/`first()`/`last()`/`nth()`/`any()`/`all()` (Phase 6, task 6.2)
+
+`summarise()` (grouped, `.by=`, and ungrouped) gains eight new aggregation
+functions, each verified against dplyr 1.2.1's own empirical behavior:
+
+* **`median(x)`** matches R's own `na.rm = FALSE` default exactly like
+  `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()` -- any `NA` in a group
+  makes the whole group's result `NA`; `na.rm = TRUE` excludes `NA`s.
+* **`quantile(x, probs)`** supports a single probability per call. cudf's
+  `interpolation::LINEAR` is bit-for-bit R's own default `type = 7`
+  (verified at several probabilities, no divergence to document). Unlike
+  every other aggregation here, `na.rm = FALSE` (the default) with an
+  actual `NA` present is a hard ERROR, matching base R's own
+  `quantile.default()` exactly (not a `NA` result).
+* **`n_distinct(x)`** counts `NA` as its own distinct value by default
+  (matching dplyr's own `n_distinct()`); `na.rm = TRUE` excludes it.
+* **`first(x)`/`last(x)`/`nth(x, n)`** use dplyr's own `na_rm=` (underscore)
+  spelling: `na_rm = FALSE` (default) never skips a `NA` when picking the
+  position (the result can itself be `NA`); `na_rm = TRUE` skips `NA`
+  values. `nth()`'s out-of-range position returns `NA`, matching dplyr.
+* **`any(x)`/`all(x)`** implement R's exact three-valued logic
+  (`any(c(TRUE, NA))` is `TRUE`, `any(c(FALSE, NA))` is `NA`,
+  `all(c(FALSE, NA))` is `FALSE`, `all(c(TRUE, NA))` is `NA`, with the
+  default `na.rm = FALSE`; `na.rm = TRUE` drops `NA` first). cudf has no
+  groupby ANY/ALL aggregation in this environment at all, so both are
+  composed from MIN/MAX-of-`BOOL8` (cudf's own null-skipping) plus a
+  "does this group have any null" indicator.
+* All eight support the same aggregation sub-expression preprocessing as
+  `sum()`/`mean()`/... (e.g. `median(x + 1)`, `any(x > 3)`).
+* `median()`/`n_distinct()` additionally light up as window ("agg" family)
+  functions in `mutate()`/`filter()`, since `get_groupby_agg()`
+  (`src/ops_groupby.cpp`) is shared source between `summarise()` and the
+  window-aggregate path (Phase 5, W4). `quantile()`/`any()`/`all()` are
+  NOT available as window functions this wave (a probability parameter /
+  the missing cudf groupby ANY/ALL instantiation, respectively, would need
+  real new plumbing). `cor()`/`weighted.mean()` remain unsupported in
+  `summarise()` (out of scope for this task).
+
 ## Rolling (moving-window) functions: `roll_mean()`/`roll_sum()`/`roll_min()`/`roll_max()`/`roll_sd()`/`roll_median()` (Theo-requested benchmark task)
 
 GPU-native rolling windows, added as a sixth window-function kind ("rolling")

@@ -12,10 +12,20 @@ ir_parse_froll_call(expr, env, schema, dt_fn_name)
 }
 \description{
 See the file-level comment above this section: only the default
-\code{align = "right"}, \code{fill = NA}, \code{adaptive = FALSE} are supported this
-wave (a non-default value returns \code{NULL}, i.e. "not implemented, fall
-back" -- mutate()'s usual contract for an unrecognized shape);
-\verb{algo=}/\verb{hasNA=} are accepted and ignored (pure performance hints,
-verified against data.table's own docs to never change the \emph{result}).
+\code{align = "right"}, \code{fill = NA}, \code{adaptive = FALSE}, \code{partial = FALSE},
+\code{give.names = FALSE} are supported this wave (a non-default value
+returns \code{NULL}, i.e. "not implemented, fall back" -- mutate()'s usual
+contract for an unrecognized shape: \code{partial = TRUE} changes windowing
+semantics entirely -- allows a genuinely incomplete window to produce a
+value instead of \code{NA} -- and \code{give.names = TRUE} changes the RETURN
+SHAPE to a named \code{data.table}/list instead of a plain vector, so both
+must be rejected, not silently ignored); \verb{algo=}/\verb{has.nf=}/\verb{hasNA=} are
+accepted and ignored (pure performance hints, verified against
+data.table's own docs to never change the \emph{result}). Proto signature
+verified against this environment's actual installed
+\code{data.table::frollmean} (\code{args(data.table::frollmean)}), not assumed
+from memory/docs alone -- note the real signature has \verb{has.nf=} (NOT
+\verb{hasNA=}, which is a separate, no-default legacy/back-compat argument
+that's ALSO present, verified empirically).
 }
 \keyword{internal}

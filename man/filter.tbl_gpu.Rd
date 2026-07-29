@@ -83,9 +83,10 @@ comparisons in the same dot (\code{filter(x > mean(x) & y < 5)}):
 \code{percent_rank()}/\code{cume_dist()}, \code{lag()}/\code{lead()},
 \code{cumsum()}/\code{cummax()}/\code{cummin()}/\code{cumprod()}/\code{cummean()}/
 \code{cumall()}/\code{cumany()}/\code{consecutive_id()}, \code{ntile()},
-\code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{n()}/\code{sd()}/\code{var()}/\code{first()}/
-\code{last()}/\code{nth()} -- the same set \code{mutate()} supports (see its own
-docs for exact semantics/argument support), evaluated per group when
+\code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{n()}/\code{sd()}/\code{var()}/\code{median()}/
+\code{n_distinct()}/\code{first()}/\code{last()}/\code{nth()} -- the same set \code{mutate()}
+supports (see its own docs for exact semantics/argument support),
+evaluated per group when
 \code{.data} is grouped (via \code{group_by()} or the on-the-fly \verb{.by=}
 argument, Phase 5 task W6 -- identical semantics either way). A
 grouped filter -- like dplyr's own -- preserves the ORIGINAL row

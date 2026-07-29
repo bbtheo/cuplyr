@@ -2604,6 +2604,26 @@ ir_call_registry <- list(
   "var" = list(arity = 1L, parse = NULL, type = type_float64,
                 lower = NULL, window = list(kind = "agg")),
 
+  # median()/n_distinct() (Phase 6, task 6.2): join the agg family "for
+  # free" once summarise() learned them, reusing get_groupby_agg()
+  # (src/ops_groupby.cpp, genuinely shared source between the summarise()
+  # and window-mutate() paths) -- verified empirically against dplyr 1.2.1
+  # (test-dplyr-summarise.R's window-parity oracle tests). Like every
+  # other "agg"-family window function, neither supports a na.rm=/na_rm=
+  # ARGUMENT here (arity is fixed at 1L, same as mean()/sum()/...; a
+  # `median(x, na.rm = TRUE)` mutate() call falls through to mutate()'s own
+  # "unsupported named argument" error, exactly like `mean(x, na.rm =
+  # TRUE)` already does) -- median() always gets na.rm=FALSE's whole-
+  # group-null propagation (src/ops_window.cpp's na_propagates list),
+  # n_distinct() always counts NA as its own distinct value
+  # (null_policy::INCLUDE, get_groupby_agg()'s "n_distinct" branch).
+  # quantile()/any()/all() are NOT added here -- see is_agg_fn()'s own
+  # docs (src/ops_window.cpp) for why.
+  "median" = list(arity = 1L, parse = NULL, type = type_float64,
+                   lower = NULL, window = list(kind = "agg")),
+  "n_distinct" = list(arity = 1L, parse = NULL, type = type_int32,
+                       lower = NULL, window = list(kind = "agg")),
+
   # first()/last()/nth(): agg-family, but order-sensitive (dplyr's own
   # "first"/"last"/"nth row *of the group, in its current order*" -- W1
   # only supports the no-order_by/no-default/no-na_rm shape, hence the

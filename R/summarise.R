@@ -34,31 +34,69 @@
 #'   \item `n()` - Count of rows in each group
 #'   \item `sd(x)` - Standard deviation
 #'   \item `var(x)` - Variance
+#'   \item `median(x)` - Median value (Phase 6, task 6.2)
+#'   \item `quantile(x, probs)` - A single quantile, `probs` a scalar in
+#'     `[0, 1]` (Phase 6, task 6.2; only one probability per call is
+#'     supported)
+#'   \item `n_distinct(x)` - Count of distinct values, `NA` counted as its
+#'     own distinct value by default (Phase 6, task 6.2)
+#'   \item `first(x)` / `last(x)` / `nth(x, n)` - The first/last/nth value
+#'     in the group's current row order (Phase 6, task 6.2)
+#'   \item `any(x)` / `all(x)` - Logical reductions with R's own
+#'     three-valued logic (Phase 6, task 6.2; `x` must be logical)
 #' }
 #'
 #' ## Aggregation sub-expressions
 #' `column` is not limited to a bare column name: any expression the same
 #' expression IR that powers [filter.tbl_gpu()]/[mutate.tbl_gpu()] understands
 #' is computed as a hidden temporary column first, then aggregated. This
-#' covers comparisons and logic (`sum(carb > 3 & wt < 4)`), arithmetic
-#' (`mean(hp / wt)`), and math functions (`mean(sqrt(hp))`, `sum(carb %% 2 ==
-#' 0)`), arbitrarily nested -- the same surface documented in
-#' \code{\link{mutate.tbl_gpu}}. A comparison/logical sub-expression is
+#' covers comparisons and logic (`sum(carb > 3 & wt < 4)`, `any(carb > 3)`),
+#' arithmetic (`mean(hp / wt)`), and math functions (`mean(sqrt(hp))`,
+#' `sum(carb %% 2 == 0)`), arbitrarily nested -- the same surface documented
+#' in \code{\link{mutate.tbl_gpu}}. A comparison/logical sub-expression is
 #' summed as `TRUE`/`FALSE` -> `1`/`0`, matching R's own coercion
-#' (`sum(c(TRUE, TRUE))` is `2L`). An expression shape the IR doesn't
-#' recognize raises the same "Invalid aggregation expression" error as any
-#' other unsupported aggregation shape.
+#' (`sum(c(TRUE, TRUE))` is `2L`) -- except inside `any()`/`all()`, which
+#' keep it logical. An expression shape the IR doesn't recognize raises the
+#' same "Invalid aggregation expression" error as any other unsupported
+#' aggregation shape.
 #'
 #' ## NA handling
-#' `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()` all match R's own
-#' `na.rm = FALSE` default (Phase 6, task 6.1): if a group contains ANY `NA`
-#' in the aggregated column, the WHOLE group's result is `NA` for that
-#' aggregation -- e.g. `summarise(m = mean(x))` is `NA` for a group with even
-#' one `NA` value of `x`, matching real dplyr exactly. Pass `na.rm = TRUE`
-#' explicitly (e.g. `sum(x, na.rm = TRUE)`) to exclude `NA` values instead
-#' (cudf's own native aggregation behavior). `n()` is unaffected by
-#' `na.rm=` (it counts every row regardless of nulls, like dplyr's own
-#' `n()`).
+#' `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()`/`median()` all match R's
+#' own `na.rm = FALSE` default (Phase 6, tasks 6.1/6.2): if a group contains
+#' ANY `NA` in the aggregated column, the WHOLE group's result is `NA` for
+#' that aggregation -- e.g. `summarise(m = mean(x))` is `NA` for a group
+#' with even one `NA` value of `x`, matching real dplyr exactly. Pass
+#' `na.rm = TRUE` explicitly (e.g. `sum(x, na.rm = TRUE)`) to exclude `NA`
+#' values instead (cudf's own native aggregation behavior). `n()` is
+#' unaffected by `na.rm=` (it counts every row regardless of nulls, like
+#' dplyr's own `n()`).
+#'
+#' `quantile()` diverges from the mean/sum/.../median family: matching base
+#' R's own `quantile.default()` exactly, `na.rm = FALSE` (the default) with
+#' an actual `NA` present is a hard ERROR ("missing values and NaN's not
+#' allowed if 'na.rm' is FALSE"), not a `NA` result -- pass
+#' `na.rm = TRUE` to compute the quantile over the non-`NA` values instead.
+#'
+#' `n_distinct()` counts `NA` as its own distinct value when
+#' `na.rm = FALSE` (the default, matching dplyr's own `n_distinct()`
+#' exactly) -- e.g. `n_distinct(c(1, 2, NA, 2))` is `3`. Pass
+#' `na.rm = TRUE` to exclude `NA` from the distinct count instead.
+#'
+#' `first()`/`last()`/`nth()` use dplyr's own `na_rm=` spelling
+#' (underscore, not `na.rm`): `na_rm = FALSE` (the default) never skips a
+#' `NA` when picking the first/last/nth value (so the result can itself be
+#' `NA`); `na_rm = TRUE` skips `NA` values, returning the first/last/nth
+#' non-`NA` value in the group (or `NA` if the group has none).
+#'
+#' `any()`/`all()` implement R's exact three-valued logic: `any(x)` is
+#' `TRUE` if any element is `TRUE` (regardless of `NA`s present), `NA` if
+#' there's no `TRUE` but at least one `NA` (with `na.rm = FALSE`, the
+#' default), else `FALSE`; `all(x)` is `FALSE` if any element is `FALSE`
+#' (regardless of `NA`s present), `NA` if there's no `FALSE` but at least
+#' one `NA` (with `na.rm = FALSE`), else `TRUE`. `na.rm = TRUE` drops `NA`
+#' values first, matching base R's `any()`/`all()` exactly (an all-`NA`
+#' group with `na.rm = TRUE` is `FALSE` for `any()`, `TRUE` for `all()`,
+#' the empty-vector identity in both cases).
 #'
 #' ## Ungrouped summarise
 #' If `.data` is not grouped, summarise will compute aggregations over all
@@ -159,9 +197,20 @@ summarise_core <- function(.data, dots) {
   # reduced to the `fn(single_arg)` shape preprocess_agg_expressions() (and
   # parse_aggregations()'s own regex) already understand, with na.rm
   # tracked out-of-band per dot instead of embedded in the call shape.
+  # Extended (Phase 6, task 6.2) to also recognize `na_rm = <literal>`
+  # (first()/last()/nth()'s own spelling) -- see extract_na_rm()'s docs.
   extracted <- lapply(dots, extract_na_rm)
   na_rm_flags <- vapply(extracted, `[[`, logical(1), "na_rm")
   dots <- lapply(extracted, `[[`, "quo")
+
+  # Phase 6, task 6.2: extract and strip quantile()'s `probs=` / nth()'s
+  # `n=` scalar shape parameter -- run AFTER na.rm/na_rm extraction (so
+  # this function's own argument-matching never has to understand that
+  # control), reducing both to the same single-argument `fn(x)` shape
+  # every other aggregation already produces.
+  extracted2 <- lapply(dots, extract_agg_shape_param)
+  agg_extra <- vapply(extracted2, `[[`, numeric(1), "extra")
+  dots <- lapply(extracted2, `[[`, "quo")
 
   # Pre-process: create temporary columns for expressions inside agg functions
   # (e.g. sum(carb == 4)). Per D4, if a temp column is needed and .data is
@@ -174,36 +223,50 @@ summarise_core <- function(.data, dots) {
   # Parse the aggregation expressions (now with simple column refs), emitting
   # aggregation structs that carry the cudf-accepted function name (fixes
   # lazy sd()/var(), which used to reach C++ as "sd"/"var" and error out).
-  aggregations <- parse_aggregations(current_schema(working_data), processed_dots, na_rm_flags)
+  aggregations <- parse_aggregations(current_schema(working_data), processed_dots,
+                                     na_rm_flags, agg_extra)
 
   push_op(working_data, ast_summarise(input_node(working_data), aggregations,
                                       working_data$groups))
 }
 
-# Internal: Extract and strip an `na.rm = <literal>` named argument from a
-# single summarise() aggregation dot (Phase 6, task 6.1, Fix A)
+# Internal: Extract and strip an `na.rm = <literal>` (or `na_rm = <literal>`)
+# named argument from a single summarise() aggregation dot (Phase 6, task
+# 6.1, Fix A; extended Phase 6, task 6.2 for the underscore spelling)
 #
-# Real dplyr's `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()` all default to
-# `na.rm = FALSE` (verified empirically against dplyr 1.2.1: any NA in a
-# group makes the WHOLE group's aggregation result NA). cudf's own groupby
-# aggregations always exclude nulls, so this default requires an extra
-# whole-group-null propagation step in `gpu_summarise()`
-# (`src/ops_groupby.cpp`) -- `na_rm = FALSE` (the R-side default emitted
-# when no `na.rm=` is present) requests that step; `na.rm = TRUE` opts back
-# into cudf's native (NA-excluding) behavior directly, no extra step.
+# Real dplyr's `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()`/`median()`/
+# `quantile()`/`n_distinct()`/`any()`/`all()` all spell this control
+# `na.rm` (dot); `first()`/`last()`/`nth()` spell it `na_rm` (underscore --
+# confirmed via `args(dplyr::first)` against dplyr 1.2.1: `function (x,
+# order_by = NULL, default = NULL, na_rm = FALSE)`). Both defaults to
+# `FALSE`, matching R's own `na.rm = FALSE` default: any NA in a group
+# makes the WHOLE group's aggregation result NA for the mean/sum/.../
+# median family (verified empirically against dplyr 1.2.1). cudf's own
+# groupby aggregations always exclude nulls, so this default requires an
+# extra whole-group-null propagation step in `gpu_summarise()`
+# (`src/ops_groupby.cpp`) for that family -- `na_rm = FALSE` (the R-side
+# default emitted when no `na.rm=`/`na_rm=` is present) requests that
+# step; `na_rm = TRUE` opts back into cudf's native (NA-excluding)
+# behavior directly, no extra step. `n_distinct()`/`first()`/`last()`/
+# `nth()` interpret the SAME flag differently (selecting cudf's own
+# `null_policy` directly rather than a post-hoc propagation step -- see
+# `make_aggregation()`'s own docs), and `any()`/`all()` implement R's
+# three-valued logic with it -- but the R-side extraction (which spelling
+# is present, its value) is identical for every one of these functions,
+# so one shared implementation still covers all of them.
 #
-# Mirrors `ir_parse_sum_call()`'s (R/ir.R) validation style: `na.rm`'s value
-# is resolved via `eval_tidy()` in the dot's own environment (so a bound
+# Mirrors `ir_parse_sum_call()`'s (R/ir.R) validation style: the value is
+# resolved via `eval_tidy()` in the dot's own environment (so a bound
 # variable like `na.rm = drop_na` works, not just a literal `TRUE`/`FALSE`
 # token), but unlike `ir_parse_sum_call()` (which returns `NULL` to signal
 # "try a different shape" to its caller, since mutate()/filter() have
-# fallback paths), an unevaluable or non-logical `na.rm` is a hard error
-# here -- summarise()'s aggregation parsing has no CPU fallback (see this
-# file's own module docs).
+# fallback paths), an unevaluable or non-logical value -- or BOTH spellings
+# present at once -- is a hard error here -- summarise()'s aggregation
+# parsing has no CPU fallback (see this file's own module docs).
 #
 # @param quo A quosure, one summarise() dot (post `auto_name_dots()`)
-# @return `list(quo = <possibly rewritten quosure, na.rm stripped>, na_rm =
-#   logical(1))`
+# @return `list(quo = <possibly rewritten quosure, na.rm/na_rm stripped>,
+#   na_rm = logical(1))`
 # @keywords internal
 extract_na_rm <- function(quo) {
   expr <- rlang::quo_get_expr(quo)
@@ -218,12 +281,12 @@ extract_na_rm <- function(quo) {
     return(list(quo = quo, na_rm = FALSE))
   }
 
-  na_rm_pos <- which(arg_names == "na.rm")
+  na_rm_pos <- which(arg_names == "na.rm" | arg_names == "na_rm")
   if (length(na_rm_pos) == 0) {
     return(list(quo = quo, na_rm = FALSE))
   }
   if (length(na_rm_pos) > 1) {
-    stop("Multiple na.rm= arguments in aggregation expression: ",
+    stop("Multiple na.rm=/na_rm= arguments in aggregation expression: ",
          rlang::quo_text(quo), call. = FALSE)
   }
 
@@ -232,12 +295,162 @@ extract_na_rm <- function(quo) {
     error = function(e) NULL
   )
   if (!is.logical(na_rm_val) || length(na_rm_val) != 1 || is.na(na_rm_val)) {
-    stop("na.rm= must evaluate to a single TRUE or FALSE in aggregation expression: ",
+    stop("na.rm=/na_rm= must evaluate to a single TRUE or FALSE in aggregation expression: ",
          rlang::quo_text(quo), call. = FALSE)
   }
 
   stripped_expr <- expr[-na_rm_pos]
   list(quo = rlang::new_quosure(stripped_expr, env), na_rm = isTRUE(na_rm_val))
+}
+
+# Internal: Extract and strip `quantile()`'s `probs=` / `nth()`'s `n=`
+# scalar shape parameter from a single summarise() aggregation dot (Phase
+# 6, task 6.2)
+#
+# Both `quantile(x, probs)` and `nth(x, n)` are two-(or-more)-argument
+# calls whose SECOND argument is a scalar "which one" parameter, not a
+# data column -- `decompose_agg_call()`'s generic 0-or-1-arg shape (used
+# by every other aggregation) can't represent this, so it's extracted
+# out-of-band here, run AFTER `extract_na_rm()` (so any na.rm=/na_rm=
+# has already been stripped and doesn't need to be understood by this
+# function's own argument matching), reducing the call to the same
+# single-argument `fn(x)` shape every other aggregation produces --
+# `preprocess_agg_expressions()`/`parse_aggregations()` need no
+# quantile()/nth()-specific handling at all past this point.
+#
+# @param quo A quosure, one summarise() dot (post `extract_na_rm()`)
+# @return `list(quo = <possibly rewritten quosure>, extra = <numeric
+#   scalar, NA_real_ if not applicable>)`
+# @keywords internal
+extract_agg_shape_param <- function(quo) {
+  expr <- rlang::quo_get_expr(quo)
+  env <- rlang::quo_get_env(quo)
+
+  if (!is.call(expr)) {
+    return(list(quo = quo, extra = NA_real_))
+  }
+
+  head <- expr[[1]]
+  if (is.call(head) && length(head) == 3 && identical(head[[1]], as.name("::"))) {
+    head <- head[[3]]  # strip namespace: pkg::fn -> fn
+  }
+  if (!is.symbol(head)) {
+    return(list(quo = quo, extra = NA_real_))
+  }
+  fn_name <- as.character(head)
+
+  if (identical(fn_name, "quantile")) {
+    return(extract_quantile_probs(expr, env, quo))
+  }
+  if (identical(fn_name, "nth")) {
+    return(extract_nth_position(expr, env, quo))
+  }
+
+  list(quo = quo, extra = NA_real_)
+}
+
+# Internal: `quantile()`'s own argument-matching, called from
+# `extract_agg_shape_param()`
+#
+# Only a SINGLE probability is supported (scratchpad/todo.md's explicit
+# scope cut for this wave): `probs=` must evaluate to one value in `[0,
+# 1]`. `type=` (R's own quantile "algorithm" selector, default `7`) is
+# validated but never threaded through -- cuplyr always computes cudf's
+# `interpolation::LINEAR`, which is bit-for-bit R's own default `type = 7`
+# for a plain (non-discrete) sample (verified empirically, see
+# `gpu_summarise()`'s own docs and `test-dplyr-summarise.R`) -- so a
+# `type=` OTHER than `7` is rejected outright (no silent divergence)
+# rather than silently computing the wrong thing. `names=`/`digits=` only
+# affect the OUTPUT NAME's label/rounding in real R (never the value
+# itself), so both are accepted and ignored.
+#
+# @keywords internal
+extract_quantile_probs <- function(expr, env, quo) {
+  proto <- function(x, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = FALSE,
+                     names = TRUE, type = 7, digits = 7) NULL
+  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  if (is.null(present)) {
+    stop("Invalid quantile() call in aggregation expression: ",
+         rlang::quo_text(quo), call. = FALSE)
+  }
+  present_args <- as.list(present)[-1]
+
+  if (is.null(present_args$x)) {
+    stop("quantile() requires an `x` argument: ", rlang::quo_text(quo), call. = FALSE)
+  }
+
+  if (!is.null(present_args$type)) {
+    type_val <- tryCatch(
+      rlang::eval_tidy(rlang::new_quosure(present_args$type, env)),
+      error = function(e) NULL
+    )
+    if (is.null(type_val) || !is.numeric(type_val) || length(type_val) != 1 || type_val != 7) {
+      stop("summarise()'s quantile() only supports type = 7 (R's own default): ",
+           rlang::quo_text(quo), call. = FALSE)
+    }
+  }
+
+  if (is.null(present_args$probs)) {
+    stop("summarise()'s quantile() requires a single `probs` value: ",
+         rlang::quo_text(quo), call. = FALSE)
+  }
+  probs_val <- tryCatch(
+    rlang::eval_tidy(rlang::new_quosure(present_args$probs, env)),
+    error = function(e) NULL
+  )
+  if (is.null(probs_val) || !is.numeric(probs_val) || length(probs_val) != 1 ||
+      is.na(probs_val) || probs_val < 0 || probs_val > 1) {
+    stop("summarise()'s quantile() requires a single probability in [0, 1]: ",
+         rlang::quo_text(quo), call. = FALSE)
+  }
+
+  list(
+    quo = rlang::new_quosure(rlang::call2("quantile", present_args$x), env),
+    extra = as.double(probs_val)
+  )
+}
+
+# Internal: `nth()`'s own argument-matching, called from
+# `extract_agg_shape_param()`
+#
+# `order_by=`/`default=` are rejected outright (not implemented this
+# wave, mirroring `ir_parse_first_last_nth()`'s identical cut for the
+# window-function `nth()` -- R/ir.R); `n` must be a single non-zero
+# integer (dplyr's own 1-based/negative convention, translated to cudf's
+# `NTH_ELEMENT` convention in `gpu_summarise()`, mirroring
+# `src/ops_window.cpp`'s existing translation for the window path).
+#
+# @keywords internal
+extract_nth_position <- function(expr, env, quo) {
+  proto <- function(x, n, order_by = NULL, default = NULL, na_rm = FALSE) NULL
+  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  if (is.null(present)) {
+    stop("Invalid nth() call in aggregation expression: ", rlang::quo_text(quo), call. = FALSE)
+  }
+  present_args <- as.list(present)[-1]
+
+  if (!is.null(present_args$order_by) || !is.null(present_args$default)) {
+    stop("summarise()'s nth() does not support order_by=/default=: ",
+         rlang::quo_text(quo), call. = FALSE)
+  }
+  if (is.null(present_args$x) || is.null(present_args$n)) {
+    stop("nth() requires `x` and `n` arguments: ", rlang::quo_text(quo), call. = FALSE)
+  }
+
+  n_val <- tryCatch(
+    rlang::eval_tidy(rlang::new_quosure(present_args$n, env)),
+    error = function(e) NULL
+  )
+  if (is.null(n_val) || !is.numeric(n_val) || length(n_val) != 1 || is.na(n_val) ||
+      n_val != round(n_val) || n_val == 0) {
+    stop("nth() requires a single non-zero integer position: ",
+         rlang::quo_text(quo), call. = FALSE)
+  }
+
+  list(
+    quo = rlang::new_quosure(rlang::call2("nth", present_args$x), env),
+    extra = as.double(n_val)
+  )
 }
 
 # Internal: `.by=` desugar for summarise() (Phase 5, task W9)
@@ -415,7 +628,12 @@ preprocess_agg_expressions <- function(.data, dots) {
     # though not every dot ends up needing one).
     temp_col_name <- paste0(".temp_agg_", i)
 
-    working_data <- create_temp_column(working_data, temp_col_name, ir)
+    # any()/all() (Phase 6, task 6.2): keep a BOOL8-inferred sub-expression
+    # (e.g. `any(x > 3)`) as BOOL8 rather than the sum()-oriented INT32
+    # promotion every other aggregation wants -- see create_temp_column()'s
+    # own `keep_bool` docs.
+    keep_bool <- decomposed$fn_name %in% c("any", "all")
+    working_data <- create_temp_column(working_data, temp_col_name, ir, keep_bool = keep_bool)
 
     # Create a new quosure with the temp column name, e.g. `sum(.temp_agg_3)`.
     new_dots[[i]] <- rlang::new_quosure(
@@ -439,9 +657,16 @@ preprocess_agg_expressions <- function(.data, dots) {
 # @param col_name Name for the new column
 # @param ir A parsed (not yet bound) IR node, non-const (references at
 #   least one column)
+# @param keep_bool Logical scalar (Phase 6, task 6.2). `FALSE` (default)
+#   matches the original sum()-oriented behavior: a BOOL8-inferred
+#   sub-expression is declared INT32. `any()`/`all()` need the OPPOSITE --
+#   their argument (e.g. `any(x > 3)`) must stay BOOL8, since their
+#   three-valued-logic implementation (`gpu_summarise()`) dispatches on
+#   the aggregation's own MIN/MAX-of-BOOL8 semantics, not a sum-style
+#   integer promotion.
 # @return Modified tbl_gpu with the new column appended
 # @keywords internal
-create_temp_column <- function(.data, col_name, ir) {
+create_temp_column <- function(.data, col_name, ir, keep_bool = FALSE) {
   schema <- .data$schema
   inferred_type <- ir_infer_type(ir, schema)
 
@@ -452,8 +677,10 @@ create_temp_column <- function(.data, col_name, ir) {
   # aggregation over a comparison, e.g. `sum(carb > 3)`) expects downstream
   # via make_aggregation()'s INT32->INT64 promotion rule. gpu_mutate_expr()
   # performs the actual GPU-side cast (BOOL8 -> INT32) since the declared
-  # output type differs from the computed one (src/ops_expr.cpp).
-  new_type <- if (identical(inferred_type, "BOOL8")) "INT32" else inferred_type
+  # output type differs from the computed one (src/ops_expr.cpp). Skipped
+  # for any()/all() (`keep_bool = TRUE`), which need the argument to stay
+  # logical -- see this function's own `keep_bool` docs.
+  new_type <- if (identical(inferred_type, "BOOL8") && !keep_bool) "INT32" else inferred_type
 
   bound_ir <- ir_bind(ir, schema)
 
@@ -496,20 +723,42 @@ create_temp_column <- function(.data, col_name, ir) {
 # @param schema Current schema (list(names=, types=))
 # @param dots Quosures from summarise(), already temp-column-preprocessed
 # @param na_rm_flags Logical vector, same length/order as `dots` (Phase 6,
-#   task 6.1): each dot's already-extracted `na.rm` value (see
-#   `extract_na_rm()`), `FALSE` when not supplied by the user, matching R's
-#   own default
+#   task 6.1; extended 6.2 for the new functions): each dot's
+#   already-extracted `na.rm`/`na_rm` value (see `extract_na_rm()`),
+#   `FALSE` when not supplied by the user, matching R's own default
+# @param agg_extra Numeric vector, same length/order as `dots` (Phase 6,
+#   task 6.2): each dot's already-extracted shape parameter (see
+#   `extract_agg_shape_param()`) -- `quantile()`'s probability, `nth()`'s
+#   position, `NA_real_` for every other function
 # @return List of aggregation structs (see make_aggregation())
 # @keywords internal
-parse_aggregations <- function(schema, dots, na_rm_flags = rep(FALSE, length(dots))) {
+parse_aggregations <- function(schema, dots, na_rm_flags = rep(FALSE, length(dots)),
+                               agg_extra = rep(NA_real_, length(dots))) {
   # dplyr-facing aggregation function names (order matches the historical
   # error message from parse_agg_expressions()) and their cudf-accepted
-  # equivalents (src/ops_groupby.cpp::get_groupby_agg()).
-  agg_functions <- c("sum", "mean", "min", "max", "n", "sd", "var", "count")
+  # equivalents (src/ops_groupby.cpp::get_groupby_agg(), plus the
+  # dedicated non-get_groupby_agg() handling gpu_summarise() gives
+  # quantile()/n_distinct()/first()/last()/nth()/any()/all() -- Phase 6,
+  # task 6.2).
+  agg_functions <- c("sum", "mean", "min", "max", "n", "sd", "var", "count",
+                      "median", "quantile", "n_distinct", "first", "last", "nth",
+                      "any", "all")
   agg_fn_map <- c(
     sum = "sum", mean = "mean", min = "min", max = "max",
-    n = "n", sd = "std", var = "variance", count = "n"
+    n = "n", sd = "std", var = "variance", count = "n",
+    median = "median", quantile = "quantile", n_distinct = "n_distinct",
+    first = "first", last = "last", nth = "nth", any = "any", all = "all"
   )
+
+  # Aggregations restricted to a numeric-ish input (median()/quantile(): a
+  # STRING column has no well-defined median/quantile) vs. restricted to a
+  # logical input (any()/all(): dplyr's own three-valued-logic contract is
+  # defined over logical vectors; a numeric/string column here would be a
+  # user mistake this catches early with a clear message rather than a raw
+  # cudf type error later). n_distinct()/first()/last()/nth() accept any
+  # type (matching dplyr, which places no type restriction on these).
+  numeric_only_fns <- c("median", "quantile")
+  logical_only_fns <- c("any", "all")
 
   aggregations <- vector("list", length(dots))
 
@@ -555,10 +804,28 @@ parse_aggregations <- function(schema, dots, na_rm_flags = rep(FALSE, length(dot
     }
 
     input_type <- schema$types[col_idx]
+
+    # unname(): schema$types is a NAMED vector (named by column), and
+    # identical() treats a "names" attribute as significant (identical(c(x =
+    # "BOOL8"), "BOOL8") is FALSE even though the values are equal) -- same
+    # landmine, same fix, as check_filter_comparison_types()'s (R/filter.R)
+    # and na_if()'s (R/ir.R) existing unname() calls.
+    input_type_bare <- unname(input_type)
+
+    if (func_name %in% numeric_only_fns && identical(input_type_bare, "STRING")) {
+      stop(func_name, "() requires a numeric column; '", col_name,
+           "' is STRING.", call. = FALSE)
+    }
+    if (func_name %in% logical_only_fns && !identical(input_type_bare, "BOOL8")) {
+      stop(func_name, "() requires a logical column; '", col_name,
+           "' is ", input_type_bare, ".", call. = FALSE)
+    }
+
     cudf_fn <- unname(agg_fn_map[func_name])
 
     aggregations[[i]] <- make_aggregation(names(dots)[i], col_name, cudf_fn, input_type,
-                                          na_rm = isTRUE(na_rm_flags[i]))
+                                          na_rm = isTRUE(na_rm_flags[i]),
+                                          extra = agg_extra[i])
   }
 
   aggregations

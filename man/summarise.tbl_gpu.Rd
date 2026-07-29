@@ -50,6 +50,16 @@ performed entirely on the GPU for maximum performance.
 \item \code{n()} - Count of rows in each group
 \item \code{sd(x)} - Standard deviation
 \item \code{var(x)} - Variance
+\item \code{median(x)} - Median value (Phase 6, task 6.2)
+\item \code{quantile(x, probs)} - A single quantile, \code{probs} a scalar in
+\verb{[0, 1]} (Phase 6, task 6.2; only one probability per call is
+supported)
+\item \code{n_distinct(x)} - Count of distinct values, \code{NA} counted as its
+own distinct value by default (Phase 6, task 6.2)
+\item \code{first(x)} / \code{last(x)} / \code{nth(x, n)} - The first/last/nth value
+in the group's current row order (Phase 6, task 6.2)
+\item \code{any(x)} / \code{all(x)} - Logical reductions with R's own
+three-valued logic (Phase 6, task 6.2; \code{x} must be logical)
 }
 }
 
@@ -58,26 +68,55 @@ performed entirely on the GPU for maximum performance.
 \code{column} is not limited to a bare column name: any expression the same
 expression IR that powers \code{\link[=filter.tbl_gpu]{filter.tbl_gpu()}}/\code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}} understands
 is computed as a hidden temporary column first, then aggregated. This
-covers comparisons and logic (\code{sum(carb > 3 & wt < 4)}), arithmetic
-(\code{mean(hp / wt)}), and math functions (\code{mean(sqrt(hp))}, \code{sum(carb \%\% 2 == 0)}), arbitrarily nested -- the same surface documented in
-\code{\link{mutate.tbl_gpu}}. A comparison/logical sub-expression is
+covers comparisons and logic (\code{sum(carb > 3 & wt < 4)}, \code{any(carb > 3)}),
+arithmetic (\code{mean(hp / wt)}), and math functions (\code{mean(sqrt(hp))},
+\code{sum(carb \%\% 2 == 0)}), arbitrarily nested -- the same surface documented
+in \code{\link{mutate.tbl_gpu}}. A comparison/logical sub-expression is
 summed as \code{TRUE}/\code{FALSE} -> \code{1}/\code{0}, matching R's own coercion
-(\code{sum(c(TRUE, TRUE))} is \code{2L}). An expression shape the IR doesn't
-recognize raises the same "Invalid aggregation expression" error as any
-other unsupported aggregation shape.
+(\code{sum(c(TRUE, TRUE))} is \code{2L}) -- except inside \code{any()}/\code{all()}, which
+keep it logical. An expression shape the IR doesn't recognize raises the
+same "Invalid aggregation expression" error as any other unsupported
+aggregation shape.
 }
 
 \subsection{NA handling}{
 
-\code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{sd()}/\code{var()} all match R's own
-\code{na.rm = FALSE} default (Phase 6, task 6.1): if a group contains ANY \code{NA}
-in the aggregated column, the WHOLE group's result is \code{NA} for that
-aggregation -- e.g. \code{summarise(m = mean(x))} is \code{NA} for a group with even
-one \code{NA} value of \code{x}, matching real dplyr exactly. Pass \code{na.rm = TRUE}
-explicitly (e.g. \code{sum(x, na.rm = TRUE)}) to exclude \code{NA} values instead
-(cudf's own native aggregation behavior). \code{n()} is unaffected by
-\verb{na.rm=} (it counts every row regardless of nulls, like dplyr's own
-\code{n()}).
+\code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{sd()}/\code{var()}/\code{median()} all match R's
+own \code{na.rm = FALSE} default (Phase 6, tasks 6.1/6.2): if a group contains
+ANY \code{NA} in the aggregated column, the WHOLE group's result is \code{NA} for
+that aggregation -- e.g. \code{summarise(m = mean(x))} is \code{NA} for a group
+with even one \code{NA} value of \code{x}, matching real dplyr exactly. Pass
+\code{na.rm = TRUE} explicitly (e.g. \code{sum(x, na.rm = TRUE)}) to exclude \code{NA}
+values instead (cudf's own native aggregation behavior). \code{n()} is
+unaffected by \verb{na.rm=} (it counts every row regardless of nulls, like
+dplyr's own \code{n()}).
+
+\code{quantile()} diverges from the mean/sum/.../median family: matching base
+R's own \code{quantile.default()} exactly, \code{na.rm = FALSE} (the default) with
+an actual \code{NA} present is a hard ERROR ("missing values and NaN's not
+allowed if 'na.rm' is FALSE"), not a \code{NA} result -- pass
+\code{na.rm = TRUE} to compute the quantile over the non-\code{NA} values instead.
+
+\code{n_distinct()} counts \code{NA} as its own distinct value when
+\code{na.rm = FALSE} (the default, matching dplyr's own \code{n_distinct()}
+exactly) -- e.g. \code{n_distinct(c(1, 2, NA, 2))} is \code{3}. Pass
+\code{na.rm = TRUE} to exclude \code{NA} from the distinct count instead.
+
+\code{first()}/\code{last()}/\code{nth()} use dplyr's own \verb{na_rm=} spelling
+(underscore, not \code{na.rm}): \code{na_rm = FALSE} (the default) never skips a
+\code{NA} when picking the first/last/nth value (so the result can itself be
+\code{NA}); \code{na_rm = TRUE} skips \code{NA} values, returning the first/last/nth
+non-\code{NA} value in the group (or \code{NA} if the group has none).
+
+\code{any()}/\code{all()} implement R's exact three-valued logic: \code{any(x)} is
+\code{TRUE} if any element is \code{TRUE} (regardless of \code{NA}s present), \code{NA} if
+there's no \code{TRUE} but at least one \code{NA} (with \code{na.rm = FALSE}, the
+default), else \code{FALSE}; \code{all(x)} is \code{FALSE} if any element is \code{FALSE}
+(regardless of \code{NA}s present), \code{NA} if there's no \code{FALSE} but at least
+one \code{NA} (with \code{na.rm = FALSE}), else \code{TRUE}. \code{na.rm = TRUE} drops \code{NA}
+values first, matching base R's \code{any()}/\code{all()} exactly (an all-\code{NA}
+group with \code{na.rm = TRUE} is \code{FALSE} for \code{any()}, \code{TRUE} for \code{all()},
+the empty-vector identity in both cases).
 }
 
 \subsection{Ungrouped summarise}{

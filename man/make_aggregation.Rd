@@ -4,28 +4,53 @@
 \alias{make_aggregation}
 \title{Create an aggregation structure for summarise}
 \usage{
-make_aggregation(output_col, input_col, fn, input_type = NULL, na_rm = FALSE)
+make_aggregation(
+  output_col,
+  input_col,
+  fn,
+  input_type = NULL,
+  na_rm = FALSE,
+  extra = NA_real_
+)
 }
 \arguments{
 \item{output_col}{Output column name}
 
 \item{input_col}{Input column name}
 
-\item{fn}{Aggregation function name (sum, mean, min, max, n)}
+\item{fn}{Aggregation function name (sum, mean, min, max, n, sd, var,
+median, quantile, n_distinct, first, last, nth, any, all)}
 
 \item{input_type}{Input column type}
 
-\item{na_rm}{Logical scalar (Phase 6, task 6.1). \code{FALSE} (the default,
-matching R's own \code{na.rm = FALSE} default for \code{mean()}/\code{sum()}/\code{min()}/
-\code{max()}/\code{sd()}/\code{var()}) means a group with ANY null input value must
-produce a NULL aggregation result for the WHOLE group -- cudf's own
-groupby MEAN/SUM/MIN/MAX/STD/VARIANCE aggregations always exclude
-nulls, so \code{gpu_summarise()} (\code{src/ops_groupby.cpp}) applies an extra
+\item{na_rm}{Logical scalar (Phase 6, task 6.1; extended Phase 6, task
+6.2). \code{FALSE} (the default, matching R's own \code{na.rm = FALSE} default
+for \code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{sd()}/\code{var()}/\code{median()}) means a
+group with ANY null input value must produce a NULL aggregation result
+for the WHOLE group -- cudf's own groupby MEAN/SUM/MIN/MAX/STD/
+VARIANCE/MEDIAN aggregations always exclude nulls, so
+\code{gpu_summarise()} (\code{src/ops_groupby.cpp}) applies an extra
 whole-group-null propagation step when this is \code{FALSE} and the input
 column actually has nulls (same technique as the window-aggregate
 path, \code{src/ops_window.cpp}, W4). \code{TRUE} means "use cudf's native
 null-excluding behavior as-is" -- no extra step. Meaningless for \code{n()}
-(counts rows regardless of nulls, matching dplyr already).}
+(counts rows regardless of nulls, matching dplyr already). For
+\code{quantile()}, \code{na_rm = FALSE} with an actual null present is a hard
+ERROR (matching base R's own \code{quantile.default()}), not a NA
+propagation -- see \code{gpu_summarise()}. For \code{n_distinct()}, \code{na_rm}
+selects cudf's \code{null_policy} directly (\code{INCLUDE}/\code{EXCLUDE}) rather
+than a post-hoc propagation step -- NA is its own distinct value when
+\code{na_rm = FALSE}, matching dplyr's \code{n_distinct()} exactly. For
+\code{first()}/\code{last()}/\code{nth()}, \code{na_rm} also selects \code{null_policy}
+directly: \code{FALSE} (default) never skips a NA when picking the
+position (may return NA), \code{TRUE} skips NA values when picking. For
+\code{any()}/\code{all()}, \code{na_rm} implements R's own three-valued logic
+(\code{any(c(TRUE, NA))} is \code{TRUE}, \code{any(c(FALSE, NA))} is \code{NA} when
+\code{na_rm = FALSE}, \code{FALSE} when \code{na_rm = TRUE}).}
+
+\item{extra}{Numeric scalar, \code{NA_real_} unless \code{fn} needs an extra
+scalar parameter beyond the input column: \code{quantile()}'s probability
+(\verb{[0, 1]}) or \code{nth()}'s (possibly negative) element position.}
 }
 \value{
 An aggregation list structure

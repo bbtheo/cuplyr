@@ -654,8 +654,12 @@ test_that("summarise() errors on unsupported function", {
 
   gpu_df <- tbl_gpu(mtcars)
 
+  # median() USED to be unsupported (this test's original pin), but is now
+  # implemented (Phase 6, task 6.2 -- see test-dplyr-summarise.R). cor() and
+  # weighted.mean() remain genuinely unsupported (scratchpad/todo.md's
+  # Phase 6 aggregation list), so the pin moves to one of those instead.
   expect_error(
-    dplyr::summarise(gpu_df, result = median(mpg)),
+    dplyr::summarise(gpu_df, result = cor(mpg, wt)),
     "Unsupported"
   )
 })

@@ -375,28 +375,54 @@ infer_mutate_output_type <- function(op, input_types, scalar) {
 #'
 #' @param output_col Output column name
 #' @param input_col Input column name
-#' @param fn Aggregation function name (sum, mean, min, max, n)
+#' @param fn Aggregation function name (sum, mean, min, max, n, sd, var,
+#'   median, quantile, n_distinct, first, last, nth, any, all)
 #' @param input_type Input column type
-#' @param na_rm Logical scalar (Phase 6, task 6.1). `FALSE` (the default,
-#'   matching R's own `na.rm = FALSE` default for `mean()`/`sum()`/`min()`/
-#'   `max()`/`sd()`/`var()`) means a group with ANY null input value must
-#'   produce a NULL aggregation result for the WHOLE group -- cudf's own
-#'   groupby MEAN/SUM/MIN/MAX/STD/VARIANCE aggregations always exclude
-#'   nulls, so `gpu_summarise()` (`src/ops_groupby.cpp`) applies an extra
+#' @param na_rm Logical scalar (Phase 6, task 6.1; extended Phase 6, task
+#'   6.2). `FALSE` (the default, matching R's own `na.rm = FALSE` default
+#'   for `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()`/`median()`) means a
+#'   group with ANY null input value must produce a NULL aggregation result
+#'   for the WHOLE group -- cudf's own groupby MEAN/SUM/MIN/MAX/STD/
+#'   VARIANCE/MEDIAN aggregations always exclude nulls, so
+#'   `gpu_summarise()` (`src/ops_groupby.cpp`) applies an extra
 #'   whole-group-null propagation step when this is `FALSE` and the input
 #'   column actually has nulls (same technique as the window-aggregate
 #'   path, `src/ops_window.cpp`, W4). `TRUE` means "use cudf's native
 #'   null-excluding behavior as-is" -- no extra step. Meaningless for `n()`
-#'   (counts rows regardless of nulls, matching dplyr already).
+#'   (counts rows regardless of nulls, matching dplyr already). For
+#'   `quantile()`, `na_rm = FALSE` with an actual null present is a hard
+#'   ERROR (matching base R's own `quantile.default()`), not a NA
+#'   propagation -- see `gpu_summarise()`. For `n_distinct()`, `na_rm`
+#'   selects cudf's `null_policy` directly (`INCLUDE`/`EXCLUDE`) rather
+#'   than a post-hoc propagation step -- NA is its own distinct value when
+#'   `na_rm = FALSE`, matching dplyr's `n_distinct()` exactly. For
+#'   `first()`/`last()`/`nth()`, `na_rm` also selects `null_policy`
+#'   directly: `FALSE` (default) never skips a NA when picking the
+#'   position (may return NA), `TRUE` skips NA values when picking. For
+#'   `any()`/`all()`, `na_rm` implements R's own three-valued logic
+#'   (`any(c(TRUE, NA))` is `TRUE`, `any(c(FALSE, NA))` is `NA` when
+#'   `na_rm = FALSE`, `FALSE` when `na_rm = TRUE`).
+#' @param extra Numeric scalar, `NA_real_` unless `fn` needs an extra
+#'   scalar parameter beyond the input column: `quantile()`'s probability
+#'   (`[0, 1]`) or `nth()`'s (possibly negative) element position.
 #' @return An aggregation list structure
 #' @keywords internal
-make_aggregation <- function(output_col, input_col, fn, input_type = NULL, na_rm = FALSE) {
+make_aggregation <- function(output_col, input_col, fn, input_type = NULL, na_rm = FALSE,
+                              extra = NA_real_) {
   output_type <- switch(fn,
     "n" = "INT32",
     "sum" = if (!is.null(input_type) && input_type == "INT32") "INT64" else "FLOAT64",
     "mean" = "FLOAT64",
     "min" = input_type %||% "FLOAT64",
     "max" = input_type %||% "FLOAT64",
+    "median" = "FLOAT64",
+    "quantile" = "FLOAT64",
+    "n_distinct" = "INT32",
+    "first" = input_type %||% "FLOAT64",
+    "last" = input_type %||% "FLOAT64",
+    "nth" = input_type %||% "FLOAT64",
+    "any" = "BOOL8",
+    "all" = "BOOL8",
     "FLOAT64"
   )
 
@@ -406,7 +432,8 @@ make_aggregation <- function(output_col, input_col, fn, input_type = NULL, na_rm
     fn = fn,
     input_type = input_type,
     output_type = output_type,
-    na_rm = isTRUE(na_rm)
+    na_rm = isTRUE(na_rm),
+    extra = as.double(extra)
   )
 }
 

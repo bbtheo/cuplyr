@@ -38,6 +38,29 @@ std::unique_ptr<cudf::groupby_aggregation> get_groupby_agg(const std::string& ag
         return cudf::make_std_aggregation<cudf::groupby_aggregation>();
     } else if (agg_type == "variance") {
         return cudf::make_variance_aggregation<cudf::groupby_aggregation>();
+    } else if (agg_type == "median") {
+        // Phase 6, task 6.2: make_median_aggregation<groupby_aggregation>()
+        // has a confirmed explicit instantiation in this environment's
+        // compiled libcudf.so (verified via `nm -DC libcudf.so`, mirroring
+        // the same due-diligence this file's roll_median()-exclusion
+        // comment (src/ops_window.cpp) already did for the ROLLING
+        // instantiation, which does NOT exist). Shares this file's ordinary
+        // na.rm=FALSE whole-group-null propagation technique -- verified
+        // empirically against dplyr 1.2.1 that median(), like mean()/sum()/
+        // min()/max()/sd()/var(), silently returns NA for a group with any
+        // NA (never errors, unlike quantile() below).
+        return cudf::make_median_aggregation<cudf::groupby_aggregation>();
+    } else if (agg_type == "n_distinct") {
+        // Phase 6, task 6.2: this ONE fixed-null_policy::INCLUDE overload
+        // (NA counts as its own distinct value) is what makes n_distinct()
+        // reusable from the window-aggregate path (src/ops_window.cpp),
+        // which -- like every other window "agg"-family function -- has no
+        // na.rm=/na_rm= argument support at all yet (see that file's own
+        // is_agg_fn() list): gpu_summarise() itself does NOT call this
+        // overload -- it needs BOTH null_policy directions (na.rm=TRUE
+        // support), so it builds its own make_nunique_aggregation() call
+        // directly instead (see the AggKind::NUNIQUE branch below).
+        return cudf::make_nunique_aggregation<cudf::groupby_aggregation>(cudf::null_policy::INCLUDE);
     } else {
         Rcpp::stop("Unknown aggregation type: " + agg_type);
     }
@@ -47,10 +70,111 @@ std::unique_ptr<cudf::groupby_aggregation> get_groupby_agg(const std::string& ag
 // Phase 6, task 6.1 (Fix A): does this aggregation kind need R's own
 // na.rm = FALSE whole-group-null propagation (see the file-level rationale
 // at gpu_summarise())? n() is deliberately excluded -- it counts rows
-// regardless of nulls, matching dplyr's n() already.
+// regardless of nulls, matching dplyr's n() already. Phase 6, task 6.2:
+// median() joins this list (verified empirically -- see get_groupby_agg()'s
+// own comment); quantile()/n_distinct()/first()/last()/nth()/any()/all()
+// are handled by entirely separate mechanisms (a hard error, cudf's own
+// null_policy, or R's three-valued logic respectively -- see
+// gpu_summarise()'s own docs) and never reach this predicate at all.
 bool agg_na_propagates(const std::string& agg_type) {
     return agg_type == "sum" || agg_type == "mean" || agg_type == "min" ||
-           agg_type == "max" || agg_type == "std" || agg_type == "variance";
+           agg_type == "max" || agg_type == "std" || agg_type == "variance" ||
+           agg_type == "median";
+}
+
+// Phase 6, task 6.2: aggregation-kind classification for the functions that
+// DON'T fit get_groupby_agg()'s "one simple aggregation + optional na.rm
+// whole-group-null propagation" shape -- each needs its own request
+// construction (quantile()'s probability, n_distinct()'s null_policy,
+// first()/last()/nth()'s element position + null_policy) or, for any()/
+// all(), an entirely custom post-hoc combination (cudf's groupby_aggregation
+// has NO ANY/ALL instantiation at all in this environment -- verified via
+// `nm -DC libcudf.so`: only aggregation/reduce_aggregation/
+// segmented_reduce_aggregation exist for make_any_aggregation()/
+// make_all_aggregation(), never groupby_aggregation).
+enum class AggKind { SIMPLE, QUANTILE, NUNIQUE, NTH_ELEMENT, ANY, ALL };
+
+AggKind classify_agg(const std::string& agg_type) {
+    if (agg_type == "quantile") return AggKind::QUANTILE;
+    if (agg_type == "n_distinct") return AggKind::NUNIQUE;
+    if (agg_type == "first" || agg_type == "last" || agg_type == "nth") return AggKind::NTH_ELEMENT;
+    if (agg_type == "any") return AggKind::ANY;
+    if (agg_type == "all") return AggKind::ALL;
+    return AggKind::SIMPLE;
+}
+
+// first()/last()/nth() -> cudf's NTH_ELEMENT position, mirroring
+// src/ops_window.cpp's identical translation for the window path: dplyr's
+// own 1-based/negative `nth(x, k)` convention IS cudf's own negative-index
+// convention (`nth(x, -1)` == cudf's n = -1, both mean "last element"),
+// only a positive k needs -1 (1-based -> 0-based). first()/last() are the
+// fixed n = 0 / n = -1 special cases (agg_extra is unused/NA for these
+// two).
+cudf::size_type nth_element_position(const std::string& agg_type, double extra) {
+    if (agg_type == "first") {
+        return 0;
+    }
+    if (agg_type == "last") {
+        return -1;
+    }
+    cudf::size_type n = static_cast<cudf::size_type>(extra);
+    return n > 0 ? n - 1 : n;
+}
+
+// Phase 6, task 6.2: any()/all() with R's exact three-valued logic (verified
+// empirically against dplyr 1.2.1: `any(c(TRUE, NA))` is `TRUE`,
+// `any(c(FALSE, NA))` is `NA`, `all(c(FALSE, NA))` is `FALSE`,
+// `all(c(TRUE, NA))` is `NA`). Composed from MIN/MAX on the BOOL8 value
+// column (cudf's own MIN/MAX skip nulls already) plus a per-group
+// "has any null" indicator (the same MAX-of-is_null() technique
+// `null_out_groups_with_any_null()` uses above), since cudf has no
+// ANY/ALL groupby aggregation to call directly.
+//
+// `reduced` is MAX(x) (any()) or MIN(x) (all()), both skip-null, so a
+// group with ONLY null values comes back NULL here (not TRUE/FALSE) --
+// `filled` replaces that with the identity value: `FALSE` for any()
+// (matching `any(logical(0))`), `TRUE` for all() (matching
+// `all(logical(0))`) -- correct for na_rm = TRUE, where a null-only group
+// after "removing NA" is genuinely empty.
+//
+// For na_rm = FALSE (`has_null_i8` non-null), one extra correction is
+// needed: a group with NO true value found (any()) or NO false value found
+// (all()) but at least one NULL must come back NULL (R's "unknown"), not
+// the identity-filled FALSE/TRUE -- `should_null_out` flags exactly those
+// rows, and the final `copy_if_else` nulls them out (mirroring
+// `null_out_groups_with_any_null()`'s own convention: the mask argument
+// says WHERE to substitute the null scalar).
+std::unique_ptr<cudf::column> combine_any_all(
+    const cudf::column_view& reduced,
+    const cudf::column_view* has_null_i8,
+    bool is_any) {
+    cudf::numeric_scalar<bool> identity_scalar(!is_any, true);
+    auto reduced_is_null = cudf::is_null(reduced);
+    auto filled = cudf::copy_if_else(identity_scalar, reduced, reduced_is_null->view());
+
+    if (has_null_i8 == nullptr) {
+        return filled;
+    }
+
+    cudf::numeric_scalar<int8_t> zero_i8(0, true);
+    auto has_null_bool = cudf::binary_operation(
+        *has_null_i8, zero_i8, cudf::binary_operator::NOT_EQUAL,
+        cudf::data_type{cudf::type_id::BOOL8});
+
+    std::unique_ptr<cudf::column> should_null_out;
+    if (is_any) {
+        auto not_filled = cudf::unary_operation(filled->view(), cudf::unary_operator::NOT);
+        should_null_out = cudf::binary_operation(
+            not_filled->view(), has_null_bool->view(), cudf::binary_operator::LOGICAL_AND,
+            cudf::data_type{cudf::type_id::BOOL8});
+    } else {
+        should_null_out = cudf::binary_operation(
+            filled->view(), has_null_bool->view(), cudf::binary_operator::LOGICAL_AND,
+            cudf::data_type{cudf::type_id::BOOL8});
+    }
+
+    auto null_scalar = cudf::make_empty_scalar_like(filled->view());
+    return cudf::copy_if_else(*null_scalar, filled->view(), should_null_out->view());
 }
 
 // Given a single aggregation's already-computed cudf result column and the
@@ -98,7 +222,7 @@ std::unique_ptr<cudf::column> null_out_groups_with_any_null(
 // [[Rcpp::export]]
 SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                    IntegerVector agg_col_indices, CharacterVector agg_types,
-                   LogicalVector na_rm) {
+                   LogicalVector na_rm, NumericVector agg_extra) {
     using namespace cuplyr;
 
     Rcpp::XPtr<GpuTablePtr> ptr(xptr);
@@ -110,6 +234,10 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     if (na_rm.size() != num_aggs) {
         Rcpp::stop("na_rm length (%d) must match agg_col_indices length (%d)",
                    na_rm.size(), num_aggs);
+    }
+    if (agg_extra.size() != num_aggs) {
+        Rcpp::stop("agg_extra length (%d) must match agg_col_indices length (%d)",
+                   agg_extra.size(), num_aggs);
     }
 
     for (int i = 0; i < num_groups; ++i) {
@@ -184,6 +312,56 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                 // depends on this too).
                 cudf::groupby::groupby gb(keys_table, cudf::null_policy::INCLUDE);
 
+                AggKind kind = classify_agg(agg_type);
+
+                // Phase 6, task 6.2: quantile()'s na.rm = FALSE (default)
+                // with an actual NA present is a hard ERROR in base R
+                // itself ("missing values and NaN's not allowed if 'na.rm'
+                // is FALSE"), verified empirically against dplyr 1.2.1 --
+                // NOT a NA-propagation like mean()/sum()/.../median()
+                // above. A single "does this column have ANY null at all"
+                // check is equivalent to dplyr's own per-group error
+                // (real dplyr aborts the ENTIRE summarise() call the
+                // moment any one group hits a NA, so there is no partial
+                // result to preserve either way).
+                if (kind == AggKind::QUANTILE && !static_cast<bool>(na_rm[i]) && col.has_nulls()) {
+                    Rcpp::stop("quantile(): missing values and NaN's not allowed if na.rm = FALSE. "
+                               "Use na.rm = TRUE to ignore missing values.");
+                }
+
+                if (kind == AggKind::ANY || kind == AggKind::ALL) {
+                    bool is_any = (kind == AggKind::ANY);
+                    bool na_rm_flag = static_cast<bool>(na_rm[i]);
+
+                    std::vector<cudf::groupby::aggregation_request> requests(1);
+                    requests[0].values = col;
+                    requests[0].aggregations.push_back(
+                        is_any ? cudf::make_max_aggregation<cudf::groupby_aggregation>()
+                               : cudf::make_min_aggregation<cudf::groupby_aggregation>());
+
+                    std::unique_ptr<cudf::column> null_indicator_i8;
+                    if (!na_rm_flag) {
+                        auto null_indicator_bool = cudf::is_null(col);
+                        null_indicator_i8 = cudf::cast(null_indicator_bool->view(),
+                                                        cudf::data_type{cudf::type_id::INT8});
+                        cudf::groupby::aggregation_request null_req;
+                        null_req.values = null_indicator_i8->view();
+                        null_req.aggregations.push_back(
+                            cudf::make_max_aggregation<cudf::groupby_aggregation>());
+                        requests.push_back(std::move(null_req));
+                    }
+
+                    auto [result_keys, result_aggs] = gb.aggregate(requests);
+                    cudf::column_view reduced_view = result_aggs[0].results[0]->view();
+                    if (na_rm_flag) {
+                        result_columns.push_back(combine_any_all(reduced_view, nullptr, is_any));
+                    } else {
+                        cudf::column_view has_null_view = result_aggs[1].results[0]->view();
+                        result_columns.push_back(combine_any_all(reduced_view, &has_null_view, is_any));
+                    }
+                    continue;
+                }
+
                 // Phase 6, task 6.1 (Fix A): if this aggregation needs
                 // na.rm=FALSE whole-group-null propagation, compute the
                 // is_null-indicator MAX request in the SAME gb.aggregate()
@@ -191,14 +369,37 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                 // results share the exact same (single, whole-table-as-one-
                 // group) row, so no separate-call group-order assumption is
                 // needed here.
-                bool need_na_prop = agg_na_propagates(agg_type) &&
+                bool need_na_prop = kind == AggKind::SIMPLE && agg_na_propagates(agg_type) &&
                     !static_cast<bool>(na_rm[i]) && col.has_nulls();
 
                 std::unique_ptr<cudf::column> null_indicator_i8;
                 std::vector<cudf::groupby::aggregation_request> requests;
                 cudf::groupby::aggregation_request req;
                 req.values = col;
-                req.aggregations.push_back(get_groupby_agg(agg_type));
+                switch (kind) {
+                    case AggKind::QUANTILE:
+                        req.aggregations.push_back(cudf::make_quantile_aggregation<cudf::groupby_aggregation>(
+                            {agg_extra[i]}, cudf::interpolation::LINEAR));
+                        break;
+                    case AggKind::NUNIQUE: {
+                        cudf::null_policy np = static_cast<bool>(na_rm[i])
+                            ? cudf::null_policy::EXCLUDE : cudf::null_policy::INCLUDE;
+                        req.aggregations.push_back(
+                            cudf::make_nunique_aggregation<cudf::groupby_aggregation>(np));
+                        break;
+                    }
+                    case AggKind::NTH_ELEMENT: {
+                        cudf::size_type n = nth_element_position(agg_type, agg_extra[i]);
+                        cudf::null_policy np = static_cast<bool>(na_rm[i])
+                            ? cudf::null_policy::EXCLUDE : cudf::null_policy::INCLUDE;
+                        req.aggregations.push_back(
+                            cudf::make_nth_element_aggregation<cudf::groupby_aggregation>(n, np));
+                        break;
+                    }
+                    default:
+                        req.aggregations.push_back(get_groupby_agg(agg_type));
+                        break;
+                }
                 requests.push_back(std::move(req));
 
                 if (need_na_prop) {
@@ -259,21 +460,83 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     // test-dplyr-summarise.R's mixed na.rm=TRUE/FALSE-on-the-same-column
     // oracle test before this fix).
     std::vector<int> main_request_idx(num_aggs, -1);
+    // Phase 6, task 6.2: any()/all()'s own "does this group have any null"
+    // companion request -- same interleave-into-the-shared-`requests`-
+    // vector discipline as na_prop_request_idx above (and for the exact
+    // same reason: `cudf::groupby::aggregate()`'s own docs explicitly warn
+    // that "successive aggregate() calls may return results in different
+    // orders", so any()/all()'s companion MUST be answered by this SAME
+    // call, never a separate one).
+    std::vector<int> any_all_null_request_idx(num_aggs, -1);
     // Must outlive the gb.aggregate() call below (requests reference their views).
     std::vector<std::unique_ptr<cudf::column>> null_indicator_cols;
 
     for (int i = 0; i < num_aggs; ++i) {
         std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
         cudf::column_view value_view = view.column(agg_col_indices[i]);
+        AggKind kind = classify_agg(agg_type);
+        bool na_rm_flag = static_cast<bool>(na_rm[i]);
+
+        // Phase 6, task 6.2: quantile()'s na.rm = FALSE (default) with an
+        // actual NA present is a hard ERROR in base R itself -- see the
+        // identical check (and its own docs) in the num_groups == 0 branch
+        // above.
+        if (kind == AggKind::QUANTILE && !na_rm_flag && value_view.has_nulls()) {
+            Rcpp::stop("quantile(): missing values and NaN's not allowed if na.rm = FALSE. "
+                       "Use na.rm = TRUE to ignore missing values.");
+        }
 
         cudf::groupby::aggregation_request req;
         req.values = value_view;
-        req.aggregations.push_back(get_groupby_agg(agg_type));
+        switch (kind) {
+            case AggKind::QUANTILE:
+                req.aggregations.push_back(cudf::make_quantile_aggregation<cudf::groupby_aggregation>(
+                    {agg_extra[i]}, cudf::interpolation::LINEAR));
+                break;
+            case AggKind::NUNIQUE: {
+                cudf::null_policy np = na_rm_flag ? cudf::null_policy::EXCLUDE : cudf::null_policy::INCLUDE;
+                req.aggregations.push_back(
+                    cudf::make_nunique_aggregation<cudf::groupby_aggregation>(np));
+                break;
+            }
+            case AggKind::NTH_ELEMENT: {
+                cudf::size_type n = nth_element_position(agg_type, agg_extra[i]);
+                cudf::null_policy np = na_rm_flag ? cudf::null_policy::EXCLUDE : cudf::null_policy::INCLUDE;
+                req.aggregations.push_back(
+                    cudf::make_nth_element_aggregation<cudf::groupby_aggregation>(n, np));
+                break;
+            }
+            case AggKind::ANY:
+                req.aggregations.push_back(cudf::make_max_aggregation<cudf::groupby_aggregation>());
+                break;
+            case AggKind::ALL:
+                req.aggregations.push_back(cudf::make_min_aggregation<cudf::groupby_aggregation>());
+                break;
+            default:
+                req.aggregations.push_back(get_groupby_agg(agg_type));
+                break;
+        }
         main_request_idx[i] = static_cast<int>(requests.size());
         requests.push_back(std::move(req));
 
-        bool need_na_prop = agg_na_propagates(agg_type) &&
-            !static_cast<bool>(na_rm[i]) && value_view.has_nulls();
+        if (kind == AggKind::ANY || kind == AggKind::ALL) {
+            if (!na_rm_flag) {
+                auto null_indicator_bool = cudf::is_null(value_view);
+                null_indicator_cols.push_back(cudf::cast(
+                    null_indicator_bool->view(), cudf::data_type{cudf::type_id::INT8}));
+
+                cudf::groupby::aggregation_request null_req;
+                null_req.values = null_indicator_cols.back()->view();
+                null_req.aggregations.push_back(
+                    cudf::make_max_aggregation<cudf::groupby_aggregation>());
+                any_all_null_request_idx[i] = static_cast<int>(requests.size());
+                requests.push_back(std::move(null_req));
+            }
+            continue;  // any()/all() never need agg_na_propagates()'s own step
+        }
+
+        bool need_na_prop = kind == AggKind::SIMPLE && agg_na_propagates(agg_type) &&
+            !na_rm_flag && value_view.has_nulls();
         if (need_na_prop) {
             auto null_indicator_bool = cudf::is_null(value_view);
             null_indicator_cols.push_back(cudf::cast(
@@ -297,6 +560,23 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         result_aggs[main_request_idx[i]].results[0] = null_out_groups_with_any_null(
             std::move(result_aggs[main_request_idx[i]].results[0]),
             result_aggs[na_prop_request_idx[i]].results[0]->view());
+    }
+
+    for (int i = 0; i < num_aggs; ++i) {
+        std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
+        AggKind kind = classify_agg(agg_type);
+        if (kind != AggKind::ANY && kind != AggKind::ALL) {
+            continue;
+        }
+        bool is_any = (kind == AggKind::ANY);
+        cudf::column_view reduced_view = result_aggs[main_request_idx[i]].results[0]->view();
+        if (any_all_null_request_idx[i] < 0) {
+            result_aggs[main_request_idx[i]].results[0] = combine_any_all(reduced_view, nullptr, is_any);
+        } else {
+            cudf::column_view has_null_view = result_aggs[any_all_null_request_idx[i]].results[0]->view();
+            result_aggs[main_request_idx[i]].results[0] =
+                combine_any_all(reduced_view, &has_null_view, is_any);
+        }
     }
 
     std::vector<std::unique_ptr<cudf::column>> result_columns;
