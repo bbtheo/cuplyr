@@ -320,6 +320,20 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       return(ir_parse_sum_call(expr, env, schema))
     }
 
+    # Rolling windows (scratchpad/todo.md "Rolling-window benchmark
+    # target"): cuplyr's own roll_*() names, and an alias for
+    # data.table::froll*() (verified against benchmark_rolling.R's actual
+    # cuplyr probe call shape) -- both need real argument-name matching
+    # (na.rm=/fill=/align=/... can be omitted or out of position), so both
+    # get dedicated dispatch like lag()/lead()/ntile() above. See the
+    # file-level comment above ir_parse_roll_call()'s definition.
+    if (fn_name %in% c("roll_mean", "roll_sum", "roll_min", "roll_max", "roll_sd", "roll_median")) {
+      return(ir_parse_roll_call(expr, env, schema, fn_name))
+    }
+    if (fn_name %in% c("frollmean", "frollsum", "frollmin", "frollmax", "frollsd", "frollmedian")) {
+      return(ir_parse_froll_call(expr, env, schema, fn_name))
+    }
+
     canonical <- ir_op_alias(fn_name)
     args_raw <- as.list(expr)[-1]
 
@@ -1292,6 +1306,276 @@ ir_parse_with_order_call <- function(expr, env, schema) {
   }
 
   apply_order_override(call_ir, order_ref)
+}
+
+# -----------------------------------------------------------------------------
+# Rolling windows (Theo-requested benchmark task, scratchpad/todo.md
+# "Rolling-window benchmark target"): a fifth window kind, `"rolling"`,
+# alongside shift/rank/scan/agg. Surfaced under two call shapes, both
+# needing real argument-NAME matching (same reason as lag()/lead()/ntile()
+# above -- na.rm=/fill=/align= are named controls that can be omitted or
+# supplied out of position), so both get dedicated top-level dispatch
+# rather than the generic per-arg registry loop:
+#   * cuplyr's own names -- `roll_mean(x, n, na.rm = FALSE)`,
+#     `roll_sum()`/`roll_min()`/`roll_max()`/`roll_sd()`/`roll_median()` --
+#     RcppRoll/slider-adjacent naming picked as the dplyr-ecosystem-idiomatic
+#     surface (see ir_parse_roll_call()).
+#   * an ALIAS for `data.table::frollmean(x, n, ...)` and its five
+#     siblings (`frollsum`/`frollmin`/`frollmax`/`frollsd`/`frollmedian`) --
+#     this is the exact call shape `benchmark/benchmark_rolling.R`'s cuplyr
+#     probe constructs (`rlang::call2(paste0("froll", workload), sym("x"),
+#     window, .ns = "data.table")`), verified by reading that script before
+#     picking this alias surface. `pkg::fn(...)` is already stripped to a
+#     bare `fn_name` by `ir_parse_expr()`'s call-head handling before any
+#     dispatch runs (`data.table::frollmean` arrives here as plain
+#     `"frollmean"`), so `ir_parse_froll_call()` only has to translate
+#     data.table's richer argument set (`fill=`/`algo=`/`align=`/`hasNA=`/
+#     `adaptive=`) down to the same `list(n=, na_rm=)` meta shape, rejecting
+#     (NULL, i.e. "not implemented this wave, fall back") any non-default
+#     `align=`/`fill=`/`adaptive=` -- this task is right-aligned-only, per
+#     scratchpad/todo.md's explicit scope cut. `algo=`/`hasNA=` are accepted
+#     but ignored: both are pure performance hints in data.table (exact vs.
+#     approximate *computation strategy*, and a "does x contain NA at all"
+#     hint respectively) that never change the correct *result*, and cuplyr
+#     always computes the exact result regardless.
+#
+# Both shapes desugar to the SAME five (well, six, see roll_median below)
+# canonical registry ops (`"roll_mean"`/`"roll_sum"`/`"roll_min"`/
+# `"roll_max"`/`"roll_sd"`/`"roll_median"`), reusing `window_spec()`'s
+# EXISTING `n`/`na_rm` fields verbatim (no new field needed: `n` already
+# carries lag()/lead()'s shift amount and nth()'s element position, `na_rm`
+# already threads through generically in R/window.R's
+# extract_one_window_call() even though no pre-existing window op had set
+# it to anything but FALSE before this task) -- see
+# scratchpad/phase5_window_design.md section 2's `window_spec()` field
+# docs, all reused unchanged.
+#
+# Empirically verified (a standalone probe against this environment's
+# installed cudf 25.12, NOT re-derived from the header comments alone,
+# since "min_periods" is ambiguous between "row count in window" and
+# "valid (non-null) count in window" until tested):
+#   * `cudf::rolling_window(x, preceding = w, following = 0, min_periods =
+#     w, agg)` reproduces R's na.rm=FALSE poisoning FOR FREE, with no
+#     separate is-null-indicator masking pass at all (unlike the W4
+#     cum*/rank sticky-NA fix this file's window entries otherwise mirror):
+#     the window is a FIXED w-row range, so "w valid values required"
+#     among exactly w physical rows already means "zero nulls tolerated" --
+#     confirmed on `x = c(1,2,NA,4,5)`, w=3: every output is NA the moment
+#     the row-range includes the NA, matching data.table's own
+#     `frollsum(x, 3, na.rm = FALSE)`.
+#   * na.rm=TRUE is NOT simply "cudf's own default behavior" (cudf rolling
+#     aggregations always skip nulls when computing, regardless of
+#     min_periods): using `min_periods = 1` alone would incorrectly
+#     compute a value for the leading (w-1) rows too, using FEWER than w
+#     physical rows -- confirmed empirically that real
+#     `data.table::frollmean(x, n, na.rm = TRUE)` still keeps exactly the
+#     leading (n-1) positions NA (a ROW-COUNT requirement, independent of
+#     na.rm), and only skips individual NA *values* once a window has
+#     become physically complete. `src/ops_window.cpp`'s rolling branch
+#     therefore computes the aggregate with `min_periods = 1` (skip nulls,
+#     as low a valid-count bar as possible) and separately masks to NA any
+#     row whose PHYSICAL row-count-in-window (a second rolling COUNT_ALL
+#     pass, `null_policy::INCLUDE`, `min_periods = 1`, which counts rows
+#     regardless of their own nullity) is `< w` -- verified bit-for-bit
+#     against `data.table::frollmean(c(1,2,NA,4,5), 3, na.rm = TRUE)` ==
+#     `c(NA, NA, 1.5, 3, 4.5)`.
+#   * Grouped rolling comes "almost free": `cudf::grouped_rolling_window()`
+#     clamps window boundaries at GROUP edges (not just table edges) when
+#     given a `group_keys` table, and this file's existing frame
+#     architecture already produces a stable-sorted-by-group-only `work`
+#     view (no order_cols for a rolling frame, exactly like the scan
+#     family) whose ROW ORDER is the group's original relative order --
+#     exactly what `grouped_rolling_window()` requires ("presorted by the
+#     group_key values"). `src/ops_window.cpp` therefore uses
+#     `grouped_rolling_window()` UNIFORMLY for both the truly-grouped and
+#     the ungrouped case (the ungrouped case's substituted constant
+#     zero-key column is trivially "one sorted group"), the same "one code
+#     path via a substituted key column" idiom this file already uses for
+#     the scan/rank/agg families -- no separate `cudf::rolling_window()`
+#     call needed at all.
+#   * `cudf::make_median_aggregation<T>()` has NO `rolling_aggregation`
+#     explicit template instantiation in this environment's compiled
+#     `libcudf.so` (confirmed via `nm -DC libcudf.so | grep
+#     make_median_aggregation`: only `aggregation`/`reduce_aggregation`/
+#     `groupby_aggregation` instantiations exist) -- MEDIAN is genuinely
+#     unsupported by `cudf::rolling_window`/`grouped_rolling_window` in
+#     cudf 25.12, not merely undocumented. `roll_median()` is therefore
+#     registered (so it parses, types, and participates in window
+#     decomposition identically to its five siblings) but
+#     `window_spec_lowerable()` (R/lower.R) explicitly excludes it, routing
+#     any `roll_median()`/`data.table::frollmedian()` mutate() call through
+#     the existing `mutate_window_fallback()` CPU path -- which needs
+#     `roll_median()` (cuplyr's own name) to be a REAL, correct, exported R
+#     function for that CPU re-run to work at all; see `R/roll.R`.
+#   * MEAN/SUM/MIN/MAX/STD all have confirmed `rolling_aggregation`
+#     instantiations (`nm -DC libcudf.so`), matching scratchpad/todo.md's
+#     expectation exactly. `roll_sd()` uses `make_std_aggregation<
+#     rolling_aggregation>(1)` (ddof = 1, sample standard deviation,
+#     matching R's own `sd()` and this file's existing groupby `sd()`
+#     entry's ddof choice).
+# -----------------------------------------------------------------------------
+
+#' Parse `roll_mean(x, n, na.rm = FALSE)` and its five siblings
+#'
+#' cuplyr's own rolling-window surface (RcppRoll/slider-adjacent naming --
+#' see the file-level comment above this section for the full design
+#' rationale). Right-aligned only: there is no `align=` parameter on this
+#' surface at all (unlike the `frollmean()`-alias path below, which has to
+#' reject a non-default `align=` explicitly since data.table's own
+#' signature offers one).
+#'
+#' @param fn_name One of `"roll_mean"`/`"roll_sum"`/`"roll_min"`/
+#'   `"roll_max"`/`"roll_sd"`/`"roll_median"`
+#' @keywords internal
+ir_parse_roll_call <- function(expr, env, schema, fn_name) {
+  proto <- function(x, n, na.rm = FALSE) NULL
+  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  if (is.null(present)) {
+    return(NULL)
+  }
+  present_args <- as.list(present)[-1]
+  if (is.null(present_args$x) || is.null(present_args$n)) {
+    return(NULL)
+  }
+
+  x_ir <- ir_parse_expr(present_args$x, env, schema)
+  if (is.null(x_ir)) {
+    return(NULL)
+  }
+
+  n_value <- ir_parse_roll_window_width(present_args$n, env)
+  if (is.null(n_value)) {
+    return(NULL)
+  }
+
+  na_rm <- ir_parse_roll_na_rm(present_args$na.rm, env)
+  if (is.null(na_rm)) {
+    return(NULL)
+  }
+
+  ir_call(fn_name, list(x_ir), meta = list(n = n_value, na_rm = na_rm))
+}
+
+#' Parse `data.table::frollmean(x, n, fill=, algo=, align=, na.rm=, hasNA=,
+#' adaptive=)` and its five siblings as an alias for `roll_mean()`/etc.
+#'
+#' See the file-level comment above this section: only the default
+#' `align = "right"`, `fill = NA`, `adaptive = FALSE`, `partial = FALSE`,
+#' `give.names = FALSE` are supported this wave (a non-default value
+#' returns `NULL`, i.e. "not implemented, fall back" -- mutate()'s usual
+#' contract for an unrecognized shape: `partial = TRUE` changes windowing
+#' semantics entirely -- allows a genuinely incomplete window to produce a
+#' value instead of `NA` -- and `give.names = TRUE` changes the RETURN
+#' SHAPE to a named `data.table`/list instead of a plain vector, so both
+#' must be rejected, not silently ignored); `algo=`/`has.nf=`/`hasNA=` are
+#' accepted and ignored (pure performance hints, verified against
+#' data.table's own docs to never change the *result*). Proto signature
+#' verified against this environment's actual installed
+#' `data.table::frollmean` (`args(data.table::frollmean)`), not assumed
+#' from memory/docs alone -- note the real signature has `has.nf=` (NOT
+#' `hasNA=`, which is a separate, no-default legacy/back-compat argument
+#' that's ALSO present, verified empirically).
+#'
+#' @param dt_fn_name One of `"frollmean"`/`"frollsum"`/`"frollmin"`/
+#'   `"frollmax"`/`"frollsd"`/`"frollmedian"`
+#' @keywords internal
+ir_parse_froll_call <- function(expr, env, schema, dt_fn_name) {
+  canonical <- switch(dt_fn_name,
+    frollmean = "roll_mean", frollsum = "roll_sum", frollmin = "roll_min",
+    frollmax = "roll_max", frollsd = "roll_sd", frollmedian = "roll_median"
+  )
+
+  proto <- function(x, n, fill = NA, algo = c("fast", "exact"),
+                     align = c("right", "left", "center"), na.rm = FALSE,
+                     has.nf = NA, adaptive = FALSE, partial = FALSE,
+                     give.names = FALSE, hasNA) NULL
+  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  if (is.null(present)) {
+    return(NULL)
+  }
+  present_args <- as.list(present)[-1]
+  if (is.null(present_args$x) || is.null(present_args$n)) {
+    return(NULL)
+  }
+
+  if (!is.null(present_args$align)) {
+    align_eval <- ir_eval_constant(present_args$align, env)
+    if (!align_eval$ok || !identical(align_eval$value, "right")) {
+      return(NULL)  # align="left"/"center": not implemented this wave
+    }
+  }
+  if (!is.null(present_args$fill)) {
+    fill_eval <- ir_eval_constant(present_args$fill, env)
+    if (!fill_eval$ok || length(fill_eval$value) != 1 || !is.na(fill_eval$value)) {
+      return(NULL)  # a non-NA fill: not implemented this wave
+    }
+  }
+  if (!is.null(present_args$adaptive)) {
+    adaptive_eval <- ir_eval_constant(present_args$adaptive, env)
+    if (!adaptive_eval$ok || !isFALSE(adaptive_eval$value)) {
+      return(NULL)  # adaptive=TRUE (per-row window vector): not implemented this wave
+    }
+  }
+  if (!is.null(present_args$partial)) {
+    partial_eval <- ir_eval_constant(present_args$partial, env)
+    if (!partial_eval$ok || !isFALSE(partial_eval$value)) {
+      return(NULL)  # partial=TRUE: different windowing semantics, not implemented this wave
+    }
+  }
+  if (!is.null(present_args$give.names)) {
+    give_names_eval <- ir_eval_constant(present_args$give.names, env)
+    if (!give_names_eval$ok || !isFALSE(give_names_eval$value)) {
+      return(NULL)  # give.names=TRUE: changes return shape entirely, not implemented this wave
+    }
+  }
+  # algo=/has.nf=/hasNA=: accepted, deliberately unread (see docs above).
+
+  x_ir <- ir_parse_expr(present_args$x, env, schema)
+  if (is.null(x_ir)) {
+    return(NULL)
+  }
+
+  n_value <- ir_parse_roll_window_width(present_args$n, env)
+  if (is.null(n_value)) {
+    return(NULL)
+  }
+
+  na_rm <- ir_parse_roll_na_rm(present_args$na.rm, env)
+  if (is.null(na_rm)) {
+    return(NULL)
+  }
+
+  ir_call(canonical, list(x_ir), meta = list(n = n_value, na_rm = na_rm))
+}
+
+# A rolling window width must be a positive whole-number CONSTANT (never a
+# column reference/vector of multiple sizes -- data.table's own "adaptive"
+# multi-window-size shape, rejected above via `adaptive=`, is the only
+# vector-`n` case that would otherwise reach here, and `length(...) != 1`
+# rejects it defensively too). Returns an integer scalar, or `NULL` (not
+# implemented this wave / not a constant).
+ir_parse_roll_window_width <- function(n_expr, env) {
+  n_eval <- ir_eval_constant(n_expr, env)
+  n_val <- n_eval$value
+  if (!n_eval$ok || !is.numeric(n_val) || length(n_val) != 1 || is.na(n_val) ||
+      n_val != round(n_val) || n_val < 1) {
+    return(NULL)
+  }
+  as.integer(n_val)
+}
+
+# `na.rm=` must be a constant TRUE/FALSE (absent -> FALSE, dplyr/data.table's
+# shared default). Returns a logical scalar, or `NULL` (not a constant).
+ir_parse_roll_na_rm <- function(na_rm_expr, env) {
+  if (is.null(na_rm_expr)) {
+    return(FALSE)
+  }
+  na_rm_eval <- ir_eval_constant(na_rm_expr, env)
+  na_rm_val <- na_rm_eval$value
+  if (!na_rm_eval$ok || !is.logical(na_rm_val) || length(na_rm_val) != 1 || is.na(na_rm_val)) {
+    return(NULL)
+  }
+  na_rm_val
 }
 
 #' Parse `ntile(x = row_number(), n)`
@@ -2356,7 +2640,37 @@ ir_call_registry <- list(
     window = NULL
   ),
   "consecutive_id" = list(arity = 1L, parse = ir_parse_consecutive_id, type = type_int32,
-                           lower = NULL, window = NULL)
+                           lower = NULL, window = NULL),
+
+  # --- Rolling windows (Theo-requested benchmark task, a sixth window
+  # kind alongside shift/rank/scan/agg): roll_mean()/roll_sum()/roll_min()/
+  # roll_max()/roll_sd()/roll_median(), parsed via the dedicated
+  # ir_parse_roll_call()/ir_parse_froll_call() dispatch above (never via
+  # this entry's own `parse`/generic loop -- na.rm= is a named control the
+  # generic per-arg loop can't express, same reason as lag()/lead()).
+  # Output types: roll_mean/roll_sd/roll_median always FLOAT64 (matching
+  # data.table::frollmean()/frollsd()/frollmedian(), always double);
+  # roll_sum reuses type_window_sum verbatim (identical promotion rule to
+  # window sum()/summarise's sum(): INT32 -> INT64, else FLOAT64);
+  # roll_min/roll_max preserve the argument's own type (type_arg1, matching
+  # cudf::rolling_window()'s own documented "MIN/MAX return a column of the
+  # same type as the input" rule). `window_spec_lowerable()` (R/lower.R)
+  # excludes "roll_median" specifically -- cudf's rolling_window()/
+  # grouped_rolling_window() have no MEDIAN aggregation instantiation in
+  # this environment (verified via `nm -DC libcudf.so`) -- routing it
+  # through the existing CPU-fallback path instead (see R/roll.R).
+  "roll_mean" = list(arity = 1L, parse = NULL, type = type_float64,
+                      lower = NULL, window = list(kind = "rolling")),
+  "roll_sum" = list(arity = 1L, parse = NULL, type = type_window_sum,
+                     lower = NULL, window = list(kind = "rolling")),
+  "roll_min" = list(arity = 1L, parse = NULL, type = type_arg1,
+                     lower = NULL, window = list(kind = "rolling")),
+  "roll_max" = list(arity = 1L, parse = NULL, type = type_arg1,
+                     lower = NULL, window = list(kind = "rolling")),
+  "roll_sd" = list(arity = 1L, parse = NULL, type = type_float64,
+                    lower = NULL, window = list(kind = "rolling")),
+  "roll_median" = list(arity = 1L, parse = NULL, type = type_float64,
+                        lower = NULL, window = list(kind = "rolling"))
 
   # ntile() is dispatched directly from ir_parse_expr() (ir_parse_ntile()),
   # never through this registry at all (its "x supplied or not" distinction

@@ -37,8 +37,10 @@ using a memory-efficient two-phase algorithm.
 
 \subsection{NA handling}{
 \itemize{
-\item \code{NA} values are placed last for ascending order
-\item \code{NA} values are placed first for descending order
+\item \code{NA} values are always placed last, for both ascending order and
+\code{desc()}/descending order, matching dplyr exactly (verified empirically
+against dplyr 1.2.1; fixed in Phase 6 -- older versions of this package
+placed \code{NA} first for descending sorts, a divergence from dplyr)
 }
 }
 

@@ -1,5 +1,52 @@
 # cuplyr (development version)
 
+## Rolling (moving-window) functions: `roll_mean()`/`roll_sum()`/`roll_min()`/`roll_max()`/`roll_sd()`/`roll_median()` (Theo-requested benchmark task)
+
+GPU-native rolling windows, added as a sixth window-function kind ("rolling")
+alongside the existing shift/rank/scan/agg families (`R/window.R`'s
+decomposition machinery, `src/ops_window.cpp`'s `gpu_window()`) -- no new
+verb wiring was needed in `mutate()`/`filter()` at all, both pick these up
+automatically through the same shared window-decomposition pass every other
+window function already goes through.
+
+* `roll_mean(x, n, na.rm = FALSE)`, `roll_sum()`, `roll_min()`, `roll_max()`,
+  `roll_sd()` (RcppRoll/slider-adjacent naming) are GPU-native via
+  `cudf::rolling_window()`/`grouped_rolling_window()` (right-aligned only
+  this wave; `align=` is not a parameter on this surface). Grouped rolling
+  (`group_by()`/`.by=`) works via the same frame machinery every other
+  window function uses, with no new C++ primitive beyond the rolling calls
+  themselves.
+* `data.table::frollmean()`/`frollsum()`/`frollmin()`/`frollmax()`/`frollsd()`/
+  `frollmedian()` are accepted as GPU-native aliases for the above (plus
+  `roll_median()`, see below), as long as `align="right"` (the default),
+  `fill=NA` (the default), and `adaptive=FALSE`/`partial=FALSE`/
+  `give.names=FALSE` (all defaults) hold -- any other value is a hard
+  `mutate()` error (no silent behavior change), matching this task's
+  explicit right-aligned-only scope.
+* `roll_median()` (and its `data.table::frollmedian()` alias) is registered
+  and parses/types identically to its five siblings, but is **not**
+  GPU-native: cudf 25.12 has no rolling MEDIAN aggregation instantiation at
+  all in this environment (verified via `nm -DC libcudf.so`), so it
+  transparently falls back to a CPU `roll_median()` implementation
+  (`R/roll.R`, also directly exported/usable standalone) via the existing
+  `mutate_window_fallback()` path -- still produces exactly the same result,
+  just off-GPU.
+* `na.rm = FALSE` (the default): any window containing an `NA` is `NA`
+  ("poisoning") -- falls out of `cudf::rolling_window()`'s own
+  `min_periods = n` requirement on a fixed `n`-row window with NO extra
+  masking pass needed (verified empirically, a pleasant simplification vs.
+  the cum*/rank families' sticky-NA fix). `na.rm = TRUE`: leading
+  physically-incomplete windows (fewer than `n` rows available yet) are
+  still `NA`, but `NA` *values* inside an otherwise-complete window are
+  skipped -- verified bit-for-bit against `data.table::frollmean(...,
+  na.rm = TRUE)`'s own output, since this is NOT simply "cudf's default
+  null-skipping behavior" (that alone would incorrectly compute a value for
+  the leading incomplete windows too).
+* See `benchmark/benchmark_rolling.R` for a locally-measured cuplyr-vs-
+  `data.table::froll*()` head-to-head across three data-size tiers
+  (1e6/1e7/1e8 rows) and the original benchmark-post workload grid (mean/
+  median/min/max/sum/sd x window 11/101/1001).
+
 ## NA-semantics parity fixes: `summarise()` `na.rm=` and `arrange(desc())` NA placement (Phase 6, task 6.1)
 
 Two live correctness divergences from dplyr, both found during Phase 5, are fixed:

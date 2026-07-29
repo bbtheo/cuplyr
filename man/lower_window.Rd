@@ -28,10 +28,13 @@ family (\code{lag()}/\code{lead()}), the "scan" family (\code{cumsum()}/\code{cu
 form), the "rank" family (\code{row_number(x)}/\code{min_rank()}/\code{dense_rank()}/
 \code{percent_rank()}/\code{cume_dist()}), and the "agg" family
 (\code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{n()}/\code{sd()}/\code{var()}/\code{first()}/
-\code{last()}/\code{nth()}) -- see \code{validate_window_spec()}. A spec whose \code{fn}
-isn't recognized AT ALL (no registry entry, or a registry entry with a
-\code{NULL} \code{window} field) hits a hard internal error here (never a
-user-facing message: no verb decomposes an expression into an
+\code{last()}/\code{nth()}) -- see \code{validate_window_spec()}. A later task (the
+rolling-window benchmark, scratchpad/todo.md) adds a sixth, "rolling"
+(\code{roll_mean()}/\code{roll_sum()}/\code{roll_min()}/\code{roll_max()}/\code{roll_sd()}, but
+NOT \code{roll_median()} -- see \code{window_spec_lowerable()}'s own docs). A spec
+whose \code{fn} isn't recognized AT ALL (no registry entry, or a registry
+entry with a \code{NULL} \code{window} field) hits a hard internal error here
+(never a user-facing message: no verb decomposes an expression into an
 unrecognized spec, so reaching this function with one is a cuplyr bug,
 not a user mistake).
 }

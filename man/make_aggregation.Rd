@@ -4,7 +4,7 @@
 \alias{make_aggregation}
 \title{Create an aggregation structure for summarise}
 \usage{
-make_aggregation(output_col, input_col, fn, input_type = NULL)
+make_aggregation(output_col, input_col, fn, input_type = NULL, na_rm = FALSE)
 }
 \arguments{
 \item{output_col}{Output column name}
@@ -14,6 +14,18 @@ make_aggregation(output_col, input_col, fn, input_type = NULL)
 \item{fn}{Aggregation function name (sum, mean, min, max, n)}
 
 \item{input_type}{Input column type}
+
+\item{na_rm}{Logical scalar (Phase 6, task 6.1). \code{FALSE} (the default,
+matching R's own \code{na.rm = FALSE} default for \code{mean()}/\code{sum()}/\code{min()}/
+\code{max()}/\code{sd()}/\code{var()}) means a group with ANY null input value must
+produce a NULL aggregation result for the WHOLE group -- cudf's own
+groupby MEAN/SUM/MIN/MAX/STD/VARIANCE aggregations always exclude
+nulls, so \code{gpu_summarise()} (\code{src/ops_groupby.cpp}) applies an extra
+whole-group-null propagation step when this is \code{FALSE} and the input
+column actually has nulls (same technique as the window-aggregate
+path, \code{src/ops_window.cpp}, W4). \code{TRUE} means "use cudf's native
+null-excluding behavior as-is" -- no extra step. Meaningless for \code{n()}
+(counts rows regardless of nulls, matching dplyr already).}
 }
 \value{
 An aggregation list structure

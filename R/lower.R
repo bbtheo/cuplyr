@@ -318,10 +318,13 @@ lower_join <- function(ast, source_ptr) {
 #' form), the "rank" family (`row_number(x)`/`min_rank()`/`dense_rank()`/
 #' `percent_rank()`/`cume_dist()`), and the "agg" family
 #' (`mean()`/`sum()`/`min()`/`max()`/`n()`/`sd()`/`var()`/`first()`/
-#' `last()`/`nth()`) -- see `validate_window_spec()`. A spec whose `fn`
-#' isn't recognized AT ALL (no registry entry, or a registry entry with a
-#' `NULL` `window` field) hits a hard internal error here (never a
-#' user-facing message: no verb decomposes an expression into an
+#' `last()`/`nth()`) -- see `validate_window_spec()`. A later task (the
+#' rolling-window benchmark, scratchpad/todo.md) adds a sixth, "rolling"
+#' (`roll_mean()`/`roll_sum()`/`roll_min()`/`roll_max()`/`roll_sd()`, but
+#' NOT `roll_median()` -- see `window_spec_lowerable()`'s own docs). A spec
+#' whose `fn` isn't recognized AT ALL (no registry entry, or a registry
+#' entry with a `NULL` `window` field) hits a hard internal error here
+#' (never a user-facing message: no verb decomposes an expression into an
 #' unrecognized spec, so reaching this function with one is a cuplyr bug,
 #' not a user mistake).
 #' @keywords internal
@@ -395,12 +398,26 @@ lower_window <- function(ast, source_ptr) {
 #' machinery can produce such a spec) but is checked defensively so a
 #' bug surfaces as a clear internal error instead of silently mis-executing.
 #'
+#' The rolling-window task (scratchpad/todo.md) adds a sixth kind,
+#' `"rolling"`, lowerable for every `fn` EXCEPT `"roll_median"`: cudf
+#' 25.12's `rolling_window()`/`grouped_rolling_window()` have no MEDIAN
+#' aggregation instantiation at all in this environment (verified via `nm
+#' -DC libcudf.so`, see the file-level comment above
+#' `ir_parse_roll_call()`, R/ir.R) -- a genuine cudf capability gap, not a
+#' cuplyr bug, so `roll_median()`/`data.table::frollmedian()` mutate()
+#' calls route through `mutate_window_fallback()` exactly like the
+#' not-yet-implemented-kind case below, needing `R/roll.R`'s real
+#' `roll_median()` R function to make that CPU re-run work.
+#'
 #' @param spec A `window_spec()` structure (`R/window.R`)
 #' @return `TRUE`/`FALSE`
 #' @keywords internal
 window_spec_lowerable <- function(spec) {
   entry <- ir_call_registry[[spec$fn]]
   kind <- if (!is.null(entry)) entry$window$kind else NULL
+  if (identical(kind, "rolling")) {
+    return(!identical(spec$fn, "roll_median"))
+  }
   identical(kind, "shift") || identical(kind, "rank") ||
     identical(kind, "scan") || identical(kind, "agg")
 }

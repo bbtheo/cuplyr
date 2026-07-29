@@ -33,5 +33,15 @@ an \code{fn} with NO registry entry at all, or a registry entry whose
 unreachable in practice (nothing in \code{R/window.R}'s decomposition
 machinery can produce such a spec) but is checked defensively so a
 bug surfaces as a clear internal error instead of silently mis-executing.
+
+The rolling-window task (scratchpad/todo.md) adds a sixth kind,
+\code{"rolling"}, lowerable for every \code{fn} EXCEPT \code{"roll_median"}: cudf
+25.12's \code{rolling_window()}/\code{grouped_rolling_window()} have no MEDIAN
+aggregation instantiation at all in this environment (verified via \verb{nm -DC libcudf.so}, see the file-level comment above
+\code{ir_parse_roll_call()}, R/ir.R) -- a genuine cudf capability gap, not a
+cuplyr bug, so \code{roll_median()}/\code{data.table::frollmedian()} mutate()
+calls route through \code{mutate_window_fallback()} exactly like the
+not-yet-implemented-kind case below, needing \code{R/roll.R}'s real
+\code{roll_median()} R function to make that CPU re-run work.
 }
 \keyword{internal}

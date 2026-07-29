@@ -69,8 +69,15 @@ other unsupported aggregation shape.
 
 \subsection{NA handling}{
 
-By default, NA values are excluded from aggregations. This matches
-the default behavior of R's base aggregation functions.
+\code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{sd()}/\code{var()} all match R's own
+\code{na.rm = FALSE} default (Phase 6, task 6.1): if a group contains ANY \code{NA}
+in the aggregated column, the WHOLE group's result is \code{NA} for that
+aggregation -- e.g. \code{summarise(m = mean(x))} is \code{NA} for a group with even
+one \code{NA} value of \code{x}, matching real dplyr exactly. Pass \code{na.rm = TRUE}
+explicitly (e.g. \code{sum(x, na.rm = TRUE)}) to exclude \code{NA} values instead
+(cudf's own native aggregation behavior). \code{n()} is unaffected by
+\verb{na.rm=} (it counts every row regardless of nulls, like dplyr's own
+\code{n()}).
 }
 
 \subsection{Ungrouped summarise}{

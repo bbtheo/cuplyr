@@ -37,7 +37,9 @@ Suggests:
     reticulate,
     knitr,
     rmarkdown,
-    pkgdown
+    pkgdown,
+    data.table,
+    withr
 VignetteBuilder: knitr
 LinkingTo:
     Rcpp

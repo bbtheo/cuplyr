@@ -57,6 +57,22 @@
 //      exactly once. `target` (self-scattered here) is only a shape/type
 //      template.
 //
+// A later task (Theo-requested, scratchpad/todo.md "Rolling-window
+// benchmark target") adds a sixth family, "rolling":
+// roll_mean()/roll_sum()/roll_min()/roll_max()/roll_sd() (NOT
+// roll_median() -- cudf 25.12 has no rolling MEDIAN aggregation in this
+// environment, see R/lower.R's window_spec_lowerable()), via
+// cudf::grouped_rolling_window() (used uniformly whether or not the
+// frame is actually grouped, same "one code path via a substituted
+// zero-key column" idiom as the families above). See the file-level
+// design comment above R/ir.R's ir_parse_roll_call() for the full
+// empirical derivation of the min_periods/na.rm scheme this family uses --
+// notably, na.rm=FALSE poisoning falls out of a FIXED w-row window's own
+// min_periods=w requirement for free (no is-null-indicator masking pass
+// needed, unlike the cum*/rank sticky-NA fix), while na.rm=TRUE needs an
+// extra rolling COUNT_ALL pass to distinguish "leading incomplete window"
+// (always NA) from "internal window with some nulls" (skip them).
+//
 // Empirical checks recorded in the W2 commit message: E1 (grouped cumsum
 // on a shuffled 100k-row table matches dplyr exactly -- validates the
 // whole perm/gather/scan/scatter round trip), E2 (grouped row_number()
@@ -80,6 +96,7 @@
 #include <cudf/copying.hpp>
 #include <cudf/filling.hpp>
 #include <cudf/groupby.hpp>
+#include <cudf/rolling.hpp>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/sorting.hpp>
@@ -231,6 +248,35 @@ std::string window_agg_cudf_name(const std::string& fn) {
     if (fn == "sd")  return "std";
     if (fn == "var") return "variance";
     return fn;
+}
+
+// --- Rolling windows (Theo-requested benchmark task, a sixth window
+// family alongside shift/rank/scan/agg -- see the file-level design
+// comment above ir_parse_roll_call() in R/ir.R for the full empirical
+// derivation of the min_periods/na.rm scheme implemented below). ---
+
+bool is_rolling_fn(const std::string& fn) {
+    return fn == "roll_mean" || fn == "roll_sum" || fn == "roll_min" ||
+           fn == "roll_max" || fn == "roll_sd";
+    // "roll_median" is intentionally excluded: cudf has no rolling MEDIAN
+    // aggregation in this environment (verified via `nm -DC libcudf.so`,
+    // see R/ir.R's comment) -- window_spec_lowerable() (R/lower.R) already
+    // keeps it from ever reaching gpu_window() at all, so a "roll_median"
+    // spec here would be a cuplyr bug (caught defensively by
+    // make_rolling_agg()'s Rcpp::stop() below, never by this predicate
+    // returning FALSE for it -- callers dispatch on is_rolling_fn() to
+    // decide bucket membership, not to validate lowerability).
+}
+
+std::unique_ptr<cudf::rolling_aggregation> make_rolling_agg(const std::string& fn) {
+    if (fn == "roll_mean") return cudf::make_mean_aggregation<cudf::rolling_aggregation>();
+    if (fn == "roll_sum")  return cudf::make_sum_aggregation<cudf::rolling_aggregation>();
+    if (fn == "roll_min")  return cudf::make_min_aggregation<cudf::rolling_aggregation>();
+    if (fn == "roll_max")  return cudf::make_max_aggregation<cudf::rolling_aggregation>();
+    // ddof = 1 (sample standard deviation): matches R's own sd() and this
+    // file's/ops_groupby.cpp's existing "sd"/"std" ddof choice.
+    if (fn == "roll_sd")   return cudf::make_std_aggregation<cudf::rolling_aggregation>(1);
+    Rcpp::stop("gpu_window: internal: unknown rolling fn '%s'", fn.c_str());
 }
 
 void check_row_limit(const cudf::table_view& view) {
@@ -425,6 +471,7 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
         std::vector<int> rank_spec_indices;
         std::vector<int> shift_spec_indices;
         std::vector<int> agg_spec_indices;
+        std::vector<int> rolling_spec_indices;
         for (size_t i = 0; i < specs.size(); ++i) {
             const WindowSpec& sp = specs[i];
             const std::string& fn = sp.fn;
@@ -440,6 +487,8 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 shift_spec_indices.push_back(static_cast<int>(i));
             } else if (is_agg_fn(fn) || is_nth_fn(fn)) {
                 agg_spec_indices.push_back(static_cast<int>(i));
+            } else if (is_rolling_fn(fn)) {
+                rolling_spec_indices.push_back(static_cast<int>(i));
             } else {
                 Rcpp::stop("gpu_window: unsupported window fn '%s'", fn.c_str());
             }
@@ -817,6 +866,67 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
             for (size_t k = 0; k < shift_spec_indices.size(); ++k) {
                 int si = shift_spec_indices[k];
                 spec_results[static_cast<size_t>(si)] = std::move(shifted[k]);
+            }
+        }
+
+        if (!rolling_spec_indices.empty()) {
+            // Rolling windows (Theo-requested benchmark task, see the
+            // file-level design comment above ir_parse_roll_call() in
+            // R/ir.R for the full empirical derivation of the min_periods/
+            // na.rm scheme below). grouped_rolling_window() is used
+            // UNIFORMLY whether or not this frame is actually grouped --
+            // `keys_view` is either the real group columns or the
+            // substituted constant zero-key column (same "one code path"
+            // idiom `gb`/groupby above already uses). This is safe because
+            // `work_view`'s row order is stable-sorted by GROUP COLS ONLY
+            // (a rolling spec carries no order_cols, exactly like the scan
+            // family -- n_order_cols == 0 for this frame), i.e. each
+            // group's ORIGINAL relative row order is preserved -- exactly
+            // grouped_rolling_window()'s documented "presorted by
+            // group_key" requirement.
+            for (int si : rolling_spec_indices) {
+                const WindowSpec& sp = specs[static_cast<size_t>(si)];
+                if (!sp.has_value) {
+                    Rcpp::stop("gpu_window: '%s' requires a value column", sp.fn.c_str());
+                }
+                if (!sp.has_n || sp.n < 1) {
+                    Rcpp::stop("gpu_window: '%s' requires a positive window width", sp.fn.c_str());
+                }
+                cudf::size_type pos = value_pos.at(sp.value_idx);
+                cudf::column_view value_view = work_view.column(pos);
+                cudf::size_type w = sp.n;
+
+                // na.rm=FALSE: min_periods = w on a FIXED w-row window
+                // already means "zero nulls tolerated" (w valid values
+                // required out of exactly w physical rows) -- verified
+                // empirically (see R/ir.R), no separate is-null-indicator
+                // masking pass needed here (unlike the cum*/rank
+                // sticky-NA fix elsewhere in this file).
+                // na.rm=TRUE: min_periods = 1 (skip nulls when computing,
+                // as low a valid-count bar as possible) plus a second
+                // rolling COUNT_ALL(INCLUDE) pass below to force NA for the
+                // leading, physically-incomplete (row-count < w) windows
+                // that min_periods = 1 alone would wrongly compute a value
+                // for using fewer than w rows.
+                cudf::size_type min_periods = sp.na_rm ? 1 : w;
+                auto agg = make_rolling_agg(sp.fn);
+                auto result = cudf::grouped_rolling_window(keys_view, value_view, w, 0, min_periods, *agg);
+
+                if (sp.na_rm) {
+                    auto count_agg = cudf::make_count_aggregation<cudf::rolling_aggregation>(
+                        cudf::null_policy::INCLUDE);
+                    auto count_result = cudf::grouped_rolling_window(keys_view, value_view, w, 0, 1, *count_agg);
+
+                    cudf::numeric_scalar<int32_t> w_scalar(w, true);
+                    auto incomplete = cudf::binary_operation(
+                        count_result->view(), w_scalar, cudf::binary_operator::LESS,
+                        cudf::data_type{cudf::type_id::BOOL8});
+
+                    auto null_scalar = cudf::make_empty_scalar_like(result->view());
+                    result = cudf::copy_if_else(*null_scalar, result->view(), incomplete->view());
+                }
+
+                spec_results[static_cast<size_t>(si)] = std::move(result);
             }
         }
 
