@@ -34,13 +34,13 @@
 #    on the *post-collect* object. Instead we capture `dplyr::group_vars()`
 #    on the pipeline's return value BEFORE collecting on both sides: the
 #    oracle's tibble/grouped-df result, and the GPU's tbl_gpu result (via
-#    `group_vars.tbl_gpu()`, i.e. `$groups`). This catches real divergences,
-#    e.g. cuplyr's `summarise()` always drops all grouping (`.groups` is
-#    effectively always "drop", see R/summarise.R:123) where dplyr's default
-#    is "drop_last". Phase 6 of the roadmap is expected to fix this; until
-#    then, oracle pipelines that call summarise() should pass
-#    `.groups = "drop"` explicitly so both sides agree (see
-#    test-oracle-smoke.R).
+#    `group_vars.tbl_gpu()`, i.e. `$groups`). `summarise()`'s `.groups=`
+#    semantics (Phase 6, task 3: real `"drop_last"` default, `"keep"`,
+#    `"drop"`, matching dplyr exactly -- see R/summarise.R's
+#    `resolve_summarise_groups()`) are no longer a divergence, so oracle
+#    pipelines exercising `summarise()`'s default grouping behavior can (and
+#    should) omit `.groups=` entirely and let this group_vars() comparison
+#    catch any regression -- see test-dplyr-summarise.R.
 
 # =============================================================================
 # Internal helpers

@@ -85,11 +85,21 @@ ast_arrange <- function(input, sort_specs, groups = character()) {
 #'
 #' @param input Input AST node
 #' @param aggregations List of aggregation structures
-#' @param groups Character vector of group columns (stored explicitly)
+#' @param groups Character vector of group columns this node aggregates BY
+#'   (drives the actual groupby op -- always the full pre-summarise group
+#'   set, regardless of `.groups=`)
+#' @param result_groups Character vector of group columns RETAINED on the
+#'   summarise's *output* (Phase 6, task 3): a subset of `groups`, computed
+#'   from `.groups=` semantics by `resolve_summarise_groups()`
+#'   (R/summarise.R) -- `character()` for `.groups = "drop"`/ungrouped
+#'   input, all of `groups` for `"keep"`, all-but-the-last for the default/
+#'   `"drop_last"`. Read by `propagate_groups()` (R/execute.R) instead of
+#'   the old hardcoded "summarise always drops all groups" rule.
 #' @return An ast_summarise node
 #' @keywords internal
-ast_summarise <- function(input, aggregations, groups) {
-  ast_node("summarise", input = input, aggregations = aggregations, groups = groups)
+ast_summarise <- function(input, aggregations, groups, result_groups = character()) {
+  ast_node("summarise", input = input, aggregations = aggregations, groups = groups,
+            result_groups = result_groups)
 }
 
 #' Create a barrier AST node (optimization fence)

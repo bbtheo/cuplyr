@@ -5,9 +5,9 @@
 \alias{summarize.tbl_gpu}
 \title{Summarise groups in a GPU table}
 \usage{
-\method{summarise}{tbl_gpu}(.data, ..., .groups = "drop", .by = NULL)
+\method{summarise}{tbl_gpu}(.data, ..., .groups = NULL, .by = NULL)
 
-\method{summarize}{tbl_gpu}(.data, ..., .groups = "drop", .by = NULL)
+\method{summarize}{tbl_gpu}(.data, ..., .groups = NULL, .by = NULL)
 }
 \arguments{
 \item{.data}{A grouped \code{tbl_gpu} object created by \code{\link[dplyr:group_by]{group_by()}}.}
@@ -18,8 +18,43 @@ expression in the form \code{fun(column)}, where \code{column} can also be any
 expression the internal expression IR understands (see "Aggregation
 sub-expressions" below).}
 
-\item{.groups}{Controls grouping structure of the result. Currently only
-"drop" is supported (default).}
+\item{.groups}{Controls grouping structure of the result (Phase 6, task
+3; matches \code{dplyr::summarise()}'s own contract exactly, verified
+empirically against dplyr 1.2.1). One of:
+\itemize{
+\item \code{NULL} (default) -- \code{"drop_last"} (see below), PLUS an
+informational message when the result is still grouped (see
+"The regroup message" below).
+\item \code{"drop_last"} -- drop the LAST grouping variable, keeping the
+rest (e.g. \code{group_by(a, b, c)} -> result grouped by \verb{a, b}); with
+only one grouping variable, the result is ungrouped. Same as the
+default, minus the message.
+\item \code{"drop"} -- the result is always ungrouped.
+\item \code{"keep"} -- every original grouping variable is retained.
+\item \code{"rowwise"} -- NOT SUPPORTED on \code{tbl_gpu} (hard error): a
+\code{tbl_gpu} has no rowwise representation (\code{rowwise()} itself is a
+full CPU-fallback verb, see \code{\link[dplyr:rowwise]{dplyr::rowwise()}}). \code{collect()} first,
+then call real \code{dplyr::rowwise()} on the plain data frame.
+}
+\verb{.groups=} is only validated against an already-grouped \code{.data} --
+matching a genuine (if surprising) dplyr quirk verified empirically:
+any non-\code{"rowwise"} value (including a typo) is silently a no-op on an
+UNGROUPED \code{.data}, since there is nothing to drop/keep/peel from an
+empty group set.
+\subsection{The regroup message}{
+
+When \code{.groups} is left \code{NULL} (the default) and the pre-summarise
+\code{.data} has MORE THAN ONE grouping variable, an informational message
+is emitted (loosely matching dplyr's own wording -- this is
+informational, not a value under parity test). It is suppressed by
+\code{options(dplyr.summarise.inform = FALSE)} (an explicit \code{TRUE}/\code{FALSE}
+value for this option always wins outright); with the option unset,
+dplyr's own rule applies: the message only fires when the CALLING
+code's top environment is the global environment (i.e. top-level/
+interactive use) -- it is silent when \code{summarise()} is called from
+inside a function/package (as in a \code{testthat} test, or one verb
+calling another, e.g. \code{\link[=tally.tbl_gpu]{tally.tbl_gpu()}}).
+}}
 
 \item{.by}{Optional on-the-fly grouping columns (tidyselect), GPU-native
 (Phase 5, task W9). Unlike \code{mutate()}/\code{filter()}'s \verb{.by=} (which behave
@@ -27,9 +62,12 @@ exactly like \code{group_by()}), \code{summarise(.by=)} has one genuinely
 different rule verified empirically against dplyr 1.2.1: groups are
 emitted in FIRST-APPEARANCE order (the order each distinct \code{.by}
 combination first appears in \code{.data}), not sorted group-key order --
-see "\code{.by} group order" below. The result is always ungrouped (same as
-a \code{group_by()}-driven \code{summarise()}). Supplying \code{.by} when \code{.data} is
-already grouped (via \code{group_by()}) is an error, matching dplyr exactly.}
+see "\code{.by} group order" below. The result is always ungrouped -- unlike
+a \code{group_by()}-driven \code{summarise()}, whose result's grouping now
+depends on \verb{.groups=} (Phase 6, task 3); \verb{.groups=} can't be combined
+with \verb{.by=} at all (rejected by dplyr's own \code{summarise()} generic).
+Supplying \code{.by} when \code{.data} is already grouped (via \code{group_by()}) is
+an error, matching dplyr exactly.}
 }
 \value{
 A \code{tbl_gpu} object with one row per group containing the grouping

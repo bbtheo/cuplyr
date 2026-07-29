@@ -4,14 +4,24 @@
 \alias{ast_summarise}
 \title{Create a summarise AST node}
 \usage{
-ast_summarise(input, aggregations, groups)
+ast_summarise(input, aggregations, groups, result_groups = character())
 }
 \arguments{
 \item{input}{Input AST node}
 
 \item{aggregations}{List of aggregation structures}
 
-\item{groups}{Character vector of group columns (stored explicitly)}
+\item{groups}{Character vector of group columns this node aggregates BY
+(drives the actual groupby op -- always the full pre-summarise group
+set, regardless of \verb{.groups=})}
+
+\item{result_groups}{Character vector of group columns RETAINED on the
+summarise's \emph{output} (Phase 6, task 3): a subset of \code{groups}, computed
+from \verb{.groups=} semantics by \code{resolve_summarise_groups()}
+(R/summarise.R) -- \code{character()} for \code{.groups = "drop"}/ungrouped
+input, all of \code{groups} for \code{"keep"}, all-but-the-last for the default/
+\code{"drop_last"}. Read by \code{propagate_groups()} (R/execute.R) instead of
+the old hardcoded "summarise always drops all groups" rule.}
 }
 \value{
 An ast_summarise node

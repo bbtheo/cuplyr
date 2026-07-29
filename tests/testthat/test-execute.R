@@ -182,16 +182,38 @@ test_that("propagate_groups() drops group columns no longer in schema", {
   expect_equal(propagate_groups(node, c("g", "x"), schema), "x")
 })
 
-test_that("propagate_groups() always clears groups for summarise and join", {
+test_that("propagate_groups() always clears groups for join", {
   schema <- list(names = c("g", "x"), types = c("INT32", "FLOAT64"))
 
-  summarise_node <- list(type = "summarise")
   join_node <- list(type = "join")
 
-  expect_equal(propagate_groups(summarise_node, "g", schema), character())
-  expect_equal(propagate_groups(summarise_node, c("g", "x"), schema), character())
   expect_equal(propagate_groups(join_node, "g", schema), character())
   expect_equal(propagate_groups(join_node, c("g", "x"), schema), character())
+})
+
+test_that("propagate_groups() reads summarise's retained groups from node$result_groups (Phase 6, task 3)", {
+  # Phase 6, task 3: summarise no longer unconditionally clears groups --
+  # `ast_summarise()`'s own `result_groups` field (computed by
+  # `resolve_summarise_groups()`, R/summarise.R, from `.groups=` semantics)
+  # drives what propagate_groups() carries forward. The input `groups` arg
+  # is IGNORED for a summarise node (it reflects the PRE-summarise grouping,
+  # not the retained set) -- only `node$result_groups` (intersected with the
+  # node's own output schema) matters.
+  schema <- list(names = c("g", "x"), types = c("INT32", "FLOAT64"))
+
+  drop_node <- list(type = "summarise", result_groups = character())
+  keep_node <- list(type = "summarise", result_groups = "g")
+
+  expect_equal(propagate_groups(drop_node, "g", schema), character())
+  expect_equal(propagate_groups(keep_node, "g", schema), "g")
+
+  # Intersected with the output schema: a retained group column that didn't
+  # survive onto the summarise's own output (shouldn't normally happen --
+  # ast_summarise() always keeps its own group columns -- but propagate_groups()
+  # guards against it the same way it does for every other node type).
+  no_x_schema <- list(names = "g", types = "INT32")
+  stale_node <- list(type = "summarise", result_groups = c("g", "x"))
+  expect_equal(propagate_groups(stale_node, character(), no_x_schema), "g")
 })
 
 test_that("propagate_groups() handles empty input groups", {

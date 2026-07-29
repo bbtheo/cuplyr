@@ -9,17 +9,54 @@
 #'   expression in the form `fun(column)`, where `column` can also be any
 #'   expression the internal expression IR understands (see "Aggregation
 #'   sub-expressions" below).
-#' @param .groups Controls grouping structure of the result. Currently only
-#'   "drop" is supported (default).
+#' @param .groups Controls grouping structure of the result (Phase 6, task
+#'   3; matches `dplyr::summarise()`'s own contract exactly, verified
+#'   empirically against dplyr 1.2.1). One of:
+#'   \itemize{
+#'     \item `NULL` (default) -- `"drop_last"` (see below), PLUS an
+#'       informational message when the result is still grouped (see
+#'       "The regroup message" below).
+#'     \item `"drop_last"` -- drop the LAST grouping variable, keeping the
+#'       rest (e.g. `group_by(a, b, c)` -> result grouped by `a, b`); with
+#'       only one grouping variable, the result is ungrouped. Same as the
+#'       default, minus the message.
+#'     \item `"drop"` -- the result is always ungrouped.
+#'     \item `"keep"` -- every original grouping variable is retained.
+#'     \item `"rowwise"` -- NOT SUPPORTED on `tbl_gpu` (hard error): a
+#'       `tbl_gpu` has no rowwise representation (`rowwise()` itself is a
+#'       full CPU-fallback verb, see [dplyr::rowwise()]). `collect()` first,
+#'       then call real `dplyr::rowwise()` on the plain data frame.
+#'   }
+#'   `.groups=` is only validated against an already-grouped `.data` --
+#'   matching a genuine (if surprising) dplyr quirk verified empirically:
+#'   any non-`"rowwise"` value (including a typo) is silently a no-op on an
+#'   UNGROUPED `.data`, since there is nothing to drop/keep/peel from an
+#'   empty group set.
+#'
+#'   ## The regroup message
+#'   When `.groups` is left `NULL` (the default) and the pre-summarise
+#'   `.data` has MORE THAN ONE grouping variable, an informational message
+#'   is emitted (loosely matching dplyr's own wording -- this is
+#'   informational, not a value under parity test). It is suppressed by
+#'   `options(dplyr.summarise.inform = FALSE)` (an explicit `TRUE`/`FALSE`
+#'   value for this option always wins outright); with the option unset,
+#'   dplyr's own rule applies: the message only fires when the CALLING
+#'   code's top environment is the global environment (i.e. top-level/
+#'   interactive use) -- it is silent when `summarise()` is called from
+#'   inside a function/package (as in a `testthat` test, or one verb
+#'   calling another, e.g. [tally.tbl_gpu()]).
 #' @param .by Optional on-the-fly grouping columns (tidyselect), GPU-native
 #'   (Phase 5, task W9). Unlike `mutate()`/`filter()`'s `.by=` (which behave
 #'   exactly like `group_by()`), `summarise(.by=)` has one genuinely
 #'   different rule verified empirically against dplyr 1.2.1: groups are
 #'   emitted in FIRST-APPEARANCE order (the order each distinct `.by`
 #'   combination first appears in `.data`), not sorted group-key order --
-#'   see "`.by` group order" below. The result is always ungrouped (same as
-#'   a `group_by()`-driven `summarise()`). Supplying `.by` when `.data` is
-#'   already grouped (via `group_by()`) is an error, matching dplyr exactly.
+#'   see "`.by` group order" below. The result is always ungrouped -- unlike
+#'   a `group_by()`-driven `summarise()`, whose result's grouping now
+#'   depends on `.groups=` (Phase 6, task 3); `.groups=` can't be combined
+#'   with `.by=` at all (rejected by dplyr's own `summarise()` generic).
+#'   Supplying `.by` when `.data` is already grouped (via `group_by()`) is
+#'   an error, matching dplyr exactly.
 #'
 #' @return A `tbl_gpu` object with one row per group containing the grouping
 #'   columns and computed aggregations.
@@ -150,7 +187,17 @@
 #'     ) |>
 #'     collect()
 #' }
-summarise.tbl_gpu <- function(.data, ..., .groups = "drop", .by = NULL) {
+summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
+  # Captured at this call depth so it matches exactly what dplyr's own
+  # `summarise.grouped_df()` captures via its own `caller_env()` call --
+  # needed by `resolve_summarise_groups()`'s regroup-message default (see
+  # `summarise_should_inform()` below). Note: dplyr's exported `summarise()`
+  # generic itself already rejects supplying BOTH `.by` and `.groups`
+  # (checked before `UseMethod()` dispatch, so it applies to `tbl_gpu`
+  # automatically -- verified empirically, no code needed here for that
+  # specific conflict).
+  caller_env <- rlang::caller_env()
+
   by_quo <- rlang::enquo(.by)
 
   # Phase 5, task W9: `.by=` resolution -- checked up front (before the
@@ -173,10 +220,139 @@ summarise.tbl_gpu <- function(.data, ..., .groups = "drop", .by = NULL) {
   dots <- auto_name_dots(dots, "summarise")
 
   if (by_given) {
+    # `.by=` summarise is always ungrouped (Phase 5, task W9); `.groups=`
+    # can never reach here alongside `.by=` (dplyr's own generic already
+    # rejects that combination before this method is even dispatched to).
     return(summarise_by_desugar(.data, dots, by_cols))
   }
 
-  summarise_core(.data, dots)
+  retained_groups <- resolve_summarise_groups(.data$groups, .groups, caller_env)
+
+  summarise_core(.data, dots, retained_groups)
+}
+
+# Internal: resolve `.groups=` into the retained group-column set, and fire
+# dplyr's own conditional "has regrouped the output" message (Phase 6, task
+# 3).
+#
+# Mirrors dplyr 1.2.1's own `summarise.data.frame()`/`summarise.grouped_df()`
+# split EXACTLY (verified empirically):
+#   - Ungrouped `.data` (`orig_groups` empty): `.groups=` is NOT VALIDATED AT
+#     ALL except the `"rowwise"` special-case -- any value, including a
+#     typo, is silently a no-op (verified: `df |> summarise(x, .groups =
+#     "bogus")` on an ungrouped tibble does NOT error in real dplyr, while
+#     the identical call on a grouped tibble does). The result is always
+#     ungrouped, matching the fact that there's nothing to "keep"/
+#     "drop_last"/"drop" from an empty group set.
+#   - Grouped `.data`: `.groups=` IS validated (`NULL`/`"drop_last"`/
+#     `"drop"`/`"keep"`/`"rowwise"` only, else a hard error naming the bad
+#     value); the "has regrouped the output" message fires ONLY when
+#     `.groups` is unset (`NULL`, the default) AND there is more than one
+#     grouping column -- gated the same way dplyr gates it, see
+#     `summarise_should_inform()`.
+#
+# `.groups = "rowwise"` is a HARD ERROR here regardless of grouped/ungrouped
+# (cuplyr's own scope decision, not a literal dplyr-divergence in observable
+# output -- just an unsupported input): a `tbl_gpu` has no rowwise
+# representation at all (`rowwise()` itself is a full CPU-fallback verb,
+# R/fallback.R), so faking it via a regular grouped `tbl_gpu` would silently
+# misrepresent the result's actual semantics for later verbs (rowwise
+# mutate/summarise treat each row as its own group, which a plain grouped
+# `tbl_gpu` does not). Users needing a real rowwise result should
+# `collect()` first, then call real `dplyr::rowwise()` on the plain data
+# frame.
+#
+# @param orig_groups Character vector, `.data$groups` BEFORE this summarise
+# @param groups_arg The raw `.groups=` value as passed by the caller (may be
+#   `NULL`)
+# @param caller_env The environment that called `summarise()` (captured via
+#   `rlang::caller_env()` at the top of `summarise.tbl_gpu()`, the same call
+#   depth dplyr's own method captures its own `caller_env()` at)
+# @return Character vector, the retained group columns
+# @keywords internal
+resolve_summarise_groups <- function(orig_groups, groups_arg, caller_env) {
+  if (identical(groups_arg, "rowwise")) {
+    stop(
+      "summarise(.groups = \"rowwise\") is not supported on tbl_gpu: a ",
+      "tbl_gpu has no rowwise representation. collect() the result first, ",
+      "then call dplyr::rowwise() on the plain data frame instead.",
+      call. = FALSE
+    )
+  }
+
+  if (length(orig_groups) == 0) {
+    # Ungrouped input: dplyr's summarise.data.frame() never validates
+    # `.groups=` (any non-"rowwise" value, valid or not, is a silent no-op)
+    # and always returns ungrouped -- verified empirically, see this
+    # function's own docs.
+    return(character())
+  }
+
+  valid_values <- c("drop_last", "drop", "keep")
+  if (!is.null(groups_arg) && !identical(groups_arg, character(0)) &&
+      !groups_arg %in% valid_values) {
+    stop(
+      "`.groups` can't be \"", groups_arg, "\"\n",
+      "Possible values are NULL (default), \"drop_last\", \"drop\", ",
+      "\"keep\", and \"rowwise\"",
+      call. = FALSE
+    )
+  }
+
+  effective <- if (is.null(groups_arg)) "drop_last" else groups_arg
+
+  if (identical(effective, "keep")) {
+    return(orig_groups)
+  }
+  if (identical(effective, "drop")) {
+    return(character())
+  }
+
+  # "drop_last" (either explicit, or the NULL default's effective value):
+  # peel the LAST grouping variable, keeping the rest; with only one
+  # grouping variable, the whole result is ungrouped.
+  n <- length(orig_groups)
+  retained <- if (n > 1) orig_groups[-n] else character()
+
+  if (is.null(groups_arg) && n > 1 && summarise_should_inform(caller_env)) {
+    inform_regrouped_output(orig_groups, retained)
+  }
+
+  retained
+}
+
+# Internal: dplyr's own `summarise_verbose()` rule (Phase 6, task 3) --
+# whether the "has regrouped the output" message should fire, verified
+# empirically against dplyr 1.2.1's own (unexported) `summarise_verbose()`:
+# an explicit `options(dplyr.summarise.inform = TRUE/FALSE)` always wins;
+# otherwise the message only fires when the CALLER's top environment is the
+# global environment (i.e. top-level/interactive use -- e.g. `Rscript -e`
+# or a script sourced at top level) and is silent when `summarise()` is
+# called from inside a function/package's own code (a `testthat` test, or
+# one cuplyr verb calling another internally, e.g. `tally.tbl_gpu()`).
+# @keywords internal
+summarise_should_inform <- function(caller_env) {
+  inform <- getOption("dplyr.summarise.inform")
+  if (isTRUE(inform) || isFALSE(inform)) {
+    return(inform)
+  }
+  identical(topenv(caller_env), globalenv())
+}
+
+# Internal: emit (a loose paraphrase of) dplyr's own "has regrouped the
+# output" message -- informational text, not a value under parity test
+# (scratchpad/todo.md Phase 6, task 3 asked to "match message text loosely").
+# @keywords internal
+inform_regrouped_output <- function(old_groups, new_groups) {
+  new_desc <- if (length(new_groups) == 0) "no groups (ungrouped)" else paste(new_groups, collapse = ", ")
+  message(
+    "`summarise()` has regrouped the output by dropping the last grouping ",
+    "variable.\n",
+    "Summaries were computed grouped by ", paste(old_groups, collapse = ", "), ".\n",
+    "Output is grouped by ", new_desc, ".\n",
+    "Use `summarise(.groups = \"drop_last\")` to silence this message, or ",
+    "`.groups = \"keep\"`/`\"drop\"` to retain/drop every grouping level."
+  )
 }
 
 # Internal: the shared aggregation pipeline -- temp-column preprocessing,
@@ -187,10 +363,17 @@ summarise.tbl_gpu <- function(.data, ..., .groups = "drop", .by = NULL) {
 #
 # @param .data A tbl_gpu (its own `$groups` drive the aggregation)
 # @param dots Already auto_name_dots()'d aggregation quosures
-# @return A new (ungrouped -- ast_summarise always drops groups, see
-#   propagate_groups(), R/execute.R) tbl_gpu
+# @param retained_groups Character vector (Phase 6, task 3), the group
+#   columns to retain on the OUTPUT's `$groups` -- as computed by
+#   `resolve_summarise_groups()` for the ordinary `.groups=`-driven path, or
+#   `character()` (the default -- always ungrouped) for
+#   `summarise_by_desugar()`'s own internal grouped summarise call, which is
+#   a pure computation device unrelated to user-visible `.groups=` semantics
+#   (`.by=` summarise is always ungrouped, matching dplyr).
+# @return A new tbl_gpu, grouped by `retained_groups` (see
+#   propagate_groups(), R/execute.R, which reads `node$result_groups`)
 # @keywords internal
-summarise_core <- function(.data, dots) {
+summarise_core <- function(.data, dots, retained_groups = character()) {
   # Phase 6, task 6.1 (Fix A): extract and strip any `na.rm = <literal>`
   # named argument BEFORE temp-column preprocessing -- this must happen
   # first so a sub-expression call like `sum(sqrt(x), na.rm = TRUE)` is
@@ -227,7 +410,7 @@ summarise_core <- function(.data, dots) {
                                      na_rm_flags, agg_extra)
 
   push_op(working_data, ast_summarise(input_node(working_data), aggregations,
-                                      working_data$groups))
+                                      working_data$groups, retained_groups))
 }
 
 # Internal: Extract and strip an `na.rm = <literal>` (or `na_rm = <literal>`)
@@ -468,8 +651,11 @@ extract_nth_position <- function(expr, env, quo) {
 #   3. arrange(..first..) orders the one-row-per-group result by that
 #      first-appearance position -- reproducing dplyr's empirically-verified
 #      `.by=` group order (see summarise.tbl_gpu()'s own roxygen).
-#   4. Drop `..first..`. The result is already ungrouped (ast_summarise
-#      always drops groups), matching dplyr's own `.by=` contract.
+#   4. Drop `..first..`. The result is already ungrouped (summarise_core()
+#      is called with its default `retained_groups = character()`, Phase 6
+#      task 3 -- this internal grouped summarise is a pure computation
+#      device, unrelated to `.groups=` semantics), matching dplyr's own
+#      `.by=` contract.
 #
 # @param .data A tbl_gpu, confirmed ungrouped by resolve_by() before this is
 #   ever called

@@ -729,3 +729,313 @@ test_that("mutate() median(x, na.rm=TRUE) is not supported (matches mean()/sum()
     "mutate\\(\\) only supports"
   )
 })
+
+# =============================================================================
+# Phase 6, task 3: `.groups=` semantics -- real "drop_last" default (not
+# "always drop everything"), "keep", "drop", "rowwise" (unsupported), the
+# conditional regroup message, chained-summarise peeling, and .by=
+# unaffected.
+#
+# Verified empirically against dplyr 1.2.1 (see R/summarise.R's
+# `resolve_summarise_groups()` for the full derivation, and
+# `tests/testthat/helper-oracle.R`'s module doc, updated by this task):
+#   - Default (`.groups` unset): `"drop_last"` -- peel the LAST grouping
+#     variable off; with exactly one grouping variable the result is fully
+#     ungrouped (drop_last === drop in that case, verified: 1-group-var
+#     tests below pass with or without an explicit `.groups=`).
+#   - `"keep"`: every original grouping variable retained.
+#   - `"drop"`: always ungrouped.
+#   - `"rowwise"`: NOT SUPPORTED on `tbl_gpu` -- a hard, documented error
+#     (`tbl_gpu` has no rowwise representation at all; `rowwise()` itself is
+#     a full CPU-fallback verb, R/fallback.R). Deliberate scope cut, not a
+#     silent divergence.
+#   - The regroup message fires ONLY when `.groups` is unset AND there is
+#     more than one grouping variable, gated by
+#     `options(dplyr.summarise.inform=)` first (explicit `TRUE`/`FALSE`
+#     always wins), else by whether the CALLING code's top environment is
+#     the global environment (dplyr's own `summarise_verbose()` rule,
+#     replicated exactly in `summarise_should_inform()`) -- meaning it does
+#     NOT fire from inside a testthat test by default on EITHER side (same
+#     rule evaluated at the same call depth for both the dplyr oracle and
+#     cuplyr), so the message tests below force it on/off via the option
+#     rather than relying on ambient call-stack shape.
+#   - `.by=` summarise is always ungrouped and unaffected by any of this
+#     (already correct since Phase 5, task W9); `.groups=` can't be combined
+#     with `.by=` at all -- rejected by dplyr's own EXPORTED `summarise()`
+#     generic before dispatch even reaches the `tbl_gpu` method (verified:
+#     no cuplyr-side code implements this specific check, it's inherited for
+#     free from dplyr's generic).
+#   - On an UNGROUPED `.data`, `.groups=` is not validated at all except the
+#     `"rowwise"` special-case (a genuine dplyr quirk, verified empirically:
+#     an invalid string is a silent no-op on ungrouped input, but a hard
+#     error on grouped input).
+# =============================================================================
+
+oracle_groups_df <- function() {
+  base <- expand.grid(a = 1:2, b = 1:2, c = 1:2)
+  rbind(
+    data.frame(base, x = seq_len(nrow(base))),
+    data.frame(base, x = seq_len(nrow(base)) + 100)
+  )
+}
+
+test_that("summarise() default .groups (drop_last) matches dplyr: 1 group var", {
+  skip_if_no_gpu()
+
+  df <- oracle_groups_df()
+  pipeline <- function(d) d |> dplyr::group_by(a) |> dplyr::summarise(m = mean(x))
+
+  expect_same_as_dplyr(df, pipeline, arrange_by = "a")
+  expect_same_as_dplyr_lazy(df, pipeline, arrange_by = "a")
+})
+
+test_that("summarise() default .groups (drop_last) matches dplyr: 2 group vars", {
+  skip_if_no_gpu()
+
+  df <- oracle_groups_df()
+  pipeline <- function(d) d |> dplyr::group_by(a, b) |> dplyr::summarise(m = mean(x))
+
+  expect_same_as_dplyr(df, pipeline, arrange_by = c("a", "b"))
+  expect_same_as_dplyr_lazy(df, pipeline, arrange_by = c("a", "b"))
+})
+
+test_that("summarise() default .groups (drop_last) matches dplyr: 3 group vars", {
+  skip_if_no_gpu()
+
+  df <- oracle_groups_df()
+  pipeline <- function(d) d |> dplyr::group_by(a, b, c) |> dplyr::summarise(m = mean(x))
+
+  expect_same_as_dplyr(df, pipeline, arrange_by = c("a", "b", "c"))
+  expect_same_as_dplyr_lazy(df, pipeline, arrange_by = c("a", "b", "c"))
+})
+
+test_that("summarise(.groups = 'keep') retains every grouping variable: 2 and 3 group vars", {
+  skip_if_no_gpu()
+
+  df <- oracle_groups_df()
+
+  pipeline2 <- function(d) {
+    d |> dplyr::group_by(a, b) |> dplyr::summarise(m = mean(x), .groups = "keep")
+  }
+  pipeline3 <- function(d) {
+    d |> dplyr::group_by(a, b, c) |> dplyr::summarise(m = mean(x), .groups = "keep")
+  }
+
+  expect_same_as_dplyr(df, pipeline2, arrange_by = c("a", "b"))
+  expect_same_as_dplyr_lazy(df, pipeline2, arrange_by = c("a", "b"))
+  expect_same_as_dplyr(df, pipeline3, arrange_by = c("a", "b", "c"))
+  expect_same_as_dplyr_lazy(df, pipeline3, arrange_by = c("a", "b", "c"))
+})
+
+test_that("summarise(.groups = 'keep') on a single group var still retains it (no-op vs default)", {
+  skip_if_no_gpu()
+
+  df <- oracle_groups_df()
+  pipeline <- function(d) d |> dplyr::group_by(a) |> dplyr::summarise(m = mean(x), .groups = "keep")
+
+  expect_same_as_dplyr(df, pipeline, arrange_by = "a")
+})
+
+test_that("summarise(.groups = 'drop') always ungroups: 1, 2, 3 group vars", {
+  skip_if_no_gpu()
+
+  df <- oracle_groups_df()
+
+  pipeline1 <- function(d) d |> dplyr::group_by(a) |> dplyr::summarise(m = mean(x), .groups = "drop")
+  pipeline2 <- function(d) d |> dplyr::group_by(a, b) |> dplyr::summarise(m = mean(x), .groups = "drop")
+  pipeline3 <- function(d) d |> dplyr::group_by(a, b, c) |> dplyr::summarise(m = mean(x), .groups = "drop")
+
+  expect_same_as_dplyr(df, pipeline1, arrange_by = "a")
+  expect_same_as_dplyr(df, pipeline2, arrange_by = c("a", "b"))
+  expect_same_as_dplyr(df, pipeline3, arrange_by = c("a", "b", "c"))
+  expect_same_as_dplyr_lazy(df, pipeline1, arrange_by = "a")
+  expect_same_as_dplyr_lazy(df, pipeline2, arrange_by = c("a", "b"))
+  expect_same_as_dplyr_lazy(df, pipeline3, arrange_by = c("a", "b", "c"))
+})
+
+test_that("summarise(.groups = 'drop_last') explicit matches dplyr: 1, 2, 3 group vars", {
+  skip_if_no_gpu()
+
+  df <- oracle_groups_df()
+
+  pipeline1 <- function(d) d |> dplyr::group_by(a) |> dplyr::summarise(m = mean(x), .groups = "drop_last")
+  pipeline2 <- function(d) d |> dplyr::group_by(a, b) |> dplyr::summarise(m = mean(x), .groups = "drop_last")
+  pipeline3 <- function(d) d |> dplyr::group_by(a, b, c) |> dplyr::summarise(m = mean(x), .groups = "drop_last")
+
+  expect_same_as_dplyr(df, pipeline1, arrange_by = "a")
+  expect_same_as_dplyr(df, pipeline2, arrange_by = c("a", "b"))
+  expect_same_as_dplyr(df, pipeline3, arrange_by = c("a", "b", "c"))
+})
+
+test_that("summarise() group order after drop_last is the group_by() order minus the last column", {
+  skip_if_no_gpu()
+
+  # Group columns supplied in a non-alphabetical order (c, a, b) -- verifies
+  # drop_last peels the LAST-SUPPLIED column, not e.g. alphabetically last.
+  df <- oracle_groups_df()
+  gpu_df <- tbl_gpu(df) |> dplyr::group_by(c, a, b)
+
+  result <- suppressMessages(dplyr::summarise(gpu_df, m = mean(x)))
+  expect_equal(result$groups, c("c", "a"))
+})
+
+test_that("summarise() regroup message fires only for >1 group vars with .groups unset (option-forced)", {
+  skip_if_no_gpu()
+
+  df <- oracle_groups_df()
+  gpu_df <- tbl_gpu(df)
+
+  withr::local_options(dplyr.summarise.inform = TRUE)
+
+  expect_message(
+    dplyr::group_by(gpu_df, a, b) |> dplyr::summarise(m = mean(x)),
+    "regroup"
+  )
+  expect_no_message(
+    dplyr::group_by(gpu_df, a) |> dplyr::summarise(m = mean(x))
+  )
+  expect_no_message(
+    dplyr::group_by(gpu_df, a, b) |> dplyr::summarise(m = mean(x), .groups = "drop_last")
+  )
+  expect_no_message(
+    dplyr::group_by(gpu_df, a, b) |> dplyr::summarise(m = mean(x), .groups = "keep")
+  )
+  expect_no_message(
+    dplyr::group_by(gpu_df, a, b) |> dplyr::summarise(m = mean(x), .groups = "drop")
+  )
+})
+
+test_that("summarise() regroup message is suppressed by dplyr.summarise.inform = FALSE", {
+  skip_if_no_gpu()
+
+  df <- oracle_groups_df()
+  gpu_df <- tbl_gpu(df)
+
+  withr::local_options(dplyr.summarise.inform = FALSE)
+
+  expect_no_message(
+    dplyr::group_by(gpu_df, a, b) |> dplyr::summarise(m = mean(x))
+  )
+})
+
+test_that("real dplyr and cuplyr agree on when the regroup message fires (same environment rule, option-forced)", {
+  skip_if_no_gpu()
+
+  df <- oracle_groups_df()
+  gpu_df <- tbl_gpu(df)
+  tbl <- dplyr::as_tibble(df)
+
+  withr::local_options(dplyr.summarise.inform = TRUE)
+
+  expect_message(dplyr::group_by(tbl, a, b) |> dplyr::summarise(m = mean(x)), "regroup")
+  expect_message(dplyr::group_by(gpu_df, a, b) |> dplyr::summarise(m = mean(x)), "regroup")
+})
+
+test_that("summarise(.groups = 'rowwise') is rejected on a grouped tbl_gpu (no rowwise representation)", {
+  skip_if_no_gpu()
+
+  df <- oracle_groups_df()
+  gpu_df <- tbl_gpu(df) |> dplyr::group_by(a, b)
+
+  expect_error(
+    dplyr::summarise(gpu_df, m = mean(x), .groups = "rowwise"),
+    "rowwise"
+  )
+})
+
+test_that("summarise(.groups = 'rowwise') is rejected even on an ungrouped tbl_gpu", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(oracle_groups_df())
+
+  expect_error(
+    dplyr::summarise(gpu_df, m = mean(x), .groups = "rowwise"),
+    "rowwise"
+  )
+})
+
+test_that("summarise(.groups = <invalid>) errors when .data is grouped", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(oracle_groups_df()) |> dplyr::group_by(a, b)
+
+  expect_error(
+    dplyr::summarise(gpu_df, m = mean(x), .groups = "bogus"),
+    "can't be"
+  )
+})
+
+test_that("summarise(.groups = <invalid>) is a silent no-op on ungrouped .data (matches a genuine dplyr quirk)", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(oracle_groups_df())
+
+  result <- dplyr::summarise(gpu_df, m = mean(x), .groups = "bogus")
+  expect_equal(result$groups, character(0))
+
+  # Verified against real dplyr too: this is not a cuplyr-only convenience,
+  # it reproduces dplyr's own (surprising) behavior exactly.
+  tbl <- dplyr::as_tibble(oracle_groups_df())
+  oracle_result <- dplyr::summarise(tbl, m = mean(x), .groups = "bogus")
+  expect_equal(dplyr::group_vars(oracle_result), character(0))
+})
+
+test_that("summarise(.by=, .groups=) errors -- both cannot be supplied at once", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(oracle_groups_df())
+
+  expect_error(
+    dplyr::summarise(gpu_df, m = mean(x), .by = a, .groups = "drop"),
+    "both"
+  )
+})
+
+test_that("summarise(.by=) is always ungrouped, unaffected by .groups semantics: 2 and 3 by-columns", {
+  skip_if_no_gpu()
+
+  df <- oracle_groups_df()
+
+  pipeline2 <- function(d) dplyr::summarise(d, m = mean(x), .by = c(a, b))
+  pipeline3 <- function(d) dplyr::summarise(d, m = mean(x), .by = c(a, b, c))
+
+  expect_same_as_dplyr(df, pipeline2)
+  expect_same_as_dplyr(df, pipeline3)
+})
+
+test_that("chained summarise() peels one more grouping level each time (classic peeling)", {
+  skip_if_no_gpu()
+
+  df <- oracle_groups_df()
+  pipeline <- function(d) {
+    suppressMessages({
+      r1 <- d |> dplyr::group_by(a, b, c) |> dplyr::summarise(m = mean(x))
+      r2 <- dplyr::summarise(r1, m2 = sum(m))
+      r3 <- dplyr::summarise(r2, m3 = sum(m2))
+    })
+    r3
+  }
+
+  # Final level is grouped by "a" only (2 rows) -- cudf's hash-groupby row
+  # order isn't guaranteed to match dplyr's, so arrange before comparing
+  # (matches this file's/test-summarise.R's own convention for grouped
+  # aggregation results).
+  expect_same_as_dplyr(df, pipeline, arrange_by = "a")
+  expect_same_as_dplyr_lazy(df, pipeline, arrange_by = "a")
+})
+
+test_that("chained summarise() intermediate group_vars() match dplyr's own peeling exactly", {
+  skip_if_no_gpu()
+
+  df <- oracle_groups_df()
+  gpu_df <- tbl_gpu(df) |> dplyr::group_by(a, b, c)
+
+  r1 <- suppressMessages(dplyr::summarise(gpu_df, m = mean(x)))
+  expect_equal(r1$groups, c("a", "b"))
+
+  r2 <- suppressMessages(dplyr::summarise(r1, m2 = sum(m)))
+  expect_equal(r2$groups, "a")
+
+  r3 <- suppressMessages(dplyr::summarise(r2, m3 = sum(m2)))
+  expect_equal(r3$groups, character(0))
+})

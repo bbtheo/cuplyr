@@ -17,11 +17,15 @@ propagate_groups(node, groups, schema)
 Character vector of group columns to carry forward
 }
 \description{
-Per D3: \code{summarise} and \code{join} always yield no groups (\code{character()});
-every other node type keeps whichever of the existing \code{groups} still
-appear in the node's (post-op) schema. This single rule reproduces
-today's per-verb behavior (select drops de-selected group columns;
-filter/mutate/arrange preserve all of them).
+Per D3: \code{join} always yields no groups (\code{character()}). \code{summarise}
+yields whatever \code{node$result_groups} says (Phase 6, task 3 -- computed by
+\code{resolve_summarise_groups()}, R/summarise.R, from the node's \verb{.groups=}
+semantics; \code{character()} for \code{.groups = "drop"}/an ungrouped input, all
+pre-summarise groups for \code{"keep"}, all-but-the-last for the default/
+\code{"drop_last"}). Every other node type keeps whichever of the existing
+\code{groups} still appear in the node's (post-op) schema. This single rule
+reproduces today's per-verb behavior (select drops de-selected group
+columns; filter/mutate/arrange preserve all of them).
 }
 \details{
 \code{rename} needs one extra step before that final \code{intersect()}: a

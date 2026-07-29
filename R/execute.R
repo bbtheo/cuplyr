@@ -95,11 +95,15 @@ propagate_factor_levels <- function(node, input_schema, surviving_names) {
 
 #' Propagate group columns across an AST node
 #'
-#' Per D3: `summarise` and `join` always yield no groups (`character()`);
-#' every other node type keeps whichever of the existing `groups` still
-#' appear in the node's (post-op) schema. This single rule reproduces
-#' today's per-verb behavior (select drops de-selected group columns;
-#' filter/mutate/arrange preserve all of them).
+#' Per D3: `join` always yields no groups (`character()`). `summarise`
+#' yields whatever `node$result_groups` says (Phase 6, task 3 -- computed by
+#' `resolve_summarise_groups()`, R/summarise.R, from the node's `.groups=`
+#' semantics; `character()` for `.groups = "drop"`/an ungrouped input, all
+#' pre-summarise groups for `"keep"`, all-but-the-last for the default/
+#' `"drop_last"`). Every other node type keeps whichever of the existing
+#' `groups` still appear in the node's (post-op) schema. This single rule
+#' reproduces today's per-verb behavior (select drops de-selected group
+#' columns; filter/mutate/arrange preserve all of them).
 #'
 #' `rename` needs one extra step before that final `intersect()`: a
 #' group column that got renamed (e.g. `rename(gdf, grp = g)` where `g` is
@@ -113,8 +117,12 @@ propagate_factor_levels <- function(node, input_schema, surviving_names) {
 #' @return Character vector of group columns to carry forward
 #' @keywords internal
 propagate_groups <- function(node, groups, schema) {
-  if (node$type %in% c("summarise", "join")) {
+  if (identical(node$type, "join")) {
     return(character())
+  }
+
+  if (identical(node$type, "summarise")) {
+    return(intersect(node$result_groups, schema$names))
   }
 
   if (identical(node$type, "rename")) {

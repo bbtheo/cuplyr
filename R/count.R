@@ -29,11 +29,15 @@
 #     it's exactly one summarise(x, name := n()-or-sum(wt)) call, so it
 #     inherits summarise()'s default `.groups` behavior of dropping only
 #     the LAST grouping level (verified: tally(group_by(df, a, b)) has
-#     groups = "a"; tally(group_by(df, g)) is ungrouped). Since our own
-#     summarise() always drops ALL groups (unlike real grouped_df
-#     summarise, which defaults to "drop_last" -- a known, tracked gap, see
-#     scratchpad/todo.md Phase 6), tally.tbl_gpu() manually restores
-#     `orig_groups[-length(orig_groups)]` after calling summarise().
+#     groups = "a"; tally(group_by(df, g)) is ungrouped). Phase 6, task 3
+#     implemented real `.groups=` semantics in summarise() itself (see
+#     R/summarise.R's `resolve_summarise_groups()`), so tally.tbl_gpu()'s
+#     plain `summarise()` call now returns the correctly drop-last-grouped
+#     result on its own -- the manual `orig_groups[-length(orig_groups)]`
+#     restoration this file used to need (back when summarise() always
+#     dropped ALL groups, a known tracked gap) is gone; only a defensive
+#     `dplyr.summarise.inform = FALSE` override remains, matching real
+#     dplyr's own `tally.data.frame()`.
 #   - Name collisions (no explicit `name=`): dplyr's default name is "n",
 #     bumped to "nn"/"nnn"/... only while it collides -- but the vars it
 #     checks against differ between the two entry points, a genuinely
@@ -253,6 +257,17 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .drop = 
   agg_name <- resolve_agg_name(name, grouped$groups)
   agg_call <- build_count_agg_call(wt_quo)
 
+  # Defensive `dplyr.summarise.inform = FALSE` override (Phase 6, task 3),
+  # matching real dplyr's own count()->tally() path (see
+  # tally.tbl_gpu()'s identical guard below): count()'s own grouping
+  # restoration is unconditional (the `new_tbl_gpu()` call just below always
+  # overrides whatever `summarise()` itself computed for `$groups`), so this
+  # is purely about not emitting a spurious regroup message when the
+  # underlying summarise() peels a multi-column grouping.
+  old_opt <- getOption("dplyr.summarise.inform")
+  on.exit(options(dplyr.summarise.inform = old_opt), add = TRUE)
+  options(dplyr.summarise.inform = FALSE)
+
   result <- rlang::inject(dplyr::summarise(grouped, !!agg_name := !!agg_call))
 
   if (isTRUE(sort)) {
@@ -308,25 +323,28 @@ tally.tbl_gpu <- function(x, wt = NULL, sort = FALSE, name = NULL) {
   agg_name <- resolve_agg_name(name, orig_groups)
   agg_call <- build_count_agg_call(wt_quo)
 
+  # Matches real dplyr's own `tally.data.frame()`, which wraps its internal
+  # `summarise()` call in `local_options(dplyr.summarise.inform = FALSE)` --
+  # a defensive suppression regardless of the caller's own
+  # `dplyr.summarise.inform` setting (verified against dplyr 1.2.1's actual
+  # source). Phase 6, task 3: now that `summarise()` itself implements the
+  # real `.groups = "drop_last"` default, this plain `summarise()` call
+  # ALREADY returns the correctly drop-last-grouped result (peeling only the
+  # LAST grouping level) with no extra group-restoration step needed here --
+  # unlike before this task, when `summarise()` always dropped ALL groups
+  # and `tally()` had to manually recompute
+  # `orig_groups[-length(orig_groups)]` itself.
+  old_opt <- getOption("dplyr.summarise.inform")
+  on.exit(options(dplyr.summarise.inform = old_opt), add = TRUE)
+  options(dplyr.summarise.inform = FALSE)
+
   result <- rlang::inject(dplyr::summarise(x, !!agg_name := !!agg_call))
 
   if (isTRUE(sort)) {
     result <- dplyr::arrange(result, dplyr::desc(!!rlang::sym(agg_name)))
   }
 
-  drop_last_groups <- if (length(orig_groups) <= 1) {
-    character(0)
-  } else {
-    orig_groups[-length(orig_groups)]
-  }
-
-  new_tbl_gpu(
-    ptr = result$ptr,
-    schema = result$schema,
-    lazy_ops = result$lazy_ops,
-    groups = intersect(drop_last_groups, result$schema$names),
-    exec_mode = result$exec_mode
-  )
+  result
 }
 
 #' Add a count column without collapsing rows

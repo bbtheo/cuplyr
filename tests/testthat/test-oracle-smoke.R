@@ -70,11 +70,13 @@ test_that("group_by() + summarise() pipeline matches dplyr", {
     val = c(1, 2, 3, 4, 5, 6)
   )
 
-  # cuplyr's summarise() always drops all grouping, unlike dplyr's default
-  # `.groups = "drop_last"` (see scratchpad/todo.md roadmap Phase 6, which
-  # will bring cuplyr's grouping semantics fully in line). Passing
-  # `.groups = "drop"` on the oracle side makes the two sides comparable
-  # until that phase lands.
+  # `.groups=` is left at its real default (Phase 6, task 3: cuplyr's
+  # summarise() now implements dplyr's own "drop_last" default exactly --
+  # see R/summarise.R's `resolve_summarise_groups()`) -- with a single
+  # grouping column (`grp`), drop_last peels it away entirely, so both
+  # sides end up ungrouped either way; the group_vars() comparison in
+  # `expect_same_as_dplyr()` verifies this directly instead of papering over
+  # it with an explicit `.groups = "drop"` workaround.
   #
   # `n` is bound locally so the bare `n()` call resolves for the dplyr
   # oracle even though this package doesn't attach dplyr (tests only use
@@ -85,7 +87,7 @@ test_that("group_by() + summarise() pipeline matches dplyr", {
     n <- dplyr::n
     tbl |>
       dplyr::group_by(grp) |>
-      dplyr::summarise(total = sum(val), n = n(), .groups = "drop")
+      dplyr::summarise(total = sum(val), n = n())
   }
 
   # Group-by aggregation order is not guaranteed, so arrange before compare.
