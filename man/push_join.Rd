@@ -4,17 +4,30 @@
 \alias{push_join}
 \title{Apply a two-input join AST node, dispatching on exec_mode}
 \usage{
-push_join(join_type, x, y, join_spec, suffix, keep, na_matches)
+push_join(
+  join_type,
+  x,
+  y,
+  join_spec,
+  suffix,
+  keep,
+  na_matches,
+  multiple = "all",
+  unmatched = "drop",
+  relationship = NULL
+)
 }
 \arguments{
 \item{join_type}{One of \code{"left"}, \code{"inner"}, \code{"full"}, \code{"right"}}
 
 \item{x, y}{The two \code{tbl_gpu} join inputs}
 
-\item{join_spec}{List with \code{left}/\code{right} key column names, as returned by
+\item{join_spec}{List with \code{left}/\code{right}/\code{op}/\code{filter}, as returned by
 \code{parse_join_by()}}
 
-\item{suffix, keep, na_matches}{As documented on the join verbs}
+\item{suffix, keep, na_matches, multiple, unmatched, relationship}{As
+documented on the join verbs (the last three are dormant -- validated
+but not yet behavior-changing -- until Phase 7 J5)}
 }
 \value{
 A new \code{tbl_gpu}

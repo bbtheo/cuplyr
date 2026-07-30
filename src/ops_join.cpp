@@ -187,7 +187,8 @@ SEXP gpu_left_join(SEXP xptr_left,
                    SEXP xptr_right,
                    Rcpp::IntegerVector left_key_cols,
                    Rcpp::IntegerVector right_key_cols,
-                   Rcpp::IntegerVector right_drop_cols) {
+                   Rcpp::IntegerVector right_drop_cols,
+                   bool nulls_equal = true) {
     using namespace cuplyr;
 
     Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
@@ -203,8 +204,10 @@ SEXP gpu_left_join(SEXP xptr_left,
     auto left_key_view = select_table_view(left_view, left_keys);
     auto right_key_view = select_table_view(right_view, right_keys);
 
+    auto null_equality = nulls_equal ? cudf::null_equality::EQUAL
+                                     : cudf::null_equality::UNEQUAL;
     auto [left_map, right_map] = cudf::left_join(
-        left_key_view, right_key_view, cudf::null_equality::EQUAL);
+        left_key_view, right_key_view, null_equality);
 
     auto right_keep = compute_right_keep_cols(right_view, right_drop);
     auto result = build_join_result(left_view, right_view, *left_map, *right_map, right_keep);
@@ -217,7 +220,8 @@ SEXP gpu_inner_join(SEXP xptr_left,
                     SEXP xptr_right,
                     Rcpp::IntegerVector left_key_cols,
                     Rcpp::IntegerVector right_key_cols,
-                    Rcpp::IntegerVector right_drop_cols) {
+                    Rcpp::IntegerVector right_drop_cols,
+                    bool nulls_equal = true) {
     using namespace cuplyr;
 
     Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
@@ -233,8 +237,10 @@ SEXP gpu_inner_join(SEXP xptr_left,
     auto left_key_view = select_table_view(left_view, left_keys);
     auto right_key_view = select_table_view(right_view, right_keys);
 
+    auto null_equality = nulls_equal ? cudf::null_equality::EQUAL
+                                     : cudf::null_equality::UNEQUAL;
     auto [left_map, right_map] = cudf::inner_join(
-        left_key_view, right_key_view, cudf::null_equality::EQUAL);
+        left_key_view, right_key_view, null_equality);
 
     auto right_keep = compute_right_keep_cols(right_view, right_drop);
     auto result = build_join_result(left_view, right_view, *left_map, *right_map, right_keep);
@@ -247,7 +253,8 @@ SEXP gpu_full_join(SEXP xptr_left,
                    SEXP xptr_right,
                    Rcpp::IntegerVector left_key_cols,
                    Rcpp::IntegerVector right_key_cols,
-                   Rcpp::IntegerVector right_drop_cols) {
+                   Rcpp::IntegerVector right_drop_cols,
+                   bool nulls_equal = true) {
     using namespace cuplyr;
 
     Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
@@ -263,8 +270,10 @@ SEXP gpu_full_join(SEXP xptr_left,
     auto left_key_view = select_table_view(left_view, left_keys);
     auto right_key_view = select_table_view(right_view, right_keys);
 
+    auto null_equality = nulls_equal ? cudf::null_equality::EQUAL
+                                     : cudf::null_equality::UNEQUAL;
     auto [left_map, right_map] = cudf::full_join(
-        left_key_view, right_key_view, cudf::null_equality::EQUAL);
+        left_key_view, right_key_view, null_equality);
 
     auto right_keep = compute_right_keep_cols(right_view, right_drop);
 

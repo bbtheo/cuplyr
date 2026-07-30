@@ -11,7 +11,10 @@ ast_join(
   by,
   keep = FALSE,
   suffix = c(".x", ".y"),
-  na_matches = "na"
+  na_matches = "na",
+  multiple = "all",
+  unmatched = "drop",
+  relationship = NULL
 )
 }
 \arguments{
@@ -21,13 +24,23 @@ ast_join(
 
 \item{right}{Right input AST node}
 
-\item{by}{Join specification list(left = \if{html}{\out{<chr>}}, right = \if{html}{\out{<chr>}})}
+\item{by}{Join specification \code{list(left, right, op, filter)}, as returned
+by \code{\link[=parse_join_by]{parse_join_by()}}}
 
 \item{keep}{Logical, keep both key columns when names match}
 
 \item{suffix}{Character vector of length 2}
 
 \item{na_matches}{Character, "na" or "never"}
+
+\item{multiple}{Character, one of "all"/"any"/"first"/"last" (dormant --
+only "all" is honored until Phase 7 J5)}
+
+\item{unmatched}{Character, one or two of "drop"/"error" (dormant --
+only "drop" is honored until Phase 7 J5)}
+
+\item{relationship}{\code{NULL} or one of the four cardinality strings
+(dormant -- not enforced until Phase 7 J5)}
 }
 \value{
 An ast_join node

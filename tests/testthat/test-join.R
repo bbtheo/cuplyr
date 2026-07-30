@@ -136,11 +136,20 @@ test_that("join results match dplyr in eager and lazy modes (edge cases)", {
     expect_equal(as.data.frame(lazy), as.data.frame(expected))
   }
 
-  # Many-to-many keys
+  # Many-to-many keys. NOTE: `relationship = "many-to-many"` is deliberately
+  # NOT passed here (unlike the plain-dplyr equivalent) -- Phase 7 J1 gives
+  # `relationship=` a real signature but any non-default (non-NULL) value
+  # hard-stops as "not supported yet" until J5 actually implements the
+  # cardinality check/warning it controls (see test-dplyr-join.R). Since the
+  # cardinality claim is purely declarative (no effect on output rows for
+  # truthful data), omitting it here still exercises real many-to-many key
+  # matching; suppressWarnings() only silences the resulting "unexpected
+  # many-to-many relationship" advisory from the plain-dplyr oracle call
+  # (cuplyr doesn't implement that warning at all yet, so nothing to compare
+  # there -- it only ever fires on the `data.frame` side of compare_join()).
   left_df <- data.frame(k = c(1, 1, 2), x = c(10, 20, 30))
   right_df <- data.frame(k = c(1, 1, 2), y = c(100, 200, 300))
-  compare_join(left_df, right_df, dplyr::inner_join, by = "k",
-               relationship = "many-to-many")
+  suppressWarnings(compare_join(left_df, right_df, dplyr::inner_join, by = "k"))
 
   # Different key names
   left_df <- data.frame(a = c(1, 2, 3), x = c(10, 20, 30))

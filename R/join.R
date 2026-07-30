@@ -1,6 +1,18 @@
 # Join operations for tbl_gpu
 
-# Parse join specification
+#' Parse a join specification into a 4-vector spec
+#'
+#' Returns `list(left, right, op, filter)`: `left`/`right`/`op` are parallel
+#' character vectors (one entry per key/condition pair), `filter` is a single
+#' scalar describing the whole join's filter semantics (`"none"` for a plain
+#' equi/inequality join; `"max"`/`"min"` for `closest()` joins -- Phase 7 J7).
+#' Every form this function currently understands (`NULL`, an unnamed
+#' character vector, a named character vector, or an already-parsed spec
+#' list) produces an all-equi spec: `op` is `"=="` for every key and `filter`
+#' is `"none"`. `join_by()` objects (class `dplyr_join_by`) are rejected for
+#' now -- non-equi condition support lands in Phase 7 J7, which lifts this
+#' rejection.
+#' @keywords internal
 parse_join_by <- function(by, x, y) {
   if (is.null(by)) {
     common <- intersect(x$schema$names, y$schema$names)
@@ -8,7 +20,8 @@ parse_join_by <- function(by, x, y) {
       stop("No common columns for natural join. Specify `by` argument.",
            call. = FALSE)
     }
-    return(list(left = common, right = common))
+    return(list(left = common, right = common,
+                op = rep("==", length(common)), filter = "none"))
   }
 
   if (inherits(by, "dplyr_join_by")) {
@@ -18,15 +31,19 @@ parse_join_by <- function(by, x, y) {
   # Already-parsed spec (e.g. `swapped_by` built by
   # build_right_join_via_left() for the right_join()-via-left_join() plan):
   # a plain list with character `left`/`right` elements. Accept and return
-  # as-is so callers can pass a pre-built spec straight through without
+  # as-is (filling in `op`/`filter` if the caller didn't already carry them)
+  # so callers may pass a pre-built spec straight through without
   # re-encoding it as a named character vector.
   if (is.list(by) && !is.data.frame(by) &&
       is.character(by$left) && is.character(by$right)) {
-    return(list(left = by$left, right = by$right))
+    op <- if (!is.null(by$op)) by$op else rep("==", length(by$left))
+    filter <- if (!is.null(by$filter)) by$filter else "none"
+    return(list(left = by$left, right = by$right, op = op, filter = filter))
   }
 
   if (is.character(by) && is.null(names(by))) {
-    return(list(left = by, right = by))
+    return(list(left = by, right = by,
+                op = rep("==", length(by)), filter = "none"))
   }
 
   if (is.character(by) && !is.null(names(by))) {
@@ -34,11 +51,76 @@ parse_join_by <- function(by, x, y) {
     right_cols <- unname(by)
     empty_names <- left_cols == ""
     left_cols[empty_names] <- right_cols[empty_names]
-    return(list(left = left_cols, right = right_cols))
+    return(list(left = left_cols, right = right_cols,
+                op = rep("==", length(left_cols)), filter = "none"))
   }
 
   stop("Invalid `by` specification. Use NULL, character vector, or named vector.",
        call. = FALSE)
+}
+
+#' Is a join spec entirely equi (`==`)?
+#'
+#' A spec with no condition pairs at all (`length(spec$op) == 0`) counts as
+#' equi -- vacuously true, and matches `join_is_equi()`'s only current caller
+#' ([resolve_join_keep()]) needing a sensible answer for the natural-join
+#' (`by = NULL`, zero common columns already rejected earlier) edge case.
+#' @keywords internal
+join_is_equi <- function(spec) {
+  length(spec$op) == 0 || all(spec$op == "==")
+}
+
+#' The equi (`==`) subset of a join spec
+#'
+#' Every current spec is 100% equi (Phase 7 J1); this returns `spec`
+#' unchanged in that case. Kept as a named subsetting helper (rather than
+#' inlining `spec$op == "=="` at call sites) so the future non-equi callers
+#' (Phase 7 J7's hash-join key selection) have one place to read the equi
+#' subset from.
+#' @keywords internal
+join_equi_spec <- function(spec) {
+  is_eq <- spec$op == "=="
+  list(left = spec$left[is_eq], right = spec$right[is_eq],
+       op = spec$op[is_eq], filter = spec$filter)
+}
+
+#' The non-equi subset of a join spec
+#'
+#' Dormant until Phase 7 J7 (`build_join_ast()`/`gpu_cond_join()`), which
+#' will lower this subset via `mixed_join`/`conditional_join`. Always empty
+#' for now, since no code path currently produces `op` values other than
+#' `"=="`.
+#' @keywords internal
+join_cond_spec <- function(spec) {
+  is_eq <- spec$op == "=="
+  list(left = spec$left[!is_eq], right = spec$right[!is_eq],
+       op = spec$op[!is_eq], filter = spec$filter)
+}
+
+#' Resolve `keep`'s `NULL` default against a join spec
+#'
+#' Mirrors dplyr's own `keep = NULL` default resolution: `NULL` means `FALSE`
+#' for an equi join and `TRUE` for a non-equi one (inequality/rolling/overlap
+#' joins can't drop either side's key column, since there's no single shared
+#' key value to keep). Explicit `keep = FALSE` on a non-equi join is a hard
+#' error with dplyr's own text -- dormant in practice until Phase 7 J7 (no
+#' spec is non-equi yet), but exercised here directly against a hand-built
+#' spec in tests.
+#' @param keep `NULL`, `TRUE`, or `FALSE`, as passed by the user
+#' @param spec A join spec as returned by [parse_join_by()]
+#' @return `TRUE`/`FALSE`
+#' @keywords internal
+resolve_join_keep <- function(keep, spec) {
+  if (is.null(keep)) {
+    return(!join_is_equi(spec))
+  }
+
+  if (isFALSE(keep) && !join_is_equi(spec)) {
+    stop("Can't set `keep = FALSE` when using an inequality, rolling, or overlap join.",
+         call. = FALSE)
+  }
+
+  keep
 }
 
 validate_join_cols <- function(cols, tbl, side) {
@@ -312,11 +394,117 @@ warn_if_join_too_large <- function(join_type, x, y, join_spec, suffix, keep) {
   }
 }
 
+#' Format a scalar value for a "not one of ..." style error message
+#'
+#' Strings render quoted (`"bogus"`); anything else falls back to `deparse()`
+#' so the message stays readable without crashing on non-character input.
+#' @keywords internal
+format_join_arg_value <- function(value) {
+  if (is.character(value) && length(value) == 1) {
+    return(paste0('"', value, '"'))
+  }
+  paste(deparse(value), collapse = " ")
+}
+
+#' Stop for a join argument value that is legal but not yet implemented
+#'
+#' `multiple=`/`unmatched=`/`relationship=` all gained real signatures in
+#' Phase 7 J1 but their actual cardinality-changing behavior only lands in
+#' J5. A value that fails dplyr's own validation gets dplyr's own error
+#' text (see the `validate_join_*()` functions below); a value that PASSES
+#' validation but isn't the default is a legal dplyr call this package can't
+#' honor correctly yet, so it must hard-stop rather than silently ignore the
+#' argument and return possibly-wrong rows.
+#' @keywords internal
+join_arg_not_supported_yet <- function(arg_name, value) {
+  stop(sprintf(
+    "`%s = %s` is not supported yet for tbl_gpu joins (Phase 7 J5); only the default is currently honored.",
+    arg_name, format_join_arg_value(value)
+  ), call. = FALSE)
+}
+
+#' Validate `multiple=`, replicating dplyr's exact bad-value text
+#'
+#' Note dplyr's own message (from `vctrs::vec_locate_matches()`) omits the
+#' offending value for this argument specifically (unlike `unmatched=`/
+#' `relationship=`/`na_matches=`, which all name it) -- this is dplyr's
+#' actual behavior, verified empirically against dplyr 1.2.1, not an
+#' oversight here.
+#' @keywords internal
+validate_join_multiple <- function(multiple) {
+  if (!is.character(multiple) || length(multiple) != 1) {
+    stop("`multiple` must be a string.", call. = FALSE)
+  }
+  if (!multiple %in% c("all", "any", "first", "last")) {
+    stop('`multiple` must be one of "all", "any", "first", or "last".',
+         call. = FALSE)
+  }
+  multiple
+}
+
+#' Validate `unmatched=`, replicating dplyr's exact bad-value text
+#'
+#' `max_length` is 2 only for `inner_join()` (independent x-side/y-side
+#' checks); every other join type allows length 1 only. `full_join()` has no
+#' `unmatched=` parameter at all in dplyr (it never drops rows), so it never
+#' calls this.
+#' @keywords internal
+validate_join_unmatched <- function(unmatched, max_length = 1L) {
+  if (!is.character(unmatched)) {
+    stop(sprintf("`unmatched` must be a character vector, not %s.",
+                 format_join_arg_value(unmatched)), call. = FALSE)
+  }
+  if (length(unmatched) < 1 || length(unmatched) > max_length) {
+    expected <- if (max_length == 1L) "length 1" else paste0("length 1 or ", max_length)
+    stop(sprintf("`unmatched` must be %s, not %d.", expected, length(unmatched)),
+         call. = FALSE)
+  }
+  bad <- setdiff(unmatched, c("drop", "error"))
+  if (length(bad) > 0) {
+    stop(sprintf('`unmatched` must be one of "drop" or "error", not "%s".', bad[1]),
+         call. = FALSE)
+  }
+  unmatched
+}
+
+#' Validate `relationship=`, replicating dplyr's exact bad-value text
+#' @keywords internal
+validate_join_relationship <- function(relationship) {
+  if (is.null(relationship)) {
+    return(relationship)
+  }
+  if (!is.character(relationship) || length(relationship) != 1) {
+    stop("`relationship` must be a string or character vector.", call. = FALSE)
+  }
+  valid <- c("one-to-one", "one-to-many", "many-to-one", "many-to-many")
+  if (!relationship %in% valid) {
+    stop(sprintf(
+      '`relationship` must be one of "one-to-one", "one-to-many", "many-to-one", or "many-to-many", not "%s".',
+      relationship
+    ), call. = FALSE)
+  }
+  relationship
+}
+
+#' Validate `na_matches=`, replicating dplyr's exact bad-value text
+#' @keywords internal
+validate_join_na_matches <- function(na_matches) {
+  if (!is.character(na_matches) || length(na_matches) != 1) {
+    stop("`na_matches` must be a string or character vector.", call. = FALSE)
+  }
+  if (!na_matches %in% c("na", "never")) {
+    stop(sprintf('`na_matches` must be one of "na" or "never", not "%s".', na_matches),
+         call. = FALSE)
+  }
+  na_matches
+}
+
 #' @export
 #' @importFrom dplyr left_join
 left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
-                              suffix = c(".x", ".y"), ..., keep = FALSE,
-                              na_matches = "na") {
+                              suffix = c(".x", ".y"), ..., keep = NULL,
+                              na_matches = "na", multiple = "all",
+                              unmatched = "drop", relationship = NULL) {
   if (!is_tbl_gpu(y)) {
     if (isTRUE(copy)) {
       y <- tbl_gpu(y)
@@ -325,25 +513,32 @@ left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
     }
   }
 
-  if (!identical(na_matches, "na")) {
-    stop("`na_matches = \"never\"` is not supported yet for tbl_gpu joins.",
-         call. = FALSE)
-  }
+  na_matches <- validate_join_na_matches(na_matches)
+  multiple <- validate_join_multiple(multiple)
+  unmatched <- validate_join_unmatched(unmatched, max_length = 1L)
+  relationship <- validate_join_relationship(relationship)
+
+  if (!identical(multiple, "all")) join_arg_not_supported_yet("multiple", multiple)
+  if (!identical(unmatched, "drop")) join_arg_not_supported_yet("unmatched", unmatched)
+  if (!is.null(relationship)) join_arg_not_supported_yet("relationship", relationship)
 
   join_spec <- parse_join_by(by, x, y)
   validate_join_cols(join_spec$left, x, "Left")
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
+  keep <- resolve_join_keep(keep, join_spec)
 
   push_join("left", x, y, join_spec, suffix = suffix, keep = keep,
-           na_matches = na_matches)
+           na_matches = na_matches, multiple = multiple, unmatched = unmatched,
+           relationship = relationship)
 }
 
 #' @export
 #' @importFrom dplyr inner_join
 inner_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
-                               suffix = c(".x", ".y"), ..., keep = FALSE,
-                               na_matches = "na") {
+                               suffix = c(".x", ".y"), ..., keep = NULL,
+                               na_matches = "na", multiple = "all",
+                               unmatched = "drop", relationship = NULL) {
   if (!is_tbl_gpu(y)) {
     if (isTRUE(copy)) {
       y <- tbl_gpu(y)
@@ -352,25 +547,34 @@ inner_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
     }
   }
 
-  if (!identical(na_matches, "na")) {
-    stop("`na_matches = \"never\"` is not supported yet for tbl_gpu joins.",
-         call. = FALSE)
+  na_matches <- validate_join_na_matches(na_matches)
+  multiple <- validate_join_multiple(multiple)
+  unmatched <- validate_join_unmatched(unmatched, max_length = 2L)
+  relationship <- validate_join_relationship(relationship)
+
+  if (!identical(multiple, "all")) join_arg_not_supported_yet("multiple", multiple)
+  if (!(length(unmatched) == 1 && identical(unmatched, "drop"))) {
+    join_arg_not_supported_yet("unmatched", unmatched)
   }
+  if (!is.null(relationship)) join_arg_not_supported_yet("relationship", relationship)
 
   join_spec <- parse_join_by(by, x, y)
   validate_join_cols(join_spec$left, x, "Left")
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
+  keep <- resolve_join_keep(keep, join_spec)
 
   push_join("inner", x, y, join_spec, suffix = suffix, keep = keep,
-           na_matches = na_matches)
+           na_matches = na_matches, multiple = multiple, unmatched = unmatched,
+           relationship = relationship)
 }
 
 #' @export
 #' @importFrom dplyr full_join
 full_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
-                              suffix = c(".x", ".y"), ..., keep = FALSE,
-                              na_matches = "na") {
+                              suffix = c(".x", ".y"), ..., keep = NULL,
+                              na_matches = "na", multiple = "all",
+                              relationship = NULL) {
   if (!is_tbl_gpu(y)) {
     if (isTRUE(copy)) {
       y <- tbl_gpu(y)
@@ -379,25 +583,35 @@ full_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
     }
   }
 
-  if (!identical(na_matches, "na")) {
-    stop("`na_matches = \"never\"` is not supported yet for tbl_gpu joins.",
-         call. = FALSE)
-  }
+  # full_join() has no `unmatched=` in dplyr (every row, matched or not, is
+  # always kept), so it isn't accepted here either -- passing it hits `...`
+  # and is silently ignored, same as dplyr's own `...`-must-be-empty dots
+  # (dplyr hard-errors on that; this is a narrower gap, not a behavior this
+  # task needs to close).
+  na_matches <- validate_join_na_matches(na_matches)
+  multiple <- validate_join_multiple(multiple)
+  relationship <- validate_join_relationship(relationship)
+
+  if (!identical(multiple, "all")) join_arg_not_supported_yet("multiple", multiple)
+  if (!is.null(relationship)) join_arg_not_supported_yet("relationship", relationship)
 
   join_spec <- parse_join_by(by, x, y)
   validate_join_cols(join_spec$left, x, "Left")
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
+  keep <- resolve_join_keep(keep, join_spec)
 
   push_join("full", x, y, join_spec, suffix = suffix, keep = keep,
-           na_matches = na_matches)
+           na_matches = na_matches, multiple = multiple, unmatched = "drop",
+           relationship = relationship)
 }
 
 #' @export
 #' @importFrom dplyr right_join
 right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
-                               suffix = c(".x", ".y"), ..., keep = FALSE,
-                               na_matches = "na") {
+                               suffix = c(".x", ".y"), ..., keep = NULL,
+                               na_matches = "na", multiple = "all",
+                               unmatched = "drop", relationship = NULL) {
   if (!is_tbl_gpu(y)) {
     if (isTRUE(copy)) {
       y <- tbl_gpu(y)
@@ -406,15 +620,20 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
     }
   }
 
-  if (!identical(na_matches, "na")) {
-    stop("`na_matches = \"never\"` is not supported yet for tbl_gpu joins.",
-         call. = FALSE)
-  }
+  na_matches <- validate_join_na_matches(na_matches)
+  multiple <- validate_join_multiple(multiple)
+  unmatched <- validate_join_unmatched(unmatched, max_length = 1L)
+  relationship <- validate_join_relationship(relationship)
+
+  if (!identical(multiple, "all")) join_arg_not_supported_yet("multiple", multiple)
+  if (!identical(unmatched, "drop")) join_arg_not_supported_yet("unmatched", unmatched)
+  if (!is.null(relationship)) join_arg_not_supported_yet("relationship", relationship)
 
   join_spec <- parse_join_by(by, x, y)
   validate_join_cols(join_spec$left, x, "Left")
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
+  keep <- resolve_join_keep(keep, join_spec)
 
   # right_join(x, y) is implemented as a swapped left_join(y, x) (keeping
   # every row of y, NA-filling unmatched x columns), reordered/renamed down
@@ -426,5 +645,6 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   # (build_right_join_via_left() / resolve_right_join_select_idx()), so both
   # schedules agree on the resulting schema.
   push_join("right", x, y, join_spec, suffix = suffix, keep = keep,
-           na_matches = na_matches)
+           na_matches = na_matches, multiple = multiple, unmatched = unmatched,
+           relationship = relationship)
 }

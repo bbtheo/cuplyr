@@ -211,12 +211,15 @@ join_input_node <- function(tbl) {
 #'
 #' @param join_type One of `"left"`, `"inner"`, `"full"`, `"right"`
 #' @param x,y The two `tbl_gpu` join inputs
-#' @param join_spec List with `left`/`right` key column names, as returned by
+#' @param join_spec List with `left`/`right`/`op`/`filter`, as returned by
 #'   `parse_join_by()`
-#' @param suffix,keep,na_matches As documented on the join verbs
+#' @param suffix,keep,na_matches,multiple,unmatched,relationship As
+#'   documented on the join verbs (the last three are dormant -- validated
+#'   but not yet behavior-changing -- until Phase 7 J5)
 #' @return A new `tbl_gpu`
 #' @keywords internal
-push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches) {
+push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
+                      multiple = "all", unmatched = "drop", relationship = NULL) {
   join_ast <- ast_join(
     join_type,
     join_input_node(x),
@@ -224,7 +227,10 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches) {
     join_spec,
     keep = keep,
     suffix = suffix,
-    na_matches = na_matches
+    na_matches = na_matches,
+    multiple = multiple,
+    unmatched = unmatched,
+    relationship = relationship
   )
 
   new_schema <- infer_schema(join_ast)

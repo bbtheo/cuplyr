@@ -237,16 +237,25 @@ ast_rename <- function(input, old_names, new_names) {
 #' @param type Join type: "inner", "left", "right", "full"
 #' @param left Left input AST node
 #' @param right Right input AST node
-#' @param by Join specification list(left = <chr>, right = <chr>)
+#' @param by Join specification `list(left, right, op, filter)`, as returned
+#'   by [parse_join_by()]
 #' @param keep Logical, keep both key columns when names match
 #' @param suffix Character vector of length 2
 #' @param na_matches Character, "na" or "never"
+#' @param multiple Character, one of "all"/"any"/"first"/"last" (dormant --
+#'   only "all" is honored until Phase 7 J5)
+#' @param unmatched Character, one or two of "drop"/"error" (dormant --
+#'   only "drop" is honored until Phase 7 J5)
+#' @param relationship `NULL` or one of the four cardinality strings
+#'   (dormant -- not enforced until Phase 7 J5)
 #' @return An ast_join node
 #' @keywords internal
 ast_join <- function(type, left, right, by, keep = FALSE,
-                     suffix = c(".x", ".y"), na_matches = "na") {
+                     suffix = c(".x", ".y"), na_matches = "na",
+                     multiple = "all", unmatched = "drop", relationship = NULL) {
   ast_node("join", left = left, right = right, join_type = type, by = by,
-           keep = keep, suffix = suffix, na_matches = na_matches)
+           keep = keep, suffix = suffix, na_matches = na_matches,
+           multiple = multiple, unmatched = unmatched, relationship = relationship)
 }
 
 # -----------------------------------------------------------------------------

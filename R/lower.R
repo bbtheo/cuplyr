@@ -279,10 +279,19 @@ lower_join <- function(ast, source_ptr) {
     integer(0)
   }
 
+  # na_matches = "na" (the default) matches NA keys against each other
+  # (cudf::null_equality::EQUAL); "never" treats every NA key as distinct,
+  # so no NA ever matches anything, on either side (::UNEQUAL). See
+  # scratchpad/phase7_joins_design.md task J1.
+  nulls_equal <- !identical(ast$na_matches, "never")
+
   switch(ast$join_type,
-    "left" = gpu_left_join(left_ptr, right_ptr, left_key_idx, right_key_idx, right_drop_idx),
-    "inner" = gpu_inner_join(left_ptr, right_ptr, left_key_idx, right_key_idx, right_drop_idx),
-    "full" = gpu_full_join(left_ptr, right_ptr, left_key_idx, right_key_idx, right_drop_idx),
+    "left" = gpu_left_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
+                           right_drop_idx, nulls_equal),
+    "inner" = gpu_inner_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
+                             right_drop_idx, nulls_equal),
+    "full" = gpu_full_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
+                           right_drop_idx, nulls_equal),
     "right" = {
       # Implement right join via swapped left join, then reorder columns.
       # Shared with the eager path in right_join.tbl_gpu() (R/join.R) via
@@ -294,7 +303,7 @@ lower_join <- function(ast, source_ptr) {
       plan <- build_right_join_via_left(left_schema, right_schema, ast$by,
                                         suffix = ast$suffix, keep = ast$keep)
       out <- gpu_left_join(right_ptr, left_ptr, right_key_idx, left_key_idx,
-                           integer(0))
+                           integer(0), nulls_equal)
       idx <- resolve_right_join_select_idx(plan, left_schema, right_schema, ast$suffix)
       gpu_select(out, idx - 1L)
     },
