@@ -214,16 +214,39 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 
   if (length(dots) == 0) return(.data)
 
+  # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R's
+  # own module docs. Checked up front (before `.data` is touched at all),
+  # same discipline as the window-predicate path below: anything genuinely
+  # unsupported (pick()-as-data-frame, cur_group()/cur_group_rows()/
+  # cur_data()/cur_data_all()/c_across(), a nested (non-top-level)
+  # across()/if_any()/if_all(), a top-level `across()` dot at all -- real
+  # dplyr itself rejects that shape in filter(), see
+  # expand_across_dots()'s own docs) routes the WHOLE filter() call
+  # through the CPU fallback. `cur_group_id()` gets its own GPU-native
+  # substitution below instead (row-level, exactly like mutate()'s).
+  if (dots_need_fallback(dots)) {
+    return(filter_across_fallback(.data, dots, by_quo))
+  }
+
+  cgid <- substitute_cur_group_id(.data, dots, verb_groups)
+  .data <- cgid$data
+  dots <- expand_across_dots(cgid$dots, current_schema(.data), verb_groups, "filter")
+
   # Schema is stable across this whole call for every PLAIN dot: filter()
   # never adds/removes real columns. The one exception is Phase 5's
   # window-predicate handling directly below: when at least one dot's IR
   # contains a window-function call, the schema is temporarily extended
   # with `..win*..`/`..winarg*..` temp columns for the remainder of this
   # call; a trailing ast_select drops them again before returning, so the
-  # table's real, user-visible schema is unaffected either way.
+  # table's real, user-visible schema is unaffected either way. Phase 10's
+  # cur_group_id() helper column (if `cgid$used`) is dropped the SAME way:
+  # `real_orig_names` (captured before that helper was ever added) is used
+  # for the trailing select instead of `orig_names` whenever either
+  # mechanism added a temp column.
   orig_data <- .data
   schema <- current_schema(.data)
   orig_names <- schema$names
+  real_orig_names <- if (isTRUE(cgid$used)) setdiff(orig_names, cgid$helper_name) else orig_names
 
   # First pass: parse every dot up front (no push_op()/GPU work yet) so we
   # know, before touching `.data` at all, whether any dot needs the window
@@ -366,11 +389,12 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 
   flush_predicates()
 
-  if (length(window_idx) > 0) {
+  if (length(window_idx) > 0 || isTRUE(cgid$used)) {
     # Drop every `..win*../..winarg*..` temp column introduced by the
-    # window-planning block above, restoring the table's real,
-    # user-visible schema (section 1.3's "trailing select" step).
-    .data <- push_op(.data, ast_select(input_node(.data), orig_names))
+    # window-planning block above, and/or Phase 10's `..cur_group_id..`
+    # helper column (if used), restoring the table's real, user-visible
+    # schema (section 1.3's "trailing select" step).
+    .data <- push_op(.data, ast_select(input_node(.data), real_orig_names))
   }
 
   .data
@@ -449,6 +473,18 @@ filter_plan_window <- function(exprs, schema, group_cols) {
 #   cuplyr_fallback_notify() notification)
 # @keywords internal
 filter_window_fallback <- function(.data, dots, by_quo) {
+  gpu_fallback("filter", .data, function(tbl) {
+    rlang::inject(dplyr::filter(tbl, !!!dots, .by = !!by_quo))
+  })
+}
+
+# Internal: whole-call CPU fallback for a filter() call whose dots contain
+# a deferred across()-family shape (Phase 10; dots_need_fallback(),
+# R/across.R). Mirrors filter_window_fallback() exactly (re-runs the real
+# dplyr::filter() call with the ORIGINAL dots, before any Phase 10
+# substitution/expansion).
+# @keywords internal
+filter_across_fallback <- function(.data, dots, by_quo) {
   gpu_fallback("filter", .data, function(tbl) {
     rlang::inject(dplyr::filter(tbl, !!!dots, .by = !!by_quo))
   })

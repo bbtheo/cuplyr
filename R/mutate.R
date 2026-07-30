@@ -336,6 +336,23 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   orig_names <- orig_schema$names
   orig_groups <- verb_groups
 
+  # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R's
+  # own module docs for the full design. Anything genuinely unsupported
+  # (pick()-as-data-frame, cur_group()/cur_group_rows()/cur_data()/
+  # cur_data_all()/c_across(), a nested (non-top-level) across()/if_any()/
+  # if_all(), or `across(.unpack = TRUE)`) routes the WHOLE mutate() call
+  # through the CPU fallback below -- checked BEFORE cur_group_id()
+  # substitution/materialization, so a call that's going to fall back
+  # anyway never pays for that materialization first.
+  if (dots_need_fallback(dots)) {
+    return(mutate_across_fallback(.data, dots, .keep, before_quo, after_quo, by_quo))
+  }
+
+  cgid <- substitute_cur_group_id(.data, dots, verb_groups)
+  .data <- cgid$data
+  orig_schema <- current_schema(.data)
+  dots <- expand_across_dots(cgid$dots, orig_schema, verb_groups, "mutate")
+
   expressions <- parse_mutate_dots(dots, orig_schema, "mutate")
 
   # Phase 5, task W3: any dot containing a window-function call (row_number(),
@@ -558,6 +575,23 @@ plan_mutate_window_batches <- function(exprs, schema) {
 #   cuplyr_fallback_notify() notification)
 # @keywords internal
 mutate_window_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo) {
+  gpu_fallback("mutate", .data, function(tbl) {
+    rlang::inject(dplyr::mutate(
+      tbl, !!!dots, .by = !!by_quo, .keep = keep,
+      .before = !!before_quo, .after = !!after_quo
+    ))
+  })
+}
+
+# Internal: whole-call CPU fallback for a mutate() call whose dots contain
+# a deferred across()-family shape (Phase 10; dots_need_fallback(),
+# R/across.R) -- pick()-as-data-frame, cur_group()/cur_group_rows()/
+# cur_data()/cur_data_all()/c_across(), a nested (non-top-level) across()/
+# if_any()/if_all(), or `across(.unpack = TRUE)`. Mirrors
+# mutate_window_fallback() exactly (re-runs the real dplyr::mutate() call
+# with the ORIGINAL dots, before any Phase 10 substitution/expansion).
+# @keywords internal
+mutate_across_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo) {
   gpu_fallback("mutate", .data, function(tbl) {
     rlang::inject(dplyr::mutate(
       tbl, !!!dots, .by = !!by_quo, .keep = keep,
@@ -799,7 +833,18 @@ update_schema_for_expr <- function(schema, expr) {
 transmute.tbl_gpu <- function(.data, ...) {
   dots <- rlang::enquos(...)
 
+  # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R
+  # and mutate.tbl_gpu()'s own identical handling.
+  if (dots_need_fallback(dots)) {
+    return(gpu_fallback("transmute", .data, function(tbl) {
+      rlang::inject(dplyr::transmute(tbl, !!!dots))
+    }))
+  }
+  cgid <- substitute_cur_group_id(.data, dots, .data$groups)
+  .data <- cgid$data
+
   schema <- current_schema(.data)
+  dots <- expand_across_dots(cgid$dots, schema, .data$groups, "transmute")
   expressions <- parse_mutate_dots(dots, schema, "transmute", warn_unnamed = FALSE)
 
   result <- .data

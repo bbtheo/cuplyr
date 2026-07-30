@@ -243,6 +243,25 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
          call. = FALSE)
   }
 
+  # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R's
+  # own module docs. Must run on the ORIGINAL (not yet auto_name_dots()'d)
+  # dots: a top-level `across(...)` dot is unnamed by construction, and
+  # auto_name_dots() would otherwise stamp it with its own deparsed text as
+  # a "name", which expand_across_dots() would then (wrongly) treat as a
+  # user-supplied name. `cur_group_id()` is treated as a deferred shape
+  # here (unlike mutate()/filter()): summarise()'s per-GROUP (not per-row)
+  # shape means the row-level join-based substitution those two verbs use
+  # doesn't produce a valid `fn(col)` aggregation dot on its own (see
+  # substitute_cur_group_id()'s own docs) -- routed to the whole-call CPU
+  # fallback instead, which real dplyr already handles correctly.
+  if (dots_need_fallback(dots, treat_cur_group_id_as_deferred = TRUE)) {
+    return(gpu_fallback("summarise", .data, function(tbl) {
+      rlang::inject(dplyr::summarise(tbl, !!!dots, .groups = .groups, .by = !!by_quo))
+    }))
+  }
+
+  summarise_groups <- if (by_given) by_cols else .data$groups
+  dots <- expand_across_dots(dots, current_schema(.data), summarise_groups, "summarise")
   dots <- auto_name_dots(dots, "summarise")
 
   if (by_given) {

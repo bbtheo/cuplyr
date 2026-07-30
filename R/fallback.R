@@ -65,7 +65,19 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE) {
 
   result <- expr_fn(tbl)
 
-  if (as_is || !is.data.frame(result) || has_list_column(result)) {
+  # A `rowwise_df` result (Phase 10: c_across()'s own context) has no
+  # `tbl_gpu` representation at all -- `tbl_gpu()` would silently discard
+  # its per-row grouping on re-upload (group_vars() on a rowwise_df is
+  # character(0), so the "restore group_by() structure" logic just below
+  # has nothing to restore), which used to make every verb chained AFTER
+  # `rowwise()` (in particular `mutate(..., sum(c_across(...)))`) silently
+  # wrong instead of erroring. Returning the real `rowwise_df` as-is (same
+  # "no GPU representation, hand back the plain object" contract
+  # `has_list_column()` already uses below) means a subsequent verb call
+  # dispatches to REAL dplyr's own method instead of `tbl_gpu`'s, which is
+  # correct: cuplyr never claims a `rowwise()` result stays GPU-backed.
+  if (as_is || !is.data.frame(result) || has_list_column(result) ||
+      inherits(result, "rowwise_df")) {
     return(result)
   }
 

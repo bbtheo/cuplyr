@@ -1,5 +1,42 @@
 # cuplyr (development version)
 
+## `across()`/`if_any()`/`if_all()`/`pick()` and tidy-eval context (Phase 10)
+
+* **`across(.cols, .fns, ..., .names=, .unpack=)`** is now GPU-native inside
+  `mutate()`/`summarise()`: it's expanded at the quosure level into ordinary
+  per-column dots (bare function, `~ .x` formula, `\(x)`/`function(x)`
+  lambda, or a named/unnamed `list()` of any of those), reusing the exact
+  same expression pipeline every other dot already goes through -- no new
+  IR node, no new C++. `.cols`'s tidyselect (`everything()`, `where()`,
+  `starts_with()`, ...) always excludes the current grouping columns,
+  matching dplyr exactly. `across()` is rejected inside `filter()` with a
+  message pointing at `if_any()`/`if_all()` (matching real dplyr 1.2.1's own
+  behavior). `.unpack = TRUE` is deferred to a CPU fallback.
+* **`if_any()`/`if_all()`** work inside `filter()`/`mutate()`/`summarise()`,
+  expanding to a single OR/AND-folded predicate (reusing `filter()`'s
+  existing three-valued-logic `&`/`|` handling).
+* **`cur_group_id()`** is GPU-native inside `mutate()`/`filter()` (including
+  nested in a comparison, e.g. `filter(cur_group_id() == 1)`, and with
+  `.by=`): it reuses the already-GPU-native `group_data()` (Phase 9) plus an
+  ordinary `left_join()` to broadcast each group's dense id back onto its
+  rows. Inside `summarise()` it falls back to the CPU (a per-group, not
+  per-row, shape).
+* **`cur_column()`** works inside `across()`'s own function argument (its
+  only valid context) via compile-time textual substitution.
+* **`pick()`**, **`cur_group()`**, **`cur_group_rows()`**, **`cur_data()`**,
+  **`cur_data_all()`**, and **`c_across()`** (as well as `across()`/
+  `if_any()`/`if_all()` nested inside another call rather than being a
+  dot's entire expression) are not GPU-native and route through a
+  whole-call CPU fallback that re-runs the real dplyr call, notified the
+  same way every other fallback is (`options(cuplyr.fallback=)`).
+* **Bug fix**: `rowwise()`'s CPU fallback used to silently re-upload its
+  result to a plain (non-rowwise) `tbl_gpu`, discarding its per-row
+  grouping -- so any verb chained immediately afterward (in particular
+  `mutate(sum(c_across(...)))`) silently computed the wrong (ordinary
+  columnar) result instead of erroring. `rowwise()` now returns a real
+  `rowwise_df` (never re-uploaded), so a chained call dispatches to real
+  dplyr instead.
+
 ## Grouping metadata API & backend generics (Phase 9)
 
 * **`group_data()`/`group_keys()`/`group_rows()`/`group_indices()`/
