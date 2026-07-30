@@ -11,30 +11,45 @@ check_set_op_compatible(x_schema, y_schema)
 }
 \value{
 A list with \verb{$target_schema} (unified schema, x's names/order)
-and \verb{$needs_fallback} (logical).
+and \verb{$needs_fallback} (logical, always \code{FALSE} as of Phase 11 L4).
 }
 \description{
 Mirrors \code{dplyr:::is_compatible()} (verified empirically against dplyr
 1.2.1 + vctrs \code{vec_ptype2()}): same column count, same column name SET
-(order tolerated), and a per-column common type. Deliberately NOT the
-same promotion rule as this package's own \code{bind_rows()}
-(\code{promote_types()}, R/bind.R): that function treats \code{STRING} as a
-universal widest type (any type silently coerces to STRING), which is
-exactly the coercion vctrs' \code{vec_ptype2()} REFUSES for a numeric/date
-column vs. a character one (verified: \code{vec_ptype2(1L, "a")} errors,
-unlike \code{bind_rows()}'s silent STRING promotion) -- dplyr's real set-op
-contract is the STRICTER one, so this reimplements vctrs' common-type
-ladder rather than reusing \code{promote_types()}.
+(order tolerated), and a per-column common type, via
+\code{resolve_common_col_type()} (R/bind.R). As of Phase 11 L4 this is
+EXACTLY the same ladder \code{bind_rows()}'s own \code{compute_unified_schema()}
+uses -- the two used to diverge (this function reimplemented vctrs'
+stricter common-type ladder from scratch because \code{bind_rows()}'s old
+\code{promote_types()} treated \code{STRING} as a universal widest type, silently
+coercing a numeric/date column against a character one, which real
+vctrs' \code{vec_ptype2()} REFUSES -- verified: \code{vec_ptype2(1L, "a")} errors).
+\code{promote_types()} is gone; both verbs now share one strict ladder.
 }
 \details{
 Factor columns get a four-way split (verified against real
 \code{vec_ptype2()} behavior for factors, see inline comments): both-factor
 with IDENTICAL levels is native (same underlying INT32 codes, safe to
-compare/concatenate directly); both-factor with DIFFERING levels, or
-factor-vs-character, both succeed in real dplyr (level-union / decode-
-to-character) but aren't implemented natively here -- \verb{$needs_fallback}
-signals the caller to route the whole verb through \code{gpu_fallback()}
-rather than raise a spurious error; factor vs. anything else (numeric,
-date, ...) is a genuine vctrs error, reproduced here directly.
+compare/concatenate directly); both-factor with DIFFERING levels is ALSO
+native as of Phase 11 L2 (\code{gpu_remap_codes()}, \code{src/ops_bind.cpp},
+remaps each side's codes onto the level UNION, mirroring \code{bind_rows()}'s
+own Bug 2 fix); factor-vs-character is ALSO native as of Phase 11 L2
+(\code{gpu_decode_factor()} decodes the factor side to its labels, mirroring
+\code{bind_rows()}'s own Bug 3 fix) -- both used to route through
+\verb{$needs_fallback} before these two GPU primitives existed. Factor vs.
+anything else (numeric, date, ...) is a genuine vctrs error, reproduced
+here directly.
+
+Phase 11 L4: the per-column ladder itself is now
+\code{resolve_common_col_type()} (R/bind.R), shared verbatim with
+\code{bind_rows()}'s own \code{compute_unified_schema()} -- this function now only
+adds the column-count/name-SET checks and its own verb-specific
+("\code{x} and \code{y} are not compatible.", bulleted) error formatting on top.
+The \code{Date}-vs-\code{POSIXct} timestamp promotion that used to require
+\verb{$needs_fallback} (no native \code{TIMESTAMP_DAYS} -> \code{TIMESTAMP_MICROSECONDS}
+cast existed yet) is now unconditionally native as of Phase 11 L3
+(\code{gpu_cast_column()} gained the 5 timestamp targets) -- \verb{$needs_fallback}
+is now ALWAYS \code{FALSE} and kept only for call-site compatibility (every
+caller in this file still checks it).
 }
 \keyword{internal}

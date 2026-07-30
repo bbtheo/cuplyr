@@ -250,8 +250,13 @@ test_that("numeric type promotion: logical < integer < double", {
   expect_type(result$b, "double")
 })
 
-test_that("Date vs. POSIXct falls back to CPU (dplyr promotes to POSIXct; no native TIMESTAMP_DAYS -> TIMESTAMP_MICROSECONDS cast)", {
+test_that("Date vs. POSIXct promotes to POSIXct natively (Phase 11 L3, no fallback)", {
   skip_if_no_gpu()
+  # Was a CPU fallback before Phase 11 L3 (no native TIMESTAMP_DAYS ->
+  # TIMESTAMP_MICROSECONDS cast existed yet); gpu_cast_column() gained the
+  # 5 timestamp targets, so check_set_op_compatible()'s `$needs_fallback`
+  # never fires for this combination any more -- asserting `"error"` below
+  # would itself fail loudly if a fallback were ever (re-)triggered.
   df1 <- tibble::tibble(a = as.Date("2020-01-01"))
   df2 <- tibble::tibble(a = as.POSIXct("2020-01-02", tz = "UTC"))
   gx <- tbl_gpu(df1)
@@ -259,11 +264,8 @@ test_that("Date vs. POSIXct falls back to CPU (dplyr promotes to POSIXct; no nat
 
   oracle <- dplyr::union(df1, df2)
 
-  withr::local_options(cuplyr.fallback = "warn")
-  expect_warning(
-    result <- dplyr::union(gx, gy),
-    "fell back to CPU evaluation"
-  )
+  withr::local_options(cuplyr.fallback = "error")
+  result <- dplyr::union(gx, gy)
   result_df <- collect(result)
   expect_s3_class(result_df$a, "POSIXct")
   expect_equal(sort(as.numeric(result_df$a)), sort(as.numeric(oracle$a)))

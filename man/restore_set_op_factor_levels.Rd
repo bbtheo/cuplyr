@@ -2,18 +2,21 @@
 % Please edit documentation in R/sets.R
 \name{restore_set_op_factor_levels}
 \alias{restore_set_op_factor_levels}
-\title{Reattach factor levels lost through \code{bind_rows()}}
+\title{Reattach factor levels after \code{bind_rows()}}
 \usage{
 restore_set_op_factor_levels(result, target_schema)
 }
 \description{
-\code{bind_rows()}/\code{bind_cols()} (R/bind.R) never carry \code{schema$factor_levels}
-forward at all (an existing, documented gap -- see
-\code{align_set_op_side()}'s own docs) -- unlike \code{semi_join()}/\code{anti_join()}/
-\code{distinct()}, which all preserve it automatically via
-\code{propagate_factor_levels()} (R/execute.R). \code{union()}/\code{union_all()}/
-\code{symdiff()} end on a \code{bind_rows()} call, so their result needs this
-reattached manually; \code{intersect()}/\code{setdiff()} (built from
-\code{semi_join()}/\code{anti_join()} + \code{distinct()} only) don't.
+As of Phase 11 L2, \code{bind_rows()} (R/bind.R) already computes and attaches
+the correct unioned \code{schema$factor_levels} on its own result (Bug 2
+fix) -- since \code{x_aligned}/\code{y_aligned} are already aligned to the exact
+same \code{target_schema}, \code{bind_rows_gpu()}'s own internal
+\code{compute_unified_schema()} call trivially recomputes the identical
+schema \code{check_set_op_compatible()} already computed here, so this is now
+a belt-and-braces no-op re-assignment (kept for defensiveness/clarity
+rather than trusting that invariant to hold silently at a distance).
+\code{intersect()}/\code{setdiff()} (built from \code{semi_join()}/\code{anti_join()} +
+\code{distinct()}, which already preserve \code{factor_levels} via
+\code{propagate_factor_levels()}, R/execute.R) don't need this at all.
 }
 \keyword{internal}

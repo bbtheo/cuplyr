@@ -43,18 +43,16 @@ compatibility contracts (mirroring \code{dplyr:::is_compatible()} /
 \code{check_compatible()}).
 }
 \details{
-A handful of column-type combinations that dplyr itself accepts aren't
-implemented natively and transparently fall back to CPU evaluation
-instead (a \code{cuplyr.fallback} notification fires, see
-\code{\link[=cuplyr_fallback_notify]{cuplyr_fallback_notify()}}): two factor columns with different level
-sets, or a factor column vs. a character column (both involve
-recomputing factor codes against a new level set / decoding codes to
-labels, which this package's GPU column model doesn't yet support), and
-a \code{Date} column vs. a \code{POSIXct} column (dplyr promotes to \code{POSIXct}; the
-underlying GPU cast this package's \code{bind_rows()} machinery would need
--- \code{TIMESTAMP_DAYS} -> \code{TIMESTAMP_MICROSECONDS} -- isn't implemented,
-see \code{check_set_op_compatible()}). Every other column-type mismatch that
-would be a genuine error in real dplyr (e.g. integer vs. character, or
+Two factor columns with different level sets (level-union remap,
+\code{gpu_remap_codes()}) and a factor column vs. a character column (decode
+to labels, \code{gpu_decode_factor()}) are both GPU-native as of Phase 11 L2.
+A \code{Date} column vs. a \code{POSIXct} column (dplyr promotes to \code{POSIXct}) is
+ALSO GPU-native as of Phase 11 L3 (\code{gpu_cast_column()} gained the
+\code{TIMESTAMP_DAYS} -> \code{TIMESTAMP_MICROSECONDS} cast, among the other 4
+timestamp-granularity targets) -- no column-type combination that real
+dplyr accepts still needs the CPU fallback (\verb{$needs_fallback} is always
+\code{FALSE}, see \code{check_set_op_compatible()}). Every column-type mismatch
+that's a genuine error in real dplyr (e.g. integer vs. character, or
 factor vs. integer) errors here too, naming the offending column and
 both types.
 }

@@ -9,7 +9,9 @@ align_to_schema(tbl, target_schema)
 \arguments{
 \item{tbl}{A tbl_gpu object}
 
-\item{target_schema}{List with names and types}
+\item{target_schema}{List with \code{names}, \code{types}, and optionally
+\code{factor_levels} (the unified level set for any \code{DICTIONARY32} column,
+see \code{compute_unified_schema()})}
 }
 \value{
 A tbl_gpu aligned to the target schema

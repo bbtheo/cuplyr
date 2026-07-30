@@ -261,6 +261,16 @@ SEXP gpu_cast_column(SEXP xptr, int col_idx, std::string target_type) {
         target_dtype = cudf::data_type{cudf::type_id::INT8};
     } else if (target_type == "BOOL8") {
         target_dtype = cudf::data_type{cudf::type_id::BOOL8};
+    } else if (target_type == "TIMESTAMP_DAYS") {
+        target_dtype = cudf::data_type{cudf::type_id::TIMESTAMP_DAYS};
+    } else if (target_type == "TIMESTAMP_SECONDS") {
+        target_dtype = cudf::data_type{cudf::type_id::TIMESTAMP_SECONDS};
+    } else if (target_type == "TIMESTAMP_MILLISECONDS") {
+        target_dtype = cudf::data_type{cudf::type_id::TIMESTAMP_MILLISECONDS};
+    } else if (target_type == "TIMESTAMP_MICROSECONDS") {
+        target_dtype = cudf::data_type{cudf::type_id::TIMESTAMP_MICROSECONDS};
+    } else if (target_type == "TIMESTAMP_NANOSECONDS") {
+        target_dtype = cudf::data_type{cudf::type_id::TIMESTAMP_NANOSECONDS};
     } else {
         Rcpp::stop("Unsupported target type for casting: %s", target_type.c_str());
     }
@@ -442,13 +452,26 @@ SEXP gpu_decode_factor(SEXP xptr, int col_idx, CharacterVector levels) {
 
 // Cast a column to STRING for bind_rows() schema unification.
 //
-// promote_types() in R/bind.R treats STRING as the "widest" type, so
-// compute_unified_schema() may declare a STRING target for a column whose
-// tables hold e.g. INT32/FLOAT64/BOOL8 physically. align_to_schema() must
-// actually cast those columns to STRING (previously it silently skipped
-// this, leaving the schema claiming STRING while the GPU column stayed
-// numeric -- gpu_bind_rows_aligned() would then reject the mismatch, or
-// worse, silently misinterpret the raw bytes).
+// HISTORICAL NOTE (Phase 11 L4): the old `promote_types()` (R/bind.R) used
+// to treat STRING as the "widest" type, so `compute_unified_schema()` could
+// declare a STRING target for a column whose tables held e.g.
+// INT32/FLOAT64/BOOL8 physically, and this function existed to actually
+// perform that numeric -> STRING cast (previously `align_to_schema()`
+// silently skipped it, leaving the schema claiming STRING while the GPU
+// column stayed numeric). Phase 11 L4 RETIRED that rule: `bind_rows()` now
+// shares `resolve_common_col_type()`'s strict vctrs-style ladder with the
+// set-op verbs (numeric/timestamp ladders promote; a numeric-vs-character
+// mismatch is a hard error, matching real dplyr's own
+// `vctrs_error_incompatible_type`) -- so the INT8/INT16/INT32/INT64/
+// FLOAT32/FLOAT64/BOOL8 branches below are DEAD CODE from `bind_rows()`'s
+// own call path as of this task (no schema unification can produce a
+// numeric-source/STRING-target pair any more). This function is kept
+// (rather than deleted) because `cast_column()` (R/bind.R) still calls it
+// unconditionally for a STRING target whenever the source isn't
+// DICTIONARY32 -- i.e. it's still reachable for a genuine STRING-vs-STRING
+// no-op-shaped call, and removing the numeric branches would leave no
+// defensive fallback if a future caller (outside bind_rows()) ever needs a
+// real numeric->STRING cast again.
 //
 // Only types with a real string_view converter in cudf are supported.
 // Types with no (or a semantically ambiguous) converter -- timestamps --

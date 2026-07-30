@@ -77,10 +77,13 @@ fallback_sweep_pipelines <- function() {
     # GPU-native now (Phase 8, see R/sets.R) -- no longer part of this
     # fallback sweep. See test-dplyr-sets.R for full oracle coverage, and
     # the "never trigger a fallback notification" block below for their
-    # happy-path native-execution guarantee (a narrow set of column-type
-    # edge cases -- mismatched factor levels, factor vs. character, Date
-    # vs. POSIXct -- still fall back by design, see R/sets.R's own docs;
-    # those are pinned directly in test-dplyr-sets.R instead of here).
+    # happy-path native-execution guarantee. As of Phase 11 (L2 factor
+    # fidelity, L3 timestamp casts), every column-type combination real
+    # dplyr accepts for these verbs is GPU-native -- mismatched factor
+    # levels, factor vs. character, and Date vs. POSIXct all used to fall
+    # back here but no longer do (see R/sets.R's own docs); the remaining
+    # column-type MISMATCHES are genuine dplyr-parity errors, not fallbacks,
+    # pinned directly in test-dplyr-sets.R instead of here.
     group_modify = list(
       fn = function(d) dplyr::group_modify(dplyr::group_by(d, g), ~ dplyr::summarise(.x, s = sum(x))),
       arrange_by = "g"

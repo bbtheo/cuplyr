@@ -2109,6 +2109,13 @@ type_float64 <- function(arg_types) "FLOAT64"
 type_int32 <- function(arg_types) "INT32"
 type_arg1 <- function(arg_types) arg_types[1]
 
+# The 5 cuDF timestamp granularities (Phase 11 L3) -- shared by
+# `check_filter_comparison_types()` (R/filter.R), `resolve_common_col_type()`
+# (R/bind.R), and the `as.Date`/`as.POSIXct` registry entries below.
+cuplyr_timestamp_types <- c("TIMESTAMP_DAYS", "TIMESTAMP_SECONDS",
+                            "TIMESTAMP_MILLISECONDS", "TIMESTAMP_MICROSECONDS",
+                            "TIMESTAMP_NANOSECONDS")
+
 # Window-class `sum()`'s output type -- reuses make_aggregation()'s own
 # switch verbatim (R/ast.R): INT32 promotes to INT64, everything else
 # (including INT64 itself, matching that function's existing behavior)
@@ -2778,7 +2785,106 @@ ir_call_registry <- list(
   "roll_sd" = list(arity = 1L, parse = NULL, type = type_float64,
                     lower = NULL, window = list(kind = "rolling")),
   "roll_median" = list(arity = 1L, parse = NULL, type = type_float64,
-                        lower = NULL, window = list(kind = "rolling"))
+                        lower = NULL, window = list(kind = "rolling")),
+
+  # --- Phase 11 L3: as.Date()/as.POSIXct() on an existing TIMESTAMP_*
+  # column, or a column-independent (constant) argument ---
+  #
+  # `arity = 1L` deliberately: any additional argument (`format=`, `tz=`,
+  # `origin=`, ...) makes `length(args_raw) != 1`, so the registry's own
+  # dispatch loop returns NULL before `parse` is even called -- falling
+  # back to L1's whole-call CPU path, exactly like a STRING-source column
+  # (see `parse` below) rather than attempting to replicate those
+  # semantics natively.
+  #
+  # Two shapes reach `parse`:
+  #   - `args[[1]]$kind == "col"`: a real schema column. Native only when
+  #     its OWN inferred type is already one of the 5 TIMESTAMP_*
+  #     granularities (`ir_call("as_date"/"as_posixct", ...)`, lowered by
+  #     `src/expr_eval.hpp`'s `apply_handler()` via a single
+  #     `cudf::cast()`); a STRING or numeric source column returns NULL
+  #     (design's explicit scope cut -- STRING parsing/numeric-origin
+  #     interpretation isn't attempted), falling back to L1.
+  #   - `args[[1]]$kind == "lit"`: a column-independent constant (already
+  #     evaluated by the generic per-arg parser -- this is what makes
+  #     `as.Date("2010-01-05")`/`as.Date(Sys.Date())` reach here instead of
+  #     the old pre-registration constant-fold path, since registering
+  #     "as.Date"/"as.POSIXct" here intercepts EVERY call to it, including
+  #     a purely literal one). Reproduces the exact value the old
+  #     constant-fold would have produced by applying the real R function
+  #     to the literal's own value (or `NA` for a bare untyped NA node) and
+  #     re-wrapping via `ir_lit_from_r()` -- which is what
+  #     `gpu_type_from_r()` already types as TIMESTAMP_DAYS/
+  #     TIMESTAMP_MICROSECONDS for a `Date`/`POSIXct` result. This keeps
+  #     e.g. `filter(d < as.Date("2010-01-05"))` on the fully native path
+  #     (a `<` comparing a real "col" node against a TIMESTAMP_DAYS "lit"
+  #     node) instead of silently falling back to the CPU for a
+  #     column-referencing dot (see `dot_references_schema_col()`,
+  #     R/filter.R).
+  #   - Any other node kind (a derived, non-literal, non-column
+  #     expression, e.g. `as.Date(x + 1)`): NULL, conservative fallback --
+  #     not attempted natively.
+  #
+  # `type`/`lower` on THIS entry are never actually consulted:
+  # `ir_infer_type()`/documentation lookups key off the node's OWN `op`
+  # field, and `parse` always rewrites the node to either a `lit` (handled
+  # entirely in R, no "as.Date" op ever reaches lowering) or an
+  # `ir_call("as_date"/"as_posixct", ...)` (looked up under ITS OWN
+  # registry key, below) -- kept here only for the same
+  # documentation-consistency reason `case_when`/`between` do the same.
+  "as.Date" = list(
+    arity = 1L,
+    parse = function(args, schema) {
+      x <- args[[1]]
+      if (identical(x$kind, "col")) {
+        x_type <- unname(ir_infer_type(x, schema))
+        if (x_type %in% cuplyr_timestamp_types) {
+          return(ir_call("as_date", list(x)))
+        }
+        return(NULL)
+      }
+      if (identical(x$kind, "lit")) {
+        val <- if (isTRUE(x$na)) NA else x$value
+        return(ir_lit_from_r(as.Date(val)))
+      }
+      NULL
+    },
+    type = type_float64,
+    lower = NULL
+  ),
+  "as.POSIXct" = list(
+    arity = 1L,
+    parse = function(args, schema) {
+      x <- args[[1]]
+      if (identical(x$kind, "col")) {
+        x_type <- unname(ir_infer_type(x, schema))
+        if (x_type %in% cuplyr_timestamp_types) {
+          return(ir_call("as_posixct", list(x)))
+        }
+        return(NULL)
+      }
+      if (identical(x$kind, "lit")) {
+        val <- if (isTRUE(x$na)) NA else x$value
+        return(ir_lit_from_r(as.POSIXct(val)))
+      }
+      NULL
+    },
+    type = type_float64,
+    lower = NULL
+  ),
+
+  # The actual lowered ops (see the "as.Date"/"as.POSIXct" `parse` hooks
+  # above): a single-arg `cudf::cast()` to a fixed target granularity,
+  # `apply_handler()`'s "as_date"/"as_posixct" case (src/expr_eval.hpp).
+  # `type` is fixed regardless of the (already-verified-timestamp) input
+  # granularity, matching `as.Date()`/`as.POSIXct()`'s own R semantics
+  # (always returns a `Date`/`POSIXct`, never a mix).
+  "as_date" = list(arity = 1L, parse = NULL,
+                    type = function(arg_types) "TIMESTAMP_DAYS",
+                    lower = list(handler = "as_date")),
+  "as_posixct" = list(arity = 1L, parse = NULL,
+                       type = function(arg_types) "TIMESTAMP_MICROSECONDS",
+                       lower = list(handler = "as_posixct"))
 
   # ntile() is dispatched directly from ir_parse_expr() (ir_parse_ntile()),
   # never through this registry at all (its "x supplied or not" distinction

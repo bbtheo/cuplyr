@@ -261,20 +261,179 @@ repair_names <- function(names, method = "unique") {
   }
 }
 
+#' Resolve the common GPU type for one column across a bind/set operation
+#' (Phase 11 L4)
+#'
+#' The type-compatibility ladder extracted out of `check_set_op_compatible()`
+#' (R/sets.R, Phase 8) so `bind_rows()`'s `compute_unified_schema()` and the
+#' set-op verbs share EXACTLY one promotion rule, instead of `bind_rows()`
+#' having its own looser one (the old `promote_types()`'s unconditional
+#' "STRING is widest" rule, which silently coerced e.g. a numeric column
+#' against a character column of the same name -- a real bug: real dplyr's
+#' own `vctrs::vec_ptype2()`-backed `bind_rows()` has never allowed this,
+#' it's a hard `vctrs_error_incompatible_type`, see
+#' `abort_bind_rows_incompatible()` below).
+#'
+#' Four cases, all pinned via oracle-verified `dplyr`/`vctrs` behavior:
+#' \itemize{
+#'   \item Both factor (`DICTIONARY32`): union of both level sets (or a
+#'     no-op if identical) -- `vctrs::vec_c(factor, factor)`'s contract.
+#'   \item Exactly one factor, the other `STRING`: decodes to `STRING`
+#'     (dplyr's factor + character -> character contract). Exactly one
+#'     factor, the other anything else (numeric, timestamp, ...): a hard
+#'     incompatibility (`$ok = FALSE`) -- real `vctrs::vec_ptype2()` refuses
+#'     this too.
+#'   \item Identical types: a no-op.
+#'   \item Both in the numeric ladder (`BOOL8 < INT32 < INT64 < FLOAT64`) or
+#'     both in the timestamp ladder (`TIMESTAMP_DAYS < ... <
+#'     TIMESTAMP_NANOSECONDS`): promotes to the wider member. The timestamp
+#'     cast (Date <-> POSIXct, etc.) is genuinely native as of Phase 11 L3
+#'     (`gpu_cast_column()`, `src/ops_bind.cpp`, gained the 5 TIMESTAMP_*
+#'     targets) -- this ladder used to require `check_set_op_compatible()`'s
+#'     own caller to set a `$needs_fallback` flag for exactly this case
+#'     (no native `TIMESTAMP_DAYS` -> `TIMESTAMP_MICROSECONDS` cast existed
+#'     yet); that flag is retired, this ladder is now unconditionally native
+#'     for both callers.
+#'   \item Anything else (e.g. numeric vs. character, factor vs. numeric,
+#'     numeric vs. timestamp): `$ok = FALSE` -- the caller reports its own
+#'     verb-specific incompatibility error (sets.R's `"`x` and `y` are not
+#'     compatible."` bulleted form vs. bind.R's `vctrs`-style `"Can't
+#'     combine ...`"` form, see `abort_bind_rows_incompatible()`).
+#' }
+#'
+#' @param tx,ty GPU type strings for the two occurrences of this column
+#'   (`unname()`d already by the caller)
+#' @param fx,fy Logical: is this occurrence `DICTIONARY32` (a factor)?
+#' @param lvls_x,lvls_y Level vectors for `tx`/`ty` when `fx`/`fy` is `TRUE`
+#'   (`NULL` otherwise)
+#' @return A list with `$ok` (logical) and, when `TRUE`, `$type` (promoted
+#'   type string) and `$factor_levels` (level vector, or `NULL` when the
+#'   result isn't `DICTIONARY32`)
+#' @keywords internal
+resolve_common_col_type <- function(tx, ty, fx = FALSE, fy = FALSE,
+                                     lvls_x = NULL, lvls_y = NULL) {
+  numeric_ladder <- c("BOOL8", "INT32", "INT64", "FLOAT64")
+  timestamp_ladder <- c("TIMESTAMP_DAYS", "TIMESTAMP_SECONDS",
+                         "TIMESTAMP_MILLISECONDS", "TIMESTAMP_MICROSECONDS",
+                         "TIMESTAMP_NANOSECONDS")
+
+  if (fx && fy) {
+    lvls <- if (identical(lvls_x, lvls_y)) lvls_x else union(lvls_x, lvls_y)
+    return(list(ok = TRUE, type = "DICTIONARY32", factor_levels = lvls))
+  }
+
+  if (xor(fx, fy)) {
+    other_type <- if (fx) ty else tx
+    if (identical(other_type, "STRING")) {
+      return(list(ok = TRUE, type = "STRING", factor_levels = NULL))
+    }
+    return(list(ok = FALSE))
+  }
+
+  if (identical(tx, ty)) {
+    return(list(ok = TRUE, type = tx, factor_levels = NULL))
+  }
+
+  if (tx %in% numeric_ladder && ty %in% numeric_ladder) {
+    idx <- max(match(tx, numeric_ladder), match(ty, numeric_ladder))
+    return(list(ok = TRUE, type = numeric_ladder[idx], factor_levels = NULL))
+  }
+
+  if (tx %in% timestamp_ladder && ty %in% timestamp_ladder) {
+    idx <- max(match(tx, timestamp_ladder), match(ty, timestamp_ladder))
+    return(list(ok = TRUE, type = timestamp_ladder[idx], factor_levels = NULL))
+  }
+
+  list(ok = FALSE)
+}
+
+#' Friendly, `vctrs`-bracket-style type label for a `bind_rows()`
+#' incompatible-type error (Phase 11 L4)
+#'
+#' Mirrors real dplyr/vctrs' own `<double>`/`<character>`/`<date>`/
+#' `<datetime<UTC>>` labels (verified empirically: `bind_rows(data.frame(x =
+#' 1), data.frame(x = as.Date("2020-01-01")))` -> `` Can't combine `..1$x`
+#' <double> and `..2$x` <date>. ``). The one label that can't be
+#' byte-matched is a factor's: real `vctrs::vec_ptype_full()` embeds a
+#' levels-derived hash (`<factor<4d52a>>`) this package has no equivalent
+#' for -- `set_op_type_label()` (R/sets.R) documents the identical
+#' limitation for its own, differently-formatted set-op error text.
+#' @keywords internal
+bind_rows_type_label <- function(type, is_factor = FALSE) {
+  if (isTRUE(is_factor)) {
+    return("factor<...>")
+  }
+  switch(type,
+    BOOL8 = "logical",
+    INT32 = "integer",
+    INT64 = "integer64",
+    FLOAT64 = "double",
+    STRING = "character",
+    TIMESTAMP_DAYS = "date",
+    TIMESTAMP_SECONDS = ,
+    TIMESTAMP_MILLISECONDS = ,
+    TIMESTAMP_MICROSECONDS = ,
+    TIMESTAMP_NANOSECONDS = "datetime<UTC>",
+    type
+  )
+}
+
+#' Raise dplyr's own `bind_rows()` incompatible-type error (Phase 11 L4)
+#'
+#' Reproduces `vctrs`' exact message shape, verified empirically against
+#' dplyr 1.2.1/vctrs 0.7.3 across 2-, 3-, and 4-table `bind_rows()` calls,
+#' named and unnamed dots, and a table where the conflicting column is
+#' entirely absent from table 1: the LEFT-hand label is ALWAYS the literal
+#' `..1` (dplyr's own dots are always relabeled `..1`/`..2`/... positionally
+#' for this error regardless of the caller's actual names, and -- a genuine
+#' vctrs quirk -- the accumulator side of a >2-way reduce keeps citing `..1`
+#' even when the running common type was actually last updated by some
+#' later table), and the RIGHT-hand label is the actual 1-based position of
+#' the table whose column first failed to fit the type accumulated so far.
+#' `compute_unified_schema()`'s own left-to-right table loop naturally
+#' produces this: it only ever calls this function the first time some
+#' table's column doesn't fit the running `name_types[[nm]]`, and never
+#' updates a "which table established this" tracker -- so the constant `1L`
+#' below isn't a simplification, it's the literal, verified rule.
+#'
+#' @param other_idx 1-based index (in the original bind_rows() dots) of the
+#'   table whose column conflicted with the running accumulated type
+#' @param col_name The conflicting column's name
+#' @param type1,type2 GPU type strings: the accumulated type so far, and
+#'   `other_idx`'s own type for this column
+#' @param is_factor1,is_factor2 Logical: is each side `DICTIONARY32`?
+#' @keywords internal
+abort_bind_rows_incompatible <- function(other_idx, col_name, type1, type2,
+                                          is_factor1 = FALSE, is_factor2 = FALSE) {
+  label1 <- bind_rows_type_label(type1, is_factor1)
+  label2 <- bind_rows_type_label(type2, is_factor2)
+  stop(sprintf("Can't combine `..1$%s` <%s> and `..%d$%s` <%s>.",
+               col_name, label1, other_idx, col_name, label2),
+       call. = FALSE)
+}
+
 #' Compute unified schema from multiple tables
 #'
-#' Factor columns (Phase 11 L2, Bug 2/3): a column present as `DICTIONARY32`
-#' in every table that has it unifies to `DICTIONARY32` with `factor_levels`
-#' set to the LEVEL UNION across every occurrence (`base::union()`, x's
-#' order first then any novel levels from later tables in order --
-#' verified empirically against `vctrs::vec_c(factor("a"), factor("b"))` ->
-#' levels `c("a", "b")`). A column that's `DICTIONARY32` in some tables and
-#' non-factor (any other type, always `STRING` once `promote_types()`
-#' applies its unconditional STRING-is-widest rule) in at least one other
-#' unifies to plain `STRING` with no `factor_levels` entry at all (dplyr's
-#' own factor + character -> character contract) -- `align_to_schema()`
-#' decodes each factor occurrence to its labels via `gpu_decode_factor()`
-#' (`cast_column()`, below).
+#' Phase 11 L4: shares `resolve_common_col_type()`'s type ladder with the
+#' set-op verbs (R/sets.R) -- the old `promote_types()`'s unconditional
+#' "STRING is widest" rule is RETIRED; a numeric-vs-character (or any other
+#' non-ladder) mismatch is now a hard error matching real dplyr/vctrs'
+#' `vctrs_error_incompatible_type` text (`abort_bind_rows_incompatible()`),
+#' not a silent STRING coercion.
+#'
+#' Factor columns (Phase 11 L2, Bug 2/3, unchanged by L4): a column present
+#' as `DICTIONARY32` in every table that has it unifies to `DICTIONARY32`
+#' with `factor_levels` set to the LEVEL UNION across every occurrence
+#' (`base::union()`, first-occurrence order -- verified empirically against
+#' `vctrs::vec_c(factor("a"), factor("b"))` -> levels `c("a", "b")`). A
+#' column that's `DICTIONARY32` in some tables and `STRING` in at least one
+#' other unifies to plain `STRING` with no `factor_levels` entry at all
+#' (dplyr's own factor + character -> character contract) --
+#' `align_to_schema()` decodes each factor occurrence to its labels via
+#' `gpu_decode_factor()` (`cast_column()`, below). A factor column against
+#' any OTHER type (numeric, timestamp, ...) is now a hard error too (real
+#' dplyr's own behavior -- verified empirically), where it used to silently
+#' fall through `promote_types()`'s STRING-is-widest rule.
 #'
 #' @param tables List of tbl_gpu objects
 #' @return List with `names`, `types`, and `factor_levels` (`NULL` if no
@@ -284,10 +443,10 @@ compute_unified_schema <- function(tables) {
   # Union of all column names (preserving order from first occurrence)
   all_names <- character()
   name_types <- list()
-  factor_levels_seen <- list()   # nm -> list of level vectors, one per factor occurrence
-  any_non_factor <- list()       # nm -> TRUE if seen as non-DICTIONARY32 in some table
+  name_factor_levels <- list()   # nm -> current level vector (only set while DICTIONARY32)
 
-  for (tbl in tables) {
+  for (t in seq_along(tables)) {
+    tbl <- tables[[t]]
     tbl_factor_levels <- tbl$schema$factor_levels
 
     for (i in seq_along(tbl$schema$names)) {
@@ -298,84 +457,38 @@ compute_unified_schema <- function(tables) {
       # and always be FALSE (identical() treats "names" as significant).
       ty <- unname(tbl$schema$types[i])
       is_factor <- identical(ty, "DICTIONARY32")
+      lvls <- if (is_factor) tbl_factor_levels[[nm]] else NULL
 
       if (!(nm %in% all_names)) {
         all_names <- c(all_names, nm)
         name_types[[nm]] <- ty
-      } else {
-        # Column exists - check type compatibility and promote if needed
-        existing_type <- name_types[[nm]]
-        promoted <- promote_types(existing_type, ty)
-        name_types[[nm]] <- promoted
+        name_factor_levels[[nm]] <- lvls
+        next
       }
 
-      if (is_factor) {
-        factor_levels_seen[[nm]] <- c(factor_levels_seen[[nm]],
-                                      list(tbl_factor_levels[[nm]]))
-      } else {
-        any_non_factor[[nm]] <- TRUE
+      existing_type <- name_types[[nm]]
+      existing_is_factor <- identical(existing_type, "DICTIONARY32")
+      existing_lvls <- name_factor_levels[[nm]]
+
+      res <- resolve_common_col_type(existing_type, ty, existing_is_factor, is_factor,
+                                      existing_lvls, lvls)
+      if (!isTRUE(res$ok)) {
+        abort_bind_rows_incompatible(t, nm, existing_type, ty, existing_is_factor, is_factor)
       }
+      name_types[[nm]] <- res$type
+      name_factor_levels[[nm]] <- res$factor_levels
     }
   }
 
   unified_types <- vapply(all_names, function(nm) name_types[[nm]], character(1))
 
-  factor_levels <- list()
-  for (nm in names(factor_levels_seen)) {
-    if (isTRUE(any_non_factor[[nm]])) {
-      next  # decode contract: factor + non-factor unifies to STRING, no levels
-    }
-    lvls_list <- factor_levels_seen[[nm]]
-    union_levels <- lvls_list[[1]]
-    if (length(lvls_list) > 1) {
-      for (j in 2:length(lvls_list)) {
-        union_levels <- union(union_levels, lvls_list[[j]])
-      }
-    }
-    factor_levels[[nm]] <- union_levels
-  }
+  factor_levels <- name_factor_levels[!vapply(name_factor_levels, is.null, logical(1))]
 
   list(
     names = all_names,
     types = unname(unified_types),
     factor_levels = if (length(factor_levels) > 0) factor_levels else NULL
   )
-}
-
-#' Promote types for bind_rows compatibility
-#' @param type1 First type string
-#' @param type2 Second type string
-#' @return Promoted type string
-#' @keywords internal
-promote_types <- function(type1, type2) {
-  if (identical(type1, type2)) return(type1)
-
-  # Define type hierarchy for numeric types
-  numeric_order <- c("BOOL8", "INT32", "INT64", "FLOAT64")
-
-  if (type1 %in% numeric_order && type2 %in% numeric_order) {
-    idx1 <- match(type1, numeric_order)
-    idx2 <- match(type2, numeric_order)
-    return(numeric_order[max(idx1, idx2)])
-  }
-
-  # STRING can coerce from any type (widest)
-  if (type1 == "STRING" || type2 == "STRING") {
-    return("STRING")
-  }
-
-  # Timestamp types - use more precise
-  timestamp_types <- c("TIMESTAMP_DAYS", "TIMESTAMP_SECONDS",
-                       "TIMESTAMP_MILLISECONDS", "TIMESTAMP_MICROSECONDS",
-                       "TIMESTAMP_NANOSECONDS")
-  if (type1 %in% timestamp_types && type2 %in% timestamp_types) {
-    idx1 <- match(type1, timestamp_types)
-    idx2 <- match(type2, timestamp_types)
-    return(timestamp_types[max(idx1, idx2)])
-  }
-
-  stop(sprintf("Cannot promote incompatible types: %s and %s", type1, type2),
-       call. = FALSE)
 }
 
 #' Do a table's factor columns already carry the target's exact level sets?

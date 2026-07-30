@@ -64,6 +64,8 @@
 #include <cudf/transform.hpp>
 #include <cudf/types.hpp>
 #include <cudf/unary.hpp>
+#include <cudf/wrappers/durations.hpp>
+#include <cudf/wrappers/timestamps.hpp>
 
 #include <Rcpp.h>
 
@@ -88,6 +90,17 @@ inline cudf::data_type expr_type_from_str(const std::string& type_str) {
     if (type_str == "INT8")    return cudf::data_type{cudf::type_id::INT8};
     if (type_str == "BOOL8")   return cudf::data_type{cudf::type_id::BOOL8};
     if (type_str == "STRING")  return cudf::data_type{cudf::type_id::STRING};
+    // Phase 11 L3: the 5 timestamp granularities. Only TIMESTAMP_DAYS (R
+    // Date) and TIMESTAMP_MICROSECONDS (R POSIXct) are ever produced by
+    // gpu_type_from_r()/a literal node's own declared type, but a "col"
+    // sibling's resolved type (join/bind-cast targets, resolve_static_type()
+    // reading an actual column's cudf type) can be any of the 5 -- every
+    // granularity must round-trip through this string form.
+    if (type_str == "TIMESTAMP_DAYS")         return cudf::data_type{cudf::type_id::TIMESTAMP_DAYS};
+    if (type_str == "TIMESTAMP_SECONDS")      return cudf::data_type{cudf::type_id::TIMESTAMP_SECONDS};
+    if (type_str == "TIMESTAMP_MILLISECONDS") return cudf::data_type{cudf::type_id::TIMESTAMP_MILLISECONDS};
+    if (type_str == "TIMESTAMP_MICROSECONDS") return cudf::data_type{cudf::type_id::TIMESTAMP_MICROSECONDS};
+    if (type_str == "TIMESTAMP_NANOSECONDS")  return cudf::data_type{cudf::type_id::TIMESTAMP_NANOSECONDS};
     Rcpp::stop("Unsupported GPU type string: %s", type_str.c_str());
 }
 
@@ -101,6 +114,11 @@ inline std::string expr_type_to_str(cudf::data_type type) {
         case cudf::type_id::INT8:    return "INT8";
         case cudf::type_id::BOOL8:   return "BOOL8";
         case cudf::type_id::STRING:  return "STRING";
+        case cudf::type_id::TIMESTAMP_DAYS:         return "TIMESTAMP_DAYS";
+        case cudf::type_id::TIMESTAMP_SECONDS:      return "TIMESTAMP_SECONDS";
+        case cudf::type_id::TIMESTAMP_MILLISECONDS: return "TIMESTAMP_MILLISECONDS";
+        case cudf::type_id::TIMESTAMP_MICROSECONDS: return "TIMESTAMP_MICROSECONDS";
+        case cudf::type_id::TIMESTAMP_NANOSECONDS:  return "TIMESTAMP_NANOSECONDS";
         default: return "FLOAT64";
     }
 }
@@ -489,6 +507,84 @@ inline std::unique_ptr<cudf::scalar> build_scalar(const std::string& type_str,
             }
             return std::make_unique<cudf::string_scalar>(v, !is_na);
         }
+        // Phase 11 L3: timestamp literals. R only ever hands `value_sexp` in
+        // one of two native conventions -- a `Date` (whole days since
+        // epoch, gpu_type_from_r() -> "TIMESTAMP_DAYS") or a `POSIXct`
+        // (fractional *seconds* since epoch, "TIMESTAMP_MICROSECONDS")
+        // literal, per ir_lit_from_r()/gpu_type_from_r() -- so TIMESTAMP_DAYS
+        // treats the raw double as whole days, while every sub-day
+        // granularity (SECONDS/MILLISECONDS/MICROSECONDS/NANOSECONDS) treats
+        // it as POSIXct's own seconds-since-epoch convention and scales up,
+        // exactly mirroring transfer_io.cpp's posixct_to_gpu()
+        // (`llround(x * 1e6)` for microseconds). A schema column of a
+        // granularity other than these two only ever arises via an explicit
+        // cast (bind_rows()/join type promotion), never a bare R literal, so
+        // this convention is the only one a literal node can ever need.
+        case cudf::type_id::TIMESTAMP_DAYS: {
+            int32_t v = 0;
+            if (!is_na) {
+                double rv = Rcpp::as<double>(value_sexp);
+                if (Rcpp::NumericVector::is_na(rv)) {
+                    is_na = true;
+                } else {
+                    v = static_cast<int32_t>(rv);
+                }
+            }
+            return std::make_unique<cudf::timestamp_scalar<cudf::timestamp_D>>(
+                cudf::duration_D{v}, !is_na);
+        }
+        case cudf::type_id::TIMESTAMP_SECONDS: {
+            int64_t v = 0;
+            if (!is_na) {
+                double rv = Rcpp::as<double>(value_sexp);
+                if (Rcpp::NumericVector::is_na(rv)) {
+                    is_na = true;
+                } else {
+                    v = static_cast<int64_t>(std::llround(rv));
+                }
+            }
+            return std::make_unique<cudf::timestamp_scalar<cudf::timestamp_s>>(
+                cudf::duration_s{v}, !is_na);
+        }
+        case cudf::type_id::TIMESTAMP_MILLISECONDS: {
+            int64_t v = 0;
+            if (!is_na) {
+                double rv = Rcpp::as<double>(value_sexp);
+                if (Rcpp::NumericVector::is_na(rv)) {
+                    is_na = true;
+                } else {
+                    v = static_cast<int64_t>(std::llround(rv * 1e3));
+                }
+            }
+            return std::make_unique<cudf::timestamp_scalar<cudf::timestamp_ms>>(
+                cudf::duration_ms{v}, !is_na);
+        }
+        case cudf::type_id::TIMESTAMP_MICROSECONDS: {
+            int64_t v = 0;
+            if (!is_na) {
+                double rv = Rcpp::as<double>(value_sexp);
+                if (Rcpp::NumericVector::is_na(rv)) {
+                    is_na = true;
+                } else {
+                    v = static_cast<int64_t>(std::llround(rv * 1e6));
+                }
+            }
+            return std::make_unique<cudf::timestamp_scalar<cudf::timestamp_us>>(
+                cudf::duration_us{v}, !is_na);
+        }
+        case cudf::type_id::TIMESTAMP_NANOSECONDS: {
+            int64_t v = 0;
+            if (!is_na) {
+                double rv = Rcpp::as<double>(value_sexp);
+                if (Rcpp::NumericVector::is_na(rv)) {
+                    is_na = true;
+                } else {
+                    v = static_cast<int64_t>(std::llround(rv * 1e9));
+                }
+            }
+            return std::make_unique<cudf::timestamp_scalar<cudf::timestamp_ns>>(
+                cudf::duration_ns{v}, !is_na);
+        }
         default:
             Rcpp::stop("Unsupported literal type: %s", type_str.c_str());
     }
@@ -512,6 +608,21 @@ inline cudf::ast::literal const& emplace_literal(std::unique_ptr<cudf::scalar> s
             return tree.emplace<cudf::ast::literal>(static_cast<cudf::numeric_scalar<bool>&>(ref));
         case cudf::type_id::STRING:
             return tree.emplace<cudf::ast::literal>(static_cast<cudf::string_scalar&>(ref));
+        case cudf::type_id::TIMESTAMP_DAYS:
+            return tree.emplace<cudf::ast::literal>(
+                static_cast<cudf::timestamp_scalar<cudf::timestamp_D>&>(ref));
+        case cudf::type_id::TIMESTAMP_SECONDS:
+            return tree.emplace<cudf::ast::literal>(
+                static_cast<cudf::timestamp_scalar<cudf::timestamp_s>&>(ref));
+        case cudf::type_id::TIMESTAMP_MILLISECONDS:
+            return tree.emplace<cudf::ast::literal>(
+                static_cast<cudf::timestamp_scalar<cudf::timestamp_ms>&>(ref));
+        case cudf::type_id::TIMESTAMP_MICROSECONDS:
+            return tree.emplace<cudf::ast::literal>(
+                static_cast<cudf::timestamp_scalar<cudf::timestamp_us>&>(ref));
+        case cudf::type_id::TIMESTAMP_NANOSECONDS:
+            return tree.emplace<cudf::ast::literal>(
+                static_cast<cudf::timestamp_scalar<cudf::timestamp_ns>&>(ref));
         default:
             Rcpp::stop("Unsupported literal scalar type");
     }
@@ -1067,6 +1178,42 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         }
 
         return cudf::round_decimal(x_col, places, cudf::rounding_method::HALF_EVEN);
+    }
+
+    // ---- as_date(x) / as_posixct(x): TIMESTAMP_* -> TIMESTAMP_* cast
+    // (Phase 11 L3) ----
+    //
+    // Backs `as.Date()`/`as.POSIXct()` applied to an EXISTING timestamp
+    // COLUMN (R/ir.R's "as.Date"/"as.POSIXct" registry entries only emit
+    // this op when the argument's inferred type is already one of the 5
+    // TIMESTAMP_* granularities -- a STRING or numeric source returns NULL
+    // at parse time instead, falling back to L1's CPU path, and a literal
+    // argument is converted directly in R at parse time via
+    // `ir_lit_from_r(as.Date(...))`, never reaching this handler at all).
+    // `cudf::cast()` between timestamp granularities is a genuine unit
+    // conversion (not a bit reinterpretation), so this is a correct,
+    // single-kernel truncate/widen -- verified empirically (Rscript, no GPU
+    // needed) against R's own defaults: `as.Date.POSIXct()`'s default `tz`
+    // argument is the literal string `"UTC"` (NOT `attr(x, "tzone")` or
+    // `Sys.timezone()`), and `as.POSIXct.Date()`'s default `tz` is also
+    // `"UTC"` -- so both conversions operate on the UTC calendar day/instant
+    // of the underlying value regardless of the object's own display
+    // timezone. cuplyr's own POSIXct storage (`posixct_to_gpu()`,
+    // `src/transfer_io.cpp`) is already UTC-normalized (R's POSIXct is
+    // always epoch-seconds internally; only the `tzone` *display* attribute
+    // varies), so a plain `cudf::cast()` reproduces R's exact default
+    // behavior with no timezone adjustment needed on either side.
+    if (op == "as_date" || op == "as_posixct") {
+        Rcpp::List x_node = args[0];
+        cudf::size_type x_idx = materialize(x_node, ctx);
+        cudf::column_view x_col = ctx.cols[x_idx];
+
+        cudf::data_type target{op == "as_date" ? cudf::type_id::TIMESTAMP_DAYS
+                                                : cudf::type_id::TIMESTAMP_MICROSECONDS};
+        if (x_col.type().id() == target.id()) {
+            return std::make_unique<cudf::column>(x_col);
+        }
+        return cudf::cast(x_col, target);
     }
 
     // ---- if_else(cond, yes, no, missing=): copy_if_else + a second pass

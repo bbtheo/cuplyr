@@ -15,8 +15,15 @@ calling it), so this only materializes (and only then calls
 \code{align_to_schema()}) when \code{current_schema()} (the lazy-AST-aware
 schema, unlike \code{tbl$schema}) actually differs from the target -- the
 common case (x/y already schema-identical) skips both entirely,
-preserving whatever laziness \code{tbl} already had. \code{align_to_schema()}
-always resets \verb{$groups} to \code{character()} and drops \verb{$schema $factor_levels} -- both are restored here from the caller-supplied
-\code{groups} and the already-computed \code{target_schema$factor_levels}.
+preserving whatever laziness \code{tbl} already had. Names/types alone don't
+catch every case that needs a real align pass: two \code{DICTIONARY32}
+columns can share the type string while their level VECTORS differ
+(Bug 2's native remap path), so \code{factor_levels_match_target()}
+(R/bind.R) is checked too. \code{align_to_schema()}'s own return also
+resets \verb{$groups} to \code{character()} -- restored here from the
+caller-supplied \code{groups}; its \verb{$schema$factor_levels} is reset to
+whatever it computed on its own slow path (unset on the fast-path
+passthrough), so it's overwritten unconditionally here with the
+already-computed \code{target_schema$factor_levels} for consistency either way.
 }
 \keyword{internal}

@@ -602,6 +602,24 @@ parse_filter_ir <- function(quo, schema) {
 # dot may already parse into a compound `&`/`|` expression under the IR
 # cutover.
 #
+# Phase 11 L3 extends this with a TIMESTAMP_* check: a timestamp column
+# compared against a literal of the SAME granularity is fine (the normal
+# case -- `d < as.Date("2010-01-05")`, `dt >= as.POSIXct(...)`); a
+# timestamp column against a NUMERIC/BOOL8 literal is rejected (mirrors the
+# STRING check's shape/message). A timestamp column against a literal of a
+# DIFFERENT timestamp granularity (e.g. a Date column vs. an `as.POSIXct()`
+# literal) is ALSO rejected here, deliberately -- not because cuDF can't
+# compare them (a column-vs-column mismatch already promotes correctly via
+# `cudf::cast()`, see `src/expr_eval.hpp`'s `build_ast()`), but because a
+# MISMATCHED LITERAL is rebuilt directly at the wider hint type via
+# `build_scalar()`, which has no way to rescale an already-evaluated R
+# value between conventions (day-count vs. fractional seconds) -- silently
+# reinterpreting the raw number would corrupt the comparison. This is a
+# real, narrower boundary than dplyr's own (which auto-promotes Date to
+# POSIXct for such a comparison) -- pinned honestly with a message telling
+# the user to align types first (`as.POSIXct(date_col) >= posixct_lit`),
+# rather than risk silent wrongness.
+#
 # @param ir An IR node
 # @param schema The current schema (names/types)
 # @return `invisible(NULL)`; `stop()`s on a detected mismatch
@@ -612,12 +630,16 @@ check_filter_comparison_types <- function(ir, schema) {
   }
 
   cmp_ops <- c("==", "!=", "<", "<=", ">", ">=")
+  timestamp_types <- c("TIMESTAMP_DAYS", "TIMESTAMP_SECONDS", "TIMESTAMP_MILLISECONDS",
+                        "TIMESTAMP_MICROSECONDS", "TIMESTAMP_NANOSECONDS")
   if (ir$op %in% cmp_ops && length(ir$args) == 2) {
     check_pair <- function(col_node, lit_node) {
       if (!identical(col_node$kind, "col") || !identical(lit_node$kind, "lit")) {
         return(invisible(NULL))
       }
-      if (is.null(lit_node$type) || !identical(lit_node$type, "STRING")) {
+      # A bare untyped NA literal (`type = NULL`) adopts the sibling
+      # column's own type at build time (section 1.2) -- never a mismatch.
+      if (is.null(lit_node$type)) {
         return(invisible(NULL))
       }
       # unname(): `schema$types[match(...)]` is a *named* single-element
@@ -629,11 +651,40 @@ check_filter_comparison_types <- function(ir, schema) {
       # below instead of returning early (T4 oracle-testing finding: this
       # broke every string filter comparison against a literal).
       col_type <- unname(schema$types[match(col_node$name, schema$names)])
-      if (is.na(col_type) || identical(col_type, "STRING")) {
+      if (is.na(col_type)) {
         return(invisible(NULL))
       }
-      stop("Cannot compare column '", col_node$name, "' (", col_type,
-           ") with a character literal.", call. = FALSE)
+
+      lit_type <- lit_node$type
+
+      if (identical(lit_type, "STRING")) {
+        if (identical(col_type, "STRING")) {
+          return(invisible(NULL))
+        }
+        stop("Cannot compare column '", col_node$name, "' (", col_type,
+             ") with a character literal.", call. = FALSE)
+      }
+
+      col_is_ts <- col_type %in% timestamp_types
+      lit_is_ts <- lit_type %in% timestamp_types
+
+      if (col_is_ts && lit_is_ts) {
+        if (identical(col_type, lit_type)) {
+          return(invisible(NULL))
+        }
+        stop("Cannot compare column '", col_node$name, "' (", col_type,
+             ") with a literal of a different timestamp precision (", lit_type,
+             "). Cast one side to match first (e.g. as.Date()/as.POSIXct()).",
+             call. = FALSE)
+      }
+
+      if (col_is_ts || lit_is_ts) {
+        stop("Cannot compare column '", col_node$name, "' (", col_type,
+             ") with a ", if (lit_is_ts) "timestamp" else "numeric",
+             " literal (", lit_type, ").", call. = FALSE)
+      }
+
+      invisible(NULL)
     }
     check_pair(ir$args[[1]], ir$args[[2]])
     check_pair(ir$args[[2]], ir$args[[1]])

@@ -14,8 +14,9 @@ List with \code{names} and \code{types} (and possibly \code{factor_levels})
 }
 \description{
 Pending-lazy-AST-aware: if \code{.data} is lazy and has pending operations,
-infers the schema from the AST (\verb{$lazy_ops}); otherwise returns the
-table's base \verb{$schema}. This is the canonical replacement for the
+infers the schema from the AST (\verb{$lazy_ops}) via \code{infer_schema_full()}
+(factor_levels-aware, see its own docs); otherwise returns the table's
+base \verb{$schema}. This is the canonical replacement for the
 \code{current_schema}/\verb{current schema} blocks duplicated inline across verbs.
 }
 \keyword{internal}

@@ -4,7 +4,7 @@
 \alias{cast_column}
 \title{Cast a column to a different type}
 \usage{
-cast_column(tbl, col_name, target_type)
+cast_column(tbl, col_name, target_type, source_levels = NULL)
 }
 \arguments{
 \item{tbl}{A tbl_gpu object}
@@ -12,6 +12,14 @@ cast_column(tbl, col_name, target_type)
 \item{col_name}{Name of column to cast}
 
 \item{target_type}{Target type string}
+
+\item{source_levels}{For a \code{DICTIONARY32} source column being cast to
+\code{STRING} (dplyr's factor + character -> character contract, Bug 3 of
+Phase 11 L2): this column's OWN level vector, decoded via
+\code{gpu_decode_factor()} instead of \code{gpu_cast_to_string()}'s numeric-only
+path (which only ever sees the PHYSICAL INT32 column and would
+silently emit its raw codes as strings, e.g. \code{"2"} instead of \code{"m"}).
+\code{NULL}/unused for every other source type.}
 }
 \value{
 A tbl_gpu with the column cast to the target type

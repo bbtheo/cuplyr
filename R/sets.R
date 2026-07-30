@@ -130,15 +130,15 @@ resolve_set_op_other_side <- function(y) {
 #'
 #' Mirrors `dplyr:::is_compatible()` (verified empirically against dplyr
 #' 1.2.1 + vctrs `vec_ptype2()`): same column count, same column name SET
-#' (order tolerated), and a per-column common type. Deliberately NOT the
-#' same promotion rule as this package's own `bind_rows()`
-#' (`promote_types()`, R/bind.R): that function treats `STRING` as a
-#' universal widest type (any type silently coerces to STRING), which is
-#' exactly the coercion vctrs' `vec_ptype2()` REFUSES for a numeric/date
-#' column vs. a character one (verified: `vec_ptype2(1L, "a")` errors,
-#' unlike `bind_rows()`'s silent STRING promotion) -- dplyr's real set-op
-#' contract is the STRICTER one, so this reimplements vctrs' common-type
-#' ladder rather than reusing `promote_types()`.
+#' (order tolerated), and a per-column common type, via
+#' `resolve_common_col_type()` (R/bind.R). As of Phase 11 L4 this is
+#' EXACTLY the same ladder `bind_rows()`'s own `compute_unified_schema()`
+#' uses -- the two used to diverge (this function reimplemented vctrs'
+#' stricter common-type ladder from scratch because `bind_rows()`'s old
+#' `promote_types()` treated `STRING` as a universal widest type, silently
+#' coercing a numeric/date column against a character one, which real
+#' vctrs' `vec_ptype2()` REFUSES -- verified: `vec_ptype2(1L, "a")` errors).
+#' `promote_types()` is gone; both verbs now share one strict ladder.
 #'
 #' Factor columns get a four-way split (verified against real
 #' `vec_ptype2()` behavior for factors, see inline comments): both-factor
@@ -151,13 +151,23 @@ resolve_set_op_other_side <- function(y) {
 #' `bind_rows()`'s own Bug 3 fix) -- both used to route through
 #' `$needs_fallback` before these two GPU primitives existed. Factor vs.
 #' anything else (numeric, date, ...) is a genuine vctrs error, reproduced
-#' here directly. `$needs_fallback` now only fires for the `Date`-vs-
-#' `POSIXct` timestamp-promotion gap (see the timestamp ladder branch
-#' below).
+#' here directly.
+#'
+#' Phase 11 L4: the per-column ladder itself is now
+#' `resolve_common_col_type()` (R/bind.R), shared verbatim with
+#' `bind_rows()`'s own `compute_unified_schema()` -- this function now only
+#' adds the column-count/name-SET checks and its own verb-specific
+#' ("`x` and `y` are not compatible.", bulleted) error formatting on top.
+#' The `Date`-vs-`POSIXct` timestamp promotion that used to require
+#' `$needs_fallback` (no native `TIMESTAMP_DAYS` -> `TIMESTAMP_MICROSECONDS`
+#' cast existed yet) is now unconditionally native as of Phase 11 L3
+#' (`gpu_cast_column()` gained the 5 timestamp targets) -- `$needs_fallback`
+#' is now ALWAYS `FALSE` and kept only for call-site compatibility (every
+#' caller in this file still checks it).
 #'
 #' @param x_schema,y_schema Schemas (`current_schema()`) of `x`/`y`.
 #' @return A list with `$target_schema` (unified schema, x's names/order)
-#'   and `$needs_fallback` (logical).
+#'   and `$needs_fallback` (logical, always `FALSE` as of Phase 11 L4).
 #' @keywords internal
 check_set_op_compatible <- function(x_schema, y_schema) {
   nx <- length(x_schema$names)
@@ -189,14 +199,8 @@ check_set_op_compatible <- function(x_schema, y_schema) {
     abort_set_op_incompatible(bullets)
   }
 
-  numeric_ladder <- c("BOOL8", "INT32", "INT64", "FLOAT64")
-  timestamp_ladder <- c("TIMESTAMP_DAYS", "TIMESTAMP_SECONDS",
-                         "TIMESTAMP_MILLISECONDS", "TIMESTAMP_MICROSECONDS",
-                         "TIMESTAMP_NANOSECONDS")
-
   promoted_types <- character(nx)
   factor_levels <- list()
-  needs_fallback <- FALSE
 
   for (i in seq_len(nx)) {
     nm <- names_x[i]
@@ -204,59 +208,19 @@ check_set_op_compatible <- function(x_schema, y_schema) {
     ty <- unname(y_schema$types[match(nm, y_schema$names)])
     fx <- set_op_is_factor(x_schema, nm)
     fy <- set_op_is_factor(y_schema, nm)
+    lvls_x <- if (fx) x_schema$factor_levels[[nm]] else NULL
+    lvls_y <- if (fy) y_schema$factor_levels[[nm]] else NULL
 
-    if (fx && fy) {
-      # Level UNION (Bug 2 fix, shared contract with bind_rows()'s own
-      # compute_unified_schema()): identical levels is a no-op union;
-      # differing levels is native too -- align_set_op_side() ->
-      # align_to_schema() remaps each side's codes via gpu_remap_codes().
-      lvls_x <- x_schema$factor_levels[[nm]]
-      lvls_y <- y_schema$factor_levels[[nm]]
-      promoted_types[i] <- tx
-      factor_levels[[nm]] <- if (identical(lvls_x, lvls_y)) lvls_x else union(lvls_x, lvls_y)
-      next
-    }
-
-    if (xor(fx, fy)) {
-      other_type <- if (fx) ty else tx
-      if (identical(other_type, "STRING")) {
-        # Decode contract (Bug 3 fix): factor + character -> character.
-        # align_to_schema()'s cast_column() decodes the factor side via
-        # gpu_decode_factor() -- no factor_levels entry on the result (it's
-        # STRING, not DICTIONARY32).
-        promoted_types[i] <- "STRING"
-      } else {
-        abort_set_op_incompatible(sprintf(
-          "✖ Incompatible types for column `%s`: %s vs %s.",
-          nm, set_op_type_label(tx, fx), set_op_type_label(ty, fy)
-        ))
-      }
-      next
-    }
-
-    if (identical(tx, ty)) {
-      promoted_types[i] <- tx
-    } else if (tx %in% numeric_ladder && ty %in% numeric_ladder) {
-      promoted_types[i] <- numeric_ladder[max(match(tx, numeric_ladder), match(ty, numeric_ladder))]
-    } else if (tx %in% timestamp_ladder && ty %in% timestamp_ladder) {
-      # vctrs (and dplyr's set ops) happily promote e.g. Date + POSIXct to
-      # POSIXct (verified empirically) -- but this package's own
-      # `gpu_cast_column()` (src/ops_bind.cpp, shared with `bind_rows()`)
-      # only implements numeric-family casts, not a real TIMESTAMP_DAYS ->
-      # TIMESTAMP_MICROSECONDS cast (a pre-existing `bind_rows()` gap this
-      # phase doesn't fix -- out of scope, no new cuDF primitive families
-      # expected here). Since the two types already differ (this branch is
-      # only reached when `identical(tx, ty)` above was FALSE), an actual
-      # cast is always required here and always unsupported -- defer to
-      # the CPU fallback rather than let `align_to_schema()` crash with a
-      # raw C++ "Unsupported target type for casting" exception.
-      needs_fallback <- TRUE
-      promoted_types[i] <- timestamp_ladder[max(match(tx, timestamp_ladder), match(ty, timestamp_ladder))]
-    } else {
+    res <- resolve_common_col_type(tx, ty, fx, fy, lvls_x, lvls_y)
+    if (!isTRUE(res$ok)) {
       abort_set_op_incompatible(sprintf(
         "✖ Incompatible types for column `%s`: %s vs %s.",
-        nm, set_op_type_label(tx, FALSE), set_op_type_label(ty, FALSE)
+        nm, set_op_type_label(tx, fx), set_op_type_label(ty, fy)
       ))
+    }
+    promoted_types[i] <- res$type
+    if (!is.null(res$factor_levels)) {
+      factor_levels[[nm]] <- res$factor_levels
     }
   }
 
@@ -266,7 +230,7 @@ check_set_op_compatible <- function(x_schema, y_schema) {
       types = promoted_types,
       factor_levels = if (length(factor_levels) > 0) factor_levels else NULL
     ),
-    needs_fallback = needs_fallback
+    needs_fallback = FALSE
   )
 }
 
@@ -352,15 +316,13 @@ restore_set_op_factor_levels <- function(result, target_schema) {
 #' Two factor columns with different level sets (level-union remap,
 #' `gpu_remap_codes()`) and a factor column vs. a character column (decode
 #' to labels, `gpu_decode_factor()`) are both GPU-native as of Phase 11 L2.
-#' One column-type combination that dplyr itself accepts still isn't
-#' implemented natively and transparently falls back to CPU evaluation
-#' instead (a `cuplyr.fallback` notification fires, see
-#' [cuplyr_fallback_notify()]): a `Date` column vs. a `POSIXct` column
-#' (dplyr promotes to `POSIXct`; the underlying GPU cast this package's
-#' `bind_rows()` machinery would need -- `TIMESTAMP_DAYS` ->
-#' `TIMESTAMP_MICROSECONDS` -- isn't implemented, see
-#' `check_set_op_compatible()`). Every other column-type mismatch that
-#' would be a genuine error in real dplyr (e.g. integer vs. character, or
+#' A `Date` column vs. a `POSIXct` column (dplyr promotes to `POSIXct`) is
+#' ALSO GPU-native as of Phase 11 L3 (`gpu_cast_column()` gained the
+#' `TIMESTAMP_DAYS` -> `TIMESTAMP_MICROSECONDS` cast, among the other 4
+#' timestamp-granularity targets) -- no column-type combination that real
+#' dplyr accepts still needs the CPU fallback (`$needs_fallback` is always
+#' `FALSE`, see `check_set_op_compatible()`). Every column-type mismatch
+#' that's a genuine error in real dplyr (e.g. integer vs. character, or
 #' factor vs. integer) errors here too, naming the offending column and
 #' both types.
 #'
