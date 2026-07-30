@@ -7,11 +7,10 @@
 #' scalar describing the whole join's filter semantics (`"none"` for a plain
 #' equi/inequality join; `"max"`/`"min"` for `closest()` joins -- Phase 7 J7).
 #' Every form this function currently understands (`NULL`, an unnamed
-#' character vector, a named character vector, or an already-parsed spec
-#' list) produces an all-equi spec: `op` is `"=="` for every key and `filter`
-#' is `"none"`. `join_by()` objects (class `dplyr_join_by`) are rejected for
-#' now -- non-equi condition support lands in Phase 7 J7, which lifts this
-#' rejection.
+#' character vector, or a named character vector) produces an all-equi spec:
+#' `op` is `"=="` for every key and `filter` is `"none"`. `join_by()` objects
+#' (class `dplyr_join_by`) are rejected for now -- non-equi condition support
+#' lands in Phase 7 J7, which lifts this rejection.
 #' @keywords internal
 parse_join_by <- function(by, x, y) {
   if (is.null(by)) {
@@ -26,19 +25,6 @@ parse_join_by <- function(by, x, y) {
 
   if (inherits(by, "dplyr_join_by")) {
     stop("`join_by()` is not supported yet for tbl_gpu joins.", call. = FALSE)
-  }
-
-  # Already-parsed spec (e.g. `swapped_by` built by
-  # build_right_join_via_left() for the right_join()-via-left_join() plan):
-  # a plain list with character `left`/`right` elements. Accept and return
-  # as-is (filling in `op`/`filter` if the caller didn't already carry them)
-  # so callers may pass a pre-built spec straight through without
-  # re-encoding it as a named character vector.
-  if (is.list(by) && !is.data.frame(by) &&
-      is.character(by$left) && is.character(by$right)) {
-    op <- if (!is.null(by$op)) by$op else rep("==", length(by$left))
-    filter <- if (!is.null(by$filter)) by$filter else "none"
-    return(list(left = by$left, right = by$right, op = op, filter = filter))
   }
 
   if (is.character(by) && is.null(names(by))) {
@@ -189,143 +175,6 @@ build_join_schema <- function(left_schema, right_schema, join_spec,
   info <- build_join_output_info(left_schema, right_schema, join_spec,
                                  suffix = suffix, keep = keep)
   list(names = info$names, types = info$types)
-}
-
-#' Build the join spec and desired output schema for right_join(),
-#' implemented via a swapped left_join()
-#'
-#' `right_join(x, y)` is implemented as `left_join(y, x)` with the key sides
-#' swapped and `keep = TRUE` forced (so both original key columns survive the
-#' join uncombined), followed by reordering/selecting down to the column set
-#' and names a native right join would produce. This helper computes the two
-#' pieces of that plan that are pure functions of the input schemas (i.e. that
-#' don't require the swapped join to have actually run yet).
-#'
-#' `right_join.tbl_gpu()` (this file) always builds a `"right"`-typed
-#' `ast_join` node and hands it to `push_join()` (`R/execute.R`), which
-#' lowers it -- in both the eager and lazy schedules -- via `lower_join()`'s
-#' `"right"` case (`R/lower.R`). That is the single caller of this helper: it
-#' calls `gpu_left_join()` on the swapped sides, then this helper's plan
-#' (via `resolve_right_join_select_idx()`) to reorder/rename the raw output.
-#'
-#' Unlike the swapped join itself, the reorder/select plan resolved by
-#' [resolve_right_join_select_idx()] is a pure function of the schemas too --
-#' it matches desired output columns to the swapped join's (formulaic, always
-#' `keep = TRUE`) raw output columns by origin table + raw source name, not
-#' by the swapped join's actual runtime column names -- so callers may
-#' compute it before or after actually running the swapped join.
-#'
-#' @param left_schema Schema of the (original) left table.
-#' @param right_schema Schema of the (original) right table.
-#' @param join_spec List with `left`/`right` character vectors of join key
-#'   column names, as returned by `parse_join_by()`.
-#' @param suffix Suffix pair for non-key name collisions, as in `right_join()`.
-#' @param keep Whether to keep both key columns, as in `right_join()`.
-#' @return A list with:
-#'   - `swapped_by`: the join spec to pass to `left_join(y, x, by = ...)`
-#'   - `desired_names`: the output column names a native right join would have
-#'   - `desired_types`: the output column GPU types, parallel to `desired_names`
-#'   - `desired_origin`: for each `desired_names` entry, whether it is
-#'     sourced from the original `"left"` (`x`) or `"right"` (`y`) table
-#'   - `desired_source`: for each `desired_names` entry, the raw column name
-#'     in its origin table's schema (before any suffixing)
-#' @keywords internal
-build_right_join_via_left <- function(left_schema, right_schema, join_spec,
-                                      suffix = c(".x", ".y"), keep = FALSE) {
-  swapped_by <- list(left = join_spec$right, right = join_spec$left)
-
-  desired_info <- build_join_output_info(left_schema, right_schema, join_spec,
-                                         suffix = suffix, keep = keep)
-
-  desired_origin <- desired_info$origin
-  desired_source <- desired_info$source_names
-
-  if (!isTRUE(keep)) {
-    # `keep = FALSE`'s single output key column carries x's (the original
-    # left table's) display name and position, per dplyr's `by = c(x = y)`
-    # naming convention -- that part of desired_info is correct as-is.
-    # But because a right_join is driven by y (every row of y survives) and
-    # the swapped left_join(y, x) NA-fills x's columns for right-only rows,
-    # sourcing that key column's *values* from x (as build_join_output_info
-    # naturally does, since it's the left-origin copy) reproduces the
-    # coalescing gap documented in scratchpad/unification_design.md Part C:
-    # right-only rows would get NA instead of the key value. y's raw key
-    # column is always present (right_join keeps every y row), so re-point
-    # just the key columns' value source to the right (y) side; the display
-    # name/type contract (desired_names/desired_types) is untouched.
-    source_in_left <- ifelse(desired_info$origin == "left",
-                             desired_info$source_names, NA_character_)
-    key_pos <- match(join_spec$left, source_in_left)
-    desired_origin[key_pos] <- "right"
-    desired_source[key_pos] <- join_spec$right
-  }
-
-  list(
-    swapped_by = swapped_by,
-    desired_names = desired_info$names,
-    desired_types = desired_info$types,
-    desired_origin = desired_origin,
-    desired_source = desired_source
-  )
-}
-
-#' Resolve the column reorder/select for a right-join-via-swapped-left-join
-#'
-#' The swapped `left_join(y, x, ...)` used to implement `right_join(x, y)` is
-#' always executed with `keep = TRUE` internally (so both original join-key
-#' columns survive, uncombined), regardless of what the caller's `keep`
-#' actually requested. That means its raw output column names never contain
-#' a bare, unsuffixed key name when the two tables' keys share a name -- only
-#' the suffixed variants (e.g. `"id.x"`/`"id.y"`) do. A plain name-based match
-#' of [build_right_join_via_left()]'s `desired_names` (which, for
-#' `keep = FALSE`, wants a single unsuffixed key column) against those raw
-#' names would therefore always fail to find it.
-#'
-#' Instead, this matches columns by *origin* (which original table, `x` or
-#' `y`, they are sourced from) and *raw source name* -- a pair that uniquely
-#' identifies a physical column regardless of what suffix it ends up
-#' displayed with. The desired schema's origins are relative to the
-#' original, unswapped `x`/`y`; the swapped join's own output-info origins
-#' are relative to *its* call (`"left"` = original `y`, `"right"` = original
-#' `x`), so they're translated back before comparing.
-#'
-#' Key-coalescing note: because the swapped join is a left join keeping every
-#' row of the original right table (`y`), the copy of the key column sourced
-#' from the original *left* table (`x`) is `NULL` for right-only rows (`x`
-#' has no matching row at all). [build_right_join_via_left()] handles this by
-#' re-pointing the `keep = FALSE` key column's *source* (not its display
-#' name, which still follows dplyr's `by = c(x_col = y_col)` convention) to
-#' the always-present `y` copy for such rows, so `desired_origin`/
-#' `desired_source` here already reflect the coalesced source -- this
-#' function just needs to find the matching raw column, whichever side it
-#' now points at. This mirrors the same-shaped `full_join()` join-key
-#' coalescing fix in `src/ops_join.cpp` (see `test-join.R`).
-#'
-#' @param plan The list returned by [build_right_join_via_left()].
-#' @param left_schema,right_schema Schemas of the original (unswapped) left
-#'   and right tables.
-#' @param suffix Suffix pair as passed to `right_join()`.
-#' @return Integer vector, 1-based indices into the swapped join's raw output
-#'   columns that select/reorder/rename it into `plan$desired_names`.
-#' @keywords internal
-resolve_right_join_select_idx <- function(plan, left_schema, right_schema, suffix) {
-  actual_info <- build_join_output_info(right_schema, left_schema, plan$swapped_by,
-                                        suffix = rev(suffix), keep = TRUE)
-
-  # actual_info$origin is relative to the swapped call: "left" = the original
-  # right table (y), "right" = the original left table (x). Flip it back to
-  # original left/right terms so it's comparable to plan$desired_origin.
-  actual_origin <- ifelse(actual_info$origin == "left", "right", "left")
-  actual_key <- paste(actual_origin, actual_info$source_names, sep = "\r")
-  desired_key <- paste(plan$desired_origin, plan$desired_source, sep = "\r")
-
-  idx <- match(desired_key, actual_key)
-  if (any(is.na(idx))) {
-    stop("Right join column reordering failed. Missing columns: ",
-         paste(plan$desired_names[is.na(idx)], collapse = ", "),
-         call. = FALSE)
-  }
-  idx
 }
 
 estimate_gpu_bytes <- function(nrow, types) {
@@ -646,15 +495,18 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   validate_key_types(x, y, join_spec)
   keep <- resolve_join_keep(keep, join_spec)
 
-  # right_join(x, y) is implemented as a swapped left_join(y, x) (keeping
-  # every row of y, NA-filling unmatched x columns), reordered/renamed down
-  # to the column set and names a native right join would produce. This is
-  # just another "right"-typed ast_join node -- push_join() (R/execute.R)
-  # dispatches it through the same unified eager/lazy path as the other join
-  # types, and lower_join()'s "right" case (R/lower.R) performs the actual
-  # swap + positional gpu_select() using the shared plan helpers
-  # (build_right_join_via_left() / resolve_right_join_select_idx()), so both
-  # schedules agree on the resulting schema.
+  # right_join(x, y) is native (Phase 7 J4): gpu_right_join()
+  # (src/ops_join.cpp) computes matched (x, y) pairs via cudf::inner_join()
+  # plus unmatched-y rows via a filtered_join anti-join, assembled so the
+  # shared stable-sort/gather/coalesce pipeline (build_join_result(), used
+  # by every mutating join type) reproduces dplyr's row-order contract:
+  # x-matched rows in x's order, then unmatched-y rows appended last. This
+  # is just another "right"-typed ast_join node -- push_join()
+  # (R/execute.R) dispatches it through the same unified eager/lazy path as
+  # the other join types, and lower_join()'s "right" case (R/lower.R) calls
+  # gpu_right_join() with exactly the same argument shape as
+  # gpu_left_join()/gpu_inner_join()/gpu_full_join(), so both schedules
+  # agree on the resulting schema.
   push_join("right", x, y, join_spec, suffix = suffix, keep = keep,
            na_matches = na_matches, multiple = multiple, unmatched = unmatched,
            relationship = relationship)

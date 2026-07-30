@@ -261,6 +261,21 @@ lower_rename <- function(ast, source_ptr) {
 }
 
 #' Lower join node
+#'
+#' The four "mutating" join types (`"left"`/`"inner"`/`"full"`/`"right"`) all
+#' share the same C++ calling convention -- `left_key_idx`/`right_key_idx`/
+#' `right_drop_idx`/`nulls_equal` -- and their GPU entry points
+#' (`gpu_left_join()`/`gpu_inner_join()`/`gpu_full_join()`/`gpu_right_join()`,
+#' `src/ops_join.cpp`) all return `list(ptr, diag)` (Phase 7 J4's map-pipeline
+#' restructure): `ptr` is the result table's external pointer, `diag` is a
+#' first-offender diagnostics list that nothing consumes yet
+#' (`check_join_cardinality()`'s multiple=/unmatched=/relationship= behavior
+#' lands in Phase 7 J5 -- for now `diag` is unpacked and discarded, not
+#' acted on). `right_join()` used to be lowered via a swapped `left_join(y,
+#' x)` plus a column reorder/select (`build_right_join_via_left()`/
+#' `resolve_right_join_select_idx()`, since removed) -- `gpu_right_join()` is
+#' now native and takes exactly the same argument shape as the other three,
+#' so no special-casing is needed here beyond the switch itself.
 #' @keywords internal
 lower_join <- function(ast, source_ptr) {
   left_ptr <- lower_and_execute(ast$left, source_ptr)
@@ -285,19 +300,37 @@ lower_join <- function(ast, source_ptr) {
   # scratchpad/phase7_joins_design.md task J1.
   nulls_equal <- !identical(ast$na_matches, "never")
 
-  switch(ast$join_type,
-    "left" = gpu_left_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
-                           right_drop_idx, nulls_equal),
-    "inner" = gpu_inner_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
+  mutating_join_types <- c("left", "inner", "full", "right")
+
+  if (ast$join_type %in% mutating_join_types) {
+    result <- switch(ast$join_type,
+      "left" = gpu_left_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
                              right_drop_idx, nulls_equal),
-    "full" = gpu_full_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
-                           right_drop_idx, nulls_equal),
+      "inner" = gpu_inner_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
+                               right_drop_idx, nulls_equal),
+      "full" = gpu_full_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
+                             right_drop_idx, nulls_equal),
+      # right (Phase 7 J4): native via cudf::inner_join() for matched pairs
+      # plus a filtered_join anti-join for unmatched-y rows, assembled and
+      # fed through the same stable-sort/gather/coalesce pipeline every
+      # other mutating join uses -- see gpu_right_join()'s own comment
+      # (src/ops_join.cpp) for the sentinel/sort-order argument that
+      # reproduces dplyr's x-matched-order-then-unmatched-y-tail contract.
+      "right" = gpu_right_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
+                               right_drop_idx, nulls_equal)
+    )
+    return(result$ptr)
+  }
+
+  switch(ast$join_type,
     # semi/anti (Phase 7 J2): native via cudf::filtered_join
     # (gpu_semi_anti_join(), src/ops_join.cpp) -- builds the hash table from
     # the right/key table, probes with the left table, sorts the returned
     # (unordered, non-duplicated) left-row index vector ascending before
     # gathering the FULL left table (no right columns at all -- see
-    # infer_schema.ast_join's semi/anti branch, x's schema verbatim).
+    # infer_schema.ast_join's semi/anti branch, x's schema verbatim). No
+    # diag list here -- semi_join()/anti_join() have no multiple=/unmatched=/
+    # relationship= in dplyr's own signatures.
     "semi" = gpu_semi_anti_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
                                FALSE, nulls_equal),
     "anti" = gpu_semi_anti_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
@@ -309,21 +342,6 @@ lower_join <- function(ast, source_ptr) {
     # cross_join.tbl_gpu() (R/join.R) builds an empty spec + keep = TRUE, and
     # build_join_output_info() with keep = TRUE never drops any right column.
     "cross" = gpu_cross_join(left_ptr, right_ptr),
-    "right" = {
-      # Implement right join via swapped left join, then reorder columns.
-      # Shared with the eager path in right_join.tbl_gpu() (R/join.R) via
-      # build_right_join_via_left() / resolve_right_join_select_idx() --
-      # right_join.tbl_gpu() builds this exact ast_join("right", ...) node
-      # whenever either input is lazy, so this branch is the live lazy path
-      # and must stay in lockstep with the eager one (including the
-      # keep = FALSE join-key coalescing fix in build_right_join_via_left()).
-      plan <- build_right_join_via_left(left_schema, right_schema, ast$by,
-                                        suffix = ast$suffix, keep = ast$keep)
-      out <- gpu_left_join(right_ptr, left_ptr, right_key_idx, left_key_idx,
-                           integer(0), nulls_equal)
-      idx <- resolve_right_join_select_idx(plan, left_schema, right_schema, ast$suffix)
-      gpu_select(out, idx - 1L)
-    },
     stop("Unknown join type: ", ast$join_type, call. = FALSE)
   )
 }

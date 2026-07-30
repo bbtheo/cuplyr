@@ -521,3 +521,77 @@ test_that("semi_join()/anti_join() reject bad na_matches values with dplyr's exa
     fixed = TRUE
   )
 })
+
+# =============================================================================
+# Phase 7 J4: right_join() row-order contract (test-first pin)
+#
+# KNOWN LIVE DIVERGENCE (scratchpad/phase7_joins_design.md section 2, fixed by
+# this task): the OLD right_join.tbl_gpu() implementation ran a swapped
+# left_join(y, x) and reordered/renamed columns after the fact -- but never
+# reordered ROWS, so the result came back in *y's own row order* (cudf's
+# left_join, applied with y in the "left" role, preserves y's row order).
+# dplyr's actual right_join() contract is different (verified empirically
+# against dplyr 1.2.1, both here and independently via a standalone Rscript
+# check against real dplyr, not the GPU code): x-MATCHED rows come first, in
+# x's own row order, and unmatched-y rows are appended LAST. This is the same
+# shape as full_join()'s left-order-then-right-only-tail contract, just
+# restricted to right_join's smaller row set (x-unmatched rows are dropped
+# entirely, not kept).
+#
+# This test deliberately shuffles y relative to x's match order AND places a
+# y-only row EARLY in y, so the old (wrong) y-order implementation and the
+# correct x-matched-order implementation produce genuinely different row
+# orders -- not just genuinely different in theory, but empirically
+# different for this exact fixture (checked against real dplyr above). NO
+# arrange_by() here: row order is the entire point of this test.
+# =============================================================================
+
+test_that("right_join() row order matches dplyr: x-matched order then unmatched-y tail", {
+  skip_if_no_gpu()
+
+  # x's own row order is id = 3, 1, 2 (plus a 4th, id = 9, with no y match at
+  # all -- dropped entirely by right_join, exercising that unmatched-LEFT
+  # rows are correctly excluded, not just correctly ordered).
+  left_df <- data.frame(id = c(3, 1, 2, 9), v = c(30, 10, 20, 90))
+  # y is shuffled relative to x's match order, with a y-only row (id = 5)
+  # placed FIRST -- the old swapped-left-join implementation would put id 5
+  # first (y's own row order); dplyr puts it last.
+  right_df <- data.frame(id = c(5, 2, 1, 3), w = c(500, 200, 100, 300))
+
+  expected <- dplyr::right_join(left_df, right_df, by = "id")
+  # Pin the oracle itself, not just the GPU result, so this test documents
+  # dplyr's real contract independent of any GPU bug: x-matched rows (3, 1,
+  # 2) in x's order, then the unmatched-y row (5) last.
+  expect_equal(expected$id, c(3, 1, 2, 5))
+
+  eager <- dplyr::right_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "id") |>
+    collect()
+  lazy <- dplyr::right_join(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df, lazy = TRUE),
+                            by = "id") |>
+    collect()
+
+  expect_equal(as.data.frame(eager), as.data.frame(expected))
+  expect_equal(as.data.frame(lazy), as.data.frame(expected))
+})
+
+test_that("right_join() duplicate matches: right rows for one left row appear in right's own order", {
+  skip_if_no_gpu()
+
+  # id = 1 matches THREE right rows -- dplyr's contract (verified empirically
+  # against dplyr 1.2.1) is that they appear in right_df's own row order for
+  # that shared left row: 100, 200, 400 (not sorted, not reversed).
+  left_df <- data.frame(id = c(1, 2), v = c("a", "b"))
+  right_df <- data.frame(id = c(1, 1, 2, 1), w = c(100, 200, 300, 400))
+
+  expected <- dplyr::right_join(left_df, right_df, by = "id")
+  expect_equal(expected$w, c(100, 200, 400, 300))
+
+  eager <- dplyr::right_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "id") |>
+    collect()
+  lazy <- dplyr::right_join(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df, lazy = TRUE),
+                            by = "id") |>
+    collect()
+
+  expect_equal(as.data.frame(eager), as.data.frame(expected))
+  expect_equal(as.data.frame(lazy), as.data.frame(expected))
+})

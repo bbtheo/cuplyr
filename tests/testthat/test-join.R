@@ -165,23 +165,33 @@ test_that("join results match dplyr in eager and lazy modes (edge cases)", {
 # =============================================================================
 # full_join() / right_join() coverage
 #
-# Neither had any test coverage before this file (see scratchpad/todo.md
-# Phase 0). cuDF's full/right join primitives don't guarantee dplyr's row
-# order (dplyr keeps left-table order for full_join, matched rows first, then
-# unmatched right rows appended; right_join preserves right-table order), so
-# comparisons below arrange() both the oracle and the GPU result by a
-# deterministic key before comparing values. This is noted per the roadmap
-# instructions and matches the ordering caveat already documented for joins
-# in CLAUDE.md ("cuDF join outputs are unordered").
+# Row order IS part of dplyr's contract for both verbs, and is pinned
+# directly (no arrange_by()) throughout this section as of Phase 7 J4:
+#   - full_join(): left-table row order first (matched or not), then
+#     right-only rows appended last, in right-table order.
+#   - right_join(): x-matched rows first, in x's own row order, then
+#     unmatched-y rows appended last, in y's order (Phase 7 J4 fixed a real
+#     divergence here -- see test-dplyr-join.R's dedicated order-pin test
+#     for the failing-before/passing-after story). Both verified empirically
+#     against dplyr 1.2.1 and matched exactly by src/ops_join.cpp's shared
+#     stable-sort-then-gather pipeline (build_join_result()).
+#
+# `compare_join_modes()`'s `arrange_by` parameter still exists for any future
+# caller that legitimately can't pin exact order (e.g. a case with genuinely
+# ambiguous match ordering), but no call site in this file uses it anymore --
+# every scenario here has a single deterministic dplyr row order, verified
+# against the dplyr-on-data.frame oracle before removing the arrange_by()
+# that used to paper over it.
 # =============================================================================
 
 # Shared helper: run `join_fn` (full_join/right_join/etc.) eagerly AND lazily
 # on tbl_gpu, and compare both against the dplyr oracle. `arrange_by`, when
-# given, sorts all three results before comparing so row-order differences
-# (legitimate for full/right joins) don't cause spurious failures. `ignore_cols`
-# drops columns from the comparison entirely -- available for callers that
-# need to exclude a column for reasons unrelated to join-key coalescing (that
-# gap is fixed; see src/ops_join.cpp and R/join.R).
+# given, sorts all three results before comparing -- available for a
+# genuinely order-ambiguous scenario, though nothing in this file needs it
+# (see the section comment above). `ignore_cols` drops columns from the
+# comparison entirely -- available for callers that need to exclude a column
+# for reasons unrelated to join-key coalescing (that gap is fixed; see
+# src/ops_join.cpp and R/join.R).
 compare_join_modes <- function(left_df, right_df, join_fn, by, ...,
                                 arrange_by = NULL, ignore_cols = NULL) {
   expected <- join_fn(left_df, right_df, by = by, ...)
@@ -252,8 +262,7 @@ test_that("full_join() basic case matches dplyr oracle", {
   left_df <- data.frame(id = c(1, 2, 3), x = c(10, 20, 30))
   right_df <- data.frame(id = c(2, 3, 4), y = c(200, 300, 400))
 
-  compare_join_modes(left_df, right_df, dplyr::full_join, by = "id",
-                     arrange_by = c("x", "y"))
+  compare_join_modes(left_df, right_df, dplyr::full_join, by = "id")
 })
 
 test_that("full_join() fills unmatched rows with NA on both sides", {
@@ -286,8 +295,7 @@ test_that("full_join() works with multi-column keys", {
   left_df <- data.frame(k1 = c(1, 1, 2), k2 = c(10, 20, 10), x = c(5, 6, 7))
   right_df <- data.frame(k1 = c(1, 2, 2), k2 = c(10, 10, 30), y = c(50, 70, 80))
 
-  compare_join_modes(left_df, right_df, dplyr::full_join, by = c("k1", "k2"),
-                     arrange_by = c("x", "y"))
+  compare_join_modes(left_df, right_df, dplyr::full_join, by = c("k1", "k2"))
 })
 
 test_that("full_join() works with renamed keys", {
@@ -296,8 +304,7 @@ test_that("full_join() works with renamed keys", {
   left_df <- data.frame(a = c(1, 2, 3), x = c(10, 20, 30))
   right_df <- data.frame(b = c(2, 3, 4), y = c(200, 300, 400))
 
-  compare_join_modes(left_df, right_df, dplyr::full_join, by = c("a" = "b"),
-                     arrange_by = c("x", "y"))
+  compare_join_modes(left_df, right_df, dplyr::full_join, by = c("a" = "b"))
 })
 
 test_that("full_join() applies suffixes on non-key name collisions", {
@@ -313,8 +320,7 @@ test_that("full_join() applies suffixes on non-key name collisions", {
   expect_equal(sort(names(result)), sort(names(expected)))
   expect_true(all(c("val.x", "val.y") %in% names(result)))
 
-  compare_join_modes(left_df, right_df, dplyr::full_join, by = "id",
-                     arrange_by = c("val.x", "val.y"))
+  compare_join_modes(left_df, right_df, dplyr::full_join, by = "id")
 })
 
 test_that("full_join() with keep = TRUE retains both key columns", {
@@ -339,60 +345,41 @@ test_that("full_join() with empty inputs returns expected shape", {
   left_df <- data.frame(id = numeric(0), x = numeric(0))
   right_df <- data.frame(id = c(1, 2), y = c(10, 20))
 
-  compare_join_modes(left_df, right_df, dplyr::full_join, by = "id",
-                     arrange_by = "y")
+  compare_join_modes(left_df, right_df, dplyr::full_join, by = "id")
 
   # Right side empty: every output row is left-only.
   left_df2 <- data.frame(id = c(1, 2), x = c(10, 20))
   right_df2 <- data.frame(id = numeric(0), y = numeric(0))
 
-  compare_join_modes(left_df2, right_df2, dplyr::full_join, by = "id",
-                     arrange_by = "id")
+  compare_join_modes(left_df2, right_df2, dplyr::full_join, by = "id")
 })
 
-# FIXED: right_join.tbl_gpu() used to error on EVERY call, for any input.
+# right_join(): history and current implementation.
 #
-# Root cause (R/join.R, right_join.tbl_gpu(), before this fix): the eager
-# implementation built `right_join(x, y)` as a swapped `left_join(y, x, by =
-# swapped_by, ...)`, where `swapped_by <- list(left = ..., right = ...)` is a
-# plain list. `left_join()` (S3-dispatched to `left_join.tbl_gpu`) calls
-# `parse_join_by(by, x, y)` internally, and `parse_join_by()` only understood
-# `NULL`, a `dplyr_join_by` object, an unnamed character vector, or a named
-# character vector -- a plain list fell through to
-# `stop("Invalid \`by\` specification. ...")`. So `right_join()` never got
-# past its first internal call.
+# right_join.tbl_gpu() originally errored on every call (a `by=` plumbing
+# bug in the first swapped-left-join implementation, long since fixed), then
+# went through a swapped-left-join-plus-column-reorder implementation for
+# several phases. Phase 7 J4 replaced that with a fully native
+# gpu_right_join() (src/ops_join.cpp): cudf::inner_join(x, y) for matched
+# pairs, plus a filtered_join anti-join for y rows with no x match, fed
+# through the same stable-sort/gather/coalesce pipeline
+# (build_join_result()) every other mutating join type uses. That native
+# implementation is also what fixed the row-order divergence pinned in
+# test-dplyr-join.R (the old swapped-join implementation emitted y's own row
+# order; dplyr's actual contract is x-matched-order-then-unmatched-y-tail).
 #
-# Fix: `parse_join_by()` now also accepts an already-parsed spec (a plain
-# list with character `left`/`right` elements, as produced by
-# `build_right_join_via_left()`) and returns it as-is. `right_join.tbl_gpu()`
-# was also reworked to build its own `ast_join("right", ...)` node for the
-# lazy path (mirroring `left_join.tbl_gpu()`/`inner_join.tbl_gpu()`/
-# `full_join.tbl_gpu()`) and, for both paths, to resolve the swapped join's
-# output columns via `resolve_right_join_select_idx()`, which matches by
-# *origin table + raw source column name* rather than by literal output
-# name -- necessary because the swapped join is always run with
-# `keep = TRUE` internally, so shared key names (e.g. `"id"` on both sides)
-# come back suffixed (`"id.x"`/`"id.y"`) and never literally match the
-# single unsuffixed name a `keep = FALSE` right join wants.
-#
-# Also fixed here: the `keep = FALSE` key column's *values*. Because the
-# swapped join keeps every row of the *original right* table and NA-fills
-# unmatched columns from the *original left* table, naively sourcing the
-# single output key column from the *left* table's raw key copy (dplyr's
-# naming convention: `by = c(x_col = y_col)` displays it under `x_col`'s
-# name) would leave it `NA` for right-only rows -- the same shape of gap as
-# `full_join()`'s join-key coalescing bug. Since a right_join is driven
-# entirely by the right table, `build_right_join_via_left()` re-points the
-# `keep = FALSE` key column's value source to the right (y) table's raw key
-# copy, which is always present, while keeping the left-derived display name.
+# The `keep = FALSE` key-coalescing behavior below (right-only rows' single
+# output key column must read its VALUE from y, not x, even though it
+# displays under x's name per dplyr's `by = c(x_col = y_col)` convention) is
+# handled by the same `cudf::replace_nulls()` machinery full_join() uses for
+# its own right-only rows (see build_join_result()'s key-coalescing block).
 test_that("right_join() basic case matches dplyr oracle", {
   skip_if_no_gpu()
 
   left_df <- data.frame(id = c(1, 2, 3), x = c(10, 20, 30))
   right_df <- data.frame(id = c(2, 3, 4), y = c(200, 300, 400))
 
-  compare_join_modes(left_df, right_df, dplyr::right_join, by = "id",
-                     arrange_by = c("x", "y"))
+  compare_join_modes(left_df, right_df, dplyr::right_join, by = "id")
 })
 
 test_that("right_join() fills unmatched left rows with NA", {
@@ -425,8 +412,7 @@ test_that("right_join() works with multi-column keys", {
   left_df <- data.frame(k1 = c(1, 1, 2), k2 = c(10, 20, 10), x = c(5, 6, 7))
   right_df <- data.frame(k1 = c(1, 2, 2), k2 = c(10, 10, 30), y = c(50, 70, 80))
 
-  compare_join_modes(left_df, right_df, dplyr::right_join, by = c("k1", "k2"),
-                     arrange_by = c("x", "y"))
+  compare_join_modes(left_df, right_df, dplyr::right_join, by = c("k1", "k2"))
 })
 
 test_that("right_join() works with renamed keys", {
@@ -435,8 +421,7 @@ test_that("right_join() works with renamed keys", {
   left_df <- data.frame(a = c(1, 2, 3), x = c(10, 20, 30))
   right_df <- data.frame(b = c(2, 3, 4), y = c(200, 300, 400))
 
-  compare_join_modes(left_df, right_df, dplyr::right_join, by = c("a" = "b"),
-                     arrange_by = c("x", "y"))
+  compare_join_modes(left_df, right_df, dplyr::right_join, by = c("a" = "b"))
 })
 
 test_that("right_join() applies suffixes on non-key name collisions", {
@@ -452,8 +437,7 @@ test_that("right_join() applies suffixes on non-key name collisions", {
   expect_equal(sort(names(result)), sort(names(expected)))
   expect_true(all(c("val.x", "val.y") %in% names(result)))
 
-  compare_join_modes(left_df, right_df, dplyr::right_join, by = "id",
-                     arrange_by = c("val.x", "val.y"))
+  compare_join_modes(left_df, right_df, dplyr::right_join, by = "id")
 })
 
 test_that("right_join() with keep = TRUE retains both key columns", {
@@ -475,7 +459,7 @@ test_that("right_join() with keep = TRUE retains both key columns", {
   # no coalescing needed/possible here -- unlike the keep = FALSE cases
   # above, this can be compared exactly, key columns included.
   compare_join_modes(left_df, right_df, dplyr::right_join, by = c("a" = "b"),
-                     keep = TRUE, arrange_by = c("x", "y"))
+                     keep = TRUE)
 })
 
 test_that("right_join() with empty inputs returns expected shape", {
@@ -485,16 +469,14 @@ test_that("right_join() with empty inputs returns expected shape", {
   left_df <- data.frame(id = numeric(0), x = numeric(0))
   right_df <- data.frame(id = c(1, 2), y = c(10, 20))
 
-  compare_join_modes(left_df, right_df, dplyr::right_join, by = "id",
-                     arrange_by = "y")
+  compare_join_modes(left_df, right_df, dplyr::right_join, by = "id")
 
   # Right side empty: right_join keeps only right's rows, so the result is
   # empty too.
   left_df2 <- data.frame(id = c(1, 2), x = c(10, 20))
   right_df2 <- data.frame(id = numeric(0), y = numeric(0))
 
-  compare_join_modes(left_df2, right_df2, dplyr::right_join, by = "id",
-                     arrange_by = "id")
+  compare_join_modes(left_df2, right_df2, dplyr::right_join, by = "id")
 })
 
 test_that("right_join() column order matches build_join_schema (left cols then right)", {

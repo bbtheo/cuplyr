@@ -7,6 +7,18 @@
 lower_join(ast, source_ptr)
 }
 \description{
-Lower join node
+The four "mutating" join types (\code{"left"}/\code{"inner"}/\code{"full"}/\code{"right"}) all
+share the same C++ calling convention -- \code{left_key_idx}/\code{right_key_idx}/
+\code{right_drop_idx}/\code{nulls_equal} -- and their GPU entry points
+(\code{gpu_left_join()}/\code{gpu_inner_join()}/\code{gpu_full_join()}/\code{gpu_right_join()},
+\code{src/ops_join.cpp}) all return \code{list(ptr, diag)} (Phase 7 J4's map-pipeline
+restructure): \code{ptr} is the result table's external pointer, \code{diag} is a
+first-offender diagnostics list that nothing consumes yet
+(\code{check_join_cardinality()}'s multiple=/unmatched=/relationship= behavior
+lands in Phase 7 J5 -- for now \code{diag} is unpacked and discarded, not
+acted on). \code{right_join()} used to be lowered via a swapped \code{left_join(y, x)} plus a column reorder/select (\code{build_right_join_via_left()}/
+\code{resolve_right_join_select_idx()}, since removed) -- \code{gpu_right_join()} is
+now native and takes exactly the same argument shape as the other three,
+so no special-casing is needed here beyond the switch itself.
 }
 \keyword{internal}

@@ -12,10 +12,9 @@ character vectors (one entry per key/condition pair), \code{filter} is a single
 scalar describing the whole join's filter semantics (\code{"none"} for a plain
 equi/inequality join; \code{"max"}/\code{"min"} for \code{closest()} joins -- Phase 7 J7).
 Every form this function currently understands (\code{NULL}, an unnamed
-character vector, a named character vector, or an already-parsed spec
-list) produces an all-equi spec: \code{op} is \code{"=="} for every key and \code{filter}
-is \code{"none"}. \code{join_by()} objects (class \code{dplyr_join_by}) are rejected for
-now -- non-equi condition support lands in Phase 7 J7, which lifts this
-rejection.
+character vector, or a named character vector) produces an all-equi spec:
+\code{op} is \code{"=="} for every key and \code{filter} is \code{"none"}. \code{join_by()} objects
+(class \code{dplyr_join_by}) are rejected for now -- non-equi condition support
+lands in Phase 7 J7, which lifts this rejection.
 }
 \keyword{internal}
