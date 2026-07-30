@@ -15,12 +15,29 @@ resolve_join_keep(keep, spec)
 \code{TRUE}/\code{FALSE}
 }
 \description{
-Mirrors dplyr's own \code{keep = NULL} default resolution: \code{NULL} means \code{FALSE}
-for an equi join and \code{TRUE} for a non-equi one (inequality/rolling/overlap
-joins can't drop either side's key column, since there's no single shared
-key value to keep). Explicit \code{keep = FALSE} on a non-equi join is a hard
-error with dplyr's own text -- dormant in practice until Phase 7 J7 (no
-spec is non-equi yet), but exercised here directly against a hand-built
-spec in tests.
+Ported directly from \code{dplyr:::join_cols()} (verified via \code{body()} against
+dplyr 1.2.1, Phase 7 J7 finding): \code{keep = NULL}'s real resolution is NOT
+a single whole-join TRUE/FALSE decision -- it is PER CONDITION.
+\code{join_cols()}'s own \code{is_null(keep)} branch drops the right key column
+(and coalesces, no suffix distinction) only for conditions whose
+\code{by$condition == "=="}; a genuinely non-equi condition (\code{join_by(a >= b)}) always keeps BOTH sides' key columns, suffixed like any other
+colliding column -- verified empirically: \code{join_by(c == d, a >= b)}
+drops \code{d} (the equi pair) but keeps both \code{a} and \code{b} (the non-equi
+pair). An all-equi spec's per-condition resolution collapses to
+"drop every right key" (this package's historical \code{FALSE} behavior,
+unchanged); an all-non-equi spec's per-condition resolution collapses to
+"keep every column, suffixed uniformly" (this package's historical
+\code{TRUE}-forced behavior for a pure non-equi join, also unchanged) -- only
+a MIXED equi/non-equi spec actually needs the per-condition machinery to
+differ from either extreme, which is why this was never caught before
+J7 (no spec was ever both equi and non-equi at once).
+}
+\details{
+Both \code{NULL} and a \emph{legal} explicit \code{FALSE} resolve to the same
+\code{FALSE} return value here: \code{build_join_output_info()}'s own \code{keep != TRUE} branch always applies the per-condition (\code{join_spec$op == "=="})
+logic, which -- per \code{dplyr:::join_cols()}'s own \code{is_null}/\code{is_false}
+branches -- are byte-identical whenever \code{is_false(keep)} is even legal
+(i.e. an all-equi spec, where \code{by$x[equi] == by$x} and \code{by$y[equi] == by$y} make the two branches' cross-sets identical); explicit \code{keep = FALSE} on any spec with a genuinely non-equi condition is a hard error
+with dplyr's own text, exactly as before.
 }
 \keyword{internal}

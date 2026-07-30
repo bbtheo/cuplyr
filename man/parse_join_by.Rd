@@ -10,11 +10,27 @@ parse_join_by(by, x, y)
 Returns \code{list(left, right, op, filter)}: \code{left}/\code{right}/\code{op} are parallel
 character vectors (one entry per key/condition pair), \code{filter} is a single
 scalar describing the whole join's filter semantics (\code{"none"} for a plain
-equi/inequality join; \code{"max"}/\code{"min"} for \code{closest()} joins -- Phase 7 J7).
-Every form this function currently understands (\code{NULL}, an unnamed
-character vector, or a named character vector) produces an all-equi spec:
-\code{op} is \code{"=="} for every key and \code{filter} is \code{"none"}. \code{join_by()} objects
-(class \code{dplyr_join_by}) are rejected for now -- non-equi condition support
-lands in Phase 7 J7, which lifts this rejection.
+equi join; \code{"max"}/\code{"min"} for \code{closest()} joins -- Phase 7 J7, which never
+reach this function, see below). Every form this function currently
+understands (\code{NULL}, an unnamed character vector, a named character
+vector, or an EQUI-ONLY \code{join_by()} object) produces an all-equi spec:
+\code{op} is \code{"=="} for every key and \code{filter} is \code{"none"}. A non-equi
+\code{join_by()} object (any condition other than \code{"=="}, or any \code{closest()}
+filter -- see \code{join_by_is_non_equi()}) is never passed here: every join
+verb checks \code{join_by_is_non_equi()} FIRST and routes straight to the CPU
+fallback (\code{gpu_fallback()}, mirroring \code{nest_join()}'s two-table fallback
+shape in \code{R/fallback.R}) before ever calling \code{parse_join_by()} -- Phase 7
+J7 replaces that fallback with a native \code{mixed_join}/\code{conditional_join}
+lowering, at which point this function gains a real non-equi branch. The
+\code{stop()} below is an internal-only safety net: every join verb calls
+\code{\link[=join_by_natively_supported]{join_by_natively_supported()}} FIRST and routes the unsupported subset
+(\code{closest()}/rolling \verb{filter=}, an unrecognized operator, or a STRING
+non-equi column -- see that function's own docs) to the CPU fallback
+before ever reaching this function, so a non-equi \code{join_by()} that does
+reach here is always one J7's native \code{mixed_join}/\code{conditional_join}
+lowering (\code{gpu_cond_join()}, \code{src/ops_join.cpp}) can handle: \code{op}
+carries each condition's real operator (not just \code{"=="}) straight
+through, and \code{\link[=join_equi_spec]{join_equi_spec()}}/\code{\link[=join_cond_spec]{join_cond_spec()}} (below) split it back
+into its equi/non-equi halves at lowering time (\code{R/lower.R::lower_join()}).
 }
 \keyword{internal}

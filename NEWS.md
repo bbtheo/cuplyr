@@ -1,5 +1,68 @@
 # cuplyr (development version)
 
+## Joins completion: `join_by()`, non-equi conditions, cardinality checks, `semi_join()`/`anti_join()`/`cross_join()` (Phase 7)
+
+Every mutating and filtering join verb now runs GPU-natively for the full
+dplyr 1.2.1 surface, with row order, key coalescing, suffixing, and every
+cardinality check reproducing dplyr's own contract exactly (see
+`?mutating-joins`, `?semi-anti-joins`, `?dplyr::cross_join` for the full
+per-argument documentation):
+
+* **`join_by()` DSL**: equi conditions (`join_by(a)`, `join_by(a == b)`,
+  `join_by(x$a == y$b)`) route through the existing native hash-join path.
+  Non-equi and mixed conditions (`>=`, `>`, `<=`, `<`, and the
+  `between()`/`within()`/`overlaps()` helpers that pre-expand to pairs of
+  them) are GPU-native via `cudf::mixed_join()` (when at least one equi
+  condition is present) or `cudf::conditional_join()` (none), including
+  `left_join()`/`inner_join()`/`full_join()`/`right_join()`/`semi_join()`/
+  `anti_join()`. `keep = NULL` resolves *per condition*, not per whole join
+  (a mixed `join_by(c == d, a >= b)` drops `d` but keeps both `a` and `b`).
+* **`na_matches = "never"`**: `NA` keys never match anything (including
+  another `NA`), via `cudf::null_equality::UNEQUAL`, for every equi and
+  non-equi join type. `"na"` (the default) additionally makes `NA` match
+  `NA` under inclusive non-equi operators (`>=`/`<=`) in a `join_by()`
+  condition, matching dplyr's own semantics exactly.
+* **`multiple=`**: `"all"` (default), `"any"`, `"first"`, `"last"` — resolved
+  device-side against the already-sorted join maps, at zero extra cost for
+  the default `"all"`.
+* **`unmatched=`**: `"drop"` (default) or `"error"`, raising dplyr's exact
+  `dplyr_error_join_matches_nothing`/`dplyr_error_join_matches_remaining`
+  conditions (class vector, message text, and offending row number all
+  verified against dplyr 1.2.1 directly).
+* **`relationship=`**: `"one-to-one"`, `"one-to-many"`, `"many-to-one"`,
+  `"many-to-many"`, raising dplyr's exact `dplyr_error_join_relationship_*`
+  conditions on violation. The default (`relationship = NULL`) also emits
+  dplyr's own many-to-many advisory warning whenever both sides have a
+  genuine duplicate.
+* **`semi_join()`/`anti_join()`**: native via `cudf::filtered_join` (the
+  non-deprecated OO replacement for `join.hpp`'s free `left_semi_join`/
+  `left_anti_join`). `x`'s `group_by()` grouping is preserved (these are row
+  filters, not column-merging joins).
+* **`cross_join()`**: native via `cudf::cross_join`, left-major row/column
+  order, every common name suffixed on both sides.
+* **`right_join()` row order fix**: previously emitted y-order for unmatched
+  rows; now matches dplyr's own x-matched-then-unmatched-y-tail contract.
+  Implemented via a device-side join-map pipeline (sanitize → stable sort →
+  optional diagnostics → `multiple=` filtering → gather/coalesce) shared by
+  every mutating join type, replacing the old swapped-left-join workaround.
+* **Suffix/keep edge cases**: ported `dplyr:::add_suffixes()`/
+  `dplyr:::join_cols()` directly (an already-taken suffixed name now gets a
+  second suffix, e.g. `val.y.y`, instead of silently colliding).
+
+**Falls back to CPU (transparent, notified via `cuplyr.fallback`), by
+deliberate design, not oversight:**
+
+* `join_by(closest(...))` / rolling joins — needs a "keep only the extremal
+  match per group" step this package's join kernels don't implement; a GPU
+  route is scoped for Phase 12+.
+* A non-equi condition comparing `STRING` columns — cudf's AST comparison
+  evaluator has no string support (equi `STRING` joins are unaffected).
+* `suffix = c("", ...)` when it would still produce a genuine duplicate
+  output column name — dplyr resolves this via a name-keyed column
+  *overwrite* that this package's fixed-column-count gather can't express
+  natively.
+* `nest_join()` — needs list-column support (Phase 11).
+
 ## New `summarise()` aggregations: `median()`/`quantile()`/`n_distinct()`/`first()`/`last()`/`nth()`/`any()`/`all()` (Phase 6, task 6.2)
 
 `summarise()` (grouped, `.by=`, and ungrouped) gains eight new aggregation

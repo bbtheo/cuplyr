@@ -13,12 +13,28 @@ share the same C++ calling convention -- \code{left_key_idx}/\code{right_key_idx
 (\code{gpu_left_join()}/\code{gpu_inner_join()}/\code{gpu_full_join()}/\code{gpu_right_join()},
 \code{src/ops_join.cpp}) all return \code{list(ptr, diag)} (Phase 7 J4's map-pipeline
 restructure): \code{ptr} is the result table's external pointer, \code{diag} is a
-first-offender diagnostics list that nothing consumes yet
-(\code{check_join_cardinality()}'s multiple=/unmatched=/relationship= behavior
-lands in Phase 7 J5 -- for now \code{diag} is unpacked and discarded, not
-acted on). \code{right_join()} used to be lowered via a swapped \code{left_join(y, x)} plus a column reorder/select (\code{build_right_join_via_left()}/
+first-offender diagnostics list consumed by \code{check_join_cardinality()}
+below (multiple=/unmatched=/relationship=, Phase 7 J5). \code{right_join()}
+used to be lowered via a swapped \code{left_join(y, x)} plus a column
+reorder/select (\code{build_right_join_via_left()}/
 \code{resolve_right_join_select_idx()}, since removed) -- \code{gpu_right_join()} is
 now native and takes exactly the same argument shape as the other three,
 so no special-casing is needed here beyond the switch itself.
+}
+\details{
+Non-equi \code{join_by()} (Phase 7 J7, \code{scratchpad/phase7_joins_design.md}
+section 1.4/2): \code{ast$by$op} carries each condition's real operator (not
+just \code{"=="}) whenever \code{join_by_natively_supported()} (R/join.R) let the
+join reach this AST shape at all -- \code{\link[=join_equi_spec]{join_equi_spec()}}/\code{\link[=join_cond_spec]{join_cond_spec()}}
+split it back into an equality-key subset (routed through the same
+hash-join machinery every equi join uses, via \code{mixed_join}'s own
+equality tables) and a residual non-equi subset, folded into one AST
+condition tree by \code{join_cond_ir_from_spec()} + \code{\link[=ir_bind_join]{ir_bind_join()}} and
+handed to \code{gpu_cond_join()} (\code{src/ops_join.cpp}), which dispatches to
+\verb{mixed_*}/\verb{conditional_*} cuDF entry points depending on whether any
+equi keys survived the split. \code{gpu_cond_join()} reuses the exact same
+\code{list(ptr, diag)} / bare-\code{ptr} return shapes as the equi paths below (see
+its own C++ comment for the \code{join_kind == "right"} swapped-role decision),
+so \code{check_join_cardinality()} applies identically either way.
 }
 \keyword{internal}

@@ -1003,6 +1003,96 @@ join_route_to_fallback <- function(verb_name, verb_fn, x, y, args) {
   })
 }
 
+#' Mutating joins for `tbl_gpu` (`left_join()`, `inner_join()`, `full_join()`,
+#' `right_join()`)
+#'
+#' GPU-native equi and non-equi joins mirroring `dplyr::left_join()`'s own
+#' `by=`/`keep=`/`na_matches=`/`multiple=`/`unmatched=`/`relationship=`
+#' semantics (Phase 7). Row order, key coalescing, suffixing, and every
+#' cardinality check reproduce dplyr's own contract exactly -- see "Details"
+#' below for what runs natively on the GPU versus what transparently falls
+#' back to CPU (`dplyr`) evaluation.
+#'
+#' @param x,y `tbl_gpu` objects to join. If `y` is not a `tbl_gpu`, set
+#'   `copy = TRUE` to upload it automatically (`tbl_gpu(y)`).
+#' @param by Join specification: `NULL` (natural join on every common column
+#'   name), an unnamed character vector (`c("a", "b")`, matched by identical
+#'   name on both sides), a named character vector (`c("lx" = "ry")`, for
+#'   differently-named keys), or a [dplyr::join_by()] spec. `join_by()`
+#'   supports both equi conditions (`a`, `a == b`) and non-equi conditions
+#'   (`>=`, `>`, `<=`, `<`, and the `between()`/`within()`/`overlaps()`
+#'   helpers that pre-expand to pairs of them) -- all GPU-native (Phase 7
+#'   J6/J7). `join_by(closest(...))`/rolling joins, and any non-equi
+#'   condition comparing `STRING` columns, are not GPU-native and
+#'   transparently fall back to CPU evaluation (a `cuplyr.fallback`
+#'   notification fires; see `options(cuplyr.fallback = )`), still with a
+#'   result that matches `dplyr` exactly.
+#' @param copy Whether to upload a non-`tbl_gpu` `y` via `tbl_gpu()`.
+#' @param suffix Length-2 character vector used to disambiguate colliding
+#'   non-key column names (default `c(".x", ".y")`). Ported from
+#'   `dplyr:::add_suffixes()`: an already-taken suffixed name gets suffixed
+#'   again (`val.y.y`) rather than silently colliding. `suffix = c("", "")`
+#'   (or any element set to `""`) that still collides with a genuine
+#'   duplicate name reproduces dplyr's name-keyed column-overwrite semantics
+#'   via a CPU fallback -- this package's fixed-column-count gather has no
+#'   native way to express "the right column's data silently replaces the
+#'   left's, and the output has one fewer column than the naive merge".
+#' @param ... Not used; dplyr itself requires these to be empty.
+#' @param keep Whether to keep both sides' join key columns in the output.
+#'   `NULL` (the default) resolves *per condition*, exactly like
+#'   `dplyr:::join_cols()`: an equi condition's key columns coalesce to one
+#'   (the right-side copy is dropped), while a non-equi condition's columns
+#'   are always kept on both sides (there is no single "coalesced" value for
+#'   an inequality). Explicit `keep = FALSE` is only legal when every
+#'   condition is equi (errors with dplyr's own text otherwise); explicit
+#'   `keep = TRUE` keeps and suffixes every column on both sides uniformly.
+#' @param na_matches `"na"` (default): an `NA` key matches another `NA` key,
+#'   like `base::merge()`. `"never"`: `NA` keys never match anything,
+#'   including another `NA` (`cudf::null_equality::UNEQUAL` on the GPU).
+#' @param multiple How to resolve a left/right row matching more than one row
+#'   on the other side: `"all"` (default, every match kept), `"any"`,
+#'   `"first"`, or `"last"`. Filtering runs device-side against the
+#'   already-sorted join maps (Phase 7 J5) -- `"all"`, the default used by
+#'   every performance benchmark, costs nothing extra.
+#' @param unmatched How to handle rows with no match: `"drop"` (default) or
+#'   `"error"` (raises dplyr's exact `dplyr_error_join_matches_nothing`/
+#'   `dplyr_error_join_matches_remaining` conditions, including the
+#'   offending row number). `full_join()` has no `unmatched=` parameter at
+#'   all, matching dplyr's own signature (it never drops a row).
+#' @param relationship Optional cardinality assertion: `NULL` (default --
+#'   emits dplyr's own many-to-many advisory warning whenever *both* sides
+#'   have a genuine duplicate), `"one-to-one"`, `"one-to-many"`,
+#'   `"many-to-one"`, or `"many-to-many"` (silences the advisory warning).
+#'   A violation raises dplyr's exact `dplyr_error_join_relationship_*`
+#'   condition, including the class vector and first-offending-row bullet.
+#' @return A `tbl_gpu` with dplyr's own row/column contract for the given
+#'   join type. `right_join()`'s row order is x-matched rows (in `x`'s own
+#'   order) followed by any unmatched `y` rows appended last.
+#'
+#' @details
+#' ## GPU-native coverage (Phase 7)
+#' - Equi joins (`join_by(a)`, `by = "col"`, `by = c(a = "b")`): a hash join
+#'   (`cudf::inner_join()`/`left_join()`/`full_join()`), stable-sorted to
+#'   reproduce dplyr's row order (Phase 7 J1/J4/J6).
+#' - Non-equi/mixed `join_by()` conditions (`>=`, `>`, `<=`, `<`, and their
+#'   `between()`/`within()`/`overlaps()` derivations): `cudf::mixed_join()`
+#'   when at least one equi condition is present, `cudf::conditional_join()`
+#'   otherwise (Phase 7 J7).
+#' - `na_matches=`, `multiple=`, `unmatched=`, `relationship=` are fully
+#'   GPU-native/checked, with dplyr's exact condition classes and message
+#'   text (Phase 7 J1/J5).
+#'
+#' ## Falls back to CPU (transparent, notified)
+#' - `join_by(closest(...))` / any rolling join.
+#' - A non-equi condition comparing `STRING` columns (cudf's AST comparison
+#'   evaluator has no string support; equi `STRING` joins are unaffected).
+#' - `suffix = c("", ...)` when it would still produce a genuine duplicate
+#'   output column name.
+#' - `nest_join()` stays CPU-only entirely (needs list-column support,
+#'   Phase 11) -- it is not one of the four verbs documented here.
+#'
+#' @name mutating-joins
+#' @rdname mutating-joins
 #' @export
 #' @importFrom dplyr left_join
 left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
@@ -1048,6 +1138,7 @@ left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
            relationship = relationship)
 }
 
+#' @rdname mutating-joins
 #' @export
 #' @importFrom dplyr inner_join
 inner_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
@@ -1093,6 +1184,7 @@ inner_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
            relationship = relationship)
 }
 
+#' @rdname mutating-joins
 #' @export
 #' @importFrom dplyr full_join
 full_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
@@ -1142,6 +1234,7 @@ full_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
            relationship = relationship)
 }
 
+#' @rdname mutating-joins
 #' @export
 #' @importFrom dplyr right_join
 right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
@@ -1212,6 +1305,28 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
 #' mutating joins that `push_join()`/`propagate_groups()`'s D3 rule always
 #' clears groups for); `push_join()` special-cases `join_type %in%
 #' c("semi", "anti")` to carry `x$groups` forward instead of dropping them.
+#'
+#' `by` accepts the same forms as the mutating joins (see `?mutating-joins`):
+#' `NULL`, a character vector, or a [dplyr::join_by()] spec, including
+#' non-equi conditions (`>=`, `>`, `<=`, `<`, `between()`/`within()`/
+#' `overlaps()`) via `cudf::conditional_join`/`mixed_join` (Phase 7 J7).
+#' `join_by(closest(...))`/rolling joins, and non-equi conditions over
+#' `STRING` columns, fall back to CPU evaluation transparently (with a
+#' `cuplyr.fallback` notification), same as the mutating joins.
+#'
+#' @param x,y `tbl_gpu` objects to join. If `y` is not a `tbl_gpu`, set
+#'   `copy = TRUE` to upload it automatically.
+#' @param by Join specification -- see "Details" above and `?mutating-joins`.
+#' @param copy Whether to upload a non-`tbl_gpu` `y` via `tbl_gpu()`.
+#' @param ... Not used; dplyr itself requires these to be empty.
+#' @param na_matches `"na"` (default, `NA` keys match each other) or
+#'   `"never"` (`NA` keys never match anything).
+#' @return A `tbl_gpu` with `x`'s own schema, filtered to the rows that
+#'   (`semi_join()`) or don't (`anti_join()`) have a match in `y`. `x`'s
+#'   `group_by()` grouping is preserved (these are row filters, not
+#'   column-merging joins).
+#' @name semi-anti-joins
+#' @rdname semi-anti-joins
 #' @export
 #' @importFrom dplyr semi_join
 semi_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
@@ -1241,9 +1356,10 @@ semi_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
            na_matches = na_matches)
 }
 
-#' See `semi_join.tbl_gpu()`'s roxygen just above -- same native
-#' `filtered_join`-based implementation and grouping-preservation rationale,
-#' `is_anti = TRUE` in the shared `gpu_semi_anti_join()` C++ entry point.
+#' `is_anti = TRUE` in the shared `gpu_semi_anti_join()` C++ entry point --
+#' same native `filtered_join`-based implementation and
+#' grouping-preservation rationale as `semi_join()`, see `?semi-anti-joins`.
+#' @rdname semi-anti-joins
 #' @export
 #' @importFrom dplyr anti_join
 anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
@@ -1316,6 +1432,20 @@ anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
 #' is 0") -- guarded here with a clearer, dplyr-flavored message before ever
 #' reaching the GPU call, for both the eager and lazy schedules (the 0-column
 #' case is knowable from the schemas alone, no execution needed).
+#'
+#' @param x,y `tbl_gpu` objects. If `y` is not a `tbl_gpu`, set
+#'   `copy = TRUE` to upload it automatically.
+#' @param ... Not used; dplyr itself requires these to be empty.
+#' @param copy Whether to upload a non-`tbl_gpu` `y` via `tbl_gpu()`.
+#' @param suffix Length-2 character vector disambiguating every common
+#'   column name (every shared name gets both suffixes, since there are no
+#'   join keys to coalesce). `suffix = c("", ...)` colliding with a genuine
+#'   duplicate name falls back to CPU evaluation, same as the mutating
+#'   joins' degenerate-suffix case.
+#' @return A `tbl_gpu` with every row of `x` paired with every row of `y`
+#'   (`nrow(x) * nrow(y)` rows), columns from `x` first then `y`. `x`'s
+#'   `group_by()` grouping is preserved for any group column whose name
+#'   survives suffixing unchanged.
 #' @export
 #' @importFrom dplyr cross_join
 cross_join.tbl_gpu <- function(x, y, ..., copy = FALSE, suffix = c(".x", ".y")) {

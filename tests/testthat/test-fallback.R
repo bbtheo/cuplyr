@@ -141,6 +141,20 @@ test_that("nest_join() returns a plain data frame with a list-column, not a tbl_
   expect_equal(nrow(result), nrow(oracle))
 })
 
+test_that("nest_join() triggers the fallback notification", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  gt <- tbl_gpu(df) |> dplyr::select(g) |> dplyr::distinct()
+  y <- tibble::tibble(g = c(1, 2), extra = c("A", "B"))
+
+  withr::local_options(cuplyr.fallback = "warn")
+
+  expect_warning(
+    gt |> dplyr::nest_join(y, by = "g"),
+    "fell back to CPU evaluation"
+  )
+})
+
 test_that("setequal() returns a logical, matching dplyr", {
   skip_if_no_gpu()
   df <- fallback_df()

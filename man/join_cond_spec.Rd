@@ -7,9 +7,11 @@
 join_cond_spec(spec)
 }
 \description{
-Dormant until Phase 7 J7 (\code{build_join_ast()}/\code{gpu_cond_join()}), which
-will lower this subset via \code{mixed_join}/\code{conditional_join}. Always empty
-for now, since no code path currently produces \code{op} values other than
-\code{"=="}.
+Feeds \code{join_cond_ir_from_spec()} below: the residual AST condition
+\code{gpu_cond_join()} (\code{src/ops_join.cpp}) evaluates via \code{mixed_join}'s
+\code{binary_predicate} argument (equi entries are handled entirely by
+\code{mixed_join}'s own equality-key hashing, via \code{\link[=join_equi_spec]{join_equi_spec()}} instead --
+re-including them in the AST condition too would be redundant, not
+wrong, but this package's \code{gpu_cond_join()} never does).
 }
 \keyword{internal}

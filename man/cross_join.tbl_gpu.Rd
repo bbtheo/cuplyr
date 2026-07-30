@@ -6,6 +6,26 @@
 \usage{
 \method{cross_join}{tbl_gpu}(x, y, ..., copy = FALSE, suffix = c(".x", ".y"))
 }
+\arguments{
+\item{x, y}{\code{tbl_gpu} objects. If \code{y} is not a \code{tbl_gpu}, set
+\code{copy = TRUE} to upload it automatically.}
+
+\item{...}{Not used; dplyr itself requires these to be empty.}
+
+\item{copy}{Whether to upload a non-\code{tbl_gpu} \code{y} via \code{tbl_gpu()}.}
+
+\item{suffix}{Length-2 character vector disambiguating every common
+column name (every shared name gets both suffixes, since there are no
+join keys to coalesce). \code{suffix = c("", ...)} colliding with a genuine
+duplicate name falls back to CPU evaluation, same as the mutating
+joins' degenerate-suffix case.}
+}
+\value{
+A \code{tbl_gpu} with every row of \code{x} paired with every row of \code{y}
+(\code{nrow(x) * nrow(y)} rows), columns from \code{x} first then \code{y}. \code{x}'s
+\code{group_by()} grouping is preserved for any group column whose name
+survives suffixing unchanged.
+}
 \description{
 Native GPU implementation (Phase 7 J3). Unlike every other join verb,
 dplyr's own \code{cross_join()} signature has no \code{by}/\code{keep}/\code{na_matches}/

@@ -41,12 +41,12 @@ list(
 | `src/ops_common.hpp` | `get_compare_op()` (used by `expr_eval.hpp`'s string-comparison handler) |
 | `src/transfer_io.cpp` | `df_to_gpu()`, `gpu_collect()`, `gpu_head()`, `gpu_dim()` |
 | `src/ops_filter.cpp` | `gpu_filter_bool()`, `gpu_filter_mask()` — CPU-eval fallback mask application only; every IR-parseable predicate now goes through `gpu_filter_expr()` (`ops_expr.cpp`) |
-| `src/expr_eval.hpp` | Expression-IR evaluator shared by filter/mutate/summarise temp columns (`eval_ctx`, `ast_expressible()`, `build_ast()`, `materialize()`, `apply_handler()`) |
+| `src/expr_eval.hpp` | Expression-IR evaluator shared by filter/mutate/summarise temp columns (`eval_ctx`, `ast_expressible()`, `build_ast()`, `materialize()`, `apply_handler()`); `build_join_ast()` (Phase 7 J7) is a side-aware sibling for non-equi `join_by()` conditions — emits `column_reference(LEFT\|RIGHT)`, never retrofitted into `build_ast()` |
 | `src/ops_expr.cpp` | `gpu_compute_column()`, `gpu_filter_expr()`, `gpu_mutate_expr()` — the IR entry points |
 | `src/ops_select.cpp` | `gpu_select()` |
 | `src/ops_groupby.cpp` | `gpu_summarise()` |
 | `src/ops_arrange.cpp` | `gpu_arrange()` |
-| `src/ops_join.cpp` | join logic with stable-sort for dplyr ordering |
+| `src/ops_join.cpp` | join logic (equi hash joins, native `semi`/`anti`/`cross`/`right`, `gpu_cond_join()` for non-equi `join_by()` via `mixed_join`/`conditional_join`) with the shared device-side sanitize→stable-sort→diag→`multiple=`-filter→gather/coalesce pipeline (`build_join_result()`) for dplyr row-order/cardinality parity |
 | `src/ops_bind.cpp` | `gpu_bind_rows_aligned()`, `gpu_bind_cols_impl()` |
 | `src/gpu_info.cpp` | device availability/info |
 
@@ -63,7 +63,7 @@ list(
 | `R/arrange.R` | arrange verb — parses sort specs (incl. `.by_group`), builds one `ast_arrange` node via `push_op()` |
 | `R/group-by.R` | `group_by()`, `ungroup()`, `group_vars()` — metadata-only, no AST node |
 | `R/summarise.R` | summarise/groupby verb — `parse_aggregations()` builds aggregation structs (cudf-accepted function names), builds one `ast_summarise` node via `push_op()`; temp-column preprocessing for expressions inside agg calls |
-| `R/join.R` | join verbs — parse join spec, dispatch through `push_join()` (join analogue of `push_op()`); `build_join_schema()`, `build_join_output_info()` |
+| `R/join.R` | join verbs — parse join spec (incl. `join_by()`, equi and non-equi) via `parse_join_by()`, dispatch through `push_join()` (join analogue of `push_op()`); `build_join_schema()`, `build_join_output_info()`, `check_join_cardinality()` (`multiple=`/`unmatched=`/`relationship=`); routes `closest()`/rolling joins, STRING non-equi conditions, and degenerate `suffix=c("",...)` collisions to the notified CPU fallback (`join_route_to_fallback()`) |
 | `R/bind.R` | `bind_rows()`, `bind_cols()` with schema unification |
 | `R/collect.R` | pulls data to R, warns on INT64 precision loss |
 | `R/compute.R` | `compute()`, `collapse()`, `as_lazy()`, `as_eager()`, `show_query()` — `compute()` is the only caller of `optimize_ast()` |
@@ -259,7 +259,20 @@ filter node with N predicates is already exactly one fused kernel.
 - Lazy joins build `ast_join` with two inputs
 - Source pointers attached via `set_ast_source_ptr()` before lowering
 - Schema inference: `infer_schema.ast_join` uses `build_join_schema()` in `R/join.R`
-- Right join: implemented via swapped left join + column reorder
+- Right join (Phase 7 J4): native `gpu_right_join()` (`cudf::inner_join()` for
+  matched pairs + a `filtered_join` anti-join for unmatched-y rows), NOT a
+  swapped left join + column reorder (that helper was deleted in J4). Shares
+  the same device-side join-map pipeline as every other mutating join type
+  (see "Join Ordering & Unmatched Rows" below) to reproduce dplyr's
+  x-matched-then-unmatched-y-tail row order.
+- Non-equi/mixed `join_by()` conditions (Phase 7 J7): `ir_bind_join()`
+  resolves each condition's columns by the spec's explicit side tag
+  (`0`=left/`1`=right, not name-lookup order — required for self-joins with
+  identical schemas), and `build_join_ast()` (`src/expr_eval.hpp`, a
+  side-aware sibling of `build_ast()`, NOT a retrofit of it) emits
+  `column_reference(LEFT|RIGHT)` nodes for `gpu_cond_join()`
+  (`cudf::mixed_join()` when ≥1 equi condition, `cudf::conditional_join()`
+  otherwise).
 - Ensure desired column names exist before calling `gpu_select`
 
 ### Optimizer Barriers
@@ -353,8 +366,26 @@ String columns use offset-based storage (Apache Arrow format):
 ### Join Ordering & Unmatched Rows
 - **cuDF join outputs are unordered**: We stable-sort join maps by left_map (then right_map) in `src/ops_join.cpp` to match dplyr
 - **JoinNoMatch sentinel**: cuDF uses sentinel values; gather treats negatives as wraparound
-- **Current fix**: Sanitize join maps on CPU (replace with `nrows`) before gather, use `out_of_bounds_policy::NULLIFY`
-- **Right key dropping**: `keep = FALSE` drops right keys even when names differ
+- **Device-side join-map pipeline** (Phase 7 J4, `build_join_result()` in
+  `src/ops_join.cpp`): sanitize join maps on device (replace both `< 0`
+  *and* `>= nrows` sentinel values with `nrows` — the `>= nrows` half was a
+  latent gap in the original CPU-side sanitize, fixed in J4) → stable sort
+  → single device-to-host transfer only when diagnostics/`multiple=` are
+  needed (`join_map_stats()`: `left_multi_first`/`right_multi_first`/
+  `left_unmatched_first`/`right_unmatched_first`) → `multiple=` host
+  filtering (Phase 7 J5, skipped entirely for the default `multiple =
+  "all"`) → gather with `out_of_bounds_policy::NULLIFY` + coalesce. Every
+  mutating join type (`left`/`inner`/`full`/`right`) shares this one
+  pipeline; C++ exports return `list(ptr, diag)`, and `lower_join()`
+  (`R/lower.R`) calls `check_join_cardinality()` (`R/join.R`) with the raw
+  `diag` to raise dplyr's exact `multiple=`/`unmatched=`/`relationship=`
+  conditions.
+- **Right key dropping**: `keep = FALSE` drops right keys even when names differ (only legal for an all-equi spec — `keep = FALSE` on any genuinely non-equi `join_by()` condition errors with dplyr's own text; see `resolve_join_keep()`, `R/join.R`)
+- **`keep = NULL`'s real resolution is per-condition, not per-join** (Phase 7
+  J7 finding): a mixed `join_by(c == d, a >= b)` drops `d` (the equi pair)
+  but keeps *both* `a` and `b` (the non-equi pair, suffixed) — ported
+  directly from `dplyr:::join_cols()`'s own per-condition branch, see
+  `build_join_output_info()`.
 
 ### Filter Parsing
 - Expressions parse through `ir_parse_quo()` (`R/ir.R`) into `make_predicate()` records (`ir`, `cols`, `estimated_cost`, `is_deterministic`, `na_sensitive`); optimizer passes read `pred$cols`, never the IR tree directly

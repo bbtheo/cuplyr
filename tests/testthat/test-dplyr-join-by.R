@@ -604,3 +604,18 @@ test_that("a non-natively-supported join_by() triggers the fallback notification
                      by = dplyr::join_by(a == b)) |> collect()
   )
 })
+
+test_that("join_by() with a STRING non-equi condition triggers the fallback notification", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(a = c("apple", "banana", "cherry"), v = c(1, 2, 3))
+  right_df <- data.frame(b = c("banana", "date"), w = c(10, 20))
+
+  withr::local_options(cuplyr.fallback = "warn")
+
+  expect_warning(
+    dplyr::left_join(tbl_gpu(left_df), tbl_gpu(right_df),
+                     by = dplyr::join_by(a >= b)) |> collect(),
+    "fell back to CPU evaluation"
+  )
+})

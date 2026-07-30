@@ -57,6 +57,25 @@ perf_join_probe_df <- local({
   )
 })
 
+# Phase 7 J9: a small, deliberately-narrow-range probe for the non-equi
+# (join_by(id >= id2)) benchmark below. perf_big_df's `id` is uniform over
+# 1:5000 across 1e6 rows; this probe's 100 rows have `id2` uniform over the
+# narrow high sub-range 4901:5000 (one row per value, no duplicates). Only
+# left rows with id >= 4901 (~2% of 1e6 = ~20000 rows) can match anything at
+# all, and each of those matches at most 100 right rows (fewer for smaller
+# id) -- average ~50 matches per qualifying left row, for a total output on
+# the order of ~1e6 rows, the same order of magnitude as this file's other
+# "kernel"-calibrated (compute-bound, not fan-out-dominated) benchmarks. A
+# uniform-range probe over the FULL 1:5000 span (like perf_join_probe_df)
+# would instead fan out closer to a near-cartesian ~1e8 rows for `>=`, which
+# is deliberately avoided here.
+perf_join_nonequi_probe_df <- local({
+  data.frame(
+    id2 = 4901:5000,
+    w2 = runif(100)
+  )
+})
+
 # =============================================================================
 # filter()
 # =============================================================================
@@ -287,6 +306,59 @@ test_that("perf: join_left_lazy", {
         collect()
     )
   }, calibration = "transfer")
+})
+
+# =============================================================================
+# semi_join() (Phase 7 J9)
+#
+# Calibration class: "kernel" -- unlike left_join()'s fan-out-bound benchmark
+# above, semi_join() never duplicates rows: the result is a subset of
+# perf_big_df's own 1e6 rows (bounded above by 1e6, same order of magnitude
+# as filter_chain/mutate_chain/etc.), so this benchmark is compute-bound
+# (the filtered_join build+probe pass) like the other native-verb kernel
+# benchmarks, not transfer-bound like the fan-out mutating joins.
+# perf_join_probe_df's 5e4 rows sampled uniformly over 1:5000 almost
+# certainly cover every distinct `id` value perf_big_df has, so this
+# benchmark exercises the real filtered_join machinery against a
+# realistically-sized build table without collapsing to a trivial no-op.
+# =============================================================================
+
+test_that("perf: join_semi_lazy", {
+  skip_if_no_gpu()
+  gpu_df <- tbl_gpu(perf_big_df, lazy = TRUE)
+  gpu_probe <- tbl_gpu(perf_join_probe_df, lazy = TRUE)
+
+  expect_no_perf_regression("join_semi_lazy", function() {
+    gpu_df |>
+      dplyr::semi_join(gpu_probe, by = "id") |>
+      collect()
+  }, calibration = "kernel")
+})
+
+# =============================================================================
+# Non-equi join_by() (Phase 7 J9)
+#
+# Calibration class: "kernel" -- a join_by(id >= id2) against
+# perf_join_nonequi_probe_df's deliberately narrow-range 100-row probe (see
+# that fixture's own comment above for the fan-out derivation): output is on
+# the order of ~1e6 rows, the same order of magnitude as perf_big_df itself,
+# so this benchmark is dominated by gpu_cond_join()'s conditional_join()
+# compute pass (no equi component in this condition), not by transferring a
+# huge fan-out result.
+# =============================================================================
+
+test_that("perf: join_nonequi_lazy", {
+  skip_if_no_gpu()
+  gpu_df <- tbl_gpu(perf_big_df, lazy = TRUE)
+  gpu_probe <- tbl_gpu(perf_join_nonequi_probe_df, lazy = TRUE)
+
+  expect_no_perf_regression("join_nonequi_lazy", function() {
+    suppressWarnings(
+      gpu_df |>
+        dplyr::left_join(gpu_probe, by = dplyr::join_by(id >= id2)) |>
+        collect()
+    )
+  }, calibration = "kernel")
 })
 
 # =============================================================================
