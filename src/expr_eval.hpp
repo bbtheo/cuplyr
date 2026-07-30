@@ -714,6 +714,187 @@ inline cudf::ast::expression const& build_ast(Rcpp::List node,
 }
 
 // -----------------------------------------------------------------------------
+// build_join_ast() (Phase 7 J7, scratchpad/phase7_joins_design.md section
+// 1.4): a sibling of build_ast() for a non-equi join_by() CONDITION IR only
+// (built by R/join.R's join_cond_ir_from_spec() + ir_bind_join()). Much
+// smaller than build_ast() by construction, not by omission:
+//
+//   - Every "col" node already carries an explicit `side` field (0 =
+//     left/x, 1 = right/y -- see ir_bind_join()'s R-side docs for why this
+//     is an explicit tag rather than a lookup-order convention: a self-join
+//     has identical left/right schemas, so name-based single-schema
+//     resolution can't tell which side a column belongs to). That resolves
+//     here into a cudf::ast::column_reference(index, table_reference); the
+//     table_reference is LEFT/RIGHT as cudf sees the PHYSICAL argument
+//     slots this predicate will be evaluated against, which can be SWAPPED
+//     from the logical left(x)/right(y) roles when `swap_sides` is true --
+//     gpu_cond_join()'s right_join() route reframes a native right_join()
+//     with a non-equi condition as mixed_left_join()/conditional_left_join()
+//     with x and y's physical roles swapped (see that function's own
+//     comment, src/ops_join.cpp, for the full derivation); `index` is
+//     always that column's own position within its LOGICAL side's table
+//     (x_view/y_view), unaffected by the swap -- only which AST table slot
+//     it's tagged as changes.
+//   - There is NO literal-node handling and no materialize()/
+//     apply_handler() escape hatch at all: join_by() itself only ever
+//     accepts column-to-column comparisons (`join_by(a >= 5)` is a dplyr
+//     PARSE error before this package ever sees it), so a join condition IR
+//     tree is, structurally, always exactly "&"-folded comparison ("==",
+//     "!=", ">=", ">", "<=", "<") nodes over "col" leaves. Any other shape
+//     reaching here is an internal bug (unreachable from join_by()) and
+//     Rcpp::stop()s accordingly rather than silently mis-lowering it.
+//   - Operand type matching reuses the exact same promotion_rank()/
+//     ast_cast_op_for_type() machinery build_ast() uses just above (see its
+//     own "AST operand type matching" note): an INT32 key compared against
+//     a FLOAT64 key needs the INT32 side wrapped in a CAST_TO_FLOAT64
+//     operation() before cudf's AST evaluator accepts the comparison (it
+//     requires exactly matching operand types, unlike R/dplyr's own
+//     implicit-promotion comparison semantics). A BOOL8-vs-INT32 mismatch
+//     (promoting to INT32, which has no AST cast target at all, per
+//     ast_cast_op_for_type()'s own doc) has no materialize-and-cudf::cast()
+//     fallback here -- unreachable from any join_by() this package accepts
+//     as natively supported (join_by_natively_supported(), R/join.R, only
+//     screens out STRING columns; a genuine BOOL8-vs-non-INT32-numeric join
+//     key is an extremely unusual shape) -- Rcpp::stop()s with a clear
+//     message instead of silently misbehaving.
+// -----------------------------------------------------------------------------
+
+inline cudf::data_type join_col_type(int side, int index,
+                                      const cudf::table_view& x_view,
+                                      const cudf::table_view& y_view) {
+    return (side == 1) ? y_view.column(index).type() : x_view.column(index).type();
+}
+
+// `na_matches_na`: dplyr's `na_matches = "na"` default (Phase 7 J7 finding,
+// verified empirically against dplyr 1.2.1 -- NOT documented in the design
+// doc's "NULL predicate result excludes the pair" note, which only holds
+// for `na_matches = "never"`): for the equality-INCLUSIVE comparison
+// operators ("==", ">=", "<="), a NA on BOTH sides is treated as a genuine
+// match (`inner_join(data.frame(a=NA), data.frame(b=NA), by=join_by(a >=
+// b))` returns ONE row, not zero) -- exactly as if `na_matches = "na"`
+// generalizes dplyr's own equi-join NA-matching convention to every
+// inclusive comparison, not just `==`. A NA on only ONE side never
+// matches, and the STRICT operators (">", "<") never match NA at all
+// regardless of `na_matches` (verified: `a > b` with both NA returns 0
+// rows even under the default). `na_matches = "never"` (`na_matches_na =
+// false` here) disables this entirely, which is exactly cudf's native
+// null-propagating AST comparison behavior already (a NULL operand makes
+// the comparison NULL, and mixed_join/conditional_join drop any pair whose
+// predicate is NULL) -- so the fix below only ever adds work for the
+// default case, and only for "==" (unreachable here in practice --
+// join_cond_spec() always splits "==" into the equi-key subset instead,
+// see R/join.R -- but handled defensively)/"=>"/"<=".
+inline cudf::ast::expression const& build_join_ast(
+    Rcpp::List node,
+    cudf::ast::tree& tree,
+    const cudf::table_view& x_view,
+    const cudf::table_view& y_view,
+    bool swap_sides,
+    bool na_matches_na = true) {
+
+    std::string kind = ir_kind(node);
+
+    if (kind == "col") {
+        int side = Rcpp::as<int>(node["side"]);
+        int index = Rcpp::as<int>(node["index"]);
+        bool physically_left = swap_sides ? (side == 1) : (side == 0);
+        cudf::ast::table_reference tref = physically_left
+            ? cudf::ast::table_reference::LEFT
+            : cudf::ast::table_reference::RIGHT;
+        return tree.emplace<cudf::ast::column_reference>(index, tref);
+    }
+
+    if (kind != "call") {
+        Rcpp::stop("internal: unsupported join condition IR node kind '%s' "
+                   "(unreachable from join_by())", kind.c_str());
+    }
+
+    std::string op = Rcpp::as<std::string>(node["op"]);
+    Rcpp::List args = node["args"];
+
+    cudf::ast::ast_operator ast_op;
+    if (!ast_op_from_name(op, ast_op)) {
+        Rcpp::stop("internal: unsupported join condition operator '%s' "
+                   "(unreachable from join_by())", op.c_str());
+    }
+
+    if (op == "&") {
+        cudf::ast::expression const& lhs = build_join_ast(args[0], tree, x_view, y_view, swap_sides, na_matches_na);
+        cudf::ast::expression const& rhs = build_join_ast(args[1], tree, x_view, y_view, swap_sides, na_matches_na);
+        return tree.emplace<cudf::ast::operation>(ast_op, lhs, rhs);
+    }
+
+    // A comparison: both args are "col" nodes (join_by() never allows a
+    // literal operand -- see the file-level note above).
+    Rcpp::List lhs_node = args[0];
+    Rcpp::List rhs_node = args[1];
+    if (ir_kind(lhs_node) != "col" || ir_kind(rhs_node) != "col") {
+        Rcpp::stop("internal: join condition comparison with a non-column "
+                   "operand (unreachable from join_by())");
+    }
+
+    int lhs_side = Rcpp::as<int>(lhs_node["side"]);
+    int lhs_index = Rcpp::as<int>(lhs_node["index"]);
+    int rhs_side = Rcpp::as<int>(rhs_node["side"]);
+    int rhs_index = Rcpp::as<int>(rhs_node["index"]);
+
+    cudf::data_type lhs_type = join_col_type(lhs_side, lhs_index, x_view, y_view);
+    cudf::data_type rhs_type = join_col_type(rhs_side, rhs_index, x_view, y_view);
+
+    cudf::ast::expression const& lhs_ref = build_join_ast(lhs_node, tree, x_view, y_view, swap_sides, na_matches_na);
+    cudf::ast::expression const& rhs_ref = build_join_ast(rhs_node, tree, x_view, y_view, swap_sides, na_matches_na);
+
+    cudf::ast::expression const* lhs_final = &lhs_ref;
+    cudf::ast::expression const* rhs_final = &rhs_ref;
+
+    if (lhs_type.id() != rhs_type.id()) {
+        cudf::data_type target = (promotion_rank(rhs_type.id()) > promotion_rank(lhs_type.id()))
+            ? rhs_type : lhs_type;
+
+        cudf::ast::ast_operator cast_op;
+        if (!ast_cast_op_for_type(target.id(), cast_op)) {
+            Rcpp::stop("internal: join condition operand type mismatch (%s vs %s) "
+                       "has no AST cast path (unreachable from a natively "
+                       "supported join_by())",
+                       expr_type_to_str(lhs_type).c_str(), expr_type_to_str(rhs_type).c_str());
+        }
+
+        if (lhs_type.id() != target.id()) {
+            lhs_final = &tree.emplace<cudf::ast::operation>(cast_op, lhs_ref);
+        }
+        if (rhs_type.id() != target.id()) {
+            rhs_final = &tree.emplace<cudf::ast::operation>(cast_op, rhs_ref);
+        }
+    }
+
+    cudf::ast::expression const& cmp =
+        tree.emplace<cudf::ast::operation>(ast_op, *lhs_final, *rhs_final);
+
+    // NA-reflexive fix (see this function's own file-level note just
+    // above): "==", ">=", "<=" additionally match when BOTH operands are
+    // NULL, under na_matches = "na" (the default). cudf's AST comparison
+    // already yields NULL whenever either operand is NULL (excluding the
+    // pair on its own for every OTHER shape -- one-sided NULL, or a strict
+    // ">"/"<" with both NULL, matches dplyr's own observed behavior with no
+    // further change needed), so this only needs to OR in an extra
+    // "both-null" branch for the three inclusive operators.
+    bool is_inclusive_cmp = (op == "==" || op == ">=" || op == "<=");
+    if (!na_matches_na || !is_inclusive_cmp) {
+        return cmp;
+    }
+
+    cudf::ast::expression const& lhs_is_null =
+        tree.emplace<cudf::ast::operation>(cudf::ast::ast_operator::IS_NULL, *lhs_final);
+    cudf::ast::expression const& rhs_is_null =
+        tree.emplace<cudf::ast::operation>(cudf::ast::ast_operator::IS_NULL, *rhs_final);
+    cudf::ast::expression const& both_null = tree.emplace<cudf::ast::operation>(
+        cudf::ast::ast_operator::NULL_LOGICAL_AND, lhs_is_null, rhs_is_null);
+
+    return tree.emplace<cudf::ast::operation>(
+        cudf::ast::ast_operator::NULL_LOGICAL_OR, cmp, both_null);
+}
+
+// -----------------------------------------------------------------------------
 // apply_handler(): the non-AST cuDF calls (section 2.3's second table).
 // Column-producing arguments are materialize()'d; literal-only arguments
 // (round()'s decimal places, %in%'s RHS set) are read directly off the IR

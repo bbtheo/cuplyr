@@ -269,11 +269,21 @@ test_that("full_join() has no unmatched= parameter (matches dplyr's own signatur
 # =============================================================================
 
 test_that("resolve_join_keep() resolves NULL against equi/non-equi specs", {
+  # Phase 7 J7 finding (verified against dplyr 1.2.1's own
+  # `dplyr:::join_cols()` source): `keep = NULL`'s real default resolution
+  # is NOT a whole-join TRUE/FALSE decision -- it drops the right key
+  # column PER CONDITION, only for genuinely equi ("==") entries, and keeps
+  # both sides for a non-equi one. `resolve_join_keep()` itself now always
+  # returns `FALSE` for `NULL` (both equi and non-equi specs): the
+  # per-condition distinction lives entirely in
+  # `build_join_output_info()`'s `keep != TRUE` branch (see its own
+  # roxygen, R/join.R), which reads `join_spec$op` directly instead of a
+  # pre-collapsed scalar.
   equi_spec <- list(left = "id", right = "id", op = "==", filter = "none")
   cond_spec <- list(left = "id", right = "id", op = ">=", filter = "none")
 
   expect_identical(cuplyr:::resolve_join_keep(NULL, equi_spec), FALSE)
-  expect_identical(cuplyr:::resolve_join_keep(NULL, cond_spec), TRUE)
+  expect_identical(cuplyr:::resolve_join_keep(NULL, cond_spec), FALSE)
 })
 
 test_that("resolve_join_keep() passes through explicit TRUE/FALSE when equi", {

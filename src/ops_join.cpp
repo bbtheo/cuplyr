@@ -4,6 +4,7 @@
 
 #include "cuda_utils.hpp"
 #include "gpu_table.hpp"
+#include "expr_eval.hpp"
 
 #if __has_include(<cudf/join/join.hpp>)
 #include <cudf/join/join.hpp>
@@ -13,6 +14,8 @@
 #error "cuDF join headers not found (expected cudf/join/join.hpp or cudf/join.hpp)"
 #endif
 #include <cudf/join/filtered_join.hpp>
+#include <cudf/join/mixed_join.hpp>
+#include <cudf/join/conditional_join.hpp>
 #include <cudf/aggregation.hpp>
 #include <cudf/ast/expressions.hpp>
 #include <cudf/binaryop.hpp>
@@ -894,4 +897,231 @@ SEXP gpu_cross_join(SEXP xptr_left, SEXP xptr_right) {
     auto result = cudf::cross_join(left_view, right_view);
 
     return make_gpu_table_xptr(std::move(result));
+}
+
+// -----------------------------------------------------------------------
+// gpu_cond_join(): Phase 7 J7 (scratchpad/phase7_joins_design.md section
+// 1.4/2), the native non-equi join_by() entry point -- one condition IR
+// (already `&`-folded across every non-equi entry and bound to per-side
+// 0-based indices by R/join.R's join_cond_ir_from_spec() + ir_bind_join())
+// dispatched through cuDF's mixed_join (equality keys + AST residual
+// condition) whenever the spec has >= 1 equi condition alongside the
+// non-equi one(s), or conditional_join (pure AST predicate, no equality
+// keys at all) otherwise -- exactly the split R/join.R's
+// join_equi_spec()/join_cond_spec() already compute.
+//
+// Every mutating result (left/inner/full/right) is fed through the SAME
+// build_join_result() pipeline every equi join uses (device sanitize ->
+// diag -> stable sort -> multiple= filter -> gather), so
+// check_join_cardinality()'s multiple=/relationship=/unmatched= behavior
+// (R/join.R) applies identically whether the by= spec was equi or non-equi
+// -- verified empirically against dplyr 1.2.1 that these arguments are
+// independent of join_by()'s condition shape. `keep` is always forced
+// TRUE for a non-equi spec (resolve_join_keep(), R/join.R), so there is no
+// join-key column to drop or coalesce on either side: every column of both
+// tables survives untouched, hence the empty `right_drop_cols`/
+// `left_key_cols`/`right_key_cols` arguments to build_join_result() below.
+//
+// right_join() DECISION (see the "right" branch's own comment): cuDF has
+// no mixed_right_join/conditional_right_join at all. Rather than punting
+// non-equi right_join() to the CPU fallback, this reframes it as a LEFT
+// join with x and y's PHYSICAL roles swapped (every y row kept, matched
+// against x), then swaps the two returned index maps back into this
+// package's x-is-left/y-is-right convention before handing them to
+// build_join_result() -- whose own ascending stable sort on (left_map,
+// right_map) then reproduces dplyr's right_join() row-order contract
+// (x-matched order, then unmatched-y tail) exactly the way gpu_right_join()
+// does for the equi case.
+// [[Rcpp::export]]
+SEXP gpu_cond_join(SEXP xptr_left,
+                   SEXP xptr_right,
+                   Rcpp::IntegerVector equi_left_keys,
+                   Rcpp::IntegerVector equi_right_keys,
+                   Rcpp::IntegerVector right_drop_cols,
+                   Rcpp::List cond_ir,
+                   std::string join_kind,
+                   bool nulls_equal = true,
+                   std::string multiple = "all") {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
+    Rcpp::XPtr<GpuTablePtr> right_ptr(xptr_right);
+
+    cudf::table_view left_view = get_table_view(left_ptr);
+    cudf::table_view right_view = get_table_view(right_ptr);
+
+    auto equi_left = to_index_vec(equi_left_keys);
+    auto equi_right = to_index_vec(equi_right_keys);
+    bool has_equi = !equi_left.empty();
+
+    // Phase 7 J7 finding: `keep`'s real `NULL` default is PER CONDITION,
+    // not a whole-join TRUE/FALSE (see resolve_join_keep()'s/
+    // build_join_output_info()'s own R-side docs) -- `right_drop_cols` (R:
+    // lower_join()) only ever names the EQUI subset's right-side columns.
+    // Dropping (right_keep) applies uniformly to every mutating join kind,
+    // exactly like gpu_left_join()/gpu_inner_join()/gpu_full_join() already
+    // drop a redundant right key column whenever keep = FALSE. Coalescing
+    // (filling a right-only/unmatched-right row's null left-gathered key
+    // from the right table) is a DIFFERENT question, gated by join_kind
+    // below (only "full"/"right" can ever produce such a row -- inner/left
+    // never do, same rationale as the equi paths' own {}, {} for those two).
+    auto right_drop = to_index_vec(right_drop_cols);
+    auto right_keep = compute_right_keep_cols(right_view, right_drop);
+
+    auto null_equality = nulls_equal ? cudf::null_equality::EQUAL
+                                     : cudf::null_equality::UNEQUAL;
+
+    auto stream = cudf::get_default_stream();
+    auto mr = rmm::mr::get_current_device_resource();
+
+    if (join_kind == "right") {
+        // See this function's own file-level comment for the full
+        // derivation. build_join_ast()'s `swap_sides = true` tags x's
+        // columns as the physical RIGHT table and y's as the physical LEFT
+        // table (the same logical predicate join_by()'s x/y columns always
+        // mean -- only the AST's table_reference tagging changes), matching
+        // the argument order below: y plays the "left" role (every row
+        // kept), x plays the "right" role (matched-or-sentinel).
+        cudf::ast::tree tree;
+        cudf::ast::expression const& predicate =
+            build_join_ast(cond_ir, tree, left_view, right_view, /*swap_sides=*/true, nulls_equal);
+
+        std::unique_ptr<rmm::device_uvector<cudf::size_type>> y_map;
+        std::unique_ptr<rmm::device_uvector<cudf::size_type>> x_map;
+
+        if (has_equi) {
+            auto x_equi_view = select_table_view(left_view, equi_left);
+            auto y_equi_view = select_table_view(right_view, equi_right);
+            std::tie(y_map, x_map) = cudf::mixed_left_join(
+                y_equi_view, x_equi_view, right_view, left_view,
+                predicate, null_equality, {}, stream, mr);
+        } else {
+            std::tie(y_map, x_map) = cudf::conditional_left_join(
+                right_view, left_view, predicate, {}, stream, mr);
+        }
+
+        // Coalescing: right_join can produce unmatched-y rows (left_map ==
+        // sentinel), same shape of gap gpu_right_join()/gpu_full_join()
+        // already coalesce for -- gated on right_drop non-empty exactly
+        // like those two.
+        std::vector<cudf::size_type> coalesce_left_keys;
+        std::vector<cudf::size_type> coalesce_right_keys;
+        if (!right_drop.empty()) {
+            coalesce_left_keys = equi_left;
+            coalesce_right_keys = equi_right;
+        }
+
+        // reclassify_excess = true: right_join always keeps every y row
+        // regardless of multiple= capping (same rationale as
+        // gpu_right_join()/gpu_full_join() above).
+        auto build = build_join_result(left_view, right_view,
+                                       map_as_column_view(*x_map),
+                                       map_as_column_view(*y_map),
+                                       right_keep,
+                                       coalesce_left_keys, coalesce_right_keys,
+                                       multiple, true);
+        return wrap_join_build_result(std::move(build));
+    }
+
+    cudf::ast::tree tree;
+    cudf::ast::expression const& predicate =
+        build_join_ast(cond_ir, tree, left_view, right_view, /*swap_sides=*/false, nulls_equal);
+
+    if (join_kind == "semi" || join_kind == "anti") {
+        std::unique_ptr<rmm::device_uvector<cudf::size_type>> idx;
+        if (has_equi) {
+            auto left_equi_view = select_table_view(left_view, equi_left);
+            auto right_equi_view = select_table_view(right_view, equi_right);
+            idx = (join_kind == "anti")
+                ? cudf::mixed_left_anti_join(left_equi_view, right_equi_view,
+                                             left_view, right_view,
+                                             predicate, null_equality, stream, mr)
+                : cudf::mixed_left_semi_join(left_equi_view, right_equi_view,
+                                             left_view, right_view,
+                                             predicate, null_equality, stream, mr);
+        } else {
+            idx = (join_kind == "anti")
+                ? cudf::conditional_left_anti_join(left_view, right_view, predicate, {}, stream, mr)
+                : cudf::conditional_left_semi_join(left_view, right_view, predicate, {}, stream, mr);
+        }
+
+        // Same left-row-order contract as gpu_semi_anti_join() above: the
+        // returned index vector's order is unspecified, so sort ascending
+        // before gathering.
+        cudf::device_span<cudf::size_type const> idx_span(idx->data(), idx->size());
+        cudf::column_view idx_col_view(idx_span);
+        cudf::table_view idx_tbl({idx_col_view});
+        auto sorted_idx_tbl = cudf::sort(idx_tbl, {cudf::order::ASCENDING},
+                                         {}, stream, mr);
+        auto sorted_idx_view = sorted_idx_tbl->view().column(0);
+
+        auto result = cudf::gather(left_view, sorted_idx_view,
+                                   cudf::out_of_bounds_policy::DONT_CHECK,
+                                   stream, mr);
+        return make_gpu_table_xptr(std::move(result));
+    }
+
+    std::unique_ptr<rmm::device_uvector<cudf::size_type>> left_map;
+    std::unique_ptr<rmm::device_uvector<cudf::size_type>> right_map;
+
+    if (has_equi) {
+        auto left_equi_view = select_table_view(left_view, equi_left);
+        auto right_equi_view = select_table_view(right_view, equi_right);
+
+        if (join_kind == "inner") {
+            std::tie(left_map, right_map) = cudf::mixed_inner_join(
+                left_equi_view, right_equi_view, left_view, right_view,
+                predicate, null_equality, {}, stream, mr);
+        } else if (join_kind == "left") {
+            std::tie(left_map, right_map) = cudf::mixed_left_join(
+                left_equi_view, right_equi_view, left_view, right_view,
+                predicate, null_equality, {}, stream, mr);
+        } else if (join_kind == "full") {
+            std::tie(left_map, right_map) = cudf::mixed_full_join(
+                left_equi_view, right_equi_view, left_view, right_view,
+                predicate, null_equality, {}, stream, mr);
+        } else {
+            Rcpp::stop("internal: unknown mutating non-equi join kind '%s'", join_kind.c_str());
+        }
+    } else {
+        if (join_kind == "inner") {
+            std::tie(left_map, right_map) = cudf::conditional_inner_join(
+                left_view, right_view, predicate, {}, stream, mr);
+        } else if (join_kind == "left") {
+            std::tie(left_map, right_map) = cudf::conditional_left_join(
+                left_view, right_view, predicate, {}, stream, mr);
+        } else if (join_kind == "full") {
+            std::tie(left_map, right_map) = cudf::conditional_full_join(
+                left_view, right_view, predicate, stream, mr);
+        } else {
+            Rcpp::stop("internal: unknown mutating non-equi join kind '%s'", join_kind.c_str());
+        }
+    }
+
+    // reclassify_excess: false for inner/left (a capped-out match is simply
+    // dropped, never surfaced as its own row -- same contract as the equi
+    // paths above), true for full (every row of both sides always survives
+    // regardless of multiple= capping) -- identical rationale to
+    // gpu_left_join()/gpu_inner_join()/gpu_full_join().
+    bool reclassify_excess = (join_kind == "full");
+
+    // Coalescing: only full_join() can produce BOTH a left-unmatched
+    // (right-only) row -- inner/left never do (every output row has a real
+    // left source), same rationale as gpu_inner_join()/gpu_left_join()
+    // passing {}, {} unconditionally.
+    std::vector<cudf::size_type> coalesce_left_keys;
+    std::vector<cudf::size_type> coalesce_right_keys;
+    if (join_kind == "full" && !right_drop.empty()) {
+        coalesce_left_keys = equi_left;
+        coalesce_right_keys = equi_right;
+    }
+
+    auto build = build_join_result(left_view, right_view,
+                                   map_as_column_view(*left_map),
+                                   map_as_column_view(*right_map),
+                                   right_keep,
+                                   coalesce_left_keys, coalesce_right_keys,
+                                   multiple, reclassify_excess);
+
+    return wrap_join_build_result(std::move(build));
 }

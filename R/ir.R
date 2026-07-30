@@ -1894,6 +1894,82 @@ ir_bind <- function(ir, schema) {
   ir
 }
 
+#' Create a side-tagged IR column reference for a non-equi `join_by()`
+#' condition (Phase 7 J7)
+#'
+#' A plain [ir_col()] node is resolved against a *single* schema by name
+#' ([ir_bind()]) -- fine for `filter()`/`mutate()`, which only ever see one
+#' table. A join condition (`join_by(a >= b)`) references columns from TWO
+#' tables at once, and -- crucially -- a self-join (`inner_join(x, x,
+#' join_by(a >= b))`) has IDENTICAL left/right schemas, so a name alone
+#' can't say which side `a`/`b` belong to. `join_by()`'s own pre-normalized
+#' spec already tells us explicitly, though: `x`/`y` are parallel vectors
+#' where `x[i]` is ALWAYS the left-table column and `y[i]` is ALWAYS the
+#' right-table column for condition `i` (see `join_by_is_non_equi()`'s own
+#' roxygen, R/join.R). `join_cond_ir_from_spec()` (R/join.R) uses that
+#' knowledge directly when building each condition's IR, tagging every
+#' `col` node with an explicit `side` (`0L` = left/x, `1L` = right/y) at
+#' construction time -- deliberately NOT the design doc's original
+#' "resolve left-first-then-right by lookup order" sketch, which silently
+#' breaks on a self-join. [ir_bind_join()] then resolves `$index` against
+#' the correct side's schema using this tag, never by cross-schema lookup.
+#' @param name Character scalar, the column name
+#' @param side `0L` (left/x) or `1L` (right/y)
+#' @return A `cuplyr_ir_col` node with an extra `side` field
+#' @keywords internal
+ir_col_join <- function(name, side) {
+  node <- ir_col(name)
+  node$side <- as.integer(side)
+  node
+}
+
+#' Bind 0-based, per-side column indices onto a non-equi join condition IR
+#' tree (Phase 7 J7)
+#'
+#' The join-condition analogue of [ir_bind()]. Every `col` node in a
+#' condition IR built by `join_cond_ir_from_spec()` (R/join.R) already
+#' carries an explicit `side` tag (see [ir_col_join()]'s docs for why this
+#' package deviates from the design doc's lookup-order sketch: a self-join
+#' has identical left/right schemas, so name-based resolution against
+#' `left_schema` first would silently mis-bind a right-only column, or
+#' bind a same-named column to the wrong side entirely). This function
+#' simply resolves each `col` node's `$index` against `left_schema` (side
+#' `0L`) or `right_schema` (side `1L`) directly, using that tag -- never a
+#' generic single-schema lookup.
+#' @param ir An IR node (or `NULL`), every `col` descendant carrying a
+#'   `side` field ([ir_col_join()])
+#' @param left_schema,right_schema List with `names`/`types` for the join's
+#'   left/right inputs
+#' @return The IR tree with `index` filled in on every `col` node
+#' @keywords internal
+ir_bind_join <- function(ir, left_schema, right_schema) {
+  if (is.null(ir)) {
+    return(ir)
+  }
+
+  if (ir$kind == "col") {
+    schema <- if (identical(ir$side, 1L)) right_schema else left_schema
+    idx <- match(ir$name, schema$names)
+    if (is.na(idx)) {
+      side_name <- if (identical(ir$side, 1L)) "Right" else "Left"
+      stop(side_name, " join condition column '", ir$name, "' not found.\n",
+           "Available columns: ", paste(schema$names, collapse = ", "),
+           call. = FALSE)
+    }
+    ir$index <- idx - 1L
+    return(ir)
+  }
+
+  # kind == "call": every non-equi join condition IR is built exclusively
+  # from comparison ops folded with "&" (join_cond_ir_from_spec()) -- never
+  # a literal (join_by() itself only ever accepts column-to-column
+  # comparisons, e.g. `join_by(a >= b)`; `join_by(a >= 5)` is a dplyr parse
+  # error before this package ever sees it) -- so no "lit" branch is needed
+  # here, unlike ir_bind()'s generic single-schema version.
+  ir$args <- lapply(ir$args, ir_bind_join, left_schema = left_schema, right_schema = right_schema)
+  ir
+}
+
 #' Deparse an IR node back to readable text
 #'
 #' For diagnostics (`show_query()`, error messages) -- not intended to be a

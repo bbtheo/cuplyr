@@ -268,14 +268,28 @@ lower_rename <- function(ast, source_ptr) {
 #' (`gpu_left_join()`/`gpu_inner_join()`/`gpu_full_join()`/`gpu_right_join()`,
 #' `src/ops_join.cpp`) all return `list(ptr, diag)` (Phase 7 J4's map-pipeline
 #' restructure): `ptr` is the result table's external pointer, `diag` is a
-#' first-offender diagnostics list that nothing consumes yet
-#' (`check_join_cardinality()`'s multiple=/unmatched=/relationship= behavior
-#' lands in Phase 7 J5 -- for now `diag` is unpacked and discarded, not
-#' acted on). `right_join()` used to be lowered via a swapped `left_join(y,
-#' x)` plus a column reorder/select (`build_right_join_via_left()`/
+#' first-offender diagnostics list consumed by `check_join_cardinality()`
+#' below (multiple=/unmatched=/relationship=, Phase 7 J5). `right_join()`
+#' used to be lowered via a swapped `left_join(y, x)` plus a column
+#' reorder/select (`build_right_join_via_left()`/
 #' `resolve_right_join_select_idx()`, since removed) -- `gpu_right_join()` is
 #' now native and takes exactly the same argument shape as the other three,
 #' so no special-casing is needed here beyond the switch itself.
+#'
+#' Non-equi `join_by()` (Phase 7 J7, `scratchpad/phase7_joins_design.md`
+#' section 1.4/2): `ast$by$op` carries each condition's real operator (not
+#' just `"=="`) whenever `join_by_natively_supported()` (R/join.R) let the
+#' join reach this AST shape at all -- [join_equi_spec()]/[join_cond_spec()]
+#' split it back into an equality-key subset (routed through the same
+#' hash-join machinery every equi join uses, via `mixed_join`'s own
+#' equality tables) and a residual non-equi subset, folded into one AST
+#' condition tree by `join_cond_ir_from_spec()` + [ir_bind_join()] and
+#' handed to `gpu_cond_join()` (`src/ops_join.cpp`), which dispatches to
+#' `mixed_*`/`conditional_*` cuDF entry points depending on whether any
+#' equi keys survived the split. `gpu_cond_join()` reuses the exact same
+#' `list(ptr, diag)` / bare-`ptr` return shapes as the equi paths below (see
+#' its own C++ comment for the `join_kind == "right"` swapped-role decision),
+#' so `check_join_cardinality()` applies identically either way.
 #' @keywords internal
 lower_join <- function(ast, source_ptr) {
   left_ptr <- lower_and_execute(ast$left, source_ptr)
@@ -283,6 +297,73 @@ lower_join <- function(ast, source_ptr) {
 
   left_schema <- infer_schema(ast$left)
   right_schema <- infer_schema(ast$right)
+
+  # na_matches = "na" (the default) matches NA keys against each other
+  # (cudf::null_equality::EQUAL); "never" treats every NA key as distinct,
+  # so no NA ever matches anything, on either side (::UNEQUAL). See
+  # scratchpad/phase7_joins_design.md task J1.
+  nulls_equal <- !identical(ast$na_matches, "never")
+
+  mutating_join_types <- c("left", "inner", "full", "right")
+
+  # Phase 7 J7: at least one condition's operator isn't "==" -- a native
+  # non-equi join_by() (join_by_natively_supported() already screened out
+  # closest()/rolling filters, unrecognized operators, and STRING columns
+  # before this AST node was ever built; see R/join.R). `keep` is NOT
+  # unconditionally TRUE here (Phase 7 J7 finding, see
+  # resolve_join_keep()/build_join_output_info()'s own docs, R/join.R):
+  # dplyr's real `keep = NULL` default drops the right key column (and
+  # coalesces) PER CONDITION, only for the genuinely equi (`op == "=="`)
+  # entries -- a mixed `join_by(c == d, a >= b)` drops `d` but keeps both
+  # `a`/`b`. `right_drop`/coalescing below therefore only ever applies to
+  # `equi_spec`'s columns, mirroring gpu_full_join()'s/gpu_right_join()'s
+  # own `right_drop`-gated coalescing exactly.
+  is_non_equi <- length(ast$by$op) > 0 && any(ast$by$op != "==")
+
+  if (is_non_equi) {
+    equi_spec <- join_equi_spec(ast$by)
+    cond_spec <- join_cond_spec(ast$by)
+
+    equi_left_idx <- if (length(equi_spec$left) > 0) {
+      match(equi_spec$left, left_schema$names) - 1L
+    } else {
+      integer(0)
+    }
+    equi_right_idx <- if (length(equi_spec$right) > 0) {
+      match(equi_spec$right, right_schema$names) - 1L
+    } else {
+      integer(0)
+    }
+
+    right_drop <- if (!isTRUE(ast$keep)) equi_spec$right else character(0)
+    right_drop_idx <- if (length(right_drop) > 0) {
+      match(right_drop, right_schema$names) - 1L
+    } else {
+      integer(0)
+    }
+
+    cond_ir <- ir_bind_join(join_cond_ir_from_spec(cond_spec), left_schema, right_schema)
+
+    if (ast$join_type %in% mutating_join_types) {
+      result <- gpu_cond_join(left_ptr, right_ptr, equi_left_idx, equi_right_idx,
+                              right_drop_idx, cond_ir, ast$join_type, nulls_equal,
+                              ast$multiple)
+
+      check_join_cardinality(result$diag, ast$join_type, ast$multiple,
+                             ast$relationship, ast$unmatched)
+
+      return(result$ptr)
+    }
+
+    # semi/anti (no multiple=/unmatched=/relationship= in dplyr's own
+    # signature for either -- see the equi semi/anti branch below; `keep`
+    # is likewise not part of dplyr's semi_join()/anti_join() signature at
+    # all, and the output is x's own schema verbatim regardless, so
+    # right_drop_idx is computed uniformly above but never consulted by
+    # gpu_cond_join()'s semi/anti branch).
+    return(gpu_cond_join(left_ptr, right_ptr, equi_left_idx, equi_right_idx,
+                         right_drop_idx, cond_ir, ast$join_type, nulls_equal, "all"))
+  }
 
   left_key_idx <- match(ast$by$left, left_schema$names) - 1L
   right_key_idx <- match(ast$by$right, right_schema$names) - 1L
@@ -293,14 +374,6 @@ lower_join <- function(ast, source_ptr) {
   } else {
     integer(0)
   }
-
-  # na_matches = "na" (the default) matches NA keys against each other
-  # (cudf::null_equality::EQUAL); "never" treats every NA key as distinct,
-  # so no NA ever matches anything, on either side (::UNEQUAL). See
-  # scratchpad/phase7_joins_design.md task J1.
-  nulls_equal <- !identical(ast$na_matches, "never")
-
-  mutating_join_types <- c("left", "inner", "full", "right")
 
   if (ast$join_type %in% mutating_join_types) {
     # `multiple=` filtering happens device-side (src/ops_join.cpp

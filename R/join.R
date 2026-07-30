@@ -26,6 +26,72 @@ join_by_is_non_equi <- function(by) {
     (any(by$condition != "==") || any(by$filter != "none"))
 }
 
+#' The non-equi operators J7's native `mixed_join`/`conditional_join`
+#' lowering understands
+#'
+#' `join_by()`'s own infix parser only ever produces one of these five for
+#' a condition (verified empirically: `==`, `>=`, `>`, `<=`, `<`; `!=` isn't
+#' reachable via any of `join_by()`'s own helpers -- `between()`/`within()`/
+#' `overlaps()` all pre-expand to `>=`/`<=` pairs, `closest()` wraps one of
+#' the five -- but is included here defensively since `ast_op_from_name()`
+#' (`src/expr_eval.hpp`) already has an entry for it and nothing about this
+#' set is dplyr-specific).
+#' @keywords internal
+join_native_non_equi_ops <- c("==", "!=", ">=", ">", "<=", "<")
+
+#' Is this `by=` spec natively lowerable end to end (Phase 7 J7)?
+#'
+#' `TRUE` for everything [join_by_is_non_equi()] already called equi (no
+#' change there -- J6 native hash-join path). For a genuinely non-equi
+#' `join_by()` object, native lowering additionally requires:
+#'   1. Every condition's `filter` is `"none"` -- a `closest()`/rolling
+#'      condition (`filter = "max"/"min"`) is a nearest-match query, not a
+#'      plain inequality; `gpu_cond_join()`/`build_join_ast()`
+#'      (src/ops_join.cpp / src/expr_eval.hpp) have no such "keep only the
+#'      extremal match per group" step, and dplyr's `closest()` GPU route is
+#'      out of scope until Phase 12+ (J8 pins this fallback).
+#'   2. Every condition's operator is one this package's AST lowering
+#'      understands ([join_native_non_equi_ops]).
+#'   3. Neither side of any genuinely non-equi (`condition != "=="`)
+#'      condition is a STRING column -- `build_join_ast()`'s comparison
+#'      lowering reuses `get_compare_op()`/AST comparison ops, which cudf's
+#'      AST evaluator can't apply to STRING columns at all (unlike the
+#'      dedicated `binary_operation()` handler `ir_op_is_comparison()`
+#'      routes string filter/mutate comparisons through); STRING non-equi
+#'      joins stay on the CPU fallback (J8).
+#' A missing/misspelled column name is NOT checked here -- left to
+#' `validate_join_cols()`'s own proper error downstream on the native path
+#' (safer than silently routing an outright user typo to a fallback that
+#' would just re-raise the same error one layer later).
+#' @keywords internal
+join_by_natively_supported <- function(by, x, y) {
+  if (!join_by_is_non_equi(by)) {
+    return(TRUE)
+  }
+
+  if (any(by$filter != "none")) {
+    return(FALSE)
+  }
+  if (!all(by$condition %in% join_native_non_equi_ops)) {
+    return(FALSE)
+  }
+
+  is_non_equi <- by$condition != "=="
+  if (!any(is_non_equi)) {
+    return(TRUE)
+  }
+
+  left_idx <- match(by$x[is_non_equi], x$schema$names)
+  right_idx <- match(by$y[is_non_equi], y$schema$names)
+  if (anyNA(left_idx) || anyNA(right_idx)) {
+    return(TRUE)  # let validate_join_cols() raise its own error natively
+  }
+
+  left_types <- x$schema$types[left_idx]
+  right_types <- y$schema$types[right_idx]
+  !any(left_types == "STRING") && !any(right_types == "STRING")
+}
+
 #' Parse a join specification into a 4-vector spec
 #'
 #' Returns `list(left, right, op, filter)`: `left`/`right`/`op` are parallel
@@ -43,8 +109,16 @@ join_by_is_non_equi <- function(by) {
 #' shape in `R/fallback.R`) before ever calling `parse_join_by()` -- Phase 7
 #' J7 replaces that fallback with a native `mixed_join`/`conditional_join`
 #' lowering, at which point this function gains a real non-equi branch. The
-#' `stop()` below is an internal-only safety net (unreachable from any join
-#' verb in this package) in case that invariant is ever violated.
+#' `stop()` below is an internal-only safety net: every join verb calls
+#' [join_by_natively_supported()] FIRST and routes the unsupported subset
+#' (`closest()`/rolling `filter=`, an unrecognized operator, or a STRING
+#' non-equi column -- see that function's own docs) to the CPU fallback
+#' before ever reaching this function, so a non-equi `join_by()` that does
+#' reach here is always one J7's native `mixed_join`/`conditional_join`
+#' lowering (`gpu_cond_join()`, `src/ops_join.cpp`) can handle: `op`
+#' carries each condition's real operator (not just `"=="`) straight
+#' through, and [join_equi_spec()]/[join_cond_spec()] (below) split it back
+#' into its equi/non-equi halves at lowering time (`R/lower.R::lower_join()`).
 #' @keywords internal
 parse_join_by <- function(by, x, y) {
   if (is.null(by)) {
@@ -58,10 +132,9 @@ parse_join_by <- function(by, x, y) {
   }
 
   if (inherits(by, "dplyr_join_by")) {
-    if (join_by_is_non_equi(by)) {
-      stop("Internal error: non-equi join_by() must be routed to the CPU ",
-           "fallback before reaching parse_join_by() (Phase 7 J7 will ",
-           "replace this with a native non-equi lowering path).",
+    if (join_by_is_non_equi(by) && !all(by$filter == "none")) {
+      stop("Internal error: a closest()/rolling join_by() must be routed ",
+           "to the CPU fallback before reaching parse_join_by().",
            call. = FALSE)
     }
     return(list(left = by$x, right = by$y,
@@ -113,10 +186,12 @@ join_equi_spec <- function(spec) {
 
 #' The non-equi subset of a join spec
 #'
-#' Dormant until Phase 7 J7 (`build_join_ast()`/`gpu_cond_join()`), which
-#' will lower this subset via `mixed_join`/`conditional_join`. Always empty
-#' for now, since no code path currently produces `op` values other than
-#' `"=="`.
+#' Feeds `join_cond_ir_from_spec()` below: the residual AST condition
+#' `gpu_cond_join()` (`src/ops_join.cpp`) evaluates via `mixed_join`'s
+#' `binary_predicate` argument (equi entries are handled entirely by
+#' `mixed_join`'s own equality-key hashing, via [join_equi_spec()] instead --
+#' re-including them in the AST condition too would be redundant, not
+#' wrong, but this package's `gpu_cond_join()` never does).
 #' @keywords internal
 join_cond_spec <- function(spec) {
   is_eq <- spec$op == "=="
@@ -124,22 +199,74 @@ join_cond_spec <- function(spec) {
        op = spec$op[!is_eq], filter = spec$filter)
 }
 
+#' Build a single, `&`-folded IR condition tree from a join spec's non-equi
+#' subset (Phase 7 J7)
+#'
+#' One `ir_call(op, list(x_col, y_col))` comparison node per condition
+#' entry (`cond_spec$left[i] <op> cond_spec$right[i]`), each column tagged
+#' with its side via [ir_col_join()] (`0L` = left/x, `1L` = right/y --
+#' straight from `cond_spec`'s own parallel `left`/`right` vectors, which
+#' `parse_join_by()` populated from `join_by()`'s own `x`/`y` fields; see
+#' [ir_bind_join()]'s docs for why this explicit tag -- not a lookup-order
+#' convention -- is required for a self-join to bind correctly), folded
+#' together with `"&"` exactly like `lower_filter()` folds a filter node's
+#' predicate list into one expression. `cond_spec` must be non-empty
+#' (callers only invoke this when `length(cond_spec$op) > 0`, i.e. the
+#' join_by() has at least one genuinely non-equi condition -- see
+#' `lower_join()`, R/lower.R).
+#' @param cond_spec The non-equi subset of a join spec, as returned by
+#'   [join_cond_spec()]
+#' @return An unbound IR node (run [ir_bind_join()] before lowering)
+#' @keywords internal
+join_cond_ir_from_spec <- function(cond_spec) {
+  n <- length(cond_spec$op)
+  combined <- NULL
+  for (i in seq_len(n)) {
+    node <- ir_call(cond_spec$op[i], list(
+      ir_col_join(cond_spec$left[i], 0L),
+      ir_col_join(cond_spec$right[i], 1L)
+    ))
+    combined <- if (is.null(combined)) node else ir_call("&", list(combined, node))
+  }
+  combined
+}
+
 #' Resolve `keep`'s `NULL` default against a join spec
 #'
-#' Mirrors dplyr's own `keep = NULL` default resolution: `NULL` means `FALSE`
-#' for an equi join and `TRUE` for a non-equi one (inequality/rolling/overlap
-#' joins can't drop either side's key column, since there's no single shared
-#' key value to keep). Explicit `keep = FALSE` on a non-equi join is a hard
-#' error with dplyr's own text -- dormant in practice until Phase 7 J7 (no
-#' spec is non-equi yet), but exercised here directly against a hand-built
-#' spec in tests.
+#' Ported directly from `dplyr:::join_cols()` (verified via `body()` against
+#' dplyr 1.2.1, Phase 7 J7 finding): `keep = NULL`'s real resolution is NOT
+#' a single whole-join TRUE/FALSE decision -- it is PER CONDITION.
+#' `join_cols()`'s own `is_null(keep)` branch drops the right key column
+#' (and coalesces, no suffix distinction) only for conditions whose
+#' `by$condition == "=="`; a genuinely non-equi condition (`join_by(a >=
+#' b)`) always keeps BOTH sides' key columns, suffixed like any other
+#' colliding column -- verified empirically: `join_by(c == d, a >= b)`
+#' drops `d` (the equi pair) but keeps both `a` and `b` (the non-equi
+#' pair). An all-equi spec's per-condition resolution collapses to
+#' "drop every right key" (this package's historical `FALSE` behavior,
+#' unchanged); an all-non-equi spec's per-condition resolution collapses to
+#' "keep every column, suffixed uniformly" (this package's historical
+#' `TRUE`-forced behavior for a pure non-equi join, also unchanged) -- only
+#' a MIXED equi/non-equi spec actually needs the per-condition machinery to
+#' differ from either extreme, which is why this was never caught before
+#' J7 (no spec was ever both equi and non-equi at once).
+#'
+#' Both `NULL` and a *legal* explicit `FALSE` resolve to the same
+#' `FALSE` return value here: `build_join_output_info()`'s own `keep !=
+#' TRUE` branch always applies the per-condition (`join_spec$op == "=="`)
+#' logic, which -- per `dplyr:::join_cols()`'s own `is_null`/`is_false`
+#' branches -- are byte-identical whenever `is_false(keep)` is even legal
+#' (i.e. an all-equi spec, where `by$x[equi] == by$x` and `by$y[equi] ==
+#' by$y` make the two branches' cross-sets identical); explicit `keep =
+#' FALSE` on any spec with a genuinely non-equi condition is a hard error
+#' with dplyr's own text, exactly as before.
 #' @param keep `NULL`, `TRUE`, or `FALSE`, as passed by the user
 #' @param spec A join spec as returned by [parse_join_by()]
 #' @return `TRUE`/`FALSE`
 #' @keywords internal
 resolve_join_keep <- function(keep, spec) {
   if (is.null(keep)) {
-    return(!join_is_equi(spec))
+    return(FALSE)
   }
 
   if (isFALSE(keep) && !join_is_equi(spec)) {
@@ -150,14 +277,23 @@ resolve_join_keep <- function(keep, spec) {
   keep
 }
 
+#' Validate a join spec's per-side column list exists in that side's schema
+#'
+#' Deliberately does NOT require `cols` to be unique (Phase 7 J7 finding): a
+#' repeated column IS a legitimate non-equi shape --
+#' `join_by(between(a, lo, hi))` compares the SAME left column `a` against
+#' TWO different right columns (`lo` via `>=`, `hi` via `<=`), so
+#' `join_spec$left` is `c("a", "a")` by construction (`within()`/
+#' `overlaps()` similarly duplicate a column across their pre-expanded
+#' condition pairs) -- this is exactly what `between()`/`within()`/
+#' `overlaps()` need to keep working once J7 routes them off the CPU
+#' fallback, not a user error to reject.
+#' @keywords internal
 validate_join_cols <- function(cols, tbl, side) {
   missing <- setdiff(cols, tbl$schema$names)
   if (length(missing) > 0) {
     stop(side, " join columns not found: ", paste(missing, collapse = ", "),
          call. = FALSE)
-  }
-  if (length(unique(cols)) != length(cols)) {
-    stop(side, " join columns must be unique.", call. = FALSE)
   }
 }
 
@@ -232,30 +368,43 @@ add_suffixes <- function(x, y, suffix) {
 }
 
 #' Compute a join's output column names/types/origin, mirroring
-#' `dplyr:::join_cols()` exactly (Phase 7 J6)
+#' `dplyr:::join_cols()` exactly (Phase 7 J6/J7)
 #'
 #' Ported directly from dplyr 1.2.1's own `join_cols()` (verified via
 #' `body(dplyr:::join_cols)`), specialized to this package's always-resolved
 #' `keep` (never `NULL` here -- every join verb calls `resolve_join_keep()`
-#' first, and for an all-equi spec dplyr's own `keep = NULL` and `keep =
-#' FALSE` branches of `join_cols()` are identical, since both ignore exactly
-#' `join_spec$left`/`join_spec$right`; only a genuinely non-equi spec would
-#' make them diverge, and those never reach here -- see
-#' `join_by_is_non_equi()`).
+#' first, which -- Phase 7 J7 finding -- returns `FALSE` for BOTH the real
+#' `NULL` default AND a legal explicit `FALSE`; see its own roxygen for why
+#' those two collapse to one value here).
 #'
 #' `keep = TRUE`: every column on both sides is suffixed uniformly via
 #' `add_suffixes()` (no column is "ignored"), and nothing is dropped from
 #' the right table -- reproduces e.g. `join_by(a)` + `keep = TRUE` giving
 #' `a.x`/`a.y` for BOTH copies of the shared key.
 #'
-#' `keep = FALSE`: the join KEY columns (`join_spec$left`/`join_spec$right`)
-#' are excluded from suffixing entirely (they keep their bare original name,
-#' since they collapse to one coalesced column) and the right table's key
-#' columns are dropped from the output. Every other column is suffixed via
-#' `add_suffixes()` against the OTHER side's RAW (pre-suffix) names plus (for
-#' the side being checked) that side's own ignored key names -- exactly
-#' dplyr's own cross-set (`c(x_ignore, y_aux)` for the left side, plain
-#' `x_names` for the right side).
+#' `keep != TRUE` (the `NULL`-default/legal-`FALSE` case): PER CONDITION,
+#' mirroring `dplyr:::join_cols()`'s own `is_null(keep)` branch exactly
+#' (Phase 7 J7 finding -- verified empirically against dplyr 1.2.1 that this
+#' branch, not a whole-join TRUE/FALSE collapse, governs the real `keep =
+#' NULL` default: `join_by(c == d, a >= b)` drops `d` but keeps BOTH `a` and
+#' `b`). `is_eq <- join_spec$op == "=="` selects which condition PAIRS
+#' collapse to one coalesced column (the join KEY columns for those pairs
+#' specifically are excluded from suffixing -- they keep their bare
+#' original name -- and the right table's key column for that pair is
+#' dropped from the output) versus which pairs are kept verbatim on BOTH
+#' sides, suffixed like any other colliding column (a genuinely non-equi
+#' condition, e.g. `join_by(a >= b)`, has no single shared key value to
+#' collapse to -- there IS no "coalesced" column for it). An all-equi spec
+#' (`is_eq` all `TRUE`) collapses to this package's historical `keep =
+#' FALSE` behavior exactly; an all-non-equi spec (`is_eq` all `FALSE`)
+#' collapses to byte-identical output to the `keep = TRUE` branch above
+#' (every column suffixed against the full cross set, nothing dropped) --
+#' verified algebraically: `x_ignore`/`y_ignore` are both `character(0)`,
+#' so `y_aux` becomes all of `right_names` and every column check is
+#' unconditional, exactly reproducing `add_suffixes(left_names,
+#' right_names, ...)`/`add_suffixes(right_names, left_names, ...)`. Only a
+#' MIXED equi/non-equi spec actually needs this per-condition machinery to
+#' diverge from either extreme.
 #' @keywords internal
 build_join_output_info <- function(left_schema, right_schema, join_spec,
                                    suffix = c(".x", ".y"), keep = FALSE) {
@@ -267,8 +416,11 @@ build_join_output_info <- function(left_schema, right_schema, join_spec,
     right_out_names <- add_suffixes(right_names, left_names, suffix[2])
     right_keep <- right_names
   } else {
-    x_ignore <- join_spec$left
-    y_aux <- setdiff(right_names, c(join_spec$left, join_spec$right))
+    is_eq <- join_spec$op == "=="
+    x_ignore <- join_spec$left[is_eq]
+    y_ignore <- join_spec$right[is_eq]
+
+    y_aux <- setdiff(right_names, c(x_ignore, y_ignore))
     x_check <- !left_names %in% x_ignore
 
     left_out_names <- left_names
@@ -276,7 +428,7 @@ build_join_output_info <- function(left_schema, right_schema, join_spec,
                                             c(x_ignore, y_aux), suffix[1])
 
     right_out_all <- add_suffixes(right_names, left_names, suffix[2])
-    keep_idx <- !right_names %in% join_spec$right
+    keep_idx <- !right_names %in% y_ignore
     right_keep <- right_names[keep_idx]
     right_out_names <- right_out_all[keep_idx]
   }
@@ -865,7 +1017,7 @@ left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
     }
   }
 
-  if (join_by_is_non_equi(by)) {
+  if (!join_by_natively_supported(by, x, y)) {
     return(join_route_to_fallback("left_join", dplyr::left_join, x, y, list(
       by = by, suffix = suffix, keep = keep, na_matches = na_matches,
       multiple = multiple, unmatched = unmatched, relationship = relationship
@@ -910,7 +1062,7 @@ inner_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
     }
   }
 
-  if (join_by_is_non_equi(by)) {
+  if (!join_by_natively_supported(by, x, y)) {
     return(join_route_to_fallback("inner_join", dplyr::inner_join, x, y, list(
       by = by, suffix = suffix, keep = keep, na_matches = na_matches,
       multiple = multiple, unmatched = unmatched, relationship = relationship
@@ -955,7 +1107,7 @@ full_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
     }
   }
 
-  if (join_by_is_non_equi(by)) {
+  if (!join_by_natively_supported(by, x, y)) {
     return(join_route_to_fallback("full_join", dplyr::full_join, x, y, list(
       by = by, suffix = suffix, keep = keep, na_matches = na_matches,
       multiple = multiple, relationship = relationship
@@ -1004,7 +1156,7 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
     }
   }
 
-  if (join_by_is_non_equi(by)) {
+  if (!join_by_natively_supported(by, x, y)) {
     return(join_route_to_fallback("right_join", dplyr::right_join, x, y, list(
       by = by, suffix = suffix, keep = keep, na_matches = na_matches,
       multiple = multiple, unmatched = unmatched, relationship = relationship
@@ -1072,7 +1224,7 @@ semi_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
     }
   }
 
-  if (join_by_is_non_equi(by)) {
+  if (!join_by_natively_supported(by, x, y)) {
     return(join_route_to_fallback("semi_join", dplyr::semi_join, x, y, list(
       by = by, na_matches = na_matches
     )))
@@ -1104,7 +1256,7 @@ anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
     }
   }
 
-  if (join_by_is_non_equi(by)) {
+  if (!join_by_natively_supported(by, x, y)) {
     return(join_route_to_fallback("anti_join", dplyr::anti_join, x, y, list(
       by = by, na_matches = na_matches
     )))
