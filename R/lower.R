@@ -303,13 +303,20 @@ lower_join <- function(ast, source_ptr) {
   mutating_join_types <- c("left", "inner", "full", "right")
 
   if (ast$join_type %in% mutating_join_types) {
+    # `multiple=` filtering happens device-side (src/ops_join.cpp
+    # build_join_result(), Phase 7 J5) -- passed straight through as a
+    # string; "all" (the default) is a zero-cost no-op there. `diag`
+    # (join_map_stats(), computed BEFORE filtering) is consumed by
+    # check_join_cardinality() below to raise dplyr's exact
+    # relationship=/unmatched= conditions -- see its own roxygen
+    # (R/join.R) for the full precedence rules.
     result <- switch(ast$join_type,
       "left" = gpu_left_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
-                             right_drop_idx, nulls_equal),
+                             right_drop_idx, nulls_equal, ast$multiple),
       "inner" = gpu_inner_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
-                               right_drop_idx, nulls_equal),
+                               right_drop_idx, nulls_equal, ast$multiple),
       "full" = gpu_full_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
-                             right_drop_idx, nulls_equal),
+                             right_drop_idx, nulls_equal, ast$multiple),
       # right (Phase 7 J4): native via cudf::inner_join() for matched pairs
       # plus a filtered_join anti-join for unmatched-y rows, assembled and
       # fed through the same stable-sort/gather/coalesce pipeline every
@@ -317,8 +324,12 @@ lower_join <- function(ast, source_ptr) {
       # (src/ops_join.cpp) for the sentinel/sort-order argument that
       # reproduces dplyr's x-matched-order-then-unmatched-y-tail contract.
       "right" = gpu_right_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
-                               right_drop_idx, nulls_equal)
+                               right_drop_idx, nulls_equal, ast$multiple)
     )
+
+    check_join_cardinality(result$diag, ast$join_type, ast$multiple,
+                           ast$relationship, ast$unmatched)
+
     return(result$ptr)
   }
 

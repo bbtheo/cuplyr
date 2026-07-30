@@ -1,7 +1,9 @@
 # Oracle parity tests for Phase 7 J1: the 4-vector join spec
 # (list(left, right, op, filter)), na_matches = "never" threaded through
-# left/inner/full/right joins via nulls_equal, and the new (currently
-# dormant) multiple=/unmatched=/relationship= argument plumbing.
+# left/inner/full/right joins via nulls_equal, and the multiple=/unmatched=/
+# relationship= argument plumbing (validation only here; the actual
+# cardinality-changing behavior these arguments control is activated in
+# Phase 7 J5 and covered by tests/testthat/test-dplyr-join-rows.R).
 #
 # NO arrange_by() omission here for row order: unlike test-join.R's
 # full/right coverage, every comparison below sorts both sides by the join
@@ -231,29 +233,23 @@ test_that("relationship= rejects bad values with dplyr's exact text", {
   )
 })
 
-test_that("non-default multiple=/unmatched=/relationship= stop as not-yet-supported", {
+test_that("non-default multiple=/unmatched=/relationship= are honored (Phase 7 J5)", {
   skip_if_no_gpu()
 
+  # `id` is a clean 1:1 key on both sides here (no duplicates, no unmatched
+  # rows), so none of these non-default values have anything to filter/
+  # complain about -- they should simply succeed (activated, not stubbed).
   gx <- tbl_gpu(data.frame(id = 1:3))
   gy <- tbl_gpu(data.frame(id = 1:3))
 
-  expect_error(
-    dplyr::left_join(gx, gy, by = "id", multiple = "first"),
-    "not supported yet for tbl_gpu joins \\(Phase 7 J5\\)"
-  )
-  expect_error(
-    dplyr::left_join(gx, gy, by = "id", unmatched = "error"),
-    "not supported yet for tbl_gpu joins \\(Phase 7 J5\\)"
-  )
-  expect_error(
-    dplyr::inner_join(gx, gy, by = "id", relationship = "one-to-one"),
-    "not supported yet for tbl_gpu joins \\(Phase 7 J5\\)"
-  )
+  expect_no_error(dplyr::left_join(gx, gy, by = "id", multiple = "first") |> collect())
+  expect_no_error(dplyr::left_join(gx, gy, by = "id", unmatched = "error") |> collect())
+  expect_no_error(dplyr::inner_join(gx, gy, by = "id", relationship = "one-to-one") |> collect())
 
-  # Defaults never hit the not-yet-supported path.
-  expect_no_error(dplyr::left_join(gx, gy, by = "id", multiple = "all"))
-  expect_no_error(dplyr::left_join(gx, gy, by = "id", unmatched = "drop"))
-  expect_no_error(dplyr::inner_join(gx, gy, by = "id", relationship = NULL))
+  # Defaults still work.
+  expect_no_error(dplyr::left_join(gx, gy, by = "id", multiple = "all") |> collect())
+  expect_no_error(dplyr::left_join(gx, gy, by = "id", unmatched = "drop") |> collect())
+  expect_no_error(dplyr::inner_join(gx, gy, by = "id", relationship = NULL) |> collect())
 })
 
 test_that("full_join() has no unmatched= parameter (matches dplyr's own signature)", {

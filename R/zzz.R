@@ -2,6 +2,19 @@
 #' @importFrom Rcpp sourceCpp
 #' @importFrom rlang %||%
 NULL
+
+# Opt this package's namespace into {cli}-formatted rlang conditions
+# (bullet glyphs AND width-aware wrapping) -- rlang's `use_cli()`
+# (`env_get(..., ".__rlang_use_cli__.", inherit = TRUE)`) looks for this
+# exact binding name in the topenv of whichever frame calls
+# `rlang::abort()`/`rlang::warn()`. Phase 7 J5's `check_join_cardinality()`
+# (R/join.R) needs its conditions to wrap identically to dplyr's own
+# (dplyr sets this same `c(format = TRUE, inline = FALSE)` value in its own
+# namespace) -- without this, rlang defaults to `c(format = FALSE, inline =
+# FALSE)` and never wraps long bullets, which would otherwise make
+# `expect_snapshot()`'s dplyr-vs-cuplyr message comparisons diverge purely
+# on line-wrapping, not any real content difference.
+.__rlang_use_cli__. <- c(format = TRUE, inline = FALSE)
 .onLoad <- function(libname, pkgname) {
   # Check GPU availability
   gpu_ok <- tryCatch(

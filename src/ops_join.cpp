@@ -38,6 +38,9 @@
 #include <rmm/device_uvector.hpp>
 
 #include <set>
+#include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -243,18 +246,126 @@ Rcpp::List join_map_stats(
     );
 }
 
+// -----------------------------------------------------------------------
+// `multiple=` device-side filtering (Phase 7 J5, scratchpad/
+// phase7_joins_design.md section 1.3 steps 4-5).
+//
+// dplyr's `multiple=` semantics group by LEFT (x/"needles") regardless of
+// join type -- empirically verified (a right_join(x, y, multiple = "first")
+// still caps the number of Y rows per X row, not the reverse) -- so this
+// operates on `left_map` alone, and is called AFTER build_join_result()'s
+// stable sort (map rows are already ascending by (left_map, right_map),
+// which makes every left-value's matches a contiguous run: "first"/"last"
+// per group is just "first/last row of each run").
+//
+// Sentinel-left rows (`left_map == n_left`, the unmatched-right tail
+// gpu_full_join()/gpu_right_join() assemble) are EXEMPT from grouping --
+// they don't represent any real x row's multiplicity, and multiple of them
+// legitimately share the same sentinel value without being "the same
+// group" -- so they must never be collapsed down to one row.
+//
+// `reclassify_excess`: false for left_join/inner_join -- their contract
+// never surfaces an "extra" row for a capped-out match (verified
+// empirically: left_join(multiple = "first") returns exactly one row per
+// left row, no phantom row for the dropped match), so excess rows are
+// simply DROPPED via a boolean mask. true for full_join/right_join --
+// their contract is that EVERY right row survives regardless of `multiple=`
+// capping (verified empirically: the capped-out right row reappears as an
+// additional unmatched-right row, left columns NA) -- so excess rows are
+// RECLASSIFIED (left_map reset to the sentinel `n_left`) rather than
+// dropped, which requires a second stable sort afterward to relocate them
+// into the unmatched-right tail (in right_map order, same contract as any
+// other unmatched-right row).
+std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>> apply_multiple_filter(
+    cudf::column_view left_map_view,
+    cudf::column_view right_map_view,
+    const std::string& multiple,
+    cudf::size_type n_left,
+    bool reclassify_excess,
+    rmm::cuda_stream_view stream,
+    rmm::mr::device_memory_resource* mr) {
+
+    // "any" behaves like "first" in this backend -- verified empirically
+    // against dplyr 1.2.1 (both pick the smallest matching right-row index
+    // deterministically on the data.frame/vctrs backend dplyr itself uses),
+    // so no separate code path is needed.
+    if (multiple == "all") {
+        return {std::make_unique<cudf::column>(left_map_view, stream, mr),
+                std::make_unique<cudf::column>(right_map_view, stream, mr)};
+    }
+
+    // Never a real left index (>= 0) or the sentinel (== n_left): safe as a
+    // shift boundary-fill value so the first/last row of the whole array is
+    // always its own "edge", regardless of what real value it holds.
+    cudf::numeric_scalar<cudf::size_type> boundary_scalar(-1, true, stream);
+    cudf::size_type offset = (multiple == "last") ? -1 : 1;
+    auto neighbor = cudf::shift(left_map_view, offset, boundary_scalar, stream, mr);
+
+    // is_edge: this row's left_map differs from its "previous" (multiple =
+    // "first"/"any", offset = 1) or "next" (multiple = "last", offset = -1)
+    // neighbor -- i.e. it is the first/last row of its contiguous run of
+    // equal left_map values (guaranteed contiguous by the caller's ascending
+    // sort on (left_map, right_map)).
+    auto is_edge = cudf::binary_operation(
+        left_map_view, neighbor->view(), cudf::binary_operator::NOT_EQUAL,
+        cudf::data_type(cudf::type_id::BOOL8), stream, mr);
+
+    cudf::numeric_scalar<cudf::size_type> n_left_scalar(n_left, true, stream);
+    auto is_sentinel = cudf::binary_operation(
+        left_map_view, n_left_scalar, cudf::binary_operator::EQUAL,
+        cudf::data_type(cudf::type_id::BOOL8), stream, mr);
+
+    // keep_mask: the chosen edge of each real group, OR any sentinel row
+    // (always kept, never collapsed with its sentinel-sharing neighbors).
+    auto keep_mask = cudf::binary_operation(
+        is_edge->view(), is_sentinel->view(), cudf::binary_operator::LOGICAL_OR,
+        cudf::data_type(cudf::type_id::BOOL8), stream, mr);
+
+    if (!reclassify_excess) {
+        cudf::table_view map_tbl({left_map_view, right_map_view});
+        auto filtered = cudf::apply_boolean_mask(map_tbl, keep_mask->view(), stream, mr);
+        auto cols = filtered->release();
+        return {std::move(cols[0]), std::move(cols[1])};
+    }
+
+    // excess_mask = !keep_mask (De Morgan: only ever true for non-sentinel,
+    // non-edge rows, since keep_mask already ORs in is_sentinel).
+    auto excess_mask = cudf::unary_operation(keep_mask->view(), cudf::unary_operator::NOT, stream, mr);
+    auto new_left_map = cudf::copy_if_else(
+        n_left_scalar, left_map_view, excess_mask->view(), stream, mr);
+
+    // Re-sort: reclassifying excess rows to the sentinel moved them (in
+    // value) to the very end of the valid range, but their POSITION in the
+    // array hasn't changed yet -- this stable sort relocates them into the
+    // unmatched-right tail, in right_map order, matching dplyr's row-order
+    // contract for that tail exactly (same mechanism gpu_right_join() itself
+    // relies on for its own sentinel-tagged rows).
+    cudf::table_view remapped_tbl({new_left_map->view(), right_map_view});
+    std::vector<cudf::order> order_cols = {cudf::order::ASCENDING, cudf::order::ASCENDING};
+    auto order = cudf::stable_sorted_order(remapped_tbl, order_cols);
+    auto resorted = cudf::gather(remapped_tbl, order->view(),
+                                 cudf::out_of_bounds_policy::DONT_CHECK, stream, mr);
+    auto cols = resorted->release();
+    return {std::move(cols[0]), std::move(cols[1])};
+}
+
 struct JoinBuildResult {
     std::unique_ptr<cudf::table> table;
     Rcpp::List diag;
 };
 
-// The six-step join-map pipeline (Phase 7 J4, scratchpad/phase7_joins_design.md
-// section 1.3): device sanitize (incl. the >= nrows sentinel gap) -> stable
-// sort (this IS dplyr's row-order contract) -> gather/coalesce, plus a
-// join_map_stats() diagnostics hook alongside the sanitize step. Applied
-// uniformly to left/inner/full/right -- semi/anti/cross never call this
-// (they have no multiple=/unmatched=/relationship= in dplyr's own
-// signatures, so no diagnostics are needed there).
+// The seven-step join-map pipeline (Phase 7 J4/J5, scratchpad/
+// phase7_joins_design.md section 1.3): device sanitize (incl. the >= nrows
+// sentinel gap) -> diag stats -> stable sort (this IS dplyr's row-order
+// contract) -> multiple= filter (J5) -> gather/coalesce. Applied uniformly
+// to left/inner/full/right -- semi/anti/cross never call this (they have no
+// multiple=/unmatched=/relationship= in dplyr's own signatures, so no
+// diagnostics/filtering are needed there).
+//
+// `multiple`/`reclassify_excess`: see apply_multiple_filter()'s own comment.
+// `reclassify_excess` is meaningless (never read) when `multiple == "all"`,
+// so callers may pass either value in that case -- gpu_left_join()/
+// gpu_inner_join() pass `false` (their own contract) unconditionally.
 JoinBuildResult build_join_result(
     const cudf::table_view& left_view,
     const cudf::table_view& right_view,
@@ -262,7 +373,9 @@ JoinBuildResult build_join_result(
     const cudf::column_view& right_map_in,
     const std::vector<cudf::size_type>& right_keep_cols,
     const std::vector<cudf::size_type>& left_key_cols = {},
-    const std::vector<cudf::size_type>& right_key_cols = {}) {
+    const std::vector<cudf::size_type>& right_key_cols = {},
+    const std::string& multiple = "all",
+    bool reclassify_excess = false) {
 
     auto stream = cudf::get_default_stream();
     auto mr = rmm::mr::get_current_device_resource();
@@ -274,10 +387,17 @@ JoinBuildResult build_join_result(
     auto left_map_col = sanitize_join_map(left_map_in, left_view.num_rows(), stream, mr);
     auto right_map_col = sanitize_join_map(right_map_in, right_view.num_rows(), stream, mr);
 
-    // Step 2 (dormant hook until J5): first-offender diagnostics. Computed
-    // from the already-sanitized, still-on-device maps -- only ever
-    // transfers individual scalars to host (see join_map_stats()'s own
-    // comment), never the full map.
+    // Step 2: first-offender diagnostics (Phase 7 J5: consumed by
+    // check_join_cardinality() in R, R/join.R). Computed from the
+    // already-sanitized, still-on-device maps, BEFORE any multiple=
+    // filtering below -- only ever transfers individual scalars to host
+    // (see join_map_stats()'s own comment), never the full map. This is
+    // deliberate: dplyr's own relationship=/unmatched= cardinality checks
+    // always evaluate the RAW (pre-multiple=-filter) match set (empirically
+    // verified: relationship = "one-to-one" still errors on genuine
+    // duplicates even when multiple = "first" would have resolved them down
+    // to one match each), so computing diag here -- ahead of the filter
+    // step -- is exactly the semantics R needs, not an ordering accident.
     Rcpp::List diag = join_map_stats(left_map_col->view(), right_map_col->view(),
                                      left_view.num_rows(), right_view.num_rows(),
                                      stream, mr);
@@ -300,6 +420,25 @@ JoinBuildResult build_join_result(
     auto sorted_view = sorted_maps->view();
     left_map_view = sorted_view.column(0);
     right_map_view = sorted_view.column(1);
+
+    // Step 3.5 (Phase 7 J5): multiple= filtering, on the now-sorted maps
+    // (see apply_multiple_filter()'s own comment for the grouping/
+    // sentinel-exemption/reclassification rules). Skipped entirely -- no
+    // extra allocation, no extra kernel launch -- when multiple == "all"
+    // (the overwhelmingly common case, and the only value every join call
+    // site used before Phase 7 J5), so a default-argument join call pays
+    // exactly the same cost it did before this filtering step existed.
+    // `filtered_left`/`filtered_right` hold ownership so the views below
+    // stay valid for the rest of this function when filtering did run.
+    std::unique_ptr<cudf::column> filtered_left;
+    std::unique_ptr<cudf::column> filtered_right;
+    if (multiple != "all") {
+        std::tie(filtered_left, filtered_right) = apply_multiple_filter(
+            left_map_view, right_map_view, multiple,
+            left_view.num_rows(), reclassify_excess, stream, mr);
+        left_map_view = filtered_left->view();
+        right_map_view = filtered_right->view();
+    }
 
     auto right_subview = select_table_view(right_view, right_keep_cols);
 
@@ -400,7 +539,8 @@ SEXP gpu_left_join(SEXP xptr_left,
                    Rcpp::IntegerVector left_key_cols,
                    Rcpp::IntegerVector right_key_cols,
                    Rcpp::IntegerVector right_drop_cols,
-                   bool nulls_equal = true) {
+                   bool nulls_equal = true,
+                   std::string multiple = "all") {
     using namespace cuplyr;
 
     Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
@@ -422,10 +562,14 @@ SEXP gpu_left_join(SEXP xptr_left,
         left_key_view, right_key_view, null_equality);
 
     auto right_keep = compute_right_keep_cols(right_view, right_drop);
+    // reclassify_excess = false: left_join never surfaces a capped-out
+    // right match as its own row (verified empirically, Phase 7 J5) -- an
+    // excess match beyond multiple = "first"/"last"'s pick is dropped
+    // outright, not reclassified.
     auto build = build_join_result(left_view, right_view,
                                    map_as_column_view(*left_map),
                                    map_as_column_view(*right_map),
-                                   right_keep);
+                                   right_keep, {}, {}, multiple, false);
 
     return wrap_join_build_result(std::move(build));
 }
@@ -436,7 +580,8 @@ SEXP gpu_inner_join(SEXP xptr_left,
                     Rcpp::IntegerVector left_key_cols,
                     Rcpp::IntegerVector right_key_cols,
                     Rcpp::IntegerVector right_drop_cols,
-                    bool nulls_equal = true) {
+                    bool nulls_equal = true,
+                    std::string multiple = "all") {
     using namespace cuplyr;
 
     Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
@@ -458,10 +603,13 @@ SEXP gpu_inner_join(SEXP xptr_left,
         left_key_view, right_key_view, null_equality);
 
     auto right_keep = compute_right_keep_cols(right_view, right_drop);
+    // reclassify_excess = false: same rationale as gpu_left_join() above --
+    // inner_join never surfaces unmatched rows of either side at all, so a
+    // capped-out excess match is dropped outright.
     auto build = build_join_result(left_view, right_view,
                                    map_as_column_view(*left_map),
                                    map_as_column_view(*right_map),
-                                   right_keep);
+                                   right_keep, {}, {}, multiple, false);
 
     return wrap_join_build_result(std::move(build));
 }
@@ -472,7 +620,8 @@ SEXP gpu_full_join(SEXP xptr_left,
                    Rcpp::IntegerVector left_key_cols,
                    Rcpp::IntegerVector right_key_cols,
                    Rcpp::IntegerVector right_drop_cols,
-                   bool nulls_equal = true) {
+                   bool nulls_equal = true,
+                   std::string multiple = "all") {
     using namespace cuplyr;
 
     Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
@@ -507,10 +656,15 @@ SEXP gpu_full_join(SEXP xptr_left,
         coalesce_right_keys = right_keys;
     }
 
+    // reclassify_excess = true: full_join always keeps every right row --
+    // a capped-out excess match (multiple = "first"/"last") reappears as
+    // an additional unmatched-right row (verified empirically, Phase 7 J5),
+    // rather than being dropped.
     auto build = build_join_result(left_view, right_view,
                                    map_as_column_view(*left_map),
                                    map_as_column_view(*right_map),
-                                   right_keep, coalesce_left_keys, coalesce_right_keys);
+                                   right_keep, coalesce_left_keys, coalesce_right_keys,
+                                   multiple, true);
 
     return wrap_join_build_result(std::move(build));
 }
@@ -521,7 +675,8 @@ SEXP gpu_right_join(SEXP xptr_left,
                     Rcpp::IntegerVector left_key_cols,
                     Rcpp::IntegerVector right_key_cols,
                     Rcpp::IntegerVector right_drop_cols,
-                    bool nulls_equal = true) {
+                    bool nulls_equal = true,
+                    std::string multiple = "all") {
     using namespace cuplyr;
 
     // Native right_join (Phase 7 J4 -- see scratchpad/phase7_joins_design.md
@@ -641,9 +796,14 @@ SEXP gpu_right_join(SEXP xptr_left,
         coalesce_right_keys = right_keys;
     }
 
+    // reclassify_excess = true: same rationale as gpu_full_join() above --
+    // right_join always keeps every right (y) row, so a capped-out excess
+    // match reappears as an additional unmatched-right row rather than
+    // being dropped.
     auto build = build_join_result(left_view, right_view,
                                    full_left_map->view(), full_right_map->view(),
-                                   right_keep, coalesce_left_keys, coalesce_right_keys);
+                                   right_keep, coalesce_left_keys, coalesce_right_keys,
+                                   multiple, true);
 
     return wrap_join_build_result(std::move(build));
 }

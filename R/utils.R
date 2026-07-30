@@ -30,10 +30,26 @@ col_index <- function(x, name) {
 }
 
 # Wrap GPU calls with a clearer error message for allocation failures
+#
+# `dplyr_error_join` (Phase 7 J5, `check_join_cardinality()`, R/join.R) is a
+# deliberately-raised, well-formed dplyr-parity condition -- not a GPU
+# allocation/kernel failure -- signaled from INSIDE `lower_join()`, which
+# runs underneath this wrapper (`push_join()`, R/execute.R, wraps its own
+# `lower_and_execute()` call the same way `push_op()` does for every other
+# verb). Re-throwing it unchanged (rather than re-wrapping into the generic
+# "GPU operation ... failed" message) preserves its class/message exactly,
+# which every `expect_snapshot()`/`cnd_message()` comparison against
+# dplyr's own condition in tests/testthat/test-dplyr-join-rows.R depends
+# on. No other current caller of `push_op()`/`push_join()` raises a
+# classed condition from inside `lower_and_execute()`, so this is a no-op
+# for every other verb.
 wrap_gpu_call <- function(op_name, expr) {
   tryCatch(
     expr,
     error = function(e) {
+      if (inherits(e, "dplyr_error_join")) {
+        stop(e)
+      }
       msg <- conditionMessage(e)
       stop(
         "GPU operation '", op_name, "' failed. This is often caused by insufficient device memory. ",

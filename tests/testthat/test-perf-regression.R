@@ -249,6 +249,16 @@ test_that("perf: window_rank_grouped_lazy", {
 # *collected* result, not the input -- i.e. it is dominated by the
 # device->host transfer of a ~10x-larger result, not by kernel work. That
 # makes it a transfer-bound benchmark despite doing a hash join internally.
+#
+# Phase 7 J5: this fixture's ~200 rows/id x ~10 rows/id key distribution is
+# a genuine many-to-many pattern, so `left_join()`'s default `relationship =
+# NULL`/`multiple = "all"` now raises dplyr's own "unexpected many-to-many
+# relationship" advisory warning (check_join_cardinality(), R/join.R) on
+# every iteration -- expected and harmless (confirmed: still 17/17 on the
+# perf gate: the warning is a handful of string-formatting/condition-
+# dispatch calls, utterly dwarfed by this benchmark's multi-MB device->host
+# transfer), but suppressWarnings() keeps it from cluttering every perf run
+# with a duplicate warning per timed iteration.
 # =============================================================================
 
 test_that("perf: join_left_eager", {
@@ -257,9 +267,11 @@ test_that("perf: join_left_eager", {
   gpu_probe <- tbl_gpu(perf_join_probe_df, lazy = FALSE)
 
   expect_no_perf_regression("join_left_eager", function() {
-    gpu_df |>
-      dplyr::left_join(gpu_probe, by = "id") |>
-      collect()
+    suppressWarnings(
+      gpu_df |>
+        dplyr::left_join(gpu_probe, by = "id") |>
+        collect()
+    )
   }, calibration = "transfer")
 })
 
@@ -269,9 +281,11 @@ test_that("perf: join_left_lazy", {
   gpu_probe <- tbl_gpu(perf_join_probe_df, lazy = TRUE)
 
   expect_no_perf_regression("join_left_lazy", function() {
-    gpu_df |>
-      dplyr::left_join(gpu_probe, by = "id") |>
-      collect()
+    suppressWarnings(
+      gpu_df |>
+        dplyr::left_join(gpu_probe, by = "id") |>
+        collect()
+    )
   }, calibration = "transfer")
 })
 
