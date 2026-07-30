@@ -236,6 +236,13 @@ rowwise.tbl_gpu <- function(.data, ...) {
 # cross_join() moved to R/join.R (GPU-native via cudf::cross_join,
 # Phase 7 J3) -- see cross_join.tbl_gpu(), ast_join()'s "cross" join_type
 # (R/ast.R), lower_join() (R/lower.R), gpu_cross_join() (src/ops_join.cpp).
+# union()/union_all()/intersect()/setdiff()/setequal()/symdiff() moved to
+# R/sets.R (GPU-native, composed from bind_rows()/distinct()/semi_join()/
+# anti_join(), Phase 8) -- see union.tbl_gpu() et al., and
+# check_set_op_compatible() for the dplyr-mirrored column-compatibility
+# checks. Each still falls back to CPU evaluation (via gpu_fallback(),
+# same shape as every verb below) for the narrow factor-column edge cases
+# R/sets.R's own docs describe.
 # =============================================================================
 
 #' @rdname fallback-verbs
@@ -246,66 +253,6 @@ nest_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, keep = NULL,
   y_tbl <- collect_other_side(y)
   gpu_fallback("nest_join", x, function(tbl) {
     dplyr::nest_join(tbl, y_tbl, by = by, copy = copy, keep = keep, name = name, ...)
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr union
-union.tbl_gpu <- function(x, y, ...) {
-  y_tbl <- collect_other_side(y)
-  gpu_fallback("union", x, function(tbl) {
-    dplyr::union(tbl, y_tbl, ...)
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr union_all
-union_all.tbl_gpu <- function(x, y, ...) {
-  y_tbl <- collect_other_side(y)
-  gpu_fallback("union_all", x, function(tbl) {
-    dplyr::union_all(tbl, y_tbl, ...)
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr intersect
-intersect.tbl_gpu <- function(x, y, ...) {
-  y_tbl <- collect_other_side(y)
-  gpu_fallback("intersect", x, function(tbl) {
-    dplyr::intersect(tbl, y_tbl, ...)
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr setdiff
-setdiff.tbl_gpu <- function(x, y, ...) {
-  y_tbl <- collect_other_side(y)
-  gpu_fallback("setdiff", x, function(tbl) {
-    dplyr::setdiff(tbl, y_tbl, ...)
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr setequal
-setequal.tbl_gpu <- function(x, y, ...) {
-  y_tbl <- collect_other_side(y)
-  gpu_fallback("setequal", x, function(tbl) {
-    dplyr::setequal(tbl, y_tbl, ...)
-  }, as_is = TRUE)
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr symdiff
-symdiff.tbl_gpu <- function(x, y, ...) {
-  y_tbl <- collect_other_side(y)
-  gpu_fallback("symdiff", x, function(tbl) {
-    dplyr::symdiff(tbl, y_tbl, ...)
   })
 }
 

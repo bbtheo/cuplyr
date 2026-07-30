@@ -5,12 +5,6 @@
 \alias{reframe.tbl_gpu}
 \alias{rowwise.tbl_gpu}
 \alias{nest_join.tbl_gpu}
-\alias{union.tbl_gpu}
-\alias{union_all.tbl_gpu}
-\alias{intersect.tbl_gpu}
-\alias{setdiff.tbl_gpu}
-\alias{setequal.tbl_gpu}
-\alias{symdiff.tbl_gpu}
 \alias{rows_insert.tbl_gpu}
 \alias{rows_append.tbl_gpu}
 \alias{rows_update.tbl_gpu}
@@ -37,18 +31,6 @@
 \method{rowwise}{tbl_gpu}(.data, ...)
 
 \method{nest_join}{tbl_gpu}(x, y, by = NULL, copy = FALSE, keep = NULL, name = NULL, ...)
-
-\method{union}{tbl_gpu}(x, y, ...)
-
-\method{union_all}{tbl_gpu}(x, y, ...)
-
-\method{intersect}{tbl_gpu}(x, y, ...)
-
-\method{setdiff}{tbl_gpu}(x, y, ...)
-
-\method{setequal}{tbl_gpu}(x, y, ...)
-
-\method{symdiff}{tbl_gpu}(x, y, ...)
 
 \method{rows_insert}{tbl_gpu}(
   x,

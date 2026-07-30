@@ -1,5 +1,40 @@
 # cuplyr (development version)
 
+## Set operations: `union()`/`union_all()`/`intersect()`/`setdiff()`/`symdiff()`/`setequal()` (Phase 8)
+
+Every dplyr row-set operation is now GPU-native, composed entirely from
+existing verbs -- no new C++ (see `?set-ops`):
+
+* **`union()`**: `distinct(bind_rows(x, y))` -- x's own distinct rows (in
+  x's row order), then any row from `y` not already present in `x`, in
+  y's row order.
+* **`union_all()`**: `bind_rows(x, y)` -- every row of `x`, then every row
+  of `y`, duplicates included.
+* **`intersect()`**: `distinct(semi_join(x, y, by = <every column>))`.
+* **`setdiff()`**: `distinct(anti_join(x, y, by = <every column>))`.
+* **`symdiff()`**: `setdiff(x, y)` concatenated with `setdiff(y, x)`.
+* **`setequal()`**: two anti-join cardinality checks (`nrow() == 0` on
+  both sides) -- a plain `TRUE`/`FALSE`, ignoring row order and
+  duplicates on both sides, matching dplyr exactly.
+* **Column compatibility**: same column count and name *set* (order is
+  tolerated -- `y` is matched to `x` by name); a per-column common type
+  follows vctrs' own (strict) common-type rules -- narrower than this
+  package's `bind_rows()` (which treats `STRING` as universally
+  coercible) -- so e.g. an integer column vs. a character column is a
+  hard error here too, naming the offending column and both types, not a
+  silent promotion to `STRING`.
+* **`y` may be a plain `data.frame`** (uploaded automatically) -- unlike
+  the join verbs, these generics have no `copy=` argument at all.
+* Two column-type combinations real dplyr accepts fall back to CPU
+  evaluation instead of erroring (a `cuplyr.fallback` notification
+  fires): two factor columns with different level sets, or a factor
+  column vs. a character column (both need recomputing/decoding factor
+  codes, which this package's GPU column model doesn't support yet); and
+  a `Date` column vs. a `POSIXct` column (dplyr promotes to `POSIXct`,
+  but the underlying `TIMESTAMP_DAYS` -> `TIMESTAMP_MICROSECONDS` GPU
+  cast isn't implemented). Two factor columns with *identical* levels
+  are fully native.
+
 ## Joins completion: `join_by()`, non-equi conditions, cardinality checks, `semi_join()`/`anti_join()`/`cross_join()` (Phase 7)
 
 Every mutating and filtering join verb now runs GPU-natively for the full

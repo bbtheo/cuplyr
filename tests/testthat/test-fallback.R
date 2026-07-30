@@ -73,26 +73,14 @@ fallback_sweep_pipelines <- function() {
     # src/ops_join.cpp's gpu_cross_join()) -- no longer part of this
     # fallback sweep. See the "never trigger a fallback notification" block
     # below, and test-dplyr-join-cross.R for full oracle coverage.
-    union = list(
-      fn = function(d) dplyr::union(dplyr::select(d, g), tibble::tibble(g = 9)),
-      arrange_by = "g"
-    ),
-    union_all = list(
-      fn = function(d) dplyr::union_all(dplyr::select(d, g), tibble::tibble(g = 9)),
-      arrange_by = "g"
-    ),
-    intersect = list(
-      fn = function(d) dplyr::intersect(dplyr::select(d, g), tibble::tibble(g = c(1, 9))),
-      arrange_by = "g"
-    ),
-    setdiff = list(
-      fn = function(d) dplyr::setdiff(dplyr::select(d, g), tibble::tibble(g = 1)),
-      arrange_by = "g"
-    ),
-    symdiff = list(
-      fn = function(d) dplyr::symdiff(dplyr::select(d, g), tibble::tibble(g = c(1, 9))),
-      arrange_by = "g"
-    ),
+    # union()/union_all()/intersect()/setdiff()/setequal()/symdiff() are
+    # GPU-native now (Phase 8, see R/sets.R) -- no longer part of this
+    # fallback sweep. See test-dplyr-sets.R for full oracle coverage, and
+    # the "never trigger a fallback notification" block below for their
+    # happy-path native-execution guarantee (a narrow set of column-type
+    # edge cases -- mismatched factor levels, factor vs. character, Date
+    # vs. POSIXct -- still fall back by design, see R/sets.R's own docs;
+    # those are pinned directly in test-dplyr-sets.R instead of here).
     group_modify = list(
       fn = function(d) dplyr::group_modify(dplyr::group_by(d, g), ~ dplyr::summarise(.x, s = sum(x))),
       arrange_by = "g"
@@ -153,15 +141,6 @@ test_that("nest_join() triggers the fallback notification", {
     gt |> dplyr::nest_join(y, by = "g"),
     "fell back to CPU evaluation"
   )
-})
-
-test_that("setequal() returns a logical, matching dplyr", {
-  skip_if_no_gpu()
-  df <- fallback_df()
-  gt <- tbl_gpu(df) |> dplyr::select(g)
-
-  expect_true(gt |> dplyr::setequal(tibble::tibble(g = c(1, 1, 2, 2, 3))))
-  expect_false(gt |> dplyr::setequal(tibble::tibble(g = c(1, 2))))
 })
 
 test_that("rows_insert() adds new rows matching dplyr", {
@@ -550,4 +529,23 @@ test_that("cross_join() is GPU-native and never triggers a fallback notification
   expect_no_error(gt |> dplyr::group_by(g) |> dplyr::cross_join(y_small))
   expect_no_error(gt |> as_lazy() |> dplyr::cross_join(y_small) |> collect())
   expect_no_error(gt |> dplyr::cross_join(tibble::tibble(k = 1:2), copy = TRUE))
+})
+
+test_that("union()/union_all()/intersect()/setdiff()/setequal()/symdiff() are GPU-native and never trigger a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gt <- tbl_gpu(fallback_df()) |> dplyr::select(g)
+  y_small <- tbl_gpu(tibble::tibble(g = c(1, 9)))
+  y_small_df <- tibble::tibble(g = c(1, 9))
+
+  expect_no_error(gt |> dplyr::union(y_small))
+  expect_no_error(gt |> dplyr::union_all(y_small))
+  expect_no_error(gt |> dplyr::intersect(y_small))
+  expect_no_error(gt |> dplyr::setdiff(y_small))
+  expect_no_error(gt |> dplyr::symdiff(y_small))
+  expect_no_error(gt |> dplyr::setequal(y_small))
+  # A plain data.frame `y` (auto-uploaded, no `copy=` argument exists for
+  # these generics) is native too.
+  expect_no_error(gt |> dplyr::union(y_small_df))
+  expect_no_error(gt |> as_lazy() |> dplyr::intersect(y_small) |> collect())
 })
