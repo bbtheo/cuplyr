@@ -97,10 +97,20 @@ test_that("order_by() wrapping an agg-kind function is a hard mutate() error, ma
   expect_error(df |> dplyr::group_by(g) |> dplyr::mutate(z = dplyr::order_by(y, mean(x))))
 })
 
-test_that("order_by() wrapping row_number(x) with ties in the ranked column is not yet supported", {
+test_that("order_by() wrapping row_number(x) with ties falls back and works end-to-end", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "warn")
+
+  # Phase 11, task L1 (universal expression-level CPU fallback):
+  # order_by()'s own parser only understands wrapping a bare row_number()
+  # (no argument), not the ranked row_number(x) form -- ir_parse_order_by_call()
+  # returns NULL for this shape, which used to be "mutate() has no CPU
+  # fallback"'s hard error. It now transparently falls back to real
+  # dplyr::mutate() and succeeds.
   df <- data.frame(x = c(1, 1, 1, 2, 2), y = c(3, 1, 2, 5, 4))
-  expect_error(dplyr::mutate(tbl_gpu(df), z = dplyr::order_by(y, dplyr::row_number(x))))
+  pipeline <- function(d) dplyr::mutate(d, z = dplyr::order_by(y, dplyr::row_number(x)))
+
+  expect_warning(expect_same_as_dplyr(df, pipeline), "fell back to CPU evaluation")
 })
 
 # =============================================================================

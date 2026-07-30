@@ -323,34 +323,69 @@ test_that("roll_median()/roll_mean() fallback-notification bookkeeping is correc
 })
 
 # =============================================================================
-# Rejected shapes: align != "right" (or any other non-default fill=/
-# adaptive=/partial=/give.names=) is a hard mutate() error, not a silent
-# fallback -- matching mutate()'s existing "no CPU fallback for an
-# unrecognized shape" contract (this task's explicit "right-aligned only"
-# scope cut).
+# Non-default shapes: align != "right" (or any other non-default fill=/
+# adaptive=/partial=/give.names=) has no NATIVE lowering (this task's
+# explicit "right-aligned only" scope cut, ir_parse_froll_call() returns
+# NULL for these) -- Phase 11, task L1 (universal expression-level CPU
+# fallback) means this is no longer mutate()'s own hard error: it now
+# transparently falls back to real dplyr::mutate() (which calls real
+# data.table::frollmean() on the CPU), succeeding for every shape
+# data.table itself can compute, and still erroring (with data.table's OWN
+# message, not cuplyr's) for a shape data.table itself rejects
+# (adaptive = TRUE with a non-vector n=, below).
 # =============================================================================
 
-test_that("data.table::froll*(align != 'right') is rejected (mutate() hard error)", {
+test_that("data.table::froll*(align != 'right') falls back and works end-to-end", {
   skip_if_no_gpu()
   skip_if_no_data_table()
+  withr::local_options(cuplyr.fallback = "warn")
 
   df <- data.frame(x = c(1, 2, 3, 4, 5))
   g <- tbl_gpu(df, lazy = FALSE)
 
-  expect_error(
-    g |> dplyr::mutate(y = data.table::frollmean(x, 3, align = "left")) |> collect()
+  expect_warning(
+    result_left <- g |> dplyr::mutate(y = data.table::frollmean(x, 3, align = "left")) |> collect(),
+    "fell back to CPU evaluation"
   )
-  expect_error(
-    g |> dplyr::mutate(y = data.table::frollmean(x, 3, align = "center")) |> collect()
+  expect_equal(result_left$y, data.table::frollmean(df$x, 3, align = "left"))
+
+  expect_warning(
+    result_center <- g |> dplyr::mutate(y = data.table::frollmean(x, 3, align = "center")) |> collect(),
+    "fell back to CPU evaluation"
   )
-  expect_error(
-    g |> dplyr::mutate(y = data.table::frollmean(x, 3, fill = 0)) |> collect()
+  expect_equal(result_center$y, data.table::frollmean(df$x, 3, align = "center"))
+
+  expect_warning(
+    result_fill <- g |> dplyr::mutate(y = data.table::frollmean(x, 3, fill = 0)) |> collect(),
+    "fell back to CPU evaluation"
   )
-  expect_error(
-    g |> dplyr::mutate(y = data.table::frollmean(x, 3, adaptive = TRUE)) |> collect()
+  expect_equal(result_fill$y, data.table::frollmean(df$x, 3, fill = 0))
+
+  expect_warning(
+    result_names <- g |> dplyr::mutate(y = data.table::frollmean(x, 3, give.names = TRUE)) |> collect(),
+    "fell back to CPU evaluation"
   )
-  expect_error(
-    g |> dplyr::mutate(y = data.table::frollmean(x, 3, give.names = TRUE)) |> collect()
+  expect_equal(result_names$y, data.table::frollmean(df$x, 3, give.names = TRUE))
+})
+
+test_that("data.table::froll*(adaptive = TRUE) with a scalar n= still errors (data.table's own error, via fallback)", {
+  skip_if_no_gpu()
+  skip_if_no_data_table()
+  withr::local_options(cuplyr.fallback = "warn")
+
+  df <- data.frame(x = c(1, 2, 3, 4, 5))
+  g <- tbl_gpu(df, lazy = FALSE)
+
+  # data.table's own adaptive=TRUE requires n= to be a per-row vector of
+  # window widths -- a plain scalar n=3 is a genuine data.table user error,
+  # reproduced (with data.table's own message) via the fallback rather than
+  # cuplyr's.
+  expect_warning(
+    expect_error(
+      g |> dplyr::mutate(y = data.table::frollmean(x, 3, adaptive = TRUE)) |> collect(),
+      "length of integer vector"
+    ),
+    "fell back to CPU evaluation"
   )
 })
 

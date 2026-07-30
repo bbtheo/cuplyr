@@ -279,6 +279,33 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
     }
   }
 
+  # Phase 11, task L1: universal expression-level CPU fallback. A dot that
+  # `ir_parse_quo()` couldn't parse at all (`ir` is NULL -- as opposed to a
+  # genuine thrown error, which already propagated out of the loop above)
+  # AND that references a real schema column somewhere in its raw
+  # expression tree (`dot_references_schema_col()`) can NEVER be handled by
+  # `filter_eval_mask()`'s no-data-mask `eval_tidy()` -- that column symbol
+  # either errors "object not found" or, worse, silently resolves to an
+  # unrelated same-named object in the calling environment, giving a wrong
+  # (not just missing) result. Route the WHOLE filter() call to the CPU
+  # fallback instead, exactly like filter_window_fallback() already does
+  # for an unlowerable window plan -- and before ANY push_op() has touched
+  # `.data` (this check runs directly after the parse loop, ahead of the
+  # window-handling block below), so "never half-lower" holds even for a
+  # dot mixing a window call with an unknown function (e.g. `mean(x) > 0 &
+  # toupper(y) == "A"` fails to parse as ONE unit, so it's never even added
+  # to `window_idx` above -- it's caught here instead). A dot that's NULL
+  # but references no schema column (a genuine constant/environment-vector
+  # shape, e.g. `rep(TRUE, n)`) is untouched -- it still flows to
+  # `filter_eval_mask()` below, unchanged from before L1.
+  needs_expr_fallback <- vapply(seq_along(dots), function(i) {
+    is.null(parsed[[i]]) && dot_references_schema_col(dots[[i]], orig_names)
+  }, logical(1))
+
+  if (any(needs_expr_fallback)) {
+    return(filter_expr_fallback(orig_data, dots, by_quo))
+  }
+
   # Phase 5, task W5: at least one dot's predicate contains a window call
   # (mean(x), n(), row_number(), cumsum(x), lag(x), ...). dplyr's multi-dot
   # semantics (verified empirically -- see this file's roxygen "Multi-dot
@@ -488,6 +515,51 @@ filter_across_fallback <- function(.data, dots, by_quo) {
   gpu_fallback("filter", .data, function(tbl) {
     rlang::inject(dplyr::filter(tbl, !!!dots, .by = !!by_quo))
   })
+}
+
+# Internal: whole-call CPU fallback for a filter() call with at least one dot
+# whose shape the expression IR doesn't recognize at all, AND that
+# references a real schema column (Phase 11, task L1 -- the "universal
+# expression-level CPU fallback"; see scratchpad/phase11_design.md and
+# dot_references_schema_col()'s own docs for why the column-reference check
+# matters). Mirrors filter_window_fallback()/filter_across_fallback()
+# exactly -- re-runs the real dplyr::filter() call, with every original
+# (already across()-expanded/cur_group_id()-substituted) dot, on the CPU.
+# This is what subsumes grepl()/other base-R-string or arbitrary-function
+# predicates referencing a real column, and closes the top_n()/top_frac()
+# gap (both desugar to `filter(top_n_rank(n, wt))`, a shape the IR has
+# never understood and never will natively).
+# @keywords internal
+filter_expr_fallback <- function(.data, dots, by_quo) {
+  gpu_fallback("filter", .data, function(tbl) {
+    rlang::inject(dplyr::filter(tbl, !!!dots, .by = !!by_quo))
+  })
+}
+
+# Internal: TRUE iff `quo`'s raw expression references at least one symbol
+# matching a current schema column name, anywhere in its tree (Phase 11,
+# task L1). Used only to decide, for a dot `ir_parse_quo()` couldn't parse
+# at all, whether it's safe to hand to `filter_eval_mask()`'s no-data-mask
+# `eval_tidy()` (safe only when the expression is genuinely
+# column-independent, e.g. a pre-computed logical vector or `rep(TRUE,
+# n)`) or whether it must instead go to `filter_expr_fallback()` (any
+# reference to a real column can never evaluate correctly with no data
+# mask -- it either errors "object not found" or silently resolves to an
+# unrelated same-named object in the calling environment).
+#
+# Deliberately simple: `all.vars()` (base R) walks the whole expression
+# tree and returns every free variable symbol, with no need to
+# special-case call heads/operators/`.data`-pronoun forms the way
+# `ir_cols()`/`expr_has_column_ref()` do for parsed IR -- exactly the
+# right tool here since the expression, by construction, did NOT parse
+# into IR at all.
+#
+# @param quo A quosure (one filter() dot)
+# @param col_names Character vector, the current schema's column names
+# @return Logical scalar
+# @keywords internal
+dot_references_schema_col <- function(quo, col_names) {
+  any(all.vars(rlang::quo_get_expr(quo)) %in% col_names)
 }
 
 # ir_parse_quo() throws (rather than returning NULL) when a constant-folded

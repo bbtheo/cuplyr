@@ -131,9 +131,24 @@ test_that("when_all() inside filter() matches dplyr", {
 # Not-yet-supported size= falls back to a hard mutate() error
 # =============================================================================
 
-test_that("when_any()'s size= is not yet supported and errors clearly in mutate()", {
+test_that("when_any()'s size= falls back and still errors (real dplyr's own error, not cuplyr's)", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "warn")
+
+  # size= has no native parse support (ir_parse_when_reduce() returns NULL
+  # for it) -- Phase 11, task L1 (universal expression-level CPU fallback)
+  # means this is no longer mutate()'s own "only supports" hard error: it
+  # now falls back to real dplyr::mutate(), which ALSO errors here (size=3
+  # doesn't match this fixture's 9 rows) -- just with dplyr's own message,
+  # not cuplyr's.
   df <- oracle_when_df()
   gt <- tbl_gpu(df)
-  expect_error(dplyr::mutate(gt, z = dplyr::when_any(x > 1, size = 3)), "mutate")
+
+  expect_warning(
+    expect_error(
+      dplyr::mutate(gt, z = dplyr::when_any(x > 1, size = 3)),
+      "must have size 3"
+    ),
+    "fell back to CPU evaluation"
+  )
 })

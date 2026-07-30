@@ -353,7 +353,24 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   orig_schema <- current_schema(.data)
   dots <- expand_across_dots(cgid$dots, orig_schema, verb_groups, "mutate")
 
-  expressions <- parse_mutate_dots(dots, orig_schema, "mutate")
+  # Phase 11, task L1: universal expression-level CPU fallback. Every dot is
+  # parsed via the SAME ir_parse_quo()-driven parser as before -- the only
+  # change is what happens when a dot's shape isn't recognized at all
+  # (`ir_parse_quo()` returns NULL, as opposed to throwing a genuine parse
+  # error like "column not found"): instead of parse_mutate_dots()'s old
+  # hard stop() (now a defensive, internal-only fallback -- see that
+  # function's `stop_on_unparseable` docs), it signals NULL back here, and
+  # the WHOLE mutate() call is re-run on the CPU via mutate_expr_fallback(),
+  # with `dots` (already across()-expanded/cur_group_id()-substituted, same
+  # precedent as mutate_window_fallback()'s own re-run target) re-injected.
+  # A genuine THROWN error (e.g. an undefined column/environment variable)
+  # is NOT caught here -- it propagates normally, preserving every existing
+  # pinned error-message test (scratchpad/phase11_design.md's "NULL-vs-throw
+  # trigger rule").
+  expressions <- parse_mutate_dots(dots, orig_schema, "mutate", stop_on_unparseable = FALSE)
+  if (is.null(expressions)) {
+    return(mutate_expr_fallback(.data, dots, .keep, before_quo, after_quo, by_quo))
+  }
 
   # Phase 5, task W3: any dot containing a window-function call (row_number(),
   # lag()/lead(), cumsum()/cummax()/cummin()/cumprod(), and their R desugars
@@ -600,6 +617,26 @@ mutate_across_fallback <- function(.data, dots, keep, before_quo, after_quo, by_
   })
 }
 
+# Internal: whole-call CPU fallback for a mutate() call with at least one dot
+# whose shape the expression IR doesn't recognize at all (Phase 11, task L1
+# -- the "universal expression-level CPU fallback"; see
+# scratchpad/phase11_design.md). Mirrors mutate_window_fallback()/
+# mutate_across_fallback() exactly (same re-injection pattern, same target
+# `.data`/`dots` -- already across()-expanded/cur_group_id()-substituted by
+# the time mutate.tbl_gpu() calls this, consistent with those two
+# precedents). This is what subsumes identity()/ifelse()/scale()/lengths()/
+# toupper()/local-closure mutate dots -- and, more generally, ANY
+# unrecognized shape, not just window/across-family ones.
+# @keywords internal
+mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo) {
+  gpu_fallback("mutate", .data, function(tbl) {
+    rlang::inject(dplyr::mutate(
+      tbl, !!!dots, .by = !!by_quo, .keep = keep,
+      .before = !!before_quo, .after = !!after_quo
+    ))
+  })
+}
+
 # Parse mutate()/transmute()'s `...` dots into a list of mutate expression
 # structures (see make_mutate_expr(), R/ast.R). Shared by both verbs: they
 # differ only in what they do with the finished `expressions` list
@@ -619,7 +656,23 @@ mutate_across_fallback <- function(.data, dots, keep, before_quo, after_quo, by_
 #   real `dplyr::transmute()` (verified empirically: dplyr never warns for
 #   an unnamed transmute dot, not even a bare column reference, which is
 #   transmute's single most common idiom, e.g. `transmute(df, a = x + 1, y)`)
-# @return A list of expression structures, one per dot. Carries an extra
+# @param stop_on_unparseable Logical (Phase 11, task L1). `TRUE` (default):
+#   the historical behavior -- a dot whose expression `ir_parse_quo()`
+#   doesn't recognize at all (returns `NULL`, as opposed to throwing a
+#   genuine parse error) is a hard `stop()`. `FALSE`: instead of stopping,
+#   the WHOLE FUNCTION returns `NULL` immediately (abandoning whatever
+#   dots have already been parsed) the moment such a dot is found --
+#   `mutate.tbl_gpu()`/`transmute.tbl_gpu()` read this `NULL` as "route the
+#   whole call to the CPU fallback" (`mutate_expr_fallback()`). Either way,
+#   a genuinely THROWN error from `ir_parse_quo()` (e.g. "object ... not
+#   found") is never caught here -- it always propagates, which is exactly
+#   the "NULL-vs-throw trigger rule" scratchpad/phase11_design.md specifies:
+#   an unrecognized *shape* falls back, a genuine user error stays fast.
+#   With `stop_on_unparseable = FALSE`, the old hard `stop()` becomes
+#   unreachable from any real mutate()/transmute() call (both callers pass
+#   `FALSE`) -- kept only as a defensive, internal-only safety net.
+# @return A list of expression structures, one per dot (or `NULL`, only
+#   possible when `stop_on_unparseable = FALSE`, see above). Carries an extra
 #   `"has_window"` attribute (Phase 5, task W3): `TRUE` iff any dot's parsed
 #   IR contains a window-function call anywhere (`ir_has_window()`) --
 #   `mutate.tbl_gpu()` reads this to decide whether to route the whole call
@@ -630,7 +683,8 @@ mutate_across_fallback <- function(.data, dots, keep, before_quo, after_quo, by_
 #   is `mutate()` only, per `scratchpad/phase5_window_design.md` section 8's
 #   W3 row).
 # @keywords internal
-parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE) {
+parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
+                               stop_on_unparseable = TRUE) {
   dots <- if (warn_unnamed) auto_name_dots(dots, verb) else name_dots_silently(dots)
 
   expressions <- list()
@@ -643,6 +697,18 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE) {
     ir <- ir_parse_quo(expr, schema)
 
     if (is.null(ir)) {
+      if (!stop_on_unparseable) {
+        # Phase 11, task L1: signal "route the whole call to the CPU
+        # fallback" instead of erroring -- see this function's own
+        # `stop_on_unparseable` docs.
+        return(NULL)
+      }
+
+      # Defensive, internal-only path (Phase 11, task L1): both real
+      # callers (mutate.tbl_gpu()/transmute.tbl_gpu()) pass
+      # `stop_on_unparseable = FALSE`, so this stop() is unreachable from
+      # any dplyr-facing call -- kept only as a safety net for any future
+      # internal caller that doesn't want the fallback behavior.
       stop(
         verb, "() only supports column copies, arithmetic (+, -, *, /, ^, ",
         "%%, %/%), comparisons (==, !=, <, <=, >, >=), logical operators ",
@@ -845,7 +911,17 @@ transmute.tbl_gpu <- function(.data, ...) {
 
   schema <- current_schema(.data)
   dots <- expand_across_dots(cgid$dots, schema, .data$groups, "transmute")
-  expressions <- parse_mutate_dots(dots, schema, "transmute", warn_unnamed = FALSE)
+
+  # Phase 11, task L1: same universal expression-level CPU fallback as
+  # mutate.tbl_gpu() -- see mutate_expr_fallback()'s own docs for the full
+  # "NULL-vs-throw trigger rule" derivation.
+  expressions <- parse_mutate_dots(dots, schema, "transmute", warn_unnamed = FALSE,
+                                    stop_on_unparseable = FALSE)
+  if (is.null(expressions)) {
+    return(gpu_fallback("transmute", .data, function(tbl) {
+      rlang::inject(dplyr::transmute(tbl, !!!dots))
+    }))
+  }
 
   result <- .data
   if (length(expressions) > 0) {

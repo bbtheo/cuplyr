@@ -150,6 +150,18 @@ pronoun_call_name <- function(expr) {
 # unsupported call is not the place to raise the "not found" diagnostic;
 # the caller falls back instead).
 expr_has_column_ref <- function(expr, schema) {
+  # An empty/missing argument slot (e.g. the elided row-index in `x[, 1]`)
+  # is a special R sentinel: forcing it (is.symbol()/is.call(), even just
+  # reading it as a plain value) always raises "argument ... is missing,
+  # with no default", regardless of context -- rlang::is_missing() is the
+  # one check that inspects it safely. Found via Phase 11 task L1 test
+  # coverage (mutate(y = scale(x)[, 1]), which reaches this walker once
+  # `[` isn't found in ir_call_registry) -- a pre-existing landmine, not
+  # something L1 itself introduces (see the identical guard in
+  # R/across.R's raw-expression walkers).
+  if (rlang::is_missing(expr)) {
+    return(FALSE)
+  }
   if (is.symbol(expr)) {
     return(as.character(expr) %in% schema$names)
   }

@@ -264,6 +264,24 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   dots <- expand_across_dots(dots, current_schema(.data), summarise_groups, "summarise")
   dots <- auto_name_dots(dots, "summarise")
 
+  # Phase 11, task L1: universal expression-level CPU fallback. Runs AFTER
+  # across()-expansion/auto_name_dots() (so an ordinary, expandable
+  # across() dot is screened normally, as its expanded per-column dots --
+  # never mistaken for an unrecognized shape) but BEFORE any GPU work at
+  # all (summarise_dots_parseable() touches no GPU pointer, only the
+  # schema) -- "never half-lower". A dot whose aggregation shape
+  # parse_aggregations() would eventually reject as "Invalid aggregation
+  # expression"/"Unsupported aggregation function" (an unknown reducer
+  # like cor()/weighted.mean(), or an unrecognized sub-expression like
+  # sum(paste0(x))) now falls back to real dplyr::summarise() instead of
+  # hard-erroring -- see summarise_dots_parseable()'s own docs for exactly
+  # which cases trigger this vs. propagate a genuine error.
+  if (!summarise_dots_parseable(dots, current_schema(.data))) {
+    return(gpu_fallback("summarise", .data, function(tbl) {
+      rlang::inject(dplyr::summarise(tbl, !!!dots, .groups = .groups, .by = !!by_quo))
+    }))
+  }
+
   if (by_given) {
     # `.by=` summarise is always ungrouped (Phase 5, task W9); `.groups=`
     # can never reach here alongside `.by=` (dplyr's own generic already
@@ -398,6 +416,84 @@ inform_regrouped_output <- function(old_groups, new_groups) {
     "Use `summarise(.groups = \"drop_last\")` to silence this message, or ",
     "`.groups = \"keep\"`/`\"drop\"` to retain/drop every grouping level."
   )
+}
+
+# Internal: L1 pre-pass (Phase 11) -- TRUE iff every dot in `dots` (already
+# across()-expanded/auto_name_dots()'d) is a shape parse_aggregations()
+# will accept, checked WITHOUT any GPU side effects, so it's safe to call
+# before touching `.data` at all ("never half-lower").
+#
+# Deliberately mirrors preprocess_agg_expressions()'s own decision tree
+# exactly (same extract_na_rm()/extract_agg_shape_param()/
+# decompose_agg_call()/ir_parse_quo() calls, same
+# ir_has_window()-before-ir_is_const() ordering), rather than reusing that
+# function directly, since preprocess_agg_expressions() has real
+# side-effects (create_temp_column() mutates a GPU pointer, compute()
+# materializes a lazy table) this pre-pass must never trigger -- this is a
+# pure, repeatable dry run over quosures/schema only.
+#
+# Returns `FALSE` (a fallback trigger) for exactly the two shapes that
+# would otherwise reach parse_aggregations()'s "Invalid aggregation
+# expression" (decompose_agg_call() fails, or its arg doesn't parse at
+# all) or "Unsupported aggregation function" (a function name outside the
+# fixed cudf-backed list, e.g. cor()/weighted.mean()/an unknown reducer)
+# errors -- i.e. "this SHAPE isn't understood". A dot that's a genuine
+# user mistake FLOWS THROUGH unchanged (not caught here) and still errors
+# normally once it reaches na.rm=/na_rm= validation, column-not-found
+# checks, or ir_parse_quo() throwing (e.g. a missing column inside the
+# aggregation argument) -- matching the "NULL-vs-throw trigger rule".
+#
+# @param dots Quosures from summarise(), already across()-expanded and
+#   auto_name_dots()'d (exactly what summarise.tbl_gpu() itself is about to
+#   hand to summarise_core()/summarise_by_desugar())
+# @param schema `.data`'s current schema (list(names=, types=))
+# @return Logical scalar
+# @keywords internal
+summarise_dots_parseable <- function(dots, schema) {
+  known_agg_fns <- c("sum", "mean", "min", "max", "n", "sd", "var", "count",
+                      "median", "quantile", "n_distinct", "first", "last", "nth",
+                      "any", "all")
+
+  for (i in seq_along(dots)) {
+    quo <- extract_na_rm(dots[[i]])$quo
+    quo <- extract_agg_shape_param(quo)$quo
+
+    expr <- rlang::quo_get_expr(quo)
+    env <- rlang::quo_get_env(quo)
+
+    if (grepl("^n\\(\\)$", strip_ns_prefix(rlang::quo_text(quo)))) {
+      next  # bare n(): always valid, no column argument to check
+    }
+
+    decomposed <- decompose_agg_call(expr)
+    if (is.null(decomposed) || is.null(decomposed$arg)) {
+      return(FALSE)  # not a `fn(single_arg)` shape (and not bare n())
+    }
+    if (!decomposed$fn_name %in% known_agg_fns) {
+      return(FALSE)  # unknown reducer, e.g. cor()/weighted.mean()
+    }
+
+    arg_expr <- decomposed$arg
+    if (is.symbol(arg_expr) && as.character(arg_expr) %in% schema$names) {
+      next  # bare column reference: always valid, no temp column needed
+    }
+
+    arg_quo <- rlang::new_quosure(arg_expr, env)
+    ir <- ir_parse_quo(arg_quo, schema)  # may throw a genuine error -- propagates
+
+    if (!is.null(ir) && ir_has_window(ir)) {
+      next  # windows-inside-summarise: always valid (Phase 6, task 4)
+    }
+    if (is.null(ir)) {
+      return(FALSE)  # sub-expression shape not understood at all
+    }
+    # ir_is_const(ir) (e.g. sum(5)): left alone here, exactly like
+    # preprocess_agg_expressions() -- not a "shape not understood" case,
+    # so not a fallback trigger; parse_aggregations() raises its own
+    # diagnosable error for this rare/degenerate shape.
+  }
+
+  TRUE
 }
 
 # Internal: the shared aggregation pipeline -- temp-column preprocessing,
@@ -1129,6 +1225,11 @@ parse_aggregations <- function(schema, dots, na_rm_flags = rep(FALSE, length(dot
     )[[1]]
 
     if (length(match_result) != 3) {
+      # Defensive, internal-only path (Phase 11, task L1): every real
+      # summarise() call is screened by summarise_dots_parseable() before
+      # reaching here, which already routes this exact shape to the CPU
+      # fallback -- unreachable from any dplyr-facing call, kept only as a
+      # safety net.
       stop("Invalid aggregation expression: ", expr_text,
            "\nExpected format: function(column), e.g., mean(mpg)",
            call. = FALSE)
@@ -1139,6 +1240,10 @@ parse_aggregations <- function(schema, dots, na_rm_flags = rep(FALSE, length(dot
 
     # Validate function
     if (!func_name %in% agg_functions) {
+      # Defensive, internal-only path (Phase 11, task L1): same as above --
+      # summarise_dots_parseable()'s `known_agg_fns` check already routes an
+      # unknown reducer (e.g. cor()/weighted.mean()) to the CPU fallback
+      # before this is ever reached.
       stop("Unsupported aggregation function: ", func_name,
            "\nSupported functions: ", paste(agg_functions, collapse = ", "),
            call. = FALSE)

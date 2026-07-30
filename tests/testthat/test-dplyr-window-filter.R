@@ -138,15 +138,19 @@ test_that("filter(row_number() <= 3) per group matches dplyr", {
 # rather than silently misbehaving or crashing.
 # =============================================================================
 
-test_that("filter(min_rank(desc(x)) <= 2): desc() inside rank's own arg does not parse (documented gap)", {
+test_that("filter(min_rank(desc(x)) <= 2): desc() inside rank's own arg falls back and works end-to-end", {
   skip_if_no_gpu()
-  df <- data.frame(x = c(3, 1, 2))
-  gdf <- tbl_gpu(df)
+  withr::local_options(cuplyr.fallback = "warn")
 
-  expect_error(
-    gdf |> dplyr::filter(dplyr::min_rank(dplyr::desc(x)) <= 2) |> collect(),
-    "filter\\(\\) only supports comparisons"
-  )
+  # desc() nested inside min_rank()'s own argument doesn't parse natively
+  # (a documented gap) -- Phase 11, task L1 (universal expression-level CPU
+  # fallback) means this is no longer filter()'s own "only supports
+  # comparisons" hard error: it now transparently falls back to real
+  # dplyr::filter() and succeeds.
+  df <- data.frame(x = c(3, 1, 2))
+  pipeline <- function(d) dplyr::filter(d, dplyr::min_rank(dplyr::desc(x)) <= 2)
+
+  expect_warning(expect_same_as_dplyr(df, pipeline), "fell back to CPU evaluation")
 })
 
 # =============================================================================

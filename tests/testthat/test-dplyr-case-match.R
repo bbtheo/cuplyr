@@ -155,13 +155,38 @@ test_that("case_match() errors on a STRING LHS against a numeric x, matching dpl
 # case_when()'s .ptype=/.size=/.unmatched=
 # =============================================================================
 
-test_that("case_match()'s .ptype= is not yet supported and errors clearly", {
+test_that("case_match()'s .ptype= falls back (rather than erroring) and works end-to-end", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "warn")
+
+  # Phase 11, task L1 (universal expression-level CPU fallback): `.ptype=`
+  # is still not natively parsed (ir_parse_case_match() returns NULL for
+  # it), but that no longer means "mutate() has no CPU fallback" -- it now
+  # transparently falls back to real dplyr::mutate() and succeeds.
   df <- oracle_case_match_df()
   gt <- tbl_gpu(df)
-  expect_error(
-    dplyr::mutate(gt, z = dplyr::case_match(x, 1 ~ 1L, .default = 0L, .ptype = integer())),
-    "mutate"
+
+  # case_match() itself is deprecated upstream (in favor of
+  # recode_values()) and warns about that on every call, on TOP OF this
+  # task's own "fell back to CPU evaluation" notification -- muffle just
+  # the deprecation warning (matching this file's own suppressWarnings()
+  # convention elsewhere) so only the fallback notification reaches
+  # expect_warning() below.
+  withCallingHandlers(
+    expect_warning(
+      result <- dplyr::mutate(gt, z = dplyr::case_match(x, 1 ~ 1L, .default = 0L, .ptype = integer())) |>
+        collect(),
+      "fell back to CPU evaluation"
+    ),
+    warning = function(w) {
+      if (grepl("deprecated", conditionMessage(w), fixed = TRUE)) {
+        invokeRestart("muffleWarning")
+      }
+    }
+  )
+  expect_equal(
+    result$z,
+    suppressWarnings(dplyr::case_match(df$x, 1 ~ 1L, .default = 0L, .ptype = integer()))
   )
 })
 

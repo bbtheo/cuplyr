@@ -538,12 +538,22 @@ test_that("summarise() accepts a column-vs-column arithmetic sub-expression (mea
   expect_same_as_dplyr_lazy(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
 })
 
-test_that("summarise() raises a diagnosable error for a genuinely unparseable aggregation sub-expression", {
+test_that("summarise() falls back (rather than erroring) for a genuinely unparseable aggregation sub-expression", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "warn")
 
-  expect_error(
-    tbl_gpu(mtcars) |> dplyr::summarise(x = sum(paste0(carb))),
-    "Invalid aggregation expression"
+  # Phase 11, task L1 (universal expression-level CPU fallback):
+  # sum(paste0(carb)) no longer hard-errors with cuplyr's own "Invalid
+  # aggregation expression" message (a cuplyr-only message real dplyr
+  # never emits) -- it now falls back to real dplyr::summarise(), which
+  # itself errors here (sum() of a character vector is a base-R error, not
+  # a cuplyr-specific one).
+  expect_warning(
+    expect_error(
+      tbl_gpu(mtcars) |> dplyr::summarise(x = sum(paste0(carb))),
+      "invalid 'type' \\(character\\)"
+    ),
+    "fell back to CPU evaluation"
   )
 })
 
@@ -649,29 +659,44 @@ test_that("summarise() errors on non-existent column", {
   )
 })
 
-test_that("summarise() errors on unsupported function", {
+test_that("summarise() falls back (rather than erroring) for an unsupported reducer function", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "warn")
 
   gpu_df <- tbl_gpu(mtcars)
 
   # median() USED to be unsupported (this test's original pin), but is now
-  # implemented (Phase 6, task 6.2 -- see test-dplyr-summarise.R). cor() and
-  # weighted.mean() remain genuinely unsupported (scratchpad/todo.md's
-  # Phase 6 aggregation list), so the pin moves to one of those instead.
-  expect_error(
-    dplyr::summarise(gpu_df, result = cor(mpg, wt)),
-    "Unsupported"
+  # implemented natively (Phase 6, task 6.2 -- see test-dplyr-summarise.R).
+  # cor() has no native cudf groupby aggregation and never gets one in this
+  # package's scope (scratchpad/todo.md's Phase 6 aggregation list) -- but
+  # Phase 11, task L1 (universal expression-level CPU fallback) means it's
+  # no longer a hard "Unsupported aggregation function" error (a
+  # cuplyr-only message real dplyr never emits): it now transparently
+  # falls back to real dplyr::summarise() and SUCCEEDS.
+  expect_warning(
+    result <- dplyr::summarise(gpu_df, result = cor(mpg, wt)) |> collect(),
+    "fell back to CPU evaluation"
   )
+  expect_equal(result$result, cor(mtcars$mpg, mtcars$wt))
 })
 
-test_that("summarise() errors with invalid expression format", {
+test_that("summarise() falls back (rather than erroring) for a non-scalar aggregation result", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "warn")
 
   gpu_df <- tbl_gpu(mtcars)
 
-  expect_error(
-    dplyr::summarise(gpu_df, result = mpg + 1),
-    "Invalid aggregation"
+  # mpg + 1 isn't a `fn(single_arg)` aggregation shape at all -- Phase 11,
+  # task L1 routes it to the CPU fallback instead of cuplyr's own "Invalid
+  # aggregation expression" message (a cuplyr-only message real dplyr
+  # never emits). Real dplyr::summarise() itself still errors on this
+  # (result must be a single value per group), just with its own message.
+  expect_warning(
+    expect_error(
+      dplyr::summarise(gpu_df, result = mpg + 1),
+      "must be size 1"
+    ),
+    "fell back to CPU evaluation"
   )
 })
 

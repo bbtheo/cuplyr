@@ -839,15 +839,19 @@ test_that("filter() n_distinct() works as a window predicate", {
   expect_same_as_dplyr(df, pipeline)
 })
 
-test_that("mutate() median(x, na.rm=TRUE) is not supported (matches mean()/sum()'s own na.rm= gap in window context)", {
+test_that("mutate() median(x, na.rm=TRUE) falls back (rather than erroring) as a window function", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "warn")
 
-  gpu_df <- tbl_gpu(oracle_summarise_na_df()) |> dplyr::group_by(g)
+  # median()'s window-mutate registry entry has no na.rm= handling (arity
+  # mismatch -> NULL, matching mean()/sum()'s own na.rm= gap in window
+  # context) -- Phase 11, task L1 (universal expression-level CPU
+  # fallback) means this is no longer mutate()'s own hard error: it now
+  # transparently falls back to real dplyr::mutate() and succeeds.
+  df <- oracle_summarise_na_df()
+  pipeline <- function(d) d |> dplyr::group_by(g) |> dplyr::mutate(m = median(x, na.rm = TRUE))
 
-  expect_error(
-    dplyr::mutate(gpu_df, m = median(x, na.rm = TRUE)) |> collect(),
-    "mutate\\(\\) only supports"
-  )
+  expect_warning(expect_same_as_dplyr(df, pipeline), "fell back to CPU evaluation")
 })
 
 # =============================================================================
@@ -1280,19 +1284,21 @@ test_that("summarise() window-inside-aggregation works with .by=", {
   expect_same_as_dplyr(df, pipeline, arrange_by = "z")
 })
 
-test_that("BOUNDARY (documented, not implemented): combining two SEPARATE aggregation calls at the dot level still errors", {
+test_that("combining two SEPARATE aggregation calls at the dot level falls back and works end-to-end (Phase 11, task L1)", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "warn")
 
   # sum(cumsum(x)) - mean(y): the dot itself is not a bare fn(single_arg)
   # shape (decompose_agg_call() only recognizes ONE top-level call), so this
-  # never reaches resolve_agg_window_arg() at all -- same pre-existing
-  # "Invalid aggregation expression" error as any other unsupported dot
-  # shape, deliberately unchanged by this task.
+  # never reaches resolve_agg_window_arg() at all -- this used to be
+  # summarise()'s own "Invalid aggregation expression" hard error (a
+  # cuplyr-only message real dplyr never emits); Phase 11, task L1
+  # (universal expression-level CPU fallback) means it now transparently
+  # falls back to real dplyr::summarise() and succeeds.
   df <- oracle_window_agg_df()
-  gpu_df <- tbl_gpu(df) |> dplyr::group_by(g)
+  pipeline <- function(d) {
+    d |> dplyr::group_by(g) |> dplyr::summarise(z = sum(cumsum(v)) - mean(v), .groups = "drop")
+  }
 
-  expect_error(
-    dplyr::summarise(gpu_df, z = sum(cumsum(v)) - mean(v), .groups = "drop"),
-    "Invalid aggregation expression"
-  )
+  expect_warning(expect_same_as_dplyr(df, pipeline, arrange_by = "g"), "fell back to CPU evaluation")
 })

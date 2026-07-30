@@ -454,18 +454,45 @@ test_that("mutate() no longer errors on %% (now supported by the expression engi
   expect_equal(result$new_col, mtcars$mpg %% 5, tolerance = 1e-10)
 })
 
-test_that("mutate() errors on unsupported operation", {
+test_that("mutate() falls back (rather than erroring) on an unsupported operation", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "warn")
 
   gpu_df <- tbl_gpu(mtcars)
 
   # strsplit() has no ir_call_registry entry and its argument references a
   # real column, so ir_parse_quo() can't constant-fold it either -- a
-  # genuinely opaque expression, replacing the old %% example (which the
-  # IR now understands, see the test above).
+  # genuinely opaque expression (replacing the old %% example, which the
+  # IR now understands, see the test above). Phase 11, task L1 (universal
+  # expression-level CPU fallback): this NO LONGER hard-errors with
+  # cuplyr's own "only supports" message (a cuplyr-only message real dplyr
+  # never emits) -- it now falls back to real dplyr::mutate() and
+  # succeeds, producing the same list-column strsplit() always does.
+  expect_warning(
+    result <- dplyr::mutate(gpu_df, new_col = strsplit(as.character(mpg), "")) |> collect(),
+    "fell back to CPU evaluation"
+  )
+  expect_equal(result$new_col, strsplit(as.character(mtcars$mpg), ""))
+})
+
+test_that("mutate() still propagates a genuine parse-time error without falling back", {
+  skip_if_no_gpu()
+  # cuplyr.fallback = "error" would surface a DIFFERENT ("... fell back to
+  # CPU evaluation for: ...") message if this dot were (incorrectly)
+  # routed through the Phase 11 task L1 fallback instead of erroring
+  # directly -- asserting the "not found" text below confirms it wasn't.
+  withr::local_options(cuplyr.fallback = "error")
+
+  gpu_df <- tbl_gpu(mtcars)
+
+  # made_up_col is a bare symbol that's neither a schema column nor a
+  # resolvable environment variable -- ir_parse_quo() THROWS (rather than
+  # returning NULL) for this shape, which the L1 fallback's "NULL-vs-throw
+  # trigger rule" (scratchpad/phase11_design.md) deliberately does not
+  # catch: a genuine user error stays a fast, direct error.
   expect_error(
-    dplyr::mutate(gpu_df, new_col = strsplit(mpg, "")),
-    "only supports"
+    dplyr::mutate(gpu_df, new_col = made_up_col + 1),
+    "not found"
   )
 })
 

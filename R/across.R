@@ -97,6 +97,18 @@ is_lambda_expr <- function(expr) {
 # @return `expr` with every substitution applied
 # @keywords internal
 substitute_across_placeholders <- function(expr, replacement, col_name) {
+  # An empty/missing argument slot (e.g. the elided row-index in `x[, 1]`,
+  # which as.list()/recursion below can surface as one of `expr`'s own
+  # "parts") is a special R sentinel: FORCING it (is.symbol()/is.call()/
+  # identical(), even just reading it as a plain value) always raises
+  # "argument ... is missing, with no default", regardless of context.
+  # rlang::is_missing() is the one check that inspects it safely. Found via
+  # Phase 11 task L1 test coverage (mutate(y = scale(x)[, 1])) -- a
+  # pre-existing landmine in every one of this file's raw-expression
+  # walkers, not something L1 itself introduces.
+  if (rlang::is_missing(expr)) {
+    return(expr)
+  }
   if (is.symbol(expr)) {
     if (identical(expr, as.symbol(".x")) || identical(expr, as.symbol("."))) {
       return(replacement)
@@ -120,6 +132,11 @@ substitute_across_placeholders <- function(expr, replacement, col_name) {
 # Used by substitute_cur_group_id() below.
 # @keywords internal
 substitute_zero_arg_call <- function(expr, fn_name, replacement) {
+  # See substitute_across_placeholders()'s identical guard just above for
+  # why this is needed (the empty-argument-slot/rlang::is_missing() landmine).
+  if (rlang::is_missing(expr)) {
+    return(expr)
+  }
   if (is.call(expr)) {
     if (identical(call_head_name(expr), fn_name) && length(expr) == 1) {
       return(replacement)
@@ -135,6 +152,14 @@ substitute_zero_arg_call <- function(expr, fn_name, replacement) {
 # `pkg::`-qualified) anywhere in its tree.
 # @keywords internal
 expr_contains_zero_arg_call <- function(expr, fn_name) {
+  # See substitute_across_placeholders()'s identical guard for why this is
+  # needed (the empty-argument-slot/rlang::is_missing() landmine) --
+  # without it, `substitute_cur_group_id()`'s own `has_any` gate check
+  # (called on EVERY mutate()/filter() dot, whether or not it references
+  # cur_group_id() at all) crashes for a dot like `scale(x)[, 1]`.
+  if (rlang::is_missing(expr)) {
+    return(FALSE)
+  }
   if (!is.call(expr)) {
     return(FALSE)
   }
@@ -189,6 +214,13 @@ dots_need_fallback <- function(dots, treat_cur_group_id_as_deferred = FALSE) {
 
 # @keywords internal
 expr_needs_fallback <- function(expr, extra_names, top_level = FALSE) {
+  # See substitute_across_placeholders()'s identical guard for why this is
+  # needed (the empty-argument-slot/rlang::is_missing() landmine) --
+  # without it, dots_need_fallback() (called on EVERY mutate()/filter()/
+  # summarise() dot) crashes for a dot like `scale(x)[, 1]`.
+  if (rlang::is_missing(expr)) {
+    return(FALSE)
+  }
   if (!is.call(expr)) {
     return(FALSE)
   }
