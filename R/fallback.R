@@ -228,27 +228,12 @@ rowwise.tbl_gpu <- function(.data, ...) {
 # support are enough for the real dplyr::add_tally() to work transparently.
 # =============================================================================
 # Two-table verbs: joins without a GPU-native path, set operations, rows_*
+#
+# semi_join()/anti_join() moved to R/join.R (GPU-native via
+# cudf::filtered_join, Phase 7 J2) -- see semi_join.tbl_gpu()/
+# anti_join.tbl_gpu(), ast_join()'s "semi"/"anti" join_type (R/ast.R),
+# lower_join() (R/lower.R), gpu_semi_anti_join() (src/ops_join.cpp).
 # =============================================================================
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr semi_join
-semi_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...) {
-  y_tbl <- collect_other_side(y)
-  gpu_fallback("semi_join", x, function(tbl) {
-    dplyr::semi_join(tbl, y_tbl, by = by, copy = copy, ...)
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr anti_join
-anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...) {
-  y_tbl <- collect_other_side(y)
-  gpu_fallback("anti_join", x, function(tbl) {
-    dplyr::anti_join(tbl, y_tbl, by = by, copy = copy, ...)
-  })
-}
 
 #' @rdname fallback-verbs
 #' @export

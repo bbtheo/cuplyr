@@ -578,6 +578,15 @@ infer_schema.ast_summarise <- function(node) {
 #' @export
 infer_schema.ast_join <- function(node) {
   left_schema <- infer_schema(node$left)
+
+  # semi/anti joins are row filters, not column merges (Phase 7 J2): the
+  # output is x's (the left input's) own schema verbatim, factor_levels
+  # included -- there is no right-side column to merge in and no
+  # suffix/keep decision to make.
+  if (node$join_type %in% c("semi", "anti")) {
+    return(left_schema)
+  }
+
   right_schema <- infer_schema(node$right)
   build_join_schema(left_schema, right_schema, node$by,
                     suffix = node$suffix, keep = node$keep)

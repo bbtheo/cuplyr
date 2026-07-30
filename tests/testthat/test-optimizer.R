@@ -141,6 +141,88 @@ test_that("push_down_filters does not move right-only filters below left join", 
   expect_s3_class(pushed$input, "ast_join")
 })
 
+test_that("push_down_filters pushes ALL predicates below a semi/anti join, never to the right", {
+  # Phase 7 J2: semi/anti's output schema is x's (left's) schema verbatim,
+  # so every predicate is necessarily left-only -- unlike a mutating join,
+  # there's no "stay" case and no right-side pushdown target at all.
+  left_schema <- list(names = c("k", "a"), types = c("INT32", "FLOAT64"))
+  right_schema <- list(names = c("k", "b"), types = c("INT32", "FLOAT64"))
+  left <- ast_source(left_schema)
+  right <- ast_source(right_schema)
+
+  for (jt in c("semi", "anti")) {
+    join <- ast_join(jt, left, right, by = list(left = "k", right = "k"))
+
+    pred <- make_predicate(ir_call(">", list(ir_col("a"), ir_lit(1, "FLOAT64"))), left_schema)
+    filter_node <- ast_filter(join, list(pred))
+
+    pushed <- push_down_filters(filter_node)
+
+    expect_s3_class(pushed, "ast_join")
+    expect_s3_class(pushed$left, "ast_filter")
+    expect_s3_class(pushed$right, "ast_source")
+  }
+})
+
+test_that("push_down_projections only needs by$right from a semi/anti join's right side", {
+  left_schema <- list(names = c("k", "a", "unused"), types = c("INT32", "FLOAT64", "FLOAT64"))
+  right_schema <- list(names = c("k", "extra1", "extra2"), types = c("INT32", "FLOAT64", "FLOAT64"))
+  left <- ast_source(left_schema)
+  right <- ast_source(right_schema)
+
+  for (jt in c("semi", "anti")) {
+    join <- ast_join(jt, left, right, by = list(left = "k", right = "k"))
+    select_node <- ast_select(join, c("k", "a"))
+
+    pushed <- push_down_projections(select_node)
+    expect_s3_class(pushed$input$left, "ast_select")
+    expect_equal(sort(pushed$input$left$columns), c("a", "k"), info = jt)
+    expect_s3_class(pushed$input$right, "ast_select")
+    expect_equal(pushed$input$right$columns, "k", info = jt)
+  }
+})
+
+test_that("prune_dead_columns drops an unused mutate output feeding a semi/anti join's left side", {
+  # Same rationale as the push_down_projections test above, but exercised
+  # through prune_dead_columns' own "join" branch, which needs a mutate
+  # (not a bare source -- prune_dead_columns' "source" case is a no-op,
+  # unlike push_down_projections') to observe anything actually get pruned.
+  left_schema <- list(names = c("k", "a"), types = c("INT32", "FLOAT64"))
+  right_schema <- list(names = c("k"), types = c("INT32"))
+  left_source <- ast_source(left_schema)
+  waste_expr <- make_mutate_expr("waste", ir_call("+", list(ir_col("a"), ir_lit_from_r(1))), left_schema)
+  left_mutate <- ast_mutate(left_source, list(waste_expr))
+  right <- ast_source(right_schema)
+
+  for (jt in c("semi", "anti")) {
+    join <- ast_join(jt, left_mutate, right, by = list(left = "k", right = "k"))
+    select_node <- ast_select(join, c("k", "a"))
+
+    pruned <- prune_dead_columns(select_node, c("k", "a"))
+    # "waste" isn't required anywhere downstream of the join (the join's
+    # own output is x's schema verbatim, and the outer select only asks
+    # for k/a) -- the mutate node producing it should be pruned away
+    # entirely, leaving the join's left input as the bare source.
+    expect_s3_class(pruned$input$left, "ast_source")
+  }
+})
+
+test_that("infer_schema.ast_join returns x's schema verbatim for semi/anti (incl. factor_levels)", {
+  left_schema <- list(names = c("k", "a"), types = c("INT32", "FLOAT64"),
+                      factor_levels = list(a = c("x", "y")))
+  right_schema <- list(names = c("k", "b"), types = c("INT32", "FLOAT64"))
+  left <- ast_source(left_schema)
+  right <- ast_source(right_schema)
+
+  for (jt in c("semi", "anti")) {
+    join <- ast_join(jt, left, right, by = list(left = "k", right = "k"))
+    schema <- infer_schema(join)
+    expect_identical(schema$names, left_schema$names, info = jt)
+    expect_identical(schema$types, left_schema$types, info = jt)
+    expect_identical(schema$factor_levels, left_schema$factor_levels, info = jt)
+  }
+})
+
 test_that("push_down_filters respects renamed join keys", {
   left_schema <- list(names = c("a", "x"), types = c("INT32", "FLOAT64"))
   right_schema <- list(names = c("b", "y"), types = c("INT32", "FLOAT64"))

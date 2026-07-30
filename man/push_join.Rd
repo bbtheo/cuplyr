@@ -18,7 +18,8 @@ push_join(
 )
 }
 \arguments{
-\item{join_type}{One of \code{"left"}, \code{"inner"}, \code{"full"}, \code{"right"}}
+\item{join_type}{One of \code{"left"}, \code{"inner"}, \code{"full"}, \code{"right"},
+\code{"semi"}, \code{"anti"}}
 
 \item{x, y}{The two \code{tbl_gpu} join inputs}
 
@@ -27,7 +28,9 @@ push_join(
 
 \item{suffix, keep, na_matches, multiple, unmatched, relationship}{As
 documented on the join verbs (the last three are dormant -- validated
-but not yet behavior-changing -- until Phase 7 J5)}
+but not yet behavior-changing -- until Phase 7 J5; all are unused for
+\code{"semi"}/\code{"anti"}, which have no \code{suffix}/\code{keep}/\code{multiple}/
+\code{unmatched}/\code{relationship} in dplyr's own signature)}
 }
 \value{
 A new \code{tbl_gpu}
@@ -39,8 +42,16 @@ one \code{exec_mode}/\code{ptr}/\code{schema} to decide the schedule. A join has
 independent inputs (\code{x}/\code{y}) whose \emph{either} side being lazy forces the
 whole join lazy (mirroring the pre-unification behavior), and whose eager
 execution needs both sides' pointers anchored -- see \code{join_input_node()}.
-Per D3, joins always drop groups (\code{character()}) and never carry
-\code{factor_levels} (this matches \code{build_join_schema()}, which never
-propagated them).
+Per D3, the mutating joins (\code{"left"}/\code{"inner"}/\code{"full"}/\code{"right"}) always
+drop groups (\code{character()}) and never carry \code{factor_levels} (this matches
+\code{build_join_schema()}, which never propagated them). \code{"semi"}/\code{"anti"}
+are the one exception (Phase 7 J2): they're row filters, not column
+merges -- the output schema is x's own schema verbatim (see
+\code{infer_schema.ast_join}'s semi/anti branch, which returns x's schema,
+factor_levels included), and dplyr's own \code{semi_join()}/\code{anti_join()}
+PRESERVE x's \code{group_by()} grouping (verified empirically against dplyr
+1.2.1) -- so \code{x$groups} is carried forward (filtered defensively through
+the new schema's names, mirroring \code{propagate_groups()}'s own convention
+for non-join nodes) instead of being cleared.
 }
 \keyword{internal}

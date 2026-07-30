@@ -4,8 +4,6 @@
 \alias{fallback-verbs}
 \alias{reframe.tbl_gpu}
 \alias{rowwise.tbl_gpu}
-\alias{semi_join.tbl_gpu}
-\alias{anti_join.tbl_gpu}
 \alias{nest_join.tbl_gpu}
 \alias{cross_join.tbl_gpu}
 \alias{union.tbl_gpu}
@@ -38,10 +36,6 @@
 \method{reframe}{tbl_gpu}(.data, ..., .by = NULL)
 
 \method{rowwise}{tbl_gpu}(.data, ...)
-
-\method{semi_join}{tbl_gpu}(x, y, by = NULL, copy = FALSE, ...)
-
-\method{anti_join}{tbl_gpu}(x, y, by = NULL, copy = FALSE, ...)
 
 \method{nest_join}{tbl_gpu}(x, y, by = NULL, copy = FALSE, keep = NULL, name = NULL, ...)
 

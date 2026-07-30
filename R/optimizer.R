@@ -250,15 +250,25 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       ast
     },
     "join" = {
-      left_schema <- infer_schema(ast$left)
-      right_schema <- infer_schema(ast$right)
-      info <- build_join_output_info(left_schema, right_schema, ast$by,
-                                     suffix = ast$suffix, keep = ast$keep)
-      req <- intersect(required_cols, info$names)
-      idx <- match(req, info$names)
-      idx <- idx[!is.na(idx)]
-      left_needed <- unique(c(ast$by$left, info$source_names[idx][info$origin[idx] == "left"]))
-      right_needed <- unique(c(ast$by$right, info$source_names[idx][info$origin[idx] == "right"]))
+      if (ast$join_type %in% c("semi", "anti")) {
+        # semi/anti (Phase 7 J2, design section 1.2): the output is x's
+        # (left's) schema verbatim -- every `required_cols` entry is
+        # already a left column, no origin split needed. The right side
+        # contributes nothing to the output at all; it only needs its own
+        # join-key columns (`by$right`) to probe against.
+        left_needed <- union(required_cols, ast$by$left)
+        right_needed <- unique(ast$by$right)
+      } else {
+        left_schema <- infer_schema(ast$left)
+        right_schema <- infer_schema(ast$right)
+        info <- build_join_output_info(left_schema, right_schema, ast$by,
+                                       suffix = ast$suffix, keep = ast$keep)
+        req <- intersect(required_cols, info$names)
+        idx <- match(req, info$names)
+        idx <- idx[!is.na(idx)]
+        left_needed <- unique(c(ast$by$left, info$source_names[idx][info$origin[idx] == "left"]))
+        right_needed <- unique(c(ast$by$right, info$source_names[idx][info$origin[idx] == "right"]))
+      }
 
       ast$left <- push_down_projections(ast$left, left_needed, group_cols)
       ast$right <- push_down_projections(ast$right, right_needed, group_cols)
@@ -491,15 +501,23 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
       ast
     },
     "join" = {
-      left_schema <- infer_schema(ast$left)
-      right_schema <- infer_schema(ast$right)
-      info <- build_join_output_info(left_schema, right_schema, ast$by,
-                                     suffix = ast$suffix, keep = ast$keep)
-      req <- intersect(required_cols, info$names)
-      idx <- match(req, info$names)
-      idx <- idx[!is.na(idx)]
-      left_needed <- unique(c(ast$by$left, info$source_names[idx][info$origin[idx] == "left"]))
-      right_needed <- unique(c(ast$by$right, info$source_names[idx][info$origin[idx] == "right"]))
+      if (ast$join_type %in% c("semi", "anti")) {
+        # Same rationale as push_down_projections()'s "join" case above:
+        # semi/anti's output is x's schema verbatim, right only needs its
+        # own join keys.
+        left_needed <- union(required_cols, ast$by$left)
+        right_needed <- unique(ast$by$right)
+      } else {
+        left_schema <- infer_schema(ast$left)
+        right_schema <- infer_schema(ast$right)
+        info <- build_join_output_info(left_schema, right_schema, ast$by,
+                                       suffix = ast$suffix, keep = ast$keep)
+        req <- intersect(required_cols, info$names)
+        idx <- match(req, info$names)
+        idx <- idx[!is.na(idx)]
+        left_needed <- unique(c(ast$by$left, info$source_names[idx][info$origin[idx] == "left"]))
+        right_needed <- unique(c(ast$by$right, info$source_names[idx][info$origin[idx] == "right"]))
+      }
 
       ast$left <- prune_dead_columns(ast$left, left_needed, group_cols)
       ast$right <- prune_dead_columns(ast$right, right_needed, group_cols)
@@ -580,6 +598,21 @@ push_down_filters <- function(ast) {
   }
 
   if (input$type == "join") {
+    if (input$join_type %in% c("semi", "anti")) {
+      # semi/anti (Phase 7 J2, design section 1.2): behave like "left" for
+      # filter pushdown, but even more permissively -- the join's OUTPUT
+      # schema is x's (left's) schema verbatim, so every predicate column
+      # is necessarily a left column (there's no right-side name in the
+      # output namespace for a predicate to reference at all). Pushing the
+      # whole filter below the join is always safe: semi/anti only ever
+      # subsets x's ROWS without touching any column's values, so
+      # filter(semi_join(x, y), pred) and semi_join(filter(x, pred), y)
+      # select the identical row set. Right is NEVER a pushdown target --
+      # it isn't part of the output at all.
+      input$left <- ast_filter(input$left, ast$predicates)
+      return(input)
+    }
+
     left_schema <- infer_schema(input$left)
     right_schema <- infer_schema(input$right)
     info <- build_join_output_info(left_schema, right_schema, input$by,

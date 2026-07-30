@@ -292,6 +292,16 @@ lower_join <- function(ast, source_ptr) {
                              right_drop_idx, nulls_equal),
     "full" = gpu_full_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
                            right_drop_idx, nulls_equal),
+    # semi/anti (Phase 7 J2): native via cudf::filtered_join
+    # (gpu_semi_anti_join(), src/ops_join.cpp) -- builds the hash table from
+    # the right/key table, probes with the left table, sorts the returned
+    # (unordered, non-duplicated) left-row index vector ascending before
+    # gathering the FULL left table (no right columns at all -- see
+    # infer_schema.ast_join's semi/anti branch, x's schema verbatim).
+    "semi" = gpu_semi_anti_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
+                               FALSE, nulls_equal),
+    "anti" = gpu_semi_anti_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
+                               TRUE, nulls_equal),
     "right" = {
       # Implement right join via swapped left join, then reorder columns.
       # Shared with the eager path in right_join.tbl_gpu() (R/join.R) via

@@ -340,3 +340,184 @@ test_that("parse_join_by() returns the 4-vector spec for every existing by= form
   expect_identical(named$op, "==")
   expect_identical(named$filter, "none")
 })
+
+# =============================================================================
+# Phase 7 J2: semi_join()/anti_join() native via cudf::filtered_join
+#
+# Verified empirically against dplyr 1.2.1 before implementation:
+#   - Left row ORDER IS a real contract (unlike the mutating joins' NA-key
+#     ordering, which this file's na_matches block above deliberately sorts
+#     around) -- no arrange_by() anywhere in this section.
+#   - No duplication: even when multiple right rows match one left key,
+#     that left row appears at most once in the result.
+#   - Duplicate left rows (same key value, different row) are each kept or
+#     dropped independently -- semi_join()/anti_join() never merge rows.
+#   - na_matches = "na" (default): an NA key on one side matches an NA key
+#     on the other (semi keeps the row, anti drops it). For multi-key
+#     joins this is a per-key-column comparison: only a row whose EVERY
+#     key column matches (NA-to-NA counted as a match under "na") is a hit.
+#   - na_matches = "never": NA keys never match anything, including
+#     another NA (semi drops the row, anti keeps it).
+#   - Grouping (`group_by()`) on x is PRESERVED by both verbs -- a real
+#     divergence from the mutating joins, which always clear groups
+#     (D3/`propagate_groups()`) -- `push_join()`'s `"semi"`/`"anti"`
+#     special case (R/execute.R) carries `x$groups` forward instead.
+# =============================================================================
+
+# Shared helper: run `join_fn` (semi_join/anti_join) eagerly AND lazily on
+# tbl_gpu, and compare row-for-row -- INCLUDING order, a real contract for
+# these verbs -- against the dplyr-on-data.frame oracle.
+compare_semi_anti <- function(left_df, right_df, join_fn, by, ...) {
+  expected <- join_fn(left_df, right_df, by = by, ...)
+
+  eager <- join_fn(tbl_gpu(left_df), tbl_gpu(right_df), by = by, ...) |>
+    collect()
+  lazy <- join_fn(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df, lazy = TRUE),
+                  by = by, ...) |>
+    collect()
+
+  expected_df <- as.data.frame(expected)
+  eager_df <- as.data.frame(eager)
+  lazy_df <- as.data.frame(lazy)
+  rownames(expected_df) <- NULL
+  rownames(eager_df) <- NULL
+  rownames(lazy_df) <- NULL
+
+  expect_equal(eager_df, expected_df)
+  expect_equal(lazy_df, expected_df)
+}
+
+test_that("semi_join()/anti_join() match dplyr: single key, default na_matches", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(id = c(3, 1, 2, 1, NA), v = 1:5)
+  right_df <- data.frame(id = c(1, 2, 2, NA))
+
+  compare_semi_anti(left_df, right_df, dplyr::semi_join, by = "id")
+  compare_semi_anti(left_df, right_df, dplyr::anti_join, by = "id")
+})
+
+test_that("semi_join()/anti_join() na_matches = 'never'", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(id = c(3, 1, 2, 1, NA), v = 1:5)
+  right_df <- data.frame(id = c(1, 2, 2, NA))
+
+  compare_semi_anti(left_df, right_df, dplyr::semi_join, by = "id", na_matches = "never")
+  compare_semi_anti(left_df, right_df, dplyr::anti_join, by = "id", na_matches = "never")
+})
+
+test_that("semi_join()/anti_join() work with multi-key joins (incl. NA keys, both na_matches)", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(k1 = c(1, 2, 1, NA), k2 = c(10, 20, 10, 30), x = c(5, 6, 7, 8))
+  right_df <- data.frame(k1 = c(1, NA), k2 = c(10, 30))
+
+  compare_semi_anti(left_df, right_df, dplyr::semi_join, by = c("k1", "k2"))
+  compare_semi_anti(left_df, right_df, dplyr::anti_join, by = c("k1", "k2"))
+  compare_semi_anti(left_df, right_df, dplyr::semi_join, by = c("k1", "k2"), na_matches = "never")
+  compare_semi_anti(left_df, right_df, dplyr::anti_join, by = c("k1", "k2"), na_matches = "never")
+})
+
+test_that("semi_join()/anti_join() work with renamed keys", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(a = c(1, 2, 3, NA), x = c(10, 20, 30, 40))
+  right_df <- data.frame(b = c(1, 3, NA), y = c(100, 300, 400))
+
+  compare_semi_anti(left_df, right_df, dplyr::semi_join, by = c("a" = "b"))
+  compare_semi_anti(left_df, right_df, dplyr::anti_join, by = c("a" = "b"))
+})
+
+test_that("semi_join() does not duplicate a left row on multiple right matches", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(id = c(1, 2, 3), v = c("a", "b", "c"))
+  right_df <- data.frame(id = c(1, 1, 1, 2, 2))  # id 1 matches 3x, id 2 matches 2x
+
+  compare_semi_anti(left_df, right_df, dplyr::semi_join, by = "id")
+
+  result <- dplyr::semi_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "id") |> collect()
+  expect_equal(nrow(result), 2)
+})
+
+test_that("semi_join()/anti_join() keep duplicate left rows independently", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(id = c(1, 1, 2, 1), v = c("a", "b", "c", "d"))
+  right_df <- data.frame(id = c(1))
+
+  compare_semi_anti(left_df, right_df, dplyr::semi_join, by = "id")
+  compare_semi_anti(left_df, right_df, dplyr::anti_join, by = "id")
+})
+
+test_that("semi_join()/anti_join() with an empty right table", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(id = c(1, 2, 3), v = 1:3)
+  right_df <- data.frame(id = numeric(0))
+
+  compare_semi_anti(left_df, right_df, dplyr::semi_join, by = "id")
+  compare_semi_anti(left_df, right_df, dplyr::anti_join, by = "id")
+})
+
+test_that("semi_join()/anti_join() with an empty (0-row) left table", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(id = numeric(0), v = character(0))
+  right_df <- data.frame(id = c(1, 2))
+
+  compare_semi_anti(left_df, right_df, dplyr::semi_join, by = "id")
+  compare_semi_anti(left_df, right_df, dplyr::anti_join, by = "id")
+})
+
+test_that("semi_join()/anti_join() with both sides empty (0-row)", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(id = numeric(0), v = character(0))
+  right_df <- data.frame(id = numeric(0))
+
+  compare_semi_anti(left_df, right_df, dplyr::semi_join, by = "id")
+  compare_semi_anti(left_df, right_df, dplyr::anti_join, by = "id")
+})
+
+test_that("semi_join()/anti_join() preserve x's grouping (group_vars()), eager and lazy", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(id = c(1, 2, 3, 1), grp = c("a", "a", "b", "b"), v = 1:4)
+  right_df <- data.frame(id = c(1, 3))
+
+  oracle_semi <- dplyr::semi_join(dplyr::group_by(left_df, grp), right_df, by = "id")
+  oracle_anti <- dplyr::anti_join(dplyr::group_by(left_df, grp), right_df, by = "id")
+
+  gpu_semi <- dplyr::semi_join(dplyr::group_by(tbl_gpu(left_df), grp), tbl_gpu(right_df), by = "id")
+  gpu_anti <- dplyr::anti_join(dplyr::group_by(tbl_gpu(left_df), grp), tbl_gpu(right_df), by = "id")
+
+  expect_identical(gpu_semi$groups, dplyr::group_vars(oracle_semi))
+  expect_identical(gpu_anti$groups, dplyr::group_vars(oracle_anti))
+  expect_equal(as.data.frame(collect(gpu_semi)), as.data.frame(dplyr::ungroup(oracle_semi)))
+  expect_equal(as.data.frame(collect(gpu_anti)), as.data.frame(dplyr::ungroup(oracle_anti)))
+
+  lazy_x <- as_lazy(dplyr::group_by(tbl_gpu(left_df), grp))
+  gpu_semi_lazy <- dplyr::semi_join(lazy_x, tbl_gpu(right_df, lazy = TRUE), by = "id")
+  expect_identical(gpu_semi_lazy$groups, dplyr::group_vars(oracle_semi))
+  expect_equal(as.data.frame(collect(gpu_semi_lazy)), as.data.frame(dplyr::ungroup(oracle_semi)))
+})
+
+test_that("semi_join()/anti_join() reject bad na_matches values with dplyr's exact text", {
+  skip_if_no_gpu()
+
+  gx <- tbl_gpu(data.frame(id = 1:3))
+  gy <- tbl_gpu(data.frame(id = 1:3))
+
+  expect_error(
+    dplyr::semi_join(gx, gy, by = "id", na_matches = "bogus"),
+    '`na_matches` must be one of "na" or "never", not "bogus".',
+    fixed = TRUE
+  )
+  expect_error(
+    dplyr::anti_join(gx, gy, by = "id", na_matches = "bogus"),
+    '`na_matches` must be one of "na" or "never", not "bogus".',
+    fixed = TRUE
+  )
+})

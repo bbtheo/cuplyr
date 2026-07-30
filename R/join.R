@@ -368,11 +368,21 @@ warn_if_join_too_large <- function(join_type, x, y, join_spec, suffix, keep) {
     "right" = n_right,
     "inner" = min(n_left, n_right),
     "full" = n_left + n_right,
+    "semi" = n_left,
+    "anti" = n_left,
     n_left
   )
 
-  schema <- build_join_schema(x$schema, y$schema, join_spec,
-                              suffix = suffix, keep = keep)
+  # semi/anti never merge columns (output is x's own schema verbatim, see
+  # infer_schema.ast_join's semi/anti branch) -- build_join_output_info()'s
+  # merged-schema estimate would be wrong here (and keep/suffix are unused
+  # for these join types), so estimate straight from x's own schema.
+  schema <- if (join_type %in% c("semi", "anti")) {
+    x$schema
+  } else {
+    build_join_schema(x$schema, y$schema, join_spec,
+                      suffix = suffix, keep = keep)
+  }
   est_bytes <- estimate_gpu_bytes(est_rows, schema$types)
 
   mem <- gpu_memory_state()
@@ -647,4 +657,66 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   push_join("right", x, y, join_spec, suffix = suffix, keep = keep,
            na_matches = na_matches, multiple = multiple, unmatched = unmatched,
            relationship = relationship)
+}
+
+#' `semi_join()`/`anti_join()`: native via `cudf::filtered_join`
+#'
+#' Native GPU implementation via `cudf::filtered_join` (Phase 7 J2). Unlike
+#' the mutating joins, dplyr's own `semi_join()`/`anti_join()` signature has
+#' no `suffix`/`keep`/`multiple`/`unmatched`/`relationship` arguments at all
+#' (verified via `args(dplyr:::semi_join.data.frame)`: `x, y, by, copy, ...,
+#' na_matches`) -- there's nothing to merge, so no column-collision handling
+#' is needed. The result is x's own schema verbatim (a row subset of x),
+#' and -- verified empirically against dplyr 1.2.1 -- x's `group_by()`
+#' grouping is PRESERVED (these are filters, not the column-merging
+#' mutating joins that `push_join()`/`propagate_groups()`'s D3 rule always
+#' clears groups for); `push_join()` special-cases `join_type %in%
+#' c("semi", "anti")` to carry `x$groups` forward instead of dropping them.
+#' @export
+#' @importFrom dplyr semi_join
+semi_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
+                              na_matches = "na") {
+  if (!is_tbl_gpu(y)) {
+    if (isTRUE(copy)) {
+      y <- tbl_gpu(y)
+    } else {
+      stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
+    }
+  }
+
+  na_matches <- validate_join_na_matches(na_matches)
+
+  join_spec <- parse_join_by(by, x, y)
+  validate_join_cols(join_spec$left, x, "Left")
+  validate_join_cols(join_spec$right, y, "Right")
+  validate_key_types(x, y, join_spec)
+
+  push_join("semi", x, y, join_spec, suffix = c(".x", ".y"), keep = FALSE,
+           na_matches = na_matches)
+}
+
+#' See `semi_join.tbl_gpu()`'s roxygen just above -- same native
+#' `filtered_join`-based implementation and grouping-preservation rationale,
+#' `is_anti = TRUE` in the shared `gpu_semi_anti_join()` C++ entry point.
+#' @export
+#' @importFrom dplyr anti_join
+anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
+                              na_matches = "na") {
+  if (!is_tbl_gpu(y)) {
+    if (isTRUE(copy)) {
+      y <- tbl_gpu(y)
+    } else {
+      stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
+    }
+  }
+
+  na_matches <- validate_join_na_matches(na_matches)
+
+  join_spec <- parse_join_by(by, x, y)
+  validate_join_cols(join_spec$left, x, "Left")
+  validate_join_cols(join_spec$right, y, "Right")
+  validate_key_types(x, y, join_spec)
+
+  push_join("anti", x, y, join_spec, suffix = c(".x", ".y"), keep = FALSE,
+           na_matches = na_matches)
 }

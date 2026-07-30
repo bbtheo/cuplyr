@@ -205,17 +205,28 @@ join_input_node <- function(tbl) {
 #' independent inputs (`x`/`y`) whose *either* side being lazy forces the
 #' whole join lazy (mirroring the pre-unification behavior), and whose eager
 #' execution needs both sides' pointers anchored -- see `join_input_node()`.
-#' Per D3, joins always drop groups (`character()`) and never carry
-#' `factor_levels` (this matches `build_join_schema()`, which never
-#' propagated them).
+#' Per D3, the mutating joins (`"left"`/`"inner"`/`"full"`/`"right"`) always
+#' drop groups (`character()`) and never carry `factor_levels` (this matches
+#' `build_join_schema()`, which never propagated them). `"semi"`/`"anti"`
+#' are the one exception (Phase 7 J2): they're row filters, not column
+#' merges -- the output schema is x's own schema verbatim (see
+#' `infer_schema.ast_join`'s semi/anti branch, which returns x's schema,
+#' factor_levels included), and dplyr's own `semi_join()`/`anti_join()`
+#' PRESERVE x's `group_by()` grouping (verified empirically against dplyr
+#' 1.2.1) -- so `x$groups` is carried forward (filtered defensively through
+#' the new schema's names, mirroring `propagate_groups()`'s own convention
+#' for non-join nodes) instead of being cleared.
 #'
-#' @param join_type One of `"left"`, `"inner"`, `"full"`, `"right"`
+#' @param join_type One of `"left"`, `"inner"`, `"full"`, `"right"`,
+#'   `"semi"`, `"anti"`
 #' @param x,y The two `tbl_gpu` join inputs
 #' @param join_spec List with `left`/`right`/`op`/`filter`, as returned by
 #'   `parse_join_by()`
 #' @param suffix,keep,na_matches,multiple,unmatched,relationship As
 #'   documented on the join verbs (the last three are dormant -- validated
-#'   but not yet behavior-changing -- until Phase 7 J5)
+#'   but not yet behavior-changing -- until Phase 7 J5; all are unused for
+#'   `"semi"`/`"anti"`, which have no `suffix`/`keep`/`multiple`/
+#'   `unmatched`/`relationship` in dplyr's own signature)
 #' @return A new `tbl_gpu`
 #' @keywords internal
 push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
@@ -235,12 +246,15 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
 
   new_schema <- infer_schema(join_ast)
 
+  is_filter_join <- join_type %in% c("semi", "anti")
+  new_groups <- if (is_filter_join) intersect(x$groups, new_schema$names) else character()
+
   if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
     return(new_tbl_gpu(
       ptr = NULL,
       schema = new_schema,
       lazy_ops = join_ast,
-      groups = character(),
+      groups = new_groups,
       exec_mode = "lazy"
     ))
   }
@@ -256,7 +270,7 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
     ptr = new_ptr,
     schema = new_schema,
     lazy_ops = NULL,
-    groups = character(),
+    groups = new_groups,
     exec_mode = "eager"
   )
 }

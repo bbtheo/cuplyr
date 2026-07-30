@@ -30,8 +30,6 @@ fallback_df <- function() {
 # =============================================================================
 
 fallback_sweep_pipelines <- function() {
-  y_small <- tibble::tibble(g = c(1, 3))
-
   list(
     # transmute()/glimpse() are GPU-native now (Phase 3 task 4, see
     # R/mutate.R, R/glimpse.R, test-dplyr-transmute.R) -- no longer part of
@@ -67,8 +65,10 @@ fallback_sweep_pipelines <- function() {
     # see R/count.R, test-dplyr-count.R) -- no longer part of this fallback
     # sweep either. See the "never triggers a fallback notification" block
     # below instead.
-    semi_join = list(fn = function(d) dplyr::semi_join(d, y_small, by = "g")),
-    anti_join = list(fn = function(d) dplyr::anti_join(d, y_small, by = "g")),
+    # semi_join()/anti_join() are GPU-native now (Phase 7 J2, see R/join.R,
+    # src/ops_join.cpp's gpu_semi_anti_join()) -- no longer part of this
+    # fallback sweep. See the "never trigger a fallback notification" block
+    # below instead.
     cross_join = list(
       fn = function(d) {
         dplyr::cross_join(dplyr::distinct(dplyr::select(d, g)), tibble::tibble(k = 1:2))
@@ -511,4 +511,19 @@ test_that("count()/tally()/add_count()/add_tally() are GPU-native and never trig
   # transparently via tbl_vars.tbl_gpu()/group_vars.tbl_gpu()/mutate()/
   # arrange(), with no tbl_gpu-specific code of its own (R/count.R).
   expect_no_error(gt |> dplyr::group_by(g) |> dplyr::add_tally())
+})
+
+test_that("semi_join()/anti_join() are GPU-native and never trigger a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gt <- tbl_gpu(fallback_df())
+  # Like the mutating joins, `y` must be a tbl_gpu unless `copy = TRUE`.
+  y_small <- tbl_gpu(tibble::tibble(g = c(1, 3)))
+
+  expect_no_error(gt |> dplyr::semi_join(y_small, by = "g"))
+  expect_no_error(gt |> dplyr::anti_join(y_small, by = "g"))
+  expect_no_error(gt |> dplyr::semi_join(y_small, by = "g", na_matches = "never"))
+  expect_no_error(gt |> dplyr::anti_join(y_small, by = "g", na_matches = "never"))
+  expect_no_error(gt |> dplyr::group_by(g) |> dplyr::semi_join(y_small, by = "g"))
+  expect_no_error(gt |> as_lazy() |> dplyr::semi_join(y_small, by = "g") |> collect())
 })

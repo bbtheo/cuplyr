@@ -12,6 +12,7 @@
 #else
 #error "cuDF join headers not found (expected cudf/join/join.hpp or cudf/join.hpp)"
 #endif
+#include <cudf/join/filtered_join.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/table/table_view.hpp>
@@ -291,6 +292,60 @@ SEXP gpu_full_join(SEXP xptr_left,
 
     auto result = build_join_result(left_view, right_view, *left_map, *right_map, right_keep,
                                     coalesce_left_keys, coalesce_right_keys);
+
+    return make_gpu_table_xptr(std::move(result));
+}
+
+// [[Rcpp::export]]
+SEXP gpu_semi_anti_join(SEXP xptr_left,
+                        SEXP xptr_right,
+                        Rcpp::IntegerVector left_key_cols,
+                        Rcpp::IntegerVector right_key_cols,
+                        bool is_anti,
+                        bool nulls_equal = true) {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
+    Rcpp::XPtr<GpuTablePtr> right_ptr(xptr_right);
+
+    cudf::table_view left_view = get_table_view(left_ptr);
+    cudf::table_view right_view = get_table_view(right_ptr);
+
+    auto left_keys = to_index_vec(left_key_cols);
+    auto right_keys = to_index_vec(right_key_cols);
+
+    auto left_key_view = select_table_view(left_view, left_keys);
+    auto right_key_view = select_table_view(right_view, right_keys);
+
+    auto null_equality = nulls_equal ? cudf::null_equality::EQUAL
+                                     : cudf::null_equality::UNEQUAL;
+
+    auto stream = cudf::get_default_stream();
+    auto mr = rmm::mr::get_current_device_resource();
+
+    // Build the hash table from the right/filter table (scratchpad/
+    // phase7_joins_design.md J2's verified fact); probe with the left table.
+    // Returned indices are UNORDERED left-table row indices with no
+    // duplication -- even when multiple right rows match the same left key,
+    // a left row appears at most once.
+    cudf::filtered_join joiner(right_key_view, null_equality,
+                               cudf::set_as_build_table::RIGHT, stream);
+
+    auto indices = is_anti ? joiner.anti_join(left_key_view, stream, mr)
+                           : joiner.semi_join(left_key_view, stream, mr);
+
+    // Sort the index vector ascending before gathering, to reproduce dplyr's
+    // left-row-order contract (filtered_join's result order is unspecified).
+    cudf::device_span<cudf::size_type const> idx_span(indices->data(), indices->size());
+    cudf::column_view idx_col_view(idx_span);
+    cudf::table_view idx_tbl({idx_col_view});
+    auto sorted_idx_tbl = cudf::sort(idx_tbl, {cudf::order::ASCENDING},
+                                     {}, stream, mr);
+    auto sorted_idx_view = sorted_idx_tbl->view().column(0);
+
+    auto result = cudf::gather(left_view, sorted_idx_view,
+                               cudf::out_of_bounds_policy::DONT_CHECK,
+                               stream, mr);
 
     return make_gpu_table_xptr(std::move(result));
 }
