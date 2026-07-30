@@ -198,56 +198,12 @@ test_that("rows_*(in_place = TRUE) is rejected for tbl_gpu", {
   )
 })
 
-test_that("group_data() returns grouping metadata matching dplyr", {
-  skip_if_no_gpu()
-  df <- fallback_df()
-  gt <- tbl_gpu(df) |> dplyr::group_by(g)
-
-  result <- gt |> dplyr::group_data()
-  oracle <- dplyr::group_data(dplyr::group_by(df, g))
-
-  expect_false(is_tbl_gpu(result))
-  expect_equal(tibble::as_tibble(result)$g, tibble::as_tibble(oracle)$g)
-})
-
-test_that("group_keys() returns key metadata matching dplyr", {
-  skip_if_no_gpu()
-  df <- fallback_df()
-  gt <- tbl_gpu(df) |> dplyr::group_by(g)
-
-  result <- gt |> dplyr::group_keys()
-  oracle <- dplyr::group_keys(dplyr::group_by(df, g))
-
-  expect_false(is_tbl_gpu(result))
-  expect_equal(result, oracle)
-})
-
-test_that("group_indices() returns per-row group index matching dplyr", {
-  skip_if_no_gpu()
-  df <- fallback_df()
-  gt <- tbl_gpu(df) |> dplyr::group_by(g)
-
-  result <- gt |> dplyr::group_indices()
-  oracle <- dplyr::group_indices(dplyr::group_by(df, g))
-
-  expect_equal(result, oracle)
-})
-
-test_that("group_size() returns per-group sizes matching dplyr", {
-  skip_if_no_gpu()
-  df <- fallback_df()
-  gt <- tbl_gpu(df) |> dplyr::group_by(g)
-
-  expect_equal(dplyr::group_size(gt), dplyr::group_size(dplyr::group_by(df, g)))
-})
-
-test_that("n_groups() returns the group count matching dplyr", {
-  skip_if_no_gpu()
-  df <- fallback_df()
-  gt <- tbl_gpu(df) |> dplyr::group_by(g)
-
-  expect_equal(dplyr::n_groups(gt), dplyr::n_groups(dplyr::group_by(df, g)))
-})
+# group_data()/group_keys()/group_rows()/group_indices()/group_size()/
+# n_groups() are GPU-native now (Phase 9 task 1, see R/group-by.R's
+# compute_group_data()) -- no longer fallback verbs. See
+# test-dplyr-group-data.R for full oracle coverage (ascending/NA-last row
+# order, multi-key, .drop=FALSE factor expansion, computed group_by(),
+# and the "never trigger a fallback" pin).
 
 test_that("group_split() returns a plain list of tibbles matching dplyr", {
   skip_if_no_gpu()

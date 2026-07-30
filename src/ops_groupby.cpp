@@ -15,6 +15,7 @@
 
 #include <cmath>
 #include <limits>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -729,4 +730,153 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
 
     auto result = std::make_unique<cudf::table>(std::move(result_columns));
     return make_gpu_table_xptr(std::move(result));
+}
+
+// Phase 9, task 1: grouping metadata API (group_data()/group_keys()/
+// group_rows()/group_indices()/group_size()/n_groups()).
+//
+// Representation chosen (cheapest that serves all six R-facing queries):
+// a small DISTINCT-keys table (one row per group, in dplyr's own canonical
+// order -- see below) plus two small host-side integer vectors: `offsets`
+// (length num_groups + 1, the group boundary positions) and `perm` (length
+// nrow, the ORIGINAL 1-based row index for every row, permuted into
+// group-sorted order). `.rows` for group i is `perm[offsets[i]+1 ..
+// offsets[i+1]]` (R-side 1-based slicing of `perm`, since `offsets` are
+// 0-based boundary positions into it) -- group_data()/group_keys()/
+// group_rows()/group_size()/n_groups() all derive from the distinct-keys
+// table + offsets alone; only group_indices() needs `perm` itself (see
+// R/group-by.R::compute_group_data()).
+//
+// Row order (verified empirically against dplyr 1.2.1, see this task's own
+// test file): group_by()+group_data() emits groups in ASCENDING key order,
+// NA sorted LAST, with each group's `.rows` in original-row order. This
+// falls out for free from `cudf::groupby::groupby`'s own DEFAULT behavior
+// (`sorted::NO`, no explicit `column_order`/`null_precedence`): its
+// internal `sort_groupby_helper::key_sort_order()` (verified against cudf
+// source, cpp/src/groupby/sort/sort_helper.cu) calls
+// `stable_sorted_order(keys, {}, precedence)` where `{}` (empty
+// column_order) means every column ASCENDING, and `precedence` defaults to
+// `null_order::AFTER` for every column whenever `_null_precedence` (which
+// we never set) is empty -- i.e. cudf's own "unsorted-keys" groupby path
+// already IS dplyr's canonical group order, no manual pre-sort needed
+// (contrast with src/ops_window.cpp's window families, which pre-sort
+// manually via `stable_sorted_order()` themselves and construct their
+// groupby with `sorted::YES` -- not needed here since we WANT this exact
+// default behavior, not an identity-permutation optimization).
+//
+// null_policy::INCLUDE: same rationale as gpu_summarise() above -- dplyr's
+// group_by() always treats NA as its own group, never drops NA-key rows.
+// [[Rcpp::export]]
+List gpu_group_info(SEXP xptr, IntegerVector group_col_indices) {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
+    cudf::table_view view = get_table_view(ptr);
+
+    int n_key_cols = group_col_indices.size();
+    if (n_key_cols == 0) {
+        Rcpp::stop("gpu_group_info() requires at least one group column index");
+    }
+    for (int i = 0; i < n_key_cols; ++i) {
+        if (group_col_indices[i] < 0 || group_col_indices[i] >= view.num_columns()) {
+            Rcpp::stop("Group column index out of bounds: %d", group_col_indices[i]);
+        }
+    }
+
+    std::vector<cudf::column_view> key_views;
+    key_views.reserve(n_key_cols);
+    for (int i = 0; i < n_key_cols; ++i) {
+        key_views.push_back(view.column(group_col_indices[i]));
+    }
+    cudf::table_view keys_table(key_views);
+
+    cudf::size_type nrow = view.num_rows();
+
+    // Row-index column [0, 1, ..., nrow-1] as get_groups()'s "values" table
+    // -- its gathered/grouped-order output IS the permutation (`perm`) this
+    // function returns, built the same host-vector -> device_buffer ->
+    // cudf::column idiom gpu_summarise() already uses above (never a
+    // device-side Thrust call).
+    std::vector<int32_t> row_idx_data(static_cast<size_t>(nrow));
+    std::iota(row_idx_data.begin(), row_idx_data.end(), 0);
+
+    rmm::device_buffer row_idx_buf(row_idx_data.size() * sizeof(int32_t),
+                                    rmm::cuda_stream_view(),
+                                    rmm::mr::get_current_device_resource_ref());
+    if (!row_idx_data.empty()) {
+        check_cuda(cudaMemcpy(row_idx_buf.data(), row_idx_data.data(),
+                               row_idx_data.size() * sizeof(int32_t), cudaMemcpyHostToDevice),
+                   "gpu_group_info row-index upload");
+    }
+    auto row_idx_col = std::make_unique<cudf::column>(
+        cudf::data_type{cudf::type_id::INT32},
+        nrow,
+        std::move(row_idx_buf),
+        rmm::device_buffer{},
+        0
+    );
+    std::vector<cudf::column_view> row_idx_views = { row_idx_col->view() };
+    cudf::table_view row_idx_table(row_idx_views);
+
+    cudf::groupby::groupby gb(keys_table, cudf::null_policy::INCLUDE);
+    auto groups_result = gb.get_groups(row_idx_table);
+
+    std::vector<cudf::size_type> offsets_vec = groups_result.offsets;
+    cudf::size_type num_groups = offsets_vec.empty()
+        ? 0
+        : static_cast<cudf::size_type>(offsets_vec.size()) - 1;
+
+    // Distinct keys table: gather the FIRST row of each group out of the
+    // (already sorted+grouped) per-row keys table -- `offsets[i]` is that
+    // row's position for group i.
+    std::unique_ptr<cudf::table> distinct_keys;
+    if (num_groups > 0) {
+        std::vector<int32_t> first_rows(static_cast<size_t>(num_groups));
+        for (cudf::size_type i = 0; i < num_groups; ++i) {
+            first_rows[static_cast<size_t>(i)] = static_cast<int32_t>(offsets_vec[static_cast<size_t>(i)]);
+        }
+
+        rmm::device_buffer first_rows_buf(first_rows.size() * sizeof(int32_t),
+                                           rmm::cuda_stream_view(),
+                                           rmm::mr::get_current_device_resource_ref());
+        check_cuda(cudaMemcpy(first_rows_buf.data(), first_rows.data(),
+                               first_rows.size() * sizeof(int32_t), cudaMemcpyHostToDevice),
+                   "gpu_group_info first-row-of-group upload");
+        auto first_rows_col = std::make_unique<cudf::column>(
+            cudf::data_type{cudf::type_id::INT32},
+            static_cast<cudf::size_type>(first_rows.size()),
+            std::move(first_rows_buf),
+            rmm::device_buffer{},
+            0
+        );
+
+        distinct_keys = cudf::gather(groups_result.keys->view(), first_rows_col->view(),
+                                      cudf::out_of_bounds_policy::DONT_CHECK);
+    } else {
+        distinct_keys = cudf::empty_like(keys_table);
+    }
+
+    // perm: original row index (already 1-based for direct R use as
+    // .rows/group_indices()) for every row, in group-sorted order --
+    // segmented by `offsets` (still 0-based boundary positions) into each
+    // group's own .rows on the R side.
+    IntegerVector perm(nrow);
+    if (nrow > 0) {
+        cudf::column_view perm_view = groups_result.values->view().column(0);
+        std::vector<int32_t> host_perm(static_cast<size_t>(nrow));
+        check_cuda(cudaMemcpy(host_perm.data(), perm_view.data<int32_t>(),
+                               static_cast<size_t>(nrow) * sizeof(int32_t), cudaMemcpyDeviceToHost),
+                   "gpu_group_info perm download");
+        for (cudf::size_type i = 0; i < nrow; ++i) {
+            perm[i] = host_perm[static_cast<size_t>(i)] + 1;
+        }
+    }
+
+    IntegerVector offsets(offsets_vec.begin(), offsets_vec.end());
+
+    return List::create(
+        Named("keys") = make_gpu_table_xptr(std::move(distinct_keys)),
+        Named("offsets") = offsets,
+        Named("perm") = perm
+    );
 }

@@ -1,5 +1,45 @@
 # cuplyr (development version)
 
+## Grouping metadata API & backend generics (Phase 9)
+
+* **`group_data()`/`group_keys()`/`group_rows()`/`group_indices()`/
+  `group_size()`/`n_groups()`** are now GPU-native (previously CPU
+  fallbacks): one new C++ primitive, `gpu_group_info()`
+  (`src/ops_groupby.cpp`), returns the distinct group keys, group-boundary
+  offsets, and a row permutation from a single `cudf::groupby::get_groups()`
+  call. Row order matches dplyr's own convention exactly: ascending key
+  order, `NA` sorted last, each group's rows in original order.
+* **`group_by()` computed columns**: a named argument (e.g.
+  `group_by(df, g = x %/% 2)`, or even `group_by(df, g = x)`) now runs a
+  real `mutate()` first, then groups by the new/overwritten column --
+  matching dplyr exactly, including later dots referencing earlier
+  computed ones and `.add=` combining with existing groups. `group_by()`
+  with no arguments and `.add = FALSE` (the default) now correctly clears
+  existing groups (previously incorrectly left them unchanged).
+* **`group_by(.drop = FALSE)`**: unobserved factor-level combinations of
+  the FACTOR grouping columns now appear in `group_data()` with
+  `.rows = integer(0)` (non-factor grouping columns in that row are `NA`),
+  matching dplyr's own factor-level-expansion algorithm. This is honored
+  for the direct `group_by(.drop = FALSE) |> group_data()` call chain, not
+  threaded through every other verb (a documented limitation, see
+  `?group_by.tbl_gpu`).
+* **`tbl_nongroup_vars()`/`group_by_drop_default()`** now work
+  transparently (the former needed no new code at all -- it's plain dplyr
+  composition over `tbl_vars()`/`group_vars()`, both pre-existing; the
+  latter reads back the table's own most recent `.drop=`).
+* **dplyr's backend extension contract** -- `dplyr_row_slice()`/
+  `dplyr_col_modify()`/`dplyr_reconstruct()` -- and the 1-d, column-
+  selecting form of `[` are now implemented for `tbl_gpu`, for third-party
+  code that manipulates a dplyr backend generically rather than through
+  its specific verb methods. `[.tbl_gpu` also fixes a pre-existing latent
+  bug: without it, `gt[1]` silently returned `list(ptr = <pointer>)`
+  (base R's *list* `[` method) instead of a 1-column `tbl_gpu`.
+* The iteration family (`group_split()`/`group_map()`/`group_modify()`/
+  `group_nest()`/`nest_by()`), `group_trim()`, and `rowwise()` remain CPU
+  fallbacks -- they inherently produce R-side objects (or, for
+  `group_trim()`, need a real GPU factor-code remap that's out of scope
+  here).
+
 ## Set operations: `union()`/`union_all()`/`intersect()`/`setdiff()`/`symdiff()`/`setequal()` (Phase 8)
 
 Every dplyr row-set operation is now GPU-native, composed entirely from

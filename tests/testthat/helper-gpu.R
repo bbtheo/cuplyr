@@ -233,8 +233,10 @@ verify_no_r_copy <- function(x) {
     return(FALSE)
   }
 
-  # Check the structure - should only have ptr, schema, lazy_ops, groups, exec_mode
-  expected_fields <- c("ptr", "schema", "lazy_ops", "groups", "exec_mode")
+  # Check the structure - should only have ptr, schema, lazy_ops, groups,
+  # exec_mode, group_drop (Phase 9 task 1: group_by()'s own .drop= flag,
+  # a plain boolean -- metadata, not a data copy)
+  expected_fields <- c("ptr", "schema", "lazy_ops", "groups", "exec_mode", "group_drop")
   actual_fields <- names(unclass(x))
 
   # Verify no extra fields that might contain data

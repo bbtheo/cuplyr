@@ -18,10 +18,13 @@ notification (e.g. \code{"transmute"}, \code{"slice_min"}), gated by
 returns its result.}
 
 \item{as_is}{Logical. If \code{TRUE}, \code{expr_fn}'s return value is always
-returned unchanged, never re-uploaded -- used for verbs that return
-metadata \emph{about} the grouping/data rather than a transformed dataset
-(e.g. \code{group_data()}, \code{group_keys()}), even though that metadata happens
-to be a small data frame.}
+returned unchanged, never re-uploaded -- for a verb that returns
+metadata \emph{about} the grouping/data rather than a transformed dataset,
+even when that metadata happens to be a small data frame (dplyr's own
+grouping-metadata queries, e.g. \code{group_data()}/\code{group_keys()}, used to
+be implemented this way -- Phase 9 task 1 made them GPU-native instead,
+see R/group-by.R -- but the parameter stays for any future fallback
+verb with the same "always a plain R object" shape).}
 }
 \value{
 Either a new \code{tbl_gpu} (grouping, execution mode, and factor

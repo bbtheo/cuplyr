@@ -11,11 +11,6 @@
 \alias{rows_patch.tbl_gpu}
 \alias{rows_upsert.tbl_gpu}
 \alias{rows_delete.tbl_gpu}
-\alias{group_data.tbl_gpu}
-\alias{group_keys.tbl_gpu}
-\alias{group_indices.tbl_gpu}
-\alias{group_size.tbl_gpu}
-\alias{n_groups.tbl_gpu}
 \alias{group_split.tbl_gpu}
 \alias{group_map.tbl_gpu}
 \alias{group_modify.tbl_gpu}
@@ -76,16 +71,6 @@
   in_place = FALSE
 )
 
-\method{group_data}{tbl_gpu}(.data)
-
-\method{group_keys}{tbl_gpu}(.tbl, ...)
-
-\method{group_indices}{tbl_gpu}(.data, ...)
-
-\method{group_size}{tbl_gpu}(x)
-
-\method{n_groups}{tbl_gpu}(x)
-
 \method{group_split}{tbl_gpu}(.tbl, ..., .keep = TRUE)
 
 \method{group_map}{tbl_gpu}(.data, .f, ..., .keep = FALSE)
@@ -126,9 +111,6 @@ vector, \code{\link[dplyr:group_split]{dplyr::group_split()}}'s list), or whose 
 containing list-columns with no GPU representation (e.g.
 \code{\link[dplyr:nest_by]{dplyr::nest_by()}}, \code{\link[dplyr:group_nest]{dplyr::group_nest()}}, \code{\link[dplyr:nest_join]{dplyr::nest_join()}}'s nested
 match column), are returned as plain R objects rather than re-uploaded.
-Verbs that only report metadata about the grouping/data (e.g.
-\code{\link[dplyr:group_data]{dplyr::group_data()}}, \code{\link[dplyr:group_keys]{dplyr::group_keys()}}) are likewise always
-returned as plain R objects.
 
 Every fallback calls \code{\link[=cuplyr_fallback_notify]{cuplyr_fallback_notify()}}, so
 \code{options(cuplyr.fallback = "warn")} (or \code{"error"}) can be used to surface

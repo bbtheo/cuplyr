@@ -134,7 +134,8 @@ new_tbl_gpu <- function(ptr = NULL,
                         schema = list(names = character(), types = character()),
                         lazy_ops = NULL,
                         groups = character(),
-                        exec_mode = NULL) {
+                        exec_mode = NULL,
+                        group_drop = TRUE) {
   if (is.list(lazy_ops) && length(lazy_ops) == 0) {
     lazy_ops <- NULL
   }
@@ -152,7 +153,8 @@ new_tbl_gpu <- function(ptr = NULL,
       schema = schema,
       lazy_ops = lazy_ops,
       groups = groups,
-      exec_mode = exec_mode
+      exec_mode = exec_mode,
+      group_drop = group_drop
     ),
     class = c("tbl_gpu", "tbl")
   )

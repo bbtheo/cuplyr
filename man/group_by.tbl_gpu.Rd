@@ -9,13 +9,17 @@
 \arguments{
 \item{.data}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
 
-\item{...}{Column names to group by. Can be unquoted column names or
-tidyselect expressions.}
+\item{...}{Column names to group by. Can be unquoted column names,
+tidyselect expressions, or \code{name = expression} computed columns (see
+"Computed groups" below).}
 
 \item{.add}{If \code{FALSE} (default), will override existing groups. If \code{TRUE},
 will add to existing groups.}
 
-\item{.drop}{Ignored. Included for compatibility with dplyr generic.}
+\item{.drop}{Whether to drop unobserved factor-level combinations from
+\code{\link[dplyr:group_data]{group_data()}}/\code{\link[dplyr:group_keys]{group_keys()}}/\code{\link[dplyr:n_groups]{n_groups()}}/etc. Defaults to \code{TRUE}
+(dplyr's own default). See "\code{.drop} semantics" below for the exact
+scope of what's honored.}
 }
 \value{
 A grouped \code{tbl_gpu} object. The object has the same data but with
@@ -27,13 +31,56 @@ The grouping is stored as metadata and does not perform any computation
 until an aggregation is requested.
 }
 \details{
-Unlike operations like \code{\link[=filter]{filter()}} or \code{\link[dplyr:mutate]{mutate()}}, \code{group_by()} does not
-perform any GPU computation. It simply records which columns should be
-used for grouping in subsequent aggregation operations.
+Unlike operations like \code{\link[dplyr:filter]{dplyr::filter()}} or \code{\link[dplyr:mutate]{mutate()}}, \code{group_by()} does not
+perform any expensive GPU aggregation itself. It simply records which
+columns should be used for grouping in subsequent aggregation operations
+(computed group columns, see below, DO run a real \code{mutate()}).
 
-The actual groupby computation happens when you call \code{\link[dplyr:summarise]{summarise()}} on the
-grouped table. This lazy approach allows you to chain multiple operations
-before executing the expensive groupby operation.
+The actual groupby computation happens when you call \code{\link[dplyr:summarise]{summarise()}} (or
+one of the \code{\link[dplyr:group_data]{group_data()}} family) on the grouped table. This lazy
+approach allows you to chain multiple operations before executing the
+expensive groupby operation.
+\subsection{Computed groups}{
+
+Verified empirically against dplyr 1.2.1: a \strong{named} argument (e.g.
+\code{group_by(df, g = x \%/\% 2)}, or even a bare-symbol rename like
+\code{group_by(df, g = x)}) is ALWAYS treated as a \code{mutate()} expression --
+the original column (if any) is kept, a new (or overwritten) column is
+added under the given name, and the table is then grouped by that name.
+Later dots may reference earlier dots' newly-computed columns, exactly
+like \code{mutate()}'s own chain semantics (e.g. \code{group_by(df, g = x \%/\% 2, h = g * 10)}). Unnamed arguments are resolved via ordinary tidyselect
+against the \emph{current} schema (after any computed columns from this same
+call have been added), and every dot's resulting group column name(s)
+are combined in the exact order the arguments were written (even when
+named and unnamed dots are interleaved).
+
+Calling \code{group_by()} with \strong{no} arguments and \code{.add = FALSE} (the
+default) clears any existing grouping entirely (verified empirically --
+this differs from simply returning \code{.data} unchanged, which was this
+function's historical, incorrect behavior for that case).
+}
+
+\subsection{\code{.drop} semantics}{
+
+\code{.drop = FALSE} (verified empirically against dplyr 1.2.1) adds one
+placeholder row (\code{.rows = integer(0)}) to \code{\link[dplyr:group_data]{group_data()}}'s output for
+every declared \emph{factor level combination} of the FACTOR grouping columns
+that has no observed row anywhere in the data -- non-factor grouping
+columns in that placeholder row are \code{NA} (dplyr does not attempt to
+cross the placeholder against every observed non-factor value; see
+\code{compute_group_data()}, R/group-by.R, for the exact algorithm).
+
+This is honored for the immediate \code{group_by(..., .drop = FALSE) |> group_data()}-style call chain, but -- like \verb{$groups} normally does not
+need special handling to survive intervening verbs -- \code{.drop} is stored
+as a single boolean field on the returned \code{tbl_gpu} (\verb{$group_drop}) that
+is \strong{not} re-threaded through every other verb's own \code{tbl_gpu}
+construction (\code{push_op()}, \code{push_join()}, \code{gpu_fallback()}, etc. all
+default it back to \code{TRUE}). Full propagation would require touching
+every construction site in the codebase for a rarely-used flag --
+deliberately deferred (documented, not silently wrong: the common
+\code{group_by(.drop = FALSE) |> group_data()} pattern works; \code{group_by(.drop = FALSE) |> filter(...) |> group_data()} silently reverts to \code{.drop = TRUE} semantics, matching neither an error nor a crash, just dplyr's
+default).
+}
 }
 \examples{
 if (has_gpu()) {
@@ -47,6 +94,10 @@ if (has_gpu()) {
   by_cyl_gear <- gpu_mtcars |>
     group_by(cyl, gear)
 
+  # Computed group column
+  by_half_cyl <- gpu_mtcars |>
+    group_by(half_cyl = cyl \%/\% 2)
+
   # Use with summarise for aggregation
   result <- gpu_mtcars |>
     group_by(cyl) |>
@@ -56,5 +107,6 @@ if (has_gpu()) {
 }
 \seealso{
 \code{\link{summarise.tbl_gpu}} for aggregating grouped data,
-\code{\link{ungroup.tbl_gpu}} for removing grouping
+\code{\link{ungroup.tbl_gpu}} for removing grouping,
+\code{\link{group_data.tbl_gpu}} for the grouping metadata query family
 }

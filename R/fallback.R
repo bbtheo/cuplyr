@@ -27,10 +27,13 @@
 #'   `.data` was grouped) that calls the corresponding real dplyr verb and
 #'   returns its result.
 #' @param as_is Logical. If `TRUE`, `expr_fn`'s return value is always
-#'   returned unchanged, never re-uploaded -- used for verbs that return
-#'   metadata *about* the grouping/data rather than a transformed dataset
-#'   (e.g. `group_data()`, `group_keys()`), even though that metadata happens
-#'   to be a small data frame.
+#'   returned unchanged, never re-uploaded -- for a verb that returns
+#'   metadata *about* the grouping/data rather than a transformed dataset,
+#'   even when that metadata happens to be a small data frame (dplyr's own
+#'   grouping-metadata queries, e.g. `group_data()`/`group_keys()`, used to
+#'   be implemented this way -- Phase 9 task 1 made them GPU-native instead,
+#'   see R/group-by.R -- but the parameter stays for any future fallback
+#'   verb with the same "always a plain R object" shape).
 #' @return Either a new `tbl_gpu` (grouping, execution mode, and factor
 #'   levels restored/round-tripped), or `expr_fn`'s raw return value
 #'   unchanged when: `as_is = TRUE`; the result isn't a data frame at all
@@ -132,9 +135,6 @@ collect_other_side <- function(y) {
 #' containing list-columns with no GPU representation (e.g.
 #' [dplyr::nest_by()], [dplyr::group_nest()], [dplyr::nest_join()]'s nested
 #' match column), are returned as plain R objects rather than re-uploaded.
-#' Verbs that only report metadata about the grouping/data (e.g.
-#' [dplyr::group_data()], [dplyr::group_keys()]) are likewise always
-#' returned as plain R objects.
 #'
 #' Every fallback calls [cuplyr_fallback_notify()], so
 #' `options(cuplyr.fallback = "warn")` (or `"error"`) can be used to surface
@@ -345,59 +345,21 @@ rows_delete.tbl_gpu <- function(x, y, by = NULL, ..., unmatched = c("error", "ig
 }
 
 # =============================================================================
-# Grouping introspection: group_data/group_keys/group_indices/group_size/
-# n_groups (always returned as-is: metadata about the grouping, not a
-# transformed dataset) and group_split/group_map/group_modify/group_nest/
-# group_trim (transforming verbs; group_split/group_map naturally return a
-# plain list, group_nest's list-column is caught by has_list_column())
+# Grouping introspection & iteration
+#
+# group_data()/group_keys()/group_rows()/group_indices()/group_size()/
+# n_groups() moved to R/group-by.R (GPU-native, Phase 9 task 1) -- see
+# compute_group_data() (the shared `gpu_group_info()`-backed query) and
+# each verb's own method there. The iteration family below
+# (group_split()/group_map()/group_modify()/group_nest()/group_trim()/
+# nest_by()) inherently produces R-side objects (a plain list, a
+# user-function's arbitrary return value, or a list-column data frame) and
+# stays on the CPU fallback -- group_split()/group_map() naturally return a
+# plain list, group_nest()'s list-column is caught by has_list_column().
+# group_trim() additionally needs a real GPU factor-code remap (not just
+# metadata), which is out of this task's scope (Phase 11 factor-machinery
+# territory) -- deliberately deferred, same as rowwise().
 # =============================================================================
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr group_data
-group_data.tbl_gpu <- function(.data) {
-  gpu_fallback("group_data", .data, function(tbl) {
-    dplyr::group_data(tbl)
-  }, as_is = TRUE)
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr group_keys
-group_keys.tbl_gpu <- function(.tbl, ...) {
-  dots <- rlang::enquos(...)
-  gpu_fallback("group_keys", .tbl, function(tbl) {
-    rlang::inject(dplyr::group_keys(tbl, !!!dots))
-  }, as_is = TRUE)
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr group_indices
-group_indices.tbl_gpu <- function(.data, ...) {
-  dots <- rlang::enquos(...)
-  gpu_fallback("group_indices", .data, function(tbl) {
-    rlang::inject(dplyr::group_indices(tbl, !!!dots))
-  }, as_is = TRUE)
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr group_size
-group_size.tbl_gpu <- function(x) {
-  gpu_fallback("group_size", x, function(tbl) {
-    dplyr::group_size(tbl)
-  }, as_is = TRUE)
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr n_groups
-n_groups.tbl_gpu <- function(x) {
-  gpu_fallback("n_groups", x, function(tbl) {
-    dplyr::n_groups(tbl)
-  }, as_is = TRUE)
-}
 
 #' @rdname fallback-verbs
 #' @export

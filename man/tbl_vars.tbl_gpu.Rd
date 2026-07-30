@@ -33,5 +33,9 @@ the contrasting case, R/count.R). Before this method existed,
 (\code{UseMethod("tbl_vars")} found no applicable method for a plain-list
 \code{tbl_gpu} object, and the generic's own \code{tbl_vars.default} doesn't apply
 since \code{tbl_gpu} isn't a data.frame subclass).
+
+\code{dplyr::tbl_nongroup_vars()} (Phase 9, task 1) is a plain, non-generic
+function defined purely in terms of \code{setdiff(tbl_vars(x), group_vars(x))} -- it works transparently for \code{tbl_gpu} via this method
+plus \code{group_vars.tbl_gpu()}, with no \code{tbl_gpu}-specific code of its own.
 }
 \keyword{internal}
