@@ -317,7 +317,7 @@ test_that("factor columns with identical levels are GPU-native (no fallback)", {
   expect_no_error(dplyr::setequal(gx, gy))
 })
 
-test_that("factor columns with different levels fall back to CPU (dplyr succeeds, unions levels)", {
+test_that("factor columns with different levels are GPU-native as of Phase 11 L2 (level union)", {
   skip_if_no_gpu()
   df1 <- tibble::tibble(a = factor(c("a", "b")))
   df2 <- tibble::tibble(a = factor(c("b", "c")))
@@ -326,16 +326,17 @@ test_that("factor columns with different levels fall back to CPU (dplyr succeeds
 
   oracle <- dplyr::union(df1, df2)
 
-  withr::local_options(cuplyr.fallback = "warn")
-  expect_warning(
-    result <- dplyr::union(gx, gy),
-    "fell back to CPU evaluation"
-  )
+  # gpu_remap_codes() (src/ops_bind.cpp) makes this native now -- no fallback.
+  withr::local_options(cuplyr.fallback = "error")
+  result <- dplyr::union(gx, gy)
   result_df <- collect(result)
+
+  expect_s3_class(result_df$a, "factor")
+  expect_equal(levels(result_df$a), levels(oracle$a))
   expect_equal(sort(as.character(result_df$a)), sort(as.character(oracle$a)))
 })
 
-test_that("factor vs. character columns fall back to CPU (dplyr succeeds, common type character)", {
+test_that("factor vs. character columns are GPU-native as of Phase 11 L2 (decode to character)", {
   skip_if_no_gpu()
   df1 <- tibble::tibble(a = factor(c("a", "b")))
   df2 <- tibble::tibble(a = c("b", "c"))
@@ -344,12 +345,11 @@ test_that("factor vs. character columns fall back to CPU (dplyr succeeds, common
 
   oracle <- dplyr::union(df1, df2)
 
-  withr::local_options(cuplyr.fallback = "warn")
-  expect_warning(
-    result <- dplyr::union(gx, gy),
-    "fell back to CPU evaluation"
-  )
+  # gpu_decode_factor() (src/ops_bind.cpp) makes this native now -- no fallback.
+  withr::local_options(cuplyr.fallback = "error")
+  result <- dplyr::union(gx, gy)
   result_df <- collect(result)
+
   expect_type(result_df$a, "character")
   expect_equal(sort(result_df$a), sort(oracle$a))
 })

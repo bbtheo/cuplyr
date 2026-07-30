@@ -339,29 +339,84 @@ test_that("bind_rows promotes character + integer to STRING regardless of table 
   expect_equal(result$x, c("p", "q", as.character(1:3)))
 })
 
-test_that("bind_rows factor + character: skipped as a numeric-parity case, errors loudly instead", {
+test_that("bind_rows factor + character decodes to character labels (Phase 11 L2 Bug 3)", {
   skip_if_no_gpu()
 
-  # Design-doc P2 asks for a factor+character case "if factors promote to
-  # STRING in compute_unified_schema; if factors are INT32 here, skip and
-  # note it." Factors here are schema-tagged "DICTIONARY32" (not "INT32"),
-  # but their *physical* GPU column is INT32 codes (per CLAUDE.md's type
-  # table and confirmed in transfer_io.cpp) -- the same physical
-  # representation as a plain integer column. compute_unified_schema() does
-  # promote factor + character to STRING (the STRING-is-widest rule is
-  # unconditional), so naively reusing the integer string-cast path here
-  # would silently convert factor *codes* to strings (e.g. "2") instead of
-  # their *labels* (e.g. "m") -- a second, distinct silent-corruption bug.
-  # That's a separate, harder fix (factor_levels-aware string conversion)
-  # that is out of scope for this STRING-promotion fix, so cast_column()
-  # explicitly refuses this case instead of guessing. This test locks down
-  # that loud refusal instead of a numeric-parity comparison.
+  # dplyr's real contract (verified empirically: vctrs::vec_ptype2(factor,
+  # character) -> character, and bind_rows(factor, character) decodes to
+  # LABELS): factor's own physical GPU column is INT32 codes (per
+  # CLAUDE.md's logical/physical type split), so cast_column() must decode
+  # via gpu_decode_factor() (this column's OWN levels), not reuse the
+  # numeric integer->string cast path -- that would silently emit codes
+  # ("2") instead of labels ("m"), a previously-locked-down (now fixed)
+  # silent-corruption bug.
   df1 <- data.frame(x = factor(c("m", "f", "m")))
   df2 <- data.frame(x = c("a", "b"), stringsAsFactors = FALSE)
 
+  expected <- dplyr::bind_rows(df1, df2)
+
+  result_tbl <- bind_rows(tbl_gpu(df1), tbl_gpu(df2))
+  expect_equal(result_tbl$schema$types[[1]], "STRING")
+
+  result <- result_tbl |> collect()
+  expect_type(result$x, "character")
+  expect_equal(result$x, expected$x)
+})
+
+test_that("bind_rows factor + factor with different levels unions levels (Phase 11 L2 Bug 2)", {
+  skip_if_no_gpu()
+
+  # dplyr's real contract (verified empirically:
+  # vctrs::vec_c(factor("a"), factor("b")) -> factor c("a","b") with levels
+  # c("a","b"), i.e. union(levels(x), levels(y)), x's order first). Before
+  # this fix, bind_rows() concatenated the raw INT32 codes verbatim with no
+  # remap AND dropped `schema$factor_levels` entirely -- collect() would
+  # present the column as plain integers, not even a factor.
+  df1 <- data.frame(x = factor(c("a", "b"), levels = c("a", "b")))
+  df2 <- data.frame(x = factor(c("b", "c"), levels = c("b", "c")))
+
+  expected <- dplyr::bind_rows(df1, df2)
+
+  result_tbl <- bind_rows(tbl_gpu(df1), tbl_gpu(df2))
+  expect_equal(result_tbl$schema$types[[1]], "DICTIONARY32")
+
+  result <- result_tbl |> collect()
+  expect_s3_class(result$x, "factor")
+  expect_equal(levels(result$x), levels(expected$x))
+  expect_equal(as.character(result$x), as.character(expected$x))
+})
+
+test_that("bind_rows factor + factor with identical levels is a no-op union (native, no remap needed)", {
+  skip_if_no_gpu()
+
+  lvls <- c("lo", "mid", "hi")
+  df1 <- data.frame(x = factor(c("hi", "lo"), levels = lvls))
+  df2 <- data.frame(x = factor(c("mid", "hi"), levels = lvls))
+
+  expected <- dplyr::bind_rows(df1, df2)
+
+  result <- bind_rows(tbl_gpu(df1), tbl_gpu(df2)) |> collect()
+  expect_s3_class(result$x, "factor")
+  expect_equal(levels(result$x), lvls)
+  expect_equal(as.character(result$x), as.character(expected$x))
+})
+
+test_that("bind_rows factor + integer currently errors (pinned; L4 will replace with dplyr-parity text)", {
+  skip_if_no_gpu()
+
+  # Real dplyr also errors here (`Can't combine ..1$x <factor<...>> and
+  # ..2$x <integer>.`) -- cuplyr's own promote_types()/DICTIONARY32 ladder
+  # already refuses to promote a factor against a numeric type, just with
+  # cuplyr's own generic message rather than dplyr's exact text/class. This
+  # test PINS today's behavior (an error, not a value) so a future L4 pass
+  # (replacing this with dplyr's own vctrs-parity error) has a documented
+  # starting point instead of silently changing behavior unnoticed.
+  df1 <- data.frame(x = factor(c("a", "b")))
+  df2 <- data.frame(x = 1:2)
+
   expect_error(
     bind_rows(tbl_gpu(df1), tbl_gpu(df2)),
-    "factor column 'x'.*STRING|cannot combine factor"
+    "Cannot promote incompatible types"
   )
 })
 

@@ -2,6 +2,7 @@
 // GPU bind_rows and bind_cols implementations using cuDF
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
+#include "r_to_column.hpp"
 
 #include <cudf/table/table.hpp>
 #include <cudf/table/table_view.hpp>
@@ -15,6 +16,9 @@
 #include <cudf/strings/convert/convert_floats.hpp>
 #include <cudf/strings/convert/convert_booleans.hpp>
 #include <cudf/scalar/scalar.hpp>
+#include <cudf/binaryop.hpp>
+#include <cudf/replace.hpp>
+#include <cudf/null_mask.hpp>
 
 #include <vector>
 #include <string>
@@ -290,6 +294,152 @@ SEXP gpu_cast_column(SEXP xptr, int col_idx, std::string target_type) {
     return make_gpu_table_xptr(std::move(result));
 }
 
+// =============================================================================
+// Factor fidelity primitives (Phase 11 L2)
+//
+// cuplyr keeps factor columns as plain INT32 codes physically on the GPU
+// (R's own factor storage: TYPEOF(x) == INTSXP, uploaded through the exact
+// same integer_to_gpu() path as a real integer column -- see CLAUDE.md's
+// logical/physical type split and gpu_physical_type(), R/utils.R). Codes
+// are 1-based, matching R's own factor codes exactly (`levels(x)[code]`),
+// with NA encoded as the column's null mask -- never a sentinel code value.
+//
+// Both primitives below share one shape: gather a small per-level lookup
+// table (one row per OLD level) using the column's own codes as the
+// index. cudf::gather() requires a NON-NULLABLE gather map and 0-based
+// indices, so the 1-based codes are first shifted down by one (nulls
+// propagate through the subtraction unchanged) and then null-sanitized
+// (replaced with 0, an always-in-bounds placeholder) before gathering;
+// the ORIGINAL null mask is reapplied to the result afterward so NA rows
+// stay NA regardless of what the placeholder happened to look up.
+// =============================================================================
+
+// Convert a column of 1-based (possibly null) codes into a non-nullable,
+// 0-based gather map suitable for cudf::gather(), preserving the original
+// null positions in `original_nulls_from` for the caller to reapply.
+static std::unique_ptr<cudf::column> sanitize_codes_for_gather(cudf::column_view const& codes_col) {
+    cudf::numeric_scalar<int32_t> one(1, true);
+    auto shifted = cudf::binary_operation(
+        codes_col, one, cudf::binary_operator::SUB,
+        cudf::data_type{cudf::type_id::INT32});
+
+    if (!codes_col.has_nulls()) {
+        return shifted;
+    }
+
+    cudf::numeric_scalar<int32_t> zero(0, true);
+    return cudf::replace_nulls(shifted->view(), zero);
+}
+
+// Reapply `source`'s null mask onto `target` in place (used after gathering
+// through a sanitized, non-nullable index column -- see above).
+static void reapply_null_mask(std::unique_ptr<cudf::column>& target,
+                               cudf::column_view const& source) {
+    if (!source.has_nulls()) {
+        return;
+    }
+    rmm::device_buffer mask = cudf::copy_bitmask(source);
+    target->set_null_mask(std::move(mask), source.null_count());
+}
+
+// Remap a factor column's physical codes onto a different level ordering.
+//
+// `map` is a 0-based lookup: `map[i]` (R-side, 0-based/C++ indexing) gives
+// the NEW 1-based code for the OLD 1-based level `i + 1` (i.e. `map[0]` is
+// the new code for old level 1, `map[1]` for old level 2, ...). R builds
+// this via `match(current_levels, target_levels)` (R/bind.R's
+// `remap_factor_column()`), which is already exactly this 0-based-vector/
+// 1-based-value shape. NA codes (null) are left null -- the map is never
+// consulted for them.
+// [[Rcpp::export]]
+SEXP gpu_remap_codes(SEXP xptr, int col_idx, IntegerVector map) {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
+    cudf::table_view view = get_table_view(ptr);
+
+    if (col_idx < 0 || col_idx >= view.num_columns()) {
+        Rcpp::stop("Column index out of bounds: %d", col_idx);
+    }
+
+    cudf::column_view codes_col = view.column(col_idx);
+    if (codes_col.type().id() != cudf::type_id::INT32) {
+        Rcpp::stop("gpu_remap_codes(): column %d is not an INT32 (factor code) "
+                   "column", col_idx);
+    }
+
+    auto map_col = integer_to_gpu(map);
+    auto sanitized = sanitize_codes_for_gather(codes_col);
+
+    std::vector<cudf::column_view> lookup_cols{map_col->view()};
+    cudf::table_view lookup_table(lookup_cols);
+
+    auto gathered = cudf::gather(lookup_table, sanitized->view(),
+                                  cudf::out_of_bounds_policy::DONT_CHECK);
+    auto gathered_cols = gathered->release();
+    std::unique_ptr<cudf::column> new_codes = std::move(gathered_cols[0]);
+    reapply_null_mask(new_codes, codes_col);
+
+    std::vector<std::unique_ptr<cudf::column>> columns;
+    for (cudf::size_type i = 0; i < view.num_columns(); ++i) {
+        if (i == col_idx) {
+            columns.push_back(std::move(new_codes));
+        } else {
+            columns.push_back(std::make_unique<cudf::column>(view.column(i)));
+        }
+    }
+
+    auto result = std::make_unique<cudf::table>(std::move(columns));
+    return make_gpu_table_xptr(std::move(result));
+}
+
+// Decode a factor column to its label strings (dplyr's factor + character
+// -> character contract: `vctrs::vec_ptype2()` decodes to labels, never the
+// raw codes). `levels` is this column's own level vector (R-side 1-based,
+// `levels[code]`); uploaded once as a small STRING lookup column and
+// gathered the same way `gpu_remap_codes()` gathers its INT32 lookup.
+// [[Rcpp::export]]
+SEXP gpu_decode_factor(SEXP xptr, int col_idx, CharacterVector levels) {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
+    cudf::table_view view = get_table_view(ptr);
+
+    if (col_idx < 0 || col_idx >= view.num_columns()) {
+        Rcpp::stop("Column index out of bounds: %d", col_idx);
+    }
+
+    cudf::column_view codes_col = view.column(col_idx);
+    if (codes_col.type().id() != cudf::type_id::INT32) {
+        Rcpp::stop("gpu_decode_factor(): column %d is not an INT32 (factor code) "
+                   "column", col_idx);
+    }
+
+    auto levels_col = character_to_gpu(levels);
+    auto sanitized = sanitize_codes_for_gather(codes_col);
+
+    std::vector<cudf::column_view> lookup_cols{levels_col->view()};
+    cudf::table_view lookup_table(lookup_cols);
+
+    auto gathered = cudf::gather(lookup_table, sanitized->view(),
+                                  cudf::out_of_bounds_policy::DONT_CHECK);
+    auto gathered_cols = gathered->release();
+    std::unique_ptr<cudf::column> decoded = std::move(gathered_cols[0]);
+    reapply_null_mask(decoded, codes_col);
+
+    std::vector<std::unique_ptr<cudf::column>> columns;
+    for (cudf::size_type i = 0; i < view.num_columns(); ++i) {
+        if (i == col_idx) {
+            columns.push_back(std::move(decoded));
+        } else {
+            columns.push_back(std::make_unique<cudf::column>(view.column(i)));
+        }
+    }
+
+    auto result = std::make_unique<cudf::table>(std::move(columns));
+    return make_gpu_table_xptr(std::move(result));
+}
+
 // Cast a column to STRING for bind_rows() schema unification.
 //
 // promote_types() in R/bind.R treats STRING as the "widest" type, so
@@ -301,9 +451,15 @@ SEXP gpu_cast_column(SEXP xptr, int col_idx, std::string target_type) {
 // worse, silently misinterpret the raw bytes).
 //
 // Only types with a real string_view converter in cudf are supported.
-// Types with no (or a semantically ambiguous) converter -- timestamps,
-// and DICTIONARY32 (factor codes, which would round-trip as numeric code
-// strings rather than factor labels) -- error loudly instead of guessing.
+// Types with no (or a semantically ambiguous) converter -- timestamps --
+// are unsupported. Factor/DICTIONARY32 columns are handled separately, one
+// layer up: cast_column() (R/bind.R) intercepts a DICTIONARY32 source
+// BEFORE ever calling this function and routes it through
+// gpu_decode_factor() instead, since this function only ever sees the
+// PHYSICAL INT32 column and has no access to its levels -- naively casting
+// that INT32 column here (it would fall into the plain INT32 case below)
+// would silently emit its numeric code (e.g. "2") as a string instead of
+// its factor label (e.g. "m").
 // [[Rcpp::export]]
 SEXP gpu_cast_to_string(SEXP xptr, int col_idx) {
     using namespace cuplyr;
@@ -346,9 +502,7 @@ SEXP gpu_cast_to_string(SEXP xptr, int col_idx) {
         }
         default: {
             Rcpp::stop("Cannot cast column %d to STRING for bind_rows(): no string "
-                       "converter available for cudf type id %d (e.g. TIMESTAMP_* and "
-                       "DICTIONARY32/factor columns are not supported -- factor columns "
-                       "would round-trip as numeric codes, not their labels)",
+                       "converter available for cudf type id %d (e.g. TIMESTAMP_*)",
                        col_idx, static_cast<int>(tid));
         }
     }

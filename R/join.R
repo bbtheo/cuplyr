@@ -433,12 +433,101 @@ build_join_output_info <- function(left_schema, right_schema, join_spec,
     right_out_names <- right_out_all[keep_idx]
   }
 
+  out_names <- c(left_out_names, right_out_names)
+  origin <- c(rep("left", length(left_out_names)), rep("right", length(right_out_names)))
+  source_names <- c(left_names, right_keep)
+
   list(
-    names = c(left_out_names, right_out_names),
+    names = out_names,
     types = c(left_schema$types, right_schema$types[match(right_keep, right_names)]),
-    origin = c(rep("left", length(left_out_names)), rep("right", length(right_out_names))),
-    source_names = c(left_names, right_keep)
+    origin = origin,
+    source_names = source_names,
+    factor_levels = join_output_factor_levels(left_schema, right_schema,
+                                              out_names, origin, source_names)
   )
+}
+
+#' Propagate `factor_levels` through a join's output-name mapping
+#'
+#' `build_join_schema()`/`build_join_output_info()` compute each output
+#' column's post-suffix NAME and which side's SOURCE column it came from
+#' (`origin`/`source_names`, parallel to `names`) -- this reattaches
+#' `factor_levels`, keyed by that post-suffix output name, by looking up
+#' each output column's own origin schema's `factor_levels` under its
+#' PRE-suffix source name. This is the Bug 1 fix (Phase 11 L2): before this,
+#' `build_join_schema()` returned only `names`/`types`, so every mutating
+#' join (`left_join()`/`inner_join()`/`full_join()`/`right_join()`, and
+#' `cross_join()`) silently dropped factor metadata entirely -- `collect()`
+#' would then present a factor column as raw integer codes.
+#'
+#' A coalesced equi-join KEY column (kept unsuffixed under `keep = FALSE`,
+#' see `build_join_output_info()`'s `is_eq` branch) always has `origin ==
+#' "left"` here (the right-side copy of that key is dropped, never part of
+#' `out_names`) -- correct, since the join's native gather always keeps the
+#' LEFT key column's own physical data for a coalesced key (see
+#' `src/ops_join.cpp`), so its levels are always the left side's.
+#' `join_factor_key_levels_conflict()` (below) is the correctness guard for
+#' the case this alone can't resolve: an equi key that's factor-typed on
+#' BOTH sides with DIFFERENT level sets would still coalesce to "the left
+#' side's levels" here, but the native GPU join itself compares the two
+#' sides' raw INT32 codes directly -- which would silently mismatch two
+#' logically-equal labels encoded under different codes. That case is
+#' caught and routed to the CPU fallback before ever reaching this
+#' function (every join verb calls it right after `validate_key_types()`).
+#' @keywords internal
+join_output_factor_levels <- function(left_schema, right_schema, out_names, origin, source_names) {
+  factor_levels <- list()
+  for (i in seq_along(out_names)) {
+    src_schema <- if (identical(origin[i], "left")) left_schema else right_schema
+    lvls <- src_schema$factor_levels[[source_names[i]]]
+    if (!is.null(lvls)) {
+      factor_levels[[out_names[i]]] <- lvls
+    }
+  }
+  if (length(factor_levels) == 0) NULL else factor_levels
+}
+
+#' Would this join's equi keys compare two factor columns with different
+#' level sets?
+#'
+#' Native GPU joins match equi keys by comparing their PHYSICAL INT32 codes
+#' directly (`validate_key_types()` only checks `identical()`/numeric-
+#' compatible type strings, never level compatibility) -- if both sides of
+#' an equi condition are factor columns whose level VECTORS differ, two
+#' logically-equal labels can be encoded under different codes (e.g. `"a"`
+#' is code 1 on the left but code 2 on the right), so comparing raw codes
+#' would silently produce wrong matches. This is detectable from schemas
+#' alone, before any GPU op runs -- every join verb (`left_join()`/
+#' `inner_join()`/`full_join()`/`right_join()`/`semi_join()`/`anti_join()`)
+#' calls this right after `validate_key_types()` and routes the WHOLE join
+#' to the CPU fallback when it's `TRUE`, mirroring
+#' `join_output_would_collide()`'s existing pattern (Phase 8 sets.R
+#' precedent: `check_set_op_compatible()` uses the identical
+#' identical-levels-vs-not split to decide native vs. fallback).
+#' Both-factor-with-IDENTICAL-levels keys compare correctly natively (same
+#' code domain) and are not flagged here.
+#' @keywords internal
+join_factor_key_levels_conflict <- function(x_schema, y_schema, join_spec) {
+  if (length(join_spec$op) == 0) {
+    return(FALSE)
+  }
+  is_eq <- join_spec$op == "=="
+  if (!any(is_eq)) {
+    return(FALSE)
+  }
+
+  left_keys <- join_spec$left[is_eq]
+  right_keys <- join_spec$right[is_eq]
+
+  for (i in seq_along(left_keys)) {
+    lvls_x <- x_schema$factor_levels[[left_keys[i]]]
+    lvls_y <- y_schema$factor_levels[[right_keys[i]]]
+    if (!is.null(lvls_x) && !is.null(lvls_y) && !identical(lvls_x, lvls_y)) {
+      return(TRUE)
+    }
+  }
+
+  FALSE
 }
 
 #' Would this join's output have a duplicate column name?
@@ -468,7 +557,7 @@ build_join_schema <- function(left_schema, right_schema, join_spec,
                               suffix = c(".x", ".y"), keep = FALSE) {
   info <- build_join_output_info(left_schema, right_schema, join_spec,
                                  suffix = suffix, keep = keep)
-  list(names = info$names, types = info$types)
+  list(names = info$names, types = info$types, factor_levels = info$factor_levels)
 }
 
 estimate_gpu_bytes <- function(nrow, types) {
@@ -1124,6 +1213,14 @@ left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   validate_join_cols(join_spec$left, x, "Left")
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
+
+  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec)) {
+    return(join_route_to_fallback("left_join", dplyr::left_join, x, y, list(
+      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
+      multiple = multiple, unmatched = unmatched, relationship = relationship
+    )))
+  }
+
   keep <- resolve_join_keep(keep, join_spec)
 
   if (join_output_would_collide(x$schema, y$schema, join_spec, suffix, keep)) {
@@ -1170,6 +1267,14 @@ inner_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   validate_join_cols(join_spec$left, x, "Left")
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
+
+  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec)) {
+    return(join_route_to_fallback("inner_join", dplyr::inner_join, x, y, list(
+      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
+      multiple = multiple, unmatched = unmatched, relationship = relationship
+    )))
+  }
+
   keep <- resolve_join_keep(keep, join_spec)
 
   if (join_output_would_collide(x$schema, y$schema, join_spec, suffix, keep)) {
@@ -1220,6 +1325,14 @@ full_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   validate_join_cols(join_spec$left, x, "Left")
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
+
+  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec)) {
+    return(join_route_to_fallback("full_join", dplyr::full_join, x, y, list(
+      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
+      multiple = multiple, relationship = relationship
+    )))
+  }
+
   keep <- resolve_join_keep(keep, join_spec)
 
   if (join_output_would_collide(x$schema, y$schema, join_spec, suffix, keep)) {
@@ -1266,6 +1379,14 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   validate_join_cols(join_spec$left, x, "Left")
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
+
+  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec)) {
+    return(join_route_to_fallback("right_join", dplyr::right_join, x, y, list(
+      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
+      multiple = multiple, unmatched = unmatched, relationship = relationship
+    )))
+  }
+
   keep <- resolve_join_keep(keep, join_spec)
 
   if (join_output_would_collide(x$schema, y$schema, join_spec, suffix, keep)) {
@@ -1352,6 +1473,12 @@ semi_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
 
+  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec)) {
+    return(join_route_to_fallback("semi_join", dplyr::semi_join, x, y, list(
+      by = by, na_matches = na_matches
+    )))
+  }
+
   push_join("semi", x, y, join_spec, suffix = c(".x", ".y"), keep = FALSE,
            na_matches = na_matches)
 }
@@ -1384,6 +1511,12 @@ anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
   validate_join_cols(join_spec$left, x, "Left")
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
+
+  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec)) {
+    return(join_route_to_fallback("anti_join", dplyr::anti_join, x, y, list(
+      by = by, na_matches = na_matches
+    )))
+  }
 
   push_join("anti", x, y, join_spec, suffix = c(".x", ".y"), keep = FALSE,
            na_matches = na_matches)

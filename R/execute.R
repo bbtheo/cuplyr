@@ -10,11 +10,56 @@
 # `R/lower.R` (lowering) and `R/ast.R` (schema inference) are shared
 # verbatim by both schedules.
 
+#' Infer a node's output schema, INCLUDING `factor_levels`
+#'
+#' `infer_schema()` (R/ast.R) computes `names`/`types` recursively via each
+#' node type's own S3 method, but only `infer_schema.ast_join` (Phase 11 L2,
+#' Bug 1) threads `factor_levels` through on its own -- every other node
+#' type (filter/mutate/select/arrange/summarise/distinct/slice/rename/
+#' window/barrier) relies entirely on `push_op()`'s separate
+#' `propagate_factor_levels()` step, which only ever ran at op-construction
+#' time (each verb's own call site, one node at a time against that node's
+#' OWN immediate input schema). That's fine for a freshly-built single-node
+#' AST, but `current_schema()`/`compute.tbl_gpu()` both need to recompute
+#' the schema for an ARBITRARY-depth pending AST from scratch (a multi-op
+#' lazy chain, or a chain built on top of another lazy op) by calling plain
+#' `infer_schema()` directly -- which, for any of those non-join node
+#' types, silently drops `factor_levels` for the whole subtree above the
+#' leaf `ast_source` (the one place besides `ast_join` that genuinely
+#' carries `factor_levels`, via `input_node()`'s `ast_source(.data$schema)`).
+#'
+#' This wraps `infer_schema()` to recurse down to each node's input FIRST
+#' (recovering the leaf's real `factor_levels` from its `ast_source`
+#' schema, or an `ast_join`'s own self-contained computation), then
+#' reapplies `propagate_factor_levels()` on the way back up -- exactly what
+#' `push_op()` does for one node, generalized to a whole AST.
+#'
+#' @param node An AST node (or `NULL`)
+#' @return List with `names`, `types`, and (if any survive) `factor_levels`
+#' @keywords internal
+infer_schema_full <- function(node) {
+  if (is.null(node)) {
+    return(list(names = character(0), types = character(0)))
+  }
+  if (identical(node$type, "source")) {
+    return(node$schema)
+  }
+  if (identical(node$type, "join")) {
+    return(infer_schema(node))  # already factor_levels-aware, see build_join_schema()
+  }
+
+  input_schema <- infer_schema_full(node$input)
+  new_schema <- infer_schema(node)
+  new_schema$factor_levels <- propagate_factor_levels(node, input_schema, new_schema$names)
+  new_schema
+}
+
 #' Get the schema a new op should be built against
 #'
 #' Pending-lazy-AST-aware: if `.data` is lazy and has pending operations,
-#' infers the schema from the AST (`$lazy_ops`); otherwise returns the
-#' table's base `$schema`. This is the canonical replacement for the
+#' infers the schema from the AST (`$lazy_ops`) via `infer_schema_full()`
+#' (factor_levels-aware, see its own docs); otherwise returns the table's
+#' base `$schema`. This is the canonical replacement for the
 #' `current_schema`/`current schema` blocks duplicated inline across verbs.
 #'
 #' @param .data A `tbl_gpu` object
@@ -22,7 +67,7 @@
 #' @keywords internal
 current_schema <- function(.data) {
   if (identical(.data$exec_mode, "lazy") && has_pending_ops(.data)) {
-    infer_schema(.data$lazy_ops)
+    infer_schema_full(.data$lazy_ops)
   } else {
     .data$schema
   }

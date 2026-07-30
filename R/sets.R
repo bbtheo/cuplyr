@@ -143,12 +143,17 @@ resolve_set_op_other_side <- function(y) {
 #' Factor columns get a four-way split (verified against real
 #' `vec_ptype2()` behavior for factors, see inline comments): both-factor
 #' with IDENTICAL levels is native (same underlying INT32 codes, safe to
-#' compare/concatenate directly); both-factor with DIFFERING levels, or
-#' factor-vs-character, both succeed in real dplyr (level-union / decode-
-#' to-character) but aren't implemented natively here -- `$needs_fallback`
-#' signals the caller to route the whole verb through `gpu_fallback()`
-#' rather than raise a spurious error; factor vs. anything else (numeric,
-#' date, ...) is a genuine vctrs error, reproduced here directly.
+#' compare/concatenate directly); both-factor with DIFFERING levels is ALSO
+#' native as of Phase 11 L2 (`gpu_remap_codes()`, `src/ops_bind.cpp`,
+#' remaps each side's codes onto the level UNION, mirroring `bind_rows()`'s
+#' own Bug 2 fix); factor-vs-character is ALSO native as of Phase 11 L2
+#' (`gpu_decode_factor()` decodes the factor side to its labels, mirroring
+#' `bind_rows()`'s own Bug 3 fix) -- both used to route through
+#' `$needs_fallback` before these two GPU primitives existed. Factor vs.
+#' anything else (numeric, date, ...) is a genuine vctrs error, reproduced
+#' here directly. `$needs_fallback` now only fires for the `Date`-vs-
+#' `POSIXct` timestamp-promotion gap (see the timestamp ladder branch
+#' below).
 #'
 #' @param x_schema,y_schema Schemas (`current_schema()`) of `x`/`y`.
 #' @return A list with `$target_schema` (unified schema, x's names/order)
@@ -201,20 +206,24 @@ check_set_op_compatible <- function(x_schema, y_schema) {
     fy <- set_op_is_factor(y_schema, nm)
 
     if (fx && fy) {
-      if (identical(x_schema$factor_levels[[nm]], y_schema$factor_levels[[nm]])) {
-        promoted_types[i] <- tx
-        factor_levels[[nm]] <- x_schema$factor_levels[[nm]]
-      } else {
-        needs_fallback <- TRUE
-        promoted_types[i] <- tx
-      }
+      # Level UNION (Bug 2 fix, shared contract with bind_rows()'s own
+      # compute_unified_schema()): identical levels is a no-op union;
+      # differing levels is native too -- align_set_op_side() ->
+      # align_to_schema() remaps each side's codes via gpu_remap_codes().
+      lvls_x <- x_schema$factor_levels[[nm]]
+      lvls_y <- y_schema$factor_levels[[nm]]
+      promoted_types[i] <- tx
+      factor_levels[[nm]] <- if (identical(lvls_x, lvls_y)) lvls_x else union(lvls_x, lvls_y)
       next
     }
 
     if (xor(fx, fy)) {
       other_type <- if (fx) ty else tx
       if (identical(other_type, "STRING")) {
-        needs_fallback <- TRUE
+        # Decode contract (Bug 3 fix): factor + character -> character.
+        # align_to_schema()'s cast_column() decodes the factor side via
+        # gpu_decode_factor() -- no factor_levels entry on the result (it's
+        # STRING, not DICTIONARY32).
         promoted_types[i] <- "STRING"
       } else {
         abort_set_op_incompatible(sprintf(
@@ -271,15 +280,23 @@ check_set_op_compatible <- function(x_schema, y_schema) {
 #' `align_to_schema()`) when `current_schema()` (the lazy-AST-aware
 #' schema, unlike `tbl$schema`) actually differs from the target -- the
 #' common case (x/y already schema-identical) skips both entirely,
-#' preserving whatever laziness `tbl` already had. `align_to_schema()`
-#' always resets `$groups` to `character()` and drops `$schema
-#' $factor_levels` -- both are restored here from the caller-supplied
-#' `groups` and the already-computed `target_schema$factor_levels`.
+#' preserving whatever laziness `tbl` already had. Names/types alone don't
+#' catch every case that needs a real align pass: two `DICTIONARY32`
+#' columns can share the type string while their level VECTORS differ
+#' (Bug 2's native remap path), so `factor_levels_match_target()`
+#' (R/bind.R) is checked too. `align_to_schema()`'s own return also
+#' resets `$groups` to `character()` -- restored here from the
+#' caller-supplied `groups`; its `$schema$factor_levels` is reset to
+#' whatever it computed on its own slow path (unset on the fast-path
+#' passthrough), so it's overwritten unconditionally here with the
+#' already-computed `target_schema$factor_levels` for consistency either way.
 #' @keywords internal
 align_set_op_side <- function(tbl, target_schema, groups = character()) {
   schema <- current_schema(tbl)
   needs_align <- !identical(schema$names, target_schema$names) ||
-    !identical(unname(schema$types), unname(target_schema$types))
+    !identical(unname(schema$types), unname(target_schema$types)) ||
+    !factor_levels_match_target(schema$factor_levels, target_schema$factor_levels,
+                                target_schema$names, unname(target_schema$types))
 
   if (needs_align) {
     if (identical(tbl$exec_mode, "lazy") && has_pending_ops(tbl)) {
@@ -304,16 +321,19 @@ align_set_op_side <- function(tbl, target_schema, groups = character()) {
   tbl
 }
 
-#' Reattach factor levels lost through `bind_rows()`
+#' Reattach factor levels after `bind_rows()`
 #'
-#' `bind_rows()`/`bind_cols()` (R/bind.R) never carry `schema$factor_levels`
-#' forward at all (an existing, documented gap -- see
-#' `align_set_op_side()`'s own docs) -- unlike `semi_join()`/`anti_join()`/
-#' `distinct()`, which all preserve it automatically via
-#' `propagate_factor_levels()` (R/execute.R). `union()`/`union_all()`/
-#' `symdiff()` end on a `bind_rows()` call, so their result needs this
-#' reattached manually; `intersect()`/`setdiff()` (built from
-#' `semi_join()`/`anti_join()` + `distinct()` only) don't.
+#' As of Phase 11 L2, `bind_rows()` (R/bind.R) already computes and attaches
+#' the correct unioned `schema$factor_levels` on its own result (Bug 2
+#' fix) -- since `x_aligned`/`y_aligned` are already aligned to the exact
+#' same `target_schema`, `bind_rows_gpu()`'s own internal
+#' `compute_unified_schema()` call trivially recomputes the identical
+#' schema `check_set_op_compatible()` already computed here, so this is now
+#' a belt-and-braces no-op re-assignment (kept for defensiveness/clarity
+#' rather than trusting that invariant to hold silently at a distance).
+#' `intersect()`/`setdiff()` (built from `semi_join()`/`anti_join()` +
+#' `distinct()`, which already preserve `factor_levels` via
+#' `propagate_factor_levels()`, R/execute.R) don't need this at all.
 #' @keywords internal
 restore_set_op_factor_levels <- function(result, target_schema) {
   result$schema$factor_levels <- target_schema$factor_levels
@@ -329,17 +349,17 @@ restore_set_op_factor_levels <- function(result, target_schema) {
 #' compatibility contracts (mirroring `dplyr:::is_compatible()` /
 #' `check_compatible()`).
 #'
-#' A handful of column-type combinations that dplyr itself accepts aren't
-#' implemented natively and transparently fall back to CPU evaluation
+#' Two factor columns with different level sets (level-union remap,
+#' `gpu_remap_codes()`) and a factor column vs. a character column (decode
+#' to labels, `gpu_decode_factor()`) are both GPU-native as of Phase 11 L2.
+#' One column-type combination that dplyr itself accepts still isn't
+#' implemented natively and transparently falls back to CPU evaluation
 #' instead (a `cuplyr.fallback` notification fires, see
-#' [cuplyr_fallback_notify()]): two factor columns with different level
-#' sets, or a factor column vs. a character column (both involve
-#' recomputing factor codes against a new level set / decoding codes to
-#' labels, which this package's GPU column model doesn't yet support), and
-#' a `Date` column vs. a `POSIXct` column (dplyr promotes to `POSIXct`; the
-#' underlying GPU cast this package's `bind_rows()` machinery would need
-#' -- `TIMESTAMP_DAYS` -> `TIMESTAMP_MICROSECONDS` -- isn't implemented,
-#' see `check_set_op_compatible()`). Every other column-type mismatch that
+#' [cuplyr_fallback_notify()]): a `Date` column vs. a `POSIXct` column
+#' (dplyr promotes to `POSIXct`; the underlying GPU cast this package's
+#' `bind_rows()` machinery would need -- `TIMESTAMP_DAYS` ->
+#' `TIMESTAMP_MICROSECONDS` -- isn't implemented, see
+#' `check_set_op_compatible()`). Every other column-type mismatch that
 #' would be a genuine error in real dplyr (e.g. integer vs. character, or
 #' factor vs. integer) errors here too, naming the offending column and
 #' both types.

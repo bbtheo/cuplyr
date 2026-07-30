@@ -71,7 +71,11 @@ compute.tbl_gpu <- function(x, ..., name = NULL) {
   # Run optimizer and execute
   optimized <- optimize_ast(x$lazy_ops)
   new_ptr <- lower_and_execute(optimized, x$ptr)
-  final_schema <- infer_schema(x$lazy_ops)
+  # infer_schema_full() (R/execute.R), not plain infer_schema(): the latter
+  # only threads factor_levels through an ast_join node (Phase 11 L2 Bug 1)
+  # -- every other node type needs propagate_factor_levels() reapplied at
+  # each level, which infer_schema_full() does recursively.
+  final_schema <- infer_schema_full(x$lazy_ops)
 
   new_tbl_gpu(
     ptr = new_ptr,

@@ -20,7 +20,7 @@ list(
 ```
 
 ### Type Mappings
-| R Type | GPU Type | Notes |
+| R Type | GPU Type (schema/logical) | Notes |
 |--------|----------|-------|
 | logical | BOOL8 | |
 | integer | INT32 | |
@@ -28,8 +28,51 @@ list(
 | character | STRING | |
 | Date | TIMESTAMP_DAYS | |
 | POSIXct | TIMESTAMP_MICROSECONDS | |
-| factor | INT32 | codes only |
+| factor | DICTIONARY32 (physical: INT32) | codes only, 1-based, `schema$factor_levels` holds labels |
 | integer64 | FLOAT64 | loses precision >2^53, warns |
+
+#### Logical vs. physical type: factor columns (Phase 11 L2)
+
+cuplyr deliberately does **not** adopt cudf's real `DICTIONARY32` column
+type (a dictionary-encoded keys+indices structure). A factor is uploaded
+and stored as a plain **INT32** column of 1-based R factor codes (R's own
+`TYPEOF(x)` for a factor is `INTSXP`, so it flows through the exact same
+`integer_to_gpu()` path as a real integer column, `src/transfer_io.cpp`);
+the label strings live only in `schema$factor_levels[[col]]` on the R
+side, never on the GPU. `"DICTIONARY32"` is therefore a **logical**
+schema type only.
+
+`gpu_physical_type()` (`R/utils.R`) is the single conversion point between
+the two views: `"DICTIONARY32" -> "INT32"`, every other type unchanged.
+Call sites split into two camps:
+- **Physical-column sites** (talk to the actual `cudf::column`, which is
+  always INT32 for a factor): must route the type string through
+  `gpu_physical_type()` first -- e.g. `gpu_make_null_column()` (bind
+  null-column padding), `gpu_cast_column()`'s target-type dispatch. These
+  C++ primitives have no `DICTIONARY32` case at all and would error if
+  handed the logical label directly.
+- **Logical-semantics sites** (care whether a column IS a factor, not what
+  bytes back it): must keep seeing `"DICTIONARY32"` verbatim, never routed
+  through `gpu_physical_type()` -- the mutate arithmetic guard
+  (`infer_mutate_output_type()`, R/ast.R), join key type-compatibility
+  checks (`validate_key_types()`, R/join.R), memory accounting
+  (`R/gpu-memory.R`). Silently treating a factor as a plain integer here
+  would let arithmetic on a factor slip through, or let two differently-
+  leveled factor keys join as if they shared one integer domain.
+
+Two GPU primitives (`src/ops_bind.cpp`) operate directly on factor codes
+without ever needing a real dictionary type:
+- `gpu_remap_codes(xptr, col_idx, map)`: remaps a factor column's codes
+  onto a *different* level ordering (`bind_rows()`'s LEVEL-UNION contract
+  for two factors with different level sets, and the native `union()`/
+  `intersect()`/etc. set-op path, Phase 8/11).
+- `gpu_decode_factor(xptr, col_idx, levels)`: decodes a factor column to
+  its label strings (dplyr's factor + character -> character contract).
+
+Both gather a small per-level lookup table (an uploaded INT32 map or
+STRING levels column) using the physical codes as the index -- see
+`src/ops_bind.cpp` for the null-sanitization details (codes are 1-based
+and cudf's `gather()` needs a non-nullable, 0-based index).
 
 ## Source Map
 
@@ -47,7 +90,7 @@ list(
 | `src/ops_groupby.cpp` | `gpu_summarise()` |
 | `src/ops_arrange.cpp` | `gpu_arrange()` |
 | `src/ops_join.cpp` | join logic (equi hash joins, native `semi`/`anti`/`cross`/`right`, `gpu_cond_join()` for non-equi `join_by()` via `mixed_join`/`conditional_join`) with the shared device-side sanitize→stable-sort→diag→`multiple=`-filter→gather/coalesce pipeline (`build_join_result()`) for dplyr row-order/cardinality parity |
-| `src/ops_bind.cpp` | `gpu_bind_rows_aligned()`, `gpu_bind_cols_impl()` |
+| `src/ops_bind.cpp` | `gpu_bind_rows_aligned()`, `gpu_bind_cols_impl()`, `gpu_cast_column()`, `gpu_cast_to_string()`; factor fidelity (Phase 11 L2): `gpu_remap_codes()`, `gpu_decode_factor()` |
 | `src/gpu_info.cpp` | device availability/info |
 
 ### R Files
@@ -63,8 +106,8 @@ list(
 | `R/arrange.R` | arrange verb — parses sort specs (incl. `.by_group`), builds one `ast_arrange` node via `push_op()` |
 | `R/group-by.R` | `group_by()`, `ungroup()`, `group_vars()` — metadata-only, no AST node |
 | `R/summarise.R` | summarise/groupby verb — `parse_aggregations()` builds aggregation structs (cudf-accepted function names), builds one `ast_summarise` node via `push_op()`; temp-column preprocessing for expressions inside agg calls |
-| `R/join.R` | join verbs — parse join spec (incl. `join_by()`, equi and non-equi) via `parse_join_by()`, dispatch through `push_join()` (join analogue of `push_op()`); `build_join_schema()`, `build_join_output_info()`, `check_join_cardinality()` (`multiple=`/`unmatched=`/`relationship=`); routes `closest()`/rolling joins, STRING non-equi conditions, and degenerate `suffix=c("",...)` collisions to the notified CPU fallback (`join_route_to_fallback()`) |
-| `R/bind.R` | `bind_rows()`, `bind_cols()` with schema unification |
+| `R/join.R` | join verbs — parse join spec (incl. `join_by()`, equi and non-equi) via `parse_join_by()`, dispatch through `push_join()` (join analogue of `push_op()`); `build_join_schema()`, `build_join_output_info()` (propagates `factor_levels` keyed by post-suffix output name, Phase 11 L2), `check_join_cardinality()` (`multiple=`/`unmatched=`/`relationship=`); routes `closest()`/rolling joins, STRING non-equi conditions, degenerate `suffix=c("",...)` collisions, and same-named equi keys that are factor-typed on both sides with different level sets (`join_factor_key_levels_conflict()`) to the notified CPU fallback (`join_route_to_fallback()`) |
+| `R/bind.R` | `bind_rows()`, `bind_cols()` with schema unification; `compute_unified_schema()` computes a factor level UNION (Phase 11 L2 Bug 2), `align_to_schema()`/`cast_column()` remap (`gpu_remap_codes()`) or decode (`gpu_decode_factor()`, Bug 3) factor columns as needed |
 | `R/collect.R` | pulls data to R, warns on INT64 precision loss |
 | `R/compute.R` | `compute()`, `collapse()`, `as_lazy()`, `as_eager()`, `show_query()` — `compute()` is the only caller of `optimize_ast()` |
 | `R/ast.R` | AST node constructors (`ast_source`, `ast_filter`, etc.) and `infer_schema()` methods |

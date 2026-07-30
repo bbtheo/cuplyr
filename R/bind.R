@@ -212,7 +212,8 @@ bind_rows_gpu <- function(dots, .id = NULL) {
   # Build result
   result <- new_tbl_gpu(
     ptr = new_ptr,
-    schema = list(names = unified$names, types = unified$types),
+    schema = list(names = unified$names, types = unified$types,
+                  factor_levels = unified$factor_levels),
     groups = character(),
     exec_mode = "eager"
   )
@@ -261,18 +262,42 @@ repair_names <- function(names, method = "unique") {
 }
 
 #' Compute unified schema from multiple tables
+#'
+#' Factor columns (Phase 11 L2, Bug 2/3): a column present as `DICTIONARY32`
+#' in every table that has it unifies to `DICTIONARY32` with `factor_levels`
+#' set to the LEVEL UNION across every occurrence (`base::union()`, x's
+#' order first then any novel levels from later tables in order --
+#' verified empirically against `vctrs::vec_c(factor("a"), factor("b"))` ->
+#' levels `c("a", "b")`). A column that's `DICTIONARY32` in some tables and
+#' non-factor (any other type, always `STRING` once `promote_types()`
+#' applies its unconditional STRING-is-widest rule) in at least one other
+#' unifies to plain `STRING` with no `factor_levels` entry at all (dplyr's
+#' own factor + character -> character contract) -- `align_to_schema()`
+#' decodes each factor occurrence to its labels via `gpu_decode_factor()`
+#' (`cast_column()`, below).
+#'
 #' @param tables List of tbl_gpu objects
-#' @return List with names and types for unified schema
+#' @return List with `names`, `types`, and `factor_levels` (`NULL` if no
+#'   column in the union ends up `DICTIONARY32`) for the unified schema
 #' @keywords internal
 compute_unified_schema <- function(tables) {
   # Union of all column names (preserving order from first occurrence)
   all_names <- character()
   name_types <- list()
+  factor_levels_seen <- list()   # nm -> list of level vectors, one per factor occurrence
+  any_non_factor <- list()       # nm -> TRUE if seen as non-DICTIONARY32 in some table
 
   for (tbl in tables) {
+    tbl_factor_levels <- tbl$schema$factor_levels
+
     for (i in seq_along(tbl$schema$names)) {
       nm <- tbl$schema$names[i]
-      ty <- tbl$schema$types[i]
+      # unname(): `tbl$schema$types` is a NAMED vector (tbl_gpu() builds it
+      # via vapply()) -- identical(ty, "DICTIONARY32") would otherwise
+      # compare a named single-element vector against an unnamed literal
+      # and always be FALSE (identical() treats "names" as significant).
+      ty <- unname(tbl$schema$types[i])
+      is_factor <- identical(ty, "DICTIONARY32")
 
       if (!(nm %in% all_names)) {
         all_names <- c(all_names, nm)
@@ -283,12 +308,38 @@ compute_unified_schema <- function(tables) {
         promoted <- promote_types(existing_type, ty)
         name_types[[nm]] <- promoted
       }
+
+      if (is_factor) {
+        factor_levels_seen[[nm]] <- c(factor_levels_seen[[nm]],
+                                      list(tbl_factor_levels[[nm]]))
+      } else {
+        any_non_factor[[nm]] <- TRUE
+      }
     }
   }
 
   unified_types <- vapply(all_names, function(nm) name_types[[nm]], character(1))
 
-  list(names = all_names, types = unname(unified_types))
+  factor_levels <- list()
+  for (nm in names(factor_levels_seen)) {
+    if (isTRUE(any_non_factor[[nm]])) {
+      next  # decode contract: factor + non-factor unifies to STRING, no levels
+    }
+    lvls_list <- factor_levels_seen[[nm]]
+    union_levels <- lvls_list[[1]]
+    if (length(lvls_list) > 1) {
+      for (j in 2:length(lvls_list)) {
+        union_levels <- union(union_levels, lvls_list[[j]])
+      }
+    }
+    factor_levels[[nm]] <- union_levels
+  }
+
+  list(
+    names = all_names,
+    types = unname(unified_types),
+    factor_levels = if (length(factor_levels) > 0) factor_levels else NULL
+  )
 }
 
 #' Promote types for bind_rows compatibility
@@ -327,9 +378,66 @@ promote_types <- function(type1, type2) {
        call. = FALSE)
 }
 
+#' Do a table's factor columns already carry the target's exact level sets?
+#'
+#' Helper for `align_to_schema()`'s already-aligned fast path: `identical()`
+#' on `names`/`types` alone isn't enough for a `DICTIONARY32` column -- two
+#' tables can agree on the type string while their actual level VECTORS
+#' differ (Bug 2, Phase 11 L2), which still needs a code remap even though
+#' no type-string cast is triggered.
+#' @keywords internal
+factor_levels_match_target <- function(source_factor_levels, target_factor_levels,
+                                       names, types) {
+  factor_idx <- which(types == "DICTIONARY32")
+  for (i in factor_idx) {
+    nm <- names[i]
+    if (!identical(source_factor_levels[[nm]], target_factor_levels[[nm]])) {
+      return(FALSE)
+    }
+  }
+  TRUE
+}
+
+#' Remap a factor column's physical codes onto a different level ordering
+#'
+#' Used by `align_to_schema()` when unifying two `DICTIONARY32` columns
+#' under the same name whose level VECTORS differ (Bug 2, Phase 11 L2):
+#' dplyr's own `bind_rows()`/`vctrs::vec_c()` contract for two factors is a
+#' LEVEL UNION, not a raw code concatenation -- naively concatenating this
+#' table's codes as-is (the pre-fix behavior) would silently misinterpret
+#' them once the union's code assignment differs from this table's own.
+#' `match(current_levels, target_levels)` gives, for each of this table's
+#' OLD (1-based) levels in order, its NEW 1-based code in `target_levels`
+#' (always found -- `target_levels` is always a superset, see
+#' `compute_unified_schema()`); `gpu_remap_codes()` (`src/ops_bind.cpp`)
+#' gathers using the column's own (null-safe) codes as the index.
+#' @param tbl A tbl_gpu object
+#' @param col_name Name of the factor column to remap
+#' @param current_levels This table's own level vector for `col_name`
+#' @param target_levels The unified level vector to remap onto
+#' @return A tbl_gpu with `col_name`'s codes remapped (schema/types/groups
+#'   otherwise unchanged)
+#' @keywords internal
+remap_factor_column <- function(tbl, col_name, current_levels, target_levels) {
+  col_idx <- match(col_name, tbl$schema$names) - 1L
+  map <- as.integer(match(current_levels, target_levels))
+
+  new_ptr <- gpu_remap_codes(tbl$ptr, col_idx, map)
+
+  new_tbl_gpu(
+    ptr = new_ptr,
+    schema = list(names = tbl$schema$names, types = tbl$schema$types,
+                  factor_levels = tbl$schema$factor_levels),
+    groups = tbl$groups,
+    exec_mode = "eager"
+  )
+}
+
 #' Align a table to a target schema
 #' @param tbl A tbl_gpu object
-#' @param target_schema List with names and types
+#' @param target_schema List with `names`, `types`, and optionally
+#'   `factor_levels` (the unified level set for any `DICTIONARY32` column,
+#'   see `compute_unified_schema()`)
 #' @return A tbl_gpu aligned to the target schema
 #' @keywords internal
 align_to_schema <- function(tbl, target_schema) {
@@ -337,10 +445,24 @@ align_to_schema <- function(tbl, target_schema) {
   current_types <- unname(tbl$schema$types)  # Remove names for comparison
   target_names <- target_schema$names
   target_types <- unname(target_schema$types)
+  target_factor_levels <- target_schema$factor_levels
 
-  # Check if already aligned (common case for same-schema tables)
+  # Captured ONCE, up front: `add_null_columns()`/`remap_factor_column()`/
+  # `cast_column()` below each return a *new* tbl_gpu, and
+  # `add_null_columns()` in particular rebuilds its own schema without
+  # necessarily preserving every existing column's `factor_levels` entry --
+  # reading from this snapshot (rather than the evolving `tbl$schema
+  # $factor_levels`) avoids losing a column's levels partway through this
+  # function's own multi-step rewrite.
+  source_factor_levels <- tbl$schema$factor_levels
+
+  # Check if already aligned (common case for same-schema tables) --
+  # names/types identical AND (for any DICTIONARY32 column) this table's
+  # own levels already match the target's exactly.
   if (identical(current_names, target_names) &&
-      identical(current_types, target_types)) {
+      identical(current_types, target_types) &&
+      factor_levels_match_target(source_factor_levels, target_factor_levels,
+                                 target_names, target_types)) {
     return(tbl)
   }
 
@@ -357,17 +479,31 @@ align_to_schema <- function(tbl, target_schema) {
     current_types <- unname(tbl$schema$types)
   }
 
-  # Now handle type coercion for each column
+  # Now handle type coercion (and factor level remapping) for each column
   for (i in seq_along(target_names)) {
     target_name <- target_names[i]
     target_type <- target_types[i]
+
+    if (identical(target_type, "DICTIONARY32")) {
+      # Same LOGICAL type doesn't mean the physical codes already agree:
+      # remap unless this table's own levels already match the union (or
+      # this is an all-null column just added above, which has no levels
+      # of its own to remap -- every row is null regardless).
+      current_levels <- source_factor_levels[[target_name]]
+      col_target_levels <- target_factor_levels[[target_name]]
+      if (!is.null(current_levels) && !identical(current_levels, col_target_levels)) {
+        tbl <- remap_factor_column(tbl, target_name, current_levels, col_target_levels)
+      }
+      next
+    }
 
     current_idx <- match(target_name, current_names)
     current_type <- current_types[current_idx]
 
     if (!identical(current_type, target_type)) {
       # Need to cast this column
-      tbl <- cast_column(tbl, target_name, target_type)
+      source_levels <- source_factor_levels[[target_name]]
+      tbl <- cast_column(tbl, target_name, target_type, source_levels = source_levels)
       current_types <- unname(tbl$schema$types)
     }
   }
@@ -378,7 +514,8 @@ align_to_schema <- function(tbl, target_schema) {
 
   new_tbl_gpu(
     ptr = new_ptr,
-    schema = list(names = target_names, types = target_types),
+    schema = list(names = target_names, types = target_types,
+                  factor_levels = target_factor_levels),
     groups = character(),
     exec_mode = "eager"
   )
@@ -393,9 +530,12 @@ align_to_schema <- function(tbl, target_schema) {
 add_null_columns <- function(tbl, col_names, col_types) {
   nrows <- nrow(tbl)
 
-  # Create null columns and bind them
+  # Create null columns and bind them. `gpu_physical_type()` (R/utils.R):
+  # `gpu_make_null_column()` is a PHYSICAL-column C++ primitive with no
+  # DICTIONARY32 case (a factor's actual GPU column is INT32) -- passing
+  # the logical type string straight through would error.
   null_tbls <- lapply(seq_along(col_names), function(i) {
-    null_ptr <- gpu_make_null_column(nrows, col_types[i])
+    null_ptr <- gpu_make_null_column(nrows, gpu_physical_type(col_types[i]))
     new_tbl_gpu(
       ptr = null_ptr,
       schema = list(names = col_names[i], types = col_types[i]),
@@ -415,7 +555,8 @@ add_null_columns <- function(tbl, col_names, col_types) {
 
   new_tbl_gpu(
     ptr = new_ptr,
-    schema = list(names = new_names, types = new_types),
+    schema = list(names = new_names, types = new_types,
+                  factor_levels = tbl$schema$factor_levels),
     groups = character(),
     exec_mode = "eager"
   )
@@ -425,9 +566,16 @@ add_null_columns <- function(tbl, col_names, col_types) {
 #' @param tbl A tbl_gpu object
 #' @param col_name Name of column to cast
 #' @param target_type Target type string
+#' @param source_levels For a `DICTIONARY32` source column being cast to
+#'   `STRING` (dplyr's factor + character -> character contract, Bug 3 of
+#'   Phase 11 L2): this column's OWN level vector, decoded via
+#'   `gpu_decode_factor()` instead of `gpu_cast_to_string()`'s numeric-only
+#'   path (which only ever sees the PHYSICAL INT32 column and would
+#'   silently emit its raw codes as strings, e.g. `"2"` instead of `"m"`).
+#'   `NULL`/unused for every other source type.
 #' @return A tbl_gpu with the column cast to the target type
 #' @keywords internal
-cast_column <- function(tbl, col_name, target_type) {
+cast_column <- function(tbl, col_name, target_type, source_levels = NULL) {
   col_idx <- match(col_name, tbl$schema$names) - 1L
 
   if (is.na(col_idx) || col_idx < 0) {
@@ -436,21 +584,16 @@ cast_column <- function(tbl, col_name, target_type) {
 
   new_ptr <- if (identical(target_type, "STRING")) {
     current_type <- tbl$schema$types[[col_idx + 1L]]
-    # DICTIONARY32 columns are factors: the GPU column physically stores
-    # integer codes (see CLAUDE.md type mapping), not the label strings.
-    # gpu_cast_to_string() only sees the physical column, so casting a
-    # factor here would silently emit its numeric codes as strings (e.g.
-    # "2") instead of its labels (e.g. "m"). Refuse loudly instead of
-    # guessing; proper support needs factor_levels-aware conversion, which
-    # is out of scope here.
     if (identical(current_type, "DICTIONARY32")) {
-      stop("bind_rows(): cannot combine factor column '", col_name,
-           "' with an incompatible type by promoting to STRING - this ",
-           "would silently convert factor codes to strings instead of ",
-           "their labels. Convert the factor to character first (e.g. ",
-           "as.character()) if this is intended.", call. = FALSE)
+      if (is.null(source_levels)) {
+        stop("bind_rows(): cannot cast factor column '", col_name,
+             "' to STRING -- its levels are unknown to cast_column().",
+             call. = FALSE)
+      }
+      gpu_decode_factor(tbl$ptr, col_idx, source_levels)
+    } else {
+      gpu_cast_to_string(tbl$ptr, col_idx)
     }
-    gpu_cast_to_string(tbl$ptr, col_idx)
   } else {
     gpu_cast_column(tbl$ptr, col_idx, target_type)
   }
@@ -458,9 +601,16 @@ cast_column <- function(tbl, col_name, target_type) {
   new_types <- tbl$schema$types
   new_types[col_idx + 1L] <- target_type
 
+  new_factor_levels <- tbl$schema$factor_levels
+  if (!is.null(new_factor_levels) && !is.null(new_factor_levels[[col_name]])) {
+    new_factor_levels[[col_name]] <- NULL  # no longer a factor after this cast
+    if (length(new_factor_levels) == 0) new_factor_levels <- NULL
+  }
+
   new_tbl_gpu(
     ptr = new_ptr,
-    schema = list(names = tbl$schema$names, types = new_types),
+    schema = list(names = tbl$schema$names, types = new_types,
+                  factor_levels = new_factor_levels),
     groups = tbl$groups,
     exec_mode = "eager"
   )

@@ -12,10 +12,13 @@
 # preservation, column order for `.keep_all = FALSE`, group-column
 # prepending rules, NA/NaN equality) rather than assumed.
 #
-# Factor keys are intentionally not covered here: cuplyr's factor schema
-# type (`DICTIONARY32`) has a known, separate mismatch tracked for Phase 11
-# (scratchpad/todo.md "factor DICTIONARY32-vs-INT32 schema mismatch"),
-# unrelated to distinct() itself.
+# Factor keys: distinct() never talks to any C++ primitive by TYPE STRING
+# (lower_distinct(), R/lower.R, only ever passes column INDICES to
+# gpu_distinct()/gpu_select()) -- the DICTIONARY32-vs-physical-INT32 split
+# formalized by gpu_physical_type() (Phase 11 L2) never mattered here, and
+# distinct() reaches its schema through the generic push_op()/
+# propagate_factor_levels() path (R/execute.R), not build_join_schema()
+# (the thing Bug 1 actually fixed). See the "Factor keys" section below.
 
 oracle_distinct_df <- function() {
   tibble::tibble(
@@ -245,4 +248,47 @@ test_that("distinct() never triggers cuplyr_fallback_notify()", {
   expect_no_error(gt |> dplyr::distinct(x, .keep_all = TRUE))
   expect_no_error(gt |> dplyr::distinct(w = x + 1))
   expect_no_error(gt |> dplyr::group_by(y) |> dplyr::distinct(x))
+})
+
+# =============================================================================
+# Factor keys (Phase 11 L2): now testable -- see the file header comment
+# =============================================================================
+
+oracle_distinct_factor_df <- function() {
+  tibble::tibble(
+    g = factor(c("a", "b", "a", "c", "b", "a"), levels = c("a", "b", "c")),
+    v = c(10, 20, 30, 40, 50, 60)
+  )
+}
+
+test_that("distinct() on a factor key column matches dplyr and preserves levels", {
+  skip_if_no_gpu()
+  df <- oracle_distinct_factor_df()
+  pipeline <- function(d) dplyr::distinct(d, g)
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
+
+  result <- dplyr::distinct(tbl_gpu(df), g) |> collect()
+  expect_s3_class(result$g, "factor")
+  expect_equal(levels(result$g), c("a", "b", "c"))
+})
+
+test_that("distinct(.keep_all = TRUE) keeps a non-key factor column with its levels", {
+  skip_if_no_gpu()
+  df <- oracle_distinct_factor_df()
+  pipeline <- function(d) dplyr::distinct(d, v = v %% 2, .keep_all = TRUE)
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
+
+  result <- dplyr::distinct(tbl_gpu(df), v = v %% 2, .keep_all = TRUE) |> collect()
+  expect_s3_class(result$g, "factor")
+  expect_equal(levels(result$g), c("a", "b", "c"))
+})
+
+test_that("distinct() on a grouped table with a factor group column preserves levels", {
+  skip_if_no_gpu()
+  df <- oracle_distinct_factor_df()
+  pipeline <- function(d) d |> dplyr::group_by(g) |> dplyr::distinct()
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
 })

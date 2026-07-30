@@ -601,3 +601,153 @@ test_that("right_join() duplicate matches: right rows for one left row appear in
   expect_equal(as.data.frame(eager), as.data.frame(expected))
   expect_equal(as.data.frame(lazy), as.data.frame(expected))
 })
+
+# =============================================================================
+# Factor columns (Phase 11 L2, Bug 1): mutating joins used to drop
+# `schema$factor_levels` entirely (build_join_schema() only ever returned
+# `names`/`types`) -- collect() would then present a factor column as raw
+# INT32 codes instead of a real factor. build_join_output_info() now
+# propagates factor_levels keyed by each output column's POST-suffix name.
+# =============================================================================
+
+test_that("left_join() preserves factor levels on a non-key factor column", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(id = c(1, 2, 3), v = c(10, 20, 30))
+  right_df <- data.frame(id = c(1, 2, 3),
+                         grp = factor(c("m", "f", "m"), levels = c("f", "m")))
+
+  expected <- dplyr::left_join(left_df, right_df, by = "id")
+
+  eager <- dplyr::left_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "id") |> collect()
+  lazy <- dplyr::left_join(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df, lazy = TRUE),
+                           by = "id") |> collect()
+
+  expect_s3_class(eager$grp, "factor")
+  expect_equal(levels(eager$grp), c("f", "m"))
+  expect_equal(as.data.frame(eager), as.data.frame(expected))
+  expect_s3_class(lazy$grp, "factor")
+  expect_equal(as.data.frame(lazy), as.data.frame(expected))
+})
+
+test_that("left_join() preserves factor levels on an equi JOIN KEY (same levels both sides)", {
+  skip_if_no_gpu()
+
+  lvls <- c("a", "b", "c")
+  left_df <- data.frame(grp = factor(c("a", "b", "c"), levels = lvls), v = 1:3)
+  right_df <- data.frame(grp = factor(c("b", "c"), levels = lvls), w = c(20, 30))
+
+  expected <- dplyr::left_join(left_df, right_df, by = "grp")
+
+  result <- dplyr::left_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "grp") |> collect()
+
+  expect_s3_class(result$grp, "factor")
+  expect_equal(levels(result$grp), lvls)
+  expect_equal(as.character(result$grp), as.character(expected$grp))
+  expect_equal(as.data.frame(result), as.data.frame(expected))
+})
+
+test_that("inner_join() with keep = TRUE preserves factor levels on BOTH suffixed key copies", {
+  skip_if_no_gpu()
+
+  lvls <- c("a", "b", "c")
+  left_df <- data.frame(grp = factor(c("a", "b"), levels = lvls), v = 1:2)
+  right_df <- data.frame(grp = factor(c("b", "a"), levels = lvls), w = c(20, 30))
+
+  expected <- dplyr::inner_join(left_df, right_df, by = "grp", keep = TRUE)
+
+  result <- dplyr::inner_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "grp", keep = TRUE) |>
+    collect()
+
+  expect_s3_class(result$grp.x, "factor")
+  expect_s3_class(result$grp.y, "factor")
+  expect_equal(levels(result$grp.x), lvls)
+  expect_equal(levels(result$grp.y), lvls)
+
+  ord <- order(result$v)
+  expected_ord <- order(expected$v)
+  expect_equal(as.character(result$grp.x[ord]), as.character(expected$grp.x[expected_ord]))
+  expect_equal(as.character(result$grp.y[ord]), as.character(expected$grp.y[expected_ord]))
+})
+
+test_that("cross_join() preserves factor levels on both sides' columns", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(g = factor(c("a", "b")))
+  right_df <- data.frame(g = factor(c("x", "y", "z")))
+
+  expected <- dplyr::cross_join(left_df, right_df)
+  result <- dplyr::cross_join(tbl_gpu(left_df), tbl_gpu(right_df)) |> collect()
+
+  expect_s3_class(result$g.x, "factor")
+  expect_s3_class(result$g.y, "factor")
+  expect_equal(levels(result$g.x), levels(left_df$g))
+  expect_equal(levels(result$g.y), levels(right_df$g))
+
+  ord <- order(as.character(result$g.x), as.character(result$g.y))
+  expected_ord <- order(as.character(expected$g.x), as.character(expected$g.y))
+  expect_equal(as.character(result$g.x[ord]), as.character(expected$g.x[expected_ord]))
+  expect_equal(as.character(result$g.y[ord]), as.character(expected$g.y[expected_ord]))
+})
+
+test_that("semi_join()/anti_join() preserve factor levels (x's own schema verbatim)", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(grp = factor(c("a", "b", "c"), levels = c("a", "b", "c")), v = 1:3)
+  right_df <- data.frame(grp = factor(c("b", "c")))
+
+  semi_expected <- dplyr::semi_join(left_df, right_df, by = "grp")
+  anti_expected <- dplyr::anti_join(left_df, right_df, by = "grp")
+
+  semi_result <- dplyr::semi_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "grp") |> collect()
+  anti_result <- dplyr::anti_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "grp") |> collect()
+
+  expect_s3_class(semi_result$grp, "factor")
+  expect_equal(levels(semi_result$grp), c("a", "b", "c"))
+  expect_equal(as.data.frame(semi_result), as.data.frame(semi_expected))
+
+  expect_s3_class(anti_result$grp, "factor")
+  expect_equal(as.data.frame(anti_result), as.data.frame(anti_expected))
+})
+
+test_that("join() falls back to CPU when an equi factor KEY has different levels on both sides", {
+  skip_if_no_gpu()
+
+  # Native joins compare equi keys by raw INT32 code -- two factor columns
+  # with DIFFERENT level vectors would silently mismatch if compared that
+  # way (e.g. "a" is code 1 on the left but code 2 on the right). Routing
+  # the whole join to the CPU fallback (join_factor_key_levels_conflict())
+  # avoids that; the *result* must still match dplyr exactly.
+  left_df <- data.frame(grp = factor(c("a", "b", "c")), v = 1:3)
+  right_df <- data.frame(grp = factor(c("c", "b", "a"), levels = c("c", "b", "a")), w = c(30, 20, 10))
+
+  expected <- dplyr::left_join(left_df, right_df, by = "grp")
+
+  withr::local_options(cuplyr.fallback = "warn")
+  expect_warning(
+    result <- dplyr::left_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "grp") |> collect(),
+    "fell back to CPU evaluation"
+  )
+
+  ord <- order(as.character(result$grp))
+  expected_ord <- order(as.character(expected$grp))
+  expect_equal(as.character(result$grp[ord]), as.character(expected$grp[expected_ord]))
+  expect_equal(result$w[ord], expected$w[expected_ord])
+})
+
+test_that("semi_join() falls back to CPU when an equi factor KEY has different levels on both sides", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(grp = factor(c("a", "b", "c")), v = 1:3)
+  right_df <- data.frame(grp = factor(c("b", "c"), levels = c("c", "b", "a")))
+
+  expected <- dplyr::semi_join(left_df, right_df, by = "grp")
+
+  withr::local_options(cuplyr.fallback = "warn")
+  expect_warning(
+    result <- dplyr::semi_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "grp") |> collect(),
+    "fell back to CPU evaluation"
+  )
+
+  expect_equal(sort(as.character(result$grp)), sort(as.character(expected$grp)))
+})
