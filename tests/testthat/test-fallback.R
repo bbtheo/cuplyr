@@ -69,12 +69,10 @@ fallback_sweep_pipelines <- function() {
     # src/ops_join.cpp's gpu_semi_anti_join()) -- no longer part of this
     # fallback sweep. See the "never trigger a fallback notification" block
     # below instead.
-    cross_join = list(
-      fn = function(d) {
-        dplyr::cross_join(dplyr::distinct(dplyr::select(d, g)), tibble::tibble(k = 1:2))
-      },
-      arrange_by = c("g", "k")
-    ),
+    # cross_join() is GPU-native now too (Phase 7 J3, see R/join.R,
+    # src/ops_join.cpp's gpu_cross_join()) -- no longer part of this
+    # fallback sweep. See the "never trigger a fallback notification" block
+    # below, and test-dplyr-join-cross.R for full oracle coverage.
     union = list(
       fn = function(d) dplyr::union(dplyr::select(d, g), tibble::tibble(g = 9)),
       arrange_by = "g"
@@ -526,4 +524,16 @@ test_that("semi_join()/anti_join() are GPU-native and never trigger a fallback n
   expect_no_error(gt |> dplyr::anti_join(y_small, by = "g", na_matches = "never"))
   expect_no_error(gt |> dplyr::group_by(g) |> dplyr::semi_join(y_small, by = "g"))
   expect_no_error(gt |> as_lazy() |> dplyr::semi_join(y_small, by = "g") |> collect())
+})
+
+test_that("cross_join() is GPU-native and never triggers a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gt <- tbl_gpu(fallback_df())
+  y_small <- tbl_gpu(tibble::tibble(k = 1:2))
+
+  expect_no_error(gt |> dplyr::cross_join(y_small))
+  expect_no_error(gt |> dplyr::group_by(g) |> dplyr::cross_join(y_small))
+  expect_no_error(gt |> as_lazy() |> dplyr::cross_join(y_small) |> collect())
+  expect_no_error(gt |> dplyr::cross_join(tibble::tibble(k = 1:2), copy = TRUE))
 })

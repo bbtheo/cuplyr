@@ -233,6 +233,9 @@ rowwise.tbl_gpu <- function(.data, ...) {
 # cudf::filtered_join, Phase 7 J2) -- see semi_join.tbl_gpu()/
 # anti_join.tbl_gpu(), ast_join()'s "semi"/"anti" join_type (R/ast.R),
 # lower_join() (R/lower.R), gpu_semi_anti_join() (src/ops_join.cpp).
+# cross_join() moved to R/join.R (GPU-native via cudf::cross_join,
+# Phase 7 J3) -- see cross_join.tbl_gpu(), ast_join()'s "cross" join_type
+# (R/ast.R), lower_join() (R/lower.R), gpu_cross_join() (src/ops_join.cpp).
 # =============================================================================
 
 #' @rdname fallback-verbs
@@ -243,16 +246,6 @@ nest_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, keep = NULL,
   y_tbl <- collect_other_side(y)
   gpu_fallback("nest_join", x, function(tbl) {
     dplyr::nest_join(tbl, y_tbl, by = by, copy = copy, keep = keep, name = name, ...)
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr cross_join
-cross_join.tbl_gpu <- function(x, y, ..., copy = FALSE, suffix = c(".x", ".y")) {
-  y_tbl <- collect_other_side(y)
-  gpu_fallback("cross_join", x, function(tbl) {
-    dplyr::cross_join(tbl, y_tbl, ..., copy = copy, suffix = suffix)
   })
 }
 

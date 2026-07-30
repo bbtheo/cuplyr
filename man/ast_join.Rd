@@ -18,7 +18,8 @@ ast_join(
 )
 }
 \arguments{
-\item{type}{Join type: "inner", "left", "right", "full"}
+\item{type}{Join type: "inner", "left", "right", "full", "semi", "anti",
+"cross"}
 
 \item{left}{Left input AST node}
 

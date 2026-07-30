@@ -234,7 +234,8 @@ ast_rename <- function(input, old_names, new_names) {
 
 #' Create a join AST node
 #'
-#' @param type Join type: "inner", "left", "right", "full"
+#' @param type Join type: "inner", "left", "right", "full", "semi", "anti",
+#'   "cross"
 #' @param left Left input AST node
 #' @param right Right input AST node
 #' @param by Join specification `list(left, right, op, filter)`, as returned
@@ -588,6 +589,13 @@ infer_schema.ast_join <- function(node) {
   }
 
   right_schema <- infer_schema(node$right)
+  # cross (Phase 7 J3): reuses this same general (non-semi/anti) branch
+  # unchanged -- cross_join.tbl_gpu() (R/join.R) already builds an empty
+  # `by` spec + `keep = TRUE`, which makes build_join_schema()/
+  # build_join_output_info() suffix EVERY common name (not just would-be
+  # join keys, since there are none) and drop nothing from either side --
+  # exactly dplyr's own cross_join() column-naming contract (verified
+  # empirically against dplyr 1.2.1).
   build_join_schema(left_schema, right_schema, node$by,
                     suffix = node$suffix, keep = node$keep)
 }

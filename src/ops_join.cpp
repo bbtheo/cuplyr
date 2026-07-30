@@ -349,3 +349,37 @@ SEXP gpu_semi_anti_join(SEXP xptr_left,
 
     return make_gpu_table_xptr(std::move(result));
 }
+
+// [[Rcpp::export]]
+SEXP gpu_cross_join(SEXP xptr_left, SEXP xptr_right) {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
+    Rcpp::XPtr<GpuTablePtr> right_ptr(xptr_right);
+
+    cudf::table_view left_view = get_table_view(left_ptr);
+    cudf::table_view right_view = get_table_view(right_ptr);
+
+    // 0-column guard: cudf::cross_join() throws cudf::logic_error if either
+    // side has 0 columns (scratchpad/phase7_joins_design.md J3 spec, verified
+    // against the cudf/join/join.hpp doc comment). The R side
+    // (cross_join.tbl_gpu(), R/join.R) already stops with a clearer,
+    // dplyr-flavored message before this is ever called; this is a
+    // defensive backstop against any other caller reaching this entry point
+    // directly with a malformed/empty table.
+    if (left_view.num_columns() == 0 || right_view.num_columns() == 0) {
+        Rcpp::stop("cross_join() requires both tables to have at least one column.");
+    }
+
+    // No keys, no drops: cudf::cross_join() returns the full cartesian
+    // product with left's columns first (in their original order) followed
+    // by right's columns (in their original order) -- exactly the column
+    // order build_join_output_info() produces for an empty spec with
+    // keep = TRUE (every common name suffixed, nothing dropped), so no
+    // further reordering/selecting is needed here. 0-row inputs on either
+    // side are handled natively by cudf (empty cartesian product, no error);
+    // only the 0-column case above needs a guard.
+    auto result = cudf::cross_join(left_view, right_view);
+
+    return make_gpu_table_xptr(std::move(result));
+}

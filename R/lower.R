@@ -302,6 +302,13 @@ lower_join <- function(ast, source_ptr) {
                                FALSE, nulls_equal),
     "anti" = gpu_semi_anti_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
                                TRUE, nulls_equal),
+    # cross (Phase 7 J3): native via cudf::cross_join (gpu_cross_join(),
+    # src/ops_join.cpp) -- no keys, no drops; the cartesian product's column
+    # order (left's columns, then right's) already matches
+    # infer_schema.ast_join's regular (non-semi/anti) branch, since
+    # cross_join.tbl_gpu() (R/join.R) builds an empty spec + keep = TRUE, and
+    # build_join_output_info() with keep = TRUE never drops any right column.
+    "cross" = gpu_cross_join(left_ptr, right_ptr),
     "right" = {
       # Implement right join via swapped left join, then reorder columns.
       # Shared with the eager path in right_join.tbl_gpu() (R/join.R) via

@@ -208,7 +208,7 @@ join_input_node <- function(tbl) {
 #' Per D3, the mutating joins (`"left"`/`"inner"`/`"full"`/`"right"`) always
 #' drop groups (`character()`) and never carry `factor_levels` (this matches
 #' `build_join_schema()`, which never propagated them). `"semi"`/`"anti"`
-#' are the one exception (Phase 7 J2): they're row filters, not column
+#' are one exception (Phase 7 J2): they're row filters, not column
 #' merges -- the output schema is x's own schema verbatim (see
 #' `infer_schema.ast_join`'s semi/anti branch, which returns x's schema,
 #' factor_levels included), and dplyr's own `semi_join()`/`anti_join()`
@@ -217,8 +217,26 @@ join_input_node <- function(tbl) {
 #' the new schema's names, mirroring `propagate_groups()`'s own convention
 #' for non-join nodes) instead of being cleared.
 #'
+#' `"cross"` is a second, more surprising exception (Phase 7 J3): dplyr's own
+#' `cross_join.data.frame()` ends with `dplyr_reconstruct(x_out, x)`, which
+#' (for a `grouped_df` `x`) keeps grouping over exactly the group-var NAMES
+#' that still exist, unchanged, in the joined output -- it does NOT
+#' unconditionally clear `x`'s groups the way `left_join()`/`inner_join()`/
+#' `full_join()`/`right_join()` do. Verified empirically against dplyr 1.2.1:
+#' a group column with a name unique to `x` (no collision with any of `y`'s
+#' names) survives under its own name and STAYS grouped in the result; a
+#' group column whose name collides with one of `y`'s (and is therefore
+#' suffixed, e.g. `"g"` -> `"g.x"`) is silently DROPPED from the grouping
+#' (not an error) since `"g"` no longer names any column in the output. Only
+#' `y`'s grouping is irrelevant either way (`dplyr_reconstruct()`'s template
+#' is `x` alone). This is exactly the same `intersect(x$groups,
+#' new_schema$names)` formula already used for semi/anti -- a colliding
+#' group column is renamed away from the new schema's names by
+#' `build_join_output_info()`'s own suffixing rule, so the intersection
+#' naturally excludes it without any cross-specific logic.
+#'
 #' @param join_type One of `"left"`, `"inner"`, `"full"`, `"right"`,
-#'   `"semi"`, `"anti"`
+#'   `"semi"`, `"anti"`, `"cross"`
 #' @param x,y The two `tbl_gpu` join inputs
 #' @param join_spec List with `left`/`right`/`op`/`filter`, as returned by
 #'   `parse_join_by()`
@@ -226,7 +244,11 @@ join_input_node <- function(tbl) {
 #'   documented on the join verbs (the last three are dormant -- validated
 #'   but not yet behavior-changing -- until Phase 7 J5; all are unused for
 #'   `"semi"`/`"anti"`, which have no `suffix`/`keep`/`multiple`/
-#'   `unmatched`/`relationship` in dplyr's own signature)
+#'   `unmatched`/`relationship` in dplyr's own signature; `"cross"` has no
+#'   `keep`/`na_matches`/`multiple`/`unmatched`/`relationship` in dplyr's own
+#'   signature either, and always passes `keep = TRUE` internally purely to
+#'   get `build_join_output_info()`'s all-common-names-suffixed behavior --
+#'   see `cross_join.tbl_gpu()`, `R/join.R`)
 #' @return A new `tbl_gpu`
 #' @keywords internal
 push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
@@ -246,8 +268,8 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
 
   new_schema <- infer_schema(join_ast)
 
-  is_filter_join <- join_type %in% c("semi", "anti")
-  new_groups <- if (is_filter_join) intersect(x$groups, new_schema$names) else character()
+  preserves_x_groups <- join_type %in% c("semi", "anti", "cross")
+  new_groups <- if (preserves_x_groups) intersect(x$groups, new_schema$names) else character()
 
   if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
     return(new_tbl_gpu(

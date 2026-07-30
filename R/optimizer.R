@@ -631,9 +631,16 @@ push_down_filters <- function(ast) {
 
     for (pred in ast$predicates) {
       side <- classify_predicate(pred)
-      if (side == "left" && input$join_type %in% c("inner", "left")) {
+      # cross (Phase 7 J3, design section 1.2/2): behaves like "inner" for
+      # filter pushdown on BOTH sides -- a cross join has no unmatched-row
+      # concept at all (every left row pairs with every right row), so a
+      # left-only predicate can always push to the left side and a
+      # right-only predicate can always push to the right side without
+      # changing the result, exactly like an inner join's own left/right
+      # pushdown rule.
+      if (side == "left" && input$join_type %in% c("inner", "left", "cross")) {
         left_preds <- c(left_preds, list(pred))
-      } else if (side == "right" && input$join_type %in% c("inner", "right")) {
+      } else if (side == "right" && input$join_type %in% c("inner", "right", "cross")) {
         right_preds <- c(right_preds, list(pred))
       } else {
         stay_preds <- c(stay_preds, list(pred))

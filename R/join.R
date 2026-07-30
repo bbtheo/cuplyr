@@ -370,6 +370,7 @@ warn_if_join_too_large <- function(join_type, x, y, join_spec, suffix, keep) {
     "full" = n_left + n_right,
     "semi" = n_left,
     "anti" = n_left,
+    "cross" = n_left * n_right,
     n_left
   )
 
@@ -719,4 +720,72 @@ anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
 
   push_join("anti", x, y, join_spec, suffix = c(".x", ".y"), keep = FALSE,
            na_matches = na_matches)
+}
+
+#' `cross_join()`: native via `cudf::cross_join`
+#'
+#' Native GPU implementation (Phase 7 J3). Unlike every other join verb,
+#' dplyr's own `cross_join()` signature has no `by`/`keep`/`na_matches`/
+#' `multiple`/`unmatched`/`relationship` at all (verified via
+#' `args(dplyr::cross_join)`: `x, y, ..., copy, suffix`) -- there are no keys
+#' to match, every row of `x` is paired with every row of `y`. Verified
+#' empirically against dplyr 1.2.1:
+#' - Output column order is left-major: all of `x`'s columns (in their
+#'   original order), then all of `y`'s (in their original order).
+#' - Every COMMON column name (not just would-be join keys, since there are
+#'   none) gets BOTH suffixes -- e.g. two tables both having `id`/`val`
+#'   produces `id.x`/`val.x`/`id.y`/`val.y`, never a bare shared name. This
+#'   is exactly `build_join_output_info()`'s own behavior for an all-common
+#'   spec with `keep = TRUE` (its `drop_right` is always `character(0)` when
+#'   `keep = TRUE`, regardless of what the spec's `left`/`right` contain), so
+#'   an empty join spec (no keys at all) plus `keep = TRUE` reproduces it
+#'   exactly -- see `ast_join()`'s `by`/`keep` fields below.
+#' - Grouping is NOT unconditionally cleared, unlike `left_join()`/
+#'   `inner_join()`/`full_join()`/`right_join()` (D3): dplyr's own
+#'   `cross_join.data.frame()` ends with `dplyr_reconstruct(x_out, x)`,
+#'   which keeps `x`'s grouping over exactly the group-var NAMES that
+#'   survive, unchanged, in the output. A group column whose name is unique
+#'   to `x` stays grouped; one whose name collides with `y`'s (and gets
+#'   suffixed away, e.g. `"g"` -> `"g.x"`) is silently dropped from the
+#'   grouping. `y`'s own grouping is always irrelevant. See `push_join()`'s
+#'   (`R/execute.R`) `preserves_x_groups` handling, which reuses the exact
+#'   same `intersect(x$groups, new_schema$names)` formula already used for
+#'   `semi_join()`/`anti_join()` -- a colliding group column is renamed away
+#'   from the new schema's names by `build_join_output_info()`'s own
+#'   suffixing rule, so the intersection naturally excludes it with no
+#'   cross-specific logic needed.
+#' - 0-row `x` or `y` produces a 0-row result with the correct (merged)
+#'   schema -- cudf's `cross_join()` handles this natively, no R-side
+#'   special-casing needed.
+#' - `copy = TRUE` with a plain `data.frame` `y` works like every other join.
+#'
+#' `gpu_cross_join()` (`src/ops_join.cpp`) throws if either side has 0
+#' *columns* (verified in the `cudf/join/join.hpp` doc comment: "throw
+#' cudf::logic_error if the number of columns in either left or right table
+#' is 0") -- guarded here with a clearer, dplyr-flavored message before ever
+#' reaching the GPU call, for both the eager and lazy schedules (the 0-column
+#' case is knowable from the schemas alone, no execution needed).
+#' @export
+#' @importFrom dplyr cross_join
+cross_join.tbl_gpu <- function(x, y, ..., copy = FALSE, suffix = c(".x", ".y")) {
+  if (!is_tbl_gpu(y)) {
+    if (isTRUE(copy)) {
+      y <- tbl_gpu(y)
+    } else {
+      stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
+    }
+  }
+
+  if (length(x$schema$names) == 0 || length(y$schema$names) == 0) {
+    stop("cross_join() requires both tables to have at least one column.",
+         call. = FALSE)
+  }
+
+  # No keys at all -- an empty spec, `keep = TRUE` so build_join_output_info()
+  # suffixes every common name (see roxygen above).
+  join_spec <- list(left = character(0), right = character(0),
+                    op = character(0), filter = "none")
+
+  push_join("cross", x, y, join_spec, suffix = suffix, keep = TRUE,
+           na_matches = "na")
 }

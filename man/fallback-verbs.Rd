@@ -5,7 +5,6 @@
 \alias{reframe.tbl_gpu}
 \alias{rowwise.tbl_gpu}
 \alias{nest_join.tbl_gpu}
-\alias{cross_join.tbl_gpu}
 \alias{union.tbl_gpu}
 \alias{union_all.tbl_gpu}
 \alias{intersect.tbl_gpu}
@@ -38,8 +37,6 @@
 \method{rowwise}{tbl_gpu}(.data, ...)
 
 \method{nest_join}{tbl_gpu}(x, y, by = NULL, copy = FALSE, keep = NULL, name = NULL, ...)
-
-\method{cross_join}{tbl_gpu}(x, y, ..., copy = FALSE, suffix = c(".x", ".y"))
 
 \method{union}{tbl_gpu}(x, y, ...)
 
