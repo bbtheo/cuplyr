@@ -1,16 +1,50 @@
 # Join operations for tbl_gpu
 
+#' Is a `join_by()` object non-equi?
+#'
+#' `TRUE` only for a real `dplyr_join_by` object (class from `dplyr::join_by()`)
+#' with at least one condition other than `"=="` (an inequality/rolling
+#' condition, e.g. `join_by(a >= b)`, `join_by(between(...))`) or any
+#' `filter` other than `"none"` (a `closest()` join). Empirically verified
+#' against dplyr 1.2.1 (`str(join_by(...))` for `join_by(a)`, `join_by(a ==
+#' b, c >= d)`, `join_by(x$a == y$b)`, `join_by(between(a, lo, hi))`,
+#' `join_by(closest(a >= b))`, `join_by(within(...))`, `join_by(overlaps(...))`):
+#' the object is a PRE-NORMALIZED `list(exprs, condition, filter, x, y)`
+#' where `condition`/`filter`/`x`/`y` are already parallel, per-condition
+#' character vectors (NOT a single scalar `filter` -- `between()`/`within()`/
+#' `overlaps()` each pre-expand to two `condition` entries with `filter =
+#' c("none", "none")`, and mixing `closest()` with a plain equi condition in
+#' the same call, e.g. `join_by(closest(a >= b), c == d)`, produces `filter =
+#' c("max", "none")`). This function's "any" check is deliberate: a `join_by()`
+#' call mixing an equi condition with even ONE non-equi/closest condition
+#' must route the WHOLE join to the CPU fallback (see the callers in this
+#' file), since there is no such thing as a partially-equi join in this
+#' package's hash-join path.
+#' @keywords internal
+join_by_is_non_equi <- function(by) {
+  inherits(by, "dplyr_join_by") &&
+    (any(by$condition != "==") || any(by$filter != "none"))
+}
+
 #' Parse a join specification into a 4-vector spec
 #'
 #' Returns `list(left, right, op, filter)`: `left`/`right`/`op` are parallel
 #' character vectors (one entry per key/condition pair), `filter` is a single
 #' scalar describing the whole join's filter semantics (`"none"` for a plain
-#' equi/inequality join; `"max"`/`"min"` for `closest()` joins -- Phase 7 J7).
-#' Every form this function currently understands (`NULL`, an unnamed
-#' character vector, or a named character vector) produces an all-equi spec:
-#' `op` is `"=="` for every key and `filter` is `"none"`. `join_by()` objects
-#' (class `dplyr_join_by`) are rejected for now -- non-equi condition support
-#' lands in Phase 7 J7, which lifts this rejection.
+#' equi join; `"max"`/`"min"` for `closest()` joins -- Phase 7 J7, which never
+#' reach this function, see below). Every form this function currently
+#' understands (`NULL`, an unnamed character vector, a named character
+#' vector, or an EQUI-ONLY `join_by()` object) produces an all-equi spec:
+#' `op` is `"=="` for every key and `filter` is `"none"`. A non-equi
+#' `join_by()` object (any condition other than `"=="`, or any `closest()`
+#' filter -- see `join_by_is_non_equi()`) is never passed here: every join
+#' verb checks `join_by_is_non_equi()` FIRST and routes straight to the CPU
+#' fallback (`gpu_fallback()`, mirroring `nest_join()`'s two-table fallback
+#' shape in `R/fallback.R`) before ever calling `parse_join_by()` -- Phase 7
+#' J7 replaces that fallback with a native `mixed_join`/`conditional_join`
+#' lowering, at which point this function gains a real non-equi branch. The
+#' `stop()` below is an internal-only safety net (unreachable from any join
+#' verb in this package) in case that invariant is ever violated.
 #' @keywords internal
 parse_join_by <- function(by, x, y) {
   if (is.null(by)) {
@@ -24,7 +58,14 @@ parse_join_by <- function(by, x, y) {
   }
 
   if (inherits(by, "dplyr_join_by")) {
-    stop("`join_by()` is not supported yet for tbl_gpu joins.", call. = FALSE)
+    if (join_by_is_non_equi(by)) {
+      stop("Internal error: non-equi join_by() must be routed to the CPU ",
+           "fallback before reaching parse_join_by() (Phase 7 J7 will ",
+           "replace this with a native non-equi lowering path).",
+           call. = FALSE)
+    }
+    return(list(left = by$x, right = by$y,
+                op = by$condition, filter = "none"))
   }
 
   if (is.character(by) && is.null(names(by))) {
@@ -145,29 +186,130 @@ validate_key_types <- function(x, y, join_spec) {
   }
 }
 
+#' Port of `dplyr:::add_suffixes()`
+#'
+#' The real column-naming primitive behind every dplyr join's suffix
+#' handling (verified via `body(dplyr:::add_suffixes)` against dplyr 1.2.1)
+#' -- NOT a one-shot "does this name collide with the other side" check like
+#' `build_join_output_info()` used before Phase 7 J6. `x` is the set of
+#' names to (maybe) suffix; `y` is the "cross" name set to disambiguate
+#' against (the other side's names, plus, for the ignore-aware caller below,
+#' this side's own ignored/key names); `suffix` is appended to any entry of
+#' `x` that collides with `c(y, x)`, and the check is REPEATED (each
+#' iteration re-checks the whole combined vector for duplicates) until every
+#' entry is unique -- so an "already-taken suffixed name" (e.g. left already
+#' has a literal `val.y` column when `val` needs a `.y` suffix from a
+#' collision with the right table) gets a SECOND suffix (`val.y.y`),
+#' matching dplyr exactly rather than silently producing a duplicate output
+#' column name. `suffix` equal to the literal empty string `""` is dplyr's
+#' own escape hatch: `identical(suffix, "")` short-circuits to `x`
+#' unchanged, even when that leaves a genuine name collision -- dplyr
+#' resolves that downstream via a name-keyed column *overwrite*
+#' (`join_mutate()`'s `out[names(y_out)] <- vec_slice(y_out, ...)`, which
+#' replaces same-named columns in place rather than erroring or renaming);
+#' see `join_output_would_collide()` below for how cuplyr detects
+#' this specific degenerate case and routes around it (CPU fallback) instead
+#' of trying to reproduce a column-count-changing overwrite in the native
+#' gather path.
+#' @keywords internal
+add_suffixes <- function(x, y, suffix) {
+  if (length(x) == 0) {
+    return(x)
+  }
+  if (identical(suffix, "")) {
+    return(x)
+  }
+
+  combined <- c(y, x)
+  dup <- duplicated(combined)
+  while (any(dup)) {
+    combined[dup] <- paste0(combined[dup], suffix)
+    dup <- duplicated(combined)
+  }
+
+  n_y <- length(y)
+  combined[seq.int(n_y + 1L, n_y + length(x))]
+}
+
+#' Compute a join's output column names/types/origin, mirroring
+#' `dplyr:::join_cols()` exactly (Phase 7 J6)
+#'
+#' Ported directly from dplyr 1.2.1's own `join_cols()` (verified via
+#' `body(dplyr:::join_cols)`), specialized to this package's always-resolved
+#' `keep` (never `NULL` here -- every join verb calls `resolve_join_keep()`
+#' first, and for an all-equi spec dplyr's own `keep = NULL` and `keep =
+#' FALSE` branches of `join_cols()` are identical, since both ignore exactly
+#' `join_spec$left`/`join_spec$right`; only a genuinely non-equi spec would
+#' make them diverge, and those never reach here -- see
+#' `join_by_is_non_equi()`).
+#'
+#' `keep = TRUE`: every column on both sides is suffixed uniformly via
+#' `add_suffixes()` (no column is "ignored"), and nothing is dropped from
+#' the right table -- reproduces e.g. `join_by(a)` + `keep = TRUE` giving
+#' `a.x`/`a.y` for BOTH copies of the shared key.
+#'
+#' `keep = FALSE`: the join KEY columns (`join_spec$left`/`join_spec$right`)
+#' are excluded from suffixing entirely (they keep their bare original name,
+#' since they collapse to one coalesced column) and the right table's key
+#' columns are dropped from the output. Every other column is suffixed via
+#' `add_suffixes()` against the OTHER side's RAW (pre-suffix) names plus (for
+#' the side being checked) that side's own ignored key names -- exactly
+#' dplyr's own cross-set (`c(x_ignore, y_aux)` for the left side, plain
+#' `x_names` for the right side).
+#' @keywords internal
 build_join_output_info <- function(left_schema, right_schema, join_spec,
                                    suffix = c(".x", ".y"), keep = FALSE) {
   left_names <- left_schema$names
   right_names <- right_schema$names
 
-  drop_right <- if (!isTRUE(keep)) join_spec$right else character(0)
+  if (isTRUE(keep)) {
+    left_out_names <- add_suffixes(left_names, right_names, suffix[1])
+    right_out_names <- add_suffixes(right_names, left_names, suffix[2])
+    right_keep <- right_names
+  } else {
+    x_ignore <- join_spec$left
+    y_aux <- setdiff(right_names, c(join_spec$left, join_spec$right))
+    x_check <- !left_names %in% x_ignore
 
-  right_keep <- setdiff(right_names, drop_right)
-  conflicts <- intersect(left_names, right_keep)
+    left_out_names <- left_names
+    left_out_names[x_check] <- add_suffixes(left_names[x_check],
+                                            c(x_ignore, y_aux), suffix[1])
 
-  left_out <- ifelse(left_names %in% conflicts,
-                     paste0(left_names, suffix[1]),
-                     left_names)
-  right_out <- ifelse(right_keep %in% conflicts,
-                      paste0(right_keep, suffix[2]),
-                      right_keep)
+    right_out_all <- add_suffixes(right_names, left_names, suffix[2])
+    keep_idx <- !right_names %in% join_spec$right
+    right_keep <- right_names[keep_idx]
+    right_out_names <- right_out_all[keep_idx]
+  }
 
   list(
-    names = c(left_out, right_out),
+    names = c(left_out_names, right_out_names),
     types = c(left_schema$types, right_schema$types[match(right_keep, right_names)]),
-    origin = c(rep("left", length(left_out)), rep("right", length(right_out))),
+    origin = c(rep("left", length(left_out_names)), rep("right", length(right_out_names))),
     source_names = c(left_names, right_keep)
   )
+}
+
+#' Would this join's output have a duplicate column name?
+#'
+#' With the `add_suffixes()` port above, this can only happen when at least
+#' one `suffix` element is the literal empty string `""` AND that side's
+#' would-be-suffixed name genuinely collides with the other side (see
+#' `add_suffixes()`'s own roxygen for why `""` is special: dplyr itself
+#' resolves the resulting name clash via a name-keyed column *overwrite*
+#' downstream in `join_mutate()`, not a rename or an error) -- with any
+#' other suffix value, `add_suffixes()`'s iterate-until-unique loop
+#' guarantees `build_join_output_info()`'s `names` has no duplicates.
+#' Callers use this to detect the degenerate case up front (computable from
+#' schemas alone, no GPU work needed) and route the whole join to the CPU
+#' fallback instead, since cuplyr's fixed-column-count gather has no native
+#' way to reproduce "the later column's data silently replaces the earlier
+#' same-named column, and the total column count drops by one".
+#' @keywords internal
+join_output_would_collide <- function(left_schema, right_schema, join_spec,
+                                      suffix, keep) {
+  info <- build_join_output_info(left_schema, right_schema, join_spec,
+                                 suffix = suffix, keep = keep)
+  anyDuplicated(info$names) > 0
 }
 
 build_join_schema <- function(left_schema, right_schema, join_spec,
@@ -340,6 +482,54 @@ validate_join_na_matches <- function(na_matches) {
          call. = FALSE)
   }
   na_matches
+}
+
+#' Describe a `suffix=` value the way dplyr's own bad-value message would
+#'
+#' A minimal, purpose-built port of just enough of dplyr's
+#' `obj_type_friendly()`-driven text (walked via
+#' `body(dplyr:::standardise_join_suffix)`, empirically verified against
+#' dplyr 1.2.1's actual message for `character(0)`/a length-1 string/a
+#' length-3 vector/a bare `NA`) to reproduce `validate_join_suffix()`'s
+#' messages exactly -- not a general-purpose friendly-type formatter.
+#' @keywords internal
+describe_suffix_value <- function(x) {
+  if (!is.character(x)) {
+    if (length(x) == 1 && is.na(x)) {
+      return("`NA`")
+    }
+    kind <- if (is.logical(x)) "logical" else if (is.integer(x)) "integer" else
+      if (is.double(x)) "double" else typeof(x)
+    return(sprintf("a %s vector", kind))
+  }
+  if (length(x) == 0) {
+    return("an empty character vector")
+  }
+  if (length(x) == 1) {
+    return(sprintf('the string "%s"', x))
+  }
+  "a character vector"
+}
+
+#' Validate `suffix=`, replicating dplyr's exact bad-value text
+#'
+#' Mirrors `dplyr:::standardise_join_suffix()` exactly (verified empirically
+#' against dplyr 1.2.1): must be a length-2 character vector with no `NA`
+#' element. A single literal `""` element is legal (it means "don't suffix
+#' this side at all" -- see `add_suffixes()`'s own roxygen) and is NOT
+#' rejected here.
+#' @keywords internal
+validate_join_suffix <- function(suffix) {
+  if (!is.character(suffix) || length(suffix) != 2) {
+    rlang::abort(sprintf(
+      "`suffix` must be a character vector of length 2, not %s of length %d.",
+      describe_suffix_value(suffix), length(suffix)
+    ))
+  }
+  if (anyNA(suffix)) {
+    rlang::abort("`suffix` can't be `NA`.")
+  }
+  suffix
 }
 
 # =============================================================================
@@ -632,6 +822,35 @@ check_join_cardinality <- function(diag, join_type, multiple, relationship, unma
   invisible(NULL)
 }
 
+#' Route a join call to the transparent CPU fallback (Phase 7 J6)
+#'
+#' Shared by every mutating/semi/anti join verb below for the two shapes the
+#' native GPU path can't (yet, or ever) handle:
+#'   1. A non-equi `join_by()` object (`join_by_is_non_equi()` is `TRUE`) --
+#'      Phase 7 J7 replaces this with a native `mixed_join`/`conditional_join`
+#'      lowering; until then this keeps user code working exactly like every
+#'      other not-yet-native verb (mirrors `nest_join()`'s two-table fallback
+#'      shape, `R/fallback.R`: collect the OTHER table, then run the real
+#'      dplyr verb on `.data`'s own materialized/grouped tibble via
+#'      `gpu_fallback()`).
+#'   2. The `suffix = c("", ...)` degenerate name-collision case detected by
+#'      `join_output_would_collide()` -- dplyr resolves this via a
+#'      name-keyed column overwrite this package's fixed-column-count gather
+#'      can't reproduce natively; falls back rather than emitting a wrong or
+#'      duplicate-named result.
+#' `args` is the full named-argument list the corresponding `dplyr::<verb>()`
+#' call needs (using the ORIGINAL, not yet `resolve_join_keep()`-resolved,
+#' user-facing values where relevant, e.g. `by`/`keep`, so dplyr's own
+#' defaulting/validation runs exactly as it would for a bare call) --
+#' `y_tbl` is collected once and reused across every retry-shaped caller.
+#' @keywords internal
+join_route_to_fallback <- function(verb_name, verb_fn, x, y, args) {
+  y_tbl <- collect(y)
+  gpu_fallback(verb_name, x, function(tbl) {
+    rlang::inject(verb_fn(tbl, y_tbl, !!!args))
+  })
+}
+
 #' @export
 #' @importFrom dplyr left_join
 left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
@@ -646,6 +865,14 @@ left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
     }
   }
 
+  if (join_by_is_non_equi(by)) {
+    return(join_route_to_fallback("left_join", dplyr::left_join, x, y, list(
+      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
+      multiple = multiple, unmatched = unmatched, relationship = relationship
+    )))
+  }
+
+  suffix <- validate_join_suffix(suffix)
   na_matches <- validate_join_na_matches(na_matches)
   multiple <- validate_join_multiple(multiple)
   unmatched <- validate_join_unmatched(unmatched, max_length = 1L)
@@ -656,6 +883,13 @@ left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
   keep <- resolve_join_keep(keep, join_spec)
+
+  if (join_output_would_collide(x$schema, y$schema, join_spec, suffix, keep)) {
+    return(join_route_to_fallback("left_join", dplyr::left_join, x, y, list(
+      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
+      multiple = multiple, unmatched = unmatched, relationship = relationship
+    )))
+  }
 
   push_join("left", x, y, join_spec, suffix = suffix, keep = keep,
            na_matches = na_matches, multiple = multiple, unmatched = unmatched,
@@ -676,6 +910,14 @@ inner_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
     }
   }
 
+  if (join_by_is_non_equi(by)) {
+    return(join_route_to_fallback("inner_join", dplyr::inner_join, x, y, list(
+      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
+      multiple = multiple, unmatched = unmatched, relationship = relationship
+    )))
+  }
+
+  suffix <- validate_join_suffix(suffix)
   na_matches <- validate_join_na_matches(na_matches)
   multiple <- validate_join_multiple(multiple)
   unmatched <- validate_join_unmatched(unmatched, max_length = 2L)
@@ -686,6 +928,13 @@ inner_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
   keep <- resolve_join_keep(keep, join_spec)
+
+  if (join_output_would_collide(x$schema, y$schema, join_spec, suffix, keep)) {
+    return(join_route_to_fallback("inner_join", dplyr::inner_join, x, y, list(
+      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
+      multiple = multiple, unmatched = unmatched, relationship = relationship
+    )))
+  }
 
   push_join("inner", x, y, join_spec, suffix = suffix, keep = keep,
            na_matches = na_matches, multiple = multiple, unmatched = unmatched,
@@ -706,11 +955,19 @@ full_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
     }
   }
 
+  if (join_by_is_non_equi(by)) {
+    return(join_route_to_fallback("full_join", dplyr::full_join, x, y, list(
+      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
+      multiple = multiple, relationship = relationship
+    )))
+  }
+
   # full_join() has no `unmatched=` in dplyr (every row, matched or not, is
   # always kept), so it isn't accepted here either -- passing it hits `...`
   # and is silently ignored, same as dplyr's own `...`-must-be-empty dots
   # (dplyr hard-errors on that; this is a narrower gap, not a behavior this
   # task needs to close).
+  suffix <- validate_join_suffix(suffix)
   na_matches <- validate_join_na_matches(na_matches)
   multiple <- validate_join_multiple(multiple)
   relationship <- validate_join_relationship(relationship)
@@ -720,6 +977,13 @@ full_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
   keep <- resolve_join_keep(keep, join_spec)
+
+  if (join_output_would_collide(x$schema, y$schema, join_spec, suffix, keep)) {
+    return(join_route_to_fallback("full_join", dplyr::full_join, x, y, list(
+      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
+      multiple = multiple, relationship = relationship
+    )))
+  }
 
   push_join("full", x, y, join_spec, suffix = suffix, keep = keep,
            na_matches = na_matches, multiple = multiple, unmatched = "drop",
@@ -740,6 +1004,14 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
     }
   }
 
+  if (join_by_is_non_equi(by)) {
+    return(join_route_to_fallback("right_join", dplyr::right_join, x, y, list(
+      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
+      multiple = multiple, unmatched = unmatched, relationship = relationship
+    )))
+  }
+
+  suffix <- validate_join_suffix(suffix)
   na_matches <- validate_join_na_matches(na_matches)
   multiple <- validate_join_multiple(multiple)
   unmatched <- validate_join_unmatched(unmatched, max_length = 1L)
@@ -750,6 +1022,13 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
   validate_join_cols(join_spec$right, y, "Right")
   validate_key_types(x, y, join_spec)
   keep <- resolve_join_keep(keep, join_spec)
+
+  if (join_output_would_collide(x$schema, y$schema, join_spec, suffix, keep)) {
+    return(join_route_to_fallback("right_join", dplyr::right_join, x, y, list(
+      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
+      multiple = multiple, unmatched = unmatched, relationship = relationship
+    )))
+  }
 
   # right_join(x, y) is native (Phase 7 J4): gpu_right_join()
   # (src/ops_join.cpp) computes matched (x, y) pairs via cudf::inner_join()
@@ -793,6 +1072,12 @@ semi_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
     }
   }
 
+  if (join_by_is_non_equi(by)) {
+    return(join_route_to_fallback("semi_join", dplyr::semi_join, x, y, list(
+      by = by, na_matches = na_matches
+    )))
+  }
+
   na_matches <- validate_join_na_matches(na_matches)
 
   join_spec <- parse_join_by(by, x, y)
@@ -817,6 +1102,12 @@ anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
     } else {
       stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
     }
+  }
+
+  if (join_by_is_non_equi(by)) {
+    return(join_route_to_fallback("anti_join", dplyr::anti_join, x, y, list(
+      by = by, na_matches = na_matches
+    )))
   }
 
   na_matches <- validate_join_na_matches(na_matches)
@@ -889,10 +1180,22 @@ cross_join.tbl_gpu <- function(x, y, ..., copy = FALSE, suffix = c(".x", ".y")) 
          call. = FALSE)
   }
 
+  suffix <- validate_join_suffix(suffix)
+
   # No keys at all -- an empty spec, `keep = TRUE` so build_join_output_info()
   # suffixes every common name (see roxygen above).
   join_spec <- list(left = character(0), right = character(0),
                     op = character(0), filter = "none")
+
+  # Phase 7 J6: the same `suffix = c("", ...)` degenerate name-collision
+  # case the mutating joins guard against (see `join_output_would_collide()`)
+  # -- computable from schemas alone, routed to the CPU fallback rather than
+  # emitting a wrong/duplicate-named result.
+  if (join_output_would_collide(x$schema, y$schema, join_spec, suffix, TRUE)) {
+    return(join_route_to_fallback("cross_join", dplyr::cross_join, x, y, list(
+      suffix = suffix
+    )))
+  }
 
   push_join("cross", x, y, join_spec, suffix = suffix, keep = TRUE,
            na_matches = "na")
