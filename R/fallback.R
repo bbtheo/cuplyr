@@ -151,6 +151,22 @@ NULL
 #' @rdname fallback-verbs
 #' @export
 #' @importFrom dplyr reframe
+#
+# Phase 6, task 4 DECISION (verified empirically against dplyr 1.2.1):
+# reframe() returns an ARBITRARY number of rows per group (e.g.
+# `reframe(x = range(x))` returns 2 rows/group, `reframe(q = quantile(x,
+# c(.25, .5, .75)))` returns 3) -- a fundamentally different output shape
+# from summarise()'s fixed one-row-per-group contract, which
+# gpu_summarise()'s single groupby::aggregate() call (and every AST/schema
+# assumption built on top of it) is not designed to produce. Building this
+# GPU-natively needs real per-group variable-length output (a
+# `collect_list()`-style aggregation + explode, or equivalent), which needs
+# list-column support cuplyr doesn't have until Phase 11 -- deliberately
+# staying on the CPU fallback below rather than special-casing a narrow
+# "common case" (e.g. a multi-probability quantile()), since that would
+# still need the same variable-row-count machinery in miniature and
+# wouldn't generalize to reframe()'s actual contract (any function
+# returning any number of values per group).
 reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(.by)

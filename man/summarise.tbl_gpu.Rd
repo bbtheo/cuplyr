@@ -115,6 +115,18 @@ summed as \code{TRUE}/\code{FALSE} -> \code{1}/\code{0}, matching R's own coerci
 keep it logical. An expression shape the IR doesn't recognize raises the
 same "Invalid aggregation expression" error as any other unsupported
 aggregation shape.
+
+\code{column} may also be (or contain) a WINDOW-function call (Phase 6, task
+4), e.g. \code{last(cumsum(v))}, \code{sum(v - lag(v, default = 0))},
+\code{mean(cumsum(v) - lag(cumsum(v)))}: the window function is computed PER
+GROUP first (over each group's own row order, using the same
+window-decomposition engine \code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}} uses), and the
+aggregation then reduces that per-row window result -- matching dplyr's
+own two-step semantics exactly. Only ONE aggregation's own argument tree
+is decomposed this way: combining TWO SEPARATE aggregation calls at the
+dot level (\code{sum(cumsum(x)) - mean(y)}) is not supported (the same
+"Invalid aggregation expression" error as any other dot that isn't a
+bare \code{fn(single_arg)} shape).
 }
 
 \subsection{NA handling}{
@@ -128,6 +140,20 @@ with even one \code{NA} value of \code{x}, matching real dplyr exactly. Pass
 values instead (cudf's own native aggregation behavior). \code{n()} is
 unaffected by \verb{na.rm=} (it counts every row regardless of nulls, like
 dplyr's own \code{n()}).
+
+When \code{na.rm = TRUE} and a group's aggregated column is ENTIRELY \code{NA}
+(Phase 6, task 4), the result matches base R's own empty-vector
+reduction identity, exactly like real dplyr: \code{sum()} -> \code{0}, \code{mean()} ->
+\code{NaN}, \code{min()} -> \code{Inf}, \code{max()} -> \code{-Inf} (real dplyr also surfaces a
+base-R warning for \code{min()}/\code{max()} here -- cuplyr does not replicate that
+warning, only the value), \code{sd()}/\code{var()}/\code{median()} -> \code{NA} (their
+natural result already, no special-casing needed). One documented
+boundary: \code{min()}/\code{max()}'s \code{Inf}/\code{-Inf} identity can only be
+represented in a \code{FLOAT64} column; over an INTEGER column (where real
+dplyr promotes the WHOLE result column to double the instant any group
+needs this identity -- a data-dependent type decision this package's
+parse-time schema inference can't make), the all-\code{NA}-group result stays
+\code{NA} rather than promoting.
 
 \code{quantile()} diverges from the mean/sum/.../median family: matching base
 R's own \code{quantile.default()} exactly, \code{na.rm = FALSE} (the default) with

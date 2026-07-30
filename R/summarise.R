@@ -97,6 +97,18 @@
 #' same "Invalid aggregation expression" error as any other unsupported
 #' aggregation shape.
 #'
+#' `column` may also be (or contain) a WINDOW-function call (Phase 6, task
+#' 4), e.g. `last(cumsum(v))`, `sum(v - lag(v, default = 0))`,
+#' `mean(cumsum(v) - lag(cumsum(v)))`: the window function is computed PER
+#' GROUP first (over each group's own row order, using the same
+#' window-decomposition engine [mutate.tbl_gpu()] uses), and the
+#' aggregation then reduces that per-row window result -- matching dplyr's
+#' own two-step semantics exactly. Only ONE aggregation's own argument tree
+#' is decomposed this way: combining TWO SEPARATE aggregation calls at the
+#' dot level (`sum(cumsum(x)) - mean(y)`) is not supported (the same
+#' "Invalid aggregation expression" error as any other dot that isn't a
+#' bare `fn(single_arg)` shape).
+#'
 #' ## NA handling
 #' `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()`/`median()` all match R's
 #' own `na.rm = FALSE` default (Phase 6, tasks 6.1/6.2): if a group contains
@@ -107,6 +119,20 @@
 #' values instead (cudf's own native aggregation behavior). `n()` is
 #' unaffected by `na.rm=` (it counts every row regardless of nulls, like
 #' dplyr's own `n()`).
+#'
+#' When `na.rm = TRUE` and a group's aggregated column is ENTIRELY `NA`
+#' (Phase 6, task 4), the result matches base R's own empty-vector
+#' reduction identity, exactly like real dplyr: `sum()` -> `0`, `mean()` ->
+#' `NaN`, `min()` -> `Inf`, `max()` -> `-Inf` (real dplyr also surfaces a
+#' base-R warning for `min()`/`max()` here -- cuplyr does not replicate that
+#' warning, only the value), `sd()`/`var()`/`median()` -> `NA` (their
+#' natural result already, no special-casing needed). One documented
+#' boundary: `min()`/`max()`'s `Inf`/`-Inf` identity can only be
+#' represented in a `FLOAT64` column; over an INTEGER column (where real
+#' dplyr promotes the WHOLE result column to double the instant any group
+#' needs this identity -- a data-dependent type decision this package's
+#' parse-time schema inference can't make), the all-`NA`-group result stays
+#' `NA` rather than promoting.
 #'
 #' `quantile()` diverges from the mean/sum/.../median family: matching base
 #' R's own `quantile.default()` exactly, `na.rm = FALSE` (the default) with
@@ -794,6 +820,28 @@ preprocess_agg_expressions <- function(.data, dots) {
     arg_quo <- rlang::new_quosure(arg_expr, env)
     ir <- ir_parse_quo(arg_quo, current_schema(working_data))
 
+    # Phase 6, task 4: windows-inside-summarise (`sum(cumsum(v))`,
+    # `last(cumsum(v))`, ...) -- checked BEFORE the ir_is_const() check below,
+    # since a window call with no column argument at all (e.g. bare
+    # `row_number()`) has no ir_cols() of its own and would otherwise be
+    # (wrongly) treated as a constant subtree. See resolve_agg_window_arg()'s
+    # own docs for the full derivation and scope boundary.
+    if (!is.null(ir) && ir_has_window(ir)) {
+      if (has_pending_ops(working_data)) {
+        working_data <- compute(working_data)
+        cuplyr_fallback_notify("summarise", rlang::quo_text(quo))
+      }
+
+      resolved <- resolve_agg_window_arg(working_data, ir, decomposed$fn_name, i)
+      working_data <- resolved$data
+
+      new_dots[[i]] <- rlang::new_quosure(
+        as.call(list(as.name(decomposed$fn_name), as.name(resolved$col_name))),
+        rlang::base_env()
+      )
+      next
+    }
+
     if (is.null(ir) || ir_is_const(ir)) {
       # Either genuinely unparseable by the expression IR, or a constant
       # subtree with no column reference at all (e.g. `sum(5)`): neither is
@@ -829,6 +877,102 @@ preprocess_agg_expressions <- function(.data, dots) {
   }
 
   list(data = working_data, dots = new_dots)
+}
+
+# Internal: windows-inside-summarise (Phase 6, task 4) -- resolve an
+# aggregation's OWN argument tree, already confirmed to contain a window-
+# function call (`ir_has_window(ir)`), into a plain materialized column
+# reference, by reusing the exact window-decomposition machinery
+# `mutate()`'s own window path drives (`plan_window_stages()`/
+# `decompose_window_group()`, `R/window.R`, Phase 5): `summarise(z =
+# last(cumsum(v)))` verified empirically against dplyr 1.2.1 to compute
+# `cumsum(v)` PER GROUP first (over each group's own row order), THEN
+# reduce that per-row result with `last()` -- exactly the two-step shape
+# `plan_window_stages()` (window stage(s) materializing a temp column) +
+# the aggregation's OWN reduction (parse_aggregations(), unchanged) already
+# gives for free once the window stages are pushed onto `working_data`
+# BEFORE the enclosing `summarise()` node.
+#
+# Windowing happens against `working_data`'s OWN current `$groups` -- the
+# SAME grouping `gpu_summarise()` will reduce over moments later (whether
+# real `group_by()` columns or, for `summarise(.by=)`, the internal
+# `summarise_by_desugar()` call's own `by_cols` grouping) -- so the window
+# "sees" exactly the rows/groups the aggregation itself will reduce.
+#
+# Scope boundary (documented, not a silent gap): only ONE aggregation's OWN
+# argument tree is decomposed at a time. Arbitrary window nesting WITHIN
+# that one argument is fully supported (same machinery `mutate()` uses for
+# one dot) -- `sum(cumsum(x))`, `last(cumsum(v))`, `sum(v - lag(v, default =
+# 0))`, `mean(cumsum(v) - lag(cumsum(v)))` (two window calls sharing a
+# CSE'd subexpression, deduplicated by `ir_extract_windows()`'s own hash-
+# keyed cache) all work. Combining TWO SEPARATE aggregation calls at the
+# DOT level (`summarise(z = sum(cumsum(x)) - mean(y))`) is explicitly not
+# attempted: `decompose_agg_call()` only ever recognizes a bare
+# `fn(single_arg)` dot shape in the first place, so a dot like that never
+# even reaches this function -- it falls straight through to
+# `parse_aggregations()`'s pre-existing "Invalid aggregation expression"
+# error, unchanged (summarise() has no CPU fallback at all, per this file's
+# module docs, so there is nowhere else for such a dot to go).
+#
+# An unlowerable window spec inside the argument (currently only
+# `roll_median()`, per `window_spec_lowerable()`) is rejected with a clear,
+# summarise()-specific error BEFORE any stage is pushed (mirroring
+# `mutate_window()`'s own "validate every spec before executing any of
+# them" discipline, R/mutate.R) -- summarise() has no CPU fallback to drop
+# back to the way `mutate_window_fallback()` can, so this is a hard error
+# rather than a silent re-route.
+#
+# @param working_data A tbl_gpu (already materialized -- no pending lazy
+#   ops; the caller guarantees this, same precondition as
+#   `create_temp_column()`)
+# @param ir A parsed (unbound) IR node for the aggregation's argument,
+#   confirmed by the caller to contain a window call (`ir_has_window(ir)`)
+# @param fn_name Character scalar, the aggregation function's OWN name
+#   (e.g. `"sum"`, `"last"`) -- used only to decide `keep_bool` for
+#   any()/all(), identically to `create_temp_column()`'s own parameter of
+#   the same name, if the post-decomposition expression still needs its
+#   own temp-column computation
+# @param dot_index Integer, this dot's 1-based position in the summarise()
+#   call -- used only for a readable, collision-free temp column name if a
+#   `create_temp_column()` step ends up needed
+# @return `list(data = <tbl_gpu, with every window stage already pushed>,
+#   col_name = <character scalar, a real column name in the returned
+#   data's schema, safe to reference directly as the aggregation's own
+#   argument>)`
+# @keywords internal
+resolve_agg_window_arg <- function(working_data, ir, fn_name, dot_index) {
+  exprs <- stats::setNames(list(ir), "..agg_arg..")
+  plan <- plan_window_stages(exprs, current_schema(working_data), working_data$groups)
+
+  all_specs <- unlist(lapply(plan$stages, `[[`, "specs"), recursive = FALSE)
+  unlowerable <- Filter(Negate(window_spec_lowerable), all_specs)
+  if (length(unlowerable) > 0) {
+    stop(
+      "summarise() does not support ", unlowerable[[1]]$fn,
+      "() inside an aggregation expression.",
+      call. = FALSE
+    )
+  }
+
+  for (stage in plan$stages) {
+    if (length(stage$pre) > 0) {
+      working_data <- push_op(working_data, ast_mutate(input_node(working_data), stage$pre))
+    }
+    working_data <- push_op(
+      working_data, ast_window(input_node(working_data), stage$specs, working_data$groups)
+    )
+  }
+
+  post_ir <- plan$post[["..agg_arg.."]]
+
+  if (identical(post_ir$kind, "col")) {
+    return(list(data = working_data, col_name = post_ir$name))
+  }
+
+  temp_col_name <- paste0(".temp_agg_win_", dot_index)
+  keep_bool <- fn_name %in% c("any", "all")
+  working_data <- create_temp_column(working_data, temp_col_name, post_ir, keep_bool = keep_bool)
+  list(data = working_data, col_name = temp_col_name)
 }
 
 # Internal: Create a temporary column from a parsed IR expression

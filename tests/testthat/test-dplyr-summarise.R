@@ -239,46 +239,166 @@ test_that("na.rm=TRUE and na.rm=FALSE aggregations on the SAME column in one sum
 })
 
 # =============================================================================
-# KNOWN GAP (out of scope for this task, not fixed here): na.rm=TRUE on a
-# group that is ENTIRELY NA
+# Phase 6, task 4: entirely-NA-group na.rm=TRUE identity values
+#
+# Real R's own sum(numeric(0)) is 0, mean(numeric(0)) is NaN,
+# min(numeric(0))/max(numeric(0)) are Inf/-Inf (both WITH a warning --
+# verified empirically, and confirmed dplyr::summarise() surfaces that
+# warning too, wrapped in its own "There was 1 warning in `summarise()`"
+# condition -- see the dedicated warning test below), and sd/var/median of
+# numeric(0) are all NA. dplyr's summarise(fn(x, na.rm = TRUE)) inherits
+# this exact empty-vector convention when a group's `x` is entirely NA (so
+# na.rm=TRUE reduces over zero values). cudf's own null-excluding groupby
+# aggregations (SUM/MEAN/MIN/MAX with EXCLUDE null policy, which na.rm=TRUE
+# routes straight through to) return NULL for a wholly-excluded group
+# instead of these identity values -- fixed in gpu_summarise()
+# (src/ops_groupby.cpp) with an extra per-group "valid (non-null) count"
+# request, substituting the identity scalar via copy_if_else() wherever
+# that count is 0. sd()/var()/median() need NO fix at all: cudf's NULL
+# result for a wholly-excluded group already collects to NA, which is
+# already base R's own sd(numeric(0))/var(numeric(0))/median(numeric(0))
+# value -- verified empirically above, confirmed unaffected by this task.
+#
+# Boundary (documented, not fixed): min()/max()'s identity (Inf/-Inf) can
+# only be represented in a FLOAT64 output column. Real dplyr promotes an
+# INTEGER column's min()/max() result to double THE MOMENT any group needs
+# this identity (verified empirically -- see the boundary test below), a
+# genuinely data-dependent type decision cuplyr's parse-time (schema-before-
+# execution) type inference architecture cannot make without a much larger
+# change (the column's output type would have to depend on whether any
+# GROUP turns out to be all-NA at runtime, not just the input's static
+# type). sum()'s identity (0) and mean()'s identity (NaN) have no such
+# problem (0 is exactly representable in the INT64 sum() already promotes
+# to; mean() is always FLOAT64 regardless of input type) and ARE fixed
+# unconditionally, including over an INTEGER column.
 # =============================================================================
 
-test_that("KNOWN GAP: na.rm=TRUE sum/mean/min/max on an all-NA group return NA, not base R's 0/NaN/Inf/-Inf", {
+test_that("summarise() na.rm=TRUE identity values match base R for an entirely-NA FLOAT64 group", {
   skip_if_no_gpu()
 
-  # Real R's own sum(numeric(0)) is 0, mean(numeric(0)) is NaN, and
-  # min(numeric(0))/max(numeric(0)) are Inf/-Inf (with a warning) -- dplyr's
-  # summarise(fn(x, na.rm = TRUE)) inherits this exact empty-vector
-  # convention when a group's `x` is entirely NA (so na.rm=TRUE reduces
-  # over zero values). cudf's own null-excluding groupby aggregations
-  # (MEAN/SUM/MIN/MAX with EXCLUDE null policy, which na.rm=TRUE routes
-  # straight through to) return NULL for a wholly-excluded group instead --
-  # a genuine, separate divergence from a DIFFERENT root cause than this
-  # task's whole-group-null (na.rm=FALSE) propagation rule, only reachable
-  # now that na.rm=TRUE parsing exists at all. Deliberately left unfixed
-  # here (would need an additional per-group "ALL values null" check, with
-  # a function-specific identity/Inf patch, for every na.rm=TRUE
-  # aggregation) -- tracked in scratchpad/workflow_state.md's "Parked /
-  # discovered" section for a future Phase 6 task. This test PINS the
-  # current (divergent) cuplyr behavior so a future fix has a clear,
-  # deliberately-failing regression test to flip.
   df <- data.frame(g = c(1, 1), x = c(NA_real_, NA_real_))
+  pipeline <- function(d) {
+    suppressWarnings(
+      d |>
+        dplyr::group_by(g) |>
+        dplyr::summarise(
+          s = sum(x, na.rm = TRUE), m = mean(x, na.rm = TRUE),
+          mn = min(x, na.rm = TRUE), mx = max(x, na.rm = TRUE),
+          sdv = sd(x, na.rm = TRUE), v = var(x, na.rm = TRUE),
+          md = median(x, na.rm = TRUE),
+          .groups = "drop"
+        )
+    )
+  }
+
+  expect_same_as_dplyr(df, pipeline, arrange_by = "g")
+  expect_same_as_dplyr_lazy(df, pipeline, arrange_by = "g")
+})
+
+test_that("summarise() na.rm=TRUE identity values only apply to the group(s) that are entirely NA", {
+  skip_if_no_gpu()
+
+  # Group 1 is entirely NA (identity values); group 2 has real data (cudf's
+  # ordinary NA-excluding aggregation, untouched by the fix).
+  df <- data.frame(g = c(1, 1, 2, 2), x = c(NA_real_, NA_real_, 5, 6))
+  pipeline <- function(d) {
+    suppressWarnings(
+      d |>
+        dplyr::group_by(g) |>
+        dplyr::summarise(
+          s = sum(x, na.rm = TRUE), m = mean(x, na.rm = TRUE),
+          mn = min(x, na.rm = TRUE), mx = max(x, na.rm = TRUE),
+          .groups = "drop"
+        )
+    )
+  }
+
+  expect_same_as_dplyr(df, pipeline, arrange_by = "g")
+})
+
+test_that("summarise() na.rm=TRUE identity values work ungrouped (whole table entirely NA)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = c(NA_real_, NA_real_, NA_real_))
+  pipeline <- function(d) {
+    suppressWarnings(
+      d |>
+        dplyr::summarise(
+          s = sum(x, na.rm = TRUE), m = mean(x, na.rm = TRUE),
+          mn = min(x, na.rm = TRUE), mx = max(x, na.rm = TRUE)
+        )
+    )
+  }
+
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("summarise() sum()'s na.rm=TRUE identity (0) is fixed even over an INTEGER column", {
+  skip_if_no_gpu()
+
+  df <- data.frame(g = c(1, 1), x = c(NA_integer_, NA_integer_))
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(g) |>
+      dplyr::summarise(s = sum(x, na.rm = TRUE), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(df, pipeline, arrange_by = "g")
+})
+
+test_that("real dplyr surfaces a base-R warning for min()/max(na.rm=TRUE) on an all-NA group (documented, not replicated by cuplyr)", {
+  # No GPU/tbl_gpu involved -- this test only documents real dplyr's own
+  # behavior (verified empirically), establishing what the deliberate
+  # decision above is about. cuplyr's fix produces the same VALUE (Inf/-Inf)
+  # but does not attempt to reproduce dplyr's own warning-wrapping condition
+  # machinery -- an informational/diagnostic detail, not a return value, and
+  # out of scope for GPU-kernel-level parity (same policy as the regroup
+  # message elsewhere in this file).
+  df <- data.frame(g = c(1, 1), x = c(NA_real_, NA_real_))
+
+  expect_warning(
+    dplyr::group_by(df, g) |> dplyr::summarise(mn = min(x, na.rm = TRUE), .groups = "drop"),
+    "no non-missing arguments"
+  )
+  expect_warning(
+    dplyr::group_by(df, g) |> dplyr::summarise(mx = max(x, na.rm = TRUE), .groups = "drop"),
+    "no non-missing arguments"
+  )
+})
+
+test_that("BOUNDARY (documented, not fixed): min()/max() na.rm=TRUE on an all-NA INTEGER group stays NA, unlike dplyr's Inf/-Inf-with-promotion", {
+  skip_if_no_gpu()
+
+  # See this section's own module doc above for the full rationale: real
+  # dplyr promotes the WHOLE output column to double the instant any group
+  # needs the Inf/-Inf identity, a data-dependent type decision cuplyr's
+  # static (pre-execution) schema inference can't make. This test PINS the
+  # current (divergent, but honest) cuplyr behavior for the INTEGER case so
+  # a future fix (were the schema architecture to support data-dependent
+  # promotion) has a clear, deliberately-failing regression test to flip.
+  df <- data.frame(g = c(1, 1), x = c(NA_integer_, NA_integer_))
   gpu_df <- tbl_gpu(df)
 
   result <- gpu_df |>
     dplyr::group_by(g) |>
     dplyr::summarise(
-      s = sum(x, na.rm = TRUE), m = mean(x, na.rm = TRUE),
       mn = min(x, na.rm = TRUE), mx = max(x, na.rm = TRUE),
       .groups = "drop"
     ) |>
     collect()
 
-  # Current (divergent) cuplyr behavior: NA for all four, not 0/NaN/Inf/-Inf.
-  expect_true(is.na(result$s))
-  expect_true(is.na(result$m))
+  # Documented divergence: NA (not Inf/-Inf as real dplyr promotes to).
   expect_true(is.na(result$mn))
   expect_true(is.na(result$mx))
+
+  # Confirm real dplyr's own behavior for the record (promotes to double).
+  oracle <- suppressWarnings(
+    dplyr::group_by(df, g) |>
+      dplyr::summarise(mn = min(x, na.rm = TRUE), mx = max(x, na.rm = TRUE), .groups = "drop")
+  )
+  expect_true(is.infinite(oracle$mn))
+  expect_true(is.infinite(oracle$mx))
 })
 
 # =============================================================================
@@ -1038,4 +1158,141 @@ test_that("chained summarise() intermediate group_vars() match dplyr's own peeli
 
   r3 <- suppressMessages(dplyr::summarise(r2, m3 = sum(m2)))
   expect_equal(r3$groups, character(0))
+})
+
+# =============================================================================
+# Phase 6, task 4: windows-inside-summarise (`summarise(z = last(cumsum(v)))`
+# style)
+#
+# Verified empirically against dplyr 1.2.1: the window function computes
+# per-group first (over the group's own row order), THEN the aggregation
+# reduces that per-row window result -- e.g. `summarise(z = last(cumsum(v)))`
+# on group (3, 1, 2) computes cumsum -> (3, 4, 6), then last() -> 6.
+# Implemented (R/summarise.R's `resolve_agg_window_arg()`) by running the
+# SAME window-decomposition machinery mutate()'s own window path uses
+# (`plan_window_stages()`, R/window.R, Phase 5) against the aggregation's
+# OWN argument tree, pushing the resulting `ast_window`/`ast_mutate` stages
+# onto the working data (grouped by `.data`'s OWN group_by()/`.by=`
+# grouping) BEFORE summarise()'s own aggregation runs over the
+# now-materialized window-result column.
+#
+# Scope boundary (documented, not a silent gap -- see resolve_agg_window_arg()'s
+# own docs): only ONE aggregation's OWN argument tree is decomposed --
+# arbitrary window nesting WITHIN that one argument works (`sum(v -
+# lag(v, default = 0))`, `mean(cumsum(v) - lag(cumsum(v)))`), but combining
+# TWO SEPARATE aggregation calls at the dot level (`sum(cumsum(x)) -
+# mean(y)`) is not attempted: `decompose_agg_call()` only ever recognizes a
+# bare `fn(single_arg)` dot shape in the first place, so that dot falls
+# through to `parse_aggregations()`'s pre-existing "Invalid aggregation
+# expression" error, unchanged (summarise() has no CPU fallback).
+# =============================================================================
+
+oracle_window_agg_df <- function() {
+  # Row order within each group deliberately not sorted by v, so a
+  # cumsum()-based test actually exercises row-order-sensitivity.
+  data.frame(g = c(1, 1, 1, 2, 2), v = c(3, 1, 2, 10, 20))
+}
+
+test_that("summarise() last(cumsum(v)) computes the window per-group then reduces (grouped, eager+lazy)", {
+  skip_if_no_gpu()
+
+  df <- oracle_window_agg_df()
+  pipeline <- function(d) {
+    d |> dplyr::group_by(g) |> dplyr::summarise(z = dplyr::last(cumsum(v)), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(df, pipeline, arrange_by = "g")
+  expect_same_as_dplyr_lazy(df, pipeline, arrange_by = "g")
+})
+
+test_that("summarise() sum(cumsum(v)) works (grouped and ungrouped)", {
+  skip_if_no_gpu()
+
+  df <- oracle_window_agg_df()
+  pipeline_grouped <- function(d) {
+    d |> dplyr::group_by(g) |> dplyr::summarise(z = sum(cumsum(v)), .groups = "drop")
+  }
+  pipeline_ungrouped <- function(d) d |> dplyr::summarise(z = sum(cumsum(v)))
+
+  expect_same_as_dplyr(df, pipeline_grouped, arrange_by = "g")
+  expect_same_as_dplyr(df, pipeline_ungrouped)
+})
+
+test_that("summarise() sum(v - lag(v, default = 0)) works (window call nested in arithmetic)", {
+  skip_if_no_gpu()
+
+  df <- oracle_window_agg_df()
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(g) |>
+      dplyr::summarise(z = sum(v - dplyr::lag(v, default = 0)), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(df, pipeline, arrange_by = "g")
+})
+
+test_that("summarise() first(row_number()) works (rank-family window inside an aggregation)", {
+  skip_if_no_gpu()
+
+  df <- oracle_window_agg_df()
+  pipeline <- function(d) {
+    d |> dplyr::group_by(g) |> dplyr::summarise(z = dplyr::first(dplyr::row_number()), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(df, pipeline, arrange_by = "g")
+})
+
+test_that("summarise() mean(cumsum(v) - lag(cumsum(v), default = 0)) works (two window calls sharing a CSE'd subexpression)", {
+  skip_if_no_gpu()
+
+  df <- oracle_window_agg_df()
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(g) |>
+      dplyr::summarise(
+        z = mean(cumsum(v) - dplyr::lag(cumsum(v), default = 0)),
+        .groups = "drop"
+      )
+  }
+
+  expect_same_as_dplyr(df, pipeline, arrange_by = "g")
+})
+
+test_that("summarise() window-inside-aggregation combined with an ordinary bare-column aggregation in the same call", {
+  skip_if_no_gpu()
+
+  df <- oracle_window_agg_df()
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(g) |>
+      dplyr::summarise(z = dplyr::last(cumsum(v)), m = mean(v), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(df, pipeline, arrange_by = "g")
+})
+
+test_that("summarise() window-inside-aggregation works with .by=", {
+  skip_if_no_gpu()
+
+  df <- oracle_window_agg_df()
+  pipeline <- function(d) dplyr::summarise(d, z = dplyr::last(cumsum(v)), .by = g)
+
+  expect_same_as_dplyr(df, pipeline, arrange_by = "z")
+})
+
+test_that("BOUNDARY (documented, not implemented): combining two SEPARATE aggregation calls at the dot level still errors", {
+  skip_if_no_gpu()
+
+  # sum(cumsum(x)) - mean(y): the dot itself is not a bare fn(single_arg)
+  # shape (decompose_agg_call() only recognizes ONE top-level call), so this
+  # never reaches resolve_agg_window_arg() at all -- same pre-existing
+  # "Invalid aggregation expression" error as any other unsupported dot
+  # shape, deliberately unchanged by this task.
+  df <- oracle_window_agg_df()
+  gpu_df <- tbl_gpu(df) |> dplyr::group_by(g)
+
+  expect_error(
+    dplyr::summarise(gpu_df, z = sum(cumsum(v)) - mean(v), .groups = "drop"),
+    "Invalid aggregation expression"
+  )
 })

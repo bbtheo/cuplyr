@@ -13,6 +13,8 @@
 #include <rmm/device_buffer.hpp>
 #include <rmm/mr/per_device_resource.hpp>
 
+#include <cmath>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -199,6 +201,92 @@ std::unique_ptr<cudf::column> null_out_groups_with_any_null(
     return cudf::copy_if_else(*null_scalar, agg_result->view(), has_any_null->view());
 }
 
+// Phase 6, task 4: entirely-NA-group na.rm=TRUE identity values.
+//
+// Base R's own empty-vector reductions (verified empirically, see
+// test-dplyr-summarise.R's own module doc): sum(numeric(0)) is 0,
+// mean(numeric(0)) is NaN, min(numeric(0))/max(numeric(0)) are Inf/-Inf
+// (both WITH a warning dplyr's summarise() itself surfaces, wrapped in its
+// own condition machinery -- NOT replicated here, informational only, see
+// this task's test file for the documented decision). sd()/var()/median()
+// need NO fix: their NULL-for-an-all-excluded-group result already
+// collects to NA, which IS base R's own sd(numeric(0))/var(numeric(0))/
+// median(numeric(0)) value.
+//
+// `agg_type` restricted to "sum"/"mean"/"min"/"max" by the caller (see
+// needs_identity_fix() below); na.rm=TRUE is a precondition (checked by the
+// caller too -- na.rm=FALSE's whole-group-null propagation,
+// agg_na_propagates(), is the entirely separate, already-existing fix for
+// the opposite flag value).
+bool needs_identity_fix(const std::string& agg_type, bool na_rm_flag,
+                         const cudf::column_view& value_view) {
+    if (!na_rm_flag) {
+        return false;
+    }
+    if (agg_type == "sum" || agg_type == "mean") {
+        return true;
+    }
+    if (agg_type == "min" || agg_type == "max") {
+        // min()/max()'s identity (Inf/-Inf) can only be represented in a
+        // FLOAT64 output column -- real dplyr promotes an INTEGER column's
+        // result to double the moment any group needs this identity (a
+        // data-dependent type decision cuplyr's parse-time/pre-execution
+        // schema inference can't make; see test-dplyr-summarise.R's
+        // "BOUNDARY" test). Only fix the case that's already FLOAT64 going
+        // in, where no promotion is needed at all.
+        return value_view.type().id() == cudf::type_id::FLOAT64;
+    }
+    return false;
+}
+
+// Build the identity scalar for `agg_type`, matching `out_type` (the
+// aggregation's ACTUAL result column type, e.g. INT64 for sum() over an
+// INT32 column, FLOAT64 for mean()/min()/max()) -- see needs_identity_fix()'s
+// own docs for the value table.
+std::unique_ptr<cudf::scalar> make_identity_scalar(const std::string& agg_type,
+                                                    cudf::data_type out_type) {
+    if (out_type.id() == cudf::type_id::INT64) {
+        return std::make_unique<cudf::numeric_scalar<int64_t>>(0, true);
+    }
+    if (out_type.id() == cudf::type_id::INT32) {
+        return std::make_unique<cudf::numeric_scalar<int32_t>>(0, true);
+    }
+    if (out_type.id() == cudf::type_id::FLOAT64) {
+        double v;
+        if (agg_type == "sum") {
+            v = 0.0;
+        } else if (agg_type == "mean") {
+            v = std::nan("");
+        } else if (agg_type == "min") {
+            v = std::numeric_limits<double>::infinity();
+        } else {
+            // "max"
+            v = -std::numeric_limits<double>::infinity();
+        }
+        return std::make_unique<cudf::numeric_scalar<double>>(v, true);
+    }
+    return nullptr;
+}
+
+// Given a SIMPLE aggregation's already-computed result column and a
+// per-group "valid (non-null) input count" column (same row count/order as
+// `agg_result`, built via a COUNT(EXCLUDE) request over the same input
+// column), replace every row whose group had ZERO valid inputs with the
+// identity scalar -- the entirely-NA-group na.rm=TRUE case. Mirrors
+// null_out_groups_with_any_null()'s own copy_if_else()-on-a-mask
+// convention, just substituting a real value instead of a null scalar.
+std::unique_ptr<cudf::column> substitute_identity_for_empty_groups(
+    std::unique_ptr<cudf::column> agg_result,
+    const cudf::column_view& valid_count_per_group,
+    const cudf::scalar& identity_scalar) {
+    cudf::numeric_scalar<int32_t> zero_i32(0, true);
+    auto is_empty = cudf::binary_operation(
+        valid_count_per_group, zero_i32, cudf::binary_operator::EQUAL,
+        cudf::data_type{cudf::type_id::BOOL8});
+
+    return cudf::copy_if_else(identity_scalar, agg_result->view(), is_empty->view());
+}
+
 } // namespace cuplyr
 
 // Phase 6, task 6.1 (Fix A): `na_rm` -- one flag per aggregation, same
@@ -372,6 +460,14 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                 bool need_na_prop = kind == AggKind::SIMPLE && agg_na_propagates(agg_type) &&
                     !static_cast<bool>(na_rm[i]) && col.has_nulls();
 
+                // Phase 6, task 4: entirely-NA-group na.rm=TRUE identity
+                // values (sum()->0, mean()->NaN, min()->Inf, max()->-Inf) --
+                // mutually exclusive with need_na_prop above (one requires
+                // na_rm==FALSE, the other na_rm==TRUE), so both share the
+                // same "extra request at index 1" slot below.
+                bool need_identity_fix = kind == AggKind::SIMPLE &&
+                    needs_identity_fix(agg_type, static_cast<bool>(na_rm[i]), col);
+
                 std::unique_ptr<cudf::column> null_indicator_i8;
                 std::vector<cudf::groupby::aggregation_request> requests;
                 cudf::groupby::aggregation_request req;
@@ -411,6 +507,12 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                     null_req.aggregations.push_back(
                         cudf::make_max_aggregation<cudf::groupby_aggregation>());
                     requests.push_back(std::move(null_req));
+                } else if (need_identity_fix) {
+                    cudf::groupby::aggregation_request count_req;
+                    count_req.values = col;
+                    count_req.aggregations.push_back(
+                        cudf::make_count_aggregation<cudf::groupby_aggregation>(cudf::null_policy::EXCLUDE));
+                    requests.push_back(std::move(count_req));
                 }
 
                 auto [result_keys, result_aggs] = gb.aggregate(requests);
@@ -419,6 +521,10 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                 if (need_na_prop) {
                     agg_result = null_out_groups_with_any_null(
                         std::move(agg_result), result_aggs[1].results[0]->view());
+                } else if (need_identity_fix) {
+                    auto identity_scalar = make_identity_scalar(agg_type, agg_result->view().type());
+                    agg_result = substitute_identity_for_empty_groups(
+                        std::move(agg_result), result_aggs[1].results[0]->view(), *identity_scalar);
                 }
 
                 result_columns.push_back(std::move(agg_result));
@@ -468,6 +574,13 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     // orders", so any()/all()'s companion MUST be answered by this SAME
     // call, never a separate one).
     std::vector<int> any_all_null_request_idx(num_aggs, -1);
+    // Phase 6, task 4: entirely-NA-group na.rm=TRUE identity values -- same
+    // interleave-into-the-shared-`requests`-vector discipline as
+    // na_prop_request_idx above, holding each aggregation's own extra
+    // per-group "valid (non-null) count" COUNT(EXCLUDE) request (-1 if not
+    // needed). Mutually exclusive with na_prop_request_idx per aggregation
+    // (one requires na_rm==FALSE, the other na_rm==TRUE).
+    std::vector<int> identity_fix_request_idx(num_aggs, -1);
     // Must outlive the gb.aggregate() call below (requests reference their views).
     std::vector<std::unique_ptr<cudf::column>> null_indicator_cols;
 
@@ -548,6 +661,19 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                 cudf::make_max_aggregation<cudf::groupby_aggregation>());
             na_prop_request_idx[i] = static_cast<int>(requests.size());
             requests.push_back(std::move(null_req));
+            continue;
+        }
+
+        // Phase 6, task 4: entirely-NA-group na.rm=TRUE identity values --
+        // see needs_identity_fix()'s own docs. Mutually exclusive with
+        // need_na_prop above (already `continue`d past if so).
+        if (kind == AggKind::SIMPLE && needs_identity_fix(agg_type, na_rm_flag, value_view)) {
+            cudf::groupby::aggregation_request count_req;
+            count_req.values = value_view;
+            count_req.aggregations.push_back(
+                cudf::make_count_aggregation<cudf::groupby_aggregation>(cudf::null_policy::EXCLUDE));
+            identity_fix_request_idx[i] = static_cast<int>(requests.size());
+            requests.push_back(std::move(count_req));
         }
     }
 
@@ -560,6 +686,18 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         result_aggs[main_request_idx[i]].results[0] = null_out_groups_with_any_null(
             std::move(result_aggs[main_request_idx[i]].results[0]),
             result_aggs[na_prop_request_idx[i]].results[0]->view());
+    }
+
+    for (int i = 0; i < num_aggs; ++i) {
+        if (identity_fix_request_idx[i] < 0) {
+            continue;
+        }
+        std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
+        auto& main_result = result_aggs[main_request_idx[i]].results[0];
+        auto identity_scalar = make_identity_scalar(agg_type, main_result->view().type());
+        main_result = substitute_identity_for_empty_groups(
+            std::move(main_result), result_aggs[identity_fix_request_idx[i]].results[0]->view(),
+            *identity_scalar);
     }
 
     for (int i = 0; i < num_aggs; ++i) {
