@@ -688,6 +688,21 @@ is_opaque_expression <- function(expr_text) {
 #' group+order columns) -- nothing may be pushed across it, the same
 #' reasoning as `arrange`/`slice`.
 #'
+#' Phase 12 audit note: barrier classification only matters for node TYPES
+#' that actually appear in an AST at all. `do()`/`rows_insert()`/
+#' `rows_append()`/`rows_update()`/`rows_patch()`/`rows_upsert()`/
+#' `rows_delete()`, and every colwise/pick-bearing call (`mutate_at()`,
+#' `top_n()`, `pick()`-inside-an-expression, ...) are whole-call CPU
+#' fallbacks (`gpu_fallback()`, R/fallback.R): they materialize any pending
+#' lazy ops via `compute()` FIRST, then run the real dplyr verb on the
+#' collected data and re-upload -- the result always has `lazy_ops = NULL`
+#' (see `tests/testthat/test-fallback.R`'s "fallback verbs materialize
+#' pending lazy ops" test). None of these verbs ever construct an AST node
+#' of their own, so "is this node type a barrier" is simply inapplicable to
+#' them -- there is nothing downstream of a fallback call for a barrier to
+#' block, since nothing downstream can ever see a pending op that predates
+#' the fallback.
+#'
 #' @param node An AST node
 #' @return TRUE if node is a barrier
 #' @keywords internal
@@ -757,6 +772,54 @@ set_ast_source_ptr <- function(node, ptr) {
 # Print Methods
 # -----------------------------------------------------------------------------
 
+#' Describe a join's `by` spec as "left op right, ..." condition pairs
+#'
+#' Shared by `print.ast_node()`/`ast_to_string()` (Phase 12, `show_query()`
+#' coverage audit): renders every condition, not just the equi ones, so a
+#' non-equi/mixed `join_by()` (`op` other than `"=="`) is visible in the
+#' rendered query -- e.g. `join_by(a == b, x >= y)` shows as
+#' `"a == b, x >= y"`.
+#'
+#' @param by A join spec `list(left, right, op, filter)` (see [parse_join_by()])
+#' @return Character scalar, `""` if `by` has no conditions
+#' @keywords internal
+describe_join_conditions <- function(by) {
+  if (is.null(by) || length(by$left) == 0) return("")
+  paste(by$left, by$op, by$right, sep = " ", collapse = ", ")
+}
+
+#' Describe a slice node's mode-specific sizing/ordering detail
+#'
+#' @param node An `ast_slice` node
+#' @return Character scalar, `""` if there's nothing mode-specific to add
+#'   (shouldn't happen for any of the four supported modes)
+#' @keywords internal
+describe_slice_detail <- function(node) {
+  size <- function() paste0(if (isTRUE(node$is_prop)) "prop=" else "n=", node$amount)
+  switch(node$mode,
+    "head" = size(),
+    "tail" = size(),
+    "index" = paste0("indices=[", paste(node$raw_indices, collapse = ","), "]"),
+    "rank" = paste0(
+      "order_by=", node$order_col,
+      ", desc=", node$descending,
+      ", ", size(),
+      ", with_ties=", node$with_ties
+    ),
+    ""
+  )
+}
+
+#' Describe a window node's specs as "fn->output_col" pairs
+#'
+#' @param specs List of `window_spec()` structures (`R/window.R`)
+#' @return Character scalar
+#' @keywords internal
+describe_window_specs <- function(specs) {
+  paste(vapply(specs, function(s) paste0(s$fn, "->", s$output_col), character(1)),
+        collapse = ", ")
+}
+
 #' @export
 print.ast_node <- function(x, ..., indent = 0) {
   prefix <- paste0(rep("| ", indent), collapse = "")
@@ -784,19 +847,25 @@ print.ast_node <- function(x, ..., indent = 0) {
           length(x$aggregations), " aggs]", sep = "")
     },
     "join" = {
-      cat(" [", x$join_type, " join]", sep = "")
+      conds <- describe_join_conditions(x$by)
+      cat(" [", x$join_type, " join",
+          if (nzchar(conds)) paste0("; on ", conds) else "",
+          "]", sep = "")
     },
     "distinct" = {
-      cat(" [", length(x$key_cols), " keys, keep_all=", x$keep_all, "]", sep = "")
+      cat(" [keys=", paste(x$key_cols, collapse = ","),
+          ", keep_all=", x$keep_all, "]", sep = "")
     },
     "slice" = {
-      cat(" [mode=", x$mode, "]", sep = "")
+      cat(" [mode=", x$mode, ", ", describe_slice_detail(x), "]", sep = "")
     },
     "rename" = {
-      cat(" [", length(x$old_names), " renamed]", sep = "")
+      pairs <- paste(x$old_names, "->", x$new_names, collapse = ", ")
+      cat(" [", pairs, "]", sep = "")
     },
     "window" = {
-      cat(" [", length(x$specs), " specs]", sep = "")
+      cat(" [", length(x$specs), " specs: ", describe_window_specs(x$specs),
+          "; group_cols=", paste(x$group_cols, collapse = ","), "]", sep = "")
     }
   )
 
@@ -828,11 +897,15 @@ ast_to_string <- function(node) {
     "arrange" = paste0("arrange[", length(node$sort_specs), "]"),
     "summarise" = paste0("summarise[", length(node$aggregations), "]"),
     "barrier" = "barrier",
-    "join" = paste0("join[", node$join_type, "]"),
-    "distinct" = paste0("distinct[", paste(node$key_cols, collapse = ","), "]"),
-    "slice" = paste0("slice[", node$mode, "]"),
+    "join" = {
+      conds <- describe_join_conditions(node$by)
+      paste0("join[", node$join_type, if (nzchar(conds)) paste0("; on ", conds) else "", "]")
+    },
+    "distinct" = paste0("distinct[", paste(node$key_cols, collapse = ","),
+                        "; keep_all=", node$keep_all, "]"),
+    "slice" = paste0("slice[", node$mode, "; ", describe_slice_detail(node), "]"),
     "rename" = paste0("rename[", paste(node$old_names, "->", node$new_names, collapse = ","), "]"),
-    "window" = paste0("window[", length(node$specs), "]"),
+    "window" = paste0("window[", describe_window_specs(node$specs), "]"),
     node$type
   )
 

@@ -13,6 +13,33 @@ push_down_filters(ast)
 AST with filters pushed down across mutates where safe
 }
 \description{
-Push filters below mutates when predicates do not depend on mutate outputs
+Phase 12 audit -- filter-pushdown-across-\code{distinct()} (flagged as a known,
+unimplemented opportunity back in section 3.1 of the design notes):
+\code{filter(distinct(df, k), k > 1)} COULD safely push the filter below
+\code{distinct()} when the predicate only references surviving key columns (or,
+when \code{.keep_all = TRUE}, any column at all) -- a predicate that's a pure
+function of the dedup key is constant within each dedup group, so
+filtering before or after the group-representative pick selects the same
+groups either way. A predicate touching a NON-key column (only reachable
+with \code{.keep_all = TRUE}) is NOT safe to push, though: it could remove the
+very row \code{distinct()} would have picked as a group's representative,
+changing which row (not just which groups) survives.
+}
+\details{
+Deliberately NOT implemented here. \code{distinct} is a barrier
+(\code{is_barrier()}, R/ast.R), so under the current \code{optimize_with_barriers()}
+architecture a \code{filter} immediately above a \code{distinct} is split into two
+INDEPENDENT segments before any pass runs (see \code{optimize_with_barriers()}'s
+own comments) -- the filter's segment has its \verb{$input} truncated to NULL
+at extraction, so \code{distinct} is never actually present as \code{ast$input} in
+the same \code{push_down_filters()} call for the ordinary linear-chain case.
+Reaching across deliberately would require a barrier-aware special case in
+\code{optimize_with_barriers()} itself (matching on "is the barrier specifically
+a distinct node, and is the segment's bottom node specifically a single
+filter with only-key-column predicates"), not a \code{push_down_filters()}
+switch case -- meaningfully more invasive than the analogous mutate/
+select pushdown cases below, and with a real correctness footgun if the
+key-vs-non-key-column safety check is ever gotten wrong. Left for a future
+phase; the two-line summary above is the reason it isn't attempted now.
 }
 \keyword{internal}

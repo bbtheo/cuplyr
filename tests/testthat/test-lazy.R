@@ -379,6 +379,106 @@ test_that("show_query handles eager tables", {
   expect_output(show_query(tbl), "No pending operations")
 })
 
+# Phase 12: show_query() rendering coverage for every node type added since
+# it was last touched (distinct/slice*/rename/window/join incl. non-equi,
+# semi/anti/cross) -- see the print.ast_node()/ast_to_string() helpers in
+# R/ast.R (describe_join_conditions()/describe_slice_detail()/
+# describe_window_specs()).
+
+test_that("show_query renders distinct's key columns and keep_all", {
+  skip_if_no_gpu()
+
+  df <- data.frame(a = c(1, 2, 2, 3), b = c(1, 2, 3, 4))
+  tbl <- tbl_gpu(df, lazy = TRUE) |> dplyr::distinct(a, .keep_all = TRUE)
+
+  expect_output(show_query(tbl), "keys=a")
+  expect_output(show_query(tbl), "keep_all=TRUE")
+})
+
+test_that("show_query renders slice_min's rank detail (order_by/desc/n/with_ties)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(a = c(3, 1, 2), b = 1:3)
+  tbl <- tbl_gpu(df, lazy = TRUE) |> dplyr::slice_min(a, n = 1)
+
+  expect_output(show_query(tbl), "mode=rank")
+  expect_output(show_query(tbl), "order_by=a")
+  expect_output(show_query(tbl), "desc=FALSE")
+  expect_output(show_query(tbl), "n=1")
+})
+
+test_that("show_query renders slice_head's n", {
+  skip_if_no_gpu()
+
+  df <- data.frame(a = 1:5)
+  tbl <- tbl_gpu(df, lazy = TRUE) |> dplyr::slice_head(n = 2)
+
+  expect_output(show_query(tbl), "mode=head")
+  expect_output(show_query(tbl), "n=2")
+})
+
+test_that("show_query renders rename's old -> new map", {
+  skip_if_no_gpu()
+
+  df <- data.frame(a = 1:3)
+  tbl <- tbl_gpu(df, lazy = TRUE) |> dplyr::rename(new_a = a)
+
+  expect_output(show_query(tbl), "a -> new_a")
+})
+
+test_that("show_query renders window specs and group_cols", {
+  skip_if_no_gpu()
+
+  df <- data.frame(g = c(1, 1, 2), a = c(3, 1, 2))
+  tbl <- tbl_gpu(df, lazy = TRUE) |>
+    dplyr::group_by(g) |>
+    dplyr::mutate(rn = dplyr::row_number())
+
+  expect_output(show_query(tbl), "row_number->")
+  expect_output(show_query(tbl), "group_cols=g")
+})
+
+test_that("show_query renders an equi join's type and condition", {
+  skip_if_no_gpu()
+
+  df1 <- data.frame(k = 1:3, a = 1:3)
+  df2 <- data.frame(k = 1:3, b = 4:6)
+  tbl <- dplyr::inner_join(tbl_gpu(df1, lazy = TRUE), tbl_gpu(df2, lazy = TRUE), by = "k")
+
+  expect_output(show_query(tbl), "inner join; on k == k")
+})
+
+test_that("show_query renders semi/anti/cross join types", {
+  skip_if_no_gpu()
+
+  df1 <- data.frame(k = 1:3, a = 1:3)
+  df2 <- data.frame(k = 1:3, b = 4:6)
+
+  expect_output(
+    show_query(dplyr::semi_join(tbl_gpu(df1, lazy = TRUE), tbl_gpu(df2, lazy = TRUE), by = "k")),
+    "semi join; on k == k"
+  )
+  expect_output(
+    show_query(dplyr::anti_join(tbl_gpu(df1, lazy = TRUE), tbl_gpu(df2, lazy = TRUE), by = "k")),
+    "anti join; on k == k"
+  )
+  expect_output(
+    show_query(dplyr::cross_join(tbl_gpu(df1, lazy = TRUE), tbl_gpu(df2, lazy = TRUE))),
+    "cross join"
+  )
+})
+
+test_that("show_query renders a non-equi join's condition operator", {
+  skip_if_no_gpu()
+
+  df1 <- data.frame(k = 1:3, a = 1:3)
+  df2 <- data.frame(k = 1:3, b = 4:6)
+  tbl <- dplyr::inner_join(tbl_gpu(df1, lazy = TRUE), tbl_gpu(df2, lazy = TRUE),
+                           by = dplyr::join_by(k >= k))
+
+  expect_output(show_query(tbl), "inner join; on k >= k")
+})
+
 # Edge Cases
 
 test_that("empty filter returns all rows in lazy mode", {

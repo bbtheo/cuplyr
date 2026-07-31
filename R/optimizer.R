@@ -232,21 +232,8 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       ast$input <- push_down_projections(ast$input, needed, group_cols)
       ast
     },
-    "summarise" = {
-      agg_inputs <- unique(unlist(lapply(ast$aggregations, `[[`, "input_col")))
-      agg_inputs <- agg_inputs[!is.na(agg_inputs)]  # n() has no input
-      needed <- union(ast$groups, agg_inputs)
-      ast$input <- push_down_projections(ast$input, needed, ast$groups)
-      ast
-    },
     "select" = {
       ast$input <- push_down_projections(ast$input, ast$columns, group_cols)
-      ast
-    },
-    "arrange" = {
-      sort_cols <- vapply(ast$sort_specs, `[[`, character(1), "col_name")
-      needed <- union(required_cols, sort_cols)
-      ast$input <- push_down_projections(ast$input, needed, group_cols)
       ast
     },
     "join" = {
@@ -274,15 +261,40 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       ast$right <- push_down_projections(ast$right, right_needed, group_cols)
       ast
     },
-    # Defensive (`window` is a barrier -- see `is_barrier()`, R/ast.R --
-    # so in the current architecture this branch is never reached via the
-    # normal barrier-splitting entry point in `optimize_with_barriers()`,
-    # exactly like the pre-existing "arrange"/"summarise"/"distinct"/"slice"
-    # cases above/below, which are barriers too). Per
-    # `scratchpad/phase5_window_design.md` section 2.1: union every spec's
-    # `value_col`/`order_cols` plus the node's own `group_cols` into the
-    # required set and never insert a select (a window spec's result
-    # depends on the full row set/order, not a droppable projection).
+    # Phase 12 audit note: "arrange"/"summarise"/"window" (and, added here,
+    # "rename"/"distinct"/"slice") are all barriers (`is_barrier()`,
+    # R/ast.R), so none of these cases are reached via the *normal*
+    # barrier-splitting entry point (`optimize_with_barriers()` truncates a
+    # segment right before the first barrier it finds walking down `$input`,
+    # so a barrier node is never the `ast` a segment's own
+    # `push_down_projections()` call is invoked on). They ARE reached,
+    # however, via the "join" case below: `ast$left`/`ast$right` are
+    # recursed into with a direct `push_down_projections()` call, NOT
+    # `optimize_with_barriers()`, so a join's own input side can be (and
+    # commonly is -- `x |> rename(...) |> left_join(y, ...)`,
+    # `x |> distinct(...) |> inner_join(y, ...)`) a barrier-type node
+    # directly. Confirmed empirically (Phase 12 audit): before this case
+    # existed, a join's `rename`/`distinct`/`slice` input side had its
+    # required columns silently mistranslated (`rename`, whose input
+    # schema still uses the OLD names) or under-required (`distinct`'s own
+    # `key_cols`, `slice(mode="rank")`'s `order_col`, not automatically
+    # part of what's needed downstream), so a subsequent `ast_select`
+    # inserted further down could drop a column the barrier node itself
+    # still needed -- a real, reproducible miscorrectness bug, not just a
+    # missed optimization (see `tests/testthat/test-optimizer.R`).
+    "arrange" = {
+      sort_cols <- vapply(ast$sort_specs, `[[`, character(1), "col_name")
+      needed <- union(required_cols, sort_cols)
+      ast$input <- push_down_projections(ast$input, needed, group_cols)
+      ast
+    },
+    "summarise" = {
+      agg_inputs <- unique(unlist(lapply(ast$aggregations, `[[`, "input_col")))
+      agg_inputs <- agg_inputs[!is.na(agg_inputs)]
+      needed <- union(ast$groups, agg_inputs)
+      ast$input <- push_down_projections(ast$input, needed, ast$groups)
+      ast
+    },
     "window" = {
       spec_cols <- unique(unlist(
         lapply(ast$specs, function(s) c(s$value_col, s$order_cols)),
@@ -291,6 +303,40 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       spec_cols <- spec_cols[!is.na(spec_cols)]
       needed <- union(union(required_cols, ast$group_cols), spec_cols)
       ast$input <- push_down_projections(ast$input, needed, ast$group_cols)
+      ast
+    },
+    "rename" = {
+      # `required_cols` is expressed in POST-rename names (the schema seen
+      # by everything above this node); `ast$input`'s own schema still uses
+      # the PRE-rename names, so translate any renamed entry back through
+      # `new_names -> old_names` before recursing. Columns untouched by the
+      # rename pass through unchanged (their name is the same on both sides
+      # of the map).
+      rev_idx <- match(required_cols, ast$new_names)
+      translated <- required_cols
+      hit <- !is.na(rev_idx)
+      translated[hit] <- ast$old_names[rev_idx[hit]]
+      ast$input <- push_down_projections(ast$input, translated, group_cols)
+      ast
+    },
+    "distinct" = {
+      # `key_cols` are required for the dedup itself regardless of whether
+      # `required_cols` (computed from this node's own OUTPUT schema)
+      # references them -- true even for `.keep_all = TRUE`, where
+      # `required_cols` can be a strict subset of the full input schema.
+      needed <- union(required_cols, ast$key_cols)
+      ast$input <- push_down_projections(ast$input, needed, group_cols)
+      ast
+    },
+    "slice" = {
+      # `mode = "rank"`'s `order_col` is required for the ranking itself
+      # even when it isn't otherwise referenced downstream (it may be a
+      # real user column not selected further up, or a temp column already
+      # excluded from this node's own output schema by
+      # `infer_schema.ast_slice`).
+      extra <- if (!is.null(ast$order_col)) ast$order_col else character(0)
+      needed <- union(required_cols, extra)
+      ast$input <- push_down_projections(ast$input, needed, group_cols)
       ast
     },
     {
@@ -313,6 +359,20 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
 #' @keywords internal
 fuse_mutates <- function(ast) {
   if (is.null(ast)) return(NULL)
+
+  # Phase 12 audit: a "join" node has no `$input` field at all (its two
+  # inputs are `$left`/`$right`), so without this case, any mutate chain
+  # sitting directly on either side of a join (`x |> mutate(...) |>
+  # mutate(...) |> inner_join(y, ...)`) was silently skipped by this whole
+  # pass -- not a correctness bug (unfused mutates still execute correctly,
+  # just as separate kernels), but a real missed-optimization gap now
+  # closed the same way push_down_projections()/prune_dead_columns()
+  # already recurse into both sides.
+  if (ast$type == "join") {
+    ast$left <- fuse_mutates(ast$left)
+    ast$right <- fuse_mutates(ast$right)
+    return(ast)
+  }
 
   if (ast$type != "mutate") {
     if (!is.null(ast$input)) {
@@ -494,12 +554,6 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
       ast$input <- prune_dead_columns(ast$input, keep, group_cols)
       ast
     },
-    "arrange" = {
-      sort_cols <- vapply(ast$sort_specs, `[[`, character(1), "col_name")
-      needed <- union(required_cols, sort_cols)
-      ast$input <- prune_dead_columns(ast$input, needed, group_cols)
-      ast
-    },
     "join" = {
       if (ast$join_type %in% c("semi", "anti")) {
         # Same rationale as push_down_projections()'s "join" case above:
@@ -523,8 +577,17 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
       ast$right <- prune_dead_columns(ast$right, right_needed, group_cols)
       ast
     },
-    # Defensive, same rationale as push_down_projections()'s "window" case
-    # above: union in every spec's referenced columns, never drop anything.
+    # Same reachability rationale as push_down_projections()'s equivalent
+    # cases (Phase 12 audit note above it): "arrange"/"summarise"/"window"/
+    # "rename"/"distinct"/"slice" are all barriers, so these cases are only
+    # ever reached via a join's `left`/`right` recursion below, never via
+    # the normal barrier-splitting entry point.
+    "arrange" = {
+      sort_cols <- vapply(ast$sort_specs, `[[`, character(1), "col_name")
+      needed <- union(required_cols, sort_cols)
+      ast$input <- prune_dead_columns(ast$input, needed, group_cols)
+      ast
+    },
     "window" = {
       spec_cols <- unique(unlist(
         lapply(ast$specs, function(s) c(s$value_col, s$order_cols)),
@@ -533,6 +596,32 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
       spec_cols <- spec_cols[!is.na(spec_cols)]
       needed <- union(union(required_cols, ast$group_cols), spec_cols)
       ast$input <- prune_dead_columns(ast$input, needed, ast$group_cols)
+      ast
+    },
+    "rename" = {
+      # Same old_names/new_names translation as push_down_projections()'s
+      # "rename" case: without it, a mutate producing the pre-rename column
+      # further down could be wrongly judged "not required" (since
+      # `required_cols` would only ever contain the post-rename name) and
+      # pruned away entirely -- confirmed empirically (Phase 12 audit),
+      # worse than the projection-only bug since it drops a whole
+      # expression, not just narrows a source projection.
+      rev_idx <- match(required_cols, ast$new_names)
+      translated <- required_cols
+      hit <- !is.na(rev_idx)
+      translated[hit] <- ast$old_names[rev_idx[hit]]
+      ast$input <- prune_dead_columns(ast$input, translated, group_cols)
+      ast
+    },
+    "distinct" = {
+      needed <- union(required_cols, ast$key_cols)
+      ast$input <- prune_dead_columns(ast$input, needed, group_cols)
+      ast
+    },
+    "slice" = {
+      extra <- if (!is.null(ast$order_col)) ast$order_col else character(0)
+      needed <- union(required_cols, extra)
+      ast$input <- prune_dead_columns(ast$input, needed, group_cols)
       ast
     },
     {
@@ -550,11 +639,53 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
 
 #' Push filters below mutates when predicates do not depend on mutate outputs
 #'
+#' Phase 12 audit -- filter-pushdown-across-`distinct()` (flagged as a known,
+#' unimplemented opportunity back in section 3.1 of the design notes):
+#' `filter(distinct(df, k), k > 1)` COULD safely push the filter below
+#' `distinct()` when the predicate only references surviving key columns (or,
+#' when `.keep_all = TRUE`, any column at all) -- a predicate that's a pure
+#' function of the dedup key is constant within each dedup group, so
+#' filtering before or after the group-representative pick selects the same
+#' groups either way. A predicate touching a NON-key column (only reachable
+#' with `.keep_all = TRUE`) is NOT safe to push, though: it could remove the
+#' very row `distinct()` would have picked as a group's representative,
+#' changing which row (not just which groups) survives.
+#'
+#' Deliberately NOT implemented here. `distinct` is a barrier
+#' (`is_barrier()`, R/ast.R), so under the current `optimize_with_barriers()`
+#' architecture a `filter` immediately above a `distinct` is split into two
+#' INDEPENDENT segments before any pass runs (see `optimize_with_barriers()`'s
+#' own comments) -- the filter's segment has its `$input` truncated to NULL
+#' at extraction, so `distinct` is never actually present as `ast$input` in
+#' the same `push_down_filters()` call for the ordinary linear-chain case.
+#' Reaching across deliberately would require a barrier-aware special case in
+#' `optimize_with_barriers()` itself (matching on "is the barrier specifically
+#' a distinct node, and is the segment's bottom node specifically a single
+#' filter with only-key-column predicates"), not a `push_down_filters()`
+#' switch case -- meaningfully more invasive than the analogous mutate/
+#' select pushdown cases below, and with a real correctness footgun if the
+#' key-vs-non-key-column safety check is ever gotten wrong. Left for a future
+#' phase; the two-line summary above is the reason it isn't attempted now.
+#'
 #' @param ast Root AST node
 #' @return AST with filters pushed down across mutates where safe
 #' @keywords internal
 push_down_filters <- function(ast) {
   if (is.null(ast)) return(NULL)
+
+  # Phase 12 audit: a "join" node has no `$input` field (its inputs are
+  # `$left`/`$right`), so without this case any filter chain sitting
+  # entirely *within* one side of a join (not directly wrapping the join
+  # itself -- that case is handled below, by the `input$type == "join"`
+  # branch, but only one level deep) was never visited by this pass at
+  # all. Recurse into both sides independently; the existing
+  # `input$type == "join"` logic further down still handles the one-level
+  # swap of a filter that directly wraps this join from above.
+  if (ast$type == "join") {
+    ast$left <- push_down_filters(ast$left)
+    ast$right <- push_down_filters(ast$right)
+    return(ast)
+  }
 
   # Recurse first
   if (!is.null(ast$input)) {
@@ -677,6 +808,15 @@ push_down_filters <- function(ast) {
 #' @keywords internal
 reorder_filters <- function(ast) {
   if (is.null(ast)) return(NULL)
+
+  # Same "join" has-no-$input gap as fuse_mutates()/push_down_filters()
+  # above (Phase 12 audit): without this, a consecutive filter chain
+  # sitting entirely within one side of a join was never reordered.
+  if (ast$type == "join") {
+    ast$left <- reorder_filters(ast$left)
+    ast$right <- reorder_filters(ast$right)
+    return(ast)
+  }
 
   if (ast$type != "filter") {
     if (!is.null(ast$input)) {

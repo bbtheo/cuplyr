@@ -751,3 +751,78 @@ test_that("semi_join() falls back to CPU when an equi factor KEY has different l
 
   expect_equal(sort(as.character(result$grp)), sort(as.character(expected$grp)))
 })
+
+# =============================================================================
+# Phase 12 optimizer audit: lazy joins whose left side is itself a pending
+# barrier-type op (rename()/distinct()/slice_min()) used to have their
+# required columns corrupted by push_down_projections()/prune_dead_columns()
+# when a trailing select() narrowed the output -- these three passes'
+# "join" case recurses directly into ast$left/ast$right, bypassing the
+# normal optimizer-barrier machinery entirely (see R/optimizer.R's audit
+# comments and tests/testthat/test-optimizer.R's AST-level unit tests for
+# the mechanism). These are full GPU round-trip pins for the same bugs.
+# =============================================================================
+
+test_that("lazy join whose left side has a pending rename() survives projection pushdown", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(x = c(1, 2, 3, 4, 5), y = c(10, 11, 12, 13, 14))
+  right_df <- data.frame(z = c(2, 4), w = c(200, 400))
+
+  pipeline <- function(x, y) {
+    x |>
+      dplyr::rename(new_x = x) |>
+      dplyr::inner_join(y, by = c("new_x" = "z")) |>
+      dplyr::select(new_x, y, w)
+  }
+
+  expected <- pipeline(left_df, right_df)
+
+  # A trailing select() narrows required_cols, forcing push_down_projections()
+  # to actually recurse into the join's rename()-holding left side.
+  result <- pipeline(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df, lazy = TRUE)) |> collect()
+
+  expect_equal(
+    as.data.frame(result)[order(result$new_x), ],
+    as.data.frame(expected)[order(expected$new_x), ],
+    ignore_attr = TRUE
+  )
+})
+
+test_that("lazy join whose left side has a pending distinct(.keep_all=TRUE) survives projection pushdown", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(k = c(1, 1, 2, 2, 3), extra = c(1, 2, 3, 4, 5))
+  right_df <- data.frame(k2 = c(1, 2, 3))
+
+  pipeline <- function(x, y) {
+    x |>
+      dplyr::distinct(k, extra, .keep_all = TRUE) |>
+      dplyr::inner_join(y, by = c("k" = "k2")) |>
+      dplyr::select(k)
+  }
+
+  expected <- pipeline(left_df, right_df)
+  result <- pipeline(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df, lazy = TRUE)) |> collect()
+
+  expect_equal(sort(result$k), sort(expected$k))
+})
+
+test_that("lazy join whose left side has a pending slice_min() survives projection pushdown", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(k = c(1, 2, 3), rank_by = c(30, 10, 20))
+  right_df <- data.frame(k2 = c(1, 2, 3))
+
+  pipeline <- function(x, y) {
+    x |>
+      dplyr::slice_min(rank_by, n = 1) |>
+      dplyr::inner_join(y, by = c("k" = "k2")) |>
+      dplyr::select(k)
+  }
+
+  expected <- pipeline(left_df, right_df)
+  result <- pipeline(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df, lazy = TRUE)) |> collect()
+
+  expect_equal(sort(result$k), sort(expected$k))
+})

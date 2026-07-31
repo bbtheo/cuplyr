@@ -39,5 +39,20 @@ every window spec's result depends on the FULL row set (which rows exist)
 and the current row order (frames are built from a stable sort of
 group+order columns) -- nothing may be pushed across it, the same
 reasoning as \code{arrange}/\code{slice}.
+
+Phase 12 audit note: barrier classification only matters for node TYPES
+that actually appear in an AST at all. \code{do()}/\code{rows_insert()}/
+\code{rows_append()}/\code{rows_update()}/\code{rows_patch()}/\code{rows_upsert()}/
+\code{rows_delete()}, and every colwise/pick-bearing call (\code{mutate_at()},
+\code{top_n()}, \code{pick()}-inside-an-expression, ...) are whole-call CPU
+fallbacks (\code{gpu_fallback()}, R/fallback.R): they materialize any pending
+lazy ops via \code{compute()} FIRST, then run the real dplyr verb on the
+collected data and re-upload -- the result always has \code{lazy_ops = NULL}
+(see \code{tests/testthat/test-fallback.R}'s "fallback verbs materialize
+pending lazy ops" test). None of these verbs ever construct an AST node
+of their own, so "is this node type a barrier" is simply inapplicable to
+them -- there is nothing downstream of a fallback call for a barrier to
+block, since nothing downstream can ever see a pending op that predates
+the fallback.
 }
 \keyword{internal}
