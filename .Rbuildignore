@@ -33,3 +33,7 @@
 ^pkgdown/
 ^scripts$
 ^scripts/
+^inst/dplyr-conformance$
+^inst/dplyr-conformance/
+^tools$
+^tools/
