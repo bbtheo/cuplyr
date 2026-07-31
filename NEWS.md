@@ -1,5 +1,128 @@
 # cuplyr (development version)
 
+## The long tail: universal CPU fallback, factor fidelity, timestamps, base-R strings, datetime accessors, and exit-scope pins (Phase 11)
+
+Phase 11 was scanned from dplyr 1.2.1's own test suite: string functions
+barely appear and datetime accessors appear zero times, but UNKNOWN USER
+FUNCTIONS inside `mutate()`/`summarise()`/`filter()` (closures, `identity()`,
+`ifelse()`, `scale()`, `lengths()`, ...) hard-errored -- so this phase leads
+with a universal fallback (L1) before the "long tail" surface area (L5/L6)
+it also delivers.
+
+* **L1 -- universal expression-level CPU fallback**: any `mutate()`/
+  `filter()`/`summarise()` expression shape the GPU expression engine
+  doesn't understand now routes the WHOLE verb call through the notified
+  CPU fallback (all original dots re-injected, `.by=`/`.keep=`/`.before=`/
+  `.after=` preserved), instead of hard-erroring. The trigger rule is
+  precise: parser returns `NULL` (shape not understood) -> fall back;
+  parser THROWS (a genuine user error, e.g. an undefined column) -> keep
+  throwing. This single change fixes `top_n()`/`top_frac()` and the whole
+  `mutate_at()`/`mutate_all()`/`mutate_if()`/`summarise_at()`/
+  `summarise_all()`/`summarise_if()` colwise family end-to-end (none of
+  these are `tbl_gpu` S3 methods -- they're plain functions that build and
+  call `mutate()`/`filter()`/`summarise()` themselves, so L1 is exactly
+  what they needed) and turns nine formerly-pinned cuplyr-only error
+  messages into either successes or dplyr's own error text.
+* **L2 -- factor fidelity**: three silent-wrongness bugs fixed. Mutating
+  joins used to drop `factor_levels` entirely (now propagated through
+  `build_join_schema()` keyed by post-suffix column name; a factor key with
+  DIFFERENT levels on each side routes the whole join to the CPU fallback,
+  since native joins compare raw codes). `bind_rows()` used to concatenate
+  raw factor codes across differently-leveled factor columns (now computes
+  the dplyr-matching level UNION and remaps each side via new
+  `gpu_remap_codes()`). Factor-to-character `bind_rows()` used to refuse
+  loudly (now decodes via new `gpu_decode_factor()`, matching dplyr's real
+  "factor + character = character" contract). `gpu_physical_type()`
+  documents the logical (`DICTIONARY32`)-vs-physical (`INT32` codes) type
+  split that R schema types and actual GPU storage now honor consistently.
+* **L3 -- timestamp literals & casts**: `Date`/`POSIXct` literals are
+  first-class inside `filter()`/`mutate()` expressions (all 5 cuDF
+  `TIMESTAMP_*` granularities), so `filter(d < as.Date("2010-01-05"))` --
+  verbatim dplyr-test-style code -- now runs natively instead of
+  hard-erroring. `as.Date()`/`as.POSIXct()` applied to an existing
+  timestamp column lower to a single `cudf::cast()`, with R's exact
+  default-UTC semantics (`as.Date.POSIXct()`'s default `tz` really is the
+  literal string `"UTC"`, matching cuplyr's own always-UTC storage, so no
+  adjustment is needed).
+* **L4 -- `bind_rows()` vctrs strictness**: the shared type-promotion ladder
+  (extracted from Phase 8's set-op checker) replaces the old, looser
+  promotion table -- `STRING` is now always widest (never silently
+  demoted), and numeric+character mixes error with vctrs' own message
+  format. The long-parked `"4.0"`-from-floats divergence pin is retired
+  (that code path is now unreachable).
+* **L5 -- base-R string functions native in `mutate()`/`filter()`**:
+  `toupper()`/`tolower()` (`cudf::strings::to_upper()`/`to_lower()`),
+  `nchar()` (`count_characters()`, INT32), `substr()` (`slice_strings()`,
+  exact R clamping semantics for out-of-range `start`/`stop`), `trimws()`
+  (`strip()`, `which=`), `paste0()`/`paste()` (row-wise `concatenate()`,
+  `sep=`, and R's own "a genuine `NA` argument becomes the literal string
+  `\"NA\"`" rule), `grepl()` (`contains_re()`/`contains()` for `fixed=TRUE`,
+  with R's "`NA` element -> `FALSE`" rule enforced explicitly since cuDF
+  itself null-propagates), `sub()`/`gsub()` (`replace_re()`/`replace()`,
+  first-match-only vs. all-matches), and `startsWith()`/`endsWith()`
+  (`find.hpp`). Deliberately NOT implemented (falls back to CPU instead):
+  `paste()`/`paste0()` with any non-STRING argument (no `as.character()`
+  formatting replication -- the `paste0("x", 4)` is `"x4"`, not `"x4.0"`,
+  trap), `collapse=`, `ignore.case=`/`perl=`/`useBytes=`, a non-literal
+  pattern/position argument, `nchar(type != "chars")`. cuDF's regex dialect
+  is not R's TRE/PCRE -- only simple ASCII patterns are oracle-tested.
+  A real correctness risk this task found and fixed: a STRING-producing
+  function nested inside a comparison/arithmetic expression (e.g.
+  `toupper(x) == "ABC"`, `nchar(x) + 1L`) needs `resolve_static_type()`
+  (`src/expr_eval.hpp`) to report the REAL result type of every new op, or
+  libcudf's AST evaluator throws "non-matching operand types" -- fixed by
+  extending both `resolve_static_type()` and the STRING-operand detection
+  in `op_dispatches_to_ast()` for every new L5/L6 op.
+* **L6 -- lubridate datetime accessors native in `mutate()`/`filter()`**:
+  `year()`/`month()`/`day()`/`hour()`/`minute()`/`second()`/`quarter()`/
+  `yday()`/`wday()` (`cudf::datetime::extract_datetime_component()`/
+  `extract_quarter()`/`day_of_year()`, cast immediately from their native
+  INT16 to the declared INT32 inside the C++ handler itself so nested usage
+  sees the real type). `wday()`'s cuDF `WEEKDAY` component is ISO
+  `Mon=1..Sun=7`; `lubridate::wday()`'s default (`week_start=7`, i.e.
+  Sunday) is `Sun=1, Mon=2, ..., Sat=7` -- remapped via `(w %% 7) + 1`
+  (verified empirically, and only applied when the global
+  `lubridate.week.start` option is still at its own default). **MANDATORY
+  namespace guard**: since none of these 9 names exist in base R, going
+  native requires the call's function symbol to resolve -- in the
+  quosure's own environment, or via an explicit `lubridate::` qualification
+  -- to EXACTLY `lubridate`'s own function; a user's own same-named
+  function, or lubridate not being installed/attached at all, falls back to
+  the CPU path instead (reproducing dplyr's own behavior, including its own
+  "could not find function" error when applicable) rather than silently
+  misinterpreting the call. Any optional argument (`label=`, `abbr=`,
+  `with_year=`, a non-default `week_start=`, ...) present at all falls
+  back. Known, documented, and accepted divergence: `lubridate::second()`
+  returns a fractional value for sub-second-precision `POSIXct` input,
+  which the native path truncates to a whole INT32 (cuDF's `SECOND`
+  component has no sub-second concept) -- whole-second values (the
+  overwhelming majority of real usage) are unaffected. lubridate is a
+  `Suggests`-only soft dependency (`requireNamespace()`-gated); every
+  accessor falls back naturally when it isn't installed.
+* **L7 -- exit**: `rows_insert()`/`rows_append()`/`rows_update()`/
+  `rows_patch()`/`rows_upsert()`/`rows_delete()` were already
+  fallback-registered (Phase 2) -- this pins oracle-equality, the fallback
+  notification, and `in_place = TRUE` rejection for all six explicitly.
+  `do()` is an ordinary S3 generic dplyr never gave a `tbl_gpu` method (it
+  used to hard-error with "no applicable method for 'do'"); `do.tbl_gpu()`
+  now routes through the same CPU-fallback primitive every other
+  non-native verb uses. Verified (not rebuilt): `top_n()`/`top_frac()` and
+  the `mutate_at()`/`mutate_all()`/`mutate_if()`/`summarise_at()`/
+  `summarise_all()`/`summarise_if()` colwise family all work correctly
+  post-L1 (`recode()` needed nothing -- it's a plain vector-level
+  function).
+
+Deliberately out of scope for the whole phase (documented, not deferred by
+omission): native `rows_*()` (the CPU fallback already re-runs real dplyr,
+so it's already 100% conformant -- native would be a large effort for zero
+additional conformance), list-columns/`LIST`/`collect_list()`/`unnest()`
+interop (`nest_by()`/`group_nest()`/`nest_join()`/`reframe()`/`rowwise()`
+stay CPU-fallback-only), real `DICTIONARY32` factor storage (INT32 codes +
+R-side levels stays the design), native INT64/`bit64` round-trip, `FLOAT32`
+ingestion, `floor_date()`/`ceiling_date()`/`round_date()`, `difftime`, the
+`stringr` surface, GPU `roll_median()`, and large-window rolling
+aggregation (perf phase).
+
 ## `across()`/`if_any()`/`if_all()`/`pick()` and tidy-eval context (Phase 10)
 
 * **`across(.cols, .fns, ..., .names=, .unpack=)`** is now GPU-native inside

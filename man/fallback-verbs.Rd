@@ -4,6 +4,7 @@
 \alias{fallback-verbs}
 \alias{reframe.tbl_gpu}
 \alias{rowwise.tbl_gpu}
+\alias{do.tbl_gpu}
 \alias{nest_join.tbl_gpu}
 \alias{rows_insert.tbl_gpu}
 \alias{rows_append.tbl_gpu}
@@ -24,6 +25,8 @@
 \method{reframe}{tbl_gpu}(.data, ..., .by = NULL)
 
 \method{rowwise}{tbl_gpu}(.data, ...)
+
+\method{do}{tbl_gpu}(.data, ...)
 
 \method{nest_join}{tbl_gpu}(x, y, by = NULL, copy = FALSE, keep = NULL, name = NULL, ...)
 

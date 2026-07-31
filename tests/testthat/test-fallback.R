@@ -201,6 +201,107 @@ test_that("rows_*(in_place = TRUE) is rejected for tbl_gpu", {
   )
 })
 
+# Phase 11 L7 exit: pinning (not building) the six rows_*() verbs, which
+# were already fallback-registered (see the module header comment and
+# scratchpad/phase11_design.md's own "rows_* verification+pins ONLY" scope
+# note -- native rows_*() is explicitly out of scope: the fallback re-runs
+# real dplyr, so it's already 100% conformant, and native would be a week
+# of work for zero additional conformance). Two things this pins that the
+# tests above don't already cover explicitly: (1) every one of the six
+# verbs actually fires `cuplyr_fallback_notify()` (not just rows_update, as
+# the pre-existing test above happened to check), and (2) `in_place = TRUE`
+# is rejected by EVERY verb, not just rows_update.
+rows_verb_calls <- list(
+  rows_insert = function(gt) dplyr::rows_insert(gt, tibble::tibble(id = 4, v = "d"), by = "id"),
+  rows_append = function(gt) dplyr::rows_append(gt, tibble::tibble(id = 4, v = "d")),
+  rows_update = function(gt) dplyr::rows_update(gt, tibble::tibble(id = 1, v = "Z"), by = "id"),
+  rows_patch = function(gt) dplyr::rows_patch(gt, tibble::tibble(id = 1, v = "Z"), by = "id"),
+  rows_upsert = function(gt) dplyr::rows_upsert(gt, tibble::tibble(id = c(1, 4), v = c("Z", "d")), by = "id"),
+  rows_delete = function(gt) dplyr::rows_delete(gt, tibble::tibble(id = 1), by = "id")
+)
+
+for (.nm in names(rows_verb_calls)) {
+  local({
+    nm <- .nm
+    call_fn <- rows_verb_calls[[nm]]
+
+    test_that(sprintf("%s() triggers the fallback notification", nm), {
+      skip_if_no_gpu()
+      gt <- tbl_gpu(tibble::tibble(id = 1:3, v = c("a", "b", "c")))
+      withr::local_options(cuplyr.fallback = "warn")
+
+      expect_warning(call_fn(gt), "fell back to CPU evaluation")
+    })
+
+    test_that(sprintf("%s(in_place = TRUE) is rejected for tbl_gpu", nm), {
+      skip_if_no_gpu()
+      gt <- tbl_gpu(tibble::tibble(id = 1:3, v = c("a", "b", "c")))
+
+      verb_fn <- getExportedValue("dplyr", nm)
+      expect_error(
+        verb_fn(gt, tibble::tibble(id = 1, v = "Z"), by = "id", in_place = TRUE),
+        "in_place"
+      )
+    })
+  })
+}
+
+# Phase 11 L7 exit: do() is an ordinary S3 generic (do.data.frame/
+# do.grouped_df/do.rowwise_df/do.NULL exist in dplyr, but no do.default) --
+# test-first confirmed (per the repo's STRICT mandate) that calling
+# dplyr::do() on a tbl_gpu before do.tbl_gpu() existed hard-errored with "no
+# applicable method for 'do'", never reaching gpu_fallback() at all. See
+# do.tbl_gpu(), R/fallback.R.
+
+test_that("do() with an unnamed expression matches dplyr on ungrouped input", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  gt <- tbl_gpu(df)
+
+  # An unnamed do() clause returning a plain (no list-column) data frame is
+  # re-uploaded by gpu_fallback() as an ordinary tbl_gpu, exactly like any
+  # other fallback verb -- collect() first, like the rows_*() tests above.
+  result <- gt |> dplyr::do(head(., 2)) |> collect()
+  oracle <- dplyr::do(df, head(., 2))
+
+  expect_equal(tibble::as_tibble(result), tibble::as_tibble(oracle))
+})
+
+test_that("do() with an unnamed expression matches dplyr on grouped input (per-group dispatch)", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  gt <- tbl_gpu(df) |> dplyr::group_by(g)
+
+  result <- gt |> dplyr::do(head(., 1)) |> collect()
+  oracle <- dplyr::do(dplyr::group_by(df, g), head(., 1))
+
+  expect_equal(
+    dplyr::arrange(tibble::as_tibble(result), g),
+    dplyr::arrange(tibble::as_tibble(dplyr::ungroup(oracle)), g)
+  )
+})
+
+test_that("do() with a named expression returns a plain list-column data frame, not a tbl_gpu", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  gt <- tbl_gpu(df) |> dplyr::group_by(g)
+
+  result <- gt |> dplyr::do(top_x = max(.$x))
+  oracle <- dplyr::do(dplyr::group_by(df, g), top_x = max(.$x))
+
+  expect_false(is_tbl_gpu(result))
+  expect_true(any(vapply(result, is.list, logical(1))))
+  expect_equal(nrow(result), nrow(oracle))
+})
+
+test_that("do() triggers the fallback notification", {
+  skip_if_no_gpu()
+  gt <- tbl_gpu(fallback_df())
+  withr::local_options(cuplyr.fallback = "warn")
+
+  expect_warning(gt |> dplyr::do(head(., 1)), "fell back to CPU evaluation")
+})
+
 # group_data()/group_keys()/group_rows()/group_indices()/group_size()/
 # n_groups() are GPU-native now (Phase 9 task 1, see R/group-by.R's
 # compute_group_data()) -- no longer fallback verbs. See

@@ -197,6 +197,33 @@ rowwise.tbl_gpu <- function(.data, ...) {
   })
 }
 
+#' @rdname fallback-verbs
+#' @export
+#' @importFrom dplyr do
+#
+# Phase 11 L7: do() IS an ordinary S3 generic (dplyr exports do.data.frame/
+# do.grouped_df/do.rowwise_df/do.NULL, but no do.default) -- confirmed
+# empirically (test-first, per the repo's STRICT mandate) that calling
+# dplyr::do() on a tbl_gpu before this method existed hard-errored with "no
+# applicable method for 'do' applied to an object of class \"c('tbl_gpu',
+# 'tbl')\"", never reaching any fallback at all. gpu_fallback() already
+# restores group_by() structure on the collected tibble when `.data` was
+# grouped, so dispatching through it here is enough to route to real
+# dplyr's do.grouped_df for a grouped tbl_gpu, or do.data.frame for an
+# ungrouped one -- no bespoke per-group logic needed.
+#
+# `do()`'s named-dots form (e.g. `do(models = lm(y ~ x, data = .))`)
+# produces a data frame with LIST columns (one model object per group) --
+# `gpu_fallback()`'s existing `has_list_column()` check already returns
+# that as a plain tibble rather than attempting (and failing) to re-upload
+# it, exactly like `nest_by()`/`group_nest()`.
+do.tbl_gpu <- function(.data, ...) {
+  dots <- rlang::enquos(...)
+  gpu_fallback("do", .data, function(tbl) {
+    rlang::inject(dplyr::do(tbl, !!!dots))
+  })
+}
+
 # =============================================================================
 # slice() family
 #

@@ -56,10 +56,23 @@
 #include <cudf/binaryop.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
+#include <cudf/datetime.hpp>
 #include <cudf/replace.hpp>
 #include <cudf/round.hpp>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/search.hpp>
+#include <cudf/strings/attributes.hpp>
+#include <cudf/strings/case.hpp>
+#include <cudf/strings/combine.hpp>
+#include <cudf/strings/contains.hpp>
+#include <cudf/strings/find.hpp>
+#include <cudf/strings/regex/flags.hpp>
+#include <cudf/strings/regex/regex_program.hpp>
+#include <cudf/strings/replace.hpp>
+#include <cudf/strings/replace_re.hpp>
+#include <cudf/strings/slice.hpp>
+#include <cudf/strings/strings_column_view.hpp>
+#include <cudf/strings/strip.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/transform.hpp>
 #include <cudf/types.hpp>
@@ -71,6 +84,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -212,6 +226,12 @@ inline bool ir_op_is_comparison(const std::string& op) {
     return cmp.count(op) > 0;
 }
 
+// Forward declaration: op_dispatches_to_ast() (just below) needs this to
+// detect a STRING-producing "call" operand (Phase 11 L5, e.g. `toupper(x)
+// == "ABC"`) -- see that function's own updated doc comment. Defined in
+// full further down this file.
+inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx);
+
 // op_dispatches_to_ast(): materialize()'s top-level "build_ast+compute_column
 // vs apply_handler" decision for a call node. This is deliberately NOT the
 // same question as ast_expressible() (which asks "does this WHOLE subtree,
@@ -226,8 +246,10 @@ inline bool ir_op_is_comparison(const std::string& op) {
 // exception: a *comparison* op ("==" etc.) whose own immediate operands are
 // STRING must go to the handler even though the op name has an ast_op entry
 // (section 0's STRING carve-out) -- checked shallowly here (col type from
-// ctx, lit's own declared type; a "call" operand producing STRING doesn't
-// occur in Phase 1's scope, so it isn't checked).
+// ctx, lit's own declared type; a "call" operand -- e.g. Phase 11 L5's
+// `toupper(x) == "ABC"` -- checked via resolve_static_type(), which is
+// exactly the same static-type machinery build_ast()'s own operand-type-
+// matching logic uses just below).
 inline bool op_dispatches_to_ast(const std::string& op, Rcpp::List node, const eval_ctx& ctx) {
     cudf::ast::ast_operator dummy;
     if (!ast_op_from_name(op, dummy)) return false;
@@ -243,6 +265,8 @@ inline bool op_dispatches_to_ast(const std::string& op, Rcpp::List node, const e
             } else if (ak == "lit") {
                 SEXP t = a["type"];
                 if (!Rf_isNull(t) && Rcpp::as<std::string>(t) == "STRING") return false;
+            } else if (ak == "call") {
+                if (resolve_static_type(a, ctx).id() == cudf::type_id::STRING) return false;
             }
         }
     }
@@ -430,6 +454,33 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
         }
         return cudf::data_type{type_by_promotion_rank(best)};
     }
+
+    // Phase 11 L5/L6: every new op's declared GPU type (R/ir.R's own
+    // registry `type` functions, mirrored here so nested usage inside an
+    // AST-native op -- comparisons, arithmetic -- resolves the REAL type
+    // rather than falling through to the generic FLOAT64 default below,
+    // which would otherwise cause build_ast()'s operand-type-matching logic
+    // (see its own "AST operand type matching" note) to skip a cast that's
+    // actually needed, or wrongly skip flagging a STRING operand (see
+    // op_dispatches_to_ast()'s updated "call" branch above) -- both would
+    // surface as a cudf "non-matching operand types" throw at
+    // compute_column() time. Every one of these ops' own apply_handler()
+    // case (below) already returns a column of exactly this declared type
+    // (datetime accessors cast INT16 -> INT32 immediately, string ops are
+    // genuinely STRING/BOOL8-native), so this is never an approximation the
+    // way the arithmetic branch just above is.
+    static const std::set<std::string> string_ops = {
+        "toupper", "tolower", "substr", "trimws", "sub", "gsub", "paste_cols"
+    };
+    if (string_ops.count(op)) return cudf::data_type{cudf::type_id::STRING};
+
+    static const std::set<std::string> bool_string_ops = {"grepl", "starts_with", "ends_with"};
+    if (bool_string_ops.count(op)) return cudf::data_type{cudf::type_id::BOOL8};
+
+    static const std::set<std::string> int32_ops = {
+        "nchar", "year", "month", "day", "hour", "minute", "second", "quarter", "yday", "wday"
+    };
+    if (int32_ops.count(op)) return cudf::data_type{cudf::type_id::INT32};
 
     // %in%'s first argument type, or any other unrecognized op: safe FLOAT64
     // default (matches ir_infer_type()'s bare-NA-in-isolation fallback).
@@ -1214,6 +1265,219 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
             return std::make_unique<cudf::column>(x_col);
         }
         return cudf::cast(x_col, target);
+    }
+
+    // ---- toupper(x) / tolower(x): case.hpp (Phase 11 L5) ----
+    if (op == "toupper" || op == "tolower") {
+        Rcpp::List x_node = args[0];
+        cudf::size_type x_idx = materialize(x_node, ctx);
+        cudf::strings_column_view sv(ctx.cols[x_idx]);
+        return (op == "toupper") ? cudf::strings::to_upper(sv) : cudf::strings::to_lower(sv);
+    }
+
+    // ---- nchar(x): attributes.hpp count_characters(), cast defensively to
+    // the registry-declared INT32 (Phase 11 L5) ----
+    if (op == "nchar") {
+        Rcpp::List x_node = args[0];
+        cudf::size_type x_idx = materialize(x_node, ctx);
+        cudf::strings_column_view sv(ctx.cols[x_idx]);
+        auto result = cudf::strings::count_characters(sv);
+        if (result->type().id() != cudf::type_id::INT32) {
+            result = cudf::cast(result->view(), cudf::data_type{cudf::type_id::INT32});
+        }
+        return result;
+    }
+
+    // ---- substr(x, start0, stop0): slice_strings() -- R/ir.R's
+    // ir_parse_substr() already converted R's inclusive 1-based [start,
+    // stop] into cuDF's exclusive 0-based [start, stop), clamped so
+    // start0 >= 0 and stop0 >= start0 (Phase 11 L5) ----
+    if (op == "substr") {
+        Rcpp::List x_node = args[0];
+        cudf::size_type x_idx = materialize(x_node, ctx);
+        cudf::strings_column_view sv(ctx.cols[x_idx]);
+
+        Rcpp::List start_node = args[1];
+        Rcpp::List stop_node = args[2];
+        int32_t start0 = Rcpp::as<int32_t>(start_node["value"]);
+        int32_t stop0 = Rcpp::as<int32_t>(stop_node["value"]);
+        cudf::numeric_scalar<cudf::size_type> start_scalar(start0, true);
+        cudf::numeric_scalar<cudf::size_type> stop_scalar(stop0, true);
+        return cudf::strings::slice_strings(sv, start_scalar, stop_scalar);
+    }
+
+    // ---- trimws(x, which): strip.hpp (Phase 11 L5) ----
+    if (op == "trimws") {
+        Rcpp::List x_node = args[0];
+        cudf::size_type x_idx = materialize(x_node, ctx);
+        cudf::strings_column_view sv(ctx.cols[x_idx]);
+
+        Rcpp::List which_node = args[1];
+        std::string which = Rcpp::as<std::string>(which_node["value"]);
+        cudf::strings::side_type side = cudf::strings::side_type::BOTH;
+        if (which == "left") side = cudf::strings::side_type::LEFT;
+        else if (which == "right") side = cudf::strings::side_type::RIGHT;
+        return cudf::strings::strip(sv, side);
+    }
+
+    // ---- paste0(...)/paste(...): row-wise concatenate() (Phase 11 L5).
+    // args = [str_col_1, ..., str_col_N, sep_literal]; narep = "NA" matches
+    // R's own "a genuine NA argument becomes the literal string 'NA'" rule
+    // (verified empirically: paste0("a", NA, "b") is "aNAb", not NA). ----
+    if (op == "paste_cols") {
+        int n = args.size();
+        Rcpp::List sep_node = args[n - 1];
+        std::string sep = Rcpp::as<std::string>(sep_node["value"]);
+
+        std::vector<cudf::column_view> str_cols;
+        std::vector<std::unique_ptr<cudf::column>> owned_broadcasts;
+        str_cols.reserve(static_cast<size_t>(n - 1));
+        for (int i = 0; i < n - 1; ++i) {
+            Rcpp::List a = args[i];
+            if (ir_kind(a) == "lit") {
+                bool na = ir_lit_is_na(a);
+                std::string v = na ? std::string() : Rcpp::as<std::string>(a["value"]);
+                cudf::string_scalar sc(v, !na);
+                auto col = cudf::make_column_from_scalar(sc, ctx.view().num_rows());
+                str_cols.push_back(col->view());
+                owned_broadcasts.push_back(std::move(col));
+            } else {
+                cudf::size_type idx = materialize(a, ctx);
+                str_cols.push_back(ctx.cols[idx]);
+            }
+        }
+
+        cudf::table_view str_table(str_cols);
+        cudf::string_scalar sep_scalar(sep, true);
+        cudf::string_scalar narep_scalar("NA", true);
+        return cudf::strings::concatenate(str_table, sep_scalar, narep_scalar);
+    }
+
+    // ---- grepl(x, pattern, fixed): contains()/contains_re(), NA -> FALSE
+    // (Phase 11 L5) ----
+    if (op == "grepl") {
+        Rcpp::List x_node = args[0];
+        Rcpp::List pattern_node = args[1];
+        Rcpp::List fixed_node = args[2];
+
+        cudf::size_type x_idx = materialize(x_node, ctx);
+        cudf::strings_column_view sv(ctx.cols[x_idx]);
+        std::string pattern = Rcpp::as<std::string>(pattern_node["value"]);
+        bool fixed = Rcpp::as<bool>(fixed_node["value"]);
+
+        std::unique_ptr<cudf::column> result;
+        if (fixed) {
+            cudf::string_scalar target(pattern, true);
+            result = cudf::strings::contains(sv, target);
+        } else {
+            auto prog = cudf::strings::regex_program::create(pattern);
+            result = cudf::strings::contains_re(sv, *prog);
+        }
+
+        // R's grepl() treats a NA element of x as FALSE (verified
+        // empirically), unlike contains_re()/contains(), which null-
+        // propagate -- fix up after the fact, exactly like %in%'s own
+        // never-NA rule above.
+        cudf::numeric_scalar<bool> false_scalar(false, true);
+        return cudf::replace_nulls(result->view(), false_scalar);
+    }
+
+    // ---- sub(x, pattern, replacement, fixed) / gsub(...): replace_re()/
+    // replace(); sub() replaces only the first match per string, gsub()
+    // every match (Phase 11 L5) ----
+    if (op == "sub" || op == "gsub") {
+        Rcpp::List x_node = args[0];
+        Rcpp::List pattern_node = args[1];
+        Rcpp::List repl_node = args[2];
+        Rcpp::List fixed_node = args[3];
+
+        cudf::size_type x_idx = materialize(x_node, ctx);
+        cudf::strings_column_view sv(ctx.cols[x_idx]);
+        std::string pattern = Rcpp::as<std::string>(pattern_node["value"]);
+        std::string repl = Rcpp::as<std::string>(repl_node["value"]);
+        bool fixed = Rcpp::as<bool>(fixed_node["value"]);
+        cudf::size_type maxrepl = (op == "sub") ? 1 : -1;
+
+        if (fixed) {
+            cudf::string_scalar target(pattern, true);
+            cudf::string_scalar repl_scalar(repl, true);
+            return cudf::strings::replace(sv, target, repl_scalar, maxrepl);
+        }
+
+        auto prog = cudf::strings::regex_program::create(pattern);
+        cudf::string_scalar repl_scalar(repl, true);
+        std::optional<cudf::size_type> max_count =
+            (op == "sub") ? std::optional<cudf::size_type>(1) : std::nullopt;
+        return cudf::strings::replace_re(sv, *prog, repl_scalar, max_count);
+    }
+
+    // ---- startsWith(x, prefix) / endsWith(x, suffix): find.hpp. NA
+    // propagates like R's own startsWith()/endsWith() (no fixup needed,
+    // unlike grepl() above) (Phase 11 L5) ----
+    if (op == "starts_with" || op == "ends_with") {
+        Rcpp::List x_node = args[0];
+        Rcpp::List target_node = args[1];
+
+        cudf::size_type x_idx = materialize(x_node, ctx);
+        cudf::strings_column_view sv(ctx.cols[x_idx]);
+        std::string target_str = Rcpp::as<std::string>(target_node["value"]);
+        cudf::string_scalar target(target_str, true);
+
+        return (op == "starts_with") ? cudf::strings::starts_with(sv, target)
+                                      : cudf::strings::ends_with(sv, target);
+    }
+
+    // ---- year/month/day/hour/minute/second/quarter/yday/wday: datetime.hpp
+    // (Phase 11 L6). Cast immediately to the registry-declared INT32 so
+    // nested usage sees the real type (see resolve_static_type()'s matching
+    // cases above for why this matters) ----
+    if (op == "year" || op == "month" || op == "day" || op == "hour" ||
+        op == "minute" || op == "second" || op == "quarter" || op == "yday" ||
+        op == "wday") {
+        Rcpp::List x_node = args[0];
+        cudf::size_type x_idx = materialize(x_node, ctx);
+        cudf::column_view x_col = ctx.cols[x_idx];
+
+        std::unique_ptr<cudf::column> result;
+        if (op == "quarter") {
+            result = cudf::datetime::extract_quarter(x_col);
+        } else if (op == "yday") {
+            result = cudf::datetime::day_of_year(x_col);
+        } else {
+            static const std::map<std::string, cudf::datetime::datetime_component> comp_table = {
+                {"year", cudf::datetime::datetime_component::YEAR},
+                {"month", cudf::datetime::datetime_component::MONTH},
+                {"day", cudf::datetime::datetime_component::DAY},
+                {"hour", cudf::datetime::datetime_component::HOUR},
+                {"minute", cudf::datetime::datetime_component::MINUTE},
+                {"second", cudf::datetime::datetime_component::SECOND},
+                {"wday", cudf::datetime::datetime_component::WEEKDAY},
+            };
+            result = cudf::datetime::extract_datetime_component(x_col, comp_table.at(op));
+        }
+
+        if (result->type().id() != cudf::type_id::INT32) {
+            result = cudf::cast(result->view(), cudf::data_type{cudf::type_id::INT32});
+        }
+
+        if (op == "wday") {
+            // cuDF WEEKDAY is ISO Mon=1..Sun=7; lubridate::wday()'s default
+            // (week_start = 7, i.e. Sunday) is Sun=1, Mon=2, ..., Sat=7 --
+            // verified empirically (plain Rscript, no GPU): (w %% 7) + 1
+            // maps cuDF's convention onto lubridate's exactly (Mon:
+            // (1 %% 7) + 1 = 2; Sun: (7 %% 7) + 1 = 1). R/ir.R's
+            // ir_parse_lubridate_accessor() only goes native for wday()
+            // when the global lubridate.week.start option is still at its
+            // own default (7), so this remap is always valid here.
+            cudf::numeric_scalar<int32_t> seven(7, true);
+            cudf::numeric_scalar<int32_t> one(1, true);
+            auto modded = cudf::binary_operation(result->view(), seven, cudf::binary_operator::PYMOD,
+                                                  cudf::data_type{cudf::type_id::INT32});
+            result = cudf::binary_operation(modded->view(), one, cudf::binary_operator::ADD,
+                                             cudf::data_type{cudf::type_id::INT32});
+        }
+
+        return result;
     }
 
     // ---- if_else(cond, yes, no, missing=): copy_if_else + a second pass

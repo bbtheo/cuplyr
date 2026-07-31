@@ -4,9 +4,18 @@
 # own test files, string functions barely appear and datetime accessors
 # never do -- what actually breaks dplyr parity on cuplyr is UNKNOWN USER
 # FUNCTIONS (local closures, identity(), ifelse(), scale(), lengths(),
-# toupper(), ...) that mutate()/summarise() used to hard-error on and
+# sprintf(), ...) that mutate()/summarise() used to hard-error on and
 # filter()'s no-data-mask CPU eval couldn't serve (also why top_n()/
 # top_frac() were broken end-to-end).
+#
+# NOTE (Phase 11 task L5): this file originally used toupper()/grepl() as
+# its "genuinely unregistered function" examples, back when no native
+# string support existed at all -- L5 registered both natively, so those
+# two examples were swapped for sprintf()/grepl(ignore.case=TRUE) (a
+# different, still-genuinely-unsupported shape) below to keep testing what
+# they were meant to test (an unparseable shape subsumed by the whole-call
+# fallback) without now contradicting L5's own native coverage (see
+# test-dplyr-strings.R for toupper()/grepl()'s own native oracle tests).
 #
 # The trigger rule (mutate.R's parse_mutate_dots(stop_on_unparseable=),
 # summarise.R's summarise_dots_parseable(), filter.R's
@@ -76,16 +85,15 @@ test_that("mutate() falls back for lengths()", {
   expect_warning(expect_same_as_dplyr(df, pipeline), "fell back to CPU evaluation")
 })
 
-test_that("mutate() falls back for toupper() (BEFORE any native string support exists)", {
+test_that("mutate() falls back for sprintf() (a still-genuinely-unregistered function)", {
   skip_if_no_gpu()
   withr::local_options(cuplyr.fallback = "warn")
 
-  # This proves L1's subsumption claim: toupper() has no ir_call_registry
-  # entry at all as of this task (native base-R string support is Phase
-  # 11 task L5, not yet implemented) -- it works ANYWAY, transparently,
-  # via the CPU fallback.
+  # This proves L1's subsumption claim: sprintf() has no ir_call_registry
+  # entry at all (not part of Phase 11 task L5's base-R string scope) -- it
+  # works ANYWAY, transparently, via the CPU fallback.
   df <- tibble::tibble(name = c("alice", "bob", "carl"))
-  pipeline <- function(d) dplyr::mutate(d, y = toupper(name))
+  pipeline <- function(d) dplyr::mutate(d, y = sprintf("%s!", name))
 
   expect_warning(expect_same_as_dplyr(df, pipeline), "fell back to CPU evaluation")
 })
@@ -94,12 +102,15 @@ test_that("mutate() falls back for toupper() (BEFORE any native string support e
 # filter(): unknown-shape predicates referencing a real column
 # =============================================================================
 
-test_that("filter() falls back for grepl()", {
+test_that("filter() falls back for grepl(ignore.case = TRUE)", {
   skip_if_no_gpu()
   withr::local_options(cuplyr.fallback = "warn")
 
+  # grepl() itself is native (Phase 11 L5) -- ignore.case=TRUE specifically
+  # is not (cuDF's regex_flags has no case-insensitive flag), so this dot
+  # still falls back, exactly the shape this test is meant to exercise.
   df <- tibble::tibble(name = c("Alice", "Bob", "alice2", "Dan"))
-  pipeline <- function(d) dplyr::filter(d, grepl("lice", name))
+  pipeline <- function(d) dplyr::filter(d, grepl("LICE", name, ignore.case = TRUE))
 
   expect_warning(expect_same_as_dplyr(df, pipeline), "fell back to CPU evaluation")
 })
@@ -109,14 +120,15 @@ test_that("filter() with a window call mixed with an unknown function falls back
   withr::local_options(cuplyr.fallback = "warn")
 
   # A dot combining a window call (mean()) with a function the IR doesn't
-  # understand (toupper()) fails to parse as ONE unit (the whole `&`
+  # understand (sprintf()) fails to parse as ONE unit (the whole `&`
   # expression returns NULL), so it's never even classified as
   # window-bearing -- it must route to the whole-call fallback instead of
-  # attempting a partial/half-lowered plan.
+  # attempting a partial/half-lowered plan. nchar() itself is native (Phase
+  # 11 L5) -- sprintf() is the piece that's still genuinely unsupported.
   df <- tibble::tibble(g = c(1, 1, 2, 2), name = c("Alice", "bob", "Carl", "dan"))
   pipeline <- function(d) {
     d |> dplyr::group_by(g) |>
-      dplyr::filter(mean(nchar(name)) > 0 & toupper(name) != "") |>
+      dplyr::filter(mean(nchar(name)) > 0 & sprintf("%s", name) != "") |>
       dplyr::ungroup()
   }
 

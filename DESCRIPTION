@@ -39,6 +39,7 @@ Suggests:
     rmarkdown,
     pkgdown,
     data.table,
+    lubridate,
     withr
 VignetteBuilder: knitr
 LinkingTo:

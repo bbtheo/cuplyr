@@ -346,6 +346,54 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       return(ir_parse_froll_call(expr, env, schema, fn_name))
     }
 
+    # Phase 11 L5 (base-R strings): nchar()/substr()/trimws()/paste0()/
+    # paste()/grepl()/sub()/gsub()/startsWith()/endsWith() all have optional
+    # named controls (type=/which=/sep=/collapse=/fixed=/ignore.case=/...)
+    # the generic per-arg registry loop can't validate (it only ever sees
+    # positional args -- same reason lag()/lead()/ntile()/roll_*() above
+    # need dedicated dispatch). toupper()/tolower() need no such dispatch
+    # (fixed 1-arg signature, ordinary registry entries below).
+    if (identical(fn_name, "nchar")) {
+      return(ir_parse_nchar(expr, env, schema))
+    }
+    if (identical(fn_name, "substr")) {
+      return(ir_parse_substr(expr, env, schema))
+    }
+    if (identical(fn_name, "trimws")) {
+      return(ir_parse_trimws(expr, env, schema))
+    }
+    if (fn_name %in% c("paste0", "paste")) {
+      return(ir_parse_paste_call(expr, env, schema, fn_name))
+    }
+    if (identical(fn_name, "grepl")) {
+      return(ir_parse_grepl(expr, env, schema))
+    }
+    if (fn_name %in% c("sub", "gsub")) {
+      return(ir_parse_sub_gsub(expr, env, schema, fn_name))
+    }
+    if (fn_name %in% c("startsWith", "endsWith")) {
+      return(ir_parse_starts_ends_with(expr, env, schema, fn_name))
+    }
+
+    # Phase 11 L6 (lubridate datetime accessors): MANDATORY namespace guard
+    # -- year()/month()/day()/hour()/minute()/second()/quarter()/yday()/
+    # wday() are lubridate names, not base R (base R has no year()) -- go
+    # native ONLY if the call's function symbol resolves (in the quosure's
+    # own environment, or via an explicit `lubridate::` qualification) to
+    # exactly lubridate's own function; otherwise NULL (fall back), so a
+    # user's own same-named function (or lubridate not being
+    # installed/attached at all) reproduces dplyr's ordinary "could not
+    # find function"/user-function behavior on the CPU fallback path
+    # instead of cuplyr silently misinterpreting an unrelated call. See
+    # ir_require_lubridate_fn()'s own docs.
+    if (fn_name %in% c("year", "month", "day", "hour", "minute", "second",
+                        "quarter", "yday", "wday")) {
+      if (!ir_require_lubridate_fn(head, env, fn_name)) {
+        return(NULL)
+      }
+      return(ir_parse_lubridate_accessor(expr, env, schema, fn_name))
+    }
+
     canonical <- ir_op_alias(fn_name)
     args_raw <- as.list(expr)[-1]
 
@@ -2378,6 +2426,549 @@ ir_parse_consecutive_id <- function(args, schema) {
   ir_call("cumsum", list(increment))
 }
 
+# -----------------------------------------------------------------------------
+# Phase 11 L5 (scratchpad/phase11_design.md): base-R string functions.
+# STRING is never `ast_expressible()` (src/expr_eval.hpp), so every one of
+# these always materializes as its own `apply_handler()` column -- there is
+# no AST-native string op, unlike arithmetic/comparison/logic.
+#
+# Every dedicated dispatch function below follows the lag()/lead()/ntile()
+# precedent (module comment above ir_parse_shift_call()): `rlang::call_match()`
+# against a prototype mirroring the REAL base-R signature, so named/
+# positional/reordered calls are matched exactly like real R would, then any
+# OPTIONAL argument this wave doesn't implement being present AT ALL (even at
+# its own default value) makes the whole dot return `NULL` (fall back to L1's
+# CPU path) -- the same "narrow scope, cut liberally" convention every prior
+# phase in this file established (see ir_parse_first_last_nth()'s docs for
+# the canonical statement of this rule).
+#
+# `pattern`/`start`/`stop`/`which`/`sep`/etc. arguments are all evaluated as
+# R-side CONSTANTS via [ir_eval_constant()] (no data mask) -- exactly the
+# `lag()`'s `n=`/`default=` precedent -- never as column expressions; a
+# column-valued position/pattern falls back.
+# -----------------------------------------------------------------------------
+
+# TRUE iff `ir_node`'s inferred GPU type is STRING. Shared guard for every
+# L5 entry/dispatch function below (toupper()/tolower()'s own `parse` hooks,
+# and every dedicated dispatch function's own `x` check) -- mirrors
+# na_if()'s/case_match()'s own `unname()` landmine (a schema column's
+# inferred type comes back NAMED; identical() treats a `names` attribute as
+# significant).
+# @keywords internal
+ir_is_string_type <- function(ir_node, schema) {
+  identical(unname(ir_infer_type(ir_node, schema)), "STRING")
+}
+
+#' Parse `nchar(x, type = "chars", allowNA = FALSE, keepNA = NA)` (Phase 11 L5)
+#'
+#' Only the default `type = "chars"` shape is implemented -- `allowNA=`/
+#' `keepNA=` present at all, or an explicit `type=` other than `"chars"`,
+#' falls back: cuDF's `count_characters()` (`strings/attributes.hpp`) counts
+#' Unicode code points, matching R's own `nchar(type = "chars")` (the
+#' default) exactly, but has no byte-count (`type = "bytes"`) or
+#' display-width (`type = "width"`) equivalent. `x` must be a genuine
+#' STRING-typed expression.
+#' @keywords internal
+ir_parse_nchar <- function(expr, env, schema) {
+  proto <- function(x, type = "chars", allowNA = FALSE, keepNA = NA) NULL
+  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  if (is.null(present)) {
+    return(NULL)
+  }
+  present_args <- as.list(present)[-1]
+
+  if (!is.null(present_args$allowNA) || !is.null(present_args$keepNA)) {
+    return(NULL)
+  }
+  if (!is.null(present_args$type)) {
+    type_eval <- ir_eval_constant(present_args$type, env)
+    if (!type_eval$ok || !identical(type_eval$value, "chars")) {
+      return(NULL)  # type = "bytes"/"width": not implemented this wave
+    }
+  }
+  if (is.null(present_args$x)) {
+    return(NULL)
+  }
+
+  x_ir <- ir_parse_expr(present_args$x, env, schema)
+  if (is.null(x_ir) || !ir_is_string_type(x_ir, schema)) {
+    return(NULL)
+  }
+
+  ir_call("nchar", list(x_ir))
+}
+
+#' Parse `substr(x, start, stop)` (Phase 11 L5)
+#'
+#' `start`/`stop` must be constant (non-column) whole numbers -- resolved
+#' via [ir_eval_constant()] with no data mask, exactly like `lag()`'s `n=`.
+#' Converts R's inclusive 1-based `[start, stop]` into cuDF
+#' `slice_strings()`'s (`strings/slice.hpp`) exclusive 0-based `[start,
+#' stop)`, replicating R's own clamping (verified empirically against real
+#' `substr()`): a `start` below 1 clamps UP to 1 *before* the 0-based
+#' conversion (`substr("hello", -2, 3)` is `"hel"`, identical to
+#' `substr("hello", 1, 3)`), and a `stop` below the already-clamped 0-based
+#' start clamps up to it, producing an empty string (`substr("hello", 5,
+#' 2)` is `""`) rather than ever handing `slice_strings()` a negative
+#' scalar. A non-numeric/`NA` `start`/`stop`, a non-constant `start`/`stop`,
+#' or a non-STRING `x`, falls back.
+#' @keywords internal
+ir_parse_substr <- function(expr, env, schema) {
+  proto <- function(x, start, stop) NULL
+  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  if (is.null(present)) {
+    return(NULL)
+  }
+  present_args <- as.list(present)[-1]
+  if (is.null(present_args$x) || is.null(present_args$start) || is.null(present_args$stop)) {
+    return(NULL)
+  }
+
+  x_ir <- ir_parse_expr(present_args$x, env, schema)
+  if (is.null(x_ir) || !ir_is_string_type(x_ir, schema)) {
+    return(NULL)
+  }
+
+  start_eval <- ir_eval_constant(present_args$start, env)
+  stop_eval <- ir_eval_constant(present_args$stop, env)
+  if (!start_eval$ok || !stop_eval$ok) {
+    return(NULL)
+  }
+  start_val <- start_eval$value
+  stop_val <- stop_eval$value
+  if (!is.numeric(start_val) || length(start_val) != 1 || is.na(start_val) ||
+      !is.numeric(stop_val) || length(stop_val) != 1 || is.na(stop_val)) {
+    return(NULL)
+  }
+
+  start_r <- max(as.integer(start_val), 1L)
+  start0 <- start_r - 1L
+  stop0 <- max(as.integer(stop_val), start0)
+
+  ir_call("substr", list(x_ir, ir_lit_from_r(start0), ir_lit_from_r(stop0)))
+}
+
+#' Parse `trimws(x, which = "both", whitespace = "[ \\t\\r\\n]")` (Phase 11 L5)
+#'
+#' Only the default `whitespace=` (space/tab/CR/LF -- cuDF `strip()`'s
+#' (`strings/strip.hpp`) own "empty `to_strip` means strip whitespace"
+#' behavior) is implemented -- an explicit `whitespace=` argument at all
+#' falls back. `which=` maps to `cudf::strings::side_type`
+#' (`"both"`/`"left"`/`"right"`), matched via `pmatch()` against the 3 full
+#' names (real `trimws()` uses `match.arg()` internally, which also accepts
+#' an unambiguous partial match like `"l"`).
+#' @keywords internal
+ir_parse_trimws <- function(expr, env, schema) {
+  proto <- function(x, which = "both", whitespace = "[ \t\r\n]") NULL
+  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  if (is.null(present)) {
+    return(NULL)
+  }
+  present_args <- as.list(present)[-1]
+
+  if (!is.null(present_args$whitespace)) {
+    return(NULL)
+  }
+  if (is.null(present_args$x)) {
+    return(NULL)
+  }
+
+  x_ir <- ir_parse_expr(present_args$x, env, schema)
+  if (is.null(x_ir) || !ir_is_string_type(x_ir, schema)) {
+    return(NULL)
+  }
+
+  which_val <- "both"
+  if (!is.null(present_args$which)) {
+    which_eval <- ir_eval_constant(present_args$which, env)
+    if (!which_eval$ok || !is.character(which_eval$value) || length(which_eval$value) < 1) {
+      return(NULL)
+    }
+    matched <- pmatch(which_eval$value[1], c("both", "left", "right"))
+    if (is.na(matched)) {
+      return(NULL)
+    }
+    which_val <- c("both", "left", "right")[matched]
+  }
+
+  ir_call("trimws", list(x_ir, ir_lit_from_r(which_val)))
+}
+
+#' Parse `paste0(..., collapse = NULL)` / `paste(..., sep = " ", collapse =
+#' NULL)` (Phase 11 L5)
+#'
+#' `collapse=` (reduce-to-one-string) is not implemented this wave -- its
+#' presence at all falls back. `sep=` (`paste()` only; `paste0()` is always
+#' `sep = ""`) must be a constant string. Every dot must resolve to a
+#' STRING-typed IR node -- ANY non-STRING dot (numeric, logical, ...) falls
+#' back rather than replicating R's `as.character()` formatting rules
+#' (verified empirically: `paste0("x", 4)` is `"x4"`, NOT `"x4.0"` --
+#' faithfully reproducing `as.character()`'s numeric-formatting edge cases
+#' for every type is explicitly out of scope, per the design doc's own
+#' "x4 vs 4.0 trap" note). The lowered `ir_call("paste_cols", ...)` node's
+#' LAST argument is always a STRING literal carrying the separator (never a
+#' per-row value) -- `apply_handler()`'s `narep = "NA"` reproduces R's own
+#' "a genuine NA argument becomes the literal two-character string `\"NA\"`"
+#' behavior (verified: `paste0("a", NA, "b")` is `"aNAb"`, not `NA`).
+#' @keywords internal
+ir_parse_paste_call <- function(expr, env, schema, fn_name) {
+  proto <- if (identical(fn_name, "paste0")) {
+    function(..., collapse = NULL) NULL
+  } else {
+    function(..., sep = " ", collapse = NULL) NULL
+  }
+  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  if (is.null(present)) {
+    return(NULL)
+  }
+  present_args <- as.list(present)[-1]
+
+  if (!is.null(present_args$collapse)) {
+    return(NULL)
+  }
+
+  sep_val <- if (identical(fn_name, "paste0")) "" else " "
+  if (!is.null(present_args$sep)) {
+    sep_eval <- ir_eval_constant(present_args$sep, env)
+    if (!sep_eval$ok || !is.character(sep_eval$value) || length(sep_eval$value) != 1 ||
+        is.na(sep_eval$value)) {
+      return(NULL)
+    }
+    sep_val <- sep_eval$value
+  }
+
+  arg_names <- names(present_args)
+  if (is.null(arg_names)) {
+    arg_names <- rep("", length(present_args))
+  }
+  dots_raw <- present_args[!(arg_names %in% c("sep", "collapse"))]
+  if (length(dots_raw) == 0) {
+    return(NULL)  # zero-dot edge case: not implemented this wave
+  }
+
+  dot_irs <- vector("list", length(dots_raw))
+  for (i in seq_along(dots_raw)) {
+    node <- ir_parse_expr(dots_raw[[i]], env, schema)
+    if (is.null(node) || !ir_is_string_type(node, schema)) {
+      return(NULL)  # non-STRING/unparseable arg: fall back (no as.character())
+    }
+    dot_irs[[i]] <- node
+  }
+
+  ir_call("paste_cols", c(dot_irs, list(ir_lit_from_r(sep_val))))
+}
+
+#' Parse `grepl(pattern, x, ignore.case = FALSE, perl = FALSE, fixed =
+#' FALSE, useBytes = FALSE)` (Phase 11 L5)
+#'
+#' `pattern` must be a constant (non-column) string -- resolved via
+#' [ir_eval_constant()]. `ignore.case=`/`perl=`/`useBytes=` present at all
+#' falls back (cuDF's `regex_flags` -- `strings/regex/flags.hpp` -- has no
+#' case-insensitive flag to map `ignore.case=TRUE` onto, and PCRE
+#' (`perl=TRUE`) is a materially different regex dialect from cuDF's own --
+#' cuDF-regex-vs-R divergence is scoped to simple ASCII patterns only, per
+#' the design doc). `fixed=TRUE` routes to a literal substring search
+#' (`contains()`, `strings/find.hpp`) instead of regex (`contains_re()`,
+#' `strings/contains.hpp`). The lowered node's 3rd argument is always a
+#' BOOL8 literal carrying `fixed`. Result is always non-NA: R's `grepl()`
+#' treats a `NA` element of `x` as `FALSE` (verified empirically), enforced
+#' by the C++ handler via `replace_nulls()` after the (null-propagating)
+#' cuDF call.
+#' @keywords internal
+ir_parse_grepl <- function(expr, env, schema) {
+  proto <- function(pattern, x, ignore.case = FALSE, perl = FALSE, fixed = FALSE, useBytes = FALSE) NULL
+  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  if (is.null(present)) {
+    return(NULL)
+  }
+  present_args <- as.list(present)[-1]
+
+  if (!is.null(present_args[["ignore.case"]]) || !is.null(present_args$perl) ||
+      !is.null(present_args$useBytes)) {
+    return(NULL)
+  }
+  if (is.null(present_args$pattern) || is.null(present_args$x)) {
+    return(NULL)
+  }
+
+  pattern_eval <- ir_eval_constant(present_args$pattern, env)
+  if (!pattern_eval$ok || !is.character(pattern_eval$value) ||
+      length(pattern_eval$value) != 1 || is.na(pattern_eval$value)) {
+    return(NULL)
+  }
+
+  fixed_val <- FALSE
+  if (!is.null(present_args$fixed)) {
+    fixed_eval <- ir_eval_constant(present_args$fixed, env)
+    if (!fixed_eval$ok || !is.logical(fixed_eval$value) || length(fixed_eval$value) != 1 ||
+        is.na(fixed_eval$value)) {
+      return(NULL)
+    }
+    fixed_val <- fixed_eval$value
+  }
+
+  x_ir <- ir_parse_expr(present_args$x, env, schema)
+  if (is.null(x_ir) || !ir_is_string_type(x_ir, schema)) {
+    return(NULL)
+  }
+
+  ir_call("grepl", list(x_ir, ir_lit_from_r(pattern_eval$value), ir_lit_from_r(fixed_val)))
+}
+
+#' Parse `sub(pattern, replacement, x, ignore.case=, perl=, fixed=,
+#' useBytes=)` / `gsub(...)` (Phase 11 L5)
+#'
+#' Same restrictions as [ir_parse_grepl()]: `pattern`/`replacement` must be
+#' constant strings, `ignore.case=`/`perl=`/`useBytes=` present at all
+#' falls back, `fixed=TRUE` routes to literal `replace()`
+#' (`strings/replace.hpp`) instead of `replace_re()`
+#' (`strings/replace_re.hpp`). `sub()` replaces only the first match per
+#' string (`max_replace_count = 1`); `gsub()` replaces every match
+#' (`std::nullopt`) -- both share one C++ handler keyed off the op name
+#' (`"sub"`/`"gsub"`, both registered separately below purely so
+#' `ir_infer_type()` can look them up by their own name).
+#' @keywords internal
+ir_parse_sub_gsub <- function(expr, env, schema, fn_name) {
+  proto <- function(pattern, replacement, x, ignore.case = FALSE, perl = FALSE,
+                     fixed = FALSE, useBytes = FALSE) NULL
+  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  if (is.null(present)) {
+    return(NULL)
+  }
+  present_args <- as.list(present)[-1]
+
+  if (!is.null(present_args[["ignore.case"]]) || !is.null(present_args$perl) ||
+      !is.null(present_args$useBytes)) {
+    return(NULL)
+  }
+  if (is.null(present_args$pattern) || is.null(present_args$replacement) ||
+      is.null(present_args$x)) {
+    return(NULL)
+  }
+
+  pattern_eval <- ir_eval_constant(present_args$pattern, env)
+  if (!pattern_eval$ok || !is.character(pattern_eval$value) ||
+      length(pattern_eval$value) != 1 || is.na(pattern_eval$value)) {
+    return(NULL)
+  }
+  repl_eval <- ir_eval_constant(present_args$replacement, env)
+  if (!repl_eval$ok || !is.character(repl_eval$value) ||
+      length(repl_eval$value) != 1 || is.na(repl_eval$value)) {
+    return(NULL)
+  }
+
+  fixed_val <- FALSE
+  if (!is.null(present_args$fixed)) {
+    fixed_eval <- ir_eval_constant(present_args$fixed, env)
+    if (!fixed_eval$ok || !is.logical(fixed_eval$value) || length(fixed_eval$value) != 1 ||
+        is.na(fixed_eval$value)) {
+      return(NULL)
+    }
+    fixed_val <- fixed_eval$value
+  }
+
+  x_ir <- ir_parse_expr(present_args$x, env, schema)
+  if (is.null(x_ir) || !ir_is_string_type(x_ir, schema)) {
+    return(NULL)
+  }
+
+  ir_call(fn_name, list(x_ir, ir_lit_from_r(pattern_eval$value),
+                        ir_lit_from_r(repl_eval$value), ir_lit_from_r(fixed_val)))
+}
+
+#' Parse `startsWith(x, prefix)` / `endsWith(x, suffix)` (Phase 11 L5)
+#'
+#' `prefix`/`suffix` must be a constant (non-column, non-`NA`) string --
+#' matching a per-row column-valued target (`starts_with()`/`ends_with()`'s
+#' `targets` column overload, `strings/find.hpp`) is not implemented this
+#' wave. NA propagation needs no special handling in the C++ handler: cuDF's
+#' `starts_with()`/`ends_with()` already null-propagate exactly like R's own
+#' `startsWith()`/`endsWith()` (verified empirically: `startsWith(c("abc",
+#' NA), "a")` is `TRUE, NA`, not `TRUE, FALSE`) -- unlike `grepl()` above,
+#' which needs an explicit NA-to-FALSE fixup.
+#' @keywords internal
+ir_parse_starts_ends_with <- function(expr, env, schema, fn_name) {
+  proto <- if (identical(fn_name, "startsWith")) {
+    function(x, prefix) NULL
+  } else {
+    function(x, suffix) NULL
+  }
+  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  if (is.null(present)) {
+    return(NULL)
+  }
+  present_args <- as.list(present)[-1]
+  target_name <- if (identical(fn_name, "startsWith")) "prefix" else "suffix"
+
+  if (is.null(present_args$x) || is.null(present_args[[target_name]])) {
+    return(NULL)
+  }
+
+  x_ir <- ir_parse_expr(present_args$x, env, schema)
+  if (is.null(x_ir) || !ir_is_string_type(x_ir, schema)) {
+    return(NULL)
+  }
+
+  target_eval <- ir_eval_constant(present_args[[target_name]], env)
+  if (!target_eval$ok || !is.character(target_eval$value) ||
+      length(target_eval$value) != 1 || is.na(target_eval$value)) {
+    return(NULL)
+  }
+
+  op <- if (identical(fn_name, "startsWith")) "starts_with" else "ends_with"
+  ir_call(op, list(x_ir, ir_lit_from_r(target_eval$value)))
+}
+
+# -----------------------------------------------------------------------------
+# Phase 11 L6 (scratchpad/phase11_design.md): lubridate datetime accessors.
+#
+# MANDATORY NAMESPACE GUARD: year()/month()/day()/hour()/minute()/second()/
+# quarter()/yday()/wday() are lubridate's own names -- base R has no year()
+# (unlike, say, `nchar()`/`substr()` above, which really are base R). Going
+# native for a call that merely happens to be spelled `year(x)` would be
+# wrong if the user has their own unrelated `year <- function(x) ...` in
+# scope, or if lubridate isn't installed/attached at all (in which case real
+# dplyr's own CPU evaluation would raise "could not find function \"year\""
+# -- cuplyr must reproduce that, not silently misinterpret the call).
+# `ir_require_lubridate_fn()` resolves the call's OWN function symbol --
+# `ir_parse_expr()`'s call-handling branch already derived it from `head`,
+# either a bare symbol (looked up in the quosure's environment, exactly like
+# any other symbol resolution in this file) or an explicit `pkg::fn`
+# qualification (resolved directly via that package's namespace, bypassing
+# environment lookup entirely, so `lubridate::year(x)` is honored even when
+# lubridate isn't attached) -- and accepts the call ONLY if that resolves to
+# the REAL, identical `lubridate::<name>` function object.
+# -----------------------------------------------------------------------------
+
+#' Resolve a call's function symbol to the actual function object it invokes
+#'
+#' @param head The call's own head (`expr[[1]]`, as derived by
+#'   `ir_parse_expr()`'s call-handling branch) -- a bare symbol, or a
+#'   `pkg::fn`/`pkg:::fn` call
+#' @param env The quosure's environment (used only for a bare symbol)
+#' @return The resolved function, or `NULL` if it can't be resolved (an
+#'   undefined symbol, or a non-function binding)
+#' @keywords internal
+resolve_call_fn <- function(head, env) {
+  if (is.call(head) && length(head) == 3 &&
+      (identical(head[[1]], as.name("::")) || identical(head[[1]], as.name(":::")))) {
+    pkg <- as.character(head[[2]])
+    fn <- as.character(head[[3]])
+    return(tryCatch(getExportedValue(pkg, fn), error = function(e) NULL))
+  }
+  if (is.symbol(head)) {
+    return(tryCatch(get(as.character(head), envir = env, mode = "function", inherits = TRUE),
+                     error = function(e) NULL))
+  }
+  NULL
+}
+
+#' The Phase 11 L6 namespace guard: TRUE iff a call's function symbol
+#' resolves to exactly `lubridate::<name>`
+#'
+#' `FALSE` (never an error) whenever lubridate isn't installed, `name` isn't
+#' one of its exports, or the call's own function symbol resolves to
+#' anything else (including simply not resolving at all) -- every one of
+#' those cases must fall back to L1's CPU path, never hard-error here.
+#' @keywords internal
+ir_require_lubridate_fn <- function(head, env, name) {
+  if (!requireNamespace("lubridate", quietly = TRUE)) {
+    return(FALSE)
+  }
+  target <- tryCatch(getExportedValue("lubridate", name), error = function(e) NULL)
+  if (is.null(target)) {
+    return(FALSE)
+  }
+  resolved <- resolve_call_fn(head, env)
+  if (is.null(resolved)) {
+    return(FALSE)
+  }
+  identical(resolved, target)
+}
+
+#' Parse a lubridate accessor call (Phase 11 L6), once
+#' [ir_require_lubridate_fn()] has already confirmed the call really
+#' invokes lubridate's own function
+#'
+#' Every one of these 9 functions takes `x` as its sole required argument;
+#' each also has 1-4 OPTIONAL controls (`label=`/`abbr=`/`locale=`
+#' (month()/wday()), `week_start=` (wday() only), `with_year=`/
+#' `fiscal_start=` (quarter() only)) that are NOT implemented this wave --
+#' any of them present at all (even at its own default value) falls back,
+#' matched via `rlang::call_match()` against a prototype mirroring each
+#' function's REAL lubridate signature (so `year(x)`/`year(x = d)` both
+#' match, but e.g. `month(x, label = TRUE)` does not).
+#'
+#' `x` must already be one of the 5 TIMESTAMP_* granularities (a STRING or
+#' numeric `x` is not attempted natively, mirroring `as.Date()`/
+#' `as.POSIXct()`'s own scope cut in L3).
+#'
+#' `wday()`'s own default depends on the GLOBAL `lubridate.week.start`
+#' option (`getOption("lubridate.week.start", 7)`) -- verified empirically
+#' (plain Rscript, no GPU needed): with the option at its own default (7,
+#' i.e. Sunday), `lubridate::wday(d)` returns `Sun=1, Mon=2, ..., Sat=7`.
+#' cuDF's `WEEKDAY` component (`datetime.hpp`) is ISO `Mon=1..Sun=7`;
+#' `(w %% 7) + 1` maps cuDF's convention onto lubridate's exactly (verified
+#' algebraically against the empirical ground truth: Mon `(1 %% 7) + 1 =
+#' 2`; Sun `(7 %% 7) + 1 = 1`) -- implemented in the C++ handler
+#' (`src/expr_eval.hpp`). If the user has changed the global option away
+#' from its own default, this remap would be wrong, so `wday()` additionally
+#' checks the CURRENT option value at parse time and falls back if it isn't
+#' the default 7.
+#'
+#' KNOWN, DOCUMENTED DIVERGENCE (not fixed this wave, see
+#' `test-dplyr-datetime.R`): `lubridate::second()` returns a FRACTIONAL
+#' value for a POSIXct with sub-second precision (e.g. `second(x)` where
+#' `x` is `13:45:30.75` is `30.75`, not `30`) -- cuDF's `SECOND` component
+#' is always a whole integer, so `second()` on a genuinely sub-second-
+#' precision column silently truncates natively instead of falling back.
+#' Whole-second POSIXct values (the overwhelming majority of real usage,
+#' and every `Date`/whole-second `POSIXct`) are unaffected.
+#'
+#' @keywords internal
+ir_parse_lubridate_accessor <- function(expr, env, schema, fn_name) {
+  proto <- switch(fn_name,
+    year = ,
+    day = ,
+    hour = ,
+    minute = ,
+    second = ,
+    yday = function(x) NULL,
+    month = function(x, label = FALSE, abbr = TRUE, locale = Sys.getlocale("LC_TIME")) NULL,
+    quarter = function(x, with_year = FALSE, fiscal_start = 1) NULL,
+    wday = function(x, label = FALSE, abbr = TRUE,
+                     week_start = getOption("lubridate.week.start", 7),
+                     locale = Sys.getlocale("LC_TIME")) NULL
+  )
+  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  if (is.null(present)) {
+    return(NULL)
+  }
+  present_args <- as.list(present)[-1]
+
+  if (length(setdiff(names(present_args), "x")) > 0) {
+    return(NULL)  # any optional control present at all: not implemented this wave
+  }
+  if (is.null(present_args$x)) {
+    return(NULL)
+  }
+
+  if (identical(fn_name, "wday") && !identical(getOption("lubridate.week.start", 7), 7)) {
+    return(NULL)  # non-default global week_start: the (w %% 7) + 1 remap wouldn't hold
+  }
+
+  x_ir <- ir_parse_expr(present_args$x, env, schema)
+  if (is.null(x_ir)) {
+    return(NULL)
+  }
+  x_type <- unname(ir_infer_type(x_ir, schema))
+  if (!x_type %in% cuplyr_timestamp_types) {
+    return(NULL)  # STRING/numeric source: not attempted natively (mirrors L3)
+  }
+
+  ir_call(fn_name, list(x_ir))
+}
+
 #' Registry of supported expression-IR operations
 #'
 #' See the module-level comment above and section 6 of
@@ -2884,7 +3475,78 @@ ir_call_registry <- list(
                     lower = list(handler = "as_date")),
   "as_posixct" = list(arity = 1L, parse = NULL,
                        type = function(arg_types) "TIMESTAMP_MICROSECONDS",
-                       lower = list(handler = "as_posixct"))
+                       lower = list(handler = "as_posixct")),
+
+  # --- Phase 11 L5: base-R string functions ---
+  # toupper()/tolower() reach here via the ORDINARY registry per-arg loop
+  # (fixed arity = 1, no optional named controls) -- unlike every other L5
+  # entry below, which is parsed entirely by its own dedicated dispatch
+  # function (ir_parse_nchar()/ir_parse_substr()/etc., invoked directly from
+  # ir_parse_expr()'s call-handling branch, mirroring lag()/lead()/ntile())
+  # because real R lets their optional arguments be named/omitted/reordered
+  # in ways the registry's positional-only per-arg loop can't validate. Every
+  # dedicated-dispatch entry below exists only so ir_infer_type()/lowering
+  # can look up `type`/`lower` for the finished ir_call(...) node each
+  # dispatch function builds (same "documentation, not dispatch" role
+  # "case_when"/"replace_when" play above).
+  "toupper" = list(
+    arity = 1L,
+    parse = function(args, schema) {
+      if (!ir_is_string_type(args[[1]], schema)) return(NULL)
+      ir_call("toupper", args)
+    },
+    type = function(arg_types) "STRING",
+    lower = list(handler = "toupper")
+  ),
+  "tolower" = list(
+    arity = 1L,
+    parse = function(args, schema) {
+      if (!ir_is_string_type(args[[1]], schema)) return(NULL)
+      ir_call("tolower", args)
+    },
+    type = function(arg_types) "STRING",
+    lower = list(handler = "tolower")
+  ),
+  "nchar" = list(arity = 1L, parse = NULL, type = type_int32, lower = list(handler = "nchar")),
+  "substr" = list(arity = 3L, parse = NULL, type = function(arg_types) "STRING",
+                   lower = list(handler = "substr")),
+  "trimws" = list(arity = 2L, parse = NULL, type = function(arg_types) "STRING",
+                   lower = list(handler = "trimws")),
+  "paste_cols" = list(arity = NA_integer_, parse = NULL, type = function(arg_types) "STRING",
+                       lower = list(handler = "paste_cols")),
+  "grepl" = list(arity = 3L, parse = NULL, type = type_bool8, lower = list(handler = "grepl")),
+  "sub" = list(arity = 4L, parse = NULL, type = function(arg_types) "STRING",
+               lower = list(handler = "sub")),
+  "gsub" = list(arity = 4L, parse = NULL, type = function(arg_types) "STRING",
+                lower = list(handler = "gsub")),
+  "starts_with" = list(arity = 2L, parse = NULL, type = type_bool8,
+                        lower = list(handler = "starts_with")),
+  "ends_with" = list(arity = 2L, parse = NULL, type = type_bool8,
+                      lower = list(handler = "ends_with")),
+
+  # --- Phase 11 L6: lubridate datetime accessors ---
+  # Dispatched only via ir_parse_lubridate_accessor(), reached only after
+  # the mandatory ir_require_lubridate_fn() namespace guard passes (both
+  # above) -- these entries exist purely for ir_infer_type()/lowering
+  # lookup. Each cuDF call (extract_datetime_component()/extract_quarter()/
+  # day_of_year(), datetime.hpp) returns INT16, cast immediately to INT32
+  # inside the C++ handler itself (not left to a later "declared output
+  # type" cast step) so a nested use (e.g. `filter(year(d) == 2020)`, inside
+  # build_ast()'s own static type resolution) sees the real INT32 type --
+  # see resolve_static_type()'s matching new cases, src/expr_eval.hpp.
+  "year" = list(arity = 1L, parse = NULL, type = type_int32, lower = list(handler = "year")),
+  "month" = list(arity = 1L, parse = NULL, type = type_int32, lower = list(handler = "month")),
+  "day" = list(arity = 1L, parse = NULL, type = type_int32, lower = list(handler = "day")),
+  "hour" = list(arity = 1L, parse = NULL, type = type_int32, lower = list(handler = "hour")),
+  "minute" = list(arity = 1L, parse = NULL, type = type_int32, lower = list(handler = "minute")),
+  "second" = list(arity = 1L, parse = NULL, type = type_int32, lower = list(handler = "second")),
+  "quarter" = list(arity = 1L, parse = NULL, type = type_int32, lower = list(handler = "quarter")),
+  "yday" = list(arity = 1L, parse = NULL, type = type_int32, lower = list(handler = "yday")),
+  # wday: cuDF WEEKDAY is ISO Mon=1..Sun=7; lubridate::wday()'s default
+  # (week_start = 7, i.e. Sunday) is Sun=1..Sat=7 -- verified empirically
+  # (plain Rscript, no GPU) -- remapped via `(w %% 7) + 1` inside the C++
+  # handler itself (src/expr_eval.hpp).
+  "wday" = list(arity = 1L, parse = NULL, type = type_int32, lower = list(handler = "wday"))
 
   # ntile() is dispatched directly from ir_parse_expr() (ir_parse_ntile()),
   # never through this registry at all (its "x supplied or not" distinction

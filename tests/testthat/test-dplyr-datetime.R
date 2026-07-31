@@ -1,7 +1,7 @@
 # Phase 11 L3: timestamp literals in filter()/mutate(), TIMESTAMP_* <->
 # TIMESTAMP_* casts (gpu_cast_column), and as.Date()/as.POSIXct() applied to
 # an existing TIMESTAMP_* column. L6 (datetime accessors: year()/month()/
-# etc.) is a separate, later task -- not covered here.
+# etc.) is covered in its own section near the bottom of this file.
 #
 # Pre-fix confirmation (see scratchpad/workflow_state.md for the full
 # narrative): before this task, `filter(d < as.Date("2010-01-05"))` on a
@@ -237,4 +237,197 @@ test_that("POSIXct literal comparisons preserve sub-second precision", {
   expect_same_as_dplyr(df, function(tbl) {
     dplyr::filter(tbl, dt < as.POSIXct("2020-01-01 00:00:01.0", tz = "UTC"))
   })
+})
+
+# -----------------------------------------------------------------------------
+# Phase 11 L6: lubridate datetime accessors (year()/month()/day()/hour()/
+# minute()/second()/quarter()/yday()/wday()) native in filter()/mutate().
+#
+# Every test in this section skips outright when lubridate isn't installed
+# (it's a Suggests-only soft dependency, per DESCRIPTION -- the namespace
+# guard, ir_require_lubridate_fn() in R/ir.R, makes every one of these
+# functions fall back to L1's CPU path when lubridate is unavailable, which
+# would itself reproduce dplyr's own "could not find function" error since
+# none of these are base R -- not exercised here, since there is nothing
+# GPU-native to pin without lubridate actually present).
+# -----------------------------------------------------------------------------
+
+skip_if_no_lubridate <- function() {
+  testthat::skip_if_not_installed("lubridate")
+}
+
+test_that("year()/month()/day()/quarter()/yday() match lubridate on a Date column", {
+  skip_if_no_gpu()
+  skip_if_no_lubridate()
+
+  df <- tibble::tibble(d = as.Date(c("2024-01-01", "2024-01-02", "2024-06-15",
+                                      "2024-12-31", NA)))
+
+  pipeline <- function(tbl) {
+    dplyr::mutate(
+      tbl,
+      y = lubridate::year(d),
+      m = lubridate::month(d),
+      da = lubridate::day(d),
+      q = lubridate::quarter(d),
+      yd = lubridate::yday(d)
+    )
+  }
+  expect_same_as_dplyr(df, pipeline, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(df, pipeline, ignore_col_types = TRUE)
+})
+
+test_that("hour()/minute()/second() match lubridate on a POSIXct column", {
+  skip_if_no_gpu()
+  skip_if_no_lubridate()
+
+  df <- tibble::tibble(dt = as.POSIXct(
+    c("2024-01-01 13:45:30", "2024-06-15 23:59:59", "2024-12-31 00:00:01", NA),
+    tz = "UTC"
+  ))
+
+  pipeline <- function(tbl) {
+    dplyr::mutate(tbl, h = lubridate::hour(dt), mi = lubridate::minute(dt),
+                  se = lubridate::second(dt))
+  }
+  expect_same_as_dplyr(df, pipeline, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(df, pipeline, ignore_col_types = TRUE)
+})
+
+test_that("wday() matches lubridate's default (Sun=1..Sat=7) on both Date and POSIXct", {
+  skip_if_no_gpu()
+  skip_if_no_lubridate()
+
+  # Verified empirically first (plain Rscript, no GPU): with
+  # lubridate.week.start at its own default (7, Sunday),
+  # lubridate::wday(as.Date(c("2024-01-01", ..., "2024-01-07"))) (a
+  # Mon..Sun run) is 2,3,4,5,6,7,1 -- i.e. Sun=1, Mon=2, ..., Sat=7. cuDF's
+  # own WEEKDAY component is ISO Mon=1..Sun=7; the C++ handler's
+  # `(w %% 7) + 1` remap (src/expr_eval.hpp) is what's under test here.
+  df <- tibble::tibble(d = as.Date(c("2024-01-01", "2024-01-02", "2024-01-03",
+                                      "2024-01-04", "2024-01-05", "2024-01-06",
+                                      "2024-01-07")))
+  oracle_wday <- lubridate::wday(df$d)
+  expect_equal(oracle_wday, c(2, 3, 4, 5, 6, 7, 1))
+
+  expect_same_as_dplyr(df, function(tbl) dplyr::mutate(tbl, w = lubridate::wday(d)),
+                        ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(df, function(tbl) dplyr::mutate(tbl, w = lubridate::wday(d)),
+                             ignore_col_types = TRUE)
+})
+
+test_that("wday() with a non-default week_start falls back to CPU and matches dplyr", {
+  skip_if_no_gpu()
+  skip_if_no_lubridate()
+
+  df <- tibble::tibble(d = as.Date(c("2024-01-01", "2024-01-02", "2024-01-03")))
+  g <- tbl_gpu(df)
+
+  withr::local_options(cuplyr.fallback = "warn")
+  expect_warning(
+    result <- dplyr::mutate(g, w = lubridate::wday(d, week_start = 1)),
+    "fell back to CPU evaluation"
+  )
+  expect_equal(collect(result), dplyr::mutate(df, w = lubridate::wday(d, week_start = 1)))
+})
+
+test_that("wday() falls back when the global lubridate.week.start option is non-default", {
+  skip_if_no_gpu()
+  skip_if_no_lubridate()
+
+  withr::local_options(lubridate.week.start = 1)
+  df <- tibble::tibble(d = as.Date(c("2024-01-01", "2024-01-02", "2024-01-03")))
+  g <- tbl_gpu(df)
+
+  withr::local_options(cuplyr.fallback = "warn")
+  expect_warning(
+    result <- dplyr::mutate(g, w = lubridate::wday(d)),
+    "fell back to CPU evaluation"
+  )
+  expect_equal(collect(result), dplyr::mutate(df, w = lubridate::wday(d)))
+})
+
+test_that("month(label = TRUE) and quarter(with_year = TRUE) fall back to CPU and match dplyr", {
+  skip_if_no_gpu()
+  skip_if_no_lubridate()
+
+  df <- tibble::tibble(d = as.Date(c("2024-01-15", "2024-06-15")))
+  g <- tbl_gpu(df)
+
+  withr::local_options(cuplyr.fallback = "warn")
+  expect_warning(
+    result <- dplyr::mutate(g, m = lubridate::month(d, label = TRUE)),
+    "fell back to CPU evaluation"
+  )
+  expect_equal(collect(result), dplyr::mutate(df, m = lubridate::month(d, label = TRUE)))
+
+  expect_warning(
+    result2 <- dplyr::mutate(g, q = lubridate::quarter(d, with_year = TRUE)),
+    "fell back to CPU evaluation"
+  )
+  expect_equal(collect(result2), dplyr::mutate(df, q = lubridate::quarter(d, with_year = TRUE)))
+})
+
+test_that("datetime accessors on a STRING/numeric column fall back to CPU and match dplyr", {
+  skip_if_no_gpu()
+  skip_if_no_lubridate()
+
+  df <- tibble::tibble(s = c("2024-01-01", "2024-06-15"))
+  g <- tbl_gpu(df)
+
+  withr::local_options(cuplyr.fallback = "warn")
+  expect_warning(
+    result <- dplyr::mutate(g, y = lubridate::year(s)),
+    "fell back to CPU evaluation"
+  )
+  expect_equal(collect(result), dplyr::mutate(df, y = lubridate::year(s)))
+})
+
+test_that("a user-defined function shadowing a lubridate accessor name is honored, not misinterpreted", {
+  skip_if_no_gpu()
+  skip_if_no_lubridate()
+
+  # Namespace guard (ir_require_lubridate_fn(), R/ir.R): `year` here resolves
+  # to this LOCAL function, not lubridate::year -- must fall back to L1's
+  # CPU path (which correctly calls the user's own function), never silently
+  # treat this as a native datetime accessor call.
+  year <- function(x) "shadowed"
+  df <- tibble::tibble(d = as.Date(c("2024-01-01", "2024-06-15")))
+  g <- tbl_gpu(df)
+
+  result <- collect(dplyr::mutate(g, y2 = year(d)))
+  oracle <- dplyr::mutate(df, y2 = year(d))
+  expect_equal(result, oracle)
+  expect_equal(unique(oracle$y2), "shadowed")
+})
+
+test_that("year()/month()/etc. nest correctly inside a larger filter() AST", {
+  skip_if_no_gpu()
+  skip_if_no_lubridate()
+
+  df <- tibble::tibble(d = as.Date(c("2024-01-01", "2024-03-15", "2024-06-15", "2024-12-31")))
+
+  expect_same_as_dplyr(df, function(tbl) {
+    dplyr::filter(tbl, lubridate::year(d) == 2024 & lubridate::month(d) > 3)
+  })
+})
+
+test_that("second() truncates fractional seconds natively (documented divergence)", {
+  skip_if_no_gpu()
+  skip_if_no_lubridate()
+
+  # KNOWN, DOCUMENTED DIVERGENCE (see ir_parse_lubridate_accessor()'s own
+  # docs, R/ir.R): lubridate::second() returns a FRACTIONAL value for a
+  # sub-second-precision POSIXct (verified empirically: second() on
+  # 13:45:30.75 is 30.75, not 30). cuDF's SECOND component is always a whole
+  # integer. This is a real, accepted divergence for sub-second input,
+  # scoped out of native support this wave -- pinned explicitly here rather
+  # than silently passing or silently failing.
+  dt <- as.POSIXct("2024-01-01 13:45:30.75", tz = "UTC")
+  expect_equal(lubridate::second(dt), 30.75)
+
+  df <- tibble::tibble(dt = dt)
+  result <- collect(tbl_gpu(df) |> dplyr::mutate(se = lubridate::second(dt)))
+  expect_equal(result$se, 30L)
+  expect_false(isTRUE(all.equal(result$se, lubridate::second(dt))))
 })
