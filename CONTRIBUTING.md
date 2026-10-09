@@ -62,6 +62,12 @@ pixi run r          # Start R
 | `pixi run build` | Build source tarball |
 | `pixi run pkgdown` | Build documentation site |
 
+## Distribution and Install CI Policy
+
+- Install-path CI lives in `/home/theo/cuplr/.github/workflows/install-matrix.yml` (pixi/conda/system).
+- Compiled artifact architecture policy: cuplyr currently compiles `.cpp` sources only, so no `-gencode` matrix is applied. Add explicit architecture flags only if/when `.cu` + nvcc compilation is introduced.
+- `conda/meta.yaml` is retained for CI/build reproducibility and compatibility testing, not as the primary end-user distribution channel.
+
 ## Code Guidelines
 
 ### Exports and NAMESPACE

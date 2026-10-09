@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Squash-merge one feature branch into dev, gated. Orchestrator-only.
+#
+#   tools/merge-queue <name>        # branch feat/<name>
+#
+# Needs, in scratchpad/parity/features/:
+#   <name>.commit.txt   commit message (conventional-commit subject + body)
+#   <name>.protected    line 1: SHA of the PM's acceptance-test commit;
+#                       remaining lines: test file paths the coder must not touch
+#
+# Exit codes: 0 merged | 1 gate failed | 2 setup error | 3 merge conflict
+#             4 protected tests modified after the PM's commit | 5 nothing to merge
+# Gate artifacts land in scratchpad/parity/gates/<name>-<timestamp>/.
+source "$(dirname "$0")/lib.sh"
+name="$1"
+branch="feat/$name"
+integ="$CUPLYR_WT_PARENT/_integration"
+feat="$CUPLYR_PARITY_DIR/features"
+msg="$feat/$name.commit.txt"
+prot="$feat/$name.protected"
+
+exec 7>"$CUPLYR_LOCK_DIR/merge.lock"
+flock 7
+
+[[ -d "$integ" ]] || { echo "no integration worktree; run tools/parity-init" >&2; exit 2; }
+[[ -f "$msg" ]] || { echo "missing $msg" >&2; exit 2; }
+[[ -f "$prot" ]] || { echo "missing $prot" >&2; exit 2; }
+git rev-parse --verify -q "$branch" >/dev/null || { echo "no branch $branch" >&2; exit 2; }
+cd "$integ"
+[[ "$(git branch --show-current)" == dev ]] || { echo "integration worktree is not on dev" >&2; exit 2; }
+[[ -z "$(git status --porcelain)" ]] || { echo "integration worktree is dirty" >&2; exit 2; }
+
+pm_sha="$(head -n1 "$prot")"
+mapfile -t paths < <(tail -n +2 "$prot" | sed '/^\s*$/d')
+if [[ ${#paths[@]} -gt 0 ]] && ! git diff --quiet "$pm_sha" "$branch" -- "${paths[@]}"; then
+  echo "protected acceptance tests changed since $pm_sha:" >&2
+  git diff --stat "$pm_sha" "$branch" -- "${paths[@]}" >&2
+  exit 4
+fi
+
+git checkout -q --detach dev
+if ! git merge -q --squash "$branch"; then
+  git diff --name-only --diff-filter=U >&2
+  git reset -q --hard && git checkout -q dev
+  exit 3
+fi
+if git diff --cached --quiet; then
+  git checkout -q dev; exit 5
+fi
+{
+  cat "$msg"
+  grep -q '^Co-Authored-By: Claude' "$msg" || printf '\nCo-Authored-By: Claude <noreply@anthropic.com>\n'
+} | git commit -q -F -
+candidate="$(git rev-parse HEAD)"
+
+out="$CUPLYR_PARITY_DIR/gates/$name-$(date +%Y%m%dT%H%M%S)"
+if tools/gpu-run --gate --label "gate:$name" -- tools/merge-gate "$out"; then
+  git checkout -q dev
+  git merge -q --ff-only "$candidate"
+  # Ratchet the conformance baseline: new passes become required passes.
+  cp "$out/conformance.tsv" "$CUPLYR_PARITY_DIR/conformance_baseline.tsv"
+  echo "MERGED $branch as $(git rev-parse --short HEAD); gate artifacts: $out"
+else
+  git checkout -q dev
+  echo "GATE FAILED for $branch; dev unchanged; artifacts: $out" >&2
+  exit 1
+fi

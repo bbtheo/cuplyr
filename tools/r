@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Ad-hoc R under the GPU lock, with the worktree's package loaded:
+#   tools/r 'tbl_gpu(mtcars) |> filter(mpg > 20) |> collect()'
+source "$(dirname "$0")/lib.sh"
+cd "$CUPLYR_WT_ROOT"
+exec "$(dirname "$0")/gpu-run" --label r -- Rscript -e "pkgload::load_all(quiet = TRUE); suppressPackageStartupMessages(library(dplyr)); $1"

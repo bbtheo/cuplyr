@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Create a feature worktree off dev and get it ready to build.
+#
+#   tools/wt-new <feature-id> [attempt]
+#
+# Branch feat/<id> (attempt 1) or feat/<id>-a<N>; path ../cuplr-wt/<same>.
+# Prints the worktree path on the last line of stdout.
+source "$(dirname "$0")/lib.sh"
+id="$1"; attempt="${2:-1}"
+name="$id"; [[ "$attempt" == 1 ]] || name="$id-a$attempt"
+path="$CUPLYR_WT_PARENT/$name"
+
+[[ -e "$path" ]] && { echo "worktree path already exists: $path" >&2; exit 1; }
+git -C "$CUPLYR_MAIN" worktree add -b "feat/$name" "$path" dev >&2
+
+cd "$path"
+cuplyr_activate_env
+./configure >&2
+Rscript -e 'pkgbuild::compile_dll(quiet = TRUE)' >&2
+echo "$path"

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# One or more test files under the GPU lock:  tools/test-file tests/testthat/test-x.R [--out f.tsv]
+source "$(dirname "$0")/lib.sh"
+cd "$CUPLYR_WT_ROOT"
+exec "$(dirname "$0")/gpu-run" --label test-file -- Rscript tools/run-tests.R file "$@"

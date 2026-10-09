@@ -1,4 +1,6 @@
 {% set version = environ.get("CUPLYR_VERSION", "0.1.1.9000") %}
+# Policy: this recipe is retained for CI/build reproducibility and compatibility testing.
+# It is not the primary end-user distribution channel for cuplyr.
 
 package:
   name: r-cuplyr

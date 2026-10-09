@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Run a command while holding the machine-wide GPU lock.
+#
+#   tools/gpu-run [--gate] [--label NAME] -- CMD [ARGS...]
+#
+# Every process that touches the GPU (tests, perf, conformance, load_all,
+# roxygen) goes through here, from every worktree, so only one runs at a time.
+#
+# Two lock files under <git-common-dir>/cuplyr-locks/:
+#   gate.lock  held for the whole run by a --gate job. Normal jobs pass through
+#              it (take + release) before queuing, so once a gate job is waiting
+#              no NEW normal job can start ahead of it.
+#   gpu.lock   the actual GPU mutex.
+#
+# Each run appends a row to stats.tsv (start, label, wt, wait_s, hold_s, exit)
+# so the orchestrator can measure lock contention.
+
+source "$(dirname "$0")/lib.sh"
+
+gate=0
+label=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --gate) gate=1; shift ;;
+    --label) label="$2"; shift 2 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+[[ $# -gt 0 ]] || { echo "usage: tools/gpu-run [--gate] [--label NAME] -- CMD..." >&2; exit 2; }
+label="${label:-$(basename "$1")}"
+
+cuplyr_activate_env
+
+# Re-entrant: a command already running under the lock (e.g. tools/merge-gate)
+# must not try to take it again, or it deadlocks on itself.
+if [[ -n "${CUPLYR_GPU_LOCK_HELD:-}" ]]; then
+  exec "$@"
+fi
+export CUPLYR_GPU_LOCK_HELD=1
+
+t0=$(date +%s)
+exec 8>"$CUPLYR_LOCK_DIR/gate.lock"
+if [[ $gate == 1 ]]; then
+  flock 8
+else
+  flock 8
+  flock -u 8
+fi
+exec 9>"$CUPLYR_LOCK_DIR/gpu.lock"
+flock 9
+t1=$(date +%s)
+echo "[gpu-run] lock acquired after $((t1 - t0))s ($label)" >&2
+
+set +e
+"$@"
+rc=$?
+set -e
+
+t2=$(date +%s)
+printf '%s\t%s\t%s\t%d\t%d\t%d\n' "$(date -d @"$t0" -Iseconds)" "$label" \
+  "$(basename "$CUPLYR_WT_ROOT")" "$((t1 - t0))" "$((t2 - t1))" "$rc" \
+  >> "$CUPLYR_LOCK_DIR/stats.tsv"
+exit $rc

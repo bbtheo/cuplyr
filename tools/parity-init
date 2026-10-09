@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# One-time setup for the parity workflow:
+#   - creates the integration worktree ../cuplr-wt/_integration on `dev`
+#   - records the conformance baseline from dev (only if none exists)
+# `dev` must not be checked out anywhere else (the integration worktree owns it).
+source "$(dirname "$0")/lib.sh"
+integ="$CUPLYR_WT_PARENT/_integration"
+mkdir -p "$CUPLYR_PARITY_DIR/features" "$CUPLYR_PARITY_DIR/gates"
+
+if [[ ! -d "$integ" ]]; then
+  if git -C "$CUPLYR_MAIN" worktree list --porcelain | grep -qx 'branch refs/heads/dev'; then
+    echo "dev is checked out in another worktree; switch it away first (e.g. git switch --detach dev)" >&2
+    exit 1
+  fi
+  git -C "$CUPLYR_MAIN" worktree add "$integ" dev
+  (cd "$integ" && cuplyr_activate_env && ./configure && Rscript -e 'pkgbuild::compile_dll(quiet = TRUE)')
+fi
+
+baseline="$CUPLYR_PARITY_DIR/conformance_baseline.tsv"
+if [[ ! -f "$baseline" ]]; then
+  cd "$integ"
+  "$integ/tools/gpu-run" --gate --label parity-init -- \
+    Rscript tools/run-dplyr-conformance.R --ids "$baseline.tmp" \
+      --report "$CUPLYR_PARITY_DIR/conformance_baseline.md"
+  mv "$baseline.tmp" "$baseline"
+  echo "baseline: $(awk -F'\t' 'FNR>1 && $3=="pass"' "$baseline" | wc -l) passing conformance tests"
+fi

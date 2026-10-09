@@ -373,8 +373,12 @@ test_that("base::sqrt() strips the namespace", {
 # -----------------------------------------------------------------------------
 
 test_that("an unregistered call referencing a column returns NULL (fallback)", {
+  # paste0()/sprintf(): paste0() is natively registered as of Phase 11 task
+  # L5 (see test-dplyr-strings.R for its own oracle coverage) -- sprintf()
+  # is not, and is still a genuinely unregistered call for this test's
+  # purpose.
   schema <- list(names = "x", types = "STRING")
-  ir <- ir_parse_quo(quo_in(quote(paste0(x, "y"))), schema)
+  ir <- ir_parse_quo(quo_in(quote(sprintf("%s-y", x))), schema)
 
   expect_null(ir)
 })

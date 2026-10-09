@@ -708,15 +708,18 @@ test_that("slice() indices referencing n() fall back to CPU and still match dply
 
 test_that("slice_min() with an order_by expression the IR can't parse falls back", {
   skip_if_no_gpu()
+  # toupper() is natively registered as of Phase 11 task L5 -- sprintf() is
+  # not, and is still a genuinely unparseable order_by expression for this
+  # test's purpose (see test-dplyr-strings.R for toupper()'s own coverage).
   df <- tibble::tibble(x = c(3, 1, 2), s = c("c", "a", "b"))
   gt <- tbl_gpu(df)
 
   withr::local_options(cuplyr.fallback = "warn")
   expect_warning(
-    result <- collect(dplyr::slice_min(gt, toupper(s), n = 1)),
+    result <- collect(dplyr::slice_min(gt, sprintf("%s", s), n = 1)),
     "slice_min.*fell back to CPU evaluation"
   )
-  oracle <- dplyr::slice_min(df, toupper(s), n = 1)
+  oracle <- dplyr::slice_min(df, sprintf("%s", s), n = 1)
   expect_equal(tibble::as_tibble(result), oracle)
 })
 
@@ -727,11 +730,22 @@ test_that("grouped slice_min() with an order_by expression the IR can't parse fa
 
   withr::local_options(cuplyr.fallback = "warn")
   expect_warning(
-    result <- collect(dplyr::slice_min(gt, toupper(s), n = 1)),
+    result <- collect(dplyr::slice_min(gt, sprintf("%s", s), n = 1)),
     "slice_min.*fell back to CPU evaluation"
   )
-  oracle <- dplyr::slice_min(dplyr::group_by(df, g), toupper(s), n = 1)
+  oracle <- dplyr::slice_min(dplyr::group_by(df, g), sprintf("%s", s), n = 1)
   expect_equal(tibble::as_tibble(result), tibble::as_tibble(dplyr::ungroup(oracle)))
+})
+
+test_that("slice_min() with a NATIVE string order_by expression (toupper()) works and never falls back", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  df <- tibble::tibble(x = c(3, 1, 2), s = c("c", "a", "b"))
+  gt <- tbl_gpu(df)
+
+  expect_no_error(result <- collect(dplyr::slice_min(gt, toupper(s), n = 1)))
+  oracle <- dplyr::slice_min(df, toupper(s), n = 1)
+  expect_equal(tibble::as_tibble(result), oracle)
 })
 
 # slice_sample() is GPU-native (ungrouped, group_by()-grouped, and by=) as

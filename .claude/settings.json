@@ -1,6 +1,9 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "3"
+  },
   "permissions": {
-    "$schema": "https://json.schemastore.org/claude-code-settings.json",
     "defaultMode": "acceptEdits",
     "allow": [
       "Bash(air:*)",
@@ -14,18 +17,37 @@
       "Bash(git grep:*)",
       "Bash(grep:*)",
       "Bash(ls:*)",
-      "Bash(R:*)",
       "Bash(rm:*)",
-      "Bash(Rscript:*)",
       "Bash(sed:*)",
+      "Bash(tools/test:*)",
+      "Bash(tools/test-file:*)",
+      "Bash(tools/perf:*)",
+      "Bash(tools/conformance:*)",
+      "Bash(tools/r:*)",
+      "Bash(tools/build:*)",
+      "Bash(tools/document:*)",
+      "Bash(tools/wt-new:*)",
+      "Bash(tools/merge-queue:*)",
       "Skill(*)",
       "WebFetch(domain:cran.r-project.org)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:raw.githubusercontent.com)"
     ],
     "deny": [
-      "Read(.Renviron)", 
+      "Read(.Renviron)",
       "Read(.env)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard-bash.sh" }]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [{ "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard-files.sh" }]
+      }
     ]
   }
 }

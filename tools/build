@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Compile this worktree's C++ (no GPU, no lock, no install). Run after C++
+# changes so the later locked test run doesn't spend lock time compiling.
+source "$(dirname "$0")/lib.sh"
+cd "$CUPLYR_WT_ROOT"
+cuplyr_activate_env
+[[ -f src/Makevars ]] || ./configure
+exec Rscript -e 'pkgbuild::compile_dll(quiet = FALSE)'

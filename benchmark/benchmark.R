@@ -27,7 +27,7 @@ generate_taxi_data <- function(n_rows = 1000000) {
 }
 
 # Generate data as data.table first
-data_dt <- generate_taxi_data(n_rows = 25000000)
+data_dt <- generate_taxi_data(n_rows = 10000000)
 data <- as.data.frame(data_dt)  # Convert to data.frame for dplyr
 
 # Create DuckDB in-memory database

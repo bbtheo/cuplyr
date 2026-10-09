@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# The pre-merge gate. Run by tools/merge-queue inside the integration worktree,
+# under `tools/gpu-run --gate`. Not for agents to call directly.
+#
+#   tools/merge-gate <out-dir>
+#
+# Passes only if ALL of:
+#   1. the testthat suite has no fail/error
+#   2. the perf gate passes against the main checkout's perf_baseline.json
+#   3. no dplyr conformance test that passes in conformance_baseline.tsv
+#      fails, errors, skips or disappears now (strict per-test check)
+source "$(dirname "$0")/lib.sh"
+cd "$CUPLYR_WT_ROOT"
+out="$1"; mkdir -p "$out"
+baseline="$CUPLYR_PARITY_DIR/conformance_baseline.tsv"
+[[ -f "$baseline" ]] || { echo "no conformance baseline at $baseline; run tools/parity-init" >&2; exit 2; }
+
+ok=1
+summary="$out/summary.txt"
+: > "$summary"
+
+if Rscript tools/run-tests.R suite --out "$out/suite.tsv" > "$out/suite.log" 2>&1; then
+  echo "suite: PASS" >> "$summary"
+else
+  echo "suite: FAIL" >> "$summary"; ok=0
+fi
+grep -E '^RESULT:' "$out/suite.log" >> "$summary" || true
+
+if CUPLYR_PERF_BASELINE="$CUPLYR_MAIN/scratchpad/perf_baseline.json" \
+   Rscript tools/run-tests.R perf --out "$out/perf.tsv" > "$out/perf.log" 2>&1; then
+  echo "perf: PASS" >> "$summary"
+else
+  echo "perf: FAIL" >> "$summary"; ok=0
+fi
+
+Rscript tools/run-dplyr-conformance.R --ids "$out/conformance.tsv" \
+  --report "$out/conformance.md" > "$out/conformance.log" 2>&1 || true
+if [[ ! -s "$out/conformance.tsv" ]]; then
+  echo "conformance: FAIL (harness produced no per-test IDs; see conformance.log)" >> "$summary"; ok=0
+else
+  # Rows are file<TAB>test<TAB>status; the key is file<TAB>test.
+  awk -F'\t' 'NR==FNR { if (FNR>1 && $3=="pass") now[$1 FS $2]=1; next }
+              FNR>1 && $3=="pass" && !(($1 FS $2) in now) { print $1 " :: " $2 }' \
+    "$out/conformance.tsv" "$baseline" > "$out/conformance_regressions.txt"
+  awk -F'\t' 'NR==FNR { if (FNR>1 && $3=="pass") was[$1 FS $2]=1; next }
+              FNR>1 && $3=="pass" && !(($1 FS $2) in was) { print $1 " :: " $2 }' \
+    "$baseline" "$out/conformance.tsv" > "$out/conformance_new_passes.txt"
+  n_reg=$(wc -l < "$out/conformance_regressions.txt")
+  n_new=$(wc -l < "$out/conformance_new_passes.txt")
+  n_pass=$(awk -F'\t' 'FNR>1 && $3=="pass"' "$out/conformance.tsv" | wc -l)
+  if [[ "$n_reg" -eq 0 ]]; then
+    echo "conformance: PASS ($n_pass passing, +$n_new new, 0 regressions)" >> "$summary"
+  else
+    echo "conformance: FAIL ($n_reg previously-passing tests regressed; see conformance_regressions.txt)" >> "$summary"; ok=0
+  fi
+fi
+
+cat "$summary"
+[[ $ok == 1 ]]

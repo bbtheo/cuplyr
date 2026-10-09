@@ -96,14 +96,18 @@
 #   Rscript tools/run-dplyr-conformance.R                # run all runnable files
 #   Rscript tools/run-dplyr-conformance.R test-distinct.R # run just one file
 #   Rscript tools/run-dplyr-conformance.R --all           # also attempt out-of-scope files
+#   ... --ids ids.tsv        # also write one row per test: file, test, status
+#   ... --report path.md     # report location (default scratchpad/dplyr_conformance_report.md)
 #
-# Output: scratchpad/dplyr_conformance_report.md (overwritten each run) plus
-# a compact summary table printed to stdout.
+# Run it through tools/conformance (GPU lock) rather than directly. The
+# package is pkgload::load_all()-ed from this checkout, never library()-ed, so
+# each worktree measures its own code.
+#
+# Output: the markdown report plus a compact summary table printed to stdout.
 
 suppressPackageStartupMessages({
   library(testthat)
   library(dplyr)
-  library(cuplyr)
   library(tibble)
   # dplyr's own test files call plenty of unqualified helper functions that
   # are only visible because `test_check("dplyr")`'s real execution
@@ -137,6 +141,7 @@ find_pkg_root <- function() {
   normalizePath(".")
 }
 pkg_root <- find_pkg_root()
+pkgload::load_all(pkg_root, quiet = TRUE)
 tests_dir <- file.path(pkg_root, "inst", "dplyr-conformance", "tests")
 source(file.path(pkg_root, "inst", "dplyr-conformance", "manifest.R"))
 
@@ -151,6 +156,16 @@ if (!has_gpu()) {
 # ---- CLI args ---------------------------------------------------------------
 
 cli_args <- commandArgs(trailingOnly = TRUE)
+take_flag_value <- function(flag) {
+  i <- match(flag, cli_args)
+  if (is.na(i)) return(NULL)
+  val <- cli_args[[i + 1L]]
+  cli_args <<- cli_args[-c(i, i + 1L)]
+  val
+}
+ids_path <- take_flag_value("--ids")
+report_path <- take_flag_value("--report") %||%
+  file.path(pkg_root, "scratchpad", "dplyr_conformance_report.md")
 run_all_incl_out_of_scope <- "--all" %in% cli_args
 explicit_files <- setdiff(cli_args, "--all")
 
@@ -301,7 +316,7 @@ run_one_file <- function(fname) {
   if (!is.null(file_level_error)) {
     return(list(
       file = fname, n_tests = 0L, passed = 0L, failed = 0L, errored = 0L, skipped = 0L,
-      file_error = file_level_error, reasons = character(0)
+      file_error = file_level_error, reasons = character(0), ids = NULL
     ))
   }
 
@@ -311,9 +326,19 @@ run_one_file <- function(fname) {
   errored <- 0L
   skipped <- 0L
   reasons <- character(0)
+  statuses <- character(0)
 
   for (t in res) {
     cls <- vapply(t$results, function(x) class(x)[1], character(1))
+    statuses <- c(statuses, if (any(cls == "expectation_error")) {
+      "error"
+    } else if (any(cls == "expectation_failure")) {
+      "fail"
+    } else if (length(cls) > 0 && all(cls == "expectation_skip")) {
+      "skip"
+    } else {
+      "pass"
+    })
     if (any(cls == "expectation_error")) {
       errored <- errored + 1L
       first_bad <- Filter(function(x) inherits(x, "expectation_error"), t$results)[[1]]
@@ -329,10 +354,18 @@ run_one_file <- function(fname) {
     }
   }
 
+  # Test names can repeat within a file; suffix the occurrence so every row
+  # has a stable ID for the merge gate's per-test regression check.
+  test_names <- vapply(res, function(t) t$test %||% "", character(1))
+  occurrence <- stats::ave(seq_along(test_names), test_names, FUN = seq_along)
+  test_ids <- ifelse(occurrence > 1, paste0(test_names, " #", occurrence), test_names)
+
   list(
     file = fname, n_tests = n_tests, passed = passed, failed = failed,
     errored = errored, skipped = skipped, file_error = NA_character_,
-    reasons = reasons
+    reasons = reasons,
+    ids = data.frame(file = rep(fname, n_tests), test = test_ids, status = statuses,
+      stringsAsFactors = FALSE)
   )
 }
 
@@ -347,7 +380,7 @@ for (i in seq_along(target_files)) {
     error = function(e) {
       list(
         file = fname, n_tests = 0L, passed = 0L, failed = 0L, errored = 0L, skipped = 0L,
-        file_error = conditionMessage(e), reasons = character(0)
+        file_error = conditionMessage(e), reasons = character(0), ids = NULL
       )
     }
   )
@@ -529,6 +562,16 @@ fight the rest of the package's explicit `collect()` philosophy, or is
 pattern) to be worth the ergonomics win? Flagged, not decided.
 ")
 
-report_path <- file.path(pkg_root, "scratchpad", "dplyr_conformance_report.md")
 writeLines(lines, report_path)
 message("\nWrote report to ", report_path)
+
+if (!is.null(ids_path)) {
+  id_rows <- do.call(rbind, lapply(all_results, function(r) r$ids))
+  if (is.null(id_rows)) {
+    id_rows <- data.frame(file = character(), test = character(), status = character())
+  }
+  # Tabs/newlines inside test names would break the TSV.
+  id_rows$test <- gsub("[\t\n\r]+", " ", id_rows$test)
+  utils::write.table(id_rows, ids_path, sep = "\t", quote = FALSE, row.names = FALSE)
+  message("Wrote per-test IDs to ", ids_path)
+}

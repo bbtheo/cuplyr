@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Regenerate NAMESPACE, man/ and Rcpp exports (loads the package, so it takes the GPU lock).
+source "$(dirname "$0")/lib.sh"
+cd "$CUPLYR_WT_ROOT"
+exec "$(dirname "$0")/gpu-run" --label document -- Rscript -e 'Rcpp::compileAttributes(); roxygen2::roxygenise()'

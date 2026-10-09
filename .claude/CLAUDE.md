@@ -1,550 +1,118 @@
 # cuplyr – Notes for Coding Agents
 
-GPU-backed dplyr API in R with C++/Rcpp bindings to libcudf.
+GPU-backed dplyr API in R, with C++/Rcpp bindings to libcudf (cuDF 25.12).
+The current goal is **full dplyr feature parity on the GPU**, built by a
+multi-agent workflow (see "Parity workflow" below).
 
-## Quick Reference
+For how the code works (source map, AST/optimizer, joins, factor handling,
+cuDF API gotchas, test helpers), read `.claude/reference/architecture.md`
+before changing code. This file only covers what every agent needs.
 
-### Core Data Structures
+## Core facts
+
 ```r
-# tbl_gpu structure (R/tbl-gpu.R)
+# tbl_gpu (R/tbl-gpu.R)
 list(
-  ptr = <externalptr>,           # XPtr to cudf::table
-  schema = list(
-    names = c("col1", "col2"),   # column names
-    types = c("FLOAT64", "INT32") # GPU type strings
-  ),
-  groups = c("col1"),            # group_by columns (can be empty)
-  exec_mode = "eager",           # "eager" or "lazy"
-  lazy_ops = list()              # AST for lazy evaluation
+  ptr = <externalptr>,      # XPtr to cudf::table
+  schema = list(names = c("a", "b"), types = c("FLOAT64", "INT32")),
+  groups = c("a"),          # group_by() columns, metadata only
+  exec_mode = "eager",      # or "lazy"
+  lazy_ops = NULL           # pending AST when lazy
 )
 ```
 
-### Type Mappings
-| R Type | GPU Type (schema/logical) | Notes |
-|--------|----------|-------|
+| R type | GPU type | Notes |
+|---|---|---|
 | logical | BOOL8 | |
 | integer | INT32 | |
 | double | FLOAT64 | |
 | character | STRING | |
 | Date | TIMESTAMP_DAYS | |
 | POSIXct | TIMESTAMP_MICROSECONDS | |
-| factor | DICTIONARY32 (physical: INT32) | codes only, 1-based, `schema$factor_levels` holds labels |
-| integer64 | FLOAT64 | loses precision >2^53, warns |
-
-#### Logical vs. physical type: factor columns (Phase 11 L2)
-
-cuplyr deliberately does **not** adopt cudf's real `DICTIONARY32` column
-type (a dictionary-encoded keys+indices structure). A factor is uploaded
-and stored as a plain **INT32** column of 1-based R factor codes (R's own
-`TYPEOF(x)` for a factor is `INTSXP`, so it flows through the exact same
-`integer_to_gpu()` path as a real integer column, `src/transfer_io.cpp`);
-the label strings live only in `schema$factor_levels[[col]]` on the R
-side, never on the GPU. `"DICTIONARY32"` is therefore a **logical**
-schema type only.
-
-`gpu_physical_type()` (`R/utils.R`) is the single conversion point between
-the two views: `"DICTIONARY32" -> "INT32"`, every other type unchanged.
-Call sites split into two camps:
-- **Physical-column sites** (talk to the actual `cudf::column`, which is
-  always INT32 for a factor): must route the type string through
-  `gpu_physical_type()` first -- e.g. `gpu_make_null_column()` (bind
-  null-column padding), `gpu_cast_column()`'s target-type dispatch. These
-  C++ primitives have no `DICTIONARY32` case at all and would error if
-  handed the logical label directly.
-- **Logical-semantics sites** (care whether a column IS a factor, not what
-  bytes back it): must keep seeing `"DICTIONARY32"` verbatim, never routed
-  through `gpu_physical_type()` -- the mutate arithmetic guard
-  (`infer_mutate_output_type()`, R/ast.R), join key type-compatibility
-  checks (`validate_key_types()`, R/join.R), memory accounting
-  (`R/gpu-memory.R`). Silently treating a factor as a plain integer here
-  would let arithmetic on a factor slip through, or let two differently-
-  leveled factor keys join as if they shared one integer domain.
-
-Two GPU primitives (`src/ops_bind.cpp`) operate directly on factor codes
-without ever needing a real dictionary type:
-- `gpu_remap_codes(xptr, col_idx, map)`: remaps a factor column's codes
-  onto a *different* level ordering (`bind_rows()`'s LEVEL-UNION contract
-  for two factors with different level sets, and the native `union()`/
-  `intersect()`/etc. set-op path, Phase 8/11).
-- `gpu_decode_factor(xptr, col_idx, levels)`: decodes a factor column to
-  its label strings (dplyr's factor + character -> character contract).
-
-Both gather a small per-level lookup table (an uploaded INT32 map or
-STRING levels column) using the physical codes as the index -- see
-`src/ops_bind.cpp` for the null-sanitization details (codes are 1-based
-and cudf's `gather()` needs a non-nullable, 0-based index).
-
-## Source Map
-
-### C++ Files
-| File | Purpose |
-|------|---------|
-| `src/gpu_table.hpp` | `GpuTablePtr`, `make_gpu_table_xptr()`, `get_table_view()` |
-| `src/cuda_utils.hpp` | `check_cuda()` error helper |
-| `src/ops_common.hpp` | `get_compare_op()` (used by `expr_eval.hpp`'s string-comparison handler) |
-| `src/transfer_io.cpp` | `df_to_gpu()`, `gpu_collect()`, `gpu_head()`, `gpu_dim()` |
-| `src/ops_filter.cpp` | `gpu_filter_bool()`, `gpu_filter_mask()` — CPU-eval fallback mask application only; every IR-parseable predicate now goes through `gpu_filter_expr()` (`ops_expr.cpp`) |
-| `src/expr_eval.hpp` | Expression-IR evaluator shared by filter/mutate/summarise temp columns (`eval_ctx`, `ast_expressible()`, `build_ast()`, `materialize()`, `apply_handler()`); `build_join_ast()` (Phase 7 J7) is a side-aware sibling for non-equi `join_by()` conditions — emits `column_reference(LEFT\|RIGHT)`, never retrofitted into `build_ast()` |
-| `src/ops_expr.cpp` | `gpu_compute_column()`, `gpu_filter_expr()`, `gpu_mutate_expr()` — the IR entry points |
-| `src/ops_select.cpp` | `gpu_select()` |
-| `src/ops_groupby.cpp` | `gpu_summarise()` |
-| `src/ops_arrange.cpp` | `gpu_arrange()` |
-| `src/ops_join.cpp` | join logic (equi hash joins, native `semi`/`anti`/`cross`/`right`, `gpu_cond_join()` for non-equi `join_by()` via `mixed_join`/`conditional_join`) with the shared device-side sanitize→stable-sort→diag→`multiple=`-filter→gather/coalesce pipeline (`build_join_result()`) for dplyr row-order/cardinality parity |
-| `src/ops_bind.cpp` | `gpu_bind_rows_aligned()`, `gpu_bind_cols_impl()`, `gpu_cast_column()`, `gpu_cast_to_string()`; factor fidelity (Phase 11 L2): `gpu_remap_codes()`, `gpu_decode_factor()` |
-| `src/gpu_info.cpp` | device availability/info |
-
-### R Files
-| File | Purpose |
-|------|---------|
-| `R/tbl-gpu.R` | `tbl_gpu()`, `new_tbl_gpu()`, `is_tbl_gpu()`, `resolve_exec_mode()` |
-| `R/utils.R` | `gpu_type_from_r()`, `col_index()` |
-| `R/execute.R` | unified execution helpers: `push_op()` (the sole exec_mode branch point), `input_node()`, `current_schema()`, `propagate_groups()`, `propagate_factor_levels()`, `auto_name_dots()`, `cuplyr_fallback_notify()`, join analogues `join_input_node()`/`push_join()` |
-| `R/ir.R` | Expression IR shared by filter/mutate: `ir_parse_quo()`, `ir_cols()`, `ir_cost()`, `ir_is_const()`, `ir_bind()`, `ir_infer_type()`, `ir_call_registry` |
-| `R/filter.R` | filter verb — parses expressions via `ir_parse_quo()` into `make_predicate()` records, builds one `ast_filter` node via `push_op()`; constant expressions (TRUE/FALSE/vectors) are evaluated in R, not the GPU IR path; unparseable expressions fall back to a CPU-eval boolean mask (`filter_eval_mask()`) |
-| `R/mutate.R` | mutate verb — parses expressions into `make_mutate_expr()` structs, builds one `ast_mutate` node via `push_op()`; type inference lives in `R/ast.R::infer_mutate_output_type()` |
-| `R/select.R` | select verb — parses tidyselect, builds one `ast_select` node via `push_op()` |
-| `R/arrange.R` | arrange verb — parses sort specs (incl. `.by_group`), builds one `ast_arrange` node via `push_op()` |
-| `R/group-by.R` | `group_by()`, `ungroup()`, `group_vars()` — metadata-only, no AST node |
-| `R/summarise.R` | summarise/groupby verb — `parse_aggregations()` builds aggregation structs (cudf-accepted function names), builds one `ast_summarise` node via `push_op()`; temp-column preprocessing for expressions inside agg calls |
-| `R/join.R` | join verbs — parse join spec (incl. `join_by()`, equi and non-equi) via `parse_join_by()`, dispatch through `push_join()` (join analogue of `push_op()`); `build_join_schema()`, `build_join_output_info()` (propagates `factor_levels` keyed by post-suffix output name, Phase 11 L2), `check_join_cardinality()` (`multiple=`/`unmatched=`/`relationship=`); routes `closest()`/rolling joins, STRING non-equi conditions, degenerate `suffix=c("",...)` collisions, and same-named equi keys that are factor-typed on both sides with different level sets (`join_factor_key_levels_conflict()`) to the notified CPU fallback (`join_route_to_fallback()`) |
-| `R/bind.R` | `bind_rows()`, `bind_cols()` with schema unification; `compute_unified_schema()` computes a factor level UNION (Phase 11 L2 Bug 2), `align_to_schema()`/`cast_column()` remap (`gpu_remap_codes()`) or decode (`gpu_decode_factor()`, Bug 3) factor columns as needed |
-| `R/collect.R` | pulls data to R, warns on INT64 precision loss |
-| `R/compute.R` | `compute()`, `collapse()`, `as_lazy()`, `as_eager()`, `show_query()` — `compute()` is the only caller of `optimize_ast()` |
-| `R/ast.R` | AST node constructors (`ast_source`, `ast_filter`, etc.) and `infer_schema()` methods |
-| `R/optimizer.R` | AST optimization passes (projection, filter pushdown, fusion) — runs only via `compute()`, never on the eager single-op path |
-| `R/lower.R` | `lower_and_execute()` — the single execution path for every AST node in both eager and lazy modes |
-| `R/gpu-memory.R` | memory reporting and GC helpers |
-| `R/gpu.R` | `has_gpu()`, `gpu_details()` |
-| `R/print.R` | `print.tbl_gpu()` method |
-
-### Benchmark Files
-| File | Purpose |
-|------|---------|
-| `benchmark/benchmark_memory.R` | lazy vs eager memory/time comparison |
-| `benchmark/benchmark_filter_pushdown.R` | auto vs manual filter placement |
-
-## Local Dev (pixi)
-
-### Commands
-| Command | When to Use |
-|---------|-------------|
-| `pixi run load-dev` | R-only changes, quick iteration |
-| `pixi run install` | After C++ changes or export changes |
-| `pixi run dev` | Stale artifacts, clean rebuild |
-| `pixi run test` | After feature work (requires GPU) |
-| `pixi run configure` | Only when CUDA/cudf paths change |
-
-### Workflow
-1. Edit code
-2. `pixi run install` (if C++ changed) or `pixi run load-dev` (R only)
-3. Test in R: `tbl_gpu(mtcars) |> filter(mpg > 20) |> collect()`
-4. `pixi run test`
-
-## Implementing a New dplyr Verb
-
-### Step 1: C++ Implementation (`src/ops_<verb>.cpp`)
-
-```cpp
-#include "gpu_table.hpp"
-#include "cuda_utils.hpp"
-#include <cudf/...>  // operation-specific headers
-#include <Rcpp.h>
-
-using namespace Rcpp;
-
-// [[Rcpp::export]]
-SEXP gpu_<verb>(SEXP xptr, /* params */) {
-    using namespace cuplyr;
-
-    // 1. Get table view
-    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
-    cudf::table_view view = get_table_view(ptr);
-
-    // 2. Validate inputs
-    if (col_idx < 0 || col_idx >= view.num_columns()) {
-        Rcpp::stop("Column index out of bounds: %d", col_idx);
-    }
-
-    // 3. Perform cuDF operation
-    auto result = cudf::some_operation(view, ...);
-
-    // 4. Return new table
-    return make_gpu_table_xptr(std::move(result));
-}
-```
-
-### Step 2: R Wrapper (`R/<verb>.R`)
-
-```r
-#' @export
-#' @importFrom dplyr <verb>
-<verb>.tbl_gpu <- function(.data, ...) {
-  # 1. Capture expressions
-  dots <- rlang::enquos(...)
-  if (length(dots) == 0) return(.data)
-
-  # 2. Parse expressions (verb-specific)
-  for (i in seq_along(dots)) {
-    expr <- dots[[i]]
-    expr_text <- rlang::quo_text(expr)
-    # ... parse and validate
-  }
-
-  # 3. Convert column names to 0-based indices
-  col_idx <- match(col_name, .data$schema$names) - 1L
-
-  # 4. Call C++ function
-  new_ptr <- gpu_<verb>(.data$ptr, col_idx, ...)
-
-  # 5. Return new tbl_gpu (preserves schema/groups unless modified)
-  new_tbl_gpu(
-    ptr = new_ptr,
-    schema = .data$schema,  # or modified schema
-    groups = .data$groups
-  )
-}
-```
-
-### Step 3: Update Exports
-
-**NAMESPACE** (add these lines):
-```
-S3method(<verb>,tbl_gpu)
-importFrom(dplyr,<verb>)
-```
-
-**Rcpp exports** (run or manually add):
-```r
-Rcpp::compileAttributes()
-```
-
-Or manually add to:
-- `src/RcppExports.cpp`: function declaration + wrapper + CallEntries entry
-- `R/RcppExports.R`: R wrapper function
-
-### Step 4: Tests (`tests/testthat/test-<verb>.R`)
-
-```r
-test_that("<verb>() basic case works", {
-  skip_if_no_gpu()
-
-  df <- data.frame(x = c(1, 2, 3))
-  gpu_df <- tbl_gpu(df)
-
-  result <- gpu_df |>
-    dplyr::<verb>(...) |>
-    collect()
-
-  expect_equal(result$x, expected)
-})
-```
-
-## AST & Lazy Evaluation
-
-### One execution path
-Every verb follows the same shape: parse its arguments, build **one** AST
-node wrapping `input_node(.data)`, and hand it to `push_op()` (or, for
-joins, `push_join()`) in `R/execute.R`. `push_op()` is the *only* place
-that branches on `exec_mode`:
-- **lazy**: the node is stored as the new `$lazy_ops`; no GPU work happens.
-- **eager**: the node is lowered and executed immediately via
-  `lower_and_execute()` (`R/lower.R`), with no optimizer pass — a
-  single-op AST has nothing to optimize, and running the optimizer eagerly
-  risks routing a multi-predicate filter through the fused kernel
-  incorrectly (see design decision D2 in
-  `scratchpad/unification_design.md` if present).
-
-`optimize_ast()` (`R/optimizer.R`) only ever runs from `compute()`, which
-is invoked by `collect()`/`show_query()`/explicit `compute()` calls on a
-lazy table with pending ops. `R/lower.R::lower_and_execute()` is the single
-execution path for every AST node in both schedules — there are no
-separate eager/lazy implementations (`*_lazy()`/`*_one()` functions) per
-verb any more.
-
-### Lazy Mode Mechanics
-- Lazy tables defer execution by building an AST in `$lazy_ops`
-- Operations return new `tbl_gpu` with updated AST, no GPU work
-- `collect()` triggers AST lowering and execution
-
-### Optimizer Passes
-The optimizer transforms the AST before execution. Pass order matters:
-
-1. **Projection Pruning** (`push_down_projections`): Inserts `select` nodes to drop unused columns early
-   - `build_join_output_info()` maps output columns back to left/right sources
-   - Dead columns are dropped before expensive operations
-
-2. **Mutate Fusion** (`fuse_mutates`): Combines consecutive mutate nodes
-   - Guards: max 8 expressions, max 4 intermediates, max 3 reuses
-   - Uses topological sort for dependent expressions
-
-3. **Dead Column Pruning** (`prune_dead_columns`): Removes unused mutate outputs
-   - Walks root to leaves tracking required columns
-   - Empty mutate nodes are eliminated
-
-4. **Filter Pushdown** (`push_down_filters`): Moves filters closer to data sources
-   - Pushes across mutate when predicates don't depend on outputs
-   - Join pushdown rules:
-     - Inner join: left-only predicates -> left, right-only -> right
-     - Left join: only left-only predicates pushed
-     - Right join: only right-only predicates pushed
-     - Full join: no side-only pushdown allowed
-
-5. **Filter Reordering** (`reorder_filters`): Executes cheaper filters first
-   - Collects consecutive filter chains
-   - Sorts by `estimated_cost` field
-
-There is no separate filter-fusion pass: `lower_filter()` always folds every
-predicate in a filter node together with `&` into one IR expression and
-evaluates it as a single `gpu_filter_expr()`/`compute_column()` kernel, so a
-filter node with N predicates is already exactly one fused kernel.
-
-### Join-Specific Notes
-- Lazy joins build `ast_join` with two inputs
-- Source pointers attached via `set_ast_source_ptr()` before lowering
-- Schema inference: `infer_schema.ast_join` uses `build_join_schema()` in `R/join.R`
-- Right join (Phase 7 J4): native `gpu_right_join()` (`cudf::inner_join()` for
-  matched pairs + a `filtered_join` anti-join for unmatched-y rows), NOT a
-  swapped left join + column reorder (that helper was deleted in J4). Shares
-  the same device-side join-map pipeline as every other mutating join type
-  (see "Join Ordering & Unmatched Rows" below) to reproduce dplyr's
-  x-matched-then-unmatched-y-tail row order.
-- Non-equi/mixed `join_by()` conditions (Phase 7 J7): `ir_bind_join()`
-  resolves each condition's columns by the spec's explicit side tag
-  (`0`=left/`1`=right, not name-lookup order — required for self-joins with
-  identical schemas), and `build_join_ast()` (`src/expr_eval.hpp`, a
-  side-aware sibling of `build_ast()`, NOT a retrofit of it) emits
-  `column_reference(LEFT|RIGHT)` nodes for `gpu_cond_join()`
-  (`cudf::mixed_join()` when ≥1 equi condition, `cudf::conditional_join()`
-  otherwise).
-- Ensure desired column names exist before calling `gpu_select`
-
-### Optimizer Barriers
-- Barrier reattachment uses a helper to avoid R copy-on-modify pitfalls
-- Be careful when modifying AST nodes in place
-
-## Common Patterns
-
-### Expression Parsing (R side)
-```r
-# Capture unevaluated expressions
-dots <- rlang::enquos(...)
-
-# Get expression text
-expr_text <- rlang::quo_text(expr)
-
-# Get raw expression
-raw_expr <- rlang::quo_get_expr(expr)
-
-# Check if symbol (bare column name)
-if (is.symbol(raw_expr)) col_name <- as.character(raw_expr)
-
-# Check if call (function application)
-if (is.call(raw_expr)) {
-  fn_name <- as.character(raw_expr[[1]])  # e.g., "desc", "-"
-  arg <- raw_expr[[2]]                     # first argument
-}
-```
-
-### Column Index Conversion
-```r
-# R uses 1-based, C++ uses 0-based
-col_idx_r <- match(col_name, .data$schema$names)  # 1-based, NA if not found
-col_idx_cpp <- col_idx_r - 1L                      # 0-based for C++
-```
-
-### Validation Patterns (C++)
-```cpp
-// Bounds check
-if (col_idx < 0 || col_idx >= view.num_columns()) {
-    Rcpp::stop("Column index out of bounds: %d (table has %d columns)",
-               col_idx, view.num_columns());
-}
-
-// NA check in LogicalVector
-if (LogicalVector::is_na(value[i])) {
-    Rcpp::stop("NA values not allowed in parameter");
-}
-
-// Row count limit (int32 for indices)
-if (view.num_rows() > static_cast<cudf::size_type>(INT32_MAX)) {
-    Rcpp::stop("Table too large (max ~2.1 billion rows)");
-}
-```
-
-## Known Issues & Sharp Edges
-
-### Environment-Specific cuDF Issues
-_Installed version: cuDF 25.12.0 (see `cudf/version_config.hpp`; conda pkg `libcudf-25.12.00`)._
-- **Header locations differ by version**: `bitmask_allocation_size_bytes` is in `cudf/null_mask.hpp`. There is no `cudf/bitmask.hpp` file in this version at all.
-- **Join headers**: Use `<cudf/join/join.hpp>`, not `<cudf/join.hpp>`. That header declares `inner_join`, `left_join`, `full_join`, and `cross_join`. It also still declares free-function `left_semi_join`/`left_anti_join`, but both are marked `[[deprecated]]` in favor of the object-oriented API below.
-  - Non-deprecated semi/anti joins: `<cudf/join/filtered_join.hpp>`, class `cudf::filtered_join` — construct once from a build table, then call `.semi_join(probe)` / `.anti_join(probe)` (each returns a `device_uvector<size_type>` of left-table indices).
-  - Condition/mixed joins: `<cudf/join/conditional_join.hpp>` (AST-predicate joins) and `<cudf/join/mixed_join.hpp>` (equality keys + AST residual condition).
-- **cuDF gather API**: `cudf::gather()` (in `cudf/copying.hpp`) takes an `out_of_bounds_policy bounds_policy` parameter (`NULLIFY` or `DONT_CHECK`, default `DONT_CHECK`) but has **no** `negative_index_policy` parameter — that enum only exists on the detail-namespace overload in `cudf/detail/gather.hpp`, not on the public API.
-- **Avoid device-side Thrust** unless compiling with nvcc
-
-### Type Consistency
-R schema types MUST match actual GPU column types. If changing type handling:
-- Update `R/utils.R::gpu_type_from_r()`
-- Update `src/transfer_io.cpp::df_to_gpu()`
-- Update tests for round-trip behavior
-
-### String Column Operations
-String columns use offset-based storage (Apache Arrow format):
-- `col.child(0)` = offsets column (int32, n+1 elements)
-- `col.data<char>()` = concatenated character data
-- When slicing (e.g., head), must slice both offsets and chars correctly
-
-### Memory Semantics
-- Most ops allocate new tables (immutable design)
-- Peak memory for sorting: ~2x table size
-- Use `gpu_memory_state()` to monitor
-- GC frees GPU memory via pointer release
-
-### Grouping Behavior
-- `group_by()` only sets metadata (`$groups`), no GPU work
-- Groups are applied during `summarise()`
-- `arrange(.by_group=TRUE)` prepends group columns to sort keys
-- Preserve `$groups` when returning new tbl_gpu unless ungrouping
-
-### Join Ordering & Unmatched Rows
-- **cuDF join outputs are unordered**: We stable-sort join maps by left_map (then right_map) in `src/ops_join.cpp` to match dplyr
-- **JoinNoMatch sentinel**: cuDF uses sentinel values; gather treats negatives as wraparound
-- **Device-side join-map pipeline** (Phase 7 J4, `build_join_result()` in
-  `src/ops_join.cpp`): sanitize join maps on device (replace both `< 0`
-  *and* `>= nrows` sentinel values with `nrows` — the `>= nrows` half was a
-  latent gap in the original CPU-side sanitize, fixed in J4) → stable sort
-  → single device-to-host transfer only when diagnostics/`multiple=` are
-  needed (`join_map_stats()`: `left_multi_first`/`right_multi_first`/
-  `left_unmatched_first`/`right_unmatched_first`) → `multiple=` host
-  filtering (Phase 7 J5, skipped entirely for the default `multiple =
-  "all"`) → gather with `out_of_bounds_policy::NULLIFY` + coalesce. Every
-  mutating join type (`left`/`inner`/`full`/`right`) shares this one
-  pipeline; C++ exports return `list(ptr, diag)`, and `lower_join()`
-  (`R/lower.R`) calls `check_join_cardinality()` (`R/join.R`) with the raw
-  `diag` to raise dplyr's exact `multiple=`/`unmatched=`/`relationship=`
-  conditions.
-- **Right key dropping**: `keep = FALSE` drops right keys even when names differ (only legal for an all-equi spec — `keep = FALSE` on any genuinely non-equi `join_by()` condition errors with dplyr's own text; see `resolve_join_keep()`, `R/join.R`)
-- **`keep = NULL`'s real resolution is per-condition, not per-join** (Phase 7
-  J7 finding): a mixed `join_by(c == d, a >= b)` drops `d` (the equi pair)
-  but keeps *both* `a` and `b` (the non-equi pair, suffixed) — ported
-  directly from `dplyr:::join_cols()`'s own per-condition branch, see
-  `build_join_output_info()`.
-
-### Filter Parsing
-- Expressions parse through `ir_parse_quo()` (`R/ir.R`) into `make_predicate()` records (`ir`, `cols`, `estimated_cost`, `is_deterministic`, `na_sensitive`); optimizer passes read `pred$cols`, never the IR tree directly
-- Constant expressions (`ir_is_const()` — no column reference anywhere, e.g. `TRUE`, `FALSE`, `rep(TRUE, n)`) never reach the GPU IR path: they're evaluated in R (`eval_tidy` on the original quosure, not the constant-folded IR) so an n-row mask always has a real column to broadcast against; `TRUE` is a genuine no-op, `FALSE`/`NA` build an impossible predicate (`ir_lit_from_r(FALSE)`) that still flows through the normal lazy `push_op()`/`ast_filter` path
-- Comparing a non-STRING column against a STRING literal (or vice versa) is caught by `check_filter_comparison_types()` before lowering, with a message naming the column and its type
-- Expressions the IR doesn't recognize fall back to a CPU-eval boolean mask (`filter_eval_mask()`), with no data mask (only expressions that evaluate standalone, e.g. `rep(TRUE, n)`, can succeed there)
-
-### Mutate Parsing
-- Expressions parse through `ir_parse_quo()` (`R/ir.R`) into `make_mutate_expr()` records (`output_col`, `ir`, `input_cols`, `output_type`), lowered to a single `gpu_mutate_expr()` call per `mutate()` node; arbitrary nesting (`(x + y) * z - 1`), scalar-on-either-side, and later dots referencing earlier dots' outputs are all handled by the IR/evaluator, not by special-cased chain lowering
-- An expression shape the IR doesn't recognize is a hard error (no CPU fallback for `mutate()`, unlike `filter()`)
-
-### Summarise Aggregation Sub-Expressions
-- `create_temp_column()` (`R/summarise.R`) is a single IR-based implementation: any sub-expression `ir_parse_quo()` understands is valid inside an aggregation call (`sum(x > 3 & y < 2)`, `mean(sqrt(x))`, `sum(x %% 2 == 0)`, etc.), built via one `gpu_mutate_expr()` call, same as `mutate()`
-- A `BOOL8`-inferred sub-expression (comparisons, `&`/`|`/`!`, `is.na()`, ...) is declared `INT32` for the temp column so `sum()` promotes to `INT64` like R's `sum(logical)`; `gpu_mutate_expr()` performs the actual GPU-side cast
-- `preprocess_agg_expressions()` decomposes the aggregation call's raw expression (not text) via `decompose_agg_call()`, so a bare column reference needs no temp column and any unparseable shape falls through to `parse_aggregations()`'s existing diagnosable error
-
-### Bind Operations
-- `bind_rows()` computes unified schema via `compute_unified_schema()`
-- Type promotion hierarchy: BOOL8 < INT32 < INT64 < FLOAT64; STRING is widest
-- Missing columns filled with nulls via `gpu_make_null_column()`
-- `bind_cols()` uses `vctrs::vec_as_names()` for name repair when available
-- Both operations materialize lazy tables before binding
-
-## Debugging Build Failures
-
-- If a cudf header can't be found, check pixi environment paths and `src/Makevars`
-- Run `pixi run configure` after updating CUDA/cudf libs
-- Use `rg --files -g '*bitmask*' $CONDA_PREFIX/include/cudf` to locate moved headers
-- Join build errors: confirm `#include <cudf/join/join.hpp>` for inner/left/full/cross join; use `#include <cudf/join/filtered_join.hpp>` (`cudf::filtered_join`) for semi/anti join since the free `left_semi_join`/`left_anti_join` functions are deprecated; avoid device-side Thrust unless compiling with nvcc
-- GPU not detected is common in CI or local dev; tests use `skip_if_no_gpu()`
-- Rcpp exports need regeneration after moving/adding functions: run `Rcpp::compileAttributes()` or `devtools::document()`
-
-## Testing
-
-### Available Helpers (`tests/testthat/helper-*.R`)
-```r
-skip_if_no_gpu()           # Skip test if no GPU available
-expect_valid_tbl_gpu(x)    # Check tbl_gpu structure (allows exec_mode field)
-expect_data_on_gpu(x)      # Verify data is on GPU
-gc_gpu()                   # Force GPU garbage collection
-gpu_memory_snapshot()      # Get memory state for comparison
-```
-
-### Test Pattern
-```r
-test_that("operation handles edge case", {
-  skip_if_no_gpu()
-
-  # Setup
-  df <- data.frame(...)
-  gpu_df <- tbl_gpu(df)
-
-  # Execute
-  result <- gpu_df |> some_operation() |> collect()
-
-  # Assert
-  expect_equal(result$col, expected)
-})
-```
-
-### Lazy vs Eager Cross-Mode Testing
-Use `tibble::as_tibble()` to avoid rownames/class mismatches when comparing:
-```r
-expect_equal(
-
-  as_tibble(eager_result),
-  as_tibble(lazy_result)
-)
-```
-
-## Code Review Checklist
-
-Before merging dev to master, verify:
-- [ ] **Branch references**: Update Colab links back to `master` branch:
-  - `README.md`: Change `blob/dev` to `blob/master` in Colab badge URLs
-  - `notebooks/install_cuplyr.ipynb`: Change git clone from `-b dev` to remove the flag (or use `-b master`)
-- [ ] **Type alignment**: `R/utils.R` and `src/transfer_io.cpp` agree on type mapping
-- [ ] **Head/collect parity**: If a type is supported in `gpu_collect()`, ensure `gpu_head()` uses the same conversion path
-- [ ] **Arrange semantics**: Stable sort support, NA ordering, group-prepend behavior
-- [ ] **Rcpp exports**: If new C++ functions exist, `R/RcppExports.R` and `src/RcppExports.cpp` are updated
-- [ ] **Tests**: New features have matching `tests/testthat/test-*.R` coverage with `skip_if_no_gpu()`
-- [ ] **Joins**: Left-table order preserved, right-key dropping correct, pushdown rules followed
-- [ ] **Binds**: Type promotion correct, null columns for missing, lazy tables materialized
-
-## Development Mandates
-
-**Test-first bugfixes (STRICT)**: When a bug is reported, always add a failing test that reproduces it *before* implementing the fix. If the test passes unexpectedly, revert the fix, confirm failure, then re-apply.
-
-**Run tests after every feature (STRICT)**: After implementing any feature or fix, always run `pixi run test` before considering the work complete. Do not skip this step. If tests fail, fix the issue before moving on.
-
-**Roxygen2 for exports (STRICT)**: NEVER edit the NAMESPACE file by hand. Always use `#' @export` roxygen tags on functions and run `devtools::document()` (or `pixi run load-dev` which triggers it) to regenerate NAMESPACE. The same applies to `@importFrom` directives. Manual NAMESPACE edits will be overwritten.
-
-**Scratchpad for non-publishable docs (STRICT)**: When writing plans, post-mortems, analysis documents, or any other content that is not meant to be committed to the repository, always write them to the `scratchpad/` directory. Examples: `scratchpad/post_mortem.md`, `scratchpad/analysis.md`, `scratchpad/plan.md`. This keeps the repository clean and separates working documents from production code/docs.
-
-## cuDF Header Quick Reference
-
-| Operation | Header | Key Functions |
-|-----------|--------|---------------|
-| Sorting | `<cudf/sorting.hpp>` | `sorted_order`, `stable_sorted_order`, `sort` |
-| Gathering/Scattering | `<cudf/copying.hpp>` | `gather`, `scatter`, `empty_like` |
-| Filtering | `<cudf/stream_compaction.hpp>` | `apply_boolean_mask` |
-| Binary ops | `<cudf/binaryop.hpp>` | `binary_operation` |
-| Aggregation | `<cudf/aggregation.hpp>`, `<cudf/groupby.hpp>` | `groupby::aggregate` |
-| Null handling | `<cudf/null_mask.hpp>` | `bitmask_allocation_size_bytes` |
-| Scalars | `<cudf/scalar/scalar.hpp>`, `<cudf/scalar/scalar_factories.hpp>` | `make_numeric_scalar` |
-| Joins | `<cudf/join/join.hpp>` | `inner_join`, `left_join`, `full_join`, `cross_join` |
-| Semi/anti joins | `<cudf/join/filtered_join.hpp>` | `filtered_join` class: `.semi_join()`, `.anti_join()` (free `left_semi_join`/`left_anti_join` in `join.hpp` are `[[deprecated]]`) |
-| Conditional/mixed joins | `<cudf/join/conditional_join.hpp>`, `<cudf/join/mixed_join.hpp>` | AST-predicate and equality+condition joins |
-| Concatenation | `<cudf/concatenate.hpp>` | `concatenate` (for bind_rows/bind_cols) |
-| Distinct/duplicates | `<cudf/stream_compaction.hpp>` | `distinct`, `distinct_indices`, `stable_distinct`, `unique_count`, `distinct_count` |
-| Rank | `<cudf/sorting.hpp>` | `rank` |
-| Scan (column) | `<cudf/reduction.hpp>` | `scan` |
-| Scan/shift (grouped) | `<cudf/groupby.hpp>` | `groupby::scan`, `groupby::sort_scan`, `groupby::shift` |
-| Conditional copy | `<cudf/copying.hpp>` | `copy_if_else` |
-| Null/value replace | `<cudf/replace.hpp>` | `replace_nulls`, `find_and_replace_all`, `clamp` |
-| AST expression eval | `<cudf/transform.hpp>`, `<cudf/ast/expressions.hpp>` | `compute_column` (+ `ast::literal`, `ast::column_reference`, `ast::operation`, `ast::tree`) |
-| Strings | `<cudf/strings/*.hpp>` | e.g. `case.hpp`, `find.hpp`, `replace.hpp`, `split/`, `convert/` |
-| Datetime | `<cudf/datetime.hpp>` | datetime component extraction/arithmetic |
-| Sampling/slicing | `<cudf/copying.hpp>` | `slice`, `split`, `sample`, `shift` |
+| factor | DICTIONARY32 (logical) / INT32 (physical) | 1-based codes on GPU, labels in `schema$factor_levels`; see the reference for which call sites use which view |
+| integer64 | FLOAT64 | loses precision above 2^53, warns |
+
+Every verb builds one AST node and hands it to `push_op()` (`R/execute.R`);
+`R/lower.R::lower_and_execute()` is the single execution path for eager and
+lazy. The optimizer runs only from `compute()`.
+
+## Hard rules
+
+These are enforced by hooks in `.claude/hooks/` where possible. Don't try to
+work around a block; if a rule stops legitimate work, say so in your report.
+
+1. **Nothing is ever installed.** No `R CMD INSTALL`, `pixi run install`,
+   `devtools::install()`. Code is loaded with `pkgload::load_all()` from the
+   worktree being tested.
+2. **All R goes through the GPU lock.** One RTX 5070 (12 GB) serves every
+   worktree, so every R process uses a `tools/` wrapper (table below). No raw
+   `Rscript`/`R -e`, and no `pixi` calls from agents.
+3. **Call tools by absolute path in the worktree you mean.** The scripts test
+   the worktree they live in, not your shell's cwd:
+   `/home/theo/cuplr-wt/<id>/tools/test-file tests/testthat/test-x.R`.
+4. **Never edit `NAMESPACE`** or the Rcpp export files. Use roxygen tags
+   (`@export`, `@importFrom`) and run `tools/document`.
+5. **Test-first bugfixes.** Add a failing test that reproduces the bug before
+   the fix. If it passes unexpectedly, the bug isn't understood yet.
+6. **Baselines are Theo's.** Agents never write `scratchpad/perf_baseline.json`
+   or set `CUPLYR_PERF_RECORD`. `tools/merge-queue` ratchets the conformance
+   baseline; nothing else touches it.
+7. **Git**: never push. `dev` only moves through `tools/merge-queue`. Commits
+   keep Theo as author and end with the trailer
+   `Co-Authored-By: Claude <noreply@anthropic.com>`.
+8. **Non-publishable writing** (plans, post-mortems, reviews, logs) goes in
+   `scratchpad/` (gitignored), never in the package.
+
+## Commands
+
+| Command | Lock | Use |
+|---|---|---|
+| `tools/build` | no | Compile this worktree's C++ (runs `./configure` first if needed). Do this after C++ edits so locked runs don't compile. |
+| `tools/test-file <file>... [--out f.tsv]` | yes | Run specific test files. |
+| `tools/r '<R expr>'` | yes | Ad-hoc R with the package loaded and dplyr attached. |
+| `tools/document` | yes | Regenerate NAMESPACE, man/, Rcpp exports. |
+| `tools/test [--out f.tsv]` | yes | Full testthat suite. Tester agents only. |
+| `tools/perf [--out f.tsv]` | yes | Perf gate (`CUPLYR_PERF=1`, max ratio 1.5 vs the main checkout's baseline). Tester agents only. |
+| `tools/conformance [files] [--ids f.tsv] [--report f.md]` | yes | dplyr's own vendored test suite run against `tbl_gpu`. Tester agents only. |
+| `tools/wt-new <id> [attempt]` | no | Create feature worktree `../cuplr-wt/<id>` on branch `feat/<id>` off `dev`. PM only. |
+| `tools/merge-queue <name>` | gate | Squash-merge `feat/<name>` into `dev` behind the full gate. Orchestrator only. |
+
+`tools/gpu-run` is the lock itself; the wrappers above call it. A gate run
+blocks new GPU jobs from starting until it finishes. Lock waits are logged to
+`.git/cuplyr-locks/stats.tsv`.
+
+`pixi run test|perf|conformance|document|build` are aliases for Theo's
+terminal in the main checkout.
+
+## Testing conventions
+
+- Every GPU test starts with `skip_if_no_gpu()`.
+- Parity tests compare against real dplyr with `expect_same_as_dplyr(df,
+  pipeline, ...)` / `expect_same_as_dplyr_lazy()` (`tests/testthat/helper-oracle.R`).
+  Use `arrange_by =` only where dplyr itself doesn't define row order.
+- Compare eager and lazy results through `tibble::as_tibble()`.
+- `test-memory-regression.R` measures GPU memory deltas and is sensitive to
+  other GPU activity; that is one reason everything runs under the lock.
+
+## Parity workflow
+
+Roles (definitions in `.claude/agents/`, orchestrator procedure in
+`.claude/skills/parity-orchestrator/SKILL.md`):
+
+| Role | Model | Does |
+|---|---|---|
+| Orchestrator | Opus (main session) | Owns the backlog and ledger, dispatches PMs, writes post-mortems, runs the merge queue. |
+| `pm` | Opus | One feature in its own worktree. Writes the acceptance tests, then drives coder -> tester -> reviewer rounds. |
+| `coder` | Sonnet (rounds 1-2), Opus (rounds 3-4) | Writes the code. Can't touch the PM's acceptance tests. Runs only targeted test files. |
+| `tester` | Haiku | Runs the full suite, perf and conformance; writes logs; reports facts only. |
+| `reviewer` | Opus | Adversarial review of diff and logs. Never runs code; asks a tester instead. |
+
+State lives in `scratchpad/parity/` in the main checkout:
+`ledger.md` (backlog, status, merge queue), `features/<name>.md` (brief,
+design, round history), `features/<name>/` (test runs, reviews),
+`features/<name>.protected` and `.commit.txt` (read by `tools/merge-queue`),
+`gates/` (merge gate artifacts), `conformance_baseline.tsv`.
+
+The gap analysis the backlog is built from is
+`scratchpad/dplyr_feature_gaps.md`. `scratchpad/workflow_state.md` is the
+frozen history of phases 0-13.
