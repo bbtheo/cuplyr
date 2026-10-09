@@ -24,7 +24,13 @@ if (nzchar(Sys.getenv("CUPLYR_PERF_RECORD"))) {
   stop("CUPLYR_PERF_RECORD is set: re-baselining perf is Theo's decision, not a test run.")
 }
 
-pkgload::load_all(quiet = TRUE)
+# Rebuild a stale -O0 .so before loading; never load_all() with debug = TRUE
+# (see tools/ensure-optimized.R).
+# cwd is the worktree root: every caller (tools/test, tools/test-file,
+# tools/perf and the merge gate script) cd's to it before running this.
+source("tools/ensure-optimized.R")
+cuplyr_ensure_optimized_dll(".")
+pkgload::load_all(quiet = TRUE, debug = FALSE)
 
 run <- function(files) {
   rows <- list()

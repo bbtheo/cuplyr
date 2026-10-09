@@ -7,16 +7,28 @@
 # recorded baseline (see helper-perf.R for the full harness contract).
 #
 # Opt-in and machine-specific: every benchmark is skipped unless
-# CUPLYR_PERF=1 is set (see expect_no_perf_regression()). To (re)record
-# baselines on this machine:
+# CUPLYR_PERF=1 is set (see expect_no_perf_regression()). The package must be
+# loaded from an optimized (-O2) build: pkgload::load_all() defaults to
+# debug = TRUE, which recompiles any edited .cpp at -O0 and makes timings
+# meaningless (expect_no_perf_regression() refuses such a build). So build and
+# load like this, from the worktree root. To (re)record baselines on this
+# machine:
 #
 #   CUPLYR_PERF=1 CUPLYR_PERF_RECORD=1 pixi run Rscript -e \
-#     'pkgload::load_all(quiet=TRUE); testthat::test_file("tests/testthat/test-perf-regression.R")'
+#     'source("tools/ensure-optimized.R"); cuplyr_ensure_optimized_dll("."); pkgload::load_all(quiet=TRUE, debug=FALSE); testthat::test_file("tests/testthat/test-perf-regression.R")'
 #
 # and to check against the recorded baseline:
 #
 #   CUPLYR_PERF=1 pixi run Rscript -e \
-#     'pkgload::load_all(quiet=TRUE); testthat::test_file("tests/testthat/test-perf-regression.R")'
+#     'source("tools/ensure-optimized.R"); cuplyr_ensure_optimized_dll("."); pkgload::load_all(quiet=TRUE, debug=FALSE); testthat::test_file("tests/testthat/test-perf-regression.R")'
+#
+# The calibration probes are measured once per process, at the first
+# benchmark that uses each. The kernel probe reads ~0.7x its baseline in this
+# file's process and ~1.2x in a bare session or on a repeat measurement (see
+# perf_calibration_time() in helper-perf.R). That no longer matters: it never
+# widens a kernel threshold and only errors above 1.5x. The transfer probe
+# does widen transfer thresholds, so run the whole file the way the gate
+# does when comparing numbers with gate logs.
 
 # =============================================================================
 # GPU warm-up (file start)

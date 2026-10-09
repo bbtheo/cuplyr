@@ -6,7 +6,7 @@
 #
 # Three-piece API:
 #
-#   perf_time(fn, iterations, warmup)        - median wall time of fn()
+#   perf_time(fn, iterations, warmup)        - median per-call wall time of fn()
 #   perf_baseline_path()                     - where the baseline JSON lives
 #   expect_no_perf_regression(id, fn, ...)   - the test-facing entry point
 #
@@ -44,66 +44,107 @@
 # Timing
 # =============================================================================
 
-#' Time a zero-arg closure, returning the median of several timed runs
+#' Time a zero-arg closure, returning the median per-call time
+#'
+#' proc.time() ticks in 1 ms steps, which is 10-50% of a 2-10 ms benchmark. So
+#' each timed sample runs `fn` back to back `reps` times, with `reps` chosen so
+#' the sample lasts at least `min_sample_s` (~50 ms; one tick is then <= 2%),
+#' and the sample's elapsed time is divided by `reps`. `reps` is 1 for calls
+#' that already take that long, so slow benchmarks are timed exactly as
+#' before. Batched calls run without gc_gpu() between them; the GPU is
+#' collected once before each sample. That back-to-back GC pressure adds
+#' 2-4% to a collect()-heavy call (transfer probe, 3 calls per sample:
+#' 0.0183-0.0187 s batched vs 0.0180 s single-call, 4/4 gate-like sessions),
+#' which is why the calibration probes opt out with `batch = FALSE`.
 #'
 #' @param fn A zero-argument function. For lazy pipelines it must call
 #'   collect() (or compute()) internally so the pipeline actually executes;
 #'   otherwise only AST construction would be timed.
-#' @param iterations Number of timed runs (median is reported).
+#' @param iterations Number of timed samples (median is reported).
 #' @param warmup Number of untimed runs executed first (JIT/caching/allocator
 #'   warmup), discarded.
-#' @return Median elapsed time in seconds (numeric scalar).
-perf_time <- function(fn, iterations = 5, warmup = 2) {
+#' @param min_sample_s Minimum duration of one timed sample, in seconds.
+#' @param batch If FALSE, never batch: every sample is one call (`reps` = 1),
+#'   timed the way the pre-F00 baselines were recorded. Used by the calibration
+#'   probes (see perf_calibration_time()).
+#' @return Median per-call elapsed time in seconds (numeric scalar) with
+#'   attribute `reps`, the number of calls batched into each sample.
+perf_time <- function(fn, iterations = 5, warmup = 2, min_sample_s = 0.05, batch = TRUE) {
   stopifnot(is.function(fn))
   stopifnot(is.numeric(iterations), length(iterations) == 1, iterations >= 1)
   stopifnot(is.numeric(warmup), length(warmup) == 1, warmup >= 0)
+  stopifnot(is.numeric(min_sample_s), length(min_sample_s) == 1, min_sample_s > 0)
+  stopifnot(is.logical(batch), length(batch) == 1, !is.na(batch))
+
+  # proc.time()["elapsed"] is a monotonic wall-clock reading (unaffected by
+  # system clock adjustments), unlike Sys.time().
+  now <- function() proc.time()[["elapsed"]]
+  run_batch <- function(n) {
+    t0 <- now()
+    for (j in seq_len(n)) fn()
+    now() - t0
+  }
 
   for (i in seq_len(warmup)) {
     fn()
   }
   if (warmup > 0) gc_gpu()
 
+  # Probe the per-call time with batches of doubling size until one batch
+  # lasts >= 10 ms (10 ticks, so <= 10% error on the estimate).
+  reps <- 1
+  if (batch) {
+    n <- 1
+    repeat {
+      elapsed <- run_batch(n)
+      if (elapsed >= 0.01 || n >= 2^20) break
+      n <- n * 2
+    }
+    per_call <- max(elapsed / n, 1e-9)
+    reps <- if (per_call >= min_sample_s) 1 else min(ceiling(min_sample_s / per_call), 1e5)
+  }
+
   times <- numeric(iterations)
   for (i in seq_len(iterations)) {
     gc_gpu()
-    # proc.time()["elapsed"] is a monotonic wall-clock reading (unaffected by
-    # system clock adjustments), unlike Sys.time().
-    t0 <- proc.time()[["elapsed"]]
-    fn()
-    times[i] <- proc.time()[["elapsed"]] - t0
+    times[i] <- run_batch(reps) / reps
   }
 
-  stats::median(times)
+  structure(stats::median(times), reps = reps)
 }
 
 # =============================================================================
 # Process-local state
 # =============================================================================
 #
-# GPU clock state (P8 idle vs boosted) drifts by ~2-3x between test-runner
-# sessions independent of any code change, which used to make the perf gate
-# fire on ambient drift alone. Two mechanisms address this:
+# GPU clock state (P8 idle vs boosted) and host contention can shift timings
+# between test-runner sessions independent of any code change. Mechanisms:
 #
 #   - perf_warm_gpu(): force the clocks out of idle before anything is timed.
-#   - perf_current_calibration()/perf_current_calibration_transfer(): measure
-#     fixed, deterministic workloads alongside the real benchmarks and use
-#     current/baseline drift on *those* workloads to scale the acceptable
-#     threshold for every other benchmark.
+#   - perf_current_calibration_transfer(): a fixed tbl_gpu()/collect() round
+#     trip whose current/baseline drift widens the thresholds of the
+#     transfer-bound benchmarks (`calibration = "transfer"`), up to
+#     perf_calibration_cap.
+#   - perf_current_calibration(): the "kernel" probe. It is NOT used to scale
+#     anything: its reading has two modes that depend on R process state, not
+#     on the machine (see perf_calibration_time()). Kernel-calibrated
+#     benchmarks always use scale 1, and the probe is only a health check that
+#     errors above perf_kernel_probe_bound, far above both modes.
 #
-# Two calibration probes, not one: the original kernel-heavy/transfer-light
-# calibration workload tracks GPU clock state well, but is blind to a
-# separate ambient condition -- host/PCIe transfer speed -- that can drift
-# independently of GPU clocks (observed directly: transfer-bound benchmarks
-# running 2-5x slower than baseline while the kernel calibration scale sat
-# at ~1.07x). Benchmarks now declare which ambient condition dominates them
-# (`calibration = "kernel"` or `"transfer"` in expect_no_perf_regression())
-# and are scaled against the matching probe.
+# (An earlier note here attributed 2-5x transfer-benchmark slowdowns to PCIe
+# drift. Those runs were -O0 builds: the R<->cudf conversion loops are
+# package C++, the kernels are always-optimized libcudf, so only
+# transfer-bound benchmarks and the transfer probe slowed down. See
+# perf_check_build().)
+#
+# A scale only ever widens a threshold, never tightens it.
 #
 # Both probes are cached per R process (via perf_state) so repeated
 # expect_no_perf_regression() calls within one `testthat::test_file()` run
-# only pay the warm-up/calibration cost once, keeping the ambient conditions
-# the same for every benchmark. Use `force = TRUE` (or reset perf_state) to
-# bypass.
+# only pay the calibration cost once. `force = TRUE` (or resetting perf_state)
+# re-measures; for the kernel probe that typically moves the reading from its
+# fast mode to its slow mode, which is harmless because neither mode changes
+# a threshold.
 perf_state <- new.env(parent = emptyenv())
 perf_state$warmed <- FALSE
 perf_state$calib_median <- NULL
@@ -167,14 +208,13 @@ perf_warm_gpu <- function(min_seconds = 2, force = FALSE) {
 # Ambient calibration
 # =============================================================================
 
-#' Data for the ambient-calibration workload
+#' Data for the kernel-probe workload
 #'
 #' Distinct from both the warm-up data above and every benchmark pipeline in
-#' test-perf-regression.R -- this workload's only job is to be timed
-#' identically at record time and check time so its current/baseline drift
-#' can serve as a proxy for ambient GPU clock state. Sized (5e6 rows) so the
-#' filter+mutate+arrange pipeline below lands at ~70ms warm on this machine's
-#' GPU, comfortably inside the ~50-100ms target range.
+#' test-perf-regression.R; this workload's only job is to be timed the same
+#' way at record time and check time. 5e6 rows; the pipeline below reads
+#' 0.043-0.047 s or 0.075-0.080 s per call depending on process state (see
+#' perf_calibration_time()).
 #' @keywords internal
 perf_calibration_data <- function() {
   set.seed(20260202)
@@ -186,12 +226,33 @@ perf_calibration_data <- function() {
   )
 }
 
-#' Time the fixed ambient-calibration workload (median of 5, like perf_time() defaults)
+#' Time the fixed kernel-probe workload (median of 5, one call per sample)
 #'
-#' A filter/mutate/arrange pipeline, warm (the table is preallocated once,
-#' outside the timed closure) and ~50-100ms per run on a boosted GPU -- long
-#' enough to be a stable timing signal, short enough not to meaningfully add
-#' to suite runtime.
+#' filter/mutate/arrange on a table preallocated on the GPU (outside the
+#' timed closure), then collect(): the ~4.5e6 surviving rows x 4 columns,
+#' ~126 MB, are copied device->host and built into an R data frame on every
+#' call. So this is not a kernel-only or transfer-light workload: the
+#' device->host copy and the host-side allocation are a large part of it.
+#'
+#' One call per sample (`batch = FALSE`), the way the `_calibration`
+#' baseline (0.065 s) was recorded.
+#'
+#' Measured on the -O2 build with the GPU warmed, its reading has two modes
+#' that depend on the state of the R process, with nothing else changed:
+#'   - fast, 0.043-0.047 s (scale 0.66-0.72): the first measurement in a
+#'     process in which the perf file's fixtures already exist. That is the
+#'     gate's state (10/10 perf runs on record).
+#'   - slow, 0.075-0.080 s (scale 1.154-1.231): a bare session without the
+#'     fixtures, and any second measurement in the same process, even with
+#'     the fixtures alive (2/2).
+#' Neither mode is an ambient GPU reading, the mechanism is unexplained, and
+#' the 0.065 s baseline matches neither. The slow mode straddles any cap
+#' placed between its readings (0.078 s is 1.2000 +/- 1e-12 against 0.065 s,
+#' and floating-point noise in the proc.time() difference picked the side),
+#' so using this probe to widen thresholds made the gate's outcome random.
+#' That is why kernel-calibrated benchmarks are never scaled by it: see
+#' perf_effective_scale(), which only checks it against
+#' perf_kernel_probe_bound.
 #' @keywords internal
 perf_calibration_time <- function() {
   gpu_df <- tbl_gpu(perf_calibration_data(), lazy = FALSE)
@@ -202,7 +263,7 @@ perf_calibration_time <- function() {
       dplyr::mutate(z = v + w) |>
       dplyr::arrange(id, dplyr::desc(z)) |>
       collect()
-  })
+  }, batch = FALSE)
 }
 
 #' Current-session calibration median, cached per process
@@ -220,14 +281,10 @@ perf_current_calibration <- function(force = FALSE) {
 # Ambient calibration -- transfer probe
 # =============================================================================
 #
-# The kernel calibration above (filter/mutate/arrange on a preallocated
-# table) is deliberately transfer-light: the input table is built once
-# outside the timed closure, and the result never leaves the GPU. That makes
-# it a poor proxy for benchmarks dominated by host<->device copies (a fresh
-# tbl_gpu() construction, a collect() of a large result). This probe times
-# exactly that shape instead -- transfer in, transfer out, no compute -- so
-# transfer-bound benchmarks scale against transfer ambient conditions rather
-# than GPU-kernel ambient conditions.
+# Benchmarks dominated by host<->device copies (a fresh tbl_gpu()
+# construction, a collect() of a large result) scale against this probe,
+# which times exactly that shape: transfer in, transfer out, no compute. It
+# is the only probe that widens thresholds (see perf_effective_scale()).
 
 #' Data for the transfer-calibration workload
 #'
@@ -245,13 +302,22 @@ perf_calibration_transfer_data <- function() {
   )
 }
 
-#' Time the fixed transfer-calibration workload (median of 5, like perf_time() defaults)
+#' Time the fixed transfer-calibration workload (median of 5, one call per sample)
 #'
 #' tbl_gpu() construction (host->device) immediately followed by collect()
-#' (device->host), with no compute step in between -- the workload is
-#' dominated by transfer bandwidth/latency, not kernel execution, so its
-#' current/baseline drift tracks host/PCIe-side ambient conditions rather
-#' than GPU clock state.
+#' (device->host), with no compute step in between, so the workload is
+#' dominated by transfer bandwidth/latency and host-side conversion, not
+#' kernel execution.
+#'
+#' One call per sample (`batch = FALSE`), like the `_calibration_transfer`
+#' baseline and like transfer_roundtrip / join_left_*, which take well over
+#' 50 ms per call and so are never batched. Batching this ~18 ms probe (3
+#' calls per sample) adds GC pressure between back-to-back calls: 0.0183-0.0187 s
+#' batched against 0.0180 s single-call in 4/4 gate-like sessions
+#' (+1.7-3.9%), 0.0193-0.0197 s in earlier merge-gate runs. That would widen
+#' the transfer thresholds by a measurement artifact. The price is
+#' resolution: single-call readings are whole 1 ms ticks, 5.3% of the
+#' 0.019 s baseline each.
 #' @keywords internal
 perf_calibration_transfer_time <- function() {
   df <- perf_calibration_transfer_data()
@@ -259,7 +325,7 @@ perf_calibration_transfer_time <- function() {
   perf_time(function() {
     tbl_gpu(df) |>
       collect()
-  })
+  }, batch = FALSE)
 }
 
 #' Current-session transfer-calibration median, cached per process
@@ -344,12 +410,16 @@ perf_read_baseline <- function(path) {
 }
 
 #' Write the baseline list back out as JSON
+#'
+#' `digits = NA` writes doubles at full precision: toJSON()'s default of 4
+#' decimal places (not significant digits) would round batched sub-ms timings
+#' (e.g. 0.0016xx s for summarise_grouped_*, written as 0.0016) by up to ~3%.
 #' @keywords internal
 perf_write_baseline <- function(path, data) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
 
   if (requireNamespace("jsonlite", quietly = TRUE)) {
-    txt <- jsonlite::toJSON(data, auto_unbox = TRUE, pretty = TRUE, null = "null")
+    txt <- jsonlite::toJSON(data, auto_unbox = TRUE, pretty = TRUE, null = "null", digits = NA)
     writeLines(as.character(txt), path)
   } else {
     writeLines(perf_json_encode(data), path)
@@ -450,6 +520,208 @@ perf_git_commit <- function() {
 }
 
 # =============================================================================
+# Build check
+# =============================================================================
+
+#' Path of the active cuplyr shared object, NA if none is loaded
+#'
+#' After an in-process pkgload::load_all() reload, pkgload loads the rebuilt
+#' DLL from a new private temp copy but leaves the old one loaded, so the
+#' list holds several "cuplyr" entries and `[["cuplyr"]]` returns the first,
+#' stale one: after a reload to a partial -O0 build, the check would scan the
+#' previous, optimized DLL and pass. R appends new DLLs to the end of its table
+#' and keeps the order when it drops entries, so the last entry is the most
+#' recently loaded one, which is the one the reloaded namespace uses.
+#' @param dlls A DLLInfoList; defaults to getLoadedDLLs().
+#' @keywords internal
+perf_loaded_dll_path <- function(dlls = getLoadedDLLs()) {
+  dlls <- unclass(dlls)
+  dlls <- dlls[names(dlls) == "cuplyr"]
+  if (length(dlls) == 0) NA_character_ else unclass(dlls[[length(dlls)]])[["path"]]
+}
+
+#' Was the loaded cuplyr DLL compiled with optimization?
+#'
+#' pkgbuild/pkgload compile with `-O0` by default (`debug = TRUE`). That is
+#' invisible to correctness tests but makes the package-side conversion loops
+#' 2.5-5x slower than the -O2 build the baselines were recorded with, so every
+#' perf ratio would be meaningless.
+#'
+#' The answer comes from the compiler flags recorded in the loaded .so's DWARF
+#' producer strings (the same scan as cuplyr_so_build_state() in
+#' tools/ensure-optimized.R, duplicated here so the helper does not depend on
+#' tools/). It has to read the file, not ask the package: `__OPTIMIZE__` in a
+#' package translation unit only describes that one unit, and a load_all()
+#' after editing a single .cpp recompiles just that unit at -O0 while the rest
+#' stay -O2 (a "partial" build, which a check inside any one unit misses). Any
+#' `-O0` unit means timings of the code paths it holds are inflated, so any
+#' `-O0` fails.
+#'
+#' The absence of " -O0 " only means something if the flags were recorded at
+#' all, so at least one GCC producer string ("GNU C", which also matches
+#' "GNU C++20 ...") must be present. A build without `-g`, with compressed
+#' debug sections, or from clang (no flags in its producer) records none and
+#' is reported unoptimized rather than passing vacuously (finding no " -O0 "
+#' in a file that records no flags proves nothing).
+#' On this toolchain all 13 package .cpp units record a "GNU C++20" producer.
+#' A DLL that is not loaded or cannot be read cannot be vouched for: FALSE.
+#' @param path The shared object to scan; defaults to the active cuplyr DLL.
+#' @keywords internal
+perf_build_is_optimized <- function(path = perf_loaded_dll_path()) {
+  if (is.na(path) || !file.exists(path)) {
+    return(FALSE)
+  }
+  bytes <- readBin(path, "raw", file.size(path))
+  has_producer <- length(grepRaw("GNU C", bytes, fixed = TRUE)) > 0
+  has_producer && length(grepRaw(" -O0 ", bytes, fixed = TRUE)) == 0
+}
+
+#' Refuse to time an unoptimized build
+#' @param optimized Whether the build is optimized; defaults to asking the
+#'   loaded DLL. Overridable so the check itself is testable.
+#' @keywords internal
+perf_check_build <- function(optimized = perf_build_is_optimized()) {
+  if (!isTRUE(optimized)) {
+    rlang::abort(
+      paste0(
+        "The active cuplyr DLL (", perf_loaded_dll_path(), ") has -O0 compilation units (or records no ",
+        "GCC compiler flags, or could not be read), so perf ratios are meaningless: -O0 code is 2.5-5x slower ",
+        "than the -O2 build the baseline was recorded with. Run tools/build (it rebuilds stale -O0 objects) or load through ",
+        "tools/test-file or tools/r, which do. When loading by hand, call ",
+        "cuplyr_ensure_optimized_dll() (tools/ensure-optimized.R) and pkgload::load_all(debug = FALSE); ",
+        "the default load_all() recompiles edited files at -O0."
+      ),
+      class = "cuplyr_perf_unoptimized_build"
+    )
+  }
+  invisible(TRUE)
+}
+
+# =============================================================================
+# Calibration scale and threshold
+# =============================================================================
+
+# Largest transfer-probe scale (current probe time / baseline probe time)
+# that still widens the transfer thresholds. 1.2 is the lowest value the gate
+# contract allows (a 1.2 scale must still widen). Evidence, on the -O2 build
+# on this machine with the GPU warmed, the probe timed one call per sample
+# (the way its 0.019 s baseline was recorded):
+#   - 0.017-0.018 s (0.895-0.947) in 7/7 gate-like sessions and in earlier
+#     merge-gate runs; 0.017 and 0.020 s (0.895, 1.053) in two record-order sessions.
+#     Single-call readings are whole 1 ms ticks, 5.3% of the baseline each.
+#   - batched readings, which run 2-4% high (see perf_calibration_transfer_time()):
+#     1.018-1.035 in earlier merge-gate runs, 1.07-1.09 in five fresh standalone
+#     sessions.
+#   - an unoptimized (-O0) build read 3.0x.
+# Against the 0.019 s baseline the cap falls at 0.0228 s, between two ticks:
+# 0.022 s (1.158) widens, 0.023 s (1.211) errors, so no reading sits on it.
+# That leaves 2 ticks above the highest single-call reading (0.020 s) and
+# sits far below the -O0 symptom. The widest transfer threshold is
+# 1.2 * 1.5 = 1.8x baseline. If a legitimate environment ever reads above it,
+# fix the probe or re-record its baseline (Theo's call); do not raise the cap.
+perf_calibration_cap <- 1.2
+
+# Health-check bound for the kernel probe, which never widens anything (see
+# perf_calibration_time()). It must sit clear of both of the probe's modes,
+# measured against its 0.065 s baseline: fast 0.043-0.047 s (0.66-0.72),
+# slow 0.075-0.080 s (1.154-1.231). 1.5:
+#   - is 22% above the slow mode's highest reading (1.231). The bound falls at
+#     0.0975 s, 17.5 ms above it (0.080 s) and between two ticks, so a
+#     median of whole-tick readings is 0.097 s (1.492, passes) or 0.098 s
+#     (1.508, errors) and floating-point noise cannot decide the outcome.
+#   - equals the gate's max_ratio: a probe 1.5x slower than its baseline is
+#     already more slowdown than the gate tolerates for any benchmark, so the
+#     error flags a session that is unusable for timing (other GPU load,
+#     clocks stuck low, host contention) or a regression in the probe's own
+#     code paths (filter/mutate/arrange/collect), instead of a pile of
+#     unexplained benchmark failures.
+#   - is well below the 3x the end-to-end tests pin as an error.
+# Between 1.231 and 1.5 a kernel reading neither widens nor errors. The probe
+# does not detect an -O0 build (it read 0.83 on one, because its
+# work is mostly libcudf); perf_check_build() does.
+perf_kernel_probe_bound <- 1.5
+
+# A raw scale within this relative distance of a bound counts as on it, i.e.
+# accepted. proc.time() differences carry ~1e-12 relative error (a 78 ms
+# reading came back as 0.077999999999999847 s), so without it a reading of
+# exactly the bound in whole ticks (possible after a re-record) would land on
+# either side at random.
+perf_scale_tolerance <- 1e-9
+
+#' Turn a raw probe ratio into the factor applied to the baseline
+#'
+#' Transfer probe (and the default, `context = NULL`): a session faster than
+#' the baseline session (raw < 1) never tightens the threshold below
+#' `baseline * max_ratio`, which is the gate's stated contract. A slower
+#' session widens it by exactly the measured slowdown, up to
+#' `perf_calibration_cap`.
+#'
+#' Kernel probe (`context$probe == "kernel"`): always 1. The probe's reading
+#' depends on R process state (perf_calibration_time()), so it is only a
+#' health check against `perf_kernel_probe_bound`.
+#'
+#' Beyond the bound, or for a nonsensical value (NA, non-positive, infinite),
+#' there is no honest threshold to give: an error is raised rather than a
+#' skip (a skipped perf test passes the gate) or a silent clamp (which hides
+#' real regressions behind a sick-machine allowance).
+#' @param raw_scale current probe time / baseline probe time.
+#' @param context Optional list(id, probe, current_s, baseline_s) naming the
+#'   benchmark, the probe ("kernel" or "transfer") and its two timings.
+#'   `probe` selects the rule above; the rest only explains the error.
+#' @keywords internal
+perf_effective_scale <- function(raw_scale, context = NULL) {
+  kernel <- identical(context$probe, "kernel")
+  bound <- if (kernel) perf_kernel_probe_bound else perf_calibration_cap
+  valid <- is.numeric(raw_scale) && length(raw_scale) == 1 && is.finite(raw_scale) && raw_scale > 0
+  if (!valid || raw_scale > bound * (1 + perf_scale_tolerance)) {
+    where <- NULL
+    if (!is.null(context)) {
+      where <- sprintf(
+        "Benchmark '%s', %s probe: current %s s, baseline %s s, raw scale %s, %s %.2f.",
+        context$id %||% "?", context$probe %||% "?",
+        format(context$current_s %||% NA, digits = 4), format(context$baseline_s %||% NA, digits = 4),
+        format(raw_scale), if (kernel) "health-check bound" else "cap", bound
+      )
+    }
+    hint <- if (kernel) {
+      paste0(
+        "The kernel probe never widens thresholds; this is its health check. Its two process-state modes ",
+        "read 0.043-0.047 s and 0.075-0.080 s (scale 0.66-0.72 and 1.154-1.231), both well below the bound, ",
+        "so this reading is not one of them."
+      )
+    } else {
+      paste0(
+        "The transfer probe widens transfer thresholds up to the cap. Gate sessions read ",
+        "0.017-0.020 s against its 0.019 s baseline."
+      )
+    }
+    rlang::abort(
+      c(
+        sprintf(
+          "Calibration scale %s is not usable (valid: > 0 and <= %.2f).",
+          format(raw_scale), bound
+        ),
+        where,
+        hint,
+        "i" = paste0(
+          "Either the machine state (GPU clocks, other GPU load, host contention) or the probe's code paths ",
+          "are far from the baseline session. Investigate; do not raise the bound to make this pass."
+        )
+      ),
+      class = "cuplyr_perf_calibration_error"
+    )
+  }
+  if (kernel) 1 else max(1, raw_scale)
+}
+
+#' Time limit for a benchmark: baseline * effective calibration scale * max_ratio
+#' @param context See perf_effective_scale().
+#' @keywords internal
+perf_threshold <- function(baseline_s, raw_scale, max_ratio = 1.5, context = NULL) {
+  baseline_s * perf_effective_scale(raw_scale, context) * max_ratio
+}
+
+# =============================================================================
 # Test-facing entry point
 # =============================================================================
 
@@ -460,27 +732,24 @@ perf_git_commit <- function() {
 #' (re)writes the baseline entry for `id` (plus the shared `_calibration` and
 #' `_calibration_transfer` entries, see below) instead of checking anything.
 #'
-#' Ambient robustness: GPU clock state (P8 idle vs boosted) can swing every
-#' timing in a session by ~2-3x with zero code change, and host/PCIe
-#' transfer speed can independently drift by 2-5x on its own -- either would
-#' otherwise make this gate fire on drift alone, with zero code change.
+#' Ambient robustness: GPU clock state (P8 idle vs boosted) and host/PCIe
+#' speed can shift every timing in a session with zero code change.
 #' Defenses:
 #'
+#'   0. perf_check_build() fails the check on an unoptimized (-O0) build.
 #'   1. perf_warm_gpu() runs before any timing (cached per-process) to force
 #'      clocks out of idle.
-#'   2. Two fixed ambient-calibration workloads are timed the same way `fn`
-#'      is: a kernel-heavy/transfer-light one (perf_current_calibration())
-#'      and a transfer-heavy one (perf_current_calibration_transfer()). Each
-#'      benchmark declares via `calibration` which probe dominates its own
-#'      timing, and `scale = current_calib / baseline_calib` (computed from
-#'      the matching probe only) estimates how much faster/slower *this
-#'      session* is than the session the baseline was recorded in, purely
-#'      from ambient state. The threshold is widened/narrowed by that scale
-#'      before comparing to `fn`'s time. A scale outside [0.5, 4] is clamped
-#'      (with a warning); a scale outside [0.25, 8] means the machine state
-#'      is too different to judge anything, so the check is skipped
-#'      entirely rather than risking a false pass/fail. These clamps are
-#'      applied identically regardless of which probe is in play.
+#'   2. Two fixed calibration probes are timed one call per sample (the way
+#'      their baselines were recorded): perf_current_calibration() ("kernel")
+#'      and perf_current_calibration_transfer() ("transfer"). Each benchmark
+#'      names its probe via `calibration`, and `raw_scale = current_calib /
+#'      baseline_calib` for that probe goes through perf_effective_scale():
+#'        - transfer: 1 if the session is faster (never tighter than
+#'          baseline * max_ratio), the raw value up to `perf_calibration_cap`;
+#'        - kernel: always 1 (the probe is bimodal by R process state, see
+#'          perf_calibration_time()), checked against `perf_kernel_probe_bound`;
+#'      and an error beyond the bound (or if the scale is NA/non-positive/
+#'      infinite) instead of a skip or a silent clamp.
 #'
 #' @param id Stable, descriptive benchmark identifier (used as the JSON key).
 #'   Must not be "_calibration" or "_calibration_transfer" -- those keys are
@@ -490,12 +759,13 @@ perf_git_commit <- function() {
 #' @param max_ratio Maximum allowed scale-adjusted current/baseline ratio
 #'   before failing.
 #' @param iterations Timed iterations passed through to perf_time().
-#' @param calibration Which ambient probe dominates this benchmark's timing:
+#' @param calibration Which probe this benchmark is checked against:
 #'   `"kernel"` (default) for GPU-compute-heavy/transfer-light benchmarks
-#'   (filter/mutate/select/arrange/summarise chains, fused pipelines), or
-#'   `"transfer"` for benchmarks dominated by host<->device copies (a raw
-#'   round trip, or a join whose collected result is much larger than its
-#'   inputs).
+#'   (filter/mutate/select/arrange/summarise chains, fused pipelines), whose
+#'   threshold is never widened, or `"transfer"` for benchmarks dominated by
+#'   host<->device copies (a raw round trip, or a join whose collected result
+#'   is much larger than its inputs), whose threshold widens with the
+#'   transfer probe.
 expect_no_perf_regression <- function(id, fn, max_ratio = 1.5, iterations = 5,
                                        calibration = c("kernel", "transfer")) {
   calibration <- match.arg(calibration)
@@ -507,12 +777,13 @@ expect_no_perf_regression <- function(id, fn, max_ratio = 1.5, iterations = 5,
     stop("'_calibration'/'_calibration_transfer' are reserved benchmark ids", call. = FALSE)
   }
 
+  perf_check_build()
   perf_warm_gpu()
 
   baseline_path <- perf_baseline_path()
 
   if (identical(Sys.getenv("CUPLYR_PERF_RECORD"), "1")) {
-    median_s <- perf_time(fn, iterations = iterations)
+    median_s <- as.numeric(perf_time(fn, iterations = iterations))
     calib_median <- perf_current_calibration()
     calib_transfer_median <- perf_current_calibration_transfer()
 
@@ -576,34 +847,24 @@ expect_no_perf_regression <- function(id, fn, max_ratio = 1.5, iterations = 5,
 
   baseline_calib <- as.numeric(calib_entry$median_s)
   current_calib <- current_calib_fn()
-  raw_scale <- current_calib / baseline_calib
-
-  if (raw_scale < 0.25 || raw_scale > 8) {
-    testthat::skip(sprintf(
-      "[perf] %s: ambient %s-calibration scale %.3fx (current=%.4fs, baseline=%.4fs) is far outside [0.25x, 8x] -- machine state too different from the baseline session to judge; skipping",
-      id, calibration, raw_scale, current_calib, baseline_calib
-    ))
-  }
-
-  scale <- raw_scale
-  if (raw_scale < 0.5 || raw_scale > 4) {
-    warning(sprintf(
-      "[perf] %s: ambient %s-calibration scale %.3fx is outside the normal [0.5x, 4x] range (current=%.4fs, baseline=%.4fs); clamping scale for this check",
-      id, calibration, raw_scale, current_calib, baseline_calib
-    ), call. = FALSE)
-    scale <- max(0.5, min(4, raw_scale))
-  }
+  raw_scale <- as.numeric(current_calib) / baseline_calib
+  context <- list(
+    id = id, probe = calibration, current_s = as.numeric(current_calib), baseline_s = baseline_calib
+  )
+  scale <- perf_effective_scale(raw_scale, context)
 
   baseline_s <- as.numeric(entry$median_s)
-  current_s <- perf_time(fn, iterations = iterations)
+  timed <- perf_time(fn, iterations = iterations)
+  current_s <- as.numeric(timed)
+  reps <- attr(timed, "reps")
   raw_ratio <- current_s / baseline_s
   adjusted_ratio <- raw_ratio / scale
-  threshold <- baseline_s * scale * max_ratio
+  threshold <- perf_threshold(baseline_s, raw_scale, max_ratio, context)
 
   # Emit on pass as well as failure so perf runs are auditable from logs.
   message(sprintf(
-    "[perf] %s (calibration=%s): current=%.4fs baseline=%.4fs raw_ratio=%.3fx scale=%.3fx adjusted_ratio=%.3fx (max_ratio=%.2fx, commit=%s)",
-    id, calibration, current_s, baseline_s, raw_ratio, scale, adjusted_ratio, max_ratio, entry$commit %||% "unknown"
+    "[perf] %s (calibration=%s): current=%.4fs baseline=%.4fs raw_ratio=%.3fx raw_scale=%.3fx scale=%.3fx adjusted_ratio=%.3fx (max_ratio=%.2fx, reps=%d, commit=%s)",
+    id, calibration, current_s, baseline_s, raw_ratio, raw_scale, scale, adjusted_ratio, max_ratio, reps, entry$commit %||% "unknown"
   ))
 
   testthat::expect_lt(

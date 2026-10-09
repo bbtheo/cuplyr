@@ -141,7 +141,9 @@ find_pkg_root <- function() {
   normalizePath(".")
 }
 pkg_root <- find_pkg_root()
-pkgload::load_all(pkg_root, quiet = TRUE)
+source(file.path(pkg_root, "tools", "ensure-optimized.R"))
+cuplyr_ensure_optimized_dll(pkg_root)
+pkgload::load_all(pkg_root, quiet = TRUE, debug = FALSE)
 tests_dir <- file.path(pkg_root, "inst", "dplyr-conformance", "tests")
 source(file.path(pkg_root, "inst", "dplyr-conformance", "manifest.R"))
 

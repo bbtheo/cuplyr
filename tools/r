@@ -3,4 +3,6 @@
 #   tools/r 'tbl_gpu(mtcars) |> filter(mpg > 20) |> collect()'
 source "$(dirname "$0")/lib.sh"
 cd "$CUPLYR_WT_ROOT"
-exec "$(dirname "$0")/gpu-run" --label r -- Rscript -e "pkgload::load_all(quiet = TRUE); suppressPackageStartupMessages(library(dplyr)); $1"
+# Rebuild a stale -O0 .so first (tools/ensure-optimized.R), so ad-hoc timings
+# never measure unoptimized code.
+exec "$(dirname "$0")/gpu-run" --label r -- Rscript -e "source('tools/ensure-optimized.R'); cuplyr_ensure_optimized_dll('.'); pkgload::load_all(quiet = TRUE, debug = FALSE); suppressPackageStartupMessages(library(dplyr)); $1"

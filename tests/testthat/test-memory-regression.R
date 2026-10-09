@@ -7,6 +7,18 @@ test_that("lazy mutate chain uses near-constant GPU memory", {
 
   df <- data.frame(x = runif(1e6), y = runif(1e6))
 
+  # The first lazy mutate pipeline in a process allocates ~18 MiB once (lazy
+  # CUDA module loading / cudf first-use state) and never returns it. Pay that
+  # here, on a small table, so it isn't counted against the pipeline below.
+  # Without it this test fails 5/5 when run alone and only passes in the suite
+  # because earlier files have already paid.
+  tbl_gpu(data.frame(x = runif(1e3), y = runif(1e3)), lazy = TRUE) |>
+    mutate(a = x + y) |>
+    mutate(b = a * 2) |>
+    mutate(c = b - x) |>
+    mutate(d = c / y) |>
+    collect()
+
   gpu_gc(verbose = FALSE)
   before <- gpu_memory_state()$used_bytes
 

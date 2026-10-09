@@ -13,7 +13,7 @@ if [[ ! -d "$integ" ]]; then
     exit 1
   fi
   git -C "$CUPLYR_MAIN" worktree add "$integ" dev
-  (cd "$integ" && cuplyr_activate_env && ./configure && Rscript -e 'pkgbuild::compile_dll(quiet = TRUE)')
+  (cd "$integ" && cuplyr_activate_env && ./configure && Rscript -e 'pkgbuild::compile_dll(debug = FALSE, quiet = TRUE)')
 fi
 
 baseline="$CUPLYR_PARITY_DIR/conformance_baseline.tsv"

@@ -31,3 +31,8 @@ cuplyr_activate_env() {
 # Compiles are CPU-only and happen outside the GPU lock where possible
 # (tools/build); parallelize them.
 export MAKEFLAGS="${MAKEFLAGS:--j8}"
+
+# pkgbuild/pkgload default to debug builds (-O0), 2.5-5x slower than the -O2
+# build perf baselines are recorded with. Turn the extra debug flags off for
+# every compile path that goes through a tool.
+export PKG_BUILD_EXTRA_FLAGS=false

@@ -16,5 +16,5 @@ git -C "$CUPLYR_MAIN" worktree add -b "feat/$name" "$path" dev >&2
 cd "$path"
 cuplyr_activate_env
 ./configure >&2
-Rscript -e 'pkgbuild::compile_dll(quiet = TRUE)' >&2
+Rscript -e 'pkgbuild::compile_dll(debug = FALSE, quiet = TRUE)' >&2
 echo "$path"

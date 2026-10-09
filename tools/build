@@ -5,4 +5,4 @@ source "$(dirname "$0")/lib.sh"
 cd "$CUPLYR_WT_ROOT"
 cuplyr_activate_env
 [[ -f src/Makevars ]] || ./configure
-exec Rscript -e 'pkgbuild::compile_dll(quiet = FALSE)'
+exec Rscript -e 'source("tools/ensure-optimized.R"); cuplyr_ensure_optimized_dll(".", quiet = FALSE)'
