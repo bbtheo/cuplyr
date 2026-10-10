@@ -7,7 +7,8 @@
 bind_rows_gpu(dots, .id = NULL)
 }
 \arguments{
-\item{dots}{List of tables to bind}
+\item{dots}{Inputs as flattened and checked by \code{bind_rows_route()}: tbl_gpu
+and data frames, named for every input when \code{.id} is given}
 
 \item{.id}{Optional column name to identify source}
 }

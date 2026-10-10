@@ -10,7 +10,9 @@ bind_cols(
 )
 }
 \arguments{
-\item{...}{Objects to bind (tbl_gpu, data.frame, or a list of these)}
+\item{...}{Objects to bind (tbl_gpu, data.frame, vectors, or lists of
+these, flattened recursively as in \code{dplyr::bind_cols()}). A vector
+becomes one column named by its argument name. \code{NULL}s are dropped.}
 
 \item{.name_repair}{How to handle duplicate column names}
 }
@@ -20,4 +22,10 @@ Combined data frame or tbl_gpu
 \description{
 Combines objects horizontally by adding columns. For tbl_gpu objects,
 operations are performed on the GPU. For other objects, delegates to dplyr.
+}
+\details{
+If any input (including one inside a list) is a \code{tbl_gpu}, the result is a
+\code{tbl_gpu}, wherever the \code{tbl_gpu} sits in the arguments. Call this function
+(not \code{dplyr::bind_cols()} or \code{vctrs::vec_cbind()}) on a \code{tbl_gpu}: those
+cannot be intercepted by S3 dispatch and raise an error for a \code{tbl_gpu}.
 }

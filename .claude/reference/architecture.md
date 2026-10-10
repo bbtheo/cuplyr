@@ -95,6 +95,7 @@ and cudf's `gather()` needs a non-nullable, 0-based index).
 | `src/ops_arrange.cpp` | `gpu_arrange()` |
 | `src/ops_join.cpp` | join logic (equi hash joins, native `semi`/`anti`/`cross`/`right`, `gpu_cond_join()` for non-equi `join_by()` via `mixed_join`/`conditional_join`) with the shared device-side sanitize→stable-sort→diag→`multiple=`-filter→gather/coalesce pipeline (`build_join_result()`) for dplyr row-order/cardinality parity |
 | `src/ops_bind.cpp` | `gpu_bind_rows_aligned()`, `gpu_bind_cols_impl()`, `gpu_cast_column()`, `gpu_cast_to_string()`; factor fidelity (Phase 11 L2): `gpu_remap_codes()`, `gpu_decode_factor()` |
+| `src/ops_gather.cpp` | vctrs support (F02): `gpu_handle_src()` (constant ALTREP source-id vector for row handles), `gpu_gather_rows()` (gather by (source,row) handles from one or several same-layout tables, NA -> null row) |
 | `src/gpu_info.cpp` | device availability/info |
 
 ### R Files
@@ -120,6 +121,7 @@ and cudf's `gather()` needs a non-nullable, 0-based index).
 | `R/gpu-memory.R` | memory reporting and GC helpers |
 | `R/gpu.R` | `has_gpu()`, `gpu_details()` |
 | `R/print.R` | `print.tbl_gpu()` method |
+| `R/vctrs.R` | vctrs contract (F02): `vec_proxy()` returns a two-column frame of row handles (`.src` = integer source id, constant ALTREP `gpu_handle_src()`; `.row` = `seq_len(n)`), so `vec_size()` is O(1); `vec_restore()` decodes them into one GPU gather. Source registry holds sources weakly with ids that are never reused; `vec_proxy()` also pins the source strongly until the enclosing vctrs entry closure (innermost non-generic vctrs frame, `vctrs_entry_frame()`) returns, because vctrs copies handle values out of the proxy and may drop the table before restoring. A dead source is a loud `cuplyr_error_vctrs_dead_source`. `vec_proxy_equal/compare/order` and cross-layout casts collect (via `cuplyr_fallback_notify()`); `vec_ptype2`/`vec_cast` against tbl_gpu/tibble/data.frame (result stays a tbl_gpu); `length.tbl_gpu` = number of columns. `names()`/`names<-` answer vctrs (row names) with NULL / no-op, see `called_from_vctrs()` in `R/tbl-gpu.R`. `vec_rbind()`/`vec_cbind()` (so `dplyr::bind_rows()`/`bind_cols()`) on a tbl_gpu raise `cuplyr_error_vctrs_bind_unsupported`; use `cuplyr::bind_rows()`/`bind_cols()` (`R/bind.R`: `bind_rows_inputs()`/`bind_cols_inputs()` replicate dplyr 1.2.1's argument flattening -- single-bare-list unwrap, `vctrs::obj_is_list()` splicing, NULLs dropped -- then any tbl_gpu among the inputs routes to the GPU and everything else goes to dplyr unchanged). A lazy input's `compute()` is memoized per vctrs entry call (`vctrs_computed()`), released with the pins |
 
 ### Benchmark Files
 | File | Purpose |

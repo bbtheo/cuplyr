@@ -7,7 +7,8 @@
 bind_rows(..., .id = NULL)
 }
 \arguments{
-\item{...}{Objects to bind (tbl_gpu, data.frame, or a list of these)}
+\item{...}{Objects to bind (tbl_gpu, data.frame, or lists of these,
+flattened as in \code{dplyr::bind_rows()}). \code{NULL}s are dropped.}
 
 \item{.id}{Optional column name to identify source tables}
 }
@@ -17,4 +18,11 @@ Combined data frame or tbl_gpu
 \description{
 Combines objects vertically by stacking rows. For tbl_gpu objects,
 operations are performed on the GPU. For other objects, delegates to dplyr.
+}
+\details{
+If any input (including one inside a list) is a \code{tbl_gpu}, the result is a
+\code{tbl_gpu}, wherever the \code{tbl_gpu} sits in the arguments. Call this function
+(not \code{dplyr::bind_rows()}, \code{purrr::map_dfr()} or \code{vctrs::vec_rbind()}) on a
+\code{tbl_gpu}: those cannot be intercepted by S3 dispatch and raise an error for
+a \code{tbl_gpu}.
 }

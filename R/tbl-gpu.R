@@ -265,7 +265,21 @@ dim.tbl_gpu <- function(x) {
 #' @return A character vector of column names.
 #' @export
 names.tbl_gpu <- function(x) {
+  if (called_from_vctrs(sys.parent())) {
+    # vctrs asks `names(x)` for the names of the ROWS of a vector (a data
+    # frame's row names, which tbl_gpu doesn't have). Answering with the
+    # column names would make `vec_slice(x, "colname")` silently pick a row
+    # and mis-name `vec_c()` results.
+    return(NULL)
+  }
   x$schema$names
+}
+
+# TRUE if the closure that called `names()` (sys.parent of the method) lives
+# in the vctrs namespace. vctrs evaluates `names(x)` in its own function's
+# frame, so this is exact for vctrs internals and FALSE for user/dplyr code.
+called_from_vctrs <- function(p) {
+  p > 0L && identical(topenv(environment(sys.function(p))), asNamespace("vctrs"))
 }
 
 #' Set column names of a GPU table
@@ -277,6 +291,12 @@ names.tbl_gpu <- function(x) {
 #' @return The modified `tbl_gpu` object.
 #' @export
 `names<-.tbl_gpu` <- function(x, value) {
+  # vctrs sets ROW names (`vec_set_names(x, NULL)`, `vec_c(a = x)`); a GPU
+  # table has none, so this is a no-op there (see `names.tbl_gpu()`).
+  if (called_from_vctrs(sys.parent())) {
+    return(x)
+  }
+
   n_cols <- length(x$schema$names)
 
   if (!is.character(value)) {
@@ -302,6 +322,20 @@ names.tbl_gpu <- function(x) {
     stop("`value` must not contain empty strings.", call. = FALSE)
   }
 
+  # Pending lazy ops: the new names have to go through the AST, because
+  # `current_schema()` is inferred from it and ignores the base schema's names.
+  if (has_pending_ops(x)) {
+    return(dplyr::rename(x, dplyr::all_of(stats::setNames(current_schema(x)$names, value))))
+  }
+
+  # Keep the name-keyed metadata (grouping, factor levels) in step.
+  old <- x$schema$names
+  if (length(x$groups) > 0) {
+    x$groups <- value[match(x$groups, old)]
+  }
+  if (!is.null(x$schema$factor_levels)) {
+    names(x$schema$factor_levels) <- value[match(names(x$schema$factor_levels), old)]
+  }
   x$schema$names <- value
   x
 }

@@ -7,7 +7,9 @@
 bind_cols_gpu(dots, .name_repair = "unique")
 }
 \arguments{
-\item{dots}{List of tables to bind}
+\item{dots}{Inputs as flattened by \code{bind_cols_inputs()}: tbl_gpu, data
+frames and vectors (a vector becomes one column, named by its element
+name, recycled to the table height like \code{vctrs::vec_cbind()} does)}
 
 \item{.name_repair}{Name repair method}
 }

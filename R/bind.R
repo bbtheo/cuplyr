@@ -11,8 +11,16 @@
 #' Combines objects horizontally by adding columns. For tbl_gpu objects,
 #' operations are performed on the GPU. For other objects, delegates to dplyr.
 #'
-#' @param ... Objects to bind (tbl_gpu, data.frame, or a list of these)
+#' @param ... Objects to bind (tbl_gpu, data.frame, vectors, or lists of
+#'   these, flattened recursively as in `dplyr::bind_cols()`). A vector
+#'   becomes one column named by its argument name. `NULL`s are dropped.
 #' @param .name_repair How to handle duplicate column names
+#'
+#' @details
+#' If any input (including one inside a list) is a `tbl_gpu`, the result is a
+#' `tbl_gpu`, wherever the `tbl_gpu` sits in the arguments. Call this function
+#' (not `dplyr::bind_cols()` or `vctrs::vec_cbind()`) on a `tbl_gpu`: those
+#' cannot be intercepted by S3 dispatch and raise an error for a `tbl_gpu`.
 #'
 #' @return Combined data frame or tbl_gpu
 #' @export
@@ -24,16 +32,30 @@ bind_cols <- function(..., .name_repair = c("unique", "universal",
 #' @export
 bind_cols.tbl_gpu <- function(..., .name_repair = c("unique", "universal",
                                                      "check_unique", "minimal")) {
-  dots <- list(...)
   .name_repair <- match.arg(.name_repair)
-  bind_cols_gpu(dots, .name_repair = .name_repair)
+  bind_cols_route(..., .name_repair = .name_repair)
 }
 
 #' @export
 bind_cols.default <- function(..., .name_repair = c("unique", "universal",
                                                      "check_unique", "minimal")) {
   .name_repair <- match.arg(.name_repair)
-  dplyr::bind_cols(..., .name_repair = .name_repair)
+  bind_cols_route(..., .name_repair = .name_repair)
+}
+
+# A tbl_gpu that is not the first argument (`NULL`, a tibble or a list comes
+# first) dispatches to the default method, so both methods route here: any
+# tbl_gpu among dplyr's flattened inputs sends the call to the GPU, anything
+# else goes to dplyr unchanged (and so raises dplyr's own errors).
+# The captured arguments are passed on to dplyr as a list, so a spliced
+# `!!!f()` is evaluated once.
+bind_cols_route <- function(..., .name_repair) {
+  args <- rlang::list2(...)
+  dots <- bind_cols_inputs(args)
+  if (any(vapply(dots, is_tbl_gpu, logical(1)))) {
+    return(bind_cols_gpu(dots, .name_repair = .name_repair))
+  }
+  dplyr::bind_cols(!!!args, .name_repair = .name_repair)
 }
 
 
@@ -42,8 +64,16 @@ bind_cols.default <- function(..., .name_repair = c("unique", "universal",
 #' Combines objects vertically by stacking rows. For tbl_gpu objects,
 #' operations are performed on the GPU. For other objects, delegates to dplyr.
 #'
-#' @param ... Objects to bind (tbl_gpu, data.frame, or a list of these)
+#' @param ... Objects to bind (tbl_gpu, data.frame, or lists of these,
+#'   flattened as in `dplyr::bind_rows()`). `NULL`s are dropped.
 #' @param .id Optional column name to identify source tables
+#'
+#' @details
+#' If any input (including one inside a list) is a `tbl_gpu`, the result is a
+#' `tbl_gpu`, wherever the `tbl_gpu` sits in the arguments. Call this function
+#' (not `dplyr::bind_rows()`, `purrr::map_dfr()` or `vctrs::vec_rbind()`) on a
+#' `tbl_gpu`: those cannot be intercepted by S3 dispatch and raise an error for
+#' a `tbl_gpu`.
 #'
 #' @return Combined data frame or tbl_gpu
 #' @export
@@ -53,15 +83,131 @@ bind_rows <- function(..., .id = NULL) {
 
 #' @export
 bind_rows.tbl_gpu <- function(..., .id = NULL) {
-  dots <- list(...)
-  bind_rows_gpu(dots, .id = .id)
+  bind_rows_route(..., .id = .id)
 }
 
 #' @export
 bind_rows.default <- function(..., .id = NULL) {
-  dplyr::bind_rows(..., .id = .id)
+  bind_rows_route(..., .id = .id)
 }
 
+# See bind_cols_route(). After flattening, the inputs are checked the way
+# dplyr::bind_rows() checks them, so a call dplyr rejects fails with dplyr's
+# message on the GPU path too.
+bind_rows_route <- function(..., .id) {
+  args <- rlang::list2(...)
+  dots <- bind_rows_inputs(args)
+  is_gpu <- vapply(dots, is_tbl_gpu, logical(1))
+  if (!any(is_gpu)) {
+    return(dplyr::bind_rows(!!!args, .id = .id))
+  }
+  # Only the other inputs are checked: vctrs::vec_is() on a lazy tbl_gpu
+  # would compute it, and bind_rows_gpu() computes it again.
+  bindable <- is_gpu
+  bindable[!is_gpu] <- vapply(dots[!is_gpu], bind_dataframe_ish, logical(1))
+  # dplyr turns named non-table inputs into the columns of one tibble
+  # (bind_rows(a = 1, b = 2)); with a tbl_gpu among them that tibble would
+  # need a data frame column, which a tbl_gpu can't hold.
+  if (rlang::is_named(dots) && !all(bindable)) {
+    rlang::abort(
+      c(
+        "Can't bind named non-table inputs together with a tbl_gpu.",
+        i = "dplyr packs them into data frame columns, which a tbl_gpu can't hold."
+      ),
+      class = "cuplyr_error_bind_unsupported"
+    )
+  }
+
+  for (i in seq_along(dots)) {
+    if (!bindable[[i]]) {
+      rlang::abort(sprintf(
+        "Argument %d must be a data frame or a named atomic vector.", i
+      ))
+    }
+    if (!is_gpu[[i]] && !is.data.frame(dots[[i]])) {
+      dots[[i]] <- bind_row_as_df(dots[[i]])
+    }
+  }
+
+  if (!is.null(.id)) {
+    # dplyr's own .id check (and message), with no inputs to bind
+    dplyr::bind_rows(.id = .id)
+    if (!rlang::is_named(dots)) {
+      nms <- names(dots) %||% rep("", length(dots))
+      unnamed <- which(is.na(nms) | nms == "")
+      nms[unnamed] <- as.character(unnamed)
+      names(dots) <- nms
+    }
+  } else {
+    names(dots) <- NULL
+  }
+
+  bind_rows_gpu(dots, .id = .id)
+}
+
+# dplyr 1.2.1's argument flattening (`dplyr::bind_rows()` / `bind_cols()`
+# and their `list_flatten()` helper), so the GPU path binds exactly the inputs
+# dplyr would. Only vctrs lists are spliced (bare lists, or classes ending in
+# "list"): a data frame, a tbl_gpu, a POSIXlt or an S3 container like
+# `structure(list(...), class = "x")` stays one input. bind_rows() first
+# unwraps a single bare-list argument, then splices unnamed lists one level;
+# bind_cols() splices every list recursively. NULLs are dropped afterwards.
+bind_rows_inputs <- function(dots) {
+  if (length(dots) == 1L && rlang::is_bare_list(dots[[1L]])) {
+    dots <- dots[[1L]]
+  }
+  dots <- bind_list_flatten(dots, fn = function(x) !rlang::is_named(x))
+  dots[!vapply(dots, is.null, logical(1))]
+}
+
+bind_cols_inputs <- function(dots) {
+  dots <- bind_list_flatten(dots, recursive = TRUE)
+  dots[!vapply(dots, is.null, logical(1))]
+}
+
+# Splice the elements of `x` that are vctrs lists (and pass `fn`, if given)
+# into `x`. A spliced list's own name is dropped; its elements keep theirs.
+bind_list_flatten <- function(x, fn = NULL, recursive = FALSE) {
+  x <- unclass(x)
+  loc <- vapply(x, vctrs::obj_is_list, logical(1))
+  if (!is.null(fn)) {
+    loc[loc] <- vapply(x[loc], fn, logical(1))
+  }
+  nms <- names(x)
+  if (!is.null(nms)) {
+    nms[loc] <- ""
+    names(x) <- nms
+  }
+  x[loc] <- lapply(x[loc], unclass)
+  x[!loc] <- lapply(x[!loc], list)
+  out <- vctrs::list_unchop(x, ptype = list())
+  if (recursive && any(loc)) {
+    out <- bind_list_flatten(out, fn = fn, recursive = TRUE)
+  }
+  out
+}
+
+# dplyr's `dataframe_ish()`: a data frame, or a named vector (one row).
+bind_dataframe_ish <- function(x) {
+  is.data.frame(x) || (vctrs::vec_is(x) && rlang::is_named(x))
+}
+
+# A named list or named atomic vector as the one-row data frame dplyr binds.
+bind_row_as_df <- function(x) {
+  if (vctrs::obj_is_list(x)) {
+    if (any(vapply(x, is_tbl_gpu, logical(1)))) {
+      rlang::abort(
+        c(
+          "Can't bind a named list of tbl_gpu as one row.",
+          i = "dplyr packs such a list into data frame columns, which a tbl_gpu can't hold."
+        ),
+        class = "cuplyr_error_bind_unsupported"
+      )
+    }
+    return(vctrs::data_frame(!!!x, .name_repair = "minimal"))
+  }
+  vctrs::vec_rbind(x)
+}
 
 
 # =============================================================================
@@ -69,54 +215,73 @@ bind_rows.default <- function(..., .id = NULL) {
 # =============================================================================
 
 #' GPU bind_cols implementation
-#' @param dots List of tables to bind
+#' @param dots Inputs as flattened by `bind_cols_inputs()`: tbl_gpu, data
+#'   frames and vectors (a vector becomes one column, named by its element
+#'   name, recycled to the table height like `vctrs::vec_cbind()` does)
 #' @param .name_repair Name repair method
 #' @return A tbl_gpu
 #' @keywords internal
 bind_cols_gpu <- function(dots, .name_repair = "unique") {
-  # Flatten if passed a list (but not a tbl_gpu or data.frame)
-  if (length(dots) == 1 && is.list(dots[[1]]) &&
-      !is_tbl_gpu(dots[[1]]) && !inherits(dots[[1]], "data.frame")) {
-    dots <- dots[[1]]
-  }
-
-  # Filter NULL entries
-  dots <- dots[!vapply(dots, is.null, logical(1))]
-
   if (length(dots) == 0) {
     stop("No tables provided to bind_cols", call. = FALSE)
   }
 
-  # Convert any data.frames to tbl_gpu
-  dots <- lapply(dots, function(x) {
-    if (is.data.frame(x) && !is_tbl_gpu(x)) {
-      tbl_gpu(x, lazy = FALSE)
-    } else if (!is_tbl_gpu(x)) {
-      stop("All inputs must be tbl_gpu or data.frame", call. = FALSE)
-    } else {
-      x
-    }
-  })
-
-  if (length(dots) == 1) {
+  if (length(dots) == 1 && is_tbl_gpu(dots[[1]])) {
     return(dots[[1]])
   }
 
+  # dplyr::bind_cols() ignores the names of data frame inputs; a vector's
+  # name is its column name.
+  nms <- names(dots) %||% rep("", length(dots))
+  nms[is.na(nms)] <- ""
+  is_gpu <- vapply(dots, is_tbl_gpu, logical(1))
+
   # Materialize any lazy tables
-  dots <- lapply(dots, function(x) {
+  dots[is_gpu] <- lapply(dots[is_gpu], function(x) {
     if (identical(x$exec_mode, "lazy") && has_pending_ops(x)) {
       compute(x)
     } else {
       x
     }
   })
+  n <- nrow(dots[[which(is_gpu)[[1L]]]])
+
+  # Convert data frames and vectors to tbl_gpu. A vector is uploaded under a
+  # placeholder name: its real name may be "" until repair_names() below.
+  col_names <- vector("list", length(dots))
+  dots <- lapply(seq_along(dots), function(i) {
+    x <- dots[[i]]
+    if (is_gpu[[i]]) {
+      col_names[[i]] <<- x$schema$names
+      x
+    } else if (is.data.frame(x)) {
+      col_names[[i]] <<- names(x)
+      tbl_gpu(x, lazy = FALSE)
+    } else if (vctrs::vec_is(x)) {
+      col_names[[i]] <<- nms[[i]]
+      col <- vctrs::vec_recycle(x, n, x_arg = nms[[i]])
+      tbl_gpu(vctrs::new_data_frame(list(value = col), n = n), lazy = FALSE)
+    } else {
+      stop("All inputs must be tbl_gpu, data.frame or vectors", call. = FALSE)
+    }
+  })
 
   # Collect column names and handle duplicates
-  all_names <- unlist(lapply(dots, function(x) x$schema$names))
+  all_names <- unlist(col_names)
   repaired_names <- repair_names(all_names, .name_repair)
 
   # Collect types (unname to avoid issues)
   all_types <- unname(unlist(lapply(dots, function(x) x$schema$types)))
+
+  # Factor levels are keyed by column name, so re-key them by position onto
+  # the repaired names.
+  all_levels <- unlist(lapply(dots, function(x) {
+    lapply(x$schema$names, function(nm) x$schema$factor_levels[[nm]])
+  }), recursive = FALSE)
+  has_levels <- !vapply(all_levels, is.null, logical(1))
+  factor_levels <- if (any(has_levels)) {
+    rlang::set_names(all_levels[has_levels], repaired_names[has_levels])
+  }
 
   # Collect pointers
   ptrs <- lapply(dots, function(x) x$ptr)
@@ -129,44 +294,25 @@ bind_cols_gpu <- function(dots, .name_repair = "unique") {
 
   new_tbl_gpu(
     ptr = new_ptr,
-    schema = list(names = repaired_names, types = all_types),
+    schema = list(names = repaired_names, types = all_types,
+                  factor_levels = factor_levels),
     groups = groups,
     exec_mode = "eager"
   )
 }
 
 #' GPU bind_rows implementation
-#' @param dots List of tables to bind
+#' @param dots Inputs as flattened and checked by `bind_rows_route()`: tbl_gpu
+#'   and data frames, named for every input when `.id` is given
 #' @param .id Optional column name to identify source
 #' @return A tbl_gpu
 #' @keywords internal
 bind_rows_gpu <- function(dots, .id = NULL) {
-  # Get source names BEFORE flattening (to preserve names)
-  source_names <- names(dots)
-
-  # Flatten if passed a list (but not a tbl_gpu or data.frame)
-  if (length(dots) == 1 && is.list(dots[[1]]) &&
-      !is_tbl_gpu(dots[[1]]) && !inherits(dots[[1]], "data.frame")) {
-    # Get names from the inner list if the outer one has none
-    if (is.null(source_names) || all(source_names == "")) {
-      source_names <- names(dots[[1]])
-    }
-    dots <- dots[[1]]
-  }
-
-  # Filter NULL entries
-  dots <- dots[!vapply(dots, is.null, logical(1))]
-
   if (length(dots) == 0) {
     stop("No tables provided to bind_rows", call. = FALSE)
   }
 
-  # Set up source names for .id column
-  if (is.null(source_names) || length(source_names) != length(dots)) {
-    source_names <- as.character(seq_along(dots))
-  } else {
-    source_names[source_names == ""] <- as.character(which(source_names == ""))
-  }
+  source_names <- names(dots) %||% as.character(seq_along(dots))
 
   # Convert any data.frames to tbl_gpu
   dots <- lapply(dots, function(x) {

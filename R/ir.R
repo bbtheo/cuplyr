@@ -89,6 +89,12 @@ ir_lit_from_r <- function(value, allow_vector = FALSE) {
     return(ir_lit(value = NULL, type = NULL, na = FALSE))
   }
 
+  if (is_tbl_gpu(value)) {
+    # length() of a tbl_gpu is its column count, so it must not be mistaken
+    # for a (scalar) literal.
+    stop("A tbl_gpu can't be used as a value inside an expression.", call. = FALSE)
+  }
+
   n <- length(value)
 
   if (n != 1) {
