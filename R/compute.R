@@ -77,6 +77,23 @@ compute.tbl_gpu <- function(x, ..., name = NULL) {
   # each level, which infer_schema_full() does recursively.
   final_schema <- infer_schema_full(x$lazy_ops)
 
+  # Safety net: the result is named by the unoptimized schema but holds the
+  # optimized plan's columns by position. Passes keep the output columns and
+  # their order by contract; if one ever reorders them, gather back by name
+  # (rather than return values under the wrong names). A different column set
+  # is a bug in a pass, so fail loudly.
+  optimized_names <- infer_schema(optimized)$names
+  if (!identical(optimized_names, final_schema$names)) {
+    if (anyDuplicated(optimized_names) > 0 ||
+        !setequal(optimized_names, final_schema$names)) {
+      stop("Internal error: the optimized plan's columns (",
+           paste(optimized_names, collapse = ", "), ") differ from the plan's ",
+           "schema (", paste(final_schema$names, collapse = ", "), ").",
+           call. = FALSE)
+    }
+    new_ptr <- gpu_select(new_ptr, match(final_schema$names, optimized_names) - 1L)
+  }
+
   new_tbl_gpu(
     ptr = new_ptr,
     schema = final_schema,

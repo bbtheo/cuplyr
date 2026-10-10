@@ -37,11 +37,17 @@ equivalent and cheaper). A NAMED top-level \code{across()} dot (e.g.
 here: \code{\link[=dots_need_fallback]{dots_need_fallback()}} sends the whole call to the CPU fallback.
 }
 \details{
-The result carries a \code{"needs_fallback"} attribute. It is \code{TRUE} when an
-\code{across()} renames onto a column that a later expansion of the same
-\code{across()} reads (\code{across(c(y = x, z = y), ...)}): dplyr evaluates every
-function against the pre-\code{across()} data, while the expanded dots would
-run in sequence. That needs the schema, so \code{\link[=dots_need_fallback]{dots_need_fallback()}} can't
-see it; the verb calls then re-run the ORIGINAL dots on the CPU.
+The result carries a \code{"needs_fallback"} attribute. It is \code{TRUE} when the
+schema or the \code{.fns} values show that dplyr must run the call:
+an unsupported \code{.fns}/extra-argument shape (a non-inlinable lambda, a
+value whose free variables are columns, ...), duplicate output names, or,
+in \code{summarise()}/\code{filter()}, an \code{across()} that renames onto a column that a
+later expansion of the same \code{across()} reads (\code{across(c(y = x, z = y), ...)}): dplyr evaluates every function against the pre-\code{across()} data,
+while the expanded dots would run in sequence. That needs the schema, so
+\code{\link[=dots_need_fallback]{dots_need_fallback()}} can't see it; the verb calls then re-run the
+ORIGINAL dots on the CPU. In \code{mutate()}/\code{transmute()} the same hazard is
+staged instead: the expansions are computed into temp columns first and
+assigned afterwards, and the \code{"staged_temps"} attribute names the temps the
+caller must drop (and whose CPU fallbacks must use the ORIGINAL dots).
 }
 \keyword{internal}

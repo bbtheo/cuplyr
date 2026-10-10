@@ -418,107 +418,19 @@ try_fuse_mutate_pair <- function(lower, upper) {
     return(NULL)
   }
 
-  # Guard 2: Check for dependencies
+  # No reordering: `lower` then `upper` is already dplyr's sequential order,
+  # and lower_mutate() binds each expression against the columns as the
+  # earlier ones left them. So write-after-read and write-after-write
+  # overwrites fuse correctly with no temps.
   lower_outputs <- vapply(lower$expressions, `[[`, character(1), "output_col")
   upper_inputs <- unique(unlist(lapply(upper$expressions, `[[`, "input_cols")))
 
-  has_dependency <- any(upper_inputs %in% lower_outputs)
-
-  if (has_dependency) {
-    sorted_exprs <- toposort_expressions(combined_exprs)
-    if (is.null(sorted_exprs)) {
-      return(NULL)  # Cycle detected or too complex
-    }
-    if (mutate_reorder_unsafe(combined_exprs, sorted_exprs)) {
-      return(NULL)
-    }
-    combined_exprs <- sorted_exprs
-  }
-
-  # Guard 3: Count intermediate columns
-  intermediate_uses <- table(upper_inputs[upper_inputs %in% lower_outputs])
-  n_intermediates <- length(intermediate_uses)
-  max_reuse <- if (length(intermediate_uses) > 0) max(intermediate_uses) else 0
-
-  if (n_intermediates > 4 || max_reuse > 3) {
+  # Guard 2: Count intermediate columns (lower outputs the upper reads)
+  if (length(intersect(upper_inputs, lower_outputs)) > 4) {
     return(NULL)
   }
 
   ast_mutate(lower$input, combined_exprs)
-}
-
-#' Does reordering `before` into `after` break sequential semantics?
-#'
-#' The expressions run in order, each seeing the columns the earlier ones
-#' wrote. toposort_expressions() only models read-after-write, so it can move
-#' a writer ahead of an earlier reader of the same name (a staged across()
-#' reads `y` before a later expression assigns it, and that order must stay).
-#' Such a move, or reordering two writers of one name, changes the result.
-#'
-#' @param before,after The expression lists before and after sorting
-#' @return TRUE if the reorder is unsafe
-#' @keywords internal
-mutate_reorder_unsafe <- function(before, after) {
-  outs <- vapply(before, `[[`, character(1), "output_col")
-  if (anyDuplicated(outs)) {
-    return(TRUE)
-  }
-  pos <- match(vapply(after, `[[`, character(1), "output_col"), outs)
-  rank_of <- integer(length(outs))
-  rank_of[pos] <- seq_along(pos)
-  for (i in seq_along(before)) {
-    for (j in seq_len(length(before))[-seq_len(i)]) {
-      if (outs[j] %in% before[[i]]$input_cols && rank_of[i] > rank_of[j]) {
-        return(TRUE)
-      }
-    }
-  }
-  FALSE
-}
-
-#' Topologically sort expressions to respect dependencies
-#'
-#' @param exprs List of expression structures
-#' @return Sorted list or NULL if cycle detected
-#' @keywords internal
-toposort_expressions <- function(exprs) {
-  if (length(exprs) == 0) return(list())
-
-  outputs <- vapply(exprs, `[[`, character(1), "output_col")
-  names(exprs) <- outputs
-
-  # Kahn's algorithm
-  in_degree <- integer(length(exprs))
-  names(in_degree) <- outputs
-
-  for (i in seq_along(exprs)) {
-    deps <- intersect(exprs[[i]]$input_cols, outputs)
-    in_degree[i] <- length(deps)
-  }
-
-  result <- list()
-  queue <- names(in_degree)[in_degree == 0]
-
-  while (length(queue) > 0) {
-    current <- queue[1]
-    queue <- queue[-1]
-    result <- c(result, list(exprs[[current]]))
-
-    for (i in seq_along(exprs)) {
-      if (current %in% exprs[[i]]$input_cols) {
-        in_degree[i] <- in_degree[i] - 1
-        if (in_degree[i] == 0) {
-          queue <- c(queue, outputs[i])
-        }
-      }
-    }
-  }
-
-  if (length(result) != length(exprs)) {
-    return(NULL)  # Cycle detected
-  }
-
-  result
 }
 
 # -----------------------------------------------------------------------------
@@ -568,7 +480,15 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
         expr <- exprs[[i]]
         if (expr$output_col %in% required) {
           keep[i] <- TRUE
-          required <- union(setdiff(required, expr$output_col), expr$input_cols)
+          # The name stays required: an earlier writer of it (in this node or
+          # a lower one) may be the expression that CREATES the column, and
+          # gpu_mutate_expr() appends new columns in order of first writing.
+          # Dropping that writer (a dead overwrite) would move the column
+          # behind later-created ones while the result is still named by the
+          # unoptimized schema -- values under the wrong names. Cost: every
+          # earlier writer of a still-required name is kept, including pure
+          # dead overwrites (`mutate(a = x) |> mutate(a = y)` computes both).
+          required <- union(required, expr$input_cols)
         }
       }
 

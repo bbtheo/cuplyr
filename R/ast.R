@@ -308,7 +308,7 @@ make_predicate <- function(ir, schema) {
 #' mutate expression record. `ir` is the parsed expression IR (see
 #' `R/ir.R`); `input_cols`/`output_type` are cached from `ir_cols()`/
 #' `ir_infer_type()` since every optimizer pass
-#' (`fuse_mutates`/`try_fuse_mutate_pair`/`toposort_expressions`/
+#' (`fuse_mutates`/`try_fuse_mutate_pair`/
 #' `prune_dead_columns`/`push_down_projections`) reads only those two fields
 #' plus `output_col` -- none of them walk the IR tree themselves. `op`/
 #' `scalar`/`input_types` are gone: only `lower_mutate()` (via

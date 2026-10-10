@@ -314,7 +314,7 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   }, logical(1))
 
   if (any(needs_expr_fallback)) {
-    return(filter_expr_fallback(orig_data, dots, by_quo))
+    return(filter_expr_fallback(fallback_data, fallback_dots, by_quo))
   }
 
   # Phase 5, task W5: at least one dot's predicate contains a window call
@@ -345,7 +345,7 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
       # nothing has been pushed onto `.data` yet at this point, so falling
       # back to CPU evaluation of the WHOLE call, from the pristine
       # original table and dots, is safe.
-      return(filter_window_fallback(orig_data, dots, by_quo))
+      return(filter_window_fallback(fallback_data, fallback_dots, by_quo))
     }
 
     for (stage in plan$stages) {
@@ -534,8 +534,8 @@ filter_across_fallback <- function(.data, dots, by_quo) {
 # expression-level CPU fallback"; see scratchpad/phase11_design.md and
 # dot_references_schema_col()'s own docs for why the column-reference check
 # matters). Mirrors filter_window_fallback()/filter_across_fallback()
-# exactly -- re-runs the real dplyr::filter() call, with every original
-# (already across()-expanded/cur_group_id()-substituted) dot, on the CPU.
+# exactly -- re-runs the real dplyr::filter() call, with the user's original
+# dots (before across() expansion / cur_group_id() substitution), on the CPU.
 # This is what subsumes grepl()/other base-R-string or arbitrary-function
 # predicates referencing a real column, and closes the top_n()/top_frac()
 # gap (both desugar to `filter(top_n_rank(n, wt))`, a shape the IR has

@@ -404,7 +404,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 
   # One ast_mutate node carries every expression from every dot -- lowered
   # to a single gpu_mutate_expr() call by lower_mutate() (R/lower.R), and a
-  # fusion target for fuse_mutates()/toposort_expressions() (R/optimizer.R)
+  # fusion target for fuse_mutates() (R/optimizer.R)
   # across consecutive mutate() calls in lazy mode. Skipped entirely when
   # there are no expressions (e.g. `mutate(gdf, .keep = "none")`) -- an
   # ast_mutate with zero expressions would be a pure no-op anyway (see

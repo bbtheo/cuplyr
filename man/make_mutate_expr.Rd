@@ -23,7 +23,7 @@ Section 3 of \code{scratchpad/phase1_expression_engine.md}: the IR cutover's
 mutate expression record. \code{ir} is the parsed expression IR (see
 \code{R/ir.R}); \code{input_cols}/\code{output_type} are cached from \code{ir_cols()}/
 \code{ir_infer_type()} since every optimizer pass
-(\code{fuse_mutates}/\code{try_fuse_mutate_pair}/\code{toposort_expressions}/
+(\code{fuse_mutates}/\code{try_fuse_mutate_pair}/
 \code{prune_dead_columns}/\code{push_down_projections}) reads only those two fields
 plus \code{output_col} -- none of them walk the IR tree themselves. \code{op}/
 \code{scalar}/\code{input_types} are gone: only \code{lower_mutate()} (via

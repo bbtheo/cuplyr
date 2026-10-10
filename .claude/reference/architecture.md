@@ -254,8 +254,8 @@ The optimizer transforms the AST before execution. Pass order matters:
    - Dead columns are dropped before expensive operations
 
 2. **Mutate Fusion** (`fuse_mutates`): Combines consecutive mutate nodes
-   - Guards: max 8 expressions, max 4 intermediates, max 3 reuses
-   - Uses topological sort for dependent expressions
+   - Guards: max 8 expressions, max 4 intermediates (lower outputs the upper reads)
+   - Concatenates in original order (lowering is sequential, so overwrites need no reordering)
 
 3. **Dead Column Pruning** (`prune_dead_columns`): Removes unused mutate outputs
    - Walks root to leaves tracking required columns
