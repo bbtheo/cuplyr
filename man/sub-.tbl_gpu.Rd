@@ -2,31 +2,57 @@
 % Please edit documentation in R/generics.R
 \name{[.tbl_gpu}
 \alias{[.tbl_gpu}
-\title{Select columns of a GPU table by position, name, or logical mask}
+\title{Subset a GPU table with tibble's \code{[} semantics}
 \usage{
-\method{[}{tbl_gpu}(x, i, ...)
+\method{[}{tbl_gpu}(x, i, j, drop = FALSE)
 }
 \arguments{
 \item{x}{A \code{tbl_gpu} object.}
 
-\item{i}{A numeric (position, positive to keep or negative to drop),
-character (name), or logical (mask) vector selecting columns.}
+\item{i}{Row subscript (or, in the 1-d form, the column subscript).}
 
-\item{...}{Ignored (present only so a 2-d call, e.g. \code{x[i, j]}, can be
-detected via \code{\link[=nargs]{nargs()}} and rejected with a clear error instead of
-silently misinterpreting \code{j}).}
+\item{j}{Column subscript.}
+
+\item{drop}{If \code{TRUE} and the result has one column, return the column.}
 }
 \value{
-A new \code{tbl_gpu} with only the selected columns.
+A \code{tbl_gpu}, or a vector when \code{drop = TRUE} selects one column.
 }
 \description{
-\code{tbl_gpu} is a plain classed \code{list}, not a \code{data.frame} subclass, so
-without this method \code{gt[1]} fell through to base R's \emph{list} \code{[} method
-(returning \verb{list(ptr = <pointer to the GPU table>)}, not a 1-column
-\code{tbl_gpu}) -- silently wrong and dangerous, since the leaked \code{ptr} looks
-like it could be used directly. Only the 1-d form (\code{x[j]}, selecting
-columns) is supported -- matching data.frame/tibble's own single-index
-\code{[} convention -- via \code{\link[dplyr:select]{dplyr::select()}}, not a 2-d \code{x[i, j]} row+column
-form (use \link[=slice.tbl_gpu]{slice()}/\link[=filter.tbl_gpu]{filter()} for rows,
-\link[=select.tbl_gpu]{select()} for columns instead).
+\code{tbl_gpu} is a plain classed \code{list}, not a \code{data.frame} subclass, so a
+\code{[} method is needed (base R's list \code{[} would leak the raw \code{ptr}).
+Follows the \code{[} method of tibble (\verb{tibble:::[.tbl_df}), and for a grouped
+table dplyr's \verb{[.grouped_df}:
+\itemize{
+\item \code{x[j]} selects columns; \code{x[i, j]}, \code{x[i, ]}, \code{x[, j]}, \code{x[]} are the
+2-d forms. \code{j} is resolved first (names, positions, negative, logical)
+with tibble's \verb{vctrs_error_subscript_*} errors, messages and calls.
+\item Rows (\code{i}): positive positions gather in the given order (duplicates
+kept; out-of-range or \code{NA} gives an all-\code{NA} row), \code{0} is dropped,
+negative positions drop rows (out-of-range ones are ignored), a logical
+recycles from length 1 or must have length \code{nrow} (\code{NA} gives an \code{NA}
+row), a character is read as a row position (no row names).
+\item \code{drop = TRUE} with exactly one result column returns that column as a
+vector (the only shape that executes a lazy table); with several
+columns it is ignored, except that a grouped table comes back
+ungrouped. In the 1-d form \verb{drop=} warns and is ignored (a grouped table
+is still ungrouped, as in dplyr).
+}
+}
+\details{
+Row selection is one GPU gather (an \code{ast_slice(mode = "bracket")} node,
+lazy or eager); column selection is the ordinary select node. Groups are
+the original group variables that survive, \code{.drop} is kept.
+
+Row subscripts are validated against the real row count at call time
+whenever that is known without executing anything (an eager table, or a
+lazy one with no pending operations). On a lazy table with pending
+operations the row subscript is resolved when the plan runs, so its errors
+(same class, message and \code{[} call) surface at \code{collect()}/\code{compute()}.
+
+Divergences from tibble, all loud errors: zero-column results
+(\code{x[, 0]}, \code{x[character()]}, \code{x[, FALSE]}) and duplicated columns
+(\code{x[, c("a", "a")]}) because a \code{tbl_gpu} cannot represent them, and matrix
+subscripts (\code{x[m]}, and the soft-deprecated one-column matrix row subscript
+\code{x[m, ]}, which tibble still accepts with a deprecation notice).
 }

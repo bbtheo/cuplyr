@@ -75,14 +75,16 @@ col_index <- function(x, name) {
 # "GPU operation ... failed" message) preserves its class/message exactly,
 # which every `expect_snapshot()`/`cnd_message()` comparison against
 # dplyr's own condition in tests/testthat/test-dplyr-join-rows.R depends
-# on. No other current caller of `push_op()`/`push_join()` raises a
-# classed condition from inside `lower_and_execute()`, so this is a no-op
-# for every other verb.
+# on. `vctrs_error_subscript` (F03, `x[i, ]` resolving its row subscript
+# against nrow in `lower_slice()`) is passed through for the same reason:
+# it is tibble's own error class. No other caller raises a classed
+# condition from inside `lower_and_execute()`, so this is a no-op for every
+# other verb.
 wrap_gpu_call <- function(op_name, expr) {
   tryCatch(
     expr,
     error = function(e) {
-      if (inherits(e, "dplyr_error_join")) {
+      if (inherits(e, c("dplyr_error_join", "vctrs_error_subscript"))) {
         stop(e)
       }
       msg <- conditionMessage(e)

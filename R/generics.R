@@ -11,12 +11,11 @@
 # them directly (or indirectly, via some other package's dplyr-backend
 # support) doesn't hit "no applicable method" on a tbl_gpu.
 #
-# Also here: `[.tbl_gpu` (the 1-d, column-selecting form dplyr's own
-# `tbl_nongroup_vars()`-adjacent internals sometimes rely on) -- before this
-# method existed, `tbl_gpu` (a plain classed `list`) fell through to base
-# R's *list* `[` method, silently returning `list(ptr = <pointer>)` for
-# `gt[1]` instead of a 1-column tbl_gpu. `names<-.tbl_gpu` already existed
-# (R/tbl-gpu.R).
+# Also here: `[.tbl_gpu`, tibble's `[` for both the 1-d (column) and the 2-d
+# (`x[i, j]`, `drop =`) forms -- before this method existed, `tbl_gpu` (a
+# plain classed `list`) fell through to base R's *list* `[` method, silently
+# returning `list(ptr = <pointer>)` for `gt[1]` instead of a 1-column
+# tbl_gpu. `names<-.tbl_gpu` already existed (R/tbl-gpu.R).
 
 #' Modify rows of a GPU table by position (dplyr backend generic)
 #'
@@ -216,51 +215,171 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
   out
 }
 
-#' Select columns of a GPU table by position, name, or logical mask
+#' Subset a GPU table with tibble's `[` semantics
 #'
-#' `tbl_gpu` is a plain classed `list`, not a `data.frame` subclass, so
-#' without this method `gt[1]` fell through to base R's *list* `[` method
-#' (returning `list(ptr = <pointer to the GPU table>)`, not a 1-column
-#' `tbl_gpu`) -- silently wrong and dangerous, since the leaked `ptr` looks
-#' like it could be used directly. Only the 1-d form (`x[j]`, selecting
-#' columns) is supported -- matching data.frame/tibble's own single-index
-#' `[` convention -- via [dplyr::select()], not a 2-d `x[i, j]` row+column
-#' form (use [slice()][slice.tbl_gpu]/[filter()][filter.tbl_gpu] for rows,
-#' [select()][select.tbl_gpu] for columns instead).
+#' `tbl_gpu` is a plain classed `list`, not a `data.frame` subclass, so a
+#' `[` method is needed (base R's list `[` would leak the raw `ptr`).
+#' Follows the `[` method of tibble (`tibble:::[.tbl_df`), and for a grouped
+#' table dplyr's `[.grouped_df`:
+#' - `x[j]` selects columns; `x[i, j]`, `x[i, ]`, `x[, j]`, `x[]` are the
+#'   2-d forms. `j` is resolved first (names, positions, negative, logical)
+#'   with tibble's `vctrs_error_subscript_*` errors, messages and calls.
+#' - Rows (`i`): positive positions gather in the given order (duplicates
+#'   kept; out-of-range or `NA` gives an all-`NA` row), `0` is dropped,
+#'   negative positions drop rows (out-of-range ones are ignored), a logical
+#'   recycles from length 1 or must have length `nrow` (`NA` gives an `NA`
+#'   row), a character is read as a row position (no row names).
+#' - `drop = TRUE` with exactly one result column returns that column as a
+#'   vector (the only shape that executes a lazy table); with several
+#'   columns it is ignored, except that a grouped table comes back
+#'   ungrouped. In the 1-d form `drop=` warns and is ignored (a grouped table
+#'   is still ungrouped, as in dplyr).
+#'
+#' Row selection is one GPU gather (an `ast_slice(mode = "bracket")` node,
+#' lazy or eager); column selection is the ordinary select node. Groups are
+#' the original group variables that survive, `.drop` is kept.
+#'
+#' Row subscripts are validated against the real row count at call time
+#' whenever that is known without executing anything (an eager table, or a
+#' lazy one with no pending operations). On a lazy table with pending
+#' operations the row subscript is resolved when the plan runs, so its errors
+#' (same class, message and `[` call) surface at `collect()`/`compute()`.
+#'
+#' Divergences from tibble, all loud errors: zero-column results
+#' (`x[, 0]`, `x[character()]`, `x[, FALSE]`) and duplicated columns
+#' (`x[, c("a", "a")]`) because a `tbl_gpu` cannot represent them, and matrix
+#' subscripts (`x[m]`, and the soft-deprecated one-column matrix row subscript
+#' `x[m, ]`, which tibble still accepts with a deprecation notice).
 #'
 #' @param x A `tbl_gpu` object.
-#' @param i A numeric (position, positive to keep or negative to drop),
-#'   character (name), or logical (mask) vector selecting columns.
-#' @param ... Ignored (present only so a 2-d call, e.g. `x[i, j]`, can be
-#'   detected via [nargs()] and rejected with a clear error instead of
-#'   silently misinterpreting `j`).
-#' @return A new `tbl_gpu` with only the selected columns.
+#' @param i Row subscript (or, in the 1-d form, the column subscript).
+#' @param j Column subscript.
+#' @param drop If `TRUE` and the result has one column, return the column.
+#' @return A `tbl_gpu`, or a vector when `drop = TRUE` selects one column.
 #' @export
-`[.tbl_gpu` <- function(x, i, ...) {
-  if (nargs() > 2) {
-    stop(
-      "2-d `[` indexing (`x[i, j]`) is not supported for tbl_gpu; ",
-      "use slice()/filter() for rows and select() for columns instead.",
-      call. = FALSE
-    )
+`[.tbl_gpu` <- function(x, i, j, drop = FALSE) {
+  # Subscript labels and the error call are the user's, as in tibble.
+  i_arg <- substitute(i)
+  j_arg <- substitute(j)
+  # sys.call() of an internally dispatched method names the method, not `[`.
+  this_call <- sys.call()
+  this_call[[1L]] <- quote(`[`)
+  this_env <- environment()
+
+  i_missing <- missing(i)
+  j_missing <- missing(j)
+  if (i_missing) i_arg <- NULL
+  if (j_missing) j_arg <- NULL
+  if (!i_missing && is.null(i)) i <- integer()
+  if (!j_missing && is.null(j)) j <- integer()
+
+  ungroup_after <- FALSE
+  n_real_args <- nargs() - !missing(drop)
+  if (n_real_args <= 2L) {
+    # dplyr's `[.grouped_df` sees the user's `drop` and ungroups on TRUE even
+    # though tibble ignores it in the 1-d form.
+    ungroup_after <- isTRUE(drop)
+    if (!missing(drop)) {
+      rlang::warn(
+        "`drop` argument ignored for subsetting a tibble with `x[j]`, it has an effect only for `x[i, j]`.",
+        use_cli_format = FALSE
+      )
+      drop <- FALSE
+    }
+    j <- if (i_missing) NULL else i
+    j_arg <- i_arg
+    i_arg <- NULL
+    j_missing <- i_missing
+    i_missing <- TRUE
+    if (!j_missing && is.matrix(j)) {
+      stop("Matrix subscripts `x[m]` are not supported for tbl_gpu.", call. = FALSE)
+    }
   }
 
-  if (missing(i)) {
-    return(x)
+  # Row count, when known without executing anything.
+  n_known <- if (has_pending_ops(x)) NA_integer_ else gpu_dim(x$ptr)[1]
+
+  if (!j_missing) {
+    schema <- current_schema(x)
+    loc <- bracket_col_location(j, schema$names, j_arg, this_env)
+    if (length(loc) == 0L) {
+      stop("`[` cannot return a zero-column tbl_gpu.", call. = FALSE)
+    }
+    if (anyDuplicated(loc)) {
+      stop("`[` with duplicated columns is not supported for tbl_gpu (column names must be unique).",
+           call. = FALSE)
+    }
+    if (!identical(loc, seq_along(schema$names))) {
+      keep_groups <- x$groups
+      drop_flag <- x$group_drop %||% TRUE
+      x <- push_op(x, ast_select(input_node(x), schema$names[loc]))
+      x$group_drop <- drop_flag
+      x$groups <- intersect(keep_groups, x$schema$names)
+    }
   }
 
-  nm <- current_schema(x)$names
-  col_positions <- stats::setNames(seq_along(nm), nm)
-  selected <- tryCatch(
-    col_positions[i],
-    error = function(e) {
-      stop("Invalid column index for `[.tbl_gpu`: ", conditionMessage(e), call. = FALSE)
+  if (!i_missing && !isTRUE(i)) {
+    drop_flag <- x$group_drop %||% TRUE
+    node <- if (is.na(n_known)) {
+      # nrow unknown until the plan runs: resolve (and validate) at lowering,
+      # reporting against the user's subscript and call.
+      ast_slice(input_node(x), mode = "bracket", raw_indices = i,
+                bracket_arg = i_arg, bracket_call = this_call)
+    } else {
+      ast_slice(input_node(x), mode = "bracket",
+                raw_indices = bracket_row_positions(i, n_known, i_arg, this_env),
+                rows_resolved = TRUE)
+    }
+    x <- push_op(x, node)
+    x$group_drop <- drop_flag
+  }
+
+  if (isTRUE(drop) && length(x$schema$names) == 1L) {
+    return(dplyr::pull(dplyr::ungroup(x), 1L))
+  }
+  if (isTRUE(drop) || ungroup_after) {
+    x <- dplyr::ungroup(x)
+  }
+  x
+}
+
+# Column subscript -> integer positions, with tibble's error classes, labels
+# and call (`vectbl_as_col_location()` + `subclass_col_index_errors()`).
+bracket_col_location <- function(j, names, j_arg, call) {
+  withCallingHandlers(
+    vctrs::vec_as_location(j, length(names), names, missing = "error", call = call),
+    vctrs_error_subscript = function(cnd) {
+      cnd$subscript_arg <- j_arg
+      cnd$subscript_elt <- "column"
+      rlang::cnd_signal(cnd)
     }
   )
+}
 
-  if (anyNA(selected)) {
-    stop("Undefined columns selected.", call. = FALSE)
+# Row subscript -> 1-based positions against `n` rows (NA = all-NA row).
+# Mirrors `vectbl_as_row_index()`: out-of-range positives become NA,
+# out-of-range negatives are ignored, everything else goes to vctrs, with
+# the errors relabelled as `subclass_row_index_errors()` does.
+bracket_row_positions <- function(i, n, i_arg, call) {
+  if (is.character(i)) {
+    # Tibble coerces character subscripts by its own rules, so ask it on a
+    # one-column stub (seq_len() is compact, cost is the result size).
+    return(tibble::new_tibble(list(.r = seq_len(n)), nrow = n)[i, ]$.r)
   }
-
-  dplyr::select(x, dplyr::all_of(names(selected)))
+  if (is.numeric(i)) {
+    if (any(i > 0, na.rm = TRUE)) {
+      i[which(i > n)] <- NA
+    } else if (any(i < 0, na.rm = TRUE)) {
+      i <- i[!(i < -n)]
+      if (length(i) == 0L) i <- seq_len(n)
+    }
+  }
+  withCallingHandlers(
+    vctrs::vec_as_location(i, n, missing = "propagate", call = call),
+    vctrs_error_subscript = function(cnd) {
+      cnd$subscript_arg <- i_arg
+      cnd$subscript_elt <- "row"
+      rlang::cnd_signal(cnd)
+    }
+  )
 }

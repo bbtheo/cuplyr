@@ -133,16 +133,17 @@ ast_distinct <- function(input, key_cols, keep_all = FALSE) {
 #' One node type covers the whole slice family (`slice()`/`slice_head()`/
 #' `slice_tail()`/`slice_min()`/`slice_max()`), distinguished by `mode` --
 #' unlike most other verbs (which each get their own `ast_*` constructor),
-#' these four share the same "select a subset of rows, in some order,
+#' these five share the same "select a subset of rows, in some order,
 #' from a single input" shape and (mostly) the same `n=`/`prop=` sizing
-#' rule, so one node with a mode-specific field set avoids four
+#' rule, so one node with a mode-specific field set avoids several
 #' near-identical constructors/lowering functions/optimizer barrier
 #' entries. `slice_sample()` and every *grouped* variant are out of scope
 #' for this node (Phase 3 scope decision, see `R/slice.R`) and keep using
 #' the CPU fallback (`R/fallback.R`) instead.
 #'
 #' @param input Input AST node
-#' @param mode One of `"head"`, `"tail"`, `"index"`, `"rank"`
+#' @param mode One of `"head"`, `"tail"`, `"index"`, `"rank"`, `"bracket"` (tibble
+#'   `x[i, ]` row subscript in `raw_indices`, NA / out-of-range give NA rows)
 #' @param amount For `mode` `"head"`/`"tail"`/`"rank"`: the raw (unresolved)
 #'   `n`/`prop` value (sign preserved; resolved against the actual row
 #'   count only at lowering time, see `src/ops_common.hpp::compute_slice_size()`)
@@ -152,6 +153,12 @@ ast_distinct <- function(input, key_cols, keep_all = FALSE) {
 #'   vector from `slice()`'s dots (may contain 0/NA/duplicates/out-of-range/
 #'   negative values -- fully resolved only at lowering time, since negative
 #'   indices and out-of-range dropping both need the actual row count)
+#' @param bracket_arg,bracket_call,rows_resolved For `mode` `"bracket"`:
+#'   `raw_indices` is either already resolved to 1-based positions against the
+#'   real row count (`rows_resolved = TRUE`, `NA` = all-`NA` row), or still
+#'   the user's raw subscript, in which case `bracket_arg` (the user's
+#'   subscript expression) and `bracket_call` (the `[` call) label any error
+#'   raised when it is resolved at lowering
 #' @param order_col For `mode` `"rank"`: the column name (in `input`'s
 #'   output schema) to rank by -- always a real column name, even when
 #'   `order_by` was a computed expression (see `order_is_temp`)
@@ -169,11 +176,15 @@ ast_distinct <- function(input, key_cols, keep_all = FALSE) {
 ast_slice <- function(input, mode, amount = NULL, is_prop = NULL,
                       raw_indices = NULL, order_col = NULL,
                       order_is_temp = FALSE, descending = NULL,
-                      with_ties = NULL, na_rm = NULL) {
+                      with_ties = NULL, na_rm = NULL,
+                      bracket_arg = NULL, bracket_call = NULL,
+                      rows_resolved = FALSE) {
   ast_node("slice", input = input, mode = mode, amount = amount, is_prop = is_prop,
            raw_indices = raw_indices, order_col = order_col,
            order_is_temp = order_is_temp, descending = descending,
-           with_ties = with_ties, na_rm = na_rm)
+           with_ties = with_ties, na_rm = na_rm,
+           bracket_arg = bracket_arg, bracket_call = bracket_call,
+           rows_resolved = rows_resolved)
 }
 
 #' Create a window AST node
@@ -796,7 +807,7 @@ describe_join_conditions <- function(by) {
 #'
 #' @param node An `ast_slice` node
 #' @return Character scalar, `""` if there's nothing mode-specific to add
-#'   (shouldn't happen for any of the four supported modes)
+#'   (shouldn't happen for any of the supported modes)
 #' @keywords internal
 describe_slice_detail <- function(node) {
   size <- function() paste0(if (isTRUE(node$is_prop)) "prop=" else "n=", node$amount)
@@ -804,6 +815,8 @@ describe_slice_detail <- function(node) {
     "head" = size(),
     "tail" = size(),
     "index" = paste0("indices=[", paste(node$raw_indices, collapse = ","), "]"),
+    "bracket" = paste0("`[` rows=[", paste(utils::head(node$raw_indices, 10), collapse = ","),
+                       if (length(node$raw_indices) > 10) ",..." else "", "]"),
     "rank" = paste0(
       "order_by=", node$order_col,
       ", desc=", node$descending,

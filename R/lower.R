@@ -229,6 +229,18 @@ lower_slice <- function(ast, source_ptr) {
     "head" = gpu_slice_head(input_ptr, ast$amount, ast$is_prop),
     "tail" = gpu_slice_tail(input_ptr, ast$amount, ast$is_prop),
     "index" = gpu_slice_indices(input_ptr, ast$raw_indices),
+    # `x[i, ]`: tibble semantics (NA / out-of-range -> all-NA row), resolved
+    # against the real row count (unless `[.tbl_gpu` already did), then one
+    # NULLIFY gather.
+    "bracket" = {
+      pos <- if (isTRUE(ast$rows_resolved)) {
+        ast$raw_indices
+      } else {
+        bracket_row_positions(ast$raw_indices, gpu_dim(input_ptr)[1],
+                              ast$bracket_arg, ast$bracket_call)
+      }
+      gpu_gather_rows(list(input_ptr), as.numeric(pos) - 1)
+    },
     "rank" = {
       input_schema <- infer_schema(ast$input)
       col_idx <- match(ast$order_col, input_schema$names) - 1L

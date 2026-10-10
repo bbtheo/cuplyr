@@ -14,13 +14,17 @@ ast_slice(
   order_is_temp = FALSE,
   descending = NULL,
   with_ties = NULL,
-  na_rm = NULL
+  na_rm = NULL,
+  bracket_arg = NULL,
+  bracket_call = NULL,
+  rows_resolved = FALSE
 )
 }
 \arguments{
 \item{input}{Input AST node}
 
-\item{mode}{One of \code{"head"}, \code{"tail"}, \code{"index"}, \code{"rank"}}
+\item{mode}{One of \code{"head"}, \code{"tail"}, \code{"index"}, \code{"rank"}, \code{"bracket"} (tibble
+\code{x[i, ]} row subscript in \code{raw_indices}, NA / out-of-range give NA rows)}
 
 \item{amount}{For \code{mode} \code{"head"}/\code{"tail"}/\code{"rank"}: the raw (unresolved)
 \code{n}/\code{prop} value (sign preserved; resolved against the actual row
@@ -49,6 +53,13 @@ for \code{slice_max()}}
 
 \item{with_ties, na_rm}{For \code{mode} \code{"rank"}: as documented on
 \code{slice_min()}/\code{slice_max()}}
+
+\item{bracket_arg, bracket_call, rows_resolved}{For \code{mode} \code{"bracket"}:
+\code{raw_indices} is either already resolved to 1-based positions against the
+real row count (\code{rows_resolved = TRUE}, \code{NA} = all-\code{NA} row), or still
+the user's raw subscript, in which case \code{bracket_arg} (the user's
+subscript expression) and \code{bracket_call} (the \code{[} call) label any error
+raised when it is resolved at lowering}
 }
 \value{
 An ast_slice node
@@ -57,9 +68,9 @@ An ast_slice node
 One node type covers the whole slice family (\code{slice()}/\code{slice_head()}/
 \code{slice_tail()}/\code{slice_min()}/\code{slice_max()}), distinguished by \code{mode} --
 unlike most other verbs (which each get their own \verb{ast_*} constructor),
-these four share the same "select a subset of rows, in some order,
+these five share the same "select a subset of rows, in some order,
 from a single input" shape and (mostly) the same \verb{n=}/\verb{prop=} sizing
-rule, so one node with a mode-specific field set avoids four
+rule, so one node with a mode-specific field set avoids several
 near-identical constructors/lowering functions/optimizer barrier
 entries. \code{slice_sample()} and every \emph{grouped} variant are out of scope
 for this node (Phase 3 scope decision, see \code{R/slice.R}) and keep using

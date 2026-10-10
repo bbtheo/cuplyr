@@ -397,18 +397,25 @@ test_that("`[.tbl_gpu` selects columns by position, name, negation, and logical 
   expect_equal(names(collect(gt[c(TRUE, FALSE, TRUE)])), c("g", "s"))
 })
 
-test_that("`[.tbl_gpu` rejects 2-d indexing instead of silently misinterpreting it", {
+test_that("`[.tbl_gpu` 2-d indexing matches tibble", {
   skip_if_no_gpu()
 
-  gt <- tbl_gpu(data.frame(g = 1:3, x = 1:3))
-  expect_error(gt[1, 2], "2-d")
+  df <- data.frame(g = 1:3, x = 1:3)
+  gt <- tbl_gpu(df)
+  expect_identical(
+    tibble::as_tibble(collect(gt[1, 2])),
+    tibble::as_tibble(df)[1, 2]
+  )
 })
 
-test_that("`[.tbl_gpu` errors on an undefined column", {
+test_that("`[.tbl_gpu` errors on an undefined column like tibble", {
   skip_if_no_gpu()
 
-  gt <- tbl_gpu(data.frame(g = 1:3))
-  expect_error(gt["nope"], "Undefined")
+  df <- data.frame(g = 1:3)
+  gt <- tbl_gpu(df)
+  err <- expect_error(gt["nope"], class = "vctrs_error_subscript_oob")
+  oracle <- tryCatch(tibble::as_tibble(df)["nope"], error = function(e) e)
+  expect_identical(conditionMessage(err), conditionMessage(oracle))
 })
 
 # =============================================================================

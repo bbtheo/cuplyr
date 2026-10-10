@@ -11,7 +11,7 @@ describe_slice_detail(node)
 }
 \value{
 Character scalar, \code{""} if there's nothing mode-specific to add
-(shouldn't happen for any of the four supported modes)
+(shouldn't happen for any of the supported modes)
 }
 \description{
 Describe a slice node's mode-specific sizing/ordering detail
