@@ -12,7 +12,9 @@
 \item{...}{Additional arguments (ignored, included for compatibility).}
 }
 \value{
-A \link[tibble:tibble]{tibble::tibble} containing the data from the GPU table.
+A \link[tibble:tibble]{tibble::tibble} containing the data from the GPU table (a
+\code{grouped_df}, with the same \code{.drop}, when \code{x} is grouped, as for
+\code{dplyr::collect()} on a database table).
 Column types are converted back to R types:
 \itemize{
 \item FLOAT64/FLOAT32 -> numeric (double)
@@ -27,6 +29,18 @@ the final step in a GPU data manipulation pipeline, after filtering,
 mutating, and selecting the data you need.
 }
 \details{
+\subsection{Grouped tables and \code{.drop}}{
+
+The \code{.drop} setting of \code{group_by()} travels with the table through the
+verbs that keep at least one group column (and is reset to the default when
+none is left; \code{group_by()} on a grouped table keeps it unless given a new
+\code{.drop}), so \code{group_by(f, .drop = FALSE) |> arrange(x) |> collect()} still
+keeps empty factor-level groups. One exception for now: a \code{mutate()} or
+\code{filter()} that uses \code{cur_group_id()} resets it to \code{TRUE}. Empty groups of a \emph{non-factor} column
+that a row-removing verb (\code{filter()}, \code{slice()}) emptied are not kept, unlike
+in dplyr: see the \code{.drop} section of \link[=group_by.tbl_gpu]{group_by()}.
+}
+
 \subsection{Memory considerations}{
 
 Collecting transfers all data from GPU to CPU memory. For large datasets,

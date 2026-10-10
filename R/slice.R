@@ -1048,7 +1048,7 @@ slice_sample_native <- function(.data, gm, amount, is_prop, replace) {
     key_col_idx <- match(group_cols, schema$names) - 1L
     key_ptr <- gpu_select(materialized$ptr, key_col_idx)
     key_schema <- list(names = group_cols, types = schema$types[key_col_idx + 1L])
-    key_tbl <- collect(new_tbl_gpu(ptr = key_ptr, schema = key_schema))
+    key_tbl <- collect_frame(new_tbl_gpu(ptr = key_ptr, schema = key_schema))
 
     rows_list <- if (identical(gm$mode, "group_by")) {
       dplyr::group_rows(dplyr::group_by(key_tbl, !!!rlang::syms(group_cols)))
@@ -1068,7 +1068,8 @@ slice_sample_native <- function(.data, gm, amount, is_prop, replace) {
   }
 
   new_ptr <- gpu_slice_indices(materialized$ptr, as.double(idx))
-  new_tbl_gpu(ptr = new_ptr, schema = schema, groups = out_groups)
+  new_tbl_gpu(ptr = new_ptr, schema = schema, groups = out_groups,
+              group_drop = if (length(out_groups) > 0L) materialized$group_drop %||% TRUE else TRUE)
 }
 
 #' Sample rows

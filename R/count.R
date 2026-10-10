@@ -274,11 +274,13 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .drop = 
     result <- dplyr::arrange(result, dplyr::desc(!!rlang::sym(agg_name)))
   }
 
+  out_groups <- intersect(orig_groups, result$schema$names)
   new_tbl_gpu(
     ptr = result$ptr,
     schema = result$schema,
     lazy_ops = result$lazy_ops,
-    groups = intersect(orig_groups, result$schema$names),
+    groups = out_groups,
+    group_drop = if (length(out_groups) > 0L) x$group_drop %||% TRUE else TRUE,
     exec_mode = result$exec_mode
   )
 }
@@ -418,11 +420,13 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
     result <- dplyr::arrange(result, dplyr::desc(!!rlang::sym(agg_name)))
   }
 
+  out_groups <- intersect(orig_groups, result$schema$names)
   new_tbl_gpu(
     ptr = result$ptr,
     schema = result$schema,
     lazy_ops = result$lazy_ops,
-    groups = intersect(orig_groups, result$schema$names),
+    groups = out_groups,
+    group_drop = if (length(out_groups) > 0L) x$group_drop %||% TRUE else TRUE,
     exec_mode = result$exec_mode
   )
 }

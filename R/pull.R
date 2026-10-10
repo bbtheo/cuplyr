@@ -56,7 +56,7 @@ pull.tbl_gpu <- function(.data, var = -1, name = NULL, ...) {
 
   var_name <- rlang::inject(tidyselect::vars_pull(schema$names, !!var_quo))
 
-  result_tbl <- collect(materialized)
+  result_tbl <- collect_frame(materialized)
 
   if (rlang::quo_is_null(name_quo)) {
     return(result_tbl[[var_name]])

@@ -6,6 +6,13 @@
 # - Object size calculation on GPU
 # - Data residency verification (ensuring data is on GPU, not CPU)
 
+# tbl_gpu's `$`/`[[` return COLUMNS for user code, and the raw internal fields
+# (`gt$ptr`, `gt$groups <- ...`) only for package code. testthat runs test
+# files in a child of the global environment, so test code opts in with this
+# binding (see `internal_caller()`, R/generics.R). Functions re-homed to
+# `globalenv()` do not see it and get user (column) semantics.
+.cuplyr_internal_access <- TRUE
+
 # =============================================================================
 # Skip Helpers
 # =============================================================================

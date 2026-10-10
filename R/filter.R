@@ -764,6 +764,7 @@ filter_eval_mask <- function(.data, quo) {
     ptr = new_ptr,
     schema = .data$schema,
     groups = .data$groups,
+    group_drop = .data$group_drop %||% TRUE,
     exec_mode = .data$exec_mode
   )
 }

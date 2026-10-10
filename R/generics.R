@@ -115,34 +115,63 @@ dplyr_col_modify.tbl_gpu <- function(data, cols) {
   existing_replaced <- intersect(names(cols), schema_names)
   drop_names <- union(removed_names, existing_replaced)
 
-  base <- materialized
-  if (length(drop_names) > 0) {
-    keep <- setdiff(schema_names, drop_names)
-    base <- dplyr::select(materialized, dplyr::all_of(keep))
-  }
-
-  if (length(cols) == 0) {
-    return(base)
-  }
-
-  upload <- tbl_gpu(tibble::as_tibble(cols), lazy = FALSE)
-  # `bind_cols()` unqualified (NOT `dplyr::bind_cols()`): dplyr's own
-  # top-level `bind_cols()` is a plain function that calls
-  # `vctrs::vec_cbind()` directly (never `UseMethod()`) -- this package's
-  # OWN `bind_cols()` (R/bind.R) is a real S3 generic that dispatches to
-  # `bind_cols.tbl_gpu()`; calling the `dplyr::` one here would try (and
-  # fail) to treat a `tbl_gpu` as a plain vctrs-compatible value.
-  combined <- bind_cols(base, upload)
-
+  # Existing columns being replaced stay in place, new ones are appended.
   final_order <- c(
-    intersect(schema_names, names(combined)),
-    setdiff(names(combined), schema_names)
+    setdiff(schema_names, removed_names),
+    setdiff(names(cols), schema_names)
   )
-  # NOT routed through `dplyr::dplyr_reconstruct()` -- see
-  # `dplyr_reconstruct.tbl_gpu()`'s own docs below for why the top-level
-  # generic is unsafe to call with a tbl_gpu `data` argument; `select()`
-  # already returns a fully-formed tbl_gpu.
-  dplyr::select(combined, dplyr::all_of(final_order))
+  apply_col_changes(data, materialized, final_order, cols)
+}
+
+# Build the table with columns `final_names`, where the columns named in
+# `new_cols` (a named list of already-recycled R vectors) are uploaded and
+# every other one is carried over from `m`, the materialized (no pending ops)
+# table of `x`. Shared by `dplyr_col_modify()` and `$<-`/`[[<-`.
+#
+# Uploads the new columns as a small `tbl_gpu`, drops the replaced columns from
+# `m`, and `bind_cols()`s the two back together. `x`'s groups (those that
+# survive) and `.drop`, and its exec_mode, are kept: a lazy table stays lazy.
+apply_col_changes <- function(x, m, final_names, new_cols) {
+  if (length(final_names) == 0L) {
+    stop("A tbl_gpu cannot have zero columns.", call. = FALSE)
+  }
+  base_names <- setdiff(final_names, names(new_cols))
+  work <- set_tbl_gpu_field(ungrouped(m), "group_drop", TRUE)
+  work <- set_tbl_gpu_field(work, "exec_mode", "eager")
+
+  combined <- if (length(base_names) == 0L) {
+    NULL
+  } else if (identical(base_names, .subset2(work, "schema")$names)) {
+    work
+  } else {
+    push_op(work, ast_select(input_node(work), base_names))
+  }
+
+  if (length(new_cols) > 0L) {
+    # `bind_cols()` unqualified (NOT `dplyr::bind_cols()`): dplyr's own
+    # top-level `bind_cols()` is a plain function that calls
+    # `vctrs::vec_cbind()` directly (never `UseMethod()`) -- this package's
+    # OWN `bind_cols()` (R/bind.R) is a real S3 generic that dispatches to
+    # `bind_cols.tbl_gpu()`; calling the `dplyr::` one here would try (and
+    # fail) to treat a `tbl_gpu` as a plain vctrs-compatible value.
+    upload <- tbl_gpu(tibble::as_tibble(new_cols, .name_repair = "minimal"), lazy = FALSE)
+    # "minimal": the names were validated by tibble (or by the caller) already,
+    # and "unique" would rewrite a legal `...N` name.
+    combined <- if (is.null(combined)) upload else bind_cols(combined, upload, .name_repair = "minimal")
+  }
+
+  # An index bug here would surface from the GPU layer as an "out of memory"
+  # hint, so say what happened.
+  if (!all(final_names %in% .subset2(combined, "schema")$names)) {
+    stop("Internal error: columns ", paste0("`", setdiff(final_names, .subset2(combined, "schema")$names), "`", collapse = ", "),
+         " were lost while modifying a tbl_gpu.", call. = FALSE)
+  }
+  if (!identical(.subset2(combined, "schema")$names, final_names)) {
+    combined <- push_op(combined, ast_select(input_node(combined), final_names))
+  }
+
+  combined <- with_surviving_groups(x, combined)
+  set_tbl_gpu_field(combined, "exec_mode", .subset2(x, "exec_mode"))
 }
 
 #' Restore `tbl_gpu`-specific attributes after a generic transformation
@@ -191,7 +220,6 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
     return(data)
   }
 
-  tbl_gpu_fields <- c("ptr", "schema", "lazy_ops", "groups", "exec_mode", "group_drop")
   if (is.data.frame(data) && identical(names(data), tbl_gpu_fields)) {
     return(new_tbl_gpu(
       ptr = data$ptr, schema = data$schema, lazy_ops = data$lazy_ops,
@@ -313,8 +341,10 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
       keep_groups <- x$groups
       drop_flag <- x$group_drop %||% TRUE
       x <- push_op(x, ast_select(input_node(x), schema$names[loc]))
-      x$group_drop <- drop_flag
-      x$groups <- intersect(keep_groups, x$schema$names)
+      x$groups <- intersect(keep_groups, schema$names[loc])
+      # dplyr: once no group column is left the table is ungrouped, and a later
+      # group_by() starts from the default `.drop` again.
+      x$group_drop <- if (length(x$groups) > 0L) drop_flag else TRUE
     }
   }
 
@@ -382,4 +412,300 @@ bracket_row_positions <- function(i, n, i_arg, call) {
       rlang::cnd_signal(cnd)
     }
   )
+}
+
+# =============================================================================
+# `$`, `[[`, `$<-`, `[[<-`, `[<-`: the base-R object contract (F04)
+#
+# A tbl_gpu is a classed list whose six elements are internal fields, but to
+# users it is a table, so `gt$x` / `gt[["x"]]` return COLUMN x (tibble's
+# semantics, warnings and errors), and assignment is a column modification on
+# the GPU.
+#
+# The package itself reads and writes the fields with `x$ptr`, `x$groups <- `,
+# ... hundreds of times, through these same methods. The rule that keeps those
+# working: a field name (`tbl_gpu_fields`) accessed from code whose top-level
+# environment is the cuplyr namespace is the raw list element; everything else
+# (user code, other packages, even for a column that happens to be named
+# `groups`) is a column. testthat evaluates test files in a child of the
+# global environment, not of the namespace, so the package's own tests keep
+# internal access through a marker binding (`.cuplyr_internal_access`, defined
+# in the test helpers). The check is `switch()` on the name first, so the
+# common internal access costs one extra `topenv()`.
+#
+# Subscript validation, recycling and error messages are tibble's own: each
+# method runs the same operation on a "stub" tibble (the right names and
+# row count, placeholder columns) and acts on the outcome. The user's
+# subscripts reach tibble as the ORIGINAL promises, forwarded through `...`
+# (`[[` takes `(x, ...)`, `[[<-` `(x, ..., value)`): each is evaluated once, in
+# its own environment, and tibble's `substitute()` labels (`Can't extract
+# column with `nm``) show the user's expressions. Rebuilding a call from
+# `substitute(i)` and evaluating it somewhere else would evaluate the
+# expression twice and in the wrong frame (`lapply(tbls, `[[`, nm)`). The
+# assigned value is passed on as `value` (replacement methods must end in a
+# `value` argument), so tibble's messages about it name `value`.
+# =============================================================================
+
+tbl_gpu_fields <- c("ptr", "schema", "lazy_ops", "groups", "exec_mode", "group_drop")
+
+# The cuplyr namespace (this file is evaluated in it).
+cuplyr_ns <- environment()
+
+# Is `env` (a caller's environment) package-internal code? True inside the
+# namespace, and in the package's own tests: testthat evaluates them in
+# environments below the global environment, where the test helpers
+# (tests/testthat/helper-gpu.R) define the marker `.cuplyr_internal_access`.
+# The search stops at the global environment, so user code, other packages and
+# functions re-homed to `globalenv()` never count (the marker can also be
+# visible from there, since pkgload loads the helpers into the namespace).
+internal_caller <- function(env) {
+  if (identical(parent.env(env), cuplyr_ns) || identical(topenv(env), cuplyr_ns)) {
+    return(TRUE)
+  }
+  global <- globalenv()
+  while (!identical(env, global) && !identical(env, emptyenv())) {
+    if (exists(".cuplyr_internal_access", envir = env, inherits = FALSE)) {
+      return(TRUE)
+    }
+    env <- parent.env(env)
+  }
+  FALSE
+}
+
+is_tbl_gpu_field <- function(name) {
+  is.character(name) && length(name) == 1L && !is.na(name) && name %in% tbl_gpu_fields
+}
+
+#' @export
+`$.tbl_gpu` <- function(x, name) {
+  if (switch(name, ptr = , schema = , lazy_ops = , groups = , exec_mode = ,
+             group_drop = TRUE, FALSE) &&
+      internal_caller(parent.frame())) {
+    return(.subset2(x, name))
+  }
+  col <- match(name, current_schema(x)$names)
+  if (is.na(col)) {
+    rlang::warn(paste0("Unknown or uninitialised column: `", name, "`."))
+    return(NULL)
+  }
+  fetch_column(x, col)
+}
+
+#' @export
+`[[.tbl_gpu` <- function(x, ...) {
+  nd <- ...length()
+  if (nd == 1L && !missing(..1) && is_tbl_gpu_field(..1) && internal_caller(parent.frame())) {
+    return(.subset2(x, ..1))
+  }
+
+  nms <- current_schema(x)$names
+  # `exact=` is tibble's to warn about; every other argument is a subscript.
+  n_sub <- nd - sum(...names() == "exact")
+  # sys.call() of an internally dispatched method names the method, not `[[`.
+  this_call <- sys.call()
+  this_call[[1L]] <- quote(`[[`)
+
+  if (n_sub <= 1L) {
+    # tibble resolves the column subscript against columns whose value is
+    # their own position, so its errors, warnings and messages are reproduced
+    # as is.
+    pos_stub <- tibble::new_tibble(stats::setNames(as.list(seq_along(nms)), nms), nrow = 1L)
+    pos <- with_user_call(`[[`(pos_stub, ...), this_call)
+    return(if (is.null(pos)) NULL else fetch_column(x, pos))
+  }
+
+  # x[[i, j]]: tibble validates the row and column on a stub whose every column
+  # is the row numbers (a compact sequence, shared by all columns), then one
+  # row of the column is gathered on the GPU.
+  m <- if (has_pending_ops(x)) compute(x) else x
+  n <- gpu_dim(.subset2(m, "ptr"))[[1L]]
+  rows <- seq_len(n)
+  row_stub <- tibble::new_tibble(stats::setNames(rep(list(rows), length(nms)), nms), nrow = n)
+  row <- with_user_call(`[[`(row_stub, ...), this_call)
+  if (is.null(row)) {
+    return(NULL)
+  }
+  # The column position, from the column subscript alone: `col_of()` has
+  # tibble's formals, so `j` matches by name or position like it does there.
+  # Its promise was forced by the call above, so it is not evaluated again,
+  # and the warnings that call raised are muffled.
+  pos_stub <- tibble::new_tibble(stats::setNames(as.list(seq_along(nms)), nms), nrow = 1L)
+  col_of <- function(i, j, ..., exact = TRUE) `[[`(pos_stub, j)
+  pos <- suppressWarnings(col_of(...))
+  fetch_cell(m, pos, row)
+}
+
+# Errors tibble raises against a subscript stub name the stub's call
+# (`pos_stub[[...]]`); they are re-signalled with the user's call, class and
+# message unchanged. Errors from evaluating the user's own subscript name some
+# other call and pass through as they are.
+with_user_call <- function(expr, call) {
+  tryCatch(expr, error = function(e) {
+    stub_call <- conditionCall(e)
+    if (is.call(stub_call) && any(c("pos_stub", "row_stub") %in% all.names(stub_call))) {
+      e$call <- call
+    }
+    stop(e)
+  })
+}
+
+# One column of `x` as an R vector: ungroup, select it, collect that
+# one-column table. Lazy tables only append a node to the plan (so the
+# optimizer prunes everything else), eager ones gather one column on the GPU.
+fetch_column <- function(x, col) {
+  .subset2(collect_frame(select_one_column(x, col)), 1L)
+}
+
+# One cell: the same, with a one-row gather before the transfer.
+fetch_cell <- function(x, col, row) {
+  one <- select_one_column(x, col)
+  one <- push_op(one, ast_slice(input_node(one), mode = "bracket",
+                                raw_indices = row, rows_resolved = TRUE))
+  .subset2(collect_frame(one), 1L)
+}
+
+select_one_column <- function(x, col) {
+  name <- current_schema(x)$names[[col]]
+  x <- set_tbl_gpu_field(x, "groups", character())
+  push_op(x, ast_select(input_node(x), name))
+}
+
+#' @export
+`$<-.tbl_gpu` <- function(x, name, value) {
+  if (switch(name, ptr = , schema = , lazy_ops = , groups = , exec_mode = ,
+             group_drop = TRUE, FALSE) &&
+      internal_caller(parent.frame())) {
+    return(set_tbl_gpu_field(x, name, value))
+  }
+  gpu_assign_column(x, value, function(stub) {
+    eval(call("$<-", stub, as.name(name), quote(value)))
+  })
+}
+
+#' @export
+`[[<-.tbl_gpu` <- function(x, ..., value) {
+  nd <- ...length()
+  if (nd == 1L && !missing(..1) && is_tbl_gpu_field(..1) && internal_caller(parent.frame())) {
+    return(set_tbl_gpu_field(x, ..1, value))
+  }
+  if (nd > 1L) {
+    stop(
+      "`[[<-` with a row and a column (`x[[i, j]] <- value`) is not supported for tbl_gpu.\n",
+      "Use `mutate()` to change values.",
+      call. = FALSE
+    )
+  }
+  # The subscript stays an unevaluated promise that tibble labels its
+  # messages with.
+  gpu_assign_column(x, value, function(stub) `[[<-`(stub, ..., value = value))
+}
+
+#' @export
+`[<-.tbl_gpu` <- function(x, i, j, value) {
+  stop(
+    "`[<-` is not supported for tbl_gpu: it cannot modify cells or several columns in place.\n",
+    "Use `mutate()` to add or change columns, and `x$col <- value` / `x[[\"col\"]] <- value` ",
+    "to set one.",
+    call. = FALSE
+  )
+}
+
+set_tbl_gpu_field <- function(x, name, value) {
+  cl <- oldClass(x)
+  x <- unclass(x)
+  x[[name]] <- value
+  class(x) <- cl
+  x
+}
+
+# Stub tibble for validating an assignment: the table's column names, `n`
+# rows, and a placeholder column that no assigned value can be identical to.
+assign_marker <- structure(0L, class = "cuplyr_assign_marker")
+
+assign_stub <- function(nms, n) {
+  tibble::new_tibble(stats::setNames(rep(list(assign_marker), length(nms)), nms), nrow = n)
+}
+
+# A plain, non-missing, finite length-one logical/integer/double/character: a
+# value that mutate() takes as a literal and types like tibble would (no
+# attributes: not a factor, Date, ...; no NA/NaN/Inf, whose literals are not
+# typed or kept the same way).
+is_plain_scalar <- function(v) {
+  length(v) == 1L && is.atomic(v) && is.null(attributes(v)) &&
+    (is.logical(v) || is.numeric(v) || is.character(v)) &&
+    !is.na(v) && !(is.double(v) && is.infinite(v))
+}
+
+# `x$col <- value` / `x[[j]] <- value` for tbl_gpu. `assign_fn(stub)` performs
+# the assignment on a stub tibble, so tibble validates the subscript, recycles
+# `value` to the row count and says what columns result.
+gpu_assign_column <- function(x, value, assign_fn) {
+  nms <- current_schema(x)$names
+
+  if (is.null(value)) {
+    # Dropping a column (or nothing): no row count needed, so no execution.
+    keep <- names(assign_fn(assign_stub(nms, 0L)))
+    if (identical(keep, nms)) {
+      return(x)
+    }
+    if (length(keep) == 0L) {
+      stop("A tbl_gpu cannot have zero columns.", call. = FALSE)
+    }
+    return(with_surviving_groups(x, push_op(ungrouped(x), ast_select(input_node(x), keep))))
+  }
+
+  if (is_plain_scalar(value)) {
+    # A length-one value recycles to any row count, so tibble's check does not
+    # need the real one, and the column is a literal in a mutate(): a lazy plan
+    # is extended, not run, and nothing is built on the host.
+    res <- assign_fn(assign_stub(nms, 1L))
+    changed <- changed_columns(res)
+    # (Not over a factor column: mutate() would keep the old column's levels.)
+    if (length(changed) == 1L && is_plain_scalar(.subset2(res, changed)) &&
+        !changed %in% names(current_schema(x)$factor_levels)) {
+      u <- ungrouped(x)
+      out <- rlang::inject(dplyr::mutate(u, !!changed := !!.subset2(res, changed)))
+      if (identical(names(res), current_schema(out)$names)) {
+        return(with_surviving_groups(x, out))
+      }
+    }
+  }
+
+  # The row count is the one AFTER pending operations.
+  m <- if (has_pending_ops(x)) compute(x) else x
+  res <- assign_fn(assign_stub(nms, gpu_dim(.subset2(m, "ptr"))[[1L]]))
+
+  final_names <- names(res)
+  changed <- changed_columns(res)
+  new_cols <- lapply(stats::setNames(changed, changed), function(nm) {
+    v <- .subset2(res, nm)
+    if (is.data.frame(v) || is.matrix(v) || is.array(v) || (is.list(v) && !inherits(v, "POSIXlt"))) {
+      stop(
+        "Can't assign a data frame, matrix or list as a tbl_gpu column (`", nm, "`).\n",
+        "A GPU column must be an atomic vector.",
+        call. = FALSE
+      )
+    }
+    v
+  })
+  apply_col_changes(x, m, final_names, new_cols)
+}
+
+# Names of the columns of a stub-assignment result that were assigned (they no
+# longer hold the placeholder).
+changed_columns <- function(res) {
+  nms <- names(res)
+  nms[!vapply(nms, function(nm) identical(.subset2(res, nm), assign_marker), logical(1))]
+}
+
+# `x` without its groups (what the one-column helpers and the assignment work on).
+ungrouped <- function(x) set_tbl_gpu_field(x, "groups", character())
+
+# `out`, a table derived from the ungrouped `x`, regrouped by the group
+# columns of `x` that it still has, keeping `x`'s `.drop` while any survive.
+with_surviving_groups <- function(x, out) {
+  keep <- intersect(.subset2(x, "groups"), current_schema(out)$names)
+  out <- set_tbl_gpu_field(out, "groups", keep)
+  set_tbl_gpu_field(out, "group_drop",
+                    if (length(keep) > 0L) .subset2(x, "group_drop") %||% TRUE else TRUE)
 }

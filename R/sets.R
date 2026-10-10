@@ -347,7 +347,7 @@ union.tbl_gpu <- function(x, y, ...) {
 
   if (chk$needs_fallback) {
     return(gpu_fallback("union", x, function(tbl) {
-      dplyr::union(tbl, collect(y))
+      dplyr::union(tbl, collect_other_side(y))
     }))
   }
 
@@ -370,7 +370,7 @@ union_all.tbl_gpu <- function(x, y, ...) {
 
   if (chk$needs_fallback) {
     return(gpu_fallback("union_all", x, function(tbl) {
-      dplyr::union_all(tbl, collect(y))
+      dplyr::union_all(tbl, collect_other_side(y))
     }))
   }
 
@@ -392,7 +392,7 @@ intersect.tbl_gpu <- function(x, y, ...) {
 
   if (chk$needs_fallback) {
     return(gpu_fallback("intersect", x, function(tbl) {
-      dplyr::intersect(tbl, collect(y))
+      dplyr::intersect(tbl, collect_other_side(y))
     }))
   }
 
@@ -414,7 +414,7 @@ setdiff.tbl_gpu <- function(x, y, ...) {
 
   if (chk$needs_fallback) {
     return(gpu_fallback("setdiff", x, function(tbl) {
-      dplyr::setdiff(tbl, collect(y))
+      dplyr::setdiff(tbl, collect_other_side(y))
     }))
   }
 
@@ -436,7 +436,7 @@ symdiff.tbl_gpu <- function(x, y, ...) {
 
   if (chk$needs_fallback) {
     return(gpu_fallback("symdiff", x, function(tbl) {
-      dplyr::symdiff(tbl, collect(y))
+      dplyr::symdiff(tbl, collect_other_side(y))
     }))
   }
 
@@ -467,7 +467,7 @@ setequal.tbl_gpu <- function(x, y, ...) {
 
   if (chk$needs_fallback) {
     return(gpu_fallback("setequal", x, function(tbl) {
-      dplyr::setequal(tbl, collect(y))
+      dplyr::setequal(tbl, collect_other_side(y))
     }, as_is = TRUE))
   }
 

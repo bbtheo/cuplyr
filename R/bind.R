@@ -91,6 +91,39 @@ bind_rows.default <- function(..., .id = NULL) {
   bind_rows_route(..., .id = .id)
 }
 
+#' Base `rbind()` / `cbind()` for GPU tables
+#'
+#' `rbind(gt, ...)` is [bind_rows()] (keeping the first table's groups) and
+#' `cbind(gt, ...)` is [bind_cols()], so
+#' the result is a `tbl_gpu` built on the GPU (base R would otherwise bind the
+#' internal fields of the list). Base R picks the method from the arguments, so
+#' this applies when a `tbl_gpu` comes first (or no argument is a plain
+#' `data.frame`).
+#'
+#' @param ... `tbl_gpu`s, data frames and vectors, as for [bind_rows()] /
+#'   [bind_cols()].
+#' @param deparse.level Ignored.
+#' @return A `tbl_gpu`.
+#' @name tbl_gpu-rbind
+#' @export
+rbind.tbl_gpu <- function(..., deparse.level = 1) {
+  out <- bind_rows(...)
+  # Like `rbind()` of data frames (and dplyr's `bind_rows()`), the result keeps
+  # the first input's grouping. (cuplyr's `bind_rows()` clears it.)
+  first <- ..1
+  if (is_tbl_gpu(first) && is_tbl_gpu(out)) {
+    out$groups <- intersect(first$groups, out$schema$names)
+    out$group_drop <- if (length(out$groups) > 0L) first$group_drop %||% TRUE else TRUE
+  }
+  out
+}
+
+#' @rdname tbl_gpu-rbind
+#' @export
+cbind.tbl_gpu <- function(..., deparse.level = 1) {
+  bind_cols(...)
+}
+
 # See bind_cols_route(). After flattening, the inputs are checked the way
 # dplyr::bind_rows() checks them, so a call dplyr rejects fails with dplyr's
 # message on the GPU path too.
@@ -289,14 +322,17 @@ bind_cols_gpu <- function(dots, .name_repair = "unique") {
   # Call C++ function
   new_ptr <- gpu_bind_cols_impl(ptrs)
 
-  # Preserve groups from first table
-  groups <- dots[[1]]$groups
+  # Preserve groups (and their `.drop`) from first table. dplyr regroups the
+  # output by name, so a group column renamed by repair (`bind_cols(g, g)`)
+  # no longer groups it.
+  groups <- intersect(dots[[1]]$groups, repaired_names)
 
   new_tbl_gpu(
     ptr = new_ptr,
     schema = list(names = repaired_names, types = all_types,
                   factor_levels = factor_levels),
     groups = groups,
+    group_drop = if (length(groups) > 0L) dots[[1]]$group_drop %||% TRUE else TRUE,
     exec_mode = "eager"
   )
 }
@@ -688,6 +724,7 @@ remap_factor_column <- function(tbl, col_name, current_levels, target_levels) {
     schema = list(names = tbl$schema$names, types = tbl$schema$types,
                   factor_levels = tbl$schema$factor_levels),
     groups = tbl$groups,
+    group_drop = tbl$group_drop %||% TRUE,
     exec_mode = "eager"
   )
 }
@@ -871,6 +908,7 @@ cast_column <- function(tbl, col_name, target_type, source_levels = NULL) {
     schema = list(names = tbl$schema$names, types = new_types,
                   factor_levels = new_factor_levels),
     groups = tbl$groups,
+    group_drop = tbl$group_drop %||% TRUE,
     exec_mode = "eager"
   )
 }

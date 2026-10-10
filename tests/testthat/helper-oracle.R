@@ -28,13 +28,14 @@
 #    `arrange_by = c("col1", "col2")` to sort both sides before comparing
 #    when order is not part of the contract being tested.
 #
-# 3. Grouping metadata: `collect.tbl_gpu()` always returns a plain tibble
-#    (see R/collect.R) -- it never restores `group_by()` structure, unlike
-#    `dplyr::collect()` on a database backend. So there is nothing to compare
-#    on the *post-collect* object. Instead we capture `dplyr::group_vars()`
-#    on the pipeline's return value BEFORE collecting on both sides: the
-#    oracle's tibble/grouped-df result, and the GPU's tbl_gpu result (via
-#    `group_vars.tbl_gpu()`, i.e. `$groups`). `summarise()`'s `.groups=`
+# 3. Grouping metadata: `collect.tbl_gpu()` keeps the grouping, like
+#    `dplyr::collect()` on a database backend (a grouped `tbl_gpu` collects to a
+#    `grouped_df` with the same `.drop`). The oracle ungroups both sides before
+#    comparing the data (`oracle_normalize()`), and compares the grouping
+#    separately: we capture `dplyr::group_vars()` on the pipeline's return
+#    value BEFORE collecting on both sides: the oracle's tibble/grouped-df
+#    result, and the GPU's tbl_gpu result (via `group_vars.tbl_gpu()`, i.e.
+#    `$groups`). `summarise()`'s `.groups=`
 #    semantics (Phase 6, task 3: real `"drop_last"` default, `"keep"`,
 #    `"drop"`, matching dplyr exactly -- see R/summarise.R's
 #    `resolve_summarise_groups()`) are no longer a divergence, so oracle

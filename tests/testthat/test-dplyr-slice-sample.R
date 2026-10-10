@@ -168,7 +168,7 @@ test_that("group_by()-grouped slice_sample(n=) draws/orders by ascending group k
   set.seed(11)
   gpu_res <- dplyr::slice_sample(gt, n = 1)
   expect_equal(gpu_res$groups, "g")
-  gpu <- collect(gpu_res)
+  gpu <- dplyr::ungroup(collect(gpu_res))
 
   expect_equal(gpu, tibble::as_tibble(dplyr::ungroup(oracle)))
   # Output really is reordered into ascending group-key order, not input order.
@@ -183,7 +183,7 @@ test_that("group_by()-grouped slice_sample(replace = TRUE) oversampling per grou
   set.seed(22)
   oracle <- df |> dplyr::group_by(g) |> dplyr::slice_sample(n = 4, replace = TRUE)
   set.seed(22)
-  gpu <- collect(dplyr::slice_sample(gt, n = 4, replace = TRUE))
+  gpu <- dplyr::ungroup(collect(dplyr::slice_sample(gt, n = 4, replace = TRUE)))
 
   expect_equal(nrow(oracle), 8L)
   expect_equal(gpu, tibble::as_tibble(dplyr::ungroup(oracle)))
@@ -197,7 +197,7 @@ test_that("group_by()-grouped slice_sample() with single-row groups matches", {
   set.seed(33)
   oracle <- df |> dplyr::group_by(g) |> dplyr::slice_sample(n = 1)
   set.seed(33)
-  gpu <- collect(dplyr::slice_sample(gt, n = 1))
+  gpu <- dplyr::ungroup(collect(dplyr::slice_sample(gt, n = 1)))
 
   expect_equal(gpu, tibble::as_tibble(dplyr::ungroup(oracle)))
 
@@ -205,7 +205,7 @@ test_that("group_by()-grouped slice_sample() with single-row groups matches", {
   set.seed(44)
   oracle2 <- df |> dplyr::group_by(g) |> dplyr::slice_sample(n = 3, replace = TRUE)
   set.seed(44)
-  gpu2 <- collect(dplyr::slice_sample(gt, n = 3, replace = TRUE))
+  gpu2 <- dplyr::ungroup(collect(dplyr::slice_sample(gt, n = 3, replace = TRUE)))
   expect_equal(gpu2, tibble::as_tibble(dplyr::ungroup(oracle2)))
 })
 
@@ -217,7 +217,7 @@ test_that("group_by()-grouped slice_sample() with an NA group key matches (NA gr
   set.seed(66)
   oracle <- df |> dplyr::group_by(g) |> dplyr::slice_sample(n = 1)
   set.seed(66)
-  gpu <- collect(dplyr::slice_sample(gt, n = 1))
+  gpu <- dplyr::ungroup(collect(dplyr::slice_sample(gt, n = 1)))
 
   expect_equal(gpu, tibble::as_tibble(dplyr::ungroup(oracle)))
 })
@@ -293,7 +293,7 @@ test_that("slice_sample() on a lazy tbl_gpu with pending ops still matches dplyr
   set.seed(5)
   gpu_res <- dplyr::slice_sample(gt, n = 1)
   expect_equal(gpu_res$exec_mode, "lazy")
-  gpu <- collect(gpu_res)
+  gpu <- dplyr::ungroup(collect(gpu_res))
 
   expect_equal(gpu, tibble::as_tibble(dplyr::ungroup(oracle)))
 })
@@ -347,7 +347,7 @@ test_that("grouped slice_sample(weight_by=) falls back to CPU, notifies, and sti
   oracle <- df |> dplyr::group_by(g) |> dplyr::slice_sample(n = 1, weight_by = w)
   set.seed(13)
   expect_warning(
-    gpu <- collect(dplyr::slice_sample(gt, n = 1, weight_by = w)),
+    gpu <- dplyr::ungroup(collect(dplyr::slice_sample(gt, n = 1, weight_by = w))),
     "slice_sample.*fell back to CPU evaluation"
   )
 

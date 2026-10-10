@@ -241,7 +241,7 @@ gpu_proto <- function(x) {
     return(tibble::tibble())
   }
   ptr <- vctrs_null_table_ptr(schema, 0L)
-  collect(new_tbl_gpu(ptr = ptr, schema = schema))
+  collect_frame(new_tbl_gpu(ptr = ptr, schema = schema))
 }
 
 # ---------------------------------------------------------------------------
@@ -327,7 +327,7 @@ is_handle_frame <- function(x) {
 restore_from_data <- function(x, to) {
   out <- tbl_gpu(tibble::as_tibble(x), lazy = identical(to$exec_mode, "lazy"))
   out$groups <- intersect(to$groups, out$schema$names)
-  out$group_drop <- to$group_drop %||% TRUE
+  out$group_drop <- if (length(out$groups) > 0L) to$group_drop %||% TRUE else TRUE
   out
 }
 
@@ -392,7 +392,7 @@ vec_restore.tbl_gpu <- function(x, to, ...) {
 
 collected_frame <- function(x, what) {
   cuplyr_fallback_notify("vctrs", what)
-  as.data.frame(collect(x))
+  as.data.frame(collect_frame(x))
 }
 
 #' @exportS3Method vctrs::vec_proxy_equal
@@ -472,7 +472,7 @@ cast_gpu_to_gpu <- function(x, to, ..., x_arg = "", to_arg = "", call = rlang::c
   }
   cuplyr_fallback_notify("vctrs", "vec_cast() between tbl_gpu layouts")
   casted <- vctrs::vec_cast(
-    collect(x), gpu_proto(to), x_arg = x_arg, to_arg = to_arg, call = call
+    collect_frame(x), gpu_proto(to), x_arg = x_arg, to_arg = to_arg, call = call
   )
   restore_from_data(casted, to)
 }
@@ -491,7 +491,7 @@ cast_gpu_to_df <- function(x, to, ..., x_arg = "", to_arg = "", call = rlang::ca
   if (inherits(to, "grouped_df")) {
     to <- dplyr::ungroup(to)
   }
-  vctrs::vec_cast(collect(x), to, x_arg = x_arg, to_arg = to_arg, call = call)
+  vctrs::vec_cast(collect_frame(x), to, x_arg = x_arg, to_arg = to_arg, call = call)
 }
 
 #' @exportS3Method vctrs::vec_cast tbl_gpu.tbl_gpu

@@ -11,9 +11,10 @@
 #' @param .add If `FALSE` (default), will override existing groups. If `TRUE`,
 #'   will add to existing groups.
 #' @param .drop Whether to drop unobserved factor-level combinations from
-#'   [group_data()]/[group_keys()]/[n_groups()]/etc. Defaults to `TRUE`
-#'   (dplyr's own default). See "`.drop` semantics" below for the exact
-#'   scope of what's honored.
+#'   [group_data()]/[group_keys()]/[n_groups()]/etc. Defaults to
+#'   `group_by_drop_default(.data)`: `TRUE` for an ungrouped table, the
+#'   table's current setting for a grouped one (as in dplyr). See "`.drop`
+#'   semantics" below for the exact scope of what's honored.
 #'
 #' @return A grouped `tbl_gpu` object. The object has the same data but with
 #'   grouping columns recorded for use by [summarise()].
@@ -57,19 +58,18 @@
 #' cross the placeholder against every observed non-factor value; see
 #' `compute_group_data()`, R/group-by.R, for the exact algorithm).
 #'
-#' This is honored for the immediate `group_by(..., .drop = FALSE) |>
-#' group_data()`-style call chain, but -- like `$groups` normally does not
-#' need special handling to survive intervening verbs -- `.drop` is stored
-#' as a single boolean field on the returned `tbl_gpu` (`$group_drop`) that
-#' is **not** re-threaded through every other verb's own `tbl_gpu`
-#' construction (`push_op()`, `push_join()`, `gpu_fallback()`, etc. all
-#' default it back to `TRUE`). Full propagation would require touching
-#' every construction site in the codebase for a rarely-used flag --
-#' deliberately deferred (documented, not silently wrong: the common
-#' `group_by(.drop = FALSE) |> group_data()` pattern works; `group_by(.drop
-#' = FALSE) |> filter(...) |> group_data()` silently reverts to `.drop =
-#' TRUE` semantics, matching neither an error nor a crash, just dplyr's
-#' default).
+#' `.drop` is stored as a single boolean on the returned `tbl_gpu`
+#' (`$group_drop`) and carried by `push_op()`/`push_join()` through every verb
+#' that keeps a group column (and by `count()`, `add_count()` and
+#' `slice_sample()`, which build their result directly); it is reset to `TRUE`
+#' once no group column is left. Like dplyr, `.drop` defaults to the table's
+#' current setting, so regrouping a `.drop = FALSE` table keeps it.
+#'
+#' What is *not* carried is dplyr's fixed group-keys table: groups are
+#' recomputed from the data each time, so an empty group of a non-factor
+#' column that `filter()` or `slice()` emptied vanishes from `group_data()`
+#' (dplyr keeps it, for any column type). Empty factor-level groups are
+#' re-added from the declared levels.
 #'
 #' @seealso
 #' \code{\link{summarise.tbl_gpu}} for aggregating grouped data,
@@ -101,7 +101,8 @@
 #'     summarise(mean_mpg = mean(mpg)) |>
 #'     collect()
 #' }
-group_by.tbl_gpu <- function(.data, ..., .add = FALSE, .drop = TRUE) {
+group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
+                             .drop = dplyr::group_by_drop_default(.data)) {
   dots <- rlang::enquos(...)
 
   if (length(dots) == 0) {
@@ -163,7 +164,8 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE, .drop = TRUE) {
     schema = working$schema,
     lazy_ops = working$lazy_ops,
     groups = new_groups,
-    group_drop = .drop,
+    # dots that select no column leave the table ungrouped, `.drop` and all
+    group_drop = if (length(new_groups) > 0L) .drop else TRUE,
     exec_mode = working$exec_mode
   )
 }
@@ -295,10 +297,11 @@ tbl_vars.tbl_gpu <- function(x) {
 #' `dplyr::group_by_drop_default()` is a generic dplyr's own internals call
 #' to decide the default `.drop=` value for verbs built on top of
 #' `group_by()` (e.g. `group_trim()`'s own default, see R/fallback.R). The
-#' `.default` method always returns `TRUE`; this method instead reports
-#' whichever value the table's own most recent `group_by(..., .drop=)` call
-#' recorded (`$group_drop`, see `group_by.tbl_gpu()`'s own "`.drop`
-#' semantics" docs for the scope of what's tracked).
+#' `.default` method always returns `TRUE`; this method returns `TRUE` for an
+#' ungrouped table and otherwise whichever value the table's own most recent
+#' `group_by(..., .drop=)` call recorded (`$group_drop`, see
+#' `group_by.tbl_gpu()`'s own "`.drop` semantics" docs for the scope of
+#' what's tracked).
 #'
 #' @param .tbl A `tbl_gpu` object.
 #' @return `TRUE` or `FALSE`.
@@ -307,7 +310,12 @@ tbl_vars.tbl_gpu <- function(x) {
 #' @importFrom dplyr group_by_drop_default
 #' @keywords internal
 group_by_drop_default.tbl_gpu <- function(.tbl) {
-  isTRUE(.tbl$group_drop %||% TRUE)
+  # dplyr reports TRUE for any ungrouped table; a stale `$group_drop` left on
+  # one must not leak into the next group_by().
+  if (length(.subset2(.tbl, "groups")) == 0L) {
+    return(TRUE)
+  }
+  isTRUE(.subset2(.tbl, "group_drop") %||% TRUE)
 }
 
 # Internal: Parse column names from group_by expressions
@@ -420,7 +428,7 @@ compute_group_data <- function(.data) {
   }
 
   keys_tbl <- new_tbl_gpu(ptr = info$keys, schema = keys_schema, exec_mode = "eager")
-  keys_df <- tibble::as_tibble(collect(keys_tbl))
+  keys_df <- tibble::as_tibble(collect_frame(keys_tbl))
 
   offsets <- info$offsets
   perm <- info$perm

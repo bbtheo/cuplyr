@@ -726,8 +726,8 @@ estimate_gpu_bytes <- function(nrow, types) {
 }
 
 warn_if_join_too_large <- function(join_type, x, y, join_spec, suffix, keep) {
-  dims_x <- tryCatch(dim(x), error = function(e) NULL)
-  dims_y <- tryCatch(dim(y), error = function(e) NULL)
+  dims_x <- tryCatch(base_dim(x), error = function(e) NULL)
+  dims_y <- tryCatch(base_dim(y), error = function(e) NULL)
   if (is.null(dims_x) || is.null(dims_y)) {
     return(invisible(NULL))
   }
@@ -1226,7 +1226,7 @@ check_join_cardinality <- function(diag, join_type, multiple, relationship, unma
 #' `y_tbl` is collected once and reused across every retry-shaped caller.
 #' @keywords internal
 join_route_to_fallback <- function(verb_name, verb_fn, x, y, args, user_env = NULL) {
-  y_tbl <- collect(y)
+  y_tbl <- collect_other_side(y)
   # `by = character()`: dplyr's own deprecation warning would blame the
   # calling package (cuplyr) and add lifecycle's "report the issue" bullets, so
   # warn here with the user's frame and mute the copy dplyr raises inside the

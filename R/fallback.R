@@ -54,7 +54,7 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE) {
 
   cuplyr_fallback_notify(verb_name, sprintf("%s()", verb_name))
 
-  tbl <- collect(materialized)
+  tbl <- collect_frame(materialized)
 
   # Restore dplyr grouping metadata on the CPU side so grouped semantics
   # (per-group aggregation, grouped slice_min/slice_max, etc.) work exactly
@@ -118,7 +118,7 @@ has_list_column <- function(df) {
 # @keywords internal
 collect_other_side <- function(y) {
   if (is_tbl_gpu(y)) {
-    return(collect(y))
+    return(collect_frame(y))
   }
   y
 }

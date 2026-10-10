@@ -11,7 +11,7 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
     return(invisible(x))
   }
 
-  dims <- dim(x)
+  dims <- base_dim(x)
   types <- gpu_col_types(x$ptr)
   col_names <- x$schema$names
 

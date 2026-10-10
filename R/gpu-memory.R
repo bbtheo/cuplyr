@@ -42,7 +42,7 @@ gpu_memory_usage <- function(x) {
     return(NA_real_)
   }
 
-  dims <- tryCatch(dim(x), error = function(e) NULL)
+  dims <- tryCatch(base_dim(x), error = function(e) NULL)
   if (is.null(dims)) {
     return(NA_real_)
   }

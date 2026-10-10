@@ -10,16 +10,19 @@
 \item{x}{A \code{tbl_gpu} object.}
 }
 \value{
-An integer vector of length 2: c(nrow, ncol).
-Returns `c(NA, ncol)
+An integer vector of length 2: c(nrow, ncol). The row count is \code{NA}
+for a table that has no GPU data yet, and for \code{ncol()}/\code{NCOL()} of a lazy
+table with pending operations (which ignore it).
 }
 \description{
-Returns the number of rows and columns in a GPU table.
+Returns the number of rows and columns in a GPU table. For a lazy table
+with pending operations the row count is that of the RESULT, so the plan is
+run on the GPU (\code{compute()}, nothing is copied to R and \code{x} itself is not
+changed). \code{ncol()}/\code{NCOL()} only need the column count, so they are answered
+from the schema without running anything.
 }
 \examples{
 if (has_gpu()) {
-
-
-
+  dim(tbl_gpu(mtcars))
 }
 }

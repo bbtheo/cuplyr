@@ -66,10 +66,10 @@ infer_schema_full <- function(node) {
 #' @return List with `names` and `types` (and possibly `factor_levels`)
 #' @keywords internal
 current_schema <- function(.data) {
-  if (identical(.data$exec_mode, "lazy") && has_pending_ops(.data)) {
-    infer_schema_full(.data$lazy_ops)
+  if (identical(.subset2(.data, "exec_mode"), "lazy") && has_pending_ops(.data)) {
+    infer_schema_full(.subset2(.data, "lazy_ops"))
   } else {
-    .data$schema
+    .subset2(.data, "schema")
   }
 }
 
@@ -88,14 +88,14 @@ current_schema <- function(.data) {
 #' @return An `ast_node` to use as the `input` of a new node
 #' @keywords internal
 input_node <- function(.data) {
-  if (identical(.data$exec_mode, "lazy")) {
+  if (identical(.subset2(.data, "exec_mode"), "lazy")) {
     if (has_pending_ops(.data)) {
-      return(.data$lazy_ops)
+      return(.subset2(.data, "lazy_ops"))
     }
-    return(ast_source(.data$schema))
+    return(ast_source(.subset2(.data, "schema")))
   }
 
-  ast_source(.data$schema, source_ptr = .data$ptr)
+  ast_source(.subset2(.data, "schema"), source_ptr = .subset2(.data, "ptr"))
 }
 
 #' Restrict factor level metadata to columns that survive an op
@@ -209,26 +209,31 @@ push_op <- function(.data, node) {
   new_schema <- infer_schema(node)
   new_schema$factor_levels <- propagate_factor_levels(node, input_schema, new_schema$names)
 
-  new_groups <- propagate_groups(node, .data$groups, new_schema)
+  new_groups <- propagate_groups(node, .subset2(.data, "groups"), new_schema)
+  # `.drop` belongs to the grouping: kept while any group column survives, back
+  # to the default once the table is ungrouped (a later group_by() starts over).
+  new_group_drop <- if (length(new_groups) > 0L) .subset2(.data, "group_drop") %||% TRUE else TRUE
 
-  if (identical(.data$exec_mode, "lazy")) {
+  if (identical(.subset2(.data, "exec_mode"), "lazy")) {
     return(new_tbl_gpu(
-      ptr = .data$ptr,
+      ptr = .subset2(.data, "ptr"),
       schema = new_schema,
       lazy_ops = node,
       groups = new_groups,
-      exec_mode = .data$exec_mode
+      exec_mode = "lazy",
+      group_drop = new_group_drop
     ))
   }
 
-  new_ptr <- wrap_gpu_call(node$type, lower_and_execute(node, .data$ptr))
+  new_ptr <- wrap_gpu_call(node$type, lower_and_execute(node, .subset2(.data, "ptr")))
 
   new_tbl_gpu(
     ptr = new_ptr,
     schema = new_schema,
     lazy_ops = NULL,
     groups = new_groups,
-    exec_mode = .data$exec_mode
+    exec_mode = .subset2(.data, "exec_mode"),
+    group_drop = new_group_drop
   )
 }
 
@@ -311,7 +316,8 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
   new_schema <- infer_schema(join_ast)
 
   new_groups <- intersect(x$groups, new_schema$names)
-  new_group_drop <- x$group_drop %||% TRUE
+  # As in push_op(): `.drop` goes with the last surviving group column.
+  new_group_drop <- if (length(new_groups) > 0L) x$group_drop %||% TRUE else TRUE
 
   if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
     return(new_tbl_gpu(

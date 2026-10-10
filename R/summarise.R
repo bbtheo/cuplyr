@@ -1147,6 +1147,7 @@ create_temp_column <- function(.data, col_name, ir, keep_bool = FALSE) {
     ),
     lazy_ops = .data$lazy_ops,
     groups = .data$groups,
+    group_drop = .data$group_drop %||% TRUE,
     exec_mode = .data$exec_mode
   )
 }

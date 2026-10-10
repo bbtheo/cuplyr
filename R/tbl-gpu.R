@@ -237,21 +237,47 @@ as_tbl_gpu <- function(x, ...) {
 
 #' Get dimensions of a GPU table
 #'
-#' Returns the number of rows and columns in a GPU table.
+#' Returns the number of rows and columns in a GPU table. For a lazy table
+#' with pending operations the row count is that of the RESULT, so the plan is
+#' run on the GPU (`compute()`, nothing is copied to R and `x` itself is not
+#' changed). `ncol()`/`NCOL()` only need the column count, so they are answered
+#' from the schema without running anything.
 #'
 #' @param x A `tbl_gpu` object.
 #'
-#' @return An integer vector of length 2: c(nrow, ncol).
-#'   Returns `c(NA, ncol)
+#' @return An integer vector of length 2: c(nrow, ncol). The row count is `NA`
+#'   for a table that has no GPU data yet, and for `ncol()`/`NCOL()` of a lazy
+#'   table with pending operations (which ignore it).
 #'
 #' @export
 #' @examples
 #' if (has_gpu()) {
-#'
-#'
-#'
+#'   dim(tbl_gpu(mtcars))
 #' }
 dim.tbl_gpu <- function(x) {
+  if (is.null(x$ptr)) {
+    return(c(NA_integer_, length(x$schema$names)))
+  }
+  if (has_pending_ops(x)) {
+    # `ncol(x)` is `dim(x)[2L]` and `NCOL(x)` the same, neither is generic.
+    caller <- sys.parent()
+    if (caller > 0L) {
+      fn <- sys.function(caller)
+      if (identical(fn, base::ncol) || identical(fn, base::NCOL)) {
+        return(c(NA_integer_, length(current_schema(x)$names)))
+      }
+    }
+    return(gpu_dim(compute(x)$ptr))
+  }
+  gpu_dim(x$ptr)
+}
+
+# Dimensions of the table `x$ptr` points at, WITHOUT running pending lazy
+# operations (so for a lazy table with pending ops this is the size of its
+# base table, not of its result). For cheap estimates (printing, memory
+# accounting, join-size warnings) that must never execute a plan, which
+# `dim()` does.
+base_dim <- function(x) {
   if (is.null(x$ptr)) {
     c(NA_integer_, length(x$schema$names))
   } else {

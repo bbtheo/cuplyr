@@ -4,7 +4,7 @@
 \alias{group_by.tbl_gpu}
 \title{Group a GPU table by one or more columns}
 \usage{
-\method{group_by}{tbl_gpu}(.data, ..., .add = FALSE, .drop = TRUE)
+\method{group_by}{tbl_gpu}(.data, ..., .add = FALSE, .drop = dplyr::group_by_drop_default(.data))
 }
 \arguments{
 \item{.data}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
@@ -17,9 +17,10 @@ tidyselect expressions, or \code{name = expression} computed columns (see
 will add to existing groups.}
 
 \item{.drop}{Whether to drop unobserved factor-level combinations from
-\code{\link[dplyr:group_data]{group_data()}}/\code{\link[dplyr:group_keys]{group_keys()}}/\code{\link[dplyr:n_groups]{n_groups()}}/etc. Defaults to \code{TRUE}
-(dplyr's own default). See "\code{.drop} semantics" below for the exact
-scope of what's honored.}
+\code{\link[dplyr:group_data]{group_data()}}/\code{\link[dplyr:group_keys]{group_keys()}}/\code{\link[dplyr:n_groups]{n_groups()}}/etc. Defaults to
+\code{group_by_drop_default(.data)}: \code{TRUE} for an ungrouped table, the
+table's current setting for a grouped one (as in dplyr). See "\code{.drop}
+semantics" below for the exact scope of what's honored.}
 }
 \value{
 A grouped \code{tbl_gpu} object. The object has the same data but with
@@ -70,16 +71,18 @@ columns in that placeholder row are \code{NA} (dplyr does not attempt to
 cross the placeholder against every observed non-factor value; see
 \code{compute_group_data()}, R/group-by.R, for the exact algorithm).
 
-This is honored for the immediate \code{group_by(..., .drop = FALSE) |> group_data()}-style call chain, but -- like \verb{$groups} normally does not
-need special handling to survive intervening verbs -- \code{.drop} is stored
-as a single boolean field on the returned \code{tbl_gpu} (\verb{$group_drop}) that
-is \strong{not} re-threaded through every other verb's own \code{tbl_gpu}
-construction (\code{push_op()}, \code{push_join()}, \code{gpu_fallback()}, etc. all
-default it back to \code{TRUE}). Full propagation would require touching
-every construction site in the codebase for a rarely-used flag --
-deliberately deferred (documented, not silently wrong: the common
-\code{group_by(.drop = FALSE) |> group_data()} pattern works; \code{group_by(.drop = FALSE) |> filter(...) |> group_data()} silently reverts to \code{.drop = TRUE} semantics, matching neither an error nor a crash, just dplyr's
-default).
+\code{.drop} is stored as a single boolean on the returned \code{tbl_gpu}
+(\verb{$group_drop}) and carried by \code{push_op()}/\code{push_join()} through every verb
+that keeps a group column (and by \code{count()}, \code{add_count()} and
+\code{slice_sample()}, which build their result directly); it is reset to \code{TRUE}
+once no group column is left. Like dplyr, \code{.drop} defaults to the table's
+current setting, so regrouping a \code{.drop = FALSE} table keeps it.
+
+What is \emph{not} carried is dplyr's fixed group-keys table: groups are
+recomputed from the data each time, so an empty group of a non-factor
+column that \code{filter()} or \code{slice()} emptied vanishes from \code{group_data()}
+(dplyr keeps it, for any column type). Empty factor-level groups are
+re-added from the declared levels.
 }
 }
 \examples{

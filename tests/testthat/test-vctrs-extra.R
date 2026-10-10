@@ -142,7 +142,7 @@ test_that("names<- keeps groups and factor levels in step", {
   gg <- dplyr::group_by(tbl_gpu(df), g)
   out <- rlang::set_names(gg, c("G", "F", "X"))
   expect_identical(dplyr::group_vars(out), "G")
-  expect_identical(collect(out), tibble::tibble(G = df$g, F = df$f, X = df$x))
+  expect_identical(dplyr::ungroup(collect(out)), tibble::tibble(G = df$g, F = df$f, X = df$x))
 })
 
 test_that("names<- on a lazy table with pending ops renames through the AST", {
@@ -170,7 +170,7 @@ test_that("vec_cast() between layouts goes through the CPU cast and keeps groups
   p <- vctrs::vec_ptype2(a, b)
   expect_identical(dplyr::group_vars(p), "g")
   casted <- vctrs::vec_cast(a, p)
-  expect_identical(collect(casted), tibble::tibble(g = c(1, 2), x = c(1, 2)))
+  expect_identical(dplyr::ungroup(collect(casted)), tibble::tibble(g = c(1, 2), x = c(1, 2)))
   expect_identical(dplyr::group_vars(casted), "g")
 })
 
