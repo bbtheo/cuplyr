@@ -348,10 +348,22 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
     return(mutate_across_fallback(.data, dots, .keep, before_quo, after_quo, by_quo))
   }
 
-  cgid <- substitute_cur_group_id(.data, dots, verb_groups)
+  # Expand before cur_group_id() substitution, so a call that falls back
+  # never pays for the substitution's GPU work and the helper column is never
+  # in `.cols`'s selectable universe.
+  expanded <- expand_across_dots(dots, current_schema(.data), verb_groups, "mutate")
+  if (isTRUE(attr(expanded, "needs_fallback"))) {
+    return(mutate_across_fallback(.data, dots, .keep, before_quo, after_quo, by_quo))
+  }
+  # The CPU fallbacks below re-run dplyr on the table and dots as they were
+  # BEFORE cur_group_id() substitution, so dplyr computes cur_group_id()
+  # itself and the helper column never reaches the result.
+  fallback_data <- .data
+  fallback_dots <- expanded
+  cgid <- substitute_cur_group_id(.data, expanded, verb_groups)
   .data <- cgid$data
   orig_schema <- current_schema(.data)
-  dots <- expand_across_dots(cgid$dots, orig_schema, verb_groups, "mutate")
+  dots <- cgid$dots
 
   # Phase 11, task L1: universal expression-level CPU fallback. Every dot is
   # parsed via the SAME ir_parse_quo()-driven parser as before -- the only
@@ -361,15 +373,15 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   # hard stop() (now a defensive, internal-only fallback -- see that
   # function's `stop_on_unparseable` docs), it signals NULL back here, and
   # the WHOLE mutate() call is re-run on the CPU via mutate_expr_fallback(),
-  # with `dots` (already across()-expanded/cur_group_id()-substituted, same
-  # precedent as mutate_window_fallback()'s own re-run target) re-injected.
+  # on the pre-substitution table with the across()-expanded (but not
+  # cur_group_id()-substituted) dots re-injected.
   # A genuine THROWN error (e.g. an undefined column/environment variable)
   # is NOT caught here -- it propagates normally, preserving every existing
   # pinned error-message test (scratchpad/phase11_design.md's "NULL-vs-throw
   # trigger rule").
   expressions <- parse_mutate_dots(dots, orig_schema, "mutate", stop_on_unparseable = FALSE)
   if (is.null(expressions)) {
-    return(mutate_expr_fallback(.data, dots, .keep, before_quo, after_quo, by_quo))
+    return(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo))
   }
 
   # Phase 5, task W3: any dot containing a window-function call (row_number(),
@@ -380,8 +392,8 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   # scratchpad/phase5_window_design.md section 1.3.
   if (isTRUE(attr(expressions, "has_window"))) {
     return(mutate_window(
-      .data, dots, expressions, orig_schema, orig_names, orig_groups,
-      .keep, before_quo, after_quo, by_quo
+      .data, fallback_dots, expressions, orig_schema, orig_names, orig_groups,
+      .keep, before_quo, after_quo, by_quo, fallback_data = fallback_data
     ))
   }
 
@@ -436,10 +448,11 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 # R/lower.R). This is the "detect at plan time... never half-lower"
 # requirement from the design doc.
 #
-# @param .data The original tbl_gpu (BEFORE this mutate() call)
-# @param dots The original (already rlang::enquos()'d) dots -- needed
-#   verbatim for the CPU fallback path, which re-runs the real
-#   dplyr::mutate() call
+# @param .data The tbl_gpu to compute on (with cur_group_id()'s helper
+#   column, if this call substituted one)
+# @param dots The across()-expanded dots BEFORE cur_group_id() substitution
+#   -- only used by the CPU fallback path, which re-runs the real
+#   dplyr::mutate() call on `fallback_data`
 # @param expressions parse_mutate_dots()'s result: one make_mutate_expr()
 #   struct per dot, built from the RAW (window-containing) per-dot IR,
 #   parsed against `orig_schema` with the usual left-to-right dot-visibility
@@ -466,10 +479,12 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 #   unlowerable and we must re-run the original `dplyr::mutate()` call on
 #   the CPU (mutate_window_fallback()), so that fallback re-run honors
 #   `.by=` too
+# @param fallback_data The tbl_gpu as it was before cur_group_id()
+#   substitution; the CPU fallback runs on it so no helper column leaks
 # @return A new tbl_gpu
 # @keywords internal
 mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, orig_groups,
-                           keep, before_quo, after_quo, by_quo) {
+                           keep, before_quo, after_quo, by_quo, fallback_data = .data) {
   exprs_raw <- stats::setNames(
     lapply(expressions, `[[`, "ir"),
     vapply(expressions, `[[`, character(1), "output_col")
@@ -484,7 +499,7 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
     all(vapply(plan$all_specs, window_spec_lowerable, logical(1)))
 
   if (!all_lowerable) {
-    return(mutate_window_fallback(.data, dots, keep, before_quo, after_quo, by_quo))
+    return(mutate_window_fallback(fallback_data, dots, keep, before_quo, after_quo, by_quo))
   }
 
   result <- .data
@@ -621,10 +636,10 @@ mutate_across_fallback <- function(.data, dots, keep, before_quo, after_quo, by_
 # whose shape the expression IR doesn't recognize at all (Phase 11, task L1
 # -- the "universal expression-level CPU fallback"; see
 # scratchpad/phase11_design.md). Mirrors mutate_window_fallback()/
-# mutate_across_fallback() exactly (same re-injection pattern, same target
-# `.data`/`dots` -- already across()-expanded/cur_group_id()-substituted by
-# the time mutate.tbl_gpu() calls this, consistent with those two
-# precedents). This is what subsumes identity()/ifelse()/scale()/lengths()/
+# mutate_across_fallback() exactly (same re-injection pattern). The caller
+# passes the table and the across()-expanded dots from BEFORE cur_group_id()
+# substitution, so dplyr evaluates cur_group_id() itself and the helper
+# column never appears in the result. This is what subsumes identity()/ifelse()/scale()/lengths()/
 # toupper()/local-closure mutate dots -- and, more generally, ANY
 # unrecognized shape, not just window/across-family ones.
 # @keywords internal
@@ -736,6 +751,23 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     }
 
     step <- make_mutate_expr(new_name, ir, schema)
+
+    # The GPU holds a factor as bare INT32 codes, so only a bare copy of a
+    # factor column can stay native (its levels follow it, see
+    # propagate_factor_levels()). Any other factor-valued expression
+    # (if_else()/coalesce()/case_when()/lag() over factors) would compute on
+    # the codes and lose or mislabel the levels.
+    if (identical(unname(step$output_type), "DICTIONARY32") && !identical(ir$kind, "col")) {
+      if (!stop_on_unparseable) {
+        return(NULL)
+      }
+      stop(
+        verb, "() can't compute a factor-valued expression on the GPU.\n",
+        "Expression: ", rlang::quo_text(expr),
+        call. = FALSE
+      )
+    }
+
     expressions <- c(expressions, list(step))
 
     # Update the running schema so subsequent dots see this dot's output.
@@ -906,11 +938,20 @@ transmute.tbl_gpu <- function(.data, ...) {
       rlang::inject(dplyr::transmute(tbl, !!!dots))
     }))
   }
-  cgid <- substitute_cur_group_id(.data, dots, .data$groups)
+  expanded <- expand_across_dots(dots, current_schema(.data), .data$groups, "transmute")
+  if (isTRUE(attr(expanded, "needs_fallback"))) {
+    return(gpu_fallback("transmute", .data, function(tbl) {
+      rlang::inject(dplyr::transmute(tbl, !!!dots))
+    }))
+  }
+  # As in mutate.tbl_gpu(): the CPU fallback runs on the pre-substitution
+  # table and dots so cur_group_id()'s helper column can't leak.
+  fallback_data <- .data
+  fallback_dots <- expanded
+  cgid <- substitute_cur_group_id(.data, expanded, .data$groups)
   .data <- cgid$data
-
   schema <- current_schema(.data)
-  dots <- expand_across_dots(cgid$dots, schema, .data$groups, "transmute")
+  dots <- cgid$dots
 
   # Phase 11, task L1: same universal expression-level CPU fallback as
   # mutate.tbl_gpu() -- see mutate_expr_fallback()'s own docs for the full
@@ -918,8 +959,8 @@ transmute.tbl_gpu <- function(.data, ...) {
   expressions <- parse_mutate_dots(dots, schema, "transmute", warn_unnamed = FALSE,
                                     stop_on_unparseable = FALSE)
   if (is.null(expressions)) {
-    return(gpu_fallback("transmute", .data, function(tbl) {
-      rlang::inject(dplyr::transmute(tbl, !!!dots))
+    return(gpu_fallback("transmute", fallback_data, function(tbl) {
+      rlang::inject(dplyr::transmute(tbl, !!!fallback_dots))
     }))
   }
 

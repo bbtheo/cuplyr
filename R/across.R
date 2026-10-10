@@ -205,9 +205,20 @@ dots_need_fallback <- function(dots, treat_cur_group_id_as_deferred = FALSE) {
   } else {
     deferred_fallback_fns
   }
+  dot_names <- names(dots) %||% rep("", length(dots))
   any(vapply(
-    dots,
-    function(q) expr_needs_fallback(rlang::quo_get_expr(q), extra_names, top_level = TRUE),
+    seq_along(dots),
+    function(i) {
+      expr <- rlang::quo_get_expr(dots[[i]])
+      # A NAMED top-level across() packs a data-frame column, which a
+      # tbl_gpu can't hold: dplyr's own result (or, for filter(), its own
+      # named-input error) comes from the whole-call fallback.
+      if (!is.na(dot_names[i]) && nzchar(dot_names[i]) &&
+          identical(call_head_name(expr), "across")) {
+        return(TRUE)
+      }
+      expr_needs_fallback(expr, extra_names, top_level = TRUE)
+    },
     logical(1)
   ))
 }
@@ -298,10 +309,12 @@ verb_across_fallback <- function(verb_name, .data, call_fn) {
 #
 # @param .data A tbl_gpu (may be lazy with pending ops; materialized here
 #   only if actually needed)
-# @param dots A list of quosures (mutate()/filter()'s own dots, BEFORE
-#   across()/if_any()/if_all() expansion -- cur_group_id() substitution
-#   runs first, so any across()-generated dot inheriting `cur_column()`-
-#   substituted text never itself needs to worry about cur_group_id())
+# @param dots A list of quosures. mutate()/transmute() pass their dots
+#   AFTER across()/if_any()/if_all() expansion (so the helper column is never
+#   selectable and their CPU fallbacks can re-run the unsubstituted dots);
+#   filter() passes them BEFORE expansion (so the if_any()/if_all() piece
+#   check can type cur_group_id() pieces) and excludes the helper from
+#   `.cols` itself
 # @param group_cols Character vector, the effective group columns
 #   (`verb_groups` -- `.by=` columns if supplied, `.data$groups`
 #   otherwise)
@@ -389,8 +402,8 @@ schema_type_proxy_value <- function(type) {
 # Resolve a `.cols`/`pick()`-style tidyselect expression against the
 # columns of `schema` EXCLUDING `group_cols` (see this section's own
 # header comment). Returns the selected column names, in tidyselect's own
-# resolved order (duplicates/renames are not meaningful for across()'s own
-# `.cols`, so `allow_rename = FALSE`).
+# resolved order. Renames (`c(new = old)`) are allowed: the result is named
+# by the NEW names, its values are the OLD (source) column names.
 #
 # @param cols_expr A language object (the `.cols` argument's raw
 #   expression)
@@ -398,12 +411,13 @@ schema_type_proxy_value <- function(type) {
 # @param schema list(names=, types=)
 # @param group_cols Character vector, columns to exclude from the
 #   selectable universe entirely
-# @return Character vector of selected column names (possibly empty)
+# @return Named character vector: values are the selected source columns,
+#   names the output names (possibly empty)
 # @keywords internal
 resolve_across_cols <- function(cols_expr, env, schema, group_cols) {
   eligible <- setdiff(schema$names, group_cols)
   if (length(eligible) == 0) {
-    return(character())
+    return(stats::setNames(character(), character()))
   }
   eligible_types <- unname(schema$types[match(eligible, schema$names)])
 
@@ -414,9 +428,24 @@ resolve_across_cols <- function(cols_expr, env, schema, group_cols) {
   proxy_df <- tibble::as_tibble(proxy)
 
   sel <- tidyselect::eval_select(
-    expr = cols_expr, data = proxy_df, env = env, allow_rename = FALSE
+    expr = cols_expr, data = proxy_df, env = env, allow_rename = TRUE
   )
-  eligible[sel]
+  if (anyDuplicated(names(sel))) {
+    rlang::abort("Names must be unique.")
+  }
+  stats::setNames(eligible[sel], names(sel))
+}
+
+# `.cols` of a missing-`.cols` across()/if_any()/if_all(): dplyr's deprecated
+# everything() default, with its lifecycle warning.
+# @keywords internal
+default_across_cols <- function(fn) {
+  lifecycle::deprecate_warn(
+    "1.1.0", I(paste0("Using `", fn, "()` without supplying `.cols`")),
+    details = "Please supply `.cols` instead.",
+    env = asNamespace("dplyr"), user_env = rlang::global_env()
+  )
+  rlang::expr(tidyselect::everything())
 }
 
 # =============================================================================
@@ -490,6 +519,9 @@ parse_across_fns <- function(fns_expr, env, extra_args = list()) {
 parse_single_fn <- function(fn_expr, env, extra_args = list()) {
   if (is.symbol(fn_expr)) {
     fn_name <- as.character(fn_expr)
+    if (identical(fn_name, "identity") && length(extra_args) == 0) {
+      return(function(col_sym, col_name) col_sym)
+    }
     return(function(col_sym, col_name) {
       as.call(c(list(as.name(fn_name), col_sym), extra_args))
     })
@@ -580,16 +612,17 @@ if_any_all_proto <- function(.cols, .fns, ..., .names = NULL) NULL
 #   selectable universe
 # @return A named list of quosures (possibly length 0, if `.cols` matched
 #   no columns -- verified empirically: this is a silent no-op, not an
-#   error)
+#   error). Its `"needs_fallback"` attribute is `TRUE` when an output name is
+#   read by a later expansion (see the loop below).
 # @keywords internal
 expand_one_across <- function(expr, env, schema, group_cols) {
   matched <- rlang::call_match(expr, across_proto, defaults = FALSE)
   present <- as.list(matched)[-1]
 
-  if (is.null(present$.cols)) {
-    stop("across() requires a `.cols` argument.", call. = FALSE)
-  }
-  cols <- resolve_across_cols(present$.cols, env, schema, group_cols)
+  # An explicit `.cols = NULL` selects nothing; only an absent `.cols` takes
+  # the deprecated everything() default.
+  cols_expr <- if (".cols" %in% names(present)) present$.cols else default_across_cols("across")
+  cols <- resolve_across_cols(cols_expr, env, schema, group_cols)
   if (length(cols) == 0) {
     return(stats::setNames(list(), character()))
   }
@@ -620,17 +653,68 @@ expand_one_across <- function(expr, env, schema, group_cols) {
 
   out_names <- character()
   out_quos <- list()
-  for (col in cols) {
+  # dplyr evaluates every function of one across() against the data as it was
+  # before the across(); the expanded dots run in sequence, so an output name
+  # that a later expansion reads would change that expansion's values. The
+  # source column itself counts as read even when only a string names it
+  # (`get(cur_column())`), which all.vars() can't see.
+  hazard <- FALSE
+  for (i in seq_along(cols)) {
+    col <- cols[[i]]
     col_sym <- as.name(col)
     for (spec in specs) {
       built_expr <- spec$build(col_sym, col)
-      out_name <- apply_names_template(names_tmpl, col, spec$label %||% "")
+      out_name <- apply_names_template(names_tmpl, names(cols)[i], spec$label %||% "")
+      if (col %in% out_names || any(out_names %in% all.vars(built_expr))) {
+        hazard <- TRUE
+      }
       out_names <- c(out_names, out_name)
       out_quos <- c(out_quos, list(rlang::new_quosure(built_expr, env)))
     }
   }
   names(out_quos) <- out_names
+  attr(out_quos, "needs_fallback") <- hazard
   out_quos
+}
+
+# dplyr's wording for the class of a non-logical if_any()/if_all() piece.
+# @keywords internal
+across_type_label <- function(type) {
+  switch(type,
+    FLOAT64 = , FLOAT32 = "a double vector",
+    INT32 = , INT64 = "an integer vector",
+    STRING = "a character vector",
+    DICTIONARY32 = "a <factor> object",
+    TIMESTAMP_DAYS = "a <Date> object",
+    TIMESTAMP_SECONDS = , TIMESTAMP_MILLISECONDS = , TIMESTAMP_MICROSECONDS = ,
+    TIMESTAMP_NANOSECONDS = "a <POSIXct> object",
+    paste0("a ", tolower(type), " vector")
+  )
+}
+
+# if_any()/if_all() require every per-column predicate to be logical. dplyr
+# checks the values; here the piece's inferred type stands in for them, so a
+# piece the IR can't type is left to the normal parse path.
+# @param piece The instantiated predicate for `col`
+# @keywords internal
+check_across_predicate_piece <- function(piece, col, env, schema) {
+  # mutate() expands before substituting cur_group_id(), so a piece may still
+  # contain the call; type it as the INT32 helper it will become.
+  if (expr_contains_zero_arg_call(piece, "cur_group_id")) {
+    helper <- unique_temp_name("..cur_group_id..", schema$names)
+    piece <- substitute_zero_arg_call(piece, "cur_group_id", as.name(helper))
+    schema$names <- c(schema$names, helper)
+    schema$types <- c(schema$types, "INT32")
+  }
+  type <- tryCatch(suppressWarnings({
+    ir <- ir_parse_quo(rlang::new_quosure(piece, env), schema)
+    if (is.null(ir)) NULL else ir_infer_type(ir, schema)
+  }), error = function(e) NULL)
+  if (is.null(type) || identical(unname(type), "BOOL8")) {
+    return(invisible())
+  }
+  rlang::abort(sprintf("`%s` must be a logical vector, not %s.", col,
+                       across_type_label(unname(type))))
 }
 
 # Expand a top-level `if_any(.cols, .fns, ..., .names=)` / `if_all(...)`
@@ -644,21 +728,32 @@ expand_one_across <- function(expr, env, schema, group_cols) {
 # @param env The dot's own quosure environment
 # @param schema,group_cols As `expand_one_across()`
 # @param mode `"if_any"` or `"if_all"`
-# @return A single quosure (the folded predicate), or `NULL` if `.cols`
-#   matched no columns (there is no sensible empty-fold value to return
-#   without knowing the row count up front, so this is treated as a
-#   deferred shape by the caller rather than guessed at)
+# @param verb The calling verb; only `"summarise"` changes the result
+# @return A single quosure (the folded predicate; the literal FALSE/TRUE
+#   if `.cols` matched no columns)
 # @keywords internal
-expand_if_any_all <- function(expr, env, schema, group_cols, mode) {
+expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filter") {
   matched <- rlang::call_match(expr, if_any_all_proto, defaults = FALSE)
   present <- as.list(matched)[-1]
 
-  if (is.null(present$.cols)) {
-    stop(mode, "() requires a `.cols` argument.", call. = FALSE)
-  }
-  cols <- resolve_across_cols(present$.cols, env, schema, group_cols)
+  cols_expr <- if (".cols" %in% names(present)) present$.cols else default_across_cols(mode)
+  cols <- unname(resolve_across_cols(cols_expr, env, schema, group_cols))
   if (length(cols) == 0) {
-    return(NULL)
+    # dplyr: if_any() over nothing is FALSE, if_all() is TRUE
+    value <- identical(mode, "if_all")
+    # summarise() only knows aggregations, so a constant there is an
+    # aggregation over the first column's NA pattern; everywhere else it is
+    # the literal.
+    if (identical(verb, "summarise") && length(schema$names) > 0) {
+      col <- as.name(c(setdiff(schema$names, group_cols), schema$names)[1])
+      probe <- if (value) {
+        rlang::expr(all(is.na(!!col) | !is.na(!!col), na.rm = TRUE))
+      } else {
+        rlang::expr(any(is.na(!!col) & !is.na(!!col), na.rm = TRUE))
+      }
+      return(rlang::new_quosure(probe, env))
+    }
+    return(rlang::new_quosure(value, env))
   }
 
   extra_args <- present[!names(present) %in% c(".cols", ".fns", ".names")]
@@ -679,6 +774,7 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode) {
   combined <- NULL
   for (col in cols) {
     piece <- spec$build(as.name(col), col)
+    check_across_predicate_piece(piece, col, env, schema)
     combined <- if (is.null(combined)) piece else as.call(list(fold_op, combined, piece))
   }
 
@@ -706,11 +802,15 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode) {
 #' the message ("must be a logical vector... use if_any()/if_all()
 #' instead") is the same either way, so raising it up front here is
 #' equivalent and cheaper). A NAMED top-level `across()` dot (e.g.
-#' `mutate(z = across(x, y))`) is likewise unsupported here (dplyr's own
-#' behavior for this shape is a genuinely strange packed-column name, not
-#' a shape worth reproducing) -- callers should have already routed it to
-#' the whole-call fallback via [dots_need_fallback()] (this function
-#' itself will error for it, not fallback, if it slips through).
+#' `mutate(z = across(x, y))`) packs a data-frame column and never gets
+#' here: [dots_need_fallback()] sends the whole call to the CPU fallback.
+#'
+#' The result carries a `"needs_fallback"` attribute. It is `TRUE` when an
+#' `across()` renames onto a column that a later expansion of the same
+#' `across()` reads (`across(c(y = x, z = y), ...)`): dplyr evaluates every
+#' function against the pre-`across()` data, while the expanded dots would
+#' run in sequence. That needs the schema, so [dots_need_fallback()] can't
+#' see it; the verb calls then re-run the ORIGINAL dots on the CPU.
 #'
 #' @param dots A list of quosures (already past cur_group_id substitution,
 #'   if applicable)
@@ -719,11 +819,12 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode) {
 #'   exclude from `.cols`'s selectable universe
 #' @param verb Character, `"filter"`/`"mutate"`/`"summarise"`/`"transmute"`
 #' @return A new (possibly longer, possibly shorter) named list of
-#'   quosures
+#'   quosures, with the `"needs_fallback"` attribute described above
 #' @keywords internal
 expand_across_dots <- function(dots, schema, group_cols, verb) {
   out_quos <- list()
   out_names <- character()
+  needs_fallback <- FALSE
 
   for (i in seq_along(dots)) {
     quo <- dots[[i]]
@@ -742,25 +843,17 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
         )
       }
       expanded <- expand_one_across(expr, env, schema, group_cols)
+      needs_fallback <- needs_fallback || isTRUE(attr(expanded, "needs_fallback"))
       out_quos <- c(out_quos, expanded)
       out_names <- c(out_names, names(expanded))
       next
     }
 
-    if (is_named && identical(head_name, "across")) {
-      stop("A named `across()` dot is not supported.", call. = FALSE)
-    }
-
     if (identical(head_name, "if_any") || identical(head_name, "if_all")) {
-      combined <- expand_if_any_all(expr, env, schema, group_cols, head_name)
-      if (is.null(combined)) {
-        stop(
-          head_name, "() matched no columns -- can't fold an empty selection.",
-          call. = FALSE
-        )
-      }
+      combined <- expand_if_any_all(expr, env, schema, group_cols, head_name, verb)
       out_quos <- c(out_quos, list(combined))
-      out_names <- c(out_names, if (is_named) nm else "")
+      # dplyr names an unnamed if_any()/if_all() dot after the original call
+      out_names <- c(out_names, if (is_named) nm else if (identical(verb, "filter")) "" else rlang::as_label(expr))
       next
     }
 
@@ -769,5 +862,6 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
   }
 
   names(out_quos) <- out_names
+  attr(out_quos, "needs_fallback") <- needs_fallback
   out_quos
 }

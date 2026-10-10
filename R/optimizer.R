@@ -191,6 +191,13 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
   switch(ast$type,
     "source" = {
       keep <- intersect(ast$schema$names, required_cols)
+      # A downstream node that reads no column at all (a constant
+      # `mutate(a = TRUE)` under a select) would prune the source to zero
+      # columns, and a zero-column table has no row count to broadcast the
+      # constant over: keep one column.
+      if (length(keep) == 0 && length(ast$schema$names) > 0) {
+        keep <- ast$schema$names[1]
+      }
       if (length(keep) < length(ast$schema$names)) {
         ast_select(ast, keep)
       } else {

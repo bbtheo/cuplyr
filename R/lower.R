@@ -110,6 +110,17 @@ lower_mutate <- function(ast, source_ptr) {
 
   out_names <- vapply(ast$expressions, `[[`, character(1), "output_col")
   out_types <- vapply(ast$expressions, `[[`, character(1), "output_type")
+  # A bare factor-column copy is typed DICTIONARY32 (logical); the column
+  # that comes out is the INT32 codes. Any other factor-valued expression is
+  # sent to the CPU by parse_mutate_dots(); if one gets here anyway, fail
+  # rather than return codes with no levels.
+  is_copy <- vapply(ast$expressions, function(e) identical(e$ir$kind, "col"), logical(1))
+  bad <- out_types == "DICTIONARY32" & !is_copy
+  if (any(bad)) {
+    stop("Can't compute factor-valued expression `", out_names[bad][1],
+         "` on the GPU.", call. = FALSE)
+  }
+  out_types <- gpu_physical_type(out_types)
 
   gpu_mutate_expr(input_ptr, bound_exprs, out_names, out_types, input_schema$names)
 }

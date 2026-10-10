@@ -261,8 +261,13 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   }
 
   summarise_groups <- if (by_given) by_cols else .data$groups
-  dots <- expand_across_dots(dots, current_schema(.data), summarise_groups, "summarise")
-  dots <- auto_name_dots(dots, "summarise")
+  expanded <- expand_across_dots(dots, current_schema(.data), summarise_groups, "summarise")
+  if (isTRUE(attr(expanded, "needs_fallback"))) {
+    return(gpu_fallback("summarise", .data, function(tbl) {
+      rlang::inject(dplyr::summarise(tbl, !!!dots, .groups = .groups, .by = !!by_quo))
+    }))
+  }
+  dots <- auto_name_dots(expanded, "summarise")
 
   # Phase 11, task L1: universal expression-level CPU fallback. Runs AFTER
   # across()-expansion/auto_name_dots() (so an ordinary, expandable

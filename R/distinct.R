@@ -131,9 +131,10 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
     }
   }
 
-  input <- input_node(.data)
+  # Push the key mutate as its own op (as count() does) so push_op() carries
+  # factor levels onto renamed/copied factor keys in eager mode too.
   if (length(expressions) > 0) {
-    input <- ast_mutate(input, expressions)
+    .data <- push_op(.data, ast_mutate(input_node(.data), expressions))
   }
 
   # Group columns are always part of the key and the result; any group
@@ -143,6 +144,6 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
   # `distinct(gdf, x)` returns `y, x`, prepending the *missing* group column).
   key_cols <- unique(c(setdiff(group_vars, dot_names), dot_names))
 
-  node <- ast_distinct(input, key_cols, keep_all = .keep_all)
+  node <- ast_distinct(input_node(.data), key_cols, keep_all = .keep_all)
   push_op(.data, node)
 }

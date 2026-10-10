@@ -19,7 +19,7 @@ exclude from \code{.cols}'s selectable universe}
 }
 \value{
 A new (possibly longer, possibly shorter) named list of
-quosures
+quosures, with the \code{"needs_fallback"} attribute described above
 }
 \description{
 Walks \code{dots} in order; a top-level, unnamed \code{across(...)} dot is
@@ -33,10 +33,15 @@ empirically -- it raises at EVALUATION time there, not parse time, but
 the message ("must be a logical vector... use if_any()/if_all()
 instead") is the same either way, so raising it up front here is
 equivalent and cheaper). A NAMED top-level \code{across()} dot (e.g.
-\code{mutate(z = across(x, y))}) is likewise unsupported here (dplyr's own
-behavior for this shape is a genuinely strange packed-column name, not
-a shape worth reproducing) -- callers should have already routed it to
-the whole-call fallback via \code{\link[=dots_need_fallback]{dots_need_fallback()}} (this function
-itself will error for it, not fallback, if it slips through).
+\code{mutate(z = across(x, y))}) packs a data-frame column and never gets
+here: \code{\link[=dots_need_fallback]{dots_need_fallback()}} sends the whole call to the CPU fallback.
+}
+\details{
+The result carries a \code{"needs_fallback"} attribute. It is \code{TRUE} when an
+\code{across()} renames onto a column that a later expansion of the same
+\code{across()} reads (\code{across(c(y = x, z = y), ...)}): dplyr evaluates every
+function against the pre-\code{across()} data, while the expanded dots would
+run in sequence. That needs the schema, so \code{\link[=dots_need_fallback]{dots_need_fallback()}} can't
+see it; the verb calls then re-run the ORIGINAL dots on the CPU.
 }
 \keyword{internal}

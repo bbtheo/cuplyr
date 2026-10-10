@@ -228,9 +228,13 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
     return(filter_across_fallback(.data, dots, by_quo))
   }
 
+  # Substitution runs before expansion here so the if_any()/if_all() piece
+  # check can type cur_group_id() pieces; the helper column is excluded from
+  # `.cols`'s selectable set alongside the group columns.
   cgid <- substitute_cur_group_id(.data, dots, verb_groups)
   .data <- cgid$data
-  dots <- expand_across_dots(cgid$dots, current_schema(.data), verb_groups, "filter")
+  dots <- expand_across_dots(cgid$dots, current_schema(.data),
+                             c(verb_groups, cgid$helper_name), "filter")
 
   # Schema is stable across this whole call for every PLAIN dot: filter()
   # never adds/removes real columns. The one exception is Phase 5's

@@ -129,6 +129,21 @@ propagate_factor_levels <- function(node, input_schema, surviving_names) {
     names(factor_levels) <- nm
   }
 
+  # A bare copy of a factor column (`mutate(h = f)`) carries its levels to
+  # the output name; any other expression stops a replaced column being a
+  # factor.
+  if (identical(node$type, "mutate")) {
+    for (expr in node$expressions) {
+      is_factor <- identical(unname(expr$output_type), "DICTIONARY32")
+      src <- if (identical(expr$ir$kind, "col")) factor_levels[[expr$ir$name]] else NULL
+      if (is_factor && !is.null(src)) {
+        factor_levels[[expr$output_col]] <- src
+      } else if (!is_factor) {
+        factor_levels[[expr$output_col]] <- NULL
+      }
+    }
+  }
+
   factor_levels <- factor_levels[names(factor_levels) %in% surviving_names]
 
   if (length(factor_levels) == 0) {
