@@ -1254,15 +1254,13 @@ mute_cross_by_warning <- function(expr, mute = TRUE) {
 }
 
 #' Coerce `y` to a `tbl_gpu` (shared by every join verb)
+#'
+#' Goes through [dplyr::auto_copy()]: a `tbl_gpu` `y` is returned as is, a
+#' non-GPU `y` is uploaded when `copy = TRUE`, and with `copy = FALSE` dplyr's
+#' "`x` and `y` must share the same src" error is raised.
 #' @keywords internal
-join_coerce_y <- function(y, copy) {
-  if (is_tbl_gpu(y)) {
-    return(y)
-  }
-  if (isTRUE(copy)) {
-    return(tbl_gpu(y))
-  }
-  stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
+join_coerce_y <- function(x, y, copy) {
+  dplyr::auto_copy(x, y, copy = copy)
 }
 
 #' Shared body of `left_join()`/`inner_join()`/`full_join()`/`right_join()`
@@ -1279,7 +1277,7 @@ join_coerce_y <- function(y, copy) {
 #' @keywords internal
 mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
                           multiple, unmatched, relationship, user_env) {
-  y <- join_coerce_y(y, copy)
+  y <- join_coerce_y(x, y, copy)
   verb <- paste0(join_type, "_join")
   verb_fn <- get(verb, envir = asNamespace("dplyr"))
   fallback_args <- function() {
@@ -1334,7 +1332,7 @@ mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
 #' Shared body of `semi_join()`/`anti_join()` (see [mutating_join()])
 #' @keywords internal
 filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
-  y <- join_coerce_y(y, copy)
+  y <- join_coerce_y(x, y, copy)
   verb <- paste0(join_type, "_join")
   verb_fn <- get(verb, envir = asNamespace("dplyr"))
   fallback_args <- function() {
@@ -1616,13 +1614,7 @@ anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
 #' @export
 #' @importFrom dplyr cross_join
 cross_join.tbl_gpu <- function(x, y, ..., copy = FALSE, suffix = c(".x", ".y")) {
-  if (!is_tbl_gpu(y)) {
-    if (isTRUE(copy)) {
-      y <- tbl_gpu(y)
-    } else {
-      stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
-    }
-  }
+  y <- join_coerce_y(x, y, copy)
 
   if (length(x$schema$names) == 0 || length(y$schema$names) == 0) {
     stop("cross_join() requires both tables to have at least one column.",

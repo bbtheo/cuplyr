@@ -1,5 +1,20 @@
 # cuplyr (development version)
 
+## dplyr generic registrations (F05)
+
+* `show_query()` is now a `tbl_gpu` method for dplyr's generic (it was a
+  plain function masking it), so `dplyr::show_query(gt)` works. The argument
+  is `x` rather than `.data`, and `x` is returned invisibly (it used to return
+  the pending AST). cuplyr re-exports dplyr's generic.
+* New `explain()`, `same_src()` and `auto_copy()` methods for `tbl_gpu`.
+  `explain()` prints the pending operations and, for a lazy table with
+  pending operations, the optimized plan `compute()` would run; nothing is
+  executed.
+* A GPU join (including `cross_join()`) with a non-GPU `y` and `copy = FALSE`
+  now raises dplyr's "`x` and `y` must share the same src" error instead of
+  a cuplyr-specific message. With `copy = TRUE`, `y` is uploaded after
+  `as.data.frame()`, so a plain list works as in dplyr.
+
 ## The long tail: universal CPU fallback, factor fidelity, timestamps, base-R strings, datetime accessors, and exit-scope pins (Phase 11)
 
 Phase 11 was scanned from dplyr 1.2.1's own test suite: string functions
@@ -510,7 +525,7 @@ Every dplyr generic that doesn't yet have a GPU-native `tbl_gpu` method now work
 
 * `is_lazy()` and `has_pending_ops()` check the current execution state.
 
-* `show_query()` displays the pending operation tree for debugging.
+* `show_query()` displays the pending operation tree for debugging (since F05 it is a method for dplyr's generic and returns its input invisibly).
 
 ## Join operations
 

@@ -221,25 +221,83 @@ has_pending_ops <- function(.data) {
 
 #' Show pending operations for a lazy tbl_gpu
 #'
-#' @param .data A `tbl_gpu` object.
-#' @return Invisibly returns the AST, prints it for inspection.
+#' `tbl_gpu` method for dplyr's [dplyr::show_query()] generic. Prints the
+#' pending AST (nothing is executed).
+#'
+#' @param x A `tbl_gpu` object.
+#' @param ... Not used.
+#' @return `x`, invisibly.
 #'
 #' @export
-show_query <- function(.data) {
-  if (!is_tbl_gpu(.data)) {
-    stop("show_query() requires a tbl_gpu object", call. = FALSE)
-  }
-
-  if (is.null(.data$lazy_ops)) {
+#' @importFrom dplyr show_query
+show_query.tbl_gpu <- function(x, ...) {
+  if (is.null(x$lazy_ops)) {
     cat("No pending operations (eager mode or already computed)\n")
-  } else if (!inherits(.data$lazy_ops, "ast_node")) {
+  } else if (!inherits(x$lazy_ops, "ast_node")) {
     cat("Invalid pending operations object (expected AST node)\n")
   } else {
     cat("Pending operations:\n")
-    print(.data$lazy_ops)
-    cat("\nAST depth:", ast_depth(.data$lazy_ops), "\n")
-    cat("Node count:", ast_count(.data$lazy_ops), "\n")
+    print(x$lazy_ops)
+    cat("\nAST depth:", ast_depth(x$lazy_ops), "\n")
+    cat("Node count:", ast_count(x$lazy_ops), "\n")
   }
 
-  invisible(.data$lazy_ops)
+  invisible(x)
+}
+
+#' @importFrom dplyr show_query
+#' @export
+dplyr::show_query
+
+#' Explain a tbl_gpu query
+#'
+#' `tbl_gpu` method for dplyr's [dplyr::explain()] generic. Prints
+#' [show_query()]'s output and, when operations are pending, the optimized
+#' plan `compute()` would run. Nothing is executed.
+#'
+#' @param x A `tbl_gpu` object.
+#' @param ... Not used.
+#' @return `x`, invisibly.
+#'
+#' @export
+#' @importFrom dplyr explain
+explain.tbl_gpu <- function(x, ...) {
+  show_query(x)
+  # Same condition compute() uses to decide whether it has a plan to run.
+  if (is_lazy(x) && has_pending_ops(x)) {
+    cat("\nOptimized plan:\n")
+    print(optimize_ast(x$lazy_ops))
+  }
+  invisible(x)
+}
+
+#' Source compatibility and upload for tbl_gpu
+#'
+#' `tbl_gpu` methods for dplyr's [dplyr::same_src()] and [dplyr::auto_copy()]
+#' generics, used by the join verbs' `copy =` handling.
+#'
+#' @param x A `tbl_gpu`.
+#' @param y Object to test or upload.
+#' @param copy Passed by dplyr; `auto_copy()` only reaches this method when
+#'   copying is allowed.
+#' @param ... Not used.
+#' @return `same_src()`: `TRUE` when `y` is a `tbl_gpu`. `auto_copy()`: `y`
+#'   as a `tbl_gpu`.
+#'
+#' @export
+#' @importFrom dplyr same_src
+same_src.tbl_gpu <- function(x, y) {
+  is_tbl_gpu(y)
+}
+
+#' @rdname same_src.tbl_gpu
+#' @export
+#' @importFrom dplyr auto_copy
+auto_copy.tbl_gpu <- function(x, y, copy = FALSE, ...) {
+  # dplyr's data frame method coerces with as.data.frame() first, so a list
+  # (or matrix) `y` is accepted the same way here.
+  if (!is.data.frame(y)) {
+    y <- as.data.frame(y)
+  }
+  tbl_gpu(y)
 }

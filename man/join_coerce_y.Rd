@@ -4,9 +4,11 @@
 \alias{join_coerce_y}
 \title{Coerce \code{y} to a \code{tbl_gpu} (shared by every join verb)}
 \usage{
-join_coerce_y(y, copy)
+join_coerce_y(x, y, copy)
 }
 \description{
-Coerce \code{y} to a \code{tbl_gpu} (shared by every join verb)
+Goes through \code{\link[dplyr:auto_copy]{dplyr::auto_copy()}}: a \code{tbl_gpu} \code{y} is returned as is, a
+non-GPU \code{y} is uploaded when \code{copy = TRUE}, and with \code{copy = FALSE} dplyr's
+"\code{x} and \code{y} must share the same src" error is raised.
 }
 \keyword{internal}

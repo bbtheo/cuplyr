@@ -235,7 +235,7 @@ test_that("cross_join() requires y to be a tbl_gpu unless copy = TRUE", {
 
   expect_error(
     dplyr::cross_join(tbl_gpu(x), y),
-    "must be a tbl_gpu"
+    "must share the same src"
   )
 })
 
