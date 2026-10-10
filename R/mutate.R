@@ -355,11 +355,16 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   if (isTRUE(attr(expanded, "needs_fallback"))) {
     return(mutate_across_fallback(.data, dots, .keep, before_quo, after_quo, by_quo))
   }
-  # The CPU fallbacks below re-run dplyr on the table and dots as they were
-  # BEFORE cur_group_id() substitution, so dplyr computes cur_group_id()
-  # itself and the helper column never reaches the result.
+  # The CPU fallbacks below re-run dplyr on the table and the ORIGINAL user
+  # dots as they were BEFORE across() expansion and cur_group_id()
+  # substitution. dplyr then computes cur_group_id() itself (the helper column
+  # never reaches the result), does its own pre-dot evaluation for a staged
+  # across() (the temps never exist there), and calls `.fns` values with
+  # their own environment: an inlined body would instead read any column an
+  # earlier dot creates, including ones an unnamed data-frame dot splices in.
+  staged_temps <- attr(expanded, "staged_temps")
   fallback_data <- .data
-  fallback_dots <- expanded
+  fallback_dots <- dots
   cgid <- substitute_cur_group_id(.data, expanded, verb_groups)
   .data <- cgid$data
   orig_schema <- current_schema(.data)
@@ -373,8 +378,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   # hard stop() (now a defensive, internal-only fallback -- see that
   # function's `stop_on_unparseable` docs), it signals NULL back here, and
   # the WHOLE mutate() call is re-run on the CPU via mutate_expr_fallback(),
-  # on the pre-substitution table with the across()-expanded (but not
-  # cur_group_id()-substituted) dots re-injected.
+  # on the pre-substitution table with the original dots re-injected.
   # A genuine THROWN error (e.g. an undefined column/environment variable)
   # is NOT caught here -- it propagates normally, preserving every existing
   # pinned error-message test (scratchpad/phase11_design.md's "NULL-vs-throw
@@ -393,7 +397,8 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   if (isTRUE(attr(expressions, "has_window"))) {
     return(mutate_window(
       .data, fallback_dots, expressions, orig_schema, orig_names, orig_groups,
-      .keep, before_quo, after_quo, by_quo, fallback_data = fallback_data
+      .keep, before_quo, after_quo, by_quo, fallback_data = fallback_data,
+      drop = staged_temps
     ))
   }
 
@@ -411,7 +416,8 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   }
 
   select_node <- mutate_keep_select_node(
-    result, orig_names, orig_groups, expressions, .keep, before_quo, after_quo
+    result, orig_names, orig_groups, expressions, .keep, before_quo, after_quo,
+    drop = staged_temps
   )
   if (is.null(select_node)) {
     return(result)
@@ -450,9 +456,9 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 #
 # @param .data The tbl_gpu to compute on (with cur_group_id()'s helper
 #   column, if this call substituted one)
-# @param dots The across()-expanded dots BEFORE cur_group_id() substitution
-#   -- only used by the CPU fallback path, which re-runs the real
-#   dplyr::mutate() call on `fallback_data`
+# @param dots The user's ORIGINAL dots (before across() expansion and
+#   cur_group_id() substitution) -- only used by the CPU fallback path,
+#   which re-runs the real dplyr::mutate() call on `fallback_data`
 # @param expressions parse_mutate_dots()'s result: one make_mutate_expr()
 #   struct per dot, built from the RAW (window-containing) per-dot IR,
 #   parsed against `orig_schema` with the usual left-to-right dot-visibility
@@ -481,10 +487,12 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 #   `.by=` too
 # @param fallback_data The tbl_gpu as it was before cur_group_id()
 #   substitution; the CPU fallback runs on it so no helper column leaks
+# @param drop Staged across() temp columns, removed from the result
 # @return A new tbl_gpu
 # @keywords internal
 mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, orig_groups,
-                           keep, before_quo, after_quo, by_quo, fallback_data = .data) {
+                           keep, before_quo, after_quo, by_quo, fallback_data = .data,
+                           drop = character()) {
   exprs_raw <- stats::setNames(
     lapply(expressions, `[[`, "ir"),
     vapply(expressions, `[[`, character(1), "output_col")
@@ -514,7 +522,8 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
   }
 
   select_node <- mutate_keep_select_node(
-    result, orig_names, orig_groups, expressions, keep, before_quo, after_quo
+    result, orig_names, orig_groups, expressions, keep, before_quo, after_quo,
+    drop = drop
   )
   if (is.null(select_node)) {
     return(result)
@@ -637,9 +646,9 @@ mutate_across_fallback <- function(.data, dots, keep, before_quo, after_quo, by_
 # -- the "universal expression-level CPU fallback"; see
 # scratchpad/phase11_design.md). Mirrors mutate_window_fallback()/
 # mutate_across_fallback() exactly (same re-injection pattern). The caller
-# passes the table and the across()-expanded dots from BEFORE cur_group_id()
-# substitution, so dplyr evaluates cur_group_id() itself and the helper
-# column never appears in the result. This is what subsumes identity()/ifelse()/scale()/lengths()/
+# passes the table and the ORIGINAL dots from BEFORE across() expansion and
+# cur_group_id() substitution, so dplyr evaluates across() and
+# cur_group_id() itself and the helper column never appears in the result. This is what subsumes identity()/ifelse()/scale()/lengths()/
 # toupper()/local-closure mutate dots -- and, more generally, ANY
 # unrecognized shape, not just window/across-family ones.
 # @keywords internal
@@ -824,14 +833,17 @@ name_dots_silently <- function(dots) {
 # @param keep One of "all"/"used"/"unused"/"none"
 # @param before_quo,after_quo Quosures for `.before`/`.after` (already
 #   checked not to be BOTH non-NULL)
+# @param drop Temp columns (staged across() expansions) the result must not
+#   keep: they are not new columns, but their inputs still count as used
 # @return An ast_select node to stack on `result` via push_op(), or `NULL`
 #   if no select node is needed (the "all", no `.before`/`.after` case is
 #   always a pure identity and is skipped to avoid an unnecessary AST node)
 # @keywords internal
 mutate_keep_select_node <- function(result, orig_names, orig_groups,
-                                     expressions, keep, before_quo, after_quo) {
+                                     expressions, keep, before_quo, after_quo,
+                                     drop = character()) {
   touched_cols <- unique(vapply(expressions, `[[`, character(1), "output_col"))
-  new_cols <- touched_cols[!touched_cols %in% orig_names]
+  new_cols <- touched_cols[!touched_cols %in% c(orig_names, drop)]
   existing_touched <- touched_cols[touched_cols %in% orig_names]
   input_cols_union <- unique(unlist(lapply(expressions, `[[`, "input_cols")))
 
@@ -930,6 +942,7 @@ update_schema_for_expr <- function(schema, expr) {
 #' }
 transmute.tbl_gpu <- function(.data, ...) {
   dots <- rlang::enquos(...)
+  orig_dots <- dots
 
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R
   # and mutate.tbl_gpu()'s own identical handling.
@@ -945,9 +958,11 @@ transmute.tbl_gpu <- function(.data, ...) {
     }))
   }
   # As in mutate.tbl_gpu(): the CPU fallback runs on the pre-substitution
-  # table and dots so cur_group_id()'s helper column can't leak.
+  # table with the ORIGINAL dots, so cur_group_id()'s helper column and the
+  # staged temps can't leak and `.fns` values keep their own environment.
+  staged_temps <- attr(expanded, "staged_temps")
   fallback_data <- .data
-  fallback_dots <- expanded
+  fallback_dots <- orig_dots
   cgid <- substitute_cur_group_id(.data, expanded, .data$groups)
   .data <- cgid$data
   schema <- current_schema(.data)
@@ -972,7 +987,9 @@ transmute.tbl_gpu <- function(.data, ...) {
   # Order: literal dot order (whether bare-column or newly computed), with
   # any un-dotted group column prepended -- see the roxygen "Details" above
   # for how this differs from mutate(.keep = "none")'s ordering rule.
-  dot_output_cols <- unique(vapply(expressions, `[[`, character(1), "output_col"))
+  dot_output_cols <- setdiff(
+    unique(vapply(expressions, `[[`, character(1), "output_col")), staged_temps
+  )
   missing_groups <- setdiff(.data$groups, dot_output_cols)
   final_order <- c(missing_groups, dot_output_cols)
 

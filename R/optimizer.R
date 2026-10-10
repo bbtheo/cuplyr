@@ -425,10 +425,14 @@ try_fuse_mutate_pair <- function(lower, upper) {
   has_dependency <- any(upper_inputs %in% lower_outputs)
 
   if (has_dependency) {
-    combined_exprs <- toposort_expressions(combined_exprs)
-    if (is.null(combined_exprs)) {
+    sorted_exprs <- toposort_expressions(combined_exprs)
+    if (is.null(sorted_exprs)) {
       return(NULL)  # Cycle detected or too complex
     }
+    if (mutate_reorder_unsafe(combined_exprs, sorted_exprs)) {
+      return(NULL)
+    }
+    combined_exprs <- sorted_exprs
   }
 
   # Guard 3: Count intermediate columns
@@ -441,6 +445,35 @@ try_fuse_mutate_pair <- function(lower, upper) {
   }
 
   ast_mutate(lower$input, combined_exprs)
+}
+
+#' Does reordering `before` into `after` break sequential semantics?
+#'
+#' The expressions run in order, each seeing the columns the earlier ones
+#' wrote. toposort_expressions() only models read-after-write, so it can move
+#' a writer ahead of an earlier reader of the same name (a staged across()
+#' reads `y` before a later expression assigns it, and that order must stay).
+#' Such a move, or reordering two writers of one name, changes the result.
+#'
+#' @param before,after The expression lists before and after sorting
+#' @return TRUE if the reorder is unsafe
+#' @keywords internal
+mutate_reorder_unsafe <- function(before, after) {
+  outs <- vapply(before, `[[`, character(1), "output_col")
+  if (anyDuplicated(outs)) {
+    return(TRUE)
+  }
+  pos <- match(vapply(after, `[[`, character(1), "output_col"), outs)
+  rank_of <- integer(length(outs))
+  rank_of[pos] <- seq_along(pos)
+  for (i in seq_along(before)) {
+    for (j in seq_len(length(before))[-seq_len(i)]) {
+      if (outs[j] %in% before[[i]]$input_cols && rank_of[i] > rank_of[j]) {
+        return(TRUE)
+      }
+    }
+  }
+  FALSE
 }
 
 #' Topologically sort expressions to respect dependencies

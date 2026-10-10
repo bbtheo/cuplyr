@@ -96,7 +96,7 @@ is_lambda_expr <- function(expr) {
 # @param col_name Character scalar, this column's name (for `cur_column()`)
 # @return `expr` with every substitution applied
 # @keywords internal
-substitute_across_placeholders <- function(expr, replacement, col_name) {
+substitute_across_placeholders <- function(expr, replacement, col_name, subst_dot = TRUE) {
   # An empty/missing argument slot (e.g. the elided row-index in `x[, 1]`,
   # which as.list()/recursion below can surface as one of `expr`'s own
   # "parts") is a special R sentinel: FORCING it (is.symbol()/is.call()/
@@ -110,7 +110,7 @@ substitute_across_placeholders <- function(expr, replacement, col_name) {
     return(expr)
   }
   if (is.symbol(expr)) {
-    if (identical(expr, as.symbol(".x")) || identical(expr, as.symbol("."))) {
+    if (subst_dot && (identical(expr, as.symbol(".x")) || identical(expr, as.symbol(".")))) {
       return(replacement)
     }
     return(expr)
@@ -121,7 +121,8 @@ substitute_across_placeholders <- function(expr, replacement, col_name) {
     }
     parts <- as.list(expr)
     parts <- lapply(parts, substitute_across_placeholders,
-                     replacement = replacement, col_name = col_name)
+                     replacement = replacement, col_name = col_name,
+                     subst_dot = subst_dot)
     return(as.call(parts))
   }
   expr
@@ -255,8 +256,8 @@ expr_needs_fallback <- function(expr, extra_names, top_level = FALSE) {
   FALSE
 }
 
-# TRUE iff a top-level `across(...)` call expression supplies a truthy
-# `.unpack = ` argument (Phase 10 scope cut: `.unpack` -- unpacking a
+# TRUE iff a top-level `across(...)` call expression supplies any `.unpack = `
+# argument other than a literal FALSE (Phase 10 scope cut: `.unpack` -- unpacking a
 # data-frame-valued `.fns` result into multiple columns -- is not
 # implemented; deferred to the whole-call CPU fallback instead of a hard
 # error, since dplyr itself supports it).
@@ -264,11 +265,12 @@ expr_needs_fallback <- function(expr, extra_names, top_level = FALSE) {
 across_call_has_unpack <- function(expr) {
   proto <- function(.cols, .fns, ..., .names = NULL, .unpack = FALSE) NULL
   matched <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
-  if (is.null(matched) || is.null(matched$.unpack)) {
+  if (is.null(matched) || !".unpack" %in% names(matched)) {
     return(FALSE)
   }
-  val <- tryCatch(eval(matched$.unpack, baseenv()), error = function(e) NULL)
-  isTRUE(val)
+  # Anything but a literal FALSE (TRUE, a glue string, a variable, an invalid
+  # value dplyr must reject) goes to dplyr.
+  !identical(matched$.unpack, FALSE)
 }
 
 # Internal: run the real dplyr verb on the CPU, for a call whose dots
@@ -351,6 +353,10 @@ substitute_cur_group_id <- function(.data, dots, group_cols) {
     keys_gpu <- tbl_gpu(keys, lazy = FALSE)
 
     joined <- dplyr::left_join(.data, keys_gpu, by = group_cols)
+    # A lazy join is only a pending op; the rebuild below reads `$ptr`
+    if (has_pending_ops(joined)) {
+      joined <- compute(joined)
+    }
     # left_join.tbl_gpu() preserves `.data`'s own groups already (Phase 7/8);
     # rebuild explicitly regardless, so this never depends on that being
     # true for every future join code path.
@@ -454,106 +460,328 @@ default_across_cols <- function(fn) {
 # =============================================================================
 
 # One `.fns` entry, resolved to something instantiable per column.
+# `env`, when set, is the environment the instantiated expression must be
+# evaluated in (a formula/closure VALUE keeps its own environment, a literal
+# lambda uses the dot's).
 # @keywords internal
-make_fn_spec <- function(label, build) {
-  list(label = label, build = build)
+make_fn_spec <- function(label, build, env = NULL) {
+  list(label = label, build = build, env = env)
 }
 
-# Parse across()'s `.fns` argument (a single function-like value, or a
-# `list()` of them) into a list of `make_fn_spec()` entries. Returns `NULL`
-# if `fns_expr` is a shape this file doesn't understand syntactically (a
-# bound variable holding a function/list, or anything else that isn't
-# literally a symbol/formula/lambda/`list(...)` call at the quosure level)
-# -- callers treat `NULL` as a hard, diagnosable error (dots_need_fallback()
-# already screens out every shape genuinely meant to defer to the CPU, so
-# reaching here with an unparseable `.fns` is a real "cuplyr doesn't
-# understand this yet" case, not a deferred one).
-#
-# `missing_ok = TRUE` (across()'s own contract, verified empirically:
-# `across(cols)` with `.fns` entirely omitted is IDENTITY, not an error --
-# distinct from an explicit `.fns = NULL`, which real dplyr itself
-# rejects) lets the caller signal "no `.fns` argument was supplied at
-# all"; this function then returns a single identity spec.
-#
-# @param fns_expr The `.fns` argument's raw expression, or `NULL` if
-#   entirely omitted (see `missing_ok`)
-# @param env Environment to resolve any leftover free variables in a
-#   formula/lambda body against
-# @param extra_args A (possibly empty) named `list()` of already-evaluated
-#   extra arguments from across()'s own `...` (the deprecated-but-still-
-#   supported "extra args passed to a bare function name" form, e.g.
-#   `across(x, mean, na.rm = TRUE)`) -- appended only to bare-symbol
-#   (plain function name) specs, matching dplyr's own historical behavior
-# @return A list of `make_fn_spec()` entries, or `NULL`
+# Function names the IR / aggregation layer can lower natively. A `.fns`
+# VALUE identical to one of these is emitted as a plain `name(col)` call.
 # @keywords internal
-parse_across_fns <- function(fns_expr, env, extra_args = list()) {
-  if (is.null(fns_expr)) {
-    return(list(make_fn_spec(NA_character_, function(col_sym, col_name) col_sym)))
-  }
-
-  if (identical(call_head_name(fns_expr), "list")) {
-    elts <- as.list(fns_expr)[-1]
-    elt_names <- names(elts)
-    if (is.null(elt_names)) elt_names <- rep("", length(elts))
-
-    specs <- vector("list", length(elts))
-    for (i in seq_along(elts)) {
-      label <- if (nzchar(elt_names[i])) elt_names[i] else as.character(i)
-      one <- parse_single_fn(elts[[i]], env, extra_args)
-      if (is.null(one)) return(NULL)
-      specs[[i]] <- make_fn_spec(label, one)
-    }
-    return(specs)
-  }
-
-  one <- parse_single_fn(fns_expr, env, extra_args)
-  if (is.null(one)) return(NULL)
-  list(make_fn_spec(NA_character_, one))
+across_known_fn_names <- function() {
+  union(names(ir_call_registry), c("quantile", "any", "all", "count"))
 }
 
-# Parse a SINGLE function-like `.fns` value (bare symbol / formula /
-# lambda) into a `build(col_sym, col_name)` closure producing the
-# instantiated expression for one column. Returns `NULL` for anything else
-# (a bound variable, a call to something other than `function`, ...).
+# Call heads an inlined VALUE body may use: everything the IR lowers by name.
+# A body with any other call (UseMethod, missing, sapply, a nested function,
+# `{`, `pkg::fn`, ...) is not inlined, since dplyr calls the value in a real
+# frame instead.
 # @keywords internal
-parse_single_fn <- function(fn_expr, env, extra_args = list()) {
-  if (is.symbol(fn_expr)) {
-    fn_name <- as.character(fn_expr)
-    if (identical(fn_name, "identity") && length(extra_args) == 0) {
-      return(function(col_sym, col_name) col_sym)
+across_native_heads <- function() {
+  c(across_known_fn_names(), "(", "ceiling", "paste0", "paste", "startsWith", "endsWith")
+}
+
+# TRUE iff every call in `expr` has a bare-symbol head the IR knows by name.
+# @keywords internal
+across_expr_native <- function(expr) {
+  if (rlang::is_missing(expr) || !is.call(expr)) {
+    return(TRUE)
+  }
+  head <- expr[[1]]
+  if (!is.symbol(head) || !as.character(head) %in% across_native_heads()) {
+    return(FALSE)
+  }
+  all(vapply(as.list(expr)[-1], across_expr_native, logical(1)))
+}
+
+# The registry name `value` is, or NULL. The IR lowers a call by its bare
+# name (it drops any `pkg::`), as the function dplyr itself sees under that
+# name, so `value` must be that function: `stats::lag` is not the IR's `lag`,
+# `dplyr::lag` is. A bare name must also resolve to `value` from `env`, so
+# the emitted `name(col)` means the same thing if an expression fallback
+# evaluates it.
+# @keywords internal
+across_known_fn_name <- function(value, env, fn_expr = NULL) {
+  qualified <- is.call(fn_expr) && length(fn_expr) == 3 &&
+    identical(fn_expr[[1]], as.name("::")) && is.symbol(fn_expr[[3]])
+  candidates <- c(across_known_fn_names(), "identity")
+  if (qualified) {
+    candidates <- intersect(as.character(fn_expr[[3]]), candidates)
+  }
+  dplyr_ns <- asNamespace("dplyr")
+  for (nm in candidates) {
+    canonical <- get0(nm, envir = dplyr_ns, mode = "function")
+    if (is.null(canonical) || !identical(canonical, value)) {
+      next
     }
-    return(function(col_sym, col_name) {
-      as.call(c(list(as.name(fn_name), col_sym), extra_args))
-    })
+    if (qualified || identical(get0(nm, envir = env, mode = "function"), value)) {
+      return(nm)
+    }
   }
+  NULL
+}
 
-  if (is_formula_expr(fn_expr)) {
-    rhs <- fn_expr[[2]]
-    return(function(col_sym, col_name) {
-      substitute_across_placeholders(rhs, col_sym, col_name)
-    })
+# TRUE iff an inlined body would read a data column or the pronouns where
+# dplyr's call of the VALUE would see its own environment instead.
+# @param vars Free variables of the body (all.vars()), minus its argument
+# @param scope Every column name in scope: the pre-call schema plus every
+#   column an earlier dot of the same call creates
+# @keywords internal
+across_free_vars_hit_data <- function(vars, scope) {
+  # An NA in `scope` means an earlier dot may have added columns we can't
+  # name (an unnamed dot that returns a data frame): any free variable may
+  # be one of them.
+  if (anyNA(scope)) return(length(vars) > 0)
+  any(vars %in% c(scope, ".data", ".env"))
+}
+
+# The arguments dplyr's lambda/formula inlining rules reject.
+# @keywords internal
+across_formula_inlinable <- function(fml_expr) {
+  nms <- all.names(fml_expr)
+  !(any(grepl("\\.\\.[0-9]|\\.y", nms)) || "return" %in% nms)
+}
+
+# Build spec for an inlined formula right-hand side.
+# @keywords internal
+across_formula_build <- function(rhs) {
+  function(col_sym, col_name) substitute_across_placeholders(rhs, col_sym, col_name)
+}
+
+# Build spec for an inlined one-formal lambda body.
+# @keywords internal
+across_lambda_build <- function(formal, body_expr) {
+  function(col_sym, col_name) {
+    substituted <- substitute_across_placeholders(body_expr, col_sym, col_name, subst_dot = FALSE)
+    substitute_symbol(substituted, formal, col_sym)
   }
+}
 
-  if (is_lambda_expr(fn_expr)) {
-    formals_pairlist <- fn_expr[[2]]
-    formal_names <- names(formals_pairlist)
-    formal_names <- formal_names[formal_names != "..."]
-    if (length(formal_names) != 1) {
+# `spec` when its instantiated body is fully native, else NULL.
+# @keywords internal
+across_native_spec <- function(spec) {
+  probe <- spec$build(as.name("..across_probe.."), "..across_probe..")
+  if (across_expr_native(probe)) spec else NULL
+}
+
+# Dispatch on a `.fns` VALUE (evaluated in the dot's environment). dplyr
+# never inlines a value: it calls it, with the value's own environment and
+# a real call frame. So a value is turned into an expression only when that
+# is unobservable: it is a function the IR knows by identity, or its body
+# only uses calls the IR lowers by name and none of its free variables is a
+# column in scope or a pronoun. Returns a make_fn_spec(), or NULL for "let
+# dplyr handle it".
+#
+# @param value The evaluated function / formula
+# @param fn_expr The expression it came from (NULL if there is none)
+# @param scope Column names in scope (see across_free_vars_hit_data())
+# @keywords internal
+across_value_spec <- function(value, fn_expr, env, scope, extra_args) {
+  has_extra <- length(extra_args) > 0
+  if (inherits(value, "formula")) {
+    if (has_extra || !rlang::is_formula(value, lhs = FALSE) || !across_formula_inlinable(value)) {
       return(NULL)
     }
-    param <- as.name(formal_names[1])
-    body_expr <- fn_expr[[3]]
-    return(function(col_sym, col_name) {
-      substituted <- substitute_across_placeholders(body_expr, col_sym, col_name)
-      # The lambda's own formal (whatever it's actually called, e.g. `v` in
-      # `\(v) v + 1`) also needs substituting -- substitute_across_placeholders()
-      # only rewrites the canonical `.x`/`.` spelling, so do the formal's own
-      # name as a second pass.
-      substitute_symbol(substituted, formal_names[1], col_sym)
-    })
+    rhs <- value[[2]]
+    if (across_free_vars_hit_data(setdiff(all.vars(rhs), c(".x", ".")), scope)) {
+      return(NULL)
+    }
+    return(across_native_spec(make_fn_spec(NULL, across_formula_build(rhs), env = environment(value))))
+  }
+  if (!is.function(value)) {
+    return(NULL)
   }
 
-  NULL
+  known <- across_known_fn_name(value, env, fn_expr)
+  if (!is.null(known)) {
+    if (identical(known, "identity") && !has_extra) {
+      return(make_fn_spec(NULL, function(col_sym, col_name) col_sym))
+    }
+    # Keep a `pkg::` qualification: the IR ignores it, but an expression
+    # fallback that evaluates the call must find the same function.
+    head <- if (is.call(fn_expr) && identical(fn_expr[[1]], as.name("::"))) fn_expr else as.name(known)
+    return(make_fn_spec(NULL, function(col_sym, col_name) {
+      as.call(c(list(head, col_sym), extra_args))
+    }))
+  }
+
+  if (has_extra || is.primitive(value) || isNamespace(environment(value))) {
+    return(NULL)
+  }
+  fmls <- formals(value)
+  body_expr <- body(value)
+  if (length(fmls) != 1 || identical(names(fmls), "...") || "return" %in% all.names(body_expr)) {
+    return(NULL)
+  }
+  formal <- names(fmls)[1]
+  if (across_free_vars_hit_data(setdiff(all.vars(body_expr), formal), scope)) {
+    return(NULL)
+  }
+  across_native_spec(make_fn_spec(NULL, across_lambda_build(formal, body_expr), env = environment(value)))
+}
+
+# Resolve ONE `.fns` expression (a list element or the whole argument) to a
+# make_fn_spec(), or NULL when it needs dplyr: a literal function/formula is
+# inlined iff dplyr would inline it; anything else is evaluated and
+# dispatched on its value. A quosure (from `{{ fn }}`) is looked through to
+# its expression and environment, as if it had been written there.
+# @keywords internal
+parse_single_fn <- function(fn_expr, env, scope, extra_args = list()) {
+  if (rlang::is_missing(fn_expr)) {
+    return(NULL)
+  }
+  if (rlang::is_quosure(fn_expr)) {
+    return(parse_single_fn(rlang::quo_get_expr(fn_expr), rlang::quo_get_env(fn_expr), scope, extra_args))
+  }
+  if (!inherits(fn_expr, "formula")) {
+    if (is_formula_expr(fn_expr)) {
+      if (length(extra_args) > 0 || !across_formula_inlinable(fn_expr)) {
+        return(NULL)
+      }
+      return(make_fn_spec(NULL, across_formula_build(fn_expr[[2]]), env = env))
+    }
+    if (is_lambda_expr(fn_expr)) {
+      formals_pairlist <- fn_expr[[2]]
+      body_expr <- fn_expr[[3]]
+      if (length(extra_args) > 0 || length(formals_pairlist) != 1 ||
+          "return" %in% all.names(body_expr)) {
+        return(NULL)
+      }
+      return(make_fn_spec(NULL, across_lambda_build(names(formals_pairlist)[1], body_expr), env = env))
+    }
+  }
+  value <- tryCatch(
+    if (is.language(fn_expr) && !inherits(fn_expr, "formula")) eval(fn_expr, env) else fn_expr,
+    error = function(e) NULL
+  )
+  if (is.null(value)) {
+    return(NULL)
+  }
+  across_value_spec(value, fn_expr, env, scope, extra_args)
+}
+
+# Parse across()'s `.fns` argument into `list(specs, is_list)`, where
+# `specs` is a list of make_fn_spec() entries (labelled for `{.fn}`) and
+# `is_list` says whether the argument was a list (which changes the default
+# `.names`). Returns NULL when dplyr must run the call instead (an
+# unsupported or invalid shape, an error while evaluating `.fns`, ...).
+#
+# `fns_expr = NULL` means `.fns` was omitted (across()'s identity).
+#
+# @param fns_expr The `.fns` argument's raw expression, or `NULL`
+# @param env The dot's environment
+# @param scope Column names in scope (pre-call schema plus names earlier
+#   dots create)
+# @param extra_args Already-checked extra arguments from across()'s `...`
+# @keywords internal
+parse_across_fns <- function(fns_expr, env, scope, extra_args = list()) {
+  if (is.null(fns_expr)) {
+    return(list(
+      specs = list(make_fn_spec("1", function(col_sym, col_name) col_sym)),
+      is_list = FALSE
+    ))
+  }
+
+  # `{{ fn }}` in a wrapper: behave exactly as if the caller's expression
+  # had been written here, in the caller's environment.
+  if (rlang::is_quosure(fns_expr)) {
+    return(parse_across_fns(rlang::quo_get_expr(fns_expr), rlang::quo_get_env(fns_expr), scope, extra_args))
+  }
+
+  if (identical(call_head_name(fns_expr), "list") && !inherits(fns_expr, "formula")) {
+    elts <- as.list(fns_expr)[-1]
+    if (length(elts) == 0) {
+      return(NULL)
+    }
+    elt_names <- names(elts)
+    if (is.null(elt_names)) elt_names <- rep("", length(elts))
+    specs <- vector("list", length(elts))
+    for (i in seq_along(elts)) {
+      one <- parse_single_fn(elts[[i]], env, scope, extra_args)
+      if (is.null(one)) return(NULL)
+      one$label <- if (nzchar(elt_names[i])) elt_names[i] else as.character(i)
+      specs[[i]] <- one
+    }
+    return(list(specs = specs, is_list = TRUE))
+  }
+
+  # A literal function/formula
+  if (!inherits(fns_expr, "formula") && (is_formula_expr(fns_expr) || is_lambda_expr(fns_expr))) {
+    one <- parse_single_fn(fns_expr, env, scope, extra_args)
+    if (is.null(one)) return(NULL)
+    one$label <- "1"
+    return(list(specs = list(one), is_list = FALSE))
+  }
+
+  # Anything else is a value: evaluate once, dispatch on its type
+  value <- tryCatch(
+    if (is.language(fns_expr) && !inherits(fns_expr, "formula")) eval(fns_expr, env) else fns_expr,
+    error = function(e) NULL
+  )
+  if (is.null(value)) {
+    return(NULL)
+  }
+  if (is.list(value) && !inherits(value, "formula") && !is.data.frame(value)) {
+    if (length(value) == 0) {
+      return(NULL)
+    }
+    vnames <- names(value)
+    if (is.null(vnames)) vnames <- rep("", length(value))
+    specs <- vector("list", length(value))
+    for (i in seq_along(value)) {
+      one <- across_value_spec(value[[i]], NULL, env, scope, extra_args)
+      if (is.null(one)) return(NULL)
+      one$label <- if (nzchar(vnames[i])) vnames[i] else as.character(i)
+      specs[[i]] <- one
+    }
+    return(list(specs = specs, is_list = TRUE))
+  }
+  one <- across_value_spec(value, fns_expr, env, scope, extra_args)
+  if (is.null(one)) return(NULL)
+  one$label <- "1"
+  list(specs = list(one), is_list = FALSE)
+}
+
+# TRUE for a numeric constant expression such as `-1` or `1/3`.
+# @keywords internal
+across_const_expr <- function(a) {
+  if (is.numeric(a) && length(a) == 1) {
+    return(TRUE)
+  }
+  is.call(a) && is.symbol(a[[1]]) && as.character(a[[1]]) %in% c("-", "+", "*", "/", "^", "(") &&
+    all(vapply(as.list(a)[-1], across_const_expr, logical(1)))
+}
+
+# across()'s extra `...` arguments, if they can be passed natively: every one
+# must be a constant (including simple numeric arithmetic such as `-1` or
+# `1/3`) or a symbol that is not a column in scope and evaluates cleanly in
+# `env`. NULL means "let dplyr evaluate them" (they are data-masked there,
+# once per group).
+# @param scope Column names in scope (see across_free_vars_hit_data())
+# @keywords internal
+across_extra_args <- function(args, env, scope) {
+  out <- list()
+  for (i in seq_along(args)) {
+    a <- args[[i]]
+    val <- if (is.symbol(a)) {
+      nm <- as.character(a)
+      if (anyNA(scope) || nm %in% c(scope, ".data", ".env")) return(NULL)
+      tryCatch(eval(a, env), error = function(e) return(NULL))
+    } else if (is.atomic(a) && length(a) == 1) {
+      a
+    } else if (across_const_expr(a)) {
+      eval(a, baseenv())
+    } else {
+      return(NULL)
+    }
+    if (is.null(val)) return(NULL)
+    out[i] <- list(val)
+  }
+  names(out) <- names(args)
+  out
 }
 
 # Recursively substitute every bare occurrence of symbol named `sym_name`
@@ -562,6 +790,9 @@ parse_single_fn <- function(fn_expr, env, extra_args = list()) {
 # `.`/`cur_column()` handling.
 # @keywords internal
 substitute_symbol <- function(expr, sym_name, replacement) {
+  if (rlang::is_missing(expr)) {
+    return(expr)
+  }
   if (is.symbol(expr)) {
     if (identical(as.character(expr), sym_name)) {
       return(replacement)
@@ -610,12 +841,16 @@ if_any_all_proto <- function(.cols, .fns, ..., .names = NULL) NULL
 # @param schema Current schema (`list(names=, types=)`)
 # @param group_cols Character vector, columns excluded from `.cols`'s
 #   selectable universe
+# @param scope Column names in scope for the free-variable guards: `schema`'s
+#   plus every name an earlier dot of the same call creates
 # @return A named list of quosures (possibly length 0, if `.cols` matched
 #   no columns -- verified empirically: this is a silent no-op, not an
-#   error). Its `"needs_fallback"` attribute is `TRUE` when an output name is
-#   read by a later expansion (see the loop below).
+#   error). Attributes: `"needs_fallback"` is `TRUE` when dplyr must run the
+#   whole call (an unsupported `.fns`/extra-argument shape, duplicate output
+#   names); `"hazard"` is `TRUE` when an output name is read by a later
+#   expansion (see the loop below).
 # @keywords internal
-expand_one_across <- function(expr, env, schema, group_cols) {
+expand_one_across <- function(expr, env, schema, group_cols, scope = schema$names) {
   matched <- rlang::call_match(expr, across_proto, defaults = FALSE)
   present <- as.list(matched)[-1]
 
@@ -627,28 +862,40 @@ expand_one_across <- function(expr, env, schema, group_cols) {
     return(stats::setNames(list(), character()))
   }
 
-  extra_args <- present[!names(present) %in% c(".cols", ".fns", ".names", ".unpack")]
-  extra_args <- lapply(extra_args, eval, envir = env)
+  # Anything this file can't express natively hands the whole call to dplyr
+  fallback <- function() across_fallback_result()
 
-  fns_expr <- present$.fns
-  specs <- parse_across_fns(fns_expr, env, extra_args)
-  if (is.null(specs)) {
-    stop(
-      "across()'s `.fns` must be a function, a formula (`~ .x + 1`), or a ",
-      "list of them: ", rlang::expr_deparse(expr), call. = FALSE
-    )
+  extra_args <- across_extra_args(
+    present[!names(present) %in% c(".cols", ".fns", ".names", ".unpack")], env, scope
+  )
+  if (is.null(extra_args)) {
+    return(fallback())
   }
+
+  fns_given <- ".fns" %in% names(present)
+  if (fns_given && is.null(present[[".fns"]])) {
+    return(fallback())
+  }
+  parsed <- parse_across_fns(if (fns_given) present[[".fns"]] else NULL, env, scope, extra_args)
+  if (is.null(parsed)) {
+    return(fallback())
+  }
+  specs <- parsed$specs
 
   names_tmpl <- if (!is.null(present$.names)) {
     val <- tryCatch(eval(present$.names, envir = env), error = function(e) NULL)
-    if (!is.character(val) || length(val) != 1) {
-      stop("across()'s `.names` must be a single glue string.", call. = FALSE)
+    if (!is.character(val) || length(val) != 1 || is.na(val)) {
+      return(fallback())
+    }
+    # Only {.col}/{.fn} are native; any other glue is dplyr's to evaluate
+    if (grepl("[{}]", gsub("{.fn}", "", gsub("{.col}", "", val, fixed = TRUE), fixed = TRUE))) {
+      return(fallback())
     }
     val
-  } else if (length(specs) == 1) {
-    "{.col}"
-  } else {
+  } else if (parsed$is_list) {
     "{.col}_{.fn}"
+  } else {
+    "{.col}"
   }
 
   out_names <- character()
@@ -657,24 +904,97 @@ expand_one_across <- function(expr, env, schema, group_cols) {
   # before the across(); the expanded dots run in sequence, so an output name
   # that a later expansion reads would change that expansion's values. The
   # source column itself counts as read even when only a string names it
-  # (`get(cur_column())`), which all.vars() can't see.
+  # (`get(cur_column())` falls back above); `.data[["y"]]` reads `y`, and a
+  # non-literal `.data[[nm]]` is treated as reading every column.
   hazard <- FALSE
   for (i in seq_along(cols)) {
     col <- cols[[i]]
     col_sym <- as.name(col)
     for (spec in specs) {
       built_expr <- spec$build(col_sym, col)
+      # get()/get0()/mget() look a column up by string behind the IR's back
+      # (it would fail to resolve the name): dplyr runs those.
+      if (any(c("get", "get0", "mget") %in% all.names(built_expr))) {
+        return(fallback())
+      }
       out_name <- apply_names_template(names_tmpl, names(cols)[i], spec$label %||% "")
-      if (col %in% out_names || any(out_names %in% all.vars(built_expr))) {
+      reads <- across_string_reads(built_expr)
+      if (col %in% out_names || any(out_names %in% c(all.vars(built_expr), reads$names)) ||
+          (length(out_names) > 0 && reads$dynamic)) {
         hazard <- TRUE
       }
       out_names <- c(out_names, out_name)
-      out_quos <- c(out_quos, list(rlang::new_quosure(built_expr, env)))
+      out_quos <- c(out_quos, list(rlang::new_quosure(built_expr, spec$env %||% env)))
     }
   }
+  if (anyDuplicated(out_names)) {
+    return(fallback())
+  }
   names(out_quos) <- out_names
-  attr(out_quos, "needs_fallback") <- hazard
+  attr(out_quos, "needs_fallback") <- FALSE
+  attr(out_quos, "hazard") <- hazard
   out_quos
+}
+
+# An empty expansion flagged for the whole-call CPU fallback.
+# @keywords internal
+across_fallback_result <- function() {
+  out <- stats::setNames(list(), character())
+  attr(out, "needs_fallback") <- TRUE
+  out
+}
+
+# The columns `expr` reads through `.data[[...]]`, which all.vars() can't see:
+# `names` are the string-literal ones, `dynamic` says some index is not a
+# literal (so any column may be read). Other `[[` uses (a list, a vector) are
+# not column reads.
+# @keywords internal
+across_string_reads <- function(expr) {
+  out <- list(names = character(), dynamic = FALSE)
+  walk <- function(e) {
+    if (rlang::is_missing(e) || !is.call(e)) {
+      return(invisible())
+    }
+    if (identical(e[[1]], as.name("[[")) && length(e) >= 3 && identical(e[[2]], as.name(".data"))) {
+      idx <- e[[3]]
+      if (is.character(idx) && length(idx) == 1) {
+        out$names <<- c(out$names, idx)
+      } else {
+        out$dynamic <<- TRUE
+      }
+    }
+    for (part in as.list(e)) walk(part)
+  }
+  walk(expr)
+  out
+}
+
+# Rewrite one across() dot's expansions so they all read the data as it was
+# before the dot (mutate()/transmute()): every expansion is computed into a
+# temp column first, then assigned to its real name. The caller drops the
+# temps.
+#
+# @param expanded The expansion (named list of quosures)
+# @param taken Names the temps must not collide with
+# @return List of quosures (temps, then assignments) with a `"temps"`
+#   attribute naming the temp columns
+# @keywords internal
+stage_across_expansion <- function(expanded, taken) {
+  n <- length(expanded)
+  temps <- character(n)
+  for (k in seq_len(n)) {
+    temps[k] <- unique_temp_name(paste0("..across_", k, ".."), c(taken, temps[seq_len(k - 1)]))
+  }
+  computed <- expanded
+  attributes(computed) <- NULL
+  names(computed) <- temps
+  assigned <- lapply(seq_len(n), function(k) {
+    rlang::new_quosure(as.name(temps[k]), rlang::quo_get_env(expanded[[k]]))
+  })
+  names(assigned) <- names(expanded)
+  out <- c(computed, assigned)
+  attr(out, "temps") <- temps
+  out
 }
 
 # dplyr's wording for the class of a non-logical if_any()/if_all() piece.
@@ -732,7 +1052,8 @@ check_across_predicate_piece <- function(piece, col, env, schema) {
 # @return A single quosure (the folded predicate; the literal FALSE/TRUE
 #   if `.cols` matched no columns)
 # @keywords internal
-expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filter") {
+expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filter",
+                              scope = schema$names) {
   matched <- rlang::call_match(expr, if_any_all_proto, defaults = FALSE)
   present <- as.list(matched)[-1]
 
@@ -756,29 +1077,45 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filte
     return(rlang::new_quosure(value, env))
   }
 
-  extra_args <- present[!names(present) %in% c(".cols", ".fns", ".names")]
-  extra_args <- lapply(extra_args, eval, envir = env)
-
-  fns_expr <- present$.fns
-  specs <- parse_across_fns(fns_expr, env, extra_args)
-  if (is.null(specs) || length(specs) != 1) {
-    stop(
-      mode, "()'s `.fns` must be a single function or formula: ",
-      rlang::expr_deparse(expr), call. = FALSE
-    )
+  fallback <- function() {
+    structure(rlang::new_quosure(FALSE, env), needs_fallback = TRUE)
   }
-  spec <- specs[[1]]
+
+  extra_args <- across_extra_args(
+    present[!names(present) %in% c(".cols", ".fns", ".names")], env, scope
+  )
+  if (is.null(extra_args)) {
+    return(fallback())
+  }
+  fns_given <- ".fns" %in% names(present)
+  if (fns_given && is.null(present[[".fns"]])) {
+    return(fallback())
+  }
+  parsed <- parse_across_fns(if (fns_given) present[[".fns"]] else NULL, env, scope, extra_args)
+  if (is.null(parsed)) {
+    return(fallback())
+  }
 
   fold_op <- if (identical(mode, "if_any")) as.name("|") else as.name("&")
 
+  # One quosure carries one environment, so the functions must share it
+  envs <- lapply(parsed$specs, function(sp) sp$env %||% env)
+  if (!all(vapply(envs, identical, logical(1), envs[[1]]))) {
+    return(fallback())
+  }
+  piece_env <- envs[[1]]
+
+  # Every function of a list contributes one piece per column
   combined <- NULL
   for (col in cols) {
-    piece <- spec$build(as.name(col), col)
-    check_across_predicate_piece(piece, col, env, schema)
-    combined <- if (is.null(combined)) piece else as.call(list(fold_op, combined, piece))
+    for (spec in parsed$specs) {
+      piece <- spec$build(as.name(col), col)
+      check_across_predicate_piece(piece, col, piece_env, schema)
+      combined <- if (is.null(combined)) piece else as.call(list(fold_op, combined, piece))
+    }
   }
 
-  rlang::new_quosure(combined, env)
+  rlang::new_quosure(combined, piece_env)
 }
 
 # =============================================================================
@@ -805,12 +1142,19 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filte
 #' `mutate(z = across(x, y))`) packs a data-frame column and never gets
 #' here: [dots_need_fallback()] sends the whole call to the CPU fallback.
 #'
-#' The result carries a `"needs_fallback"` attribute. It is `TRUE` when an
-#' `across()` renames onto a column that a later expansion of the same
-#' `across()` reads (`across(c(y = x, z = y), ...)`): dplyr evaluates every
-#' function against the pre-`across()` data, while the expanded dots would
-#' run in sequence. That needs the schema, so [dots_need_fallback()] can't
-#' see it; the verb calls then re-run the ORIGINAL dots on the CPU.
+#' The result carries a `"needs_fallback"` attribute. It is `TRUE` when the
+#' schema or the `.fns` values show that dplyr must run the call:
+#' an unsupported `.fns`/extra-argument shape (a non-inlinable lambda, a
+#' value whose free variables are columns, ...), duplicate output names, or,
+#' in `summarise()`/`filter()`, an `across()` that renames onto a column that a
+#' later expansion of the same `across()` reads (`across(c(y = x, z = y),
+#' ...)`): dplyr evaluates every function against the pre-`across()` data,
+#' while the expanded dots would run in sequence. That needs the schema, so
+#' [dots_need_fallback()] can't see it; the verb calls then re-run the
+#' ORIGINAL dots on the CPU. In `mutate()`/`transmute()` the same hazard is
+#' staged instead: the expansions are computed into temp columns first and
+#' assigned afterwards, and the `"staged_temps"` attribute names the temps the
+#' caller must drop (and whose CPU fallbacks must use the ORIGINAL dots).
 #'
 #' @param dots A list of quosures (already past cur_group_id substitution,
 #'   if applicable)
@@ -825,6 +1169,12 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
   out_quos <- list()
   out_names <- character()
   needs_fallback <- FALSE
+  staged_temps <- character()
+  mutating <- verb %in% c("mutate", "transmute")
+  # Names in scope for the guards of a later dot: the table's columns plus
+  # everything an earlier dot of this call creates (dplyr evaluates a value's
+  # free variables and the extra `...` args against that data).
+  scope <- schema$names
 
   for (i in seq_along(dots)) {
     quo <- dots[[i]]
@@ -842,26 +1192,48 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
           "instead.\nExpression: ", rlang::expr_deparse(expr), call. = FALSE
         )
       }
-      expanded <- expand_one_across(expr, env, schema, group_cols)
+      expanded <- expand_one_across(expr, env, schema, group_cols, scope)
       needs_fallback <- needs_fallback || isTRUE(attr(expanded, "needs_fallback"))
+      if (isTRUE(attr(expanded, "hazard"))) {
+        if (mutating) {
+          # Stage: compute every expansion from the pre-dot data into temps
+          expanded <- stage_across_expansion(
+            expanded, c(schema$names, out_names, names(dots), staged_temps)
+          )
+          staged_temps <- c(staged_temps, attr(expanded, "temps"))
+        } else {
+          needs_fallback <- TRUE
+        }
+      }
       out_quos <- c(out_quos, expanded)
       out_names <- c(out_names, names(expanded))
+      scope <- union(scope, names(expanded))
       next
     }
 
     if (identical(head_name, "if_any") || identical(head_name, "if_all")) {
-      combined <- expand_if_any_all(expr, env, schema, group_cols, head_name, verb)
+      combined <- expand_if_any_all(expr, env, schema, group_cols, head_name, verb, scope)
+      needs_fallback <- needs_fallback || isTRUE(attr(combined, "needs_fallback"))
       out_quos <- c(out_quos, list(combined))
       # dplyr names an unnamed if_any()/if_all() dot after the original call
       out_names <- c(out_names, if (is_named) nm else if (identical(verb, "filter")) "" else rlang::as_label(expr))
+      if (!identical(verb, "filter")) scope <- union(scope, out_names[length(out_names)])
       next
     }
 
     out_quos <- c(out_quos, list(quo))
     out_names <- c(out_names, if (is_named) nm else "")
+    if (!identical(verb, "filter")) {
+      # An unnamed dot other than a column already in scope can return a data
+      # frame, whose columns dplyr adds under their own names: from here on
+      # the set of columns is unknown (NA, see across_free_vars_hit_data()).
+      unknown <- !is_named && !(is.symbol(expr) && as.character(expr) %in% scope)
+      scope <- union(scope, if (is_named) nm else if (unknown) NA_character_ else rlang::as_label(expr))
+    }
   }
 
   names(out_quos) <- out_names
   attr(out_quos, "needs_fallback") <- needs_fallback
+  attr(out_quos, "staged_temps") <- staged_temps
   out_quos
 }

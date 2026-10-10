@@ -231,10 +231,17 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   # Substitution runs before expansion here so the if_any()/if_all() piece
   # check can type cur_group_id() pieces; the helper column is excluded from
   # `.cols`'s selectable set alongside the group columns.
+  fallback_data <- .data
+  fallback_dots <- dots
   cgid <- substitute_cur_group_id(.data, dots, verb_groups)
   .data <- cgid$data
   dots <- expand_across_dots(cgid$dots, current_schema(.data),
                              c(verb_groups, cgid$helper_name), "filter")
+  # An unsupported `.fns` shape: dplyr runs the call on the table and dots as
+  # the user wrote them (no cur_group_id() helper column)
+  if (isTRUE(attr(dots, "needs_fallback"))) {
+    return(filter_across_fallback(fallback_data, fallback_dots, by_quo))
+  }
 
   # Schema is stable across this whole call for every PLAIN dot: filter()
   # never adds/removes real columns. The one exception is Phase 5's
