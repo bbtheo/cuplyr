@@ -123,16 +123,23 @@
 #' When `na.rm = TRUE` and a group's aggregated column is ENTIRELY `NA`
 #' (Phase 6, task 4), the result matches base R's own empty-vector
 #' reduction identity, exactly like real dplyr: `sum()` -> `0`, `mean()` ->
-#' `NaN`, `min()` -> `Inf`, `max()` -> `-Inf` (real dplyr also surfaces a
-#' base-R warning for `min()`/`max()` here -- cuplyr does not replicate that
-#' warning, only the value), `sd()`/`var()`/`median()` -> `NA` (their
-#' natural result already, no special-casing needed). One documented
-#' boundary: `min()`/`max()`'s `Inf`/`-Inf` identity can only be
-#' represented in a `FLOAT64` column; over an INTEGER column (where real
-#' dplyr promotes the WHOLE result column to double the instant any group
-#' needs this identity -- a data-dependent type decision this package's
-#' parse-time schema inference can't make), the all-`NA`-group result stays
-#' `NA` rather than promoting.
+#' `NaN`, `min()` -> `Inf`, `max()` -> `-Inf` (with base R's warning "no
+#' non-missing arguments to min; returning Inf" / "... max; returning -Inf",
+#' as dplyr surfaces it, for double and integer input alike; it is only
+#' raised when some group actually hits the identity), `sd()`/`var()`/
+#' `median()` -> `NA` (their natural result already, no special-casing
+#' needed).
+#'
+#' Over an INTEGER column, dplyr promotes the WHOLE `min()`/`max()` result
+#' column to double the instant any group needs the identity, and keeps it
+#' integer otherwise; cuplyr does the same. Because that type depends on the
+#' data, a `summarise()` with an integer `min()`/`max()` runs immediately even
+#' on a lazy table (pending operations are computed first), and the result's
+#' schema reflects the real type. A 0-row input also counts as an empty
+#' group: ungrouped, `summarise()` returns one row of empty-vector reductions
+#' (`n()` 0, `mean()` `NaN`, `sum()` 0, `min()` `Inf`, ...); grouped, the
+#' result has no rows but an integer `min()`/`max()` is typed double, as in
+#' dplyr.
 #'
 #' `quantile()` diverges from the mean/sum/.../median family: matching base
 #' R's own `quantile.default()` exactly, `na.rm = FALSE` (the default) with
@@ -164,6 +171,33 @@
 #' ## Ungrouped summarise
 #' If `.data` is not grouped, summarise will compute aggregations over all
 #' rows, returning a single-row table.
+#'
+#' ## No expressions
+#' `summarise(.data)` with no expressions follows dplyr: ungrouped, it
+#' returns a one-row table with no columns; grouped, it returns the distinct
+#' group keys (one row per group, in `group_by()`'s ascending, `NA`-last
+#' order) and peels one grouping layer per `.groups`; with `.by`, it returns
+#' the distinct `.by` combinations in first-appearance order.
+#'
+#' ## Tables with no columns
+#' cudf cannot hold rows without columns, so a zero-column `tbl_gpu` keeps its
+#' row count on the R side. What that covers: `tbl_gpu()`, `dim()`,
+#' `collect()`/`as_tibble()`, `compute()`/`collapse()`,
+#' `group_by()`/`ungroup()`, zero-dot `summarise()` (1 x 0), `summarise()`
+#' with dots (a CPU fallback, so `n()` counts correctly), ungrouped
+#' `slice()`/`slice_head()`/`slice_tail()`, `bind_rows()`/`bind_cols()` of
+#' zero-column tables only, a literal-mask `filter()`, `dplyr_row_slice()`,
+#' and adding a column with `$<-`/`[[<-`. Every other verb, joins with a zero-column side,
+#' vctrs operations (`vec_size()`, `vec_slice()`, ...), and binding a
+#' zero-column table that has rows to one with columns raise an error instead
+#' of returning a wrong row count (full support is F14).
+#'
+#' ## Redefining columns
+#' An expression named like a grouping column replaces that key in place
+#' (same position, the expression's type; the table stays grouped by that
+#' name). An expression that mentions a name an earlier expression created
+#' (or a name created twice) sees the new value, as in dplyr; such calls run
+#' through the CPU fallback.
 #'
 #' ## `.by` group order
 #' Verified empirically against dplyr 1.2.1: `summarise(.by=)` emits one row
@@ -227,20 +261,28 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   by_quo <- rlang::enquo(.by)
 
   # Phase 5, task W9: `.by=` resolution -- checked up front (before the
-  # zero-dots error just below), matching mutate()/filter()'s own `.by=`
+  # zero-dots branch just below), matching mutate()/filter()'s own `.by=`
   # resolution order: resolve_by() (R/execute.R) errors immediately if
   # `.data` is already grouped, and this must fire even when `...` is empty
   # (verified empirically: `summarise(group_by(df, g), .by = g)` raises the
-  # grouped-`.data` error, it does NOT reach summarise()'s own "requires at
-  # least one aggregation expression" check first).
+  # grouped-`.data` error).
   by_cols <- resolve_by(.data, by_quo, ".by")
   by_given <- !rlang::quo_is_null(by_quo)
 
   dots <- rlang::enquos(...)
 
+  # F07: zero dots is a valid call (dplyr returns the group keys).
   if (length(dots) == 0) {
-    stop("summarise() requires at least one aggregation expression.",
-         call. = FALSE)
+    return(summarise_zero_dots(.data, by_cols, by_given, .groups, caller_env))
+  }
+
+  # F07: a zero-column table has rows but no cudf column to count them with,
+  # so even n() can't run on the GPU. The CPU fallback sees the real row
+  # count (collect() honours `$nrow`).
+  if (length(current_schema(.data)$names) == 0L) {
+    return(gpu_fallback("summarise", .data, function(tbl) {
+      rlang::inject(dplyr::summarise(tbl, !!!dots, .groups = .groups, .by = !!by_quo))
+    }))
   }
 
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R's
@@ -281,7 +323,12 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   # sum(paste0(x))) now falls back to real dplyr::summarise() instead of
   # hard-erroring -- see summarise_dots_parseable()'s own docs for exactly
   # which cases trigger this vs. propagate a genuine error.
-  if (!summarise_dots_parseable(dots, current_schema(.data))) {
+  # F07: dots that redefine a name another dot assigned, or reference one
+  # (`summarise(x = max(x), m = mean(x))`: the second dot sees the NEW x), are
+  # evaluated sequentially by dplyr. The GPU path computes every aggregate
+  # from the input columns at once, so these go to the CPU fallback.
+  if (summarise_dots_are_sequential(dots) ||
+      !summarise_dots_parseable(dots, current_schema(.data))) {
     return(gpu_fallback("summarise", .data, function(tbl) {
       rlang::inject(dplyr::summarise(tbl, !!!dots, .groups = .groups, .by = !!by_quo))
     }))
@@ -297,6 +344,79 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   retained_groups <- resolve_summarise_groups(.data$groups, .groups, caller_env)
 
   summarise_core(.data, dots, retained_groups)
+}
+
+# Internal: summarise() with no dots (F07), as dplyr's summarise.data.frame()
+# / summarise.grouped_df() do it:
+#   - ungrouped: a 1 x 0 table. It does not depend on the input's data, so it
+#     is uploaded fresh (a lazy join result has no pointer to read); `$nrow`
+#     carries the 1. A lazy input's pending ops are computed (and discarded)
+#     first, since they can error.
+#   - grouped: one row per group holding only the grouping columns, in
+#     group_by()'s canonical order (ascending, NA last), so the hash
+#     group-by is followed by an arrange(). `.groups` is resolved and
+#     validated like every other summarise().
+#   - `.by=`: the distinct `.by` combinations in first-appearance order,
+#     ungrouped.
+# @keywords internal
+summarise_zero_dots <- function(.data, by_cols, by_given, groups_arg, caller_env) {
+  if (by_given && length(by_cols) > 0) {
+    return(dplyr::distinct(.data, !!!rlang::syms(by_cols)))
+  }
+
+  retained_groups <- resolve_summarise_groups(.data$groups, groups_arg, caller_env)
+
+  if (length(.data$groups) == 0) {
+    # The result is always the same 1 x 0 table, uploaded fresh (a lazy join
+    # result has no `$ptr` to build on). Pending ops still run first, as in
+    # dplyr, so their errors (`unmatched = "error"`, ...) surface.
+    if (has_pending_ops(.data)) {
+      cuplyr_fallback_notify("summarise", "no expressions (pending operations run first)")
+      compute(.data)
+    }
+    return(tbl_gpu(tibble::tibble(.rows = 1L), lazy = .data$exec_mode == "lazy"))
+  }
+
+  keys <- push_op(.data, ast_summarise(input_node(.data), list(), .data$groups, retained_groups))
+  dplyr::arrange(keys, !!!rlang::syms(.data$groups))
+}
+
+# Internal: TRUE iff the dots must be evaluated one after another (F07): a
+# name is assigned twice, or a dot mentions a name an EARLIER dot assigned
+# (dplyr's later dot then sees the new value, for a grouping column as well as
+# any other). Names are collected with `all.vars()` (deliberately generous: it
+# also reports `.data$x`'s `x`) plus the string in `.data[["x"]]`, which
+# `all.vars()` does not see. A false positive only costs the CPU fallback.
+# @param dots auto_name_dots()'d quosures
+# @keywords internal
+summarise_dots_are_sequential <- function(dots) {
+  nms <- names(dots)
+  if (anyDuplicated(nms) > 0) {
+    return(TRUE)
+  }
+  for (i in seq_along(dots)[-1]) {
+    expr <- rlang::quo_get_expr(dots[[i]])
+    if (any(c(all.vars(expr), expr_data_pronoun_names(expr)) %in% nms[seq_len(i - 1)])) {
+      return(TRUE)
+    }
+  }
+  FALSE
+}
+
+# Internal: every name read through `.data$name` / `.data[["name"]]` anywhere
+# in `expr`.
+# @keywords internal
+expr_data_pronoun_names <- function(expr) {
+  # An empty argument slot (`x[, 1]`) errors when forced: it names nothing.
+  tryCatch({
+    if (is_data_pronoun_call(expr)) {
+      pronoun_call_name(expr)
+    } else if (is.call(expr)) {
+      unlist(lapply(as.list(expr), expr_data_pronoun_names), use.names = FALSE) %||% character()
+    } else {
+      character()
+    }
+  }, error = function(e) character())
 }
 
 # Internal: resolve `.groups=` into the retained group-column set, and fire
@@ -519,7 +639,8 @@ summarise_dots_parseable <- function(dots, schema) {
 # @return A new tbl_gpu, grouped by `retained_groups` (see
 #   propagate_groups(), R/execute.R, which reads `node$result_groups`)
 # @keywords internal
-summarise_core <- function(.data, dots, retained_groups = character()) {
+summarise_core <- function(.data, dots, retained_groups = character(),
+                           internal_cols = character()) {
   # Phase 6, task 6.1 (Fix A): extract and strip any `na.rm = <literal>`
   # named argument BEFORE temp-column preprocessing -- this must happen
   # first so a sub-expression call like `sum(sqrt(x), na.rm = TRUE)` is
@@ -555,8 +676,55 @@ summarise_core <- function(.data, dots, retained_groups = character()) {
   aggregations <- parse_aggregations(current_schema(working_data), processed_dots,
                                      na_rm_flags, agg_extra)
 
+  # F07: internal helper aggregations (summarise_by_desugar()'s row-position
+  # min()) must stay INT32 and never warn.
+  for (i in seq_along(aggregations)) {
+    if (aggregations[[i]]$output_col %in% internal_cols) {
+      aggregations[[i]]$identity <- FALSE
+    }
+  }
+
+  # F07: an INT32 min()/max() turns the WHOLE result column into FLOAT64
+  # (Inf/-Inf) iff some group is empty -- a property of the data, which a
+  # schema inferred before running can't know. Such a summarise runs right
+  # away (a lazy table first materializes its pending ops, like the
+  # temp-column case above) and the schema is corrected from the real result.
+  if (any(vapply(aggregations, function(agg) isTRUE(agg$identity) &&
+                 identical(unname(agg$input_type), "INT32"), logical(1)))) {
+    return(summarise_run_now(working_data, aggregations, retained_groups))
+  }
+
   push_op(working_data, ast_summarise(input_node(working_data), aggregations,
                                       working_data$groups, retained_groups))
+}
+
+# Internal: run a summarise node immediately, then reconcile the schema with
+# the result's real column types (F07, see summarise_core()). Returns a table
+# in the input's exec_mode with no pending ops.
+# @keywords internal
+summarise_run_now <- function(.data, aggregations, retained_groups) {
+  was_lazy <- identical(.data$exec_mode, "lazy")
+
+  if (was_lazy && has_pending_ops(.data)) {
+    cuplyr_fallback_notify("summarise", paste0(
+      "integer min()/max() (result type depends on the data): ",
+      paste(vapply(aggregations, function(a) a$output_col, character(1)), collapse = ", ")
+    ))
+  }
+  base <- compute(.data)
+  base$exec_mode <- "eager"
+  result <- push_op(base, ast_summarise(input_node(base), aggregations,
+                                        base$groups, retained_groups))
+
+  # The only possible drift is INT32 min()/max() promoted to FLOAT64.
+  actual <- gpu_col_types(result$ptr)
+  promoted <- result$schema$types == "INT32" & actual == "dbl"  # gpu_col_types() spelling
+  result$schema$types[promoted] <- "FLOAT64"
+
+  if (was_lazy) {
+    result$exec_mode <- "lazy"
+  }
+  result
 }
 
 # Internal: Extract and strip an `na.rm = <literal>` (or `na_rm = <literal>`)
@@ -831,7 +999,7 @@ summarise_by_desugar <- function(.data, dots, by_cols) {
     rlang::call2("min", as.name(rowid_name)), rlang::base_env()
   )
 
-  result <- summarise_core(grouped, dots)
+  result <- summarise_core(grouped, dots, internal_cols = first_name)
   result <- dplyr::arrange(result, !!rlang::sym(first_name))
   dplyr::select(result, -dplyr::all_of(first_name))
 }

@@ -264,6 +264,9 @@ vec_proxy.tbl_gpu <- function(x, ...) {
   if (is.null(m$ptr)) {
     rlang::abort("Cannot take the vctrs proxy of a tbl_gpu with no GPU table.")
   }
+  # The proxy's size is cudf's row count, which is 0 for a zero-column table
+  # whatever its R-side `$nrow` says (F07; full support is F14).
+  check_zero_column_input(m, m$schema, "vctrs::vec_proxy")
   n <- gpu_dim(m$ptr)[[1L]]
   id <- vctrs_register_source(m)
   if (entry > 0L) {

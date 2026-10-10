@@ -129,6 +129,20 @@ propagate_factor_levels <- function(node, input_schema, surviving_names) {
     names(factor_levels) <- nm
   }
 
+  if (identical(node$type, "summarise")) {
+    # F07: an aggregate output only keeps a factor column's levels when it IS
+    # that column carried through first()/last()/nth(); an aggregate named
+    # like a factor (typically a grouping key it replaced) is a plain
+    # integer/double column.
+    for (agg in node$aggregations) {
+      carries <- agg$fn %in% c("first", "last", "nth") &&
+        identical(agg$input_col, agg$output_col)
+      if (!carries) {
+        factor_levels[[agg$output_col]] <- NULL
+      }
+    }
+  }
+
   # A bare copy of a factor column (`mutate(h = f)`) carries its levels to
   # the output name; any other expression stops a replaced column being a
   # factor.
@@ -191,6 +205,36 @@ propagate_groups <- function(node, groups, schema) {
   intersect(groups, schema$names)
 }
 
+#' Refuse verbs on a zero-column table that has rows
+#'
+#' A cudf table with no columns always has 0 rows, so a zero-column `tbl_gpu`
+#' carries its row count on the R side (`x$nrow`, see `new_tbl_gpu()`). Verbs
+#' lower to cudf calls that cannot see it, so running one on such a table
+#' would silently return a table with the wrong row count. Until zero-column
+#' tables are supported by every verb (F14), fail loudly instead. Called by
+#' `push_op()`, `push_join()` (both sides), the binds and `vec_proxy()`;
+#' `summarise()` and the `slice()` family handle this input before it reaches
+#' `push_op()`.
+#'
+#' @param .data A `tbl_gpu`
+#' @param input_schema `current_schema(.data)`
+#' @param verb Character, the node type, for the message
+#' @keywords internal
+check_zero_column_input <- function(.data, input_schema, verb) {
+  if (length(input_schema$names) == 0) {
+    n <- .subset2(.data, "nrow")
+    if (is.null(n)) {
+      stop("`", verb, "()` is not supported on a tbl_gpu with no columns ",
+           "and an unknown number of rows.", call. = FALSE)
+    }
+    if (n > 0) {
+      stop("`", verb, "()` is not supported on a tbl_gpu with no columns but ",
+           n, " rows.", call. = FALSE)
+    }
+  }
+  invisible(NULL)
+}
+
 #' Apply an AST node to a tbl_gpu, dispatching on exec_mode
 #'
 #' The only exec_mode branch point (D1). Lazy mode stores `node` as the new
@@ -205,6 +249,7 @@ propagate_groups <- function(node, groups, schema) {
 #' @keywords internal
 push_op <- function(.data, node) {
   input_schema <- current_schema(.data)
+  check_zero_column_input(.data, input_schema, node$type)
 
   new_schema <- infer_schema(node)
   new_schema$factor_levels <- propagate_factor_levels(node, input_schema, new_schema$names)
@@ -221,7 +266,8 @@ push_op <- function(.data, node) {
       lazy_ops = node,
       groups = new_groups,
       exec_mode = "lazy",
-      group_drop = new_group_drop
+      group_drop = new_group_drop,
+      nrow = .subset2(.data, "nrow")
     ))
   }
 
@@ -233,7 +279,8 @@ push_op <- function(.data, node) {
     lazy_ops = NULL,
     groups = new_groups,
     exec_mode = .subset2(.data, "exec_mode"),
-    group_drop = new_group_drop
+    group_drop = new_group_drop,
+    nrow = .subset2(.data, "nrow")
   )
 }
 
@@ -299,6 +346,13 @@ join_input_node <- function(tbl) {
 push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
                       multiple = "all", unmatched = "drop", relationship = NULL,
                       cross_by = FALSE) {
+  # Joins lower to cudf, which sees no rows in a zero-column side, so a
+  # `by = character()` join against one would silently get the row count
+  # wrong (F07).
+  verb <- paste0(join_type, "_join")
+  check_zero_column_input(x, current_schema(x), verb)
+  check_zero_column_input(y, current_schema(y), verb)
+
   join_ast <- ast_join(
     join_type,
     join_input_node(x),

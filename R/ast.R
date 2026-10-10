@@ -440,10 +440,18 @@ infer_mutate_output_type <- function(op, input_types, scalar) {
 #' @param extra Numeric scalar, `NA_real_` unless `fn` needs an extra
 #'   scalar parameter beyond the input column: `quantile()`'s probability
 #'   (`[0, 1]`) or `nth()`'s (possibly negative) element position.
+#' @param identity Logical scalar (F07). `TRUE` (the default) lets a
+#'   `min()`/`max()` over an INT32/FLOAT64 column apply base R's empty-vector
+#'   identity (`Inf`/`-Inf`, with dplyr's warning) for an empty group, which
+#'   promotes an INT32 result column to FLOAT64 when it happens; see
+#'   `gpu_summarise()` (`src/ops_groupby.cpp`). `FALSE` is for internal helper
+#'   aggregations (`summarise_by_desugar()`'s row-position `min()`) that must
+#'   stay INT32 and never warn. Only meaningful for `min`/`max` over
+#'   INT32/FLOAT64; stored as `FALSE` for everything else.
 #' @return An aggregation list structure
 #' @keywords internal
 make_aggregation <- function(output_col, input_col, fn, input_type = NULL, na_rm = FALSE,
-                              extra = NA_real_) {
+                              extra = NA_real_, identity = TRUE) {
   output_type <- switch(fn,
     "n" = "INT32",
     "sum" = if (!is.null(input_type) && input_type == "INT32") "INT64" else "FLOAT64",
@@ -468,7 +476,9 @@ make_aggregation <- function(output_col, input_col, fn, input_type = NULL, na_rm
     input_type = input_type,
     output_type = output_type,
     na_rm = isTRUE(na_rm),
-    extra = as.double(extra)
+    extra = as.double(extra),
+    identity = isTRUE(identity) && fn %in% c("min", "max") &&
+      !is.null(input_type) && unname(input_type) %in% c("INT32", "FLOAT64")
   )
 }
 
@@ -585,10 +595,37 @@ infer_schema.ast_summarise <- function(node) {
   agg_names <- vapply(node$aggregations, `[[`, character(1), "output_col")
   agg_types <- vapply(node$aggregations, `[[`, character(1), "output_type")
 
+  # F07: an aggregate named like a grouping column replaces that key IN
+  # PLACE (see summarise_output_index()).
+  idx <- summarise_output_index(node$groups, agg_names)
+
   list(
-    names = c(group_names, agg_names),
-    types = c(group_types, agg_types)
+    names = c(group_names, agg_names)[idx],
+    types = c(group_types, agg_types)[idx]
   )
+}
+
+#' Output column order of a summarise node
+#'
+#' `gpu_summarise()` returns `[group keys, aggregates]`. dplyr instead lets an
+#' aggregate named like a grouping column replace that key in place (same
+#' position, the aggregate's type); every other aggregate follows the keys in
+#' call order. This returns the 1-based permutation of `c(keys, aggregates)`
+#' that yields dplyr's layout, shared by `infer_schema.ast_summarise()` and
+#' `lower_summarise()` so the schema and the table cannot disagree. It is the
+#' identity when no aggregate collides with a key. Duplicate aggregate names
+#' never reach a node (`summarise()` routes them to the CPU fallback).
+#'
+#' @param groups Character vector of group columns the node aggregates by
+#' @param agg_names Character vector of aggregate output names
+#' @return Integer vector indexing `c(keys, aggregates)`
+#' @keywords internal
+summarise_output_index <- function(groups, agg_names) {
+  n_groups <- length(groups)
+  over <- match(groups, agg_names)
+  key_idx <- ifelse(is.na(over), seq_len(n_groups), n_groups + over)
+  rest <- setdiff(seq_along(agg_names), over[!is.na(over)])
+  as.integer(c(key_idx, n_groups + rest))
 }
 
 #' @export

@@ -11,8 +11,9 @@
 }
 \value{
 An integer vector of length 2: c(nrow, ncol). The row count is \code{NA}
-for a table that has no GPU data yet, and for \code{ncol()}/\code{NCOL()} of a lazy
-table with pending operations (which ignore it).
+for a table that has no GPU data yet, for \code{ncol()}/\code{NCOL()} of a lazy
+table with pending operations (which ignore it), and for a zero-column
+table whose row count was never recorded.
 }
 \description{
 Returns the number of rows and columns in a GPU table. For a lazy table

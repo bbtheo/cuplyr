@@ -637,15 +637,14 @@ test_that("summarise() can be chained with collect()", {
 # Error Handling
 # =============================================================================
 
-test_that("summarise() errors with no expressions", {
+test_that("summarise() with no expressions returns a 1 x 0 table, like dplyr (F07)", {
   skip_if_no_gpu()
 
   gpu_df <- tbl_gpu(mtcars)
 
-  expect_error(
-    dplyr::summarise(gpu_df),
-    "requires at least one"
-  )
+  res <- dplyr::summarise(gpu_df)
+  expect_identical(dim(res), c(1L, 0L))
+  expect_identical(collect(res), tibble::tibble(.rows = 1L))
 })
 
 test_that("summarise() errors on non-existent column", {

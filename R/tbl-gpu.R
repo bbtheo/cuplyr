@@ -101,7 +101,10 @@ tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
 
   exec_mode <- resolve_exec_mode(lazy)
 
-  new_tbl_gpu(ptr = ptr, schema = schema, exec_mode = exec_mode)
+  # A cudf table with no columns has no rows, so a zero-column data frame
+  # keeps its row count on the R side (`$nrow`, see new_tbl_gpu()).
+  new_tbl_gpu(ptr = ptr, schema = schema, exec_mode = exec_mode,
+              nrow = if (ncol(data) == 0L) nrow(data) else NULL)
 }
 
 #' @rdname tbl_gpu
@@ -128,6 +131,10 @@ tbl_gpu.tbl_gpu <- function(data, ..., lazy = NULL) {
 # @param lazy_ops AST root node for pending operations (NULL if none)
 # @param groups Character vector of grouping columns
 # @param exec_mode Execution mode: "lazy" or "eager"
+# @param nrow Row count of a ZERO-column table (cudf cannot represent rows
+#   without columns, so it lives here as `$nrow`); `NULL` otherwise. dim(),
+#   collect(), print() and compute() honour it, and push_op() refuses verbs
+#   on such a table when it has rows (check_zero_column_input()).
 # @return A tbl_gpu S3 object
 # @keywords internal
 new_tbl_gpu <- function(ptr = NULL,
@@ -135,7 +142,8 @@ new_tbl_gpu <- function(ptr = NULL,
                         lazy_ops = NULL,
                         groups = character(),
                         exec_mode = NULL,
-                        group_drop = TRUE) {
+                        group_drop = TRUE,
+                        nrow = NULL) {
   if (is.list(lazy_ops) && length(lazy_ops) == 0) {
     lazy_ops <- NULL
   }
@@ -147,17 +155,18 @@ new_tbl_gpu <- function(ptr = NULL,
     stop("exec_mode must be 'lazy' or 'eager'.", call. = FALSE)
   }
 
-  structure(
-    list(
-      ptr = ptr,
-      schema = schema,
-      lazy_ops = lazy_ops,
-      groups = groups,
-      exec_mode = exec_mode,
-      group_drop = group_drop
-    ),
-    class = c("tbl_gpu", "tbl")
+  out <- list(
+    ptr = ptr,
+    schema = schema,
+    lazy_ops = lazy_ops,
+    groups = groups,
+    exec_mode = exec_mode,
+    group_drop = group_drop
   )
+  if (!is.null(nrow) && length(schema$names) == 0L) {
+    out$nrow <- as.integer(nrow)
+  }
+  structure(out, class = c("tbl_gpu", "tbl"))
 }
 
 #' Resolve execution mode from explicit value, option, or environment variable
@@ -246,8 +255,9 @@ as_tbl_gpu <- function(x, ...) {
 #' @param x A `tbl_gpu` object.
 #'
 #' @return An integer vector of length 2: c(nrow, ncol). The row count is `NA`
-#'   for a table that has no GPU data yet, and for `ncol()`/`NCOL()` of a lazy
-#'   table with pending operations (which ignore it).
+#'   for a table that has no GPU data yet, for `ncol()`/`NCOL()` of a lazy
+#'   table with pending operations (which ignore it), and for a zero-column
+#'   table whose row count was never recorded.
 #'
 #' @export
 #' @examples
@@ -255,6 +265,9 @@ as_tbl_gpu <- function(x, ...) {
 #'   dim(tbl_gpu(mtcars))
 #' }
 dim.tbl_gpu <- function(x) {
+  if (length(x$schema$names) == 0L) {
+    return(zero_column_dim(x))
+  }
   if (is.null(x$ptr)) {
     return(c(NA_integer_, length(x$schema$names)))
   }
@@ -272,13 +285,23 @@ dim.tbl_gpu <- function(x) {
   gpu_dim(x$ptr)
 }
 
+# Zero-column table: cudf always reports 0 rows for it, so only the R-side
+# count (`$nrow`, see new_tbl_gpu()) is trustworthy. `NA` (never 0) when
+# nobody recorded one. No plan is run: the verbs that keep a zero-column
+# table carry the count through push_op().
+zero_column_dim <- function(x) {
+  c(x[["nrow"]] %||% NA_integer_, 0L)
+}
+
 # Dimensions of the table `x$ptr` points at, WITHOUT running pending lazy
 # operations (so for a lazy table with pending ops this is the size of its
 # base table, not of its result). For cheap estimates (printing, memory
 # accounting, join-size warnings) that must never execute a plan, which
 # `dim()` does.
 base_dim <- function(x) {
-  if (is.null(x$ptr)) {
+  if (length(x$schema$names) == 0L) {
+    zero_column_dim(x)
+  } else if (is.null(x$ptr)) {
     c(NA_integer_, length(x$schema$names))
   } else {
     gpu_dim(x$ptr)

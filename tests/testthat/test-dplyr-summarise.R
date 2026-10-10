@@ -292,7 +292,8 @@ test_that("summarise() na.rm=TRUE identity values match base R for an entirely-N
   }
 
   expect_same_as_dplyr(df, pipeline, arrange_by = "g")
-  expect_same_as_dplyr_lazy(df, pipeline, arrange_by = "g")
+  # Lazy: the warning fires at collect(), outside the pipeline's suppressWarnings().
+  suppressWarnings(expect_same_as_dplyr_lazy(df, pipeline, arrange_by = "g"))
 })
 
 test_that("summarise() na.rm=TRUE identity values only apply to the group(s) that are entirely NA", {
@@ -331,7 +332,7 @@ test_that("summarise() na.rm=TRUE identity values work ungrouped (whole table en
   }
 
   expect_same_as_dplyr(df, pipeline)
-  expect_same_as_dplyr_lazy(df, pipeline)
+  suppressWarnings(expect_same_as_dplyr_lazy(df, pipeline))
 })
 
 test_that("summarise() sum()'s na.rm=TRUE identity (0) is fixed even over an INTEGER column", {
@@ -347,14 +348,10 @@ test_that("summarise() sum()'s na.rm=TRUE identity (0) is fixed even over an INT
   expect_same_as_dplyr(df, pipeline, arrange_by = "g")
 })
 
-test_that("real dplyr surfaces a base-R warning for min()/max(na.rm=TRUE) on an all-NA group (documented, not replicated by cuplyr)", {
-  # No GPU/tbl_gpu involved -- this test only documents real dplyr's own
-  # behavior (verified empirically), establishing what the deliberate
-  # decision above is about. cuplyr's fix produces the same VALUE (Inf/-Inf)
-  # but does not attempt to reproduce dplyr's own warning-wrapping condition
-  # machinery -- an informational/diagnostic detail, not a return value, and
-  # out of scope for GPU-kernel-level parity (same policy as the regroup
-  # message elsewhere in this file).
+test_that("real dplyr surfaces a base-R warning for min()/max(na.rm=TRUE) on an all-NA group (cuplyr replicates it since F07, see test-parity-F07-minmax.R)", {
+  # No GPU/tbl_gpu involved: this test only documents real dplyr's own
+  # behaviour. Since F07, cuplyr emits the same base-R warning text; the GPU
+  # side is covered in test-parity-F07-minmax.R.
   df <- data.frame(g = c(1, 1), x = c(NA_real_, NA_real_))
 
   expect_warning(
@@ -367,38 +364,35 @@ test_that("real dplyr surfaces a base-R warning for min()/max(na.rm=TRUE) on an 
   )
 })
 
-test_that("BOUNDARY (documented, not fixed): min()/max() na.rm=TRUE on an all-NA INTEGER group stays NA, unlike dplyr's Inf/-Inf-with-promotion", {
+test_that("min()/max() na.rm=TRUE on an all-NA INTEGER group promote to double Inf/-Inf, like dplyr (F07; was a BOUNDARY test)", {
   skip_if_no_gpu()
 
-  # See this section's own module doc above for the full rationale: real
-  # dplyr promotes the WHOLE output column to double the instant any group
-  # needs the Inf/-Inf identity, a data-dependent type decision cuplyr's
-  # static (pre-execution) schema inference can't make. This test PINS the
-  # current (divergent, but honest) cuplyr behavior for the INTEGER case so
-  # a future fix (were the schema architecture to support data-dependent
-  # promotion) has a clear, deliberately-failing regression test to flip.
+  # F07 flipped this test. It used to pin cuplyr's divergent NA result. Real
+  # dplyr promotes the WHOLE output column to double as soon as any group
+  # needs the Inf/-Inf identity, and cuplyr now does the same (data-dependent
+  # output type).
   df <- data.frame(g = c(1, 1), x = c(NA_integer_, NA_integer_))
   gpu_df <- tbl_gpu(df)
 
-  result <- gpu_df |>
-    dplyr::group_by(g) |>
-    dplyr::summarise(
-      mn = min(x, na.rm = TRUE), mx = max(x, na.rm = TRUE),
-      .groups = "drop"
-    ) |>
-    collect()
+  result <- suppressWarnings(
+    gpu_df |>
+      dplyr::group_by(g) |>
+      dplyr::summarise(
+        mn = min(x, na.rm = TRUE), mx = max(x, na.rm = TRUE),
+        .groups = "drop"
+      ) |>
+      collect()
+  )
 
-  # Documented divergence: NA (not Inf/-Inf as real dplyr promotes to).
-  expect_true(is.na(result$mn))
-  expect_true(is.na(result$mx))
-
-  # Confirm real dplyr's own behavior for the record (promotes to double).
   oracle <- suppressWarnings(
     dplyr::group_by(df, g) |>
       dplyr::summarise(mn = min(x, na.rm = TRUE), mx = max(x, na.rm = TRUE), .groups = "drop")
   )
-  expect_true(is.infinite(oracle$mn))
-  expect_true(is.infinite(oracle$mx))
+  expect_identical(result$mn, oracle$mn)
+  expect_identical(result$mx, oracle$mx)
+  expect_type(result$mn, "double")
+  expect_identical(result$mn, Inf)
+  expect_identical(result$mx, -Inf)
 })
 
 # =============================================================================

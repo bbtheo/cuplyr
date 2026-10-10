@@ -95,6 +95,16 @@ collect_frame <- function(x) {
   # Get final schema (might have been updated by lazy ops)
   final_schema <- x$schema
 
+  if (length(final_schema$names) == 0L) {
+    # Zero-column table: the row count lives on the R side (new_tbl_gpu()).
+    # cudf would say 0, so a missing count is an error, not an empty table.
+    if (is.null(x[["nrow"]])) {
+      stop("Cannot collect: this tbl_gpu has no columns and its row count ",
+           "is unknown.", call. = FALSE)
+    }
+    return(tibble::tibble(.rows = x[["nrow"]]))
+  }
+
   df <- wrap_gpu_call("collect", gpu_collect(x$ptr, final_schema$names))
   result <- tibble::as_tibble(df)
 

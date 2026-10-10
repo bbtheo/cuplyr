@@ -56,6 +56,24 @@ dplyr_row_slice.tbl_gpu <- function(data, i, ...) {
   }
 
   materialized <- if (has_pending_ops(data)) compute(data) else data
+
+  if (length(materialized$schema$names) == 0L) {
+    # Zero-column table: nothing for cudf to gather, only the R-side count.
+    n <- materialized[["nrow"]]
+    if (is.null(n) || any(i < 1L | i > n)) {
+      stop("Can't slice a tbl_gpu with no columns: unknown row count or ",
+           "out-of-range positions.", call. = FALSE)
+    }
+    return(new_tbl_gpu(
+      ptr = materialized$ptr,
+      schema = materialized$schema,
+      groups = materialized$groups,
+      group_drop = materialized$group_drop,
+      exec_mode = materialized$exec_mode,
+      nrow = length(i)
+    ))
+  }
+
   new_ptr <- wrap_gpu_call("dplyr_row_slice", gpu_slice_indices(materialized$ptr, as.double(i)))
 
   # NOT routed through `dplyr::dplyr_reconstruct()` -- see
@@ -220,10 +238,13 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
     return(data)
   }
 
-  if (is.data.frame(data) && identical(names(data), tbl_gpu_fields)) {
+  # (`nrow` is only present on a zero-column table)
+  if (is.data.frame(data) &&
+      identical(setdiff(names(data), "nrow"), setdiff(tbl_gpu_fields, "nrow"))) {
     return(new_tbl_gpu(
       ptr = data$ptr, schema = data$schema, lazy_ops = data$lazy_ops,
-      groups = data$groups, exec_mode = data$exec_mode, group_drop = data$group_drop
+      groups = data$groups, exec_mode = data$exec_mode, group_drop = data$group_drop,
+      nrow = data[["nrow"]]
     ))
   }
 
@@ -446,7 +467,8 @@ bracket_row_positions <- function(i, n, i_arg, call) {
 # `value` argument), so tibble's messages about it name `value`.
 # =============================================================================
 
-tbl_gpu_fields <- c("ptr", "schema", "lazy_ops", "groups", "exec_mode", "group_drop")
+# `nrow` is the row count of a zero-column table (new_tbl_gpu()).
+tbl_gpu_fields <- c("ptr", "schema", "lazy_ops", "groups", "exec_mode", "group_drop", "nrow")
 
 # The cuplyr namespace (this file is evaluated in it).
 cuplyr_ns <- environment()
@@ -479,7 +501,7 @@ is_tbl_gpu_field <- function(name) {
 #' @export
 `$.tbl_gpu` <- function(x, name) {
   if (switch(name, ptr = , schema = , lazy_ops = , groups = , exec_mode = ,
-             group_drop = TRUE, FALSE) &&
+             group_drop = , nrow = TRUE, FALSE) &&
       internal_caller(parent.frame())) {
     return(.subset2(x, name))
   }
@@ -573,7 +595,7 @@ select_one_column <- function(x, col) {
 #' @export
 `$<-.tbl_gpu` <- function(x, name, value) {
   if (switch(name, ptr = , schema = , lazy_ops = , groups = , exec_mode = ,
-             group_drop = TRUE, FALSE) &&
+             group_drop = , nrow = TRUE, FALSE) &&
       internal_caller(parent.frame())) {
     return(set_tbl_gpu_field(x, name, value))
   }
@@ -654,10 +676,11 @@ gpu_assign_column <- function(x, value, assign_fn) {
     return(with_surviving_groups(x, push_op(ungrouped(x), ast_select(input_node(x), keep))))
   }
 
-  if (is_plain_scalar(value)) {
+  if (is_plain_scalar(value) && length(nms) > 0L) {
     # A length-one value recycles to any row count, so tibble's check does not
     # need the real one, and the column is a literal in a mutate(): a lazy plan
-    # is extended, not run, and nothing is built on the host.
+    # is extended, not run, and nothing is built on the host. (Not on a
+    # zero-column table: mutate() can't know its row count there.)
     res <- assign_fn(assign_stub(nms, 1L))
     changed <- changed_columns(res)
     # (Not over a factor column: mutate() would keep the old column's levels.)
@@ -673,7 +696,12 @@ gpu_assign_column <- function(x, value, assign_fn) {
 
   # The row count is the one AFTER pending operations.
   m <- if (has_pending_ops(x)) compute(x) else x
-  res <- assign_fn(assign_stub(nms, gpu_dim(.subset2(m, "ptr"))[[1L]]))
+  # dim(), not gpu_dim(): cudf reports 0 rows for a zero-column table.
+  n <- dim(m)[[1L]]
+  if (is.na(n)) {
+    check_zero_column_input(m, current_schema(m), "$<-")
+  }
+  res <- assign_fn(assign_stub(nms, n))
 
   final_names <- names(res)
   changed <- changed_columns(res)

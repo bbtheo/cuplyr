@@ -299,6 +299,28 @@ bind_cols_gpu <- function(dots, .name_repair = "unique") {
     }
   })
 
+  # Zero-column tables carry their row count on the R side (new_tbl_gpu()), so
+  # cudf can't see it: binding only zero-column tables of one size is just
+  # that size; mixing one that has rows with real columns is unsupported.
+  no_cols <- vapply(dots, function(x) length(x$schema$names) == 0L, logical(1))
+  if (all(no_cols)) {
+    sizes <- unique(vapply(dots, function(x) x[["nrow"]] %||% NA_integer_, integer(1)))
+    if (length(sizes) != 1L || is.na(sizes)) {
+      stop("`bind_cols()` of tables with no columns needs one known, common ",
+           "number of rows.", call. = FALSE)
+    }
+    return(new_tbl_gpu(
+      ptr = dots[[1]]$ptr,
+      schema = dots[[1]]$schema,
+      groups = dots[[1]]$groups,
+      exec_mode = "eager",
+      nrow = sizes
+    ))
+  }
+  for (x in dots[no_cols]) {
+    check_zero_column_input(x, x$schema, "bind_cols")
+  }
+
   # Collect column names and handle duplicates
   all_names <- unlist(col_names)
   repaired_names <- repair_names(all_names, .name_repair)
@@ -375,6 +397,28 @@ bind_rows_gpu <- function(dots, .id = NULL) {
     result <- dots[[1]]
     result$groups <- character()
     return(result)
+  }
+
+  # Zero-column tables carry their row count on the R side (new_tbl_gpu()),
+  # which the concatenation can't see. All zero-column: the counts add up.
+  # Mixed with real columns, one that has rows is unsupported (it would need
+  # all-NA padding rows), but an empty one adds nothing.
+  no_cols <- vapply(dots, function(x) length(x$schema$names) == 0L, logical(1))
+  if (all(no_cols) && is.null(.id)) {
+    sizes <- vapply(dots, function(x) x[["nrow"]] %||% NA_integer_, integer(1))
+    if (anyNA(sizes)) {
+      stop("`bind_rows()` of tables with no columns needs known row counts.",
+           call. = FALSE)
+    }
+    return(new_tbl_gpu(
+      ptr = dots[[1]]$ptr,
+      schema = dots[[1]]$schema,
+      exec_mode = "eager",
+      nrow = sum(sizes)
+    ))
+  }
+  for (x in dots[no_cols]) {
+    check_zero_column_input(x, x$schema, "bind_rows")
   }
 
   # Compute unified schema

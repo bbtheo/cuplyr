@@ -735,6 +735,26 @@ filter_eval_mask <- function(.data, quo) {
 
   n_rows <- dim(.data)[1]
 
+  if (length(.data$schema$names) == 0L) {
+    # Zero-column table: no cudf column to mask, so only the R-side count
+    # changes (dim() is NA when nobody recorded one).
+    if (is.na(n_rows)) {
+      stop("filter() needs a known row count on a tbl_gpu with no columns.",
+           call. = FALSE)
+    }
+    if (length(eval_result) != 1L && length(eval_result) != n_rows) {
+      stop("Logical vector length (", length(eval_result),
+           ") must match number of rows (", n_rows, ")", call. = FALSE)
+    }
+    return(new_tbl_gpu(
+      ptr = .data$ptr,
+      schema = .data$schema,
+      groups = .data$groups,
+      exec_mode = .data$exec_mode,
+      nrow = sum(rep_len(eval_result, n_rows) %in% TRUE)
+    ))
+  }
+
   if (length(eval_result) == 1) {
     # Single boolean: TRUE keeps all rows, FALSE keeps none
     if (isTRUE(eval_result)) {

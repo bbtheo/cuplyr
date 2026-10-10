@@ -114,7 +114,8 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
       lazy_ops = .data$lazy_ops,
       groups = new_groups,
       group_drop = new_drop,
-      exec_mode = .data$exec_mode
+      exec_mode = .data$exec_mode,
+      nrow = .data[["nrow"]]
     ))
   }
 
@@ -166,7 +167,8 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
     groups = new_groups,
     # dots that select no column leave the table ungrouped, `.drop` and all
     group_drop = if (length(new_groups) > 0L) .drop else TRUE,
-    exec_mode = working$exec_mode
+    exec_mode = working$exec_mode,
+    nrow = working[["nrow"]]
   )
 }
 
@@ -203,7 +205,8 @@ ungroup.tbl_gpu <- function(x, ...) {
     lazy_ops = x$lazy_ops,
     groups = character(),
     group_drop = TRUE,
-    exec_mode = x$exec_mode
+    exec_mode = x$exec_mode,
+    nrow = x[["nrow"]]
   )
 }
 

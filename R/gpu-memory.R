@@ -136,7 +136,8 @@ gpu_object_info <- function(x) {
   if (!is.null(x$ptr) && inherits(x$ptr, "externalptr")) {
     result$pointer_valid <- TRUE
 
-    dims <- tryCatch(gpu_dim(x$ptr), error = function(e) NULL)
+    # base_dim(): a zero-column table's rows live on the R side.
+    dims <- tryCatch(base_dim(x), error = function(e) NULL)
     if (!is.null(dims)) {
       result$nrow <- dims[1]
       result$ncol <- dims[2]

@@ -144,16 +144,23 @@ dplyr's own \code{n()}).
 When \code{na.rm = TRUE} and a group's aggregated column is ENTIRELY \code{NA}
 (Phase 6, task 4), the result matches base R's own empty-vector
 reduction identity, exactly like real dplyr: \code{sum()} -> \code{0}, \code{mean()} ->
-\code{NaN}, \code{min()} -> \code{Inf}, \code{max()} -> \code{-Inf} (real dplyr also surfaces a
-base-R warning for \code{min()}/\code{max()} here -- cuplyr does not replicate that
-warning, only the value), \code{sd()}/\code{var()}/\code{median()} -> \code{NA} (their
-natural result already, no special-casing needed). One documented
-boundary: \code{min()}/\code{max()}'s \code{Inf}/\code{-Inf} identity can only be
-represented in a \code{FLOAT64} column; over an INTEGER column (where real
-dplyr promotes the WHOLE result column to double the instant any group
-needs this identity -- a data-dependent type decision this package's
-parse-time schema inference can't make), the all-\code{NA}-group result stays
-\code{NA} rather than promoting.
+\code{NaN}, \code{min()} -> \code{Inf}, \code{max()} -> \code{-Inf} (with base R's warning "no
+non-missing arguments to min; returning Inf" / "... max; returning -Inf",
+as dplyr surfaces it, for double and integer input alike; it is only
+raised when some group actually hits the identity), \code{sd()}/\code{var()}/
+\code{median()} -> \code{NA} (their natural result already, no special-casing
+needed).
+
+Over an INTEGER column, dplyr promotes the WHOLE \code{min()}/\code{max()} result
+column to double the instant any group needs the identity, and keeps it
+integer otherwise; cuplyr does the same. Because that type depends on the
+data, a \code{summarise()} with an integer \code{min()}/\code{max()} runs immediately even
+on a lazy table (pending operations are computed first), and the result's
+schema reflects the real type. A 0-row input also counts as an empty
+group: ungrouped, \code{summarise()} returns one row of empty-vector reductions
+(\code{n()} 0, \code{mean()} \code{NaN}, \code{sum()} 0, \code{min()} \code{Inf}, ...); grouped, the
+result has no rows but an integer \code{min()}/\code{max()} is typed double, as in
+dplyr.
 
 \code{quantile()} diverges from the mean/sum/.../median family: matching base
 R's own \code{quantile.default()} exactly, \code{na.rm = FALSE} (the default) with
@@ -187,6 +194,39 @@ the empty-vector identity in both cases).
 
 If \code{.data} is not grouped, summarise will compute aggregations over all
 rows, returning a single-row table.
+}
+
+\subsection{No expressions}{
+
+\code{summarise(.data)} with no expressions follows dplyr: ungrouped, it
+returns a one-row table with no columns; grouped, it returns the distinct
+group keys (one row per group, in \code{group_by()}'s ascending, \code{NA}-last
+order) and peels one grouping layer per \code{.groups}; with \code{.by}, it returns
+the distinct \code{.by} combinations in first-appearance order.
+}
+
+\subsection{Tables with no columns}{
+
+cudf cannot hold rows without columns, so a zero-column \code{tbl_gpu} keeps its
+row count on the R side. What that covers: \code{tbl_gpu()}, \code{dim()},
+\code{collect()}/\code{as_tibble()}, \code{compute()}/\code{collapse()},
+\code{group_by()}/\code{ungroup()}, zero-dot \code{summarise()} (1 x 0), \code{summarise()}
+with dots (a CPU fallback, so \code{n()} counts correctly), ungrouped
+\code{slice()}/\code{slice_head()}/\code{slice_tail()}, \code{bind_rows()}/\code{bind_cols()} of
+zero-column tables only, a literal-mask \code{filter()}, \code{dplyr_row_slice()},
+and adding a column with \verb{$<-}/\verb{[[<-}. Every other verb, joins with a zero-column side,
+vctrs operations (\code{vec_size()}, \code{vec_slice()}, ...), and binding a
+zero-column table that has rows to one with columns raise an error instead
+of returning a wrong row count (full support is F14).
+}
+
+\subsection{Redefining columns}{
+
+An expression named like a grouping column replaces that key in place
+(same position, the expression's type; the table stays grouped by that
+name). An expression that mentions a name an earlier expression created
+(or a name created twice) sees the new value, as in dplyr; such calls run
+through the CPU fallback.
 }
 
 \subsection{\code{.by} group order}{

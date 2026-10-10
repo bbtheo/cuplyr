@@ -192,7 +192,29 @@ lower_summarise <- function(ast, source_ptr) {
     }
   }
 
-  gpu_summarise(input_ptr, group_indices, agg_col_indices, agg_fns, na_rm_flags, agg_extra)
+  # F07: min()/max() over INT32/FLOAT64 apply base R's empty-group identity
+  # (see make_aggregation()'s `identity`).
+  identity_flags <- vapply(ast$aggregations, function(agg) isTRUE(agg$identity), logical(1))
+
+  result <- gpu_summarise(input_ptr, group_indices, agg_col_indices, agg_fns,
+                          na_rm_flags, agg_extra, identity_flags)
+
+  # dplyr warns whenever min()/max() hit the identity, with base R's text.
+  used <- attr(result, "identity_used")
+  for (i in which(used)) {
+    fn <- ast$aggregations[[i]]$fn
+    warning("no non-missing arguments to ", fn, "; returning ",
+            if (identical(fn, "min")) "Inf" else "-Inf", call. = FALSE)
+  }
+
+  # An aggregate named like a grouping column replaces that key in place.
+  agg_names <- vapply(ast$aggregations, `[[`, character(1), "output_col")
+  out_idx <- summarise_output_index(ast$groups, agg_names)
+  if (!identical(out_idx, seq_along(out_idx))) {
+    result <- gpu_select(result, out_idx - 1L)
+  }
+
+  result
 }
 
 #' Lower distinct node

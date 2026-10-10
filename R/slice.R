@@ -571,6 +571,36 @@ slice_grouped_native <- function(.data, group_mode, group_cols, mode,
   push_op(result, ast_select(input_node(result), orig_names))
 }
 
+#' Slice a zero-column tbl_gpu by running dplyr on a stand-in
+#'
+#' A zero-column table has no cudf rows to gather (its row count lives in
+#' `$nrow`), so the kept positions are computed by dplyr itself on a
+#' zero-column tibble of that height, and only the count is carried over.
+#' A lazy zero-column table's pending ops are computed first. Returns `NULL`
+#' when `.data` is not an ungrouped, known-height, zero-column table, so the
+#' caller falls through to its usual path (which errors for a zero-column
+#' table with rows).
+#'
+#' @param .data A `tbl_gpu`
+#' @param fn Function of one tibble, running the dplyr verb
+#' @keywords internal
+slice_zero_column <- function(.data, fn) {
+  if (length(current_schema(.data)$names) > 0L || length(.data$groups) > 0L) {
+    return(NULL)
+  }
+  if (has_pending_ops(.data)) {
+    .data <- compute(.data)
+  }
+  n <- .data[["nrow"]]
+  if (is.null(n)) {
+    return(NULL)
+  }
+  kept <- nrow(fn(tibble::new_tibble(list(), nrow = n)))
+  new_tbl_gpu(ptr = .data$ptr, schema = .data$schema, groups = .data$groups,
+              group_drop = .data$group_drop, exec_mode = .data$exec_mode,
+              nrow = kept)
+}
+
 #' Select rows by position
 #'
 #' Keeps rows of a GPU table by integer position, similar to
@@ -610,6 +640,13 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(.by)
   gm <- slice_group_mode(.data, by_quo, ".by")
+
+  if (identical(gm$mode, "none")) {
+    zero <- slice_zero_column(.data, function(tbl) {
+      rlang::inject(dplyr::slice(tbl, !!!dots, .preserve = .preserve))
+    })
+    if (!is.null(zero)) return(zero)
+  }
 
   idx <- tryCatch(resolve_slice_dots(dots), error = function(e) NULL)
   if (!is.null(idx)) {
@@ -661,6 +698,13 @@ slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
   if (!missing(n)) np$n <- n
   if (!missing(prop)) np$prop <- prop
 
+  if (identical(gm$mode, "none")) {
+    zero <- slice_zero_column(.data, function(tbl) {
+      rlang::inject(dplyr::slice_head(tbl, !!!dots, !!!np))
+    })
+    if (!is.null(zero)) return(zero)
+  }
+
   if (length(dots) == 0) {
     amt <- tryCatch(
       resolve_slice_amount(np$n, np$prop),
@@ -703,6 +747,13 @@ slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
   np <- list()
   if (!missing(n)) np$n <- n
   if (!missing(prop)) np$prop <- prop
+
+  if (identical(gm$mode, "none")) {
+    zero <- slice_zero_column(.data, function(tbl) {
+      rlang::inject(dplyr::slice_tail(tbl, !!!dots, !!!np))
+    })
+    if (!is.null(zero)) return(zero)
+  }
 
   if (length(dots) == 0) {
     amt <- tryCatch(
