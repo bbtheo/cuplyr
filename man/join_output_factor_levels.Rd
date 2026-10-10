@@ -37,6 +37,6 @@ side's levels" here, but the native GPU join itself compares the two
 sides' raw INT32 codes directly -- which would silently mismatch two
 logically-equal labels encoded under different codes. That case is
 caught and routed to the CPU fallback before ever reaching this
-function (every join verb calls it right after \code{validate_key_types()}).
+function (every join verb calls it right after \code{resolve_join_key_types()}).
 }
 \keyword{internal}

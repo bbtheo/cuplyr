@@ -26,8 +26,7 @@
 \value{
 A \code{tbl_gpu} with \code{x}'s own schema, filtered to the rows that
 (\code{semi_join()}) or don't (\code{anti_join()}) have a match in \code{y}. \code{x}'s
-\code{group_by()} grouping is preserved (these are row filters, not
-column-merging joins).
+\code{group_by()} grouping is preserved.
 }
 \description{
 Native GPU implementation via \code{cudf::filtered_join} (Phase 7 J2). Unlike
@@ -35,10 +34,8 @@ the mutating joins, dplyr's own \code{semi_join()}/\code{anti_join()} signature 
 no \code{suffix}/\code{keep}/\code{multiple}/\code{unmatched}/\code{relationship} arguments at all
 (verified via \code{args(dplyr:::semi_join.data.frame)}: \verb{x, y, by, copy, ..., na_matches}) -- there's nothing to merge, so no column-collision handling
 is needed. The result is x's own schema verbatim (a row subset of x),
-and -- verified empirically against dplyr 1.2.1 -- x's \code{group_by()}
-grouping is PRESERVED (these are filters, not the column-merging
-mutating joins that \code{push_join()}/\code{propagate_groups()}'s D3 rule always
-clears groups for); \code{push_join()} special-cases \code{join_type \%in\% c("semi", "anti")} to carry \code{x$groups} forward instead of dropping them.
+and x's \code{group_by()} grouping is preserved (as for every join type,
+see \code{push_join()}, \code{R/execute.R}).
 }
 \details{
 \code{by} accepts the same forms as the mutating joins (see \code{?mutating-joins}):

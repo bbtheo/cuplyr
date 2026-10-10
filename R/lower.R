@@ -298,6 +298,10 @@ lower_join <- function(ast, source_ptr) {
   left_schema <- infer_schema(ast$left)
   right_schema <- infer_schema(ast$right)
 
+  if (isTRUE(ast$cross_by)) {
+    return(lower_cross_by_join(ast, left_ptr, right_ptr, left_schema, right_schema))
+  }
+
   # na_matches = "na" (the default) matches NA keys against each other
   # (cudf::null_equality::EQUAL); "never" treats every NA key as distinct,
   # so no NA ever matches anything, on either side (::UNEQUAL). See
@@ -305,6 +309,37 @@ lower_join <- function(ast, source_ptr) {
   nulls_equal <- !identical(ast$na_matches, "never")
 
   mutating_join_types <- c("left", "inner", "full", "right")
+
+  # Key position per spec pair (0-based), then the A3 key-cast plan: when an
+  # equi pair's two sides have different (compatible) types,
+  # apply_join_key_casts() casts them to the common type -- in place for a
+  # merged key, on trailing temporary copies when the original column must
+  # survive (keep = TRUE, semi/anti). `temps` is NULL (and nothing below
+  # changes) when all key types already match.
+  left_pair_idx <- match(ast$by$left, left_schema$names) - 1L
+  right_pair_idx <- match(ast$by$right, right_schema$names) - 1L
+  temps <- NULL
+  cond_by <- ast$by
+  cond_left_schema <- left_schema
+  cond_right_schema <- right_schema
+  if (!is.null(ast$by$key_casts)) {
+    plan <- apply_join_key_casts(ast, left_ptr, right_ptr, left_schema, right_schema,
+                                 left_pair_idx, right_pair_idx)
+    left_ptr <- plan$left_ptr
+    right_ptr <- plan$right_ptr
+    left_pair_idx <- plan$left_pair_idx
+    right_pair_idx <- plan$right_pair_idx
+    temps <- plan$temps
+    # Non-equi conditions are bound against the schemas extended with the
+    # temporary cast copies (named in cond_by), so both operands already
+    # have the common type when the evaluator sees them.
+    cond_by <- plan$cond_by
+    cond_left_schema <- plan$left_schema
+    cond_right_schema <- plan$right_schema
+  }
+  finish <- function(ptr) {
+    if (is.null(temps)) ptr else drop_join_key_temps(ptr, temps)
+  }
 
   # Phase 7 J7: at least one condition's operator isn't "==" -- a native
   # non-equi join_by() (join_by_natively_supported() already screened out
@@ -322,18 +357,11 @@ lower_join <- function(ast, source_ptr) {
 
   if (is_non_equi) {
     equi_spec <- join_equi_spec(ast$by)
-    cond_spec <- join_cond_spec(ast$by)
+    cond_spec <- join_cond_spec(cond_by)
 
-    equi_left_idx <- if (length(equi_spec$left) > 0) {
-      match(equi_spec$left, left_schema$names) - 1L
-    } else {
-      integer(0)
-    }
-    equi_right_idx <- if (length(equi_spec$right) > 0) {
-      match(equi_spec$right, right_schema$names) - 1L
-    } else {
-      integer(0)
-    }
+    is_eq <- ast$by$op == "=="
+    equi_left_idx <- left_pair_idx[is_eq]
+    equi_right_idx <- right_pair_idx[is_eq]
 
     right_drop <- if (!isTRUE(ast$keep)) equi_spec$right else character(0)
     right_drop_idx <- if (length(right_drop) > 0) {
@@ -342,7 +370,8 @@ lower_join <- function(ast, source_ptr) {
       integer(0)
     }
 
-    cond_ir <- ir_bind_join(join_cond_ir_from_spec(cond_spec), left_schema, right_schema)
+    cond_ir <- ir_bind_join(join_cond_ir_from_spec(cond_spec), cond_left_schema,
+                            cond_right_schema)
 
     if (ast$join_type %in% mutating_join_types) {
       result <- gpu_cond_join(left_ptr, right_ptr, equi_left_idx, equi_right_idx,
@@ -352,7 +381,7 @@ lower_join <- function(ast, source_ptr) {
       check_join_cardinality(result$diag, ast$join_type, ast$multiple,
                              ast$relationship, ast$unmatched)
 
-      return(result$ptr)
+      return(finish(result$ptr))
     }
 
     # semi/anti (no multiple=/unmatched=/relationship= in dplyr's own
@@ -361,12 +390,12 @@ lower_join <- function(ast, source_ptr) {
     # all, and the output is x's own schema verbatim regardless, so
     # right_drop_idx is computed uniformly above but never consulted by
     # gpu_cond_join()'s semi/anti branch).
-    return(gpu_cond_join(left_ptr, right_ptr, equi_left_idx, equi_right_idx,
-                         right_drop_idx, cond_ir, ast$join_type, nulls_equal, "all"))
+    return(finish(gpu_cond_join(left_ptr, right_ptr, equi_left_idx, equi_right_idx,
+                                right_drop_idx, cond_ir, ast$join_type, nulls_equal, "all")))
   }
 
-  left_key_idx <- match(ast$by$left, left_schema$names) - 1L
-  right_key_idx <- match(ast$by$right, right_schema$names) - 1L
+  left_key_idx <- left_pair_idx
+  right_key_idx <- right_pair_idx
 
   right_drop <- if (!isTRUE(ast$keep)) ast$by$right else character(0)
   right_drop_idx <- if (length(right_drop) > 0) {
@@ -403,7 +432,7 @@ lower_join <- function(ast, source_ptr) {
     check_join_cardinality(result$diag, ast$join_type, ast$multiple,
                            ast$relationship, ast$unmatched)
 
-    return(result$ptr)
+    return(finish(result$ptr))
   }
 
   switch(ast$join_type,
@@ -415,10 +444,10 @@ lower_join <- function(ast, source_ptr) {
     # infer_schema.ast_join's semi/anti branch, x's schema verbatim). No
     # diag list here -- semi_join()/anti_join() have no multiple=/unmatched=/
     # relationship= in dplyr's own signatures.
-    "semi" = gpu_semi_anti_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
-                               FALSE, nulls_equal),
-    "anti" = gpu_semi_anti_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
-                               TRUE, nulls_equal),
+    "semi" = finish(gpu_semi_anti_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
+                                       FALSE, nulls_equal)),
+    "anti" = finish(gpu_semi_anti_join(left_ptr, right_ptr, left_key_idx, right_key_idx,
+                                       TRUE, nulls_equal)),
     # cross (Phase 7 J3): native via cudf::cross_join (gpu_cross_join(),
     # src/ops_join.cpp) -- no keys, no drops; the cartesian product's column
     # order (left's columns, then right's) already matches
@@ -428,6 +457,206 @@ lower_join <- function(ast, source_ptr) {
     "cross" = gpu_cross_join(left_ptr, right_ptr),
     stop("Unknown join type: ", ast$join_type, call. = FALSE)
   )
+}
+
+#' Cast one join key column to its common type (A3)
+#'
+#' A factor key meeting a character key is decoded to its labels with
+#' `gpu_decode_factor()` -- never `gpu_cast_column()`, which would only see
+#' the physical INT32 codes. Everything else is a numeric/timestamp ladder
+#' step handled by `gpu_cast_column()`. The column is replaced in place.
+#' @keywords internal
+cast_join_key_column <- function(ptr, idx, from_type, to_type, levels) {
+  if (identical(from_type, "DICTIONARY32")) {
+    if (is.null(levels)) {
+      stop("Can't join on a factor column whose levels are unknown: ",
+           "its factor metadata was lost earlier in the pipeline, so the ",
+           "codes cannot be decoded to labels.", call. = FALSE)
+    }
+    gpu_decode_factor(ptr, idx, levels)
+  } else {
+    gpu_cast_column(ptr, idx, to_type)
+  }
+}
+
+#' Apply a join's key-cast plan (`by$key_casts`, see `resolve_join_key_types()`)
+#'
+#' Merged equi keys (`keep != TRUE`, mutating joins): cast IN PLACE on both
+#' sides -- the single output key column has the common type anyway, and
+#' right/full coalescing then fills unmatched-y rows from the cast y key.
+#'
+#' Every other cast pair -- equi keys whose original column must survive
+#' (`keep = TRUE`, and semi/anti, whose output is x verbatim) and non-equi
+#' conditions (whose columns always keep their own types): match on cast
+#' COPIES of just the side(s) that need a cast, appended as trailing temporary
+#' columns. Equi pairs repoint the key indices at the copies; a non-equi pair's
+#' condition is rewritten to name the copies (`cond_by`, with the schemas
+#' extended by them) so the evaluator never sees mismatched operand types.
+#' `drop_join_key_temps()` removes the temporaries from the result. (They are
+#' dropped after the join rather than via `right_drop` so the C++ side's
+#' right/full key coalescing, which is gated on `right_drop`, never touches the
+#' surviving originals.)
+#'
+#' @return `list(left_ptr, right_ptr, left_pair_idx, right_pair_idx, temps,
+#'   cond_by, left_schema, right_schema)`; `temps` is `NULL` when every cast
+#'   was applied in place.
+#' @keywords internal
+apply_join_key_casts <- function(ast, left_ptr, right_ptr, left_schema, right_schema,
+                                 left_pair_idx, right_pair_idx) {
+  in_place <- !isTRUE(ast$keep) && !(ast$join_type %in% c("semi", "anti"))
+  n_left <- length(left_schema$names)
+  n_right <- length(right_schema$names)
+
+  left_temps <- list()   # each: list(src = 0-based source column, cast = key_casts entry)
+  right_temps <- list()
+  cond_by <- ast$by
+  for (cast in ast$by$key_casts) {
+    i <- cast$idx
+    if (in_place && ast$by$op[i] == "==") {
+      if (cast$cast_left) {
+        left_ptr <- cast_join_key_column(left_ptr, left_pair_idx[i], cast$left_type,
+                                         cast$type, cast$left_levels)
+      }
+      if (cast$cast_right) {
+        right_ptr <- cast_join_key_column(right_ptr, right_pair_idx[i], cast$right_type,
+                                          cast$type, cast$right_levels)
+      }
+      next
+    }
+
+    if (cast$cast_left) {
+      left_temps[[length(left_temps) + 1L]] <- list(src = left_pair_idx[i], cast = cast)
+      left_pair_idx[i] <- n_left + length(left_temps) - 1L
+      cond_by$left[i] <- paste0(".cuplyr_key_x", length(left_temps))
+    }
+    if (cast$cast_right) {
+      right_temps[[length(right_temps) + 1L]] <- list(src = right_pair_idx[i], cast = cast)
+      right_pair_idx[i] <- n_right + length(right_temps) - 1L
+      cond_by$right[i] <- paste0(".cuplyr_key_y", length(right_temps))
+    }
+  }
+
+  if (length(left_temps) == 0L && length(right_temps) == 0L) {
+    return(list(left_ptr = left_ptr, right_ptr = right_ptr,
+                left_pair_idx = left_pair_idx, right_pair_idx = right_pair_idx,
+                temps = NULL, cond_by = cond_by,
+                left_schema = left_schema, right_schema = right_schema))
+  }
+
+  # Appends the copies, casts them to the common type, and extends the schema
+  # (names/types only: all the condition binder reads).
+  append_temps <- function(ptr, schema, temps, n, side, levels_of) {
+    if (length(temps) == 0L) return(list(ptr = ptr, schema = schema))
+    srcs <- vapply(temps, function(t) as.integer(t$src), integer(1))
+    ptr <- gpu_select(ptr, c(seq_len(n) - 1L, srcs))
+    for (k in seq_along(temps)) {
+      cast <- temps[[k]]$cast
+      ptr <- cast_join_key_column(ptr, n + k - 1L, cast[[paste0(side, "_type")]],
+                                  cast$type, cast[[paste0(side, "_levels")]])
+    }
+    schema$names <- c(schema$names, paste0(".cuplyr_key_", if (side == "left") "x" else "y",
+                                           seq_along(temps)))
+    schema$types <- c(schema$types, vapply(temps, function(t) t$cast$type, character(1)))
+    list(ptr = ptr, schema = schema)
+  }
+  left <- append_temps(left_ptr, left_schema, left_temps, n_left, "left")
+  right <- append_temps(right_ptr, right_schema, right_temps, n_right, "right")
+
+  list(left_ptr = left$ptr, right_ptr = right$ptr,
+       left_pair_idx = left_pair_idx, right_pair_idx = right_pair_idx,
+       temps = list(n_left = n_left, n_right = n_right,
+                    n_left_temp = length(left_temps),
+                    n_right_temp = length(right_temps),
+                    semi_anti = ast$join_type %in% c("semi", "anti")),
+       cond_by = cond_by, left_schema = left$schema, right_schema = right$schema)
+}
+
+#' Drop the temporary key copies `apply_join_key_casts()` appended
+#'
+#' A mutating join's columns are `[left cols, left temps, right cols kept,
+#' right temps]`; semi/anti return `[left cols, left temps]`.
+#' @keywords internal
+drop_join_key_temps <- function(ptr, temps) {
+  n_cols <- gpu_dim(ptr)[2]
+  left_temp <- temps$n_left + seq_len(temps$n_left_temp) - 1L
+  right_temp <- if (temps$semi_anti) integer(0) else {
+    n_cols - seq_len(temps$n_right_temp)
+  }
+  gpu_select(ptr, setdiff(seq_len(n_cols) - 1L, c(left_temp, right_temp)))
+}
+
+#' Lower a `by = character()` join (gap A4)
+#'
+#' dplyr runs its ordinary join machinery with a constant key
+#' (`join_rows(cross = TRUE)`), so every x row matches every y row. That is a
+#' cartesian product when both sides have rows (`gpu_cross_join()`, x-major),
+#' but an empty side behaves like an outer join: left/full keep x with NA y
+#' columns, right/full keep y with NA x columns, inner gives 0 rows; semi
+#' returns x iff y has rows, anti the opposite. Row counts are only known
+#' here, at execution time, so the empty-side cases are decided in R.
+#' Deliberately NOT a hash join on a constant key column (a hash build over
+#' n identical keys is quadratic).
+#'
+#' `multiple = "first"/"any"/"last"` keep y's first/last row for each x row;
+#' for right/full the other y rows are then unmatched and appended with NA x
+#' columns, like dplyr. `relationship`/`unmatched` run through
+#' `check_join_cardinality()` on a diag synthesized from the two row counts;
+#' the default relationship is `"many-to-many"` (no warning).
+#' @keywords internal
+lower_cross_by_join <- function(ast, left_ptr, right_ptr, left_schema, right_schema) {
+  nx <- gpu_dim(left_ptr)[1]
+  ny <- gpu_dim(right_ptr)[1]
+  type <- ast$join_type
+
+  if (type %in% c("semi", "anti")) {
+    out <- gpu_select(left_ptr, seq_along(left_schema$names) - 1L)
+    keep_x <- (ny > 0) == identical(type, "semi")
+    return(if (keep_x) out else gpu_slice_head(out, 0, FALSE))
+  }
+
+  diag <- list(
+    left_multi_first = if (nx > 0 && ny > 1) 0L else -1L,
+    right_multi_first = if (ny > 0 && nx > 1) 0L else -1L,
+    left_unmatched_first = if (nx > 0 && ny == 0) 0L else -1L,
+    right_unmatched_first = if (ny > 0 && nx == 0) 0L else -1L
+  )
+  check_join_cardinality(diag, type, ast$multiple,
+                         ast$relationship %||% "many-to-many", ast$unmatched)
+
+  null_cols <- function(schema, n) {
+    lapply(seq_along(schema$names), function(i) {
+      gpu_make_null_column(n, gpu_physical_type(unname(schema$types[i])))
+    })
+  }
+
+  if (nx == 0 || ny == 0) {
+    if (identical(type, "left") || identical(type, "full")) {
+      if (ny == 0 && nx > 0) {
+        return(gpu_bind_cols_impl(c(list(left_ptr), null_cols(right_schema, nx))))
+      }
+    }
+    if (identical(type, "right") || identical(type, "full")) {
+      if (nx == 0 && ny > 0) {
+        return(gpu_bind_cols_impl(c(null_cols(left_schema, ny), list(right_ptr))))
+      }
+    }
+    return(gpu_cross_join(left_ptr, right_ptr))
+  }
+
+  pick <- ast$multiple
+  if (ny > 1 && pick %in% c("first", "any", "last")) {
+    first <- !identical(pick, "last")
+    matched_y <- if (first) gpu_slice_head(right_ptr, 1, FALSE) else gpu_slice_tail(right_ptr, 1, FALSE)
+    out <- gpu_cross_join(left_ptr, matched_y)
+    if (type %in% c("right", "full")) {
+      rest_y <- if (first) gpu_slice_tail(right_ptr, ny - 1, FALSE) else gpu_slice_head(right_ptr, ny - 1, FALSE)
+      rest <- gpu_bind_cols_impl(c(null_cols(left_schema, ny - 1L), list(rest_y)))
+      out <- gpu_bind_rows_aligned(list(out, rest))
+    }
+    return(out)
+  }
+
+  gpu_cross_join(left_ptr, right_ptr)
 }
 
 #' Lower window node

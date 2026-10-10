@@ -82,7 +82,8 @@ compute.tbl_gpu <- function(x, ..., name = NULL) {
     schema = final_schema,
     lazy_ops = NULL,
     groups = x$groups,
-    exec_mode = x$exec_mode
+    exec_mode = x$exec_mode,
+    group_drop = x$group_drop %||% TRUE
   )
 }
 

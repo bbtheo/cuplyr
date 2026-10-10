@@ -44,20 +44,10 @@ spec with \code{keep = TRUE} (its \code{drop_right} is always \code{character(0)
 \code{keep = TRUE}, regardless of what the spec's \code{left}/\code{right} contain), so
 an empty join spec (no keys at all) plus \code{keep = TRUE} reproduces it
 exactly -- see \code{ast_join()}'s \code{by}/\code{keep} fields below.
-\item Grouping is NOT unconditionally cleared, unlike \code{left_join()}/
-\code{inner_join()}/\code{full_join()}/\code{right_join()} (D3): dplyr's own
-\code{cross_join.data.frame()} ends with \code{dplyr_reconstruct(x_out, x)},
-which keeps \code{x}'s grouping over exactly the group-var NAMES that
-survive, unchanged, in the output. A group column whose name is unique
-to \code{x} stays grouped; one whose name collides with \code{y}'s (and gets
-suffixed away, e.g. \code{"g"} -> \code{"g.x"}) is silently dropped from the
-grouping. \code{y}'s own grouping is always irrelevant. See \code{push_join()}'s
-(\code{R/execute.R}) \code{preserves_x_groups} handling, which reuses the exact
-same \code{intersect(x$groups, new_schema$names)} formula already used for
-\code{semi_join()}/\code{anti_join()} -- a colliding group column is renamed away
-from the new schema's names by \code{build_join_output_info()}'s own
-suffixing rule, so the intersection naturally excludes it with no
-cross-specific logic needed.
+\item Grouping follows the rule shared by every join (\code{push_join()},
+\code{R/execute.R}): \code{x}'s groups that survive in the output keep grouping
+(dplyr's \code{cross_join.data.frame()} ends with \code{dplyr_reconstruct(x_out, x)}); a group column whose name collides with \code{y}'s and gets suffixed
+away (\code{"g"} -> \code{"g.x"}) drops out. \code{y}'s grouping is irrelevant.
 \item 0-row \code{x} or \code{y} produces a 0-row result with the correct (merged)
 schema -- cudf's \code{cross_join()} handles this natively, no R-side
 special-casing needed.

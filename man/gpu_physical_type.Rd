@@ -32,7 +32,7 @@ first, or hand the C++ side a \code{"DICTIONARY32"} it has no case for.
 \item \strong{Logical-semantics sites} (care whether a column IS a
 factor, not what bytes back it): the mutate arithmetic guard
 (\code{R/ast.R::infer_mutate_output_type()}), join key type-compatibility
-checks (\code{validate_key_types()}, \code{R/join.R}), memory accounting
+checks (\code{resolve_join_key_types()}, \code{R/join.R}), memory accounting
 (\code{R/gpu-memory.R}). These must keep seeing \code{"DICTIONARY32"} verbatim
 -- routing them through this helper would make a factor column
 silently indistinguishable from a real integer column (e.g. letting

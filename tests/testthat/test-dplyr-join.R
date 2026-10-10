@@ -364,10 +364,8 @@ test_that("parse_join_by() returns the 4-vector spec for every existing by= form
 #     key column matches (NA-to-NA counted as a match under "na") is a hit.
 #   - na_matches = "never": NA keys never match anything, including
 #     another NA (semi drops the row, anti keeps it).
-#   - Grouping (`group_by()`) on x is PRESERVED by both verbs -- a real
-#     divergence from the mutating joins, which always clear groups
-#     (D3/`propagate_groups()`) -- `push_join()`'s `"semi"`/`"anti"`
-#     special case (R/execute.R) carries `x$groups` forward instead.
+#   - Grouping (`group_by()`) on x is PRESERVED by both verbs (as it is by
+#     every join type since F06; see `push_join()`, R/execute.R).
 # =============================================================================
 
 # Shared helper: run `join_fn` (semi_join/anti_join) eagerly AND lazily on

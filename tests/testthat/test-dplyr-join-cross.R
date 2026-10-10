@@ -140,8 +140,7 @@ test_that("cross_join() preserves x's grouping when the group var's name doesn't
   # dplyr's own cross_join.data.frame() ends with dplyr_reconstruct(x_out, x)
   # -- verified empirically against dplyr 1.2.1 -- so a group column whose
   # name is unique to x (no collision with y) survives under its own name
-  # and STAYS grouped in the result (unlike left/inner/full/right_join(),
-  # which always clear groups per D3).
+  # and STAYS grouped in the result (every join type does this since F06).
   x <- data.frame(g = c(1, 1, 2), id = 1:3)
   y <- data.frame(k = 1:2)
 

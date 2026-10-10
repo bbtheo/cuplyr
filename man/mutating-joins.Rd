@@ -71,7 +71,13 @@
 \item{by}{Join specification: \code{NULL} (natural join on every common column
 name), an unnamed character vector (\code{c("a", "b")}, matched by identical
 name on both sides), a named character vector (\code{c("lx" = "ry")}, for
-differently-named keys), or a \code{\link[dplyr:join_by]{dplyr::join_by()}} spec. \code{join_by()}
+differently-named keys), or a \code{\link[dplyr:join_by]{dplyr::join_by()}} spec. Key columns whose
+types differ are cast to their common type for matching, as in dplyr
+(integer/double/logical, factor/character, Date/POSIXct), and a pair
+with no common type raises \code{dplyr_error_join_incompatible_type} when the
+verb is called. \code{by = character()} (deprecated in dplyr 1.1.0, warns
+once) is a cross join with the usual \verb{multiple=}/\verb{relationship=}/
+\verb{unmatched=} rules. \code{join_by()}
 supports both equi conditions (\code{a}, \code{a == b}) and non-equi conditions
 (\code{>=}, \code{>}, \code{<=}, \code{<}, and the \code{between()}/\code{within()}/\code{overlaps()}
 helpers that pre-expand to pairs of them) -- all GPU-native (Phase 7

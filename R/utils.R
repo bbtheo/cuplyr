@@ -42,7 +42,7 @@ gpu_type_from_r <- function(x) {
 #'   \item \strong{Logical-semantics sites} (care whether a column IS a
 #'     factor, not what bytes back it): the mutate arithmetic guard
 #'     (`R/ast.R::infer_mutate_output_type()`), join key type-compatibility
-#'     checks (`validate_key_types()`, `R/join.R`), memory accounting
+#'     checks (`resolve_join_key_types()`, `R/join.R`), memory accounting
 #'     (`R/gpu-memory.R`). These must keep seeing `"DICTIONARY32"` verbatim
 #'     -- routing them through this helper would make a factor column
 #'     silently indistinguishable from a real integer column (e.g. letting

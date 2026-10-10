@@ -182,13 +182,13 @@ test_that("propagate_groups() drops group columns no longer in schema", {
   expect_equal(propagate_groups(node, c("g", "x"), schema), "x")
 })
 
-test_that("propagate_groups() always clears groups for join", {
+test_that("propagate_groups() keeps surviving group columns for join (F06)", {
   schema <- list(names = c("g", "x"), types = c("INT32", "FLOAT64"))
 
   join_node <- list(type = "join")
 
-  expect_equal(propagate_groups(join_node, "g", schema), character())
-  expect_equal(propagate_groups(join_node, c("g", "x"), schema), character())
+  expect_equal(propagate_groups(join_node, "g", schema), "g")
+  expect_equal(propagate_groups(join_node, c("g", "x", "gone"), schema), c("g", "x"))
 })
 
 test_that("propagate_groups() reads summarise's retained groups from node$result_groups (Phase 6, task 3)", {

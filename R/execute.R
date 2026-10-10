@@ -140,7 +140,8 @@ propagate_factor_levels <- function(node, input_schema, surviving_names) {
 
 #' Propagate group columns across an AST node
 #'
-#' Per D3: `join` always yields no groups (`character()`). `summarise`
+#' A `join` keeps `x`'s groups that survive in its output (`push_join()`
+#' computes that itself; this branch is only the defensive default). `summarise`
 #' yields whatever `node$result_groups` says (Phase 6, task 3 -- computed by
 #' `resolve_summarise_groups()`, R/summarise.R, from the node's `.groups=`
 #' semantics; `character()` for `.groups = "drop"`/an ungrouped input, all
@@ -162,10 +163,6 @@ propagate_factor_levels <- function(node, input_schema, surviving_names) {
 #' @return Character vector of group columns to carry forward
 #' @keywords internal
 propagate_groups <- function(node, groups, schema) {
-  if (identical(node$type, "join")) {
-    return(character())
-  }
-
   if (identical(node$type, "summarise")) {
     return(intersect(node$result_groups, schema$names))
   }
@@ -250,54 +247,38 @@ join_input_node <- function(tbl) {
 #' independent inputs (`x`/`y`) whose *either* side being lazy forces the
 #' whole join lazy (mirroring the pre-unification behavior), and whose eager
 #' execution needs both sides' pointers anchored -- see `join_input_node()`.
-#' Per D3, the mutating joins (`"left"`/`"inner"`/`"full"`/`"right"`) always
-#' drop groups (`character()`) and never carry `factor_levels` (this matches
-#' `build_join_schema()`, which never propagated them). `"semi"`/`"anti"`
-#' are one exception (Phase 7 J2): they're row filters, not column
-#' merges -- the output schema is x's own schema verbatim (see
-#' `infer_schema.ast_join`'s semi/anti branch, which returns x's schema,
-#' factor_levels included), and dplyr's own `semi_join()`/`anti_join()`
-#' PRESERVE x's `group_by()` grouping (verified empirically against dplyr
-#' 1.2.1) -- so `x$groups` is carried forward (filtered defensively through
-#' the new schema's names, mirroring `propagate_groups()`'s own convention
-#' for non-join nodes) instead of being cleared.
 #'
-#' `"cross"` is a second, more surprising exception (Phase 7 J3): dplyr's own
-#' `cross_join.data.frame()` ends with `dplyr_reconstruct(x_out, x)`, which
-#' (for a `grouped_df` `x`) keeps grouping over exactly the group-var NAMES
-#' that still exist, unchanged, in the joined output -- it does NOT
-#' unconditionally clear `x`'s groups the way `left_join()`/`inner_join()`/
-#' `full_join()`/`right_join()` do. Verified empirically against dplyr 1.2.1:
-#' a group column with a name unique to `x` (no collision with any of `y`'s
-#' names) survives under its own name and STAYS grouped in the result; a
-#' group column whose name collides with one of `y`'s (and is therefore
-#' suffixed, e.g. `"g"` -> `"g.x"`) is silently DROPPED from the grouping
-#' (not an error) since `"g"` no longer names any column in the output. Only
-#' `y`'s grouping is irrelevant either way (`dplyr_reconstruct()`'s template
-#' is `x` alone). This is exactly the same `intersect(x$groups,
-#' new_schema$names)` formula already used for semi/anti -- a colliding
-#' group column is renamed away from the new schema's names by
-#' `build_join_output_info()`'s own suffixing rule, so the intersection
-#' naturally excludes it without any cross-specific logic.
+#' Groups (F06): every dplyr join ends with `dplyr_reconstruct(out, x)`, so
+#' for EVERY join type the result is grouped by `intersect(x$groups,
+#' names(out))` and keeps `x`'s `.drop` setting (`x$group_drop`); `y`'s
+#' grouping is irrelevant. A group column that gets suffixed away (a name
+#' collision, or the key under `keep = TRUE`) simply drops out of the
+#' intersection; a merged key that is also a group column stays grouped (with
+#' its coerced type). Semi/anti outputs are `x`'s schema verbatim, so all of
+#' `x`'s groups survive.
 #'
 #' @param join_type One of `"left"`, `"inner"`, `"full"`, `"right"`,
 #'   `"semi"`, `"anti"`, `"cross"`
 #' @param x,y The two `tbl_gpu` join inputs
-#' @param join_spec List with `left`/`right`/`op`/`filter`, as returned by
-#'   `parse_join_by()`
+#' @param join_spec List with `left`/`right`/`op`/`filter` (and, when key
+#'   types differ, `key_casts`), as returned by `parse_join_by()` /
+#'   `resolve_join_key_types()`
 #' @param suffix,keep,na_matches,multiple,unmatched,relationship As
-#'   documented on the join verbs (the last three are dormant -- validated
-#'   but not yet behavior-changing -- until Phase 7 J5; all are unused for
-#'   `"semi"`/`"anti"`, which have no `suffix`/`keep`/`multiple`/
-#'   `unmatched`/`relationship` in dplyr's own signature; `"cross"` has no
-#'   `keep`/`na_matches`/`multiple`/`unmatched`/`relationship` in dplyr's own
-#'   signature either, and always passes `keep = TRUE` internally purely to
-#'   get `build_join_output_info()`'s all-common-names-suffixed behavior --
-#'   see `cross_join.tbl_gpu()`, `R/join.R`)
+#'   documented on the join verbs (all are unused for `"semi"`/`"anti"`,
+#'   which have no `suffix`/`keep`/`multiple`/`unmatched`/`relationship` in
+#'   dplyr's own signature; `"cross"` has none of `keep`/`na_matches`/
+#'   `multiple`/`unmatched`/`relationship` either, and always passes `keep =
+#'   TRUE` internally purely to get `build_join_output_info()`'s
+#'   all-common-names-suffixed behavior -- see `cross_join.tbl_gpu()`,
+#'   `R/join.R`)
+#' @param cross_by `TRUE` for dplyr's deprecated `by = character()` spelling:
+#'   an ordinary `join_type` join over a constant key (see
+#'   `lower_cross_by_join()`, `R/lower.R`)
 #' @return A new `tbl_gpu`
 #' @keywords internal
 push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
-                      multiple = "all", unmatched = "drop", relationship = NULL) {
+                      multiple = "all", unmatched = "drop", relationship = NULL,
+                      cross_by = FALSE) {
   join_ast <- ast_join(
     join_type,
     join_input_node(x),
@@ -308,13 +289,14 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
     na_matches = na_matches,
     multiple = multiple,
     unmatched = unmatched,
-    relationship = relationship
+    relationship = relationship,
+    cross_by = cross_by
   )
 
   new_schema <- infer_schema(join_ast)
 
-  preserves_x_groups <- join_type %in% c("semi", "anti", "cross")
-  new_groups <- if (preserves_x_groups) intersect(x$groups, new_schema$names) else character()
+  new_groups <- intersect(x$groups, new_schema$names)
+  new_group_drop <- x$group_drop %||% TRUE
 
   if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
     return(new_tbl_gpu(
@@ -322,11 +304,13 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
       schema = new_schema,
       lazy_ops = join_ast,
       groups = new_groups,
-      exec_mode = "lazy"
+      exec_mode = "lazy",
+      group_drop = new_group_drop
     ))
   }
 
-  warn_if_join_too_large(join_type, x, y, join_spec, suffix, keep)
+  warn_if_join_too_large(if (cross_by) "cross" else join_type, x, y, join_spec,
+                         suffix, keep)
 
   new_ptr <- wrap_gpu_call(
     paste0(join_type, "_join"),
@@ -338,7 +322,8 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
     schema = new_schema,
     lazy_ops = NULL,
     groups = new_groups,
-    exec_mode = "eager"
+    exec_mode = "eager",
+    group_drop = new_group_drop
   )
 }
 

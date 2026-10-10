@@ -249,14 +249,18 @@ ast_rename <- function(input, old_names, new_names) {
 #'   only "drop" is honored until Phase 7 J5)
 #' @param relationship `NULL` or one of the four cardinality strings
 #'   (dormant -- not enforced until Phase 7 J5)
+#' @param cross_by `TRUE` for dplyr's deprecated `by = character()` cross
+#'   spelling (`by` is then the empty spec; see `lower_cross_by_join()`)
 #' @return An ast_join node
 #' @keywords internal
 ast_join <- function(type, left, right, by, keep = FALSE,
                      suffix = c(".x", ".y"), na_matches = "na",
-                     multiple = "all", unmatched = "drop", relationship = NULL) {
+                     multiple = "all", unmatched = "drop", relationship = NULL,
+                     cross_by = FALSE) {
   ast_node("join", left = left, right = right, join_type = type, by = by,
            keep = keep, suffix = suffix, na_matches = na_matches,
-           multiple = multiple, unmatched = unmatched, relationship = relationship)
+           multiple = multiple, unmatched = unmatched, relationship = relationship,
+           cross_by = cross_by)
 }
 
 # -----------------------------------------------------------------------------

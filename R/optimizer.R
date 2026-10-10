@@ -257,6 +257,8 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
         right_needed <- unique(c(ast$by$right, info$source_names[idx][info$origin[idx] == "right"]))
       }
 
+      left_needed <- join_keep_a_column(ast, ast$left, left_needed)
+      right_needed <- join_keep_a_column(ast, ast$right, right_needed)
       ast$left <- push_down_projections(ast$left, left_needed, group_cols)
       ast$right <- push_down_projections(ast$right, right_needed, group_cols)
       ast
@@ -573,6 +575,8 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
         right_needed <- unique(c(ast$by$right, info$source_names[idx][info$origin[idx] == "right"]))
       }
 
+      left_needed <- join_keep_a_column(ast, ast$left, left_needed)
+      right_needed <- join_keep_a_column(ast, ast$right, right_needed)
       ast$left <- prune_dead_columns(ast$left, left_needed, group_cols)
       ast$right <- prune_dead_columns(ast$right, right_needed, group_cols)
       ast
@@ -631,6 +635,20 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
       ast
     }
   )
+}
+
+#' Keep at least one column on each side of a keyless join
+#'
+#' A `cross` join or a `by = character()` join has no key columns, so
+#' projection pruning can leave a side with no needed column at all -- and a
+#' zero-column table has lost its row count, which the join still needs
+#' (cross product size; "does y have rows" for semi/anti).
+#' @keywords internal
+join_keep_a_column <- function(ast, side, needed) {
+  if (length(needed) > 0L || !(isTRUE(ast$cross_by) || identical(ast$join_type, "cross"))) {
+    return(needed)
+  }
+  infer_schema(side)$names[1L]
 }
 
 # -----------------------------------------------------------------------------
@@ -750,6 +768,10 @@ push_down_filters <- function(ast) {
                                    suffix = input$suffix, keep = input$keep)
 
     classify_predicate <- function(pred) {
+      # A merged key cast to a common type (A3) has a different type than the
+      # source column a pushed-down filter would read (e.g. a character
+      # predicate against a factor key), so keep such predicates above the join.
+      if (any(pred$cols %in% info$cast_keys)) return("both")
       sides <- unique(info$origin[match(pred$cols, info$names)])
       sides <- sides[!is.na(sides)]
       if (length(sides) != 1) return("both")

@@ -14,7 +14,8 @@ ast_join(
   na_matches = "na",
   multiple = "all",
   unmatched = "drop",
-  relationship = NULL
+  relationship = NULL,
+  cross_by = FALSE
 )
 }
 \arguments{
@@ -42,6 +43,9 @@ only "drop" is honored until Phase 7 J5)}
 
 \item{relationship}{\code{NULL} or one of the four cardinality strings
 (dormant -- not enforced until Phase 7 J5)}
+
+\item{cross_by}{\code{TRUE} for dplyr's deprecated \code{by = character()} cross
+spelling (\code{by} is then the empty spec; see \code{lower_cross_by_join()})}
 }
 \value{
 An ast_join node

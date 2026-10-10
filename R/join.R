@@ -297,29 +297,146 @@ validate_join_cols <- function(cols, tbl, side) {
   }
 }
 
-validate_key_types <- function(x, y, join_spec) {
-  left_types <- x$schema$types[match(join_spec$left, x$schema$names)]
-  right_types <- y$schema$types[match(join_spec$right, y$schema$names)]
-
-  numeric_types <- c("INT8", "INT16", "INT32", "INT64", "FLOAT32", "FLOAT64", "BOOL8")
-
-  for (i in seq_along(left_types)) {
-    lt <- left_types[i]
-    rt <- right_types[i]
-
-    if (identical(lt, rt)) {
-      next
-    }
-
-    if (lt %in% numeric_types && rt %in% numeric_types) {
-      next
-    }
-
-    stop(sprintf(
-      "Key column type mismatch: %s (%s) vs %s (%s). Cannot join incompatible types.",
-      join_spec$left[i], lt, join_spec$right[i], rt
-    ), call. = FALSE)
+#' Is `by` one of the three spellings dplyr treats as a cross join?
+#'
+#' Mirrors `dplyr:::is_cross_by()`: `character()`, a named `character(0)`, or
+#' `list(x = character(), y = character())`.
+#' @keywords internal
+is_cross_by <- function(by) {
+  if (is.character(by) && length(by) == 0L) {
+    return(TRUE)
   }
+  is.list(by) && !inherits(by, "dplyr_join_by") && length(by) == 2L &&
+    is.character(by[["x"]]) && length(by[["x"]]) == 0L &&
+    is.character(by[["y"]]) && length(by[["y"]]) == 0L
+}
+
+#' The empty join spec used by `by = character()` cross joins
+#' @keywords internal
+join_cross_spec <- function() {
+  list(left = character(0), right = character(0), op = character(0),
+       filter = "none")
+}
+
+#' dplyr's lifecycle warning for `by = character()`
+#'
+#' `lifecycle` derives the package named in "was deprecated in dplyr 1.1.0"
+#' from `env`, so `env` is dplyr's namespace (not cuplyr's), the same call
+#' `dplyr:::warn_join_cross_by()` makes. `user_env` is the user's calling
+#' frame (the frame that called the join verb).
+#' @keywords internal
+warn_join_cross_by <- function(user_env) {
+  lifecycle::deprecate_warn(
+    when = "1.1.0",
+    what = I("Using `by = character()` to perform a cross join"),
+    with = "cross_join()",
+    env = asNamespace("dplyr"),
+    user_env = user_env,
+    id = "dplyr-by-for-cross-join"
+  )
+}
+
+#' vctrs-style type label for a join key, as in dplyr's incompatible-type error
+#'
+#' Built from `vctrs::vec_ptype_full()` on a zero-length prototype so labels
+#' (including the levels hash in `<factor<4d52a>>`) match dplyr's exactly.
+#' @keywords internal
+join_key_type_label <- function(type, levels = NULL) {
+  proto <- switch(type,
+    DICTIONARY32 = factor(character(), levels = levels),
+    BOOL8 = logical(),
+    INT32 = integer(),
+    FLOAT64 = double(),
+    STRING = character(),
+    TIMESTAMP_DAYS = as.Date(character()),
+    TIMESTAMP_SECONDS = ,
+    TIMESTAMP_MILLISECONDS = ,
+    TIMESTAMP_MICROSECONDS = ,
+    TIMESTAMP_NANOSECONDS = as.POSIXct(character(), tz = "UTC"),
+    NULL
+  )
+  if (is.null(proto)) {
+    return(tolower(type))
+  }
+  vctrs::vec_ptype_full(proto)
+}
+
+#' Raise dplyr's `dplyr_error_join_incompatible_type`
+#' @keywords internal
+abort_join_incompatible_type <- function(x_name, y_name, x_type, y_type,
+                                         x_levels = NULL, y_levels = NULL) {
+  abort_join(
+    c(
+      sprintf("Can't join `x$%s` with `y$%s` due to incompatible types.",
+              x_name, y_name),
+      i = sprintf("`x$%s` is a <%s>.", x_name, join_key_type_label(x_type, x_levels)),
+      i = sprintf("`y$%s` is a <%s>.", y_name, join_key_type_label(y_type, y_levels))
+    ),
+    class = "dplyr_error_join_incompatible_type"
+  )
+}
+
+# Numeric types the join-condition AST evaluator widens by itself
+# (src/expr_eval.hpp, `ast_cast_op_for_type()`).
+join_ast_numeric_types <- c("INT32", "INT64", "FLOAT64")
+
+#' Resolve every join key pair's common type (gap A3)
+#'
+#' Schema-only (no GPU work). dplyr casts each key pair to its common type
+#' (`vctrs::vec_ptype2()`) before matching and errors when a pair has none;
+#' the ladder is `resolve_common_col_type()` (R/bind.R), shared with
+#' `bind_rows()` and the set operations. Walks equi AND non-equi pairs so an
+#' incompatible pair raises at verb time, in eager and lazy mode.
+#'
+#' Pairs whose types already match (the common, benchmarked case) cost one
+#' vector comparison and leave `join_spec` untouched. Equi pairs with
+#' compatible-but-different types are recorded in `join_spec$key_casts`:
+#' `idx` (position in the spec), `type` (the common type), `cast_left`/
+#' `cast_right`, the source types, and a factor side's levels (needed to
+#' decode it to `STRING`). Non-equi pairs are only validated: the expression
+#' evaluator casts their operands itself.
+#'
+#' `lower_join()` applies the plan; `build_join_output_info()` reads it for
+#' the merged key's output type.
+#' @param x_schema,y_schema Schemas of the two inputs
+#' @param join_spec A join spec from [parse_join_by()]
+#' @return `join_spec`, with `key_casts` set when any equi pair needs a cast
+#' @keywords internal
+resolve_join_key_types <- function(x_schema, y_schema, join_spec) {
+  lt <- unname(x_schema$types[match(join_spec$left, x_schema$names)])
+  rt <- unname(y_schema$types[match(join_spec$right, y_schema$names)])
+  mismatch <- which(lt != rt)
+  if (length(mismatch) == 0L) {
+    return(join_spec)
+  }
+
+  casts <- list()
+  for (i in mismatch) {
+    fx <- identical(lt[i], "DICTIONARY32")
+    fy <- identical(rt[i], "DICTIONARY32")
+    lvls_x <- if (fx) x_schema$factor_levels[[join_spec$left[i]]]
+    lvls_y <- if (fy) y_schema$factor_levels[[join_spec$right[i]]]
+    res <- resolve_common_col_type(lt[i], rt[i], fx, fy, lvls_x, lvls_y)
+    if (!isTRUE(res$ok)) {
+      abort_join_incompatible_type(join_spec$left[i], join_spec$right[i],
+                                   lt[i], rt[i], lvls_x, lvls_y)
+    }
+    if (join_spec$op[i] != "==" && lt[i] %in% join_ast_numeric_types &&
+        rt[i] %in% join_ast_numeric_types) {
+      next
+    }
+    casts[[length(casts) + 1L]] <- list(
+      idx = i, type = res$type,
+      left_type = lt[i], right_type = rt[i],
+      cast_left = !identical(lt[i], res$type),
+      cast_right = !identical(rt[i], res$type),
+      left_levels = lvls_x, right_levels = lvls_y
+    )
+  }
+  if (length(casts) > 0L) {
+    join_spec$key_casts <- casts
+  }
+  join_spec
 }
 
 #' Port of `dplyr:::add_suffixes()`
@@ -437,13 +554,36 @@ build_join_output_info <- function(left_schema, right_schema, join_spec,
   origin <- c(rep("left", length(left_out_names)), rep("right", length(right_out_names)))
   source_names <- c(left_names, right_keep)
 
+  types <- c(left_schema$types, right_schema$types[match(right_keep, right_names)])
+  factor_levels <- join_output_factor_levels(left_schema, right_schema,
+                                             out_names, origin, source_names)
+
+  # A merged equi key (keep != TRUE) whose two sides had different types
+  # leaves the join as ONE column of the common type (A3, `key_casts`
+  # recorded by resolve_join_key_types()); a factor + character key becomes
+  # plain STRING. With keep = TRUE both originals survive untouched.
+  cast_keys <- character(0)
+  if (!isTRUE(keep) && !is.null(join_spec$key_casts)) {
+    for (cast in join_spec$key_casts) {
+      # Non-equi columns keep their own types (matched on cast copies).
+      if (join_spec$op[cast$idx] != "==") next
+      pos <- match(join_spec$left[cast$idx], left_names)
+      types[pos] <- cast$type
+      cast_keys <- c(cast_keys, left_out_names[pos])
+      if (!identical(cast$type, "DICTIONARY32")) {
+        factor_levels[[left_out_names[pos]]] <- NULL
+      }
+    }
+    if (length(factor_levels) == 0) factor_levels <- NULL
+  }
+
   list(
     names = out_names,
-    types = c(left_schema$types, right_schema$types[match(right_keep, right_names)]),
+    types = types,
     origin = origin,
     source_names = source_names,
-    factor_levels = join_output_factor_levels(left_schema, right_schema,
-                                              out_names, origin, source_names)
+    factor_levels = factor_levels,
+    cast_keys = cast_keys
   )
 }
 
@@ -473,7 +613,7 @@ build_join_output_info <- function(left_schema, right_schema, join_spec,
 #' sides' raw INT32 codes directly -- which would silently mismatch two
 #' logically-equal labels encoded under different codes. That case is
 #' caught and routed to the CPU fallback before ever reaching this
-#' function (every join verb calls it right after `validate_key_types()`).
+#' function (every join verb calls it right after `resolve_join_key_types()`).
 #' @keywords internal
 join_output_factor_levels <- function(left_schema, right_schema, out_names, origin, source_names) {
   factor_levels <- list()
@@ -491,7 +631,7 @@ join_output_factor_levels <- function(left_schema, right_schema, out_names, orig
 #' level sets?
 #'
 #' Native GPU joins match equi keys by comparing their PHYSICAL INT32 codes
-#' directly (`validate_key_types()` only checks `identical()`/numeric-
+#' directly (`resolve_join_key_types()` only checks `identical()`/numeric-
 #' compatible type strings, never level compatibility) -- if both sides of
 #' an equi condition are factor columns whose level VECTORS differ, two
 #' logically-equal labels can be encoded under different codes (e.g. `"a"`
@@ -499,7 +639,7 @@ join_output_factor_levels <- function(left_schema, right_schema, out_names, orig
 #' would silently produce wrong matches. This is detectable from schemas
 #' alone, before any GPU op runs -- every join verb (`left_join()`/
 #' `inner_join()`/`full_join()`/`right_join()`/`semi_join()`/`anti_join()`)
-#' calls this right after `validate_key_types()` and routes the WHOLE join
+#' calls this right after `resolve_join_key_types()` and routes the WHOLE join
 #' to the CPU fallback when it's `TRUE`, mirroring
 #' `join_output_would_collide()`'s existing pattern (Phase 8 sets.R
 #' precedent: `check_set_op_compatible()` uses the identical
@@ -1085,11 +1225,145 @@ check_join_cardinality <- function(diag, join_type, multiple, relationship, unma
 #' defaulting/validation runs exactly as it would for a bare call) --
 #' `y_tbl` is collected once and reused across every retry-shaped caller.
 #' @keywords internal
-join_route_to_fallback <- function(verb_name, verb_fn, x, y, args) {
+join_route_to_fallback <- function(verb_name, verb_fn, x, y, args, user_env = NULL) {
   y_tbl <- collect(y)
+  # `by = character()`: dplyr's own deprecation warning would blame the
+  # calling package (cuplyr) and add lifecycle's "report the issue" bullets, so
+  # warn here with the user's frame and mute the copy dplyr raises inside the
+  # fallback -- exactly one warning (nest_join() does the same).
+  mute <- !is.null(user_env) && is_cross_by(args$by)
+  if (mute) {
+    warn_join_cross_by(user_env)
+  }
   gpu_fallback(verb_name, x, function(tbl) {
-    rlang::inject(verb_fn(tbl, y_tbl, !!!args))
+    mute_cross_by_warning(rlang::inject(verb_fn(tbl, y_tbl, !!!args)), mute)
   })
+}
+
+#' Evaluate `expr`, muting dplyr's `by = character()` deprecation warning
+#' @param expr Evaluated lazily, inside the handler.
+#' @param mute When `FALSE`, `expr` is just evaluated.
+#' @keywords internal
+mute_cross_by_warning <- function(expr, mute = TRUE) {
+  if (!mute) {
+    return(expr)
+  }
+  withCallingHandlers(expr, lifecycle_warning_deprecated = function(w) {
+    rlang::cnd_muffle(w)
+  })
+}
+
+#' Coerce `y` to a `tbl_gpu` (shared by every join verb)
+#' @keywords internal
+join_coerce_y <- function(y, copy) {
+  if (is_tbl_gpu(y)) {
+    return(y)
+  }
+  if (isTRUE(copy)) {
+    return(tbl_gpu(y))
+  }
+  stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
+}
+
+#' Shared body of `left_join()`/`inner_join()`/`full_join()`/`right_join()`
+#'
+#' `unmatched = NULL` means the verb has no `unmatched=` argument
+#' (`full_join()`): it is not validated, not forwarded to the CPU fallback,
+#' and the node gets `"drop"`.
+#'
+#' Order of checks: the unsupported-`by` CPU fallback; argument validation;
+#' key-type resolution (raises `dplyr_error_join_incompatible_type`, A3);
+#' the factor-level-conflict and suffix-collision fallbacks; then, for
+#' `by = character()` only, dplyr's deprecation warning (emitted last so a
+#' fallback, whose dplyr call warns by itself, never warns twice).
+#' @keywords internal
+mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
+                          multiple, unmatched, relationship, user_env) {
+  y <- join_coerce_y(y, copy)
+  verb <- paste0(join_type, "_join")
+  verb_fn <- get(verb, envir = asNamespace("dplyr"))
+  fallback_args <- function() {
+    args <- list(by = by, suffix = suffix, keep = keep, na_matches = na_matches,
+                 multiple = multiple)
+    if (!is.null(unmatched)) args$unmatched <- unmatched
+    args$relationship <- relationship
+    join_route_to_fallback(verb, verb_fn, x, y, args, user_env = user_env)
+  }
+
+  if (!join_by_natively_supported(by, x, y)) {
+    return(fallback_args())
+  }
+
+  suffix <- validate_join_suffix(suffix)
+  na_matches <- validate_join_na_matches(na_matches)
+  multiple <- validate_join_multiple(multiple)
+  if (!is.null(unmatched)) {
+    unmatched <- validate_join_unmatched(unmatched,
+                                         max_length = if (join_type == "inner") 2L else 1L)
+  }
+  relationship <- validate_join_relationship(relationship)
+
+  cross_by <- is_cross_by(by)
+  join_spec <- if (cross_by) join_cross_spec() else parse_join_by(by, x, y)
+  validate_join_cols(join_spec$left, x, "Left")
+  validate_join_cols(join_spec$right, y, "Right")
+  join_spec <- resolve_join_key_types(x$schema, y$schema, join_spec)
+
+  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec)) {
+    return(fallback_args())
+  }
+
+  # `by = character()` suffixes every common name whatever `keep` says, which
+  # is what an empty spec with keep = TRUE does.
+  keep_resolved <- if (cross_by) TRUE else resolve_join_keep(keep, join_spec)
+
+  if (join_output_would_collide(x$schema, y$schema, join_spec, suffix, keep_resolved)) {
+    return(fallback_args())
+  }
+
+  if (cross_by) {
+    warn_join_cross_by(user_env)
+  }
+
+  push_join(join_type, x, y, join_spec, suffix = suffix, keep = keep_resolved,
+            na_matches = na_matches, multiple = multiple,
+            unmatched = unmatched %||% "drop", relationship = relationship,
+            cross_by = cross_by)
+}
+
+#' Shared body of `semi_join()`/`anti_join()` (see [mutating_join()])
+#' @keywords internal
+filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
+  y <- join_coerce_y(y, copy)
+  verb <- paste0(join_type, "_join")
+  verb_fn <- get(verb, envir = asNamespace("dplyr"))
+  fallback_args <- function() {
+    join_route_to_fallback(verb, verb_fn, x, y, list(by = by, na_matches = na_matches),
+                           user_env = user_env)
+  }
+
+  if (!join_by_natively_supported(by, x, y)) {
+    return(fallback_args())
+  }
+
+  na_matches <- validate_join_na_matches(na_matches)
+
+  cross_by <- is_cross_by(by)
+  join_spec <- if (cross_by) join_cross_spec() else parse_join_by(by, x, y)
+  validate_join_cols(join_spec$left, x, "Left")
+  validate_join_cols(join_spec$right, y, "Right")
+  join_spec <- resolve_join_key_types(x$schema, y$schema, join_spec)
+
+  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec)) {
+    return(fallback_args())
+  }
+
+  if (cross_by) {
+    warn_join_cross_by(user_env)
+  }
+
+  push_join(join_type, x, y, join_spec, suffix = c(".x", ".y"), keep = FALSE,
+            na_matches = na_matches, cross_by = cross_by)
 }
 
 #' Mutating joins for `tbl_gpu` (`left_join()`, `inner_join()`, `full_join()`,
@@ -1107,7 +1381,13 @@ join_route_to_fallback <- function(verb_name, verb_fn, x, y, args) {
 #' @param by Join specification: `NULL` (natural join on every common column
 #'   name), an unnamed character vector (`c("a", "b")`, matched by identical
 #'   name on both sides), a named character vector (`c("lx" = "ry")`, for
-#'   differently-named keys), or a [dplyr::join_by()] spec. `join_by()`
+#'   differently-named keys), or a [dplyr::join_by()] spec. Key columns whose
+#'   types differ are cast to their common type for matching, as in dplyr
+#'   (integer/double/logical, factor/character, Date/POSIXct), and a pair
+#'   with no common type raises `dplyr_error_join_incompatible_type` when the
+#'   verb is called. `by = character()` (deprecated in dplyr 1.1.0, warns
+#'   once) is a cross join with the usual `multiple=`/`relationship=`/
+#'   `unmatched=` rules. `join_by()`
 #'   supports both equi conditions (`a`, `a == b`) and non-equi conditions
 #'   (`>=`, `>`, `<=`, `<`, and the `between()`/`within()`/`overlaps()`
 #'   helpers that pre-expand to pairs of them) -- all GPU-native (Phase 7
@@ -1188,51 +1468,8 @@ left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
                               suffix = c(".x", ".y"), ..., keep = NULL,
                               na_matches = "na", multiple = "all",
                               unmatched = "drop", relationship = NULL) {
-  if (!is_tbl_gpu(y)) {
-    if (isTRUE(copy)) {
-      y <- tbl_gpu(y)
-    } else {
-      stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
-    }
-  }
-
-  if (!join_by_natively_supported(by, x, y)) {
-    return(join_route_to_fallback("left_join", dplyr::left_join, x, y, list(
-      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
-      multiple = multiple, unmatched = unmatched, relationship = relationship
-    )))
-  }
-
-  suffix <- validate_join_suffix(suffix)
-  na_matches <- validate_join_na_matches(na_matches)
-  multiple <- validate_join_multiple(multiple)
-  unmatched <- validate_join_unmatched(unmatched, max_length = 1L)
-  relationship <- validate_join_relationship(relationship)
-
-  join_spec <- parse_join_by(by, x, y)
-  validate_join_cols(join_spec$left, x, "Left")
-  validate_join_cols(join_spec$right, y, "Right")
-  validate_key_types(x, y, join_spec)
-
-  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec)) {
-    return(join_route_to_fallback("left_join", dplyr::left_join, x, y, list(
-      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
-      multiple = multiple, unmatched = unmatched, relationship = relationship
-    )))
-  }
-
-  keep <- resolve_join_keep(keep, join_spec)
-
-  if (join_output_would_collide(x$schema, y$schema, join_spec, suffix, keep)) {
-    return(join_route_to_fallback("left_join", dplyr::left_join, x, y, list(
-      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
-      multiple = multiple, unmatched = unmatched, relationship = relationship
-    )))
-  }
-
-  push_join("left", x, y, join_spec, suffix = suffix, keep = keep,
-           na_matches = na_matches, multiple = multiple, unmatched = unmatched,
-           relationship = relationship)
+  mutating_join("left", x, y, by, copy, suffix, keep, na_matches, multiple,
+                unmatched, relationship, user_env = rlang::caller_env())
 }
 
 #' @rdname mutating-joins
@@ -1242,51 +1479,8 @@ inner_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
                                suffix = c(".x", ".y"), ..., keep = NULL,
                                na_matches = "na", multiple = "all",
                                unmatched = "drop", relationship = NULL) {
-  if (!is_tbl_gpu(y)) {
-    if (isTRUE(copy)) {
-      y <- tbl_gpu(y)
-    } else {
-      stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
-    }
-  }
-
-  if (!join_by_natively_supported(by, x, y)) {
-    return(join_route_to_fallback("inner_join", dplyr::inner_join, x, y, list(
-      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
-      multiple = multiple, unmatched = unmatched, relationship = relationship
-    )))
-  }
-
-  suffix <- validate_join_suffix(suffix)
-  na_matches <- validate_join_na_matches(na_matches)
-  multiple <- validate_join_multiple(multiple)
-  unmatched <- validate_join_unmatched(unmatched, max_length = 2L)
-  relationship <- validate_join_relationship(relationship)
-
-  join_spec <- parse_join_by(by, x, y)
-  validate_join_cols(join_spec$left, x, "Left")
-  validate_join_cols(join_spec$right, y, "Right")
-  validate_key_types(x, y, join_spec)
-
-  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec)) {
-    return(join_route_to_fallback("inner_join", dplyr::inner_join, x, y, list(
-      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
-      multiple = multiple, unmatched = unmatched, relationship = relationship
-    )))
-  }
-
-  keep <- resolve_join_keep(keep, join_spec)
-
-  if (join_output_would_collide(x$schema, y$schema, join_spec, suffix, keep)) {
-    return(join_route_to_fallback("inner_join", dplyr::inner_join, x, y, list(
-      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
-      multiple = multiple, unmatched = unmatched, relationship = relationship
-    )))
-  }
-
-  push_join("inner", x, y, join_spec, suffix = suffix, keep = keep,
-           na_matches = na_matches, multiple = multiple, unmatched = unmatched,
-           relationship = relationship)
+  mutating_join("inner", x, y, by, copy, suffix, keep, na_matches, multiple,
+                unmatched, relationship, user_env = rlang::caller_env())
 }
 
 #' @rdname mutating-joins
@@ -1296,55 +1490,13 @@ full_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
                               suffix = c(".x", ".y"), ..., keep = NULL,
                               na_matches = "na", multiple = "all",
                               relationship = NULL) {
-  if (!is_tbl_gpu(y)) {
-    if (isTRUE(copy)) {
-      y <- tbl_gpu(y)
-    } else {
-      stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
-    }
-  }
-
-  if (!join_by_natively_supported(by, x, y)) {
-    return(join_route_to_fallback("full_join", dplyr::full_join, x, y, list(
-      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
-      multiple = multiple, relationship = relationship
-    )))
-  }
-
   # full_join() has no `unmatched=` in dplyr (every row, matched or not, is
   # always kept), so it isn't accepted here either -- passing it hits `...`
   # and is silently ignored, same as dplyr's own `...`-must-be-empty dots
   # (dplyr hard-errors on that; this is a narrower gap, not a behavior this
   # task needs to close).
-  suffix <- validate_join_suffix(suffix)
-  na_matches <- validate_join_na_matches(na_matches)
-  multiple <- validate_join_multiple(multiple)
-  relationship <- validate_join_relationship(relationship)
-
-  join_spec <- parse_join_by(by, x, y)
-  validate_join_cols(join_spec$left, x, "Left")
-  validate_join_cols(join_spec$right, y, "Right")
-  validate_key_types(x, y, join_spec)
-
-  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec)) {
-    return(join_route_to_fallback("full_join", dplyr::full_join, x, y, list(
-      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
-      multiple = multiple, relationship = relationship
-    )))
-  }
-
-  keep <- resolve_join_keep(keep, join_spec)
-
-  if (join_output_would_collide(x$schema, y$schema, join_spec, suffix, keep)) {
-    return(join_route_to_fallback("full_join", dplyr::full_join, x, y, list(
-      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
-      multiple = multiple, relationship = relationship
-    )))
-  }
-
-  push_join("full", x, y, join_spec, suffix = suffix, keep = keep,
-           na_matches = na_matches, multiple = multiple, unmatched = "drop",
-           relationship = relationship)
+  mutating_join("full", x, y, by, copy, suffix, keep, na_matches, multiple,
+                unmatched = NULL, relationship, user_env = rlang::caller_env())
 }
 
 #' @rdname mutating-joins
@@ -1354,63 +1506,14 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
                                suffix = c(".x", ".y"), ..., keep = NULL,
                                na_matches = "na", multiple = "all",
                                unmatched = "drop", relationship = NULL) {
-  if (!is_tbl_gpu(y)) {
-    if (isTRUE(copy)) {
-      y <- tbl_gpu(y)
-    } else {
-      stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
-    }
-  }
-
-  if (!join_by_natively_supported(by, x, y)) {
-    return(join_route_to_fallback("right_join", dplyr::right_join, x, y, list(
-      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
-      multiple = multiple, unmatched = unmatched, relationship = relationship
-    )))
-  }
-
-  suffix <- validate_join_suffix(suffix)
-  na_matches <- validate_join_na_matches(na_matches)
-  multiple <- validate_join_multiple(multiple)
-  unmatched <- validate_join_unmatched(unmatched, max_length = 1L)
-  relationship <- validate_join_relationship(relationship)
-
-  join_spec <- parse_join_by(by, x, y)
-  validate_join_cols(join_spec$left, x, "Left")
-  validate_join_cols(join_spec$right, y, "Right")
-  validate_key_types(x, y, join_spec)
-
-  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec)) {
-    return(join_route_to_fallback("right_join", dplyr::right_join, x, y, list(
-      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
-      multiple = multiple, unmatched = unmatched, relationship = relationship
-    )))
-  }
-
-  keep <- resolve_join_keep(keep, join_spec)
-
-  if (join_output_would_collide(x$schema, y$schema, join_spec, suffix, keep)) {
-    return(join_route_to_fallback("right_join", dplyr::right_join, x, y, list(
-      by = by, suffix = suffix, keep = keep, na_matches = na_matches,
-      multiple = multiple, unmatched = unmatched, relationship = relationship
-    )))
-  }
-
   # right_join(x, y) is native (Phase 7 J4): gpu_right_join()
   # (src/ops_join.cpp) computes matched (x, y) pairs via cudf::inner_join()
   # plus unmatched-y rows via a filtered_join anti-join, assembled so the
   # shared stable-sort/gather/coalesce pipeline (build_join_result(), used
   # by every mutating join type) reproduces dplyr's row-order contract:
-  # x-matched rows in x's order, then unmatched-y rows appended last. This
-  # is just another "right"-typed ast_join node -- push_join()
-  # (R/execute.R) dispatches it through the same unified eager/lazy path as
-  # the other join types, and lower_join()'s "right" case (R/lower.R) calls
-  # gpu_right_join() with exactly the same argument shape as
-  # gpu_left_join()/gpu_inner_join()/gpu_full_join(), so both schedules
-  # agree on the resulting schema.
-  push_join("right", x, y, join_spec, suffix = suffix, keep = keep,
-           na_matches = na_matches, multiple = multiple, unmatched = unmatched,
-           relationship = relationship)
+  # x-matched rows in x's order, then unmatched-y rows appended last.
+  mutating_join("right", x, y, by, copy, suffix, keep, na_matches, multiple,
+                unmatched, relationship, user_env = rlang::caller_env())
 }
 
 #' `semi_join()`/`anti_join()`: native via `cudf::filtered_join`
@@ -1421,11 +1524,8 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
 #' (verified via `args(dplyr:::semi_join.data.frame)`: `x, y, by, copy, ...,
 #' na_matches`) -- there's nothing to merge, so no column-collision handling
 #' is needed. The result is x's own schema verbatim (a row subset of x),
-#' and -- verified empirically against dplyr 1.2.1 -- x's `group_by()`
-#' grouping is PRESERVED (these are filters, not the column-merging
-#' mutating joins that `push_join()`/`propagate_groups()`'s D3 rule always
-#' clears groups for); `push_join()` special-cases `join_type %in%
-#' c("semi", "anti")` to carry `x$groups` forward instead of dropping them.
+#' and x's `group_by()` grouping is preserved (as for every join type,
+#' see `push_join()`, `R/execute.R`).
 #'
 #' `by` accepts the same forms as the mutating joins (see `?mutating-joins`):
 #' `NULL`, a character vector, or a [dplyr::join_by()] spec, including
@@ -1444,43 +1544,14 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
 #'   `"never"` (`NA` keys never match anything).
 #' @return A `tbl_gpu` with `x`'s own schema, filtered to the rows that
 #'   (`semi_join()`) or don't (`anti_join()`) have a match in `y`. `x`'s
-#'   `group_by()` grouping is preserved (these are row filters, not
-#'   column-merging joins).
+#'   `group_by()` grouping is preserved.
 #' @name semi-anti-joins
 #' @rdname semi-anti-joins
 #' @export
 #' @importFrom dplyr semi_join
 semi_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
                               na_matches = "na") {
-  if (!is_tbl_gpu(y)) {
-    if (isTRUE(copy)) {
-      y <- tbl_gpu(y)
-    } else {
-      stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
-    }
-  }
-
-  if (!join_by_natively_supported(by, x, y)) {
-    return(join_route_to_fallback("semi_join", dplyr::semi_join, x, y, list(
-      by = by, na_matches = na_matches
-    )))
-  }
-
-  na_matches <- validate_join_na_matches(na_matches)
-
-  join_spec <- parse_join_by(by, x, y)
-  validate_join_cols(join_spec$left, x, "Left")
-  validate_join_cols(join_spec$right, y, "Right")
-  validate_key_types(x, y, join_spec)
-
-  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec)) {
-    return(join_route_to_fallback("semi_join", dplyr::semi_join, x, y, list(
-      by = by, na_matches = na_matches
-    )))
-  }
-
-  push_join("semi", x, y, join_spec, suffix = c(".x", ".y"), keep = FALSE,
-           na_matches = na_matches)
+  filtering_join("semi", x, y, by, copy, na_matches, user_env = rlang::caller_env())
 }
 
 #' `is_anti = TRUE` in the shared `gpu_semi_anti_join()` C++ entry point --
@@ -1491,35 +1562,7 @@ semi_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
 #' @importFrom dplyr anti_join
 anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
                               na_matches = "na") {
-  if (!is_tbl_gpu(y)) {
-    if (isTRUE(copy)) {
-      y <- tbl_gpu(y)
-    } else {
-      stop("`y` must be a tbl_gpu or set copy = TRUE.", call. = FALSE)
-    }
-  }
-
-  if (!join_by_natively_supported(by, x, y)) {
-    return(join_route_to_fallback("anti_join", dplyr::anti_join, x, y, list(
-      by = by, na_matches = na_matches
-    )))
-  }
-
-  na_matches <- validate_join_na_matches(na_matches)
-
-  join_spec <- parse_join_by(by, x, y)
-  validate_join_cols(join_spec$left, x, "Left")
-  validate_join_cols(join_spec$right, y, "Right")
-  validate_key_types(x, y, join_spec)
-
-  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec)) {
-    return(join_route_to_fallback("anti_join", dplyr::anti_join, x, y, list(
-      by = by, na_matches = na_matches
-    )))
-  }
-
-  push_join("anti", x, y, join_spec, suffix = c(".x", ".y"), keep = FALSE,
-           na_matches = na_matches)
+  filtering_join("anti", x, y, by, copy, na_matches, user_env = rlang::caller_env())
 }
 
 #' `cross_join()`: native via `cudf::cross_join`
@@ -1540,20 +1583,11 @@ anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
 #'   `keep = TRUE`, regardless of what the spec's `left`/`right` contain), so
 #'   an empty join spec (no keys at all) plus `keep = TRUE` reproduces it
 #'   exactly -- see `ast_join()`'s `by`/`keep` fields below.
-#' - Grouping is NOT unconditionally cleared, unlike `left_join()`/
-#'   `inner_join()`/`full_join()`/`right_join()` (D3): dplyr's own
-#'   `cross_join.data.frame()` ends with `dplyr_reconstruct(x_out, x)`,
-#'   which keeps `x`'s grouping over exactly the group-var NAMES that
-#'   survive, unchanged, in the output. A group column whose name is unique
-#'   to `x` stays grouped; one whose name collides with `y`'s (and gets
-#'   suffixed away, e.g. `"g"` -> `"g.x"`) is silently dropped from the
-#'   grouping. `y`'s own grouping is always irrelevant. See `push_join()`'s
-#'   (`R/execute.R`) `preserves_x_groups` handling, which reuses the exact
-#'   same `intersect(x$groups, new_schema$names)` formula already used for
-#'   `semi_join()`/`anti_join()` -- a colliding group column is renamed away
-#'   from the new schema's names by `build_join_output_info()`'s own
-#'   suffixing rule, so the intersection naturally excludes it with no
-#'   cross-specific logic needed.
+#' - Grouping follows the rule shared by every join (`push_join()`,
+#'   `R/execute.R`): `x`'s groups that survive in the output keep grouping
+#'   (dplyr's `cross_join.data.frame()` ends with `dplyr_reconstruct(x_out,
+#'   x)`); a group column whose name collides with `y`'s and gets suffixed
+#'   away (`"g"` -> `"g.x"`) drops out. `y`'s grouping is irrelevant.
 #' - 0-row `x` or `y` produces a 0-row result with the correct (merged)
 #'   schema -- cudf's `cross_join()` handles this natively, no R-side
 #'   special-casing needed.

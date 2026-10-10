@@ -14,7 +14,8 @@ push_join(
   na_matches,
   multiple = "all",
   unmatched = "drop",
-  relationship = NULL
+  relationship = NULL,
+  cross_by = FALSE
 )
 }
 \arguments{
@@ -23,18 +24,21 @@ push_join(
 
 \item{x, y}{The two \code{tbl_gpu} join inputs}
 
-\item{join_spec}{List with \code{left}/\code{right}/\code{op}/\code{filter}, as returned by
-\code{parse_join_by()}}
+\item{join_spec}{List with \code{left}/\code{right}/\code{op}/\code{filter} (and, when key
+types differ, \code{key_casts}), as returned by \code{parse_join_by()} /
+\code{resolve_join_key_types()}}
 
 \item{suffix, keep, na_matches, multiple, unmatched, relationship}{As
-documented on the join verbs (the last three are dormant -- validated
-but not yet behavior-changing -- until Phase 7 J5; all are unused for
-\code{"semi"}/\code{"anti"}, which have no \code{suffix}/\code{keep}/\code{multiple}/
-\code{unmatched}/\code{relationship} in dplyr's own signature; \code{"cross"} has no
-\code{keep}/\code{na_matches}/\code{multiple}/\code{unmatched}/\code{relationship} in dplyr's own
-signature either, and always passes \code{keep = TRUE} internally purely to
-get \code{build_join_output_info()}'s all-common-names-suffixed behavior --
-see \code{cross_join.tbl_gpu()}, \code{R/join.R})}
+documented on the join verbs (all are unused for \code{"semi"}/\code{"anti"},
+which have no \code{suffix}/\code{keep}/\code{multiple}/\code{unmatched}/\code{relationship} in
+dplyr's own signature; \code{"cross"} has none of \code{keep}/\code{na_matches}/
+\code{multiple}/\code{unmatched}/\code{relationship} either, and always passes \code{keep = TRUE} internally purely to get \code{build_join_output_info()}'s
+all-common-names-suffixed behavior -- see \code{cross_join.tbl_gpu()},
+\code{R/join.R})}
+
+\item{cross_by}{\code{TRUE} for dplyr's deprecated \code{by = character()} spelling:
+an ordinary \code{join_type} join over a constant key (see
+\code{lower_cross_by_join()}, \code{R/lower.R})}
 }
 \value{
 A new \code{tbl_gpu}
@@ -46,34 +50,14 @@ one \code{exec_mode}/\code{ptr}/\code{schema} to decide the schedule. A join has
 independent inputs (\code{x}/\code{y}) whose \emph{either} side being lazy forces the
 whole join lazy (mirroring the pre-unification behavior), and whose eager
 execution needs both sides' pointers anchored -- see \code{join_input_node()}.
-Per D3, the mutating joins (\code{"left"}/\code{"inner"}/\code{"full"}/\code{"right"}) always
-drop groups (\code{character()}) and never carry \code{factor_levels} (this matches
-\code{build_join_schema()}, which never propagated them). \code{"semi"}/\code{"anti"}
-are one exception (Phase 7 J2): they're row filters, not column
-merges -- the output schema is x's own schema verbatim (see
-\code{infer_schema.ast_join}'s semi/anti branch, which returns x's schema,
-factor_levels included), and dplyr's own \code{semi_join()}/\code{anti_join()}
-PRESERVE x's \code{group_by()} grouping (verified empirically against dplyr
-1.2.1) -- so \code{x$groups} is carried forward (filtered defensively through
-the new schema's names, mirroring \code{propagate_groups()}'s own convention
-for non-join nodes) instead of being cleared.
 }
 \details{
-\code{"cross"} is a second, more surprising exception (Phase 7 J3): dplyr's own
-\code{cross_join.data.frame()} ends with \code{dplyr_reconstruct(x_out, x)}, which
-(for a \code{grouped_df} \code{x}) keeps grouping over exactly the group-var NAMES
-that still exist, unchanged, in the joined output -- it does NOT
-unconditionally clear \code{x}'s groups the way \code{left_join()}/\code{inner_join()}/
-\code{full_join()}/\code{right_join()} do. Verified empirically against dplyr 1.2.1:
-a group column with a name unique to \code{x} (no collision with any of \code{y}'s
-names) survives under its own name and STAYS grouped in the result; a
-group column whose name collides with one of \code{y}'s (and is therefore
-suffixed, e.g. \code{"g"} -> \code{"g.x"}) is silently DROPPED from the grouping
-(not an error) since \code{"g"} no longer names any column in the output. Only
-\code{y}'s grouping is irrelevant either way (\code{dplyr_reconstruct()}'s template
-is \code{x} alone). This is exactly the same \code{intersect(x$groups, new_schema$names)} formula already used for semi/anti -- a colliding
-group column is renamed away from the new schema's names by
-\code{build_join_output_info()}'s own suffixing rule, so the intersection
-naturally excludes it without any cross-specific logic.
+Groups (F06): every dplyr join ends with \code{dplyr_reconstruct(out, x)}, so
+for EVERY join type the result is grouped by \code{intersect(x$groups, names(out))} and keeps \code{x}'s \code{.drop} setting (\code{x$group_drop}); \code{y}'s
+grouping is irrelevant. A group column that gets suffixed away (a name
+collision, or the key under \code{keep = TRUE}) simply drops out of the
+intersection; a merged key that is also a group column stays grouped (with
+its coerced type). Semi/anti outputs are \code{x}'s schema verbatim, so all of
+\code{x}'s groups survive.
 }
 \keyword{internal}

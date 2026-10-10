@@ -277,7 +277,7 @@ align_set_op_side <- function(tbl, target_schema, groups = character()) {
   # table's `$schema$types` had -- `tbl_gpu()` builds it via `vapply()`,
   # which names it by column by default. Left inconsistent, one side
   # ending up named and the other not makes `identical(lt, rt)` in
-  # `validate_key_types()` (R/join.R) see a spurious mismatch even when
+  # `resolve_join_key_types()` (R/join.R) see a spurious mismatch even when
   # the actual type strings match (an attribute-only difference) --
   # unnamed unconditionally here so both sides are always comparably
   # unnamed downstream.

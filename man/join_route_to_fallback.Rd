@@ -4,7 +4,7 @@
 \alias{join_route_to_fallback}
 \title{Route a join call to the transparent CPU fallback (Phase 7 J6)}
 \usage{
-join_route_to_fallback(verb_name, verb_fn, x, y, args)
+join_route_to_fallback(verb_name, verb_fn, x, y, args, user_env = NULL)
 }
 \description{
 Shared by every mutating/semi/anti join verb below for the two shapes the

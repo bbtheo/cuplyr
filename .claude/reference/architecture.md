@@ -58,8 +58,8 @@ Call sites split into two camps:
 - **Logical-semantics sites** (care whether a column IS a factor, not what
   bytes back it): must keep seeing `"DICTIONARY32"` verbatim, never routed
   through `gpu_physical_type()` -- the mutate arithmetic guard
-  (`infer_mutate_output_type()`, R/ast.R), join key type-compatibility
-  checks (`validate_key_types()`, R/join.R), memory accounting
+  (`infer_mutate_output_type()`, R/ast.R), join key type resolution
+  (`resolve_join_key_types()`, R/join.R), memory accounting
   (`R/gpu-memory.R`). Silently treating a factor as a plain integer here
   would let arithmetic on a factor slip through, or let two differently-
   leveled factor keys join as if they shared one integer domain.
@@ -293,6 +293,46 @@ filter node with N predicates is already exactly one fused kernel.
   `column_reference(LEFT|RIGHT)` nodes for `gpu_cond_join()`
   (`cudf::mixed_join()` when ≥1 equi condition, `cudf::conditional_join()`
   otherwise).
+- Key type coercion (F06/A3): `resolve_join_key_types()` (verb time, schema
+  only) walks every key pair (equi and non-equi) with
+  `resolve_common_col_type()` (R/bind.R, shared with bind_rows/set ops) and
+  raises `dplyr_error_join_incompatible_type` with dplyr's text (type labels
+  from `vctrs::vec_ptype_full()`, so factor hashes match). Compatible-but-
+  different equi pairs go in `join_spec$key_casts` (travels on `ast$by`);
+  matching types leave it `NULL` and lowering is untouched (perf). Merged keys
+  (`keep != TRUE`, mutating) are cast in place on both sides and the output
+  key has the common type (`build_join_output_info()`, also `cast_keys` so
+  the optimizer won't push a predicate on such a key below the join).
+  `keep = TRUE`, semi/anti and non-equi columns keep their original types:
+  `apply_join_key_casts()` (R/lower.R) matches on cast copies (only the side
+  that needs a cast) appended as trailing temp columns and
+  `drop_join_key_temps()` removes them afterwards (not via `right_drop`, which
+  would also switch on right/full coalescing). Non-equi pairs are recorded in
+  `key_casts` too, except numeric pairs (`INT32`/`INT64`/`FLOAT64`), which the
+  AST evaluator widens itself (it can only cast to INT64/FLOAT64, so Date vs
+  POSIXct or logical vs integer need the copies). The condition IR is bound
+  against the schemas extended with the copies (`cond_by` names them), so the
+  evaluator never sees mismatched operand types. `cast_join_key_column()`
+  errors clearly on a factor key whose levels are unknown (NULL).
+  Factor -> STRING uses `gpu_decode_factor()`, never `gpu_cast_column()`.
+- `by = character()` (F06/A4): detected by `is_cross_by()` in every join verb;
+  the lifecycle warning is raised once from the verb (`warn_join_cross_by()`,
+  `env` = dplyr's namespace so it says "dplyr 1.1.0"). A join that ends on the
+  CPU fallback (`join_route_to_fallback()`, `nest_join()`) warns from the verb
+  too and mutes the copy dplyr raises inside
+  (`mute_cross_by_warning()`). The node is a normal `join_type` join with an empty spec, `keep = TRUE`, `cross_by = TRUE`;
+  `lower_cross_by_join()` decides at execution time from the two row counts
+  (cartesian via `gpu_cross_join()`, NA-padded outer results for an empty
+  side, semi/anti = "y has rows"), synthesizes the cardinality diag for
+  `check_join_cardinality()` (default relationship many-to-many). Never a
+  hash join on a constant key. A keyless side may not be pruned to zero
+  columns (row count lost): `join_keep_a_column()` in the optimizer.
+- Groups (F06): every join type keeps `intersect(x$groups, output names)`
+  and `x$group_drop` (`push_join()`); there is no D3 "joins clear groups" rule
+  any more. `gpu_fallback()` regroups with `.drop = x$group_drop` and reads
+  `.drop` back from the result, so CPU-fallback joins keep it too.
+- `nest_join()` is still a CPU fallback; its default `name` is
+  `as_label(enexpr(y))` and it warns for `by = character()` from the verb.
 - Ensure desired column names exist before calling `gpu_select`
 
 ### Optimizer Barriers

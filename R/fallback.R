@@ -60,7 +60,8 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE) {
   # (per-group aggregation, grouped slice_min/slice_max, etc.) work exactly
   # as they would on a real grouped_df.
   if (length(materialized$groups) > 0) {
-    tbl <- dplyr::group_by(tbl, !!!rlang::syms(materialized$groups))
+    tbl <- dplyr::group_by(tbl, !!!rlang::syms(materialized$groups),
+                           .drop = isTRUE(materialized$group_drop %||% TRUE))
   }
 
   result <- expr_fn(tbl)
@@ -88,8 +89,11 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE) {
 
   new_tbl <- tbl_gpu(dplyr::ungroup(result), lazy = FALSE)
 
+  # `.drop` is read back the same way: a verb that keeps x's grouping (joins,
+  # filter, ...) keeps its `.drop = FALSE` too.
   if (length(new_groups) > 0) {
-    new_tbl <- dplyr::group_by(new_tbl, !!!rlang::syms(new_groups))
+    new_tbl <- dplyr::group_by(new_tbl, !!!rlang::syms(new_groups),
+                               .drop = dplyr::group_by_drop_default(result))
   }
 
   if (was_lazy) {
@@ -289,9 +293,23 @@ do.tbl_gpu <- function(.data, ...) {
 #' @importFrom dplyr nest_join
 nest_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, keep = NULL,
                                name = NULL, ...) {
+  # dplyr names the list column after the `y` expression (`as_label(enexpr(y))`);
+  # taken before `y` is collected so it isn't the collected copy's name.
+  name <- name %||% rlang::as_label(rlang::enexpr(y))
+  user_env <- rlang::caller_env()
   y_tbl <- collect_other_side(y)
+  # `by = character()`: dplyr's own deprecation warning would blame the
+  # calling package (cuplyr), so warn here with the user's frame and mute
+  # the copy dplyr raises inside the fallback -- exactly one warning.
+  cross_by <- is_cross_by(by)
+  if (cross_by) {
+    warn_join_cross_by(user_env)
+  }
   gpu_fallback("nest_join", x, function(tbl) {
-    dplyr::nest_join(tbl, y_tbl, by = by, copy = copy, keep = keep, name = name, ...)
+    mute_cross_by_warning(
+      dplyr::nest_join(tbl, y_tbl, by = by, copy = copy, keep = keep, name = name, ...),
+      cross_by
+    )
   })
 }
 
