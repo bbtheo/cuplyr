@@ -1,103 +1,60 @@
 #!/usr/bin/env Rscript
 # Run dplyr's own vendored test suite (inst/dplyr-conformance/tests/) against
-# cuplyr's tbl_gpu backend and produce a per-file pass/fail/error/skip ledger.
+# cuplyr's tbl_gpu backend and produce a per-file ledger plus a per-test TSV.
 #
-# Phase 13 (dplyr-parity roadmap, scratchpad/todo.md): the whole point of the
-# roadmap was "the whole dplyr test suite runs on cuplyr" -- this script is
-# the harness that actually measures that, rather than the hand-mirrored
-# oracle suite (tests/testthat/test-dplyr-*.R) which only covers the shapes
-# cuplyr's own authors thought to write.
+# Phase 13 (dplyr-parity roadmap): the goal is "the whole dplyr test suite runs
+# on cuplyr", measured here rather than by the hand-mirrored oracle suite
+# (tests/testthat/test-dplyr-*.R). F01 reworked the harness so that the number
+# reflects cuplyr and not the harness (items C1-C8 of
+# scratchpad/dplyr_feature_gaps.md section 4).
 #
-# ---------------------------------------------------------------------------
-# SHIM MECHANISM (decided after prototyping against test-distinct.R, per the
-# Phase 13 risk-spike note) -- and why:
+# This file is the thin CLI (load the package, parse args, loop over files,
+# write the report). All logic lives in tools/conformance-lib.R, which the
+# unit tests in tests/testthat/test-parity-F01-harness.R drive on fake files.
+# Read the header of that file for the mechanism and why it is built this way:
+#   - construction-site shim scoping (only fixtures that enter a pipeline are
+#     uploaded; everything else stays a plain tibble/data.frame);
+#   - strict comparisons (grouping restored on collect, recursion into lists
+#     and list-columns, bare data.frame fixtures compared as bare, including
+#     expect_s3_class(x, "data.frame", exact = TRUE), a harness relaxation);
+#   - pinned CRAN-mode snapshot semantics and testthat edition 3;
+#   - per-test instrumentation and the `not_exercised` status;
+#   - the exclusion manifest tools/conformance-exclusions.tsv and `excluded`.
 #
-# The task brief offered several options ranging from "mask tibble()/
-# data.frame() so constructed tables become tbl_gpu, normalize both sides of
-# expectations" to a fully re-executing test_that() wrapper. A full re-write
-# of `test_that()` semantics was rejected as overkill and fragile: testthat's
-# own `test_that()` ALREADY isolates each test (catches its own errors/
-# expectation failures and always returns, recording into whatever reporter
-# is active) -- there is no need to reimplement that isolation, only to (a)
-# make constructed data become tbl_gpu, and (b) make comparisons tolerant of
-# tbl_gpu operands. Concretely, per test file:
-#
-#   1. A fresh child-of-globalenv() "shim environment" masks `tibble()`,
-#      `data.frame()`, and `tribble()`: each calls through to the REAL
-#      constructor, then attempts `cuplyr::tbl_gpu()` on the result,
-#      catching upload failures (list-columns, 0-row/0-col edges, etc.) by
-#      silently falling back to the plain tibble/data.frame -- exactly
-#      cuplyr's own `gpu_fallback()` philosophy applied to test fixtures.
-#      This ONLY affects bare, unqualified `tibble(...)`/`data.frame(...)`
-#      calls written literally in the vendored test file's source text --
-#      R's lexical scoping means dplyr's OWN internals (which call
-#      `tibble::tibble()`/`base::data.frame()` from inside the dplyr
-#      namespace) are entirely unaffected by this override, so the shim
-#      targets exactly "constructed tibbles/data.frames ENTERING a pipeline"
-#      as the task brief asked, not dplyr's internal machinery.
-#   2. `expect_equal()`/`expect_identical()` are masked to `collect()` +
-#      `as_tibble()` any tbl_gpu operand on BOTH sides before delegating to
-#      the real testthat expectation -- "normalize both sides" per the task
-#      brief. `expect_s3_class()` is masked narrowly: if the object being
-#      checked is a tbl_gpu AND the target class is one of
-#      data.frame/tbl_df/tbl/tbl_gpu, treat it as satisfied outright (tbl_gpu
-#      IS a table-like object, just represented differently -- see CLAUDE.md
-#      on the DICTIONARY32 logical/physical split for the same kind of
-#      "different bytes, same logical contract" reasoning); anything else
-#      normalizes and delegates to the real check.
-#   3. A HARNESS-ONLY (not part of the real cuplyr package/exports) `$` and
-#      `[[` method for tbl_gpu is defined inside the shim env:
-#      `collect(x)[[name]]`. Prototyping against test-distinct.R found this
-#      necessary -- dplyr's tests overwhelmingly extract columns via
-#      `result$col`/`result[["col"]]` directly in plain test-body code
-#      (never inside an expectation call), which our masked expect_equal()
-#      cannot intercept because the extraction already evaluated to NULL
-#      (tbl_gpu is a plain list with fields ptr/schema/groups/..., so `$col`
-#      silently returns NULL with no error) BEFORE expect_equal() ever runs.
-#      This is flagged in the report as a genuine, if narrow, ergonomics gap
-#      worth a future real PR (adding `$.tbl_gpu`/`[[.tbl_gpu` to the actual
-#      package) -- NOT invented as real package API by this task, since that
-#      would need its own design pass (does auto-collect on `$` fight the
-#      "explicit collect()" philosophy the rest of the package follows?).
-#   4. Each vendored file is run via `testthat::test_file(path, reporter =
-#      "list", env = shim_env)` -- `env` is accepted by `test_file()`'s
-#      `...` (verified against installed testthat 3.3.2's `test_files_serial`
-#      body) and, when supplied, is used AS THE test execution environment
-#      directly (not wrapped) rather than testthat's usual fresh
-#      `test_env()`, and `load_helpers = TRUE` (the default) still sources
-#      the file's sibling `helper-*.R` files into it first, exactly
-#      mirroring how `devtools::test()`/`R CMD check` would run these files
-#      inside the real dplyr package.
-#
-# HONEST LIMITATIONS (not hidden -- this is what makes the ledger meaningful
-# rather than a rubber stamp):
-#   - Anything routed to dplyr's CPU fallback in cuplyr (do()/rows_*()/
-#     colwise/rowwise/...) round-trips through real tibbles internally, so it
-#     behaves close to identically to unshimmed dplyr -- a green result there
-#     is a weaker signal than a green result on a GPU-native verb.
-#   - `expect_snapshot()` compares against the vendored `_snaps/*.md` MD5/
-#     text reference; almost every snapshot that includes an ERROR MESSAGE
-#     will mismatch cuplyr's own wording even when the underlying behavior
-#     (erroring at all) is correct -- these are categorized separately, not
-#     silently hidden as failures.
+# Honest limitations (the ledger is only as meaningful as these):
+#   - Anything routed to dplyr's CPU fallback in cuplyr (do()/rows_*()/colwise/
+#     rowwise/...) round-trips through real tibbles internally, so a green
+#     result there is a weaker signal than one on a GPU-native verb.
+#   - `error = TRUE` snapshots are credited as a success only when, statement
+#     by statement, cuplyr errors exactly where dplyr's reference in _snaps
+#     errors and no credited error is an infrastructure/missing-feature error
+#     that the reference does not also show for that statement; the wording is
+#     never compared (the report lists every relaxed check with dplyr's
+#     reference text, and marks AUDIT where the final "!" lines differ). A
+#     snapshot without a usable reference block credits nothing and records a
+#     skip expectation without ending the test. `error = FALSE` snapshots run the code
+#     but compare nothing, so a test whose only assertion is one is a skip.
 #   - Only bare `tibble()`/`data.frame()`/`tribble()` calls are shimmed;
-#     `tibble::tibble()`-qualified calls, `as_tibble()`/`as.data.frame()`
-#     conversions, and matrix/list inputs are NOT intercepted -- a test that
-#     only ever uses those forms runs against a REAL, unshimmed tibble and so
-#     doesn't exercise cuplyr at all (a "green" result there proves nothing
-#     about cuplyr; also flagged, not celebrated).
-#   - `$`/`[[` auto-collect (item 3 above) hides the cost of a device->host
-#     transfer on every single column access -- fine for a conformance
-#     count, actively bad practice if anyone copied this pattern into real
-#     user code.
+#     `tibble::tibble()`-qualified calls, `as_tibble()`/`as.data.frame()` and
+#     matrix/list inputs run on real tibbles. A passing test that built a table
+#     with a shimmed constructor but never created a tbl_gpu is `not_exercised`;
+#     a passing test with no constructor call at all (vector-only) stays `pass`
+#     and is counted separately as exercised = FALSE.
+#   - A HARNESS-ONLY `$`/`[[` method for tbl_gpu (defined in the shim env, not
+#     in the package) collects on every column access; see the findings
+#     appendix of the report for why that is not a package API yet.
 #
-# ---------------------------------------------------------------------------
 # Usage:
 #   Rscript tools/run-dplyr-conformance.R                # run all runnable files
 #   Rscript tools/run-dplyr-conformance.R test-distinct.R # run just one file
 #   Rscript tools/run-dplyr-conformance.R --all           # also attempt out-of-scope files
-#   ... --ids ids.tsv        # also write one row per test: file, test, status
+#   ... --ids ids.tsv        # also write one row per test (file, test, status first)
 #   ... --report path.md     # report location (default scratchpad/dplyr_conformance_report.md)
+#   ... --compare old.tsv    # add a per-file before/after table and the list of
+#                            # lost passes (id, new status, message) against an
+#                            # earlier ids TSV, e.g. the ratcheted baseline
+#   ... --exclusions path    # manifest (default tools/conformance-exclusions.tsv;
+#                            # "none" disables exclusions)
 #
 # Run it through tools/conformance (GPU lock) rather than directly. The
 # package is pkgload::load_all()-ed from this checkout, never library()-ed, so
@@ -111,20 +68,11 @@ suppressPackageStartupMessages({
   library(tibble)
   # dplyr's own test files call plenty of unqualified helper functions that
   # are only visible because `test_check("dplyr")`'s real execution
-  # environment is `env_clone(asNamespace("dplyr"))` (see make_shim_env()
-  # below) -- that clone's parent chain is dplyr's own `import(rlang)`/
-  # `import(vctrs, except = data_frame)` (dplyr's NAMESPACE, confirmed by
-  # inspection: both are FULL `import()`s, not `importFrom()`), which is why
-  # bare `vec_slice()`/`list_of()`/`is_integerish()`/`new_vctr()`/
-  # `vec_assign()`/`exprs()`/`set_names()` etc. resolve inside dplyr's own
-  # tests. Two more, `local_options()` (withr) and `map_chr()` (purrr), are
-  # NOT part of dplyr's Imports (they're Suggests-only) -- they resolve in a
-  # real dplyr test run because the namespace's parent chain bottoms out at
-  # `.GlobalEnv` (a documented R fact: a namespace's imports env's parent is
-  # the base namespace, whose parent IS `.GlobalEnv`) and from there the
-  # normal search path, so attaching them here (as any dplyr contributor's
-  # interactive session would have them attached via Suggests) reproduces
-  # the same resolution.
+  # environment is `env_clone(asNamespace("dplyr"))` (see cf_make_shim_env()
+  # in the lib) -- that clone's parent chain is dplyr's own `import(rlang)`/
+  # `import(vctrs, except = data_frame)`. Two more, `local_options()` (withr)
+  # and `map_chr()` (purrr), are Suggests-only in dplyr and resolve in a real
+  # run through the search path, so they are attached here to reproduce that.
   library(withr)
   library(purrr)
 })
@@ -144,6 +92,7 @@ pkg_root <- find_pkg_root()
 source(file.path(pkg_root, "tools", "ensure-optimized.R"))
 cuplyr_ensure_optimized_dll(pkg_root)
 pkgload::load_all(pkg_root, quiet = TRUE, debug = FALSE)
+source(file.path(pkg_root, "tools", "conformance-lib.R"))
 tests_dir <- file.path(pkg_root, "inst", "dplyr-conformance", "tests")
 source(file.path(pkg_root, "inst", "dplyr-conformance", "manifest.R"))
 
@@ -166,6 +115,9 @@ take_flag_value <- function(flag) {
   val
 }
 ids_path <- take_flag_value("--ids")
+compare_path <- take_flag_value("--compare")
+exclusions_path <- take_flag_value("--exclusions") %||%
+  file.path(pkg_root, "tools", "conformance-exclusions.tsv")
 report_path <- take_flag_value("--report") %||%
   file.path(pkg_root, "scratchpad", "dplyr_conformance_report.md")
 run_all_incl_out_of_scope <- "--all" %in% cli_args
@@ -179,197 +131,9 @@ target_files <- if (length(explicit_files) > 0) {
   runnable_files(tests_dir)
 }
 
-# ---- Shim construction -------------------------------------------------------
+exclusions <- if (identical(exclusions_path, "none")) NULL else conformance_load_exclusions(exclusions_path)
 
-gpu_try_construct <- function(x) {
-  if (!is.data.frame(x)) {
-    return(x)
-  }
-  res <- tryCatch(cuplyr::tbl_gpu(x), error = function(e) NULL, warning = function(w) NULL)
-  if (is.null(res)) x else res
-}
-
-gpu_normalize <- function(x) {
-  if (inherits(x, "tbl_gpu")) {
-    tryCatch(
-      tibble::as_tibble(dplyr::collect(x)),
-      error = function(e) x # collect() itself failed -- let the real comparison surface it
-    )
-  } else {
-    x
-  }
-}
-
-make_shim_env <- function() {
-  # Start from the SAME base environment dplyr's own `test_check("dplyr")`
-  # uses (see testthat::test_env(), which does exactly this for a named
-  # package): a clone of dplyr's namespace, so every unqualified
-  # dplyr-internal helper (join_cols(), count_regroups(), tbl_at_vars(),
-  # as_fun_list(), join_by_common(), join_rows(), compute_by(), shift(),
-  # ...) and every `import()`ed rlang/vctrs function resolves exactly as it
-  # would inside a real dplyr test run. Without this, hundreds of tests
-  # error on "could not find function" before ever reaching cuplyr code --
-  # confirmed by prototyping without it first (see report's own history);
-  # that noise would drown out genuine signal, so this is load-bearing, not
-  # a nice-to-have.
-  env <- testthat::test_env("dplyr")
-
-  # Re-shadow every cuplyr-exported name over the cloned dplyr binding.
-  # Real usage is `library(dplyr); library(cuplyr)`, where cuplyr (attached
-  # LAST) masks any same-named dplyr binding on the search path -- most
-  # verbs don't need this (dplyr already defines them as UseMethod()
-  # generics that dispatch correctly to `verb.tbl_gpu()` regardless of
-  # which literal function object is called), but a few of dplyr's own
-  # top-level functions are NOT S3 generics at all (`bind_rows()`/
-  # `bind_cols()` call `vctrs::vec_rbind()`/`vec_cbind()` directly instead
-  # of `UseMethod()`) -- cuplyr instead defines ITS OWN `bind_rows <-
-  # function(...) UseMethod("bind_rows")` and exports it specifically to
-  # mask dplyr's plain-function version for exactly this reason (see
-  # R/bind.R). `test_env("dplyr")`'s clone captures dplyr's OWN internal
-  # `bind_rows` binding directly in the cloned env (not just via the search
-  # path), which would otherwise silently bypass cuplyr's real masking
-  # mechanism and misreport a shim artifact as a cuplyr `bind_rows()`
-  # failure. Confirmed empirically: without this fix, every `bind_rows()`
-  # call in test-bind-rows.R errored with "Argument 1 must be a data frame
-  # or a named atomic vector" (vec_rbind() rejecting a plain-list tbl_gpu)
-  # even though `cuplyr::bind_rows(tbl_gpu1, tbl_gpu2)` works fine when
-  # called directly.
-  for (nm in getNamespaceExports("cuplyr")) {
-    env[[nm]] <- get(nm, envir = asNamespace("cuplyr"))
-  }
-
-  env$data.frame <- function(...) gpu_try_construct(base::data.frame(...))
-  env$tibble <- function(...) gpu_try_construct(tibble::tibble(...))
-  env$tribble <- function(...) gpu_try_construct(tibble::tribble(...))
-
-  # Harness-only accessor shims (see header comment, limitation item 3) --
-  # NOT part of the real cuplyr package.
-  env$`$.tbl_gpu` <- function(x, name) {
-    tibble::as_tibble(dplyr::collect(x))[[name]]
-  }
-  env$`[[.tbl_gpu` <- function(x, i, ...) {
-    tibble::as_tibble(dplyr::collect(x))[[i, ...]]
-  }
-
-  gpu_class_tolerant_classes <- c("data.frame", "tbl_df", "tbl", "tbl_gpu")
-  env$expect_s3_class <- function(object, class, ..., exact = FALSE) {
-    if (inherits(object, "tbl_gpu") && isTRUE(all(class %in% gpu_class_tolerant_classes))) {
-      return(testthat::succeed())
-    }
-    testthat::expect_s3_class(gpu_normalize(object), class, ..., exact = exact)
-  }
-  env$expect_equal <- function(object, expected, ...) {
-    testthat::expect_equal(gpu_normalize(object), gpu_normalize(expected), ...)
-  }
-  env$expect_identical <- function(object, expected, ...) {
-    testthat::expect_identical(gpu_normalize(object), gpu_normalize(expected), ...)
-  }
-
-  env
-}
-
-# ---- Reason classification (heuristic, for the report's honesty mandate) ---
-
-classify_reason <- function(msg) {
-  if (is.na(msg) || !nzchar(msg)) {
-    return("unknown")
-  }
-  if (grepl("not an exported object|dplyr:::|:::.*dplyr|non-exported|could not find function", msg, ignore.case = TRUE)) {
-    return("dplyr-internal usage")
-  }
-  if (grepl("Snapshot", msg, ignore.case = TRUE)) {
-    return("shim artifact: snapshot text mismatch")
-  }
-  # These two are checked BEFORE the generic tbl_gpu bucket below: both
-  # messages happen to mention "tbl_gpu" but are genuine, actionable
-  # cuplyr-side gaps, not shim plumbing -- see the report's "top genuine
-  # gaps" section.
-  if (grepl("must be a vector, not a", msg, ignore.case = TRUE)) {
-    return("genuine cuplyr gap: tbl_gpu has no vctrs vec_size()/vec_slice() contract (breaks coalesce()/if_else()/between()/consecutive_id()/n_distinct()/lead()/lag()/rank()/nth_value()/with_order() when passed a whole table)")
-  }
-  if (grepl("2-d .\\[. indexing", msg, ignore.case = TRUE)) {
-    return("genuine cuplyr gap: 2-d `[` (row+col) indexing not implemented for tbl_gpu (R/generics.R only implements the 1-d column-select form; dplyr's own tests routinely do `result[1:2, ]` to check a row subset)")
-  }
-  if (grepl("inherit from|Actual class|no applicable method|not a data\\.frame|no method for", msg, ignore.case = TRUE)) {
-    return("shim artifact: class/representation mismatch")
-  }
-  if (grepl("tbl_gpu|gpu_normalize|GPU|has_gpu|cuplyr", msg, ignore.case = TRUE)) {
-    return("shim artifact: tbl_gpu representation")
-  }
-  if (grepl("not supported|not implemented|unsupported|no ir_call_registry|Unrecognized|not recognized|Unknown function", msg, ignore.case = TRUE)) {
-    return("genuine cuplyr gap: unsupported expression/verb shape")
-  }
-  "genuine cuplyr gap (needs triage)"
-}
-
-# ---- Run one file ------------------------------------------------------------
-
-run_one_file <- function(fname) {
-  path <- file.path(tests_dir, fname)
-  env <- make_shim_env()
-  res <- tryCatch(
-    testthat::test_file(path, reporter = "list", env = env),
-    error = function(e) {
-      structure(list(), file_level_error = conditionMessage(e))
-    }
-  )
-
-  file_level_error <- attr(res, "file_level_error")
-  if (!is.null(file_level_error)) {
-    return(list(
-      file = fname, n_tests = 0L, passed = 0L, failed = 0L, errored = 0L, skipped = 0L,
-      file_error = file_level_error, reasons = character(0), ids = NULL
-    ))
-  }
-
-  n_tests <- length(res)
-  passed <- 0L
-  failed <- 0L
-  errored <- 0L
-  skipped <- 0L
-  reasons <- character(0)
-  statuses <- character(0)
-
-  for (t in res) {
-    cls <- vapply(t$results, function(x) class(x)[1], character(1))
-    statuses <- c(statuses, if (any(cls == "expectation_error")) {
-      "error"
-    } else if (any(cls == "expectation_failure")) {
-      "fail"
-    } else if (length(cls) > 0 && all(cls == "expectation_skip")) {
-      "skip"
-    } else {
-      "pass"
-    })
-    if (any(cls == "expectation_error")) {
-      errored <- errored + 1L
-      first_bad <- Filter(function(x) inherits(x, "expectation_error"), t$results)[[1]]
-      reasons <- c(reasons, conditionMessage(first_bad))
-    } else if (any(cls == "expectation_failure")) {
-      failed <- failed + 1L
-      first_bad <- Filter(function(x) inherits(x, "expectation_failure"), t$results)[[1]]
-      reasons <- c(reasons, conditionMessage(first_bad))
-    } else if (length(cls) > 0 && all(cls == "expectation_skip")) {
-      skipped <- skipped + 1L
-    } else {
-      passed <- passed + 1L
-    }
-  }
-
-  # Test names can repeat within a file; suffix the occurrence so every row
-  # has a stable ID for the merge gate's per-test regression check.
-  test_names <- vapply(res, function(t) t$test %||% "", character(1))
-  occurrence <- stats::ave(seq_along(test_names), test_names, FUN = seq_along)
-  test_ids <- ifelse(occurrence > 1, paste0(test_names, " #", occurrence), test_names)
-
-  list(
-    file = fname, n_tests = n_tests, passed = passed, failed = failed,
-    errored = errored, skipped = skipped, file_error = NA_character_,
-    reasons = reasons,
-    ids = data.frame(file = rep(fname, n_tests), test = test_ids, status = statuses,
-      stringsAsFactors = FALSE)
-  )
-}
+# ---- Run ---------------------------------------------------------------------
 
 message("Running dplyr conformance harness on ", length(target_files), " file(s)...")
 all_results <- vector("list", length(target_files))
@@ -378,11 +142,13 @@ for (i in seq_along(target_files)) {
   fname <- target_files[[i]]
   message(sprintf("[%d/%d] %s", i, length(target_files), fname))
   all_results[[fname]] <- tryCatch(
-    run_one_file(fname),
+    conformance_run_file(file.path(tests_dir, fname), exclusions),
     error = function(e) {
       list(
         file = fname, n_tests = 0L, passed = 0L, failed = 0L, errored = 0L, skipped = 0L,
-        file_error = conditionMessage(e), reasons = character(0), ids = NULL
+        not_exercised = 0L, excluded = 0L, file_error = conditionMessage(e),
+        reasons = character(0), ids = cf_empty_ids(),
+        unmatched_exclusions = NULL, relaxed_snapshots = NULL
       )
     }
   )
@@ -390,101 +156,55 @@ for (i in seq_along(target_files)) {
 
 # ---- Aggregate + report ------------------------------------------------------
 
-summary_rows <- lapply(all_results, function(r) {
+summary_df <- do.call(rbind, lapply(all_results, function(r) {
   data.frame(
     file = r$file, n_tests = r$n_tests, passed = r$passed, failed = r$failed,
-    errored = r$errored, skipped = r$skipped,
-    file_error = !is.na(r$file_error),
+    errored = r$errored, skipped = r$skipped, not_exercised = r$not_exercised,
+    excluded = r$excluded, file_error = !is.na(r$file_error),
     stringsAsFactors = FALSE
   )
-})
-summary_df <- do.call(rbind, summary_rows)
+}))
 rownames(summary_df) <- NULL
 
-total_tests <- sum(summary_df$n_tests)
-total_passed <- sum(summary_df$passed)
-total_failed <- sum(summary_df$failed)
-total_errored <- sum(summary_df$errored)
-total_skipped <- sum(summary_df$skipped)
-fully_green_files <- sum(summary_df$n_tests > 0 & summary_df$failed == 0 & summary_df$errored == 0 & !summary_df$file_error)
-file_level_error_files <- sum(summary_df$file_error)
-
 message(sprintf(
-  "\nTOTAL: %d tests across %d files -- %d passed, %d failed, %d errored, %d skipped. %d/%d files fully green. %d file(s) errored before any test ran.",
-  total_tests, nrow(summary_df), total_passed, total_failed, total_errored, total_skipped,
-  fully_green_files, nrow(summary_df), file_level_error_files
+  paste0("\nTOTAL: %d tests across %d files -- %d passed, %d failed, %d errored, %d skipped, ",
+    "%d not_exercised, %d excluded. %d file(s) errored before any test ran."),
+  sum(summary_df$n_tests), nrow(summary_df), sum(summary_df$passed), sum(summary_df$failed),
+  sum(summary_df$errored), sum(summary_df$skipped), sum(summary_df$not_exercised),
+  sum(summary_df$excluded), sum(summary_df$file_error)
 ))
 print(summary_df)
 
-# Top failure reasons across the whole run, categorized.
-all_reasons <- unlist(lapply(all_results, function(r) r$reasons))
-reason_categories <- vapply(all_reasons, classify_reason, character(1))
-category_counts <- sort(table(reason_categories), decreasing = TRUE)
+id_rows <- do.call(rbind, lapply(all_results, function(r) r$ids))
+if (is.null(id_rows)) id_rows <- cf_empty_ids()
 
-# Build the markdown ledger.
-lines <- c(
-  "# dplyr conformance report (Phase 13)",
-  "",
-  sprintf("Generated: %s", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")),
-  sprintf(
-    "Vendored dplyr version: see `inst/dplyr-conformance/PROVENANCE.txt` (%s)",
-    { pv <- file.path(pkg_root, "inst", "dplyr-conformance", "PROVENANCE.txt")
-      if (file.exists(pv)) {
-        vline <- grep("^dplyr version:", readLines(pv), value = TRUE)
-        if (length(vline) > 0) sub("^dplyr version: ", "", vline[1]) else "unknown"
-      } else "unknown"
-    }
-  ),
-  sprintf("Files run this pass: %d (%s)", length(target_files), if (run_all_incl_out_of_scope) "all vendored, including out-of-scope" else "runnable/CORE set only"),
-  "",
-  "## Headline numbers",
-  "",
-  sprintf("- **%d of %d runnable files fully green** (0 failed, 0 errored, ran to completion)", fully_green_files, nrow(summary_df)),
-  sprintf("- **%d individual tests** executed across those files", total_tests),
-  sprintf(
-    "- **%.1f%%** of individual tests passed (%d passed / %d failed / %d errored / %d skipped)",
-    if (total_tests > 0) 100 * total_passed / total_tests else NA, total_passed, total_failed, total_errored, total_skipped
-  ),
-  sprintf("- %d file(s) errored before a single `test_that()` block completed (parse/load-time failure)", file_level_error_files),
-  "",
-  "## Top failure-reason categories (heuristic classification of first-failure message per failing/erroring test)",
-  ""
+cmp <- NULL
+if (!is.null(compare_path)) {
+  cmp <- conformance_compare(conformance_read_ids(compare_path), id_rows)
+  message(sprintf("Compared against %s: %d lost pass(es), %d new pass(es).",
+    compare_path, nrow(cmp$lost_passes), nrow(cmp$new_passes)))
+}
+
+vendored_version <- {
+  pv <- file.path(pkg_root, "inst", "dplyr-conformance", "PROVENANCE.txt")
+  if (file.exists(pv)) {
+    vline <- grep("^dplyr version:", readLines(pv), value = TRUE)
+    if (length(vline) > 0) sub("^dplyr version: ", "", vline[1]) else "unknown"
+  } else "unknown"
+}
+lines <- conformance_report(
+  all_results, exclusions = exclusions, cmp = cmp,
+  header = c(
+    "# dplyr conformance report (Phase 13)",
+    "",
+    sprintf("Generated: %s", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")),
+    sprintf("Vendored dplyr version: see `inst/dplyr-conformance/PROVENANCE.txt` (%s)", vendored_version),
+    sprintf("Files run this pass: %d (%s)", length(target_files),
+      if (run_all_incl_out_of_scope) "all vendored, including out-of-scope" else "runnable/CORE set only"),
+    sprintf("Exclusion manifest: %s", if (is.null(exclusions)) "none" else
+      sprintf("%s (%d entries)", basename(exclusions_path), nrow(exclusions)))
+  )
 )
-if (length(category_counts) > 0) {
-  lines <- c(lines, "| Category | Count |", "|---|---|")
-  for (nm in names(category_counts)) {
-    lines <- c(lines, sprintf("| %s | %d |", nm, category_counts[[nm]]))
-  }
-} else {
-  lines <- c(lines, "(no failures/errors recorded)")
-}
-
-lines <- c(lines, "", "## Per-file ledger", "")
-lines <- c(lines, "| File | Tests | Passed | Failed | Errored | Skipped | Status | Top reason (first failure/error) |")
-lines <- c(lines, "|---|---|---|---|---|---|---|---|")
-for (fname in target_files) {
-  r <- all_results[[fname]]
-  status <- if (!is.na(r$file_error)) {
-    "FILE ERROR"
-  } else if (r$n_tests == 0) {
-    "NO TESTS"
-  } else if (r$failed == 0 && r$errored == 0) {
-    "GREEN"
-  } else {
-    "RED"
-  }
-  top_reason <- if (!is.na(r$file_error)) {
-    gsub("\\|", "\\\\|", substr(r$file_error, 1, 160))
-  } else if (length(r$reasons) > 0) {
-    gsub("\\n", " ", gsub("\\|", "\\\\|", substr(r$reasons[[1]], 1, 160)))
-  } else {
-    ""
-  }
-  lines <- c(lines, sprintf(
-    "| %s | %d | %d | %d | %d | %d | %s | %s |",
-    fname, r$n_tests, r$passed, r$failed, r$errored, r$skipped, status, top_reason
-  ))
-}
 
 out_of_scope_tbl <- out_of_scope_files(tests_dir)
 lines <- c(lines, "", "## Out-of-scope files (not run by default)", "",
@@ -494,15 +214,14 @@ for (fname in out_of_scope_tbl) {
 }
 
 # ---- Manually-triaged notable findings ---------------------------------
-# The categories above are produced by grepping first-failure messages, which
-# is enough to sort "shim plumbing" from "actual cuplyr behavior" in bulk,
-# but a handful of specific, high-value findings only surfaced from reading
-# individual failures by hand (below the file-level ledger's resolution).
-# Recorded here as a fixed, dated appendix -- NOT regenerated automatically
-# each run (the classifier can't produce prose like this), but the counts
-# above are. Update this block by hand if a future run's investigation
-# turns up something new.
-lines <- c(lines, "", "## Notable findings (manually triaged, 2026-07-31)", "", "
+# The categories in the report are produced by grepping first-failure
+# messages, which is enough to sort "harness plumbing" from "actual cuplyr
+# behavior" in bulk, but a handful of specific, high-value findings only
+# surfaced from reading individual failures by hand. Recorded here as a
+# fixed, dated appendix -- NOT regenerated automatically (the classifier can't
+# produce prose like this), but the counts above are. Update this block by
+# hand if a future run's investigation turns up something new.
+lines <- c(lines, "", "## Notable findings (manually triaged, 2026-07-31; predates F01)", "", "
 ### 1. Genuine bug: integer-backed `Date` columns silently lose Date-ness on upload
 
 `R/utils.R::gpu_type_from_r()` checks `is.integer(x)` (line 6) BEFORE it ever
@@ -555,7 +274,7 @@ bucket, not because it's actionable in the same way as (1)/(2).
 ### 4. Shim limitation, not a cuplyr fact: `tbl_gpu` has no `$`/`[[` method in the real package
 
 The harness itself defines HARNESS-ONLY `$.tbl_gpu`/`[[.tbl_gpu` methods
-(see tools/run-dplyr-conformance.R's own header) because dplyr's tests
+(see tools/conformance-lib.R's shim environment) because dplyr's tests
 overwhelmingly extract columns via `result$col`/`result[[\"col\"]]` directly
 in plain test-body code. Worth a real design discussion (not resolved here):
 would adding a real, exported `$.tbl_gpu`/`[[.tbl_gpu` (auto-collecting)
@@ -568,12 +287,6 @@ writeLines(lines, report_path)
 message("\nWrote report to ", report_path)
 
 if (!is.null(ids_path)) {
-  id_rows <- do.call(rbind, lapply(all_results, function(r) r$ids))
-  if (is.null(id_rows)) {
-    id_rows <- data.frame(file = character(), test = character(), status = character())
-  }
-  # Tabs/newlines inside test names would break the TSV.
-  id_rows$test <- gsub("[\t\n\r]+", " ", id_rows$test)
-  utils::write.table(id_rows, ids_path, sep = "\t", quote = FALSE, row.names = FALSE)
+  conformance_write_ids(id_rows, ids_path)
   message("Wrote per-test IDs to ", ids_path)
 }

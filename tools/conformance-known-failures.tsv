@@ -1,0 +1,5 @@
+file	test	owner	reason
+test-slice.R	slice handles zero-row and zero-column inputs (#1219, #2490)	F07	zero-column input: slice(df, 1) loses the row count (row.names empty, tibble(.rows = 1) expected); hidden by the old shim, surfaced by F01's construction-site upload
+test-summarise.R	summarise(.groups=) in global environment	F07	summarise() with only .groups= and no aggregation errors ("requires at least one aggregation expression"); dplyr returns the distinct groups
+test-group-by.R	can partially `ungroup()` (#6606)	F13	ungroup(gdf, g1) drops all groups instead of keeping g2 (returns an ungrouped tibble, grouped_df expected)
+test-join.R	filtering joins finalize unspecified columns (#6804)	F36	semi_join() of an unspecified() column returns a plain column instead of keeping class vctrs_unspecified

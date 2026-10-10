@@ -8,7 +8,22 @@
 #   1. the testthat suite has no fail/error
 #   2. the perf gate passes against the main checkout's perf_baseline.json
 #   3. no dplyr conformance test that passes in conformance_baseline.tsv
-#      fails, errors, skips or disappears now (strict per-test check)
+#      regresses (strict per-test check, tools/conformance-gate.R; the rules
+#      are conformance_gate_check() in tools/conformance-lib.R):
+#        pass -> fail/error   regression, unless listed in
+#                             tools/conformance-known-failures.tsv (the
+#                             candidate's or dev's copy): accepted known failure
+#        pass -> skip/missing always a regression
+#        pass -> excluded     reclassified (needs a manifest row), not a regression
+#        pass -> not_exercised reclassified only when the candidate changes the
+#                             harness vs dev (tools/conformance-lib.R,
+#                             run-dplyr-conformance.R, conformance-exclusions.tsv,
+#                             inst/dplyr-conformance/); on a package-only merge a
+#                             fixture that stops uploading is a cuplyr regression
+#      and, when the merging feature (from the gate dir name; F07-a2 counts as
+#      F07) owns known-failure rows in either copy, all of them pass and the
+#      candidate's copy no longer lists them. A listed test that passes on
+#      another feature's merge only warns. Any script error fails the gate.
 source "$(dirname "$0")/lib.sh"
 cd "$CUPLYR_WT_ROOT"
 out="$1"; mkdir -p "$out"
@@ -38,20 +53,15 @@ Rscript tools/run-dplyr-conformance.R --ids "$out/conformance.tsv" \
 if [[ ! -s "$out/conformance.tsv" ]]; then
   echo "conformance: FAIL (harness produced no per-test IDs; see conformance.log)" >> "$summary"; ok=0
 else
-  # Rows are file<TAB>test<TAB>status; the key is file<TAB>test.
-  awk -F'\t' 'NR==FNR { if (FNR>1 && $3=="pass") now[$1 FS $2]=1; next }
-              FNR>1 && $3=="pass" && !(($1 FS $2) in now) { print $1 " :: " $2 }' \
-    "$out/conformance.tsv" "$baseline" > "$out/conformance_regressions.txt"
-  awk -F'\t' 'NR==FNR { if (FNR>1 && $3=="pass") was[$1 FS $2]=1; next }
-              FNR>1 && $3=="pass" && !(($1 FS $2) in was) { print $1 " :: " $2 }' \
-    "$baseline" "$out/conformance.tsv" > "$out/conformance_new_passes.txt"
-  n_reg=$(wc -l < "$out/conformance_regressions.txt")
-  n_new=$(wc -l < "$out/conformance_new_passes.txt")
-  n_pass=$(awk -F'\t' 'FNR>1 && $3=="pass"' "$out/conformance.tsv" | wc -l)
-  if [[ "$n_reg" -eq 0 ]]; then
-    echo "conformance: PASS ($n_pass passing, +$n_new new, 0 regressions)" >> "$summary"
-  else
-    echo "conformance: FAIL ($n_reg previously-passing tests regressed; see conformance_regressions.txt)" >> "$summary"; ok=0
+  # Exit 0 = PASS, 3 = FAIL (its lines say why), anything else = script error.
+  rc=0
+  Rscript tools/conformance-gate.R --baseline "$baseline" --new "$out/conformance.tsv" \
+    --out "$out" --base-ref dev > "$out/conformance_gate.log" 2>&1 || rc=$?
+  grep -E '^conformance: ' "$out/conformance_gate.log" >> "$summary" || true
+  if [[ $rc -eq 3 ]]; then
+    ok=0
+  elif [[ $rc -ne 0 ]]; then
+    echo "conformance: FAIL (gate script error, exit $rc; see conformance_gate.log)" >> "$summary"; ok=0
   fi
 fi
 
