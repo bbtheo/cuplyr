@@ -260,6 +260,10 @@ The optimizer transforms the AST before execution. Pass order matters:
 3. **Dead Column Pruning** (`prune_dead_columns`): Removes unused mutate outputs
    - Walks root to leaves tracking required columns
    - Empty mutate nodes are eliminated
+   - Join pruning (here and in `push_down_projections`) shares
+     `join_side_requirements()`: pruning must not change a required column's
+     output name, so the collision partner of a suffixed (`v.x`) column is kept
+     on the other side (verified by recomputing names on the pruned schemas)
 
 4. **Filter Pushdown** (`push_down_filters`): Moves filters closer to data sources
    - Pushes across mutate when predicates don't depend on outputs
@@ -268,6 +272,15 @@ The optimizer transforms the AST before execution. Pass order matters:
      - Left join: only left-only predicates pushed
      - Right join: only right-only predicates pushed
      - Full join: no side-only pushdown allowed
+     - Nothing is pushed below a left/inner/right join with `unmatched = "error"`
+       or `relationship` one-to-one/one-to-many/many-to-one: dplyr's checks read
+       the full inputs, so a pushed filter could hide or create the error
+     - No right-side pushdown when `multiple` is first/last/any (the pick is
+       among all of an x row's y matches); left-side pushdown is unaffected
+     - A pushed predicate is rewritten from output names (`v.x`) to the side's
+       source names (`join_source_predicate()`)
+     - Accepted limitation: with default `relationship = NULL` pushdown may
+       suppress dplyr's advisory many-to-many warning (rows are identical)
 
 5. **Filter Reordering** (`reorder_filters`): Executes cheaper filters first
    - Collects consecutive filter chains

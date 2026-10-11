@@ -837,8 +837,12 @@ ast_count <- function(node) {
 #' @keywords internal
 set_ast_source_ptr <- function(node, ptr) {
   if (is.null(node)) return(NULL)
+  # A lazy join result has no pointer of its own: its sources already carry
+  # theirs (attached by the inner push_join()), so there is nothing to do.
+  if (is.null(ptr)) return(node)
   if (node$type == "source") {
-    node$source_ptr <- ptr
+    # Never overwrite an attached pointer (a chained join's inner sources).
+    if (is.null(node$source_ptr)) node$source_ptr <- ptr
     return(node)
   }
   if (!is.null(node$input)) {

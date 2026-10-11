@@ -215,7 +215,20 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
 
       extra_cols <- setdiff(pred_cols, required_cols)
       if (length(extra_cols) > 0) {
-        ast_select(ast, required_cols)
+        # With a complete input chain, keep the input's column order and
+        # only names it actually has: `required_cols` is in the parent's
+        # order (and a window above this filter in a join side passes its
+        # own outputs down), and a reordered join side changes which column
+        # gets which stacked suffix (`v.x.x` vs `v.x`). In a segment cut at
+        # a barrier the input schema is partial or empty, so fall back to
+        # `required_cols` (computed from the untruncated tree by
+        # optimize_with_barriers()).
+        keep <- if (input_chain_complete(ast$input)) {
+          intersect(infer_schema(ast$input)$names, required_cols)
+        } else {
+          required_cols
+        }
+        ast_select(ast, keep)
       } else {
         ast
       }
@@ -259,21 +272,18 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
         left_needed <- union(required_cols, ast$by$left)
         right_needed <- unique(ast$by$right)
       } else {
-        left_schema <- infer_schema(ast$left)
-        right_schema <- infer_schema(ast$right)
-        info <- build_join_output_info(left_schema, right_schema, ast$by,
-                                       suffix = ast$suffix, keep = ast$keep)
-        req <- intersect(required_cols, info$names)
-        idx <- match(req, info$names)
-        idx <- idx[!is.na(idx)]
-        left_needed <- unique(c(ast$by$left, info$source_names[idx][info$origin[idx] == "left"]))
-        right_needed <- unique(c(ast$by$right, info$source_names[idx][info$origin[idx] == "right"]))
+        needed <- join_side_requirements(ast, required_cols)
+        left_needed <- needed$left
+        right_needed <- needed$right
       }
 
       left_needed <- join_keep_a_column(ast, ast$left, left_needed)
       right_needed <- join_keep_a_column(ast, ast$right, right_needed)
-      ast$left <- push_down_projections(ast$left, left_needed, group_cols)
-      ast$right <- push_down_projections(ast$right, right_needed, group_cols)
+      # `group_cols` are OUTPUT-namespace names, already folded into
+      # `required_cols` above and mapped to source names by the side
+      # requirements: they must not be forwarded into the sides.
+      ast$left <- push_down_projections(ast$left, left_needed)
+      ast$right <- push_down_projections(ast$right, right_needed)
       ast
     },
     # Phase 12 audit note: "arrange"/"summarise"/"window" (and, added here,
@@ -550,21 +560,16 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
         left_needed <- union(required_cols, ast$by$left)
         right_needed <- unique(ast$by$right)
       } else {
-        left_schema <- infer_schema(ast$left)
-        right_schema <- infer_schema(ast$right)
-        info <- build_join_output_info(left_schema, right_schema, ast$by,
-                                       suffix = ast$suffix, keep = ast$keep)
-        req <- intersect(required_cols, info$names)
-        idx <- match(req, info$names)
-        idx <- idx[!is.na(idx)]
-        left_needed <- unique(c(ast$by$left, info$source_names[idx][info$origin[idx] == "left"]))
-        right_needed <- unique(c(ast$by$right, info$source_names[idx][info$origin[idx] == "right"]))
+        needed <- join_side_requirements(ast, required_cols)
+        left_needed <- needed$left
+        right_needed <- needed$right
       }
 
       left_needed <- join_keep_a_column(ast, ast$left, left_needed)
       right_needed <- join_keep_a_column(ast, ast$right, right_needed)
-      ast$left <- prune_dead_columns(ast$left, left_needed, group_cols)
-      ast$right <- prune_dead_columns(ast$right, right_needed, group_cols)
+      # group_cols are output-namespace names: see push_down_projections()
+      ast$left <- prune_dead_columns(ast$left, left_needed)
+      ast$right <- prune_dead_columns(ast$right, right_needed)
       ast
     },
     # Same reachability rationale as push_down_projections()'s equivalent
@@ -628,6 +633,70 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
   )
 }
 
+#' Columns each side of a mutating join must keep for `required_cols`
+#'
+#' Shared by push_down_projections() and prune_dead_columns() so the two
+#' passes cannot drift. Besides the join keys and the source column of each
+#' required output, pruning must not change any required column's output
+#' NAME: a column suffixed because of a collision (`v.x`) would come out as
+#' plain `v` if its collision partner were pruned from the other side. So
+#' the partner is kept too, and the result is verified by recomputing the
+#' output names on the pruned schemas (falling back to keeping both sides
+#' whole if the simple rule is ever not enough, e.g. double suffixes).
+#'
+#' Invariant the verification relies on: it recomputes names on each side's
+#' columns in NATURAL (schema) order, so every pass that prunes a join side
+#' must keep that order. The returned sets are unordered on purpose; when the
+#' input chain is complete, an inserted `ast_select` must use
+#' `intersect(<input names>, needed)`, never `needed` itself, because stacked
+#' suffixes depend on column order. (A join side is always a complete
+#' subtree.)
+#' @keywords internal
+join_side_requirements <- function(ast, required_cols) {
+  left_schema <- infer_schema(ast$left)
+  right_schema <- infer_schema(ast$right)
+  info <- build_join_output_info(left_schema, right_schema, ast$by,
+                                 suffix = ast$suffix, keep = ast$keep)
+  idx <- match(intersect(required_cols, info$names), info$names)
+  idx <- idx[!is.na(idx)]
+  is_left <- info$origin[idx] == "left"
+  src <- info$source_names[idx]
+  left_needed <- unique(c(ast$by$left, src[is_left]))
+  right_needed <- unique(c(ast$by$right, src[!is_left]))
+
+  # Collision partners of renamed (suffixed) required columns.
+  renamed <- info$names[idx] != src
+  left_needed <- unique(c(left_needed, intersect(src[renamed & !is_left], left_schema$names)))
+  right_needed <- unique(c(right_needed, intersect(src[renamed & is_left], right_schema$names)))
+
+  prune <- function(schema, keep) {
+    k <- schema$names %in% keep
+    list(names = schema$names[k], types = schema$types[k])
+  }
+  pinfo <- build_join_output_info(prune(left_schema, left_needed),
+                                  prune(right_schema, right_needed), ast$by,
+                                  suffix = ast$suffix, keep = ast$keep)
+  key <- function(i) paste(i$origin, i$source_names)
+  m <- match(key(info)[idx], key(pinfo))
+  if (anyNA(m) || !identical(pinfo$names[m], info$names[idx])) {
+    return(list(left = left_schema$names, right = right_schema$names))
+  }
+  list(left = left_needed, right = right_needed)
+}
+
+#' Does an input chain reach a real leaf?
+#'
+#' `extract_segment_above_barrier()` truncates a segment's bottom `$input`
+#' to NULL, so `infer_schema()` inside such a segment sees a partial (or
+#' empty) schema. "source" and "join" are the only node types without an
+#' `$input`; a chain ending anywhere else was cut at a barrier.
+#' @keywords internal
+input_chain_complete <- function(node) {
+  if (is.null(node)) return(FALSE)
+  while (!is.null(node$input)) node <- node$input
+  node$type %in% c("source", "join")
+}
+
 #' Keep at least one column on each side of a keyless join
 #'
 #' A `cross` join or a `by = character()` join has no key columns, so
@@ -645,6 +714,28 @@ join_keep_a_column <- function(ast, side, needed) {
 # -----------------------------------------------------------------------------
 # Pass 4: Filter Pushdown
 # -----------------------------------------------------------------------------
+
+#' Rewrite a predicate pushed below a join to the side's source names
+#'
+#' A predicate is written against the join's OUTPUT names (`v.x`, `k.y`), but
+#' once pushed to one side it reads that side's own table, where the column
+#' is still called by its source name. Only IR `col` nodes are renamed.
+#' @keywords internal
+join_source_predicate <- function(pred, info, side) {
+  map <- info$source_names[info$origin == side]
+  names(map) <- info$names[info$origin == side]
+  rename_ir <- function(ir) {
+    if (ir$kind == "col") {
+      if (ir$name %in% names(map)) ir$name <- unname(map[[ir$name]])
+    } else if (ir$kind == "call") {
+      ir$args <- lapply(ir$args, rename_ir)
+    }
+    ir
+  }
+  pred$ir <- rename_ir(pred$ir)
+  pred$cols <- ir_cols(pred$ir)
+  pred
+}
 
 #' Push filters below mutates when predicates do not depend on mutate outputs
 #'
@@ -779,6 +870,23 @@ push_down_filters <- function(ast) {
     right_preds <- list()
     stay_preds <- list()
 
+    # dplyr's join_rows() runs its cardinality checks (unmatched = "error",
+    # relationship = one-to-one/one-to-many/many-to-one) over the FULL
+    # inputs, so a filter below the join could hide or create an error:
+    # push nothing. multiple = first/last/any picks among ALL of an x row's
+    # y matches, so y must not be filtered first (x-side pushdown is fine).
+    # Known, accepted limitation: with the default relationship = NULL a
+    # pushdown can suppress dplyr's advisory many-to-many warning or change
+    # its row numbers (rows are identical); blocking it would remove the
+    # optimizer's main join benefit. Join warnings belong to F36.
+    if (input$join_type %in% c("inner", "left", "right") &&
+        (any(input$unmatched == "error") ||
+         any(input$relationship %in% c("one-to-one", "one-to-many", "many-to-one")))) {
+      return(ast)
+    }
+    right_push_ok <- !(input$join_type %in% c("inner", "left", "right") &&
+                         !identical(input$multiple, "all"))
+
     for (pred in ast$predicates) {
       side <- classify_predicate(pred)
       # cross (Phase 7 J3, design section 1.2/2): behaves like "inner" for
@@ -789,9 +897,10 @@ push_down_filters <- function(ast) {
       # changing the result, exactly like an inner join's own left/right
       # pushdown rule.
       if (side == "left" && input$join_type %in% c("inner", "left", "cross")) {
-        left_preds <- c(left_preds, list(pred))
-      } else if (side == "right" && input$join_type %in% c("inner", "right", "cross")) {
-        right_preds <- c(right_preds, list(pred))
+        left_preds <- c(left_preds, list(join_source_predicate(pred, info, "left")))
+      } else if (side == "right" && input$join_type %in% c("inner", "right", "cross") &&
+                 right_push_ok) {
+        right_preds <- c(right_preds, list(join_source_predicate(pred, info, "right")))
       } else {
         stay_preds <- c(stay_preds, list(pred))
       }
