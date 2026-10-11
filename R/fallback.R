@@ -40,6 +40,13 @@
 #'   (e.g. `pull()`'s vector, `group_split()`'s list); or the result is a
 #'   data frame that contains list-columns (e.g. `nest_by()`/`group_nest()`/
 #'   `nest_join()`'s nested-tibble columns), which have no GPU representation.
+#'
+#'   When the result is a grouped data frame whose `group_data()` keeps groups
+#'   with no row that a plain regroup of its data would not have (dplyr's
+#'   `dplyr_col_modify.grouped_df()` does this for a verb that leaves the group
+#'   columns alone, after `filter()`/`slice()` with `.preserve = TRUE`), the
+#'   returned `tbl_gpu` carries those keys as `$fixed_keys` (see
+#'   `fixed_keys_of()`); verbs that regroup get none.
 #' @keywords internal
 gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE) {
   if (!is_tbl_gpu(.data)) {
@@ -99,6 +106,7 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE) {
   if (length(new_groups) > 0) {
     new_tbl <- dplyr::group_by(new_tbl, !!!rlang::syms(new_groups),
                                .drop = dplyr::group_by_drop_default(result))
+    new_tbl$fixed_keys <- result_fixed_keys(result, new_groups)
   }
 
   if (was_lazy) {
@@ -106,6 +114,30 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE) {
   }
 
   new_tbl
+}
+
+# The group keys of the grouped_df `result` when dplyr kept groups a plain
+# regroup of its data would not have (the empty groups of `filter()`/`slice()`
+# `.preserve = TRUE`, which `dplyr_col_modify.grouped_df()` leaves in
+# `group_data()` for a verb that doesn't write a group column), else NULL.
+# dplyr's own result is the oracle, so a verb that regroups (writing a group
+# column, rows_*, and on a `.drop = TRUE` table arrange() or a join) yields
+# NULL and `.drop = FALSE` factor expansion is not mistaken for fixed keys.
+# Skipped when no group is empty.
+# @keywords internal
+result_fixed_keys <- function(result, new_groups) {
+  gd <- dplyr::group_data(result)
+  if (!any(lengths(gd$.rows) == 0L)) {
+    return(NULL)
+  }
+  keys <- tibble::as_tibble(gd[new_groups])
+  plain <- dplyr::grouped_df(dplyr::ungroup(result), new_groups,
+                             drop = dplyr::group_by_drop_default(result))
+  plain_keys <- tibble::as_tibble(dplyr::group_data(plain)[new_groups])
+  if (nrow(keys) == nrow(plain_keys) && all(vctrs::vec_equal(keys, plain_keys, na_equal = TRUE))) {
+    return(NULL)
+  }
+  keys
 }
 
 # TRUE if any column of `df` is a list-column (e.g. nest_by()/group_nest()'s

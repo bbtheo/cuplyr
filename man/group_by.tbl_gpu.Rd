@@ -90,9 +90,13 @@ declared levels. The one exception is \code{slice(.preserve = TRUE)} on a
 \code{group_by()}-grouped table: it fixes the input's group-keys table
 (\verb{$fixed_keys}, emptied groups included, any key type), which
 \code{group_data()} and friends, \code{collect()} and the CPU fallbacks (so
-\code{summarise()}) honour. \code{mutate()}, \code{select()}, \code{rename()} and \code{relocate()}
-carry it as long as they leave the group columns alone; every other verb,
-and any change of grouping, drops it.
+\code{summarise()}) honour. \code{filter(.preserve = TRUE)} fixes keys the same way.
+\code{mutate()}, \code{select()}, \code{rename()} and \code{relocate()} carry it as long as
+they leave the group columns alone, and a CPU fallback result carries
+whatever empty groups dplyr's own result kept (see \code{gpu_fallback()}: a
+fallback \code{mutate()} keeps them, a fallback \code{arrange()} on a \code{.drop = TRUE}
+table drops them); every
+other verb, and any change of grouping, drops it.
 }
 }
 \examples{

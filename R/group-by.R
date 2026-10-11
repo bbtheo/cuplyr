@@ -77,9 +77,13 @@
 #' `group_by()`-grouped table: it fixes the input's group-keys table
 #' (`$fixed_keys`, emptied groups included, any key type), which
 #' `group_data()` and friends, `collect()` and the CPU fallbacks (so
-#' `summarise()`) honour. `mutate()`, `select()`, `rename()` and `relocate()`
-#' carry it as long as they leave the group columns alone; every other verb,
-#' and any change of grouping, drops it.
+#' `summarise()`) honour. `filter(.preserve = TRUE)` fixes keys the same way.
+#' `mutate()`, `select()`, `rename()` and `relocate()` carry it as long as
+#' they leave the group columns alone, and a CPU fallback result carries
+#' whatever empty groups dplyr's own result kept (see `gpu_fallback()`: a
+#' fallback `mutate()` keeps them, a fallback `arrange()` on a `.drop = TRUE`
+#' table drops them); every
+#' other verb, and any change of grouping, drops it.
 #'
 #' @seealso
 #' \code{\link{summarise.tbl_gpu}} for aggregating grouped data,

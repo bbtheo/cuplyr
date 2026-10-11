@@ -33,6 +33,13 @@ unchanged when: \code{as_is = TRUE}; the result isn't a data frame at all
 (e.g. \code{pull()}'s vector, \code{group_split()}'s list); or the result is a
 data frame that contains list-columns (e.g. \code{nest_by()}/\code{group_nest()}/
 \code{nest_join()}'s nested-tibble columns), which have no GPU representation.
+
+When the result is a grouped data frame whose \code{group_data()} keeps groups
+with no row that a plain regroup of its data would not have (dplyr's
+\code{dplyr_col_modify.grouped_df()} does this for a verb that leaves the group
+columns alone, after \code{filter()}/\code{slice()} with \code{.preserve = TRUE}), the
+returned \code{tbl_gpu} carries those keys as \verb{$fixed_keys} (see
+\code{fixed_keys_of()}); verbs that regroup get none.
 }
 \description{
 The core Phase-2 fallback primitive. Materializes any pending lazy
