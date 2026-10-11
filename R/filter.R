@@ -18,7 +18,11 @@
 #'   filtering, and the result is always ungrouped. Supplying `.by` when
 #'   `.data` is already grouped (via `group_by()`) is an error, matching
 #'   dplyr exactly.
-#' @param .preserve Ignored. Included for compatibility with dplyr generic.
+#' @param .preserve Whether to keep the groups the filter emptied. With `TRUE`,
+#'   a `group_by()`-grouped result keeps the input's group keys (empty groups
+#'   included) for `group_data()`, `collect()` and `summarise()`, like dplyr
+#'   (see [group_by.tbl_gpu()] for what carries them on). `FALSE` recomputes
+#'   the groups from the remaining rows.
 #'
 #' @return A `tbl_gpu` object containing only rows where all conditions are TRUE.
 #'   The GPU memory for the filtered result is newly allocated.
@@ -195,8 +199,83 @@
 #'     collect()
 #' }
 filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
-  dots <- rlang::enquos(...)
-  by_quo <- rlang::enquo(.by)
+  filter_impl(.data, rlang::enquos(...), rlang::enquo(.by), .preserve,
+              complement = FALSE, call = rlang::current_env())
+}
+
+#' Drop rows of a GPU table where conditions are TRUE
+#'
+#' The complement of [filter.tbl_gpu()], like `dplyr::filter_out()`: all
+#' conditions are combined with AND first, then the rows where that
+#' combination is `TRUE` are dropped. Rows where it is `FALSE` or `NA` are
+#' kept (so this is not `filter(!cond)`). With no conditions every row is
+#' dropped. It runs on the same engine as `filter()` (same expression
+#' surface, window predicates, `.by`, CPU fallbacks, eager and lazy): the
+#' predicate pushed to the GPU is `is.na(P) | !P` for the combined `P`.
+#'
+#' @inheritParams filter.tbl_gpu
+#' @param ... Logical expressions; rows where all of them are `TRUE` are
+#'   dropped.
+#' @return A `tbl_gpu` object without the rows where all conditions are TRUE.
+#'
+#' @export
+#' @importFrom dplyr filter_out
+filter_out.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
+  filter_impl(.data, rlang::enquos(...), rlang::enquo(.by), .preserve,
+              complement = TRUE, call = rlang::current_env())
+}
+
+# Internal: the engine behind filter() and filter_out(). `complement = TRUE`
+# is filter_out(): every dot's predicate is ANDed into ONE expression P and the
+# single pushed predicate is `is.na(P) | !P`.
+#
+# `.preserve = TRUE` on a group_by() table fixes the input's group keys on the
+# result (as slice() does, see fixed_keys_of()); every other exit drops them.
+# @keywords internal
+filter_impl <- function(.data, dots, by_quo, .preserve, complement, call) {
+  keys <- NULL
+  # dplyr keeps a `.drop = FALSE` table's whole group structure whatever
+  # `.preserve` says, so those tables take the same route.
+  keep_groups <- isTRUE(.preserve) || !isTRUE(.data$group_drop %||% TRUE)
+  if (keep_groups && rlang::quo_is_null(by_quo) && length(.data$groups) > 0L) {
+    # taken now, from the computed input, so a lazy plan runs once
+    if (has_pending_ops(.data)) .data <- compute(.data)
+    keys <- slice_group_keys(.data)
+  }
+  groups <- .data$groups
+  out <- filter_run(.data, dots, by_quo, .preserve, complement, call)
+  if (is_tbl_gpu(out)) {
+    if (!is.null(keys) && identical(out$groups, groups)) {
+      out$fixed_keys <- keys
+    } else if (!is.null(out[["fixed_keys"]]) && (is.null(keys) || !identical(out$groups, groups))) {
+      out <- drop_fixed_keys(out)
+    }
+  }
+  out
+}
+
+# A `tbl_gpu` without its fixed group keys.
+# @keywords internal
+drop_fixed_keys <- function(x) {
+  cls <- class(x)
+  x <- unclass(x)
+  x$fixed_keys <- NULL
+  structure(x, class = cls)
+}
+
+# filter_impl()'s body. Every exit may hand back its input unchanged; the
+# caller sets or drops the fixed keys.
+# @keywords internal
+filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
+  # dplyr's own checks and per-group semantics are reached by running the
+  # real verb on the CPU: named inputs (a named dot is only fine when its
+  # expression is a logical literal), `.by` together with `.preserve`, and a
+  # table with no columns.
+  cpu <- function() filter_cpu_fallback(.data, dots, by_quo, .preserve, complement)
+  nms <- names(dots)
+  if (!is.null(nms) && any(nzchar(nms) & !vapply(dots, function(q) is.logical(rlang::quo_get_expr(q)), logical(1)))) {
+    return(cpu())
+  }
 
   # Phase 5, task W6: `.by=` resolution -- checked up front (before the
   # zero-dots early return just below), matching dplyr's own behavior of
@@ -209,10 +288,13 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   # would; the result is always ungrouped when `.by=` was used, which falls
   # out automatically since resolve_by() already guarantees `.data` itself
   # is ungrouped in that case.
-  by_cols <- resolve_by(.data, by_quo, ".by")
+  by_cols <- resolve_by(.data, by_quo, ".by", call = call)
   verb_groups <- if (!rlang::quo_is_null(by_quo)) by_cols else .data$groups
 
-  if (length(dots) == 0) return(.data)
+  if (!rlang::quo_is_null(by_quo) && isTRUE(.preserve)) return(cpu())
+  if (complement && length(current_schema(.data)$names) == 0L) return(cpu())
+
+  if (length(dots) == 0 && !complement) return(.data)
 
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R's
   # own module docs. Checked up front (before `.data` is touched at all),
@@ -225,7 +307,7 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   # through the CPU fallback. `cur_group_id()` gets its own GPU-native
   # substitution below instead (row-level, exactly like mutate()'s).
   if (dots_need_fallback(dots)) {
-    return(filter_across_fallback(.data, dots, by_quo))
+    return(filter_across_fallback(.data, dots, by_quo, .preserve, complement))
   }
 
   # Substitution runs before expansion here so the if_any()/if_all() piece
@@ -240,7 +322,7 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   # An unsupported `.fns` shape: dplyr runs the call on the table and dots as
   # the user wrote them (no cur_group_id() helper column)
   if (isTRUE(attr(dots, "needs_fallback"))) {
-    return(filter_across_fallback(fallback_data, fallback_dots, by_quo))
+    return(filter_across_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
   }
 
   # Schema is stable across this whole call for every PLAIN dot: filter()
@@ -310,11 +392,13 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   # shape, e.g. `rep(TRUE, n)`) is untouched -- it still flows to
   # `filter_eval_mask()` below, unchanged from before L1.
   needs_expr_fallback <- vapply(seq_along(dots), function(i) {
-    is.null(parsed[[i]]) && dot_references_schema_col(dots[[i]], orig_names)
+    (is.null(parsed[[i]]) && dot_references_schema_col(dots[[i]], orig_names)) ||
+      filter_compares_factor_to_string(parsed[[i]], schema) ||
+      (complement && filter_ir_not_logical(parsed[[i]], schema, i %in% window_idx))
   }, logical(1))
 
   if (any(needs_expr_fallback)) {
-    return(filter_expr_fallback(fallback_data, fallback_dots, by_quo))
+    return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
   }
 
   # A dot with no column reference whose IR is NULL (opaque) or constant is
@@ -328,7 +412,17 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
     if (is.null(parsed[[i]]) || ir_is_const(parsed[[i]])) {
       res <- tryCatch(list(value = rlang::eval_tidy(dots[[i]], data = list())), error = function(e) NULL)
       if (is.null(res)) {
-        return(filter_expr_fallback(fallback_data, fallback_dots, by_quo))
+        return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
+      }
+      # Only a plain logical scalar is a constant predicate. A matrix/array
+      # (dplyr's own error or deprecation warning), a vector on a grouped
+      # table (recycled per group), and anything at all under filter_out() are
+      # dplyr's to evaluate.
+      value <- res$value
+      scalar_lgl <- is.logical(value) && length(value) == 1L && is.null(dim(value))
+      if (!is.null(dim(value)) || (length(verb_groups) > 0L && length(value) != 1L) ||
+          (complement && !scalar_lgl)) {
+        return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
       }
       standalone[i] <- list(res)
     }
@@ -362,7 +456,16 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
       # nothing has been pushed onto `.data` yet at this point, so falling
       # back to CPU evaluation of the WHOLE call, from the pristine
       # original table and dots, is safe.
-      return(filter_window_fallback(fallback_data, fallback_dots, by_quo))
+      return(filter_window_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
+    }
+
+    # filter_out() complements with a cudf NOT, which accepts numeric inputs
+    # where dplyr errors ("`..1` must be a logical vector"). Judge each
+    # window dot by its rewritten predicate's type, before any stage is
+    # pushed, and let dplyr raise its own error on the CPU.
+    if (complement && any(vapply(plan$post, filter_ir_not_logical, logical(1),
+                                 schema = plan$schema, is_window = FALSE))) {
+      return(filter_window_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
     }
 
     for (stage in plan$stages) {
@@ -387,9 +490,25 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
     }
   }
 
+  # filter_out(): only IR predicates are collected; they are ANDed into one P
+  # and complemented once, after the loop. A constant FALSE/NA dot makes P
+  # FALSE or NA, so every row is kept.
+  comp_irs <- list()
+  keep_all <- FALSE
+
   for (i in seq_along(dots)) {
     quo <- dots[[i]]
     ir <- parsed[[i]]
+
+    if (complement) {
+      if (is.null(ir) || ir_is_const(ir)) {
+        if (!isTRUE(standalone[[i]]$value)) keep_all <- TRUE
+      } else {
+        check_filter_comparison_types(ir, schema)
+        comp_irs <- c(comp_irs, list(ir))
+      }
+      next
+    }
 
     if (is.null(ir)) {
       # Opaque expression (the IR doesn't understand this shape): flush any
@@ -443,6 +562,18 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   }
 
   flush_predicates()
+
+  if (complement && !keep_all) {
+    # keep iff !(P %in% TRUE) = is.na(P) | !P; no dot (or only TRUE dots)
+    # leaves nothing to keep.
+    p_ir <- Reduce(function(a, b) ir_call("&", list(a, b)), comp_irs)
+    keep_ir <- if (is.null(p_ir)) {
+      ir_lit_from_r(FALSE)
+    } else {
+      ir_call("|", list(ir_call("is.na", list(p_ir)), ir_call("!", list(p_ir))))
+    }
+    .data <- push_op(.data, ast_filter(input_node(.data), list(make_predicate(keep_ir, schema))))
+  }
 
   if (length(window_idx) > 0 || isTRUE(cgid$used)) {
     # Drop every `..win*../..winarg*..` temp column introduced by the
@@ -502,6 +633,25 @@ filter_plan_window <- function(exprs, schema, group_cols) {
   plan
 }
 
+# Internal: run the real dplyr::filter() (or dplyr::filter_out() when
+# `complement`) on the CPU with the user's ORIGINAL dots, `.by` and
+# `.preserve`. The shared body of every filter fallback below.
+# @keywords internal
+filter_cpu_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE) {
+  verb <- if (complement) "filter_out" else "filter"
+  fn <- if (complement) dplyr::filter_out else dplyr::filter
+  gpu_fallback(verb, .data, function(tbl) {
+    # Evaluated below the global environment: dplyr attributes a deprecation
+    # (a one-column matrix) to the env of its caller, and an internal frame
+    # would make lifecycle treat it as indirect use and warn only once.
+    # The verb is bound under its own name so dplyr's error header reads
+    # `filter()` / `filter_out()`.
+    env <- rlang::new_environment(rlang::list2(!!verb := fn, tbl = tbl), parent = globalenv())
+    call <- rlang::call2(verb, quote(tbl), !!!dots, .by = by_quo, .preserve = .preserve)
+    rlang::eval_tidy(call, env = env)
+  })
+}
+
 # Internal: whole-call CPU fallback for a window-bearing filter() call whose
 # plan isn't (yet) fully lowerable (Phase 5, task W5).
 #
@@ -527,10 +677,8 @@ filter_plan_window <- function(exprs, schema, group_cols) {
 # @return A new tbl_gpu (via gpu_fallback(), which also emits the
 #   cuplyr_fallback_notify() notification)
 # @keywords internal
-filter_window_fallback <- function(.data, dots, by_quo) {
-  gpu_fallback("filter", .data, function(tbl) {
-    rlang::inject(dplyr::filter(tbl, !!!dots, .by = !!by_quo))
-  })
+filter_window_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE) {
+  filter_cpu_fallback(.data, dots, by_quo, .preserve, complement)
 }
 
 # Internal: whole-call CPU fallback for a filter() call whose dots contain
@@ -539,10 +687,8 @@ filter_window_fallback <- function(.data, dots, by_quo) {
 # dplyr::filter() call with the ORIGINAL dots, before any Phase 10
 # substitution/expansion).
 # @keywords internal
-filter_across_fallback <- function(.data, dots, by_quo) {
-  gpu_fallback("filter", .data, function(tbl) {
-    rlang::inject(dplyr::filter(tbl, !!!dots, .by = !!by_quo))
-  })
+filter_across_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE) {
+  filter_cpu_fallback(.data, dots, by_quo, .preserve, complement)
 }
 
 # Internal: whole-call CPU fallback for a filter() call with at least one dot
@@ -558,10 +704,39 @@ filter_across_fallback <- function(.data, dots, by_quo) {
 # gap (both desugar to `filter(top_n_rank(n, wt))`, a shape the IR has
 # never understood and never will natively).
 # @keywords internal
-filter_expr_fallback <- function(.data, dots, by_quo) {
-  gpu_fallback("filter", .data, function(tbl) {
-    rlang::inject(dplyr::filter(tbl, !!!dots, .by = !!by_quo))
-  })
+filter_expr_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE) {
+  filter_cpu_fallback(.data, dots, by_quo, .preserve, complement)
+}
+
+# Internal: TRUE iff a (non-window, non-constant) dot's IR is not a logical
+# expression; filter_out() hands it to dplyr for its own error.
+# @keywords internal
+filter_ir_not_logical <- function(ir, schema, is_window) {
+  if (is.null(ir) || is_window || ir_is_const(ir)) {
+    return(FALSE)
+  }
+  !identical(unname(tryCatch(ir_infer_type(ir, schema), error = function(e) "BOOL8")), "BOOL8")
+}
+
+# Internal: TRUE iff the IR compares a factor column with a string literal
+# (`f == "u"`), which dplyr resolves through the factor's labels. The GPU holds
+# only the codes, so such a dot goes to the CPU fallback.
+# @keywords internal
+filter_compares_factor_to_string <- function(ir, schema) {
+  if (is.null(ir) || !identical(ir$kind, "call")) {
+    return(FALSE)
+  }
+  if (length(ir$args) == 2L && ir$op %in% c("==", "!=", "<", "<=", ">", ">=")) {
+    for (k in 1:2) {
+      a <- ir$args[[k]]
+      b <- ir$args[[3L - k]]
+      if (identical(a$kind, "col") && identical(b$kind, "lit") && identical(b$type, "STRING") &&
+          identical(unname(schema$types[match(a$name, schema$names)]), "DICTIONARY32")) {
+        return(TRUE)
+      }
+    }
+  }
+  any(vapply(ir$args, filter_compares_factor_to_string, logical(1), schema = schema))
 }
 
 # Internal: TRUE iff `quo`'s raw expression references at least one symbol
