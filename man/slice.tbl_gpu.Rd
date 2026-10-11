@@ -24,7 +24,10 @@ position in \code{.data} (see module docs), and the result is always
 ungrouped. Supplying \code{.by} when \code{.data} is already grouped (via
 \code{group_by()}) is an error, matching dplyr.}
 
-\item{.preserve}{Passed through to the CPU fallback when triggered.}
+\item{.preserve}{Whether to keep the groups the slice emptied. With \code{TRUE},
+a \code{group_by()}-grouped result keeps the input's group keys (empty groups
+included) for \code{group_data()}, \code{collect()} and \code{summarise()}, like dplyr
+(see \code{\link[=group_by.tbl_gpu]{group_by.tbl_gpu()}} for what carries them on).}
 }
 \value{
 A \code{tbl_gpu} object with the selected rows.

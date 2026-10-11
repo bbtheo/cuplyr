@@ -348,9 +348,12 @@ substitute_cur_group_id <- function(.data, dots, group_cols) {
     step <- make_mutate_expr(helper_name, ir_lit_from_r(1L), .data$schema)
     new_data <- push_op(.data, ast_mutate(input_node(.data), list(step)))
   } else {
+    # slice(.preserve = TRUE) fixed the group keys: numbering must run over
+    # them (empty groups included), as group_indices() does.
+    fixed <- if (identical(group_cols, .data$groups)) fixed_keys_of(.data)
     tmp_grouped <- new_tbl_gpu(
       ptr = .data$ptr, schema = .data$schema, groups = group_cols,
-      exec_mode = .data$exec_mode
+      exec_mode = .data$exec_mode, fixed_keys = fixed
     )
     gd <- compute_group_data(tmp_grouped)
     keys <- gd[setdiff(names(gd), ".rows")]
@@ -367,7 +370,7 @@ substitute_cur_group_id <- function(.data, dots, group_cols) {
     # true for every future join code path.
     new_data <- new_tbl_gpu(
       ptr = joined$ptr, schema = joined$schema, groups = .data$groups,
-      exec_mode = joined$exec_mode
+      exec_mode = joined$exec_mode, fixed_keys = fixed
     )
   }
 

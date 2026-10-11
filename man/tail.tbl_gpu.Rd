@@ -10,7 +10,10 @@
 \item{x}{A \code{tbl_gpu} object.}
 
 \item{n}{Number of rows to keep (default \code{6}, matching \code{utils::tail()}).
-Negative \code{n} keeps all but the first \code{abs(n)} rows.}
+Negative \code{n} keeps all but the first \code{abs(n)} rows. A fractional \code{n} is
+rounded up, as in base, so \verb{-1 < n < 0} keeps every row. Groups are
+ignored: the rows are the last \code{n} of the whole table, and the result
+keeps the grouping of \code{x}.}
 
 \item{...}{Not used.}
 }
@@ -18,6 +21,8 @@ Negative \code{n} keeps all but the first \code{abs(n)} rows.}
 A \code{tbl_gpu} object with the last \code{n} rows.
 }
 \description{
-\code{utils::tail()} method for \code{tbl_gpu}, implemented as \code{slice_tail(x, n = n)} (see \code{\link[=slice_tail.tbl_gpu]{slice_tail.tbl_gpu()}} for the native-vs-fallback dispatch and
-negative-\code{n} semantics).
+\code{utils::tail()} method for \code{tbl_gpu}. Keeps the same rows as
+\code{utils::tail.data.frame()}: implemented as \code{slice_tail(n = ceiling(n))} on
+the ungrouped table (see \code{\link[=slice_tail.tbl_gpu]{slice_tail.tbl_gpu()}} for the native-vs-fallback
+dispatch), with the grouping put back on the result.
 }

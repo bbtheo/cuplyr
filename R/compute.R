@@ -101,7 +101,8 @@ compute.tbl_gpu <- function(x, ..., name = NULL) {
     groups = x$groups,
     exec_mode = x$exec_mode,
     group_drop = x$group_drop %||% TRUE,
-    nrow = x[["nrow"]]
+    nrow = x[["nrow"]],
+    fixed_keys = x[["fixed_keys"]]
   )
 }
 

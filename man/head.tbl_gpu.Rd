@@ -10,7 +10,9 @@
 \item{x}{A \code{tbl_gpu} object.}
 
 \item{n}{Number of rows to keep (default \code{6}, matching \code{utils::head()}).
-Negative \code{n} keeps all but the last \code{abs(n)} rows.}
+Negative \code{n} keeps all but the last \code{abs(n)} rows. A fractional \code{n} is
+rounded down, as in base. Groups are ignored: the rows are the first \code{n}
+of the whole table, and the result keeps the grouping of \code{x}.}
 
 \item{...}{Not used.}
 }
@@ -18,6 +20,8 @@ Negative \code{n} keeps all but the last \code{abs(n)} rows.}
 A \code{tbl_gpu} object with the first \code{n} rows.
 }
 \description{
-\code{utils::head()} method for \code{tbl_gpu}, implemented as \code{slice_head(x, n = n)} (see \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}} for the native-vs-fallback dispatch and
-negative-\code{n} semantics).
+\code{utils::head()} method for \code{tbl_gpu}. Keeps the same rows as
+\code{utils::head.data.frame()}: implemented as \code{slice_head(n = floor(n))} on the
+ungrouped table (see \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}} for the native-vs-fallback
+dispatch), with the grouping put back on the result.
 }

@@ -4,7 +4,7 @@
 \alias{slice_group_mode}
 \title{Classify a call's effective grouping for the slice() family}
 \usage{
-slice_group_mode(.data, by_quo, arg_name)
+slice_group_mode(.data, by_quo, arg_name, call = rlang::caller_env())
 }
 \arguments{
 \item{.data}{A \code{tbl_gpu} object}
@@ -13,6 +13,8 @@ slice_group_mode(.data, by_quo, arg_name)
 
 \item{arg_name}{Character scalar, \code{"by"} or \code{".by"} (interpolated into
 \code{resolve_by()}'s grouped-\code{.data} error message, see its own docs)}
+
+\item{call}{The calling verb's frame, for the \code{by}-on-grouped error}
 }
 \value{
 \verb{list(mode = "none"|"group_by"|"by", group_cols = <chr>)}:

@@ -292,6 +292,7 @@ push_op <- function(.data, node) {
   # `.drop` belongs to the grouping: kept while any group column survives, back
   # to the default once the table is ungrouped (a later group_by() starts over).
   new_group_drop <- if (length(new_groups) > 0L) .subset2(.data, "group_drop") %||% TRUE else TRUE
+  new_keys <- carry_fixed_keys(node, .data, new_groups)
 
   if (identical(.subset2(.data, "exec_mode"), "lazy")) {
     return(new_tbl_gpu(
@@ -301,7 +302,8 @@ push_op <- function(.data, node) {
       groups = new_groups,
       exec_mode = "lazy",
       group_drop = new_group_drop,
-      nrow = .subset2(.data, "nrow")
+      nrow = .subset2(.data, "nrow"),
+      fixed_keys = new_keys
     ))
   }
 
@@ -314,8 +316,41 @@ push_op <- function(.data, node) {
     groups = new_groups,
     exec_mode = .subset2(.data, "exec_mode"),
     group_drop = new_group_drop,
-    nrow = .subset2(.data, "nrow")
+    nrow = .subset2(.data, "nrow"),
+    fixed_keys = new_keys
   )
+}
+
+# The fixed group keys (`slice(.preserve = TRUE)`, see fixed_keys_of()) that
+# survive `node`: only a column-only node (select/rename/mutate and its window
+# stages, relocate is a select) that leaves every group column's values and
+# the grouping alone. Anything else returns NULL, so the keys can never end up
+# on a table with different groups.
+# @keywords internal
+carry_fixed_keys <- function(node, .data, new_groups) {
+  keys <- fixed_keys_of(.data)
+  if (is.null(keys) || !node$type %in% c("select", "rename", "mutate", "window")) {
+    return(NULL)
+  }
+  old <- .subset2(.data, "groups")
+  outputs <- switch(node$type,
+    mutate = vapply(node$expressions, function(e) e$output_col, character(1)),
+    window = vapply(node$specs, function(s) s$output_col, character(1)),
+    character()
+  )
+  if (any(outputs %in% old)) {
+    return(NULL)
+  }
+  expected <- old
+  if (identical(node$type, "rename")) {
+    idx <- match(old, node$old_names)
+    expected[!is.na(idx)] <- node$new_names[idx[!is.na(idx)]]
+  }
+  if (!identical(new_groups, expected)) {
+    return(NULL)
+  }
+  names(keys) <- new_groups
+  keys
 }
 
 #' Build one side of a join's AST, always anchoring the source pointer
@@ -496,6 +531,7 @@ auto_name_dots <- function(dots, verb) {
 #'   `"by"` for the `slice_*()` family) -- interpolated into the
 #'   grouped-`.data` error message so it names the argument the caller
 #'   actually used
+#' @param call Environment of the user-facing verb, the call the error reports
 #' @return A character vector of column names: `character()` when `by_quo`
 #'   is NULL (absent or explicit `.by = NULL`, matching dplyr: both behave
 #'   identically, see the roxygen on the calling verb), otherwise the
@@ -504,14 +540,14 @@ auto_name_dots <- function(dots, verb) {
 #'   `starts_with("g")`, etc. all work exactly as they do for real
 #'   dplyr's own `.by=`)
 #' @keywords internal
-resolve_by <- function(.data, by_quo, arg_name = ".by") {
+resolve_by <- function(.data, by_quo, arg_name = ".by", call = rlang::caller_env()) {
   if (rlang::quo_is_null(by_quo)) {
     return(character())
   }
 
   if (length(.data$groups) > 0) {
-    stop("Can't supply `", arg_name, "` when `.data` is a grouped data frame.",
-         call. = FALSE)
+    rlang::abort(paste0("Can't supply `", arg_name,
+                        "` when `.data` is a grouped data frame."), call = call)
   }
 
   nm <- current_schema(.data)$names

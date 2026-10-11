@@ -271,6 +271,14 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
 
   dots <- rlang::enquos(...)
 
+  # slice(.preserve = TRUE) fixed the group keys: the empty groups get a row
+  # too (n() = 0), which only the CPU summarise (seeing the keys) produces.
+  if (!is.null(fixed_keys_of(.data))) {
+    return(gpu_fallback("summarise", .data, function(tbl) {
+      rlang::inject(dplyr::summarise(tbl, !!!dots, .groups = .groups))
+    }))
+  }
+
   # F07: zero dots is a valid call (dplyr returns the group keys).
   if (length(dots) == 0) {
     return(summarise_zero_dots(.data, by_cols, by_given, .groups, caller_env))

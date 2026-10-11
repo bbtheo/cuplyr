@@ -69,11 +69,17 @@
 #' once no group column is left. Like dplyr, `.drop` defaults to the table's
 #' current setting, so regrouping a `.drop = FALSE` table keeps it.
 #'
-#' What is *not* carried is dplyr's fixed group-keys table: groups are
-#' recomputed from the data each time, so an empty group of a non-factor
-#' column that `filter()` or `slice()` emptied vanishes from `group_data()`
-#' (dplyr keeps it, for any column type). Empty factor-level groups are
-#' re-added from the declared levels.
+#' Groups are recomputed from the data each time, so an empty group of a
+#' non-factor column that `filter()` emptied vanishes from `group_data()`
+#' (dplyr's `filter(.preserve = TRUE)` would keep it; that argument is not
+#' supported natively). Empty factor-level groups are re-added from the
+#' declared levels. The one exception is `slice(.preserve = TRUE)` on a
+#' `group_by()`-grouped table: it fixes the input's group-keys table
+#' (`$fixed_keys`, emptied groups included, any key type), which
+#' `group_data()` and friends, `collect()` and the CPU fallbacks (so
+#' `summarise()`) honour. `mutate()`, `select()`, `rename()` and `relocate()`
+#' carry it as long as they leave the group columns alone; every other verb,
+#' and any change of grouping, drops it.
 #'
 #' @seealso
 #' \code{\link{summarise.tbl_gpu}} for aggregating grouped data,
@@ -532,7 +538,11 @@ compute_group_data <- function(.data) {
   gd <- keys_df
   gd$.rows <- vctrs::new_list_of(rows_list, ptype = integer())
 
-  if (!isTRUE(materialized$group_drop %||% TRUE)) {
+  fixed <- fixed_keys_of(materialized)
+  if (!is.null(fixed)) {
+    # slice(.preserve = TRUE): the fixed keys are the groups, observed or not
+    gd <- fixed_group_rows(gd, fixed)
+  } else if (!isTRUE(materialized$group_drop %||% TRUE)) {
     gd <- expand_dropped_groups(gd, group_names, keys_schema$factor_levels)
   }
 
@@ -540,6 +550,42 @@ compute_group_data <- function(.data) {
   attr(gd, ".drop") <- isTRUE(materialized$group_drop %||% TRUE)
 
   gd
+}
+
+# The group keys `slice(.preserve = TRUE)` fixed on `x`, or NULL. Only trusted
+# while they still describe the table's grouping, so a key table that outlived
+# a change of groups can never be read.
+# @keywords internal
+fixed_keys_of <- function(x) {
+  keys <- .subset2(x, "fixed_keys")
+  if (is.null(keys) || !identical(names(keys), .subset2(x, "groups"))) {
+    return(NULL)
+  }
+  keys
+}
+
+# Group data (keys + `.rows`) of `fixed` keys, with the rows of the observed
+# groups `gd` (keys + `.rows`) put on the matching key; a key with no observed
+# row gets `integer()`. NA keys match NA.
+# @keywords internal
+fixed_group_rows <- function(gd, fixed) {
+  m <- vctrs::vec_match(fixed, gd[names(fixed)])
+  rows <- unclass(gd$.rows)[m]
+  rows[is.na(m)] <- list(integer())
+  out <- fixed
+  out$.rows <- vctrs::new_list_of(rows, ptype = integer())
+  out
+}
+
+# `frame` (a data frame) as a grouped_df whose groups are exactly the `fixed`
+# keys, empty ones included.
+# @keywords internal
+with_fixed_groups <- function(frame, fixed, drop = TRUE) {
+  frame <- tibble::as_tibble(frame)
+  observed <- dplyr::group_data(dplyr::grouped_df(frame, names(fixed)))
+  gd <- tibble::as_tibble(fixed_group_rows(observed, fixed))
+  attr(gd, ".drop") <- drop
+  dplyr::new_grouped_df(frame, gd)
 }
 
 # Honor group_by(.drop = FALSE) (see group_by.tbl_gpu()'s own docs) with

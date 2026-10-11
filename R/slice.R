@@ -136,9 +136,10 @@
 #'   when `.data` is `group_by()`-grouped; `"by"` when `by=`/`.by=` was
 #'   supplied (which implies `.data` itself is ungrouped, since
 #'   `resolve_by()` would otherwise have already errored)
+#' @param call The calling verb's frame, for the `by`-on-grouped error
 #' @keywords internal
-slice_group_mode <- function(.data, by_quo, arg_name) {
-  by_cols <- resolve_by(.data, by_quo, arg_name)
+slice_group_mode <- function(.data, by_quo, arg_name, call = rlang::caller_env()) {
+  by_cols <- resolve_by(.data, by_quo, arg_name, call = call)
   if (length(by_cols) > 0) {
     return(list(mode = "by", group_cols = by_cols))
   }
@@ -148,34 +149,75 @@ slice_group_mode <- function(.data, by_quo, arg_name) {
   list(mode = "none", group_cols = character())
 }
 
-# Resolve a verb's `n=`/`prop=` pair into `list(amount, is_prop)`, matching
-# dplyr's `check_slice_n_prop()`/`get_slice_size()` contract exactly (shared
-# by slice_head()/slice_tail()/slice_min()/slice_max(), which all use the
-# identical rule -- verified empirically, including that slice_min()/
-# slice_max() accept a negative `n` just like slice_head()/slice_tail() do).
-# `n`/`prop` are `NULL` when the caller's argument was missing.
+# Resolve a verb's `n=`/`prop=` pair into `list(amount, is_prop)`, running
+# dplyr's `check_slice_n_prop()` rules (same messages, an `rlang_error` raised
+# from `call`): `n` a round number (Inf allowed, NA not), `prop` a number, not
+# both. Shared by slice_head()/slice_tail()/slice_min()/slice_max()/
+# slice_sample(); the verbs call it first, before they look at the data, so
+# lazy and 0-row tables error at call time like dplyr. Arguments may be
+# missing (the caller's own missing `n`/`prop` pass straight through).
+# Verified that slice_min()/slice_max() accept a negative `n` just like
+# slice_head()/slice_tail() do.
 #
-# @param n Numeric scalar or `NULL`
-# @param prop Numeric scalar or `NULL`
-# @return `list(amount, is_prop)`, or throws if both/neither are invalid
+# @param n,prop The verb's `n`/`prop` (possibly missing)
+# @param call Environment of the user-facing verb
+# @return `list(amount, is_prop)`; `n = 1` if both are missing
 # @keywords internal
-resolve_slice_amount <- function(n, prop) {
-  if (!is.null(n) && !is.null(prop)) {
-    stop("Must supply `n` or `prop`, but not both.", call. = FALSE)
-  }
-  if (is.null(n) && is.null(prop)) {
+resolve_slice_amount <- function(n, prop, call = rlang::caller_env()) {
+  if (missing(n) && missing(prop)) {
     return(list(amount = 1, is_prop = FALSE))
   }
-  if (!is.null(n)) {
-    if (!(is.numeric(n) && length(n) == 1) || is.na(n)) {
-      stop("`n` must be a single number, not: ", rlang::as_label(n), call. = FALSE)
+  if (!missing(n) && missing(prop)) {
+    n <- slice_constant(n, "n", call)
+    if (!rlang::is_integerish(n, n = 1) || is.na(n)) {
+      slice_amount_error(list(n = n), call)
     }
     return(list(amount = as.double(n), is_prop = FALSE))
   }
-  if (!(is.numeric(prop) && length(prop) == 1) || is.na(prop)) {
-    stop("`prop` must be a single number, not: ", rlang::as_label(prop), call. = FALSE)
+  if (!missing(prop) && missing(n)) {
+    prop <- slice_constant(prop, "prop", call)
+    if (!is.numeric(prop) || length(prop) != 1 || is.na(prop)) {
+      slice_amount_error(list(prop = prop), call)
+    }
+    return(list(amount = as.double(prop), is_prop = TRUE))
   }
-  list(amount = as.double(prop), is_prop = TRUE)
+  rlang::abort("Must supply `n` or `prop`, but not both.", call = call)
+}
+
+# Raise dplyr's own n=/prop= message from `call`. The text (which describes the
+# offending value with rlang's non-exported obj_type_friendly()) is taken from
+# dplyr itself: its check runs before it looks at the data, so a zero-row
+# stand-in produces exactly the error the user would get.
+# @keywords internal
+slice_amount_error <- function(args, call) {
+  cnd <- tryCatch(
+    rlang::inject(dplyr::slice_head(tibble::tibble(), !!!args)),
+    error = function(e) e
+  )
+  msg <- if (inherits(cnd, "error")) {
+    conditionMessage(cnd)
+  } else {
+    "`n` and `prop` must be a single number."
+  }
+  rlang::abort(msg, call = call)
+}
+
+# dplyr's check_constant(): forcing `x` must not fail.
+# @keywords internal
+slice_constant <- function(x, name, call) {
+  withCallingHandlers(force(x), error = function(e) {
+    rlang::abort(paste0("`", name, "` must be a constant."), parent = e, call = call)
+  })
+}
+
+# The `n`/`prop` the user gave, as a list for re-calling dplyr (a NULL stays
+# NULL so dplyr reports it).
+# @keywords internal
+slice_np <- function(n, prop) {
+  np <- list()
+  if (!missing(n)) np["n"] <- list(n)
+  if (!missing(prop)) np["prop"] <- list(prop)
+  np
 }
 
 # Evaluate slice()'s dots into a single raw (unresolved) numeric index
@@ -630,7 +672,10 @@ slice_zero_column <- function(.data, fn) {
 #'   position in `.data` (see module docs), and the result is always
 #'   ungrouped. Supplying `.by` when `.data` is already grouped (via
 #'   `group_by()`) is an error, matching dplyr.
-#' @param .preserve Passed through to the CPU fallback when triggered.
+#' @param .preserve Whether to keep the groups the slice emptied. With `TRUE`,
+#'   a `group_by()`-grouped result keeps the input's group keys (empty groups
+#'   included) for `group_data()`, `collect()` and `summarise()`, like dplyr
+#'   (see [group_by.tbl_gpu()] for what carries them on).
 #'
 #' @return A `tbl_gpu` object with the selected rows.
 #'
@@ -639,7 +684,22 @@ slice_zero_column <- function(.data, fn) {
 slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(.by)
-  gm <- slice_group_mode(.data, by_quo, ".by")
+  gm <- slice_group_mode(.data, by_quo, ".by", call = rlang::current_env())
+
+  # .preserve = TRUE on a group_by()-grouped table fixes the input's group
+  # keys on the result (see fixed_keys_of()): taken now, from the computed
+  # input, so a lazy plan runs once.
+  keys <- NULL
+  if (isTRUE(.preserve) && identical(gm$mode, "group_by")) {
+    if (has_pending_ops(.data)) .data <- compute(.data)
+    keys <- slice_group_keys(.data)
+  }
+  with_keys <- function(result) {
+    if (!is.null(keys) && is_tbl_gpu(result) && identical(result$groups, .data$groups)) {
+      result$fixed_keys <- keys
+    }
+    result
+  }
 
   if (identical(gm$mode, "none")) {
     zero <- slice_zero_column(.data, function(tbl) {
@@ -655,12 +715,22 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
     } else {
       slice_grouped_native(.data, gm$mode, gm$group_cols, mode = "index", raw_indices = idx)
     }
-    if (!is.null(result)) return(result)
+    if (!is.null(result)) return(with_keys(result))
   }
 
-  gpu_fallback("slice", .data, function(tbl) {
+  with_keys(gpu_fallback("slice", .data, function(tbl) {
     rlang::inject(dplyr::slice(tbl, !!!dots, .by = !!by_quo, .preserve = .preserve))
-  })
+  }))
+}
+
+# The group keys of a grouped `tbl_gpu` (the fixed ones if it has them), as a
+# plain tibble in group_data() order.
+# @keywords internal
+slice_group_keys <- function(.data) {
+  gd <- compute_group_data(.data)
+  keys <- gd[setdiff(names(gd), ".rows")]
+  attr(keys, ".drop") <- NULL
+  keys
 }
 
 #' Select the first rows
@@ -693,10 +763,9 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
-  gm <- slice_group_mode(.data, by_quo, "by")
-  np <- list()
-  if (!missing(n)) np$n <- n
-  if (!missing(prop)) np$prop <- prop
+  amt <- resolve_slice_amount(n, prop, call = rlang::current_env())
+  gm <- slice_group_mode(.data, by_quo, "by", call = rlang::current_env())
+  np <- slice_np(n, prop)
 
   if (identical(gm$mode, "none")) {
     zero <- slice_zero_column(.data, function(tbl) {
@@ -706,20 +775,14 @@ slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
   }
 
   if (length(dots) == 0) {
-    amt <- tryCatch(
-      resolve_slice_amount(np$n, np$prop),
-      error = function(e) NULL
-    )
-    if (!is.null(amt)) {
-      result <- if (identical(gm$mode, "none")) {
-        push_op(.data, ast_slice(input_node(.data), mode = "head",
-                                 amount = amt$amount, is_prop = amt$is_prop))
-      } else {
-        slice_grouped_native(.data, gm$mode, gm$group_cols, mode = "head",
-                              amount = amt$amount, is_prop = amt$is_prop)
-      }
-      if (!is.null(result)) return(result)
+    result <- if (identical(gm$mode, "none")) {
+      push_op(.data, ast_slice(input_node(.data), mode = "head",
+                               amount = amt$amount, is_prop = amt$is_prop))
+    } else {
+      slice_grouped_native(.data, gm$mode, gm$group_cols, mode = "head",
+                            amount = amt$amount, is_prop = amt$is_prop)
     }
+    if (!is.null(result)) return(result)
   }
 
   gpu_fallback("slice_head", .data, function(tbl) {
@@ -743,10 +806,9 @@ slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
 slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
-  gm <- slice_group_mode(.data, by_quo, "by")
-  np <- list()
-  if (!missing(n)) np$n <- n
-  if (!missing(prop)) np$prop <- prop
+  amt <- resolve_slice_amount(n, prop, call = rlang::current_env())
+  gm <- slice_group_mode(.data, by_quo, "by", call = rlang::current_env())
+  np <- slice_np(n, prop)
 
   if (identical(gm$mode, "none")) {
     zero <- slice_zero_column(.data, function(tbl) {
@@ -756,20 +818,14 @@ slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
   }
 
   if (length(dots) == 0) {
-    amt <- tryCatch(
-      resolve_slice_amount(np$n, np$prop),
-      error = function(e) NULL
-    )
-    if (!is.null(amt)) {
-      result <- if (identical(gm$mode, "none")) {
-        push_op(.data, ast_slice(input_node(.data), mode = "tail",
-                                 amount = amt$amount, is_prop = amt$is_prop))
-      } else {
-        slice_grouped_native(.data, gm$mode, gm$group_cols, mode = "tail",
-                              amount = amt$amount, is_prop = amt$is_prop)
-      }
-      if (!is.null(result)) return(result)
+    result <- if (identical(gm$mode, "none")) {
+      push_op(.data, ast_slice(input_node(.data), mode = "tail",
+                               amount = amt$amount, is_prop = amt$is_prop))
+    } else {
+      slice_grouped_native(.data, gm$mode, gm$group_cols, mode = "tail",
+                            amount = amt$amount, is_prop = amt$is_prop)
     }
+    if (!is.null(result)) return(result)
   }
 
   gpu_fallback("slice_tail", .data, function(tbl) {
@@ -816,17 +872,16 @@ slice_min.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   order_quo <- rlang::enquo(order_by)
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
-  gm <- slice_group_mode(.data, by_quo, "by")
-  np <- list()
-  if (!missing(n)) np$n <- n
-  if (!missing(prop)) np$prop <- prop
+  amt <- resolve_slice_amount(n, prop, call = rlang::current_env())
+  gm <- slice_group_mode(.data, by_quo, "by", call = rlang::current_env())
+  np <- slice_np(n, prop)
 
   if (length(dots) == 0) {
     result <- if (identical(gm$mode, "none")) {
-      slice_rank_native(.data, order_quo, np, descending = FALSE,
+      slice_rank_native(.data, order_quo, amt, descending = FALSE,
                         with_ties = with_ties, na_rm = na_rm)
     } else {
-      slice_rank_grouped(.data, gm, order_quo, np, descending = FALSE,
+      slice_rank_grouped(.data, gm, order_quo, amt, descending = FALSE,
                          with_ties = with_ties, na_rm = na_rm)
     }
     if (!is.null(result)) return(result)
@@ -858,17 +913,16 @@ slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   order_quo <- rlang::enquo(order_by)
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
-  gm <- slice_group_mode(.data, by_quo, "by")
-  np <- list()
-  if (!missing(n)) np$n <- n
-  if (!missing(prop)) np$prop <- prop
+  amt <- resolve_slice_amount(n, prop, call = rlang::current_env())
+  gm <- slice_group_mode(.data, by_quo, "by", call = rlang::current_env())
+  np <- slice_np(n, prop)
 
   if (length(dots) == 0) {
     result <- if (identical(gm$mode, "none")) {
-      slice_rank_native(.data, order_quo, np, descending = TRUE,
+      slice_rank_native(.data, order_quo, amt, descending = TRUE,
                         with_ties = with_ties, na_rm = na_rm)
     } else {
-      slice_rank_grouped(.data, gm, order_quo, np, descending = TRUE,
+      slice_rank_grouped(.data, gm, order_quo, amt, descending = TRUE,
                          with_ties = with_ties, na_rm = na_rm)
     }
     if (!is.null(result)) return(result)
@@ -881,18 +935,12 @@ slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
 }
 
 # Shared grouped/`by=` native-path builder for slice_min()/slice_max():
-# resolves n=/prop= (the only part `slice_grouped_native()` itself can't
-# resolve without knowing `mode` up front) and delegates to
-# `slice_grouped_native(mode = "rank")`, or returns `NULL` (caller falls
-# back to CPU) if `n=`/`prop=` are invalid.
+# delegates to `slice_grouped_native(mode = "rank")` with the already-
+# resolved `amt` (see resolve_slice_amount()), or returns `NULL` (caller falls
+# back to CPU).
 #
 # @keywords internal
-slice_rank_grouped <- function(.data, gm, order_quo, np, descending, with_ties, na_rm) {
-  amt <- tryCatch(resolve_slice_amount(np$n, np$prop), error = function(e) NULL)
-  if (is.null(amt)) {
-    return(NULL)
-  }
-
+slice_rank_grouped <- function(.data, gm, order_quo, amt, descending, with_ties, na_rm) {
   slice_grouped_native(.data, gm$mode, gm$group_cols, mode = "rank",
                        amount = amt$amount, is_prop = amt$is_prop,
                        order_quo = order_quo, descending = descending,
@@ -900,17 +948,12 @@ slice_rank_grouped <- function(.data, gm, order_quo, np, descending, with_ties, 
 }
 
 # Shared ungrouped native-path builder for slice_min()/slice_max(): resolves
-# order_by/n/prop and builds+pushes the `ast_slice(mode = "rank")` node, or
+# order_by and builds+pushes the `ast_slice(mode = "rank")` node, or
 # returns `NULL` (caller falls back to CPU) if `order_by` isn't something
-# the IR recognizes, or `n=`/`prop=` are invalid.
+# the IR recognizes.
 #
 # @keywords internal
-slice_rank_native <- function(.data, order_quo, np, descending, with_ties, na_rm) {
-  amt <- tryCatch(resolve_slice_amount(np$n, np$prop), error = function(e) NULL)
-  if (is.null(amt)) {
-    return(NULL)
-  }
-
+slice_rank_native <- function(.data, order_quo, amt, descending, with_ties, na_rm) {
   schema <- current_schema(.data)
   resolved <- tryCatch(resolve_slice_order(order_quo, schema), error = function(e) NULL)
   if (is.null(resolved)) {
@@ -934,38 +977,79 @@ slice_rank_native <- function(.data, order_quo, np, descending, with_ties, na_rm
 
 #' First rows of a GPU table
 #'
-#' `utils::head()` method for `tbl_gpu`, implemented as `slice_head(x, n =
-#' n)` (see [slice_head.tbl_gpu()] for the native-vs-fallback dispatch and
-#' negative-`n` semantics).
+#' `utils::head()` method for `tbl_gpu`. Keeps the same rows as
+#' `utils::head.data.frame()`: implemented as `slice_head(n = floor(n))` on the
+#' ungrouped table (see [slice_head.tbl_gpu()] for the native-vs-fallback
+#' dispatch), with the grouping put back on the result.
 #'
 #' @param x A `tbl_gpu` object.
 #' @param n Number of rows to keep (default `6`, matching `utils::head()`).
-#'   Negative `n` keeps all but the last `abs(n)` rows.
+#'   Negative `n` keeps all but the last `abs(n)` rows. A fractional `n` is
+#'   rounded down, as in base. Groups are ignored: the rows are the first `n`
+#'   of the whole table, and the result keeps the grouping of `x`.
 #' @param ... Not used.
 #'
 #' @return A `tbl_gpu` object with the first `n` rows.
 #'
 #' @export
 head.tbl_gpu <- function(x, n = 6L, ...) {
-  slice_head.tbl_gpu(x, n = n)
+  # base keeps floor(min(n, nrow)) rows for n >= 0 and floor(max(nrow + n, 0))
+  # for n < 0, i.e. min(floor(n), nrow) and max(nrow + floor(n), 0): exactly
+  # slice_head(n = floor(n)), including +-Inf and floor(-0.5) = -1
+  head_tail_ungrouped(x, floor(n), slice_head.tbl_gpu)
 }
 
 #' Last rows of a GPU table
 #'
-#' `utils::tail()` method for `tbl_gpu`, implemented as `slice_tail(x, n =
-#' n)` (see [slice_tail.tbl_gpu()] for the native-vs-fallback dispatch and
-#' negative-`n` semantics).
+#' `utils::tail()` method for `tbl_gpu`. Keeps the same rows as
+#' `utils::tail.data.frame()`: implemented as `slice_tail(n = ceiling(n))` on
+#' the ungrouped table (see [slice_tail.tbl_gpu()] for the native-vs-fallback
+#' dispatch), with the grouping put back on the result.
 #'
 #' @param x A `tbl_gpu` object.
 #' @param n Number of rows to keep (default `6`, matching `utils::tail()`).
-#'   Negative `n` keeps all but the first `abs(n)` rows.
+#'   Negative `n` keeps all but the first `abs(n)` rows. A fractional `n` is
+#'   rounded up, as in base, so `-1 < n < 0` keeps every row. Groups are
+#'   ignored: the rows are the last `n` of the whole table, and the result
+#'   keeps the grouping of `x`.
 #' @param ... Not used.
 #'
 #' @return A `tbl_gpu` object with the last `n` rows.
 #'
 #' @export
 tail.tbl_gpu <- function(x, n = 6L, ...) {
-  slice_tail.tbl_gpu(x, n = n)
+  # base keeps length.out = min(n, nrow) rows for n >= 0 and max(nrow + n, 0)
+  # for n < 0, and seq.int() rounds length.out up: min(ceiling(n), nrow) and
+  # max(nrow + ceiling(n), 0). That is slice_tail(n = ceiling(n)), except that
+  # for -1 < n < 0 ceiling(n) is -0 ("drop no rows"), which slice_tail() reads
+  # as n = 0; keeping every row is n = Inf there. (n = -0 itself is not < 0,
+  # and keeps 0 rows in base too.)
+  m <- ceiling(n)
+  if (isTRUE(n < 0 && m == 0)) m <- Inf
+  head_tail_ungrouped(x, m, slice_tail.tbl_gpu)
+}
+
+# head.data.frame()/tail.data.frame() select rows with `[`, which ignores the
+# grouping and then regroups the result (`[.grouped_df`): same groups and
+# `.drop`, keys recomputed from the rows kept, so slice(.preserve = TRUE)'s
+# fixed keys are not carried over. Slice the ungrouped table, then put the
+# grouping back as metadata.
+head_tail_ungrouped <- function(x, n, slicer) {
+  groups <- x$groups
+  if (length(groups) == 0L) {
+    return(slicer(x, n = n))
+  }
+  drop <- group_by_drop_default(x)
+  out <- slicer(group_by.tbl_gpu(x), n = n)
+  new_tbl_gpu(
+    ptr = out$ptr,
+    schema = out$schema,
+    lazy_ops = out$lazy_ops,
+    groups = groups,
+    group_drop = drop,
+    exec_mode = out$exec_mode,
+    nrow = out[["nrow"]]
+  )
 }
 
 # -----------------------------------------------------------------------------
@@ -1165,25 +1249,31 @@ slice_sample.tbl_gpu <- function(.data, ..., n, prop, by = NULL,
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
   weight_quo <- rlang::enquo(weight_by)
-  np <- list()
-  if (!missing(n)) np$n <- n
-  if (!missing(prop)) np$prop <- prop
+  amt <- resolve_slice_amount(n, prop, call = rlang::current_env())
+  np <- slice_np(n, prop)
 
   # resolve_by() (via slice_group_mode()) raises dplyr's own
   # "Can't supply `by`..." error when `.data` is already grouped -- that
   # error is real, correct behavior and must propagate, not be swallowed
   # into a fallback, so this call is deliberately OUTSIDE any tryCatch()
   # (same pattern as slice_head.tbl_gpu() etc.).
-  gm <- slice_group_mode(.data, by_quo, "by")
+  gm <- slice_group_mode(.data, by_quo, "by", call = rlang::current_env())
+
+  # Zero columns: the sample is only a row count, drawn by dplyr itself on a
+  # stand-in of that height (same RNG use, see slice_zero_column()).
+  if (identical(gm$mode, "none")) {
+    zero <- slice_zero_column(.data, function(tbl) {
+      rlang::inject(dplyr::slice_sample(tbl, !!!dots, !!!np, weight_by = !!weight_quo,
+                                         replace = replace))
+    })
+    if (!is.null(zero)) return(zero)
+  }
 
   if (length(dots) == 0 && rlang::quo_is_null(weight_quo)) {
-    amt <- tryCatch(resolve_slice_amount(np$n, np$prop), error = function(e) NULL)
-    if (!is.null(amt)) {
-      was_lazy <- identical(.data$exec_mode, "lazy")
-      result <- slice_sample_native(.data, gm, amt$amount, amt$is_prop, replace)
-      if (was_lazy) result <- as_lazy(result)
-      return(result)
-    }
+    was_lazy <- identical(.data$exec_mode, "lazy")
+    result <- slice_sample_native(.data, gm, amt$amount, amt$is_prop, replace)
+    if (was_lazy) result <- as_lazy(result)
+    return(result)
   }
 
   gpu_fallback("slice_sample", .data, function(tbl) {

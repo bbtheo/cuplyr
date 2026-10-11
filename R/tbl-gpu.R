@@ -141,6 +141,11 @@ tbl_gpu.tbl_gpu <- function(data, ..., lazy = NULL) {
 #   without columns, so it lives here as `$nrow`); `NULL` otherwise. dim(),
 #   collect(), print() and compute() honour it, and push_op() refuses verbs
 #   on such a table when it has rows (check_zero_column_input()).
+# @param fixed_keys A tibble of group keys (one column per entry of `groups`,
+#   same names and order) that dplyr's `slice(.preserve = TRUE)` fixes on a
+#   grouped table, or `NULL` (the default, and the only value any constructor
+#   gets unless it passes it on purpose). Dropped unless it matches `groups`.
+#   See `fixed_keys_of()` (R/group-by.R).
 # @return A tbl_gpu S3 object
 # @keywords internal
 new_tbl_gpu <- function(ptr = NULL,
@@ -149,7 +154,8 @@ new_tbl_gpu <- function(ptr = NULL,
                         groups = character(),
                         exec_mode = NULL,
                         group_drop = TRUE,
-                        nrow = NULL) {
+                        nrow = NULL,
+                        fixed_keys = NULL) {
   if (is.list(lazy_ops) && length(lazy_ops) == 0) {
     lazy_ops <- NULL
   }
@@ -171,6 +177,9 @@ new_tbl_gpu <- function(ptr = NULL,
   )
   if (!is.null(nrow) && length(schema$names) == 0L) {
     out$nrow <- as.integer(nrow)
+  }
+  if (!is.null(fixed_keys) && length(groups) > 0L && identical(names(fixed_keys), groups)) {
+    out$fixed_keys <- fixed_keys
   }
   structure(out, class = c("tbl_gpu", "tbl"))
 }

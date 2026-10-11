@@ -60,8 +60,13 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE) {
   # (per-group aggregation, grouped slice_min/slice_max, etc.) work exactly
   # as they would on a real grouped_df.
   if (length(materialized$groups) > 0) {
-    tbl <- dplyr::group_by(tbl, !!!rlang::syms(materialized$groups),
-                           .drop = isTRUE(materialized$group_drop %||% TRUE))
+    drop <- isTRUE(materialized$group_drop %||% TRUE)
+    keys <- fixed_keys_of(materialized)
+    tbl <- if (is.null(keys)) {
+      dplyr::group_by(tbl, !!!rlang::syms(materialized$groups), .drop = drop)
+    } else {
+      with_fixed_groups(tbl, keys, drop)
+    }
   }
 
   result <- expr_fn(tbl)

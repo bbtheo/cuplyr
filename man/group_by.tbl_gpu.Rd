@@ -82,11 +82,17 @@ that keeps a group column (and by \code{count()}, \code{add_count()} and
 once no group column is left. Like dplyr, \code{.drop} defaults to the table's
 current setting, so regrouping a \code{.drop = FALSE} table keeps it.
 
-What is \emph{not} carried is dplyr's fixed group-keys table: groups are
-recomputed from the data each time, so an empty group of a non-factor
-column that \code{filter()} or \code{slice()} emptied vanishes from \code{group_data()}
-(dplyr keeps it, for any column type). Empty factor-level groups are
-re-added from the declared levels.
+Groups are recomputed from the data each time, so an empty group of a
+non-factor column that \code{filter()} emptied vanishes from \code{group_data()}
+(dplyr's \code{filter(.preserve = TRUE)} would keep it; that argument is not
+supported natively). Empty factor-level groups are re-added from the
+declared levels. The one exception is \code{slice(.preserve = TRUE)} on a
+\code{group_by()}-grouped table: it fixes the input's group-keys table
+(\verb{$fixed_keys}, emptied groups included, any key type), which
+\code{group_data()} and friends, \code{collect()} and the CPU fallbacks (so
+\code{summarise()}) honour. \code{mutate()}, \code{select()}, \code{rename()} and \code{relocate()}
+carry it as long as they leave the group columns alone; every other verb,
+and any change of grouping, drops it.
 }
 }
 \examples{

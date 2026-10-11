@@ -26,8 +26,9 @@
 #' `.drop`), so `group_by(f, .drop = FALSE) |> arrange(x) |> collect()` still
 #' keeps empty factor-level groups. One exception for now: a `mutate()` or
 #' `filter()` that uses `cur_group_id()` resets it to `TRUE`. Empty groups of a *non-factor* column
-#' that a row-removing verb (`filter()`, `slice()`) emptied are not kept, unlike
-#' in dplyr: see the `.drop` section of [group_by()][group_by.tbl_gpu].
+#' that `filter()` or `slice()` emptied are not kept, unlike in dplyr, except after
+#' `slice(.preserve = TRUE)`, which keeps its input's group keys: see the `.drop`
+#' section of [group_by()][group_by.tbl_gpu].
 #'
 #' ## Memory considerations
 #' Collecting transfers all data from GPU to CPU memory. For large datasets,
@@ -72,7 +73,13 @@ collect.tbl_gpu <- function(x, ...) {
   # comes back grouped, with the same `.drop`.
   groups <- intersect(x$groups, names(out))
   if (length(groups) > 0L) {
-    out <- dplyr::grouped_df(out, groups, drop = isTRUE(x$group_drop %||% TRUE))
+    drop <- isTRUE(x$group_drop %||% TRUE)
+    keys <- fixed_keys_of(x)
+    out <- if (is.null(keys)) {
+      dplyr::grouped_df(out, groups, drop = drop)
+    } else {
+      with_fixed_groups(out, keys, drop)
+    }
   }
   out
 }
