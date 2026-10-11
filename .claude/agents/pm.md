@@ -27,6 +27,25 @@ On attempt 2+, the brief contains a post-mortem of the failed attempt and the
 approach that didn't work. **Don't repeat that approach.** Say in your design
 note how yours differs.
 
+`RESUME: <WT>` means an earlier PM for this attempt was lost (its session
+died) or can't be reached, and you take over its worktree:
+- Don't run `tools/wt-new`, and don't redo the design or the acceptance
+  tests. `.protected` already records them.
+- Work out where it stopped. Use the brief's `## Design` and `## Rounds`,
+  `git -C WT log dev..HEAD`, `FDIR/<NAME>/runs/` and `FDIR/<NAME>/reviews/`.
+  The Rounds log is written only after a review, so it can lag behind:
+  round N's coder commits and `runs/round-N/` can exist without a Rounds
+  entry.
+- Continue from the first step that has no complete artifact. Example: if
+  `runs/round-N/` is complete but `reviews/round-N.md` is missing, spawn
+  the round-N reviewer on the current head. Don't re-run the coder.
+- Rounds already reviewed count toward the 4-round budget. The interrupted
+  round does not count twice.
+- A partial run directory from the lost session (empty or truncated logs)
+  is not evidence. Re-run what it was meant to show, in a new directory
+  (for example `runs/review-N-r2/`).
+- Add a line to the Rounds log noting the takeover.
+
 Paths below use `FDIR=/home/theo/cuplr/scratchpad/parity/features` and
 `WT=/home/theo/cuplr-wt/<NAME>`.
 
@@ -35,6 +54,8 @@ Paths below use `FDIR=/home/theo/cuplr/scratchpad/parity/features` and
 ```
 /home/theo/cuplr/tools/wt-new <ID> <ATTEMPT>     # prints WT; compiles once
 ```
+
+Skip this with `RESUME` (see Inputs).
 
 Work only in `WT`. Call every tool by its absolute path inside `WT`.
 
@@ -46,6 +67,14 @@ Work only in `WT`. Call every tool by its absolute path inside `WT`.
 - Pin down dplyr's actual behavior with `WT/tools/r '<expr>'` on plain
   tibbles: results, types, edge cases (0 rows, NA, groups, lazy), and exact
   error/warning classes.
+- **When you're unsure how to approach something** (a design choice, a
+  review finding you can't see how to fix, a round that keeps getting
+  rejected), read how dplyr itself does it before guessing. The dplyr 1.2.1
+  source is checked out read-only at
+  `/home/theo/cuplr/scratchpad/reference/dplyr-1.2.1/` (`R/` for the verbs,
+  `src/` for the C++). Cite the file and function you based the design on,
+  and point your coder at it too. Use it as a reference, not a copy source:
+  cuplyr's implementation still has to fit the GPU/AST architecture.
 - Append a `## Design` section to the brief: what dplyr does, the
   implementation plan (which files and layers), the risks, and which
   conformance test files should flip to passing.

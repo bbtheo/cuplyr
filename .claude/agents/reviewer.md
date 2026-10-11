@@ -55,8 +55,21 @@ summary and run directory, and all previous rounds' reviews.
 
 To prove a suspected bug, spawn a `tester` with a run directory of
 `<FDIR>/<NAME>/runs/review-<N>/` and the exact `tools/r '<expr>'` commands to
-run: the same pipeline on a tibble and on `tbl_gpu()`, eager and lazy. Use
-this freely; a demonstrated failure is worth more than a suspected one.
+run: the same pipeline on a tibble and on `tbl_gpu()`, eager and lazy. A
+demonstrated failure is worth more than a suspected one, but probes are
+expensive, so budget them:
+
+- First reuse what exists: the round's tester logs and earlier
+  `runs/review-*` directories. Don't re-run anything that already has a log.
+- At most **5 probe commands per review round**, sent as **one batched
+  tester spawn** (a second spawn only if the first one's results raise a new
+  suspicion that needs checking). Pick the probes most likely to turn a
+  reasoned blocker into a verified one.
+- Don't re-run the full suite, perf or conformance; the PM's tester already
+  did. If you believe a gate result is wrong, say so as a finding and
+  ask the PM to re-run it.
+- Anything you couldn't probe within the budget goes in as **reasoned**,
+  with your argument.
 
 ## Rules for findings
 

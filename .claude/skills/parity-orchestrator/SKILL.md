@@ -14,6 +14,12 @@ Each invocation is one **tick**. Context gets compacted between ticks, so
 `scratchpad/parity/ledger.md` is the source of truth: read it first, and write
 every decision to it before acting on it.
 
+**Every turn ends with `ScheduleWakeup`** (prompt `/loop /parity-orchestrator`),
+unless the stop condition in step 6 holds. That includes turns where you only
+answer Theo or record his decision. A turn that ends without one ends the
+loop: the pending wakeup is dropped. On 2026-10-09 this left the orchestrator
+dead for three hours after a reply turn.
+
 ## Paths
 
 - `P=/home/theo/cuplr/scratchpad/parity`
@@ -70,7 +76,37 @@ every decision to it before acting on it.
    without dispatching anything. Dispatch starts only after Theo approves in
    the session; then write `Backlog approved: <date>` and `Bootstrap: done`.
 
-### 1. Collect finished PMs
+### 1. Recover PMs lost with an earlier session
+
+PM agents (and their coders, testers and reviewers) live inside this
+session's process. If the session ends while one is running (crash, reboot,
+closed app), the PM is gone and no completion notification will ever come.
+So every tick, before collecting:
+
+1. Call `ListAgents`. Every ledger row that is `IN_PROGRESS` and whose PM
+   agent id isn't listed is lost. (`QUEUED` and `WAITING_THEO` rows have no
+   running PM, so skip them.)
+2. Check whether the lost PM finished before it died: read the last
+   assistant message in
+   `~/.claude/projects/-home-theo-cuplr/*/subagents/agent-<id>.jsonl`. If it
+   is a final report with a `STATUS:` line, handle it in step 2 as if it had
+   just arrived.
+3. Otherwise redispatch it in place. Spawn
+   `Agent(subagent_type: "pm", run_in_background: true)` with the same NAME,
+   ID and ATTEMPT (a lost session is not a failed attempt), the brief path,
+   and `RESUME: <worktree path>`. Tell it which round it was in according to
+   the brief's `## Rounds` log and `P/features/<NAME>/runs/` and `reviews/`,
+   and what was in progress when it died.
+4. Record the new agent id in the ledger, keep the original start time, and
+   add a tick-log line: `<NAME> PM lost with session; redispatched (resume
+   round <N>)`.
+
+A merge started in an earlier session is dead too: treat it as not running.
+Re-running `tools/merge-queue` exits 2 if the interrupted merge left
+`_integration` dirty or off `dev`; then follow the exit-2 row in step 3.
+Don't reset `_integration` yourself without checking what's in it.
+
+### 2. Collect finished PMs
 
 PM agents run in the background and notify this session when they finish.
 For each final report:
@@ -94,7 +130,7 @@ For each final report:
 Record the PM's agent id in the ledger when you dispatch it, so you can
 SendMessage the same PM later.
 
-### 2. Merge queue (one at a time)
+### 3. Merge queue (one at a time)
 
 Take the head of the queue. If no merge is already running, run
 `tools/merge-queue <NAME>` in a background Bash call (it can take many
@@ -109,10 +145,9 @@ minutes; you'll be notified when it exits). On exit:
 | 2, 5 | setup / empty | Investigate yourself; fix the ledger or files; don't bother the PM unless it's theirs. |
 
 If SendMessage fails (the PM is gone), dispatch a new PM for the same
-`NAME` with the gate or conflict details. The worktree already exists, so
-tell it to continue there rather than run `tools/wt-new`.
+`NAME` with `RESUME: <worktree path>` and the gate or conflict details.
 
-### 3. Capacity
+### 4. Capacity
 
 From `stats.tsv`, take the jobs that started in the last 60 minutes:
 - median `wait_s` < 120 and the target is below 4 -> target += 1
@@ -122,7 +157,7 @@ From `stats.tsv`, take the jobs that started in the last 60 minutes:
 Start with target 2. Write the current target and the median wait into the
 ledger each tick.
 
-### 4. Dispatch
+### 5. Dispatch
 
 While (PMs in flight) < target, pick the first backlog row that is
 `APPROVED` or `REDISPATCH`, whose `depends` are all `MERGED`, and that:
@@ -138,7 +173,7 @@ To dispatch:
    stating NAME, ID, ATTEMPT and the brief path.
 3. Status `IN_PROGRESS`; record the agent id, worktree path and start time.
 
-### 5. Close the tick
+### 6. Close the tick
 
 - Update the ledger: the status table, the in-flight list, the queue,
   capacity, the conformance pass count over time, and a one-line log entry
@@ -149,7 +184,8 @@ To dispatch:
   (`ScheduleWakeup` with `stop: true`).
 - Otherwise schedule the next tick with `ScheduleWakeup`, 1800 s as the
   fallback heartbeat. PM completions and merge-queue exits wake you sooner on
-  their own.
+  their own. Theo's messages wake you too. When you answer one, still end
+  that turn with `ScheduleWakeup`, or the loop stops.
 
 ## Notifications
 
