@@ -1,6 +1,12 @@
+# `@importFrom dplyr n` is load-bearing: dplyr evaluates `n()` inside
+# group_by(df, n()) from the calling (package/test) namespace; without the
+# import that lookup fails with `could not find function "n"`. `group_cols` is
+# the same for selections such as ungroup(df, group_cols()): tidyselect brings
+# its own helpers (starts_with(), ...) but not dplyr's group_cols().
 #' @useDynLib cuplyr, .registration = TRUE
 #' @importFrom Rcpp sourceCpp
 #' @importFrom rlang %||%
+#' @importFrom dplyr n group_cols
 NULL
 
 # Opt this package's namespace into {cli}-formatted rlang conditions

@@ -901,6 +901,9 @@ expr_has_mask_only_call <- function(expr) {
   zero_arg <- c("n", "row_number", "cur_group_id", "cur_group_rows", "cur_column",
                 "cur_group", "cur_data", "cur_data_all")
   any_arg <- c("pick", "across", "c_across", "if_any", "if_all")
+  if (rlang::is_quosure(expr)) {
+    return(expr_has_mask_only_call(rlang::quo_get_expr(expr)))
+  }
   if (rlang::is_missing(expr) || !is.call(expr)) {
     return(FALSE)
   }

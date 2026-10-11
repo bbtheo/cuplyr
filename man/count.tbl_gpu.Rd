@@ -4,7 +4,14 @@
 \alias{count.tbl_gpu}
 \title{Count observations by group}
 \usage{
-\method{count}{tbl_gpu}(x, ..., wt = NULL, sort = FALSE, name = NULL, .drop = TRUE)
+\method{count}{tbl_gpu}(
+  x,
+  ...,
+  wt = NULL,
+  sort = FALSE,
+  name = NULL,
+  .drop = dplyr::group_by_drop_default(x)
+)
 }
 \arguments{
 \item{x}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
@@ -25,9 +32,9 @@ column.}
 (default), uses \code{"n"}, or \code{"nn"}/\code{"nnn"}/... if \code{"n"} already names one
 of the (post-\code{...}) grouping columns.}
 
-\item{.drop}{Ignored. Included for compatibility with the dplyr generic
-(factor group level dropping is deferred to Phase 11 -- see
-\code{scratchpad/todo.md}).}
+\item{.drop}{Passed to \code{\link[=group_by.tbl_gpu]{group_by.tbl_gpu()}}; with \code{.drop = FALSE} the result
+has a zero-count row for every empty factor-level group, in \code{group_data()}
+order. Defaults to \code{group_by_drop_default(x)}.}
 }
 \value{
 A \code{tbl_gpu} object with one row per group, containing the
@@ -40,8 +47,9 @@ restored to \code{x}'s ORIGINAL grouping in full (verified against dplyr
 \description{
 Counts the number of rows (or sums a weight column) for each combination
 of \code{...}, similar to \code{dplyr::count()}. Sugar over \code{\link[=group_by.tbl_gpu]{group_by.tbl_gpu()}},
-\code{\link[=summarise.tbl_gpu]{summarise.tbl_gpu()}}, and \code{\link[=arrange.tbl_gpu]{arrange.tbl_gpu()}} -- runs entirely on the
-GPU, with no CPU round-trip.
+\code{\link[=summarise.tbl_gpu]{summarise.tbl_gpu()}}, and \code{\link[=arrange.tbl_gpu]{arrange.tbl_gpu()}} -- runs on the GPU. The one
+exception is \code{.drop = FALSE} with a factor key, which also collects the
+(small) group keys to add the empty groups.
 }
 \examples{
 if (has_gpu()) {

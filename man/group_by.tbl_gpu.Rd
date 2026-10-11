@@ -9,9 +9,10 @@
 \arguments{
 \item{.data}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
 
-\item{...}{Column names to group by. Can be unquoted column names,
-tidyselect expressions, or \code{name = expression} computed columns (see
-"Computed groups" below).}
+\item{...}{Variables to group by: column names (\code{x}, \code{.data$x}), a
+top-level \code{\link[dplyr:pick]{dplyr::pick()}}, or computed columns (\code{name = expression}, or an
+unnamed expression such as \code{a + 1}; see "Computed groups" below). Like
+dplyr, tidyselect helpers are only allowed inside \code{pick()}.}
 
 \item{.add}{If \code{FALSE} (default), will override existing groups. If \code{TRUE},
 will add to existing groups.}
@@ -49,11 +50,14 @@ Verified empirically against dplyr 1.2.1: a \strong{named} argument (e.g.
 the original column (if any) is kept, a new (or overwritten) column is
 added under the given name, and the table is then grouped by that name.
 Later dots may reference earlier dots' newly-computed columns, exactly
-like \code{mutate()}'s own chain semantics (e.g. \code{group_by(df, g = x \%/\% 2, h = g * 10)}). Unnamed arguments are resolved via ordinary tidyselect
-against the \emph{current} schema (after any computed columns from this same
-call have been added), and every dot's resulting group column name(s)
-are combined in the exact order the arguments were written (even when
-named and unnamed dots are interleaved).
+like \code{mutate()}'s own chain semantics (e.g. \code{group_by(df, g = x \%/\% 2, h = g * 10)}). An \strong{unnamed} argument is a column reference (\code{x},
+\code{.data$x}, \code{.data[["x"]]}), a top-level \code{pick()}, or -- anything else --
+a data-masking expression computed into a new column named
+\code{rlang::as_label()} of the expression (\code{group_by(df, a + 1)} makes a column
+called \code{a + 1}). All computed dots (named and unnamed) run as one
+\code{mutate()} on the ungrouped data, in argument order. Every dot's resulting
+group column name(s) are combined in the order the arguments were written.
+The old \verb{add =} and \verb{.dots =} arguments are defunct and error.
 
 Calling \code{group_by()} with \strong{no} arguments and \code{.add = FALSE} (the
 default) clears any existing grouping entirely (verified empirically --
@@ -66,10 +70,10 @@ function's historical, incorrect behavior for that case).
 \code{.drop = FALSE} (verified empirically against dplyr 1.2.1) adds one
 placeholder row (\code{.rows = integer(0)}) to \code{\link[dplyr:group_data]{group_data()}}'s output for
 every declared \emph{factor level combination} of the FACTOR grouping columns
-that has no observed row anywhere in the data -- non-factor grouping
-columns in that placeholder row are \code{NA} (dplyr does not attempt to
-cross the placeholder against every observed non-factor value; see
-\code{compute_group_data()}, R/group-by.R, for the exact algorithm).
+that has no observed row, expanded recursively like dplyr: under each
+parent group a factor column takes all its levels (plus \code{NA} if observed
+there) and a non-factor column the values observed under that parent (a
+single \code{NA} under an empty parent); see \code{expand_dropped_groups()}.
 
 \code{.drop} is stored as a single boolean on the returned \code{tbl_gpu}
 (\verb{$group_drop}) and carried by \code{push_op()}/\code{push_join()} through every verb

@@ -87,7 +87,13 @@ tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
 
   # Build schema with factor levels for round-trip fidelity
   factor_levels <- lapply(data, function(col) {
-    if (is.factor(col)) levels(col) else NULL
+    if (is.factor(col)) {
+      lvls <- levels(col)
+      # `ordered` rides on the level vector so every site that copies levels
+      # carries it; collect() and the .drop expansion restore it.
+      if (is.ordered(col)) attr(lvls, "ordered") <- TRUE
+      lvls
+    } else NULL
   })
   names(factor_levels) <- names(data)
   # Remove NULL entries to keep schema compact

@@ -233,6 +233,11 @@ expr_needs_fallback <- function(expr, extra_names, top_level = FALSE) {
   if (rlang::is_missing(expr)) {
     return(FALSE)
   }
+  # A quosure spliced into the tree (`f({{ var }})`); `{{ }}` of a missing
+  # argument is a quosure wrapping the empty argument.
+  if (rlang::is_quosure(expr)) {
+    return(expr_needs_fallback(rlang::quo_get_expr(expr), extra_names, top_level))
+  }
   if (!is.call(expr)) {
     return(FALSE)
   }
@@ -608,6 +613,9 @@ across_native_heads <- function() {
 # TRUE iff every call in `expr` has a bare-symbol head the IR knows by name.
 # @keywords internal
 across_expr_native <- function(expr) {
+  if (rlang::is_quosure(expr)) {
+    return(across_expr_native(rlang::quo_get_expr(expr)))
+  }
   if (rlang::is_missing(expr) || !is.call(expr)) {
     return(TRUE)
   }

@@ -9,13 +9,15 @@
 \arguments{
 \item{x}{A \code{tbl_gpu} object.}
 
-\item{...}{Ignored. Included for compatibility with dplyr generic.}
+\item{...}{Columns to remove from the grouping (tidyselect; renaming is an
+error). Empty removes all groups. Must be empty for an ungrouped table.}
 }
 \value{
 An ungrouped \code{tbl_gpu} object.
 }
 \description{
-Removes all grouping information from a grouped \code{tbl_gpu} object.
+Removes grouping from a grouped \code{tbl_gpu} object: all of it, or only the
+group columns selected in \code{...}.
 }
 \examples{
 if (has_gpu()) {

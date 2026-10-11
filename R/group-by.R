@@ -5,9 +5,10 @@
 #' until an aggregation is requested.
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
-#' @param ... Column names to group by. Can be unquoted column names,
-#'   tidyselect expressions, or `name = expression` computed columns (see
-#'   "Computed groups" below).
+#' @param ... Variables to group by: column names (`x`, `.data$x`), a
+#'   top-level [dplyr::pick()], or computed columns (`name = expression`, or an
+#'   unnamed expression such as `a + 1`; see "Computed groups" below). Like
+#'   dplyr, tidyselect helpers are only allowed inside `pick()`.
 #' @param .add If `FALSE` (default), will override existing groups. If `TRUE`,
 #'   will add to existing groups.
 #' @param .drop Whether to drop unobserved factor-level combinations from
@@ -38,11 +39,14 @@
 #' added under the given name, and the table is then grouped by that name.
 #' Later dots may reference earlier dots' newly-computed columns, exactly
 #' like `mutate()`'s own chain semantics (e.g. `group_by(df, g = x %/% 2, h
-#' = g * 10)`). Unnamed arguments are resolved via ordinary tidyselect
-#' against the *current* schema (after any computed columns from this same
-#' call have been added), and every dot's resulting group column name(s)
-#' are combined in the exact order the arguments were written (even when
-#' named and unnamed dots are interleaved).
+#' = g * 10)`). An **unnamed** argument is a column reference (`x`,
+#' `.data$x`, `.data[["x"]]`), a top-level `pick()`, or -- anything else --
+#' a data-masking expression computed into a new column named
+#' `rlang::as_label()` of the expression (`group_by(df, a + 1)` makes a column
+#' called `a + 1`). All computed dots (named and unnamed) run as one
+#' `mutate()` on the ungrouped data, in argument order. Every dot's resulting
+#' group column name(s) are combined in the order the arguments were written.
+#' The old `add =` and `.dots =` arguments are defunct and error.
 #'
 #' Calling `group_by()` with **no** arguments and `.add = FALSE` (the
 #' default) clears any existing grouping entirely (verified empirically --
@@ -53,10 +57,10 @@
 #' `.drop = FALSE` (verified empirically against dplyr 1.2.1) adds one
 #' placeholder row (`.rows = integer(0)`) to [group_data()]'s output for
 #' every declared *factor level combination* of the FACTOR grouping columns
-#' that has no observed row anywhere in the data -- non-factor grouping
-#' columns in that placeholder row are `NA` (dplyr does not attempt to
-#' cross the placeholder against every observed non-factor value; see
-#' `compute_group_data()`, R/group-by.R, for the exact algorithm).
+#' that has no observed row, expanded recursively like dplyr: under each
+#' parent group a factor column takes all its levels (plus `NA` if observed
+#' there) and a non-factor column the values observed under that parent (a
+#' single `NA` under an empty parent); see `expand_dropped_groups()`.
 #'
 #' `.drop` is stored as a single boolean on the returned `tbl_gpu`
 #' (`$group_drop`) and carried by `push_op()`/`push_join()` through every verb
@@ -107,7 +111,7 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
 
   if (length(dots) == 0) {
     new_groups <- if (.add) .data$groups else character()
-    new_drop <- if (.add) (.data$group_drop %||% TRUE) else TRUE
+    new_drop <- if (.add && length(.data$groups) > 0L) .drop else TRUE
     return(new_tbl_gpu(
       ptr = .data$ptr,
       schema = .data$schema,
@@ -123,19 +127,13 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   if (is.null(dot_names)) {
     dot_names <- rep("", length(dots))
   }
-  is_named <- !is.na(dot_names) & dot_names != ""
-
-  # Named args are ALWAYS a mutate() expression (see "Computed groups"
-  # above) -- delegated straight to mutate.tbl_gpu() (in the dots' own
-  # relative order, so later named dots can reference earlier ones' new
-  # columns) rather than reimplementing expression evaluation here.
-  working <- .data
-  if (any(is_named)) {
-    named_dots <- dots[is_named]
-    # dplyr computes these on the UNGROUPED data (#5598), so n(), pick() and
-    # friends see the whole table even when `.data` is already grouped
-    working <- rlang::inject(dplyr::mutate(dplyr::ungroup(working), !!!named_dots))
+  if (any(c("add", ".dots") %in% dot_names)) {
+    if ("add" %in% dot_names) {
+      lifecycle::deprecate_stop("1.0.0", "group_by(add = )", "group_by(.add = )")
+    }
+    lifecycle::deprecate_stop("1.0.0", "group_by(.dots = )")
   }
+  is_named <- !is.na(dot_names) & dot_names != ""
 
   # Whole-call CPU fallback for shapes with no tbl_gpu representation or that
   # only dplyr can resolve (pick() inside wrappers, across(), a named pick()
@@ -147,60 +145,109 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
     })
   }
 
-  if (!is_tbl_gpu(working)) {
+  # Classify each dot like dplyr's group_by_prepare(): a variable reference
+  # (`x`, `.data$x`, `.data[["x"]]`) or a top-level pick() names existing
+  # columns; everything else -- every named dot, and any unnamed expression
+  # (`a + 1`, `2`, `"g"`, `-a`, ...) -- is data-masking and computed into a
+  # column called as_label(expr).
+  kind <- character(length(dots))     # "named", "var", "pick", "computed"
+  var_name <- character(length(dots))
+  comp_names <- dot_names
+  for (i in seq_along(dots)) {
+    if (is_named[i]) {
+      kind[i] <- "computed"
+      next
+    }
+    expr <- rlang::quo_get_expr(dots[[i]])
+    if (is.null(expr)) {
+      # an unnamed NULL (e.g. an unused `{{ arg }}`) is ignored by dplyr
+      kind[i] <- "null"
+    } else if (is.symbol(expr)) {
+      kind[i] <- "var"
+      var_name[i] <- as.character(expr)
+    } else if (is_data_pronoun_call(expr)) {
+      # `.data[[var]]` arrives as `.data[["name"]]`: rlang evaluates the
+      # subscript when capturing the quosure
+      kind[i] <- "var"
+      var_name[i] <- pronoun_call_name(expr)
+    } else if (rlang::is_call(expr) &&
+               (call_head_name(expr) %in% c("pick", "across"))) {
+      kind[i] <- "pick"
+    } else {
+      kind[i] <- "computed"
+      comp_names[i] <- rlang::as_label(dots[[i]])
+    }
+  }
+  is_comp <- kind == "computed"
+  # A column named twice has no single "type at this position"
+  if (anyDuplicated(comp_names[is_comp])) {
     return(group_by_fallback())
   }
 
-  # Resolve every dot -- named -> its own name; unnamed -> a top-level pick()
-  # (resolved on the full columns, see resolve_pick_call()) or tidyselect
-  # against the schema AFTER the mutate() above -- IN THE ORIGINAL ARGUMENT
-  # ORDER, since dplyr preserves the exact order args were written even
-  # when named/unnamed dots are interleaved (verified empirically).
+  # Computed dots run as ONE mutate() on the UNGROUPED data (#5598), so n(),
+  # pick() and friends see the whole table even when `.data` is already
+  # grouped, and later dots see earlier ones' columns.
+  working <- .data
+  if (any(is_comp)) {
+    comp_dots <- stats::setNames(dots[is_comp], comp_names[is_comp])
+    working <- rlang::inject(dplyr::mutate(dplyr::ungroup(working), !!!comp_dots))
+    if (!is_tbl_gpu(working)) {
+      return(group_by_fallback())
+    }
+  }
+
   working_schema <- current_schema(working)
   orig_schema <- current_schema(.data)
   orig_names <- orig_schema$names
-  # A column named twice has no single "type at this position"
-  if (anyDuplicated(dot_names[is_named])) {
-    return(group_by_fallback())
-  }
   new_groups <- character()
   for (i in seq_along(dots)) {
-    if (is_named[i]) {
-      new_groups <- c(new_groups, dot_names[i])
+    if (kind[i] == "null") {
       next
-    }
-    # A pick() only sees the columns as they are at its position: the
-    # original ones (with their original type until a named dot redefines
-    # them) plus those made by earlier named dots.
-    earlier <- dot_names[seq_len(i - 1L)][is_named[seq_len(i - 1L)]]
-    visible <- working_schema$names %in% c(orig_names, earlier)
-    pick_names <- working_schema$names[visible]
-    use_working <- pick_names %in% earlier
-    pick_types <- ifelse(
-      use_working,
-      working_schema$types[match(pick_names, working_schema$names)],
-      orig_schema$types[match(pick_names, orig_names)]
-    )
-    pick_schema <- list(names = pick_names, types = unname(pick_types))
-    picked <- resolve_pick_call(dots[[i]], pick_schema)
-    if (!is.null(picked)) {
+    } else if (kind[i] == "computed") {
+      # a computed dot that evaluated to NULL made no column: dplyr ignores it
+      # when unnamed and rejects it when named
+      if (!comp_names[i] %in% working_schema$names) {
+        if (is_named[i]) {
+          rlang::abort(c(
+            "Must group by variables found in `.data`.",
+            x = paste0("Column `", comp_names[i], "` is not found.")
+          ))
+        }
+        next
+      }
+      new_groups <- c(new_groups, comp_names[i])
+    } else if (kind[i] == "var") {
+      if (!var_name[i] %in% working_schema$names) {
+        rlang::abort(c(
+          "Must group by variables found in `.data`.",
+          x = paste0("Column `", var_name[i], "` is not found."),
+          i = paste0("Available columns: ",
+                     paste(working_schema$names, collapse = ", "))
+        ))
+      }
+      new_groups <- c(new_groups, var_name[i])
+    } else {
+      # A pick() only sees the columns as they are at its position: the
+      # original ones (with their original type until a computed dot
+      # redefines them) plus those made by earlier computed dots.
+      earlier <- comp_names[seq_len(i - 1L)][is_comp[seq_len(i - 1L)]]
+      visible <- working_schema$names %in% c(orig_names, earlier)
+      pick_names <- working_schema$names[visible]
+      use_working <- pick_names %in% earlier
+      pick_types <- ifelse(
+        use_working,
+        working_schema$types[match(pick_names, working_schema$names)],
+        orig_schema$types[match(pick_names, orig_names)]
+      )
+      pick_schema <- list(names = pick_names, types = unname(pick_types))
+      picked <- resolve_pick_call(dots[[i]], pick_schema)
+      if (is.null(picked)) {
+        return(group_by_fallback())
+      }
       new_groups <- c(new_groups, picked)
-      next
     }
-    cols <- parse_group_cols(working, dots[i])
-    if (is.null(cols)) {
-      return(group_by_fallback())
-    }
-    new_groups <- c(new_groups, cols)
   }
   new_groups <- unique(new_groups)
-
-  missing <- setdiff(new_groups, current_schema(working)$names)
-  if (length(missing) > 0) {
-    stop("Column(s) not found: ", paste(missing, collapse = ", "),
-         "\nAvailable columns: ", paste(current_schema(working)$names, collapse = ", "),
-         call. = FALSE)
-  }
 
   if (.add && length(.data$groups) > 0) {
     new_groups <- unique(c(.data$groups, new_groups))
@@ -220,10 +267,12 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
 
 #' Remove grouping from a GPU table
 #'
-#' Removes all grouping information from a grouped `tbl_gpu` object.
+#' Removes grouping from a grouped `tbl_gpu` object: all of it, or only the
+#' group columns selected in `...`.
 #'
 #' @param x A `tbl_gpu` object.
-#' @param ... Ignored. Included for compatibility with dplyr generic.
+#' @param ... Columns to remove from the grouping (tidyselect; renaming is an
+#'   error). Empty removes all groups. Must be empty for an ungrouped table.
 #'
 #' @return An ungrouped `tbl_gpu` object.
 #'
@@ -245,12 +294,40 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
 #'   length(group_vars(ungrouped))  # 0
 #' }
 ungroup.tbl_gpu <- function(x, ...) {
+  groups <- x$groups
+  drop <- TRUE
+  if (...length() > 0L) {
+    if (length(groups) == 0L) {
+      rlang::check_dots_empty()
+    }
+    # tidyselect over every column; the selected group columns stop being
+    # groups (other selections are ignored), `.drop` is kept while any is left
+    # (predicates see the schema's type proxies, like pick()/across())
+    schema <- current_schema(x)
+    dots <- rlang::enquos(...)
+    if (!all(vapply(dots, function(q) {
+      pick_selection_is_type_only(rlang::quo_get_expr(q), rlang::quo_get_env(q), schema$names)
+    }, logical(1)))) {
+      return(gpu_fallback("ungroup", x, function(tbl) dplyr::ungroup(tbl, !!!dots)))
+    }
+    # the proxy carries the grouping: group_cols() reads it from peek_data()
+    proxy <- dplyr::grouped_df(tibble::as_tibble(stats::setNames(
+      lapply(unname(schema$types), schema_type_proxy_value), schema$names
+    )), groups)
+    sel <- tidyselect::eval_select(rlang::expr(c(!!!dots)), proxy, allow_rename = FALSE)
+    groups <- setdiff(groups, names(sel))
+    if (length(groups) > 0L) {
+      drop <- group_by_drop_default(x)
+    }
+  } else {
+    groups <- character()
+  }
   new_tbl_gpu(
     ptr = x$ptr,
     schema = x$schema,
     lazy_ops = x$lazy_ops,
-    groups = character(),
-    group_drop = TRUE,
+    groups = groups,
+    group_drop = drop,
     exec_mode = x$exec_mode,
     nrow = x[["nrow"]]
   )
@@ -367,52 +444,6 @@ group_by_drop_default.tbl_gpu <- function(.tbl) {
   isTRUE(.subset2(.tbl, "group_drop") %||% TRUE)
 }
 
-# Internal: Parse column names from group_by expressions
-#
-# Handles both bare column names and tidyselect expressions
-#
-# @param .data A tbl_gpu object
-# @param dots Quosures from group_by()
-# @return Character vector of column names, or NULL when a non-symbol dot
-#   can't be resolved by tidyselect (caller falls back to dplyr)
-# @keywords internal
-parse_group_cols <- function(.data, dots) {
-  col_names <- character()
-  unresolved <- FALSE
-  schema_names <- current_schema(.data)$names
-
-  for (expr in dots) {
-    expr_text <- rlang::quo_text(expr)
-
-    # Check if it's a simple column name
-    if (expr_text %in% schema_names) {
-      col_names <- c(col_names, expr_text)
-    } else {
-      # Try tidyselect evaluation
-      tryCatch({
-        # Create a named vector for tidyselect
-        col_positions <- stats::setNames(
-          seq_along(schema_names),
-          schema_names
-        )
-        selected <- tidyselect::eval_select(expr, data = col_positions)
-        col_names <- c(col_names, names(selected))
-      }, error = function(e) {
-        # A bare symbol that tidyselect can't resolve is reported as a
-        # missing column by the caller; any other shape (a pick() it can't
-        # expand natively, a wrapper, ...) is for dplyr to evaluate.
-        if (is.symbol(rlang::quo_get_expr(expr))) {
-          col_names <<- c(col_names, expr_text)
-        } else {
-          unresolved <<- TRUE
-        }
-      })
-    }
-  }
-
-  if (unresolved) NULL else unique(col_names)
-}
-
 # =============================================================================
 # Grouping metadata query family (Phase 9, task 1): group_data()/
 # group_keys()/group_indices()/group_size()/n_groups() are all GPU-native,
@@ -505,60 +536,83 @@ compute_group_data <- function(.data) {
     gd <- expand_dropped_groups(gd, group_names, keys_schema$factor_levels)
   }
 
+  # dplyr's grouped_df group_data() carries `.drop` as an attribute
+  attr(gd, ".drop") <- isTRUE(materialized$group_drop %||% TRUE)
+
   gd
 }
 
-# Honor group_by(.drop = FALSE) (see group_by.tbl_gpu()'s own docs): adds
-# one placeholder row (.rows = integer(0)) per declared factor-level
-# combination of the FACTOR grouping columns that has no row anywhere in
-# `gd` -- verified empirically against dplyr 1.2.1 that non-factor grouping
-# columns in a placeholder row are NA (dplyr does NOT cross the placeholder
-# against every distinct value of the non-factor columns; it only expands
-# the cartesian product of the factor columns' own declared levels). A
-# no-op when there are no factor grouping columns at all (nothing declared
-# to expand against).
+# Honor group_by(.drop = FALSE) (see group_by.tbl_gpu()'s own docs) with
+# dplyr's recursive rule, column by column in grouping order: under each
+# parent group a FACTOR column expands to all its declared levels (plus NA if
+# NA is observed there) and any other column takes the values observed under
+# that parent; under an EMPTY parent a non-factor column is a single NA while
+# a factor column still expands all levels. `gd` is the observed
+# keys + `.rows` (one row per observed group, ascending key order), so the
+# result is in group order. A no-op without factor grouping columns.
 # @keywords internal
 expand_dropped_groups <- function(gd, group_names, factor_levels) {
-  if (is.null(factor_levels) || length(factor_levels) == 0) {
-    return(gd)
-  }
-  factor_group_names <- intersect(group_names, names(factor_levels))
-  if (length(factor_group_names) == 0) {
+  if (is.null(factor_levels) || !any(group_names %in% names(factor_levels))) {
     return(gd)
   }
 
-  level_lists <- lapply(factor_group_names, function(nm) factor_levels[[nm]])
-  names(level_lists) <- factor_group_names
-  full_grid <- do.call(
-    expand.grid,
-    c(level_lists, list(KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE))
-  )
-  for (nm in factor_group_names) {
-    full_grid[[nm]] <- factor(full_grid[[nm]], levels = factor_levels[[nm]])
+  # Every partial key ("parent") is processed at once per column: `row` holds
+  # the observed gd rows ordered by `pid`, the id of the parent they sit under.
+  row <- seq_len(nrow(gd))
+  pid <- rep.int(1L, length(row))
+  np <- 1L
+  keys <- list()
+  for (nm in group_names) {
+    col <- gd[[nm]]
+    lv <- factor_levels[[nm]]
+    if (!is.null(lv)) {
+      # every level under each parent, plus NA where NA is observed
+      nlev <- length(lv)
+      code <- as.integer(col[row])
+      na_code <- is.na(code)
+      rk <- (pid - 1) * (nlev + 1) + ifelse(na_code, nlev + 1L, code)
+      has_na <- logical(np)
+      has_na[pid[na_code]] <- TRUE
+      per <- nlev + has_na
+      par <- rep.int(seq_len(np), per)
+      j <- sequence(per)
+      gid <- match(rk, (par - 1) * (nlev + 1) + j)
+      j[j > nlev] <- NA_integer_
+      piece <- factor_from_levels(as.vector(lv), lv)[j]
+    } else {
+      # the values observed under each parent (first-appearance = ascending
+      # key order); a parent with no rows gets a single NA
+      vals <- vctrs::vec_slice(col, row)
+      g <- vctrs::vec_group_loc(vctrs::data_frame(p = pid, v = vals))
+      gid_obs <- integer(length(row))
+      gid_obs[unlist(g$loc)] <- rep.int(seq_len(nrow(g)), lengths(g$loc))
+      empty <- which(!seq_len(np) %in% pid)
+      all_pid <- c(g$key$p, empty)
+      all_val <- vctrs::vec_c(
+        g$key$v, vctrs::vec_slice(col, rep.int(NA_integer_, length(empty)))
+      )
+      ord <- order(all_pid)
+      rank <- integer(length(ord))
+      rank[ord] <- seq_along(ord)
+      gid <- rank[gid_obs]
+      par <- all_pid[ord]
+      piece <- vctrs::vec_slice(all_val, ord)
+    }
+    keys <- lapply(keys, function(v) vctrs::vec_slice(v, par))
+    keys[[nm]] <- piece
+    o <- order(gid)
+    row <- row[o]
+    pid <- gid[o]
+    np <- length(par)
   }
 
-  key_of <- function(df) do.call(paste, c(unname(as.list(df)), list(sep = "\r")))
-  observed_key <- key_of(gd[factor_group_names])
-  full_key <- key_of(full_grid)
-  missing <- full_grid[!(full_key %in% observed_key), , drop = FALSE]
-
-  if (nrow(missing) == 0) {
-    return(gd)
-  }
-
-  other_names <- setdiff(group_names, factor_group_names)
-  for (nm in other_names) {
-    missing[[nm]] <- rep(gd[[nm]][NA_integer_], nrow(missing))
-  }
-  missing$.rows <- vctrs::new_list_of(
-    replicate(nrow(missing), integer(), simplify = FALSE),
-    ptype = integer()
-  )
-  missing <- missing[names(gd)]
-
-  out <- vctrs::vec_rbind(gd, missing)
-  ord_cols <- lapply(group_names, function(nm) out[[nm]])
-  out[do.call(order, c(ord_cols, list(na.last = TRUE))), , drop = FALSE]
+  # each leaf group holds at most one observed gd row
+  first <- row[match(seq_len(np), pid)]
+  rows_out <- unclass(gd$.rows)[first]
+  rows_out[is.na(first)] <- list(integer())
+  out <- tibble::as_tibble(keys)
+  out$.rows <- vctrs::new_list_of(rows_out, ptype = integer())
+  out
 }
 
 #' Grouping metadata: keys, row indices, per-row group id, sizes, and count
@@ -607,6 +661,7 @@ group_keys.tbl_gpu <- function(.tbl, ...) {
     )
   }
   gd <- compute_group_data(.tbl)
+  attr(gd, ".drop") <- NULL
   gd[setdiff(names(gd), ".rows")]
 }
 

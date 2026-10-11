@@ -60,7 +60,7 @@
 #   - Expression dots (`count(df, g = x %/% 10)`): dplyr's group_by()
 #     supports both tidyselect-style column selection AND creating a new
 #     column via a data-masked expression in the same `...` -- but our own
-#     group_by.tbl_gpu() only supports the former (parse_group_cols() has
+#     group_by.tbl_gpu() only supports the former (the old parse_group_cols() had
 #     no mutate step). count()/add_count() need the latter, so this file
 #     resolves dots the same way distinct.tbl_gpu() does (R/distinct.R):
 #     parse each dot through the mutate IR, only emitting an actual
@@ -79,9 +79,10 @@
 #     `null_policy::INCLUDE`, see src/ops_groupby.cpp) and original row
 #     order is preserved (the window kernel's scatter-back step,
 #     src/ops_window.cpp). See test-dplyr-count.R's dedicated NA-key tests.
-#   - `.drop` (count()'s factor-levels arg): accepted, ignored -- same
-#     "compatibility only" stance as group_by.tbl_gpu()'s own `.drop`;
-#     factor group fidelity is Phase 11 (see scratchpad/todo.md).
+#   - `.drop` (count()'s factor-levels arg): defaults to
+#     group_by_drop_default(x) and is passed to group_by(); with `.drop =
+#     FALSE` the result gets zero-count rows for empty factor groups (see
+#     count_add_empty_groups()).
 #     add_count()'s `.drop` was deprecated in dplyr 1.0.0 and errors if
 #     supplied at all (replicated here without a `lifecycle` dependency).
 
@@ -144,6 +145,35 @@ resolve_grouping_dots <- function(.data, dots) {
   list(data = result, names = unique(names_out))
 }
 
+# `.drop = FALSE` grouped count()/tally(): dplyr returns one row per group of
+# group_data() order, with n = 0 for the groups that have no rows. `grouped` is
+# the table that was aggregated, `result` the summarise() of it (observed
+# groups only). Only this path pays for the extra group_data() call; it is a
+# no-op unless .drop = FALSE and some group key is a factor. The result is
+# rebuilt from the (small) collected keys and keeps `result`'s exec_mode.
+# @param out_groups Groups the returned table carries
+# @keywords internal
+count_add_empty_groups <- function(grouped, result, agg_name, out_groups) {
+  keys <- grouped$groups
+  if (length(keys) == 0L || group_by_drop_default(grouped) ||
+      !any(keys %in% names(current_schema(grouped)$factor_levels))) {
+    return(result)
+  }
+  gd <- compute_group_data(grouped)
+  gd_keys <- gd[keys]
+  res_df <- collect(result)
+  idx <- vctrs::vec_match(gd_keys, res_df[keys])
+  n <- vctrs::vec_slice(res_df[[agg_name]], idx)
+  n[is.na(idx)] <- vctrs::vec_cast(0, n)
+  out <- gd_keys
+  out[[agg_name]] <- n
+  out <- tbl_gpu(out, lazy = identical(result$exec_mode, "lazy"))
+  if (length(out_groups) > 0L) {
+    out <- dplyr::group_by(out, !!!rlang::syms(out_groups), .drop = FALSE)
+  }
+  out
+}
+
 # Pick the aggregation's output column name: the user's explicit `name=` if
 # given, else "n" bumped to "nn"/"nnn"/... while it collides with `vars`
 # (dplyr's own n_name()/check_n_name() rule). Callers pass different `vars`
@@ -199,8 +229,9 @@ build_count_agg_call <- function(wt_quo, for_mutate = FALSE) {
 #'
 #' Counts the number of rows (or sums a weight column) for each combination
 #' of `...`, similar to `dplyr::count()`. Sugar over [group_by.tbl_gpu()],
-#' [summarise.tbl_gpu()], and [arrange.tbl_gpu()] -- runs entirely on the
-#' GPU, with no CPU round-trip.
+#' [summarise.tbl_gpu()], and [arrange.tbl_gpu()] -- runs on the GPU. The one
+#' exception is `.drop = FALSE` with a factor key, which also collects the
+#' (small) group keys to add the empty groups.
 #'
 #' @param x A `tbl_gpu` object created by [tbl_gpu()].
 #' @param ... Column names or expressions to group by (e.g. `count(df, x)`
@@ -215,9 +246,9 @@ build_count_agg_call <- function(wt_quo, for_mutate = FALSE) {
 #' @param name The name of the count column in the output. If `NULL`
 #'   (default), uses `"n"`, or `"nn"`/`"nnn"`/... if `"n"` already names one
 #'   of the (post-`...`) grouping columns.
-#' @param .drop Ignored. Included for compatibility with the dplyr generic
-#'   (factor group level dropping is deferred to Phase 11 -- see
-#'   `scratchpad/todo.md`).
+#' @param .drop Passed to [group_by.tbl_gpu()]; with `.drop = FALSE` the result
+#'   has a zero-count row for every empty factor-level group, in `group_data()`
+#'   order. Defaults to `group_by_drop_default(x)`.
 #'
 #' @return A `tbl_gpu` object with one row per group, containing the
 #'   grouping columns and the count column. Grouping: if `x` was ungrouped,
@@ -239,7 +270,8 @@ build_count_agg_call <- function(wt_quo, for_mutate = FALSE) {
 #'   gpu_mtcars |> count(cyl) |> collect()
 #'   gpu_mtcars |> count(cyl, sort = TRUE) |> collect()
 #' }
-count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .drop = TRUE) {
+count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
+                          .drop = dplyr::group_by_drop_default(x)) {
   dots <- rlang::enquos(...)
   wt_quo <- rlang::enquo(wt)
   orig_groups <- x$groups
@@ -248,8 +280,9 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .drop = 
   working <- resolved$data
   dot_names <- resolved$names
 
+  # like count.data.frame(), `.drop` only applies when `...` regroups
   grouped <- if (length(dot_names) > 0) {
-    dplyr::group_by(working, !!!rlang::syms(dot_names), .add = TRUE)
+    dplyr::group_by(working, !!!rlang::syms(dot_names), .add = TRUE, .drop = .drop)
   } else {
     working
   }
@@ -269,12 +302,13 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .drop = 
   options(dplyr.summarise.inform = FALSE)
 
   result <- rlang::inject(dplyr::summarise(grouped, !!agg_name := !!agg_call))
+  out_groups <- intersect(orig_groups, result$schema$names)
+  result <- count_add_empty_groups(grouped, result, agg_name, out_groups)
 
   if (isTRUE(sort)) {
     result <- dplyr::arrange(result, dplyr::desc(!!rlang::sym(agg_name)))
   }
 
-  out_groups <- intersect(orig_groups, result$schema$names)
   new_tbl_gpu(
     ptr = result$ptr,
     schema = result$schema,
@@ -341,6 +375,7 @@ tally.tbl_gpu <- function(x, wt = NULL, sort = FALSE, name = NULL) {
   options(dplyr.summarise.inform = FALSE)
 
   result <- rlang::inject(dplyr::summarise(x, !!agg_name := !!agg_call))
+  result <- count_add_empty_groups(x, result, agg_name, result$groups)
 
   if (isTRUE(sort)) {
     result <- dplyr::arrange(result, dplyr::desc(!!rlang::sym(agg_name)))

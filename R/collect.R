@@ -113,7 +113,7 @@ collect_frame <- function(x) {
     for (col_name in names(final_schema$factor_levels)) {
       if (col_name %in% names(result)) {
         lvls <- final_schema$factor_levels[[col_name]]
-        result[[col_name]] <- factor(lvls[result[[col_name]]], levels = lvls)
+        result[[col_name]] <- factor_from_levels(lvls[result[[col_name]]], lvls)
       }
     }
   }
@@ -171,4 +171,11 @@ as.list.tbl_gpu <- function(x, ...) {
 #' @export
 as.matrix.tbl_gpu <- function(x, ...) {
   as.matrix(collect_frame(x), ...)
+}
+
+# A factor from labels and a schema level vector, honoring the `ordered`
+# attribute upload put on it (see tbl_gpu.data.frame()).
+# @keywords internal
+factor_from_levels <- function(x, lvls) {
+  factor(x, levels = as.vector(lvls), ordered = isTRUE(attr(lvls, "ordered")))
 }

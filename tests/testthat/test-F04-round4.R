@@ -14,8 +14,9 @@ test_that("an ungrouped tbl_gpu reports .drop = TRUE whatever its stale flag", {
   skip_if_no_gpu()
   for (lazy in c(FALSE, TRUE)) {
     gt <- dplyr::group_by(r4_up(r4_df(), lazy), f, .drop = FALSE)
-    # a selection that resolves to no column leaves the table ungrouped
-    none <- dplyr::group_by(gt, dplyr::any_of("zz"), .drop = FALSE)
+    # a pick() that resolves to no column leaves the table ungrouped (a bare
+    # tidyselect helper is an error in dplyr, F13)
+    none <- dplyr::group_by(gt, dplyr::pick(dplyr::any_of("zz")), .drop = FALSE)
     expect_identical(dplyr::group_vars(none), character())
     expect_identical(dplyr::group_by_drop_default(none), TRUE)
     expect_identical(.subset2(none, "group_drop"), TRUE)

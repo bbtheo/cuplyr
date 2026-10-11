@@ -1,3 +1,2 @@
 file	test	owner	reason
-test-group-by.R	can partially `ungroup()` (#6606)	F13	ungroup(gdf, g1) drops all groups instead of keeping g2 (returns an ungrouped tibble, grouped_df expected)
 test-join.R	filtering joins finalize unspecified columns (#6804)	F36	semi_join() of an unspecified() column returns a plain column instead of keeping class vctrs_unspecified
