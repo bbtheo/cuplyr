@@ -326,7 +326,7 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   standalone <- vector("list", length(dots))
   for (i in setdiff(seq_along(dots), window_idx)) {
     if (is.null(parsed[[i]]) || ir_is_const(parsed[[i]])) {
-      res <- tryCatch(list(value = rlang::eval_tidy(dots[[i]])), error = function(e) NULL)
+      res <- tryCatch(list(value = rlang::eval_tidy(dots[[i]], data = list())), error = function(e) NULL)
       if (is.null(res)) {
         return(filter_expr_fallback(fallback_data, fallback_dots, by_quo))
       }

@@ -405,6 +405,11 @@ fuse_mutates <- function(ast) {
   ast
 }
 
+# TRUE iff a mutate node carries a vector-literal expression.
+mutate_has_vector_literal <- function(node) {
+  any(vapply(node$expressions, function(e) identical(e$ir$kind, "vec"), logical(1)))
+}
+
 #' Try to fuse two consecutive mutate nodes
 #'
 #' @param lower Lower (earlier) mutate node
@@ -479,6 +484,11 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
 
       for (i in rev(seq_along(exprs))) {
         expr <- exprs[[i]]
+        # A vector literal is kept even when dead: its length check is an error
+        # dplyr raises regardless of use.
+        if (identical(expr$ir$kind, "vec")) {
+          keep[i] <- TRUE
+        }
         if (expr$output_col %in% required) {
           keep[i] <- TRUE
           # The name stays required: an earlier writer of it (in this node or
@@ -684,6 +694,11 @@ push_down_filters <- function(ast) {
   filter_cols <- unique(unlist(lapply(ast$predicates, `[[`, "cols")))
 
   if (input$type == "mutate") {
+    # A vector literal is tied to row positions (and its length to the row
+    # count): a filter must stay above it.
+    if (mutate_has_vector_literal(input)) {
+      return(ast)
+    }
     mutate_outputs <- vapply(input$expressions, `[[`, character(1), "output_col")
 
     # Do not push if filter references any mutate outputs (including replacements)

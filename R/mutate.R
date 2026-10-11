@@ -383,10 +383,20 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   # is NOT caught here -- it propagates normally, preserving every existing
   # pinned error-message test (scratchpad/phase11_design.md's "NULL-vs-throw
   # trigger rule").
-  expressions <- parse_mutate_dots(dots, orig_schema, "mutate", stop_on_unparseable = FALSE)
+  # Vector literals (`y = 1:5`) are native only for an ungrouped, no-`.by`
+  # call; per-group evaluation is dplyr's job (CPU fallback).
+  expressions <- parse_mutate_dots(dots, orig_schema, "mutate", stop_on_unparseable = FALSE,
+                                   vector_literals = length(verb_groups) == 0)
   if (is.null(expressions)) {
     return(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo))
   }
+  # A vector literal next to a window call isn't planned together: let dplyr
+  # run the whole call.
+  if (isTRUE(attr(expressions, "has_window")) && isTRUE(attr(expressions, "has_vec"))) {
+    return(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo))
+  }
+  dropped <- attr(expressions, "dropped")
+  check_droppable_groups(dropped, if (by_given) character() else verb_groups)
 
   # Phase 5, task W3: any dot containing a window-function call (row_number(),
   # lag()/lead(), cumsum()/cummax()/cummin()/cumprod(), and their R desugars
@@ -398,7 +408,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
     return(mutate_window(
       .data, fallback_dots, expressions, orig_schema, orig_names, orig_groups,
       .keep, before_quo, after_quo, by_quo, fallback_data = fallback_data,
-      drop = staged_temps
+      drop = staged_temps, dropped = dropped
     ))
   }
 
@@ -417,7 +427,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 
   select_node <- mutate_keep_select_node(
     result, orig_names, orig_groups, expressions, .keep, before_quo, after_quo,
-    drop = staged_temps
+    drop = staged_temps, dropped = dropped
   )
   if (is.null(select_node)) {
     return(result)
@@ -488,11 +498,13 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 # @param fallback_data The tbl_gpu as it was before cur_group_id()
 #   substitution; the CPU fallback runs on it so no helper column leaks
 # @param drop Staged across() temp columns, removed from the result
+# @param dropped Columns set to `NULL` by a dot (and not re-added), removed
+#   from the result
 # @return A new tbl_gpu
 # @keywords internal
 mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, orig_groups,
                            keep, before_quo, after_quo, by_quo, fallback_data = .data,
-                           drop = character()) {
+                           drop = character(), dropped = character()) {
   exprs_raw <- stats::setNames(
     lapply(expressions, `[[`, "ir"),
     vapply(expressions, `[[`, character(1), "output_col")
@@ -523,7 +535,7 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
 
   select_node <- mutate_keep_select_node(
     result, orig_names, orig_groups, expressions, keep, before_quo, after_quo,
-    drop = drop
+    drop = drop, dropped = dropped
   )
   if (is.null(select_node)) {
     return(result)
@@ -708,17 +720,55 @@ mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_qu
 #   W3 row).
 # @keywords internal
 parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
-                               stop_on_unparseable = TRUE) {
+                               stop_on_unparseable = TRUE, vector_literals = FALSE) {
   dots <- if (warn_unnamed) auto_name_dots(dots, verb) else name_dots_silently(dots)
 
   expressions <- list()
   has_window <- FALSE
+  has_vec <- FALSE
+  dropped <- character()
+  # dplyr places a new column where its name first appears, even when that
+  # dot is `col = NULL` (and a later dot fills it in).
+  dot_order <- unique(names(dots))
 
   for (i in seq_along(dots)) {
     new_name <- names(dots)[i]
     expr <- dots[[i]]
 
-    ir <- ir_parse_quo(expr, schema)
+    const <- mutate_constant_value(expr, schema)
+
+    # `col = NULL` (or a constant that evaluates to NULL) drops the column:
+    # later dots no longer see it, and a later dot of the same name re-adds it.
+    if (identical(const$kind, "null")) {
+      dropped <- union(dropped, new_name)
+      keep_idx <- schema$names != new_name
+      schema$names <- schema$names[keep_idx]
+      schema$types <- schema$types[keep_idx]
+      next
+    }
+
+    if (identical(const$kind, "scalar")) {
+      # Build the literal from the value already computed: evaluating the
+      # dot again (ir_parse_quo()) would run RNG/side effects twice.
+      ir <- ir_lit_from_r(const$value)
+    } else if (identical(const$kind, "vector")) {
+      if (!vector_literals || !const$supported) {
+        if (!stop_on_unparseable) {
+          return(NULL)
+        }
+        stop(verb, "() can't use a vector literal here.\n",
+             "Expression: ", rlang::quo_text(expr), call. = FALSE)
+      }
+      ir <- ir_vec(const$value, gpu_type_from_r(const$value), expr, new_name)
+      has_vec <- TRUE
+    } else {
+      # A vector constant nested inside a larger expression (`x + 1:5`) is
+      # dplyr's elementwise job: CPU fallback.
+      ir <- tryCatch(
+        ir_parse_quo(expr, schema),
+        cuplyr_vector_literal = function(e) NULL
+      )
+    }
 
     if (is.null(ir)) {
       if (!stop_on_unparseable) {
@@ -778,13 +828,103 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     }
 
     expressions <- c(expressions, list(step))
+    dropped <- setdiff(dropped, new_name)
 
     # Update the running schema so subsequent dots see this dot's output.
     schema <- update_schema_for_expr(schema, step)
   }
 
   attr(expressions, "has_window") <- has_window
+  attr(expressions, "has_vec") <- has_vec
+  attr(expressions, "dropped") <- dropped
+  attr(expressions, "dot_order") <- dot_order
   expressions
+}
+
+# Classify a mutate()/transmute() dot that reads no column: `kind` is
+# "null" (the dot is, or evaluates to, NULL), "vector" (an atomic vector of
+# length != 1; `supported` says whether it can be uploaded as a column),
+# "scalar" (an evaluated call/symbol with a length-1 atomic value, returned
+# as `value` so the caller doesn't evaluate the dot a second time), or
+# "none" (everything else). Evaluated in R, in the dot's environment,
+# with an empty data mask so `.env` works and data-only calls (`n()`) fail
+# and count as "none".
+# @keywords internal
+mutate_constant_value <- function(quo, schema) {
+  none <- list(kind = "none")
+  expr <- rlang::quo_get_expr(quo)
+  if (is.null(expr)) {
+    return(list(kind = "null"))
+  }
+
+  if (is.symbol(expr) || is.call(expr)) {
+    if (expr_has_column_ref(expr, schema) || expr_has_mask_only_call(expr)) {
+      return(none)
+    }
+    got <- tryCatch(
+      list(value = rlang::eval_tidy(quo, data = list())),
+      error = function(e) NULL
+    )
+    if (is.null(got)) {
+      return(none)
+    }
+    value <- got$value
+  } else {
+    value <- expr
+  }
+
+  if (is.null(value)) {
+    return(list(kind = "null"))
+  }
+  if (!is.atomic(value)) {
+    return(none)
+  }
+  if (length(value) == 1L) {
+    # A bare literal (no evaluation happened) takes the ordinary parse path.
+    return(if (is.symbol(expr) || is.call(expr)) list(kind = "scalar", value = value) else none)
+  }
+
+  supported <- (is.logical(value) || is.integer(value) || is.double(value) || is.character(value)) &&
+    (!is.object(value) || identical(class(value), "Date")) &&
+    is.null(dim(value))
+  list(kind = "vector", value = if (supported) unname(value) else value, supported = supported)
+}
+
+# TRUE iff `expr` calls a function that only works inside dplyr's data mask
+# (n(), zero-arg row_number(), cur_*(), pick(), across()...). Such a dot
+# can't be pre-evaluated out here: evaluation would run its column-free
+# sub-calls (`runif(1)` in `runif(1) + n()`) and then fail on the mask-only
+# call, and ir_parse_quo() would run them a second time. A user function
+# that calls n() internally is not detected (it double-evaluates as before).
+# @keywords internal
+expr_has_mask_only_call <- function(expr) {
+  zero_arg <- c("n", "row_number", "cur_group_id", "cur_group_rows", "cur_column",
+                "cur_group", "cur_data", "cur_data_all")
+  any_arg <- c("pick", "across", "c_across", "if_any", "if_all")
+  if (rlang::is_missing(expr) || !is.call(expr)) {
+    return(FALSE)
+  }
+  head <- call_head_name(expr)
+  if (!is.null(head) && ((head %in% zero_arg && length(expr) == 1L) || head %in% any_arg)) {
+    return(TRUE)
+  }
+  for (part in as.list(expr)[-1]) {
+    if (expr_has_mask_only_call(part)) {
+      return(TRUE)
+    }
+  }
+  FALSE
+}
+
+# dplyr refuses to drop a grouping column of a grouped table (`.by` allows it).
+# @keywords internal
+check_droppable_groups <- function(dropped, groups) {
+  bad <- intersect(dropped, groups)
+  if (length(bad) > 0) {
+    stop("Can't drop grouping column", if (length(bad) > 1) "s", " ",
+         paste0("`", bad, "`", collapse = ", "), " with NULL.", call. = FALSE)
+  }
+  invisible(NULL)
 }
 
 # Fill in unnamed dots' names from their deparsed expression text, with no
@@ -799,7 +939,7 @@ name_dots_silently <- function(dots) {
 
   for (i in seq_along(dots)) {
     if (is.na(dot_names[i]) || dot_names[i] == "") {
-      dot_names[i] <- rlang::quo_text(dots[[i]])
+      dot_names[i] <- rlang::as_label(dots[[i]])
     }
   }
 
@@ -835,15 +975,22 @@ name_dots_silently <- function(dots) {
 #   checked not to be BOTH non-NULL)
 # @param drop Temp columns (staged across() expansions) the result must not
 #   keep: they are not new columns, but their inputs still count as used
+# @param dropped Columns a dot set to `NULL` (and no later dot re-added)
 # @return An ast_select node to stack on `result` via push_op(), or `NULL`
 #   if no select node is needed (the "all", no `.before`/`.after` case is
 #   always a pure identity and is skipped to avoid an unnecessary AST node)
 # @keywords internal
 mutate_keep_select_node <- function(result, orig_names, orig_groups,
                                      expressions, keep, before_quo, after_quo,
-                                     drop = character()) {
+                                     drop = character(), dropped = character()) {
   touched_cols <- unique(vapply(expressions, `[[`, character(1), "output_col"))
-  new_cols <- touched_cols[!touched_cols %in% c(orig_names, drop)]
+  new_cols <- touched_cols[!touched_cols %in% c(orig_names, drop, dropped)]
+  # New columns sit where their name first appeared among the dots, which
+  # includes a `col = NULL` dot that a later dot re-fills.
+  dot_order <- attr(expressions, "dot_order")
+  if (!is.null(dot_order)) {
+    new_cols <- dot_order[dot_order %in% new_cols]
+  }
   existing_touched <- touched_cols[touched_cols %in% orig_names]
   input_cols_union <- unique(unlist(lapply(expressions, `[[`, "input_cols")))
 
@@ -858,9 +1005,12 @@ mutate_keep_select_node <- function(result, orig_names, orig_groups,
   kept_orig_names <- orig_names[orig_names %in% union(always_kept, mode_extra)]
 
   full_names <- current_schema(result)$names
+  full_names <- c(full_names[!full_names %in% new_cols], new_cols)
 
   if (length(new_cols) > 0 &&
       (!rlang::quo_is_null(before_quo) || !rlang::quo_is_null(after_quo))) {
+    # A column dropped by `col = NULL` is already gone for .before/.after.
+    full_names <- full_names[!full_names %in% dropped]
     name_vec <- stats::setNames(full_names, full_names)
     loc <- tidyselect::eval_relocate(
       expr = rlang::expr(c(!!!rlang::syms(new_cols))), data = name_vec,
@@ -871,6 +1021,10 @@ mutate_keep_select_node <- function(result, orig_names, orig_groups,
   }
 
   final_order <- full_names[full_names %in% union(kept_orig_names, new_cols)]
+  final_order <- final_order[!final_order %in% dropped]
+  if (length(dropped) > 0 && length(final_order) == 0) {
+    stop("Can't drop every column of a tbl_gpu.", call. = FALSE)
+  }
 
   if (identical(final_order, current_schema(result)$names)) {
     return(NULL)
@@ -972,12 +1126,16 @@ transmute.tbl_gpu <- function(.data, ...) {
   # mutate.tbl_gpu() -- see mutate_expr_fallback()'s own docs for the full
   # "NULL-vs-throw trigger rule" derivation.
   expressions <- parse_mutate_dots(dots, schema, "transmute", warn_unnamed = FALSE,
-                                    stop_on_unparseable = FALSE)
+                                    stop_on_unparseable = FALSE,
+                                    vector_literals = length(.data$groups) == 0)
   if (is.null(expressions)) {
     return(gpu_fallback("transmute", fallback_data, function(tbl) {
       rlang::inject(dplyr::transmute(tbl, !!!fallback_dots))
     }))
   }
+
+  dropped <- attr(expressions, "dropped")
+  check_droppable_groups(dropped, .data$groups)
 
   result <- .data
   if (length(expressions) > 0) {
@@ -988,7 +1146,7 @@ transmute.tbl_gpu <- function(.data, ...) {
   # any un-dotted group column prepended -- see the roxygen "Details" above
   # for how this differs from mutate(.keep = "none")'s ordering rule.
   dot_output_cols <- setdiff(
-    unique(vapply(expressions, `[[`, character(1), "output_col")), staged_temps
+    attr(expressions, "dot_order"), c(staged_temps, dropped)
   )
   missing_groups <- setdiff(.data$groups, dot_output_cols)
   final_order <- c(missing_groups, dot_output_cols)

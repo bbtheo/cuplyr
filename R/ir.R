@@ -60,6 +60,27 @@ ir_call <- function(op, args, meta = list()) {
   )
 }
 
+#' Create an IR vector-literal node (mutate()/transmute() only)
+#'
+#' A whole-dot constant vector (`mutate(y = 1:5)`): its length is the table's
+#' row count (or the call is an error), so it is uploaded as a column at
+#' lowering time (`lower_mutate()`), never evaluated by the GPU expression
+#' engine. Only ever the top node of a mutate expression record.
+#'
+#' @param value Atomic vector (names stripped), length != 1
+#' @param type GPU type string
+#' @param quo The named quosure of the dot, used to raise dplyr's own error
+#'   when the length doesn't fit
+#' @param name Output column name
+#' @return A `cuplyr_ir_vec` node
+#' @keywords internal
+ir_vec <- function(value, type, quo, name) {
+  structure(
+    list(kind = "vec", value = value, type = type, quo = quo, name = name),
+    class = c("cuplyr_ir_vec", "cuplyr_ir")
+  )
+}
+
 #' Build an IR literal node from an already-evaluated R value
 #'
 #' Implements the length/NA rules from section 1.2: a bare, untyped `NA`
@@ -99,9 +120,17 @@ ir_lit_from_r <- function(value, allow_vector = FALSE) {
 
   if (n != 1) {
     if (!allow_vector) {
-      stop("Expected a numeric scalar, but got a value of length ", n,
-           ". (Vector literals are only supported on the right-hand side ",
-           "of %in%.)", call. = FALSE)
+      # Classed so mutate()/transmute() can route a nested vector literal
+      # (`x + 1:5`) to the CPU fallback instead of failing; every other
+      # caller still sees an ordinary error with this message.
+      stop(structure(
+        class = c("cuplyr_vector_literal", "error", "condition"),
+        list(message = paste0(
+          "Expected a numeric scalar, but got a value of length ", n,
+          ". (Vector literals are only supported on the right-hand side ",
+          "of %in%.)"
+        ), call = NULL)
+      ))
     }
     return(ir_lit(value = value, type = gpu_type_from_r(value), na = FALSE))
   }
@@ -174,11 +203,25 @@ expr_has_column_ref <- function(expr, schema) {
   if (is_data_pronoun_call(expr)) {
     return(TRUE)
   }
+  # `.env$b` / `.env[["b"]]` read the environment even when a column is named b.
+  if (is_env_pronoun_call(expr)) {
+    return(FALSE)
+  }
   if (is.call(expr)) {
     return(any(vapply(as.list(expr), expr_has_column_ref, logical(1), schema = schema)))
   }
   FALSE
 }
+
+# Window-function names whose all-constant calls are folded in R (see
+# ir_parse_expr()).
+ir_foldable_window_fns <- c(
+  "row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist", "ntile",
+  "cumsum", "cumprod", "cummax", "cummin", "cummean", "cumall", "cumany",
+  "lag", "lead", "consecutive_id",
+  "sum", "mean", "min", "max", "sd", "var", "median", "n_distinct",
+  "first", "last", "nth"
+)
 
 # The recursive walker behind ir_parse_quo(). Carries the quosure's
 # environment explicitly (rather than re-deriving a quosure at every
@@ -267,6 +310,25 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       replacement <- if (fn_name == "&&") "&" else "|"
       stop("'", fn_name, "' is not supported in filter(); use '", replacement, "'",
            call. = FALSE)
+    }
+
+    # A window call whose arguments read no column (`row_number("a")`,
+    # `cumsum(2)`, `lag(5)`) runs on a length-1 constant in dplyr and the
+    # result is recycled; evaluate it in R and use the value. Zero-arg
+    # `row_number()`/`n()` and anything reading a column are left alone (an
+    # evaluation error outside the data mask also means "not constant").
+    if (fn_name %in% ir_foldable_window_fns && length(expr) > 1 &&
+        !any(vapply(as.list(expr)[-1], expr_has_column_ref, logical(1), schema = schema))) {
+      folded <- tryCatch(
+        list(value = rlang::eval_tidy(rlang::new_quosure(expr, env), data = list())),
+        error = function(e) NULL
+      )
+      if (!is.null(folded) && is.atomic(folded$value) && !is.null(folded$value)) {
+        if (length(folded$value) != 1) {
+          return(NULL)
+        }
+        return(ir_lit_from_r(folded$value))
+      }
     }
 
     # case_when()'s dots are `~` formulas, not ordinary expressions the
@@ -1840,6 +1902,7 @@ ir_cols <- function(ir) {
   switch(ir$kind,
     col = ir$name,
     lit = character(),
+    vec = character(),
     call = unique(unlist(lapply(ir$args, ir_cols), use.names = FALSE))
   )
 }
@@ -1861,6 +1924,7 @@ ir_cost <- function(ir) {
   }
   switch(ir$kind,
     lit = 1L,
+    vec = 1L,
     col = 2L,
     call = sum(vapply(ir$args, ir_cost, integer(1))) + 1L
   )
@@ -1943,7 +2007,7 @@ ir_bind <- function(ir, schema) {
     return(ir)
   }
 
-  if (ir$kind == "lit") {
+  if (ir$kind == "lit" || ir$kind == "vec") {
     return(ir)
   }
 
@@ -2059,6 +2123,7 @@ ir_deparse <- function(ir) {
 
   switch(ir$kind,
     col = ir$name,
+    vec = paste0("<", ir$type, "[", length(ir$value), "]>"),
     lit = {
       if (isTRUE(ir$na)) {
         "NA"
@@ -2098,6 +2163,10 @@ ir_infer_type <- function(ir, schema) {
            call. = FALSE)
     }
     return(schema$types[idx])
+  }
+
+  if (ir$kind == "vec") {
+    return(ir$type)
   }
 
   if (ir$kind == "lit") {

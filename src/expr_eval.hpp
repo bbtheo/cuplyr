@@ -174,6 +174,17 @@ inline bool ir_lit_is_na(Rcpp::List node) {
     return !Rf_isNull(na_sexp) && Rcpp::as<bool>(na_sexp);
 }
 
+// True iff a STRING literal's value is a single NA_character_. R's folds
+// (e.g. lag()/lead() of a scalar) produce such literals with the IR na flag
+// still FALSE, and Rcpp::as<std::string>(NA_STRING) reads as the text "NA".
+inline bool sexp_is_na_string(SEXP v) {
+    return TYPEOF(v) == STRSXP && Rf_xlength(v) == 1 && STRING_ELT(v, 0) == NA_STRING;
+}
+
+inline bool ir_lit_string_is_na(Rcpp::List node) {
+    return ir_lit_is_na(node) || sexp_is_na_string(node["value"]);
+}
+
 // -----------------------------------------------------------------------------
 // Section 2.3 op tables: IR canonical op name -> cudf AST operator, or ->
 // non-AST handler name. Adding a new AST-native op per the section 6
@@ -507,6 +518,7 @@ inline std::unique_ptr<cudf::scalar> build_scalar(const std::string& type_str,
             double v = 0.0;
             if (!is_na) {
                 v = Rcpp::as<double>(value_sexp);
+                // NA and NaN both become a null scalar, as upload maps NaN to null.
                 if (Rcpp::NumericVector::is_na(v)) is_na = true;
             }
             return std::make_unique<cudf::numeric_scalar<double>>(v, !is_na);
@@ -550,7 +562,7 @@ inline std::unique_ptr<cudf::scalar> build_scalar(const std::string& type_str,
         case cudf::type_id::STRING: {
             std::string v;
             if (!is_na) {
-                if (Rcpp::CharacterVector::is_na(value_sexp)) {
+                if (sexp_is_na_string(value_sexp)) {
                     is_na = true;
                 } else {
                     v = Rcpp::as<std::string>(value_sexp);
@@ -1809,21 +1821,21 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         }
         if (rhs_is_lit && !lhs_is_lit) {
             cudf::size_type li = materialize(lhs_node, ctx);
-            bool na = ir_lit_is_na(rhs_node);
+            bool na = ir_lit_string_is_na(rhs_node);
             std::string s = na ? std::string() : Rcpp::as<std::string>(rhs_node["value"]);
             cudf::string_scalar sc(s, !na);
             return cudf::binary_operation(ctx.cols[li], sc, bop, out_type);
         }
         if (lhs_is_lit && !rhs_is_lit) {
             cudf::size_type ri = materialize(rhs_node, ctx);
-            bool na = ir_lit_is_na(lhs_node);
+            bool na = ir_lit_string_is_na(lhs_node);
             std::string s = na ? std::string() : Rcpp::as<std::string>(lhs_node["value"]);
             cudf::string_scalar sc(s, !na);
             return cudf::binary_operation(sc, ctx.cols[ri], bop, out_type);
         }
         // both literal: degenerate, but still well-defined
-        bool lna = ir_lit_is_na(lhs_node);
-        bool rna = ir_lit_is_na(rhs_node);
+        bool lna = ir_lit_string_is_na(lhs_node);
+        bool rna = ir_lit_string_is_na(rhs_node);
         std::string ls = lna ? std::string() : Rcpp::as<std::string>(lhs_node["value"]);
         std::string rs = rna ? std::string() : Rcpp::as<std::string>(rhs_node["value"]);
         cudf::string_scalar lsc(ls, !lna);

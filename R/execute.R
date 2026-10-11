@@ -428,10 +428,14 @@ auto_name_dots <- function(dots, verb) {
     new_name <- dot_names[i]
 
     if (is.na(new_name) || new_name == "") {
-      new_name <- rlang::quo_text(dots[[i]])
-      warning("Unnamed ", verb, " expression '", new_name, "' will use expression as column name.\n",
-              "Consider using explicit names: ", verb, "(name = ", new_name, ")",
-              call. = FALSE)
+      # as_label() is dplyr's own naming rule (a bare `.data$x` is `x`).
+      new_name <- rlang::as_label(dots[[i]])
+      # A `.data$x` / `.data[["x"]]` dot is a column reference: no warning.
+      if (!is_data_pronoun_call(rlang::quo_get_expr(dots[[i]]))) {
+        warning("Unnamed ", verb, " expression '", new_name, "' will use expression as column name.\n",
+                "Consider using explicit names: ", verb, "(name = ", new_name, ")",
+                call. = FALSE)
+      }
       dot_names[i] <- new_name
     }
   }

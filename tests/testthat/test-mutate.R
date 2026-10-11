@@ -428,14 +428,15 @@ test_that("mutate() errors on non-numeric scalar", {
   )
 })
 
-test_that("mutate() errors on vector scalar", {
+test_that("mutate() with a nested vector literal follows dplyr (F11: CPU fallback, R recycling warning)", {
   skip_if_no_gpu()
 
   gpu_df <- tbl_gpu(mtcars)
 
-  expect_error(
+  # dplyr itself only warns (R's recycling rule) rather than erroring.
+  expect_warning(
     dplyr::mutate(gpu_df, new_col = mpg + c(1, 2, 3)),
-    "numeric scalar|length"
+    "longer object length"
   )
 })
 

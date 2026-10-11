@@ -77,14 +77,15 @@ col_index <- function(x, name) {
 # dplyr's own condition in tests/testthat/test-dplyr-join-rows.R depends
 # on. `vctrs_error_subscript` (F03, `x[i, ]` resolving its row subscript
 # against nrow in `lower_slice()`) is passed through for the same reason:
-# it is tibble's own error class. No other caller raises a classed
+# it is tibble's own error class, and `dplyr:::mutate_error` (a wrong-size vector
+# literal in lower_mutate(), raised by dplyr itself). No other caller raises a classed
 # condition from inside `lower_and_execute()`, so this is a no-op for every
 # other verb.
 wrap_gpu_call <- function(op_name, expr) {
   tryCatch(
     expr,
     error = function(e) {
-      if (inherits(e, c("dplyr_error_join", "vctrs_error_subscript"))) {
+      if (inherits(e, c("dplyr_error_join", "vctrs_error_subscript", "dplyr:::mutate_error"))) {
         stop(e)
       }
       msg <- conditionMessage(e)

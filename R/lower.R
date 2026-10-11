@@ -89,13 +89,36 @@ lower_filter <- function(ast, source_ptr) {
 lower_mutate <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
   input_schema <- infer_schema(ast$input)
+  expressions <- ast$expressions
+
+  # Vector literals (`y = 1:5`): upload each as a temp column appended to the
+  # input, make the expression a copy of it, and drop the temps afterwards.
+  vec_idx <- which(vapply(expressions, function(e) identical(e$ir$kind, "vec"), logical(1)))
+  n_input_cols <- length(input_schema$names)
+  if (length(vec_idx) > 0) {
+    n_rows <- gpu_dim(input_ptr)[[1L]]
+    tmp_names <- paste0("..vec", seq_along(vec_idx), "..")
+    tmp_cols <- list()
+    for (k in seq_along(vec_idx)) {
+      vec <- expressions[[vec_idx[k]]]$ir
+      if (length(vec$value) != n_rows) {
+        mutate_vector_size_error(n_rows, vec)
+      }
+      tmp_cols[[tmp_names[k]]] <- vec$value
+      expressions[[vec_idx[k]]]$ir <- ir_col(tmp_names[k])
+    }
+    upload <- tbl_gpu(tibble::as_tibble(tmp_cols, .name_repair = "minimal"), lazy = FALSE)
+    input_ptr <- gpu_bind_cols_impl(list(input_ptr, upload$ptr))
+    input_schema$names <- c(input_schema$names, tmp_names)
+    input_schema$types <- c(input_schema$types, upload$schema$types)
+  }
 
   index_names <- input_schema$names
   index_types <- input_schema$types
-  bound_exprs <- vector("list", length(ast$expressions))
+  bound_exprs <- vector("list", length(expressions))
 
-  for (i in seq_along(ast$expressions)) {
-    expr <- ast$expressions[[i]]
+  for (i in seq_along(expressions)) {
+    expr <- expressions[[i]]
 
     lookup_schema <- list(names = index_names, types = index_types)
     bound_exprs[[i]] <- ir_bind(expr$ir, lookup_schema)
@@ -108,13 +131,13 @@ lower_mutate <- function(ast, source_ptr) {
     index_types <- c(index_types, expr$output_type)
   }
 
-  out_names <- vapply(ast$expressions, `[[`, character(1), "output_col")
-  out_types <- vapply(ast$expressions, `[[`, character(1), "output_type")
+  out_names <- vapply(expressions, `[[`, character(1), "output_col")
+  out_types <- vapply(expressions, `[[`, character(1), "output_type")
   # A bare factor-column copy is typed DICTIONARY32 (logical); the column
   # that comes out is the INT32 codes. Any other factor-valued expression is
   # sent to the CPU by parse_mutate_dots(); if one gets here anyway, fail
   # rather than return codes with no levels.
-  is_copy <- vapply(ast$expressions, function(e) identical(e$ir$kind, "col"), logical(1))
+  is_copy <- vapply(expressions, function(e) identical(e$ir$kind, "col"), logical(1))
   bad <- out_types == "DICTIONARY32" & !is_copy
   if (any(bad)) {
     stop("Can't compute factor-valued expression `", out_names[bad][1],
@@ -122,7 +145,24 @@ lower_mutate <- function(ast, source_ptr) {
   }
   out_types <- gpu_physical_type(out_types)
 
-  gpu_mutate_expr(input_ptr, bound_exprs, out_names, out_types, input_schema$names)
+  result <- gpu_mutate_expr(input_ptr, bound_exprs, out_names, out_types, input_schema$names)
+  if (length(vec_idx) > 0) {
+    # The temps are input columns, so they kept their slots after the originals.
+    temp_slots <- n_input_cols + seq_along(vec_idx) - 1L
+    result <- gpu_select(result, setdiff(seq_len(gpu_dim(result)[[2L]]) - 1L, temp_slots))
+  }
+  result
+}
+
+# A vector literal whose length isn't the table's row count: run dplyr itself
+# on an empty-column tibble of that height with the original dot, so the error
+# (class, "must be size N or 1, not K", the "Inlined constant" variant) is
+# dplyr's own.
+mutate_vector_size_error <- function(n_rows, vec) {
+  tb <- tibble::new_tibble(list(), nrow = n_rows)
+  rlang::inject(dplyr::mutate(tb, !!vec$name := !!vec$quo))
+  stop("Can't recycle `", vec$name, "` (size ", length(vec$value), ") to size ", n_rows, ".",
+       call. = FALSE)
 }
 
 #' Lower arrange node
