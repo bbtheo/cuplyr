@@ -9,7 +9,8 @@ ast_summarise(
   aggregations,
   groups,
   result_groups = character(),
-  on_sum_overflow = "error"
+  on_sum_overflow = "error",
+  sort_groups = TRUE
 )
 }
 \arguments{
@@ -34,6 +35,10 @@ leaves R's integer range at execution. \code{"double"}: the column comes back
 FLOAT64, as in dplyr (eager mode reconciles the schema from the result).
 \code{"error"} (lazy plans, whose schema was declared INT32 statically): raise
 \code{cuplyr_error_sum_overflow}.}
+
+\item{sort_groups}{(F33) Sort the grouped result by the group keys
+(ascending, \code{NA} last), dplyr's \code{group_by()} order. \code{FALSE} only for
+\code{summarise_by_desugar()}, which re-sorts by first appearance anyway.}
 }
 \value{
 An ast_summarise node

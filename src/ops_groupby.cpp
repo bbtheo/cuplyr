@@ -8,6 +8,7 @@
 #include <cudf/groupby.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/null_mask.hpp>
+#include <cudf/sorting.hpp>
 #include <cudf/reduction.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/table/table.hpp>
@@ -440,7 +441,7 @@ bool narrow_int_sum(std::unique_ptr<cudf::column>& col) {
 SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                    IntegerVector agg_col_indices, CharacterVector agg_types,
                    LogicalVector na_rm, NumericVector agg_extra,
-                   LogicalVector identity) {
+                   LogicalVector identity, bool sort_keys) {
     using namespace cuplyr;
 
     Rcpp::XPtr<GpuTablePtr> ptr(xptr);
@@ -946,7 +947,23 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         narrow_sum(i, result_columns.back());
     }
 
-    return finish(std::make_unique<cudf::table>(std::move(result_columns)));
+    auto result = std::make_unique<cudf::table>(std::move(result_columns));
+
+    // F33: dplyr's group_by() order -- keys ascending, NA last. Bytewise
+    // string compare is the C locale, factor codes give level order, BOOL8
+    // gives FALSE < TRUE. The keys are distinct, so an unstable sort is
+    // fine. Done on the k-row result, before R permutes [keys, aggs].
+    if (sort_keys && result->num_rows() > 1) {
+        cudf::table_view key_view = result->view().select(
+            [&] { std::vector<cudf::size_type> k(num_groups); std::iota(k.begin(), k.end(), 0); return k; }());
+        std::vector<cudf::order> order(num_groups, cudf::order::ASCENDING);
+        std::vector<cudf::null_order> nulls(num_groups, cudf::null_order::AFTER);
+        auto idx = cudf::sorted_order(key_view, order, nulls);
+        result = cudf::gather(result->view(), idx->view(),
+                              cudf::out_of_bounds_policy::DONT_CHECK);
+    }
+
+    return finish(std::move(result));
 }
 
 // Phase 9, task 1: grouping metadata API (group_data()/group_keys()/

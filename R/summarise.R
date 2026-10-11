@@ -206,13 +206,27 @@
 #' (or a name created twice) sees the new value, as in dplyr; such calls run
 #' through the CPU fallback.
 #'
+#' ## Group order
+#' `group_by(g) |> summarise(...)` returns groups in dplyr's `group_by()`
+#' order: ascending, `NA` last, strings in the C locale, `FALSE < TRUE`,
+#' factors in level order (`gpu_summarise()` sorts the small aggregated result
+#' by the keys). `count()`/`tally()` inherit it.
+#'
+#' ## `.drop = FALSE`
+#' On a `group_by(.drop = FALSE)` grouping with a factor key, every group of
+#' `group_data()` gets a row, empty ones included, holding each expression
+#' evaluated on an empty vector (`n()` 0, `sum()` 0, `mean()` `NaN`, `min()`
+#' `Inf` with base R's warning, ...); with no expressions the result is the
+#' keys of every group. Such a call materializes a lazy table on the GPU (the
+#' row count is data-dependent).
+#'
 #' ## `.by` group order
 #' Verified empirically against dplyr 1.2.1: `summarise(.by=)` emits one row
 #' per distinct `.by` combination in the order that combination FIRST
 #' appears in `.data` -- e.g. `summarise(tibble(g = c("b","a","b")), n =
 #' n(), .by = g)` returns `g` in the order `c("b", "a")`, not `c("a", "b")`.
-#' This differs from `group_by(g) |> summarise(...)`, whose group order is
-#' cuDF's own (unspecified, hash-groupby-derived) order. Implemented via a
+#' This differs from `group_by(g) |> summarise(...)`, whose groups are
+#' sorted. Implemented via a
 #' desugar (`summarise_by_desugar()`): an ungrouped `row_number()` marks
 #' each row's original position, a grouped summarise computes the user's
 #' aggregations plus `min()` of that position per group, and the result is
@@ -369,7 +383,107 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
 
   retained_groups <- resolve_summarise_groups(.data$groups, .groups, caller_env)
 
+  # F33: a `.drop = FALSE` grouping with a factor key also emits the empty
+  # groups. The test reads the schema only, so the default path pays nothing.
+  if (summarise_wants_empty_groups(.data)) {
+    cpu <- function() {
+      gpu_fallback("summarise", .data, function(tbl) {
+        rlang::inject(dplyr::summarise(tbl, !!!orig_dots, .groups = .groups))
+      })
+    }
+    # An aggregate named like a key replaces it; rare enough for the CPU.
+    if (any(names(dots) %in% .data$groups)) return(cpu())
+    return(summarise_with_empty_groups(.data, dots, retained_groups, cpu))
+  }
+
   summarise_core(.data, dots, retained_groups)
+}
+
+# Internal: TRUE iff summarise() of `.data` has to add rows for empty groups
+# (F33): `group_by(.drop = FALSE)` with some factor key. Schema checks only.
+# @keywords internal
+summarise_wants_empty_groups <- function(.data) {
+  length(.data$groups) > 0L && isFALSE(.data$group_drop) &&
+    any(.data$groups %in% names(current_schema(.data)$factor_levels))
+}
+
+# Internal: grouped summarise() on a `.drop = FALSE` grouping (F33). The
+# observed groups are summarised as usual; the empty groups of group_data()
+# take the values of the same aggregations over an empty slice (F07's
+# ungrouped 0-row summarise: n() 0, sum() 0, mean() NaN, min() Inf, ...). The
+# table is assembled on the GPU (one gather over [observed; empty-slice row]
+# plus the uploaded key columns), so aggregate values never pass through R
+# (an upload would turn NaN into NA). Needs the data's row layout, so a lazy
+# input's pending ops are computed first.
+# @param dots auto_name_dots()'d aggregation quosures
+# @param fallback Function running the whole call on the CPU, for the
+#   (unexpected) aggregate type mismatches
+# @keywords internal
+summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) {
+  was_lazy <- identical(.data$exec_mode, "lazy")
+  # A GPU materialization of the pending ops, not a CPU fallback: no notice.
+  base <- compute(.data)
+  base$exec_mode <- "eager"
+  keys <- base$groups
+
+  finish <- function(result) {
+    if (was_lazy) result$exec_mode <- "lazy"
+    result
+  }
+
+  gd <- compute_group_data(base)
+  if (!any(lengths(gd$.rows) == 0L)) {
+    return(finish(summarise_core(base, dots, retained_groups)))
+  }
+
+  observed <- summarise_core(base, dots, character())
+  empty_slice <- new_tbl_gpu(
+    ptr = gpu_gather_rows(list(base$ptr), numeric(0)),
+    schema = base$schema, exec_mode = "eager"
+  )
+  identity_row <- summarise_core(empty_slice, dots, character())
+
+  n_keys <- length(keys)
+  agg_names <- observed$schema$names[-seq_len(n_keys)]
+  obs_types <- observed$schema$types[-seq_len(n_keys)]
+  id_types <- identity_row$schema$types
+  if (!identical(identity_row$schema$names, agg_names)) {
+    return(fallback())
+  }
+
+  # INT32 vs FLOAT64 (an integer min()/max() that did or didn't meet an empty
+  # group) is the one drift that can occur: cast to the common type.
+  common <- ifelse(obs_types == id_types, obs_types, "FLOAT64")
+  if (any(obs_types != id_types & !(obs_types %in% c("INT32", "FLOAT64") &
+                                   id_types %in% c("INT32", "FLOAT64")))) {
+    return(fallback())
+  }
+  obs_ptr <- gpu_select(observed$ptr, n_keys + seq_along(agg_names) - 1L)
+  id_ptr <- identity_row$ptr
+  for (j in which(obs_types != common)) obs_ptr <- gpu_cast_column(obs_ptr, j - 1L, common[[j]])
+  for (j in which(id_types != common)) id_ptr <- gpu_cast_column(id_ptr, j - 1L, common[[j]])
+
+  # Row of each group_data() group in the observed result, or the identity row
+  # (index n_observed in the concatenation) when it is empty.
+  obs_keys <- collect(dplyr::select(observed, dplyr::all_of(keys)))
+  gd_keys <- gd[keys]
+  n_obs <- nrow(obs_keys)
+  idx <- vctrs::vec_match(gd_keys, obs_keys[keys])
+  idx0 <- ifelse(is.na(idx), n_obs, idx - 1L)
+
+  agg_ptr <- gpu_gather_rows(list(obs_ptr, id_ptr), as.numeric(idx0))
+  key_tbl <- tbl_gpu(tibble::as_tibble(gd_keys), lazy = FALSE)
+  schema <- list(
+    names = c(keys, agg_names),
+    types = c(unname(key_tbl$schema$types), common),
+    factor_levels = key_tbl$schema$factor_levels
+  )
+  finish(new_tbl_gpu(
+    ptr = gpu_bind_cols_impl(list(key_tbl$ptr, agg_ptr)),
+    schema = schema, groups = retained_groups,
+    group_drop = length(retained_groups) == 0L,
+    exec_mode = "eager"
+  ))
 }
 
 # Internal: summarise() with no dots (F07), as dplyr's summarise.data.frame()
@@ -379,8 +493,9 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
 #     carries the 1. A lazy input's pending ops are computed (and discarded)
 #     first, since they can error.
 #   - grouped: one row per group holding only the grouping columns, in
-#     group_by()'s canonical order (ascending, NA last), so the hash
-#     group-by is followed by an arrange(). `.groups` is resolved and
+#     group_by()'s canonical order (ascending, NA last; gpu_summarise() sorts
+#     the keys). A `.drop = FALSE` grouping with a factor key also emits its
+#     empty groups, built from group_data()'s keys. `.groups` is resolved and
 #     validated like every other summarise().
 #   - `.by=`: the distinct `.by` combinations in first-appearance order,
 #     ungrouped.
@@ -403,8 +518,28 @@ summarise_zero_dots <- function(.data, by_cols, by_given, groups_arg, caller_env
     return(tbl_gpu(tibble::tibble(.rows = 1L), lazy = .data$exec_mode == "lazy"))
   }
 
-  keys <- push_op(.data, ast_summarise(input_node(.data), list(), .data$groups, retained_groups))
-  dplyr::arrange(keys, !!!rlang::syms(.data$groups))
+  if (summarise_wants_empty_groups(.data)) {
+    return(summarise_group_keys(.data, retained_groups))
+  }
+
+  # gpu_summarise() sorts the keys itself (F33).
+  push_op(.data, ast_summarise(input_node(.data), list(), .data$groups, retained_groups))
+}
+
+# Internal: zero-dots summarise() of a `.drop = FALSE` grouping (F33): the keys
+# of every group_data() group, empty ones included, uploaded as the result.
+# Needs the data's row layout, so a lazy input's pending ops are computed first
+# on the GPU (not a CPU fallback: no notice).
+# @keywords internal
+summarise_group_keys <- function(.data, retained_groups) {
+  was_lazy <- identical(.data$exec_mode, "lazy")
+  base <- compute(.data)
+  base$exec_mode <- "eager"
+  keys <- tbl_gpu(tibble::as_tibble(compute_group_data(base)[base$groups]), lazy = FALSE)
+  keys$groups <- retained_groups
+  keys$group_drop <- length(retained_groups) == 0L
+  if (was_lazy) keys$exec_mode <- "lazy"
+  keys
 }
 
 # Internal: TRUE iff the dots must be evaluated one after another (F07): a
@@ -737,7 +872,7 @@ ir_agg_arg_is_scalar_reduction <- function(ir) {
 #   propagate_groups(), R/execute.R, which reads `node$result_groups`)
 # @keywords internal
 summarise_core <- function(.data, dots, retained_groups = character(),
-                           internal_cols = character()) {
+                           internal_cols = character(), sort_groups = TRUE) {
   # Phase 6, task 6.1 (Fix A): extract and strip any `na.rm = <literal>`
   # named argument BEFORE temp-column preprocessing -- this must happen
   # first so a sub-expression call like `sum(sqrt(x), na.rm = TRUE)` is
@@ -788,7 +923,7 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   # temp-column case above) and the schema is corrected from the real result.
   if (any(vapply(aggregations, function(agg) isTRUE(agg$identity) &&
                  identical(unname(agg$input_type), "INT32"), logical(1)))) {
-    return(summarise_run_now(working_data, aggregations, retained_groups))
+    return(summarise_run_now(working_data, aggregations, retained_groups, sort_groups))
   }
 
   # F34: an integer sum() that overflows is a double in dplyr. An eager
@@ -797,7 +932,7 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   eager <- !identical(working_data$exec_mode, "lazy")
   result <- push_op(working_data, ast_summarise(
     input_node(working_data), aggregations, working_data$groups, retained_groups,
-    on_sum_overflow = if (eager) "double" else "error"
+    on_sum_overflow = if (eager) "double" else "error", sort_groups = sort_groups
   ))
   if (eager) reconcile_summarise_types(result) else result
 }
@@ -806,7 +941,7 @@ summarise_core <- function(.data, dots, retained_groups = character(),
 # the result's real column types (F07, see summarise_core()). Returns a table
 # in the input's exec_mode with no pending ops.
 # @keywords internal
-summarise_run_now <- function(.data, aggregations, retained_groups) {
+summarise_run_now <- function(.data, aggregations, retained_groups, sort_groups = TRUE) {
   was_lazy <- identical(.data$exec_mode, "lazy")
 
   if (was_lazy && has_pending_ops(.data)) {
@@ -819,7 +954,8 @@ summarise_run_now <- function(.data, aggregations, retained_groups) {
   base$exec_mode <- "eager"
   result <- push_op(base, ast_summarise(input_node(base), aggregations,
                                         base$groups, retained_groups,
-                                        on_sum_overflow = "double"))
+                                        on_sum_overflow = "double",
+                                        sort_groups = sort_groups))
   result <- reconcile_summarise_types(result)
 
   if (was_lazy) {
@@ -1112,7 +1248,7 @@ summarise_by_desugar <- function(.data, dots, by_cols) {
     rlang::call2("min", as.name(rowid_name)), rlang::base_env()
   )
 
-  result <- summarise_core(grouped, dots, internal_cols = first_name)
+  result <- summarise_core(grouped, dots, internal_cols = first_name, sort_groups = FALSE)
   result <- dplyr::arrange(result, !!rlang::sym(first_name))
   dplyr::select(result, -dplyr::all_of(first_name))
 }

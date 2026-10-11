@@ -237,7 +237,8 @@ lower_summarise <- function(ast, source_ptr) {
   identity_flags <- vapply(ast$aggregations, function(agg) isTRUE(agg$identity), logical(1))
 
   result <- gpu_summarise(input_ptr, group_indices, agg_col_indices, agg_fns,
-                          na_rm_flags, agg_extra, identity_flags)
+                          na_rm_flags, agg_extra, identity_flags,
+                          !isFALSE(ast$sort_groups))
 
   # dplyr warns whenever min()/max() hit the identity, with base R's text.
   used <- attr(result, "identity_used")

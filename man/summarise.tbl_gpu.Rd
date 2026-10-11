@@ -236,13 +236,31 @@ name). An expression that mentions a name an earlier expression created
 through the CPU fallback.
 }
 
+\subsection{Group order}{
+
+\code{group_by(g) |> summarise(...)} returns groups in dplyr's \code{group_by()}
+order: ascending, \code{NA} last, strings in the C locale, \code{FALSE < TRUE},
+factors in level order (\code{gpu_summarise()} sorts the small aggregated result
+by the keys). \code{count()}/\code{tally()} inherit it.
+}
+
+\subsection{\code{.drop = FALSE}}{
+
+On a \code{group_by(.drop = FALSE)} grouping with a factor key, every group of
+\code{group_data()} gets a row, empty ones included, holding each expression
+evaluated on an empty vector (\code{n()} 0, \code{sum()} 0, \code{mean()} \code{NaN}, \code{min()}
+\code{Inf} with base R's warning, ...); with no expressions the result is the
+keys of every group. Such a call materializes a lazy table on the GPU (the
+row count is data-dependent).
+}
+
 \subsection{\code{.by} group order}{
 
 Verified empirically against dplyr 1.2.1: \code{summarise(.by=)} emits one row
 per distinct \code{.by} combination in the order that combination FIRST
 appears in \code{.data} -- e.g. \code{summarise(tibble(g = c("b","a","b")), n = n(), .by = g)} returns \code{g} in the order \code{c("b", "a")}, not \code{c("a", "b")}.
-This differs from \code{group_by(g) |> summarise(...)}, whose group order is
-cuDF's own (unspecified, hash-groupby-derived) order. Implemented via a
+This differs from \code{group_by(g) |> summarise(...)}, whose groups are
+sorted. Implemented via a
 desugar (\code{summarise_by_desugar()}): an ungrouped \code{row_number()} marks
 each row's original position, a grouped summarise computes the user's
 aggregations plus \code{min()} of that position per group, and the result is

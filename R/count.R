@@ -81,8 +81,8 @@
 #     src/ops_window.cpp). See test-dplyr-count.R's dedicated NA-key tests.
 #   - `.drop` (count()'s factor-levels arg): defaults to
 #     group_by_drop_default(x) and is passed to group_by(); with `.drop =
-#     FALSE` the result gets zero-count rows for empty factor groups (see
-#     count_add_empty_groups()).
+#     FALSE` the result gets zero-count rows for empty factor groups (summarise()
+#     adds them, F33).
 #     add_count()'s `.drop` was deprecated in dplyr 1.0.0 and errors if
 #     supplied at all (replicated here without a `lifecycle` dependency).
 
@@ -144,35 +144,6 @@ resolve_grouping_dots <- function(.data, dots) {
   }
 
   list(data = result, names = unique(names_out))
-}
-
-# `.drop = FALSE` grouped count()/tally(): dplyr returns one row per group of
-# group_data() order, with n = 0 for the groups that have no rows. `grouped` is
-# the table that was aggregated, `result` the summarise() of it (observed
-# groups only). Only this path pays for the extra group_data() call; it is a
-# no-op unless .drop = FALSE and some group key is a factor. The result is
-# rebuilt from the (small) collected keys and keeps `result`'s exec_mode.
-# @param out_groups Groups the returned table carries
-# @keywords internal
-count_add_empty_groups <- function(grouped, result, agg_name, out_groups) {
-  keys <- grouped$groups
-  if (length(keys) == 0L || group_by_drop_default(grouped) ||
-      !any(keys %in% names(current_schema(grouped)$factor_levels))) {
-    return(result)
-  }
-  gd <- compute_group_data(grouped)
-  gd_keys <- gd[keys]
-  res_df <- collect(result)
-  idx <- vctrs::vec_match(gd_keys, res_df[keys])
-  n <- vctrs::vec_slice(res_df[[agg_name]], idx)
-  n[is.na(idx)] <- vctrs::vec_cast(0, n)
-  out <- gd_keys
-  out[[agg_name]] <- n
-  out <- tbl_gpu(out, lazy = identical(result$exec_mode, "lazy"))
-  if (length(out_groups) > 0L) {
-    out <- dplyr::group_by(out, !!!rlang::syms(out_groups), .drop = FALSE)
-  }
-  out
 }
 
 # Pick the aggregation's output column name: the user's explicit `name=` if
@@ -310,7 +281,6 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
 
   result <- rlang::inject(dplyr::summarise(grouped, !!agg_name := !!agg_call))
   out_groups <- intersect(orig_groups, result$schema$names)
-  result <- count_add_empty_groups(grouped, result, agg_name, out_groups)
 
   if (isTRUE(sort)) {
     result <- dplyr::arrange(result, dplyr::desc(!!rlang::sym(agg_name)))
@@ -382,7 +352,6 @@ tally.tbl_gpu <- function(x, wt = NULL, sort = FALSE, name = NULL) {
   options(dplyr.summarise.inform = FALSE)
 
   result <- rlang::inject(dplyr::summarise(x, !!agg_name := !!agg_call))
-  result <- count_add_empty_groups(x, result, agg_name, result$groups)
 
   if (isTRUE(sort)) {
     result <- dplyr::arrange(result, dplyr::desc(!!rlang::sym(agg_name)))

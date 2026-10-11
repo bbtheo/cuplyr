@@ -509,15 +509,23 @@ push_op <- function(.data, node) {
 }
 
 # The fixed group keys (`slice(.preserve = TRUE)`, see fixed_keys_of()) that
-# survive `node`: only a column-only node (select/rename/mutate and its window
+# survive `node`: a column-only node (select/rename/mutate and its window
 # stages, relocate is a select) that leaves every group column's values and
-# the grouping alone. Anything else returns NULL, so the keys can never end up
-# on a table with different groups.
+# the grouping alone, or (F33) an arrange/distinct of a `.drop = FALSE` table,
+# which dplyr's dplyr_row_slice() leaves with the whole group structure (with
+# `.drop = TRUE` it trims the empty groups, so they are dropped here too).
+# Anything else returns NULL, so the keys can never end up on a table with
+# different groups.
 # @keywords internal
 carry_fixed_keys <- function(node, .data, new_groups) {
   abort_positional_rename_with_groups(node, .subset2(.data, "groups"))
   keys <- fixed_keys_of(.data)
-  if (is.null(keys) || !node$type %in% c("select", "rename", "mutate", "window")) {
+  if (is.null(keys)) {
+    return(NULL)
+  }
+  if (node$type %in% c("arrange", "distinct")) {
+    if (!isFALSE(.subset2(.data, "group_drop"))) return(NULL)
+  } else if (!node$type %in% c("select", "rename", "mutate", "window")) {
     return(NULL)
   }
   old <- .subset2(.data, "groups")
@@ -631,6 +639,13 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
   # As in push_op(): `.drop` goes with the last surviving group column.
   new_group_drop <- if (length(new_groups) > 0L) x$group_drop %||% TRUE else TRUE
 
+  # F33: semi/anti joins slice x's rows, so (dplyr_row_slice()) a `.drop =
+  # FALSE` x keeps its fixed group keys.
+  join_fixed_keys <- if (join_type %in% c("semi", "anti") && isFALSE(x$group_drop) &&
+                         identical(new_groups, x$groups)) {
+    fixed_keys_of(x)
+  }
+
   if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
     return(new_tbl_gpu(
       ptr = NULL,
@@ -638,7 +653,8 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
       lazy_ops = join_ast,
       groups = new_groups,
       exec_mode = "lazy",
-      group_drop = new_group_drop
+      group_drop = new_group_drop,
+      fixed_keys = join_fixed_keys
     ))
   }
 
@@ -656,7 +672,8 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
     lazy_ops = NULL,
     groups = new_groups,
     exec_mode = "eager",
-    group_drop = new_group_drop
+    group_drop = new_group_drop,
+    fixed_keys = join_fixed_keys
   )
 }
 

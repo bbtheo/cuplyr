@@ -103,12 +103,16 @@ ast_arrange <- function(input, sort_specs, groups = character()) {
 #'   FLOAT64, as in dplyr (eager mode reconciles the schema from the result).
 #'   `"error"` (lazy plans, whose schema was declared INT32 statically): raise
 #'   `cuplyr_error_sum_overflow`.
+#' @param sort_groups (F33) Sort the grouped result by the group keys
+#'   (ascending, `NA` last), dplyr's `group_by()` order. `FALSE` only for
+#'   `summarise_by_desugar()`, which re-sorts by first appearance anyway.
 #' @return An ast_summarise node
 #' @keywords internal
 ast_summarise <- function(input, aggregations, groups, result_groups = character(),
-                          on_sum_overflow = "error") {
+                          on_sum_overflow = "error", sort_groups = TRUE) {
   ast_node("summarise", input = input, aggregations = aggregations, groups = groups,
-            result_groups = result_groups, on_sum_overflow = on_sum_overflow)
+            result_groups = result_groups, on_sum_overflow = on_sum_overflow,
+            sort_groups = sort_groups)
 }
 
 #' Create a barrier AST node (optimization fence)
