@@ -10,7 +10,8 @@ abort_bind_rows_incompatible(
   type1,
   type2,
   is_factor1 = FALSE,
-  is_factor2 = FALSE
+  is_factor2 = FALSE,
+  call = rlang::caller_env()
 )
 }
 \arguments{
@@ -23,6 +24,8 @@ table whose column conflicted with the running accumulated type}
 \code{other_idx}'s own type for this column}
 
 \item{is_factor1, is_factor2}{Logical: is each side \code{DICTIONARY32}?}
+
+\item{call}{The user's call; the error has vctrs' classes}
 }
 \description{
 Reproduces \code{vctrs}' exact message shape, verified empirically against

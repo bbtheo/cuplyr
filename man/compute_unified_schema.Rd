@@ -4,10 +4,19 @@
 \alias{compute_unified_schema}
 \title{Compute unified schema from multiple tables}
 \usage{
-compute_unified_schema(tables)
+compute_unified_schema(
+  tables,
+  positions = seq_along(tables),
+  call = rlang::caller_env()
+)
 }
 \arguments{
 \item{tables}{List of tbl_gpu objects}
+
+\item{positions}{Each table's position among the user's inputs (for the
+error's \code{..N} labels)}
+
+\item{call}{The user's call, for errors}
 }
 \value{
 List with \code{names}, \code{types}, and \code{factor_levels} (\code{NULL} if no

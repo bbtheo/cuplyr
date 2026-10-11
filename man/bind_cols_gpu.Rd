@@ -4,19 +4,24 @@
 \alias{bind_cols_gpu}
 \title{GPU bind_cols implementation}
 \usage{
-bind_cols_gpu(dots, .name_repair = "unique")
+bind_cols_gpu(dots, .name_repair = "unique", call = rlang::caller_env())
 }
 \arguments{
 \item{dots}{Inputs as flattened by \code{bind_cols_inputs()}: tbl_gpu, data
 frames and vectors (a vector becomes one column, named by its element
-name, recycled to the table height like \code{vctrs::vec_cbind()} does)}
+name)}
 
 \item{.name_repair}{Name repair method}
+
+\item{call}{The user's call, for errors}
 }
 \value{
 A tbl_gpu
 }
 \description{
-GPU bind_cols implementation
+Sizes follow vctrs' rules (\code{vctrs::vec_size_common()}): inputs of size 1
+recycle, every other size must match, and an input with no columns
+contributes its size only. A lazy input is computed once, so its size is the
+post-op row count.
 }
 \keyword{internal}

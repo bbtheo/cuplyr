@@ -97,15 +97,16 @@ test_that("F07: bind_rows()/bind_cols()/literal-mask filter() on zero-column tab
 
   expect_identical(dim(cuplyr::bind_rows(t2, t3)), c(5L, 0L))
   expect_identical(dim(cuplyr::bind_cols(t3, t3)), c(3L, 0L))
-  expect_error(cuplyr::bind_cols(t2, t3), "common")
+  # dplyr (vctrs) reports the size mismatch, labelled by position.
+  expect_error(cuplyr::bind_cols(t2, t3), "Can't recycle `..1` (size 2) to match `..2` (size 3)", fixed = TRUE)
   expect_identical(collect(dplyr::filter(t3, c(TRUE, FALSE, NA))), tibble::tibble(.rows = 1L))
   expect_identical(collect(dplyr::filter(t3, TRUE)), tibble::tibble(.rows = 3L))
 
-  # A zero-column table with rows next to real columns would need NA padding:
-  # an error, never a silent drop.
+  # dplyr (F12): a zero-column table pads with NA in bind_rows() and adds no
+  # columns in bind_cols(); neither is an error.
   real <- tbl_gpu(data.frame(x = 1:3))
-  expect_error(cuplyr::bind_rows(real, t3), "no columns")
-  expect_error(cuplyr::bind_cols(real, t3), "no columns")
+  expect_identical(collect(cuplyr::bind_rows(real, t3))$x, c(1L, 2L, 3L, NA, NA, NA))
+  expect_identical(collect(cuplyr::bind_cols(real, t3))$x, 1:3)
 })
 
 test_that("F07: dplyr_row_slice() on a zero-column table keeps the sliced row count", {

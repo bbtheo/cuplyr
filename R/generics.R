@@ -166,12 +166,9 @@ apply_col_changes <- function(x, m, final_names, new_cols) {
   }
 
   if (length(new_cols) > 0L) {
-    # `bind_cols()` unqualified (NOT `dplyr::bind_cols()`): dplyr's own
-    # top-level `bind_cols()` is a plain function that calls
-    # `vctrs::vec_cbind()` directly (never `UseMethod()`) -- this package's
-    # OWN `bind_cols()` (R/bind.R) is a real S3 generic that dispatches to
-    # `bind_cols.tbl_gpu()`; calling the `dplyr::` one here would try (and
-    # fail) to treat a `tbl_gpu` as a plain vctrs-compatible value.
+    # `bind_cols()` unqualified (NOT `dplyr::bind_cols()`): this package's own
+    # (R/bind.R) binds a tbl_gpu on the GPU; dplyr's would try (and fail) to
+    # treat a `tbl_gpu` as a plain vctrs-compatible value.
     upload <- tbl_gpu(tibble::as_tibble(new_cols, .name_repair = "minimal"), lazy = FALSE)
     # "minimal": the names were validated by tibble (or by the caller) already,
     # and "unique" would rewrite a legal `...N` name.

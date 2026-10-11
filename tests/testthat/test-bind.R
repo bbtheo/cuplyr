@@ -2,9 +2,13 @@
 
 # Basic S3 wiring --------------------------------------------------------------
 
-test_that("bind_rows and bind_cols register S3 methods for tbl_gpu", {
-  expect_true(is.function(getS3method("bind_rows", "tbl_gpu", optional = TRUE)))
-  expect_true(is.function(getS3method("bind_cols", "tbl_gpu", optional = TRUE)))
+# Plain functions like dplyr's (a generic would force `!!!` splices), so there
+# are no tbl_gpu methods to register.
+test_that("bind_rows and bind_cols are plain functions, not S3 generics", {
+  expect_null(getS3method("bind_rows", "tbl_gpu", optional = TRUE))
+  expect_null(getS3method("bind_cols", "tbl_gpu", optional = TRUE))
+  expect_false(any(grepl("UseMethod", deparse(body(bind_rows)))))
+  expect_false(any(grepl("UseMethod", deparse(body(bind_cols)))))
 })
 
 test_that("bind_rows delegates to dplyr for non-tbl_gpu inputs", {
@@ -488,10 +492,11 @@ test_that("bind_rows .id column appears first", {
 })
 
 # =============================================================================
-# bind_rows: Groups are discarded after binding
+# bind_rows: the first input's groups are kept (as dplyr does)
 # =============================================================================
 
-test_that("bind_rows discards groups from single grouped table", {
+# dplyr's bind_rows() keeps the first input's groups, so these assert that.
+test_that("bind_rows keeps groups of a single grouped table", {
  skip_if_no_gpu()
 
  df <- data.frame(g = c("a", "a", "b", "b"), x = 1:4)
@@ -499,10 +504,10 @@ test_that("bind_rows discards groups from single grouped table", {
 
  result <- bind_rows(gpu_grouped)
 
- expect_equal(result$groups, character(0))
+ expect_equal(result$groups, "g")
 })
 
-test_that("bind_rows discards groups from multiple grouped tables", {
+test_that("bind_rows keeps the first of multiple grouped tables' groups", {
  skip_if_no_gpu()
 
  df1 <- data.frame(g = c("a", "a"), x = 1:2)
@@ -513,10 +518,10 @@ test_that("bind_rows discards groups from multiple grouped tables", {
 
  result <- bind_rows(g1, g2)
 
- expect_equal(result$groups, character(0))
+ expect_equal(result$groups, "g")
 })
 
-test_that("bind_rows discards groups even with different grouping columns", {
+test_that("bind_rows keeps the first table's groups with different grouping columns", {
  skip_if_no_gpu()
 
  df1 <- data.frame(g1 = c("a", "b"), x = 1:2)
@@ -527,7 +532,7 @@ test_that("bind_rows discards groups even with different grouping columns", {
 
  result <- bind_rows(g1, g2)
 
- expect_equal(result$groups, character(0))
+ expect_equal(result$groups, "g1")
 })
 
 # =============================================================================
@@ -632,6 +637,7 @@ test_that("bind_cols with single table returns equivalent table", {
 # bind_cols: All tables must have same row count
 # =============================================================================
 
+# dplyr/vctrs' size rule: size-1 recycles, other mismatches are vctrs errors.
 test_that("bind_cols errors when row counts differ", {
  skip_if_no_gpu()
 
@@ -640,7 +646,7 @@ test_that("bind_cols errors when row counts differ", {
 
  expect_error(
    bind_cols(tbl_gpu(df1), tbl_gpu(df2)),
-   "same number of rows|row count"
+   "Can't recycle", class = "vctrs_error_incompatible_size"
  )
 })
 
@@ -652,7 +658,7 @@ test_that("bind_cols errors when first table has more rows", {
 
  expect_error(
    bind_cols(tbl_gpu(df1), tbl_gpu(df2)),
-   "same number of rows|row count"
+   "Can't recycle", class = "vctrs_error_incompatible_size"
  )
 })
 
@@ -665,7 +671,7 @@ test_that("bind_cols errors when any table in chain has different row count", {
 
  expect_error(
    bind_cols(tbl_gpu(df1), tbl_gpu(df2), tbl_gpu(df3)),
-   "same number of rows|row count"
+   "Can't recycle", class = "vctrs_error_incompatible_size"
  )
 })
 
@@ -861,4 +867,30 @@ test_that("bind_rows result can be used with bind_cols", {
  expect_equal(ncol(result), 2)
  expect_equal(result$a, 1:4)
  expect_equal(result$b, 5:8)
+})
+
+# =============================================================================
+# bind_cols size errors label data-frame inputs by position
+# =============================================================================
+
+test_that("bind_cols size errors label data frame arguments `..N`, ignoring their names", {
+  skip_if_no_gpu()
+
+  gt <- tbl_gpu(tibble::tibble(x = 1:3))
+  tb <- tibble::tibble(x = 1:3)
+  other <- tibble::tibble(z = 1:2)
+
+  msg <- function(expr) conditionMessage(tryCatch(expr, error = identity))
+
+  # dplyr clears the names of data frame inputs, so `a` never shows up.
+  expect_identical(
+    msg(cuplyr::bind_cols(gt, a = other)),
+    msg(dplyr::bind_cols(tb, a = other))
+  )
+  expect_identical(
+    msg(cuplyr::bind_cols(a = gt, other)),
+    msg(dplyr::bind_cols(a = tb, other))
+  )
+  expect_match(msg(cuplyr::bind_cols(gt, a = other)),
+               "Can't recycle `..1` (size 3) to match `..2` (size 2)", fixed = TRUE)
 })

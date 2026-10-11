@@ -4,14 +4,14 @@
 \alias{add_id_column}
 \title{Add .id column to identify source tables}
 \usage{
-add_id_column(result, id_col_name, original_tables, source_names)
+add_id_column(result, id_col_name, row_counts, source_names)
 }
 \arguments{
 \item{result}{The combined tbl_gpu}
 
 \item{id_col_name}{Name for the .id column}
 
-\item{original_tables}{List of original tables (for row counts)}
+\item{row_counts}{Row count of each original input (zero-column ones too)}
 
 \item{source_names}{Names/identifiers for each source}
 }

@@ -8,7 +8,7 @@
 #   setdiff(x, y)    = distinct(anti_join(x_aligned, y_aligned, by = <all cols>))
 #   symdiff(x, y)    = bind_rows(setdiff(x_aligned, y_aligned), setdiff(y_aligned, x_aligned))
 #   setequal(x, y)   = nrow(anti_join(x, y)) == 0 && nrow(anti_join(y, x)) == 0
-# (`bind_rows()`/`bind_cols()` are this package's own top-level generics,
+# (`bind_rows()`/`bind_cols()` are this package's own top-level functions,
 # R/bind.R; `distinct()`/`semi_join()`/`anti_join()` are dplyr generics this
 # package registers `tbl_gpu` S3 methods for, R/distinct.R/R/join.R.)
 #
@@ -354,7 +354,8 @@ union.tbl_gpu <- function(x, y, ...) {
   x_aligned <- align_set_op_side(x, chk$target_schema, groups = x$groups)
   y_aligned <- align_set_op_side(y, chk$target_schema, groups = character())
 
-  combined <- bind_rows(x_aligned, y_aligned)
+  # bind_rows() keeps x's groups; distinct() runs on the ungrouped rows.
+  combined <- dplyr::ungroup(bind_rows(x_aligned, y_aligned))
   result <- dplyr::distinct(combined)
   result$groups <- x$groups
   restore_set_op_factor_levels(result, chk$target_schema)

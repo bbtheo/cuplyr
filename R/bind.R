@@ -26,34 +26,22 @@
 #' @export
 bind_cols <- function(..., .name_repair = c("unique", "universal",
                                              "check_unique", "minimal")) {
-  UseMethod("bind_cols")
-}
-
-#' @export
-bind_cols.tbl_gpu <- function(..., .name_repair = c("unique", "universal",
-                                                     "check_unique", "minimal")) {
   .name_repair <- match.arg(.name_repair)
-  bind_cols_route(..., .name_repair = .name_repair)
+  bind_cols_route(..., .name_repair = .name_repair, call = rlang::current_env())
 }
 
-#' @export
-bind_cols.default <- function(..., .name_repair = c("unique", "universal",
-                                                     "check_unique", "minimal")) {
-  .name_repair <- match.arg(.name_repair)
-  bind_cols_route(..., .name_repair = .name_repair)
-}
-
-# A tbl_gpu that is not the first argument (`NULL`, a tibble or a list comes
-# first) dispatches to the default method, so both methods route here: any
-# tbl_gpu among dplyr's flattened inputs sends the call to the GPU, anything
-# else goes to dplyr unchanged (and so raises dplyr's own errors).
-# The captured arguments are passed on to dplyr as a list, so a spliced
-# `!!!f()` is evaluated once.
-bind_cols_route <- function(..., .name_repair) {
+# Like dplyr's own, `bind_cols()`/`bind_rows()` are plain functions, not S3
+# generics: UseMethod() would force the first `...` element for dispatch and
+# so evaluate a spliced `!!!list` as a plain `!`. Any tbl_gpu among dplyr's
+# flattened inputs sends the call to the GPU, anything else goes to dplyr
+# unchanged (and so raises dplyr's own errors). The captured arguments are
+# passed on to dplyr as a list, so a spliced `!!!f()` is evaluated once.
+# `call` is the user's call, for errors raised on the GPU path.
+bind_cols_route <- function(..., .name_repair, call) {
   args <- rlang::list2(...)
   dots <- bind_cols_inputs(args)
   if (any(vapply(dots, is_tbl_gpu, logical(1)))) {
-    return(bind_cols_gpu(dots, .name_repair = .name_repair))
+    return(bind_cols_gpu(dots, .name_repair = .name_repair, call = call))
   }
   dplyr::bind_cols(!!!args, .name_repair = .name_repair)
 }
@@ -78,17 +66,7 @@ bind_cols_route <- function(..., .name_repair) {
 #' @return Combined data frame or tbl_gpu
 #' @export
 bind_rows <- function(..., .id = NULL) {
-  UseMethod("bind_rows")
-}
-
-#' @export
-bind_rows.tbl_gpu <- function(..., .id = NULL) {
-  bind_rows_route(..., .id = .id)
-}
-
-#' @export
-bind_rows.default <- function(..., .id = NULL) {
-  bind_rows_route(..., .id = .id)
+  bind_rows_route(..., .id = .id, call = rlang::current_env())
 }
 
 #' Base `rbind()` / `cbind()` for GPU tables
@@ -107,15 +85,7 @@ bind_rows.default <- function(..., .id = NULL) {
 #' @name tbl_gpu-rbind
 #' @export
 rbind.tbl_gpu <- function(..., deparse.level = 1) {
-  out <- bind_rows(...)
-  # Like `rbind()` of data frames (and dplyr's `bind_rows()`), the result keeps
-  # the first input's grouping. (cuplyr's `bind_rows()` clears it.)
-  first <- ..1
-  if (is_tbl_gpu(first) && is_tbl_gpu(out)) {
-    out$groups <- intersect(first$groups, out$schema$names)
-    out$group_drop <- if (length(out$groups) > 0L) first$group_drop %||% TRUE else TRUE
-  }
-  out
+  bind_rows(...)
 }
 
 #' @rdname tbl_gpu-rbind
@@ -124,10 +94,10 @@ cbind.tbl_gpu <- function(..., deparse.level = 1) {
   bind_cols(...)
 }
 
-# See bind_cols_route(). After flattening, the inputs are checked the way
-# dplyr::bind_rows() checks them, so a call dplyr rejects fails with dplyr's
-# message on the GPU path too.
-bind_rows_route <- function(..., .id) {
+# See bind_cols_route() (`call` is the user's call). After flattening, the
+# inputs are checked the way dplyr::bind_rows() checks them, so a call dplyr
+# rejects fails with dplyr's message on the GPU path too.
+bind_rows_route <- function(..., .id, call) {
   args <- rlang::list2(...)
   dots <- bind_rows_inputs(args)
   is_gpu <- vapply(dots, is_tbl_gpu, logical(1))
@@ -147,7 +117,8 @@ bind_rows_route <- function(..., .id) {
         "Can't bind named non-table inputs together with a tbl_gpu.",
         i = "dplyr packs them into data frame columns, which a tbl_gpu can't hold."
       ),
-      class = "cuplyr_error_bind_unsupported"
+      class = "cuplyr_error_bind_unsupported",
+      call = call
     )
   }
 
@@ -155,7 +126,7 @@ bind_rows_route <- function(..., .id) {
     if (!bindable[[i]]) {
       rlang::abort(sprintf(
         "Argument %d must be a data frame or a named atomic vector.", i
-      ))
+      ), call = call)
     }
     if (!is_gpu[[i]] && !is.data.frame(dots[[i]])) {
       dots[[i]] <- bind_row_as_df(dots[[i]])
@@ -163,8 +134,11 @@ bind_rows_route <- function(..., .id) {
   }
 
   if (!is.null(.id)) {
-    # dplyr's own .id check (and message), with no inputs to bind
-    dplyr::bind_rows(.id = .id)
+    # dplyr's own .id check and message, re-raised from the user's call
+    tryCatch(
+      dplyr::bind_rows(.id = .id),
+      error = function(e) rlang::abort(conditionMessage(e), call = call)
+    )
     if (!rlang::is_named(dots)) {
       nms <- names(dots) %||% rep("", length(dots))
       unnamed <- which(is.na(nms) | nms == "")
@@ -175,7 +149,7 @@ bind_rows_route <- function(..., .id) {
     names(dots) <- NULL
   }
 
-  bind_rows_gpu(dots, .id = .id)
+  bind_rows_gpu(dots, .id = .id, call = call)
 }
 
 # dplyr 1.2.1's argument flattening (`dplyr::bind_rows()` / `bind_cols()`
@@ -248,13 +222,19 @@ bind_row_as_df <- function(x) {
 # =============================================================================
 
 #' GPU bind_cols implementation
+#'
+#' Sizes follow vctrs' rules (`vctrs::vec_size_common()`): inputs of size 1
+#' recycle, every other size must match, and an input with no columns
+#' contributes its size only. A lazy input is computed once, so its size is the
+#' post-op row count.
 #' @param dots Inputs as flattened by `bind_cols_inputs()`: tbl_gpu, data
 #'   frames and vectors (a vector becomes one column, named by its element
-#'   name, recycled to the table height like `vctrs::vec_cbind()` does)
+#'   name)
 #' @param .name_repair Name repair method
+#' @param call The user's call, for errors
 #' @return A tbl_gpu
 #' @keywords internal
-bind_cols_gpu <- function(dots, .name_repair = "unique") {
+bind_cols_gpu <- function(dots, .name_repair = "unique", call = rlang::caller_env()) {
   if (length(dots) == 0) {
     stop("No tables provided to bind_cols", call. = FALSE)
   }
@@ -277,48 +257,75 @@ bind_cols_gpu <- function(dots, .name_repair = "unique") {
       x
     }
   })
-  n <- nrow(dots[[which(is_gpu)[[1L]]]])
 
-  # Convert data frames and vectors to tbl_gpu. A vector is uploaded under a
-  # placeholder name: its real name may be "" until repair_names() below.
-  col_names <- vector("list", length(dots))
-  dots <- lapply(seq_along(dots), function(i) {
+  # Only the non-tbl_gpu inputs are checked (vec_is() on a tbl_gpu could
+  # compute it).
+  ok <- is_gpu
+  ok[!is_gpu] <- vapply(dots[!is_gpu], function(x) {
+    is.data.frame(x) || vctrs::vec_is(x)
+  }, logical(1))
+  if (!all(ok)) {
+    rlang::abort(sprintf(
+      "Argument %d must be a data frame or a vector.", which(!ok)[[1L]]
+    ), call = call)
+  }
+
+  no_cols <- vapply(dots, function(x) {
+    if (is_tbl_gpu(x)) length(x$schema$names) == 0L
+    else is.data.frame(x) && ncol(x) == 0L
+  }, logical(1))
+  sizes <- vapply(dots, function(x) {
+    if (is_tbl_gpu(x) && length(x$schema$names) == 0L) {
+      as.integer(x[["nrow"]] %||% NA_integer_)
+    } else if (is_tbl_gpu(x) || is.data.frame(x)) {
+      as.integer(nrow(x))
+    } else {
+      as.integer(vctrs::vec_size(x))
+    }
+  }, integer(1))
+  if (anyNA(sizes)) {
+    stop("`bind_cols()` of tables with no columns needs a known number of rows.",
+         call. = FALSE)
+  }
+
+  # vctrs' own size rule and message, with its argument labels: `..N`, or the
+  # name for a vector (dplyr clears the names of data frame inputs first).
+  nms[is_gpu | vapply(dots, is.data.frame, logical(1))] <- ""
+  labels <- ifelse(nms != "", nms, paste0("..", seq_along(dots)))
+  proxies <- lapply(sizes, function(s) vctrs::new_data_frame(n = s))
+  names(proxies) <- labels
+  n <- vctrs::vec_size_common(!!!proxies, .call = call)
+
+  first <- dots[[1L]]
+  keep <- which(!no_cols)
+  if (length(keep) == 0L) {
+    # Zero-column inputs only: the result is just the common size.
+    return(tbl_gpu(tibble::tibble(.rows = n), lazy = FALSE))
+  }
+
+  # Convert data frames and vectors to tbl_gpu and recycle size-1 inputs.
+  col_names <- vector("list", length(keep))
+  pieces <- vector("list", length(keep))
+  for (j in seq_along(keep)) {
+    i <- keep[[j]]
     x <- dots[[i]]
     if (is_gpu[[i]]) {
-      col_names[[i]] <<- x$schema$names
-      x
+      if (sizes[[i]] != n) {
+        x <- dplyr_row_slice.tbl_gpu(x, rep(1L, n))
+      }
+      col_names[[j]] <- x$schema$names
     } else if (is.data.frame(x)) {
-      col_names[[i]] <<- names(x)
-      tbl_gpu(x, lazy = FALSE)
-    } else if (vctrs::vec_is(x)) {
-      col_names[[i]] <<- nms[[i]]
-      col <- vctrs::vec_recycle(x, n, x_arg = nms[[i]])
-      tbl_gpu(vctrs::new_data_frame(list(value = col), n = n), lazy = FALSE)
+      if (sizes[[i]] != n) {
+        x <- vctrs::vec_recycle(x, n)
+      }
+      col_names[[j]] <- names(x)
+      x <- tbl_gpu(x, lazy = FALSE)
     } else {
-      stop("All inputs must be tbl_gpu, data.frame or vectors", call. = FALSE)
+      col_names[[j]] <- nms[[i]]
+      col <- vctrs::vec_recycle(x, n, x_arg = nms[[i]])
+      x <- tbl_gpu(vctrs::new_data_frame(list(value = col), n = n), lazy = FALSE)
     }
-  })
-
-  # Zero-column tables carry their row count on the R side (new_tbl_gpu()), so
-  # cudf can't see it: binding only zero-column tables of one size is just
-  # that size; mixing one that has rows with real columns is unsupported.
-  no_cols <- vapply(dots, function(x) length(x$schema$names) == 0L, logical(1))
-  if (all(no_cols)) {
-    sizes <- unique(vapply(dots, function(x) x[["nrow"]] %||% NA_integer_, integer(1)))
-    if (length(sizes) != 1L || is.na(sizes)) {
-      stop("`bind_cols()` of tables with no columns needs one known, common ",
-           "number of rows.", call. = FALSE)
-    }
-    return(new_tbl_gpu(
-      ptr = dots[[1]]$ptr,
-      schema = dots[[1]]$schema,
-      groups = dots[[1]]$groups,
-      exec_mode = "eager",
-      nrow = sizes
-    ))
-  }
-  for (x in dots[no_cols]) {
-    check_zero_column_input(x, x$schema, "bind_cols")
+    pieces[[j]] <- x
   }
 
   # Collect column names and handle duplicates
@@ -326,11 +333,11 @@ bind_cols_gpu <- function(dots, .name_repair = "unique") {
   repaired_names <- repair_names(all_names, .name_repair)
 
   # Collect types (unname to avoid issues)
-  all_types <- unname(unlist(lapply(dots, function(x) x$schema$types)))
+  all_types <- unname(unlist(lapply(pieces, function(x) x$schema$types)))
 
   # Factor levels are keyed by column name, so re-key them by position onto
   # the repaired names.
-  all_levels <- unlist(lapply(dots, function(x) {
+  all_levels <- unlist(lapply(pieces, function(x) {
     lapply(x$schema$names, function(nm) x$schema$factor_levels[[nm]])
   }), recursive = FALSE)
   has_levels <- !vapply(all_levels, is.null, logical(1))
@@ -339,38 +346,55 @@ bind_cols_gpu <- function(dots, .name_repair = "unique") {
   }
 
   # Collect pointers
-  ptrs <- lapply(dots, function(x) x$ptr)
+  ptrs <- lapply(pieces, function(x) x$ptr)
 
   # Call C++ function
   new_ptr <- gpu_bind_cols_impl(ptrs)
 
-  # Preserve groups (and their `.drop`) from first table. dplyr regroups the
-  # output by name, so a group column renamed by repair (`bind_cols(g, g)`)
+  # Preserve groups (and their `.drop`) from the first input. dplyr regroups
+  # the output by name, so a group column renamed by repair (`bind_cols(g, g)`)
   # no longer groups it.
-  groups <- intersect(dots[[1]]$groups, repaired_names)
+  groups <- if (is_tbl_gpu(first)) intersect(first$groups, repaired_names) else character()
 
   new_tbl_gpu(
     ptr = new_ptr,
     schema = list(names = repaired_names, types = all_types,
                   factor_levels = factor_levels),
     groups = groups,
-    group_drop = if (length(groups) > 0L) dots[[1]]$group_drop %||% TRUE else TRUE,
+    group_drop = if (length(groups) > 0L) first$group_drop %||% TRUE else TRUE,
     exec_mode = "eager"
   )
 }
 
 #' GPU bind_rows implementation
+#'
+#' Keeps the first input's groups and `.drop` (a tbl_gpu's, or a grouped data
+#' frame's), as `dplyr::bind_rows()` does. An input with no columns adds its
+#' rows as all-NA rows of the unified schema.
 #' @param dots Inputs as flattened and checked by `bind_rows_route()`: tbl_gpu
 #'   and data frames, named for every input when `.id` is given
 #' @param .id Optional column name to identify source
+#' @param call The user's call, for errors
 #' @return A tbl_gpu
 #' @keywords internal
-bind_rows_gpu <- function(dots, .id = NULL) {
+bind_rows_gpu <- function(dots, .id = NULL, call = rlang::caller_env()) {
   if (length(dots) == 0) {
     stop("No tables provided to bind_rows", call. = FALSE)
   }
 
   source_names <- names(dots) %||% as.character(seq_along(dots))
+
+  first <- dots[[1L]]
+  if (is_tbl_gpu(first)) {
+    first_groups <- first$groups
+    first_drop <- first$group_drop %||% TRUE
+  } else if (dplyr::is_grouped_df(first)) {
+    first_groups <- dplyr::group_vars(first)
+    first_drop <- dplyr::group_by_drop_default(first)
+  } else {
+    first_groups <- character()
+    first_drop <- TRUE
+  }
 
   # Convert any data.frames to tbl_gpu
   dots <- lapply(dots, function(x) {
@@ -393,41 +417,47 @@ bind_rows_gpu <- function(dots, .id = NULL) {
   })
 
   if (length(dots) == 1 && is.null(.id)) {
-    # Single table, no .id - just return with groups cleared
-    result <- dots[[1]]
-    result$groups <- character()
-    return(result)
+    # Single table, no .id: nothing to bind, groups stay
+    return(dots[[1]])
   }
 
   # Zero-column tables carry their row count on the R side (new_tbl_gpu()),
-  # which the concatenation can't see. All zero-column: the counts add up.
-  # Mixed with real columns, one that has rows is unsupported (it would need
-  # all-NA padding rows), but an empty one adds nothing.
+  # which the concatenation can't see.
   no_cols <- vapply(dots, function(x) length(x$schema$names) == 0L, logical(1))
-  if (all(no_cols) && is.null(.id)) {
-    sizes <- vapply(dots, function(x) x[["nrow"]] %||% NA_integer_, integer(1))
-    if (anyNA(sizes)) {
-      stop("`bind_rows()` of tables with no columns needs known row counts.",
-           call. = FALSE)
+  row_counts <- vapply(dots, function(x) {
+    as.integer(if (length(x$schema$names) == 0L) x[["nrow"]] %||% NA_integer_ else nrow(x))
+  }, integer(1))
+  if (anyNA(row_counts)) {
+    stop("`bind_rows()` of tables with no columns needs known row counts.",
+         call. = FALSE)
+  }
+
+  if (all(no_cols)) {
+    # Only the row count (and the .id column) is left.
+    if (is.null(.id)) {
+      return(new_tbl_gpu(
+        ptr = dots[[1]]$ptr,
+        schema = dots[[1]]$schema,
+        exec_mode = "eager",
+        nrow = sum(row_counts)
+      ))
     }
-    return(new_tbl_gpu(
-      ptr = dots[[1]]$ptr,
-      schema = dots[[1]]$schema,
-      exec_mode = "eager",
-      nrow = sum(sizes)
-    ))
-  }
-  for (x in dots[no_cols]) {
-    check_zero_column_input(x, x$schema, "bind_rows")
+    return(make_id_table(.id, source_names, row_counts))
   }
 
-  # Compute unified schema
-  unified <- compute_unified_schema(dots)
+  # Compute unified schema over the inputs that have columns
+  real <- which(!no_cols)
+  unified <- compute_unified_schema(dots[real], positions = real, call = call)
 
-  # Align each table to unified schema
-  aligned <- lapply(dots, function(tbl) {
-    align_to_schema(tbl, unified)
+  # Align each table to unified schema; a zero-column one becomes all-NA rows
+  aligned <- lapply(seq_along(dots), function(i) {
+    if (!no_cols[[i]]) {
+      align_to_schema(dots[[i]], unified)
+    } else if (row_counts[[i]] > 0L) {
+      null_table_for_schema(unified, row_counts[[i]])
+    }
   })
+  aligned <- aligned[!vapply(aligned, is.null, logical(1))]
 
   # Collect pointers
   ptrs <- lapply(aligned, function(x) x$ptr)
@@ -446,9 +476,12 @@ bind_rows_gpu <- function(dots, .id = NULL) {
 
   # Add .id column if requested
   if (!is.null(.id)) {
-    result <- add_id_column(result, .id, dots, source_names)
+    result <- add_id_column(result, .id, row_counts, source_names)
   }
 
+  groups <- intersect(first_groups, result$schema$names)
+  result$groups <- groups
+  result$group_drop <- if (length(groups) > 0L) first_drop else TRUE
   result
 }
 
@@ -628,14 +661,20 @@ bind_rows_type_label <- function(type, is_factor = FALSE) {
 #' @param type1,type2 GPU type strings: the accumulated type so far, and
 #'   `other_idx`'s own type for this column
 #' @param is_factor1,is_factor2 Logical: is each side `DICTIONARY32`?
+#' @param call The user's call; the error has vctrs' classes
 #' @keywords internal
 abort_bind_rows_incompatible <- function(other_idx, col_name, type1, type2,
-                                          is_factor1 = FALSE, is_factor2 = FALSE) {
+                                          is_factor1 = FALSE, is_factor2 = FALSE,
+                                          call = rlang::caller_env()) {
   label1 <- bind_rows_type_label(type1, is_factor1)
   label2 <- bind_rows_type_label(type2, is_factor2)
-  stop(sprintf("Can't combine `..1$%s` <%s> and `..%d$%s` <%s>.",
-               col_name, label1, other_idx, col_name, label2),
-       call. = FALSE)
+  rlang::abort(
+    sprintf("Can't combine `..1$%s` <%s> and `..%d$%s` <%s>.",
+            col_name, label1, other_idx, col_name, label2),
+    class = c("vctrs_error_ptype2", "vctrs_error_incompatible_type",
+              "vctrs_error_incompatible", "vctrs_error"),
+    call = call
+  )
 }
 
 #' Compute unified schema from multiple tables
@@ -662,10 +701,14 @@ abort_bind_rows_incompatible <- function(other_idx, col_name, type1, type2,
 #' fall through `promote_types()`'s STRING-is-widest rule.
 #'
 #' @param tables List of tbl_gpu objects
+#' @param positions Each table's position among the user's inputs (for the
+#'   error's `..N` labels)
+#' @param call The user's call, for errors
 #' @return List with `names`, `types`, and `factor_levels` (`NULL` if no
 #'   column in the union ends up `DICTIONARY32`) for the unified schema
 #' @keywords internal
-compute_unified_schema <- function(tables) {
+compute_unified_schema <- function(tables, positions = seq_along(tables),
+                                   call = rlang::caller_env()) {
   # Union of all column names (preserving order from first occurrence)
   all_names <- character()
   name_types <- list()
@@ -699,7 +742,8 @@ compute_unified_schema <- function(tables) {
       res <- resolve_common_col_type(existing_type, ty, existing_is_factor, is_factor,
                                       existing_lvls, lvls)
       if (!isTRUE(res$ok)) {
-        abort_bind_rows_incompatible(t, nm, existing_type, ty, existing_is_factor, is_factor)
+        abort_bind_rows_incompatible(positions[[t]], nm, existing_type, ty,
+                                     existing_is_factor, is_factor, call = call)
       }
       name_types[[nm]] <- res$type
       name_factor_levels[[nm]] <- res$factor_levels
@@ -861,6 +905,26 @@ align_to_schema <- function(tbl, target_schema) {
   )
 }
 
+#' An all-NA table of `n` rows with a unified schema (a zero-column input's
+#' rows in `bind_rows()`)
+#' @param schema List with `names`, `types` and `factor_levels`
+#' @param n Row count
+#' @keywords internal
+null_table_for_schema <- function(schema, n) {
+  # Physical types: a factor's GPU column is INT32 (see add_null_columns()).
+  cols <- lapply(unname(schema$types), function(ty) {
+    gpu_make_null_column(n, gpu_physical_type(ty))
+  })
+  new_ptr <- if (length(cols) == 1L) cols[[1L]] else gpu_bind_cols_impl(cols)
+  new_tbl_gpu(
+    ptr = new_ptr,
+    schema = list(names = schema$names, types = unname(schema$types),
+                  factor_levels = schema$factor_levels),
+    groups = character(),
+    exec_mode = "eager"
+  )
+}
+
 #' Add null columns to a table
 #' @param tbl A tbl_gpu object
 #' @param col_names Names of columns to add
@@ -957,22 +1021,24 @@ cast_column <- function(tbl, col_name, target_type, source_levels = NULL) {
   )
 }
 
+#' The .id column alone: `source_names` repeated by each input's row count
+#' @keywords internal
+make_id_table <- function(id_col_name, source_names, row_counts) {
+  id_df <- data.frame(x = rep(source_names, times = row_counts),
+                      stringsAsFactors = FALSE)
+  names(id_df) <- id_col_name
+  tbl_gpu(id_df, lazy = FALSE)
+}
+
 #' Add .id column to identify source tables
 #' @param result The combined tbl_gpu
 #' @param id_col_name Name for the .id column
-#' @param original_tables List of original tables (for row counts)
+#' @param row_counts Row count of each original input (zero-column ones too)
 #' @param source_names Names/identifiers for each source
 #' @return A tbl_gpu with .id column prepended
 #' @keywords internal
-add_id_column <- function(result, id_col_name, original_tables, source_names) {
-  # Create character vector with source identifiers
-  row_counts <- vapply(original_tables, nrow, integer(1))
-  id_values <- rep(source_names, times = row_counts)
-
-  # Create data frame with .id column and transfer to GPU
-  id_df <- data.frame(x = id_values, stringsAsFactors = FALSE)
-  names(id_df) <- id_col_name
-  id_tbl <- tbl_gpu(id_df, lazy = FALSE)
+add_id_column <- function(result, id_col_name, row_counts, source_names) {
+  id_tbl <- make_id_table(id_col_name, source_names, row_counts)
 
   # Bind .id column at front
   bind_cols(id_tbl, result, .name_repair = "minimal")
