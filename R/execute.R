@@ -480,6 +480,9 @@ push_op <- function(.data, node) {
   # to the default once the table is ungrouped (a later group_by() starts over).
   new_group_drop <- if (length(new_groups) > 0L) .subset2(.data, "group_drop") %||% TRUE else TRUE
   new_keys <- carry_fixed_keys(node, .data, new_groups)
+  new_unspec <- if (node$type %in% c("filter", "arrange", "slice", "barrier")) {
+    .subset2(.data, "unspecified")
+  }
 
   if (identical(.subset2(.data, "exec_mode"), "lazy")) {
     return(new_tbl_gpu(
@@ -490,7 +493,8 @@ push_op <- function(.data, node) {
       exec_mode = "lazy",
       group_drop = new_group_drop,
       nrow = .subset2(.data, "nrow"),
-      fixed_keys = new_keys
+      fixed_keys = new_keys,
+      unspecified = new_unspec
     ))
   }
 
@@ -504,7 +508,8 @@ push_op <- function(.data, node) {
     exec_mode = .subset2(.data, "exec_mode"),
     group_drop = new_group_drop,
     nrow = .subset2(.data, "nrow"),
-    fixed_keys = new_keys
+    fixed_keys = new_keys,
+    unspecified = new_unspec
   )
 }
 
@@ -645,6 +650,8 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
                          identical(new_groups, x$groups)) {
     fixed_keys_of(x)
   }
+  # Filtering joins return x verbatim, so its unspecified() columns survive.
+  join_unspec <- if (join_type %in% c("semi", "anti")) x[["unspecified"]]
 
   if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
     return(new_tbl_gpu(
@@ -654,7 +661,8 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
       groups = new_groups,
       exec_mode = "lazy",
       group_drop = new_group_drop,
-      fixed_keys = join_fixed_keys
+      fixed_keys = join_fixed_keys,
+      unspecified = join_unspec
     ))
   }
 
@@ -673,7 +681,8 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
     groups = new_groups,
     exec_mode = "eager",
     group_drop = new_group_drop,
-    fixed_keys = join_fixed_keys
+    fixed_keys = join_fixed_keys,
+    unspecified = join_unspec
   )
 }
 

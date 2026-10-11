@@ -60,6 +60,15 @@ This enables optimizations like:
 \item Filter reordering (cheapest filters first)
 }
 
+A \code{vctrs::unspecified()} column (all \code{NA}, no type yet) is stored as BOOL8.
+It collects back as \code{vctrs::unspecified()} only while it passes through
+\code{filter()}, \code{arrange()}, \code{slice()} and \code{semi_join()}/\code{anti_join()} (as a
+column of \code{x}, as in dplyr); every other verb (\code{select()}, \code{mutate()},
+\code{group_by()} with computed expressions, \code{slice_min()}/\code{slice_max()}, a
+mutating join, \code{vctrs::vec_slice()}) returns it as a plain logical column.
+An unspecified column joined against a string, \code{Date} or factor key, or
+bound to a character column in \code{bind_rows()}, still errors.
+
 Column type mappings from R to GPU:
 \itemize{
 \item \code{numeric} -> FLOAT64

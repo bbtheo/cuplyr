@@ -44,6 +44,15 @@
 #'   \item Filter reordering (cheapest filters first)
 #' }
 #'
+#' A `vctrs::unspecified()` column (all `NA`, no type yet) is stored as BOOL8.
+#' It collects back as `vctrs::unspecified()` only while it passes through
+#' `filter()`, `arrange()`, `slice()` and `semi_join()`/`anti_join()` (as a
+#' column of `x`, as in dplyr); every other verb (`select()`, `mutate()`,
+#' `group_by()` with computed expressions, `slice_min()`/`slice_max()`, a
+#' mutating join, `vctrs::vec_slice()`) returns it as a plain logical column.
+#' An unspecified column joined against a string, `Date` or factor key, or
+#' bound to a character column in `bind_rows()`, still errors.
+#'
 #' Column type mappings from R to GPU:
 #' \itemize{
 #'   \item `numeric` -> FLOAT64
@@ -83,6 +92,15 @@ tbl_gpu <- function(data, ..., lazy = NULL) {
 #' @rdname tbl_gpu
 #' @export
 tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
+  # `vctrs::unspecified()` columns (all NA) upload as plain logical; their
+  # names ride on the table (`$unspecified`) so row-only verbs and filtering
+  # joins can give the class back at collect().
+  unspec <- vapply(data, inherits, logical(1), what = "vctrs_unspecified")
+  unspec_names <- NULL
+  if (any(unspec)) {
+    for (j in which(unspec)) data[[j]] <- rep(NA, nrow(data))
+    unspec_names <- setdiff(names(data)[unspec], names(data)[duplicated(names(data))])
+  }
   # Raised before wrap_gpu_call() so it is not reworded as a device-memory error.
   check_supported_column_classes(data)
   # Integer-backed Date/POSIXct must reach the C++ upload as doubles.
@@ -119,7 +137,8 @@ tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
   # A cudf table with no columns has no rows, so a zero-column data frame
   # keeps its row count on the R side (`$nrow`, see new_tbl_gpu()).
   new_tbl_gpu(ptr = ptr, schema = schema, exec_mode = exec_mode,
-              nrow = if (ncol(data) == 0L) nrow(data) else NULL)
+              nrow = if (ncol(data) == 0L) nrow(data) else NULL,
+              unspecified = unspec_names)
 }
 
 # Internal: classes a column may carry and still have a GPU representation.
@@ -190,6 +209,10 @@ tbl_gpu.tbl_gpu <- function(data, ..., lazy = NULL) {
 #   grouped table, or `NULL` (the default, and the only value any constructor
 #   gets unless it passes it on purpose). Dropped unless it matches `groups`.
 #   See `fixed_keys_of()` (R/group-by.R).
+# @param unspecified Names of BOOL8 columns that were `vctrs::unspecified()`
+#   at upload and are still the original column (see tbl_gpu.data.frame()).
+#   Only push_op()/push_join() carry it, through row-only nodes and semi/anti
+#   joins; collect_frame() restores the class.
 # @return A tbl_gpu S3 object
 # @keywords internal
 new_tbl_gpu <- function(ptr = NULL,
@@ -199,7 +222,8 @@ new_tbl_gpu <- function(ptr = NULL,
                         exec_mode = NULL,
                         group_drop = TRUE,
                         nrow = NULL,
-                        fixed_keys = NULL) {
+                        fixed_keys = NULL,
+                        unspecified = NULL) {
   if (is.list(lazy_ops) && length(lazy_ops) == 0) {
     lazy_ops <- NULL
   }
@@ -226,6 +250,12 @@ new_tbl_gpu <- function(ptr = NULL,
   }
   if (!is.null(fixed_keys) && length(groups) > 0L && identical(names(fixed_keys), groups)) {
     out$fixed_keys <- fixed_keys
+  }
+  if (length(unspecified) > 0L) {
+    unspecified <- intersect(unspecified, schema$names[schema$types == "BOOL8"])
+    if (length(unspecified) > 0L) {
+      out$unspecified <- unspecified
+    }
   }
   structure(out, class = c("tbl_gpu", "tbl"))
 }
@@ -473,6 +503,12 @@ called_from_vctrs <- function(p) {
   }
   if (!is.null(x$schema$factor_levels)) {
     x$schema$factor_levels <- levels_from_positions(value, levels_by_position(x$schema))
+  }
+  # The unspecified marker is name-keyed too; a name that comes out duplicated
+  # can't be addressed by collect_frame(), so it loses the marker.
+  if (length(x[["unspecified"]]) > 0L) {
+    new_unspec <- setdiff(value[match(x[["unspecified"]], old)], value[duplicated(value)])
+    x[["unspecified"]] <- if (length(new_unspec) > 0L) new_unspec
   }
   x$schema$names <- value
   x

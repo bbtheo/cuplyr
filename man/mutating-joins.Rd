@@ -128,10 +128,15 @@ all, matching dplyr's own signature (it never drops a row).}
 
 \item{relationship}{Optional cardinality assertion: \code{NULL} (default --
 emits dplyr's own many-to-many advisory warning whenever \emph{both} sides
-have a genuine duplicate), \code{"one-to-one"}, \code{"one-to-many"},
+have a genuine duplicate, for equality joins called directly; never for
+inequality/overlap joins or indirect calls, as in dplyr), \code{"one-to-one"}, \code{"one-to-many"},
 \code{"many-to-one"}, or \code{"many-to-many"} (silences the advisory warning).
 A violation raises dplyr's exact \verb{dplyr_error_join_relationship_*}
-condition, including the class vector and first-offending-row bullet.}
+condition, including the class vector and first-offending-row bullet.
+Known limitation: with the default \code{relationship}, a lazy pipeline whose
+\code{filter()} the optimizer pushes below the join may not emit the advisory
+many-to-many warning, or may report different row numbers in it (the
+rows returned are identical).}
 }
 \value{
 A \code{tbl_gpu} with dplyr's own row/column contract for the given

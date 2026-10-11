@@ -1,2 +1,1 @@
 file	test	owner	reason
-test-join.R	filtering joins finalize unspecified columns (#6804)	F36	semi_join() of an unspecified() column returns a plain column instead of keeping class vctrs_unspecified

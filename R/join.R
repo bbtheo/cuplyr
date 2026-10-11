@@ -297,6 +297,102 @@ validate_join_cols <- function(cols, tbl, side) {
   }
 }
 
+#' dplyr's "Join columns must be unique" check (`check_join_vars()`)
+#'
+#' Per side, equi columns plus the UNIQUE non-equi columns must not repeat: a
+#' column may appear in several non-equi conditions
+#' (`join_by(a >= lo, a <= hi)`) but not twice among the equi ones, nor in both
+#' an equi and a non-equi condition. dplyr raises a plain `rlang_error`; x is
+#' checked before y. Runs on the raw `by` at the verb call (before routing to
+#' the fallback), so eager, lazy and fallback joins all fail the same way.
+#' Also raises dplyr's `keep = FALSE` + non-equi error first, and stops after
+#' x's duplicate check when x lacks a join column, so that error (raised later
+#' by the join) precedes y's duplicates, as in dplyr's `join_cols()`.
+#' @param by The user's `by=` (`NULL`, character, `join_by()`)
+#' @param x The left table
+#' @param keep The user's `keep=` (`NULL` for filtering joins)
+#' @param call The verb's frame, reported as the error call
+#' @keywords internal
+check_join_cols_unique <- function(by, x, keep = NULL, call = rlang::caller_env()) {
+  if (is.null(by) || is_cross_by(by)) {
+    return(invisible())
+  }
+  if (inherits(by, "dplyr_join_by")) {
+    cols <- list(x = by$x, y = by$y)
+    op <- by$condition
+  } else if (is.character(by)) {
+    right <- unname(by)
+    left <- names(by) %||% right
+    left[left == ""] <- right[left == ""]
+    cols <- list(x = left, y = right)
+    op <- rep("==", length(by))
+  } else {
+    return(invisible())
+  }
+  non_equi <- op != "=="
+  # dplyr's join_cols() order: `keep = FALSE` with a non-equi condition first,
+  # then per side unique-then-present (all of x before y).
+  if (isFALSE(keep) && any(non_equi)) {
+    rlang::abort(
+      "Can't set `keep = FALSE` when using an inequality, rolling, or overlap join.",
+      call = call
+    )
+  }
+  for (side in c("x", "y")) {
+    vars <- cols[[side]]
+    vars <- c(vars[!non_equi], unique(vars[non_equi]))
+    dup <- unique(vars[duplicated(vars)])
+    if (length(dup) > 0L) {
+      q <- encodeString(dup, quote = "`")
+      listed <- if (length(dup) <= 2L) {
+        paste(q, collapse = " and ")
+      } else {
+        paste0(paste(q[-length(q)], collapse = ", "), ", and ", q[[length(q)]])
+      }
+      rlang::abort(c(
+        sprintf("Join columns in `%s` must be unique.", side),
+        x = sprintf("Problem with %s.", listed)
+      ), call = call)
+    }
+    # A missing column is reported by the join itself (native or dplyr's
+    # fallback); stop here so it comes before the other side's duplicates.
+    if (side == "x" && !all(cols$x %in% current_schema(x)$names)) {
+      break
+    }
+  }
+  invisible()
+}
+
+#' Is a mutating join's default `relationship` allowed to warn?
+#'
+#' dplyr's `compute_join_relationship()` returns "none" (no advisory
+#' many-to-many warning) when any condition is not `==` (inequality, overlap,
+#' mixed equi + non-equi), for `by = character()`, and when the verb was not
+#' called directly (`is_direct(user_env)`: the caller's top env is the global
+#' env, or the package under test). Decided at the verb call; a lazy node
+#' carries the decision as `relationship = "many-to-many"` (a no-op check).
+#' @param spec Parsed `join_by` spec (`op`)
+#' @param user_env The environment that called the join verb
+#' @keywords internal
+join_may_warn_many_to_many <- function(spec, user_env) {
+  length(spec$op) > 0L && all(spec$op == "==") && join_is_direct(user_env)
+}
+
+# Port of dplyr's is_direct() (R/join-rows.R): the caller is the global env's
+# code, or code of the package under test (testthat clones the namespace, so
+# compare namespace names).
+join_is_direct <- function(env) {
+  if (identical(env, emptyenv())) {
+    return(FALSE)
+  }
+  top <- topenv(env)
+  if (identical(top, globalenv())) {
+    return(TRUE)
+  }
+  tested <- Sys.getenv("TESTTHAT_PKG")
+  nzchar(tested) && isNamespace(top) && identical(rlang::ns_env_name(top), tested)
+}
+
 #' Is `by` one of the three spellings dplyr treats as a cross join?
 #'
 #' Mirrors `dplyr:::is_cross_by()`: `character()`, a named `character(0)`, or
@@ -1279,6 +1375,7 @@ mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
                           multiple, unmatched, relationship, user_env) {
   y <- join_coerce_y(x, y, copy)
   check_unique_join_inputs(x, y, call = rlang::caller_env())
+  check_join_cols_unique(by, x, keep = keep, call = rlang::caller_env())
   verb <- paste0(join_type, "_join")
   verb_fn <- get(verb, envir = asNamespace("dplyr"))
   fallback_args <- function() {
@@ -1304,6 +1401,11 @@ mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
 
   cross_by <- is_cross_by(by)
   join_spec <- if (cross_by) join_cross_spec() else parse_join_by(by, x, y)
+  # The default relationship only warns for direct all-equi calls (decided
+  # here, where the verb was called, not when a lazy plan finally runs).
+  if (is.null(relationship) && !join_may_warn_many_to_many(join_spec, user_env)) {
+    relationship <- "many-to-many"
+  }
   validate_join_cols(join_spec$left, x, "Left")
   validate_join_cols(join_spec$right, y, "Right")
   join_spec <- resolve_join_key_types(x$schema, y$schema, join_spec)
@@ -1335,6 +1437,7 @@ mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
 filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
   y <- join_coerce_y(x, y, copy)
   check_unique_join_inputs(x, y, call = rlang::caller_env())
+  check_join_cols_unique(by, x, call = rlang::caller_env())
   verb <- paste0(join_type, "_join")
   verb_fn <- get(verb, envir = asNamespace("dplyr"))
   fallback_args <- function() {
@@ -1430,10 +1533,15 @@ filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
 #'   all, matching dplyr's own signature (it never drops a row).
 #' @param relationship Optional cardinality assertion: `NULL` (default --
 #'   emits dplyr's own many-to-many advisory warning whenever *both* sides
-#'   have a genuine duplicate), `"one-to-one"`, `"one-to-many"`,
+#'   have a genuine duplicate, for equality joins called directly; never for
+#'   inequality/overlap joins or indirect calls, as in dplyr), `"one-to-one"`, `"one-to-many"`,
 #'   `"many-to-one"`, or `"many-to-many"` (silences the advisory warning).
 #'   A violation raises dplyr's exact `dplyr_error_join_relationship_*`
 #'   condition, including the class vector and first-offending-row bullet.
+#'   Known limitation: with the default `relationship`, a lazy pipeline whose
+#'   `filter()` the optimizer pushes below the join may not emit the advisory
+#'   many-to-many warning, or may report different row numbers in it (the
+#'   rows returned are identical).
 #' @return A `tbl_gpu` with dplyr's own row/column contract for the given
 #'   join type. `right_join()`'s row order is x-matched rows (in `x`'s own
 #'   order) followed by any unmatched `y` rows appended last.

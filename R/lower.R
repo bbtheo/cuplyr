@@ -605,6 +605,23 @@ apply_join_key_casts <- function(ast, left_ptr, right_ptr, left_schema, right_sc
   n_left <- length(left_schema$names)
   n_right <- length(right_schema$names)
 
+  # Temp names must not collide with ANY column on either side: the condition
+  # binder resolves by name, so a user column of the same name would stand in.
+  taken <- c(left_schema$names, right_schema$names)
+  temp_name <- function(side, k) {
+    base <- paste0(".cuplyr_key_", side, k)
+    nm <- base
+    i <- 0L
+    while (nm %in% taken) {
+      i <- i + 1L
+      nm <- paste0(base, "_", i)
+    }
+    taken <<- c(taken, nm)
+    nm
+  }
+  left_temp_names <- character()
+  right_temp_names <- character()
+
   left_temps <- list()   # each: list(src = 0-based source column, cast = key_casts entry)
   right_temps <- list()
   cond_by <- ast$by
@@ -625,12 +642,14 @@ apply_join_key_casts <- function(ast, left_ptr, right_ptr, left_schema, right_sc
     if (cast$cast_left) {
       left_temps[[length(left_temps) + 1L]] <- list(src = left_pair_idx[i], cast = cast)
       left_pair_idx[i] <- n_left + length(left_temps) - 1L
-      cond_by$left[i] <- paste0(".cuplyr_key_x", length(left_temps))
+      left_temp_names <- c(left_temp_names, temp_name("x", length(left_temps)))
+      cond_by$left[i] <- left_temp_names[[length(left_temps)]]
     }
     if (cast$cast_right) {
       right_temps[[length(right_temps) + 1L]] <- list(src = right_pair_idx[i], cast = cast)
       right_pair_idx[i] <- n_right + length(right_temps) - 1L
-      cond_by$right[i] <- paste0(".cuplyr_key_y", length(right_temps))
+      right_temp_names <- c(right_temp_names, temp_name("y", length(right_temps)))
+      cond_by$right[i] <- right_temp_names[[length(right_temps)]]
     }
   }
 
@@ -643,7 +662,7 @@ apply_join_key_casts <- function(ast, left_ptr, right_ptr, left_schema, right_sc
 
   # Appends the copies, casts them to the common type, and extends the schema
   # (names/types only: all the condition binder reads).
-  append_temps <- function(ptr, schema, temps, n, side, levels_of) {
+  append_temps <- function(ptr, schema, temps, n, side, temp_names) {
     if (length(temps) == 0L) return(list(ptr = ptr, schema = schema))
     srcs <- vapply(temps, function(t) as.integer(t$src), integer(1))
     ptr <- gpu_select(ptr, c(seq_len(n) - 1L, srcs))
@@ -652,13 +671,12 @@ apply_join_key_casts <- function(ast, left_ptr, right_ptr, left_schema, right_sc
       ptr <- cast_join_key_column(ptr, n + k - 1L, cast[[paste0(side, "_type")]],
                                   cast$type, cast[[paste0(side, "_levels")]])
     }
-    schema$names <- c(schema$names, paste0(".cuplyr_key_", if (side == "left") "x" else "y",
-                                           seq_along(temps)))
+    schema$names <- c(schema$names, temp_names)
     schema$types <- c(schema$types, vapply(temps, function(t) t$cast$type, character(1)))
     list(ptr = ptr, schema = schema)
   }
-  left <- append_temps(left_ptr, left_schema, left_temps, n_left, "left")
-  right <- append_temps(right_ptr, right_schema, right_temps, n_right, "right")
+  left <- append_temps(left_ptr, left_schema, left_temps, n_left, "left", left_temp_names)
+  right <- append_temps(right_ptr, right_schema, right_temps, n_right, "right", right_temp_names)
 
   list(left_ptr = left$ptr, right_ptr = right$ptr,
        left_pair_idx = left_pair_idx, right_pair_idx = right_pair_idx,

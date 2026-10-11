@@ -343,6 +343,25 @@ filter node with N predicates is already exactly one fused kernel.
   `check_join_cardinality()` (default relationship many-to-many). Never a
   hash join on a constant key. A keyless side may not be pruned to zero
   columns (row count lost): `join_keep_a_column()` in the optimizer.
+- Join validation (F36): `check_join_cols_unique()` (R/join.R) is dplyr's
+  `check_join_vars()` ("Join columns in `x` must be unique.", plain
+  `rlang_error`), run on the raw `by` in every join verb before any routing.
+  The advisory many-to-many warning follows dplyr's `compute_join_relationship()`:
+  `mutating_join()` decides at the verb call (`join_may_warn_many_to_many()`:
+  all-`==` spec and `join_is_direct(user_env)`, a port of `is_direct()`); when it
+  may not warn, a default `relationship` becomes `"many-to-many"` on the node
+  (a no-op check, survives optimizer rebuilds). Known limitation (roxygen): a
+  pushed-down filter can still change the warning's row numbers. Cast-key temp
+  columns in `apply_join_key_casts()` get names absent from both schemas
+  (`.cuplyr_key_x1`, then `_1`, ...). `vctrs::unspecified()` columns upload as
+  BOOL8 and are named in `$unspecified` (tbl field, like `fixed_keys`); only
+  `push_op()` row-only nodes (filter/arrange/slice/barrier), group_by/ungroup,
+  compute and semi/anti joins (`push_join()`, x side) carry it, and
+  `collect_frame()` restores the class for still-BOOL8 all-NA columns. Every
+  other verb drops it (plain logical). The two places that bypass `push_op()`
+  keep it honest: `names<-.tbl_gpu` remaps it by position (dropping a name
+  that ends up duplicated), and the same-layout shortcut of
+  `cast_gpu_to_gpu()` keeps only markers that `to` also has.
 - Groups (F06): every join type keeps `intersect(x$groups, output names)`
   and `x$group_drop` (`push_join()`); there is no D3 "joins clear groups" rule
   any more. `gpu_fallback()` regroups with `.drop = x$group_drop` and reads

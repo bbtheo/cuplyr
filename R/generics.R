@@ -237,13 +237,14 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
 
   # (`nrow` is only present on a zero-column table, `fixed_keys` on a table
   # whose group keys were fixed)
-  optional <- c("nrow", "fixed_keys")
+  optional <- c("nrow", "fixed_keys", "unspecified")
   if (is.data.frame(data) &&
       identical(setdiff(names(data), optional), setdiff(tbl_gpu_fields, optional))) {
     return(new_tbl_gpu(
       ptr = data$ptr, schema = data$schema, lazy_ops = data$lazy_ops,
       groups = data$groups, exec_mode = data$exec_mode, group_drop = data$group_drop,
-      nrow = data[["nrow"]], fixed_keys = data[["fixed_keys"]]
+      nrow = data[["nrow"]], fixed_keys = data[["fixed_keys"]],
+      unspecified = data[["unspecified"]]
     ))
   }
 
@@ -483,9 +484,10 @@ bracket_row_positions <- function(i, n, i_arg, call) {
 # =============================================================================
 
 # `nrow` is the row count of a zero-column table (new_tbl_gpu()); `fixed_keys`
-# the group keys `slice(.preserve = TRUE)` fixed (only present when set).
+# the group keys `slice(.preserve = TRUE)` fixed, `unspecified` the names of
+# vctrs::unspecified() columns (both only present when set).
 tbl_gpu_fields <- c("ptr", "schema", "lazy_ops", "groups", "exec_mode", "group_drop", "nrow",
-                    "fixed_keys")
+                    "fixed_keys", "unspecified")
 
 # The cuplyr namespace (this file is evaluated in it).
 cuplyr_ns <- environment()
@@ -518,7 +520,7 @@ is_tbl_gpu_field <- function(name) {
 #' @export
 `$.tbl_gpu` <- function(x, name) {
   if (switch(name, ptr = , schema = , lazy_ops = , groups = , exec_mode = ,
-             group_drop = , nrow = , fixed_keys = TRUE, FALSE) &&
+             group_drop = , nrow = , fixed_keys = , unspecified = TRUE, FALSE) &&
       internal_caller(parent.frame())) {
     return(.subset2(x, name))
   }
@@ -612,7 +614,7 @@ select_one_column <- function(x, col) {
 #' @export
 `$<-.tbl_gpu` <- function(x, name, value) {
   if (switch(name, ptr = , schema = , lazy_ops = , groups = , exec_mode = ,
-             group_drop = , nrow = , fixed_keys = TRUE, FALSE) &&
+             group_drop = , nrow = , fixed_keys = , unspecified = TRUE, FALSE) &&
       internal_caller(parent.frame())) {
     return(set_tbl_gpu_field(x, name, value))
   }

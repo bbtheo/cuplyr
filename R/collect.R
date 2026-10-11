@@ -133,6 +133,15 @@ collect_frame <- function(x) {
     }
   }
 
+  # Columns that were vctrs::unspecified() at upload and went through row-only
+  # verbs / filtering joins only (tbl_gpu.data.frame()). All NA by construction.
+  for (nm in x[["unspecified"]]) {
+    col <- result[[nm]]
+    if (is.logical(col) && all(is.na(col))) {
+      result[[nm]] <- vctrs::unspecified(length(col))
+    }
+  }
+
   if (any(final_schema$types == "INT64")) {
     int64_cols <- which(final_schema$types == "INT64")
     for (col_idx in int64_cols) {

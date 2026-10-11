@@ -471,6 +471,9 @@ cast_gpu_to_gpu <- function(x, to, ..., x_arg = "", to_arg = "", call = rlang::c
     # Same layout: no GPU work, only `to`'s grouping metadata.
     x$groups <- to$groups
     x$group_drop <- to$group_drop %||% TRUE
+    # A column is unspecified in the result only if `to` says so too.
+    keep_unspec <- intersect(x[["unspecified"]], to[["unspecified"]])
+    x[["unspecified"]] <- if (length(keep_unspec) > 0L) keep_unspec
     return(x)
   }
   cuplyr_fallback_notify("vctrs", "vec_cast() between tbl_gpu layouts")
