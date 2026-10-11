@@ -141,8 +141,9 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
 
     # Not in the expression IR (a user function, a column-free call that only
     # works inside the data mask, ...): dplyr evaluates it, or raises its own
-    # error.
-    if (is.null(ir)) {
+    # error. Same for a factor outside the places F18's rule allows
+    # (ir_factor_rule()): dplyr resolves it through the labels.
+    if (is.null(ir) || ir_factor_rule(ir, schema) == "cpu") {
       return(distinct_fallback(.data, orig_dots, .keep_all))
     }
 

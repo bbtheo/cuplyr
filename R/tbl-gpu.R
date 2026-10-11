@@ -83,7 +83,18 @@ tbl_gpu <- function(data, ..., lazy = NULL) {
 #' @rdname tbl_gpu
 #' @export
 tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
-  ptr <- wrap_gpu_call("tbl_gpu", df_to_gpu(data))
+  # Raised before wrap_gpu_call() so it is not reworded as a device-memory error.
+  check_supported_column_classes(data)
+  # Integer-backed Date/POSIXct must reach the C++ upload as doubles.
+  # Assign only where a column changes: on a grouped_df every `[[<-` regroups.
+  upload <- data
+  for (j in seq_along(upload)) {
+    col <- upload[[j]]
+    if (is.integer(col) && (inherits(col, "Date") || inherits(col, "POSIXct"))) {
+      upload[[j]] <- timestamp_as_double(col)
+    }
+  }
+  ptr <- wrap_gpu_call("tbl_gpu", df_to_gpu(upload))
 
   # Build schema with factor levels for round-trip fidelity
   factor_levels <- lapply(data, function(col) {
@@ -109,6 +120,41 @@ tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
   # keeps its row count on the R side (`$nrow`, see new_tbl_gpu()).
   new_tbl_gpu(ptr = ptr, schema = schema, exec_mode = exec_mode,
               nrow = if (ncol(data) == 0L) nrow(data) else NULL)
+}
+
+# Internal: classes a column may carry and still have a GPU representation.
+# Anything else (ts, difftime, hms, IDate, AsIs, POSIXlt, S4, ...) would upload
+# as its bare storage type and silently change what later verbs return, so it
+# is an error. integer64 keeps its own warning (gpu_type_from_r()).
+# @keywords internal
+check_supported_column_classes <- function(data) {
+  ok <- list(c("factor"), c("ordered", "factor"), "Date", c("POSIXct", "POSIXt"), "integer64")
+  bad <- character()
+  for (j in seq_along(data)) {
+    col <- data[[j]]
+    cls <- oldClass(col)
+    if (isS4(col)) {
+      cls <- class(col)
+    } else if (is.null(cls) || any(vapply(ok, identical, logical(1), cls))) {
+      next
+    } else if (!is.atomic(col) && !inherits(col, "POSIXlt")) {
+      next # list / data-frame columns keep their existing errors
+    }
+    bad <- c(bad, sprintf("`%s` <%s>", names(data)[j], paste(cls, collapse = "/")))
+  }
+  if (length(bad) == 0L) {
+    return(invisible())
+  }
+  rlang::abort(
+    c(
+      paste0("Can't upload column(s) with a class that has no GPU representation: ",
+             paste(bad, collapse = ", "), "."),
+      i = paste0("Convert them first, e.g. `unclass()` / `as.numeric()` / `as.character()`, ",
+                 "or `as.POSIXct()` for POSIXlt.")
+    ),
+    class = "cuplyr_error_unsupported_class",
+    call = NULL
+  )
 }
 
 #' @rdname tbl_gpu

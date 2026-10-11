@@ -116,6 +116,10 @@ ir_lit_from_r <- function(value, allow_vector = FALSE) {
     stop("A tbl_gpu can't be used as a value inside an expression.", call. = FALSE)
   }
 
+  # An integer-backed Date/POSIXct is still a timestamp; give it double
+  # storage like the uploaded columns have.
+  value <- timestamp_as_double(value)
+
   n <- length(value)
 
   if (n != 1) {
@@ -522,6 +526,11 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
 #' the IR doesn't (yet) understand -- callers (filter/mutate parsers, from
 #' T3/T5 onward) fall back to the pre-existing CPU-eval or error path.
 #'
+#' A parse-time type check that fails only because a factor (DICTIONARY32)
+#' operand is involved signals `cuplyr_factor_needs_cpu` (see
+#' [stop_factor_needs_cpu()]); that class becomes `NULL` here, so every verb
+#' sends the dot to its CPU fallback, where dplyr combines the factor itself.
+#'
 #' @param quo An `rlang` quosure
 #' @param schema List with `names`/`types` (as from [current_schema()])
 #' @return An IR node, or `NULL` if unsupported
@@ -529,7 +538,10 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
 ir_parse_quo <- function(quo, schema) {
   expr <- rlang::quo_get_expr(quo)
   env <- rlang::quo_get_env(quo)
-  ir_parse_expr(expr, env, schema, allow_vector = FALSE)
+  tryCatch(
+    ir_parse_expr(expr, env, schema, allow_vector = FALSE),
+    cuplyr_factor_needs_cpu = function(e) NULL
+  )
 }
 
 #' Parse a `case_when()` call into IR (Phase 4)
@@ -766,6 +778,9 @@ ir_parse_value_match_clauses <- function(expr, env, schema, default_key) {
     }
     if (!isTRUE(lhs_ir$na)) {
       lhs_type <- unname(ir_infer_type(lhs_ir, schema))
+      if (identical(x_type, "DICTIONARY32") || identical(lhs_type, "DICTIONARY32")) {
+        return(NULL)  # a factor needs dplyr's labels: CPU fallback (F18)
+      }
       if (identical(x_type, "STRING") != identical(lhs_type, "STRING")) {
         stop("case_match()/recode_values(): can't convert the matched value (",
              lhs_type, ") to match the type of `x` (", x_type, ").", call. = FALSE)
@@ -875,6 +890,9 @@ ir_parse_replace_values <- function(expr, env, schema) {
     }
     if (!isTRUE(lhs_ir$na)) {
       lhs_type <- unname(ir_infer_type(lhs_ir, schema))
+      if (identical(x_type, "DICTIONARY32") || identical(lhs_type, "DICTIONARY32")) {
+        return(NULL)  # a factor needs dplyr's labels: CPU fallback (F18)
+      }
       if (identical(x_type, "STRING") != identical(lhs_type, "STRING")) {
         stop("replace_values(): can't convert the matched value (", lhs_type,
              ") to match the type of `x` (", x_type, ").", call. = FALSE)
@@ -886,6 +904,9 @@ ir_parse_replace_values <- function(expr, env, schema) {
     }
     if (!(identical(val_ir$kind, "lit") && isTRUE(val_ir$na) && is.null(val_ir$type))) {
       val_type <- unname(ir_infer_type(val_ir, schema))
+      if (identical(x_type, "DICTIONARY32") || identical(val_type, "DICTIONARY32")) {
+        return(NULL)  # a factor needs dplyr's labels: CPU fallback (F18)
+      }
       if (identical(x_type, "STRING") != identical(val_type, "STRING")) {
         stop("replace_values(): can't convert a replacement value (", val_type,
              ") to match the type of `x` (", x_type, ").", call. = FALSE)
@@ -953,6 +974,9 @@ ir_parse_replace_when <- function(expr, env, schema) {
     }
     if (!(identical(val_ir$kind, "lit") && isTRUE(val_ir$na) && is.null(val_ir$type))) {
       val_type <- unname(ir_infer_type(val_ir, schema))
+      if (identical(x_type, "DICTIONARY32") || identical(val_type, "DICTIONARY32")) {
+        return(NULL)  # a factor needs dplyr's labels: CPU fallback (F18)
+      }
       if (identical(x_type, "STRING") != identical(val_type, "STRING")) {
         stop("replace_when(): can't convert a replacement value (", val_type,
              ") to match the type of `x` (", x_type, ").", call. = FALSE)
@@ -1253,6 +1277,12 @@ ir_parse_order_ref <- function(expr, schema) {
       }
       col <- as.character(inner)
       if (!(col %in% schema$names)) {
+        return(NULL)
+      }
+      # `-f` is arithmetic on a factor (F18's rule): dplyr warns and ignores
+      # the order, so it can't be a native sort key
+      if (identical(as.character(head), "-") &&
+          ir_factor_rule(ir_call("-", list(ir_col(col))), schema) == "cpu") {
         return(NULL)
       }
       return(list(col = col, desc = TRUE))
@@ -2142,6 +2172,88 @@ ir_deparse <- function(ir) {
   )
 }
 
+#' Where may a factor stay on the GPU? (F18's rule, one bottom-up pass)
+#'
+#' The GPU holds only a factor's integer codes, while dplyr/base R resolve a
+#' factor through its labels. A *factor operand* is a DICTIONARY32 column
+#' reference, or a DICTIONARY32-typed `lit`/`vec` node (a factor value from
+#' the environment). It may stay on the GPU only
+#'
+#' 1. as a bare column reference (plain copy, key, or sort key on its own);
+#' 2. directly inside `is.na()` / `n_distinct()`;
+#' 3. as both operands of `==`/`!=` when both are factor *columns* with
+#'    identical level vectors (labels, order and `ordered` flag); `<`/`<=`/
+#'    `>`/`>=` additionally need both ordered. (`%in%` is not here: the GPU's
+#'    `%in%` only takes a literal set.)
+#'
+#' Anything else that touches a factor operand (comparisons with non-factors
+#' or other levels, arithmetic, helpers, windows, aggregates, factor values
+#' from the environment) needs dplyr's labels, warnings and errors, so callers
+#' send it to their CPU fallback.
+#'
+#' Each node is visited once: a node's status is derived from its children's
+#' statuses, never by re-walking a subtree, so the cost is linear in IR size.
+#' IR nodes stored in a call's `meta` (e.g. `lag()`'s `default`) count as
+#' children.
+#'
+#' @param ir An IR node (or `NULL`)
+#' @param schema List with `names`/`types` (and `factor_levels`)
+#' @return `"none"` (no factor operand outside the allowed places), `"bare"`
+#'   (the root itself is a bare factor column), or `"cpu"`
+#' @keywords internal
+ir_factor_rule <- function(ir, schema) {
+  dup <- anyDuplicated(schema$names) > 0L
+  levels_of <- function(name) {
+    if (dup) {
+      return(NULL)
+    }
+    schema$factor_levels[[name]]
+  }
+  same_levels <- function(a, b) {
+    la <- levels_of(a$name)
+    lb <- levels_of(b$name)
+    !is.null(la) && !is.null(lb) && identical(la, lb)
+  }
+  visit <- function(node) {
+    if (is.null(node)) {
+      return("none")
+    }
+    switch(node$kind,
+      col = if (identical(unname(schema$types[match(node$name, schema$names)]), "DICTIONARY32")) "bare" else "none",
+      lit = ,
+      vec = if (identical(unname(node$type), "DICTIONARY32")) "cpu" else "none",
+      call = {
+        meta_nodes <- Filter(function(m) is.list(m) && !is.null(m$kind), node$meta)
+        st <- vapply(c(node$args, meta_nodes), visit, character(1))
+        if (any(st == "cpu")) {
+          return("cpu")
+        }
+        if (!any(st == "bare")) {
+          return("none")
+        }
+        op <- node$op
+        if (op %in% c("is.na", "n_distinct")) {
+          return("none")
+        }
+        if (length(node$args) == 2L && length(meta_nodes) == 0L && all(st == "bare") &&
+            identical(node$args[[1]]$kind, "col") && identical(node$args[[2]]$kind, "col") &&
+            same_levels(node$args[[1]], node$args[[2]])) {
+          if (op %in% c("==", "!=")) {
+            return("none")
+          }
+          if (op %in% c("<", "<=", ">", ">=") &&
+              isTRUE(attr(levels_of(node$args[[1]]$name), "ordered"))) {
+            return("none")
+          }
+        }
+        "cpu"
+      },
+      "none"
+    )
+  }
+  visit(ir)
+}
+
 #' Infer the GPU output type of an IR node
 #'
 #' Recurses; for arithmetic call nodes this delegates to the existing
@@ -2299,6 +2411,24 @@ type_minus <- function(arg_types) {
 
 ir_value_type_rank <- c(BOOL8 = 1L, INT32 = 2L, INT64 = 3L, FLOAT64 = 4L)
 
+#' Signal a type error caused by a factor operand (F18)
+#'
+#' The GPU types a factor as DICTIONARY32 and can't combine it with anything
+#' else, but dplyr can (vctrs makes `factor` + `character` a character), so a
+#' type check that fails because of a DICTIONARY32 operand is not a user
+#' error. It signals this class instead of a plain error; [ir_parse_quo()]
+#' turns it into `NULL` (CPU fallback). Outside a parse the message is the
+#' same one the plain error had.
+#'
+#' @param ... Message pieces, pasted together
+#' @keywords internal
+stop_factor_needs_cpu <- function(...) {
+  stop(structure(
+    class = c("cuplyr_factor_needs_cpu", "error", "condition"),
+    list(message = paste0(...), call = NULL)
+  ))
+}
+
 # @param types Character vector of GPU types for every "value position" arg
 #   of an if_else()/case_when()/coalesce() call (already resolved -- no
 #   remaining bare/isolated NA placeholders, see ir_resolve_value_nas())
@@ -2314,16 +2444,19 @@ ir_unify_types <- function(types, op_name) {
     return(uniq)
   }
 
+  # A factor among the values: dplyr may well combine it, the GPU can't.
+  fail <- if ("DICTIONARY32" %in% uniq) stop_factor_needs_cpu else
+    function(...) stop(..., call. = FALSE)
+
   if ("STRING" %in% uniq) {
-    stop(op_name, "(): can't combine ",
+    fail(op_name, "(): can't combine ",
          paste(paste0("<", uniq, ">"), collapse = " and "),
-         " -- STRING values can't be combined with a non-STRING value.",
-         call. = FALSE)
+         " -- STRING values can't be combined with a non-STRING value.")
   }
 
   ranks <- ir_value_type_rank[uniq]
   if (anyNA(ranks)) {
-    stop(op_name, "(): can't unify types ", paste(uniq, collapse = ", "), call. = FALSE)
+    fail(op_name, "(): can't unify types ", paste(uniq, collapse = ", "))
   }
 
   names(ranks)[which.max(ranks)]
@@ -3231,6 +3364,9 @@ ir_call_registry <- list(
       # cudf cast error at GPU-execution time instead.
       x_type <- unname(ir_infer_type(x, schema))
       y_type <- unname(ir_infer_type(y, schema))
+      if (identical(x_type, "DICTIONARY32") || identical(y_type, "DICTIONARY32")) {
+        return(NULL)  # a factor needs dplyr's labels: CPU fallback (F18)
+      }
       if (identical(x_type, "STRING") != identical(y_type, "STRING")) {
         stop("na_if(): can't convert `y` (", y_type, ") to match the type of ",
              "`x` (", x_type, ").", call. = FALSE)

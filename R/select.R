@@ -452,12 +452,14 @@ push_select_rename <- function(.data, names, loc) {
     return(push_op(.data, select_node))
   }
   changed <- selected_cols != output_names
-  if (dup) {
+  if (dup || length(current_schema(.data)$factor_levels) > 0L) {
     # two steps, so the rename's factor levels are read off the select's
-    # result (by position) rather than the original table's
+    # result (by position) rather than the original table's: a combined node
+    # would give `select(x = y)` the levels of the dropped factor `x`
     selected <- push_op(.data, select_node)
     return(push_op(selected, ast_rename(input_node(selected), selected_cols[changed],
-                                        output_names[changed], positions = which(changed))))
+                                        output_names[changed],
+                                        positions = if (dup) which(changed))))
   }
   node <- ast_rename(select_node, selected_cols[changed], output_names[changed])
   push_op(.data, node)

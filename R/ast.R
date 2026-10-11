@@ -377,8 +377,13 @@ infer_mutate_output_type <- function(op, input_types, scalar) {
     grepl("^TIMESTAMP_", input_types)
   if (any(is_unsupported)) {
     bad_type <- input_types[is_unsupported][1]
-    stop("mutate() does not support arithmetic on ", bad_type, " columns",
-         call. = FALSE)
+    msg <- paste0("mutate() does not support arithmetic on ", bad_type, " columns")
+    # A factor operand: dplyr warns and returns NA, so the parse falls back
+    # (stop_factor_needs_cpu()) instead of erroring.
+    if ("DICTIONARY32" %in% input_types) {
+      stop_factor_needs_cpu(msg)
+    }
+    stop(msg, call. = FALSE)
   }
 
   # Rule 3: division always promotes to FLOAT64 (dplyr: `1L/2L` is double).

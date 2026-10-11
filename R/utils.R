@@ -3,10 +3,11 @@
 # Type mapping from R to GPU types
 gpu_type_from_r <- function(x) {
   if (is.logical(x)) return("BOOL8")
+  # Date/POSIXct first: seq.Date() and friends can have integer storage.
+  if (inherits(x, "Date")) return("TIMESTAMP_DAYS")
+  if (inherits(x, "POSIXct")) return("TIMESTAMP_MICROSECONDS")
   if (is.integer(x)) return("INT32")
   if (is.double(x)) {
-    if (inherits(x, "Date")) return("TIMESTAMP_DAYS")
-    if (inherits(x, "POSIXct")) return("TIMESTAMP_MICROSECONDS")
     # integer64 is stored as REALSXP in R but represents int64
     # Currently we ingest it as FLOAT64 (may lose precision for large values)
     if (inherits(x, "integer64")) {
@@ -97,4 +98,14 @@ wrap_gpu_call <- function(op_name, expr) {
       )
     }
   )
+}
+
+# Internal: integer-backed Date/POSIXct (seq.Date(), structure(1L, class =
+# "Date")) -> double storage with class and tzone kept; anything else as is.
+# The upload dispatches on TYPEOF, so this keeps them timestamps on the GPU.
+timestamp_as_double <- function(x) {
+  if (is.integer(x) && (inherits(x, "Date") || inherits(x, "POSIXct"))) {
+    storage.mode(x) <- "double"
+  }
+  x
 }

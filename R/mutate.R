@@ -745,6 +745,7 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
       keep_idx <- schema$names != new_name
       schema$names <- schema$names[keep_idx]
       schema$types <- schema$types[keep_idx]
+      schema <- set_schema_factor_levels(schema, new_name, NULL)
       next
     }
 
@@ -801,6 +802,20 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
         "frollmax()/frollsd() also accepted, align=\"right\" only)) ",
         "(some named arguments of these are not yet supported -- see ",
         "?mutate.tbl_gpu).\n",
+        "Expression: ", rlang::quo_text(expr),
+        call. = FALSE
+      )
+    }
+
+    # A factor outside the places F18's rule allows (ir_factor_rule(): bare
+    # copy, is.na()/n_distinct(), identical-level comparison) needs dplyr's
+    # labels, warnings and errors. Same CPU route as an unparseable dot.
+    if (ir_factor_rule(ir, schema) == "cpu") {
+      if (!stop_on_unparseable) {
+        return(NULL)
+      }
+      stop(
+        verb, "() can't use a factor in this expression on the GPU.\n",
         "Expression: ", rlang::quo_text(expr),
         call. = FALSE
       )
@@ -1048,6 +1063,12 @@ mutate_keep_select_node <- function(result, orig_names, orig_groups,
 # @return Updated schema
 # @keywords internal
 update_schema_for_expr <- function(schema, expr) {
+  # The output name's levels, read BEFORE writing (`f = f` is its own
+  # source). ir_factor_rule() reads these for the dots that follow.
+  schema <- set_schema_factor_levels(
+    schema, expr$output_col, mutate_output_levels(schema$factor_levels, expr)
+  )
+
   existing_idx <- match(expr$output_col, schema$names)
 
   if (!is.na(existing_idx)) {
@@ -1057,6 +1078,32 @@ update_schema_for_expr <- function(schema, expr) {
     schema$types <- c(schema$types, expr$output_type)
   }
 
+  schema
+}
+
+# The factor levels one mutate output takes: a bare copy of a factor column
+# takes its source's levels; anything else (including a copy whose source
+# has no recorded levels) is not a known factor, so the output name's old
+# entry must go (NULL). The one rule for update_schema_for_expr() and
+# propagate_factor_levels()'s mutate branch.
+# @param factor_levels The running `factor_levels` list (before this output)
+# @param expr A mutate expression (output_col, output_type, ir)
+# @keywords internal
+mutate_output_levels <- function(factor_levels, expr) {
+  if (identical(unname(expr$output_type), "DICTIONARY32") && identical(expr$ir$kind, "col")) {
+    factor_levels[[expr$ir$name]]
+  } else {
+    NULL
+  }
+}
+
+# Set (or, with NULL, drop) one column's entry in a running schema's
+# `factor_levels`, leaving no empty list behind.
+# @keywords internal
+set_schema_factor_levels <- function(schema, name, levels) {
+  fl <- schema$factor_levels %||% list()
+  fl[[name]] <- levels
+  schema$factor_levels <- if (length(fl) == 0L) NULL else fl
   schema
 }
 

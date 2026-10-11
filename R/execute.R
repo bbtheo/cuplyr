@@ -281,8 +281,11 @@ propagate_factor_levels <- function(node, input_schema, surviving_names) {
   # Duplicated names: the levels follow their column by position, the way
   # the select/rename itself addresses it.
   # slice and barrier keep every column in place.
-  if (node$type %in% c("select", "rename", "distinct", "slice", "barrier") &&
-      (anyDuplicated(input_schema$names) > 0L || anyDuplicated(surviving_names) > 0L)) {
+  # A select always goes by position: `select(x = y)` drops the old `x`, and a
+  # by-name filter would hand the new `x` the dropped factor's levels.
+  if (identical(node$type, "select") ||
+      (node$type %in% c("rename", "distinct", "slice", "barrier") &&
+       (anyDuplicated(input_schema$names) > 0L || anyDuplicated(surviving_names) > 0L))) {
     by_pos <- levels_by_position(input_schema)
     idx <- switch(node$type,
       select = node$positions %||% match(node$columns, input_schema$names),
@@ -319,16 +322,10 @@ propagate_factor_levels <- function(node, input_schema, surviving_names) {
 
   # A bare copy of a factor column (`mutate(h = f)`) carries its levels to
   # the output name; any other expression stops a replaced column being a
-  # factor.
+  # factor (mutate_output_levels(), R/mutate.R).
   if (identical(node$type, "mutate")) {
     for (expr in node$expressions) {
-      is_factor <- identical(unname(expr$output_type), "DICTIONARY32")
-      src <- if (identical(expr$ir$kind, "col")) factor_levels[[expr$ir$name]] else NULL
-      if (is_factor && !is.null(src)) {
-        factor_levels[[expr$output_col]] <- src
-      } else if (!is_factor) {
-        factor_levels[[expr$output_col]] <- NULL
-      }
+      factor_levels[[expr$output_col]] <- mutate_output_levels(factor_levels, expr)
     }
   }
 

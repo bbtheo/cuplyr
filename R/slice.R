@@ -289,7 +289,8 @@ unique_slice_order_name <- function(existing_names) {
 # @keywords internal
 resolve_slice_order <- function(order_quo, schema) {
   ir <- ir_parse_quo(order_quo, schema)
-  if (is.null(ir)) {
+  # A factor outside the places F18's rule allows needs dplyr's labels
+  if (is.null(ir) || ir_factor_rule(ir, schema) == "cpu") {
     return(NULL)
   }
 

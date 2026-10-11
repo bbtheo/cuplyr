@@ -109,7 +109,7 @@ test_that("bind_cols() adds vectors as columns next to a tbl_gpu", {
   # (11 columns). dplyr keeps it as a POSIXlt column, which a tbl_gpu can't
   # hold, so the upload fails exactly as tbl_gpu(tibble(y = lt)) does.
   lt <- as.POSIXlt(as.POSIXct(c("2020-01-01", "2020-01-02", "2020-01-03"), tz = "UTC"))
-  expect_error(cuplyr::bind_cols(tbl_gpu(d1()), y = lt), "Unsupported column type")
+  expect_error(cuplyr::bind_cols(tbl_gpu(d1()), y = lt), class = "cuplyr_error_unsupported_class")
 })
 
 test_that("bind_cols() keeps factor levels", {

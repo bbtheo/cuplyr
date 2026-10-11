@@ -116,7 +116,7 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
       sort_specs <- c(sort_specs, lapply(picked, function(col) {
         list(col_name = col, descending = FALSE)
       }))
-    } else if (arrange_dot_is_native(quo)) {
+    } else if (arrange_dot_is_native(quo, schema)) {
       sort_specs <- c(sort_specs, list(parse_arrange_expr(quo, .data = .data, schema = schema)))
     } else {
       return(gpu_fallback("arrange", .data, function(tbl) {
@@ -152,9 +152,10 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
 }
 
 # Internal: is this dot one of the shapes parse_arrange_expr() handles
-# natively -- `x`, `desc(x)` / `dplyr::desc(x)`, `-x` with a bare symbol?
+# natively -- `x`, `desc(x)` / `dplyr::desc(x)`, `-x` with a bare symbol
+# (not on a factor column)?
 # @keywords internal
-arrange_dot_is_native <- function(quo) {
+arrange_dot_is_native <- function(quo, schema) {
   expr <- rlang::quo_get_expr(quo)
   if (is.symbol(expr)) {
     return(TRUE)
@@ -166,7 +167,16 @@ arrange_dot_is_native <- function(quo) {
   if (rlang::is_call(head, "::") && identical(head[[2]], quote(dplyr))) {
     head <- head[[3]]
   }
-  is.symbol(head) && as.character(head) %in% c("desc", "-")
+  if (!is.symbol(head) || !as.character(head) %in% c("desc", "-")) {
+    return(FALSE)
+  }
+  # `-x` is arithmetic: on a factor column dplyr warns and keeps the input
+  # order (F18's rule), so only `desc(x)` / `x` sort a factor natively
+  if (identical(as.character(head), "-")) {
+    neg <- ir_call("-", list(ir_col(as.character(expr[[2]]))))
+    return(ir_factor_rule(neg, schema) != "cpu")
+  }
+  TRUE
 }
 
 # Internal: Parse a single arrange expression

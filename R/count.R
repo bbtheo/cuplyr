@@ -121,8 +121,9 @@ resolve_grouping_dots <- function(.data, dots) {
 
     ir <- ir_parse_quo(expr, schema)
 
-    # Not in the expression IR: the caller hands the whole call to dplyr
-    if (is.null(ir)) {
+    # Not in the expression IR, or a factor outside the places F18's rule
+    # allows (ir_factor_rule()): the caller hands the whole call to dplyr
+    if (is.null(ir) || ir_factor_rule(ir, schema) == "cpu") {
       return(NULL)
     }
 

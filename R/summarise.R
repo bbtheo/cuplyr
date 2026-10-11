@@ -609,12 +609,22 @@ summarise_dots_parseable <- function(dots, schema) {
 
     arg_expr <- decomposed$arg
     if (is.symbol(arg_expr) && as.character(arg_expr) %in% schema$names) {
+      # A bare factor column only aggregates natively under n_distinct();
+      # first()/max()/sum()/... need dplyr's factor semantics (CPU)
+      if (identical(ir_factor_rule(ir_col(as.character(arg_expr)), schema), "bare") &&
+          !identical(decomposed$fn_name, "n_distinct")) {
+        return(FALSE)
+      }
       next  # bare column reference: always valid, no temp column needed
     }
 
     arg_quo <- rlang::new_quosure(arg_expr, env)
     ir <- ir_parse_quo(arg_quo, schema)  # may throw a genuine error -- propagates
 
+    status <- ir_factor_rule(ir, schema)
+    if (status == "cpu" || (status == "bare" && !identical(decomposed$fn_name, "n_distinct"))) {
+      return(FALSE)  # a factor outside the allowed places (F18's rule): CPU
+    }
     if (!is.null(ir) && ir_has_window(ir)) {
       next  # windows-inside-summarise: always valid (Phase 6, task 4)
     }
@@ -1116,6 +1126,20 @@ preprocess_agg_expressions <- function(.data, dots) {
 
     arg_quo <- rlang::new_quosure(arg_expr, env)
     ir <- ir_parse_quo(arg_quo, current_schema(working_data))
+
+    # A factor column spelled through the pronoun or parentheses (`.data$f`,
+    # `.data[["f"]]`, `(f)`) parses to a bare `col` node: rewrite to fn(<f>)
+    # like the bare-symbol branch above, so n_distinct() of a factor stays
+    # native (F18's rule) instead of copying DICTIONARY32 into a temp column.
+    # Limited to factors so every other type keeps its existing path.
+    if (!is.null(ir) && identical(ir$kind, "col") &&
+        identical(ir_factor_rule(ir, current_schema(working_data)), "bare")) {
+      new_dots[[i]] <- rlang::new_quosure(
+        as.call(list(as.name(decomposed$fn_name), as.name(ir$name))),
+        rlang::base_env()
+      )
+      next
+    }
 
     # Phase 6, task 4: windows-inside-summarise (`sum(cumsum(v))`,
     # `last(cumsum(v))`, ...) -- checked BEFORE the ir_is_const() check below,

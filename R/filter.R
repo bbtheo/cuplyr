@@ -394,7 +394,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # `filter_eval_mask()` below, unchanged from before L1.
   needs_expr_fallback <- vapply(seq_along(dots), function(i) {
     (is.null(parsed[[i]]) && dot_references_schema_col(dots[[i]], orig_names)) ||
-      filter_compares_factor_to_string(parsed[[i]], schema) ||
+      (!is.null(parsed[[i]]) && ir_factor_rule(parsed[[i]], schema) != "none") ||
       (complement && filter_ir_not_logical(parsed[[i]], schema, i %in% window_idx))
   }, logical(1))
 
@@ -717,27 +717,6 @@ filter_ir_not_logical <- function(ir, schema, is_window) {
     return(FALSE)
   }
   !identical(unname(tryCatch(ir_infer_type(ir, schema), error = function(e) "BOOL8")), "BOOL8")
-}
-
-# Internal: TRUE iff the IR compares a factor column with a string literal
-# (`f == "u"`), which dplyr resolves through the factor's labels. The GPU holds
-# only the codes, so such a dot goes to the CPU fallback.
-# @keywords internal
-filter_compares_factor_to_string <- function(ir, schema) {
-  if (is.null(ir) || !identical(ir$kind, "call")) {
-    return(FALSE)
-  }
-  if (length(ir$args) == 2L && ir$op %in% c("==", "!=", "<", "<=", ">", ">=")) {
-    for (k in 1:2) {
-      a <- ir$args[[k]]
-      b <- ir$args[[3L - k]]
-      if (identical(a$kind, "col") && identical(b$kind, "lit") && identical(b$type, "STRING") &&
-          identical(unname(schema$types[match(a$name, schema$names)]), "DICTIONARY32")) {
-        return(TRUE)
-      }
-    }
-  }
-  any(vapply(ir$args, filter_compares_factor_to_string, logical(1), schema = schema))
 }
 
 # Internal: TRUE iff `quo`'s raw expression references at least one symbol

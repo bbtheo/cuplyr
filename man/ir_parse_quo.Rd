@@ -21,4 +21,10 @@ evaluating it in the quosure's environment. Returns \code{NULL} for anything
 the IR doesn't (yet) understand -- callers (filter/mutate parsers, from
 T3/T5 onward) fall back to the pre-existing CPU-eval or error path.
 }
+\details{
+A parse-time type check that fails only because a factor (DICTIONARY32)
+operand is involved signals \code{cuplyr_factor_needs_cpu} (see
+\code{\link[=stop_factor_needs_cpu]{stop_factor_needs_cpu()}}); that class becomes \code{NULL} here, so every verb
+sends the dot to its CPU fallback, where dplyr combines the factor itself.
+}
 \keyword{internal}

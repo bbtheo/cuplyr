@@ -24,3 +24,6 @@ test-group-split.R	group_split(.keep=FALSE) does not try to remove virtual group
 test-rowwise.R	new_rowwise_df() does not require `group_data=`	C8	tests dplyr's rowwise_df constructor new_rowwise_df() and attr(x, 'groups'); tbl_gpu has no such constructor or attribute
 test-rowwise.R	new_rowwise_df() can add class and attributes (#5918)	C8	tests dplyr's rowwise_df constructor new_rowwise_df() adding classes and attributes; tbl_gpu has no such constructor
 test-rowwise.R	validate_rowwise_df() gives useful errors	C8	corrupts attr(x, 'groups') of a rowwise_df and snapshots dplyr's validate_rowwise_df() errors; it passes only because any error satisfies a relaxed snapshot, not because of cuplyr
+test-arrange.R	arrange handles S4 classes (#1105)	C5	cuplyr refuses S4/custom-class columns at upload (F18 B); the fixture cannot reach the GPU
+test-arrange.R	legacy - arrange handles S4 classes (#1105)	C5	cuplyr refuses S4/custom-class columns at upload (F18 B); the fixture cannot reach the GPU
+test-mutate.R	mutate() handles symbol expressions	C5	cuplyr refuses S4/custom-class columns at upload (F18 B); the fixture cannot reach the GPU
