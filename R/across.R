@@ -394,25 +394,6 @@ substitute_cur_group_id <- function(.data, dots, group_cols) {
 # `everything()` implicitly skipping it).
 # =============================================================================
 
-# A one-row proxy value for a GPU schema type, so `where(is.numeric)`-style
-# predicates evaluate correctly against tidyselect's data mask without
-# needing any real GPU data.
-# @keywords internal
-schema_type_proxy_value <- function(type) {
-  switch(type,
-    BOOL8 = TRUE,
-    INT32 = 1L,
-    INT64 = 1L,
-    FLOAT64 = 1,
-    FLOAT32 = 1,
-    STRING = "a",
-    TIMESTAMP_DAYS = as.Date("1970-01-01"),
-    TIMESTAMP_MICROSECONDS = as.POSIXct("1970-01-01", tz = "UTC"),
-    DICTIONARY32 = factor("a"),
-    NA
-  )
-}
-
 # Resolve a `.cols`/`pick()`-style tidyselect expression against the
 # columns of `schema` EXCLUDING `group_cols` (see this section's own
 # header comment). Returns the selected column names, in tidyselect's own
@@ -426,23 +407,26 @@ schema_type_proxy_value <- function(type) {
 # @param group_cols Character vector, columns to exclude from the
 #   selectable universe entirely
 # @return Named character vector: values are the selected source columns,
-#   names the output names (possibly empty)
+#   names the output names (possibly empty); or `NULL` when the selection
+#   is not provably type-only (selection_is_type_only()): a predicate that may
+#   read values needs the real data, which the caller hands to dplyr (a
+#   whole-call fallback)
 # @keywords internal
 resolve_across_cols <- function(cols_expr, env, schema, group_cols) {
   eligible <- setdiff(schema$names, group_cols)
   if (length(eligible) == 0) {
     return(stats::setNames(character(), character()))
   }
-  eligible_types <- unname(schema$types[match(eligible, schema$names)])
-
-  proxy <- stats::setNames(
-    lapply(eligible_types, schema_type_proxy_value),
-    eligible
-  )
-  proxy_df <- tibble::as_tibble(proxy)
+  if (!selection_is_type_only(cols_expr, env, eligible)) {
+    return(NULL)
+  }
+  keep <- match(eligible, schema$names)
+  proxy <- tidyselect_proxy(list(
+    names = eligible, types = schema$types[keep], factor_levels = schema$factor_levels
+  ))
 
   sel <- tidyselect::eval_select(
-    expr = cols_expr, data = proxy_df, env = env, allow_rename = TRUE
+    expr = cols_expr, data = proxy, env = env, allow_rename = TRUE
   )
   if (anyDuplicated(names(sel))) {
     rlang::abort("Names must be unique.")
@@ -990,6 +974,10 @@ expand_one_across <- function(expr, env, schema, group_cols, scope = schema$name
   # the deprecated everything() default.
   cols_expr <- if (".cols" %in% names(present)) present$.cols else default_across_cols("across")
   cols <- resolve_across_cols(cols_expr, env, schema, group_cols)
+  if (is.null(cols)) {
+    # value-dependent selection: dplyr resolves it on the real data
+    return(across_fallback_result())
+  }
   if (length(cols) == 0) {
     return(stats::setNames(list(), character()))
   }
@@ -1190,7 +1178,11 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filte
   present <- as.list(matched)[-1]
 
   cols_expr <- if (".cols" %in% names(present)) present$.cols else default_across_cols(mode)
-  cols <- unname(resolve_across_cols(cols_expr, env, schema, group_cols))
+  cols <- resolve_across_cols(cols_expr, env, schema, group_cols)
+  if (is.null(cols)) {
+    return(structure(rlang::new_quosure(FALSE, env), needs_fallback = TRUE))
+  }
+  cols <- unname(cols)
   if (length(cols) == 0) {
     # dplyr: if_any() over nothing is FALSE, if_all() is TRUE
     value <- identical(mode, "if_all")

@@ -66,7 +66,7 @@ vctrs_state_init <- function() {
 vctrs_schema_sig <- function(schema) {
   list(
     types = unname(as.character(schema$types)),
-    levels = unname(lapply(schema$names, function(n) schema$factor_levels[[n]]))
+    levels = levels_by_position(schema)
   )
 }
 

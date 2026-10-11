@@ -11,7 +11,7 @@ check_set_op_compatible(x_schema, y_schema)
 }
 \value{
 A list with \verb{$target_schema} (unified schema, x's names/order)
-and \verb{$needs_fallback} (logical, always \code{FALSE} as of Phase 11 L4).
+and \verb{$needs_fallback} (logical: \code{TRUE} only for duplicated column names).
 }
 \description{
 Mirrors \code{dplyr:::is_compatible()} (verified empirically against dplyr

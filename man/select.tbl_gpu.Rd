@@ -20,9 +20,10 @@ to keep. Supports:
 \code{is.ordered}, \code{inherits(x, "Date")}), bare or combined in a lambda
 such as \code{~ is.numeric(.x) || is.factor(.x)}, are answered from the
 column types. Any other predicate (\code{where(~ anyNA(.x))},
-\code{lubridate::is.Date}), and any call that is not a tidyselect helper,
-is resolved on the data: a notified CPU fallback that collects the
-table
+\code{lubridate::is.Date}), and any call that is not a tidyselect helper
+or a base name builder (\code{sort(names(x))}, \code{paste0()}, \code{rev()},
+\code{setdiff()}, \code{.data$x}, ... with safe arguments), is resolved on the
+data: a notified CPU fallback that collects the table
 \item Helpers: \code{starts_with()}, \code{ends_with()}, \code{contains()}, etc.
 \item Renaming while selecting: \code{select(new_name = old_name)}
 }}

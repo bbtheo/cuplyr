@@ -36,7 +36,7 @@ lower_and_execute <- function(ast, source_ptr) {
 lower_select <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
   input_schema <- infer_schema(ast$input)
-  indices <- match(ast$columns, input_schema$names) - 1L
+  indices <- (ast$positions %||% match(ast$columns, input_schema$names)) - 1L
   gpu_select(input_ptr, indices)
 }
 
@@ -272,7 +272,7 @@ lower_distinct <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
   input_schema <- infer_schema(ast$input)
 
-  key_idx <- match(ast$key_cols, input_schema$names) - 1L
+  key_idx <- (ast$key_positions %||% match(ast$key_cols, input_schema$names)) - 1L
 
   result_ptr <- gpu_distinct(input_ptr, key_idx)
 

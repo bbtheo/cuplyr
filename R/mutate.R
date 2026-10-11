@@ -301,6 +301,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
                            .keep = c("all", "used", "unused", "none"),
                            .before = NULL, .after = NULL) {
   .keep <- match.arg(.keep)
+  check_unique_input_names(.data)
 
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(.by)
@@ -1098,6 +1099,7 @@ update_schema_for_expr <- function(schema, expr) {
 #'     collect()
 #' }
 transmute.tbl_gpu <- function(.data, ...) {
+  check_unique_input_names(.data)
   dots <- rlang::enquos(...)
   orig_dots <- dots
 

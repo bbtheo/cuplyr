@@ -78,18 +78,7 @@ relocate.tbl_gpu <- function(.data, ..., .before = NULL, .after = NULL) {
     return(.data)
   }
 
-  reordered_cols <- schema$names[loc]
-  output_names <- names(loc)
-
-  select_node <- ast_select(input_node(.data), reordered_cols)
-
-  if (identical(reordered_cols, output_names)) {
-    out <- push_op(.data, select_node)
-  } else {
-    changed <- reordered_cols != output_names
-    node <- ast_rename(select_node, reordered_cols[changed], output_names[changed])
-    out <- push_op(.data, node)
-  }
+  out <- push_select_rename(.data, schema$names, loc)
 
   if (length(.data$groups) > 0L) {
     out <- set_groups_by_position(out, .data, loc, schema$names)

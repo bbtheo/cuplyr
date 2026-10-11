@@ -1278,6 +1278,7 @@ join_coerce_y <- function(x, y, copy) {
 mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
                           multiple, unmatched, relationship, user_env) {
   y <- join_coerce_y(x, y, copy)
+  check_unique_join_inputs(x, y, call = rlang::caller_env())
   verb <- paste0(join_type, "_join")
   verb_fn <- get(verb, envir = asNamespace("dplyr"))
   fallback_args <- function() {
@@ -1333,6 +1334,7 @@ mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
 #' @keywords internal
 filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
   y <- join_coerce_y(x, y, copy)
+  check_unique_join_inputs(x, y, call = rlang::caller_env())
   verb <- paste0(join_type, "_join")
   verb_fn <- get(verb, envir = asNamespace("dplyr"))
   fallback_args <- function() {
@@ -1615,6 +1617,7 @@ anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
 #' @importFrom dplyr cross_join
 cross_join.tbl_gpu <- function(x, y, ..., copy = FALSE, suffix = c(".x", ".y")) {
   y <- join_coerce_y(x, y, copy)
+  check_unique_join_inputs(x, y)
 
   if (length(x$schema$names) == 0 || length(y$schema$names) == 0) {
     stop("cross_join() requires both tables to have at least one column.",

@@ -257,6 +257,7 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   # automatically -- verified empirically, no code needed here for that
   # specific conflict).
   caller_env <- rlang::caller_env()
+  check_unique_input_names(.data)
 
   by_quo <- rlang::enquo(.by)
 

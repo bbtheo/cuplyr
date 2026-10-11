@@ -244,7 +244,9 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       ast
     },
     "select" = {
-      ast$input <- push_down_projections(ast$input, ast$columns, group_cols)
+      # a positional select (duplicated names) can't be translated by name
+      needed <- if (is.null(ast$positions)) ast$columns
+      ast$input <- push_down_projections(ast$input, needed, group_cols)
       ast
     },
     "join" = {
@@ -342,6 +344,8 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       # references them -- true even for `.keep_all = TRUE`, where
       # `required_cols` can be a strict subset of the full input schema.
       needed <- union(required_cols, ast$key_cols)
+      # keyed by position (duplicated names): nothing below is pruned by name
+      if (!is.null(ast$key_positions)) needed <- NULL
       ast$input <- push_down_projections(ast$input, needed, group_cols)
       ast
     },
@@ -526,6 +530,10 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
       ast
     },
     "select" = {
+      if (!is.null(ast$positions)) {
+        ast$input <- prune_dead_columns(ast$input, NULL, group_cols)
+        return(ast)
+      }
       keep <- intersect(ast$columns, required_cols)
       if (length(keep) == 0) {
         keep <- ast$columns
@@ -601,6 +609,7 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
     },
     "distinct" = {
       needed <- union(required_cols, ast$key_cols)
+      if (!is.null(ast$key_positions)) needed <- NULL
       ast$input <- prune_dead_columns(ast$input, needed, group_cols)
       ast
     },
@@ -723,8 +732,9 @@ push_down_filters <- function(ast) {
   }
 
   if (input$type == "select") {
-    # Only push if select keeps all predicate columns
-    if (!all(filter_cols %in% input$columns)) {
+    # Only push if select keeps all predicate columns (a positional select
+    # renames nothing by name, but its columns can't be matched by name)
+    if (!is.null(input$positions) || !all(filter_cols %in% input$columns)) {
       return(ast)
     }
 

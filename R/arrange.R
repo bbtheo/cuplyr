@@ -81,6 +81,7 @@
 #' }
 arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
   dots <- rlang::enquos(...)
+  if (length(dots) > 0L) check_unique_input_names(.data)
 
   # The GPU sort is byte order, i.e. dplyr's "C" locale. Any other `.locale`
   # (or an invalid one, which dplyr must reject, even with no dots) reruns the

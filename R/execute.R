@@ -73,6 +73,86 @@ current_schema <- function(.data) {
   }
 }
 
+# dplyr's verbs that read columns (filter, mutate, summarise, arrange, ...)
+# refuse a data frame with duplicated names; select()/relocate()/rename()
+# are what repair them. Verbs call this at their entry so dplyr's message
+# comes before any other check; push_op() enforces the same rule on every
+# node (node_is_position_safe()), so a verb that forgets still can't run.
+# @keywords internal
+check_unique_input_names <- function(.data, call = rlang::caller_env()) {
+  if (anyDuplicated(.subset2(.data, "schema")$names) > 0L) {
+    abort_duplicate_names(call)
+  }
+  invisible(.data)
+}
+
+abort_duplicate_names <- function(call = rlang::caller_env()) {
+  rlang::abort("Can't transform a data frame with duplicate names.", call = call)
+}
+
+# A tbl_gpu may carry duplicated column names only while it is ungrouped: a
+# group column is identified by name, and so are the fixed keys of
+# `slice(.preserve = TRUE)`. Every writer that could put duplicated names on a
+# grouped table calls this first (names<-, push_op()'s output, new_tbl_gpu()).
+# @param names,groups The column names and group columns the table would get
+# @keywords internal
+check_dup_names_ungrouped <- function(names, groups, call = rlang::caller_env()) {
+  if (length(groups) > 0L && anyDuplicated(names) > 0L) {
+    rlang::abort(c(
+      "Can't give a grouped tbl_gpu duplicated column names.",
+      i = "`ungroup()` first, or pick unique names."
+    ), class = "cuplyr_error_duplicate_names", call = call)
+  }
+  invisible()
+}
+
+# dplyr's join_cols() check: every join refuses duplicated names on either
+# side. Called at each join verb's entry and again by push_join().
+# @keywords internal
+check_unique_join_inputs <- function(x, y, call = rlang::caller_env()) {
+  for (side in c("x", "y")) {
+    nms <- current_schema(if (side == "x") x else y)$names
+    dup <- anyDuplicated(nms)
+    if (dup > 0L) {
+      rlang::abort(c(
+        sprintf("Input columns in `%s` must be unique.", side),
+        x = sprintf("Problem with `%s`.", nms[[dup]])
+      ), call = call)
+    }
+  }
+  invisible()
+}
+
+#' Can a node run on a table with duplicated column names?
+#'
+#' On such a table a column name is ambiguous, so any node that finds a
+#' column by name (a predicate, an expression, a sort or join key, a by-name
+#' select) would silently take the first of the same-named columns.
+#' `push_op()` refuses every node on a duplicated-name input except the ones
+#' listed here, which address columns by position or touch only rows:
+#' - `select`/`rename` carrying `positions` (select(), relocate(), rename(),
+#'   `[` and `$`/`[[` build them whenever names are duplicated);
+#' - `distinct` carrying `key_positions` (distinct()/unique());
+#' - `slice` without an ordering column: head()/tail(), `x[i, ]` and the
+#'   row-index slices (the slice verbs themselves refuse duplicated names
+#'   at their entry, as dplyr does);
+#' - `barrier`.
+#' A new node type, or a by-name variant of these, fails closed.
+#'
+#' @param node An AST node about to be pushed
+#' @return `TRUE` when `node` is position-correct
+#' @keywords internal
+node_is_position_safe <- function(node) {
+  switch(node$type,
+    select = ,
+    rename = !is.null(node$positions),
+    distinct = !is.null(node$key_positions),
+    slice = is.null(node$order_col),
+    barrier = TRUE,
+    FALSE
+  )
+}
+
 #' Build the AST node that a new op should be layered on top of
 #'
 #' - lazy + pending ops: returns `.data$lazy_ops` as-is.
@@ -98,6 +178,83 @@ input_node <- function(.data) {
   ast_source(.subset2(.data, "schema"), source_ptr = .subset2(.data, "ptr"))
 }
 
+#' Factor levels by column position
+#'
+#' `schema$factor_levels` is a list named by column. When a table has
+#' duplicated column names (positional select()/relocate()/rename()) a name no
+#' longer identifies a column, so an entry belongs to the n-th `DICTIONARY32`
+#' column carrying its name: entries are kept in column order, and a duplicated
+#' name may repeat in the list. Unique names keep the plain by-name lookup.
+#'
+#' Only `levels_from_positions()` lays a list out in column order, and it tags
+#' the list (`attr(, "by_position")`) when the names repeat. A list for
+#' duplicated names without that tag was written by name somewhere, so its
+#' order says nothing about which column an entry belongs to: that is an error
+#' rather than a guess. Every writer that can produce duplicated names
+#' (`names<-`, positional nodes in `propagate_factor_levels()`, `tbl_gpu()`,
+#' `bind_cols()`) goes through `levels_from_positions()`.
+#'
+#' @param schema A schema with `names`, `types` and `factor_levels`
+#' @return A list the length of `schema$names`: the level vector of a factor
+#'   column, `NULL` for any other
+#' @keywords internal
+levels_by_position <- function(schema) {
+  nms <- schema$names
+  fl <- schema$factor_levels
+  if (is.null(fl)) {
+    return(vector("list", length(nms)))
+  }
+  if (!anyDuplicated(nms)) {
+    return(unname(fl[nms]))
+  }
+  dict <- which(unname(schema$types) == "DICTIONARY32")
+  if (!isTRUE(attr(fl, "by_position")) || length(fl) != length(dict)) {
+    rlang::abort(c(
+      "Internal error: factor levels of duplicated column names are not tracked by position.",
+      i = "Please report this to the cuplyr maintainers."
+    ), class = "cuplyr_error_internal")
+  }
+  out <- vector("list", length(nms))
+  fl_names <- names(fl)
+  seen <- list()
+  for (i in dict) {
+    nm <- nms[[i]]
+    k <- (seen[[nm]] %||% 0L) + 1L
+    seen[[nm]] <- k
+    hit <- which(fl_names == nm)[k]
+    if (is.na(hit)) {
+      rlang::abort(c(
+        "Internal error: factor levels of duplicated column names are not tracked by position.",
+        i = "Please report this to the cuplyr maintainers."
+      ), class = "cuplyr_error_internal")
+    }
+    out[i] <- list(fl[[hit]])
+  }
+  out
+}
+
+#' Rebuild `schema$factor_levels` from per-position level vectors
+#'
+#' The inverse of `levels_by_position()`: entries in column order, named by
+#' the output column names (which may repeat). When they repeat, the list is
+#' tagged `by_position` so `levels_by_position()` can trust its order.
+#'
+#' @param names Output column names
+#' @param by_pos List the length of `names` (`NULL` for a non-factor column)
+#' @return A named list, or `NULL` when no column is a factor
+#' @keywords internal
+levels_from_positions <- function(names, by_pos) {
+  keep <- !vapply(by_pos, is.null, logical(1))
+  if (!any(keep)) {
+    return(NULL)
+  }
+  out <- stats::setNames(by_pos[keep], names[keep])
+  if (anyDuplicated(names) > 0L) {
+    attr(out, "by_position") <- TRUE
+  }
+  out
+}
+
 #' Restrict factor level metadata to columns that survive an op
 #'
 #' Implements the factor_levels half of D3: `schema$factor_levels` is
@@ -119,6 +276,23 @@ propagate_factor_levels <- function(node, input_schema, surviving_names) {
   factor_levels <- input_schema$factor_levels
   if (is.null(factor_levels) || length(factor_levels) == 0) {
     return(NULL)
+  }
+
+  # Duplicated names: the levels follow their column by position, the way
+  # the select/rename itself addresses it.
+  # slice and barrier keep every column in place.
+  if (node$type %in% c("select", "rename", "distinct", "slice", "barrier") &&
+      (anyDuplicated(input_schema$names) > 0L || anyDuplicated(surviving_names) > 0L)) {
+    by_pos <- levels_by_position(input_schema)
+    idx <- switch(node$type,
+      select = node$positions %||% match(node$columns, input_schema$names),
+      distinct = if (!isTRUE(node$keep_all)) {
+        node$key_positions %||% match(node$key_cols, input_schema$names)
+      },
+      NULL
+    )
+    if (!is.null(idx)) by_pos <- by_pos[idx]
+    return(levels_from_positions(surviving_names, by_pos))
   }
 
   if (identical(node$type, "rename")) {
@@ -192,6 +366,7 @@ propagate_factor_levels <- function(node, input_schema, surviving_names) {
 #' @return Character vector of group columns to carry forward
 #' @keywords internal
 propagate_groups <- function(node, groups, schema) {
+  abort_positional_rename_with_groups(node, groups)
   if (identical(node$type, "summarise")) {
     return(intersect(node$result_groups, schema$names))
   }
@@ -203,6 +378,17 @@ propagate_groups <- function(node, groups, schema) {
   }
 
   intersect(groups, schema$names)
+}
+
+# A positional rename (duplicated names) can't map group columns by name. The
+# invariant above keeps it off grouped tables, so this is unreachable.
+# @keywords internal
+abort_positional_rename_with_groups <- function(node, groups) {
+  if (identical(node$type, "rename") && !is.null(node$positions) && length(groups) > 0L) {
+    rlang::abort("Internal error: positional rename on a grouped tbl_gpu.",
+                 class = "cuplyr_error_internal")
+  }
+  invisible()
 }
 
 #' Refuse verbs on a zero-column table that has rows
@@ -284,11 +470,15 @@ zero_column_nrow <- function(.data, verb) {
 push_op <- function(.data, node) {
   input_schema <- current_schema(.data)
   check_zero_column_input(.data, input_schema, node$type)
+  if (anyDuplicated(input_schema$names) > 0L && !node_is_position_safe(node)) {
+    abort_duplicate_names(rlang::caller_env())
+  }
 
   new_schema <- infer_schema(node)
   new_schema$factor_levels <- propagate_factor_levels(node, input_schema, new_schema$names)
 
   new_groups <- propagate_groups(node, .subset2(.data, "groups"), new_schema)
+  check_dup_names_ungrouped(new_schema$names, new_groups)
   # `.drop` belongs to the grouping: kept while any group column survives, back
   # to the default once the table is ungrouped (a later group_by() starts over).
   new_group_drop <- if (length(new_groups) > 0L) .subset2(.data, "group_drop") %||% TRUE else TRUE
@@ -328,6 +518,7 @@ push_op <- function(.data, node) {
 # on a table with different groups.
 # @keywords internal
 carry_fixed_keys <- function(node, .data, new_groups) {
+  abort_positional_rename_with_groups(node, .subset2(.data, "groups"))
   keys <- fixed_keys_of(.data)
   if (is.null(keys) || !node$type %in% c("select", "rename", "mutate", "window")) {
     return(NULL)
@@ -419,6 +610,7 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
   # `by = character()` join against one would silently get the row count
   # wrong (F07).
   verb <- paste0(join_type, "_join")
+  check_unique_join_inputs(x, y, rlang::caller_env())
   check_zero_column_input(x, current_schema(x), verb)
   check_zero_column_input(y, current_schema(y), verb)
 
@@ -550,8 +742,19 @@ resolve_by <- function(.data, by_quo, arg_name = ".by", call = rlang::caller_env
                         "` when `.data` is a grouped data frame."), call = call)
   }
 
-  nm <- current_schema(.data)$names
-  loc <- tidyselect::eval_select(by_quo, stats::setNames(nm, nm))
+  # Same rule as select(): a selection made of names and base type tests is
+  # answered by the typed proxy; anything that may read values runs on the
+  # real data (only the names come back, so the verb itself stays native).
+  schema <- current_schema(.data)
+  if (selection_is_type_only(by_quo, NULL, schema$names)) {
+    loc <- tidyselect::eval_select(by_quo, tidyselect_proxy(schema))
+  } else {
+    verb <- tryCatch(rlang::call_name(rlang::frame_call(call)), error = function(e) NULL)
+    cuplyr_fallback_notify(verb %||% arg_name,
+                           "a selection that may read column values (resolved on the data)")
+    data <- if (has_pending_ops(.data)) compute(.data) else .data
+    loc <- tidyselect::eval_select(by_quo, collect_frame(data))
+  }
   names(loc)
 }
 

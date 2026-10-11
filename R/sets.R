@@ -167,9 +167,14 @@ resolve_set_op_other_side <- function(y) {
 #'
 #' @param x_schema,y_schema Schemas (`current_schema()`) of `x`/`y`.
 #' @return A list with `$target_schema` (unified schema, x's names/order)
-#'   and `$needs_fallback` (logical, always `FALSE` as of Phase 11 L4).
+#'   and `$needs_fallback` (logical: `TRUE` only for duplicated column names).
 #' @keywords internal
 check_set_op_compatible <- function(x_schema, y_schema) {
+  # Duplicated names: the GPU paths match columns by name, so dplyr runs the
+  # whole call (union_all() repairs the names, the others keep them).
+  if (anyDuplicated(x_schema$names) > 0L || anyDuplicated(y_schema$names) > 0L) {
+    return(list(target_schema = NULL, needs_fallback = TRUE))
+  }
   nx <- length(x_schema$names)
   ny <- length(y_schema$names)
   if (nx != ny) {

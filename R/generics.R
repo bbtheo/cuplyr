@@ -364,7 +364,7 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
     if (!zero_cols && !identical(loc, seq_along(schema$names))) {
       keep_groups <- x$groups
       drop_flag <- x$group_drop %||% TRUE
-      x <- push_op(x, ast_select(input_node(x), schema$names[loc]))
+      x <- push_op(x, ast_select_at(input_node(x), schema$names, loc))
       x$groups <- intersect(keep_groups, schema$names[loc])
       # dplyr: once no group column is left the table is ungrouped, and a later
       # group_by() starts from the default `.drop` again.
@@ -604,9 +604,9 @@ fetch_cell <- function(x, col, row) {
 }
 
 select_one_column <- function(x, col) {
-  name <- current_schema(x)$names[[col]]
+  names <- current_schema(x)$names
   x <- set_tbl_gpu_field(x, "groups", character())
-  push_op(x, ast_select(input_node(x), name))
+  push_op(x, ast_select_at(input_node(x), names, col))
 }
 
 #' @export

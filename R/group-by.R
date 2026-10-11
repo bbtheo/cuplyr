@@ -115,6 +115,16 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
                              .drop = dplyr::group_by_drop_default(.data)) {
   dots <- rlang::enquos(...)
 
+  # dplyr's group_by() (with or without dots) rebuilds the table with tibble,
+  # which refuses duplicated names; grouping metadata would name an ambiguous
+  # column.
+  dup <- anyDuplicated(.data$schema$names)
+  if (dup > 0L) {
+    rlang::abort(paste0("Column name `", .data$schema$names[[dup]], "` must not be duplicated.\n",
+                        "Use `.name_repair` to specify repair."),
+                 class = c("tibble_error_column_names_must_be_unique", "tibble_error"))
+  }
+
   if (length(dots) == 0) {
     new_groups <- if (.add) .data$groups else character()
     new_drop <- if (.add && length(.data$groups) > 0L) .drop else TRUE
@@ -317,9 +327,7 @@ ungroup.tbl_gpu <- function(x, ...) {
       return(gpu_fallback("ungroup", x, function(tbl) dplyr::ungroup(tbl, !!!dots)))
     }
     # the proxy carries the grouping: group_cols() reads it from peek_data()
-    proxy <- dplyr::grouped_df(tibble::as_tibble(stats::setNames(
-      lapply(unname(schema$types), schema_type_proxy_value), schema$names
-    )), groups)
+    proxy <- tidyselect_proxy(schema, groups)
     sel <- tidyselect::eval_select(rlang::expr(c(!!!dots)), proxy, allow_rename = FALSE)
     groups <- setdiff(groups, names(sel))
     if (length(groups) > 0L) {

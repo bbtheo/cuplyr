@@ -113,10 +113,18 @@ collect_frame <- function(x) {
   }
 
   df <- wrap_gpu_call("collect", gpu_collect(x$ptr, final_schema$names))
-  result <- tibble::as_tibble(df)
+  # "minimal": a relocate()/rename() result may carry duplicated names
+  result <- tibble::as_tibble(df, .name_repair = "minimal")
 
   # Restore factor columns using stored levels
-  if (!is.null(final_schema$factor_levels)) {
+  if (!is.null(final_schema$factor_levels) && anyDuplicated(final_schema$names) > 0L) {
+    # duplicated names: by position, and only the columns that are factors
+    by_pos <- levels_by_position(final_schema)
+    for (i in which(!vapply(by_pos, is.null, logical(1)))) {
+      lvls <- by_pos[[i]]
+      result[[i]] <- factor_from_levels(lvls[result[[i]]], lvls)
+    }
+  } else if (!is.null(final_schema$factor_levels)) {
     for (col_name in names(final_schema$factor_levels)) {
       if (col_name %in% names(result)) {
         lvls <- final_schema$factor_levels[[col_name]]

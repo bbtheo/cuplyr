@@ -131,6 +131,7 @@ bind_rows_route <- function(..., .id, call) {
     if (!is_gpu[[i]] && !is.data.frame(dots[[i]])) {
       dots[[i]] <- bind_row_as_df(dots[[i]])
     }
+    dots[[i]] <- bind_rows_repair_names(dots[[i]], call)
   }
 
   if (!is.null(.id)) {
@@ -150,6 +151,24 @@ bind_rows_route <- function(..., .id, call) {
   }
 
   bind_rows_gpu(dots, .id = .id, call = call)
+}
+
+# vctrs (under dplyr's bind_rows()) repairs an input's duplicated names
+# ("unique", with its "New names:" message) before matching columns by name;
+# a tbl_gpu gets the same names through a positional rename.
+# @keywords internal
+bind_rows_repair_names <- function(d, call) {
+  nms <- if (is_tbl_gpu(d)) current_schema(d)$names else names(d)
+  if (!anyDuplicated(nms)) {
+    return(d)
+  }
+  new <- vctrs::vec_as_names(nms, repair = "unique", call = call)
+  if (!is_tbl_gpu(d)) {
+    names(d) <- new
+    return(d)
+  }
+  changed <- which(nms != new)
+  push_op(d, ast_rename(input_node(d), nms[changed], new[changed], positions = changed))
 }
 
 # dplyr 1.2.1's argument flattening (`dplyr::bind_rows()` / `bind_cols()`
@@ -332,18 +351,26 @@ bind_cols_gpu <- function(dots, .name_repair = "unique", call = rlang::caller_en
   all_names <- unlist(col_names)
   repaired_names <- repair_names(all_names, .name_repair)
 
+  # dplyr regroups the output with tibble, which refuses duplicated names.
+  if (is_tbl_gpu(first) && length(first$groups) > 0L && anyDuplicated(repaired_names) > 0L) {
+    dups <- unique(repaired_names[duplicated(repaired_names)])
+    rlang::abort(
+      c(paste0("Column names ", paste0("`", dups, "`", collapse = ", "),
+               " must not be duplicated."),
+        "Use `.name_repair` to specify repair."),
+      class = c("tibble_error_column_names_must_be_unique", "tibble_error"),
+      call = call
+    )
+  }
+
   # Collect types (unname to avoid issues)
   all_types <- unname(unlist(lapply(pieces, function(x) x$schema$types)))
 
-  # Factor levels are keyed by column name, so re-key them by position onto
-  # the repaired names.
-  all_levels <- unlist(lapply(pieces, function(x) {
-    lapply(x$schema$names, function(nm) x$schema$factor_levels[[nm]])
-  }), recursive = FALSE)
-  has_levels <- !vapply(all_levels, is.null, logical(1))
-  factor_levels <- if (any(has_levels)) {
-    rlang::set_names(all_levels[has_levels], repaired_names[has_levels])
-  }
+  # Factor levels by position (an input may carry duplicated names), re-keyed
+  # onto the repaired names.
+  all_levels <- unlist(lapply(pieces, function(x) levels_by_position(x$schema)),
+                       recursive = FALSE)
+  factor_levels <- levels_from_positions(repaired_names, all_levels)
 
   # Collect pointers
   ptrs <- lapply(pieces, function(x) x$ptr)
@@ -480,6 +507,7 @@ bind_rows_gpu <- function(dots, .id = NULL, call = rlang::caller_env()) {
   }
 
   groups <- intersect(first_groups, result$schema$names)
+  check_dup_names_ungrouped(result$schema$names, groups, call = call)
   result$groups <- groups
   result$group_drop <- if (length(groups) > 0L) first_drop else TRUE
   result
@@ -1041,5 +1069,19 @@ add_id_column <- function(result, id_col_name, row_counts, source_names) {
   id_tbl <- make_id_table(id_col_name, source_names, row_counts)
 
   # Bind .id column at front
-  bind_cols(id_tbl, result, .name_repair = "minimal")
+  out <- bind_cols(id_tbl, result, .name_repair = "minimal")
+
+  # vctrs' `.names_to` rule: an `.id` naming an existing column replaces that
+  # column in place, so the result never carries a duplicate. `out` is
+  # ungrouped here, where the transient duplicated name is allowed; the
+  # positional select drops the old column and puts the id in its slot.
+  existing <- match(id_col_name, result$schema$names)
+  if (!is.na(existing)) {
+    n <- length(result$schema$names)
+    positions <- seq_len(n + 1L)[-1L]
+    positions[existing] <- 1L
+    out <- push_op(out, ast_select(input_node(out), out$schema$names[positions],
+                                   positions = positions))
+  }
+  out
 }

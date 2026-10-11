@@ -63,11 +63,14 @@ ast_mutate <- function(input, expressions) {
 #'
 #' @param input Input AST node
 #' @param columns Character vector of column names to keep
+#' @param positions `NULL` (select by `columns`), or the integer positions of
+#'   the kept columns in `input`'s schema: used instead of the names when the
+#'   input has duplicated column names, where a name is ambiguous. Such a node
+#'   is an optimizer barrier and never pruned through.
 #' @return An ast_select node
 #' @keywords internal
-ast_select <- function(input, columns) {
-
-  ast_node("select", input = input, columns = columns)
+ast_select <- function(input, columns, positions = NULL) {
+  ast_node("select", input = input, columns = columns, positions = positions)
 }
 
 #' Create an arrange AST node
@@ -122,10 +125,15 @@ ast_barrier <- function(input) {
 #'   if any, already prepended by the caller)
 #' @param keep_all Logical, `TRUE` to keep every column of `input` (dplyr's
 #'   `.keep_all = TRUE`), `FALSE` to project down to just `key_cols`
+#' @param key_positions `NULL` (key on `key_cols` by name), or the integer
+#'   positions of the key columns in `input`'s schema: used instead of the
+#'   names when the input has duplicated column names. Such a node is never
+#'   pruned through by name.
 #' @return An ast_distinct node
 #' @keywords internal
-ast_distinct <- function(input, key_cols, keep_all = FALSE) {
-  ast_node("distinct", input = input, key_cols = key_cols, keep_all = keep_all)
+ast_distinct <- function(input, key_cols, keep_all = FALSE, key_positions = NULL) {
+  ast_node("distinct", input = input, key_cols = key_cols, keep_all = keep_all,
+           key_positions = key_positions)
 }
 
 #' Create a slice AST node
@@ -513,7 +521,7 @@ infer_schema.ast_filter <- function(node) {
 #' @export
 infer_schema.ast_select <- function(node) {
   input_schema <- infer_schema(node$input)
-  idx <- match(node$columns, input_schema$names)
+  idx <- node$positions %||% match(node$columns, input_schema$names)
   list(
     names = input_schema$names[idx],
     types = input_schema$types[idx]
@@ -566,7 +574,7 @@ infer_schema.ast_distinct <- function(node) {
     return(input_schema)
   }
 
-  idx <- match(node$key_cols, input_schema$names)
+  idx <- node$key_positions %||% match(node$key_cols, input_schema$names)
   list(names = input_schema$names[idx], types = input_schema$types[idx])
 }
 
@@ -765,7 +773,8 @@ is_opaque_expression <- function(expr_text) {
 #' @keywords internal
 is_barrier <- function(node) {
   if (is.null(node)) return(FALSE)
-  node$type %in% c("arrange", "barrier", "summarise", "distinct", "slice", "rename", "window")
+  node$type %in% c("arrange", "barrier", "summarise", "distinct", "slice", "rename", "window") ||
+    (identical(node$type, "select") && !is.null(node$positions))
 }
 
 #' Get the depth of an AST tree

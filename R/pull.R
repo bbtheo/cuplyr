@@ -50,6 +50,11 @@
 pull.tbl_gpu <- function(.data, var = -1, name = NULL, ...) {
   var_quo <- rlang::enquo(var)
   name_quo <- rlang::enquo(name)
+  if (anyDuplicated(.data$schema$names) > 0L) {
+    # dplyr: tidyselect's vars_pull() refuses them (`[[` by name would take
+    # the first of the same-named columns)
+    rlang::abort("`data` must be uniquely named but has duplicate columns.")
+  }
 
   materialized <- if (has_pending_ops(.data)) compute(.data) else .data
   schema <- materialized$schema

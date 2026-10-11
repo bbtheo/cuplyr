@@ -4,7 +4,7 @@
 \alias{ast_distinct}
 \title{Create a distinct AST node}
 \usage{
-ast_distinct(input, key_cols, keep_all = FALSE)
+ast_distinct(input, key_cols, keep_all = FALSE, key_positions = NULL)
 }
 \arguments{
 \item{input}{Input AST node (any dot expressions that compute new key
@@ -18,6 +18,11 @@ if any, already prepended by the caller)}
 
 \item{keep_all}{Logical, \code{TRUE} to keep every column of \code{input} (dplyr's
 \code{.keep_all = TRUE}), \code{FALSE} to project down to just \code{key_cols}}
+
+\item{key_positions}{\code{NULL} (key on \code{key_cols} by name), or the integer
+positions of the key columns in \code{input}'s schema: used instead of the
+names when the input has duplicated column names. Such a node is never
+pruned through by name.}
 }
 \value{
 An ast_distinct node

@@ -80,13 +80,16 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
       return(zero_column_result(.data, "distinct",
                                 n = min(zero_column_nrow(.data, "distinct"), 1L)))
     }
-    node <- ast_distinct(input_node(.data), schema$names, keep_all = TRUE)
+    node <- ast_distinct(input_node(.data), schema$names, keep_all = TRUE,
+                         key_positions = distinct_key_positions(schema$names, schema$names))
     return(push_op(.data, node))
   }
 
   # NULL dots are dropped after the "no dots" check above, as in dplyr.
   dots <- dots[!vapply(dots, rlang::quo_is_null, logical(1))]
   if (length(dots) == 0) {
+    # dplyr runs these through mutate(), which refuses duplicated names
+    check_unique_input_names(.data)
     # Only the grouping columns are keys.
     if (length(group_vars) > 0L) {
       if (isTRUE(.keep_all)) {
@@ -165,8 +168,22 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
   # `distinct(gdf, x)` returns `y, x`, prepending the *missing* group column).
   key_cols <- unique(c(setdiff(group_vars, dot_names), dot_names))
 
-  node <- ast_distinct(input_node(.data), key_cols, keep_all = .keep_all)
+  node <- ast_distinct(input_node(.data), key_cols, keep_all = .keep_all,
+                       key_positions = distinct_key_positions(key_cols, schema$names))
   push_op(.data, node)
+}
+
+# Key positions for a distinct node over a table named `names`: `NULL` (key by
+# name) unless the names are duplicated. Then an all-columns key is every
+# position, and a bare-name key is its first match, which is the column
+# dplyr's own distinct(dd, x) keys on. (A computed key went through mutate(),
+# which already refused the table.)
+# @keywords internal
+distinct_key_positions <- function(key_cols, names) {
+  if (!anyDuplicated(names)) {
+    return(NULL)
+  }
+  if (identical(key_cols, names)) seq_along(names) else match(key_cols, names)
 }
 
 # Whole-call CPU fallback with the user's original dots.

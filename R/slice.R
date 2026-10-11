@@ -683,6 +683,7 @@ slice_zero_column <- function(.data, fn) {
 #' @importFrom dplyr slice
 slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   dots <- rlang::enquos(...)
+  check_unique_input_names(.data)
   by_quo <- rlang::enquo(.by)
   gm <- slice_group_mode(.data, by_quo, ".by", call = rlang::current_env())
 
@@ -764,6 +765,7 @@ slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
   amt <- resolve_slice_amount(n, prop, call = rlang::current_env())
+  check_unique_input_names(.data)
   gm <- slice_group_mode(.data, by_quo, "by", call = rlang::current_env())
   np <- slice_np(n, prop)
 
@@ -807,6 +809,7 @@ slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
   amt <- resolve_slice_amount(n, prop, call = rlang::current_env())
+  check_unique_input_names(.data)
   gm <- slice_group_mode(.data, by_quo, "by", call = rlang::current_env())
   np <- slice_np(n, prop)
 
@@ -873,6 +876,7 @@ slice_min.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
   amt <- resolve_slice_amount(n, prop, call = rlang::current_env())
+  check_unique_input_names(.data)
   gm <- slice_group_mode(.data, by_quo, "by", call = rlang::current_env())
   np <- slice_np(n, prop)
 
@@ -914,6 +918,7 @@ slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
   amt <- resolve_slice_amount(n, prop, call = rlang::current_env())
+  check_unique_input_names(.data)
   gm <- slice_group_mode(.data, by_quo, "by", call = rlang::current_env())
   np <- slice_np(n, prop)
 
@@ -1034,8 +1039,18 @@ tail.tbl_gpu <- function(x, n = 6L, ...) {
 # `.drop`, keys recomputed from the rows kept, so slice(.preserve = TRUE)'s
 # fixed keys are not carried over. Slice the ungrouped table, then put the
 # grouping back as metadata.
+#
+# slice_head()/slice_tail() refuse duplicated names as dplyr's do, but `[`
+# (and so head()/tail()) accepts them: such a table gets the row-only slice
+# node directly (it has no groups, group_by() refuses it too).
 head_tail_ungrouped <- function(x, n, slicer) {
   groups <- x$groups
+  if (length(groups) == 0L && anyDuplicated(current_schema(x)$names) > 0L) {
+    amt <- resolve_slice_amount(n = n)
+    mode <- if (identical(slicer, slice_head.tbl_gpu)) "head" else "tail"
+    return(push_op(x, ast_slice(input_node(x), mode = mode,
+                                amount = amt$amount, is_prop = FALSE)))
+  }
   if (length(groups) == 0L) {
     return(slicer(x, n = n))
   }
@@ -1250,6 +1265,7 @@ slice_sample.tbl_gpu <- function(.data, ..., n, prop, by = NULL,
   by_quo <- rlang::enquo(by)
   weight_quo <- rlang::enquo(weight_by)
   amt <- resolve_slice_amount(n, prop, call = rlang::current_env())
+  check_unique_input_names(.data)
   np <- slice_np(n, prop)
 
   # resolve_by() (via slice_group_mode()) raises dplyr's own

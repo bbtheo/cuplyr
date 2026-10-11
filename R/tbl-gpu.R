@@ -95,14 +95,12 @@ tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
       lvls
     } else NULL
   })
-  names(factor_levels) <- names(data)
-  # Remove NULL entries to keep schema compact
-  factor_levels <- Filter(Negate(is.null), factor_levels)
-
+  # By position: `data` may carry duplicated names. NULL entries are dropped
+  # to keep the schema compact.
   schema <- list(
     names = names(data),
     types = vapply(data, gpu_type_from_r, character(1)),
-    factor_levels = if (length(factor_levels) > 0) factor_levels else NULL
+    factor_levels = levels_from_positions(names(data), unname(factor_levels))
   )
 
   exec_mode <- resolve_exec_mode(lazy)
@@ -166,6 +164,8 @@ new_tbl_gpu <- function(ptr = NULL,
   if (!exec_mode %in% c("lazy", "eager")) {
     stop("exec_mode must be 'lazy' or 'eager'.", call. = FALSE)
   }
+
+  check_dup_names_ungrouped(schema$names, groups)
 
   out <- list(
     ptr = ptr,
@@ -398,19 +398,35 @@ called_from_vctrs <- function(p) {
     stop("`value` must not contain empty strings.", call. = FALSE)
   }
 
+  # Refuse before any state changes: a grouped table can't carry duplicates.
+  check_dup_names_ungrouped(value, x$groups)
+
   # Pending lazy ops: the new names have to go through the AST, because
   # `current_schema()` is inferred from it and ignores the base schema's names.
+  # A rename by name can't address (or produce) duplicated names, so those go
+  # through a positional rename node.
   if (has_pending_ops(x)) {
-    return(dplyr::rename(x, dplyr::all_of(stats::setNames(current_schema(x)$names, value))))
+    old <- current_schema(x)$names
+    if (!anyDuplicated(old) && !anyDuplicated(value)) {
+      return(dplyr::rename(x, dplyr::all_of(stats::setNames(old, value))))
+    }
+    changed <- old != value
+    if (!any(changed)) {
+      return(x)
+    }
+    return(push_op(x, ast_rename(input_node(x), old[changed], value[changed],
+                                 positions = which(changed))))
   }
 
-  # Keep the name-keyed metadata (grouping, factor levels) in step.
+  # Keep the name-keyed metadata (grouping, factor levels) in step. Factor
+  # levels are re-laid out by position: a by-name list keeps whatever order
+  # earlier ops left it in, which stops being enough once a name repeats.
   old <- x$schema$names
   if (length(x$groups) > 0) {
     x$groups <- value[match(x$groups, old)]
   }
   if (!is.null(x$schema$factor_levels)) {
-    names(x$schema$factor_levels) <- value[match(names(x$schema$factor_levels), old)]
+    x$schema$factor_levels <- levels_from_positions(value, levels_by_position(x$schema))
   }
   x$schema$names <- value
   x

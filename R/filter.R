@@ -233,6 +233,7 @@ filter_out.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 # result (as slice() does, see fixed_keys_of()); every other exit drops them.
 # @keywords internal
 filter_impl <- function(.data, dots, by_quo, .preserve, complement, call) {
+  check_unique_input_names(.data, call)
   keys <- NULL
   # dplyr keeps a `.drop = FALSE` table's whole group structure whatever
   # `.preserve` says, so those tables take the same route.

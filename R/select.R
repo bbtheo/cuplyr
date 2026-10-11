@@ -15,9 +15,10 @@
 #'       `is.ordered`, `inherits(x, "Date")`), bare or combined in a lambda
 #'       such as `~ is.numeric(.x) || is.factor(.x)`, are answered from the
 #'       column types. Any other predicate (`where(~ anyNA(.x))`,
-#'       `lubridate::is.Date`), and any call that is not a tidyselect helper,
-#'       is resolved on the data: a notified CPU fallback that collects the
-#'       table
+#'       `lubridate::is.Date`), and any call that is not a tidyselect helper
+#'       or a base name builder (`sort(names(x))`, `paste0()`, `rev()`,
+#'       `setdiff()`, `.data$x`, ... with safe arguments), is resolved on the
+#'       data: a notified CPU fallback that collects the table
 #'     \item Helpers: `starts_with()`, `ends_with()`, `contains()`, etc.
 #'     \item Renaming while selecting: `select(new_name = old_name)`
 #'   }
@@ -114,15 +115,7 @@ select.tbl_gpu <- function(.data, ...) {
   selected_cols <- schema$names[vars]
   output_names <- names(vars)
 
-  select_node <- ast_select(input_node(.data), selected_cols)
-
-  if (identical(selected_cols, output_names)) {
-    out <- push_op(.data, select_node)
-  } else {
-    changed <- selected_cols != output_names
-    node <- ast_rename(select_node, selected_cols[changed], output_names[changed])
-    out <- push_op(.data, node)
-  }
+  out <- push_select_rename(.data, schema$names, vars)
 
   if (length(groups) > 0L) {
     out <- set_groups_by_position(out, .data, vars, schema$names)
@@ -185,9 +178,7 @@ tidyselect_proxy_value <- function(type, levels = NULL) {
 # column names are allowed.
 # @keywords internal
 tidyselect_proxy <- function(schema, groups = character()) {
-  levels <- schema$factor_levels
-  cols <- Map(function(type, name) tidyselect_proxy_value(type, levels[[name]]),
-              unname(schema$types), schema$names)
+  cols <- Map(tidyselect_proxy_value, unname(schema$types), levels_by_position(schema))
   names(cols) <- schema$names
   frame <- vctrs::new_data_frame(cols, n = 1L)
   if (length(groups) == 0L) {
@@ -247,10 +238,73 @@ selection_is_type_only <- function(x, env, cols) {
   if (name %in% c("c", "-", "!", "&", "|", "(", ":")) {
     return(selection_is_type_only(as.list(x)[-1L], env, cols))
   }
-  name %in% c(
+  if (name %in% c(
     "everything", "last_col", "starts_with", "ends_with", "contains", "matches",
     "num_range", "all_of", "any_of", "one_of", "group_cols"
-  )
+  )) {
+    return(TRUE)
+  }
+  name_builder_is_safe(x, env)
+}
+
+# Base functions that build names or positions out of their arguments and
+# can't return a predicate; `selection_is_type_only()` accepts a call to one
+# only when every argument is itself safe (name_builder_is_safe()).
+name_builder_fns <- c(
+  "names", "colnames", "sort", "rev", "unique", "setdiff", "union", "intersect",
+  "paste", "paste0", "sprintf", "toupper", "tolower", "seq_len", "seq", "head",
+  "tail", "[", "c", ":"
+)
+
+# The functions a name builder `name` may legitimately be: the base one, plus
+# the generic dplyr attaches over setdiff/union/intersect (it falls back to
+# base on vectors), and utils' head/tail.
+# @keywords internal
+name_builder_originals <- function(name) {
+  home <- if (name %in% c("head", "tail")) asNamespace("utils") else baseenv()
+  out <- list(base::get0(name, home))
+  if (name %in% c("setdiff", "union", "intersect")) {
+    out <- c(out, list(getExportedValue("dplyr", name)))
+  }
+  out
+}
+
+# Is `x` a name-building expression: a constant, a symbol that is not a
+# function, `.data$x` / `.data[["x"]]`, or a call to a base name builder
+# (looked up in `env` and compared by identity, so a user function named
+# `sort` doesn't pass) whose arguments are all safe in turn? Anything else
+# (a user helper, `c(helper(), ...)` inside a builder) may hide a predicate.
+# @keywords internal
+name_builder_is_safe <- function(x, env) {
+  if (rlang::is_quosure(x)) {
+    return(name_builder_is_safe(rlang::quo_get_expr(x), rlang::quo_get_env(x)))
+  }
+  if (rlang::is_missing(x)) {
+    return(TRUE)
+  }
+  if (is.symbol(x)) {
+    fn <- rlang::env_get(env %||% globalenv(), as.character(x), default = NULL, inherit = TRUE)
+    return(!is.function(fn))
+  }
+  if (!is.call(x)) {
+    return(!is.function(x))
+  }
+  if (is_data_pronoun_call(x)) {
+    return(TRUE)
+  }
+  name <- pick_call_name(x[[1L]])
+  if (is.null(name) || !name %in% name_builder_fns) {
+    return(FALSE)
+  }
+  fn <- if (is.symbol(x[[1L]])) {
+    rlang::env_get(env %||% globalenv(), name, default = NULL, inherit = TRUE)
+  } else {
+    base::get0(name, baseenv())
+  }
+  if (!any(vapply(name_builder_originals(name), identical, logical(1), fn))) {
+    return(FALSE)
+  }
+  all(vapply(as.list(x)[-1L], name_builder_is_safe, logical(1), env = env))
 }
 
 # A where() argument whose answer depends only on the column's class: a base
@@ -367,6 +421,48 @@ resolve_selection <- function(.data, schema, quos, verb, resolve) {
   list(loc = resolve(frame), data = data)
 }
 
+# A select node keeping the columns at positions `loc` of a table named
+# `names`: by name, or by position when the names are duplicated (where a name
+# is ambiguous, and push_op() refuses a by-name select).
+# @keywords internal
+ast_select_at <- function(input, names, loc) {
+  ast_select(input, names[loc], positions = if (anyDuplicated(names) > 0L) unname(loc))
+}
+
+# The select node for `loc` (named positions into `names`: the kept columns
+# in order, named by their output names), plus a rename on top when
+# tidyselect renamed a column. A table with duplicated names, or a selection
+# repeating a source column (`select(d, a = x, b = x)`), is addressed by
+# position end to end: the select by `loc`, the rename by the output slots.
+# The intermediate select of a repeated source column carries duplicated names,
+# which a grouped table must not; it is built on the ungrouped table, and the
+# caller puts the groups (and the fixed keys of `slice(.preserve = TRUE)`) back
+# by position (set_groups_by_position()).
+# @keywords internal
+push_select_rename <- function(.data, names, loc) {
+  selected_cols <- names[loc]
+  output_names <- names(loc)
+  dup <- anyDuplicated(names) > 0L || anyDuplicated(selected_cols) > 0L
+  if (dup) {
+    .data <- ungrouped(.data)
+  }
+  select_node <- ast_select(input_node(.data), selected_cols,
+                            positions = if (dup) unname(loc))
+  if (identical(selected_cols, output_names)) {
+    return(push_op(.data, select_node))
+  }
+  changed <- selected_cols != output_names
+  if (dup) {
+    # two steps, so the rename's factor levels are read off the select's
+    # result (by position) rather than the original table's
+    selected <- push_op(.data, select_node)
+    return(push_op(selected, ast_rename(input_node(selected), selected_cols[changed],
+                                        output_names[changed], positions = which(changed))))
+  }
+  node <- ast_rename(select_node, selected_cols[changed], output_names[changed])
+  push_op(.data, node)
+}
+
 # dplyr's ensure_group_vars(): grouping columns the selection leaves out are
 # put in front, with a message, unless an output name already uses theirs.
 # @param vars Named integer positions from eval_select()
@@ -391,7 +487,9 @@ select_ensure_group_vars <- function(vars, names, groups) {
 
 # Groups follow their column by position (dplyr regroups by position): each
 # original group column keeps its group under the name it now has, and a
-# column renamed onto a group's name does not inherit the group.
+# column renamed onto a group's name does not inherit the group. The fixed
+# keys of `slice(.preserve = TRUE)` (see fixed_keys_of()) follow the same
+# mapping, and are kept only when every group column survives.
 # @param out The pushed select/relocate result
 # @param before The input table
 # @param loc Named positions (into `names`) of the output columns, in order
@@ -399,6 +497,13 @@ select_ensure_group_vars <- function(vars, names, groups) {
 set_groups_by_position <- function(out, before, loc, names) {
   pos <- match(match(before$groups, names), loc)
   groups <- names(loc)[pos[!is.na(pos)]]
+  keys <- fixed_keys_of(before)
+  if (!is.null(keys) && !anyNA(pos)) {
+    names(keys) <- groups
+    out$fixed_keys <- keys
+  } else if (!is.null(out[["fixed_keys"]])) {
+    out <- drop_fixed_keys(out)
+  }
   out$groups <- groups
   out$group_drop <- if (length(groups) > 0L) before$group_drop %||% TRUE else TRUE
   out

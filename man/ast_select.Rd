@@ -4,12 +4,17 @@
 \alias{ast_select}
 \title{Create a select AST node}
 \usage{
-ast_select(input, columns)
+ast_select(input, columns, positions = NULL)
 }
 \arguments{
 \item{input}{Input AST node}
 
 \item{columns}{Character vector of column names to keep}
+
+\item{positions}{\code{NULL} (select by \code{columns}), or the integer positions of
+the kept columns in \code{input}'s schema: used instead of the names when the
+input has duplicated column names, where a name is ambiguous. Such a node
+is an optimizer barrier and never pruned through.}
 }
 \value{
 An ast_select node
