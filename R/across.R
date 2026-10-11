@@ -442,6 +442,127 @@ resolve_across_cols <- function(cols_expr, env, schema, group_cols) {
   stats::setNames(eligible[sel], names(sel))
 }
 
+# Resolve a TOP-LEVEL `pick(...)` / `dplyr::pick(...)` dot (group_by(),
+# arrange()) to column names. dplyr expands pick() once, on the FULL current
+# columns (no group exclusion: unlike mutate()/summarise(), these verbs see
+# the ungrouped data), in the quosure's environment. Returns the selected
+# column names (character(0) for `pick(NULL)`), or NULL when the dot is not a
+# natively resolvable pick: not a pick call, no arguments, a rename, or a
+# tidyselect error -- the caller then falls back to dplyr, which raises its
+# own error (or succeeds) for those.
+# @param quo A quosure (one dot)
+# @param schema list(names=, types=)
+# @keywords internal
+resolve_pick_call <- function(quo, schema) {
+  expr <- rlang::quo_get_expr(quo)
+  if (!rlang::is_call(expr) || length(expr) < 2L) {
+    return(NULL)
+  }
+  head <- expr[[1]]
+  is_pick <- identical(head, quote(pick)) ||
+    (rlang::is_call(head, "::") && identical(head[[2]], quote(dplyr)) &&
+       identical(head[[3]], quote(pick)))
+  if (!is_pick) {
+    return(NULL)
+  }
+  args <- as.list(expr)[-1]
+  if (!is.null(names(args)) && any(names(args) != "")) {
+    return(NULL)
+  }
+  # The proxies carry only the column TYPE, so a selection that looks at
+  # values (a lambda or user predicate in where()) cannot be resolved here
+  if (!pick_selection_is_type_only(expr, rlang::quo_get_env(quo), schema$names)) {
+    return(NULL)
+  }
+  sel <- tryCatch(
+    resolve_across_cols(rlang::call2("c", !!!args), rlang::quo_get_env(quo), schema, character()),
+    error = function(e) NULL
+  )
+  if (is.null(sel) || !identical(unname(names(sel)), unname(as.character(sel)))) {
+    return(NULL)
+  }
+  unname(as.character(sel))
+}
+
+# Is every `where()` predicate in a pick() selection a known type-only
+# predicate, and every other call a tidyselect helper or operator? `x` is a
+# pick() call (or an argument of one); embedded `{{ }}` quosures are walked in
+# their own environment. Anything else (a lambda, a user function, an unknown
+# call) could depend on column values, which the type proxies don't have.
+# A bare symbol must name a column: tidyselect would otherwise look it up in
+# the environment, where it may be a predicate function (`pick(is_complete)`
+# is still accepted, with a deprecation warning) or an external vector. Of the
+# other non-calls only constants (names, positions, NULL) are safe; a function
+# spliced in with `!!` would also be applied as a predicate.
+# @param cols Column names of the schema the selection resolves against
+# @keywords internal
+pick_selection_is_type_only <- function(x, env, cols) {
+  # `pick(a, )`: an empty argument slot can't be classified
+  if (rlang::is_missing(x)) {
+    return(FALSE)
+  }
+  if (rlang::is_quosure(x)) {
+    return(pick_selection_is_type_only(rlang::quo_get_expr(x), rlang::quo_get_env(x), cols))
+  }
+  if (is.symbol(x)) {
+    return(as.character(x) %in% cols)
+  }
+  if (!is.call(x)) {
+    return(is.atomic(x) || is.null(x))
+  }
+  name <- pick_call_name(x[[1]])
+  args <- as.list(x)[-1]
+  walk_args <- function() {
+    all(vapply(args, pick_selection_is_type_only, logical(1), env = env, cols = cols))
+  }
+  if (identical(name, "pick")) {
+    return(walk_args())
+  }
+  if (identical(name, "where")) {
+    return(length(args) == 1L && pick_predicate_is_type_only(args[[1]], env))
+  }
+  if (is.null(name)) {
+    return(FALSE)
+  }
+  if (name %in% c("c", "-", "!", "&", "|", "(", ":")) {
+    return(walk_args())
+  }
+  # other tidyselect helpers take names/patterns, never column values
+  name %in% c(
+    "everything", "last_col", "starts_with", "ends_with", "contains", "matches",
+    "num_range", "all_of", "any_of", "group_cols"
+  )
+}
+
+# `f` / `pkg::f` call head -> "f" (tidyselect/dplyr/base namespaces only)
+# @keywords internal
+pick_call_name <- function(head) {
+  if (is.symbol(head)) {
+    return(as.character(head))
+  }
+  if (rlang::is_call(head, "::", n = 2L) && is.symbol(head[[3]]) &&
+        as.character(head[[2]]) %in% c("tidyselect", "dplyr", "base")) {
+    return(as.character(head[[3]]))
+  }
+  NULL
+}
+
+# A `where()` predicate resolving (in `env`) to one of base R's type tests.
+# @keywords internal
+pick_predicate_is_type_only <- function(pred, env) {
+  if (rlang::is_quosure(pred)) {
+    return(pick_predicate_is_type_only(rlang::quo_get_expr(pred), rlang::quo_get_env(pred)))
+  }
+  if (!is.symbol(pred) && !rlang::is_call(pred, "::", n = 2L)) {
+    return(FALSE)
+  }
+  fn <- tryCatch(eval(pred, env), error = function(e) NULL)
+  is.function(fn) && any(vapply(
+    list(is.numeric, is.double, is.integer, is.character, is.logical, is.factor),
+    identical, logical(1), fn
+  ))
+}
+
 # `.cols` of a missing-`.cols` across()/if_any()/if_all(): dplyr's deprecated
 # everything() default, with its lifecycle warning.
 # @keywords internal

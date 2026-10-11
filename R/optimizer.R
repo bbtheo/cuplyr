@@ -292,8 +292,9 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
     # still needed -- a real, reproducible miscorrectness bug, not just a
     # missed optimization (see `tests/testthat/test-optimizer.R`).
     "arrange" = {
+      # `.by_group = TRUE` sorts by `ast$groups` too (lower_arrange())
       sort_cols <- vapply(ast$sort_specs, `[[`, character(1), "col_name")
-      needed <- union(required_cols, sort_cols)
+      needed <- union(union(required_cols, sort_cols), ast$groups)
       ast$input <- push_down_projections(ast$input, needed, group_cols)
       ast
     },
@@ -547,8 +548,9 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
     # ever reached via a join's `left`/`right` recursion below, never via
     # the normal barrier-splitting entry point.
     "arrange" = {
+      # `.by_group = TRUE` sorts by `ast$groups` too (lower_arrange())
       sort_cols <- vapply(ast$sort_specs, `[[`, character(1), "col_name")
-      needed <- union(required_cols, sort_cols)
+      needed <- union(union(required_cols, sort_cols), ast$groups)
       ast$input <- prune_dead_columns(ast$input, needed, group_cols)
       ast
     },

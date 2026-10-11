@@ -4,7 +4,7 @@
 \alias{arrange.tbl_gpu}
 \title{Arrange rows of a GPU table by column values}
 \usage{
-\method{arrange}{tbl_gpu}(.data, ..., .by_group = FALSE)
+\method{arrange}{tbl_gpu}(.data, ..., .by_group = FALSE, .locale = NULL)
 }
 \arguments{
 \item{.data}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
@@ -15,6 +15,10 @@ of precedence (first column is primary sort key).}
 
 \item{.by_group}{If \code{TRUE} and \code{.data} is grouped, sort within groups by
 prepending group columns to the sort specification. Default is \code{FALSE}.}
+
+\item{.locale}{The locale to sort character vectors in. \code{NULL} (the default)
+and \code{"C"} sort by byte order on the GPU; any other locale is sorted by
+dplyr on the CPU (via stringi) through the usual fallback.}
 }
 \value{
 A \code{tbl_gpu} object with rows reordered. The GPU memory for the
@@ -61,7 +65,8 @@ For very large tables, consider filtering to reduce size before sorting.
 All column types supported by \code{tbl_gpu} can be sorted:
 numeric, integer, character, logical, Date, POSIXct.
 
-Note: Character sorting uses binary/UTF-8 ordering, not locale-aware collation.
+Note: Character sorting on the GPU uses binary/UTF-8 ordering (dplyr's
+\code{"C"} locale). A non-\code{"C"} \code{.locale} falls back to dplyr.
 }
 }
 \examples{

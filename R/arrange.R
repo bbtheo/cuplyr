@@ -10,6 +10,9 @@
 #'   of precedence (first column is primary sort key).
 #' @param .by_group If `TRUE` and `.data` is grouped, sort within groups by
 #'   prepending group columns to the sort specification. Default is `FALSE`.
+#' @param .locale The locale to sort character vectors in. `NULL` (the default)
+#'   and `"C"` sort by byte order on the GPU; any other locale is sorted by
+#'   dplyr on the CPU (via stringi) through the usual fallback.
 #'
 #' @return A `tbl_gpu` object with rows reordered. The GPU memory for the
 #'   sorted result is newly allocated (approximately 2x table size peak memory).
@@ -40,7 +43,8 @@
 #' All column types supported by `tbl_gpu` can be sorted:
 #' numeric, integer, character, logical, Date, POSIXct.
 #'
-#' Note: Character sorting uses binary/UTF-8 ordering, not locale-aware collation.
+#' Note: Character sorting on the GPU uses binary/UTF-8 ordering (dplyr's
+#' `"C"` locale). A non-`"C"` `.locale` falls back to dplyr.
 #'
 #' @seealso
 #' \code{\link{filter.tbl_gpu}} for filtering rows,
@@ -75,18 +79,56 @@
 #'     arrange(mpg, .by_group = TRUE) |>
 #'     collect()
 #' }
-arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE) {
+arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
   dots <- rlang::enquos(...)
 
+  # The GPU sort is byte order, i.e. dplyr's "C" locale. Any other `.locale`
+  # (or an invalid one, which dplyr must reject, even with no dots) reruns the
+  # whole call in dplyr, and so does the deprecated system-locale option, which
+  # only applies while `.locale` is NULL
+  legacy_locale <- is.null(.locale) && isTRUE(getOption("dplyr.legacy_locale"))
+  if (legacy_locale || !(is.null(.locale) || identical(.locale, "C"))) {
+    return(gpu_fallback("arrange", .data, function(tbl) {
+      dplyr::arrange(tbl, !!!dots, .by_group = .by_group, .locale = .locale)
+    }))
+  }
+
   if (length(dots) == 0) {
+    # `arrange(group_by(df, g), .by_group = TRUE)` still sorts by the groups
+    if (isTRUE(.by_group) && length(.data$groups) > 0) {
+      return(push_op(.data, ast_arrange(input_node(.data), list(), .data$groups)))
+    }
     return(.data)
   }
 
   # Get current schema
   schema <- current_schema(.data)
 
-  # Parse sort specifications
-  sort_specs <- lapply(dots, parse_arrange_expr, .data = .data, schema = schema)
+  # Classify every dot first: `x` / `desc(x)` / `-x` and a resolvable
+  # top-level pick() are native (pick() expands to one ascending spec per
+  # column, selected on the full data); anything else is evaluated by dplyr.
+  # Decided before any op is pushed, so the fallback reruns the whole call.
+  sort_specs <- list()
+  for (quo in dots) {
+    picked <- resolve_pick_call(quo, schema)
+    if (!is.null(picked)) {
+      sort_specs <- c(sort_specs, lapply(picked, function(col) {
+        list(col_name = col, descending = FALSE)
+      }))
+    } else if (arrange_dot_is_native(quo)) {
+      sort_specs <- c(sort_specs, list(parse_arrange_expr(quo, .data = .data, schema = schema)))
+    } else {
+      return(gpu_fallback("arrange", .data, function(tbl) {
+        dplyr::arrange(tbl, !!!dots, .by_group = .by_group, .locale = .locale)
+      }))
+    }
+  }
+
+  # `arrange(pick(NULL))` and friends select no column: nothing to sort by,
+  # unless `.by_group = TRUE` (then the same node as the no-dots case)
+  if (length(sort_specs) == 0 && !(isTRUE(.by_group) && length(.data$groups) > 0)) {
+    return(.data)
+  }
 
   # Validate columns exist
   for (spec in sort_specs) {
@@ -106,6 +148,24 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE) {
   }
 
   push_op(.data, ast_arrange(input_node(.data), sort_specs, groups_for_arrange))
+}
+
+# Internal: is this dot one of the shapes parse_arrange_expr() handles
+# natively -- `x`, `desc(x)` / `dplyr::desc(x)`, `-x` with a bare symbol?
+# @keywords internal
+arrange_dot_is_native <- function(quo) {
+  expr <- rlang::quo_get_expr(quo)
+  if (is.symbol(expr)) {
+    return(TRUE)
+  }
+  if (!rlang::is_call(expr) || length(expr) != 2L || !is.symbol(expr[[2]])) {
+    return(FALSE)
+  }
+  head <- expr[[1]]
+  if (rlang::is_call(head, "::") && identical(head[[2]], quote(dplyr))) {
+    head <- head[[3]]
+  }
+  is.symbol(head) && as.character(head) %in% c("desc", "-")
 }
 
 # Internal: Parse a single arrange expression

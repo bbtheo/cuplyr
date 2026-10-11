@@ -317,6 +317,23 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
     return(filter_expr_fallback(fallback_data, fallback_dots, by_quo))
   }
 
+  # A dot with no column reference whose IR is NULL (opaque) or constant is
+  # evaluated standalone in R (below) -- no data mask. If that errors, dplyr
+  # may still succeed (the call can use pick()/n()/cur_*() inside a user
+  # function, valid only in the mask), so hand the WHOLE call to dplyr,
+  # decided here before any predicate is pushed. Each such dot is evaluated
+  # exactly once: the value is cached for the loop below.
+  standalone <- vector("list", length(dots))
+  for (i in setdiff(seq_along(dots), window_idx)) {
+    if (is.null(parsed[[i]]) || ir_is_const(parsed[[i]])) {
+      res <- tryCatch(list(value = rlang::eval_tidy(dots[[i]])), error = function(e) NULL)
+      if (is.null(res)) {
+        return(filter_expr_fallback(fallback_data, fallback_dots, by_quo))
+      }
+      standalone[i] <- list(res)
+    }
+  }
+
   # Phase 5, task W5: at least one dot's predicate contains a window call
   # (mean(x), n(), row_number(), cumsum(x), lag(x), ...). dplyr's multi-dot
   # semantics (verified empirically -- see this file's roxygen "Multi-dot
@@ -379,7 +396,7 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
       # predicates accumulated so far into a real ast_filter node, then
       # fall back to CPU-side evaluation of this expression (D4).
       flush_predicates()
-      .data <- filter_eval_mask(.data, quo)
+      .data <- filter_eval_mask(.data, quo, standalone[[i]]$value)
       next
     }
 
@@ -393,7 +410,7 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
       # Evaluate in R instead (on the original quosure, not the already-
       # constant-folded IR) and route to the same no-op / impossible-
       # predicate / mask-apply paths the pre-IR parser used.
-      value <- tryCatch(rlang::eval_tidy(quo), error = function(e) NULL)
+      value <- standalone[[i]]$value
 
       if (is.logical(value) && length(value) == 1 && isTRUE(value)) {
         next  # TRUE: genuine no-op, contributes nothing (D4/S4 semantics)
@@ -417,7 +434,7 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
       # expression -- filter_eval_mask() has the exact error/mask-apply
       # logic for these shapes already.
       flush_predicates()
-      .data <- filter_eval_mask(.data, quo)
+      .data <- filter_eval_mask(.data, quo, value)
       next
     }
 
@@ -722,15 +739,17 @@ check_filter_comparison_types <- function(ir, schema) {
 #
 # @param .data A tbl_gpu object
 # @param quo A quosure whose evaluated result must be logical
+# @param eval_result The quosure's already-evaluated value (callers that
+#   evaluated it once to decide routing pass it so it isn't run twice)
 # @return A filtered tbl_gpu object
 # @keywords internal
-filter_eval_mask <- function(.data, quo) {
+filter_eval_mask <- function(.data, quo, eval_result = rlang::eval_tidy(quo)) {
   if (identical(.data$exec_mode, "lazy") && has_pending_ops(.data)) {
     .data <- compute(.data)
   }
 
   expr_chr <- rlang::quo_text(quo)
-  eval_result <- tryCatch(rlang::eval_tidy(quo), error = function(e) NULL)
+  eval_result <- tryCatch(eval_result, error = function(e) NULL)
 
   if (is.null(eval_result) || !is.logical(eval_result)) {
     stop("filter() only supports comparisons: ==, !=, >, >=, <, <=\n",

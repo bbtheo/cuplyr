@@ -431,11 +431,19 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
     # f not in the registry: constant-fold if the subtree has no column
     # reference (how c(4, 6), nrow(df), Sys.Date() work), else unsupported.
     if (!expr_has_column_ref(expr, schema)) {
-      val <- tryCatch(
-        rlang::eval_tidy(rlang::new_quosure(expr, env)),
-        error = function(e) stop(conditionMessage(e), call. = FALSE)
+      # An error here is NOT proof of a user error: dplyr evaluates the call
+      # inside the data mask, where pick()/n()/cur_*() (possibly inside user
+      # functions) are valid but fail out here. NULL = unsupported, so the
+      # caller's CPU fallback reruns it through dplyr (which raises its own
+      # error if the call really is broken).
+      folded <- tryCatch(
+        list(value = rlang::eval_tidy(rlang::new_quosure(expr, env))),
+        error = function(e) NULL
       )
-      return(ir_lit_from_r(val, allow_vector = allow_vector))
+      if (is.null(folded)) {
+        return(NULL)
+      }
+      return(ir_lit_from_r(folded$value, allow_vector = allow_vector))
     }
 
     return(NULL)

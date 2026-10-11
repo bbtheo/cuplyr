@@ -400,28 +400,21 @@ test_that("arrange() errors on non-existent column", {
   )
 })
 
-test_that("arrange() errors on invalid desc() argument", {
+# F10: expression dots used to be a hard error; dplyr accepts them, so they
+# now match dplyr (via the CPU fallback).
+test_that("arrange() with an expression inside desc() matches dplyr", {
   skip_if_no_gpu()
 
-  df <- data.frame(x = c(1, 2, 3))
-  gpu_df <- tbl_gpu(df)
-
-  expect_error(
-    dplyr::arrange(gpu_df, dplyr::desc(x + 1)),
-    "column name"
-  )
+  df <- tibble::tibble(x = c(1, 3, 2))
+  expect_same_as_dplyr(df, function(d) dplyr::arrange(d, dplyr::desc(x + 1)))
 })
 
-test_that("arrange() errors on complex expressions", {
+test_that("arrange() with an expression dot matches dplyr", {
   skip_if_no_gpu()
 
-  df <- data.frame(x = c(1, 2, 3))
-  gpu_df <- tbl_gpu(df)
-
-  expect_error(
-    dplyr::arrange(gpu_df, x + 1),
-    "column names"
-  )
+  df <- tibble::tibble(x = c(1, 3, 2))
+  expect_same_as_dplyr(df, function(d) dplyr::arrange(d, x + 1))
+  expect_same_as_dplyr(df, function(d) dplyr::arrange(d, -(x * 2)))
 })
 
 # =============================================================================

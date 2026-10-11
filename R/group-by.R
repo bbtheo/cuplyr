@@ -132,20 +132,66 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   working <- .data
   if (any(is_named)) {
     named_dots <- dots[is_named]
-    working <- rlang::inject(dplyr::mutate(working, !!!named_dots))
+    # dplyr computes these on the UNGROUPED data (#5598), so n(), pick() and
+    # friends see the whole table even when `.data` is already grouped
+    working <- rlang::inject(dplyr::mutate(dplyr::ungroup(working), !!!named_dots))
   }
 
-  # Resolve every dot -- named -> its own name; unnamed -> tidyselect
+  # Whole-call CPU fallback for shapes with no tbl_gpu representation or that
+  # only dplyr can resolve (pick() inside wrappers, across(), a named pick()
+  # that makes a df-column, ...). Always reruns the ORIGINAL call, from the
+  # original `.data`, so nothing half-applied leaks.
+  group_by_fallback <- function() {
+    gpu_fallback("group_by", .data, function(tbl) {
+      dplyr::group_by(tbl, !!!dots, .add = .add, .drop = .drop)
+    })
+  }
+
+  if (!is_tbl_gpu(working)) {
+    return(group_by_fallback())
+  }
+
+  # Resolve every dot -- named -> its own name; unnamed -> a top-level pick()
+  # (resolved on the full columns, see resolve_pick_call()) or tidyselect
   # against the schema AFTER the mutate() above -- IN THE ORIGINAL ARGUMENT
   # ORDER, since dplyr preserves the exact order args were written even
   # when named/unnamed dots are interleaved (verified empirically).
+  working_schema <- current_schema(working)
+  orig_schema <- current_schema(.data)
+  orig_names <- orig_schema$names
+  # A column named twice has no single "type at this position"
+  if (anyDuplicated(dot_names[is_named])) {
+    return(group_by_fallback())
+  }
   new_groups <- character()
   for (i in seq_along(dots)) {
     if (is_named[i]) {
       new_groups <- c(new_groups, dot_names[i])
-    } else {
-      new_groups <- c(new_groups, parse_group_cols(working, dots[i]))
+      next
     }
+    # A pick() only sees the columns as they are at its position: the
+    # original ones (with their original type until a named dot redefines
+    # them) plus those made by earlier named dots.
+    earlier <- dot_names[seq_len(i - 1L)][is_named[seq_len(i - 1L)]]
+    visible <- working_schema$names %in% c(orig_names, earlier)
+    pick_names <- working_schema$names[visible]
+    use_working <- pick_names %in% earlier
+    pick_types <- ifelse(
+      use_working,
+      working_schema$types[match(pick_names, working_schema$names)],
+      orig_schema$types[match(pick_names, orig_names)]
+    )
+    pick_schema <- list(names = pick_names, types = unname(pick_types))
+    picked <- resolve_pick_call(dots[[i]], pick_schema)
+    if (!is.null(picked)) {
+      new_groups <- c(new_groups, picked)
+      next
+    }
+    cols <- parse_group_cols(working, dots[i])
+    if (is.null(cols)) {
+      return(group_by_fallback())
+    }
+    new_groups <- c(new_groups, cols)
   }
   new_groups <- unique(new_groups)
 
@@ -327,10 +373,12 @@ group_by_drop_default.tbl_gpu <- function(.tbl) {
 #
 # @param .data A tbl_gpu object
 # @param dots Quosures from group_by()
-# @return Character vector of column names
+# @return Character vector of column names, or NULL when a non-symbol dot
+#   can't be resolved by tidyselect (caller falls back to dplyr)
 # @keywords internal
 parse_group_cols <- function(.data, dots) {
   col_names <- character()
+  unresolved <- FALSE
   schema_names <- current_schema(.data)$names
 
   for (expr in dots) {
@@ -350,13 +398,19 @@ parse_group_cols <- function(.data, dots) {
         selected <- tidyselect::eval_select(expr, data = col_positions)
         col_names <- c(col_names, names(selected))
       }, error = function(e) {
-        # If tidyselect fails, assume it's a column name
-        col_names <<- c(col_names, expr_text)
+        # A bare symbol that tidyselect can't resolve is reported as a
+        # missing column by the caller; any other shape (a pick() it can't
+        # expand natively, a wrapper, ...) is for dplyr to evaluate.
+        if (is.symbol(rlang::quo_get_expr(expr))) {
+          col_names <<- c(col_names, expr_text)
+        } else {
+          unresolved <<- TRUE
+        }
       })
     }
   }
 
-  unique(col_names)
+  if (unresolved) NULL else unique(col_names)
 }
 
 # =============================================================================
