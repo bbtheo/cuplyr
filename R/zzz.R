@@ -3,10 +3,12 @@
 # import that lookup fails with `could not find function "n"`. `group_cols` is
 # the same for selections such as ungroup(df, group_cols()): tidyselect brings
 # its own helpers (starts_with(), ...) but not dplyr's group_cols().
+# `n_distinct` is the same for summarise(d, k = n_distinct(x)) evaluated by
+# dplyr itself (a pipeline run on a plain data frame from a test namespace).
 #' @useDynLib cuplyr, .registration = TRUE
 #' @importFrom Rcpp sourceCpp
 #' @importFrom rlang %||%
-#' @importFrom dplyr n group_cols
+#' @importFrom dplyr n group_cols n_distinct
 NULL
 
 # Opt this package's namespace into {cli}-formatted rlang conditions

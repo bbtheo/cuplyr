@@ -64,7 +64,14 @@
 #' @details
 #' ## Supported aggregation functions
 #' \itemize{
-#'   \item `sum(x)` - Sum of values
+#'   \item `sum(x)` - Sum of values. Over an integer or logical `x` the result
+#'     is an integer, as in dplyr; if it leaves R's integer range
+#'     (`+-(2^31 - 1)`) dplyr returns a double, and so does an eager `tbl_gpu`.
+#'     A lazy plan has a fixed schema and raises a
+#'     `cuplyr_error_sum_overflow` error instead (use `sum(as.numeric(x))`),
+#'     except that a lazy `summarise()` which also takes the `min()`/`max()`
+#'     of an integer or logical column runs immediately and then behaves like
+#'     an eager one (double on overflow).
 #'   \item `mean(x)` - Arithmetic mean
 #'   \item `min(x)` - Minimum value
 #'   \item `max(x)` - Maximum value
@@ -311,6 +318,11 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
     }))
   }
 
+  # F34: the fallbacks below must re-run what the user wrote, not the
+  # across()-expanded, auto-named dots (that would drop dplyr's unnamed
+  # data-frame splice and evaluate across() lambdas sequentially).
+  orig_dots <- dots
+
   summarise_groups <- if (by_given) by_cols else .data$groups
   expanded <- expand_across_dots(dots, current_schema(.data), summarise_groups, "summarise")
   if (isTRUE(attr(expanded, "needs_fallback"))) {
@@ -318,7 +330,10 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
       rlang::inject(dplyr::summarise(tbl, !!!dots, .groups = .groups, .by = !!by_quo))
     }))
   }
-  dots <- auto_name_dots(expanded, "summarise")
+  # Named silently here: the "will use expression as column name" warning is
+  # only true on the GPU path, so it is raised below, after the fallback
+  # checks (dplyr itself does not warn for an unnamed splice or expression).
+  dots <- name_dots_silently(expanded)
 
   # Phase 11, task L1: universal expression-level CPU fallback. Runs AFTER
   # across()-expansion/auto_name_dots() (so an ordinary, expandable
@@ -339,9 +354,11 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   if (summarise_dots_are_sequential(dots) ||
       !summarise_dots_parseable(dots, current_schema(.data))) {
     return(gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(tbl, !!!dots, .groups = .groups, .by = !!by_quo))
+      rlang::inject(dplyr::summarise(tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo))
     }))
   }
+
+  auto_name_dots(expanded, "summarise")  # only for its unnamed-expression warning
 
   if (by_given) {
     # `.by=` summarise is always ungrouped (Phase 5, task W9); `.groups=`
@@ -625,11 +642,17 @@ summarise_dots_parseable <- function(dots, schema) {
     if (status == "cpu" || (status == "bare" && !identical(decomposed$fn_name, "n_distinct"))) {
       return(FALSE)  # a factor outside the allowed places (F18's rule): CPU
     }
-    if (!is.null(ir) && ir_has_window(ir)) {
-      next  # windows-inside-summarise: always valid (Phase 6, task 4)
-    }
     if (is.null(ir)) {
       return(FALSE)  # sub-expression shape not understood at all
+    }
+    # F34: dplyr evaluates the argument once per group. A length-1 argument
+    # that contains a reducer (`sum(mean(n))`, `sum(n())`) is a reduction of a
+    # scalar, which the broadcast-then-reduce window path would get wrong.
+    if (ir_agg_arg_is_scalar_reduction(ir)) {
+      return(FALSE)
+    }
+    if (ir_has_window(ir)) {
+      next  # windows-inside-summarise: always valid (Phase 6, task 4)
     }
     # ir_is_const(ir) (e.g. sum(5)): left alone here, exactly like
     # preprocess_agg_expressions() -- not a "shape not understood" case,
@@ -638,6 +661,61 @@ summarise_dots_parseable <- function(dots, schema) {
   }
 
   TRUE
+}
+
+# Internal: per-group length analysis of an aggregate's argument (F34).
+# dplyr evaluates `sum(<arg>)` once per group, so `<arg>` is either a
+# length-n vector (n = the group's rows) or a length-1 value. A column is
+# length n, a literal length 1; a reducing call (mean(), n(), sum(), ...)
+# returns length 1; a row-level window call (cumsum(), lag(), rank family,
+# rolling) takes its first argument's length (a bare `row_number()` is n);
+# anything element-wise is n if some child is n (recycling).
+#
+# The GPU path broadcasts a reducer's result to n copies. That is harmless
+# while the length-1 value is used element-wise, but wrong once it feeds a
+# window (agg or row-level): dplyr runs the window over ONE value, the GPU
+# over n copies (`cumsum(mean(n))`, `sum(mean(n))`, `lag(mean(n))`). The
+# desugars of cummean()/consecutive_id() add a bare `row_number()` (length n)
+# next to the user's argument; they are judged by the window that wraps the
+# user's argument (cumsum()/lag()), so that injected node never hides the
+# length-1 argument.
+# @return `list(len = "1"|"n", reducer = <a reducer occurs inside>,
+#   unsafe = <a window inside takes a length-1 value containing a reducer>)`
+# @keywords internal
+ir_agg_length <- function(ir) {
+  kind <- ir$kind
+  if (identical(kind, "lit")) {
+    return(list(len = "1", reducer = FALSE, unsafe = FALSE))
+  }
+  if (!identical(kind, "call")) {
+    return(list(len = "n", reducer = FALSE, unsafe = FALSE))  # col / vec
+  }
+
+  kids <- lapply(ir$args, ir_agg_length)
+  any_reducer <- any(vapply(kids, `[[`, logical(1), "reducer"))
+  any_unsafe <- any(vapply(kids, `[[`, logical(1), "unsafe"))
+  window <- ir_call_registry[[ir$op]]$window
+  if (!is.null(window)) {
+    first <- if (length(kids) > 0) kids[[1]] else NULL
+    unsafe <- any_unsafe ||
+      (!is.null(first) && identical(first$len, "1") && isTRUE(first$reducer))
+    if (identical(window$kind, "agg")) {
+      return(list(len = "1", reducer = TRUE, unsafe = unsafe))
+    }
+    len <- if (is.null(first)) "n" else first$len
+    return(list(len = len, reducer = any_reducer, unsafe = unsafe))
+  }
+  any_n <- any(vapply(kids, function(k) identical(k$len, "n"), logical(1)))
+  list(len = if (any_n) "n" else "1", reducer = any_reducer, unsafe = any_unsafe)
+}
+
+# TRUE iff the broadcast-then-reduce path would get the aggregate's argument
+# wrong: it is itself a length-1 value built from a reducer, or some window
+# inside it takes one.
+# @keywords internal
+ir_agg_arg_is_scalar_reduction <- function(ir) {
+  info <- ir_agg_length(ir)
+  isTRUE(info$unsafe) || (identical(info$len, "1") && isTRUE(info$reducer))
 }
 
 # Internal: the shared aggregation pipeline -- temp-column preprocessing,
@@ -713,8 +791,15 @@ summarise_core <- function(.data, dots, retained_groups = character(),
     return(summarise_run_now(working_data, aggregations, retained_groups))
   }
 
-  push_op(working_data, ast_summarise(input_node(working_data), aggregations,
-                                      working_data$groups, retained_groups))
+  # F34: an integer sum() that overflows is a double in dplyr. An eager
+  # table reconciles its schema from the result; a lazy plan keeps INT32 and
+  # errors at execution (see ast_summarise(on_sum_overflow=)).
+  eager <- !identical(working_data$exec_mode, "lazy")
+  result <- push_op(working_data, ast_summarise(
+    input_node(working_data), aggregations, working_data$groups, retained_groups,
+    on_sum_overflow = if (eager) "double" else "error"
+  ))
+  if (eager) reconcile_summarise_types(result) else result
 }
 
 # Internal: run a summarise node immediately, then reconcile the schema with
@@ -733,16 +818,25 @@ summarise_run_now <- function(.data, aggregations, retained_groups) {
   base <- compute(.data)
   base$exec_mode <- "eager"
   result <- push_op(base, ast_summarise(input_node(base), aggregations,
-                                        base$groups, retained_groups))
-
-  # The only possible drift is INT32 min()/max() promoted to FLOAT64.
-  actual <- gpu_col_types(result$ptr)
-  promoted <- result$schema$types == "INT32" & actual == "dbl"  # gpu_col_types() spelling
-  result$schema$types[promoted] <- "FLOAT64"
+                                        base$groups, retained_groups,
+                                        on_sum_overflow = "double"))
+  result <- reconcile_summarise_types(result)
 
   if (was_lazy) {
     result$exec_mode <- "lazy"
   }
+  result
+}
+
+# Internal: correct an executed summarise result's schema from its real
+# column types. The only possible drift is an INT32 column that came back
+# double: an INT32 min()/max() promoted to FLOAT64 (F07), or an integer sum()
+# that overflowed R's integer range (F34).
+# @keywords internal
+reconcile_summarise_types <- function(result) {
+  actual <- gpu_col_types(result$ptr)
+  promoted <- result$schema$types == "INT32" & actual == "dbl"  # gpu_col_types() spelling
+  result$schema$types[promoted] <- "FLOAT64"
   result
 }
 
@@ -1133,6 +1227,7 @@ preprocess_agg_expressions <- function(.data, dots) {
     # native (F18's rule) instead of copying DICTIONARY32 into a temp column.
     # Limited to factors so every other type keeps its existing path.
     if (!is.null(ir) && identical(ir$kind, "col") &&
+        identical(decomposed$fn_name, "n_distinct") &&
         identical(ir_factor_rule(ir, current_schema(working_data)), "bare")) {
       new_dots[[i]] <- rlang::new_quosure(
         as.call(list(as.name(decomposed$fn_name), as.name(ir$name))),
@@ -1290,6 +1385,13 @@ resolve_agg_window_arg <- function(working_data, ir, fn_name, dot_index) {
     return(list(data = working_data, col_name = post_ir$name))
   }
 
+  # create_temp_column() reads `$ptr`, which is stale while the window stages
+  # above are still pending lazy ops: run them (silently -- the caller has
+  # already reported its own materialization).
+  if (has_pending_ops(working_data)) {
+    working_data <- compute(working_data)
+  }
+
   temp_col_name <- paste0(".temp_agg_win_", dot_index)
   keep_bool <- fn_name %in% c("any", "all")
   working_data <- create_temp_column(working_data, temp_col_name, post_ir, keep_bool = keep_bool)
@@ -1340,12 +1442,15 @@ create_temp_column <- function(.data, col_name, ir, keep_bool = FALSE) {
     gpu_mutate_expr(.data$ptr, list(bound_ir), col_name, new_type, schema$names)
   )
 
+  # Everything else on the schema (notably `factor_levels`, which a factor
+  # grouping key still needs) is carried over.
+  new_schema <- schema
+  new_schema$names <- c(schema$names, col_name)
+  new_schema$types <- c(schema$types, new_type)
+
   new_tbl_gpu(
     ptr = new_ptr,
-    schema = list(
-      names = c(schema$names, col_name),
-      types = c(schema$types, new_type)
-    ),
+    schema = new_schema,
     lazy_ops = .data$lazy_ops,
     groups = .data$groups,
     group_drop = .data$group_drop %||% TRUE,
@@ -1417,21 +1522,20 @@ parse_aggregations <- function(schema, dots, na_rm_flags = rep(FALSE, length(dot
   for (i in seq_along(dots)) {
     expr <- dots[[i]]
     expr_text <- rlang::quo_text(expr)
-    match_text <- strip_ns_prefix(expr_text)
 
-    # Check for n() which has no column argument
-    if (grepl("^n\\(\\)$", match_text)) {
+    # F34: read the call off the expression, not its deparsed text (a
+    # backticked name like `my x` has no usable text form). A one-argument
+    # call whose argument isn't a name keeps the old "Column '<text>' not
+    # found" diagnosis.
+    decomposed <- decompose_agg_call(rlang::quo_get_expr(expr))
+
+    # n() has no column argument
+    if (!is.null(decomposed) && identical(decomposed$fn_name, "n") && is.null(decomposed$arg)) {
       aggregations[[i]] <- make_aggregation(names(dots)[i], NA_character_, "n")
       next
     }
 
-    # Parse function(column) pattern
-    match_result <- regmatches(
-      match_text,
-      regexec("^([a-zA-Z_][a-zA-Z0-9_]*)\\(([^)]+)\\)$", match_text)
-    )[[1]]
-
-    if (length(match_result) != 3) {
+    if (is.null(decomposed) || is.null(decomposed$arg)) {
       # Defensive, internal-only path (Phase 11, task L1): every real
       # summarise() call is screened by summarise_dots_parseable() before
       # reaching here, which already routes this exact shape to the CPU
@@ -1442,8 +1546,12 @@ parse_aggregations <- function(schema, dots, na_rm_flags = rep(FALSE, length(dot
            call. = FALSE)
     }
 
-    func_name <- match_result[2]
-    col_name <- trimws(match_result[3])
+    func_name <- decomposed$fn_name
+    col_name <- if (is.symbol(decomposed$arg)) {
+      as.character(decomposed$arg)
+    } else {
+      paste(deparse(decomposed$arg), collapse = "")
+    }
 
     # Validate function
     if (!func_name %in% agg_functions) {

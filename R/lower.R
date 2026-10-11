@@ -247,6 +247,18 @@ lower_summarise <- function(ast, source_ptr) {
             if (identical(fn, "min")) "Inf" else "-Inf", call. = FALSE)
   }
 
+  # F34: an integer/logical sum() that left R's integer range came back as
+  # FLOAT64 (dplyr returns a double there). A lazy plan declared INT32
+  # statically, so it can't absorb that: fail loudly rather than drift.
+  if (any(attr(result, "sum_overflow")) && !identical(ast$on_sum_overflow, "double")) {
+    rlang::abort(
+      c("An integer `sum()` overflowed R's integer range.",
+        i = "dplyr would return a double here, but a lazy plan has a fixed schema.",
+        i = "Use `sum(as.numeric(x))`, or run the pipeline in eager mode."),
+      class = "cuplyr_error_sum_overflow"
+    )
+  }
+
   # An aggregate named like a grouping column replaces that key in place.
   agg_names <- vapply(ast$aggregations, `[[`, character(1), "output_col")
   out_idx <- summarise_output_index(ast$groups, agg_names)

@@ -384,6 +384,38 @@ std::unique_ptr<cudf::column> empty_input_reduction(const std::string& agg_type,
     return null_of(in_type);
 }
 
+// F34: dplyr's sum() of an integer or logical column is an R integer. The
+// GPU reduces in INT64 (cudf's groupby/reduce sum type for INT32/BOOL8);
+// this narrows the result column afterwards. If every value fits R's integer
+// range (+-(2^31 - 1); -2^31 is NA_integer_ in R) the column becomes INT32.
+// Otherwise base R's sum() returns a double and one overflowing group makes
+// the whole column double, so the whole column becomes FLOAT64 and the
+// function returns true so the R side can reconcile (eager) or raise (lazy).
+// Cost: one minmax reduction (two scalars to the host) plus one cast.
+bool is_int_sum(const std::string& agg_type, cudf::type_id input_id) {
+    return agg_type == "sum" &&
+           (input_id == cudf::type_id::INT32 || input_id == cudf::type_id::BOOL8);
+}
+
+bool narrow_int_sum(std::unique_ptr<cudf::column>& col) {
+    constexpr int64_t kRIntMax = 2147483647;  // R's .Machine$integer.max
+    if (col->type().id() != cudf::type_id::INT64) {
+        col = cudf::cast(col->view(), cudf::data_type{cudf::type_id::INT64});
+    }
+    bool overflow = false;
+    if (col->size() > 0) {
+        auto [lo, hi] = cudf::minmax(col->view());
+        auto* lo_s = static_cast<cudf::numeric_scalar<int64_t>*>(lo.get());
+        auto* hi_s = static_cast<cudf::numeric_scalar<int64_t>*>(hi.get());
+        // An all-null column has no valid extremes and can't overflow.
+        overflow = lo_s->is_valid() && hi_s->is_valid() &&
+                   (lo_s->value() < -kRIntMax || hi_s->value() > kRIntMax);
+    }
+    col = cudf::cast(col->view(), cudf::data_type{
+        overflow ? cudf::type_id::FLOAT64 : cudf::type_id::INT32});
+    return overflow;
+}
+
 } // namespace cuplyr
 
 // Phase 6, task 6.1 (Fix A): `na_rm` -- one flag per aggregation, same
@@ -437,11 +469,22 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     // for min()/max() over FLOAT64/INT32 input that is not an internal
     // helper aggregation.
     LogicalVector identity_used(num_aggs, false);
+    // F34: per-aggregation "an integer/logical sum() left R's integer range
+    // and was returned as FLOAT64" report (see narrow_int_sum()).
+    LogicalVector sum_overflow(num_aggs, false);
     auto finish = [&](std::unique_ptr<cudf::table> result) {
         SEXP out = make_gpu_table_xptr(std::move(result));
         Rcpp::Shield<SEXP> keep(out);
         Rf_setAttrib(out, Rf_install("identity_used"), identity_used);
+        Rf_setAttrib(out, Rf_install("sum_overflow"), sum_overflow);
         return out;
+    };
+    // Applied to each aggregation's final column, whichever path made it.
+    auto narrow_sum = [&](int i, std::unique_ptr<cudf::column>& col) {
+        if (is_int_sum(Rcpp::as<std::string>(agg_types[i]),
+                       view.column(agg_col_indices[i]).type().id())) {
+            sum_overflow[i] = narrow_int_sum(col);
+        }
     };
 
     for (int i = 0; i < num_groups; ++i) {
@@ -457,6 +500,23 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         }
     }
 
+    // F34: dplyr's min()/max() of a logical column is an integer. A BOOL8
+    // input is cast to INT32 up front so it takes the INT32 path (empty-group
+    // identity, double promotion, warning) unchanged.
+    std::vector<std::unique_ptr<cudf::column>> bool_minmax_cast(num_aggs);
+    auto agg_col = [&](int i) -> cudf::column_view {
+        return bool_minmax_cast[i] ? bool_minmax_cast[i]->view()
+                                   : view.column(agg_col_indices[i]);
+    };
+    for (int i = 0; i < num_aggs; ++i) {
+        std::string t = Rcpp::as<std::string>(agg_types[i]);
+        if ((t == "min" || t == "max") &&
+            view.column(agg_col_indices[i]).type().id() == cudf::type_id::BOOL8) {
+            bool_minmax_cast[i] = cudf::cast(view.column(agg_col_indices[i]),
+                                             cudf::data_type{cudf::type_id::INT32});
+        }
+    }
+
     // F07: ungrouped summarise() of a 0-row table crashed in cudf (a 0-group
     // groupby against the 1-row count column). Build the one-row result of
     // the empty-vector reductions directly.
@@ -466,9 +526,10 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
             std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
             bool used = false;
             result_columns.push_back(empty_input_reduction(
-                agg_type, view.column(agg_col_indices[i]).type(),
+                agg_type, agg_col(i).type(),
                 static_cast<bool>(identity[i]), used));
             identity_used[i] = used;
+            narrow_sum(i, result_columns.back());
         }
         return finish(std::make_unique<cudf::table>(std::move(result_columns)));
     }
@@ -478,7 +539,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
 
         for (int i = 0; i < num_aggs; ++i) {
             std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
-            cudf::column_view col = view.column(agg_col_indices[i]);
+            cudf::column_view col = agg_col(i);
 
             if (agg_type == "n") {
                 // cudf::size_type (view.num_rows()) is already int32_t, so this
@@ -663,6 +724,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                         std::move(agg_result), result_aggs[1].results[0]->view(), *identity_scalar);
                 }
 
+                narrow_sum(i, agg_result);
                 result_columns.push_back(std::move(agg_result));
             }
         }
@@ -721,7 +783,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
 
     for (int i = 0; i < num_aggs; ++i) {
         std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
-        cudf::column_view value_view = view.column(agg_col_indices[i]);
+        cudf::column_view value_view = agg_col(i);
         AggKind kind = classify_agg(agg_type);
         bool na_rm_flag = static_cast<bool>(na_rm[i]);
 
@@ -830,7 +892,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         }
         std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
         auto& main_result = result_aggs[main_request_idx[i]].results[0];
-        if (minmax_has_identity(agg_type, view.column(agg_col_indices[i]).type().id())) {
+        if (minmax_has_identity(agg_type, agg_col(i).type().id())) {
             cudf::column_view counts = result_aggs[identity_fix_request_idx[i]].results[0]->view();
             identity_used[i] = apply_minmax_identity(main_result, agg_type == "min", &counts);
             continue;
@@ -848,7 +910,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         for (int i = 0; i < num_aggs; ++i) {
             std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
             if (identity[i] &&
-                minmax_has_identity(agg_type, view.column(agg_col_indices[i]).type().id())) {
+                minmax_has_identity(agg_type, agg_col(i).type().id())) {
                 apply_minmax_identity(result_aggs[main_request_idx[i]].results[0],
                                       agg_type == "min", nullptr);
                 identity_used[i] = true;
@@ -881,6 +943,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
 
     for (int i = 0; i < num_aggs; ++i) {
         result_columns.push_back(std::move(result_aggs[main_request_idx[i]].results[0]));
+        narrow_sum(i, result_columns.back());
     }
 
     return finish(std::make_unique<cudf::table>(std::move(result_columns)));

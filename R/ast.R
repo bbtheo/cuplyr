@@ -98,11 +98,17 @@ ast_arrange <- function(input, sort_specs, groups = character()) {
 #'   input, all of `groups` for `"keep"`, all-but-the-last for the default/
 #'   `"drop_last"`. Read by `propagate_groups()` (R/execute.R) instead of
 #'   the old hardcoded "summarise always drops all groups" rule.
+#' @param on_sum_overflow (F34) What to do when an integer/logical `sum()`
+#'   leaves R's integer range at execution. `"double"`: the column comes back
+#'   FLOAT64, as in dplyr (eager mode reconciles the schema from the result).
+#'   `"error"` (lazy plans, whose schema was declared INT32 statically): raise
+#'   `cuplyr_error_sum_overflow`.
 #' @return An ast_summarise node
 #' @keywords internal
-ast_summarise <- function(input, aggregations, groups, result_groups = character()) {
+ast_summarise <- function(input, aggregations, groups, result_groups = character(),
+                          on_sum_overflow = "error") {
   ast_node("summarise", input = input, aggregations = aggregations, groups = groups,
-            result_groups = result_groups)
+            result_groups = result_groups, on_sum_overflow = on_sum_overflow)
 }
 
 #' Create a barrier AST node (optimization fence)
@@ -470,9 +476,17 @@ infer_mutate_output_type <- function(op, input_types, scalar) {
 #' @keywords internal
 make_aggregation <- function(output_col, input_col, fn, input_type = NULL, na_rm = FALSE,
                               extra = NA_real_, identity = TRUE) {
+  # F34: min()/max() of a logical is an integer in dplyr; gpu_summarise()
+  # casts the BOOL8 input to INT32, so the aggregation is an INT32 one.
+  if (fn %in% c("min", "max") && identical(unname(input_type), "BOOL8")) {
+    input_type <- "INT32"
+  }
   output_type <- switch(fn,
     "n" = "INT32",
-    "sum" = if (!is.null(input_type) && input_type == "INT32") "INT64" else "FLOAT64",
+    # F34: dplyr's sum() of an integer/logical is an R integer. gpu_summarise()
+    # reduces in INT64 and narrows to INT32; the type is FLOAT64 instead when
+    # a sum leaves R's integer range (see ast_summarise(on_sum_overflow=)).
+    "sum" = if (!is.null(input_type) && unname(input_type) %in% c("INT32", "BOOL8")) "INT32" else "FLOAT64",
     "mean" = "FLOAT64",
     "min" = input_type %||% "FLOAT64",
     "max" = input_type %||% "FLOAT64",

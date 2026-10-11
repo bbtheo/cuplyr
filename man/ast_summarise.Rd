@@ -4,7 +4,13 @@
 \alias{ast_summarise}
 \title{Create a summarise AST node}
 \usage{
-ast_summarise(input, aggregations, groups, result_groups = character())
+ast_summarise(
+  input,
+  aggregations,
+  groups,
+  result_groups = character(),
+  on_sum_overflow = "error"
+)
 }
 \arguments{
 \item{input}{Input AST node}
@@ -22,6 +28,12 @@ from \verb{.groups=} semantics by \code{resolve_summarise_groups()}
 input, all of \code{groups} for \code{"keep"}, all-but-the-last for the default/
 \code{"drop_last"}. Read by \code{propagate_groups()} (R/execute.R) instead of
 the old hardcoded "summarise always drops all groups" rule.}
+
+\item{on_sum_overflow}{(F34) What to do when an integer/logical \code{sum()}
+leaves R's integer range at execution. \code{"double"}: the column comes back
+FLOAT64, as in dplyr (eager mode reconciles the schema from the result).
+\code{"error"} (lazy plans, whose schema was declared INT32 statically): raise
+\code{cuplyr_error_sum_overflow}.}
 }
 \value{
 An ast_summarise node
