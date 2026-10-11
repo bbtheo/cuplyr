@@ -211,7 +211,7 @@ propagate_groups <- function(node, groups, schema) {
 #' carries its row count on the R side (`x$nrow`, see `new_tbl_gpu()`). Verbs
 #' lower to cudf calls that cannot see it, so running one on such a table
 #' would silently return a table with the wrong row count. Until zero-column
-#' tables are supported by every verb (F14), fail loudly instead. Called by
+#' tables are supported by every verb, fail loudly instead. Called by
 #' `push_op()`, `push_join()` (both sides), the binds and `vec_proxy()`;
 #' `summarise()` and the `slice()` family handle this input before it reaches
 #' `push_op()`.
@@ -233,6 +233,40 @@ check_zero_column_input <- function(.data, input_schema, verb) {
     }
   }
   invisible(NULL)
+}
+
+#' A zero-column result with a known number of rows
+#'
+#' The one place verbs that end with no columns (`select()`, `transmute()`,
+#' `[`, `distinct()`) build their result: an ungrouped zero-column `tbl_gpu`
+#' of `n` rows in the input's exec_mode. `n` defaults to the input's row
+#' count; pending lazy operations are computed first to get it (a
+#' materialization point, as for `summarise()` with no expressions).
+#'
+#' @param .data The input `tbl_gpu`
+#' @param verb Character, for the fallback notification
+#' @param n Row count of the result, or `NULL` for `.data`'s own
+#' @keywords internal
+zero_column_result <- function(.data, verb, n = NULL) {
+  if (is.null(n)) {
+    n <- zero_column_nrow(.data, verb)
+  }
+  tbl_gpu(tibble::tibble(.rows = n), lazy = identical(.data$exec_mode, "lazy"))
+}
+
+# Row count of `.data`, computing pending lazy operations to get it.
+# @keywords internal
+zero_column_nrow <- function(.data, verb) {
+  if (has_pending_ops(.data)) {
+    cuplyr_fallback_notify(verb, "zero columns (pending operations run first)")
+    .data <- compute(.data)
+  }
+  n <- base_dim(.data)[1]
+  if (is.na(n)) {
+    stop("`", verb, "()` is not supported on a tbl_gpu with no columns ",
+         "and an unknown number of rows.", call. = FALSE)
+  }
+  n
 }
 
 #' Apply an AST node to a tbl_gpu, dispatching on exec_mode

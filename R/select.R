@@ -8,8 +8,16 @@
 #'   to keep. Supports:
 #'   \itemize{
 #'     \item Column names: `select(x, y, z)`
-#'     \item Negative selection: `select(-x)` (not yet supported)
-#'     \item Range: `select(x:z)` (not yet supported)
+#'     \item Negative selection: `select(-x)`
+#'     \item Range: `select(x:z)`
+#'     \item Predicates: `where(is.numeric)`. Base type tests (`is.numeric`,
+#'       `is.double`, `is.integer`, `is.character`, `is.logical`, `is.factor`,
+#'       `is.ordered`, `inherits(x, "Date")`), bare or combined in a lambda
+#'       such as `~ is.numeric(.x) || is.factor(.x)`, are answered from the
+#'       column types. Any other predicate (`where(~ anyNA(.x))`,
+#'       `lubridate::is.Date`), and any call that is not a tidyselect helper,
+#'       is resolved on the data: a notified CPU fallback that collects the
+#'       table
 #'     \item Helpers: `starts_with()`, `ends_with()`, `contains()`, etc.
 #'     \item Renaming while selecting: `select(new_name = old_name)`
 #'   }
@@ -28,6 +36,17 @@
 #' runs as one `gpu_select()` gather, with the rename applied on top of it
 #' as a separate, schema-only [ast_rename()] step whenever the tidyselect
 #' resolution renamed a column.
+#'
+#' ## Grouped tables
+#' Grouping columns that the selection leaves out are added in front, with
+#' the message "Adding missing grouping variables", as in dplyr. Groups
+#' follow their column by position, so `select(group_by(df, a), a = b)` is
+#' ungrouped.
+#'
+#' ## Zero columns
+#' A selection that keeps no column (`select(df, -everything())`) gives a
+#' zero-column table that still knows its row count. A lazy table with
+#' pending operations is computed first to get that count.
 #'
 #' ## Performance
 #' Select operations involve copying column data to a new table structure.
@@ -62,15 +81,27 @@
 #'     collect()
 #' }
 select.tbl_gpu <- function(.data, ...) {
-  # Get current schema (from AST or base)
   schema <- current_schema(.data)
 
-  # tidyselect needs a named vector
-  name_vec <- stats::setNames(schema$names, schema$names)
-  vars <- tidyselect::eval_select(rlang::expr(c(...)), name_vec)
+  # tidyselect resolves against a frame of the schema's column types, so
+  # type-test where() predicates see types (and a duplicated name stays
+  # addressable by position); any other predicate is resolved on the real
+  # data (see resolve_selection()).
+  quos <- rlang::enquos(...)
+  call <- rlang::current_env()
+  sel <- resolve_selection(.data, schema, quos, "select", function(data) {
+    tidyselect::eval_select(rlang::expr(c(!!!quos)), data, error_call = call)
+  })
+  vars <- sel$loc
+  .data <- sel$data
 
-  if (length(vars) == 0) {
-    stop("select() resulted in no columns.", call. = FALSE)
+  groups <- .data$groups
+  if (length(groups) > 0L) {
+    vars <- select_ensure_group_vars(vars, schema$names, groups)
+  }
+
+  if (length(vars) == 0L) {
+    return(zero_column_result(.data, "select"))
   }
 
   # `names(vars)` are the OUTPUT names tidyselect resolved -- for a plain
@@ -86,10 +117,289 @@ select.tbl_gpu <- function(.data, ...) {
   select_node <- ast_select(input_node(.data), selected_cols)
 
   if (identical(selected_cols, output_names)) {
-    return(push_op(.data, select_node))
+    out <- push_op(.data, select_node)
+  } else {
+    changed <- selected_cols != output_names
+    node <- ast_rename(select_node, selected_cols[changed], output_names[changed])
+    out <- push_op(.data, node)
   }
 
-  changed <- selected_cols != output_names
-  node <- ast_rename(select_node, selected_cols[changed], output_names[changed])
-  push_op(.data, node)
+  if (length(groups) > 0L) {
+    out <- set_groups_by_position(out, .data, vars, schema$names)
+  }
+  out
+}
+
+# =============================================================================
+# Shared tidyselect resolution for select(), relocate(), rename(),
+# rename_with()
+#
+# tidyselect runs where() predicates on the data it is given. The GPU table
+# has no R-side data, so a one-row frame of PROXY columns stands in: per
+# schema column, a value of the class collect() gives it (a factor with the
+# column's levels and `ordered`). That answers a predicate exactly only when
+# the answer depends on the class alone, so the proxy is used only when a
+# static walk (selection_is_type_only()) proves every predicate is a base
+# type test: `is.numeric`, `is.double`, `is.integer`, `is.character`,
+# `is.logical`, `is.factor`, `is.ordered`, or `inherits(x, "<constant>")`,
+# bare or in a lambda/closure combining them with `!`, `&&`, `||`. Names,
+# positions, ranges and the name-pattern helpers need no predicate at all.
+# Anything else (a predicate that reads values, a type test the walk can't
+# see through such as `lubridate::is.Date`, a user function, an unknown call)
+# resolves the selection on the real data: a notified CPU fallback that
+# computes a lazy plan once and builds the verb's result on the computed
+# table.
+# =============================================================================
+
+# One proxy value per GPU type, built once (the POSIXct constructor is not
+# free): what collect() returns for that type. Types collect() has no
+# conversion for come back as doubles.
+proxy_cache <- new.env(parent = emptyenv())
+
+tidyselect_proxy_value <- function(type, levels = NULL) {
+  if (identical(type, "DICTIONARY32") && !is.null(levels)) {
+    code <- if (length(levels) > 0L) 1L else NA_integer_
+    return(structure(
+      code, levels = as.character(levels),
+      class = c(if (isTRUE(attr(levels, "ordered"))) "ordered", "factor")
+    ))
+  }
+  if (!is.null(hit <- proxy_cache[[type]])) {
+    return(hit)
+  }
+  v <- switch(type,
+    BOOL8 = TRUE,
+    INT32 = 1L,
+    STRING = "a",
+    TIMESTAMP_DAYS = as.Date("1970-01-01"),
+    TIMESTAMP_MICROSECONDS = as.POSIXct("1970-01-01", tz = "UTC"),
+    DICTIONARY32 = factor("a"),
+    1
+  )
+  proxy_cache[[type]] <- v
+  v
+}
+
+# One-row frame of `schema`'s column classes for tidyselect, grouped like the
+# table so group_cols() works. Built with new_data_frame() so duplicated
+# column names are allowed.
+# @keywords internal
+tidyselect_proxy <- function(schema, groups = character()) {
+  levels <- schema$factor_levels
+  cols <- Map(function(type, name) tidyselect_proxy_value(type, levels[[name]]),
+              unname(schema$types), schema$names)
+  names(cols) <- schema$names
+  frame <- vctrs::new_data_frame(cols, n = 1L)
+  if (length(groups) == 0L) {
+    return(frame)
+  }
+  # one row, one group
+  keys <- cols[match(groups, schema$names)]
+  dplyr::new_grouped_df(
+    tibble::new_tibble(frame),
+    groups = tibble::new_tibble(c(keys, list(.rows = vctrs::list_of(1L))), nrow = 1L)
+  )
+}
+
+# Is every predicate in this selection (a quosure, a list of them, or an
+# expression walked inside one) answered by the column classes alone?
+# Symbols that name a column, constants and the name/pattern helpers carry no
+# predicate. A where() needs where_predicate_is_type_only(); a function
+# standing for a predicate (a bare function symbol, a spliced function) is
+# checked the same way. Any other call may expand to a value predicate.
+# @param x Quosure, list of quosures, or expression
+# @param env Environment for the symbols of a bare expression
+# @param cols Column names of the schema the selection resolves against
+# @keywords internal
+selection_is_type_only <- function(x, env, cols) {
+  if (rlang::is_missing(x)) {
+    return(TRUE)
+  }
+  if (rlang::is_quosure(x)) {
+    return(selection_is_type_only(rlang::quo_get_expr(x), rlang::quo_get_env(x), cols))
+  }
+  if (is.list(x)) {
+    return(all(vapply(x, selection_is_type_only, logical(1), env = env, cols = cols)))
+  }
+  if (is.function(x)) {
+    return(where_predicate_is_type_only(x, env))
+  }
+  if (is.symbol(x)) {
+    # a symbol that is not a column is looked up in the environment, where it
+    # could be a predicate function (a deprecated but accepted selection)
+    name <- as.character(x)
+    if (name %in% cols) {
+      return(TRUE)
+    }
+    fn <- rlang::env_get(env, name, default = NULL, inherit = TRUE)
+    return(!is.function(fn) || where_predicate_is_type_only(fn, env))
+  }
+  if (!is.call(x)) {
+    return(TRUE)
+  }
+  name <- pick_call_name(x[[1L]])
+  if (is.null(name)) {
+    return(FALSE)
+  }
+  if (identical(name, "where")) {
+    return(length(x) == 2L && where_predicate_is_type_only(x[[2L]], env))
+  }
+  if (name %in% c("c", "-", "!", "&", "|", "(", ":")) {
+    return(selection_is_type_only(as.list(x)[-1L], env, cols))
+  }
+  name %in% c(
+    "everything", "last_col", "starts_with", "ends_with", "contains", "matches",
+    "num_range", "all_of", "any_of", "one_of", "group_cols"
+  )
+}
+
+# A where() argument whose answer depends only on the column's class: a base
+# type test (bare, `base::` or as a value), or a lambda (`~ body`, a formula
+# value, `function(x) body`, a closure value) whose body only applies type
+# tests to its own argument (type_only_body()).
+# @param pred The where() argument: expression, quosure or evaluated value
+# @param env Environment `pred`'s symbols are looked up in
+# @keywords internal
+where_predicate_is_type_only <- function(pred, env) {
+  if (rlang::is_quosure(pred)) {
+    return(where_predicate_is_type_only(rlang::quo_get_expr(pred), rlang::quo_get_env(pred)))
+  }
+  if (rlang::is_call(pred, "~", n = 1L)) {
+    # a lambda written in place, or a formula value with its own environment
+    return(type_only_body(pred[[2L]], c(".x", ".", "..1"),
+                          attr(pred, ".Environment") %||% env))
+  }
+  if (rlang::is_call(pred, "function")) {
+    arg <- names(pred[[2L]])[1L]
+    return(!is.na(arg) && !identical(arg, "...") && type_only_body(pred[[3L]], arg, env))
+  }
+  if (is.symbol(pred) || rlang::is_call(pred, "::", n = 2L)) {
+    pred <- tryCatch(eval(pred, env), error = function(e) NULL)
+    if (rlang::is_formula(pred)) {
+      return(where_predicate_is_type_only(pred, env))
+    }
+  }
+  if (!is.function(pred)) {
+    return(FALSE)
+  }
+  if (is_base_type_test(pred)) {
+    return(TRUE)
+  }
+  if (is.primitive(pred)) {
+    return(FALSE)
+  }
+  # a closure value: its body, over its first argument, in its own environment
+  arg <- if (inherits(pred, "rlang_lambda_function")) c(".x", ".", "..1") else names(formals(pred))[1L]
+  !anyNA(arg) && !identical(arg, "...") && type_only_body(body(pred), arg, environment(pred))
+}
+
+# Base R's class tests a proxy of the right class answers exactly.
+# @keywords internal
+is_base_type_test <- function(fn) {
+  for (test in list(is.numeric, is.double, is.integer, is.character, is.logical,
+                    is.factor, is.ordered)) {
+    if (identical(fn, test)) return(TRUE)
+  }
+  FALSE
+}
+
+# Is `expr` built only from base type tests and `inherits(<arg>, "<constant>")`
+# applied to the predicate's own argument (one of `args`), joined by `!`,
+# `&&`, `||`, `&`, `|`, `(` or a one-expression `{`? Call heads are looked up
+# in `env`, so a user function named like a type test doesn't pass.
+# @keywords internal
+type_only_body <- function(expr, args, env) {
+  if (rlang::is_call(expr, "(", n = 1L) || rlang::is_call(expr, "{", n = 1L) ||
+        rlang::is_call(expr, "!", n = 1L)) {
+    return(type_only_body(expr[[2L]], args, env))
+  }
+  if (rlang::is_call(expr, c("&&", "||", "&", "|"), n = 2L)) {
+    return(type_only_body(expr[[2L]], args, env) && type_only_body(expr[[3L]], args, env))
+  }
+  if (!is.call(expr) || !(is.symbol(expr[[1L]]) || rlang::is_call(expr[[1L]], "::", n = 2L))) {
+    return(FALSE)
+  }
+  fn <- tryCatch(eval(expr[[1L]], env), error = function(e) NULL)
+  call_args <- as.list(expr)[-1L]
+  arg_names <- names(call_args) %||% rep("", length(call_args))
+  is_own_arg <- function(a) is.symbol(a) && as.character(a) %in% args
+  if (is.function(fn) && is_base_type_test(fn)) {
+    return(length(call_args) == 1L && arg_names %in% c("", "x") && is_own_arg(call_args[[1L]]))
+  }
+  if (identical(fn, base::inherits)) {
+    return(length(call_args) == 2L && arg_names[1L] %in% c("", "x") &&
+             arg_names[2L] %in% c("", "what") && is_own_arg(call_args[[1L]]) &&
+             is.character(call_args[[2L]]) && !anyNA(call_args[[2L]]))
+  }
+  FALSE
+}
+
+# Resolve a selection to positions, for select()/relocate()/rename()/
+# rename_with(): on the proxy when selection_is_type_only(), otherwise on the
+# real data with a notified CPU fallback.
+#
+# @param .data The input tbl_gpu
+# @param schema `current_schema(.data)`
+# @param quos The quosures of the selection (all slots that take one)
+# @param verb Verb name, for the fallback notification
+# @param resolve `function(data)` running tidyselect on a data frame
+# @return list(loc = positions as `resolve()` returns them, data = the input
+#   to build the result on: `.data`, or its computed table when the real data
+#   had to be read, so the plan does not run twice)
+# @keywords internal
+resolve_selection <- function(.data, schema, quos, verb, resolve) {
+  groups <- .data$groups
+  if (selection_is_type_only(quos, NULL, schema$names)) {
+    return(list(loc = resolve(tidyselect_proxy(schema, groups)), data = .data))
+  }
+
+  if (anyDuplicated(schema$names) > 0L) {
+    stop("`", verb, "()` cannot evaluate this selection on a table with ",
+         "duplicated column names: it needs the column values (a `where()` ",
+         "predicate that is not a base type test, or a function call).", call. = FALSE)
+  }
+  cuplyr_fallback_notify(verb, "a selection that may read column values (resolved on the data)")
+  data <- if (has_pending_ops(.data)) compute(.data) else .data
+  frame <- collect_frame(data)
+  if (length(groups) > 0L) {
+    frame <- dplyr::grouped_df(frame, groups)
+  }
+  list(loc = resolve(frame), data = data)
+}
+
+# dplyr's ensure_group_vars(): grouping columns the selection leaves out are
+# put in front, with a message, unless an output name already uses theirs.
+# @param vars Named integer positions from eval_select()
+# @return `vars` with the added grouping columns prepended
+# @keywords internal
+select_ensure_group_vars <- function(vars, names, groups) {
+  group_loc <- match(groups, names)
+  missing <- setdiff(group_loc, vars)
+  if (length(missing) == 0L) {
+    return(vars)
+  }
+  added <- stats::setNames(missing, names[missing])
+  added <- added[!names(added) %in% names(vars)]
+  if (length(added) > 0L) {
+    rlang::inform(paste0(
+      "Adding missing grouping variables: ",
+      paste0("`", names(added), "`", collapse = ", ")
+    ))
+  }
+  c(added, vars)
+}
+
+# Groups follow their column by position (dplyr regroups by position): each
+# original group column keeps its group under the name it now has, and a
+# column renamed onto a group's name does not inherit the group.
+# @param out The pushed select/relocate result
+# @param before The input table
+# @param loc Named positions (into `names`) of the output columns, in order
+# @keywords internal
+set_groups_by_position <- function(out, before, loc, names) {
+  pos <- match(match(before$groups, names), loc)
+  groups <- names(loc)[pos[!is.na(pos)]]
+  out$groups <- groups
+  out$group_drop <- if (length(groups) > 0L) before$group_drop %||% TRUE else TRUE
+  out
 }

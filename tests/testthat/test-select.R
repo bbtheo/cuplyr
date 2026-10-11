@@ -192,15 +192,13 @@ test_that("select() single column from large table works", {
   expect_equal(dim(selected)[1], 32)
 })
 
-test_that("select() errors when no columns match", {
+test_that("select() with no matching columns gives a zero-column table", {
   skip_if_no_gpu()
 
   gpu_df <- tbl_gpu(mtcars)
 
-  expect_error(
-    dplyr::select(gpu_df, starts_with("xyz")),
-    "no columns|resulted in no"
-  )
+  res <- dplyr::select(gpu_df, starts_with("xyz"))
+  expect_identical(dim(res), c(32L, 0L))
 })
 
 # =============================================================================

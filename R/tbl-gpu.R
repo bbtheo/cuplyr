@@ -314,6 +314,18 @@ base_dim <- function(x) {
   }
 }
 
+#' Dimnames of a GPU table
+#'
+#' Rows are unnamed; the column names are the table's current names (no plan
+#' is run), so `colnames()` works.
+#'
+#' @param x A `tbl_gpu` object.
+#' @return `list(NULL, <column names>)`.
+#' @export
+dimnames.tbl_gpu <- function(x) {
+  list(NULL, current_schema(x)$names)
+}
+
 #' Get column names of a GPU table
 #'
 #' @param x A `tbl_gpu` object.

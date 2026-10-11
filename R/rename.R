@@ -74,9 +74,14 @@ check_rename_unique <- function(names) {
 #' }
 rename.tbl_gpu <- function(.data, ...) {
   schema <- current_schema(.data)
-  name_vec <- stats::setNames(schema$names, schema$names)
 
-  loc <- tidyselect::eval_rename(rlang::expr(c(...)), name_vec)
+  quos <- rlang::enquos(...)
+  call <- rlang::current_env()
+  sel <- resolve_selection(.data, schema, quos, "rename", function(data) {
+    tidyselect::eval_rename(rlang::expr(c(!!!quos)), data, error_call = call)
+  })
+  loc <- sel$loc
+  .data <- sel$data
 
   if (length(loc) == 0) {
     # No dots: dplyr's own rename() is a no-op in this case -- return .data
@@ -92,8 +97,16 @@ rename.tbl_gpu <- function(.data, ...) {
   full_names[loc] <- new_names
   check_rename_unique(full_names)
 
-  node <- ast_rename(input_node(.data), old_names, new_names)
+  node <- ast_rename(input_node(.data), old_names, new_names,
+                     positions = rename_positions(schema$names, loc))
   push_op(.data, node)
+}
+
+# Positions a rename node must use, or `NULL` for the by-name rule. Only a
+# table with duplicated names needs them (a name would be ambiguous).
+# @keywords internal
+rename_positions <- function(names, loc) {
+  if (anyDuplicated(names) > 0L) unname(loc) else NULL
 }
 
 #' Rename columns of a GPU table with a function
@@ -129,9 +142,13 @@ rename_with.tbl_gpu <- function(.data, .fn, .cols = dplyr::everything(), ...) {
   fn <- rlang::as_function(.fn)
 
   schema <- current_schema(.data)
-  name_vec <- stats::setNames(schema$names, schema$names)
 
-  sel <- tidyselect::eval_select(cols_quo, name_vec, allow_rename = FALSE)
+  call <- rlang::current_env()
+  resolved <- resolve_selection(.data, schema, cols_quo, "rename_with", function(data) {
+    tidyselect::eval_select(cols_quo, data, allow_rename = FALSE, error_call = call)
+  })
+  sel <- resolved$loc
+  .data <- resolved$data
   old_names <- schema$names[sel]
 
   new_names <- fn(old_names, ...)
@@ -152,6 +169,7 @@ rename_with.tbl_gpu <- function(.data, .fn, .cols = dplyr::everything(), ...) {
     return(.data)
   }
 
-  node <- ast_rename(input_node(.data), old_names, new_names)
+  node <- ast_rename(input_node(.data), old_names, new_names,
+                     positions = rename_positions(schema$names, sel))
   push_op(.data, node)
 }

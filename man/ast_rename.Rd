@@ -4,7 +4,7 @@
 \alias{ast_rename}
 \title{Create a rename AST node}
 \usage{
-ast_rename(input, old_names, new_names)
+ast_rename(input, old_names, new_names, positions = NULL)
 }
 \arguments{
 \item{input}{Input AST node}
@@ -14,6 +14,11 @@ schema) being renamed}
 
 \item{new_names}{Character vector of the same length: \code{new_names[i]} is
 what \code{old_names[i]} becomes}
+
+\item{positions}{\code{NULL} (rename by \code{old_names}), or the integer positions
+of the renamed columns: used instead of the names when the input has
+duplicated column names, where a name is ambiguous. Such a node is
+never pruned through by the optimizer.}
 }
 \value{
 An ast_rename node

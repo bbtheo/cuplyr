@@ -66,6 +66,7 @@
 #' }
 distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
   dots <- rlang::enquos(...)
+  orig_dots <- dots
   group_vars <- .data$groups
 
   if (length(dots) == 0) {
@@ -74,8 +75,31 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
     # itself produces byte-identical output for both), so there is nothing
     # `.keep_all` could change here.
     schema <- current_schema(.data)
+    if (length(schema$names) == 0L) {
+      # every row of a zero-column table is the same row
+      return(zero_column_result(.data, "distinct",
+                                n = min(zero_column_nrow(.data, "distinct"), 1L)))
+    }
     node <- ast_distinct(input_node(.data), schema$names, keep_all = TRUE)
     return(push_op(.data, node))
+  }
+
+  # NULL dots are dropped after the "no dots" check above, as in dplyr.
+  dots <- dots[!vapply(dots, rlang::quo_is_null, logical(1))]
+  if (length(dots) == 0) {
+    # Only the grouping columns are keys.
+    if (length(group_vars) > 0L) {
+      if (isTRUE(.keep_all)) {
+        return(distinct_fallback(.data, orig_dots, .keep_all))
+      }
+      node <- ast_distinct(input_node(.data), group_vars, keep_all = FALSE)
+      return(push_op(.data, node))
+    }
+    if (isTRUE(.keep_all)) {
+      return(distinct_fallback(.data, orig_dots, .keep_all))
+    }
+    return(zero_column_result(.data, "distinct",
+                              n = min(zero_column_nrow(.data, "distinct"), 1L)))
   }
 
   # Name dots: an unnamed bare column (`distinct(df, x)`) uses its own name;
@@ -112,14 +136,11 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
 
     ir <- ir_parse_quo(expr, schema)
 
+    # Not in the expression IR (a user function, a column-free call that only
+    # works inside the data mask, ...): dplyr evaluates it, or raises its own
+    # error.
     if (is.null(ir)) {
-      stop(
-        "distinct() only supports column references and expressions ",
-        "mutate() also supports (arithmetic, comparisons, logical operators, ",
-        "is.na(), between(), %in%, and the usual math functions).\n",
-        "Expression: ", rlang::quo_text(expr),
-        call. = FALSE
-      )
+      return(distinct_fallback(.data, orig_dots, .keep_all))
     }
 
     is_trivial_copy <- identical(ir$kind, "col") && identical(ir$name, new_name)
@@ -146,4 +167,40 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
 
   node <- ast_distinct(input_node(.data), key_cols, keep_all = .keep_all)
   push_op(.data, node)
+}
+
+# Whole-call CPU fallback with the user's original dots.
+# @keywords internal
+distinct_fallback <- function(.data, dots, .keep_all) {
+  gpu_fallback("distinct", .data, function(tbl) {
+    rlang::inject(dplyr::distinct(tbl, !!!dots, .keep_all = .keep_all))
+  })
+}
+
+#' Unique rows of a GPU table
+#'
+#' `unique(x)` is `distinct(x)`: duplicate rows over all columns are dropped.
+#'
+#' @param x A `tbl_gpu` object.
+#' @param incomparables Only `FALSE`, as in `unique.data.frame()`.
+#' @param ... Only `fromLast = FALSE` is supported (a GPU `distinct()` keeps
+#'   the first occurrence); `fromLast = TRUE` and other arguments are errors
+#'   rather than silently ignored.
+#' @return A `tbl_gpu` with duplicate rows removed (groups are kept).
+#' @export
+unique.tbl_gpu <- function(x, incomparables = FALSE, ...) {
+  if (!isFALSE(incomparables)) {
+    stop("`incomparables` is not supported for tbl_gpu; use `FALSE`.", call. = FALSE)
+  }
+  args <- list(...)
+  from_last <- args[["fromLast"]]
+  args[["fromLast"]] <- NULL
+  if (length(args) > 0L) {
+    stop("`unique()` on a tbl_gpu only supports `fromLast = FALSE`; other arguments are not supported.",
+         call. = FALSE)
+  }
+  if (!is.null(from_last) && !isFALSE(from_last)) {
+    stop("`fromLast = TRUE` is not supported for tbl_gpu.", call. = FALSE)
+  }
+  dplyr::distinct(x)
 }

@@ -13,8 +13,16 @@
 to keep. Supports:
 \itemize{
 \item Column names: \code{select(x, y, z)}
-\item Negative selection: \code{select(-x)} (not yet supported)
-\item Range: \code{select(x:z)} (not yet supported)
+\item Negative selection: \code{select(-x)}
+\item Range: \code{select(x:z)}
+\item Predicates: \code{where(is.numeric)}. Base type tests (\code{is.numeric},
+\code{is.double}, \code{is.integer}, \code{is.character}, \code{is.logical}, \code{is.factor},
+\code{is.ordered}, \code{inherits(x, "Date")}), bare or combined in a lambda
+such as \code{~ is.numeric(.x) || is.factor(.x)}, are answered from the
+column types. Any other predicate (\code{where(~ anyNA(.x))},
+\code{lubridate::is.Date}), and any call that is not a tidyselect helper,
+is resolved on the data: a notified CPU fallback that collects the
+table
 \item Helpers: \code{starts_with()}, \code{ends_with()}, \code{contains()}, etc.
 \item Renaming while selecting: \code{select(new_name = old_name)}
 }}
@@ -38,6 +46,21 @@ is schema-only (see \code{\link[=rename.tbl_gpu]{rename.tbl_gpu()}}): the underl
 runs as one \code{gpu_select()} gather, with the rename applied on top of it
 as a separate, schema-only \code{\link[=ast_rename]{ast_rename()}} step whenever the tidyselect
 resolution renamed a column.
+}
+
+\subsection{Grouped tables}{
+
+Grouping columns that the selection leaves out are added in front, with
+the message "Adding missing grouping variables", as in dplyr. Groups
+follow their column by position, so \code{select(group_by(df, a), a = b)} is
+ungrouped.
+}
+
+\subsection{Zero columns}{
+
+A selection that keeps no column (\code{select(df, -everything())}) gives a
+zero-column table that still knows its row count. A lazy table with
+pending operations is computed first to get that count.
 }
 
 \subsection{Performance}{

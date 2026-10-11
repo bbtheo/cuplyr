@@ -1101,6 +1101,11 @@ transmute.tbl_gpu <- function(.data, ...) {
   dots <- rlang::enquos(...)
   orig_dots <- dots
 
+  # No expressions on an ungrouped table: every column goes (n x 0 result).
+  if (length(dots) == 0L && length(.data$groups) == 0L) {
+    return(zero_column_result(.data, "transmute"))
+  }
+
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R
   # and mutate.tbl_gpu()'s own identical handling.
   if (dots_need_fallback(dots)) {
@@ -1154,6 +1159,9 @@ transmute.tbl_gpu <- function(.data, ...) {
   missing_groups <- setdiff(.data$groups, dot_output_cols)
   final_order <- c(missing_groups, dot_output_cols)
 
+  if (length(final_order) == 0L) {
+    return(zero_column_result(result, "transmute"))
+  }
   push_op(result, ast_select(input_node(result), final_order))
 }
 

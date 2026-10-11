@@ -347,9 +347,7 @@ test_that("unsupported shapes error loudly instead of returning something wrong"
   skip_if_no_gpu()
   for (lazy in c(FALSE, TRUE)) {
     gt <- f03_up(f03_df(), lazy)
-    # zero-column results: tbl_gpu can't hold a 0-column table
-    expect_error(collect(gt[, 0]))
-    expect_error(collect(gt[character()]))
+    # zero-column results are supported (F14, test-parity-F14-zero-cols.R)
     # duplicated columns: tbl_gpu needs unique names
     expect_error(collect(gt[, c("x", "x")]))
     # matrix subscript

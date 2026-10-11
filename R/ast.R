@@ -237,10 +237,15 @@ ast_window <- function(input, specs, group_cols = character()) {
 #'   schema) being renamed
 #' @param new_names Character vector of the same length: `new_names[i]` is
 #'   what `old_names[i]` becomes
+#' @param positions `NULL` (rename by `old_names`), or the integer positions
+#'   of the renamed columns: used instead of the names when the input has
+#'   duplicated column names, where a name is ambiguous. Such a node is
+#'   never pruned through by the optimizer.
 #' @return An ast_rename node
 #' @keywords internal
-ast_rename <- function(input, old_names, new_names) {
-  ast_node("rename", input = input, old_names = old_names, new_names = new_names)
+ast_rename <- function(input, old_names, new_names, positions = NULL) {
+  ast_node("rename", input = input, old_names = old_names, new_names = new_names,
+           positions = positions)
 }
 
 #' Create a join AST node
@@ -548,7 +553,7 @@ infer_schema.ast_barrier <- function(node) {
 infer_schema.ast_rename <- function(node) {
   input_schema <- infer_schema(node$input)
   result_names <- input_schema$names
-  idx <- match(node$old_names, result_names)
+  idx <- node$positions %||% match(node$old_names, result_names)
   result_names[idx] <- node$new_names
   list(names = result_names, types = input_schema$types)
 }

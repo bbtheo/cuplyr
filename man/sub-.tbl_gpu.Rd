@@ -50,8 +50,11 @@ lazy one with no pending operations). On a lazy table with pending
 operations the row subscript is resolved when the plan runs, so its errors
 (same class, message and \code{[} call) surface at \code{collect()}/\code{compute()}.
 
-Divergences from tibble, all loud errors: zero-column results
-(\code{x[, 0]}, \code{x[character()]}, \code{x[, FALSE]}) and duplicated columns
+A zero-column result (\code{x[, 0]}, \code{x[character()]}, \code{x[, FALSE]}) is an
+ungrouped zero-column table that keeps the row count (a lazy table with
+pending operations is computed first).
+
+Divergences from tibble, all loud errors: duplicated columns
 (\code{x[, c("a", "a")]}) because a \code{tbl_gpu} cannot represent them, and matrix
 subscripts (\code{x[m]}, and the soft-deprecated one-column matrix row subscript
 \code{x[m, ]}, which tibble still accepts with a deprecation notice).

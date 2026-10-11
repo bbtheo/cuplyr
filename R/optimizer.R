@@ -190,6 +190,10 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
 
   switch(ast$type,
     "source" = {
+      # a source with duplicated names can't be pruned by name
+      if (anyDuplicated(ast$schema$names) > 0L) {
+        return(ast)
+      }
       keep <- intersect(ast$schema$names, required_cols)
       # A downstream node that reads no column at all (a constant
       # `mutate(a = TRUE)` under a select) would prune the source to zero
@@ -326,6 +330,9 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       translated <- required_cols
       hit <- !is.na(rev_idx)
       translated[hit] <- ast$old_names[rev_idx[hit]]
+      # A positional rename (duplicated names) can't be translated by name:
+      # everything below it stays.
+      if (!is.null(ast$positions)) translated <- NULL
       ast$input <- push_down_projections(ast$input, translated, group_cols)
       ast
     },
@@ -586,6 +593,9 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
       translated <- required_cols
       hit <- !is.na(rev_idx)
       translated[hit] <- ast$old_names[rev_idx[hit]]
+      # A positional rename (duplicated names) can't be translated by name:
+      # everything below it stays.
+      if (!is.null(ast$positions)) translated <- NULL
       ast$input <- prune_dead_columns(ast$input, translated, group_cols)
       ast
     },

@@ -56,13 +56,27 @@ relocate.tbl_gpu <- function(.data, ..., .before = NULL, .after = NULL) {
   after_quo <- rlang::enquo(.after)
 
   schema <- current_schema(.data)
-  name_vec <- stats::setNames(schema$names, schema$names)
 
-  loc <- tidyselect::eval_relocate(
-    expr = rlang::expr(c(...)), data = name_vec,
-    before = before_quo, after = after_quo,
-    before_arg = ".before", after_arg = ".after"
+  quos <- rlang::enquos(...)
+  call <- rlang::current_env()
+  sel <- resolve_selection(
+    .data, schema, c(as.list(quos), list(before_quo, after_quo)), "relocate",
+    function(data) {
+      tidyselect::eval_relocate(
+        expr = rlang::expr(c(!!!quos)), data = data,
+        before = before_quo, after = after_quo,
+        before_arg = ".before", after_arg = ".after", error_call = call
+      )
+    }
   )
+  loc <- sel$loc
+  .data <- sel$data
+
+  if (length(schema$names) == 0L) {
+    # nothing to move (a zero-column table keeps its row count as is); the
+    # selection above was still validated
+    return(.data)
+  }
 
   reordered_cols <- schema$names[loc]
   output_names <- names(loc)
@@ -70,10 +84,15 @@ relocate.tbl_gpu <- function(.data, ..., .before = NULL, .after = NULL) {
   select_node <- ast_select(input_node(.data), reordered_cols)
 
   if (identical(reordered_cols, output_names)) {
-    return(push_op(.data, select_node))
+    out <- push_op(.data, select_node)
+  } else {
+    changed <- reordered_cols != output_names
+    node <- ast_rename(select_node, reordered_cols[changed], output_names[changed])
+    out <- push_op(.data, node)
   }
 
-  changed <- reordered_cols != output_names
-  node <- ast_rename(select_node, reordered_cols[changed], output_names[changed])
-  push_op(.data, node)
+  if (length(.data$groups) > 0L) {
+    out <- set_groups_by_position(out, .data, loc, schema$names)
+  }
+  out
 }

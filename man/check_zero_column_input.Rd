@@ -18,7 +18,7 @@ A cudf table with no columns always has 0 rows, so a zero-column \code{tbl_gpu}
 carries its row count on the R side (\code{x$nrow}, see \code{new_tbl_gpu()}). Verbs
 lower to cudf calls that cannot see it, so running one on such a table
 would silently return a table with the wrong row count. Until zero-column
-tables are supported by every verb (F14), fail loudly instead. Called by
+tables are supported by every verb, fail loudly instead. Called by
 \code{push_op()}, \code{push_join()} (both sides), the binds and \code{vec_proxy()};
 \code{summarise()} and the \code{slice()} family handle this input before it reaches
 \code{push_op()}.

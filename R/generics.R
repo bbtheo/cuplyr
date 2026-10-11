@@ -291,8 +291,11 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
 #' operations the row subscript is resolved when the plan runs, so its errors
 #' (same class, message and `[` call) surface at `collect()`/`compute()`.
 #'
-#' Divergences from tibble, all loud errors: zero-column results
-#' (`x[, 0]`, `x[character()]`, `x[, FALSE]`) and duplicated columns
+#' A zero-column result (`x[, 0]`, `x[character()]`, `x[, FALSE]`) is an
+#' ungrouped zero-column table that keeps the row count (a lazy table with
+#' pending operations is computed first).
+#'
+#' Divergences from tibble, all loud errors: duplicated columns
 #' (`x[, c("a", "a")]`) because a `tbl_gpu` cannot represent them, and matrix
 #' subscripts (`x[m]`, and the soft-deprecated one-column matrix row subscript
 #' `x[m, ]`, which tibble still accepts with a deprecation notice).
@@ -342,20 +345,21 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
     }
   }
 
-  # Row count, when known without executing anything.
-  n_known <- if (has_pending_ops(x)) NA_integer_ else gpu_dim(x$ptr)[1]
+  # Row count, when known without executing anything (a zero-column table's
+  # lives on the R side, base_dim() reads it).
+  n_known <- if (has_pending_ops(x)) NA_integer_ else base_dim(x)[1]
 
+  # A zero-column input keeps zero columns, whatever `j` is.
+  zero_cols <- length(current_schema(x)$names) == 0L
   if (!j_missing) {
     schema <- current_schema(x)
     loc <- bracket_col_location(j, schema$names, j_arg, this_env)
-    if (length(loc) == 0L) {
-      stop("`[` cannot return a zero-column tbl_gpu.", call. = FALSE)
-    }
-    if (anyDuplicated(loc)) {
+    zero_cols <- zero_cols || length(loc) == 0L
+    if (!zero_cols && anyDuplicated(loc)) {
       stop("`[` with duplicated columns is not supported for tbl_gpu (column names must be unique).",
            call. = FALSE)
     }
-    if (!identical(loc, seq_along(schema$names))) {
+    if (!zero_cols && !identical(loc, seq_along(schema$names))) {
       keep_groups <- x$groups
       drop_flag <- x$group_drop %||% TRUE
       x <- push_op(x, ast_select(input_node(x), schema$names[loc]))
@@ -364,6 +368,12 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
       # group_by() starts from the default `.drop` again.
       x$group_drop <- if (length(x$groups) > 0L) drop_flag else TRUE
     }
+  }
+
+  if (!i_missing && !isTRUE(i) && zero_cols && !is.na(n_known)) {
+    # only the number of selected rows is kept: no need to gather any column
+    n_rows <- length(bracket_row_positions(i, n_known, i_arg, this_env))
+    return(zero_column_result(x, "[", n = n_rows))
   }
 
   if (!i_missing && !isTRUE(i)) {
@@ -380,6 +390,12 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
     }
     x <- push_op(x, node)
     x$group_drop <- drop_flag
+  }
+
+  # Zero columns: the rows above were selected on the full table, the result
+  # keeps only their count.
+  if (zero_cols) {
+    return(zero_column_result(x, "["))
   }
 
   if (isTRUE(drop) && length(x$schema$names) == 1L) {

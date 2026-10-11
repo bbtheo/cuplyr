@@ -98,9 +98,14 @@
 #   matching dplyr's count()/group_by(), which don't warn for an unnamed
 #   computed grouping expression)
 # @return `list(data = <tbl_gpu, with any needed mutate step applied>,
-#   names = <character vector of resolved column names, in dot order>)`
+#   names = <character vector of resolved column names, in dot order>)`, or
+#   `NULL` when a dot is not in the expression IR (a user function, a
+#   column-free call that needs the data mask, ...): the caller then re-runs
+#   the whole call through dplyr (`gpu_fallback()`)
 # @keywords internal
 resolve_grouping_dots <- function(.data, dots) {
+  # count(df, NULL) is count(df): NULL dots are dropped
+  dots <- dots[!vapply(dots, rlang::quo_is_null, logical(1))]
   if (length(dots) == 0) {
     return(list(data = .data, names = character(0)))
   }
@@ -116,14 +121,9 @@ resolve_grouping_dots <- function(.data, dots) {
 
     ir <- ir_parse_quo(expr, schema)
 
+    # Not in the expression IR: the caller hands the whole call to dplyr
     if (is.null(ir)) {
-      stop(
-        "count()/add_count() only support column references and expressions ",
-        "mutate() also supports (arithmetic, comparisons, logical operators, ",
-        "is.na(), between(), %in%, and the usual math functions).\n",
-        "Expression: ", rlang::quo_text(expr),
-        call. = FALSE
-      )
+      return(NULL)
     }
 
     is_trivial_copy <- identical(ir$kind, "col") && identical(ir$name, new_name)
@@ -277,6 +277,12 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
   orig_groups <- x$groups
 
   resolved <- resolve_grouping_dots(x, dots)
+  if (is.null(resolved)) {
+    return(gpu_fallback("count", x, function(tbl) {
+      rlang::inject(dplyr::count(tbl, !!!dots, wt = !!wt_quo, sort = sort,
+                                 name = name, .drop = .drop))
+    }))
+  }
   working <- resolved$data
   dot_names <- resolved$names
 
@@ -436,6 +442,12 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
   orig_groups <- x$groups
 
   resolved <- resolve_grouping_dots(x, dots)
+  if (is.null(resolved)) {
+    return(gpu_fallback("add_count", x, function(tbl) {
+      rlang::inject(dplyr::add_count(tbl, !!!dots, wt = !!wt_quo, sort = sort,
+                                     name = name))
+    }))
+  }
   working <- resolved$data
   dot_names <- resolved$names
 
