@@ -535,6 +535,9 @@ compute_group_data <- function(.data) {
     ]
     keys_schema$factor_levels <- if (length(fl) > 0) fl else NULL
   }
+  keys_schema$tz <- tz_from_positions(
+    group_names, keys_schema$types, tz_by_position(materialized$schema)[schema_idx]
+  )
 
   keys_tbl <- new_tbl_gpu(ptr = info$keys, schema = keys_schema, exec_mode = "eager")
   keys_df <- tibble::as_tibble(collect_frame(keys_tbl))

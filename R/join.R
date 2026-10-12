@@ -673,12 +673,32 @@ build_join_output_info <- function(left_schema, right_schema, join_spec,
     if (length(factor_levels) == 0) factor_levels <- NULL
   }
 
+  # POSIXct zones (F32): every column keeps its own side's zone; a merged
+  # equi key takes vctrs' common tzone of the two sides (a Date side has none).
+  zones <- c(tz_by_position(left_schema),
+             tz_by_position(right_schema)[match(right_keep, right_names)])
+  if (!isTRUE(keep)) {
+    for (i in which(is_eq)) {
+      pos <- match(join_spec$left[i], left_names)
+      if (!identical(unname(types[pos]), "TIMESTAMP_MICROSECONDS")) next
+      lpos <- pos
+      rpos <- match(join_spec$right[i], right_names)
+      zones[pos] <- tz_fold(
+        if (identical(unname(left_schema$types[lpos]), "TIMESTAMP_MICROSECONDS")) zones[pos],
+        if (identical(unname(right_schema$types[rpos]), "TIMESTAMP_MICROSECONDS")) {
+          tz_by_position(right_schema)[[rpos]]
+        }
+      ) %||% "UTC"
+    }
+  }
+
   list(
     names = out_names,
     types = types,
     origin = origin,
     source_names = source_names,
     factor_levels = factor_levels,
+    tz = tz_from_positions(out_names, types, tz_localize(zones)),  # vec_slice(): absent -> ""
     cast_keys = cast_keys
   )
 }
@@ -766,6 +786,31 @@ join_factor_key_levels_conflict <- function(x_schema, y_schema, join_spec) {
   FALSE
 }
 
+#' Does a key pair unify a Date with a non-UTC POSIXct? (F32)
+#'
+#' dplyr casts such a Date to local midnight of the POSIXct's zone
+#' (`vec_cast(<Date>, <POSIXct tz>)`), which moves with DST. The native cast
+#' is the UTC midnight, exact only for a UTC-equivalent zone; any other pair
+#' (equi or non-equi) routes the whole join to the CPU.
+#' @keywords internal
+join_date_posixct_needs_cpu <- function(x_schema, y_schema, join_spec) {
+  if (length(join_spec$left) == 0L) {
+    return(FALSE)
+  }
+  li <- match(join_spec$left, x_schema$names)
+  ri <- match(join_spec$right, y_schema$names)
+  lt <- unname(x_schema$types[li])
+  rt <- unname(y_schema$types[ri])
+  pair <- (lt == "TIMESTAMP_DAYS" & rt == "TIMESTAMP_MICROSECONDS") |
+    (lt == "TIMESTAMP_MICROSECONDS" & rt == "TIMESTAMP_DAYS")
+  if (!any(pair)) {
+    return(FALSE)
+  }
+  zone <- ifelse(lt == "TIMESTAMP_MICROSECONDS",
+                 tz_by_position(x_schema)[li], tz_by_position(y_schema)[ri])
+  any(pair & !vapply(zone, tz_is_utc, logical(1)))
+}
+
 #' Would this join's output have a duplicate column name?
 #'
 #' With the `add_suffixes()` port above, this can only happen when at least
@@ -793,7 +838,8 @@ build_join_schema <- function(left_schema, right_schema, join_spec,
                               suffix = c(".x", ".y"), keep = FALSE) {
   info <- build_join_output_info(left_schema, right_schema, join_spec,
                                  suffix = suffix, keep = keep)
-  list(names = info$names, types = info$types, factor_levels = info$factor_levels)
+  list(names = info$names, types = info$types, factor_levels = info$factor_levels,
+       tz = info$tz)
 }
 
 estimate_gpu_bytes <- function(nrow, types) {
@@ -1410,7 +1456,8 @@ mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
   validate_join_cols(join_spec$right, y, "Right")
   join_spec <- resolve_join_key_types(x$schema, y$schema, join_spec)
 
-  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec)) {
+  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec) ||
+      join_date_posixct_needs_cpu(x$schema, y$schema, join_spec)) {
     return(fallback_args())
   }
 
@@ -1457,7 +1504,8 @@ filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
   validate_join_cols(join_spec$right, y, "Right")
   join_spec <- resolve_join_key_types(x$schema, y$schema, join_spec)
 
-  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec)) {
+  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec) ||
+      join_date_posixct_needs_cpu(x$schema, y$schema, join_spec)) {
     return(fallback_args())
   }
 

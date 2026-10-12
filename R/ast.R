@@ -389,9 +389,17 @@ infer_mutate_output_type <- function(op, input_types, scalar) {
     bad_type <- input_types[is_unsupported][1]
     msg <- paste0("mutate() does not support arithmetic on ", bad_type, " columns")
     # A factor operand: dplyr warns and returns NA, so the parse falls back
-    # (stop_factor_needs_cpu()) instead of erroring.
+    # (stop_factor_needs_cpu()) instead of erroring. So does a timestamp
+    # `+`/`-` a number (F32): `t + 3600` is valid R (a POSIXct in t's zone)
+    # that the GPU expression engine has no duration arithmetic for; dplyr
+    # computes it on the CPU. `t - t2` (a difftime, not re-uploadable) and
+    # the other operators keep the plain error.
     if ("DICTIONARY32" %in% input_types) {
       stop_factor_needs_cpu(msg)
+    }
+    is_ts <- grepl("^TIMESTAMP_", input_types)
+    if (op %in% c("+", "-") && sum(is_ts) == 1L && !any(is_unsupported & !is_ts)) {
+      stop_timestamp_needs_cpu(msg)
     }
     stop(msg, call. = FALSE)
   }
@@ -666,17 +674,22 @@ summarise_output_index <- function(groups, agg_names) {
 
 #' @export
 infer_schema.ast_join <- function(node) {
-  left_schema <- infer_schema(node$left)
+  # *_full(): the children's factor levels and POSIXct zones (F32) are
+  # metadata that plain infer_schema() drops above a source.
+  left_schema <- infer_schema_full(node$left)
 
   # semi/anti joins are row filters, not column merges (Phase 7 J2): the
   # output is x's (the left input's) own schema verbatim, factor_levels
   # included -- there is no right-side column to merge in and no
   # suffix/keep decision to make.
   if (node$join_type %in% c("semi", "anti")) {
+    # a row filter: vec_slice() turns an absent tzone into "" (F32)
+    left_schema$tz <- tz_from_positions(left_schema$names, left_schema$types,
+                                        tz_localize(tz_by_position(left_schema)))
     return(left_schema)
   }
 
-  right_schema <- infer_schema(node$right)
+  right_schema <- infer_schema_full(node$right)
   # cross (Phase 7 J3): reuses this same general (non-semi/anti) branch
   # unchanged -- cross_join.tbl_gpu() (R/join.R) already builds an empty
   # `by` spec + `keep = TRUE`, which makes build_join_schema()/

@@ -1069,6 +1069,15 @@ update_schema_for_expr <- function(schema, expr) {
     schema, expr$output_col, mutate_output_levels(schema$factor_levels, expr)
   )
 
+  # F32: a POSIXct output takes the zone of its expression (read before the
+  # output name is overwritten, `t = t + 1` is its own source); anything else
+  # has no zone.
+  zone <- if (identical(unname(expr$output_type), "TIMESTAMP_MICROSECONDS")) {
+    ir_infer_tz(expr$ir, schema)
+  } else {
+    "UTC"
+  }
+
   existing_idx <- match(expr$output_col, schema$names)
 
   if (!is.na(existing_idx)) {
@@ -1078,7 +1087,7 @@ update_schema_for_expr <- function(schema, expr) {
     schema$types <- c(schema$types, expr$output_type)
   }
 
-  schema
+  set_schema_tz(schema, expr$output_col, zone)
 }
 
 # The factor levels one mutate output takes: a bare copy of a factor column

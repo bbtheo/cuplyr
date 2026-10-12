@@ -478,6 +478,10 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) 
     types = c(unname(key_tbl$schema$types), common),
     factor_levels = key_tbl$schema$factor_levels
   )
+  schema$tz <- tz_from_positions(
+    schema$names, schema$types,
+    c(tz_by_position(key_tbl$schema), tz_by_position(observed$schema)[-seq_len(n_keys)])
+  )
   finish(new_tbl_gpu(
     ptr = gpu_bind_cols_impl(list(key_tbl$ptr, agg_ptr)),
     schema = schema, groups = retained_groups,
@@ -1580,9 +1584,7 @@ create_temp_column <- function(.data, col_name, ir, keep_bool = FALSE) {
 
   # Everything else on the schema (notably `factor_levels`, which a factor
   # grouping key still needs) is carried over.
-  new_schema <- schema
-  new_schema$names <- c(schema$names, col_name)
-  new_schema$types <- c(schema$types, new_type)
+  new_schema <- append_schema_cols(schema, col_name, new_type, ir_infer_tz(ir, schema))
 
   new_tbl_gpu(
     ptr = new_ptr,

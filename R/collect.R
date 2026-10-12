@@ -133,6 +133,9 @@ collect_frame <- function(x) {
     }
   }
 
+  # POSIXct columns come back from the GPU as UTC; give them their zone.
+  result <- restore_tz(result, final_schema)
+
   # Columns that were vctrs::unspecified() at upload and went through row-only
   # verbs / filtering joins only (tbl_gpu.data.frame()). All NA by construction.
   for (nm in x[["unspecified"]]) {

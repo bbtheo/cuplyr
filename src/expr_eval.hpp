@@ -349,6 +349,15 @@ inline cudf::type_id type_by_promotion_rank(int rank) {
 // -----------------------------------------------------------------------------
 
 inline cudf::data_type unify_value_types(const std::vector<cudf::data_type>& types) {
+    // One type throughout (a timestamp column, say): nothing to promote. The
+    // rank table below only knows the numeric ladder.
+    if (!types.empty()) {
+        bool same = true;
+        for (const auto& t : types) {
+            if (t != types[0]) same = false;
+        }
+        if (same) return types[0];
+    }
     bool any_string = false;
     bool all_string = true;
     for (const auto& t : types) {

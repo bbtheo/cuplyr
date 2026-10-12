@@ -126,10 +126,16 @@ tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
   })
   # By position: `data` may carry duplicated names. NULL entries are dropped
   # to keep the schema compact.
+  types <- vapply(data, gpu_type_from_r, character(1))
+  # POSIXct zones (F32): the instant is UTC on the GPU, the tzone is metadata.
+  zones <- vapply(data, function(col) {
+    if (inherits(col, "POSIXct")) tz_of_attr(col) else "UTC"
+  }, character(1))
   schema <- list(
     names = names(data),
-    types = vapply(data, gpu_type_from_r, character(1)),
-    factor_levels = levels_from_positions(names(data), unname(factor_levels))
+    types = types,
+    factor_levels = levels_from_positions(names(data), unname(factor_levels)),
+    tz = tz_from_positions(names(data), types, unname(zones))
   )
 
   exec_mode <- resolve_exec_mode(lazy)
@@ -503,6 +509,9 @@ called_from_vctrs <- function(p) {
   }
   if (!is.null(x$schema$factor_levels)) {
     x$schema$factor_levels <- levels_from_positions(value, levels_by_position(x$schema))
+  }
+  if (!is.null(x$schema$tz)) {
+    x$schema$tz <- tz_from_positions(value, x$schema$types, tz_by_position(x$schema))
   }
   # The unspecified marker is name-keyed too; a name that comes out duplicated
   # can't be addressed by collect_frame(), so it loses the marker.

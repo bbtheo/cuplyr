@@ -371,6 +371,8 @@ bind_cols_gpu <- function(dots, .name_repair = "unique", call = rlang::caller_en
   all_levels <- unlist(lapply(pieces, function(x) levels_by_position(x$schema)),
                        recursive = FALSE)
   factor_levels <- levels_from_positions(repaired_names, all_levels)
+  tz <- tz_from_positions(repaired_names, all_types,
+                          unlist(lapply(pieces, function(x) tz_by_position(x$schema))))
 
   # Collect pointers
   ptrs <- lapply(pieces, function(x) x$ptr)
@@ -386,7 +388,7 @@ bind_cols_gpu <- function(dots, .name_repair = "unique", call = rlang::caller_en
   new_tbl_gpu(
     ptr = new_ptr,
     schema = list(names = repaired_names, types = all_types,
-                  factor_levels = factor_levels),
+                  factor_levels = factor_levels, tz = tz),
     groups = groups,
     group_drop = if (length(groups) > 0L) first$group_drop %||% TRUE else TRUE,
     exec_mode = "eager"
@@ -476,6 +478,20 @@ bind_rows_gpu <- function(dots, .id = NULL, call = rlang::caller_env()) {
   real <- which(!no_cols)
   unified <- compute_unified_schema(dots[real], positions = real, call = call)
 
+  if (isTRUE(unified$cpu_tz)) {
+    # A Date next to a non-UTC POSIXct: vctrs casts the Date to local midnight
+    # of that zone, which R computes exactly (DST included).
+    cuplyr_fallback_notify("bind_rows", "a Date combined with a non-UTC POSIXct")
+    frames <- lapply(dots, collect_frame)
+    names(frames) <- if (!is.null(.id)) source_names
+    result <- tbl_gpu(dplyr::bind_rows(!!!frames, .id = .id), lazy = FALSE)
+    groups <- intersect(first_groups, result$schema$names)
+    check_dup_names_ungrouped(result$schema$names, groups, call = call)
+    result$groups <- groups
+    result$group_drop <- if (length(groups) > 0L) first_drop else TRUE
+    return(result)
+  }
+
   # Align each table to unified schema; a zero-column one becomes all-NA rows
   aligned <- lapply(seq_along(dots), function(i) {
     if (!no_cols[[i]]) {
@@ -496,7 +512,7 @@ bind_rows_gpu <- function(dots, .id = NULL, call = rlang::caller_env()) {
   result <- new_tbl_gpu(
     ptr = new_ptr,
     schema = list(names = unified$names, types = unified$types,
-                  factor_levels = unified$factor_levels),
+                  factor_levels = unified$factor_levels, tz = unified$tz),
     groups = character(),
     exec_mode = "eager"
   )
@@ -741,10 +757,13 @@ compute_unified_schema <- function(tables, positions = seq_along(tables),
   all_names <- character()
   name_types <- list()
   name_factor_levels <- list()   # nm -> current level vector (only set while DICTIONARY32)
+  name_tz <- list()              # nm -> vctrs' common tzone of its POSIXct occurrences (F32)
+  name_has_date <- character()   # names with a Date occurrence
 
   for (t in seq_along(tables)) {
     tbl <- tables[[t]]
     tbl_factor_levels <- tbl$schema$factor_levels
+    tbl_tz <- tz_by_position(tbl$schema)
 
     for (i in seq_along(tbl$schema$names)) {
       nm <- tbl$schema$names[i]
@@ -755,13 +774,17 @@ compute_unified_schema <- function(tables, positions = seq_along(tables),
       ty <- unname(tbl$schema$types[i])
       is_factor <- identical(ty, "DICTIONARY32")
       lvls <- if (is_factor) tbl_factor_levels[[nm]] else NULL
+      ty_tz <- if (identical(ty, "TIMESTAMP_MICROSECONDS")) tbl_tz[[i]]
+      if (identical(ty, "TIMESTAMP_DAYS")) name_has_date <- c(name_has_date, nm)
 
       if (!(nm %in% all_names)) {
         all_names <- c(all_names, nm)
         name_types[[nm]] <- ty
         name_factor_levels[[nm]] <- lvls
+        name_tz[nm] <- list(ty_tz)
         next
       }
+      name_tz[nm] <- list(tz_fold(name_tz[[nm]], ty_tz))
 
       existing_type <- name_types[[nm]]
       existing_is_factor <- identical(existing_type, "DICTIONARY32")
@@ -782,10 +805,24 @@ compute_unified_schema <- function(tables, positions = seq_along(tables),
 
   factor_levels <- name_factor_levels[!vapply(name_factor_levels, is.null, logical(1))]
 
+  # F32: a POSIXct column takes vctrs' common tzone. A Date unified with a
+  # POSIXct is cast to midnight in THAT zone (DST-dependent), which the GPU's
+  # UTC cast only matches for a UTC-equivalent zone: otherwise the caller runs
+  # the bind on the CPU (`cpu_tz`).
+  zones <- vapply(all_names, function(nm) name_tz[[nm]] %||% "UTC", character(1))
+  zones_out <- tz_localize(zones)  # vec_rbind(): an absent tzone becomes ""
+  cpu_tz <- any(vapply(seq_along(all_names), function(k) {
+    nm <- all_names[[k]]
+    identical(unname(unified_types[[k]]), "TIMESTAMP_MICROSECONDS") &&
+      nm %in% name_has_date && !tz_is_utc(zones[[k]])
+  }, logical(1)))
+
   list(
     names = all_names,
     types = unname(unified_types),
-    factor_levels = if (length(factor_levels) > 0) factor_levels else NULL
+    factor_levels = if (length(factor_levels) > 0) factor_levels else NULL,
+    tz = tz_from_positions(all_names, unname(unified_types), unname(zones_out)),
+    cpu_tz = cpu_tz
   )
 }
 
@@ -875,6 +912,11 @@ align_to_schema <- function(tbl, target_schema) {
       identical(current_types, target_types) &&
       factor_levels_match_target(source_factor_levels, target_factor_levels,
                                  target_names, target_types)) {
+    # A zone-only difference is metadata: the GPU holds UTC instants either
+    # way, so no column is touched (F32).
+    if (!tz_matches_target(tbl$schema, target_schema)) {
+      tbl$schema$tz <- target_schema$tz
+    }
     return(tbl)
   }
 
@@ -927,7 +969,8 @@ align_to_schema <- function(tbl, target_schema) {
   new_tbl_gpu(
     ptr = new_ptr,
     schema = list(names = target_names, types = target_types,
-                  factor_levels = target_factor_levels),
+                  factor_levels = target_factor_levels,
+                  tz = target_schema$tz),
     groups = character(),
     exec_mode = "eager"
   )

@@ -206,6 +206,10 @@ check_set_op_compatible <- function(x_schema, y_schema) {
 
   promoted_types <- character(nx)
   factor_levels <- list()
+  zones <- rep("UTC", nx)
+  tz_x <- tz_by_position(x_schema)
+  tz_y <- tz_by_position(y_schema)
+  needs_fallback <- FALSE
 
   for (i in seq_len(nx)) {
     nm <- names_x[i]
@@ -224,6 +228,18 @@ check_set_op_compatible <- function(x_schema, y_schema) {
       ))
     }
     promoted_types[i] <- res$type
+    if (identical(res$type, "TIMESTAMP_MICROSECONDS")) {
+      # F32: vctrs' common tzone; a Date next to a non-UTC POSIXct is cast to
+      # local midnight of that zone, which only the CPU computes exactly.
+      zones[[i]] <- tz_fold(
+        if (identical(tx, "TIMESTAMP_MICROSECONDS")) tz_x[[match(nm, x_schema$names)]],
+        if (identical(ty, "TIMESTAMP_MICROSECONDS")) tz_y[[match(nm, y_schema$names)]]
+      ) %||% "UTC"
+      if ((identical(tx, "TIMESTAMP_DAYS") || identical(ty, "TIMESTAMP_DAYS")) &&
+          !tz_is_utc(zones[[i]])) {
+        needs_fallback <- TRUE
+      }
+    }
     if (!is.null(res$factor_levels)) {
       factor_levels[[nm]] <- res$factor_levels
     }
@@ -233,9 +249,10 @@ check_set_op_compatible <- function(x_schema, y_schema) {
     target_schema = list(
       names = names_x,
       types = promoted_types,
-      factor_levels = if (length(factor_levels) > 0) factor_levels else NULL
+      factor_levels = if (length(factor_levels) > 0) factor_levels else NULL,
+      tz = tz_from_positions(names_x, promoted_types, tz_localize(zones))
     ),
-    needs_fallback = FALSE
+    needs_fallback = needs_fallback
   )
 }
 
@@ -265,7 +282,8 @@ align_set_op_side <- function(tbl, target_schema, groups = character()) {
   needs_align <- !identical(schema$names, target_schema$names) ||
     !identical(unname(schema$types), unname(target_schema$types)) ||
     !factor_levels_match_target(schema$factor_levels, target_schema$factor_levels,
-                                target_schema$names, unname(target_schema$types))
+                                target_schema$names, unname(target_schema$types)) ||
+    !tz_matches_target(schema, target_schema)
 
   if (needs_align) {
     if (identical(tbl$exec_mode, "lazy") && has_pending_ops(tbl)) {
@@ -306,6 +324,7 @@ align_set_op_side <- function(tbl, target_schema, groups = character()) {
 #' @keywords internal
 restore_set_op_factor_levels <- function(result, target_schema) {
   result$schema$factor_levels <- target_schema$factor_levels
+  result$schema$tz <- target_schema$tz
   result
 }
 

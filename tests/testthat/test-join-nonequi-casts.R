@@ -52,24 +52,24 @@ test_that("keep = TRUE and mixed equi/non-equi with casts keep original types", 
   }
 })
 
-test_that("a factor key whose levels were lost gives a clear error, not a STRSXP one", {
+test_that("a factor key keeps its levels through a lazy select + join (F32: join schemas read the children's metadata)", {
   skip_if_no_gpu()
   sx <- data.frame(id = c("a", "b", "c"), v = 1:3, f2 = factor(c("u", "v", "u")))
   sy <- data.frame(id = c("c", "a"), w = c(30, 10))
   lab <- data.frame(f2 = c("u", "v"), desc = c("U!", "V!"))
-  # compute() of a lazy select + join currently drops the factor levels from
-  # the schema (a separate, known gap): the decode must refuse rather than
-  # crash inside Rcpp.
+  # Used to lose the factor levels from the schema of a join over a lazy
+  # select (the decode then refused with "factor column whose levels are
+  # unknown"); the schema of a join's children now carries them.
   j <- tbl_gpu(sx, lazy = TRUE) |>
     select(id, v, f2) |>
     left_join(tbl_gpu(sy, lazy = TRUE), by = "id") |>
     compute()
-  expect_error(
-    collect(left_join(j, tbl_gpu(lab, lazy = TRUE), by = "f2")),
-    "factor column whose levels are unknown"
+  expect_equal(
+    tibble::as_tibble(collect(left_join(j, tbl_gpu(lab, lazy = TRUE), by = "f2"))),
+    tibble::as_tibble(sx |> select(id, v, f2) |> left_join(sy, by = "id") |> left_join(lab, by = "f2"))
   )
-  expect_error(
-    collect(semi_join(j, tbl_gpu(lab, lazy = TRUE), by = "f2")),
-    "factor column whose levels are unknown"
+  expect_equal(
+    tibble::as_tibble(collect(semi_join(j, tbl_gpu(lab, lazy = TRUE), by = "f2"))),
+    tibble::as_tibble(sx |> select(id, v, f2) |> left_join(sy, by = "id") |> semi_join(lab, by = "f2"))
   )
 })

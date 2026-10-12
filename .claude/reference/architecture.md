@@ -15,7 +15,8 @@ list(
   ptr = <externalptr>,           # XPtr to cudf::table
   schema = list(
     names = c("col1", "col2"),   # column names
-    types = c("FLOAT64", "INT32") # GPU type strings
+    types = c("FLOAT64", "INT32"), # GPU type strings
+    # optional metadata: factor_levels (factor labels), tz (POSIXct zones)
   ),
   groups = c("col1"),            # group_by columns (can be empty)
   exec_mode = "eager",           # "eager" or "lazy"
@@ -78,6 +79,79 @@ STRING levels column) using the physical codes as the index -- see
 `src/ops_bind.cpp` for the null-sanitization details (codes are 1-based
 and cudf's `gather()` needs a non-nullable, 0-based index).
 
+#### POSIXct time zones (F32)
+
+The GPU holds every POSIXct as UTC microseconds (cudf has no tz-aware type);
+the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
+`schema$factor_levels` (helpers and propagation in `R/tz.R`):
+
+- `schema$tz` is a named character vector, column name -> zone, only for
+  TIMESTAMP_MICROSECONDS columns whose zone is not `"UTC"`. `""` is local time,
+  `NA_character_` a column whose tzone attribute is absent. Like dplyr,
+  absent becomes `""` wherever values are sliced or combined (filter, arrange,
+  slice, distinct, summarise, joins, binds, set ops, `if_else()`/`coalesce()`/
+  `lag()`/... and window outputs: `tz_localize()`); it stays absent through
+  select/rename/relocate, a bare `mutate(t2 = t)` copy and `t +/- n`. No entry means `"UTC"`, which is also what every path
+  that does not know the zone produces, so a missing propagation shows up as a
+  wrong attribute, never a wrong instant. With duplicated column names the
+  vector holds one entry per TIMESTAMP_MICROSECONDS column in column order,
+  tagged `by_position` (`tz_by_position()` / `tz_from_positions()`, like
+  `levels_by_position()`).
+- Written at upload (`tbl_gpu.data.frame()`), restored by `collect_frame()`
+  (`restore_tz()`, the C++ collect tags every column "UTC") and by
+  `print()`/`glimpse()` previews. Carried by `propagate_schema_meta()`
+  (`R/execute.R`: `push_op()` and `infer_schema_full()`, hence `compute()`)
+  through `propagate_tz()`; joins (`build_join_output_info()`, a merged key
+  takes `tz_fold()` of the two sides, `keep = TRUE` and other columns keep
+  their own), `bind_rows()`/set ops (`compute_unified_schema()`,
+  `check_set_op_compatible()`), `bind_cols()`, `names<-`, vctrs restore,
+  `group_data` keys, the empty-group summarise. `infer_schema.ast_join()` reads
+  its children through `infer_schema_full()`, so metadata survives a join over
+  lazy ops.
+- mutate/transmute: `update_schema_for_expr()` sets the output zone with
+  `ir_infer_tz()` (`R/ir.R`, the `ir_infer_type()` sibling): column -> its
+  zone, POSIXct literal -> its `tzone`, and every op that can return a
+  POSIXct has an explicit rule in `ir_tz_rules`: `x` ops (`na_if()`,
+  `replace_when()`/`replace_values()`, `lag()`/`lead()`, `first()`/`last()`/
+  `nth()`, `min()`/`max()`, `roll_min()`/`roll_max()`) take `x`'s zone, since
+  dplyr casts the other values to `x`; `common` ops (`if_else()` true/false/
+  missing, `case_when()` values then `.default`, `coalesce()`) take
+  `tz_fold()` of the value operands in order (vctrs' rule: the first zone,
+  unless it is local, then the next); `as.POSIXct()` keeps a POSIXct's zone
+  and makes a Date UTC. An op without a rule (unary `-`, `abs()`,
+  `cummax()`/`cummin()`, which R rejects on a POSIXct) signals
+  `cuplyr_timestamp_needs_cpu` from `ir_tz_of()`; `ir_parse_quo()` runs it
+  over every POSIXct-valued call (`ir_check_tz_rules()`), so such an
+  expression goes to the CPU instead of claiming a zone. Window ops and
+  summarise `min/max/first/last/nth` keep the value column's zone. Set
+  operations treat a zone that differs from the common one as needing
+  alignment (`tz_matches_target()`, like the factor levels), so
+  `align_to_schema()` hands back the target's zones for `intersect()`/
+  `setdiff()`/`semi_join()` sides; a zone-only difference just rewrites
+  `schema$tz` (no column copy).
+- **Fallback rule**: the calendar accessors (`hour()`, `wday()`, ... and the
+  user-callable `lubridate::as_date()`) on a POSIXct whose zone is not
+  UTC-equivalent (`tz_is_utc()`: `""`/`NA` resolve to the session zone first)
+  return `NULL` from the IR parser, so the verb's whole-call CPU fallback
+  computes them with R's tz database (exact on DST days). `summarise()` falls
+  back for an aggregate over such an accessor by the existing
+  `ir_parse_quo()` -> `NULL` rule. `as.Date()` stays native (R 4.6: UTC). A
+  Date unified with a non-UTC POSIXct (join keys, equi and non-equi:
+  `join_date_posixct_needs_cpu()`; `bind_rows()` / set ops:
+  `compute_unified_schema()$cpu_tz` / `check_set_op_compatible()`) goes to the
+  CPU, since dplyr casts the Date to *local midnight of that zone*. UTC pairs
+  keep the native UTC cast. `t + n` / `t - n` (one timestamp operand, the other
+  numeric), `if_else()`/`case_when()`/`coalesce()` mixing a Date with a
+  POSIXct, and a Date + POSIXct mix in `na_if()`/`replace_when()` (the GPU
+  cast would reinterpret the ticks; a `lag()`/`lead()` default whose type
+  differs from a timestamp `x` makes `ir_parse_shift_call()` return `NULL`
+  for the same reason) signal `cuplyr_timestamp_needs_cpu` (a subclass of
+  `cuplyr_factor_needs_cpu`: parse returns `NULL`, whole-call CPU fallback).
+  `ir_parse_quo()` runs the type inference after the parse and re-raises only
+  that subclass, so a factor expression still comes back as IR for
+  `ir_factor_rule()`. Other timestamp type errors (`t - t2`, `Date - Date`, a
+  timestamp with a string) keep their plain errors.
+
 ## Source Map
 
 ### C++ Files
@@ -103,6 +177,7 @@ and cudf's `gather()` needs a non-nullable, 0-based index).
 |------|---------|
 | `R/tbl-gpu.R` | `tbl_gpu()`, `new_tbl_gpu()`, `is_tbl_gpu()`, `resolve_exec_mode()`. `dim()`/`nrow()` of a lazy table with pending ops run the plan on the GPU (`compute()`, no collect, caller untouched); `ncol()`/`NCOL()` are answered from the schema (`dim.tbl_gpu` checks that its caller is `base::ncol`/`NCOL`). Internal code that only needs a cheap size uses `base_dim()` (base table's dims, never executes). |
 | `R/utils.R` | `gpu_type_from_r()`, `col_index()` |
+| `R/tz.R` | POSIXct time zone metadata (F32): `tz_is_utc()`, `tz_fold()`, `tz_by_position()`/`tz_from_positions()`, `propagate_tz()`, `propagate_schema_meta()`, `restore_tz()`; see "POSIXct time zones" above |
 | `R/execute.R` | unified execution helpers: `push_op()` (the sole exec_mode branch point; carries `groups` and `.drop` -- `.drop` only while a group column survives), `input_node()`, `current_schema()`, `propagate_groups()`, `propagate_factor_levels()`, `auto_name_dots()`, `cuplyr_fallback_notify()`, join analogues `join_input_node()`/`push_join()` |
 | `R/ir.R` | Expression IR shared by filter/mutate: `ir_parse_quo()`, `ir_cols()`, `ir_cost()`, `ir_is_const()`, `ir_bind()`, `ir_infer_type()`, `ir_call_registry` |
 | `R/filter.R` | filter verb — parses expressions via `ir_parse_quo()` into `make_predicate()` records, builds one `ast_filter` node via `push_op()`; constant expressions (TRUE/FALSE/vectors) are evaluated in R, not the GPU IR path; unparseable expressions fall back to a CPU-eval boolean mask (`filter_eval_mask()`) |

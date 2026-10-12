@@ -77,6 +77,7 @@ glimpse.tbl_gpu <- function(x, width = NULL, ...) {
   }
 
   max_name_width <- max(nchar(col_names), 1)
+  zones <- tz_by_position(materialized$schema)
 
   for (i in seq_along(col_names)) {
     col_name <- col_names[i]
@@ -85,8 +86,9 @@ glimpse.tbl_gpu <- function(x, width = NULL, ...) {
     type_str <- paste0("<", col_type, ">")
 
     if (!is.null(preview) && length(preview[[i]]) > 0) {
-      vals <- preview[[i]]
-      if (is.character(vals)) {
+      is_time <- inherits(preview[[i]], c("POSIXct", "Date"))
+      vals <- preview_values(preview[[i]], zones[[i]])
+      if (is.character(vals) && !is_time) {
         vals <- paste0("\"", vals, "\"")
       }
       vals[is.na(vals)] <- "NA"

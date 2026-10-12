@@ -539,7 +539,25 @@ ir_parse_quo <- function(quo, schema) {
   expr <- rlang::quo_get_expr(quo)
   env <- rlang::quo_get_env(quo)
   tryCatch(
-    ir_parse_expr(expr, env, schema, allow_vector = FALSE),
+    {
+      ir <- ir_parse_expr(expr, env, schema, allow_vector = FALSE)
+      # Timestamp arithmetic (`t + 3600`) parses fine and only its type check
+      # says "CPU"; verbs infer the type after the parse (outside this
+      # handler), so run it here too, plus the zone rule of every POSIXct
+      # op (F32: an op without one goes to the CPU). Only the timestamp
+      # signal is acted on: a factor signal must still come back as IR for
+      # ir_factor_rule(), and any other type error is left for the verb to
+      # raise.
+      if (!is.null(ir)) {
+        tryCatch({
+          ir_infer_type(ir, schema)
+          ir_check_tz_rules(ir, schema)
+        }, error = function(e) {
+          if (inherits(e, "cuplyr_timestamp_needs_cpu")) stop(e)
+        })
+      }
+      ir
+    },
     cuplyr_factor_needs_cpu = function(e) NULL
   )
 }
@@ -690,7 +708,23 @@ ir_parse_case_when <- function(expr, env, schema) {
 # the same idea generalized to N clauses -- the result is always `x`'s own
 # type (arg 1), never a vctrs-style unify across the replacement values.
 type_replace_when <- function(arg_types) {
+  n <- length(arg_types)
+  value_idx <- c(1L, if (n >= 3L) seq(3L, n, by = 2L))  # x, val_1, ..., val_N
+  ir_check_cast_to_x(arg_types[value_idx], "replace_when")
   arg_types[1]
+}
+
+# For the ops whose result is `x` with other values cast into it (na_if(),
+# replace_when()): vctrs casts a Date to local midnight in a POSIXct `x`'s
+# zone and rejects a POSIXct into a Date `x`, neither of which the GPU cast
+# does (it reinterprets the raw ticks), so a Date + POSIXct mix goes to the
+# CPU (F32).
+# @keywords internal
+ir_check_cast_to_x <- function(types, op_name) {
+  if (all(c("TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS") %in% types)) {
+    stop_timestamp_needs_cpu(op_name, "(): can't combine a Date and a POSIXct on the GPU.")
+  }
+  invisible()
 }
 
 #' Shared clause-parsing helper for case_match()/recode_values() (Phase 4 wave 2)
@@ -1166,6 +1200,14 @@ ir_parse_shift_call <- function(expr, env, schema, fn_name) {
         return(NULL)  # non-scalar default: not implemented this wave
       }
       default_ir <- ir_lit_from_r(default_val)
+      # A Date default for a POSIXct `x` (or the reverse): vctrs casts it
+      # (local midnight / an error), the GPU would reinterpret its ticks (F32)
+      x_type <- unname(ir_infer_type(x_ir, schema))
+      def_type <- unname(default_ir$type)
+      if (!isTRUE(default_ir$na) && !identical(x_type, def_type) &&
+          any(c(x_type, def_type) %in% cuplyr_timestamp_types)) {
+        return(NULL)
+      }
     }
   }
 
@@ -2325,6 +2367,129 @@ ir_infer_type <- function(ir, schema) {
   entry$type(arg_types)
 }
 
+#' Infer the time zone of a POSIXct-valued IR node (F32)
+#'
+#' The sibling of [ir_infer_type()] for the `tzone` attribute the result
+#' would carry in R. Only meaningful for a TIMESTAMP_MICROSECONDS result (it
+#' returns `"UTC"` for anything else): a column has its schema zone, a POSIXct
+#' literal its own `tzone`, and every op that can return a POSIXct has an
+#' explicit rule in [ir_tz_rules]. An op without one raises
+#' `cuplyr_timestamp_needs_cpu` (the expression goes to the CPU when the
+#' parse sees it, [ir_parse_quo()]) rather than guess a zone.
+#'
+#' @param ir An IR node
+#' @param schema List with `names`/`types`/`tz`
+#' @return A zone string as stored in `schema$tz`: a name, `""` (local), `NA`
+#'   (no tzone attribute) or `"UTC"`
+#' @keywords internal
+ir_infer_tz <- function(ir, schema) {
+  zone <- ir_tz_of(ir, schema)
+  if (is.null(zone)) "UTC" else zone
+}
+
+#' How each POSIXct-valued op gets its zone (F32)
+#'
+#' Verified against dplyr 1.2 / vctrs 0.7 on plain tibbles, for local,
+#' absent, UTC and New York operands:
+#'
+#' - `x`: the result is `x` itself, a slice of it, or other values cast to
+#'   `x`'s type (`vec_cast(y, x)`), so it has `x`'s zone (absent becomes
+#'   `""`): `na_if()`, `replace_when()` (also `replace_values()`), `lag()`/
+#'   `lead()` (with `default = `), `first()`/`last()`/`nth()`, `min()`/
+#'   `max()`, and cuplyr's `roll_min()`/`roll_max()`.
+#' - `common`: vctrs' common type of the value operands in order
+#'   ([tz_fold()]), then absent becomes `""`: `if_else()` (true, false,
+#'   missing), `case_when()` (values in order, then `.default`),
+#'   `coalesce()`.
+#' - `as_posixct`: a POSIXct keeps its zone as is, a Date becomes UTC
+#'   midnight (R's `as.POSIXct.Date`).
+#'
+#' Not listed, so CPU: unary `-`, `abs()`, `cummax()`/`cummin()` (R's
+#' `Math.POSIXt` rejects them, so dplyr errors). `t +/- n` never reaches
+#' here: its type check already sends it to the CPU ([infer_mutate_output_type()]).
+#'
+#' @format A named list of op names per rule
+#' @keywords internal
+ir_tz_rules <- list(
+  x = c("na_if", "replace_when", "lag", "lead", "first", "last", "nth",
+        "min", "max", "roll_min", "roll_max"),
+  common = c("if_else", "case_when", "coalesce"),
+  as_posixct = "as_posixct"
+)
+
+# The value operands of a vctrs-common op, in fold order.
+# @keywords internal
+ir_tz_value_args <- function(ir) {
+  args <- ir$args
+  n <- length(args)
+  switch(ir$op,
+    if_else = args[-1],                                 # true, false, missing
+    case_when = args[c(seq(2L, n - 1L, by = 2L), n)],   # val_1, ..., default
+    args                                                # coalesce
+  )
+}
+
+# `NULL` when `ir` is not POSIXct-valued, else its zone.
+# @keywords internal
+ir_tz_of <- function(ir, schema) {
+  if (identical(ir$kind, "col")) {
+    idx <- match(ir$name, schema$names)
+    if (is.na(idx) || !identical(unname(schema$types[idx]), "TIMESTAMP_MICROSECONDS")) {
+      return(NULL)
+    }
+    return(tz_by_position(schema)[[idx]])
+  }
+  if (identical(ir$kind, "lit") || identical(ir$kind, "vec")) {
+    if (!identical(unname(ir$type), "TIMESTAMP_MICROSECONDS") || isTRUE(ir$na)) {
+      return(NULL)
+    }
+    return(tz_of_attr(ir$value))
+  }
+  if (!identical(unname(ir_infer_type(ir, schema)), "TIMESTAMP_MICROSECONDS")) {
+    return(NULL)
+  }
+  op <- ir$op
+  if (op %in% ir_tz_rules$x) {
+    # the result has x's type, so x is the POSIXct that sets the zone
+    return(tz_localize(ir_tz_of(ir$args[[1]], schema) %||% "UTC"))
+  }
+  if (op %in% ir_tz_rules$common) {
+    zone <- NULL
+    for (arg in ir_tz_value_args(ir)) {
+      zone <- tz_fold(zone, ir_tz_of(arg, schema))
+    }
+    return(tz_localize(zone %||% "UTC"))
+  }
+  if (op %in% ir_tz_rules$as_posixct) {
+    # a Date becomes UTC midnight; a POSIXct keeps its zone
+    return(ir_tz_of(ir$args[[1]], schema) %||% "UTC")
+  }
+  stop_timestamp_needs_cpu(
+    op, "() on a POSIXct value: no time zone rule on the GPU path."
+  )
+}
+
+# Run ir_tz_of() over every POSIXct-valued call of a parsed expression, so an
+# op without a zone rule (ir_tz_rules) sends the whole expression to the CPU
+# at parse time, wherever it sits in the tree. A no-op without a POSIXct
+# column in the schema (constant subtrees are already folded in R).
+# @keywords internal
+ir_check_tz_rules <- function(ir, schema) {
+  if (!any(unname(schema$types) == "TIMESTAMP_MICROSECONDS")) {
+    return(invisible())
+  }
+  visit <- function(node) {
+    if (!identical(node$kind, "call")) {
+      return(invisible())
+    }
+    meta_nodes <- Filter(function(m) is.list(m) && !is.null(m$kind), node$meta)
+    for (child in c(node$args, meta_nodes)) visit(child)
+    ir_tz_of(node, schema)
+  }
+  visit(ir)
+  invisible()
+}
+
 # -----------------------------------------------------------------------------
 # ir_call_registry - the extension contract (section 6)
 # -----------------------------------------------------------------------------
@@ -2429,6 +2594,24 @@ stop_factor_needs_cpu <- function(...) {
   ))
 }
 
+#' Signal a type error dplyr resolves for a timestamp operand (F32)
+#'
+#' The timestamp sibling of [stop_factor_needs_cpu()]: `t + 3600` (a POSIXct in
+#' `t`'s zone) and a Date mixed with a POSIXct in `if_else()`/`case_when()`/
+#' `coalesce()` are valid R that the GPU engine can't compute. It is a
+#' subclass, so [ir_parse_quo()]'s handler turns it into `NULL` as well, but
+#' only this class is raised from the type check [ir_parse_quo()] runs: a
+#' factor expression has to come back as IR for [ir_factor_rule()].
+#'
+#' @param ... Message pieces, pasted together
+#' @keywords internal
+stop_timestamp_needs_cpu <- function(...) {
+  stop(structure(
+    class = c("cuplyr_timestamp_needs_cpu", "cuplyr_factor_needs_cpu", "error", "condition"),
+    list(message = paste0(...), call = NULL)
+  ))
+}
+
 # @param types Character vector of GPU types for every "value position" arg
 #   of an if_else()/case_when()/coalesce() call (already resolved -- no
 #   remaining bare/isolated NA placeholders, see ir_resolve_value_nas())
@@ -2444,9 +2627,17 @@ ir_unify_types <- function(types, op_name) {
     return(uniq)
   }
 
-  # A factor among the values: dplyr may well combine it, the GPU can't.
-  fail <- if ("DICTIONARY32" %in% uniq) stop_factor_needs_cpu else
+  # A factor among the values: dplyr may well combine it, the GPU can't. The
+  # same for a Date next to a POSIXct (F32): vctrs unifies them to a POSIXct
+  # by casting the Date to local midnight. Every other timestamp mix is a
+  # plain error.
+  fail <- if ("DICTIONARY32" %in% uniq) {
+    stop_factor_needs_cpu
+  } else if (all(c("TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS") %in% uniq)) {
+    stop_timestamp_needs_cpu
+  } else {
     function(...) stop(..., call. = FALSE)
+  }
 
   if ("STRING" %in% uniq) {
     fail(op_name, "(): can't combine ",
@@ -2480,6 +2671,7 @@ type_coalesce <- function(arg_types) {
 # `na_if(1:3, 2)` -- an integer `x` against a double literal `y` -- stays
 # integer; `y` is just compared against, never promoted into the result).
 type_na_if <- function(arg_types) {
+  ir_check_cast_to_x(arg_types, "na_if")
   arg_types[1]
 }
 
@@ -3102,6 +3294,15 @@ ir_require_lubridate_fn <- function(head, env, name) {
   identical(resolved, target)
 }
 
+# TRUE iff `ir` is POSIXct-valued in a zone that is not UTC-equivalent, i.e.
+# a calendar component of it depends on the zone (DST included) and must be
+# computed on the CPU (F32).
+# @keywords internal
+ir_needs_cpu_tz <- function(ir, schema) {
+  zone <- ir_tz_of(ir, schema)
+  !is.null(zone) && !tz_is_utc(zone)
+}
+
 #' Parse a lubridate accessor call (Phase 11 L6), once
 #' [ir_require_lubridate_fn()] has already confirmed the call really
 #' invokes lubridate's own function
@@ -3180,6 +3381,9 @@ ir_parse_lubridate_accessor <- function(expr, env, schema, fn_name) {
   x_type <- unname(ir_infer_type(x_ir, schema))
   if (!x_type %in% cuplyr_timestamp_types) {
     return(NULL)  # STRING/numeric source: not attempted natively (mirrors L3)
+  }
+  if (ir_needs_cpu_tz(x_ir, schema)) {
+    return(NULL)  # F32: wall clock in a non-UTC zone is computed by R itself
   }
 
   ir_call(fn_name, list(x_ir))
@@ -3689,7 +3893,19 @@ ir_call_registry <- list(
   # `type` is fixed regardless of the (already-verified-timestamp) input
   # granularity, matching `as.Date()`/`as.POSIXct()`'s own R semantics
   # (always returns a `Date`/`POSIXct`, never a mix).
-  "as_date" = list(arity = 1L, parse = NULL,
+  #
+  # F32: this key is also what a user's `lubridate::as_date(x)` resolves to,
+  # and lubridate takes the calendar day in the column's own zone while the
+  # cast below is the UTC day. `as.Date()` (UTC by default in R 4.6) builds
+  # the node directly and is not re-parsed, so only the user-callable form
+  # goes through this hook: a non-UTC POSIXct goes to the CPU.
+  "as_date" = list(arity = 1L,
+                    parse = function(args, schema) {
+                      if (ir_needs_cpu_tz(args[[1]], schema)) {
+                        return(NULL)
+                      }
+                      ir_call("as_date", args)
+                    },
                     type = function(arg_types) "TIMESTAMP_DAYS",
                     lower = list(handler = "as_date")),
   "as_posixct" = list(arity = 1L, parse = NULL,

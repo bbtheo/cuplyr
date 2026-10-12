@@ -522,6 +522,16 @@ List gpu_head(SEXP xptr, int n, CharacterVector col_names) {
                 }
                 NumericVector rv(nrow);
                 for (int j = 0; j < nrow; ++j) rv[j] = static_cast<double>(temp[j]);
+                if (head_col.null_count() > 0 && head_col.null_mask() != nullptr) {
+                    std::vector<uint8_t> validity(bitmask_allocation_size_bytes(nrow));
+                    check_cuda(cudaMemcpy(validity.data(), head_col.null_mask(), validity.size(), cudaMemcpyDeviceToHost),
+                               "gpu_head date null_mask memcpy");
+                    for (int j = 0; j < nrow; ++j) {
+                        if (!(validity[j / 8] & (1 << (j % 8)))) {
+                            rv[j] = NA_REAL;
+                        }
+                    }
+                }
                 rv.attr("class") = "Date";
                 result[i] = rv;
                 break;
@@ -534,6 +544,16 @@ List gpu_head(SEXP xptr, int n, CharacterVector col_names) {
                 }
                 NumericVector rv(nrow);
                 for (int j = 0; j < nrow; ++j) rv[j] = static_cast<double>(temp[j]) / 1e6;
+                if (head_col.null_count() > 0 && head_col.null_mask() != nullptr) {
+                    std::vector<uint8_t> validity(bitmask_allocation_size_bytes(nrow));
+                    check_cuda(cudaMemcpy(validity.data(), head_col.null_mask(), validity.size(), cudaMemcpyDeviceToHost),
+                               "gpu_head posixct null_mask memcpy");
+                    for (int j = 0; j < nrow; ++j) {
+                        if (!(validity[j / 8] & (1 << (j % 8)))) {
+                            rv[j] = NA_REAL;
+                        }
+                    }
+                }
                 rv.attr("class") = CharacterVector::create("POSIXct", "POSIXt");
                 rv.attr("tzone") = "UTC";
                 result[i] = rv;

@@ -344,7 +344,8 @@ vec_restore.tbl_gpu <- function(x, to, ...) {
   schema <- list(
     names = schema$names,
     types = schema$types,
-    factor_levels = schema$factor_levels
+    factor_levels = schema$factor_levels,
+    tz = schema$tz
   )
   src <- x[[1L]]
   row <- x[[2L]]

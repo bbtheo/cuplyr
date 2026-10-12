@@ -32,6 +32,8 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
   # Calculate column name width for alignment
   max_name_width <- max(nchar(col_names), 1)
 
+  zones <- tz_by_position(x$schema)
+
   # Print each column
   for (i in seq_along(col_names)) {
     col_name <- col_names[i]
@@ -43,10 +45,11 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
 
     # Get preview values
     if (!is.null(preview)) {
-      vals <- preview[[i]]
+      is_time <- inherits(preview[[i]], c("POSIXct", "Date"))
+      vals <- preview_values(preview[[i]], zones[[i]])
       if (length(vals) > 0) {
         # Truncate strings for display
-        if (is.character(vals)) {
+        if (is.character(vals) && !is_time) {
           vals <- ifelse(nchar(vals) > 20, paste0(substr(vals, 1, 17), "..."), vals)
           vals <- paste0("\"", vals, "\"")
         }

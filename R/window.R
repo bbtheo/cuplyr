@@ -447,10 +447,23 @@ decompose_window_group <- function(exprs, schema, win_n = 0L, winarg_n = 0L) {
       character()
     }
 
-    current_schema <- list(
-      names = c(current_schema$names, pre_names, spec_names),
-      types = c(current_schema$types, pre_types, spec_types)
-    )
+    # F32: the new columns' POSIXct zones. A pre-step has its expression's;
+    # a window op over a POSIXct column (lag(), first(), cummax(), ...) keeps
+    # that column's zone.
+    pre_tz <- vapply(unname(state$pre), function(p) {
+      ir_infer_tz(p$ir, current_schema)
+    }, character(1))
+    with_pre <- append_schema_cols(current_schema, pre_names, pre_types, pre_tz)
+    spec_tz <- vapply(unname(state$specs), function(s) {
+      if (identical(unname(s$output_type), "TIMESTAMP_MICROSECONDS") && !is.na(s$value_col)) {
+        tz_localize(schema_tz_of(with_pre, s$value_col))
+      } else {
+        "UTC"
+      }
+    }, character(1))
+    with_spec <- append_schema_cols(with_pre, spec_names, spec_types, spec_tz)
+    current_schema <- list(names = with_spec$names, types = with_spec$types,
+                           tz = with_spec$tz)
   }
 
   list(post = pending, stages = stages, schema = current_schema, win_n = win_n, winarg_n = winarg_n)
@@ -532,7 +545,10 @@ plan_window_stages <- function(exprs, schema, group_cols = character()) {
       # appending a duplicate -- shared with mutate()'s own per-dot schema
       # bookkeeping so a later batch sees exactly the schema mutate() itself
       # would produce.
-      running_schema <- update_schema_for_expr(running_schema, list(output_col = nm, output_type = out_type))
+      running_schema <- update_schema_for_expr(
+        running_schema,
+        list(output_col = nm, output_type = out_type, ir = decomposed$post[[k]])
+      )
     }
   }
 

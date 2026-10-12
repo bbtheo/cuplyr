@@ -49,9 +49,7 @@ infer_schema_full <- function(node) {
   }
 
   input_schema <- infer_schema_full(node$input)
-  new_schema <- infer_schema(node)
-  new_schema$factor_levels <- propagate_factor_levels(node, input_schema, new_schema$names)
-  new_schema
+  propagate_schema_meta(node, input_schema, infer_schema(node))
 }
 
 #' Get the schema a new op should be built against
@@ -471,8 +469,7 @@ push_op <- function(.data, node) {
     abort_duplicate_names(rlang::caller_env())
   }
 
-  new_schema <- infer_schema(node)
-  new_schema$factor_levels <- propagate_factor_levels(node, input_schema, new_schema$names)
+  new_schema <- propagate_schema_meta(node, input_schema, infer_schema(node))
 
   new_groups <- propagate_groups(node, .subset2(.data, "groups"), new_schema)
   check_dup_names_ungrouped(new_schema$names, new_groups)
