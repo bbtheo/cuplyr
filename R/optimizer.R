@@ -228,6 +228,17 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
         } else {
           required_cols
         }
+        # Nothing above reads a column (a constant `mutate(b = 1)` under a
+        # select): a zero-column table has no row count to broadcast over, so
+        # keep one predicate column (same guard as the "source" case).
+        if (length(keep) == 0L) {
+          keep <- if (input_chain_complete(ast$input)) {
+            intersect(infer_schema(ast$input)$names, pred_cols)[1]
+          } else {
+            pred_cols[1]
+          }
+          if (is.na(keep)) keep <- pred_cols[1]
+        }
         ast_select(ast, keep)
       } else {
         ast
