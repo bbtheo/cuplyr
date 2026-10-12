@@ -524,6 +524,12 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
         return cudf::data_type{cudf::type_id::TIMESTAMP_DAYS};
     }
 
+    // F41: the casts have fixed output types. Falling through to the FLOAT64
+    // default made build_ast() retype a sibling timestamp operand to FLOAT64
+    // and trip cudf's "non-matching operand types".
+    if (op == "as_date") return cudf::data_type{cudf::type_id::TIMESTAMP_DAYS};
+    if (op == "as_posixct") return cudf::data_type{cudf::type_id::TIMESTAMP_MICROSECONDS};
+
     // %in%'s first argument type, or any other unrecognized op: safe FLOAT64
     // default (matches ir_infer_type()'s bare-NA-in-isolation fallback).
     return cudf::data_type{cudf::type_id::FLOAT64};
@@ -1467,6 +1473,21 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
                     if (Rcpp::LogicalVector::is_na(v[i])) set_has_na = true;
                 }
                 haystack = logical_to_gpu(v);
+                break;
+            }
+            // F41: a Date / POSIXct set (R/ir.R only lets one through when
+            // its type is x's own), uploaded exactly like a column so equal
+            // source values map to equal days / microseconds.
+            case cudf::type_id::TIMESTAMP_DAYS:
+            case cudf::type_id::TIMESTAMP_MICROSECONDS: {
+                Rcpp::NumericVector v(set_value);
+                for (R_xlen_t i = 0; i < v.size(); ++i) {
+                    if (std::isnan(v[i])) set_has_na = true;
+                }
+                bool saw_fraction = false;
+                haystack = set_dtype.id() == cudf::type_id::TIMESTAMP_DAYS
+                    ? date_to_gpu(v, saw_fraction)
+                    : posixct_to_gpu(v);
                 break;
             }
             default:

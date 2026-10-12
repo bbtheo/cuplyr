@@ -415,7 +415,7 @@ test_that("every registry op with a POSIXct result has a zone rule", {
                  types = c("TIMESTAMP_MICROSECONDS", "TIMESTAMP_MICROSECONDS", "BOOL8"),
                  tz = c(l = "", n = "America/New_York"))
   x_typed <- c("na_if", "replace_when", "lag", "lead", "first", "last", "nth",
-               "min", "max", "roll_min", "roll_max")
+               "min", "max", "mean", "median", "roll_min", "roll_max")
   common <- c("if_else", "case_when", "coalesce")
   for (op in names(ir_call_registry)) {
     for (k in 1:3) {

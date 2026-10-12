@@ -263,6 +263,12 @@ lower_summarise <- function(ast, source_ptr) {
             if (identical(fn, "min")) "Inf" else "-Inf", call. = FALSE)
   }
 
+  # F41: a Date mean()/median() with a fractional result was floored.
+  frac <- attr(result, "ts_fraction")
+  if (any(frac)) {
+    warn_fractional_dates(vapply(ast$aggregations[which(frac)], `[[`, character(1), "output_col"))
+  }
+
   # F34: an integer/logical sum() that left R's integer range came back as
   # FLOAT64 (dplyr returns a double there). A lazy plan declared INT32
   # statically, so it can't absorb that: fail loudly rather than drift.
@@ -892,6 +898,13 @@ lower_window <- function(ast, source_ptr) {
   }
   if (isTRUE(attr(result, "cumsum_overflow"))) {
     warning("integer overflow in 'cumsum'; use 'cumsum(as.numeric(.))'", call. = FALSE)
+  }
+  # F41: a Date mean()/median() with a fractional result was floored. The spec
+  # is named for the user's output column when it is one (`label`, set by
+  # plan_mutate_window_batches()), else by its window temp column.
+  frac <- attr(result, "ts_fraction")
+  if (any(frac)) {
+    warn_fractional_dates(vapply(specs[which(frac)], function(s) s$label %||% s$output_col, character(1)))
   }
   result
 }

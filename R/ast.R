@@ -513,10 +513,12 @@ make_aggregation <- function(output_col, input_col, fn, input_type = NULL, na_rm
     # reduces in INT64 and narrows to INT32; the type is FLOAT64 instead when
     # a sum leaves R's integer range (see ast_summarise(on_sum_overflow=)).
     "sum" = if (!is.null(input_type) && unname(input_type) %in% c("INT32", "BOOL8")) "INT32" else "FLOAT64",
-    "mean" = "FLOAT64",
+    # F41: mean()/median() of a Date/POSIXct is that timestamp type
+    # (gpu_summarise() converts back from the FLOAT64 aggregate).
+    "mean" = ts_mean_type(input_type),
     "min" = input_type %||% "FLOAT64",
     "max" = input_type %||% "FLOAT64",
-    "median" = "FLOAT64",
+    "median" = ts_mean_type(input_type),
     "quantile" = "FLOAT64",
     "n_distinct" = "INT32",
     "first" = input_type %||% "FLOAT64",

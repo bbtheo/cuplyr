@@ -2,6 +2,7 @@
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
 #include "int_sum.hpp"
+#include "ts_agg.hpp"
 
 #include <cudf/aggregation.hpp>
 #include <cudf/binaryop.hpp>
@@ -442,11 +443,15 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     // F34: per-aggregation "an integer/logical sum() left R's integer range
     // and was returned as FLOAT64" report (see narrow_int_sum()).
     LogicalVector sum_overflow(num_aggs, false);
+    // F41: per-aggregation "a Date mean()/median() had a fractional result and
+    // was floored" report (see ts_agg.hpp); the caller warns naming the column.
+    LogicalVector ts_fraction(num_aggs, false);
     auto finish = [&](std::unique_ptr<cudf::table> result) {
         SEXP out = make_gpu_table_xptr(std::move(result));
         Rcpp::Shield<SEXP> keep(out);
         Rf_setAttrib(out, Rf_install("identity_used"), identity_used);
         Rf_setAttrib(out, Rf_install("sum_overflow"), sum_overflow);
+        Rf_setAttrib(out, Rf_install("ts_fraction"), ts_fraction);
         return out;
     };
     // Applied to each aggregation's final column, whichever path made it.
@@ -474,9 +479,20 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     // input is cast to INT32 up front so it takes the INT32 path (empty-group
     // identity, double promotion, warning) unchanged.
     std::vector<std::unique_ptr<cudf::column>> bool_minmax_cast(num_aggs);
+    // F41: mean()/median() of a Date/POSIXct aggregate its FLOAT64 days /
+    // microseconds (ts_agg.hpp); ts_finish() converts the result back.
+    std::vector<std::unique_ptr<cudf::column>> ts_float_cast(num_aggs);
+    std::vector<cudf::type_id> ts_target(num_aggs, cudf::type_id::EMPTY);
     auto agg_col = [&](int i) -> cudf::column_view {
+        if (ts_float_cast[i]) return ts_float_cast[i]->view();
         return bool_minmax_cast[i] ? bool_minmax_cast[i]->view()
                                    : view.column(agg_col_indices[i]);
+    };
+    auto ts_finish = [&](int i, std::unique_ptr<cudf::column>& col) {
+        if (ts_target[i] == cudf::type_id::EMPTY) return;
+        bool frac = false;
+        col = float64_to_ts(std::move(col), ts_target[i], frac);
+        ts_fraction[i] = frac;
     };
     for (int i = 0; i < num_aggs; ++i) {
         std::string t = Rcpp::as<std::string>(agg_types[i]);
@@ -484,6 +500,10 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
             view.column(agg_col_indices[i]).type().id() == cudf::type_id::BOOL8) {
             bool_minmax_cast[i] = cudf::cast(view.column(agg_col_indices[i]),
                                              cudf::data_type{cudf::type_id::INT32});
+        }
+        ts_target[i] = ts_agg_target(t, view.column(agg_col_indices[i]).type().id());
+        if (ts_target[i] != cudf::type_id::EMPTY) {
+            ts_float_cast[i] = ts_to_float64(view.column(agg_col_indices[i]));
         }
     }
 
@@ -500,6 +520,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                 static_cast<bool>(identity[i]), used));
             identity_used[i] = used;
             narrow_sum(i, result_columns.back());
+            ts_finish(i, result_columns.back());
         }
         return finish(std::make_unique<cudf::table>(std::move(result_columns)));
     }
@@ -695,6 +716,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                 }
 
                 narrow_sum(i, agg_result);
+                ts_finish(i, agg_result);
                 result_columns.push_back(std::move(agg_result));
             }
         }
@@ -914,6 +936,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     for (int i = 0; i < num_aggs; ++i) {
         result_columns.push_back(std::move(result_aggs[main_request_idx[i]].results[0]));
         narrow_sum(i, result_columns.back());
+        ts_finish(i, result_columns.back());
     }
 
     auto result = std::make_unique<cudf::table>(std::move(result_columns));

@@ -645,6 +645,20 @@ plan_mutate_window_batches <- function(exprs, schema) {
       batch_schema <- update_schema_for_expr(batch_schema, step)
     }
 
+    # F41: a window spec that IS a dot's whole value carries the dot's name, so
+    # a fractional Date warning can name the output column.
+    for (k in seq_along(batch_idx)) {
+      post <- decomposed$post[[k]]
+      if (!identical(post$kind, "col")) next
+      for (si in seq_along(decomposed$stages)) {
+        for (pi in seq_along(decomposed$stages[[si]]$specs)) {
+          if (identical(decomposed$stages[[si]]$specs[[pi]]$output_col, post$name)) {
+            decomposed$stages[[si]]$specs[[pi]]$label <- names(exprs)[batch_idx[k]]
+          }
+        }
+      }
+    }
+
     batch_plans[[bi]] <- list(stages = decomposed$stages, expressions = batch_expressions)
     schema_cursor <- batch_schema
   }
@@ -780,7 +794,9 @@ mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_qu
 # while nothing in the call sees the fraction, so a later dot that may read
 # the column (expr_may_read_cols(); a bare copy `b = dd` copies the floored
 # column and isn't a reader, its output is floored too) sends the call to
-# the CPU, where dplyr computes it from the real value. Any expansion of a
+# the CPU, where dplyr computes it from the real value. The same goes for the
+# output of a whole-value mean()/median() of a Date/POSIXct (rounded to the
+# column type on the GPU, dplyr's is a double). Any expansion of a
 # later user dot's across()/if_any()/if_all() counts as a reader (its `.cols`
 # was resolved before this call's columns existed, so it can't be checked
 # by name); expansions of the across() that floored the value don't. A
@@ -1004,11 +1020,17 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     expressions <- c(expressions, list(step))
     dropped <- setdiff(dropped, new_name)
     copied_vec <- !is.na(copied) && frac_vec[copied]
+    # F41: a native mean()/median() of a Date/POSIXct is rounded to the column
+    # type (a fractional Date mean is floored, lower_window() warns), where
+    # dplyr's value is a double. Same reader rule as a floored constant; the
+    # warning comes from the window lowering, so it isn't in `fractional`.
+    ts_mean <- identical(ir$kind, "call") && ir$op %in% c("mean", "median") &&
+      unname(step$output_type) %in% c("TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS")
     forget_frac(new_name)
-    if (!is.null(floored) || floored_vec || !is.na(copied)) {
+    if (!is.null(floored) || floored_vec || ts_mean || !is.na(copied)) {
       frac <- c(frac, new_name)
       frac_origin <- c(frac_origin, origin)
-      frac_vec <- c(frac_vec, floored_vec || copied_vec)
+      frac_vec <- c(frac_vec, floored_vec || ts_mean || copied_vec)
     }
 
     # Update the running schema so subsequent dots see this dot's output.
@@ -1487,7 +1509,10 @@ transmute.tbl_gpu <- function(.data, ...) {
                                     vector_literals = length(.data$groups) == 0,
                                     ungrouped = length(.data$groups) == 0,
                                     evaluated = evaluated, provenance = provenance)
-  if (is.null(expressions)) {
+  # A window call (mean()/cumsum()/lag()/..., also a timestamp mean()/median())
+  # needs the staged plan of mutate_window(), which transmute() doesn't use:
+  # without this the call died at lowering ("window op reached lowering").
+  if (is.null(expressions) || isTRUE(attr(expressions, "has_window"))) {
     return(gpu_fallback("transmute", fallback_data, function(tbl) {
       dots_cpu <- inline_evaluated_dots(fallback_dots, evaluated$consts, provenance, nrow(tbl))
       rlang::inject(dplyr::transmute(tbl, !!!dots_cpu))

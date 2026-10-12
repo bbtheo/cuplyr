@@ -403,6 +403,9 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
     if (identical(fn_name, "sum")) {
       return(ir_parse_sum_call(expr, env, schema))
     }
+    if (fn_name %in% c("mean", "median") && length(expr) == 3L) {
+      return(ir_parse_mean_median_call(expr, env, schema, fn_name))
+    }
 
     # Rolling windows (scratchpad/todo.md "Rolling-window benchmark
     # target"): cuplyr's own roll_*() names, and an alias for
@@ -464,6 +467,22 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
         return(NULL)
       }
       return(ir_parse_lubridate_accessor(expr, env, schema, fn_name))
+    }
+
+    # F41: a column-free as.Date()/as.POSIXct() is a constant, whatever its
+    # arguments (`tz =`, `format =`, a vector set for `%in%`): the registry
+    # entries below only take one parsed argument. An error means "not
+    # constant" (NULL, CPU), as in the generic fold further down.
+    if (fn_name %in% c("as.Date", "as.POSIXct") && length(expr) > 1 &&
+        !expr_has_column_ref(expr, schema)) {
+      folded <- tryCatch(
+        list(value = rlang::eval_tidy(rlang::new_quosure(expr, env))),
+        error = function(e) NULL
+      )
+      if (is.null(folded)) {
+        return(NULL)
+      }
+      return(ir_lit_from_r(folded$value, allow_vector = allow_vector))
     }
 
     canonical <- ir_op_alias(fn_name)
@@ -1967,6 +1986,38 @@ ir_parse_sum_call <- function(expr, env, schema) {
   ir_call("sum", list(x_ir))
 }
 
+# F41: `mean(x, na.rm = <literal>)` / `median(...)` in mutate()/filter(). The
+# window agg path has no na.rm argument, so the two-argument form is only
+# native for a Date/POSIXct x (where "all NA" is NA either way); it is carried
+# as `meta$na_rm` into the window spec. `na.rm = FALSE` is the one-argument
+# call. Any other shape is NULL (CPU), as before.
+ir_parse_mean_median_call <- function(expr, env, schema, fn_name) {
+  args_raw <- as.list(expr)[-1]
+  arg_names <- names(args_raw)
+  if (is.null(arg_names) || !identical(arg_names, c("", "na.rm"))) {
+    return(NULL)
+  }
+  x_ir <- ir_parse_expr(args_raw[[1]], env, schema)
+  if (is.null(x_ir)) {
+    return(NULL)
+  }
+  na_rm_val <- tryCatch(
+    rlang::eval_tidy(rlang::new_quosure(args_raw[[2]], env)),
+    error = function(e) NULL
+  )
+  if (!is.logical(na_rm_val) || length(na_rm_val) != 1L || is.na(na_rm_val)) {
+    return(NULL)
+  }
+  if (!na_rm_val) {
+    return(ir_call(fn_name, list(x_ir)))
+  }
+  x_type <- tryCatch(unname(ir_infer_type(x_ir, schema)), error = function(e) NA_character_)
+  if (!x_type %in% c("TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS")) {
+    return(NULL)
+  }
+  ir_call(fn_name, list(x_ir), meta = list(na_rm = TRUE))
+}
+
 # -----------------------------------------------------------------------------
 # Tree Helpers
 # -----------------------------------------------------------------------------
@@ -2411,7 +2462,7 @@ ir_infer_tz <- function(ir, schema) {
 #'   `x`'s type (`vec_cast(y, x)`), so it has `x`'s zone (absent becomes
 #'   `""`): `na_if()`, `replace_when()` (also `replace_values()`), `lag()`/
 #'   `lead()` (with `default = `), `first()`/`last()`/`nth()`, `min()`/
-#'   `max()`, and cuplyr's `roll_min()`/`roll_max()`.
+#'   `max()`, `mean()`/`median()` (F41), and cuplyr's `roll_min()`/`roll_max()`.
 #' - `common`: vctrs' common type of the value operands in order
 #'   ([tz_fold()]), then absent becomes `""`: `if_else()` (true, false,
 #'   missing), `case_when()` (values in order, then `.default`),
@@ -2427,7 +2478,7 @@ ir_infer_tz <- function(ir, schema) {
 #' @keywords internal
 ir_tz_rules <- list(
   x = c("na_if", "replace_when", "lag", "lead", "first", "last", "nth",
-        "min", "max", "roll_min", "roll_max"),
+        "min", "max", "mean", "median", "roll_min", "roll_max"),
   common = c("if_else", "case_when", "coalesce"),
   as_posixct = "as_posixct"
 )
@@ -2617,17 +2668,19 @@ ir_type_is_timestamp <- function(ir, schema) {
 # below), if_else()/case_when()/coalesce() (ir_unify_types()), na_if()/
 # replace_when() (ir_check_cast_to_x()), as.Date()/as.POSIXct() (their own
 # type fns), and POSIXct-valued ops (ir_check_tz_rules()).
-# Not listed, so CPU: `%in%` (the `in` handler has no timestamp set type),
-# `*`, `/`, `^`, `%%`, `%/%`, `&`, `|`, `!`, xor(), the math functions
+# `%in%` is listed but only native for a timestamp x against a set literal of
+# the same timestamp type (ir_check_ts_operands()); `match()` compares the raw
+# numbers, so any other mix stays on the CPU.
+# Not listed, so CPU: `*`, `/`, `^`, `%%`, `%/%`, `&`, `|`, `!`, xor(), the math functions
 # (round() keeps a Date in R, floor()/abs()/sqrt()/... error), cumulative
-# functions (R errors except for cummean()), sum/mean/median/sd/var (no cudf
-# reduction over a timestamp; mean/median give a Date in R), near(), the
+# functions (R errors except for cummean()), sum/sd/var (no cudf
+# reduction over a timestamp), near(), the
 # string functions (R formats the Date first), roll_mean/sum/sd/median.
 ir_ts_native_ops <- c(
-  "+", "-", "date_add_days", "date_sub_days",
+  "+", "-", "date_add_days", "date_sub_days", "%in%",
   "==", "!=", "<", "<=", ">", ">=",
   "is.na", "if_else", "case_when", "coalesce", "na_if", "replace_when",
-  "lag", "lead", "first", "last", "nth", "min", "max", "n_distinct",
+  "lag", "lead", "first", "last", "nth", "min", "max", "mean", "median", "n_distinct",
   "row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist",
   "consecutive_id", "roll_min", "roll_max",
   "as.Date", "as.POSIXct", "as_date", "as_posixct",
@@ -2648,11 +2701,25 @@ ir_ts_native_ops <- c(
 # (between() expands to `>=` and `<=`), and nesting at any depth.
 # @keywords internal
 ir_check_ts_operands <- function(ir, arg_types) {
+  # F41: a timestamp mean()/median() is only native as a whole value (the
+  # aggregate is rounded/floored to the column type, which dplyr's double
+  # isn't). Used inside any other expression (`t >= mean(t)`, `mean(d) + 1L`)
+  # the result must stay unrounded: CPU.
+  for (i in seq_along(ir$args)) {
+    a <- ir$args[[i]]
+    if (identical(a$kind, "call") && a$op %in% c("mean", "median") &&
+        unname(arg_types[i]) %in% cuplyr_timestamp_types) {
+      stop_timestamp_needs_cpu(a$op, "() of a timestamp inside `", ir$op, "()`: not on the GPU.")
+    }
+  }
   is_ts <- arg_types %in% cuplyr_timestamp_types
   if (!any(is_ts)) {
     return(invisible())
   }
   op <- ir$op
+  if (op %in% c("mean", "median") && !unname(arg_types[1]) %in% c("TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS")) {
+    stop_timestamp_needs_cpu(op, "() of a ", unname(arg_types[1]), ": not on the GPU.")
+  }
   if (!op %in% ir_ts_native_ops) {
     stop_timestamp_needs_cpu(op, "() of a timestamp: not on the GPU.")
   }
@@ -2667,6 +2734,17 @@ ir_check_ts_operands <- function(ir, arg_types) {
     }
     if (any(vapply(ir$args, function(a) identical(a$kind, "lit") && isTRUE(a$na), logical(1)))) {
       stop_timestamp_needs_cpu("a timestamp shifted by NA: not on the GPU.")
+    }
+  }
+  if (identical(op, "%in%")) {
+    # F41: a timestamp x against a set literal of the same timestamp type (a
+    # POSIXct set compares instants whatever its tzone). Anything else (mixed
+    # Date/POSIXct, a numeric or string set, a timestamp set against another
+    # x) is match() on raw numbers or strings: CPU. A fractional Date set is
+    # caught by ir_check_ts_lit().
+    if (length(arg_types) != 2L || length(unique(unname(arg_types))) != 1L ||
+        !identical(ir$args[[2]]$kind, "lit")) {
+      stop_timestamp_needs_cpu("%in% of a timestamp and a different type: not on the GPU.")
     }
   }
   if (op %in% c("==", "!=", "<", "<=", ">", ">=")) {
@@ -2726,6 +2804,16 @@ type_bool8 <- function(arg_types) "BOOL8"
 type_float64 <- function(arg_types) "FLOAT64"
 type_int32 <- function(arg_types) "INT32"
 type_arg1 <- function(arg_types) arg_types[1]
+# F41: mean()/median() of a Date/POSIXct is that timestamp type (computed on
+# the integer rep, converted back); every other input gives a double.
+type_mean_median <- function(arg_types) ts_mean_type(arg_types[1])
+ts_mean_type <- function(input_type) {
+  input_type <- unname(input_type)
+  if (length(input_type) == 1L && input_type %in% c("TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS")) {
+    return(input_type)
+  }
+  "FLOAT64"
+}
 
 # The 5 cuDF timestamp granularities (Phase 11 L3) -- shared by
 # `check_filter_comparison_types()` (R/filter.R), `resolve_common_col_type()`
@@ -3928,7 +4016,7 @@ ir_call_registry <- list(
   # table doesn't cover a case at all (sum(): type_window_sum reimplements
   # its exact switch branch, since arg_types here come from a window call's
   # own arg rather than an aggregation struct's `input_type` field).
-  "mean" = list(arity = 1L, parse = NULL, type = type_float64,
+  "mean" = list(arity = 1L, parse = NULL, type = type_mean_median,
                  lower = NULL, window = list(kind = "agg")),
   "sum" = list(arity = 1L, parse = NULL, type = type_window_int_sum,
                 lower = NULL, window = list(kind = "agg")),
@@ -3958,7 +4046,7 @@ ir_call_registry <- list(
   # (null_policy::INCLUDE, get_groupby_agg()'s "n_distinct" branch).
   # quantile()/any()/all() are NOT added here -- see is_agg_fn()'s own
   # docs (src/ops_window.cpp) for why.
-  "median" = list(arity = 1L, parse = NULL, type = type_float64,
+  "median" = list(arity = 1L, parse = NULL, type = type_mean_median,
                    lower = NULL, window = list(kind = "agg")),
   "n_distinct" = list(arity = 1L, parse = NULL, type = type_int32,
                        lower = NULL, window = list(kind = "agg")),

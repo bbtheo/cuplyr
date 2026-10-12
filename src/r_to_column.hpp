@@ -27,6 +27,11 @@ std::unique_ptr<cudf::column> character_to_gpu(Rcpp::CharacterVector x);
 // Create GPU column from R logical vector (BOOL8, NA -> null)
 std::unique_ptr<cudf::column> logical_to_gpu(Rcpp::LogicalVector x);
 
+// Create GPU column from R Date (TIMESTAMP_DAYS, floored; `saw_fraction` set
+// if any value was fractional) / POSIXct (TIMESTAMP_MICROSECONDS, rounded) vector
+std::unique_ptr<cudf::column> date_to_gpu(Rcpp::NumericVector x, bool& saw_fraction);
+std::unique_ptr<cudf::column> posixct_to_gpu(Rcpp::NumericVector x);
+
 } // namespace cuplyr
 
 #endif // CUPLYR_R_TO_COLUMN_HPP

@@ -772,11 +772,13 @@ summarise_dots_parseable <- function(dots, schema) {
     }
 
     arg_expr <- decomposed$arg
-    # F37: of these, only min/max/first/last/nth/n_distinct take a timestamp
-    # on the GPU (the same set as ir_ts_native_ops). cudf has no mean/median/
-    # sd/var/sum/quantile over one, and dplyr gives a Date for mean/median and
-    # an error for sum/quantile/any/all: CPU, bare or computed.
-    ts_agg <- !decomposed$fn_name %in% c("min", "max", "first", "last", "nth", "n_distinct")
+    # F37/F41: of these, only min/max/first/last/nth/n_distinct and
+    # mean/median take a timestamp on the GPU (the same set as
+    # ir_ts_native_ops; mean/median compute on the integer rep and convert
+    # back, ts_agg.hpp). cudf has no sd/var/sum/quantile over one, and dplyr
+    # gives an error for sum/quantile/any/all: CPU, bare or computed.
+    ts_agg <- !decomposed$fn_name %in% c("min", "max", "first", "last", "nth", "n_distinct",
+                                         "mean", "median")
     if (ts_agg && is.symbol(arg_expr) && as.character(arg_expr) %in% schema$names &&
         unname(schema$types[match(as.character(arg_expr), schema$names)]) %in% cuplyr_timestamp_types) {
       return(FALSE)

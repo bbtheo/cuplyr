@@ -89,6 +89,7 @@
 #include "cuda_utils.hpp"
 #include "expr_eval.hpp"  // build_scalar(), expr_type_from_str()
 #include "int_sum.hpp"   // narrow_int_sum()
+#include "ts_agg.hpp"    // F41: Date/POSIXct mean()/median()
 
 #include <cudf/aggregation.hpp>
 #include <cudf/binaryop.hpp>
@@ -353,6 +354,9 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
     // double for a top-level sum, not for one a later stage consumes).
     std::vector<bool> sum_overflow(static_cast<size_t>(n_appended), false);
     bool any_sum_overflow = false;
+    // F41: a Date mean()/median() whose fractional result was floored, per spec.
+    std::vector<bool> ts_fraction(static_cast<size_t>(n_appended), false);
+    bool any_ts_fraction = false;
 
     // Constant zero-valued INT32 key column, built lazily (at most once) --
     // only needed when `group_indices` is empty (an ungrouped window node,
@@ -786,6 +790,10 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
 
             std::vector<cudf::groupby::aggregation_request> requests;
             std::vector<AggJob> agg_jobs;
+            // F41: mean()/median() of a Date/POSIXct aggregates the FLOAT64
+            // days / microseconds; converted back after the broadcast.
+            std::vector<std::unique_ptr<cudf::column>> ts_float_keepalive;
+            std::map<int, cudf::type_id> ts_targets;
 
             cudf::groupby::aggregation_request count_req;
             count_req.values = keys_view.column(0);
@@ -840,6 +848,13 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                     }
                     cudf::size_type pos = value_pos.at(sp.value_idx);
                     req.values = work_view.column(pos);
+                    cudf::type_id ts_target =
+                        cuplyr::ts_agg_target(sp.fn, work_view.column(pos).type().id());
+                    if (ts_target != cudf::type_id::EMPTY) {
+                        ts_float_keepalive.push_back(cuplyr::ts_to_float64(work_view.column(pos)));
+                        req.values = ts_float_keepalive.back()->view();
+                        ts_targets[si] = ts_target;
+                    }
                     req.aggregations.push_back(cuplyr::get_groupby_agg(window_agg_cudf_name(sp.fn)));
                 }
 
@@ -891,7 +906,7 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 bool na_propagates = sp.fn == "mean" || sp.fn == "sum" || sp.fn == "min" ||
                                       sp.fn == "max" || sp.fn == "sd" || sp.fn == "var" ||
                                       sp.fn == "median";
-                if (!na_propagates) {
+                if (!na_propagates || (sp.na_rm && ts_targets.count(si))) {
                     continue;
                 }
 
@@ -929,6 +944,17 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 auto null_scalar = cudf::make_empty_scalar_like(spec_results[static_cast<size_t>(si)]->view());
                 spec_results[static_cast<size_t>(si)] = cudf::copy_if_else(
                     *null_scalar, spec_results[static_cast<size_t>(si)]->view(), has_any_null->view());
+            }
+
+            // F41: back to Date / POSIXct (ts_agg.hpp).
+            for (const auto& [si, target] : ts_targets) {
+                bool frac = false;
+                auto& res = spec_results[static_cast<size_t>(si)];
+                res = cuplyr::float64_to_ts(std::move(res), target, frac);
+                if (frac) {
+                    ts_fraction[static_cast<size_t>(specs[static_cast<size_t>(si)].out_pos)] = true;
+                    any_ts_fraction = true;
+                }
             }
         }
 
@@ -1094,6 +1120,10 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
     if (any_sum_overflow) {
         Rcpp::LogicalVector flag(sum_overflow.begin(), sum_overflow.end());
         Rf_setAttrib(out, Rf_install("sum_overflow"), flag);
+    }
+    if (any_ts_fraction) {
+        Rcpp::LogicalVector flag(ts_fraction.begin(), ts_fraction.end());
+        Rf_setAttrib(out, Rf_install("ts_fraction"), flag);
     }
     return out;
 }
