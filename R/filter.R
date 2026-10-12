@@ -395,7 +395,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   needs_expr_fallback <- vapply(seq_along(dots), function(i) {
     (is.null(parsed[[i]]) && dot_references_schema_col(dots[[i]], orig_names)) ||
       (!is.null(parsed[[i]]) && ir_factor_rule(parsed[[i]], schema) != "none") ||
-      (complement && filter_ir_not_logical(parsed[[i]], schema, i %in% window_idx))
+      filter_ir_not_logical(parsed[[i]], schema, i %in% window_idx)
   }, logical(1))
 
   if (any(needs_expr_fallback)) {
@@ -417,12 +417,13 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       }
       # Only a plain logical scalar is a constant predicate. A matrix/array
       # (dplyr's own error or deprecation warning), a vector on a grouped
-      # table (recycled per group), and anything at all under filter_out() are
+      # table (recycled per group), a non-logical constant (dplyr's "must be a
+      # logical vector" error), and anything at all under filter_out() are
       # dplyr's to evaluate.
       value <- res$value
       scalar_lgl <- is.logical(value) && length(value) == 1L && is.null(dim(value))
       if (!is.null(dim(value)) || (length(verb_groups) > 0L && length(value) != 1L) ||
-          (complement && !scalar_lgl)) {
+          (complement && !scalar_lgl) || !is.logical(value)) {
         return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
       }
       standalone[i] <- list(res)
@@ -460,11 +461,11 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       return(filter_window_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
     }
 
-    # filter_out() complements with a cudf NOT, which accepts numeric inputs
-    # where dplyr errors ("`..1` must be a logical vector"). Judge each
-    # window dot by its rewritten predicate's type, before any stage is
-    # pushed, and let dplyr raise its own error on the CPU.
-    if (complement && any(vapply(plan$post, filter_ir_not_logical, logical(1),
+    # A non-logical predicate must raise dplyr's own "`..1` must be a logical
+    # vector" error (filter_out()'s cudf NOT would even accept numerics).
+    # Judge each window dot by its rewritten predicate's type, before any
+    # stage is pushed, and let dplyr raise its error on the CPU.
+    if (any(vapply(plan$post, filter_ir_not_logical, logical(1),
                                  schema = plan$schema, is_window = FALSE))) {
       return(filter_window_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
     }

@@ -90,9 +90,17 @@ wrap_gpu_call <- function(op_name, expr) {
         stop(e)
       }
       msg <- conditionMessage(e)
+      # Only memory errors get the device-memory hint; anything else (a cudf
+      # logic_error, a type mismatch) would be misdiagnosed by it.
+      is_oom <- inherits(e, c("std::bad_alloc", "rmm::bad_alloc", "rmm::out_of_memory")) ||
+        grepl("out[_ ]of[_ ]memory|bad_alloc|cudaErrorMemoryAllocation", msg)
+      hint <- if (is_oom) {
+        " This is often caused by insufficient device memory. Try filtering inputs, calling gpu_gc(), or reducing the workload."
+      } else {
+        ""
+      }
       stop(
-        "GPU operation '", op_name, "' failed. This is often caused by insufficient device memory. ",
-        "Try filtering inputs, calling gpu_gc(), or reducing the workload.\n",
+        "GPU operation '", op_name, "' failed.", hint, "\n",
         "Original error: ", msg,
         call. = FALSE
       )
