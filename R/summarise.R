@@ -764,6 +764,15 @@ summarise_dots_parseable <- function(dots, schema) {
     }
 
     arg_expr <- decomposed$arg
+    # F37: of these, only min/max/first/last/nth/n_distinct take a timestamp
+    # on the GPU (the same set as ir_ts_native_ops). cudf has no mean/median/
+    # sd/var/sum/quantile over one, and dplyr gives a Date for mean/median and
+    # an error for sum/quantile/any/all: CPU, bare or computed.
+    ts_agg <- !decomposed$fn_name %in% c("min", "max", "first", "last", "nth", "n_distinct")
+    if (ts_agg && is.symbol(arg_expr) && as.character(arg_expr) %in% schema$names &&
+        unname(schema$types[match(as.character(arg_expr), schema$names)]) %in% cuplyr_timestamp_types) {
+      return(FALSE)
+    }
     if (is.symbol(arg_expr) && as.character(arg_expr) %in% schema$names) {
       # A bare factor column only aggregates natively under n_distinct();
       # first()/max()/sum()/... need dplyr's factor semantics (CPU)
@@ -783,6 +792,9 @@ summarise_dots_parseable <- function(dots, schema) {
     }
     if (is.null(ir)) {
       return(FALSE)  # sub-expression shape not understood at all
+    }
+    if (ts_agg && ir_type_is_timestamp(ir, schema)) {
+      return(FALSE)
     }
     # F34: dplyr evaluates the argument once per group. A length-1 argument
     # that contains a reducer (`sum(mean(n))`, `sum(n())`) is a reduction of a

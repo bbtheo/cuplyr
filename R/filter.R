@@ -786,23 +786,12 @@ parse_filter_ir <- function(quo, schema) {
 # dot may already parse into a compound `&`/`|` expression under the IR
 # cutover.
 #
-# Phase 11 L3 extends this with a TIMESTAMP_* check: a timestamp column
-# compared against a literal of the SAME granularity is fine (the normal
-# case -- `d < as.Date("2010-01-05")`, `dt >= as.POSIXct(...)`); a
-# timestamp column against a NUMERIC/BOOL8 literal is rejected (mirrors the
-# STRING check's shape/message). A timestamp column against a literal of a
-# DIFFERENT timestamp granularity (e.g. a Date column vs. an `as.POSIXct()`
-# literal) is ALSO rejected here, deliberately -- not because cuDF can't
-# compare them (a column-vs-column mismatch already promotes correctly via
-# `cudf::cast()`, see `src/expr_eval.hpp`'s `build_ast()`), but because a
-# MISMATCHED LITERAL is rebuilt directly at the wider hint type via
-# `build_scalar()`, which has no way to rescale an already-evaluated R
-# value between conventions (day-count vs. fractional seconds) -- silently
-# reinterpreting the raw number would corrupt the comparison. This is a
-# real, narrower boundary than dplyr's own (which auto-promotes Date to
-# POSIXct for such a comparison) -- pinned honestly with a message telling
-# the user to align types first (`as.POSIXct(date_col) >= posixct_lit`),
-# rather than risk silent wrongness.
+# Phase 11 L3 extended this to a timestamp column against a number or a
+# timestamp literal of another granularity. F37 removed that: such a
+# comparison never reaches here, because ir_check_ts_operands() (R/ir.R)
+# sends every comparison of a timestamp with anything but the same timestamp
+# type to the CPU from the type inference ir_parse_quo() runs, so filter()
+# gives dplyr's result (`d < 5`, `d == "2024-01-01"`) instead of an error.
 #
 # @param ir An IR node
 # @param schema The current schema (names/types)
@@ -814,8 +803,6 @@ check_filter_comparison_types <- function(ir, schema) {
   }
 
   cmp_ops <- c("==", "!=", "<", "<=", ">", ">=")
-  timestamp_types <- c("TIMESTAMP_DAYS", "TIMESTAMP_SECONDS", "TIMESTAMP_MILLISECONDS",
-                        "TIMESTAMP_MICROSECONDS", "TIMESTAMP_NANOSECONDS")
   if (ir$op %in% cmp_ops && length(ir$args) == 2) {
     check_pair <- function(col_node, lit_node) {
       if (!identical(col_node$kind, "col") || !identical(lit_node$kind, "lit")) {
@@ -839,33 +826,12 @@ check_filter_comparison_types <- function(ir, schema) {
         return(invisible(NULL))
       }
 
-      lit_type <- lit_node$type
-
-      if (identical(lit_type, "STRING")) {
+      if (identical(lit_node$type, "STRING")) {
         if (identical(col_type, "STRING")) {
           return(invisible(NULL))
         }
         stop("Cannot compare column '", col_node$name, "' (", col_type,
              ") with a character literal.", call. = FALSE)
-      }
-
-      col_is_ts <- col_type %in% timestamp_types
-      lit_is_ts <- lit_type %in% timestamp_types
-
-      if (col_is_ts && lit_is_ts) {
-        if (identical(col_type, lit_type)) {
-          return(invisible(NULL))
-        }
-        stop("Cannot compare column '", col_node$name, "' (", col_type,
-             ") with a literal of a different timestamp precision (", lit_type,
-             "). Cast one side to match first (e.g. as.Date()/as.POSIXct()).",
-             call. = FALSE)
-      }
-
-      if (col_is_ts || lit_is_ts) {
-        stop("Cannot compare column '", col_node$name, "' (", col_type,
-             ") with a ", if (lit_is_ts) "timestamp" else "numeric",
-             " literal (", lit_type, ").", call. = FALSE)
       }
 
       invisible(NULL)

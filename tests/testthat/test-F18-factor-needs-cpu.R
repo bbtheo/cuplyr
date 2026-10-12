@@ -27,10 +27,11 @@ test_that("type checks raise cuplyr_factor_needs_cpu only for a factor operand",
                "does not support arithmetic on DICTIONARY32 columns",
                class = "cuplyr_factor_needs_cpu")
 
-  # No factor: the same plain errors as before, not the fallback class.
+  # No factor and no timestamp (F37 routes those to the CPU too): the same
+  # plain errors as before, not the fallback class.
   for (thunk in list(
     function() ir_unify_types(c("FLOAT64", "STRING"), "coalesce"),
-    function() ir_unify_types(c("TIMESTAMP_DAYS", "INT32"), "if_else"),
+    function() ir_unify_types(c("BOOL8", "STRING"), "if_else"),
     function() infer_mutate_output_type("+", c("STRING", "INT32"), NULL)
   )) {
     err <- tryCatch(thunk(), error = function(e) e)

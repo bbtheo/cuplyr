@@ -542,12 +542,13 @@ ir_parse_quo <- function(quo, schema) {
     {
       ir <- ir_parse_expr(expr, env, schema, allow_vector = FALSE)
       # Timestamp arithmetic (`t + 3600`) parses fine and only its type check
-      # says "CPU"; verbs infer the type after the parse (outside this
-      # handler), so run it here too, plus the zone rule of every POSIXct
-      # op (F32: an op without one goes to the CPU). Only the timestamp
-      # signal is acted on: a factor signal must still come back as IR for
-      # ir_factor_rule(), and any other type error is left for the verb to
-      # raise.
+      # says "CPU", as does every timestamp argument the GPU can't take
+      # (ir_check_ts_operands(), F37); verbs infer the type after the parse
+      # (outside this handler), so run it here too, plus the zone rule of
+      # every POSIXct op (F32: an op without one goes to the CPU). Only the
+      # timestamp signal is acted on: a factor signal must still come back as
+      # IR for ir_factor_rule(), and any other type error is left for the
+      # verb to raise.
       if (!is.null(ir)) {
         tryCatch({
           ir_infer_type(ir, schema)
@@ -718,11 +719,17 @@ type_replace_when <- function(arg_types) {
 # replace_when()): vctrs casts a Date to local midnight in a POSIXct `x`'s
 # zone and rejects a POSIXct into a Date `x`, neither of which the GPU cast
 # does (it reinterprets the raw ticks), so a Date + POSIXct mix goes to the
-# CPU (F32).
+# CPU (F32). So does any other mix with a timestamp (F37): vctrs rejects a
+# number into a Date `x` (`na_if(d, 19725)`) and a Date into a number `x`,
+# where the GPU would compare the raw values.
 # @keywords internal
 ir_check_cast_to_x <- function(types, op_name) {
   if (all(c("TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS") %in% types)) {
     stop_timestamp_needs_cpu(op_name, "(): can't combine a Date and a POSIXct on the GPU.")
+  }
+  if (any(types %in% cuplyr_timestamp_types) && length(unique(unname(types))) > 1L) {
+    stop_timestamp_needs_cpu(op_name, "(): can't cast between a timestamp and ",
+                             "another type on the GPU.")
   }
   invisible()
 }
@@ -1200,6 +1207,9 @@ ir_parse_shift_call <- function(expr, env, schema, fn_name) {
         return(NULL)  # non-scalar default: not implemented this wave
       }
       default_ir <- ir_lit_from_r(default_val)
+      # `meta` is outside ir_infer_type()'s walk: a fractional Date default
+      # goes to the CPU here (F37, ir_check_ts_lit())
+      ir_check_ts_lit(default_ir)
       # A Date default for a POSIXct `x` (or the reverse): vctrs casts it
       # (local midnight / an error), the GPU would reinterpret its ticks (F32)
       x_type <- unname(ir_infer_type(x_ir, schema))
@@ -2336,6 +2346,7 @@ ir_infer_type <- function(ir, schema) {
     if (is.null(ir$type)) {
       return("BOOL8")
     }
+    ir_check_ts_lit(ir)
     return(ir$type)
   }
 
@@ -2363,6 +2374,10 @@ ir_infer_type <- function(ir, schema) {
   if (any(is_isolated_na) && !all(is_isolated_na)) {
     arg_types[is_isolated_na] <- arg_types[!is_isolated_na][1]
   }
+
+  # F37: a timestamp argument the GPU can't take goes to the CPU, whatever
+  # built the node (see ir_check_ts_operands()).
+  ir_check_ts_operands(ir, arg_types)
 
   entry$type(arg_types)
 }
@@ -2507,6 +2522,201 @@ ir_check_tz_rules <- function(ir, schema) {
 #   C++ side: nothing for ast_op entries; one apply_handler() case for
 #     handler entries.
 
+# F37: the parse hook of "+" and "-" (it only sees parsed args). A Date
+# shifted by a whole number of days becomes a native date_add_days/
+# date_sub_days node; every other timestamp shape that dplyr can compute goes
+# to the CPU (`stop_timestamp_needs_cpu()`): a fractional/NA/double shift,
+# `ts - ts` (a difftime, which surfaces F18's upload error unless the result
+# drops it), and a unary sign (base R errors on a unary minus). Shapes base R
+# rejects (`n - d`, `d + d2`) and non-timestamp calls keep the plain node, so
+# the type check raises its usual error.
+ir_parse_ts_arith <- function(op) {
+  force(op)
+  function(args, schema) {
+    plain <- ir_call(op, args)
+    if (!ir_args_may_be_timestamp(args, schema)) {
+      return(plain)
+    }
+    types <- tryCatch(
+      vapply(args, ir_infer_type, character(1), schema = schema),
+      error = function(e) NULL
+    )
+    if (is.null(types) || !any(types %in% cuplyr_timestamp_types)) {
+      return(plain)
+    }
+    is_ts <- types %in% cuplyr_timestamp_types
+    if (length(args) == 1L) {
+      stop_timestamp_needs_cpu("unary ", op, " on a timestamp")
+    }
+    if (all(is_ts)) {
+      if (op == "-") {
+        stop_timestamp_needs_cpu("`-` of two timestamps is a difftime")
+      }
+      return(plain)
+    }
+    # a bare NA (`d + NA`) adopts the date's type, so the type check would
+    # say "Date + Date"; dplyr gives an NA Date
+    if (any(vapply(args, function(a) identical(a$kind, "lit") && isTRUE(a$na), logical(1)))) {
+      stop_timestamp_needs_cpu("a timestamp shifted by NA")
+    }
+    ts_pos <- which(is_ts)
+    if (op == "-" && ts_pos == 2L) {
+      return(plain)   # number - date: R errors
+    }
+    if (!identical(unname(types[ts_pos]), "TIMESTAMP_DAYS")) {
+      return(plain)   # POSIXct: F32's CPU route
+    }
+    n <- args[[3L - ts_pos]]
+    if (identical(n$kind, "lit")) {
+      v <- n$value
+      if (!(is.numeric(v) && length(v) == 1L && is.finite(v) && v == trunc(v) &&
+            abs(v) <= .Machine$integer.max)) {
+        return(plain)
+      }
+      n <- ir_lit(as.integer(v), "INT32")
+    } else if (!identical(unname(types[3L - ts_pos]), "INT32")) {
+      return(plain)   # a double/logical shift: dplyr may be fractional
+    }
+    ir_call(if (op == "+") "date_add_days" else "date_sub_days",
+            list(args[[ts_pos]], n))
+  }
+}
+
+# Cheap pre-check for ir_parse_ts_arith(): the Date shift can only be built
+# when the schema has a timestamp column or an argument is a timestamp
+# literal. Skips re-inferring whole subtrees for every `x1 + x2 + ...` step.
+# A timestamp buried deeper (`(as.Date(lit) + n) + 1L`) keeps the plain
+# node, which is correct, just not native: every CPU decision of the hook is
+# also made by the type inference (ir_check_ts_operands() for a unary sign
+# and a bare NA, infer_mutate_output_type() for a shift and `ts - ts`).
+# @keywords internal
+ir_args_may_be_timestamp <- function(args, schema) {
+  if (any(unname(schema$types) %in% cuplyr_timestamp_types)) {
+    return(TRUE)
+  }
+  any(vapply(args, function(a) {
+    a$kind %in% c("lit", "vec") && unname(a$type %||% "") %in% cuplyr_timestamp_types
+  }, logical(1)))
+}
+
+# TRUE iff the node's inferred type is a timestamp (Date/POSIXct).
+# @keywords internal
+ir_type_is_timestamp <- function(ir, schema) {
+  type <- tryCatch(ir_infer_type(ir, schema), error = function(e) NA_character_)
+  unname(type) %in% cuplyr_timestamp_types
+}
+
+# F37: the registry ops the GPU computes correctly when an argument is a
+# timestamp (Date/POSIXct). ir_check_ts_operands() sends every other op with a
+# timestamp argument to the CPU, where dplyr gives its result or its error.
+# Before Date shifts were native, a shifted Date never reached these ops
+# (`d + 1` itself went to the CPU); now `d + 1L` is a plain TIMESTAMP_DAYS
+# value like a Date column, so the rule goes by type, never by node kind.
+# Listed ops still check their own argument mixes: `+`/`-` (ir_parse_ts_arith()
+# and infer_mutate_output_type()), the comparisons (same timestamp type only,
+# below), if_else()/case_when()/coalesce() (ir_unify_types()), na_if()/
+# replace_when() (ir_check_cast_to_x()), as.Date()/as.POSIXct() (their own
+# type fns), and POSIXct-valued ops (ir_check_tz_rules()).
+# Not listed, so CPU: `%in%` (the `in` handler has no timestamp set type),
+# `*`, `/`, `^`, `%%`, `%/%`, `&`, `|`, `!`, xor(), the math functions
+# (round() keeps a Date in R, floor()/abs()/sqrt()/... error), cumulative
+# functions (R errors except for cummean()), sum/mean/median/sd/var (no cudf
+# reduction over a timestamp; mean/median give a Date in R), near(), the
+# string functions (R formats the Date first), roll_mean/sum/sd/median.
+ir_ts_native_ops <- c(
+  "+", "-", "date_add_days", "date_sub_days",
+  "==", "!=", "<", "<=", ">", ">=",
+  "is.na", "if_else", "case_when", "coalesce", "na_if", "replace_when",
+  "lag", "lead", "first", "last", "nth", "min", "max", "n_distinct",
+  "row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist",
+  "consecutive_id", "roll_min", "roll_max",
+  "as.Date", "as.POSIXct", "as_date", "as_posixct",
+  "year", "month", "day", "hour", "minute", "second", "quarter", "yday", "wday"
+)
+
+# F37: the timestamp rule of ir_infer_type(), run on every call node `ir`
+# with its argument types (bare NAs already resolved to a sibling's type).
+# These signal `cuplyr_timestamp_needs_cpu`: a timestamp argument of an op
+# outside ir_ts_native_ops; a unary `+`/`-` or a `+`/`-` with a bare NA; a
+# comparison of a timestamp with anything but the same timestamp type (with a
+# number or string the GPU truncates the literal or has no such comparison;
+# with a Date vs a POSIXct R compares the raw numbers and warns), except a
+# numeric NA/NaN literal (`d > NaN` is NA either way, F11); a timestamp in a
+# condition position. Literal values are checked on their own
+# (ir_check_ts_lit()). ir_parse_quo() runs the type inference over the whole
+# tree, so this covers every way a node gets built: the parser, the desugars
+# (between() expands to `>=` and `<=`), and nesting at any depth.
+# @keywords internal
+ir_check_ts_operands <- function(ir, arg_types) {
+  is_ts <- arg_types %in% cuplyr_timestamp_types
+  if (!any(is_ts)) {
+    return(invisible())
+  }
+  op <- ir$op
+  if (!op %in% ir_ts_native_ops) {
+    stop_timestamp_needs_cpu(op, "() of a timestamp: not on the GPU.")
+  }
+  # ir_parse_ts_arith() sends these to the CPU too, but it skips a node whose
+  # timestamp is nested (`-(as.Date(lit) + n)` without a Date column), and
+  # the type fns would keep a unary sign's Date type or call `d + NA` a
+  # "Date + Date". Base R errors on a unary minus, returns the timestamp for
+  # a unary plus, and gives an NA timestamp for a bare-NA shift.
+  if (op %in% c("+", "-")) {
+    if (length(arg_types) == 1L) {
+      stop_timestamp_needs_cpu("unary ", op, " on a timestamp: not on the GPU.")
+    }
+    if (any(vapply(ir$args, function(a) identical(a$kind, "lit") && isTRUE(a$na), logical(1)))) {
+      stop_timestamp_needs_cpu("a timestamp shifted by NA: not on the GPU.")
+    }
+  }
+  if (op %in% c("==", "!=", "<", "<=", ">", ">=")) {
+    missing_num <- vapply(ir$args, function(a) {
+      identical(a$kind, "lit") && is.numeric(a$value) && length(a$value) == 1L && is.na(a$value)
+    }, logical(1))
+    if (length(unique(unname(arg_types[!missing_num]))) > 1L) {
+      stop_timestamp_needs_cpu(
+        "`", op, "` of ", paste(unname(arg_types), collapse = " and "), ": not on the GPU."
+      )
+    }
+  }
+  n <- length(arg_types)
+  cond_idx <- switch(op,
+    if_else = 1L,
+    case_when = if (n >= 3L) seq(1L, n - 1L, by = 2L),
+    replace_when = if (n >= 3L) seq(2L, n - 1L, by = 2L),
+    NULL
+  )
+  if (any(is_ts[cond_idx])) {
+    stop_timestamp_needs_cpu(op, "(): a timestamp condition.")
+  }
+  invisible()
+}
+
+# F37: the literal half of the timestamp rule, run by ir_infer_type() on every
+# literal it reaches (and by ir_parse_shift_call() on a lag()/lead()
+# `default`, which sits in `meta`). A Date literal becomes a TIMESTAMP_DAYS
+# scalar, an int32 count of days (build_scalar() truncates), but an R Date
+# can hold a fraction: `seq(a, b, length.out = k)` breakpoints, midpoints,
+# mean() of Dates. `d >= 19724.5` would become `d >= 19724`, and a fractional
+# value in if_else()/coalesce()/... would be truncated rather than floored
+# like an upload (tbl_gpu()) is. So a Date literal with any non-whole (or
+# out of int32 range) value sends its expression to the CPU, where dplyr
+# compares the real value. NA values are fine (a null scalar). POSIXct
+# literals are left alone: build_scalar() rounds them to microseconds exactly
+# as posixct_to_gpu() rounds the columns they meet.
+# @keywords internal
+ir_check_ts_lit <- function(ir) {
+  if (!identical(unname(ir$type), "TIMESTAMP_DAYS") || is.null(ir$value)) {
+    return(invisible())
+  }
+  v <- unclass(ir$value)
+  v <- v[!is.na(v)]
+  if (!all(is.finite(v) & v == trunc(v) & abs(v) <= .Machine$integer.max)) {
+    stop_timestamp_needs_cpu("a Date value that isn't a whole day: not on the GPU.")
+  }
+  invisible()
+}
+
 # Small type-fn builders shared by several registry entries below.
 type_arith_op <- function(op) {
   force(op)
@@ -2629,11 +2839,12 @@ ir_unify_types <- function(types, op_name) {
 
   # A factor among the values: dplyr may well combine it, the GPU can't. The
   # same for a Date next to a POSIXct (F32): vctrs unifies them to a POSIXct
-  # by casting the Date to local midnight. Every other timestamp mix is a
-  # plain error.
+  # by casting the Date to local midnight. Any other timestamp mix goes to the
+  # CPU too (F37), so the user gets vctrs' own error ("Can't combine <date>
+  # and <double>") rather than ours.
   fail <- if ("DICTIONARY32" %in% uniq) {
     stop_factor_needs_cpu
-  } else if (all(c("TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS") %in% uniq)) {
+  } else if (any(uniq %in% cuplyr_timestamp_types)) {
     stop_timestamp_needs_cpu
   } else {
     function(...) stop(..., call. = FALSE)
@@ -3408,8 +3619,13 @@ ir_parse_lubridate_accessor <- function(expr, env, schema, fn_name) {
 #'
 #' @keywords internal
 ir_call_registry <- list(
-  "+" = list(arity = 2L, parse = NULL, type = type_arith_op("+"), lower = list(ast_op = "ADD")),
-  "-" = list(arity = NA_integer_, parse = NULL, type = type_minus, lower = list(ast_op = "SUB")),
+  "+" = list(arity = 2L, parse = ir_parse_ts_arith("+"), type = type_arith_op("+"), lower = list(ast_op = "ADD")),
+  "-" = list(arity = NA_integer_, parse = ir_parse_ts_arith("-"), type = type_minus, lower = list(ast_op = "SUB")),
+  # F37: Date +/- a whole number of days; only ir_parse_ts_arith() builds them.
+  "date_add_days" = list(arity = 2L, parse = NULL, type = function(arg_types) "TIMESTAMP_DAYS",
+                         lower = list(handler = "date_add_days")),
+  "date_sub_days" = list(arity = 2L, parse = NULL, type = function(arg_types) "TIMESTAMP_DAYS",
+                         lower = list(handler = "date_sub_days")),
   "*" = list(arity = 2L, parse = NULL, type = type_arith_op("*"), lower = list(ast_op = "MUL")),
   "/" = list(arity = 2L, parse = NULL, type = type_float64, lower = list(ast_op = "TRUE_DIV")),
   "^" = list(arity = 2L, parse = NULL, type = type_float64, lower = list(ast_op = "POW")),

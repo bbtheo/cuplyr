@@ -171,19 +171,20 @@ test_that("print() and glimpse() show NA dates and zoned times", {
 
 # ---- round 2 ----------------------------------------------------------------
 
-test_that("only a Date + POSIXct mix signals the timestamp CPU route", {
-  # the F18 contract: other timestamp mixes keep their plain errors
-  err <- tryCatch(ir_unify_types(c("TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS"), "if_else"),
-                  error = function(e) e)
-  expect_s3_class(err, "cuplyr_timestamp_needs_cpu")
-  expect_s3_class(err, "cuplyr_factor_needs_cpu")
-  for (types in list(c("TIMESTAMP_DAYS", "INT32"),
+test_that("a timestamp mix signals the timestamp CPU route; other mixes stay plain errors", {
+  # F37: a timestamp next to any other value type goes to the CPU, so dplyr
+  # combines it (Date + POSIXct) or raises vctrs' own error (Date + number)
+  for (types in list(c("TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS"),
+                     c("TIMESTAMP_DAYS", "INT32"),
                      c("TIMESTAMP_MICROSECONDS", "FLOAT64"),
                      c("TIMESTAMP_MICROSECONDS", "STRING"))) {
     err <- tryCatch(ir_unify_types(types, "coalesce"), error = function(e) e)
-    expect_s3_class(err, "error")
-    expect_false(inherits(err, "cuplyr_factor_needs_cpu"))
+    expect_s3_class(err, "cuplyr_timestamp_needs_cpu")
+    expect_s3_class(err, "cuplyr_factor_needs_cpu")
   }
+  err <- tryCatch(ir_unify_types(c("FLOAT64", "STRING"), "coalesce"), error = function(e) e)
+  expect_s3_class(err, "error")
+  expect_false(inherits(err, "cuplyr_factor_needs_cpu"))
 })
 
 test_that("ir_parse_quo() sends timestamp +/- numeric to the CPU, leaves the rest alone", {
@@ -192,15 +193,15 @@ test_that("ir_parse_quo() sends timestamp +/- numeric to the CPU, leaves the res
                            "TIMESTAMP_DAYS", "DICTIONARY32", "FLOAT64"))
   expect_null(ir_parse_quo(rlang::quo(t + 3600), schema))
   expect_null(ir_parse_quo(rlang::quo(n - t), schema))
-  expect_null(ir_parse_quo(rlang::quo(d + 1), schema))
-  # timestamp - timestamp: the parse stays IR and the verb's type check keeps
-  # its plain error (no CPU round trip that fails on re-upload)
+  # a Date shifted by a whole number of days is native (F37); other shifts
+  # (a fractional literal, a double column) go to the CPU
+  expect_identical(ir_parse_quo(rlang::quo(d + 1), schema)$op, "date_add_days")
+  expect_null(ir_parse_quo(rlang::quo(d + 0.5), schema))
+  expect_null(ir_parse_quo(rlang::quo(d + n), schema))
+  # timestamp - timestamp is a difftime (F37): the CPU computes it, and the
+  # re-upload raises F18's classed error unless the result drops it
   for (q in list(rlang::quo(t - t2), rlang::quo(d - d))) {
-    ir <- ir_parse_quo(q, schema)
-    expect_false(is.null(ir))
-    err <- tryCatch(ir_infer_type(ir, schema), error = function(e) e)
-    expect_match(conditionMessage(err), "arithmetic on TIMESTAMP")
-    expect_false(inherits(err, "cuplyr_factor_needs_cpu"))
+    expect_null(ir_parse_quo(q, schema))
   }
   # a factor expression is still returned as IR for ir_factor_rule()
   ir <- ir_parse_quo(rlang::quo(is.na(f - 1)), schema)

@@ -75,51 +75,38 @@ test_that("filter() combining a Date comparison with a plain numeric predicate s
   })
 })
 
-test_that("filter() Date column vs. numeric literal errors with a clear message", {
+# F37: these three used to pin a clear cuplyr error (a timestamp column vs. a
+# number, or vs. a timestamp literal of another precision). Every comparison
+# of a timestamp with anything but the same timestamp type now goes to the
+# CPU (ir_check_ts_operands(), R/ir.R), so filter() gives dplyr's result.
+
+test_that("filter() Date column vs. numeric literal matches dplyr (CPU route)", {
   skip_if_no_gpu()
 
   df <- data.frame(d = as.Date(c("2010-01-01", "2010-01-10")))
-  g <- tbl_gpu(df)
-
-  expect_error(
-    dplyr::filter(g, d < 5),
-    "Cannot compare column 'd' \\(TIMESTAMP_DAYS\\) with a numeric literal"
-  )
+  expect_same_as_dplyr(df, function(tbl) dplyr::filter(tbl, d < 5))
+  expect_same_as_dplyr(df, function(tbl) dplyr::filter(tbl, d > 14610.5))
 })
 
-test_that("filter() POSIXct column vs. logical literal errors with a clear message", {
+test_that("filter() POSIXct column vs. logical literal matches dplyr (CPU route)", {
   skip_if_no_gpu()
 
-  df <- data.frame(dt = as.POSIXct("2020-01-01", tz = "UTC"))
-  g <- tbl_gpu(df)
-
-  expect_error(
-    dplyr::filter(g, dt == TRUE),
-    "Cannot compare column 'dt' \\(TIMESTAMP_MICROSECONDS\\) with a numeric literal"
-  )
+  df <- data.frame(dt = as.POSIXct(c("2020-01-01", "1970-01-01 00:00:01"), tz = "UTC"))
+  expect_same_as_dplyr(df, function(tbl) dplyr::filter(tbl, dt == TRUE))
 })
 
-test_that("filter() Date column vs. a different-granularity timestamp literal errors clearly (documented boundary)", {
+test_that("filter() Date column vs. a different-granularity timestamp literal matches dplyr (CPU route)", {
   skip_if_no_gpu()
 
-  # A column-vs-column mismatch already promotes correctly via cudf::cast()
-  # (see the bind_rows()/union() timestamp-mix tests) -- this is narrower:
-  # a MISMATCHED LITERAL is rebuilt directly via build_scalar() at the
-  # column's own hint type, which has no way to rescale an already-evaluated
-  # R value between day-count and fractional-seconds conventions. Rejected
-  # explicitly rather than risking silent wrongness (see
-  # check_filter_comparison_types()'s own doc comment, R/filter.R).
-  # NOTE: the literal must be a single-arg `as.POSIXct(x)` call -- a 2-arg
-  # call (e.g. adding `tz=`) doesn't match the native registry entry's
-  # `arity = 1L` at all, so it takes the (also-safe) L1 CPU-fallback path
-  # instead of ever reaching this native rejection (see the next test).
+  # The GPU would rebuild the POSIXct literal at the Date column's type with
+  # no rescaling; dplyr compares the raw numbers (with an "Incompatible
+  # methods" warning), which the CPU route reproduces.
   df <- data.frame(d = as.Date(c("2010-01-01", "2010-01-10")))
   g <- tbl_gpu(df)
+  oracle <- suppressWarnings(dplyr::filter(df, d < as.POSIXct("2010-01-05")))
 
-  expect_error(
-    dplyr::filter(g, d < as.POSIXct("2010-01-05")),
-    "different timestamp precision"
-  )
+  result <- suppressWarnings(dplyr::filter(g, d < as.POSIXct("2010-01-05")))
+  expect_equal(as.data.frame(collect(result)), oracle)
 })
 
 test_that("filter() with as.POSIXct(x, tz=) (extra arg) falls back to CPU and matches dplyr's own warning-based behavior", {

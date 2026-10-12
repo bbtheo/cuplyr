@@ -392,13 +392,17 @@ infer_mutate_output_type <- function(op, input_types, scalar) {
     # (stop_factor_needs_cpu()) instead of erroring. So does a timestamp
     # `+`/`-` a number (F32): `t + 3600` is valid R (a POSIXct in t's zone)
     # that the GPU expression engine has no duration arithmetic for; dplyr
-    # computes it on the CPU. `t - t2` (a difftime, not re-uploadable) and
-    # the other operators keep the plain error.
+    # computes it on the CPU. So does `t - t2` (F37: a difftime; the CPU
+    # route then raises F18's upload error unless the result drops it). The
+    # other operators keep the plain error here, though an IR expression
+    # with `*`, `%%`, ... on a timestamp never gets this far:
+    # ir_check_ts_operands() (R/ir.R) sends it to the CPU first.
     if ("DICTIONARY32" %in% input_types) {
       stop_factor_needs_cpu(msg)
     }
     is_ts <- grepl("^TIMESTAMP_", input_types)
-    if (op %in% c("+", "-") && sum(is_ts) == 1L && !any(is_unsupported & !is_ts)) {
+    if (op %in% c("+", "-") && !any(is_unsupported & !is_ts) &&
+        (sum(is_ts) == 1L || (op == "-" && sum(is_ts) == 2L))) {
       stop_timestamp_needs_cpu(msg)
     }
     stop(msg, call. = FALSE)

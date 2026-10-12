@@ -149,8 +149,101 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
   `cuplyr_factor_needs_cpu`: parse returns `NULL`, whole-call CPU fallback).
   `ir_parse_quo()` runs the type inference after the parse and re-raises only
   that subclass, so a factor expression still comes back as IR for
-  `ir_factor_rule()`. Other timestamp type errors (`t - t2`, `Date - Date`, a
-  timestamp with a string) keep their plain errors.
+  `ir_factor_rule()`. `Date + Date` and `n - d` keep their plain
+  errors (other operators on a timestamp go to the CPU, see F37 below).
+- **Date arithmetic (F37)**: the `+`/`-` registry entries have a parse hook
+  (`ir_parse_ts_arith()`, R/ir.R) because only the parsed args show whether a
+  literal is whole. `Date +/- n` with `n` an INT32 expression or a finite
+  whole literal in int32 range (`+` either order, `-` date minus number)
+  becomes `date_add_days`/`date_sub_days` (typed TIMESTAMP_DAYS, handler in
+  `apply_handler()`: INT32 bit_cast to DURATION_DAYS, then cudf timestamp
+  +/- duration), so it is native in mutate, filter and grouped mutate; int32
+  day overflow wraps. Any other Date shift (double column, fractional or NA
+  literal) and POSIXct `t +/- n` take the CPU route. `ts - ts` (a difftime)
+  a unary `-ts`/`+ts` also signal `cuplyr_timestamp_needs_cpu`, so dplyr computes
+  them (`as.numeric(d2 - d)`, `filter(d2 - d > 3)` work; a difftime result
+  column hits F18's `cuplyr_error_unsupported_class` at re-upload, hint
+  `as.numeric()`; `-d` errors and `+d` returns `d`, as in base R). Making the shift native removed
+  the CPU route that used to hide the GPU's timestamp gaps, so one rule in
+  the type inference sends them back: `ir_check_ts_operands()` (R/ir.R), run
+  by `ir_infer_type()` on every call node, so it covers parser-built nodes,
+  desugars (`between()`) and any nesting. A timestamp argument is native only
+  for the ops in `ir_ts_native_ops` (`+`/`-`, same-type comparisons,
+  `is.na`, `if_else`/`case_when`/`coalesce`/`na_if`/`replace_when` with
+  matching types, `lag`/`lead`/`first`/`last`/`nth`/`min`/`max`/
+  `n_distinct`, the rank functions, the casts and the datetime accessors);
+  anything else (`%in%`, a comparison with a number/string or another
+  timestamp type, math, cumulative, `sum`/`mean`/`median`/`sd`/`var`,
+  string functions) signals `cuplyr_timestamp_needs_cpu`. The rule goes by
+  type, never by node kind: a bare Date column gets the same treatment, so
+  `filter(d < 5)` and `filter(d %in% dates)` give dplyr's result through the
+  CPU (`check_filter_comparison_types()` no longer sees timestamps). A
+  timestamp mixed with another type in `ir_unify_types()` /
+  `ir_check_cast_to_x()` goes to the CPU too (vctrs' error). summarise()
+  aggregates aren't IR calls, so `summarise_dots_parseable()` keeps its own
+  list: only `min`/`max`/`first`/`last`/`nth`/`n_distinct` take a timestamp.
+  The `+`/`-` hook returns early when the schema and the literal args hold no
+  timestamp (`ir_args_may_be_timestamp()`); that only costs native-ness,
+  because the type inference repeats each of the hook's CPU decisions
+  (`ir_check_ts_operands()`: unary `+`/`-`, a bare-NA shift;
+  `infer_mutate_output_type()`: a shift, `ts - ts`). Literals: a Date literal
+  is an int32 day count on the GPU (`build_scalar()` truncates), so
+  `ir_check_ts_lit()` (run by `ir_infer_type()` on every literal, by
+  `ir_parse_shift_call()` on a `lag()`/`lead()` `default`, and by
+  `parse_mutate_dots()` on a constant dot) sends any Date literal with a
+  non-whole value (`seq(a, b, length.out = k)` midpoints) to the CPU, in any
+  slot; a fractional Date in the result is then floored at upload. The one
+  exception is a whole column-free mutate()/transmute() dot, see
+  "Evaluate-once" below.
+- **Fractional Dates at upload**: a TIMESTAMP_DAYS column holds whole days, so
+  `date_to_gpu()` (`src/transfer_io.cpp`) floors every double Date while it
+  already loops over the column, and `df_to_gpu()` flags the columns it had to
+  change in a `fractional_dates` attribute of the returned pointer;
+  `tbl_gpu()` strips it and warns once (`cuplyr_warning_fractional_date`,
+  naming the columns). No extra pass over whole Dates. Every upload goes
+  through `tbl_gpu()`, so this is also what a CPU fallback producing `d + 0.5`
+  or a fractional `mean(<Date>)` goes through.
+- **Evaluate-once for column-free mutate()/transmute() dots**: dplyr evaluates
+  each dot once (per group). `parse_mutate_dots()` evaluates a dot that reads
+  no column itself (`mutate_constant_value()`, empty data mask) and builds the
+  literal from that value, so `runif(1)`, a counter or `f()` runs once on the
+  native path. When the call then takes the CPU route anyway (some other dot
+  is unparseable), the values of directly written column-free dots of an
+  ungrouped call are recorded by expanded position and
+  `inline_evaluated_dots()` hands dplyr the value instead of the expression,
+  under dplyr's label for an unnamed dot (the `"provenance"` attribute of
+  `expand_across_dots()` maps expanded dots back to user dots). across() dots
+  go to dplyr as written, since dplyr resolves `.cols` against the columns
+  earlier dots create. Known limit: on the CPU route, column-free across()
+  bodies, grouped/`.by` constants and column-free sub-calls folded inside
+  other dots (`x + runif(1)`) run again.
+- **Fractional Date constants (native floor)**: a column-free dot whose value
+  is a fractional Date (finite, int32 range) is built from its floored value
+  (`floor_fractional_date()`, -0.5 -> -1, like `date_to_gpu()`), grouped and
+  `.by` calls included, and the verb raises the upload's warning
+  (`warn_fractional_dates()`, `cuplyr_warning_fractional_date`) once it has
+  committed to the native path, at verb time in eager and lazy mode, naming
+  the columns whose final value is floored (not staged across() temps, not a
+  column a later dot drops or overwrites). That gives the column the CPU
+  route plus upload would give, with one evaluation, as long as nothing in the
+  call sees the fraction: a later dot that may read the name sends the call
+  to the CPU route. Readers are found syntactically: `expr_may_read_cols()`
+  (the symbol anywhere, `.data`, or a call that reaches the mask without
+  naming a column, `expr_reaches_mask()`: `pick()`, a nested `across()`,
+  `cur_data()`, `get()`/`exists()`/`eval()`/`environment()` and similar; a
+  user function calling `pick()` itself is not detected). A top-level
+  `across()`/`if_any()`/`if_all()` is already expanded by then, against the
+  pre-call columns, so its expansion never names the floored column:
+  instead every expansion of such a dot (provenance kind `"across"` or
+  `"combined"`) after the user dot that floored a value counts as a reader;
+  expansions of the across() that produced the value don't. A bare copy
+  (`ee = dd`, also a staged across() assignment) isn't a reader: it copies
+  the floored column and is floored itself. A fractional Date vector
+  constant (uploaded by `ir_vec()`, floored and warned there) follows the
+  same reader rule. A column-free dot that reaches the mask
+  (`y = exists("x")`) is never inlined on the CPU route: dplyr evaluates it
+  in its mask. Known limit: on a zero-row table the native path still warns
+  although nothing is floored.
 
 ## Source Map
 

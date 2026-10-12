@@ -502,6 +502,10 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
     };
     if (int32_ops.count(op)) return cudf::data_type{cudf::type_id::INT32};
 
+    if (op == "date_add_days" || op == "date_sub_days") {
+        return cudf::data_type{cudf::type_id::TIMESTAMP_DAYS};
+    }
+
     // %in%'s first argument type, or any other unrecognized op: safe FLOAT64
     // default (matches ir_infer_type()'s bare-NA-in-isolation fallback).
     return cudf::data_type{cudf::type_id::FLOAT64};
@@ -1286,6 +1290,26 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
             return std::make_unique<cudf::column>(x_col);
         }
         return cudf::cast(x_col, target);
+    }
+
+    // ---- date_add_days(d, n) / date_sub_days(d, n) (F37): a Date shifted by
+    // a whole number of days. R/ir.R's "+"/"-" parse hook only builds these
+    // for a TIMESTAMP_DAYS first arg and an INT32 second arg (column or
+    // whole literal). The INT32 days are reinterpreted as DURATION_DAYS
+    // (same 4-byte rep), so the cuDF timestamp +/- duration op gives
+    // TIMESTAMP_DAYS back; a null on either side stays null.
+    if (op == "date_add_days" || op == "date_sub_days") {
+        Rcpp::List d_node = args[0];
+        Rcpp::List n_node = args[1];
+        cudf::size_type d_idx = materialize(d_node, ctx);
+        cudf::size_type n_idx = materialize(n_node, ctx);
+        cudf::column_view d_col = ctx.cols[d_idx];
+        cudf::column_view n_col = ctx.cols[n_idx];
+        auto days = cudf::bit_cast(n_col, cudf::data_type{cudf::type_id::DURATION_DAYS});
+        return cudf::binary_operation(
+            d_col, days,
+            op == "date_add_days" ? cudf::binary_operator::ADD : cudf::binary_operator::SUB,
+            cudf::data_type{cudf::type_id::TIMESTAMP_DAYS});
     }
 
     // ---- toupper(x) / tolower(x): case.hpp (Phase 11 L5) ----

@@ -364,6 +364,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   # their own environment: an inlined body would instead read any column an
   # earlier dot creates, including ones an unnamed data-frame dot splices in.
   staged_temps <- attr(expanded, "staged_temps")
+  provenance <- attr(expanded, "provenance")
   fallback_data <- .data
   fallback_dots <- dots
   cgid <- substitute_cur_group_id(.data, expanded, verb_groups)
@@ -386,10 +387,14 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   # trigger rule").
   # Vector literals (`y = 1:5`) are native only for an ungrouped, no-`.by`
   # call; per-group evaluation is dplyr's job (CPU fallback).
+  evaluated <- new.env(parent = emptyenv())
   expressions <- parse_mutate_dots(dots, orig_schema, "mutate", stop_on_unparseable = FALSE,
-                                   vector_literals = length(verb_groups) == 0)
+                                   vector_literals = length(verb_groups) == 0,
+                                   ungrouped = length(verb_groups) == 0,
+                                   evaluated = evaluated, provenance = provenance)
   if (is.null(expressions)) {
-    return(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo))
+    return(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
+                                consts = evaluated$consts, provenance = provenance))
   }
   # A vector literal next to a window call isn't planned together: let dplyr
   # run the whole call.
@@ -398,6 +403,10 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   }
   dropped <- attr(expressions, "dropped")
   check_droppable_groups(dropped, if (by_given) character() else verb_groups)
+  # Floored fractional Date constants (parse_mutate_dots()); staged temps
+  # aren't output columns. Warned once the native call has run (eager) or
+  # been planned (lazy); a CPU fallback's upload warns by itself.
+  fractional <- setdiff(attr(expressions, "fractional_dates"), staged_temps)
 
   # Phase 5, task W3: any dot containing a window-function call (row_number(),
   # lag()/lead(), cumsum()/cummax()/cummin()/cumprod(), and their R desugars
@@ -409,7 +418,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
     return(mutate_window(
       .data, fallback_dots, expressions, orig_schema, orig_names, orig_groups,
       .keep, before_quo, after_quo, by_quo, fallback_data = fallback_data,
-      drop = staged_temps, dropped = dropped
+      drop = staged_temps, dropped = dropped, fractional = fractional
     ))
   }
 
@@ -430,11 +439,11 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
     result, orig_names, orig_groups, expressions, .keep, before_quo, after_quo,
     drop = staged_temps, dropped = dropped
   )
-  if (is.null(select_node)) {
-    return(result)
+  if (!is.null(select_node)) {
+    result <- push_op(result, select_node)
   }
-
-  push_op(result, select_node)
+  warn_fractional_dates(fractional)
+  result
 }
 
 # Internal: window-bearing mutate() dispatch (Phase 5, task W3)
@@ -501,11 +510,15 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 # @param drop Staged across() temp columns, removed from the result
 # @param dropped Columns set to `NULL` by a dot (and not re-added), removed
 #   from the result
+# @param fractional Columns built from a floored fractional Date constant:
+#   warned about only if the call stays native (the CPU fallback's upload
+#   warns itself)
 # @return A new tbl_gpu
 # @keywords internal
 mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, orig_groups,
                            keep, before_quo, after_quo, by_quo, fallback_data = .data,
-                           drop = character(), dropped = character()) {
+                           drop = character(), dropped = character(),
+                           fractional = character()) {
   exprs_raw <- stats::setNames(
     lapply(expressions, `[[`, "ir"),
     vapply(expressions, `[[`, character(1), "output_col")
@@ -538,11 +551,11 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
     result, orig_names, orig_groups, expressions, keep, before_quo, after_quo,
     drop = drop, dropped = dropped
   )
-  if (is.null(select_node)) {
-    return(result)
+  if (!is.null(select_node)) {
+    result <- push_op(result, select_node)
   }
-
-  push_op(result, select_node)
+  warn_fractional_dates(fractional)
+  result
 }
 
 # Internal: pure planning pass for mutate_window() -- no push_op()/GPU work
@@ -661,12 +674,18 @@ mutate_across_fallback <- function(.data, dots, keep, before_quo, after_quo, by_
 # mutate_across_fallback() exactly (same re-injection pattern). The caller
 # passes the table and the ORIGINAL dots from BEFORE across() expansion and
 # cur_group_id() substitution, so dplyr evaluates across() and
-# cur_group_id() itself and the helper column never appears in the result. This is what subsumes identity()/ifelse()/scale()/lengths()/
+# cur_group_id() itself and the helper column never appears in the result.
+# `consts`/`provenance` (parse_mutate_dots()'s recorded values) are inlined
+# by inline_evaluated_dots() so dot values aren't computed twice.
+# This is what subsumes identity()/ifelse()/scale()/lengths()/
 # toupper()/local-closure mutate dots -- and, more generally, ANY
 # unrecognized shape, not just window/across-family ones.
 # @keywords internal
-mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo) {
+mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo,
+                                consts = NULL, provenance = NULL) {
   gpu_fallback("mutate", .data, function(tbl) {
+    # Inlined here, where the row count is known (see inline_evaluated_dots()).
+    dots <- inline_evaluated_dots(dots, consts, provenance, nrow(tbl))
     rlang::inject(dplyr::mutate(
       tbl, !!!dots, .by = !!by_quo, .keep = keep,
       .before = !!before_quo, .after = !!after_quo
@@ -708,6 +727,41 @@ mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_qu
 #   With `stop_on_unparseable = FALSE`, the old hard `stop()` becomes
 #   unreachable from any real mutate()/transmute() call (both callers pass
 #   `FALSE`) -- kept only as a defensive, internal-only safety net.
+# @param ungrouped `TRUE` for a call with no groups and no `.by`. Only then
+#   are evaluated constants recorded in `evaluated`.
+# @param evaluated Optional environment. Each column-free dot (scalar, vector
+#   or NULL) this function evaluates in an ungrouped call
+#   (see mutate_constant_value()) is stored in `evaluated$consts`, a list
+#   keyed by the dot's position (as.character(i)), as list(value). When the
+#   function returns `NULL` the caller hands those values to the CPU route
+#   (inline_evaluated_dots()) so dplyr doesn't evaluate the dot a second time.
+# @param provenance Optional `"provenance"` attribute of expand_across_dots()
+#   for `dots`: which user dot each expanded dot came from, and whether it is
+#   an across()/if_any()/if_all() expansion (see the reader rule below).
+#
+# Evaluate-once and fractional Dates (F37). dplyr evaluates each dot once. A
+# column-free dot is evaluated here (mutate_constant_value()) and becomes a
+# literal, so the native path evaluates it once too. A fractional Date value
+# can't be a TIMESTAMP_DAYS literal (ir_check_ts_lit()); it is built from its
+# floored value instead, which is the column the CPU route would give after
+# the upload floor, and its name is listed in the `"fractional_dates"`
+# attribute: the caller raises `cuplyr_warning_fractional_date` once it has
+# committed to the native path (warn_fractional_dates()). That only holds
+# while nothing in the call sees the fraction, so a later dot that may read
+# the column (expr_may_read_cols(); a bare copy `b = dd` copies the floored
+# column and isn't a reader, its output is floored too) sends the call to
+# the CPU, where dplyr computes it from the real value. Any expansion of a
+# later user dot's across()/if_any()/if_all() counts as a reader (its `.cols`
+# was resolved before this call's columns existed, so it can't be checked
+# by name); expansions of the across() that floored the value don't. A
+# fractional Date vector constant is floored by its upload (lower_mutate(),
+# which warns itself) and follows the same reader rule. Known limit: on a
+# zero-row table nothing is floored, but the native path still warns.
+# Accepted limit: in a call that takes the CPU route for any reason, dplyr
+# evaluates again what wasn't inlined -- column-free across() bodies (passed
+# to dplyr as written, so it resolves `.cols` against the columns earlier
+# dots create), constants of a grouped or `.by` call, and column-free
+# sub-calls folded inside other dots (`runif(1)` in `x + runif(1)`).
 # @return A list of expression structures, one per dot (or `NULL`, only
 #   possible when `stop_on_unparseable = FALSE`, see above). Carries an extra
 #   `"has_window"` attribute (Phase 5, task W3): `TRUE` iff any dot's parsed
@@ -718,10 +772,12 @@ mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_qu
 #   guard at lowering time). `transmute.tbl_gpu()` ignores the attribute --
 #   window-function support inside `transmute()` is not yet wired (W3 scope
 #   is `mutate()` only, per `scratchpad/phase5_window_design.md` section 8's
-#   W3 row).
+#   W3 row). Also carries `"fractional_dates"`: the output names whose
+#   final value is a floored fractional Date constant (see above).
 # @keywords internal
 parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
-                               stop_on_unparseable = TRUE, vector_literals = FALSE) {
+                               stop_on_unparseable = TRUE, vector_literals = FALSE,
+                               ungrouped = FALSE, evaluated = NULL, provenance = NULL) {
   dots <- if (warn_unnamed) auto_name_dots(dots, verb) else name_dots_silently(dots)
 
   expressions <- list()
@@ -732,11 +788,67 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
   # dot is `col = NULL` (and a later dot fills it in).
   dot_order <- unique(names(dots))
 
+  # Record the value of the column-free dot at position `j`, so the CPU route
+  # inlines it instead of evaluating it again. Only for an ungrouped call
+  # (dplyr evaluates a grouped call per group, so a value computed once would
+  # change what the CPU route does). A vector is recorded too;
+  # inline_evaluated_dots() skips one whose vec_size() can't match the data. A
+  # name an earlier `col = NULL` dot removed is NULL in dplyr's mask,
+  # but was read from the environment here: dplyr must evaluate such a dot,
+  # and one that can see the mask without naming a column (`exists("x")`,
+  # expr_reaches_mask()).
+  record_const <- function(j, const, quo) {
+    if (!is.null(evaluated) && ungrouped &&
+        (const$kind %in% c("scalar", "vector") || (identical(const$kind, "null") && isTRUE(const$evaluated))) &&
+        !any(all.vars(rlang::quo_get_expr(quo)) %in% dropped) &&
+        !expr_reaches_mask(rlang::quo_get_expr(quo))) {
+      evaluated$consts[[as.character(j)]] <- list(value = const$raw %||% const$value)
+    }
+  }
+
+  # Names whose column holds a floored fractional Date constant, in order,
+  # with the user dot each came from (`provenance`) and whether it is a
+  # vector constant (floored, and warned, when lower_mutate() uploads it).
+  frac <- character()
+  frac_origin <- integer()
+  frac_vec <- logical()
+  forget_frac <- function(nm) {
+    keep <- frac != nm
+    frac <<- frac[keep]
+    frac_origin <<- frac_origin[keep]
+    frac_vec <<- frac_vec[keep]
+  }
+
   for (i in seq_along(dots)) {
     new_name <- names(dots)[i]
     expr <- dots[[i]]
+    origin <- if (is.null(provenance)) i else provenance$origin[i]
+    from_across <- !is.null(provenance) && provenance$kind[i] %in% c("across", "combined")
+
+    # A dot that may read a floored fractional Date column must see the
+    # fraction: CPU route. Checked before evaluating anything of this dot.
+    # An across()/if_any()/if_all() expansion resolved `.cols` against the
+    # pre-call columns, so it may read any name an earlier user dot floored
+    # without naming it (dplyr would select it): conservatively a reader.
+    # Expansions of the across() that floored the value don't read it.
+    copied <- NA_integer_
+    if (length(frac) > 0) {
+      e <- rlang::quo_get_expr(expr)
+      if (is.symbol(e)) {
+        copied <- match(as.character(e), frac)
+      }
+      if (is.na(copied) &&
+          (expr_may_read_cols(e, frac) || (from_across && any(frac_origin != origin)))) {
+        if (!stop_on_unparseable) {
+          return(NULL)
+        }
+        stop(verb, "() can't read a fractional Date value on the GPU.\n",
+             "Expression: ", rlang::quo_text(expr), call. = FALSE)
+      }
+    }
 
     const <- mutate_constant_value(expr, schema)
+    record_const(i, const, expr)
 
     # `col = NULL` (or a constant that evaluates to NULL) drops the column:
     # later dots no longer see it, and a later dot of the same name re-adds it.
@@ -746,13 +858,25 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
       schema$names <- schema$names[keep_idx]
       schema$types <- schema$types[keep_idx]
       schema <- set_schema_factor_levels(schema, new_name, NULL)
+      forget_frac(new_name)
       next
     }
 
+    floored <- NULL
+    floored_vec <- FALSE
     if (identical(const$kind, "scalar")) {
       # Build the literal from the value already computed: evaluating the
-      # dot again (ir_parse_quo()) would run RNG/side effects twice.
-      ir <- ir_lit_from_r(const$value)
+      # dot again (ir_parse_quo()) would run RNG/side effects twice. A
+      # fractional Date is built floored (see this function's docs).
+      floored <- floor_fractional_date(const$value)
+      ir <- tryCatch(
+        {
+          lit <- ir_lit_from_r(floored %||% const$value)
+          ir_check_ts_lit(lit)
+          lit
+        },
+        cuplyr_timestamp_needs_cpu = function(e) NULL
+      )
     } else if (identical(const$kind, "vector")) {
       if (!vector_literals || !const$supported) {
         if (!stop_on_unparseable) {
@@ -763,6 +887,10 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
       }
       ir <- ir_vec(const$value, gpu_type_from_r(const$value), expr, new_name)
       has_vec <- TRUE
+      floored_vec <- inherits(const$value, "Date") && {
+        v <- as.double(unclass(const$value))
+        any(is.finite(v) & v != floor(v))
+      }
     } else {
       # A vector constant nested inside a larger expression (`x + 1:5`) is
       # dplyr's elementwise job: CPU fallback.
@@ -845,6 +973,13 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
 
     expressions <- c(expressions, list(step))
     dropped <- setdiff(dropped, new_name)
+    copied_vec <- !is.na(copied) && frac_vec[copied]
+    forget_frac(new_name)
+    if (!is.null(floored) || floored_vec || !is.na(copied)) {
+      frac <- c(frac, new_name)
+      frac_origin <- c(frac_origin, origin)
+      frac_vec <- c(frac_vec, floored_vec || copied_vec)
+    }
 
     # Update the running schema so subsequent dots see this dot's output.
     schema <- update_schema_for_expr(schema, step)
@@ -854,6 +989,7 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
   attr(expressions, "has_vec") <- has_vec
   attr(expressions, "dropped") <- dropped
   attr(expressions, "dot_order") <- dot_order
+  attr(expressions, "fractional_dates") <- frac[!frac_vec]
   expressions
 }
 
@@ -861,7 +997,8 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
 # "null" (the dot is, or evaluates to, NULL), "vector" (an atomic vector of
 # length != 1; `supported` says whether it can be uploaded as a column),
 # "scalar" (an evaluated call/symbol with a length-1 atomic value, returned
-# as `value` so the caller doesn't evaluate the dot a second time), or
+# as `value` so the caller doesn't evaluate the dot a second time; a "null"
+# also says, in `evaluated`, whether evaluating the dot was needed), or
 # "none" (everything else). Evaluated in R, in the dot's environment,
 # with an empty data mask so `.env` works and data-only calls (`n()`) fail
 # and count as "none".
@@ -885,25 +1022,147 @@ mutate_constant_value <- function(quo, schema) {
       return(none)
     }
     value <- got$value
+    ran <- TRUE
   } else {
     value <- expr
+    ran <- FALSE
   }
 
   if (is.null(value)) {
-    return(list(kind = "null"))
+    return(list(kind = "null", evaluated = ran))
   }
   if (!is.atomic(value)) {
     return(none)
   }
   if (length(value) == 1L) {
     # A bare literal (no evaluation happened) takes the ordinary parse path.
-    return(if (is.symbol(expr) || is.call(expr)) list(kind = "scalar", value = value) else none)
+    return(if (ran) list(kind = "scalar", value = value) else none)
   }
 
   supported <- (is.logical(value) || is.integer(value) || is.double(value) || is.character(value)) &&
     (!is.object(value) || identical(class(value), "Date")) &&
     is.null(dim(value))
-  list(kind = "vector", value = if (supported) unname(value) else value, supported = supported)
+  # `value` is unnamed for ir_vec(); `raw` keeps the names a CPU-route
+  # recorded constant (record_const()) must still carry (`names(v)`).
+  list(kind = "vector", value = if (supported) unname(value) else value, raw = value,
+       supported = supported)
+}
+
+# The CPU route must not evaluate again a column-free dot that
+# parse_mutate_dots() already evaluated (RNG, counters, side effects).
+# `dots` are the user's dots from before across() expansion; `consts` holds
+# the values recorded per EXPANDED dot position, and `provenance` (see
+# expand_across_dots()) says which original dot each expanded dot came from.
+# A dot passed through unchanged ("dot") whose value was recorded is
+# replaced by that value, under the name dplyr gives the original
+# expression. Everything else stays as written for dplyr; in particular an
+# across() dot, which dplyr resolves against the columns earlier dots
+# create (its column-free bodies run again there, see parse_mutate_dots()).
+# A recorded non-NULL value is inlined only if its vctrs::vec_size() is 1 or
+# `n` (dplyr's own constant size rule): otherwise dplyr's size error would
+# name the value ("<date>") instead of the user's expression, so the dot
+# stays as written (and is evaluated again before the error). NULL is always
+# inlined (dplyr doesn't size-check it). A value vec_size() errors on stays
+# as written.
+# @param dots list of quosures (user dots, before expansion)
+# @param consts named list keyed by expanded-dot position, each list(value), or NULL
+# @param provenance the `"provenance"` attribute of expand_across_dots()
+# @param n row count of the data the CPU route runs on
+# @keywords internal
+inline_evaluated_dots <- function(dots, consts, provenance, n) {
+  if (length(consts) == 0) {
+    return(dots)
+  }
+  dot_names <- names(dots)
+  if (is.null(dot_names)) {
+    dot_names <- rep("", length(dots))
+  }
+  for (d in seq_along(dots)) {
+    idx <- which(provenance$origin == d)
+    if (length(idx) != 1L || !identical(provenance$kind[idx], "dot") ||
+        !(as.character(idx) %in% names(consts))) {
+      next
+    }
+    value <- consts[[as.character(idx)]]$value
+    if (!is.null(value)) {
+      size <- tryCatch(vctrs::vec_size(value), error = function(e) NA_integer_)
+      if (!size %in% c(1L, n)) {
+        next
+      }
+    }
+    quo <- dots[[d]]
+    if (is.na(dot_names[d]) || dot_names[d] == "") {
+      # dplyr's own rule for an unnamed dot
+      dot_names[d] <- rlang::with_options(
+        "rlang:::use_as_label_infix" = FALSE,
+        rlang::as_label(quo)
+      )
+    }
+    dots[[d]] <- rlang::new_quosure(value, rlang::quo_get_env(quo))
+  }
+  names(dots) <- dot_names
+  dots
+}
+
+# The floored value of a column-free Date constant that isn't a whole day,
+# or NULL for anything else. Floored like the upload (date_to_gpu()):
+# -0.5 -> -1. Non-finite or out-of-int32 values keep going to the CPU.
+# @keywords internal
+floor_fractional_date <- function(value) {
+  if (!inherits(value, "Date") || length(value) != 1L) {
+    return(NULL)
+  }
+  v <- as.double(unclass(value))
+  if (!is.finite(v) || v == floor(v) || abs(floor(v)) > .Machine$integer.max) {
+    return(NULL)
+  }
+  structure(floor(v), class = "Date")
+}
+
+# TRUE iff dot expression `expr` may read a column named in `cols` when
+# dplyr evaluates it. Syntactic and conservative: the names as symbols
+# anywhere (also under `.env$`), the `.data` pronoun, or a call that can
+# reach a mask column without naming it (expr_reaches_mask()). A top-level
+# across()/if_any()/if_all() dot is already expanded when this runs (its
+# `.cols` resolved against the pre-call columns, so the expansion never
+# names a column an earlier dot of the call creates): parse_mutate_dots()
+# treats those expansions as readers through their provenance instead.
+# Not detected: a user function that calls pick()/cur_data() itself.
+# @keywords internal
+expr_may_read_cols <- function(expr, cols) {
+  any(all.vars(expr) %in% c(cols, ".data")) || expr_reaches_mask(expr)
+}
+
+# TRUE iff `expr` calls something that can reach dplyr's data mask without
+# naming a column as a symbol: pick(), a nested across() and friends,
+# cur_data(), get()/mget()/exists(), eval(), environment()... Such a dot's
+# value depends on the mask, so it can't be computed outside it either.
+# @keywords internal
+expr_reaches_mask <- function(expr) {
+  mask_wide <- c(
+    "pick", "across", "c_across", "if_any", "if_all", "cur_data", "cur_data_all",
+    "cur_group", "get", "get0", "mget", "exists", "dynGet", "eval", "evalq",
+    "eval_tidy", "eval_bare", "parse", "str2lang", "str2expression",
+    "environment", "parent.frame", "sys.frame", "sys.frames", "sys.function",
+    "as.environment", "ls", "objects", "local", "with", "within",
+    "do.call", "match.fun"
+  )
+  walk <- function(e) {
+    if (rlang::is_missing(e) || !is.call(e)) {
+      return(FALSE)
+    }
+    head <- call_head_name(e)
+    if (!is.null(head) && head %in% mask_wide) {
+      return(TRUE)
+    }
+    for (part in as.list(e)) {
+      if (walk(part)) {
+        return(TRUE)
+      }
+    }
+    FALSE
+  }
+  walk(expr)
 }
 
 # TRUE iff `expr` calls a function that only works inside dplyr's data mask
@@ -1181,6 +1440,7 @@ transmute.tbl_gpu <- function(.data, ...) {
   # table with the ORIGINAL dots, so cur_group_id()'s helper column and the
   # staged temps can't leak and `.fns` values keep their own environment.
   staged_temps <- attr(expanded, "staged_temps")
+  provenance <- attr(expanded, "provenance")
   fallback_data <- .data
   fallback_dots <- orig_dots
   cgid <- substitute_cur_group_id(.data, expanded, .data$groups)
@@ -1191,12 +1451,16 @@ transmute.tbl_gpu <- function(.data, ...) {
   # Phase 11, task L1: same universal expression-level CPU fallback as
   # mutate.tbl_gpu() -- see mutate_expr_fallback()'s own docs for the full
   # "NULL-vs-throw trigger rule" derivation.
+  evaluated <- new.env(parent = emptyenv())
   expressions <- parse_mutate_dots(dots, schema, "transmute", warn_unnamed = FALSE,
                                     stop_on_unparseable = FALSE,
-                                    vector_literals = length(.data$groups) == 0)
+                                    vector_literals = length(.data$groups) == 0,
+                                    ungrouped = length(.data$groups) == 0,
+                                    evaluated = evaluated, provenance = provenance)
   if (is.null(expressions)) {
     return(gpu_fallback("transmute", fallback_data, function(tbl) {
-      rlang::inject(dplyr::transmute(tbl, !!!fallback_dots))
+      dots_cpu <- inline_evaluated_dots(fallback_dots, evaluated$consts, provenance, nrow(tbl))
+      rlang::inject(dplyr::transmute(tbl, !!!dots_cpu))
     }))
   }
 
@@ -1220,6 +1484,10 @@ transmute.tbl_gpu <- function(.data, ...) {
   if (length(final_order) == 0L) {
     return(zero_column_result(result, "transmute"))
   }
-  push_op(result, ast_select(input_node(result), final_order))
+  result <- push_op(result, ast_select(input_node(result), final_order))
+  # As in mutate.tbl_gpu(): floored fractional Date constants, warned now
+  # that the call is native.
+  warn_fractional_dates(setdiff(attr(expressions, "fractional_dates"), staged_temps))
+  result
 }
 

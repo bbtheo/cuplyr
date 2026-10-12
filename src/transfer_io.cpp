@@ -228,8 +228,11 @@ std::unique_ptr<column> logical_to_gpu(LogicalVector x) {
     );
 }
 
-// Create GPU column from R Date vector (days since epoch)
-std::unique_ptr<column> date_to_gpu(NumericVector x) {
+// Create GPU column from R Date vector (days since epoch). TIMESTAMP_DAYS holds
+// whole days, so a fractional Date is floored (the calendar day R prints; a
+// truncating cast gives the wrong day below zero) and `saw_fraction` is set so
+// the R side can warn.
+std::unique_ptr<column> date_to_gpu(NumericVector x, bool& saw_fraction) {
     size_type n = x.size();
 
     rmm::device_buffer data(n * sizeof(int32_t),
@@ -240,13 +243,23 @@ std::unique_ptr<column> date_to_gpu(NumericVector x) {
     std::vector<uint8_t> validity(bitmask_allocation_size_bytes(n), 0xFF);
     size_type null_count = 0;
 
+    const double* xp = REAL(x);
     for (size_type i = 0; i < n; ++i) {
-        if (NumericVector::is_na(x[i])) {
+        const double v = xp[i];
+        if (std::isnan(v)) {
             days[i] = 0;
             validity[i / 8] &= ~(1 << (i % 8));
             null_count++;
         } else {
-            days[i] = static_cast<int32_t>(x[i]);
+            // Whole days (the common case) round-trip through the truncating
+            // cast; only the rest pay for floor().
+            int32_t t = static_cast<int32_t>(v);
+            if (static_cast<double>(t) != v) {
+                const double whole = std::floor(v);
+                if (whole != v) saw_fraction = true;
+                t = static_cast<int32_t>(whole);
+            }
+            days[i] = t;
         }
     }
 
@@ -655,6 +668,7 @@ SEXP df_to_gpu(DataFrame df) {
     int ncol = df.size();
     std::vector<std::unique_ptr<cudf::column>> columns;
     columns.reserve(ncol);
+    std::vector<int> fractional_dates;   // 1-based indices of floored Date columns
 
     for (int i = 0; i < ncol; ++i) {
         SEXP col = df[i];
@@ -665,7 +679,9 @@ SEXP df_to_gpu(DataFrame df) {
         switch (TYPEOF(col)) {
             case REALSXP:
                 if (is_date) {
-                    columns.push_back(date_to_gpu(col));
+                    bool saw_fraction = false;
+                    columns.push_back(date_to_gpu(col, saw_fraction));
+                    if (saw_fraction) fractional_dates.push_back(i + 1);
                 } else if (is_posixct) {
                     columns.push_back(posixct_to_gpu(col));
                 } else {
@@ -687,7 +703,14 @@ SEXP df_to_gpu(DataFrame df) {
     }
 
     auto tbl = std::make_unique<cudf::table>(std::move(columns));
-    return make_gpu_table_xptr(std::move(tbl));
+    // Keep the XPtr (it protects the pointer) alive while wrap() allocates.
+    auto out = make_gpu_table_xptr(std::move(tbl));
+    // tbl_gpu() warns for these and strips the attribute
+    if (!fractional_dates.empty()) {
+        Rcpp::Shield<SEXP> idx(Rcpp::wrap(fractional_dates));
+        Rf_setAttrib(out, Rf_install("fractional_dates"), idx);
+    }
+    return out;
 }
 
 // [[Rcpp::export]]

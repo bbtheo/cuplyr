@@ -19,7 +19,13 @@ exclude from \code{.cols}'s selectable universe}
 }
 \value{
 A new (possibly longer, possibly shorter) named list of
-quosures, with the \code{"needs_fallback"} attribute described above
+quosures, with the \code{"needs_fallback"} attribute described above, and a
+\code{"provenance"} attribute: \code{list(origin, kind)}, one entry per returned
+quosure. \code{origin} is the index of the input dot it came from; \code{kind} is
+\code{"dot"} (the input dot, passed through unchanged), \code{"across"} (an
+expansion of an unnamed \code{across()} dot, staged or not) or \code{"combined"}
+(an \code{if_any()}/\code{if_all()} dot). mutate()/transmute() use it to tell
+which original dot a value computed from the expanded dots belongs to.
 }
 \description{
 Walks \code{dots} in order; a top-level, unnamed \code{across(...)} dot is

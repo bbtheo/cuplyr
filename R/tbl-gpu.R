@@ -113,6 +113,13 @@ tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
     }
   }
   ptr <- wrap_gpu_call("tbl_gpu", df_to_gpu(upload))
+  # TIMESTAMP_DAYS holds whole days: the upload floors a fractional Date (the
+  # day R prints) and flags the columns it touched on the pointer.
+  frac <- attr(ptr, "fractional_dates")
+  if (!is.null(frac)) {
+    attr(ptr, "fractional_dates") <- NULL
+    warn_fractional_dates(names(upload)[frac])
+  }
 
   # Build schema with factor levels for round-trip fidelity
   factor_levels <- lapply(data, function(col) {
@@ -145,6 +152,26 @@ tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
   new_tbl_gpu(ptr = ptr, schema = schema, exec_mode = exec_mode,
               nrow = if (ncol(data) == 0L) nrow(data) else NULL,
               unspecified = unspec_names)
+}
+
+# The one warning for a fractional Date column floored to whole days (a GPU
+# Date holds whole days): raised by the upload (tbl_gpu(), so also every CPU
+# fallback result) and by mutate()/transmute() when they build a column-free
+# fractional Date constant natively (parse_mutate_dots()). `cols` names the
+# columns.
+# @keywords internal
+warn_fractional_dates <- function(cols) {
+  if (length(cols) == 0L) {
+    return(invisible())
+  }
+  rlang::warn(
+    c(paste0(
+      "Fractional Date column", if (length(cols) > 1L) "s", " ",
+      paste0("`", cols, "`", collapse = ", "),
+      " floored to whole days: a GPU Date holds whole days only."
+    )),
+    class = "cuplyr_warning_fractional_date"
+  )
 }
 
 # Internal: classes a column may carry and still have a GPU representation.

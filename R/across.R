@@ -1287,11 +1287,19 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filte
 #'   exclude from `.cols`'s selectable universe
 #' @param verb Character, `"filter"`/`"mutate"`/`"summarise"`/`"transmute"`
 #' @return A new (possibly longer, possibly shorter) named list of
-#'   quosures, with the `"needs_fallback"` attribute described above
+#'   quosures, with the `"needs_fallback"` attribute described above, and a
+#'   `"provenance"` attribute: `list(origin, kind)`, one entry per returned
+#'   quosure. `origin` is the index of the input dot it came from; `kind` is
+#'   `"dot"` (the input dot, passed through unchanged), `"across"` (an
+#'   expansion of an unnamed `across()` dot, staged or not) or `"combined"`
+#'   (an `if_any()`/`if_all()` dot). mutate()/transmute() use it to tell
+#'   which original dot a value computed from the expanded dots belongs to.
 #' @keywords internal
 expand_across_dots <- function(dots, schema, group_cols, verb) {
   out_quos <- list()
   out_names <- character()
+  prov_origin <- integer()
+  prov_kind <- character()
   needs_fallback <- FALSE
   staged_temps <- character()
   mutating <- verb %in% c("mutate", "transmute")
@@ -1331,6 +1339,8 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
       }
       out_quos <- c(out_quos, expanded)
       out_names <- c(out_names, names(expanded))
+      prov_origin <- c(prov_origin, rep(i, length(expanded)))
+      prov_kind <- c(prov_kind, rep("across", length(expanded)))
       scope <- union(scope, names(expanded))
       next
     }
@@ -1339,6 +1349,8 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
       combined <- expand_if_any_all(expr, env, schema, group_cols, head_name, verb, scope)
       needs_fallback <- needs_fallback || isTRUE(attr(combined, "needs_fallback"))
       out_quos <- c(out_quos, list(combined))
+      prov_origin <- c(prov_origin, i)
+      prov_kind <- c(prov_kind, "combined")
       # dplyr names an unnamed if_any()/if_all() dot after the original call
       out_names <- c(out_names, if (is_named) nm else if (identical(verb, "filter")) "" else rlang::as_label(expr))
       if (!identical(verb, "filter")) scope <- union(scope, out_names[length(out_names)])
@@ -1347,6 +1359,8 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
 
     out_quos <- c(out_quos, list(quo))
     out_names <- c(out_names, if (is_named) nm else "")
+    prov_origin <- c(prov_origin, i)
+    prov_kind <- c(prov_kind, "dot")
     if (!identical(verb, "filter")) {
       # An unnamed dot other than a column already in scope can return a data
       # frame, whose columns dplyr adds under their own names: from here on
@@ -1359,5 +1373,6 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
   names(out_quos) <- out_names
   attr(out_quos, "needs_fallback") <- needs_fallback
   attr(out_quos, "staged_temps") <- staged_temps
+  attr(out_quos, "provenance") <- list(origin = prov_origin, kind = prov_kind)
   out_quos
 }
