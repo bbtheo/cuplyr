@@ -80,6 +80,20 @@ static Rcpp::List remap_virtual_col_indices(Rcpp::List node,
     return new_node;
 }
 
+// F42: the result pointer carries an "int_overflow" attribute when a checked
+// integer +, -, * left R's integer range (the value became NA). The R side
+// signals the warning (never from here: a warning turned into an error by
+// options(warn = 2) would longjmp past C++ destructors).
+static SEXP finish_expr_result(std::unique_ptr<cudf::table> tbl, bool int_overflow) {
+    SEXP out = cuplyr::make_gpu_table_xptr(std::move(tbl));
+    if (int_overflow) {
+        Rcpp::Shield<SEXP> keep(out);
+        Rcpp::LogicalVector flag(1, true);
+        Rf_setAttrib(out, Rf_install("int_overflow"), flag);
+    }
+    return out;
+}
+
 // [[Rcpp::export]]
 SEXP gpu_compute_column(SEXP xptr, Rcpp::List ir) {
     using namespace cuplyr;
@@ -101,7 +115,7 @@ SEXP gpu_compute_column(SEXP xptr, Rcpp::List ir) {
     std::vector<std::unique_ptr<cudf::column>> cols;
     cols.push_back(std::move(result_col));
     auto tbl = std::make_unique<cudf::table>(std::move(cols));
-    return make_gpu_table_xptr(std::move(tbl));
+    return finish_expr_result(std::move(tbl), ctx.int_overflow);
 }
 
 // [[Rcpp::export]]
@@ -124,7 +138,7 @@ SEXP gpu_filter_expr(SEXP xptr, Rcpp::List ir) {
     }
 
     auto result = cudf::apply_boolean_mask(view, mask);
-    return make_gpu_table_xptr(std::move(result));
+    return finish_expr_result(std::move(result), ctx.int_overflow);
 }
 
 // [[Rcpp::export]]
@@ -227,5 +241,5 @@ SEXP gpu_mutate_expr(SEXP xptr,
     }
 
     auto result = std::make_unique<cudf::table>(std::move(final_columns));
-    return make_gpu_table_xptr(std::move(result));
+    return finish_expr_result(std::move(result), ctx.int_overflow);
 }

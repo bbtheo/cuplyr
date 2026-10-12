@@ -778,6 +778,36 @@ resolve_by <- function(.data, by_quo, arg_name = ".by", call = rlang::caller_env
   names(loc)
 }
 
+# F42: run `attempt()`, verb pushes that may raise `cuplyr_error_sum_overflow`
+# (an eager table executes them on the spot), and run `on_overflow()` instead
+# if one does. The attempt's warnings are held back: they're re-raised when the
+# attempt succeeds and dropped when it overflows, since the rerun raises its
+# own (`mutate(s = sum(x + 1L))` would otherwise warn twice). `class` names the
+# condition to catch (summarise() uses its own, see resolve_agg_window_arg()).
+# @keywords internal
+retry_on_sum_overflow <- function(attempt, on_overflow, class = "cuplyr_error_sum_overflow") {
+  held <- list()
+  on.exit(for (w in held) warning(w), add = TRUE)
+  overflowed <- FALSE
+  handlers <- list(function(e) {
+    overflowed <<- TRUE
+    NULL
+  })
+  names(handlers) <- class
+  result <- rlang::inject(tryCatch(
+    withCallingHandlers(attempt(), warning = function(w) {
+      held[[length(held) + 1L]] <<- w
+      invokeRestart("muffleWarning")
+    }),
+    !!!handlers
+  ))
+  if (overflowed) {
+    held <- list()
+    return(on_overflow())
+  }
+  result
+}
+
 #' Notify about a CPU-eval fallback, gated by `options(cuplyr.fallback = )`
 #'
 #' Per D4: default is silent (keeps existing eager behavior unchanged,

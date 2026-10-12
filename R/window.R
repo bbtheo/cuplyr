@@ -180,7 +180,7 @@ window_arg_cols <- function(ir) {
 #   `existing_names` (character vector, grows as names are allocated)
 # @return Character scalar, the new spec's `output_col`
 # @keywords internal
-extract_one_window_call <- function(node, schema, state) {
+extract_one_window_call <- function(node, schema, state, key = NULL) {
   entry <- ir_call_registry[[node$op]]
 
   value_col <- NA_character_
@@ -213,17 +213,30 @@ extract_one_window_call <- function(node, schema, state) {
   out_name <- next_window_temp_name(state, "win_n", "..win")
   state$existing_names <- c(state$existing_names, out_name)
 
+  # F42: a window sum() of INT32/BOOL8 is declared INT32 (an integer sum).
+  out_type <- ir_infer_type(node, schema)
+  int_sum <- identical(node$op, "sum") && identical(unname(out_type), "INT32")
+
   spec <- window_spec(
     output_col = out_name,
     fn = node$op,
     value_col = value_col,
     order_cols = order_cols,
     order_desc = order_desc,
-    output_type = ir_infer_type(node, schema),
+    output_type = out_type,
     n = if (is.null(node$meta$n)) NA_integer_ else node$meta$n,
     default = node$meta$default,
     na_rm = isTRUE(node$meta$na_rm)
   )
+  # "lenient" (filter(), whose window nodes are flagged `on_sum_overflow =
+  # "double"`): a sum that feeds a later stage (it sits inside another window
+  # call's arguments) can't come back FLOAT64, because that stage typed its
+  # output from the declared INT32. Its overflow raises
+  # `cuplyr_error_sum_overflow` (lower_window() reads this spec-level policy).
+  if (int_sum && identical(state$sums, "lenient") && !is.null(key) &&
+      key %in% state$nested_sum_keys) {
+    spec$on_sum_overflow <- "error"
+  }
   state$specs[[out_name]] <- spec
 
   out_name
@@ -302,7 +315,7 @@ ir_extract_windows <- function(ir, schema, state) {
         return(ir_col(cached))
       }
 
-      out_name <- extract_one_window_call(node, schema, state)
+      out_name <- extract_one_window_call(node, schema, state, key)
       state$seen[[key]] <- out_name
       return(ir_col(out_name))
     }
@@ -313,6 +326,31 @@ ir_extract_windows <- function(ir, schema, state) {
   }
 
   walk(ir)
+}
+
+# F42: the `rlang::hash()` keys (as in ir_extract_windows()'s CSE cache) of every
+# `sum()` call that sits inside the arguments of another window call. Such a
+# sum is consumed by a later stage, so extract_one_window_call() doesn't let it
+# overflow to a double when the caller lets top-level sums do so.
+# @keywords internal
+ir_nested_window_sum_keys <- function(ir) {
+  keys <- character()
+  walk <- function(node, under_window) {
+    if (is.null(node) || !identical(node$kind, "call")) {
+      return(invisible())
+    }
+    entry <- ir_call_registry[[node$op]]
+    is_window <- !is.null(entry) && !is.null(entry$window)
+    if (is_window && under_window && identical(node$op, "sum")) {
+      keys <<- c(keys, rlang::hash(list(op = node$op, args = node$args, meta = node$meta)))
+    }
+    for (a in node$args) {
+      walk(a, under_window || is_window)
+    }
+    invisible()
+  }
+  walk(ir, FALSE)
+  keys
 }
 
 # -----------------------------------------------------------------------------
@@ -405,7 +443,8 @@ window_batches <- function(exprs) {
 #   stages = <list of list(pre=, specs=)>, schema = <schema after every
 #   stage's outputs are appended>, win_n = , winarg_n = )`
 # @keywords internal
-decompose_window_group <- function(exprs, schema, win_n = 0L, winarg_n = 0L) {
+decompose_window_group <- function(exprs, schema, win_n = 0L, winarg_n = 0L,
+                                   sums = "int") {
   pending <- exprs
   stages <- list()
   current_schema <- schema
@@ -422,6 +461,12 @@ decompose_window_group <- function(exprs, schema, win_n = 0L, winarg_n = 0L) {
     state$existing_names <- current_schema$names
     state$win_n <- win_n
     state$winarg_n <- winarg_n
+    state$sums <- sums
+    state$nested_sum_keys <- if (identical(sums, "lenient")) {
+      unique(unlist(lapply(pending, ir_nested_window_sum_keys), use.names = FALSE))
+    } else {
+      character()
+    }
 
     pending <- lapply(pending, function(e) ir_extract_windows(e, current_schema, state))
 
@@ -494,6 +539,13 @@ decompose_window_group <- function(exprs, schema, win_n = 0L, winarg_n = 0L) {
 #' @param group_cols Character vector of group-by column names (passed
 #'   through unchanged for a future `ast_window()` to consume -- W1's own
 #'   decomposition logic doesn't need to inspect these at all)
+#' @param sums (F42) How an integer/logical window `sum()` is typed. `"int"`
+#'   (default): INT32, as dplyr's integer sum. `"lenient"` (lazy `filter()`,
+#'   whose window nodes are flagged `on_sum_overflow = "double"`): INT32 too, and a
+#'   top-level sum may come back FLOAT64 when it overflows; one that feeds a
+#'   later stage (inside another window call's arguments) has its spec flagged
+#'   `on_sum_overflow = "error"` instead, because that stage is typed from the
+#'   INT32.
 #' @return `list(stages, post, schema, group_cols)`:
 #'   \itemize{
 #'     \item `stages`: list of `list(pre = <list of make_mutate_expr()
@@ -508,7 +560,9 @@ decompose_window_group <- function(exprs, schema, win_n = 0L, winarg_n = 0L) {
 #'     \item `group_cols`: passed through unchanged
 #'   }
 #' @keywords internal
-plan_window_stages <- function(exprs, schema, group_cols = character()) {
+plan_window_stages <- function(exprs, schema, group_cols = character(),
+                               sums = c("int", "lenient")) {
+  sums <- match.arg(sums)
   if (length(exprs) == 0) {
     return(list(stages = list(), post = exprs, schema = schema, group_cols = group_cols))
   }
@@ -527,7 +581,8 @@ plan_window_stages <- function(exprs, schema, group_cols = character()) {
 
   for (batch_idx in window_batches(exprs)) {
     group_exprs <- exprs[batch_idx]
-    decomposed <- decompose_window_group(group_exprs, running_schema, win_n, winarg_n)
+    decomposed <- decompose_window_group(group_exprs, running_schema, win_n, winarg_n,
+                                         sums)
     win_n <- decomposed$win_n
     winarg_n <- decomposed$winarg_n
 

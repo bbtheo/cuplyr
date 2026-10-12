@@ -486,44 +486,25 @@ test_that("mutate() floor(int_col) promotes to double like dplyr (lazy)", {
   expect_same_as_dplyr_lazy(df, pipeline)
 })
 
-test_that("mutate() INT32 arithmetic overflow wraps, unlike dplyr's NA (documented divergence, not fixed)", {
+test_that("mutate() INT32 arithmetic overflow is NA with a warning, like dplyr", {
   skip_if_no_gpu()
-  # Not an oracle-comparison test: R promotes an overflowing integer
-  # addition to NA with a warning ("NAs produced by integer overflow"),
-  # while cuplyr's INT32 arithmetic is plain fixed-width C++ int32_t
-  # addition, which silently wraps around -- the same divergence flagged in
-  # R/mutate.R's roxygen ("this means INT32 arithmetic can silently wrap
-  # around on overflow ... rather than promoting to a wider type"). Per the
-  # T6 task brief this is a documented, not fixed, divergence -- pin the
-  # actual GPU behavior directly instead of comparing to the (deliberately
-  # different) dplyr oracle.
-  #
-  # Two sub-cases, because R's own integer type reserves the INT32_MIN bit
-  # pattern (-2147483648) as its NA_INTEGER sentinel -- it isn't a
-  # representable integer *value* in R at all (`-2147483647L - 1L` itself
-  # overflows and warns). So:
-  #  - .Machine$integer.max + 1L wraps to INT32_MIN at the bit level, which
-  #    R's collect() then reads back as NA (a coincidental, silent collision
-  #    with R's own sentinel, NOT cuplyr detecting the overflow).
-  #  - .Machine$integer.max + 2L wraps to INT32_MIN + 1, which IS a normal,
-  #    representable, non-NA R integer (-2147483647L) -- this is the case
-  #    that unambiguously demonstrates real wraparound rather than an NA
-  #    coincidence.
+  # R gives NA with the warning "NAs produced by integer overflow" (F42; the
+  # F42 acceptance tests cover the full contract). -2^31 is R's NA_integer_,
+  # so .Machine$integer.max + 2L must be NA too, not a wrapped -2147483647L.
   df <- data.frame(i = c(.Machine$integer.max, .Machine$integer.max, 1L))
   gpu_df <- tbl_gpu(df)
 
-  result1 <- dplyr::mutate(gpu_df, w = i + 1L) |> collect()
+  result1 <- suppressWarnings(dplyr::mutate(gpu_df, w = i + 1L) |> collect())
   expect_equal(result1$w[3], 2L)
-  expect_true(is.na(result1$w[1]))  # INT32_MIN bit pattern == R's NA_INTEGER
+  expect_true(is.na(result1$w[1]))
 
-  result2 <- dplyr::mutate(gpu_df, w = i + 2L) |> collect()
+  result2 <- suppressWarnings(dplyr::mutate(gpu_df, w = i + 2L) |> collect())
   expect_equal(result2$w[3], 3L)
-  expect_equal(result2$w[1], -2147483647L)  # genuine wraparound, not NA
+  expect_true(is.na(result2$w[1]))  # wrapped to -2147483647 before F42
+  expect_warning(dplyr::mutate(gpu_df, w = i + 2L), "NAs produced by integer overflow")
 
-  # dplyr/R's own behavior for comparison: NA with a warning, no wrap at all.
-  r_result <- suppressWarnings(dplyr::mutate(df, w = i + 1L))
+  r_result <- suppressWarnings(dplyr::mutate(df, w = i + 2L))
   expect_true(is.na(r_result$w[1]))
-  expect_warning(dplyr::mutate(df, w = i + 1L), "overflow")
 })
 
 # =============================================================================

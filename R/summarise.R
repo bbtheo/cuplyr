@@ -374,11 +374,24 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
 
   auto_name_dots(expanded, "summarise")  # only for its unnamed-expression warning
 
+  cpu <- function() {
+    gpu_fallback("summarise", .data, function(tbl) {
+      rlang::inject(dplyr::summarise(tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo))
+    })
+  }
+  # F42: an integer window sum() in an aggregation's argument that overflows
+  # in some group reruns the whole call on the CPU (resolve_agg_window_arg()),
+  # in both modes, as the window stages run at summarise(). The GPU attempt's
+  # warnings are dropped then: dplyr raises its own.
+  gpu_or_cpu <- function(attempt) {
+    retry_on_sum_overflow(attempt, cpu, class = "cuplyr_summarise_rerun")
+  }
+
   if (by_given) {
     # `.by=` summarise is always ungrouped (Phase 5, task W9); `.groups=`
     # can never reach here alongside `.by=` (dplyr's own generic already
     # rejects that combination before this method is even dispatched to).
-    return(summarise_by_desugar(.data, dots, by_cols))
+    return(gpu_or_cpu(function() summarise_by_desugar(.data, dots, by_cols)))
   }
 
   retained_groups <- resolve_summarise_groups(.data$groups, .groups, caller_env)
@@ -386,17 +399,12 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   # F33: a `.drop = FALSE` grouping with a factor key also emits the empty
   # groups. The test reads the schema only, so the default path pays nothing.
   if (summarise_wants_empty_groups(.data)) {
-    cpu <- function() {
-      gpu_fallback("summarise", .data, function(tbl) {
-        rlang::inject(dplyr::summarise(tbl, !!!orig_dots, .groups = .groups))
-      })
-    }
     # An aggregate named like a key replaces it; rare enough for the CPU.
     if (any(names(dots) %in% .data$groups)) return(cpu())
-    return(summarise_with_empty_groups(.data, dots, retained_groups, cpu))
+    return(gpu_or_cpu(function() summarise_with_empty_groups(.data, dots, retained_groups, cpu)))
   }
 
-  summarise_core(.data, dots, retained_groups)
+  gpu_or_cpu(function() summarise_core(.data, dots, retained_groups))
 }
 
 # Internal: TRUE iff summarise() of `.data` has to add rows for empty groups
@@ -1510,8 +1518,30 @@ preprocess_agg_expressions <- function(.data, dots) {
 # @keywords internal
 resolve_agg_window_arg <- function(working_data, ir, fn_name, dot_index) {
   exprs <- stats::setNames(list(ir), "..agg_arg..")
-  plan <- plan_window_stages(exprs, current_schema(working_data), working_data$groups)
+  schema <- current_schema(working_data)
 
+  # F42: an integer window sum() inside the aggregation's argument is INT32, so
+  # arithmetic on it is checked like dplyr's (`x * sum(x)`, also under a
+  # row-level window: `last(cumsum(x * sum(x)))`). Such a sum can't become a
+  # double mid-plan (later stages and the temp column below are typed from the
+  # INT32), and dplyr makes only the overflowing groups' sums doubles: the
+  # others stay integers, and arithmetic on them still overflows to NA. So an
+  # overflow (raised here: resolve_agg_window_plan() computes the stages, and
+  # the caller has already computed any earlier pending ops) asks
+  # summarise.tbl_gpu() to rerun the whole call on the CPU.
+  plan <- plan_window_stages(exprs, schema, working_data$groups)
+  tryCatch(
+    resolve_agg_window_plan(working_data, plan, fn_name, dot_index),
+    cuplyr_error_sum_overflow = function(e) {
+      rlang::abort("An integer window sum() overflowed inside summarise().",
+                   class = "cuplyr_summarise_rerun")
+    }
+  )
+}
+
+# Internal: run a planned window decomposition for resolve_agg_window_arg()
+# @keywords internal
+resolve_agg_window_plan <- function(working_data, plan, fn_name, dot_index) {
   all_specs <- unlist(lapply(plan$stages, `[[`, "specs"), recursive = FALSE)
   unlowerable <- Filter(Negate(window_spec_lowerable), all_specs)
   if (length(unlowerable) > 0) {
@@ -1531,17 +1561,19 @@ resolve_agg_window_arg <- function(working_data, ir, fn_name, dot_index) {
     )
   }
 
+  # create_temp_column() reads `$ptr`, which is stale while the window stages
+  # above are still pending lazy ops: run them (silently -- the caller has
+  # already reported its own materialization). Also for a bare column, so an
+  # integer sum overflow is raised here, where resolve_agg_window_arg() can
+  # replan, and not at collect().
+  if (has_pending_ops(working_data)) {
+    working_data <- compute(working_data)
+  }
+
   post_ir <- plan$post[["..agg_arg.."]]
 
   if (identical(post_ir$kind, "col")) {
     return(list(data = working_data, col_name = post_ir$name))
-  }
-
-  # create_temp_column() reads `$ptr`, which is stale while the window stages
-  # above are still pending lazy ops: run them (silently -- the caller has
-  # already reported its own materialization).
-  if (has_pending_ops(working_data)) {
-    working_data <- compute(working_data)
   }
 
   temp_col_name <- paste0(".temp_agg_win_", dot_index)
@@ -1589,10 +1621,10 @@ create_temp_column <- function(.data, col_name, ir, keep_bool = FALSE) {
 
   bound_ir <- ir_bind(ir, schema)
 
-  new_ptr <- wrap_gpu_call(
+  new_ptr <- warn_int_overflow(wrap_gpu_call(
     "summarise_mutate_expr",
     gpu_mutate_expr(.data$ptr, list(bound_ir), col_name, new_type, schema$names)
-  )
+  ))
 
   # Everything else on the schema (notably `factor_levels`, which a factor
   # grouping key still needs) is carried over.

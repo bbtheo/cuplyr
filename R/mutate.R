@@ -146,8 +146,10 @@
 #'       \item `cumsum()`/`cummax()`/`cummin()`/`cumprod()` -- matching R's
 #'         own NA-propagation (`cumsum(c(1, 2, NA, 4))` is `1, 3, NA, NA`:
 #'         once an NA is seen, every later cumulative value in that group is
-#'         NA too)
-#'       \item `cummean()` (`cumsum(x) / row_number()`), `cumall()`/
+#'         NA too). The `cumsum()` of an integer or logical is an integer
+#'         that is `NA` from the first overflow on (with R's warning), as in R
+#'       \item `cummean()` (`cumsum(x) / row_number()`, accumulated in
+#'         double), `cumall()`/
 #'         `cumany()` (tri-state-encoded `cummin()`/`cummax()`), and
 #'         `consecutive_id()` (single-column only; a run-length group id
 #'         that increments whenever the input value changes, treating
@@ -164,7 +166,12 @@
 #'         table, ungrouped); `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()`
 #'         match R's own `na.rm = FALSE` default (ANY `NA` in the group
 #'         makes the WHOLE group's result `NA`); `n()` always counts every
-#'         row regardless of `NA`s
+#'         row regardless of `NA`s. `sum()` of an integer or logical is an
+#'         integer, as in dplyr. When a sum leaves the integer range dplyr
+#'         returns a double (for the whole column, and for any expression
+#'         on it): an eager call is then rerun by dplyr on the CPU, and a
+#'         lazy plan, whose schema is fixed, raises
+#'         `cuplyr_error_sum_overflow` at `collect()`
 #'       \item `first(x, order_by = NULL)` / `last(x, order_by = NULL)` /
 #'         `nth(x, n, order_by = NULL)` -- the first/last/`n`th row of the
 #'         group in its current row order, or in `order_by`'s order when
@@ -207,10 +214,11 @@
 #'     `1L / 2L` and `2L ^ 2L` are both doubles).
 #'   \item `+`, `-`, `*`, `%%`, `%/%` preserve integer types: the result is
 #'     `INT32` when every input column and R literal involved is integer
-#'     or logical (`TRUE + TRUE` is `2L`, matching R). Note this means
-#'     `INT32` arithmetic can silently wrap around on overflow (as in
-#'     plain R/C++ integer arithmetic) rather than promoting to a wider
-#'     type. If any input is `FLOAT64`/`FLOAT32`, the result is
+#'     or logical (`TRUE + TRUE` is `2L`, matching R). Like R, an
+#'     integer `+`, `-` or `*` whose result leaves
+#'     `.Machine$integer.max` is `NA` with the warning "NAs produced by
+#'     integer overflow" (once per call; at `collect()` for a lazy table),
+#'     and `%/%`/`%%` by `0L` are `NA`. If any input is `FLOAT64`/`FLOAT32`, the result is
 #'     `FLOAT64`; otherwise if any input is `INT64`, the result is
 #'     `INT64`. A bare R numeric literal (e.g. the `1` in
 #'     `mutate(y = int_col + 1)`) is a *double* in R, so it promotes the
@@ -536,24 +544,46 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
     return(mutate_window_fallback(fallback_data, dots, keep, before_quo, after_quo, by_quo))
   }
 
-  result <- .data
-  for (batch_plan in plan$batch_plans) {
-    for (stage in batch_plan$stages) {
-      if (length(stage$pre) > 0) {
-        result <- push_op(result, ast_mutate(input_node(result), stage$pre))
+  emit <- function() {
+    result <- .data
+    for (batch_plan in plan$batch_plans) {
+      for (stage in batch_plan$stages) {
+        if (length(stage$pre) > 0) {
+          result <- push_op(result, ast_mutate(input_node(result), stage$pre))
+        }
+        result <- push_op(result, ast_window(input_node(result), stage$specs, orig_groups))
       }
-      result <- push_op(result, ast_window(input_node(result), stage$specs, orig_groups))
+      result <- push_op(result, ast_mutate(input_node(result), batch_plan$expressions))
     }
-    result <- push_op(result, ast_mutate(input_node(result), batch_plan$expressions))
+
+    select_node <- mutate_keep_select_node(
+      result, orig_names, orig_groups, expressions, keep, before_quo, after_quo,
+      drop = drop, dropped = dropped
+    )
+    if (!is.null(select_node)) {
+      result <- push_op(result, select_node)
+    }
+    result
   }
 
-  select_node <- mutate_keep_select_node(
-    result, orig_names, orig_groups, expressions, keep, before_quo, after_quo,
-    drop = drop, dropped = dropped
-  )
-  if (!is.null(select_node)) {
-    result <- push_op(result, select_node)
+  # F42: an integer/logical window sum() is declared INT32, but dplyr returns a
+  # double when a sum leaves the integer range (one overflowing group makes the
+  # whole column double, and `sum(x) + 1L` follows). The eager schema is only
+  # known after the fact, so such a call is rerun whole by dplyr; overflow is
+  # rare, so the CPU path costs nothing in the common case. A lazy plan has a
+  # fixed schema and raises `cuplyr_error_sum_overflow` at collect() instead.
+  if (identical(.data$exec_mode, "eager")) {
+    # The CPU rerun's upload warns about fractional dates itself.
+    return(retry_on_sum_overflow(
+      function() {
+        result <- emit()
+        warn_fractional_dates(fractional)
+        result
+      },
+      function() mutate_window_fallback(fallback_data, dots, keep, before_quo, after_quo, by_quo)
+    ))
   }
+  result <- emit()
   warn_fractional_dates(fractional)
   result
 }

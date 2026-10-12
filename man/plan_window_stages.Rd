@@ -4,7 +4,12 @@
 \alias{plan_window_stages}
 \title{Plan the window-decomposition stages for a set of expressions}
 \usage{
-plan_window_stages(exprs, schema, group_cols = character())
+plan_window_stages(
+  exprs,
+  schema,
+  group_cols = character(),
+  sums = c("int", "lenient")
+)
 }
 \arguments{
 \item{exprs}{A \emph{named} list of IR nodes, one per dot, in verb-call
@@ -17,6 +22,14 @@ types=))}
 \item{group_cols}{Character vector of group-by column names (passed
 through unchanged for a future \code{ast_window()} to consume -- W1's own
 decomposition logic doesn't need to inspect these at all)}
+
+\item{sums}{(F42) How an integer/logical window \code{sum()} is typed. \code{"int"}
+(default): INT32, as dplyr's integer sum. \code{"lenient"} (lazy \code{filter()},
+whose window nodes are flagged \code{on_sum_overflow = "double"}): INT32 too, and a
+top-level sum may come back FLOAT64 when it overflows; one that feeds a
+later stage (inside another window call's arguments) has its spec flagged
+\code{on_sum_overflow = "error"} instead, because that stage is typed from the
+INT32.}
 }
 \value{
 \code{list(stages, post, schema, group_cols)}:

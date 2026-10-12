@@ -220,10 +220,20 @@ ast_slice <- function(input, mode, amount = NULL, is_prop = NULL,
 #'   `character()` for an ungrouped window (section 3: lowering substitutes
 #'   a constant key column and skips the sort when there's also no
 #'   `order_cols` on every spec)
+#' @param on_sum_overflow (F42) What to do when an integer/logical window
+#'   `sum()` (declared INT32) leaves R's integer range at execution. `"error"`:
+#'   raise `cuplyr_error_sum_overflow` (mutate() and eager filter(): eager
+#'   reruns the call on the CPU, lazy fails loudly). `"double"`: the column
+#'   comes back FLOAT64, as in dplyr, for a consumer that reads the real column
+#'   type (lazy `filter()`'s predicate). A spec's own `on_sum_overflow` field,
+#'   when set, overrides this for that spec (`filter()` sets `"error"` on a sum
+#'   a later stage consumes).
 #' @return An ast_window node
 #' @keywords internal
-ast_window <- function(input, specs, group_cols = character()) {
-  ast_node("window", input = input, specs = specs, group_cols = group_cols)
+ast_window <- function(input, specs, group_cols = character(),
+                       on_sum_overflow = "error") {
+  ast_node("window", input = input, specs = specs, group_cols = group_cols,
+           on_sum_overflow = on_sum_overflow)
 }
 
 #' Create a rename AST node

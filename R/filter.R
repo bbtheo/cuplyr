@@ -470,11 +470,35 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       return(filter_window_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
     }
 
-    for (stage in plan$stages) {
-      if (length(stage$pre) > 0) {
-        .data <- push_op(.data, ast_mutate(input_node(.data), stage$pre))
+    # F42: an integer window sum() is INT32, so arithmetic on it is checked as
+    # in dplyr. dplyr makes only the overflowing groups' sums doubles; the
+    # other groups' sums stay integers and arithmetic on them still overflows
+    # to NA. An eager call therefore reruns on the CPU when any sum overflows
+    # (exact, and overflow is rare). A lazy plan lets a top-level sum come back
+    # FLOAT64 (inexact only when another group's in-range sum then meets
+    # overflowing integer arithmetic), and a sum nested in another window call
+    # (`max(x * sum(y))`), which a later stage reads as INT32, raises
+    # `cuplyr_error_sum_overflow` at collect() (filter_plan_window()).
+    eager <- identical(.data$exec_mode, "eager")
+    push_stages <- function(d) {
+      for (stage in plan$stages) {
+        if (length(stage$pre) > 0) {
+          d <- push_op(d, ast_mutate(input_node(d), stage$pre))
+        }
+        d <- push_op(d, ast_window(input_node(d), stage$specs, verb_groups,
+                                   on_sum_overflow = if (eager) "error" else "double"))
       }
-      .data <- push_op(.data, ast_window(input_node(.data), stage$specs, verb_groups))
+      d
+    }
+    if (eager) {
+      staged <- retry_on_sum_overflow(function() list(data = push_stages(.data)),
+                                      function() NULL)
+      if (is.null(staged)) {
+        return(filter_window_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
+      }
+      .data <- staged$data
+    } else {
+      .data <- push_stages(.data)
     }
 
     for (k in seq_along(window_idx)) {
@@ -622,7 +646,15 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
 #   errored or produced an unlowerable spec
 # @keywords internal
 filter_plan_window <- function(exprs, schema, group_cols) {
-  plan <- tryCatch(plan_window_stages(exprs, schema, group_cols), error = function(e) NULL)
+  # sums = "lenient": an integer window sum() is INT32 (checked integer
+  # arithmetic on it, as in dplyr). A lazy call pushes the window nodes with
+  # on_sum_overflow = "double", so a top-level sum becomes a double only when
+  # it overflows (F42); the temp columns never reach the output schema. A sum
+  # nested in another window call can't change type mid-plan: its spec raises
+  # on overflow instead. An eager call reruns on the CPU on any overflow (see
+  # the caller).
+  plan <- tryCatch(plan_window_stages(exprs, schema, group_cols, sums = "lenient"),
+                   error = function(e) NULL)
   if (is.null(plan)) {
     return(NULL)
   }

@@ -4,7 +4,7 @@
 \alias{ast_window}
 \title{Create a window AST node}
 \usage{
-ast_window(input, specs, group_cols = character())
+ast_window(input, specs, group_cols = character(), on_sum_overflow = "error")
 }
 \arguments{
 \item{input}{Input AST node}
@@ -15,6 +15,15 @@ ast_window(input, specs, group_cols = character())
 \code{character()} for an ungrouped window (section 3: lowering substitutes
 a constant key column and skips the sort when there's also no
 \code{order_cols} on every spec)}
+
+\item{on_sum_overflow}{(F42) What to do when an integer/logical window
+\code{sum()} (declared INT32) leaves R's integer range at execution. \code{"error"}:
+raise \code{cuplyr_error_sum_overflow} (mutate() and eager filter(): eager
+reruns the call on the CPU, lazy fails loudly). \code{"double"}: the column
+comes back FLOAT64, as in dplyr, for a consumer that reads the real column
+type (lazy \code{filter()}'s predicate). A spec's own \code{on_sum_overflow} field,
+when set, overrides this for that spec (\code{filter()} sets \code{"error"} on a sum
+a later stage consumes).}
 }
 \value{
 An ast_window node

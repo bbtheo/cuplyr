@@ -57,6 +57,9 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/datetime.hpp>
+#include <cudf/aggregation.hpp>
+#include <cudf/null_mask.hpp>
+#include <cudf/reduction.hpp>
 #include <cudf/replace.hpp>
 #include <cudf/round.hpp>
 #include <cudf/scalar/scalar.hpp>
@@ -150,6 +153,9 @@ inline std::string expr_type_to_str(cudf::data_type type) {
 struct eval_ctx {
     std::vector<cudf::column_view> cols;
     std::vector<std::unique_ptr<cudf::column>> owned;
+    // F42: set when a checked integer +, -, * left R's integer range somewhere
+    // (the value became NA). The entry points hand it to R, which warns.
+    bool int_overflow = false;
 
     cudf::table_view view() const { return cudf::table_view(cols); }
 
@@ -242,6 +248,9 @@ inline bool ir_op_is_comparison(const std::string& op) {
 // == "ABC"`) -- see that function's own updated doc comment. Defined in
 // full further down this file.
 inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx);
+// F42: 0 = ordinary node, 1 = integer +, -, * (overflow checked), 2 = integer
+// %/% or %% (zero divisor gives NA). Defined after resolve_static_type().
+inline int checked_int_kind(const std::string& op, Rcpp::List node, const eval_ctx& ctx);
 
 // op_dispatches_to_ast(): materialize()'s top-level "build_ast+compute_column
 // vs apply_handler" decision for a call node. This is deliberately NOT the
@@ -264,6 +273,7 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
 inline bool op_dispatches_to_ast(const std::string& op, Rcpp::List node, const eval_ctx& ctx) {
     cudf::ast::ast_operator dummy;
     if (!ast_op_from_name(op, dummy)) return false;
+    if (checked_int_kind(op, node, ctx) != 0) return false;  // F42: handler
 
     if (ir_op_is_comparison(op)) {
         Rcpp::List args = node["args"];
@@ -466,12 +476,20 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
     if (op == "+" || op == "-" || op == "*" || op == "%%" || op == "%/%") {
         // Approximates infer_mutate_output_type() for the purpose of typing an
         // intermediate literal only -- the real output_type always comes from R.
+        // A bare untyped NA adopts its sibling's type, so it doesn't count.
+        // Logical-only operands give an integer, as in R (F42).
         int best = 0;
+        bool any_operand = false;
         for (int i = 0; i < args.size(); ++i) {
-            cudf::data_type t = resolve_static_type(args[i], ctx);
+            Rcpp::List a = args[i];
+            if (ir_kind(a) == "lit" && Rf_isNull(a["type"]) && ir_lit_is_na(a)) continue;
+            any_operand = true;
+            cudf::data_type t = resolve_static_type(a, ctx);
             int r = promotion_rank(t.id());
             if (r > best) best = r;
         }
+        if (!any_operand) return cudf::data_type{cudf::type_id::FLOAT64};
+        if (best == 0) best = 1;
         return cudf::data_type{type_by_promotion_rank(best)};
     }
 
@@ -509,6 +527,37 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
     // %in%'s first argument type, or any other unrecognized op: safe FLOAT64
     // default (matches ir_infer_type()'s bare-NA-in-isolation fallback).
     return cudf::data_type{cudf::type_id::FLOAT64};
+}
+
+// -----------------------------------------------------------------------------
+// F42: integer semantics. R's integer +, -, * give NA (with a warning) when the
+// result leaves +-.Machine$integer.max, and %/% / %% by 0L give NA, where cudf
+// INT32 arithmetic wraps or returns garbage. A binary node of those ops whose
+// operands are all INT32/BOOL8 (a bare NA literal adopts its sibling's type)
+// is therefore not an AST op itself: apply_checked_int() (below) checks the
+// range in INT64 and nulls the rows that are out of range. Its ancestors still
+// fuse into one AST that references the materialized result like a column
+// (ast_expressible()). Unary minus and abs() can't overflow and stay on the
+// AST path.
+// -----------------------------------------------------------------------------
+
+inline int checked_int_kind(const std::string& op, Rcpp::List node, const eval_ctx& ctx) {
+    int kind = 0;
+    if (op == "+" || op == "-" || op == "*") kind = 1;
+    else if (op == "%/%" || op == "%%") kind = 2;
+    else return 0;
+
+    Rcpp::List args = node["args"];
+    if (args.size() != 2) return 0;
+    bool any_operand = false;
+    for (int i = 0; i < args.size(); ++i) {
+        Rcpp::List a = args[i];
+        if (ir_kind(a) == "lit" && Rf_isNull(a["type"]) && ir_lit_is_na(a)) continue;
+        any_operand = true;
+        cudf::type_id id = resolve_static_type(a, ctx).id();
+        if (id != cudf::type_id::INT32 && id != cudf::type_id::BOOL8) return 0;
+    }
+    return any_operand ? kind : 0;
 }
 
 // -----------------------------------------------------------------------------
@@ -736,6 +785,10 @@ inline bool ast_expressible(Rcpp::List node, const eval_ctx& ctx) {
     std::string op = Rcpp::as<std::string>(node["op"]);
     cudf::ast::ast_operator dummy;
     if (!ast_op_from_name(op, dummy)) return false;
+    // F42: a checked integer op is its own kernel (apply_checked_int()), which
+    // build_ast() materializes and references like a column, so it never stops
+    // its ancestors from fusing.
+    if (checked_int_kind(op, node, ctx) != 0) return true;
 
     Rcpp::List args = node["args"];
     for (int i = 0; i < args.size(); ++i) {
@@ -788,6 +841,12 @@ inline cudf::ast::expression const& build_ast(Rcpp::List node,
     if (!ast_op_from_name(op, ast_op)) {
         // Not actually ast-native (shouldn't happen if the caller checked
         // ast_expressible() first) -- fall back to materializing it whole.
+        cudf::size_type idx = materialize(node, ctx);
+        return tree.emplace<cudf::ast::column_reference>(idx);
+    }
+    if (checked_int_kind(op, node, ctx) != 0) {
+        // F42: a checked integer op is its own kernel (apply_handler()); the
+        // parent references the materialized column.
         cudf::size_type idx = materialize(node, ctx);
         return tree.emplace<cudf::ast::column_reference>(idx);
     }
@@ -1082,6 +1141,211 @@ inline cudf::ast::expression const& build_join_ast(
 }
 
 // -----------------------------------------------------------------------------
+// apply_checked_int() (F42): see checked_int_kind().
+//
+// Integer +, -, * (kind 1). A chain of them (up to kMaxFusedChecked nodes) is
+// two compute_column() calls, both without a null literal (the nullable AST
+// path is much slower) and a reduction:
+//
+//   value  the chain in INT32. cudf wraps on overflow; harmless, because every
+//          row where some node left the range is nulled below.
+//   ok     BOOL8, the AND (NULL_LOGICAL_AND) of one range test per node,
+//          ABS(r) <= .Machine$integer.max, where r is that node's exact value
+//          in INT64 (a plain, unguarded INT64 subtree over CAST_TO_INT64
+//          leaves).
+//
+// `ok` is null where an operand is null and false only where a node's operands
+// were all valid and its result left the range (R's NA, with a warning), so
+// `all(ok)` skipping nulls is exactly "no overflow": no null-count heuristics,
+// and a null in another branch can't hide an overflow (`(x * y) + z` with z
+// NA: R still warns for x * y). On overflow the null mask of `value` becomes
+// bools_to_mask(ok), which is valid only where ok is true.
+//
+// Wrapping is benign. A wrapped value (INT32 `value`, or the INT64 `r` of a
+// node above a large product) exists only in a row where some node left the
+// range. The deepest such node has exact, in-range operands, so its own test
+// is valid and false, which makes `ok` false and nulls the row whatever the
+// wrapped tests above it say. libcudf's AST operators are precompiled code on
+// runtime values and the GPU doesn't trap on signed overflow. The verb signals
+// the warning (ctx.int_overflow). The AST shares no subexpressions, so the tree
+// size is the sum of the node subtrees: hence the cap. Anything that is not
+// such a node (columns, other ops, a node with a null literal) is a leaf,
+// materialized first. A node with a null literal is NA on every row.
+//
+// %/% and %% (kind 2): in range iff the divisor != 0 (NA, no warning). Computed
+// in INT64 (FLOOR_DIV's declared AST type isn't integral) and cast to INT32.
+// -----------------------------------------------------------------------------
+
+// Measured on 8/16/30-term chains at 5e6 rows: 3 and 4 are equally fast and
+// beat 8 by 10-15% (each range test re-evaluates its node's whole INT64 subtree,
+// so a group's cost grows with the square of its size).
+constexpr int kMaxFusedChecked = 4;
+
+// A literal that is NA, however the IR spells it (the na flag, a NULL value,
+// or a typed NA such as NA_integer_ whose na flag is FALSE).
+inline bool checked_lit_is_null(Rcpp::List a) {
+    if (ir_lit_is_na(a)) return true;
+    SEXP v = a["value"];
+    if (Rf_isNull(v)) return true;
+    // As build_scalar("INT64", ...) reads it, without building a device scalar.
+    return Rcpp::NumericVector::is_na(Rcpp::as<double>(v));
+}
+
+inline bool checked_has_null_literal(Rcpp::List node) {
+    Rcpp::List args = node["args"];
+    for (int i = 0; i < args.size(); ++i) {
+        Rcpp::List a = args[i];
+        if (ir_kind(a) == "lit" && checked_lit_is_null(a)) return true;
+    }
+    return false;
+}
+
+struct checked_tree {
+    cudf::ast::tree tree;
+    std::vector<std::unique_ptr<cudf::scalar>> scalars;
+    std::vector<cudf::ast::expression const*> oks;   // one range test per fused node
+    std::vector<cudf::size_type> leaf_cols;          // ctx indices of leaf columns
+    int fused = 0;                                   // nodes entered as fused
+};
+
+struct checked_vr {
+    cudf::ast::expression const* v;   // INT32 value (wraps)
+    cudf::ast::expression const* r;   // exact INT64 value
+};
+
+inline checked_vr fuse_checked(Rcpp::List node, checked_tree& ct, eval_ctx& ctx) {
+    namespace ast = cudf::ast;
+    std::string kind = ir_kind(node);
+
+    if (kind == "lit") {
+        return {&make_literal("INT32", node["value"], false, ct.tree, ct.scalars),
+                &make_literal("INT64", node["value"], false, ct.tree, ct.scalars)};
+    }
+
+    // The budget is charged on entry (pre-order): a node's own range test is
+    // only pushed after its children return, so counting finished tests would
+    // let a whole left- or right-deep chain fuse, at a cost quadratic in its
+    // length. Past the cap a node is a leaf: materialize() evaluates it as its
+    // own fused chain, with a fresh budget.
+    bool fusable = false;
+    if (kind == "call" && ct.fused < kMaxFusedChecked) {
+        std::string op = Rcpp::as<std::string>(node["op"]);
+        fusable = checked_int_kind(op, node, ctx) == 1 && !checked_has_null_literal(node);
+        if (fusable) ++ct.fused;
+    }
+
+    if (!fusable) {
+        cudf::size_type idx = materialize(node, ctx);
+        if (ctx.cols[idx].type().id() == cudf::type_id::BOOL8) {
+            // The AST has no cast to INT32.
+            idx = ctx.push(cudf::cast(ctx.cols[idx], cudf::data_type{cudf::type_id::INT32}));
+        }
+        ct.leaf_cols.push_back(idx);
+        ast::expression const& ref = ct.tree.emplace<ast::column_reference>(idx);
+        return {&ref, &ct.tree.emplace<ast::operation>(ast::ast_operator::CAST_TO_INT64, ref)};
+    }
+
+    std::string op = Rcpp::as<std::string>(node["op"]);
+    Rcpp::List args = node["args"];
+    checked_vr lhs = fuse_checked(args[0], ct, ctx);
+    checked_vr rhs = fuse_checked(args[1], ct, ctx);
+    ast::ast_operator ast_op;
+    ast_op_from_name(op, ast_op);
+    ast::expression const& v = ct.tree.emplace<ast::operation>(ast_op, *lhs.v, *rhs.v);
+    ast::expression const& r = ct.tree.emplace<ast::operation>(ast_op, *lhs.r, *rhs.r);
+    ast::expression const& absr = ct.tree.emplace<ast::operation>(ast::ast_operator::ABS, r);
+    ast::expression const& maxlit = make_literal(
+        "INT64", Rcpp::wrap(static_cast<double>(2147483647)), false, ct.tree, ct.scalars);
+    ct.oks.push_back(&ct.tree.emplace<ast::operation>(ast::ast_operator::LESS_EQUAL, absr, maxlit));
+    return {&v, &r};
+}
+
+inline std::unique_ptr<cudf::column> apply_checked_int_add(Rcpp::List node, eval_ctx& ctx) {
+    namespace ast = cudf::ast;
+    Rcpp::List args = node["args"];
+
+    // R evaluates both operands even when one is NA: a nested node still
+    // reports its own overflow. The result is NA on every row.
+    if (checked_has_null_literal(node)) {
+        for (int i = 0; i < args.size(); ++i) {
+            Rcpp::List a = args[i];
+            if (ir_kind(a) != "lit") materialize(a, ctx);
+        }
+        cudf::numeric_scalar<int32_t> na(0, false);
+        return cudf::make_column_from_scalar(na, ctx.view().num_rows());
+    }
+
+    checked_tree ct;
+    checked_vr top = fuse_checked(node, ct, ctx);
+    ast::expression const* ok = ct.oks[0];
+    for (size_t i = 1; i < ct.oks.size(); ++i) {
+        ok = &ct.tree.emplace<ast::operation>(ast::ast_operator::NULL_LOGICAL_AND, *ok, *ct.oks[i]);
+    }
+
+    auto value = cudf::compute_column(ctx.view(), *top.v);
+    auto in_range = cudf::compute_column(ctx.view(), *ok);
+    auto all_ok = cudf::reduce(in_range->view(),
+                               *cudf::make_all_aggregation<cudf::reduce_aggregation>(),
+                               cudf::data_type{cudf::type_id::BOOL8});
+    auto* all_ok_s = static_cast<cudf::numeric_scalar<bool>*>(all_ok.get());
+    // Invalid when every row is null: nothing to report, `value` is all null.
+    if (all_ok_s->is_valid() && !all_ok_s->value()) {
+        ctx.int_overflow = true;
+        auto mask = cudf::bools_to_mask(in_range->view());
+        value->set_null_mask(std::move(*mask.first), mask.second);
+    }
+    return value;
+}
+
+inline std::unique_ptr<cudf::column> apply_checked_int_div(Rcpp::List node, eval_ctx& ctx) {
+    std::string op = Rcpp::as<std::string>(node["op"]);
+    Rcpp::List args = node["args"];
+
+    cudf::ast::tree tree;
+    std::vector<std::unique_ptr<cudf::scalar>> scalars;
+    std::vector<cudf::ast::expression const*> operands;
+
+    for (int i = 0; i < args.size(); ++i) {
+        Rcpp::List a = args[i];
+        if (ir_kind(a) == "lit") {
+            operands.push_back(&make_literal("INT64", a["value"], ir_lit_is_na(a), tree, scalars));
+        } else {
+            cudf::size_type idx = materialize(a, ctx);
+            cudf::ast::expression const& ref = tree.emplace<cudf::ast::column_reference>(idx);
+            operands.push_back(&tree.emplace<cudf::ast::operation>(
+                cudf::ast::ast_operator::CAST_TO_INT64, ref));
+        }
+    }
+
+    cudf::ast::ast_operator ast_op;
+    ast_op_from_name(op, ast_op);
+    cudf::ast::expression const& r_raw =
+        tree.emplace<cudf::ast::operation>(ast_op, *operands[0], *operands[1]);
+    cudf::ast::expression const& r =
+        tree.emplace<cudf::ast::operation>(cudf::ast::ast_operator::CAST_TO_INT64, r_raw);
+    cudf::ast::expression const& zero = make_literal("INT64", Rcpp::wrap(0.0), false, tree, scalars);
+    cudf::ast::expression const& ok = tree.emplace<cudf::ast::operation>(
+        cudf::ast::ast_operator::NOT_EQUAL, *operands[1], zero);
+    cudf::ast::expression const& null_bool = make_literal("BOOL8", R_NilValue, true, tree, scalars);
+    cudf::ast::expression const& guard =
+        tree.emplace<cudf::ast::operation>(cudf::ast::ast_operator::NULL_LOGICAL_OR, ok, null_bool);
+    cudf::ast::expression const& guard64 =
+        tree.emplace<cudf::ast::operation>(cudf::ast::ast_operator::CAST_TO_INT64, guard);
+    cudf::ast::expression const& root =
+        tree.emplace<cudf::ast::operation>(cudf::ast::ast_operator::MUL, r, guard64);
+
+    auto wide = cudf::compute_column(ctx.view(), root);
+    if (wide->null_count() == 0) {
+        wide->set_null_mask(rmm::device_buffer{}, 0);
+    }
+    return cudf::cast(wide->view(), cudf::data_type{cudf::type_id::INT32});
+}
+
+inline std::unique_ptr<cudf::column> apply_checked_int(Rcpp::List node, eval_ctx& ctx, int kind) {
+    return kind == 1 ? apply_checked_int_add(node, ctx) : apply_checked_int_div(node, ctx);
+}
+
+// -----------------------------------------------------------------------------
 // apply_handler(): the non-AST cuDF calls (section 2.3's second table).
 // Column-producing arguments are materialize()'d; literal-only arguments
 // (round()'s decimal places, %in%'s RHS set) are read directly off the IR
@@ -1091,6 +1355,11 @@ inline cudf::ast::expression const& build_join_ast(
 inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ctx) {
     std::string op = Rcpp::as<std::string>(node["op"]);
     Rcpp::List args = node["args"];
+
+    // ---- F42: integer +, -, *, %/%, %% (overflow / zero divisor -> NA) ----
+    if (int kind = checked_int_kind(op, node, ctx)) {
+        return apply_checked_int(node, ctx, kind);
+    }
 
     // ---- %in%: contains(haystack, needles) + the never-NA post-step ----
     if (op == "%in%") {

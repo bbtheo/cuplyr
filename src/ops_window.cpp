@@ -88,6 +88,7 @@
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
 #include "expr_eval.hpp"  // build_scalar(), expr_type_from_str()
+#include "int_sum.hpp"   // narrow_int_sum()
 
 #include <cudf/aggregation.hpp>
 #include <cudf/binaryop.hpp>
@@ -343,6 +344,16 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
 
     std::vector<std::unique_ptr<cudf::column>> appended(static_cast<size_t>(n_appended));
 
+    // F42: reported to the caller as attributes of the result pointer. The
+    // caller signals the cumsum() warning, and either raises F34's sum
+    // overflow error (lazy) or lets the verb fall back to dplyr (eager).
+    bool cumsum_overflow = false;  // an INT32/BOOL8 cumsum() left the integer range
+    // Per appended column (out_pos): an INT32/BOOL8 window sum() became FLOAT64.
+    // Per spec, because the caller's policy is per spec (filter() tolerates a
+    // double for a top-level sum, not for one a later stage consumes).
+    std::vector<bool> sum_overflow(static_cast<size_t>(n_appended), false);
+    bool any_sum_overflow = false;
+
     // Constant zero-valued INT32 key column, built lazily (at most once) --
     // only needed when `group_indices` is empty (an ungrouped window node,
     // section 3 of the design doc).
@@ -538,6 +549,7 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 int spec_index;
                 int primary_request_idx;
                 int indicator_request_idx;  // -1 if no sticky-NA fix needed
+                bool int_cumsum;            // F42: INT32/BOOL8 cumsum(), scanned in INT64
             };
 
             std::vector<cudf::groupby::scan_request> requests;
@@ -545,10 +557,11 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
             // Sticky-NA fix (section 4 of the design doc, cum* numeric
             // family only): the indicator column must outlive gb.scan().
             std::vector<std::unique_ptr<cudf::column>> indicator_keepalive;
+            std::vector<std::unique_ptr<cudf::column>> widened_keepalive;
 
             for (int si : scan_spec_indices) {
                 const WindowSpec& sp = specs[static_cast<size_t>(si)];
-                ScanJob job{si, -1, -1};
+                ScanJob job{si, -1, -1, false};
 
                 cudf::groupby::scan_request req;
                 if (sp.fn == "row_number") {
@@ -565,6 +578,19 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                     cudf::size_type pos = value_pos.at(sp.value_idx);
                     cudf::column_view value_view = work_view.column(pos);
                     req.values = value_view;
+                    // F42: an INT32/BOOL8 cumsum() is scanned in INT64 so the
+                    // running sum is exact (cudf's SUM target type for an INT32
+                    // source; a BOOL8 source is widened first); rows past the
+                    // integer range are nulled below.
+                    if (sp.fn == "cumsum" && (value_view.type().id() == cudf::type_id::INT32 ||
+                                              value_view.type().id() == cudf::type_id::BOOL8)) {
+                        if (value_view.type().id() == cudf::type_id::BOOL8) {
+                            auto wide = cudf::cast(value_view, cudf::data_type{cudf::type_id::INT64});
+                            req.values = wide->view();
+                            widened_keepalive.push_back(std::move(wide));
+                        }
+                        job.int_cumsum = true;
+                    }
                     req.aggregations.push_back(make_cum_scan_agg(sp.fn));
                     job.primary_request_idx = static_cast<int>(requests.size());
                     requests.push_back(std::move(req));
@@ -589,7 +615,7 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
 
             for (int si : rank_spec_indices) {
                 const WindowSpec& sp = specs[static_cast<size_t>(si)];
-                ScanJob job{si, -1, -1};
+                ScanJob job{si, -1, -1, false};
 
                 // The ranked column is this frame's sole order column (just
                 // checked above), so its cudf::order/null_order are exactly
@@ -627,6 +653,54 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
 
                     auto mask_pair = cudf::bools_to_mask(not_seen->view());
                     result->set_null_mask(std::move(*mask_pair.first), mask_pair.second);
+                }
+
+                if (job.int_cumsum) {
+                    // F42: base R's integer cumsum() is NA from the first
+                    // overflow on (sticky, per group, even if the running sum
+                    // comes back in range) and warns. One minmax tells whether
+                    // anything left the range; only then are the rows flagged.
+                    // `bad` is null where the value is already NA, so an
+                    // overflow after an NA is not reported (R stops
+                    // accumulating at an NA).
+                    constexpr int64_t kRIntMax = 2147483647;
+                    if (result->type().id() != cudf::type_id::INT64) {
+                        result = cudf::cast(result->view(), cudf::data_type{cudf::type_id::INT64});
+                    }
+                    bool any_bad = false;
+                    if (result->size() > 0) {
+                        auto [lo, hi] = cudf::minmax(result->view());
+                        auto* lo_s = static_cast<cudf::numeric_scalar<int64_t>*>(lo.get());
+                        auto* hi_s = static_cast<cudf::numeric_scalar<int64_t>*>(hi.get());
+                        any_bad = lo_s->is_valid() && hi_s->is_valid() &&
+                                  (lo_s->value() < -kRIntMax || hi_s->value() > kRIntMax);
+                    }
+                    if (any_bad) {
+                        cumsum_overflow = true;
+                        auto abs_sum = cudf::unary_operation(result->view(), cudf::unary_operator::ABS);
+                        cudf::numeric_scalar<int64_t> int_max(kRIntMax, true);
+                        auto bad = cudf::binary_operation(abs_sum->view(), int_max,
+                                                          cudf::binary_operator::GREATER,
+                                                          cudf::data_type{cudf::type_id::BOOL8});
+                        cudf::numeric_scalar<bool> no(false, true);
+                        auto bad_filled = cudf::replace_nulls(bad->view(), no);
+                        auto flag_i8 = cudf::cast(bad_filled->view(),
+                                                  cudf::data_type{cudf::type_id::INT8});
+                        cudf::groupby::scan_request sticky_req;
+                        sticky_req.values = flag_i8->view();
+                        sticky_req.aggregations.push_back(
+                            cudf::make_max_aggregation<cudf::groupby_scan_aggregation>());
+                        std::vector<cudf::groupby::scan_request> sticky_requests;
+                        sticky_requests.push_back(std::move(sticky_req));
+                        auto sticky_pair = gb.scan(sticky_requests);
+                        cudf::numeric_scalar<int8_t> zero8(0, true);
+                        auto sticky = cudf::binary_operation(
+                            sticky_pair.second[0].results[0]->view(), zero8,
+                            cudf::binary_operator::NOT_EQUAL,
+                            cudf::data_type{cudf::type_id::BOOL8});
+                        auto null_scalar = cudf::make_empty_scalar_like(result->view());
+                        result = cudf::copy_if_else(*null_scalar, result->view(), sticky->view());
+                    }
                 }
 
                 spec_results[static_cast<size_t>(job.spec_index)] = std::move(result);
@@ -960,6 +1034,19 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
         // gpu_mutate_expr(), src/ops_expr.cpp).
         for (size_t i = 0; i < specs.size(); ++i) {
             cudf::data_type want = expr_type_from_str(specs[i].out_type);
+            // F42: sum() of INT32/BOOL8 declared INT32 (an integer sum):
+            // narrow the INT64 total, or widen the whole column to FLOAT64
+            // when a group left the integer range (base R's sum() is a
+            // double there). The caller decides what to do with the flag.
+            if (specs[i].has_value && want.id() == cudf::type_id::INT32 &&
+                cuplyr::is_int_sum(specs[i].fn,
+                                   work_view.column(value_pos.at(specs[i].value_idx)).type().id())) {
+                if (cuplyr::narrow_int_sum(spec_results[i])) {
+                    sum_overflow[static_cast<size_t>(specs[i].out_pos)] = true;
+                    any_sum_overflow = true;
+                }
+                continue;
+            }
             if (spec_results[i]->type().id() != want.id()) {
                 spec_results[i] = cudf::cast(spec_results[i]->view(), want);
             }
@@ -998,5 +1085,15 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
     }
 
     auto result = std::make_unique<cudf::table>(std::move(final_columns));
-    return make_gpu_table_xptr(std::move(result));
+    SEXP out = make_gpu_table_xptr(std::move(result));
+    Rcpp::Shield<SEXP> keep(out);
+    if (cumsum_overflow) {
+        Rcpp::LogicalVector flag(1, true);
+        Rf_setAttrib(out, Rf_install("cumsum_overflow"), flag);
+    }
+    if (any_sum_overflow) {
+        Rcpp::LogicalVector flag(sum_overflow.begin(), sum_overflow.end());
+        Rf_setAttrib(out, Rf_install("sum_overflow"), flag);
+    }
+    return out;
 }

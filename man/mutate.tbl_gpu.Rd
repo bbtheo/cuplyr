@@ -168,8 +168,10 @@ ordering instead of the table's/group's current row order
 \item \code{cumsum()}/\code{cummax()}/\code{cummin()}/\code{cumprod()} -- matching R's
 own NA-propagation (\code{cumsum(c(1, 2, NA, 4))} is \verb{1, 3, NA, NA}:
 once an NA is seen, every later cumulative value in that group is
-NA too)
-\item \code{cummean()} (\code{cumsum(x) / row_number()}), \code{cumall()}/
+NA too). The \code{cumsum()} of an integer or logical is an integer
+that is \code{NA} from the first overflow on (with R's warning), as in R
+\item \code{cummean()} (\code{cumsum(x) / row_number()}, accumulated in
+double), \code{cumall()}/
 \code{cumany()} (tri-state-encoded \code{cummin()}/\code{cummax()}), and
 \code{consecutive_id()} (single-column only; a run-length group id
 that increments whenever the input value changes, treating
@@ -186,7 +188,12 @@ one aggregate broadcast to every row of its group (or the whole
 table, ungrouped); \code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{sd()}/\code{var()}
 match R's own \code{na.rm = FALSE} default (ANY \code{NA} in the group
 makes the WHOLE group's result \code{NA}); \code{n()} always counts every
-row regardless of \code{NA}s
+row regardless of \code{NA}s. \code{sum()} of an integer or logical is an
+integer, as in dplyr. When a sum leaves the integer range dplyr
+returns a double (for the whole column, and for any expression
+on it): an eager call is then rerun by dplyr on the CPU, and a
+lazy plan, whose schema is fixed, raises
+\code{cuplyr_error_sum_overflow} at \code{collect()}
 \item \code{first(x, order_by = NULL)} / \code{last(x, order_by = NULL)} /
 \code{nth(x, n, order_by = NULL)} -- the first/last/\code{n}th row of the
 group in its current row order, or in \code{order_by}'s order when
@@ -233,10 +240,11 @@ support arithmetic on those types.
 \code{1L / 2L} and \code{2L ^ 2L} are both doubles).
 \item \code{+}, \code{-}, \code{*}, \code{\%\%}, \code{\%/\%} preserve integer types: the result is
 \code{INT32} when every input column and R literal involved is integer
-or logical (\code{TRUE + TRUE} is \code{2L}, matching R). Note this means
-\code{INT32} arithmetic can silently wrap around on overflow (as in
-plain R/C++ integer arithmetic) rather than promoting to a wider
-type. If any input is \code{FLOAT64}/\code{FLOAT32}, the result is
+or logical (\code{TRUE + TRUE} is \code{2L}, matching R). Like R, an
+integer \code{+}, \code{-} or \code{*} whose result leaves
+\code{.Machine$integer.max} is \code{NA} with the warning "NAs produced by
+integer overflow" (once per call; at \code{collect()} for a lazy table),
+and \code{\%/\%}/\code{\%\%} by \code{0L} are \code{NA}. If any input is \code{FLOAT64}/\code{FLOAT32}, the result is
 \code{FLOAT64}; otherwise if any input is \code{INT64}, the result is
 \code{INT64}. A bare R numeric literal (e.g. the \code{1} in
 \code{mutate(y = int_col + 1)}) is a \emph{double} in R, so it promotes the

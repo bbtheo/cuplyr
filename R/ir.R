@@ -2745,6 +2745,14 @@ type_window_sum <- function(arg_types) {
   if (identical(arg_types[1], "INT32")) "INT64" else "FLOAT64"
 }
 
+# mutate()'s window sum(): like dplyr, the sum of an integer or logical is an
+# integer (F42). The GPU total is INT64; an overflow is flagged by gpu_window()
+# and handled by the caller (eager mutate() reruns the call on the CPU, a lazy
+# plan raises `cuplyr_error_sum_overflow`). Everything else stays double.
+type_window_int_sum <- function(arg_types) {
+  if (arg_types[1] %in% c("INT32", "BOOL8")) "INT32" else "FLOAT64"
+}
+
 # abs() preserves its argument's type -- EXCEPT a logical (BOOL8) argument,
 # which R promotes to integer (`typeof(abs(TRUE))` is "integer", not
 # "logical"; base R's abs() coerces via as.integer()/as.double() before
@@ -2965,7 +2973,13 @@ ir_resolve_value_nas <- function(nodes, schema) {
 #'
 #' @keywords internal
 ir_parse_cummean <- function(args, schema) {
-  ir_call("/", list(ir_call("cumsum", list(args[[1]])), ir_call("row_number", list())))
+  x <- args[[1]]
+  # dplyr accumulates in double: an integer/logical argument must not go
+  # through the (overflow-checked) integer cumsum (F42).
+  if (!identical(unname(ir_infer_type(x, schema)), "FLOAT64")) {
+    x <- ir_call("+", list(x, ir_lit_from_r(0)))
+  }
+  ir_call("/", list(ir_call("cumsum", list(x)), ir_call("row_number", list())))
 }
 
 #' Desugar `cumall(x)`/`cumany(x)` into a tri-state `cummin`/`cummax` encoding
@@ -3916,7 +3930,7 @@ ir_call_registry <- list(
   # own arg rather than an aggregation struct's `input_type` field).
   "mean" = list(arity = 1L, parse = NULL, type = type_float64,
                  lower = NULL, window = list(kind = "agg")),
-  "sum" = list(arity = 1L, parse = NULL, type = type_window_sum,
+  "sum" = list(arity = 1L, parse = NULL, type = type_window_int_sum,
                 lower = NULL, window = list(kind = "agg")),
   "min" = list(arity = 1L, parse = NULL, type = type_arg1,
                 lower = NULL, window = list(kind = "agg")),

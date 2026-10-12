@@ -1,5 +1,40 @@
 # cuplyr (development version)
 
+## R integer arithmetic semantics (F42)
+
+* Integer `+`, `-` and `*` (on integer or logical columns and literals) give
+  `NA` with R's warning "NAs produced by integer overflow" when the result
+  leaves +-`.Machine$integer.max`, in `mutate()`, `transmute()`, `filter()`
+  and `summarise()` sub-expressions. They used to wrap around silently. The
+  warning is raised once per verb call: at the verb on an eager table, at
+  `collect()` on a lazy one (except `summarise()` temp columns, which are
+  computed at `summarise()`).
+* Integer `%/%` and `%%` by zero give `NA`, as in R.
+* `cumsum()` of an integer or logical column no longer wraps around: from its
+  first overflow on, every row of the group is `NA`, with R's "integer
+  overflow in 'cumsum'" warning. `cummean()` of such a column accumulates in
+  double, as in dplyr, instead of returning wrapped values.
+* A window `sum()` of an integer or logical column (`mutate(s = sum(x))`,
+  `filter(x * sum(x) > 0L)`, `summarise(m = max(x * sum(x)))`) is now an
+  integer, as in dplyr, so arithmetic on it is checked integer arithmetic.
+  It used to be a double. When a sum leaves R's integer range, dplyr makes that
+  sum a double but keeps the other groups' sums integers. cuplyr gets the
+  same result by rerunning the call on the CPU: always for an eager table,
+  and for `summarise()` on a lazy table too.
+* New lazy errors, of class `cuplyr_error_sum_overflow` (the F34 rule for a
+  fixed lazy schema): a lazy `mutate()` window `sum()` that overflows, and a
+  lazy `filter()` whose overflowing sum sits inside another window call
+  (`filter(x * 1000L > mean(sum(x)))`), which used to return dplyr's rows.
+  Use `sum(as.numeric(x))` or eager mode. A lazy `filter()` on a top-level
+  sum that overflows still compares the double value, but if another group's
+  in-range sum then meets overflowing integer arithmetic, that row is not
+  dropped (known limitation).
+* Checked integer arithmetic costs more than the old wrapping arithmetic:
+  each group of up to four `+`/`-`/`*` nodes takes a second pass for the
+  range test and a reduction. At 5e6 rows, `x + y` takes about 1.6 ms
+  (1.2 ms before), a three-node expression 2.9 ms (1.6 ms) and a filter on
+  one 2.1 ms (1.4 ms). Double arithmetic is unchanged.
+
 ## dplyr generic registrations (F05)
 
 * `show_query()` is now a `tbl_gpu` method for dplyr's generic (it was a
@@ -465,7 +500,7 @@ Every dplyr generic that doesn't yet have a GPU-native `tbl_gpu` method now work
 
 * `bind_rows()` now actually casts columns that get type-promoted to `STRING` (e.g. combining a numeric column in one table with a character column in another). Previously the promoted column kept its original GPU type while the schema claimed `STRING`, causing a type-mismatch failure.
 
-* `mutate()` no longer silently promotes integer arithmetic to `FLOAT64`. `+`, `-`, `*`, `%%`, and `%/%` now preserve `INT32`/`INT64` when every input column and literal involved is integer or logical (matching R/dplyr, e.g. `TRUE + TRUE` is `2L`). Note that `INT32` results can now wrap around on overflow instead of silently promoting to a wider type, matching plain integer arithmetic semantics. `/` and `^` continue to always promote to `FLOAT64` (matching R: `1L / 2L` and `2L ^ 2L` are both doubles).
+* `mutate()` no longer silently promotes integer arithmetic to `FLOAT64`. `+`, `-`, `*`, `%%`, and `%/%` now preserve `INT32`/`INT64` when every input column and literal involved is integer or logical (matching R/dplyr, e.g. `TRUE + TRUE` is `2L`). `INT32` results that leave R's integer range are `NA` with a warning, as in R (F42; they wrapped around before F42). `/` and `^` continue to always promote to `FLOAT64` (matching R: `1L / 2L` and `2L ^ 2L` are both doubles).
 
 * `arrange(..., .by_group = TRUE)` now sorts prepended group columns in ascending order to match `dplyr::arrange.grouped_df()`, even when the user's own expression wraps a group column in `desc()` (e.g. `arrange(desc(g), x, .by_group = TRUE)` now sorts `g` ascending, `x` per the user's spec).
 

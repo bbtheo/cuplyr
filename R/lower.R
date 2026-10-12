@@ -64,7 +64,20 @@ lower_filter <- function(ast, source_ptr) {
   }
 
   bound_ir <- ir_bind(combined_ir, input_schema)
-  gpu_filter_expr(input_ptr, bound_ir)
+  warn_int_overflow(gpu_filter_expr(input_ptr, bound_ir))
+}
+
+# F42: R's integer +, -, * give NA with this warning when the result leaves
+# +-.Machine$integer.max. The C++ evaluator nulls those rows and flags the
+# result pointer ("int_overflow"); the warning is signalled here, once per
+# verb call (lowering runs at the verb when eager, at collect() when lazy).
+# Never from C++: options(warn = 2) would longjmp past destructors.
+# @keywords internal
+warn_int_overflow <- function(ptr) {
+  if (isTRUE(attr(ptr, "int_overflow"))) {
+    warning("NAs produced by integer overflow", call. = FALSE)
+  }
+  ptr
 }
 
 #' Lower mutate node
@@ -145,7 +158,9 @@ lower_mutate <- function(ast, source_ptr) {
   }
   out_types <- gpu_physical_type(out_types)
 
-  result <- gpu_mutate_expr(input_ptr, bound_exprs, out_names, out_types, input_schema$names)
+  result <- warn_int_overflow(
+    gpu_mutate_expr(input_ptr, bound_exprs, out_names, out_types, input_schema$names)
+  )
   if (length(vec_idx) > 0) {
     # The temps are input columns, so they kept their slots after the originals.
     temp_slots <- n_input_cols + seq_along(vec_idx) - 1L
@@ -252,12 +267,7 @@ lower_summarise <- function(ast, source_ptr) {
   # FLOAT64 (dplyr returns a double there). A lazy plan declared INT32
   # statically, so it can't absorb that: fail loudly rather than drift.
   if (any(attr(result, "sum_overflow")) && !identical(ast$on_sum_overflow, "double")) {
-    rlang::abort(
-      c("An integer `sum()` overflowed R's integer range.",
-        i = "dplyr would return a double here, but a lazy plan has a fixed schema.",
-        i = "Use `sum(as.numeric(x))`, or run the pipeline in eager mode."),
-      class = "cuplyr_error_sum_overflow"
-    )
+    abort_sum_overflow()
   }
 
   # An aggregate named like a grouping column replaces that key in place.
@@ -268,6 +278,18 @@ lower_summarise <- function(ast, source_ptr) {
   }
 
   result
+}
+
+# F34/F42: the loud failure for an integer/logical sum() that left R's integer
+# range under a static INT32 schema (summarise() and window sums in mutate()).
+# @keywords internal
+abort_sum_overflow <- function() {
+  rlang::abort(
+    c("An integer `sum()` overflowed R's integer range.",
+      i = "dplyr would return a double here, but a lazy plan has a fixed schema.",
+      i = "Use `sum(as.numeric(x))`, or run the pipeline in eager mode."),
+    class = "cuplyr_error_sum_overflow"
+  )
 }
 
 #' Lower distinct node
@@ -852,7 +874,26 @@ lower_window <- function(ast, source_ptr) {
     list(order_idx = order_idx, order_desc = s0$order_desc, specs = cpp_specs)
   })
 
-  gpu_window(input_ptr, frames, group_indices)
+  result <- gpu_window(input_ptr, frames, group_indices)
+
+  # F42: an integer/logical window sum() that left the integer range came
+  # back as FLOAT64 (dplyr returns a double there; `sum_overflow` has one flag
+  # per spec). A lazy plan declared INT32 statically, so it can't absorb that:
+  # fail loudly rather than drift. An eager verb catches this error and reruns
+  # the call (retry_on_sum_overflow()). A spec's own `on_sum_overflow` (set by
+  # filter()'s planning for a sum a later stage consumes) overrides the node's.
+  overflowed <- attr(result, "sum_overflow")
+  if (any(overflowed)) {
+    policy <- vapply(specs, function(s) s$on_sum_overflow %||% ast$on_sum_overflow %||% "error",
+                     character(1))
+    if (any(overflowed & policy != "double")) {
+      abort_sum_overflow()
+    }
+  }
+  if (isTRUE(attr(result, "cumsum_overflow"))) {
+    warning("integer overflow in 'cumsum'; use 'cumsum(as.numeric(.))'", call. = FALSE)
+  }
+  result
 }
 
 #' Is a window spec lowerable by `src/ops_window.cpp`'s `gpu_window()`?
