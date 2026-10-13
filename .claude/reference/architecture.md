@@ -217,6 +217,41 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
   earlier dots create. Known limit: on the CPU route, column-free across()
   bodies, grouped/`.by` constants and column-free sub-calls folded inside
   other dots (`x + runif(1)`) run again.
+- **Running schema for across()/if_any()/if_all() (F45)**: this qualifies the
+  across() sentence above. `expand_across_dots()` resolves each such dot's
+  `.cols` against `run`: the input schema updated by every earlier dot
+  (created/overwritten columns with the type the native path infers via
+  `ir_parse_quo()` + `make_mutate_expr()`, `x = NULL` removes, an across()'s
+  outputs typed from its expansion on the pre-dot schema, if_any/if_all BOOL8).
+  `run` is only advanced up to the last such dot, and expansion stops at the
+  first dot that needs dplyr (the verbs rerun the original dots then). A type of
+  NA is "exists, type unknown", which a column-free dot gets because it must
+  not be evaluated a second time just to learn it. Every output whose type
+  `across_infer_output()` can't give (column-free calls, mask-only calls like
+  n(), unknown factor levels, every summarise output) is NA-typed and also goes
+  in `run$maybe`, because its value may be NULL (`z = v`, `z = c()`) and then
+  creates nothing (mutate also removes an existing column):
+  `resolve_across_cols()` returns `NULL` (whole-call dplyr) unless the
+  selection comes out identical with and without those columns and picks none
+  of them. Setting a `run$maybe` column again when it isn't the last column
+  sets `run$unknown_set`: dplyr's mask appends a column it re-creates after a
+  NULL, so its position isn't known (`across_run_set()`). A literal `x = NULL`
+  in mutate removes `x` from `run` and a later `x = ...` appends it, like the
+  mask. `resolve_across_cols()` also returns `NULL` for a selection that is not
+  name-only over an NA-typed column, for every selection once
+  `run$unknown_set` is set (also by an unnamed dot that may return a data
+  frame), and for a tidyselect error caused by a removed column. An if_any()/if_all()
+  piece whose type is NA is dplyr's to check (`check_across_predicate_piece()`).
+  summarise outputs are always NA-typed. A type is recorded only when it is the
+  type R gives the column (`across_r_typed()`): every call must be in the
+  allowlist `across_r_typed_fns` (a `pkg::` prefix must name the function's own
+  package), minus `median()` of a non-double, `max()`/`min()`/`cummax()`/
+  `cummin()`/unary `-` of a logical and environment values of other classes
+  than Date/POSIXct. Anything else the IR parses (`ntile()`, lubridate's
+  `year()`/`month()`/`second()`/`yday()`/`wday()`, `roll_*()`) is NA-typed but
+  not `maybe`, so name-only selections over it stay native. An unnamed bare
+  symbol naming a `run$maybe` column sets `run$unknown_set` (it may be an
+  environment value, appended, unpacked or skipped).
 - **Fractional Date constants (native floor)**: a column-free dot whose value
   is a fractional Date (finite, int32 range) is built from its floored value
   (`floor_fractional_date()`, -0.5 -> -1, like `date_to_gpu()`), grouped and
@@ -233,8 +268,8 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
   `cur_data()`, `get()`/`exists()`/`eval()`/`environment()` and similar; a
   user function calling `pick()` itself is not detected). A top-level
   `across()`/`if_any()`/`if_all()` is already expanded by then, against the
-  pre-call columns, so its expansion never names the floored column:
-  instead every expansion of such a dot (provenance kind `"across"` or
+  running schema at its dot (F45), so a name-only selection does reach the floored
+  column; every expansion of such a dot (provenance kind `"across"` or
   `"combined"`) after the user dot that floored a value counts as a reader;
   expansions of the across() that produced the value don't. A bare copy
   (`ee = dd`, also a staged across() assignment) isn't a reader: it copies

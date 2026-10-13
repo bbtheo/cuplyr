@@ -874,8 +874,9 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     # A dot that may read a floored fractional Date column must see the
     # fraction: CPU route. Checked before evaluating anything of this dot.
     # An across()/if_any()/if_all() expansion resolved `.cols` against the
-    # pre-call columns, so it may read any name an earlier user dot floored
-    # without naming it (dplyr would select it): conservatively a reader.
+    # running schema, which doesn't know which names an earlier user dot
+    # floored, so it may read one without naming it (dplyr would select it):
+    # conservatively a reader.
     # Expansions of the across() that floored the value don't read it.
     copied <- NA_integer_
     if (length(frac) > 0) {

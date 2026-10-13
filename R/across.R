@@ -413,6 +413,11 @@ substitute_cur_group_id <- function(.data, dots, group_cols) {
 #   whole-call fallback)
 # @keywords internal
 resolve_across_cols <- function(cols_expr, env, schema, group_cols) {
+  # A running schema that lost track of which columns exist (see
+  # across_run_step()): dplyr resolves `.cols` on the real data.
+  if (isTRUE(schema$unknown_set)) {
+    return(NULL)
+  }
   eligible <- setdiff(schema$names, group_cols)
   if (length(eligible) == 0) {
     return(stats::setNames(character(), character()))
@@ -421,13 +426,54 @@ resolve_across_cols <- function(cols_expr, env, schema, group_cols) {
     return(NULL)
   }
   keep <- match(eligible, schema$names)
-  proxy <- tidyselect_proxy(list(
-    names = eligible, types = schema$types[keep], factor_levels = schema$factor_levels
-  ))
+  types <- schema$types[keep]
+  # A column of unknown type (NA, created by an earlier dot) can only be told
+  # apart by name: any other selection waits for the real data.
+  if (anyNA(types)) {
+    if (!pick_selection_is_type_only(cols_expr, env, eligible) ||
+          "where" %in% all.names(cols_expr)) {
+      return(NULL)
+    }
+    types[is.na(types)] <- "FLOAT64"
+  }
+  select_on <- function(keep_rows) {
+    proxy <- tidyselect_proxy(list(
+      names = eligible[keep_rows], types = types[keep_rows],
+      factor_levels = schema$factor_levels
+    ))
+    tidyselect::eval_select(expr = cols_expr, data = proxy, env = env, allow_rename = TRUE)
+  }
+  all_rows <- rep(TRUE, length(eligible))
 
-  sel <- tidyselect::eval_select(
-    expr = cols_expr, data = proxy, env = env, allow_rename = TRUE
+  sel <- tryCatch(
+    select_on(all_rows),
+    error = function(e) {
+      # The selection may only be broken by a column an earlier dot removed:
+      # dplyr raises its own error for that, on the real data.
+      if (!is.null(schema$base_names) && !all(schema$base_names %in% schema$names)) {
+        return(NULL)
+      }
+      stop(e)
+    }
   )
+  if (is.null(sel)) {
+    return(NULL)
+  }
+  # A column an earlier dot may not have created at all (see
+  # across_run_set()): the selection must come out the same without it, and
+  # must not pick it, or dplyr decides on the real data.
+  absent <- eligible %in% schema$maybe
+  if (any(absent)) {
+    if (any(absent[sel])) {
+      return(NULL)
+    }
+    without <- tryCatch(select_on(!absent), error = function(e) NULL)
+    if (is.null(without) ||
+          !identical(names(without), names(sel)) ||
+          !identical(eligible[!absent][without], eligible[sel])) {
+      return(NULL)
+    }
+  }
   if (anyDuplicated(names(sel))) {
     rlang::abort("Names must be unique.")
   }
@@ -1133,9 +1179,13 @@ across_type_label <- function(type) {
 }
 
 # if_any()/if_all() require every per-column predicate to be logical. dplyr
-# checks the values; here the piece's inferred type stands in for them, so a
-# piece the IR can't type is left to the normal parse path.
+# checks the values; here the piece's inferred type stands in for them. A piece
+# the IR can't parse is left to the normal parse path; one whose type is
+# unknown (it reads a column the running schema couldn't type) is dplyr's to
+# check on the real values.
 # @param piece The instantiated predicate for `col`
+# @return `TRUE` when dplyr must run the call, otherwise invisibly `FALSE`;
+#   raises dplyr's error for a piece of known non-logical type
 # @keywords internal
 check_across_predicate_piece <- function(piece, col, env, schema) {
   # mutate() expands before substituting cur_group_id(), so a piece may still
@@ -1151,7 +1201,10 @@ check_across_predicate_piece <- function(piece, col, env, schema) {
     if (is.null(ir)) NULL else ir_infer_type(ir, schema)
   }), error = function(e) NULL)
   if (is.null(type) || identical(unname(type), "BOOL8")) {
-    return(invisible())
+    return(invisible(FALSE))
+  }
+  if (anyNA(type)) {
+    return(TRUE)
   }
   rlang::abort(sprintf("`%s` must be a logical vector, not %s.", col,
                        across_type_label(unname(type))))
@@ -1234,7 +1287,9 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filte
   for (col in cols) {
     for (spec in parsed$specs) {
       piece <- spec$build(as.name(col), col)
-      check_across_predicate_piece(piece, col, piece_env, schema)
+      if (check_across_predicate_piece(piece, col, piece_env, schema)) {
+        return(fallback())
+      }
       combined <- if (is.null(combined)) piece else as.call(list(fold_op, combined, piece))
     }
   }
@@ -1265,6 +1320,9 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filte
 #' equivalent and cheaper). A NAMED top-level `across()` dot (e.g.
 #' `mutate(z = across(x, y))`) packs a data-frame column and never gets
 #' here: [dots_need_fallback()] sends the whole call to the CPU fallback.
+#'
+#' Expansion stops at the first dot that needs dplyr (the result is then partial
+#' and only its `"needs_fallback"` attribute is meaningful).
 #'
 #' The result carries a `"needs_fallback"` attribute. It is `TRUE` when the
 #' schema or the `.fns` values show that dplyr must run the call:
@@ -1308,7 +1366,26 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
   # free variables and the extra `...` args against that data).
   scope <- schema$names
 
+  # dplyr resolves an across()/if_any()/if_all() against the columns as they
+  # stand at its dot. `run` is that schema, tracked only up to the last such
+  # dot, so a call without one pays nothing.
+  selecting <- vapply(seq_along(dots), function(i) {
+    nm <- names(dots)[i]
+    head <- call_head_name(rlang::quo_get_expr(dots[[i]]))
+    is_named <- !is.null(nm) && !is.na(nm) && nzchar(nm)
+    (!is_named && identical(head, "across")) || isTRUE(head %in% c("if_any", "if_all"))
+  }, logical(1))
+  last_selecting <- if (identical(verb, "filter") || !any(selecting)) 0L else max(which(selecting))
+  run <- schema
+  run$base_names <- schema$names
+
   for (i in seq_along(dots)) {
+    # dplyr reruns the original dots, so what the later ones would expand to
+    # is moot: against the schema as it was before this dot they could raise
+    # an error dplyr doesn't.
+    if (needs_fallback) {
+      break
+    }
     quo <- dots[[i]]
     nm <- names(dots)[i]
     expr <- rlang::quo_get_expr(quo)
@@ -1316,6 +1393,7 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
     head_name <- call_head_name(expr)
 
     is_named <- !is.null(nm) && !is.na(nm) && nzchar(nm)
+    track <- i < last_selecting
 
     if (!is_named && identical(head_name, "across")) {
       if (identical(verb, "filter")) {
@@ -1324,13 +1402,22 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
           "instead.\nExpression: ", rlang::expr_deparse(expr), call. = FALSE
         )
       }
-      expanded <- expand_one_across(expr, env, schema, group_cols, scope)
+      expanded <- expand_one_across(expr, env, run, group_cols, scope)
       needs_fallback <- needs_fallback || isTRUE(attr(expanded, "needs_fallback"))
+      # The outputs' types come from the expansion as written, against the
+      # columns before this dot
+      if (track && !needs_fallback) {
+        after <- run
+        for (k in seq_along(expanded)) {
+          after <- across_run_set_inferred(after, names(expanded)[k], expanded[[k]], run, verb)
+        }
+        run_next <- after
+      }
       if (isTRUE(attr(expanded, "hazard"))) {
         if (mutating) {
           # Stage: compute every expansion from the pre-dot data into temps
           expanded <- stage_across_expansion(
-            expanded, c(schema$names, out_names, names(dots), staged_temps)
+            expanded, c(schema$names, run$names, out_names, names(dots), staged_temps)
           )
           staged_temps <- c(staged_temps, attr(expanded, "temps"))
         } else {
@@ -1342,11 +1429,12 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
       prov_origin <- c(prov_origin, rep(i, length(expanded)))
       prov_kind <- c(prov_kind, rep("across", length(expanded)))
       scope <- union(scope, names(expanded))
+      if (track && !needs_fallback) run <- run_next
       next
     }
 
     if (identical(head_name, "if_any") || identical(head_name, "if_all")) {
-      combined <- expand_if_any_all(expr, env, schema, group_cols, head_name, verb, scope)
+      combined <- expand_if_any_all(expr, env, run, group_cols, head_name, verb, scope)
       needs_fallback <- needs_fallback || isTRUE(attr(combined, "needs_fallback"))
       out_quos <- c(out_quos, list(combined))
       prov_origin <- c(prov_origin, i)
@@ -1354,6 +1442,10 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
       # dplyr names an unnamed if_any()/if_all() dot after the original call
       out_names <- c(out_names, if (is_named) nm else if (identical(verb, "filter")) "" else rlang::as_label(expr))
       if (!identical(verb, "filter")) scope <- union(scope, out_names[length(out_names)])
+      if (track && !needs_fallback) {
+        run <- across_run_set(run, out_names[length(out_names)],
+                              if (mutating) "BOOL8" else NA_character_)
+      }
       next
     }
 
@@ -1367,6 +1459,7 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
       # the set of columns is unknown (NA, see across_free_vars_hit_data()).
       unknown <- !is_named && !(is.symbol(expr) && as.character(expr) %in% scope)
       scope <- union(scope, if (is_named) nm else if (unknown) NA_character_ else rlang::as_label(expr))
+      if (track) run <- across_run_step(run, nm, quo, verb)
     }
   }
 
@@ -1375,4 +1468,302 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
   attr(out_quos, "staged_temps") <- staged_temps
   attr(out_quos, "provenance") <- list(origin = prov_origin, kind = prov_kind)
   out_quos
+}
+
+# =============================================================================
+# The running schema of expand_across_dots()
+#
+# `run` is a schema (names, types, factor_levels, tz) plus `base_names` (the
+# columns before the call) and `unknown_set` (set once an earlier dot may have
+# added columns we can't name, or put one where we can't say). A type of NA
+# means "exists, type not known": a created column whose type the native path
+# can't be asked about without running something (a column-free call), whose
+# factor levels/zone aren't known exactly, or whose R type may not be the type
+# the native path gives it (`median(<int>)`, lubridate's `year()`: see
+# across_r_typed()). `maybe` lists the columns that may not exist at all: a
+# dot whose value can't be known without running it may evaluate to NULL,
+# which creates nothing (`z = v` with `v <- NULL`). UNKNOWN is always safe:
+# resolve_across_cols() sends a selection that could depend on it to dplyr.
+# =============================================================================
+
+# Add or overwrite one column of a running schema (an overwrite keeps its
+# position). `maybe` marks a column that may not exist (see above): it also
+# stands for an overwritten column that the dot may have removed.
+# @keywords internal
+across_run_set <- function(run, name, type, levels = NULL, zone = "UTC", maybe = FALSE) {
+  idx <- match(name, run$names)
+  # Setting a column that may not exist: if it doesn't (an earlier dot was
+  # NULL), dplyr's mask appends it at the end; if it does, it stays put. Only
+  # the last column is in the same place either way.
+  if (!is.na(idx) && name %in% run$maybe && idx < length(run$names)) {
+    run$unknown_set <- TRUE
+  }
+  run$maybe <- if (maybe) union(run$maybe, name) else setdiff(run$maybe, name)
+  run <- set_schema_factor_levels(run, name, levels)
+  if (is.na(idx)) {
+    run$names <- c(run$names, name)
+    run$types <- c(unname(run$types), type)
+  } else {
+    run$types <- unname(run$types)
+    run$types[idx] <- type
+  }
+  set_schema_tz(run, name, zone)
+}
+
+# Remove one column from a running schema (`name = NULL`).
+# @keywords internal
+across_run_drop <- function(run, name) {
+  run$maybe <- setdiff(run$maybe, name)
+  keep <- run$names != name
+  run$names <- run$names[keep]
+  run$types <- unname(run$types)[keep]
+  run <- set_schema_factor_levels(run, name, NULL)
+  set_schema_tz(run, name, "UTC")
+}
+
+# Calls that are safe to hand to ir_parse_quo() twice: it evaluates a
+# column-free call it doesn't recognize, which must not happen just to learn a
+# type.
+# @keywords internal
+across_pure_heads <- function() {
+  c(names(ir_call_registry), ir_foldable_window_fns, "c", "~", "(", ":",
+    "case_when", "case_match", "recode_values", "replace_values", "replace_when",
+    "when_all", "when_any", "order_by", "with_order")
+}
+
+# The type, factor levels and zone the native path gives the column that `quo`
+# computes on `run`, or `list(type = NA, maybe = TRUE)` when that can't be said
+# without running anything (the column may not even exist, see above), or
+# `list(type = NA, maybe = FALSE)` when R's type for it may be another one.
+# @keywords internal
+across_infer_output <- function(quo, run) {
+  unknown <- list(type = NA_character_, maybe = TRUE)
+  expr <- rlang::quo_get_expr(quo)
+  if (isTRUE(run$unknown_set) || anyDuplicated(run$names) > 0L ||
+        expr_has_mask_only_call(expr) || expr_reaches_mask(expr)) {
+    return(unknown)
+  }
+  literal <- is.atomic(expr) && length(expr) == 1L
+  if (!literal && !expr_has_column_ref(expr, run)) {
+    return(unknown)
+  }
+  # an operand of unknown type makes the result's type unknown
+  no_type <- run$names[is.na(run$types)]
+  if (length(no_type) > 0L && (any(all.vars(expr) %in% no_type) || ".data" %in% all.vars(expr))) {
+    return(unknown)
+  }
+  pure_heads <- across_pure_heads()
+  pure <- function(e) {
+    if (rlang::is_missing(e) || !is.call(e)) {
+      return(TRUE)
+    }
+    head <- call_head_name(e)
+    if (is.null(head) || (!head %in% pure_heads && !expr_has_column_ref(e, run))) {
+      return(FALSE)
+    }
+    # the head of `pkg::fn` is the call `::`(pkg, fn), not an argument
+    all(vapply(as.list(e)[-1], pure, logical(1)))
+  }
+  if (!pure(expr)) {
+    return(unknown)
+  }
+  tryCatch(suppressWarnings({
+    ir <- ir_parse_quo(quo, run)
+    if (is.null(ir) || identical(ir_factor_rule(ir, run), "cpu")) {
+      return(unknown)
+    }
+    type <- unname(make_mutate_expr(".", ir, run)$output_type)
+    if (length(type) != 1L || is.na(type)) {
+      return(unknown)
+    }
+    # The column exists (the IR computes it), but a type predicate must see
+    # the type R gives it, which may not be this one.
+    if (!across_r_typed(expr, rlang::quo_get_env(quo), run) ||
+          !type %in% c("BOOL8", "INT32", "FLOAT64", "STRING", "DICTIONARY32",
+                       "TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS")) {
+      return(list(type = NA_character_, maybe = FALSE))
+    }
+    levels <- NULL
+    if (identical(type, "DICTIONARY32")) {
+      # only a bare copy of a factor with known levels stays a native factor
+      levels <- if (identical(ir$kind, "col")) run$factor_levels[[ir$name]] else NULL
+      if (is.null(levels)) {
+        return(unknown)
+      }
+    }
+    zone <- if (identical(type, "TIMESTAMP_MICROSECONDS")) ir_infer_tz(ir, run) else "UTC"
+    list(type = type, levels = levels, zone = zone)
+  }), error = function(e) unknown)
+}
+
+# Functions whose native type is the type R gives their result, for every
+# input the native path takes, with the package a `pkg::fn` call may name.
+# Each was checked against dplyr 1.2.1 and lubridate on plain tibbles, for
+# logical, integer, double, character, Date and POSIXct inputs, n odd and
+# even. Left out because R's type differs: ntile() (integer in R), year(),
+# month(), second(), yday() and wday() (doubles in lubridate), and cuplyr's
+# roll_*()/data.table's froll*(). across_r_typed() adds the cases that
+# depend on the input type.
+# @keywords internal
+across_r_typed_fns <- c(
+  "(" = "base", "~" = "base", "c" = "base", ":" = "base",
+  "+" = "base", "-" = "base", "*" = "base", "/" = "base", "^" = "base",
+  "%%" = "base", "%/%" = "base",
+  "==" = "base", "!=" = "base", "<" = "base", "<=" = "base", ">" = "base",
+  ">=" = "base", "&" = "base", "|" = "base", "!" = "base", xor = "base",
+  is.na = "base", "%in%" = "base",
+  abs = "base", sqrt = "base", exp = "base", log = "base", log2 = "base",
+  log10 = "base", floor = "base", ceiling = "base", sin = "base", cos = "base",
+  tan = "base", round = "base",
+  cumsum = "base", cumprod = "base", cummax = "base", cummin = "base",
+  mean = "base", sum = "base", max = "base", min = "base",
+  median = "stats", sd = "stats", var = "stats",
+  toupper = "base", tolower = "base", nchar = "base", substr = "base",
+  trimws = "base", paste = "base", paste0 = "base", grepl = "base",
+  sub = "base", gsub = "base", startsWith = "base", endsWith = "base",
+  as.Date = "base", as.POSIXct = "base",
+  between = "dplyr", near = "dplyr", cumall = "dplyr", cumany = "dplyr",
+  cummean = "dplyr", when_any = "dplyr", when_all = "dplyr",
+  n_distinct = "dplyr", row_number = "dplyr", min_rank = "dplyr",
+  dense_rank = "dplyr", percent_rank = "dplyr", cume_dist = "dplyr",
+  consecutive_id = "dplyr", lag = "dplyr", lead = "dplyr", first = "dplyr",
+  last = "dplyr", nth = "dplyr", if_else = "dplyr", case_when = "dplyr",
+  coalesce = "dplyr", na_if = "dplyr", case_match = "dplyr",
+  recode_values = "dplyr", replace_values = "dplyr", replace_when = "dplyr",
+  as_date = "lubridate", day = "lubridate", hour = "lubridate",
+  minute = "lubridate", quarter = "lubridate"
+)
+
+# Of those, the ones whose result type in R doesn't depend on their
+# arguments' (logical, character, nchar()'s integer): what's inside them
+# can't change the type.
+across_r_fixed_type_fns <- c(
+  "==", "!=", "<", "<=", ">", ">=", "&", "|", "!", "xor", "is.na", "%in%",
+  "between", "near", "grepl", "startsWith", "endsWith", "cumall", "cumany",
+  "when_any", "when_all", "toupper", "tolower", "substr", "trimws", "paste",
+  "paste0", "sub", "gsub", "nchar"
+)
+
+# TRUE when R's type for `expr` (one that ir_parse_quo() parses on `run`) is
+# surely the type the native path gives it: every call is in
+# across_r_typed_fns (a `pkg::` prefix must name the function's package),
+# outside these cases where R's type depends on the input:
+# - median() of anything but a double or a timestamp: an integer or a
+#   logical gives an integer/logical for an odd count and a double for an
+#   even one, per group;
+# - max()/min()/cummax()/cummin() of a logical and unary `-` of a logical
+#   are integers in R;
+# - a value from the environment of a class other than Date/POSIXct.
+# @keywords internal
+across_r_typed <- function(expr, env, run) {
+  arg_type <- function(a) {
+    tryCatch(
+      ir_infer_type(ir_parse_expr(a, env, run, allow_vector = FALSE), run),
+      error = function(e) NA_character_
+    )
+  }
+  plain <- function(v) {
+    is.atomic(v) && !is.factor(v) && (is.null(oldClass(v)) || inherits(v, c("Date", "POSIXct")))
+  }
+  if (rlang::is_quosure(expr)) {
+    return(across_r_typed(rlang::quo_get_expr(expr), rlang::quo_get_env(expr), run))
+  }
+  if (rlang::is_missing(expr) || is.null(expr) || is_data_pronoun_call(expr)) {
+    return(TRUE)
+  }
+  # a constant, possibly a classed one injected with `!!`
+  if (is.atomic(expr)) {
+    return(plain(expr))
+  }
+  if (is.symbol(expr)) {
+    nm <- as.character(expr)
+    return(nm %in% run$names || plain(get0(nm, envir = env, inherits = TRUE)))
+  }
+  if (is_env_pronoun_call(expr)) {
+    return(plain(get0(pronoun_call_name(expr), envir = env, inherits = TRUE)))
+  }
+  if (!is.call(expr)) {
+    return(FALSE)
+  }
+  head <- expr[[1]]
+  fn <- call_head_name(expr)
+  if (is.null(fn) || !fn %in% names(across_r_typed_fns)) {
+    return(FALSE)
+  }
+  if (is.call(head) && !identical(as.character(head[[2]]), across_r_typed_fns[[fn]])) {
+    return(FALSE)
+  }
+  if (fn %in% across_r_fixed_type_fns) {
+    return(TRUE)
+  }
+  args <- as.list(expr)[-1]
+  if (fn %in% c("median", "max", "min", "cummax", "cummin") ||
+        (identical(fn, "-") && length(args) == 1L)) {
+    arg_names <- names(args) %||% rep("", length(args))
+    x <- if ("x" %in% arg_names) args["x"] else utils::head(args[!nzchar(arg_names)], 1L)
+    if (length(x) == 0L) {
+      return(FALSE)
+    }
+    type <- arg_type(x[[1]])
+    ok <- if (identical(fn, "median")) {
+      isTRUE(type %in% c("FLOAT64", "TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS"))
+    } else {
+      !is.na(type) && type != "BOOL8"
+    }
+    if (!ok) {
+      return(FALSE)
+    }
+  }
+  all(vapply(args, across_r_typed, logical(1), env = env, run = run))
+}
+
+# Record the column `quo` computes under `name`; `on` is the schema it is
+# computed against (an across() dot's expansions all see the pre-dot one).
+# @keywords internal
+across_run_set_inferred <- function(run, name, quo, on, verb) {
+  info <- if (verb %in% c("mutate", "transmute")) {
+    across_infer_output(quo, on)
+  } else {
+    list(type = NA_character_, maybe = TRUE)
+  }
+  across_run_set(run, name, info$type, info$levels, info$zone %||% "UTC", isTRUE(info$maybe))
+}
+
+# Advance `run` over one ordinary (non-across) dot. `nm` is the dot's name
+# (empty when unnamed).
+# @keywords internal
+across_run_step <- function(run, nm, quo, verb) {
+  if (isTRUE(run$unknown_set)) {
+    return(run)
+  }
+  expr <- rlang::quo_get_expr(quo)
+  is_named <- !is.null(nm) && !is.na(nm) && nzchar(nm)
+  if (!is_named && is.symbol(expr) && as.character(expr) %in% run$names) {
+    # A column an earlier dot may have removed: if it did, the symbol is
+    # whatever the environment holds, which dplyr appends at the end (or
+    # unpacks, for a data frame, or skips, for NULL).
+    if (as.character(expr) %in% run$maybe) {
+      run$unknown_set <- TRUE
+    }
+    return(run)
+  }
+  mutating <- verb %in% c("mutate", "transmute")
+  if (is.null(expr)) {
+    if (!is_named || !mutating) {
+      run$unknown_set <- TRUE
+      return(run)
+    }
+    return(across_run_drop(run, nm))
+  }
+  if (is_named) {
+    return(across_run_set_inferred(run, nm, quo, run, verb))
+  }
+  # Unnamed: a column named after the expression, unless it returns a data
+  # frame. Only an expression the IR parses is surely a column.
+  info <- if (mutating) across_infer_output(quo, run) else list(type = NA_character_)
+  if (is.na(info$type)) {
+    run$unknown_set <- TRUE
+    return(run)
+  }
+  across_run_set(run, rlang::as_label(expr), info$type, info$levels, info$zone %||% "UTC")
 }
