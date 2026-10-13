@@ -309,6 +309,8 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
                            .keep = c("all", "used", "unused", "none"),
                            .before = NULL, .after = NULL) {
   .keep <- match.arg(.keep)
+  p <- sys.parent()
+  inform_colwise_grouped(.data, "mutate", if (p > 0L) sys.function(p))
   check_unique_input_names(.data)
 
   dots <- rlang::enquos(...)
@@ -334,6 +336,12 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 
   if (!rlang::quo_is_null(before_quo) && !rlang::quo_is_null(after_quo)) {
     stop("Can't supply both `.before` and `.after`.", call. = FALSE)
+  }
+
+  # Zero-column table with rows: after the arguments are validated against
+  # `.data` (an invalid `.by` must still error), dplyr runs the call.
+  if (length(dots) > 0L && is_zero_column_with_rows(.data)) {
+    return(mutate_expr_fallback(.data, dots, .keep, before_quo, after_quo, by_quo))
   }
 
   if (length(dots) == 0 && identical(.keep, "all") &&
@@ -1467,9 +1475,17 @@ set_schema_factor_levels <- function(schema, name, levels) {
 #'     collect()
 #' }
 transmute.tbl_gpu <- function(.data, ...) {
+  p <- sys.parent()
+  inform_colwise_grouped(.data, "transmute", if (p > 0L) sys.function(p))
   check_unique_input_names(.data)
   dots <- rlang::enquos(...)
   orig_dots <- dots
+
+  if (length(dots) > 0L && is_zero_column_with_rows(.data)) {
+    return(gpu_fallback("transmute", .data, function(tbl) {
+      rlang::inject(dplyr::transmute(tbl, !!!dots))
+    }))
+  }
 
   # No expressions on an ungrouped table: every column goes (n x 0 result).
   if (length(dots) == 0L && length(.data$groups) == 0L) {
@@ -1547,3 +1563,55 @@ transmute.tbl_gpu <- function(.data, ...) {
   result
 }
 
+# dplyr's own (non-generic) colwise verbs and add_tally() reach the tbl_gpu
+# methods through dplyr's generics; imported so they resolve inside the package
+# (inform_colwise_grouped() compares against them, and the tests call them).
+#' @importFrom dplyr mutate_all mutate_if mutate_at transmute_all transmute_if summarise_all add_tally
+#' @name colwise-imports
+#' @keywords internal
+#' @noRd
+NULL
+
+# dplyr's check_grouped() for mutate_all()/mutate_if()/transmute_all()/
+# transmute_if(): they inform that the grouping variables are ignored, but test
+# is_grouped_df(), which is FALSE for a tbl_gpu. `caller` is the function that
+# called the mutate()/transmute() generic (with UseMethod() dispatch the
+# method's parent frame is the generic's caller), so only the colwise verbs
+# trigger it.
+inform_colwise_grouped <- function(.data, verb, caller) {
+  if (length(.data$groups) == 0L || !is.function(caller)) {
+    return(invisible())
+  }
+  for (suffix in c("all", "if")) {
+    fn <- getExportedValue("dplyr", paste0(verb, "_", suffix))
+    if (identical(caller, fn)) {
+      cols <- .data$groups
+      msg <- paste0(if (length(cols) == 1L) "Column " else "Columns ",
+                    paste0(if (length(cols) > 6L) c(paste0("`", cols[1:5], "`"), "...")
+                           else paste0("`", cols, "`"), collapse = ", "))
+      alt <- if (suffix == "all") {
+        sprintf("Use `%s_at(df, vars(-group_cols()), myoperation)` to silence the message.", verb)
+      }
+      rlang::inform(c(
+        sprintf("`%s_%s()` ignored the following grouping variables:", verb, suffix),
+        "*" = msg,
+        i = alt
+      ))
+    }
+  }
+  invisible()
+}
+
+# A zero-column table with rows: dplyr recycles a constant `mutate(b = 1)` to
+# the row count, but there is no column to size a constant against (and
+# push_op() refuses the input, check_zero_column_input()). mutate() and
+# transmute() hand such a call to dplyr on the CPU: there is no data to move,
+# and dplyr's tidyselect then sees exactly the columns the user has (none),
+# so if_all() over nothing is TRUE, if_any() FALSE and an empty across() adds
+# nothing. FALSE when `.data` has columns, no rows, or an unknown row count
+# (the usual checks then apply).
+# @keywords internal
+is_zero_column_with_rows <- function(.data) {
+  n <- .subset2(.data, "nrow")
+  length(current_schema(.data)$names) == 0L && !is.null(n) && !is.na(n) && n > 0L
+}

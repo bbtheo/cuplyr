@@ -258,10 +258,10 @@ test_that("full_join() has no unmatched= parameter (matches dplyr's own signatur
   gx <- tbl_gpu(data.frame(id = 1:3))
   gy <- tbl_gpu(data.frame(id = 1:3))
 
-  # `unmatched=` isn't a formal of full_join.tbl_gpu(), so it's swallowed by
-  # `...` and never validated/errors -- matching dplyr's own full_join(),
-  # which likewise has no `unmatched=` argument.
-  expect_no_error(dplyr::full_join(gx, gy, by = "id", unmatched = "drop") |> collect())
+  # `unmatched=` isn't a formal of full_join.tbl_gpu(), so it lands in `...`
+  # and errors -- matching dplyr's own full_join(), which checks its dots.
+  expect_error(dplyr::full_join(gx, gy, by = "id", unmatched = "drop"),
+               class = "rlib_error_dots_nonempty")
 })
 
 # =============================================================================

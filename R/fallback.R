@@ -336,7 +336,9 @@ do.tbl_gpu <- function(.data, ...) {
 #' @export
 #' @importFrom dplyr nest_join
 nest_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, keep = NULL,
-                               name = NULL, ...) {
+                               name = NULL, ...,
+                               na_matches = c("na", "never"), unmatched = "drop") {
+  rlang::check_dots_empty0(...)
   # dplyr names the list column after the `y` expression (`as_label(enexpr(y))`);
   # taken before `y` is collected so it isn't the collected copy's name.
   name <- name %||% rlang::as_label(rlang::enexpr(y))
@@ -351,7 +353,8 @@ nest_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, keep = NULL,
   }
   gpu_fallback("nest_join", x, function(tbl) {
     mute_cross_by_warning(
-      dplyr::nest_join(tbl, y_tbl, by = by, copy = copy, keep = keep, name = name, ...),
+      dplyr::nest_join(tbl, y_tbl, by = by, copy = copy, keep = keep, name = name,
+                       na_matches = na_matches, unmatched = unmatched),
       cross_by
     )
   })

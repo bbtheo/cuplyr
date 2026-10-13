@@ -50,12 +50,16 @@ test_that("F07: dots naming an earlier dot's output go through the CPU fallback 
   expect_identical(res$y, 4)
 })
 
-test_that("F07: push_op() verbs on a zero-column table with rows error instead of returning a wrong row count", {
+test_that("F07: push_op() verbs on a zero-column table with rows error (filter) instead of returning a wrong row count", {
   skip_if_no_gpu()
   gpu <- tbl_gpu(tibble::tibble(.rows = 4L))
 
   expect_error(dplyr::filter(gpu, FALSE), "no columns")
-  expect_error(dplyr::mutate(as_lazy(gpu), z = 1L), "no columns")
+  # constant mutate() recycles to the row count (F44); a pure column-less
+  # table can't be sized any other way, so the rest still errors.
+  expect_identical(
+    collect(dplyr::mutate(as_lazy(gpu), z = 1L)), tibble::tibble(z = rep(1L, 4))
+  )
   expect_identical(dim(as_lazy(gpu)), c(4L, 0L))
   expect_identical(collect(compute(as_lazy(gpu))), tibble::tibble(.rows = 4L))
 })

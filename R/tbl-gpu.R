@@ -539,6 +539,28 @@ dimnames.tbl_gpu <- function(x) {
   list(NULL, current_schema(x)$names)
 }
 
+#' Set the dimnames of a GPU table
+#'
+#' Only the column names can be set (`colnames(x) <- value`); rows are
+#' unnamed, so `value[[1]]` must be `NULL`.
+#'
+#' @param x A `tbl_gpu` object.
+#' @param value `list(NULL, <column names>)`.
+#' @return The modified `tbl_gpu` object.
+#' @export
+`dimnames<-.tbl_gpu` <- function(x, value) {
+  if (!is.list(value) || length(value) != 2L) {
+    stop("`value` must be a list of length 2 (row names, column names).",
+         call. = FALSE)
+  }
+  if (length(value[[1]]) > 0L) {
+    stop("A GPU table has no row names; only column names can be set.",
+         call. = FALSE)
+  }
+  names(x) <- if (is.null(value[[2]])) character(0) else as.character(value[[2]])
+  x
+}
+
 #' Get column names of a GPU table
 #'
 #' @param x A `tbl_gpu` object.
@@ -566,8 +588,8 @@ called_from_vctrs <- function(p) {
 #'
 #' @param x A `tbl_gpu` object.
 #' @param value A character vector of new column names. Must have the same
-#'   length as the number of columns, contain no `NA` values, and no empty
-#'   strings.
+#'   length as the number of columns. `NA` and `""` are allowed, as in a
+#'   data frame (data-masking verbs then refuse the table, like dplyr).
 #' @return The modified `tbl_gpu` object.
 #' @export
 `names<-.tbl_gpu` <- function(x, value) {
@@ -594,14 +616,8 @@ called_from_vctrs <- function(p) {
     )
   }
 
-  if (anyNA(value)) {
-    stop("`value` must not contain NA values.", call. = FALSE)
-  }
-
-  if (any(value == "")) {
-    stop("`value` must not contain empty strings.", call. = FALSE)
-  }
-
+  # Like a data.frame, `NA` and "" are allowed as names; the masking verbs
+  # refuse such a table (check_unique_input_names()).
   # Refuse before any state changes: a grouped table can't carry duplicates.
   check_dup_names_ungrouped(value, x$groups)
 
@@ -611,10 +627,11 @@ called_from_vctrs <- function(p) {
   # through a positional rename node.
   if (has_pending_ops(x)) {
     old <- current_schema(x)$names
-    if (!anyDuplicated(old) && !anyDuplicated(value)) {
+    if (!anyDuplicated(old) && !anyDuplicated(value) && !anyNA(c(old, value)) &&
+        !any(c(old, value) == "")) {
       return(dplyr::rename(x, dplyr::all_of(stats::setNames(old, value))))
     }
-    changed <- old != value
+    changed <- is.na(old) | is.na(value) | old != value
     if (!any(changed)) {
       return(x)
     }

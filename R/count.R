@@ -164,6 +164,13 @@ resolve_agg_name <- function(name, vars) {
   while (candidate %in% vars) {
     candidate <- paste0("n", candidate)
   }
+  # dplyr's check_n_name()
+  if (candidate != "n") {
+    rlang::inform(c(
+      paste0("Storing counts in `", candidate, "`, as `n` already present in input"),
+      i = "Use `name = \"new_name\"` to pick a new name."
+    ))
+  }
   candidate
 }
 

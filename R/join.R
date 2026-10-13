@@ -1624,6 +1624,7 @@ left_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
                               suffix = c(".x", ".y"), ..., keep = NULL,
                               na_matches = "na", multiple = "all",
                               unmatched = "drop", relationship = NULL) {
+  rlang::check_dots_empty0(...)
   mutating_join("left", x, y, by, copy, suffix, keep, na_matches, multiple,
                 unmatched, relationship, user_env = rlang::caller_env())
 }
@@ -1635,6 +1636,7 @@ inner_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
                                suffix = c(".x", ".y"), ..., keep = NULL,
                                na_matches = "na", multiple = "all",
                                unmatched = "drop", relationship = NULL) {
+  rlang::check_dots_empty0(...)
   mutating_join("inner", x, y, by, copy, suffix, keep, na_matches, multiple,
                 unmatched, relationship, user_env = rlang::caller_env())
 }
@@ -1646,11 +1648,9 @@ full_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
                               suffix = c(".x", ".y"), ..., keep = NULL,
                               na_matches = "na", multiple = "all",
                               relationship = NULL) {
+  rlang::check_dots_empty0(...)
   # full_join() has no `unmatched=` in dplyr (every row, matched or not, is
-  # always kept), so it isn't accepted here either -- passing it hits `...`
-  # and is silently ignored, same as dplyr's own `...`-must-be-empty dots
-  # (dplyr hard-errors on that; this is a narrower gap, not a behavior this
-  # task needs to close).
+  # always kept), so passing it lands in `...` and errors, as in dplyr.
   mutating_join("full", x, y, by, copy, suffix, keep, na_matches, multiple,
                 unmatched = NULL, relationship, user_env = rlang::caller_env())
 }
@@ -1662,6 +1662,7 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
                                suffix = c(".x", ".y"), ..., keep = NULL,
                                na_matches = "na", multiple = "all",
                                unmatched = "drop", relationship = NULL) {
+  rlang::check_dots_empty0(...)
   # right_join(x, y) is native (Phase 7 J4): gpu_right_join()
   # (src/ops_join.cpp) computes matched (x, y) pairs via cudf::inner_join()
   # plus unmatched-y rows via a filtered_join anti-join, assembled so the
@@ -1707,6 +1708,7 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
 #' @importFrom dplyr semi_join
 semi_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
                               na_matches = "na") {
+  rlang::check_dots_empty0(...)
   filtering_join("semi", x, y, by, copy, na_matches, user_env = rlang::caller_env())
 }
 
@@ -1718,6 +1720,7 @@ semi_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
 #' @importFrom dplyr anti_join
 anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
                               na_matches = "na") {
+  rlang::check_dots_empty0(...)
   filtering_join("anti", x, y, by, copy, na_matches, user_env = rlang::caller_env())
 }
 
@@ -1772,6 +1775,7 @@ anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
 #' @export
 #' @importFrom dplyr cross_join
 cross_join.tbl_gpu <- function(x, y, ..., copy = FALSE, suffix = c(".x", ".y")) {
+  rlang::check_dots_empty0(...)
   y <- join_coerce_y(x, y, copy)
   check_unique_join_inputs(x, y)
 

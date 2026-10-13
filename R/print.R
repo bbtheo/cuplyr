@@ -38,7 +38,7 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
 
   dims <- base_dim(x)
   types <- gpu_col_types(x$ptr)
-  col_names <- x$schema$names
+  col_names <- display_names(x$schema$names)
 
   # Header
   cat("Rows: ", format(dims[1], big.mark = ","), "\n", sep = "")
@@ -97,4 +97,11 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
   }
 
   invisible(x)
+}
+
+# Column names as printed: an NA name shows as "NA" (nchar(NA_character_) is
+# NA and would break the width arithmetic).
+display_names <- function(nms) {
+  nms[is.na(nms)] <- "NA"
+  nms
 }

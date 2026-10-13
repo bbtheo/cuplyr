@@ -377,24 +377,20 @@ test_that("names<-.tbl_gpu() errors on non-character input", {
   )
 })
 
-test_that("names<-.tbl_gpu() errors on NA names", {
+test_that("names<-.tbl_gpu() accepts NA names, as a data frame does (F44)", {
   skip_if_no_gpu()
 
   gpu_df <- tbl_gpu(mtcars[, 1:3])
-  expect_error(
-    names(gpu_df) <- c("a", NA, "c"),
-    "NA"
-  )
+  names(gpu_df) <- c("a", NA, "c")
+  expect_identical(names(gpu_df), c("a", NA, "c"))
 })
 
-test_that("names<-.tbl_gpu() errors on empty string names", {
+test_that("names<-.tbl_gpu() accepts empty string names, as a data frame does (F44)", {
   skip_if_no_gpu()
 
   gpu_df <- tbl_gpu(mtcars[, 1:3])
-  expect_error(
-    names(gpu_df) <- c("a", "", "c"),
-    "empty"
-  )
+  names(gpu_df) <- c("a", "", "c")
+  expect_identical(names(gpu_df), c("a", "", "c"))
 })
 
 # =============================================================================

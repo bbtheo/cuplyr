@@ -57,7 +57,7 @@ glimpse.tbl_gpu <- function(x, width = NULL, ...) {
   materialized <- if (has_pending_ops(x)) compute(x) else x
 
   dims <- dim(materialized)
-  col_names <- materialized$schema$names
+  col_names <- display_names(materialized$schema$names)
   types <- gpu_col_types(materialized$ptr)
 
   cat("Rows: ", format(dims[1], big.mark = ","), "\n", sep = "")

@@ -28,7 +28,17 @@
 
 \method{do}{tbl_gpu}(.data, ...)
 
-\method{nest_join}{tbl_gpu}(x, y, by = NULL, copy = FALSE, keep = NULL, name = NULL, ...)
+\method{nest_join}{tbl_gpu}(
+  x,
+  y,
+  by = NULL,
+  copy = FALSE,
+  keep = NULL,
+  name = NULL,
+  ...,
+  na_matches = c("na", "never"),
+  unmatched = "drop"
+)
 
 \method{rows_insert}{tbl_gpu}(
   x,

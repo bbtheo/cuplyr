@@ -78,7 +78,16 @@ current_schema <- function(.data) {
 # node (node_is_position_safe()), so a verb that forgets still can't run.
 # @keywords internal
 check_unique_input_names <- function(.data, call = rlang::caller_env()) {
-  if (anyDuplicated(.subset2(.data, "schema")$names) > 0L) {
+  nms <- current_schema(.data)$names
+  # dplyr's DataMask (R/data-mask.R) checks missing names, then "" names, then
+  # duplicates, so a repeated NA or "" gets the missing/empty message.
+  if (anyNA(nms)) {
+    rlang::abort("Can't transform a data frame with missing names.", call = call)
+  }
+  if (any(nms == "")) {
+    rlang::abort("Can't transform a data frame with `NA` or `\"\"` names.", call = call)
+  }
+  if (anyDuplicated(nms) > 0L) {
     abort_duplicate_names(call)
   }
   invisible(.data)

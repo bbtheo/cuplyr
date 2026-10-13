@@ -339,15 +339,10 @@ test_that("full_join() never raises matches_nothing/matches_remaining (no unmatc
   gx <- tbl_gpu(left_df); gy <- tbl_gpu(right_df)
 
   # `unmatched=` isn't a formal of full_join.tbl_gpu() (matching dplyr's own
-  # full_join() signature) -- passing it is silently absorbed by `...` and
-  # never reaches check_join_cardinality() with anything but the hardcoded
-  # "drop"/"drop" default, so neither matches_nothing nor matches_remaining
-  # can ever fire. (NOTE: this is NOT compared against the dplyr oracle
-  # here -- dplyr's own full_join(unmatched = "error") actually hits its
-  # `...` "must be empty" dots-validation error, a narrower, pre-existing,
-  # documented divergence from Phase 7 J1 that this task does not close;
-  # see test-dplyr-join.R's "full_join() has no unmatched=" test.)
-  expect_no_error(dplyr::full_join(gx, gy, by = "a", unmatched = "error") |> collect())
+  # full_join() signature): it lands in `...`, which errors as in dplyr, so
+  # neither matches_nothing nor matches_remaining can ever fire.
+  expect_error(dplyr::full_join(gx, gy, by = "a", unmatched = "error"),
+               class = "rlib_error_dots_nonempty")
   expect_no_error(dplyr::full_join(gx, gy, by = "a") |> collect())
 })
 
