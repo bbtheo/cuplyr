@@ -41,6 +41,9 @@ bind_cols_route <- function(..., .name_repair, call) {
   args <- rlang::list2(...)
   dots <- bind_cols_inputs(args)
   if (any(vapply(dots, is_tbl_gpu, logical(1)))) {
+    if (bind_first_is_rowwise(dots)) {
+      return(bind_rowwise_first("bind_cols", dots, .name_repair = .name_repair))
+    }
     return(bind_cols_gpu(dots, .name_repair = .name_repair, call = call))
   }
   dplyr::bind_cols(!!!args, .name_repair = .name_repair)
@@ -103,6 +106,9 @@ bind_rows_route <- function(..., .id, call) {
   is_gpu <- vapply(dots, is_tbl_gpu, logical(1))
   if (!any(is_gpu)) {
     return(dplyr::bind_rows(!!!args, .id = .id))
+  }
+  if (bind_first_is_rowwise(dots)) {
+    return(bind_rowwise_first("bind_rows", dots, .id = .id))
   }
   # Only the other inputs are checked: vctrs::vec_is() on a lazy tbl_gpu
   # would compute it, and bind_rows_gpu() computes it again.
@@ -339,7 +345,7 @@ bind_cols_gpu <- function(dots, .name_repair = "unique", call = rlang::caller_en
         x <- vctrs::vec_recycle(x, n)
       }
       col_names[[j]] <- names(x)
-      x <- tbl_gpu(x, lazy = FALSE)
+      x <- upload_other_side(x, lazy = FALSE)
     } else {
       col_names[[j]] <- nms[[i]]
       col <- vctrs::vec_recycle(x, n, x_arg = nms[[i]])
@@ -398,6 +404,22 @@ bind_cols_gpu <- function(dots, .name_repair = "unique", call = rlang::caller_en
   if (bind_has_meta(first)) carry_frame_meta(out, first) else out
 }
 
+# A rowwise_df first input decides the result's class (a rowwise_df), which a
+# tbl_gpu can't hold: collect the tbl_gpu inputs and let dplyr bind on the CPU.
+bind_first_is_rowwise <- function(dots) {
+  length(dots) > 0L && inherits(dots[[1L]], "rowwise_df")
+}
+
+bind_rowwise_first <- function(verb, dots, ...) {
+  cuplyr_fallback_notify(verb, "a rowwise data frame as the first input")
+  dots <- lapply(dots, collect_other_side)
+  # Called by name so dplyr's errors read `bind_rows()` / `bind_cols()`.
+  switch(verb,
+    bind_rows = rlang::inject(dplyr::bind_rows(!!!dots, ...)),
+    bind_cols = rlang::inject(dplyr::bind_cols(!!!dots, ...))
+  )
+}
+
 # A bind input that has data-frame attributes and a class to hand over: a table,
 # not a bare vector.
 bind_has_meta <- function(x) is.data.frame(x) || is_tbl_gpu(x)
@@ -435,7 +457,7 @@ bind_rows_gpu <- function(dots, .id = NULL, call = rlang::caller_env()) {
   # Convert any data.frames to tbl_gpu
   dots <- lapply(dots, function(x) {
     if (is.data.frame(x) && !is_tbl_gpu(x)) {
-      tbl_gpu(x, lazy = FALSE)
+      upload_other_side(x, lazy = FALSE)
     } else if (!is_tbl_gpu(x)) {
       stop("All inputs must be tbl_gpu or data.frame", call. = FALSE)
     } else {

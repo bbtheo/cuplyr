@@ -22,14 +22,15 @@
 #'       default, minus the message.
 #'     \item `"drop"` -- the result is always ungrouped.
 #'     \item `"keep"` -- every original grouping variable is retained.
-#'     \item `"rowwise"` -- NOT SUPPORTED on `tbl_gpu` (hard error): a
-#'       `tbl_gpu` has no rowwise representation (`rowwise()` itself is a
-#'       full CPU-fallback verb, see [dplyr::rowwise()]). `collect()` first,
-#'       then call real `dplyr::rowwise()` on the plain data frame.
+#'     \item `"rowwise"` -- the summary runs on the GPU keeping every
+#'       grouping variable, then the result is collected and returned as
+#'       dplyr's own `rowwise_df` by those variables (a CPU object, like the
+#'       result of [dplyr::rowwise()] on a `tbl_gpu`: a `tbl_gpu` has no
+#'       rowwise representation).
 #'   }
 #'   `.groups=` is only validated against an already-grouped `.data` --
 #'   matching a genuine (if surprising) dplyr quirk verified empirically:
-#'   any non-`"rowwise"` value (including a typo) is silently a no-op on an
+#'   any value other than `"rowwise"` (including a typo) is silently a no-op on an
 #'   UNGROUPED `.data`, since there is nothing to drop/keep/peel from an
 #'   empty group set.
 #'
@@ -280,6 +281,16 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   caller_env <- rlang::caller_env()
   check_unique_input_names(.data)
 
+  # `.groups = "rowwise"`: summarise keeping every group, then hand back
+  # dplyr's own rowwise_df (a tbl_gpu can't represent rowwise data).
+  if (identical(.groups, "rowwise")) {
+    cuplyr_fallback_notify("summarise", ".groups = \"rowwise\" (the result is a CPU rowwise_df)")
+    res <-summarise_impl_dots(.data, rlang::enquos(...), "keep", rlang::enquo(.by),
+                               caller_env)
+    res <- if (is_tbl_gpu(res)) collect(res) else res
+    return(dplyr::rowwise(dplyr::ungroup(res), dplyr::all_of(dplyr::group_vars(res))))
+  }
+
   by_quo <- rlang::enquo(.by)
 
   # Phase 5, task W9: `.by=` resolution -- checked up front (before the
@@ -292,6 +303,14 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   by_given <- !rlang::quo_is_null(by_quo)
 
   dots <- rlang::enquos(...)
+  summarise_impl(.data, dots, .groups, by_quo, by_cols, by_given, caller_env)
+}
+
+# Internal: summarise_impl() with `.by=` resolved from its quosure.
+# @keywords internal
+summarise_impl_dots <- function(.data, dots, .groups, by_quo, caller_env) {
+  by_cols <- resolve_by(.data, by_quo, ".by")
+  by_given <- !rlang::quo_is_null(by_quo)
   summarise_impl(.data, dots, .groups, by_quo, by_cols, by_given, caller_env)
 }
 
@@ -640,16 +659,8 @@ expr_data_pronoun_names <- function(expr) {
 #     grouping column -- gated the same way dplyr gates it, see
 #     `summarise_should_inform()`.
 #
-# `.groups = "rowwise"` is a HARD ERROR here regardless of grouped/ungrouped
-# (cuplyr's own scope decision, not a literal dplyr-divergence in observable
-# output -- just an unsupported input): a `tbl_gpu` has no rowwise
-# representation at all (`rowwise()` itself is a full CPU-fallback verb,
-# R/fallback.R), so faking it via a regular grouped `tbl_gpu` would silently
-# misrepresent the result's actual semantics for later verbs (rowwise
-# mutate/summarise treat each row as its own group, which a plain grouped
-# `tbl_gpu` does not). Users needing a real rowwise result should
-# `collect()` first, then call real `dplyr::rowwise()` on the plain data
-# frame.
+# `.groups = "rowwise"` never reaches this function: summarise.tbl_gpu()
+# summarises with "keep" and returns dplyr's rowwise_df of the result.
 #
 # @param orig_groups Character vector, `.data$groups` BEFORE this summarise
 # @param groups_arg The raw `.groups=` value as passed by the caller (may be
@@ -660,15 +671,6 @@ expr_data_pronoun_names <- function(expr) {
 # @return Character vector, the retained group columns
 # @keywords internal
 resolve_summarise_groups <- function(orig_groups, groups_arg, caller_env) {
-  if (identical(groups_arg, "rowwise")) {
-    stop(
-      "summarise(.groups = \"rowwise\") is not supported on tbl_gpu: a ",
-      "tbl_gpu has no rowwise representation. collect() the result first, ",
-      "then call dplyr::rowwise() on the plain data frame instead.",
-      call. = FALSE
-    )
-  }
-
   if (length(orig_groups) == 0) {
     # Ungrouped input: dplyr's summarise.data.frame() never validates
     # `.groups=` (any non-"rowwise" value, valid or not, is a silent no-op)

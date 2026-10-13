@@ -31,14 +31,15 @@ only one grouping variable, the result is ungrouped. Same as the
 default, minus the message.
 \item \code{"drop"} -- the result is always ungrouped.
 \item \code{"keep"} -- every original grouping variable is retained.
-\item \code{"rowwise"} -- NOT SUPPORTED on \code{tbl_gpu} (hard error): a
-\code{tbl_gpu} has no rowwise representation (\code{rowwise()} itself is a
-full CPU-fallback verb, see \code{\link[dplyr:rowwise]{dplyr::rowwise()}}). \code{collect()} first,
-then call real \code{dplyr::rowwise()} on the plain data frame.
+\item \code{"rowwise"} -- the summary runs on the GPU keeping every
+grouping variable, then the result is collected and returned as
+dplyr's own \code{rowwise_df} by those variables (a CPU object, like the
+result of \code{\link[dplyr:rowwise]{dplyr::rowwise()}} on a \code{tbl_gpu}: a \code{tbl_gpu} has no
+rowwise representation).
 }
 \verb{.groups=} is only validated against an already-grouped \code{.data} --
 matching a genuine (if surprising) dplyr quirk verified empirically:
-any non-\code{"rowwise"} value (including a typo) is silently a no-op on an
+any value other than \code{"rowwise"} (including a typo) is silently a no-op on an
 UNGROUPED \code{.data}, since there is nothing to drop/keep/peel from an
 empty group set.
 \subsection{The regroup message}{

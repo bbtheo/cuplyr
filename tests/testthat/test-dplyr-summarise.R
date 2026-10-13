@@ -1049,26 +1049,53 @@ test_that("real dplyr and cuplyr agree on when the regroup message fires (same e
   expect_message(dplyr::group_by(gpu_df, a, b) |> dplyr::summarise(m = mean(x)), "regroup")
 })
 
-test_that("summarise(.groups = 'rowwise') is rejected on a grouped tbl_gpu (no rowwise representation)", {
+test_that("summarise(.groups = 'rowwise') on a grouped tbl_gpu returns dplyr's rowwise_df (F20)", {
   skip_if_no_gpu()
 
   df <- oracle_groups_df()
-  gpu_df <- tbl_gpu(df) |> dplyr::group_by(a, b)
+  expected <- dplyr::as_tibble(df) |> dplyr::group_by(a, b) |>
+    dplyr::summarise(m = mean(x), .groups = "rowwise")
+  got <- tbl_gpu(df) |> dplyr::group_by(a, b) |>
+    dplyr::summarise(m = mean(x), .groups = "rowwise")
 
-  expect_error(
-    dplyr::summarise(gpu_df, m = mean(x), .groups = "rowwise"),
-    "rowwise"
+  expect_s3_class(got, "rowwise_df")
+  expect_identical(dplyr::group_vars(got), c("a", "b"))
+  expect_equal(
+    dplyr::arrange(dplyr::ungroup(got), a, b),
+    dplyr::arrange(dplyr::ungroup(expected), a, b)
   )
 })
 
-test_that("summarise(.groups = 'rowwise') is rejected even on an ungrouped tbl_gpu", {
+test_that("summarise(.groups = 'rowwise') on an ungrouped tbl_gpu returns dplyr's rowwise_df (F20)", {
   skip_if_no_gpu()
 
-  gpu_df <- tbl_gpu(oracle_groups_df())
+  df <- oracle_groups_df()
+  expected <- dplyr::as_tibble(df) |> dplyr::summarise(m = mean(x), .groups = "rowwise")
+  got <- tbl_gpu(df) |> dplyr::summarise(m = mean(x), .groups = "rowwise")
 
+  expect_identical(class(got), class(expected))
+  expect_equal(got, expected)
+})
+
+test_that("summarise(.groups = 'rowwise') notifies the CPU fallback (F20)", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(data.frame(g = c(1L, 1L, 2L), c = c(1, 2, 3)))
+
+  withr::local_options(cuplyr.fallback = "error")
   expect_error(
-    dplyr::summarise(gpu_df, m = mean(x), .groups = "rowwise"),
-    "rowwise"
+    dplyr::summarise(gpu_df, t = sum(c), .groups = "rowwise"),
+    "fell back to CPU"
+  )
+  withr::local_options(cuplyr.fallback = "warn")
+  expect_warning(
+    dplyr::summarise(gpu_df, t = sum(c), .groups = "rowwise"),
+    "fell back to CPU"
+  )
+  withr::local_options(cuplyr.fallback = "silent")
+  expect_condition(
+    dplyr::summarise(gpu_df, t = sum(c), .groups = "rowwise"),
+    class = "cuplyr_cpu_fallback"
   )
 })
 

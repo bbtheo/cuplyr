@@ -92,6 +92,18 @@ tbl_gpu <- function(data, ..., lazy = NULL) {
 #' @rdname tbl_gpu
 #' @export
 tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
+  # A tbl_gpu can't represent rowwise data, and uploading it grouped by its
+  # rowwise vars would silently compute per group: upload it ungrouped, loudly.
+  if (inherits(data, "rowwise_df")) {
+    rlang::warn(
+      c(
+        "A tbl_gpu can't represent rowwise data: uploaded ungrouped.",
+        i = "`rowwise()` on a tbl_gpu runs on the CPU and returns a plain rowwise data frame."
+      ),
+      class = "cuplyr_warning_rowwise_upload"
+    )
+    data <- dplyr::ungroup(data)
+  }
   # `vctrs::unspecified()` columns (all NA) upload as plain logical; their
   # names ride on the table (`$unspecified`) so row-only verbs and filtering
   # joins can give the class back at collect().
@@ -159,6 +171,15 @@ tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
                      unspecified = unspec_names,
                      bare_df = identical(class(data), "data.frame"))
   with_frame_attrs(out, frame_attrs(data))
+}
+
+# Upload for the "other side" of a two-table verb (join y, set-op y, a non-first
+# bind input). dplyr ignores y's grouping there, so a rowwise_df goes up
+# ungrouped and without the tbl_gpu() warning. Other data frames are unchanged.
+# @keywords internal
+upload_other_side <- function(y, lazy = FALSE) {
+  if (inherits(y, "rowwise_df")) y <- dplyr::ungroup(y)
+  tbl_gpu(y, lazy = lazy)
 }
 
 # Data-frame attributes (F31). dplyr's dplyr_reconstruct() copies a template's

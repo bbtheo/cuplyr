@@ -318,5 +318,5 @@ auto_copy.tbl_gpu <- function(x, y, copy = FALSE, ...) {
   if (!is.data.frame(y)) {
     y <- as.data.frame(y)
   }
-  tbl_gpu(y)
+  upload_other_side(y, lazy = NULL)
 }

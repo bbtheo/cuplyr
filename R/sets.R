@@ -121,7 +121,7 @@ resolve_set_op_other_side <- function(y) {
     return(y)
   }
   if (is.data.frame(y)) {
-    return(tbl_gpu(y, lazy = FALSE))
+    return(upload_other_side(y, lazy = FALSE))
   }
   abort_set_op_incompatible("`y` must be a data frame.")
 }
