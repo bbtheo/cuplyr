@@ -361,8 +361,12 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   # through the CPU fallback below -- checked BEFORE cur_group_id()
   # substitution/materialization, so a call that's going to fall back
   # anyway never pays for that materialization first.
+  # cur_group()$key and length(cur_group_rows()) are plain expressions; the
+  # CPU fallbacks keep the dots as the user wrote them.
+  user_dots <- dots
+  dots <- rewrite_context_dots(dots, verb_groups, sequential = TRUE, name_unnamed = TRUE)
   if (dots_need_fallback(dots)) {
-    return(mutate_across_fallback(.data, dots, .keep, before_quo, after_quo, by_quo))
+    return(mutate_across_fallback(.data, user_dots, .keep, before_quo, after_quo, by_quo))
   }
 
   # Expand before cur_group_id() substitution, so a call that falls back
@@ -370,7 +374,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   # in `.cols`'s selectable universe.
   expanded <- expand_across_dots(dots, current_schema(.data), verb_groups, "mutate")
   if (isTRUE(attr(expanded, "needs_fallback"))) {
-    return(mutate_across_fallback(.data, dots, .keep, before_quo, after_quo, by_quo))
+    return(mutate_across_fallback(.data, user_dots, .keep, before_quo, after_quo, by_quo))
   }
   # The CPU fallbacks below re-run dplyr on the table and the ORIGINAL user
   # dots as they were BEFORE across() expansion and cur_group_id()
@@ -382,8 +386,8 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   staged_temps <- attr(expanded, "staged_temps")
   provenance <- attr(expanded, "provenance")
   fallback_data <- .data
-  fallback_dots <- dots
-  cgid <- substitute_cur_group_id(.data, expanded, verb_groups)
+  fallback_dots <- user_dots
+  cgid <- substitute_cur_group_id(.data, expanded, verb_groups, by = by_given)
   .data <- cgid$data
   orig_schema <- current_schema(.data)
   dots <- cgid$dots
@@ -1494,15 +1498,17 @@ transmute.tbl_gpu <- function(.data, ...) {
 
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R
   # and mutate.tbl_gpu()'s own identical handling.
+  user_dots <- dots
+  dots <- rewrite_context_dots(dots, .data$groups, sequential = TRUE, name_unnamed = TRUE)
   if (dots_need_fallback(dots)) {
     return(gpu_fallback("transmute", .data, function(tbl) {
-      rlang::inject(dplyr::transmute(tbl, !!!dots))
+      rlang::inject(dplyr::transmute(tbl, !!!user_dots))
     }))
   }
   expanded <- expand_across_dots(dots, current_schema(.data), .data$groups, "transmute")
   if (isTRUE(attr(expanded, "needs_fallback"))) {
     return(gpu_fallback("transmute", .data, function(tbl) {
-      rlang::inject(dplyr::transmute(tbl, !!!dots))
+      rlang::inject(dplyr::transmute(tbl, !!!user_dots))
     }))
   }
   # As in mutate.tbl_gpu(): the CPU fallback runs on the pre-substitution

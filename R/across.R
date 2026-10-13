@@ -17,7 +17,7 @@
 #     `arrange(pick(...))`, ...) -- no GPU representation for "a handful of
 #     columns as one value" exists in this package's IR, so ANY dot that
 #     references pick()/cur_group()/cur_group_rows()/cur_data()/
-#     cur_data_all()/c_across() anywhere in its expression tree, or nests
+#     cur_data_all()/c_across() (beyond the native rewrites below) anywhere in its expression tree, or nests
 #     across()/if_any()/if_all() inside another call (rather than being the
 #     WHOLE dot), or supplies `across(.unpack = TRUE)`, is routed through a
 #     whole-CALL CPU fallback (dots_need_fallback()/verb_across_fallback())
@@ -31,13 +31,16 @@
 #     already GPU-native (R/group-by.R's compute_group_data(), Phase 9) --
 #     so this reuses that plus an ordinary left_join() to broadcast each
 #     group's id back onto every one of its rows. Supported inside
-#     mutate()/filter() (row-level verbs); inside summarise() it is routed
-#     to the whole-call fallback instead (see substitute_cur_group_id()'s
-#     own docs for why).
-#   - cur_group()/cur_group_rows() always fall back (no clean GPU
-#     lowering: the former returns a 1-row tibble, the latter a row-index
-#     vector, per current group -- genuinely row/group-context objects,
-#     not columns).
+#     mutate()/filter() (row-level verbs), numbered over group_data() for
+#     group_by() (`.drop = FALSE` empty groups included) and in first-appearance
+#     order for `.by`. In summarise() only a dot that is exactly
+#     `cur_group_id()` is native (the output row number, see
+#     summarise_group_id_split()); any other use falls back.
+#   - cur_group()/cur_group_rows() are genuinely group-context objects (a 1-row
+#     tibble, a row-index vector), so they fall back except for two shapes that
+#     are plain expressions (rewrite_context_dots()): `cur_group()$key` /
+#     `cur_group()[["key"]]` for a group column, and `length(cur_group_rows())`
+#     (= n()).
 #   - c_across() is rowwise()'s own companion; rowwise() itself is already
 #     a full CPU-fallback verb (R/fallback.R, Phase 2), so c_across() needs
 #     no code here at all -- it only ever appears inside a rowwise-mutate
@@ -297,6 +300,95 @@ verb_across_fallback <- function(verb_name, .data, call_fn) {
 }
 
 # =============================================================================
+# cur_group()$key and length(cur_group_rows()): syntactic rewrites
+# =============================================================================
+
+# Rewrite the two shapes of cur_group()/cur_group_rows() that are plain column
+# or count expressions, before the whole-call fallback screen:
+#   - `cur_group()$key` / `cur_group()[["key"]]` -> the group column `key`
+#     (`key` a column of `group_cols` that no earlier dot of the call writes:
+#     cur_group() keeps the old key)
+#   - `length(cur_group_rows())` -> `dplyr::n()`
+# Bare or `pkg::`-qualified. Everything else is left alone and so still reaches
+# the fallback. Function bodies and formulas are not entered (their names may
+# be shadowed).
+#
+# @param dots A list of quosures
+# @param group_cols Character vector, the effective group columns
+# @param sequential `TRUE` for mutate()/transmute(), whose dots can write a
+#   group column before a later dot reads cur_group()
+# @param name_unnamed Name a rewritten unnamed dot after the original
+#   expression (filter() dots must stay unnamed)
+# @return The dots, rewritten (the originals stay with the caller for the CPU
+#   fallbacks)
+# @keywords internal
+rewrite_context_dots <- function(dots, group_cols, sequential = FALSE, name_unnamed = FALSE) {
+  has_ctx <- any(vapply(dots, function(q) {
+    expr_contains_zero_arg_call(rlang::quo_get_expr(q), "cur_group") ||
+      expr_contains_zero_arg_call(rlang::quo_get_expr(q), "cur_group_rows")
+  }, logical(1)))
+  if (!has_ctx) {
+    return(dots)
+  }
+  nms <- names(dots) %||% rep("", length(dots))
+  names(dots) <- nms
+  for (i in seq_along(dots)) {
+    keys <- group_cols
+    if (sequential && i > 1L) {
+      keys <- setdiff(keys, nms[seq_len(i - 1L)])
+    }
+    old <- rlang::quo_get_expr(dots[[i]])
+    expr <- rewrite_context_expr(old, keys)
+    # An unnamed dot is named after the expression the user wrote
+    if (name_unnamed && !identical(expr, old) && !nzchar(nms[i])) {
+      names(dots)[i] <- rlang::as_label(old)
+    }
+    dots[[i]] <- rlang::new_quosure(expr, rlang::quo_get_env(dots[[i]]))
+  }
+  dots
+}
+
+# @keywords internal
+rewrite_context_expr <- function(expr, keys) {
+  if (rlang::is_missing(expr) || !is.call(expr)) {
+    return(expr)
+  }
+  head <- call_head_name(expr)
+  if (identical(head, "length") && length(expr) == 2L) {
+    arg <- expr[[2]]
+    if (is.call(arg) && length(arg) == 1L && identical(call_head_name(arg), "cur_group_rows")) {
+      return(quote(dplyr::n()))
+    }
+  }
+  if (is.symbol(expr[[1]]) && as.character(expr[[1]]) %in% c("$", "[[") && length(expr) == 3L) {
+    obj <- expr[[2]]
+    if (is.call(obj) && length(obj) == 1L && identical(call_head_name(obj), "cur_group")) {
+      key <- expr[[3]]
+      key <- if (is.symbol(key) && identical(as.character(expr[[1]]), "$")) {
+        as.character(key)
+      } else if (is.character(key) && length(key) == 1L) {
+        key
+      } else {
+        NULL
+      }
+      if (!is.null(key) && key %in% keys) {
+        return(as.name(key))
+      }
+    }
+  }
+  if (identical(head, "function") || identical(head, "~")) {
+    return(expr)
+  }
+  parts <- as.list(expr)
+  for (j in seq_along(parts)[-1]) {
+    if (!rlang::is_missing(parts[[j]])) {
+      parts[j] <- list(rewrite_context_expr(parts[[j]], keys))
+    }
+  }
+  as.call(parts)
+}
+
+# =============================================================================
 # cur_group_id(): GPU-native substitution (mutate()/filter() only)
 # =============================================================================
 
@@ -325,10 +417,12 @@ verb_across_fallback <- function(verb_name, .data, call_fn) {
 # @param group_cols Character vector, the effective group columns
 #   (`verb_groups` -- `.by=` columns if supplied, `.data$groups`
 #   otherwise)
+# @param by Logical, `TRUE` when `group_cols` come from `.by=` (first-appearance
+#   numbering, no empty groups) rather than group_by()
 # @return `list(data = <possibly-materialized-and-joined tbl_gpu>, dots =
 #   <possibly-rewritten dots>)`
 # @keywords internal
-substitute_cur_group_id <- function(.data, dots, group_cols) {
+substitute_cur_group_id <- function(.data, dots, group_cols, by = FALSE) {
   has_any <- any(vapply(
     dots, function(q) expr_contains_zero_arg_call(rlang::quo_get_expr(q), "cur_group_id"),
     logical(1)
@@ -348,14 +442,23 @@ substitute_cur_group_id <- function(.data, dots, group_cols) {
     step <- make_mutate_expr(helper_name, ir_lit_from_r(1L), .data$schema)
     new_data <- push_op(.data, ast_mutate(input_node(.data), list(step)))
   } else {
-    # slice(.preserve = TRUE) fixed the group keys: numbering must run over
-    # them (empty groups included), as group_indices() does.
-    fixed <- if (identical(group_cols, .data$groups)) fixed_keys_of(.data)
+    # group_by() groups: numbering runs over group_data() as the table has it,
+    # so `.drop = FALSE` empty groups count and slice(.preserve = TRUE) fixed
+    # keys are kept. `.by` groups (vec_group_loc() in dplyr) have no empty
+    # groups and are numbered in first-appearance order.
+    fixed <- if (!by) fixed_keys_of(.data)
     tmp_grouped <- new_tbl_gpu(
       ptr = .data$ptr, schema = .data$schema, groups = group_cols,
-      exec_mode = .data$exec_mode, fixed_keys = fixed
+      exec_mode = .data$exec_mode, fixed_keys = fixed,
+      group_drop = if (by) TRUE else .data$group_drop
     )
     gd <- compute_group_data(tmp_grouped)
+    if (by && nrow(gd) > 1L) {
+      # Rows within a group are ascending, so the first row is each group's head
+      rows <- unclass(gd$.rows)
+      first_row <- unlist(rows, use.names = FALSE)[cumsum(c(1L, lengths(rows)[-length(rows)]))]
+      gd <- gd[order(first_row), , drop = FALSE]
+    }
     keys <- gd[setdiff(names(gd), ".rows")]
     keys[[helper_name]] <- seq_len(nrow(keys))
     keys_gpu <- tbl_gpu(keys, lazy = FALSE)
@@ -365,13 +468,13 @@ substitute_cur_group_id <- function(.data, dots, group_cols) {
     if (has_pending_ops(joined)) {
       joined <- compute(joined)
     }
-    # left_join.tbl_gpu() preserves `.data`'s own groups already (Phase 7/8);
-    # rebuild explicitly regardless, so this never depends on that being
-    # true for every future join code path.
-    new_data <- copy_frame_meta(new_tbl_gpu(
-      ptr = joined$ptr, schema = joined$schema, groups = .data$groups,
-      exec_mode = joined$exec_mode, fixed_keys = fixed
-    ), .data)
+    # Keep every field of `.data` (group_drop, fixed_keys, frame meta, ...);
+    # only the data and its schema change.
+    new_data <- .data
+    new_data <- set_tbl_gpu_field(new_data, "ptr", joined$ptr)
+    new_data <- set_tbl_gpu_field(new_data, "schema", joined$schema)
+    new_data <- set_tbl_gpu_field(new_data, "lazy_ops", NULL)
+    new_data <- set_tbl_gpu_field(new_data, "exec_mode", joined$exec_mode)
   }
 
   new_dots <- lapply(dots, function(q) {
@@ -1163,29 +1266,14 @@ stage_across_expansion <- function(expanded, taken) {
   out
 }
 
-# dplyr's wording for the class of a non-logical if_any()/if_all() piece.
-# @keywords internal
-across_type_label <- function(type) {
-  switch(type,
-    FLOAT64 = , FLOAT32 = "a double vector",
-    INT32 = , INT64 = "an integer vector",
-    STRING = "a character vector",
-    DICTIONARY32 = "a <factor> object",
-    TIMESTAMP_DAYS = "a <Date> object",
-    TIMESTAMP_SECONDS = , TIMESTAMP_MILLISECONDS = , TIMESTAMP_MICROSECONDS = ,
-    TIMESTAMP_NANOSECONDS = "a <POSIXct> object",
-    paste0("a ", tolower(type), " vector")
-  )
-}
-
 # if_any()/if_all() require every per-column predicate to be logical. dplyr
 # checks the values; here the piece's inferred type stands in for them. A piece
 # the IR can't parse is left to the normal parse path; one whose type is
 # unknown (it reads a column the running schema couldn't type) is dplyr's to
 # check on the real values.
 # @param piece The instantiated predicate for `col`
-# @return `TRUE` when dplyr must run the call, otherwise invisibly `FALSE`;
-#   raises dplyr's error for a piece of known non-logical type
+# @return `TRUE` when dplyr must run the call (a piece of known non-logical
+#   type is dplyr's error to raise), otherwise invisibly `FALSE`
 # @keywords internal
 check_across_predicate_piece <- function(piece, col, env, schema) {
   # mutate() expands before substituting cur_group_id(), so a piece may still
@@ -1203,11 +1291,9 @@ check_across_predicate_piece <- function(piece, col, env, schema) {
   if (is.null(type) || identical(unname(type), "BOOL8")) {
     return(invisible(FALSE))
   }
-  if (anyNA(type)) {
-    return(TRUE)
-  }
-  rlang::abort(sprintf("`%s` must be a logical vector, not %s.", col,
-                       across_type_label(unname(type))))
+  # Known non-logical (or an NA type): dplyr raises the error itself, with
+  # its own class, call and group context, from the CPU fallback.
+  TRUE
 }
 
 # Expand a top-level `if_any(.cols, .fns, ..., .names=)` / `if_all(...)`

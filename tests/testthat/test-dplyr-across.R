@@ -354,12 +354,12 @@ test_that("cur_group_id() in filter() never triggers the CPU fallback", {
   expect_no_error(dplyr::filter(gt, dplyr::cur_group_id() == 1))
 })
 
-test_that("cur_group_id() in summarise() falls back", {
+test_that("cur_group_id() inside a longer summarise() expression falls back", {
   skip_if_no_gpu()
   withr::local_options(cuplyr.fallback = "warn")
 
   gt <- tbl_gpu(tibble::tibble(g = c(1, 1, 2), x = 1:3)) |> dplyr::group_by(g)
-  expect_warning(dplyr::summarise(gt, gid = dplyr::cur_group_id()), "fell back to CPU evaluation")
+  expect_warning(dplyr::summarise(gt, gid = dplyr::cur_group_id() * 2L), "fell back to CPU evaluation")
 })
 
 test_that("cur_group_id()'s hidden helper column never leaks into the mutate() output", {
@@ -407,7 +407,7 @@ test_that("cur_group() falls back with correct results", {
 
   df <- tibble::tibble(g = c(1, 1, 2), x = 1:3)
   pipeline <- function(d) {
-    dplyr::group_by(d, g) |> dplyr::mutate(k = dplyr::cur_group()$g)
+    dplyr::group_by(d, g) |> dplyr::mutate(k = nrow(dplyr::cur_group()))
   }
 
   expect_warning(
@@ -423,7 +423,7 @@ test_that("cur_group_rows() falls back with correct results", {
 
   df <- tibble::tibble(g = c(1, 1, 2), x = 1:3)
   pipeline <- function(d) {
-    dplyr::group_by(d, g) |> dplyr::mutate(k = length(dplyr::cur_group_rows()))
+    dplyr::group_by(d, g) |> dplyr::mutate(k = sum(dplyr::cur_group_rows()))
   }
 
   expect_warning(

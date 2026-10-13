@@ -27,8 +27,7 @@
 #' verbs that keep at least one group column (and is reset to the default when
 #' none is left; `group_by()` on a grouped table keeps it unless given a new
 #' `.drop`), so `group_by(f, .drop = FALSE) |> arrange(x) |> collect()` still
-#' keeps empty factor-level groups. One exception for now: a `mutate()` or
-#' `filter()` that uses `cur_group_id()` resets it to `TRUE`. Empty groups of a *non-factor* column
+#' keeps empty factor-level groups. Empty groups of a *non-factor* column
 #' that `filter()` or `slice()` emptied are not kept, unlike in dplyr, except after
 #' `slice(.preserve = TRUE)`, which keeps its input's group keys: see the `.drop`
 #' section of [group_by()][group_by.tbl_gpu].

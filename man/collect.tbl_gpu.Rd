@@ -38,8 +38,7 @@ The \code{.drop} setting of \code{group_by()} travels with the table through the
 verbs that keep at least one group column (and is reset to the default when
 none is left; \code{group_by()} on a grouped table keeps it unless given a new
 \code{.drop}), so \code{group_by(f, .drop = FALSE) |> arrange(x) |> collect()} still
-keeps empty factor-level groups. One exception for now: a \code{mutate()} or
-\code{filter()} that uses \code{cur_group_id()} resets it to \code{TRUE}. Empty groups of a \emph{non-factor} column
+keeps empty factor-level groups. Empty groups of a \emph{non-factor} column
 that \code{filter()} or \code{slice()} emptied are not kept, unlike in dplyr, except after
 \code{slice(.preserve = TRUE)}, which keeps its input's group keys: see the \code{.drop}
 section of \link[=group_by.tbl_gpu]{group_by()}.

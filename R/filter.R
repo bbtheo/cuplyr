@@ -307,16 +307,20 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # expand_across_dots()'s own docs) routes the WHOLE filter() call
   # through the CPU fallback. `cur_group_id()` gets its own GPU-native
   # substitution below instead (row-level, exactly like mutate()'s).
+  # cur_group()$key and length(cur_group_rows()) are plain expressions; the
+  # CPU fallbacks keep the dots as the user wrote them.
+  user_dots <- dots
+  dots <- rewrite_context_dots(dots, verb_groups)
   if (dots_need_fallback(dots)) {
-    return(filter_across_fallback(.data, dots, by_quo, .preserve, complement))
+    return(filter_across_fallback(.data, user_dots, by_quo, .preserve, complement))
   }
 
   # Substitution runs before expansion here so the if_any()/if_all() piece
   # check can type cur_group_id() pieces; the helper column is excluded from
   # `.cols`'s selectable set alongside the group columns.
   fallback_data <- .data
-  fallback_dots <- dots
-  cgid <- substitute_cur_group_id(.data, dots, verb_groups)
+  fallback_dots <- user_dots
+  cgid <- substitute_cur_group_id(.data, dots, verb_groups, by = !rlang::quo_is_null(by_quo))
   .data <- cgid$data
   dots <- expand_across_dots(cgid$dots, current_schema(.data),
                              c(verb_groups, cgid$helper_name), "filter")

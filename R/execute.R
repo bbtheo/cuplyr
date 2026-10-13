@@ -840,6 +840,13 @@ retry_on_sum_overflow <- function(attempt, on_overflow, class = "cuplyr_error_su
 #' @return `invisible(NULL)`
 #' @keywords internal
 cuplyr_fallback_notify <- function(verb, expr_text) {
+  # Lets a caller that can do without the CPU (summarise()'s cur_group_id()
+  # path) catch the fallback. gpu_fallback() has already computed any pending
+  # ops, but the CPU evaluation itself has not started.
+  rlang::signal(
+    sprintf("%s() fell back to CPU evaluation", verb),
+    class = "cuplyr_cpu_fallback", verb = verb
+  )
   mode <- getOption("cuplyr.fallback", "silent")
   msg <- sprintf(
     "cuplyr: %s() fell back to CPU evaluation for: %s",

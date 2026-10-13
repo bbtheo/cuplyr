@@ -292,7 +292,13 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   by_given <- !rlang::quo_is_null(by_quo)
 
   dots <- rlang::enquos(...)
+  summarise_impl(.data, dots, .groups, by_quo, by_cols, by_given, caller_env)
+}
 
+# Internal: the body of summarise.tbl_gpu() on captured dots, so the
+# cur_group_id() path can run it again on a reduced set of dots.
+# @keywords internal
+summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, caller_env) {
   # slice(.preserve = TRUE) fixed the group keys: the empty groups get a row
   # too (n() = 0), which only the CPU summarise (seeing the keys) produces.
   if (!is.null(fixed_keys_of(.data))) {
@@ -320,28 +326,45 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   # dots: a top-level `across(...)` dot is unnamed by construction, and
   # auto_name_dots() would otherwise stamp it with its own deparsed text as
   # a "name", which expand_across_dots() would then (wrongly) treat as a
-  # user-supplied name. `cur_group_id()` is treated as a deferred shape
+  # user-supplied name. Other uses of `cur_group_id()` are deferred shapes
   # here (unlike mutate()/filter()): summarise()'s per-GROUP (not per-row)
   # shape means the row-level join-based substitution those two verbs use
   # doesn't produce a valid `fn(col)` aggregation dot on its own (see
   # substitute_cur_group_id()'s own docs) -- routed to the whole-call CPU
-  # fallback instead, which real dplyr already handles correctly.
+  # fallback instead, which real dplyr already handles correctly. The one
+  # native shape, a dot that is exactly `cur_group_id()`, is handled just above.
+  # length(cur_group_rows()) is n(); the CPU fallbacks keep the user's dots.
+  user_dots <- dots
+  dots <- rewrite_context_dots(dots, character(), name_unnamed = TRUE)
+  # A dot that is exactly cur_group_id() is the output row number: the rows of
+  # a summarise result are in group_data() order. Anything more involved with
+  # cur_group_id() (or a reduced call that would reach the CPU) stays on dplyr.
+  if (summarise_has_cur_group_id(dots)) {
+    reduced <- summarise_group_id_split(.data, dots, by_cols, by_given)
+    if (!is.null(reduced)) {
+      res <- summarise_with_group_id(
+        .data, dots, reduced, .groups, by_quo, by_cols, by_given, caller_env
+      )
+      if (!is.null(res)) return(res)
+    }
+  }
+
   if (dots_need_fallback(dots, treat_cur_group_id_as_deferred = TRUE)) {
     return(gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(tbl, !!!dots, .groups = .groups, .by = !!by_quo))
+      rlang::inject(dplyr::summarise(tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
     }))
   }
 
   # F34: the fallbacks below must re-run what the user wrote, not the
   # across()-expanded, auto-named dots (that would drop dplyr's unnamed
   # data-frame splice and evaluate across() lambdas sequentially).
-  orig_dots <- dots
+  orig_dots <- user_dots
 
   summarise_groups <- if (by_given) by_cols else .data$groups
   expanded <- expand_across_dots(dots, current_schema(.data), summarise_groups, "summarise")
   if (isTRUE(attr(expanded, "needs_fallback"))) {
     return(gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(tbl, !!!dots, .groups = .groups, .by = !!by_quo))
+      rlang::inject(dplyr::summarise(tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
     }))
   }
   # Named silently here: the "will use expression as column name" warning is
@@ -1788,4 +1811,79 @@ parse_aggregations <- function(schema, dots, na_rm_flags = rep(FALSE, length(dot
   }
 
   aggregations
+}
+
+# Internal: TRUE iff some dot of a summarise() mentions cur_group_id().
+# @keywords internal
+summarise_has_cur_group_id <- function(dots) {
+  any(vapply(
+    dots, function(q) expr_contains_zero_arg_call(rlang::quo_get_expr(q), "cur_group_id"),
+    logical(1)
+  ))
+}
+
+# Internal: split the dots of a summarise() with cur_group_id() into the dots
+# that are exactly `cur_group_id()` and the rest. `NULL` when the call is not
+# of that shape (the whole call then goes to dplyr): an unnamed or clashing
+# id dot, an id mentioned inside a longer expression, a later dot reading an
+# id name, an unnamed dot beside the id, or an ungrouped call with nothing else
+# to summarise.
+# @return `NULL`, or `list(id = <indices of the id dots>, rest = <dots>)`
+# @keywords internal
+summarise_group_id_split <- function(.data, dots, by_cols, by_given) {
+  nms <- names(dots) %||% rep("", length(dots))
+  is_id <- vapply(dots, function(q) {
+    e <- rlang::quo_get_expr(q)
+    is.call(e) && length(e) == 1L && identical(call_head_name(e), "cur_group_id")
+  }, logical(1))
+  # cur_group_id() anywhere else in a dot
+  mentions <- vapply(dots, function(q) {
+    expr_contains_zero_arg_call(rlang::quo_get_expr(q), "cur_group_id")
+  }, logical(1))
+  if (any(mentions & !is_id)) return(NULL)
+  id_names <- nms[is_id]
+  if (any(!nzchar(id_names)) || anyDuplicated(nms[nzchar(nms)]) > 0L) return(NULL)
+  # An unnamed other dot (`mean(x)`, `across()`) takes its name from dplyr's
+  # naming rules, which the final select() by name can't reproduce
+  if (any(!nzchar(nms[!is_id]))) return(NULL)
+  keys <- if (by_given) by_cols else .data$groups
+  if (any(id_names %in% c(keys, current_schema(.data)$names))) return(NULL)
+  # A dot reading an id name sees the id (sequential evaluation)
+  rest <- dots[!is_id]
+  reads <- any(vapply(rest, function(q) {
+    any(all.vars(rlang::quo_get_expr(q)) %in% id_names)
+  }, logical(1)))
+  if (reads) return(NULL)
+  if (length(rest) == 0L && length(keys) == 0L) return(NULL)
+  list(is_id = is_id, rest = rest, keys = keys)
+}
+
+# Internal: run a summarise() whose id dots are `cur_group_id()` on the
+# remaining dots, then append the row number under each id name. `NULL` when
+# the reduced call would reach the CPU (a "cuplyr_cpu_fallback" signal from
+# gpu_fallback()), so the caller sends the whole original call there instead:
+# a fallback result may have several rows per group.
+# @keywords internal
+summarise_with_group_id <- function(.data, dots, split, .groups, by_quo, by_cols, by_given,
+                                    caller_env) {
+  res <- tryCatch(
+    summarise_impl(.data, split$rest, .groups, by_quo, by_cols, by_given, caller_env),
+    cuplyr_cpu_fallback = function(cnd) NULL
+  )
+  if (is.null(res) || !is_tbl_gpu(res)) return(NULL)
+
+  nms <- names(dots)
+  id_names <- nms[split$is_id]
+  out_groups <- res$groups
+  out_drop <- res$group_drop
+  # Number the rows ungrouped: row_number() over the whole result
+  flat <- set_tbl_gpu_field(res, "groups", character())
+  flat <- set_tbl_gpu_field(flat, "fixed_keys", NULL)
+  id_exprs <- stats::setNames(
+    rep(list(quote(dplyr::row_number())), length(id_names)), id_names
+  )
+  flat <- rlang::inject(dplyr::mutate(flat, !!!id_exprs))
+  flat <- dplyr::select(flat, dplyr::all_of(c(split$keys, nms)))
+  flat <- set_tbl_gpu_field(flat, "groups", out_groups)
+  set_tbl_gpu_field(flat, "group_drop", out_drop)
 }
