@@ -397,6 +397,13 @@ inline cudf::data_type unify_value_types(const std::vector<cudf::data_type>& typ
 // `type` functions, without calling back into R.
 // -----------------------------------------------------------------------------
 
+// F46: ops named "floor_date_<unit>", "ceiling_date_<unit>", "round_date_<unit>"
+// (unit one of second/minute/hour/day/week); R/ir.R's ir_round_ops.
+inline bool is_round_date_op(const std::string& op) {
+    return op.rfind("floor_date_", 0) == 0 || op.rfind("ceiling_date_", 0) == 0 ||
+           op.rfind("round_date_", 0) == 0;
+}
+
 inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx) {
     std::string kind = ir_kind(node);
 
@@ -523,6 +530,12 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
     if (op == "date_add_days" || op == "date_sub_days") {
         return cudf::data_type{cudf::type_id::TIMESTAMP_DAYS};
     }
+    // F46: a POSIXct shifted by a whole number of seconds keeps its type.
+    if (op == "ts_add_us" || op == "ts_sub_us") return resolve_static_type(args[0], ctx);
+
+    // F46: floor_date_<unit> / ceiling_date_<unit> / round_date_<unit> keep
+    // their operand's timestamp type.
+    if (is_round_date_op(op)) return resolve_static_type(args[0], ctx);
 
     // F41: the casts have fixed output types. Falling through to the FLOAT64
     // default made build_ast() retype a sibling timestamp operand to FLOAT64
@@ -1600,6 +1613,95 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
             d_col, days,
             op == "date_add_days" ? cudf::binary_operator::ADD : cudf::binary_operator::SUB,
             cudf::data_type{cudf::type_id::TIMESTAMP_DAYS});
+    }
+
+    // ---- ts_add_us(t, n) / ts_sub_us(t, n) (F46): a POSIXct shifted by a
+    // whole number of seconds; n is an INT64 literal in microseconds
+    // (R/ir.R's "+"/"-" parse hook). Nulls stay null. ----
+    if (op == "ts_add_us" || op == "ts_sub_us") {
+        Rcpp::List t_node = args[0];
+        Rcpp::List n_node = args[1];
+        cudf::size_type t_idx = materialize(t_node, ctx);
+        cudf::size_type n_idx = materialize(n_node, ctx);
+        cudf::column_view t_col = ctx.cols[t_idx];
+        auto dur = cudf::bit_cast(ctx.cols[n_idx],
+                                  cudf::data_type{cudf::type_id::DURATION_MICROSECONDS});
+        return cudf::binary_operation(
+            t_col, dur,
+            op == "ts_add_us" ? cudf::binary_operator::ADD : cudf::binary_operator::SUB,
+            t_col.type());
+    }
+
+    // ---- floor_date / ceiling_date / round_date (F46). lubridate semantics:
+    // floor goes toward -inf, ceiling keeps a POSIXct already on the boundary
+    // but moves a Date up one unit (change_on_boundary defaults to TRUE for
+    // a Date), round sends ties UP (floor(x + unit/2)) -- NOT cuDF's
+    // round_datetimes (half-to-even). Scope is gated in R
+    // (ir_parse_lubridate_rounding()): UTC POSIXct with second..day, Date
+    // with day/week (Sunday start). ----
+    if (is_round_date_op(op)) {
+        const std::string fn = op.substr(0, op.find('_'));
+        const std::string unit = op.substr(op.find("_date_") + 6);
+        Rcpp::List x_node = args[0];
+        cudf::size_type x_idx = materialize(x_node, ctx);
+        cudf::column_view x_col = ctx.cols[x_idx];
+
+        if (x_col.type().id() == cudf::type_id::TIMESTAMP_DAYS) {
+            if (unit == "day") {
+                if (fn == "ceiling") {
+                    cudf::numeric_scalar<int32_t> one(1, true);
+                    auto i32 = cudf::bit_cast(x_col, cudf::data_type{cudf::type_id::INT32});
+                    auto plus = cudf::binary_operation(i32, one, cudf::binary_operator::ADD,
+                                                       cudf::data_type{cudf::type_id::INT32});
+                    return std::make_unique<cudf::column>(
+                        cudf::bit_cast(plus->view(), x_col.type()));
+                }
+                return std::make_unique<cudf::column>(x_col);
+            }
+            // week, Sunday start: k = days since Sunday = (d + 4) mod 7
+            // (1970-01-01 is a Thursday)
+            const cudf::data_type i32t{cudf::type_id::INT32};
+            cudf::numeric_scalar<int32_t> four(4, true), seven(7, true);
+            auto d = cudf::bit_cast(x_col, i32t);
+            auto shifted = cudf::binary_operation(d, four, cudf::binary_operator::ADD, i32t);
+            auto k = cudf::binary_operation(shifted->view(), seven,
+                                            cudf::binary_operator::PYMOD, i32t);
+            auto fl = cudf::binary_operation(d, k->view(), cudf::binary_operator::SUB, i32t);
+            std::unique_ptr<cudf::column> res;
+            if (fn == "floor") {
+                res = std::move(fl);
+            } else if (fn == "ceiling") {
+                res = cudf::binary_operation(fl->view(), seven, cudf::binary_operator::ADD, i32t);
+            } else {
+                cudf::numeric_scalar<int32_t> four2(4, true);
+                auto up = cudf::binary_operation(k->view(), four2,
+                                                 cudf::binary_operator::GREATER_EQUAL,
+                                                 cudf::data_type{cudf::type_id::BOOL8});
+                auto up32 = cudf::cast(up->view(), i32t);
+                auto up7 = cudf::binary_operation(up32->view(), seven,
+                                                  cudf::binary_operator::MUL, i32t);
+                res = cudf::binary_operation(fl->view(), up7->view(),
+                                             cudf::binary_operator::ADD, i32t);
+            }
+            return std::make_unique<cudf::column>(cudf::bit_cast(res->view(), x_col.type()));
+        }
+
+        // POSIXct (microseconds)
+        cudf::datetime::rounding_frequency freq;
+        int64_t unit_us;
+        if (unit == "second") { freq = cudf::datetime::rounding_frequency::SECOND; unit_us = 1000000LL; }
+        else if (unit == "minute") { freq = cudf::datetime::rounding_frequency::MINUTE; unit_us = 60000000LL; }
+        else if (unit == "hour") { freq = cudf::datetime::rounding_frequency::HOUR; unit_us = 3600000000LL; }
+        else if (unit == "day") { freq = cudf::datetime::rounding_frequency::DAY; unit_us = 86400000000LL; }
+        else Rcpp::stop("%s(): unsupported unit '%s'", fn.c_str(), unit.c_str());
+
+        if (fn == "floor") return cudf::datetime::floor_datetimes(x_col, freq);
+        if (fn == "ceiling") return cudf::datetime::ceil_datetimes(x_col, freq);
+        cudf::duration_scalar<cudf::duration_us> half(
+            cudf::duration_us{unit_us / 2}, true);
+        auto shifted = cudf::binary_operation(x_col, half, cudf::binary_operator::ADD,
+                                              x_col.type());
+        return cudf::datetime::floor_datetimes(shifted->view(), freq);
     }
 
     // ---- toupper(x) / tolower(x): case.hpp (Phase 11 L5) ----

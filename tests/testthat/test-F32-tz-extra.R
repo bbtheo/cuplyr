@@ -415,7 +415,10 @@ test_that("every registry op with a POSIXct result has a zone rule", {
                  types = c("TIMESTAMP_MICROSECONDS", "TIMESTAMP_MICROSECONDS", "BOOL8"),
                  tz = c(l = "", n = "America/New_York"))
   x_typed <- c("na_if", "replace_when", "lag", "lead", "first", "last", "nth",
-               "min", "max", "mean", "median", "roll_min", "roll_max")
+               "min", "max", "mean", "median", "roll_min", "roll_max",
+               # F46: floor/ceiling_date keep x's zone, a bare shift too
+               grep("^(floor|ceiling)_date_", names(ir_call_registry), value = TRUE),
+               "ts_add_us", "ts_sub_us")
   common <- c("if_else", "case_when", "coalesce")
   for (op in names(ir_call_registry)) {
     for (k in 1:3) {
@@ -436,6 +439,9 @@ test_that("every registry op with a POSIXct result has a zone rule", {
         expect_identical(zone, if (k == 1L) "" else "America/New_York", info = info)
       } else if (op == "as_posixct") {
         expect_identical(zone, "", info = info)
+      } else if (grepl("^round_date_", op)) {
+        # F46: a local zone comes back as the session zone's name
+        expect_identical(zone, "Europe/Helsinki", info = info)
       } else {
         # no rule: never claims a zone, the expression goes to the CPU
         expect_identical(zone, "<cpu>", info = info)

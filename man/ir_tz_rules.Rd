@@ -19,17 +19,23 @@ absent, UTC and New York operands:
 \code{x}'s type (\code{vec_cast(y, x)}), so it has \code{x}'s zone (absent becomes
 \code{""}): \code{na_if()}, \code{replace_when()} (also \code{replace_values()}), \code{lag()}/
 \code{lead()} (with \verb{default = }), \code{first()}/\code{last()}/\code{nth()}, \code{min()}/
-\code{max()}, and cuplyr's \code{roll_min()}/\code{roll_max()}.
+\code{max()}, \code{mean()}/\code{median()} (F41), and cuplyr's \code{roll_min()}/\code{roll_max()}.
 \item \code{common}: vctrs' common type of the value operands in order
 (\code{\link[=tz_fold]{tz_fold()}}), then absent becomes \code{""}: \code{if_else()} (true, false,
 missing), \code{case_when()} (values in order, then \code{.default}),
 \code{coalesce()}.
 \item \code{as_posixct}: a POSIXct keeps its zone as is, a Date becomes UTC
 midnight (R's \code{as.POSIXct.Date}).
+\item \code{shift} (F46): \code{ts_add_us}/\code{ts_sub_us} keep \code{x}'s zone attribute as is
+(an absent one stays absent).
+\item \code{round_date} (F46): \code{round_date()} of a local or absent zone returns the
+session zone's name; floor_date()/ceiling_date() (in \code{x}) keep \code{""}.
 }
 
 Not listed, so CPU: unary \code{-}, \code{abs()}, \code{cummax()}/\code{cummin()} (R's
-\code{Math.POSIXt} rejects them, so dplyr errors). \verb{t +/- n} never reaches
-here: its type check already sends it to the CPU (\code{\link[=infer_mutate_output_type]{infer_mutate_output_type()}}).
+\code{Math.POSIXt} rejects them, so dplyr errors). A bare \verb{t +/- n} never
+reaches here: its type check sends it to the CPU
+(\code{\link[=infer_mutate_output_type]{infer_mutate_output_type()}}); only the rounding calls rewrite it
+(\code{\link[=ir_posixct_shift]{ir_posixct_shift()}}).
 }
 \keyword{internal}

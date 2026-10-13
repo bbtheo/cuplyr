@@ -469,12 +469,16 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       return(ir_parse_lubridate_accessor(expr, env, schema, fn_name))
     }
 
-    # F41: a column-free as.Date()/as.POSIXct() is a constant, whatever its
-    # arguments (`tz =`, `format =`, a vector set for `%in%`): the registry
-    # entries below only take one parsed argument. An error means "not
-    # constant" (NULL, CPU), as in the generic fold further down.
-    if (fn_name %in% c("as.Date", "as.POSIXct") && length(expr) > 1 &&
-        !expr_has_column_ref(expr, schema)) {
+    # F41/F46: a column-free as.Date()/as.POSIXct()/floor_date()/
+    # ceiling_date()/round_date() is a constant, whatever its arguments (`tz =`,
+    # `format =`, a vector set for `%in%`, a unit the native rounding doesn't
+    # cover): the registry entries below only take one parsed argument. An
+    # error means "not constant" (NULL, CPU), as in the generic fold further
+    # down. Folded before the namespace guard, so a user's own floor_date() is
+    # evaluated as it would be on dev.
+    if (fn_name %in% c("as.Date", "as.POSIXct", "floor_date", "ceiling_date",
+                        "round_date") &&
+        length(expr) > 1 && !expr_has_column_ref(expr, schema)) {
       folded <- tryCatch(
         list(value = rlang::eval_tidy(rlang::new_quosure(expr, env))),
         error = function(e) NULL
@@ -483,6 +487,14 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
         return(NULL)
       }
       return(ir_lit_from_r(folded$value, allow_vector = allow_vector))
+    }
+
+    # F46: lubridate floor_date()/ceiling_date()/round_date(), same guard.
+    if (fn_name %in% c("floor_date", "ceiling_date", "round_date")) {
+      if (!ir_require_lubridate_fn(head, env, fn_name)) {
+        return(NULL)
+      }
+      return(ir_parse_lubridate_rounding(expr, env, schema, fn_name))
     }
 
     canonical <- ir_op_alias(fn_name)
@@ -2453,6 +2465,16 @@ ir_infer_tz <- function(ir, schema) {
   if (is.null(zone)) "UTC" else zone
 }
 
+# F46: the native lubridate rounding ops, "<fn>_date_<unit>" (the unit is
+# part of the op name; ir_parse_lubridate_rounding() picks the combination).
+# floor_date()/ceiling_date()/round_date() return x's class and zone.
+# @keywords internal
+ir_round_ops <- as.vector(outer(
+  c("floor_date", "ceiling_date", "round_date"),
+  c("second", "minute", "hour", "day", "week"),
+  paste, sep = "_"
+))
+
 #' How each POSIXct-valued op gets its zone (F32)
 #'
 #' Verified against dplyr 1.2 / vctrs 0.7 on plain tibbles, for local,
@@ -2469,18 +2491,31 @@ ir_infer_tz <- function(ir, schema) {
 #'   `coalesce()`.
 #' - `as_posixct`: a POSIXct keeps its zone as is, a Date becomes UTC
 #'   midnight (R's `as.POSIXct.Date`).
+#' - `shift` (F46): `ts_add_us`/`ts_sub_us` keep `x`'s zone attribute as is
+#'   (an absent one stays absent).
+#' - `round_date` (F46): `round_date()` of a local or absent zone returns the
+#'   session zone's name; floor_date()/ceiling_date() (in `x`) keep `""`.
 #'
 #' Not listed, so CPU: unary `-`, `abs()`, `cummax()`/`cummin()` (R's
-#' `Math.POSIXt` rejects them, so dplyr errors). `t +/- n` never reaches
-#' here: its type check already sends it to the CPU ([infer_mutate_output_type()]).
+#' `Math.POSIXt` rejects them, so dplyr errors). A bare `t +/- n` never
+#' reaches here: its type check sends it to the CPU
+#' ([infer_mutate_output_type()]); only the rounding calls rewrite it
+#' ([ir_posixct_shift()]).
 #'
 #' @format A named list of op names per rule
 #' @keywords internal
 ir_tz_rules <- list(
   x = c("na_if", "replace_when", "lag", "lead", "first", "last", "nth",
-        "min", "max", "mean", "median", "roll_min", "roll_max"),
+        "min", "max", "mean", "median", "roll_min", "roll_max",
+        grep("^(floor|ceiling)_date_", ir_round_ops, value = TRUE)),
   common = c("if_else", "case_when", "coalesce"),
-  as_posixct = "as_posixct"
+  as_posixct = "as_posixct",
+  # F46: `t +/- n` keeps x's zone attribute as is (an absent one stays absent)
+  shift = c("ts_add_us", "ts_sub_us"),
+  # F46: timechange::time_round() takes the zone from lubridate's tz(), so a
+  # local ("" / absent) zone comes back as the session zone's name, unlike
+  # floor_date()/ceiling_date() which keep "".
+  round_date = grep("^round_date_", ir_round_ops, value = TRUE)
 )
 
 # The value operands of a vctrs-common op, in fold order.
@@ -2525,6 +2560,13 @@ ir_tz_of <- function(ir, schema) {
       zone <- tz_fold(zone, ir_tz_of(arg, schema))
     }
     return(tz_localize(zone %||% "UTC"))
+  }
+  if (op %in% ir_tz_rules$shift) {
+    return(ir_tz_of(ir$args[[1]], schema) %||% "UTC")
+  }
+  if (op %in% ir_tz_rules$round_date) {
+    zone <- ir_tz_of(ir$args[[1]], schema) %||% "UTC"
+    return(if (is.na(zone) || !nzchar(zone)) session_tz() else zone)
   }
   if (op %in% ir_tz_rules$as_posixct) {
     # a Date becomes UTC midnight; a POSIXct keeps its zone
@@ -2615,11 +2657,18 @@ ir_parse_ts_arith <- function(op) {
       return(plain)   # number - date: R errors
     }
     if (!identical(unname(types[ts_pos]), "TIMESTAMP_DAYS")) {
-      return(plain)   # POSIXct: F32's CPU route
+      return(plain)   # POSIXct: F32's CPU route (ir_posixct_shift() for F46)
     }
     n <- args[[3L - ts_pos]]
     if (identical(n$kind, "lit")) {
       v <- n$value
+      # Unclassed only, as in ir_posixct_shift(): a lubridate Period/Duration
+      # (`days(1)`) is a double-storage S4 object that passes is.numeric(),
+      # and as.integer() on it gives seconds, not days. The plain node's type
+      # check sends it to the CPU (a difftime fails is.numeric() already).
+      if (is.object(v) || !n$type %in% c("INT32", "FLOAT64")) {
+        return(plain)
+      }
       if (!(is.numeric(v) && length(v) == 1L && is.finite(v) && v == trunc(v) &&
             abs(v) <= .Machine$integer.max)) {
         return(plain)
@@ -2631,6 +2680,37 @@ ir_parse_ts_arith <- function(op) {
     ir_call(if (op == "+") "date_add_days" else "date_sub_days",
             list(args[[ts_pos]], n))
   }
+}
+
+# F46: the operand of a native floor_date()/ceiling_date()/round_date() may be a
+# POSIXct shifted by a whole-number literal of seconds (`floor_date(t + 3600,
+# "hour")`). Elsewhere `t +/- n` stays on F32's CPU route (the result's absent
+# tzone attribute can't be told from "" in the rounded result, but can in a
+# bare shift), so the rewrite happens here, only at the rounding call.
+# @keywords internal
+ir_posixct_shift <- function(ir, schema) {
+  if (!identical(ir$kind, "call") || !ir$op %in% c("+", "-") || length(ir$args) != 2L) {
+    return(ir)
+  }
+  types <- tryCatch(
+    vapply(ir$args, ir_infer_type, character(1), schema = schema),
+    error = function(e) NULL
+  )
+  ts_pos <- which(unname(types) == "TIMESTAMP_MICROSECONDS")
+  if (length(ts_pos) != 1L || (ir$op == "-" && ts_pos == 2L)) {
+    return(ir)
+  }
+  n <- ir$args[[3L - ts_pos]]
+  v <- n$value
+  # Unclassed only: a Period (`hours(1)`) is a double-storage S4 object whose
+  # data part is 0, and a difftime/Duration has its own unit.
+  if (!identical(n$kind, "lit") || isTRUE(n$na) || is.object(v) ||
+      !n$type %in% c("INT32", "FLOAT64") || !is.numeric(v) || length(v) != 1L ||
+      !is.finite(v) || v != trunc(v) || abs(v) > 1e9) {
+    return(ir)
+  }
+  ir_call(if (ir$op == "+") "ts_add_us" else "ts_sub_us",
+          list(ir$args[[ts_pos]], ir_lit(v * 1e6, "INT64")))
 }
 
 # Cheap pre-check for ir_parse_ts_arith(): the Date shift can only be built
@@ -2677,14 +2757,15 @@ ir_type_is_timestamp <- function(ir, schema) {
 # reduction over a timestamp), near(), the
 # string functions (R formats the Date first), roll_mean/sum/sd/median.
 ir_ts_native_ops <- c(
-  "+", "-", "date_add_days", "date_sub_days", "%in%",
+  "+", "-", "date_add_days", "date_sub_days", "ts_add_us", "ts_sub_us", "%in%",
   "==", "!=", "<", "<=", ">", ">=",
   "is.na", "if_else", "case_when", "coalesce", "na_if", "replace_when",
   "lag", "lead", "first", "last", "nth", "min", "max", "mean", "median", "n_distinct",
   "row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist",
   "consecutive_id", "roll_min", "roll_max",
   "as.Date", "as.POSIXct", "as_date", "as_posixct",
-  "year", "month", "day", "hour", "minute", "second", "quarter", "yday", "wday"
+  "year", "month", "day", "hour", "minute", "second", "quarter", "yday", "wday",
+  ir_round_ops
 )
 
 # F37: the timestamp rule of ir_infer_type(), run on every call node `ir`
@@ -3702,6 +3783,69 @@ ir_parse_lubridate_accessor <- function(expr, env, schema, fn_name) {
   ir_call(fn_name, list(x_ir))
 }
 
+#' Parse a lubridate floor_date()/ceiling_date()/round_date() call (F46)
+#'
+#' Native only for a UTC-equivalent POSIXct with unit second/minute/hour/day
+#' and a Date with day/week (week starting Sunday, the default
+#' `lubridate.week.start`), `unit` a single character literal in one of
+#' timechange's spellings with no multiplier. Anything else (other zones,
+#' `week_start`/`change_on_boundary` arguments, calendar units, a Date with a
+#' sub-day unit, which lubridate turns into a POSIXct, unknown spellings)
+#' returns `NULL` and runs on the CPU.
+#'
+#' @keywords internal
+ir_parse_lubridate_rounding <- function(expr, env, schema, fn_name) {
+  proto <- switch(fn_name,
+    floor_date = function(x, unit = "seconds", week_start = getOption("lubridate.week.start", 7)) NULL,
+    ceiling_date = function(x, unit = "seconds", change_on_boundary = NULL,
+                            week_start = getOption("lubridate.week.start", 7)) NULL,
+    round_date = function(x, unit = "second", week_start = getOption("lubridate.week.start", 7)) NULL
+  )
+  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  if (is.null(present)) {
+    return(NULL)
+  }
+  present_args <- as.list(present)[-1]
+  if (length(setdiff(names(present_args), c("x", "unit"))) > 0 || is.null(present_args$x)) {
+    return(NULL)
+  }
+
+  unit <- if ("unit" %in% names(present_args)) present_args$unit else
+    if (identical(fn_name, "round_date")) "second" else "seconds"
+  if (!is.character(unit) || length(unit) != 1L || is.na(unit)) {
+    return(NULL)
+  }
+  unit <- switch(unit,
+    second = , seconds = , sec = , secs = , S = , s = "second",
+    minute = , minutes = , min = , mins = , M = "minute",
+    hour = , hours = , h = , H = "hour",
+    day = , days = , d = , D = "day",
+    week = , weeks = , w = , W = "week",
+    return(NULL)
+  )
+
+  x_ir <- ir_parse_expr(present_args$x, env, schema)
+  if (is.null(x_ir)) {
+    return(NULL)
+  }
+  x_ir <- ir_posixct_shift(x_ir, schema)
+  x_type <- unname(ir_infer_type(x_ir, schema))
+  if (identical(x_type, "TIMESTAMP_DAYS")) {
+    if (!unit %in% c("day", "week") ||
+        (identical(unit, "week") && !isTRUE(getOption("lubridate.week.start", 7) == 7))) {
+      return(NULL)
+    }
+  } else if (identical(x_type, "TIMESTAMP_MICROSECONDS")) {
+    if (identical(unit, "week") || ir_needs_cpu_tz(x_ir, schema)) {
+      return(NULL)
+    }
+  } else {
+    return(NULL)
+  }
+
+  ir_call(paste(fn_name, unit, sep = "_"), list(x_ir))
+}
+
 #' Registry of supported expression-IR operations
 #'
 #' See the module-level comment above and section 6 of
@@ -3728,6 +3872,12 @@ ir_call_registry <- list(
                          lower = list(handler = "date_add_days")),
   "date_sub_days" = list(arity = 2L, parse = NULL, type = function(arg_types) "TIMESTAMP_DAYS",
                          lower = list(handler = "date_sub_days")),
+  # F46: a POSIXct shifted by a whole number of seconds, the literal in INT64
+  # microseconds; only ir_posixct_shift() builds them.
+  "ts_add_us" = list(arity = 2L, parse = NULL, type = function(arg_types) arg_types[[1]],
+                     lower = list(handler = "ts_add_us")),
+  "ts_sub_us" = list(arity = 2L, parse = NULL, type = function(arg_types) arg_types[[1]],
+                     lower = list(handler = "ts_sub_us")),
   "*" = list(arity = 2L, parse = NULL, type = type_arith_op("*"), lower = list(ast_op = "MUL")),
   "/" = list(arity = 2L, parse = NULL, type = type_float64, lower = list(ast_op = "TRUE_DIV")),
   "^" = list(arity = 2L, parse = NULL, type = type_float64, lower = list(ast_op = "POW")),
@@ -4308,3 +4458,12 @@ ir_call_registry <- list(
   # entry here; ir_infer_type()/ir_bind() never need to look up "ntile" as
   # an op name, since it never appears in a finished tree either.
 )
+
+# F46: the lubridate rounding ops all return their operand's type.
+for (.op in ir_round_ops) {
+  ir_call_registry[[.op]] <- list(
+    arity = 1L, parse = NULL, type = function(arg_types) arg_types[[1]],
+    lower = list(handler = .op)
+  )
+}
+rm(.op)
