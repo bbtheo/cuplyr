@@ -644,7 +644,7 @@ test_that("summarise() with no expressions returns a 1 x 0 table, like dplyr (F0
 
   res <- dplyr::summarise(gpu_df)
   expect_identical(dim(res), c(1L, 0L))
-  expect_identical(collect(res), tibble::tibble(.rows = 1L))
+  expect_identical(collect(res), dplyr::summarise(mtcars))
 })
 
 test_that("summarise() errors on non-existent column", {

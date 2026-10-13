@@ -93,7 +93,7 @@ test_that("unique() rejects the arguments it can't honour", {
     expect_error(unique(g, fromLast = TRUE), "fromLast")
     expect_error(unique(g, incomparables = 5), "incomparables")
     expect_error(unique(g, bogus = 1), "only supports")
-    expect_equal(collect(unique(g, fromLast = FALSE)), unique(tibble::as_tibble(u)))
+    expect_equal(collect(unique(g, fromLast = FALSE)), unique(u))
   }
 })
 

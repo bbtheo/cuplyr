@@ -71,7 +71,7 @@ dplyr_row_slice.tbl_gpu <- function(data, i, ...) {
       group_drop = materialized$group_drop,
       exec_mode = materialized$exec_mode,
       nrow = length(i)
-    ))
+    ) |> carry_frame_meta(materialized))
   }
 
   new_ptr <- wrap_gpu_call("dplyr_row_slice", gpu_slice_indices(materialized$ptr, as.double(i)))
@@ -80,13 +80,13 @@ dplyr_row_slice.tbl_gpu <- function(data, i, ...) {
   # `dplyr_reconstruct.tbl_gpu()`'s own docs below for why the top-level
   # generic is unsafe to call with a tbl_gpu `data` argument; this result
   # is already a fully-formed tbl_gpu, so there is nothing to reconstruct.
-  new_tbl_gpu(
+  carry_frame_meta(new_tbl_gpu(
     ptr = new_ptr,
     schema = materialized$schema,
     groups = materialized$groups,
     group_drop = materialized$group_drop,
     exec_mode = materialized$exec_mode
-  )
+  ), materialized)
 }
 
 #' Add, remove, or replace columns of a GPU table with literal values (dplyr
@@ -236,16 +236,21 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
   }
 
   # (`nrow` is only present on a zero-column table, `fixed_keys` on a table
-  # whose group keys were fixed)
-  optional <- c("nrow", "fixed_keys", "unspecified")
+  # whose group keys were fixed, `bare_df` on a table from a plain data.frame)
+  optional <- c("nrow", "fixed_keys", "unspecified", "bare_df")
   if (is.data.frame(data) &&
       identical(setdiff(names(data), optional), setdiff(tbl_gpu_fields, optional))) {
-    return(new_tbl_gpu(
+    # dplyr_reconstruct.grouped_df()/.data.frame(): the template's groups
+    # (those that survive), `.drop`, attributes and class win over `data`'s.
+    groups <- intersect(template$groups, data$schema$names)
+    out <- new_tbl_gpu(
       ptr = data$ptr, schema = data$schema, lazy_ops = data$lazy_ops,
-      groups = data$groups, exec_mode = data$exec_mode, group_drop = data$group_drop,
+      groups = groups, exec_mode = data$exec_mode,
+      group_drop = if (length(groups) > 0L) template$group_drop %||% TRUE else TRUE,
       nrow = data[["nrow"]], fixed_keys = data[["fixed_keys"]],
       unspecified = data[["unspecified"]]
-    ))
+    )
+    return(carry_frame_meta(out, template))
   }
 
   # `data` is a genuine, different data frame (e.g. from generic code that
@@ -485,9 +490,10 @@ bracket_row_positions <- function(i, n, i_arg, call) {
 
 # `nrow` is the row count of a zero-column table (new_tbl_gpu()); `fixed_keys`
 # the group keys `slice(.preserve = TRUE)` fixed, `unspecified` the names of
-# vctrs::unspecified() columns (both only present when set).
+# vctrs::unspecified() columns, `bare_df` that the table came from a plain
+# data.frame (F31); all three only present when set.
 tbl_gpu_fields <- c("ptr", "schema", "lazy_ops", "groups", "exec_mode", "group_drop", "nrow",
-                    "fixed_keys", "unspecified")
+                    "fixed_keys", "unspecified", "bare_df")
 
 # The cuplyr namespace (this file is evaluated in it).
 cuplyr_ns <- environment()
@@ -520,7 +526,7 @@ is_tbl_gpu_field <- function(name) {
 #' @export
 `$.tbl_gpu` <- function(x, name) {
   if (switch(name, ptr = , schema = , lazy_ops = , groups = , exec_mode = ,
-             group_drop = , nrow = , fixed_keys = , unspecified = TRUE, FALSE) &&
+             group_drop = , nrow = , fixed_keys = , unspecified = , bare_df = TRUE, FALSE) &&
       internal_caller(parent.frame())) {
     return(.subset2(x, name))
   }
@@ -614,7 +620,7 @@ select_one_column <- function(x, col) {
 #' @export
 `$<-.tbl_gpu` <- function(x, name, value) {
   if (switch(name, ptr = , schema = , lazy_ops = , groups = , exec_mode = ,
-             group_drop = , nrow = , fixed_keys = , unspecified = TRUE, FALSE) &&
+             group_drop = , nrow = , fixed_keys = , unspecified = , bare_df = TRUE, FALSE) &&
       internal_caller(parent.frame())) {
     return(set_tbl_gpu_field(x, name, value))
   }
@@ -750,8 +756,11 @@ ungrouped <- function(x) set_tbl_gpu_field(x, "groups", character())
 
 # `out`, a table derived from the ungrouped `x`, regrouped by the group
 # columns of `x` that it still has, keeping `x`'s `.drop` while any survive.
+# Like dplyr_col_modify() + dplyr_reconstruct(out, x), `x` also decides the
+# attributes and class (F31).
 with_surviving_groups <- function(x, out) {
   keep <- intersect(.subset2(x, "groups"), current_schema(out)$names)
+  out <- reset_frame_meta(out, x)
   out <- set_tbl_gpu_field(out, "groups", keep)
   set_tbl_gpu_field(out, "group_drop",
                     if (length(keep) > 0L) .subset2(x, "group_drop") %||% TRUE else TRUE)

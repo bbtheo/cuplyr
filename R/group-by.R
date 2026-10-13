@@ -132,7 +132,11 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   if (length(dots) == 0) {
     new_groups <- if (.add) .data$groups else character()
     new_drop <- if (.add && length(.data$groups) > 0L) .drop else TRUE
-    return(new_tbl_gpu(
+    # group_by() keeps the attributes but always gives a tibble (F31). On an
+    # already grouped table dplyr rebuilds through as_tibble() and loses them
+    # unless `.add` leaves the grouping as it was.
+    keep_attrs <- length(.data$groups) == 0L || length(new_groups) > 0L
+    return(copy_frame_meta(new_tbl_gpu(
       ptr = .data$ptr,
       schema = .data$schema,
       lazy_ops = .data$lazy_ops,
@@ -141,7 +145,7 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
       exec_mode = .data$exec_mode,
       nrow = .data[["nrow"]],
       unspecified = .data[["unspecified"]]
-    ))
+    ), .data, attrs = keep_attrs, bare = FALSE))
   }
 
   dot_names <- names(dots)
@@ -274,7 +278,14 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
     new_groups <- unique(c(.data$groups, new_groups))
   }
 
-  new_tbl_gpu(
+  # A grouped input keeps its attributes only through a plain regroup (every
+  # dot a column reference, new_grouped_df()); computed dots go through
+  # dplyr_col_modify.grouped_df() and an empty grouping through as_tibble(),
+  # which drop them. An ungrouped input always keeps them.
+  keep_attrs <- length(.data$groups) == 0L ||
+    (all(kind == "var") && length(new_groups) > 0L)
+
+  copy_frame_meta(new_tbl_gpu(
     ptr = working$ptr,
     schema = working$schema,
     lazy_ops = working$lazy_ops,
@@ -284,7 +295,7 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
     exec_mode = working$exec_mode,
     nrow = working[["nrow"]],
     unspecified = working[["unspecified"]]
-  )
+  ), .data, attrs = keep_attrs, bare = FALSE)
 }
 
 #' Remove grouping from a GPU table
@@ -342,7 +353,10 @@ ungroup.tbl_gpu <- function(x, ...) {
   } else {
     groups <- character()
   }
-  new_tbl_gpu(
+  # An ungrouped x comes back as is. A grouped one is rebuilt: a full ungroup
+  # goes through as_tibble() and loses its attributes, a partial one through
+  # group_by(x, <remaining>) which keeps them (as a tibble, F31).
+  out <- new_tbl_gpu(
     ptr = x$ptr,
     schema = x$schema,
     lazy_ops = x$lazy_ops,
@@ -352,6 +366,11 @@ ungroup.tbl_gpu <- function(x, ...) {
     nrow = x[["nrow"]],
     unspecified = x[["unspecified"]]
   )
+  if (length(x$groups) > 0L && length(groups) > 0L) {
+    copy_frame_meta(out, x, bare = FALSE)
+  } else {
+    carry_frame_meta(out, x)
+  }
 }
 
 #' Get grouping variables from a GPU table
@@ -709,7 +728,12 @@ NULL
 #' @export
 #' @importFrom dplyr group_data
 group_data.tbl_gpu <- function(.data) {
-  compute_group_data(.data)
+  gd <- compute_group_data(.data)
+  # dplyr: an ungrouped plain data.frame answers with a bare data.frame (F31)
+  if (isTRUE(.subset2(.data, "bare_df"))) {
+    class(gd) <- "data.frame"
+  }
+  gd
 }
 
 #' @rdname group-data

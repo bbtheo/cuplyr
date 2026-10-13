@@ -11,15 +11,17 @@
 # Basic collect() Tests
 # =============================================================================
 
-test_that("collect() returns a tibble", {
+test_that("collect() returns a tibble, or the bare data.frame it came from", {
   skip_if_no_gpu()
 
-  gpu_df <- tbl_gpu(mtcars)
-  result <- collect(gpu_df)
+  result <- collect(tbl_gpu(tibble::as_tibble(mtcars)))
 
   expect_s3_class(result, "tbl_df")
   expect_s3_class(result, "tbl")
   expect_s3_class(result, "data.frame")
+
+  # F31: a plain data.frame comes back as one, as it does through dplyr
+  expect_identical(class(collect(tbl_gpu(mtcars))), "data.frame")
 })
 
 test_that("collect() returns correct dimensions", {

@@ -51,7 +51,7 @@ test_that("F07: ungrouped summarise() with zero dots returns one row, zero colum
   res <- dplyr::summarise(tbl_gpu(df))
   expect_true(is_tbl_gpu(res))
   expect_identical(dim(res), c(1L, 0L))
-  expect_identical(collect(res), tibble::tibble(.rows = 1L))
+  expect_identical(collect(res), dplyr::summarise(df))
   expect_identical(dplyr::group_vars(res), character())
   expect_no_error(utils::capture.output(print(res)))
 })
@@ -298,7 +298,7 @@ test_that("F07: ungroup() and empty group_by() keep a zero-column table's row co
 
   res <- tbl_gpu(f07z_df()) |> dplyr::summarise() |> dplyr::ungroup()
   expect_identical(dim(res), c(1L, 0L))
-  expect_identical(collect(res), tibble::tibble(.rows = 1L))
+  expect_identical(collect(res), dplyr::ungroup(dplyr::summarise(f07z_df())))
 })
 
 test_that("F07: binds and literal-mask filter on zero-column tables are right or a loud error", {
@@ -334,7 +334,7 @@ test_that("F07: zero-dot ungrouped summarise() after a lazy join returns 1 x 0",
     res <- dplyr::left_join(tbl_gpu(jx, lazy = lazy), tbl_gpu(jy, lazy = lazy), by = "k") |>
       dplyr::summarise() |>
       collect()
-    expect_identical(res, tibble::tibble(.rows = 1L))
+    expect_identical(res, dplyr::summarise(dplyr::left_join(jx, jy, by = "k")))
   }
 })
 

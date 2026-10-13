@@ -639,9 +639,12 @@ slice_zero_column <- function(.data, fn) {
     return(NULL)
   }
   kept <- nrow(fn(tibble::new_tibble(list(), nrow = n)))
-  new_tbl_gpu(ptr = .data$ptr, schema = .data$schema, groups = .data$groups,
-              group_drop = .data$group_drop, exec_mode = .data$exec_mode,
-              nrow = kept)
+  copy_frame_meta(
+    new_tbl_gpu(ptr = .data$ptr, schema = .data$schema, groups = .data$groups,
+                group_drop = .data$group_drop, exec_mode = .data$exec_mode,
+                nrow = kept),
+    .data
+  )
 }
 
 #' Select rows by position
@@ -1057,7 +1060,8 @@ head_tail_ungrouped <- function(x, n, slicer) {
   }
   drop <- group_by_drop_default(x)
   out <- slicer(group_by.tbl_gpu(x), n = n)
-  new_tbl_gpu(
+  # head()/tail() go through `[.grouped_df`, which keeps the attributes
+  copy_frame_meta(new_tbl_gpu(
     ptr = out$ptr,
     schema = out$schema,
     lazy_ops = out$lazy_ops,
@@ -1065,7 +1069,7 @@ head_tail_ungrouped <- function(x, n, slicer) {
     group_drop = drop,
     exec_mode = out$exec_mode,
     nrow = out[["nrow"]]
-  )
+  ), x, bare = FALSE)
 }
 
 # -----------------------------------------------------------------------------
@@ -1219,8 +1223,11 @@ slice_sample_native <- function(.data, gm, amount, is_prop, replace) {
   }
 
   new_ptr <- gpu_slice_indices(materialized$ptr, as.double(idx))
-  new_tbl_gpu(ptr = new_ptr, schema = schema, groups = out_groups,
-              group_drop = if (length(out_groups) > 0L) materialized$group_drop %||% TRUE else TRUE)
+  carry_frame_meta(
+    new_tbl_gpu(ptr = new_ptr, schema = schema, groups = out_groups,
+                group_drop = if (length(out_groups) > 0L) materialized$group_drop %||% TRUE else TRUE),
+    materialized
+  )
 }
 
 #' Sample rows

@@ -926,13 +926,13 @@ filter_eval_mask <- function(.data, quo, eval_result = rlang::eval_tidy(quo)) {
       stop("Logical vector length (", length(eval_result),
            ") must match number of rows (", n_rows, ")", call. = FALSE)
     }
-    return(new_tbl_gpu(
+    return(carry_frame_meta(new_tbl_gpu(
       ptr = .data$ptr,
       schema = .data$schema,
       groups = .data$groups,
       exec_mode = .data$exec_mode,
       nrow = sum(rep_len(eval_result, n_rows) %in% TRUE)
-    ))
+    ), .data))
   }
 
   if (length(eval_result) == 1) {
@@ -960,11 +960,11 @@ filter_eval_mask <- function(.data, quo, eval_result = rlang::eval_tidy(quo)) {
     }
   }
 
-  new_tbl_gpu(
+  carry_frame_meta(new_tbl_gpu(
     ptr = new_ptr,
     schema = .data$schema,
     groups = .data$groups,
     group_drop = .data$group_drop %||% TRUE,
     exec_mode = .data$exec_mode
-  )
+  ), .data)
 }

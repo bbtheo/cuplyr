@@ -28,7 +28,8 @@ Imports:
     cli (>= 3.6.0),
     lifecycle (>= 1.0.5),
     tidyselect (>= 1.2.0),
-    tibble (>= 3.2.0)
+    tibble (>= 3.2.0),
+    pillar
 Suggests:
     testthat (>= 3.0.0),
     bench,

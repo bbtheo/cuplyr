@@ -1,5 +1,30 @@
 # Print method for tbl_gpu (glimpse-style output)
 
+#' Summary header of a tbl_gpu (pillar)
+#'
+#' dplyr's `tbl_sum()` for a data frame or tibble: `"A tibble"` (`"A data
+#' frame"` for an ungrouped table from a plain `data.frame`) with the
+#' dimensions, plus the groups of a grouped table.
+#'
+#' @param x A `tbl_gpu`.
+#' @param ... Ignored.
+#' @return A named character vector.
+#' @export
+#' @importFrom pillar tbl_sum
+tbl_sum.tbl_gpu <- function(x, ...) {
+  out <- stats::setNames(
+    pillar::dim_desc(x),
+    if (isTRUE(.subset2(x, "bare_df"))) "A data frame" else "A tibble"
+  )
+  groups <- .subset2(x, "groups")
+  if (length(groups) > 0L) {
+    mark <- if (identical(getOption("OutDec"), ",")) "." else ","
+    n <- formatC(nrow(dplyr::group_data(x)), big.mark = mark, format = "d")
+    out <- c(out, Groups = paste0(paste(groups, collapse = ", "), " [", n, "]"))
+  }
+  out
+}
+
 #' @export
 print.tbl_gpu <- function(x, ..., width = NULL) {
   width <- width %||% getOption("width", 80)

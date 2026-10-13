@@ -186,7 +186,8 @@ test_that("collect() keeps the groups of a grouped tbl_gpu, as dplyr/dbplyr coll
     }
     # ungrouped stays a plain tibble
     expect_identical(collect(dplyr::ungroup(dplyr::group_by(gt, g))), oracle_in)
-    expect_identical(class(collect(gt)), c("tbl_df", "tbl", "data.frame"))
+    # (the input is a plain data.frame, which stays one: F31)
+    expect_identical(class(collect(gt)), class(df))
   }
 })
 

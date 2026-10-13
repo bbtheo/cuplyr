@@ -92,13 +92,13 @@ test_that("bind_rows()/bind_cols() accept a tbl_gpu anywhere in their arguments"
 
   out <- cuplyr::bind_rows(g1, list(g2, NULL, tibble::as_tibble(d3)))
   expect_true(is_tbl_gpu(out))
-  expect_identical(collect(out), tibble::as_tibble(rbind(d1, d2, d3)))
+  expect_identical(collect(out), dplyr::bind_rows(d1, d2, d3))
 
   named <- cuplyr::bind_rows(list(a = d1, b = g2), .id = "src")
   expect_true(is_tbl_gpu(named))
   expect_identical(
     collect(named),
-    dplyr::bind_rows(list(a = tibble::as_tibble(d1), b = tibble::as_tibble(d2)), .id = "src")
+    dplyr::bind_rows(list(a = d1, b = d2), .id = "src")
   )
 
   cols <- cuplyr::bind_cols(tibble::tibble(k = 1:2), g1)
@@ -150,7 +150,7 @@ test_that("names<- on a lazy table with pending ops renames through the AST", {
   lz <- tbl_gpu(data.frame(a = 1:3, b = 4:6), lazy = TRUE) |> dplyr::filter(a > 1L)
   out <- rlang::set_names(lz, c("p", "q"))
   expect_identical(names(out), c("p", "q"))
-  expect_identical(collect(out), tibble::tibble(p = 2:3, q = 5:6))
+  expect_identical(collect(out), data.frame(p = 2:3, q = 5:6))
 })
 
 test_that("vec_c() of many distinct tables gathers from every source", {
@@ -196,13 +196,13 @@ test_that("a lazy input is computed once per vctrs call, and the memo is dropped
   # a new vctrs call recomputes; a combine of the same input computes once
   out <- vctrs::vec_c(lz, lz)
   expect_identical(n, 2L * per)
-  expect_identical(collect(out), tibble::tibble(x = c(3:10, 3:10)))
+  expect_identical(collect(out), data.frame(x = c(3:10, 3:10)))
   expect_length(ls(vctrs_state$memo), 0L)
   expect_length(ls(vctrs_state$pins), 0L)
 
   # a different pending pipeline on the same source is not confused with it
   lz2 <- dplyr::filter(lz, x > 8L)
   out2 <- vctrs::vec_c(lz, lz2)
-  expect_identical(collect(out2), tibble::tibble(x = c(3:10, 9:10)))
+  expect_identical(collect(out2), data.frame(x = c(3:10, 9:10)))
   expect_length(ls(vctrs_state$memo), 0L)
 })

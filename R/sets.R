@@ -382,7 +382,7 @@ union.tbl_gpu <- function(x, y, ...) {
   combined <- dplyr::ungroup(bind_rows(x_aligned, y_aligned))
   result <- dplyr::distinct(combined)
   result$groups <- x$groups
-  restore_set_op_factor_levels(result, chk$target_schema)
+  reset_frame_meta(restore_set_op_factor_levels(result, chk$target_schema), x)
 }
 
 #' @rdname set-ops
@@ -404,7 +404,7 @@ union_all.tbl_gpu <- function(x, y, ...) {
 
   result <- bind_rows(x_aligned, y_aligned)
   result$groups <- x$groups
-  restore_set_op_factor_levels(result, chk$target_schema)
+  reset_frame_meta(restore_set_op_factor_levels(result, chk$target_schema), x)
 }
 
 #' @rdname set-ops
@@ -426,7 +426,7 @@ intersect.tbl_gpu <- function(x, y, ...) {
   y_aligned <- align_set_op_side(y, chk$target_schema, groups = character())
 
   matched <- dplyr::semi_join(x_aligned, y_aligned, by = target_names, na_matches = "na")
-  dplyr::distinct(matched)
+  reset_frame_meta(dplyr::distinct(matched), x)
 }
 
 #' @rdname set-ops
@@ -448,7 +448,7 @@ setdiff.tbl_gpu <- function(x, y, ...) {
   y_aligned <- align_set_op_side(y, chk$target_schema, groups = character())
 
   unmatched <- dplyr::anti_join(x_aligned, y_aligned, by = target_names, na_matches = "na")
-  dplyr::distinct(unmatched)
+  reset_frame_meta(dplyr::distinct(unmatched), x)
 }
 
 #' @rdname set-ops
@@ -479,7 +479,7 @@ symdiff.tbl_gpu <- function(x, y, ...) {
 
   result <- bind_rows(x_minus_y, y_minus_x)
   result$groups <- x$groups
-  restore_set_op_factor_levels(result, chk$target_schema)
+  reset_frame_meta(restore_set_op_factor_levels(result, chk$target_schema), x)
 }
 
 #' @rdname set-ops

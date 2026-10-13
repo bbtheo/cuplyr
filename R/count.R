@@ -286,14 +286,16 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
     result <- dplyr::arrange(result, dplyr::desc(!!rlang::sym(agg_name)))
   }
 
-  new_tbl_gpu(
+  # The transient grouping above dropped the input's attributes and class;
+  # dplyr_reconstruct(out, x) gives x's (ungrouped x only) back.
+  carry_frame_meta(new_tbl_gpu(
     ptr = result$ptr,
     schema = result$schema,
     lazy_ops = result$lazy_ops,
     groups = out_groups,
     group_drop = if (length(out_groups) > 0L) x$group_drop %||% TRUE else TRUE,
     exec_mode = result$exec_mode
-  )
+  ), x)
 }
 
 #' Count the rows in each group (no additional grouping)
@@ -438,12 +440,14 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
   }
 
   out_groups <- intersect(orig_groups, result$schema$names)
-  new_tbl_gpu(
+  # The transient grouping above dropped the input's attributes and class;
+  # dplyr_reconstruct(out, x) gives x's (ungrouped x only) back.
+  carry_frame_meta(new_tbl_gpu(
     ptr = result$ptr,
     schema = result$schema,
     lazy_ops = result$lazy_ops,
     groups = out_groups,
     group_drop = if (length(out_groups) > 0L) x$group_drop %||% TRUE else TRUE,
     exec_mode = result$exec_mode
-  )
+  ), x)
 }

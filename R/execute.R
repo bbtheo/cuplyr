@@ -432,7 +432,10 @@ zero_column_result <- function(.data, verb, n = NULL) {
   if (is.null(n)) {
     n <- zero_column_nrow(.data, verb)
   }
-  tbl_gpu(tibble::tibble(.rows = n), lazy = identical(.data$exec_mode, "lazy"))
+  carry_frame_meta(
+    tbl_gpu(tibble::tibble(.rows = n), lazy = identical(.data$exec_mode, "lazy")),
+    .data
+  )
 }
 
 # Row count of `.data`, computing pending lazy operations to get it.
@@ -481,8 +484,12 @@ push_op <- function(.data, node) {
     .subset2(.data, "unspecified")
   }
 
+  # F31: summarise() rebuilds the frame, so only the bare data.frame class
+  # survives it; every other node is dplyr_reconstruct(out, .data).
+  keep_attrs <- !identical(node$type, "summarise")
+
   if (identical(.subset2(.data, "exec_mode"), "lazy")) {
-    return(new_tbl_gpu(
+    out <- new_tbl_gpu(
       ptr = .subset2(.data, "ptr"),
       schema = new_schema,
       lazy_ops = node,
@@ -492,12 +499,13 @@ push_op <- function(.data, node) {
       nrow = .subset2(.data, "nrow"),
       fixed_keys = new_keys,
       unspecified = new_unspec
-    ))
+    )
+    return(carry_frame_meta(out, .data, attrs = keep_attrs))
   }
 
   new_ptr <- wrap_gpu_call(node$type, lower_and_execute(node, .subset2(.data, "ptr")))
 
-  new_tbl_gpu(
+  out <- new_tbl_gpu(
     ptr = new_ptr,
     schema = new_schema,
     lazy_ops = NULL,
@@ -508,6 +516,7 @@ push_op <- function(.data, node) {
     fixed_keys = new_keys,
     unspecified = new_unspec
   )
+  carry_frame_meta(out, .data, attrs = keep_attrs)
 }
 
 # The fixed group keys (`slice(.preserve = TRUE)`, see fixed_keys_of()) that
@@ -650,8 +659,9 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
   # Filtering joins return x verbatim, so its unspecified() columns survive.
   join_unspec <- if (join_type %in% c("semi", "anti")) x[["unspecified"]]
 
+  # F31: x's attributes and class win (dplyr_reconstruct(out, x)).
   if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
-    return(new_tbl_gpu(
+    out <- new_tbl_gpu(
       ptr = NULL,
       schema = new_schema,
       lazy_ops = join_ast,
@@ -660,7 +670,8 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
       group_drop = new_group_drop,
       fixed_keys = join_fixed_keys,
       unspecified = join_unspec
-    ))
+    )
+    return(carry_frame_meta(out, x))
   }
 
   warn_if_join_too_large(if (cross_by) "cross" else join_type, x, y, join_spec,
@@ -671,7 +682,7 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
     lower_and_execute(join_ast, x$ptr)
   )
 
-  new_tbl_gpu(
+  out <- new_tbl_gpu(
     ptr = new_ptr,
     schema = new_schema,
     lazy_ops = NULL,
@@ -681,6 +692,7 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
     fixed_keys = join_fixed_keys,
     unspecified = join_unspec
   )
+  carry_frame_meta(out, x)
 }
 
 #' Auto-name unnamed dots, warning as dplyr's verbs do

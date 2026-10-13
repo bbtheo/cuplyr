@@ -241,7 +241,10 @@ gpu_proto <- function(x) {
     return(tibble::tibble())
   }
   ptr <- vctrs_null_table_ptr(schema, 0L)
-  collect_frame(new_tbl_gpu(ptr = ptr, schema = schema))
+  out <- collect_frame(new_tbl_gpu(ptr = ptr, schema = schema))
+  # a table from a plain data.frame has a data.frame ptype (F31)
+  if (isTRUE(.subset2(x, "bare_df"))) class(out) <- "data.frame"
+  out
 }
 
 # ---------------------------------------------------------------------------
@@ -331,7 +334,7 @@ restore_from_data <- function(x, to) {
   out <- tbl_gpu(tibble::as_tibble(x), lazy = identical(to$exec_mode, "lazy"))
   out$groups <- intersect(to$groups, out$schema$names)
   out$group_drop <- if (length(out$groups) > 0L) to$group_drop %||% TRUE else TRUE
-  out
+  copy_frame_meta(out, to)
 }
 
 #' @exportS3Method vctrs::vec_restore
@@ -382,13 +385,13 @@ vec_restore.tbl_gpu <- function(x, to, ...) {
     ptr <- wrap_gpu_call("vec_restore", gpu_gather_rows(ptrs, gidx))
   }
 
-  new_tbl_gpu(
+  copy_frame_meta(new_tbl_gpu(
     ptr = ptr,
     schema = schema,
     groups = to$groups,
     exec_mode = to$exec_mode,
     group_drop = to$group_drop %||% TRUE
-  )
+  ), to)
 }
 
 # ---------------------------------------------------------------------------
@@ -443,6 +446,10 @@ ptype2_tbl_gpu <- function(x, y, ..., x_arg = "", y_arg = "", call = rlang::call
   lazy <- identical(mode_of(x), "lazy") || identical(mode_of(y), "lazy")
   out <- tbl_gpu(tibble::as_tibble(proto), lazy = lazy)
   out$groups <- intersect(union(groups_of(x), groups_of(y)), out$schema$names)
+  # vctrs' rule: two plain data.frames stay a data.frame (F31)
+  if (identical(class(proto), "data.frame") && length(out$groups) == 0L) {
+    out <- set_tbl_gpu_field(out, "bare_df", TRUE)
+  }
   out
 }
 
@@ -475,7 +482,9 @@ cast_gpu_to_gpu <- function(x, to, ..., x_arg = "", to_arg = "", call = rlang::c
     # A column is unspecified in the result only if `to` says so too.
     keep_unspec <- intersect(x[["unspecified"]], to[["unspecified"]])
     x[["unspecified"]] <- if (length(keep_unspec) > 0L) keep_unspec
-    return(x)
+    # vctrs restores to `to`: its class and attributes replace x's (F31)
+    x <- set_tbl_gpu_field(strip_frame_attrs(x), "bare_df", NULL)
+    return(copy_frame_meta(x, to))
   }
   cuplyr_fallback_notify("vctrs", "vec_cast() between tbl_gpu layouts")
   casted <- vctrs::vec_cast(

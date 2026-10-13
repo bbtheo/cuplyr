@@ -61,7 +61,9 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE) {
 
   cuplyr_fallback_notify(verb_name, sprintf("%s()", verb_name))
 
-  tbl <- collect_frame(materialized)
+  # dplyr sees the frame it would have: the input's attributes and class
+  # (a bare data.frame stays one), so its own result carries them (F31).
+  tbl <- restore_frame_meta(collect_frame(materialized), materialized)
 
   # Restore dplyr grouping metadata on the CPU side so grouped semantics
   # (per-group aggregation, grouped slice_min/slice_max, etc.) work exactly
@@ -100,6 +102,11 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE) {
   new_groups <- dplyr::group_vars(result)
 
   new_tbl <- tbl_gpu(dplyr::ungroup(result), lazy = FALSE)
+  # dplyr's own result decides the attributes and class; ungroup() of a
+  # grouped one would have dropped them (F31). The class rides on the upload.
+  if (length(new_groups) > 0) {
+    new_tbl <- with_frame_attrs(strip_frame_attrs(new_tbl), frame_attrs(result))
+  }
 
   # `.drop` is read back the same way: a verb that keeps x's grouping (joins,
   # filter, ...) keeps its `.drop = FALSE` too.
@@ -155,7 +162,7 @@ has_list_column <- function(df) {
 # @keywords internal
 collect_other_side <- function(y) {
   if (is_tbl_gpu(y)) {
-    return(collect_frame(y))
+    return(restore_frame_meta(collect_frame(y), y))
   }
   y
 }

@@ -9,7 +9,10 @@
 #'
 #' @return A [tibble::tibble] containing the data from the GPU table (a
 #'   `grouped_df`, with the same `.drop`, when `x` is grouped, as for
-#'   `dplyr::collect()` on a database table).
+#'   `dplyr::collect()` on a database table). A table uploaded from a plain
+#'   `data.frame` comes back as a bare `data.frame` while it is ungrouped, and
+#'   custom data-frame attributes (`attr(df, "foo")`) are kept the way dplyr
+#'   keeps them through verbs.
 #'   Column types are converted back to R types:
 #'   \itemize{
 #'     \item FLOAT64/FLOAT32 -> numeric (double)
@@ -81,7 +84,27 @@ collect.tbl_gpu <- function(x, ...) {
       with_fixed_groups(out, keys, drop)
     }
   }
-  out
+  restore_frame_meta(out, x)
+}
+
+# The data-frame attributes and the bare data.frame class of the input table
+# `x` (F31) put back on a collected frame: what dplyr's data frame carries
+# through every verb that keeps its class. Metadata only.
+# @keywords internal
+restore_frame_meta <- function(frame, x) {
+  frame <- with_frame_attrs(frame, frame_attrs(x))
+  # a stale flag must never strip a grouped_df's class
+  if (isTRUE(.subset2(x, "bare_df")) && length(.subset2(x, "groups")) == 0L) {
+    class(frame) <- "data.frame"
+  }
+  frame
+}
+
+# restore_frame_meta() for as_tibble()/as.data.frame(): a grouped table is
+# rebuilt from its bare data there (as_tibble.grouped_df() drops attributes).
+# @keywords internal
+ungrouped_frame_meta <- function(frame, x) {
+  if (length(.subset2(x, "groups")) > 0L) frame else restore_frame_meta(frame, x)
 }
 
 # The data of a tbl_gpu as an UNGROUPED tibble. This is what every internal
@@ -178,14 +201,15 @@ collect_frame <- function(x) {
 #' @name tbl_gpu-coerce
 #' @export
 as.data.frame.tbl_gpu <- function(x, row.names = NULL, optional = FALSE, ...) {
-  as.data.frame(collect_frame(x), row.names = row.names, optional = optional, ...)
+  as.data.frame(ungrouped_frame_meta(collect_frame(x), x), row.names = row.names,
+                optional = optional, ...)
 }
 
 #' @rdname tbl_gpu-coerce
 #' @export
 #' @importFrom tibble as_tibble
 as_tibble.tbl_gpu <- function(x, ...) {
-  tibble::as_tibble(collect_frame(x), ...)
+  tibble::as_tibble(ungrouped_frame_meta(collect_frame(x), x), ...)
 }
 
 #' @rdname tbl_gpu-coerce

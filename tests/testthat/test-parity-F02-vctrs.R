@@ -165,7 +165,7 @@ test_that("vec_slice() gathers on the GPU without collecting or re-uploading", {
 
   out <- f02_no_transfer(vctrs::vec_slice(g, c(4, NA, 2)))
   expect_true(is_tbl_gpu(out))
-  expect_identical(collect(out), vctrs::vec_slice(tibble::as_tibble(df), c(4, NA, 2)))
+  expect_identical(collect(out), vctrs::vec_slice(df, c(4, NA, 2)))
 })
 
 test_that("vec_slice() raises vctrs' subscript errors", {
@@ -195,17 +195,20 @@ test_that("vec_ptype2() of tbl_gpu and data-frame-likes is a tbl_gpu", {
   for (lazy in c(FALSE, TRUE)) {
     ga <- f02_up(a, lazy)
     gb <- f02_up(b, lazy)
-    want <- vctrs::vec_ptype2(tibble::as_tibble(a), tibble::as_tibble(b))
+    ta <- tibble::as_tibble(a)
+    tb <- tibble::as_tibble(b)
 
-    for (p in list(
-      vctrs::vec_ptype2(ga, gb),
-      vctrs::vec_ptype2(ga, tibble::as_tibble(b)),
-      vctrs::vec_ptype2(tibble::as_tibble(a), gb),
-      vctrs::vec_ptype2(ga, b),
-      vctrs::vec_ptype2(a, gb)
+    # (the tbl_gpu result, vctrs' answer for the same inputs as data frames:
+    # two plain data.frames give a data.frame, any tibble a tibble)
+    for (case in list(
+      list(vctrs::vec_ptype2(ga, gb), vctrs::vec_ptype2(a, b)),
+      list(vctrs::vec_ptype2(ga, tb), vctrs::vec_ptype2(a, tb)),
+      list(vctrs::vec_ptype2(ta, gb), vctrs::vec_ptype2(ta, b)),
+      list(vctrs::vec_ptype2(ga, b), vctrs::vec_ptype2(a, b)),
+      list(vctrs::vec_ptype2(a, gb), vctrs::vec_ptype2(a, b))
     )) {
-      expect_true(is_tbl_gpu(p))
-      expect_identical(collect(p), want)
+      expect_true(is_tbl_gpu(case[[1]]))
+      expect_identical(collect(case[[1]]), case[[2]])
     }
   }
 
@@ -232,7 +235,7 @@ test_that("vec_cast() moves between tbl_gpu and tibble with vctrs' rules", {
 
   up <- vctrs::vec_cast(tibble::as_tibble(int_df), g_dbl)
   expect_true(is_tbl_gpu(up))
-  expect_identical(collect(up), tibble::tibble(x = c(1, 2)))
+  expect_identical(collect(up), data.frame(x = c(1, 2)))
 
   down <- vctrs::vec_cast(g_int, tibble::tibble(x = double()))
   expect_false(is_tbl_gpu(down))
@@ -240,10 +243,10 @@ test_that("vec_cast() moves between tbl_gpu and tibble with vctrs' rules", {
 
   widened <- vctrs::vec_cast(g_int, g_dbl)
   expect_true(is_tbl_gpu(widened))
-  expect_identical(collect(widened), tibble::tibble(x = c(1, 2)))
+  expect_identical(collect(widened), data.frame(x = c(1, 2)))
 
   added <- vctrs::vec_cast(g_int, f02_up(data.frame(x = 1.5, z = "a")))
-  expect_identical(collect(added), tibble::tibble(x = c(1, 2), z = NA_character_))
+  expect_identical(collect(added), data.frame(x = c(1, 2), z = NA_character_))
 
   expect_error(vctrs::vec_cast(g_dbl, g_int), class = "vctrs_error_cast_lossy")
   expect_error(
@@ -454,5 +457,5 @@ test_that("bind_rows() and bind_cols() handle tbl_gpu inputs passed in lists or 
   acc <- NULL
   for (d in list(d1, d2)) acc <- cuplyr::bind_rows(acc, tbl_gpu(d))
   expect_true(is_tbl_gpu(acc))
-  expect_identical(collect(acc), tibble::as_tibble(rbind(d1, d2)))
+  expect_identical(collect(acc), dplyr::bind_rows(d1, d2))
 })

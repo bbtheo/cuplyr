@@ -319,7 +319,8 @@ bind_cols_gpu <- function(dots, .name_repair = "unique", call = rlang::caller_en
   keep <- which(!no_cols)
   if (length(keep) == 0L) {
     # Zero-column inputs only: the result is just the common size.
-    return(tbl_gpu(tibble::tibble(.rows = n), lazy = FALSE))
+    out <- tbl_gpu(tibble::tibble(.rows = n), lazy = FALSE)
+    return(if (bind_has_meta(first)) carry_frame_meta(out, first) else out)
   }
 
   # Convert data frames and vectors to tbl_gpu and recycle size-1 inputs.
@@ -385,7 +386,7 @@ bind_cols_gpu <- function(dots, .name_repair = "unique", call = rlang::caller_en
   # no longer groups it.
   groups <- if (is_tbl_gpu(first)) intersect(first$groups, repaired_names) else character()
 
-  new_tbl_gpu(
+  out <- new_tbl_gpu(
     ptr = new_ptr,
     schema = list(names = repaired_names, types = all_types,
                   factor_levels = factor_levels, tz = tz),
@@ -393,7 +394,13 @@ bind_cols_gpu <- function(dots, .name_repair = "unique", call = rlang::caller_en
     group_drop = if (length(groups) > 0L) first$group_drop %||% TRUE else TRUE,
     exec_mode = "eager"
   )
+  # the first input's attributes and class (F31); a bare vector has none
+  if (bind_has_meta(first)) carry_frame_meta(out, first) else out
 }
+
+# A bind input that has data-frame attributes and a class to hand over: a table,
+# not a bare vector.
+bind_has_meta <- function(x) is.data.frame(x) || is_tbl_gpu(x)
 
 #' GPU bind_rows implementation
 #'
@@ -436,6 +443,10 @@ bind_rows_gpu <- function(dots, .id = NULL, call = rlang::caller_env()) {
     }
   })
 
+  # dplyr_reconstruct(out, first): the first input's attributes and class (F31)
+  meta_from <- first
+  done <- function(res) reset_frame_meta(res, meta_from)
+
   # Materialize any lazy tables
   dots <- lapply(dots, function(x) {
     if (identical(x$exec_mode, "lazy") && has_pending_ops(x)) {
@@ -464,14 +475,14 @@ bind_rows_gpu <- function(dots, .id = NULL, call = rlang::caller_env()) {
   if (all(no_cols)) {
     # Only the row count (and the .id column) is left.
     if (is.null(.id)) {
-      return(new_tbl_gpu(
+      return(done(new_tbl_gpu(
         ptr = dots[[1]]$ptr,
         schema = dots[[1]]$schema,
         exec_mode = "eager",
         nrow = sum(row_counts)
-      ))
+      )))
     }
-    return(make_id_table(.id, source_names, row_counts))
+    return(done(make_id_table(.id, source_names, row_counts)))
   }
 
   # Compute unified schema over the inputs that have columns
@@ -489,7 +500,7 @@ bind_rows_gpu <- function(dots, .id = NULL, call = rlang::caller_env()) {
     check_dup_names_ungrouped(result$schema$names, groups, call = call)
     result$groups <- groups
     result$group_drop <- if (length(groups) > 0L) first_drop else TRUE
-    return(result)
+    return(done(result))
   }
 
   # Align each table to unified schema; a zero-column one becomes all-NA rows
@@ -526,7 +537,7 @@ bind_rows_gpu <- function(dots, .id = NULL, call = rlang::caller_env()) {
   check_dup_names_ungrouped(result$schema$names, groups, call = call)
   result$groups <- groups
   result$group_drop <- if (length(groups) > 0L) first_drop else TRUE
-  result
+  done(result)
 }
 
 # =============================================================================

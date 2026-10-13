@@ -148,10 +148,98 @@ tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
   exec_mode <- resolve_exec_mode(lazy)
 
   # A cudf table with no columns has no rows, so a zero-column data frame
-  # keeps its row count on the R side (`$nrow`, see new_tbl_gpu()).
-  new_tbl_gpu(ptr = ptr, schema = schema, exec_mode = exec_mode,
-              nrow = if (ncol(data) == 0L) nrow(data) else NULL,
-              unspecified = unspec_names)
+  # keeps its row count on the R side (`$nrow`, see new_tbl_gpu()). A grouped_df
+  # uploads grouped (with its `.drop`); the data frame's own attributes and a
+  # bare data.frame class ride on the table (F31).
+  groups <- dplyr::group_vars(data)
+  out <- new_tbl_gpu(ptr = ptr, schema = schema, exec_mode = exec_mode,
+                     groups = groups,
+                     group_drop = if (length(groups) > 0L) dplyr::group_by_drop_default(data) else TRUE,
+                     nrow = if (ncol(data) == 0L) nrow(data) else NULL,
+                     unspecified = unspec_names,
+                     bare_df = identical(class(data), "data.frame"))
+  with_frame_attrs(out, frame_attrs(data))
+}
+
+# Data-frame attributes (F31). dplyr's dplyr_reconstruct() copies a template's
+# attributes (all but names/row.names/class) onto a verb's result. On a tbl_gpu
+# they are the object's own R attributes other than names/class, so that
+# `attr(gt, "foo")` works as on a data frame (attr() has no S3 dispatch, a list
+# field could never answer it). `groups` is the grouped_df structure, not a
+# user attribute. A bare `data.frame` class is the field `$bare_df` (see
+# new_tbl_gpu()). Metadata only: no GPU work.
+# @keywords internal
+frame_attrs <- function(x) {
+  a <- attributes(x)
+  a[setdiff(names(a), c("names", "row.names", "class", "groups"))]
+}
+
+# `x` with exactly the attributes `attrs` added (existing ones are replaced).
+# @keywords internal
+with_frame_attrs <- function(x, attrs) {
+  for (nm in names(attrs)) {
+    attr(x, nm) <- attrs[[nm]]
+  }
+  x
+}
+
+# `x` without its data-frame attributes (summarise() rebuilds the frame).
+# @keywords internal
+strip_frame_attrs <- function(x) {
+  for (nm in names(frame_attrs(x))) {
+    attr(x, nm) <- NULL
+  }
+  x
+}
+
+# What a verb result inherits from its input `from` (a tbl_gpu, or a data
+# frame for the binds): its attributes, whether it is a bare data.frame, and
+# whether it is grouped.
+# @keywords internal
+frame_meta <- function(from) {
+  if (is_tbl_gpu(from)) {
+    list(attrs = frame_attrs(from), bare = isTRUE(.subset2(from, "bare_df")),
+         grouped = length(.subset2(from, "groups")) > 0L)
+  } else {
+    list(attrs = frame_attrs(from), bare = identical(class(from), "data.frame"),
+         grouped = dplyr::is_grouped_df(from))
+  }
+}
+
+# Copy `from`'s attributes and bare class onto the verb result `out` verbatim
+# (compute(), group_by(), ...: verbs that rebuild a table but whose result
+# dplyr leaves as is). `bare` is dropped when `out` is grouped.
+# @keywords internal
+copy_frame_meta <- function(out, from, attrs = TRUE, bare = TRUE) {
+  meta <- frame_meta(from)
+  if (attrs) {
+    out <- with_frame_attrs(out, meta$attrs)
+  }
+  if (bare && meta$bare && length(.subset2(out, "groups")) == 0L) {
+    out <- set_tbl_gpu_field(out, "bare_df", TRUE)
+  }
+  out
+}
+
+# dplyr's rule for a verb's result (dplyr_reconstruct() of the input): an
+# UNGROUPED input hands its attributes (unless `attrs = FALSE`: summarise()
+# and tally() rebuild the frame) and its bare data.frame class to the result;
+# a GROUPED input hands over nothing, since dplyr_reconstruct.grouped_df()
+# rebuilds with grouped_df().
+# @keywords internal
+carry_frame_meta <- function(out, from, attrs = TRUE) {
+  if (frame_meta(from)$grouped) {
+    return(out)
+  }
+  copy_frame_meta(out, from, attrs = attrs)
+}
+
+# `out` with `from`'s attributes and class instead of its own: for results
+# assembled from pieces that may carry other tables' attributes (set operations,
+# column assignment). Same rule as carry_frame_meta().
+# @keywords internal
+reset_frame_meta <- function(out, from) {
+  carry_frame_meta(set_tbl_gpu_field(strip_frame_attrs(out), "bare_df", NULL), from)
 }
 
 # The one warning for a fractional Date column floored to whole days (a GPU
@@ -246,6 +334,9 @@ tbl_gpu.tbl_gpu <- function(data, ..., lazy = NULL) {
 #   at upload and are still the original column (see tbl_gpu.data.frame()).
 #   Only push_op()/push_join() carry it, through row-only nodes and semi/anti
 #   joins; collect_frame() restores the class.
+# @param bare_df `TRUE` for a table that came from a plain `data.frame` (not a
+#   tibble) and is ungrouped: it collects as a bare data.frame (F31). Only
+#   present on the object when set, and dropped for a grouped table.
 # @return A tbl_gpu S3 object
 # @keywords internal
 new_tbl_gpu <- function(ptr = NULL,
@@ -256,7 +347,8 @@ new_tbl_gpu <- function(ptr = NULL,
                         group_drop = TRUE,
                         nrow = NULL,
                         fixed_keys = NULL,
-                        unspecified = NULL) {
+                        unspecified = NULL,
+                        bare_df = FALSE) {
   if (is.list(lazy_ops) && length(lazy_ops) == 0) {
     lazy_ops <- NULL
   }
@@ -289,6 +381,9 @@ new_tbl_gpu <- function(ptr = NULL,
     if (length(unspecified) > 0L) {
       out$unspecified <- unspecified
     }
+  }
+  if (isTRUE(bare_df) && length(groups) == 0L) {
+    out$bare_df <- TRUE
   }
   structure(out, class = c("tbl_gpu", "tbl"))
 }

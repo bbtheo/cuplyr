@@ -14,7 +14,10 @@
 \value{
 A \link[tibble:tibble]{tibble::tibble} containing the data from the GPU table (a
 \code{grouped_df}, with the same \code{.drop}, when \code{x} is grouped, as for
-\code{dplyr::collect()} on a database table).
+\code{dplyr::collect()} on a database table). A table uploaded from a plain
+\code{data.frame} comes back as a bare \code{data.frame} while it is ungrouped, and
+custom data-frame attributes (\code{attr(df, "foo")}) are kept the way dplyr
+keeps them through verbs.
 Column types are converted back to R types:
 \itemize{
 \item FLOAT64/FLOAT32 -> numeric (double)

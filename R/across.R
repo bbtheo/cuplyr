@@ -368,10 +368,10 @@ substitute_cur_group_id <- function(.data, dots, group_cols) {
     # left_join.tbl_gpu() preserves `.data`'s own groups already (Phase 7/8);
     # rebuild explicitly regardless, so this never depends on that being
     # true for every future join code path.
-    new_data <- new_tbl_gpu(
+    new_data <- copy_frame_meta(new_tbl_gpu(
       ptr = joined$ptr, schema = joined$schema, groups = .data$groups,
       exec_mode = joined$exec_mode, fixed_keys = fixed
-    )
+    ), .data)
   }
 
   new_dots <- lapply(dots, function(q) {

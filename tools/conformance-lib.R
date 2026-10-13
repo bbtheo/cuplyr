@@ -516,7 +516,29 @@ cf_new_state <- function() {
   state <- cf_reset_counters(new.env(parent = emptyenv()))
   state$test_name <- NA_character_
   state$snap_file <- NA_character_
+  # Uploaded fixtures of this file, list(fields, class): see .cf_upload() in
+  # cf_make_shim_env(). Holding the fields keeps each fixture's GPU pointer
+  # alive, so its address cannot be reused by a later table.
+  state$fixtures <- list()
   state
+}
+
+# A tbl_gpu's fields without any attributes (other than their names): two
+# objects with identical fields are the same GPU table with the same metadata.
+cf_fixture_fields <- function(x) {
+  f <- unclass(x)
+  attributes(f) <- list(names = names(f))
+  f
+}
+
+# The class of the fixture `x` was uploaded from, or NULL when `x` is not (a
+# copy of) an uploaded fixture.
+cf_fixture_class <- function(state, x) {
+  fields <- cf_fixture_fields(x)
+  for (entry in rev(state$fixtures)) {
+    if (identical(entry$fields, fields)) return(entry$class)
+  }
+  NULL
 }
 
 cf_read_counters <- function(state) {
@@ -607,8 +629,11 @@ cf_make_shim_env <- function(state, upload = TRUE) {
     }
     state$uploads <- state$uploads + 1L
     # class(df) in a test means "the class of this fixture", see `class` below.
-    attr(res, "cf_fixture_class") <- class(x)
-    attr(res, "cf_fixture_ptr") <- .subset2(res, "ptr")
+    # Recorded in the state, not as attributes of `res`: a tbl_gpu's extra R
+    # attributes are its data-frame attributes (F31), which verbs carry and
+    # collect() returns, so harness bookkeeping stored there would show up in
+    # results and attributes() of derived tables.
+    state$fixtures[[length(state$fixtures) + 1L]] <- list(fields = cf_fixture_fields(res), class = class(x))
     res
   }
 
@@ -619,9 +644,8 @@ cf_make_shim_env <- function(state, upload = TRUE) {
   # since cuplyr collects a tibble the test fails, as it should.
   env$class <- function(x) {
     if (inherits(x, "tbl_gpu")) {
-      fixture <- attr(x, "cf_fixture_class", exact = TRUE)
+      fixture <- cf_fixture_class(state, x)
       is_fixture <- !is.null(fixture) &&
-        identical(attr(x, "cf_fixture_ptr", exact = TRUE), .subset2(x, "ptr")) &&
         length(.subset2(x, "groups")) == 0L && is.null(.subset2(x, "lazy_ops"))
       if (is_fixture) {
         return(fixture)

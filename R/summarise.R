@@ -514,7 +514,7 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) 
 # @keywords internal
 summarise_zero_dots <- function(.data, by_cols, by_given, groups_arg, caller_env) {
   if (by_given && length(by_cols) > 0) {
-    return(dplyr::distinct(.data, !!!rlang::syms(by_cols)))
+    return(strip_frame_attrs(dplyr::distinct(.data, !!!rlang::syms(by_cols))))
   }
 
   retained_groups <- resolve_summarise_groups(.data$groups, groups_arg, caller_env)
@@ -527,7 +527,10 @@ summarise_zero_dots <- function(.data, by_cols, by_given, groups_arg, caller_env
       cuplyr_fallback_notify("summarise", "no expressions (pending operations run first)")
       compute(.data)
     }
-    return(tbl_gpu(tibble::tibble(.rows = 1L), lazy = .data$exec_mode == "lazy"))
+    return(copy_frame_meta(
+      tbl_gpu(tibble::tibble(.rows = 1L), lazy = .data$exec_mode == "lazy"),
+      .data, attrs = FALSE
+    ))
   }
 
   if (summarise_wants_empty_groups(.data)) {
@@ -547,7 +550,9 @@ summarise_group_keys <- function(.data, retained_groups) {
   was_lazy <- identical(.data$exec_mode, "lazy")
   base <- compute(.data)
   base$exec_mode <- "eager"
-  keys <- tbl_gpu(tibble::as_tibble(compute_group_data(base)[base$groups]), lazy = FALSE)
+  # (group_data() carries a `.drop` attribute, which is not the table's)
+  keys <- tbl_gpu(strip_frame_attrs(tibble::as_tibble(compute_group_data(base)[base$groups])),
+                  lazy = FALSE)
   keys$groups <- retained_groups
   keys$group_drop <- length(retained_groups) == 0L
   if (was_lazy) keys$exec_mode <- "lazy"
@@ -1276,7 +1281,8 @@ summarise_by_desugar <- function(.data, dots, by_cols) {
 
   result <- summarise_core(grouped, dots, internal_cols = first_name, sort_groups = FALSE)
   result <- dplyr::arrange(result, !!rlang::sym(first_name))
-  dplyr::select(result, -dplyr::all_of(first_name))
+  # the grouping above was internal: summarise() keeps only the bare class
+  copy_frame_meta(dplyr::select(result, -dplyr::all_of(first_name)), .data, attrs = FALSE)
 }
 
 #' @rdname summarise.tbl_gpu
@@ -1632,14 +1638,14 @@ create_temp_column <- function(.data, col_name, ir, keep_bool = FALSE) {
   # grouping key still needs) is carried over.
   new_schema <- append_schema_cols(schema, col_name, new_type, ir_infer_tz(ir, schema))
 
-  new_tbl_gpu(
+  copy_frame_meta(new_tbl_gpu(
     ptr = new_ptr,
     schema = new_schema,
     lazy_ops = .data$lazy_ops,
     groups = .data$groups,
     group_drop = .data$group_drop %||% TRUE,
     exec_mode = .data$exec_mode
-  )
+  ), .data)
 }
 
 # Internal: Parse aggregation expressions into make_aggregation() structs

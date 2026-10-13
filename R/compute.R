@@ -94,7 +94,7 @@ compute.tbl_gpu <- function(x, ..., name = NULL) {
     new_ptr <- gpu_select(new_ptr, match(final_schema$names, optimized_names) - 1L)
   }
 
-  new_tbl_gpu(
+  copy_frame_meta(new_tbl_gpu(
     ptr = new_ptr,
     schema = final_schema,
     lazy_ops = NULL,
@@ -104,7 +104,7 @@ compute.tbl_gpu <- function(x, ..., name = NULL) {
     nrow = x[["nrow"]],
     fixed_keys = x[["fixed_keys"]],
     unspecified = x[["unspecified"]]
-  )
+  ), x)
 }
 
 #' Create a subquery barrier without executing

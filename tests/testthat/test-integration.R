@@ -29,8 +29,8 @@ test_that("complete filter-mutate-select-collect pipeline works", {
   # Verify select
   expect_equal(names(result), c("mpg", "kpl", "cyl", "hp"))
 
-  # Verify result is a tibble
-  expect_s3_class(result, "tbl_df")
+  # Verify result is a data.frame (F31: the input's class, as dplyr keeps it)
+  expect_identical(class(result), "data.frame")
 })
 
 test_that("pipeline results match dplyr on data.frame", {
@@ -195,7 +195,7 @@ test_that("intermediate results can be inspected", {
 
   # Final collection should work
   result <- collect(step3)
-  expect_s3_class(result, "tbl_df")
+  expect_identical(class(result), "data.frame")
 })
 
 test_that("branching pipelines work correctly", {
@@ -490,7 +490,7 @@ test_that("data stays on GPU throughout entire pipeline", {
 
   # Only collect at the end
   result <- collect(step3)
-  expect_s3_class(result, "tbl_df")
+  expect_identical(class(result), "data.frame")
 
   # Verify intermediate objects are lightweight
   expect_lightweight_r_object(step1)
