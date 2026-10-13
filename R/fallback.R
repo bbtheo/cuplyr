@@ -455,24 +455,90 @@ rows_delete.tbl_gpu <- function(x, y, by = NULL, ..., unmatched = c("error", "ig
 # n_groups() moved to R/group-by.R (GPU-native, Phase 9 task 1) -- see
 # compute_group_data() (the shared `gpu_group_info()`-backed query) and
 # each verb's own method there. The iteration family below
-# (group_split()/group_map()/group_modify()/group_nest()/group_trim()/
-# nest_by()) inherently produces R-side objects (a plain list, a
-# user-function's arbitrary return value, or a list-column data frame) and
-# stays on the CPU fallback -- group_split()/group_map() naturally return a
-# plain list, group_nest()'s list-column is caught by has_list_column().
+# (group_map()/group_modify()/group_nest()/group_trim()/nest_by())
+# inherently produces R-side objects (a user-function's arbitrary return
+# value, or a list-column data frame) and stays on the CPU fallback --
+# group_map()'s .f needs real data frames, group_nest()'s list-column is
+# caught by has_list_column(). group_split() is GPU-native (below).
 # group_trim() additionally needs a real GPU factor-code remap (not just
 # metadata), which is out of this task's scope (Phase 11 factor-machinery
 # territory) -- deliberately deferred, same as rowwise().
 # =============================================================================
 
-#' @rdname fallback-verbs
+#' Split a GPU table into one GPU table per group (dplyr backend method)
+#'
+#' Native: [dplyr::group_split()] on a `tbl_gpu` groups by `...` (or uses the
+#' existing groups), computes the group row indices on the GPU
+#' (`compute_group_data()`: sorted keys, NA last, `.drop = FALSE` and
+#' preserved empty groups), gathers the rows into group order and cuts the
+#' table at the group sizes (`gpu_split_rows()`). The chunks are `tbl_gpu`
+#' tables, as dplyr's chunks have the class of the ungrouped input, and the
+#' `list_of` ptype is a 0-row `tbl_gpu`. A table left with no columns (every
+#' column dropped by `.keep = FALSE`) is the one case that still goes through
+#' the CPU fallback.
+#'
+#' @inheritParams dplyr::group_split
+#' @param keep Defunct, use `.keep`.
+#' @return A [vctrs::list_of()] of `tbl_gpu` tables.
 #' @export
 #' @importFrom dplyr group_split
-group_split.tbl_gpu <- function(.tbl, ..., .keep = TRUE) {
-  dots <- rlang::enquos(...)
-  gpu_fallback("group_split", .tbl, function(tbl) {
-    rlang::inject(dplyr::group_split(tbl, !!!dots, .keep = .keep))
-  })
+group_split.tbl_gpu <- function(.tbl, ..., .keep = TRUE, keep = lifecycle::deprecated()) {
+  if (lifecycle::is_present(keep)) {
+    lifecycle::deprecate_stop("1.0.0", "group_split(keep = )", "group_split(.keep = )",
+                              env = asNamespace("dplyr"))
+  }
+
+  if (length(.tbl$groups) > 0L) {
+    if (...length() > 0L) {
+      # same call dplyr's warn_ignores_dots() makes, so the text matches
+      cli::cli_warn(paste(
+        "Calling {.fn group_split} on a {.cls grouped_df} ignores `...`.",
+        "Please use {.code group_by(..., .add = TRUE) |> group_split()}."
+      ))
+    }
+    data <- .tbl
+  } else {
+    data <- group_by(.tbl, ...)
+  }
+  if (has_pending_ops(data)) {
+    data <- compute(data)
+  }
+
+  out <- ungroup(data)
+  if (!isTRUE(.keep) && length(data$groups) > 0L) {
+    out <- dplyr::select(out, -dplyr::all_of(data$groups))
+    if (has_pending_ops(out)) {
+      out <- compute(out)
+    }
+  }
+  if (length(out$schema$names) == 0L) {
+    return(gpu_fallback("group_split", .tbl, function(tbl) {
+      dplyr::group_split(tbl, ..., .keep = .keep)
+    }))
+  }
+
+  rows <- compute_group_data(data)$.rows
+  sizes <- lengths(rows)
+  # no reordering needed when everything is one group (ungrouped input)
+  idx0 <- if (length(data$groups) == 0L) integer() else as.integer(unlist(rows, use.names = FALSE)) - 1L
+  ptrs <- wrap_gpu_call("group_split", gpu_split_rows(out$ptr, idx0, as.integer(sizes)))
+
+  # vctrs::unspecified() columns: the select() above and group_by()'s
+  # computed-key mutate both drop the marker, so take it from before them.
+  # A computed key that overwrites an unspecified column is no longer one.
+  unspecified <- union(
+    data[["unspecified"]],
+    setdiff(.tbl[["unspecified"]], data$groups)
+  )
+  wrap <- function(ptr) {
+    carry_frame_meta(
+      new_tbl_gpu(ptr = ptr, schema = out$schema, exec_mode = .tbl$exec_mode,
+                  unspecified = unspecified),
+      out
+    )
+  }
+  ptype <- wrap(wrap_gpu_call("group_split", gpu_slice_head(out$ptr, 0, FALSE)))
+  vctrs::new_list_of(lapply(ptrs, wrap), ptype = ptype)
 }
 
 #' @rdname fallback-verbs

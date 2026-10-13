@@ -12,7 +12,6 @@
 \alias{rows_patch.tbl_gpu}
 \alias{rows_upsert.tbl_gpu}
 \alias{rows_delete.tbl_gpu}
-\alias{group_split.tbl_gpu}
 \alias{group_map.tbl_gpu}
 \alias{group_modify.tbl_gpu}
 \alias{group_nest.tbl_gpu}
@@ -83,8 +82,6 @@
   copy = FALSE,
   in_place = FALSE
 )
-
-\method{group_split}{tbl_gpu}(.tbl, ..., .keep = TRUE)
 
 \method{group_map}{tbl_gpu}(.data, .f, ..., .keep = FALSE)
 

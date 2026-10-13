@@ -42,6 +42,7 @@ Suggests:
     pkgdown,
     data.table,
     lubridate,
+    waldo,
     withr
 VignetteBuilder: knitr
 LinkingTo:

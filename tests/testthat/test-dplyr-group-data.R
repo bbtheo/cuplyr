@@ -437,13 +437,13 @@ test_that("group_data()/group_keys()/group_indices()/group_size()/n_groups() nev
   expect_no_error(dplyr::n_groups(gt))
 })
 
-test_that("the iteration family (group_split/map/modify/nest/nest_by) still falls back", {
+test_that("the iteration family (group_map/modify/nest/nest_by) still falls back", {
   skip_if_no_gpu()
   withr::local_options(cuplyr.fallback = "warn")
 
   gt <- tbl_gpu(tibble::tibble(g = c(1, 1, 2), x = 1:3)) |> dplyr::group_by(g)
 
-  expect_warning(dplyr::group_split(gt), "fell back to CPU evaluation")
+  expect_no_warning(dplyr::group_split(gt))
   expect_warning(dplyr::group_map(gt, ~ sum(.x$x)), "fell back to CPU evaluation")
   expect_warning(dplyr::group_modify(gt, ~ dplyr::summarise(.x, s = sum(x))), "fell back to CPU evaluation")
   expect_warning(dplyr::group_nest(gt), "fell back to CPU evaluation")

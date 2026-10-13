@@ -532,3 +532,16 @@ vec_cast.grouped_df.tbl_gpu <- cast_gpu_to_df
 length.tbl_gpu <- function(x) {
   length(current_schema(x)$names)
 }
+
+# waldo (testthat 3e) compares external pointers by address, so two equal
+# tbl_gpu tables, or a list_of whose ptype is a tbl_gpu, never compare equal.
+# Compare a tbl_gpu as its collected frame instead (groups and frame
+# attributes included), the equivalence the oracle helpers already use.
+#' @exportS3Method waldo::compare_proxy
+compare_proxy.tbl_gpu <- function(x, path = "x") {
+  collected <- tryCatch(dplyr::collect(x), error = function(e) NULL)
+  if (is.null(collected)) {
+    return(list(object = x, path = path))
+  }
+  list(object = collected, path = paste0("collect(", path, ")"))
+}

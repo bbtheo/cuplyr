@@ -183,6 +183,64 @@ SEXP gpu_slice_indices(SEXP xptr, NumericVector raw_indices) {
     return make_gpu_table_xptr(std::move(result));
 }
 
+// group_split(): gather the rows into group order (`idx0`, 0-based, all
+// groups concatenated) and cut at the cumulative group `sizes`, copying every
+// piece into its own owned table so the chunks outlive the source. An empty
+// `idx0` means "already in group order" (ungrouped input): the source is
+// split as is. Returns one XPtr per size (an empty list for no sizes).
+// [[Rcpp::export]]
+Rcpp::List gpu_split_rows(SEXP xptr, IntegerVector idx0, IntegerVector sizes) {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
+    cudf::table_view view = get_table_view(ptr);
+    check_row_limit(view, "group_split()");
+
+    R_xlen_t ngroups = sizes.size();
+    Rcpp::List out(ngroups);
+    if (ngroups == 0) return out;
+
+    cudf::size_type total = 0;
+    std::vector<cudf::size_type> splits;
+    splits.reserve(static_cast<size_t>(ngroups));
+    for (R_xlen_t i = 0; i < ngroups; ++i) {
+        if (sizes[i] < 0) Rcpp::stop("group_split(): negative group size");
+        total += sizes[i];
+        if (i + 1 < ngroups) splits.push_back(total);
+    }
+
+    std::unique_ptr<cudf::table> gathered;
+    cudf::table_view source = view;
+    if (idx0.size() > 0) {
+        if (idx0.size() != total) Rcpp::stop("group_split(): row indices do not match group sizes");
+        if (total > view.num_rows()) Rcpp::stop("group_split(): group sizes exceed the table's rows");
+        for (R_xlen_t i = 0; i < idx0.size(); ++i) {
+            if (idx0[i] == NA_INTEGER || idx0[i] < 0 || idx0[i] >= view.num_rows())
+                Rcpp::stop("group_split(): row index out of range");
+        }
+        auto stream = cudf::get_default_stream();
+        auto mr = rmm::mr::get_current_device_resource();
+        rmm::device_uvector<cudf::size_type> d_idx(idx0.size(), stream);
+        check_cuda(
+            cudaMemcpy(d_idx.data(), &idx0[0], idx0.size() * sizeof(cudf::size_type),
+                       cudaMemcpyHostToDevice),
+            "group_split() gather-map upload");
+        cudf::column_view gather_map(
+            cudf::device_span<cudf::size_type const>(d_idx.data(), d_idx.size()));
+        gathered = cudf::gather(view, gather_map, cudf::out_of_bounds_policy::DONT_CHECK,
+                                stream, mr);
+        source = gathered->view();
+    } else if (total != view.num_rows()) {
+        Rcpp::stop("group_split(): group sizes do not cover the table");
+    }
+
+    std::vector<cudf::table_view> parts = cudf::split(source, splits);
+    for (R_xlen_t i = 0; i < ngroups; ++i) {
+        out[i] = make_gpu_table_xptr(std::make_unique<cudf::table>(parts[i]));
+    }
+    return out;
+}
+
 // [[Rcpp::export]]
 SEXP gpu_slice_rank(SEXP xptr, int order_col_idx, bool descending, double amount,
                      bool is_prop, bool with_ties, bool na_rm) {

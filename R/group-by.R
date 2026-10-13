@@ -493,7 +493,8 @@ group_by_drop_default.tbl_gpu <- function(.tbl) {
 # `group_data(.data)[[".rows"]]`, so it already works transparently once
 # `group_data.tbl_gpu()` exists. Previously (Phase 2) all six were CPU
 # fallbacks (see R/fallback.R's now-removed registrations); the iteration
-# family (group_split()/group_map()/group_modify()/group_nest()/nest_by())
+# family (group_map()/group_modify()/group_nest()/nest_by(); group_split()
+# is native, R/fallback.R)
 # inherently produces R-side objects
 # and stays on the CPU fallback (R/fallback.R).
 # =============================================================================
