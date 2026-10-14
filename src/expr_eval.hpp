@@ -85,6 +85,7 @@
 
 #include <Rcpp.h>
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <optional>
@@ -164,6 +165,22 @@ struct eval_ctx {
         owned.push_back(std::move(col));
         cols.push_back(v);
         return static_cast<cudf::size_type>(cols.size() - 1);
+    }
+
+    // Free the storage of every column pushed at or after `mark` (a value of
+    // cols.size() taken earlier), for a handler that folds many clauses and
+    // must not keep each clause's scratch alive until the end. Indices still
+    // never shift: the freed slots stay in `cols`, re-pointed at input column
+    // 0 so that view() remains a valid equal-height table. Nothing may refer
+    // to a released index afterwards (callers release only what their own
+    // loop iteration pushed). Input columns are never released.
+    void release_from(size_t mark) {
+        size_t base = cols.size() - owned.size();  // push() keeps these in lockstep
+        if (base == 0) return;
+        for (size_t k = std::max(mark, base); k < cols.size(); ++k) {
+            owned[k - base].reset();
+            cols[k] = cols[0];
+        }
     }
 };
 
@@ -1371,6 +1388,59 @@ inline std::unique_ptr<cudf::column> apply_checked_int(Rcpp::List node, eval_ctx
 // node since they are host-side values, not per-row columns.
 // -----------------------------------------------------------------------------
 
+// Right-to-left chained copy_if_else shared by case_when() and
+// replace_when()/replace_values(): result = cond_1 ? val_1 : (cond_2 ? val_2 :
+// ... : `acc`). `acc` is the already-built default column (a view into the
+// ctx or an input column). A NULL cond element takes the accumulated "else"
+// side per copy_if_else()'s null-mask rule, i.e. dplyr's "NA condition is no
+// match".
+//
+// Peak memory is O(rows), whatever the clause count (F30: a 500-key
+// recode() lookup is 500 clauses): a literal value goes through the scalar
+// overload instead of being expanded to a full column, each clause's scratch
+// (condition mask, casted column) is released as soon as that clause is
+// folded in, and the previous accumulator is freed when replaced.
+inline std::unique_ptr<cudf::column> fold_clauses(
+        eval_ctx& ctx, const cudf::data_type& target, cudf::column_view acc,
+        const std::vector<Rcpp::List>& conds, const std::vector<Rcpp::List>& vals,
+        const char* who) {
+    std::string target_str = expr_type_to_str(target);
+    std::unique_ptr<cudf::column> owned_acc;
+    for (int i = static_cast<int>(conds.size()) - 1; i >= 0; --i) {
+        size_t mark = ctx.cols.size();
+
+        cudf::size_type cond_idx = materialize(conds[i], ctx);
+        cudf::column_view cond_col = ctx.cols[cond_idx];
+        if (cond_col.type().id() != cudf::type_id::BOOL8) {
+            Rcpp::stop("%s: each condition must be logical, not %s",
+                       who, expr_type_to_str(cond_col.type()).c_str());
+        }
+
+        Rcpp::List val_node = vals[i];
+        std::unique_ptr<cudf::column> next;
+        if (ir_kind(val_node) == "lit") {
+            auto s = build_scalar(target_str, val_node["value"], ir_lit_is_na(val_node));
+            next = cudf::copy_if_else(*s, acc, cond_col);
+        } else {
+            cudf::size_type val_idx = materialize(val_node, ctx);
+            if (ctx.cols[val_idx].type().id() != target.id()) {
+                auto casted = cudf::cast(ctx.cols[val_idx], target);
+                val_idx = ctx.push(std::move(casted));
+            }
+            next = cudf::copy_if_else(ctx.cols[val_idx], acc, cond_col);
+        }
+
+        ctx.release_from(mark);
+        owned_acc = std::move(next);  // frees the previous accumulator
+        acc = owned_acc->view();
+    }
+    if (!owned_acc) {
+        // Defensive only: the R parsers require at least one clause.
+        return std::make_unique<cudf::column>(acc);
+    }
+    return owned_acc;
+}
+
 inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ctx) {
     std::string op = Rcpp::as<std::string>(node["op"]);
     Rcpp::List args = node["args"];
@@ -2055,31 +2125,12 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         // this needs NO replace_nulls(cond, FALSE) adjustment, unlike
         // if_else() above (whose NA-condition rows must become a DISTINCT
         // NA/missing value, not fall through).
-        std::vector<std::unique_ptr<cudf::column>> owned_accs;
-        for (int i = n_when - 1; i >= 0; --i) {
-            Rcpp::List cond_node = args[2 * i];
-            Rcpp::List val_node = args[2 * i + 1];
-
-            cudf::size_type cond_idx = materialize(cond_node, ctx);
-            cudf::column_view cond_col = ctx.cols[cond_idx];
-            if (cond_col.type().id() != cudf::type_id::BOOL8) {
-                Rcpp::stop("case_when(): each condition must be logical, not %s",
-                           expr_type_to_str(cond_col.type()).c_str());
-            }
-
-            cudf::column_view val_col = value_as_column(val_node);
-            auto next = cudf::copy_if_else(val_col, acc, cond_col);
-            acc = next->view();
-            owned_accs.push_back(std::move(next));
+        std::vector<Rcpp::List> conds, vals;
+        for (int i = 0; i < n_when; ++i) {
+            conds.push_back(args[2 * i]);
+            vals.push_back(args[2 * i + 1]);
         }
-
-        if (owned_accs.empty()) {
-            // Defensive only: the R parser (ir_parse_case_when()) requires
-            // at least one `~` clause, so n_when == 0 never actually reaches
-            // here.
-            return std::make_unique<cudf::column>(acc);
-        }
-        return std::move(owned_accs.back());
+        return fold_clauses(ctx, target, acc, conds, vals, "case_when()");
     }
 
     // ---- coalesce(...): left-folded replace_nulls (Phase 4) ----
@@ -2204,29 +2255,12 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         // LHS conditions are treated like FALSE") and replace_values()'s
         // %in%-desugared conditions (which are themselves already never-NA,
         // see the %in% handler above).
-        std::vector<std::unique_ptr<cudf::column>> owned_accs;
-        for (int i = n_when - 1; i >= 0; --i) {
-            Rcpp::List cond_node = args[2 * i + 1];
-            Rcpp::List val_node = args[2 * i + 2];
-
-            cudf::size_type cond_idx = materialize(cond_node, ctx);
-            cudf::column_view cond_col = ctx.cols[cond_idx];
-            if (cond_col.type().id() != cudf::type_id::BOOL8) {
-                Rcpp::stop("replace_when()/replace_values(): each condition must be logical, not %s",
-                           expr_type_to_str(cond_col.type()).c_str());
-            }
-
-            cudf::column_view val_col = value_as_column(val_node);
-            auto next = cudf::copy_if_else(val_col, acc, cond_col);
-            acc = next->view();
-            owned_accs.push_back(std::move(next));
+        std::vector<Rcpp::List> conds, vals;
+        for (int i = 0; i < n_when; ++i) {
+            conds.push_back(args[2 * i + 1]);
+            vals.push_back(args[2 * i + 2]);
         }
-
-        if (owned_accs.empty()) {
-            // Defensive only: both R parsers require at least one clause.
-            return std::make_unique<cudf::column>(acc);
-        }
-        return std::move(owned_accs.back());
+        return fold_clauses(ctx, target, acc, conds, vals, "replace_when()/replace_values()");
     }
 
     // ---- string ==/!=/</<=/>/>=: binary_operation + get_compare_op() ----

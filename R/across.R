@@ -1613,7 +1613,7 @@ across_run_drop <- function(run, name) {
 # @keywords internal
 across_pure_heads <- function() {
   c(names(ir_call_registry), ir_foldable_window_fns, "c", "~", "(", ":",
-    "case_when", "case_match", "recode_values", "replace_values", "replace_when",
+    "case_when", "case_match", "recode", "recode_values", "replace_values", "replace_when",
     "when_all", "when_any", "order_by", "with_order")
 }
 
@@ -1715,7 +1715,7 @@ across_r_typed_fns <- c(
   consecutive_id = "dplyr", lag = "dplyr", lead = "dplyr", first = "dplyr",
   last = "dplyr", nth = "dplyr", if_else = "dplyr", case_when = "dplyr",
   coalesce = "dplyr", na_if = "dplyr", case_match = "dplyr",
-  recode_values = "dplyr", replace_values = "dplyr", replace_when = "dplyr",
+  recode = "dplyr", recode_values = "dplyr", replace_values = "dplyr", replace_when = "dplyr",
   as_date = "lubridate", day = "lubridate", hour = "lubridate",
   minute = "lubridate", quarter = "lubridate"
 )

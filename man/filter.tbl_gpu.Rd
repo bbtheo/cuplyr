@@ -68,7 +68,7 @@ a literal or another string column
 \item Math on columns inside a predicate (\verb{+ - * / \%\% \%/\% ^}, \code{sqrt},
 \code{log}, \code{abs}, etc. -- the same set \code{mutate()} supports)
 \item \code{if_else()}, \code{case_when()}, \code{coalesce()}, \code{na_if()},
-\code{case_match()}, \code{recode_values()}, \code{replace_values()},
+\code{case_match()}, \code{recode()} (scalar literal shapes), \code{recode_values()}, \code{replace_values()},
 \code{replace_when()} -- the same conditional/vector functions \code{mutate()}
 supports (see its own docs for the exact type-unification rules),
 usable anywhere inside a predicate, including as the whole predicate

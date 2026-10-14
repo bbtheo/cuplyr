@@ -100,6 +100,11 @@
 #'     `new_value` plus `.default`. Deprecated upstream in dplyr 1.2 in
 #'     favor of `recode_values()`/`replace_values()`, but still supported
 #'     here. `.ptype=` is not yet supported.
+#'   \item `recode(.x, old = new, ..., .default =, .missing =)` -- native only
+#'     for a bare character/integer/double column `.x` and scalar literal
+#'     replacements of one shared type (`dplyr::recode`, including `!!!`
+#'     lookups); duplicate keys, factor `.x`, `recode_factor()`, and a result
+#'     type different from `.x` without `.default` run on the CPU.
 #'   \item `recode_values(x, old_values ~ new_value, ..., default = val)` --
 #'     the non-deprecated equivalent of `case_match()` above (identical
 #'     semantics, `default` instead of `.default`). The `from=`/`to=`

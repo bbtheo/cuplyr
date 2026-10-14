@@ -123,6 +123,11 @@ the same value-type unification rule as \code{case_when()} across every
 \code{new_value} plus \code{.default}. Deprecated upstream in dplyr 1.2 in
 favor of \code{recode_values()}/\code{replace_values()}, but still supported
 here. \verb{.ptype=} is not yet supported.
+\item \code{recode(.x, old = new, ..., .default =, .missing =)} -- native only
+for a bare character/integer/double column \code{.x} and scalar literal
+replacements of one shared type (\code{dplyr::recode}, including \verb{!!!}
+lookups); duplicate keys, factor \code{.x}, \code{recode_factor()}, and a result
+type different from \code{.x} without \code{.default} run on the CPU.
 \item \code{recode_values(x, old_values ~ new_value, ..., default = val)} --
 the non-deprecated equivalent of \code{case_match()} above (identical
 semantics, \code{default} instead of \code{.default}). The \verb{from=}/\verb{to=}

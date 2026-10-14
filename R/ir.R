@@ -359,6 +359,9 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
     if (identical(fn_name, "recode_values")) {
       return(ir_parse_recode_values(expr, env, schema))
     }
+    if (identical(fn_name, "recode")) {
+      return(ir_parse_recode(expr, env, schema))
+    }
     if (identical(fn_name, "replace_values")) {
       return(ir_parse_replace_values(expr, env, schema))
     }
@@ -884,6 +887,191 @@ ir_parse_value_match_clauses <- function(expr, env, schema, default_key) {
   interleaved[seq(2L, n_when * 2L, by = 2L)] <- values[seq_len(n_when)]
 
   ir_call("case_when", c(interleaved, values[n_when + 1L]), meta = list(n_when = n_when))
+}
+
+#' One scalar `recode()` value, by shape
+#'
+#' Accepts only what the F30 allowlist means to: a length-1, attribute-free
+#' atomic of typeof character/integer/double/logical (doubles finite or
+#' `NA_real_`; R parses `NA`, `NA_character_`, ... as such constants, so a
+#' symbol is never accepted), or unary `-` on a numeric literal. Nothing is
+#' evaluated.
+#'
+#' @return `list(value =, type =)` (`type` is the R typeof), or `NULL`
+#' @keywords internal
+ir_recode_scalar <- function(a, env, schema) {
+  if (is.call(a) && length(a) == 2L && identical(a[[1]], as.name("-"))) {
+    inner <- ir_recode_scalar(a[[2]], env, schema)
+    if (is.null(inner) || !inner$type %in% c("integer", "double") || is.na(inner$value)) {
+      return(NULL)
+    }
+    return(list(value = -inner$value, type = inner$type))
+  }
+  if (!is.atomic(a) || length(a) != 1L || !is.null(attributes(a)) ||
+      !typeof(a) %in% c("character", "integer", "double", "logical")) {
+    return(NULL)
+  }
+  if (is.double(a) && !is.na(a) && !is.finite(a)) {
+    return(NULL)  # Inf
+  }
+  if (is.double(a) && is.nan(a)) {
+    return(NULL)
+  }
+  list(value = a, type = typeof(a))
+}
+
+#' Parse `dplyr::recode(.x, old = new, ..., .default =, .missing =)`
+#'
+#' A POSITIVE allowlist (F30): anything that doesn't match exactly returns
+#' `NULL`, i.e. the CPU fallback, which already reproduces dplyr's results,
+#' warnings and errors. Accepted: head resolving to `dplyr::recode`; `.x` a
+#' bare STRING/INT32/FLOAT64 (non-factor) column; scalar-literal values of one
+#' shared typeof; string keys = names, numeric keys = `as.double(names)` (whole
+#' int32 for an INT32 `.x`) or positions; no duplicate keys; and, without
+#' `.default`, a value type equal to `.x`'s (otherwise dplyr's data-dependent
+#' "Unreplaced values treated as NA" warning must stay on the CPU). Lowers to
+#' `case_when(is.na(x) ~ .missing, x == key ~ val, ..., .default = .default
+#' or x)`, every literal explicitly typed. See `features/F30.md`.
+#' @keywords internal
+ir_parse_recode <- function(expr, env, schema) {
+  head <- expr[[1]]
+  target <- tryCatch(getExportedValue("dplyr", "recode"), error = function(e) NULL)
+  resolved <- resolve_call_fn(head, env)
+  if (is.null(target) || is.null(resolved) || !identical(resolved, target)) {
+    return(NULL)
+  }
+
+  args <- as.list(expr)[-1]
+  if (length(args) < 2L) {
+    return(NULL)
+  }
+  arg_names <- names(args) %||% rep("", length(args))
+
+  if (!arg_names[1] %in% c("", ".x")) {
+    return(NULL)
+  }
+  if (rlang::is_missing(args[[1]]) || !is.symbol(args[[1]])) {
+    return(NULL)
+  }
+  x_name <- as.character(args[[1]])
+  idx <- match(x_name, schema$names)
+  if (is.na(idx) || anyDuplicated(schema$names) > 0L ||
+      !is.null(schema$factor_levels[[x_name]])) {
+    return(NULL)
+  }
+  x_gpu <- unname(schema$types[idx])
+  if (!x_gpu %in% c("STRING", "INT32", "FLOAT64")) {
+    return(NULL)
+  }
+  x_r <- c(STRING = "character", INT32 = "integer", FLOAT64 = "double")[[x_gpu]]
+
+  rest <- args[-1]
+  rnames <- arg_names[-1]
+  if (any(is.na(rnames)) || any(rnames == ".x")) {
+    return(NULL)
+  }
+  is_ctl <- rnames %in% c(".default", ".missing")
+  if (anyDuplicated(rnames[is_ctl]) > 0L) {
+    return(NULL)
+  }
+  rep_names <- rnames[!is_ctl]
+  if (any(startsWith(rep_names, "."))) {
+    return(NULL)  # partial match of .x, typo of .default/.missing
+  }
+  reps <- rest[!is_ctl]
+  if (length(reps) == 0L) {
+    return(NULL)
+  }
+
+  # Scalar-by-shape values; an empty argument (`recode(x, a = )`) is NULL.
+  parse_val <- function(i) {
+    if (rlang::is_missing(rest[[i]])) NULL else ir_recode_scalar(rest[[i]], env, schema)
+  }
+  rep_pos <- which(!is_ctl)
+  rep_vals <- lapply(rep_pos, parse_val)
+  has_default <- ".default" %in% rnames
+  has_missing <- ".missing" %in% rnames
+  def_val <- if (has_default) parse_val(match(".default", rnames))
+  mis_val <- if (has_missing) parse_val(match(".missing", rnames))
+  all_vals <- c(rep_vals, if (has_default) list(def_val), if (has_missing) list(mis_val))
+  if (any(vapply(all_vals, is.null, logical(1)))) {
+    return(NULL)
+  }
+  val_type <- all_vals[[1]]$type
+  if (!all(vapply(all_vals, function(v) identical(v$type, val_type), logical(1)))) {
+    return(NULL)
+  }
+  if (!has_default && !identical(val_type, x_r)) {
+    return(NULL)
+  }
+
+  # Keys.
+  named <- nzchar(rep_names)
+  if (x_gpu == "STRING") {
+    if (!all(named) || anyDuplicated(rep_names) > 0L) {
+      return(NULL)
+    }
+    keys <- rep_names
+  } else {
+    if (any(named) && !all(named)) {
+      return(NULL)
+    }
+    if (all(named)) {
+      keys <- tryCatch(as.double(rep_names), warning = function(w) NULL)
+      if (is.null(keys) || any(!is.finite(keys)) || anyDuplicated(keys) > 0L) {
+        return(NULL)
+      }
+    } else {
+      keys <- as.double(seq_along(reps))
+    }
+    if (x_gpu == "INT32") {
+      if (any(keys != trunc(keys)) || any(abs(keys) > .Machine$integer.max)) {
+        return(NULL)
+      }
+      keys <- as.integer(keys)
+    }
+  }
+
+  # Every literal carries its own type (a bare NA would adopt a sibling's).
+  lit_of <- function(v) {
+    if (is.na(v)) {
+      ir_lit(value = NULL, type = gpu_type_from_r(v), na = TRUE)
+    } else {
+      ir_lit_from_r(v)
+    }
+  }
+  x_ir <- ir_col(x_name)
+  na_of_t <- switch(val_type,
+    character = NA_character_, integer = NA_integer_, double = NA_real_, logical = NA)
+
+  conds <- list()
+  vals <- list()
+  # A missing `.x` row never matches a key and, with `.default`/`.missing`,
+  # is only replaced by `.missing`. dplyr's is.na() also covers NaN; on the
+  # GPU a NaN computed by a calculation is a number, not a null, so a FLOAT64
+  # `.x` also tests `x != x`. That clause is needed even with neither
+  # argument: dplyr then returns NA (not NaN) for such a row.
+  if (has_default || has_missing || x_gpu == "FLOAT64") {
+    na_cond <- ir_call("is.na", list(x_ir))
+    if (x_gpu == "FLOAT64") {
+      na_cond <- ir_call("|", list(na_cond, ir_call("!=", list(x_ir, x_ir))))
+    }
+    conds <- c(conds, list(na_cond))
+    vals <- c(vals, list(lit_of(if (has_missing) mis_val$value else na_of_t)))
+  }
+  # `==` on a null `x` is null, which a clause treats as "no match" (like
+  # `%in%`'s never-NA result), and -0 == 0, with no hash set per key.
+  for (i in seq_along(reps)) {
+    conds <- c(conds, list(ir_call("==", list(x_ir, lit_of(keys[i])))))
+    vals <- c(vals, list(lit_of(rep_vals[[i]]$value)))
+  }
+  default_ir <- if (has_default) lit_of(def_val$value) else x_ir
+
+  n_when <- length(conds)
+  interleaved <- vector("list", n_when * 2L)
+  interleaved[seq(1L, n_when * 2L, by = 2L)] <- conds
+  interleaved[seq(2L, n_when * 2L, by = 2L)] <- vals
+  ir_call("case_when", c(interleaved, list(default_ir)), meta = list(n_when = n_when))
 }
 
 #' Parse `case_match(.x, old_values ~ new_value, ..., .default=, .ptype=)`

@@ -55,7 +55,7 @@
 #'   \item Math on columns inside a predicate (`+ - * / %% %/% ^`, `sqrt`,
 #'     `log`, `abs`, etc. -- the same set `mutate()` supports)
 #'   \item `if_else()`, `case_when()`, `coalesce()`, `na_if()`,
-#'     `case_match()`, `recode_values()`, `replace_values()`,
+#'     `case_match()`, `recode()` (scalar literal shapes), `recode_values()`, `replace_values()`,
 #'     `replace_when()` -- the same conditional/vector functions `mutate()`
 #'     supports (see its own docs for the exact type-unification rules),
 #'     usable anywhere inside a predicate, including as the whole predicate
