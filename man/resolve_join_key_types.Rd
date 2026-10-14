@@ -27,8 +27,10 @@ vector comparison and leave \code{join_spec} untouched. Equi pairs with
 compatible-but-different types are recorded in \code{join_spec$key_casts}:
 \code{idx} (position in the spec), \code{type} (the common type), \code{cast_left}/
 \code{cast_right}, the source types, and a factor side's levels (needed to
-decode it to \code{STRING}). Non-equi pairs are only validated: the expression
-evaluator casts their operands itself.
+decode it to \code{STRING}). Non-equi numeric pairs are only validated (the
+expression evaluator widens their operands itself); a rolling INT32/FLOAT64
+pair is recorded (it is searched, not evaluated) and so is a non-equi
+STRING pair (\code{string_codes = TRUE}, see below).
 
 \code{lower_join()} applies the plan; \code{build_join_output_info()} reads it for
 the merged key's output type.

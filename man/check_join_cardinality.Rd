@@ -21,8 +21,8 @@ check_join_cardinality(diag, join_type, multiple, relationship, unmatched)
 \description{
 The Phase 7 J5 activation point: called from \code{lower_join()} (R/lower.R)
 immediately after a mutating join (\code{left}/\code{inner}/\code{full}/\code{right}) returns
-its \code{list(ptr, diag)} result, using the RAW (pre-\verb{multiple=}-filter)
-\code{diag} from \code{join_map_stats()} (\code{src/ops_join.cpp}). Never called for
+its \code{list(ptr, diag)} result, using the \code{diag} from \code{join_map_stats()}
+(\code{src/ops_join.cpp}), computed after the \verb{multiple=} filter. Never called for
 \code{semi}/\code{anti}/\code{cross} -- those join types have no \verb{multiple=}/
 \verb{unmatched=}/\verb{relationship=} in dplyr's own signatures at all.
 }

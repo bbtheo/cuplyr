@@ -18,10 +18,8 @@
 # that equi subset end to end. A join_by() with ANY non-equi condition or
 # non-"none" filter (join_by_is_non_equi() == TRUE) is routed to the CPU
 # fallback (gpu_fallback(), the same two-table shape nest_join()/set-ops use
-# in R/fallback.R) rather than a hard stop() -- Phase 7 J7 replaces this
-# with a native mixed_join/conditional_join lowering; the "non-equi forms"
-# section below pins today's fallback behavior with names that will need
-# updating (not just deleting) once J7 lands.
+# in R/fallback.R) rather than a hard stop() -- Phase 7 J7 replaced this
+# with a native mixed_join/conditional_join lowering for most shapes.
 
 # =============================================================================
 # Shared helper: run `join_fn` eagerly AND lazily on tbl_gpu, compare both
@@ -119,7 +117,7 @@ test_that("parse_join_by() maps an equi join_by() object onto the 4-vector spec"
   expect_identical(spec$left, c("a", "c"))
   expect_identical(spec$right, c("b", "d"))
   expect_identical(spec$op, c("==", "=="))
-  expect_identical(spec$filter, "none")
+  expect_identical(spec$filter, rep("none", length(spec$op)))
 
   spec_natural <- parse_join_by(dplyr::join_by(a), x, y)
   expect_identical(spec_natural$left, "a")
@@ -226,9 +224,9 @@ test_that("join_by() works identically to an equivalent by = c(a = 'b') call", {
 #    `build_join_ast()` src/expr_eval.hpp) for every operator join_by()
 #    itself can produce ("==", ">=", ">", "<=", "<"), on non-STRING columns,
 #    with `filter == "none"` (no `closest()`/rolling). `join_by_natively_
-#    supported()` (R/join.R) is what screens the still-unsupported subset
-#    (closest()/rolling `filter=`, STRING non-equi columns) to the CPU
-#    fallback -- see section 4 below, which pins THAT behavior instead.
+#    supported()` (R/join.R) is what screens the still-unsupported subset to
+#    the CPU fallback -- see section 4 below. (F24: STRING/STRING non-equi
+#    conditions and single closest() joins are native too.)
 #
 #    An important, empirically-verified (dplyr 1.2.1) wrinkle pinned here:
 #    `na_matches = "na"` (the default) makes a NA on BOTH sides a genuine
@@ -536,14 +534,17 @@ test_that("keep = FALSE with a non-equi join_by() errors with dplyr's exact text
 })
 
 # =============================================================================
-# 4. Still-fallback non-equi forms (Phase 7 J8 pins these permanently):
-#    closest()/rolling `filter != "none"`, and STRING non-equi columns.
-#    join_by_natively_supported() (R/join.R) is what screens these before
-#    parse_join_by() is ever called.
+# 4. join_by() forms and the native/fallback split (F24):
+#    a single closest() condition (plus == conditions) and STRING/STRING
+#    non-equi conditions are native; two closest() conditions, closest()
+#    next to another inequality, and a STRING compared with a non-STRING
+#    still fall back. join_by_natively_supported() (R/join.R) screens these
+#    before parse_join_by() is ever called.
 # =============================================================================
 
-test_that("join_by(closest(...)) still works via the CPU fallback", {
+test_that("join_by(closest(...)) works natively", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
 
   left_df <- data.frame(a = c(1, 6, 11), v = c("p", "q", "r"))
   right_df <- data.frame(b = c(0, 5, 10, 15), w = c("A", "B", "C", "D"))
@@ -552,8 +553,9 @@ test_that("join_by(closest(...)) still works via the CPU fallback", {
                   by = dplyr::join_by(closest(a >= b)), arrange_by = "v")
 })
 
-test_that("join_by() mixing closest() with an equi condition still works via the CPU fallback", {
+test_that("join_by() mixing closest() with an equi condition works natively", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
 
   left_df <- data.frame(a = c(1, 2), c = c(10, 20), v = c("p", "q"))
   right_df <- data.frame(b = c(0, 3), d = c(10, 20), w = c("A", "B"))
@@ -562,8 +564,9 @@ test_that("join_by() mixing closest() with an equi condition still works via the
                   by = dplyr::join_by(closest(a >= b), c == d), arrange_by = "v")
 })
 
-test_that("join_by() with a STRING non-equi condition still works via the CPU fallback", {
+test_that("join_by() with a STRING non-equi condition works natively", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
 
   left_df <- data.frame(a = c("apple", "banana", "cherry"), v = c(1, 2, 3))
   right_df <- data.frame(b = c("banana", "date"), w = c(10, 20))
@@ -572,17 +575,35 @@ test_that("join_by() with a STRING non-equi condition still works via the CPU fa
                   by = dplyr::join_by(a >= b), arrange_by = "v")
 })
 
+test_that("two closest() conditions, closest() with another inequality, and STRING vs non-STRING still fall back correctly", {
+  skip_if_no_gpu()
+
+  left_df <- data.frame(a = c(1, 6, 11), b = c(2, 2, 9), v = c("p", "q", "r"))
+  right_df <- data.frame(c = c(0, 5, 10, 15), d = c(1, 3, 8, 9), w = c("A", "B", "C", "D"))
+  compare_join_by(left_df, right_df, dplyr::left_join,
+                  by = dplyr::join_by(closest(a >= c), closest(b <= d)), arrange_by = "v")
+  compare_join_by(left_df, right_df, dplyr::left_join,
+                  by = dplyr::join_by(closest(a >= c), b <= d), arrange_by = "v")
+
+  str_left <- data.frame(s = c("a", "b"), v = 1:2, stringsAsFactors = FALSE)
+  num_right <- data.frame(n = c(1, 2), w = 1:2)
+  expect_error(
+    dplyr::left_join(tbl_gpu(str_left), tbl_gpu(num_right), by = dplyr::join_by(s >= n)),
+    class = "dplyr_error_join_incompatible_type"
+  )
+})
+
 test_that("a non-natively-supported join_by() triggers the fallback notification; a native non-equi one doesn't", {
   skip_if_no_gpu()
 
-  left_df <- data.frame(a = c(1, 2, 3), v = c(10, 20, 30))
-  right_df <- data.frame(b = c(2, 3, 4), w = c(200, 300, 400))
+  left_df <- data.frame(a = c(1, 2, 3), b = c(1, 2, 3), v = c(10, 20, 30))
+  right_df <- data.frame(c = c(2, 3, 4), d = c(2, 3, 4), w = c(200, 300, 400))
 
   withr::local_options(cuplyr.fallback = "warn")
 
   expect_warning(
     dplyr::left_join(tbl_gpu(left_df), tbl_gpu(right_df),
-                     by = dplyr::join_by(closest(a >= b))) |> collect(),
+                     by = dplyr::join_by(closest(a >= c), closest(b >= d))) |> collect(),
     "fell back to CPU evaluation"
   )
 
@@ -601,21 +622,11 @@ test_that("a non-natively-supported join_by() triggers the fallback notification
 
   expect_no_warning(
     dplyr::left_join(tbl_gpu(left_df), tbl_gpu(right_df),
-                     by = dplyr::join_by(a == b)) |> collect()
+                     by = dplyr::join_by(a == c)) |> collect()
   )
-})
 
-test_that("join_by() with a STRING non-equi condition triggers the fallback notification", {
-  skip_if_no_gpu()
-
-  left_df <- data.frame(a = c("apple", "banana", "cherry"), v = c(1, 2, 3))
-  right_df <- data.frame(b = c("banana", "date"), w = c(10, 20))
-
-  withr::local_options(cuplyr.fallback = "warn")
-
-  expect_warning(
+  expect_no_warning(
     dplyr::left_join(tbl_gpu(left_df), tbl_gpu(right_df),
-                     by = dplyr::join_by(a >= b)) |> collect(),
-    "fell back to CPU evaluation"
+                     by = dplyr::join_by(closest(a >= c))) |> collect()
   )
 })

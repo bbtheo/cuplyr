@@ -895,6 +895,7 @@ push_down_filters <- function(ast) {
     # inputs, so a filter below the join could hide or create an error:
     # push nothing. multiple = first/last/any picks among ALL of an x row's
     # y matches, so y must not be filtered first (x-side pushdown is fine).
+    # The same goes for a closest() condition (below).
     # Known, accepted limitation: with the default relationship = NULL a
     # pushdown can suppress dplyr's advisory many-to-many warning or change
     # its row numbers (rows are identical); blocking it would remove the
@@ -904,8 +905,12 @@ push_down_filters <- function(ast) {
          any(input$relationship %in% c("one-to-one", "one-to-many", "many-to-one")))) {
       return(ast)
     }
+    # A closest() join keeps only the extremal y rows of each x row's matches
+    # (F24), so a predicate on y columns pushed below it would change which
+    # y row is closest, exactly like multiple = first/last/any.
     right_push_ok <- !(input$join_type %in% c("inner", "left", "right") &&
-                         !identical(input$multiple, "all"))
+                         !identical(input$multiple, "all")) &&
+      !any(input$by$filter != "none")
 
     for (pred in ast$predicates) {
       side <- classify_predicate(pred)

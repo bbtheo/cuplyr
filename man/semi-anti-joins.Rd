@@ -42,7 +42,8 @@ see \code{push_join()}, \code{R/execute.R}).
 \code{NULL}, a character vector, or a \code{\link[dplyr:join_by]{dplyr::join_by()}} spec, including
 non-equi conditions (\code{>=}, \code{>}, \code{<=}, \code{<}, \code{between()}/\code{within()}/
 \code{overlaps()}) via \code{cudf::conditional_join}/\code{mixed_join} (Phase 7 J7).
-\code{join_by(closest(...))}/rolling joins, and non-equi conditions over
-\code{STRING} columns, fall back to CPU evaluation transparently (with a
+A single \code{closest()} condition is native (it asks whether an x row has a
+closest match), as are non-equi conditions over two \code{STRING} columns;
+shapes outside that fall back to CPU evaluation transparently (with a
 \code{cuplyr.fallback} notification), same as the mutating joins.
 }

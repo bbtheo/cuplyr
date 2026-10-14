@@ -309,7 +309,7 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
 | `src/ops_groupby.cpp` | `gpu_summarise()`. All `quantile()` aggregations of one call that read the same value column share one groupby request (`QuantileRequests`), so cudf sorts it once however many probabilities there are (F22: reframe's k rewritten dots). `median()` of a float column is one of them, at 0.5 (keeping median's NA propagation for na.rm = FALSE, not quantile's error); an integer median stays cudf MEDIAN. The value is R's type 7, which cudf LINEAR is not exactly: it blends `(1-f)*lo + f*hi` even at f = 0 (`0 * Inf = NaN`, noise next to a far neighbour such as 8 next to 1e9), where R takes `x[lo]`, and R's index `1 + (n-1)*p` rounds in two steps, so it can be whole where cudf's position is not. So EVERY quantile request (FLOAT64 and INT32 columns, and the float median) carries COUNT_VALID (once per request) + LOWER + HIGHER, and `QuantileRequests::take()` recomputes R's index in separate (non-FMA) binary ops, with `n1 = max(count-1, 0)` once per request: a whole index takes that element, otherwise the lower value is used wherever LOWER == HIGHER. LOWER/HIGHER of an INT32 column are INT32 and are cast to LINEAR's FLOAT64 first. This costs about 2x the LINEAR-only time at k = 101 (2e6 rows, 1000 groups: 0.04 s to 0.08 s). GPU-computed NaN (`0 / 0`; an upload already turns R's NaN into null) is missing like in R: `inspect_float_column()` (one sum reduction as the gate, exact checks only when the sum isn't finite) finds NaN/Inf once per float column, and every na.rm = TRUE aggregation, plus min/max/median/quantile under na.rm = FALSE (`agg_reads_nan_as_null()`), reads the column with NaN made null, so quantile() errors and min/max/median give NA (R: NaN/NA). sum/mean/sd/var keep cudf's NaN; n_distinct/first/last/nth with na.rm = FALSE see the value |
 | `src/ops_arrange.cpp` | `gpu_arrange()` |
 | `src/ops_reframe.cpp` | `gpu_reframe_expand()` (F22): wide one-row-per-group table -> k rows per group on the device (`cudf::repeat` for keys/size-1 results, `cudf::interleave_columns` for a size-k result, a `sequence % m` gather map for literals) |
-| `src/ops_join.cpp` | join logic (equi hash joins, native `semi`/`anti`/`cross`/`right`, `gpu_cond_join()` for non-equi `join_by()` via `mixed_join`/`conditional_join`) with the shared device-side sanitize→stable-sort→diag→`multiple=`-filter→gather/coalesce pipeline (`build_join_result()`) for dplyr row-order/cardinality parity |
+| `src/ops_join.cpp` | join logic (equi hash joins, native `semi`/`anti`/`cross`/`right`, `gpu_cond_join()` for non-equi `join_by()` via `mixed_join`/`conditional_join`, `gpu_rolling_join()` for `closest()` (F24), `gpu_string_codes()` for non-equi STRING conditions) with the shared device-side sanitize→stable-sort→diag→`multiple=`-filter→gather/coalesce pipeline (`build_join_result()`) for dplyr row-order/cardinality parity |
 | `src/ops_bind.cpp` | `gpu_bind_rows_aligned()`, `gpu_bind_cols_impl()`, `gpu_cast_column()`, `gpu_cast_to_string()`; factor fidelity (Phase 11 L2): `gpu_remap_codes()`, `gpu_decode_factor()` |
 | `src/ops_gather.cpp` | vctrs support (F02): `gpu_handle_src()` (constant ALTREP source-id vector for row handles), `gpu_gather_rows()` (gather by (source,row) handles from one or several same-layout tables, NA -> null row) |
 | `src/gpu_info.cpp` | device availability/info |
@@ -329,7 +329,7 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
 | `R/group-by.R` | `group_by()`, `ungroup()`, `group_vars()` — metadata-only, no AST node |
 | `R/reframe.R` | native `reframe()` (F22): `reframe_native_plan()` screens the dots (`quantile(x, <const probs>, na.rm=)`, `range(x, na.rm=)`, column-free literals, scalar aggregations; anything else, and any sequential/`across()`/`pick()` dot, is the whole-call CPU fallback, decided before GPU work), rewrites each size-k dot into k scalar aggregations, runs `summarise_impl()` for the WIDE table, then pushes one `ast_reframe` node (barrier; `lower_reframe()` -> `gpu_reframe_expand()`). Call heads must resolve in the quosure env to the real function (a user's own `range` goes to the CPU), literals are plain vectors without `dim`. `reframe_wide_dots_ok()` is a POSITIVE allowlist, so reframe() doesn't inherit plain summarise()/IR/window divergences: each wide dot is `n()` or `sum/mean/min/max/sd/var/median/quantile(arg, na.rm = <literal>)`, `arg` a bare column or a column-reading expression walked by `reframe_arg_info()` over INT32/FLOAT64/BOOL8 columns, literals and `reframe_arg_fns` only (no window/aggregate call, no `^`/sqrt/log, no string operand; comparisons, `!`, `&`, `|`, is.na() only on NaN-free integer/logical operands, since a GPU NaN compares as a number), with per-aggregation types (`reframe_agg_arg_types()`: median() doubles only, quantile() INT32/FLOAT64, a bare timestamp, or a bare STRING under `session_collation_is_c()` (R/utils.R), only for min()/max()). The k dots of one expression share one summarise temp column (`preprocess_agg_expressions()` reuses a temp column, or a window argument's resolved column, for an identical parsed IR and `keep_bool`). A 0-group table with a size-k result raises vctrs' "Can't recycle" at lowering. `%%`/`%/%` of an integer by a double is native only for a finite, non-zero, whole literal divisor with |d| <= `.Machine$integer.max` (exact on the GPU); a fractional divisor (`1L %/% 0.1` is 9 in R, floor(x / y) gives 10) is the CPU's. A `sum()` of an INT32 argument can leave R's integer range (a double in dplyr), which a lazy plan can't type, so `reframe_wide_dots_ok()` returns the names of such dots (`plan$int32_sum`): on a lazy input the call computes the pending ops and runs the wide summarise eagerly (the reconcile in `summarise_impl()` widens the type), then the reframe node goes back to lazy; with pending ops this fires the `cuplyr_fallback_notify()` notice naming just those user-facing dots, mirroring `summarise_run_now()`. The wide step suppresses `notify_materialization()` notices (summarise's early compute of pending ops) |
 | `R/summarise.R` | summarise/groupby verb — `parse_aggregations()` builds aggregation structs (cudf-accepted function names), builds one `ast_summarise` node via `push_op()`; temp-column preprocessing for expressions inside agg calls |
-| `R/join.R` | join verbs — parse join spec (incl. `join_by()`, equi and non-equi) via `parse_join_by()`, dispatch through `push_join()` (join analogue of `push_op()`); `build_join_schema()`, `build_join_output_info()` (propagates `factor_levels` keyed by post-suffix output name, Phase 11 L2), `check_join_cardinality()` (`multiple=`/`unmatched=`/`relationship=`); routes `closest()`/rolling joins, STRING non-equi conditions, degenerate `suffix=c("",...)` collisions, and same-named equi keys that are factor-typed on both sides with different level sets (`join_factor_key_levels_conflict()`) to the notified CPU fallback (`join_route_to_fallback()`) |
+| `R/join.R` | join verbs — parse join spec (incl. `join_by()`, equi and non-equi) via `parse_join_by()`, dispatch through `push_join()` (join analogue of `push_op()`); `build_join_schema()`, `build_join_output_info()` (propagates `factor_levels` keyed by post-suffix output name, Phase 11 L2), `check_join_cardinality()` (`multiple=`/`unmatched=`/`relationship=`); `join_by_natively_supported()`/`join_by_rolling_native()` is the positive allowlist for non-equi shapes (see Join-Specific Notes); routes two `closest()`s, `closest()` next to another inequality, factor/logical/Date-vs-POSIXct rolling keys, STRING-vs-non-STRING non-equi conditions, degenerate `suffix=c("",...)` collisions, and same-named equi keys that are factor-typed on both sides with different level sets (`join_factor_key_levels_conflict()`) to the notified CPU fallback (`join_route_to_fallback()`) |
 | `R/bind.R` | `bind_rows()`, `bind_cols()` (plain functions, not S3 generics, so `!!!` splices work; errors cite the user's call; `bind_rows()` keeps the first input's groups/`.drop` and NA-pads zero-column inputs; `bind_cols()` follows vctrs' size rules: size-1 recycles, zero-column inputs give their size) with schema unification; `compute_unified_schema()` computes a factor level UNION (Phase 11 L2 Bug 2), `align_to_schema()`/`cast_column()` remap (`gpu_remap_codes()`) or decode (`gpu_decode_factor()`, Bug 3) factor columns as needed |
 | `R/collect.R` | pulls data to R, warns on INT64 precision loss. `collect_frame()` is the UNGROUPED tibble (what every internal caller that needs rows uses: fallbacks, pull, sets, joins, vctrs, `$`); `collect()` = `collect_frame()` + `dplyr::grouped_df()` with the table's `.drop` (dplyr/dbplyr contract: a grouped tbl_gpu collects grouped). `as.data.frame()`/`as_tibble()` (ungrouped)/`as.list()`/`as.matrix()` also go through `collect_frame()` |
 | `R/generics.R` | dplyr backend generics (`dplyr_col_modify()` etc.), `[`, and the base-R object contract (F04): `$`, `[[`, `$<-`, `[[<-`, `[<-`. For user code `gt$x` / `gt[["x"]]` fetch ONE column (ungroup + select + collect), `gt$x <- v` / `gt[[j]] <- v` are a GPU column modification (`gpu_assign_column()` -> `apply_col_changes()`: upload the new columns, `bind_cols()`, reorder; exec_mode and surviving groups kept), `[<-` and cell assignment are loud errors pointing at `mutate()`. Subscript checks, recycling and messages are tibble's own, run on a placeholder "stub" tibble; `[[`, `[[<-` and `$<-` take `(x, ...)` and forward the user's original promises to tibble (subscripts are evaluated once, in their own frame; labels in messages stay the user's expressions). A plain non-missing length-one `$<-`/`[[<-` value becomes a literal `mutate()` (a lazy plan is extended, not run); `x[[i, j]]` gathers one row on the GPU. **Internal fields**: a field name (`tbl_gpu_fields`) read/written by package code (caller's `topenv()` is the namespace, or its env chain below the global env holds the test marker `.cuplyr_internal_access` from `tests/testthat/helper-gpu.R`) is the raw list element; anything else (user code, other packages, global-env functions) gets the column. Code that must reach a field from elsewhere uses `unclass(x)$field` |
@@ -549,6 +549,45 @@ filter node with N predicates is already exactly one fused kernel.
   evaluator never sees mismatched operand types. `cast_join_key_column()`
   errors clearly on a factor key whose levels are unknown (NULL).
   Factor -> STRING uses `gpu_decode_factor()`, never `gpu_cast_column()`.
+- Rolling joins (F24): `join_by(<== keys>, closest(x$t <op> y$s))` with exactly
+  one `closest()` (`>=`, `>`, `<=`, `<`) is native when the rolling pair is one
+  type in `join_rolling_types` (INT32, FLOAT64, Date, POSIXct, STRING) or an
+  INT32/FLOAT64 mix (recorded in `key_casts`; the cast copy is searched).
+  `parse_join_by()` carries `filter` as a vector parallel to `op`;
+  `lower_join()` sends the `filter != "none"` condition to `gpu_rolling_join()`
+  (`src/ops_join.cpp`), never to the AST join (an inequality join plus a
+  per-row max is O(n*m) pairs). The kernel: stable-sort y by (equi keys,
+  rolling key), nulls first; `lower_bound`/`upper_bound` give each x row's equi
+  group and boundary candidate; validity checks (group range, null rules:
+  non-null x needs a non-null candidate, null x matches only a null candidate
+  and only for `>=`/`<=` with `na_matches = "na"`, `"never"` drops any x row
+  with a null key); a FLOAT64 rolling value has three kinds (present, null,
+  NaN from GPU arithmetic: cudf sorts NaN after +Inf), a candidate must have
+  the x row's kind, a missing kind matches like null does, and under `"never"`
+  a NaN in any FLOAT64 key of the x row matches nothing; a second search gives the tie block; scan/repeat/sequence
+  expand blocks into gather maps (right/full append y rows nobody picked with
+  the left sentinel), then `build_join_result()` runs unchanged, so
+  `multiple=`/`unmatched=`/`relationship=` act on the post-filter matches like
+  dplyr. semi/anti keep x rows with/without a block. The optimizer never
+  pushes a right-only predicate below a `closest()` join (`right_push_ok`).
+- Non-equi STRING pairs (F24): cudf's AST can't compare strings, so
+  `resolve_join_key_types()` records a `string_codes` cast and
+  `apply_join_key_casts()` appends one INT32 code column per side from
+  `gpu_string_codes()` (dense rank of both columns concatenated, nulls stay
+  null, bytewise UTF-8 = vctrs' C locale); `cond_by` names them. STRING against
+  a non-STRING stays on the fallback.
+- `multiple = "error"`/`"warning"` (undocumented, defunct in dplyr's NEWS but
+  still working through vctrs) never reach the native code: `mutating_join()`
+  sends them to the CPU fallback for every join shape, before validation, so
+  `build_join_result()`/`apply_multiple_filter()` only see all/any/first/last
+  (anything else is an internal error). `join_route_to_fallback()` runs dplyr
+  from a frame that inherits the global env when the user's call was direct, so
+  dplyr's own advisory many-to-many warning survives the fallback. Under
+  right/full `multiple = "first"/"last"/"any"`, `apply_multiple_filter()` lists
+  each y row no kept pair uses once as unmatched (not once per capped-out pair).
+  `join_map_stats()` runs on the maps AFTER that filter: vctrs resolves
+  `multiple` first, so `relationship=` and the "remaining y rows" of
+  `unmatched = "error"` see only the kept matches.
 - `by = character()` (F06/A4): detected by `is_cross_by()` in every join verb;
   the lifecycle warning is raised once from the verb (`warn_join_cross_by()`,
   `env` = dplyr's namespace so it says "dplyr 1.1.0"). A join that ends on the
@@ -700,14 +739,13 @@ String columns use offset-based storage (Apache Arrow format):
   `src/ops_join.cpp`): sanitize join maps on device (replace both `< 0`
   *and* `>= nrows` sentinel values with `nrows` — the `>= nrows` half was a
   latent gap in the original CPU-side sanitize, fixed in J4) → stable sort
-  → single device-to-host transfer only when diagnostics/`multiple=` are
-  needed (`join_map_stats()`: `left_multi_first`/`right_multi_first`/
-  `left_unmatched_first`/`right_unmatched_first`) → `multiple=` host
-  filtering (Phase 7 J5, skipped entirely for the default `multiple =
-  "all"`) → gather with `out_of_bounds_policy::NULLIFY` + coalesce. Every
+  → `multiple=` device filtering (Phase 7 J5, skipped entirely for the
+  default `multiple = "all"`) → diagnostics (`join_map_stats()`:
+  `left_multi_first`/`right_multi_first`/`left_unmatched_first`/
+  `right_unmatched_first`, scalars only, on the filtered maps) → gather with `out_of_bounds_policy::NULLIFY` + coalesce. Every
   mutating join type (`left`/`inner`/`full`/`right`) shares this one
   pipeline; C++ exports return `list(ptr, diag)`, and `lower_join()`
-  (`R/lower.R`) calls `check_join_cardinality()` (`R/join.R`) with the raw
+  (`R/lower.R`) calls `check_join_cardinality()` (`R/join.R`) with the
   `diag` to raise dplyr's exact `multiple=`/`unmatched=`/`relationship=`
   conditions.
 - **Right key dropping**: `keep = FALSE` drops right keys even when names differ (only legal for an all-equi spec — `keep = FALSE` on any genuinely non-equi `join_by()` condition errors with dplyr's own text; see `resolve_join_keep()`, `R/join.R`)

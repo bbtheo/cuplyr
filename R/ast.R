@@ -936,14 +936,18 @@ set_ast_source_ptr <- function(node, ptr) {
 #' coverage audit): renders every condition, not just the equi ones, so a
 #' non-equi/mixed `join_by()` (`op` other than `"=="`) is visible in the
 #' rendered query -- e.g. `join_by(a == b, x >= y)` shows as
-#' `"a == b, x >= y"`.
+#' `"a == b, x >= y"`. A `closest()` condition shows as `closest(x >= y)`.
 #'
 #' @param by A join spec `list(left, right, op, filter)` (see [parse_join_by()])
 #' @return Character scalar, `""` if `by` has no conditions
 #' @keywords internal
 describe_join_conditions <- function(by) {
   if (is.null(by) || length(by$left) == 0) return("")
-  paste(by$left, by$op, by$right, sep = " ", collapse = ", ")
+  cond <- paste(by$left, by$op, by$right, sep = " ")
+  # A closest() condition (F24) carries `filter != "none"`.
+  rolling <- length(by$filter) == length(cond) & by$filter != "none"
+  cond[rolling] <- paste0("closest(", cond[rolling], ")")
+  paste(cond, collapse = ", ")
 }
 
 #' Describe a slice node's mode-specific sizing/ordering detail

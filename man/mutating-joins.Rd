@@ -81,9 +81,11 @@ once) is a cross join with the usual \verb{multiple=}/\verb{relationship=}/
 supports both equi conditions (\code{a}, \code{a == b}) and non-equi conditions
 (\code{>=}, \code{>}, \code{<=}, \code{<}, and the \code{between()}/\code{within()}/\code{overlaps()}
 helpers that pre-expand to pairs of them) -- all GPU-native (Phase 7
-J6/J7). \code{join_by(closest(...))}/rolling joins, and any non-equi
-condition comparing \code{STRING} columns, are not GPU-native and
-transparently fall back to CPU evaluation (a \code{cuplyr.fallback}
+J6/J7). A \code{closest()} rolling condition (one per call, next to any
+number of \code{==} conditions) and non-equi conditions comparing two \code{STRING}
+columns are GPU-native too (F24). Two \code{closest()} conditions, \code{closest()}
+next to another inequality, and factor/logical/Date-vs-POSIXct rolling
+keys transparently fall back to CPU evaluation (a \code{cuplyr.fallback}
 notification fires; see \code{options(cuplyr.fallback = )}), still with a
 result that matches \code{dplyr} exactly.}
 
@@ -116,9 +118,11 @@ including another \code{NA} (\verb{cudf::null_equality::UNEQUAL} on the GPU).}
 
 \item{multiple}{How to resolve a left/right row matching more than one row
 on the other side: \code{"all"} (default, every match kept), \code{"any"},
-\code{"first"}, or \code{"last"}. Filtering runs device-side against the
+\code{"first"}, or \code{"last"} (the undocumented \code{"error"} and \code{"warning"} run on
+the CPU fallback). Filtering runs device-side against the
 already-sorted join maps (Phase 7 J5) -- \code{"all"}, the default used by
-every performance benchmark, costs nothing extra.}
+every performance benchmark, costs nothing extra. Under right/full joins
+a y row that no kept pair uses is listed once as unmatched.}
 
 \item{unmatched}{How to handle rows with no match: \code{"drop"} (default) or
 \code{"error"} (raises dplyr's exact \code{dplyr_error_join_matches_nothing}/
@@ -164,14 +168,25 @@ otherwise (Phase 7 J7).
 \item \verb{na_matches=}, \verb{multiple=}, \verb{unmatched=}, \verb{relationship=} are fully
 GPU-native/checked, with dplyr's exact condition classes and message
 text (Phase 7 J1/J5).
+\item \code{join_by(closest(...))} rolling joins (F24): exactly one \code{closest()}
+condition (\code{>=}, \code{>}, \code{<=}, \code{<}) plus \code{==} conditions, on integer,
+double, Date or POSIXct (or \code{STRING}) rolling keys: y is sorted by
+(equi keys, rolling key) and each x row finds its closest rows by binary
+search (\code{gpu_rolling_join()}), so a rolling join never materialises the
+inequality join. Every y row tied at the closest value is returned, and
+\verb{multiple=}/\verb{unmatched=}/\verb{relationship=} act on those matches, as in
+dplyr.
+\item A non-equi condition comparing two \code{STRING} columns (F24): both sides
+are replaced by INT32 codes of one shared bytewise (C-locale) order
+before the AST evaluator runs.
 }
 }
 
 \subsection{Falls back to CPU (transparent, notified)}{
 \itemize{
-\item \code{join_by(closest(...))} / any rolling join.
-\item A non-equi condition comparing \code{STRING} columns (cudf's AST comparison
-evaluator has no string support; equi \code{STRING} joins are unaffected).
+\item Two \code{closest()} conditions, \code{closest()} next to another inequality, and
+rolling keys that are factors, logicals or a Date against a POSIXct.
+\item A non-equi condition comparing a \code{STRING} with a non-\code{STRING} column.
 \item \code{suffix = c("", ...)} when it would still produce a genuine duplicate
 output column name.
 \item \code{nest_join()} stays CPU-only entirely (needs list-column support,

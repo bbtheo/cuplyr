@@ -530,6 +530,23 @@ lower_join <- function(ast, source_ptr) {
       integer(0)
     }
 
+    # F24: a closest() condition (join_by_rolling_native() let in exactly one,
+    # next to == conditions) is a sort + binary search, not an AST join.
+    # `cond_by` names the cast copies of the rolling pair (INT32 vs FLOAT64).
+    rolling <- which(ast$by$filter != "none")
+    if (length(rolling) == 1L) {
+      result <- gpu_rolling_join(left_ptr, right_ptr, equi_left_idx, equi_right_idx,
+                                 left_pair_idx[rolling], right_pair_idx[rolling],
+                                 ast$by$op[rolling], right_drop_idx, ast$join_type,
+                                 nulls_equal, ast$multiple)
+      if (ast$join_type %in% mutating_join_types) {
+        check_join_cardinality(result$diag, ast$join_type, ast$multiple,
+                               ast$relationship, ast$unmatched)
+        return(finish(result$ptr))
+      }
+      return(finish(result))
+    }
+
     cond_ir <- ir_bind_join(join_cond_ir_from_spec(cond_spec), cond_left_schema,
                             cond_right_schema)
 
@@ -568,7 +585,7 @@ lower_join <- function(ast, source_ptr) {
     # `multiple=` filtering happens device-side (src/ops_join.cpp
     # build_join_result(), Phase 7 J5) -- passed straight through as a
     # string; "all" (the default) is a zero-cost no-op there. `diag`
-    # (join_map_stats(), computed BEFORE filtering) is consumed by
+    # (join_map_stats(), computed after filtering) is consumed by
     # check_join_cardinality() below to raise dplyr's exact
     # relationship=/unmatched= conditions -- see its own roxygen
     # (R/join.R) for the full precedence rules.
@@ -686,9 +703,14 @@ apply_join_key_casts <- function(ast, left_ptr, right_ptr, left_schema, right_sc
 
   left_temps <- list()   # each: list(src = 0-based source column, cast = key_casts entry)
   right_temps <- list()
+  code_casts <- list()   # non-equi STRING pairs, handled after the numeric copies
   cond_by <- ast$by
   for (cast in ast$by$key_casts) {
     i <- cast$idx
+    if (isTRUE(cast$string_codes)) {
+      code_casts[[length(code_casts) + 1L]] <- cast
+      next
+    }
     if (in_place && ast$by$op[i] == "==") {
       if (cast$cast_left) {
         left_ptr <- cast_join_key_column(left_ptr, left_pair_idx[i], cast$left_type,
@@ -715,7 +737,7 @@ apply_join_key_casts <- function(ast, left_ptr, right_ptr, left_schema, right_sc
     }
   }
 
-  if (length(left_temps) == 0L && length(right_temps) == 0L) {
+  if (length(left_temps) == 0L && length(right_temps) == 0L && length(code_casts) == 0L) {
     return(list(left_ptr = left_ptr, right_ptr = right_ptr,
                 left_pair_idx = left_pair_idx, right_pair_idx = right_pair_idx,
                 temps = NULL, cond_by = cond_by,
@@ -740,11 +762,32 @@ apply_join_key_casts <- function(ast, left_ptr, right_ptr, left_schema, right_sc
   left <- append_temps(left_ptr, left_schema, left_temps, n_left, "left", left_temp_names)
   right <- append_temps(right_ptr, right_schema, right_temps, n_right, "right", right_temp_names)
 
+  # Non-equi STRING pairs (F24): one INT32 code column per side in a shared
+  # order, appended after the numeric copies.
+  n_left_temp <- length(left_temps)
+  n_right_temp <- length(right_temps)
+  for (cast in code_casts) {
+    i <- cast$idx
+    codes <- gpu_string_codes(left$ptr, left_pair_idx[i], right$ptr, right_pair_idx[i])
+    left$ptr <- gpu_bind_cols_impl(list(left$ptr, codes$left))
+    right$ptr <- gpu_bind_cols_impl(list(right$ptr, codes$right))
+    left_pair_idx[i] <- n_left + n_left_temp
+    right_pair_idx[i] <- n_right + n_right_temp
+    n_left_temp <- n_left_temp + 1L
+    n_right_temp <- n_right_temp + 1L
+    cond_by$left[i] <- temp_name("x", n_left_temp)
+    cond_by$right[i] <- temp_name("y", n_right_temp)
+    left$schema$names <- c(left$schema$names, cond_by$left[i])
+    left$schema$types <- c(left$schema$types, "INT32")
+    right$schema$names <- c(right$schema$names, cond_by$right[i])
+    right$schema$types <- c(right$schema$types, "INT32")
+  }
+
   list(left_ptr = left$ptr, right_ptr = right$ptr,
        left_pair_idx = left_pair_idx, right_pair_idx = right_pair_idx,
        temps = list(n_left = n_left, n_right = n_right,
-                    n_left_temp = length(left_temps),
-                    n_right_temp = length(right_temps),
+                    n_left_temp = n_left_temp,
+                    n_right_temp = n_right_temp,
                     semi_anti = ast$join_type %in% c("semi", "anti")),
        cond_by = cond_by, left_schema = left$schema, right_schema = right$schema)
 }

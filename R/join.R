@@ -39,26 +39,20 @@ join_by_is_non_equi <- function(by) {
 #' @keywords internal
 join_native_non_equi_ops <- c("==", "!=", ">=", ">", "<=", "<")
 
-#' Is this `by=` spec natively lowerable end to end (Phase 7 J7)?
+#' Is this `by=` spec natively lowerable end to end (Phase 7 J7, F24)?
 #'
 #' `TRUE` for everything [join_by_is_non_equi()] already called equi (no
 #' change there -- J6 native hash-join path). For a genuinely non-equi
-#' `join_by()` object, native lowering additionally requires:
-#'   1. Every condition's `filter` is `"none"` -- a `closest()`/rolling
-#'      condition (`filter = "max"/"min"`) is a nearest-match query, not a
-#'      plain inequality; `gpu_cond_join()`/`build_join_ast()`
-#'      (src/ops_join.cpp / src/expr_eval.hpp) have no such "keep only the
-#'      extremal match per group" step, and dplyr's `closest()` GPU route is
-#'      out of scope until Phase 12+ (J8 pins this fallback).
-#'   2. Every condition's operator is one this package's AST lowering
-#'      understands ([join_native_non_equi_ops]).
-#'   3. Neither side of any genuinely non-equi (`condition != "=="`)
-#'      condition is a STRING column -- `build_join_ast()`'s comparison
-#'      lowering reuses `get_compare_op()`/AST comparison ops, which cudf's
-#'      AST evaluator can't apply to STRING columns at all (unlike the
-#'      dedicated `binary_operation()` handler `ir_op_is_comparison()`
-#'      routes string filter/mutate comparisons through); STRING non-equi
-#'      joins stay on the CPU fallback (J8).
+#' `join_by()` object, native lowering additionally requires one of:
+#'   * A plain non-equi join (every condition's `filter` is `"none"`): every
+#'     operator is one this package's AST lowering understands
+#'     ([join_native_non_equi_ops]). A non-equi condition comparing two STRING
+#'     columns is native too (F24): `lower_join()` maps both sides onto INT32
+#'     codes of one shared order (`apply_join_key_casts()`), because cudf's
+#'     AST evaluator can't compare strings. A STRING against anything else
+#'     stays on the CPU fallback.
+#'   * A rolling join ([join_by_rolling_native()], F24): exactly one
+#'     `closest()` condition plus `==` conditions.
 #' A missing/misspelled column name is NOT checked here -- left to
 #' `validate_join_cols()`'s own proper error downstream on the native path
 #' (safer than silently routing an outright user typo to a fallback that
@@ -70,7 +64,7 @@ join_by_natively_supported <- function(by, x, y) {
   }
 
   if (any(by$filter != "none")) {
-    return(FALSE)
+    return(join_by_rolling_native(by, x, y))
   }
   if (!all(by$condition %in% join_native_non_equi_ops)) {
     return(FALSE)
@@ -89,36 +83,57 @@ join_by_natively_supported <- function(by, x, y) {
 
   left_types <- x$schema$types[left_idx]
   right_types <- y$schema$types[right_idx]
-  !any(left_types == "STRING") && !any(right_types == "STRING")
+  is_str <- left_types == "STRING" | right_types == "STRING"
+  all(left_types[is_str] == "STRING" & right_types[is_str] == "STRING")
+}
+
+# Types `gpu_rolling_join()` can sort and binary-search (plus STRING, whose
+# cudf order is bytewise UTF-8, i.e. vctrs' C-locale order).
+join_rolling_types <- c("INT32", "FLOAT64", "TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS",
+                        "STRING")
+
+#' Can this `closest()` join run on `gpu_rolling_join()` (F24)?
+#'
+#' A POSITIVE allowlist; everything else (several `closest()`, `closest()`
+#' next to another inequality, an unknown operator, factor/logical/Date-vs-
+#' POSIXct rolling keys) takes the CPU fallback:
+#'   * exactly one condition has `filter != "none"`, its operator is one of
+#'     `>=`, `>`, `<=`, `<`, and every other condition is `==` with
+#'     `filter == "none"`;
+#'   * the rolling pair is two columns of one type in [join_rolling_types], or
+#'     INT32 against FLOAT64 (compared as FLOAT64 through `key_casts`).
+#' A column missing from a schema is left to `validate_join_cols()`.
+#' @keywords internal
+join_by_rolling_native <- function(by, x, y) {
+  rolling <- which(by$filter != "none")
+  if (length(rolling) != 1L || !by$condition[rolling] %in% c(">=", ">", "<=", "<")) {
+    return(FALSE)
+  }
+  if (!all(by$condition[-rolling] == "==" & by$filter[-rolling] == "none")) {
+    return(FALSE)
+  }
+  li <- match(by$x[rolling], x$schema$names)
+  ri <- match(by$y[rolling], y$schema$names)
+  if (anyNA(li) || anyNA(ri)) {
+    return(TRUE)
+  }
+  lt <- unname(x$schema$types[li])
+  rt <- unname(y$schema$types[ri])
+  (identical(lt, rt) && lt %in% join_rolling_types) ||
+    setequal(c(lt, rt), c("INT32", "FLOAT64"))
 }
 
 #' Parse a join specification into a 4-vector spec
 #'
-#' Returns `list(left, right, op, filter)`: `left`/`right`/`op` are parallel
-#' character vectors (one entry per key/condition pair), `filter` is a single
-#' scalar describing the whole join's filter semantics (`"none"` for a plain
-#' equi join; `"max"`/`"min"` for `closest()` joins -- Phase 7 J7, which never
-#' reach this function, see below). Every form this function currently
-#' understands (`NULL`, an unnamed character vector, a named character
-#' vector, or an EQUI-ONLY `join_by()` object) produces an all-equi spec:
-#' `op` is `"=="` for every key and `filter` is `"none"`. A non-equi
-#' `join_by()` object (any condition other than `"=="`, or any `closest()`
-#' filter -- see `join_by_is_non_equi()`) is never passed here: every join
-#' verb checks `join_by_is_non_equi()` FIRST and routes straight to the CPU
-#' fallback (`gpu_fallback()`, mirroring `nest_join()`'s two-table fallback
-#' shape in `R/fallback.R`) before ever calling `parse_join_by()` -- Phase 7
-#' J7 replaces that fallback with a native `mixed_join`/`conditional_join`
-#' lowering, at which point this function gains a real non-equi branch. The
-#' `stop()` below is an internal-only safety net: every join verb calls
-#' [join_by_natively_supported()] FIRST and routes the unsupported subset
-#' (`closest()`/rolling `filter=`, an unrecognized operator, or a STRING
-#' non-equi column -- see that function's own docs) to the CPU fallback
-#' before ever reaching this function, so a non-equi `join_by()` that does
-#' reach here is always one J7's native `mixed_join`/`conditional_join`
-#' lowering (`gpu_cond_join()`, `src/ops_join.cpp`) can handle: `op`
-#' carries each condition's real operator (not just `"=="`) straight
-#' through, and [join_equi_spec()]/[join_cond_spec()] (below) split it back
-#' into its equi/non-equi halves at lowering time (`R/lower.R::lower_join()`).
+#' Returns `list(left, right, op, filter)`: four parallel character vectors,
+#' one entry per key/condition pair. `op` is each condition's operator
+#' (`"=="` for every key of a character/`NULL` `by`), `filter` its `join_by()`
+#' filter: `"none"`, or `"max"`/`"min"` for a `closest()` condition (F24).
+#' Callers run [join_by_natively_supported()] first, so a `join_by()` that
+#' reaches here is one the native lowering handles: [join_equi_spec()] and
+#' [join_cond_spec()] split it into its equi/non-equi halves at lowering time
+#' (`R/lower.R::lower_join()`), and a `closest()` condition goes to
+#' `gpu_rolling_join()`.
 #' @keywords internal
 parse_join_by <- function(by, x, y) {
   if (is.null(by)) {
@@ -128,22 +143,18 @@ parse_join_by <- function(by, x, y) {
            call. = FALSE)
     }
     return(list(left = common, right = common,
-                op = rep("==", length(common)), filter = "none"))
+                op = rep("==", length(common)),
+                filter = rep("none", length(common))))
   }
 
   if (inherits(by, "dplyr_join_by")) {
-    if (join_by_is_non_equi(by) && !all(by$filter == "none")) {
-      stop("Internal error: a closest()/rolling join_by() must be routed ",
-           "to the CPU fallback before reaching parse_join_by().",
-           call. = FALSE)
-    }
     return(list(left = by$x, right = by$y,
-                op = by$condition, filter = "none"))
+                op = by$condition, filter = by$filter))
   }
 
   if (is.character(by) && is.null(names(by))) {
     return(list(left = by, right = by,
-                op = rep("==", length(by)), filter = "none"))
+                op = rep("==", length(by)), filter = rep("none", length(by))))
   }
 
   if (is.character(by) && !is.null(names(by))) {
@@ -152,7 +163,8 @@ parse_join_by <- function(by, x, y) {
     empty_names <- left_cols == ""
     left_cols[empty_names] <- right_cols[empty_names]
     return(list(left = left_cols, right = right_cols,
-                op = rep("==", length(left_cols)), filter = "none"))
+                op = rep("==", length(left_cols)),
+                filter = rep("none", length(left_cols))))
   }
 
   stop("Invalid `by` specification. Use NULL, character vector, or named vector.",
@@ -181,7 +193,7 @@ join_is_equi <- function(spec) {
 join_equi_spec <- function(spec) {
   is_eq <- spec$op == "=="
   list(left = spec$left[is_eq], right = spec$right[is_eq],
-       op = spec$op[is_eq], filter = spec$filter)
+       op = spec$op[is_eq], filter = spec$filter[is_eq])
 }
 
 #' The non-equi subset of a join spec
@@ -196,7 +208,7 @@ join_equi_spec <- function(spec) {
 join_cond_spec <- function(spec) {
   is_eq <- spec$op == "=="
   list(left = spec$left[!is_eq], right = spec$right[!is_eq],
-       op = spec$op[!is_eq], filter = spec$filter)
+       op = spec$op[!is_eq], filter = spec$filter[!is_eq])
 }
 
 #' Build a single, `&`-folded IR condition tree from a join spec's non-equi
@@ -411,7 +423,7 @@ is_cross_by <- function(by) {
 #' @keywords internal
 join_cross_spec <- function() {
   list(left = character(0), right = character(0), op = character(0),
-       filter = "none")
+       filter = character(0))
 }
 
 #' dplyr's lifecycle warning for `by = character()`
@@ -489,8 +501,10 @@ join_ast_numeric_types <- c("INT32", "INT64", "FLOAT64")
 #' compatible-but-different types are recorded in `join_spec$key_casts`:
 #' `idx` (position in the spec), `type` (the common type), `cast_left`/
 #' `cast_right`, the source types, and a factor side's levels (needed to
-#' decode it to `STRING`). Non-equi pairs are only validated: the expression
-#' evaluator casts their operands itself.
+#' decode it to `STRING`). Non-equi numeric pairs are only validated (the
+#' expression evaluator widens their operands itself); a rolling INT32/FLOAT64
+#' pair is recorded (it is searched, not evaluated) and so is a non-equi
+#' STRING pair (`string_codes = TRUE`, see below).
 #'
 #' `lower_join()` applies the plan; `build_join_output_info()` reads it for
 #' the merged key's output type.
@@ -502,11 +516,26 @@ resolve_join_key_types <- function(x_schema, y_schema, join_spec) {
   lt <- unname(x_schema$types[match(join_spec$left, x_schema$names)])
   rt <- unname(y_schema$types[match(join_spec$right, y_schema$names)])
   mismatch <- which(lt != rt)
+
+  # Non-equi STRING pairs (F24): cudf's AST evaluator can't compare strings,
+  # so both sides are replaced by INT32 codes of one shared order
+  # (`apply_join_key_casts()`). A closest() pair is searched on the strings
+  # themselves and needs no codes.
+  casts <- list()
+  for (i in which(lt == "STRING" & rt == "STRING" & join_spec$op != "==" &
+                  join_spec$filter == "none")) {
+    casts[[length(casts) + 1L]] <- list(
+      idx = i, type = "INT32", left_type = "STRING", right_type = "STRING",
+      cast_left = TRUE, cast_right = TRUE, string_codes = TRUE
+    )
+  }
   if (length(mismatch) == 0L) {
+    if (length(casts) > 0L) {
+      join_spec$key_casts <- casts
+    }
     return(join_spec)
   }
 
-  casts <- list()
   for (i in mismatch) {
     fx <- identical(lt[i], "DICTIONARY32")
     fy <- identical(rt[i], "DICTIONARY32")
@@ -517,8 +546,9 @@ resolve_join_key_types <- function(x_schema, y_schema, join_spec) {
       abort_join_incompatible_type(join_spec$left[i], join_spec$right[i],
                                    lt[i], rt[i], lvls_x, lvls_y)
     }
-    if (join_spec$op[i] != "==" && lt[i] %in% join_ast_numeric_types &&
-        rt[i] %in% join_ast_numeric_types) {
+    # (A rolling pair is searched, not evaluated as an AST: it needs the copy.)
+    if (join_spec$op[i] != "==" && join_spec$filter[i] == "none" &&
+        lt[i] %in% join_ast_numeric_types && rt[i] %in% join_ast_numeric_types) {
       next
     }
     casts[[length(casts) + 1L]] <- list(
@@ -1078,12 +1108,12 @@ validate_join_suffix <- function(suffix) {
 #
 # `diag` (`list(left_multi_first, right_multi_first, left_unmatched_first,
 # right_unmatched_first)`, all 0-based C++ row indices with -1 meaning "no
-# such row") is computed by `join_map_stats()` on the RAW (pre-`multiple=`
-# -filter) sanitized join maps -- deliberately, since dplyr's own
-# `relationship=`/`unmatched=` checks fire on the raw match cardinality
-# regardless of `multiple=` (empirically verified: `relationship =
-# "one-to-one"` still errors on a genuine duplicate even when `multiple =
-# "first"` would have resolved it down to one match). "x" always means
+# such row") is computed by `join_map_stats()` on the sanitized join maps
+# AFTER the `multiple=` filter (vctrs resolves `multiple` first, so
+# `relationship=` and the "remaining y rows" of `unmatched = "error"` see
+# only the matches `multiple` kept; empirically verified: with y = (1, 1) and
+# x = 1, `multiple = "first"` still fails `unmatched = "error"` for y row 2
+# and passes `relationship = "many-to-one"`). "x" always means
 # `ast$left`/left_map and "y" always means `ast$right`/right_map here,
 # regardless of `join_type` -- dplyr's own `join_rows()` never swaps the
 # x/y ("needles"/"haystack") roles based on join type either, including for
@@ -1275,8 +1305,8 @@ resolve_unmatched_sides <- function(unmatched) {
 #'
 #' The Phase 7 J5 activation point: called from `lower_join()` (R/lower.R)
 #' immediately after a mutating join (`left`/`inner`/`full`/`right`) returns
-#' its `list(ptr, diag)` result, using the RAW (pre-`multiple=`-filter)
-#' `diag` from `join_map_stats()` (`src/ops_join.cpp`). Never called for
+#' its `list(ptr, diag)` result, using the `diag` from `join_map_stats()`
+#' (`src/ops_join.cpp`), computed after the `multiple=` filter. Never called for
 #' `semi`/`anti`/`cross` -- those join types have no `multiple=`/
 #' `unmatched=`/`relationship=` in dplyr's own signatures at all.
 #'
@@ -1318,7 +1348,7 @@ check_join_cardinality <- function(diag, join_type, multiple, relationship, unma
 
   # ---- 1. multiplicity: relationship= (if set) or the auto many-to-many
   # warning (relationship = NULL, multiple = "all" only) -- always evaluated
-  # on the RAW match set, ahead of any unmatched= check below.
+  # ahead of any unmatched= check below.
   if (!is.null(relationship)) {
     switch(relationship,
       "one-to-one" = check_relationship_one_to_one(left_multi, right_multi),
@@ -1377,9 +1407,21 @@ join_route_to_fallback <- function(verb_name, verb_fn, x, y, args, user_env = NU
   if (mute) {
     warn_join_cross_by(user_env)
   }
-  gpu_fallback(verb_name, x, function(tbl) {
+  run <- function(tbl) {
     mute_cross_by_warning(rlang::inject(verb_fn(tbl, y_tbl, !!!args)), mute)
-  })
+  }
+  # dplyr's advisory many-to-many warning (relationship = NULL) fires only for
+  # a call it sees as direct (`is_direct(caller_env())`, R/join-rows.R). When
+  # the user's call was direct, run dplyr from a frame whose top environment
+  # is the global env instead of cuplyr's namespace, so the warning survives
+  # the fallback (e.g. `multiple = "warning"` on an equi join).
+  if (!is.null(user_env) && join_is_direct(user_env)) {
+    environment(run) <- rlang::env(
+      globalenv(), verb_fn = verb_fn, y_tbl = y_tbl, args = args, mute = mute,
+      mute_cross_by_warning = mute_cross_by_warning
+    )
+  }
+  gpu_fallback(verb_name, x, run)
 }
 
 #' Evaluate `expr`, muting dplyr's `by = character()` deprecation warning
@@ -1430,6 +1472,14 @@ mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
     if (!is.null(unmatched)) args$unmatched <- unmatched
     args$relationship <- relationship
     join_route_to_fallback(verb, verb_fn, x, y, args, user_env = user_env)
+  }
+
+  # `multiple = "error"`/`"warning"` are undocumented (defunct in dplyr's NEWS)
+  # but still reach vctrs and work: dplyr's CPU path is exact for every join
+  # shape, so the native code only ever sees all/any/first/last.
+  if (is.character(multiple) && length(multiple) == 1 &&
+      multiple %in% c("error", "warning")) {
+    return(fallback_args())
   }
 
   if (!join_by_natively_supported(by, x, y)) {
@@ -1542,9 +1592,11 @@ filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
 #'   supports both equi conditions (`a`, `a == b`) and non-equi conditions
 #'   (`>=`, `>`, `<=`, `<`, and the `between()`/`within()`/`overlaps()`
 #'   helpers that pre-expand to pairs of them) -- all GPU-native (Phase 7
-#'   J6/J7). `join_by(closest(...))`/rolling joins, and any non-equi
-#'   condition comparing `STRING` columns, are not GPU-native and
-#'   transparently fall back to CPU evaluation (a `cuplyr.fallback`
+#'   J6/J7). A `closest()` rolling condition (one per call, next to any
+#'   number of `==` conditions) and non-equi conditions comparing two `STRING`
+#'   columns are GPU-native too (F24). Two `closest()` conditions, `closest()`
+#'   next to another inequality, and factor/logical/Date-vs-POSIXct rolling
+#'   keys transparently fall back to CPU evaluation (a `cuplyr.fallback`
 #'   notification fires; see `options(cuplyr.fallback = )`), still with a
 #'   result that matches `dplyr` exactly.
 #' @param copy Whether to upload a non-`tbl_gpu` `y` via `tbl_gpu()`.
@@ -1571,9 +1623,11 @@ filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
 #'   including another `NA` (`cudf::null_equality::UNEQUAL` on the GPU).
 #' @param multiple How to resolve a left/right row matching more than one row
 #'   on the other side: `"all"` (default, every match kept), `"any"`,
-#'   `"first"`, or `"last"`. Filtering runs device-side against the
+#'   `"first"`, or `"last"` (the undocumented `"error"` and `"warning"` run on
+#'   the CPU fallback). Filtering runs device-side against the
 #'   already-sorted join maps (Phase 7 J5) -- `"all"`, the default used by
-#'   every performance benchmark, costs nothing extra.
+#'   every performance benchmark, costs nothing extra. Under right/full joins
+#'   a y row that no kept pair uses is listed once as unmatched.
 #' @param unmatched How to handle rows with no match: `"drop"` (default) or
 #'   `"error"` (raises dplyr's exact `dplyr_error_join_matches_nothing`/
 #'   `dplyr_error_join_matches_remaining` conditions, including the
@@ -1606,11 +1660,22 @@ filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
 #' - `na_matches=`, `multiple=`, `unmatched=`, `relationship=` are fully
 #'   GPU-native/checked, with dplyr's exact condition classes and message
 #'   text (Phase 7 J1/J5).
+#' - `join_by(closest(...))` rolling joins (F24): exactly one `closest()`
+#'   condition (`>=`, `>`, `<=`, `<`) plus `==` conditions, on integer,
+#'   double, Date or POSIXct (or `STRING`) rolling keys: y is sorted by
+#'   (equi keys, rolling key) and each x row finds its closest rows by binary
+#'   search (`gpu_rolling_join()`), so a rolling join never materialises the
+#'   inequality join. Every y row tied at the closest value is returned, and
+#'   `multiple=`/`unmatched=`/`relationship=` act on those matches, as in
+#'   dplyr.
+#' - A non-equi condition comparing two `STRING` columns (F24): both sides
+#'   are replaced by INT32 codes of one shared bytewise (C-locale) order
+#'   before the AST evaluator runs.
 #'
 #' ## Falls back to CPU (transparent, notified)
-#' - `join_by(closest(...))` / any rolling join.
-#' - A non-equi condition comparing `STRING` columns (cudf's AST comparison
-#'   evaluator has no string support; equi `STRING` joins are unaffected).
+#' - Two `closest()` conditions, `closest()` next to another inequality, and
+#'   rolling keys that are factors, logicals or a Date against a POSIXct.
+#' - A non-equi condition comparing a `STRING` with a non-`STRING` column.
 #' - `suffix = c("", ...)` when it would still produce a genuine duplicate
 #'   output column name.
 #' - `nest_join()` stays CPU-only entirely (needs list-column support,
@@ -1688,8 +1753,9 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
 #' `NULL`, a character vector, or a [dplyr::join_by()] spec, including
 #' non-equi conditions (`>=`, `>`, `<=`, `<`, `between()`/`within()`/
 #' `overlaps()`) via `cudf::conditional_join`/`mixed_join` (Phase 7 J7).
-#' `join_by(closest(...))`/rolling joins, and non-equi conditions over
-#' `STRING` columns, fall back to CPU evaluation transparently (with a
+#' A single `closest()` condition is native (it asks whether an x row has a
+#' closest match), as are non-equi conditions over two `STRING` columns;
+#' shapes outside that fall back to CPU evaluation transparently (with a
 #' `cuplyr.fallback` notification), same as the mutating joins.
 #'
 #' @param x,y `tbl_gpu` objects to join. If `y` is not a `tbl_gpu`, set
@@ -1789,7 +1855,7 @@ cross_join.tbl_gpu <- function(x, y, ..., copy = FALSE, suffix = c(".x", ".y")) 
   # No keys at all -- an empty spec, `keep = TRUE` so build_join_output_info()
   # suffixes every common name (see roxygen above).
   join_spec <- list(left = character(0), right = character(0),
-                    op = character(0), filter = "none")
+                    op = character(0), filter = character(0))
 
   # Phase 7 J6: the same `suffix = c("", ...)` degenerate name-collision
   # case the mutating joins guard against (see `join_output_would_collide()`)
