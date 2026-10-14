@@ -161,7 +161,10 @@ collect_other_side <- function(y) {
 }
 
 # =============================================================================
-# reframe() / rowwise()
+# rowwise()
+#
+# reframe() moved to R/reframe.R (native for the quantile()/range()/literal
+# shapes, F22; the rest is the whole-call fallback there).
 #
 # distinct() moved to R/distinct.R (GPU-native, Phase 3) -- see ast_distinct
 # (R/ast.R), lower_distinct() (R/lower.R), gpu_distinct() (src/ops_distinct.cpp).
@@ -200,33 +203,6 @@ collect_other_side <- function(y) {
 #' @name fallback-verbs
 #' @keywords internal
 NULL
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr reframe
-#
-# Phase 6, task 4 DECISION (verified empirically against dplyr 1.2.1):
-# reframe() returns an ARBITRARY number of rows per group (e.g.
-# `reframe(x = range(x))` returns 2 rows/group, `reframe(q = quantile(x,
-# c(.25, .5, .75)))` returns 3) -- a fundamentally different output shape
-# from summarise()'s fixed one-row-per-group contract, which
-# gpu_summarise()'s single groupby::aggregate() call (and every AST/schema
-# assumption built on top of it) is not designed to produce. Building this
-# GPU-natively needs real per-group variable-length output (a
-# `collect_list()`-style aggregation + explode, or equivalent), which needs
-# list-column support cuplyr doesn't have until Phase 11 -- deliberately
-# staying on the CPU fallback below rather than special-casing a narrow
-# "common case" (e.g. a multi-probability quantile()), since that would
-# still need the same variable-row-count machinery in miniature and
-# wouldn't generalize to reframe()'s actual contract (any function
-# returning any number of values per group).
-reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
-  dots <- rlang::enquos(...)
-  by_quo <- rlang::enquo(.by)
-  gpu_fallback("reframe", .data, function(tbl) {
-    rlang::inject(dplyr::reframe(tbl, !!!dots, .by = !!by_quo))
-  })
-}
 
 #' @rdname fallback-verbs
 #' @export

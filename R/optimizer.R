@@ -332,6 +332,11 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       ast$input <- push_down_projections(ast$input, needed, ast$groups)
       ast
     },
+    "reframe" = {
+      # reads every column of its (wide) input; nothing is pruned below it
+      ast$input <- push_down_projections(ast$input, infer_schema(ast$input)$names)
+      ast
+    },
     "window" = {
       spec_cols <- unique(unlist(
         lapply(ast$specs, function(s) c(s$value_col, s$order_cols)),
@@ -593,6 +598,10 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
       sort_cols <- vapply(ast$sort_specs, `[[`, character(1), "col_name")
       needed <- union(union(required_cols, sort_cols), ast$groups)
       ast$input <- prune_dead_columns(ast$input, needed, group_cols)
+      ast
+    },
+    "reframe" = {
+      ast$input <- prune_dead_columns(ast$input, infer_schema(ast$input)$names)
       ast
     },
     "window" = {

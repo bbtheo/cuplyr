@@ -26,6 +26,7 @@ lower_and_execute <- function(ast, source_ptr) {
     "slice" = lower_slice(ast, source_ptr),
     "rename" = lower_rename(ast, source_ptr),
     "window" = lower_window(ast, source_ptr),
+    "reframe" = lower_reframe(ast, source_ptr),
     "barrier" = lower_and_execute(ast$input, source_ptr),
     stop("Unknown AST node type: ", ast$type, call. = FALSE)
   )
@@ -284,6 +285,39 @@ lower_summarise <- function(ast, source_ptr) {
   }
 
   result
+}
+
+#' Lower reframe node
+#'
+#' Reshapes the wide one-row-per-group table to `k` rows per group on the
+#' device (`gpu_reframe_expand()`, src/ops_reframe.cpp). A literal output is
+#' uploaded as a tiny table and tiled there.
+#' @keywords internal
+lower_reframe <- function(ast, source_ptr) {
+  input_ptr <- lower_and_execute(ast$input, source_ptr)
+  input_schema <- infer_schema(ast$input)
+  k <- ast$k
+
+  # No groups at all (a grouped 0-row input) and a multi-row result: dplyr
+  # can't recycle the size-k result to the 0 rows of the keys.
+  if (k > 1L && gpu_dim(input_ptr)[[1]] == 0L) {
+    vctrs::vec_recycle(seq_len(k), 0L, x_arg = ast$first_k_name)
+  }
+
+  lit_ptrs <- list()
+  lit_idx <- rep(NA_integer_, length(ast$outputs))
+  src <- vector("list", length(ast$outputs))
+  for (i in seq_along(ast$outputs)) {
+    o <- ast$outputs[[i]]
+    if (identical(o$kind, "literal")) {
+      lit_ptrs[[length(lit_ptrs) + 1L]] <- tbl_gpu(tibble::tibble(v = o$value), lazy = FALSE)$ptr
+      lit_idx[[i]] <- length(lit_ptrs)
+      src[[i]] <- integer()
+    } else {
+      src[[i]] <- match(o$src, input_schema$names) - 1L
+    }
+  }
+  gpu_reframe_expand(input_ptr, src, lit_ptrs, lit_idx, k)
 }
 
 # F34/F42: the loud failure for an integer/logical sum() that left R's integer

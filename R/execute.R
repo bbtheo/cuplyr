@@ -374,6 +374,10 @@ propagate_groups <- function(node, groups, schema) {
   if (identical(node$type, "summarise")) {
     return(intersect(node$result_groups, schema$names))
   }
+  # reframe() always returns an ungrouped table
+  if (identical(node$type, "reframe")) {
+    return(character())
+  }
 
   if (identical(node$type, "rename")) {
     idx <- match(groups, node$old_names)

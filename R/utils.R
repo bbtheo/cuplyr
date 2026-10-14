@@ -58,6 +58,14 @@ gpu_physical_type <- function(type) {
   ifelse(type == "DICTIONARY32", "INT32", type)
 }
 
+# Does the session order strings as the GPU does (bytes)? Only the C and
+# POSIX collations; R sorts "a" before "B" under en_US.UTF-8 and C.UTF-8.
+# (F19 has the same test as colwise_c_collation() on its own branch.)
+# @keywords internal
+session_collation_is_c <- function() {
+  Sys.getlocale("LC_COLLATE") %in% c("C", "POSIX")
+}
+
 # Column index lookup (0-based for C++)
 col_index <- function(x, name) {
   idx <- match(name, x$schema$names)
@@ -81,7 +89,9 @@ col_index <- function(x, name) {
 # it is tibble's own error class, and `dplyr:::mutate_error` (a wrong-size vector
 # literal in lower_mutate(), raised by dplyr itself), and
 # `cuplyr_error_sum_overflow` (F42: an integer window sum() left the integer
-# range; eager mutate() catches it to rerun the call on the CPU). No other
+# range; eager mutate() catches it to rerun the call on the CPU), and
+# `vctrs_error_incompatible_size` (F22: a multi-row reframe() result on a table
+# with no groups, vctrs' own "Can't recycle" condition). No other
 # caller raises a classed condition from inside `lower_and_execute()`, so this
 # is a no-op for every other verb.
 wrap_gpu_call <- function(op_name, expr) {
@@ -89,7 +99,7 @@ wrap_gpu_call <- function(op_name, expr) {
     expr,
     error = function(e) {
       if (inherits(e, c("dplyr_error_join", "vctrs_error_subscript", "dplyr:::mutate_error",
-                         "cuplyr_error_sum_overflow"))) {
+                         "cuplyr_error_sum_overflow", "vctrs_error_incompatible_size"))) {
         stop(e)
       }
       msg <- conditionMessage(e)

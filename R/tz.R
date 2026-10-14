@@ -241,6 +241,14 @@ propagate_tz <- function(node, input_schema, new_schema) {
     return(tz_from_positions(new_schema$names, new_schema$types,
                              c(by_pos, unname(spec_tz))))
   }
+  if (identical(node$type, "reframe")) {
+    # each output takes the zone of its (first) wide source column; a literal
+    # is never a POSIXct
+    out <- vapply(node$outputs, function(o) {
+      if (identical(o$kind, "literal")) "UTC" else by_pos[[match(o$src[[1]], nms)]]
+    }, character(1))
+    return(tz_from_positions(new_schema$names, new_schema$types, out))
+  }
   if (identical(node$type, "summarise")) {
     key_tz <- tz_localize(by_pos[match(node$groups, nms)])
     agg_tz <- vapply(node$aggregations, function(agg) {

@@ -115,6 +115,26 @@ ast_summarise <- function(input, aggregations, groups, result_groups = character
             sort_groups = sort_groups)
 }
 
+#' Create a reframe AST node
+#'
+#' The LONG step of a native `reframe()` (F22, `R/reframe.R`): reshapes the
+#' wide one-row-per-group table `input` into `k` rows per group.
+#'
+#' @param input Input AST node (the wide table)
+#' @param outputs The output columns in order, each `list(name, kind, ...)`:
+#'   `kind = "rep"` (`src` = one wide column, every row repeated `k` times; the
+#'   group keys and size-1 results), `"interleave"` (`src` = `k` wide columns
+#'   interleaved row by row; a size-`k` result) or `"literal"` (`value`, an R
+#'   vector of length 1 or `k`, tiled)
+#' @param k Rows per group
+#' @param first_k_name Name of the first output of size `k` (NA when `k == 1`):
+#'   the column in dplyr's "Can't recycle" error for an empty table
+#' @return An ast_reframe node
+#' @keywords internal
+ast_reframe <- function(input, outputs, k, first_k_name = NA_character_) {
+  ast_node("reframe", input = input, outputs = outputs, k = k, first_k_name = first_k_name)
+}
+
 #' Create a barrier AST node (optimization fence)
 #'
 #' @param input Input AST node
@@ -689,6 +709,21 @@ summarise_output_index <- function(groups, agg_names) {
 }
 
 #' @export
+infer_schema.ast_reframe <- function(node) {
+  input_schema <- infer_schema(node$input)
+  types <- vapply(node$outputs, function(o) {
+    switch(o$kind,
+      literal = gpu_type_from_r(o$value),
+      {
+        src <- unname(input_schema$types[match(o$src, input_schema$names)])
+        if (length(unique(src)) == 1L) src[[1]] else "FLOAT64"  # INT32 vs FLOAT64 drift
+      }
+    )
+  }, character(1))
+  list(names = vapply(node$outputs, `[[`, character(1), "name"), types = types)
+}
+
+#' @export
 infer_schema.ast_join <- function(node) {
   # *_full(): the children's factor levels and POSIXct zones (F32) are
   # metadata that plain infer_schema() drops above a source.
@@ -825,7 +860,8 @@ is_opaque_expression <- function(expr_text) {
 #' @keywords internal
 is_barrier <- function(node) {
   if (is.null(node)) return(FALSE)
-  node$type %in% c("arrange", "barrier", "summarise", "distinct", "slice", "rename", "window") ||
+  node$type %in% c("arrange", "barrier", "summarise", "distinct", "slice", "rename", "window",
+                   "reframe") ||
     (identical(node$type, "select") && !is.null(node$positions))
 }
 
@@ -987,6 +1023,9 @@ print.ast_node <- function(x, ..., indent = 0) {
       pairs <- paste(x$old_names, "->", x$new_names, collapse = ", ")
       cat(" [", pairs, "]", sep = "")
     },
+    "reframe" = {
+      cat(" [k=", x$k, ", ", length(x$outputs), " cols]", sep = "")
+    },
     "window" = {
       cat(" [", length(x$specs), " specs: ", describe_window_specs(x$specs),
           "; group_cols=", paste(x$group_cols, collapse = ","), "]", sep = "")
@@ -1030,6 +1069,7 @@ ast_to_string <- function(node) {
     "slice" = paste0("slice[", node$mode, "; ", describe_slice_detail(node), "]"),
     "rename" = paste0("rename[", paste(node$old_names, "->", node$new_names, collapse = ","), "]"),
     "window" = paste0("window[", describe_window_specs(node$specs), "]"),
+    "reframe" = paste0("reframe[k=", node$k, "]"),
     node$type
   )
 

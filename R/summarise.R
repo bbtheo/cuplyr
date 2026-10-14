@@ -306,6 +306,19 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   summarise_impl(.data, dots, .groups, by_quo, by_cols, by_given, caller_env)
 }
 
+# Internal: the notice for a summarise step that computes the pending lazy ops
+# early (a temp column, a window argument, an integer min()/max()). It is
+# reported like a CPU fallback (`cuplyr.fallback`), except inside the wide step
+# of a native reframe() (`with_reframe_wide()`), whose caller never wanted
+# laziness there: the wide table is computed right away anyway.
+# @keywords internal
+notify_materialization <- function(verb, expr_text) {
+  if (!isTRUE(reframe_state$wide)) {
+    cuplyr_fallback_notify(verb, expr_text)
+  }
+  invisible(NULL)
+}
+
 # Internal: summarise_impl() with `.by=` resolved from its quosure.
 # @keywords internal
 summarise_impl_dots <- function(.data, dots, .groups, by_quo, caller_env) {
@@ -1001,7 +1014,7 @@ summarise_run_now <- function(.data, aggregations, retained_groups, sort_groups 
   was_lazy <- identical(.data$exec_mode, "lazy")
 
   if (was_lazy && has_pending_ops(.data)) {
-    cuplyr_fallback_notify("summarise", paste0(
+    notify_materialization("summarise", paste0(
       "integer min()/max() (result type depends on the data): ",
       paste(vapply(aggregations, function(a) a$output_col, character(1)), collapse = ", ")
     ))
@@ -1385,6 +1398,7 @@ preprocess_agg_expressions <- function(.data, dots) {
   working_data <- .data
   new_dots <- vector("list", length(dots))
   names(new_dots) <- names(dots)
+  temp_cols <- list()
 
   for (i in seq_along(dots)) {
     quo <- dots[[i]]
@@ -1429,6 +1443,30 @@ preprocess_agg_expressions <- function(.data, dots) {
       next
     }
 
+    # any()/all() (Phase 6, task 6.2): keep a BOOL8-inferred sub-expression
+    # (e.g. `any(x > 3)`) as BOOL8 rather than the sum()-oriented INT32
+    # promotion every other aggregation wants -- see create_temp_column()'s
+    # own `keep_bool` docs.
+    keep_bool <- decomposed$fn_name %in% c("any", "all")
+
+    # F22: dots that aggregate the same expression (reframe()'s k quantiles
+    # of `x * 2` or `cumsum(x)`) share one temp column: the parsed IR already
+    # holds any value the expression took from the environment, so equal IR is
+    # an equal column. A window argument's column depends on the IR plus
+    # working_data's groups and row order, which no dot changes. Each temp
+    # column (and each window stage) copies the whole table, so k of them cost
+    # k times the table.
+    if (!is.null(ir)) {
+      shared <- Find(function(t) identical(t$keep_bool, keep_bool) && identical(t$ir, ir), temp_cols)
+      if (!is.null(shared)) {
+        new_dots[[i]] <- rlang::new_quosure(
+          as.call(list(as.name(decomposed$fn_name), as.name(shared$name))),
+          rlang::base_env()
+        )
+        next
+      }
+    }
+
     # Phase 6, task 4: windows-inside-summarise (`sum(cumsum(v))`,
     # `last(cumsum(v))`, ...) -- checked BEFORE the ir_is_const() check below,
     # since a window call with no column argument at all (e.g. bare
@@ -1438,11 +1476,13 @@ preprocess_agg_expressions <- function(.data, dots) {
     if (!is.null(ir) && ir_has_window(ir)) {
       if (has_pending_ops(working_data)) {
         working_data <- compute(working_data)
-        cuplyr_fallback_notify("summarise", rlang::quo_text(quo))
+        notify_materialization("summarise", rlang::quo_text(quo))
       }
 
       resolved <- resolve_agg_window_arg(working_data, ir, decomposed$fn_name, i)
       working_data <- resolved$data
+      temp_cols[[length(temp_cols) + 1L]] <- list(ir = ir, keep_bool = keep_bool,
+                                                  name = resolved$col_name)
 
       new_dots[[i]] <- rlang::new_quosure(
         as.call(list(as.name(decomposed$fn_name), as.name(resolved$col_name))),
@@ -1464,18 +1504,14 @@ preprocess_agg_expressions <- function(.data, dots) {
     # Materialize before building the temp column if lazy ops are pending.
     if (has_pending_ops(working_data)) {
       working_data <- compute(working_data)
-      cuplyr_fallback_notify("summarise", rlang::quo_text(quo))
+      notify_materialization("summarise", rlang::quo_text(quo))
     }
 
     # Create a temporary column name (index-based, so it stays unique even
     # though not every dot ends up needing one).
     temp_col_name <- paste0(".temp_agg_", i)
+    temp_cols[[length(temp_cols) + 1L]] <- list(ir = ir, keep_bool = keep_bool, name = temp_col_name)
 
-    # any()/all() (Phase 6, task 6.2): keep a BOOL8-inferred sub-expression
-    # (e.g. `any(x > 3)`) as BOOL8 rather than the sum()-oriented INT32
-    # promotion every other aggregation wants -- see create_temp_column()'s
-    # own `keep_bool` docs.
-    keep_bool <- decomposed$fn_name %in% c("any", "all")
     working_data <- create_temp_column(working_data, temp_col_name, ir, keep_bool = keep_bool)
 
     # Create a new quosure with the temp column name, e.g. `sum(.temp_agg_3)`.

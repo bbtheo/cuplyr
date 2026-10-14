@@ -36,7 +36,7 @@ fallback_sweep_pipelines <- function() {
     # this fallback sweep. reframe() takes over as this file's vehicle for
     # the cross-cutting fallback behaviors below (materialization/exec_mode,
     # factor round-trip, the cuplyr.fallback option).
-    reframe = list(fn = function(d) dplyr::reframe(d, mx = max(x), .by = g), arrange_by = "g"),
+    reframe = list(fn = function(d) dplyr::reframe(d, mx = unique(x), .by = g), arrange_by = "g"),
     rowwise = list(fn = function(d) dplyr::rowwise(d)),
     # slice()/slice_head()/slice_tail() are GPU-native for ungrouped input
     # (Phase 3 task 2, see R/slice.R and test-dplyr-slice.R for that
@@ -419,13 +419,13 @@ test_that("fallback verbs materialize pending lazy ops and restore lazy exec_mod
 
   # transmute() is GPU-native now (Phase 3 task 4, R/mutate.R) -- reframe()
   # takes over as this test's fallback vehicle.
-  result <- lazy_gt |> dplyr::reframe(z = max(x), .by = g)
+  result <- lazy_gt |> dplyr::reframe(z = unique(x), .by = g)
 
   expect_true(is_tbl_gpu(result))
   expect_true(is_lazy(result))
   expect_false(has_pending_ops(result))
 
-  oracle <- dplyr::reframe(dplyr::filter(df, x > 10), z = max(x), .by = g)
+  oracle <- dplyr::reframe(dplyr::filter(df, x > 10), z = unique(x), .by = g)
   expect_equal(
     dplyr::arrange(collect(result), z),
     dplyr::arrange(oracle, z)
@@ -437,7 +437,7 @@ test_that("eager fallback input stays eager after re-upload", {
   df <- fallback_df()
   gt <- tbl_gpu(df, lazy = FALSE)
 
-  result <- gt |> dplyr::reframe(z = max(x), .by = g)
+  result <- gt |> dplyr::reframe(z = unique(x), .by = g)
 
   expect_true(is_tbl_gpu(result))
   expect_false(is_lazy(result))
@@ -470,7 +470,7 @@ test_that("options(cuplyr.fallback = 'warn') warns for a fallback verb", {
   gt <- tbl_gpu(fallback_df())
 
   expect_warning(
-    gt |> dplyr::reframe(z = max(x), .by = g),
+    gt |> dplyr::reframe(z = unique(x), .by = g),
     "reframe.*fell back to CPU evaluation"
   )
 })
@@ -481,7 +481,7 @@ test_that("options(cuplyr.fallback = 'error') stops for a fallback verb", {
   gt <- tbl_gpu(fallback_df())
 
   expect_error(
-    gt |> dplyr::reframe(z = max(x), .by = g),
+    gt |> dplyr::reframe(z = unique(x), .by = g),
     "reframe.*fell back to CPU evaluation"
   )
 })
@@ -491,7 +491,7 @@ test_that("fallback verbs are silent by default", {
   withr::local_options(cuplyr.fallback = NULL)
   gt <- tbl_gpu(fallback_df())
 
-  expect_no_warning(gt |> dplyr::reframe(z = max(x), .by = g))
+  expect_no_warning(gt |> dplyr::reframe(z = unique(x), .by = g))
 })
 
 test_that("GPU-native verbs never trigger a fallback notification", {

@@ -14,12 +14,14 @@
 #include <cudf/reduction.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/table/table.hpp>
+#include <cudf/transform.hpp>
 #include <cudf/unary.hpp>
 #include <rmm/device_buffer.hpp>
 #include <rmm/mr/per_device_resource.hpp>
 
 #include <cmath>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -387,6 +389,169 @@ std::unique_ptr<cudf::column> empty_input_reduction(const std::string& agg_type,
     return null_of(in_type);
 }
 
+bool is_float_type(cudf::type_id id) {
+    return id == cudf::type_id::FLOAT64 || id == cudf::type_id::FLOAT32;
+}
+
+// F22: what gpu_summarise() must know about a float value column. NaN only
+// arrives computed on the GPU (`0 / 0`, `Inf - Inf`; an upload turns R's NaN
+// into null), and R counts it as missing: na.rm = TRUE drops it, quantile()
+// without it errors, median() is NA. cudf treats it as a number (MIN/MAX skip
+// it, quantiles sort it last), so such aggregations read `nan_nulled`, the
+// column with every NaN made null. One sum reduction settles it for almost
+// every column: a NaN makes the sum NaN, so a finite sum means no NaN; only a
+// non-finite one (or an overflow) runs the exact check.
+struct FloatColumnInfo {
+    bool has_nan = false;
+    std::unique_ptr<cudf::column> nan_nulled;
+};
+
+FloatColumnInfo inspect_float_column(cudf::column_view col) {
+    FloatColumnInfo info;
+    if (col.size() == 0 || col.null_count() == col.size()) return info;
+    auto total = cudf::reduce(col, *cudf::make_sum_aggregation<cudf::reduce_aggregation>(),
+                              cudf::data_type{cudf::type_id::FLOAT64});
+    auto* sum = static_cast<cudf::numeric_scalar<double>*>(total.get());
+    if (!sum->is_valid() || std::isfinite(sum->value())) return info;
+
+    auto nan_flags = cudf::is_nan(col);
+    auto any_nan = cudf::reduce(nan_flags->view(),
+                                *cudf::make_any_aggregation<cudf::reduce_aggregation>(),
+                                cudf::data_type{cudf::type_id::BOOL8});
+    auto* flag = static_cast<cudf::numeric_scalar<bool>*>(any_nan.get());
+    info.has_nan = flag->is_valid() && flag->value();
+    if (info.has_nan) {
+        info.nan_nulled = std::make_unique<cudf::column>(col);
+        auto mask = cudf::nans_to_nulls(col);
+        info.nan_nulled->set_null_mask(std::move(*mask.first), mask.second);
+    }
+    return info;
+}
+
+// Does this aggregation read a float column with NaN as missing? Always under
+// na.rm = TRUE. Under na.rm = FALSE R gives NaN (median() NA) where cudf's
+// MIN/MAX/quantile would skip or sort past the NaN, so those read it as null
+// too (NA, the accepted NaN-as-NA divergence; quantile() then errors like R).
+// sum/mean/sd/var already give NaN from cudf, and n_distinct/first/last/nth
+// keep the value itself, so they read the column as is.
+bool agg_reads_nan_as_null(const std::string& agg_type, bool na_rm) {
+    if (agg_type == "n") return false;
+    return na_rm || agg_type == "min" || agg_type == "max" || agg_type == "median" ||
+           agg_type == "quantile";
+}
+
+// F22: the QUANTILE aggregations of one gpu_summarise() call (median() of a
+// float column is one too, at 0.5). All the probabilities asked of the same
+// value column ride in ONE groupby request, so cudf sorts that column once
+// however many there are (a reframe() of 101 percentiles is 101 aggregations
+// of one column). Each aggregation is R's type 7, which cudf's LINEAR is not
+// exactly: LINEAR interpolates (1 - f) * lo + f * hi even when f == 0 (0 * Inf
+// = NaN, and 0 * 1e300 next to a far neighbour is noise), where R's
+// stats:::quantile.default takes "x[lo]" at a whole position. And R's index
+// 1 + (n - 1) * p is computed in two roundings, so it can be exactly whole where
+// cudf's position p * (n - 1) keeps a 1e-16 fraction. So every quantile also
+// asks for LOWER and HIGHER (and its request counts the valid values once), and
+// take() recomputes R's index: a whole one names the element itself, otherwise
+// the lower value is used wherever LOWER and HIGHER agree.
+struct QuantileRequests {
+    struct Slot { int req = -1; int pos = -1; int lo = -1; int hi = -1; int cnt = -1; double p = 0; };
+    std::vector<Slot> slot;
+    std::map<int, int> request_of_key;
+    std::map<int, int> count_of_key;  // position of COUNT_VALID in the request
+    // max(count - 1, 0) per request, shared by every probability (take()).
+    std::map<int, std::unique_ptr<cudf::column>> n1_of_request;
+
+    explicit QuantileRequests(int num_aggs) : slot(num_aggs) {}
+
+    // `key` identifies the value column (equal keys share a request).
+    void add(std::vector<cudf::groupby::aggregation_request>& requests, int i, int key,
+             cudf::column_view values, double p) {
+        auto found = request_of_key.find(key);
+        int r;
+        if (found == request_of_key.end()) {
+            r = static_cast<int>(requests.size());
+            requests.emplace_back();
+            requests[r].values = values;
+            request_of_key[key] = r;
+            count_of_key[key] = static_cast<int>(requests[r].aggregations.size());
+            requests[r].aggregations.push_back(
+                cudf::make_count_aggregation<cudf::groupby_aggregation>(
+                    cudf::null_policy::EXCLUDE));
+        } else {
+            r = found->second;
+        }
+        auto& aggs = requests[r].aggregations;
+        Slot s;
+        s.req = r;
+        s.p = p;
+        s.pos = static_cast<int>(aggs.size());
+        aggs.push_back(cudf::make_quantile_aggregation<cudf::groupby_aggregation>(
+            {p}, cudf::interpolation::LINEAR));
+        s.lo = static_cast<int>(aggs.size());
+        aggs.push_back(cudf::make_quantile_aggregation<cudf::groupby_aggregation>(
+            {p}, cudf::interpolation::LOWER));
+        s.hi = static_cast<int>(aggs.size());
+        aggs.push_back(cudf::make_quantile_aggregation<cudf::groupby_aggregation>(
+            {p}, cudf::interpolation::HIGHER));
+        s.cnt = count_of_key.at(key);
+        slot[i] = s;
+    }
+
+    bool has(int i) const { return slot[i].req >= 0; }
+
+    std::unique_ptr<cudf::column> take(std::vector<cudf::groupby::aggregation_result>& results,
+                                       int i) {
+        const Slot& s = slot[i];
+        const cudf::data_type f64{cudf::type_id::FLOAT64};
+        const cudf::data_type b8{cudf::type_id::BOOL8};
+        auto linear = std::move(results[s.req].results[s.pos]);
+        // LOWER/HIGHER keep the value column's type (INT32 for an integer
+        // column), LINEAR is FLOAT64: bring them to the result's type.
+        auto as_result_type = [&](const std::unique_ptr<cudf::column>& c)
+            -> std::unique_ptr<cudf::column> {
+            if (c->type() == linear->type()) return nullptr;
+            return cudf::cast(c->view(), linear->type());
+        };
+        auto lower_cast = as_result_type(results[s.req].results[s.lo]);
+        auto higher_cast = as_result_type(results[s.req].results[s.hi]);
+        cudf::column_view lower = lower_cast ? lower_cast->view() : results[s.req].results[s.lo]->view();
+        cudf::column_view higher = higher_cast ? higher_cast->view() : results[s.req].results[s.hi]->view();
+        // A null (an all-NA group under na.rm = TRUE) compares to null, which
+        // copy_if_else treats as false: it keeps `linear`, itself null there.
+        auto same = cudf::binary_operation(lower, higher, cudf::binary_operator::EQUAL, b8);
+        auto picked = cudf::copy_if_else(lower, linear->view(), same->view());
+
+        // The type-7 index of stats:::quantile.default, each step its own
+        // operation: it rounds the product and the +1 separately, and a fused
+        // expression could contract into an FMA. n1 = max(count - 1, 0) is the
+        // same for every probability of the request.
+        auto& n1 = n1_of_request[s.req];
+        if (!n1) {
+            auto n = cudf::cast(results[s.req].results[s.cnt]->view(), f64);
+            auto minus1 = cudf::binary_operation(n->view(), cudf::numeric_scalar<double>(1.0, true),
+                                                 cudf::binary_operator::SUB, f64);
+            n1 = cudf::binary_operation(minus1->view(), cudf::numeric_scalar<double>(0.0, true),
+                                        cudf::binary_operator::NULL_MAX, f64);
+        }
+        auto prod = cudf::binary_operation(n1->view(), cudf::numeric_scalar<double>(s.p, true),
+                                           cudf::binary_operator::MUL, f64);
+        auto idx = cudf::binary_operation(prod->view(), cudf::numeric_scalar<double>(1.0, true),
+                                          cudf::binary_operator::ADD, f64);
+        auto idx_floor = cudf::unary_operation(idx->view(), cudf::unary_operator::FLOOR);
+        auto whole = cudf::binary_operation(idx->view(), idx_floor->view(),
+                                            cudf::binary_operator::EQUAL, b8);
+        // A whole index names the element at 0-based idx - 1: cudf's LOWER
+        // (floor of the position) where that is floor(prod), else HIGHER.
+        auto pos = cudf::binary_operation(idx->view(), cudf::numeric_scalar<double>(1.0, true),
+                                          cudf::binary_operator::SUB, f64);
+        auto prod_floor = cudf::unary_operation(prod->view(), cudf::unary_operator::FLOOR);
+        auto on_lower = cudf::binary_operation(pos->view(), prod_floor->view(),
+                                               cudf::binary_operator::EQUAL, b8);
+        auto at_index = cudf::copy_if_else(lower, higher, on_lower->view());
+        return cudf::copy_if_else(at_index->view(), picked->view(), whole->view());
+    }
+};
+
 } // namespace cuplyr
 
 // Phase 6, task 6.1 (Fix A): `na_rm` -- one flag per aggregation, same
@@ -507,6 +672,39 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         }
     }
 
+    // F22: the column each aggregation reads (`eff[i]`): agg_col(i), or for a
+    // float column holding GPU-computed NaN its NaN-as-null copy where R counts
+    // NaN as missing (agg_reads_nan_as_null()). Each float column is inspected
+    // at most once per call, and only when some aggregation of it cares.
+    // median() of a float column goes through QuantileRequests at 0.5
+    // (`median_q`): cudf's MEDIAN is LINEAR and gives NaN next to +-Inf.
+    std::map<int, FloatColumnInfo> float_info;
+    std::vector<cudf::column_view> eff(num_aggs);
+    std::vector<char> median_q(num_aggs, 0);
+    for (int i = 0; i < num_aggs; ++i) {
+        std::string t = Rcpp::as<std::string>(agg_types[i]);
+        eff[i] = agg_col(i);
+        if (ts_float_cast[i] || !is_float_type(eff[i].type().id()) ||
+            !agg_reads_nan_as_null(t, static_cast<bool>(na_rm[i]))) {
+            continue;
+        }
+        median_q[i] = t == "median";
+        auto it = float_info.find(agg_col_indices[i]);
+        if (it == float_info.end()) {
+            it = float_info.emplace(agg_col_indices[i], inspect_float_column(eff[i])).first;
+        }
+        if (it->second.has_nan) eff[i] = it->second.nan_nulled->view();
+    }
+    // A quantile slot's request key: the value column, so every quantile and
+    // float median() of one column shares a request (they read the same
+    // `eff`); a cast copy is its own.
+    auto quantile_key = [&](int i) {
+        return (ts_float_cast[i] || bool_minmax_cast[i]) ? -(i + 1) : agg_col_indices[i];
+    };
+    auto null_double = []() {
+        return cudf::make_column_from_scalar(cudf::numeric_scalar<double>(0.0, false), 1);
+    };
+
     // F07: ungrouped summarise() of a 0-row table crashed in cudf (a 0-group
     // groupby against the 1-row count column). Build the one-row result of
     // the empty-vector reductions directly.
@@ -528,9 +726,67 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     if (num_groups == 0) {
         std::vector<std::unique_ptr<cudf::column>> result_columns;
 
+        // F22: every quantile() of the call in one groupby request per value
+        // column (see QuantileRequests); the loop below only places the results.
+        std::vector<std::unique_ptr<cudf::column>> quantile_cols(num_aggs);
+        {
+            QuantileRequests quantiles(num_aggs);
+            std::vector<cudf::groupby::aggregation_request> q_requests;
+            for (int i = 0; i < num_aggs; ++i) {
+                bool is_quantile =
+                    classify_agg(Rcpp::as<std::string>(agg_types[i])) == AggKind::QUANTILE;
+                if (!is_quantile && !median_q[i]) continue;
+                cudf::column_view col = eff[i];
+                bool has_na = !static_cast<bool>(na_rm[i]) && col.has_nulls();
+                // Phase 6, task 6.2: quantile()'s na.rm = FALSE (default) with an
+                // actual NA present is a hard ERROR in base R itself ("missing
+                // values and NaN's not allowed if 'na.rm' is FALSE"), verified
+                // against dplyr 1.2.1 -- not an NA propagation like mean()/sum().
+                // "Any null at all" equals dplyr's per-group error: it aborts the
+                // whole call the moment one group hits an NA.
+                if (is_quantile && has_na) {
+                    Rcpp::stop("quantile(): missing values and NaN's not allowed if na.rm = FALSE. "
+                               "Use na.rm = TRUE to ignore missing values.");
+                }
+                // median()'s na.rm = FALSE with an NA is NA (the only group).
+                if (has_na) {
+                    quantile_cols[i] = null_double();
+                    continue;
+                }
+                quantiles.add(q_requests, i, quantile_key(i), col,
+                              median_q[i] ? 0.5 : agg_extra[i]);
+            }
+            if (!q_requests.empty()) {
+                // One group: the whole table, keyed by a constant (cudf's
+                // groupby needs a keys table).
+                std::vector<int32_t> keys_data(view.num_rows(), 0);
+                rmm::device_buffer keys_buf(keys_data.size() * sizeof(int32_t),
+                                            rmm::cuda_stream_view(),
+                                            rmm::mr::get_current_device_resource_ref());
+                if (!keys_data.empty()) {
+                    check_cuda(cudaMemcpy(keys_buf.data(), keys_data.data(),
+                                           keys_data.size() * sizeof(int32_t), cudaMemcpyHostToDevice),
+                               "gpu_summarise keys memcpy");
+                }
+                cudf::column keys_col(cudf::data_type{cudf::type_id::INT32}, view.num_rows(),
+                                      std::move(keys_buf), rmm::device_buffer{}, 0);
+                cudf::groupby::groupby gb(cudf::table_view({keys_col.view()}),
+                                          cudf::null_policy::INCLUDE);
+                auto [result_keys, result_aggs] = gb.aggregate(q_requests);
+                for (int i = 0; i < num_aggs; ++i) {
+                    if (quantiles.has(i)) quantile_cols[i] = quantiles.take(result_aggs, i);
+                }
+            }
+        }
+
         for (int i = 0; i < num_aggs; ++i) {
             std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
-            cudf::column_view col = agg_col(i);
+            cudf::column_view col = eff[i];
+
+            if (quantile_cols[i]) {
+                result_columns.push_back(std::move(quantile_cols[i]));
+                continue;
+            }
 
             if (agg_type == "n") {
                 // cudf::size_type (view.num_rows()) is already int32_t, so this
@@ -585,21 +841,6 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                 cudf::groupby::groupby gb(keys_table, cudf::null_policy::INCLUDE);
 
                 AggKind kind = classify_agg(agg_type);
-
-                // Phase 6, task 6.2: quantile()'s na.rm = FALSE (default)
-                // with an actual NA present is a hard ERROR in base R
-                // itself ("missing values and NaN's not allowed if 'na.rm'
-                // is FALSE"), verified empirically against dplyr 1.2.1 --
-                // NOT a NA-propagation like mean()/sum()/.../median()
-                // above. A single "does this column have ANY null at all"
-                // check is equivalent to dplyr's own per-group error
-                // (real dplyr aborts the ENTIRE summarise() call the
-                // moment any one group hits a NA, so there is no partial
-                // result to preserve either way).
-                if (kind == AggKind::QUANTILE && !static_cast<bool>(na_rm[i]) && col.has_nulls()) {
-                    Rcpp::stop("quantile(): missing values and NaN's not allowed if na.rm = FALSE. "
-                               "Use na.rm = TRUE to ignore missing values.");
-                }
 
                 if (kind == AggKind::ANY || kind == AggKind::ALL) {
                     bool is_any = (kind == AggKind::ANY);
@@ -658,10 +899,6 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                 cudf::groupby::aggregation_request req;
                 req.values = col;
                 switch (kind) {
-                    case AggKind::QUANTILE:
-                        req.aggregations.push_back(cudf::make_quantile_aggregation<cudf::groupby_aggregation>(
-                            {agg_extra[i]}, cudf::interpolation::LINEAR));
-                        break;
                     case AggKind::NUNIQUE: {
                         cudf::null_policy np = static_cast<bool>(na_rm[i])
                             ? cudf::null_policy::EXCLUDE : cudf::null_policy::INCLUDE;
@@ -772,10 +1009,11 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     std::vector<int> identity_fix_request_idx(num_aggs, -1);
     // Must outlive the gb.aggregate() call below (requests reference their views).
     std::vector<std::unique_ptr<cudf::column>> null_indicator_cols;
+    QuantileRequests quantiles(num_aggs);
 
     for (int i = 0; i < num_aggs; ++i) {
         std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
-        cudf::column_view value_view = agg_col(i);
+        cudf::column_view value_view = eff[i];
         AggKind kind = classify_agg(agg_type);
         bool na_rm_flag = static_cast<bool>(na_rm[i]);
 
@@ -783,18 +1021,35 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         // actual NA present is a hard ERROR in base R itself -- see the
         // identical check (and its own docs) in the num_groups == 0 branch
         // above.
-        if (kind == AggKind::QUANTILE && !na_rm_flag && value_view.has_nulls()) {
-            Rcpp::stop("quantile(): missing values and NaN's not allowed if na.rm = FALSE. "
-                       "Use na.rm = TRUE to ignore missing values.");
+        if (kind == AggKind::QUANTILE || median_q[i]) {
+            bool has_na = !na_rm_flag && value_view.has_nulls();
+            if (kind == AggKind::QUANTILE && has_na) {
+                Rcpp::stop("quantile(): missing values and NaN's not allowed if na.rm = FALSE. "
+                           "Use na.rm = TRUE to ignore missing values.");
+            }
+            // F22: shares one request (one sort) per value column.
+            quantiles.add(requests, i, quantile_key(i), value_view,
+                          median_q[i] ? 0.5 : agg_extra[i]);
+            main_request_idx[i] = quantiles.slot[i].req;
+            // median()'s na.rm = FALSE: a group with an NA is NA (the usual
+            // na-prop step, applied to the quantile result below).
+            if (has_na) {
+                auto null_indicator_bool = cudf::is_null(value_view);
+                null_indicator_cols.push_back(cudf::cast(
+                    null_indicator_bool->view(), cudf::data_type{cudf::type_id::INT8}));
+                cudf::groupby::aggregation_request null_req;
+                null_req.values = null_indicator_cols.back()->view();
+                null_req.aggregations.push_back(
+                    cudf::make_max_aggregation<cudf::groupby_aggregation>());
+                na_prop_request_idx[i] = static_cast<int>(requests.size());
+                requests.push_back(std::move(null_req));
+            }
+            continue;
         }
 
         cudf::groupby::aggregation_request req;
         req.values = value_view;
         switch (kind) {
-            case AggKind::QUANTILE:
-                req.aggregations.push_back(cudf::make_quantile_aggregation<cudf::groupby_aggregation>(
-                    {agg_extra[i]}, cudf::interpolation::LINEAR));
-                break;
             case AggKind::NUNIQUE: {
                 cudf::null_policy np = na_rm_flag ? cudf::null_policy::EXCLUDE : cudf::null_policy::INCLUDE;
                 req.aggregations.push_back(
@@ -869,13 +1124,21 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
 
     auto [result_keys, result_aggs] = gb.aggregate(requests);
 
+    // The quantile results leave their shared requests first, so everything
+    // below that reads `results[0]` of a request sees only its own aggregation.
+    std::vector<std::unique_ptr<cudf::column>> quantile_cols(num_aggs);
+    for (int i = 0; i < num_aggs; ++i) {
+        if (quantiles.has(i)) quantile_cols[i] = quantiles.take(result_aggs, i);
+    }
+
     for (int i = 0; i < num_aggs; ++i) {
         if (na_prop_request_idx[i] < 0) {
             continue;
         }
-        result_aggs[main_request_idx[i]].results[0] = null_out_groups_with_any_null(
-            std::move(result_aggs[main_request_idx[i]].results[0]),
-            result_aggs[na_prop_request_idx[i]].results[0]->view());
+        auto& target = quantile_cols[i] ? quantile_cols[i]
+                                        : result_aggs[main_request_idx[i]].results[0];
+        target = null_out_groups_with_any_null(
+            std::move(target), result_aggs[na_prop_request_idx[i]].results[0]->view());
     }
 
     for (int i = 0; i < num_aggs; ++i) {
@@ -934,7 +1197,9 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     }
 
     for (int i = 0; i < num_aggs; ++i) {
-        result_columns.push_back(std::move(result_aggs[main_request_idx[i]].results[0]));
+        result_columns.push_back(quantile_cols[i]
+                                     ? std::move(quantile_cols[i])
+                                     : std::move(result_aggs[main_request_idx[i]].results[0]));
         narrow_sum(i, result_columns.back());
         ts_finish(i, result_columns.back());
     }
