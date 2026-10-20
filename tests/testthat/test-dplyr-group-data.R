@@ -420,7 +420,7 @@ test_that("`[.tbl_gpu` errors on an undefined column like tibble", {
 
 # =============================================================================
 # Fallback flips: the metadata six are GPU-native; the iteration family
-# (group_split/map/modify/nest/nest_by/group_trim/rowwise) stays fallback
+# (group_map/modify/nest/nest_by/rowwise) stays fallback
 # =============================================================================
 
 test_that("group_data()/group_keys()/group_indices()/group_size()/n_groups() never trigger a fallback", {
@@ -458,13 +458,14 @@ test_that("rowwise() still falls back", {
   expect_warning(dplyr::rowwise(gt), "fell back to CPU evaluation")
 })
 
-test_that("group_trim() still falls back", {
+test_that("group_trim() is native", {
   skip_if_no_gpu()
-  withr::local_options(cuplyr.fallback = "warn")
+  withr::local_options(cuplyr.fallback = "error")
 
   gt <- tbl_gpu(tibble::tibble(g = c(1, 1, 2, 2, 3), x = 1:5)) |>
     dplyr::group_by(g) |>
     dplyr::filter(g != 2)
 
-  expect_warning(dplyr::group_trim(gt), "fell back to CPU evaluation")
+  expect_no_error(out <- dplyr::group_trim(gt))
+  expect_equal(collect(out), dplyr::group_trim(collect(gt)), ignore_attr = TRUE)
 })

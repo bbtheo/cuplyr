@@ -462,7 +462,7 @@ tbl_vars.tbl_gpu <- function(x) {
 #'
 #' `dplyr::group_by_drop_default()` is a generic dplyr's own internals call
 #' to decide the default `.drop=` value for verbs built on top of
-#' `group_by()` (e.g. `group_trim()`'s own default, see R/fallback.R). The
+#' `group_by()` (e.g. `group_trim()`'s own default, see below). The
 #' `.default` method always returns `TRUE`; this method returns `TRUE` for an
 #' ungrouped table and otherwise whichever value the table's own most recent
 #' `group_by(..., .drop=)` call recorded (`$group_drop`, see
@@ -484,6 +484,75 @@ group_by_drop_default.tbl_gpu <- function(.tbl) {
   isTRUE(.subset2(.tbl, "group_drop") %||% TRUE)
 }
 
+#' Drop unused levels of the factor group columns (dplyr backend method)
+#'
+#' Native: [dplyr::group_trim()] on a grouped `tbl_gpu` finds the codes still
+#' used by each factor group column on the GPU (a distinct over that one
+#' column; only the at most `n_levels + 1` distinct codes reach R), keeps the
+#' used levels in their original order (an ordered factor stays ordered),
+#' remaps the codes with `gpu_remap_codes()` and regroups with
+#' `ungroup()` + `group_by(.drop = )`, which also drops any `fixed_keys` left
+#' by `.preserve = TRUE`. Pending ops are computed first (the new level set
+#' depends on the data). An ungrouped table is returned unchanged, without
+#' looking at `.drop`, like dplyr. Shapes outside the allowlist (duplicated
+#' names, a factor group column without known levels) use the CPU fallback.
+#'
+#' @param .tbl A `tbl_gpu` object.
+#' @param .drop Whether the regroup drops empty groups.
+#' @return A `tbl_gpu`.
+#' @export
+#' @importFrom dplyr group_trim
+group_trim.tbl_gpu <- function(.tbl, .drop = dplyr::group_by_drop_default(.tbl)) {
+  if (length(.tbl$groups) == 0L) {
+    return(.tbl)
+  }
+  if (!rlang::is_bool(.drop)) {
+    rlang::abort("`.drop` must be `TRUE` or `FALSE`.")
+  }
+
+  fallback <- function() {
+    gpu_fallback("group_trim", .tbl, function(tbl) {
+      dplyr::group_trim(tbl, .drop = .drop)
+    })
+  }
+
+  vars <- .tbl$groups
+  tbl <- if (has_pending_ops(.tbl)) compute(.tbl) else .tbl
+  names_ <- tbl$schema$names
+  if (anyDuplicated(names_) || !all(vars %in% names_)) {
+    return(fallback())
+  }
+  idx0 <- match(vars, names_) - 1L
+  is_fct <- tbl$schema$types[idx0 + 1L] == "DICTIONARY32"
+  levels_ <- tbl$schema$factor_levels
+  if (any(is_fct) && !all(vars[is_fct] %in% names(levels_))) {
+    return(fallback())
+  }
+
+  for (k in which(is_fct)) {
+    col <- vars[[k]]
+    old <- levels_[[col]]
+    one <- new_tbl_gpu(
+      ptr = wrap_gpu_call("group_trim", gpu_distinct(gpu_select(tbl$ptr, idx0[[k]]), 0L)),
+      schema = list(names = "k", types = "INT32"), exec_mode = "eager"
+    )
+    codes <- collect_frame(one)[[1L]]
+    used <- sort(unique(codes[!is.na(codes)]))
+    if (length(used) == length(old)) {
+      next
+    }
+    new <- old[used]
+    if (isTRUE(attr(old, "ordered"))) attr(new, "ordered") <- TRUE
+    map <- as.integer(match(seq_along(old), used))
+    tbl$ptr <- wrap_gpu_call("group_trim", gpu_remap_codes(tbl$ptr, idx0[[k]], map))
+    tbl$schema$factor_levels[[col]] <- new
+  }
+
+  # ungroup() sheds custom attributes / bare data.frame class like dplyr's
+  # as_tibble(); group_by() then rebuilds the groups (no fixed_keys)
+  group_by(ungroup(tbl), !!!rlang::syms(vars), .drop = .drop)
+}
+
 # =============================================================================
 # Grouping metadata query family (Phase 9, task 1): group_data()/
 # group_keys()/group_indices()/group_size()/n_groups() are all GPU-native,
@@ -494,7 +563,7 @@ group_by_drop_default.tbl_gpu <- function(.tbl) {
 # `group_data.tbl_gpu()` exists. Previously (Phase 2) all six were CPU
 # fallbacks (see R/fallback.R's now-removed registrations); the iteration
 # family (group_map()/group_modify()/group_nest()/nest_by(); group_split()
-# is native, R/fallback.R)
+# is native, R/fallback.R; group_trim() is native, above)
 # inherently produces R-side objects
 # and stays on the CPU fallback (R/fallback.R).
 # =============================================================================

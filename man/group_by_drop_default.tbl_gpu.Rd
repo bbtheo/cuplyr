@@ -15,7 +15,7 @@
 \description{
 \code{dplyr::group_by_drop_default()} is a generic dplyr's own internals call
 to decide the default \verb{.drop=} value for verbs built on top of
-\code{group_by()} (e.g. \code{group_trim()}'s own default, see R/fallback.R). The
+\code{group_by()} (e.g. \code{group_trim()}'s own default, see below). The
 \code{.default} method always returns \code{TRUE}; this method returns \code{TRUE} for an
 ungrouped table and otherwise whichever value the table's own most recent
 \code{group_by(..., .drop=)} call recorded (\verb{$group_drop}, see

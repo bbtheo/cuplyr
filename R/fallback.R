@@ -340,14 +340,12 @@ nest_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, keep = NULL,
 # n_groups() moved to R/group-by.R (GPU-native, Phase 9 task 1) -- see
 # compute_group_data() (the shared `gpu_group_info()`-backed query) and
 # each verb's own method there. The iteration family below
-# (group_map()/group_modify()/group_nest()/group_trim()/nest_by())
+# (group_map()/group_modify()/group_nest()/nest_by())
 # inherently produces R-side objects (a user-function's arbitrary return
 # value, or a list-column data frame) and stays on the CPU fallback --
 # group_map()'s .f needs real data frames, group_nest()'s list-column is
 # caught by has_list_column(). group_split() is GPU-native (below).
-# group_trim() additionally needs a real GPU factor-code remap (not just
-# metadata), which is out of this task's scope (Phase 11 factor-machinery
-# territory) -- deliberately deferred, same as rowwise().
+# group_trim() is GPU-native (F27, R/group-by.R).
 # =============================================================================
 
 #' Split a GPU table into one GPU table per group (dplyr backend method)
@@ -451,15 +449,6 @@ group_nest.tbl_gpu <- function(.tbl, ..., .key = "data", keep = FALSE) {
   dots <- rlang::enquos(...)
   gpu_fallback("group_nest", .tbl, function(tbl) {
     rlang::inject(dplyr::group_nest(tbl, !!!dots, .key = .key, keep = keep))
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr group_trim
-group_trim.tbl_gpu <- function(.tbl, .drop = dplyr::group_by_drop_default(.tbl)) {
-  gpu_fallback("group_trim", .tbl, function(tbl) {
-    dplyr::group_trim(tbl, .drop = .drop)
   })
 }
 

@@ -8,7 +8,6 @@
 \alias{group_map.tbl_gpu}
 \alias{group_modify.tbl_gpu}
 \alias{group_nest.tbl_gpu}
-\alias{group_trim.tbl_gpu}
 \alias{nest_by.tbl_gpu}
 \alias{sample_n.tbl_gpu}
 \alias{sample_frac.tbl_gpu}
@@ -35,8 +34,6 @@
 \method{group_modify}{tbl_gpu}(.data, .f, ..., .keep = FALSE)
 
 \method{group_nest}{tbl_gpu}(.tbl, ..., .key = "data", keep = FALSE)
-
-\method{group_trim}{tbl_gpu}(.tbl, .drop = dplyr::group_by_drop_default(.tbl))
 
 \method{nest_by}{tbl_gpu}(.data, ..., .key = "data", .keep = FALSE)
 

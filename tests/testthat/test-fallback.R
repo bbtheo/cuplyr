@@ -87,9 +87,6 @@ fallback_sweep_pipelines <- function() {
     group_modify = list(
       fn = function(d) dplyr::group_modify(dplyr::group_by(d, g), ~ dplyr::summarise(.x, s = sum(x))),
       arrange_by = "g"
-    ),
-    group_trim = list(
-      fn = function(d) dplyr::group_trim(dplyr::filter(dplyr::group_by(d, g), g != 2))
     )
     # rows_update()/rows_patch() are GPU-native since F26 (R/rows.R); see the
     # "native rows_*() sweep" block below.
@@ -114,7 +111,9 @@ rows_native_sweep <- list(
   rows_update = function(d) dplyr::rows_update(d, tibble::tibble(g = 1, s = "a", x = 999),
                                                by = c("g", "s"), copy = TRUE),
   rows_patch = function(d) dplyr::rows_patch(d, tibble::tibble(g = 1, s = "a", x = 999),
-                                             by = c("g", "s"), copy = TRUE)
+                                             by = c("g", "s"), copy = TRUE),
+  # group_trim() is native since F27 (R/group-by.R)
+  group_trim = function(d) dplyr::group_trim(dplyr::filter(dplyr::group_by(d, g), g != 2))
 )
 for (.nm in names(rows_native_sweep)) {
   local({
