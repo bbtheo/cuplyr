@@ -5,12 +5,6 @@
 \alias{rowwise.tbl_gpu}
 \alias{do.tbl_gpu}
 \alias{nest_join.tbl_gpu}
-\alias{rows_insert.tbl_gpu}
-\alias{rows_append.tbl_gpu}
-\alias{rows_update.tbl_gpu}
-\alias{rows_patch.tbl_gpu}
-\alias{rows_upsert.tbl_gpu}
-\alias{rows_delete.tbl_gpu}
 \alias{group_map.tbl_gpu}
 \alias{group_modify.tbl_gpu}
 \alias{group_nest.tbl_gpu}
@@ -34,50 +28,6 @@
   ...,
   na_matches = c("na", "never"),
   unmatched = "drop"
-)
-
-\method{rows_insert}{tbl_gpu}(
-  x,
-  y,
-  by = NULL,
-  ...,
-  conflict = c("error", "ignore"),
-  copy = FALSE,
-  in_place = FALSE
-)
-
-\method{rows_append}{tbl_gpu}(x, y, ..., copy = FALSE, in_place = FALSE)
-
-\method{rows_update}{tbl_gpu}(
-  x,
-  y,
-  by = NULL,
-  ...,
-  unmatched = c("error", "ignore"),
-  copy = FALSE,
-  in_place = FALSE
-)
-
-\method{rows_patch}{tbl_gpu}(
-  x,
-  y,
-  by = NULL,
-  ...,
-  unmatched = c("error", "ignore"),
-  copy = FALSE,
-  in_place = FALSE
-)
-
-\method{rows_upsert}{tbl_gpu}(x, y, by = NULL, ..., copy = FALSE, in_place = FALSE)
-
-\method{rows_delete}{tbl_gpu}(
-  x,
-  y,
-  by = NULL,
-  ...,
-  unmatched = c("error", "ignore"),
-  copy = FALSE,
-  in_place = FALSE
 )
 
 \method{group_map}{tbl_gpu}(.data, .f, ..., .keep = FALSE)

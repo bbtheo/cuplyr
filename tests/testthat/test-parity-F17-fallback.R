@@ -175,7 +175,7 @@ test_that("fallback verbs that regroup drop the preserved keys, as dplyr does", 
   f17_groups_parity(df, function(d) group_modify(f17_keep_g(d), ~ .x))
   # rows_append() regroups
   extra <- tibble::tibble(g = 1, h = "z", x = 10)
-  f17_groups_parity(df, function(d) rows_append(f17_keep_g(d), extra))
+  f17_groups_parity(df, function(d) rows_append(f17_keep_g(d), extra, copy = TRUE))
   # filter(.preserve = FALSE) after the fallback drops them
   f17_groups_parity(df, function(d) {
     mutate(f17_keep_g(d), y = f17_twice(x)) |> filter(x > 0)

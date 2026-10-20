@@ -90,13 +90,9 @@ fallback_sweep_pipelines <- function() {
     ),
     group_trim = list(
       fn = function(d) dplyr::group_trim(dplyr::filter(dplyr::group_by(d, g), g != 2))
-    ),
-    rows_update = list(
-      fn = function(d) dplyr::rows_update(d, tibble::tibble(g = 1, s = "a", x = 999), by = c("g", "s"))
-    ),
-    rows_patch = list(
-      fn = function(d) dplyr::rows_patch(d, tibble::tibble(g = 1, s = "a", x = 999), by = c("g", "s"))
     )
+    # rows_update()/rows_patch() are GPU-native since F26 (R/rows.R); see the
+    # "native rows_*() sweep" block below.
   )
 }
 
@@ -108,6 +104,26 @@ for (.nm in names(fallback_pipelines)) {
     test_that(sprintf("%s() fallback matches dplyr oracle", nm), {
       skip_if_no_gpu()
       expect_same_as_dplyr(fallback_df(), spec$fn, arrange_by = spec$arrange_by)
+    })
+  })
+}
+
+# The rows_update()/rows_patch() entries that used to live in the sweep above:
+# native now, so they are checked against the oracle here.
+rows_native_sweep <- list(
+  rows_update = function(d) dplyr::rows_update(d, tibble::tibble(g = 1, s = "a", x = 999),
+                                               by = c("g", "s"), copy = TRUE),
+  rows_patch = function(d) dplyr::rows_patch(d, tibble::tibble(g = 1, s = "a", x = 999),
+                                             by = c("g", "s"), copy = TRUE)
+)
+for (.nm in names(rows_native_sweep)) {
+  local({
+    nm <- .nm
+    fn <- rows_native_sweep[[nm]]
+    test_that(sprintf("%s() matches the dplyr oracle (native)", nm), {
+      skip_if_no_gpu()
+      withr::local_options(cuplyr.fallback = "error")
+      expect_same_as_dplyr(fallback_df(), fn)
     })
   })
 }
@@ -151,7 +167,7 @@ test_that("rows_insert() adds new rows matching dplyr", {
   base_df <- tibble::tibble(id = 1:3, v = c("a", "b", "c"))
   gt <- tbl_gpu(base_df)
 
-  result <- gt |> dplyr::rows_insert(tibble::tibble(id = 4, v = "d"), by = "id") |> collect()
+  result <- gt |> dplyr::rows_insert(tibble::tibble(id = 4, v = "d"), by = "id", copy = TRUE) |> collect()
   oracle <- dplyr::rows_insert(base_df, tibble::tibble(id = 4, v = "d"), by = "id")
 
   expect_equal(tibble::as_tibble(result), oracle)
@@ -162,7 +178,7 @@ test_that("rows_append() adds rows matching dplyr", {
   base_df <- tibble::tibble(id = 1:3, v = c("a", "b", "c"))
   gt <- tbl_gpu(base_df)
 
-  result <- gt |> dplyr::rows_append(tibble::tibble(id = 4, v = "d")) |> collect()
+  result <- gt |> dplyr::rows_append(tibble::tibble(id = 4, v = "d"), copy = TRUE) |> collect()
   oracle <- dplyr::rows_append(base_df, tibble::tibble(id = 4, v = "d"))
 
   expect_equal(tibble::as_tibble(result), oracle)
@@ -174,7 +190,7 @@ test_that("rows_upsert() updates and inserts rows matching dplyr", {
   gt <- tbl_gpu(base_df)
   y <- tibble::tibble(id = c(1, 4), v = c("Z", "d"))
 
-  result <- gt |> dplyr::rows_upsert(y, by = "id") |> collect()
+  result <- gt |> dplyr::rows_upsert(y, by = "id", copy = TRUE) |> collect()
   oracle <- dplyr::rows_upsert(base_df, y, by = "id")
 
   expect_equal(tibble::as_tibble(result), oracle)
@@ -185,7 +201,7 @@ test_that("rows_delete() removes rows matching dplyr", {
   base_df <- tibble::tibble(id = 1:3, v = c("a", "b", "c"))
   gt <- tbl_gpu(base_df)
 
-  result <- gt |> dplyr::rows_delete(tibble::tibble(id = 1), by = "id") |> collect()
+  result <- gt |> dplyr::rows_delete(tibble::tibble(id = 1), by = "id", copy = TRUE) |> collect()
   oracle <- dplyr::rows_delete(base_df, tibble::tibble(id = 1), by = "id")
 
   expect_equal(tibble::as_tibble(result), oracle)
@@ -196,28 +212,22 @@ test_that("rows_*(in_place = TRUE) is rejected for tbl_gpu", {
   gt <- tbl_gpu(tibble::tibble(id = 1:3, v = c("a", "b", "c")))
 
   expect_error(
-    gt |> dplyr::rows_update(tibble::tibble(id = 1, v = "Z"), by = "id", in_place = TRUE),
+    gt |> dplyr::rows_update(tibble::tibble(id = 1, v = "Z"), by = "id", copy = TRUE,
+                             in_place = TRUE),
     "in_place"
   )
 })
 
-# Phase 11 L7 exit: pinning (not building) the six rows_*() verbs, which
-# were already fallback-registered (see the module header comment and
-# scratchpad/phase11_design.md's own "rows_* verification+pins ONLY" scope
-# note -- native rows_*() is explicitly out of scope: the fallback re-runs
-# real dplyr, so it's already 100% conformant, and native would be a week
-# of work for zero additional conformance). Two things this pins that the
-# tests above don't already cover explicitly: (1) every one of the six
-# verbs actually fires `cuplyr_fallback_notify()` (not just rows_update, as
-# the pre-existing test above happened to check), and (2) `in_place = TRUE`
-# is rejected by EVERY verb, not just rows_update.
+# The six rows_*() verbs are GPU-native since F26 (R/rows.R): with a GPU `y`
+# of x's column types they never reach the CPU fallback, and `in_place = TRUE`
+# is rejected by every one (dplyr's check comes before anything else).
 rows_verb_calls <- list(
-  rows_insert = function(gt) dplyr::rows_insert(gt, tibble::tibble(id = 4, v = "d"), by = "id"),
-  rows_append = function(gt) dplyr::rows_append(gt, tibble::tibble(id = 4, v = "d")),
-  rows_update = function(gt) dplyr::rows_update(gt, tibble::tibble(id = 1, v = "Z"), by = "id"),
-  rows_patch = function(gt) dplyr::rows_patch(gt, tibble::tibble(id = 1, v = "Z"), by = "id"),
-  rows_upsert = function(gt) dplyr::rows_upsert(gt, tibble::tibble(id = c(1, 4), v = c("Z", "d")), by = "id"),
-  rows_delete = function(gt) dplyr::rows_delete(gt, tibble::tibble(id = 1), by = "id")
+  rows_insert = function(gt) dplyr::rows_insert(gt, tbl_gpu(tibble::tibble(id = 4L, v = "d")), by = "id"),
+  rows_append = function(gt) dplyr::rows_append(gt, tbl_gpu(tibble::tibble(id = 4L, v = "d"))),
+  rows_update = function(gt) dplyr::rows_update(gt, tbl_gpu(tibble::tibble(id = 1L, v = "Z")), by = "id"),
+  rows_patch = function(gt) dplyr::rows_patch(gt, tbl_gpu(tibble::tibble(id = 1L, v = "Z")), by = "id"),
+  rows_upsert = function(gt) dplyr::rows_upsert(gt, tbl_gpu(tibble::tibble(id = c(1L, 4L), v = c("Z", "d"))), by = "id"),
+  rows_delete = function(gt) dplyr::rows_delete(gt, tbl_gpu(tibble::tibble(id = 1L)), by = "id")
 )
 
 for (.nm in names(rows_verb_calls)) {
@@ -225,12 +235,12 @@ for (.nm in names(rows_verb_calls)) {
     nm <- .nm
     call_fn <- rows_verb_calls[[nm]]
 
-    test_that(sprintf("%s() triggers the fallback notification", nm), {
+    test_that(sprintf("%s() stays native (no fallback notification)", nm), {
       skip_if_no_gpu()
       gt <- tbl_gpu(tibble::tibble(id = 1:3, v = c("a", "b", "c")))
-      withr::local_options(cuplyr.fallback = "warn")
+      withr::local_options(cuplyr.fallback = "error")
 
-      expect_warning(call_fn(gt), "fell back to CPU evaluation")
+      expect_no_error(collect(call_fn(gt)))
     })
 
     test_that(sprintf("%s(in_place = TRUE) is rejected for tbl_gpu", nm), {
@@ -238,8 +248,10 @@ for (.nm in names(rows_verb_calls)) {
       gt <- tbl_gpu(tibble::tibble(id = 1:3, v = c("a", "b", "c")))
 
       verb_fn <- getExportedValue("dplyr", nm)
+      args <- if (identical(nm, "rows_append")) list() else list(by = "id")
       expect_error(
-        verb_fn(gt, tibble::tibble(id = 1, v = "Z"), by = "id", in_place = TRUE),
+        do.call(verb_fn, c(list(gt, tbl_gpu(tibble::tibble(id = 1L, v = "Z"))), args,
+                           list(in_place = TRUE))),
         "in_place"
       )
     })

@@ -329,93 +329,9 @@ nest_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, keep = NULL,
   })
 }
 
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr rows_insert
-rows_insert.tbl_gpu <- function(x, y, by = NULL, ..., conflict = c("error", "ignore"),
-                                 copy = FALSE, in_place = FALSE) {
-  if (isTRUE(in_place)) {
-    stop("rows_insert(in_place = TRUE) is not supported for tbl_gpu; ",
-         "assign the result instead.", call. = FALSE)
-  }
-  y_tbl <- collect_other_side(y)
-  gpu_fallback("rows_insert", x, function(tbl) {
-    dplyr::rows_insert(tbl, y_tbl, by = by, ..., conflict = conflict, copy = copy)
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr rows_append
-rows_append.tbl_gpu <- function(x, y, ..., copy = FALSE, in_place = FALSE) {
-  if (isTRUE(in_place)) {
-    stop("rows_append(in_place = TRUE) is not supported for tbl_gpu; ",
-         "assign the result instead.", call. = FALSE)
-  }
-  y_tbl <- collect_other_side(y)
-  gpu_fallback("rows_append", x, function(tbl) {
-    dplyr::rows_append(tbl, y_tbl, ..., copy = copy)
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr rows_update
-rows_update.tbl_gpu <- function(x, y, by = NULL, ..., unmatched = c("error", "ignore"),
-                                 copy = FALSE, in_place = FALSE) {
-  if (isTRUE(in_place)) {
-    stop("rows_update(in_place = TRUE) is not supported for tbl_gpu; ",
-         "assign the result instead.", call. = FALSE)
-  }
-  y_tbl <- collect_other_side(y)
-  gpu_fallback("rows_update", x, function(tbl) {
-    dplyr::rows_update(tbl, y_tbl, by = by, ..., unmatched = unmatched, copy = copy)
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr rows_patch
-rows_patch.tbl_gpu <- function(x, y, by = NULL, ..., unmatched = c("error", "ignore"),
-                                copy = FALSE, in_place = FALSE) {
-  if (isTRUE(in_place)) {
-    stop("rows_patch(in_place = TRUE) is not supported for tbl_gpu; ",
-         "assign the result instead.", call. = FALSE)
-  }
-  y_tbl <- collect_other_side(y)
-  gpu_fallback("rows_patch", x, function(tbl) {
-    dplyr::rows_patch(tbl, y_tbl, by = by, ..., unmatched = unmatched, copy = copy)
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr rows_upsert
-rows_upsert.tbl_gpu <- function(x, y, by = NULL, ..., copy = FALSE, in_place = FALSE) {
-  if (isTRUE(in_place)) {
-    stop("rows_upsert(in_place = TRUE) is not supported for tbl_gpu; ",
-         "assign the result instead.", call. = FALSE)
-  }
-  y_tbl <- collect_other_side(y)
-  gpu_fallback("rows_upsert", x, function(tbl) {
-    dplyr::rows_upsert(tbl, y_tbl, by = by, ..., copy = copy)
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr rows_delete
-rows_delete.tbl_gpu <- function(x, y, by = NULL, ..., unmatched = c("error", "ignore"),
-                                 copy = FALSE, in_place = FALSE) {
-  if (isTRUE(in_place)) {
-    stop("rows_delete(in_place = TRUE) is not supported for tbl_gpu; ",
-         "assign the result instead.", call. = FALSE)
-  }
-  y_tbl <- collect_other_side(y)
-  gpu_fallback("rows_delete", x, function(tbl) {
-    dplyr::rows_delete(tbl, y_tbl, by = by, ..., unmatched = unmatched, copy = copy)
-  })
-}
+# rows_insert()/rows_append()/rows_update()/rows_patch()/rows_upsert()/
+# rows_delete() moved to R/rows.R (GPU-native, F26); their data-dependent errors
+# and shapes outside the native allowlist still run through gpu_fallback().
 
 # =============================================================================
 # Grouping introspection & iteration
