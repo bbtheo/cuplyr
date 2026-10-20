@@ -1,5 +1,11 @@
 # cuplyr (development version)
 
+## group_nest() and nest_by() `.drop` (F28)
+
+* `group_nest()` and `nest_by()` on a `tbl_gpu` now pass `...` through to
+  `group_by()` unchanged, so `.drop = TRUE` drops empty factor levels as in
+  dplyr (previously ignored).
+
 ## R integer arithmetic semantics (F42)
 
 * Integer `+`, `-` and `*` (on integer or logical columns and literals) give

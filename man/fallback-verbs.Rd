@@ -66,6 +66,10 @@ containing list-columns with no GPU representation (e.g.
 \code{\link[dplyr:nest_by]{dplyr::nest_by()}}, \code{\link[dplyr:group_nest]{dplyr::group_nest()}}, \code{\link[dplyr:nest_join]{dplyr::nest_join()}}'s nested
 match column), are returned as plain R objects rather than re-uploaded.
 
+A GPU key match for \code{nest_join()}/\code{group_nest()}/\code{nest_by()} was measured and
+does not pay (the time is building the nested tibbles on the host), so they
+stay CPU fallbacks.
+
 Every fallback calls \code{\link[=cuplyr_fallback_notify]{cuplyr_fallback_notify()}}, so
 \code{options(cuplyr.fallback = "warn")} (or \code{"error"}) can be used to surface
 (or forbid) accidental fallbacks in code that's expected to stay fully

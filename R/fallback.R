@@ -192,6 +192,10 @@ collect_other_side <- function(y) {
 #' [dplyr::nest_by()], [dplyr::group_nest()], [dplyr::nest_join()]'s nested
 #' match column), are returned as plain R objects rather than re-uploaded.
 #'
+#' A GPU key match for `nest_join()`/`group_nest()`/`nest_by()` was measured and
+#' does not pay (the time is building the nested tibbles on the host), so they
+#' stay CPU fallbacks.
+#'
 #' Every fallback calls [cuplyr_fallback_notify()], so
 #' `options(cuplyr.fallback = "warn")` (or `"error"`) can be used to surface
 #' (or forbid) accidental fallbacks in code that's expected to stay fully
@@ -446,9 +450,10 @@ group_modify.tbl_gpu <- function(.data, .f, ..., .keep = FALSE) {
 #' @export
 #' @importFrom dplyr group_nest
 group_nest.tbl_gpu <- function(.tbl, ..., .key = "data", keep = FALSE) {
-  dots <- rlang::enquos(...)
+  # `...` is forwarded as is (not enquos()+inject()) so `.drop = TRUE` reaches
+  # group_by() as a value; dplyr itself raises the grouped-input dots warning.
   gpu_fallback("group_nest", .tbl, function(tbl) {
-    rlang::inject(dplyr::group_nest(tbl, !!!dots, .key = .key, keep = keep))
+    dplyr::group_nest(tbl, ..., .key = .key, keep = keep)
   })
 }
 
@@ -456,9 +461,9 @@ group_nest.tbl_gpu <- function(.tbl, ..., .key = "data", keep = FALSE) {
 #' @export
 #' @importFrom dplyr nest_by
 nest_by.tbl_gpu <- function(.data, ..., .key = "data", .keep = FALSE) {
-  dots <- rlang::enquos(...)
+  # `...` forwarded unchanged, see group_nest.tbl_gpu().
   gpu_fallback("nest_by", .data, function(tbl) {
-    rlang::inject(dplyr::nest_by(tbl, !!!dots, .key = .key, .keep = .keep))
+    dplyr::nest_by(tbl, ..., .key = .key, .keep = .keep)
   })
 }
 
