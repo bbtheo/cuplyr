@@ -207,7 +207,7 @@ extract_one_window_call <- function(node, schema, state, key = NULL) {
     order_desc <- node$meta$order_override$desc
   } else if (identical(entry$window$kind, "rank") && !is.na(value_col)) {
     order_cols <- value_col
-    order_desc <- FALSE
+    order_desc <- isTRUE(node$meta$rank_desc)
   }
 
   out_name <- next_window_temp_name(state, "win_n", "..win")

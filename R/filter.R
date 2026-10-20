@@ -311,6 +311,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # CPU fallbacks keep the dots as the user wrote them.
   user_dots <- dots
   dots <- rewrite_context_dots(dots, verb_groups)
+  dots <- rewrite_top_n_rank_dots(dots, .data)
   if (dots_need_fallback(dots)) {
     return(filter_across_fallback(.data, user_dots, by_quo, .preserve, complement))
   }
@@ -739,8 +740,9 @@ filter_across_fallback <- function(.data, dots, by_quo, .preserve = FALSE, compl
 # dots (before across() expansion / cur_group_id() substitution), on the CPU.
 # This is what subsumes grepl()/other base-R-string or arbitrary-function
 # predicates referencing a real column, and closes the top_n()/top_frac()
-# gap (both desugar to `filter(top_n_rank(n, wt))`, a shape the IR has
-# never understood and never will natively).
+# gap (both desugar to `filter(top_n_rank(n, wt))`). The common top_n_rank()
+# shapes never get here: filter_run() rewrites them to a native
+# `min_rank() <= n` first (rewrite_top_n_rank_dots()); this takes the rest.
 # @keywords internal
 filter_expr_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE) {
   filter_cpu_fallback(.data, dots, by_quo, .preserve, complement)
@@ -780,6 +782,212 @@ filter_ir_not_logical <- function(ir, schema, is_window) {
 # @keywords internal
 dot_references_schema_col <- function(quo, col_names) {
   any(all.vars(rlang::quo_get_expr(quo)) %in% col_names)
+}
+
+# --- F29: dplyr's top_n()/top_frac() ------------------------------------------
+#
+# top_n() is a plain function that calls `filter(x, top_n_rank({{ n }}, !!wt))`,
+# and `top_n_rank(n, wt)` is `min_rank(desc(wt)) <= n` for n > 0, else
+# `min_rank(wt) <= abs(n)`. The dot reaching filter() is a quosure whose
+# expression holds nested quosures for `n` and `wt` (`wt` is a plain symbol
+# when top_n() picked the last column itself). A dot is rewritten to the
+# equivalent native window predicate only for the shapes below; the CPU
+# fallbacks keep rerunning the dots as the user wrote them.
+
+# Inside an `n` expression, the pronouns (as symbols) and the functions (as
+# call heads) that need the data mask. A bare symbol `n` is the user's own
+# variable (`n <- 5; top_n(df, n, x)`); only a call to `n()` reads the mask.
+top_n_mask_pronouns <- c(".data", ".env")
+top_n_mask_fns <- c("n", "pick", "cur_group", "cur_group_id", "cur_group_rows",
+                    "cur_column", "cur_data", "cur_data_all", "across",
+                    "c_across", "if_any", "if_all")
+
+# Look through nested quosures: list(expr, env) of a quosure or plain expr.
+top_n_unwrap <- function(x, env) {
+  while (rlang::is_quosure(x)) {
+    env <- rlang::quo_get_env(x)
+    x <- rlang::quo_get_expr(x)
+  }
+  list(expr = x, env = env)
+}
+
+# TRUE iff a quosure sits anywhere inside `expr`.
+top_n_has_quosure <- function(expr) {
+  if (rlang::is_quosure(expr)) return(TRUE)
+  is.call(expr) && any(vapply(as.list(expr), top_n_has_quosure, logical(1)))
+}
+
+# The symbols of `expr`, through nested quosures, as list(vars =, fns =):
+# `fns` are the called function names (`f` of `f()` and of `pkg::f()`),
+# `vars` every other symbol.
+top_n_symbols <- function(expr) {
+  if (rlang::is_quosure(expr)) return(top_n_symbols(rlang::quo_get_expr(expr)))
+  if (is.symbol(expr)) return(list(vars = as.character(expr), fns = character()))
+  if (!is.call(expr)) return(list(vars = character(), fns = character()))
+  head <- expr[[1]]
+  out <- if (is.symbol(head)) {
+    list(vars = character(), fns = as.character(head))
+  } else if (is.call(head) && length(head) == 3L &&
+             (identical(head[[1]], as.name("::")) || identical(head[[1]], as.name(":::")))) {
+    list(vars = character(), fns = as.character(head[[3]]))
+  } else {
+    top_n_symbols(head)
+  }
+  for (arg in as.list(expr)[-1]) {
+    if (rlang::is_missing(arg)) next
+    sub <- top_n_symbols(arg)
+    out$vars <- c(out$vars, sub$vars)
+    out$fns <- c(out$fns, sub$fns)
+  }
+  out
+}
+
+# Evaluate `f()`, undoing any random-number draw it makes. Returns
+# list(value =, rng =): `rng` is TRUE when `f()` moved the RNG, in which case
+# `.Random.seed` has been put back (or removed again) and the caller must not
+# use `value`, but leave the one real evaluation to dplyr.
+# @keywords internal
+top_n_rng_guard <- function(f) {
+  seed_env <- globalenv()
+  had <- exists(".Random.seed", envir = seed_env, inherits = FALSE)
+  old <- if (had) get(".Random.seed", envir = seed_env, inherits = FALSE)
+  value <- f()
+  now <- if (exists(".Random.seed", envir = seed_env, inherits = FALSE)) {
+    get(".Random.seed", envir = seed_env, inherits = FALSE)
+  }
+  moved <- !identical(old, now)
+  if (moved) {
+    if (had) assign(".Random.seed", old, envir = seed_env) else rm(".Random.seed", envir = seed_env)
+  }
+  list(value = value, rng = moved)
+}
+
+# The scalar number a constant `n` expression evaluates to, or NULL (it reads
+# a column or the data mask, errors, draws random numbers, or is not a finite
+# scalar number). dplyr evaluates `n` once per group, so an `n` that advances
+# the RNG (`sample(1:4, 1)`) cannot be folded into one constant: the seed is
+# restored and the caller declines, leaving the single evaluation to dplyr.
+# Other side effects of `n` (a message, a counter) are not detected: the
+# callers decline BEFORE evaluating where they cheaply can, but a rewrite that
+# is declined later still runs a side-effecting `n` once more on the CPU.
+top_n_const <- function(x, env, schema) {
+  if (rlang::is_missing(x)) return(NULL)
+  syms <- top_n_symbols(x)
+  if (any(syms$vars %in% c(schema$names, top_n_mask_pronouns)) ||
+      any(syms$fns %in% top_n_mask_fns)) {
+    return(NULL)
+  }
+  q <- if (rlang::is_quosure(x)) x else rlang::new_quosure(x, env)
+  res <- top_n_rng_guard(function() tryCatch(rlang::eval_tidy(q), error = function(e) NULL))
+  if (res$rng) return(NULL)
+  val <- res$value
+  if (is.numeric(val) && !is.object(val) && length(val) == 1L && is.finite(val)) val else NULL
+}
+
+# TRUE iff `expr` is a call to dplyr's own n() with no arguments.
+top_n_is_n_call <- function(expr, env) {
+  if (!is.call(expr) || length(expr) != 1L) return(FALSE)
+  head <- expr[[1]]
+  if (is.call(head) && length(head) == 3L && as.character(head[[1]]) %in% c("::", ":::")) {
+    return(identical(head[[2]], as.name("dplyr")) && identical(head[[3]], as.name("n")))
+  }
+  is.symbol(head) && identical(as.character(head), "n") &&
+    identical(get0("n", envir = env, mode = "function"), dplyr::n)
+}
+
+# `n` as list(c =, times_n =): the constant, and whether it multiplies n().
+# NULL for anything outside the allowlist.
+top_n_parse_n <- function(n_arg, env, schema) {
+  u <- top_n_unwrap(n_arg, env)
+  const <- top_n_const(n_arg, env, schema)
+  if (!is.null(const)) return(list(c = const, times_n = FALSE))
+  if (top_n_is_n_call(u$expr, u$env)) return(list(c = 1, times_n = TRUE))
+  if (is.call(u$expr) && length(u$expr) == 3L && identical(u$expr[[1]], as.name("*"))) {
+    for (side in 2:3) {
+      mine <- top_n_unwrap(u$expr[[side]], u$env)
+      if (top_n_is_n_call(mine$expr, mine$env)) {
+        const <- top_n_const(u$expr[[5L - side]], u$env, schema)
+        if (!is.null(const)) return(list(c = const, times_n = TRUE))
+      }
+    }
+  }
+  NULL
+}
+
+# TRUE iff `head` (the call head of a dot's expression) names dplyr's own
+# top_n_rank() as seen from the dot's environment.
+top_n_rank_head <- function(head, env) {
+  # dplyr doesn't export top_n_rank(), so only `dplyr:::top_n_rank` can name it
+  if (is.call(head) && length(head) == 3L && identical(head[[1]], as.name(":::"))) {
+    return(identical(head[[2]], as.name("dplyr")) && identical(head[[3]], as.name("top_n_rank")))
+  }
+  is.symbol(head) && identical(as.character(head), "top_n_rank") &&
+    identical(get0("top_n_rank", envir = env, mode = "function"),
+              get("top_n_rank", envir = asNamespace("dplyr")))
+}
+
+# The native `min_rank(...) <= ...` predicate for one top_n_rank() dot, or
+# NULL to leave the dot alone.
+rewrite_top_n_rank_dot <- function(dot, schema) {
+  expr <- rlang::quo_get_expr(dot)
+  env <- rlang::quo_get_env(dot)
+  if (!is.call(expr) || length(expr) != 3L || !is.null(names(expr))) {
+    return(NULL)
+  }
+  if (!top_n_rank_head(expr[[1]], env)) return(NULL)
+
+  # `wt` before `n`: evaluating `n` and then declining would run it twice
+  # (once here, once on the CPU).
+  wt <- top_n_unwrap(expr[[3]], env)
+  if (rlang::is_missing(wt$expr) || top_n_has_quosure(wt$expr)) return(NULL)
+  # Parsing folds the column-free parts of `wt`. One that draws random
+  # numbers (`x * rnorm(1)`) would be drawn here, again for the rewritten dot,
+  # and once more when filter() parses it, where dplyr draws once (per group):
+  # leave such a `wt` to dplyr, with the RNG as it was.
+  parsed <- top_n_rng_guard(function() {
+    tryCatch(ir_parse_expr(wt$expr, wt$env, schema), error = function(e) NULL)
+  })
+  if (parsed$rng) return(NULL)
+  wt_ir <- parsed$value
+  if (is.null(wt_ir)) return(NULL)
+  wt_type <- tryCatch(ir_infer_type(wt_ir, schema), error = function(e) NULL)
+  if (is.null(wt_type) || identical(unname(wt_type), "DICTIONARY32")) return(NULL)
+
+  nn <- top_n_parse_n(expr[[2]], env, schema)
+  if (is.null(nn)) return(NULL)
+
+  bound <- if (nn$times_n) call("*", abs(nn$c), quote(dplyr::n())) else abs(nn$c)
+  # dplyr's own functions, whatever the user's environment binds to these
+  # names (ir_parse_expr() strips the `dplyr::`).
+  rank <- if (nn$c > 0) {
+    rlang::expr(dplyr::min_rank(dplyr::desc(!!wt$expr)))
+  } else {
+    rlang::expr(dplyr::min_rank(!!wt$expr))
+  }
+  new <- rlang::new_quosure(call("<=", rank, bound), wt$env)
+
+  # A rewrite that doesn't parse (unknown column, unsupported wt) is left to
+  # dplyr, which raises its own error or computes the result.
+  ir <- tryCatch(ir_parse_quo(new, schema), error = function(e) NULL)
+  if (is.null(ir)) return(NULL)
+  new
+}
+
+# @param dots filter() quosures
+# @param .data the table being filtered; its schema is read only once a dot
+#   turns out to be a top_n_rank() call
+# @return the dots with each eligible top_n_rank() dot replaced
+# @keywords internal
+rewrite_top_n_rank_dots <- function(dots, .data) {
+  schema <- NULL
+  for (i in seq_along(dots)) {
+    expr <- rlang::quo_get_expr(dots[[i]])
+    if (!is.call(expr) || !top_n_rank_head(expr[[1]], rlang::quo_get_env(dots[[i]]))) next
+    schema <- schema %||% current_schema(.data)
+    new <- rewrite_top_n_rank_dot(dots[[i]], schema)
+    if (!is.null(new)) dots[[i]] <- new
+  }
+  dots
 }
 
 # ir_parse_quo() throws (rather than returning NULL) when a constant-folded

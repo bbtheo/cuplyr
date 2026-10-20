@@ -256,6 +256,21 @@ SEXP gpu_slice_rank(SEXP xptr, int order_col_idx, bool descending, double amount
     }
 
     cudf::column_view order_col = view.column(order_col_idx);
+    // A floating NaN ranks as NA, tied with the real NAs and dropped by
+    // na_rm (vec_rank() and vec_detect_complete() both treat NaN as
+    // missing). cudf orders NaN above +Inf, which put a GPU-computed NaN
+    // first for slice_max(). Only the sort/rank key is nulled; the gathered
+    // rows keep their NaN. Same rule as gpu_window()'s rank frames.
+    std::unique_ptr<cudf::column> nan_nulled;
+    if (order_col.type().id() == cudf::type_id::FLOAT64 ||
+        order_col.type().id() == cudf::type_id::FLOAT32) {
+        auto mask = cudf::nans_to_nulls(order_col);
+        if (mask.second > order_col.null_count()) {
+            nan_nulled = std::make_unique<cudf::column>(order_col);
+            nan_nulled->set_null_mask(std::move(*mask.first), mask.second);
+            order_col = nan_nulled->view();
+        }
+    }
     cudf::size_type nrow = view.num_rows();
     cudf::size_type size = compute_slice_size(amount, is_prop, nrow);
 

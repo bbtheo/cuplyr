@@ -844,7 +844,7 @@ is_opaque_expression <- function(expr_text) {
 #' that actually appear in an AST at all. `do()`/`rows_insert()`/
 #' `rows_append()`/`rows_update()`/`rows_patch()`/`rows_upsert()`/
 #' `rows_delete()`, and every colwise/pick-bearing call (`mutate_at()`,
-#' `top_n()`, `pick()`-inside-an-expression, ...) are whole-call CPU
+#' `pick()`-inside-an-expression, ...) are whole-call CPU
 #' fallbacks (`gpu_fallback()`, R/fallback.R): they materialize any pending
 #' lazy ops via `compute()` FIRST, then run the real dplyr verb on the
 #' collected data and re-upload -- the result always has `lazy_ops = NULL`

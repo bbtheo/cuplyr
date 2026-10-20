@@ -44,7 +44,7 @@ Phase 12 audit note: barrier classification only matters for node TYPES
 that actually appear in an AST at all. \code{do()}/\code{rows_insert()}/
 \code{rows_append()}/\code{rows_update()}/\code{rows_patch()}/\code{rows_upsert()}/
 \code{rows_delete()}, and every colwise/pick-bearing call (\code{mutate_at()},
-\code{top_n()}, \code{pick()}-inside-an-expression, ...) are whole-call CPU
+\code{pick()}-inside-an-expression, ...) are whole-call CPU
 fallbacks (\code{gpu_fallback()}, R/fallback.R): they materialize any pending
 lazy ops via \code{compute()} FIRST, then run the real dplyr verb on the
 collected data and re-upload -- the result always has \code{lazy_ops = NULL}

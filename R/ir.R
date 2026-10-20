@@ -503,6 +503,32 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
     canonical <- ir_op_alias(fn_name)
     args_raw <- as.list(expr)[-1]
 
+    # F29 A0: a rank-family call whose single argument is `desc(e)` ranks
+    # `e` descending. Parse `e` as the value argument and flag the node;
+    # R/window.R turns the flag into the spec's `order_desc`. Any other
+    # `desc()` shape (nested, extra args) parses `desc` as an unknown call
+    # and falls back as before.
+    if (canonical %in% ir_rank_desc_fns && length(args_raw) == 1L) {
+      inner <- ir_unwrap_desc(args_raw[[1]])
+      if (!is.null(inner)) {
+        parsed <- ir_parse_expr(inner, env, schema)
+        if (is.null(parsed)) {
+          return(NULL)
+        }
+        # dplyr's desc() is `-xtfrm(x)`: a character `x` is ranked in the
+        # session collation, which the GPU (bytes) matches only under C.
+        # (A bare min_rank(s) is vec_rank(), C-ordered, so stays native.)
+        if (!session_collation_is_c()) {
+          type <- tryCatch(ir_infer_type(parsed, schema), error = function(e) "STRING")
+          if (identical(unname(type), "STRING")) {
+            return(NULL)
+          }
+        }
+        node <- ir_call(canonical, list(parsed), meta = list(rank_desc = TRUE))
+        return(node)
+      }
+    }
+
     if (canonical %in% names(ir_call_registry)) {
       entry <- ir_call_registry[[canonical]]
 
@@ -1509,6 +1535,33 @@ ir_parse_first_last_nth <- function(expr, env, schema, fn_name) {
   ir_call(fn_name, list(x_ir), meta = list(order_override = order_override))
 }
 
+# Rank-family functions that accept `desc(e)` as their value argument (F29).
+ir_rank_desc_fns <- c("row_number", "min_rank", "dense_rank", "percent_rank",
+                      "cume_dist")
+
+# `e` for a call `desc(e)` / `dplyr::desc(e)` (one argument), else `NULL`.
+# A quosure spliced in by a wrapper (`{{ }}`) is looked through, and `e` then
+# comes back as a quosure of that environment, not the caller's.
+ir_unwrap_desc <- function(expr) {
+  quo_env <- NULL
+  if (rlang::is_quosure(expr)) {
+    quo_env <- rlang::quo_get_env(expr)
+    expr <- rlang::quo_get_expr(expr)
+  }
+  if (!is.call(expr) || length(expr) != 2L || (!is.null(names(expr)) && nzchar(names(expr)[2]))) {
+    return(NULL)
+  }
+  head <- expr[[1]]
+  if (is.call(head) && length(head) == 3 && identical(head[[1]], as.symbol("::")) &&
+      identical(head[[2]], as.symbol("dplyr"))) {
+    head <- head[[3]]
+  }
+  if (!is.symbol(head) || !identical(as.character(head), "desc")) {
+    return(NULL)
+  }
+  if (is.null(quo_env)) expr[[2]] else rlang::new_quosure(expr[[2]], quo_env)
+}
+
 #' Parse a window "order by" reference (`order_by=` argument, or
 #' `order_by()`/`with_order()`'s own first argument) into a schema column
 #' reference
@@ -2078,9 +2131,13 @@ ir_parse_ntile <- function(expr, env, schema) {
       return(NULL)
     }
     rn <- ir_call("row_number", list(x_ir))
-    indicator <- ir_call("if_else", list(
-      ir_call("is.na", list(x_ir)), ir_lit_from_r(0L), ir_lit_from_r(1L)
-    ))
+    # A NaN computed on the GPU is not null; dplyr counts it as missing.
+    missing_ir <- ir_call("is.na", list(x_ir))
+    x_type <- tryCatch(ir_infer_type(x_ir, schema), error = function(e) NULL)
+    if (isTRUE(x_type %in% c("FLOAT32", "FLOAT64"))) {
+      missing_ir <- ir_call("|", list(missing_ir, ir_call("!=", list(x_ir, x_ir))))
+    }
+    indicator <- ir_call("if_else", list(missing_ir, ir_lit_from_r(0L), ir_lit_from_r(1L)))
     len <- ir_call("sum", list(indicator))
   } else {
     rn <- ir_call("row_number", list())

@@ -760,6 +760,7 @@ String columns use offset-based storage (Apache Arrow format):
 - Expressions parse through `ir_parse_quo()` (`R/ir.R`) into `make_predicate()` records (`ir`, `cols`, `estimated_cost`, `is_deterministic`, `na_sensitive`); optimizer passes read `pred$cols`, never the IR tree directly
 - Constant expressions (`ir_is_const()` — no column reference anywhere, e.g. `TRUE`, `FALSE`, `rep(TRUE, n)`) never reach the GPU IR path: they're evaluated in R (`eval_tidy` on the original quosure, not the constant-folded IR) so an n-row mask always has a real column to broadcast against; `TRUE` is a genuine no-op, `FALSE`/`NA` build an impossible predicate (`ir_lit_from_r(FALSE)`) that still flows through the normal lazy `push_op()`/`ast_filter` path
 - Comparing a non-STRING column against a STRING literal (or vice versa) is caught by `check_filter_comparison_types()` before lowering, with a message naming the column and its type
+- `top_n()`/`top_frac()` reach `filter()` as a `top_n_rank(n, wt)` dot; `rewrite_top_n_rank_dots()` (`R/filter.R`) rewrites it to `min_rank(desc(wt)) <= n` / `min_rank(wt) <= abs(n)` for a constant `n` or `c * n()` (CPU fallbacks keep the original dots). Rank-family calls with one `desc(e)` argument parse natively (`meta$rank_desc` -> the window spec's `order_desc`)
 - Expressions the IR doesn't recognize fall back to a CPU-eval boolean mask (`filter_eval_mask()`), with no data mask (only expressions that evaluate standalone, e.g. `rep(TRUE, n)`, can succeed there)
 
 ### Mutate Parsing

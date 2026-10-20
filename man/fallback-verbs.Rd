@@ -9,8 +9,6 @@
 \alias{group_modify.tbl_gpu}
 \alias{group_nest.tbl_gpu}
 \alias{nest_by.tbl_gpu}
-\alias{sample_n.tbl_gpu}
-\alias{sample_frac.tbl_gpu}
 \title{CPU fallback methods for dplyr verbs without a GPU-native implementation}
 \usage{
 \method{rowwise}{tbl_gpu}(.data, ...)
@@ -36,10 +34,6 @@
 \method{group_nest}{tbl_gpu}(.tbl, ..., .key = "data", keep = FALSE)
 
 \method{nest_by}{tbl_gpu}(.data, ..., .key = "data", .keep = FALSE)
-
-\method{sample_n}{tbl_gpu}(tbl, size, replace = FALSE, weight = NULL, .env = NULL, ...)
-
-\method{sample_frac}{tbl_gpu}(tbl, size = 1, replace = FALSE, weight = NULL, .env = NULL, ...)
 }
 \arguments{
 \item{.data, x, y, tbl, .tbl}{A \code{tbl_gpu} object (or, for \code{y}/two-table verbs,

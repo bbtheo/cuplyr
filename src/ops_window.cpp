@@ -414,6 +414,24 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
         // desugar (min_rank(order_col, order_desc = TRUE) on a column with
         // nulls silently produced ranks offset by the group's null count,
         // e.g. 3,4,5 instead of 1,2,3, until this fix).
+        //
+        // F29: in a frame that ranks, a floating order column is read with
+        // NaN as null. dplyr's ranks are vec_rank(incomplete = "na"), and
+        // vctrs counts NaN as incomplete, so a NaN gets an NA rank and is left
+        // out of percent_rank()/cume_dist()'s non-NA count. cudf instead
+        // orders NaN above +Inf, and null_policy::EXCLUDE only skips nulls,
+        // so a GPU-computed NaN (0 / 0) would rank first under DESCENDING.
+        // Nulling it here, before the sort, also keeps the presorted rank
+        // scan's input sorted (NaN rows land with the nulls, last). Only the
+        // sort key changes: value columns (cumsum(x), lag(x), ...) are
+        // separate views and keep their NaN. A non-rank spec sharing the
+        // frame (lag(y, order_by = x) next to min_rank(x)) sees NaN ordered
+        // with the NAs, in row order, which is also vctrs' order.
+        bool frame_ranks = false;
+        for (const auto& sp : specs) {
+            if (is_rank_fn(sp.fn) && sp.has_value) frame_ranks = true;
+        }
+        std::vector<std::unique_ptr<cudf::column>> nan_nulled_keepalive;
         std::vector<cudf::column_view> order_col_views;
         std::vector<cudf::order> order_col_orders;
         std::vector<cudf::null_order> order_col_null_precs;
@@ -422,7 +440,18 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
             if (idx < 0 || idx >= n_input) {
                 Rcpp::stop("gpu_window: order column index out of bounds: %d", idx);
             }
-            order_col_views.push_back(view.column(idx));
+            cudf::column_view order_col = view.column(idx);
+            bool is_float = order_col.type().id() == cudf::type_id::FLOAT64 ||
+                            order_col.type().id() == cudf::type_id::FLOAT32;
+            if (frame_ranks && is_float) {
+                auto mask = cudf::nans_to_nulls(order_col);
+                if (mask.second > order_col.null_count()) {
+                    nan_nulled_keepalive.push_back(std::make_unique<cudf::column>(order_col));
+                    nan_nulled_keepalive.back()->set_null_mask(std::move(*mask.first), mask.second);
+                    order_col = nan_nulled_keepalive.back()->view();
+                }
+            }
+            order_col_views.push_back(order_col);
             bool desc = (i < order_desc_r.size()) && static_cast<bool>(order_desc_r[i]);
             order_col_orders.push_back(desc ? cudf::order::DESCENDING : cudf::order::ASCENDING);
             order_col_null_precs.push_back(desc ? cudf::null_order::BEFORE : cudf::null_order::AFTER);
@@ -626,8 +655,9 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 // `order_col_orders[0]` / `order_col_null_precs[0]` -- the
                 // SAME (possibly direction-flipped, nulls-last) null
                 // precedence step 1's physical sort used for this column.
-                cudf::size_type pos = value_pos.at(sp.value_idx);
-                cudf::column_view value_view = work_view.column(pos);
+                // It is read from the order position of `work_view`, not
+                // the value position: only the order copy has NaN as null.
+                cudf::column_view value_view = work_view.column(n_group_cols);
 
                 cudf::groupby::scan_request req;
                 req.values = value_view;
@@ -728,8 +758,8 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 continue;
             }
 
-            cudf::size_type pos = value_pos.at(specs[static_cast<size_t>(si)].value_idx);
-            cudf::column_view value_view = work_view.column(pos);
+            // The order position (NaN read as null), as in the rank scan.
+            cudf::column_view value_view = work_view.column(n_group_cols);
 
             std::vector<cudf::groupby::aggregation_request> pr_requests(2);
             pr_requests[0].values = value_view;

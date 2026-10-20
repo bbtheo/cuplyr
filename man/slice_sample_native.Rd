@@ -4,7 +4,7 @@
 \alias{slice_sample_native}
 \title{GPU-native \code{slice_sample()} (Phase 5, task W8)}
 \usage{
-slice_sample_native(.data, gm, amount, is_prop, replace)
+slice_sample_native(.data, gm, amount, is_prop, replace, fallback)
 }
 \arguments{
 \item{.data}{A \code{tbl_gpu} object (already materialized if it had pending
@@ -17,9 +17,14 @@ which a lazy AST doesn't have)}
 \item{amount, is_prop}{As resolved by \code{resolve_slice_amount()}}
 
 \item{replace}{Logical scalar, \code{slice_sample()}'s own \verb{replace=}}
+
+\item{fallback}{\verb{function(tbl)} running dplyr's \code{slice_sample()} on the
+CPU. Used when a group is empty and \code{replace = TRUE} still asks for
+rows: \code{sample.int(0, size, replace = TRUE)} fails, and dplyr raises that
+from slice(), after drawing the groups before it, so dplyr runs it.}
 }
 \value{
-A new (always eager) \code{tbl_gpu}
+A new (always eager) \code{tbl_gpu}, or \code{fallback()}'s result
 }
 \description{
 Reproduces dplyr's own RNG stream bit-for-bit by generating row indices

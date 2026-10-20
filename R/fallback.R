@@ -466,29 +466,3 @@ nest_by.tbl_gpu <- function(.data, ..., .key = "data", .keep = FALSE) {
     dplyr::nest_by(tbl, ..., .key = .key, .keep = .keep)
   })
 }
-
-# =============================================================================
-# Superseded sampling/top-n verbs
-# =============================================================================
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr sample_n
-sample_n.tbl_gpu <- function(tbl, size, replace = FALSE, weight = NULL,
-                              .env = NULL, ...) {
-  weight_quo <- rlang::enquo(weight)
-  gpu_fallback("sample_n", tbl, function(t) {
-    rlang::inject(dplyr::sample_n(t, size, replace = replace, weight = !!weight_quo, ...))
-  })
-}
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr sample_frac
-sample_frac.tbl_gpu <- function(tbl, size = 1, replace = FALSE, weight = NULL,
-                                 .env = NULL, ...) {
-  weight_quo <- rlang::enquo(weight)
-  gpu_fallback("sample_frac", tbl, function(t) {
-    rlang::inject(dplyr::sample_frac(t, size, replace = replace, weight = !!weight_quo, ...))
-  })
-}

@@ -465,11 +465,28 @@ slice_grouped_native <- function(.data, group_mode, group_cols, mode,
   }
 
   na_key_name <- NULL
+  sort_key_name <- order_col
   if (identical(mode, "rank")) {
     schema <- current_schema(result)
     na_key_name <- unique_temp_name("..slice_na..", schema$names)
-    na_step <- make_mutate_expr(na_key_name, ir_call("is.na", list(ir_col(order_col))), schema)
-    result <- push_op(result, ast_mutate(input_node(result), list(na_step)))
+    # dplyr ranks NaN as missing (vec_rank(nan_distinct = FALSE), and
+    # vec_detect_complete() for na_rm). A NaN computed on the GPU is a
+    # number, not a null, so a FLOAT order column also tests `x != x`.
+    is_float <- schema$types[[match(order_col, schema$names)]] %in% c("FLOAT32", "FLOAT64")
+    na_ir <- ir_call("is.na", list(ir_col(order_col)))
+    if (is_float) {
+      na_ir <- ir_call("|", list(na_ir, ir_call("!=", list(ir_col(order_col), ir_col(order_col)))))
+    }
+    steps <- list(make_mutate_expr(na_key_name, na_ir, schema))
+    # The arrange's value key must also tie NaN with NA, so the missing rows
+    # keep their row order (dplyr's stable order() over tied ranks); cudf
+    # sorts NaN and null apart. Every missing row gets the same constant.
+    if (is_float) {
+      sort_key_name <- unique_temp_name("..slice_key..", c(schema$names, na_key_name))
+      key_ir <- ir_call("if_else", list(na_ir, ir_lit_from_r(0), ir_col(order_col)))
+      steps <- c(steps, list(make_mutate_expr(sort_key_name, key_ir, schema)))
+    }
+    result <- push_op(result, ast_mutate(input_node(result), steps))
   }
 
   # Group-order key: group_by() sorts by group_cols ascending (NA-key group
@@ -500,7 +517,7 @@ slice_grouped_native <- function(.data, group_mode, group_cols, mode,
   if (identical(mode, "rank")) {
     sort_specs <- c(sort_specs,
                     list(list(col_name = na_key_name, descending = FALSE)),
-                    list(list(col_name = order_col, descending = isTRUE(descending))))
+                    list(list(col_name = sort_key_name, descending = isTRUE(descending))))
   }
 
   result <- push_op(result, ast_arrange(input_node(result), sort_specs, groups = character()))
@@ -732,7 +749,12 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 # plain tibble in group_data() order.
 # @keywords internal
 slice_group_keys <- function(.data) {
-  gd <- compute_group_data(.data)
+  slice_group_keys_of(compute_group_data(.data))
+}
+
+# The key columns of a group_data() tibble, as a plain tibble.
+# @keywords internal
+slice_group_keys_of <- function(gd) {
   keys <- gd[setdiff(names(gd), ".rows")]
   attr(keys, ".drop") <- NULL
   keys
@@ -1182,52 +1204,193 @@ compute_slice_sample_size <- function(amount, is_prop, n, replace) {
 #' @param gm A `list(mode, group_cols)` as returned by `slice_group_mode()`
 #' @param amount,is_prop As resolved by `resolve_slice_amount()`
 #' @param replace Logical scalar, `slice_sample()`'s own `replace=`
-#' @return A new (always eager) `tbl_gpu`
+#' @param fallback `function(tbl)` running dplyr's `slice_sample()` on the
+#'   CPU. Used when a group is empty and `replace = TRUE` still asks for
+#'   rows: `sample.int(0, size, replace = TRUE)` fails, and dplyr raises that
+#'   from slice(), after drawing the groups before it, so dplyr runs it.
+#' @return A new (always eager) `tbl_gpu`, or `fallback()`'s result
 #' @keywords internal
-slice_sample_native <- function(.data, gm, amount, is_prop, replace) {
+slice_sample_native <- function(.data, gm, amount, is_prop, replace, fallback) {
   materialized <- if (has_pending_ops(.data)) compute(.data) else .data
-  schema <- materialized$schema
-
-  if (identical(gm$mode, "none")) {
-    nrow <- gpu_dim(materialized$ptr)[1]
-    size <- compute_slice_sample_size(amount, is_prop, nrow, replace)
-    idx <- if (size == 0L) integer(0) else sample.int(nrow, size, replace = replace)
-    out_groups <- character()
-  } else {
-    group_cols <- gm$group_cols
-
-    # "select() + collect() ONLY the group columns" -- built directly from
-    # the existing gpu_select()/collect() primitives rather than routing
-    # through the dplyr::select() S3 generic, since this is an internal
-    # projection with no user-facing meaning of its own.
-    key_col_idx <- match(group_cols, schema$names) - 1L
-    key_ptr <- gpu_select(materialized$ptr, key_col_idx)
-    key_schema <- list(names = group_cols, types = schema$types[key_col_idx + 1L])
-    key_tbl <- collect_frame(new_tbl_gpu(ptr = key_ptr, schema = key_schema))
-
-    rows_list <- if (identical(gm$mode, "group_by")) {
-      dplyr::group_rows(dplyr::group_by(key_tbl, !!!rlang::syms(group_cols)))
-    } else {
-      vctrs::vec_group_loc(key_tbl)$loc
-    }
-
-    idx <- integer(0)
-    for (rows in rows_list) {
-      gsize <- length(rows)
-      size <- compute_slice_sample_size(amount, is_prop, gsize, replace)
-      local_idx <- if (size == 0L) integer(0) else sample.int(gsize, size, replace = replace)
-      idx <- c(idx, rows[local_idx])
-    }
-
-    out_groups <- if (identical(gm$mode, "group_by")) group_cols else character()
+  groups <- slice_sample_groups(materialized, gm)
+  if (any(lengths(groups$rows) == 0L) &&
+      compute_slice_sample_size(amount, is_prop, 0L, replace) > 0) {
+    return(fallback(materialized))
   }
+  slice_sample_gather(materialized, gm, groups, function(gsize) {
+    size <- compute_slice_sample_size(amount, is_prop, gsize, replace)
+    if (size == 0L) integer(0) else sample.int(gsize, size, replace = replace)
+  })
+}
 
+# The groups of `materialized` as `list(rows =, keys =)`: `rows` holds the row
+# indices of each group in the order dplyr draws and concatenates them (see
+# slice_sample_native()), an ungrouped table being one group of every row;
+# `keys` is the group keys in that order (NULL unless group_by()-grouped).
+# A group_by()-grouped table takes both from compute_group_data(), so the
+# empty groups that `.drop = FALSE` and filter()/slice() `.preserve = TRUE`
+# keep are listed too: dplyr draws (or fails to draw) from them as well.
+# @keywords internal
+slice_sample_groups <- function(materialized, gm) {
+  schema <- materialized$schema
+  if (identical(gm$mode, "none")) {
+    return(list(rows = list(seq_len(gpu_dim(materialized$ptr)[1])), keys = NULL))
+  }
+  if (identical(gm$mode, "group_by")) {
+    gd <- compute_group_data(materialized)
+    return(list(rows = as.list(gd$.rows), keys = slice_group_keys_of(gd)))
+  }
+  group_cols <- gm$group_cols
+
+  # "select() + collect() ONLY the group columns" -- built directly from
+  # the existing gpu_select()/collect() primitives rather than routing
+  # through the dplyr::select() S3 generic, since this is an internal
+  # projection with no user-facing meaning of its own.
+  key_col_idx <- match(group_cols, schema$names) - 1L
+  key_ptr <- gpu_select(materialized$ptr, key_col_idx)
+  key_schema <- list(names = group_cols, types = schema$types[key_col_idx + 1L])
+  key_schema$factor_levels <- schema$factor_levels[intersect(group_cols, names(schema$factor_levels))]
+  key_tbl <- collect_frame(new_tbl_gpu(ptr = key_ptr, schema = key_schema))
+  list(rows = vctrs::vec_group_loc(key_tbl)$loc, keys = NULL)
+}
+
+# Draw each group's rows with `draw(group_size)` (the local indices dplyr's
+# sample.int() call for that group returns), in group order, and gather them
+# on the GPU. The grouping of `materialized` stays on the result, as dplyr's
+# slice() leaves it: a `.drop = FALSE` table keeps every group, so when a
+# group ends up empty its keys are fixed on the result (see fixed_keys_of());
+# a `.drop = TRUE` table loses its empty groups.
+# @param groups slice_sample_groups()'s result
+# @keywords internal
+slice_sample_gather <- function(materialized, gm, groups, draw) {
+  rows_list <- groups$rows
+  idx <- vector("list", length(rows_list))
+  for (k in seq_along(rows_list)) {
+    rows <- rows_list[[k]]
+    idx[[k]] <- rows[draw(length(rows))]
+  }
+  emptied <- any(lengths(idx) == 0L)
+  idx <- as.integer(unlist(idx))
+
+  out_groups <- if (identical(gm$mode, "group_by")) gm$group_cols else character()
+  group_drop <- if (length(out_groups) > 0L) materialized$group_drop %||% TRUE else TRUE
   new_ptr <- gpu_slice_indices(materialized$ptr, as.double(idx))
   carry_frame_meta(
-    new_tbl_gpu(ptr = new_ptr, schema = schema, groups = out_groups,
-                group_drop = if (length(out_groups) > 0L) materialized$group_drop %||% TRUE else TRUE),
+    new_tbl_gpu(ptr = new_ptr, schema = materialized$schema, groups = out_groups,
+                group_drop = group_drop,
+                fixed_keys = if (emptied && isFALSE(group_drop)) groups$keys),
     materialized
   )
+}
+
+# --- sample_n() / sample_frac() (F29) -----------------------------------------
+#
+# dplyr: `slice(tbl, local({ size <- check_size(size, n(), replace);
+# sample.int(n(), size, replace = replace) }))` per group (sample_frac: `size
+# <- round(n() * check_frac(size, replace))`), the same group order and output
+# order as slice_sample(). Native when dplyr's calls can be reproduced without
+# the data mask: no `weight`, a constant `size`, and no group that would make
+# dplyr raise (it raises from inside slice(), after drawing earlier groups, so
+# those calls run on the CPU and dplyr gives the error and the RNG state).
+
+# The size of sample_n()/sample_frac() when it is a non-negative constant that
+# evaluating leaves the RNG untouched, else NULL.
+# @keywords internal
+sample_const_size <- function(size_quo, schema) {
+  size <- top_n_const(size_quo, rlang::quo_get_env(size_quo), schema)
+  if (is.null(size) || size < 0) NULL else size
+}
+
+# Shared body of sample_n.tbl_gpu() and sample_frac.tbl_gpu().
+# @param frac TRUE for sample_frac()
+# @param fallback function(tbl) running dplyr's verb on the CPU, with the size
+#   and weight quosures injected and `.env` forwarded
+# @keywords internal
+sample_rows_impl <- function(tbl, size_quo, replace, weight_quo, env, frac, fallback) {
+  verb <- if (frac) "sample_frac" else "sample_n"
+  cpu <- function(x) gpu_fallback(verb, x, fallback)
+  was_lazy <- identical(tbl$exec_mode, "lazy")
+
+  if (!rlang::quo_is_null(weight_quo) || !(isTRUE(replace) || isFALSE(replace)) ||
+      length(current_schema(tbl)$names) == 0L) {
+    return(cpu(tbl))
+  }
+  size <- sample_const_size(size_quo, current_schema(tbl))
+  if (is.null(size)) return(cpu(tbl))
+
+  materialized <- if (has_pending_ops(tbl)) compute(tbl) else tbl
+  gm <- list(mode = if (length(materialized$groups) > 0L) "group_by" else "none",
+             group_cols = materialized$groups)
+  groups <- slice_sample_groups(materialized, gm)
+  gsizes <- lengths(groups$rows)
+  ok <- if (frac) {
+    size <= 1 || replace
+  } else {
+    # sample.int() cannot draw from an empty group with replacement
+    all(size <= gsizes | replace) && !(replace && size > 0 && any(gsizes == 0L))
+  }
+  if (!ok) {
+    res <- cpu(materialized)
+    return(if (was_lazy && is_tbl_gpu(res)) as_lazy(res) else res)
+  }
+
+  if (!is.null(env)) {
+    rlang::inform(if (frac) {
+      "`.env` is deprecated and no longer has any effect"
+    } else {
+      "`sample_n()` argument `.env` is deprecated and no longer has any effect."
+    })
+  }
+  result <- slice_sample_gather(materialized, gm, groups, function(gsize) {
+    n_draw <- if (frac) round(gsize * size) else size
+    sample.int(gsize, n_draw, replace = replace)
+  })
+  if (was_lazy) as_lazy(result) else result
+}
+
+#' Sample rows by number or fraction
+#'
+#' `sample_n()` and `sample_frac()` (superseded by [slice_sample()] in dplyr)
+#' on a GPU table. Without `weight` they draw row indices on the CPU with the
+#' exact `sample.int()` calls dplyr makes, so the same `set.seed()` gives the
+#' same rows, and gather them on the GPU like [slice_sample.tbl_gpu()]. A
+#' `weight`, a `size` that reads the data (a column, `n()`) or draws random
+#' numbers, and any call dplyr would raise an error for (e.g. a `size` larger
+#' than a group without `replace`) run on the CPU through [gpu_fallback()],
+#' where dplyr raises the error and consumes the RNG itself.
+#'
+#' @param tbl A `tbl_gpu` object.
+#' @param size Number of rows (`sample_n()`) or fraction of rows
+#'   (`sample_frac()`) to sample, per group.
+#' @param replace Whether to sample with replacement.
+#' @param weight Sampling weights; always run on the CPU.
+#' @param .env Deprecated, as in dplyr.
+#' @param ... Passed on to dplyr when the call runs on the CPU.
+#' @return A `tbl_gpu` object with the sampled rows, grouped like `tbl`.
+#' @name sample_n.tbl_gpu
+#' @export
+#' @importFrom dplyr sample_n
+sample_n.tbl_gpu <- function(tbl, size, replace = FALSE, weight = NULL,
+                              .env = NULL, ...) {
+  size_quo <- rlang::enquo(size)
+  weight_quo <- rlang::enquo(weight)
+  sample_rows_impl(tbl, size_quo, replace, weight_quo, .env, frac = FALSE, function(t) {
+    rlang::inject(dplyr::sample_n(t, !!size_quo, replace = replace, weight = !!weight_quo,
+                                  .env = .env, ...))
+  })
+}
+
+#' @rdname sample_n.tbl_gpu
+#' @export
+#' @importFrom dplyr sample_frac
+sample_frac.tbl_gpu <- function(tbl, size = 1, replace = FALSE, weight = NULL,
+                                 .env = NULL, ...) {
+  size_quo <- rlang::enquo(size)
+  weight_quo <- rlang::enquo(weight)
+  sample_rows_impl(tbl, size_quo, replace, weight_quo, .env, frac = TRUE, function(t) {
+    rlang::inject(dplyr::sample_frac(t, !!size_quo, replace = replace, weight = !!weight_quo,
+                                     .env = .env, ...))
+  })
 }
 
 #' Sample rows
@@ -1293,15 +1456,19 @@ slice_sample.tbl_gpu <- function(.data, ..., n, prop, by = NULL,
     if (!is.null(zero)) return(zero)
   }
 
+  cpu <- function(x) {
+    gpu_fallback("slice_sample", x, function(tbl) {
+      rlang::inject(dplyr::slice_sample(tbl, !!!dots, !!!np, by = !!by_quo,
+                                         weight_by = !!weight_quo, replace = replace))
+    })
+  }
+
   if (length(dots) == 0 && rlang::quo_is_null(weight_quo)) {
     was_lazy <- identical(.data$exec_mode, "lazy")
-    result <- slice_sample_native(.data, gm, amt$amount, amt$is_prop, replace)
-    if (was_lazy) result <- as_lazy(result)
+    result <- slice_sample_native(.data, gm, amt$amount, amt$is_prop, replace, cpu)
+    if (was_lazy && is_tbl_gpu(result)) result <- as_lazy(result)
     return(result)
   }
 
-  gpu_fallback("slice_sample", .data, function(tbl) {
-    rlang::inject(dplyr::slice_sample(tbl, !!!dots, !!!np, by = !!by_quo,
-                                       weight_by = !!weight_quo, replace = replace))
-  })
+  cpu(.data)
 }

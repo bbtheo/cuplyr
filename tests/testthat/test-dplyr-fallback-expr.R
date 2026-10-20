@@ -179,24 +179,24 @@ test_that("summarise()'s CPU fallback restores grouping metadata correctly (.gro
 # filter(top_n_rank(...)), a shape the IR has never understood natively)
 # =============================================================================
 
-test_that("dplyr::top_n() falls back and works end-to-end (previously broken)", {
+test_that("dplyr::top_n() runs natively and matches dplyr (F29)", {
   skip_if_no_gpu()
-  withr::local_options(cuplyr.fallback = "warn")
+  withr::local_options(cuplyr.fallback = "error")
 
   df <- tibble::tibble(x = c(5, 3, 8, 1, 9, 2, 7))
   pipeline <- function(d) dplyr::top_n(d, 3, x)
 
-  expect_warning(expect_same_as_dplyr(df, pipeline, arrange_by = "x"), "fell back to CPU evaluation")
+  expect_same_as_dplyr(df, pipeline, arrange_by = "x")
 })
 
-test_that("dplyr::top_frac() falls back and works end-to-end (previously broken)", {
+test_that("dplyr::top_frac() runs natively and matches dplyr (F29)", {
   skip_if_no_gpu()
-  withr::local_options(cuplyr.fallback = "warn")
+  withr::local_options(cuplyr.fallback = "error")
 
   df <- tibble::tibble(x = c(5, 3, 8, 1, 9, 2, 7, 4))
   pipeline <- function(d) dplyr::top_frac(d, 0.5, x)
 
-  expect_warning(expect_same_as_dplyr(df, pipeline, arrange_by = "x"), "fell back to CPU evaluation")
+  expect_same_as_dplyr(df, pipeline, arrange_by = "x")
 })
 
 # =============================================================================
