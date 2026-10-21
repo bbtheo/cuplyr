@@ -2,7 +2,6 @@
 % Please edit documentation in R/fallback.R
 \name{fallback-verbs}
 \alias{fallback-verbs}
-\alias{rowwise.tbl_gpu}
 \alias{do.tbl_gpu}
 \alias{nest_join.tbl_gpu}
 \alias{group_map.tbl_gpu}
@@ -11,8 +10,6 @@
 \alias{nest_by.tbl_gpu}
 \title{CPU fallback methods for dplyr verbs without a GPU-native implementation}
 \usage{
-\method{rowwise}{tbl_gpu}(.data, ...)
-
 \method{do}{tbl_gpu}(.data, ...)
 
 \method{nest_join}{tbl_gpu}(

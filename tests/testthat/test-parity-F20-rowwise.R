@@ -1,12 +1,13 @@
-# F20: rowwise() semantics on tbl_gpu.
+# F20: rowwise() semantics on tbl_gpu (contract revised by F49).
 #
-# Contract (see scratchpad/parity/features/F20.md, ## Design):
-# - rowwise() of a tbl_gpu runs on the CPU and returns dplyr's own rowwise_df;
-#   every verb after it is dplyr's, so results match dplyr exactly.
+# Contract (see scratchpad/parity/features/F20.md and F49.md, ## Design):
+# - rowwise() of a tbl_gpu is a rowwise tbl_gpu (F49; F20 ran it on the CPU),
+#   and every verb after it matches dplyr exactly: collect() gives dplyr's
+#   rowwise_df.
 # - No path silently turns a rowwise_df into a GPU table that is grouped by
 #   the rowwise vars (the F31 side effect) or that quietly drops rowwise-ness:
-#   * tbl_gpu()/as_tbl_gpu() of a rowwise_df upload it UNGROUPED and raise a
-#     classed warning `cuplyr_warning_rowwise_upload`;
+#   * tbl_gpu()/as_tbl_gpu() of a rowwise_df upload it as a rowwise tbl_gpu,
+#     silently (F49; F20 uploaded it ungrouped with a classed warning);
 #   * a rowwise_df on the "other side" of a two-table verb (join y, set-op y,
 #     a non-first bind input) is uploaded silently and ungrouped, since dplyr
 #     ignores y's grouping there;
@@ -44,44 +45,52 @@ expect_same_rowwise <- function(df, pipeline, lazy = FALSE) {
 # A1. Upload of a rowwise_df
 # ---------------------------------------------------------------------------
 
-test_that("tbl_gpu(<rowwise_df>) uploads ungrouped with a classed warning", {
+test_that("tbl_gpu(<rowwise_df>) uploads a rowwise tbl_gpu without a warning (F49)", {
   skip_if_no_gpu()
   df <- f20_df()
 
   for (rdf in list(dplyr::rowwise(df, g), dplyr::rowwise(df), dplyr::rowwise(df, id, g))) {
-    expect_warning(gt <- tbl_gpu(rdf), class = "cuplyr_warning_rowwise_upload")
+    expect_no_warning(gt <- tbl_gpu(rdf))
     expect_true(is_tbl_gpu(gt))
-    expect_identical(dplyr::group_vars(gt), character())
-    expect_equal(tibble::as_tibble(collect(gt)), tibble::as_tibble(dplyr::ungroup(rdf)))
+    expect_identical(dplyr::group_vars(gt), dplyr::group_vars(rdf))
+    got <- collect(gt)
+    expect_identical(class(got), class(rdf))
+    expect_equal(got, rdf)
   }
 })
 
-test_that("tbl_gpu(<rowwise_df>, lazy = TRUE) and as_tbl_gpu() follow the same rule", {
+test_that("tbl_gpu(<rowwise_df>, lazy = TRUE) and as_tbl_gpu() follow the same rule (F49)", {
   skip_if_no_gpu()
   rdf <- dplyr::rowwise(f20_df(), g)
 
-  expect_warning(gl <- tbl_gpu(rdf, lazy = TRUE), class = "cuplyr_warning_rowwise_upload")
+  expect_no_warning(gl <- tbl_gpu(rdf, lazy = TRUE))
   expect_identical(gl$exec_mode, "lazy")
-  expect_identical(dplyr::group_vars(gl), character())
+  expect_identical(dplyr::group_vars(gl), "g")
+  expect_s3_class(collect(gl), "rowwise_df")
 
-  expect_warning(ga <- as_tbl_gpu(rdf), class = "cuplyr_warning_rowwise_upload")
-  expect_identical(dplyr::group_vars(ga), character())
+  expect_no_warning(ga <- as_tbl_gpu(rdf))
+  expect_identical(dplyr::group_vars(ga), "g")
+  expect_s3_class(collect(ga), "rowwise_df")
 })
 
-test_that("an uploaded rowwise_df is not secretly grouped by its rowwise vars", {
+test_that("an uploaded rowwise_df computes per row, not per rowwise-var group", {
   skip_if_no_gpu()
   rdf <- dplyr::rowwise(f20_df(), g)
-  gt <- suppressWarnings(tbl_gpu(rdf))
+  gt <- tbl_gpu(rdf)
 
-  # Whole-table aggregates, exactly as on dplyr::ungroup(rdf).
-  expected <- dplyr::ungroup(rdf) |>
-    dplyr::mutate(m = mean(c), n = dplyr::n())
+  # Per-row aggregates, exactly as on the rowwise_df itself.
+  expected <- rdf |> dplyr::mutate(m = mean(c), n = dplyr::n())
   got <- gt |> dplyr::mutate(m = mean(c), n = dplyr::n()) |> collect()
-  expect_equal(tibble::as_tibble(got), tibble::as_tibble(expected))
+  expect_identical(class(got), class(expected))
+  expect_equal(got, expected)
 
+  withr::local_options(dplyr.summarise.inform = FALSE)
+  expected_s <- rdf |> dplyr::summarise(total = sum(c))
   s <- gt |> dplyr::summarise(total = sum(c))
-  expect_identical(dplyr::group_vars(s), character())
-  expect_equal(tibble::as_tibble(collect(s)), tibble::tibble(total = 150L))
+  expect_identical(dplyr::group_vars(s), "g")
+  got_s <- collect(s)
+  expect_identical(class(got_s), class(expected_s))
+  expect_equal(got_s, expected_s)
 })
 
 test_that("a grouped (non-rowwise) upload still keeps its groups, without the warning", {
@@ -177,10 +186,11 @@ test_that("bind_cols() with a rowwise_df first input returns dplyr's rowwise_df"
 })
 
 # ---------------------------------------------------------------------------
-# A2. rowwise() of a tbl_gpu: dplyr's rowwise_df and dplyr's verbs after it
+# A2. rowwise() of a tbl_gpu: a rowwise tbl_gpu that collects to dplyr's
+# rowwise_df, and verbs after it that match dplyr's
 # ---------------------------------------------------------------------------
 
-test_that("rowwise() of a tbl_gpu returns dplyr's rowwise_df (eager and lazy)", {
+test_that("rowwise() of a tbl_gpu collects to dplyr's rowwise_df (eager and lazy)", {
   skip_if_no_gpu()
   df <- f20_df()
   for (lazy in c(FALSE, TRUE)) {
@@ -278,7 +288,7 @@ test_that("ungroup() after rowwise() gives dplyr's plain tibble", {
   })
 })
 
-test_that("summarise(.groups = \"rowwise\") on a tbl_gpu returns dplyr's rowwise_df", {
+test_that("summarise(.groups = \"rowwise\") on a tbl_gpu collects to dplyr's rowwise_df", {
   skip_if_no_gpu()
   df <- f20_df()
   for (lazy in c(FALSE, TRUE)) {

@@ -41,6 +41,9 @@ NULL
 #' @importFrom dplyr rows_insert
 rows_insert.tbl_gpu <- function(x, y, by = NULL, ..., conflict = c("error", "ignore"),
                                 copy = FALSE, in_place = FALSE) {
+  if (is_rowwise_gpu(x)) {
+    return(rowwise_cpu(x, "rows_insert", tables = "y"))
+  }
   rlang::check_dots_empty()
   rows_run("rows_insert", x, y, by, copy, in_place, list(conflict = conflict))
 }
@@ -49,6 +52,9 @@ rows_insert.tbl_gpu <- function(x, y, by = NULL, ..., conflict = c("error", "ign
 #' @export
 #' @importFrom dplyr rows_append
 rows_append.tbl_gpu <- function(x, y, ..., copy = FALSE, in_place = FALSE) {
+  if (is_rowwise_gpu(x)) {
+    return(rowwise_cpu(x, "rows_append", tables = "y"))
+  }
   rlang::check_dots_empty()
   rows_run("rows_append", x, y, NULL, copy, in_place, list())
 }
@@ -58,6 +64,9 @@ rows_append.tbl_gpu <- function(x, y, ..., copy = FALSE, in_place = FALSE) {
 #' @importFrom dplyr rows_update
 rows_update.tbl_gpu <- function(x, y, by = NULL, ..., unmatched = c("error", "ignore"),
                                 copy = FALSE, in_place = FALSE) {
+  if (is_rowwise_gpu(x)) {
+    return(rowwise_cpu(x, "rows_update", tables = "y"))
+  }
   rlang::check_dots_empty()
   rows_run("rows_update", x, y, by, copy, in_place, list(unmatched = unmatched))
 }
@@ -67,6 +76,9 @@ rows_update.tbl_gpu <- function(x, y, by = NULL, ..., unmatched = c("error", "ig
 #' @importFrom dplyr rows_patch
 rows_patch.tbl_gpu <- function(x, y, by = NULL, ..., unmatched = c("error", "ignore"),
                                copy = FALSE, in_place = FALSE) {
+  if (is_rowwise_gpu(x)) {
+    return(rowwise_cpu(x, "rows_patch", tables = "y"))
+  }
   rlang::check_dots_empty()
   rows_run("rows_patch", x, y, by, copy, in_place, list(unmatched = unmatched))
 }
@@ -75,6 +87,9 @@ rows_patch.tbl_gpu <- function(x, y, by = NULL, ..., unmatched = c("error", "ign
 #' @export
 #' @importFrom dplyr rows_upsert
 rows_upsert.tbl_gpu <- function(x, y, by = NULL, ..., copy = FALSE, in_place = FALSE) {
+  if (is_rowwise_gpu(x)) {
+    return(rowwise_cpu(x, "rows_upsert", tables = "y"))
+  }
   rlang::check_dots_empty()
   rows_run("rows_upsert", x, y, by, copy, in_place, list())
 }
@@ -84,6 +99,9 @@ rows_upsert.tbl_gpu <- function(x, y, by = NULL, ..., copy = FALSE, in_place = F
 #' @importFrom dplyr rows_delete
 rows_delete.tbl_gpu <- function(x, y, by = NULL, ..., unmatched = c("error", "ignore"),
                                 copy = FALSE, in_place = FALSE) {
+  if (is_rowwise_gpu(x)) {
+    return(rowwise_cpu(x, "rows_delete", tables = "y"))
+  }
   rlang::check_dots_empty()
   rows_run("rows_delete", x, y, by, copy, in_place, list(unmatched = unmatched))
 }

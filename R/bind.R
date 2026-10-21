@@ -404,20 +404,29 @@ bind_cols_gpu <- function(dots, .name_repair = "unique", call = rlang::caller_en
   if (bind_has_meta(first)) carry_frame_meta(out, first) else out
 }
 
-# A rowwise_df first input decides the result's class (a rowwise_df), which a
-# tbl_gpu can't hold: collect the tbl_gpu inputs and let dplyr bind on the CPU.
+# A rowwise first input (a host rowwise_df, or a rowwise tbl_gpu, F49) decides
+# the result's class (a rowwise_df): collect the tbl_gpu inputs and let dplyr
+# bind on the CPU. With a rowwise tbl_gpu first the result goes back up as a
+# rowwise tbl_gpu, like any other fallback.
 bind_first_is_rowwise <- function(dots) {
-  length(dots) > 0L && inherits(dots[[1L]], "rowwise_df")
+  length(dots) > 0L && (inherits(dots[[1L]], "rowwise_df") || is_rowwise_gpu(dots[[1L]]))
 }
 
 bind_rowwise_first <- function(verb, dots, ...) {
   cuplyr_fallback_notify(verb, "a rowwise data frame as the first input")
-  dots <- lapply(dots, collect_other_side)
+  first_gpu <- is_rowwise_gpu(dots[[1L]])
+  was_lazy <- first_gpu && identical(dots[[1L]]$exec_mode, "lazy")
+  dots[-1L] <- lapply(dots[-1L], collect_other_side)
+  dots[[1L]] <- if (first_gpu) collect(dots[[1L]]) else dots[[1L]]
   # Called by name so dplyr's errors read `bind_rows()` / `bind_cols()`.
-  switch(verb,
+  out <- switch(verb,
     bind_rows = rlang::inject(dplyr::bind_rows(!!!dots, ...)),
     bind_cols = rlang::inject(dplyr::bind_cols(!!!dots, ...))
   )
+  if (first_gpu && is.data.frame(out) && !has_list_column(out)) {
+    out <- tbl_gpu(out, lazy = was_lazy)
+  }
+  out
 }
 
 # A bind input that has data-frame attributes and a class to hand over: a table,

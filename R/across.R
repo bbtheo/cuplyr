@@ -41,10 +41,10 @@
 #     are plain expressions (rewrite_context_dots()): `cur_group()$key` /
 #     `cur_group()[["key"]]` for a group column, and `length(cur_group_rows())`
 #     (= n()).
-#   - c_across() is rowwise()'s own companion; rowwise() itself is already
-#     a full CPU-fallback verb (R/fallback.R, Phase 2), so c_across() needs
-#     no code here at all -- it only ever appears inside a rowwise-mutate
-#     call, which never reaches this file.
+#   - c_across() is rowwise()'s own companion. It only ever appears inside a
+#     rowwise call, which R/rowwise.R rewrites (sum/mean/min/max/prod of
+#     c_across() become horizontal GPU ops, F49) before it reaches this file;
+#     a c_across() that survives the rewrite sends the whole call to dplyr.
 
 # =============================================================================
 # Small AST helpers
@@ -419,10 +419,11 @@ rewrite_context_expr <- function(expr, keys) {
 #   otherwise)
 # @param by Logical, `TRUE` when `group_cols` come from `.by=` (first-appearance
 #   numbering, no empty groups) rather than group_by()
+# @param rowwise `TRUE` for a rowwise `.data` (F49): the id is the row number
 # @return `list(data = <possibly-materialized-and-joined tbl_gpu>, dots =
 #   <possibly-rewritten dots>)`
 # @keywords internal
-substitute_cur_group_id <- function(.data, dots, group_cols, by = FALSE) {
+substitute_cur_group_id <- function(.data, dots, group_cols, by = FALSE, rowwise = FALSE) {
   has_any <- any(vapply(
     dots, function(q) expr_contains_zero_arg_call(rlang::quo_get_expr(q), "cur_group_id"),
     logical(1)
@@ -437,7 +438,10 @@ substitute_cur_group_id <- function(.data, dots, group_cols, by = FALSE) {
 
   helper_name <- unique_temp_name("..cur_group_id..", current_schema(.data)$names)
 
-  if (length(group_cols) == 0) {
+  if (rowwise) {
+    # A rowwise table: every row is its own group, numbered in row order (F49).
+    new_data <- rowwise_with_row_ids(.data, helper_name)
+  } else if (length(group_cols) == 0) {
     # Ungrouped (or `.by=` resolving to no columns): every row is group 1.
     step <- make_mutate_expr(helper_name, ir_lit_from_r(1L), .data$schema)
     new_data <- push_op(.data, ast_mutate(input_node(.data), list(step)))

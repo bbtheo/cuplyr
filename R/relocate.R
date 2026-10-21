@@ -83,5 +83,8 @@ relocate.tbl_gpu <- function(.data, ..., .before = NULL, .after = NULL) {
   if (length(.data$groups) > 0L) {
     out <- set_groups_by_position(out, .data, loc, schema$names)
   }
-  out
+  if (is_rowwise_gpu(.data) && !is_rowwise_gpu(out)) {
+    out <- rowwise_mark(out, character())  # (a rowwise table with duplicated names, no vars)
+  }
+  rowwise_column_order(out)
 }

@@ -34,3 +34,24 @@ t.tbl_gpu <- function(x) {
 as.environment.tbl_gpu <- function(x) {
   unsupported_base("as.environment", "use `collect()` first.")
 }
+
+# Without these, is.na()/anyNA() answer about the internal fields (all FALSE),
+# so `x[is.na(x)] <- 0` would quietly do nothing.
+
+#' @export
+is.na.tbl_gpu <- function(x) {
+  unsupported_base(
+    "is.na",
+    paste0("use `is.na()` inside `mutate()` or `filter()` (e.g. ",
+           "`mutate(across(everything(), ~ coalesce(.x, 0)))` to replace missing ",
+           "values), or `collect()` first.")
+  )
+}
+
+#' @export
+anyNA.tbl_gpu <- function(x, recursive = FALSE) {
+  unsupported_base(
+    "anyNA",
+    "use `summarise(across(everything(), ~ any(is.na(.x))))`, or `collect()` first."
+  )
+}

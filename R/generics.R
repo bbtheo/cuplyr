@@ -70,7 +70,8 @@ dplyr_row_slice.tbl_gpu <- function(data, i, ...) {
       groups = materialized$groups,
       group_drop = materialized$group_drop,
       exec_mode = materialized$exec_mode,
-      nrow = length(i)
+      nrow = length(i),
+      rowwise = is_rowwise_gpu(materialized)
     ) |> carry_frame_meta(materialized))
   }
 
@@ -85,7 +86,8 @@ dplyr_row_slice.tbl_gpu <- function(data, i, ...) {
     schema = materialized$schema,
     groups = materialized$groups,
     group_drop = materialized$group_drop,
-    exec_mode = materialized$exec_mode
+    exec_mode = materialized$exec_mode,
+    rowwise = is_rowwise_gpu(materialized)
   ), materialized)
 }
 
@@ -237,7 +239,7 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
 
   # (`nrow` is only present on a zero-column table, `fixed_keys` on a table
   # whose group keys were fixed, `bare_df` on a table from a plain data.frame)
-  optional <- c("nrow", "fixed_keys", "unspecified", "bare_df")
+  optional <- c("nrow", "fixed_keys", "unspecified", "bare_df", "rowwise")
   if (is.data.frame(data) &&
       identical(setdiff(names(data), optional), setdiff(tbl_gpu_fields, optional))) {
     # dplyr_reconstruct.grouped_df()/.data.frame(): the template's groups
@@ -248,7 +250,8 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
       groups = groups, exec_mode = data$exec_mode,
       group_drop = if (length(groups) > 0L) template$group_drop %||% TRUE else TRUE,
       nrow = data[["nrow"]], fixed_keys = data[["fixed_keys"]],
-      unspecified = data[["unspecified"]]
+      unspecified = data[["unspecified"]],
+      rowwise = is_rowwise_gpu(template)
     )
     return(carry_frame_meta(out, template))
   }
@@ -259,6 +262,9 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
   out <- tbl_gpu(data, lazy = identical(template$exec_mode, "lazy"))
 
   template_groups <- template$groups
+  if (is_rowwise_gpu(template)) {
+    return(rowwise_mark(out, intersect(template_groups, names(out))))
+  }
   if (length(template_groups) > 0 && all(template_groups %in% names(out))) {
     out <- dplyr::group_by(
       out, !!!rlang::syms(template_groups),
@@ -412,7 +418,7 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
   if (isTRUE(drop) || ungroup_after) {
     x <- dplyr::ungroup(x)
   }
-  x
+  rowwise_column_order(x)
 }
 
 # Column subscript -> integer positions, with tibble's error classes, labels
@@ -491,9 +497,10 @@ bracket_row_positions <- function(i, n, i_arg, call) {
 # `nrow` is the row count of a zero-column table (new_tbl_gpu()); `fixed_keys`
 # the group keys `slice(.preserve = TRUE)` fixed, `unspecified` the names of
 # vctrs::unspecified() columns, `bare_df` that the table came from a plain
-# data.frame (F31); all three only present when set.
+# data.frame (F31), `rowwise` that it is a rowwise table (F49); all four only
+# present when set.
 tbl_gpu_fields <- c("ptr", "schema", "lazy_ops", "groups", "exec_mode", "group_drop", "nrow",
-                    "fixed_keys", "unspecified", "bare_df")
+                    "fixed_keys", "unspecified", "bare_df", "rowwise")
 
 # The cuplyr namespace (this file is evaluated in it).
 cuplyr_ns <- environment()
@@ -526,7 +533,7 @@ is_tbl_gpu_field <- function(name) {
 #' @export
 `$.tbl_gpu` <- function(x, name) {
   if (switch(name, ptr = , schema = , lazy_ops = , groups = , exec_mode = ,
-             group_drop = , nrow = , fixed_keys = , unspecified = , bare_df = TRUE, FALSE) &&
+             group_drop = , nrow = , fixed_keys = , unspecified = , bare_df = , rowwise = TRUE, FALSE) &&
       internal_caller(parent.frame())) {
     return(.subset2(x, name))
   }
@@ -620,7 +627,7 @@ select_one_column <- function(x, col) {
 #' @export
 `$<-.tbl_gpu` <- function(x, name, value) {
   if (switch(name, ptr = , schema = , lazy_ops = , groups = , exec_mode = ,
-             group_drop = , nrow = , fixed_keys = , unspecified = , bare_df = TRUE, FALSE) &&
+             group_drop = , nrow = , fixed_keys = , unspecified = , bare_df = , rowwise = TRUE, FALSE) &&
       internal_caller(parent.frame())) {
     return(set_tbl_gpu_field(x, name, value))
   }
@@ -649,10 +656,40 @@ select_one_column <- function(x, col) {
 
 #' @export
 `[<-.tbl_gpu` <- function(x, i, j, value) {
+  # Whole columns only: `x[j] <- v` and `x[, j] <- v`, through the same
+  # validated stub assignment as `$<-` / `[[<-` (so recycling, new columns,
+  # `NULL` drops and a grouped table's vars behave like the tibble). Every cell
+  # form errors: a row subscript, an empty `x[] <-` / `x[, ] <-`, and a matrix
+  # subscript (tibble's `x[is.na(x)] <- 0`).
+  nsub <- nargs() - 2L  # the subscripts, empty ones included
+  if (nsub == 2L && !missing(i)) {
+    stop_cell_assign("with a row subscript (`x[i, j] <- value`)")
+  }
+  if ((nsub == 1L && missing(i)) || (nsub == 2L && missing(j))) {
+    stop_cell_assign("with an empty subscript (`x[] <- value`, `x[, ] <- value`)")
+  }
+  if (nsub == 1L) {
+    if (is.matrix(i) || is.array(i)) {
+      stop_cell_assign("with a matrix subscript (`x[m] <- value`)")
+    }
+    out <- gpu_assign_column(x, value, function(stub) {
+      stub[i] <- value
+      stub
+    })
+  } else {
+    out <- gpu_assign_column(x, value, function(stub) {
+      stub[, j] <- value
+      stub
+    })
+  }
+  # `[<-.rowwise_df` lists the surviving rowwise vars in column order.
+  rowwise_column_order(out)
+}
+
+stop_cell_assign <- function(what) {
   stop(
-    "`[<-` is not supported for tbl_gpu: it cannot modify cells or several columns in place.\n",
-    "Use `mutate()` to add or change columns, and `x$col <- value` / `x[[\"col\"]] <- value` ",
-    "to set one.",
+    "`[<-` is not supported for tbl_gpu ", what, ": it cannot modify cells in place.\n",
+    "Use `mutate()` to change values, and `x[j] <- value` / `x[, j] <- value` to set whole columns.",
     call. = FALSE
   )
 }
@@ -752,7 +789,11 @@ changed_columns <- function(res) {
 }
 
 # `x` without its groups (what the one-column helpers and the assignment work on).
-ungrouped <- function(x) set_tbl_gpu_field(x, "groups", character())
+# A rowwise table loses its rowwise-ness too: with_surviving_groups() and
+# set_groups_by_position() put it back from the table they are given.
+ungrouped <- function(x) {
+  set_tbl_gpu_field(set_tbl_gpu_field(x, "groups", character()), "rowwise", NULL)
+}
 
 # `out`, a table derived from the ungrouped `x`, regrouped by the group
 # columns of `x` that it still has, keeping `x`'s `.drop` while any survive.
@@ -762,6 +803,7 @@ with_surviving_groups <- function(x, out) {
   keep <- intersect(.subset2(x, "groups"), current_schema(out)$names)
   out <- reset_frame_meta(out, x)
   out <- set_tbl_gpu_field(out, "groups", keep)
+  out <- set_tbl_gpu_field(out, "rowwise", if (is_rowwise_gpu(x)) TRUE)
   set_tbl_gpu_field(out, "group_drop",
                     if (length(keep) > 0L) .subset2(x, "group_drop") %||% TRUE else TRUE)
 }

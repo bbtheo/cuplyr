@@ -310,7 +310,8 @@ ir_foldable_window_fns <- c(
 # F50's factor decode). A user call by one of these names is an unknown
 # function: constant-folded or sent to the CPU, where the user's own function
 # of that name runs.
-ir_internal_ops <- c("cast_int32", "factor_codes", "factor_labels", "cast_float64")
+ir_internal_ops <- c("cast_int32", "factor_codes", "factor_labels", "cast_float64",
+                     "rw_agg_i32", "rw_agg_f64")
 
 # The recursive walker behind ir_parse_quo(). Carries the quosure's
 # environment explicitly (rather than re-deriving a quosure at every
@@ -393,6 +394,14 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       fn_name <- as.character(head)
     } else {
       return(NULL)  # exotic call head (e.g. a function literal): unsupported
+    }
+
+    # F49: an IR node the rowwise rewrite (R/rowwise.R) built for a horizontal
+    # aggregate, embedded as `.cuplyr_rw(<node>, <columns it reads>)`. The
+    # trailing symbols only let walkers of the raw expression (all.vars(), the
+    # constant-folding checks) see the columns; the node is the value.
+    if (identical(fn_name, ".cuplyr_rw")) {
+      return(expr[[2]])
     }
 
     if (fn_name %in% c("&&", "||")) {
@@ -2422,7 +2431,9 @@ ir_cols <- function(ir) {
   }
   switch(ir$kind,
     col = ir$name,
-    lit = character(),
+    # (F49: a rewritten length(c_across(..)) is a literal that still reads its
+    # operand columns, which .keep = "used"/"unused" must see)
+    lit = ir$reads %||% character(),
     vec = character(),
     call = unique(unlist(lapply(ir$args, ir_cols), use.names = FALSE))
   )
@@ -5243,6 +5254,15 @@ ir_call_registry <- list(
                          lower = list(handler = "factor_labels")),
   "cast_float64" = list(arity = 1L, parse = NULL, type = type_float64,
                         lower = list(handler = "cast_float64")),
+  # F49: a rowwise horizontal aggregate (sum/mean/min/max/prod over the
+  # columns of one row); meta$fn and meta$na_rm say which. Built only by
+  # R/rowwise.R's rewrite and embedded in the dot as `.cuplyr_rw(<node>, cols)`
+  # (ir_parse_expr()); `_i32` is the INT32-typed form (integer sum/min/max),
+  # `_f64` the FLOAT64 one. Arguments are columns.
+  "rw_agg_i32" = list(arity = NA_integer_, parse = NULL, type = type_int32,
+                      lower = list(handler = "rw_agg_i32")),
+  "rw_agg_f64" = list(arity = NA_integer_, parse = NULL, type = type_float64,
+                      lower = list(handler = "rw_agg_f64")),
   "substr" = list(arity = 3L, parse = NULL, type = function(arg_types) "STRING",
                    lower = list(handler = "substr")),
   "trimws" = list(arity = 2L, parse = NULL, type = function(arg_types) "STRING",

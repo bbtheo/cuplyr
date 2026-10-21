@@ -72,8 +72,9 @@
 #
 # Comparisons: expect_equal()/expect_identical()/expect_s3_class() collect a
 # tbl_gpu with its grouping restored (so grouped vs ungrouped now differs, as in
-# dplyr), recurse into plain lists and list-columns (C7), and, only when
-# exactly one side came from a tbl_gpu and the other is a bare data.frame,
+# dplyr; a rowwise tbl_gpu, F49, is collected as dplyr's rowwise_df), recurse
+# into plain lists and list-columns (C7), and, only when exactly one side came
+# from a tbl_gpu and the other is a bare data.frame,
 # compare the collected side as a bare data.frame (the harness turned that
 # data.frame fixture into a tbl_gpu; the tibble class is its artifact). Data,
 # names, types, row count and grouping are always compared.
@@ -424,6 +425,12 @@ cf_collect <- function(x) {
     return(x) # collect() itself failed: let the real comparison surface it
   }
   groups <- .subset2(x, "groups")
+  if (isTRUE(.subset2(x, "rowwise"))) {
+    # a rowwise tbl_gpu (F49) is dplyr's rowwise_df of its vars, which collect()
+    # builds itself: only the as_tibble() above is undone
+    rw <- tryCatch(dplyr::rowwise(out, dplyr::all_of(groups)), error = function(e) NULL)
+    return(if (is.null(rw)) out else rw)
+  }
   if (length(groups) > 0) {
     drop <- .subset2(x, "group_drop") %||% TRUE
     grouped <- tryCatch(dplyr::group_by(out, !!!rlang::syms(groups), .drop = drop), error = function(e) NULL)

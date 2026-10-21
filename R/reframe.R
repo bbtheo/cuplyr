@@ -71,6 +71,9 @@ with_reframe_wide <- function(expr) {
 #' @export
 #' @importFrom dplyr reframe
 reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
+  if (is_rowwise_gpu(.data)) {
+    return(rowwise_cpu(.data, "reframe"))
+  }
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(.by)
   caller_env <- rlang::caller_env()

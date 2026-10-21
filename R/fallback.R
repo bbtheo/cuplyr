@@ -16,8 +16,10 @@
 #' The core Phase-2 fallback primitive. Materializes any pending lazy
 #' operations, collects `.data` to a tibble (restoring `group_by()` structure
 #' from `.data$groups` so grouped semantics apply on the CPU exactly as they
-#' would on a real `grouped_df`), applies `expr_fn` (which should call the
-#' real dplyr verb), and re-uploads the result via [tbl_gpu()].
+#' would on a real `grouped_df`; a rowwise table becomes dplyr's `rowwise_df`
+#' of its rowwise vars, F49), applies `expr_fn` (which should call the
+#' real dplyr verb), and re-uploads the result via [tbl_gpu()] (a `rowwise_df`
+#' result goes back up as a rowwise table).
 #'
 #' @param verb_name Character, the verb name to use in the fallback
 #'   notification (e.g. `"transmute"`, `"slice_min"`), gated by
@@ -53,22 +55,42 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE) {
     stop("gpu_fallback() requires a tbl_gpu object.", call. = FALSE)
   }
 
+  # F49: a native rowwise attempt (rowwise_attempt()) abandons itself instead
+  # of running dplyr on part of the call: bail before anything is computed.
+  if (rowwise_state$depth > 0L) {
+    rowwise_bail("a CPU fallback was requested")
+  }
+
   was_lazy <- identical(.data$exec_mode, "lazy")
 
   # Materialize any pending lazy ops first, per Phase 2 design: the fallback
   # always operates on a real, fully-computed GPU table.
   materialized <- if (has_pending_ops(.data)) compute(.data) else .data
 
-  cuplyr_fallback_notify(verb_name, sprintf("%s()", verb_name))
+  # (with the error a failed native rowwise attempt swallowed: rowwise_rerun())
+  # (read once: a fallback inside the rerun's own per-row code is unrelated)
+  why <- rowwise_state$why
+  rowwise_state$why <- NULL
+  cuplyr_fallback_notify(verb_name, if (is.null(why)) {
+    sprintf("%s()", verb_name)
+  } else {
+    sprintf("%s() (the native rowwise attempt failed: %s)", verb_name, why)
+  })
 
   # dplyr sees the frame it would have: the input's attributes and class
-  # (a bare data.frame stays one), so its own result carries them (F31).
-  tbl <- restore_frame_meta(collect_frame(materialized), materialized)
+  # (a bare data.frame stays one), so its own result carries them (F31). A
+  # rowwise table is dplyr's rowwise_df of its vars (F49): never grouped by
+  # them.
+  tbl <- if (is_rowwise_gpu(materialized)) {
+    collect(materialized)
+  } else {
+    restore_frame_meta(collect_frame(materialized), materialized)
+  }
 
   # Restore dplyr grouping metadata on the CPU side so grouped semantics
   # (per-group aggregation, grouped slice_min/slice_max, etc.) work exactly
   # as they would on a real grouped_df.
-  if (length(materialized$groups) > 0) {
+  if (length(materialized$groups) > 0 && !is_rowwise_gpu(materialized)) {
     drop <- isTRUE(materialized$group_drop %||% TRUE)
     keys <- fixed_keys_of(materialized)
     tbl <- if (is.null(keys)) {
@@ -80,13 +102,15 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE) {
 
   result <- expr_fn(tbl)
 
-  # A `rowwise_df` result has no `tbl_gpu` representation (re-uploading would
-  # drop its per-row grouping). It is returned as-is, so the next verb
-  # dispatches to dplyr's own method; cuplyr never claims a `rowwise()`
-  # result stays GPU-backed.
-  if (as_is || !is.data.frame(result) || has_list_column(result) ||
-      inherits(result, "rowwise_df")) {
+  if (as_is || !is.data.frame(result) || has_list_column(result)) {
     return(result)
+  }
+
+  # A rowwise_df result goes back up as a rowwise table (F49), like every
+  # other result, so a later native verb stays on the GPU.
+  if (inherits(result, "rowwise_df")) {
+    new_tbl <- tbl_gpu(result, lazy = FALSE)
+    return(if (was_lazy) as_lazy(new_tbl) else new_tbl)
   }
 
   # The verb may change grouping (e.g. summarise()-like verbs drop it,
@@ -163,6 +187,8 @@ collect_other_side <- function(y) {
 # =============================================================================
 # rowwise()
 #
+# rowwise() itself is native, see R/rowwise.R (F49).
+#
 # reframe() moved to R/reframe.R (native for the quantile()/range()/literal
 # shapes, F22; the rest is the whole-call fallback there).
 #
@@ -207,16 +233,6 @@ collect_other_side <- function(y) {
 #' @name fallback-verbs
 #' @keywords internal
 NULL
-
-#' @rdname fallback-verbs
-#' @export
-#' @importFrom dplyr rowwise
-rowwise.tbl_gpu <- function(.data, ...) {
-  dots <- rlang::enquos(...)
-  gpu_fallback("rowwise", .data, function(tbl) {
-    rlang::inject(dplyr::rowwise(tbl, !!!dots))
-  })
-}
 
 #' @rdname fallback-verbs
 #' @export
@@ -316,7 +332,9 @@ nest_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, keep = NULL,
   # taken before `y` is collected so it isn't the collected copy's name.
   name <- name %||% rlang::as_label(rlang::enexpr(y))
   user_env <- rlang::caller_env()
-  y_tbl <- collect_other_side(y)
+  # dplyr nests pieces of y's own class (dplyr_reconstruct(template = y)): a
+  # grouped or rowwise tbl_gpu y is collected with its grouping (F49).
+  y_tbl <- if (is_tbl_gpu(y)) collect(y) else collect_other_side(y)
   # `by = character()`: dplyr's own deprecation warning would blame the
   # calling package (cuplyr), so warn here with the user's frame and mute
   # the copy dplyr raises inside the fallback -- exactly one warning.
@@ -373,6 +391,9 @@ group_split.tbl_gpu <- function(.tbl, ..., .keep = TRUE, keep = lifecycle::depre
   if (lifecycle::is_present(keep)) {
     lifecycle::deprecate_stop("1.0.0", "group_split(keep = )", "group_split(.keep = )",
                               env = asNamespace("dplyr"))
+  }
+  if (is_rowwise_gpu(.tbl)) {
+    return(rowwise_cpu(.tbl, "group_split"))
   }
 
   if (length(.tbl$groups) > 0L) {

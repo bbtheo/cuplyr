@@ -234,6 +234,9 @@ filter_out.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 # @keywords internal
 filter_impl <- function(.data, dots, by_quo, .preserve, complement, call) {
   check_unique_input_names(.data, call)
+  if (is_rowwise_gpu(.data)) {
+    return(filter_rowwise(.data, dots, by_quo, .preserve, complement, call))
+  }
   keys <- NULL
   # dplyr keeps a `.drop = FALSE` table's whole group structure whatever
   # `.preserve` says, so those tables take the same route.
@@ -253,6 +256,28 @@ filter_impl <- function(.data, dots, by_quo, .preserve, complement, call) {
     }
   }
   out
+}
+
+# filter()/filter_out() of a rowwise table (F49): the predicates are evaluated
+# once per row, which for an elementwise predicate is the vectorised filter. The
+# native attempt is filter_run() with the rowwise vars protected (it treats the
+# table as ungrouped), after rowwise_rewrite_dots() turned the row aggregates
+# into horizontal GPU ops; anything else (`.by`, `.preserve`, a window call, a
+# constant that is not a single logical, ...) runs the whole call in dplyr.
+# @keywords internal
+filter_rowwise <- function(.data, dots, by_quo, .preserve, complement, call) {
+  cpu <- function() filter_cpu_fallback(.data, dots, by_quo, .preserve, complement)
+  if (!rlang::quo_is_null(by_quo) || !identical(.preserve, FALSE)) {
+    return(cpu())
+  }
+  rw <- rowwise_rewrite_dots(.data, dots, named = FALSE)
+  if (is.null(rw)) {
+    return(rowwise_rerun(cpu))
+  }
+  res <- rowwise_attempt(function() {
+    filter_run(.data, rw, by_quo, .preserve, complement, call)
+  })
+  if (is.null(res)) rowwise_rerun(cpu) else res
 }
 
 # A `tbl_gpu` without its fixed group keys.
@@ -290,7 +315,9 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # out automatically since resolve_by() already guarantees `.data` itself
   # is ungrouped in that case.
   by_cols <- resolve_by(.data, by_quo, ".by", call = call)
-  verb_groups <- if (!rlang::quo_is_null(by_quo)) by_cols else .data$groups
+  # (a rowwise table's groups are its rowwise vars: nothing is computed over them)
+  rowwise <- is_rowwise_gpu(.data)
+  verb_groups <- if (!rlang::quo_is_null(by_quo)) by_cols else if (rowwise) character() else .data$groups
 
   if (!rlang::quo_is_null(by_quo) && isTRUE(.preserve)) return(cpu())
   if (complement && length(current_schema(.data)$names) == 0L) return(cpu())
@@ -322,7 +349,8 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # `.cols`'s selectable set alongside the group columns.
   fallback_data <- .data
   fallback_dots <- user_dots
-  cgid <- substitute_cur_group_id(.data, dots, verb_groups, by = !rlang::quo_is_null(by_quo))
+  cgid <- substitute_cur_group_id(.data, dots, verb_groups, by = !rlang::quo_is_null(by_quo),
+                                  rowwise = rowwise)
   .data <- cgid$data
   dots <- expand_across_dots(cgid$dots, current_schema(.data),
                              c(verb_groups, cgid$helper_name), "filter")
@@ -377,6 +405,11 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     if (!is.null(ir) && ir_has_window(ir)) {
       window_idx <- c(window_idx, i)
     }
+  }
+
+  # A window call sees one row on a rowwise table: dplyr's result, not ours.
+  if (rowwise && length(window_idx) > 0) {
+    rowwise_bail("a window call in a rowwise filter()")
   }
 
   # Phase 11, task L1: universal expression-level CPU fallback. A dot that

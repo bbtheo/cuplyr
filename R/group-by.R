@@ -135,7 +135,7 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
     # group_by() keeps the attributes but always gives a tibble (F31). On an
     # already grouped table dplyr rebuilds through as_tibble() and loses them
     # unless `.add` leaves the grouping as it was.
-    keep_attrs <- length(.data$groups) == 0L || length(new_groups) > 0L
+    keep_attrs <- (length(.data$groups) == 0L && !is_rowwise_gpu(.data)) || length(new_groups) > 0L
     return(copy_frame_meta(new_tbl_gpu(
       ptr = .data$ptr,
       schema = .data$schema,
@@ -282,7 +282,7 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   # dot a column reference, new_grouped_df()); computed dots go through
   # dplyr_col_modify.grouped_df() and an empty grouping through as_tibble(),
   # which drop them. An ungrouped input always keeps them.
-  keep_attrs <- length(.data$groups) == 0L ||
+  keep_attrs <- (length(.data$groups) == 0L && !is_rowwise_gpu(.data)) ||
     (all(kind == "var") && length(new_groups) > 0L)
 
   copy_frame_meta(new_tbl_gpu(
@@ -329,6 +329,14 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
 ungroup.tbl_gpu <- function(x, ...) {
   groups <- x$groups
   drop <- TRUE
+  if (is_rowwise_gpu(x)) {
+    # ungroup.rowwise_df(): nothing may be named, and it is as_tibble()
+    rlang::check_dots_empty()
+    return(new_tbl_gpu(
+      ptr = x$ptr, schema = x$schema, lazy_ops = x$lazy_ops, exec_mode = x$exec_mode,
+      nrow = x[["nrow"]], unspecified = x[["unspecified"]]
+    ))
+  }
   if (...length() > 0L) {
     if (length(groups) == 0L) {
       rlang::check_dots_empty()
@@ -503,6 +511,10 @@ group_by_drop_default.tbl_gpu <- function(.tbl) {
 #' @export
 #' @importFrom dplyr group_trim
 group_trim.tbl_gpu <- function(.tbl, .drop = dplyr::group_by_drop_default(.tbl)) {
+  if (is_rowwise_gpu(.tbl)) {
+    # (dplyr: a rowwise_df has no groups to trim)
+    return(.tbl)
+  }
   if (length(.tbl$groups) == 0L) {
     return(.tbl)
   }
@@ -597,6 +609,10 @@ group_trim.tbl_gpu <- function(.tbl, .drop = dplyr::group_by_drop_default(.tbl))
 #' @keywords internal
 compute_group_data <- function(.data) {
   materialized <- if (has_pending_ops(.data)) compute(.data) else .data
+
+  if (is_rowwise_gpu(materialized)) {
+    return(rowwise_group_data(materialized))
+  }
 
   if (length(materialized$groups) == 0) {
     nr <- dim(materialized)[1]

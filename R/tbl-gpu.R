@@ -92,16 +92,12 @@ tbl_gpu <- function(data, ..., lazy = NULL) {
 #' @rdname tbl_gpu
 #' @export
 tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
-  # A tbl_gpu can't represent rowwise data, and uploading it grouped by its
-  # rowwise vars would silently compute per group: upload it ungrouped, loudly.
-  if (inherits(data, "rowwise_df")) {
-    rlang::warn(
-      c(
-        "A tbl_gpu can't represent rowwise data: uploaded ungrouped.",
-        i = "`rowwise()` on a tbl_gpu runs on the CPU and returns a plain rowwise data frame."
-      ),
-      class = "cuplyr_warning_rowwise_upload"
-    )
+  # A rowwise_df uploads as a rowwise table (F49): its rowwise vars become
+  # `$groups` and the table is flagged `$rowwise` (see new_tbl_gpu()), so no
+  # verb can mistake the vars for real groups. The data goes up ungrouped.
+  orig <- data
+  is_rowwise <- inherits(data, "rowwise_df")
+  if (is_rowwise) {
     data <- dplyr::ungroup(data)
   }
   # `vctrs::unspecified()` columns (all NA) upload as plain logical; their
@@ -163,19 +159,21 @@ tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
   # keeps its row count on the R side (`$nrow`, see new_tbl_gpu()). A grouped_df
   # uploads grouped (with its `.drop`); the data frame's own attributes and a
   # bare data.frame class ride on the table (F31).
-  groups <- dplyr::group_vars(data)
+  groups <- dplyr::group_vars(orig)
   out <- new_tbl_gpu(ptr = ptr, schema = schema, exec_mode = exec_mode,
                      groups = groups,
-                     group_drop = if (length(groups) > 0L) dplyr::group_by_drop_default(data) else TRUE,
+                     group_drop = if (length(groups) > 0L && !is_rowwise) dplyr::group_by_drop_default(orig) else TRUE,
                      nrow = if (ncol(data) == 0L) nrow(data) else NULL,
                      unspecified = unspec_names,
-                     bare_df = identical(class(data), "data.frame"))
-  with_frame_attrs(out, frame_attrs(data))
+                     bare_df = identical(class(data), "data.frame"),
+                     rowwise = is_rowwise)
+  with_frame_attrs(out, frame_attrs(orig))
 }
 
 # Upload for the "other side" of a two-table verb (join y, set-op y, a non-first
 # bind input). dplyr ignores y's grouping there, so a rowwise_df goes up
-# ungrouped and without the tbl_gpu() warning. Other data frames are unchanged.
+# ungrouped (a rowwise tbl_gpu y is read for its columns only). Other data
+# frames are unchanged.
 # @keywords internal
 upload_other_side <- function(y, lazy = FALSE) {
   if (inherits(y, "rowwise_df")) y <- dplyr::ungroup(y)
@@ -218,12 +216,14 @@ strip_frame_attrs <- function(x) {
 # whether it is grouped.
 # @keywords internal
 frame_meta <- function(from) {
+  # A rowwise table counts as grouped here: dplyr_reconstruct.rowwise_df()
+  # rebuilds with rowwise_df(), so it hands over nothing either (F49).
   if (is_tbl_gpu(from)) {
     list(attrs = frame_attrs(from), bare = isTRUE(.subset2(from, "bare_df")),
-         grouped = length(.subset2(from, "groups")) > 0L)
+         grouped = length(.subset2(from, "groups")) > 0L || is_rowwise_gpu(from))
   } else {
     list(attrs = frame_attrs(from), bare = identical(class(from), "data.frame"),
-         grouped = dplyr::is_grouped_df(from))
+         grouped = dplyr::is_grouped_df(from) || inherits(from, "rowwise_df"))
   }
 }
 
@@ -236,7 +236,7 @@ copy_frame_meta <- function(out, from, attrs = TRUE, bare = TRUE) {
   if (attrs) {
     out <- with_frame_attrs(out, meta$attrs)
   }
-  if (bare && meta$bare && length(.subset2(out, "groups")) == 0L) {
+  if (bare && meta$bare && length(.subset2(out, "groups")) == 0L && !is_rowwise_gpu(out)) {
     out <- set_tbl_gpu_field(out, "bare_df", TRUE)
   }
   out
@@ -358,6 +358,12 @@ tbl_gpu.tbl_gpu <- function(data, ..., lazy = NULL) {
 # @param bare_df `TRUE` for a table that came from a plain `data.frame` (not a
 #   tibble) and is ungrouped: it collects as a bare data.frame (F31). Only
 #   present on the object when set, and dropped for a grouped table.
+# @param rowwise `TRUE` for a rowwise table (F49): `groups` then holds the
+#   rowwise vars (possibly none), which are NOT groups for any computation, and
+#   the object carries `$rowwise = TRUE`. The field exists only on rowwise
+#   tables (the conformance harness recognises an uploaded fixture by its
+#   fields), see is_rowwise_gpu() in R/rowwise.R. A rowwise table is never a
+#   bare data.frame.
 # @return A tbl_gpu S3 object
 # @keywords internal
 new_tbl_gpu <- function(ptr = NULL,
@@ -369,7 +375,8 @@ new_tbl_gpu <- function(ptr = NULL,
                         nrow = NULL,
                         fixed_keys = NULL,
                         unspecified = NULL,
-                        bare_df = FALSE) {
+                        bare_df = FALSE,
+                        rowwise = FALSE) {
   if (is.list(lazy_ops) && length(lazy_ops) == 0) {
     lazy_ops <- NULL
   }
@@ -403,7 +410,9 @@ new_tbl_gpu <- function(ptr = NULL,
       out$unspecified <- unspecified
     }
   }
-  if (isTRUE(bare_df) && length(groups) == 0L) {
+  if (isTRUE(rowwise)) {
+    out$rowwise <- TRUE
+  } else if (isTRUE(bare_df) && length(groups) == 0L) {
     out$bare_df <- TRUE
   }
   structure(out, class = c("tbl_gpu", "tbl"))

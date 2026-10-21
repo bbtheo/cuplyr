@@ -37,7 +37,7 @@ fallback_sweep_pipelines <- function() {
     # the cross-cutting fallback behaviors below (materialization/exec_mode,
     # factor round-trip, the cuplyr.fallback option).
     reframe = list(fn = function(d) dplyr::reframe(d, mx = unique(x), .by = g), arrange_by = "g"),
-    rowwise = list(fn = function(d) dplyr::rowwise(d)),
+    # rowwise() is GPU-native since F49 (test-parity-F49-rowwise.R).
     # slice()/slice_head()/slice_tail() are GPU-native for ungrouped input
     # (Phase 3 task 2, see R/slice.R and test-dplyr-slice.R for that
     # coverage) -- grouped here so this sweep still exercises their

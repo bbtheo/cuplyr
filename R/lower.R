@@ -65,7 +65,7 @@ lower_filter <- function(ast, source_ptr) {
   }
 
   bound_ir <- ir_bind(combined_ir, input_schema)
-  warn_int_overflow(gpu_filter_expr(input_ptr, bound_ir))
+  warn_int_overflow(gpu_filter_expr(input_ptr, bound_ir), in_filter = TRUE)
 }
 
 # F42: R's integer +, -, * give NA with this warning when the result leaves
@@ -74,11 +74,53 @@ lower_filter <- function(ast, source_ptr) {
 # verb call (lowering runs at the verb when eager, at collect() when lazy).
 # Never from C++: options(warn = 2) would longjmp past destructors.
 # @keywords internal
-warn_int_overflow <- function(ptr) {
+warn_int_overflow <- function(ptr, in_filter = FALSE) {
   if (isTRUE(attr(ptr, "int_overflow"))) {
     warning("NAs produced by integer overflow", call. = FALSE)
   }
+  check_rowwise_flags(attr(ptr, "rw_flags"), in_filter)
   ptr
+}
+
+# F49: the flags the rowwise horizontal aggregates (rw_agg_*, R/rowwise.R) leave
+# on a result pointer, bit by bit (see src/expr_eval.hpp): 1 an integer sum()
+# left the integer range (base R returns a double there; a static INT32 schema
+# can't, so it fails loudly like F42's window sums); 2 an integer min()/max()
+# with na.rm = TRUE had an all-NA row (a double +-Inf in base R; only the eager
+# path builds that INT32 form, after checking it away first); 4/8 a double
+# min()/max() of an all-NA row (or of zero rows) gave +-Inf, with base R's
+# warning; 16/32 an integer min()/max() ran on zero rows (dplyr evaluates it
+# once on the empty group: +-Inf, a double). The eager path sends a zero-row
+# min()/max() to dplyr first, so 16/32 only reach a lazy plan: a column's type
+# can't change there, but a filter predicate's can (only base R's warning
+# remains, `in_filter`).
+# @keywords internal
+check_rowwise_flags <- function(flags, in_filter = FALSE) {
+  if (is.null(flags)) {
+    return(invisible())
+  }
+  if (bitwAnd(flags, 1L) != 0L) {
+    abort_sum_overflow()
+  }
+  if (bitwAnd(flags, 2L) != 0L) {
+    rlang::abort("An integer `min()`/`max()` of an all-NA row is a double.",
+                 class = "cuplyr_error_rowwise_retype")
+  }
+  if (bitwAnd(flags, 48L) != 0L) {
+    if (!in_filter) {
+      rlang::abort(c("An integer `min()`/`max()` of a zero-row table is a double.",
+                     i = "dplyr evaluates it once on the empty group, but a lazy plan has a fixed schema."),
+                   class = "cuplyr_error_rowwise_retype")
+    }
+    flags <- bitwOr(flags, bitwShiftR(bitwAnd(flags, 48L), 2L))
+  }
+  if (bitwAnd(flags, 4L) != 0L) {
+    warning("no non-missing arguments to min; returning Inf", call. = FALSE)
+  }
+  if (bitwAnd(flags, 8L) != 0L) {
+    warning("no non-missing arguments to max; returning -Inf", call. = FALSE)
+  }
+  invisible()
 }
 
 #' Lower mutate node

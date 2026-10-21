@@ -63,7 +63,10 @@ glimpse.tbl_gpu <- function(x, width = NULL, ...) {
   cat("Rows: ", format(dims[1], big.mark = ","), "\n", sep = "")
   cat("Columns: ", dims[2], "\n", sep = "")
 
-  if (length(materialized$groups) > 0) {
+  if (is_rowwise_gpu(materialized)) {
+    # one group per row: the vars are the table's header, as pillar prints it
+    cat("Rowwise: ", paste(materialized$groups, collapse = ", "), "\n", sep = "")
+  } else if (length(materialized$groups) > 0) {
     n_groups <- glimpse_n_groups(materialized)
     cat("Groups: ", paste(materialized$groups, collapse = ", "),
         " [", format(n_groups, big.mark = ","), "]\n", sep = "")

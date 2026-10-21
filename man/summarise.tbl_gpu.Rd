@@ -32,11 +32,15 @@ default, minus the message.
 \item \code{"drop"} -- the result is always ungrouped.
 \item \code{"keep"} -- every original grouping variable is retained.
 \item \code{"rowwise"} -- the summary runs on the GPU keeping every
-grouping variable, then the result is collected and returned as
-dplyr's own \code{rowwise_df} by those variables (a CPU object, like the
-result of \code{\link[dplyr:rowwise]{dplyr::rowwise()}} on a \code{tbl_gpu}: a \code{tbl_gpu} has no
-rowwise representation).
+grouping variable, and the result is a rowwise \code{tbl_gpu} by those
+variables (\code{\link[dplyr:rowwise]{dplyr::rowwise()}}); \code{collect()} returns dplyr's own
+\code{rowwise_df}.
 }
+On a rowwise \code{tbl_gpu} (see \code{\link[=rowwise.tbl_gpu]{rowwise.tbl_gpu()}}) \code{summarise()} computes one
+row per input row, the rowwise variables first. \code{.groups = NULL} (and
+\code{"keep"}) groups the result by those variables (with dplyr's message
+when \code{.groups} is not given), \code{"drop"} ungroups it, \code{"rowwise"} keeps it
+rowwise; \code{"drop_last"} is an error, as in dplyr.
 \verb{.groups=} is only validated against an already-grouped \code{.data} --
 matching a genuine (if surprising) dplyr quirk verified empirically:
 any value other than \code{"rowwise"} (including a typo) is silently a no-op on an

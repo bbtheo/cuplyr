@@ -251,6 +251,9 @@ build_count_agg_call <- function(wt_quo, for_mutate = FALSE) {
 #' }
 count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
                           .drop = dplyr::group_by_drop_default(x)) {
+  if (is_rowwise_gpu(x)) {
+    return(rowwise_cpu(x, "count"))
+  }
   dots <- rlang::enquos(...)
   wt_quo <- rlang::enquo(wt)
   orig_groups <- x$groups
@@ -339,6 +342,9 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
 #'   gpu_mtcars |> group_by(cyl) |> tally() |> collect()
 #' }
 tally.tbl_gpu <- function(x, wt = NULL, sort = FALSE, name = NULL) {
+  if (is_rowwise_gpu(x)) {
+    return(rowwise_cpu(x, "tally"))
+  }
   wt_quo <- rlang::enquo(wt)
   orig_groups <- x$groups
 
@@ -411,6 +417,9 @@ tally.tbl_gpu <- function(x, wt = NULL, sort = FALSE, name = NULL) {
 #'   gpu_mtcars |> add_count(cyl) |> collect()
 #' }
 add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .drop = NULL) {
+  if (is_rowwise_gpu(x)) {
+    return(rowwise_cpu(x, "add_count"))
+  }
   if (!is.null(.drop)) {
     stop("`add_count(.drop = )` was deprecated in dplyr 1.0.0 and is no ",
          "longer accepted.", call. = FALSE)

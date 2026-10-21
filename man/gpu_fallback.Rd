@@ -45,7 +45,9 @@ returned \code{tbl_gpu} carries those keys as \verb{$fixed_keys} (see
 The core Phase-2 fallback primitive. Materializes any pending lazy
 operations, collects \code{.data} to a tibble (restoring \code{group_by()} structure
 from \code{.data$groups} so grouped semantics apply on the CPU exactly as they
-would on a real \code{grouped_df}), applies \code{expr_fn} (which should call the
-real dplyr verb), and re-uploads the result via \code{\link[=tbl_gpu]{tbl_gpu()}}.
+would on a real \code{grouped_df}; a rowwise table becomes dplyr's \code{rowwise_df}
+of its rowwise vars, F49), applies \code{expr_fn} (which should call the
+real dplyr verb), and re-uploads the result via \code{\link[=tbl_gpu]{tbl_gpu()}} (a \code{rowwise_df}
+result goes back up as a rowwise table).
 }
 \keyword{internal}

@@ -1,5 +1,41 @@
 # cuplyr (development version)
 
+## rowwise() on the GPU (F49)
+
+* `rowwise()` of a `tbl_gpu` is now native and metadata-only: it returns a
+  rowwise `tbl_gpu` (no download; a lazy table stays lazy). `collect()`
+  returns dplyr's `rowwise_df`, `as_tibble()` and `ungroup()` drop the
+  rowwise-ness, `group_by()` replaces it, and `tbl_gpu(<rowwise_df>)` uploads a
+  rowwise table silently (it used to upload ungrouped, with a warning).
+  `summarise(.groups = "rowwise")` returns a rowwise `tbl_gpu`.
+* `mutate()`, `transmute()`, `filter()`, `filter_out()` and `summarise()` on a
+  rowwise table run on the GPU for elementwise expressions, and for the row
+  aggregates `sum()`/`mean()`/`min()`/`max()`/`prod()` of `c_across(...)`,
+  of `c(a, b, ...)` or of several columns, `n()`, `cur_group_id()` and
+  `length(c_across(...))`, with dplyr's NA rules and result types. A 1e5-row
+  `rowwise() |> mutate(s = sum(c_across(a:e)))` takes milliseconds instead of
+  about twenty seconds. Anything else on a rowwise table (an R function per
+  row, list-columns, window functions, `.by`, the verbs listed in the
+  architecture notes) runs the whole call in dplyr on the CPU and comes back
+  as a rowwise `tbl_gpu`.
+* An integer `sum()` of a row that leaves the integer range is a double, as in
+  dplyr, on an eager table. A lazy plan fails with `cuplyr_error_sum_overflow`
+  instead (its schema is fixed), and an integer `min()`/`max(na.rm = TRUE)` over
+  columns in a lazy plan runs the call on the CPU.
+* `nest_join()` with a grouped or rowwise `tbl_gpu` as `y` nests pieces of
+  `y`'s own class, as dplyr does.
+* Whole-column `[<-` now works on every `tbl_gpu`: `x[j] <- value` and
+  `x[, j] <- value` add, replace or (with `NULL`) drop columns as on a tibble,
+  keeping the groups (a rowwise table's vars in column order, as dplyr's
+  `[<-.rowwise_df`). Cell assignment (`x[i, j] <- value`, `x[] <- value`, a
+  matrix subscript) still errors, pointing at `mutate()`.
+* `is.na()` and `anyNA()` of a whole `tbl_gpu` now error. They used to answer
+  about the object's internal fields (all `FALSE`), so `x[is.na(x)] <- 0` did
+  nothing; use `mutate(across(everything(), ~ coalesce(.x, 0)))`.
+* When a rowwise verb's native attempt fails and the call reruns in dplyr, the
+  fallback notification (`options(cuplyr.fallback = "warn")`) includes the
+  error the attempt raised.
+
 ## group_nest() and nest_by() `.drop` (F28)
 
 * `group_nest()` and `nest_by()` on a `tbl_gpu` now pass `...` through to

@@ -23,11 +23,15 @@
 #'     \item `"drop"` -- the result is always ungrouped.
 #'     \item `"keep"` -- every original grouping variable is retained.
 #'     \item `"rowwise"` -- the summary runs on the GPU keeping every
-#'       grouping variable, then the result is collected and returned as
-#'       dplyr's own `rowwise_df` by those variables (a CPU object, like the
-#'       result of [dplyr::rowwise()] on a `tbl_gpu`: a `tbl_gpu` has no
-#'       rowwise representation).
+#'       grouping variable, and the result is a rowwise `tbl_gpu` by those
+#'       variables ([dplyr::rowwise()]); `collect()` returns dplyr's own
+#'       `rowwise_df`.
 #'   }
+#'   On a rowwise `tbl_gpu` (see [rowwise.tbl_gpu()]) `summarise()` computes one
+#'   row per input row, the rowwise variables first. `.groups = NULL` (and
+#'   `"keep"`) groups the result by those variables (with dplyr's message
+#'   when `.groups` is not given), `"drop"` ungroups it, `"rowwise"` keeps it
+#'   rowwise; `"drop_last"` is an error, as in dplyr.
 #'   `.groups=` is only validated against an already-grouped `.data` --
 #'   matching a genuine (if surprising) dplyr quirk verified empirically:
 #'   any value other than `"rowwise"` (including a typo) is silently a no-op on an
@@ -281,13 +285,20 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   caller_env <- rlang::caller_env()
   check_unique_input_names(.data)
 
-  # `.groups = "rowwise"`: summarise keeping every group, then hand back
-  # dplyr's own rowwise_df (a tbl_gpu can't represent rowwise data).
+  # A rowwise table summarises once per row (F49, R/rowwise.R).
+  if (is_rowwise_gpu(.data)) {
+    return(summarise_rowwise(.data, rlang::enquos(...), .groups, rlang::enquo(.by), caller_env))
+  }
+
+  # `.groups = "rowwise"`: summarise keeping every group, then the result is
+  # rowwise by those groups (F49: a rowwise tbl_gpu; collect() gives dplyr's
+  # rowwise_df). The host rowwise_df of a CPU route is rowwise already.
   if (identical(.groups, "rowwise")) {
-    cuplyr_fallback_notify("summarise", ".groups = \"rowwise\" (the result is a CPU rowwise_df)")
-    res <-summarise_impl_dots(.data, rlang::enquos(...), "keep", rlang::enquo(.by),
+    res <- summarise_impl_dots(.data, rlang::enquos(...), "keep", rlang::enquo(.by),
                                caller_env)
-    res <- if (is_tbl_gpu(res)) collect(res) else res
+    if (is_tbl_gpu(res)) {
+      return(rowwise_mark(res, res$groups))
+    }
     return(dplyr::rowwise(dplyr::ungroup(res), dplyr::all_of(dplyr::group_vars(res))))
   }
 
@@ -674,7 +685,7 @@ expr_data_pronoun_names <- function(expr) {
 #     `summarise_should_inform()`.
 #
 # `.groups = "rowwise"` never reaches this function: summarise.tbl_gpu()
-# summarises with "keep" and returns dplyr's rowwise_df of the result.
+# summarises with "keep" and marks the result rowwise (rowwise_mark()).
 #
 # @param orig_groups Character vector, `.data$groups` BEFORE this summarise
 # @param groups_arg The raw `.groups=` value as passed by the caller (may be

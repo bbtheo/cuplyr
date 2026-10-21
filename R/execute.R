@@ -496,6 +496,10 @@ push_op <- function(.data, node) {
   new_unspec <- if (node$type %in% c("filter", "arrange", "slice", "barrier")) {
     .subset2(.data, "unspecified")
   }
+  # F49: a rowwise table stays rowwise through every node but the ones that
+  # rebuild the rows or their grouping (their verbs never reach push_op() with a
+  # rowwise input: they run through the whole-call fallback or build their own).
+  new_rowwise <- is_rowwise_gpu(.data) && !node$type %in% c("summarise", "reframe", "distinct")
 
   # F31: summarise() rebuilds the frame, so only the bare data.frame class
   # survives it; every other node is dplyr_reconstruct(out, .data).
@@ -511,7 +515,8 @@ push_op <- function(.data, node) {
       group_drop = new_group_drop,
       nrow = .subset2(.data, "nrow"),
       fixed_keys = new_keys,
-      unspecified = new_unspec
+      unspecified = new_unspec,
+      rowwise = new_rowwise
     )
     return(carry_frame_meta(out, .data, attrs = keep_attrs))
   }
@@ -527,7 +532,8 @@ push_op <- function(.data, node) {
     group_drop = new_group_drop,
     nrow = .subset2(.data, "nrow"),
     fixed_keys = new_keys,
-    unspecified = new_unspec
+    unspecified = new_unspec,
+    rowwise = new_rowwise
   )
   carry_frame_meta(out, .data, attrs = keep_attrs)
 }
@@ -682,7 +688,8 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
       exec_mode = "lazy",
       group_drop = new_group_drop,
       fixed_keys = join_fixed_keys,
-      unspecified = join_unspec
+      unspecified = join_unspec,
+      rowwise = is_rowwise_gpu(x)
     )
     return(carry_frame_meta(out, x))
   }
@@ -703,7 +710,8 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
     exec_mode = "eager",
     group_drop = new_group_drop,
     fixed_keys = join_fixed_keys,
-    unspecified = join_unspec
+    unspecified = join_unspec,
+    rowwise = is_rowwise_gpu(x)
   )
   carry_frame_meta(out, x)
 }

@@ -18,6 +18,9 @@ list(
   groups = c("a"),          # group_by() columns, metadata only
   exec_mode = "eager",      # or "lazy"
   lazy_ops = NULL           # pending AST when lazy
+  # rowwise = TRUE          # present ONLY on a rowwise table (F49): `groups` then
+  #                         # holds the rowwise vars, which are NOT groups; every verb
+  #                         # is either rowwise-aware or runs whole on the CPU
 )
 ```
 

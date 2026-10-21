@@ -323,6 +323,43 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   before_quo <- rlang::enquo(.before)
   after_quo <- rlang::enquo(.after)
 
+  if (is_rowwise_gpu(.data)) {
+    return(mutate_rowwise(.data, dots, by_quo, .keep, before_quo, after_quo))
+  }
+  mutate_run(.data, dots, by_quo, .keep, before_quo, after_quo)
+}
+
+# mutate() of a rowwise table (F49). Elementwise expressions are the
+# vectorised mutate() (every column is one value per row), so the native path is
+# the ordinary one run with the rowwise vars as protected columns instead of
+# groups (mutate_run(rowwise = TRUE)), after rowwise_rewrite_dots() turned the
+# row aggregates into horizontal GPU ops. The attempt is all-or-nothing
+# (rowwise_attempt()): `.by` (an error in dplyr), a shape the rewrite or the
+# parser does not know, a window call, anything that would fall back or fail
+# natively reruns the WHOLE call in dplyr with the user's dots, so dplyr
+# produces its own result or error.
+# @keywords internal
+mutate_rowwise <- function(.data, dots, by_quo, keep, before_quo, after_quo) {
+  cpu <- function() mutate_expr_fallback(.data, dots, keep, before_quo, after_quo, by_quo)
+  if (!rlang::quo_is_null(by_quo)) {
+    return(cpu())
+  }
+  rw <- rowwise_rewrite_dots(.data, dots)
+  if (is.null(rw)) {
+    return(rowwise_rerun(cpu))
+  }
+  res <- rowwise_attempt(function() {
+    mutate_run(.data, rw, by_quo, keep, before_quo, after_quo, rowwise = TRUE)
+  })
+  if (is.null(res)) rowwise_rerun(cpu) else rowwise_column_order(res)
+}
+
+# mutate.tbl_gpu()'s body on captured arguments. `rowwise = TRUE` (a rowwise
+# `.data`, whose dots rowwise_rewrite_dots() has rewritten): the table's groups
+# are the rowwise vars, which this treats as columns to keep, never as groups
+# to compute over; the checks of rowwise_expressions_ok() bail out of the call.
+mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwise = FALSE) {
+
   # Phase 5, task W6: `.by=` resolution. resolve_by() (R/execute.R) errors
   # immediately if `.data` is already grouped (matching dplyr's own
   # "Can't supply `.by`..." message verbatim) -- checked up front, before
@@ -336,8 +373,8 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   # case, and push_op()'s propagate_groups() only ever propagates
   # `.data$groups` (never `verb_groups`) into the result.
   by_given <- !rlang::quo_is_null(by_quo)
-  by_cols <- resolve_by(.data, by_quo, ".by")
-  verb_groups <- if (by_given) by_cols else .data$groups
+  by_cols <- if (rowwise) character() else resolve_by(.data, by_quo, ".by")
+  verb_groups <- if (by_given) by_cols else if (rowwise) character() else .data$groups
 
   if (!rlang::quo_is_null(before_quo) && !rlang::quo_is_null(after_quo)) {
     stop("Can't supply both `.before` and `.after`.", call. = FALSE)
@@ -356,7 +393,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 
   orig_schema <- current_schema(.data)
   orig_names <- orig_schema$names
-  orig_groups <- verb_groups
+  orig_groups <- if (rowwise) .data$groups else verb_groups
 
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R's
   # own module docs for the full design. Anything genuinely unsupported
@@ -393,7 +430,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   provenance <- attr(expanded, "provenance")
   fallback_data <- .data
   fallback_dots <- user_dots
-  cgid <- substitute_cur_group_id(.data, expanded, verb_groups, by = by_given)
+  cgid <- substitute_cur_group_id(.data, expanded, verb_groups, by = by_given, rowwise = rowwise)
   .data <- cgid$data
   orig_schema <- current_schema(.data)
   dots <- cgid$dots
@@ -414,10 +451,15 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   # Vector literals (`y = 1:5`) are native only for an ungrouped, no-`.by`
   # call; per-group evaluation is dplyr's job (CPU fallback).
   evaluated <- new.env(parent = emptyenv())
+  # (A rowwise call evaluates each dot once per row: no vector literals, and
+  # no constant is evaluated once for the CPU route to inline.)
   expressions <- parse_mutate_dots(dots, orig_schema, "mutate", stop_on_unparseable = FALSE,
-                                   vector_literals = length(verb_groups) == 0,
-                                   ungrouped = length(verb_groups) == 0,
+                                   vector_literals = length(verb_groups) == 0 && !rowwise,
+                                   ungrouped = length(verb_groups) == 0 && !rowwise,
                                    evaluated = evaluated, provenance = provenance)
+  if (rowwise && !rowwise_expressions_ok(expressions)) {
+    rowwise_bail("a window call or vector literal in a rowwise mutate()")
+  }
   if (is.null(expressions)) {
     return(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
                                 consts = evaluated$consts, provenance = provenance))
@@ -428,6 +470,9 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
     return(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo))
   }
   dropped <- attr(expressions, "dropped")
+  if (rowwise && any(dropped %in% .data$groups)) {
+    rowwise_bail("a rowwise var is dropped")
+  }
   check_droppable_groups(dropped, if (by_given) character() else verb_groups)
   # Floored fractional Date constants (parse_mutate_dots()); staged temps
   # aren't output columns. Warned once the native call has run (eager) or
@@ -1493,7 +1538,31 @@ transmute.tbl_gpu <- function(.data, ...) {
   inform_colwise_grouped(.data, "transmute", if (p > 0L) sys.function(p))
   check_unique_input_names(.data)
   dots <- rlang::enquos(...)
+
+  if (is_rowwise_gpu(.data)) {
+    # as mutate_rowwise(): rewrite the row aggregates, attempt the native path,
+    # else the whole call in dplyr
+    cpu <- function() {
+      gpu_fallback("transmute", .data, function(tbl) {
+        rlang::inject(dplyr::transmute(.data = tbl, !!!dots))
+      })
+    }
+    rw <- if (length(dots) > 0L || length(.data$groups) > 0L) rowwise_rewrite_dots(.data, dots)
+    if (is.null(rw)) {
+      return(rowwise_rerun(cpu))
+    }
+    res <- rowwise_attempt(function() transmute_run(.data, rw, rowwise = TRUE))
+    return(if (is.null(res)) rowwise_rerun(cpu) else rowwise_column_order(res))
+  }
+  transmute_run(.data, dots)
+}
+
+# transmute.tbl_gpu()'s body on captured dots; `rowwise = TRUE` as in
+# mutate_run(): the rowwise vars are the columns kept in front, not groups.
+transmute_run <- function(.data, dots, rowwise = FALSE) {
   orig_dots <- dots
+  # the groups every window/cur_group/vector-literal decision is made over
+  eff_groups <- if (rowwise) character() else .data$groups
 
   if (length(dots) > 0L && is_zero_column_with_rows(.data)) {
     return(gpu_fallback("transmute", .data, function(tbl) {
@@ -1510,13 +1579,13 @@ transmute.tbl_gpu <- function(.data, ...) {
   # and mutate.tbl_gpu()'s own identical handling.
   user_dots <- dots
   dots <- colwise_rewrite_dots(dots, current_schema(.data))
-  dots <- rewrite_context_dots(dots, .data$groups, sequential = TRUE, name_unnamed = TRUE)
+  dots <- rewrite_context_dots(dots, eff_groups, sequential = TRUE, name_unnamed = TRUE)
   if (dots_need_fallback(dots)) {
     return(gpu_fallback("transmute", .data, function(tbl) {
       rlang::inject(dplyr::transmute(.data = tbl, !!!user_dots))
     }))
   }
-  expanded <- expand_across_dots(dots, current_schema(.data), .data$groups, "transmute")
+  expanded <- expand_across_dots(dots, current_schema(.data), eff_groups, "transmute")
   if (isTRUE(attr(expanded, "needs_fallback"))) {
     return(gpu_fallback("transmute", .data, function(tbl) {
       rlang::inject(dplyr::transmute(.data = tbl, !!!user_dots))
@@ -1529,7 +1598,7 @@ transmute.tbl_gpu <- function(.data, ...) {
   provenance <- attr(expanded, "provenance")
   fallback_data <- .data
   fallback_dots <- orig_dots
-  cgid <- substitute_cur_group_id(.data, expanded, .data$groups)
+  cgid <- substitute_cur_group_id(.data, expanded, eff_groups, rowwise = rowwise)
   .data <- cgid$data
   schema <- current_schema(.data)
   dots <- cgid$dots
@@ -1540,12 +1609,15 @@ transmute.tbl_gpu <- function(.data, ...) {
   evaluated <- new.env(parent = emptyenv())
   expressions <- parse_mutate_dots(dots, schema, "transmute", warn_unnamed = FALSE,
                                     stop_on_unparseable = FALSE,
-                                    vector_literals = length(.data$groups) == 0,
-                                    ungrouped = length(.data$groups) == 0,
+                                    vector_literals = length(eff_groups) == 0 && !rowwise,
+                                    ungrouped = length(eff_groups) == 0 && !rowwise,
                                     evaluated = evaluated, provenance = provenance)
   # A window call (mean()/cumsum()/lag()/..., also a timestamp mean()/median())
   # needs the staged plan of mutate_window(), which transmute() doesn't use:
   # without this the call died at lowering ("window op reached lowering").
+  if (rowwise && !rowwise_expressions_ok(expressions)) {
+    rowwise_bail("a window call or vector literal in a rowwise transmute()")
+  }
   if (is.null(expressions) || isTRUE(attr(expressions, "has_window"))) {
     return(gpu_fallback("transmute", fallback_data, function(tbl) {
       dots_cpu <- inline_evaluated_dots(fallback_dots, evaluated$consts, provenance, nrow(tbl))
@@ -1554,7 +1626,10 @@ transmute.tbl_gpu <- function(.data, ...) {
   }
 
   dropped <- attr(expressions, "dropped")
-  check_droppable_groups(dropped, .data$groups)
+  if (rowwise && any(dropped %in% .data$groups)) {
+    rowwise_bail("a rowwise var is dropped")
+  }
+  check_droppable_groups(dropped, eff_groups)
 
   result <- .data
   if (length(expressions) > 0) {
@@ -1596,7 +1671,8 @@ NULL
 # method's parent frame is the generic's caller), so only the colwise verbs
 # trigger it.
 inform_colwise_grouped <- function(.data, verb, caller) {
-  if (length(.data$groups) == 0L || !is.function(caller)) {
+  # (dplyr's check_grouped() tests is_grouped_df(): a rowwise_df is not)
+  if (length(.data$groups) == 0L || is_rowwise_gpu(.data) || !is.function(caller)) {
     return(invisible())
   }
   for (suffix in c("all", "if")) {

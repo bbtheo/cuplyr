@@ -705,6 +705,9 @@ slice_zero_column <- function(.data, fn) {
 #' @export
 #' @importFrom dplyr slice
 slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
+  if (is_rowwise_gpu(.data)) {
+    return(rowwise_cpu(.data, "slice"))
+  }
   dots <- rlang::enquos(...)
   check_unique_input_names(.data)
   by_quo <- rlang::enquo(.by)
@@ -790,6 +793,9 @@ slice_group_keys_of <- function(gd) {
 #' @export
 #' @importFrom dplyr slice_head
 slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
+  if (is_rowwise_gpu(.data)) {
+    return(rowwise_cpu(.data, "slice_head"))
+  }
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
   amt <- resolve_slice_amount(n, prop, call = rlang::current_env())
@@ -834,6 +840,9 @@ slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
 #' @export
 #' @importFrom dplyr slice_tail
 slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
+  if (is_rowwise_gpu(.data)) {
+    return(rowwise_cpu(.data, "slice_tail"))
+  }
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
   amt <- resolve_slice_amount(n, prop, call = rlang::current_env())
@@ -900,6 +909,9 @@ slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
 #' @importFrom dplyr slice_min
 slice_min.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
                                with_ties = TRUE, na_rm = FALSE) {
+  if (is_rowwise_gpu(.data)) {
+    return(rowwise_cpu(.data, "slice_min"))
+  }
   order_quo <- rlang::enquo(order_by)
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
@@ -942,6 +954,9 @@ slice_min.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
 #' @importFrom dplyr slice_max
 slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
                                with_ties = TRUE, na_rm = FALSE) {
+  if (is_rowwise_gpu(.data)) {
+    return(rowwise_cpu(.data, "slice_max"))
+  }
   order_quo <- rlang::enquo(order_by)
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
@@ -1072,6 +1087,10 @@ tail.tbl_gpu <- function(x, n = 6L, ...) {
 # (and so head()/tail()) accepts them: such a table gets the row-only slice
 # node directly (it has no groups, group_by() refuses it too).
 head_tail_ungrouped <- function(x, n, slicer) {
+  if (is_rowwise_gpu(x)) {
+    # `[.rowwise_df`: the first/last rows of the table, still rowwise (F49)
+    return(rowwise_column_order(rowwise_mark(head_tail_ungrouped(ungrouped(x), n, slicer), x$groups)))
+  }
   groups <- x$groups
   if (length(groups) == 0L && anyDuplicated(current_schema(x)$names) > 0L) {
     amt <- resolve_slice_amount(n = n)
@@ -1374,6 +1393,9 @@ sample_rows_impl <- function(tbl, size_quo, replace, weight_quo, env, frac, fall
 #' @importFrom dplyr sample_n
 sample_n.tbl_gpu <- function(tbl, size, replace = FALSE, weight = NULL,
                               .env = NULL, ...) {
+  if (is_rowwise_gpu(tbl)) {
+    return(rowwise_cpu(tbl, "sample_n"))
+  }
   size_quo <- rlang::enquo(size)
   weight_quo <- rlang::enquo(weight)
   sample_rows_impl(tbl, size_quo, replace, weight_quo, .env, frac = FALSE, function(t) {
@@ -1387,6 +1409,9 @@ sample_n.tbl_gpu <- function(tbl, size, replace = FALSE, weight = NULL,
 #' @importFrom dplyr sample_frac
 sample_frac.tbl_gpu <- function(tbl, size = 1, replace = FALSE, weight = NULL,
                                  .env = NULL, ...) {
+  if (is_rowwise_gpu(tbl)) {
+    return(rowwise_cpu(tbl, "sample_frac"))
+  }
   size_quo <- rlang::enquo(size)
   weight_quo <- rlang::enquo(weight)
   sample_rows_impl(tbl, size_quo, replace, weight_quo, .env, frac = TRUE, function(t) {
@@ -1434,6 +1459,9 @@ sample_frac.tbl_gpu <- function(tbl, size = 1, replace = FALSE, weight = NULL,
 #' @importFrom dplyr slice_sample
 slice_sample.tbl_gpu <- function(.data, ..., n, prop, by = NULL,
                                   weight_by = NULL, replace = FALSE) {
+  if (is_rowwise_gpu(.data)) {
+    return(rowwise_cpu(.data, "slice_sample"))
+  }
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(by)
   weight_quo <- rlang::enquo(weight_by)

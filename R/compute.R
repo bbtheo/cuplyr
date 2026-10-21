@@ -103,7 +103,8 @@ compute.tbl_gpu <- function(x, ..., name = NULL) {
     group_drop = x$group_drop %||% TRUE,
     nrow = x[["nrow"]],
     fixed_keys = x[["fixed_keys"]],
-    unspecified = x[["unspecified"]]
+    unspecified = x[["unspecified"]],
+    rowwise = is_rowwise_gpu(x)
   ), x)
 }
 

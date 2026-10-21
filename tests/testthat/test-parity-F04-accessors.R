@@ -1,5 +1,5 @@
-# F04 acceptance tests: tibble's `$`, `[[`, `$<-`, `[[<-` (and a loud `[<-`)
-# on tbl_gpu.
+# F04 acceptance tests: tibble's `$`, `[[`, `$<-`, `[[<-` and whole-column
+# `[<-` (cell assignment errors loudly) on tbl_gpu.
 #
 # Each case runs the same function on a plain tibble (the oracle) and on a
 # tbl_gpu (eager, lazy, lazy with a pending filter, grouped, zero rows). The
@@ -321,22 +321,51 @@ test_that("assigning a data frame or matrix column errors loudly", {
   expect_identical(tibble::as_tibble(collect(gt)), tibble::as_tibble(f04_df()))
 })
 
-test_that("cell and `[<-` assignment error loudly, pointing at mutate(), and leave x intact", {
+test_that("cell assignment errors loudly, pointing at mutate(), and leaves x intact", {
   skip_if_no_gpu()
   for (lazy in c(FALSE, TRUE)) {
     gt <- f04_up(f04_df(), lazy)
     fns <- list(
       function(t) { t[1, "x"] <- 5; t },
-      function(t) { t["z"] <- 1; t },
-      function(t) { t[, "x"] <- 0; t },
-      function(t) { t[c("x", "i")] <- list(1, 2L); t },
-      function(t) { t[[2, "x"]] <- 5; t }
+      function(t) { t[1:2, ] <- 0; t },
+      function(t) { t[[2, "x"]] <- 5; t },
+      function(t) { t[] <- 0; t },
+      function(t) { t[, ] <- 0; t },
+      # f04_df() has as many columns as an uploaded data.frame's tbl_gpu has
+      # internal fields: is.na() must not answer about those (F49 review 2, B5)
+      function(t) { t[is.na(t)] <- 0; t },
+      function(t) { t[matrix(c(TRUE, FALSE), 4L, 7L)] <- 0; t }
     )
     for (fn in fns) {
       fn <- f04_global(fn)
       expect_error(fn(gt), "mutate\\(\\)", info = paste(deparse(body(fn)), collapse = " "))
     }
+    expect_error(is.na(gt), class = "cuplyr_error_unsupported_base")
+    expect_error(anyNA(gt), class = "cuplyr_error_unsupported_base")
+    # A logical column subscript of the wrong length is tibble's error.
+    expect_error(f04_global(function(t) { t[c(TRUE, FALSE)] <- 0; t })(gt),
+                 class = "vctrs_error_subscript")
     expect_true(is_tbl_gpu(gt))
+    expect_identical(tibble::as_tibble(collect(gt)), tibble::as_tibble(f04_df()))
+  }
+})
+
+# F49 review round 1 (B1): whole-column `[<-` is supported like tibble's
+test_that("whole-column `[<-` matches tibble and leaves x intact", {
+  skip_if_no_gpu()
+  for (lazy in c(FALSE, TRUE)) {
+    gt <- f04_up(f04_df(), lazy)
+    fns <- list(
+      function(t) { t["z"] <- 1; t },
+      function(t) { t[, "x"] <- 0; t },
+      function(t) { t[c("x", "i")] <- list(1, 2L); t },
+      function(t) { t["x"] <- NULL; t }
+    )
+    for (fn in fns) {
+      fn <- f04_global(fn)
+      expect_identical(tibble::as_tibble(collect(fn(gt))), tibble::as_tibble(fn(f04_df())),
+                       info = paste(deparse(body(fn)), collapse = " "))
+    }
     expect_identical(tibble::as_tibble(collect(gt)), tibble::as_tibble(f04_df()))
   }
 })

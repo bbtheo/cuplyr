@@ -365,6 +365,9 @@ NULL
 #' @export
 #' @importFrom dplyr union
 union.tbl_gpu <- function(x, y, ...) {
+  if (is_rowwise_gpu(x)) {
+    return(rowwise_cpu(x, "union", tables = "y"))
+  }
   rlang::check_dots_empty()
   y <- resolve_set_op_other_side(y)
   chk <- check_set_op_compatible(current_schema(x), current_schema(y))
@@ -389,6 +392,9 @@ union.tbl_gpu <- function(x, y, ...) {
 #' @export
 #' @importFrom dplyr union_all
 union_all.tbl_gpu <- function(x, y, ...) {
+  if (is_rowwise_gpu(x)) {
+    return(rowwise_cpu(x, "union_all", tables = "y"))
+  }
   rlang::check_dots_empty()
   y <- resolve_set_op_other_side(y)
   chk <- check_set_op_compatible(current_schema(x), current_schema(y))
@@ -411,6 +417,9 @@ union_all.tbl_gpu <- function(x, y, ...) {
 #' @export
 #' @importFrom dplyr intersect
 intersect.tbl_gpu <- function(x, y, ...) {
+  if (is_rowwise_gpu(x)) {
+    return(rowwise_cpu(x, "intersect", tables = "y"))
+  }
   rlang::check_dots_empty()
   y <- resolve_set_op_other_side(y)
   chk <- check_set_op_compatible(current_schema(x), current_schema(y))
@@ -433,6 +442,9 @@ intersect.tbl_gpu <- function(x, y, ...) {
 #' @export
 #' @importFrom dplyr setdiff
 setdiff.tbl_gpu <- function(x, y, ...) {
+  if (is_rowwise_gpu(x)) {
+    return(rowwise_cpu(x, "setdiff", tables = "y"))
+  }
   rlang::check_dots_empty()
   y <- resolve_set_op_other_side(y)
   chk <- check_set_op_compatible(current_schema(x), current_schema(y))
@@ -455,6 +467,9 @@ setdiff.tbl_gpu <- function(x, y, ...) {
 #' @export
 #' @importFrom dplyr symdiff
 symdiff.tbl_gpu <- function(x, y, ...) {
+  if (is_rowwise_gpu(x)) {
+    return(rowwise_cpu(x, "symdiff", tables = "y"))
+  }
   rlang::check_dots_empty()
   y <- resolve_set_op_other_side(y)
   chk <- check_set_op_compatible(current_schema(x), current_schema(y))
@@ -486,6 +501,9 @@ symdiff.tbl_gpu <- function(x, y, ...) {
 #' @export
 #' @importFrom dplyr setequal
 setequal.tbl_gpu <- function(x, y, ...) {
+  if (is_rowwise_gpu(x)) {
+    return(rowwise_cpu(x, "setequal", tables = "y"))
+  }
   rlang::check_dots_empty()
   y <- resolve_set_op_other_side(y)
   chk <- check_set_op_compatible(current_schema(x), current_schema(y))

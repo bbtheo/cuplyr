@@ -21,6 +21,8 @@ list(
   groups = c("col1"),            # group_by columns (can be empty)
   exec_mode = "eager",           # "eager" or "lazy"
   lazy_ops = list()              # AST for lazy evaluation
+  # rowwise = TRUE               # ONLY on a rowwise table (F49); `groups` then holds
+  #                              # the rowwise vars -- see "Rowwise tables" below
 )
 ```
 
@@ -362,6 +364,7 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
 | `R/gpu-memory.R` | memory reporting and GC helpers |
 | `R/gpu.R` | `has_gpu()`, `gpu_details()` |
 | `R/print.R` | `print.tbl_gpu()` method |
+| `R/rowwise.R` | rowwise tables (F49): `is_rowwise_gpu()`, `rowwise.tbl_gpu()`, the CPU route `rowwise_cpu()`, the all-or-nothing native attempt `rowwise_attempt()`, the horizontal-aggregate rewrite `rowwise_rewrite_dots()`, rowwise `summarise()` -- see "Rowwise tables" |
 | `R/vctrs.R` | vctrs contract (F02): `vec_proxy()` returns a two-column frame of row handles (`.src` = integer source id, constant ALTREP `gpu_handle_src()`; `.row` = `seq_len(n)`), so `vec_size()` is O(1); `vec_restore()` decodes them into one GPU gather. Source registry holds sources weakly with ids that are never reused; `vec_proxy()` also pins the source strongly until the enclosing vctrs entry closure (innermost non-generic vctrs frame, `vctrs_entry_frame()`) returns, because vctrs copies handle values out of the proxy and may drop the table before restoring. A dead source is a loud `cuplyr_error_vctrs_dead_source`. `vec_proxy_equal/compare/order` and cross-layout casts collect (via `cuplyr_fallback_notify()`); `vec_ptype2`/`vec_cast` against tbl_gpu/tibble/data.frame (result stays a tbl_gpu); `length.tbl_gpu` = number of columns. `names()`/`names<-` answer vctrs (row names) with NULL / no-op, see `called_from_vctrs()` in `R/tbl-gpu.R`. `vec_rbind()`/`vec_cbind()` (so `dplyr::bind_rows()`/`bind_cols()`) on a tbl_gpu raise `cuplyr_error_vctrs_bind_unsupported`; use `cuplyr::bind_rows()`/`bind_cols()` (`R/bind.R`: `bind_rows_inputs()`/`bind_cols_inputs()` replicate dplyr 1.2.1's argument flattening -- single-bare-list unwrap, `vctrs::obj_is_list()` splicing, NULLs dropped -- then any tbl_gpu among the inputs routes to the GPU and everything else goes to dplyr unchanged). A lazy input's `compute()` is memoized per vctrs entry call (`vctrs_computed()`), released with the pins |
 
 ### Benchmark Files
@@ -736,6 +739,7 @@ String columns use offset-based storage (Apache Arrow format):
 - Groups are applied during `summarise()`
 - `arrange(.by_group=TRUE)` prepends group columns to sort keys
 - Preserve `$groups` when returning new tbl_gpu unless ungrouping
+- On a rowwise table `$groups` holds the rowwise vars, not groups: see "Rowwise tables"
 
 ### summarise() edge contracts (F07)
 - **Fixed group keys (`$fixed_keys`)**: `slice(.preserve = TRUE)` on a `group_by()`-grouped table stores the input's group-keys tibble (empty groups included) in `$fixed_keys` (`new_tbl_gpu(fixed_keys=)`, a `tbl_gpu_fields` member). Read only through `fixed_keys_of()` (R/group-by.R), which returns `NULL` unless its names equal `$groups`. It is honoured by `compute_group_data()` (group_data/keys/rows/indices/size/n_groups), `collect()` and `gpu_fallback()`'s regroup (`with_fixed_groups()`), and `summarise()` routes to the CPU fallback when it is set. `push_op()` carries it via `carry_fixed_keys()` only for select/rename/mutate/window nodes that leave the group columns untouched; `compute()` and `dplyr_reconstruct()` copy it; every other constructor omits it, which drops it. Default to dropping when adding a constructor. `filter()`/`filter_out()` (one engine, `filter_impl()` in R/filter.R) set it for `.preserve = TRUE` and for `.drop = FALSE` tables (dplyr keeps their whole group structure), and drop it on every other exit; `filter_out()` pushes one `ast_filter` with the predicate `is.na(P) | !P` for the ANDed dots, and sends opaque/vector/matrix dots, named dots and zero-column tables to `dplyr::filter_out()` on the CPU.
@@ -753,6 +757,84 @@ String columns use offset-based storage (Apache Arrow format):
 - `ast_rename(positions=)`: set only when the input has duplicated names (`rename_positions()`); the optimizer then passes no requirement through the node, and a source with duplicated names is never pruned.
 - Duplicated names fail closed (F40): `push_op()` refuses any node on an input with duplicated names unless `node_is_position_safe()` allows it (`select`/`rename` with `positions`, `distinct` with `key_positions`, a `slice` with no `order_col`, `barrier`), raising dplyr's "Can't transform a data frame with duplicate names."; `push_join()` and every join verb raise "Input columns in `x`/`y` must be unique." (`check_unique_join_inputs()`). Verbs dplyr refuses also check at their entry (`check_unique_input_names()`: filter, mutate, transmute, summarise, arrange with dots, the slice verbs) so the message comes first. Position-correct paths: select/relocate/rename, `distinct()`/`unique()` (`distinct_key_positions()`; a bare duplicated name keys on its first column, as dplyr), `[`/`$`/`[[` (`ast_select_at()`), `head()`/`tail()` (a row-only slice node, though `slice_head()` refuses), set ops (whole-call fallback) and `bind_rows()` (vctrs' "unique" repair as a positional rename). `group_by()` and `pull()` raise dplyr's own errors. A new verb that builds a by-name node gets the error, not the first column.
 - `count()`/`add_count()`/`distinct()` drop NULL dots; a dot the IR can't parse sends the whole call to `gpu_fallback()` with the original dots. `dimnames.tbl_gpu()` (so `colnames()`) and `unique.tbl_gpu()` (= `distinct()`) exist.
+
+### Rowwise tables (F49)
+
+`rowwise(<tbl_gpu>)` is native and metadata-only (`R/rowwise.R`): it marks the
+table, no GPU work, no download, a lazy table keeps its pending ops.
+
+**Representation.** `$groups` holds the rowwise vars (possibly `character()`),
+and the object carries `$rowwise = TRUE` -- a field that exists ONLY on rowwise
+tables (`new_tbl_gpu(rowwise = TRUE)`; the conformance harness recognises an
+uploaded fixture by its fields, so no other table may gain a field).
+`is_rowwise_gpu(x)` tests it. `push_op()`/`push_join()` carry it (except through
+summarise/reframe/distinct nodes), `compute()`/`as_lazy()`/`vec_restore()` keep
+it, `ungrouped()` drops it and `with_surviving_groups()`/`set_groups_by_position()`
+put it back. A rowwise table is never a bare data.frame. `tbl_gpu(<rowwise_df>)`
+uploads one silently; `collect()` returns `dplyr::rowwise(out, all_of(vars))`
+(identical to dplyr's); `as_tibble()`/`ungroup()` drop it; `group_by()` replaces
+it (`.add = TRUE` appends to the vars); the `group_data()` family has one group
+per row (`rowwise_group_data()`). `tbl_sum()`/`print()` show `Rowwise: <vars>`.
+The conformance harness's `cf_collect()` (`tools/conformance-lib.R`) reads the
+marker; that is its one rowwise-specific line.
+
+**THE rule.** `$groups` is full of vars that are not groups, so any code that
+reads it as groups would compute per rowwise-var group, silently wrong. A
+`tbl_gpu` method therefore is EITHER rowwise-aware (table below) OR its first
+statement routes the WHOLE call to dplyr on a CPU `rowwise_df`
+(`rowwise_cpu(.data, "<verb>")`: rebuilds the call from the method's call,
+evaluates it in the caller's environment, goes through `gpu_fallback()`).
+`gpu_fallback()` itself builds `dplyr::rowwise(tbl, all_of(vars))` for a rowwise
+input and re-uploads a `rowwise_df` result as a rowwise `tbl_gpu`. Adding a verb
+that reads `$groups`? Add it to this table and guard it.
+
+| verb | on a rowwise `tbl_gpu` |
+|---|---|
+| `rowwise`, `group_by`, `ungroup`, `group_vars`/`groups`/`tbl_vars`, the `group_data`/`group_keys`/`group_indices`/`group_size`/`group_rows`/`n_groups` family, `collect`/`compute`/`collapse`/`as_lazy`/`as_eager`, `as_tibble`, `print`/`tbl_sum`, `pull`, `glimpse`, `dim`/`names`, `group_trim` (returns the table: a rowwise table has no groups) | native |
+| `arrange`, `rename`, `rename_with`, `select`, `relocate`, `head`/`tail`/`[`, `$<-`/`[[<-`/`[<-` (whole columns only, via `gpu_assign_column()`; a row subscript errors), `dplyr_row_slice`/`dplyr_col_modify`, the joins (`left/inner/full/right/semi/anti/cross_join`: `push_join()` keeps x's vars) | native, rowwise-ness kept (`select`/`relocate`/`[`/`head`/`tail`/`mutate`/`transmute` list the vars in column order like dplyr: `rowwise_column_order()`) |
+| `mutate`, `transmute`, `filter`, `filter_out`, `summarise` | native for elementwise expressions and the rewritten row aggregates (below); the WHOLE call goes to dplyr for anything else |
+| `slice*`, `sample_*`, `distinct`/`unique`, `count`/`tally`/`add_count`, `reframe`, `group_split`, the set operations, `rows_*`, `bind_rows`/`bind_cols`/`rbind`/`cbind` with a rowwise FIRST input, `group_map`/`group_modify`/`group_nest`/`nest_by`/`nest_join`/`do` | whole call on the CPU |
+
+**Native mutate/transmute/filter/summarise.** Inside `rowwise()` every column
+is one value per row, so an elementwise expression is the vectorised result: the
+ordinary native path runs with `verb_groups = character()` (the vars are only
+columns to keep: `mutate_run(rowwise = TRUE)`, `transmute_run(rowwise = TRUE)`,
+`filter_run`). The attempt is all-or-nothing (`rowwise_attempt()`): `.by`,
+unnamed rewritten dots, a window call (it would see one row), a vector literal, a
+column-free call that is not pure (`runif(1)`), a CPU-fallback request inside the
+native code (`gpu_fallback()` bails while an attempt runs), or ANY error, abandons
+the attempt and reruns the whole call in dplyr with the user's original dots, so
+dplyr gives its own result or its own error. `summarise()` is `transmute()` plus
+dplyr's `.groups` rules (NULL/"keep" group by the vars, message only when
+`summarise_should_inform()`; "drop"; "rowwise"; "drop_last" is dplyr's error).
+`summarise(.groups = "rowwise")` on a plain table returns a rowwise `tbl_gpu`.
+`cur_group_id()` is a row-number column (`rowwise_with_row_ids()`).
+
+**Tier B: horizontal aggregates.** `rowwise_rewrite_dots()` rewrites, in the
+user's expression, `sum`/`mean`/`min`/`max`/`prod` of `c_across(<tidyselect>)`
+(resolved against the running schema minus the rowwise vars), of `c(<columns>)`,
+of several column arguments or of one column, `n()` (1L) and
+`length(c_across(..))`/`length(c(..))` (k, an IR literal whose `$reads` lists the
+operand columns so `ir_cols()` and `.keep = "used"/"unused"` count them) into
+`.cuplyr_rw(<IR node>, <cols>)` calls (`ir_parse_expr()` returns the node). The node is `rw_agg_i32`/`rw_agg_f64`
+(`src/expr_eval.hpp`, a handler that folds the operand columns with `na.rm`
+semantics: NA propagation, `sum`/`prod` neutral elements, `mean` over the non-NA
+count with a real NaN for none, NULL_MIN/NULL_MAX for `min`/`max`; FLOAT64
+operands: under `na.rm = TRUE` a NaN is missing too (`nans_to_nulls`), under
+`na.rm = FALSE` `min`/`max` give NaN for a NaN operand unless an NA is present,
+in either operand order). Only
+logical/integer/double operands; `mean(a, b)` (trim) is not rewritten. Result
+types are dplyr's: `mean`/`prod` and anything with a double operand give a
+double; `sum`/`min`/`max` of logical/integer give an integer. Two are
+data-dependent, and the handler flags them on the result pointer (`rw_flags`,
+read by `check_rowwise_flags()` in `warn_int_overflow()`): an integer `sum()`
+that leaves the integer range is a double (eager: probed on the input table
+first and built as `rw_agg_f64`; lazy: the INT32 form, failing loudly with
+`cuplyr_error_sum_overflow`, F42's rule), and an integer `min()`/`max(na.rm =
+TRUE)` of an all-NA row is `+-Inf` (a double, with dplyr's warning; eager probes
+and retypes, lazy has no native form: whole call on the CPU). A double
+`min()`/`max(na.rm = TRUE)` of an all-NA row warns "no non-missing arguments to
+min; returning Inf" at lowering.
 
 ### Join Ordering & Unmatched Rows
 - **cuDF join outputs are unordered**: We stable-sort join maps by left_map (then right_map) in `src/ops_join.cpp` to match dplyr

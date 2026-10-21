@@ -120,7 +120,10 @@ select.tbl_gpu <- function(.data, ...) {
   if (length(groups) > 0L) {
     out <- set_groups_by_position(out, .data, vars, schema$names)
   }
-  out
+  if (is_rowwise_gpu(.data) && !is_rowwise_gpu(out)) {
+    out <- rowwise_mark(out, character())  # (a rowwise table with duplicated names, no vars)
+  }
+  rowwise_column_order(out)
 }
 
 # =============================================================================
@@ -510,5 +513,7 @@ set_groups_by_position <- function(out, before, loc, names) {
   }
   out$groups <- groups
   out$group_drop <- if (length(groups) > 0L) before$group_drop %||% TRUE else TRUE
+  # a rowwise table stays rowwise (F49)
+  if (is_rowwise_gpu(before)) out$rowwise <- TRUE
   out
 }

@@ -447,6 +447,29 @@ mutate_has_vector_literal <- function(node) {
   any(vapply(node$expressions, function(e) identical(e$ir$kind, "vec"), logical(1)))
 }
 
+# F49: TRUE iff `ir` (an IR node or a list of them) holds a rowwise aggregate
+# whose flags depend on which rows it sees (check_rowwise_flags()): an integer
+# sum()/min()/max() (`rw_agg_i32`: overflow, all-NA and zero-row checks that
+# change dplyr's type) or a double min()/max() (base R's warnings). dplyr
+# computes it on every row its verb gets, so no filter may be moved below a
+# mutate holding one, or merged with the filters under one that holds one.
+ir_has_rw_flag_agg <- function(ir) {
+  if (!is.list(ir)) {
+    return(FALSE)
+  }
+  if (inherits(ir, "cuplyr_ir")) {
+    if (!identical(ir$kind, "call")) {
+      return(FALSE)
+    }
+    if (identical(ir$op, "rw_agg_i32") ||
+        (identical(ir$op, "rw_agg_f64") && isTRUE(ir$meta$fn %in% c("min", "max")))) {
+      return(TRUE)
+    }
+    return(ir_has_rw_flag_agg(ir$args))
+  }
+  any(vapply(ir, ir_has_rw_flag_agg, logical(1)))
+}
+
 #' Try to fuse two consecutive mutate nodes
 #'
 #' @param lower Lower (earlier) mutate node
@@ -829,6 +852,10 @@ push_down_filters <- function(ast) {
     if (mutate_has_vector_literal(input)) {
       return(ast)
     }
+    # A rowwise aggregate's flags must see dplyr's rows (F49).
+    if (any(vapply(input$expressions, function(e) ir_has_rw_flag_agg(e$ir), logical(1)))) {
+      return(ast)
+    }
     mutate_outputs <- vapply(input$expressions, `[[`, character(1), "output_col")
 
     # Do not push if filter references any mutate outputs (including replacements)
@@ -994,6 +1021,13 @@ reorder_filters <- function(ast) {
 
   # Flatten predicates
   all_preds <- unlist(filters, recursive = FALSE)
+
+  # A rowwise aggregate's flags must see only the rows the filters below it
+  # keep (F49): leave this node, merge what is under it.
+  if (any(vapply(all_preds, function(p) ir_has_rw_flag_agg(p$ir), logical(1)))) {
+    ast$input <- reorder_filters(ast$input)
+    return(ast)
+  }
 
   # Safety check: don't reorder non-deterministic predicates
   safe_to_reorder <- all(vapply(all_preds, function(p) {

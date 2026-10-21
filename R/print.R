@@ -17,7 +17,10 @@ tbl_sum.tbl_gpu <- function(x, ...) {
     if (isTRUE(.subset2(x, "bare_df"))) "A data frame" else "A tibble"
   )
   groups <- .subset2(x, "groups")
-  if (length(groups) > 0L) {
+  if (is_rowwise_gpu(x)) {
+    # dplyr's tbl_sum.rowwise_df(): the rowwise vars, "" when there are none
+    out <- c(out, Rowwise = paste(groups, collapse = ", "))
+  } else if (length(groups) > 0L) {
     mark <- if (identical(getOption("OutDec"), ",")) "." else ","
     n <- formatC(nrow(dplyr::group_data(x)), big.mark = mark, format = "d")
     out <- c(out, Groups = paste0(paste(groups, collapse = ", "), " [", n, "]"))
@@ -44,7 +47,9 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
   cat("Rows: ", format(dims[1], big.mark = ","), "\n", sep = "")
   cat("Columns: ", dims[2], "\n", sep = "")
 
-  if (length(x$groups) > 0) {
+  if (is_rowwise_gpu(x)) {
+    cat("Rowwise: ", paste(x$groups, collapse = ", "), "\n", sep = "")
+  } else if (length(x$groups) > 0) {
     cat("Groups: ", paste(x$groups, collapse = ", "), "\n")
   }
 

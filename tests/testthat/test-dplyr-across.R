@@ -492,40 +492,33 @@ test_that("n() works (and never falls back) inside filter()", {
 })
 
 # =============================================================================
-# c_across(): rowwise()'s own companion -- rowwise() is already a full
-# CPU-fallback verb (R/fallback.R, Phase 2); pin that c_across() composes
-# with it correctly rather than crashing.
+# c_across(): rowwise()'s own companion. Since F49 rowwise() of a tbl_gpu is a
+# native rowwise tbl_gpu (no CPU fallback), and c_across() aggregates inside a
+# rowwise mutate() are rewritten into horizontal GPU expressions. Full
+# coverage: test-parity-F49-rowwise.R and test-parity-F49-rowwise-rewrites.R.
 # =============================================================================
 
-test_that("rowwise() falls back to a real rowwise_df (not re-uploaded to GPU)", {
+test_that("rowwise() returns a native rowwise tbl_gpu (F49)", {
   skip_if_no_gpu()
-  withr::local_options(cuplyr.fallback = "warn")
+  withr::local_options(cuplyr.fallback = "error")
 
-  # A `rowwise_df` has no `tbl_gpu` representation at all (Phase 9); Phase
-  # 10 found (and fixed, R/fallback.R's gpu_fallback()) that it used to be
-  # silently re-uploaded to a plain (non-rowwise) tbl_gpu on the way out,
-  # discarding its per-row grouping -- which meant `c_across()` (or ANY
-  # other rowwise-dependent verb) chained immediately afterward silently
-  # computed the wrong thing instead of erroring or working. Pinned here:
-  # the result must be a genuine `rowwise_df`, so a chained `mutate()`
-  # dispatches to REAL dplyr, not `mutate.tbl_gpu()`.
   gt <- tbl_gpu(tibble::tibble(x = c(1, 2), y = c(3, 4)))
-  expect_warning(rt <- dplyr::rowwise(gt), "fell back to CPU evaluation")
-  expect_true(inherits(rt, "rowwise_df"))
-  expect_false(is_tbl_gpu(rt))
+  expect_no_error(rt <- dplyr::rowwise(gt))
+  expect_true(is_tbl_gpu(rt))
+  expect_s3_class(collect(rt), "rowwise_df")
 })
 
-test_that("c_across() composes with the existing rowwise() CPU fallback", {
+test_that("c_across() composes with rowwise() on the GPU", {
   skip_if_no_gpu()
-  withr::local_options(cuplyr.fallback = "warn")
+  withr::local_options(cuplyr.fallback = "error")
 
   df <- tibble::tibble(x = c(1, 2), y = c(3, 4))
   gt <- tbl_gpu(df)
 
-  expect_warning(rt <- dplyr::rowwise(gt), "fell back to CPU evaluation")
-  result <- rt |> dplyr::mutate(total = sum(dplyr::c_across(c(x, y))))
+  result <- dplyr::rowwise(gt) |> dplyr::mutate(total = sum(dplyr::c_across(c(x, y))))
 
-  expect_equal(as.data.frame(dplyr::ungroup(result)), as.data.frame(dplyr::ungroup(
+  expect_true(is_tbl_gpu(result))
+  expect_equal(as.data.frame(dplyr::ungroup(collect(result))), as.data.frame(dplyr::ungroup(
     dplyr::rowwise(df) |> dplyr::mutate(total = sum(dplyr::c_across(c(x, y))))
   )))
 })

@@ -87,6 +87,7 @@
 #include <Rcpp.h>
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -158,6 +159,15 @@ struct eval_ctx {
     // F42: set when a checked integer +, -, * left R's integer range somewhere
     // (the value became NA). The entry points hand it to R, which warns.
     bool int_overflow = false;
+    // F49: flags the rowwise horizontal aggregates (rw_agg_*) raise, one bit
+    // each: 1 an integer sum left R's integer range, 2 an integer min()/max()
+    // (na.rm = TRUE) had an all-NA row (the result would be +-Inf, a double),
+    // 4/8 a double min()/max() (na.rm = TRUE) had an all-NA row (+-Inf, with
+    // R's warning), or a double min()/max() ran on zero rows; 16/32 an integer
+    // min()/max() ran on zero rows (dplyr evaluates it once on the empty
+    // group: +-Inf, a double, with R's warning). Handed to R as the
+    // "rw_flags" attribute of the result.
+    int rw_flags = 0;
 
     cudf::table_view view() const { return cudf::table_view(cols); }
 
@@ -543,7 +553,8 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
 
     static const std::set<std::string> int32_ops = {
         "nchar", "year", "month", "day", "hour", "minute", "second", "quarter", "yday", "wday",
-        "cast_int32", "factor_codes"  // F50
+        "cast_int32", "factor_codes",  // F50
+        "rw_agg_i32"  // F49
     };
     if (int32_ops.count(op)) return cudf::data_type{cudf::type_id::INT32};
 
@@ -1835,6 +1846,163 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
             return std::make_unique<cudf::column>(x_col);
         }
         return cudf::cast(x_col, cudf::data_type{cudf::type_id::INT32});
+    }
+
+    // ---- rw_agg_i32 / rw_agg_f64 (F49): a rowwise horizontal aggregate. The
+    // operands are the columns of one row (sum/mean/min/max/prod of
+    // c_across(a:e), of c(a, b), of several column arguments), so the
+    // aggregate is a fold over columns, not over rows. meta$fn is the function
+    // and meta$na_rm its flag; `_i32` returns INT32 (sum, min and max of
+    // INT32/BOOL8 operands), `_f64` returns FLOAT64 (everything else). NA
+    // semantics are R's:
+    //   na.rm = FALSE   any NA operand gives NA;
+    //   sum / prod      NAs count as 0 / 1 (all-NA gives 0 / 1);
+    //   mean            sum of the non-NA values over their count (all-NA: NaN,
+    //                   0/0 is a real NaN here, not a null);
+    //   min / max       the extreme of the non-NA values; an all-NA row has
+    //                   none: INT32 raises flag 2 (R retypes to double), FLOAT64
+    //                   gives +-Inf and raises flag 4 / 8 (R's warning).
+    //                   Zero rows raise 16 / 32 (INT32) or 4 / 8 (FLOAT64).
+    // FLOAT64 operands add R's NaN rules: under na.rm = TRUE a NaN is missing
+    // too (nans_to_nulls first); under na.rm = FALSE min/max give NaN for a
+    // NaN operand unless an NA is present (NA wins), whatever the operand
+    // order, and sum/mean/prod propagate NaN arithmetically.
+    // An INT32 sum accumulates in INT64 and raises flag 1 when a row leaves
+    // +-.Machine$integer.max (R's sum() returns a double there). ----
+    if (op == "rw_agg_i32" || op == "rw_agg_f64") {
+        Rcpp::List meta = node["meta"];
+        const std::string fn = Rcpp::as<std::string>(meta["fn"]);
+        const bool na_rm = Rcpp::as<bool>(meta["na_rm"]);
+        const bool as_int = (op == "rw_agg_i32");
+        const int k = args.size();
+        if (k < 1) Rcpp::stop("rw_agg: no operands");
+
+        const bool is_minmax = (fn == "min" || fn == "max");
+        const cudf::data_type f64{cudf::type_id::FLOAT64};
+        const cudf::data_type work =
+            is_minmax ? cudf::data_type{as_int ? cudf::type_id::INT32 : cudf::type_id::FLOAT64}
+                      : (fn == "sum" && as_int ? cudf::data_type{cudf::type_id::INT64} : f64);
+
+        auto load = [&](int i) -> std::unique_ptr<cudf::column> {
+            Rcpp::List a = args[i];
+            cudf::size_type idx = materialize(a, ctx);
+            cudf::column_view c = ctx.cols[idx];
+            if (c.type().id() == work.id()) return std::make_unique<cudf::column>(c);
+            return cudf::cast(c, work);
+        };
+        auto fill_scalar = [&](double v) -> std::unique_ptr<cudf::scalar> {
+            if (work.id() == cudf::type_id::INT64) {
+                return std::make_unique<cudf::numeric_scalar<int64_t>>(static_cast<int64_t>(v), true);
+            }
+            if (work.id() == cudf::type_id::INT32) {
+                return std::make_unique<cudf::numeric_scalar<int32_t>>(static_cast<int32_t>(v), true);
+            }
+            return std::make_unique<cudf::numeric_scalar<double>>(v, true);
+        };
+
+        cudf::binary_operator fold_op = cudf::binary_operator::ADD;
+        if (fn == "prod") fold_op = cudf::binary_operator::MUL;
+        if (fn == "min") fold_op = cudf::binary_operator::NULL_MIN;
+        if (fn == "max") fold_op = cudf::binary_operator::NULL_MAX;
+        // what a NA operand counts as when na.rm = TRUE (min/max just skip it)
+        const double neutral = (fn == "prod") ? 1.0 : 0.0;
+
+        std::vector<std::unique_ptr<cudf::column>> operands;  // kept for the validity AND
+        std::unique_ptr<cudf::column> acc;
+        std::unique_ptr<cudf::column> count;  // mean, na.rm = TRUE: non-NA operands per row
+        std::unique_ptr<cudf::column> any_nan;  // FLOAT64 min/max, na.rm = FALSE: a NaN operand
+        const bool f64_work = (work.id() == cudf::type_id::FLOAT64);
+        for (int i = 0; i < k; ++i) {
+            auto x = load(i);
+            if (is_minmax && !na_rm) {
+                operands.push_back(std::make_unique<cudf::column>(x->view()));
+            }
+            if (f64_work && is_minmax && !na_rm) {
+                // R: a NaN operand makes min()/max() NaN (an NA operand wins
+                // over it, applied below through the validity AND). The fold
+                // itself must not see NaN: NULL_MIN/NULL_MAX compare, and a
+                // comparison with NaN depends on the operand order.
+                auto nan_here = cudf::is_nan(x->view());
+                any_nan = (i == 0) ? std::move(nan_here)
+                                   : cudf::binary_operation(any_nan->view(), nan_here->view(),
+                                                            cudf::binary_operator::LOGICAL_OR,
+                                                            cudf::data_type{cudf::type_id::BOOL8});
+            }
+            if (f64_work && (na_rm || is_minmax)) {
+                // a GPU-computed NaN is a missing value to R's na.rm = TRUE
+                // (cuplyr's summarise() agrees, F22): make it null, so the
+                // neutral fill, the mean's count and the min/max fold skip it
+                auto nn = cudf::nans_to_nulls(x->view());
+                if (nn.second > 0 || x->null_count() > 0) {
+                    x->set_null_mask(std::move(*nn.first), nn.second);
+                }
+            }
+            if (fn == "mean" && na_rm) {
+                auto valid = cudf::cast(cudf::is_valid(x->view())->view(), f64);
+                count = i == 0 ? std::move(valid)
+                               : cudf::binary_operation(count->view(), valid->view(),
+                                                        cudf::binary_operator::ADD, f64);
+            }
+            if (na_rm && !is_minmax) {
+                x = cudf::replace_nulls(x->view(), *fill_scalar(neutral));
+            }
+            acc = (i == 0) ? std::move(x)
+                           : cudf::binary_operation(acc->view(), x->view(), fold_op, work);
+        }
+
+        if (is_minmax && acc->size() == 0) {
+            // zero rows: dplyr still evaluates min()/max() once, on the empty
+            // group (+-Inf with R's warning; a double even for INT32 operands)
+            if (as_int) {
+                ctx.rw_flags |= (fn == "min") ? 16 : 32;
+            } else {
+                ctx.rw_flags |= (fn == "min") ? 4 : 8;
+            }
+        }
+
+        if (fn == "mean") {
+            if (na_rm) {
+                acc = cudf::binary_operation(acc->view(), count->view(),
+                                             cudf::binary_operator::TRUE_DIV, f64);
+            } else {
+                cudf::numeric_scalar<double> kk(static_cast<double>(k), true);
+                acc = cudf::binary_operation(acc->view(), kk, cudf::binary_operator::TRUE_DIV, f64);
+            }
+        } else if (is_minmax && !na_rm) {
+            if (any_nan) {
+                const cudf::numeric_scalar<double> nan_value(
+                    std::numeric_limits<double>::quiet_NaN(), true);
+                acc = cudf::copy_if_else(nan_value, acc->view(), any_nan->view());
+            }
+            std::vector<cudf::column_view> views;
+            for (auto& o : operands) views.push_back(o->view());
+            auto mask = cudf::bitmask_and(cudf::table_view(views));
+            acc->set_null_mask(std::move(mask.first), mask.second);
+        } else if (is_minmax) {
+            if (acc->null_count() > 0) {
+                if (as_int) {
+                    ctx.rw_flags |= 2;
+                } else {
+                    ctx.rw_flags |= (fn == "min") ? 4 : 8;
+                    acc = cudf::replace_nulls(
+                        acc->view(),
+                        *fill_scalar(fn == "min" ? std::numeric_limits<double>::infinity()
+                                                 : -std::numeric_limits<double>::infinity()));
+                }
+            }
+        } else if (fn == "sum" && as_int) {
+            auto mm = cudf::minmax(acc->view());
+            const double lim = 2147483647.0;
+            if (mm.first->is_valid() && mm.second->is_valid()) {
+                auto lo = static_cast<cudf::numeric_scalar<int64_t>*>(mm.first.get())->value();
+                auto hi = static_cast<cudf::numeric_scalar<int64_t>*>(mm.second.get())->value();
+                if (static_cast<double>(lo) < -lim || static_cast<double>(hi) > lim) {
+                    ctx.rw_flags |= 1;
+                }
+            }
+            acc = cudf::cast(acc->view(), cudf::data_type{cudf::type_id::INT32});
+        }
+        return acc;
     }
 
     // ---- nchar(x): attributes.hpp count_characters(), cast defensively to

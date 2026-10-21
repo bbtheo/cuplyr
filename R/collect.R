@@ -70,6 +70,14 @@
 collect.tbl_gpu <- function(x, ...) {
   out <- collect_frame(x)
 
+  # A rowwise table comes back as dplyr's rowwise_df, built by dplyr itself so
+  # it is identical to `dplyr::rowwise(<tibble>, vars)`, for a table from a
+  # plain data.frame too (F49).
+  if (is_rowwise_gpu(x)) {
+    out <- with_frame_attrs(tibble::as_tibble(out), frame_attrs(x))
+    return(dplyr::rowwise(out, dplyr::all_of(intersect(x$groups, names(out)))))
+  }
+
   # dplyr's contract (`collect.data.frame()` is the identity, dbplyr ends with
   # `grouped_df(out, intersect(op_grps(x), names(out)))`): a grouped table
   # comes back grouped, with the same `.drop`.
@@ -92,8 +100,9 @@ collect.tbl_gpu <- function(x, ...) {
 # @keywords internal
 restore_frame_meta <- function(frame, x) {
   frame <- with_frame_attrs(frame, frame_attrs(x))
-  # a stale flag must never strip a grouped_df's class
-  if (isTRUE(.subset2(x, "bare_df")) && length(.subset2(x, "groups")) == 0L) {
+  # a stale flag must never strip a grouped_df's (or rowwise_df's) class
+  if (isTRUE(.subset2(x, "bare_df")) && length(.subset2(x, "groups")) == 0L &&
+      !is_rowwise_gpu(x)) {
     class(frame) <- "data.frame"
   }
   frame
@@ -103,7 +112,7 @@ restore_frame_meta <- function(frame, x) {
 # rebuilt from its bare data there (as_tibble.grouped_df() drops attributes).
 # @keywords internal
 ungrouped_frame_meta <- function(frame, x) {
-  if (length(.subset2(x, "groups")) > 0L) frame else restore_frame_meta(frame, x)
+  if (length(.subset2(x, "groups")) > 0L || is_rowwise_gpu(x)) frame else restore_frame_meta(frame, x)
 }
 
 # The data of a tbl_gpu as an UNGROUPED tibble. This is what every internal
