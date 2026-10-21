@@ -57,6 +57,14 @@
 #' 0.0183-0.0187 s batched vs 0.0180 s single-call, 4/4 gate-like sessions),
 #' which is why the calibration probes opt out with `batch = FALSE`.
 #'
+#' The probe runs right after gc_gpu() and can be unrepresentative (the first
+#' calls may be slower than steady state), which would size `reps` too small
+#' (F52). So when batching, if the median timed sample is shorter than
+#' `min_sample_s`, `reps` is re-sized from that median (only ever upward, at
+#' most 3 times), the pass is discarded and `iterations` fresh samples are
+#' timed. The reported median and `reps` come from the last pass. Calls that
+#' don't batch (`reps` = 1, or `batch = FALSE`) get no extra pass.
+#'
 #' @param fn A zero-argument function. For lazy pipelines it must call
 #'   collect() (or compute()) internally so the pipeline actually executes;
 #'   otherwise only AST construction would be timed.
@@ -104,13 +112,25 @@ perf_time <- function(fn, iterations = 5, warmup = 2, min_sample_s = 0.05, batch
     reps <- if (per_call >= min_sample_s) 1 else min(ceiling(min_sample_s / per_call), 1e5)
   }
 
-  times <- numeric(iterations)
-  for (i in seq_len(iterations)) {
-    gc_gpu()
-    times[i] <- run_batch(reps) / reps
+  # Time `iterations` samples of `reps` calls each. If batching and the
+  # median sample came in shorter than min_sample_s (the probe was
+  # unrepresentative), re-size reps from these steadier per-call times,
+  # discard the pass and time a fresh one. Bounded so it always terminates.
+  max_resizes <- if (reps > 1) 3 else 0
+  resizes <- 0
+  repeat {
+    times <- numeric(iterations)
+    for (i in seq_len(iterations)) {
+      gc_gpu()
+      times[i] <- run_batch(reps) / reps
+    }
+    med <- stats::median(times)
+    if (resizes >= max_resizes || med * reps >= min_sample_s || reps >= 1e5) break
+    reps <- min(max(reps + 1, ceiling(min_sample_s / max(med, 1e-9))), 1e5)
+    resizes <- resizes + 1
   }
 
-  structure(stats::median(times), reps = reps)
+  structure(med, reps = reps)
 }
 
 # =============================================================================
