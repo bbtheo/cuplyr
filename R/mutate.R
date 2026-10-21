@@ -369,6 +369,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   # cur_group()$key and length(cur_group_rows()) are plain expressions; the
   # CPU fallbacks keep the dots as the user wrote them.
   user_dots <- dots
+  dots <- colwise_rewrite_dots(dots, orig_schema)
   dots <- rewrite_context_dots(dots, verb_groups, sequential = TRUE, name_unnamed = TRUE)
   if (dots_need_fallback(dots)) {
     return(mutate_across_fallback(.data, user_dots, .keep, before_quo, after_quo, by_quo))
@@ -705,7 +706,7 @@ plan_mutate_window_batches <- function(exprs, schema) {
 mutate_window_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo) {
   gpu_fallback("mutate", .data, function(tbl) {
     rlang::inject(dplyr::mutate(
-      tbl, !!!dots, .by = !!by_quo, .keep = keep,
+      .data = tbl, !!!dots, .by = !!by_quo, .keep = keep,
       .before = !!before_quo, .after = !!after_quo
     ))
   })
@@ -722,7 +723,7 @@ mutate_window_fallback <- function(.data, dots, keep, before_quo, after_quo, by_
 mutate_across_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo) {
   gpu_fallback("mutate", .data, function(tbl) {
     rlang::inject(dplyr::mutate(
-      tbl, !!!dots, .by = !!by_quo, .keep = keep,
+      .data = tbl, !!!dots, .by = !!by_quo, .keep = keep,
       .before = !!before_quo, .after = !!after_quo
     ))
   })
@@ -748,7 +749,7 @@ mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_qu
     # Inlined here, where the row count is known (see inline_evaluated_dots()).
     dots <- inline_evaluated_dots(dots, consts, provenance, nrow(tbl))
     rlang::inject(dplyr::mutate(
-      tbl, !!!dots, .by = !!by_quo, .keep = keep,
+      .data = tbl, !!!dots, .by = !!by_quo, .keep = keep,
       .before = !!before_quo, .after = !!after_quo
     ))
   })
@@ -1496,7 +1497,7 @@ transmute.tbl_gpu <- function(.data, ...) {
 
   if (length(dots) > 0L && is_zero_column_with_rows(.data)) {
     return(gpu_fallback("transmute", .data, function(tbl) {
-      rlang::inject(dplyr::transmute(tbl, !!!dots))
+      rlang::inject(dplyr::transmute(.data = tbl, !!!dots))
     }))
   }
 
@@ -1508,16 +1509,17 @@ transmute.tbl_gpu <- function(.data, ...) {
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R
   # and mutate.tbl_gpu()'s own identical handling.
   user_dots <- dots
+  dots <- colwise_rewrite_dots(dots, current_schema(.data))
   dots <- rewrite_context_dots(dots, .data$groups, sequential = TRUE, name_unnamed = TRUE)
   if (dots_need_fallback(dots)) {
     return(gpu_fallback("transmute", .data, function(tbl) {
-      rlang::inject(dplyr::transmute(tbl, !!!user_dots))
+      rlang::inject(dplyr::transmute(.data = tbl, !!!user_dots))
     }))
   }
   expanded <- expand_across_dots(dots, current_schema(.data), .data$groups, "transmute")
   if (isTRUE(attr(expanded, "needs_fallback"))) {
     return(gpu_fallback("transmute", .data, function(tbl) {
-      rlang::inject(dplyr::transmute(tbl, !!!user_dots))
+      rlang::inject(dplyr::transmute(.data = tbl, !!!user_dots))
     }))
   }
   # As in mutate.tbl_gpu(): the CPU fallback runs on the pre-substitution
@@ -1547,7 +1549,7 @@ transmute.tbl_gpu <- function(.data, ...) {
   if (is.null(expressions) || isTRUE(attr(expressions, "has_window"))) {
     return(gpu_fallback("transmute", fallback_data, function(tbl) {
       dots_cpu <- inline_evaluated_dots(fallback_dots, evaluated$consts, provenance, nrow(tbl))
-      rlang::inject(dplyr::transmute(tbl, !!!dots_cpu))
+      rlang::inject(dplyr::transmute(.data = tbl, !!!dots_cpu))
     }))
   }
 

@@ -310,6 +310,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # cur_group()$key and length(cur_group_rows()) are plain expressions; the
   # CPU fallbacks keep the dots as the user wrote them.
   user_dots <- dots
+  dots <- colwise_rewrite_dots(dots, current_schema(.data))
   dots <- rewrite_context_dots(dots, verb_groups)
   dots <- rewrite_top_n_rank_dots(dots, .data)
   if (dots_need_fallback(dots)) {

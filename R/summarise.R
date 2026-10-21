@@ -335,7 +335,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # too (n() = 0), which only the CPU summarise (seeing the keys) produces.
   if (!is.null(fixed_keys_of(.data))) {
     return(gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(tbl, !!!dots, .groups = .groups))
+      rlang::inject(dplyr::summarise(.data = tbl, !!!dots, .groups = .groups))
     }))
   }
 
@@ -349,7 +349,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # count (collect() honours `$nrow`).
   if (length(current_schema(.data)$names) == 0L) {
     return(gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(tbl, !!!dots, .groups = .groups, .by = !!by_quo))
+      rlang::inject(dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo))
     }))
   }
 
@@ -367,6 +367,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # native shape, a dot that is exactly `cur_group_id()`, is handled just above.
   # length(cur_group_rows()) is n(); the CPU fallbacks keep the user's dots.
   user_dots <- dots
+  dots <- colwise_rewrite_dots(dots, current_schema(.data))
   dots <- rewrite_context_dots(dots, character(), name_unnamed = TRUE)
   # A dot that is exactly cur_group_id() is the output row number: the rows of
   # a summarise result are in group_data() order. Anything more involved with
@@ -383,7 +384,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
 
   if (dots_need_fallback(dots, treat_cur_group_id_as_deferred = TRUE)) {
     return(gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
+      rlang::inject(dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
     }))
   }
 
@@ -396,7 +397,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   expanded <- expand_across_dots(dots, current_schema(.data), summarise_groups, "summarise")
   if (isTRUE(attr(expanded, "needs_fallback"))) {
     return(gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
+      rlang::inject(dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
     }))
   }
   # Named silently here: the "will use expression as column name" warning is
@@ -423,7 +424,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   if (summarise_dots_are_sequential(dots) ||
       !summarise_dots_parseable(dots, current_schema(.data))) {
     return(gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo))
+      rlang::inject(dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo))
     }))
   }
 
@@ -431,7 +432,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
 
   cpu <- function() {
     gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo))
+      rlang::inject(dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo))
     })
   }
   # F42: an integer window sum() in an aggregation's argument that overflows
@@ -778,11 +779,13 @@ inform_regrouped_output <- function(old_groups, new_groups) {
 # expression" (decompose_agg_call() fails, or its arg doesn't parse at
 # all) or "Unsupported aggregation function" (a function name outside the
 # fixed cudf-backed list, e.g. cor()/weighted.mean()/an unknown reducer)
-# errors -- i.e. "this SHAPE isn't understood". A dot that's a genuine
-# user mistake FLOWS THROUGH unchanged (not caught here) and still errors
-# normally once it reaches na.rm=/na_rm= validation, column-not-found
-# checks, or ir_parse_quo() throwing (e.g. a missing column inside the
-# aggregation argument) -- matching the "NULL-vs-throw trigger rule".
+# errors -- i.e. "this SHAPE isn't understood" -- and for an NA flag the
+# native path can't take exactly (the other spelling, a value that isn't a
+# single TRUE/FALSE, see extract_na_rm()), which dplyr evaluates. A dot
+# that's a genuine user mistake FLOWS THROUGH unchanged (not caught here)
+# and still errors normally at column-not-found checks, or ir_parse_quo()
+# throwing (e.g. a missing column inside the aggregation argument) --
+# matching the "NULL-vs-throw trigger rule".
 #
 # @param dots Quosures from summarise(), already across()-expanded and
 #   auto_name_dots()'d (exactly what summarise.tbl_gpu() itself is about to
@@ -796,9 +799,18 @@ summarise_dots_parseable <- function(dots, schema) {
                       "any", "all")
 
   for (i in seq_along(dots)) {
-    quo <- extract_na_rm(dots[[i]])$quo
-    # F48: a Period/Duration `n`/`probs` is dplyr's to reject: CPU
-    shaped <- tryCatch(extract_agg_shape_param(quo), cuplyr_type_needs_cpu = function(e) NULL)
+    # An NA flag the reducer doesn't take, or a value the native path can't
+    # take exactly (extract_na_rm()), is dplyr's to evaluate: CPU.
+    stripped <- extract_na_rm(dots[[i]], schema)
+    if (is.null(stripped)) {
+      return(FALSE)
+    }
+    quo <- stripped$quo
+    # A shape the native path can't take (quantile() with type != 7 or a
+    # probs it can't evaluate, a Period/Duration `n`/`probs` (F48), an nth()
+    # it can't position) is not a user mistake until dplyr says so: CPU,
+    # where dplyr gives its value or its own error.
+    shaped <- tryCatch(extract_agg_shape_param(quo), error = function(e) NULL)
     if (is.null(shaped)) {
       return(FALSE)
     }
@@ -817,6 +829,16 @@ summarise_dots_parseable <- function(dots, schema) {
     }
     if (!decomposed$fn_name %in% known_agg_fns) {
       return(FALSE)  # unknown reducer, e.g. cor()/weighted.mean()
+    }
+    # n() takes no argument (`n(na.rm = TRUE)` is dplyr's "unused argument"),
+    # and the one argument left must be the data: unnamed or `x =`, not a
+    # misspelled control (`sum(na_rm = TRUE)`). n_distinct(...) takes its
+    # data in `...` and rejects any name there (dplyr's check_dots_unnamed()),
+    # where the base reducers' `...` ignore one.
+    arg_name <- if (is.null(names(expr))) "" else names(expr)[[2]]
+    if (identical(decomposed$fn_name, "n") || !arg_name %in% c("", "x") ||
+        (identical(decomposed$fn_name, "n_distinct") && nzchar(arg_name))) {
+      return(FALSE)
     }
 
     arg_expr <- decomposed$arg
@@ -963,9 +985,15 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   # reduced to the `fn(single_arg)` shape preprocess_agg_expressions() (and
   # parse_aggregations()'s own regex) already understand, with na.rm
   # tracked out-of-band per dot instead of embedded in the call shape.
-  # Extended (Phase 6, task 6.2) to also recognize `na_rm = <literal>`
-  # (first()/last()/nth()'s own spelling) -- see extract_na_rm()'s docs.
-  extracted <- lapply(dots, extract_na_rm)
+  # Each reducer's own spelling only (`na_rm` for first()/last()/nth()) --
+  # see extract_na_rm()'s docs.
+  extracted <- lapply(dots, extract_na_rm, schema = current_schema(.data))
+  if (any(vapply(extracted, is.null, logical(1)))) {
+    # Unreachable from summarise(): summarise_dots_parseable() sends these
+    # dots to the CPU first.
+    stop("internal error: summarise_core() given an NA flag the native path can't take",
+         call. = FALSE)
+  }
   na_rm_flags <- vapply(extracted, `[[`, logical(1), "na_rm")
   dots <- lapply(extracted, `[[`, "quo")
 
@@ -1060,77 +1088,84 @@ reconcile_summarise_types <- function(result) {
   result
 }
 
-# Internal: Extract and strip an `na.rm = <literal>` (or `na_rm = <literal>`)
-# named argument from a single summarise() aggregation dot (Phase 6, task
-# 6.1, Fix A; extended Phase 6, task 6.2 for the underscore spelling)
+# The NA flag each native reducer takes, by its exact name: base R's
+# reducers and dplyr's n_distinct() spell it `na.rm`, dplyr's first()/last()/
+# nth() `na_rm` (dplyr 1.2.1: `first(x, order_by = NULL, default = NULL,
+# na_rm = FALSE)`, `n_distinct(..., na.rm = FALSE)`). n() takes none.
+summarise_na_flag <- c(
+  sum = "na.rm", mean = "na.rm", min = "na.rm", max = "na.rm", sd = "na.rm",
+  var = "na.rm", median = "na.rm", quantile = "na.rm", n_distinct = "na.rm",
+  any = "na.rm", all = "na.rm",
+  first = "na_rm", last = "na_rm", nth = "na_rm"
+)
+
+# Internal: Extract and strip the NA flag from a single summarise()
+# aggregation dot (Phase 6, task 6.1, Fix A; task 6.2 for first()/last()/
+# nth(); per function since F19-a2)
 #
-# Real dplyr's `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()`/`median()`/
-# `quantile()`/`n_distinct()`/`any()`/`all()` all spell this control
-# `na.rm` (dot); `first()`/`last()`/`nth()` spell it `na_rm` (underscore --
-# confirmed via `args(dplyr::first)` against dplyr 1.2.1: `function (x,
-# order_by = NULL, default = NULL, na_rm = FALSE)`). Both defaults to
-# `FALSE`, matching R's own `na.rm = FALSE` default: any NA in a group
-# makes the WHOLE group's aggregation result NA for the mean/sum/.../
-# median family (verified empirically against dplyr 1.2.1). cudf's own
-# groupby aggregations always exclude nulls, so this default requires an
-# extra whole-group-null propagation step in `gpu_summarise()`
-# (`src/ops_groupby.cpp`) for that family -- `na_rm = FALSE` (the R-side
-# default emitted when no `na.rm=`/`na_rm=` is present) requests that
-# step; `na_rm = TRUE` opts back into cudf's native (NA-excluding)
-# behavior directly, no extra step. `n_distinct()`/`first()`/`last()`/
-# `nth()` interpret the SAME flag differently (selecting cudf's own
-# `null_policy` directly rather than a post-hoc propagation step -- see
-# `make_aggregation()`'s own docs), and `any()`/`all()` implement R's
-# three-valued logic with it -- but the R-side extraction (which spelling
-# is present, its value) is identical for every one of these functions,
-# so one shared implementation still covers all of them.
+# Only the reducer's own spelling (`summarise_na_flag`) is a flag. The other
+# one is left in the call, where it is an extra argument the native shape
+# doesn't take, so summarise_dots_parseable() sends the call to dplyr, which
+# gives what R gives: one more `...` value for sum()/min()/max()/any()/all()
+# (TRUE counts as 1), swallowed by mean()/median(), an "unused argument" error
+# for sd()/var()/first()/last()/nth(). A partially matched name
+# (`mean(x, na = TRUE)`) is left in the same way.
 #
-# Mirrors `ir_parse_sum_call()`'s (R/ir.R) validation style: the value is
-# resolved via `eval_tidy()` in the dot's own environment (so a bound
-# variable like `na.rm = drop_na` works, not just a literal `TRUE`/`FALSE`
-# token), but unlike `ir_parse_sum_call()` (which returns `NULL` to signal
-# "try a different shape" to its caller, since mutate()/filter() have
-# fallback paths), an unevaluable or non-logical value -- or BOTH spellings
-# present at once -- is a hard error here -- summarise()'s aggregation
-# parsing has no CPU fallback (see this file's own module docs).
+# Both defaults are `FALSE`, matching R's own `na.rm = FALSE` default: any NA
+# in a group makes the WHOLE group's aggregation result NA for the mean/sum/
+# .../median family. cudf's own groupby aggregations always exclude nulls, so
+# this default requires an extra whole-group-null propagation step in
+# `gpu_summarise()` (`src/ops_groupby.cpp`) for that family -- `na_rm = FALSE`
+# requests that step; `na_rm = TRUE` opts back into cudf's native
+# (NA-excluding) behavior directly. `n_distinct()`/`first()`/`last()`/`nth()`
+# interpret the SAME flag differently (selecting cudf's own `null_policy`
+# directly -- see `make_aggregation()`'s own docs), and `any()`/`all()`
+# implement R's three-valued logic with it.
+#
+# The value must be one ir_na_flag_value() accepts (a single TRUE/FALSE that
+# doesn't read the data mask). Anything else -- `na.rm = 1` (which base R
+# coerces), `NA`, a vector, a column, the flag given twice -- returns NULL:
+# not native, so summarise_dots_parseable() hands the user's dots to dplyr,
+# which computes the value or raises its own error.
 #
 # @param quo A quosure, one summarise() dot (post `auto_name_dots()`)
-# @return `list(quo = <possibly rewritten quosure, na.rm/na_rm stripped>,
-#   na_rm = logical(1))`
+# @param schema The input's schema (for the column-reference check)
+# @return `list(quo = <possibly rewritten quosure, flag stripped>,
+#   na_rm = logical(1))`, or NULL when the flag isn't native
 # @keywords internal
-extract_na_rm <- function(quo) {
+extract_na_rm <- function(quo, schema) {
   expr <- rlang::quo_get_expr(quo)
   env <- rlang::quo_get_env(quo)
+  unchanged <- list(quo = quo, na_rm = FALSE)
 
-  if (!is.call(expr)) {
-    return(list(quo = quo, na_rm = FALSE))
+  if (!is.call(expr) || is.null(names(expr))) {
+    return(unchanged)
+  }
+  head <- expr[[1]]
+  if (is.call(head) && length(head) == 3 && identical(head[[1]], as.name("::"))) {
+    head <- head[[3]]  # strip namespace: pkg::fn -> fn
+  }
+  if (!is.symbol(head)) {
+    return(unchanged)
+  }
+  flag <- summarise_na_flag[as.character(head)]
+  if (is.na(flag)) {
+    return(unchanged)  # n(), an unknown reducer: any flag stays an argument
   }
 
-  arg_names <- names(expr)
-  if (is.null(arg_names)) {
-    return(list(quo = quo, na_rm = FALSE))
+  flag_pos <- which(names(expr) == flag)
+  if (length(flag_pos) == 0) {
+    return(unchanged)
+  }
+  if (length(flag_pos) > 1) {
+    return(NULL)  # R's "matched by multiple actual arguments"
+  }
+  na_rm_val <- ir_na_flag_value(expr[[flag_pos]], env, schema)
+  if (is.null(na_rm_val)) {
+    return(NULL)
   }
 
-  na_rm_pos <- which(arg_names == "na.rm" | arg_names == "na_rm")
-  if (length(na_rm_pos) == 0) {
-    return(list(quo = quo, na_rm = FALSE))
-  }
-  if (length(na_rm_pos) > 1) {
-    stop("Multiple na.rm=/na_rm= arguments in aggregation expression: ",
-         rlang::quo_text(quo), call. = FALSE)
-  }
-
-  na_rm_val <- tryCatch(
-    rlang::eval_tidy(rlang::new_quosure(expr[[na_rm_pos]], env)),
-    error = function(e) NULL
-  )
-  if (!is.logical(na_rm_val) || length(na_rm_val) != 1 || is.na(na_rm_val)) {
-    stop("na.rm=/na_rm= must evaluate to a single TRUE or FALSE in aggregation expression: ",
-         rlang::quo_text(quo), call. = FALSE)
-  }
-
-  stripped_expr <- expr[-na_rm_pos]
-  list(quo = rlang::new_quosure(stripped_expr, env), na_rm = isTRUE(na_rm_val))
+  list(quo = rlang::new_quosure(expr[-flag_pos], env), na_rm = na_rm_val)
 }
 
 # Internal: Extract and strip `quantile()`'s `probs=` / `nth()`'s `n=`
@@ -1208,6 +1243,12 @@ extract_quantile_probs <- function(expr, env, quo) {
   if (is.null(present_args$x)) {
     stop("quantile() requires an `x` argument: ", rlang::quo_text(quo), call. = FALSE)
   }
+  # extract_na_rm() already took an exact `na.rm =`; one left here was
+  # partially matched (`na = TRUE`), and the rewrite below would drop it.
+  if (!is.null(present_args[["na.rm"]])) {
+    stop("summarise()'s quantile() takes na.rm only by its full name: ",
+         rlang::quo_text(quo), call. = FALSE)
+  }
 
   if (!is.null(present_args$type)) {
     type_val <- tryCatch(
@@ -1264,7 +1305,13 @@ extract_nth_position <- function(expr, env, quo) {
     stop("summarise()'s nth() does not support order_by=/default=: ",
          rlang::quo_text(quo), call. = FALSE)
   }
-  if (is.null(present_args$x) || is.null(present_args$n)) {
+  # extract_na_rm() already took an exact `na_rm =`; one left here was
+  # partially matched (`na = TRUE`), and the rewrite below would drop it.
+  if (!is.null(present_args[["na_rm"]])) {
+    stop("summarise()'s nth() takes na_rm only by its full name: ",
+         rlang::quo_text(quo), call. = FALSE)
+  }
+  if (is.null(present_args[["x"]]) || is.null(present_args[["n"]])) {
     stop("nth() requires `x` and `n` arguments: ", rlang::quo_text(quo), call. = FALSE)
   }
 

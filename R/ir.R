@@ -158,6 +158,70 @@ ir_op_alias <- function(fn_name) {
   switch(fn_name, ceiling = "ceil", fn_name)
 }
 
+# The formal names of the R function a registry op is named after (base,
+# dplyr, stats or lubridate, first found), read from the function itself
+# (`args()` gives a primitive's), cached per name. NULL when no such function
+# exists (an op name only cuplyr builds) or it has no formals list.
+# @keywords internal
+ir_op_formals_cache <- new.env(parent = emptyenv())
+ir_op_formals <- function(fn_name) {
+  cached <- ir_op_formals_cache[[fn_name]]
+  if (!is.null(cached)) {
+    return(if (identical(cached, NA)) NULL else cached)
+  }
+  fn <- get0(fn_name, envir = baseenv(), mode = "function", inherits = FALSE)
+  for (ns in c("dplyr", "stats", "lubridate")) {
+    if (!is.null(fn)) break
+    if (requireNamespace(ns, quietly = TRUE)) {
+      fn <- tryCatch(getExportedValue(ns, fn_name), error = function(e) NULL)
+      if (!is.function(fn)) fn <- NULL
+    }
+  }
+  fmls <- if (is.null(fn)) NULL else names(formals(args(fn)))
+  ir_op_formals_cache[[fn_name]] <- if (is.null(fmls)) NA else fmls
+  fmls
+}
+
+# TRUE iff R binds every argument of the registry call `fn_name(<args_raw>)`
+# to the formal at the argument's own position, which is how the registry
+# loop and its parse hooks read them. Each named argument must carry exactly
+# the name of the formal at its position, before any `...`: a reordered name
+# (`between(x, right = 3, left = 1)`), a partial one (`round(x, d = 1)`), an
+# unknown one, or one that only exists after `...` (`coalesce(x, .ptype = 0)`,
+# `if_else(c, 1, 0, ptype = )`) is FALSE, as is a positional argument that R
+# would put in `...` or reject (`round(x, 1, 2)`, `log(x, 2, 3)`). FALSE means
+# the call runs in dplyr, which matches by name. Base R's arithmetic
+# primitives ignore names, so a reordered `-`(e2 =, e1 =) going to dplyr is
+# only slower. A call with unnamed arguments only and a fixed arity or fewer
+# than three arguments is TRUE without looking anything up.
+# @keywords internal
+ir_args_bind_by_position <- function(fn_name, args_raw, arity) {
+  arg_names <- names(args_raw)
+  n_args <- length(args_raw)
+  if (is.null(arg_names) && (n_args < 3L || !is.na(arity))) {
+    return(TRUE)
+  }
+  fmls <- ir_op_formals(fn_name)
+  if (is.null(fmls)) {
+    return(is.null(arg_names) || !any(nzchar(arg_names)))
+  }
+  dots <- match("...", fmls)
+  positional <- if (is.na(dots)) fmls else fmls[seq_len(dots - 1L)]
+  if (n_args > length(positional) && !identical(dots, 1L)) {
+    return(FALSE)
+  }
+  if (is.null(arg_names)) {
+    return(TRUE)
+  }
+  named <- which(nzchar(arg_names))
+  if (identical(dots, 1L) && is.primitive(get0(fn_name, envir = baseenv(), inherits = FALSE))) {
+    # base R's max()/min() take the data in `...` and ignore a name there
+    # (`max(x = i)` is max(i)); only a formal's own name (`na.rm`) binds
+    return(!any(arg_names[named] %in% fmls))
+  }
+  all(named <= length(positional)) && identical(unname(arg_names[named]), positional[named])
+}
+
 # TRUE iff `expr` is `.data$name` or `.data[["name"]]`.
 is_data_pronoun_call <- function(expr) {
   is.call(expr) &&
@@ -537,6 +601,14 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
     canonical <- ir_op_alias(fn_name)
     args_raw <- as.list(expr)[-1]
 
+    # The registry reads arguments by position, R binds names first: a call
+    # where the two differ is dplyr's (ir_args_bind_by_position()).
+    in_registry <- canonical %in% names(ir_call_registry) && !canonical %in% ir_internal_ops
+    if (in_registry &&
+        !ir_args_bind_by_position(fn_name, args_raw, ir_call_registry[[canonical]]$arity)) {
+      return(NULL)
+    }
+
     # F29 A0: a rank-family call whose single argument is `desc(e)` ranks
     # `e` descending. Parse `e` as the value argument and flag the node;
     # R/window.R turns the flag into the spec's `order_desc`. Any other
@@ -563,7 +635,7 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       }
     }
 
-    if (canonical %in% names(ir_call_registry) && !canonical %in% ir_internal_ops) {
+    if (in_registry) {
       entry <- ir_call_registry[[canonical]]
 
       if (!is.na(entry$arity) && length(args_raw) != entry$arity) {
@@ -1337,17 +1409,15 @@ ir_parse_when_reduce <- function(expr, env, schema, fn_name) {
   }
 
   na_rm_pos <- which(arg_names == "na_rm")
+  if (length(na_rm_pos) > 1) {
+    return(NULL)  # dplyr's own "matched by multiple actual arguments" error
+  }
   na_rm <- FALSE
   if (length(na_rm_pos) == 1) {
-    na_rm_raw <- args_raw[[na_rm_pos]]
-    na_rm_val <- tryCatch(
-      rlang::eval_tidy(rlang::new_quosure(na_rm_raw, env)),
-      error = function(e) NULL
-    )
-    if (!is.logical(na_rm_val) || length(na_rm_val) != 1 || is.na(na_rm_val)) {
+    na_rm <- ir_na_flag_value(args_raw[[na_rm_pos]], env, schema)
+    if (is.null(na_rm)) {
       return(NULL)
     }
-    na_rm <- na_rm_val
   }
 
   dot_raw <- if (length(na_rm_pos) == 1) args_raw[-na_rm_pos] else args_raw
@@ -1420,6 +1490,26 @@ ir_eval_constant <- function(raw_expr, env) {
     list(ok = TRUE, value = rlang::eval_tidy(rlang::new_quosure(raw_expr, env))),
     error = function(e) list(ok = FALSE, value = NULL)
   )
+}
+
+# The value of an NA flag argument (`na.rm =` / `na_rm =`) when the native
+# path can take it exactly: a single TRUE or FALSE, evaluated in `env`. NULL
+# (run it in dplyr) for anything else: a value base R or dplyr would coerce
+# (`1`, `"yes"`) or reject (`NA`, a vector), an expression that fails outside
+# the data mask (`n() > 0`), or one that reads a column, which dplyr's data
+# mask resolves before an environment variable of the same name. Shared by
+# summarise()'s extract_na_rm() and the IR parsers that take a flag.
+# @keywords internal
+ir_na_flag_value <- function(raw_expr, env, schema) {
+  if (expr_has_column_ref(raw_expr, schema)) {
+    return(NULL)
+  }
+  evaluated <- ir_eval_constant(raw_expr, env)
+  value <- evaluated$value
+  if (!evaluated$ok || !is.logical(value) || length(value) != 1L || is.na(value)) {
+    return(NULL)
+  }
+  as.vector(value)
 }
 
 #' Parse `lag(x, n = 1L, default = NULL, order_by = NULL)` / `lead(...)`
@@ -1636,7 +1726,12 @@ ir_parse_order_ref <- function(expr, schema) {
     if (is.call(head) && length(head) == 3 && identical(head[[1]], as.symbol("::"))) {
       head <- head[[3]]  # strip namespace: dplyr::desc -> desc
     }
-    if (is.symbol(head) && as.character(head) %in% c("desc", "-")) {
+    # dplyr evaluates an order_by= value as an ordinary call, where
+    # `desc(foo = y)` is an "unused argument" error: only desc()'s own `x`
+    # name (or none) is that column
+    arg_name <- if (is.null(names(expr))) "" else names(expr)[[2]]
+    if (is.symbol(head) && as.character(head) %in% c("desc", "-") &&
+        arg_name %in% c("", if (identical(as.character(head), "desc")) "x")) {
       inner <- expr[[2]]
       if (!is.symbol(inner)) {
         return(NULL)
@@ -1980,7 +2075,7 @@ ir_parse_roll_call <- function(expr, env, schema, fn_name) {
     return(NULL)
   }
 
-  na_rm <- ir_parse_roll_na_rm(present_args$na.rm, env)
+  na_rm <- ir_parse_roll_na_rm(present_args$na.rm, env, schema)
   if (is.null(na_rm)) {
     return(NULL)
   }
@@ -2072,7 +2167,7 @@ ir_parse_froll_call <- function(expr, env, schema, dt_fn_name) {
     return(NULL)
   }
 
-  na_rm <- ir_parse_roll_na_rm(present_args$na.rm, env)
+  na_rm <- ir_parse_roll_na_rm(present_args$na.rm, env, schema)
   if (is.null(na_rm)) {
     return(NULL)
   }
@@ -2097,17 +2192,13 @@ ir_parse_roll_window_width <- function(n_expr, env) {
 }
 
 # `na.rm=` must be a constant TRUE/FALSE (absent -> FALSE, dplyr/data.table's
-# shared default). Returns a logical scalar, or `NULL` (not a constant).
-ir_parse_roll_na_rm <- function(na_rm_expr, env) {
+# shared default). Returns a logical scalar, or `NULL` (not a constant; see
+# ir_na_flag_value()).
+ir_parse_roll_na_rm <- function(na_rm_expr, env, schema) {
   if (is.null(na_rm_expr)) {
     return(FALSE)
   }
-  na_rm_eval <- ir_eval_constant(na_rm_expr, env)
-  na_rm_val <- na_rm_eval$value
-  if (!na_rm_eval$ok || !is.logical(na_rm_val) || length(na_rm_val) != 1 || is.na(na_rm_val)) {
-    return(NULL)
-  }
-  na_rm_val
+  ir_na_flag_value(na_rm_expr, env, schema)
 }
 
 #' Parse `ntile(x = row_number(), n)`
@@ -2274,11 +2365,8 @@ ir_parse_sum_call <- function(expr, env, schema) {
     return(NULL)  # only the exact `sum(x, na.rm = <literal>)` shape matches
   }
 
-  na_rm_val <- tryCatch(
-    rlang::eval_tidy(rlang::new_quosure(args_raw[[2]], env)),
-    error = function(e) NULL
-  )
-  if (!is.logical(na_rm_val) || length(na_rm_val) != 1 || is.na(na_rm_val)) {
+  na_rm_val <- ir_na_flag_value(args_raw[[2]], env, schema)
+  if (is.null(na_rm_val)) {
     return(NULL)
   }
 
@@ -2304,11 +2392,8 @@ ir_parse_mean_median_call <- function(expr, env, schema, fn_name) {
   if (is.null(x_ir)) {
     return(NULL)
   }
-  na_rm_val <- tryCatch(
-    rlang::eval_tidy(rlang::new_quosure(args_raw[[2]], env)),
-    error = function(e) NULL
-  )
-  if (!is.logical(na_rm_val) || length(na_rm_val) != 1L || is.na(na_rm_val)) {
+  na_rm_val <- ir_na_flag_value(args_raw[[2]], env, schema)
+  if (is.null(na_rm_val)) {
     return(NULL)
   }
   if (!na_rm_val) {
@@ -3162,6 +3247,34 @@ ir_parse_factor_conversion <- function(expr, schema, fn_name) {
   )
 }
 
+# R gives a logical operand a numeric type the GPU evaluator doesn't: window
+# max()/min() and unary `-` of a logical are integers, round() of a logical is
+# a double (and cuDF's round rejects a BOOL8 column). The parse hooks of those
+# ops wrap a BOOL8 first argument in `cast_to` (`cast_int32`/`cast_float64`,
+# nulls kept), so the node's inferred type and the evaluated column are R's
+# type, for the plain verbs and everything that rewrites into them
+# (across(), the colwise verbs). summarise()'s own max()/min() aggregates are
+# parsed elsewhere (make_aggregation() casts in F34) and never get here.
+# @keywords internal
+ir_cast_bool8_first <- function(args, schema, cast_to) {
+  if (length(args) < 1L) {
+    return(args)
+  }
+  type <- tryCatch(ir_infer_type(args[[1L]], schema), error = function(e) NA_character_)
+  if (identical(unname(type), "BOOL8")) {
+    args[[1L]] <- ir_call(cast_to, list(args[[1L]]))
+  }
+  args
+}
+
+ir_parse_bool8_cast <- function(op, cast_to) {
+  force(op)
+  force(cast_to)
+  function(args, schema) {
+    ir_call(op, ir_cast_bool8_first(args, schema, cast_to))
+  }
+}
+
 # F37: the parse hook of "+" and "-" (it only sees parsed args). A Date
 # shifted by a whole number of days becomes a native date_add_days/
 # date_sub_days node; every other timestamp shape that dplyr can compute goes
@@ -3173,6 +3286,9 @@ ir_parse_factor_conversion <- function(expr, schema, fn_name) {
 ir_parse_ts_arith <- function(op) {
   force(op)
   function(args, schema) {
+    if (op == "-" && length(args) == 1L) {
+      args <- ir_cast_bool8_first(args, schema, "cast_int32")
+    }
     plain <- ir_call(op, args)
     if (!ir_args_may_be_timestamp(args, schema)) {
       return(plain)
@@ -4664,7 +4780,8 @@ ir_call_registry <- list(
   # types. Verified against the dplyr oracle (T6 finding; corrects
   # phase1_expression_engine.md section 1.3's table, which grouped round()
   # with abs() as "argument type" -- empirically wrong for round()).
-  "round" = list(arity = NA_integer_, parse = NULL, type = type_float64, lower = list(handler = "round")),
+  "round" = list(arity = NA_integer_, parse = ir_parse_bool8_cast("round", "cast_float64"),
+                 type = type_float64, lower = list(handler = "round")),
 
   # --- Phase 4: conditional & vector functions ---
   # `if_else(cond, yes, no, missing = NULL)`: 3 or 4 positional args (the
@@ -4870,10 +4987,10 @@ ir_call_registry <- list(
                  lower = NULL, window = list(kind = "agg")),
   "sum" = list(arity = 1L, parse = NULL, type = type_window_int_sum,
                 lower = NULL, window = list(kind = "agg")),
-  "min" = list(arity = 1L, parse = NULL, type = type_arg1,
-                lower = NULL, window = list(kind = "agg")),
-  "max" = list(arity = 1L, parse = NULL, type = type_arg1,
-                lower = NULL, window = list(kind = "agg")),
+  "min" = list(arity = 1L, parse = ir_parse_bool8_cast("min", "cast_int32"),
+                type = type_arg1, lower = NULL, window = list(kind = "agg")),
+  "max" = list(arity = 1L, parse = ir_parse_bool8_cast("max", "cast_int32"),
+                type = type_arg1, lower = NULL, window = list(kind = "agg")),
   "n" = list(arity = 0L, parse = NULL, type = type_int32,
               lower = NULL, window = list(kind = "agg")),
   "sd" = list(arity = 1L, parse = NULL, type = type_float64,

@@ -104,6 +104,8 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
 
   # Get current schema
   schema <- current_schema(.data)
+  user_dots <- dots
+  dots <- colwise_rewrite_dots(dots, schema)
 
   # Classify every dot first: `x` / `desc(x)` / `-x` and a resolvable
   # top-level pick() are native (pick() expands to one ascending spec per
@@ -120,7 +122,7 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
       sort_specs <- c(sort_specs, list(parse_arrange_expr(quo, .data = .data, schema = schema)))
     } else {
       return(gpu_fallback("arrange", .data, function(tbl) {
-        dplyr::arrange(tbl, !!!dots, .by_group = .by_group, .locale = .locale)
+        dplyr::arrange(tbl, !!!user_dots, .by_group = .by_group, .locale = .locale)
       }))
     }
   }

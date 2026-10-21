@@ -534,26 +534,29 @@ test_that("summarise() quantile() with na.rm=TRUE excludes NAs", {
   expect_same_as_dplyr(df, pipeline, arrange_by = "g")
 })
 
-test_that("summarise() quantile() rejects a probability vector (only a single p supported)", {
+test_that("summarise() quantile() of a probability vector is dplyr's own error (CPU)", {
   skip_if_no_gpu()
 
   gpu_df <- tbl_gpu(oracle_quantile_df())
 
   expect_error(
     dplyr::summarise(gpu_df, q = stats::quantile(x, c(0.25, 0.75))),
-    "single probability"
+    "size 1"
   )
 })
 
-test_that("summarise() quantile() rejects type != 7", {
+test_that("summarise() quantile() with type != 7 gives dplyr's value (CPU)", {
   skip_if_no_gpu()
 
-  gpu_df <- tbl_gpu(oracle_quantile_df())
+  df <- oracle_quantile_df()
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(g) |>
+      dplyr::summarise(q = stats::quantile(x, 0.4, type = 6, names = FALSE), .groups = "drop")
+  }
 
-  expect_error(
-    dplyr::summarise(gpu_df, q = stats::quantile(x, 0.5, type = 6)),
-    "type = 7"
-  )
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
 })
 
 # --- n_distinct() ---
@@ -672,26 +675,24 @@ test_that("summarise() first()/last()/nth() work on a STRING column", {
   expect_same_as_dplyr(df, pipeline, arrange_by = "g")
 })
 
-test_that("summarise() nth() rejects order_by=/default=", {
+test_that("summarise() nth() with order_by=/default= gives dplyr's value (CPU)", {
   skip_if_no_gpu()
 
-  gpu_df <- tbl_gpu(oracle_first_last_nth_df())
+  df <- oracle_first_last_nth_df()
+  pipeline <- function(d) dplyr::summarise(d, n1 = dplyr::nth(x, 2, order_by = g))
 
-  expect_error(
-    dplyr::summarise(gpu_df, n1 = dplyr::nth(x, 1, order_by = g)),
-    "order_by"
-  )
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
 })
 
-test_that("summarise() nth() rejects n = 0", {
+test_that("summarise() nth() with n = 0 gives dplyr's value (CPU)", {
   skip_if_no_gpu()
 
-  gpu_df <- tbl_gpu(oracle_first_last_nth_df())
+  df <- oracle_first_last_nth_df()
+  pipeline <- function(d) dplyr::summarise(d, n0 = dplyr::nth(x, 0))
 
-  expect_error(
-    dplyr::summarise(gpu_df, n0 = dplyr::nth(x, 0)),
-    "non-zero"
-  )
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
 })
 
 # --- any()/all() ---

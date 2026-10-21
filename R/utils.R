@@ -60,7 +60,6 @@ gpu_physical_type <- function(type) {
 
 # Does the session order strings as the GPU does (bytes)? Only the C and
 # POSIX collations; R sorts "a" before "B" under en_US.UTF-8 and C.UTF-8.
-# (F19 has the same test as colwise_c_collation() on its own branch.)
 # @keywords internal
 session_collation_is_c <- function() {
   Sys.getlocale("LC_COLLATE") %in% c("C", "POSIX")
