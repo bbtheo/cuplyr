@@ -606,15 +606,16 @@ ir_parse_quo <- function(quo, schema) {
       # (ir_check_ts_operands(), F37); verbs infer the type after the parse
       # (outside this handler), so run it here too, plus the zone rule of
       # every POSIXct op (F32: an op without one goes to the CPU). Only the
-      # timestamp signal is acted on: a factor signal must still come back as
-      # IR for ir_factor_rule(), and any other type error is left for the
-      # verb to raise.
+      # timestamp signal and the typed-allowlist signal (F48,
+      # ir_check_type_operands()) are acted on: a factor signal must still
+      # come back as IR for ir_factor_rule(), and any other type error is
+      # left for the verb to raise.
       if (!is.null(ir)) {
         tryCatch({
           ir_infer_type(ir, schema)
           ir_check_tz_rules(ir, schema)
         }, error = function(e) {
-          if (inherits(e, "cuplyr_timestamp_needs_cpu")) stop(e)
+          if (inherits(e, c("cuplyr_timestamp_needs_cpu", "cuplyr_type_needs_cpu"))) stop(e)
         })
       }
       ir
@@ -1433,8 +1434,9 @@ ir_parse_shift_call <- function(expr, env, schema, fn_name) {
   if (!is.null(present_args$n)) {
     n_eval <- ir_eval_constant(present_args$n, env)
     n_val <- n_eval$value
-    if (!n_eval$ok || !is.numeric(n_val) || length(n_val) != 1 || is.na(n_val) ||
-        n_val != round(n_val) || n_val < 0) {
+    # A Period/Duration `n` is dplyr's error to raise (F48): CPU
+    if (!n_eval$ok || is_timespan_value(n_val) || !is.numeric(n_val) || length(n_val) != 1 ||
+        is.na(n_val) || n_val != round(n_val) || n_val < 0) {
       return(NULL)
     }
     n_value <- as.integer(n_val)
@@ -1448,6 +1450,9 @@ ir_parse_shift_call <- function(expr, env, schema, fn_name) {
     }
     default_val <- default_eval$value
     if (!is.null(default_val)) {
+      if (is_timespan_value(default_val)) {
+        return(NULL)  # F48: a Period/Duration default is not a plain number
+      }
       if (!is.atomic(default_val) || length(default_val) != 1) {
         return(NULL)  # non-scalar default: not implemented this wave
       }
@@ -1524,9 +1529,9 @@ ir_parse_first_last_nth <- function(expr, env, schema, fn_name) {
     }
     n_eval <- ir_eval_constant(present_args$n, env)
     n_val <- n_eval$value
-    if (!n_eval$ok || !is.numeric(n_val) || length(n_val) != 1 || is.na(n_val) ||
-        n_val != round(n_val) || n_val == 0) {
-      return(NULL)
+    if (!n_eval$ok || is_timespan_value(n_val) || !is.numeric(n_val) || length(n_val) != 1 ||
+        is.na(n_val) || n_val != round(n_val) || n_val == 0) {
+      return(NULL)  # a Period/Duration `n` is dplyr's error to raise (F48): CPU
     }
     return(ir_call("nth", list(x_ir),
                     meta = list(n = as.integer(n_val), order_override = order_override)))
@@ -2047,8 +2052,8 @@ ir_parse_froll_call <- function(expr, env, schema, dt_fn_name) {
 ir_parse_roll_window_width <- function(n_expr, env) {
   n_eval <- ir_eval_constant(n_expr, env)
   n_val <- n_eval$value
-  if (!n_eval$ok || !is.numeric(n_val) || length(n_val) != 1 || is.na(n_val) ||
-      n_val != round(n_val) || n_val < 1) {
+  if (!n_eval$ok || is_timespan_value(n_val) || !is.numeric(n_val) || length(n_val) != 1 ||
+      is.na(n_val) || n_val != round(n_val) || n_val < 1) {
     return(NULL)
   }
   as.integer(n_val)
@@ -2095,13 +2100,13 @@ ir_parse_roll_na_rm <- function(na_rm_expr, env) {
 #'
 #' The division-then-floor steps in dplyr's own formula (`(x + (larger_size
 #' - 1L)) / larger_size`, then a final `as.integer(floor(bins))`) are
-#' expressed here via `%/%` (floor division) directly instead: every
-#' numerator/denominator pair in both branches is non-negative by
-#' construction (ranks start at 1, sizes are always >= 1), and floor
-#' division equals true-division-then-floor for non-negative operands, so
-#' this produces exactly the same result while keeping the whole expression
-#' integer-typed throughout (matching ntile()'s own always-integer output)
-#' instead of needing a separate cast step the IR has no primitive for.
+#' expressed via `%/%` (floor division) directly: every numerator/denominator
+#' pair in both branches is non-negative by construction (ranks start at 1,
+#' sizes are always >= 1), and floor division equals
+#' true-division-then-floor for non-negative operands. The sizes follow
+#' dplyr's FLOAT64 `len / n` / `ceiling()` / `floor()`, and the bins are cast
+#' to INT32 once at the end (`cast_int32`), matching ntile()'s own
+#' always-integer output.
 #'
 #' @keywords internal
 ir_parse_ntile <- function(expr, env, schema) {
@@ -2117,9 +2122,9 @@ ir_parse_ntile <- function(expr, env, schema) {
   }
   n_eval <- ir_eval_constant(present_args$n, env)
   n_val <- n_eval$value
-  if (!n_eval$ok || !is.numeric(n_val) || length(n_val) != 1 || is.na(n_val) ||
-      n_val != round(n_val) || n_val <= 0) {
-    return(NULL)
+  if (!n_eval$ok || is_timespan_value(n_val) || !is.numeric(n_val) || length(n_val) != 1 ||
+      is.na(n_val) || n_val != round(n_val) || n_val <= 0) {
+    return(NULL)  # a Period/Duration `n` is dplyr's error to raise (F48): CPU
   }
   n_lit <- ir_lit_from_r(as.integer(n_val))
 
@@ -2144,6 +2149,10 @@ ir_parse_ntile <- function(expr, env, schema) {
     len <- ir_call("n", list())
   }
 
+  # dplyr's own formula: size = len / n, larger_size = ceiling(size),
+  # smaller_size = floor(size). It runs in FLOAT64 and is cast to INT32 once
+  # at the end (ntile() returns an integer); the same chain in INT32 would pay
+  # F42's range check per node.
   n_larger         <- ir_call("%%", list(len, n_lit))
   size             <- ir_call("/", list(len, n_lit))
   larger_size      <- ir_call("ceil", list(size))
@@ -2171,11 +2180,11 @@ ir_parse_ntile <- function(expr, env, schema) {
     branch_b
   ))
 
-  ir_call("if_else", list(
+  ir_call("cast_int32", list(ir_call("if_else", list(
     ir_call("==", list(len, ir_lit_from_r(0L))),
     ir_lit(value = NULL, type = "INT32", na = TRUE),
     bins
-  ))
+  ))))
 }
 
 #' Parse `sum(x)` / `sum(x, na.rm = <literal>)` (Phase 5, task W9)
@@ -2655,6 +2664,7 @@ ir_infer_type <- function(ir, schema) {
       return("BOOL8")
     }
     ir_check_ts_lit(ir)
+    ir_check_timespan_lit(ir$value)
     return(ir$type)
   }
 
@@ -2686,6 +2696,9 @@ ir_infer_type <- function(ir, schema) {
   # F37: a timestamp argument the GPU can't take goes to the CPU, whatever
   # built the node (see ir_check_ts_operands()).
   ir_check_ts_operands(ir, arg_types)
+  # F48: the same for the STRING/BOOL8/INT32 arguments of reducers, windows
+  # and comparisons (see ir_native_arg_types).
+  ir_check_type_operands(ir, arg_types)
 
   entry$type(arg_types)
 }
@@ -3121,6 +3134,116 @@ ir_check_ts_lit <- function(ir) {
   invisible()
 }
 
+# F48: is `x` a lubridate Period/Duration/Interval or a base difftime? Their
+# numeric payload is not what R computes with (`x + days(1)` errors, `x <
+# days(1)` compares against the Period's lubridate value), so a literal of
+# one of these classes goes to the CPU wherever it appears.
+# @keywords internal
+is_timespan_value <- function(v) {
+  (isS4(v) || inherits(v, "difftime")) &&
+    any(vapply(c("Period", "Duration", "Interval", "difftime"),
+               function(cl) methods::is(v, cl), logical(1)))
+}
+
+# The literal half of F48's rule, run by ir_infer_type() on every literal.
+# @keywords internal
+ir_check_timespan_lit <- function(value) {
+  if (is_timespan_value(value)) {
+    stop_type_needs_cpu("a ", class(value)[1], " value outside Date/POSIXct arithmetic: not on the GPU.")
+  }
+  invisible()
+}
+
+# F48: the typed allowlist. For each reducer/window op, the GPU types of its
+# first (value) argument that give dplyr's result natively; any other
+# STRING/BOOL8/INT32/INT64/FLOAT64 argument goes to the CPU, where dplyr
+# gives its result, warning or error (a raw cuDF error never reaches the
+# user). A positive list: an op not named here is not judged. DICTIONARY32
+# is ir_factor_rule()'s and the timestamps are ir_check_ts_operands()'s, so
+# neither is judged here either. Comparisons and `%in%` are
+# ir_check_type_operands()'s own rules.
+# - the numeric reducers/windows take no STRING (dplyr coerces, warns or
+#   errors);
+# - median() of an INT32/BOOL8 is an integer or a double depending on each
+#   group's count, which a lazy plan can't type: CPU;
+# - cummax()/cummin() of a BOOL8 are integers in R (the GPU keeps BOOL8): CPU;
+# - cumall()/cumany()/any()/all() natively take a logical only;
+# - min()/max() of a STRING follow the session collation (ir_type_gate()).
+# @keywords internal
+ir_native_arg_types <- local({
+  num <- c("BOOL8", "INT32", "INT64", "FLOAT64")
+  c(
+    stats::setNames(rep(list(num), 14L),
+             c("mean", "sd", "var", "sum", "quantile", "cumsum", "cumprod",
+               "cummean", "roll_mean", "roll_sum", "roll_sd", "roll_median",
+               "roll_min", "roll_max")),
+    list(
+      median = c("INT64", "FLOAT64"),
+      cummax = c("INT32", "INT64", "FLOAT64"),
+      cummin = c("INT32", "INT64", "FLOAT64"),
+      any = "BOOL8", all = "BOOL8", cumall = "BOOL8", cumany = "BOOL8",
+      min = num, max = num
+    )
+  )
+})
+
+# Ops whose STRING argument is native only under a byte-order collation: the
+# one place the collation rule lives (ir_type_gate()). The comparisons are
+# not in ir_native_arg_types (ir_check_type_operands() judges them), but
+# share this rule.
+ir_collated_ops <- c("min", "max", "<", "<=", ">", ">=")
+
+ir_gated_types <- c("STRING", "BOOL8", "INT32", "INT64", "FLOAT64")
+
+# TRUE iff `op` may run on the GPU with a value argument of GPU type `type`.
+# `c_order` marks a comparison dplyr makes with vctrs (between()), which is
+# byte order whatever the session collation.
+# @keywords internal
+ir_type_gate <- function(op, type, c_order = FALSE) {
+  type <- unname(type)
+  if (identical(type, "STRING") && op %in% ir_collated_ops) {
+    return(c_order || session_collation_is_c())
+  }
+  allowed <- ir_native_arg_types[[op]]
+  if (is.null(allowed) || !type %in% ir_gated_types) {
+    return(TRUE)
+  }
+  type %in% allowed
+}
+
+# F48: the typed-allowlist rule of ir_infer_type(), run on every call node
+# `ir` with its argument types (bare NAs already resolved to a sibling's
+# type). Signals `cuplyr_type_needs_cpu` for: an op in ir_native_arg_types
+# whose first argument type isn't listed; a comparison or `%in%` mixing a
+# STRING with a number/logical (dplyr compares as character); an ordering
+# comparison with a STRING operand outside a byte-order collation (except
+# between()'s, flagged `meta$c_order`).
+# @keywords internal
+ir_check_type_operands <- function(ir, arg_types) {
+  op <- ir$op
+  types <- unname(arg_types)
+  if (op %in% names(ir_native_arg_types)) {
+    if (length(types) >= 1L && !ir_type_gate(op, types[1])) {
+      stop_type_needs_cpu(op, "() of a ", types[1], ": not on the GPU.")
+    }
+    return(invisible())
+  }
+  is_cmp <- op %in% c("==", "!=", "<", "<=", ">", ">=")
+  if (!is_cmp && !identical(op, "%in%")) {
+    return(invisible())
+  }
+  if (!"STRING" %in% types) {
+    return(invisible())
+  }
+  if (any(types %in% c("BOOL8", "INT32", "INT64", "FLOAT64"))) {
+    stop_type_needs_cpu("`", op, "` of a STRING and a number: not on the GPU.")
+  }
+  if (is_cmp && !ir_type_gate(op, "STRING", isTRUE(ir$meta$c_order))) {
+    stop_type_needs_cpu("`", op, "` of strings under a non-C collation: not on the GPU.")
+  }
+  invisible()
+}
+
 # Small type-fn builders shared by several registry entries below.
 type_arith_op <- function(op) {
   force(op)
@@ -3142,7 +3265,7 @@ ts_mean_type <- function(input_type) {
 }
 
 # The 5 cuDF timestamp granularities (Phase 11 L3) -- shared by
-# `check_filter_comparison_types()` (R/filter.R), `resolve_common_col_type()`
+# `ir_check_type_operands()`, `resolve_common_col_type()`
 # (R/bind.R), and the `as.Date`/`as.POSIXct` registry entries below.
 cuplyr_timestamp_types <- c("TIMESTAMP_DAYS", "TIMESTAMP_SECONDS",
                             "TIMESTAMP_MILLISECONDS", "TIMESTAMP_MICROSECONDS",
@@ -3240,6 +3363,23 @@ stop_factor_needs_cpu <- function(...) {
 stop_timestamp_needs_cpu <- function(...) {
   stop(structure(
     class = c("cuplyr_timestamp_needs_cpu", "cuplyr_factor_needs_cpu", "error", "condition"),
+    list(message = paste0(...), call = NULL)
+  ))
+}
+
+#' Signal a type combination the GPU does not compute like dplyr (F48)
+#'
+#' Same shape as [stop_timestamp_needs_cpu()] (a subclass of
+#' `cuplyr_factor_needs_cpu`, so [ir_parse_quo()] turns it into `NULL`): a
+#' STRING/BOOL8/INT32 argument of a reducer, window or comparison that
+#' `ir_native_arg_types` does not list, or a Period/Duration value, goes to the
+#' CPU, where dplyr gives its result, warning or error.
+#'
+#' @param ... Message pieces, pasted together
+#' @keywords internal
+stop_type_needs_cpu <- function(...) {
+  stop(structure(
+    class = c("cuplyr_type_needs_cpu", "cuplyr_factor_needs_cpu", "error", "condition"),
     list(message = paste0(...), call = NULL)
   ))
 }
@@ -3388,9 +3528,16 @@ ir_resolve_value_nas <- function(nodes, schema) {
 #' @keywords internal
 ir_parse_cummean <- function(args, schema) {
   x <- args[[1]]
+  # F48: the `x + 0` below would turn a STRING into an arithmetic error; the
+  # allowlist sends it to the CPU (dplyr coerces to numeric) while the op
+  # still has its own name.
+  x_type <- unname(ir_infer_type(x, schema))
+  if (!ir_type_gate("cummean", x_type)) {
+    stop_type_needs_cpu("cummean() of a ", x_type, ": not on the GPU.")
+  }
   # dplyr accumulates in double: an integer/logical argument must not go
   # through the (overflow-checked) integer cumsum (F42).
-  if (!identical(unname(ir_infer_type(x, schema)), "FLOAT64")) {
+  if (!identical(x_type, "FLOAT64")) {
     x <- ir_call("+", list(x, ir_lit_from_r(0)))
   }
   ir_call("/", list(ir_call("cumsum", list(x)), ir_call("row_number", list())))
@@ -3415,6 +3562,14 @@ ir_parse_cummean <- function(args, schema) {
 #' @keywords internal
 ir_parse_cumall_cumany <- function(args, schema, scan_op) {
   x <- args[[1]]
+  # The tri-state encoding below only takes a logical x; dplyr accepts any
+  # type (F48), so the typed allowlist is checked here, where the op still
+  # has its own name.
+  x_type <- tryCatch(unname(ir_infer_type(x, schema)), error = function(e) NA_character_)
+  if (!is.na(x_type) && !ir_type_gate(if (scan_op == "cummin") "cumall" else "cumany", x_type)) {
+    stop_type_needs_cpu(if (scan_op == "cummin") "cumall" else "cumany",
+                        "() of a ", x_type, ": not on the GPU.")
+  }
   encoded <- ir_call("if_else", list(
     ir_call("is.na", list(x)),
     ir_lit_from_r(1L),
@@ -4149,7 +4304,10 @@ ir_call_registry <- list(
       x <- args[[1]]
       lo <- args[[2]]
       hi <- args[[3]]
-      ir_call("&", list(ir_call(">=", list(x, lo)), ir_call("<=", list(x, hi))))
+      # dplyr's between() compares with vctrs (byte order for strings), so the
+      # comparisons skip F48's session-collation rule.
+      ir_call("&", list(ir_call(">=", list(x, lo), meta = list(c_order = TRUE)),
+                        ir_call("<=", list(x, hi), meta = list(c_order = TRUE))))
     },
     type = type_bool8,
     lower = NULL  # always desugared at parse time; never lowered as "between"
@@ -4275,8 +4433,8 @@ ir_call_registry <- list(
       # real tbl_gpu), and identical() treats a "names" attribute as
       # significant (identical(c(s = "STRING"), "STRING") is FALSE even
       # though the values are equal). Same landmine, same fix, as
-      # check_filter_comparison_types()'s existing unname() call
-      # (R/filter.R) -- without it, every na_if() STRING/non-STRING
+      # ir_check_type_operands()'s unname() call
+      # -- without it, every na_if() STRING/non-STRING
       # mismatch silently skipped this check and only surfaced as a raw
       # cudf cast error at GPU-execution time instead.
       x_type <- unname(ir_infer_type(x, schema))
@@ -4656,6 +4814,9 @@ ir_call_registry <- list(
     lower = list(handler = "tolower")
   ),
   "nchar" = list(arity = 1L, parse = NULL, type = type_int32, lower = list(handler = "nchar")),
+  # F48: ntile()'s final step (cudf::cast of its FLOAT64 bins to INT32)
+  "cast_int32" = list(arity = 1L, parse = NULL, type = type_int32,
+                      lower = list(handler = "cast_int32")),
   "substr" = list(arity = 3L, parse = NULL, type = function(arg_types) "STRING",
                    lower = list(handler = "substr")),
   "trimws" = list(arity = 2L, parse = NULL, type = function(arg_types) "STRING",

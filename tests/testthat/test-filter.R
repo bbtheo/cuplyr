@@ -368,20 +368,19 @@ test_that("filter() errors on non-existent column", {
   )
 })
 
-test_that("filter() errors on non-numeric comparison value", {
+test_that("filter() compares a number with a string like dplyr", {
   skip_if_no_gpu()
 
   gpu_df <- tbl_gpu(mtcars)
 
-  # Comparing a numeric column against a character literal is a clear type
-  # mismatch, caught before reaching the GPU (S5, Phase 1 expression-engine
-  # cutover: check_filter_comparison_types() in R/filter.R). The pre-IR
-  # parser's "numeric scalar" message is gone -- this is a genuine error
-  # contract change (scratchpad/phase1_expression_engine.md section 4).
-  expect_error(
-    dplyr::filter(gpu_df, mpg > "twenty"),
-    "Cannot compare column 'mpg'"
-  )
+  # dplyr compares the number as character (F48: CPU fallback, no error).
+  # "2" selects some rows ("21" > "2") and drops others ("10.4" < "2").
+  want <- dplyr::filter(mtcars, mpg > "2")
+  got <- collect(dplyr::filter(gpu_df, mpg > "2"))
+  expect_gt(nrow(want), 0L)
+  expect_lt(nrow(want), nrow(mtcars))
+  expect_equal(got$mpg, want$mpg)
+  expect_equal(got$cyl, want$cyl)
 })
 
 test_that("filter() with %in% works (IR cutover, task T3)", {

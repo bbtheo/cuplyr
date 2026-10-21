@@ -1117,8 +1117,11 @@ test_that("cummean(x) desugars to cumsum(x) / row_number()", {
   expect_equal(length(ir$args[[2]]$args), 0)
 })
 
+# F48: cumall()/cumany() are native for a logical argument only
+schema_xyb <- list(names = c("x", "y", "b"), types = c("FLOAT64", "FLOAT64", "BOOL8"))
+
 test_that("cumall(x) desugars to the tri-state cummin encoding", {
-  ir <- ir_parse_quo(quo_in(quote(cumall(x))), schema_xyz)
+  ir <- ir_parse_quo(quo_in(quote(cumall(b))), schema_xyb)
   expect_equal(ir$op, "if_else")
   # cond: s == 1L, where s = cummin(encoded)
   cond <- ir$args[[1]]
@@ -1136,9 +1139,14 @@ test_that("cumall(x) desugars to the tri-state cummin encoding", {
 })
 
 test_that("cumany(x) desugars to the tri-state cummax encoding", {
-  ir <- ir_parse_quo(quo_in(quote(cumany(x))), schema_xyz)
+  ir <- ir_parse_quo(quo_in(quote(cumany(b))), schema_xyb)
   s <- ir$args[[1]]$args[[1]]
   expect_equal(s$op, "cummax")
+})
+
+test_that("cumall()/cumany() of a non-logical column go to the CPU (F48)", {
+  expect_null(ir_parse_quo(quo_in(quote(cumall(x))), schema_xyb))
+  expect_null(ir_parse_quo(quo_in(quote(cumany(x))), schema_xyb))
 })
 
 test_that("consecutive_id(x) desugars to cumsum() with lag()/row_number() nested inside", {
@@ -1161,7 +1169,11 @@ test_that("consecutive_id(a, b) (multi-column) falls back (NULL)", {
 test_that("ntile(x, 3) desugars with row_number(x)/sum(...) nested window calls", {
   ir <- ir_parse_quo(quo_in(quote(ntile(x, 3))), schema_xyz)
   expect_true(ir_has_window(ir))
-  # Outermost shape: if_else(len == 0, NA, bins)
+  # Outermost shape: cast_int32(if_else(len == 0, NA, bins)) (F48: FLOAT64
+  # formula, cast to INT32 once)
+  expect_equal(ir$op, "cast_int32")
+  expect_equal(unname(ir_infer_type(ir, schema_xyz)), "INT32")
+  ir <- ir$args[[1]]
   expect_equal(ir$op, "if_else")
   expect_equal(ir$args[[1]]$op, "==")
   len_node <- ir$args[[1]]$args[[1]]
@@ -1171,7 +1183,8 @@ test_that("ntile(x, 3) desugars with row_number(x)/sum(...) nested window calls"
 test_that("ntile(n = 3) (x omitted) uses bare row_number()/n() instead of ranking", {
   ir <- ir_parse_quo(quo_in(quote(ntile(n = 3))), schema_xyz)
   expect_true(ir_has_window(ir))
-  len_node <- ir$args[[1]]$args[[1]]
+  expect_equal(ir$op, "cast_int32")
+  len_node <- ir$args[[1]]$args[[1]]$args[[1]]
   expect_equal(len_node$op, "n")
   expect_equal(length(len_node$args), 0)
 })

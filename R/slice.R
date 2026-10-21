@@ -245,7 +245,9 @@ resolve_slice_dots <- function(dots) {
 
   vals <- lapply(dots, function(d) {
     v <- rlang::eval_tidy(d)
-    if (!is.numeric(v)) {
+    # A Period/Duration index is dplyr's error to raise (F48): the stop
+    # sends the call to the CPU fallback like any non-numeric index
+    if (!is.numeric(v) || is_timespan_value(v)) {
       stop("slice() only supports plain numeric index expressions in the ",
            "GPU-native path.", call. = FALSE)
     }

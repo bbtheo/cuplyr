@@ -300,12 +300,17 @@ test_that("mutate() propagates a genuine parse-time error without attempting the
   expect_error(dplyr::mutate(gdf, y = made_up_col + 1), "not found")
 })
 
-test_that("filter() propagates a genuine type-mismatch error without attempting the CPU fallback", {
+test_that("filter() compares a number with a string like dplyr (CPU fallback, F48)", {
   skip_if_no_gpu()
-  withr::local_options(cuplyr.fallback = "error")
-
+  # dplyr compares as character: no error, and the same rows as on a tibble.
+  # "2" selects some rows ("21" > "2") and drops others ("10.4" < "2").
   gdf <- tbl_gpu(mtcars)
-  expect_error(dplyr::filter(gdf, mpg > "twenty"), "Cannot compare column")
+  want <- dplyr::filter(mtcars, mpg > "2")
+  got <- collect(dplyr::filter(gdf, mpg > "2"))
+  expect_gt(nrow(want), 0L)
+  expect_lt(nrow(want), nrow(mtcars))
+  expect_equal(got$mpg, want$mpg)
+  expect_equal(got$cyl, want$cyl)
 })
 
 test_that("filter() propagates a genuine \"column not found\" error without attempting the CPU fallback", {
@@ -316,10 +321,11 @@ test_that("filter() propagates a genuine \"column not found\" error without atte
   expect_error(dplyr::filter(gdf, made_up_col > 5), "not found")
 })
 
-test_that("summarise() propagates a genuine type-mismatch error without attempting the CPU fallback", {
+test_that("summarise() of median() of a string gives dplyr's result (CPU fallback, F48)", {
   skip_if_no_gpu()
-  withr::local_options(cuplyr.fallback = "error")
-
-  gdf <- tbl_gpu(tibble::tibble(name = c("a", "b", "c")))
-  expect_error(dplyr::summarise(gdf, m = median(name)), "requires a numeric column")
+  df <- tibble::tibble(name = c("a", "b", "c"))
+  expect_equal(
+    tibble::as_tibble(dplyr::summarise(tbl_gpu(df), m = median(name))),
+    dplyr::summarise(df, m = median(name))
+  )
 })

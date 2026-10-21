@@ -767,15 +767,16 @@ test_that("summarise() any()/all() work over comparison sub-expressions", {
   expect_same_as_dplyr(df, pipeline, arrange_by = "g")
 })
 
-test_that("summarise() any()/all() reject a non-logical column", {
+test_that("summarise() any()/all() of a non-logical column give dplyr's result (CPU, F48)", {
   skip_if_no_gpu()
 
-  gpu_df <- tbl_gpu(data.frame(x = c(1, 2, 3)))
+  df <- data.frame(x = c(1, 2, 3))
+  gpu_df <- tbl_gpu(df)
 
-  expect_error(
-    dplyr::summarise(gpu_df, a = any(x)),
-    "logical"
-  )
+  # base R coerces the number to logical and warns; so must the fallback
+  expect_warning(want <- dplyr::summarise(df, a = any(x)), "coercing argument")
+  expect_warning(got <- dplyr::summarise(gpu_df, a = any(x)), "coercing argument")
+  expect_equal(tibble::as_tibble(got), tibble::as_tibble(want))
 })
 
 # =============================================================================

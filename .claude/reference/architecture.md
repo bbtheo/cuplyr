@@ -151,6 +151,7 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
   that subclass, so a factor expression still comes back as IR for
   `ir_factor_rule()`. `Date + Date` and `n - d` keep their plain
   errors (other operators on a timestamp go to the CPU, see F37 below).
+- **Typed allowlist (F48)**: `ir_infer_type()` also runs `ir_check_type_operands()` (R/ir.R) beside `ir_check_ts_operands()`. `ir_native_arg_types` lists, per reducer/window op, the GPU types of its first argument that are native (numeric reducers and `cum*`/`roll_*`: BOOL8/INT32/INT64/FLOAT64; `median`: FLOAT64/INT64, since an integer/logical median's R type depends on the data; `cummax`/`cummin`: no BOOL8, R gives integers; `any`/`all`/`cumall`/`cumany`: BOOL8 only; `min`/`max`: STRING only when `session_collation_is_c()`). Any other STRING/BOOL8/INT32/INT64/FLOAT64 argument signals `cuplyr_type_needs_cpu` (`stop_type_needs_cpu()`, a subclass of `cuplyr_factor_needs_cpu` that `ir_parse_quo()` re-raises), so the dot takes the CPU fallback. Comparisons and `%in%` mixing a STRING with a number/logical, and `< <= > >=` on strings outside a C collation, take it too; `between()`'s desugared comparisons carry `meta$c_order` (vctrs order) and skip only the collation rule. `cumall()`/`cumany()`/`cummean()` desugar at parse time, so their parse hooks call `ir_type_gate()` themselves. A Period/Duration/Interval/difftime value (a literal, `lag()`'s `n`/`default`) is `cuplyr_type_needs_cpu` too (`ir_check_timespan_lit()`). `summarise_dots_parseable()` asks the same `ir_type_gate()` with the aggregate's argument type. A Period/Duration/difftime also goes to the CPU where a call reads it as a parameter (`ntile()`/`nth()`/`roll_*()` `n`, summarise's `nth()` `n` and `quantile()` `probs`, `slice()` indices; each tests `is_timespan_value()` and returns `NULL`/signals `cuplyr_type_needs_cpu` to the pre-pass), and a column-free mutate() constant catches the signal itself (`parse_mutate_dots()` builds that literal without `ir_parse_quo()`). The STRING collation rule lives only in `ir_type_gate()` (`ir_collated_ops`: `min`/`max` and the ordering comparisons, which `ir_check_type_operands()` asks). `ntile()` runs dplyr's FLOAT64 formula and ends in `cast_int32` (a `cudf::cast` handler, integer result; an INT32 chain paid F42's range checks per node, 33 ms vs 19 ms at 1e6 rows).
 - **Date arithmetic (F37)**: the `+`/`-` registry entries have a parse hook
   (`ir_parse_ts_arith()`, R/ir.R) because only the parsed args show whether a
   literal is whole. `Date +/- n` with `n` an INT32 expression or a finite
@@ -177,7 +178,7 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
   string functions) signals `cuplyr_timestamp_needs_cpu`. The rule goes by
   type, never by node kind: a bare Date column gets the same treatment, so
   `filter(d < 5)` and `filter(d %in% dates)` give dplyr's result through the
-  CPU (`check_filter_comparison_types()` no longer sees timestamps). A
+  CPU. A
   timestamp mixed with another type in `ir_unify_types()` /
   `ir_check_cast_to_x()` goes to the CPU too (vctrs' error). summarise()
   aggregates aren't IR calls, so `summarise_dots_parseable()` keeps its own
@@ -759,7 +760,7 @@ String columns use offset-based storage (Apache Arrow format):
 ### Filter Parsing
 - Expressions parse through `ir_parse_quo()` (`R/ir.R`) into `make_predicate()` records (`ir`, `cols`, `estimated_cost`, `is_deterministic`, `na_sensitive`); optimizer passes read `pred$cols`, never the IR tree directly
 - Constant expressions (`ir_is_const()` — no column reference anywhere, e.g. `TRUE`, `FALSE`, `rep(TRUE, n)`) never reach the GPU IR path: they're evaluated in R (`eval_tidy` on the original quosure, not the constant-folded IR) so an n-row mask always has a real column to broadcast against; `TRUE` is a genuine no-op, `FALSE`/`NA` build an impossible predicate (`ir_lit_from_r(FALSE)`) that still flows through the normal lazy `push_op()`/`ast_filter` path
-- Comparing a non-STRING column against a STRING literal (or vice versa) is caught by `check_filter_comparison_types()` before lowering, with a message naming the column and its type
+- Comparing a number/logical with a string (`filter(mpg > "a")`, `s == 2`) is dplyr's character comparison, not an error: `ir_check_type_operands()` (F48) sends it to the CPU (`check_filter_comparison_types()` is gone)
 - `top_n()`/`top_frac()` reach `filter()` as a `top_n_rank(n, wt)` dot; `rewrite_top_n_rank_dots()` (`R/filter.R`) rewrites it to `min_rank(desc(wt)) <= n` / `min_rank(wt) <= abs(n)` for a constant `n` or `c * n()` (CPU fallbacks keep the original dots). Rank-family calls with one `desc(e)` argument parse natively (`meta$rank_desc` -> the window spec's `order_desc`)
 - Expressions the IR doesn't recognize fall back to a CPU-eval boolean mask (`filter_eval_mask()`), with no data mask (only expressions that evaluate standalone, e.g. `rep(TRUE, n)`, can succeed there)
 

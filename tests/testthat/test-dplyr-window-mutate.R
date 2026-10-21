@@ -337,17 +337,13 @@ test_that("x - mean(x) grouped centering matches dplyr", {
   expect_same_as_dplyr_lazy(df, pipeline)
 })
 
-test_that("mutate() with ntile() is GPU-native and matches dplyr (values only -- see file header re: type)", {
+test_that("mutate() with ntile() is GPU-native and matches dplyr (integer result, F48)", {
   skip_if_no_gpu()
   df <- data.frame(g = c("a", "a", "b", "b"), x = c(1, 2, 3, 4))
   pipeline <- function(d) dplyr::mutate(d, y = dplyr::ntile(x, 2))
-  # ignore_col_types = TRUE: ntile()'s R desugar (R/ir.R::ir_parse_ntile())
-  # infers FLOAT64 (its formula's "/" true-division step forces this),
-  # while dplyr's own ntile() is genuinely integer -- a pre-existing (W1),
-  # values-only-affects-formatting divergence, not something this task
-  # introduced or is in scope to fix.
-  expect_same_as_dplyr(df, pipeline, ignore_col_types = TRUE)
-  expect_same_as_dplyr_lazy(df, pipeline, ignore_col_types = TRUE)
+  # ntile() is an INT32 chain (F48), so the column types match dplyr's too.
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
 })
 
 test_that("mutate() with ntile() matches dplyr, grouped, with NAs and a non-multiple group size", {
@@ -357,8 +353,8 @@ test_that("mutate() with ntile() matches dplyr, grouped, with NAs and a non-mult
     x = c(5, 3, NA, 1, 4, 10, 20, 30)
   )
   pipeline <- function(d) d |> dplyr::group_by(g) |> dplyr::mutate(nt = dplyr::ntile(x, 3), nt2 = dplyr::ntile(n = 2))
-  expect_same_as_dplyr(df, pipeline, ignore_col_types = TRUE)
-  expect_same_as_dplyr_lazy(df, pipeline, ignore_col_types = TRUE)
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
 })
 
 test_that("mutate() with min_rank() is GPU-native and matches dplyr", {

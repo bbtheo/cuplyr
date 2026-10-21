@@ -294,14 +294,13 @@ test_that("filter() string != literal matches dplyr", {
 
 test_that("filter() string < literal matches dplyr (T4 divergence, fixed)", {
   skip_if_no_gpu()
-  # T4 finding: check_filter_comparison_types()'s STRING-vs-STRING guard
-  # compared a *named* single-element schema-type subset against a bare
-  # "STRING" with identical() -- which considers the "names" attribute, so
+  # T4 finding: the old STRING-vs-STRING guard compared a *named*
+  # single-element schema-type subset against a bare "STRING" with
+  # identical() -- which considers the "names" attribute, so
   # `identical(c(s = "STRING"), "STRING")` was FALSE even when the column
   # genuinely was STRING, and EVERY string-vs-string-literal comparison
-  # (a fully supported shape) incorrectly errored with "Cannot compare
-  # column 's' (STRING) with a character literal." Fixed with unname() in
-  # R/filter.R::check_filter_comparison_types().
+  # (a fully supported shape) incorrectly errored. The type checks now
+  # unname() the types (R/ir.R::ir_check_type_operands()).
   df <- oracle_filter_df()
   pipeline <- function(d) dplyr::filter(d, s < "fig")
   expect_same_as_dplyr(df, pipeline)

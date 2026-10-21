@@ -937,9 +937,13 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
         {
           lit <- ir_lit_from_r(floored %||% const$value)
           ir_check_ts_lit(lit)
+          # A Period/Duration/difftime value is the CPU's (F48); the signal
+          # must not reach make_mutate_expr()'s ir_infer_type().
+          ir_check_timespan_lit(lit$value)
           lit
         },
-        cuplyr_timestamp_needs_cpu = function(e) NULL
+        cuplyr_timestamp_needs_cpu = function(e) NULL,
+        cuplyr_type_needs_cpu = function(e) NULL
       )
     } else if (identical(const$kind, "vector")) {
       if (!vector_literals || !const$supported) {

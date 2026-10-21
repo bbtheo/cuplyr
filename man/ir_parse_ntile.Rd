@@ -31,13 +31,8 @@ has no default) falls back, since there's nothing sensible to build.
 
 The division-then-floor steps in dplyr's own formula (`(x + (larger_size
 \itemize{
-\item 1L)) / larger_size\verb{, then a final }as.integer(floor(bins))\verb{) are expressed here via }\%/\%` (floor division) directly instead: every
-numerator/denominator pair in both branches is non-negative by
-construction (ranks start at 1, sizes are always >= 1), and floor
-division equals true-division-then-floor for non-negative operands, so
-this produces exactly the same result while keeping the whole expression
-integer-typed throughout (matching ntile()'s own always-integer output)
-instead of needing a separate cast step the IR has no primitive for.
+\item 1L)) / larger_size\verb{, then a final }as.integer(floor(bins))\verb{) are expressed via }\%/\%\verb{(floor division) directly: every numerator/denominator pair in both branches is non-negative by construction (ranks start at 1, sizes are always >= 1), and floor division equals true-division-then-floor for non-negative operands. The sizes follow dplyr's FLOAT64}len / n\code{/}ceiling()\code{/}floor()\verb{, and the bins are cast to INT32 once at the end (}cast_int32`), matching ntile()'s own
+always-integer output.
 }
 }
 \keyword{internal}

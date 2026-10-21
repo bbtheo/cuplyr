@@ -268,7 +268,7 @@ test_that("a created column whose R type isn't cuplyr's static type: where() fol
   f45_both(dg, function(d) mutate(group_by(d, g), m = median(y), across(where(is.double), ~ .x * 2)))
   f45_both(df, function(d) mutate(d, b = x > 1, mx = max(b), across(where(is.logical), ~ !.x)))
   # name-only selections after such a column stay on the GPU
-  f45_native(df, function(d) mutate(d, m = median(y), across(c(x, m), ~ .x * 2)))
+  f45_native(df, function(d) mutate(d, m = dplyr::ntile(y, 2), across(c(x, m), ~ .x * 2)))
 })
 
 test_that("lubridate accessors: a later where() sees R's type, not INT32", {

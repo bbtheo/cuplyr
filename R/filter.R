@@ -535,7 +535,6 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       if (is.null(ir) || ir_is_const(ir)) {
         if (!isTRUE(standalone[[i]]$value)) keep_all <- TRUE
       } else {
-        check_filter_comparison_types(ir, schema)
         comp_irs <- c(comp_irs, list(ir))
       }
       next
@@ -588,7 +587,6 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       next
     }
 
-    check_filter_comparison_types(ir, schema)
     predicates <- c(predicates, list(make_predicate(ir, schema)))
   }
 
@@ -1017,78 +1015,6 @@ parse_filter_ir <- function(quo, schema) {
       stop(e)
     }
   )
-}
-
-# Diagnosable filter()-specific type check: comparing a non-STRING column
-# against a STRING literal (or vice versa) used to be caught by the old
-# parser's "numeric scalar" RHS-type guard; the IR parses this shape
-# successfully (both `col` and `lit` are valid nodes), so without this
-# check it would reach the GPU and fail with a raw cudf type-mismatch
-# error instead of a clear message naming the column and its type
-# (scratchpad/phase1_expression_engine.md section 4's error-contract
-# ledger). Recurses through the whole IR subtree since a single filter()
-# dot may already parse into a compound `&`/`|` expression under the IR
-# cutover.
-#
-# Phase 11 L3 extended this to a timestamp column against a number or a
-# timestamp literal of another granularity. F37 removed that: such a
-# comparison never reaches here, because ir_check_ts_operands() (R/ir.R)
-# sends every comparison of a timestamp with anything but the same timestamp
-# type to the CPU from the type inference ir_parse_quo() runs, so filter()
-# gives dplyr's result (`d < 5`, `d == "2024-01-01"`) instead of an error.
-#
-# @param ir An IR node
-# @param schema The current schema (names/types)
-# @return `invisible(NULL)`; `stop()`s on a detected mismatch
-# @keywords internal
-check_filter_comparison_types <- function(ir, schema) {
-  if (is.null(ir) || !identical(ir$kind, "call")) {
-    return(invisible(NULL))
-  }
-
-  cmp_ops <- c("==", "!=", "<", "<=", ">", ">=")
-  if (ir$op %in% cmp_ops && length(ir$args) == 2) {
-    check_pair <- function(col_node, lit_node) {
-      if (!identical(col_node$kind, "col") || !identical(lit_node$kind, "lit")) {
-        return(invisible(NULL))
-      }
-      # A bare untyped NA literal (`type = NULL`) adopts the sibling
-      # column's own type at build time (section 1.2) -- never a mismatch.
-      if (is.null(lit_node$type)) {
-        return(invisible(NULL))
-      }
-      # unname(): `schema$types[match(...)]` is a *named* single-element
-      # subset (name = the matched column), and identical() considers the
-      # "names" attribute significant -- identical(c(s = "STRING"),
-      # "STRING") is FALSE even though the values are equal. Without
-      # unname() here, every STRING-column-vs-STRING-literal comparison
-      # (a completely valid, supported shape) fell through to the stop()
-      # below instead of returning early (T4 oracle-testing finding: this
-      # broke every string filter comparison against a literal).
-      col_type <- unname(schema$types[match(col_node$name, schema$names)])
-      if (is.na(col_type)) {
-        return(invisible(NULL))
-      }
-
-      if (identical(lit_node$type, "STRING")) {
-        if (identical(col_type, "STRING")) {
-          return(invisible(NULL))
-        }
-        stop("Cannot compare column '", col_node$name, "' (", col_type,
-             ") with a character literal.", call. = FALSE)
-      }
-
-      invisible(NULL)
-    }
-    check_pair(ir$args[[1]], ir$args[[2]])
-    check_pair(ir$args[[2]], ir$args[[1]])
-  }
-
-  for (arg in ir$args) {
-    check_filter_comparison_types(arg, schema)
-  }
-
-  invisible(NULL)
 }
 
 # Internal: CPU-eval fallback for filter expressions that aren't a

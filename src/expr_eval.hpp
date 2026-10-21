@@ -540,7 +540,8 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
     if (bool_string_ops.count(op)) return cudf::data_type{cudf::type_id::BOOL8};
 
     static const std::set<std::string> int32_ops = {
-        "nchar", "year", "month", "day", "hour", "minute", "second", "quarter", "yday", "wday"
+        "nchar", "year", "month", "day", "hour", "minute", "second", "quarter", "yday", "wday",
+        "cast_int32"
     };
     if (int32_ops.count(op)) return cudf::data_type{cudf::type_id::INT32};
 
@@ -1780,6 +1781,19 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         cudf::size_type x_idx = materialize(x_node, ctx);
         cudf::strings_column_view sv(ctx.cols[x_idx]);
         return (op == "toupper") ? cudf::strings::to_upper(sv) : cudf::strings::to_lower(sv);
+    }
+
+    // ---- cast_int32(x) (F48): a whole-valued numeric cast to INT32, nulls
+    // kept. ntile() computes its bins with dplyr's FLOAT64 formula and casts
+    // once at the end (an INT32 chain would pay F42's range checks per node). ----
+    if (op == "cast_int32") {
+        Rcpp::List x_node = args[0];
+        cudf::size_type x_idx = materialize(x_node, ctx);
+        cudf::column_view x_col = ctx.cols[x_idx];
+        if (x_col.type().id() == cudf::type_id::INT32) {
+            return std::make_unique<cudf::column>(x_col);
+        }
+        return cudf::cast(x_col, cudf::data_type{cudf::type_id::INT32});
     }
 
     // ---- nchar(x): attributes.hpp count_characters(), cast defensively to

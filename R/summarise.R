@@ -797,7 +797,12 @@ summarise_dots_parseable <- function(dots, schema) {
 
   for (i in seq_along(dots)) {
     quo <- extract_na_rm(dots[[i]])$quo
-    quo <- extract_agg_shape_param(quo)$quo
+    # F48: a Period/Duration `n`/`probs` is dplyr's to reject: CPU
+    shaped <- tryCatch(extract_agg_shape_param(quo), cuplyr_type_needs_cpu = function(e) NULL)
+    if (is.null(shaped)) {
+      return(FALSE)
+    }
+    quo <- shaped$quo
 
     expr <- rlang::quo_get_expr(quo)
     env <- rlang::quo_get_env(quo)
@@ -833,6 +838,11 @@ summarise_dots_parseable <- function(dots, schema) {
           !identical(decomposed$fn_name, "n_distinct")) {
         return(FALSE)
       }
+      # F48: the typed allowlist (ir_native_arg_types) judges the column's type
+      if (!ir_type_gate(decomposed$fn_name,
+                        schema$types[match(as.character(arg_expr), schema$names)])) {
+        return(FALSE)
+      }
       next  # bare column reference: always valid, no temp column needed
     }
 
@@ -847,6 +857,11 @@ summarise_dots_parseable <- function(dots, schema) {
       return(FALSE)  # sub-expression shape not understood at all
     }
     if (ts_agg && ir_type_is_timestamp(ir, schema)) {
+      return(FALSE)
+    }
+    # F48: the same typed allowlist for a computed argument
+    arg_type <- tryCatch(ir_infer_type(ir, schema), error = function(e) NA_character_)
+    if (!is.na(arg_type) && !ir_type_gate(decomposed$fn_name, arg_type)) {
       return(FALSE)
     }
     # F34: dplyr evaluates the argument once per group. A length-1 argument
@@ -1213,6 +1228,7 @@ extract_quantile_probs <- function(expr, env, quo) {
     rlang::eval_tidy(rlang::new_quosure(present_args$probs, env)),
     error = function(e) NULL
   )
+  ir_check_timespan_lit(probs_val)  # F48: a Period/Duration `probs`: CPU
   if (is.null(probs_val) || !is.numeric(probs_val) || length(probs_val) != 1 ||
       is.na(probs_val) || probs_val < 0 || probs_val > 1) {
     stop("summarise()'s quantile() requires a single probability in [0, 1]: ",
@@ -1256,6 +1272,7 @@ extract_nth_position <- function(expr, env, quo) {
     rlang::eval_tidy(rlang::new_quosure(present_args$n, env)),
     error = function(e) NULL
   )
+  ir_check_timespan_lit(n_val)  # F48: a Period/Duration `n`: CPU (parseable pre-pass)
   if (is.null(n_val) || !is.numeric(n_val) || length(n_val) != 1 || is.na(n_val) ||
       n_val != round(n_val) || n_val == 0) {
     stop("nth() requires a single non-zero integer position: ",
@@ -1828,8 +1845,8 @@ parse_aggregations <- function(schema, dots, na_rm_flags = rep(FALSE, length(dot
     # unname(): schema$types is a NAMED vector (named by column), and
     # identical() treats a "names" attribute as significant (identical(c(x =
     # "BOOL8"), "BOOL8") is FALSE even though the values are equal) -- same
-    # landmine, same fix, as check_filter_comparison_types()'s (R/filter.R)
-    # and na_if()'s (R/ir.R) existing unname() calls.
+    # landmine, same fix, as ir_check_type_operands()'s and na_if()'s
+    # (R/ir.R) unname() calls.
     input_type_bare <- unname(input_type)
 
     if (func_name %in% numeric_only_fns && identical(input_type_bare, "STRING")) {
