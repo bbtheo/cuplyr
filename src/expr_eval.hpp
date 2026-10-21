@@ -51,6 +51,7 @@
 #include "gpu_table.hpp"
 #include "ops_common.hpp"
 #include "r_to_column.hpp"
+#include "factor_gather.hpp"
 
 #include <cudf/ast/expressions.hpp>
 #include <cudf/binaryop.hpp>
@@ -532,7 +533,8 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
     // genuinely STRING/BOOL8-native), so this is never an approximation the
     // way the arithmetic branch just above is.
     static const std::set<std::string> string_ops = {
-        "toupper", "tolower", "substr", "trimws", "sub", "gsub", "paste_cols"
+        "toupper", "tolower", "substr", "trimws", "sub", "gsub", "paste_cols",
+        "factor_labels"  // F50
     };
     if (string_ops.count(op)) return cudf::data_type{cudf::type_id::STRING};
 
@@ -541,7 +543,7 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
 
     static const std::set<std::string> int32_ops = {
         "nchar", "year", "month", "day", "hour", "minute", "second", "quarter", "yday", "wday",
-        "cast_int32"
+        "cast_int32", "factor_codes"  // F50
     };
     if (int32_ops.count(op)) return cudf::data_type{cudf::type_id::INT32};
 
@@ -560,6 +562,9 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
     // and trip cudf's "non-matching operand types".
     if (op == "as_date") return cudf::data_type{cudf::type_id::TIMESTAMP_DAYS};
     if (op == "as_posixct") return cudf::data_type{cudf::type_id::TIMESTAMP_MICROSECONDS};
+
+    // F50: as.numeric() of a factor's codes.
+    if (op == "cast_float64") return cudf::data_type{cudf::type_id::FLOAT64};
 
     // %in%'s first argument type, or any other unrecognized op: safe FLOAT64
     // default (matches ir_infer_type()'s bare-NA-in-isolation fallback).
@@ -1781,6 +1786,42 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         cudf::size_type x_idx = materialize(x_node, ctx);
         cudf::strings_column_view sv(ctx.cols[x_idx]);
         return (op == "toupper") ? cudf::strings::to_upper(sv) : cudf::strings::to_lower(sv);
+    }
+
+    // ---- factor_codes(f) (F50): R/ir.R's ir_bind() strips this op to its
+    // column (a factor column already IS its INT32 codes), so it must never get
+    // here; fail loudly rather than silently copy if a path skipped ir_bind(). ----
+    if (op == "factor_codes") {
+        Rcpp::stop("internal: factor_codes reached C++ (ir_bind() should have stripped it)");
+    }
+
+    // ---- factor_labels(f, levels) (F50): as.character() of a factor column.
+    // Gathers the level strings by code - 1; NA codes give NA. `levels` is a
+    // STRING literal node holding the whole level vector (R/ir.R,
+    // ir_parse_factor_conversion()). ----
+    if (op == "factor_labels") {
+        Rcpp::List x_node = args[0];
+        Rcpp::List lev_node = args[1];
+        cudf::size_type x_idx = materialize(x_node, ctx);
+        cudf::column_view x_col = ctx.cols[x_idx];
+        if (x_col.type().id() != cudf::type_id::INT32) {
+            Rcpp::stop("factor_labels(): operand is not a factor (INT32 code) column");
+        }
+        SEXP lev_value = lev_node["value"];
+        Rcpp::CharacterVector levels = Rf_isNull(lev_value) ? Rcpp::CharacterVector(0)
+                                                            : Rcpp::CharacterVector(lev_value);
+        return decode_codes_to_labels(x_col, levels);
+    }
+
+    // ---- cast_float64(x) (F50): as.numeric() of a factor's codes; nulls kept ----
+    if (op == "cast_float64") {
+        Rcpp::List x_node = args[0];
+        cudf::size_type x_idx = materialize(x_node, ctx);
+        cudf::column_view x_col = ctx.cols[x_idx];
+        if (x_col.type().id() == cudf::type_id::FLOAT64) {
+            return std::make_unique<cudf::column>(x_col);
+        }
+        return cudf::cast(x_col, cudf::data_type{cudf::type_id::FLOAT64});
     }
 
     // ---- cast_int32(x) (F48): a whole-valued numeric cast to INT32, nulls

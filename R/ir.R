@@ -211,8 +211,23 @@ expr_has_column_ref <- function(expr, schema) {
   if (is_env_pronoun_call(expr)) {
     return(FALSE)
   }
+  # A quosure embedded in the tree (`{{ arg }}`, `!!quo`) is a `~` call to R;
+  # look through it to its expression. An unsupplied `{{ arg }}` wraps the
+  # missing-argument sentinel, which the guard above answers.
+  if (rlang::is_quosure(expr)) {
+    return(expr_has_column_ref(rlang::quo_get_expr(expr), schema))
+  }
   if (is.call(expr)) {
-    return(any(vapply(as.list(expr), expr_has_column_ref, logical(1), schema = schema)))
+    # unclass(): the subsetting below must not dispatch on a formula-like
+    # class, whose `[` method would force a missing-argument element.
+    parts <- unclass(as.list(expr))
+    # A function symbol is looked up as a function: a column that happens to
+    # share its name (`mutate(c = 1, y = x %in% c("a", "b"))`) is skipped by
+    # R's own call evaluation, so it is not a column reference.
+    if (is.symbol(parts[[1]])) {
+      parts <- parts[-1]
+    }
+    return(any(vapply(parts, expr_has_column_ref, logical(1), schema = schema)))
   }
   FALSE
 }
@@ -226,6 +241,12 @@ ir_foldable_window_fns <- c(
   "sum", "mean", "min", "max", "sd", "var", "median", "n_distinct",
   "first", "last", "nth"
 )
+
+# Registry ops that only cuplyr's own rewrites build (ntile()'s final cast,
+# F50's factor decode). A user call by one of these names is an unknown
+# function: constant-folded or sent to the CPU, where the user's own function
+# of that name runs.
+ir_internal_ops <- c("cast_int32", "factor_codes", "factor_labels", "cast_float64")
 
 # The recursive walker behind ir_parse_quo(). Carries the quosure's
 # environment explicitly (rather than re-deriving a quosure at every
@@ -314,6 +335,19 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       replacement <- if (fn_name == "&&") "&" else "|"
       stop("'", fn_name, "' is not supported in filter(); use '", replacement, "'",
            call. = FALSE)
+    }
+
+    # F50: as.character()/as.integer()/as.numeric()/as.double() of a bare
+    # factor column. Registry dispatch (below) runs before constant folding, so
+    # these names are intercepted only for that one shape; every other
+    # argument flows on exactly as before (`as.integer(lim)` still folds).
+    # Base-only assumption: the match is on the name alone (namespace already
+    # stripped), so a user-masked `as.character` would get the same GPU decode.
+    if (fn_name %in% c("as.character", "as.integer", "as.numeric", "as.double")) {
+      converted <- ir_parse_factor_conversion(expr, schema, fn_name)
+      if (!is.null(converted)) {
+        return(converted)
+      }
     }
 
     # A window call whose arguments read no column (`row_number("a")`,
@@ -529,7 +563,7 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       }
     }
 
-    if (canonical %in% names(ir_call_registry)) {
+    if (canonical %in% names(ir_call_registry) && !canonical %in% ir_internal_ops) {
       entry <- ir_call_registry[[canonical]]
 
       if (!is.na(entry$arity) && length(args_raw) != entry$arity) {
@@ -601,6 +635,9 @@ ir_parse_quo <- function(quo, schema) {
   tryCatch(
     {
       ir <- ir_parse_expr(expr, env, schema, allow_vector = FALSE)
+      if (!is.null(ir) && ir_decode_meets_non_utf8(ir)) {
+        return(NULL)
+      }
       # Timestamp arithmetic (`t + 3600`) parses fine and only its type check
       # says "CPU", as does every timestamp argument the GPU can't take
       # (ir_check_ts_operands(), F37); verbs infer the type after the parse
@@ -2427,6 +2464,12 @@ ir_bind <- function(ir, schema) {
     stop("internal: window op '", ir$op, "' reached lowering", call. = FALSE)
   }
 
+  # F50: a factor column already IS its INT32 codes, so factor_codes(f) binds
+  # to the column itself (a comparison on it stays one cudf AST kernel).
+  if (identical(ir$op, "factor_codes")) {
+    return(ir_bind(ir$args[[1]], schema))
+  }
+
   ir$args <- lapply(ir$args, ir_bind, schema = schema)
   ir
 }
@@ -2550,7 +2593,9 @@ ir_deparse <- function(ir) {
 #'
 #' 1. as a bare column reference (plain copy, key, or sort key on its own);
 #' 2. directly inside `is.na()` / `n_distinct()`;
-#' 3. as both operands of `==`/`!=` when both are factor *columns* with
+#' 3. as the column of F50's `factor_codes()`/`factor_labels()` (the parse
+#'    hooks turn a label comparison or `as.character(f)` into these);
+#' 4. as both operands of `==`/`!=` when both are factor *columns* with
 #'    identical level vectors (labels, order and `ordered` flag); `<`/`<=`/
 #'    `>`/`>=` additionally need both ordered. (`%in%` is not here: the GPU's
 #'    `%in%` only takes a literal set.)
@@ -2602,6 +2647,12 @@ ir_factor_rule <- function(ir, schema) {
         }
         op <- node$op
         if (op %in% c("is.na", "n_distinct")) {
+          return("none")
+        }
+        # F50: the rewrites of ir_parse_factor_cmp()/ir_parse_factor_conversion()
+        # (codes of / labels of a bare factor column) leave no factor operand.
+        if (op %in% c("factor_codes", "factor_labels") && identical(node$args[[1]]$kind, "col") &&
+            st[1] == "bare") {
           return("none")
         }
         if (length(node$args) == 2L && length(meta_nodes) == 0L && all(st == "bare") &&
@@ -2872,6 +2923,244 @@ ir_check_tz_rules <- function(ir, schema) {
 #     their own op name.
 #   C++ side: nothing for ast_op entries; one apply_handler() case for
 #     handler entries.
+
+# F50: the labels of a bare factor column node, or NULL when the node is not
+# one, the schema's names are duplicated (the levels can't be told apart, as in
+# ir_factor_rule()), the levels are unknown, or a level is NA (an NA level is
+# lost on upload, so the rewrites below would be wrong): the callers then keep
+# the plain node and F18's rule sends it to the CPU as before.
+# @keywords internal
+ir_factor_col_levels <- function(node, schema) {
+  if (!identical(node$kind, "col") || !"DICTIONARY32" %in% schema$types ||
+      anyDuplicated(schema$names) > 0L) {
+    return(NULL)
+  }
+  i <- match(node$name, schema$names)
+  if (is.na(i) || !identical(unname(schema$types[i]), "DICTIONARY32")) {
+    return(NULL)
+  }
+  lv <- schema$factor_levels[[node$name]]
+  if (is.null(lv) || anyNA(lv)) {
+    return(NULL)
+  }
+  lv
+}
+
+# F50: `factor_codes(f)` for a bare factor column node.
+# @keywords internal
+ir_factor_codes <- function(col) {
+  ir_call("factor_codes", list(col))
+}
+
+# F50: the label a comparison operand stands for: a length-1 STRING literal
+# (NA_character_ included), or, when `allow_na` is set, the bare logical NA.
+# Returns list(label = <chr1>) or NULL.
+# @keywords internal
+ir_factor_label_operand <- function(node, allow_na = TRUE) {
+  if (!identical(node$kind, "lit")) {
+    return(NULL)
+  }
+  if (isTRUE(node$na) && is.null(node$type) && allow_na) {
+    return(list(label = NA_character_))
+  }
+  if (identical(unname(node$type), "STRING") && length(node$value) == 1L && is.character(node$value)) {
+    return(list(label = unname(node$value)))
+  }
+  NULL
+}
+
+# F50: the parse hook of ==, !=, <, <=, >, >=. A bare factor column against a
+# STRING label becomes a comparison of INT32 codes against the label's level
+# position, keeping the operand order. A label that is not a level matches no
+# code: 0L for ==/!= (FALSE / TRUE, NA rows stay NA), NA for the ordering ops
+# (NA everywhere, no warning, as in base R's Ops.ordered); an NA label gives an
+# NA code either way. The ordering ops are rewritten for an ordered factor
+# only (an unordered one keeps the node so R's "not meaningful for factors"
+# warning comes from the CPU). Every other shape keeps the plain node.
+# @keywords internal
+ir_parse_factor_cmp <- function(op) {
+  force(op)
+  is_order <- op %in% c("<", "<=", ">", ">=")
+  function(args, schema) {
+    plain <- ir_call(op, args)
+    if (length(args) != 2L || !"DICTIONARY32" %in% schema$types) {
+      return(plain)
+    }
+    levels_ <- lapply(args, ir_factor_col_levels, schema = schema)
+    is_fct <- !vapply(levels_, is.null, logical(1))
+    if (sum(is_fct) != 1L) {
+      return(plain)
+    }
+    f_pos <- which(is_fct)
+    lv <- levels_[[f_pos]]
+    if (is_order && !isTRUE(attr(lv, "ordered"))) {
+      return(plain)
+    }
+    operand <- ir_factor_label_operand(args[[3L - f_pos]], allow_na = !is_order)
+    if (is.null(operand)) {
+      return(plain)
+    }
+    k <- match(operand$label, lv)
+    if (is.na(operand$label) || (is_order && is.na(k))) {
+      code <- ir_lit(NULL, "INT32", na = TRUE)
+    } else {
+      code <- ir_lit(if (is.na(k)) 0L else k, "INT32")
+    }
+    new_args <- args
+    new_args[[f_pos]] <- ir_factor_codes(args[[f_pos]])
+    new_args[[3L - f_pos]] <- code
+    ir_call(op, new_args)
+  }
+}
+
+# F50: the parse hook of %in%. A bare factor column against a set of labels (a
+# STRING literal/vector, the bare NA, an empty set, or a factor value, whose
+# labels are matched, as base R's match() does) becomes `codes %in% positions`.
+# Non-levels drop out of the set; an NA in it stays NA and matches the NA
+# codes. Everything else (a number set, a factor on the right) keeps the
+# plain node.
+# @keywords internal
+ir_parse_factor_in <- function(args, schema) {
+  plain <- ir_call("%in%", args)
+  if (length(args) != 2L || !"DICTIONARY32" %in% schema$types) {
+    return(plain)
+  }
+  lv <- ir_factor_col_levels(args[[1]], schema)
+  set <- args[[2]]
+  if (is.null(lv) || !identical(set$kind, "lit")) {
+    return(plain)
+  }
+  labels <- if (isTRUE(set$na) && is.null(set$type)) {
+    NA_character_
+  } else if (is.null(set$type) && is.null(set$value)) {
+    character(0)
+  } else if (identical(unname(set$type), "STRING")) {
+    set$value
+  } else if (identical(unname(set$type), "DICTIONARY32") && is.factor(set$value)) {
+    as.character(set$value)
+  } else {
+    return(plain)
+  }
+  pos <- match(labels, lv)
+  pos <- unique(pos[!is.na(pos) | is.na(labels)])
+  codes <- if (length(pos) == 1L && is.na(pos)) {
+    ir_lit(NULL, "INT32", na = TRUE)
+  } else {
+    ir_lit(as.integer(pos), "INT32")
+  }
+  ir_call("%in%", list(ir_factor_codes(args[[1]]), codes))
+}
+
+# F50: TRUE iff every string in `x` reaches the GPU as UTF-8. Strings are
+# uploaded as their raw CHAR() bytes and compared bytewise there, so a
+# latin1/bytes string (read.csv(encoding = "latin1")) would never equal a
+# UTF-8 one, while dplyr translates both. A string counts when it is marked
+# UTF-8, or unmarked ("unknown", the native encoding) and either ASCII or
+# valid UTF-8 in a UTF-8 session. Literals in a UTF-8 session's source code
+# are marked UTF-8, so the usual non-ASCII labels ("\u00e9t\u00e9") pass.
+# @keywords internal
+ir_strings_are_utf8 <- function(x) {
+  enc <- Encoding(x)
+  if (any(enc %in% c("latin1", "bytes"))) {
+    return(FALSE)
+  }
+  native <- x[enc == "unknown" & !is.na(x)]
+  if (length(native) == 0L) {
+    return(TRUE)
+  }
+  if (isTRUE(l10n_info()[["UTF-8"]])) {
+    return(all(validUTF8(native)))
+  }
+  # a non-UTF-8 session: native non-ASCII bytes are in that locale's encoding
+  !anyNA(iconv(native, "ASCII", "ASCII"))
+}
+
+# F50: TRUE iff `ir` decodes factor labels (factor_labels, whose levels
+# ir_parse_factor_conversion() only builds from UTF-8 strings) and also holds
+# a string literal that isn't UTF-8 (`as.character(f) == lit` with a latin1
+# `lit`): the GPU would compare the two byte encodings and never match.
+# @keywords internal
+ir_decode_meets_non_utf8 <- function(ir) {
+  decodes <- FALSE
+  strings <- list()
+  walk <- function(node) {
+    if (inherits(node, "cuplyr_ir")) {
+      if (identical(node$kind, "call")) {
+        decodes <<- decodes || identical(node$op, "factor_labels")
+        lapply(node$args, walk)
+        # IR operands held in meta (lag()'s `default`), as ir_factor_rule() visits
+        lapply(Filter(function(m) is.list(m) && !is.null(m$kind), node$meta), walk)
+      } else if (identical(node$kind, "lit") && is.character(node$value)) {
+        strings[[length(strings) + 1L]] <<- node$value
+      }
+    } else if (is.list(node)) {
+      lapply(node, walk)
+    }
+    invisible()
+  }
+  walk(ir)
+  decodes && !ir_strings_are_utf8(unlist(strings))
+}
+
+# F50: as.character()/as.integer()/as.numeric()/as.double() of a bare factor
+# column (a symbol or `.data$f`): labels (NA for NA codes), codes, or codes as
+# a double. Returns NULL for any other call, which then parses exactly as it
+# did before (these names have no registry entry, so a constant argument
+# folds, a column argument falls back).
+# @keywords internal
+ir_parse_factor_conversion <- function(expr, schema, fn_name) {
+  if (length(expr) != 2L || (!is.null(names(expr)) && nzchar(names(expr)[2])) ||
+      !"DICTIONARY32" %in% schema$types) {
+    return(NULL)
+  }
+  # `(f)` and an embedded quosure (`as.character({{ v }})`) are transparent;
+  # a symbol naming a column is that column whatever the quosure's env. An
+  # unsupplied `{{ v }}` wraps the missing-argument sentinel, which can't be
+  # read once bound to `arg`, so each slot is checked before it is extracted;
+  # declining lets as.character(<missing>) fold to "" as in dplyr.
+  if (rlang::is_missing(expr[[2]])) {
+    return(NULL)
+  }
+  arg <- expr[[2]]
+  repeat {
+    if (rlang::is_quosure(arg)) {
+      if (rlang::quo_is_missing(arg)) {
+        return(NULL)
+      }
+      arg <- rlang::quo_get_expr(arg)
+    } else if (rlang::is_call(arg, "(") && length(arg) == 2L) {
+      if (rlang::is_missing(arg[[2]])) {
+        return(NULL)
+      }
+      arg <- arg[[2]]
+    } else {
+      break
+    }
+  }
+  name <- if (is.symbol(arg)) {
+    as.character(arg)
+  } else if (is_data_pronoun_call(arg)) {
+    pronoun_call_name(arg)
+  } else {
+    return(NULL)
+  }
+  if (!name %in% schema$names) {
+    return(NULL)
+  }
+  col <- ir_col(name)
+  lv <- ir_factor_col_levels(col, schema)
+  if (is.null(lv)) {
+    return(NULL)
+  }
+  if (fn_name == "as.character" && !ir_strings_are_utf8(lv)) {
+    return(NULL)
+  }
+  switch(fn_name,
+    as.character = ir_call("factor_labels", list(col, ir_lit(as.character(lv), "STRING"))),
+    as.integer = ir_factor_codes(col),
+    ir_call("cast_float64", list(ir_factor_codes(col)))
+  )
+}
 
 # F37: the parse hook of "+" and "-" (it only sees parsed args). A Date
 # shifted by a whole number of days becomes a native date_add_days/
@@ -3161,7 +3450,8 @@ ir_check_timespan_lit <- function(value) {
 # user). A positive list: an op not named here is not judged. DICTIONARY32
 # is ir_factor_rule()'s and the timestamps are ir_check_ts_operands()'s, so
 # neither is judged here either. Comparisons and `%in%` are
-# ir_check_type_operands()'s own rules.
+# ir_check_type_operands()'s own rules, except that one with a DICTIONARY32
+# operand is ir_factor_rule()'s too (F50).
 # - the numeric reducers/windows take no STRING (dplyr coerces, warns or
 #   errors);
 # - median() of an INT32/BOOL8 is an integer or a double depending on each
@@ -3230,6 +3520,13 @@ ir_check_type_operands <- function(ir, arg_types) {
   }
   is_cmp <- op %in% c("==", "!=", "<", "<=", ">", ">=")
   if (!is_cmp && !identical(op, "%in%")) {
+    return(invisible())
+  }
+  # F50: a factor operand is ir_factor_rule()'s, not judged by the STRING
+  # rules below. A label comparison was rewritten to INT32 codes by
+  # ir_parse_factor_cmp() and never gets here; whatever is left is routed by
+  # F18's rule whatever the session collation.
+  if ("DICTIONARY32" %in% types) {
     return(invisible())
   }
   if (!"STRING" %in% types) {
@@ -4284,12 +4581,12 @@ ir_call_registry <- list(
   "%%" = list(arity = 2L, parse = NULL, type = type_arith_op("%%"), lower = list(ast_op = "PYMOD")),
   "%/%" = list(arity = 2L, parse = NULL, type = type_arith_op("%/%"), lower = list(ast_op = "FLOOR_DIV")),
 
-  "==" = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(ast_op = "EQUAL")),
-  "!=" = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(ast_op = "NOT_EQUAL")),
-  "<"  = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(ast_op = "LESS")),
-  "<=" = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(ast_op = "LESS_EQUAL")),
-  ">"  = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(ast_op = "GREATER")),
-  ">=" = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(ast_op = "GREATER_EQUAL")),
+  "==" = list(arity = 2L, parse = ir_parse_factor_cmp("=="), type = type_bool8, lower = list(ast_op = "EQUAL")),
+  "!=" = list(arity = 2L, parse = ir_parse_factor_cmp("!="), type = type_bool8, lower = list(ast_op = "NOT_EQUAL")),
+  "<"  = list(arity = 2L, parse = ir_parse_factor_cmp("<"), type = type_bool8, lower = list(ast_op = "LESS")),
+  "<=" = list(arity = 2L, parse = ir_parse_factor_cmp("<="), type = type_bool8, lower = list(ast_op = "LESS_EQUAL")),
+  ">"  = list(arity = 2L, parse = ir_parse_factor_cmp(">"), type = type_bool8, lower = list(ast_op = "GREATER")),
+  ">=" = list(arity = 2L, parse = ir_parse_factor_cmp(">="), type = type_bool8, lower = list(ast_op = "GREATER_EQUAL")),
 
   "&" = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(ast_op = "NULL_LOGICAL_AND")),
   "|" = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(ast_op = "NULL_LOGICAL_OR")),
@@ -4313,7 +4610,7 @@ ir_call_registry <- list(
     lower = NULL  # always desugared at parse time; never lowered as "between"
   ),
 
-  "%in%" = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(handler = "in")),
+  "%in%" = list(arity = 2L, parse = ir_parse_factor_in, type = type_bool8, lower = list(handler = "in")),
 
   "sqrt" = list(arity = 1L, parse = NULL, type = type_float64, lower = list(ast_op = "SQRT")),
 
@@ -4814,9 +5111,21 @@ ir_call_registry <- list(
     lower = list(handler = "tolower")
   ),
   "nchar" = list(arity = 1L, parse = NULL, type = type_int32, lower = list(handler = "nchar")),
-  # F48: ntile()'s final step (cudf::cast of its FLOAT64 bins to INT32)
+  # F48: ntile()'s final step (cudf::cast of its FLOAT64 bins to INT32);
+  # internal only (ir_internal_ops)
   "cast_int32" = list(arity = 1L, parse = NULL, type = type_int32,
                       lower = list(handler = "cast_int32")),
+  # F50: a factor column's codes / labels / codes as a double. Built only by
+  # ir_parse_factor_cmp()/ir_parse_factor_in()/ir_parse_factor_conversion();
+  # listed in ir_internal_ops, so a user call by these names never lands here.
+  # factor_codes is stripped to its column by ir_bind(); factor_labels' second
+  # argument is a STRING lit holding the level vector.
+  "factor_codes" = list(arity = 1L, parse = NULL, type = type_int32,
+                        lower = list(handler = "factor_codes")),
+  "factor_labels" = list(arity = 2L, parse = NULL, type = function(arg_types) "STRING",
+                         lower = list(handler = "factor_labels")),
+  "cast_float64" = list(arity = 1L, parse = NULL, type = type_float64,
+                        lower = list(handler = "cast_float64")),
   "substr" = list(arity = 3L, parse = NULL, type = function(arg_types) "STRING",
                    lower = list(handler = "substr")),
   "trimws" = list(arity = 2L, parse = NULL, type = function(arg_types) "STRING",

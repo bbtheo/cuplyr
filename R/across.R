@@ -734,7 +734,10 @@ make_fn_spec <- function(label, build, env = NULL) {
 # VALUE identical to one of these is emitted as a plain `name(col)` call.
 # @keywords internal
 across_known_fn_names <- function() {
-  union(names(ir_call_registry), c("quantile", "any", "all", "count"))
+  # F50: the factor conversions are parsed by ir_parse_factor_conversion()
+  # (no registry entry), so `across(where(is.factor), as.character)` can name them.
+  union(setdiff(names(ir_call_registry), ir_internal_ops), c("quantile", "any", "all", "count",
+                                   "as.character", "as.integer", "as.numeric", "as.double"))
 }
 
 # Call heads an inlined VALUE body may use: everything the IR lowers by name.
@@ -1612,7 +1615,7 @@ across_run_drop <- function(run, name) {
 # type.
 # @keywords internal
 across_pure_heads <- function() {
-  c(names(ir_call_registry), ir_foldable_window_fns, "c", "~", "(", ":",
+  c(setdiff(names(ir_call_registry), ir_internal_ops), ir_foldable_window_fns, "c", "~", "(", ":",
     "case_when", "case_match", "recode", "recode_values", "replace_values", "replace_when",
     "when_all", "when_any", "order_by", "with_order")
 }

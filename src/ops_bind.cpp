@@ -3,6 +3,7 @@
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
 #include "r_to_column.hpp"
+#include "factor_gather.hpp"
 
 #include <cudf/table/table.hpp>
 #include <cudf/table/table_view.hpp>
@@ -324,33 +325,8 @@ SEXP gpu_cast_column(SEXP xptr, int col_idx, std::string target_type) {
 // stay NA regardless of what the placeholder happened to look up.
 // =============================================================================
 
-// Convert a column of 1-based (possibly null) codes into a non-nullable,
-// 0-based gather map suitable for cudf::gather(), preserving the original
-// null positions in `original_nulls_from` for the caller to reapply.
-static std::unique_ptr<cudf::column> sanitize_codes_for_gather(cudf::column_view const& codes_col) {
-    cudf::numeric_scalar<int32_t> one(1, true);
-    auto shifted = cudf::binary_operation(
-        codes_col, one, cudf::binary_operator::SUB,
-        cudf::data_type{cudf::type_id::INT32});
-
-    if (!codes_col.has_nulls()) {
-        return shifted;
-    }
-
-    cudf::numeric_scalar<int32_t> zero(0, true);
-    return cudf::replace_nulls(shifted->view(), zero);
-}
-
-// Reapply `source`'s null mask onto `target` in place (used after gathering
-// through a sanitized, non-nullable index column -- see above).
-static void reapply_null_mask(std::unique_ptr<cudf::column>& target,
-                               cudf::column_view const& source) {
-    if (!source.has_nulls()) {
-        return;
-    }
-    rmm::device_buffer mask = cudf::copy_bitmask(source);
-    target->set_null_mask(std::move(mask), source.null_count());
-}
+// (sanitize_codes_for_gather()/reapply_null_mask() live in factor_gather.hpp,
+// shared with the F50 `factor_labels` expression handler.)
 
 // Remap a factor column's physical codes onto a different level ordering.
 //
@@ -425,17 +401,7 @@ SEXP gpu_decode_factor(SEXP xptr, int col_idx, CharacterVector levels) {
                    "column", col_idx);
     }
 
-    auto levels_col = character_to_gpu(levels);
-    auto sanitized = sanitize_codes_for_gather(codes_col);
-
-    std::vector<cudf::column_view> lookup_cols{levels_col->view()};
-    cudf::table_view lookup_table(lookup_cols);
-
-    auto gathered = cudf::gather(lookup_table, sanitized->view(),
-                                  cudf::out_of_bounds_policy::DONT_CHECK);
-    auto gathered_cols = gathered->release();
-    std::unique_ptr<cudf::column> decoded = std::move(gathered_cols[0]);
-    reapply_null_mask(decoded, codes_col);
+    std::unique_ptr<cudf::column> decoded = decode_codes_to_labels(codes_col, levels);
 
     std::vector<std::unique_ptr<cudf::column>> columns;
     for (cudf::size_type i = 0; i < view.num_columns(); ++i) {

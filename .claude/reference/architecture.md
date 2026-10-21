@@ -74,6 +74,23 @@ without ever needing a real dictionary type:
 - `gpu_decode_factor(xptr, col_idx, levels)`: decodes a factor column to
   its label strings (dplyr's factor + character -> character contract).
 
+F50 runs label operations on a bare factor column natively by rewriting them
+at parse time (`ir_parse_factor_cmp()`, `ir_parse_factor_in()`,
+`ir_parse_factor_conversion()` in `R/ir.R`, only when the levels are known,
+the schema names are unique and no level is NA): `f == "a"`, `%in%` and (for
+ordered factors) `<`/`<=`/`>`/`>=` become comparisons of `factor_codes(f)`
+(stripped to the column by `ir_bind()`) with the label's level position;
+`as.character(f)` is the `factor_labels` handler (gathers the levels by code,
+`src/factor_gather.hpp`); `as.integer`/`as.numeric` give the codes.
+`ir_factor_rule()` allows `factor_codes`/`factor_labels` over a bare column.
+Strings reach the GPU as their raw bytes, so `as.character(f)` decodes
+natively only when every level is UTF-8 (`ir_strings_are_utf8()`) and no
+non-UTF-8 string literal sits in the same expression, `meta` included
+(`ir_decode_meets_non_utf8()`); otherwise it runs on the CPU. The names in
+`ir_internal_ops` (`factor_codes`, `factor_labels`, `cast_int32`,
+`cast_float64`) are registry entries only the parser builds: a user call by
+those names is never dispatched to them.
+
 Both gather a small per-level lookup table (an uploaded INT32 map or
 STRING levels column) using the physical codes as the index -- see
 `src/ops_bind.cpp` for the null-sanitization details (codes are 1-based
