@@ -177,9 +177,11 @@ test_that("pushdown is blocked only where it is unsafe", {
   ly <- tbl_gpu(py, lazy = TRUE)
   both <- function(j) j |> filter(a > 15, b != "q")
 
-  # default inner join: both sides pushed (unchanged behaviour)
+  # default inner join (relationship = NULL, multiple = "all"): it may raise
+  # dplyr's many-to-many warning, which looks at the FULL inputs, so nothing
+  # is pushed (F53 item 6; was "both sides pushed" before F53)
   p <- f35_plan(both(inner_join(lx, ly, by = "k")))
-  expect_equal(p, list(above = FALSE, left = TRUE, right = TRUE))
+  expect_equal(p, list(above = TRUE, left = FALSE, right = FALSE))
 
   # multiple = "first"/"last"/"any": x side still pushed, y side stays
   for (m in c("first", "last", "any")) {
@@ -199,7 +201,11 @@ test_that("pushdown is blocked only where it is unsafe", {
   p <- f35_plan(both(inner_join(lx, ly, by = "k", relationship = "many-to-many")))
   expect_equal(p, list(above = FALSE, left = TRUE, right = TRUE))
 
-  # left join default: x side pushed
+  # left join default: may warn, so nothing pushed (F53 item 6)
   p <- f35_plan(lx |> left_join(ly, by = "k") |> filter(a > 15))
+  expect_equal(p, list(above = TRUE, left = FALSE, right = FALSE))
+  # left join that can't warn: x side pushed
+  p <- f35_plan(lx |> left_join(ly, by = "k", relationship = "many-to-many") |>
+                  filter(a > 15))
   expect_equal(p, list(above = FALSE, left = TRUE, right = FALSE))
 })

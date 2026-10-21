@@ -1140,3 +1140,39 @@ filter_eval_mask <- function(.data, quo, eval_result = rlang::eval_tidy(quo)) {
     exec_mode = .data$exec_mode
   ), .data)
 }
+
+#' Drop rows with missing values
+#'
+#' `stats::na.omit()` for a `tbl_gpu`: keeps the rows where no column is
+#' `NA` (`NaN` counts as missing, as in `is.na()`; an `addNA()` factor level is
+#' a value, not a missing one). It is an ordinary native [dplyr::filter()], so
+#' the table keeps its execution mode, grouping and attributes, and lazy stays
+#' lazy.
+#'
+#' Unlike `na.omit.data.frame()`, the result has no `na.action` attribute:
+#' that attribute holds the row numbers dropped, which would need an extra
+#' pass over the table and a transfer to the host just to be computed.
+#' @param object A `tbl_gpu`.
+#' @param ... Ignored (as in `na.omit.data.frame()`).
+#' @return A `tbl_gpu` without the incomplete rows.
+#' @export
+#' @importFrom stats na.omit
+na.omit.tbl_gpu <- function(object, ...) {
+  nms <- current_schema(object)$names
+  if (length(nms) == 0L) {
+    return(object)
+  }
+  types <- current_schema(object)$types
+  # is.na() is a null test; a NaN computed on the GPU is a number, so a
+  # FLOAT64 column also needs `col == col` (false for NaN).
+  preds <- Map(function(nm, ty) {
+    col <- rlang::sym(nm)
+    if (identical(unname(ty), "FLOAT64")) {
+      rlang::expr(!is.na(!!col) & !!col == !!col)
+    } else {
+      rlang::expr(!is.na(!!col))
+    }
+  }, nms, types)
+  names(preds) <- NULL
+  dplyr::filter(object, !!!preds)
+}

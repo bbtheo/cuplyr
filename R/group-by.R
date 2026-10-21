@@ -747,7 +747,7 @@ expand_dropped_groups <- function(gd, group_names, factor_levels) {
       j <- sequence(per)
       gid <- match(rk, (par - 1) * (nlev + 1) + j)
       j[j > nlev] <- NA_integer_
-      piece <- factor_from_levels(as.vector(lv), lv)[j]
+      piece <- factor_from_codes(seq_along(lv), lv)[j]
     } else {
       # the values observed under each parent (first-appearance = ascending
       # key order); a parent with no rows gets a single NA

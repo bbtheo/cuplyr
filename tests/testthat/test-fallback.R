@@ -139,7 +139,7 @@ test_that("nest_join() returns a plain data frame with a list-column, not a tbl_
   gt <- tbl_gpu(df) |> dplyr::select(g) |> dplyr::distinct()
   y <- tibble::tibble(g = c(1, 2), extra = c("A", "B"))
 
-  result <- gt |> dplyr::nest_join(y, by = "g")
+  result <- gt |> dplyr::nest_join(y, by = "g", copy = TRUE)
   oracle <- dplyr::nest_join(dplyr::distinct(dplyr::select(df, g)), y, by = "g")
 
   expect_false(is_tbl_gpu(result))
@@ -156,7 +156,7 @@ test_that("nest_join() triggers the fallback notification", {
   withr::local_options(cuplyr.fallback = "warn")
 
   expect_warning(
-    gt |> dplyr::nest_join(y, by = "g"),
+    gt |> dplyr::nest_join(y, by = "g", copy = TRUE),
     "fell back to CPU evaluation"
   )
 })

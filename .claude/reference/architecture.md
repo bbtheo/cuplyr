@@ -322,6 +322,7 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
 |------|---------|
 | `src/gpu_table.hpp` | `GpuTablePtr`, `make_gpu_table_xptr()`, `get_table_view()` |
 | `src/cuda_utils.hpp` | `check_cuda()` error helper |
+| `src/r_strings.hpp` | R string <-> cudf boundary (F53): `r_string_utf8()`/`r_scalar_utf8()` translate every R string that becomes cudf data to UTF-8 (a "bytes" string is an error); `r_mk_utf8_char()` marks strings read back from cudf as UTF-8. Use them at any new site that sends R strings to cudf. |
 | `src/ops_common.hpp` | `get_compare_op()` (used by `expr_eval.hpp`'s string-comparison handler) |
 | `src/transfer_io.cpp` | `df_to_gpu()`, `gpu_collect()`, `gpu_head()`, `gpu_dim()` |
 | `src/ops_filter.cpp` | `gpu_filter_bool()`, `gpu_filter_mask()` — CPU-eval fallback mask application only; every IR-parseable predicate now goes through `gpu_filter_expr()` (`ops_expr.cpp`) |
@@ -515,6 +516,9 @@ The optimizer transforms the AST before execution. Pass order matters:
      - Left join: only left-only predicates pushed
      - Right join: only right-only predicates pushed
      - Full join: no side-only pushdown allowed
+     - No pushdown at all below an inner/left/right join that can raise dplyr's
+       many-to-many warning (`relationship = NULL`, `multiple = "all"`): the join
+       must see the full inputs (F53). `relationship = "many-to-many"` opts back in.
      - Nothing is pushed below a left/inner/right join with `unmatched = "error"`
        or `relationship` one-to-one/one-to-many/many-to-one: dplyr's checks read
        the full inputs, so a pushed filter could hide or create the error

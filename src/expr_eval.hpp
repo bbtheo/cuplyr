@@ -51,6 +51,7 @@
 #include "gpu_table.hpp"
 #include "ops_common.hpp"
 #include "r_to_column.hpp"
+#include "r_strings.hpp"
 #include "factor_gather.hpp"
 
 #include <cudf/ast/expressions.hpp>
@@ -680,7 +681,7 @@ inline std::unique_ptr<cudf::scalar> build_scalar(const std::string& type_str,
                 if (sexp_is_na_string(value_sexp)) {
                     is_na = true;
                 } else {
-                    v = Rcpp::as<std::string>(value_sexp);
+                    v = r_scalar_utf8(value_sexp);
                 }
             }
             return std::make_unique<cudf::string_scalar>(v, !is_na);
@@ -2057,7 +2058,7 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
     if (op == "paste_cols") {
         int n = args.size();
         Rcpp::List sep_node = args[n - 1];
-        std::string sep = Rcpp::as<std::string>(sep_node["value"]);
+        std::string sep = r_scalar_utf8(Rcpp::as<SEXP>(sep_node["value"]));
 
         std::vector<cudf::column_view> str_cols;
         std::vector<std::unique_ptr<cudf::column>> owned_broadcasts;
@@ -2066,7 +2067,7 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
             Rcpp::List a = args[i];
             if (ir_kind(a) == "lit") {
                 bool na = ir_lit_is_na(a);
-                std::string v = na ? std::string() : Rcpp::as<std::string>(a["value"]);
+                std::string v = na ? std::string() : r_scalar_utf8(Rcpp::as<SEXP>(a["value"]));
                 cudf::string_scalar sc(v, !na);
                 auto col = cudf::make_column_from_scalar(sc, ctx.view().num_rows());
                 str_cols.push_back(col->view());
@@ -2092,7 +2093,7 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
 
         cudf::size_type x_idx = materialize(x_node, ctx);
         cudf::strings_column_view sv(ctx.cols[x_idx]);
-        std::string pattern = Rcpp::as<std::string>(pattern_node["value"]);
+        std::string pattern = r_scalar_utf8(Rcpp::as<SEXP>(pattern_node["value"]));
         bool fixed = Rcpp::as<bool>(fixed_node["value"]);
 
         std::unique_ptr<cudf::column> result;
@@ -2123,8 +2124,8 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
 
         cudf::size_type x_idx = materialize(x_node, ctx);
         cudf::strings_column_view sv(ctx.cols[x_idx]);
-        std::string pattern = Rcpp::as<std::string>(pattern_node["value"]);
-        std::string repl = Rcpp::as<std::string>(repl_node["value"]);
+        std::string pattern = r_scalar_utf8(Rcpp::as<SEXP>(pattern_node["value"]));
+        std::string repl = r_scalar_utf8(Rcpp::as<SEXP>(repl_node["value"]));
         bool fixed = Rcpp::as<bool>(fixed_node["value"]);
         cudf::size_type maxrepl = (op == "sub") ? 1 : -1;
 
@@ -2150,7 +2151,7 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
 
         cudf::size_type x_idx = materialize(x_node, ctx);
         cudf::strings_column_view sv(ctx.cols[x_idx]);
-        std::string target_str = Rcpp::as<std::string>(target_node["value"]);
+        std::string target_str = r_scalar_utf8(Rcpp::as<SEXP>(target_node["value"]));
         cudf::string_scalar target(target_str, true);
 
         return (op == "starts_with") ? cudf::strings::starts_with(sv, target)
@@ -2504,22 +2505,22 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         if (rhs_is_lit && !lhs_is_lit) {
             cudf::size_type li = materialize(lhs_node, ctx);
             bool na = ir_lit_string_is_na(rhs_node);
-            std::string s = na ? std::string() : Rcpp::as<std::string>(rhs_node["value"]);
+            std::string s = na ? std::string() : r_scalar_utf8(Rcpp::as<SEXP>(rhs_node["value"]));
             cudf::string_scalar sc(s, !na);
             return cudf::binary_operation(ctx.cols[li], sc, bop, out_type);
         }
         if (lhs_is_lit && !rhs_is_lit) {
             cudf::size_type ri = materialize(rhs_node, ctx);
             bool na = ir_lit_string_is_na(lhs_node);
-            std::string s = na ? std::string() : Rcpp::as<std::string>(lhs_node["value"]);
+            std::string s = na ? std::string() : r_scalar_utf8(Rcpp::as<SEXP>(lhs_node["value"]));
             cudf::string_scalar sc(s, !na);
             return cudf::binary_operation(sc, ctx.cols[ri], bop, out_type);
         }
         // both literal: degenerate, but still well-defined
         bool lna = ir_lit_string_is_na(lhs_node);
         bool rna = ir_lit_string_is_na(rhs_node);
-        std::string ls = lna ? std::string() : Rcpp::as<std::string>(lhs_node["value"]);
-        std::string rs = rna ? std::string() : Rcpp::as<std::string>(rhs_node["value"]);
+        std::string ls = lna ? std::string() : r_scalar_utf8(Rcpp::as<SEXP>(lhs_node["value"]));
+        std::string rs = rna ? std::string() : r_scalar_utf8(Rcpp::as<SEXP>(rhs_node["value"]));
         cudf::string_scalar lsc(ls, !lna);
         cudf::string_scalar rsc(rs, !rna);
         // No scalar-scalar binary_operation overload; broadcast lhs to a

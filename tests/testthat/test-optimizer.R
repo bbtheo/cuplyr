@@ -110,7 +110,8 @@ test_that("push_down_filters moves side-only filters below inner join", {
   right_schema <- list(names = c("k", "b"), types = c("INT32", "FLOAT64"))
   left <- ast_source(left_schema)
   right <- ast_source(right_schema)
-  join <- ast_join("inner", left, right, by = list(left = "k", right = "k"))
+  join <- ast_join("inner", left, right, by = list(left = "k", right = "k"),
+                   relationship = "many-to-many")
 
   join_schema <- list(names = c("k", "a", "b"), types = c("INT32", "FLOAT64", "FLOAT64"))
   pred_left <- make_predicate(ir_call(">", list(ir_col("a"), ir_lit(1, "FLOAT64"))), join_schema)
@@ -228,7 +229,8 @@ test_that("push_down_filters respects renamed join keys", {
   right_schema <- list(names = c("b", "y"), types = c("INT32", "FLOAT64"))
   left <- ast_source(left_schema)
   right <- ast_source(right_schema)
-  join <- ast_join("inner", left, right, by = list(left = "a", right = "b"))
+  join <- ast_join("inner", left, right, by = list(left = "a", right = "b"),
+                   relationship = "many-to-many")
 
   join_schema <- list(names = c("a", "x", "b", "y"), types = c("INT32", "FLOAT64", "INT32", "FLOAT64"))
   pred_left <- make_predicate(ir_call(">", list(ir_col("x"), ir_lit(1, "FLOAT64"))), join_schema)

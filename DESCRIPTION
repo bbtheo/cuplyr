@@ -29,7 +29,8 @@ Imports:
     lifecycle (>= 1.0.5),
     tidyselect (>= 1.2.0),
     tibble (>= 3.2.0),
-    pillar
+    pillar,
+    stats
 Suggests:
     testthat (>= 3.0.0),
     bench,

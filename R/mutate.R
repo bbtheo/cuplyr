@@ -1306,8 +1306,14 @@ expr_has_mask_only_call <- function(expr) {
   if (!is.null(head) && ((head %in% zero_arg && length(expr) == 1L) || head %in% any_arg)) {
     return(TRUE)
   }
-  for (part in as.list(expr)[-1]) {
-    if (expr_has_mask_only_call(part)) {
+  parts <- as.list(expr)[-1]
+  for (i in seq_along(parts)) {
+    # an empty subscript slot (`m[, 1]`) is the missing-argument sentinel:
+    # reading it into a variable and forcing it errors
+    if (rlang::is_missing(parts[[i]])) {
+      next
+    }
+    if (expr_has_mask_only_call(parts[[i]])) {
       return(TRUE)
     }
   }

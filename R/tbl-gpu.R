@@ -132,7 +132,8 @@ tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
   # Build schema with factor levels for round-trip fidelity
   factor_levels <- lapply(data, function(col) {
     if (is.factor(col)) {
-      lvls <- levels(col)
+      # UTF-8 like the strings on the GPU and the ones collect() returns.
+      lvls <- enc2utf8(levels(col))
       # `ordered` rides on the level vector so every site that copies levels
       # carries it; collect() and the .drop expansion restore it.
       if (is.ordered(col)) attr(lvls, "ordered") <- TRUE

@@ -416,6 +416,16 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # checks (dplyr itself does not warn for an unnamed splice or expression).
   dots <- name_dots_silently(expanded)
 
+  # F53: a reducer whose arguments read no column (`sum(1L)`, `max(th)`) has
+  # the same value in every group, but how often dplyr evaluates it (once per
+  # group), and what it warns, is observable. The call goes to dplyr
+  # unevaluated; it is never evaluated here.
+  if (summarise_has_constant_agg(dots, current_schema(.data))) {
+    return(gpu_fallback("summarise", .data, function(tbl) {
+      rlang::inject(dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
+    }))
+  }
+
   # Phase 11, task L1: universal expression-level CPU fallback. Runs AFTER
   # across()-expansion/auto_name_dots() (so an ordinary, expandable
   # across() dot is screened normally, as its expanded per-column dots --
@@ -472,6 +482,27 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   }
 
   gpu_or_cpu(function() summarise_core(.data, dots, retained_groups))
+}
+
+# Internal (F53): TRUE iff some dot is a reducer call (`sum(1L)`, `max(th)`)
+# with no column reference. dplyr evaluates such a dot once per group, so its
+# side effects and warnings are per group; the caller sends the whole call to
+# dplyr without evaluating anything. Nothing is evaluated here. A reducer
+# over a context call (`max(row_number())`, `sum(n())`) is not constant and
+# keeps its native route.
+# @keywords internal
+summarise_has_constant_agg <- function(dots, schema) {
+  reducers <- c("sum", "mean", "min", "max", "sd", "var", "median", "quantile",
+                "n_distinct", "first", "last", "nth", "any", "all")
+  for (i in seq_along(dots)) {
+    expr <- rlang::quo_get_expr(dots[[i]])
+    head <- call_head_name(expr)
+    if (!is.null(head) && head %in% reducers && length(expr) >= 2L &&
+        !expr_has_column_ref(expr, schema) && !expr_has_mask_only_call(expr)) {
+      return(TRUE)
+    }
+  }
+  FALSE
 }
 
 # Internal: TRUE iff summarise() of `.data` has to add rows for empty groups

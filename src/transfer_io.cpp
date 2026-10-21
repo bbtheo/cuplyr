@@ -1,6 +1,7 @@
 // src/transfer_io.cpp
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
+#include "r_strings.hpp"
 
 #include <cudf/null_mask.hpp>
 #include <cudf/column/column.hpp>
@@ -116,7 +117,7 @@ std::unique_ptr<column> character_to_gpu(CharacterVector x) {
             valids[i] = false;
             strings[i] = "";
         } else {
-            strings[i] = as<std::string>(x[i]);
+            strings[i] = r_string_utf8(STRING_ELT(x, i));
         }
     }
 
@@ -439,7 +440,7 @@ CharacterVector gpu_to_character(const cudf::column_view& col) {
         } else {
             int32_t start = offsets[i];
             int32_t len = offsets[i + 1] - start;
-            result[i] = std::string(chars.data() + start, len);
+            SET_STRING_ELT(result, i, r_mk_utf8_char(chars.data() + start, len));
         }
     }
 
@@ -608,7 +609,7 @@ List gpu_head(SEXP xptr, int n, CharacterVector col_names) {
                         } else {
                             int32_t start = offsets[j] - base_offset;
                             int32_t len = offsets[j + 1] - offsets[j];
-                            str_result[j] = std::string(chars.data() + start, len);
+                            SET_STRING_ELT(str_result, j, r_mk_utf8_char(chars.data() + start, len));
                         }
                     }
                 }

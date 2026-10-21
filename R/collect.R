@@ -153,13 +153,13 @@ collect_frame <- function(x) {
     by_pos <- levels_by_position(final_schema)
     for (i in which(!vapply(by_pos, is.null, logical(1)))) {
       lvls <- by_pos[[i]]
-      result[[i]] <- factor_from_levels(lvls[result[[i]]], lvls)
+      result[[i]] <- factor_from_codes(result[[i]], lvls)
     }
   } else if (!is.null(final_schema$factor_levels)) {
     for (col_name in names(final_schema$factor_levels)) {
       if (col_name %in% names(result)) {
         lvls <- final_schema$factor_levels[[col_name]]
-        result[[col_name]] <- factor_from_levels(lvls[result[[col_name]]], lvls)
+        result[[col_name]] <- factor_from_codes(result[[col_name]], lvls)
       }
     }
   }
@@ -232,9 +232,15 @@ as.matrix.tbl_gpu <- function(x, ...) {
   as.matrix(collect_frame(x), ...)
 }
 
-# A factor from labels and a schema level vector, honoring the `ordered`
-# attribute upload put on it (see tbl_gpu.data.frame()).
+# A factor from 1-based codes and a schema level vector, honoring the `ordered`
+# attribute upload put on it (see tbl_gpu.data.frame()). Built from the codes,
+# not by matching labels, so an explicit NA level (addNA()) keeps its own code;
+# a missing or out-of-range code is a real NA.
 # @keywords internal
-factor_from_levels <- function(x, lvls) {
-  factor(x, levels = as.vector(lvls), ordered = isTRUE(attr(lvls, "ordered")))
+factor_from_codes <- function(codes, lvls) {
+  n <- length(lvls)
+  codes <- as.integer(codes)
+  codes[!is.na(codes) & (codes < 1L | codes > n)] <- NA_integer_
+  structure(codes, levels = as.vector(lvls),
+            class = if (isTRUE(attr(lvls, "ordered"))) c("ordered", "factor") else "factor")
 }

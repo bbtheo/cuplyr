@@ -4,9 +4,9 @@
 # - group_nest() and nest_by() forward `...` (including `.drop`) to
 #   group_by() exactly as dplyr does, so `.drop = TRUE` drops empty factor
 #   levels (conformance: test-group-nest.R "group_nest() respects .drop").
-# - nest_join() keeps accepting a host `y` (with or without `copy = TRUE`);
-#   the F05 copy rule for nest_join() was cut from F28 and moved to F49
-#   (it would cost conformance test-join.R #6295 until rowwise() is GPU-backed).
+# - nest_join() accepts a host `y` with `copy = TRUE`; since F53 a host `y`
+#   with `copy = FALSE` raises the same auto_copy() error as the other GPU
+#   joins (the F05 copy rule, deferred from F28 and F49).
 # - Everything else (name default, keep, na_matches, unmatched, the `...`
 #   check, by = NULL / character() / join_by()) keeps matching dplyr.
 #

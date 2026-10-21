@@ -923,10 +923,18 @@ push_down_filters <- function(ast) {
     # push nothing. multiple = first/last/any picks among ALL of an x row's
     # y matches, so y must not be filtered first (x-side pushdown is fine).
     # The same goes for a closest() condition (below).
-    # Known, accepted limitation: with the default relationship = NULL a
-    # pushdown can suppress dplyr's advisory many-to-many warning or change
-    # its row numbers (rows are identical); blocking it would remove the
-    # optimizer's main join benefit. Join warnings belong to F36.
+    # A join that can raise dplyr's advisory many-to-many warning (default
+    # relationship = NULL, multiple = "all") checks the FULL inputs, so a
+    # filter pushed below it would suppress the warning or change its row
+    # numbers: push nothing, the join then warns exactly like dplyr (join_by()
+    # conditions dplyr never checks already carry relationship = "many-to-many",
+    # see join_may_warn_many_to_many()). Trade-off: a default-relationship
+    # join loses pushdown; say relationship = "many-to-many" (or another
+    # relationship) to keep it.
+    if (input$join_type %in% c("inner", "left", "right") &&
+        is.null(input$relationship) && identical(input$multiple, "all")) {
+      return(ast)
+    }
     if (input$join_type %in% c("inner", "left", "right") &&
         (any(input$unmatched == "error") ||
          any(input$relationship %in% c("one-to-one", "one-to-many", "many-to-one")))) {

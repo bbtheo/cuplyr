@@ -624,6 +624,12 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
     # `desc()` shape (nested, extra args) parses `desc` as an unknown call
     # and falls back as before.
     if (canonical %in% ir_rank_desc_fns && length(args_raw) == 1L) {
+      # F53: an unsupplied `{{ v }}` (`min_rank({{ v }})`, `min_rank(desc({{ v }}))`)
+      # is dplyr's to evaluate: it raises its own "`x` must be a vector, not
+      # absent." error through the CPU route.
+      if (ir_has_missing_quosure(args_raw[[1]])) {
+        return(NULL)
+      }
       inner <- ir_unwrap_desc(args_raw[[1]])
       if (!is.null(inner)) {
         parsed <- ir_parse_expr(inner, env, schema)
@@ -663,6 +669,14 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
         parsed_args[[i]] <- parsed
       }
 
+      # F53: a pure op over literals (`k == ""` with `k` an R variable) is a
+      # scalar in R; fold it here, bottom-up, so no literal-only subtree
+      # reaches the evaluator.
+      folded <- ir_fold_literal_call(canonical, parsed_args)
+      if (!is.null(folded)) {
+        return(folded)
+      }
+
       if (!is.null(entry$parse)) {
         return(entry$parse(parsed_args, schema))
       }
@@ -691,6 +705,86 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
   }
 
   NULL
+}
+
+# F53: pure registry ops that are evaluated in R when every argument is a
+# scalar literal (see ir_fold_literal_call()).
+ir_foldable_pure_ops <- c(
+  "==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "^", "%%", "%/%",
+  "&", "|", "!", "xor", "is.na", "abs", "sqrt", "exp", "log", "log2",
+  "log10", "floor", "ceil", "round", "sin", "cos", "tan", "tolower", "toupper"
+)
+
+# The R value of a scalar literal node, or `ok = FALSE` when it has none the
+# fold can use (NULL, a timestamp, a vector set, an object).
+# @keywords internal
+ir_lit_r_value <- function(node) {
+  no <- list(ok = FALSE)
+  if (!inherits(node, "cuplyr_ir") || !identical(node$kind, "lit")) {
+    return(no)
+  }
+  if (is.null(node$type)) {
+    return(if (isTRUE(node$na)) list(ok = TRUE, value = NA) else no)
+  }
+  v <- node$value
+  if (!is.atomic(v) || length(v) != 1L || is.object(v) ||
+      grepl("^TIMESTAMP", unname(node$type))) {
+    return(no)
+  }
+  list(ok = TRUE, value = v)
+}
+
+# Evaluate the pure op `op` (ir_foldable_pure_ops) on R values with base R:
+# `ok = FALSE` when R errors or warns, or the result isn't a plain scalar.
+# @keywords internal
+ir_eval_pure_op <- function(op, vals) {
+  no <- list(ok = FALSE)
+  fn <- get0(if (identical(op, "ceil")) "ceiling" else op, envir = baseenv(),
+             mode = "function", inherits = FALSE)
+  if (is.null(fn)) {
+    return(no)
+  }
+  value <- tryCatch(do.call(fn, vals), error = function(e) NULL,
+                    warning = function(w) NULL)
+  if (!is.atomic(value) || length(value) != 1L || is.object(value)) {
+    return(no)
+  }
+  list(ok = TRUE, value = value)
+}
+
+# F53: constant-fold a pure op whose arguments are all scalar literals, with
+# R's own semantics and types (`5L %/% 2L` is an integer, `NA_character_ == "a"`
+# a logical NA). Returns the literal node, or NULL when the call isn't foldable
+# (an op outside the pure list, a non-literal or vector argument, a warning or
+# error in R, a result that isn't a plain scalar): the call then parses as before.
+# @keywords internal
+ir_fold_literal_call <- function(op, args) {
+  if (!op %in% ir_foldable_pure_ops || length(args) == 0L) {
+    return(NULL)
+  }
+  # `-3` stays a unary minus of the literal (its IR shape is relied on)
+  if (identical(op, "-") && length(args) == 1L) {
+    return(NULL)
+  }
+  vals <- vector("list", length(args))
+  for (i in seq_along(args)) {
+    got <- ir_lit_r_value(args[[i]])
+    if (!got$ok) {
+      return(NULL)
+    }
+    vals[i] <- list(got$value)
+  }
+  got <- ir_eval_pure_op(op, vals)
+  if (!got$ok) {
+    return(NULL)
+  }
+  value <- got$value
+  # A NaN literal is uploaded as a null, so a computed NaN (`0/0`) must reach
+  # the evaluator as the calculation.
+  if (is.double(value) && is.nan(value)) {
+    return(NULL)
+  }
+  ir_lit_from_r(value)
 }
 
 #' Parse an rlang quosure into cuplyr IR
@@ -1679,6 +1773,19 @@ ir_parse_first_last_nth <- function(expr, env, schema, fn_name) {
 # Rank-family functions that accept `desc(e)` as their value argument (F29).
 ir_rank_desc_fns <- c("row_number", "min_rank", "dense_rank", "percent_rank",
                       "cume_dist")
+
+# TRUE iff `expr` is, or holds anywhere in its call tree, a quosure of the
+# missing argument (what `{{ v }}` becomes when `v` was not supplied).
+# @keywords internal
+ir_has_missing_quosure <- function(expr) {
+  if (rlang::is_quosure(expr)) {
+    return(rlang::quo_is_missing(expr) || ir_has_missing_quosure(rlang::quo_get_expr(expr)))
+  }
+  if (rlang::is_missing(expr) || !is.call(expr)) {
+    return(FALSE)
+  }
+  any(vapply(as.list(expr), ir_has_missing_quosure, logical(1)))
+}
 
 # `e` for a call `desc(e)` / `dplyr::desc(e)` (one argument), else `NULL`.
 # A quosure spliced in by a wrapper (`{{ }}`) is looked through, and `e` then

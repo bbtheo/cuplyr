@@ -332,6 +332,13 @@ nest_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, keep = NULL,
   # taken before `y` is collected so it isn't the collected copy's name.
   name <- name %||% rlang::as_label(rlang::enexpr(y))
   user_env <- rlang::caller_env()
+  # The copy rule of every GPU join: a host `y` needs `copy = TRUE`, else
+  # dplyr's auto_copy() error. Only the check is wanted here (the result is
+  # discarded): nest_join() pieces keep y's own class, so a host `y` is not
+  # round-tripped through the GPU.
+  if (!is_tbl_gpu(y) && !isTRUE(copy)) {
+    join_coerce_y(x, y, copy)
+  }
   # dplyr nests pieces of y's own class (dplyr_reconstruct(template = y)): a
   # grouped or rowwise tbl_gpu y is collected with its grouping (F49).
   y_tbl <- if (is_tbl_gpu(y)) collect(y) else collect_other_side(y)
