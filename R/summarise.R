@@ -519,8 +519,8 @@ summarise_wants_empty_groups <- function(.data) {
 # ungrouped 0-row summarise: n() 0, sum() 0, mean() NaN, min() Inf, ...). The
 # table is assembled on the GPU (one gather over [observed; empty-slice row]
 # plus the uploaded key columns), so aggregate values never pass through R
-# (an upload would turn NaN into NA). Needs the data's row layout, so a lazy
-# input's pending ops are computed first.
+# (they keep exactly what the GPU computed). Needs the data's row layout, so a
+# lazy input's pending ops are computed first.
 # @param dots auto_name_dots()'d aggregation quosures
 # @param fallback Function running the whole call on the CPU, for the
 #   (unexpected) aggregate type mismatches

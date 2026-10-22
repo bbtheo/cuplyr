@@ -112,17 +112,13 @@ test_that("[section 0, check 5] compute_column on a 0-row table returns a 0-row 
   expect_length(result, 0)
 })
 
-test_that("[section 0, check 6] KNOWN DIVERGENCE: cuDF NaN is not null; R's is.na(NaN) is TRUE", {
+test_that("[section 0, check 6] is.na(NaN) is TRUE: the missingness rule reads a NaN as null (F55)", {
   skip_if_no_gpu()
   tbl <- tbl_gpu(data.frame(dummy = 1:3))
 
-  # NaN as a *computed value* (0/0 via TRUE_DIV), not as an uploaded R NaN --
-  # numeric_to_gpu() (transfer_io.cpp) already nulls out both NA and NaN on
-  # ingestion (Rcpp::NumericVector::is_na() is true for NaN too, matching
-  # R's own is.na() semantics), so a GPU-resident, *non-null* NaN can only be
-  # produced by an on-GPU computation, never by uploading an R vector
-  # containing NaN. Confirmed empirically: gpu_collect() on such an upload
-  # already shows NA at that position (verified during T2 development).
+  # NaN as a computed value (0/0 via TRUE_DIV) is a valid float on the GPU, so
+  # collect() keeps it as NaN; is.na() (like the comparisons and coalesce())
+  # reads it as missing, as R does.
   division_ir <- ir_call("/", list(ir_lit(0, "FLOAT64"), ir_lit(0, "FLOAT64")))
   division_result <- compute_ir(tbl, division_ir)
   expect_true(all(is.nan(division_result)))
@@ -130,11 +126,8 @@ test_that("[section 0, check 6] KNOWN DIVERGENCE: cuDF NaN is not null; R's is.n
   isna_ir <- ir_call("is.na", list(division_ir))
   isna_result <- compute_ir(tbl, isna_ir)
 
-  # Pinned, per section 0: this is a KNOWN, DOCUMENTED, NOT-FIXED-IN-PHASE-1
-  # divergence from R. is.na(NaN) is TRUE in R; IS_NULL(NaN) is FALSE in
-  # cuDF, because NaN is a valid (non-null) floating-point value there.
-  expect_true(is.na(NaN))              # R's actual behavior
-  expect_false(unique(isna_result))    # cuDF's actual behavior (divergent)
+  expect_true(is.na(NaN))
+  expect_true(unique(isna_result))
 })
 
 # -----------------------------------------------------------------------------

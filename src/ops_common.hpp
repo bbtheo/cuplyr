@@ -3,9 +3,13 @@
 
 #include <Rcpp.h>
 #include <cudf/binaryop.hpp>
+#include <cudf/column/column.hpp>
+#include <cudf/column/column_view.hpp>
+#include <cudf/transform.hpp>
 #include <cudf/types.hpp>
 
 #include <cmath>
+#include <memory>
 #include <string>
 
 namespace cuplyr {
@@ -41,6 +45,27 @@ inline cudf::size_type compute_slice_size(double amount, bool is_prop, cudf::siz
     if (size < 0) size = 0;
     if (size > static_cast<double>(nrow)) size = static_cast<double>(nrow);
     return static_cast<cudf::size_type>(size);
+}
+
+// F55: a floating column read with NaN as null (the evaluator's
+// eval_ctx::nan_as_null() has a cheaper view route over the same mask; every
+// other site uses this copy). If `col` is FLOAT64/
+// FLOAT32 and holds a NaN (cudf::nans_to_nulls() grew the null count), returns
+// a copy that owns the NaN-nulled mask; otherwise nullptr, so the caller keeps
+// `col` (and a non-nullable column stays non-nullable). The data is untouched:
+// only the mask differs, so the NaN value survives wherever the original column
+// is gathered or returned.
+inline std::unique_ptr<cudf::column> nan_nulled_copy(cudf::column_view col) {
+    if (col.type().id() != cudf::type_id::FLOAT64 &&
+        col.type().id() != cudf::type_id::FLOAT32) {
+        return nullptr;
+    }
+    if (col.size() == 0) return nullptr;
+    auto mask = cudf::nans_to_nulls(col);
+    if (mask.second <= col.null_count()) return nullptr;
+    auto copy = std::make_unique<cudf::column>(col);
+    copy->set_null_mask(std::move(*mask.first), mask.second);
+    return copy;
 }
 
 } // namespace cuplyr

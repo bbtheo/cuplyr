@@ -151,7 +151,11 @@ inline std::string expr_type_to_str(cudf::data_type type) {
 // `cols` (views into that storage, used by column_reference indices and by
 // ast_expressible()) in lockstep. Indices only ever grow -- nothing is ever
 // reordered or removed -- so any column_reference built earlier stays valid
-// for the lifetime of the ctx.
+// for the lifetime of the ctx. The one exception to "owned holds the storage":
+// nan_as_null()'s views push a nullptr placeholder into `owned` (the view
+// shares its source's data and its mask lives in `nan_masks`). A top-level
+// result is always a fresh push() of an owned column, never such a view; the
+// entry points in src/ops_expr.cpp check that before taking ownership.
 // -----------------------------------------------------------------------------
 
 struct eval_ctx {
@@ -169,6 +173,14 @@ struct eval_ctx {
     // group: +-Inf, a double, with R's warning). Handed to R as the
     // "rw_flags" attribute of the result.
     int rw_flags = 0;
+    // F55: nan_as_null()'s cache, ctx index -> index of the NaN-as-null view.
+    std::map<cudf::size_type, cudf::size_type> nan_null_cache;
+    // F55: the null masks behind those views (keyed by the view's ctx index).
+    // A view shares the original column's data, so only the mask is allocated.
+    std::map<cudf::size_type, std::unique_ptr<rmm::device_buffer>> nan_masks;
+    // F55: while set, build_ast() reads every FLOAT64 column through
+    // nan_as_null() (see nan_only_from_leaves()).
+    bool nan_leaves = false;
 
     cudf::table_view view() const { return cudf::table_view(cols); }
 
@@ -193,8 +205,69 @@ struct eval_ctx {
             owned[k - base].reset();
             cols[k] = cols[0];
         }
+        for (auto it = nan_null_cache.begin(); it != nan_null_cache.end();) {
+            if (static_cast<size_t>(it->second) >= mark) it = nan_null_cache.erase(it);
+            else ++it;
+        }
+        for (auto it = nan_masks.begin(); it != nan_masks.end();) {
+            if (static_cast<size_t>(it->first) >= mark) it = nan_masks.erase(it);
+            else ++it;
+        }
+    }
+
+    // F55: the index of column `idx` read with NaN as null (see nan_nulled_copy()).
+    // The index itself when the column isn't floating or holds no NaN. Cached, so
+    // `x > 1 & x < 5` scans x once. The new entry is a view over the original
+    // data with the NaN-nulled mask (owned in `nan_masks`), not a copy of the
+    // data; `owned` gets a placeholder so it stays in lockstep with `cols`. A
+    // sliced column (offset != 0) takes the copying route.
+    cudf::size_type nan_as_null(cudf::size_type idx) {
+        auto it = nan_null_cache.find(idx);
+        if (it != nan_null_cache.end()) return it->second;
+        cudf::size_type out = idx;
+        cudf::column_view col = cols[idx];
+        if (col.type().id() == cudf::type_id::FLOAT64 && col.size() > 0) {
+            if (col.offset() == 0) {
+                auto mask = cudf::nans_to_nulls(col);
+                if (mask.second > col.null_count()) {
+                    cudf::column_view v(col.type(), col.size(), col.head(),
+                                        static_cast<cudf::bitmask_type const*>(mask.first->data()),
+                                        mask.second, 0);
+                    owned.push_back(nullptr);
+                    cols.push_back(v);
+                    out = static_cast<cudf::size_type>(cols.size() - 1);
+                    nan_masks[out] = std::move(mask.first);
+                }
+            } else if (auto copy = cuplyr::nan_nulled_copy(col)) {
+                out = push(std::move(copy));
+            }
+        }
+        nan_null_cache[idx] = out;
+        return out;
     }
 };
+
+// F55: sets ctx.nan_leaves for one build_ast() call and restores the previous
+// value on every exit, an exception included.
+struct nan_leaves_scope {
+    eval_ctx& ctx;
+    bool saved;
+    explicit nan_leaves_scope(eval_ctx& c) : ctx(c), saved(c.nan_leaves) { ctx.nan_leaves = true; }
+    ~nan_leaves_scope() { ctx.nan_leaves = saved; }
+    nan_leaves_scope(const nan_leaves_scope&) = delete;
+    nan_leaves_scope& operator=(const nan_leaves_scope&) = delete;
+};
+
+// F55: TRUE where a floating column holds a valid NaN (a non-nullable BOOL8
+// column). cudf::is_nan() reads the data only, and the data under a null slot
+// is R's NA_real_ payload, itself a NaN, so a null row must be masked out.
+inline std::unique_ptr<cudf::column> valid_nan(cudf::column_view col) {
+    auto nan = cudf::is_nan(col);
+    auto valid = cudf::is_valid(col);
+    return cudf::binary_operation(nan->view(), valid->view(),
+                                  cudf::binary_operator::LOGICAL_AND,
+                                  cudf::data_type{cudf::type_id::BOOL8});
+}
 
 // -----------------------------------------------------------------------------
 // IR node field accessors (Rcpp::List, see R/ir.R node shapes)
@@ -207,6 +280,16 @@ inline std::string ir_kind(Rcpp::List node) {
 inline bool ir_lit_is_na(Rcpp::List node) {
     SEXP na_sexp = node["na"];
     return !Rf_isNull(na_sexp) && Rcpp::as<bool>(na_sexp);
+}
+
+// F55: a double literal that is NaN but not NA_real_ (the missingness-sensitive
+// consumers read it as a null scalar; everywhere else it is a value).
+inline bool ir_lit_is_nan(Rcpp::List node) {
+    if (ir_lit_is_na(node)) return false;
+    SEXP v = node["value"];
+    if (TYPEOF(v) != REALSXP || Rf_xlength(v) != 1) return false;
+    double d = REAL(v)[0];
+    return std::isnan(d) && !R_IsNA(d);
 }
 
 // True iff a STRING literal's value is a single NA_character_. R's folds
@@ -452,7 +535,7 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
     Rcpp::List args = node["args"];
 
     static const std::set<std::string> bool_ops = {
-        "==", "!=", "<", "<=", ">", ">=", "&", "|", "!", "xor", "is.na", "%in%", "between"
+        "==", "!=", "<", "<=", ">", ">=", "&", "|", "!", "xor", "is.na", "is.nan", "%in%", "between"
     };
     if (bool_ops.count(op)) return cudf::data_type{cudf::type_id::BOOL8};
 
@@ -634,8 +717,8 @@ inline std::unique_ptr<cudf::scalar> build_scalar(const std::string& type_str,
             double v = 0.0;
             if (!is_na) {
                 v = Rcpp::as<double>(value_sexp);
-                // NA and NaN both become a null scalar, as upload maps NaN to null.
-                if (Rcpp::NumericVector::is_na(v)) is_na = true;
+                // Only NA_real_ is null; a NaN literal is a NaN value, as on upload.
+                if (R_IsNA(v)) is_na = true;
             }
             return std::make_unique<cudf::numeric_scalar<double>>(v, !is_na);
         }
@@ -851,6 +934,38 @@ inline bool ast_expressible(Rcpp::List node, const eval_ctx& ctx) {
     return true;
 }
 
+// F55: can the FLOAT64 expression `node` only be NaN where a column it reads is
+// NaN? Then a missingness-sensitive consumer (is.na(), a comparison) can read
+// the columns through nan_as_null() and keep the expression inline, instead of
+// materializing it to look for NaN. True for a column, abs/floor/ceil/exp/unary
+// minus of such an expression, and +, -, * of one with a finite literal (not
+// zero for *). False for anything that can make a NaN out of non-NaN inputs:
+// x / y, x ^ y, x %% y, sqrt/log/sin/cos/tan, and +, -, * of two expressions
+// (Inf - Inf, 0 * Inf).
+inline bool nan_only_from_leaves(Rcpp::List node) {
+    std::string kind = ir_kind(node);
+    if (kind == "col") return true;
+    if (kind != "call") return false;
+    std::string op = Rcpp::as<std::string>(node["op"]);
+    Rcpp::List args = node["args"];
+    if (args.size() == 1) {
+        if (op != "abs" && op != "floor" && op != "ceil" && op != "exp" && op != "-") return false;
+        return nan_only_from_leaves(args[0]);
+    }
+    if (args.size() != 2 || (op != "+" && op != "-" && op != "*")) return false;
+    for (int i = 0; i < 2; ++i) {
+        Rcpp::List lit = args[i];
+        if (ir_kind(lit) != "lit") continue;
+        if (ir_lit_is_na(lit) || Rf_isNull(lit["type"])) return false;
+        std::string ty = Rcpp::as<std::string>(lit["type"]);
+        if (ty != "FLOAT64" && ty != "INT32") return false;
+        double v = Rcpp::as<double>(lit["value"]);
+        if (!std::isfinite(v) || (op == "*" && v == 0.0)) return false;
+        return nan_only_from_leaves(args[1 - i]);
+    }
+    return false;
+}
+
 // -----------------------------------------------------------------------------
 // build_ast(): builds `node` (assumed ast_expressible(), possibly with
 // non-expressible descendants that get materialize()'d and referenced by
@@ -866,6 +981,7 @@ inline cudf::ast::expression const& build_ast(Rcpp::List node,
 
     if (kind == "col") {
         int idx = Rcpp::as<int>(node["index"]);
+        if (ctx.nan_leaves) idx = ctx.nan_as_null(idx);  // F55
         return tree.emplace<cudf::ast::column_reference>(idx);
     }
 
@@ -957,6 +1073,15 @@ inline cudf::ast::expression const& build_ast(Rcpp::List node,
         target = resolved[1];
     }
 
+    // F55: the missingness-sensitive consumers (is.na() and the six comparisons)
+    // read a FLOAT64 operand with NaN as null, as R does (`NaN > 1` is NA,
+    // `is.na(NaN)` is TRUE). A FLOAT64 column goes through nan_as_null(); a
+    // computed FLOAT64 operand is materialized first. Both stay inline when the
+    // data holds no NaN, so the kernel is the non-nullable one. A NaN literal is
+    // a null scalar. An in-AST guard instead would force the (much slower)
+    // nullable kernel on every comparison.
+    const bool nan_sensitive = ir_op_is_comparison(op) || op == "is.na";
+
     std::vector<std::reference_wrapper<cudf::ast::expression const>> operand_refs;
     operand_refs.reserve(args.size());
     for (int i = 0; i < args.size(); ++i) {
@@ -970,13 +1095,32 @@ inline cudf::ast::expression const& build_ast(Rcpp::List node,
             // Bare-NA adoption or a mismatched typed literal: both handled
             // by the lit branch's `hint` override -- rebuild at the target
             // type directly, no AST cast operation needed.
-            operand_refs.push_back(build_ast(a, tree, scalars, ctx, hint));
+            if (nan_sensitive && ir_lit_is_nan(a)) {
+                Rcpp::List null_lit = Rcpp::clone(a);
+                null_lit["na"] = true;
+                operand_refs.push_back(build_ast(null_lit, tree, scalars, ctx, hint));
+            } else {
+                operand_refs.push_back(build_ast(a, tree, scalars, ctx, hint));
+            }
             continue;
         }
 
-        cudf::ast::expression const& built = ast_expressible(a, ctx)
-            ? build_ast(a, tree, scalars, ctx, hint)
-            : tree.emplace<cudf::ast::column_reference>(materialize(a, ctx));
+        const bool nan_operand = nan_sensitive && !is_unresolved_na[i] &&
+                                 resolved[i].id() == cudf::type_id::FLOAT64;
+        // A FLOAT64 operand that can only be NaN where its columns are
+        // (nan_only_from_leaves()) stays inline, reading those columns with NaN
+        // as null; any other computed one is materialized and then scanned.
+        const bool nan_inline = nan_operand && nan_only_from_leaves(a) && ast_expressible(a, ctx);
+        cudf::ast::expression const& built = nan_inline
+            ? [&]() -> cudf::ast::expression const& {
+                  nan_leaves_scope scope(ctx);
+                  return build_ast(a, tree, scalars, ctx, hint);
+              }()
+            : nan_operand
+                ? tree.emplace<cudf::ast::column_reference>(ctx.nan_as_null(materialize(a, ctx)))
+                : ast_expressible(a, ctx)
+                    ? build_ast(a, tree, scalars, ctx, hint)
+                    : tree.emplace<cudf::ast::column_reference>(materialize(a, ctx));
 
         if (!needs_cast) {
             operand_refs.push_back(built);
@@ -1546,8 +1690,10 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         switch (set_dtype.id()) {
             case cudf::type_id::FLOAT64: {
                 Rcpp::NumericVector v(set_value);
+                // Only NA_real_ is the null; a NaN in the set uploads as a
+                // value and matches a NaN in x (match(NaN, NaN) is 1).
                 for (R_xlen_t i = 0; i < v.size(); ++i) {
-                    if (Rcpp::NumericVector::is_na(v[i])) set_has_na = true;
+                    if (R_IsNA(v[i])) set_has_na = true;
                 }
                 haystack = numeric_to_gpu(v);
                 break;
@@ -2006,6 +2152,23 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         return acc;
     }
 
+    // ---- is.nan(x) (F55): TRUE only for a valid NaN. A null (NA) is FALSE, and
+    // the data under a null slot can hold NA_real_'s NaN payload, so
+    // cudf::is_nan() alone is wrong. A non-floating column has no NaN: all FALSE.
+    // Never nan_as_null(): this is the NaN test itself. ----
+    if (op == "is.nan") {
+        Rcpp::List x_node = args[0];
+        cudf::size_type x_idx = materialize(x_node, ctx);
+        cudf::column_view x_col = ctx.cols[x_idx];
+        cudf::data_type bool_t{cudf::type_id::BOOL8};
+        if (x_col.type().id() == cudf::type_id::FLOAT64 ||
+            x_col.type().id() == cudf::type_id::FLOAT32) {
+            return valid_nan(x_col);
+        }
+        cudf::numeric_scalar<bool> no(false, true);
+        return cudf::make_column_from_scalar(no, x_col.size());
+    }
+
     // ---- nchar(x): attributes.hpp count_characters(), cast defensively to
     // the registry-declared INT32 (Phase 11 L5) ----
     if (op == "nchar") {
@@ -2365,9 +2528,13 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         cudf::data_type target = unify_value_types(value_types);
         std::string target_str = expr_type_to_str(target);
 
+        // F55: NaN is missing in every argument (dplyr's coalesce() uses
+        // vec_detect_missing()), so a FLOAT64 argument is read with NaN as null.
+        // Where every argument is missing the result is therefore NA, not NaN.
         auto value_as_column = [&](Rcpp::List node) -> cudf::column_view {
             if (ir_kind(node) == "lit") {
-                auto s = build_scalar(target_str, node["value"], ir_lit_is_na(node));
+                auto s = build_scalar(target_str, node["value"],
+                                      ir_lit_is_na(node) || ir_lit_is_nan(node));
                 auto col = cudf::make_column_from_scalar(*s, ctx.view().num_rows());
                 return ctx.cols[ctx.push(std::move(col))];
             }
@@ -2376,7 +2543,7 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
                 auto casted = cudf::cast(ctx.cols[idx], target);
                 idx = ctx.push(std::move(casted));
             }
-            return ctx.cols[idx];
+            return ctx.cols[ctx.nan_as_null(idx)];
         };
 
         cudf::column_view acc = value_as_column(args[0]);
@@ -2406,11 +2573,26 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         // na_if(1:3, 2) -- an integer x against a double literal y -- stays
         // integer); y is cast to match x for the comparison, never the
         // other way around.
+        //
+        // F55: na_if() compares with vec_equal(na_equal = TRUE), where NaN
+        // equals NaN (and not NA), so for a floating x the IEEE EQUAL (false
+        // for NaN) is OR-ed with "both are a valid NaN". na_if(x, NaN) is how
+        // dplyr standardises NaN to NA.
+        bool x_float = x_type.id() == cudf::type_id::FLOAT64;
         std::unique_ptr<cudf::column> mask;
         if (ir_kind(y_node) == "lit") {
-            auto y_scalar = build_scalar(x_type_str, y_node["value"], ir_lit_is_na(y_node));
-            mask = cudf::binary_operation(x_col, *y_scalar, cudf::binary_operator::EQUAL,
-                                           cudf::data_type{cudf::type_id::BOOL8});
+            bool y_nan = false;
+            if (x_float && !ir_lit_is_na(y_node) && !Rf_isNull(y_node["value"])) {
+                double yv = Rcpp::as<double>(y_node["value"]);
+                y_nan = std::isnan(yv) && !R_IsNA(yv);
+            }
+            if (y_nan) {
+                mask = valid_nan(x_col);
+            } else {
+                auto y_scalar = build_scalar(x_type_str, y_node["value"], ir_lit_is_na(y_node));
+                mask = cudf::binary_operation(x_col, *y_scalar, cudf::binary_operator::EQUAL,
+                                               cudf::data_type{cudf::type_id::BOOL8});
+            }
         } else {
             cudf::size_type y_idx = materialize(y_node, ctx);
             cudf::column_view y_col = ctx.cols[y_idx];
@@ -2421,6 +2603,14 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
             }
             mask = cudf::binary_operation(x_col, y_col, cudf::binary_operator::EQUAL,
                                            cudf::data_type{cudf::type_id::BOOL8});
+            if (x_float) {
+                auto both_nan = cudf::binary_operation(valid_nan(x_col)->view(), valid_nan(y_col)->view(),
+                                                       cudf::binary_operator::LOGICAL_AND,
+                                                       cudf::data_type{cudf::type_id::BOOL8});
+                mask = cudf::binary_operation(mask->view(), both_nan->view(),
+                                              cudf::binary_operator::NULL_LOGICAL_OR,
+                                              cudf::data_type{cudf::type_id::BOOL8});
+            }
         }
 
         // Wherever x == y (mask TRUE): NA of x's own type. A NULL mask

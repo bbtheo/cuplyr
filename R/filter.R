@@ -124,12 +124,10 @@
 #'     result (a bare `NA` predicate is `FALSE`-equivalent for row-keeping,
 #'     same as dplyr)
 #' }
-#' One documented, deliberate divergence from dplyr: cuDF's floating-point
-#' `NaN` is not the same value as SQL/cuDF null, so `is.na()` on a *computed*
-#' `NaN` (e.g. `0/0`) returns `FALSE` on the GPU where R's `is.na(NaN)` is
-#' `TRUE`. `NA` values ingested from R (including in a `FLOAT64` column)
-#' are unaffected -- they round-trip as genuine GPU nulls and behave
-#' identically to dplyr in every case above.
+#' A floating `NaN` (e.g. a computed `0/0`) stays a value on the GPU, but
+#' `is.na()`, the six comparisons and `coalesce()` read it as missing, as in
+#' R: `NaN > 1` is `NA` (the row is dropped) and `is.na(NaN)` is `TRUE`.
+#' `is.nan()` runs on the GPU too.
 #'
 #' ## Not yet supported
 #' \itemize{
@@ -1162,17 +1160,8 @@ na.omit.tbl_gpu <- function(object, ...) {
   if (length(nms) == 0L) {
     return(object)
   }
-  types <- current_schema(object)$types
-  # is.na() is a null test; a NaN computed on the GPU is a number, so a
-  # FLOAT64 column also needs `col == col` (false for NaN).
-  preds <- Map(function(nm, ty) {
-    col <- rlang::sym(nm)
-    if (identical(unname(ty), "FLOAT64")) {
-      rlang::expr(!is.na(!!col) & !!col == !!col)
-    } else {
-      rlang::expr(!is.na(!!col))
-    }
-  }, nms, types)
+  # is.na() reads a NaN as missing, as na.omit() does (F55).
+  preds <- lapply(nms, function(nm) rlang::expr(!is.na(!!rlang::sym(nm))))
   names(preds) <- NULL
   dplyr::filter(object, !!!preds)
 }

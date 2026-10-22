@@ -1,6 +1,6 @@
 # F29 round 3: extra checks beside the protected acceptance tests.
 
-# A NaN computed on the GPU (0 / 0), unlike an uploaded NaN, which becomes null.
+# A NaN computed on the GPU (0 / 0); an uploaded NaN is a real NaN too (F55).
 f29r3_nan_df <- function() {
   tibble::tibble(
     g = c("a", "a", "a", "a", "b", "b", "b"),

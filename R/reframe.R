@@ -400,13 +400,13 @@ reframe_agg_parts <- function(expr, env, verified) {
 # Internal: the R type of an allowlisted computed argument, walked on the R
 # expression, or NULL when the expression isn't on the list.
 #
-# `nan_free` tracks whether the value can be NaN. On the GPU a NaN is a number
-# (`NaN > 1` is FALSE, `is.na(NaN)` FALSE) where R gives NA / TRUE, so
-# comparisons, `!`, `&`, `|` and is.na() only take operands that can't be NaN:
-# INT32/BOOL8 columns, integer arithmetic on them, literals. A FLOAT64 column
-# can hold a NaN computed by an earlier mutate(), so it never counts. (A NaN
-# reaching the aggregation itself is fine: gpu_summarise() treats it as
-# missing.)
+# `nan_free` tracks whether the value can be NaN. A NaN is a value on the GPU,
+# and since F55 is.na() and the comparisons read it as missing there, like R,
+# so this gate is no longer needed for correctness. It still keeps FLOAT64
+# comparisons and logic on the CPU route: comparisons, `!`, `&`, `|` and
+# is.na() only take operands that can't be NaN (INT32/BOOL8 columns, integer
+# arithmetic on them, literals). (A NaN reaching the aggregation itself is
+# fine: gpu_summarise() treats it as missing.)
 # @return `list(type, nan_free, cols)` (`cols`: reads a column) or NULL
 # @keywords internal
 reframe_arg_info <- function(expr, schema, env) {

@@ -141,12 +141,10 @@ work); \code{filter(FALSE)} and \code{filter(NA)} both return a zero-row
 result (a bare \code{NA} predicate is \code{FALSE}-equivalent for row-keeping,
 same as dplyr)
 }
-One documented, deliberate divergence from dplyr: cuDF's floating-point
-\code{NaN} is not the same value as SQL/cuDF null, so \code{is.na()} on a \emph{computed}
-\code{NaN} (e.g. \code{0/0}) returns \code{FALSE} on the GPU where R's \code{is.na(NaN)} is
-\code{TRUE}. \code{NA} values ingested from R (including in a \code{FLOAT64} column)
-are unaffected -- they round-trip as genuine GPU nulls and behave
-identically to dplyr in every case above.
+A floating \code{NaN} (e.g. a computed \code{0/0}) stays a value on the GPU, but
+\code{is.na()}, the six comparisons and \code{coalesce()} read it as missing, as in
+R: \code{NaN > 1} is \code{NA} (the row is dropped) and \code{is.na(NaN)} is \code{TRUE}.
+\code{is.nan()} runs on the GPU too.
 }
 
 \subsection{Not yet supported}{

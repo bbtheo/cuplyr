@@ -472,13 +472,9 @@ slice_grouped_native <- function(.data, group_mode, group_cols, mode,
     schema <- current_schema(result)
     na_key_name <- unique_temp_name("..slice_na..", schema$names)
     # dplyr ranks NaN as missing (vec_rank(nan_distinct = FALSE), and
-    # vec_detect_complete() for na_rm). A NaN computed on the GPU is a
-    # number, not a null, so a FLOAT order column also tests `x != x`.
+    # vec_detect_complete() for na_rm); is.na() reads a NaN as missing (F55).
     is_float <- schema$types[[match(order_col, schema$names)]] %in% c("FLOAT32", "FLOAT64")
     na_ir <- ir_call("is.na", list(ir_col(order_col)))
-    if (is_float) {
-      na_ir <- ir_call("|", list(na_ir, ir_call("!=", list(ir_col(order_col), ir_col(order_col)))))
-    }
     steps <- list(make_mutate_expr(na_key_name, na_ir, schema))
     # The arrange's value key must also tie NaN with NA, so the missing rows
     # keep their row order (dplyr's stable order() over tied ranks); cudf

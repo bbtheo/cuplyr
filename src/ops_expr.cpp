@@ -116,6 +116,9 @@ SEXP gpu_compute_column(SEXP xptr, Rcpp::List ir) {
     // materialize_top_level() always pushes a fresh entry, so idx is always
     // within ctx.owned's range (never a bare alias into the input view).
     size_t owned_idx = static_cast<size_t>(idx - view.num_columns());
+    if (!ctx.owned[owned_idx]) {
+        Rcpp::stop("internal: top-level result is a NaN-as-null view, not an owned column");
+    }
     std::unique_ptr<cudf::column> result_col = std::move(ctx.owned[owned_idx]);
 
     std::vector<std::unique_ptr<cudf::column>> cols;
@@ -220,6 +223,9 @@ SEXP gpu_mutate_expr(SEXP xptr,
             return std::make_unique<cudf::column>(ctx.cols[idx]);  // deep copy of an unmodified input
         }
         size_t owned_idx = static_cast<size_t>(idx - n_input);
+        if (!ctx.owned[owned_idx]) {
+            Rcpp::stop("internal: mutate result is a NaN-as-null view, not an owned column");
+        }
         return std::move(ctx.owned[owned_idx]);
     };
 

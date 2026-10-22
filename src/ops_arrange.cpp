@@ -6,6 +6,7 @@
 
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
+#include "ops_common.hpp"
 
 #include <cudf/sorting.hpp>
 #include <cudf/copying.hpp>
@@ -58,10 +59,19 @@ SEXP gpu_arrange(SEXP xptr, IntegerVector col_indices, LogicalVector descending)
     }
 
     // Build key columns view (memory-efficient: just views, no copy)
+    // F55: a floating NaN sorts as NA (vctrs ties NaN with NA, both last in
+    // either direction, original order kept); cudf would order it above +Inf.
+    // Only the sort key is nulled, the gather below takes the original rows.
     std::vector<cudf::column_view> key_views;
+    std::vector<std::unique_ptr<cudf::column>> nan_nulled_keys;
     key_views.reserve(num_keys);
     for (int i = 0; i < num_keys; ++i) {
-        key_views.push_back(view.column(col_indices[i]));
+        cudf::column_view key = view.column(col_indices[i]);
+        if (auto nulled = nan_nulled_copy(key)) {
+            nan_nulled_keys.push_back(std::move(nulled));
+            key = nan_nulled_keys.back()->view();
+        }
+        key_views.push_back(key);
     }
     cudf::table_view keys_table(key_views);
 

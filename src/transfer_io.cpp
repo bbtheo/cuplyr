@@ -43,7 +43,7 @@ std::unique_ptr<column> numeric_to_gpu(NumericVector x) {
     // Check for NAs
     std::vector<uint8_t> validity(bitmask_allocation_size_bytes(n), 0xFF);
     for (size_type i = 0; i < n; ++i) {
-        if (NumericVector::is_na(x[i])) {
+        if (R_IsNA(x[i])) {
             // Clear bit i
             validity[i / 8] &= ~(1 << (i % 8));
             null_count++;

@@ -720,6 +720,19 @@ _Installed version: cuDF 25.12.0 (see `cudf/version_config.hpp`; conda pkg `libc
 - **cuDF gather API**: `cudf::gather()` (in `cudf/copying.hpp`) takes an `out_of_bounds_policy bounds_policy` parameter (`NULLIFY` or `DONT_CHECK`, default `DONT_CHECK`) but has **no** `negative_index_policy` parameter — that enum only exists on the detail-namespace overload in `cudf/detail/gather.hpp`, not on the public API.
 - **Avoid device-side Thrust** unless compiling with nvcc
 
+### NaN vs NA (F55)
+NaN is a value on the device: upload (`numeric_to_gpu()`, only `R_IsNA`
+becomes null), arithmetic, collect, `is.nan()`, group keys and join keys keep
+it. A fixed list of missingness-sensitive consumers reads a FLOAT64 operand
+with NaN as null, via `nan_nulled_copy()` (`src/ops_common.hpp`) and
+`eval_ctx::nan_as_null()` (`src/expr_eval.hpp`, cached per ctx index, a no-op
+when the column holds no NaN so the AST kernel stays non-nullable): `is.na()`
+and the six comparisons (`build_ast()`; a NaN literal there is a null scalar),
+every `coalesce()` argument, `arrange()` keys, `cummax()`/`cummin()` input,
+equi-join keys under `na_matches = "never"`. Don't add an in-AST NaN guard:
+it forces the nullable kernel (+50-90% on comparisons). `is.nan()` is an
+`apply_handler()` op (valid and NaN).
+
 ### Type Consistency
 R schema types MUST match actual GPU column types. If changing type handling:
 - Update `R/utils.R::gpu_type_from_r()`

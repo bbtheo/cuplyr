@@ -393,14 +393,14 @@ bool is_float_type(cudf::type_id id) {
     return id == cudf::type_id::FLOAT64 || id == cudf::type_id::FLOAT32;
 }
 
-// F22: what gpu_summarise() must know about a float value column. NaN only
-// arrives computed on the GPU (`0 / 0`, `Inf - Inf`; an upload turns R's NaN
-// into null), and R counts it as missing: na.rm = TRUE drops it, quantile()
-// without it errors, median() is NA. cudf treats it as a number (MIN/MAX skip
-// it, quantiles sort it last), so such aggregations read `nan_nulled`, the
-// column with every NaN made null. One sum reduction settles it for almost
-// every column: a NaN makes the sum NaN, so a finite sum means no NaN; only a
-// non-finite one (or an overflow) runs the exact check.
+// F22: what gpu_summarise() must know about a float value column. NaN
+// arrives as a valid float (computed on the GPU: `0 / 0`, `Inf - Inf`, or
+// uploaded: F55 keeps R's NaN), and R counts it as missing: na.rm = TRUE drops
+// it, quantile() without it errors, median() is NA. cudf treats it as a number
+// (MIN/MAX skip it, quantiles sort it last), so such aggregations read
+// `nan_nulled`, the column with every NaN made null. One sum reduction settles
+// it for almost every column: a NaN makes the sum NaN, so a finite sum means
+// no NaN; only a non-finite one (or an overflow) runs the exact check.
 struct FloatColumnInfo {
     bool has_nan = false;
     std::unique_ptr<cudf::column> nan_nulled;
@@ -432,12 +432,14 @@ FloatColumnInfo inspect_float_column(cudf::column_view col) {
 // na.rm = TRUE. Under na.rm = FALSE R gives NaN (median() NA) where cudf's
 // MIN/MAX/quantile would skip or sort past the NaN, so those read it as null
 // too (NA, the accepted NaN-as-NA divergence; quantile() then errors like R).
-// sum/mean/sd/var already give NaN from cudf, and n_distinct/first/last/nth
-// keep the value itself, so they read the column as is.
+// sd()/var() give NA for any NaN (R's use = "everything"), where cudf gives
+// NaN, so they read it as null as well. sum/mean already give NaN from cudf
+// as R does, and n_distinct/first/last/nth keep the value itself, so they read
+// the column as is.
 bool agg_reads_nan_as_null(const std::string& agg_type, bool na_rm) {
     if (agg_type == "n") return false;
     return na_rm || agg_type == "min" || agg_type == "max" || agg_type == "median" ||
-           agg_type == "quantile";
+           agg_type == "quantile" || agg_type == "std" || agg_type == "variance";
 }
 
 // F22: the QUANTILE aggregations of one gpu_summarise() call (median() of a
@@ -673,7 +675,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     }
 
     // F22: the column each aggregation reads (`eff[i]`): agg_col(i), or for a
-    // float column holding GPU-computed NaN its NaN-as-null copy where R counts
+    // float column holding NaN its NaN-as-null copy where R counts
     // NaN as missing (agg_reads_nan_as_null()). Each float column is inspected
     // at most once per call, and only when some aggregation of it cares.
     // median() of a float column goes through QuantileRequests at 0.5

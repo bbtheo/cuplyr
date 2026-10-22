@@ -357,20 +357,12 @@ rows_patch_from <- function(x, y, by, update) {
     if (update) {
       rlang::expr(if_else(is.na(!!m), !!v, !!t))
     } else {
-      # "missing" is NA or NaN, as for vctrs: coalesce() would leave a NaN
-      # computed on the GPU alone, and is.na() sees only the null mask of a
-      # stored column. A stored NaN is the one value not equal to itself
-      # (is.nan() has no GPU form).
-      missing <- if (identical(unname(x$schema$types[[match(vals[[i]], x$schema$names)]]), "FLOAT64")) {
-        rlang::expr(is.na(!!v) | !(!!v == !!v))
-      } else {
-        rlang::expr(is.na(!!v))
-      }
+      # "missing" is NA or NaN, as for vctrs, and is.na() sees both (F55).
+      missing <- rlang::expr(is.na(!!v))
       # dplyr's coalesce() gives NA, never NaN, where x and y are both
-      # missing, so a FLOAT64 y value is taken only when it is not missing
-      # itself (`t == t` is null for a null `t` and FALSE for a NaN).
+      # missing, so a FLOAT64 y value that is itself missing is taken as NA.
       fill <- if (identical(unname(y$schema$types[[match(vals[[i]], y$schema$names)]]), "FLOAT64")) {
-        rlang::expr(if_else(!!t == !!t, !!t, NA_real_))
+        rlang::expr(if_else(is.na(!!t), NA_real_, !!t))
       } else {
         t
       }

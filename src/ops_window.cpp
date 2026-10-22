@@ -415,22 +415,17 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
         // nulls silently produced ranks offset by the group's null count,
         // e.g. 3,4,5 instead of 1,2,3, until this fix).
         //
-        // F29: in a frame that ranks, a floating order column is read with
-        // NaN as null. dplyr's ranks are vec_rank(incomplete = "na"), and
-        // vctrs counts NaN as incomplete, so a NaN gets an NA rank and is left
-        // out of percent_rank()/cume_dist()'s non-NA count. cudf instead
-        // orders NaN above +Inf, and null_policy::EXCLUDE only skips nulls,
-        // so a GPU-computed NaN (0 / 0) would rank first under DESCENDING.
-        // Nulling it here, before the sort, also keeps the presorted rank
-        // scan's input sorted (NaN rows land with the nulls, last). Only the
-        // sort key changes: value columns (cumsum(x), lag(x), ...) are
-        // separate views and keep their NaN. A non-rank spec sharing the
-        // frame (lag(y, order_by = x) next to min_rank(x)) sees NaN ordered
-        // with the NAs, in row order, which is also vctrs' order.
-        bool frame_ranks = false;
-        for (const auto& sp : specs) {
-            if (is_rank_fn(sp.fn) && sp.has_value) frame_ranks = true;
-        }
+        // F29/F55: a floating order column is read with NaN as null in every
+        // frame. dplyr's ranks are vec_rank(incomplete = "na"), and vctrs counts
+        // NaN as incomplete, so a NaN gets an NA rank and is left out of
+        // percent_rank()/cume_dist()'s non-NA count; with_order()/nth() sort
+        // with vec_order_radix(), which ties NaN with NA, last, in row order.
+        // cudf instead orders NaN above +Inf, and null_policy::EXCLUDE only
+        // skips nulls, so a NaN (computed, or uploaded since F55) would rank
+        // first under DESCENDING. Nulling it here, before the sort, also keeps
+        // the presorted rank scan's input sorted (NaN rows land with the nulls,
+        // last). Only the sort key changes: value columns (cumsum(x), lag(x),
+        // ...) are separate views and keep their NaN.
         std::vector<std::unique_ptr<cudf::column>> nan_nulled_keepalive;
         std::vector<cudf::column_view> order_col_views;
         std::vector<cudf::order> order_col_orders;
@@ -441,15 +436,9 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 Rcpp::stop("gpu_window: order column index out of bounds: %d", idx);
             }
             cudf::column_view order_col = view.column(idx);
-            bool is_float = order_col.type().id() == cudf::type_id::FLOAT64 ||
-                            order_col.type().id() == cudf::type_id::FLOAT32;
-            if (frame_ranks && is_float) {
-                auto mask = cudf::nans_to_nulls(order_col);
-                if (mask.second > order_col.null_count()) {
-                    nan_nulled_keepalive.push_back(std::make_unique<cudf::column>(order_col));
-                    nan_nulled_keepalive.back()->set_null_mask(std::move(*mask.first), mask.second);
-                    order_col = nan_nulled_keepalive.back()->view();
-                }
+            if (auto nulled = cuplyr::nan_nulled_copy(order_col)) {
+                nan_nulled_keepalive.push_back(std::move(nulled));
+                order_col = nan_nulled_keepalive.back()->view();
             }
             order_col_views.push_back(order_col);
             bool desc = (i < order_desc_r.size()) && static_cast<bool>(order_desc_r[i]);
@@ -591,6 +580,10 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
             // family only): the indicator column must outlive gb.scan().
             std::vector<std::unique_ptr<cudf::column>> indicator_keepalive;
             std::vector<std::unique_ptr<cudf::column>> widened_keepalive;
+            // F55: cummax()/cummin() read a floating NaN as missing (cudf's
+            // max/min scan would skip it); the sticky-NA rule below then makes
+            // every later row NA.
+            std::vector<std::unique_ptr<cudf::column>> nan_nulled_values;
 
             for (int si : scan_spec_indices) {
                 const WindowSpec& sp = specs[static_cast<size_t>(si)];
@@ -610,6 +603,12 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 } else {
                     cudf::size_type pos = value_pos.at(sp.value_idx);
                     cudf::column_view value_view = work_view.column(pos);
+                    if (sp.fn == "cummax" || sp.fn == "cummin") {
+                        if (auto nulled = nan_nulled_copy(value_view)) {
+                            nan_nulled_values.push_back(std::move(nulled));
+                            value_view = nan_nulled_values.back()->view();
+                        }
+                    }
                     req.values = value_view;
                     // F42: an INT32/BOOL8 cumsum() is scanned in INT64 so the
                     // running sum is exact (cudf's SUM target type for an INT32
@@ -832,6 +831,28 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
             int count_request_idx = static_cast<int>(requests.size());
             requests.push_back(std::move(count_req));
 
+            // F55: min/max/median/sd/var of a floating column read a NaN as
+            // missing, like gpu_summarise() (agg_reads_nan_as_null()): R gives
+            // NaN/NA for the whole group where cudf's MIN/MAX/MEDIAN skip or
+            // sort past the NaN and STD/VARIANCE give NaN. The NaN-nulled copy
+            // (one per value column) feeds both the request and the
+            // na.rm = FALSE propagation below, which then makes the group NA.
+            // mean/sum keep the raw column: cudf gives NaN there, as R does.
+            std::map<cudf::size_type, std::unique_ptr<cudf::column>> nan_agg_copy;
+            auto agg_value_view = [&](const WindowSpec& sp) {
+                cudf::size_type vpos = value_pos.at(sp.value_idx);
+                cudf::column_view v = work_view.column(vpos);
+                if (sp.fn != "min" && sp.fn != "max" && sp.fn != "median" &&
+                    sp.fn != "sd" && sp.fn != "var") {
+                    return v;
+                }
+                auto it = nan_agg_copy.find(vpos);
+                if (it == nan_agg_copy.end()) {
+                    it = nan_agg_copy.emplace(vpos, cuplyr::nan_nulled_copy(v)).first;
+                }
+                return it->second ? it->second->view() : v;
+            };
+
             for (int si : agg_spec_indices) {
                 const WindowSpec& sp = specs[static_cast<size_t>(si)];
                 cudf::groupby::aggregation_request req;
@@ -877,7 +898,7 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                         Rcpp::stop("gpu_window: '%s' requires a value column", sp.fn.c_str());
                     }
                     cudf::size_type pos = value_pos.at(sp.value_idx);
-                    req.values = work_view.column(pos);
+                    req.values = agg_value_view(sp);
                     cudf::type_id ts_target =
                         cuplyr::ts_agg_target(sp.fn, work_view.column(pos).type().id());
                     if (ts_target != cudf::type_id::EMPTY) {
@@ -940,8 +961,7 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                     continue;
                 }
 
-                cudf::size_type pos = value_pos.at(sp.value_idx);
-                cudf::column_view value_view = work_view.column(pos);
+                cudf::column_view value_view = agg_value_view(sp);
                 if (!value_view.has_nulls()) {
                     continue;  // nothing to propagate
                 }
@@ -1039,6 +1059,14 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
             // group's ORIGINAL relative row order is preserved -- exactly
             // grouped_rolling_window()'s documented "presorted by
             // group_key" requirement.
+            //
+            // F55: R/roll.R drops/propagates a NaN through is.na()/anyNA(),
+            // i.e. as missing, in all five functions under both na.rm
+            // settings, so a floating value column is read through its
+            // NaN-nulled copy (one per value column, alive for the whole
+            // loop) and the min_periods/count scheme below treats a NaN
+            // exactly like an NA.
+            std::map<cudf::size_type, std::unique_ptr<cudf::column>> nan_roll_copy;
             for (int si : rolling_spec_indices) {
                 const WindowSpec& sp = specs[static_cast<size_t>(si)];
                 if (!sp.has_value) {
@@ -1049,6 +1077,11 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 }
                 cudf::size_type pos = value_pos.at(sp.value_idx);
                 cudf::column_view value_view = work_view.column(pos);
+                auto nan_it = nan_roll_copy.find(pos);
+                if (nan_it == nan_roll_copy.end()) {
+                    nan_it = nan_roll_copy.emplace(pos, cuplyr::nan_nulled_copy(value_view)).first;
+                }
+                if (nan_it->second) value_view = nan_it->second->view();
                 cudf::size_type w = sp.n;
 
                 // na.rm=FALSE: min_periods = w on a FIXED w-row window
@@ -1064,6 +1097,10 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 // that min_periods = 1 alone would wrongly compute a value
                 // for using fewer than w rows.
                 cudf::size_type min_periods = sp.na_rm ? 1 : w;
+                // R's sd() of a single value is NA, where cudf's STD (ddof = 1)
+                // gives NaN: roll_sd() needs two valid values (any w, either
+                // na.rm; w = 1 then gives NA everywhere, as R does).
+                if (sp.fn == "roll_sd") min_periods = std::max<cudf::size_type>(min_periods, 2);
                 auto agg = make_rolling_agg(sp.fn);
                 auto result = cudf::grouped_rolling_window(keys_view, value_view, w, 0, min_periods, *agg);
 

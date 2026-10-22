@@ -37,9 +37,8 @@ test_that("summarise() median() of an integer column is unchanged", {
   f22r3_both(df, function(d) summarise(d, m = median(i, na.rm = TRUE)))
 })
 
-# Row 1 of each group is 0 / 0 = NaN on the GPU (an upload turns R's NaN into
-# NA, so only a computed NaN reaches gpu_summarise() as NaN); group 3 is NaN
-# only; group 4 has a real NA as well.
+# Row 1 of each group is 0 / 0 = NaN on the GPU (an uploaded NaN reaches
+# gpu_summarise() as NaN too since F55); group 3 is NaN only; group 4 has a real NA as well.
 f22r3_nan_df <- function() {
   data.frame(
     g = c(1, 1, 1, 2, 2, 2, 3, 3, 4, 4, 4),

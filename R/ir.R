@@ -711,7 +711,7 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
 # scalar literal (see ir_fold_literal_call()).
 ir_foldable_pure_ops <- c(
   "==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "^", "%%", "%/%",
-  "&", "|", "!", "xor", "is.na", "abs", "sqrt", "exp", "log", "log2",
+  "&", "|", "!", "xor", "is.na", "is.nan", "abs", "sqrt", "exp", "log", "log2",
   "log10", "floor", "ceil", "round", "sin", "cos", "tan", "tolower", "toupper"
 )
 
@@ -779,8 +779,7 @@ ir_fold_literal_call <- function(op, args) {
     return(NULL)
   }
   value <- got$value
-  # A NaN literal is uploaded as a null, so a computed NaN (`0/0`) must reach
-  # the evaluator as the calculation.
+  # A computed NaN (`0/0`) is left to the evaluator as the calculation.
   if (is.double(value) && is.nan(value)) {
     return(NULL)
   }
@@ -1286,15 +1285,11 @@ ir_parse_recode <- function(expr, env, schema) {
   conds <- list()
   vals <- list()
   # A missing `.x` row never matches a key and, with `.default`/`.missing`,
-  # is only replaced by `.missing`. dplyr's is.na() also covers NaN; on the
-  # GPU a NaN computed by a calculation is a number, not a null, so a FLOAT64
-  # `.x` also tests `x != x`. That clause is needed even with neither
+  # is only replaced by `.missing`. dplyr's is.na() also covers NaN, and so
+  # does ours (F55). The clause is needed for a FLOAT64 `.x` even with neither
   # argument: dplyr then returns NA (not NaN) for such a row.
   if (has_default || has_missing || x_gpu == "FLOAT64") {
     na_cond <- ir_call("is.na", list(x_ir))
-    if (x_gpu == "FLOAT64") {
-      na_cond <- ir_call("|", list(na_cond, ir_call("!=", list(x_ir, x_ir))))
-    }
     conds <- c(conds, list(na_cond))
     vals <- c(vals, list(lit_of(if (has_missing) mis_val$value else na_of_t)))
   }
@@ -2380,12 +2375,8 @@ ir_parse_ntile <- function(expr, env, schema) {
       return(NULL)
     }
     rn <- ir_call("row_number", list(x_ir))
-    # A NaN computed on the GPU is not null; dplyr counts it as missing.
+    # dplyr counts a NaN as missing, and so does is.na() (F55).
     missing_ir <- ir_call("is.na", list(x_ir))
-    x_type <- tryCatch(ir_infer_type(x_ir, schema), error = function(e) NULL)
-    if (isTRUE(x_type %in% c("FLOAT32", "FLOAT64"))) {
-      missing_ir <- ir_call("|", list(missing_ir, ir_call("!=", list(x_ir, x_ir))))
-    }
     indicator <- ir_call("if_else", list(missing_ir, ir_lit_from_r(0L), ir_lit_from_r(1L)))
     len <- ir_call("sum", list(indicator))
   } else {
@@ -3540,7 +3531,7 @@ ir_type_is_timestamp <- function(ir, schema) {
 ir_ts_native_ops <- c(
   "+", "-", "date_add_days", "date_sub_days", "ts_add_us", "ts_sub_us", "%in%",
   "==", "!=", "<", "<=", ">", ">=",
-  "is.na", "if_else", "case_when", "coalesce", "na_if", "replace_when",
+  "is.na", "is.nan", "if_else", "case_when", "coalesce", "na_if", "replace_when",
   "lag", "lead", "first", "last", "nth", "min", "max", "mean", "median", "n_distinct",
   "row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist",
   "consecutive_id", "roll_min", "roll_max",
@@ -4132,7 +4123,9 @@ ir_parse_cumall_cumany <- function(args, schema, scan_op) {
 #'
 #' Builds `cumsum(if_else(rn==1L, 1L, if_else(same_as_prev, 0L, 1L)))`
 #' where `rn = row_number()` and `same_as_prev = coalesce(x == lag(x),
-#' FALSE) | (is.na(x) & is.na(lag(x)))`. `lag(x)`/`row_number()` are
+#' FALSE) | (is.na(x) & is.na(lag(x)))`; for a double `x` the "both missing"
+#' clause is split into "both NaN" and "both NA but not NaN" (vctrs keeps NaN
+#' and NA apart). `lag(x)`/`row_number()` are
 #' themselves window calls nested inside `cumsum()`'s argument -- exactly
 #' the "nested window calls needing 2 decomposition passes" shape `R/
 #' window.R`'s `ir_extract_windows()`/`plan_window_stages()` handles
@@ -4145,10 +4138,29 @@ ir_parse_consecutive_id <- function(args, schema) {
   lx <- ir_call("lag", list(x), meta = list(n = 1L, default = NULL))
   rn <- ir_call("row_number", list())
 
-  same_as_prev <- ir_call("|", list(
-    ir_call("coalesce", list(ir_call("==", list(x, lx)), ir_lit_from_r(FALSE))),
-    ir_call("&", list(ir_call("is.na", list(x)), ir_call("is.na", list(lx))))
-  ))
+  equal_prev <- ir_call("coalesce", list(ir_call("==", list(x, lx)), ir_lit_from_r(FALSE)))
+  x_type <- tryCatch(unname(ir_infer_type(x, schema)), error = function(e) NA_character_)
+  same_as_prev <- if (identical(x_type, "FLOAT64")) {
+    # F55: is.na() is TRUE for NaN, but vctrs' run identification keeps NaN and
+    # NA apart: two NaN are one run, two NA are one run, a NaN next to an NA
+    # starts a new one. So "both missing" is split into "both NaN" and "both
+    # NA (not NaN)".
+    is_nan_x <- ir_call("is.nan", list(x))
+    is_nan_lx <- ir_call("is.nan", list(lx))
+    both_na <- ir_call("&", list(
+      ir_call("&", list(ir_call("is.na", list(x)), ir_call("!", list(is_nan_x)))),
+      ir_call("&", list(ir_call("is.na", list(lx)), ir_call("!", list(is_nan_lx))))
+    ))
+    ir_call("|", list(
+      ir_call("|", list(equal_prev, ir_call("&", list(is_nan_x, is_nan_lx)))),
+      both_na
+    ))
+  } else {
+    ir_call("|", list(
+      equal_prev,
+      ir_call("&", list(ir_call("is.na", list(x)), ir_call("is.na", list(lx))))
+    ))
+  }
 
   increment <- ir_call("if_else", list(
     ir_call("==", list(rn, ir_lit_from_r(1L))),
@@ -4828,6 +4840,16 @@ ir_call_registry <- list(
   "xor" = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(ast_op = "BITWISE_XOR")),
 
   "is.na" = list(arity = 1L, parse = NULL, type = type_bool8, lower = list(ast_op = "IS_NULL")),
+
+  # F55: TRUE only for a valid NaN (NA is FALSE; a non-double column has none).
+  # A STRING or factor argument is R's own error/answer: CPU.
+  "is.nan" = list(arity = 1L, parse = function(args, schema) {
+    x_type <- tryCatch(unname(ir_infer_type(args[[1]], schema)), error = function(e) NA_character_)
+    if (is.na(x_type) || x_type %in% c("STRING", "DICTIONARY32")) {
+      return(NULL)
+    }
+    ir_call("is.nan", args)
+  }, type = type_bool8, lower = list(handler = "is.nan")),
 
   "between" = list(
     arity = 3L,

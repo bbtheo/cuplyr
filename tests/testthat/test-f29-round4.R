@@ -1,7 +1,7 @@
 # F29 round 4: extra checks beside the protected acceptance tests.
 
-# A NaN computed on the GPU (0 / 0), unlike an uploaded NaN, which becomes
-# null. Each group mixes a real NA with one or two NaNs, in both row orders.
+# A NaN computed on the GPU (0 / 0), as opposed to an uploaded NaN (F55: both
+# are real NaN now). Each group mixes a real NA with one or two NaNs, in both row orders.
 f29r4_nan_dfs <- function() {
   list(
     nan_first = tibble::tibble(

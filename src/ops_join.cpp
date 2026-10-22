@@ -69,6 +69,31 @@ cudf::table_view select_table_view(const cudf::table_view& view,
     return cudf::table_view(cols);
 }
 
+// F55: equi keys of a join. Under na_matches = "never" (`nulls_equal` false) a
+// floating NaN is incomplete like an NA, so it must not match: its key is read
+// with NaN as null. Under the default na_matches = "na" NaN matches NaN only
+// (vec_locate_matches(nan_distinct = TRUE)), which cudf's row equality already
+// does, so the keys are used as is. Only the key view changes; the output is
+// gathered from the original tables.
+cudf::table_view select_join_keys(const cudf::table_view& view,
+                                  const std::vector<cudf::size_type>& indices,
+                                  bool nulls_equal,
+                                  std::vector<std::unique_ptr<cudf::column>>& keepalive) {
+    std::vector<cudf::column_view> cols;
+    cols.reserve(indices.size());
+    for (auto idx : indices) {
+        cudf::column_view key = view.column(idx);
+        if (!nulls_equal) {
+            if (auto nulled = cuplyr::nan_nulled_copy(key)) {
+                keepalive.push_back(std::move(nulled));
+                key = keepalive.back()->view();
+            }
+        }
+        cols.push_back(key);
+    }
+    return cudf::table_view(cols);
+}
+
 // Wrap a raw join-map device_uvector<size_type> as a column_view (no copy).
 cudf::column_view map_as_column_view(const rmm::device_uvector<cudf::size_type>& map) {
     cudf::device_span<cudf::size_type const> span(map.data(), map.size());
@@ -588,8 +613,9 @@ SEXP gpu_left_join(SEXP xptr_left,
     auto right_keys = to_index_vec(right_key_cols);
     auto right_drop = to_index_vec(right_drop_cols);
 
-    auto left_key_view = select_table_view(left_view, left_keys);
-    auto right_key_view = select_table_view(right_view, right_keys);
+    std::vector<std::unique_ptr<cudf::column>> nan_nulled_keys;
+    auto left_key_view = select_join_keys(left_view, left_keys, nulls_equal, nan_nulled_keys);
+    auto right_key_view = select_join_keys(right_view, right_keys, nulls_equal, nan_nulled_keys);
 
     auto null_equality = nulls_equal ? cudf::null_equality::EQUAL
                                      : cudf::null_equality::UNEQUAL;
@@ -629,8 +655,9 @@ SEXP gpu_inner_join(SEXP xptr_left,
     auto right_keys = to_index_vec(right_key_cols);
     auto right_drop = to_index_vec(right_drop_cols);
 
-    auto left_key_view = select_table_view(left_view, left_keys);
-    auto right_key_view = select_table_view(right_view, right_keys);
+    std::vector<std::unique_ptr<cudf::column>> nan_nulled_keys;
+    auto left_key_view = select_join_keys(left_view, left_keys, nulls_equal, nan_nulled_keys);
+    auto right_key_view = select_join_keys(right_view, right_keys, nulls_equal, nan_nulled_keys);
 
     auto null_equality = nulls_equal ? cudf::null_equality::EQUAL
                                      : cudf::null_equality::UNEQUAL;
@@ -669,8 +696,9 @@ SEXP gpu_full_join(SEXP xptr_left,
     auto right_keys = to_index_vec(right_key_cols);
     auto right_drop = to_index_vec(right_drop_cols);
 
-    auto left_key_view = select_table_view(left_view, left_keys);
-    auto right_key_view = select_table_view(right_view, right_keys);
+    std::vector<std::unique_ptr<cudf::column>> nan_nulled_keys;
+    auto left_key_view = select_join_keys(left_view, left_keys, nulls_equal, nan_nulled_keys);
+    auto right_key_view = select_join_keys(right_view, right_keys, nulls_equal, nan_nulled_keys);
 
     auto null_equality = nulls_equal ? cudf::null_equality::EQUAL
                                      : cudf::null_equality::UNEQUAL;
@@ -750,8 +778,9 @@ SEXP gpu_right_join(SEXP xptr_left,
     auto right_keys = to_index_vec(right_key_cols);
     auto right_drop = to_index_vec(right_drop_cols);
 
-    auto left_key_view = select_table_view(left_view, left_keys);
-    auto right_key_view = select_table_view(right_view, right_keys);
+    std::vector<std::unique_ptr<cudf::column>> nan_nulled_keys;
+    auto left_key_view = select_join_keys(left_view, left_keys, nulls_equal, nan_nulled_keys);
+    auto right_key_view = select_join_keys(right_view, right_keys, nulls_equal, nan_nulled_keys);
 
     auto null_equality = nulls_equal ? cudf::null_equality::EQUAL
                                      : cudf::null_equality::UNEQUAL;
@@ -861,8 +890,9 @@ SEXP gpu_semi_anti_join(SEXP xptr_left,
     auto left_keys = to_index_vec(left_key_cols);
     auto right_keys = to_index_vec(right_key_cols);
 
-    auto left_key_view = select_table_view(left_view, left_keys);
-    auto right_key_view = select_table_view(right_view, right_keys);
+    std::vector<std::unique_ptr<cudf::column>> nan_nulled_keys;
+    auto left_key_view = select_join_keys(left_view, left_keys, nulls_equal, nan_nulled_keys);
+    auto right_key_view = select_join_keys(right_view, right_keys, nulls_equal, nan_nulled_keys);
 
     auto null_equality = nulls_equal ? cudf::null_equality::EQUAL
                                      : cudf::null_equality::UNEQUAL;
@@ -985,6 +1015,9 @@ SEXP gpu_cond_join(SEXP xptr_left,
     auto equi_left = to_index_vec(equi_left_keys);
     auto equi_right = to_index_vec(equi_right_keys);
     bool has_equi = !equi_left.empty();
+    // F55: the equi keys read a NaN as null under na_matches = "never"
+    // (select_join_keys()); the copies must outlive the join calls below.
+    std::vector<std::unique_ptr<cudf::column>> nan_nulled_keys;
 
     // Phase 7 J7 finding: `keep`'s real `NULL` default is PER CONDITION,
     // not a whole-join TRUE/FALSE (see resolve_join_keep()'s/
@@ -1022,8 +1055,8 @@ SEXP gpu_cond_join(SEXP xptr_left,
         std::unique_ptr<rmm::device_uvector<cudf::size_type>> x_map;
 
         if (has_equi) {
-            auto x_equi_view = select_table_view(left_view, equi_left);
-            auto y_equi_view = select_table_view(right_view, equi_right);
+            auto x_equi_view = select_join_keys(left_view, equi_left, nulls_equal, nan_nulled_keys);
+            auto y_equi_view = select_join_keys(right_view, equi_right, nulls_equal, nan_nulled_keys);
             std::tie(y_map, x_map) = cudf::mixed_left_join(
                 y_equi_view, x_equi_view, right_view, left_view,
                 predicate, null_equality, {}, stream, mr);
@@ -1062,8 +1095,8 @@ SEXP gpu_cond_join(SEXP xptr_left,
     if (join_kind == "semi" || join_kind == "anti") {
         std::unique_ptr<rmm::device_uvector<cudf::size_type>> idx;
         if (has_equi) {
-            auto left_equi_view = select_table_view(left_view, equi_left);
-            auto right_equi_view = select_table_view(right_view, equi_right);
+            auto left_equi_view = select_join_keys(left_view, equi_left, nulls_equal, nan_nulled_keys);
+            auto right_equi_view = select_join_keys(right_view, equi_right, nulls_equal, nan_nulled_keys);
             idx = (join_kind == "anti")
                 ? cudf::mixed_left_anti_join(left_equi_view, right_equi_view,
                                              left_view, right_view,
@@ -1097,8 +1130,8 @@ SEXP gpu_cond_join(SEXP xptr_left,
     std::unique_ptr<rmm::device_uvector<cudf::size_type>> right_map;
 
     if (has_equi) {
-        auto left_equi_view = select_table_view(left_view, equi_left);
-        auto right_equi_view = select_table_view(right_view, equi_right);
+        auto left_equi_view = select_join_keys(left_view, equi_left, nulls_equal, nan_nulled_keys);
+        auto right_equi_view = select_join_keys(right_view, equi_right, nulls_equal, nan_nulled_keys);
 
         if (join_kind == "inner") {
             std::tie(left_map, right_map) = cudf::mixed_inner_join(
@@ -1184,9 +1217,9 @@ SEXP gpu_cond_join(SEXP xptr_left,
 // `>=`/`<=` under na_matches = "na". na_matches = "never": any missing key in
 // the x row (equi or rolling) matches nothing. Equi group bounds treat null as
 // equal to null (cudf's row order), which is exactly na_matches = "na".
-// NaN: the upload turns R's NaN into null, but GPU arithmetic (`0 / 0`)
-// produces real NaN, which dplyr (nan_distinct = TRUE) treats as a missing
-// value distinct from NA. cudf sorts NaN after +Inf and compares NaN equal to
+// NaN: a NaN, uploaded (F55 keeps it) or computed on the GPU (`0 / 0`), is a
+// real NaN, which dplyr (nan_distinct = TRUE) treats as a missing value
+// distinct from NA. cudf sorts NaN after +Inf and compares NaN equal to
 // NaN, so a FLOAT64 rolling value has three kinds (present, null, NaN): a
 // candidate must have the x row's kind, a missing kind (null or NaN) matches
 // only for `>=`/`<=` under "na", and under "never" a NaN in any FLOAT64 key
