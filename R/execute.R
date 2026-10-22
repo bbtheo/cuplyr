@@ -911,7 +911,12 @@ cuplyr_fallback_notify <- function(verb, expr_text) {
 
   switch(mode,
     "warn" = warning(msg, call. = FALSE),
-    "error" = stop(msg, call. = FALSE),
+    # classed (but a plain error otherwise) so wrap_gpu_call() lets it through
+    # unworded: nothing failed on the GPU
+    "error" = stop(structure(
+      class = c("cuplyr_error_fallback", "simpleError", "error", "condition"),
+      list(message = msg, call = NULL)
+    )),
     invisible(NULL)
   )
 

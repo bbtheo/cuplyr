@@ -27,6 +27,9 @@ using SharedColumn = std::shared_ptr<const cudf::column>;
 
 struct GpuTable {
     std::vector<SharedColumn> columns;
+    // Set by a closing release scope (F58) on a table it created and nobody
+    // returned: the columns are dropped, and any later use is an error.
+    bool released = false;
 
     // Non-owning view; valid while this table (or any holder of its columns) lives.
     cudf::table_view view() const {
@@ -39,6 +42,14 @@ struct GpuTable {
 
 // What the R external pointer holds.
 using GpuTablePtr = std::shared_ptr<GpuTable>;
+
+// Release scopes (F58, src/gpu_scope.cpp). While a GPU step's scope is the
+// innermost one, every table make_gpu_table_xptr() creates is recorded in it;
+// tables nobody returns are freed when the step's user-level call returns.
+void gpu_scope_record(const GpuTablePtr& table);
+// The tag every table XPtr carries, so a scope can tell them from other
+// external pointers in a returned value.
+SEXP gpu_table_xptr_tag();
 
 // Custom destructor that ensures GPU cleanup
 inline void release_gpu_table(GpuTablePtr* ptr) {
@@ -58,8 +69,9 @@ inline SharedColumn share_column(std::unique_ptr<cudf::column> col) {
 inline Rcpp::XPtr<GpuTablePtr> make_gpu_table_xptr(std::vector<SharedColumn> columns) {
     auto table = std::make_shared<GpuTable>();
     table->columns = std::move(columns);
+    gpu_scope_record(table);
     auto* sptr = new GpuTablePtr(std::move(table));
-    return Rcpp::XPtr<GpuTablePtr>(sptr, true);  // true = register destructor
+    return Rcpp::XPtr<GpuTablePtr>(sptr, true, gpu_table_xptr_tag());  // true = register destructor
 }
 
 // Create an XPtr from a freshly built table: its columns become shared.
@@ -76,6 +88,9 @@ inline cudf::table_view get_table_view(Rcpp::XPtr<GpuTablePtr> xptr) {
     if (!xptr || !(*xptr)) {
         Rcpp::stop("GPU table pointer is NULL");
     }
+    if ((*xptr)->released) {
+        Rcpp::stop("GPU table was released: it was an intermediate of a finished operation and is no longer valid");
+    }
     return (*xptr)->view();
 }
 
@@ -83,6 +98,9 @@ inline cudf::table_view get_table_view(Rcpp::XPtr<GpuTablePtr> xptr) {
 inline SharedColumn get_shared_column(Rcpp::XPtr<GpuTablePtr> xptr, int i) {
     if (!xptr || !(*xptr)) {
         Rcpp::stop("GPU table pointer is NULL");
+    }
+    if ((*xptr)->released) {
+        Rcpp::stop("GPU table was released: it was an intermediate of a finished operation and is no longer valid");
     }
     const auto& cols = (*xptr)->columns;
     if (i < 0 || static_cast<size_t>(i) >= cols.size()) {

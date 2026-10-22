@@ -32,6 +32,17 @@ collected by R. However, R's garbage collector doesn't know about GPU
 memory pressure and may not run immediately. This function forces
 garbage collection and allows time for GPU cleanup.
 
+A cuplyr call you make (an eager verb, \code{compute()}, \code{collect()}, a bind)
+frees the temporary GPU tables its own steps built when it returns. What a
+call returns is yours and is never freed early, including a table that your
+code creates while a verb evaluates its arguments or expressions. So this
+function is for tables you created and dropped without R having collected
+them yet: the \code{group_by()} result of a one-line pipeline lives until R's
+next collection. So does the inner result of a dplyr verb that dplyr itself
+builds from several verb calls, such as \code{add_tally(sort = TRUE)}. When a GPU step runs out of device memory, cuplyr runs
+\code{gc()} and \code{gpu_gc(aggressive = FALSE)} itself and retries that step once;
+a second failure raises an error of class \code{cuplyr_error_gpu_oom}.
+
 Call this function:
 \itemize{
 \item Between benchmark iterations

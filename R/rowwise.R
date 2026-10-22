@@ -147,7 +147,8 @@ rowwise_bail <- function(why = "no native rowwise form") {
 
 # Run `native()`, a rowwise verb's native attempt, and return its result, or
 # NULL if it cannot be used: it bailed (rowwise_bail()), a CPU fallback was
-# requested inside it, or it raised ANY error. The caller then runs the whole
+# requested inside it, or it raised ANY error but an OOM that survived the
+# retry (`cuplyr_error_gpu_oom`, F58), which propagates. The caller then runs the whole
 # call in dplyr with the user's original arguments, so dplyr produces its own
 # result or its own error (cuplyr's wording of an error would differ). Nothing
 # the attempt built leaks: it works on copies of the immutable input.
@@ -160,6 +161,9 @@ rowwise_attempt <- function(native) {
     native(),
     cuplyr_cpu_fallback = function(cnd) NULL,
     error = function(cnd) {
+      # (re-raised from this outermost handler: from a sibling handler it would
+      # be caught by this one)
+      if (inherits(cnd, "cuplyr_error_gpu_oom")) stop(cnd)
       rowwise_state$failed <- conditionMessage(cnd)
       NULL
     }
@@ -168,8 +172,8 @@ rowwise_attempt <- function(native) {
 
 # Run `cpu()`, the CPU rerun of a rowwise verb whose native attempt or rewrite
 # gave NULL, with the message of the error that attempt swallowed (if any)
-# passed on to gpu_fallback()'s notification, so a native bug or a GPU OOM is
-# not hidden behind a plain "fell back" (options(cuplyr.fallback = "warn")).
+# passed on to gpu_fallback()'s notification, so a native bug is not hidden
+# behind a plain "fell back" (options(cuplyr.fallback = "warn")).
 # @keywords internal
 rowwise_rerun <- function(cpu) {
   rowwise_state$why <- rowwise_state$failed
@@ -275,10 +279,16 @@ rowwise_pure_fns <- c(
 # @keywords internal
 rowwise_rewrite_dots <- function(.data, dots, named = TRUE) {
   rowwise_state$failed <- NULL
-  tryCatch(rowwise_rewrite_dots_(.data, dots, named), error = function(cnd) {
-    rowwise_state$failed <- conditionMessage(cnd)
-    NULL
-  })
+  tryCatch(
+    rowwise_rewrite_dots_(.data, dots, named),
+    error = function(cnd) {
+      # an OOM that survived the retry (F58) is the user's to see, not a reason
+      # to rerun the call on the CPU
+      if (inherits(cnd, "cuplyr_error_gpu_oom")) stop(cnd)
+      rowwise_state$failed <- conditionMessage(cnd)
+      NULL
+    }
+  )
 }
 
 rowwise_rewrite_dots_ <- function(.data, dots, named) {

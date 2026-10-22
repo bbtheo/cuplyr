@@ -1264,7 +1264,7 @@ slice_sample_groups <- function(materialized, gm) {
   # through the dplyr::select() S3 generic, since this is an internal
   # projection with no user-facing meaning of its own.
   key_col_idx <- match(group_cols, schema$names) - 1L
-  key_ptr <- gpu_select(materialized$ptr, key_col_idx)
+  key_ptr <- wrap_gpu_call("slice_sample", gpu_select(materialized$ptr, key_col_idx))
   key_schema <- list(names = group_cols, types = schema$types[key_col_idx + 1L])
   key_schema$factor_levels <- schema$factor_levels[intersect(group_cols, names(schema$factor_levels))]
   key_tbl <- collect_frame(new_tbl_gpu(ptr = key_ptr, schema = key_schema))
@@ -1291,7 +1291,9 @@ slice_sample_gather <- function(materialized, gm, groups, draw) {
 
   out_groups <- if (identical(gm$mode, "group_by")) gm$group_cols else character()
   group_drop <- if (length(out_groups) > 0L) materialized$group_drop %||% TRUE else TRUE
-  new_ptr <- gpu_slice_indices(materialized$ptr, as.double(idx))
+  # Only the gather is wrapped (and so retried on an OOM): the rows above are
+  # drawn once, a second draw would move the RNG and change the sample.
+  new_ptr <- wrap_gpu_call("slice_sample", gpu_slice_indices(materialized$ptr, as.double(idx)))
   carry_frame_meta(
     new_tbl_gpu(ptr = new_ptr, schema = materialized$schema, groups = out_groups,
                 group_drop = group_drop,

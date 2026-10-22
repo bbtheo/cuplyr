@@ -1,5 +1,31 @@
 # cuplyr (development version)
 
+## Intermediates freed on return, OOM retry (F58)
+
+* A cuplyr call you make (an eager verb, `compute()` or `collect()` of a lazy
+  plan, `bind_rows()`) now frees the temporary GPU tables its own steps built
+  (cast copies, temp columns, the tables its steps hand to each other, the
+  upload of a `data.frame` argument, a lazy input it had to compute) when it
+  returns, instead of leaving them to R's garbage collector. Ownership follows
+  who called: what a call returns is yours and is never freed early, including
+  a table your own code creates (or caches) while a verb evaluates its
+  arguments, expressions or predicates. A table you create and drop yourself
+  (`group_by(a, g = x %% 3)` passed straight into `summarise()`) still waits
+  for R's collector, as does the inner result of a verb dplyr builds from
+  several verb calls (`add_tally(sort = TRUE)` runs `mutate()`, then
+  `arrange()`).
+* A device out-of-memory failure in a GPU step (a verb's lowering, an upload,
+  `compute()`, `collect()`, the casts/alignment of `bind_rows()` and set
+  operations, `slice_sample()`'s gather) is retried once after `gc()` and
+  `gpu_gc()`. A verb made of several steps retries the failed step, not the
+  whole verb. If it fails again, cuplyr raises an error of class
+  `cuplyr_error_gpu_oom` that says a retry after garbage collection was
+  attempted and includes the original error text.
+* Errors the GPU layer raised (C++ exceptions, plain `stop()`) in an eager verb
+  are still worded "GPU operation 'x' failed", and `compute()`/`collect()` of
+  a lazy plan raise them unworded, as before. A condition cuplyr's R code
+  raised with its own class is no longer reworded by the wrappers.
+
 ## Perf foundations: memory pool, shared columns, `gpu_sync()` (F57)
 
 * Loading cuplyr installs an RMM memory pool, so the many short-lived columns of

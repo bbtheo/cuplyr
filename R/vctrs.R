@@ -232,10 +232,12 @@ vctrs_pin_until_exit <- function(id, tbl, frame) {
 
 # A column-less all-null table of `n` rows with `schema`'s physical layout.
 vctrs_null_table_ptr <- function(schema, n) {
-  cols <- lapply(seq_along(schema$names), function(i) {
-    gpu_make_null_column(n, gpu_physical_type(unname(schema$types[i])))
+  wrap_gpu_call("vctrs", {
+    cols <- lapply(seq_along(schema$names), function(i) {
+      gpu_make_null_column(n, gpu_physical_type(unname(schema$types[i])))
+    })
+    if (length(cols) == 1L) cols[[1L]] else gpu_bind_cols_impl(cols)
   })
-  if (length(cols) == 1L) cols[[1L]] else gpu_bind_cols_impl(cols)
 }
 
 # 0-row tibble with the R types a collect() of `x` would produce.
@@ -385,6 +387,9 @@ vctrs_delegate_dplyr_binder <- function(x, entry) {
     }
     bind_cols_flat(dots, dots, repair, env)
   }
+  # The frames up to dplyr's unwind without a return value, so the release
+  # scope of this call (F58, wrap_gpu_call()) is closed here, keeping `out`.
+  gpu_call_scope_settle(sys.nframe(), out)
   rlang::return_from(env, out)
 }
 

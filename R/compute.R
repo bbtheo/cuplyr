@@ -70,7 +70,6 @@ compute.tbl_gpu <- function(x, ..., name = NULL) {
 
   # Run optimizer and execute
   optimized <- optimize_ast(x$lazy_ops)
-  new_ptr <- lower_and_execute(optimized, x$ptr)
   # infer_schema_full() (R/execute.R), not plain infer_schema(): the latter
   # only threads factor_levels through an ast_join node (Phase 11 L2 Bug 1)
   # -- every other node type needs propagate_factor_levels() reapplied at
@@ -83,6 +82,7 @@ compute.tbl_gpu <- function(x, ..., name = NULL) {
   # (rather than return values under the wrong names). A different column set
   # is a bug in a pass, so fail loudly.
   optimized_names <- infer_schema(optimized)$names
+  reorder <- NULL
   if (!identical(optimized_names, final_schema$names)) {
     if (anyDuplicated(optimized_names) > 0 ||
         !setequal(optimized_names, final_schema$names)) {
@@ -91,8 +91,16 @@ compute.tbl_gpu <- function(x, ..., name = NULL) {
            "schema (", paste(final_schema$names, collapse = ", "), ").",
            call. = FALSE)
     }
-    new_ptr <- gpu_select(new_ptr, match(final_schema$names, optimized_names) - 1L)
+    reorder <- match(final_schema$names, optimized_names) - 1L
   }
+
+  # One GPU step (F58): an out-of-memory failure is retried once. Other
+  # errors pass through as lowering raised them (`reword = FALSE`), as they
+  # did before F58.
+  new_ptr <- wrap_gpu_call("compute", reword = FALSE, {
+    ptr <- lower_and_execute(optimized, x$ptr)
+    if (is.null(reorder)) ptr else gpu_select(ptr, reorder)
+  })
 
   copy_frame_meta(new_tbl_gpu(
     ptr = new_ptr,

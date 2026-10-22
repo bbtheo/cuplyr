@@ -544,7 +544,7 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) 
 
   observed <- summarise_core(base, dots, character())
   empty_slice <- new_tbl_gpu(
-    ptr = gpu_gather_rows(list(base$ptr), numeric(0)),
+    ptr = wrap_gpu_call("summarise", gpu_gather_rows(list(base$ptr), numeric(0))),
     schema = base$schema, exec_mode = "eager"
   )
   identity_row <- summarise_core(empty_slice, dots, character())
@@ -564,10 +564,13 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) 
                                    id_types %in% c("INT32", "FLOAT64")))) {
     return(fallback())
   }
-  obs_ptr <- gpu_select(observed$ptr, n_keys + seq_along(agg_names) - 1L)
-  id_ptr <- identity_row$ptr
-  for (j in which(obs_types != common)) obs_ptr <- gpu_cast_column(obs_ptr, j - 1L, common[[j]])
-  for (j in which(id_types != common)) id_ptr <- gpu_cast_column(id_ptr, j - 1L, common[[j]])
+  casted <- wrap_gpu_call("summarise", {
+    obs_ptr <- gpu_select(observed$ptr, n_keys + seq_along(agg_names) - 1L)
+    id_ptr <- identity_row$ptr
+    for (j in which(obs_types != common)) obs_ptr <- gpu_cast_column(obs_ptr, j - 1L, common[[j]])
+    for (j in which(id_types != common)) id_ptr <- gpu_cast_column(id_ptr, j - 1L, common[[j]])
+    list(obs = obs_ptr, id = id_ptr)
+  })
 
   # Row of each group_data() group in the observed result, or the identity row
   # (index n_observed in the concatenation) when it is empty.
@@ -577,7 +580,7 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) 
   idx <- vctrs::vec_match(gd_keys, obs_keys[keys])
   idx0 <- ifelse(is.na(idx), n_obs, idx - 1L)
 
-  agg_ptr <- gpu_gather_rows(list(obs_ptr, id_ptr), as.numeric(idx0))
+  agg_ptr <- wrap_gpu_call("summarise", gpu_gather_rows(list(casted$obs, casted$id), as.numeric(idx0)))
   key_tbl <- tbl_gpu(tibble::as_tibble(gd_keys), lazy = FALSE)
   schema <- list(
     names = c(keys, agg_names),
@@ -589,7 +592,7 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) 
     c(tz_by_position(key_tbl$schema), tz_by_position(observed$schema)[-seq_len(n_keys)])
   )
   finish(new_tbl_gpu(
-    ptr = gpu_bind_cols_impl(list(key_tbl$ptr, agg_ptr)),
+    ptr = wrap_gpu_call("summarise", gpu_bind_cols_impl(list(key_tbl$ptr, agg_ptr))),
     schema = schema, groups = retained_groups,
     group_drop = length(retained_groups) == 0L,
     exec_mode = "eager"
@@ -1021,6 +1024,10 @@ ir_agg_arg_is_scalar_reduction <- function(ir) {
 # @keywords internal
 summarise_core <- function(.data, dots, retained_groups = character(),
                            internal_cols = character(), sort_groups = TRUE) {
+  # No wrapper of its own (F58): the work below is R logic (quosure parsing,
+  # which may evaluate a `probs =`/`n =` argument) around wrapped GPU steps, so
+  # a retry belongs to each step, not to a rerun of this parsing. The tables
+  # its steps create are freed when the user-level call returns.
   # Phase 6, task 6.1 (Fix A): extract and strip any `na.rm = <literal>`
   # named argument BEFORE temp-column preprocessing -- this must happen
   # first so a sub-expression call like `sum(sqrt(x), na.rm = TRUE)` is

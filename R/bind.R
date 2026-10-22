@@ -417,7 +417,7 @@ bind_cols_gpu <- function(dots, .name_repair = "unique", call = rlang::caller_en
   ptrs <- lapply(pieces, function(x) x$ptr)
 
   # Call C++ function
-  new_ptr <- gpu_bind_cols_impl(ptrs)
+  new_ptr <- wrap_gpu_call("bind_cols", gpu_bind_cols_impl(ptrs))
 
   # Preserve groups (and their `.drop`) from the first input. dplyr regroups
   # the output by name, so a group column renamed by repair (`bind_cols(g, g)`)
@@ -566,21 +566,20 @@ bind_rows_gpu <- function(dots, .id = NULL, call = rlang::caller_env()) {
     return(done(result))
   }
 
-  # Align each table to unified schema; a zero-column one becomes all-NA rows
-  aligned <- lapply(seq_along(dots), function(i) {
-    if (!no_cols[[i]]) {
-      align_to_schema(dots[[i]], unified)
-    } else if (row_counts[[i]] > 0L) {
-      null_table_for_schema(unified, row_counts[[i]])
-    }
+  # Align each table to unified schema (a zero-column one becomes all-NA rows)
+  # and concatenate. One wrapped call, so the cast/null-padded copies the
+  # alignment makes are freed when it returns, not at R's next GC.
+  new_ptr <- wrap_gpu_call("bind_rows", {
+    aligned <- lapply(seq_along(dots), function(i) {
+      if (!no_cols[[i]]) {
+        align_to_schema(dots[[i]], unified)
+      } else if (row_counts[[i]] > 0L) {
+        null_table_for_schema(unified, row_counts[[i]])
+      }
+    })
+    aligned <- aligned[!vapply(aligned, is.null, logical(1))]
+    gpu_bind_rows_aligned(lapply(aligned, function(x) x$ptr))
   })
-  aligned <- aligned[!vapply(aligned, is.null, logical(1))]
-
-  # Collect pointers
-  ptrs <- lapply(aligned, function(x) x$ptr)
-
-  # Concatenate
-  new_ptr <- gpu_bind_rows_aligned(ptrs)
 
   # Build result
   result <- new_tbl_gpu(
@@ -944,7 +943,7 @@ remap_factor_column <- function(tbl, col_name, current_levels, target_levels) {
   col_idx <- match(col_name, tbl$schema$names) - 1L
   map <- as.integer(match(current_levels, target_levels))
 
-  new_ptr <- gpu_remap_codes(tbl$ptr, col_idx, map)
+  new_ptr <- wrap_gpu_call("remap_factor_column", gpu_remap_codes(tbl$ptr, col_idx, map))
 
   new_tbl_gpu(
     ptr = new_ptr,
@@ -1038,7 +1037,7 @@ align_to_schema <- function(tbl, target_schema) {
 
   # Reorder columns to match target
   col_indices <- match(target_names, tbl$schema$names) - 1L
-  new_ptr <- gpu_select(tbl$ptr, col_indices)
+  new_ptr <- wrap_gpu_call("align_to_schema", gpu_select(tbl$ptr, col_indices))
 
   new_tbl_gpu(
     ptr = new_ptr,
@@ -1057,10 +1056,12 @@ align_to_schema <- function(tbl, target_schema) {
 #' @keywords internal
 null_table_for_schema <- function(schema, n) {
   # Physical types: a factor's GPU column is INT32 (see add_null_columns()).
-  cols <- lapply(unname(schema$types), function(ty) {
-    gpu_make_null_column(n, gpu_physical_type(ty))
+  new_ptr <- wrap_gpu_call("null_table_for_schema", {
+    cols <- lapply(unname(schema$types), function(ty) {
+      gpu_make_null_column(n, gpu_physical_type(ty))
+    })
+    if (length(cols) == 1L) cols[[1L]] else gpu_bind_cols_impl(cols)
   })
-  new_ptr <- if (length(cols) == 1L) cols[[1L]] else gpu_bind_cols_impl(cols)
   new_tbl_gpu(
     ptr = new_ptr,
     schema = list(names = schema$names, types = unname(schema$types),
@@ -1083,21 +1084,13 @@ add_null_columns <- function(tbl, col_names, col_types) {
   # `gpu_make_null_column()` is a PHYSICAL-column C++ primitive with no
   # DICTIONARY32 case (a factor's actual GPU column is INT32) -- passing
   # the logical type string straight through would error.
-  null_tbls <- lapply(seq_along(col_names), function(i) {
-    null_ptr <- gpu_make_null_column(nrows, gpu_physical_type(col_types[i]))
-    new_tbl_gpu(
-      ptr = null_ptr,
-      schema = list(names = col_names[i], types = col_types[i]),
-      groups = character(),
-      exec_mode = "eager"
-    )
+  new_ptr <- wrap_gpu_call("add_null_columns", {
+    null_ptrs <- lapply(seq_along(col_names), function(i) {
+      gpu_make_null_column(nrows, gpu_physical_type(col_types[i]))
+    })
+    # Bind null columns to original table
+    gpu_bind_cols_impl(c(list(tbl$ptr), null_ptrs))
   })
-
-  # Bind null columns to original table
-  all_tbls <- c(list(tbl), null_tbls)
-  ptrs <- lapply(all_tbls, function(x) x$ptr)
-
-  new_ptr <- gpu_bind_cols_impl(ptrs)
 
   new_names <- c(tbl$schema$names, col_names)
   new_types <- c(tbl$schema$types, col_types)
@@ -1131,21 +1124,24 @@ cast_column <- function(tbl, col_name, target_type, source_levels = NULL) {
     stop("Column not found: ", col_name, call. = FALSE)
   }
 
-  new_ptr <- if (identical(target_type, "STRING")) {
-    current_type <- tbl$schema$types[[col_idx + 1L]]
-    if (identical(current_type, "DICTIONARY32")) {
-      if (is.null(source_levels)) {
-        stop("bind_rows(): cannot cast factor column '", col_name,
-             "' to STRING -- its levels are unknown to cast_column().",
-             call. = FALSE)
-      }
-      gpu_decode_factor(tbl$ptr, col_idx, source_levels)
-    } else {
-      gpu_cast_to_string(tbl$ptr, col_idx)
-    }
-  } else {
-    gpu_cast_column(tbl$ptr, col_idx, target_type)
+  # The argument check stays outside the wrapped GPU call (it is not a GPU
+  # failure, and wrap_gpu_call() would reword it).
+  decode <- identical(target_type, "STRING") &&
+    identical(tbl$schema$types[[col_idx + 1L]], "DICTIONARY32")
+  if (decode && is.null(source_levels)) {
+    stop("bind_rows(): cannot cast factor column '", col_name,
+         "' to STRING -- its levels are unknown to cast_column().",
+         call. = FALSE)
   }
+  new_ptr <- wrap_gpu_call("cast_column", {
+    if (decode) {
+      gpu_decode_factor(tbl$ptr, col_idx, source_levels)
+    } else if (identical(target_type, "STRING")) {
+      gpu_cast_to_string(tbl$ptr, col_idx)
+    } else {
+      gpu_cast_column(tbl$ptr, col_idx, target_type)
+    }
+  })
 
   new_types <- tbl$schema$types
   new_types[col_idx + 1L] <- target_type
