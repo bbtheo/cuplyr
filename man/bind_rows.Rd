@@ -21,8 +21,9 @@ operations are performed on the GPU. For other objects, delegates to dplyr.
 }
 \details{
 If any input (including one inside a list) is a \code{tbl_gpu}, the result is a
-\code{tbl_gpu}, wherever the \code{tbl_gpu} sits in the arguments. Call this function
-(not \code{dplyr::bind_rows()}, \code{purrr::map_dfr()} or \code{vctrs::vec_rbind()}) on a
-\code{tbl_gpu}: those cannot be intercepted by S3 dispatch and raise an error for
-a \code{tbl_gpu}.
+\code{tbl_gpu}, wherever the \code{tbl_gpu} sits in the arguments. \code{dplyr::bind_rows()}
+and \code{purrr::map_dfr()} on a \code{tbl_gpu} input are handed to this function and
+give the same result; \code{vctrs::vec_rbind()} and \code{purrr::list_rbind()} can't
+be intercepted and raise an error for a \code{tbl_gpu} (use
+\code{dplyr::bind_rows(list)} instead of \code{list_rbind()}).
 }

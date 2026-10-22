@@ -14,7 +14,8 @@ bind_cols(
 these, flattened recursively as in \code{dplyr::bind_cols()}). A vector
 becomes one column named by its argument name. \code{NULL}s are dropped.}
 
-\item{.name_repair}{How to handle duplicate column names}
+\item{.name_repair}{How to handle duplicate column names: \code{"unique"},
+\code{"universal"}, \code{"check_unique"} or \code{"minimal"}}
 }
 \value{
 Combined data frame or tbl_gpu
@@ -25,7 +26,11 @@ operations are performed on the GPU. For other objects, delegates to dplyr.
 }
 \details{
 If any input (including one inside a list) is a \code{tbl_gpu}, the result is a
-\code{tbl_gpu}, wherever the \code{tbl_gpu} sits in the arguments. Call this function
-(not \code{dplyr::bind_cols()} or \code{vctrs::vec_cbind()}) on a \code{tbl_gpu}: those
-cannot be intercepted by S3 dispatch and raise an error for a \code{tbl_gpu}.
+\code{tbl_gpu}, wherever the \code{tbl_gpu} sits in the arguments. \code{dplyr::bind_cols()}
+on a \code{tbl_gpu} input is handed to this function and gives the same result for the
+four \code{.name_repair} strings above; any other \code{.name_repair} (a \verb{*_quiet}
+string, a function or a formula) is an error for a \code{tbl_gpu}.
+\code{vctrs::vec_cbind()} and \code{purrr::list_cbind()} can't be intercepted and
+raise an error for a \code{tbl_gpu} (use \code{dplyr::bind_cols(list)} instead of
+\code{list_cbind()}).
 }

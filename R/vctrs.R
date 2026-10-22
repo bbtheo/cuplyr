@@ -39,11 +39,15 @@
 # caller's object is not modified. Within one vctrs entry call the computed
 # table is reused (`vctrs_computed()`); a later vctrs call recomputes.
 #
-# Unsupported: calling `vctrs::vec_rbind()` / `vec_cbind()` (and so
-# `dplyr::bind_rows()` / `dplyr::bind_cols()`) on a tbl_gpu directly. They treat
-# a non-data-frame vector as a row/column and cannot be intercepted by S3
-# dispatch; `vec_proxy.tbl_gpu()` raises a clear error there. Use
-# `cuplyr::bind_rows()` / `cuplyr::bind_cols()`.
+# Binding (F47). vctrs::vec_rbind() / vec_cbind() treat a non-data-frame as one
+# row/column and can't be intercepted by S3 dispatch, so the proxy/restore pair
+# can't implement them: called directly on a tbl_gpu they raise
+# `cuplyr_error_vctrs_bind_unsupported`. `dplyr::bind_rows()` / `bind_cols()`
+# (and purrr::map_dfr()) are different: vec_proxy.tbl_gpu() recognises that it
+# runs inside one of them (`vctrs_dplyr_binder()`) and hands the whole call to
+# cuplyr's own bind on dplyr's already-flattened inputs, returning the result
+# from the dplyr frame. purrr::list_rbind() / list_cbind() reject a tbl_gpu
+# (is.data.frame() is FALSE) before any cuplyr code runs and stay unsupported.
 
 vctrs_max_source_id <- .Machine$integer.max
 
@@ -254,13 +258,18 @@ gpu_proto <- function(x) {
 vec_proxy.tbl_gpu <- function(x, ...) {
   entry <- vctrs_entry_frame(sys.nframe())
   if (entry > 0L && is_vctrs_bind_entry(sys.function(entry))) {
+    vctrs_delegate_dplyr_binder(x, entry)
     rlang::abort(
       c(
-        "Can't combine a tbl_gpu with `vec_rbind()`/`vec_cbind()` (so not with `dplyr::bind_rows()`/`dplyr::bind_cols()` either).",
-        i = "Use `cuplyr::bind_rows()` / `cuplyr::bind_cols()`, which stay on the GPU."
+        "Can't combine a tbl_gpu with `vec_rbind()`/`vec_cbind()`.",
+        i = "Use `cuplyr::bind_rows()` / `cuplyr::bind_cols()`, which stay on the GPU.",
+        i = "`dplyr::bind_rows()`, `dplyr::bind_cols()` and `purrr::map_dfr()` work too; `purrr::list_rbind()` / `list_cbind()` can't (they reject a tbl_gpu), so use `dplyr::bind_rows(list)` instead of `list_rbind()` and `dplyr::bind_cols(list)` instead of `list_cbind()`."
       ),
       class = "cuplyr_error_vctrs_bind_unsupported"
     )
+  }
+  if (entry > 0L) {
+    vctrs_delegate_dplyr_binder(x, entry)
   }
 
   m <- if (has_pending_ops(x)) vctrs_computed(x, entry) else x
@@ -323,6 +332,123 @@ vctrs_memo_drop <- function(key) {
 is_vctrs_bind_entry <- function(fn) {
   ns <- asNamespace("vctrs")
   identical(fn, ns$vec_rbind) || identical(fn, ns$vec_cbind)
+}
+
+# --- dplyr::bind_rows() / bind_cols() over tbl_gpu (F47) --------------------
+
+# If this vec_proxy() runs inside dplyr::bind_rows() / bind_cols() (vctrs entry
+# frame `entry`), compute the bind with cuplyr and return it from the dplyr
+# frame (a non-local return; on.exit handlers of the frames in between run).
+# Otherwise return normally and the caller carries on.
+#
+# The frame rule (`vctrs_dplyr_binder()`): bind_rows() reaches vctrs first in
+# dataframe_ish() -> vec_is(), bind_cols() in vec_cbind(); both after dplyr has
+# flattened `dots` into a local, which is read here (re-evaluating `...` would
+# evaluate the arguments twice, and dplyr's flattening isn't idempotent, so
+# cuplyr's post-flatten path is used). Anything unexpected falls through.
+vctrs_delegate_dplyr_binder <- function(x, entry) {
+  found <- vctrs_dplyr_binder(x, entry)
+  if (is.null(found)) {
+    return(invisible(NULL))
+  }
+  st <- vctrs_state_init()
+  key <- rlang::obj_address(found$env)
+  # recursion guard: a proxy taken inside the delegated bind is a normal one
+  if (!is.null(st$delegating[[key]])) {
+    return(invisible(NULL))
+  }
+  if (is.null(st$delegating)) {
+    st$delegating <- new.env(parent = emptyenv())
+  }
+  st$delegating[[key]] <- TRUE
+  on.exit(rm(list = key, envir = st$delegating), add = TRUE)
+
+  env <- found$env
+  dots <- found$dots
+  out <- if (found$verb == "bind_rows") {
+    bind_rows_flat(dots, dots, get0(".id", env, inherits = FALSE), env)
+  } else {
+    # dplyr leaves the default choice vector for vec_cbind() to match
+    repair <- get0(".name_repair", env, inherits = FALSE)
+    if (is.character(repair) && length(repair) > 1L) repair <- repair[[1L]]
+    # cuplyr::bind_cols() takes only dplyr's four documented strings
+    if (!(is.character(repair) && length(repair) == 1L &&
+          repair %in% c("unique", "universal", "check_unique", "minimal"))) {
+      rlang::abort(
+        c(
+          "Can't bind a tbl_gpu with this `.name_repair`.",
+          i = "`.name_repair` must be one of \"unique\", \"universal\", \"check_unique\" or \"minimal\" for a tbl_gpu."
+        ),
+        class = "cuplyr_error_bind_unsupported",
+        call = env
+      )
+    }
+    bind_cols_flat(dots, dots, repair, env)
+  }
+  rlang::return_from(env, out)
+}
+
+# list(verb, env, dots) for the dplyr binder frame that is evaluating `x`, or
+# NULL. The binder is the frame whose function is identical to dplyr::bind_rows
+# / bind_cols, reached from vctrs entry frame `entry` through its callers
+# (sys.parents(), i.e. lexical callers, so a vctrs call in dplyr's arguments
+# does not qualify) that are vctrs wrappers (vec_is -> obj_is_vector), dplyr
+# closures or base apply loops only, and whose local `dots` holds `x` as a
+# top-level element.
+vctrs_dplyr_binder <- function(x, entry) {
+  vns <- asNamespace("vctrs")
+  entry_fn <- sys.function(entry)
+  direct <- identical(entry_fn, vns$vec_rbind) || identical(entry_fn, vns$vec_cbind)
+  rows_entry <- identical(entry_fn, vns$vec_is) || identical(entry_fn, vns$obj_is_vector) ||
+    identical(entry_fn, vns$vec_rbind)
+  cols_entry <- identical(entry_fn, vns$vec_cbind)
+  # the usual case (vec_slice(), vec_c(), ...) stops here, before the
+  # namespace and call-stack lookups below
+  if (!rows_entry && !cols_entry) {
+    return(NULL)
+  }
+  dns <- asNamespace("dplyr")
+  parents <- sys.parents()
+  through_ish <- FALSE
+  p <- entry
+  # The real chain is obj_is_vector -> vec_is -> dataframe_ish -> vapply ->
+  # bind_rows (at most 5 frames above the binder); the cap only bounds the
+  # walk, since every frame on it must be a vctrs/dplyr/vapply frame.
+  for (hop in seq_len(16L)) {
+    p <- parents[[p]]
+    if (p < 1L) {
+      return(NULL)
+    }
+    fn <- sys.function(p)
+    verb <- if (identical(fn, dns$bind_rows)) "bind_rows" else if (identical(fn, dns$bind_cols)) "bind_cols"
+    if (!is.null(verb)) {
+      if ((verb == "bind_rows") != rows_entry) {
+        return(NULL)
+      }
+      # rows via vec_is need dataframe_ish() on the way: before it dots isn't
+      # flattened yet; rows/cols via vec_rbind/vec_cbind are called by the binder
+      if (!direct && !through_ish) {
+        return(NULL)
+      }
+      env <- sys.frame(p)
+      dots <- get0("dots", env, inherits = FALSE)
+      if (!is.list(dots) || !any(vapply(dots, identical, logical(1), x))) {
+        return(NULL)
+      }
+      return(list(verb = verb, env = env, dots = dots))
+    }
+    if (direct) {
+      return(NULL)
+    }
+    if (identical(fn, dns$dataframe_ish)) {
+      through_ish <- TRUE
+    } else if (!(identical(fn, vns$vec_is) || identical(fn, base::vapply) ||
+                 (is.function(fn) && !is.null(environment(fn)) &&
+                  identical(topenv(environment(fn)), dns)))) {
+      return(NULL)
+    }
+  }
+  NULL
 }
 
 is_handle_frame <- function(x) {

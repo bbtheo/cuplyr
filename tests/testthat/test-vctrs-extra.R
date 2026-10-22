@@ -72,14 +72,20 @@ test_that("pins taken for a vctrs call are released when it returns", {
   expect_length(ls(st$pins), 0L)
 })
 
-test_that("vec_rbind()/vec_cbind() on a tbl_gpu is a clear error, not a malformed tibble", {
+test_that("vec_rbind()/vec_cbind() on a tbl_gpu is a clear error; dplyr's binders work", {
   skip_if_no_gpu()
   g1 <- tbl_gpu(data.frame(x = 1:3))
   g2 <- tbl_gpu(data.frame(x = 4:6))
   expect_error(vctrs::vec_rbind(g1, g2), class = "cuplyr_error_vctrs_bind_unsupported")
   expect_error(vctrs::vec_cbind(g1, g2), class = "cuplyr_error_vctrs_bind_unsupported")
-  expect_error(dplyr::bind_rows(g1, g2), class = "cuplyr_error_vctrs_bind_unsupported")
-  expect_error(dplyr::bind_cols(g1, g2), class = "cuplyr_error_vctrs_bind_unsupported")
+  # dplyr's binders are handed to cuplyr's (F47)
+  expect_identical(collect(dplyr::bind_rows(g1, g2)), collect(cuplyr::bind_rows(g1, g2)))
+  expect_true(is_tbl_gpu(dplyr::bind_rows(g1, g2)))
+  expect_identical(
+    collect(suppressMessages(dplyr::bind_cols(g1, g2))),
+    collect(suppressMessages(cuplyr::bind_cols(g1, g2)))
+  )
+  expect_true(is_tbl_gpu(suppressMessages(dplyr::bind_cols(g1, g2))))
 })
 
 test_that("bind_rows()/bind_cols() accept a tbl_gpu anywhere in their arguments", {
