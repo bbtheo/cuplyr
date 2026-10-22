@@ -1,9 +1,11 @@
-# Helpers for the rolling-window benchmark (bench/rolling-window.R, F54).
+# Helpers for the rolling-window benchmark (bench/rolling-window.qmd, F54/F63).
 #
 # Pure definitions only: sourcing this file changes no search path, attaches
 # no package and does no GPU work. Every package call is namespaced, so the
-# driver decides which libraries are visible (bench/rolling-window.R prepends
-# the benchmark library to .libPaths() before sourcing this).
+# document decides which libraries are visible (its setup chunk prepends the
+# benchmark library to .libPaths() and load_all()s cuplyr before sourcing
+# this). The file's contents are part of the knitr cache key
+# (rw_cache_key()), so editing it reruns every timing chunk.
 
 rw_stats <- c("mean", "median", "min", "max", "sum", "sd")
 
@@ -87,6 +89,11 @@ rw_time <- function(fn, times, warmup = 2) {
   out
 }
 
+# Untimed warmup calls after the cold probe: fewer as the cell gets slower.
+# `above_s` is the probe duration (s) above which a tier starts.
+rw_warmup_tiers <- data.frame(above_s = c(-Inf, 5, 15), warmup = c(2, 1, 0))
+rw_warmup_for <- function(probe_s) rw_warmup_tiers$warmup[sum(probe_s > rw_warmup_tiers$above_s)]
+
 # How many samples fit in a cell, from the duration of its first (cold) call.
 # `probe_s` is that call's duration in seconds. The cold call is never one of
 # the recorded samples, except when it alone exceeds `probe_limit`. Returns
@@ -99,14 +106,43 @@ rw_plan_cell <- function(probe_s, times, cell_budget, probe_limit) {
                                probe_s, probe_limit)))
   }
   k <- max(1, min(times, floor(cell_budget / max(probe_s, 1e-9))))
-  warmup <- 2
-  if (probe_s > 5) warmup <- 1
-  if (probe_s > 15) warmup <- 0
+  warmup <- rw_warmup_for(probe_s)
   note <- if (k < times) {
     sprintf("times cut %d -> %d (cold probe call %.1f s, not recorded; %d untimed warmup call(s); %d timed call(s), all recorded)",
             times, k, probe_s, warmup, k)
   } else ""
   list(k = k, warmup = warmup, probe_is_sample = FALSE, note = note)
+}
+
+# Like rw_time() for several closures at once: `fns` is a named list; each of
+# `times` rounds times every closure once (same gc-before-every-call treatment),
+# alternating the order from round to round, so a slow drift or a change of
+# process state hits all of them alike. `warmup` untimed calls per closure come
+# first. Returns a data frame (label, sample, ms).
+rw_time_interleaved <- function(fns, times, warmup = 2) {
+  clock <- rw_clock()
+  res <- NULL
+  for (nm in names(fns)) {
+    for (i in seq_len(warmup)) {
+      res <- NULL
+      gc(verbose = FALSE)
+      res <- fns[[nm]]()
+    }
+  }
+  out <- vector("list", times * length(fns))
+  k <- 0L
+  for (i in seq_len(times)) {
+    for (nm in if (i %% 2L == 1L) names(fns) else rev(names(fns))) {
+      res <- NULL
+      gc(verbose = FALSE)
+      t0 <- clock()
+      res <- fns[[nm]]()
+      k <- k + 1L
+      out[[k]] <- data.frame(label = nm, sample = i, ms = clock() - t0, stringsAsFactors = FALSE)
+    }
+  }
+  res <- NULL
+  do.call(rbind, out)
 }
 
 # Set a package's thread count to `n`; returns a function that restores the
@@ -251,7 +287,7 @@ rw_functions <- function() {
 
 # Device-to-host fence. The cuplyr API gives no "work finished" guarantee
 # (nothing calls cudaDeviceSynchronize()); copying one row back is a pageable
-# cudaMemcpy, which synchronizes the default stream, and costs well under a
+# cudaMemcpy, which synchronizes the default stream, and costs under a
 # millisecond. tbl_gpu's `$` goes through tibble from outside the namespace
 # and returns NULL, hence .subset2(). Returns `r` unchanged.
 rw_gpu_finish <- function(r) {
@@ -263,8 +299,11 @@ rw_gpu_finish <- function(r) {
 # The cuplyr timed closure: function(gt, n) -> tbl_gpu on the GPU, finished.
 # `gt` was uploaded once outside timing. alias = TRUE spells the statistic as
 # data.table::froll<stat>() (cuplyr maps it to the native kernel). The median
-# has no cudf kernel and runs as a CPU fallback.
-rw_cuplyr_fun <- function(stat, alias = FALSE) {
+# has no cudf kernel and runs as a CPU fallback, so the report never times it:
+# every cuplyr cell goes through rw_native_probe() first.
+# fence = FALSE drops the device-to-host read (used once, to measure what the
+# fence costs).
+rw_cuplyr_fun <- function(stat, alias = FALSE, fence = TRUE) {
   stat <- match.arg(stat, rw_stats)
   if (alias) {
     f <- switch(stat,
@@ -287,7 +326,7 @@ rw_cuplyr_fun <- function(stat, alias = FALSE) {
   }
   function(gt, n) {
     r <- f(gt, n)
-    rw_gpu_finish(r)
+    if (fence) rw_gpu_finish(r)
     r
   }
 }
@@ -334,4 +373,172 @@ rw_grouped_setup <- function(df, n) {
     )
   }
   out
+}
+
+# ---- cells, controls and the cuplyr measurements (moved from the F54 driver) -------
+
+# Progress line on stderr (visible in the render log; not captured into the
+# document by knitr).
+rw_say <- function(...) {
+  cat(format(Sys.time(), "%H:%M:%S"), " ", ..., "\n", sep = "", file = stderr())
+}
+
+# ---- no timed CPU fallback ---------------------------------------------------------
+
+# Run `call()` once, untimed, with options(cuplyr.fallback = "error"), so that a
+# cuplyr call that would fall back to the CPU stops instead. Returns
+# list(native = TRUE/FALSE, reason = "" or the condition message, fallback =
+# TRUE when the error is cuplyr's CPU-fallback error). The previous value of
+# the option is restored, also on error. A cuplyr cell is timed only when this
+# says native = TRUE: a CPU fallback is never timed by accident. Only a
+# fallback (fallback = TRUE) is a reason to skip a cell; any other error is a
+# failure of the cell (rw_probe_error_cell()).
+rw_native_probe <- function(call) {
+  old <- options(cuplyr.fallback = "error")
+  on.exit(options(old), add = TRUE)
+  tryCatch({
+    call()
+    list(native = TRUE, reason = "", fallback = FALSE)
+  }, error = function(e) list(native = FALSE, reason = conditionMessage(e), fallback = rw_is_fallback(e)))
+}
+
+# Is this error cuplyr's CPU-fallback error? With cuplyr.fallback = "error",
+# cuplyr stops with "cuplyr: <verb>() fell back to CPU evaluation for: ...";
+# a condition of class cuplyr_cpu_fallback counts too.
+rw_is_fallback <- function(cnd) {
+  inherits(cnd, "cuplyr_cpu_fallback") ||
+    grepl("fell back to CPU evaluation", conditionMessage(cnd), fixed = TRUE)
+}
+
+# The cell of a probe call that failed for another reason than a CPU fallback:
+# the same error row safe_cell() records for a call that errors, so it counts
+# as a failed cell in the correctness table instead of dropping out of it.
+rw_probe_error_cell <- function(probe) {
+  safe_cell(function() stop("probe call failed: ", probe$reason, call. = FALSE))
+}
+
+# One row of the skipped-cells table (the chunk that skipped it, the cell, and
+# the probe's reason), and the table from a list of such rows.
+rw_skip_row <- function(chunk, stat, fn, width, reason) {
+  data.frame(chunk = chunk, stat = stat, fn = fn, width = as.numeric(width),
+             reason = reason, stringsAsFactors = FALSE)
+}
+rw_skip_table <- function(rows) {
+  if (length(rows)) return(do.call(rbind, rows))
+  rw_skip_row(character(), character(), character(), numeric(), character())
+}
+
+# ---- one timed cell ---------------------------------------------------------
+# `call` is the zero-argument timed closure; `extract` turns its result into a
+# numeric vector for the correctness check (outside timing). The first (cold)
+# call is a probe: its duration decides, through rw_plan_cell(), how many
+# samples fit in `cell_budget`, and its output feeds the correctness check. The
+# probe is not a recorded sample unless it alone exceeds `probe_limit`. `note`
+# says exactly which calls were recorded.
+run_cell <- function(call, extract, times, ref = NULL, expect_fallback = FALSE,
+                     cell_budget = 20, probe_limit = 60) {
+  note <- character()
+  gc(verbose = FALSE)
+  fell_back <- FALSE
+  t0 <- microbenchmark::get_nanotime()
+  out <- withCallingHandlers(call(), cuplyr_cpu_fallback = function(cnd) fell_back <<- TRUE)
+  probe_s <- (microbenchmark::get_nanotime() - t0) / 1e9
+  cmp <- NULL
+  if (!is.null(ref)) {
+    vec <- extract(out)
+    cmp <- rw_compare(rw_normalize(vec, length(ref)), ref)
+    rm(vec)
+  }
+  rm(out)
+  if (fell_back && !expect_fallback) note <- c(note, "UNEXPECTED CPU fallback")
+  if (!fell_back && expect_fallback) note <- c(note, "expected CPU fallback did not happen")
+  plan <- rw_plan_cell(probe_s, times, cell_budget, probe_limit)
+  if (plan$probe_is_sample) {
+    ms <- probe_s * 1e3
+  } else {
+    ms <- rw_time(call, plan$k, warmup = plan$warmup)
+  }
+  note <- c(note, if (nzchar(plan$note)) plan$note)
+  list(ms = ms, times = length(ms), note = paste(note, collapse = "; "), cmp = cmp, fell_back = fell_back)
+}
+
+# A cell whose call errors counts as a failed comparison (ok = FALSE) with the
+# message in `note`; it must not drop out of the correctness count.
+safe_cell <- function(thunk) {
+  tryCatch(thunk(), error = function(e) {
+    list(ms = NA_real_, times = 0, note = paste("error:", conditionMessage(e)),
+         cmp = list(ok = FALSE, n_na_mismatch = NA_integer_, max_abs_diff = NA_real_),
+         fell_back = NA)
+  })
+}
+
+# Run a cell with a package's thread count set to 1, restoring it afterwards
+# (also on error).
+with_one_thread <- function(pkg, thunk) {
+  restore <- rw_set_threads(pkg, 1)
+  on.exit(restore(), add = TRUE)
+  thunk()
+}
+
+cuplyr_extract <- function(r) dplyr::collect(r)$r
+
+# Peak and held GPU bytes of one call (gc() first, so earlier garbage does not
+# count).
+rw_mem_of <- function(call) {
+  gc(verbose = FALSE)
+  m <- cuplyr:::gpu_alloc_tracking(call())
+  list(peak = m$peak_bytes, held = m$held_bytes)
+}
+
+# The per-call overhead probes: a plain arithmetic mutate and two window
+# mutates (cumsum, and the rolling mean of width `width`). Names are the row
+# labels of the overhead table.
+rw_overhead_calls <- function(width) {
+  stats::setNames(list(
+    function(g) dplyr::mutate(g, y = x + 1),
+    function(g) dplyr::mutate(g, r = roll_mean(x, width)),
+    function(g) dplyr::mutate(g, r = cumsum(x))
+  ), c("plain mutate(y = x + 1)",
+       sprintf("window mutate(r = roll_mean(x, %s))", format(width, scientific = FALSE)),
+       "window mutate(r = cumsum(x))"))
+}
+
+# compute() + fence around one of those calls.
+rw_overhead_fn <- function(f) function(g) {
+  r <- dplyr::compute(f(g))
+  rw_gpu_finish(r)
+  r
+}
+
+# ---- cache key for the rendered document ------------------------------------------
+
+# Versions of installed packages, named; "not installed" when absent.
+rw_versions <- function(pkgs) {
+  out <- vapply(pkgs, function(p) {
+    v <- tryCatch(as.character(utils::packageVersion(p)), error = function(e) NA_character_)
+    if (is.na(v)) "not installed" else v
+  }, character(1))
+  stats::setNames(unname(out), pkgs)
+}
+
+# One string that changes when any file's CONTENT changes (not its mtime), any
+# version changes, or the configuration changes. Files are taken in sorted
+# path order; a missing file counts as "missing".
+rw_cache_key <- function(files, versions, config) {
+  files <- sort(unique(as.character(files)))
+  sums <- unname(tools::md5sum(files))
+  sums[is.na(sums)] <- "missing"
+  txt <- c("files", sums, "versions", paste0(names(versions), "=", versions),
+           "config", deparse(config))
+  tf <- tempfile("rw-key-")
+  on.exit(unlink(tf), add = TRUE)
+  writeLines(txt, tf)
+  unname(tools::md5sum(tf))
+}
+
+# cuplyr's own sources under `root`: R/*.R and src/*.{cpp,cu,cuh,h,hpp}.
+rw_cuplyr_sources <- function(root) {
+  r <- list.files(file.path(root, "R"), pattern = "\\.R$", full.names = TRUE)
+  s <- list.files(file.path(root, "src"), pattern = "\\.(cpp|cu|cuh|h|hpp)$", full.names = TRUE)
+  sort(c(r, s))
 }

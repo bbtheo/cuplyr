@@ -1,0 +1,1962 @@
+---
+title: "Rolling-window benchmark, redone with cuplyr"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 3
+    code-tools: true
+execute:
+  echo: false
+  warning: false
+  message: false
+params:
+  root: ".."
+  lib: "/home/theo/cuplr/scratchpad/benchmarks/rlib"
+  out_dir: "/home/theo/cuplr/scratchpad/benchmarks/rolling"
+  cache_dir: "/home/theo/cuplr/scratchpad/benchmarks/rolling/cache"
+  n_rows: 1000000
+  widths: [11, 101, 1001]
+  times: 20
+  times_custom: 5
+  cell_budget: 20
+  probe_limit: 60
+  group_rows: 1000000
+  n_groups: 1000
+  group_width: 101
+  ext_rows: 10000000
+  ext_times: 10
+  stats: [mean, median, min, max, sum, sd, custom]
+  skip_ext: false
+  rebuild: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+# Library path first, then cuplyr from the checkout named by params$root: an
+# older cuplyr is installed in the user library and must never be the one
+# that runs. Nothing is installed.
+.libPaths(c(params$lib, .libPaths()))
+pkgload::load_all(params$root, quiet = TRUE, debug = FALSE)
+source("rolling-lib.R")
+
+n_rows <- as.numeric(params$n_rows)
+widths <- sort(as.numeric(unlist(params$widths)))
+stopifnot(length(widths) == 3L)
+w_lo <- widths[1]; w_mid <- widths[2]; w_hi <- widths[3]
+times <- as.numeric(params$times); times_c <- as.numeric(params$times_custom)
+cell_budget <- as.numeric(params$cell_budget); probe_limit <- as.numeric(params$probe_limit)
+group_rows <- as.numeric(params$group_rows); n_groups <- as.numeric(params$n_groups)
+group_width <- as.numeric(params$group_width)
+ext_rows <- as.numeric(params$ext_rows); ext_times <- as.numeric(params$ext_times)
+stats_run <- as.character(unlist(params$stats))
+if (isTRUE(as.logical(params$skip_ext))) {
+  stop("skip_ext = true is not supported: the conclusions compare the extension runs")
+}
+dir.create(params$out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# The knitr cache of the timing chunks is keyed on the chunk code (knitr) and,
+# through cache.extra, on the content of rolling-lib.R and of cuplyr's R and
+# C++ sources, the versions of everything the benchmark uses, and the run
+# parameters (not the directories, which only say where things live).
+bench_pkgs <- c("cuplyr", "data.table", "roll", "RollingWindow", "runstats", "slider",
+                "RcppRoll", "zoo", "runner", "microbenchmark", "ggdist", "paletteer",
+                "ggtext", "ggplot2", "scales", "patchwork", "dplyr", "RcppParallel",
+                "fftwtools", "tibble", "knitr", "rmarkdown")
+ver <- c(R = paste(R.version$major, R.version$minor, sep = "."), rw_versions(bench_pkgs))
+# libcudf is the code the cuplyr timings measure, so it is part of the key too
+conda_prefix <- Sys.getenv("CONDA_PREFIX")
+cudf_json <- if (nzchar(conda_prefix)) list.files(file.path(conda_prefix, "conda-meta"), pattern = "^libcudf-[0-9]", full.names = FALSE) else character()
+cudf_ver <- if (length(cudf_json)) sub("^libcudf-([0-9.]+)-.*$", "\\1", cudf_json[1]) else NA_character_
+cudf_ver_short <- sub("^([0-9]+\\.[0-9]+).*$", "\\1", cudf_ver)
+key_ver <- c(ver, libcudf = if (is.na(cudf_ver)) "unknown" else cudf_ver)
+# `rebuild` only forces a rerun (params$rebuild, which FULL_RERUN in
+# bench/rolling-window.R passes); it is deliberately not part of the key
+key_config <- params[setdiff(names(params), c("root", "out_dir", "cache_dir", "rebuild"))]
+# src/Makevars holds the compile flags of cuplyr's C++ (written by configure)
+key_files <- c("rolling-lib.R", rw_cuplyr_sources(params$root), file.path(params$root, "src", "Makevars"))
+knitr::opts_chunk$set(
+  cache.path = file.path(params$cache_dir, ""),
+  cache.extra = rw_cache_key(key_files, key_ver, key_config),
+  cache.rebuild = isTRUE(as.logical(params$rebuild))
+)
+```
+
+```{r}
+#| label: bench-main
+#| cache: true
+#| include: false
+# The main experiment: every statistic x width x function, with the
+# single-thread controls, the correctness check against data.table and the
+# cuplyr entries. Uploads its own table and returns plain data frames only: a
+# cached GPU object would come back as a dead pointer.
+bench_main <- local({
+  t_start <- proc.time()[["elapsed"]]
+  has_pkg <- function(p) requireNamespace(p, quietly = TRUE)
+  for (p in c("data.table", "microbenchmark")) if (!has_pkg(p)) stop("required package missing: ", p)
+  if (!cuplyr::has_gpu()) stop("no GPU")
+  n_rows <- as.numeric(params$n_rows)
+  widths <- sort(as.numeric(unlist(params$widths)))
+  stats_run <- as.character(unlist(params$stats))
+
+  # thread settings as found, before any control changes them
+  thread_info <- data.frame(
+    item = c("OMP_NUM_THREADS (env)", "data.table getDTthreads()", "RcppRoll roll_threads()",
+             "RcppParallel defaultNumThreads()"),
+    version = c(if (nzchar(Sys.getenv("OMP_NUM_THREADS"))) Sys.getenv("OMP_NUM_THREADS") else "unset",
+                data.table::getDTthreads(),
+                if (has_pkg("RcppRoll")) RcppRoll::roll_threads() else NA,
+                if (has_pkg("RcppParallel")) RcppParallel::defaultNumThreads() else NA),
+    stringsAsFactors = FALSE)
+
+  df <- rw_data(n_rows)
+  x <- df$x
+  gt <- cuplyr::tbl_gpu(df)
+  fns <- rw_functions()
+  timing_rows <- list()
+  corr_rows <- list()
+  skip_rows <- list()
+  add_skip <- function(stat, fn, width, reason) {
+    skip_rows[[length(skip_rows) + 1]] <<- rw_skip_row("bench-main", stat, fn, width, reason)
+  }
+  add_cell <- function(stat, fn, width, res) {
+    timing_rows[[length(timing_rows) + 1]] <<- data.frame(
+      stat = stat, fn = fn, width = width, n_rows = n_rows, sample = seq_along(res$ms),
+      ms = res$ms, times = res$times, note = res$note, stringsAsFactors = FALSE)
+    if (!is.null(res$cmp)) {
+      corr_rows[[length(corr_rows) + 1]] <<- data.frame(
+        stat = stat, fn = fn, width = width, ok = res$cmp$ok,
+        n_na_mismatch = res$cmp$n_na_mismatch, max_abs_diff = res$cmp$max_abs_diff,
+        fell_back = res$fell_back %||% NA, note = res$note %||% "", stringsAsFactors = FALSE)
+    }
+  }
+  one_cell <- function(call, extract, times, ref) {
+    run_cell(call, extract, times, ref, FALSE,
+             cell_budget = params$cell_budget, probe_limit = params$probe_limit)
+  }
+
+  for (stat in stats_run) {
+    rw_say("== statistic: ", stat)
+    stat_fns <- fns[[stat]]
+    for (width in widths) {
+      rw_say("  width ", width)
+      ref <- rw_reference(stat, x, width)
+      times <- if (stat == "custom") params$times_custom else params$times
+
+      for (fn_name in names(stat_fns)) {
+        f <- stat_fns[[fn_name]]
+        rw_say("    ", fn_name)
+        cell <- function() one_cell(function() f(x, width), identity, times, ref)
+        add_cell(stat, fn_name, width, safe_cell(cell))
+        # Single-thread control for every entry whose package can use threads.
+        pkg <- rw_threaded_pkg(fn_name)
+        if (!is.na(pkg) && has_pkg(pkg)) {
+          label1 <- rw_one_thread_label(fn_name)
+          rw_say("    ", label1)
+          add_cell(stat, label1, width, safe_cell(function() with_one_thread(pkg, cell)))
+        }
+      }
+
+      if (stat != "custom") {
+        variants <- list(list(label = "cuplyr", alias = FALSE))
+        if (stat != "median") variants[[2]] <- list(label = "cuplyr (froll alias)", alias = TRUE)
+        for (v in variants) {
+          cf <- rw_cuplyr_fun(stat, alias = v$alias)
+          # No cuplyr cell that runs on the CPU fallback is timed: one untimed
+          # probe call under cuplyr.fallback = "error" decides first. A probe
+          # that fails for another reason is a failed cell, not a skip.
+          pr <- rw_native_probe(function() cf(gt, width))
+          if (pr$fallback) {
+            rw_say("    ", v$label, ": not timed (CPU fallback)")
+            add_skip(stat, v$label, width, pr$reason)
+            next
+          }
+          rw_say("    ", v$label, if (!pr$native) ": probe call failed")
+          res <- if (pr$native) safe_cell(function() one_cell(function() cf(gt, width), cuplyr_extract, times, ref)) else
+            rw_probe_error_cell(pr)
+          add_cell(stat, v$label, width, res)
+        }
+      }
+    }
+  }
+  rm(gt, df, x)
+  gc(verbose = FALSE)
+  list(timings = do.call(rbind, timing_rows), correctness = do.call(rbind, corr_rows),
+       skipped = rw_skip_table(skip_rows),
+       thread_info = thread_info, secs = proc.time()[["elapsed"]] - t_start)
+})
+invisible(gc(verbose = FALSE))
+```
+
+```{r}
+#| label: bench-overhead
+#| cache: true
+#| include: false
+# Per-call cost: the same cuplyr calls on a small table, where kernel time is
+# negligible, so they are the fixed cost of one eager mutate() + compute() +
+# fence. A plain arithmetic mutate and a cumsum window mutate are timed next
+# to the rolling ones to separate the window chain's extra cost from the bare
+# mutate cost. Same harness as everything else (gc-separated, fenced). The
+# lazy query plans are captured as text to name the nodes each call builds.
+bench_overhead <- local({
+  t_start <- proc.time()[["elapsed"]]
+  n_rows <- as.numeric(params$n_rows)
+  w <- sort(as.numeric(unlist(params$widths)))[2]
+  stats_run <- as.character(unlist(params$stats))
+  small_rows <- 1e3
+  small_times <- 50
+  rows <- list()
+  add_rows <- function(stat, fn, width, n, ms, note) {
+    rows[[length(rows) + 1]] <<- data.frame(
+      stat = stat, fn = fn, width = width, n_rows = n, sample = seq_along(ms),
+      ms = ms, times = length(ms), note = note, stringsAsFactors = FALSE)
+  }
+
+  skip_rows <- list()
+  add_skip <- function(stat, fn, width, reason) {
+    skip_rows[[length(skip_rows) + 1]] <<- rw_skip_row("bench-overhead", stat, fn, width, reason)
+  }
+  # a probe call that fails for another reason than a CPU fallback stops the
+  # render: these timings have no correctness check to record the failure in
+  probe_or_stop <- function(pr, what) {
+    if (!pr$native && !pr$fallback) stop("bench-overhead: the probe call of ", what, " failed: ", pr$reason, call. = FALSE)
+    pr
+  }
+
+  gt_small <- cuplyr::tbl_gpu(rw_data(small_rows))
+  for (stat in intersect(stats_run, c("mean", "sum", "min", "max", "sd"))) {
+    rw_say("== overhead floor: ", stat)
+    cf <- rw_cuplyr_fun(stat)
+    # every cuplyr cell is probed for a CPU fallback before it is timed
+    pr <- probe_or_stop(rw_native_probe(function() cf(gt_small, w)), paste("the", stat, "overhead floor"))
+    if (!pr$native) { add_skip(stat, "cuplyr (1e3-row overhead floor)", w, pr$reason); next }
+    ms <- rw_time(function() cf(gt_small, w), small_times, warmup = 5)
+    add_rows(stat, "cuplyr (1e3-row overhead floor)", w, small_rows, ms,
+             "same call on 1e3 rows; kernel time negligible")
+  }
+
+  gt <- cuplyr::tbl_gpu(rw_data(n_rows))
+  calls <- rw_overhead_calls(w)
+  inputs <- list(list(g = gt_small, n = small_rows, times = small_times),
+                 list(g = gt, n = n_rows, times = params$times))
+  for (inp in inputs) {
+    for (nm in names(calls)) {
+      rw_say("== overhead: ", nm, " on ", inp$n, " rows")
+      of <- rw_overhead_fn(calls[[nm]])
+      pr <- probe_or_stop(rw_native_probe(function() of(inp$g)), paste0(nm, " on ", inp$n, " rows"))
+      if (!pr$native) { add_skip("overhead", nm, NA, pr$reason); next }
+      ms <- rw_time(function() of(inp$g), inp$times, warmup = 5)
+      add_rows("overhead", nm, NA, inp$n, ms, "")
+    }
+  }
+
+  lz <- cuplyr::as_lazy(gt_small)
+  plans <- lapply(calls, function(f) utils::capture.output(dplyr::show_query(f(lz))))
+  rm(lz, gt_small, gt, inp, of)
+  gc(verbose = FALSE)
+  list(timings = do.call(rbind, rows), plans = plans, small_rows = small_rows,
+       skipped = rw_skip_table(skip_rows), secs = proc.time()[["elapsed"]] - t_start)
+})
+invisible(gc(verbose = FALSE))
+```
+
+```{r}
+#| label: bench-ext
+#| cache: true
+#| include: false
+# Extension: (a) a grouped rolling mean, (b) a larger ungrouped table. Peak
+# and held GPU bytes come from one untimed call per cuplyr entry.
+bench_ext <- local({
+  t_start <- proc.time()[["elapsed"]]
+  widths <- sort(as.numeric(unlist(params$widths)))
+  has_pkg <- function(p) requireNamespace(p, quietly = TRUE)
+  ext_list <- list()
+  add_ext <- function(experiment, fn, width, n, res, mem = NULL, ok = NA) {
+    # a failed cell (safe_cell's error row) has no samples: NA figures
+    ms <- res$ms[!is.na(res$ms)]
+    q <- function(f) if (length(ms)) unname(f(ms)) else NA_real_
+    ext_list[[length(ext_list) + 1]] <<- data.frame(
+      experiment = experiment, fn = fn, width = width, n_rows = n,
+      median_ms = q(stats::median), q25_ms = q(function(v) stats::quantile(v, .25)),
+      q75_ms = q(function(v) stats::quantile(v, .75)), min_ms = q(min), max_ms = q(max),
+      times = res$times, peak_gpu_bytes = mem$peak %||% NA_real_,
+      held_gpu_bytes_after_call = mem$held %||% NA_real_, correct = ok, note = res$note,
+      stringsAsFactors = FALSE)
+  }
+  one_cell <- function(call, extract, ref) {
+    run_cell(call, extract, params$ext_times, ref, FALSE,
+             cell_budget = params$cell_budget, probe_limit = params$probe_limit)
+  }
+  skip_rows <- list()
+  add_skip <- function(experiment, fn, width, reason) {
+    skip_rows[[length(skip_rows) + 1]] <<- rw_skip_row("bench-ext", experiment, fn, width, reason)
+  }
+
+  # (a) grouped rolling mean; data.table's own result is the reference
+  rw_say("== extension (a): grouped")
+  dfg <- rw_grouped_data(params$group_rows, params$n_groups)
+  setup <- rw_grouped_setup(dfg, params$group_width)
+  g_ref <- setup$data.table$extract(setup$data.table$run())
+  grouped_label <- function(nm) switch(nm, slider = "slider (grouped_df)", data.table = "data.table (by = g)", nm)
+  for (nm in names(setup)) {
+    rw_say("    ", nm)
+    e <- setup[[nm]]
+    pr <- list(native = TRUE, fallback = FALSE)
+    if (nm == "cuplyr") {
+      # probed for a CPU fallback before it is timed, like every cuplyr cell;
+      # a probe that fails for another reason is a failed cell, not a skip
+      pr <- rw_native_probe(e$run)
+      if (pr$fallback) { add_skip("grouped mean", "cuplyr", params$group_width, pr$reason); next }
+    }
+    res <- if (pr$native) safe_cell(function() one_cell(e$run, e$extract, g_ref)) else rw_probe_error_cell(pr)
+    mem <- if (nm == "cuplyr" && pr$native) rw_mem_of(e$run) else NULL
+    add_ext("grouped mean", grouped_label(nm), params$group_width, params$group_rows, res, mem, res$cmp$ok)
+    if (nm == "data.table") {
+      rw_say("    data.table (1 thread)")
+      res <- safe_cell(function() with_one_thread("data.table", function() one_cell(e$run, e$extract, g_ref)))
+      add_ext("grouped mean", "data.table (by = g, 1 thread)", params$group_width, params$group_rows, res, NULL, res$cmp$ok)
+    }
+  }
+  rm(setup, dfg, g_ref, e)
+  gc(verbose = FALSE)
+
+  # (b) the larger ungrouped table
+  rw_say("== extension (b): ungrouped")
+  dfb <- rw_data(params$ext_rows)
+  xb <- dfb$x
+  gtb <- cuplyr::tbl_gpu(dfb)
+  engines <- list(
+    cuplyr = NULL,
+    data.table = function(x, n) data.table::frollmean(x, n, align = "right"),
+    roll = if (has_pkg("roll")) function(x, n) roll::roll_mean(x, n),
+    RcppRoll = if (has_pkg("RcppRoll")) function(x, n) RcppRoll::roll_meanr(x, n, fill = NA)
+  )
+  for (width in widths) {
+    refb <- data.table::frollmean(xb, width, align = "right")
+    for (nm in names(engines)) {
+      rw_say("    ", nm, " width ", width)
+      pr <- list(native = TRUE, fallback = FALSE)
+      if (nm == "cuplyr") {
+        cf <- rw_cuplyr_fun("mean")
+        call <- function() cf(gtb, width)
+        extract <- cuplyr_extract
+        pr <- rw_native_probe(call)
+        if (pr$fallback) { add_skip("ungrouped mean", "cuplyr", width, pr$reason); next }
+      } else {
+        f <- engines[[nm]]
+        if (is.null(f)) next
+        call <- function() f(xb, width)
+        extract <- identity
+      }
+      cell <- function() one_cell(call, extract, refb)
+      res <- if (pr$native) safe_cell(cell) else rw_probe_error_cell(pr)
+      mem <- if (nm == "cuplyr" && pr$native) rw_mem_of(call) else NULL
+      add_ext("ungrouped mean", nm, width, params$ext_rows, res, mem, res$cmp$ok %||% NA)
+      if (nm != "cuplyr") {
+        rw_say("    ", rw_one_thread_label(nm), " width ", width)
+        res <- safe_cell(function() with_one_thread(rw_threaded_pkg(nm), cell))
+        add_ext("ungrouped mean", rw_one_thread_label(nm), width, params$ext_rows, res, NULL, res$cmp$ok %||% NA)
+      }
+    }
+    rm(refb)
+    gc(verbose = FALSE)
+  }
+  rm(gtb, dfb, xb)
+  gc(verbose = FALSE)
+  list(ext = do.call(rbind, ext_list), skipped = rw_skip_table(skip_rows),
+       secs = proc.time()[["elapsed"]] - t_start)
+})
+invisible(gc(verbose = FALSE))
+```
+
+```{r}
+#| label: bench-memory
+#| cache: true
+#| include: false
+# Memory: bytes allocated and held right after one call (the result is still
+# referenced, so held = result + whatever intermediates have not been
+# finalized yet), the peak, and the bytes held after a gc() (the result
+# alone), for a rolling mean, a plain arithmetic mutate and a cumsum window
+# mutate. Then back-to-back rolling calls without gc(): the finding reported
+# as F1.
+bench_memory <- local({
+  t_start <- proc.time()[["elapsed"]]
+  w <- sort(as.numeric(unlist(params$widths)))[2]
+  n_ext <- as.numeric(params$ext_rows)
+  dfm <- rw_data(n_ext)
+  gtm <- cuplyr::tbl_gpu(dfm)
+  cf <- rw_cuplyr_fun("mean")
+  calls <- rw_overhead_calls(w)
+  mem_calls <- stats::setNames(list(
+    function() cf(gtm, w),
+    function() rw_overhead_fn(calls[[1]])(gtm),
+    function() rw_overhead_fn(calls[[3]])(gtm)
+  ), c(names(calls)[2], names(calls)[1], names(calls)[3]))
+  # every cuplyr call is probed for a CPU fallback before it is measured; a
+  # probe that fails for another reason stops the render (there is no
+  # correctness check here to record it in)
+  skip_rows <- list()
+  native <- vapply(names(mem_calls), function(nm) {
+    pr <- rw_native_probe(mem_calls[[nm]])
+    if (!pr$native && !pr$fallback) stop("bench-memory: the probe call of ", nm, " failed: ", pr$reason, call. = FALSE)
+    if (!pr$native) skip_rows[[length(skip_rows) + 1]] <<- rw_skip_row("bench-memory", "memory", nm, NA, pr$reason)
+    pr$native
+  }, TRUE)
+  gc(verbose = FALSE)
+  breakdown <- do.call(rbind, lapply(names(mem_calls)[native], function(nm) {
+    rw_say("== memory: ", nm)
+    gc(verbose = FALSE)
+    one <- cuplyr:::gpu_alloc_tracking(mem_calls[[nm]]())
+    row <- data.frame(call = nm, n_rows = n_ext, x_column_bytes = 8 * n_ext,
+                      allocated_bytes = one$allocated_bytes, held_after_call_bytes = one$held_bytes,
+                      peak_bytes = one$peak_bytes, stringsAsFactors = FALSE)
+    rm(one)
+    gc(verbose = FALSE)
+    after_gc <- cuplyr:::gpu_alloc_tracking({ r <- mem_calls[[nm]](); gc(verbose = FALSE); r })
+    row$held_after_gc_bytes <- after_gc$held_bytes
+    rm(after_gc)
+    gc(verbose = FALSE)
+    row
+  }))
+
+  # back-to-back calls without gc(); each result is dropped, only unfinalized
+  # intermediates linger
+  n_calls <- 20
+  oom_at <- NA_integer_
+  err <- ""
+  if (native[[1]]) {
+    rw_say("== memory: ", n_calls, " back-to-back calls without gc()")
+    for (i in seq_len(n_calls)) {
+      r <- tryCatch(cf(gtm, w), error = function(e) { err <<- conditionMessage(e); NULL })
+      if (is.null(r)) { oom_at <- i; break }
+      rm(r)
+    }
+    gc(verbose = FALSE)
+  }
+  first <- function(col) if (native[[1]]) breakdown[[col]][1] else NA_real_
+  finding <- data.frame(
+    n_rows = n_ext, held_after_one_call_bytes = first("held_after_call_bytes"),
+    peak_one_call_bytes = first("peak_bytes"), result_table_bytes = first("held_after_gc_bytes"),
+    n_calls = n_calls, failed_at_call = oom_at, error = substr(err, 1, 200))
+  rm(gtm, dfm)
+  gc(verbose = FALSE)
+  list(breakdown = breakdown, finding = finding, skipped = rw_skip_table(skip_rows),
+       secs = proc.time()[["elapsed"]] - t_start)
+})
+invisible(gc(verbose = FALSE))
+```
+
+```{r}
+#| label: bench-fence
+#| cache: true
+#| include: false
+# What the one-row device-to-host fence costs: the same rolling-mean call on
+# the larger table, with and without it, through the same gc-separated
+# harness. The two variants are timed in alternation (rw_time_interleaved), so
+# a drift of the machine's state hits both alike.
+bench_fence <- local({
+  t_start <- proc.time()[["elapsed"]]
+  w <- sort(as.numeric(unlist(params$widths)))[2]
+  dfb <- rw_data(as.numeric(params$ext_rows))
+  gtb <- cuplyr::tbl_gpu(dfb)
+  with_fence <- rw_cuplyr_fun("mean", fence = TRUE)
+  without_fence <- rw_cuplyr_fun("mean", fence = FALSE)
+  rw_say("== fence on / off")
+  pr <- rw_native_probe(function() with_fence(gtb, w))
+  # a probe that fails for another reason than a CPU fallback stops the render
+  if (!pr$native && !pr$fallback) stop("bench-fence: the probe call failed: ", pr$reason, call. = FALSE)
+  if (pr$native) {
+    timings <- rw_time_interleaved(list(on = function() with_fence(gtb, w),
+                                        off = function() without_fence(gtb, w)),
+                                   params$ext_times)
+    skipped <- rw_skip_table(list())
+  } else {
+    timings <- NULL
+    skipped <- rw_skip_table(list(rw_skip_row("bench-fence", "fence", "cuplyr", w, pr$reason)))
+  }
+  rm(gtb, dfb)
+  gc(verbose = FALSE)
+  list(timings = timings, skipped = skipped, secs = proc.time()[["elapsed"]] - t_start)
+})
+invisible(gc(verbose = FALSE))
+```
+
+```{r}
+#| label: bench-runstats-shift
+#| cache: true
+#| include: false
+# runstats returns left-aligned windows. The main experiment times the raw
+# result (the shift to right-aligned happens outside timing); this chunk times
+# the same calls with the shift inside, to show how much the shift would have
+# added. The "outside" and "inside" samples are interleaved (one of each per
+# round, the order alternating), so the difference is a paired one that a change
+# of process state between the two halves of a run cannot fake. These are this
+# chunk's own samples, separate from the main table's.
+bench_runstats <- local({
+  t_start <- proc.time()[["elapsed"]]
+  if (requireNamespace("runstats", quietly = TRUE)) {
+    w <- sort(as.numeric(unlist(params$widths)))[2]
+    x <- rw_data(as.numeric(params$n_rows))$x
+    fns <- rw_functions()
+    out <- do.call(rbind, lapply(c("mean", "sd"), function(stat) {
+      f <- fns[[stat]]$runstats
+      rw_say("== runstats ", stat, ": shift outside / inside timing, interleaved")
+      d <- rw_time_interleaved(list(outside = function() f(x, w),
+                                    inside = function() rw_normalize(f(x, w), length(x))),
+                               params$times)
+      data.frame(stat = stat, shift = d$label, sample = d$sample, ms = d$ms, stringsAsFactors = FALSE)
+    }))
+  } else {
+    out <- NULL
+  }
+  list(timings = out, secs = proc.time()[["elapsed"]] - t_start)
+})
+```
+
+```{r}
+#| label: bench-cores
+#| cache: true
+#| include: false
+# One-thread timings may depend on which core the scheduler picks when the CPU
+# mixes core types (performance and efficiency cores run at different speeds).
+# This chunk pins the R process to one fast and one slow logical CPU in turn
+# and times one single-thread RcppRoll rolling mean on each. The affinity and
+# the RcppRoll thread setting are restored on exit, also after an error. NULL
+# when lscpu or taskset is missing. (No cuplyr call here: nothing to probe.)
+bench_cores <- local({
+  t_start <- proc.time()[["elapsed"]]
+  n_rows <- as.numeric(params$n_rows)
+  w <- sort(as.numeric(unlist(params$widths)))[2]
+  lscpu <- tryCatch(suppressWarnings(system2("lscpu", "-e=CPU,MAXMHZ", stdout = TRUE, stderr = FALSE)), error = function(e) character())
+  taskset <- unname(Sys.which("taskset"))
+  out <- NULL
+  if (length(lscpu) > 1L && nzchar(taskset) && requireNamespace("RcppRoll", quietly = TRUE)) {
+    cpus <- do.call(rbind, lapply(strsplit(trimws(lscpu[-1]), "\\s+"), function(z) data.frame(cpu = as.integer(z[1]), mhz = as.numeric(z[2]))))
+    cpus <- cpus[!is.na(cpus$cpu) & !is.na(cpus$mhz), ]
+    cut <- mean(range(cpus$mhz))
+    cpus$kind <- ifelse(cpus$mhz >= cut, "fast", "slow")
+    pid <- Sys.getpid()
+    mask <- sub("^.*: ", "", system2(taskset, c("-p", pid), stdout = TRUE))
+    x <- rw_data(n_rows)$x
+    restore <- rw_set_threads("RcppRoll", 1)
+    rows <- tryCatch(
+      lapply(c("fast", "slow"), function(k) {
+        pick <- cpus[cpus$kind == k, ]
+        if (!nrow(pick)) return(NULL)
+        cpu <- pick$cpu[nrow(pick)]
+        system2(taskset, c("-cp", cpu, pid), stdout = FALSE)
+        rw_say("== core placement: ", k, " cpu ", cpu)
+        ms <- rw_time(function() RcppRoll::roll_meanr(x, w, fill = NA), params$times)
+        data.frame(kind = k, cpu = cpu, mhz = pick$mhz[nrow(pick)], n_cpus = nrow(pick), ms = ms)
+      }),
+      finally = {
+        restore()
+        system2(taskset, c("-p", mask, pid), stdout = FALSE)
+      })
+    out <- do.call(rbind, rows)
+  }
+  list(timings = out, secs = proc.time()[["elapsed"]] - t_start)
+})
+```
+
+```{r}
+#| label: data
+#| include: false
+# Plain data from here on. Nothing below is cached, so the document always
+# reflects the current code; only the timing chunks above are expensive.
+main <- bench_main$timings
+main <- main[!is.na(main$ms), ]
+oh <- bench_overhead$timings
+ext <- bench_ext$ext
+cr <- bench_main$correctness
+thread_info <- bench_main$thread_info
+mem_breakdown <- bench_memory$breakdown
+if (is.null(mem_breakdown)) mem_breakdown <- data.frame()
+mem_finding <- bench_memory$finding
+# every cuplyr cell whose probe call fell back to the CPU: not timed, listed here
+sk <- rbind(bench_main$skipped, bench_overhead$skipped, bench_ext$skipped,
+            bench_memory$skipped, bench_fence$skipped)
+rownames(sk) <- NULL
+secs_by_chunk <- c("bench-main" = bench_main$secs, "bench-overhead" = bench_overhead$secs,
+                   "bench-ext" = bench_ext$secs, "bench-memory" = bench_memory$secs,
+                   "bench-fence" = bench_fence$secs, "bench-runstats-shift" = bench_runstats$secs,
+                   "bench-cores" = bench_cores$secs)
+wall_secs <- sum(secs_by_chunk)
+
+# one row per (statistic, function, width): median, quartiles, recorded samples
+cells <- do.call(rbind, lapply(split(main, list(main$stat, main$fn, main$width), drop = TRUE), function(d) {
+  data.frame(stat = d$stat[1], fn = d$fn[1], width = d$width[1], med = stats::median(d$ms),
+             q25 = unname(stats::quantile(d$ms, .25)), q75 = unname(stats::quantile(d$ms, .75)),
+             n = nrow(d), note = d$note[1], stringsAsFactors = FALSE)
+}))
+rownames(cells) <- NULL
+cells_key <- paste(cells$stat, cells$fn, cells$width, sep = "\r")
+```
+
+```{r}
+#| label: hardware
+#| include: false
+# Versions and hardware, read at render time.
+gpu <- tryCatch(cuplyr::gpu_details(), error = function(e) NULL)
+cpu_name <- tryCatch(sub(".*: ", "", grep("model name", readLines("/proc/cpuinfo"), value = TRUE)[1]),
+                     error = function(e) NA_character_)
+cpu_cores <- parallel::detectCores()
+quarto_bin <- if (nzchar(Sys.getenv("QUARTO_PATH"))) Sys.getenv("QUARTO_PATH") else unname(Sys.which("quarto"))
+if (!nzchar(quarto_bin) && file.exists(path.expand("~/.local/bin/quarto"))) quarto_bin <- path.expand("~/.local/bin/quarto")
+quarto_ver <- tryCatch(trimws(system2(quarto_bin, "--version", stdout = TRUE)[1]), error = function(e) NA_character_)
+gpu_name <- if (!is.null(gpu)) gpu$name else NA_character_
+gpu_gb <- if (!is.null(gpu)) round(gpu$total_memory / 1e9) else NA_real_
+gpu_cc <- if (!is.null(gpu)) gpu$compute_capability else NA_character_
+
+# Do the packages that were not given a thread control import an OpenMP or TBB
+# runtime? `nm -D --undefined-only` on the installed .so (NA: no nm). OpenMP
+# symbols (GOMP, omp_) and TBB symbols are counted apart: roll's TBB calls are
+# the ones RcppParallel::setThreadOptions() governs, its OpenMP ones are not.
+omp_symbols <- function(pkg) {
+  libs <- file.path(find.package(pkg), "libs")
+  sos <- list.files(libs, pattern = "\\.so$", full.names = TRUE)
+  if (!length(sos)) return(c(compiled = FALSE, symbols = 0, tbb = 0))
+  nm <- Sys.which("nm")
+  if (!nzchar(nm)) return(c(compiled = TRUE, symbols = NA, tbb = NA))
+  syms <- unlist(lapply(sos, function(so) suppressWarnings(system2(nm, c("-D", "--undefined-only", shQuote(so)), stdout = TRUE, stderr = FALSE))))
+  c(compiled = TRUE, symbols = sum(grepl("GOMP|omp_", syms)), tbb = sum(grepl("tbb", syms, ignore.case = TRUE)))
+}
+omp <- t(vapply(c("RollingWindow", "slider", "zoo", "runner", "runstats", "roll", "RcppRoll", "data.table"),
+                function(p) if (ver[[p]] == "not installed") c(NA, NA, NA) else omp_symbols(p), c(0, 0, 0)))
+colnames(omp) <- c("compiled", "symbols", "tbb")
+
+ver_table <- data.frame(
+  package = c("R", "cuplyr", "data.table", "roll", "RollingWindow", "runstats", "slider", "RcppRoll",
+              "zoo", "runner", "microbenchmark", "RcppParallel", "dplyr", "ggplot2", "scales",
+              "patchwork", "ggdist", "paletteer", "ggtext", "fftwtools", "tibble", "knitr", "rmarkdown"),
+  stringsAsFactors = FALSE)
+ver_table$version <- unname(ver[ver_table$package])
+ver_table$note <- ""
+ver_table$note[ver_table$package == "cuplyr"] <- "loaded with pkgload::load_all() from the checkout (dev)"
+ver_table$note[ver_table$package == "RollingWindow"] <- "GitHub master tarball"
+ver_table$note[ver_table$package == "runstats"] <- "CRAN Archive"
+ver_table$note[ver_table$package == "fftwtools"] <- "runstats dependency"
+ver_table$note[ver_table$package == "tibble"] <- "used by the grouped slider entry"
+ver_table$note[ver_table$package == "ggtext"] <- paste0("installed but not used: element_markdown() did not render under ggplot2 ", ver[["ggplot2"]])
+ver_table <- rbind(ver_table, data.frame(
+  package = c("Quarto", "cudf (libcudf)"), version = c(quarto_ver, cudf_ver), note = "", stringsAsFactors = FALSE))
+
+# versions.csv: R, Quarto, libcudf and package versions, hardware, thread
+# settings as found
+versions_csv <- rbind(
+  data.frame(item = c(names(ver), "Quarto", "libcudf"), version = c(unname(ver), quarto_ver, cudf_ver),
+             stringsAsFactors = FALSE),
+  data.frame(item = c("CPU", "CPU logical cores", "GPU"),
+             version = c(cpu_name, cpu_cores, if (!is.null(gpu)) paste0(gpu_name, ", ", gpu_gb, " GB, compute capability ", gpu_cc) else NA),
+             stringsAsFactors = FALSE),
+  thread_info)
+```
+
+```{r}
+#| label: helpers
+#| include: false
+# Formatting and comparison helpers for the prose. Every figure and every
+# comparative word in the text goes through these.
+
+# The thresholds behind the comparison words; "Method" states them from here.
+th_level <- 0.05   # medians within this fraction of each other are "level" (unless the IQRs are disjoint)
+th_trend <- 1.5    # widest / narrowest window median: at least this is "grows", at most its inverse "shrinks"
+th_grow <- 1.1     # slider is "growing with the width" above this ratio
+th_same <- 0.1     # two calls "cost the same" within this fraction
+th_chain <- 0.25   # the narrow-window call is "mostly call chain" within this fraction of the cumsum mutate
+th_x <- 1.25       # two figures that "agree" are within this factor of each other
+th_core <- 1.2     # a slow core is "measurably" slower than a fast one above this ratio
+th_avoid <- 10     # a custom function is clearly slower above this factor
+th_front <- 0.25   # rank / entries at most this is "near the front", at least 1 minus it "near the back", "mid-pack" between
+th_part <- 0.1     # the runstats shift is "a sizeable part" of the mean figure above this fraction
+th_mem <- 0.25     # peak memory is "well inside" the card below this fraction of it
+thr_yes <- 1.5     # one-thread / default ratio at which an entry "scales" with threads
+thr_no <- 1.15     # ... and at or below which it does not
+# three significant digits, trailing zeros kept (4.00, not 4)
+fmt_ms <- function(v) vapply(v, function(z) if (is.na(z)) "NA" else sub("\\.$", "", trimws(formatC(signif(z, 3), format = "fg", digits = 3, flag = "#"))), "")
+fmt_2 <- function(v) vapply(v, function(z) if (is.na(z)) "NA" else sub("\\.$", "", formatC(z, digits = 2, format = "fg", flag = "#")), "")
+fmt_1 <- function(v) sprintf("%.1f", v)
+fmt_x <- function(r, digits = 1) sprintf(paste0("%.", digits, "fx"), r)
+fmt_xr <- function(r) fmt_x(r, if (r >= 10) 0 else 1)
+fmt_pct <- function(f, digits = 1) sprintf(paste0("%.", digits, "f%%"), 100 * f)
+fmt_int <- function(v) formatC(v, format = "d", big.mark = ",")
+fmt_mb <- function(b) sprintf("%s MB", formatC(b / 1e6, format = "f", digits = 0, big.mark = ","))
+fmt_rows <- function(n) vapply(n, function(z) {
+  k <- log10(z)
+  if (z >= 1e3 && abs(k - round(k)) < 1e-9) sprintf("1e%d", as.integer(round(k))) else fmt_int(z)
+}, "")
+ms_s <- function(v) ifelse(v >= 1000, paste(fmt_ms(v / 1000), "s"), paste(fmt_ms(v), "ms"))
+# "4.00 ms", or "not timed" for a cell that was skipped or failed
+ms_nt <- function(v) ifelse(is.na(v), "not timed", paste(fmt_ms(v), "ms"))
+# a signed difference in ms, or nothing when either side is missing
+ms_delta <- function(a, b, vs = "") if (anyNA(c(a, b))) "" else sprintf(" (%+.2f ms%s)", a - b, vs)
+fmt_dur <- function(secs) vapply(secs, function(z) {
+  m <- floor(z / 60)
+  if (m < 1) sprintf("%.0f s", z) else sprintf("%d min %02d s", as.integer(m), as.integer(round(z - 60 * m)))
+}, "")
+num_words <- c("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+               "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+               "eighteen", "nineteen", "twenty")
+words <- function(n) ifelse(!is.na(n) & n >= 0 & n <= 20 & n == round(n), num_words[n + 1], as.character(n))
+ord_words <- c("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth")
+ordinal <- function(n) if (n <= 10) ord_words[n] else paste0(n, "th")
+times_word <- function(n) if (n == 1) "once" else if (n == 2) "twice" else paste(words(n), "times")
+plural <- function(n, one, many = paste0(one, "s")) if (n == 1) one else many
+code <- function(x) paste0("`", x, "`")
+join_and <- function(x, conj = "and") {
+  x <- as.character(x)
+  n <- length(x)
+  if (n == 0L) "" else if (n == 1L) x else if (n == 2L) paste(x, collapse = paste0(" ", conj, " ")) else
+    paste0(paste(x[-n], collapse = ", "), " ", conj, " ", x[n])
+}
+cap1 <- function(s) paste0(toupper(substr(s, 1, 1)), substring(s, 2))
+range_x <- function(v, digits = 1) {
+  r <- range(v, na.rm = TRUE)
+  a <- sprintf(paste0("%.", digits, "f"), r[1]); b <- sprintf(paste0("%.", digits, "f"), r[2])
+  if (a == b) paste0(a, "x") else paste0(a, "-", b, "x")
+}
+range_num <- function(v, digits = 2) {
+  r <- range(v, na.rm = TRUE)
+  a <- sprintf(paste0("%.", digits, "f"), r[1]); b <- sprintf(paste0("%.", digits, "f"), r[2])
+  if (a == b) a else paste0(a, "-", b)
+}
+# a range of times as "lo-hi ms" (or s), two significant digits, whole numbers from 100
+fmt_rng_one <- function(v) if (v >= 100) formatC(round(v), format = "d") else fmt_2(v)
+range_ms <- function(v) {
+  v <- v[!is.na(v)]
+  if (!length(v)) return("NA")
+  unit <- if (max(v) >= 1000) "s" else "ms"
+  if (unit == "s") v <- v / 1000
+  a <- if (unit == "s") fmt_2(min(v)) else fmt_rng_one(min(v))
+  b <- if (unit == "s") fmt_2(max(v)) else fmt_rng_one(max(v))
+  paste(if (a == b) a else paste0(a, "-", b), unit)
+}
+slash <- function(v) paste(fmt_ms(v), collapse = " / ")
+cmp_than <- function(r, hi = 1 + th_level) {      # r = a / b, a and b both times
+  if (r >= hi) "slower than" else if (r <= 1 / hi) "faster than" else "level with"
+}
+
+# Lookups into the main results
+cell_i <- function(stat, fn, width) match(paste(stat, fn, width, sep = "\r"), cells_key)
+med <- function(stat, fn, width) cells$med[cell_i(stat, fn, width)]
+med_w <- function(stat, fn, ws = widths) vapply(ws, function(w) med(stat, fn, w), 0)
+trip <- function(stat, fn, width) {
+  i <- cell_i(stat, fn, width)
+  c(med = cells$med[i], q25 = cells$q25[i], q75 = cells$q75[i])
+}
+nsamp <- function(stat, fn, width) cells$n[cell_i(stat, fn, width)]
+has_cell <- function(stat, fn, width) !is.na(cell_i(stat, fn, width))
+ext_i <- function(experiment, fn, width) which(ext$experiment == experiment & ext$fn == fn & ext$width == width)[1]
+ext_med <- function(experiment, fn, width) ext$median_ms[ext_i(experiment, fn, width)]
+ext_trip <- function(experiment, fn, width) {
+  i <- ext_i(experiment, fn, width)
+  c(med = ext$median_ms[i], q25 = ext$q25_ms[i], q75 = ext$q75_ms[i])
+}
+
+# a versus b (both c(med, q25, q75), times): lower is faster. Within 5% of each
+# other the medians are called level unless the interquartile ranges are
+# disjoint, which makes it "slightly" faster or slower.
+verdict <- function(a, b, tol = th_level) {
+  if (anyNA(c(a[["med"]], b[["med"]]))) return(NA_character_)
+  r <- a[["med"]] / b[["med"]]
+  if (r < 1 - tol) return("faster")
+  if (r > 1 + tol) return("slower")
+  if (a[["q75"]] < b[["q25"]]) return("slightly faster")
+  if (b[["q75"]] < a[["q25"]]) return("slightly slower")
+  "level"
+}
+is_faster <- function(v) v %in% c("faster", "slightly faster")
+is_slower <- function(v) v %in% c("slower", "slightly slower")
+vocab_basic <- c(faster = "faster", `slightly faster` = "slightly faster", level = "level",
+                 slower = "slower", `slightly slower` = "slightly slower")
+vocab_ahead <- c(faster = "ahead", `slightly faster` = "slightly ahead", level = "level",
+                 slower = "behind", `slightly slower` = "slightly behind")
+# "faster at all three widths" / "faster at w=101 and w=1001, slower at w=11"
+runs_txt <- function(v, ws = widths, vocab = vocab_basic) {
+  keep <- !is.na(v)
+  v <- v[keep]; ws <- ws[keep]
+  if (!length(v)) return("not comparable")
+  kinds <- unique(v)
+  if (length(kinds) == 1L) {
+    where <- if (length(ws) == length(widths)) paste("all", words(length(ws)), "widths") else join_and(paste0("w=", ws))
+    return(sprintf("%s at %s", vocab[[kinds]], where))
+  }
+  paste(vapply(kinds, function(k) sprintf("%s at %s", vocab[[k]], join_and(paste0("w=", ws[v == k]))), ""), collapse = ", ")
+}
+# statistics with the same verdict pattern are described together
+pattern_txt <- function(df, vocab = vocab_basic) {
+  stats <- unique(df$stat)
+  pats <- vapply(stats, function(s) {
+    d <- df[df$stat == s, ]
+    paste(d$v[match(widths, d$width)], collapse = "|")
+  }, "")
+  groups <- split(stats, factor(pats, levels = unique(pats)))
+  paste(vapply(names(groups), function(p) {
+    v <- strsplit(p, "|", fixed = TRUE)[[1]]
+    v[v == "NA"] <- NA
+    sprintf("%s: %s", join_and(groups[[p]]), runs_txt(v, widths, vocab))
+  }, ""), collapse = "; ")
+}
+# median per statistic as "mean 0.87, sum 0.87, min 0.97 ..." where equal
+# figures share a label ("10.4 min/max")
+merge_equal <- function(fn, stats, width = w_mid) {
+  vals <- fmt_ms(vapply(stats, function(s) med(s, fn, width), 0))
+  runs <- rle(vals)
+  ends <- cumsum(runs$lengths); starts <- ends - runs$lengths + 1
+  parts <- vapply(seq_along(runs$values), function(i) paste(runs$values[i], paste(stats[starts[i]:ends[i]], collapse = "/")), "")
+  parts[1] <- sub("^(\\S+)", "\\1 ms", parts[1])
+  paste(parts, collapse = ", ")
+}
+```
+
+```{r}
+#| label: source-lines
+#| include: false
+# Where the code the findings talk about lives, read from the checkout.
+root <- normalizePath(params$root)
+grep_lines <- function(file, pattern, fixed = TRUE) {
+  txt <- readLines(file.path(root, file), warn = FALSE)
+  which(if (fixed) grepl(pattern, txt, fixed = TRUE) else grepl(pattern, txt))
+}
+ln_window <- grep_lines("R/mutate.R", "push_op(result, ast_window(")[1]
+ln_mutate <- grep_lines("R/mutate.R", "push_op(result, ast_mutate(input_node(result), batch_plan$expressions)")[1]
+ln_select <- { l <- grep_lines("R/mutate.R", "push_op(result, select_node)"); l[l > ln_mutate][1] }
+ln_copy <- grep_lines("src/ops_window.cpp", "std::make_unique<cudf::column>(view.column(i))")[1]
+src_files <- list.files(file.path(root, "src"), pattern = "\\.(cpp|cu|cuh|h|hpp)$", full.names = TRUE)
+n_sync <- sum(vapply(src_files, function(f) sum(grepl("cudaDeviceSynchronize|cudaStreamSynchronize|synchronize\\(", readLines(f, warn = FALSE))), 0))
+sync_txt <- if (n_sync == 0) paste("no synchronization call in", code("src/")) else paste("synchronization calls were found in", code("src/"))
+f5_sync <- if (n_sync == 0) paste("Nothing in", code("src/"), "synchronizes") else paste("Some code in", code("src/"), "synchronizes (not audited here)")
+# does `$ptr` on a tbl_gpu from outside the namespace return NULL?
+ptr_probe <- local({
+  g <- cuplyr::tbl_gpu(data.frame(x = 1))
+  res <- c(dollar_null = is.null(g$ptr), subset2_ok = !is.null(.subset2(g, "ptr")))
+  rm(g)
+  gc(verbose = FALSE)
+  res
+})
+```
+
+```{r}
+#| label: claims
+#| include: false
+# Everything the prose says that depends on the numbers: the quantities, and
+# the words that compare them. If a fresh run reverses a conclusion, the
+# sentences built here say so.
+stat_order <- c("mean", "sum", "min", "max", "sd", "median")
+stats_main <- intersect(stat_order, unique(cells$stat))
+n_st <- length(stats_main)
+rows_txt <- fmt_rows(n_rows); ext_txt <- fmt_rows(ext_rows)
+groups_txt <- fmt_rows(n_groups); grp_rows_txt <- fmt_rows(group_rows)
+small_rows <- bench_overhead$small_rows; small_txt <- fmt_rows(small_rows)
+tol <- eval(formals(rw_compare)$tol)
+tol_txt <- format(tol, scientific = TRUE)
+dt_ver <- unname(ver["data.table"]); dt_minor <- sub("^([0-9]+\\.[0-9]+).*$", "\\1", dt_ver)
+ti <- stats::setNames(thread_info$version, thread_info$item)
+n_dt_threads <- ti[["data.table getDTthreads()"]]
+n_rr_threads <- ti[["RcppRoll roll_threads()"]]
+n_roll_threads <- ti[["RcppParallel defaultNumThreads()"]]
+omp_env <- ti[["OMP_NUM_THREADS (env)"]]
+
+# ---- cuplyr cells that were not timed (CPU fallback) ------------------------------
+# Every cuplyr cell was probed before timing (rw_native_probe()); the ones that
+# would run on the CPU fallback are in `sk` and have no timing anywhere.
+sk_main <- sk[sk$chunk == "bench-main", ]
+n_skip <- nrow(sk); n_skip_main <- nrow(sk_main)
+skip_stats <- unique(sk_main$stat[grepl("^cuplyr", sk_main$fn)])
+median_skipped <- "median" %in% skip_stats
+skip_why <- function(stat) if (stat == "median")
+  sprintf("no GPU path (cuplyr's roll_median() runs on the CPU fallback; cudf %s has no rolling MEDIAN)", cudf_ver_short) else
+  "no GPU path in this run (the probe call fell back to the CPU)"
+# the widths at which a main-experiment cuplyr entry was skipped
+skip_widths <- function(stat, fn) sort(sk_main$width[sk_main$stat == stat & sk_main$fn == fn])
+skip_note <- function(stat, fn = "cuplyr") {
+  ws <- skip_widths(stat, fn)
+  at <- if (length(ws) && length(ws) < length(widths)) paste0(" at ", join_and(paste0("w=", ws))) else ""
+  paste0("not timed", at, ": ", skip_why(stat))
+}
+skip_groups <- unique(sk[c("chunk", "stat", "fn")])
+skip_summary <- if (!n_skip) "" else join_and(vapply(seq_len(nrow(skip_groups)), function(i) {
+  g <- skip_groups[i, ]
+  d <- sk[sk$chunk == g$chunk & sk$stat == g$stat & sk$fn == g$fn, ]
+  at <- if (all(is.na(d$width))) "" else if (nrow(d) == length(widths) && g$chunk == "bench-main") paste(", all", words(nrow(d)), "widths") else paste0(", ", join_and(paste0("w=", d$width[!is.na(d$width)])))
+  sprintf("%s (%s%s)", code(g$fn), g$stat, at)
+}, ""))
+sk_show <- sk
+sk_show$reason <- substr(gsub("\\s+", " ", sk$reason), 1, 150)
+sk_csv <- cbind(sk, note = rep(if (n_skip) "not timed: the probe call fell back to the CPU" else character(), n_skip))
+only_native_txt <- if (!n_skip) "Every cuplyr entry is computation only, and none fell back to the CPU in this run." else
+  paste0("Every cuplyr entry that is timed is computation only. Cells that run on the CPU fallback (download, an R loop, re-upload) are not timed: ", skip_summary, ".",
+         if (median_skipped) " The median table and plot carry a note instead of a number for cuplyr." else "")
+
+# ---- run configuration -------------------------------------------------------
+cfg_defaults <- tryCatch(rmarkdown::yaml_front_matter("rolling-window.qmd")$params, error = function(e) NULL)
+cfg_names <- c("n_rows", "widths", "times", "times_custom", "cell_budget", "probe_limit", "group_rows",
+               "n_groups", "group_width", "ext_rows", "ext_times", "stats")
+cfg_diff <- if (is.null(cfg_defaults)) character() else Filter(nzchar, vapply(cfg_names, function(nm) {
+  a <- sort(as.character(unlist(params[[nm]]))); b <- sort(as.character(unlist(cfg_defaults[[nm]])))
+  # numbers compare as numbers (the default 1e7 is read from YAML as text)
+  same <- identical(a, b) || (!anyNA(suppressWarnings(as.numeric(c(a, b)))) && isTRUE(all.equal(as.numeric(a), as.numeric(b))))
+  if (same) "" else sprintf("%s = %s (default %s)", nm, paste(unlist(params[[nm]]), collapse = " / "), paste(unlist(cfg_defaults[[nm]]), collapse = " / "))
+}, ""))
+cfg_txt <- if (!length(cfg_diff)) "These are the defaults of the document, with no parameter overridden" else
+  paste0("Parameters differing from the defaults: ", join_and(cfg_diff))
+
+# ---- threads: what each setting actually did ------------------------------------
+cells_w <- cells[cells$width == w_mid, ]
+grp_lab <- "grouped mean"; ung_lab <- paste(ext_txt, "ungrouped mean")
+thr_all <- rbind(
+  data.frame(kind = "main", where = paste0(rows_txt, " rows, w=", w_mid), statistic = cells_w$stat, fn = cells_w$fn,
+             med = cells_w$med, q25 = cells_w$q25, q75 = cells_w$q75, n = cells_w$n, stringsAsFactors = FALSE),
+  { e <- ext[ext$width == w_mid, ]
+    data.frame(kind = ifelse(e$experiment == "grouped mean", "grouped", "ungrouped"),
+               where = paste0(ifelse(e$experiment == "grouped mean", grp_lab, ung_lab), ", w=", w_mid),
+               statistic = "mean", fn = e$fn, med = e$median_ms, q25 = e$q25_ms, q75 = e$q75_ms, n = e$times,
+               stringsAsFactors = FALSE) })
+default_threads <- function(fn) {
+  pkg <- rw_threaded_pkg(fn)
+  if (is.na(pkg)) return(NA_character_)
+  switch(pkg, data.table = paste0(n_dt_threads, " (setDTthreads)"), RcppRoll = paste0(n_rr_threads, " (OpenMP)"),
+         roll = paste0(n_roll_threads, " (RcppParallel)"))
+}
+thr <- do.call(rbind, lapply(grep("1 thread\\)$", thr_all$fn), function(i) {
+  b <- thr_all[i, ]
+  a <- thr_all[thr_all$where == b$where & thr_all$statistic == b$statistic & thr_all$fn == rw_base_label(b$fn), ]
+  if (nrow(a) != 1L) return(NULL)
+  ratio <- b$med / a$med
+  data.frame(kind = b$kind, where = b$where, statistic = b$statistic, entry = a$fn, threads = default_threads(a$fn),
+             default_med = a$med, default_q25 = a$q25, default_q75 = a$q75, one_med = b$med, one_q25 = b$q25,
+             one_q75 = b$q75, ratio = ratio, n_default = a$n, n_one = b$n,
+             class = if (ratio >= thr_yes) "scales" else if (ratio <= thr_no) "flat" else "weak", stringsAsFactors = FALSE)
+}))
+thr <- thr[order(match(thr$kind, c("main", "grouped", "ungrouped")), thr$entry, match(thr$statistic, c(stat_order, "custom"))), ]
+rownames(thr) <- NULL
+thr_table <- data.frame(
+  experiment = thr$where, statistic = thr$statistic, entry = thr$entry, default_threads = thr$threads,
+  default_ms = sprintf("%s (%s-%s)", fmt_ms(thr$default_med), fmt_ms(thr$default_q25), fmt_ms(thr$default_q75)),
+  one_thread_ms = sprintf("%s (%s-%s)", fmt_ms(thr$one_med), fmt_ms(thr$one_q25), fmt_ms(thr$one_q75)),
+  ratio = sprintf("%.2f", thr$ratio),
+  scales = ifelse(thr$class == "scales", sprintf("yes (%s slower at 1 thread)", fmt_x(thr$ratio)),
+                  ifelse(thr$class == "flat", "no", "weakly")), stringsAsFactors = FALSE)
+samples_txt <- function(n) { r <- range(n); if (r[1] == r[2]) as.character(r[1]) else paste0(r[1], "-", r[2]) }
+thr_main_std <- thr[thr$kind == "main" & thr$statistic != "custom", ]
+thr_main_cus <- thr[thr$kind == "main" & thr$statistic == "custom", ]
+n_thr_std <- samples_txt(c(thr_main_std$n_default, thr_main_std$n_one))
+n_thr_cus <- samples_txt(c(thr_main_cus$n_default, thr_main_cus$n_one))
+n_thr_ext <- samples_txt(c(thr$n_default[thr$kind != "main"], thr$n_one[thr$kind != "main"]))
+within_pct <- function(r) fmt_pct(max(abs(r - 1)))
+
+froll_one <- function(entry, statistic) {
+  if (entry == "data.table") code(paste0("froll", statistic))
+  else if (entry == "data.table (exact)") code("frollsum(algo = \"exact\")")
+  else if (entry == "data.table::frollapply") code("frollapply") else code(entry)
+}
+froll_group <- function(rows) {
+  plain <- rows$statistic[rows$entry == "data.table"]
+  others <- vapply(which(rows$entry != "data.table"), function(i) froll_one(rows$entry[i], rows$statistic[i]), "")
+  join_and(c(if (length(plain)) code(paste0("froll", paste(plain, collapse = "/"))), others))
+}
+scaled_group <- function(rows) {
+  join_and(vapply(seq_len(nrow(rows)), function(i) sprintf("%s (%s)", froll_one(rows$entry[i], rows$statistic[i]), fmt_x(rows$ratio[i])), ""))
+}
+
+rr <- thr[thr$entry == "RcppRoll" & thr$kind == "main", ]
+rr_ung <- thr[thr$entry == "RcppRoll" & thr$kind == "ungrouped", ]
+rr_scales <- nrow(rr) > 0 && all(rr$class == "scales")
+rr_runs <- if (rr_scales) "runs on" else "is set to"
+rr_claim <- if (rr_scales) sprintf("scales with them: %s slower at one thread for every statistic at w=%s", range_x(rr$ratio, 0), w_mid) else
+  if (all(rr$class == "flat")) sprintf("does not use them: its one-thread control is within %s of the default for every statistic at w=%s", within_pct(rr$ratio), w_mid) else
+  sprintf("scales for %s but not for %s at w=%s", join_and(rr$statistic[rr$class == "scales"]), join_and(rr$statistic[rr$class != "scales"]), w_mid)
+rr_reading <- if (rr_scales) sprintf("scales on every statistic (%s slower at one thread at w=%s%s)", range_x(rr$ratio),
+                                      w_mid, if (nrow(rr_ung)) sprintf("; %s at %s rows", fmt_x(rr_ung$ratio[1]), ext_txt) else "") else
+  sprintf("does not scale on every statistic: %s", rr_claim)
+
+dt_rows <- thr[grepl("^data\\.table", thr$entry) & thr$kind == "main", ]
+dt_flat <- dt_rows[dt_rows$class == "flat", ]
+dt_scale <- dt_rows[dt_rows$class == "scales", ]
+dt_weak <- dt_rows[dt_rows$class == "weak", ]
+dt_by <- thr[thr$kind == "grouped" & grepl("^data\\.table", thr$entry), ]
+dt_ung <- thr[thr$kind == "ungrouped" & thr$entry == "data.table", ]
+by_flat <- nrow(dt_by) > 0 && all(dt_by$class == "flat")
+dt_within <- within_pct(c(dt_flat$ratio, if (by_flat) dt_by$ratio))
+dt_lead <- if (nrow(dt_flat)) sprintf("data.table's %s%s ran effectively on one thread", froll_group(dt_flat),
+                                      if (by_flat) paste0(" and its ", code("by="), " evaluation") else "") else
+  "data.table's calls all scaled with threads"
+dt_only <- if (nrow(dt_scale)) sprintf("Only %s scale.", scaled_group(dt_scale)) else "None of its calls scaled."
+dt_weak_txt <- if (nrow(dt_weak)) sprintf(" Borderline (ratio between %s and %s): %s.", thr_no, thr_yes, scaled_group(dt_weak)) else ""
+dt_scale_names <- if (nrow(dt_scale)) join_and(vapply(seq_len(nrow(dt_scale)), function(i) froll_one(dt_scale$entry[i], dt_scale$statistic[i]), "")) else "none of its calls"
+dt_scale_sentence <- if (nrow(dt_scale)) sprintf("data.table's %s scale", dt_scale_names) else "none of data.table's calls scaled"
+dt_reading <- if (nrow(dt_scale)) sprintf("scales only for %s.", scaled_group(dt_scale)) else "does not scale for any of its calls."
+dt_flat_reading <- if (nrow(dt_flat)) sprintf("%s (ratio %s)%s do not%s", froll_group(dt_flat), range_num(dt_flat$ratio),
+                                              if (by_flat) sprintf(" and the grouped %s call (%s)", code("by = g"), sprintf("%.2f", dt_by$ratio[1])) else "",
+                                              ": that is the figure the grouped comparison below depends on.") else ""
+
+roll_rows <- thr[thr$entry == "roll" & thr$kind == "main", ]
+roll_ung <- thr[thr$entry == "roll" & thr$kind == "ungrouped", ]
+roll_flat <- nrow(roll_rows) > 0 && all(roll_rows$class == "flat")
+roll_lead <- if (roll_flat) "roll ran effectively on one thread" else sprintf("roll used extra threads for %s", join_and(roll_rows$statistic[roll_rows$class != "flat"]))
+roll_claim <- if (roll_flat) sprintf("for every statistic (1-thread vs default within %s at w=%s), although RcppParallel reports %s available threads",
+                                      within_pct(roll_rows$ratio), w_mid, n_roll_threads) else
+  sprintf("(ratio %s at w=%s); RcppParallel reports %s available threads", range_num(roll_rows$ratio), w_mid, n_roll_threads)
+roll_reading <- if (roll_flat) sprintf("does not scale on any statistic (ratio %s)%s.", range_num(roll_rows$ratio),
+                                       if (nrow(roll_ung)) sprintf(", including at %s rows", ext_txt) else "") else
+  sprintf("scales on %s (ratio %s).", join_and(roll_rows$statistic[roll_rows$class == "scales"]), range_num(roll_rows$ratio))
+
+n_omp <- omp[["roll", "symbols"]]
+roll_omp_txt <- if (!is.na(n_omp) && n_omp > 0) {
+  paste0("(", code("roll.so"), " also imports ", words(n_omp), " OpenMP runtime ", plural(n_omp, "symbol"), " (", code("GOMP*"), ", ", code("omp_*"), "), which ", code("setThreadOptions()"),
+         " does not govern; the default online vector workers used here are sequential loops, and only roll's offline workers are RcppParallel workers",
+         if (roll_flat) ", so the one-thread reading holds.)" else ", which may explain the scaling.)")
+} else ""
+unctl <- c("RollingWindow", "slider", "zoo", "runner")
+unctl <- unctl[ver[unctl] != "not installed"]
+unctl_clean <- !anyNA(omp[unctl, c("symbols", "tbb")]) && all(omp[unctl, c("symbols", "tbb")] == 0)
+runstats_pure <- ver[["runstats"]] != "not installed" && identical(unname(omp["runstats", "compiled"]), 0)
+nm_ok <- nzchar(Sys.which("nm"))
+unctl_check <- if (!nm_ok) {
+  "Their compiled code could not be checked here (no `nm`); I treat them as single-threaded, which is an assumption, not a timing."
+} else if (unctl_clean) {
+  sprintf("Their compiled code imports no OpenMP or TBB runtime symbol (%s on the installed shared object, run by this document)%s. I treat them as single-threaded; that is a static check, not a timing.",
+          code("nm -D --undefined-only"), if (runstats_pure) " and runstats is pure R" else "")
+} else {
+  bad <- unctl[!is.na(omp[unctl, "symbols"]) & (omp[unctl, "symbols"] > 0 | omp[unctl, "tbb"] > 0)]
+  sprintf("But the compiled code of %s imports OpenMP or TBB runtime symbols (%s), so they may use threads that this report did not control.",
+          join_and(bad), code("nm -D --undefined-only"))
+}
+
+# ---- who is fastest ---------------------------------------------------------------
+cpu_bases <- function(stat) {
+  f <- unique(cells$fn[cells$stat == stat])
+  f[!grepl("1 thread|^cuplyr|exact|::", f)]
+}
+view_def <- function(stat, width) { b <- cpu_bases(stat); stats::setNames(vapply(b, function(e) med(stat, e, width), 0), b) }
+view_1t <- function(stat, width) {
+  b <- cpu_bases(stat)
+  stats::setNames(vapply(b, function(e) med(stat, if (!is.na(rw_threaded_pkg(e))) rw_one_thread_label(e) else e, width), 0), b)
+}
+win_def <- vapply(stats_main, function(s) names(which.min(view_def(s, w_mid))), "")
+win_1t <- vapply(stats_main, function(s) names(which.min(view_1t(s, w_mid))), "")
+n_dt_wins <- sum(win_1t == "data.table")
+headline_verdict <- if (n_dt_wins == n_st) "holds" else if (n_dt_wins == n_st - 1L) "holds (with an exception, below)" else
+  if (n_dt_wins > n_st / 2) "holds only in part" else "does not hold"
+rr_default_wins <- win_def == "RcppRoll"
+lead_clause <- if (all(rr_default_wins) && rr_scales) sprintf("comes from its %s OpenMP threads", n_rr_threads) else
+  if (all(rr_default_wins)) "is not explained by its threads (its one-thread control is about as fast)" else
+  sprintf("is limited to %s of %s statistics", words(sum(rr_default_wins)), words(n_st))
+rr_leader <- if (all(rr_default_wins)) "RcppRoll was the fastest package in every statistic" else
+  sprintf("RcppRoll was the fastest package in %s of %s statistics", words(sum(rr_default_wins)), words(n_st))
+rr_default_list <- paste(vapply(stats_main, function(s) {
+  if (win_def[[s]] == "RcppRoll") sprintf("%s %s ms (data.table %s)", s, fmt_ms(med(s, "RcppRoll", w_mid)), fmt_ms(med(s, "data.table", w_mid)))
+  else sprintf("%s %s ms, but %s was faster (%s)", s, fmt_ms(med(s, "RcppRoll", w_mid)), win_def[[s]], fmt_ms(min(view_def(s, w_mid))))
+}, ""), collapse = ", ")
+rr1_list <- join_and(vapply(stats_main, function(s) paste(s, fmt_ms(med(s, "RcppRoll (1 thread)", w_mid))), ""))
+rr1_ratio <- sprintf("(%s %s)", range_x(rr$ratio, 0), if (all(rr$ratio > 1)) "slower" else "different")
+
+dt1_rr1 <- do.call(rbind, lapply(stats_main, function(s) data.frame(stat = s, width = widths,
+  v = vapply(widths, function(w) verdict(trip(s, "data.table (1 thread)", w), trip(s, "RcppRoll (1 thread)", w)), ""), stringsAsFactors = FALSE)))
+dt1_rr1_txt <- pattern_txt(dt1_rr1)
+dt_single_stats <- intersect(c("mean", "sum", "min", "max"), dt_flat$statistic[dt_flat$entry == "data.table"])
+dt_single_txt <- if (length(dt_single_stats)) sprintf(" (whose %s calls are single-threaded anyway)", paste(dt_single_stats, collapse = "/")) else ""
+dt1_med <- slash(med_w("median", "data.table (1 thread)")); rr1_med <- slash(med_w("median", "RcppRoll (1 thread)"))
+rw_med <- slash(med_w("median", "RollingWindow"))
+rw_v <- vapply(widths, function(w) verdict(trip("median", "RollingWindow", w), trip("median", "data.table (1 thread)", w)), "")
+rw_med_txt <- runs_txt(rw_v, widths, vocab_ahead)
+dt_med_ratio <- med("median", "data.table", w_mid) / med("median", "RcppRoll", w_mid)
+dt_med_txt <- sprintf("%s %s threads data.table's median (%s) is %s the %s-thread RcppRoll (%s).",
+  if (dt_med_ratio >= 1 + th_level) "Even with its" else "With its", n_dt_threads, ms_s(med("median", "data.table", w_mid)),
+  if (dt_med_ratio >= 1 + th_level) paste("about", fmt_xr(dt_med_ratio), "slower than") else if (dt_med_ratio <= 1 / (1 + th_level)) paste("about", fmt_xr(1 / dt_med_ratio), "faster than") else "level with",
+  n_rr_threads, ms_s(med("median", "RcppRoll", w_mid)))
+exc <- stats_main[win_1t != "data.table"]
+exc_txt <- if (!length(exc)) sprintf("At equal, one-thread conditions data.table is the fastest at w=%s in every statistic.", w_mid) else
+  paste(vapply(exc, function(s) {
+    v <- sort(view_1t(s, w_mid))
+    lab <- function(e) ifelse(is.na(vapply(e, rw_threaded_pkg, "")), e, paste("one-thread", e))
+    top <- head(names(v), 3)
+    sprintf("%s is the exception: %s (%s) is fastest, then %s%s.", s, lab(top[1]), ms_s(v[[1]]),
+            join_and(sprintf("%s (%s)", lab(top[-1]), fmt_ms(v[top[-1]]))),
+            if (s == "sd") "; the post had no data.table sd" else "")
+  }, ""), collapse = " ")
+
+# ---- roll, slider, zoo, runner, custom ---------------------------------------------
+roll_ms <- merge_equal("roll", stats_main)
+beats <- function(stat, dt_fn, other) is_faster(vapply(widths, function(w) verdict(trip(stat, dt_fn, w), trip(stat, other, w)), ""))
+dt_beats_roll_def <- all(vapply(c("median", "sd"), function(s) all(beats(s, "data.table", "roll")), TRUE))
+dt_beats_roll_1t <- all(vapply(c("median", "sd"), function(s) all(beats(s, "data.table (1 thread)", "roll (1 thread)")), TRUE))
+roll_vs_dt_txt <- if (dt_beats_roll_def && dt_beats_roll_1t) {
+  sprintf("data.table %s now has %s and %s and beats it on those (at one thread, too: median %s vs %s ms, sd %s vs %s)",
+    dt_minor, code("frollmedian"), code("frollsd"), fmt_ms(med("median", "data.table (1 thread)", w_mid)),
+    fmt_ms(med("median", "roll (1 thread)", w_mid)), fmt_ms(med("sd", "data.table (1 thread)", w_mid)), fmt_ms(med("sd", "roll (1 thread)", w_mid)))
+} else if (dt_beats_roll_def) {
+  sprintf("data.table %s beats it on median and sd at default settings, but not at one thread", dt_minor)
+} else {
+  sprintf("data.table %s does not beat it on both median and sd in this run (median %s vs %s ms, sd %s vs %s)", dt_minor,
+    fmt_ms(med("median", "data.table", w_mid)), fmt_ms(med("median", "roll", w_mid)), fmt_ms(med("sd", "data.table", w_mid)), fmt_ms(med("sd", "roll", w_mid)))
+}
+roll_ran_txt <- if (roll_flat) "roll ran on one thread for every statistic." else sprintf("roll used extra threads for %s.", join_and(roll_rows$statistic[roll_rows$class != "flat"]))
+
+fn_stats <- function(fn) { s <- unique(cells$stat[cells$fn == fn]); intersect(stat_order, s) }
+at_w <- function(fn, w, stats = fn_stats(fn)) vapply(stats, function(s) med(s, fn, w), 0)
+slower_than_dt <- function(fn) {
+  s <- intersect(fn_stats(fn), stats_main)
+  all(vapply(s, function(st) is_slower(verdict(trip(st, fn, w_mid), trip(st, "data.table", w_mid))), TRUE))
+}
+slider_grows <- all(vapply(fn_stats("slider"), function(s) med(s, "slider", w_hi) > th_grow * med(s, "slider", w_lo), TRUE))
+slider_txt <- sprintf("slider (%s at w=%s; %s at w=%s, %s at w=%s%s) %s", range_ms(at_w("slider", w_mid)), w_mid,
+  range_ms(at_w("slider", w_lo)), w_lo, range_ms(at_w("slider", w_hi)), w_hi, if (slider_grows) ", growing with the width" else "",
+  if (slower_than_dt("slider")) "is for custom alignment, not speed" else "is not slower than data.table in every statistic")
+zoo_runner_slow <- slower_than_dt("zoo") && slower_than_dt("runner")
+zoo_runner_txt <- sprintf("zoo (%s) and runner (%s at w=%s, %s at w=%s) %s", range_ms(at_w("zoo", w_mid)),
+  range_ms(at_w("runner", w_mid)), w_mid, range_ms(at_w("runner", w_hi)), w_hi,
+  if (zoo_runner_slow) "are slow" else "are not slower than data.table in every statistic")
+cus_fa <- med("custom", "data.table::frollapply", w_mid); cus_fa1 <- med("custom", "data.table::frollapply (1 thread)", w_mid)
+cus_zoo <- med_w("custom", "zoo::rollapply")
+cus_zoo_grows <- length(na.omit(cus_zoo)) > 1 && all(diff(na.omit(cus_zoo)) > 0)
+opt_equiv <- med_w("sum", "data.table")
+cus_grow_txt <- if (cus_zoo_grows) "growing with the width" else "not growing with the width"
+cus_verdict <- if (min(c(cus_fa, cus_zoo), na.rm = TRUE) > th_avoid * max(opt_equiv)) "Avoid them." else "They are not clearly slower in this run."
+
+# ---- where cuplyr lands --------------------------------------------------------------
+cup_native <- c("mean", "sum", "min", "max")
+cup_native <- intersect(cup_native, stats_main)
+# a cell that was not timed (skipped or failed) is left out of the range
+nat_txt <- paste(vapply(widths, function(w) {
+  v <- vapply(cup_native, function(s) med(s, "cuplyr", w), 0)
+  v <- v[!is.na(v)]
+  if (!length(v)) return("not timed")
+  a <- fmt_2(min(v)); b <- fmt_2(max(v)); if (a == b) a else paste0(a, "-", b)
+}, ""), collapse = " / ")
+widths_slash <- paste(widths, collapse = " / ")
+excl_cup <- c("cuplyr", "cuplyr (froll alias)")
+# RcppRoll runs on many threads by default when its one-thread control scales (the
+# threads table says so); name it that way wherever it is compared
+lab_cpu <- function(fn) ifelse(fn == "RcppRoll" & rr_scales, paste0(n_rr_threads, "-thread RcppRoll"), fn)
+vs_text <- function(stat, mine = "cuplyr") {
+  comp <- setdiff(unique(cells$fn[cells$stat == stat]), excl_cup)
+  pats <- vapply(comp, function(e) paste(vapply(widths, function(w) verdict(trip(stat, mine, w), trip(stat, e, w)), ""), collapse = "|"), "")
+  groups <- split(comp, factor(pats, levels = unique(pats)))
+  paste(vapply(names(groups), function(p) {
+    v <- strsplit(p, "|", fixed = TRUE)[[1]]; v[v == "NA"] <- NA
+    sprintf("against %s, %s is %s", join_and(sprintf("%s (%s)", lab_cpu(groups[[p]]), fmt_ms(vapply(groups[[p]], function(e) med(stat, e, w_mid), 0)))), mine, runs_txt(v, widths))
+  }, ""), collapse = "; ")
+}
+mean_vs <- vs_text("mean")
+rank_of <- function(stat, width, fn = "cuplyr") {
+  v <- vapply(setdiff(unique(cells$fn[cells$stat == stat]), setdiff(excl_cup, fn)), function(e) med(stat, e, width), 0)
+  c(rank = unname(rank(v)[fn]), n = length(v))
+}
+mean_rank <- rank_of("mean", w_mid)
+rank_pos <- if (is.na(mean_rank[["rank"]])) "not ranked (its mean at this width was not timed)" else
+  if (mean_rank[["rank"]] / mean_rank[["n"]] <= th_front) "near the front" else
+  if (mean_rank[["rank"]] / mean_rank[["n"]] >= 1 - th_front) "near the back" else "mid-pack"
+rank_detail <- if (is.na(mean_rank[["rank"]])) "" else sprintf(" (rank %s of %s entries for mean at w=%s)", mean_rank[["rank"]], mean_rank[["n"]], w_mid)
+sum_v <- vapply(widths, function(w) verdict(trip("sum", "cuplyr", w), trip("sum", "roll", w)), "")
+sum_roll_txt <- sprintf("For sum against roll, cuplyr is %s (%s vs %s ms at w=%s).", runs_txt(sum_v), fmt_ms(med("sum", "cuplyr", w_mid)), fmt_ms(med("sum", "roll", w_mid)), w_mid)
+mm_win <- widths[vapply(widths, function(w) all(vapply(c("min", "max"), function(s) is_faster(verdict(trip(s, "cuplyr", w), trip(s, "data.table", w))), TRUE)), TRUE)]
+mm_w <- if (length(mm_win)) mm_win[1] else w_mid
+mm_txt <- sprintf("For min and max it beats data.table %s (cuplyr vs data.table at w=%s: %s)", if (!length(mm_win)) "at no width" else if (length(mm_win) == length(widths)) "at every width" else paste("only at", join_and(paste0("w=", mm_win))),
+  mm_w, join_and(vapply(c("min", "max"), function(s) sprintf("%s vs %s ms for %s", fmt_ms(med(s, "cuplyr", mm_w)), fmt_ms(med(s, "data.table", mm_w)), s), "")))
+sd_ms <- med_w("sd", "cuplyr")
+sd_ranks <- lapply(widths, function(w) rank_of("sd", w))
+rank_word <- function(r) if (is.na(r[["rank"]])) "not timed" else if (r[["rank"]] == 1) "fastest" else if (r[["rank"]] == r[["n"]]) "slowest of all" else ordinal(r[["rank"]])
+sd_rank_txt <- join_and(mapply(function(r, w) sprintf("%s at w=%s", rank_word(r), w), sd_ranks, widths))
+sd_last <- isTRUE(sd_ranks[[3]][["rank"]] == sd_ranks[[3]][["n"]])
+sd_others_hi <- setdiff(unique(cells$fn[cells$stat == "sd"]), excl_cup)
+sd_next <- sd_others_hi[which.max(vapply(sd_others_hi, function(e) med("sd", e, w_hi), 0))]
+sd_tail <- if (sd_last) sprintf(" (data.table %s; the slowest other entry is %s, %s ms)", fmt_ms(med("sd", "data.table", w_hi)), sd_next, fmt_ms(med("sd", sd_next, w_hi))) else ""
+sd_line <- paste0(sd_rank_txt, sd_tail)
+sd_sent <- if (all(is.na(sd_ms))) "cuplyr sd was not timed in this run (see the skipped cells)." else
+  sprintf("cuplyr sd takes %s ms: %s.", slash(sd_ms), sd_line)
+fb_txt <- if (median_skipped) sprintf("cuplyr %s is not timed: it has no GPU path and runs on the CPU fallback, so it is left out of every figure here (F3).", code("roll_median()")) else
+  if (has_cell("median", "cuplyr", w_mid)) sprintf("cuplyr median takes %s ms (native in this run).", slash(med_w("median", "cuplyr"))) else
+  "cuplyr has no median entry in this run."
+
+# ---- how cuplyr scales with the width ------------------------------------------------
+trend <- function(stat, fn) { r <- med(stat, fn, w_hi) / med(stat, fn, w_lo); if (is.na(r)) NA_character_ else if (r >= th_trend) "grows" else if (r <= 1 / th_trend) "shrinks" else "flat" }
+cup_grow_ratio <- vapply(c("mean", "sd"), function(s) med(s, "cuplyr", w_hi) / med(s, "cuplyr", w_lo), 0)
+# unknown when a cuplyr mean or sd cell at the narrowest or widest width was not timed
+cup_grow_known <- !anyNA(cup_grow_ratio)
+cup_grows <- cup_grow_known && all(cup_grow_ratio >= th_trend)
+grow_unknown_why <- sprintf("a cuplyr mean or sd cell at w=%s or w=%s was not timed", w_lo, w_hi)
+# "1.99 / 2.05 / 4.10 ms", with "not timed" for a missing cell
+fig_w <- function(v) if (all(is.na(v))) "not timed" else paste(paste(ifelse(is.na(v), "not timed", fmt_ms(v)), collapse = " / "), "ms")
+grow_figs <- sprintf("mean %s; sd %s", fig_w(med_w("mean", "cuplyr")), fig_w(sd_ms))
+trend_fns <- c("data.table", "data.table (exact)", "roll", "RcppRoll")
+trend_df <- do.call(rbind, lapply(trend_fns, function(f) data.frame(fn = f, stat = fn_stats(f)[fn_stats(f) %in% stat_order], stringsAsFactors = FALSE)))
+trend_df$trend <- mapply(trend, trend_df$stat, trend_df$fn)
+trend_items <- function(kind) {
+  d <- trend_df[trend_df$trend %in% kind, ]
+  if (!nrow(d)) return(character())
+  unlist(lapply(unique(d$fn), function(f) {
+    s <- d$stat[d$fn == f]
+    all_s <- fn_stats(f)[fn_stats(f) %in% stat_order]
+    if (f == "data.table (exact)") "data.table's exact sum"
+    else if (length(s) == length(all_s) && length(s) > 1) lab_cpu(f) else sprintf("%s's %s", lab_cpu(f), paste(s, collapse = "/"))
+  }))
+}
+trend_flat <- join_and(trend_items("flat")); trend_down <- join_and(trend_items("shrinks")); trend_up <- join_and(trend_items("grows"))
+width_ratio <- w_hi / w_mid
+sd_up <- med("sd", "cuplyr", w_hi) / med("sd", "cuplyr", w_mid)
+grow_txt <- if (!cup_grow_known) sprintf("Whether cuplyr's cost grows with the window width is not known from this run (%s; %s)", grow_unknown_why, grow_figs) else
+  if (cup_grows) sprintf("cuplyr's cost grows with the window width (%s)", grow_figs) else
+  sprintf("cuplyr's cost does not grow strongly with the window width (%s)", grow_figs)
+trend_txt <- sprintf("%s are flat in the width%s%s",
+  trend_flat, if (nzchar(trend_down)) sprintf(" (%s get faster with the width", trend_down) else "",
+  if (nzchar(trend_up)) sprintf("%s %s get slower)", if (nzchar(trend_down)) ";" else " (", trend_up) else if (nzchar(trend_down)) ")" else "")
+incr_txt <- if (cup_grows) "\"The kernel is not incremental\" is my inference from that scaling; I did not read or profile the kernel (F2)." else "I did not read or profile the kernel (F2)."
+rescan_txt <- if (!cup_grow_known) "" else if (cup_grows) {
+  if (is.na(sd_up)) "That pattern is what a kernel that rescans each window would produce." else
+    sprintf("That pattern is what a kernel that rescans each window would produce (sd goes up %s for a %s wider window).", fmt_x(sd_up), fmt_x(width_ratio, 0))
+} else "That is not the pattern a kernel that rescans each window would produce."
+
+# ---- grouped and large ------------------------------------------------------------------
+g_cup <- ext_med(grp_lab, "cuplyr", group_width); g_dt <- ext_med(grp_lab, "data.table (by = g)", group_width)
+g_sl <- ext_med(grp_lab, "slider (grouped_df)", group_width); g_dt1 <- ext_med(grp_lab, "data.table (by = g, 1 thread)", group_width)
+g_dir <- function(r) if (is.na(r)) "not comparable with" else if (r >= 1 + th_level) sprintf("about %s faster than", fmt_xr(r)) else if (r <= 1 / (1 + th_level)) sprintf("about %s slower than", fmt_xr(1 / r)) else "level with"
+g_txt <- if (is.na(g_cup)) sprintf("cuplyr was not timed (%s), so there is no grouped comparison; data.table by group took %s ms and slider %s ms",
+                                   if (any(sk$chunk == "bench-ext" & sk$stat == "grouped mean")) "its probe call fell back to the CPU" else "its cell failed",
+                                   fmt_ms(g_dt), fmt_ms(g_sl)) else
+  sprintf("cuplyr %s ms vs data.table by group %s ms and slider %s ms, so cuplyr is %s data.table and %s slider, computation only",
+          fmt_ms(g_cup), fmt_ms(g_dt), fmt_ms(g_sl), g_dir(g_dt / g_cup), g_dir(g_sl / g_cup))
+g_fast <- isTRUE(g_cup < min(g_dt, g_sl, g_dt1, na.rm = TRUE))
+by_verb <- if (by_flat) "ran effectively single-threaded" else "used threads"
+by_tail <- if (by_flat && !is.na(g_cup)) sprintf(", so the %s is the GPU against **one CPU thread making %s per-group calls**, not against %s threads", fmt_xr(g_dt / g_cup), fmt_int(n_groups), n_dt_threads) else ""
+ung_fns <- unique(ext$fn[ext$experiment == "ungrouped mean"])
+thr_label <- function(fn) {
+  base <- fn
+  r <- thr[thr$kind == "ungrouped" & thr$entry == base, ]
+  if (nrow(r) && r$class[1] == "scales") paste0(sub(" .*", "", r$threads[1]), "-thread ", base) else base
+}
+ung_at <- function(w) {
+  others <- setdiff(ung_fns, "cuplyr")
+  data.frame(fn = others, med = vapply(others, function(e) ext_med("ungrouped mean", e, w), 0),
+             v = vapply(others, function(e) verdict(ext_trip("ungrouped mean", "cuplyr", w), ext_trip("ungrouped mean", e, w)), ""),
+             stringsAsFactors = FALSE)
+}
+# widths with a cuplyr figure (a skipped or failed cell has none)
+ung_have <- vapply(widths, function(w) !is.na(ext_med("ungrouped mean", "cuplyr", w)), TRUE)
+ung_fast <- ung_have & vapply(widths, function(w) { d <- ung_at(w); all(is_faster(d$v)) }, TRUE)
+ung_txt <- function(w) {
+  d <- ung_at(w)
+  cup <- ext_med("ungrouped mean", "cuplyr", w)
+  scaled <- d$fn[grepl("1 thread", d$fn)]
+  scaled <- scaled[vapply(scaled, function(e) { b <- rw_base_label(e); r <- thr[thr$kind == "ungrouped" & thr$entry == b, ]; nrow(r) > 0 && r$class[1] == "scales" }, TRUE)]
+  dflt <- d[!grepl("1 thread", d$fn), ]
+  if (all(is_faster(d$v))) {
+    sprintf("%s ms vs %s%s", fmt_ms(cup), join_and(sprintf("%s %s", vapply(dflt$fn, thr_label, ""), fmt_ms(dflt$med))),
+            if (length(scaled)) paste0("; ", join_and(sprintf("one-thread %s %s", rw_base_label(scaled), fmt_ms(d$med[match(scaled, d$fn)])))) else "")
+  } else {
+    ahead <- dflt[is_slower(dflt$v), ]; lvl <- dflt[dflt$v == "level" | grepl("slightly", dflt$v), ]
+    sprintf("%s ms vs %s%s", fmt_ms(cup), join_and(sprintf("%s %s", vapply(ahead$fn, thr_label, ""), fmt_ms(ahead$med))),
+            if (nrow(lvl)) sprintf("; level with %s", join_and(sprintf("%s %s", lvl$fn, fmt_ms(lvl$med)))) else "")
+  }
+}
+ung_fast_txt <- join_and(vapply(widths[ung_fast], function(w) sprintf("w=%s (%s)", w, ung_txt(w)), ""))
+ung_slow_txt <- join_and(vapply(widths[ung_have & !ung_fast], function(w) sprintf("w=%s (%s)", w, ung_txt(w)), ""))
+ung_beats_rr <- any(vapply(widths[ung_fast], function(w) { d <- ung_at(w); "RcppRoll" %in% d$fn && is_faster(d$v[d$fn == "RcppRoll"]) }, TRUE))
+ung_sent <- paste0(
+  sprintf("At %s ungrouped rows (one size) cuplyr is ", ext_txt),
+  if (any(ung_fast)) sprintf("fastest at %s", ung_fast_txt) else "not the fastest at any width",
+  if (any(ung_have & !ung_fast)) sprintf("%s %s", if (any(ung_fast)) ", and loses at" else ":", ung_slow_txt) else "",
+  if (any(!ung_have)) sprintf("; it was not timed at %s", join_and(paste0("w=", widths[!ung_have]))) else "", ".")
+peak_bytes <- suppressWarnings(max(ext$peak_gpu_bytes, na.rm = TRUE))
+peak_txt <- if (!is.finite(peak_bytes)) sprintf("No %s-row cuplyr call was measured for peak GPU memory", ext_txt) else
+  sprintf("Peak GPU memory for the %s-row call was %s, %s inside %s GB", ext_txt, fmt_mb(peak_bytes),
+          if (peak_bytes < th_mem * gpu_gb * 1e9) "well" else "not far", gpu_gb)
+
+ung_loss <- ung_have & vapply(widths, function(w) { d <- ung_at(w); d <- d[!grepl("1 thread", d$fn), ]; any(is_slower(d$v)) }, TRUE)
+net_fast <- c(if (g_fast) sprintf("the grouped configuration (%s groups)", groups_txt),
+              if (any(ung_fast)) sprintf("%s rows with windows of %s", ext_txt, join_and(widths[ung_fast])))
+net_slow <- c(if (!g_fast && !is.na(g_cup)) "the grouped configuration",
+              if (any(ung_have & !ung_fast)) sprintf("%s rows with windows of %s", ext_txt, join_and(widths[ung_have & !ung_fast])))
+# the scope of the large-configuration wins: narrow windows only when every width it
+# won is narrower than every width it did not (among the widths it was timed at)
+ung_not_fast <- widths[ung_have & !ung_fast]
+net_scope <- if (any(ung_fast) && length(ung_not_fast) && max(widths[ung_fast]) < min(ung_not_fast)) "narrow windows" else "the widths where it was fastest"
+net_lose <- if (any(ung_loss)) sprintf(", and it loses at %s", join_and(paste0("w=", widths[ung_loss]))) else
+  if (length(net_slow)) sprintf(", and it is not clearly ahead for %s", join_and(net_slow)) else ""
+net_txt <- paste0(
+  if (length(net_fast)) sprintf("In the larger configurations measured it was the fastest entry for %s%s", join_and(net_fast),
+                                if (ung_beats_rr) sprintf(", including against %s at %s rows", lab_cpu("RcppRoll"), ext_txt) else "") else "In the larger configurations measured it was not the fastest entry anywhere",
+  "; that is one grouped configuration, one large size", if (any(ung_fast)) paste(" and", net_scope) else "", net_lose, ". All of it only when the data already lives on the GPU.")
+
+# ---- per-call overhead ----------------------------------------------------------------------
+call_labels <- names(rw_overhead_calls(w_mid))
+lab_plain <- call_labels[1]; lab_roll <- call_labels[2]; lab_cum <- call_labels[3]
+oh_med <- function(label, rows) stats::median(oh$ms[oh$stat == "overhead" & oh$fn == label & oh$n_rows == rows])
+floor_df <- oh[oh$stat != "overhead" & oh$n_rows == small_rows, ]
+floor_by_stat <- tapply(floor_df$ms, floor_df$stat, stats::median)
+floor_ms <- stats::median(floor_by_stat)
+plain_small <- oh_med(lab_plain, small_rows); roll_small <- oh_med(lab_roll, small_rows); cum_small <- oh_med(lab_cum, small_rows)
+plain_big <- oh_med(lab_plain, n_rows); roll_big <- oh_med(lab_roll, n_rows); cum_big <- oh_med(lab_cum, n_rows)
+win_extra <- floor_ms - plain_small
+cum_same <- isTRUE(abs(cum_small / roll_small - 1) < th_same)
+kernel_txt <- if (cum_same) "not any single kernel" else "which may include part of the kernel's cost"
+cum_vs_roll_txt <- if (anyNA(c(cum_small, roll_small))) "cumsum and roll_mean are not both timed here, so the extra cost is not split between the path and the kernel." else
+  if (cum_same) sprintf("cumsum costs the same as roll_mean, so the extra %s ms (%s of the floor) belongs to the window-function path, not to any one kernel.", fmt_1(win_extra), fmt_pct(win_extra / floor_ms, 0)) else
+  sprintf("cumsum and roll_mean differ here (%s vs %s ms), so part of the extra %s ms may belong to the kernel rather than to the window-function path.", fmt_ms(cum_small), fmt_ms(roll_small), fmt_1(win_extra))
+floor_vs_dt <- { r <- floor_ms / med("mean", "data.table", w_mid); if (is.na(r)) "not comparable with" else if (r >= 1 + th_level) "larger than" else if (r <= 1 / (1 + th_level)) "smaller than" else "about the same as" }
+floor_share <- floor_ms / med("mean", "cuplyr", w_lo)
+floor_share_txt <- if (is.na(floor_share)) sprintf("not set against the cuplyr mean at width %s here (not timed in this run)", w_lo) else
+  sprintf("about %s of the %s ms measured at %s rows / width %s", fmt_pct(floor_share, 0), fmt_ms(med("mean", "cuplyr", w_lo)), rows_txt, w_lo)
+f4_share_txt <- if (is.na(floor_share)) "" else sprintf(", and the floor is about %s of the narrow-window rolling cost", fmt_pct(floor_share, 0))
+n_floor_samples <- nrow(floor_df)
+w_lo_vs_cum <- med("mean", "cuplyr", w_lo) - cum_big
+narrow_chain <- w_lo_vs_cum / med("mean", "cuplyr", w_lo) < th_chain
+# the narrow-window rolling mean against the cumsum mutate, at the post's size;
+# either cell can be missing (not timed), and then nothing is compared
+narrow_txt <- if (is.na(narrow_chain)) {
+  sprintf("not compared with the %s mutate here, because %s was not timed", code("cumsum"),
+          if (is.na(med("mean", "cuplyr", w_lo))) "the narrow-window rolling mean" else "the cumsum mutate")
+} else paste0(
+  if (w_lo_vs_cum >= 0) sprintf("only %s ms above", fmt_ms(w_lo_vs_cum)) else sprintf("%s ms below", fmt_ms(-w_lo_vs_cum)),
+  " the ", code("cumsum"), " mutate: ",
+  if (narrow_chain) "at narrow widths, most of cuplyr's time at this size is the call chain and the copies, not the rolling kernel" else
+    "at narrow widths the rolling kernel is a visible part of cuplyr's time at this size")
+
+plan_nodes <- lapply(bench_overhead$plans, function(l) { x <- regmatches(l, regexpr("ast_[a-z_]+", l)); x })
+plan_plain <- plan_nodes[[lab_plain]]; plan_win <- plan_nodes[[lab_roll]]
+n_mat_plain <- sum(plan_plain != "ast_source"); n_mat_win <- sum(plan_win != "ast_source")
+chain_win <- paste(plan_win, collapse = " <- "); chain_plain <- paste(plan_plain, collapse = " <- ")
+# "a window node, a mutate node and a select node", from the captured plan
+node_list <- join_and(paste("a", sub("^ast_", "", rev(plan_win[plan_win != "ast_source"])), "node"))
+
+# memory: the decomposition of the bytes held after one eager window mutate
+# a memory call that was skipped (CPU fallback) leaves NA figures, not an error
+mem_na <- function(lab) data.frame(call = lab, n_rows = ext_rows, x_column_bytes = 8 * ext_rows, allocated_bytes = NA_real_,
+                                   held_after_call_bytes = NA_real_, peak_bytes = NA_real_, held_after_gc_bytes = NA_real_)
+mb <- mem_breakdown
+mem_get <- function(lab) if (!is.null(mb) && any(mb$call == lab)) mb[mb$call == lab, ][1, ] else mem_na(lab)
+mb_roll <- mem_get(lab_roll); mb_plain <- mem_get(lab_plain); mb_cum <- mem_get(lab_cum)
+n_mem <- mb_roll$n_rows
+mask_bytes <- function(n) ceiling(n / 512) * 64
+col_b <- mb_roll$x_column_bytes
+bytes_per_row <- col_b / n_mem
+win_out <- 2 * col_b + mask_bytes(n_mem); mut_out <- 3 * col_b + 2 * mask_bytes(n_mem); sel_out <- 2 * col_b + mask_bytes(n_mem)
+pred_held <- win_out + mut_out + sel_out
+held_roll <- mb_roll$held_after_call_bytes; result_roll <- mb_roll$held_after_gc_bytes
+decomp_txt <- if (is.na(held_roll)) "could not be checked here (the call was skipped)" else if (pred_held == held_roll) "matches the measured total exactly" else sprintf("differs from the measured total by %s B", fmt_int(abs(pred_held - held_roll)))
+mem_lead <- if (isTRUE(pred_held == held_roll)) "GPU memory shows it, to the byte" else if (is.na(held_roll)) "GPU memory of the rolling call was not measured" else "GPU memory shows it, though not to the byte"
+plain_pred <- 2 * col_b
+held_peak_txt <- if (is.na(mb_roll$peak_bytes)) "not measured" else if (mb_roll$held_after_call_bytes == mb_roll$peak_bytes) "held = peak" else sprintf("held %s B, peak %s B", fmt_int(mb_roll$held_after_call_bytes), fmt_int(mb_roll$peak_bytes))
+held_ratio <- held_roll / result_roll
+
+# the no-gc() finding
+failed_at <- mem_finding$failed_at_call; n_calls <- mem_finding$n_calls
+oom_quote <- sub("^(GPU operation '[^']*' failed).*(std::bad_alloc: out_of_memory: CUDA).*$", "\\1 ... \\2", gsub("\\s+", " ", mem_finding$error))
+oom_quote <- if (!is.na(failed_at) && grepl("out_of_memory", mem_finding$error)) oom_quote else NA_character_
+gc_lead <- if (!is.na(failed_at)) paste("cuplyr needs the", code("gc()")) else paste("cuplyr is given the", code("gc()"), "too")
+gc_need_txt <- if (!is.na(failed_at)) sprintf("%s back-to-back %s-row calls without it ran the %s GB card out of memory", words(n_calls), ext_txt, gpu_gb) else
+  sprintf("%s back-to-back %s-row calls without it did not run the %s GB card out of memory in this run, but the intermediates still pile up until a collection", words(n_calls), ext_txt, gpu_gb)
+f1_oom_txt <- if (!is.na(failed_at)) sprintf("%s back-to-back calls without %s ran out of memory at the %s (%s) on the %s GB card, with the results dropped each time",
+                                             words(n_calls), code("gc()"), ordinal(failed_at), if (is.na(oom_quote)) "no error text" else paste0("\"", oom_quote, "\""), gpu_gb) else
+  sprintf("%s back-to-back calls without %s did not run out of memory at this size on the %s GB card", words(n_calls), code("gc()"), gpu_gb)
+
+# ---- Deviations -------------------------------------------------------------------------------
+# What the fence costs: the on and off calls were timed in alternation, so the
+# difference is a paired one.
+fence_df <- bench_fence$timings
+have_fence <- !is.null(fence_df)
+th_fence <- 1
+if (have_fence) {
+  f_on <- fence_df[fence_df$label == "on", ]; f_off <- fence_df[fence_df$label == "off", ]
+  fence_on <- stats::median(f_on$ms); fence_off <- stats::median(f_off$ms)
+  fence_diff <- stats::median(f_on$ms - f_off$ms[match(f_on$sample, f_off$sample)])
+  fence_n <- nrow(f_on)
+}
+fence_txt <- if (have_fence) sprintf("the rolling mean at %s rows, w=%s, in %s ms with the fence and %s ms without, %s interleaved pairs, median paired difference %s ms",
+                                      ext_txt, w_mid, fmt_ms(fence_on), fmt_ms(fence_off), fence_n, fmt_ms(fence_diff)) else
+  "nothing: the cell was skipped (see the skipped cells)"
+fence_cost <- if (!have_fence) "an unmeasured amount" else if (abs(fence_diff) < th_fence) sprintf("under %s ms", th_fence) else sprintf("about %s ms", fmt_ms(abs(fence_diff)))
+probe_sample_cells <- sum(grepl("^one sample, and it is the cold first call", cells$note))
+probe_txt <- if (probe_sample_cells == 0) "which no cell did" else sprintf("which %s %s did", words(probe_sample_cells), plural(probe_sample_cells, "cell"))
+warmup_txt <- sprintf("%s; %s above %s s; %s above %s s", rw_warmup_tiers$warmup[1], rw_warmup_tiers$warmup[2], rw_warmup_tiers$above_s[2], rw_warmup_tiers$warmup[3], rw_warmup_tiers$above_s[3])
+
+# runstats: the figures the results tables show, and the paired effect of the
+# alignment shift from the side chunk (its own, interleaved samples)
+rs <- bench_runstats$timings
+have_rs <- !is.null(rs)
+rs_main <- c(mean = med("mean", "runstats", w_mid), sd = med("sd", "runstats", w_mid))
+rs_side <- function(stat, shift) stats::median(rs$ms[rs$stat == stat & rs$shift == shift])
+rs_pair <- function(stat) {
+  o <- rs[rs$stat == stat & rs$shift == "outside", ]; i <- rs[rs$stat == stat & rs$shift == "inside", ]
+  stats::median(i$ms[match(o$sample, i$sample)] - o$ms)
+}
+rs_within <- function(a, b) a / b <= th_x && a / b >= 1 / th_x
+rs_txt <- if (have_rs) sprintf("Chunk %s timed the same two calls again with the shift inside the call, interleaved with the unshifted calls (%s pairs per statistic; these are that chunk's own samples, not the tables'). In those pairs the shift adds %s ms to the mean call (%s ms unshifted, %s ms shifted) and %s ms to the sd call (%s and %s ms), so the shift %s.",
+  code("bench-runstats-shift"), length(unique(rs$sample[rs$stat == "mean"])), fmt_ms(rs_pair("mean")), fmt_ms(rs_side("mean", "outside")), fmt_ms(rs_side("mean", "inside")),
+  fmt_ms(rs_pair("sd")), fmt_ms(rs_side("sd", "outside")), fmt_ms(rs_side("sd", "inside")),
+  if (rs_pair("mean") > th_part * rs_side("mean", "outside")) "is a sizeable part of the mean figure" else "is a small part of the mean figure") else
+  "runstats is not installed, so the effect of the shift was not measured."
+rs_agree_txt <- if (!have_rs) "" else if (rs_within(rs_side("mean", "outside"), rs_main[["mean"]]) && rs_within(rs_side("sd", "outside"), rs_main[["sd"]]))
+  "The unshifted figures of that chunk agree with the tables'." else
+  sprintf("The unshifted figures of that chunk (%s and %s ms) are not the tables' (%s and %s ms): the same call took different times in two chunks of this render, which this report does not explain. The tables' figures are the ones reported; from the side chunk only the paired difference is used.",
+          fmt_ms(rs_side("mean", "outside")), fmt_ms(rs_side("sd", "outside")), fmt_ms(rs_main[["mean"]]), fmt_ms(rs_main[["sd"]]))
+
+# core placement: what pinning shows, which calls run on one thread, and the
+# cross-check of the one-thread RcppRoll cells. The paragraph itself is in the
+# "Hardware and versions" section; these are its data-dependent pieces.
+core <- bench_cores$timings
+core_ok <- !is.null(core) && all(c("fast", "slow") %in% core$kind)
+core_med <- function(k) if (core_ok) stats::median(core$ms[core$kind == k]) else NA_real_
+core_row <- function(k) if (core_ok) core[core$kind == k, ][1, ] else list(n_cpus = NA, mhz = NA)
+core_fast <- core_row("fast"); core_slow <- core_row("slow")
+core_ratio <- core_med("slow") / core_med("fast")
+core_matters <- isTRUE(core_ratio >= th_core)
+core_effect_txt <- if (core_matters) sprintf("landing on a slow core can cost a single-threaded call up to %s, which is what pinning shows for this one", fmt_x(core_ratio)) else
+  "core placement does not matter measurably for that call"
+
+# The calls of the threads table at w=101, named per call: data.table by
+# function (frollmean/sum/..., frollapply), any other entry by package, or by
+# statistic when only some of its calls are in the group.
+thr_main <- thr[thr$kind == "main", ]
+calls_other <- function(rows) {
+  e_all <- unique(rows$entry[!grepl("^data\\.table", rows$entry)])
+  vapply(e_all, function(e) {
+    s <- rows$statistic[rows$entry == e]
+    if (setequal(s, thr_main$statistic[thr_main$entry == e])) e else sprintf("%s's %s", e, paste(s, collapse = "/"))
+  }, "")
+}
+calls_dt <- function(rows) {
+  d <- rows[grepl("^data\\.table", rows$entry), ]
+  if (nrow(d)) paste0("data.table's ", froll_group(d)) else character()
+}
+single_rows <- thr_main[thr_main$class == "flat", ]
+multi_rows <- thr_main[thr_main$class != "flat", ]
+# the packages without a thread control are single-threaded by the static check above
+# groups are separated by semicolons, since data.table's group is a list itself
+single_other <- c(calls_other(single_rows), unctl, if (ver[["runstats"]] != "not installed") "runstats")
+single_calls_txt <- paste(c(if (length(single_other)) join_and(single_other), calls_dt(single_rows)), collapse = "; ")
+multi_other <- calls_other(multi_rows)
+multi_calls_txt <- paste(c(if (length(multi_other)) join_and(multi_other), calls_dt(multi_rows)), collapse = "; ")
+multi_txt <- if (nrow(multi_rows)) sprintf("The calls the threads table shows using more than one thread (%s) can use both kinds of core.", multi_calls_txt) else
+  "No call in the threads table uses more than one thread."
+dt_agree_txt <- if (nrow(dt_flat)) sprintf("data.table's default and one-thread timings of its single-threaded calls (%s) are within %s of each other.",
+                                           froll_group(dt_flat), within_pct(dt_flat$ratio)) else ""
+
+# the cross-check: the table's one-thread RcppRoll mean against the 1e7-row
+# rate and the two pinned figures; the sentence names the figures it agrees with
+within_x <- function(a, b) isTRUE(a / b <= th_x && a / b >= 1 / th_x)
+x_apart <- function(a, b) fmt_x(max(a, b) / min(a, b), 2)
+xc_main <- med("mean", "RcppRoll (1 thread)", w_mid)
+xc_ext <- ext_med("ungrouped mean", "RcppRoll (1 thread)", w_mid) * n_rows / ext_rows
+xc_ext_ok <- within_x(xc_main, xc_ext)
+xc_fast_ok <- within_x(xc_main, core_med("fast")); xc_slow_ok <- within_x(xc_main, core_med("slow"))
+xc_ok <- xc_ext_ok && (!core_ok || xc_fast_ok || xc_slow_ok)
+xc_core_figs <- if (core_ok) sprintf(", %s ms on a fast core and %s ms on a slow one", fmt_ms(core_med("fast")), fmt_ms(core_med("slow"))) else ""
+xc_figs <- c(ext = sprintf("the %s-row rate", ext_txt), fast = "the fast-core figure", slow = "the slow-core figure")
+xc_vals <- c(ext = xc_ext, fast = core_med("fast"), slow = core_med("slow"))
+xc_hit <- c(ext = xc_ext_ok, fast = xc_fast_ok, slow = xc_slow_ok)
+xc_have <- !is.na(xc_vals)
+xc_miss <- names(xc_vals)[xc_have & !xc_hit]
+xc_miss_txt <- join_and(vapply(xc_miss, function(k) sprintf("%s away from %s", x_apart(xc_main, xc_vals[[k]]), xc_figs[[k]]), ""))
+xc_hits <- xc_figs[xc_have & xc_hit]
+xc_agree_txt <- if (length(xc_hits)) sprintf("agrees with %s within a factor of %s", join_and(xc_hits), th_x) else ""
+xc_verdict <- if (is.na(xc_main)) {
+  "RcppRoll's one-thread mean was not timed at this width, so there is nothing to cross-check."
+} else if (!xc_ok) {
+  sprintf("The table figure %s%s, so the one-thread RcppRoll cells of this render are suspect and the run should be repeated.",
+          if (nzchar(xc_agree_txt)) paste(xc_agree_txt, "but is ") else "is ", xc_miss_txt)
+} else {
+  paste0("The table figure ", xc_agree_txt,
+         if (length(xc_miss)) paste0(" and is ", xc_miss_txt) else "",
+         if (!core_ok) "." else if (xc_fast_ok && !xc_slow_ok) ", so this render's one-thread RcppRoll cell ran at fast-core speed." else
+           if (xc_slow_ok && !xc_fast_ok) ", so this render's one-thread RcppRoll cell ran at slow-core speed." else
+           "; the two pinned figures are too close to tell which kind of core it ran on.")
+}
+
+# the one call this render timed twice in different chunks
+rs_moved_txt <- if (!have_rs) "" else if (!rs_within(rs_main[["mean"]], rs_side("mean", "outside")))
+  sprintf("One call did move between chunks: the runstats mean call took %s ms in the results table and %s ms in chunk %s of the same render (%s apart). This report does not establish why; core placement is a possible cause, not a shown one.",
+          fmt_ms(rs_main[["mean"]]), fmt_ms(rs_side("mean", "outside")), code("bench-runstats-shift"), x_apart(rs_main[["mean"]], rs_side("mean", "outside"))) else
+  sprintf("The runstats mean call, timed in two chunks of this render, took %s ms in the results table and %s ms in chunk %s.",
+          fmt_ms(rs_main[["mean"]]), fmt_ms(rs_side("mean", "outside")), code("bench-runstats-shift"))
+n_cells <- nrow(cr); n_ok <- sum(cr$ok); n_err <- sum(grepl("^error:", cr$note))
+n_cells_all <- n_cells + n_skip_main
+bad <- cr[!cr$ok, ]
+alias_diff <- unlist(lapply(setdiff(stats_main, "median"), function(s) vapply(widths, function(w) med(s, "cuplyr (froll alias)", w) - med(s, "cuplyr", w), 0)))
+# cells where either entry was not timed are not compared
+alias_diff <- alias_diff[!is.na(alias_diff)]
+alias_txt <- if (!length(alias_diff)) "no cell has both entries timed, so the two were not compared" else if (all(alias_diff > 0)) sprintf("the alias was %s-%s ms slower than native in each of the %s cells, i.e. within %s ms", fmt_ms(min(alias_diff)), fmt_ms(max(alias_diff)), length(alias_diff), format(ceiling(max(alias_diff) * 10) / 10)) else
+  sprintf("the alias differed from native by %s to %s ms across %s cells (slower in %s of them)", fmt_ms(min(alias_diff)), fmt_ms(max(alias_diff)), length(alias_diff), sum(alias_diff > 0))
+n_caught <- sum(cr$fell_back %in% TRUE)
+skip_intro <- if (n_skip) "These cells were not timed; the reason is the message of the probe call. None of them has a row in `timings.csv` or `correctness.csv`; they are listed in `skipped.csv`." else "No cell was skipped in this run, so there is nothing to list."
+median_panel_txt <- if (median_skipped) "The median table and plot carry a note instead of a cuplyr number, because that call is not timed; every cuplyr entry that is timed is computation only." else "Every cuplyr entry is computation only."
+denom_txt <- if (n_skip_main == 0) "No cell was skipped, so it is every cell the benchmark planned." else
+  sprintf("%s planned %s skipped as CPU fallbacks and are neither timed nor checked, so the count is %s, not %s.", cap1(words(n_skip_main)), plural(n_skip_main, "cell was", "cells were"), n_cells, n_cells_all)
+skip_count_txt <- if (!n_skip) "No cell was skipped in this run." else
+  sprintf("%s %s skipped in this run: %s; they are listed in the table below and in `skipped.csv`.", cap1(words(n_skip)), plural(n_skip, "cell was", "cells were"), skip_summary)
+caught_txt <- if (n_caught == 0) "none was raised by a timed cell" else sprintf("%s raised by a timed cell, which is a bug in the probe and invalidates that cell", words(n_caught))
+median_entry_txt <- if (median_skipped) sprintf("There is no cuplyr median entry: %s has no cudf kernel in %s and runs through an R loop on collected data, so it is not timed.", code("roll_median()"), cudf_ver_short) else
+  "The median has a native cuplyr entry in this run."
+dt_med_rng <- range_ms(med_w("median", "data.table"))
+
+# ---- install logs -----------------------------------------------------------------------------------
+logs <- sort(list.files(params$out_dir, pattern = "^install.*\\.log$"))
+log_failed <- lapply(logs, function(f) {
+  l <- readLines(file.path(params$out_dir, f), warn = FALSE)
+  m <- regmatches(l, regexec("^\\s*(\\S+)\\s+(?:<NA>|\\S+)\\s+not run: install failed", l))
+  unique(vapply(Filter(length, m), function(z) z[2], ""))
+})
+log_notes <- c("install-attempt1-pixi-toolchain.log" = "", "install-attempt2-path-only.log" = "PATH only",
+               "install-attempt3-env.log" = "roll via RcppParallel's TBB configure, runstats via missing fftwtools, RollingWindow format-security",
+               "install-attempt4.log" = "RollingWindow only: the first flag attempt, PKG_CXXFLAGS, did not override the later -Werror",
+               "install.log" = "final run")
+log_table <- data.frame(log = logs, failed = vapply(log_failed, function(z) if (length(z)) paste(z, collapse = ", ") else "none", ""),
+                        note = ifelse(logs %in% names(log_notes), log_notes[logs], ""), stringsAsFactors = FALSE)
+all_installed <- all(ver[bench_pkgs] != "not installed")
+missing_pkgs <- names(ver)[ver == "not installed"]
+last_clean <- length(logs) > 0 && length(log_failed[[length(logs)]]) == 0
+install_lead <- if (all_installed) "Everything the benchmark needs is installed; nothing is \"not run: install failed\"" else
+  sprintf("These packages are not installed, so their entries are missing: %s", join_and(missing_pkgs))
+knitr_dir <- dirname(find.package("knitr")); rmd_dir <- dirname(find.package("rmarkdown"))
+deps_where <- unique(c(knitr_dir, rmd_dir))
+deps_in_lib <- all(normalizePath(deps_where, mustWork = FALSE) == normalizePath(params$lib, mustWork = FALSE))
+deps_txt <- sprintf("they were found in %s (%s), and rendering this document installs nothing", join_and(code(deps_where)),
+                    if (deps_in_lib) "the benchmark library" else "not the benchmark library")
+install_runs <- if (length(logs) > 1) sprintf("It took %s install runs because", words(length(logs))) else "The install needed care because"
+
+# ---- the statement about grouping F-findings ---------------------------------------------------------------
+worst_stat <- { s <- intersect(c("mean", "sum", "min", "max", "sd"), stats_main); r <- vapply(s, function(z) med(z, "cuplyr", w_hi) / med(z, "cuplyr", w_mid), 0); names(which.max(r)) }
+f2_lead <- if (!cup_grow_known) sprintf("Whether the rolling kernels slow down with the window width is not known from this run (%s).", grow_unknown_why) else
+  if (cup_grows) sprintf("Rolling kernels slow down with the window width; %s is the worst.", worst_stat) else "Rolling kernels do not slow down strongly with the window width in this run."
+u_hi <- function(fn) ext_med("ungrouped mean", fn, w_hi)
+dt_med_1t_rng <- range_ms(med_w("median", "data.table (1 thread)"))
+ptr_txt <- if (ptr_probe[["dollar_null"]]) paste0("returns NULL (tibble's ", code("$"), "), so helper code has to use ", code(".subset2()")) else
+  paste0("works from outside the namespace (checked in this run), so helper code need not use ", code(".subset2()"))
+f2_infer <- if (!cup_grow_known) "" else if (cup_grows) "The scaling suggests the kernel rescans each window (inference; not profiled)." else "The widths do not show strong growth in this run, so there is no evidence of a rescan here."
+f2_row_if <- if (cup_grows) "Candidate row" else "Candidate row (only if the growth shows up in a later run)"
+f3_body <- if (median_skipped) sprintf("%s (%s) loops in R, and it is not timed anywhere in this report. Candidate rows: (a) cheap, call %s (%s here at %s threads, %s at one thread across the three widths) inside the fallback; (b) real, a GPU rolling median (cudf %s has no MEDIAN rolling aggregation).",
+  code("roll_apply_generic"), code("R/roll.R"), code("data.table::frollmedian"), dt_med_rng, n_dt_threads, dt_med_1t_rng, cudf_ver_short) else ""
+f3_lead <- if (median_skipped) sprintf("%s's CPU fallback is an R loop, not measured in this report.", code("roll_median()")) else
+  sprintf("%s has no CPU fallback in this run.", code("roll_median()"))
+```
+
+```{r}
+#| label: csv
+#| include: false
+# The CSVs next to the rendered HTML, written from the (possibly cached) data
+# on every render, so they always match the numbers in the text.
+ext_csv <- ext
+ext_csv$experiment <- ifelse(ext$experiment == "grouped mean", grp_lab, ung_lab)
+utils::write.csv(rbind(bench_main$timings, bench_overhead$timings), file.path(params$out_dir, "timings.csv"), row.names = FALSE)
+utils::write.csv(cr, file.path(params$out_dir, "correctness.csv"), row.names = FALSE)
+utils::write.csv(ext_csv, file.path(params$out_dir, "extension.csv"), row.names = FALSE)
+utils::write.csv(versions_csv, file.path(params$out_dir, "versions.csv"), row.names = FALSE)
+utils::write.csv(mem_breakdown, file.path(params$out_dir, "memory-breakdown.csv"), row.names = FALSE)
+utils::write.csv(mem_finding, file.path(params$out_dir, "memory-finding.csv"), row.names = FALSE)
+utils::write.csv(sk_csv, file.path(params$out_dir, "skipped.csv"), row.names = FALSE)
+```
+
+```{r}
+#| label: plots
+#| include: false
+width_cols <- c("#1b9e77", "#d95f02", "#7570b3")
+plot_interval_widths <- c(0.5, 0.95)
+plot_levels <- join_and(fmt_pct(plot_interval_widths, 0))
+if (requireNamespace("paletteer", quietly = TRUE)) {
+  width_cols <- tryCatch(as.character(paletteer::paletteer_d("RColorBrewer::Dark2"))[1:3], error = function(e) width_cols)
+}
+lab_ms <- function(v) ifelse(v >= 1000, sprintf("%.1f s", v / 1000), sprintf("%.3g ms", v))
+
+# A statistic with a cuplyr cell that was not timed (CPU fallback) carries the
+# note as a caption on its plot, and as a row in its table.
+skip_fns <- function(stat) unique(sk_main$fn[sk_main$stat == stat & grepl("^cuplyr", sk_main$fn)])
+
+# the caption of a statistic's plot: one note per untimed cuplyr entry,
+# wrapped so a long note stays inside the figure
+plot_caption <- function(stat) {
+  if (!length(skip_fns(stat))) return(NULL)
+  paste(vapply(skip_fns(stat), function(f) paste(strwrap(paste0(f, " ", skip_note(stat, f)), width = 90), collapse = "\n"), ""), collapse = "\n")
+}
+plot_height <- function(stat) {
+  d <- main[main$stat == stat, ]
+  cap <- plot_caption(stat)
+  2 + 0.55 * length(unique(d$fn)) + 0.2 * if (is.null(cap)) 0 else length(strsplit(cap, "\n")[[1]])
+}
+
+stat_plot <- function(stat) {
+  d <- main[main$stat == stat, ]
+  if (!nrow(d)) return(invisible(NULL))
+  med_mid <- tapply(d$ms[d$width == w_mid], d$fn[d$width == w_mid], stats::median)
+  ord <- names(sort(med_mid, decreasing = TRUE))
+  ord <- c(setdiff(unique(d$fn), ord), ord)
+  d$fn <- factor(d$fn, levels = ord)
+  d$width_f <- factor(d$width)
+  lab <- data.frame(fn = factor(names(med_mid), levels = ord), ms = as.numeric(med_mid), label = lab_ms(as.numeric(med_mid)))
+  sub <- paste0("point = median, bars = ", paste(fmt_pct(plot_interval_widths, 0), collapse = " / "), " of samples; label = median at width ", w_mid, "\n",
+                "(1 thread) = same call with that package's thread count set to 1\n",
+                "cuplyr: computation only, data already on the GPU, no upload/download")
+  cap <- plot_caption(stat)
+  p <- ggplot2::ggplot(d, ggplot2::aes(x = ms, y = fn, colour = width_f))
+  if (requireNamespace("ggdist", quietly = TRUE)) {
+    p <- p + ggdist::stat_pointinterval(position = ggplot2::position_dodge(width = 0.6), .width = plot_interval_widths, point_size = 1.8)
+  } else {
+    p <- p + ggplot2::geom_boxplot(position = ggplot2::position_dodge(width = 0.6), width = 0.5)
+  }
+  p +
+    ggplot2::geom_text(data = lab, ggplot2::aes(x = ms, y = fn, label = label), inherit.aes = FALSE, hjust = -0.35, size = 3) +
+    # room on the right for the label of the slowest entry
+    ggplot2::scale_x_log10(labels = scales::label_number(drop0trailing = TRUE),
+                           expand = ggplot2::expansion(mult = c(0.04, 0.22))) +
+    ggplot2::scale_colour_manual(values = width_cols, name = "window width") +
+    ggplot2::labs(x = "time per call, ms (log10)", y = NULL,
+                  title = paste0("Rolling ", stat, ", n = ", format(n_rows, scientific = FALSE, big.mark = ",")), subtitle = sub, caption = cap) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(legend.position = "bottom", plot.subtitle = ggplot2::element_text(size = 8),
+                   plot.caption = ggplot2::element_text(size = 8, hjust = 0, face = "bold"),
+                   panel.grid.minor = ggplot2::element_blank())
+}
+
+ext_sub <- "computation only, data already on the GPU (cuplyr); no upload/download.\nBars/points = median; error bars = IQR; (1 thread) = threads set to 1"
+ext_panels <- function() {
+  d1 <- ext[ext$experiment == "grouped mean", ]
+  d2 <- ext[ext$experiment != "grouped mean", ]
+  d2$one_thread <- grepl("1 thread", d2$fn)
+  panels <- list()
+  if (nrow(d1)) panels[[1]] <- ggplot2::ggplot(d1, ggplot2::aes(x = median_ms, y = stats::reorder(fn, -median_ms))) +
+    ggplot2::geom_col(fill = width_cols[1]) +
+    ggplot2::geom_errorbar(ggplot2::aes(xmin = q25_ms, xmax = q75_ms), width = 0.2, orientation = "y") +
+    ggplot2::geom_text(ggplot2::aes(label = lab_ms(median_ms)), hjust = -0.1, size = 3) +
+    ggplot2::scale_x_continuous(expand = ggplot2::expansion(mult = c(0, 0.25))) +
+    ggplot2::labs(x = "median ms (IQR bars)", y = NULL,
+                  title = paste0("Grouped rolling mean, ", format(group_rows, scientific = FALSE, big.mark = ","), " rows, ", n_groups, " groups, w = ", group_width),
+                  subtitle = ext_sub) +
+    ggplot2::theme_minimal(base_size = 10) + ggplot2::theme(plot.subtitle = ggplot2::element_text(size = 7))
+  if (nrow(d2)) panels[[length(panels) + 1]] <- ggplot2::ggplot(d2, ggplot2::aes(x = width, y = median_ms, colour = fn, group = fn, linetype = one_thread)) +
+    ggplot2::geom_line() + ggplot2::geom_point(size = 2.5) +
+    ggplot2::scale_linetype_manual(values = c(`FALSE` = "solid", `TRUE` = "dashed"), guide = "none") +
+    ggplot2::scale_x_log10(breaks = unique(d2$width)) + ggplot2::scale_y_log10() +
+    ggplot2::labs(x = "window width (log10)", y = "median ms (log10)", colour = NULL,
+                  title = paste0("Ungrouped rolling mean, ", format(ext_rows, scientific = FALSE, big.mark = ","), " rows"), subtitle = ext_sub) +
+    ggplot2::theme_minimal(base_size = 10) + ggplot2::theme(legend.position = "bottom", plot.subtitle = ggplot2::element_text(size = 7))
+  panels
+}
+ext_plot <- function() patchwork::wrap_plots(ext_panels(), ncol = 1)
+ext_plot_height <- 3.4 * length(ext_panels()) + 0.5
+
+# ---- tables -------------------------------------------------------------------------------
+cell_txt <- function(stat, fn, width) {
+  i <- cell_i(stat, fn, width)
+  if (!is.na(i)) return(sprintf("%s (%s-%s) n=%d", fmt_ms(cells$med[i]), fmt_ms(cells$q25[i]), fmt_ms(cells$q75[i]), cells$n[i]))
+  if (width %in% skip_widths(stat, fn)) return("not timed (CPU fallback)")
+  if (any(cr$stat == stat & cr$fn == fn & cr$width == width & grepl("^error:", cr$note))) return("error (see Correctness)")
+  ""
+}
+stat_table <- function(stat) {
+  fns <- unique(c(cells$fn[cells$stat == stat], cr$fn[cr$stat == stat]))
+  if (!length(fns) && !length(skip_fns(stat))) return(invisible(NULL))
+  fns <- fns[order(vapply(fns, function(f) med(stat, f, w_mid), 0))]
+  out <- data.frame(`function` = fns, check.names = FALSE, stringsAsFactors = FALSE)
+  for (w in widths) out[[paste0("w=", w)]] <- vapply(fns, function(f) cell_txt(stat, f, w), "")
+  # cuplyr entries that were not timed at any width: a row saying so, not a
+  # number (a partial skip shows in the entry's own row)
+  for (f in setdiff(skip_fns(stat), fns)) {
+    out[nrow(out) + 1, ] <- c(f, skip_note(stat, f), rep("not timed", length(widths) - 1))
+  }
+  knitr::kable(out, row.names = FALSE)
+}
+```
+
+Redo of <https://roald-arboel.com/blog/posts/2024/10/03/Benchmark-rolling/> with cuplyr added as one more entry in every statistic panel. Produced by this document (`bench/rolling-window.qmd`; helpers in `bench/rolling-lib.R`, installs in `bench/install-deps.R`): the code that produces every number, table and figure is in the same file as the prose, and every number in the prose is computed from the results. Raw data, written to `r params$out_dir` on every render: `timings.csv`, `correctness.csv`, `extension.csv`, `versions.csv`, `memory-breakdown.csv`, `memory-finding.csv`, `skipped.csv`.
+
+**Run configuration:** cell budget `r cell_budget` s, probe limit `r probe_limit` s, `times` `r times`, `times_custom` `r times_c`, `ext_times` `r ext_times`. `r cfg_txt`. See "How to render" at the end for the command.
+
+Wall time of the timing chunks, which hold the GPU: **`r fmt_dur(wall_secs)`** (`r paste0(names(secs_by_chunk), " ", fmt_dur(secs_by_chunk), collapse = ", ")`; the elapsed times of the run that produced the cached results). Every number below is computed in this document from those results.
+
+## Read this first: what the numbers are
+
+**What cuplyr's number is.** The cuplyr timing is the **computation on a table that is already on the GPU**: `res <- compute(mutate(gt, r = roll_mean(x, n)))` followed by a one-row device-to-host copy as a fence, with `gt <- tbl_gpu(df)` built once outside timing. By decision (Theo, 2026-10-21) it contains **no upload and no `collect()`**. The CPU packages operate on an R vector already in memory, so both sides time the computation only. A real pipeline that starts and ends in R would also pay the PCIe transfers that are excluded here (not measured in this study). `r only_native_txt`
+
+**What the CPU numbers are: measured thread behaviour, not settings.** Package thread settings do not say what a call did, so each multi-thread-capable entry (data.table, RcppRoll, roll) was timed twice, at its default setting and with its threads set to one (entries labelled `(1 thread)`), and the "Threads actually used" section reports both. The result:
+
+- **RcppRoll `r rr_runs` `r n_rr_threads` OpenMP threads by default** (`RcppRoll::roll_threads()` = `r n_rr_threads`) and `r rr_claim`.
+- **`r dt_lead`** (default vs `setDTthreads(1)` within `r dt_within`), although `getDTthreads()` is `r n_dt_threads`. `r dt_only` `r dt_weak_txt`
+- **`r roll_lead`** `r roll_claim`. `r roll_omp_txt`
+- `r join_and(unctl)` were not given a thread control. `r unctl_check`
+
+So there is no blanket "GPU against N CPU threads" framing in this report: the comparison is to the per-entry thread behaviour above. Medians are reported with their spread (IQR in the tables, all samples in `timings.csv`). No headline speedup is claimed.
+
+**What the cuplyr number still includes, per call.** R dispatch of `mutate()`/`compute()`, the AST node builds and schema inference, lowering to C++, **`r words(n_mat_win)` full-table materializations** (an eager window `mutate()` runs `r node_list`, each of which builds a new table, so the input column `x` is deep-copied `r times_word(n_mat_win)` per call; see "Per-call cost breakdown"), allocation of the results and their validity masks, and the fence. The same call on a `r small_txt`-row table, where kernel time is negligible, takes about `r fmt_1(floor_ms)` ms for window functions (a plain `mutate(y = x + 1)` takes `r fmt_1(plain_small)` ms). That floor is `r floor_share_txt` and `r floor_vs_dt` the whole data.table call (`r fmt_ms(med("mean", "data.table", w_mid))` ms). The copy and allocation part grows with the row count and is **inside every `r rows_txt` and `r ext_txt` cuplyr timing** but not in the `r small_txt`-row floor.
+
+## Method
+
+- Data: `rw_data(n)` (`set.seed(12345)` by default, then `rnorm(n)`) with n = `r rows_txt`, no NAs, widths `r widths_slash`, right-aligned, output the same length as the input, `NA` padded. Same functions and arguments as the post (see `rw_functions()` in `bench/rolling-lib.R`), `times` = `r times`, `times` = `r times_c` for the custom function.
+- **Deviation 1, one harness for everyone.** The post used `microbenchmark(times = 20)`, which interleaves expressions and does not force a GC. Here every function (CPU packages and cuplyr) goes through `rw_time()`: untimed warmup calls, then `times` samples; an untimed `gc()` runs before every call with the previous result already dropped; each sample is timed with `microbenchmark::get_nanotime()`. `r gc_lead`: an eager `mutate()` holds its GPU intermediates until R finalizes their pointers (finding F1), and `r gc_need_txt`. Applying the same `gc()` to everyone keeps the comparison symmetric. Consequence: no GC ever lands inside a timed region, which in the post's interleaved harness it sometimes did, and deallocation of each result is untimed for every engine (cuplyr's GPU tables are freed with cudaFree inside that untimed `gc()`; the CPU packages' vectors likewise). A test (`tests/testthat/test-bench-F54-harness-extra.R`) pins that `gc()` runs before every call and outside the timed region.
+- **Deviation 2, GPU completion.** cuplyr's API gives no "work finished" guarantee (`r sync_txt`). The timed closure ends with `cuplyr:::gpu_head(ptr, 1L, names)`, a one-row pageable copy to the host that synchronizes the stream. The fence adds `r fence_cost` (chunk `bench-fence` timed `r fence_txt`); the call without the fence also leaves the GPU work unfinished, so that difference is an upper bound on the copy's own cost.
+- **Deviation 3, slow cells get fewer samples** (`cell_budget` = `r cell_budget` s of timed work per cell). Each cell starts with one cold probe call; its duration sets the sample count through `rw_plan_cell()` (`bench/rolling-lib.R`). A cuplyr cell has one more untimed call before that one, the native probe of the fallback check below, so its "cold" call is its second call and it gets one more warm-up call than the CPU packages. The probe call is *not* a recorded sample (unless it alone exceeds `probe_limit` = `r probe_limit` s, `r probe_txt`); warmup calls (`r warmup_txt`) and then `k` timed calls follow, and the `note` column of `timings.csv` records exactly this per cell. Every cut is listed in the `times` cuts table.
+- **Deviation 4, runstats alignment moved out of timing.** `runstats::RunningMean/RunningSd` return left-aligned windows (the window starts at i; the last `n - 1` values are `NA`). The timed closure returns that raw result and only tags it in place (`attr(out, "rw_align") <- "left"`, plus the window width in `rw_window`, on the local fresh vector: no copy). `rw_normalize()` shifts tagged output to right-aligned, outside timing, before the correctness check. So runstats is timed as the package returns it: mean `r fmt_ms(rs_main[["mean"]])` ms, sd `r fmt_ms(rs_main[["sd"]])` ms at w=`r w_mid` in the results tables. `r rs_txt` `r rs_agree_txt`
+- **Deviation 5, argument choices the brief left open.** `RcppRoll::roll_medianr(fill = NA)` is used (right-aligned; plain `roll_median` is centred). The custom function is `sum_custom <- function(x) sum(x)`, a naive window sum (my reading of "unoptimised"; I did not have the post's exact body). Calls: `data.table::frollapply(x, n, sum_custom)` and `zoo::rollapply(x, n, sum_custom, fill = NA, align = "right")`.
+- **Single-thread controls.** `data.table (1 thread)` is `setDTthreads(1)` for the cell (restored afterwards); `RcppRoll (1 thread)` is `options(RcppRoll.threads = 1)`; `roll (1 thread)` is `RcppParallel::setThreadOptions(numThreads = 1)` (restored to `"auto"`). The one-thread entry is timed right after its default-thread entry on the same data, through the same harness, and is also checked for correctness. Thread settings as found, before any change: `OMP_NUM_THREADS` `r omp_env`, `getDTthreads()` `r n_dt_threads`, `RcppRoll::roll_threads()` `r n_rr_threads`, `RcppParallel::defaultNumThreads()` `r n_roll_threads` (`versions.csv`).
+- **Correctness check (not in the post).** Results are computed outside timing, normalized (`as.numeric`, runstats shifted, left-pad with `NA`) and compared with `data.table::froll<stat>` via `all.equal(tolerance = tol)` (tol = `r tol_txt`) plus identical NA positions. cuplyr results are collected for this check only. A cell whose call errors counts as a failure in the table (it does not drop out of the count); `r if (n_err == 0) "there were none" else paste(words(n_err), "cell(s) errored")`.
+- **Fallback check.** Every cuplyr cell is probed before it is timed: one untimed call under `options(cuplyr.fallback = "error")` (`rw_native_probe()` in `bench/rolling-lib.R`). A cell whose probe call falls back to the CPU (cuplyr's "fell back to CPU evaluation" error) is not timed, not checked for correctness and not plotted; it is recorded in the skipped-cells table below and in `skipped.csv`. A probe call that fails for any other reason is not a skip: in the main and extension experiments the cell is recorded as failed (an error row, which counts against the correctness total), and in the overhead, memory and fence chunks it stops the render. `r skip_count_txt` As a second check the timed cells catch `cuplyr_cpu_fallback` conditions: `r caught_txt`.
+- cuplyr entries: `cuplyr` is native `roll_<stat>(x, n)` inside `mutate()`; `cuplyr (froll alias)` is `data.table::froll<stat>(x, n)` inside `mutate()` (cuplyr maps it to the same kernel; `r alias_txt`). `r median_entry_txt` Custom: n/a (cuplyr cannot apply an arbitrary R function over windows).
+- **Comparison words.** Two medians are "level" when they are within `r fmt_pct(th_level, 0)` of each other, unless their interquartile ranges do not overlap, in which case one is "slightly faster" than the other; outside that band they are "faster" and "slower". A cost "grows" with the window width when the median at w=`r w_hi` is at least `r th_trend` times the median at w=`r w_lo` (it "shrinks" at the inverse ratio and is "flat" in between); slider is "growing" above `r th_grow` times. An entry "scales" with threads at a one-thread over default ratio of at least `r thr_yes`, and does not at `r thr_no` or less. Two figures "agree" within a factor of `r th_x`; a slow core is measurably slower above `r th_core` times; two calls "cost the same" within `r fmt_pct(th_same, 0)`; a custom function is clearly slower above `r th_avoid` times its optimized equivalent; the narrow-window call is "mostly call chain" when it is within `r fmt_pct(th_chain, 0)` of the `cumsum` mutate; a peak is "well inside" the card below `r fmt_pct(th_mem, 0)` of its memory. cuplyr's rank among the entries is "near the front" when its rank divided by the number of entries is at most `r th_front`, "near the back" at `r 1 - th_front` or more and "mid-pack" in between; the runstats alignment shift is "a sizeable part" of the mean figure when it adds more than `r fmt_pct(th_part, 0)` to it.
+
+### Skipped cells (cuplyr cells that run on the CPU fallback)
+
+`r skip_intro`
+
+```{r}
+#| label: skipped-table
+if (nrow(sk_show)) knitr::kable(sk_show, row.names = FALSE)
+```
+
+## Threads actually used
+
+Default vs one thread, median ms (IQR) over the samples of each entry (`r n_thr_std` per cell for the `r rows_txt`-row rows, `r n_thr_cus` for `frollapply`; `r n_thr_ext` for the extension rows), width `r w_mid`. `ratio` = one-thread median / default median; "scales" says whether the entry used the extra threads (ratio >= `r thr_yes`: yes; <= `r thr_no`: no). The `default_threads` column is what the package reports, not what the call used.
+
+```{r}
+#| label: threads-table
+knitr::kable(thr_table, row.names = FALSE)
+```
+
+Reading it:
+
+- RcppRoll `r rr_reading`. Its `r n_rr_threads`-thread numbers are what the "RcppRoll" rows in the tables show.
+- data.table `r dt_reading` `r dt_flat_reading`
+- roll `r roll_reading`
+
+## Hardware and versions
+
+GPU: `r gpu_name`, `r gpu_gb` GB, compute capability `r gpu_cc`. CPU: `r cpu_name`, `r cpu_cores` logical cores. R `r ver[["R"]]`. Library: `r params$lib` (benchmark packages only); cuplyr loaded with `pkgload::load_all()` from `r root`.
+
+```{r}
+#| label: versions-table
+knitr::kable(ver_table, row.names = FALSE)
+```
+
+Thread settings as found: `OMP_NUM_THREADS` `r omp_env`; `data.table::getDTthreads()` `r n_dt_threads`; `RcppRoll::roll_threads()` `r n_rr_threads`; `RcppParallel::defaultNumThreads()` `r n_roll_threads`.
+
+::: {`r if (core_ok) ".content-visible" else ".content-hidden"`}
+**Core placement.** This CPU mixes core types (`r core_fast$n_cpus` logical CPUs at up to `r core_fast$mhz` MHz, `r core_slow$n_cpus` at up to `r core_slow$mhz` MHz), and the benchmark does not pin threads, so a single-threaded call can land on either kind. Chunk `bench-cores` pinned RcppRoll's one-thread rolling mean (w=`r w_mid`) to each kind in turn: `r fmt_ms(core_med("fast"))` ms on a fast core and `r fmt_ms(core_med("slow"))` ms on a slow one, so `r core_effect_txt`. Which kind of core each benchmark timing ran on is not recorded. The calls that run on one thread, default-thread rows included, are exposed to this: `r single_calls_txt`; the `(1 thread)` controls; and cuplyr's host-side R work. `r multi_txt`
+:::
+
+::: {`r if (core_ok) ".content-hidden" else ".content-visible"`}
+**Core placement.** Not measured here (no `lscpu` or `taskset`, or the CPU has one kind of core), so whether a single-threaded timing depends on the core it lands on is not known.
+:::
+
+Cross-check of the one-thread RcppRoll mean at w=`r w_mid`: `r fmt_ms(xc_main)` ms in the results table, `r fmt_ms(xc_ext)` ms scaled to `r rows_txt` rows from the `r ext_txt`-row run`r xc_core_figs`. `r xc_verdict` `r dt_agree_txt` `r rs_moved_txt`
+
+## Install results
+
+`r install_lead`. `r install_runs` the pixi environment puts a conda gcc first on `PATH`, and that gcc cannot link against the distro R's `Makeconf` (`-latomic_asneeded` unknown, `__libc_csu_init` missing from the conda sysroot): every package that links Fortran/BLAS (quadprog, RcppArmadillo) or configures TBB (RcppParallel, hence roll) failed in the first runs. `bench/install-deps.R` now:
+
+1. puts `/usr/bin` first on `PATH` and sets `CC/CXX/FC` to the system compilers for the install only (override: `BENCH_PIXI_TOOLCHAIN=1`);
+2. points RcppParallel at the distro's TBB (`TBB_INC`/`TBB_LIB`);
+3. installs `fftwtools` (a runstats dependency; tarball installs do not resolve dependencies) and RcppArmadillo before the runstats tarball;
+4. builds RollingWindow with a temporary user Makevars that drops `-Werror=format-security` (its generated `RcppExports.cpp` trips it on current Rcpp).
+
+Logs, in order, with the packages whose install failed in each (read from the summary table at the end of each log in `r params$out_dir`):
+
+```{r}
+#| label: install-table
+if (nrow(log_table)) knitr::kable(log_table, row.names = FALSE)
+```
+
+`r if (!length(logs)) "No install logs were found next to the output, so the install history cannot be summarized here. " else ""`A single clean run from an empty library was not repeated, so reproducibility from scratch rests on those incremental runs. The installer script's last edits (the `finally =` that unsets the temporary Makevars variable, and knitr and rmarkdown added to `cran_pkgs`) have not been exercised by an install run: nothing was reinstalled. Base `install.packages()` only; nothing went into the pixi library and cuplyr was not installed. knitr `r ver[["knitr"]]` and rmarkdown `r ver[["rmarkdown"]]`, which this document needs, are listed in `bench/install-deps.R`; `r deps_txt`.
+
+## Results: median ms per call at `r rows_txt` rows
+
+Cell format: median (IQR) n=samples. Rows sorted by the width-`r w_mid` median. `(1 thread)` rows are the single-thread controls. Each statistic's table is followed by its plot (log10 ms axis, point = median, bars = `r plot_levels` of samples, colour = width, width-`r w_mid` median labelled). `r median_panel_txt`
+
+### mean (median ms (IQR) n=samples)
+
+```{r}
+#| label: results-mean
+#| fig-height: !expr plot_height("mean")
+stat_table("mean")
+stat_plot("mean")
+```
+
+### median (median ms (IQR) n=samples)
+
+```{r}
+#| label: results-median
+#| fig-height: !expr plot_height("median")
+stat_table("median")
+stat_plot("median")
+```
+
+### min (median ms (IQR) n=samples)
+
+```{r}
+#| label: results-min
+#| fig-height: !expr plot_height("min")
+stat_table("min")
+stat_plot("min")
+```
+
+### max (median ms (IQR) n=samples)
+
+```{r}
+#| label: results-max
+#| fig-height: !expr plot_height("max")
+stat_table("max")
+stat_plot("max")
+```
+
+### sum (median ms (IQR) n=samples)
+
+```{r}
+#| label: results-sum
+#| fig-height: !expr plot_height("sum")
+stat_table("sum")
+stat_plot("sum")
+```
+
+### sd (median ms (IQR) n=samples)
+
+```{r}
+#| label: results-sd
+#| fig-height: !expr plot_height("sd")
+stat_table("sd")
+stat_plot("sd")
+```
+
+### custom (median ms (IQR) n=samples)
+
+```{r}
+#| label: results-custom
+#| fig-height: !expr plot_height("custom")
+stat_table("custom")
+stat_plot("custom")
+```
+
+### `times` cuts (every cell not at the configured `r times` / `r times_c`)
+
+Generated from the `note` column of `timings.csv`. Each cell's cold probe call is **not recorded**; the samples listed are the timed calls after the warmup.
+
+```{r}
+#| label: cuts-table
+cuts <- unique(main[nzchar(main$note) & main$n_rows == n_rows, c("stat", "fn", "width", "times", "note")])
+if (nrow(cuts)) knitr::kable(cuts, row.names = FALSE)
+n_cut <- nrow(cuts)
+```
+
+`r if (n_cut == 0) "No cell was cut." else sprintf("%s of the %s cells were cut; everything else ran the full number of samples (%s for the statistics, %s for the custom functions).", cap1(words(n_cut)), length(unique(paste(main$stat, main$fn, main$width))), times, times_c)`
+
+
+## Correctness
+
+Every timed (statistic x function x width) cell, including every timed cuplyr entry and every one-thread control, was compared with data.table's result. Reference: `frollmean/frollmedian/frollmin/frollmax/frollsum/frollsd`, and `frollsum` for the custom sum.
+
+`r n_ok` of `r n_cells` (function x width) cells match data.table (all.equal tol `r tol_txt`, same NA positions). The denominator counts the cells that were timed. `r denom_txt`
+
+`r if (nrow(bad) == 0) "No cuplyr mismatch, and none for any other package." else sprintf("%s %s did not match; %s listed below.", cap1(words(nrow(bad))), plural(nrow(bad), "cell"), plural(nrow(bad), "it is", "they are"))` "Match" includes the leading `NA` padding after normalization (runstats after the right-alignment shift in `rw_normalize()`); a padding or sd-convention difference would have shown up as a mismatch. Not covered: data with `NA`s, `na.rm = TRUE`, non-default alignment.
+
+```{r}
+#| label: correctness-bad
+if (nrow(bad)) knitr::kable(bad[, c("stat", "fn", "width", "n_na_mismatch", "max_abs_diff", "note")], row.names = FALSE)
+```
+
+## Extension: where the GPU should help
+
+Rolling mean, `r ext_times` samples per cell (`r if (all(ext$times == ext_times)) "no cuts" else sprintf("%s cells cut", sum(ext$times != ext_times))`). `peak_gpu_MB` is the peak from `cuplyr:::gpu_alloc_tracking()` around one untimed call; `held_after_MB` is what was still held when that call returned (see F1). `correct` compares with data.table's output. All cuplyr numbers here are computation only, data already on the GPU.
+
+Two experiments: (a) grouped: `r grp_rows_txt` rows, `r groups_txt` interleaved groups, w = `r group_width`; (b) ungrouped: `r ext_txt` rows, w = `r widths_slash`.
+
+```{r}
+#| label: extension-table
+ext_tab <- data.frame(
+  experiment = ifelse(ext$experiment == "grouped mean", grp_lab, ung_lab), fn = ext$fn, width = ext$width, n_rows = fmt_rows(ext$n_rows),
+  median_ms = fmt_ms(ext$median_ms), IQR = paste0(fmt_ms(ext$q25_ms), "-", fmt_ms(ext$q75_ms)), times = ext$times,
+  peak_gpu_MB = ifelse(is.na(ext$peak_gpu_bytes), "", sprintf("%.0f", ext$peak_gpu_bytes / 1e6)),
+  held_after_MB = ifelse(is.na(ext$held_gpu_bytes_after_call), "", sprintf("%.0f", ext$held_gpu_bytes_after_call / 1e6)),
+  correct = ext$correct, note = ext$note, stringsAsFactors = FALSE)
+knitr::kable(ext_tab, row.names = FALSE)
+```
+
+```{r}
+#| label: extension-plot
+#| fig-height: !expr ext_plot_height
+ext_plot()
+```
+
+cuplyr grouped is `group_by(tbl_gpu(df), g)` built outside timing, then `compute(mutate(gtg, r = roll_mean(x, n)))` plus the fence, with n the grouped width (`r group_width`). data.table is `dt[, r := frollmean(x, n), by = g]`, timed at the default thread setting and with `setDTthreads(1)`: **`r fmt_ms(g_dt1)` ms at one thread vs `r fmt_ms(g_dt)` ms by default, so its `by=` evaluation `r if (by_flat) "ran effectively single-threaded (it did not use the extra threads)" else "used threads"`**. slider is a grouped_df `mutate(r = slider::slide_mean(x, before = n - 1, complete = TRUE))`.
+
+## Per-call cost breakdown (overhead)
+
+Measured on the same harness as everything else (gc-separated, fenced, `compute()` of an eager `mutate()`), on a `r small_txt`-row table (kernel negligible; `r unique(oh$times[oh$n_rows == small_rows])[1]` samples) and, for contrast, on the `r rows_txt`-row table (`r unique(oh$times[oh$n_rows == n_rows & oh$stat == "overhead"])[1]` samples). The per-statistic `r small_txt`-row rolling floors are listed too.
+
+```{r}
+#| label: overhead-table
+oh_all <- oh[oh$stat == "overhead" | oh$n_rows == small_rows, ]
+oh_all$call <- ifelse(oh_all$stat == "overhead", oh_all$fn, paste0(oh_all$fn, " [", oh_all$stat, "]"))
+oh_tab <- do.call(rbind, lapply(split(oh_all, list(oh_all$call, oh_all$n_rows), drop = TRUE), function(v)
+  data.frame(call = v$call[1], rows = v$n_rows[1], median_ms_iqr = sprintf("%s (%s-%s)", fmt_ms(stats::median(v$ms)), fmt_ms(unname(stats::quantile(v$ms, .25))), fmt_ms(unname(stats::quantile(v$ms, .75)))),
+             min_max_ms = sprintf("%s-%s", fmt_ms(min(v$ms)), fmt_ms(max(v$ms))), n = nrow(v), stringsAsFactors = FALSE)))
+oh_tab <- oh_tab[order(oh_tab$rows, oh_tab$call), ]
+oh_tab$rows <- fmt_int(oh_tab$rows)
+knitr::kable(oh_tab, row.names = FALSE)
+```
+
+- **The about-`r fmt_1(floor_ms)` ms floor is for window-function mutates; a plain mutate is about `r fmt_1(plain_small)` ms.** At `r small_txt` rows: plain `mutate(y = x + 1)` `r fmt_ms(plain_small)` ms, `mutate(r = cumsum(x))` `r ms_nt(cum_small)`, `mutate(r = roll_mean(x, n))` `r fmt_ms(roll_small)` ms (the `r words(length(floor_by_stat))` rolling statistics: `r range_num(floor_by_stat)` ms medians; all `r n_floor_samples` samples between `r fmt_ms(min(floor_df$ms))` and `r fmt_ms(max(floor_df$ms))` ms). `r cum_vs_roll_txt`
+- **What the path does (read from the code, confirmed with `show_query()`).** A plain mutate is `r words(n_mat_plain)` `r plural(n_mat_plain, "node")` (`r code(chain_plain)`). An eager window mutate is `r code(chain_win)` (`R/mutate.R` lines `r ln_window`, `r ln_mutate` and `r ln_select` push the window, mutate and select nodes), and each node materializes a full table: `src/ops_window.cpp` about line `r ln_copy` builds the window output by deep-copying every input column (`std::make_unique<cudf::column>(view.column(i))`). So `x` is copied `r times_word(n_mat_win)` per call, not `r times_word(n_mat_plain)`. I did not profile where the `r fmt_1(win_extra)` ms goes (R-side node handling vs copies); that split is unknown at `r small_txt` rows.
+**`r mem_lead`** (`r ext_txt` rows, `memory-breakdown.csv`; the decomposition below `r decomp_txt`):
+
+```{r}
+#| label: memory-table
+mb_tab <- mem_breakdown
+for (cn in setdiff(names(mb_tab), "call")) mb_tab[[cn]] <- fmt_int(mb_tab[[cn]])
+if (nrow(mb_tab)) knitr::kable(mb_tab, row.names = FALSE)
+```
+
+The `r fmt_int(held_roll)` B held right after a `roll_mean` mutate decompose as `r fmt_int(win_out)` (window output: x + `..win1..` + validity mask) + `r fmt_int(mut_out)` (mutate output: x + `..win1..` + `r` + two masks) + `r fmt_int(sel_out)` (select output, the result) = `r fmt_int(pred_held)`. The decomposition is reasoned from the node chain and sized from the column bytes (`r bytes_per_row` bytes per row per column) and the padded validity mask; it `r decomp_txt`. I did not measure the three tables separately. A plain mutate holds `r fmt_int(mb_plain$held_after_call_bytes)` B (x copy + `y`, `r words(n_mat_plain)` `r plural(n_mat_plain, "materialization")`; the node chain predicts `r fmt_int(plain_pred)`) and allocates `r fmt_int(mb_plain$allocated_bytes)` B in total, against `r fmt_int(mb_roll$allocated_bytes)` B allocated by one `roll_mean` mutate. After a `gc()` the `roll_mean` result alone is `r fmt_int(result_roll)` B, so about `r fmt_x(held_ratio)` the result is held while the intermediates await finalization.
+**The copy and allocation cost scales with rows and is inside every `r rows_txt` and `r ext_txt` cuplyr timing.** At `r rows_txt` rows the plain mutate takes `r ms_nt(plain_big)``r ms_delta(plain_big, plain_small, paste(" vs", small_txt, "rows"))`, the `cumsum` window mutate `r ms_nt(cum_big)``r ms_delta(cum_big, cum_small)` and `roll_mean(x, n)` `r ms_nt(roll_big)``r ms_delta(roll_big, roll_small)`. The narrow-window rolling mean (w=`r w_lo`, `r ms_nt(med("mean", "cuplyr", w_lo))` in the tables above) is `r narrow_txt`.`r if (!is.na(narrow_chain)) " (This is an inference from comparing two different kernels, not a profile.)" else ""`
+
+## Conclusions (in the post's style, updated)
+
+All figures: `r rows_txt` rows, width `r w_mid`, median ms, computation only. cuplyr excludes transfers. Thread behaviour of the CPU entries is the measured one in "Threads actually used": RcppRoll `r if (rr_scales) paste("ran on", n_rr_threads, "OpenMP threads") else "did not scale cleanly"`; `r dt_lead`; `r roll_lead`; `r dt_scale_sentence`.
+
+- **The post's headline ("data.table wins") `r headline_verdict` at equal, one-thread conditions; RcppRoll's lead at default settings `r lead_clause`.** At default settings `r rr_leader`: `r rr_default_list`. With `RcppRoll.threads = 1` it takes `r rr1_list` ms `r rr1_ratio`. Against that one-thread RcppRoll, data.table`r dt_single_txt` compares as follows, with both at one thread: `r dt1_rr1_txt`. For the median, data.table at one thread takes `r dt1_med` ms (RcppRoll at one thread: `r rr1_med`); RollingWindow's median (`r rw_med` ms) compared with data.table at one thread is `r rw_med_txt`. `r dt_med_txt` `r exc_txt`
+- **roll** (`r roll_ms`) is a reasonable choice for the statistics it covers, but `r roll_vs_dt_txt`. `r roll_ran_txt`
+- **`r slider_txt`.** `r zoo_runner_txt`. Custom functions cost `r ms_s(cus_fa)` (`frollapply`; `r ms_s(cus_fa1)` at one thread) and `r range_ms(cus_zoo)` (`zoo::rollapply`, `r cus_grow_txt`) against `r range_ms(opt_equiv)` for the optimized equivalent (data.table's `frollsum`). `r cus_verdict`
+- **Where cuplyr lands (ungrouped, `r rows_txt` rows).** Native mean/sum/min/max take `r nat_txt` ms at widths `r widths_slash`, of which about `r fmt_1(floor_ms)` ms is the per-call floor for window mutates. For mean, per competitor (median at w=`r w_mid` in parentheses): `r mean_vs`. `r sum_roll_txt` `r mm_txt`. `r sd_sent` `r fb_txt` Custom functions: not supported.
+- **`r grow_txt`** while `r trend_txt`. `r rescan_txt` `r incr_txt`
+- **Grouped data and large data, in the configurations measured here.** Grouped mean (one configuration: `r grp_rows_txt` rows, **`r groups_txt` groups**, w=`r group_width`): `r g_txt`. data.table's `by=` evaluation `r by_verb` (`r fmt_ms(g_dt)` ms by default, `r fmt_ms(g_dt1)` ms at `setDTthreads(1)`)`r by_tail`. I did not vary the group count; data.table's cost is expected to grow with the number of groups, so the ratio is specific to `r groups_txt` groups. `r ung_sent` `r peak_txt`, but see F1.
+- Net: at the post's size cuplyr is `r rank_pos``r rank_detail` and bounded below by about `r fmt_1(floor_ms)` ms of per-call cost. `r net_txt`
+
+## Findings (candidate backlog rows; nothing was fixed in this feature)
+
+- **F1. An eager window mutate materializes `r words(n_mat_win)` full tables and holds them until R's GC.** One eager `mutate(r = roll_mean(x, n))` on `r ext_txt` rows runs `r code(paste(rev(plan_win[plan_win != "ast_source"]), collapse = " -> "))` (`R/mutate.R` `r ln_window`, `r ln_mutate`, `r ln_select`); each node builds a new table and `src/ops_window.cpp` (about line `r ln_copy`) deep-copies every input column, so `x` is copied `r times_word(n_mat_win)`. Right after the call `r fmt_int(held_roll)` bytes are held (`gpu_alloc_tracking()`: `r held_peak_txt`) = `r fmt_int(win_out)` + `r fmt_int(mut_out)` + `r fmt_int(sel_out)`, against `r fmt_int(result_roll)` for the result alone, and `r fmt_int(mb_roll$allocated_bytes)` bytes are allocated in total (`memory-breakdown.csv`, `memory-finding.csv`). A plain mutate holds `r fmt_int(mb_plain$held_after_call_bytes)` bytes (`r words(n_mat_plain)` `r plural(n_mat_plain, "materialization")`). The intermediates are freed only when R finalizes their pointers: `r f1_oom_txt`. Candidate row: remove the extra materializations (append the window results directly to the input table instead of copying every input column; no full-table copies in the mutate and select steps, e.g. share the unchanged column buffers or fuse the three nodes). That would take the `r ext_txt`-row call from `r fmt_mb(held_roll)` to about `r fmt_mb(result_roll)` (`r fmt_x(held_ratio)`). Freeing per-call intermediates deterministically (or an automatic `gpu_gc()` and retry on `bad_alloc`) would remain a separate hardening.
+- **F2. `r f2_lead`** At `r rows_txt` rows, from w=`r w_mid` to w=`r w_hi`, mean goes from `r ms_nt(med("mean", "cuplyr", w_mid))` to `r ms_nt(med("mean", "cuplyr", w_hi))` and sd from `r ms_nt(med("sd", "cuplyr", w_mid))` to `r ms_nt(med("sd", "cuplyr", w_hi))` (data.table is `r trend("sd", "data.table")` in the width: `r fmt_ms(med("sd", "data.table", w_hi))` ms for sd at w=`r w_hi`). At `r ext_txt` rows mean at w=`r w_hi` takes `r ms_nt(u_hi("cuplyr"))` for cuplyr vs data.table `r fmt_ms(u_hi("data.table"))` and `r lab_cpu("RcppRoll")` `r fmt_ms(u_hi("RcppRoll"))`. `r f2_infer` `r f2_row_if`: an incremental mean/sum (prefix sums) and a Welford or sum-of-squares sd, checked against `all.equal()` at the correctness tolerance (`r tol_txt`), or find a cudf aggregation that does not rescan each window (needs a probe).
+- **F3. `r f3_lead`** `r f3_body`
+- **F4. A fixed overhead of about `r fmt_1(floor_ms)` ms per eager window-function `mutate()` on a `r small_txt`-row table (`r fmt_1(plain_small)` ms for a plain mutate).** About `r fmt_1(win_extra)` ms of the `r fmt_1(floor_ms)` is specific to the window path, i.e. the `r chain_win` chain (`r words(n_mat_win)` nodes, `r words(n_mat_win)` materializations; `cumsum` costs `r ms_nt(cum_small)` against `r ms_nt(roll_small)` for `roll_mean`), `r kernel_txt`; the rest is the `r fmt_1(plain_small)` ms every eager mutate pays. At `r rows_txt` rows the same chain costs `r ms_nt(cum_big)` for `cumsum` against `r ms_nt(plain_big)` for a plain mutate`r f4_share_txt`. Candidate row (same fix as F1): remove the extra materializations, then re-measure the `r small_txt`-row floor; profile the remaining `r fmt_1(plain_small)` ms plain-mutate cost (R dispatch, AST build, schema inference) separately, since I did not.
+- **F5 (minor). No documented completion semantics.** `r f5_sync`, so wall-clock timing of cuplyr from R is only meaningful after a device-to-host read; the benchmark uses a one-row `gpu_head()` as a fence. Candidate row: a documented `gpu_sync()` or similar for benchmarking. Related: `x$ptr` on a `tbl_gpu` from outside the namespace `r ptr_txt`.
+
+## How to render
+
+Render only through `tools/r`, because the benchmark holds the GPU and the project has one GPU lock for every R process. From the checkout:
+
+```
+tools/r 'source("bench/rolling-window.R")'
+```
+
+That runs `quarto render` on this file with `params$root` set to the checkout, writes `rolling-window.html` and the CSVs to `params$out_dir` and keeps the knitr cache of the `bench-*` chunks in `params$cache_dir`. Quarto empties the directory given to `--output-dir` before it renders, and `params$out_dir` holds the install logs this document reads (and, by default, the cache), so the wrapper renders into a temporary directory and copies the HTML over. Do the same by hand: never pass `params$out_dir` as `--output-dir`. A cold run (empty cache) took `r fmt_dur(wall_secs)` of timed work on this machine; a render with a warm cache re-renders only the prose, tables and figures and takes seconds. Quarto `r quarto_ver` is used; it is a user install and is not installed or upgraded by anything here.
+
+To try it at smoke size (a few seconds), put the overrides in a YAML file and render this file in place with `--execute-params`; the keys are the front matter's `params`, and with the output and cache directories under `/tmp` the default cache is left alone:
+
+```
+root: "/path/to/the/checkout"
+out_dir: "/tmp/rolling-out"
+cache_dir: "/tmp/rolling-cache"
+n_rows: 5000
+times: 2
+times_custom: 1
+cell_budget: 1
+probe_limit: 5
+group_rows: 5000
+n_groups: 10
+ext_rows: 20000
+ext_times: 2
+```
+
+```
+tools/r 'system2(Sys.which("quarto"), c("render", "bench/rolling-window.qmd", "--output-dir", "/tmp/rolling-html", "--execute-params", "smoke.yml"))'
+```
+
+The test `tests/testthat/test-parity-F63-qmd-render.R` does the same on a copy of this file in a temporary directory, with a clean cache, a prose-only edit, a code edit, an edit of the helper file and a forced rerun in turn (opt in with `CUPLYR_BENCH_RENDER=1`).
+
+**Forcing a full rerun.** Set `FULL_RERUN <- TRUE` before `source("bench/rolling-window.R")`; it passes `-P rebuild:true`, which makes the setup chunk set `cache.rebuild` for the `bench-*` chunks, so every timing chunk runs again and saves its cache anew (`rebuild` is not part of the cache key). Do the same by hand with `-P rebuild:true` (or `rebuild: true` in the parameters file), or delete the cache directory (`r params$cache_dir`). Do not use `quarto render --cache-refresh`. In a review probe it re-ran none of the timing chunks, switched caching on for every other chunk, the setup chunk included, and left cache and figure directories next to the source; a later render would then restore the setup chunk from that cache instead of running it (reasoned, not run).
+
+**What invalidates the cache.** A `bench-*` chunk reruns when any of these change: the chunk's own code or options; the content (not the modification time) of `bench/rolling-lib.R`; the content of cuplyr's `R/*.R` and `src/*.{cpp,cu,cuh,h,hpp}` files and of `src/Makevars` (the compile flags) under `params$root`; the version of R, of libcudf (`r cudf_ver`) or of any package the benchmark uses (`r join_and(code(names(ver)[names(ver) != "R"]))`); or any run parameter other than the directories and the rebuild switch (`root`, `out_dir`, `cache_dir`, `rebuild`). Prose, tables and figures are never cached, so editing them never reruns a benchmark. The cached chunks return plain data frames only: a GPU object left in a cached chunk would be restored as a dead pointer.

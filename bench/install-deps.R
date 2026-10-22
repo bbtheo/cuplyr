@@ -1,6 +1,9 @@
 # Install the third-party packages of the rolling-window benchmark (F54) into
 # a separate library. Base install.packages() only; never touches the default
-# library and never installs cuplyr.
+# library and never installs cuplyr. knitr and rmarkdown are there because the
+# benchmark is a Quarto document (bench/rolling-window.qmd, F63) and Quarto's
+# knitr engine needs them; packages already visible on the library path are
+# skipped, so a machine that has them installs nothing extra.
 #
 #   tools/r 'LIB <- "/path/to/rlib"; source("bench/install-deps.R")'
 #
@@ -29,7 +32,7 @@ options(repos = c(CRAN = repos), Ncpus = 4L)
 
 cran_pkgs <- c("roll", "slider", "RcppRoll", "zoo", "runner", "microbenchmark",
                "ggdist", "paletteer", "ggtext", "data.table", "ggplot2",
-               "scales", "patchwork")
+               "scales", "patchwork", "knitr", "rmarkdown")
 
 # RcppParallel's bundled TBB build does not configure under the pixi
 # toolchain; use the distro's TBB when it is there.
