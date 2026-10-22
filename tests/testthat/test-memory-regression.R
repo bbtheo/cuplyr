@@ -19,8 +19,11 @@ test_that("lazy mutate chain uses near-constant GPU memory", {
     mutate(d = c / y) |>
     collect()
 
+  # The deltas below are bytes allocated from cuplyr's resource
+  # (pool_used_bytes; device-level `used_bytes` when there is none): a memory
+  # pool keeps its pages, so device-level deltas would read 0.
   gpu_gc(verbose = FALSE)
-  before <- gpu_memory_state()$used_bytes
+  before <- gpu_alloc_used_bytes()
 
   result <- tbl_gpu(df, lazy = TRUE) |>
     mutate(a = x + y) |>
@@ -28,7 +31,7 @@ test_that("lazy mutate chain uses near-constant GPU memory", {
     mutate(c = b - x) |>
     mutate(d = c / y)
 
-  during <- gpu_memory_state()$used_bytes
+  during <- gpu_alloc_used_bytes()
 
   source_size <- nrow(df) * 2 * 8
   expect_lt(during - before, source_size * 1.5)
@@ -40,6 +43,6 @@ test_that("lazy mutate chain uses near-constant GPU memory", {
   rm(result, collected)
   gpu_gc(verbose = FALSE)
 
-  final <- gpu_memory_state()$used_bytes
+  final <- gpu_alloc_used_bytes()
   expect_lt(final - before, source_size * 0.2)
 })

@@ -1,5 +1,30 @@
 # cuplyr (development version)
 
+## Perf foundations: memory pool, shared columns, `gpu_sync()` (F57)
+
+* Loading cuplyr installs an RMM memory pool, so the many short-lived columns of
+  a pipeline are carved out of memory reserved once instead of going through
+  `cudaMalloc`/`cudaFree`. `options(cuplyr.memory_pool = FALSE)` or
+  `CUPLYR_MEMORY_POOL=0` switches it off (the behaviour before this change);
+  `cuplyr.pool_initial` / `CUPLYR_POOL_INITIAL` sets the initial size in bytes.
+  Both are read once, at load; see `?gpu_memory_state`.
+* `gpu_memory_state()` gains `resource`, `pool_bytes` and `pool_used_bytes`.
+  `used_bytes` stays device-level and includes the pages the pool holds, so it
+  does not fall when tables are freed; `pool_used_bytes` is what is allocated
+  from the pool. `gpu_gc()$freed_bytes` is the drop in `pool_used_bytes` while a
+  pool is installed.
+* New `gpu_sync()` waits until all GPU work queued by cuplyr has finished, for
+  timing code that leaves its result on the GPU.
+* Verbs that pass a column through unchanged (`select()`, `relocate()`,
+  `rename()`, the untouched columns of `mutate()`/`transmute()`, a bare copy
+  `a = x`, `bind_cols()`, the input columns of a window `mutate()`) share it with
+  the input table instead of deep-copying it. `mutate(r = f(x))` allocates only
+  `r`.
+* An eager window `mutate()` (and `mutate()` with `.keep`/`.before`/`.after`,
+  `transmute()`) runs as one execution and builds one table instead of one per
+  node. The per-call overhead of an eager `mutate()` on a small table is about
+  25% lower.
+
 ## rowwise() on the GPU (F49)
 
 * `rowwise()` of a `tbl_gpu` is now native and metadata-only: it returns a

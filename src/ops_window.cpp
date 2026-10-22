@@ -1165,20 +1165,20 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
         }
     }
 
-    std::vector<std::unique_ptr<cudf::column>> final_columns;
+    // F57: the input columns are shared with the input table, not copied.
+    std::vector<SharedColumn> final_columns;
     final_columns.reserve(static_cast<size_t>(n_input + n_appended));
     for (int i = 0; i < n_input; ++i) {
-        final_columns.push_back(std::make_unique<cudf::column>(view.column(i)));
+        final_columns.push_back(get_shared_column(ptr, i));
     }
     for (int i = 0; i < n_appended; ++i) {
         if (!appended[static_cast<size_t>(i)]) {
             Rcpp::stop("gpu_window: internal: appended column %d was never computed", i);
         }
-        final_columns.push_back(std::move(appended[static_cast<size_t>(i)]));
+        final_columns.push_back(share_column(std::move(appended[static_cast<size_t>(i)])));
     }
 
-    auto result = std::make_unique<cudf::table>(std::move(final_columns));
-    SEXP out = make_gpu_table_xptr(std::move(result));
+    SEXP out = make_gpu_table_xptr(std::move(final_columns));
     Rcpp::Shield<SEXP> keep(out);
     if (cumsum_overflow) {
         Rcpp::LogicalVector flag(1, true);

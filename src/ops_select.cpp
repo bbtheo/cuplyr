@@ -17,22 +17,15 @@ SEXP gpu_select(SEXP xptr, IntegerVector col_indices) {
     Rcpp::XPtr<GpuTablePtr> ptr(xptr);
     cudf::table_view view = get_table_view(ptr);
 
-    std::vector<cudf::column_view> selected_views;
+    // Share the selected columns (F57): select allocates nothing.
+    std::vector<SharedColumn> columns;
     for (int i = 0; i < col_indices.size(); ++i) {
         int idx = col_indices[i];
         if (idx < 0 || idx >= view.num_columns()) {
             Rcpp::stop("Column index out of bounds: %d", idx);
         }
-        selected_views.push_back(view.column(idx));
+        columns.push_back(get_shared_column(ptr, idx));
     }
 
-    cudf::table_view selected_view(selected_views);
-
-    std::vector<std::unique_ptr<cudf::column>> columns;
-    for (int i = 0; i < selected_view.num_columns(); ++i) {
-        columns.push_back(std::make_unique<cudf::column>(selected_view.column(i)));
-    }
-
-    auto result = std::make_unique<cudf::table>(std::move(columns));
-    return make_gpu_table_xptr(std::move(result));
+    return make_gpu_table_xptr(std::move(columns));
 }

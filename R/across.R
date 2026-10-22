@@ -335,7 +335,7 @@ rewrite_context_dots <- function(dots, group_cols, sequential = FALSE, name_unna
   for (i in seq_along(dots)) {
     keys <- group_cols
     if (sequential && i > 1L) {
-      keys <- setdiff(keys, nms[seq_len(i - 1L)])
+      keys <- set_diff(keys, nms[seq_len(i - 1L)])
     }
     old <- rlang::quo_get_expr(dots[[i]])
     expr <- rewrite_context_expr(old, keys)
@@ -463,7 +463,7 @@ substitute_cur_group_id <- function(.data, dots, group_cols, by = FALSE, rowwise
       first_row <- unlist(rows, use.names = FALSE)[cumsum(c(1L, lengths(rows)[-length(rows)]))]
       gd <- gd[order(first_row), , drop = FALSE]
     }
-    keys <- gd[setdiff(names(gd), ".rows")]
+    keys <- gd[set_diff(names(gd), ".rows")]
     keys[[helper_name]] <- seq_len(nrow(keys))
     keys_gpu <- tbl_gpu(keys, lazy = FALSE)
 
@@ -525,7 +525,7 @@ resolve_across_cols <- function(cols_expr, env, schema, group_cols) {
   if (isTRUE(schema$unknown_set)) {
     return(NULL)
   }
-  eligible <- setdiff(schema$names, group_cols)
+  eligible <- set_diff(schema$names, group_cols)
   if (length(eligible) == 0) {
     return(stats::setNames(character(), character()))
   }
@@ -740,7 +740,7 @@ make_fn_spec <- function(label, build, env = NULL) {
 across_known_fn_names <- function() {
   # F50: the factor conversions are parsed by ir_parse_factor_conversion()
   # (no registry entry), so `across(where(is.factor), as.character)` can name them.
-  union(setdiff(names(ir_call_registry), ir_internal_ops), c("quantile", "any", "all", "count",
+  set_union(set_diff(names(ir_call_registry), ir_internal_ops), c("quantile", "any", "all", "count",
                                    "as.character", "as.integer", "as.numeric", "as.double"))
 }
 
@@ -781,7 +781,7 @@ across_known_fn_name <- function(value, env, fn_expr = NULL) {
     identical(fn_expr[[1]], as.name("::")) && is.symbol(fn_expr[[3]])
   candidates <- c(across_known_fn_names(), "identity")
   if (qualified) {
-    candidates <- intersect(as.character(fn_expr[[3]]), candidates)
+    candidates <- set_intersect(as.character(fn_expr[[3]]), candidates)
   }
   dplyr_ns <- asNamespace("dplyr")
   for (nm in candidates) {
@@ -858,7 +858,7 @@ across_value_spec <- function(value, fn_expr, env, scope, extra_args) {
       return(NULL)
     }
     rhs <- value[[2]]
-    if (across_free_vars_hit_data(setdiff(all.vars(rhs), c(".x", ".")), scope)) {
+    if (across_free_vars_hit_data(set_diff(all.vars(rhs), c(".x", ".")), scope)) {
       return(NULL)
     }
     return(across_native_spec(make_fn_spec(NULL, across_formula_build(rhs), env = environment(value))))
@@ -889,7 +889,7 @@ across_value_spec <- function(value, fn_expr, env, scope, extra_args) {
     return(NULL)
   }
   formal <- names(fmls)[1]
-  if (across_free_vars_hit_data(setdiff(all.vars(body_expr), formal), scope)) {
+  if (across_free_vars_hit_data(set_diff(all.vars(body_expr), formal), scope)) {
     return(NULL)
   }
   across_native_spec(make_fn_spec(NULL, across_lambda_build(formal, body_expr), env = environment(value)))
@@ -1336,7 +1336,7 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filte
     # aggregation over the first column's NA pattern; everywhere else it is
     # the literal.
     if (identical(verb, "summarise") && length(schema$names) > 0) {
-      col <- as.name(c(setdiff(schema$names, group_cols), schema$names)[1])
+      col <- as.name(c(set_diff(schema$names, group_cols), schema$names)[1])
       probe <- if (value) {
         rlang::expr(all(is.na(!!col) | !is.na(!!col), na.rm = TRUE))
       } else {
@@ -1521,7 +1521,7 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
       out_names <- c(out_names, names(expanded))
       prov_origin <- c(prov_origin, rep(i, length(expanded)))
       prov_kind <- c(prov_kind, rep("across", length(expanded)))
-      scope <- union(scope, names(expanded))
+      scope <- set_union(scope, names(expanded))
       if (track && !needs_fallback) run <- run_next
       next
     }
@@ -1534,7 +1534,7 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
       prov_kind <- c(prov_kind, "combined")
       # dplyr names an unnamed if_any()/if_all() dot after the original call
       out_names <- c(out_names, if (is_named) nm else if (identical(verb, "filter")) "" else rlang::as_label(expr))
-      if (!identical(verb, "filter")) scope <- union(scope, out_names[length(out_names)])
+      if (!identical(verb, "filter")) scope <- set_union(scope, out_names[length(out_names)])
       if (track && !needs_fallback) {
         run <- across_run_set(run, out_names[length(out_names)],
                               if (mutating) "BOOL8" else NA_character_)
@@ -1551,7 +1551,7 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
       # frame, whose columns dplyr adds under their own names: from here on
       # the set of columns is unknown (NA, see across_free_vars_hit_data()).
       unknown <- !is_named && !(is.symbol(expr) && as.character(expr) %in% scope)
-      scope <- union(scope, if (is_named) nm else if (unknown) NA_character_ else rlang::as_label(expr))
+      scope <- set_union(scope, if (is_named) nm else if (unknown) NA_character_ else rlang::as_label(expr))
       if (track) run <- across_run_step(run, nm, quo, verb)
     }
   }
@@ -1591,7 +1591,7 @@ across_run_set <- function(run, name, type, levels = NULL, zone = "UTC", maybe =
   if (!is.na(idx) && name %in% run$maybe && idx < length(run$names)) {
     run$unknown_set <- TRUE
   }
-  run$maybe <- if (maybe) union(run$maybe, name) else setdiff(run$maybe, name)
+  run$maybe <- if (maybe) set_union(run$maybe, name) else set_diff(run$maybe, name)
   run <- set_schema_factor_levels(run, name, levels)
   if (is.na(idx)) {
     run$names <- c(run$names, name)
@@ -1606,7 +1606,7 @@ across_run_set <- function(run, name, type, levels = NULL, zone = "UTC", maybe =
 # Remove one column from a running schema (`name = NULL`).
 # @keywords internal
 across_run_drop <- function(run, name) {
-  run$maybe <- setdiff(run$maybe, name)
+  run$maybe <- set_diff(run$maybe, name)
   keep <- run$names != name
   run$names <- run$names[keep]
   run$types <- unname(run$types)[keep]
@@ -1619,7 +1619,7 @@ across_run_drop <- function(run, name) {
 # type.
 # @keywords internal
 across_pure_heads <- function() {
-  c(setdiff(names(ir_call_registry), ir_internal_ops), ir_foldable_window_fns, "c", "~", "(", ":",
+  c(set_diff(names(ir_call_registry), ir_internal_ops), ir_foldable_window_fns, "c", "~", "(", ":",
     "case_when", "case_match", "recode", "recode_values", "replace_values", "replace_when",
     "when_all", "when_any", "order_by", "with_order")
 }

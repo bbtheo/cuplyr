@@ -320,7 +320,8 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
 ### C++ Files
 | File | Purpose |
 |------|---------|
-| `src/gpu_table.hpp` | `GpuTablePtr`, `make_gpu_table_xptr()`, `get_table_view()` |
+| `src/gpu_table.hpp` | The `tbl_gpu$ptr` payload (F57): `GpuTable` = a vector of shared const columns, `GpuTablePtr` (what the XPtr holds), `make_gpu_table_xptr()` (from a fresh `cudf::table` or from shared columns), `get_table_view()`, `get_shared_column()`, `share_column()`; see "Shared columns" |
+| `src/memory_resource.cpp` | The RMM memory resource installed at load (F57): `gpu_mr_install()`/`gpu_mr_state()`/`gpu_mr_kind()`, plus `gpu_sync_device()` (`cudaDeviceSynchronize()` behind `gpu_sync()`); see "Memory resource" |
 | `src/cuda_utils.hpp` | `check_cuda()` error helper |
 | `src/r_strings.hpp` | R string <-> cudf boundary (F53): `r_string_utf8()`/`r_scalar_utf8()` translate every R string that becomes cudf data to UTF-8 (a "bytes" string is an error); `r_mk_utf8_char()` marks strings read back from cudf as UTF-8. Use them at any new site that sends R strings to cudf. |
 | `src/ops_common.hpp` | `get_compare_op()` (used by `expr_eval.hpp`'s string-comparison handler) |
@@ -344,7 +345,7 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
 | `R/tbl-gpu.R` | `tbl_gpu()`, `new_tbl_gpu()`, `is_tbl_gpu()`, `resolve_exec_mode()`. `dim()`/`nrow()` of a lazy table with pending ops run the plan on the GPU (`compute()`, no collect, caller untouched); `ncol()`/`NCOL()` are answered from the schema (`dim.tbl_gpu` checks that its caller is `base::ncol`/`NCOL`). Internal code that only needs a cheap size uses `base_dim()` (base table's dims, never executes). |
 | `R/utils.R` | `gpu_type_from_r()`, `col_index()` |
 | `R/tz.R` | POSIXct time zone metadata (F32): `tz_is_utc()`, `tz_fold()`, `tz_by_position()`/`tz_from_positions()`, `propagate_tz()`, `propagate_schema_meta()`, `restore_tz()`; see "POSIXct time zones" above |
-| `R/execute.R` | unified execution helpers: `push_op()` (the sole exec_mode branch point; carries `groups` and `.drop` -- `.drop` only while a group column survives), `input_node()`, `current_schema()`, `propagate_groups()`, `propagate_factor_levels()`, `auto_name_dots()`, `cuplyr_fallback_notify()`, join analogues `join_input_node()`/`push_join()` |
+| `R/execute.R` | unified execution helpers: `push_op()` (the sole exec_mode branch point; carries `groups` and `.drop` -- `.drop` only while a group column survives; `input_schema=` skips re-deriving a schema the caller has, `carry = FALSE` leaves the frame metadata to the caller), `push_chain()` (an eager verb's several nodes as one execution, see "Eager chains"), `input_node()`, `current_schema()`, `propagate_groups()`, `propagate_factor_levels()`, `auto_name_dots()`, `cuplyr_fallback_notify()`, join analogues `join_input_node()`/`push_join()` |
 | `R/ir.R` | Expression IR shared by filter/mutate: `ir_parse_quo()`, `ir_cols()`, `ir_cost()`, `ir_is_const()`, `ir_bind()`, `ir_infer_type()`, `ir_call_registry` |
 | `R/filter.R` | filter verb — parses expressions via `ir_parse_quo()` into `make_predicate()` records, builds one `ast_filter` node via `push_op()`; constant expressions (TRUE/FALSE/vectors) are evaluated in R, not the GPU IR path; unparseable expressions fall back to a CPU-eval boolean mask (`filter_eval_mask()`) |
 | `R/mutate.R` | mutate verb — parses expressions into `make_mutate_expr()` structs, builds one `ast_mutate` node via `push_op()`; type inference lives in `R/ast.R::infer_mutate_output_type()` |
@@ -362,7 +363,7 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
 | `R/ast.R` | AST node constructors (`ast_source`, `ast_filter`, etc.) and `infer_schema()` methods |
 | `R/optimizer.R` | AST optimization passes (projection, filter pushdown, fusion) — runs only via `compute()`, never on the eager single-op path |
 | `R/lower.R` | `lower_and_execute()` — the single execution path for every AST node in both eager and lazy modes |
-| `R/gpu-memory.R` | memory reporting and GC helpers |
+| `R/gpu-memory.R` | memory reporting and GC helpers: `gpu_memory_state()`, `gpu_gc()`, `gpu_sync()`, and the load-time resource switches (`memory_resource_config()`, `memory_resource_install()`, called by `.onLoad`) |
 | `R/gpu.R` | `has_gpu()`, `gpu_details()` |
 | `R/print.R` | `print.tbl_gpu()` method |
 | `R/rowwise.R` | rowwise tables (F49): `is_rowwise_gpu()`, `rowwise.tbl_gpu()`, the CPU route `rowwise_cpu()`, the all-or-nothing native attempt `rowwise_attempt()`, the horizontal-aggregate rewrite `rowwise_rewrite_dots()`, rowwise `summarise()` -- see "Rowwise tables" |
@@ -746,10 +747,32 @@ String columns use offset-based storage (Apache Arrow format):
 - When slicing (e.g., head), must slice both offsets and chars correctly
 
 ### Memory Semantics
-- Most ops allocate new tables (immutable design)
+- Ops that build new rows (filter, arrange, slice, joins, summarise, bind_rows) allocate new columns; ops that pass columns through (select, relocate, rename, the untouched columns of mutate/transmute, a bare copy `a = x`, the input columns of a window mutate, bind_cols) **share** the input's columns, so they allocate nothing for them (see "Shared columns")
 - Peak memory for sorting: ~2x table size
-- Use `gpu_memory_state()` to monitor
-- GC frees GPU memory via pointer release
+- `gpu_memory_state()` monitors it: `used_bytes` is the device (all processes, includes what the pool reserved), `pool_used_bytes` is what this session has allocated from its memory resource; see "Memory resource"
+- GC frees GPU memory via pointer release: a column is freed when the last table sharing it is finalized. Under the pool this lowers `pool_used_bytes`, not the device's `used_bytes`
+- Tests that ask how much a table occupies or that memory comes back measure the allocator (`gpu_alloc_used_bytes()`, `gpu_alloc_snapshot()` in `tests/testthat/helper-memory.R`, or F56's `gpu_alloc_tracking()`); a claim about the CUDA driver (device-level usage) runs in a pool-off subprocess (`run_with_pool_off()`)
+
+### Shared columns (F57)
+`src/gpu_table.hpp`: the XPtr behind `tbl_gpu$ptr` holds a `GpuTable`, a vector of `std::shared_ptr<const cudf::column>`. `view()` builds a `cudf::table_view`, so every `get_table_view()` caller works unchanged. Rules for C++ ops:
+- A column that belongs to a table is **immutable**. Nothing may `release()`/move a column out of an input table, take a `mutable_view()` of one, or `set_null_mask()` it; the `const` makes that a compile error. Ops mutate (`set_null_mask()`, ...) only columns they just created, while they still own them as `std::unique_ptr<cudf::column>`, then hand them over with `share_column()`/`make_gpu_table_xptr()`.
+- To pass an input column through, put `get_shared_column(ptr, i)` into the result's column vector (`gpu_select`, `gpu_bind_cols_impl`, `gpu_window`'s input columns, `gpu_mutate_expr`'s untouched columns, the unreplaced columns of `gpu_remap_codes`/`gpu_decode_factor`/`gpu_cast_column`/`gpu_cast_to_string`), then `make_gpu_table_xptr(std::vector<SharedColumn>)`. `make_gpu_table_xptr(std::unique_ptr<cudf::table>)` still exists for freshly built tables.
+- `gpu_mutate_expr()`: a bare column copy (`mutate(a = x)`) is an alias slot of the evaluation context (`eval_ctx::push_alias()`, `materialize_top_level(alias_ok = true)`), which the result resolves back to the input column; `gpu_compute_column()` keeps copying (its result must be an owned column). Two outputs on one computed slot share it.
+- A column's device memory is freed when the last table (or, inside an op, view holder) sharing it goes; a result stays valid after its source table is garbage collected.
+- Do not hold raw `cudf::column_view`s across calls: they are valid only while some table holds the column.
+
+### Memory resource (F57)
+`.onLoad` (`R/zzz.R`) calls `memory_resource_install()` (`R/gpu-memory.R`) when a GPU is present (there is no `.onUnload` step). `src/memory_resource.cpp` creates a cuplyr-owned resource and installs it with `rmm::mr::set_current_device_resource()`: `"pool"` (default) is a `pool_memory_resource` over a cuplyr-owned `cuda_memory_resource`, `"async"` a `cuda_async_memory_resource`; both sit under a `statistics_resource_adaptor` (the installed object), so bytes in use are exact. Pool and async measured the same within noise (per-call 1e3/1e6 rows and a 1e7-row window mutate); the pool is the default because its size and `pool_bytes` are exact and it honours the initial size. Against plain `cudaMalloc` at 1e6 rows (F57 measurement, ms): arrange 1.52 -> 0.92, filter 1.14 -> 0.70, plain mutate 0.90 -> 0.64, window mutate 1.80 -> 1.22, summarise 1.30 -> 0.88; a 1e7-row window mutate 3.5 -> 2.7.
+- Switches, read by the first load that creates the resource (a later load in the same process reuses it whatever they say, and reports it; restart R to change them); the option wins over the env var: `options(cuplyr.memory_pool = FALSE)` / `CUPLYR_MEMORY_POOL` ("0"/"false"/"no"/"off" = off); `cuplyr.pool_initial` / `CUPLYR_POOL_INITIAL` (bytes; default min(1 GiB, a quarter of the free device memory); a larger request is clamped to 90% of the free memory; growth is the pool's own, doubling); `cuplyr.memory_resource` / `CUPLYR_MEMORY_RESOURCE` ("pool" or "async"). Off, when no earlier load created a resource, never calls `set_current_device_resource()`: plain `cudaMalloc`, `resource == "cuda"`.
+- `gpu_memory_state()` adds `resource` ("pool"/"async"/"cuda"), `pool_bytes` (what the resource holds from the device) and `pool_used_bytes` (allocated from it now); both NA when "cuda". `used_bytes` stays device-level (all processes) and includes the pool's pages. `gpu_allocatable_bytes()` (`R/gpu-memory.R`) = device free + (`pool_bytes` - `pool_used_bytes`): what cuplyr can allocate; callers that ask "will it fit" (`warn_if_join_too_large()`, `skip_if_insufficient_gpu_memory()`, the attach message) use it, not `free_bytes`. `gpu_gc()$freed_bytes` is the drop in `pool_used_bytes` under a resource (device-level free memory doesn't move), the rise in free device memory otherwise. `gpu_details()`/`show_gpu()` stay device-level.
+- Lifetime: one resource per process, never freed (not by any load or unload, not at exit). Every `pkgload::load_all()` `dyn.load()`s a fresh copy of `cuplyr.so`, and each copy has its own RMM per-device map (RMM's map statics are GLOBAL symbols in `cuplyr.so`), while libcudf stays bound to the map of the first copy loaded in the process; so a resource can be referenced from several copies' maps and from columns any copy created, and no copy can know it is unreferenced. `gpu_mr_install(enabled, kind, initial)` makes the process's resource current in this copy's map, creating it (`create()`) only when none exists and the switch is on. Later copies find it without any R state: each copy exports `extern "C" cuplyr_process_mr_v2()` (returns the copy's `g_inst`), and `find_in_other_copies()` walks the loaded objects with `dl_iterate_phdr()` for other `.../cuplyr.so` files, `dlsym()`s that function in each, and checks what it returns (magic, `kAbi`, `sizeof(Installed)`) before use. Nothing in the R session can forge, clobber or carry it over (round 2's `.cuplyr_mr_handle` option could be all three), and copies are never unmapped, so a pointer returned is always live. Bump `kAbi` and the `_v2` in the function name when `Installed` changes layout. `pin_this_library()` (`dladdr()` + `dlopen(RTLD_NOLOAD | RTLD_NODELETE)`) pins every copy at its first install call: the resource's vtables, the map libcudf is bound to and the finalizers of a copy's columns live in that copy, so `pkgload::unload()`'s `dyn.unload()` must not unmap it. libcudf's own scratch goes through the first copy's map, so after a reload an F56 tracking window (which wraps the current resource of the copy that opens it) does not see libcudf-internal scratch; `pool_used_bytes` still does once the first copy had a resource. F56's `gpu_alloc_tracking()` wraps whatever is current, so it sits on top of the pool and still counts every allocation cuplyr makes.
+- Load-time behaviour is tested in `callr` subprocesses that `pkgload::load_all(compile = FALSE)` the worktree.
+
+### `gpu_sync()` (F57)
+Exported; waits until all GPU work queued on the device has finished (`cudaDeviceSynchronize()` in `gpu_sync_device()`), returns `invisible(NULL)`. Verbs return when their work is queued, so a timing needs it (`bench/rolling-lib.R::rw_gpu_finish()` calls it). `collect()` and `print()` already wait (they copy to the host).
+
+### Eager chains (F57)
+A few eager verbs push several nodes (a window `mutate()` is window -> mutate -> select; `mutate(.keep = / .before = / .after =)` and `transmute()` are mutate -> select). `push_chain(.data, build)` (`R/execute.R`) hands `build()` a lazy view of `.data`, so its `push_op(carry = FALSE, input_schema = <previous push's $schema>)` calls only do schema work, then lowers the resulting chain with ONE `lower_and_execute()` (no optimizer) into one result table, and carries the frame metadata once. A lazy `.data` just runs `build()`. The error wrapper names the chain (`"window+mutate+select"`). A plain `mutate()` that cannot need a select (`.keep = "all"`, no `.before`/`.after`, nothing dropped or staged: `mutate_needs_select()`) is a single `push_op()`. `retry_on_sum_overflow()` wraps the whole chain. Per-call R cost matters at small sizes (about 90% of a 1e3-row eager mutate is R): `set_union()`/`set_diff()`/`set_intersect()` (`R/utils.R`) replace base/dplyr `union`/`setdiff`/`intersect` on plain vectors (base R 4.5+ probes classes with `tryCatch` on every call); `ir_type_memo_set()`/`ir_infer_type_memo()` reuse the type `ir_parse_quo()` just inferred; `.subset2(x, "field")`, not `x$field`, in per-call code (`$.tbl_gpu` walks the caller's environments).
 
 ### Grouping Behavior
 - `group_by()` only sets metadata (`$groups`), no GPU work
@@ -917,7 +940,9 @@ skip_if_no_gpu()           # Skip test if no GPU available
 expect_valid_tbl_gpu(x)    # Check tbl_gpu structure (allows exec_mode field)
 expect_data_on_gpu(x)      # Verify data is on GPU
 gc_gpu()                   # Force GPU garbage collection
-gpu_memory_snapshot()      # Get memory state for comparison
+gpu_memory_snapshot()      # Device-level memory state (a pool hides it; see "Memory resource")
+gpu_alloc_snapshot()       # Allocator-level state (pool_used_bytes), what memory tests should use
+run_with_pool_off(fn)      # Run fn in a subprocess with the memory pool off (device-level claims)
 ```
 
 ### Test Pattern

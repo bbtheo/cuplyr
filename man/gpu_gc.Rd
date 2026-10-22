@@ -15,7 +15,11 @@ lighter cleanup pass.}
 }
 \value{
 Invisibly returns a list with memory state before and after cleanup,
-and the amount freed in bytes and gigabytes.
+and the amount freed in bytes and gigabytes. \code{freed_bytes} is the drop in
+\code{pool_used_bytes} (allocator level) when cuplyr's memory resource is
+installed, since the device-level free memory does not move while the
+resource keeps its pages; with \code{resource == "cuda"} it is the rise in
+device free memory.
 }
 \description{
 Triggers R garbage collection to free GPU memory held by unreferenced

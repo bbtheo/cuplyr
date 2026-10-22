@@ -477,7 +477,7 @@ push_select_rename <- function(.data, names, loc) {
 # @keywords internal
 select_ensure_group_vars <- function(vars, names, groups) {
   group_loc <- match(groups, names)
-  missing <- setdiff(group_loc, vars)
+  missing <- set_diff(group_loc, vars)
   if (length(missing) == 0L) {
     return(vars)
   }

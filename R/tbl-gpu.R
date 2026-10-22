@@ -107,7 +107,7 @@ tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
   unspec_names <- NULL
   if (any(unspec)) {
     for (j in which(unspec)) data[[j]] <- rep(NA, nrow(data))
-    unspec_names <- setdiff(names(data)[unspec], names(data)[duplicated(names(data))])
+    unspec_names <- set_diff(names(data)[unspec], names(data)[duplicated(names(data))])
   }
   # Raised before wrap_gpu_call() so it is not reworded as a device-memory error.
   check_supported_column_classes(data)
@@ -191,7 +191,7 @@ upload_other_side <- function(y, lazy = FALSE) {
 # @keywords internal
 frame_attrs <- function(x) {
   a <- attributes(x)
-  a[setdiff(names(a), c("names", "row.names", "class", "groups"))]
+  a[!names(a) %in% c("names", "row.names", "class", "groups")]
 }
 
 # `x` with exactly the attributes `attrs` added (existing ones are replaced).
@@ -406,7 +406,7 @@ new_tbl_gpu <- function(ptr = NULL,
     out$fixed_keys <- fixed_keys
   }
   if (length(unspecified) > 0L) {
-    unspecified <- intersect(unspecified, schema$names[schema$types == "BOOL8"])
+    unspecified <- set_intersect(unspecified, schema$names[schema$types == "BOOL8"])
     if (length(unspecified) > 0L) {
       out$unspecified <- unspecified
     }
@@ -686,7 +686,7 @@ called_from_vctrs <- function(p) {
   # The unspecified marker is name-keyed too; a name that comes out duplicated
   # can't be addressed by collect_frame(), so it loses the marker.
   if (length(x[["unspecified"]]) > 0L) {
-    new_unspec <- setdiff(value[match(x[["unspecified"]], old)], value[duplicated(value)])
+    new_unspec <- set_diff(value[match(x[["unspecified"]], old)], value[duplicated(value)])
     x[["unspecified"]] <- if (length(new_unspec) > 0L) new_unspec
   }
   x$schema$names <- value

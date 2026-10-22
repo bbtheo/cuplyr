@@ -28,14 +28,15 @@ skip_if_no_gpu <- function() {
 
 #' Skip test if GPU memory is insufficient
 #'
-#' @param required_bytes Minimum free GPU memory needed in bytes
+#' @param required_bytes Minimum GPU memory cuplyr can allocate, in bytes: the
+#'   device's free memory plus the unused pages of cuplyr's memory pool
 skip_if_insufficient_gpu_memory <- function(required_bytes) {
   skip_if_no_gpu()
-  info <- gpu_details()
-  if (info$free_memory < required_bytes) {
+  available <- gpu_allocatable_bytes()
+  if (available < required_bytes) {
     skip(sprintf("Insufficient GPU memory: need %s, have %s",
                  format_bytes(required_bytes),
-                 format_bytes(info$free_memory)))
+                 format_bytes(available)))
   }
 }
 

@@ -930,17 +930,20 @@ warn_if_join_too_large <- function(join_type, x, y, join_spec, suffix, keep) {
   }
   est_bytes <- estimate_gpu_bytes(est_rows, schema$types)
 
+  # What cuplyr can allocate, not the device's free memory: a memory pool that
+  # grew holds pages the device no longer reports as free.
   mem <- gpu_memory_state()
-  if (!isTRUE(mem$available) || is.na(mem$free_bytes)) {
+  free_bytes <- gpu_allocatable_bytes(mem)
+  if (!isTRUE(mem$available) || is.na(free_bytes)) {
     return(invisible(NULL))
   }
 
-  if (est_bytes > mem$free_bytes * 0.8) {
+  if (est_bytes > free_bytes * 0.8) {
     warning(
       sprintf(
         "Join output is estimated at ~%.2f GB with only %.2f GB free on GPU. ",
         est_bytes / 1e9,
-        mem$free_bytes / 1e9
+        free_bytes / 1e9
       ),
       "Many-to-many joins can exceed this estimate; consider filtering or ",
       "calling gpu_gc() before joining.",

@@ -201,7 +201,7 @@ SEXP gpu_mutate_expr(SEXP xptr,
 
     for (int i = 0; i < n_expr; ++i) {
         Rcpp::List node = remap_virtual_col_indices(exprs[i], n_input, logical_to_real);
-        cudf::size_type idx = materialize_top_level(node, ctx);
+        cudf::size_type idx = materialize_top_level(node, ctx, /*alias_ok=*/true);
 
         std::string out_type_str = Rcpp::as<std::string>(out_types[i]);
         cudf::data_type want = expr_type_from_str(out_type_str);
@@ -218,18 +218,32 @@ SEXP gpu_mutate_expr(SEXP xptr,
 
     // Final assembly (replace-in-place, then append new), lifted from
     // ops_mutate_batch.cpp:141-202.
-    auto take_col = [&](cudf::size_type idx) -> std::unique_ptr<cudf::column> {
+    //
+    // F57: columns are shared, never copied. An output that is an unmodified
+    // input (or a bare copy of one, `a = x`) shares the input table's column;
+    // a computed one moves into a shared pointer once (two names that end up
+    // on the same computed slot share it too).
+    std::map<size_t, SharedColumn> taken;
+    auto take_col = [&](cudf::size_type idx) -> SharedColumn {
+        for (auto a = ctx.alias_of.find(idx); a != ctx.alias_of.end();
+             a = ctx.alias_of.find(idx)) {
+            idx = a->second;
+        }
         if (idx < n_input) {
-            return std::make_unique<cudf::column>(ctx.cols[idx]);  // deep copy of an unmodified input
+            return get_shared_column(ptr, idx);
         }
         size_t owned_idx = static_cast<size_t>(idx - n_input);
+        auto hit = taken.find(owned_idx);
+        if (hit != taken.end()) return hit->second;
         if (!ctx.owned[owned_idx]) {
             Rcpp::stop("internal: mutate result is a NaN-as-null view, not an owned column");
         }
-        return std::move(ctx.owned[owned_idx]);
+        SharedColumn col = share_column(std::move(ctx.owned[owned_idx]));
+        taken[owned_idx] = col;
+        return col;
     };
 
-    std::vector<std::unique_ptr<cudf::column>> final_columns;
+    std::vector<SharedColumn> final_columns;
     final_columns.reserve(static_cast<size_t>(n_input + n_expr));
     std::set<std::string> added;
 
@@ -240,7 +254,7 @@ SEXP gpu_mutate_expr(SEXP xptr,
             final_columns.push_back(take_col(it->second));
             added.insert(name);
         } else {
-            final_columns.push_back(std::make_unique<cudf::column>(ctx.cols[i]));
+            final_columns.push_back(get_shared_column(ptr, i));
         }
     }
 
@@ -252,6 +266,15 @@ SEXP gpu_mutate_expr(SEXP xptr,
         }
     }
 
-    auto result = std::make_unique<cudf::table>(std::move(final_columns));
-    return finish_expr_result(std::move(result), ctx.int_overflow, ctx.rw_flags);
+    SEXP out = make_gpu_table_xptr(std::move(final_columns));
+    Rcpp::Shield<SEXP> keep(out);
+    if (ctx.int_overflow) {
+        Rcpp::LogicalVector flag(1, true);
+        Rf_setAttrib(out, Rf_install("int_overflow"), flag);
+    }
+    if (ctx.rw_flags != 0) {
+        Rcpp::IntegerVector flags(1, ctx.rw_flags);
+        Rf_setAttrib(out, Rf_install("rw_flags"), flags);
+    }
+    return out;
 }

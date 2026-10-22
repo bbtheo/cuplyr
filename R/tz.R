@@ -222,6 +222,13 @@ propagate_tz <- function(node, input_schema, new_schema) {
   nms <- input_schema$names
 
   if (identical(node$type, "mutate")) {
+    # Without a zone to carry and no POSIXct output there is nothing to track.
+    if (is.null(input_schema$tz) &&
+        !any(vapply(node$expressions, function(e) {
+          identical(unname(e$output_type), "TIMESTAMP_MICROSECONDS")
+        }, logical(1)))) {
+      return(NULL)
+    }
     s <- input_schema
     for (expr in node$expressions) {
       s <- update_schema_for_expr(s, expr)

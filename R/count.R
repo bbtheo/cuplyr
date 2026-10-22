@@ -290,7 +290,7 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
   options(dplyr.summarise.inform = FALSE)
 
   result <- rlang::inject(dplyr::summarise(grouped, !!agg_name := !!agg_call))
-  out_groups <- intersect(orig_groups, result$schema$names)
+  out_groups <- set_intersect(orig_groups, result$schema$names)
 
   if (isTRUE(sort)) {
     result <- dplyr::arrange(result, dplyr::desc(!!rlang::sym(agg_name)))
@@ -455,7 +455,7 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
     result <- dplyr::arrange(result, dplyr::desc(!!rlang::sym(agg_name)))
   }
 
-  out_groups <- intersect(orig_groups, result$schema$names)
+  out_groups <- set_intersect(orig_groups, result$schema$names)
   # The transient grouping above dropped the input's attributes and class;
   # dplyr_reconstruct(out, x) gives x's (ungrouped x only) back.
   carry_frame_meta(new_tbl_gpu(

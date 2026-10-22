@@ -285,14 +285,12 @@ rw_functions <- function() {
   )
 }
 
-# Device-to-host fence. The cuplyr API gives no "work finished" guarantee
-# (nothing calls cudaDeviceSynchronize()); copying one row back is a pageable
-# cudaMemcpy, which synchronizes the default stream, and costs under a
-# millisecond. tbl_gpu's `$` goes through tibble from outside the namespace
-# and returns NULL, hence .subset2(). Returns `r` unchanged.
+# GPU completion fence: cuplyr calls return once the work is queued, so a timing
+# needs the device to finish. gpu_sync() (cudaDeviceSynchronize) waits for all of
+# it, with no copy back to the host; it works on any table, including one with no
+# columns. Returns `r` unchanged.
 rw_gpu_finish <- function(r) {
-  schema <- .subset2(r, "schema")
-  cuplyr:::gpu_head(.subset2(r, "ptr"), 1L, schema$names)
+  cuplyr::gpu_sync()
   r
 }
 
@@ -301,7 +299,7 @@ rw_gpu_finish <- function(r) {
 # data.table::froll<stat>() (cuplyr maps it to the native kernel). The median
 # has no cudf kernel and runs as a CPU fallback, so the report never times it:
 # every cuplyr cell goes through rw_native_probe() first.
-# fence = FALSE drops the device-to-host read (used once, to measure what the
+# fence = FALSE drops the gpu_sync() wait (used once, to measure what the
 # fence costs).
 rw_cuplyr_fun <- function(stat, alias = FALSE, fence = TRUE) {
   stat <- match.arg(stat, rw_stats)

@@ -129,3 +129,53 @@ timestamp_as_double <- function(x) {
   }
   x
 }
+
+# union()/setdiff()/intersect() of plain vectors without base's per-call class
+# probing (base 4.5+ runs `.set_ops_need_as_vector()`, two tryCatch(x[0L]), on
+# every call, and dplyr's generics add a dispatch on top): measurable on the
+# eager per-call path, where verbs call these dozens of times on short name
+# vectors. Same result as base for NULL or a plain atomic vector without
+# dim/class; anything else (a factor, a data frame) takes the original call.
+# @keywords internal
+is_plain_vector <- function(x) {
+  is.null(x) || (is.atomic(x) && is.null(dim(x)) && !is.object(x))
+}
+
+set_union <- function(x, y) {
+  if (is_plain_vector(x) && is_plain_vector(y)) {
+    x <- unique(x)
+    names(x) <- NULL
+    y <- unique(y)
+    names(y) <- NULL
+    return(c(x, y[match(y, x, 0L) == 0L]))
+  }
+  union(x, y)
+}
+
+set_diff <- function(x, y) {
+  if (is_plain_vector(x) && is_plain_vector(y)) {
+    if (is.null(x)) return(NULL)
+    x <- unique(x)
+    names(x) <- NULL
+    y <- unique(y)
+    names(y) <- NULL
+    return(x[match(x, y, 0L) == 0L])
+  }
+  setdiff(x, y)
+}
+
+set_intersect <- function(x, y) {
+  if (is_plain_vector(x) && is_plain_vector(y)) {
+    if (is.null(x) || is.null(y)) return(NULL)
+    x <- unique(x)
+    names(x) <- NULL
+    y <- unique(y)
+    names(y) <- NULL
+    return(c(x[match(x, y, 0L) > 0L], y[0L]))
+  }
+  intersect(x, y)
+}
+
+# The quosure of an argument nobody gave (mutate()'s `.by`, `.before`, `.after`
+# default to NULL), so a call doesn't pay an enquo() per absent argument.
+null_quo <- rlang::new_quosure(NULL, rlang::empty_env())

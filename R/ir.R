@@ -786,6 +786,29 @@ ir_fold_literal_call <- function(op, args) {
   ir_lit_from_r(value)
 }
 
+# The type ir_parse_quo() just inferred for `ir` against `schema`, which the verb
+# asks for again right after (make_mutate_expr()): inference is a pure function
+# of the two, so the answer is reused when both are the very same objects.
+# Only a successful inference is kept; any other outcome is computed again.
+.ir_type_memo <- new.env(parent = emptyenv())
+
+ir_type_memo_set <- function(ir, schema, type) {
+  # `type` is a promise whose evaluation may fail: nothing is stored then.
+  force(type)
+  .ir_type_memo$ir <- ir
+  .ir_type_memo$schema <- schema
+  .ir_type_memo$type <- type
+  invisible(type)
+}
+
+ir_infer_type_memo <- function(ir, schema) {
+  memo <- .ir_type_memo
+  if (!is.null(memo$ir) && identical(memo$ir, ir) && identical(memo$schema, schema)) {
+    return(memo$type)
+  }
+  ir_infer_type(ir, schema)
+}
+
 #' Parse an rlang quosure into cuplyr IR
 #'
 #' Implements the parse rule of section 1.2: columns shadow the
@@ -823,7 +846,7 @@ ir_parse_quo <- function(quo, schema) {
       # left for the verb to raise.
       if (!is.null(ir)) {
         tryCatch({
-          ir_infer_type(ir, schema)
+          ir_type_memo_set(ir, schema, ir_infer_type(ir, schema))
           ir_check_tz_rules(ir, schema)
         }, error = function(e) {
           if (inherits(e, c("cuplyr_timestamp_needs_cpu", "cuplyr_type_needs_cpu"))) stop(e)
@@ -878,7 +901,7 @@ ir_parse_case_when <- function(expr, env, schema) {
   }
 
   # .ptype=/.size=/.unmatched=/etc.: not implemented this wave -- fall back.
-  unsupported_named <- setdiff(arg_names[nzchar(arg_names)], ".default")
+  unsupported_named <- set_diff(arg_names[nzchar(arg_names)], ".default")
   if (length(unsupported_named) > 0) {
     return(NULL)
   }
@@ -1058,7 +1081,7 @@ ir_parse_value_match_clauses <- function(expr, env, schema, default_key) {
   rest_raw <- args_raw[-1]
   rest_names <- arg_names[-1]
 
-  unsupported_named <- setdiff(rest_names[nzchar(rest_names)], default_key)
+  unsupported_named <- set_diff(rest_names[nzchar(rest_names)], default_key)
   if (length(unsupported_named) > 0) {
     return(NULL)
   }
@@ -1501,7 +1524,7 @@ ir_parse_when_reduce <- function(expr, env, schema, fn_name) {
     arg_names <- rep("", length(args_raw))
   }
 
-  unsupported_named <- setdiff(arg_names[nzchar(arg_names)], "na_rm")
+  unsupported_named <- set_diff(arg_names[nzchar(arg_names)], "na_rm")
   if (length(unsupported_named) > 0) {
     return(NULL)  # size=: not implemented this wave
   }
@@ -4700,7 +4723,7 @@ ir_parse_lubridate_accessor <- function(expr, env, schema, fn_name) {
   }
   present_args <- as.list(present)[-1]
 
-  if (length(setdiff(names(present_args), "x")) > 0) {
+  if (length(set_diff(names(present_args), "x")) > 0) {
     return(NULL)  # any optional control present at all: not implemented this wave
   }
   if (is.null(present_args$x)) {
@@ -4749,7 +4772,7 @@ ir_parse_lubridate_rounding <- function(expr, env, schema, fn_name) {
     return(NULL)
   }
   present_args <- as.list(present)[-1]
-  if (length(setdiff(names(present_args), c("x", "unit"))) > 0 || is.null(present_args$x)) {
+  if (length(set_diff(names(present_args), c("x", "unit"))) > 0 || is.null(present_args$x)) {
     return(NULL)
   }
 

@@ -40,6 +40,8 @@ NULL
   toset <- !(names(op.cuplyr) %in% names(op))
   if (any(toset)) options(op.cuplyr[toset])
 
+  if (gpu_ok) memory_resource_install()
+
   invisible()
 }
 
@@ -49,7 +51,11 @@ NULL
   if (isTRUE(info$available)) {
     # Format memory in GB
     total_gb <- round(info$total_memory / 1e9, 1)
-    free_gb <- round(info$free_memory / 1e9, 1)
+    # What cuplyr can allocate (the free memory plus the pool's unused pages)
+    free_gb <- round(tryCatch(
+      gpu_allocatable_bytes(),
+      error = function(e) info$free_memory
+    ) / 1e9, 1)
 
     msg <- paste0(
       "cuplyr: GPU-accelerated data manipulation\n",

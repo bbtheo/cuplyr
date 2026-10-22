@@ -182,7 +182,23 @@ struct eval_ctx {
     // nan_as_null() (see nan_only_from_leaves()).
     bool nan_leaves = false;
 
+    // F57: slots of `cols` that alias another slot (a bare column copy in
+    // gpu_mutate_expr()), ctx index -> the index it aliases. `owned` holds a
+    // placeholder for them; the result shares the aliased column instead of
+    // copying it (see push_alias()).
+    std::map<cudf::size_type, cudf::size_type> alias_of;
+
     cudf::table_view view() const { return cudf::table_view(cols); }
+
+    // A fresh ctx index whose view is column `idx` itself (no copy).
+    cudf::size_type push_alias(cudf::size_type idx) {
+        cudf::column_view v = cols[idx];
+        owned.push_back(nullptr);
+        cols.push_back(v);
+        auto out = static_cast<cudf::size_type>(cols.size() - 1);
+        alias_of[out] = idx;
+        return out;
+    }
 
     cudf::size_type push(std::unique_ptr<cudf::column> col) {
         cudf::column_view v = col->view();
@@ -2802,9 +2818,12 @@ inline cudf::size_type materialize(Rcpp::List node, eval_ctx& ctx) {
 // aliasing (ops_mutate_batch.cpp:72-79).
 // -----------------------------------------------------------------------------
 
-inline cudf::size_type materialize_top_level(Rcpp::List node, eval_ctx& ctx) {
+inline cudf::size_type materialize_top_level(Rcpp::List node, eval_ctx& ctx,
+                                             bool alias_ok = false) {
     if (ir_kind(node) == "col") {
         int idx = Rcpp::as<int>(node["index"]);
+        // gpu_mutate_expr() shares the source column instead (F57).
+        if (alias_ok) return ctx.push_alias(idx);
         auto copy = std::make_unique<cudf::column>(ctx.cols[idx]);
         return ctx.push(std::move(copy));
     }

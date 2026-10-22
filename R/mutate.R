@@ -319,9 +319,13 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   check_unique_input_names(.data)
 
   dots <- rlang::enquos(...)
-  by_quo <- rlang::enquo(.by)
-  before_quo <- rlang::enquo(.before)
-  after_quo <- rlang::enquo(.after)
+  # (an argument that wasn't given is the NULL quosure; skips three enquo()s.
+  # missing() is also TRUE for an argument forwarded from a caller's missing
+  # one, whose substitute() is that caller's symbol rather than the NULL
+  # default: that one goes through enquo(), so dplyr's error stays.)
+  by_quo <- if (missing(.by) && is.null(substitute(.by))) null_quo else rlang::enquo(.by)
+  before_quo <- if (missing(.before) && is.null(substitute(.before))) null_quo else rlang::enquo(.before)
+  after_quo <- if (missing(.after) && is.null(substitute(.after))) null_quo else rlang::enquo(.after)
 
   if (is_rowwise_gpu(.data)) {
     return(mutate_rowwise(.data, dots, by_quo, .keep, before_quo, after_quo))
@@ -374,7 +378,7 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   # `.data$groups` (never `verb_groups`) into the result.
   by_given <- !rlang::quo_is_null(by_quo)
   by_cols <- if (rowwise) character() else resolve_by(.data, by_quo, ".by")
-  verb_groups <- if (by_given) by_cols else if (rowwise) character() else .data$groups
+  verb_groups <- if (by_given) by_cols else if (rowwise) character() else .subset2(.data, "groups")
 
   if (!rlang::quo_is_null(before_quo) && !rlang::quo_is_null(after_quo)) {
     stop("Can't supply both `.before` and `.after`.", call. = FALSE)
@@ -393,7 +397,7 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
 
   orig_schema <- current_schema(.data)
   orig_names <- orig_schema$names
-  orig_groups <- if (rowwise) .data$groups else verb_groups
+  orig_groups <- if (rowwise) .subset2(.data, "groups") else verb_groups
 
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R's
   # own module docs for the full design. Anything genuinely unsupported
@@ -415,7 +419,7 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   # Expand before cur_group_id() substitution, so a call that falls back
   # never pays for the substitution's GPU work and the helper column is never
   # in `.cols`'s selectable universe.
-  expanded <- expand_across_dots(dots, current_schema(.data), verb_groups, "mutate")
+  expanded <- expand_across_dots(dots, orig_schema, verb_groups, "mutate")
   if (isTRUE(attr(expanded, "needs_fallback"))) {
     return(mutate_across_fallback(.data, user_dots, .keep, before_quo, after_quo, by_quo))
   }
@@ -432,7 +436,7 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   fallback_dots <- user_dots
   cgid <- substitute_cur_group_id(.data, expanded, verb_groups, by = by_given, rowwise = rowwise)
   .data <- cgid$data
-  orig_schema <- current_schema(.data)
+  if (isTRUE(cgid$used)) orig_schema <- current_schema(.data)
   dots <- cgid$dots
 
   # Phase 11, task L1: universal expression-level CPU fallback. Every dot is
@@ -470,14 +474,14 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
     return(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo))
   }
   dropped <- attr(expressions, "dropped")
-  if (rowwise && any(dropped %in% .data$groups)) {
+  if (rowwise && any(dropped %in% .subset2(.data, "groups"))) {
     rowwise_bail("a rowwise var is dropped")
   }
   check_droppable_groups(dropped, if (by_given) character() else verb_groups)
   # Floored fractional Date constants (parse_mutate_dots()); staged temps
   # aren't output columns. Warned once the native call has run (eager) or
   # been planned (lazy); a CPU fallback's upload warns by itself.
-  fractional <- setdiff(attr(expressions, "fractional_dates"), staged_temps)
+  fractional <- set_diff(attr(expressions, "fractional_dates"), staged_temps)
 
   # Phase 5, task W3: any dot containing a window-function call (row_number(),
   # lag()/lead(), cumsum()/cummax()/cummin()/cumprod(), and their R desugars
@@ -501,17 +505,33 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   # ast_mutate with zero expressions would be a pure no-op anyway (see
   # R/ast.R::is_barrier()'s "empty mutate nodes are eliminated" comment on
   # the optimizer side), so there's nothing to gain by building one here.
-  result <- .data
-  if (length(expressions) > 0) {
-    result <- push_op(.data, ast_mutate(input_node(.data), expressions))
-  }
-
-  select_node <- mutate_keep_select_node(
-    result, orig_names, orig_groups, expressions, .keep, before_quo, after_quo,
-    drop = staged_temps, dropped = dropped
-  )
-  if (!is.null(select_node)) {
-    result <- push_op(result, select_node)
+  # The mutate alone when no select can follow it (the common `.keep = "all"`
+  # call: mutate_needs_select()); otherwise an eager call runs the mutate and
+  # the `.keep`/`.before`/`.after` select as one execution, push_chain().
+  if (!mutate_needs_select(orig_names, expressions, .keep, before_quo, after_quo,
+                           staged_temps, dropped, helper = isTRUE(cgid$used))) {
+    result <- .data
+    if (length(expressions) > 0) {
+      result <- push_op(.data, ast_mutate(input_node(.data), expressions))
+    }
+  } else {
+    result <- push_chain(.data, function(x) {
+      result <- x
+      if (length(expressions) > 0) {
+        result <- push_op(x, ast_mutate(input_node(x), expressions),
+                          input_schema = orig_schema, carry = FALSE)
+      }
+      select_node <- mutate_keep_select_node(
+        result, orig_names, orig_groups, expressions, .keep, before_quo, after_quo,
+        drop = staged_temps, dropped = dropped,
+        result_names = if (length(expressions) > 0) .subset2(result, "schema")$names else orig_names
+      )
+      if (!is.null(select_node)) {
+        result <- push_op(result, select_node, input_schema = .subset2(result, "schema"),
+                          carry = FALSE)
+      }
+      result
+    })
   }
   warn_fractional_dates(fractional)
   result
@@ -607,24 +627,32 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
     return(mutate_window_fallback(fallback_data, dots, keep, before_quo, after_quo, by_quo))
   }
 
-  emit <- function() {
-    result <- .data
+  # Each push is handed the schema the previous one produced, so none of them
+  # re-derives it from the pending chain.
+  emit <- function(result) {
+    sch <- orig_schema
     for (batch_plan in plan$batch_plans) {
       for (stage in batch_plan$stages) {
         if (length(stage$pre) > 0) {
-          result <- push_op(result, ast_mutate(input_node(result), stage$pre))
+          result <- push_op(result, ast_mutate(input_node(result), stage$pre),
+                            input_schema = sch, carry = FALSE)
+          sch <- .subset2(result, "schema")
         }
-        result <- push_op(result, ast_window(input_node(result), stage$specs, orig_groups))
+        result <- push_op(result, ast_window(input_node(result), stage$specs, orig_groups),
+                          input_schema = sch, carry = FALSE)
+        sch <- .subset2(result, "schema")
       }
-      result <- push_op(result, ast_mutate(input_node(result), batch_plan$expressions))
+      result <- push_op(result, ast_mutate(input_node(result), batch_plan$expressions),
+                        input_schema = sch, carry = FALSE)
+      sch <- .subset2(result, "schema")
     }
 
     select_node <- mutate_keep_select_node(
       result, orig_names, orig_groups, expressions, keep, before_quo, after_quo,
-      drop = drop, dropped = dropped
+      drop = drop, dropped = dropped, result_names = sch$names
     )
     if (!is.null(select_node)) {
-      result <- push_op(result, select_node)
+      result <- push_op(result, select_node, input_schema = sch, carry = FALSE)
     }
     result
   }
@@ -635,18 +663,20 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
   # known after the fact, so such a call is rerun whole by dplyr; overflow is
   # rare, so the CPU path costs nothing in the common case. A lazy plan has a
   # fixed schema and raises `cuplyr_error_sum_overflow` at collect() instead.
-  if (identical(.data$exec_mode, "eager")) {
+  if (identical(.subset2(.data, "exec_mode"), "eager")) {
     # The CPU rerun's upload warns about fractional dates itself.
     return(retry_on_sum_overflow(
       function() {
-        result <- emit()
+        # The whole chain (window stages, mutates, trailing select) runs as one
+        # execution and builds one table.
+        result <- push_chain(.data, emit)
         warn_fractional_dates(fractional)
         result
       },
       function() mutate_window_fallback(fallback_data, dots, keep, before_quo, after_quo, by_quo)
     ))
   }
-  result <- emit()
+  result <- push_chain(.data, emit)
   warn_fractional_dates(fractional)
   result
 }
@@ -963,7 +993,7 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     # `col = NULL` (or a constant that evaluates to NULL) drops the column:
     # later dots no longer see it, and a later dot of the same name re-adds it.
     if (identical(const$kind, "null")) {
-      dropped <- union(dropped, new_name)
+      dropped <- set_union(dropped, new_name)
       keep_idx <- schema$names != new_name
       schema$names <- schema$names[keep_idx]
       schema$types <- schema$types[keep_idx]
@@ -1086,7 +1116,7 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     }
 
     expressions <- c(expressions, list(step))
-    dropped <- setdiff(dropped, new_name)
+    dropped <- set_diff(dropped, new_name)
     copied_vec <- !is.na(copied) && frac_vec[copied]
     # F41: a native mean()/median() of a Date/POSIXct is rounded to the column
     # type (a fractional Date mean is floored, lower_window() warns), where
@@ -1323,7 +1353,7 @@ expr_has_mask_only_call <- function(expr) {
 # dplyr refuses to drop a grouping column of a grouped table (`.by` allows it).
 # @keywords internal
 check_droppable_groups <- function(dropped, groups) {
-  bad <- intersect(dropped, groups)
+  bad <- set_intersect(dropped, groups)
   if (length(bad) > 0) {
     stop("Can't drop grouping column", if (length(bad) > 1) "s", " ",
          paste0("`", bad, "`", collapse = ", "), " with NULL.", call. = FALSE)
@@ -1386,7 +1416,8 @@ name_dots_silently <- function(dots) {
 # @keywords internal
 mutate_keep_select_node <- function(result, orig_names, orig_groups,
                                      expressions, keep, before_quo, after_quo,
-                                     drop = character(), dropped = character()) {
+                                     drop = character(), dropped = character(),
+                                     result_names = current_schema(result)$names) {
   touched_cols <- unique(vapply(expressions, `[[`, character(1), "output_col"))
   new_cols <- touched_cols[!touched_cols %in% c(orig_names, drop, dropped)]
   # New columns sit where their name first appeared among the dots, which
@@ -1401,14 +1432,14 @@ mutate_keep_select_node <- function(result, orig_names, orig_groups,
   mode_extra <- switch(keep,
     all = orig_names,
     used = input_cols_union,
-    unused = setdiff(orig_names, input_cols_union),
+    unused = set_diff(orig_names, input_cols_union),
     none = character()
   )
 
-  always_kept <- union(orig_groups, existing_touched)
-  kept_orig_names <- orig_names[orig_names %in% union(always_kept, mode_extra)]
+  always_kept <- set_union(orig_groups, existing_touched)
+  kept_orig_names <- orig_names[orig_names %in% set_union(always_kept, mode_extra)]
 
-  full_names <- current_schema(result)$names
+  full_names <- result_names
   full_names <- c(full_names[!full_names %in% new_cols], new_cols)
 
   if (length(new_cols) > 0 &&
@@ -1424,17 +1455,37 @@ mutate_keep_select_node <- function(result, orig_names, orig_groups,
     full_names <- full_names[loc]
   }
 
-  final_order <- full_names[full_names %in% union(kept_orig_names, new_cols)]
+  final_order <- full_names[full_names %in% set_union(kept_orig_names, new_cols)]
   final_order <- final_order[!final_order %in% dropped]
   if (length(dropped) > 0 && length(final_order) == 0) {
     stop("Can't drop every column of a tbl_gpu.", call. = FALSE)
   }
 
-  if (identical(final_order, current_schema(result)$names)) {
+  if (identical(final_order, result_names)) {
     return(NULL)
   }
 
   ast_select(input_node(result), final_order)
+}
+
+# TRUE unless mutate_keep_select_node() is certain to find nothing to select:
+# `.keep = "all"` with no `.before`/`.after`, no staged temp and no dropped
+# column keeps every original column where it is, and the new columns land at
+# the end in the order the dots introduced them, which is the order the mutate
+# node appends them in; the one exception is a `col = NULL` dot that a later dot
+# re-fills (dplyr puts the column where its NAME first appeared). `helper`: the
+# input carries a cur_group_id() helper column, which the select drops.
+# @keywords internal
+mutate_needs_select <- function(orig_names, expressions, keep, before_quo, after_quo,
+                                drop, dropped, helper = FALSE) {
+  if (helper || !identical(keep, "all") || length(drop) > 0L || length(dropped) > 0L ||
+      !rlang::quo_is_null(before_quo) || !rlang::quo_is_null(after_quo)) {
+    return(TRUE)
+  }
+  touched <- unique(vapply(expressions, `[[`, character(1), "output_col"))
+  new_cols <- touched[!touched %in% orig_names]
+  dot_order <- attr(expressions, "dot_order")
+  !is.null(dot_order) && !identical(dot_order[dot_order %in% new_cols], new_cols)
 }
 
 # Update the running schema after adding a mutate expression: a replacement
@@ -1448,6 +1499,20 @@ mutate_keep_select_node <- function(result, orig_names, orig_groups,
 # @return Updated schema
 # @keywords internal
 update_schema_for_expr <- function(schema, expr) {
+  # Nothing to carry (no factor levels, no zones) and an output that is neither
+  # a factor nor a POSIXct: only the name and type change.
+  if (is.null(schema$factor_levels) && is.null(schema$tz) &&
+      !(unname(expr$output_type) %in% c("TIMESTAMP_MICROSECONDS", "DICTIONARY32"))) {
+    existing_idx <- match(expr$output_col, schema$names)
+    if (!is.na(existing_idx)) {
+      schema$types[existing_idx] <- expr$output_type
+    } else {
+      schema$names <- c(schema$names, expr$output_col)
+      schema$types <- c(schema$types, expr$output_type)
+    }
+    return(schema)
+  }
+
   # The output name's levels, read BEFORE writing (`f = f` is its own
   # source). ir_factor_rule() reads these for the dots that follow.
   schema <- set_schema_factor_levels(
@@ -1553,7 +1618,7 @@ transmute.tbl_gpu <- function(.data, ...) {
         rlang::inject(dplyr::transmute(.data = tbl, !!!dots))
       })
     }
-    rw <- if (length(dots) > 0L || length(.data$groups) > 0L) rowwise_rewrite_dots(.data, dots)
+    rw <- if (length(dots) > 0L || length(.subset2(.data, "groups")) > 0L) rowwise_rewrite_dots(.data, dots)
     if (is.null(rw)) {
       return(rowwise_rerun(cpu))
     }
@@ -1568,7 +1633,7 @@ transmute.tbl_gpu <- function(.data, ...) {
 transmute_run <- function(.data, dots, rowwise = FALSE) {
   orig_dots <- dots
   # the groups every window/cur_group/vector-literal decision is made over
-  eff_groups <- if (rowwise) character() else .data$groups
+  eff_groups <- if (rowwise) character() else .subset2(.data, "groups")
 
   if (length(dots) > 0L && is_zero_column_with_rows(.data)) {
     return(gpu_fallback("transmute", .data, function(tbl) {
@@ -1577,7 +1642,7 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
   }
 
   # No expressions on an ungrouped table: every column goes (n x 0 result).
-  if (length(dots) == 0L && length(.data$groups) == 0L) {
+  if (length(dots) == 0L && length(.subset2(.data, "groups")) == 0L) {
     return(zero_column_result(.data, "transmute"))
   }
 
@@ -1632,32 +1697,39 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
   }
 
   dropped <- attr(expressions, "dropped")
-  if (rowwise && any(dropped %in% .data$groups)) {
+  if (rowwise && any(dropped %in% .subset2(.data, "groups"))) {
     rowwise_bail("a rowwise var is dropped")
   }
   check_droppable_groups(dropped, eff_groups)
 
-  result <- .data
-  if (length(expressions) > 0) {
-    result <- push_op(.data, ast_mutate(input_node(.data), expressions))
-  }
-
   # Order: literal dot order (whether bare-column or newly computed), with
   # any un-dotted group column prepended -- see the roxygen "Details" above
   # for how this differs from mutate(.keep = "none")'s ordering rule.
-  dot_output_cols <- setdiff(
+  dot_output_cols <- set_diff(
     attr(expressions, "dot_order"), c(staged_temps, dropped)
   )
-  missing_groups <- setdiff(.data$groups, dot_output_cols)
+  missing_groups <- set_diff(.subset2(.data, "groups"), dot_output_cols)
   final_order <- c(missing_groups, dot_output_cols)
 
+  # (An eager call runs the mutate and the select as one execution, push_chain().)
+  result <- push_chain(.data, function(x) {
+    result <- x
+    if (length(expressions) > 0) {
+      result <- push_op(x, ast_mutate(input_node(x), expressions),
+                        input_schema = schema, carry = FALSE)
+    }
+    if (length(final_order) > 0L) {
+      result <- push_op(result, ast_select(input_node(result), final_order),
+                        carry = FALSE)
+    }
+    result
+  })
   if (length(final_order) == 0L) {
     return(zero_column_result(result, "transmute"))
   }
-  result <- push_op(result, ast_select(input_node(result), final_order))
   # As in mutate.tbl_gpu(): floored fractional Date constants, warned now
   # that the call is native.
-  warn_fractional_dates(setdiff(attr(expressions, "fractional_dates"), staged_temps))
+  warn_fractional_dates(set_diff(attr(expressions, "fractional_dates"), staged_temps))
   result
 }
 
@@ -1678,13 +1750,13 @@ NULL
 # trigger it.
 inform_colwise_grouped <- function(.data, verb, caller) {
   # (dplyr's check_grouped() tests is_grouped_df(): a rowwise_df is not)
-  if (length(.data$groups) == 0L || is_rowwise_gpu(.data) || !is.function(caller)) {
+  if (length(.subset2(.data, "groups")) == 0L || is_rowwise_gpu(.data) || !is.function(caller)) {
     return(invisible())
   }
   for (suffix in c("all", "if")) {
     fn <- getExportedValue("dplyr", paste0(verb, "_", suffix))
     if (identical(caller, fn)) {
-      cols <- .data$groups
+      cols <- .subset2(.data, "groups")
       msg <- paste0(if (length(cols) == 1L) "Column " else "Columns ",
                     paste0(if (length(cols) > 6L) c(paste0("`", cols[1:5], "`"), "...")
                            else paste0("`", cols, "`"), collapse = ", "))

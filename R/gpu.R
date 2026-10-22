@@ -64,7 +64,9 @@ has_gpu <- function() {
 #'
 #' ## Memory
 #' The `free_memory` value reflects memory available at the time of the call.
-#' Other applications or CUDA contexts may be using GPU memory.
+#' Other applications or CUDA contexts may be using GPU memory. It is a
+#' device-level number: memory that cuplyr's memory resource holds (see
+#' [gpu_memory_state()]) counts as used, whether or not a table occupies it.
 #'
 #' @seealso
 #' \code{\link{has_gpu}} for simple availability check,
@@ -93,7 +95,8 @@ gpu_details <- function() {
 #' Output includes:
 #' \itemize{
 #'   \item Device name and compute capability
-#'   \item Total, free, and used memory
+#'   \item Total, free, and used memory (device level: includes the memory
+#'     cuplyr's memory resource holds, see [gpu_memory_state()])
 #'   \item Number of streaming multiprocessors
 #' }
 #'

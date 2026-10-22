@@ -42,7 +42,7 @@ SEXP gpu_bind_cols_impl(List table_ptrs) {
     cudf::size_type expected_rows = first_view.num_rows();
 
     // Gather all columns from all tables
-    std::vector<std::unique_ptr<cudf::column>> all_columns;
+    std::vector<SharedColumn> all_columns;
 
     for (int t = 0; t < table_ptrs.size(); ++t) {
         Rcpp::XPtr<GpuTablePtr> ptr(table_ptrs[t]);
@@ -55,16 +55,13 @@ SEXP gpu_bind_cols_impl(List table_ptrs) {
                        expected_rows, t + 1, view.num_rows());
         }
 
-        // Copy columns from this table
+        // Share the columns of this table (F57): bind_cols allocates nothing.
         for (cudf::size_type c = 0; c < view.num_columns(); ++c) {
-            all_columns.push_back(
-                std::make_unique<cudf::column>(view.column(c))
-            );
+            all_columns.push_back(get_shared_column(ptr, c));
         }
     }
 
-    auto result = std::make_unique<cudf::table>(std::move(all_columns));
-    return make_gpu_table_xptr(std::move(result));
+    return make_gpu_table_xptr(std::move(all_columns));
 }
 
 // [[Rcpp::export]]
@@ -82,12 +79,11 @@ SEXP gpu_bind_rows_aligned(List table_ptrs) {
         Rcpp::XPtr<GpuTablePtr> ptr(table_ptrs[0]);
         cudf::table_view view = get_table_view(ptr);
 
-        std::vector<std::unique_ptr<cudf::column>> columns;
+        std::vector<SharedColumn> columns;
         for (cudf::size_type i = 0; i < view.num_columns(); ++i) {
-            columns.push_back(std::make_unique<cudf::column>(view.column(i)));
+            columns.push_back(get_shared_column(ptr, i));
         }
-        auto result = std::make_unique<cudf::table>(std::move(columns));
-        return make_gpu_table_xptr(std::move(result));
+        return make_gpu_table_xptr(std::move(columns));
     }
 
     // Build vector of table_views for concatenate
@@ -280,29 +276,27 @@ SEXP gpu_cast_column(SEXP xptr, int col_idx, std::string target_type) {
 
     // If already the target type, just copy
     if (source_col.type().id() == target_dtype.id()) {
-        std::vector<std::unique_ptr<cudf::column>> columns;
+        std::vector<SharedColumn> columns;
         for (cudf::size_type i = 0; i < view.num_columns(); ++i) {
-            columns.push_back(std::make_unique<cudf::column>(view.column(i)));
+            columns.push_back(get_shared_column(ptr, i));
         }
-        auto result = std::make_unique<cudf::table>(std::move(columns));
-        return make_gpu_table_xptr(std::move(result));
+        return make_gpu_table_xptr(std::move(columns));
     }
 
     // Cast the column
     auto casted = cudf::cast(source_col, target_dtype);
 
-    // Rebuild table with casted column
-    std::vector<std::unique_ptr<cudf::column>> columns;
+    // Rebuild table with casted column; the others are shared
+    std::vector<SharedColumn> columns;
     for (cudf::size_type i = 0; i < view.num_columns(); ++i) {
         if (i == col_idx) {
-            columns.push_back(std::move(casted));
+            columns.push_back(share_column(std::move(casted)));
         } else {
-            columns.push_back(std::make_unique<cudf::column>(view.column(i)));
+            columns.push_back(get_shared_column(ptr, i));
         }
     }
 
-    auto result = std::make_unique<cudf::table>(std::move(columns));
-    return make_gpu_table_xptr(std::move(result));
+    return make_gpu_table_xptr(std::move(columns));
 }
 
 // =============================================================================
@@ -366,17 +360,16 @@ SEXP gpu_remap_codes(SEXP xptr, int col_idx, IntegerVector map) {
     std::unique_ptr<cudf::column> new_codes = std::move(gathered_cols[0]);
     reapply_null_mask(new_codes, codes_col);
 
-    std::vector<std::unique_ptr<cudf::column>> columns;
+    std::vector<SharedColumn> columns;
     for (cudf::size_type i = 0; i < view.num_columns(); ++i) {
         if (i == col_idx) {
-            columns.push_back(std::move(new_codes));
+            columns.push_back(share_column(std::move(new_codes)));
         } else {
-            columns.push_back(std::make_unique<cudf::column>(view.column(i)));
+            columns.push_back(get_shared_column(ptr, i));
         }
     }
 
-    auto result = std::make_unique<cudf::table>(std::move(columns));
-    return make_gpu_table_xptr(std::move(result));
+    return make_gpu_table_xptr(std::move(columns));
 }
 
 // Decode a factor column to its label strings (dplyr's factor + character
@@ -403,17 +396,16 @@ SEXP gpu_decode_factor(SEXP xptr, int col_idx, CharacterVector levels) {
 
     std::unique_ptr<cudf::column> decoded = decode_codes_to_labels(codes_col, levels);
 
-    std::vector<std::unique_ptr<cudf::column>> columns;
+    std::vector<SharedColumn> columns;
     for (cudf::size_type i = 0; i < view.num_columns(); ++i) {
         if (i == col_idx) {
-            columns.push_back(std::move(decoded));
+            columns.push_back(share_column(std::move(decoded)));
         } else {
-            columns.push_back(std::make_unique<cudf::column>(view.column(i)));
+            columns.push_back(get_shared_column(ptr, i));
         }
     }
 
-    auto result = std::make_unique<cudf::table>(std::move(columns));
-    return make_gpu_table_xptr(std::move(result));
+    return make_gpu_table_xptr(std::move(columns));
 }
 
 // Cast a column to STRING for bind_rows() schema unification.
@@ -463,14 +455,18 @@ SEXP gpu_cast_to_string(SEXP xptr, int col_idx) {
     cudf::column_view source_col = view.column(col_idx);
     cudf::type_id tid = source_col.type().id();
 
+    // Already STRING: nothing to build, the table is shared as it is (F57).
+    if (tid == cudf::type_id::STRING) {
+        std::vector<SharedColumn> shared;
+        for (cudf::size_type i = 0; i < view.num_columns(); ++i) {
+            shared.push_back(get_shared_column(ptr, i));
+        }
+        return make_gpu_table_xptr(std::move(shared));
+    }
+
     std::unique_ptr<cudf::column> string_col;
 
     switch (tid) {
-        case cudf::type_id::STRING: {
-            // Already STRING - just copy through.
-            string_col = std::make_unique<cudf::column>(source_col);
-            break;
-        }
         case cudf::type_id::INT8:
         case cudf::type_id::INT16:
         case cudf::type_id::INT32:
@@ -497,17 +493,16 @@ SEXP gpu_cast_to_string(SEXP xptr, int col_idx) {
     }
 
     // Rebuild the table with the string column in place of the source column.
-    std::vector<std::unique_ptr<cudf::column>> columns;
+    std::vector<SharedColumn> columns;
     for (cudf::size_type i = 0; i < view.num_columns(); ++i) {
         if (i == col_idx) {
-            columns.push_back(std::move(string_col));
+            columns.push_back(share_column(std::move(string_col)));
         } else {
-            columns.push_back(std::make_unique<cudf::column>(view.column(i)));
+            columns.push_back(get_shared_column(ptr, i));
         }
     }
 
-    auto result = std::make_unique<cudf::table>(std::move(columns));
-    return make_gpu_table_xptr(std::move(result));
+    return make_gpu_table_xptr(std::move(columns));
 }
 
 // Get actual GPU type of a column (for debugging/validation)

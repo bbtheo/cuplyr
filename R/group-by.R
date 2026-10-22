@@ -354,7 +354,7 @@ ungroup.tbl_gpu <- function(x, ...) {
     # the proxy carries the grouping: group_cols() reads it from peek_data()
     proxy <- tidyselect_proxy(schema, groups)
     sel <- tidyselect::eval_select(rlang::expr(c(!!!dots)), proxy, allow_rename = FALSE)
-    groups <- setdiff(groups, names(sel))
+    groups <- set_diff(groups, names(sel))
     if (length(groups) > 0L) {
       drop <- group_by_drop_default(x)
     }
@@ -836,7 +836,7 @@ group_keys.tbl_gpu <- function(.tbl, ...) {
   }
   gd <- compute_group_data(.tbl)
   attr(gd, ".drop") <- NULL
-  gd[setdiff(names(gd), ".rows")]
+  gd[set_diff(names(gd), ".rows")]
 }
 
 #' @rdname group-data

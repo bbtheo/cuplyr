@@ -54,17 +54,29 @@ test_that("tracking sees the upload when driver pages hide it from device usage"
 
 test_that("large columns raise device usage even with half-used pages", {
   skip_if_no_gpu()
-  survivors <- f56_fragment_pages()
 
-  df <- create_large_test_data(nrow = 1000000, ncol = 5)
-  gc_gpu()
-  before <- f56_used()
-  g <- tbl_gpu(df)
-  diff <- f56_used() - before
+  # A claim about the CUDA driver (device-level usage), which cuplyr's memory
+  # pool would hide: it runs in a process with the pool switched off.
+  out <- run_with_pool_off(function() {
+    tabs <- lapply(1:60, function(i) tbl_gpu(data.frame(x = runif(1e5))))
+    tabs[seq(1L, 60L, by = 2L)] <- list(NULL)
+    gc(full = TRUE)
+    Sys.sleep(0.1)
+    gc(full = TRUE)
+    used <- function() {
+      info <- gpu_details()
+      info$total_memory - info$free_memory
+    }
 
-  expect_true(diff >= 0.5 * 1000000 * 5 * 8,
-              info = sprintf("device-level diff %s", format_bytes(diff)))
-  rm(survivors, g)
+    df <- as.data.frame(matrix(runif(1e6 * 5), ncol = 5))
+    gc(full = TRUE)
+    before <- used()
+    g <- tbl_gpu(df)
+    list(diff = used() - before, survivors = length(tabs), rows = nrow(g))
+  })
+
+  expect_true(out$diff >= 0.5 * 1000000 * 5 * 8,
+              info = sprintf("device-level diff %s", format_bytes(out$diff)))
 })
 
 test_that("gpu_alloc_tracking() returns the value and zero counts for host-only work", {

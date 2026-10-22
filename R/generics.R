@@ -132,13 +132,13 @@ dplyr_col_modify.tbl_gpu <- function(data, cols) {
   cols <- cols[!is_removed]
 
   schema_names <- materialized$schema$names
-  existing_replaced <- intersect(names(cols), schema_names)
-  drop_names <- union(removed_names, existing_replaced)
+  existing_replaced <- set_intersect(names(cols), schema_names)
+  drop_names <- set_union(removed_names, existing_replaced)
 
   # Existing columns being replaced stay in place, new ones are appended.
   final_order <- c(
-    setdiff(schema_names, removed_names),
-    setdiff(names(cols), schema_names)
+    set_diff(schema_names, removed_names),
+    set_diff(names(cols), schema_names)
   )
   apply_col_changes(data, materialized, final_order, cols)
 }
@@ -155,7 +155,7 @@ apply_col_changes <- function(x, m, final_names, new_cols) {
   if (length(final_names) == 0L) {
     stop("A tbl_gpu cannot have zero columns.", call. = FALSE)
   }
-  base_names <- setdiff(final_names, names(new_cols))
+  base_names <- set_diff(final_names, names(new_cols))
   work <- set_tbl_gpu_field(ungrouped(m), "group_drop", TRUE)
   work <- set_tbl_gpu_field(work, "exec_mode", "eager")
 
@@ -180,7 +180,7 @@ apply_col_changes <- function(x, m, final_names, new_cols) {
   # An index bug here would surface from the GPU layer as an "out of memory"
   # hint, so say what happened.
   if (!all(final_names %in% .subset2(combined, "schema")$names)) {
-    stop("Internal error: columns ", paste0("`", setdiff(final_names, .subset2(combined, "schema")$names), "`", collapse = ", "),
+    stop("Internal error: columns ", paste0("`", set_diff(final_names, .subset2(combined, "schema")$names), "`", collapse = ", "),
          " were lost while modifying a tbl_gpu.", call. = FALSE)
   }
   if (!identical(.subset2(combined, "schema")$names, final_names)) {
@@ -241,10 +241,10 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
   # whose group keys were fixed, `bare_df` on a table from a plain data.frame)
   optional <- c("nrow", "fixed_keys", "unspecified", "bare_df", "rowwise")
   if (is.data.frame(data) &&
-      identical(setdiff(names(data), optional), setdiff(tbl_gpu_fields, optional))) {
+      identical(set_diff(names(data), optional), set_diff(tbl_gpu_fields, optional))) {
     # dplyr_reconstruct.grouped_df()/.data.frame(): the template's groups
     # (those that survive), `.drop`, attributes and class win over `data`'s.
-    groups <- intersect(template$groups, data$schema$names)
+    groups <- set_intersect(template$groups, data$schema$names)
     out <- new_tbl_gpu(
       ptr = data$ptr, schema = data$schema, lazy_ops = data$lazy_ops,
       groups = groups, exec_mode = data$exec_mode,
@@ -263,7 +263,7 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
 
   template_groups <- template$groups
   if (is_rowwise_gpu(template)) {
-    return(rowwise_mark(out, intersect(template_groups, names(out))))
+    return(rowwise_mark(out, set_intersect(template_groups, names(out))))
   }
   if (length(template_groups) > 0 && all(template_groups %in% names(out))) {
     out <- dplyr::group_by(
@@ -377,7 +377,7 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
       keep_groups <- x$groups
       drop_flag <- x$group_drop %||% TRUE
       x <- push_op(x, ast_select_at(input_node(x), schema$names, loc))
-      x$groups <- intersect(keep_groups, schema$names[loc])
+      x$groups <- set_intersect(keep_groups, schema$names[loc])
       # dplyr: once no group column is left the table is ungrouped, and a later
       # group_by() starts from the default `.drop` again.
       x$group_drop <- if (length(x$groups) > 0L) drop_flag else TRUE
@@ -800,7 +800,7 @@ ungrouped <- function(x) {
 # Like dplyr_col_modify() + dplyr_reconstruct(out, x), `x` also decides the
 # attributes and class (F31).
 with_surviving_groups <- function(x, out) {
-  keep <- intersect(.subset2(x, "groups"), current_schema(out)$names)
+  keep <- set_intersect(.subset2(x, "groups"), current_schema(out)$names)
   out <- reset_frame_meta(out, x)
   out <- set_tbl_gpu_field(out, "groups", keep)
   out <- set_tbl_gpu_field(out, "rowwise", if (is_rowwise_gpu(x)) TRUE)

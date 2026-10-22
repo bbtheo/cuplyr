@@ -372,7 +372,7 @@ propagate_factor_levels <- function(node, input_schema, surviving_names) {
 propagate_groups <- function(node, groups, schema) {
   abort_positional_rename_with_groups(node, groups)
   if (identical(node$type, "summarise")) {
-    return(intersect(node$result_groups, schema$names))
+    return(set_intersect(node$result_groups, schema$names))
   }
   # reframe() always returns an ungrouped table
   if (identical(node$type, "reframe")) {
@@ -385,7 +385,7 @@ propagate_groups <- function(node, groups, schema) {
     groups[renamed] <- node$new_names[idx[renamed]]
   }
 
-  intersect(groups, schema$names)
+  set_intersect(groups, schema$names)
 }
 
 # A positional rename (duplicated names) can't map group columns by name. The
@@ -476,10 +476,13 @@ zero_column_nrow <- function(.data, verb) {
 #'
 #' @param .data A `tbl_gpu` object
 #' @param node The new AST node (already wrapping `input_node(.data)`)
+#' @param input_schema `current_schema(.data)`, when the caller already has it
+#'   (a node chain, `push_chain()`: the previous push's `$schema`)
+#' @param carry `FALSE` leaves the frame metadata (attributes, bare class) off
+#'   the result: a step of a `push_chain()`, which carries it once at the end
 #' @return A new `tbl_gpu` object
 #' @keywords internal
-push_op <- function(.data, node) {
-  input_schema <- current_schema(.data)
+push_op <- function(.data, node, input_schema = current_schema(.data), carry = TRUE) {
   check_zero_column_input(.data, input_schema, node$type)
   if (anyDuplicated(input_schema$names) > 0L && !node_is_position_safe(node)) {
     abort_duplicate_names(rlang::caller_env())
@@ -518,7 +521,7 @@ push_op <- function(.data, node) {
       unspecified = new_unspec,
       rowwise = new_rowwise
     )
-    return(carry_frame_meta(out, .data, attrs = keep_attrs))
+    return(if (carry) carry_frame_meta(out, .data, attrs = keep_attrs) else out)
   }
 
   new_ptr <- wrap_gpu_call(node$type, lower_and_execute(node, .subset2(.data, "ptr")))
@@ -536,6 +539,47 @@ push_op <- function(.data, node) {
     rowwise = new_rowwise
   )
   carry_frame_meta(out, .data, attrs = keep_attrs)
+}
+
+#' Run a verb's node chain as ONE eager execution
+#'
+#' A few eager verbs push several nodes (a window mutate is window -> mutate ->
+#' select). Pushed one by one, each node builds a full table; here `build()` gets
+#' a lazy view of `.data` (so its `push_op()`s only do schema work), and the
+#' chain it returns is lowered once, with no optimizer (as for any eager node),
+#' into one result table. Fields and groups come from the lazy pushes, which
+#' derive them exactly as the eager ones do; the frame metadata (attributes, bare
+#' class) is carried once from `.data` at the end, which is what carrying it
+#' through each step comes to. A lazy `.data` is just handed to `build()`.
+#'
+#' @param .data A `tbl_gpu`
+#' @param build `function(x)` pushing nodes on `x` with `push_op(carry = FALSE)`;
+#'   returns the resulting `tbl_gpu`
+#' @return A `tbl_gpu` in `.data`'s exec_mode
+#' @keywords internal
+push_chain <- function(.data, build) {
+  if (!identical(.subset2(.data, "exec_mode"), "eager")) {
+    return(carry_frame_meta(build(.data), .data))
+  }
+  view <- set_tbl_gpu_field(.data, "exec_mode", "lazy")
+  res <- build(view)
+  node <- .subset2(res, "lazy_ops")
+  new_ptr <- .subset2(.data, "ptr")
+  if (inherits(node, "ast_node")) {
+    ops <- character()
+    n <- node
+    while (!is.null(n) && !identical(n$type, "source")) {
+      ops <- c(n$type, ops)
+      n <- n$input
+    }
+    new_ptr <- wrap_gpu_call(paste(ops, collapse = "+"), lower_and_execute(node, new_ptr))
+  }
+  out <- unclass(res)
+  out$ptr <- new_ptr
+  out["lazy_ops"] <- list(NULL)
+  out$exec_mode <- "eager"
+  class(out) <- oldClass(res)
+  carry_frame_meta(out, .data)
 }
 
 # The fixed group keys (`slice(.preserve = TRUE)`, see fixed_keys_of()) that
@@ -665,7 +709,7 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
 
   new_schema <- infer_schema(join_ast)
 
-  new_groups <- intersect(x$groups, new_schema$names)
+  new_groups <- set_intersect(x$groups, new_schema$names)
   # As in push_op(): `.drop` goes with the last surviving group column.
   new_group_drop <- if (length(new_groups) > 0L) x$group_drop %||% TRUE else TRUE
 

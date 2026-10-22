@@ -19,6 +19,11 @@
 #' String columns use an average estimate of 32 bytes per element, which may
 #' vary significantly based on actual string lengths.
 #'
+#' Columns are shared between tables: a verb that leaves a column untouched
+#' (`select()`, a bare copy in `mutate()`, ...) returns a table that holds the
+#' same device memory as its input. The estimates of such tables therefore
+#' overlap, and their sum can exceed what the GPU holds.
+#'
 #' This is an estimate and actual GPU memory usage may be higher due to:
 #' \itemize{
 #'   \item Memory alignment requirements
@@ -85,6 +90,11 @@ gpu_memory_usage <- function(x) {
 #' that data resides on the GPU.
 #'
 #' @param x A `tbl_gpu` object.
+#'
+#' @details
+#' The memory estimate is the one of [gpu_memory_usage()]: columns shared with
+#' other tables are counted for each table, so estimates of related tables
+#' overlap.
 #'
 #' @return A list with the following components:
 #' \describe{
@@ -267,22 +277,62 @@ gpu_size_comparison <- function(x) {
 
 #' Get GPU memory snapshot
 #'
-#' Returns the current GPU memory state including total, free, and used memory.
-#' Useful for monitoring GPU memory usage during operations.
+#' Returns the current GPU memory state including total, free, and used memory,
+#' and what cuplyr's memory resource holds. Useful for monitoring GPU memory
+#' usage during operations.
 #'
 #' @return A list with:
 #' \describe{
 #'   \item{available}{Logical: TRUE if GPU is available}
 #'   \item{total_bytes}{Total GPU memory in bytes}
 #'   \item{free_bytes}{Free GPU memory in bytes}
-#'   \item{used_bytes}{Used GPU memory in bytes}
+#'   \item{used_bytes}{Used GPU memory in bytes: device level, `total - free`,
+#'     for every process on the card. It includes everything the memory resource
+#'     reserved, so it does not fall when tables are freed.}
 #'   \item{total_gb}{Total GPU memory in gigabytes}
 #'   \item{free_gb}{Free GPU memory in gigabytes}
 #'   \item{used_gb}{Used GPU memory in gigabytes}
+#'   \item{resource}{`"pool"`, `"async"` or `"cuda"`: the RMM memory resource
+#'     cuplyr installed at load time (see below). `"cuda"` means none: every
+#'     allocation is a plain `cudaMalloc`.}
+#'   \item{pool_bytes}{Bytes the resource currently holds from the device (the
+#'     pool's size). `NA` when `resource` is `"cuda"`.}
+#'   \item{pool_used_bytes}{Bytes currently allocated from the resource to live
+#'     columns and scratch space: what cuplyr is using, as opposed to what it
+#'     reserved. It rises when a table is created and falls when the table is
+#'     garbage collected. `NA` when `resource` is `"cuda"`.}
+#' }
+#'
+#' @section The memory resource:
+#' Loading cuplyr installs an RMM memory resource as the current device
+#' resource, so the many short-lived columns a pipeline allocates are carved out
+#' of memory reserved once instead of going through `cudaMalloc`/`cudaFree`
+#' each time. Memory the resource holds is not returned to the device until
+#' the R session ends, so the card's free memory (`free_bytes`) stays lower than
+#' the data you hold; use `pool_used_bytes` for the latter.
+#'
+#' The resource is chosen when the package loads, from options (which win) or
+#' environment variables. There is one resource per R process: the switches are
+#' read by the first load that creates it, and loading the package again in the
+#' same session (`pkgload::load_all()`, or a reload after unloading) reuses that
+#' resource, whatever the switches say then, and reports it. Restart R to
+#' change them.
+#' \describe{
+#'   \item{`cuplyr.memory_pool` / `CUPLYR_MEMORY_POOL`}{`FALSE`, or `"0"`,
+#'     `"false"`, `"no"`, `"off"`, installs nothing (`resource` is `"cuda"`,
+#'     the behaviour before the pool existed) unless an earlier load in the
+#'     session already created the resource. Anything else, or unset, installs
+#'     the resource.}
+#'   \item{`cuplyr.pool_initial` / `CUPLYR_POOL_INITIAL`}{Initial size in bytes.
+#'     Default: a quarter of the free device memory, at most 1 GiB. A larger
+#'     request is clamped to 90 percent of the free memory. The pool grows by
+#'     itself when needed.}
+#'   \item{`cuplyr.memory_resource` / `CUPLYR_MEMORY_RESOURCE`}{`"pool"` or
+#'     `"async"` to pick the kind of resource.}
 #' }
 #'
 #' @seealso
-#' \code{\link{gpu_details}} for device information,
+#' \code{\link{gpu_details}} for device information (device level only),
 #' \code{\link{gpu_memory_usage}} for per-object memory estimates
 #'
 #' @export
@@ -298,6 +348,8 @@ gpu_size_comparison <- function(x) {
 #'   after <- gpu_memory_state()
 #'
 #'   cat("Memory used:", after$used_gb - before$used_gb, "GB\n")
+#'   cat("Allocated from the resource:",
+#'       after$pool_used_bytes - before$pool_used_bytes, "bytes\n")
 #' }
 gpu_memory_state <- function() {
   info <- gpu_details()
@@ -310,9 +362,14 @@ gpu_memory_state <- function() {
       used_bytes = NA_real_,
       total_gb = NA_real_,
       free_gb = NA_real_,
-      used_gb = NA_real_
+      used_gb = NA_real_,
+      resource = "cuda",
+      pool_bytes = NA_real_,
+      pool_used_bytes = NA_real_
     ))
   }
+
+  mr <- gpu_mr_state()
 
   list(
     available = TRUE,
@@ -321,8 +378,106 @@ gpu_memory_state <- function() {
     used_bytes = info$total_memory - info$free_memory,
     total_gb = info$total_memory / 1e9,
     free_gb = info$free_memory / 1e9,
-    used_gb = (info$total_memory - info$free_memory) / 1e9
+    used_gb = (info$total_memory - info$free_memory) / 1e9,
+    resource = gpu_mr_kind(),
+    pool_bytes = mr[[1]],
+    pool_used_bytes = mr[[2]]
   )
+}
+
+# Bytes cuplyr can allocate right now (F57, internal): the device's free memory
+# plus the part of its memory resource's pages that is not in use. Under a pool
+# the device-level free memory understates this, since the pool keeps what it
+# grew to; allocations are served from those pages first. Callers that decide
+# whether something will fit (the join-size warning, tests that skip for lack of
+# memory, the attach message) use this, not `free_bytes`. `state` is
+# gpu_memory_state(); a state without the resource fields counts as no resource.
+gpu_allocatable_bytes <- function(state = gpu_memory_state()) {
+  free <- state$free_bytes
+  if (is.null(free) || is.na(free)) return(NA_real_)
+  resource <- state$resource
+  held <- state$pool_bytes
+  used <- state$pool_used_bytes
+  if (is.null(resource) || identical(resource, "cuda") ||
+      is.null(held) || is.null(used) || is.na(held) || is.na(used)) {
+    return(free)
+  }
+  free + max(held - used, 0)
+}
+
+# The memory resource (F57, internal). The switches are read at load; only the
+# first load that creates the resource uses them.
+memory_resource_flag_off <- function(x) {
+  tolower(trimws(as.character(x))) %in% c("0", "false", "no", "off")
+}
+
+memory_resource_config <- function() {
+  opt <- getOption("cuplyr.memory_pool")
+  enabled <- if (!is.null(opt)) {
+    !(isFALSE(opt) || memory_resource_flag_off(opt[[1]]))
+  } else {
+    !memory_resource_flag_off(Sys.getenv("CUPLYR_MEMORY_POOL", "1"))
+  }
+
+  initial <- getOption("cuplyr.pool_initial")
+  if (is.null(initial)) {
+    env <- Sys.getenv("CUPLYR_POOL_INITIAL", "")
+    initial <- if (nzchar(env)) suppressWarnings(as.numeric(env)) else NULL
+  }
+  initial <- suppressWarnings(as.numeric(initial)[1])
+  if (length(initial) == 0 || is.na(initial) || initial < 0) {
+    free <- tryCatch(gpu_info()$free_memory, error = function(e) 0)
+    initial <- min(2^30, 0.25 * free)
+  }
+
+  kind <- getOption("cuplyr.memory_resource")
+  if (is.null(kind)) kind <- Sys.getenv("CUPLYR_MEMORY_RESOURCE", "")
+  kind <- tolower(trimws(as.character(kind)[1]))
+  if (!kind %in% c("pool", "async")) kind <- "pool"
+
+  list(enabled = enabled, initial = initial, kind = kind)
+}
+
+# Make the process's resource current for this load, creating it when this is
+# the first load with the switch on (src/memory_resource.cpp). A resource an
+# earlier load created is reused whatever the switches say now: it can't be
+# freed while anything may point into it, and it is never stacked.
+memory_resource_install <- function() {
+  cfg <- memory_resource_config()
+  tryCatch(
+    invisible(gpu_mr_install(cfg$enabled, cfg$kind, cfg$initial)),
+    error = function(e) {
+      warning("cuplyr could not install its memory resource, using plain cudaMalloc: ",
+              conditionMessage(e), call. = FALSE)
+      invisible("cuda")
+    }
+  )
+}
+
+#' Wait for the GPU to finish
+#'
+#' Blocks until all GPU work queued by cuplyr and libcudf on the device has
+#' completed. GPU calls return as soon as the work is queued, so a timing taken
+#' without a wait can measure only the launch. Call `gpu_sync()` before reading
+#' the clock, as one would use `torch.cuda.synchronize()`.
+#'
+#' Results that are collected to R (`collect()`, `print()`) are already waited
+#' for; this is for timing code that leaves its result on the GPU.
+#'
+#' @return `NULL`, invisibly.
+#'
+#' @export
+#' @examples
+#' if (has_gpu()) {
+#'   g <- tbl_gpu(data.frame(x = runif(1e6)), lazy = FALSE)
+#'   t0 <- Sys.time()
+#'   r <- dplyr::mutate(g, y = cumsum(x))
+#'   gpu_sync()
+#'   Sys.time() - t0
+#' }
+gpu_sync <- function() {
+  gpu_sync_device()
+  invisible(NULL)
 }
 
 #' Force GPU memory cleanup
@@ -337,7 +492,11 @@ gpu_memory_state <- function() {
 #'   lighter cleanup pass.
 #'
 #' @return Invisibly returns a list with memory state before and after cleanup,
-#'   and the amount freed in bytes and gigabytes.
+#'   and the amount freed in bytes and gigabytes. `freed_bytes` is the drop in
+#'   `pool_used_bytes` (allocator level) when cuplyr's memory resource is
+#'   installed, since the device-level free memory does not move while the
+#'   resource keeps its pages; with `resource == "cuda"` it is the rise in
+#'   device free memory.
 #'
 #' @details
 #' GPU memory is automatically freed when `tbl_gpu` objects are garbage
@@ -383,16 +542,25 @@ gpu_gc <- function(verbose = FALSE, aggressive = TRUE) {
 
   after <- gpu_memory_state()
 
-  freed_bytes <- after$free_bytes - before$free_bytes
+  # Under a memory resource the device keeps the pages it reserved, so the
+  # device-level free memory doesn't move when a table is freed: report the drop
+  # in what is allocated from the resource instead (allocator level).
+  pooled <- !is.na(before$pool_used_bytes) && !is.na(after$pool_used_bytes)
+  freed_bytes <- if (pooled) {
+    before$pool_used_bytes - after$pool_used_bytes
+  } else {
+    after$free_bytes - before$free_bytes
+  }
   freed_gb <- freed_bytes / 1e9
+  level <- if (pooled) " (allocator level; the pool keeps the pages)" else ""
 
   if (verbose && !is.na(freed_bytes)) {
     if (freed_gb >= 0.01) {
-      message(sprintf("GPU memory freed: %.2f GB", freed_gb))
+      message(sprintf("GPU memory freed: %.2f GB%s", freed_gb, level))
     } else if (freed_bytes > 0) {
-      message(sprintf("GPU memory freed: %.0f bytes", freed_bytes))
+      message(sprintf("GPU memory freed: %.0f bytes%s", freed_bytes, level))
     } else {
-      message("No GPU memory freed")
+      message("No GPU memory freed", level)
     }
   }
 

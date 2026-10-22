@@ -372,7 +372,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   orig_data <- .data
   schema <- current_schema(.data)
   orig_names <- schema$names
-  real_orig_names <- if (isTRUE(cgid$used)) setdiff(orig_names, cgid$helper_name) else orig_names
+  real_orig_names <- if (isTRUE(cgid$used)) set_diff(orig_names, cgid$helper_name) else orig_names
 
   # First pass: parse every dot up front (no push_op()/GPU work yet) so we
   # know, before touching `.data` at all, whether any dot needs the window
@@ -446,7 +446,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # decided here before any predicate is pushed. Each such dot is evaluated
   # exactly once: the value is cached for the loop below.
   standalone <- vector("list", length(dots))
-  for (i in setdiff(seq_along(dots), window_idx)) {
+  for (i in set_diff(seq_along(dots), window_idx)) {
     if (is.null(parsed[[i]]) || ir_is_const(parsed[[i]])) {
       res <- tryCatch(list(value = rlang::eval_tidy(dots[[i]], data = list())), error = function(e) NULL)
       if (is.null(res)) {

@@ -12,16 +12,58 @@ A list with:
 \item{available}{Logical: TRUE if GPU is available}
 \item{total_bytes}{Total GPU memory in bytes}
 \item{free_bytes}{Free GPU memory in bytes}
-\item{used_bytes}{Used GPU memory in bytes}
+\item{used_bytes}{Used GPU memory in bytes: device level, \code{total - free},
+for every process on the card. It includes everything the memory resource
+reserved, so it does not fall when tables are freed.}
 \item{total_gb}{Total GPU memory in gigabytes}
 \item{free_gb}{Free GPU memory in gigabytes}
 \item{used_gb}{Used GPU memory in gigabytes}
+\item{resource}{\code{"pool"}, \code{"async"} or \code{"cuda"}: the RMM memory resource
+cuplyr installed at load time (see below). \code{"cuda"} means none: every
+allocation is a plain \code{cudaMalloc}.}
+\item{pool_bytes}{Bytes the resource currently holds from the device (the
+pool's size). \code{NA} when \code{resource} is \code{"cuda"}.}
+\item{pool_used_bytes}{Bytes currently allocated from the resource to live
+columns and scratch space: what cuplyr is using, as opposed to what it
+reserved. It rises when a table is created and falls when the table is
+garbage collected. \code{NA} when \code{resource} is \code{"cuda"}.}
 }
 }
 \description{
-Returns the current GPU memory state including total, free, and used memory.
-Useful for monitoring GPU memory usage during operations.
+Returns the current GPU memory state including total, free, and used memory,
+and what cuplyr's memory resource holds. Useful for monitoring GPU memory
+usage during operations.
 }
+\section{The memory resource}{
+
+Loading cuplyr installs an RMM memory resource as the current device
+resource, so the many short-lived columns a pipeline allocates are carved out
+of memory reserved once instead of going through \code{cudaMalloc}/\code{cudaFree}
+each time. Memory the resource holds is not returned to the device until
+the R session ends, so the card's free memory (\code{free_bytes}) stays lower than
+the data you hold; use \code{pool_used_bytes} for the latter.
+
+The resource is chosen when the package loads, from options (which win) or
+environment variables. There is one resource per R process: the switches are
+read by the first load that creates it, and loading the package again in the
+same session (\code{pkgload::load_all()}, or a reload after unloading) reuses that
+resource, whatever the switches say then, and reports it. Restart R to
+change them.
+\describe{
+\item{\code{cuplyr.memory_pool} / \code{CUPLYR_MEMORY_POOL}}{\code{FALSE}, or \code{"0"},
+\code{"false"}, \code{"no"}, \code{"off"}, installs nothing (\code{resource} is \code{"cuda"},
+the behaviour before the pool existed) unless an earlier load in the
+session already created the resource. Anything else, or unset, installs
+the resource.}
+\item{\code{cuplyr.pool_initial} / \code{CUPLYR_POOL_INITIAL}}{Initial size in bytes.
+Default: a quarter of the free device memory, at most 1 GiB. A larger
+request is clamped to 90 percent of the free memory. The pool grows by
+itself when needed.}
+\item{\code{cuplyr.memory_resource} / \code{CUPLYR_MEMORY_RESOURCE}}{\code{"pool"} or
+\code{"async"} to pick the kind of resource.}
+}
+}
+
 \examples{
 if (has_gpu()) {
   # Check memory before allocation
@@ -34,9 +76,11 @@ if (has_gpu()) {
   after <- gpu_memory_state()
 
   cat("Memory used:", after$used_gb - before$used_gb, "GB\n")
+  cat("Allocated from the resource:",
+      after$pool_used_bytes - before$pool_used_bytes, "bytes\n")
 }
 }
 \seealso{
-\code{\link{gpu_details}} for device information,
+\code{\link{gpu_details}} for device information (device level only),
 \code{\link{gpu_memory_usage}} for per-object memory estimates
 }

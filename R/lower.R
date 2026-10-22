@@ -207,7 +207,7 @@ lower_mutate <- function(ast, source_ptr) {
   if (length(vec_idx) > 0) {
     # The temps are input columns, so they kept their slots after the originals.
     temp_slots <- n_input_cols + seq_along(vec_idx) - 1L
-    result <- gpu_select(result, setdiff(seq_len(gpu_dim(result)[[2L]]) - 1L, temp_slots))
+    result <- gpu_select(result, set_diff(seq_len(gpu_dim(result)[[2L]]) - 1L, temp_slots))
   }
   result
 }
@@ -439,7 +439,7 @@ lower_slice <- function(ast, source_ptr) {
                                    ast$is_prop, ast$with_ties, ast$na_rm)
 
       if (isTRUE(ast$order_is_temp)) {
-        keep_idx <- setdiff(seq_along(input_schema$names) - 1L, col_idx)
+        keep_idx <- set_diff(seq_along(input_schema$names) - 1L, col_idx)
         result_ptr <- gpu_select(result_ptr, keep_idx)
       }
 
@@ -845,7 +845,7 @@ drop_join_key_temps <- function(ptr, temps) {
   right_temp <- if (temps$semi_anti) integer(0) else {
     n_cols - seq_len(temps$n_right_temp)
   }
-  gpu_select(ptr, setdiff(seq_len(n_cols) - 1L, c(left_temp, right_temp)))
+  gpu_select(ptr, set_diff(seq_len(n_cols) - 1L, c(left_temp, right_temp)))
 }
 
 #' Lower a `by = character()` join (gap A4)

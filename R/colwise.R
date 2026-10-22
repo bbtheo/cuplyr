@@ -113,7 +113,7 @@ colwise_rewrite_call <- function(expr, fn, env, schema, scope) {
     body <- body(fn)
     if (length(extra) > 0L || !across_formula_inlinable(body) || colwise_calls_cur(body) ||
         "..." %in% all.names(body) || any(placeholders %in% scope) ||
-        across_free_vars_hit_data(setdiff(all.vars(body), placeholders), scope)) {
+        across_free_vars_hit_data(set_diff(all.vars(body), placeholders), scope)) {
       colwise_giveup()
     }
     return(colwise_native_quo(substitute_across_placeholders(body, col, ""), environment(fn)))

@@ -75,13 +75,13 @@ collect.tbl_gpu <- function(x, ...) {
   # plain data.frame too (F49).
   if (is_rowwise_gpu(x)) {
     out <- with_frame_attrs(tibble::as_tibble(out), frame_attrs(x))
-    return(dplyr::rowwise(out, dplyr::all_of(intersect(x$groups, names(out)))))
+    return(dplyr::rowwise(out, dplyr::all_of(set_intersect(x$groups, names(out)))))
   }
 
   # dplyr's contract (`collect.data.frame()` is the identity, dbplyr ends with
   # `grouped_df(out, intersect(op_grps(x), names(out)))`): a grouped table
   # comes back grouped, with the same `.drop`.
-  groups <- intersect(x$groups, names(out))
+  groups <- set_intersect(x$groups, names(out))
   if (length(groups) > 0L) {
     drop <- isTRUE(x$group_drop %||% TRUE)
     keys <- fixed_keys_of(x)

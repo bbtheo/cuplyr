@@ -4,12 +4,18 @@
 \alias{push_op}
 \title{Apply an AST node to a tbl_gpu, dispatching on exec_mode}
 \usage{
-push_op(.data, node)
+push_op(.data, node, input_schema = current_schema(.data), carry = TRUE)
 }
 \arguments{
 \item{.data}{A \code{tbl_gpu} object}
 
 \item{node}{The new AST node (already wrapping \code{input_node(.data)})}
+
+\item{input_schema}{\code{current_schema(.data)}, when the caller already has it
+(a node chain, \code{push_chain()}: the previous push's \verb{$schema})}
+
+\item{carry}{\code{FALSE} leaves the frame metadata (attributes, bare class) off
+the result: a step of a \code{push_chain()}, which carries it once at the end}
 }
 \value{
 A new \code{tbl_gpu} object

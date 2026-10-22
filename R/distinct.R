@@ -170,7 +170,7 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
   # duplicated at the front (verified against dplyr 1.2.1: `distinct(gdf, x,
   # y)` with `y` grouped returns columns `x, y` -- not `y, x` -- while
   # `distinct(gdf, x)` returns `y, x`, prepending the *missing* group column).
-  key_cols <- unique(c(setdiff(group_vars, dot_names), dot_names))
+  key_cols <- unique(c(set_diff(group_vars, dot_names), dot_names))
 
   node <- ast_distinct(input_node(.data), key_cols, keep_all = .keep_all,
                        key_positions = distinct_key_positions(key_cols, schema$names))

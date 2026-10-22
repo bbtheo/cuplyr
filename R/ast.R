@@ -380,7 +380,7 @@ make_mutate_expr <- function(output_col, ir, schema) {
     output_col = output_col,
     ir = ir,
     input_cols = ir_cols(ir),
-    output_type = ir_infer_type(ir, schema)
+    output_type = ir_infer_type_memo(ir, schema)
   )
 }
 
@@ -704,7 +704,7 @@ summarise_output_index <- function(groups, agg_names) {
   n_groups <- length(groups)
   over <- match(groups, agg_names)
   key_idx <- ifelse(is.na(over), seq_len(n_groups), n_groups + over)
-  rest <- setdiff(seq_along(agg_names), over[!is.na(over)])
+  rest <- set_diff(seq_along(agg_names), over[!is.na(over)])
   as.integer(c(key_idx, n_groups + rest))
 }
 
@@ -807,7 +807,7 @@ is_opaque_expression <- function(expr_text) {
   if (is.null(parsed)) return(TRUE)
 
   calls <- find_calls(parsed)
-  unknown <- setdiff(calls, c(safe_ops, safe_fns))
+  unknown <- set_diff(calls, c(safe_ops, safe_fns))
 
   length(unknown) > 0
 }

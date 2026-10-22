@@ -197,7 +197,7 @@ rowwise_cpu <- function(.data, verb, tables = character()) {
   caller <- parent.frame(2)
   mc <- match.call(fn, call, expand.dots = TRUE, envir = caller)
   first <- names(formals(fn))[[1L]]
-  for (nm in intersect(tables, names(mc))) {
+  for (nm in set_intersect(tables, names(mc))) {
     val <- rlang::eval_bare(mc[[nm]], caller)
     mc[[nm]] <- if (is_tbl_gpu(val)) collect_other_side(val) else val
   }
@@ -316,7 +316,7 @@ rowwise_rewrite_dots_ <- function(.data, dots, named) {
       name <- if (nzchar(nms[i])) nms[i] else {
         rlang::with_options("rlang:::use_as_label_infix" = FALSE, rlang::as_label(dots[[i]]))
       }
-      ctx$produced <- union(ctx$produced, name)
+      ctx$produced <- set_union(ctx$produced, name)
       if (is.null(new)) {
         keep <- ctx$schema$names != name
         ctx$schema$names <- ctx$schema$names[keep]
@@ -346,7 +346,7 @@ rowwise_consts_ok <- function(expr, schema) {
     return(rowwise_consts_ok(rlang::quo_get_expr(expr), schema))
   }
   if (!expr_has_column_ref(expr, schema)) {
-    known <- c(rowwise_pure_fns, setdiff(names(ir_call_registry), ir_internal_ops))
+    known <- c(rowwise_pure_fns, set_diff(names(ir_call_registry), ir_internal_ops))
     return(all(rowwise_call_heads(expr) %in% known))
   }
   parts <- as.list(expr)[-1]

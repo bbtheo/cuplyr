@@ -29,6 +29,11 @@ Returns comprehensive information about a \code{tbl_gpu} object including
 its dimensions, column types, estimated memory usage, and verification
 that data resides on the GPU.
 }
+\details{
+The memory estimate is the one of \code{\link[=gpu_memory_usage]{gpu_memory_usage()}}: columns shared with
+other tables are counted for each table, so estimates of related tables
+overlap.
+}
 \examples{
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
