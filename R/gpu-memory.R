@@ -403,3 +403,32 @@ gpu_gc <- function(verbose = FALSE, aggressive = TRUE) {
     freed_gb = freed_gb
   ))
 }
+
+# Allocation tracking (F56, internal). Evaluates `expr` with an RMM statistics
+# adaptor as the current device resource and reports what was allocated through
+# RMM meanwhile. Unlike device-level free memory (cudaMemGetInfo), this cannot
+# be hidden by pages the CUDA driver already holds. Windows nest; an outer
+# window also counts the inner window's allocations.
+#
+# Returns list(value, allocated_bytes, held_bytes, peak_bytes): every byte
+# allocated while `expr` ran, the part not yet freed when it returned, and the
+# maximum held amount during it. All doubles.
+gpu_alloc_tracking <- function(expr) {
+  id <- gpu_alloc_window_push()
+  open <- TRUE
+  on.exit(if (open) gpu_alloc_window_pop(id), add = TRUE)
+  value <- expr
+  open <- FALSE
+  counts <- gpu_alloc_window_pop(id)
+  list(
+    value = value,
+    allocated_bytes = counts[[1]],
+    held_bytes = counts[[2]],
+    peak_bytes = counts[[3]]
+  )
+}
+
+# Number of open tracking windows.
+gpu_alloc_tracking_active <- function() {
+  gpu_alloc_window_count()
+}

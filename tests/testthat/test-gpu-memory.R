@@ -98,27 +98,51 @@ test_that("tbl_gpu() allocates GPU memory", {
 
   gc_gpu()
 
-  # Get baseline
-  before <- gpu_memory_snapshot()
-
-  # Create GPU table
+  # Measured at the RMM allocator, not with device-level free memory
+  # (cudaMemGetInfo). Each column here is 781 KiB, and the CUDA driver serves
+  # allocations of up to 1 MiB from 2 MiB pages the process already holds, so
+  # when earlier tests leave partly used pages behind, device-level usage does
+  # not move at all (the 0 B failures in F56). RMM sees every allocation.
   df <- create_large_test_data(nrow = 100000, ncol = 5)
-  gpu_df <- tbl_gpu(df)
+  tracked <- gpu_alloc_tracking(tbl_gpu(df))
+  gpu_df <- tracked$value
+  expect_s3_class(gpu_df, "tbl_gpu")
+  expect_equal(dim(gpu_df), c(100000L, 5L))
 
+  # 100000 rows * 5 cols * 8 bytes = 4 MB of column data, still held by the
+  # table when tbl_gpu() returns (no NAs, so no null masks).
+  expected_min <- 100000 * 5 * 8
+  expect_true(tracked$held_bytes >= expected_min,
+              info = sprintf("Upload holds %s on the GPU, expected at least %s",
+                             format_bytes(tracked$held_bytes),
+                             format_bytes(expected_min)))
+  expect_true(tracked$held_bytes < 2 * expected_min,
+              info = sprintf("Upload holds %s on the GPU, expected about %s",
+                             format_bytes(tracked$held_bytes),
+                             format_bytes(expected_min)))
+  expect_true(tracked$allocated_bytes >= tracked$held_bytes)
+})
+
+test_that("tbl_gpu() raises device-level GPU memory use", {
+  skip_if_no_gpu()
+
+  gc_gpu()
+
+  # Device-level check that the data really occupies device memory. Columns
+  # are 7.6 MiB each: the CUDA driver maps fresh pages for every allocation
+  # above 1 MiB, so memory the process already holds cannot absorb them
+  # (unlike the sub-1 MiB columns of the test above; see F56).
+  df <- create_large_test_data(nrow = 1000000, ncol = 5)
+  before <- gpu_memory_snapshot()
+  gpu_df <- tbl_gpu(df)
   after <- gpu_memory_snapshot()
 
-  # Memory usage should increase
   diff <- gpu_memory_diff(before, after)
-  expect_true(diff > 0,
-              info = sprintf("Expected GPU memory to increase, but diff was %s",
-                             format_bytes(diff)))
-
-  # Memory increase should be roughly proportional to data size
-  # 100000 rows * 5 cols * 8 bytes = 4 MB minimum
-  expected_min <- 100000 * 5 * 8
+  expected_min <- 1000000 * 5 * 8
   expect_true(diff >= expected_min * 0.5,
               info = sprintf("Memory increase (%s) less than expected (%s)",
                              format_bytes(diff), format_bytes(expected_min)))
+  expect_equal(dim(gpu_df), c(1000000L, 5L))
 })
 
 test_that("GPU memory is freed on garbage collection", {
