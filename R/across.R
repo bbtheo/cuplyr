@@ -153,9 +153,11 @@ substitute_zero_arg_call <- function(expr, fn_name, replacement) {
 }
 
 # TRUE iff `expr` contains a zero-arg call to `fn_name` (bare or
-# `pkg::`-qualified) anywhere in its tree.
+# `pkg::`-qualified) anywhere in its tree. `.scan`: first rule `fn_name` out
+# with all.names() (C), which lists every symbol of every call the walk can
+# reach, heads included, so a dot without the name costs no R-level walk.
 # @keywords internal
-expr_contains_zero_arg_call <- function(expr, fn_name) {
+expr_contains_zero_arg_call <- function(expr, fn_name, .scan = TRUE) {
   # See substitute_across_placeholders()'s identical guard for why this is
   # needed (the empty-argument-slot/rlang::is_missing() landmine) --
   # without it, `substitute_cur_group_id()`'s own `has_any` gate check
@@ -167,11 +169,14 @@ expr_contains_zero_arg_call <- function(expr, fn_name) {
   if (!is.call(expr)) {
     return(FALSE)
   }
+  if (.scan && !fn_name %in% all.names(expr)) {
+    return(FALSE)
+  }
   if (identical(call_head_name(expr), fn_name) && length(expr) == 1) {
     return(TRUE)
   }
   for (part in as.list(expr)) {
-    if (expr_contains_zero_arg_call(part, fn_name)) {
+    if (expr_contains_zero_arg_call(part, fn_name, .scan = FALSE)) {
       return(TRUE)
     }
   }
@@ -242,6 +247,11 @@ expr_needs_fallback <- function(expr, extra_names, top_level = FALSE) {
     return(expr_needs_fallback(rlang::quo_get_expr(expr), extra_names, top_level))
   }
   if (!is.call(expr)) {
+    return(FALSE)
+  }
+  # Every name the walk below can match is a call head, which all.names() (C)
+  # lists: a dot with none of them needs no R-level walk.
+  if (top_level && !any(c(extra_names, "across", "if_any", "if_all") %in% all.names(expr))) {
     return(FALSE)
   }
   head_name <- call_head_name(expr)
@@ -738,10 +748,7 @@ make_fn_spec <- function(label, build, env = NULL) {
 # VALUE identical to one of these is emitted as a plain `name(col)` call.
 # @keywords internal
 across_known_fn_names <- function() {
-  # F50: the factor conversions are parsed by ir_parse_factor_conversion()
-  # (no registry entry), so `across(where(is.factor), as.character)` can name them.
-  set_union(set_diff(names(ir_call_registry), ir_internal_ops), c("quantile", "any", "all", "count",
-                                   "as.character", "as.integer", "as.numeric", "as.double"))
+  across_registry_names()$known
 }
 
 # Call heads an inlined VALUE body may use: everything the IR lowers by name.
@@ -750,7 +757,34 @@ across_known_fn_names <- function() {
 # frame instead.
 # @keywords internal
 across_native_heads <- function() {
-  c(across_known_fn_names(), "(", "ceiling", "paste0", "paste", "startsWith", "endsWith")
+  across_registry_names()$heads
+}
+
+# Both name sets above derive only from the IR registry, which is built when
+# the namespace loads, so they're computed once per session. The cache is
+# keyed on the registry's names and ir_internal_ops (identical() is a pointer
+# check while they're unchanged), so a test that mocks the registry still
+# sees its own entries.
+across_registry_cache <- new.env(parent = emptyenv())
+
+# @keywords internal
+across_registry_names <- function() {
+  cache <- across_registry_cache
+  reg_names <- names(ir_call_registry)
+  if (!identical(cache$reg_names, reg_names) || !identical(cache$internal, ir_internal_ops)) {
+    # F50: the factor conversions are parsed by ir_parse_factor_conversion()
+    # (no registry entry), so `across(where(is.factor), as.character)` can name them.
+    known <- set_union(set_diff(reg_names, ir_internal_ops), c("quantile", "any", "all", "count",
+                                     "as.character", "as.integer", "as.numeric", "as.double"))
+    cache$value <- list(
+      known = known,
+      candidates = c(known, "identity"),
+      heads = c(known, "(", "ceiling", "paste0", "paste", "startsWith", "endsWith")
+    )
+    cache$reg_names <- reg_names
+    cache$internal <- ir_internal_ops
+  }
+  cache$value
 }
 
 # TRUE iff every call in `expr` has a bare-symbol head the IR knows by name.
@@ -779,7 +813,7 @@ across_expr_native <- function(expr) {
 across_known_fn_name <- function(value, env, fn_expr = NULL) {
   qualified <- is.call(fn_expr) && length(fn_expr) == 3 &&
     identical(fn_expr[[1]], as.name("::")) && is.symbol(fn_expr[[3]])
-  candidates <- c(across_known_fn_names(), "identity")
+  candidates <- across_registry_names()$candidates
   if (qualified) {
     candidates <- set_intersect(as.character(fn_expr[[3]]), candidates)
   }
@@ -1551,7 +1585,9 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
       # frame, whose columns dplyr adds under their own names: from here on
       # the set of columns is unknown (NA, see across_free_vars_hit_data()).
       unknown <- !is_named && !(is.symbol(expr) && as.character(expr) %in% scope)
-      scope <- set_union(scope, if (is_named) nm else if (unknown) NA_character_ else rlang::as_label(expr))
+      # c(), not set_union(): `scope` is only matched against (%in%, anyNA()),
+      # and a union per dot is quadratic in a wide call's dot count
+      scope <- c(scope, if (is_named) nm else if (unknown) NA_character_ else rlang::as_label(expr))
       if (track) run <- across_run_step(run, nm, quo, verb)
     }
   }

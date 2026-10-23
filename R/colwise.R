@@ -25,6 +25,15 @@
 # the rewritten dots, falling back with the user's original dots. A dot with
 # any call the rewrite can't reproduce exactly is returned untouched, and the
 # verb's CPU fallback then runs dplyr on the original dots.
+#
+# Speed (F60): like across() with `.fns`, the rewrite resolves each distinct
+# function once per colwise_rewrite_dots() call (colwise_fn_plan()). Per dot
+# it only checks the call's shape and the column-dependent cases (desc() on a
+# string) and substitutes the column. dplyr's own wrappers run unchanged;
+# the `_if` verbs also pay dplyr's per-column predicate loop.
+# Under pkgload::load_all() cuplyr's R code isn't byte-compiled, so R's JIT
+# compiles it over a verb's first few calls, the same for across(). To time
+# a verb, make several warm-up calls first.
 
 # Does `expr` contain a call whose head is a function object? (cheap scan)
 # @keywords internal
@@ -51,17 +60,33 @@ colwise_rewrite_dots <- function(dots, schema) {
   }
   nms <- names(dots) %||% character(length(dots))
   scope <- c(schema$names, nms[nzchar(nms)])
+  # dplyr maps one function list over the columns (as_fun_list(),
+  # manip_apply_syms()), so the dots share their function objects, extra
+  # args and environment, and `scope` is fixed here: each distinct function
+  # is resolved once per call (colwise_fn_plan()), not once per dot.
+  memo <- new.env(parent = emptyenv())
+  memo$plans <- list()
+  # assigned into unclassed: rlang's `[[<-.quosures` is slow per element
+  cls <- oldClass(dots)
+  dots <- unclass(dots)
   for (i in seq_along(dots)) {
     q <- dots[[i]]
-    if (!colwise_has_fn_head(rlang::quo_get_expr(q))) next
-    out <- tryCatch(
-      colwise_rewrite(rlang::quo_get_expr(q), rlang::quo_get_env(q), schema, scope),
-      colwise_giveup = function(e) NULL
-    )
+    expr <- rlang::quo_get_expr(q)
+    if (!colwise_has_fn_head(expr)) next
+    # dplyr's own `<fn>(col, ...)` dot needs no unwinding to give up
+    out <- if (is.function(expr[[1L]])) {
+      colwise_rewrite_call(expr, expr[[1L]], rlang::quo_get_env(q), schema, scope, memo)
+    } else {
+      tryCatch(
+        colwise_rewrite(expr, rlang::quo_get_env(q), schema, scope, memo),
+        colwise_giveup = function(e) NULL
+      )
+    }
     if (is.null(out)) next
     out <- if (rlang::is_quosure(out)) out else rlang::new_quosure(out, rlang::quo_get_env(q))
     dots[[i]] <- out
   }
+  class(dots) <- cls
   dots
 }
 
@@ -73,29 +98,74 @@ colwise_giveup <- function() {
 # own comes back as a quosure, nested in the tree; the caller unwraps a
 # top-level one.
 # @keywords internal
-colwise_rewrite <- function(expr, env, schema, scope) {
+colwise_rewrite <- function(expr, env, schema, scope, memo) {
   if (rlang::is_missing(expr)) return(expr)
   if (rlang::is_quosure(expr)) {
     if (!colwise_has_fn_head(expr)) return(expr)
-    out <- colwise_rewrite(rlang::quo_get_expr(expr), rlang::quo_get_env(expr), schema, scope)
+    out <- colwise_rewrite(rlang::quo_get_expr(expr), rlang::quo_get_env(expr), schema, scope, memo)
     return(if (rlang::is_quosure(out)) out else rlang::new_quosure(out, rlang::quo_get_env(expr)))
   }
   if (!is.call(expr) || !colwise_has_fn_head(expr)) return(expr)
   head <- expr[[1L]]
-  if (is.function(head)) return(colwise_rewrite_call(expr, head, env, schema, scope))
-  parts <- lapply(as.list(expr), colwise_rewrite, env = env, schema = schema, scope = scope)
+  if (is.function(head)) {
+    out <- colwise_rewrite_call(expr, head, env, schema, scope, memo)
+    if (is.null(out)) colwise_giveup()
+    return(out)
+  }
+  parts <- lapply(as.list(expr), colwise_rewrite, env = env, schema = schema, scope = scope, memo = memo)
   as.call(parts)
 }
 
-# One `<fn>(col, ...)` call
+# One `<fn>(col, ...)` call, or NULL to give up: the argument shape and the
+# column-dependent checks per call, everything else from the function's plan
 # @keywords internal
-colwise_rewrite_call <- function(expr, fn, env, schema, scope) {
+colwise_rewrite_call <- function(expr, fn, env, schema, scope, memo) {
   args <- as.list(expr)[-1L]
   if (length(args) < 1L || !is.symbol(args[[1L]]) || nzchar(names(args)[1L] %||% "")) {
-    colwise_giveup()
+    return(NULL)
   }
   col <- args[[1L]]
-  extra <- args[-1L]
+  plan <- colwise_fn_plan(fn, env, args[-1L], scope, memo)
+  if (is.null(plan)) return(NULL)
+
+  if (identical(plan$kind, "desc")) {
+    # dplyr keeps `<desc>(s)` as a value (-xtfrm(s)), which sorts strings in
+    # the session collation; the GPU's desc(s) is the C locale.
+    if (identical(unname(schema$types[match(as.character(col), schema$names)]), "STRING")) {
+      return(NULL)
+    }
+    return(call("desc", col))
+  }
+  body <- plan$build(col)
+  if (is.null(plan$env)) return(body)
+  if (!plan$native && !across_expr_native(body)) return(NULL)
+  rlang::new_quosure(body, plan$env)
+}
+
+# The plan for `fn` called with `extra` args from `env`, memoized in `memo`
+# (one colwise_rewrite_dots() call, so `scope` is fixed). The key is the
+# function by identical(), which compares closure environments too, plus
+# `env` and `extra`. NULL means every call to it gives up.
+# @keywords internal
+colwise_fn_plan <- function(fn, env, extra, scope, memo) {
+  for (entry in memo$plans) {
+    if (identical(entry$fn, fn) && identical(entry$env, env) && identical(entry$extra, extra)) {
+      return(entry$plan)
+    }
+  }
+  plan <- tryCatch(colwise_fn_resolve(fn, env, extra, scope), colwise_giveup = function(e) NULL)
+  memo$plans[[length(memo$plans) + 1L]] <- list(fn = fn, env = env, extra = extra, plan = plan)
+  plan
+}
+
+# Resolve one function, independent of the column it's called on:
+#   list(kind = "desc"): a bare desc(), checked per column by the caller
+#   list(kind = "body", build, env, native): `build(col)` is the plain call;
+#     with an `env` it becomes a quosure there, after an across_expr_native()
+#     check per call unless `native` says the check passed once for all
+#     columns
+# @keywords internal
+colwise_fn_resolve <- function(fn, env, extra, scope) {
   placeholders <- c(".", ".x")
 
   if (inherits(fn, "inline_colwise_function")) {
@@ -105,8 +175,8 @@ colwise_rewrite_call <- function(expr, fn, env, schema, scope) {
         any(placeholders %in% scope)) {
       colwise_giveup()
     }
-    body <- substitute_across_placeholders(fml[[2L]], col, "")
-    return(colwise_native_quo(body, environment(fml)))
+    rhs <- fml[[2L]]
+    return(colwise_body_plan(function(col) substitute_across_placeholders(rhs, col, ""), environment(fml)))
   }
 
   if (inherits(fn, "rlang_lambda_function")) {
@@ -116,18 +186,13 @@ colwise_rewrite_call <- function(expr, fn, env, schema, scope) {
         across_free_vars_hit_data(set_diff(all.vars(body), placeholders), scope)) {
       colwise_giveup()
     }
-    return(colwise_native_quo(substitute_across_placeholders(body, col, ""), environment(fn)))
+    return(colwise_body_plan(function(col) substitute_across_placeholders(body, col, ""), environment(fn)))
   }
 
-  # a bare function the arrange verbs take by name. dplyr keeps `<desc>(s)`
-  # as a value (-xtfrm(s)), which sorts strings in the session collation; the
-  # GPU's desc(s) is the C locale.
+  # a bare function the arrange verbs take by name
   if (identical(fn, dplyr::desc) && length(extra) == 0L &&
       identical(get0("desc", env, mode = "function"), fn)) {
-    if (identical(unname(schema$types[match(as.character(col), schema$names)]), "STRING")) {
-      colwise_giveup()
-    }
-    return(call("desc", col))
+    return(list(kind = "desc"))
   }
 
   # a closure is called as a value: cur_column() is an error there in dplyr
@@ -136,15 +201,46 @@ colwise_rewrite_call <- function(expr, fn, env, schema, scope) {
   if (!all(vapply(extra, function(a) is.atomic(a) && length(a) == 1L, logical(1)))) colwise_giveup()
   spec <- across_value_spec(fn, NULL, env, scope, extra)
   if (is.null(spec)) colwise_giveup()
-  body <- spec$build(col, as.character(col))
-  if (is.null(spec$env)) body else colwise_native_quo(body, spec$env)
+  build <- function(col) spec$build(col, as.character(col))
+  if (is.null(spec$env)) return(list(kind = "body", build = build, env = NULL, native = TRUE))
+  colwise_body_plan(build, spec$env)
 }
 
-# A rewritten body, or give up when it uses a call the IR doesn't lower by name
+# A "body" plan. `build(col)` runs once, on a probe column; per call the
+# column is substituted into that body, when that reproduces build() exactly
+# (checked with a second probe). The body must use only calls the IR lowers
+# by name: checked once too, unless the column lands in a call head (`~
+# .x(1)`), where the answer depends on the column's name: then per call.
 # @keywords internal
-colwise_native_quo <- function(body, env) {
-  if (!across_expr_native(body)) colwise_giveup()
-  rlang::new_quosure(body, env)
+colwise_body_plan <- function(build, env) {
+  p1 <- as.name("..cuplyr_colwise_col1..")
+  p2 <- as.name("..cuplyr_colwise_col2..")
+  body1 <- build(p1)
+  if (identical(colwise_subst_col(body1, p1, p2), build(p2))) {
+    build <- function(col) colwise_subst_col(body1, p1, col)
+  }
+  native <- !colwise_sym_is_head(body1, p1)
+  if (native && !across_expr_native(body1)) colwise_giveup()
+  list(kind = "body", build = build, env = env, native = native)
+}
+
+# `expr` with every `sym` replaced by `col` (base substitute(), in C)
+# @keywords internal
+colwise_subst_col <- function(expr, sym, col) {
+  do.call(substitute, list(expr, stats::setNames(list(col), as.character(sym))))
+}
+
+# Is `sym` the head of any call in `expr`?
+# @keywords internal
+colwise_sym_is_head <- function(expr, sym) {
+  if (rlang::is_missing(expr)) return(FALSE)
+  if (rlang::is_quosure(expr)) return(colwise_sym_is_head(rlang::quo_get_expr(expr), sym))
+  if (!is.call(expr)) return(FALSE)
+  if (identical(expr[[1L]], sym)) return(TRUE)
+  for (part in as.list(expr)) {
+    if (colwise_sym_is_head(part, sym)) return(TRUE)
+  }
+  FALSE
 }
 
 # Does `expr` call a `cur_*()` context function? (call heads only)
