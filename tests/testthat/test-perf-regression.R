@@ -415,3 +415,123 @@ test_that("perf: transfer_roundtrip", {
       collect()
   }, calibration = "transfer")
 })
+
+# =============================================================================
+# Checked integer arithmetic and rolling windows (F61)
+#
+# Calibration class: "kernel". These calls take 1-3 ms at 1e6 rows, so a
+# collect() of the result would drown them in the device->host copy. Each body
+# runs the verb and then fences with gpu_sync() (every verb returns when its
+# work is queued): an eager mutate() executes inside the call, a lazy plan
+# through compute(). perf_time() batches the calls into >= 50 ms samples (F52).
+# =============================================================================
+
+perf_int_df <- local({
+  set.seed(20261023)
+  n <- 1e6
+  data.frame(
+    a = sample.int(1000L, n, replace = TRUE),
+    b = sample.int(1000L, n, replace = TRUE),
+    c = sample.int(1000L, n, replace = TRUE)
+  )
+})
+
+test_that("perf: int_arith_eager", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gpu_df <- tbl_gpu(perf_int_df, lazy = FALSE)
+
+  expect_no_perf_regression("int_arith_eager", function() {
+    out <- dplyr::mutate(gpu_df, s = a + b, p = a * c, q = (a + b) * 2L - c)
+    gpu_sync()
+    out
+  }, calibration = "kernel")
+})
+
+test_that("perf: int_arith_lazy", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gpu_df <- tbl_gpu(perf_int_df, lazy = TRUE)
+
+  expect_no_perf_regression("int_arith_lazy", function() {
+    out <- gpu_df |>
+      dplyr::mutate(s = a + b, p = a * c, q = (a + b) * 2L - c) |>
+      compute()
+    gpu_sync()
+    out
+  }, calibration = "kernel")
+})
+
+# Operands that sum to ~2e9 row by row, but whose column ranges do not: the
+# interval proof of the fast path fails (a's max + b's max is ~4e9), so this
+# times the exact two-pass check. No row overflows, so nothing warns.
+perf_int_bounds_df <- local({
+  set.seed(20261024)
+  n <- 1e6
+  a <- sample.int(2000000000L, n, replace = TRUE)
+  data.frame(
+    a = a,
+    b = 2000000000L - a + sample.int(1000L, n, replace = TRUE),
+    c = sample.int(1000L, n, replace = TRUE)
+  )
+})
+
+test_that("perf: int_arith_bounds_eager", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gpu_df <- tbl_gpu(perf_int_bounds_df, lazy = FALSE)
+
+  expect_no_perf_regression("int_arith_bounds_eager", function() {
+    out <- dplyr::mutate(gpu_df, s = a + b, q = (a + b) - c)
+    gpu_sync()
+    out
+  }, calibration = "kernel")
+})
+
+test_that("perf: roll_mean_w11_eager", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gpu_df <- tbl_gpu(perf_big_df[, "x", drop = FALSE], lazy = FALSE)
+
+  expect_no_perf_regression("roll_mean_w11_eager", function() {
+    out <- dplyr::mutate(gpu_df, r = roll_mean(x, 11))
+    gpu_sync()
+    out
+  }, calibration = "kernel")
+})
+
+test_that("perf: roll_mean_w1001_eager", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gpu_df <- tbl_gpu(perf_big_df[, "x", drop = FALSE], lazy = FALSE)
+
+  expect_no_perf_regression("roll_mean_w1001_eager", function() {
+    out <- dplyr::mutate(gpu_df, r = roll_mean(x, 1001))
+    gpu_sync()
+    out
+  }, calibration = "kernel")
+})
+
+test_that("perf: roll_sd_w11_eager", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gpu_df <- tbl_gpu(perf_big_df[, "x", drop = FALSE], lazy = FALSE)
+
+  expect_no_perf_regression("roll_sd_w11_eager", function() {
+    out <- dplyr::mutate(gpu_df, r = roll_sd(x, 11))
+    gpu_sync()
+    out
+  }, calibration = "kernel")
+})
+
+test_that("perf: roll_sd_w1001_eager", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gpu_df <- tbl_gpu(perf_big_df[, "x", drop = FALSE], lazy = FALSE)
+
+  expect_no_perf_regression("roll_sd_w1001_eager", function() {
+    out <- dplyr::mutate(gpu_df, r = roll_sd(x, 1001))
+    gpu_sync()
+    out
+  }, calibration = "kernel")
+})

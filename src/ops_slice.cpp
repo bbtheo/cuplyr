@@ -50,6 +50,7 @@
 #include "ops_common.hpp"
 
 #include <cudf/copying.hpp>
+#include <cudf/contiguous_split.hpp>
 #include <cudf/sorting.hpp>
 #include <cudf/stream_compaction.hpp>
 #include <cudf/binaryop.hpp>
@@ -184,10 +185,14 @@ SEXP gpu_slice_indices(SEXP xptr, NumericVector raw_indices) {
 }
 
 // group_split(): gather the rows into group order (`idx0`, 0-based, all
-// groups concatenated) and cut at the cumulative group `sizes`, copying every
-// piece into its own owned table so the chunks outlive the source. An empty
-// `idx0` means "already in group order" (ungrouped input): the source is
-// split as is. Returns one XPtr per size (an empty list for no sizes).
+// groups concatenated) and cut at the cumulative group `sizes` with one
+// cudf::contiguous_split, which allocates one packed buffer per piece. A chunk
+// owns that buffer alone (its columns are SharedColumns over it), so a kept
+// chunk holds its own rows' bytes whether or not it is ever used, and the
+// gathered table and the input are free to go. An empty `idx0` means "already
+// in group order" (ungrouped input): the source is split as is. A single group
+// is not split at all: its table shares the gathered (or input) columns, which
+// are all its own rows. Returns one XPtr per size (an empty list for no sizes).
 // [[Rcpp::export]]
 Rcpp::List gpu_split_rows(SEXP xptr, IntegerVector idx0, IntegerVector sizes) {
     using namespace cuplyr;
@@ -201,12 +206,9 @@ Rcpp::List gpu_split_rows(SEXP xptr, IntegerVector idx0, IntegerVector sizes) {
     if (ngroups == 0) return out;
 
     cudf::size_type total = 0;
-    std::vector<cudf::size_type> splits;
-    splits.reserve(static_cast<size_t>(ngroups));
     for (R_xlen_t i = 0; i < ngroups; ++i) {
         if (sizes[i] < 0) Rcpp::stop("group_split(): negative group size");
         total += sizes[i];
-        if (i + 1 < ngroups) splits.push_back(total);
     }
 
     std::unique_ptr<cudf::table> gathered;
@@ -234,9 +236,40 @@ Rcpp::List gpu_split_rows(SEXP xptr, IntegerVector idx0, IntegerVector sizes) {
         Rcpp::stop("group_split(): group sizes do not cover the table");
     }
 
-    std::vector<cudf::table_view> parts = cudf::split(source, splits);
+    if (ngroups == 1) {
+        if (gathered) {
+            out[0] = make_gpu_table_xptr(std::move(gathered));
+        } else {
+            std::vector<SharedColumn> shared;
+            for (int i = 0; i < view.num_columns(); ++i) {
+                shared.push_back(get_shared_column(ptr, i));
+            }
+            out[0] = make_gpu_table_xptr(std::move(shared));
+        }
+        return out;
+    }
+
+    std::vector<cudf::size_type> splits;
+    splits.reserve(static_cast<size_t>(ngroups) - 1);
+    cudf::size_type edge = 0;
+    for (R_xlen_t i = 0; i + 1 < ngroups; ++i) {
+        edge += sizes[i];
+        splits.push_back(edge);
+    }
+
+    std::vector<cudf::packed_table> pieces = cudf::contiguous_split(source, splits);
+    gathered.reset();
     for (R_xlen_t i = 0; i < ngroups; ++i) {
-        out[i] = make_gpu_table_xptr(std::make_unique<cudf::table>(parts[i]));
+        cudf::packed_table& piece = pieces[static_cast<size_t>(i)];
+        // The piece's buffer is shared by its columns and by nothing else.
+        std::shared_ptr<const void> owner(
+            std::shared_ptr<rmm::device_buffer>(std::move(piece.data.gpu_data)));
+        std::vector<SharedColumn> columns;
+        columns.reserve(static_cast<size_t>(piece.table.num_columns()));
+        for (cudf::size_type c = 0; c < piece.table.num_columns(); ++c) {
+            columns.emplace_back(owner, piece.table.column(c));
+        }
+        out[i] = make_gpu_table_xptr(std::move(columns));
     }
     return out;
 }

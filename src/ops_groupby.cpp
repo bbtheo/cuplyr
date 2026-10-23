@@ -728,6 +728,30 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     if (num_groups == 0) {
         std::vector<std::unique_ptr<cudf::column>> result_columns;
 
+        // One group: the whole table, keyed by a constant (cudf's groupby needs a
+        // keys table). F61: built on the device once per call (not a host vector
+        // copied up per aggregation), declared sorted, and one groupby serves
+        // every aggregation and the quantile batch. null_policy::INCLUDE:
+        // cudf::groupby's default (EXCLUDE) silently drops every row whose group
+        // key is null, but dplyr's group_by()/summarise() always treats NA as its
+        // own group like any other value (verified empirically, see
+        // test-summarise.R's "keeps an NA group key" test and
+        // test-dplyr-count.R's NA-key tests -- add_count()'s join-back
+        // broadcast, R/mutate.R, depends on this too). The key is never null
+        // here, but the policy stays the grouped path's.
+        std::unique_ptr<cudf::column> const_key;
+        std::unique_ptr<cudf::groupby::groupby> const_gb;
+        auto whole_table_groupby = [&]() -> cudf::groupby::groupby& {
+            if (!const_gb) {
+                const_key = cudf::make_column_from_scalar(
+                    cudf::numeric_scalar<int32_t>(0, true), view.num_rows());
+                const_gb = std::make_unique<cudf::groupby::groupby>(
+                    cudf::table_view({const_key->view()}), cudf::null_policy::INCLUDE,
+                    cudf::sorted::YES);
+            }
+            return *const_gb;
+        };
+
         // F22: every quantile() of the call in one groupby request per value
         // column (see QuantileRequests); the loop below only places the results.
         std::vector<std::unique_ptr<cudf::column>> quantile_cols(num_aggs);
@@ -759,22 +783,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                               median_q[i] ? 0.5 : agg_extra[i]);
             }
             if (!q_requests.empty()) {
-                // One group: the whole table, keyed by a constant (cudf's
-                // groupby needs a keys table).
-                std::vector<int32_t> keys_data(view.num_rows(), 0);
-                rmm::device_buffer keys_buf(keys_data.size() * sizeof(int32_t),
-                                            rmm::cuda_stream_view(),
-                                            rmm::mr::get_current_device_resource_ref());
-                if (!keys_data.empty()) {
-                    check_cuda(cudaMemcpy(keys_buf.data(), keys_data.data(),
-                                           keys_data.size() * sizeof(int32_t), cudaMemcpyHostToDevice),
-                               "gpu_summarise keys memcpy");
-                }
-                cudf::column keys_col(cudf::data_type{cudf::type_id::INT32}, view.num_rows(),
-                                      std::move(keys_buf), rmm::device_buffer{}, 0);
-                cudf::groupby::groupby gb(cudf::table_view({keys_col.view()}),
-                                          cudf::null_policy::INCLUDE);
-                auto [result_keys, result_aggs] = gb.aggregate(q_requests);
+                auto [result_keys, result_aggs] = whole_table_groupby().aggregate(q_requests);
                 for (int i = 0; i < num_aggs; ++i) {
                     if (quantiles.has(i)) quantile_cols[i] = quantiles.take(result_aggs, i);
                 }
@@ -811,36 +820,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                     0
                 ));
             } else {
-                std::vector<int32_t> keys_data(view.num_rows(), 0);
-                rmm::device_buffer keys_buf(keys_data.size() * sizeof(int32_t),
-                                            rmm::cuda_stream_view(),
-                                            rmm::mr::get_current_device_resource_ref());
-                if (!keys_data.empty()) {
-                    check_cuda(cudaMemcpy(keys_buf.data(), keys_data.data(),
-                                           keys_data.size() * sizeof(int32_t), cudaMemcpyHostToDevice),
-                               "gpu_summarise keys memcpy");
-                }
-
-                auto keys_col = std::make_unique<cudf::column>(
-                    cudf::data_type{cudf::type_id::INT32},
-                    view.num_rows(),
-                    std::move(keys_buf),
-                    rmm::device_buffer{},
-                    0
-                );
-
-                std::vector<cudf::column_view> keys_views = { keys_col->view() };
-                cudf::table_view keys_table(keys_views);
-
-                // null_policy::INCLUDE: cudf::groupby's default
-                // (null_policy::EXCLUDE) silently drops every row whose
-                // group key is null, but dplyr's group_by()/summarise()
-                // always treats NA as its own group like any other value
-                // (verified empirically, see test-summarise.R's "keeps an
-                // NA group key" test and test-dplyr-count.R's NA-key
-                // tests -- add_count()'s join-back broadcast, R/mutate.R,
-                // depends on this too).
-                cudf::groupby::groupby gb(keys_table, cudf::null_policy::INCLUDE);
+                cudf::groupby::groupby& gb = whole_table_groupby();
 
                 AggKind kind = classify_agg(agg_type);
 

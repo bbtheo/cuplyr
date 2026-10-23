@@ -59,6 +59,11 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/datetime.hpp>
+#if __has_include(<cudf/join/join.hpp>)
+#include <cudf/join/join.hpp>
+#else
+#include <cudf/join.hpp>
+#endif
 #include <cudf/aggregation.hpp>
 #include <cudf/null_mask.hpp>
 #include <cudf/reduction.hpp>
@@ -182,6 +187,15 @@ struct eval_ctx {
     // nan_as_null() (see nan_only_from_leaves()).
     bool nan_leaves = false;
 
+    // F61: [min, max] of the valid values of an INT32 column (cudf::minmax()),
+    // by ctx index; [0, 0] for an empty or all-null column. Used by the checked
+    // integer arithmetic to prove that a chain cannot overflow.
+    struct col_range {
+        int64_t lo;
+        int64_t hi;
+    };
+    std::map<cudf::size_type, col_range> range_cache;
+
     // F57: slots of `cols` that alias another slot (a bare column copy in
     // gpu_mutate_expr()), ctx index -> the index it aliases. `owned` holds a
     // placeholder for them; the result shares the aliased column instead of
@@ -227,6 +241,10 @@ struct eval_ctx {
         }
         for (auto it = nan_masks.begin(); it != nan_masks.end();) {
             if (static_cast<size_t>(it->first) >= mark) it = nan_masks.erase(it);
+            else ++it;
+        }
+        for (auto it = range_cache.begin(); it != range_cache.end();) {
+            if (static_cast<size_t>(it->first) >= mark) it = range_cache.erase(it);
             else ++it;
         }
     }
@@ -599,6 +617,10 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
     }
     if (op == "na_if") {
         return resolve_static_type(args[0], ctx);
+    }
+    // F61: recode_lookup(x, keys, values, default, missing) has the values' type.
+    if (op == "recode_lookup") {
+        return resolve_static_type(args[2], ctx);
     }
 
     // replace_when(x, cond1 ~ val1, ...): type-stable to x (arg 0) -- see
@@ -1420,20 +1442,52 @@ struct checked_tree {
     std::vector<cudf::ast::expression const*> oks;   // one range test per fused node
     std::vector<cudf::size_type> leaf_cols;          // ctx indices of leaf columns
     int fused = 0;                                   // nodes entered as fused
+    // F61: false once some node's value interval is not inside the int32 range
+    // (or could not be bounded): the exact range test is then needed.
+    bool proven = true;
 };
 
 struct checked_vr {
     cudf::ast::expression const* v;   // INT32 value (wraps)
     cudf::ast::expression const* r;   // exact INT64 value
+    bool known = false;               // [lo, hi] bounds every valid value of r
+    int64_t lo = 0;
+    int64_t hi = 0;
 };
+
+constexpr int64_t kIntMax = 2147483647;
+
+// F61: bounds of the valid values of ctx column `idx` (INT32), one cudf::minmax()
+// per column per evaluation. An empty or all-null column has no valid row to
+// overflow, so it is [0, 0].
+inline eval_ctx::col_range checked_col_range(eval_ctx& ctx, cudf::size_type idx) {
+    auto it = ctx.range_cache.find(idx);
+    if (it != ctx.range_cache.end()) return it->second;
+    eval_ctx::col_range r{0, 0};
+    cudf::column_view col = ctx.cols[idx];
+    if (col.size() > col.null_count()) {
+        auto mm = cudf::minmax(col);
+        auto* lo = static_cast<cudf::numeric_scalar<int32_t>*>(mm.first.get());
+        auto* hi = static_cast<cudf::numeric_scalar<int32_t>*>(mm.second.get());
+        if (lo->is_valid() && hi->is_valid()) {
+            r.lo = lo->value();
+            r.hi = hi->value();
+        }
+    }
+    ctx.range_cache[idx] = r;
+    return r;
+}
 
 inline checked_vr fuse_checked(Rcpp::List node, checked_tree& ct, eval_ctx& ctx) {
     namespace ast = cudf::ast;
     std::string kind = ir_kind(node);
 
     if (kind == "lit") {
+        double lv = Rcpp::as<double>(node["value"]);
+        int64_t li = static_cast<int64_t>(lv);
         return {&make_literal("INT32", node["value"], false, ct.tree, ct.scalars),
-                &make_literal("INT64", node["value"], false, ct.tree, ct.scalars)};
+                &make_literal("INT64", node["value"], false, ct.tree, ct.scalars),
+                true, li, li};
     }
 
     // The budget is charged on entry (pre-order): a node's own range test is
@@ -1456,7 +1510,14 @@ inline checked_vr fuse_checked(Rcpp::List node, checked_tree& ct, eval_ctx& ctx)
         }
         ct.leaf_cols.push_back(idx);
         ast::expression const& ref = ct.tree.emplace<ast::column_reference>(idx);
-        return {&ref, &ct.tree.emplace<ast::operation>(ast::ast_operator::CAST_TO_INT64, ref)};
+        ast::expression const& wide =
+            ct.tree.emplace<ast::operation>(ast::ast_operator::CAST_TO_INT64, ref);
+        if (ct.proven && ctx.cols[idx].type().id() == cudf::type_id::INT32) {
+            auto rg = checked_col_range(ctx, idx);
+            return {&ref, &wide, true, rg.lo, rg.hi};
+        }
+        ct.proven = false;
+        return {&ref, &wide};
     }
 
     std::string op = Rcpp::as<std::string>(node["op"]);
@@ -1471,7 +1532,32 @@ inline checked_vr fuse_checked(Rcpp::List node, checked_tree& ct, eval_ctx& ctx)
     ast::expression const& maxlit = make_literal(
         "INT64", Rcpp::wrap(static_cast<double>(2147483647)), false, ct.tree, ct.scalars);
     ct.oks.push_back(&ct.tree.emplace<ast::operation>(ast::ast_operator::LESS_EQUAL, absr, maxlit));
-    return {&v, &r};
+
+    // F61: the interval of this node's exact value over all valid operands. The
+    // operands are inside the int32 range here (a node that could leave it
+    // ends the proof), so the products fit in int64.
+    checked_vr out{&v, &r};
+    if (ct.proven && lhs.known && rhs.known) {
+        int64_t lo, hi;
+        if (op == "+") {
+            lo = lhs.lo + rhs.lo;
+            hi = lhs.hi + rhs.hi;
+        } else if (op == "-") {
+            lo = lhs.lo - rhs.hi;
+            hi = lhs.hi - rhs.lo;
+        } else {
+            int64_t p[4] = {lhs.lo * rhs.lo, lhs.lo * rhs.hi, lhs.hi * rhs.lo, lhs.hi * rhs.hi};
+            lo = *std::min_element(p, p + 4);
+            hi = *std::max_element(p, p + 4);
+        }
+        if (lo >= -kIntMax && hi <= kIntMax) {
+            out.known = true;
+            out.lo = lo;
+            out.hi = hi;
+        }
+    }
+    if (!out.known) ct.proven = false;
+    return out;
 }
 
 inline std::unique_ptr<cudf::column> apply_checked_int_add(Rcpp::List node, eval_ctx& ctx) {
@@ -1491,6 +1577,12 @@ inline std::unique_ptr<cudf::column> apply_checked_int_add(Rcpp::List node, eval
 
     checked_tree ct;
     checked_vr top = fuse_checked(node, ct, ctx);
+    // F61: every node's interval is inside the int32 range, so no row can
+    // overflow: the INT32 value is the answer, with no range test and no
+    // reduction.
+    if (ct.proven) {
+        return cudf::compute_column(ctx.view(), *top.v);
+    }
     ast::expression const* ok = ct.oks[0];
     for (size_t i = 1; i < ct.oks.size(); ++i) {
         ok = &ct.tree.emplace<ast::operation>(ast::ast_operator::NULL_LOGICAL_AND, *ok, *ct.oks[i]);
@@ -1768,6 +1860,82 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         // nulls; fill them with whether the haystack itself contained NA.
         cudf::numeric_scalar<bool> fill_value(set_has_na, true);
         return cudf::replace_nulls(contains_result->view(), fill_value);
+    }
+
+    // ---- F61: recode_lookup(x, keys, values, default, missing) ----
+    //
+    // recode() with literal keys: each row's key is found in one hash join
+    // (keys are unique, so a row matches at most once), the matched rows take
+    // the value (NA values stay null, scatter copies the source mask) and the
+    // rest keep `default` (a literal, or x itself). A null x never matches
+    // (null_equality::UNEQUAL), a NaN is read as null (F55: it is missing, and
+    // a key is never NaN anyway). With `na_step` the missing rows then take
+    // `missing`; cudf hashes -0 and 0 alike, so -0 matches the key 0.
+    if (op == "recode_lookup") {
+        Rcpp::List x_node = args[0];
+        Rcpp::List keys_node = args[1];
+        Rcpp::List vals_node = args[2];
+        Rcpp::List def_node = args[3];
+        Rcpp::List mis_node = args[4];
+        Rcpp::List meta = node["meta"];
+        bool na_step = Rcpp::as<bool>(meta["na_step"]);
+
+        cudf::size_type x_idx = materialize(x_node, ctx);
+        cudf::column_view x_col = ctx.cols[x_idx];
+        std::string out_str = Rcpp::as<std::string>(vals_node["type"]);
+        cudf::data_type out_type = expr_type_from_str(out_str);
+
+        std::unique_ptr<cudf::column> result;
+        if (ir_kind(def_node) == "lit") {
+            auto s = build_scalar(out_str, def_node["value"], ir_lit_is_na(def_node));
+            result = cudf::make_column_from_scalar(*s, x_col.size());
+        } else {
+            // ir_parse_recode() only omits .default when the values have x's type.
+            if (x_col.type().id() != out_type.id()) {
+                Rcpp::stop("internal: recode_lookup without a default needs values of x's type");
+            }
+            result = std::make_unique<cudf::column>(x_col);
+        }
+
+        // Matched rows.
+        if (x_col.size() > 0) {
+            auto upload = [](const std::string& type, SEXP v) -> std::unique_ptr<cudf::column> {
+                if (type == "STRING") return character_to_gpu(Rcpp::CharacterVector(v));
+                if (type == "INT32") return integer_to_gpu(Rcpp::IntegerVector(v));
+                if (type == "FLOAT64") return numeric_to_gpu(Rcpp::NumericVector(v));
+                if (type == "BOOL8") return logical_to_gpu(Rcpp::LogicalVector(v));
+                Rcpp::stop("recode(): unsupported type %s", type.c_str());
+            };
+            auto keys = upload(Rcpp::as<std::string>(keys_node["type"]), keys_node["value"]);
+            auto vals = upload(out_str, vals_node["value"]);
+            // ir_parse_recode() types the key literal with x's type.
+            if (keys->type().id() != x_col.type().id()) {
+                Rcpp::stop("internal: recode_lookup keys must have x's type");
+            }
+
+            cudf::column_view probe = ctx.cols[ctx.nan_as_null(x_idx)];
+            auto [left_map, right_map] = cudf::inner_join(
+                cudf::table_view({probe}), cudf::table_view({keys->view()}),
+                cudf::null_equality::UNEQUAL);
+            if (left_map->size() > 0) {
+                cudf::column_view lm(cudf::device_span<cudf::size_type const>(
+                    left_map->data(), left_map->size()));
+                cudf::column_view rm(cudf::device_span<cudf::size_type const>(
+                    right_map->data(), right_map->size()));
+                auto picked = cudf::gather(cudf::table_view({vals->view()}), rm,
+                                           cudf::out_of_bounds_policy::DONT_CHECK);
+                auto scattered = cudf::scatter(picked->view(), lm,
+                                               cudf::table_view({result->view()}));
+                result = std::move(scattered->release()[0]);
+            }
+        }
+
+        if (na_step && x_col.size() > 0) {
+            auto s = build_scalar(out_str, mis_node["value"], ir_lit_is_na(mis_node));
+            auto missing = cudf::is_null(ctx.cols[ctx.nan_as_null(x_idx)]);
+            result = cudf::copy_if_else(*s, result->view(), missing->view());
+        }
+        return result;
     }
 
     // ---- round(x) / round(x, n): banker's rounding (HALF_EVEN) ----

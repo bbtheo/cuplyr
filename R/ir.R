@@ -307,11 +307,11 @@ ir_foldable_window_fns <- c(
 )
 
 # Registry ops that only cuplyr's own rewrites build (ntile()'s final cast,
-# F50's factor decode). A user call by one of these names is an unknown
+# F50's factor decode, F61's recode lookup). A user call by one of these names is an unknown
 # function: constant-folded or sent to the CPU, where the user's own function
 # of that name runs.
 ir_internal_ops <- c("cast_int32", "factor_codes", "factor_labels", "cast_float64",
-                     "rw_agg_i32", "rw_agg_f64")
+                     "rw_agg_i32", "rw_agg_f64", "recode_lookup")
 
 # The recursive walker behind ir_parse_quo(). Carries the quosure's
 # environment explicitly (rather than re-deriving a quosure at every
@@ -1191,8 +1191,9 @@ ir_recode_scalar <- function(a, env, schema) {
 #' int32 for an INT32 `.x`) or positions; no duplicate keys; and, without
 #' `.default`, a value type equal to `.x`'s (otherwise dplyr's data-dependent
 #' "Unreplaced values treated as NA" warning must stay on the CPU). Lowers to
-#' `case_when(is.na(x) ~ .missing, x == key ~ val, ..., .default = .default
-#' or x)`, every literal explicitly typed. See `features/F30.md`.
+#' one `recode_lookup(x, keys, values, default, missing)` node (F61: the keys
+#' and values are two vector literals, one hash lookup on the GPU instead of
+#' a clause per key), every literal explicitly typed. See `features/F30.md`.
 #' @keywords internal
 ir_parse_recode <- function(expr, env, schema) {
   head <- expr[[1]]
@@ -1305,30 +1306,21 @@ ir_parse_recode <- function(expr, env, schema) {
   na_of_t <- switch(val_type,
     character = NA_character_, integer = NA_integer_, double = NA_real_, logical = NA)
 
-  conds <- list()
-  vals <- list()
-  # A missing `.x` row never matches a key and, with `.default`/`.missing`,
-  # is only replaced by `.missing`. dplyr's is.na() also covers NaN, and so
-  # does ours (F55). The clause is needed for a FLOAT64 `.x` even with neither
-  # argument: dplyr then returns NA (not NaN) for such a row.
-  if (has_default || has_missing || x_gpu == "FLOAT64") {
-    na_cond <- ir_call("is.na", list(x_ir))
-    conds <- c(conds, list(na_cond))
-    vals <- c(vals, list(lit_of(if (has_missing) mis_val$value else na_of_t)))
-  }
-  # `==` on a null `x` is null, which a clause treats as "no match" (like
-  # `%in%`'s never-NA result), and -0 == 0, with no hash set per key.
-  for (i in seq_along(reps)) {
-    conds <- c(conds, list(ir_call("==", list(x_ir, lit_of(keys[i])))))
-    vals <- c(vals, list(lit_of(rep_vals[[i]]$value)))
-  }
-  default_ir <- if (has_default) lit_of(def_val$value) else x_ir
-
-  n_when <- length(conds)
-  interleaved <- vector("list", n_when * 2L)
-  interleaved[seq(1L, n_when * 2L, by = 2L)] <- conds
-  interleaved[seq(2L, n_when * 2L, by = 2L)] <- vals
-  ir_call("case_when", c(interleaved, list(default_ir)), meta = list(n_when = n_when))
+  # One lookup node (F61): the K keys and values are two vector literals, built
+  # in one go, instead of K `==` conditions. A missing `.x` row never matches a
+  # key and, with `.default`/`.missing`, is only replaced by `.missing`.
+  # dplyr's is.na() also covers NaN, and so does the handler (F55). The missing
+  # step is needed for a FLOAT64 `.x` even with neither argument: dplyr then
+  # returns NA (not NaN) for such a row.
+  na_step <- has_default || has_missing || x_gpu == "FLOAT64"
+  vals <- vapply(rep_vals, function(v) v$value, FUN.VALUE = vector(val_type, 1L))
+  ir_call("recode_lookup", list(
+    x_ir,
+    ir_lit(value = keys, type = x_gpu),
+    ir_lit(value = vals, type = gpu_type_from_r(vals)),
+    if (has_default) lit_of(def_val$value) else x_ir,
+    lit_of(if (has_missing) mis_val$value else na_of_t)
+  ), meta = list(na_step = na_step))
 }
 
 #' Parse `case_match(.x, old_values ~ new_value, ..., .default=, .ptype=)`
@@ -4992,6 +4984,17 @@ ir_call_registry <- list(
     parse = NULL,
     type = type_case_when,
     lower = list(handler = "case_when")
+  ),
+
+  # F61: `recode(x, !!!lookup)` as one hash lookup. Only ir_parse_recode()
+  # builds it: args are x, the key vector literal, the value vector literal,
+  # the default (a literal, or x itself) and the `.missing` literal; the result
+  # has the values' type.
+  "recode_lookup" = list(
+    arity = 5L,
+    parse = NULL,
+    type = function(arg_types) arg_types[[3]],
+    lower = list(handler = "recode_lookup")
   ),
 
   # `coalesce(...)`: variadic, at least one argument.

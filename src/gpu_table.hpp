@@ -23,7 +23,37 @@
 
 namespace cuplyr {
 
-using SharedColumn = std::shared_ptr<const cudf::column>;
+// A column that is part of a table: a view plus whatever keeps its device
+// memory alive. An ordinary column owns itself (the view is of the
+// cudf::column it holds). F61: the columns of a group_split() chunk are views
+// into one packed buffer that contiguous_split() allocated for that chunk, and
+// all of them share that buffer as owner. Either way, a SharedColumn copy
+// shares the memory and keeps exactly that owner alive, so a table holds its
+// own bytes and nothing else's.
+class SharedColumn {
+public:
+    SharedColumn() = default;
+
+    // An owned column becomes its own owner.
+    explicit SharedColumn(std::unique_ptr<cudf::column> col) {
+        std::shared_ptr<const cudf::column> owned(std::move(col));
+        view_ = owned->view();
+        owner_ = std::move(owned);
+    }
+
+    // A view into memory that `owner` keeps alive.
+    SharedColumn(std::shared_ptr<const void> owner, cudf::column_view view)
+        : owner_(std::move(owner)), view_(view) {}
+
+    cudf::column_view view() const { return view_; }
+    cudf::size_type size() const { return view_.size(); }
+    // Lets `col->view()` / `col->size()` read the same for a column and a pointer to one.
+    const SharedColumn* operator->() const { return this; }
+
+private:
+    std::shared_ptr<const void> owner_;
+    cudf::column_view view_;
+};
 
 struct GpuTable {
     std::vector<SharedColumn> columns;
@@ -35,7 +65,7 @@ struct GpuTable {
     cudf::table_view view() const {
         std::vector<cudf::column_view> views;
         views.reserve(columns.size());
-        for (const auto& c : columns) views.push_back(c->view());
+        for (const auto& c : columns) views.push_back(c.view());
         return cudf::table_view(views);
     }
 };

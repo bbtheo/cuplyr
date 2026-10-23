@@ -453,7 +453,17 @@ group_split.tbl_gpu <- function(.tbl, ..., .keep = TRUE, keep = lifecycle::depre
     )
   }
   ptype <- wrap(wrap_gpu_call("group_split", gpu_slice_head(out$ptr, 0, FALSE)))
-  vctrs::new_list_of(lapply(ptrs, wrap), ptype = ptype)
+  # Every chunk is the ptype with its own pointer (F61): wrap() once per call,
+  # not once per group.
+  template <- unclass(ptype)
+  chunk_class <- class(ptype)
+  chunks <- lapply(ptrs, function(ptr) {
+    chunk <- template
+    chunk[["ptr"]] <- ptr
+    class(chunk) <- chunk_class
+    chunk
+  })
+  vctrs::new_list_of(chunks, ptype = ptype)
 }
 
 #' @rdname fallback-verbs
