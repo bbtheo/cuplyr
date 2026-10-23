@@ -1,7 +1,7 @@
 // src/roll_median.cpp
 //
 // F59: CPU sliding-window median behind R/roll.R's roll_median_sorted() (the
-// data.table-free fallback of roll_median()). Same semantics as
+// default, exact engine of roll_median(); F66). Same semantics as
 // roll_apply_generic(x, n, stats::median, na.rm): right-aligned windows of n
 // rows, a NaN is missing (F55), na.rm = FALSE gives NA for a window holding
 // any missing value, na.rm = TRUE drops them (an empty window is NA).

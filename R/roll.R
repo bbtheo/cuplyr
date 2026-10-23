@@ -16,14 +16,17 @@
 # mutate_window_fallback() CPU path, which re-runs the user's ORIGINAL
 # `dplyr::mutate(tbl, roll_median(x, n))` call on the collected tibble --
 # that re-run needs `roll_median()` to be a real, correct, exported R
-# function. F59 made that CPU path fast: roll_median() uses
-# data.table::frollmedian() when the installed data.table has it (1.18.4 or
-# later; it stays in Suggests; a NaN is nulled first, and the few windows
-# whose midpoint of two huge values overflows are recomputed exactly), else
-# the internal roll_median_sorted() (src/roll_median.cpp, O(n log n) whatever the width).
-# Both are identical() to the reference below. The other five functions keep
-# the plain R implementation: they are the semantics oracle that GPU results
-# are compared against (and the engine for standalone use on a vector).
+# function. roll_median() uses the internal roll_median_sorted()
+# (src/roll_median.cpp, O(n log n) whatever the width) by default; it equals
+# the reference below (stats::median of each window as double). F66 made that the default: the opt-in
+# option cuplyr.roll_median = "frollmedian" uses data.table::frollmedian()
+# (1.18.4 or later; it stays in Suggests; a NaN is nulled first, and every
+# position where data.table returns +-Inf takes the exact engine's value),
+# which is faster on wide windows but can differ from the reference by one
+# rounding step on windows with an even number of non-missing values. The
+# other five functions keep the plain R implementation: they are the
+# semantics oracle that GPU results are compared against (and the engine for
+# standalone use on a vector).
 #
 # These are plain (non-generic) functions, like RcppRoll's/slider's own
 # rolling-window surface -- not S3 methods, since there is exactly one
@@ -56,15 +59,35 @@
 #' narrow windows, where it is faster, and for min/max of timestamps and
 #' logicals) -- these R implementations are the CPU semantics reference and
 #' the engine for standalone use. cudf 25.12 has
-#' no MEDIAN rolling aggregation, so `roll_median()` always runs on the CPU:
-#' `data.table::frollmedian()` when the installed data.table has it (1.18.4 or
-#' later), otherwise a built-in O(n log n) sliding median; both give exactly the result of
-#' `stats::median()` over each window.
+#' no MEDIAN rolling aggregation, so `roll_median()` always runs on the CPU
+#' (see "Median engines").
 #' `data.table::frollmean(x, n)` (and its five siblings) work as
 #' equivalent GPU-native aliases inside `mutate()`/`filter()` too, as long
 #' as `align`/`fill`/`adaptive` are left at their defaults (`"right"`,
 #' `NA`, `FALSE`) -- any other value falls back / errors, matching this
 #' task's explicit "right-aligned only" scope.
+#'
+#' **Median engines.** By default `roll_median()` uses a built-in exact
+#' engine that returns exactly `stats::median()` of each window converted to
+#' double (so integer and logical input give double, as `median()` of the
+#' window cast to double would): the same NA/`na.rm` handling, `NaN` treated
+#' as missing, `Inf`, and grouped windows. It runs in O(n log n) whatever the
+#' width (roughly 0.2 s per 1e6 rows). `options(cuplyr.roll_median = "frollmedian")`
+#' (or the environment variable `CUPLYR_ROLL_MEDIAN`; the option wins) opts
+#' in to `data.table::frollmedian()`, which needs data.table >= 1.18.4
+#' (Suggests). Its result equals `data.table::frollmedian(x, n, na.rm = na.rm)`
+#' with `NaN` treated as `NA` first, except that every position where
+#' data.table returns `Inf` or `-Inf` takes the exact engine's value (so a
+#' midpoint of two finite values that overflows comes out finite, as in
+#' `stats::median()`). Everywhere else it can differ from `stats::median()`
+#' by one rounding step (1 ulp) on windows with an even number of non-missing
+#' values. It is faster on wide windows without `NA`s, but slower than the
+#' default with `NA`s and `na.rm = TRUE` on wide windows (about 4x slower at
+#' width 1001 with 1% `NA`) and on thousands of small groups (several times
+#' slower). If it is requested but data.table is missing or too
+#' old, the exact engine is used and a message says so once per session. Any
+#' other value of the option is an error. `data.table::frollmedian()` written
+#' inside `mutate()` keeps data.table's own result.
 #'
 #' The internal option `cuplyr.roll_path` (else the environment variable
 #' `CUPLYR_ROLL_PATH`), one of `"auto"` (the default), `"scans"` or `"cudf"`,
@@ -114,14 +137,55 @@ roll_median <- function(x, n, na.rm = FALSE) {
   roll_check_n(n)
   n <- as.integer(n)
   nx <- length(x)
+  engine <- roll_median_engine() # an invalid option errors even on short input
   if (nx == 0 || n > nx) {
     return(rep(NA_real_, nx))
   }
-  if (roll_has_frollmedian()) {
-    roll_median_dt(x, n, na.rm)
-  } else {
-    roll_median_sorted(x, n, na.rm)
+  # base R's rule, as in roll_apply_generic()'s `if (na.rm)`: 1 and "TRUE"
+  # are TRUE; NA and a vector of length != 1 are errors. Both engines then
+  # get a strict flag, so neither silently reads a non-flag as FALSE.
+  na.rm <- if (na.rm) TRUE else FALSE
+  if (identical(engine, "frollmedian")) {
+    if (roll_has_frollmedian()) {
+      return(roll_median_dt(x, n, na.rm))
+    }
+    roll_median_note_exact()
   }
+  roll_median_sorted(x, n, na.rm)
+}
+
+# Which engine roll_median() uses: the option cuplyr.roll_median, else the
+# environment variable CUPLYR_ROLL_MEDIAN, read per call (like
+# roll_path_option()). "exact" (the default) or "frollmedian".
+roll_median_engine <- function() {
+  opt <- getOption("cuplyr.roll_median")
+  if (is.null(opt)) opt <- Sys.getenv("CUPLYR_ROLL_MEDIAN", "")
+  if (identical(opt, "")) {
+    return("exact")
+  }
+  if (!is.character(opt) || length(opt) != 1 || is.na(opt) ||
+      !opt %in% c("exact", "frollmedian")) {
+    stop("`cuplyr.roll_median` (or CUPLYR_ROLL_MEDIAN) must be \"exact\" or ",
+         "\"frollmedian\", not ", paste(deparse(opt), collapse = " "), ".", call. = FALSE)
+  }
+  opt
+}
+
+# Per-session state of the opt-in engine: `noted` is the one-time message flag
+# and `has_dt` caches the data.table availability check (see
+# roll_has_frollmedian()). Fields of an environment so tests can reset them.
+roll_median_state <- new.env(parent = emptyenv())
+
+roll_median_note_exact <- function() {
+  if (isTRUE(roll_median_state$noted)) {
+    return(invisible())
+  }
+  roll_median_state$noted <- TRUE
+  rlang::inform(
+    paste0("The \"frollmedian\" engine (option `cuplyr.roll_median` or ",
+           "environment variable CUPLYR_ROLL_MEDIAN) needs data.table >= 1.18.4, ",
+           "which is not available; roll_median() uses the exact engine instead."),
+    class = "cuplyr_message_roll_median_exact")
 }
 
 # The internal switch forcing gpu_window()'s rolling path (see ?roll): the
@@ -142,48 +206,55 @@ roll_path_option <- function() {
 }
 
 # data.table gained frollmedian() in 1.18.0; 1.18.4 is the release its output
-# was checked identical() to the reference on, so older versions (and no
-# data.table at all) take the built-in engine. A function so tests can force
-# the fallback.
+# was checked against, so older versions (and no data.table at all) can't
+# serve the opt-in "frollmedian" engine. A function so tests can force
+# the fallback. Cached per session: packageVersion() costs ~0.1 ms, which
+# adds up over thousands of groups. The cache never refreshes, so installing
+# data.table mid-session still leaves the exact engine in use until restart;
+# that is by design, since exact is the safe direction.
 roll_has_frollmedian <- function() {
-  requireNamespace("data.table", quietly = TRUE) &&
-    utils::packageVersion("data.table") >= "1.18.4"
+  if (is.null(roll_median_state$has_dt)) {
+    roll_median_state$has_dt <- requireNamespace("data.table", quietly = TRUE) &&
+      utils::packageVersion("data.table") >= "1.18.4"
+  }
+  roll_median_state$has_dt
 }
 
 # data.table::frollmedian() with F55's NaN rule (a NaN is missing, so it is
-# nulled first) -- identical() to roll_apply_generic(x, n, stats::median, na.rm)
-# except where the two middle values' midpoint overflows: data.table averages
-# in double ((1e308 + 1.5e308) / 2 = Inf), R's mean() in long double. Those
-# are exactly the positions that come back +-Inf from a window holding no
-# +-Inf input, so they are recomputed with the reference.
+# nulled first). It matches roll_apply_generic(x, n, stats::median, na.rm)
+# except (a) by one rounding step on windows with an even number of
+# non-missing values, since data.table averages the two middle values in
+# double and R's mean() in long double, and (b) where that midpoint
+# overflows ((1e308 + 1.5e308) / 2 = Inf), whether or not the window also
+# holds +-Inf. Every (b) position comes back +-Inf, so all +-Inf positions
+# take the exact engine's value from one O(n log n) pass; where the true
+# median is infinite that is the same +-Inf.
 roll_median_dt <- function(x, n, na.rm) {
   x <- as.double(x)
   x[is.nan(x)] <- NA_real_
   out <- data.table::frollmedian(x, n, na.rm = na.rm)
   bad <- which(is.infinite(out))
   if (length(bad) > 0) {
-    ci <- c(0L, cumsum(is.infinite(x)))
-    bad <- bad[ci[bad + 1L] - ci[bad - n + 1L] == 0L]
-    for (i in bad) {
-      w <- x[(i - n + 1L):i]
-      if (na.rm) w <- w[!is.na(w)]
-      out[i] <- stats::median(w)
-    }
+    out[bad] <- roll_median_sorted(x, n, na.rm)[bad]
   }
   out
 }
 
-# data.table-free sliding median: O(n log n) setup, O(log n) per row (see
+# The exact engine, data.table-free: O(n log n) setup, O(log n) per row (see
 # src/roll_median.cpp). Same semantics as roll_apply_generic(x, n,
-# stats::median, na.rm).
+# stats::median, na.rm); `na.rm` must already be a strict TRUE/FALSE (Rcpp
+# would read NA as true), which roll_median() guarantees.
 roll_median_sorted <- function(x, n, na.rm = FALSE) {
+  if (!isTRUE(na.rm) && !isFALSE(na.rm)) {
+    stop("roll_median_sorted(): `na.rm` must be TRUE or FALSE.", call. = FALSE)
+  }
   roll_check_n(n)
   n <- as.integer(n)
   nx <- length(x)
   if (nx == 0 || n > nx) {
     return(rep(NA_real_, nx))
   }
-  roll_median_cpp(as.double(x), n, isTRUE(na.rm))
+  roll_median_cpp(as.double(x), n, na.rm)
 }
 
 roll_check_n <- function(n) {

@@ -57,15 +57,35 @@ run GPU-natively, in time that does not depend on the window width
 narrow windows, where it is faster, and for min/max of timestamps and
 logicals) -- these R implementations are the CPU semantics reference and
 the engine for standalone use. cudf 25.12 has
-no MEDIAN rolling aggregation, so \code{roll_median()} always runs on the CPU:
-\code{data.table::frollmedian()} when the installed data.table has it (1.18.4 or
-later), otherwise a built-in O(n log n) sliding median; both give exactly the result of
-\code{stats::median()} over each window.
+no MEDIAN rolling aggregation, so \code{roll_median()} always runs on the CPU
+(see "Median engines").
 \code{data.table::frollmean(x, n)} (and its five siblings) work as
 equivalent GPU-native aliases inside \code{mutate()}/\code{filter()} too, as long
 as \code{align}/\code{fill}/\code{adaptive} are left at their defaults (\code{"right"},
 \code{NA}, \code{FALSE}) -- any other value falls back / errors, matching this
 task's explicit "right-aligned only" scope.
+
+\strong{Median engines.} By default \code{roll_median()} uses a built-in exact
+engine that returns exactly \code{stats::median()} of each window converted to
+double (so integer and logical input give double, as \code{median()} of the
+window cast to double would): the same NA/\code{na.rm} handling, \code{NaN} treated
+as missing, \code{Inf}, and grouped windows. It runs in O(n log n) whatever the
+width (roughly 0.2 s per 1e6 rows). \code{options(cuplyr.roll_median = "frollmedian")}
+(or the environment variable \code{CUPLYR_ROLL_MEDIAN}; the option wins) opts
+in to \code{data.table::frollmedian()}, which needs data.table >= 1.18.4
+(Suggests). Its result equals \code{data.table::frollmedian(x, n, na.rm = na.rm)}
+with \code{NaN} treated as \code{NA} first, except that every position where
+data.table returns \code{Inf} or \code{-Inf} takes the exact engine's value (so a
+midpoint of two finite values that overflows comes out finite, as in
+\code{stats::median()}). Everywhere else it can differ from \code{stats::median()}
+by one rounding step (1 ulp) on windows with an even number of non-missing
+values. It is faster on wide windows without \code{NA}s, but slower than the
+default with \code{NA}s and \code{na.rm = TRUE} on wide windows (about 4x slower at
+width 1001 with 1\% \code{NA}) and on thousands of small groups (several times
+slower). If it is requested but data.table is missing or too
+old, the exact engine is used and a message says so once per session. Any
+other value of the option is an error. \code{data.table::frollmedian()} written
+inside \code{mutate()} keeps data.table's own result.
 
 The internal option \code{cuplyr.roll_path} (else the environment variable
 \code{CUPLYR_ROLL_PATH}), one of \code{"auto"} (the default), \code{"scans"} or \code{"cudf"},

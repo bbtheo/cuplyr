@@ -1,5 +1,20 @@
 # cuplyr (development version)
 
+## roll_median() is exact by default (F66)
+
+* `roll_median()` now uses the built-in exact engine by default, which
+  returns exactly `stats::median()` of each window converted to double
+  (roughly 0.2 s per 1e6 rows at any width). Before, it used `data.table::frollmedian()`
+  whenever data.table was installed, which can differ from R by one rounding
+  step on windows with an even number of non-missing values although the docs
+  said the result was exact.
+* `options(cuplyr.roll_median = "frollmedian")` (or the environment variable
+  `CUPLYR_ROLL_MEDIAN`) opts in to the faster `data.table::frollmedian()` path
+  (data.table >= 1.18.4). Positions where data.table returns `Inf` or `-Inf`
+  (including a midpoint of two huge finite values that overflows) take the
+  exact engine's value. If it is requested but unavailable, cuplyr uses the
+  exact engine and says so once per session. Other values are an error.
+
 ## Intermediates freed on return, OOM retry (F58)
 
 * A cuplyr call you make (an eager verb, `compute()` or `collect()` of a lazy

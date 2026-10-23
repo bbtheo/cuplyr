@@ -4,8 +4,9 @@
 # a NaN input is missing), integer and logical input, Inf, and overflow of
 # the two middle values' midpoint.
 #
-# Two engines: data.table::frollmedian() when data.table is installed, and an
-# internal data.table-free O(n log w) roll_median_sorted(x, n, na.rm).
+# Two engines: the internal data.table-free O(n log w) roll_median_sorted(x, n,
+# na.rm), the default since F66, and data.table::frollmedian(), opt-in via
+# options(cuplyr.roll_median = "frollmedian").
 
 f59m_ref <- function(x, n, na.rm = FALSE) {
   if (!is.numeric(n) || length(n) != 1 || is.na(n) || n != trunc(n) || n < 1) {
@@ -99,6 +100,7 @@ test_that("F59: roll_median() at 1e6 rows takes well under a second; the sorted 
   sorted <- getFromNamespace("roll_median_sorted", "cuplyr")
   r1 <- NULL
   if (requireNamespace("data.table", quietly = TRUE)) {
+    withr::local_options(cuplyr.roll_median = "frollmedian")
     t_dt <- system.time(r1 <- roll_median(x, 1001, na.rm = TRUE))[["elapsed"]]
     expect_lt(t_dt, 1)
   }

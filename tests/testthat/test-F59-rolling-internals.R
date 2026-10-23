@@ -113,7 +113,12 @@ test_that("widths either side of the cudf/scan threshold agree with the referenc
   }
 })
 
-test_that("B4: roll_median() falls back to the sorted engine when data.table lacks frollmedian", {
+test_that("B4: the opt-in falls back to the sorted engine when data.table lacks frollmedian", {
+  withr::local_envvar(CUPLYR_ROLL_MEDIAN = NA)
+  withr::local_options(cuplyr.roll_median = "frollmedian")
+  old <- roll_median_state$noted
+  roll_median_state$noted <- TRUE # the one-time message is F66's to test
+  withr::defer(roll_median_state$noted <- old)
   local_mocked_bindings(
     roll_has_frollmedian = function() FALSE,
     roll_median_dt = function(...) stop("data.table path used")
