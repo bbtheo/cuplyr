@@ -290,7 +290,9 @@ for (i in seq_len(N_ITER)) {
       collect()
   })["elapsed"]
   rm(result)
-  gpu_gc()
+  # Plain gc(), not gpu_gc(): under the default "async" resource gpu_gc() also
+  # trims the pool, so every timed call would start by regrowing it.
+  gc(verbose = FALSE)
 }
 
 # Benchmark DuckDB with result materialization (query + collect)

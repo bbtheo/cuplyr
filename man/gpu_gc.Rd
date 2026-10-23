@@ -19,7 +19,11 @@ and the amount freed in bytes and gigabytes. \code{freed_bytes} is the drop in
 \code{pool_used_bytes} (allocator level) when cuplyr's memory resource is
 installed, since the device-level free memory does not move while the
 resource keeps its pages; with \code{resource == "cuda"} it is the rise in
-device free memory.
+device free memory. \code{released_bytes} is what the resource gave back to the
+device: the drop in \code{pool_bytes} across the call. Under \code{"async"} the call
+ends by trimming the async pool, so it is the memory the pool held unused
+(0 or more); under \code{"pool"} it is 0 (RMM's pool never shrinks); under
+\code{"cuda"} it is \code{NA}.
 }
 \description{
 Triggers R garbage collection to free GPU memory held by unreferenced
@@ -43,13 +47,25 @@ builds from several verb calls, such as \code{add_tally(sort = TRUE)}. When a GP
 \code{gc()} and \code{gpu_gc(aggressive = FALSE)} itself and retries that step once;
 a second failure raises an error of class \code{cuplyr_error_gpu_oom}.
 
+Under the default \code{"async"} resource, this function also synchronises the
+device and returns all unused memory of cuplyr's async pool to the device, so
+other processes can use it (see \code{\link[=gpu_memory_state]{gpu_memory_state()}} and
+\code{vignette("memory", package = "cuplyr")}). The pool is then smaller than the
+session's recent peak, so the next calls grow it again from the driver; that
+costs the first call after \code{gpu_gc()} a few percent. If the device is in a
+CUDA error state, the return step cannot run: \code{gpu_gc()} then gives a warning
+instead of an error and leaves the pool as it is, so it stays safe in cleanup
+code.
+
 Call this function:
 \itemize{
-\item Between benchmark iterations
-\item After removing large GPU objects with \code{rm()}
+\item After removing large GPU objects with \code{rm()}, when other processes
+need the memory (under \code{"async"} it returns what the pool holds unused)
 \item When you see out-of-memory errors
 \item Before allocating large new GPU tables
 }
+It is not meant for the loop of a benchmark: under \code{"async"} the trim makes
+the next call grow the pool again.
 }
 \examples{
 if (has_gpu()) {

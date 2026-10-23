@@ -283,8 +283,10 @@ bench_time <- function(fn, max_iterations = 11L) {
 # (build_fn() alone) and "e2e" (build_fn() + collect_fn()) elapsed time from
 # the SAME call, so this costs no extra GPU work versus timing only one of
 # the two (see the file-level comment). `after_each` runs after every timed
-# call (NOT counted in the timing) -- used to gpu_gc() between iterations at
-# the larger data tiers so GPU memory doesn't accumulate across repeats.
+# call (NOT counted in the timing) -- used to gc() between iterations at the
+# larger data tiers so GPU memory doesn't accumulate across repeats. Plain gc(),
+# not gpu_gc(): under the default "async" resource gpu_gc() also trims the
+# pool, so every timed call would start by growing it again from the driver.
 bench_time_two_phase <- function(build_fn, collect_fn, max_iterations = 11L, after_each = NULL) {
   measure_once <- function() {
     t0 <- proc.time()[["elapsed"]]
@@ -559,7 +561,7 @@ for (size_idx in seq_along(sizes)) {
             build_fn = function() gpu_df |> dplyr::mutate(roll = !!expr),
             collect_fn = function(obj) collect(obj),
             max_iterations = max_iter,
-            after_each = function() gpu_gc(verbose = FALSE, aggressive = FALSE)
+            after_each = function() gc(verbose = FALSE)
           ),
           error = function(e) {
             cat(sprintf(

@@ -169,6 +169,8 @@ Benchmarks on 25 million rows (synthetic taxi data, median of 10 iterations):
 
 **Hardware**: Intel Core i9-12900K (16 cores), NVIDIA RTX 5070 (12 GB VRAM)
 
+cuplyr allocates GPU memory through RMM's async resource by default. Like an RMM pool it caches freed memory for reuse, and unlike the pool `gpu_gc()` can return that memory to the device. `vignette("memory", package = "cuplyr")` compares async, the pool and plain `cudaMalloc`, with timings and held memory measured on an RTX 5070.
+
 ## Acknowledgments
 
 This project is built on [RAPIDS cuDF](https://github.com/rapidsai/cudf) by NVIDIA and the RAPIDS AI team.

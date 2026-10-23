@@ -7,7 +7,7 @@
 // (rmm's default cuda_memory_resource). cuplyr allocates many short-lived
 // columns per call, so .onLoad installs either
 //   "pool":  pool_memory_resource over a cuplyr-owned cuda_memory_resource, or
-//   "async": cuda_async_memory_resource (cudaMallocAsync's own pool),
+//   "async": cuda_async_memory_resource (cudaMallocAsync's own pool; the default),
 // wrapped in a statistics_resource_adaptor so `used` (bytes currently
 // allocated from it) is exact and cheap to read.
 //
@@ -37,8 +37,25 @@
 // of every column a copy created live in that copy's code and data, so a
 // dyn.unload() (pkgload::unload()) must not unmap it.
 //
-// The switches (enabled, kind, initial size) are read by the first load that
-// creates the resource; a later load reuses whatever exists.
+// The switches (enabled, kind, initial size, release threshold) are read by the
+// first load that creates the resource; a later load reuses whatever exists
+// (.onLoad asks gpu_mr_exists() first and then doesn't read them at all).
+//
+// Giving memory back (F65). RMM's pool never shrinks, so under "pool" memory it
+// grew to is held until the process exits. The async resource's cudaMemPool_t
+// has a release threshold, and by default cuplyr leaves it at "the whole card"
+// (nullopt: RMM then uses the device total), so the async pool caches freed
+// memory for reuse exactly like the pool does, at every data size.
+// gpu_mr_release() (gpu_gc()) syncs and trims the pool to zero on demand.
+//
+// An opt-in threshold exists too (cuplyr.release_threshold). CUDA applies it to
+// the pool's whole reservation, memory in use included: at every synchronisation
+// (which libcudf also does inside many calls, not only at collect()) unused
+// memory is released until the reservation is at or below the threshold. A
+// session that holds more than the threshold therefore keeps nothing cached and
+// every allocation goes to the driver, at about plain-cudaMalloc speed. A
+// threshold of 0 must be an explicit optional(0), since nullopt means "the whole
+// card". The initial size only primes the pool (allocate and free that much once).
 
 #include <rmm/cuda_device.hpp>
 #include <rmm/mr/cuda_async_memory_resource.hpp>
@@ -53,6 +70,7 @@
 #include <link.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <exception>
 #include <memory>
@@ -135,7 +153,10 @@ Installed* find_in_other_copies() {
   return nullptr;
 }
 
-Installed* create(const std::string& kind, double initial) {
+// `release_threshold`: NaN or negative = none (nullopt: the device total, so no
+// automatic release); otherwise the async pool's release threshold in bytes, 0
+// included. Ignored under "pool".
+Installed* create(const std::string& kind, double initial, double release_threshold) {
   if (kind != "pool" && kind != "async") {
     Rcpp::stop("gpu_mr_install(): unknown resource kind '%s'", kind.c_str());
   }
@@ -155,10 +176,15 @@ Installed* create(const std::string& kind, double initial) {
       inst->pool = std::make_unique<pool_mr>(inst->cuda.get(), init);
       top = inst->pool.get();
     } else {
-      // No release threshold is passed, so RMM's default (the device total)
-      // applies: freed memory stays reserved for reuse.
+      // The initial size only primes the pool (0: no priming). The release
+      // threshold is nullopt (RMM: the device total, no automatic release)
+      // unless one was configured; a configured 0 stays an explicit optional(0).
+      std::optional<std::size_t> threshold;
+      if (!std::isnan(release_threshold) && release_threshold >= 0) {
+        threshold = static_cast<std::size_t>(std::min(release_threshold, 9e18));
+      }
       inst->async = std::make_unique<rmm::mr::cuda_async_memory_resource>(
-          init > 0 ? std::optional<std::size_t>(init) : std::nullopt);
+          init > 0 ? std::optional<std::size_t>(init) : std::nullopt, threshold);
       top = inst->async.get();
     }
     inst->stats = std::make_unique<stats_mr>(top);
@@ -178,15 +204,18 @@ extern "C" __attribute__((visibility("default"))) void* cuplyr_process_mr_v2() {
 // Make the process's resource current for this copy of the library, creating
 // it first when none exists and `enabled` (see the file comment): `kind` is
 // "pool" or "async", `initial` the initial size in bytes (clamped to 90% of the
-// device's free memory). Returns the kind of the resource now current
-// ("pool"/"async"), or "cuda" when there is none.
+// device's free memory), `release_threshold` the async pool's release threshold
+// in bytes (NA or negative: none, the default; 0 is a real threshold; ignored
+// under "pool"). Returns the kind of the resource now current ("pool"/"async"),
+// or "cuda" when there is none.
 // [[Rcpp::export]]
-std::string gpu_mr_install(bool enabled, std::string kind, double initial) {
+std::string gpu_mr_install(bool enabled, std::string kind, double initial,
+                           double release_threshold) {
   pin_this_library();
   if (g_inst == nullptr) {
     Installed* found = find_in_other_copies();
     if (found == nullptr && !enabled) return "cuda";
-    g_inst = found != nullptr ? found : create(kind, initial);
+    g_inst = found != nullptr ? found : create(kind, initial, release_threshold);
     rmm::mr::set_current_device_resource(g_inst->stats.get());
   }
   return g_inst->kind;
@@ -213,6 +242,46 @@ Rcpp::NumericVector gpu_mr_state() {
   }
   double used = static_cast<double>(g_inst->stats->get_bytes_counter().value);
   return Rcpp::NumericVector::create(held, used);
+}
+
+// Give back the memory the async pool holds unused: wait for outstanding work
+// (memory backing in-flight async frees is released only once they complete),
+// then trim the pool to zero. No-op under "pool" (RMM's pool can't shrink) and
+// when there is no resource.
+// [[Rcpp::export]]
+void gpu_mr_release() {
+  if (g_inst == nullptr || !g_inst->async) return;
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    Rcpp::stop("CUDA error (gpu_mr_release): %s", cudaGetErrorString(err));
+  }
+  err = cudaMemPoolTrimTo(g_inst->async->pool_handle(), 0);
+  if (err != cudaSuccess) {
+    Rcpp::stop("CUDA error (gpu_mr_release): %s", cudaGetErrorString(err));
+  }
+}
+
+// The async pool's current release threshold in bytes
+// (cudaMemPoolAttrReleaseThreshold). NA when this copy of the library has no
+// async resource current (the resource is "pool", there is none, or this copy
+// hasn't run gpu_mr_install() yet) or the attribute can't be read.
+// [[Rcpp::export]]
+double gpu_mr_release_threshold() {
+  if (g_inst == nullptr || !g_inst->async) return NA_REAL;
+  std::uint64_t threshold = 0;
+  if (cudaMemPoolGetAttribute(g_inst->async->pool_handle(), cudaMemPoolAttrReleaseThreshold,
+                              &threshold) != cudaSuccess) {
+    return NA_REAL;
+  }
+  return static_cast<double>(threshold);
+}
+
+// Whether the process already has its resource: this copy uses one, or another
+// loaded copy does (see the file comment). gpu_mr_install() then reuses it and
+// ignores its arguments, so .onLoad doesn't read the switches.
+// [[Rcpp::export]]
+bool gpu_mr_exists() {
+  return g_inst != nullptr || find_in_other_copies() != nullptr;
 }
 
 // The kind of the resource current for this copy ("pool"/"async"), or "cuda"

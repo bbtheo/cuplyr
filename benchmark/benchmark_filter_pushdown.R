@@ -22,13 +22,19 @@ run_case <- function(label, expr_fn, n_iter = 3) {
   mem_deltas <- numeric(n_iter)
 
   for (i in seq_len(n_iter)) {
-    gpu_gc()
+    # Plain gc(), not gpu_gc(): under the default "async" resource gpu_gc()
+    # also trims the pool, so every timed call would start by regrowing it.
+    gc(verbose = FALSE)
     before <- gpu_memory_state()
     times[i] <- system.time({
       result <- expr_fn()
     })["elapsed"]
     after <- gpu_memory_state()
-    mem_deltas[i] <- after$used_bytes - before$used_bytes
+    # Allocator level (bytes allocated from cuplyr's memory resource) when one
+    # is installed: the device-level used_bytes doesn't move while the
+    # resource serves the call from memory it already holds.
+    used <- if (is.na(before$pool_used_bytes)) "used_bytes" else "pool_used_bytes"
+    mem_deltas[i] <- after[[used]] - before[[used]]
     rm(result)
   }
 
@@ -36,7 +42,7 @@ run_case <- function(label, expr_fn, n_iter = 3) {
               median(times) * 1000,
               min(times) * 1000,
               max(times) * 1000))
-  cat(sprintf("  median GPU used delta: %.2f GB (range: %.2f - %.2f)\n",
+  cat(sprintf("  median GPU allocated delta: %.2f GB (range: %.2f - %.2f)\n",
               median(mem_deltas) / 1e9,
               min(mem_deltas) / 1e9,
               max(mem_deltas) / 1e9))

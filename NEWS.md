@@ -1,5 +1,37 @@
 # cuplyr (development version)
 
+## async memory resource by default (F65)
+
+* The default memory resource is now `"async"` (RMM's `cuda_async_memory_resource`,
+  CUDA's stream-ordered allocator) instead of the RMM pool. By default it caches
+  freed memory for reuse like the pool does and ran at the same speed in the
+  measurements of `vignette("memory", package = "cuplyr")`, but unlike the pool
+  it can give memory back to the device: `gpu_gc()` returns everything the pool
+  holds unused. The pool kept its high-water mark until R exited, which starved
+  other processes on the card.
+* `cuplyr.release_threshold` / `CUPLYR_RELEASE_THRESHOLD` (bytes, async only,
+  unset by default) makes CUDA return unused memory by itself at the next
+  synchronisation while the pool's whole reservation, tables in use included,
+  is above the threshold; `0` keeps nothing. The price is speed: a session that
+  holds more than the threshold allocates from the driver again, at about plain
+  `cudaMalloc` speed.
+* To get the pool back: `options(cuplyr.memory_resource = "pool")` or the
+  environment variable `CUPLYR_MEMORY_RESOURCE=pool`, set before loading cuplyr
+  (one resource per R process). `cuplyr.memory_pool = FALSE` /
+  `CUPLYR_MEMORY_POOL=0`, or `cuplyr.memory_resource = "cuda"` (alias `"none"`),
+  still means no resource (plain `cudaMalloc`).
+* An unknown value of `cuplyr.memory_resource` / `CUPLYR_MEMORY_RESOURCE` now
+  warns, naming the option or variable and the value, and uses async (it used to
+  mean the pool silently); with `cuplyr.memory_pool = FALSE` it warns that the
+  value is ignored. A zero-length or `NA` `cuplyr.memory_pool` option counts as
+  unset instead of breaking the load. Where `cudaMallocAsync` is unsupported,
+  the default falls back to the pool with a warning.
+* `cuplyr.pool_initial` only sets how much the resource reserves at load, under
+  both kinds (`0` reserves nothing); it is not a limit. `gpu_gc()` gains
+  `released_bytes`, the drop in `pool_bytes` across the call (0 under the pool,
+  `NA` without a resource), and no longer fails on a CUDA error while returning
+  memory (it warns).
+
 ## roll_median() is exact by default (F66)
 
 * `roll_median()` now uses the built-in exact engine by default, which

@@ -288,47 +288,103 @@ gpu_size_comparison <- function(x) {
 #'   \item{free_bytes}{Free GPU memory in bytes}
 #'   \item{used_bytes}{Used GPU memory in bytes: device level, `total - free`,
 #'     for every process on the card. It includes everything the memory resource
-#'     reserved, so it does not fall when tables are freed.}
+#'     holds from the device, so freeing a table does not lower it while the
+#'     resource keeps the memory for reuse (always under `"pool"`; under
+#'     `"async"` until [gpu_gc()] or an automatic release hands it back, see
+#'     below). Use `pool_used_bytes` for what cuplyr's tables occupy.}
 #'   \item{total_gb}{Total GPU memory in gigabytes}
 #'   \item{free_gb}{Free GPU memory in gigabytes}
 #'   \item{used_gb}{Used GPU memory in gigabytes}
-#'   \item{resource}{`"pool"`, `"async"` or `"cuda"`: the RMM memory resource
-#'     cuplyr installed at load time (see below). `"cuda"` means none: every
-#'     allocation is a plain `cudaMalloc`.}
-#'   \item{pool_bytes}{Bytes the resource currently holds from the device (the
-#'     pool's size). `NA` when `resource` is `"cuda"`.}
+#'   \item{resource}{`"async"` (the default), `"pool"` or `"cuda"`: the RMM
+#'     memory resource cuplyr installed at load time (see below). `"cuda"` means
+#'     none: every allocation is a plain `cudaMalloc`.}
+#'   \item{pool_bytes}{Bytes the resource currently holds from the device. Under
+#'     `"pool"` that is the pool's size; under `"async"` it is the async pool's
+#'     reserved memory (`cudaMemPoolAttrReservedMemCurrent`), which shrinks when
+#'     memory is returned. `NA` when `resource` is `"cuda"`.}
 #'   \item{pool_used_bytes}{Bytes currently allocated from the resource to live
 #'     columns and scratch space: what cuplyr is using, as opposed to what it
 #'     reserved. It rises when a table is created and falls when the table is
-#'     garbage collected. `NA` when `resource` is `"cuda"`.}
+#'     garbage collected. Exact under both resources. `NA` when `resource` is
+#'     `"cuda"`.}
 #' }
 #'
 #' @section The memory resource:
 #' Loading cuplyr installs an RMM memory resource as the current device
 #' resource, so the many short-lived columns a pipeline allocates are carved out
 #' of memory reserved once instead of going through `cudaMalloc`/`cudaFree`
-#' each time. Memory the resource holds is not returned to the device until
-#' the R session ends, so the card's free memory (`free_bytes`) stays lower than
-#' the data you hold; use `pool_used_bytes` for the latter.
+#' each time. There are three resources:
+#' \describe{
+#'   \item{`"async"` (default)}{RMM's `cuda_async_memory_resource`, CUDA's
+#'     stream-ordered allocator (`cudaMallocAsync`). By default it keeps freed
+#'     memory cached for reuse, as the pool does, and runs at the same speed
+#'     (measured, see the vignette). Unlike the pool it can give the memory back:
+#'     [gpu_gc()] synchronises the device and returns everything the pool holds
+#'     unused, so other processes on the card can use it. With the opt-in
+#'     `cuplyr.release_threshold` (below) CUDA also returns unused memory by
+#'     itself, at the next synchronisation, while the pool's whole reservation
+#'     is above that threshold. The reservation counts tables in use, so a
+#'     session that holds more than the threshold keeps nothing cached and
+#'     allocates from the driver again, at about plain `cudaMalloc` speed.}
+#'   \item{`"pool"`}{RMM's `pool_memory_resource`. Same speed as async by
+#'     default, but it keeps the high-water mark of its size until the R session
+#'     ends, so the card's free memory (`free_bytes`) stays lower than the data
+#'     you hold; use `pool_used_bytes` for the latter. [gpu_gc()] cannot shrink
+#'     it (`released_bytes` is 0).}
+#'   \item{`"cuda"`}{No resource (`cuplyr.memory_pool = FALSE`, or
+#'     `cuplyr.memory_resource = "cuda"`): plain `cudaMalloc`/`cudaFree` for
+#'     every allocation. Slowest per allocation; device free memory is always
+#'     the truth, and `pool_bytes` and `pool_used_bytes` are `NA`.}
+#' }
+#' Synchronisations happen at `collect()`, `print()` and [gpu_sync()], and also
+#' inside many libcudf calls (for example whenever one copies a size or count
+#' back to the host), so an automatic release can happen in the middle of a
+#' pipeline. See `vignette("memory", package = "cuplyr")` for measurements and
+#' advice on choosing.
 #'
 #' The resource is chosen when the package loads, from options (which win) or
 #' environment variables. There is one resource per R process: the switches are
 #' read by the first load that creates it, and loading the package again in the
 #' same session (`pkgload::load_all()`, or a reload after unloading) reuses that
-#' resource, whatever the switches say then, and reports it. Restart R to
+#' resource, whatever the switches say then, and reports it; such a load does
+#' not read the switches, so it does not warn about them either. Restart R to
 #' change them.
+#'
+#' Where the GPU or driver does not support `cudaMallocAsync`, the async
+#' resource cannot be created. If async was the default (nothing chosen, or an
+#' unknown kind), cuplyr then installs `"pool"` and gives a warning saying so.
+#' If `"async"` was asked for by name, the warning says the resource could not
+#' be installed and nothing is (`resource` is `"cuda"`).
 #' \describe{
 #'   \item{`cuplyr.memory_pool` / `CUPLYR_MEMORY_POOL`}{`FALSE`, or `"0"`,
 #'     `"false"`, `"no"`, `"off"`, installs nothing (`resource` is `"cuda"`,
 #'     the behaviour before the pool existed) unless an earlier load in the
-#'     session already created the resource. Anything else, or unset, installs
-#'     the resource.}
-#'   \item{`cuplyr.pool_initial` / `CUPLYR_POOL_INITIAL`}{Initial size in bytes.
-#'     Default: a quarter of the free device memory, at most 1 GiB. A larger
-#'     request is clamped to 90 percent of the free memory. The pool grows by
-#'     itself when needed.}
-#'   \item{`cuplyr.memory_resource` / `CUPLYR_MEMORY_RESOURCE`}{`"pool"` or
-#'     `"async"` to pick the kind of resource.}
+#'     session already created the resource. Anything else, or unset (a
+#'     zero-length or `NA` option counts as unset), installs the resource.}
+#'   \item{`cuplyr.memory_resource` / `CUPLYR_MEMORY_RESOURCE`}{`"async"`
+#'     (default) or `"pool"` to pick the kind of resource; `"cuda"` or `"none"`
+#'     install nothing, like `cuplyr.memory_pool = FALSE`. Case and surrounding
+#'     blanks do not matter. Unset or empty means async. Any other value gives a
+#'     warning naming the option or variable and the value as typed, and async is
+#'     used; when `cuplyr.memory_pool` switches the resource off, the warning
+#'     says the value is ignored and no resource (`"cuda"`) is used.}
+#'   \item{`cuplyr.pool_initial` / `CUPLYR_POOL_INITIAL`}{How much the resource
+#'     reserves at load, in bytes, so the first calls need no driver
+#'     allocation. Default: a quarter of the free device memory, at most 1 GiB.
+#'     A larger request is clamped to 90 percent of the free memory. `0`
+#'     reserves nothing up front. Both `"pool"` and `"async"` grow by
+#'     themselves when needed; this is not a limit and not a release threshold.}
+#'   \item{`cuplyr.release_threshold` / `CUPLYR_RELEASE_THRESHOLD`}{Async only,
+#'     opt-in, in bytes; unset (the default) means no automatic release. It is
+#'     CUDA's release threshold for the async pool: at a synchronisation CUDA
+#'     returns unused memory to the device until the pool's whole reservation,
+#'     memory in use included, is at or below it. `0` keeps nothing, the "share
+#'     the card" setting. The price is speed: while the session holds more than
+#'     the threshold, every allocation goes to the driver. A zero-length, `NA`
+#'     or empty option counts as unset (the environment variable decides). Any
+#'     other value that is not a non-negative number gives a warning naming the
+#'     option or variable, and means unset. Ignored under `"pool"` and
+#'     `"cuda"`.}
 #' }
 #'
 #' @seealso
@@ -413,6 +469,8 @@ memory_resource_flag_off <- function(x) {
 
 memory_resource_config <- function() {
   opt <- getOption("cuplyr.memory_pool")
+  # A zero-length or NA option counts as unset: the env var decides.
+  if (length(opt) == 0 || is.na(opt[[1]])) opt <- NULL
   enabled <- if (!is.null(opt)) {
     !(isFALSE(opt) || memory_resource_flag_off(opt[[1]]))
   } else {
@@ -430,28 +488,122 @@ memory_resource_config <- function() {
     initial <- min(2^30, 0.25 * free)
   }
 
+  # Default "async"; "cuda"/"none" mean no resource (what gpu_memory_state()
+  # reports for none); an unknown kind warns, naming where it came from and
+  # quoting the value as typed. `explicit` is TRUE when the kind was asked for
+  # by name ("async" or "pool"): only a default async falls back to the pool
+  # when it can't be created (memory_resource_install()).
   kind <- getOption("cuplyr.memory_resource")
-  if (is.null(kind)) kind <- Sys.getenv("CUPLYR_MEMORY_RESOURCE", "")
-  kind <- tolower(trimws(as.character(kind)[1]))
-  if (!kind %in% c("pool", "async")) kind <- "pool"
+  source <- "cuplyr.memory_resource"
+  if (length(kind) == 0 || is.na(kind[[1]])) {
+    kind <- Sys.getenv("CUPLYR_MEMORY_RESOURCE", "")
+    source <- "CUPLYR_MEMORY_RESOURCE"
+  }
+  typed <- as.character(kind)[1]
+  kind <- tolower(trimws(typed))
+  explicit <- kind %in% c("pool", "async")
+  if (!nzchar(kind)) {
+    kind <- "async"
+  } else if (kind %in% c("cuda", "none")) {
+    enabled <- FALSE
+    kind <- "async"
+  } else if (!explicit) {
+    valid <- "Valid values are \"async\", \"pool\" and \"cuda\" (or \"none\", no resource)."
+    if (enabled) {
+      warning(sprintf("Unknown memory resource '%s' in %s; using \"async\". %s",
+                      typed, source, valid), call. = FALSE)
+    } else {
+      # The off switch decides: no resource, whatever the kind says.
+      warning(sprintf(paste0(
+        "Unknown memory resource '%s' in %s, ignored: cuplyr.memory_pool / ",
+        "CUPLYR_MEMORY_POOL switches the resource off, so none is used (\"cuda\"). %s"),
+        typed, source, valid), call. = FALSE)
+    }
+    kind <- "async"
+  }
 
-  list(enabled = enabled, initial = initial, kind = kind)
+  list(enabled = enabled, initial = initial, kind = kind, explicit = explicit,
+       release_threshold = memory_resource_release_threshold())
+}
+
+# The opt-in release threshold in bytes (async only): cuplyr.release_threshold,
+# else CUPLYR_RELEASE_THRESHOLD; NA_real_ when unset (the default: no automatic
+# release). A zero-length, NA or "" option counts as unset (the env var
+# decides), as for the other switches. Any other value that is not a
+# non-negative number warns, naming where it came from, and means unset.
+memory_resource_release_threshold <- function() {
+  value <- getOption("cuplyr.release_threshold")
+  source <- "cuplyr.release_threshold"
+  if (length(value) == 0 ||
+      (is.atomic(value) && (is.na(value[[1]]) ||
+                            (is.character(value) && !nzchar(trimws(value[[1]])))))) {
+    value <- Sys.getenv("CUPLYR_RELEASE_THRESHOLD", "")
+    source <- "CUPLYR_RELEASE_THRESHOLD"
+    if (!nzchar(trimws(value))) return(NA_real_)
+  }
+  typed <- as.character(value)[1]
+  num <- if (is.numeric(value) || is.character(value)) {
+    suppressWarnings(as.numeric(value[[1]]))
+  } else {
+    NA_real_
+  }
+  if (is.na(num) || num < 0) {
+    warning(sprintf(
+      "Invalid release threshold '%s' in %s (expected a number of bytes, 0 or more); no automatic release.",
+      typed, source), call. = FALSE)
+    return(NA_real_)
+  }
+  num
 }
 
 # Make the process's resource current for this load, creating it when this is
 # the first load with the switch on (src/memory_resource.cpp). A resource an
 # earlier load created is reused whatever the switches say now: it can't be
-# freed while anything may point into it, and it is never stacked.
+# freed while anything may point into it, and it is never stacked. The switches
+# are then not read at all, so they don't warn either.
+#
+# When the default async resource can't be created (cudaMallocAsync is
+# unsupported: RMM's constructor throws), the pool is used instead, with a
+# warning. An async that was asked for by name, a pool that fails, or an error
+# before anything was created (say an option memory_resource_config() can't
+# read) leaves plain cudaMalloc ("cuda"), with a warning naming every error.
 memory_resource_install <- function() {
-  cfg <- memory_resource_config()
-  tryCatch(
-    invisible(gpu_mr_install(cfg$enabled, cfg$kind, cfg$initial)),
-    error = function(e) {
-      warning("cuplyr could not install its memory resource, using plain cudaMalloc: ",
-              conditionMessage(e), call. = FALSE)
-      invisible("cuda")
+  called <- FALSE
+  install <- function(enabled, kind, initial = 0, release_threshold = NA_real_) {
+    called <<- TRUE
+    gpu_mr_install(enabled, kind, initial, release_threshold)
+  }
+  fail <- function(...) {
+    # gpu_mr_install() pins this copy of the library; if it was never called,
+    # call it switched off, which creates nothing (it reuses a resource only if
+    # one exists, else returns "cuda") but still pins.
+    kind <- if (called) "cuda" else tryCatch(install(FALSE, "async"), error = function(e) "cuda")
+    warning("cuplyr: no memory resource, using plain cudaMalloc (",
+            paste(vapply(list(...), conditionMessage, ""), collapse = "; "), ").",
+            call. = FALSE)
+    kind
+  }
+  kind <- tryCatch({
+    if (gpu_mr_exists()) {
+      # Reuse only: with `enabled = FALSE` the other arguments are ignored.
+      install(FALSE, "async")
+    } else {
+      cfg <- memory_resource_config()
+      create <- function(kind) {
+        install(cfg$enabled, kind, cfg$initial, cfg$release_threshold)
+      }
+      tryCatch(create(cfg$kind), error = function(e) {
+        if (!identical(cfg$kind, "async") || isTRUE(cfg$explicit)) return(fail(e))
+        tryCatch({
+          kind <- create("pool")
+          warning("cuplyr: default \"async\" unavailable, using \"pool\" instead (",
+                  conditionMessage(e), ").", call. = FALSE)
+          kind
+        }, error = function(e2) fail(e, e2))
+      })
     }
-  )
+  }, error = fail)
+  invisible(kind)
 }
 
 #' Wait for the GPU to finish
@@ -496,7 +648,11 @@ gpu_sync <- function() {
 #'   `pool_used_bytes` (allocator level) when cuplyr's memory resource is
 #'   installed, since the device-level free memory does not move while the
 #'   resource keeps its pages; with `resource == "cuda"` it is the rise in
-#'   device free memory.
+#'   device free memory. `released_bytes` is what the resource gave back to the
+#'   device: the drop in `pool_bytes` across the call. Under `"async"` the call
+#'   ends by trimming the async pool, so it is the memory the pool held unused
+#'   (0 or more); under `"pool"` it is 0 (RMM's pool never shrinks); under
+#'   `"cuda"` it is `NA`.
 #'
 #' @details
 #' GPU memory is automatically freed when `tbl_gpu` objects are garbage
@@ -515,13 +671,25 @@ gpu_sync <- function() {
 #' `gc()` and `gpu_gc(aggressive = FALSE)` itself and retries that step once;
 #' a second failure raises an error of class `cuplyr_error_gpu_oom`.
 #'
+#' Under the default `"async"` resource, this function also synchronises the
+#' device and returns all unused memory of cuplyr's async pool to the device, so
+#' other processes can use it (see [gpu_memory_state()] and
+#' `vignette("memory", package = "cuplyr")`). The pool is then smaller than the
+#' session's recent peak, so the next calls grow it again from the driver; that
+#' costs the first call after `gpu_gc()` a few percent. If the device is in a
+#' CUDA error state, the return step cannot run: `gpu_gc()` then gives a warning
+#' instead of an error and leaves the pool as it is, so it stays safe in cleanup
+#' code.
+#'
 #' Call this function:
 #' \itemize{
-#'   \item Between benchmark iterations
-#'   \item After removing large GPU objects with `rm()`
+#'   \item After removing large GPU objects with `rm()`, when other processes
+#'     need the memory (under `"async"` it returns what the pool holds unused)
 #'   \item When you see out-of-memory errors
 #'   \item Before allocating large new GPU tables
 #' }
+#' It is not meant for the loop of a benchmark: under `"async"` the trim makes
+#' the next call grow the pool again.
 #'
 #' @seealso
 #' \code{\link{gpu_memory_state}} for checking current memory usage
@@ -551,6 +719,17 @@ gpu_gc <- function(verbose = FALSE, aggressive = TRUE) {
     gc(verbose = FALSE, full = TRUE)
   }
 
+  # Async: hand back everything the pool holds unused (no-op otherwise). A CUDA
+  # error here (sticky device error) must not make gpu_gc() fail: it also runs in
+  # the OOM retry and in cleanup code.
+  tryCatch(
+    gpu_mr_release(),
+    error = function(e) {
+      warning("gpu_gc() could not return memory to the device: ", conditionMessage(e),
+              call. = FALSE)
+    }
+  )
+
   after <- gpu_memory_state()
 
   # Under a memory resource the device keeps the pages it reserved, so the
@@ -563,7 +742,15 @@ gpu_gc <- function(verbose = FALSE, aggressive = TRUE) {
     after$free_bytes - before$free_bytes
   }
   freed_gb <- freed_bytes / 1e9
-  level <- if (pooled) " (allocator level; the pool keeps the pages)" else ""
+  # What the resource gave back to the device: the drop in what it holds.
+  released_bytes <- if (pooled) before$pool_bytes - after$pool_bytes else NA_real_
+  level <- if (!pooled) {
+    ""
+  } else if (identical(after$resource, "async")) {
+    " (allocator level)"
+  } else {
+    " (allocator level; the pool keeps the pages)"
+  }
 
   if (verbose && !is.na(freed_bytes)) {
     if (freed_gb >= 0.01) {
@@ -573,13 +760,17 @@ gpu_gc <- function(verbose = FALSE, aggressive = TRUE) {
     } else {
       message("No GPU memory freed", level)
     }
+    if (pooled && identical(after$resource, "async")) {
+      message(sprintf("Returned to the device: %.2f GB", released_bytes / 1e9))
+    }
   }
 
   invisible(list(
     before = before,
     after = after,
     freed_bytes = freed_bytes,
-    freed_gb = freed_gb
+    freed_gb = freed_gb,
+    released_bytes = released_bytes
   ))
 }
 
