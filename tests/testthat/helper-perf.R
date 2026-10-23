@@ -26,6 +26,17 @@
 #        with expect_lt(current, baseline * max_ratio). No baseline for
 #        `id` yet -> skip with a clear message rather than fail, since a
 #        fresh checkout has no baseline file at all.
+#      - CUPLYR_PERF_OBSERVATIONS=<tsv> (set by tools/merge-gate and tools/perf) additionally
+#        appends one row per benchmark: id, calibration, current_s, raw_scale,
+#        scale, observed_s (= current_s / scale, the calibrated median the
+#        1.5x check compares), iterations, reps. A benchmark with no baseline
+#        entry is timed and recorded in that mode, then still skipped.
+#
+#    The baseline is adaptive: after a fully passing gate, tools/merge-queue
+#    runs tools/perf-ratchet (rules in tools/perf-ratchet-lib.R), which lowers
+#    an entry to the slower of its last two observations when that is below
+#    the stored value, and adds new ids. Raising an entry or a full re-record
+#    is Theo's (tools/perf-baseline-set, the RECORD mode above).
 #
 # 3. Baseline storage: a single JSON file (default
 #    scratchpad/perf_baseline.json, overridable via CUPLYR_PERF_BASELINE)
@@ -37,7 +48,8 @@
 #    dev/pixi environment though not a formal package dependency); a small
 #    hand-rolled reader/writer is used otherwise. The hand-rolled version
 #    only needs to round-trip the flat structure this file itself writes
-#    (id -> list(median_s, recorded_at, commit, iterations)), not arbitrary
+#    (id -> list(median_s, recorded_at, commit, iterations); the ratchet adds
+#    last_observed_s, its observation from the previous passing gate), not arbitrary
 #    JSON, so it stays intentionally minimal.
 
 # =============================================================================
@@ -745,12 +757,45 @@ perf_threshold <- function(baseline_s, raw_scale, max_ratio = 1.5, context = NUL
 # Test-facing entry point
 # =============================================================================
 
+#' Where to append gate observations, NULL when not recording
+#'
+#' CUPLYR_PERF_OBSERVATIONS is set by tools/merge-gate; tools/perf-ratchet reads
+#' the file after a passing gate.
+#' @keywords internal
+perf_observations_path <- function() {
+  p <- Sys.getenv("CUPLYR_PERF_OBSERVATIONS", "")
+  if (nzchar(p)) p else NULL
+}
+
+#' Append one observation row (TSV, header written once, full precision)
+#'
+#' `observed_s` is `current_s / scale`, the calibrated median.
+#' @keywords internal
+perf_record_observation <- function(path, id, calibration, current_s, raw_scale, scale,
+                                    observed_s, iterations, reps) {
+  num <- function(x) formatC(as.numeric(x), digits = 17, format = "g")
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  header <- !file.exists(path) || file.size(path) == 0
+  lines <- paste(
+    c(id, calibration, num(current_s), num(raw_scale), num(scale), num(observed_s), as.integer(iterations), as.integer(reps)),
+    collapse = "\t"
+  )
+  if (header) {
+    lines <- c("id\tcalibration\tcurrent_s\traw_scale\tscale\tobserved_s\titerations\treps", lines)
+  }
+  cat(lines, file = path, sep = "\n", append = TRUE)
+  invisible(path)
+}
+
 #' Assert that a benchmark hasn't regressed beyond max_ratio vs its baseline
 #'
 #' Skipped entirely unless CUPLYR_PERF=1 (perf checks are opt-in: they are
 #' slow and machine-specific). With CUPLYR_PERF_RECORD=1, times `fn` and
 #' (re)writes the baseline entry for `id` (plus the shared `_calibration` and
 #' `_calibration_transfer` entries, see below) instead of checking anything.
+#' With CUPLYR_PERF_OBSERVATIONS=<tsv> (the merge gate), every timed benchmark
+#' also appends its calibrated median to that file, and an id with no baseline
+#' entry is timed and recorded (then skipped).
 #'
 #' Ambient robustness: GPU clock state (P8 idle vs boosted) and host/PCIe
 #' speed can shift every timing in a session with zero code change.
@@ -836,10 +881,14 @@ expect_no_perf_regression <- function(id, fn, max_ratio = 1.5, iterations = 5,
 
   baseline <- perf_read_baseline(baseline_path)
   entry <- baseline[[id]]
+  obs_path <- perf_observations_path()
 
-  if (is.null(entry) || is.null(entry$median_s)) {
+  # No baseline entry: skipped, as before. Only when the merge gate records
+  # observations is the benchmark also timed (below), so the ratchet can add it.
+  new_id <- is.null(entry) || is.null(entry$median_s)
+  if (new_id && is.null(obs_path)) {
     testthat::skip(sprintf(
-      "no baseline for '%s'; run with CUPLYR_PERF=1 CUPLYR_PERF_RECORD=1 to record one",
+      "no baseline for '%s'; the merge queue adds it at the next passing gate (or record one with CUPLYR_PERF=1 CUPLYR_PERF_RECORD=1, Theo's call)",
       id
     ))
   }
@@ -873,10 +922,26 @@ expect_no_perf_regression <- function(id, fn, max_ratio = 1.5, iterations = 5,
   )
   scale <- perf_effective_scale(raw_scale, context)
 
-  baseline_s <- as.numeric(entry$median_s)
   timed <- perf_time(fn, iterations = iterations)
   current_s <- as.numeric(timed)
   reps <- attr(timed, "reps")
+
+  # The calibrated median is what the 1.5x check compares, so it is the
+  # observation the merge-queue ratchet may store. Written before the
+  # expectation: a failing benchmark is recorded too (the gate then fails and
+  # nothing ratchets).
+  if (!is.null(obs_path)) {
+    perf_record_observation(obs_path, id, calibration, current_s, raw_scale, scale, current_s / scale, iterations, reps)
+  }
+
+  if (new_id) {
+    testthat::skip(sprintf(
+      "no baseline for '%s' yet: observation recorded for the merge-queue ratchet (%.4fs, %s)",
+      id, current_s / scale, obs_path
+    ))
+  }
+
+  baseline_s <- as.numeric(entry$median_s)
   raw_ratio <- current_s / baseline_s
   adjusted_ratio <- raw_ratio / scale
   threshold <- perf_threshold(baseline_s, raw_scale, max_ratio, context)

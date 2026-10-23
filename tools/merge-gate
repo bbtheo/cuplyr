@@ -7,6 +7,8 @@
 # Passes only if ALL of:
 #   1. the testthat suite has no fail/error
 #   2. the perf gate passes against the main checkout's perf_baseline.json
+#      (each benchmark's calibrated median goes to $out/perf_observations.tsv,
+#      which tools/merge-queue hands to tools/perf-ratchet after the merge)
 #   3. no dplyr conformance test that passes in conformance_baseline.tsv
 #      regresses (strict per-test check, tools/conformance-gate.R; the rules
 #      are conformance_gate_check() in tools/conformance-lib.R):
@@ -42,6 +44,7 @@ fi
 grep -E '^RESULT:' "$out/suite.log" >> "$summary" || true
 
 if CUPLYR_PERF_BASELINE="$CUPLYR_MAIN/scratchpad/perf_baseline.json" \
+   CUPLYR_PERF_OBSERVATIONS="$out/perf_observations.tsv" \
    Rscript tools/run-tests.R perf --out "$out/perf.tsv" > "$out/perf.log" 2>&1; then
   echo "perf: PASS" >> "$summary"
 else

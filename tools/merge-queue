@@ -10,6 +10,7 @@
 #
 # Exit codes: 0 merged | 1 gate failed | 2 setup error | 3 merge conflict
 #             4 protected tests modified after the PM's commit | 5 nothing to merge
+#             6 merged, but the perf ratchet failed (perf baseline unchanged)
 # Gate artifacts land in scratchpad/parity/gates/<name>-<timestamp>/.
 source "$(dirname "$0")/lib.sh"
 name="$1"
@@ -59,6 +60,14 @@ if tools/gpu-run --gate --label "gate:$name" -- tools/merge-gate "$out"; then
   git merge -q --ff-only "$candidate"
   # Ratchet the conformance baseline: new passes become required passes.
   cp "$out/conformance.tsv" "$CUPLYR_PARITY_DIR/conformance_baseline.tsv"
+  # Ratchet the perf baseline: lower entries confirmed by two passing gates,
+  # add new ids (rules in tools/perf-ratchet-lib.R). Runs the just-merged dev's copy.
+  if ! tools/perf-ratchet --baseline "$CUPLYR_MAIN/scratchpad/perf_baseline.json" \
+       --observations "$out/perf_observations.tsv" --summary "$out/summary.txt" \
+       --out "$out" --commit "$(git rev-parse --short HEAD)"; then
+    echo "MERGED $branch as $(git rev-parse --short HEAD) but the perf ratchet failed; dev is merged, perf baseline unchanged; artifacts: $out" >&2
+    exit 6
+  fi
   echo "MERGED $branch as $(git rev-parse --short HEAD); gate artifacts: $out"
 else
   git checkout -q dev

@@ -18,11 +18,17 @@ if grep -Eq "${pos}(Rscript|R)([[:space:]]|$)" <<<"$cmd"; then
   deny "raw R/Rscript bypasses the GPU lock. Use tools/r '<expr>' for ad-hoc R, or tools/test-file / tools/test / tools/document."
 fi
 if grep -q 'CUPLYR_PERF_RECORD' <<<"$cmd"; then
-  deny "re-recording the perf baseline is Theo's decision. Report the perf result instead."
+  deny "a full perf re-record is Theo's (after a hardware change). tools/merge-queue ratchets the baseline down after a passing gate. Report the perf result instead."
+fi
+if grep -Eq "${pos}(bash[[:space:]]+|sh[[:space:]]+)?[^[:space:]]*perf-baseline-set([[:space:]]|$)" <<<"$cmd"; then
+  deny "tools/perf-baseline-set raises perf baseline entries and is Theo's. tools/merge-queue ratchets both baselines after a passing gate. Report the perf result instead."
+fi
+if grep -q 'perf-ratchet' <<<"$cmd" && grep -q 'perf_baseline\.json' <<<"$cmd"; then
+  deny "tools/perf-ratchet on the real perf baseline is tools/merge-queue's job after a passing gate. Use a temp copy to test it."
 fi
 if grep -Eq 'perf_baseline\.json|conformance_baseline\.tsv' <<<"$cmd" &&
    grep -Eq '>|sed[[:space:]]+-i|(^|[[:space:]])(cp|mv|rm|tee|truncate|dd)[[:space:]]' <<<"$cmd"; then
-  deny "the perf and conformance baselines are not writable by agents (tools/merge-queue ratchets the conformance one)."
+  deny "the perf and conformance baselines are not writable by agents. tools/merge-queue ratchets both after a passing gate; raising a perf entry is Theo's (tools/perf-baseline-set)."
 fi
 if grep -Eq "${pos}git[[:space:]]+push" <<<"$cmd"; then
   deny "agents never push. Theo pushes."

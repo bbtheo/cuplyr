@@ -134,8 +134,12 @@ model/effort, the tester counts, the verdict, and the blocking finding titles.
 to fix it. But if from round 2 on, perf is the reviewer's ONLY blocking
 finding and the coder has shown the slowdown is inherent to doing the feature
 correctly, stop the rounds and report `STATUS: PERF_DECISION` (with the
-benchmark ids, ratios and the coder's explanation). Re-baselining is Theo's
-decision, not something to spend rounds on.
+benchmark ids, ratios and the coder's explanation). Raising a baseline is
+Theo's decision, not something to spend rounds on; the merge queue only ever
+lowers it. The baseline follows `dev`'s latest speed, so a branch that has not
+merged `dev` recently can fail perf on speedups it doesn't contain: on a perf
+failure, merge `dev` into the branch and re-run perf before treating the
+slowdown as the feature's.
 
 You may correct your own acceptance tests between rounds if the reviewer or
 coder shows one is wrong about dplyr's behavior. Verify the claim with

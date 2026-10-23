@@ -57,9 +57,14 @@ work around a block; if a rule stops legitimate work, say so in your report.
    (`@export`, `@importFrom`) and run `tools/document`.
 5. **Test-first bugfixes.** Add a failing test that reproduces the bug before
    the fix. If it passes unexpectedly, the bug isn't understood yet.
-6. **Baselines are Theo's.** Agents never write `scratchpad/perf_baseline.json`
-   or set `CUPLYR_PERF_RECORD`. `tools/merge-queue` ratchets the conformance
-   baseline; nothing else touches it.
+6. **Baselines move only through the merge queue or Theo.** Agents never
+   write `scratchpad/perf_baseline.json` or `conformance_baseline.tsv`, or
+   set `CUPLYR_PERF_RECORD`. After a fully passing gate, `tools/merge-queue`
+   ratchets both: the conformance baseline takes new passes, and the perf
+   baseline is lowered to the slower of an entry's last two observations
+   (new ids are added). Raising a perf entry (`tools/perf-baseline-set`) and a
+   full re-record are Theo's. A manual re-record takes no `merge.lock`:
+   don't run one while `tools/merge-queue` is running.
 7. **Git**: never push. `dev` only moves through `tools/merge-queue`. Commits
    keep Theo as author and end with the trailer
    `Co-Authored-By: Claude <noreply@anthropic.com>`.
@@ -76,6 +81,7 @@ work around a block; if a rule stops legitimate work, say so in your report.
 | `tools/document` | yes | Regenerate NAMESPACE, man/, Rcpp exports. |
 | `tools/test [--out f.tsv]` | yes | Full testthat suite. Tester agents only. |
 | `tools/perf [--out f.tsv]` | yes | Perf gate (`CUPLYR_PERF=1`, max ratio 1.5 vs the main checkout's baseline). Tester agents only. |
+| `tools/perf-baseline-set [--baseline f] <id>=<s>...` | merge.lock | Raise (or lower) perf baseline entries by hand. Theo only; `tools/merge-queue` runs `tools/perf-ratchet` itself. |
 | `tools/conformance [files] [--ids f.tsv] [--report f.md]` | yes | dplyr's own vendored test suite run against `tbl_gpu`. Tester agents only. |
 | `tools/wt-new <id> [attempt]` | no | Create feature worktree `../cuplr-wt/<id>` on branch `feat/<id>` off `dev`. PM only. |
 | `tools/merge-queue <name>` | gate | Squash-merge `feat/<name>` into `dev` behind the full gate. Orchestrator only. |

@@ -22,6 +22,13 @@
 #   CUPLYR_PERF=1 pixi run Rscript -e \
 #     'source("tools/ensure-optimized.R"); cuplyr_ensure_optimized_dll("."); pkgload::load_all(quiet=TRUE, debug=FALSE); testthat::test_file("tests/testthat/test-perf-regression.R")'
 #
+# The baseline is adaptive: after a fully passing merge gate, tools/merge-queue
+# lowers an entry to the slower of its last two observations and adds new
+# ids (tools/perf-ratchet; the gate records them via CUPLYR_PERF_OBSERVATIONS,
+# see helper-perf.R). Re-recording is Theo's, as is raising an entry
+# (tools/perf-baseline-set). A re-record takes no merge.lock, so don't start
+# one while tools/merge-queue is running: it could overwrite or lose a ratchet.
+#
 # The calibration probes are measured once per process, at the first
 # benchmark that uses each. The kernel probe reads ~0.7x its baseline in this
 # file's process and ~1.2x in a bare session or on a repeat measurement (see

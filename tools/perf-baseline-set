@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Set (raise or lower) perf baseline entries deliberately. Theo only: use it
+# when a slower result is accepted. The merge queue only ever lowers entries.
+#
+#   tools/perf-baseline-set [--baseline <json>] <id>=<seconds> ...
+#
+# Baseline: --baseline, else $CUPLYR_PERF_BASELINE, else the main checkout's
+# scratchpad/perf_baseline.json. _calibration entries cannot be set (re-record
+# instead). Takes merge.lock without waiting, so it never races a ratchet.
+source "$(dirname "$0")/lib.sh"
+exec 7>"$CUPLYR_LOCK_DIR/merge.lock"
+flock -n 7 || { echo "a merge is running (merge.lock is held); try again when it finishes" >&2; exit 1; }
+export CUPLYR_MAIN
+cuplyr_activate_env
+exec Rscript "$(dirname "$0")/perf-ratchet.R" set "$@"

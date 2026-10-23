@@ -28,6 +28,7 @@ dead for three hours after a reply turn.
 - `P/features/<NAME>.protected`, `<NAME>.commit.txt`: written by the PM, read by `tools/merge-queue`
 - `P/gates/<NAME>-<ts>/`: merge gate artifacts (`summary.txt` first)
 - `P/conformance_baseline.tsv`: the ratcheted per-test baseline
+- `/home/theo/cuplr/scratchpad/perf_baseline.json` (the main checkout's `scratchpad/`, not `P/`): the perf baseline; `tools/merge-queue` ratchets it after a passing gate (gate dir: `perf_observations.tsv`, `perf_ratchet.txt`)
 - `.git/cuplyr-locks/stats.tsv`: GPU lock log (start, label, worktree, wait_s, hold_s, exit)
 
 `NAME` is `<ID>` for attempt 1 and `<ID>-a2` for attempt 2.
@@ -54,7 +55,7 @@ dead for three hours after a reply turn.
      timer resolution; raw ratio 1.1x became 1.5x+ after a 0.72x calibration
      scale). Make the harness robust (larger workloads or more iterations for
      sub-50 ms benchmarks, finer timing, a sane bound on calibration scale) in
-     `helper-perf.R`/`test-perf-regression.R`. Re-recording the baseline is
+     `helper-perf.R`/`test-perf-regression.R`. Raising the baseline is
      Theo's: if the fix needs one, report it as PERF_DECISION. Done when 3
      consecutive full gate runs (suite + perf + conformance) pass on dev.
    - **F01 harness artifacts**: all category C items, one feature. These are
@@ -123,9 +124,9 @@ For each final report:
     attempts into the ledger, and push-notify Theo. Remove both attempts'
     worktrees (`git worktree remove`); keep the branches.
 - `STATUS: PERF_DECISION` -> set `WAITING_THEO` and push-notify Theo with the
-  benchmark ids and ratios. Theo either accepts the slowdown (he re-records
-  the baseline himself; then the feature goes to `QUEUED`) or sends it back
-  to the PM with guidance via SendMessage.
+  benchmark ids and ratios. Theo either accepts the slowdown (he raises the
+  entries with `tools/perf-baseline-set` or re-records; then the feature goes
+  to `QUEUED`) or sends it back to the PM with guidance via SendMessage.
 
 Record the PM's agent id in the ledger when you dispatch it, so you can
 SendMessage the same PM later.
@@ -138,10 +139,11 @@ minutes; you'll be notified when it exits). On exit:
 
 | Exit | Meaning | Action |
 |---|---|---|
-| 0 | merged | Status `MERGED`, record the dev SHA and the conformance delta (`conformance_new_passes.txt` count) and the new total. `git worktree remove` this feature's worktrees. |
+| 0 | merged | Status `MERGED`, record the dev SHA and the conformance delta (`conformance_new_passes.txt` count) and the new total, plus the `perf baseline:` lines from `summary.txt` (what the ratchet lowered or added). `git worktree remove` this feature's worktrees. |
 | 1 | gate failed | Read `summary.txt`. If **only perf** failed: `WAITING_THEO` + push-notify (perf decisions are Theo's). Otherwise SendMessage the PM with the summary and the paths of the failing logs; status `IN_PROGRESS`. Not a review round. |
 | 3 | merge conflict | SendMessage the PM to merge `dev` into its branch and re-verify; status `IN_PROGRESS`. |
 | 4 | protected tests changed | SendMessage the PM: the acceptance tests changed after its recorded SHA; it must re-commit and update `.protected` or revert. |
+| 6 | merged, perf ratchet failed | Dev is merged and the perf baseline is unchanged. Treat the feature as `MERGED` (as in exit 0), read the error in the merge output, and push-notify Theo. Don't re-run the merge. |
 | 2, 5 | setup / empty | Investigate yourself; fix the ledger or files; don't bother the PM unless it's theirs. |
 
 If SendMessage fails (the PM is gone), dispatch a new PM for the same
@@ -191,11 +193,12 @@ To dispatch:
 
 Push-notify Theo (load the PushNotification tool via ToolSearch) only for:
 backlog approval, `BLOCKED`, `WAITING_THEO` (perf), preconditions failing,
-and the final summary. Everything else goes in the ledger only.
+perf ratchet failed (merge-queue exit 6), and the final summary. Everything else goes in the ledger only.
 
 ## Never
 
 - write implementation code or tests, or edit inside a feature worktree
 - merge any way other than `tools/merge-queue`, push, or touch `master`
-- touch `perf_baseline.json` or `conformance_baseline.tsv`
+- touch `perf_baseline.json` or `conformance_baseline.tsv`, or run
+  `tools/perf-baseline-set` (the merge queue ratchets them; raising a perf entry is Theo's)
 - dispatch a third attempt of a feature: after two failed PMs it's Theo's call
