@@ -16,10 +16,14 @@
 # mutate_window_fallback() CPU path, which re-runs the user's ORIGINAL
 # `dplyr::mutate(tbl, roll_median(x, n))` call on the collected tibble --
 # that re-run needs `roll_median()` to be a real, correct, exported R
-# function, which is what this file provides for all six names (so
-# roll_mean()/etc. also work standalone, outside any tbl_gpu pipeline, and
-# so a hypothetical future cudf version that adds MEDIAN support only
-# needs a C++/registry change, never an R-level fallback rewrite).
+# function. F59 made that CPU path fast: roll_median() uses
+# data.table::frollmedian() when the installed data.table has it (1.18.4 or
+# later; it stays in Suggests; a NaN is nulled first, and the few windows
+# whose midpoint of two huge values overflows are recomputed exactly), else
+# the internal roll_median_sorted() (src/roll_median.cpp, O(n log n) whatever the width).
+# Both are identical() to the reference below. The other five functions keep
+# the plain R implementation: they are the semantics oracle that GPU results
+# are compared against (and the engine for standalone use on a vector).
 #
 # These are plain (non-generic) functions, like RcppRoll's/slider's own
 # rolling-window surface -- not S3 methods, since there is exactly one
@@ -47,15 +51,25 @@
 #'
 #' Inside `mutate()`/`filter()` on a `tbl_gpu`, `roll_mean()`/`roll_sum()`/
 #' `roll_min()`/`roll_max()`/`roll_sd()` (not `roll_median()`, see below)
-#' run GPU-natively via `cudf::rolling_window()`/`grouped_rolling_window()`
-#' -- these R implementations are the CPU semantics reference and the
-#' engine for standalone use and for `roll_median()`'s CPU fallback (cudf
-#' 25.12 has no MEDIAN rolling aggregation in this environment).
+#' run GPU-natively, in time that does not depend on the window width
+#' (segmented scans; cudf's own rolling kernel is kept for
+#' narrow windows, where it is faster, and for min/max of timestamps and
+#' logicals) -- these R implementations are the CPU semantics reference and
+#' the engine for standalone use. cudf 25.12 has
+#' no MEDIAN rolling aggregation, so `roll_median()` always runs on the CPU:
+#' `data.table::frollmedian()` when the installed data.table has it (1.18.4 or
+#' later), otherwise a built-in O(n log n) sliding median; both give exactly the result of
+#' `stats::median()` over each window.
 #' `data.table::frollmean(x, n)` (and its five siblings) work as
 #' equivalent GPU-native aliases inside `mutate()`/`filter()` too, as long
 #' as `align`/`fill`/`adaptive` are left at their defaults (`"right"`,
 #' `NA`, `FALSE`) -- any other value falls back / errors, matching this
 #' task's explicit "right-aligned only" scope.
+#'
+#' The internal option `cuplyr.roll_path` (else the environment variable
+#' `CUPLYR_ROLL_PATH`), one of `"auto"` (the default), `"scans"` or `"cudf"`,
+#' forces one of the two GPU paths. It exists for tests and benchmarks and
+#' changes speed, not results.
 #'
 #' @param x A numeric vector.
 #' @param n A single positive whole number: the window width.
@@ -97,14 +111,92 @@ roll_sd <- function(x, n, na.rm = FALSE) {
 #' @rdname roll
 #' @export
 roll_median <- function(x, n, na.rm = FALSE) {
-  roll_apply_generic(x, n, stats::median, na.rm)
+  roll_check_n(n)
+  n <- as.integer(n)
+  nx <- length(x)
+  if (nx == 0 || n > nx) {
+    return(rep(NA_real_, nx))
+  }
+  if (roll_has_frollmedian()) {
+    roll_median_dt(x, n, na.rm)
+  } else {
+    roll_median_sorted(x, n, na.rm)
+  }
 }
 
-# Shared CPU engine behind all six roll_*() functions above. Not
-# performance-tuned (O(n * w)): the GPU path is native for everything
-# except roll_median(), so this is only ever hot for roll_median() itself
-# (small oracle-test-sized data) or a user calling roll_*() directly on a
-# plain R vector outside any tbl_gpu pipeline.
+# The internal switch forcing gpu_window()'s rolling path (see ?roll): the
+# option cuplyr.roll_path, else the environment variable CUPLYR_ROLL_PATH,
+# read when a plan is lowered (like cuplyr.memory_pool in R/gpu-memory.R).
+roll_path_option <- function() {
+  opt <- getOption("cuplyr.roll_path")
+  if (is.null(opt)) opt <- Sys.getenv("CUPLYR_ROLL_PATH", "")
+  if (identical(opt, "")) {
+    return("auto")
+  }
+  if (!is.character(opt) || length(opt) != 1 || is.na(opt) ||
+      !opt %in% c("auto", "scans", "cudf")) {
+    stop("`cuplyr.roll_path` (or CUPLYR_ROLL_PATH) must be \"auto\", \"scans\" or ",
+         "\"cudf\", not ", paste(deparse(opt), collapse = " "), ".", call. = FALSE)
+  }
+  opt
+}
+
+# data.table gained frollmedian() in 1.18.0; 1.18.4 is the release its output
+# was checked identical() to the reference on, so older versions (and no
+# data.table at all) take the built-in engine. A function so tests can force
+# the fallback.
+roll_has_frollmedian <- function() {
+  requireNamespace("data.table", quietly = TRUE) &&
+    utils::packageVersion("data.table") >= "1.18.4"
+}
+
+# data.table::frollmedian() with F55's NaN rule (a NaN is missing, so it is
+# nulled first) -- identical() to roll_apply_generic(x, n, stats::median, na.rm)
+# except where the two middle values' midpoint overflows: data.table averages
+# in double ((1e308 + 1.5e308) / 2 = Inf), R's mean() in long double. Those
+# are exactly the positions that come back +-Inf from a window holding no
+# +-Inf input, so they are recomputed with the reference.
+roll_median_dt <- function(x, n, na.rm) {
+  x <- as.double(x)
+  x[is.nan(x)] <- NA_real_
+  out <- data.table::frollmedian(x, n, na.rm = na.rm)
+  bad <- which(is.infinite(out))
+  if (length(bad) > 0) {
+    ci <- c(0L, cumsum(is.infinite(x)))
+    bad <- bad[ci[bad + 1L] - ci[bad - n + 1L] == 0L]
+    for (i in bad) {
+      w <- x[(i - n + 1L):i]
+      if (na.rm) w <- w[!is.na(w)]
+      out[i] <- stats::median(w)
+    }
+  }
+  out
+}
+
+# data.table-free sliding median: O(n log n) setup, O(log n) per row (see
+# src/roll_median.cpp). Same semantics as roll_apply_generic(x, n,
+# stats::median, na.rm).
+roll_median_sorted <- function(x, n, na.rm = FALSE) {
+  roll_check_n(n)
+  n <- as.integer(n)
+  nx <- length(x)
+  if (nx == 0 || n > nx) {
+    return(rep(NA_real_, nx))
+  }
+  roll_median_cpp(as.double(x), n, isTRUE(na.rm))
+}
+
+roll_check_n <- function(n) {
+  if (!is.numeric(n) || length(n) != 1 || is.na(n) || n != trunc(n) || n < 1) {
+    stop("`n` must be a single positive whole number.", call. = FALSE)
+  }
+  invisible(n)
+}
+
+# Shared CPU engine behind roll_mean/sum/min/max/sd above. Not
+# performance-tuned (O(n * w)): the GPU path is native for these five and
+# roll_median() has its own fast CPU path, so this is only hot for a user
+# calling roll_mean()/etc. directly on a long plain R vector.
 #
 # @param x A numeric vector
 # @param n A single positive whole number (the window width)
@@ -114,9 +206,7 @@ roll_median <- function(x, n, na.rm = FALSE) {
 # @return A numeric vector the same length as `x`
 # @keywords internal
 roll_apply_generic <- function(x, n, stat_fn, na.rm = FALSE) {
-  if (!is.numeric(n) || length(n) != 1 || is.na(n) || n != trunc(n) || n < 1) {
-    stop("`n` must be a single positive whole number.", call. = FALSE)
-  }
+  roll_check_n(n)
   n <- as.integer(n)
   nx <- length(x)
   out <- rep(NA_real_, nx)

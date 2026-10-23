@@ -60,18 +60,19 @@
 // A later task (Theo-requested, scratchpad/todo.md "Rolling-window
 // benchmark target") adds a sixth family, "rolling":
 // roll_mean()/roll_sum()/roll_min()/roll_max()/roll_sd() (NOT
-// roll_median() -- cudf 25.12 has no rolling MEDIAN aggregation in this
-// environment, see R/lower.R's window_spec_lowerable()), via
-// cudf::grouped_rolling_window() (used uniformly whether or not the
-// frame is actually grouped, same "one code path via a substituted
-// zero-key column" idiom as the families above). See the file-level
-// design comment above R/ir.R's ir_parse_roll_call() for the full
-// empirical derivation of the min_periods/na.rm scheme this family uses --
-// notably, na.rm=FALSE poisoning falls out of a FIXED w-row window's own
-// min_periods=w requirement for free (no is-null-indicator masking pass
-// needed, unlike the cum*/rank sticky-NA fix), while na.rm=TRUE needs an
-// extra rolling COUNT_ALL pass to distinguish "leading incomplete window"
-// (always NA) from "internal window with some nulls" (skip them).
+// roll_median(): cudf 25.12 has no rolling MEDIAN aggregation, so
+// R/roll.R computes it on the CPU, see R/lower.R's window_spec_lowerable()).
+// F59: the numeric cases are computed by src/ops_rolling.cpp, whose cost does
+// not depend on the window width (cudf::grouped_rolling_window() rescans
+// every window): segmented prefix/suffix scans for mean/sum/sd (sd needs the
+// block-local centring described there to stay within 1e-8 of data.table on
+// adversarial data) and min/max, an exact INT64 prefix difference for the
+// sum of an integer. Whatever it does not cover
+// (timestamp or boolean min/max, ...) still goes through
+// cudf::grouped_rolling_window(), used uniformly whether or not the frame is
+// actually grouped (same "one code path via a substituted zero-key column"
+// idiom as the families above). See the design comment above R/ir.R's
+// ir_parse_roll_call() for the min_periods/na.rm scheme of that fallback.
 //
 // Empirical checks recorded in the W2 commit message: E1 (grouped cumsum
 // on a shuffled 100k-row table matches dplyr exactly -- validates the
@@ -90,6 +91,7 @@
 #include "expr_eval.hpp"  // build_scalar(), expr_type_from_str()
 #include "int_sum.hpp"   // narrow_int_sum()
 #include "ts_agg.hpp"    // F41: Date/POSIXct mean()/median()
+#include "ops_rolling.hpp" // F59: width-independent rolling windows
 
 #include <cudf/aggregation.hpp>
 #include <cudf/binaryop.hpp>
@@ -102,6 +104,7 @@
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/sorting.hpp>
+#include <cudf/stream_compaction.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/transform.hpp>
@@ -136,7 +139,7 @@ namespace {
 
 // One C++-side resolved spec, mirroring R/lower.R::build_window_cpp_spec()'s
 // plain-list shape exactly: list(fn, value_idx, out_type, out_pos, n,
-// default_value, default_valid, na_rm).
+// default_value, default_valid, na_rm[, roll_path]).
 struct WindowSpec {
     std::string fn;
     bool has_value;
@@ -148,6 +151,7 @@ struct WindowSpec {
     bool default_valid;
     SEXP default_value;
     bool na_rm;
+    cuplyr::RollPath roll_path;  // rolling specs: the cuplyr.roll_path switch
 };
 
 WindowSpec parse_window_spec(Rcpp::List spec) {
@@ -170,6 +174,13 @@ WindowSpec parse_window_spec(Rcpp::List spec) {
     s.default_valid = Rcpp::as<bool>(spec["default_valid"]);
     s.default_value = spec["default_value"];
     s.na_rm = Rcpp::as<bool>(spec["na_rm"]);
+    s.roll_path = cuplyr::RollPath::Auto;
+    if (spec.containsElementNamed("roll_path")) {
+        const std::string p = Rcpp::as<std::string>(spec["roll_path"]);
+        if (p == "scans") s.roll_path = cuplyr::RollPath::Scans;
+        else if (p == "cudf") s.roll_path = cuplyr::RollPath::Cudf;
+        else if (p != "auto") Rcpp::stop("gpu_window: internal: unknown roll_path '%s'", p.c_str());
+    }
     return s;
 }
 
@@ -1045,28 +1056,31 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
         }
 
         if (!rolling_spec_indices.empty()) {
-            // Rolling windows (Theo-requested benchmark task, see the
-            // file-level design comment above ir_parse_roll_call() in
-            // R/ir.R for the full empirical derivation of the min_periods/
-            // na.rm scheme below). grouped_rolling_window() is used
-            // UNIFORMLY whether or not this frame is actually grouped --
-            // `keys_view` is either the real group columns or the
-            // substituted constant zero-key column (same "one code path"
-            // idiom `gb`/groupby above already uses). This is safe because
-            // `work_view`'s row order is stable-sorted by GROUP COLS ONLY
-            // (a rolling spec carries no order_cols, exactly like the scan
-            // family -- n_order_cols == 0 for this frame), i.e. each
-            // group's ORIGINAL relative row order is preserved -- exactly
-            // grouped_rolling_window()'s documented "presorted by
-            // group_key" requirement.
+            // Rolling windows. Specs are grouped by value column: the
+            // numeric ones go through src/ops_rolling.cpp (segmented scans:
+            // cost independent of the window width, see the header comment
+            // there); only what it does not cover (timestamp
+            // min/max, boolean min/max, ...) and the narrow windows where
+            // cudf's direct kernel is faster (roll_native()) stay on
+            // cudf::grouped_rolling_window() below. `work_view`'s row order
+            // is stable-sorted by GROUP COLS ONLY (a rolling spec carries no
+            // order_cols, like the scan family): each group's ORIGINAL
+            // relative row order, which both paths require. `gb`/`keys_view`
+            // are the real group columns or the substituted constant
+            // zero-key column, so one code path serves grouped and
+            // ungrouped frames.
             //
             // F55: R/roll.R drops/propagates a NaN through is.na()/anyNA(),
             // i.e. as missing, in all five functions under both na.rm
             // settings, so a floating value column is read through its
             // NaN-nulled copy (one per value column, alive for the whole
-            // loop) and the min_periods/count scheme below treats a NaN
-            // exactly like an NA.
+            // loop) and both paths treat a NaN exactly like an NA.
             std::map<cudf::size_type, std::unique_ptr<cudf::column>> nan_roll_copy;
+            std::map<cudf::size_type, std::vector<int>> native_by_pos;
+            // the row numbers are shared by roll_native()'s cost model (the
+            // row-weighted group size) and the scans
+            const bool real_groups = group_indices.size() > 0;
+            cuplyr::RollRows roll_rows(gb, real_groups, keys_view.column(0), nrow);
             for (int si : rolling_spec_indices) {
                 const WindowSpec& sp = specs[static_cast<size_t>(si)];
                 if (!sp.has_value) {
@@ -1084,18 +1098,22 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 if (nan_it->second) value_view = nan_it->second->view();
                 cudf::size_type w = sp.n;
 
+                const cuplyr::RollShape shape{real_groups, value_view.has_nulls(), &roll_rows,
+                                              sp.roll_path};
+                if (cuplyr::roll_native(sp.fn, value_view.type().id(), w, sp.na_rm, shape)) {
+                    native_by_pos[pos].push_back(si);
+                    continue;
+                }
+
+                // grouped_rolling_window() fallback.
                 // na.rm=FALSE: min_periods = w on a FIXED w-row window
                 // already means "zero nulls tolerated" (w valid values
-                // required out of exactly w physical rows) -- verified
-                // empirically (see R/ir.R), no separate is-null-indicator
-                // masking pass needed here (unlike the cum*/rank
-                // sticky-NA fix elsewhere in this file).
-                // na.rm=TRUE: min_periods = 1 (skip nulls when computing,
-                // as low a valid-count bar as possible) plus a second
-                // rolling COUNT_ALL(INCLUDE) pass below to force NA for the
-                // leading, physically-incomplete (row-count < w) windows
-                // that min_periods = 1 alone would wrongly compute a value
-                // for using fewer than w rows.
+                // required out of exactly w physical rows).
+                // na.rm=TRUE: min_periods = 1 (skip nulls when computing)
+                // plus a second rolling COUNT_ALL(INCLUDE) pass below to
+                // force NA for the leading, physically-incomplete
+                // (row-count < w) windows that min_periods = 1 alone would
+                // wrongly compute a value for using fewer than w rows.
                 cudf::size_type min_periods = sp.na_rm ? 1 : w;
                 // R's sd() of a single value is NA, where cudf's STD (ddof = 1)
                 // gives NaN: roll_sd() needs two valid values (any w, either
@@ -1119,6 +1137,21 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 }
 
                 spec_results[static_cast<size_t>(si)] = std::move(result);
+            }
+
+            for (const auto& kv : native_by_pos) {
+                cudf::column_view value_view = work_view.column(kv.first);
+                auto nan_it = nan_roll_copy.find(kv.first);
+                if (nan_it != nan_roll_copy.end() && nan_it->second) value_view = nan_it->second->view();
+                std::vector<cuplyr::RollReq> reqs;
+                for (int si : kv.second) {
+                    const WindowSpec& sp = specs[static_cast<size_t>(si)];
+                    reqs.push_back({sp.fn, sp.n, sp.na_rm});
+                }
+                auto cols = cuplyr::roll_columns(roll_rows, value_view, reqs);
+                for (size_t k = 0; k < kv.second.size(); ++k) {
+                    spec_results[static_cast<size_t>(kv.second[k])] = std::move(cols[k]);
+                }
             }
         }
 

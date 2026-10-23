@@ -16,7 +16,8 @@ build_window_cpp_spec(spec, out_pos, schema)
 \item{schema}{The node input's schema (\code{list(names=, types=)})}
 }
 \value{
-A plain list: \code{list(fn, value_idx, out_type, out_pos, n, default_value, default_valid, na_rm)}
+A plain list: \code{list(fn, value_idx, out_type, out_pos, n, default_value, default_valid, na_rm)}, plus \code{roll_path} (the internal
+\code{cuplyr.roll_path} switch, see \code{?roll}) for a rolling spec
 }
 \description{
 \code{default_value}/\code{default_valid} collapse \code{window_spec()}'s \code{default}

@@ -2111,6 +2111,21 @@ ir_parse_with_order_call <- function(expr, env, schema) {
 # scratchpad/phase5_window_design.md section 2's `window_spec()` field
 # docs, all reused unchanged.
 #
+# F59: cudf's rolling kernel rescans every window, so its cost grows with the
+# width (and its STD loses accuracy on offset data). `src/ops_rolling.cpp`
+# computes roll_sum/roll_mean/roll_sd/roll_min/roll_max from segmented scans
+# (segments of w rows; sums of squares about a member of each part, so
+# nothing cancels), and the sum of an integer exactly in INT64; the NA rules are the same ones the empirical notes below derive,
+# applied from counts of the finite values and infinities (a window never
+# crosses a group once its row-in-group is >= w - 1). roll_sd always takes the
+# scans. For the other four, `roll_native()` (src/ops_rolling.cpp) keeps
+# cudf's grouped_rolling_window() below a measured crossover width (about
+# 100 rows on one 1e7-row group, 56 to 160 depending on groups, NA and
+# na.rm), where its
+# direct kernel is cheaper than a constant number of passes. What the native
+# code does not cover at all (min/max of a timestamp or boolean) stays on
+# cudf too, and the notes below describe the min_periods scheme of that path.
+#
 # Empirically verified (a standalone probe against this environment's
 # installed cudf 25.12, NOT re-derived from the header comments alone,
 # since "min_periods" is ambiguous between "row count in window" and

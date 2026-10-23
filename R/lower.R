@@ -1104,7 +1104,8 @@ validate_window_spec <- function(spec) {
 #'   `ast_window` node's appended columns
 #' @param schema The node input's schema (`list(names=, types=)`)
 #' @return A plain list: `list(fn, value_idx, out_type, out_pos, n,
-#'   default_value, default_valid, na_rm)`
+#'   default_value, default_valid, na_rm)`, plus `roll_path` (the internal
+#'   `cuplyr.roll_path` switch, see `?roll`) for a rolling spec
 #' @keywords internal
 build_window_cpp_spec <- function(spec, out_pos, schema) {
   value_idx <- if (is.na(spec$value_col)) {
@@ -1120,7 +1121,7 @@ build_window_cpp_spec <- function(spec, out_pos, schema) {
     default_valid <- TRUE
   }
 
-  list(
+  out <- list(
     fn = spec$fn,
     value_idx = value_idx,
     out_type = spec$output_type,
@@ -1130,4 +1131,8 @@ build_window_cpp_spec <- function(spec, out_pos, schema) {
     default_valid = default_valid,
     na_rm = isTRUE(spec$na_rm)
   )
+  if (identical(ir_call_registry[[spec$fn]]$window$kind, "rolling")) {
+    out$roll_path <- roll_path_option()
+  }
+  out
 }

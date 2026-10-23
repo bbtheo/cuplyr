@@ -52,13 +52,23 @@ incomplete positions stay \code{NA} even though na.rm is set.
 
 Inside \code{mutate()}/\code{filter()} on a \code{tbl_gpu}, \code{roll_mean()}/\code{roll_sum()}/
 \code{roll_min()}/\code{roll_max()}/\code{roll_sd()} (not \code{roll_median()}, see below)
-run GPU-natively via \code{cudf::rolling_window()}/\code{grouped_rolling_window()}
--- these R implementations are the CPU semantics reference and the
-engine for standalone use and for \code{roll_median()}'s CPU fallback (cudf
-25.12 has no MEDIAN rolling aggregation in this environment).
+run GPU-natively, in time that does not depend on the window width
+(segmented scans; cudf's own rolling kernel is kept for
+narrow windows, where it is faster, and for min/max of timestamps and
+logicals) -- these R implementations are the CPU semantics reference and
+the engine for standalone use. cudf 25.12 has
+no MEDIAN rolling aggregation, so \code{roll_median()} always runs on the CPU:
+\code{data.table::frollmedian()} when the installed data.table has it (1.18.4 or
+later), otherwise a built-in O(n log n) sliding median; both give exactly the result of
+\code{stats::median()} over each window.
 \code{data.table::frollmean(x, n)} (and its five siblings) work as
 equivalent GPU-native aliases inside \code{mutate()}/\code{filter()} too, as long
 as \code{align}/\code{fill}/\code{adaptive} are left at their defaults (\code{"right"},
 \code{NA}, \code{FALSE}) -- any other value falls back / errors, matching this
 task's explicit "right-aligned only" scope.
+
+The internal option \code{cuplyr.roll_path} (else the environment variable
+\code{CUPLYR_ROLL_PATH}), one of \code{"auto"} (the default), \code{"scans"} or \code{"cudf"},
+forces one of the two GPU paths. It exists for tests and benchmarks and
+changes speed, not results.
 }
