@@ -1,5 +1,26 @@
 # cuplyr (development version)
 
+## Docs: eager vs lazy, performance vignette (F62)
+
+* New `vignette("performance", package = "cuplyr")` with measured timings
+  (RTX 5070, 1e3 to 5e7 rows) for a five-verb pipeline run eager and lazy, the
+  per-verb call floor, transfer costs, and the memory each mode leaves
+  allocated. It says plainly that with clean GPU memory lazy is slower than
+  eager at every size measured: about 1 ms per pipeline up to 1e6 rows, 2.4 ms
+  at 1e7 and 3 ms at 5e7. It explains why (each lazy verb still does its R-side
+  checks, `collect()` adds about 1 ms to optimize and lower the plan, and lazy
+  loses the overlap of one verb's GPU work with R preparing the next). Lazy's
+  gain is that intermediates are freed when `collect()` or `compute()` returns
+  (5 back-to-back runs at 5e7 rows: 68 to 155 ms each eager, 20 to 24 ms each
+  lazy). It also lists where the GPU loses to dplyr and how to see CPU fallbacks
+  (`options(cuplyr.fallback = "warn")`).
+* The README leads with a lazy example that runs as written, and its "Lazy
+  evaluation" section is now "Eager vs lazy". The default execution mode is
+  unchanged (eager).
+* The README lists the optimizer's five passes in the order they run.
+  `vignette("getting-started")`, `vignette("query-optimization")` and
+  `?tbl_gpu` link to the new vignette.
+
 ## async memory resource by default (F65)
 
 * The default memory resource is now `"async"` (RMM's `cuda_async_memory_resource`,

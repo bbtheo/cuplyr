@@ -308,7 +308,9 @@ result <- pipeline |> collect()
 ```
 
 Lazy mode enables query optimization like filter pushdown and operation fusion.
-See `vignette("query-optimization")` for details.
+See `vignette("query-optimization")` for details. `vignette("performance")` has
+measured timings and memory use for both modes, and says when each is the right
+choice.
 
 ## Controlling Execution
 
@@ -398,7 +400,8 @@ try({
 ## Next Steps
 
 - `vignette("query-optimization")` - Deep dive into the AST optimizer
-- `vignette("performance-tips")` - Maximizing GPU performance
+- `vignette("performance")` - Eager vs lazy: timings, memory, where the GPU loses
+- `vignette("memory")` - GPU memory resources and when memory is freed
 - Package documentation: `?tbl_gpu`, `?compute`, `?gpu_memory_state`
 
 ## System Requirements

@@ -44,6 +44,9 @@
 #'   \item Filter reordering (cheapest filters first)
 #' }
 #'
+#' For measured timings and memory use of the two modes, see
+#' `vignette("performance", package = "cuplyr")`.
+#'
 #' A `vctrs::unspecified()` column (all `NA`, no type yet) is stored as BOOL8.
 #' It collects back as `vctrs::unspecified()` only while it passes through
 #' `filter()`, `arrange()`, `slice()` and `semi_join()`/`anti_join()` (as a

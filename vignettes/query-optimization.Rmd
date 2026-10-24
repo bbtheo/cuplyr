@@ -622,5 +622,6 @@ result <- tbl_gpu(big_data, lazy = TRUE) |>
 ## Further Reading
 
 - `vignette("getting-started")` - Basic cuplyr usage
+- `vignette("performance")` - Measured eager vs lazy timings and memory
 - `?optimize_ast` - Internal optimizer documentation
 - RAPIDS cuDF documentation for GPU-specific optimizations

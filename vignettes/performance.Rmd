@@ -1,0 +1,376 @@
+---
+title: "Performance: eager and lazy pipelines"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Performance: eager and lazy pipelines}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  eval = identical(Sys.getenv("CUPLYR_VIGNETTE_EVAL"), "true") && cuplyr::has_gpu()
+)
+```
+
+## Introduction
+
+This article is about where time and memory go when you run a dplyr pipeline
+through cuplyr, and when to choose eager or lazy execution. It has numbers from
+one machine, a list of cases where the GPU loses to plain dplyr, and advice
+that follows from both. `vignette("query-optimization", package = "cuplyr")`
+explains what the optimizer passes do. This one measures what they buy.
+
+The short version: lazy is the better choice for pipelines, but not because it
+is faster. When GPU memory is clean it is slower at every table size measured:
+about 1 ms per pipeline up to 1e6 rows, 2.4 ms at 1e7 and 3 ms at 5e7. What it
+gives you is that every intermediate column is freed when the pipeline
+finishes, so it stays safe on big tables and in loops. In a loop an eager
+pipeline's leftovers pile up, and once they fill the card cuplyr's
+out-of-memory handler has to run. That made eager 3 to 7 times slower than lazy
+in the measurements below. Until the card is full eager stays faster: in a
+separate run at 2.5e7 rows, five back-to-back eager calls left about 4 GB
+behind and still took 9.4 ms each, against 12 ms lazy.
+
+```{r setup}
+library(cuplyr)
+library(dplyr)
+```
+
+## How a cuplyr call runs
+
+Each verb call does some work in R (check the arguments, work out the new
+schema) and then, in eager mode, some work on the GPU. At 1e3 rows the GPU part
+is tiny and the R part dominates. A profile of one eager verb at 1e3 rows put
+about 90% of the time on the R side. That fixed cost is the per-call floor, and
+it is why most single verbs on small tables are not faster than dplyr
+(`arrange()` is).
+
+The two modes differ in when the GPU work happens.
+
+- **Eager.** Each verb runs at once and returns a GPU table. Every
+  intermediate table stays allocated until R's garbage collector drops it.
+- **Lazy.** Each verb checks its arguments, works out the new schema and
+  records a node in a plan, without touching the GPU. `compute()` optimizes the
+  plan, runs it, and keeps the result on the GPU. `collect()` does the same and
+  then copies the result to R. The intermediates are freed when the call
+  returns.
+
+You choose the mode per table with `tbl_gpu(df, lazy = TRUE)`, or for every
+table created afterwards with `options(cuplyr.exec_mode = "lazy")`.
+`show_query()` prints the pending steps of a lazy table. `explain()` prints them
+next to the plan the optimizer will actually run:
+
+```{r explain, eval = FALSE}
+lazy <- tbl_gpu(mtcars, lazy = TRUE) |>
+  filter(mpg > 20) |>
+  mutate(kpl = mpg * 0.425, hp2 = hp * 2) |>
+  select(cyl, kpl)
+
+explain(lazy)
+#> Pending operations:
+#> ast_select [2 cols]
+#> | ast_mutate [2 expressions]
+#> | | ast_filter [1 predicates]
+#> | | | ast_source [11 cols]
+#>
+#> AST depth: 4
+#> Node count: 4
+#>
+#> Optimized plan:
+#> ast_select [2 cols]
+#> | ast_mutate [1 expressions]
+#> | | ast_select [2 cols]
+#> | | | ast_filter [1 predicates]
+#> | | | | ast_source [11 cols]
+```
+
+```{r explain-run, echo = FALSE}
+# The output above is pasted so a default build shows it. A build with GPU
+# evaluation runs the same code and fails if explain() no longer prints it.
+lazy <- tbl_gpu(mtcars, lazy = TRUE) |>
+  filter(mpg > 20) |>
+  mutate(kpl = mpg * 0.425, hp2 = hp * 2) |>
+  select(cyl, kpl)
+stopifnot(identical(
+  trimws(capture.output(explain(lazy))),
+  c("Pending operations:",
+    "ast_select [2 cols]",
+    "| ast_mutate [2 expressions]",
+    "| | ast_filter [1 predicates]",
+    "| | | ast_source [11 cols]",
+    "",
+    "AST depth: 4",
+    "Node count: 4",
+    "",
+    "Optimized plan:",
+    "ast_select [2 cols]",
+    "| ast_mutate [1 expressions]",
+    "| | ast_select [2 cols]",
+    "| | | ast_filter [1 predicates]",
+    "| | | | ast_source [11 cols]")
+))
+```
+
+In the optimized plan the mutate has one expression instead of two, because
+nothing uses `hp2`, and a select keeps only the 2 needed columns before the
+mutate. Nothing has run on the GPU yet. `collect(lazy)` runs the plan.
+
+The optimizer runs five passes when `compute()` or `collect()` is called:
+
+- **Projection pruning** inserts a select that keeps only the columns the later
+  steps need (the inner select in the plan above).
+- **Mutate fusion** merges consecutive `mutate()` calls into one node, so they
+  run as one step. It keeps the expressions in the order you wrote them, and
+  it does not merge when the result would have more than 8 expressions or
+  when the later `mutate()` reads more than 4 columns the earlier one creates.
+- **Dead-column pruning** drops mutate outputs that nothing later uses (`hp2`
+  above).
+- **Filter pushdown** usually moves a filter below a mutate when the filter
+  does not read a column that mutate computes, so the mutate sees fewer rows.
+  It also moves filters below a `select()` that keeps their columns, and into
+  the inputs of some joins. Whether a join allows it depends on its type and on
+  its `relationship`, `multiple` and `unmatched` arguments; `explain()` shows
+  where each filter ended up.
+- **Filter reordering** usually merges consecutive `filter()` calls into one
+  filter node, which builds one row mask and selects the rows once. It also
+  sorts the merged predicates so the cheaper ones (estimated from the size of
+  each expression) come first. Eager runs each `filter()` call on its own and
+  allocates the filtered table in between.
+
+A single `filter()` call with several predicates is already one filter node in
+both modes: its predicates are combined with `&` into one expression. The
+optimizer leaves their order alone unless it merges the call with another
+filter. Some verbs, such as `arrange()` and
+`summarise()`, are barriers: the passes run on each side of them but not
+across.
+`vignette("query-optimization", package = "cuplyr")` has the details.
+
+## Measurements
+
+Everything below is a static table. Nothing in this vignette is timed when it is
+built. The code that produced the numbers is at the end.
+
+- Date and code: 2026-10-23, cuplyr 0.1.1.9000 at commit b39a8f1.
+- Hardware and software: NVIDIA GeForce RTX 5070 (12 GB), driver 615.78.08,
+  R 4.6.1, dplyr 1.2.1. Memory resource `async` (the default).
+- Method: data already on the GPU (uploads are not in the pipeline timings),
+  warm, median of 15 samples (9 at 5e7 rows). Each sample timed a batch of
+  calls fenced with `gpu_sync()`. The batch size came from one timed call and
+  aimed at 30 ms, but the timer has 1 ms resolution, so batches of
+  sub-millisecond calls ran anywhere from 4 to 118 ms. Calls slower than 30 ms
+  ran one per batch. R's `gc()` ran, untimed, before every batch. Each number is
+  the median of three fresh R processes, and the three runs differed by about
+  10% at most (the 0.23 ms `arrange()` call) and by under 5% for the
+  pipelines.
+
+### A five-verb pipeline
+
+```r
+filter(x > 0.1) |> mutate(z = x * y + w) |> group_by(g) |>
+  summarise(m = mean(z), n = n()) |> arrange(desc(m)) |> collect()
+```
+
+The table has an integer `g` with 100 groups and double columns `x`, `y` and
+`w`. The dplyr column runs the same pipeline on a tibble. "Held" is how much
+GPU memory the call leaves allocated until R's next `gc()`, measured as the
+growth of `gpu_memory_state()$pool_used_bytes` across one call whose result is
+collected.
+
+| rows | eager ms | lazy ms | dplyr ms | eager held MB | lazy held MB |
+|---|---|---|---|---|---|
+| 1e3 | 3.10 | 4.14 | 3.50 | 0.03 | 0 |
+| 1e6 | 3.25 | 4.25 | 24.5 | 32 | 0 |
+| 1e7 | 4.83 | 7.20 | 211 | 324 | 0 |
+| 5e7 | 17.5 | 20.5 | not run | 1620 | 0 |
+| 5e7, 5 calls back to back, no `gc()` | 68.2 | 20.2 | not run | | |
+
+The last row is what a loop or a script does: it runs the pipeline five times
+without a `gc()` in between and reports the mean time per call. It shows the
+cautious end of a range. The eager figure depends on what the memory pool already
+holds. In two later runs of the same five-call loop it was 145 and 155 ms per
+call, against 22 and 24 ms for lazy.
+
+### One eager verb at 1e3 rows (the per-call floor)
+
+No `collect()`. The result stays on the GPU.
+
+| verb | cuplyr ms | dplyr ms |
+|---|---|---|
+| filter | 0.73 | 0.35 |
+| mutate | 0.83 | 0.40 |
+| select | 0.58 | 0.42 |
+| arrange | 0.23 | 0.68 |
+| grouped summarise | 0.81 | 0.77 |
+
+### Transfers (4 columns)
+
+| rows | `tbl_gpu()` upload ms | `collect()` of all rows ms |
+|---|---|---|
+| 1e3 | 0.14 | 0.12 |
+| 1e6 | 6.60 | 6.00 |
+| 1e7 | 68.0 | 54.0 |
+
+### A case built for the optimizer
+
+A 21-column table (`g` plus `x1` to `x20`), one query that computes columns it
+later drops and filters after the mutate:
+
+```r
+mutate(a = x1 * 2, b = x2 * x3, c = x4 + x5) |> filter(x1 > 0.9) |>
+  select(g, a) |> collect()
+```
+
+`explain()` shows the optimizer reading 2 of the 21 columns at the source,
+running the filter below the mutate, and dropping `b` and `c`.
+
+| rows | eager ms | lazy ms | dplyr ms | eager held MB | lazy held MB |
+|---|---|---|---|---|---|
+| 1e6 | 3.37 | 4.14 | 22.0 | 43 | 0 |
+| 1e7 | 7.00 | 7.20 | 182 | 428 | 0 |
+
+### Reading the table
+
+- With clean GPU memory, lazy is slower than eager at every size measured: by
+  1.0 ms at 1e3 and 1e6 rows, 2.4 ms at 1e7 and 3.0 ms at 5e7. At 1e7 rows that
+  is 49% longer (7.20 against 4.83 ms), at 5e7 rows 17% (20.5 against 17.5 ms).
+  The gap does not close on big tables. In milliseconds it grows with the row
+  count, but as a share of the run time it does not.
+- Where the first millisecond goes: recording the five-verb plan costs about as
+  much R time as running the whole eager pipeline, because each lazy verb still
+  checks its arguments and works out the schema (2.7 against 3.0 ms at 1e3 rows
+  in the follow-up run below). Then `collect()` optimizes and lowers the plan,
+  about 1 ms more (1.2 ms at 1e3 rows). Recording time does not depend on the
+  row count, so that is not what grows with it.
+- Why the gap grows: GPU calls return before the kernels finish, so an eager
+  pipeline runs one verb's GPU work while R prepares the next verb. Lazy records
+  the whole plan before any GPU work starts and loses that overlap. A separate
+  follow-up run at 1e7 rows (not part of the table above) shows it: eager took
+  4.67 ms, eager with a `gpu_sync()` after every verb 6.2 ms, lazy 7.0 ms. In
+  that run recording the lazy plan took 2.6 ms and `collect()` of the recorded
+  plan 4.25 ms. At 1e3 rows the `gpu_sync()` after every verb added only 0.1 ms
+  (3.0 to 3.1 ms), because there is little GPU work to overlap.
+- The optimizer did not make lazy faster than eager in the case built for it:
+  4.14 against 3.37 ms at 1e6 rows and 7.20 against 7.00 ms at 1e7. At these
+  sizes there is too little GPU work for the skipped work to pay back lazy's
+  extra R-side cost and lost overlap. Lazy still wins on memory there, as in
+  every case: it held nothing, eager held 428 MB.
+- Memory is the reason to prefer lazy. Here an eager pipeline leaves about 32
+  bytes per row behind until R's next `gc()`: 324 MB at 1e7 rows, 1620 MB at
+  5e7. Run it again before the `gc()` and the memory pool keeps growing. In a
+  traced run of the five-call loop it went from 5.4 to 11.6 GB on a 12 GB card,
+  and then cuplyr's out-of-memory handler ran `gc()` and `gpu_gc()` and retried
+  the step. This is what happens in the back-to-back row: 68.2 ms against
+  20.2 ms, lazy 3.4 times faster. The two later runs gave 6.6 and 6.7 times.
+- Before the card fills, eager stays faster. In a separate run at 2.5e7 rows
+  (not part of the tables), five back-to-back eager calls left about 4 GB
+  behind and took 9.4 ms each, against 12 ms lazy.
+- Against dplyr on a tibble at 1e3 rows, eager is about even (3.10 against
+  3.50 ms) and lazy is about 0.6 ms slower (4.14 ms). At 1e6 rows cuplyr is 5.8
+  to 7.5 times faster, and at 1e7 rows 29 to 44 times.
+
+## Where the GPU loses
+
+- **Tiny tables.** At 1e3 rows a single cuplyr call takes 0.23 to 0.83 ms,
+  almost all of it R-side work. Every single verb above is slower than dplyr
+  except `arrange()`, and the grouped `summarise()` is close to a tie. A whole
+  pipeline at that size is about even with dplyr eager (3.10 against 3.50 ms)
+  and about 0.6 ms slower lazy (4.14 ms).
+- **Transfers.** Moving data costs more than the compute. Uploading 1e7 rows
+  takes 68 ms and collecting them 54 ms, against 4.83 ms for the eager
+  pipeline. If you upload, run one cheap verb and collect, the GPU loses.
+- **CPU fallbacks.** Some expressions have no GPU translation, and cuplyr
+  evaluates them in R instead, copying data across. This is silent by default.
+  Set `options(cuplyr.fallback = "warn")` to be told when it happens, or
+  `"error"` to forbid it.
+
+## Practical advice
+
+- Upload once and keep the data on the GPU between steps. Collect once, at the
+  end of the pipeline.
+- Use lazy for pipelines, most of all on big tables and in loops, where not
+  holding intermediates matters. Do not expect it to be faster: with clean GPU
+  memory it was slower at every size measured. It wins when an eager pipeline's
+  leftovers pile up.
+- Use eager for interactive exploration and single calls where you want each
+  result at once.
+- To branch from a shared prefix, `compute()` it once and build the branches
+  from the result. It keeps the table on the GPU.
+- After dropping a large eager result, `gc()` frees it back to cuplyr's memory
+  pool, where the next calls reuse it. `gpu_gc()` does that too and then returns
+  the pool's unused memory to the card, so other processes can use it. It takes
+  about a second and the next calls have to grow the pool again, so use it when
+  you need the memory elsewhere, not inside a loop.
+  `vignette("memory", package = "cuplyr")` covers the memory resources and when
+  memory is freed.
+- Fence GPU timings with `gpu_sync()`. GPU calls return before the kernels
+  finish, so a timer without it may stop the clock before the GPU work is
+  done.
+- Check `explain()` when a lazy pipeline is slower than you expect. See
+  `vignette("query-optimization", package = "cuplyr")` for the passes.
+
+## Reproduce
+
+This is a trimmed copy of the script behind the tables, covering the pipeline
+timings and the memory column. It is not run when the vignette is built. Run it
+in a fresh session on an idle GPU. It sizes each batch from one timed call
+that the 1 ms timer resolution rounds, so batches of sub-millisecond calls can
+run well under or over the 30 ms it aims for.
+
+```{r reproduce, eval = FALSE}
+library(cuplyr)
+library(dplyr)
+set.seed(1)
+
+# Median ms per call. A sample is a batch of calls fenced with gpu_sync();
+# gc() runs untimed before every batch.
+per_call <- function(fn, samples = 15, warmup = 3, target = 0.03) {
+  for (i in seq_len(warmup)) fn()
+  gpu_sync(); gc(verbose = FALSE)
+  t0 <- proc.time()[["elapsed"]]; fn(); gpu_sync()
+  one <- max(proc.time()[["elapsed"]] - t0, 1e-4)
+  reps <- max(1L, min(500L, as.integer(ceiling(target / one))))
+  t <- vapply(seq_len(samples), function(i) {
+    gc(verbose = FALSE)
+    t0 <- proc.time()[["elapsed"]]
+    for (j in seq_len(reps)) fn()
+    gpu_sync()
+    (proc.time()[["elapsed"]] - t0) / reps
+  }, numeric(1))
+  1e3 * median(t)
+}
+
+# GPU memory one call leaves allocated until R's next gc(), in MB.
+held_mb <- function(fn) {
+  gc(verbose = FALSE); gc(verbose = FALSE); gpu_sync()
+  u0 <- gpu_memory_state()$pool_used_bytes
+  r <- fn(); gpu_sync()
+  u1 <- gpu_memory_state()$pool_used_bytes
+  rm(r)
+  (u1 - u0) / 1e6
+}
+
+pipeline <- function(d) {
+  d |>
+    filter(x > 0.1) |>
+    mutate(z = x * y + w) |>
+    group_by(g) |>
+    summarise(m = mean(z), n = n()) |>
+    arrange(desc(m))
+}
+
+n <- 1e6
+df <- data.frame(g = sample.int(100L, n, TRUE), x = runif(n), y = runif(n),
+                 w = rnorm(n))
+tb <- tibble::as_tibble(df)
+eg <- tbl_gpu(df, lazy = FALSE)
+lz <- tbl_gpu(df, lazy = TRUE)
+
+c(eager = per_call(function() collect(pipeline(eg))),
+  lazy  = per_call(function() collect(pipeline(lz))),
+  dplyr = per_call(function() pipeline(tb)))
+c(eager = held_mb(function() collect(pipeline(eg))),
+  lazy  = held_mb(function() collect(pipeline(lz))))
+```

@@ -60,6 +60,9 @@ This enables optimizations like:
 \item Filter reordering (cheapest filters first)
 }
 
+For measured timings and memory use of the two modes, see
+\code{vignette("performance", package = "cuplyr")}.
+
 A \code{vctrs::unspecified()} column (all \code{NA}, no type yet) is stored as BOOL8.
 It collects back as \code{vctrs::unspecified()} only while it passes through
 \code{filter()}, \code{arrange()}, \code{slice()} and \code{semi_join()}/\code{anti_join()} (as a

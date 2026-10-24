@@ -6,13 +6,29 @@ cuplyr implements a dplyr backend powered by [RAPIDS cuDF](https://github.com/ra
 
 ```r
 library(cuplyr)
+library(dplyr)
+
+# Example data, built here so the code runs as written
+set.seed(1)
+n <- 1e5
+sales_data <- data.frame(
+  year    = sample(2018:2024, n, replace = TRUE),
+  region  = sample(c("north", "south", "east", "west"), n, replace = TRUE),
+  quarter = sample(1:4, n, replace = TRUE),
+  amount  = rnorm(n, mean = 50, sd = 30),
+  price   = runif(n, 1, 10)
+)
+regions <- data.frame(
+  region  = c("north", "south", "east", "west"),
+  manager = c("Ana", "Ben", "Chi", "Dev")
+)
 
 tbl_gpu(sales_data, lazy = TRUE) |>
   filter(year >= 2020, amount > 0) |>
   mutate(revenue = amount * price) |>
   group_by(region, quarter) |>
-  summarise(total = sum(revenue)) |>
-  inner_join(regions, by = "region") |>
+  summarise(total = sum(revenue), .groups = "drop") |>
+  inner_join(tbl_gpu(regions), by = "region") |>
   arrange(desc(total)) |>
   collect()
 ```
@@ -42,20 +58,33 @@ This is experimental software under active development. Breaking changes should 
 - `compute()` – execute lazy operations, keep on GPU
 - `tbl_gpu(..., lazy = TRUE)` – enable lazy evaluation with AST optimization
 
-### Lazy evaluation
+### Eager vs lazy
 
-Lazy mode defers execution until `collect()` or `compute()`, enabling automatic optimizations:
-- Projection pruning (drop unused columns early)
-- Filter pushdown (move filters closer to data sources)
-- Mutate fusion (combine consecutive transformations)
+`tbl_gpu()` is eager by default: each verb runs on the GPU as soon as you call it and returns a GPU table. In lazy mode each verb only records a step. `collect()` (result to R) or `compute()` (result stays on the GPU) then optimizes the recorded plan, runs it, and frees every intermediate column.
+
+Use lazy for pipelines, especially on big tables or inside loops. An eager pipeline leaves its intermediates on the GPU until R's next `gc()`. In a loop they pile up, and once they fill the card cuplyr's out-of-memory handler has to run: on 5e7 rows, five back-to-back runs of a five-verb pipeline took 68 to 155 ms each eager (it depends on what the memory pool already holds) and 20 to 24 ms each lazy. Before the card fills, eager stays faster: at 2.5e7 rows, five back-to-back eager runs left about 4 GB behind and took 9.4 ms each, against 12 ms lazy. The optimizer also drops columns the result never uses. Lazy is not faster when GPU memory is clean, at any size we measured: the same pipeline took 1 ms longer lazy at 1e6 rows (3.25 ms eager, 4.25 ms lazy), 2.4 ms longer at 1e7 and 3 ms longer at 5e7. Use eager for interactive exploration and single calls, where you want each result at once.
 
 ```r
-# Enable globally
-options(cuplyr.exec_mode = "lazy")
+# Per table
+lazy_tbl <- tbl_gpu(mtcars, lazy = TRUE)
 
-# Or per-table
-tbl_gpu(data, lazy = TRUE)
+# Or for every table created afterwards
+old <- options(cuplyr.exec_mode = "lazy")
+
+# Pending steps, then the plan the optimizer will run
+lazy_tbl |> filter(mpg > 20) |> mutate(kpl = mpg * 0.425) |> select(cyl, kpl) |> explain()
+
+options(old)
 ```
+
+The optimizer applies, in this order:
+- Projection pruning (drop unused columns early)
+- Mutate fusion (combine consecutive `mutate()` calls, within limits)
+- Dead-column pruning (drop mutate outputs nothing uses)
+- Filter pushdown (move filters closer to the source: below a `mutate()` that doesn't compute their columns, below a `select()` that keeps them, and into some joins)
+- Filter reordering (merge consecutive `filter()` calls into one filter that selects the rows once, in most cases, with cheaper predicates first)
+
+The timings, the memory numbers and the cases where the GPU loses are in `vignette("performance", package = "cuplyr")`.
 
 ### Supported column types
 
@@ -155,7 +184,7 @@ GitHub Actions trigger/run instructions are in [docs/github-actions-runbook.md](
 
 ## Performance
 
-Benchmark code lives in `benchmark/benchmark.R`.
+Benchmark code lives in `benchmark/benchmark.R`. For eager vs lazy timings, per-call and transfer costs, and where the GPU loses to dplyr, see `vignette("performance", package = "cuplyr")`.
 
 Benchmarks on 25 million rows (synthetic taxi data, median of 10 iterations):
 
