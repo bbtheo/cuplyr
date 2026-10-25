@@ -3414,6 +3414,49 @@ ir_parse_bool8_cast <- function(op, cast_to) {
   }
 }
 
+# The R value of a column-free IR subtree made of literals and pure ops
+# (`-1`, `-(2)`, `1 + 1`), or `ok = FALSE`. Unlike ir_fold_literal_call() it also
+# evaluates a unary minus, which that fold leaves as a call.
+# @keywords internal
+ir_const_value <- function(node) {
+  got <- ir_lit_r_value(node)
+  if (got$ok) {
+    return(got)
+  }
+  if (!inherits(node, "cuplyr_ir") || !identical(node$kind, "call") ||
+      !node$op %in% ir_foldable_pure_ops) {
+    return(list(ok = FALSE))
+  }
+  vals <- vector("list", length(node$args))
+  for (i in seq_along(node$args)) {
+    v <- ir_const_value(node$args[[i]])
+    if (!v$ok) {
+      return(list(ok = FALSE))
+    }
+    vals[i] <- list(v$value)
+  }
+  ir_eval_pure_op(node$op, vals)
+}
+
+# F67: the parse hook of round(). The GPU rule is R's fround() for a constant
+# `digits`, so the second argument must evaluate in R (column-free) to one
+# non-NA numeric/logical value, which is passed on as a FLOAT64 literal with
+# the raw double (the handler applies `floor(digits + 0.5)` itself). A column,
+# NA/NaN, a vector or anything else returns NULL: the verb's CPU fallback gives
+# dplyr's value or error. A logical x is cast to a double first (F19-a2).
+ir_parse_round <- function(args, schema) {
+  if (length(args) == 2L) {
+    d <- ir_const_value(args[[2L]])
+    if (!d$ok || !(is.numeric(d$value) || is.logical(d$value)) || is.na(d$value)) {
+      return(NULL)
+    }
+    args[[2L]] <- ir_lit(as.double(d$value), "FLOAT64")
+  } else if (length(args) != 1L) {
+    return(NULL)
+  }
+  ir_call("round", ir_cast_bool8_first(args, schema, "cast_float64"))
+}
+
 # F37: the parse hook of "+" and "-" (it only sees parsed args). A Date
 # shifted by a whole number of days becomes a native date_add_days/
 # date_sub_days node; every other timestamp shape that dplyr can compute goes
@@ -3727,7 +3770,9 @@ ir_native_arg_types <- local({
       cummax = c("INT32", "INT64", "FLOAT64"),
       cummin = c("INT32", "INT64", "FLOAT64"),
       any = "BOOL8", all = "BOOL8", cumall = "BOOL8", cumany = "BOOL8",
-      min = num, max = num
+      min = num, max = num,
+      # a STRING gets dplyr's "non-numeric argument" error from the CPU
+      round = num
     )
   )
 })
@@ -4950,7 +4995,7 @@ ir_call_registry <- list(
   # types. Verified against the dplyr oracle (T6 finding; corrects
   # phase1_expression_engine.md section 1.3's table, which grouped round()
   # with abs() as "argument type" -- empirically wrong for round()).
-  "round" = list(arity = NA_integer_, parse = ir_parse_bool8_cast("round", "cast_float64"),
+  "round" = list(arity = NA_integer_, parse = ir_parse_round,
                  type = type_float64, lower = list(handler = "round")),
 
   # --- Phase 4: conditional & vector functions ---

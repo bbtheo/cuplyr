@@ -90,6 +90,7 @@
 #include "cuda_utils.hpp"
 #include "expr_eval.hpp"  // build_scalar(), expr_type_from_str()
 #include "int_sum.hpp"   // narrow_int_sum()
+#include "zero_sign.hpp" // unsign_zero_sum()
 #include "ts_agg.hpp"    // F41: Date/POSIXct mean()/median()
 #include "ops_rolling.hpp" // F59: width-independent rolling windows
 
@@ -685,6 +686,17 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
             for (const auto& job : scan_jobs) {
                 std::unique_ptr<cudf::column> result =
                     std::move(scan_results[static_cast<size_t>(job.primary_request_idx)].results[0]);
+                // F67: R's cumsum() of doubles starts from +0, so a leading run
+                // of -0 gives +0 where cudf's scan gives -0 (unsign_zero_sum();
+                // an ungrouped scan is one group, whose first row decides).
+                // cummean() is cumsum() / row_number(), so it follows.
+                if (specs[static_cast<size_t>(job.spec_index)].fn == "cumsum" && !job.int_cumsum) {
+                    if (group_indices.size() == 0) {
+                        cuplyr::unsign_zero_scan_one_group(result);
+                    } else {
+                        cuplyr::unsign_zero_sum(result);
+                    }
+                }
 
                 if (job.indicator_request_idx >= 0) {
                     std::unique_ptr<cudf::column>& indicator_max =
@@ -826,6 +838,7 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
             struct AggJob {
                 int spec_index;
                 int request_idx;
+                bool split_mean = false;  // request holds [SUM, COUNT_VALID], not MEAN
             };
 
             std::vector<cudf::groupby::aggregation_request> requests;
@@ -867,6 +880,7 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
             for (int si : agg_spec_indices) {
                 const WindowSpec& sp = specs[static_cast<size_t>(si)];
                 cudf::groupby::aggregation_request req;
+                bool split_mean = false;
 
                 if (sp.fn == "n") {
                     // n() ignores its own (absent) value argument -- the
@@ -917,15 +931,45 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                         req.values = ts_float_keepalive.back()->view();
                         ts_targets[si] = ts_target;
                     }
-                    req.aggregations.push_back(cuplyr::get_groupby_agg(window_agg_cudf_name(sp.fn)));
+                    // F67: a double mean() is asked for as its SUM and COUNT_VALID
+                    // (what cudf derives MEAN from), so the sum's zero sign can be
+                    // fixed before the division, as R does; see below.
+                    split_mean = sp.fn == "mean" && ts_target == cudf::type_id::EMPTY &&
+                                 req.values.type().id() == cudf::type_id::FLOAT64;
+                    if (split_mean) {
+                        req.aggregations.push_back(
+                            cudf::make_sum_aggregation<cudf::groupby_aggregation>());
+                        req.aggregations.push_back(
+                            cudf::make_count_aggregation<cudf::groupby_aggregation>(
+                                cudf::null_policy::EXCLUDE));
+                    } else {
+                        req.aggregations.push_back(
+                            cuplyr::get_groupby_agg(window_agg_cudf_name(sp.fn)));
+                    }
                 }
 
-                agg_jobs.push_back(AggJob{si, static_cast<int>(requests.size())});
+                agg_jobs.push_back(AggJob{si, static_cast<int>(requests.size()), split_mean});
                 requests.push_back(std::move(req));
             }
 
             auto agg_pair = gb.aggregate(requests);
             auto& agg_results = agg_pair.second;
+
+            // F67: sum() is never -0 in R (unsign_zero_sum()), and a double
+            // mean() is its unsigned sum over the count: -0 only when a
+            // negative sum rounds to zero on the division. Fixed on the
+            // per-group results, before the broadcast.
+            for (const auto& job : agg_jobs) {
+                auto& res = agg_results[static_cast<size_t>(job.request_idx)].results;
+                if (job.split_mean) {
+                    cuplyr::unsign_zero_sum(res[0]);
+                    res[0] = cudf::binary_operation(res[0]->view(), res[1]->view(),
+                                                    cudf::binary_operator::DIV,
+                                                    cudf::data_type{cudf::type_id::FLOAT64});
+                } else if (specs[static_cast<size_t>(job.spec_index)].fn == "sum") {
+                    cuplyr::unsign_zero_sum(res[0]);
+                }
+            }
 
             cudf::column_view counts_view =
                 agg_results[static_cast<size_t>(count_request_idx)].results[0]->view();

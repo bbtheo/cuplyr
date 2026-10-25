@@ -2,6 +2,7 @@
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
 #include "int_sum.hpp"
+#include "zero_sign.hpp"
 #include "ts_agg.hpp"
 
 #include <cudf/aggregation.hpp>
@@ -621,11 +622,17 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         Rf_setAttrib(out, Rf_install("ts_fraction"), ts_fraction);
         return out;
     };
-    // Applied to each aggregation's final column, whichever path made it.
-    auto narrow_sum = [&](int i, std::unique_ptr<cudf::column>& col) {
-        if (is_int_sum(Rcpp::as<std::string>(agg_types[i]),
-                       view.column(agg_col_indices[i]).type().id())) {
+    // Applied to each aggregation's final column, whichever path made it:
+    // an integer sum() narrows to INT32 (F34), and a double sum() is never
+    // -0 (F67, unsign_zero_sum(): one row per group; a result of more than
+    // 65536 groups is searched for a -0 first). A double mean() takes its
+    // zero sign from its sum instead (split_mean() / finish_mean()).
+    auto finish_sum = [&](int i, std::unique_ptr<cudf::column>& col) {
+        std::string t = Rcpp::as<std::string>(agg_types[i]);
+        if (is_int_sum(t, view.column(agg_col_indices[i]).type().id())) {
             sum_overflow[i] = narrow_int_sum(col);
+        } else if (t == "sum") {
+            unsign_zero_sum(col);
         }
     };
 
@@ -660,6 +667,27 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         bool frac = false;
         col = float64_to_ts(std::move(col), ts_target[i], frac);
         ts_fraction[i] = frac;
+    };
+    // F67: R's mean() of doubles is its sum (from +0, so never -0) divided by
+    // n: -0 only when a negative sum rounds to zero on the division. cudf's
+    // MEAN is SUM / COUNT_VALID but keeps the sum's -0, so a double mean() is
+    // requested as [SUM, COUNT_VALID] and finish_mean() unsigns the sum and
+    // divides, bit-identical to cudf's own MEAN otherwise. A Date/POSIXct or
+    // integer mean can't be -0 and keeps MEAN.
+    auto split_mean = [&](int i, cudf::column_view values) {
+        return Rcpp::as<std::string>(agg_types[i]) == "mean" && !ts_float_cast[i] &&
+               values.type().id() == cudf::type_id::FLOAT64;
+    };
+    auto add_mean_requests = [](cudf::groupby::aggregation_request& req) {
+        req.aggregations.push_back(cudf::make_sum_aggregation<cudf::groupby_aggregation>());
+        req.aggregations.push_back(cudf::make_count_aggregation<cudf::groupby_aggregation>(
+            cudf::null_policy::EXCLUDE));
+    };
+    auto finish_mean = [](cudf::groupby::aggregation_result& r) {
+        unsign_zero_sum(r.results[0]);
+        r.results[0] = cudf::binary_operation(r.results[0]->view(), r.results[1]->view(),
+                                              cudf::binary_operator::DIV,
+                                              cudf::data_type{cudf::type_id::FLOAT64});
     };
     for (int i = 0; i < num_aggs; ++i) {
         std::string t = Rcpp::as<std::string>(agg_types[i]);
@@ -719,7 +747,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                 agg_type, agg_col(i).type(),
                 static_cast<bool>(identity[i]), used));
             identity_used[i] = used;
-            narrow_sum(i, result_columns.back());
+            finish_sum(i, result_columns.back());
             ts_finish(i, result_columns.back());
         }
         return finish(std::make_unique<cudf::table>(std::move(result_columns)));
@@ -897,7 +925,11 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                         break;
                     }
                     default:
-                        req.aggregations.push_back(get_groupby_agg(agg_type));
+                        if (split_mean(i, col)) {
+                            add_mean_requests(req);
+                        } else {
+                            req.aggregations.push_back(get_groupby_agg(agg_type));
+                        }
                         break;
                 }
                 requests.push_back(std::move(req));
@@ -920,6 +952,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                 }
 
                 auto [result_keys, result_aggs] = gb.aggregate(requests);
+                if (split_mean(i, col)) finish_mean(result_aggs[0]);
 
                 std::unique_ptr<cudf::column> agg_result = std::move(result_aggs[0].results[0]);
                 if (need_na_prop) {
@@ -934,7 +967,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                         std::move(agg_result), result_aggs[1].results[0]->view(), *identity_scalar);
                 }
 
-                narrow_sum(i, agg_result);
+                finish_sum(i, agg_result);
                 ts_finish(i, agg_result);
                 result_columns.push_back(std::move(agg_result));
             }
@@ -1052,7 +1085,11 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                 req.aggregations.push_back(cudf::make_min_aggregation<cudf::groupby_aggregation>());
                 break;
             default:
-                req.aggregations.push_back(get_groupby_agg(agg_type));
+                if (split_mean(i, value_view)) {
+                    add_mean_requests(req);
+                } else {
+                    req.aggregations.push_back(get_groupby_agg(agg_type));
+                }
                 break;
         }
         main_request_idx[i] = static_cast<int>(requests.size());
@@ -1105,6 +1142,9 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     }
 
     auto [result_keys, result_aggs] = gb.aggregate(requests);
+    for (int i = 0; i < num_aggs; ++i) {
+        if (split_mean(i, eff[i])) finish_mean(result_aggs[main_request_idx[i]]);
+    }
 
     // The quantile results leave their shared requests first, so everything
     // below that reads `results[0]` of a request sees only its own aggregation.
@@ -1182,7 +1222,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         result_columns.push_back(quantile_cols[i]
                                      ? std::move(quantile_cols[i])
                                      : std::move(result_aggs[main_request_idx[i]].results[0]));
-        narrow_sum(i, result_columns.back());
+        finish_sum(i, result_columns.back());
         ts_finish(i, result_columns.back());
     }
 

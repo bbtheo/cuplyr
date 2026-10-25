@@ -145,11 +145,16 @@ colwise_rewrite_call <- function(expr, fn, env, schema, scope, memo) {
 # The plan for `fn` called with `extra` args from `env`, memoized in `memo`
 # (one colwise_rewrite_dots() call, so `scope` is fixed). The key is the
 # function by identical(), which compares closure environments too, plus
-# `env` and `extra`. NULL means every call to it gives up.
+# `env` and `extra`. The function and `extra` compare bitwise (F67): by
+# default identical() calls -0 and 0 equal, so `function(v) v / -0` with the
+# -0 a value in its body (built by bquote()) would share the plan of
+# `function(v) v / 0`. num.eq applies to formals, body and attributes.
+# NULL means every call to it gives up.
 # @keywords internal
 colwise_fn_plan <- function(fn, env, extra, scope, memo) {
   for (entry in memo$plans) {
-    if (identical(entry$fn, fn) && identical(entry$env, env) && identical(entry$extra, extra)) {
+    if (identical(entry$fn, fn, num.eq = FALSE) && identical(entry$env, env) &&
+        identical(entry$extra, extra, num.eq = FALSE)) {
       return(entry$plan)
     }
   }

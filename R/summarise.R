@@ -1568,9 +1568,13 @@ preprocess_agg_expressions <- function(.data, dots) {
     # an equal column. A window argument's column depends on the IR plus
     # working_data's groups and row order, which no dot changes. Each temp
     # column (and each window stage) copies the whole table, so k of them cost
-    # k times the table.
+    # k times the table. The IR is compared bitwise (num.eq = FALSE): by
+    # default identical() calls 0 and -0 equal, and `x / 0` and `x / -0` are
+    # different columns (F67).
     if (!is.null(ir)) {
-      shared <- Find(function(t) identical(t$keep_bool, keep_bool) && identical(t$ir, ir), temp_cols)
+      shared <- Find(function(t) {
+        identical(t$keep_bool, keep_bool) && identical(t$ir, ir, num.eq = FALSE)
+      }, temp_cols)
       if (!is.null(shared)) {
         new_dots[[i]] <- rlang::new_quosure(
           as.call(list(as.name(decomposed$fn_name), as.name(shared$name))),

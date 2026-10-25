@@ -39,7 +39,7 @@
 //    section 1.3 (mirroring `ir_infer_type()`/`infer_mutate_output_type()`
 //    on the R side, but not calling into R): exact for col/lit nodes and
 //    for the single-level op classes (comparisons/logic -> BOOL8, sqrt et
-//    al -> FLOAT64, abs/round -> arg type), an approximation (falls back to
+//    al -> FLOAT64, round -> FLOAT64, abs -> arg type), an approximation (falls back to
 //    a promotion-hierarchy scan of argument types) for nested arithmetic.
 //    The R-supplied `output_type` is always the authoritative final answer
 //    (enforced by the cast-to-declared-type step in ops_expr.cpp); this
@@ -48,6 +48,7 @@
 #ifndef CUPLYR_EXPR_EVAL_HPP
 #define CUPLYR_EXPR_EVAL_HPP
 
+#include "cuda_utils.hpp"
 #include "gpu_table.hpp"
 #include "ops_common.hpp"
 #include "r_to_column.hpp"
@@ -58,6 +59,7 @@
 #include <cudf/binaryop.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
+#include <cudf/utilities/default_stream.hpp>
 #include <cudf/datetime.hpp>
 #if __has_include(<cudf/join/join.hpp>)
 #include <cudf/join/join.hpp>
@@ -86,6 +88,7 @@
 #include <cudf/table/table_view.hpp>
 #include <cudf/transform.hpp>
 #include <cudf/types.hpp>
+#include <deque>
 #include <cudf/unary.hpp>
 #include <cudf/wrappers/durations.hpp>
 #include <cudf/wrappers/timestamps.hpp>
@@ -583,9 +586,11 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
         return resolve_static_type(args[0], ctx);
     }
 
-    if (op == "abs" || op == "round") {
+    if (op == "abs") {
         return resolve_static_type(args[0], ctx);
     }
+    // round() is a double in R whatever x is (F67)
+    if (op == "round") return cudf::data_type{cudf::type_id::FLOAT64};
 
     // Phase 4: if_else()/case_when()/coalesce() unify their "value position"
     // args (never `cond`); na_if() just keeps `x`'s own type. Mirrors R/ir.R's
@@ -744,6 +749,46 @@ inline int checked_int_kind(const std::string& op, Rcpp::List node, const eval_c
 // is_valid = false (`set_valid`-equivalent via the scalar's own ctor).
 // -----------------------------------------------------------------------------
 
+// F67: a FLOAT64 scalar that really holds `v` on the device. cudf's
+// numeric_scalar constructor stores the value with device_uvector::
+// set_element_async(), which memsets the element whenever `value == 0`; since
+// -0.0 == 0.0, a scalar built from -0 holds +0, and so would every AST
+// literal, fill column, copy_if_else operand and shift fill taken from it.
+// A -0 is therefore built from a placeholder and its bits copied in.
+inline std::unique_ptr<cudf::numeric_scalar<double>> make_f64_scalar(double v, bool valid) {
+    if (valid && v == 0.0 && std::signbit(v)) {
+        static const double neg_zero = -0.0;
+        auto s = std::make_unique<cudf::numeric_scalar<double>>(1.0, true);
+        cuplyr::check_cuda(cudaMemcpyAsync(s->data(), &neg_zero, sizeof(double),
+                                           cudaMemcpyHostToDevice,
+                                           cudf::get_default_stream().value()),
+                           "negative zero scalar");
+        return s;
+    }
+    return std::make_unique<cudf::numeric_scalar<double>>(v, valid);
+}
+
+// F67: an AST (cudf::ast::tree) with the literals it points at kept next to
+// it. A node used twice is evaluated twice (the AST has no common
+// subexpressions).
+struct f64_ast {
+    cudf::ast::tree tree;
+    std::deque<cudf::numeric_scalar<double>> lits;
+
+    const cudf::ast::expression& col(int i) { return tree.emplace<cudf::ast::column_reference>(i); }
+    const cudf::ast::expression& lit(double v) {
+        lits.emplace_back(v, true);
+        return tree.emplace<cudf::ast::literal>(lits.back());
+    }
+    const cudf::ast::expression& op1(cudf::ast::ast_operator o, const cudf::ast::expression& a) {
+        return tree.emplace<cudf::ast::operation>(o, a);
+    }
+    const cudf::ast::expression& op2(cudf::ast::ast_operator o, const cudf::ast::expression& a,
+                                     const cudf::ast::expression& b) {
+        return tree.emplace<cudf::ast::operation>(o, a, b);
+    }
+};
+
 inline std::unique_ptr<cudf::scalar> build_scalar(const std::string& type_str,
                                                    SEXP value_sexp,
                                                    bool force_na) {
@@ -758,7 +803,7 @@ inline std::unique_ptr<cudf::scalar> build_scalar(const std::string& type_str,
                 // Only NA_real_ is null; a NaN literal is a NaN value, as on upload.
                 if (R_IsNA(v)) is_na = true;
             }
-            return std::make_unique<cudf::numeric_scalar<double>>(v, !is_na);
+            return make_f64_scalar(v, !is_na);
         }
         case cudf::type_id::INT32: {
             int32_t v = 0;
@@ -1182,9 +1227,18 @@ inline cudf::ast::expression const& build_ast(Rcpp::List node,
 
     // Unary `-x`: no NEG in the ast_operator enum (section 2.3); lower to
     // SUB(typed-zero, x) so INT32 stays INT32 rather than promoting to
-    // FLOAT64 the way a naive "0.0 - x" would.
+    // FLOAT64 the way a naive "0.0 - x" would. A float must flip the sign of
+    // a zero too (R: -(0) is -0, and `x / -0` is -Inf), which 0 - x does not
+    // (0 - 0 is +0), so floats are multiplied by -1.0: exact for every value
+    // including +-0, +-Inf and NaN. Integers have no signed zero.
     if (op == "-" && args.size() == 1) {
         std::string zero_type = expr_type_to_str(resolve_static_type(args[0], ctx));
+        if (zero_type == "FLOAT64" || zero_type == "FLOAT32") {
+            cudf::ast::expression const& neg_one =
+                make_literal(zero_type, Rcpp::wrap(-1.0), false, tree, scalars);
+            return tree.emplace<cudf::ast::operation>(cudf::ast::ast_operator::MUL, neg_one,
+                                                      operand_refs[0].get());
+        }
         cudf::ast::expression const& zero_lit = make_literal(zero_type, Rcpp::wrap(0), false, tree, scalars);
         return tree.emplace<cudf::ast::operation>(cudf::ast::ast_operator::SUB, zero_lit, operand_refs[0].get());
     }
@@ -1938,43 +1992,159 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         return result;
     }
 
-    // ---- round(x) / round(x, n): banker's rounding (HALF_EVEN) ----
+    // ---- round(x) / round(x, digits): R's fround() (F67) ----
+    //
+    // R >= 4.0.0 does not round half-even on the scaled value (cudf::round
+    // does, and 1.05 -> 1.1 where R gives 1.0): it builds the two candidates
+    // xd = floor(|x| * 10^d) / 10^d and xu = ceil(|x| * 10^d) / 10^d, keeps the
+    // one closer to |x| in double arithmetic, and on a tie the one whose scaled
+    // value is even (src/nmath/fround.c, R 4.6.1). Reproduced here with the
+    // same operations in the same order. R/ir.R's parse hook hands this
+    // handler `digits` as a FLOAT64 literal holding R's raw double (a column,
+    // NA or NaN digits never get here). The result is a double whatever x is.
+    //
+    // Host side (digits is a constant): the identity/zero/rint cases, `dig =
+    // floor(digits + 0.5)`, 10^dig from R's own R_pow_di() (bit-identical to
+    // R's), and the exponent `emin` that replaces fround's per-row
+    // `M_LOG10_2 * (0.5 + logb(x)) + dig > DBL_DIG` test: that test is
+    // monotone in logb(x) = floor(log2(x)) (exact, subnormals included), so
+    // "no rounding needed" is exactly |x| >= 2^emin.
+    // Device side: three compute_column() AST stages (i10 = floor(|x| *
+    // 10^dig); the sign of du - dd; the chosen candidate with x's sign), then
+    // one copy_if_else. Rows that need no rounding (0, +-Inf, NaN, |x| >=
+    // 2^emin) take x itself, so -0 survives; nulls stay null.
     if (op == "round") {
         Rcpp::List x_node = args[0];
         cudf::size_type x_idx = materialize(x_node, ctx);
-        cudf::column_view x_col = ctx.cols[x_idx];
+        cudf::column_view x_in = ctx.cols[x_idx];
 
-        int32_t places = 0;
+        double digits = 0.0;
         if (args.size() > 1) {
             Rcpp::List places_node = args[1];
-            places = static_cast<int32_t>(Rcpp::as<double>(places_node["value"]));
+            digits = Rcpp::as<double>(places_node["value"]);
         }
 
-        // Header-signature surprise (verified empirically, not just from the
-        // docstring): cudf::round_decimal() only accepts integral or
-        // fixed-point columns -- it throws "Only integral or fixed point
-        // currently supported by round_decimal" for FLOAT32/FLOAT64, despite
-        // section 0 treating it as a straightforward replacement for the
-        // deprecated cudf::round() (whose own docstring examples ARE
-        // floating-point). dplyr's round() is used overwhelmingly on
-        // doubles, so: use round_decimal() for integral/fixed-point inputs
-        // (where it is in fact the right, non-deprecated call and rounding
-        // is a no-op anyway at decimal_places >= 0), and fall back to the
-        // deprecated cudf::round() -- which does support HALF_EVEN on
-        // floating-point columns -- for FLOAT32/FLOAT64.
-        if (x_col.type().id() == cudf::type_id::FLOAT32 || x_col.type().id() == cudf::type_id::FLOAT64) {
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-#endif
-            auto result = cudf::round(x_col, places, cudf::rounding_method::HALF_EVEN);
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
-            return result;
+        // R coerces integer/logical x to double
+        std::unique_ptr<cudf::column> x_cast;
+        if (x_in.type().id() != cudf::type_id::FLOAT64) {
+            x_cast = cudf::cast(x_in, cudf::data_type{cudf::type_id::FLOAT64});
+        }
+        cudf::column_view x = x_cast ? x_cast->view() : x_in;
+        const double dmax = std::numeric_limits<double>::max();
+
+        constexpr int kMaxDigits = 323;  // DBL_MAX_10_EXP + DBL_DIG
+        constexpr int kMax10e = 308;     // DBL_MAX_10_EXP
+        if (digits > kMaxDigits) {
+            return std::make_unique<cudf::column>(x);  // nothing to round
+        }
+        // an integer or logical x is whole: it is its own rounding at digits >= 0
+        if (x_cast && digits >= 0.0) return std::move(x_cast);
+
+        // The arithmetic is cudf's AST interpreter (compute_column()): each AST
+        // op is evaluated on its own, so R's operation order and rounding are
+        // kept, and a stage's temporaries never exist as columns. The stages
+        // keep at most three FLOAT64 columns alive besides x (round() once
+        // held 21 temporaries at once and ran out of memory on large tables).
+        using AO = cudf::ast::ast_operator;
+        auto xtab = [&](std::vector<cudf::column_view> cols) {
+            cols.insert(cols.begin(), x);
+            return cudf::table_view(cols);
+        };
+
+        if (digits < -kMax10e) {
+            // +0 for every finite nonzero x; 0, +-Inf and NaN stay
+            f64_ast a;
+            const auto& ax = a.op1(AO::ABS, a.col(0));
+            auto change = cudf::compute_column(
+                xtab({}), a.op2(AO::LOGICAL_AND, a.op2(AO::NOT_EQUAL, a.col(0), a.lit(0.0)),
+                                a.op2(AO::LESS_EQUAL, ax, a.lit(dmax))));
+            return cudf::copy_if_else(cudf::numeric_scalar<double>(0.0), x, change->view());
+        }
+        if (digits == 0.0) {
+            return cudf::unary_operation(x, cudf::unary_operator::RINT);  // nearbyint(): half-even
         }
 
-        return cudf::round_decimal(x_col, places, cudf::rounding_method::HALF_EVEN);
+        const int dig = static_cast<int>(std::floor(digits + 0.5));
+        // smallest e = logb(|x|) at which rounding is not needed
+        constexpr double kLog10_2 = 0.301029995663981195213738894724;  // M_LOG10_2
+        double emin_d = std::numeric_limits<double>::infinity();
+        for (int e = -1074; e <= 1023; ++e) {
+            if (kLog10_2 * (0.5 + e) + dig > 15) {
+                emin_d = std::ldexp(1.0, e);
+                break;
+            }
+        }
+        const bool big = dig > kMax10e;  // 10^dig overflows: scale in two steps
+        const double p = R_pow_di(10., big ? kMax10e : dig);
+        const double p10 = big ? R_pow_di(10., dig - kMax10e) : 1.0;
+
+        // |x| * 10^dig, and a value scaled back down, as fround() writes them
+        auto x10_of = [&](f64_ast& a, const cudf::ast::expression& ax) -> const cudf::ast::expression& {
+            const auto& t = a.op2(AO::MUL, ax, a.lit(p));
+            return big ? a.op2(AO::MUL, t, a.lit(p10)) : t;
+        };
+        auto down = [&](f64_ast& a, const cudf::ast::expression& v) -> const cudf::ast::expression& {
+            const auto& q = a.op2(AO::TRUE_DIV, v, a.lit(p));
+            return big ? a.op2(AO::TRUE_DIV, q, a.lit(p10)) : q;
+        };
+
+        // Stage 1: i10 = floor(|x| * 10^dig). The candidates are xd = i10 / p
+        // and xu = ceil(x10) / p, and ceil(x10) = i10 + (x10 > i10).
+        auto i10 = [&] {
+            f64_ast a;
+            return cudf::compute_column(
+                xtab({}), a.op1(AO::FLOOR, x10_of(a, a.op1(AO::ABS, a.col(0)))));
+        }();
+
+        // Stage 2: dif = (xu - |x|) - (|x| - xd). Its sign is exactly the order
+        // of du and dd (a - b is 0 only when a == b), so du < dd is dif < 0
+        // and du == dd is dif == 0.
+        auto dif = [&] {
+            f64_ast a;
+            const auto& ax = a.op1(AO::ABS, a.col(0));
+            const auto& i = a.col(1);
+            const auto& k = a.op1(AO::CAST_TO_FLOAT64, a.op2(AO::GREATER, x10_of(a, ax), i));
+            const auto& xu = down(a, a.op2(AO::ADD, i, k));
+            const auto& xd = down(a, i);
+            return cudf::compute_column(
+                xtab({i10->view()}),
+                a.op2(AO::SUB, a.op2(AO::SUB, xu, ax), a.op2(AO::SUB, ax, xd)));
+        }();
+
+        // Stage 3: sgn * (xu if du < dd, or du == dd with i10 odd; else xd).
+        // That select is (i10 + up * k) / p, exactly xu or xd: i10 + 1 is the
+        // double ceil(x10), and k is 0 where xu == xd.
+        auto rounded = [&] {
+            f64_ast a;
+            const auto& ax = a.op1(AO::ABS, a.col(0));
+            const auto& i = a.col(1);
+            const auto& d = a.col(2);
+            // i10 odd: half of it is not whole (i10 < 2^53 wherever it matters)
+            const auto& half = a.op2(AO::MUL, i, a.lit(0.5));
+            const auto& odd_tie = a.op2(AO::LOGICAL_AND,
+                                        a.op2(AO::NOT_EQUAL, half, a.op1(AO::FLOOR, half)),
+                                        a.op2(AO::EQUAL, d, a.lit(0.0)));
+            const auto& up = a.op2(AO::LOGICAL_OR, a.op2(AO::LESS, d, a.lit(0.0)), odd_tie);
+            const auto& inc = a.op1(AO::CAST_TO_FLOAT64,
+                                    a.op2(AO::LOGICAL_AND, up, a.op2(AO::GREATER, x10_of(a, ax), i)));
+            const auto& mag = down(a, a.op2(AO::ADD, i, inc));
+            const auto& sgn = a.op2(AO::TRUE_DIV, a.col(0), ax);  // +-1 (x == 0 keeps x)
+            return cudf::compute_column(xtab({i10->view(), dif->view()}), a.op2(AO::MUL, sgn, mag));
+        }();
+        i10.reset();
+        dif.reset();
+
+        // rows that are rounded: nonzero (zero keeps its sign), finite (so not
+        // NaN) and below the size at which a double holds no more digits;
+        // the others keep x
+        f64_ast a;
+        const auto& ax = a.op1(AO::ABS, a.col(0));
+        auto ok = cudf::compute_column(
+            xtab({}),
+            a.op2(AO::LOGICAL_AND, a.op2(AO::GREATER, ax, a.lit(0.0)),
+                  std::isfinite(emin_d) ? a.op2(AO::LESS, ax, a.lit(emin_d))
+                                        : a.op2(AO::LESS_EQUAL, ax, a.lit(dmax))));
+        return cudf::copy_if_else(rounded->view(), x, ok->view());
     }
 
     // ---- as_date(x) / as_posixct(x): TIMESTAMP_* -> TIMESTAMP_* cast
@@ -2214,11 +2384,28 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
             is_minmax ? cudf::data_type{as_int ? cudf::type_id::INT32 : cudf::type_id::FLOAT64}
                       : (fn == "sum" && as_int ? cudf::data_type{cudf::type_id::INT64} : f64);
 
+        // F67: R's sum()/mean() accumulate from +0, so all -0 operands give
+        // +0 where a fold that starts from the first operand gives -0. A
+        // double sum/mean starts from `first + 0` instead of a copy of the
+        // first operand (same allocation; the addition changes only a -0).
+        // An operand cast from an integer is never -0.
+        const bool from_plus_zero =
+            work.id() == cudf::type_id::FLOAT64 && (fn == "sum" || fn == "mean");
         auto load = [&](int i) -> std::unique_ptr<cudf::column> {
             Rcpp::List a = args[i];
             cudf::size_type idx = materialize(a, ctx);
             cudf::column_view c = ctx.cols[idx];
-            if (c.type().id() == work.id()) return std::make_unique<cudf::column>(c);
+            if (c.type().id() == work.id()) {
+                if (i == 0 && from_plus_zero) {
+                    // an AST (one fused kernel) is ~3x faster than
+                    // binary_operation() with a scalar here, close to the copy
+                    f64_ast a;
+                    return cudf::compute_column(
+                        cudf::table_view({c}),
+                        a.op2(cudf::ast::ast_operator::ADD, a.col(0), a.lit(0.0)));
+                }
+                return std::make_unique<cudf::column>(c);
+            }
             return cudf::cast(c, work);
         };
         auto fill_scalar = [&](double v) -> std::unique_ptr<cudf::scalar> {
