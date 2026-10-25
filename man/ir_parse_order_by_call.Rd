@@ -7,15 +7,8 @@
 ir_parse_order_by_call(expr, env, schema)
 }
 \description{
-dplyr's \code{order_by(order_by, call)} re-evaluates \code{call} as if the data
-were sorted by \code{order_by}, then un-sorts the result back to the
-original row order (verified empirically against dplyr 1.2.1:
-\code{order_by(x, cumsum(y))} on \code{y = c(3,1,4,1,5,9,2,6)} matches computing
-\code{cumsum} after a STABLE ascending sort of \code{x}, then scattering back to
-the original positions) -- exactly the "frame" concept
-\code{R/window.R}'s \code{window_spec()} already carries via \code{order_cols}/
-\code{order_desc}. Parses \code{order_by} into a column reference (see
-\code{\link[=ir_parse_order_ref]{ir_parse_order_ref()}}) and folds it into the parsed \code{call}'s own IR
-node via \code{\link[=apply_order_override]{apply_order_override()}}.
+dplyr rewrites it to \verb{with_order(order_by, <head of call>, <args of call>)}, so this builds that call, lets R bind its arguments (a name
+\code{with_order()} would capture, such as \code{lag(x, order_by = y)}, makes the
+call an error, i.e. \code{NULL} here) and parses it like \code{\link[=ir_parse_with_order]{ir_parse_with_order()}}.
 }
 \keyword{internal}

@@ -33,7 +33,7 @@
 #'   spec's frame: rank-family calls with a value argument default this to
 #'   `value_col` itself (ranking a column inherently orders by that same
 #'   column), UNLESS an explicit `order_by=`/`order_by()`/`with_order()`
-#'   override (Phase 5 W4, `R/ir.R`'s `apply_order_override()`) is
+#'   override (Phase 5 W4, `R/ir.R`'s `ir_parse_with_order()`) is
 #'   present, in which case that wins for ANY window kind (shift/rank/agg)
 #' @param order_desc Logical vector, parallel to `order_cols`, `TRUE` for
 #'   descending
@@ -147,7 +147,7 @@ window_arg_cols <- function(ir) {
   entry <- ir_call_registry[[ir$op]]
   own <- if (!is.null(entry) && !is.null(entry$window)) {
     # An `order_by()`/`with_order()`/`order_by=`-supplied ordering
-    # (Phase 5 W4, R/ir.R's `apply_order_override()`) references a column
+    # (Phase 5 W4, R/ir.R's `ir_parse_with_order()`) references a column
     # too, even though it isn't one of `ir$args` -- fold it in so the
     # multi-dot chunking rule (below) treats it exactly like an ordinary
     # value-argument reference.
@@ -201,7 +201,7 @@ extract_one_window_call <- function(node, schema, state, key = NULL) {
   if (!is.null(node$meta$order_override)) {
     # Phase 5 W4: an explicit `order_by=` argument, or an enclosing
     # `order_by()`/`with_order()` wrapper (R/ir.R's
-    # `apply_order_override()`), always wins over the rank-kind default
+    # `ir_parse_with_order()`), always wins over the rank-kind default
     # below -- e.g. `first(x, order_by = y)` frames on `y`, not `x`.
     order_cols <- node$meta$order_override$col
     order_desc <- node$meta$order_override$desc

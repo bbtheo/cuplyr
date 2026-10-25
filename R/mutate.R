@@ -185,14 +185,29 @@
 #'         are not yet supported
 #'       \item `ntile(x = row_number(), n)` -- desugars into `row_number()`/
 #'         `sum()`, so it's native as a consequence of those being native
-#'       \item `order_by(order_by, call)` / `with_order(order_by, fun, x)`
-#'         -- re-frame a directly-wrapped `row_number()`/`lag()`/`lead()`/
-#'         `cumsum()`/`cummax()`/`cummin()`/`cumprod()`/rank-family call's
-#'         ordering (matching dplyr exactly, including that both of these
-#'         genuinely error, in dplyr itself, when wrapped around an
-#'         aggregate like `mean()`/`first()`/`n()` -- cuplyr matches that by
-#'         rejecting the same shape as unsupported rather than silently
-#'         ignoring the requested ordering)
+#'       \item `order_by(order_by, call)` / `with_order(order_by, fun, x, ...)`
+#'         -- like dplyr, only the FIRST argument of `call` is put in
+#'         `order_by`'s order (stable, `NA` last); the other arguments are
+#'         evaluated in row order, and the call stays native only when each
+#'         of them is a non-`NULL` scalar that reads no column. Native: a
+#'         window call wrapped directly (`cumsum()`/`cummax()`/`cummin()`/
+#'         `cumprod()`/`lag()`/`lead()`/`roll_*()` except `roll_median()`,
+#'         and the calls cuplyr desugars into several windows,
+#'         `cummean()`/`cumall()`/`cumany()`/`consecutive_id()`, each part in
+#'         `order_by`'s order), the value-only rank functions
+#'         (`min_rank()`, `dense_rank()`, ... are unaffected by the order),
+#'         and an elementwise call whose other arguments are scalars
+#'         (`order_by(o, cumsum(x) * 2)` is `cumsum(x) * 2`: the window
+#'         inside the first argument runs in row order, as in dplyr).
+#'         Everything else runs the whole call on the CPU, which gives
+#'         dplyr's value or error: `roll_median()`, an elementwise call with
+#'         another column argument (`order_by(o, cumsum(x) + lag(x))`), a
+#'         `NULL` or empty extra argument (`lag(x, default = NULL)`),
+#'         `row_number(x)`/`ntile(x, n)` (ties broken by the order),
+#'         `first()`/`last()`/`nth()`, aggregates, a nested `order_by()` as
+#'         the wrapped call itself (`order_by(o, order_by(i, cumsum(x)))`;
+#'         nested inside the first argument it stays native), and shapes
+#'         dplyr rejects (`order_by(o, row_number())`)
 #'     }
 #'     Every one of these is evaluated within each `group_by()` group when
 #'     `.data` is grouped (matching `dplyr`'s own grouped-mutate semantics:
@@ -247,13 +262,12 @@
 #'
 #' ## Not yet supported
 #' \itemize{
-#'   \item `order_by()`/`with_order()` wrapping a general expression (only a
-#'     bare column, `desc(column)`, or `-column` is understood as the
-#'     ordering argument -- `order_by(a + b, cumsum(x))` is not yet
-#'     supported), or wrapping anything other than a SINGLE directly-nested
-#'     window call (`order_by(y, cumsum(x) + lag(x))` is not yet supported;
-#'     `order_by(y, lag(cumsum(x)))` IS supported, since `lag()` is the
-#'     single directly-wrapped call there)
+#'   \item `order_by()`/`with_order()` with a general expression as the
+#'     ordering argument (only a bare column, `desc(column)`, or `-column`
+#'     is native, with `-` for numeric/logical columns and `desc()` of a
+#'     string only under a C collation: `order_by(a + b, cumsum(x))` runs on
+#'     the CPU); see the `order_by()` item above for what the wrapped call
+#'     may be natively
 #'   \item Multi-column `consecutive_id(a, b, ...)` -- single-column only
 #'   \item Rolling/sliding-window functions (`slider::slide_*()` and
 #'     similar) -- planned for a later phase
@@ -762,13 +776,13 @@ plan_mutate_window_batches <- function(exprs, schema) {
 # Internal: CPU fallback for a window-bearing mutate() call whose plan isn't
 # (yet) fully lowerable. As of Phase 5 task W4, every window kind (shift/
 # rank/scan/agg) has C++ support (see window_spec_lowerable(), R/lower.R),
-# so this is only reachable for a genuinely NEW, not-yet-implemented window
-# kind added by some FUTURE phase -- there is currently no dplyr syntax that
-# reaches it (an order_by()/with_order()-wrapped agg-kind call, the other
-# way a window spec used to become unlowerable, is now rejected at PARSE
-# time instead -- see apply_order_override(), R/ir.R -- which is a hard
-# mutate() error, not this fallback). Kept for forward-compatibility rather
-# than deleted. Re-injects `.by=` (Phase 5 task W6) so the CPU re-run
+# so what reaches it is a window spec that is still unlowerable: today
+# roll_median() (CPU-only, window_spec_lowerable() excludes it), including
+# one under order_by()/with_order(). An order_by()/with_order()-wrapped
+# agg-kind call, the other way a window spec used to become unlowerable, now
+# returns NULL from the parser -- see ir_parse_with_order(), R/ir.R -- so the
+# whole call runs on the CPU, which raises dplyr's own error. Re-injects
+# `.by=` (Phase 5 task W6) so the CPU re-run
 # honors on-the-fly grouping too, exactly as the real call would have.
 #
 # @param .data The original tbl_gpu

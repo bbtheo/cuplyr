@@ -23,7 +23,7 @@ bare column, \code{desc(column)}, or \code{-column}); anything else (a general
 expression) is not implemented this wave and returns \code{NULL} (Phase 5
 W4: \verb{order_by=} re-frames this spec's own frame exactly like
 \code{order_by()}/\code{with_order()} would if wrapped around the same call --
-see \code{\link[=apply_order_override]{apply_order_override()}}'s docs -- so \code{lag(x, order_by = y)} and
+see \code{\link[=ir_parse_with_order]{ir_parse_with_order()}}'s docs -- so \code{lag(x, order_by = y)} and
 \code{order_by(y, lag(x))} produce the same \code{meta$order_override}).
 }
 \keyword{internal}

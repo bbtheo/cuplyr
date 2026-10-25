@@ -32,7 +32,7 @@ column) name of the window function's "value" argument, or
 spec's frame: rank-family calls with a value argument default this to
 \code{value_col} itself (ranking a column inherently orders by that same
 column), UNLESS an explicit \verb{order_by=}/\code{order_by()}/\code{with_order()}
-override (Phase 5 W4, \code{R/ir.R}'s \code{apply_order_override()}) is
+override (Phase 5 W4, \code{R/ir.R}'s \code{ir_parse_with_order()}) is
 present, in which case that wins for ANY window kind (shift/rank/agg)}
 
 \item{order_desc}{Logical vector, parallel to \code{order_cols}, \code{TRUE} for

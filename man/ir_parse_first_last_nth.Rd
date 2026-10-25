@@ -9,7 +9,7 @@ ir_parse_first_last_nth(expr, env, schema, fn_name)
 \description{
 The bare \code{x} (and, for \code{nth()}, a constant-integer \code{n}) shape, plus
 \verb{order_by=} (Phase 5 W4: see \code{\link[=ir_parse_order_ref]{ir_parse_order_ref()}}/
-\code{\link[=apply_order_override]{apply_order_override()}} -- \code{first(x, order_by = y)} re-frames this
+\code{\link[=ir_parse_with_order]{ir_parse_with_order()}} -- \code{first(x, order_by = y)} re-frames this
 spec's frame to be ordered by \code{y}, matching dplyr's own
 "first/last/nth row of the group IN \code{order_by}'s ORDER, not the
 group's current order" semantics, verified empirically against dplyr

@@ -1107,12 +1107,15 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
             // min/max, boolean min/max, ...) and the narrow windows where
             // cudf's direct kernel is faster (roll_native()) stay on
             // cudf::grouped_rolling_window() below. `work_view`'s row order
-            // is stable-sorted by GROUP COLS ONLY (a rolling spec carries no
-            // order_cols, like the scan family): each group's ORIGINAL
-            // relative row order, which both paths require. `gb`/`keys_view`
-            // are the real group columns or the substituted constant
-            // zero-key column, so one code path serves grouped and
-            // ungrouped frames.
+            // is stable-sorted by the group cols plus this frame's order
+            // cols: a plain rolling spec has none (like the scan family), so
+            // each group keeps its ORIGINAL relative row order; under an
+            // order_by()/with_order() override (F72) the frame's order col
+            // is sorted too, so the window runs in that order. Both paths
+            // only need each group's rows in the window's order.
+            // `gb`/`keys_view` are the real group columns or the
+            // substituted constant zero-key column, so one code path
+            // serves grouped and ungrouped frames.
             //
             // F55: R/roll.R drops/propagates a NaN through is.na()/anyNA(),
             // i.e. as missing, in all five functions under both na.rm

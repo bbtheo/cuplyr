@@ -2,7 +2,7 @@
 # own `order_by=` argument, inside mutate() (Phase 5, task W4).
 #
 # Semantics verified empirically against dplyr 1.2.1 (see R/ir.R's
-# apply_order_override() for the full narrative):
+# ir_parse_with_order() for the full narrative):
 #   - order_by(order_by, call) re-evaluates `call` as if the rows were
 #     sorted (ascending, or descending under desc()) by `order_by`, then
 #     un-sorts the result back to the ORIGINAL row order.

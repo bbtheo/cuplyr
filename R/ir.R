@@ -1642,7 +1642,7 @@ ir_na_flag_value <- function(raw_expr, env, schema) {
 #' expression) is not implemented this wave and returns `NULL` (Phase 5
 #' W4: `order_by=` re-frames this spec's own frame exactly like
 #' `order_by()`/`with_order()` would if wrapped around the same call --
-#' see [apply_order_override()]'s docs -- so `lag(x, order_by = y)` and
+#' see [ir_parse_with_order()]'s docs -- so `lag(x, order_by = y)` and
 #' `order_by(y, lag(x))` produce the same `meta$order_override`).
 #'
 #' @keywords internal
@@ -1719,7 +1719,7 @@ ir_parse_shift_call <- function(expr, env, schema, fn_name) {
 #'
 #' The bare `x` (and, for `nth()`, a constant-integer `n`) shape, plus
 #' `order_by=` (Phase 5 W4: see [ir_parse_order_ref()]/
-#' [apply_order_override()] -- `first(x, order_by = y)` re-frames this
+#' [ir_parse_with_order()] -- `first(x, order_by = y)` re-frames this
 #' spec's frame to be ordered by `y`, matching dplyr's own
 #' "first/last/nth row of the group IN `order_by`'s ORDER, not the
 #' group's current order" semantics, verified empirically against dplyr
@@ -1866,10 +1866,23 @@ ir_parse_order_ref <- function(expr, schema) {
       if (!(col %in% schema$names)) {
         return(NULL)
       }
-      # `-f` is arithmetic on a factor (F18's rule): dplyr warns and ignores
-      # the order, so it can't be a native sort key
-      if (identical(as.character(head), "-") &&
-          ir_factor_rule(ir_call("-", list(ir_col(col))), schema) == "cpu") {
+      type <- unname(schema$types[match(col, schema$names)])
+      if (length(type) != 1L || is.na(type)) {
+        return(NULL)
+      }
+      if (identical(as.character(head), "-")) {
+        # `-f` is arithmetic on a factor (F18's rule): dplyr warns and ignores
+        # the order, so it can't be a native sort key
+        if (type == "DICTIONARY32") {
+          if (ir_factor_rule(ir_call("-", list(ir_col(col))), schema) == "cpu") {
+            return(NULL)
+          }
+        } else if (!(type %in% ir_negatable_types)) {
+          return(NULL)  # `-s` / `-date` is an error in R
+        }
+      } else if (type == "STRING" && !session_collation_is_c()) {
+        # desc() is `-xtfrm(s)`: the session collation orders it, the GPU
+        # sorts bytes
         return(NULL)
       }
       return(list(col = col, desc = TRUE))
@@ -1879,109 +1892,279 @@ ir_parse_order_ref <- function(expr, schema) {
   NULL
 }
 
-#' Attach an `order_by()`/`with_order()`/`order_by=`-supplied ordering to a
-#' directly-wrapped window call
-#'
-#' No-op (returns `ir_node` unchanged) unless `ir_node` is ITSELF a single
-#' window-class `ir_call` node -- e.g. `order_by(y, x + 1)` (an
-#' order-independent expression) or `order_by(y, cumsum(x) + lag(x))` (a
-#' compound expression, not one bare window call) both pass `ir_node`
-#' through untouched, matching dplyr's own behavior for the first case
-#' (reordering has no observable effect on an order-independent
-#' expression) and this wave's documented scope limit for the second (only
-#' a SINGLE directly-wrapped window call gets the override; see
-#' [ir_parse_order_by_call()]'s docs).
-#'
-#' Sets `ir_node$meta$order_override <- order_ref`, read by
-#' `R/window.R`'s `extract_one_window_call()` in preference to a
-#' rank-kind spec's usual "value column doubles as order column" default.
-#'
-#' Rejected outright (returns `NULL`, the file's usual "not implemented"
-#' signal) when `ir_node` is an `"agg"`-kind call -- `mean()`/`sum()`/
-#' `min()`/`max()`/`n()`/`sd()`/`var()`/`first()`/`last()`/`nth()`.
-#' Verified empirically against dplyr 1.2.1: `order_by()`/`with_order()`
-#' themselves ERROR for every one of these (not just the order-invariant
-#' ones like `mean()`) -- `order_by(y, first(x))`,
-#' `with_order(y, first, x)`, and even `order_by(y, n())` all raise
-#' `vec_slice()`/argument-matching errors in real dplyr, because
-#' `order_by()`/`with_order()` un-shuffle their wrapped call's result via
-#' `vec_slice(result, order(order_by))`, which requires the result to have
-#' ONE VALUE PER INPUT ROW -- true for the `"scan"`/`"shift"`/`"rank"`
-#' kinds, never true for `"agg"` (a reduction). `first()`/`last()`/`nth()`'s
-#' OWN `order_by=` ARGUMENT (handled directly by
-#' `ir_parse_first_last_nth()`, never via this function) is a completely
-#' different, genuinely-supported dplyr feature and is unaffected by this
-#' rejection.
-#'
-#' A `"rank"`-kind call gets one of three treatments, also verified
-#' empirically against dplyr 1.2.1:
-#' \itemize{
-#'   \item `row_number(x)` (a VALUE argument, ties = "sequential" broken by
-#'     row position): the override genuinely changes the result (ties in
-#'     `x` get broken by `order_ref`'s order instead of original row
-#'     position -- confirmed empirically: `order_by(y, row_number(x))` on
-#'     data with ties in `x` differs from bare `row_number(x)`). This
-#'     would need a two-column rank frame (primary key `x`, tie-break key
-#'     `order_ref`), not implemented this wave -- rejected (`NULL`) rather
-#'     than silently producing dplyr's OWN tie-break order (original row
-#'     position) when a different one was actually requested.
-#'   \item `min_rank()`/`dense_rank()`/`percent_rank()`/`cume_dist()`
-#'     (MIN/DENSE/MAX methods, none of which break ties by position at
-#'     all): `order_by()`/`with_order()` has NO OBSERVABLE EFFECT on any of
-#'     these (confirmed empirically: `order_by(y, min_rank(x))` is
-#'     IDENTICAL to bare `min_rank(x)`, for any `y`) -- the override is
-#'     silently dropped (`ir_node` returned unchanged, exactly like an
-#'     order-independent plain expression).
-#'   \item bare `row_number()` (0 args, purely position-based): real dplyr
-#'     itself errors here (`with_order()`'s `x` argument has nothing to
-#'     bind to, since `row_number()` takes none) -- this is NOT replicated;
-#'     the override is silently dropped here too (same as the value-only
-#'     rank functions above), a deliberate, harmless LOOSENING relative to
-#'     dplyr (produces the same value bare `row_number()` would, rather
-#'     than reproducing dplyr's own argument-binding quirk as an error).
-#' }
-#'
-#' @param ir_node An IR node
-#' @param order_ref A `list(col =, desc =)` as returned by
-#'   [ir_parse_order_ref()]
-#' @return `ir_node`, possibly with `meta$order_override` set, or `NULL`
-#' @keywords internal
-apply_order_override <- function(ir_node, order_ref) {
-  if (!identical(ir_node$kind, "call")) {
-    return(ir_node)
-  }
-  entry <- ir_call_registry[[ir_node$op]]
-  if (is.null(entry) || is.null(entry$window)) {
-    return(ir_node)
-  }
+# The GPU types a unary minus is defined for (dplyr's `-col` order key is the
+# R expression `-col`: an error for a string or a Date/POSIXct).
+ir_negatable_types <- c("INT32", "INT64", "FLOAT64", "BOOL8")
 
-  kind <- entry$window$kind
-  if (identical(kind, "agg")) {
+# TRUE iff `ir` provably has one value per row. Used to tell the first
+# argument of an `order_by()` call (which dplyr permutes, and which must be
+# row-sized) from a scalar (dplyr: "`order_by` must have size 1").
+# @keywords internal
+ir_is_row_sized <- function(ir) {
+  if (identical(ir$kind, "col")) {
+    return(TRUE)
+  }
+  if (!identical(ir$kind, "call")) {
+    return(FALSE)  # literal, vector literal
+  }
+  entry <- ir_call_registry[[ir$op]]
+  if (!is.null(entry) && !is.null(entry$window)) {
+    if (identical(entry$window$kind, "agg")) {
+      return(FALSE)
+    }
+    if (length(ir$args) == 0L) {
+      return(identical(ir$op, "row_number"))
+    }
+    return(ir_is_row_sized(ir$args[[1]]))
+  }
+  any(vapply(ir$args, ir_is_row_sized, logical(1)))
+}
+
+# Window ops whose value does not depend on the row order: dplyr's
+# `order_by()` has no observable effect on them.
+ir_order_invariant_aggs <- c("sum", "n", "mean", "min", "max", "sd", "var",
+                             "median", "n_distinct")
+ir_order_invariant_ranks <- c("min_rank", "dense_rank", "percent_rank", "cume_dist")
+
+# Apply `order_ref` to every window node of `ir` -- the windows the head
+# function's own parse/desugar built -- and nothing else. `NULL` when some
+# window cannot take it exactly (see ir_parse_with_order()).
+# @keywords internal
+ir_order_windows <- function(ir, order_ref) {
+  ok <- TRUE
+  walk <- function(node) {
+    if (!ok || !identical(node$kind, "call")) {
+      return(node)
+    }
+    entry <- ir_call_registry[[node$op]]
+    if (is.null(entry) || is.null(entry$window)) {
+      node$args <- lapply(node$args, walk)
+      return(node)
+    }
+    kind <- entry$window$kind
+    if (kind %in% c("scan", "shift", "rolling")) {
+      # defensive: only the head's own windows are walked, and `with_order()`
+      # captures an `order_by =` argument, so none can carry an override yet
+      if (!is.null(node$meta$order_override)) {
+        ok <<- FALSE
+        return(node)
+      }
+      node$args <- lapply(node$args, walk)
+      node$meta$order_override <- order_ref
+      return(node)
+    }
+    if (identical(kind, "rank")) {
+      if (identical(node$op, "row_number") && length(node$args) == 0L &&
+          is.null(node$meta$order_override)) {
+        # the position in the frame sorted by group + order
+        node$meta$order_override <- order_ref
+        return(node)
+      }
+      if (node$op %in% ir_order_invariant_ranks) {
+        node$args <- lapply(node$args, walk)
+        return(node)
+      }
+      ok <<- FALSE  # row_number(x): ties are broken by the order
+      return(node)
+    }
+    if (identical(kind, "agg") && node$op %in% ir_order_invariant_aggs) {
+      node$args <- lapply(node$args, walk)
+      return(node)
+    }
+    ok <<- FALSE  # first/last/nth, an unknown window
+    node
+  }
+  out <- walk(ir)
+  if (ok) out else NULL
+}
+
+# `ir` with every column `name` replaced by `repl`, in the arguments and in
+# the IR nodes a hook keeps in `meta`.
+# @keywords internal
+ir_subst_col <- function(ir, name, repl) {
+  if (identical(ir$kind, "col")) {
+    return(if (identical(ir$name, name)) repl else ir)
+  }
+  if (!identical(ir$kind, "call")) {
+    return(ir)
+  }
+  ir$args <- lapply(ir$args, ir_subst_col, name = name, repl = repl)
+  for (m in names(ir$meta)) {
+    node <- ir$meta[[m]]
+    if (is.list(node) && !is.null(node$kind)) {
+      ir$meta[m] <- list(ir_subst_col(node, name, repl))
+    }
+  }
+  ir
+}
+
+#' Parse dplyr's `with_order(order_by, fun, x, ...)` (what `order_by()` is)
+#'
+#' dplyr 1.2.1: `with_order(o, f, a1, ...)` evaluates `a1` and `...` in ROW
+#' order, permutes only `a1` into `o` order (stable, NA last), calls
+#' `f(a1[perm], ...)` and permutes the result back. Hence:
+#' \itemize{
+#'   \item the windows `f` itself builds (a plain `cumsum`, or the
+#'     `cumsum()`/`row_number()` of `cummean()`, the `lag()` of
+#'     `consecutive_id()`, ...) run in `o` order: each gets
+#'     `meta$order_override`;
+#'   \item windows inside `a1` run in row order and get no override;
+#'   \item an elementwise `f` whose other arguments are all scalar literals
+#'     is the plain row-order value (permutation commutes with it);
+#'   \item an elementwise `f` with another row-sized argument gives
+#'     `f(a1, b[inverse perm])`, which has no native form: `NULL`.
+#' }
+#' Everything dplyr rejects (no `a1`, a scalar `a1`, an aggregate `f`, a
+#' name `with_order()` would capture) and everything the frame cannot do
+#' exactly (`row_number(x)`/`ntile(x)` tie-breaking by the order,
+#' `first`/`last`/`nth`, a nested `order_by()`) returns `NULL`, so the verb's
+#' whole-call CPU fallback gives dplyr's value or error: never an unordered
+#' native result.
+#'
+#' Every user sub-expression is evaluated at most once, in dplyr's order:
+#' the first argument, then the others. The first argument is parsed once;
+#' when it is not a plain column, `f` is parsed over a placeholder column of
+#' the argument's type (and zone), the order is applied to that tree, and the
+#' argument's IR then replaces the placeholder. A re-parse of the raw argument
+#' would run a column-free call inside it (`cumsum(x + runif(1))`) again and
+#' build the IR from the second value.
+#'
+#' @param order_ref `list(col =, desc =)` from [ir_parse_order_ref()]
+#' @param head The raw expression of `f` (a symbol or `pkg::sym`)
+#' @param a1 The raw expression of the permuted first argument
+#' @param rest Named list of the raw remaining arguments (none may read a
+#'   column, and each must evaluate to a non-NULL atomic vector of length 1)
+#' @param env The environment the expressions are evaluated in
+#' @param schema The input schema (`names`, `types`)
+#' @return An IR node, or `NULL`
+#' @keywords internal
+ir_parse_with_order <- function(order_ref, head, a1, rest, env, schema) {
+  if (is.call(head) && length(head) == 3 && identical(head[[1]], as.symbol("::"))) {
+    head_name <- head[[3]]
+  } else {
+    head_name <- head
+  }
+  if (!is.symbol(head_name) ||
+      as.character(head_name) %in% c("order_by", "with_order")) {
     return(NULL)
   }
-  if (identical(kind, "rank")) {
-    if (identical(ir_node$op, "row_number") && length(ir_node$args) > 0) {
-      return(NULL)  # row_number(x): tie-break frame change not implemented this wave
+
+  # Every other argument must be a non-NULL scalar (length exactly 1): a
+  # row-sized one is not permuted by dplyr, which no native op expresses, and
+  # NULL/empty ones are not scalars (`lag(x, n = NULL)` is dplyr's error;
+  # the parse hooks read NULL as an absent argument). All are checked for a
+  # column reference before anything is evaluated, so a call that goes to the
+  # CPU for that reason has run nothing here.
+  for (arg in rest) {
+    if (expr_has_column_ref(arg, schema)) {
+      return(NULL)
     }
-    return(ir_node)  # value-only rank fns (+ bare row_number()): no observable effect
   }
 
-  ir_node$meta$order_override <- order_ref
-  ir_node
+  # The value-only rank functions don't see the order: the plain call is the
+  # value, whatever its argument is (`min_rank(desc(x))` is not an
+  # expression of its own, only the rank call parses it). This parse is the
+  # first argument's one evaluation.
+  if (as.character(head_name) %in% ir_order_invariant_ranks && length(rest) == 0L) {
+    plain <- ir_parse_expr(as.call(list(head, a1)), env, schema)
+    if (!is.null(plain) && identical(plain$kind, "call") &&
+        identical(ir_call_registry[[plain$op]]$window$kind, "rank") &&
+        ir_is_row_sized(plain$args[[1]])) {
+      return(plain)
+    }
+    return(NULL)
+  }
+
+  # The first argument's one evaluation (dplyr evaluates it before `...`).
+  a1_ir <- ir_parse_expr(a1, env, schema)
+  if (is.null(a1_ir) || !ir_is_row_sized(a1_ir)) {
+    return(NULL)
+  }
+
+  # The others, each evaluated once; the call is parsed with the VALUE in its
+  # place. `.env$k` resolves: the mask is empty, as no column is read.
+  for (i in seq_along(rest)) {
+    value <- tryCatch(
+      list(ok = TRUE, value = rlang::eval_tidy(rest[[i]], data = list(), env = env)),
+      error = function(e) list(ok = FALSE, value = NULL)
+    )
+    if (!value$ok || !is.atomic(value$value) || length(value$value) != 1L) {
+      return(NULL)
+    }
+    rest[i] <- list(value$value)
+  }
+
+  placeholder <- NULL
+  call_schema <- schema
+  if (identical(a1_ir$kind, "col")) {
+    # A column (`x`, `.data$x`): its name evaluates nothing, and the hooks
+    # see the real column (factor levels, zone)
+    call_a1 <- as.symbol(a1_ir$name)
+  } else {
+    a1_type <- tryCatch(unname(ir_infer_type(a1_ir, schema)), error = function(e) NA_character_)
+    # A placeholder carries a type and a zone, not factor levels
+    if (length(a1_type) != 1L || is.na(a1_type) || a1_type == "DICTIONARY32" ||
+        (a1_type %in% cuplyr_timestamp_types &&
+         !a1_type %in% c("TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS"))) {
+      return(NULL)
+    }
+    placeholder <- unique_temp_name("..order_by_a1..", schema$names)
+    call_schema$names <- c(schema$names, placeholder)
+    call_schema$types <- c(schema$types, a1_type)
+    if (a1_type == "TIMESTAMP_MICROSECONDS") {
+      zone <- tryCatch(ir_infer_tz(a1_ir, schema), error = function(e) NULL)
+      if (is.null(zone)) {
+        return(NULL)
+      }
+      call_schema$tz <- tz_from_positions(call_schema$names, call_schema$types,
+                                          c(tz_by_position(schema), zone))
+    }
+    call_a1 <- as.symbol(placeholder)
+  }
+
+  call_ir <- ir_parse_expr(as.call(c(list(head, call_a1), rest)), env, call_schema)
+  if (is.null(call_ir)) {
+    return(NULL)
+  }
+  if (identical(call_ir$kind, "call")) {
+    entry <- ir_call_registry[[call_ir$op]]
+    if (!is.null(entry) && identical(entry$window$kind, "agg")) {
+      return(NULL)  # an aggregate has no row to put back
+    }
+  }
+  call_ir <- ir_order_windows(call_ir, order_ref)
+  if (is.null(call_ir) || is.null(placeholder)) {
+    return(call_ir)
+  }
+  ir_subst_col(call_ir, placeholder, a1_ir)
+}
+
+# Bind the arguments of `with_order(order_by, fun, x, ...)` the way R does
+# (`present`: the call_match()ed call) and parse. `NULL` when `x` is absent
+# or `fun` is not a (namespaced) function name.
+# @keywords internal
+ir_parse_with_order_args <- function(present, env, schema) {
+  args <- as.list(present)[-1]
+  if (is.null(args[["order_by"]]) || is.null(args[["fun"]]) || is.null(args[["x"]])) {
+    return(NULL)
+  }
+  order_ref <- ir_parse_order_ref(args[["order_by"]], schema)
+  if (is.null(order_ref)) {
+    return(NULL)
+  }
+  rest <- args[!(names(args) %in% c("order_by", "fun", "x"))]
+  if (any(vapply(rest, function(a) rlang::is_missing(a) || identical(a, quote(...)), logical(1)))) {
+    return(NULL)
+  }
+  ir_parse_with_order(order_ref, args[["fun"]], args[["x"]], rest, env, schema)
 }
 
 #' Parse `order_by(order_by, call)`
 #'
-#' dplyr's `order_by(order_by, call)` re-evaluates `call` as if the data
-#' were sorted by `order_by`, then un-sorts the result back to the
-#' original row order (verified empirically against dplyr 1.2.1:
-#' `order_by(x, cumsum(y))` on `y = c(3,1,4,1,5,9,2,6)` matches computing
-#' `cumsum` after a STABLE ascending sort of `x`, then scattering back to
-#' the original positions) -- exactly the "frame" concept
-#' `R/window.R`'s `window_spec()` already carries via `order_cols`/
-#' `order_desc`. Parses `order_by` into a column reference (see
-#' [ir_parse_order_ref()]) and folds it into the parsed `call`'s own IR
-#' node via [apply_order_override()].
+#' dplyr rewrites it to `with_order(order_by, <head of call>, <args of
+#' call>)`, so this builds that call, lets R bind its arguments (a name
+#' `with_order()` would capture, such as `lag(x, order_by = y)`, makes the
+#' call an error, i.e. `NULL` here) and parses it like [ir_parse_with_order()].
 #'
 #' @keywords internal
 ir_parse_order_by_call <- function(expr, env, schema) {
@@ -1991,74 +2174,39 @@ ir_parse_order_by_call <- function(expr, env, schema) {
     return(NULL)
   }
   present_args <- as.list(present)[-1]
-  if (is.null(present_args$order_by) || is.null(present_args$call)) {
+  if (is.null(present_args[["order_by"]]) || !is.call(present_args[["call"]])) {
     return(NULL)
   }
 
-  order_ref <- ir_parse_order_ref(present_args$order_by, schema)
-  if (is.null(order_ref)) {
-    return(NULL)
-  }
-
-  call_ir <- ir_parse_expr(present_args$call, env, schema)
-  if (is.null(call_ir)) {
-    return(NULL)
-  }
-
-  apply_order_override(call_ir, order_ref)
-}
-
-#' Parse `with_order(order_by, fun, x)`
-#'
-#' dplyr 1.2.1's actual `with_order()` signature is `function(order_by,
-#' fun, x, ...)` (verified empirically -- no `order_by_desc=` parameter in
-#' this version; wrap `order_by` in `desc()` for descending order, exactly
-#' like [order_by()]). `fun` is a BARE function reference (e.g. the
-#' symbol `cumsum`, not a call): `with_order(order_by, fun, x)` means
-#' `fun(x)`, evaluated as if the data were sorted by `order_by` (confirmed
-#' empirically identical to `order_by(order_by, fun(x))`). Only the
-#' 3-argument form (no extra `...` passed through to `fun`) is implemented
-#' this wave. `fun` may be namespace-qualified (`dplyr::lag`) -- one leading
-#' `pkg::` qualifier is stripped before the bare-symbol check, same
-#' convention as `R/summarise.R`'s `strip_ns_prefix()`/`decompose_agg_call()`
-#' -- since `dplyr` is not necessarily attached wherever `with_order()` is
-#' called from, `fun = lag` would otherwise silently resolve to `stats::lag`
-#' (a real footgun, caught empirically while writing this wave's oracle
-#' tests). Reconstructs the equivalent call and delegates to the same
-#' [apply_order_override()] [ir_parse_order_by_call()] uses.
-#'
-#' @keywords internal
-ir_parse_with_order_call <- function(expr, env, schema) {
-  proto <- function(order_by, fun, x) NULL
-  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  wrapped <- present_args[["call"]]
+  rewritten <- as.call(c(list(as.symbol("with_order"), present_args[["order_by"]], wrapped[[1]]),
+                         as.list(wrapped)[-1]))
+  present <- tryCatch(
+    rlang::call_match(rewritten, function(order_by, fun, x, ...) NULL, defaults = FALSE),
+    error = function(e) NULL
+  )
   if (is.null(present)) {
     return(NULL)
   }
-  present_args <- as.list(present)[-1]
-  if (is.null(present_args$order_by) || is.null(present_args$fun) || is.null(present_args$x)) {
+  ir_parse_with_order_args(present, env, schema)
+}
+
+#' Parse `with_order(order_by, fun, x, ...)`
+#'
+#' `fun` is a function reference (`cummean`, `dplyr::lag`); `x` and the
+#' further arguments are `fun`'s. Evaluated exactly as `order_by(order_by,
+#' fun(x, ...))`: see [ir_parse_with_order()].
+#'
+#' @keywords internal
+ir_parse_with_order_call <- function(expr, env, schema) {
+  present <- tryCatch(
+    rlang::call_match(expr, function(order_by, fun, x, ...) NULL, defaults = FALSE),
+    error = function(e) NULL
+  )
+  if (is.null(present)) {
     return(NULL)
   }
-
-  fun_expr <- present_args$fun
-  if (is.call(fun_expr) && length(fun_expr) == 3 && identical(fun_expr[[1]], as.symbol("::"))) {
-    fun_expr <- fun_expr[[3]]  # strip namespace: dplyr::lag -> lag
-  }
-  if (!is.symbol(fun_expr)) {
-    return(NULL)  # a non-bare-symbol `fun` (e.g. an anonymous function): not implemented this wave
-  }
-
-  order_ref <- ir_parse_order_ref(present_args$order_by, schema)
-  if (is.null(order_ref)) {
-    return(NULL)
-  }
-
-  reconstructed <- as.call(list(fun_expr, present_args$x))
-  call_ir <- ir_parse_expr(reconstructed, env, schema)
-  if (is.null(call_ir)) {
-    return(NULL)
-  }
-
-  apply_order_override(call_ir, order_ref)
+  ir_parse_with_order_args(present, env, schema)
 }
 
 # -----------------------------------------------------------------------------

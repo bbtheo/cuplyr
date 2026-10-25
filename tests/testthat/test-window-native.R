@@ -381,7 +381,7 @@ test_that("lower_window() accepts an agg-family spec (mean())", {
 # combination (`order_desc = TRUE` on a column containing NA) was
 # unreachable from any dplyr-facing verb before Phase 5 W7 (mutate()'s own
 # `min_rank()`/`dense_rank()` never reach a descending frame -- see
-# `apply_order_override()`'s docs, R/ir.R -- so nothing exercised it until
+# `ir_parse_with_order()`'s docs, R/ir.R -- so nothing exercised it until
 # `slice_max(..., with_ties = TRUE)`'s grouped desugar built one directly),
 # hence no earlier test caught it. Fixed by flipping the order column's own
 # null precedence together with its sort direction (BEFORE for descending,

@@ -207,14 +207,29 @@ supplied; negative \code{n} counts from the end (\code{nth(x, -1)} ==
 are not yet supported
 \item \code{ntile(x = row_number(), n)} -- desugars into \code{row_number()}/
 \code{sum()}, so it's native as a consequence of those being native
-\item \code{order_by(order_by, call)} / \code{with_order(order_by, fun, x)}
--- re-frame a directly-wrapped \code{row_number()}/\code{lag()}/\code{lead()}/
-\code{cumsum()}/\code{cummax()}/\code{cummin()}/\code{cumprod()}/rank-family call's
-ordering (matching dplyr exactly, including that both of these
-genuinely error, in dplyr itself, when wrapped around an
-aggregate like \code{mean()}/\code{first()}/\code{n()} -- cuplyr matches that by
-rejecting the same shape as unsupported rather than silently
-ignoring the requested ordering)
+\item \code{order_by(order_by, call)} / \code{with_order(order_by, fun, x, ...)}
+-- like dplyr, only the FIRST argument of \code{call} is put in
+\code{order_by}'s order (stable, \code{NA} last); the other arguments are
+evaluated in row order, and the call stays native only when each
+of them is a non-\code{NULL} scalar that reads no column. Native: a
+window call wrapped directly (\code{cumsum()}/\code{cummax()}/\code{cummin()}/
+\code{cumprod()}/\code{lag()}/\code{lead()}/\verb{roll_*()} except \code{roll_median()},
+and the calls cuplyr desugars into several windows,
+\code{cummean()}/\code{cumall()}/\code{cumany()}/\code{consecutive_id()}, each part in
+\code{order_by}'s order), the value-only rank functions
+(\code{min_rank()}, \code{dense_rank()}, ... are unaffected by the order),
+and an elementwise call whose other arguments are scalars
+(\code{order_by(o, cumsum(x) * 2)} is \code{cumsum(x) * 2}: the window
+inside the first argument runs in row order, as in dplyr).
+Everything else runs the whole call on the CPU, which gives
+dplyr's value or error: \code{roll_median()}, an elementwise call with
+another column argument (\code{order_by(o, cumsum(x) + lag(x))}), a
+\code{NULL} or empty extra argument (\code{lag(x, default = NULL)}),
+\code{row_number(x)}/\code{ntile(x, n)} (ties broken by the order),
+\code{first()}/\code{last()}/\code{nth()}, aggregates, a nested \code{order_by()} as
+the wrapped call itself (\code{order_by(o, order_by(i, cumsum(x)))};
+nested inside the first argument it stays native), and shapes
+dplyr rejects (\code{order_by(o, row_number())})
 }
 Every one of these is evaluated within each \code{group_by()} group when
 \code{.data} is grouped (matching \code{dplyr}'s own grouped-mutate semantics:
@@ -275,13 +290,12 @@ literal (\code{NA_real_}, \code{NA_integer_}, ...) always keeps its own type.
 \subsection{Not yet supported}{
 
 \itemize{
-\item \code{order_by()}/\code{with_order()} wrapping a general expression (only a
-bare column, \code{desc(column)}, or \code{-column} is understood as the
-ordering argument -- \code{order_by(a + b, cumsum(x))} is not yet
-supported), or wrapping anything other than a SINGLE directly-nested
-window call (\code{order_by(y, cumsum(x) + lag(x))} is not yet supported;
-\code{order_by(y, lag(cumsum(x)))} IS supported, since \code{lag()} is the
-single directly-wrapped call there)
+\item \code{order_by()}/\code{with_order()} with a general expression as the
+ordering argument (only a bare column, \code{desc(column)}, or \code{-column}
+is native, with \code{-} for numeric/logical columns and \code{desc()} of a
+string only under a C collation: \code{order_by(a + b, cumsum(x))} runs on
+the CPU); see the \code{order_by()} item above for what the wrapped call
+may be natively
 \item Multi-column \code{consecutive_id(a, b, ...)} -- single-column only
 \item Rolling/sliding-window functions (\verb{slider::slide_*()} and
 similar) -- planned for a later phase
