@@ -26,7 +26,8 @@
 \value{
 A \code{tbl_gpu} with \code{x}'s own schema, filtered to the rows that
 (\code{semi_join()}) or don't (\code{anti_join()}) have a match in \code{y}. \code{x}'s
-\code{group_by()} grouping is preserved.
+\code{group_by()} grouping is preserved; on a \code{.drop = FALSE} table every group
+of \code{x} is kept, including the ones the join empties, like dplyr.
 }
 \description{
 Native GPU implementation via \code{cudf::filtered_join} (Phase 7 J2). Unlike

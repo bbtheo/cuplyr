@@ -82,15 +82,17 @@ that keeps a group column (and by \code{count()}, \code{add_count()} and
 once no group column is left. Like dplyr, \code{.drop} defaults to the table's
 current setting, so regrouping a \code{.drop = FALSE} table keeps it.
 
-Groups are recomputed from the data each time, so an empty group of a
-non-factor column that \code{filter()} emptied vanishes from \code{group_data()}
-(dplyr's \code{filter(.preserve = TRUE)} would keep it; that argument is not
-supported natively). Empty factor-level groups are re-added from the
-declared levels. The one exception is \code{slice(.preserve = TRUE)} on a
-\code{group_by()}-grouped table: it fixes the input's group-keys table
-(\verb{$fixed_keys}, emptied groups included, any key type), which
-\code{group_data()} and friends, \code{collect()} and the CPU fallbacks (so
-\code{summarise()}) honour. \code{filter(.preserve = TRUE)} fixes keys the same way.
+Groups are recomputed from the data each time, and empty factor-level
+groups are re-added from the declared levels. Row-subsetting verbs also
+keep emptied groups of any key type, as dplyr does. On a \code{.drop = FALSE}
+table, \code{filter()}, \code{filter_out()}, \code{slice()}, \code{slice_head()},
+\code{slice_tail()}, \code{slice_min()}, \code{slice_max()}, \code{slice_sample()},
+\code{semi_join()}, \code{anti_join()} and \code{rows_delete()} keep every group,
+emptied ones included. \code{.preserve = TRUE} does the same for \code{slice()} and
+\code{filter()} on a \code{.drop = TRUE} table. The result fixes the input's
+group-keys table (\verb{$fixed_keys}), only when a group can have been lost,
+which \code{group_data()} and friends, \code{collect()} and the CPU fallbacks (so
+\code{summarise()}) honour.
 \code{mutate()}, \code{select()}, \code{rename()} and \code{relocate()} carry it as long as
 they leave the group columns alone, and a CPU fallback result carries
 whatever empty groups dplyr's own result kept (see \code{gpu_fallback()}: a

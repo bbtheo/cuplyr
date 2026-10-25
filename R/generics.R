@@ -28,33 +28,30 @@
 #' pending lazy operations first, since there is no lazy AST node for an
 #' arbitrary literal index gather.
 #'
-#' Matches dplyr's own `.drop = TRUE` (default) contract exactly, verified
-#' empirically: slicing down to a subset of a `.drop = TRUE` grouped
-#' table's rows recomputes `group_data()` from the surviving rows alone
-#' (now-empty groups vanish). Real dplyr's `.drop = FALSE` case is
-#' NOT matched here, though: dplyr's `grouped_df` carries its group-keys
-#' table as a fixed attribute that a row-slice narrows via set intersection
-#' (keeping now-EMPTY groups that existed before the slice, for ANY column
-#' type, not just factors); `group_data.tbl_gpu()` (R/group-by.R) instead
-#' always recomputes fresh from the actual GPU data on every call, so a
-#' `.drop = FALSE` group whose only rows get sliced away here will vanish
-#' from `group_data()` too, rather than surviving as an empty group -- see
-#' `group_by.tbl_gpu()`'s own "`.drop` semantics" docs for why this is a
-#' deliberate, documented deferral (a fixed, carried group-keys attribute
-#' is a bigger structural change than this task's on-demand metadata query).
+#' Matches dplyr's `dplyr_row_slice.grouped_df()` for a `group_by()`-grouped
+#' table: with `.drop = TRUE` (the default) the groups the slice emptied
+#' vanish from `group_data()`, unless `preserve = TRUE`; a `.drop = FALSE`
+#' table keeps every group of the input whatever `preserve` says (for any
+#' column type, not just factors). Those keys are fixed on the result
+#' (`$fixed_keys`, see [group_by.tbl_gpu()]) only when a group was actually
+#' lost; otherwise a plain regroup gives the same groups.
 #'
 #' @param data A `tbl_gpu` object.
 #' @param i A numeric (1-based positions) or logical (row mask) vector.
 #' @param ... Ignored. Included for compatibility with the dplyr generic.
+#' @param preserve Whether to keep the groups the slice emptied, as dplyr's
+#'   `dplyr_row_slice()`.
 #' @return A new `tbl_gpu`.
 #' @export
 #' @importFrom dplyr dplyr_row_slice
 #' @keywords internal
-dplyr_row_slice.tbl_gpu <- function(data, i, ...) {
+dplyr_row_slice.tbl_gpu <- function(data, i, ..., preserve = FALSE) {
   if (is.logical(i)) {
     i <- which(i)
   }
 
+  prep <- row_slice_prepare(data, preserve)
+  data <- prep$data
   materialized <- if (has_pending_ops(data)) compute(data) else data
 
   if (length(materialized$schema$names) == 0L) {
@@ -81,14 +78,14 @@ dplyr_row_slice.tbl_gpu <- function(data, i, ...) {
   # `dplyr_reconstruct.tbl_gpu()`'s own docs below for why the top-level
   # generic is unsafe to call with a tbl_gpu `data` argument; this result
   # is already a fully-formed tbl_gpu, so there is nothing to reconstruct.
-  carry_frame_meta(new_tbl_gpu(
+  row_slice_finish(carry_frame_meta(new_tbl_gpu(
     ptr = new_ptr,
     schema = materialized$schema,
     groups = materialized$groups,
     group_drop = materialized$group_drop,
     exec_mode = materialized$exec_mode,
     rowwise = is_rowwise_gpu(materialized)
-  ), materialized)
+  ), materialized), prep)
 }
 
 #' Add, remove, or replace columns of a GPU table with literal values (dplyr

@@ -12,6 +12,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/null_mask.hpp>
 #include <cudf/sorting.hpp>
+#include <cudf/stream_compaction.hpp>
 #include <cudf/reduction.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/table/table.hpp>
@@ -1435,4 +1436,117 @@ int gpu_group_count(SEXP xptr, IntegerVector group_col_indices) {
     return groups_result.offsets.empty()
         ? 0
         : static_cast<int>(groups_result.offsets.size()) - 1;
+}
+
+// The distinct group keys of a table (one row per observed group, in the
+// same order as gpu_group_info()'s `keys`: ascending, NA last) and nothing
+// else: no row-index upload, no n-row permutation download (F71's fixed-key
+// capture needs only the keys; R/group-by.R::slice_group_keys()). The same
+// groupby as gpu_group_info() (null_policy::INCLUDE).
+// [[Rcpp::export]]
+SEXP gpu_group_keys(SEXP xptr, IntegerVector group_col_indices) {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
+    cudf::table_view view = get_table_view(ptr);
+
+    int n_key_cols = group_col_indices.size();
+    if (n_key_cols == 0) {
+        Rcpp::stop("gpu_group_keys() requires at least one group column index");
+    }
+    std::vector<cudf::column_view> key_views;
+    key_views.reserve(n_key_cols);
+    for (int i = 0; i < n_key_cols; ++i) {
+        if (group_col_indices[i] < 0 || group_col_indices[i] >= view.num_columns()) {
+            Rcpp::stop("Group column index out of bounds: %d", group_col_indices[i]);
+        }
+        key_views.push_back(view.column(group_col_indices[i]));
+    }
+    cudf::table_view keys_table(key_views);
+
+    if (view.num_rows() == 0) {
+        return make_gpu_table_xptr(cudf::empty_like(keys_table));
+    }
+
+    cudf::groupby::groupby gb(keys_table, cudf::null_policy::INCLUDE);
+    auto groups_result = gb.get_groups();
+    cudf::size_type num_groups = groups_result.offsets.empty()
+        ? 0
+        : static_cast<cudf::size_type>(groups_result.offsets.size()) - 1;
+    if (num_groups == 0) {
+        return make_gpu_table_xptr(cudf::empty_like(keys_table));
+    }
+
+    // the first row of each group out of the grouped per-row keys
+    std::vector<int32_t> first_rows(static_cast<size_t>(num_groups));
+    for (cudf::size_type i = 0; i < num_groups; ++i) {
+        first_rows[static_cast<size_t>(i)] =
+            static_cast<int32_t>(groups_result.offsets[static_cast<size_t>(i)]);
+    }
+    rmm::device_buffer first_rows_buf(first_rows.size() * sizeof(int32_t),
+                                       rmm::cuda_stream_view(),
+                                       rmm::mr::get_current_device_resource_ref());
+    check_cuda(cudaMemcpy(first_rows_buf.data(), first_rows.data(),
+                           first_rows.size() * sizeof(int32_t), cudaMemcpyHostToDevice),
+               "gpu_group_keys first-row-of-group upload");
+    auto first_rows_col = std::make_unique<cudf::column>(
+        cudf::data_type{cudf::type_id::INT32},
+        num_groups,
+        std::move(first_rows_buf),
+        rmm::device_buffer{},
+        0
+    );
+    return make_gpu_table_xptr(cudf::gather(groups_result.keys->view(), first_rows_col->view(),
+                                             cudf::out_of_bounds_policy::DONT_CHECK));
+}
+
+// Per-column null counts of the given columns (F71: whether a key column
+// holds an NA, one O(n) mask count per column, no groupby).
+// [[Rcpp::export]]
+IntegerVector gpu_null_counts(SEXP xptr, IntegerVector col_indices) {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
+    cudf::table_view view = get_table_view(ptr);
+
+    IntegerVector out(col_indices.size());
+    for (int i = 0; i < col_indices.size(); ++i) {
+        if (col_indices[i] < 0 || col_indices[i] >= view.num_columns()) {
+            Rcpp::stop("Column index out of bounds: %d", col_indices[i]);
+        }
+        out[i] = static_cast<int>(view.column(col_indices[i]).null_count());
+    }
+    return out;
+}
+
+// The number of distinct key combinations of the given columns, equal to
+// gpu_group_count() (NA is its own key, null_equality::EQUAL) but counted with
+// a hash set instead of a sort-based groupby: F71 compares the group counts of
+// a table and of a row subset of it to see whether a group was lost, which
+// needs no ordering. 0 for a 0-row table.
+// [[Rcpp::export]]
+int gpu_distinct_key_count(SEXP xptr, IntegerVector group_col_indices) {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
+    cudf::table_view view = get_table_view(ptr);
+
+    int n_key_cols = group_col_indices.size();
+    if (n_key_cols == 0) {
+        Rcpp::stop("gpu_distinct_key_count() requires at least one column index");
+    }
+    std::vector<cudf::column_view> key_views;
+    key_views.reserve(n_key_cols);
+    for (int i = 0; i < n_key_cols; ++i) {
+        if (group_col_indices[i] < 0 || group_col_indices[i] >= view.num_columns()) {
+            Rcpp::stop("Group column index out of bounds: %d", group_col_indices[i]);
+        }
+        key_views.push_back(view.column(group_col_indices[i]));
+    }
+    cudf::table_view keys_table(key_views);
+
+    if (view.num_rows() == 0) {
+        return 0;
+    }
+    return static_cast<int>(cudf::distinct_count(keys_table, cudf::null_equality::EQUAL));
 }

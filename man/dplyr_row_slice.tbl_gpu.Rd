@@ -4,7 +4,7 @@
 \alias{dplyr_row_slice.tbl_gpu}
 \title{Modify rows of a GPU table by position (dplyr backend generic)}
 \usage{
-\method{dplyr_row_slice}{tbl_gpu}(data, i, ...)
+\method{dplyr_row_slice}{tbl_gpu}(data, i, ..., preserve = FALSE)
 }
 \arguments{
 \item{data}{A \code{tbl_gpu} object.}
@@ -12,6 +12,9 @@
 \item{i}{A numeric (1-based positions) or logical (row mask) vector.}
 
 \item{...}{Ignored. Included for compatibility with the dplyr generic.}
+
+\item{preserve}{Whether to keep the groups the slice emptied, as dplyr's
+\code{dplyr_row_slice()}.}
 }
 \value{
 A new \code{tbl_gpu}.
@@ -27,19 +30,12 @@ pending lazy operations first, since there is no lazy AST node for an
 arbitrary literal index gather.
 }
 \details{
-Matches dplyr's own \code{.drop = TRUE} (default) contract exactly, verified
-empirically: slicing down to a subset of a \code{.drop = TRUE} grouped
-table's rows recomputes \code{group_data()} from the surviving rows alone
-(now-empty groups vanish). Real dplyr's \code{.drop = FALSE} case is
-NOT matched here, though: dplyr's \code{grouped_df} carries its group-keys
-table as a fixed attribute that a row-slice narrows via set intersection
-(keeping now-EMPTY groups that existed before the slice, for ANY column
-type, not just factors); \code{group_data.tbl_gpu()} (R/group-by.R) instead
-always recomputes fresh from the actual GPU data on every call, so a
-\code{.drop = FALSE} group whose only rows get sliced away here will vanish
-from \code{group_data()} too, rather than surviving as an empty group -- see
-\code{group_by.tbl_gpu()}'s own "\code{.drop} semantics" docs for why this is a
-deliberate, documented deferral (a fixed, carried group-keys attribute
-is a bigger structural change than this task's on-demand metadata query).
+Matches dplyr's \code{dplyr_row_slice.grouped_df()} for a \code{group_by()}-grouped
+table: with \code{.drop = TRUE} (the default) the groups the slice emptied
+vanish from \code{group_data()}, unless \code{preserve = TRUE}; a \code{.drop = FALSE}
+table keeps every group of the input whatever \code{preserve} says (for any
+column type, not just factors). Those keys are fixed on the result
+(\verb{$fixed_keys}, see \code{\link[=group_by.tbl_gpu]{group_by.tbl_gpu()}}) only when a group was actually
+lost; otherwise a plain regroup gives the same groups.
 }
 \keyword{internal}

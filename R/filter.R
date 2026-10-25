@@ -227,33 +227,22 @@ filter_out.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 # is filter_out(): every dot's predicate is ANDed into ONE expression P and the
 # single pushed predicate is `is.na(P) | !P`.
 #
-# `.preserve = TRUE` on a group_by() table fixes the input's group keys on the
-# result (as slice() does, see fixed_keys_of()); every other exit drops them.
+# `.preserve = TRUE`, or a `.drop = FALSE` table, on a group_by() table fixes
+# the input's group keys on the result when a group can have been lost (as
+# slice() does, see row_slice_prepare()); every other exit drops them.
 # @keywords internal
 filter_impl <- function(.data, dots, by_quo, .preserve, complement, call) {
   check_unique_input_names(.data, call)
   if (is_rowwise_gpu(.data)) {
     return(filter_rowwise(.data, dots, by_quo, .preserve, complement, call))
   }
-  keys <- NULL
   # dplyr keeps a `.drop = FALSE` table's whole group structure whatever
-  # `.preserve` says, so those tables take the same route.
-  keep_groups <- isTRUE(.preserve) || !isTRUE(.data$group_drop %||% TRUE)
-  if (keep_groups && rlang::quo_is_null(by_quo) && length(.data$groups) > 0L) {
-    # taken now, from the computed input, so a lazy plan runs once
-    if (has_pending_ops(.data)) .data <- compute(.data)
-    keys <- slice_group_keys(.data)
-  }
-  groups <- .data$groups
+  # `.preserve` says, so those tables take the same route (row_slice_prepare()
+  # computes a lazy input first, so its plan runs once).
+  prep <- row_slice_prepare(.data, .preserve, eligible = rlang::quo_is_null(by_quo))
+  .data <- prep$data
   out <- filter_run(.data, dots, by_quo, .preserve, complement, call)
-  if (is_tbl_gpu(out)) {
-    if (!is.null(keys) && identical(out$groups, groups)) {
-      out$fixed_keys <- keys
-    } else if (!is.null(out[["fixed_keys"]]) && (is.null(keys) || !identical(out$groups, groups))) {
-      out <- drop_fixed_keys(out)
-    }
-  }
-  out
+  row_slice_finish(out, prep)
 }
 
 # filter()/filter_out() of a rowwise table (F49): the predicates are evaluated

@@ -694,7 +694,9 @@ slice_zero_column <- function(.data, fn) {
 #' @param .preserve Whether to keep the groups the slice emptied. With `TRUE`,
 #'   a `group_by()`-grouped result keeps the input's group keys (empty groups
 #'   included) for `group_data()`, `collect()` and `summarise()`, like dplyr
-#'   (see [group_by.tbl_gpu()] for what carries them on).
+#'   (see [group_by.tbl_gpu()] for what carries them on). On a `.drop = FALSE`
+#'   table every group is kept whatever `.preserve` says, as in dplyr (also for
+#'   `slice_head()`, `slice_tail()`, `slice_min()` and `slice_max()`).
 #'
 #' @return A `tbl_gpu` object with the selected rows.
 #'
@@ -709,20 +711,11 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   by_quo <- rlang::enquo(.by)
   gm <- slice_group_mode(.data, by_quo, ".by", call = rlang::current_env())
 
-  # .preserve = TRUE on a group_by()-grouped table fixes the input's group
-  # keys on the result (see fixed_keys_of()): taken now, from the computed
-  # input, so a lazy plan runs once.
-  keys <- NULL
-  if (isTRUE(.preserve) && identical(gm$mode, "group_by")) {
-    if (has_pending_ops(.data)) .data <- compute(.data)
-    keys <- slice_group_keys(.data)
-  }
-  with_keys <- function(result) {
-    if (!is.null(keys) && is_tbl_gpu(result) && identical(result$groups, .data$groups)) {
-      result$fixed_keys <- keys
-    }
-    result
-  }
+  # .preserve = TRUE, or a `.drop = FALSE` table, on a group_by()-grouped table
+  # fixes the input's group keys on the result (see row_slice_prepare()).
+  prep <- row_slice_prepare(.data, .preserve, eligible = identical(gm$mode, "group_by"))
+  .data <- prep$data
+  with_keys <- function(result) row_slice_finish(result, prep)
 
   if (identical(gm$mode, "none")) {
     zero <- slice_zero_column(.data, function(tbl) {
@@ -746,11 +739,105 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   }))
 }
 
+# --- Fixed group keys of a row slice (F71) -------------------------------------
+#
+# dplyr's dplyr_row_slice() keeps a `group_by()`-grouped table's whole group
+# structure when `preserve` is TRUE and always when `.drop = FALSE` (it trims
+# the emptied groups only for `.drop = TRUE`). Every cuplyr verb that ends in
+# a row slice of such a table (filter(), the slice family, semi_join()/
+# anti_join(), dplyr_row_slice()) shares this rule:
+#
+#   row_slice_prepare(x, preserve)    before the slice: is x eligible? (a lazy
+#                                     x is computed first, its keys and null
+#                                     counts need the data)
+#   row_slice_finish(result, prep)    on the result: fix the keys, if needed
+#
+# Fixed keys are a cost (a later summarise()/count()/tally()/reframe()/rows_*()
+# runs on the CPU), so they are set only when a plain regroup of the result
+# would differ from dplyr's group_data(), i.e. when a group can have been lost
+# (row_slice_keys()).
+
+# @param x a `tbl_gpu`; @param preserve dplyr's `preserve`/`.preserve`
+# @param eligible FALSE for a call that never keeps groups (`.by`)
+# @return list(data = x (computed if keys may be taken), keep, preserve)
+# @keywords internal
+row_slice_prepare <- function(x, preserve = FALSE, eligible = TRUE) {
+  keep <- eligible && (isTRUE(preserve) || isFALSE(x$group_drop)) &&
+    length(x$groups) > 0L && !is_rowwise_gpu(x)
+  if (keep && has_pending_ops(x)) x <- compute(x)
+  list(data = x, keep = keep, preserve = isTRUE(preserve))
+}
+
+# `result` with the keys of row_slice_keys() fixed on it, or with its fixed
+# keys dropped when none are needed (or its groups are not the input's).
+# @keywords internal
+row_slice_finish <- function(result, prep) {
+  if (!is_tbl_gpu(result)) return(result)
+  keys <- if (prep$keep && identical(result$groups, prep$data$groups)) {
+    row_slice_keys(prep$data, result)
+  }
+  if (!is.null(keys)) {
+    result$fixed_keys <- keys
+  } else if (!is.null(result[["fixed_keys"]])) {
+    result <- drop_fixed_keys(result)
+  }
+  result
+}
+
+# The group keys to fix on `result`, a row slice of `x` (computed, eligible per
+# row_slice_prepare()), or NULL when `result`'s own groups already match
+# dplyr's:
+# - keys `x` already has are carried (they are its groups);
+# - `.drop = FALSE` with only factor keys and no NA: dplyr's groups are every
+#   level combination, which group_data() rebuilds for any subset of rows;
+# - an eager `result`: its observed groups are a subset of x's, so equal
+#   counts mean the same set and the same group_data(); fewer means a group
+#   was lost and x's keys are captured;
+# - a lazy `result` cannot say, so x's keys are captured now.
+# @keywords internal
+row_slice_keys <- function(x, result) {
+  fixed <- fixed_keys_of(x)
+  if (!is.null(fixed)) {
+    return(fixed)
+  }
+  group_names <- x$groups
+  if (isFALSE(x$group_drop) &&
+      all(group_names %in% names(x$schema$factor_levels)) &&
+      !any(gpu_null_counts(x$ptr, group_col_index0(x)) > 0L)) {
+    return(NULL)
+  }
+  if (!has_pending_ops(result) &&
+      distinct_group_count(result) == distinct_group_count(x)) {
+    return(NULL)
+  }
+  slice_group_keys(x)
+}
+
 # The group keys of a grouped `tbl_gpu` (the fixed ones if it has them), as a
 # plain tibble in group_data() order.
 # @keywords internal
 slice_group_keys <- function(.data) {
-  slice_group_keys_of(compute_group_data(.data))
+  materialized <- if (has_pending_ops(.data)) compute(.data) else .data
+  fixed <- fixed_keys_of(materialized)
+  if (!is.null(fixed)) {
+    return(fixed)
+  }
+  group_names <- materialized$groups
+  if (is_rowwise_gpu(materialized) || length(group_names) == 0L) {
+    return(slice_group_keys_of(compute_group_data(materialized)))
+  }
+  # keys only, no row indices: the observed keys (one GPU groupby, k rows
+  # downloaded), then compute_group_data()'s `.drop = FALSE` level expansion
+  keys_schema <- group_keys_schema(materialized)
+  gd <- group_keys_frame(
+    wrap_gpu_call("group_data", gpu_group_keys(materialized$ptr, group_col_index0(materialized))),
+    keys_schema
+  )
+  if (isFALSE(materialized$group_drop)) {
+    gd$.rows <- vctrs::new_list_of(rep(list(integer()), nrow(gd)), ptype = integer())
+    gd <- expand_dropped_groups(gd, group_names, keys_schema$factor_levels)
+  }
+  slice_group_keys_of(gd)
 }
 
 # The key columns of a group_data() tibble, as a plain tibble.
@@ -798,6 +885,9 @@ slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
   check_unique_input_names(.data)
   gm <- slice_group_mode(.data, by_quo, "by", call = rlang::current_env())
   np <- slice_np(n, prop)
+  prep <- row_slice_prepare(.data, eligible = identical(gm$mode, "group_by"))
+  .data <- prep$data
+  with_keys <- function(result) row_slice_finish(result, prep)
 
   if (identical(gm$mode, "none")) {
     zero <- slice_zero_column(.data, function(tbl) {
@@ -814,12 +904,12 @@ slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
       slice_grouped_native(.data, gm$mode, gm$group_cols, mode = "head",
                             amount = amt$amount, is_prop = amt$is_prop)
     }
-    if (!is.null(result)) return(result)
+    if (!is.null(result)) return(with_keys(result))
   }
 
-  gpu_fallback("slice_head", .data, function(tbl) {
+  with_keys(gpu_fallback("slice_head", .data, function(tbl) {
     rlang::inject(dplyr::slice_head(tbl, !!!dots, !!!np, by = !!by_quo))
-  })
+  }))
 }
 
 #' Select the last rows
@@ -845,6 +935,9 @@ slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
   check_unique_input_names(.data)
   gm <- slice_group_mode(.data, by_quo, "by", call = rlang::current_env())
   np <- slice_np(n, prop)
+  prep <- row_slice_prepare(.data, eligible = identical(gm$mode, "group_by"))
+  .data <- prep$data
+  with_keys <- function(result) row_slice_finish(result, prep)
 
   if (identical(gm$mode, "none")) {
     zero <- slice_zero_column(.data, function(tbl) {
@@ -861,12 +954,12 @@ slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
       slice_grouped_native(.data, gm$mode, gm$group_cols, mode = "tail",
                             amount = amt$amount, is_prop = amt$is_prop)
     }
-    if (!is.null(result)) return(result)
+    if (!is.null(result)) return(with_keys(result))
   }
 
-  gpu_fallback("slice_tail", .data, function(tbl) {
+  with_keys(gpu_fallback("slice_tail", .data, function(tbl) {
     rlang::inject(dplyr::slice_tail(tbl, !!!dots, !!!np, by = !!by_quo))
-  })
+  }))
 }
 
 #' Select rows with the smallest values of a variable
@@ -915,6 +1008,9 @@ slice_min.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   check_unique_input_names(.data)
   gm <- slice_group_mode(.data, by_quo, "by", call = rlang::current_env())
   np <- slice_np(n, prop)
+  prep <- row_slice_prepare(.data, eligible = identical(gm$mode, "group_by"))
+  .data <- prep$data
+  with_keys <- function(result) row_slice_finish(result, prep)
 
   if (length(dots) == 0) {
     result <- if (identical(gm$mode, "none")) {
@@ -924,13 +1020,13 @@ slice_min.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
       slice_rank_grouped(.data, gm, order_quo, amt, descending = FALSE,
                          with_ties = with_ties, na_rm = na_rm)
     }
-    if (!is.null(result)) return(result)
+    if (!is.null(result)) return(with_keys(result))
   }
 
-  gpu_fallback("slice_min", .data, function(tbl) {
+  with_keys(gpu_fallback("slice_min", .data, function(tbl) {
     rlang::inject(dplyr::slice_min(tbl, order_by = !!order_quo, !!!dots, !!!np,
                                     by = !!by_quo, with_ties = with_ties, na_rm = na_rm))
-  })
+  }))
 }
 
 #' Select rows with the largest values of a variable
@@ -960,6 +1056,9 @@ slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   check_unique_input_names(.data)
   gm <- slice_group_mode(.data, by_quo, "by", call = rlang::current_env())
   np <- slice_np(n, prop)
+  prep <- row_slice_prepare(.data, eligible = identical(gm$mode, "group_by"))
+  .data <- prep$data
+  with_keys <- function(result) row_slice_finish(result, prep)
 
   if (length(dots) == 0) {
     result <- if (identical(gm$mode, "none")) {
@@ -969,13 +1068,13 @@ slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
       slice_rank_grouped(.data, gm, order_quo, amt, descending = TRUE,
                          with_ties = with_ties, na_rm = na_rm)
     }
-    if (!is.null(result)) return(result)
+    if (!is.null(result)) return(with_keys(result))
   }
 
-  gpu_fallback("slice_max", .data, function(tbl) {
+  with_keys(gpu_fallback("slice_max", .data, function(tbl) {
     rlang::inject(dplyr::slice_max(tbl, order_by = !!order_quo, !!!dots, !!!np,
                                     by = !!by_quo, with_ties = with_ties, na_rm = na_rm))
-  })
+  }))
 }
 
 # Shared grouped/`by=` native-path builder for slice_min()/slice_max():

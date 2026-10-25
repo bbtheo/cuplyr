@@ -413,6 +413,17 @@ union_all.tbl_gpu <- function(x, y, ...) {
   reset_frame_meta(restore_set_op_factor_levels(result, chk$target_schema), x)
 }
 
+# `result` (the ungrouped rows of a set operation) regrouped like `x`, `.drop`
+# included, with no fixed group keys: set operations regroup, as dplyr's
+# dplyr_reconstruct() does.
+# @keywords internal
+regroup_set_op <- function(result, x) {
+  result <- drop_fixed_keys(result)
+  result$groups <- x$groups
+  if (length(x$groups) > 0L) result$group_drop <- x$group_drop
+  result
+}
+
 #' @rdname set-ops
 #' @export
 #' @importFrom dplyr intersect
@@ -431,11 +442,13 @@ intersect.tbl_gpu <- function(x, y, ...) {
   }
 
   target_names <- chk$target_schema$names
-  x_aligned <- align_set_op_side(x, chk$target_schema, groups = x$groups)
+  # set operations regroup (dplyr_reconstruct()): the filtering join runs on
+  # ungrouped rows, so it takes no group keys (F71), and x's groups are put back
+  x_aligned <- align_set_op_side(x, chk$target_schema, groups = character())
   y_aligned <- align_set_op_side(y, chk$target_schema, groups = character())
 
   matched <- dplyr::semi_join(x_aligned, y_aligned, by = target_names, na_matches = "na")
-  reset_frame_meta(dplyr::distinct(matched), x)
+  reset_frame_meta(regroup_set_op(dplyr::distinct(matched), x), x)
 }
 
 #' @rdname set-ops
@@ -456,11 +469,11 @@ setdiff.tbl_gpu <- function(x, y, ...) {
   }
 
   target_names <- chk$target_schema$names
-  x_aligned <- align_set_op_side(x, chk$target_schema, groups = x$groups)
+  x_aligned <- align_set_op_side(x, chk$target_schema, groups = character())
   y_aligned <- align_set_op_side(y, chk$target_schema, groups = character())
 
   unmatched <- dplyr::anti_join(x_aligned, y_aligned, by = target_names, na_matches = "na")
-  reset_frame_meta(dplyr::distinct(unmatched), x)
+  reset_frame_meta(regroup_set_op(dplyr::distinct(unmatched), x), x)
 }
 
 #' @rdname set-ops
@@ -481,7 +494,7 @@ symdiff.tbl_gpu <- function(x, y, ...) {
   }
 
   target_names <- chk$target_schema$names
-  x_aligned <- align_set_op_side(x, chk$target_schema, groups = x$groups)
+  x_aligned <- align_set_op_side(x, chk$target_schema, groups = character())
   y_aligned <- align_set_op_side(y, chk$target_schema, groups = character())
 
   # `y_aligned` is already reordered to `target_names` (x's column order)
@@ -489,11 +502,11 @@ symdiff.tbl_gpu <- function(x, y, ...) {
   # verbatim-y_aligned-schema output needs no further reordering before
   # concatenating with the x-side setdiff -- both are already the same
   # (target) schema.
-  x_minus_y <- dplyr::distinct(dplyr::anti_join(x_aligned, y_aligned, by = target_names, na_matches = "na"))
+  x_minus_y <- dplyr::distinct(
+    dplyr::anti_join(x_aligned, y_aligned, by = target_names, na_matches = "na"))
   y_minus_x <- dplyr::distinct(dplyr::anti_join(y_aligned, x_aligned, by = target_names, na_matches = "na"))
 
-  result <- bind_rows(x_minus_y, y_minus_x)
-  result$groups <- x$groups
+  result <- regroup_set_op(bind_rows(x_minus_y, y_minus_x), x)
   reset_frame_meta(restore_set_op_factor_levels(result, chk$target_schema), x)
 }
 

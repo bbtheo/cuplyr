@@ -69,15 +69,17 @@
 #' once no group column is left. Like dplyr, `.drop` defaults to the table's
 #' current setting, so regrouping a `.drop = FALSE` table keeps it.
 #'
-#' Groups are recomputed from the data each time, so an empty group of a
-#' non-factor column that `filter()` emptied vanishes from `group_data()`
-#' (dplyr's `filter(.preserve = TRUE)` would keep it; that argument is not
-#' supported natively). Empty factor-level groups are re-added from the
-#' declared levels. The one exception is `slice(.preserve = TRUE)` on a
-#' `group_by()`-grouped table: it fixes the input's group-keys table
-#' (`$fixed_keys`, emptied groups included, any key type), which
-#' `group_data()` and friends, `collect()` and the CPU fallbacks (so
-#' `summarise()`) honour. `filter(.preserve = TRUE)` fixes keys the same way.
+#' Groups are recomputed from the data each time, and empty factor-level
+#' groups are re-added from the declared levels. Row-subsetting verbs also
+#' keep emptied groups of any key type, as dplyr does. On a `.drop = FALSE`
+#' table, `filter()`, `filter_out()`, `slice()`, `slice_head()`,
+#' `slice_tail()`, `slice_min()`, `slice_max()`, `slice_sample()`,
+#' `semi_join()`, `anti_join()` and `rows_delete()` keep every group,
+#' emptied ones included. `.preserve = TRUE` does the same for `slice()` and
+#' `filter()` on a `.drop = TRUE` table. The result fixes the input's
+#' group-keys table (`$fixed_keys`), only when a group can have been lost,
+#' which `group_data()` and friends, `collect()` and the CPU fallbacks (so
+#' `summarise()`) honour.
 #' `mutate()`, `select()`, `rename()` and `relocate()` carry it as long as
 #' they leave the group columns alone, and a CPU fallback result carries
 #' whatever empty groups dplyr's own result kept (see `gpu_fallback()`: a
@@ -628,27 +630,12 @@ compute_group_data <- function(.data) {
   }
 
   group_names <- materialized$groups
-  schema_idx <- match(group_names, materialized$schema$names)
-  group_col_idx0 <- as.integer(schema_idx - 1L)
+  group_col_idx0 <- group_col_index0(materialized)
 
   info <- wrap_gpu_call("group_data", gpu_group_info(materialized$ptr, group_col_idx0))
 
-  keys_schema <- list(
-    names = group_names,
-    types = unname(materialized$schema$types[schema_idx])
-  )
-  if (!is.null(materialized$schema$factor_levels)) {
-    fl <- materialized$schema$factor_levels[
-      names(materialized$schema$factor_levels) %in% group_names
-    ]
-    keys_schema$factor_levels <- if (length(fl) > 0) fl else NULL
-  }
-  keys_schema$tz <- tz_from_positions(
-    group_names, keys_schema$types, tz_by_position(materialized$schema)[schema_idx]
-  )
-
-  keys_tbl <- new_tbl_gpu(ptr = info$keys, schema = keys_schema, exec_mode = "eager")
-  keys_df <- tibble::as_tibble(collect_frame(keys_tbl))
+  keys_schema <- group_keys_schema(materialized)
+  keys_df <- group_keys_frame(info$keys, keys_schema)
 
   offsets <- info$offsets
   perm <- info$perm
@@ -678,6 +665,63 @@ compute_group_data <- function(.data) {
   gd
 }
 
+# 0-based positions of `x`'s group columns in its schema.
+# @keywords internal
+group_col_index0 <- function(x) {
+  as.integer(match(.subset2(x, "groups"), .subset2(x, "schema")$names) - 1L)
+}
+
+# The schema of `x`'s group-key table: its group columns, with their factor
+# levels and time zones.
+# @keywords internal
+group_keys_schema <- function(x) {
+  schema <- .subset2(x, "schema")
+  group_names <- .subset2(x, "groups")
+  schema_idx <- match(group_names, schema$names)
+  keys_schema <- list(
+    names = group_names,
+    types = unname(schema$types[schema_idx])
+  )
+  if (!is.null(schema$factor_levels)) {
+    fl <- schema$factor_levels[names(schema$factor_levels) %in% group_names]
+    keys_schema$factor_levels <- if (length(fl) > 0) fl else NULL
+  }
+  keys_schema$tz <- tz_from_positions(
+    group_names, keys_schema$types, tz_by_position(schema)[schema_idx]
+  )
+  keys_schema
+}
+
+# A distinct-keys GPU table (`gpu_group_info()$keys`, `gpu_group_keys()`) as a
+# tibble.
+# @keywords internal
+group_keys_frame <- function(keys_ptr, keys_schema) {
+  keys_tbl <- new_tbl_gpu(ptr = keys_ptr, schema = keys_schema, exec_mode = "eager")
+  tibble::as_tibble(collect_frame(keys_tbl))
+}
+
+# The number of observed key combinations of `x` (eager, grouped, not
+# rowwise): one GPU groupby, with no row-index upload, permutation download or
+# `.drop = FALSE` level expansion (what count_groups() adds on top).
+# @keywords internal
+observed_group_count <- function(x) {
+  wrap_gpu_call(
+    "group_data",
+    gpu_group_count(.subset2(x, "ptr"), group_col_index0(x))
+  )
+}
+
+# The same number as observed_group_count(), counted with a hash set rather
+# than a sorted groupby (about 50x faster on 5e6 string keys): row_slice_keys()
+# only compares two counts.
+# @keywords internal
+distinct_group_count <- function(x) {
+  wrap_gpu_call(
+    "group_data",
+    gpu_distinct_key_count(.subset2(x, "ptr"), group_col_index0(x))
+  )
+}
+
 # `nrow(compute_group_data(.data))` without the group data, checked in the
 # same order as compute_group_data():
 # - fixed keys (filter()/slice() with `.preserve = TRUE`, filter() of a
@@ -690,6 +734,12 @@ compute_group_data <- function(.data) {
 #   download or per-group R vectors.
 # @keywords internal
 count_groups <- function(.data) {
+  # fixed keys are the groups (compute() copies them), so a lazy table's plan
+  # is not run to count them
+  fixed <- fixed_keys_of(.data)
+  if (!is.null(fixed) && length(.subset2(.data, "groups")) > 0L && !is_rowwise_gpu(.data)) {
+    return(nrow(fixed))
+  }
   materialized <- if (has_pending_ops(.data)) compute(.data) else .data
 
   if (is_rowwise_gpu(materialized)) {
@@ -711,11 +761,7 @@ count_groups <- function(.data) {
     return(nrow(compute_group_data(materialized)))
   }
 
-  group_col_idx0 <- as.integer(match(group_names, schema$names) - 1L)
-  wrap_gpu_call(
-    "group_data",
-    gpu_group_count(.subset2(materialized, "ptr"), group_col_idx0)
-  )
+  observed_group_count(materialized)
 }
 
 # The group keys `slice(.preserve = TRUE)` fixed on `x`, or NULL. Only trusted

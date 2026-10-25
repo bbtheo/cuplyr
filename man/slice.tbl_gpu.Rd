@@ -27,7 +27,9 @@ ungrouped. Supplying \code{.by} when \code{.data} is already grouped (via
 \item{.preserve}{Whether to keep the groups the slice emptied. With \code{TRUE},
 a \code{group_by()}-grouped result keeps the input's group keys (empty groups
 included) for \code{group_data()}, \code{collect()} and \code{summarise()}, like dplyr
-(see \code{\link[=group_by.tbl_gpu]{group_by.tbl_gpu()}} for what carries them on).}
+(see \code{\link[=group_by.tbl_gpu]{group_by.tbl_gpu()}} for what carries them on). On a \code{.drop = FALSE}
+table every group is kept whatever \code{.preserve} says, as in dplyr (also for
+\code{slice_head()}, \code{slice_tail()}, \code{slice_min()} and \code{slice_max()}).}
 }
 \value{
 A \code{tbl_gpu} object with the selected rows.

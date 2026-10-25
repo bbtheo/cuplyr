@@ -1770,7 +1770,8 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
 #'   `"never"` (`NA` keys never match anything).
 #' @return A `tbl_gpu` with `x`'s own schema, filtered to the rows that
 #'   (`semi_join()`) or don't (`anti_join()`) have a match in `y`. `x`'s
-#'   `group_by()` grouping is preserved.
+#'   `group_by()` grouping is preserved; on a `.drop = FALSE` table every group
+#'   of `x` is kept, including the ones the join empties, like dplyr.
 #' @name semi-anti-joins
 #' @rdname semi-anti-joins
 #' @export

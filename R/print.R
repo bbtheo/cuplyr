@@ -44,8 +44,9 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
     cat("# Operations pending: ", ast_count_ops(.subset2(x, "lazy_ops")), "\n", sep = "")
     grouping <- lazy_grouping_sum(x)
     if (length(grouping) > 0L) {
-      # no group count: it would need the plan. Same layout as the eager
-      # header, whose first line is dropped.
+      # a group count only when fixed group keys hold it (lazy_grouping_sum());
+      # otherwise it would need the plan. Same layout as the eager header,
+      # whose first line is dropped.
       cat(gibble_header(x, width, c("A gibble" = "", grouping))[-1L], sep = "\n")
     }
     return(invisible(x))
@@ -110,13 +111,21 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
 }
 
 # The group or rowwise vars of `x` as tbl_sum() entries, without a group count
-# (a lazy table's plan is not run to print it).
+# (a lazy table's plan is not run to print it) unless fixed group keys already
+# hold the groups (F71), whose count is then known.
 lazy_grouping_sum <- function(x) {
   groups <- .subset2(x, "groups")
   if (is_rowwise_gpu(x)) {
     c(Rowwise = paste(groups, collapse = ", "))
   } else if (length(groups) > 0L) {
-    c(Groups = paste(groups, collapse = ", "))
+    keys <- fixed_keys_of(x)
+    n <- if (!is.null(keys)) {
+      mark <- if (identical(getOption("OutDec"), ",")) "." else ","
+      paste0(" [", formatC(nrow(keys), big.mark = mark, format = "d"), "]")
+    } else {
+      ""
+    }
+    c(Groups = paste0(paste(groups, collapse = ", "), n))
   } else {
     character()
   }

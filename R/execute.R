@@ -693,6 +693,14 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
   check_zero_column_input(x, current_schema(x), verb)
   check_zero_column_input(y, current_schema(y), verb)
 
+  # F71: a filtering join slices x's rows, so (dplyr_row_slice()) a grouped
+  # `.drop = FALSE` x keeps its whole group structure, emptied groups included.
+  # row_slice_finish() fixes x's keys on the result when a group can be lost;
+  # that reads x's data, so pending ops are computed first (as filter_impl()
+  # does) and the join result stays lazy if either side is.
+  prep <- row_slice_prepare(x, eligible = join_type %in% c("semi", "anti"))
+  x <- prep$data
+
   join_ast <- ast_join(
     join_type,
     join_input_node(x),
@@ -713,12 +721,6 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
   # As in push_op(): `.drop` goes with the last surviving group column.
   new_group_drop <- if (length(new_groups) > 0L) x$group_drop %||% TRUE else TRUE
 
-  # F33: semi/anti joins slice x's rows, so (dplyr_row_slice()) a `.drop =
-  # FALSE` x keeps its fixed group keys.
-  join_fixed_keys <- if (join_type %in% c("semi", "anti") && isFALSE(x$group_drop) &&
-                         identical(new_groups, x$groups)) {
-    fixed_keys_of(x)
-  }
   # Filtering joins return x verbatim, so its unspecified() columns survive.
   join_unspec <- if (join_type %in% c("semi", "anti")) x[["unspecified"]]
 
@@ -731,11 +733,10 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
       groups = new_groups,
       exec_mode = "lazy",
       group_drop = new_group_drop,
-      fixed_keys = join_fixed_keys,
       unspecified = join_unspec,
       rowwise = is_rowwise_gpu(x)
     )
-    return(carry_frame_meta(out, x))
+    return(row_slice_finish(carry_frame_meta(out, x), prep))
   }
 
   warn_if_join_too_large(if (cross_by) "cross" else join_type, x, y, join_spec,
@@ -753,11 +754,10 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
     groups = new_groups,
     exec_mode = "eager",
     group_drop = new_group_drop,
-    fixed_keys = join_fixed_keys,
     unspecified = join_unspec,
     rowwise = is_rowwise_gpu(x)
   )
-  carry_frame_meta(out, x)
+  row_slice_finish(carry_frame_meta(out, x), prep)
 }
 
 #' Auto-name unnamed dots, warning as dplyr's verbs do
