@@ -22,7 +22,7 @@ tbl_sum.tbl_gpu <- function(x, ...) {
     out <- c(out, Rowwise = paste(groups, collapse = ", "))
   } else if (length(groups) > 0L) {
     mark <- if (identical(getOption("OutDec"), ",")) "." else ","
-    n <- formatC(nrow(dplyr::group_data(x)), big.mark = mark, format = "d")
+    n <- formatC(count_groups(x), big.mark = mark, format = "d")
     out <- c(out, Groups = paste0(paste(groups, collapse = ", "), " [", n, "]"))
   }
   out
@@ -30,39 +30,44 @@ tbl_sum.tbl_gpu <- function(x, ...) {
 
 #' @export
 print.tbl_gpu <- function(x, ..., width = NULL) {
-  width <- width %||% getOption("width", 80)
+  # the header wraps at the print width; the glimpse-style body follows
+  # glimpse()'s rule, which ignores an infinite width option
+  body_w <- body_width(width)
+  width <- print_width(width)
 
-  if (is.null(x$ptr)) {
-    cat("# A GPU tibble [lazy, not materialized]\n")
-    cat("# Schema: ", paste(x$schema$names, collapse = ", "), "\n")
-    cat("# Operations pending: ", length(x$lazy_ops), "\n")
+  # A lazy table with pending operations is never run to print it: show the
+  # result's schema, its grouping (metadata only) and how many plan steps
+  # (AST nodes) are pending.
+  if (has_pending_ops(x) || is.null(.subset2(x, "ptr"))) {
+    cat("# A gibble [lazy, not materialized]\n")
+    cat("# Schema: ", paste(display_names(.subset2(x, "schema")$names), collapse = ", "), "\n", sep = "")
+    cat("# Operations pending: ", ast_count_ops(.subset2(x, "lazy_ops")), "\n", sep = "")
+    grouping <- lazy_grouping_sum(x)
+    if (length(grouping) > 0L) {
+      # no group count: it would need the plan. Same layout as the eager
+      # header, whose first line is dropped.
+      cat(gibble_header(x, width, c("A gibble" = "", grouping))[-1L], sep = "\n")
+    }
     return(invisible(x))
   }
 
-  dims <- base_dim(x)
-  types <- gpu_col_types(x$ptr)
-  col_names <- display_names(x$schema$names)
+  ptr <- .subset2(x, "ptr")
+  schema <- .subset2(x, "schema")
+  types <- gpu_col_types(ptr)
+  col_names <- display_names(schema$names)
 
-  # Header
-  cat("Rows: ", format(dims[1], big.mark = ","), "\n", sep = "")
-  cat("Columns: ", dims[2], "\n", sep = "")
-
-  if (is_rowwise_gpu(x)) {
-    cat("Rowwise: ", paste(x$groups, collapse = ", "), "\n", sep = "")
-  } else if (length(x$groups) > 0) {
-    cat("Groups: ", paste(x$groups, collapse = ", "), "\n")
-  }
+  cat(gibble_header(x, width), sep = "\n")
 
   # Get preview data (first 10 rows for value display)
   preview <- tryCatch(
-    gpu_head(x$ptr, 10L, col_names),
+    gpu_head(ptr, 10L, col_names),
     error = function(e) NULL
   )
 
   # Calculate column name width for alignment
   max_name_width <- max(nchar(col_names), 1)
 
-  zones <- tz_by_position(x$schema)
+  zones <- tz_by_position(schema)
 
   # Print each column
   for (i in seq_along(col_names)) {
@@ -87,7 +92,7 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
         val_str <- paste(vals, collapse = ", ")
 
         # Truncate to fit width
-        available_width <- width - max_name_width - nchar(type_str) - 6
+        available_width <- body_w - max_name_width - nchar(type_str) - 6
         if (nchar(val_str) > available_width && available_width > 10) {
           val_str <- paste0(substr(val_str, 1, available_width - 3), "...")
         }
@@ -102,6 +107,53 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
   }
 
   invisible(x)
+}
+
+# The group or rowwise vars of `x` as tbl_sum() entries, without a group count
+# (a lazy table's plan is not run to print it).
+lazy_grouping_sum <- function(x) {
+  groups <- .subset2(x, "groups")
+  if (is_rowwise_gpu(x)) {
+    c(Rowwise = paste(groups, collapse = ", "))
+  } else if (length(groups) > 0L) {
+    c(Groups = paste(groups, collapse = ", "))
+  } else {
+    character()
+  }
+}
+
+# The print width in pillar's order (pillar 1.11.1, get_width_print()): the
+# `width` argument, then options pillar.width, tibble.width and dplyr.width
+# (pillar plans to soft-deprecate the last two in v2.0.0), then
+# getOption("width"). tbl_format_header() caps the header at
+# cli::console_width() on top of that.
+print_width <- function(width = NULL) {
+  width %||% getOption("pillar.width") %||% getOption("tibble.width") %||%
+    getOption("dplyr.width") %||% getOption("width", 80)
+}
+
+# The width of the `$ col <type> values` body: glimpse()'s rule (pillar
+# 1.11.1, get_width_glimpse()). The `width` argument as given; otherwise the
+# option chain of print_width(), used only if finite (an infinite
+# pillar.width / tibble.width, a common setting, would let the lines run past
+# the console), else getOption("width").
+body_width <- function(width = NULL) {
+  if (!is.null(width)) {
+    return(width)
+  }
+  width <- print_width()
+  if (is.finite(width)) width else getOption("width", 80)
+}
+
+# tibble's header lines for `sum` (default tbl_sum(x)) with the first name
+# ("A tibble" / "A data frame") renamed "A gibble": pillar's own
+# tbl_format_header(), so the "name:" padding, wrapping at `width` with "#   "
+# continuation lines and subtle styling are exactly tibble's. `setup` carries
+# the fields that method reads (tbl_sum, width; see ?pillar::tbl_format_setup).
+# `width` is the resolved print width (print_width()).
+gibble_header <- function(x, width, sum = tbl_sum(x)) {
+  names(sum)[1] <- "A gibble"
+  pillar::tbl_format_header(x, list(tbl_sum = sum, width = width))
 }
 
 # Column names as printed: an NA name shows as "NA" (nchar(NA_character_) is

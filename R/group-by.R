@@ -567,9 +567,12 @@ group_trim.tbl_gpu <- function(.tbl, .drop = dplyr::group_by_drop_default(.tbl))
 
 # =============================================================================
 # Grouping metadata query family (Phase 9, task 1): group_data()/
-# group_keys()/group_indices()/group_size()/n_groups() are all GPU-native,
-# sharing one C++ primitive (`gpu_group_info()`, src/ops_groupby.cpp) via
-# `compute_group_data()` below. `group_rows()` needs no method of its own:
+# group_keys()/group_indices()/group_size()/n_groups() are all GPU-native.
+# All but n_groups() share one C++ primitive (`gpu_group_info()`,
+# src/ops_groupby.cpp) via `compute_group_data()` below; n_groups() (and the
+# printed group count) goes through `count_groups()`, which needs no row
+# indices (it falls back to `compute_group_data()` only for a `.drop = FALSE`
+# factor key). `group_rows()` needs no method of its own:
 # `dplyr::group_rows()` is a plain (non-generic) function defined as
 # `group_data(.data)[[".rows"]]`, so it already works transparently once
 # `group_data.tbl_gpu()` exists. Previously (Phase 2) all six were CPU
@@ -673,6 +676,46 @@ compute_group_data <- function(.data) {
   attr(gd, ".drop") <- isTRUE(materialized$group_drop %||% TRUE)
 
   gd
+}
+
+# `nrow(compute_group_data(.data))` without the group data, checked in the
+# same order as compute_group_data():
+# - fixed keys (filter()/slice() with `.preserve = TRUE`, filter() of a
+#   `.drop = FALSE` table): compute_group_data() returns exactly the fixed keys
+#   (fixed_group_rows()), so the count is their row count, with no GPU work;
+# - `.drop = FALSE` with a factor key: unused level combinations are groups,
+#   so the count needs the expanded group data;
+# - otherwise the number of observed key combinations from one GPU groupby
+#   (`gpu_group_count()`), with no row-index upload, n-row permutation
+#   download or per-group R vectors.
+# @keywords internal
+count_groups <- function(.data) {
+  materialized <- if (has_pending_ops(.data)) compute(.data) else .data
+
+  if (is_rowwise_gpu(materialized)) {
+    return(dim(materialized)[[1L]])
+  }
+  group_names <- .subset2(materialized, "groups")
+  if (length(group_names) == 0L) {
+    return(1L)
+  }
+  fixed <- fixed_keys_of(materialized)
+  if (!is.null(fixed)) {
+    return(nrow(fixed))
+  }
+  schema <- .subset2(materialized, "schema")
+  keeps_unused_levels <-
+    !isTRUE(.subset2(materialized, "group_drop") %||% TRUE) &&
+    any(group_names %in% names(schema$factor_levels))
+  if (keeps_unused_levels) {
+    return(nrow(compute_group_data(materialized)))
+  }
+
+  group_col_idx0 <- as.integer(match(group_names, schema$names) - 1L)
+  wrap_gpu_call(
+    "group_data",
+    gpu_group_count(.subset2(materialized, "ptr"), group_col_idx0)
+  )
 }
 
 # The group keys `slice(.preserve = TRUE)` fixed on `x`, or NULL. Only trusted
@@ -871,5 +914,5 @@ group_size.tbl_gpu <- function(x) {
 #' @export
 #' @importFrom dplyr n_groups
 n_groups.tbl_gpu <- function(x) {
-  nrow(compute_group_data(x))
+  count_groups(x)
 }

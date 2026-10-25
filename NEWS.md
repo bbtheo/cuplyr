@@ -1,5 +1,46 @@
 # cuplyr (development version)
 
+## gibble: the user-facing name for GPU tables (F51)
+
+* cuplyr's GPU tables are called gibbles. `print()` now starts with tibble's
+  own header with the noun changed (`# A gibble:` and the dimensions),
+  followed by `# Groups:` or `# Rowwise:` lines, instead of the
+  `Rows:`/`Columns:`/`Groups:` lines. The header comes from pillar's own
+  `tbl_format_header()`, so it wraps at the print width. The width follows
+  pillar's order: `print(width =)`, then `options(pillar.width)` (then
+  `tibble.width`, `dplyr.width`), then `getOption("width")`. The
+  `$ col <type> values` body is unchanged. Its value truncation follows
+  `glimpse()`'s rule: `print(width =)` as given, otherwise the width option
+  only if it is finite, so `options(pillar.width = Inf)` or
+  `options(tibble.width = Inf)` still cuts the body at `getOption("width")`.
+* The group count in the header of a grouped gibble, and `n_groups()`, no
+  longer build `group_data()` in most cases. A table with fixed group keys
+  (e.g. `filter()` or `slice()` with `.preserve = TRUE`, or `filter()` of a
+  `.drop = FALSE` table) already knows its groups, so for an eager table the
+  count costs no GPU work (a lazy table with pending operations runs its plan
+  first). Otherwise one GPU groupby returns just the count, without the row
+  indices. That groupby still sorts every key, so its cost grows with the row
+  count and the key width: about 4 ms for 2e6 integer groups, about 0.2 s for
+  1e7 rows with 1e6 string groups (against about 1 ms for an ungrouped print).
+  `group_data()` is still built for a `.drop = FALSE` table with a factor key
+  and no fixed keys, since unused levels count as groups there.
+* A lazy table with pending operations prints `# A gibble [lazy, not
+  materialized]`, its result schema, `# Operations pending: <k>` and, for a
+  grouped or rowwise table, a `# Groups:` or `# Rowwise:` line with the
+  variables (no group count: that would need the plan). It never runs the plan.
+  `k` is now the number of pending plan steps (AST nodes: a `collapse()`
+  barrier or a multi-step verb counts each node); before, a lazy join printed
+  the number of fields in its plan node (13) and a lazy table with a source
+  printed the source's dimensions with `[preview unavailable]` columns.
+* New exported aliases `gibble()`, `as_gibble()` and `is_gibble()` for
+  `tbl_gpu()`, `as_tbl_gpu()` and `is_tbl_gpu()` (the same function objects).
+  The class is still `c("tbl_gpu", "tbl")` and `pillar::tbl_sum()` still
+  returns dplyr's `"A tibble"` values.
+* The CRAN package gibble (geometry decomposition) also exports `gibble()`.
+  When both packages are attached the one attached last masks the other;
+  `cuplyr::gibble()` always works. cuplyr defines no `gibble.<class>` methods,
+  so the two cannot dispatch into each other.
+
 ## Docs: eager vs lazy, performance vignette (F62)
 
 * New `vignette("performance", package = "cuplyr")` with measured timings

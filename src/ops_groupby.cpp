@@ -1206,9 +1206,11 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
 }
 
 // Phase 9, task 1: grouping metadata API (group_data()/group_keys()/
-// group_rows()/group_indices()/group_size()/n_groups()).
+// group_rows()/group_indices()/group_size(); n_groups() goes through
+// R/group-by.R::count_groups(), which usually needs only gpu_group_count()
+// at the end of this file).
 //
-// Representation chosen (cheapest that serves all six R-facing queries):
+// Representation chosen (cheapest that serves all these R-facing queries):
 // a small DISTINCT-keys table (one row per group, in dplyr's own canonical
 // order -- see below) plus two small host-side integer vectors: `offsets`
 // (length num_groups + 1, the group boundary positions) and `perm` (length
@@ -1216,7 +1218,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
 // group-sorted order). `.rows` for group i is `perm[offsets[i]+1 ..
 // offsets[i+1]]` (R-side 1-based slicing of `perm`, since `offsets` are
 // 0-based boundary positions into it) -- group_data()/group_keys()/
-// group_rows()/group_size()/n_groups() all derive from the distinct-keys
+// group_rows()/group_size() all derive from the distinct-keys
 // table + offsets alone; only group_indices() needs `perm` itself (see
 // R/group-by.R::compute_group_data()).
 //
@@ -1352,4 +1354,45 @@ List gpu_group_info(SEXP xptr, IntegerVector group_col_indices) {
         Named("offsets") = offsets,
         Named("perm") = perm
     );
+}
+
+// Number of groups gpu_group_info() would return (n_groups(), and the group
+// count in a grouped table's printed header; R/group-by.R::count_groups()).
+// Same groupby as gpu_group_info() (null_policy::INCLUDE, so NA is its own
+// group and NaN keys stay separate from NA), but `get_groups()` is called
+// with no values table, so there is no row-index upload and no n-row
+// permutation download, and nothing is returned to R but the count.
+// get_groups() itself still stable-sorts the keys, gathers an n-row sorted
+// copy of them on the device, and copies all num_groups + 1 offsets to the
+// host; only their count is used.
+// [[Rcpp::export]]
+int gpu_group_count(SEXP xptr, IntegerVector group_col_indices) {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
+    cudf::table_view view = get_table_view(ptr);
+
+    int n_key_cols = group_col_indices.size();
+    if (n_key_cols == 0) {
+        Rcpp::stop("gpu_group_count() requires at least one group column index");
+    }
+    std::vector<cudf::column_view> key_views;
+    key_views.reserve(n_key_cols);
+    for (int i = 0; i < n_key_cols; ++i) {
+        if (group_col_indices[i] < 0 || group_col_indices[i] >= view.num_columns()) {
+            Rcpp::stop("Group column index out of bounds: %d", group_col_indices[i]);
+        }
+        key_views.push_back(view.column(group_col_indices[i]));
+    }
+    cudf::table_view keys_table(key_views);
+
+    if (view.num_rows() == 0) {
+        return 0;
+    }
+
+    cudf::groupby::groupby gb(keys_table, cudf::null_policy::INCLUDE);
+    auto groups_result = gb.get_groups();
+    return groups_result.offsets.empty()
+        ? 0
+        : static_cast<int>(groups_result.offsets.size()) - 1;
 }

@@ -37,6 +37,8 @@ tbl_gpu(sales_data, lazy = TRUE) |>
 
 cuplyr translates dplyr operations into cuDF execution on NVIDIA GPUs. It follows the same backend pattern as dbplyr: write standard R code, execute on GPU hardware. This approach can provide significant speedups on larger datasets (typically >1M rows) without requiring major code changes.
 
+`tbl_gpu()` makes cuplyr's GPU tables, called gibbles (they print as `# A gibble:` followed by the dimensions). `gibble()`, `as_gibble()` and `is_gibble()` are aliases of `tbl_gpu()`, `as_tbl_gpu()` and `is_tbl_gpu()`; the class stays `tbl_gpu`. The CRAN package gibble also exports a `gibble()`: if both are attached, the last one attached masks the other, and `cuplyr::gibble()` always works.
+
 **Built on [RAPIDS cuDF](https://rapids.ai/)**: cuDF is an open-source GPU DataFrame library developed by NVIDIA's RAPIDS team. It provides optimized CUDA kernels for data manipulation operations, backed by Apache Arrow's columnar memory format. cuplyr provides an R interface to this execution engine.
 
 ## Status
@@ -60,7 +62,7 @@ This is experimental software under active development. Breaking changes should 
 
 ### Eager vs lazy
 
-`tbl_gpu()` is eager by default: each verb runs on the GPU as soon as you call it and returns a GPU table. In lazy mode each verb only records a step. `collect()` (result to R) or `compute()` (result stays on the GPU) then optimizes the recorded plan, runs it, and frees every intermediate column.
+`tbl_gpu()` is eager by default: each verb runs on the GPU as soon as you call it and returns a gibble. In lazy mode each verb only records a step. `collect()` (result to R) or `compute()` (result stays on the GPU) then optimizes the recorded plan, runs it, and frees every intermediate column.
 
 Use lazy for pipelines, especially on big tables or inside loops. An eager pipeline leaves its intermediates on the GPU until R's next `gc()`. In a loop they pile up, and once they fill the card cuplyr's out-of-memory handler has to run: on 5e7 rows, five back-to-back runs of a five-verb pipeline took 68 to 155 ms each eager (it depends on what the memory pool already holds) and 20 to 24 ms each lazy. Before the card fills, eager stays faster: at 2.5e7 rows, five back-to-back eager runs left about 4 GB behind and took 9.4 ms each, against 12 ms lazy. The optimizer also drops columns the result never uses. Lazy is not faster when GPU memory is clean, at any size we measured: the same pipeline took 1 ms longer lazy at 1e6 rows (3.25 ms eager, 4.25 ms lazy), 2.4 ms longer at 1e7 and 3 ms longer at 5e7. Use eager for interactive exploration and single calls, where you want each result at once.
 

@@ -2,9 +2,12 @@
 % Please edit documentation in R/tbl-gpu.R
 \name{is_tbl_gpu}
 \alias{is_tbl_gpu}
+\alias{is_gibble}
 \title{Test if an object is a GPU table}
 \usage{
 is_tbl_gpu(x)
+
+is_gibble(x)
 }
 \arguments{
 \item{x}{An R object to test.}

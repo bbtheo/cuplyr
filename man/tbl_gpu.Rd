@@ -2,11 +2,14 @@
 % Please edit documentation in R/tbl-gpu.R
 \name{tbl_gpu}
 \alias{tbl_gpu}
+\alias{gibble}
 \alias{tbl_gpu.data.frame}
 \alias{tbl_gpu.tbl_gpu}
 \title{Create a GPU-backed data frame}
 \usage{
 tbl_gpu(data, ..., lazy = NULL)
+
+gibble(data, ..., lazy = NULL)
 
 \method{tbl_gpu}{data.frame}(data, ..., lazy = NULL)
 
@@ -38,10 +41,12 @@ A \code{tbl_gpu} object containing:
 }
 }
 \description{
-Transfers an R data frame to GPU memory using NVIDIA's libcudf library,
-enabling high-performance data manipulation operations. The resulting
-\code{tbl_gpu} object can be used with dplyr verbs like \code{filter()}, \code{mutate()},
-\code{select()}, and collected back to R with \code{collect()}.
+cuplyr's GPU tables, called gibbles, live in GPU memory. \code{gibble()} is
+another name for \code{tbl_gpu()}. It transfers an R data frame to GPU memory
+using NVIDIA's libcudf library, enabling high-performance data manipulation
+operations. The resulting \code{tbl_gpu} object can be used with dplyr verbs
+like \code{filter()}, \code{mutate()}, \code{select()}, and collected back to R with
+\code{collect()}.
 }
 \details{
 The data is immediately copied to GPU memory when \code{tbl_gpu()} is called.
@@ -81,6 +86,19 @@ Column type mappings from R to GPU:
 \item \code{Date} -> TIMESTAMP_DAYS
 \item \code{POSIXct} -> TIMESTAMP_MICROSECONDS
 }
+}
+
+\subsection{Gibbles}{
+
+"Gibble" is the user-facing name of a \code{tbl_gpu}: \code{print()} starts
+with \verb{# A gibble:} and the dimensions, and \code{gibble()}, \code{as_gibble()} and
+\code{is_gibble()} are aliases of \code{tbl_gpu()}, \code{as_tbl_gpu()} and
+\code{is_tbl_gpu()}. The class stays \code{tbl_gpu}, and \code{tbl_sum()} still returns
+dplyr's values.
+
+The CRAN package gibble (geometry decomposition, Michael Sumner) also
+exports a function called \code{gibble()}. When both packages are attached, the
+one attached last masks the other; \code{cuplyr::gibble()} always works.
 }
 }
 \examples{

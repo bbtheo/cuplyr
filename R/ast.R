@@ -898,6 +898,24 @@ ast_count <- function(node) {
   1L + ast_count(node$input)
 }
 
+#' Count the operations pending in an AST tree
+#'
+#' Like [ast_count()], but source nodes (the data a plan starts from) do not
+#' count.
+#'
+#' @param node Root AST node (or NULL)
+#' @return Integer count
+#' @keywords internal
+ast_count_ops <- function(node) {
+  if (is.null(node) || node$type == "source") {
+    return(0L)
+  }
+  if (node$type == "join") {
+    return(1L + ast_count_ops(node$left) + ast_count_ops(node$right))
+  }
+  1L + ast_count_ops(node$input)
+}
+
 #' Attach a source pointer to the source node in an AST
 #'
 #' @param node Root AST node
