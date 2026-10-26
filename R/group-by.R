@@ -78,8 +78,9 @@
 #' emptied ones included. `.preserve = TRUE` does the same for `slice()` and
 #' `filter()` on a `.drop = TRUE` table. The result fixes the input's
 #' group-keys table (`$fixed_keys`), only when a group can have been lost,
-#' which `group_data()` and friends, `collect()` and the CPU fallbacks (so
-#' `summarise()`) honour.
+#' which `group_data()` and friends, `collect()`, `summarise()`/`count()`/
+#' `tally()` (on the GPU, with a row for each emptied group) and the CPU
+#' fallbacks honour.
 #' `mutate()`, `select()`, `rename()` and `relocate()` carry it as long as
 #' they leave the group columns alone, and a CPU fallback result carries
 #' whatever empty groups dplyr's own result kept (see `gpu_fallback()`: a

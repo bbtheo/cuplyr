@@ -218,12 +218,20 @@
 #' by the keys). `count()`/`tally()` inherit it.
 #'
 #' ## `.drop = FALSE`
-#' On a `group_by(.drop = FALSE)` grouping with a factor key, every group of
-#' `group_data()` gets a row, empty ones included, holding each expression
+#' On a `group_by(.drop = FALSE)` grouping with a factor key, or on a table
+#' whose group keys are fixed (a `.drop = FALSE` table after `filter()`,
+#' `semi_join()`, `slice()`, ..., or a `.preserve = TRUE` slice), every group
+#' of `group_data()` gets a row, empty ones included, holding each expression
 #' evaluated on an empty vector (`n()` 0, `sum()` 0, `mean()` `NaN`, `min()`
 #' `Inf` with base R's warning, ...); with no expressions the result is the
 #' keys of every group. Such a call materializes a lazy table on the GPU (the
-#' row count is data-dependent).
+#' row count is data-dependent). The result is regrouped with the input's
+#' `.drop`. Three shapes differ from dplyr or leave the GPU: `min()`/`max()`
+#' of a Date or POSIXct column is `NA` for an empty group (dplyr's `Inf`/`-Inf`
+#' cannot be held by a GPU timestamp column; an uploaded non-finite Date or
+#' POSIXct is `NA` as well), `mean()` of a Date or POSIXct column is `NA` for
+#' an empty group where dplyr gives a `NaN` Date/POSIXct, and `min()`/`max()`
+#' of a character column runs the whole call on the CPU when a group is empty.
 #'
 #' ## `.by` group order
 #' Verified empirically against dplyr 1.2.1: `summarise(.by=)` emits one row
@@ -342,14 +350,6 @@ summarise_impl_dots <- function(.data, dots, .groups, by_quo, caller_env) {
 # cur_group_id() path can run it again on a reduced set of dots.
 # @keywords internal
 summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, caller_env) {
-  # slice(.preserve = TRUE) fixed the group keys: the empty groups get a row
-  # too (n() = 0), which only the CPU summarise (seeing the keys) produces.
-  if (!is.null(fixed_keys_of(.data))) {
-    return(gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(.data = tbl, !!!dots, .groups = .groups))
-    }))
-  }
-
   # F07: zero dots is a valid call (dplyr returns the group keys).
   if (length(dots) == 0) {
     return(summarise_zero_dots(.data, by_cols, by_given, .groups, caller_env))
@@ -451,8 +451,10 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
 
   auto_name_dots(expanded, "summarise")  # only for its unnamed-expression warning
 
-  cpu <- function() {
-    gpu_fallback("summarise", .data, function(tbl) {
+  # (`tbl`: the table to run on; the empty-group path hands over the pending
+  # ops it has already computed)
+  cpu <- function(tbl = .data) {
+    gpu_fallback("summarise", tbl, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo))
     })
   }
@@ -461,7 +463,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # in both modes, as the window stages run at summarise(). The GPU attempt's
   # warnings are dropped then: dplyr raises its own.
   gpu_or_cpu <- function(attempt) {
-    retry_on_sum_overflow(attempt, cpu, class = "cuplyr_summarise_rerun")
+    retry_on_sum_overflow(attempt, function() cpu(), class = "cuplyr_summarise_rerun")
   }
 
   if (by_given) {
@@ -505,25 +507,40 @@ summarise_has_constant_agg <- function(dots, schema) {
   FALSE
 }
 
-# Internal: TRUE iff summarise() of `.data` has to add rows for empty groups
-# (F33): `group_by(.drop = FALSE)` with some factor key. Schema checks only.
+# Internal: TRUE iff summarise() of `.data` has to add rows for empty groups:
+# the table has fixed group keys (F74: a `.drop = FALSE` table after a filter,
+# semi_join(), slice(), ...; or a `.preserve = TRUE` slice), or (F33)
+# `group_by(.drop = FALSE)` with some factor key. Metadata checks only.
 # @keywords internal
 summarise_wants_empty_groups <- function(.data) {
-  length(.data$groups) > 0L && isFALSE(.data$group_drop) &&
-    any(.data$groups %in% names(current_schema(.data)$factor_levels))
+  length(.data$groups) > 0L &&
+    (!is.null(fixed_keys_of(.data)) ||
+       (isFALSE(.data$group_drop) &&
+          any(.data$groups %in% names(current_schema(.data)$factor_levels))))
 }
 
-# Internal: grouped summarise() on a `.drop = FALSE` grouping (F33). The
-# observed groups are summarised as usual; the empty groups of group_data()
-# take the values of the same aggregations over an empty slice (F07's
-# ungrouped 0-row summarise: n() 0, sum() 0, mean() NaN, min() Inf, ...). The
-# table is assembled on the GPU (one gather over [observed; empty-slice row]
-# plus the uploaded key columns), so aggregate values never pass through R
-# (they keep exactly what the GPU computed). Needs the data's row layout, so a
-# lazy input's pending ops are computed first.
+# Internal: grouped summarise() whose groups include empty ones (F33, F74). The
+# observed groups are summarised as usual; every other group of group_data()
+# (the fixed keys, or the unused factor-level combinations) takes the values of
+# the same aggregations over an empty slice (F07's ungrouped 0-row summarise:
+# n() 0, sum() 0, mean() NaN, min() Inf, ...). The table is assembled on the
+# GPU (one gather over [observed; empty-slice row] plus the uploaded key
+# columns), so aggregate values never pass through R (they keep exactly what the
+# GPU computed). Needs the data's row layout, so a lazy input's pending ops are
+# computed first. Added work over a plain summarise: the observed keys are
+# downloaded and matched once, and one gather.
+#
+# A timestamp min()/max() of an empty group is NA here, where dplyr has
+# Inf/-Inf (no GPU timestamp holds those, and uploading them gives NA as
+# well); the other timestamp aggregates (mean(), median(), first(), ...) have
+# a null identity value too. A STRING min()/max() of an empty group is NA with
+# dplyr's warning, which the identity row doesn't reproduce: the call goes to
+# `fallback` (on the already computed table), decided before the observed
+# summarise runs whenever the aggregates are known from the schema.
 # @param dots auto_name_dots()'d aggregation quosures
-# @param fallback Function running the whole call on the CPU, for the
-#   (unexpected) aggregate type mismatches
+# @param fallback Function taking the computed table and running the whole call
+#   on the CPU, for the aggregates whose empty-group value the identity row
+#   can't give exactly
 # @keywords internal
 summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) {
   was_lazy <- identical(.data$exec_mode, "lazy")
@@ -531,18 +548,52 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) 
   base <- compute(.data)
   base$exec_mode <- "eager"
   keys <- base$groups
+  # dplyr regroups with group_by_drop_default(.data) while a group is retained
+  out_drop <- if (length(retained_groups) > 0L) base$group_drop %||% TRUE else TRUE
 
   finish <- function(result) {
     if (was_lazy) result$exec_mode <- "lazy"
     result
   }
+  cpu_route <- function() finish(fallback(base))
 
-  gd <- compute_group_data(base)
-  if (!any(lengths(gd$.rows) == 0L)) {
-    return(finish(summarise_core(base, dots, retained_groups)))
+  # Every group of group_data(), keys only (no `.rows` needed): the fixed keys
+  # as they are, else the factor expansion of the observed keys.
+  full_keys <- fixed_keys_of(base)
+  n_present <- NULL  # the number of groups with rows, once it is known
+  if (is.null(full_keys)) {
+    expanded <- group_keys_expanded(base)
+    full_keys <- expanded$keys
+    n_present <- expanded$n_observed
+    if (n_present == nrow(full_keys)) {
+      return(finish(summarise_core(base, dots, retained_groups)))
+    }
   }
 
-  observed <- summarise_core(base, dots, character())
+  # An aggregate with no exact empty-group value: with an empty group the
+  # call goes to the CPU before any GPU summarise runs (which would warn a
+  # second time). An unknown type (NA) is settled once the aggregations exist.
+  cpu_agg <- summarise_empty_value_on_cpu(dots, current_schema(base))
+  if (isTRUE(cpu_agg)) {
+    if (is.null(n_present)) n_present <- distinct_group_count(base)
+    # (more groups than keys would be a broken fixed-keys invariant: also dplyr's)
+    if (n_present != nrow(full_keys)) return(cpu_route())
+  }
+
+  agg_info <- new.env(parent = emptyenv())
+  observed <- summarise_core(base, dots, retained_groups, agg_info = agg_info)
+  n_obs <- dim(observed)[[1L]]
+  # Observed keys are always among the full keys: equal counts mean no group is
+  # empty and the observed result (in the same key order) is the answer.
+  if (n_obs == nrow(full_keys)) {
+    return(finish(observed))
+  }
+  if (n_obs > nrow(full_keys)) return(cpu_route())
+
+  if (is.na(cpu_agg) && any(vapply(agg_info$aggregations, summarise_agg_empty_on_cpu, logical(1)))) {
+    return(cpu_route())
+  }
+
   empty_slice <- new_tbl_gpu(
     ptr = wrap_gpu_call("summarise", gpu_gather_rows(list(base$ptr), numeric(0))),
     schema = base$schema, exec_mode = "eager"
@@ -554,7 +605,7 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) 
   obs_types <- observed$schema$types[-seq_len(n_keys)]
   id_types <- identity_row$schema$types
   if (!identical(identity_row$schema$names, agg_names)) {
-    return(fallback())
+    return(cpu_route())
   }
 
   # INT32 vs FLOAT64 (an integer min()/max() that did or didn't meet an empty
@@ -562,7 +613,7 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) 
   common <- ifelse(obs_types == id_types, obs_types, "FLOAT64")
   if (any(obs_types != id_types & !(obs_types %in% c("INT32", "FLOAT64") &
                                    id_types %in% c("INT32", "FLOAT64")))) {
-    return(fallback())
+    return(cpu_route())
   }
   casted <- wrap_gpu_call("summarise", {
     obs_ptr <- gpu_select(observed$ptr, n_keys + seq_along(agg_names) - 1L)
@@ -573,19 +624,32 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) 
   })
 
   # Row of each group_data() group in the observed result, or the identity row
-  # (index n_observed in the concatenation) when it is empty.
-  obs_keys <- collect(dplyr::select(observed, dplyr::all_of(keys)))
-  gd_keys <- gd[keys]
-  n_obs <- nrow(obs_keys)
-  idx <- vctrs::vec_match(gd_keys, obs_keys[keys])
+  # (index n_obs in the concatenation) when it is empty.
+  obs_keys <- collect_frame(dplyr::select(set_tbl_gpu_field(observed, "groups", character()),
+                                          dplyr::all_of(keys)))
+  idx <- vctrs::vec_match(full_keys, obs_keys[keys])
+  # An observed key that is not among the full keys would silently lose its
+  # row: the key invariant is broken, so let dplyr do it.
+  if (sum(!is.na(idx)) != n_obs) return(cpu_route())
   idx0 <- ifelse(is.na(idx), n_obs, idx - 1L)
 
   agg_ptr <- wrap_gpu_call("summarise", gpu_gather_rows(list(casted$obs, casted$id), as.numeric(idx0)))
-  key_tbl <- tbl_gpu(tibble::as_tibble(gd_keys), lazy = FALSE)
+  # dplyr warns for an empty group's min()/max() with base R's text. The
+  # numeric identity row raises it itself; a timestamp's is a plain null.
+  for (agg in agg_info$aggregations) {
+    if (agg$fn %in% c("min", "max") && unname(agg$input_type %||% "") %in% cuplyr_timestamp_types) {
+      warning("no non-missing arguments to ", agg$fn, "; returning ",
+              if (identical(agg$fn, "min")) "Inf" else "-Inf", call. = FALSE)
+    }
+  }
+  key_tbl <- tbl_gpu(strip_frame_attrs(tibble::as_tibble(full_keys)), lazy = FALSE)
+  obs_levels <- observed$schema$factor_levels
+  levels_out <- c(key_tbl$schema$factor_levels,
+                  obs_levels[names(obs_levels) %in% agg_names])
   schema <- list(
     names = c(keys, agg_names),
     types = c(unname(key_tbl$schema$types), common),
-    factor_levels = key_tbl$schema$factor_levels
+    factor_levels = if (length(levels_out) > 0L) levels_out
   )
   schema$tz <- tz_from_positions(
     schema$names, schema$types,
@@ -593,10 +657,49 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) 
   )
   finish(new_tbl_gpu(
     ptr = wrap_gpu_call("summarise", gpu_bind_cols_impl(list(key_tbl$ptr, agg_ptr))),
-    schema = schema, groups = retained_groups,
-    group_drop = length(retained_groups) == 0L,
+    schema = schema, groups = retained_groups, group_drop = out_drop,
     exec_mode = "eager"
   ))
+}
+
+# Internal: TRUE iff a parsed aggregation's value over an empty group is one
+# the identity row can't give: a STRING min()/max() (NA with dplyr's "no
+# non-missing arguments, returning NA" warning).
+# @keywords internal
+summarise_agg_empty_on_cpu <- function(agg) {
+  agg$fn %in% c("min", "max") && identical(unname(agg$input_type %||% ""), "STRING")
+}
+
+# Internal: summarise_agg_empty_on_cpu() decided from the dots and the schema
+# alone, before anything runs: TRUE if some aggregate is one (a bare column or
+# an expression whose type the IR infers), NA if some aggregate's argument type
+# can't be told without lowering, else FALSE. The dots have passed
+# summarise_dots_parseable(), so each is `fn(arg)` once its flags are stripped.
+# @keywords internal
+summarise_empty_value_on_cpu <- function(dots, schema) {
+  unknown <- FALSE
+  for (dot in dots) {
+    quo <- extract_na_rm(dot, schema)$quo
+    quo <- extract_agg_shape_param(quo)$quo
+    expr <- rlang::quo_get_expr(quo)
+    decomposed <- decompose_agg_call(expr)
+    if (is.null(decomposed)) {
+      unknown <- TRUE
+      next
+    }
+    if (!decomposed$fn_name %in% c("min", "max") || is.null(decomposed$arg)) next
+    arg <- decomposed$arg
+    type <- if (is.symbol(arg) && as.character(arg) %in% schema$names) {
+      unname(schema$types[match(as.character(arg), schema$names)])
+    } else {
+      tryCatch({
+        ir <- ir_parse_quo(rlang::new_quosure(arg, rlang::quo_get_env(quo)), schema)
+        if (is.null(ir)) NA_character_ else ir_infer_type(ir, schema)
+      }, error = function(e) NA_character_)
+    }
+    if (is.na(type)) unknown <- TRUE else if (identical(type, "STRING")) return(TRUE)
+  }
+  if (unknown) NA else FALSE
 }
 
 # Internal: summarise() with no dots (F07), as dplyr's summarise.data.frame()
@@ -642,20 +745,21 @@ summarise_zero_dots <- function(.data, by_cols, by_given, groups_arg, caller_env
   push_op(.data, ast_summarise(input_node(.data), list(), .data$groups, retained_groups))
 }
 
-# Internal: zero-dots summarise() of a `.drop = FALSE` grouping (F33): the keys
-# of every group_data() group, empty ones included, uploaded as the result.
-# Needs the data's row layout, so a lazy input's pending ops are computed first
-# on the GPU (not a CPU fallback: no notice).
+# Internal: zero-dots summarise() with empty groups (F33, F74): the keys of
+# every group_data() group, empty ones included, uploaded as the result -- the
+# fixed keys as they are, else the factor expansion. Needs the data's row
+# layout for the latter, so a lazy input's pending ops are computed first on
+# the GPU (not a CPU fallback: no notice).
 # @keywords internal
 summarise_group_keys <- function(.data, retained_groups) {
   was_lazy <- identical(.data$exec_mode, "lazy")
   base <- compute(.data)
   base$exec_mode <- "eager"
   # (group_data() carries a `.drop` attribute, which is not the table's)
-  keys <- tbl_gpu(strip_frame_attrs(tibble::as_tibble(compute_group_data(base)[base$groups])),
-                  lazy = FALSE)
+  all_keys <- fixed_keys_of(base) %||% compute_group_data(base)[base$groups]
+  keys <- tbl_gpu(strip_frame_attrs(tibble::as_tibble(all_keys)), lazy = FALSE)
   keys$groups <- retained_groups
-  keys$group_drop <- length(retained_groups) == 0L
+  keys$group_drop <- if (length(retained_groups) > 0L) base$group_drop %||% TRUE else TRUE
   if (was_lazy) keys$exec_mode <- "lazy"
   keys
 }
@@ -1019,11 +1123,14 @@ ir_agg_arg_is_scalar_reduction <- function(ir) {
 #   `summarise_by_desugar()`'s own internal grouped summarise call, which is
 #   a pure computation device unrelated to user-visible `.groups=` semantics
 #   (`.by=` summarise is always ungrouped, matching dplyr).
+# @param agg_info `NULL`, or an environment that receives the parsed
+#   `aggregations` (summarise_with_empty_groups() reads their functions and types)
 # @return A new tbl_gpu, grouped by `retained_groups` (see
 #   propagate_groups(), R/execute.R, which reads `node$result_groups`)
 # @keywords internal
 summarise_core <- function(.data, dots, retained_groups = character(),
-                           internal_cols = character(), sort_groups = TRUE) {
+                           internal_cols = character(), sort_groups = TRUE,
+                           agg_info = NULL) {
   # No wrapper of its own (F58): the work below is R logic (quosure parsing,
   # which may evaluate a `probs =`/`n =` argument) around wrapped GPU steps, so
   # a retry belongs to each step, not to a rerun of this parsing. The tables
@@ -1076,6 +1183,9 @@ summarise_core <- function(.data, dots, retained_groups = character(),
       aggregations[[i]]$identity <- FALSE
     }
   }
+
+  # (F74) the caller wants to see which aggregations ran
+  if (!is.null(agg_info)) agg_info$aggregations <- aggregations
 
   # F07: an INT32 min()/max() turns the WHOLE result column into FLOAT64
   # (Inf/-Inf) iff some group is empty -- a property of the data, which a

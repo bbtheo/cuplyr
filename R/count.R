@@ -209,8 +209,9 @@ build_count_agg_call <- function(wt_quo, for_mutate = FALSE) {
 #' Counts the number of rows (or sums a weight column) for each combination
 #' of `...`, similar to `dplyr::count()`. Sugar over [group_by.tbl_gpu()],
 #' [summarise.tbl_gpu()], and [arrange.tbl_gpu()] -- runs on the GPU. The one
-#' exception is `.drop = FALSE` with a factor key, which also collects the
-#' (small) group keys to add the empty groups.
+#' exception is a `.drop = FALSE` grouping with a factor key, or a table with
+#' fixed group keys (after `filter()`, `semi_join()`, ... on a `.drop = FALSE`
+#' table), which also collects the (small) group keys to add the empty groups.
 #'
 #' @param x A `tbl_gpu` object created by [tbl_gpu()].
 #' @param ... Column names or expressions to group by (e.g. `count(df, x)`

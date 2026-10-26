@@ -251,12 +251,20 @@ by the keys). \code{count()}/\code{tally()} inherit it.
 
 \subsection{\code{.drop = FALSE}}{
 
-On a \code{group_by(.drop = FALSE)} grouping with a factor key, every group of
-\code{group_data()} gets a row, empty ones included, holding each expression
+On a \code{group_by(.drop = FALSE)} grouping with a factor key, or on a table
+whose group keys are fixed (a \code{.drop = FALSE} table after \code{filter()},
+\code{semi_join()}, \code{slice()}, ..., or a \code{.preserve = TRUE} slice), every group
+of \code{group_data()} gets a row, empty ones included, holding each expression
 evaluated on an empty vector (\code{n()} 0, \code{sum()} 0, \code{mean()} \code{NaN}, \code{min()}
 \code{Inf} with base R's warning, ...); with no expressions the result is the
 keys of every group. Such a call materializes a lazy table on the GPU (the
-row count is data-dependent).
+row count is data-dependent). The result is regrouped with the input's
+\code{.drop}. Three shapes differ from dplyr or leave the GPU: \code{min()}/\code{max()}
+of a Date or POSIXct column is \code{NA} for an empty group (dplyr's \code{Inf}/\code{-Inf}
+cannot be held by a GPU timestamp column; an uploaded non-finite Date or
+POSIXct is \code{NA} as well), \code{mean()} of a Date or POSIXct column is \code{NA} for
+an empty group where dplyr gives a \code{NaN} Date/POSIXct, and \code{min()}/\code{max()}
+of a character column runs the whole call on the CPU when a group is empty.
 }
 
 \subsection{\code{.by} group order}{

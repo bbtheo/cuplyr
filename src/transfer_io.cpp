@@ -247,7 +247,9 @@ std::unique_ptr<column> date_to_gpu(NumericVector x, bool& saw_fraction) {
     const double* xp = REAL(x);
     for (size_type i = 0; i < n; ++i) {
         const double v = xp[i];
-        if (std::isnan(v)) {
+        // NA, NaN and +-Inf are null: a TIMESTAMP_DAYS can't hold them, and
+        // the int32 cast of a non-finite double is undefined behaviour.
+        if (!std::isfinite(v)) {
             days[i] = 0;
             validity[i / 8] &= ~(1 << (i % 8));
             null_count++;
@@ -298,7 +300,9 @@ std::unique_ptr<column> posixct_to_gpu(NumericVector x) {
     size_type null_count = 0;
 
     for (size_type i = 0; i < n; ++i) {
-        if (NumericVector::is_na(x[i])) {
+        // NA, NaN and +-Inf are null (see date_to_gpu()); llround() of an
+        // infinity is undefined.
+        if (!std::isfinite(x[i])) {
             micros[i] = 0;
             validity[i / 8] &= ~(1 << (i % 8));
             null_count++;

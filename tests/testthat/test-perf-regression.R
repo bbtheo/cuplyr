@@ -227,6 +227,67 @@ test_that("perf: summarise_grouped_lazy", {
   }, calibration = "kernel")
 })
 
+# F74: summarise() on a `.drop = FALSE` table with fixed group keys (a lazy
+# semi_join() empties half of the 2e4 character-key groups). The cost over a
+# plain grouped summarise is the observed-key download/match and one gather;
+# before F74 this whole call ran on the CPU. Calibration "kernel": compute
+# bound, a 2e4-row result.
+perf_fixed_keys_df <- local({
+  set.seed(74)
+  n <- 1e6
+  data.frame(
+    k = sprintf("k%05d", sample.int(2e4, n, replace = TRUE)),
+    x = runif(n),
+    stringsAsFactors = FALSE
+  )
+})
+perf_fixed_keys_keep <- data.frame(k = sprintf("k%05d", seq(1, 2e4, by = 2)),
+                                   stringsAsFactors = FALSE)
+
+test_that("perf: summarise_fixed_keys_lazy", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gpu_df <- tbl_gpu(perf_fixed_keys_df, lazy = TRUE)
+  gpu_keep <- tbl_gpu(perf_fixed_keys_keep, lazy = TRUE)
+
+  expect_no_perf_regression("summarise_fixed_keys_lazy", function() {
+    gpu_df |>
+      dplyr::group_by(k, .drop = FALSE) |>
+      dplyr::semi_join(gpu_keep, by = "k") |>
+      dplyr::summarise(n = n(), s = sum(x), m = mean(x)) |>
+      collect()
+  }, calibration = "kernel")
+})
+
+# F33/F74: summarise() on a `group_by(.drop = FALSE)` factor key (no fixed
+# keys) with 5e4 levels, half of them never observed. Everything this path
+# adds over a plain grouped summarise is per-group R work on the keys (the
+# level expansion, the observed-key match); F74 round 3 found it had doubled
+# through a per-element `lengths()` on the `.rows` list_of. Calibration
+# "kernel", like the fixed-keys benchmark above.
+perf_factor_drop_df <- local({
+  set.seed(33)
+  n <- 1e6
+  lv <- sprintf("f%05d", seq_len(5e4))
+  data.frame(
+    f = factor(lv[sample(seq(1, 5e4, by = 2), n, replace = TRUE)], levels = lv),
+    x = runif(n)
+  )
+})
+
+test_that("perf: summarise_factor_drop_false_lazy", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gpu_df <- tbl_gpu(perf_factor_drop_df, lazy = TRUE)
+
+  expect_no_perf_regression("summarise_factor_drop_false_lazy", function() {
+    gpu_df |>
+      dplyr::group_by(f, .drop = FALSE) |>
+      dplyr::summarise(n = n(), s = sum(x), m = mean(x)) |>
+      collect()
+  }, calibration = "kernel")
+})
+
 # =============================================================================
 # Window functions (Phase 5) - grouped mutate()
 #

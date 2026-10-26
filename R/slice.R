@@ -752,10 +752,10 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 #                                     counts need the data)
 #   row_slice_finish(result, prep)    on the result: fix the keys, if needed
 #
-# Fixed keys are a cost (a later summarise()/count()/tally()/reframe()/rows_*()
-# runs on the CPU), so they are set only when a plain regroup of the result
-# would differ from dplyr's group_data(), i.e. when a group can have been lost
-# (row_slice_keys()).
+# Fixed keys are a cost (a later summarise()/count()/tally() downloads the
+# observed keys and matches them, reframe()/rows_*() run on the CPU), so they
+# are set only when a plain regroup of the result would differ from dplyr's
+# group_data(), i.e. when a group can have been lost (row_slice_keys()).
 
 # @param x a `tbl_gpu`; @param preserve dplyr's `preserve`/`.preserve`
 # @param eligible FALSE for a call that never keeps groups (`.by`)
@@ -822,22 +822,30 @@ slice_group_keys <- function(.data) {
   if (!is.null(fixed)) {
     return(fixed)
   }
-  group_names <- materialized$groups
-  if (is_rowwise_gpu(materialized) || length(group_names) == 0L) {
+  if (is_rowwise_gpu(materialized) || length(materialized$groups) == 0L) {
     return(slice_group_keys_of(compute_group_data(materialized)))
   }
-  # keys only, no row indices: the observed keys (one GPU groupby, k rows
-  # downloaded), then compute_group_data()'s `.drop = FALSE` level expansion
-  keys_schema <- group_keys_schema(materialized)
+  group_keys_expanded(materialized)$keys
+}
+
+# The group_data() keys of an eager, grouped, non-rowwise `tbl_gpu` with no
+# fixed keys, without row indices: the observed keys (one GPU groupby, k rows
+# downloaded), then compute_group_data()'s `.drop = FALSE` level expansion.
+# Returns list(keys = <plain tibble>, n_observed = <the number of observed
+# groups, i.e. of non-empty ones>).
+# @keywords internal
+group_keys_expanded <- function(x) {
+  keys_schema <- group_keys_schema(x)
   gd <- group_keys_frame(
-    wrap_gpu_call("group_data", gpu_group_keys(materialized$ptr, group_col_index0(materialized))),
+    wrap_gpu_call("group_data", gpu_group_keys(x$ptr, group_col_index0(x))),
     keys_schema
   )
-  if (isFALSE(materialized$group_drop)) {
-    gd$.rows <- vctrs::new_list_of(rep(list(integer()), nrow(gd)), ptype = integer())
-    gd <- expand_dropped_groups(gd, group_names, keys_schema$factor_levels)
+  n_observed <- nrow(gd)
+  if (isFALSE(x$group_drop)) {
+    gd$.rows <- vctrs::new_list_of(rep(list(integer()), n_observed), ptype = integer())
+    gd <- expand_dropped_groups(gd, x$groups, keys_schema$factor_levels)
   }
-  slice_group_keys_of(gd)
+  list(keys = slice_group_keys_of(gd), n_observed = n_observed)
 }
 
 # The key columns of a group_data() tibble, as a plain tibble.

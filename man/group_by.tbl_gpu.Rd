@@ -91,8 +91,9 @@ table, \code{filter()}, \code{filter_out()}, \code{slice()}, \code{slice_head()}
 emptied ones included. \code{.preserve = TRUE} does the same for \code{slice()} and
 \code{filter()} on a \code{.drop = TRUE} table. The result fixes the input's
 group-keys table (\verb{$fixed_keys}), only when a group can have been lost,
-which \code{group_data()} and friends, \code{collect()} and the CPU fallbacks (so
-\code{summarise()}) honour.
+which \code{group_data()} and friends, \code{collect()}, \code{summarise()}/\code{count()}/
+\code{tally()} (on the GPU, with a row for each emptied group) and the CPU
+fallbacks honour.
 \code{mutate()}, \code{select()}, \code{rename()} and \code{relocate()} carry it as long as
 they leave the group columns alone, and a CPU fallback result carries
 whatever empty groups dplyr's own result kept (see \code{gpu_fallback()}: a

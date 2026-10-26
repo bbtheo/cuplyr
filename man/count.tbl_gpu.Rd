@@ -48,8 +48,9 @@ restored to \code{x}'s ORIGINAL grouping in full (verified against dplyr
 Counts the number of rows (or sums a weight column) for each combination
 of \code{...}, similar to \code{dplyr::count()}. Sugar over \code{\link[=group_by.tbl_gpu]{group_by.tbl_gpu()}},
 \code{\link[=summarise.tbl_gpu]{summarise.tbl_gpu()}}, and \code{\link[=arrange.tbl_gpu]{arrange.tbl_gpu()}} -- runs on the GPU. The one
-exception is \code{.drop = FALSE} with a factor key, which also collects the
-(small) group keys to add the empty groups.
+exception is a \code{.drop = FALSE} grouping with a factor key, or a table with
+fixed group keys (after \code{filter()}, \code{semi_join()}, ... on a \code{.drop = FALSE}
+table), which also collects the (small) group keys to add the empty groups.
 }
 \examples{
 if (has_gpu()) {
