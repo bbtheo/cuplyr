@@ -4,8 +4,8 @@
 #
 #   tools/r 'source("bench/rolling-window.R")'
 #
-# The render holds the GPU for the whole benchmark (about 16 minutes on a cold
-# cache), so it goes through tools/r like every other R process. Variables set
+# The render holds the GPU for the whole benchmark (about 25 minutes on a cold
+# cache, with polars and DuckDB), so it goes through tools/r like every other R process. Variables set
 # before source():
 #   FULL_RERUN   TRUE passes -P rebuild:true: rerun and re-save every timing
 #                chunk (the document turns it into knitr's cache.rebuild for the
@@ -54,8 +54,27 @@ render_rolling_report <- function() {
   if (isTRUE(pick("FULL_RERUN"))) args <- c(args, "-P", "rebuild:true")
 
   message("quarto ", paste(args, collapse = " "))
+  t0 <- proc.time()[["elapsed"]]
+  clock0 <- Sys.time()
   status <- system2(quarto, args)
   if (!identical(status, 0L)) stop("quarto render failed with exit status ", status)
+  # the whole render, pandoc included (the document reports its own knitting time)
+  total_secs <- proc.time()[["elapsed"]] - t0
+  message(sprintf("render wall time (quarto, pandoc included): %.0f s", total_secs))
+  # A render in which every timing chunk ran leaves render-time.csv (the document
+  # writes it); this adds the total, which only the wrapper can know, so a later
+  # warm render can quote it. An older record is left alone.
+  tryCatch({
+    rt_path <- file.path(out_dir, "render-time.csv")
+    if (file.exists(rt_path)) {
+      rt <- utils::read.csv(rt_path, stringsAsFactors = FALSE)
+      if (nrow(rt) == 1L && as.POSIXct(rt$render_start) >= clock0 - 2) {
+        rt$total_secs <- total_secs
+        utils::write.csv(rt, rt_path, row.names = FALSE)
+        message("wrote the total render time into ", rt_path)
+      }
+    }
+  }, error = function(e) message("render-time.csv not updated: ", conditionMessage(e)))
   html <- file.path(staging, "rolling-window.html")
   if (!file.exists(html)) stop("quarto did not produce ", html)
   file.copy(html, file.path(out_dir, "rolling-window.html"), overwrite = TRUE)

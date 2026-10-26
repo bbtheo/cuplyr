@@ -5,6 +5,15 @@
 # knitr engine needs them; packages already visible on the library path are
 # skipped, so a machine that has them installs nothing extra.
 #
+# polars and DuckDB (F73) are benchmark entries too. duckdb comes from CRAN as a
+# C++ source build (several minutes; it compiles at R's Makeconf flags, not
+# DuckDB's own release flags). polars (r-polars) is not on CRAN: it comes from
+# R-multiverse, the repository its install vignette recommends, with
+# NOT_CRAN=true so that the source package downloads the project's prebuilt Rust
+# library instead of building it with cargo (LIBR_POLARS_BUILD=true forces the
+# cargo build). callr runs the polars cells in their own processes and DBI is
+# DuckDB's interface. The summary table gives the elapsed `secs` of each install.
+#
 #   tools/r 'LIB <- "/path/to/rlib"; source("bench/install-deps.R")'
 #
 # The library comes from a pre-set `LIB` variable, else the first command-line
@@ -32,7 +41,8 @@ options(repos = c(CRAN = repos), Ncpus = 4L)
 
 cran_pkgs <- c("roll", "slider", "RcppRoll", "zoo", "runner", "microbenchmark",
                "ggdist", "paletteer", "ggtext", "data.table", "ggplot2",
-               "scales", "patchwork", "knitr", "rmarkdown")
+               "scales", "patchwork", "knitr", "rmarkdown", "DBI", "callr", "duckdb")
+polars_repo <- "https://community.r-multiverse.org"
 
 # RcppParallel's bundled TBB build does not configure under the pixi
 # toolchain; use the distro's TBB when it is there.
@@ -41,12 +51,13 @@ if (file.exists("/usr/include/tbb/tbb.h") && file.exists("/usr/lib/libtbb.so")) 
 }
 
 results <- list()
-record <- function(pkg, ok, msg = "") {
-  results[[pkg]] <<- list(ok = ok, msg = msg)
+record <- function(pkg, ok, msg = "", secs = NA_real_) {
+  results[[pkg]] <<- list(ok = ok, msg = msg, secs = secs)
 }
 
 try_install <- function(pkg, ...) {
   warns <- character()
+  t0 <- proc.time()[["elapsed"]]
   tryCatch({
     withCallingHandlers(
       install.packages(pkg, lib = LIB, ...),
@@ -55,8 +66,9 @@ try_install <- function(pkg, ...) {
         invokeRestart("muffleWarning")
       })
     ok <- requireNamespace(pkg, lib.loc = LIB, quietly = TRUE)
-    record(pkg, ok, if (ok) "" else paste(c("not loadable", warns), collapse = "; "))
-  }, error = function(e) record(pkg, FALSE, conditionMessage(e)))
+    record(pkg, ok, if (ok) "" else paste(c("not loadable", warns), collapse = "; "),
+           secs = proc.time()[["elapsed"]] - t0)
+  }, error = function(e) record(pkg, FALSE, conditionMessage(e), secs = proc.time()[["elapsed"]] - t0))
 }
 
 # RcppParallel is installed explicitly so roll's build sees it (and its error
@@ -76,6 +88,15 @@ for (pkg in cran_pkgs) {
     try_install(pkg, repos = repos)
   }
 }
+
+# polars: R-multiverse, with NOT_CRAN=true set for this install only.
+if (!requireNamespace("polars", quietly = TRUE)) {
+  message("== installing polars (R-multiverse, prebuilt Rust library)")
+  old_not_cran <- Sys.getenv("NOT_CRAN", unset = NA)
+  Sys.setenv(NOT_CRAN = "true")
+  try_install("polars", repos = c(polars_repo, repos))
+  if (is.na(old_not_cran)) Sys.unsetenv("NOT_CRAN") else Sys.setenv(NOT_CRAN = old_not_cran)
+} else record("polars", TRUE, "already installed")
 
 # runstats is archived on CRAN: newest tarball in the Archive directory.
 if (!requireNamespace("runstats", quietly = TRUE)) {
@@ -120,6 +141,7 @@ ver_table <- do.call(rbind, lapply(names(results), function(p) {
     package = p,
     version = if (isTRUE(results[[p]]$ok)) as.character(utils::packageVersion(p)) else NA_character_,
     status = if (isTRUE(results[[p]]$ok)) "ok" else "not run: install failed",
+    secs = results[[p]]$secs,
     note = results[[p]]$msg,
     stringsAsFactors = FALSE
   )

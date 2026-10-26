@@ -38,6 +38,8 @@ params:
 # older cuplyr is installed in the user library and must never be the one
 # that runs. Nothing is installed.
 .libPaths(c(params$lib, .libPaths()))
+# the start of this render, for "This render took" at the end of the document
+render_t0 <- Sys.time()
 pkgload::load_all(params$root, quiet = TRUE, debug = FALSE)
 source("rolling-lib.R")
 
@@ -63,22 +65,31 @@ dir.create(params$out_dir, recursive = TRUE, showWarnings = FALSE)
 bench_pkgs <- c("cuplyr", "data.table", "roll", "RollingWindow", "runstats", "slider",
                 "RcppRoll", "zoo", "runner", "microbenchmark", "ggdist", "paletteer",
                 "ggtext", "ggplot2", "scales", "patchwork", "dplyr", "RcppParallel",
-                "fftwtools", "tibble", "knitr", "rmarkdown")
+                "fftwtools", "tibble", "knitr", "rmarkdown", "polars", "duckdb", "DBI", "callr")
 ver <- c(R = paste(R.version$major, R.version$minor, sep = "."), rw_versions(bench_pkgs))
+# polars' Rust crate is a second version to key on (the R package downloads a
+# prebuilt library). It is read in a child process, not here: loading polars in
+# this process would start its thread pool next to the CUDA context. DuckDB's
+# library is bundled in the duckdb package, so the package version is the
+# library's version.
+polars_crate <- tryCatch(rw_polars_child(NULL, function() polars::polars_info()$versions$rust_crate),
+                         error = function(e) "unknown")
 # libcudf is the code the cuplyr timings measure, so it is part of the key too
 conda_prefix <- Sys.getenv("CONDA_PREFIX")
 cudf_json <- if (nzchar(conda_prefix)) list.files(file.path(conda_prefix, "conda-meta"), pattern = "^libcudf-[0-9]", full.names = FALSE) else character()
 cudf_ver <- if (length(cudf_json)) sub("^libcudf-([0-9.]+)-.*$", "\\1", cudf_json[1]) else NA_character_
 cudf_ver_short <- sub("^([0-9]+\\.[0-9]+).*$", "\\1", cudf_ver)
-key_ver <- c(ver, libcudf = if (is.na(cudf_ver)) "unknown" else cudf_ver)
+key_ver <- c(ver, libcudf = if (is.na(cudf_ver)) "unknown" else cudf_ver, polars_rust_crate = polars_crate)
 # `rebuild` only forces a rerun (params$rebuild, which FULL_RERUN in
 # bench/rolling-window.R passes); it is deliberately not part of the key
 key_config <- params[setdiff(names(params), c("root", "out_dir", "cache_dir", "rebuild"))]
 # src/Makevars holds the compile flags of cuplyr's C++ (written by configure)
 key_files <- c("rolling-lib.R", rw_cuplyr_sources(params$root), file.path(params$root, "src", "Makevars"))
+# the key is kept: the render-time record at the end names the code it timed
+cache_key <- rw_cache_key(key_files, key_ver, key_config)
 knitr::opts_chunk$set(
   cache.path = file.path(params$cache_dir, ""),
-  cache.extra = rw_cache_key(key_files, key_ver, key_config),
+  cache.extra = cache_key,
   cache.rebuild = isTRUE(as.logical(params$rebuild))
 )
 ```
@@ -93,6 +104,7 @@ knitr::opts_chunk$set(
 # cached GPU object would come back as a dead pointer.
 bench_main <- local({
   t_start <- proc.time()[["elapsed"]]
+  t_clock <- Sys.time()
   has_pkg <- function(p) requireNamespace(p, quietly = TRUE)
   for (p in c("data.table", "microbenchmark")) if (!has_pkg(p)) stop("required package missing: ", p)
   if (!cuplyr::has_gpu()) stop("no GPU")
@@ -184,7 +196,7 @@ bench_main <- local({
   gc(verbose = FALSE)
   list(timings = do.call(rbind, timing_rows), correctness = do.call(rbind, corr_rows),
        skipped = rw_skip_table(skip_rows),
-       thread_info = thread_info, secs = proc.time()[["elapsed"]] - t_start)
+       thread_info = thread_info, secs = proc.time()[["elapsed"]] - t_start, started = t_clock)
 })
 invisible(gc(verbose = FALSE))
 ```
@@ -201,6 +213,7 @@ invisible(gc(verbose = FALSE))
 # lazy query plans are captured as text to name the nodes each call builds.
 bench_overhead <- local({
   t_start <- proc.time()[["elapsed"]]
+  t_clock <- Sys.time()
   n_rows <- as.numeric(params$n_rows)
   w <- sort(as.numeric(unlist(params$widths)))[2]
   stats_run <- as.character(unlist(params$stats))
@@ -256,7 +269,7 @@ bench_overhead <- local({
   rm(lz, gt_small, gt, inp, of)
   gc(verbose = FALSE)
   list(timings = do.call(rbind, rows), plans = plans, small_rows = small_rows,
-       skipped = rw_skip_table(skip_rows), secs = proc.time()[["elapsed"]] - t_start)
+       skipped = rw_skip_table(skip_rows), secs = proc.time()[["elapsed"]] - t_start, started = t_clock)
 })
 invisible(gc(verbose = FALSE))
 ```
@@ -269,6 +282,7 @@ invisible(gc(verbose = FALSE))
 # and held GPU bytes come from one untimed call per cuplyr entry.
 bench_ext <- local({
   t_start <- proc.time()[["elapsed"]]
+  t_clock <- Sys.time()
   widths <- sort(as.numeric(unlist(params$widths)))
   has_pkg <- function(p) requireNamespace(p, quietly = TRUE)
   ext_list <- list()
@@ -365,7 +379,194 @@ bench_ext <- local({
   rm(gtb, dfb, xb)
   gc(verbose = FALSE)
   list(ext = do.call(rbind, ext_list), skipped = rw_skip_table(skip_rows),
-       secs = proc.time()[["elapsed"]] - t_start)
+       secs = proc.time()[["elapsed"]] - t_start, started = t_clock)
+})
+invisible(gc(verbose = FALSE))
+```
+
+```{r}
+#| label: bench-engines
+#| cache: true
+#| include: false
+# polars and DuckDB (F73): the same statistics, widths and extensions as
+# bench-main and bench-ext, each at the engine's default thread count and at one
+# thread. An engine gets its data once, outside timing; the timed call is only
+# the rolling computation, to a result that stays inside the engine (a polars
+# DataFrame, a DuckDB temp table), the same rule as cuplyr's result on the GPU.
+# DuckDB runs in this process, with one connection per (thread setting, dataset),
+# each loading its dataset once outside timing and closed with shutdown = TRUE.
+# polars runs in a fresh process per setting
+# (rw_polars_child()), because its thread pool is fixed when it loads; the child
+# sources the same rolling-lib.R as this document (the copy next to the qmd), is
+# never given cuplyr (no CUDA context) and returns plain data frames. Nothing
+# from the GPU lives in this chunk.
+bench_engines <- local({
+  t_start <- proc.time()[["elapsed"]]
+  t_clock <- Sys.time()
+  # polars is only checked for, never loaded here (its thread pool belongs to the
+  # child processes); the others are used in this process
+  if (!nzchar(system.file(package = "polars"))) stop("required package missing: polars")
+  for (p in c("duckdb", "DBI", "callr", "data.table", "microbenchmark")) {
+    if (!requireNamespace(p, quietly = TRUE)) stop("required package missing: ", p)
+  }
+  cfg <- list(n_rows = as.numeric(params$n_rows), widths = sort(as.numeric(unlist(params$widths))),
+              stats = setdiff(as.character(unlist(params$stats)), "custom"),
+              times = as.numeric(params$times), cell_budget = as.numeric(params$cell_budget),
+              probe_limit = as.numeric(params$probe_limit), group_rows = as.numeric(params$group_rows),
+              n_groups = as.numeric(params$n_groups), group_width = as.numeric(params$group_width),
+              ext_rows = as.numeric(params$ext_rows), ext_times = as.numeric(params$ext_times),
+              # the per-call floor: the same call on a small table, where the
+              # computation is negligible (the same table size, width, statistics
+              # and sample count as bench-overhead's floor of cuplyr)
+              small_rows = 1e3, floor_times = 50)
+  cfg$floor_stats <- intersect(c("mean", "sum", "min", "max", "sd"), cfg$stats)
+
+  # All the cells of one engine configuration: the main grid, the grouped mean,
+  # the ungrouped mean at the larger size and the per-call floor on a small
+  # table. `make_engine(df)` builds the engine on a data frame (and loads it,
+  # untimed); every cell goes through the
+  # same run_cell() as the other entries, with the engine's reset (the untimed
+  # drop of the previous result) and the check against data.table, NA padding
+  # included. It has no free variables of its own: it runs in this process
+  # (DuckDB) and in the polars child, where rolling-lib.R was just sourced.
+  engine_grid <- function(make_engine, label, cfg) {
+    timing_rows <- list(); corr_rows <- list(); ext_list <- list()
+    seen_threads <- integer()
+    add_cell <- function(stat, width, res) {
+      timing_rows[[length(timing_rows) + 1]] <<- data.frame(
+        stat = stat, fn = label, width = width, n_rows = cfg$n_rows, sample = seq_along(res$ms),
+        ms = res$ms, times = res$times, note = res$note, stringsAsFactors = FALSE)
+      corr_rows[[length(corr_rows) + 1]] <<- data.frame(
+        stat = stat, fn = label, width = width, ok = res$cmp$ok,
+        n_na_mismatch = res$cmp$n_na_mismatch, max_abs_diff = res$cmp$max_abs_diff,
+        fell_back = res$fell_back %||% NA, note = res$note %||% "", stringsAsFactors = FALSE)
+    }
+    add_ext <- function(experiment, width, n, res) {
+      ms <- res$ms[!is.na(res$ms)]
+      q <- function(f) if (length(ms)) unname(f(ms)) else NA_real_
+      ext_list[[length(ext_list) + 1]] <<- data.frame(
+        experiment = experiment, fn = label, width = width, n_rows = n,
+        median_ms = q(stats::median), q25_ms = q(function(v) stats::quantile(v, .25)),
+        q75_ms = q(function(v) stats::quantile(v, .75)), min_ms = q(min), max_ms = q(max),
+        times = res$times, peak_gpu_bytes = NA_real_, held_gpu_bytes_after_call = NA_real_,
+        correct = res$cmp$ok, note = res$note, stringsAsFactors = FALSE)
+    }
+    with_engine <- function(df, body) {
+      eng <- make_engine(df)
+      on.exit(eng$close(), add = TRUE)
+      seen_threads <<- c(seen_threads, eng$threads())
+      body(eng)
+    }
+    cell <- function(eng, stat, grouped, width, times, ref) {
+      f <- eng$fun(stat, grouped)
+      res <- safe_cell(function() {
+        run_cell(function() f(width), eng$extract, times, ref, FALSE,
+                 cell_budget = cfg$cell_budget, probe_limit = cfg$probe_limit, reset = eng$reset)
+      })
+      eng$reset()
+      res
+    }
+
+    df <- rw_data(cfg$n_rows)
+    with_engine(df, function(eng) {
+      for (stat in cfg$stats) for (width in cfg$widths) {
+        rw_say("    ", label, " ", stat, " width ", width)
+        add_cell(stat, width, cell(eng, stat, FALSE, width, cfg$times, rw_reference(stat, df$x, width)))
+      }
+    })
+
+    # (a) grouped: data.table per group, in the original row order, is the reference
+    dfg <- rw_grouped_data(cfg$group_rows, cfg$n_groups)
+    g_ref <- numeric(nrow(dfg))
+    for (k in split(seq_len(nrow(dfg)), dfg$g)) {
+      g_ref[k] <- data.table::frollmean(dfg$x[k], cfg$group_width, align = "right")
+    }
+    with_engine(dfg, function(eng) {
+      rw_say("    ", label, " grouped mean")
+      add_ext("grouped mean", cfg$group_width, cfg$group_rows,
+              cell(eng, "mean", TRUE, cfg$group_width, cfg$ext_times, g_ref))
+    })
+    rm(dfg, g_ref)
+
+    # (b) the larger ungrouped table
+    dfb <- rw_data(cfg$ext_rows)
+    with_engine(dfb, function(eng) {
+      for (width in cfg$widths) {
+        rw_say("    ", label, " ", cfg$ext_rows, " rows width ", width)
+        add_ext("ungrouped mean", width, cfg$ext_rows,
+                cell(eng, "mean", FALSE, width, cfg$ext_times, data.table::frollmean(dfb$x, width, align = "right")))
+      }
+    })
+    rm(dfb, df)
+
+    # (c) the per-call floor: the same call on a small table, at the middle width.
+    # A floor measured on a wrong result is no floor, so a mismatch stops the chunk.
+    w_floor <- cfg$widths[2]
+    dfs <- rw_data(cfg$small_rows)
+    floor_rows <- list()
+    with_engine(dfs, function(eng) {
+      for (stat in cfg$floor_stats) {
+        rw_say("    ", label, " ", cfg$small_rows, " rows (floor) ", stat)
+        res <- cell(eng, stat, FALSE, w_floor, cfg$floor_times, rw_reference(stat, dfs$x, w_floor))
+        if (!isTRUE(res$cmp$ok)) stop(label, ": the ", cfg$small_rows, "-row floor call for ", stat, " did not match data.table")
+        floor_rows[[length(floor_rows) + 1]] <<- data.frame(
+          stat = stat, fn = paste0(label, " (1e3-row overhead floor)"), width = w_floor, n_rows = cfg$small_rows,
+          sample = seq_along(res$ms), ms = res$ms, times = res$times, note = "same call on 1e3 rows; computation negligible",
+          stringsAsFactors = FALSE)
+      }
+    })
+    rm(dfs)
+    gc(verbose = FALSE)
+    if (length(unique(seen_threads)) != 1L) stop(label, ": the engine reported different thread counts within one grid")
+    list(timings = do.call(rbind, timing_rows), correctness = do.call(rbind, corr_rows),
+         ext = do.call(rbind, ext_list), floor = do.call(rbind, floor_rows), threads = seen_threads[[1]])
+  }
+  environment(engine_grid) <- globalenv()
+
+  # What the polars child runs. rolling-lib.R is sourced by absolute path (the
+  # copy this document sourced); cuplyr is never loaded.
+  child_job <- function(lib_file, grid, label, cfg) {
+    source(lib_file)
+    environment(grid) <- globalenv()
+    out <- grid(rw_polars_engine, label, cfg)
+    info <- polars::polars_info()
+    out$polars <- list(rust_crate = info$versions$rust_crate, nightly = isTRUE(info$features$nightly))
+    out
+  }
+  environment(child_job) <- globalenv()
+  lib_file <- normalizePath("rolling-lib.R", mustWork = TRUE)
+
+  settings <- list(list(config = "default", threads = NULL, suffix = ""),
+                   list(config = "1 thread", threads = 1L, suffix = " (1 thread)"))
+  parts <- list(); thread_rows <- list(); polars_info <- NULL
+  add_part <- function(engine, config, out) {
+    parts[[length(parts) + 1]] <<- out[c("timings", "correctness", "ext", "floor")]
+    thread_rows[[length(thread_rows) + 1]] <<- data.frame(engine = engine, config = config,
+                                                         threads = out$threads, stringsAsFactors = FALSE)
+  }
+  tmp <- rw_duckdb_engine(data.frame(x = 1))
+  duckdb_lib <- tmp$version()
+  tmp$close()
+  for (s in settings) {
+    rw_say("== DuckDB, ", s$config)
+    add_part("DuckDB", s$config, engine_grid(function(df) rw_duckdb_engine(df, s$threads),
+                                             paste0("DuckDB", s$suffix), cfg))
+    gc(verbose = FALSE)
+  }
+  for (s in settings) {
+    rw_say("== polars, ", s$config, " (child process)")
+    out <- rw_polars_child(s$threads, child_job,
+                           list(lib_file = lib_file, grid = engine_grid, label = paste0("polars", s$suffix), cfg = cfg),
+                           show = TRUE)
+    add_part("polars", s$config, out)
+    polars_info <- out$polars
+  }
+  list(timings = do.call(rbind, lapply(parts, `[[`, "timings")),
+       correctness = do.call(rbind, lapply(parts, `[[`, "correctness")),
+       ext = do.call(rbind, lapply(parts, `[[`, "ext")),
+       floor = do.call(rbind, lapply(parts, `[[`, "floor")), small_rows = cfg$small_rows,
+       threads = do.call(rbind, thread_rows), skipped = rw_skip_table(list()),
+       duckdb_lib = duckdb_lib, polars = polars_info, secs = proc.time()[["elapsed"]] - t_start, started = t_clock)
 })
 invisible(gc(verbose = FALSE))
 ```
@@ -382,6 +583,7 @@ invisible(gc(verbose = FALSE))
 # as F1.
 bench_memory <- local({
   t_start <- proc.time()[["elapsed"]]
+  t_clock <- Sys.time()
   w <- sort(as.numeric(unlist(params$widths)))[2]
   n_ext <- as.numeric(params$ext_rows)
   dfm <- rw_data(n_ext)
@@ -442,7 +644,7 @@ bench_memory <- local({
   rm(gtm, dfm)
   gc(verbose = FALSE)
   list(breakdown = breakdown, finding = finding, skipped = rw_skip_table(skip_rows),
-       secs = proc.time()[["elapsed"]] - t_start)
+       secs = proc.time()[["elapsed"]] - t_start, started = t_clock)
 })
 invisible(gc(verbose = FALSE))
 ```
@@ -457,6 +659,7 @@ invisible(gc(verbose = FALSE))
 # a drift of the machine's state hits both alike.
 bench_fence <- local({
   t_start <- proc.time()[["elapsed"]]
+  t_clock <- Sys.time()
   w <- sort(as.numeric(unlist(params$widths)))[2]
   dfb <- rw_data(as.numeric(params$ext_rows))
   gtb <- cuplyr::tbl_gpu(dfb)
@@ -477,7 +680,7 @@ bench_fence <- local({
   }
   rm(gtb, dfb)
   gc(verbose = FALSE)
-  list(timings = timings, skipped = skipped, secs = proc.time()[["elapsed"]] - t_start)
+  list(timings = timings, skipped = skipped, secs = proc.time()[["elapsed"]] - t_start, started = t_clock)
 })
 invisible(gc(verbose = FALSE))
 ```
@@ -495,6 +698,7 @@ invisible(gc(verbose = FALSE))
 # chunk's own samples, separate from the main table's.
 bench_runstats <- local({
   t_start <- proc.time()[["elapsed"]]
+  t_clock <- Sys.time()
   if (requireNamespace("runstats", quietly = TRUE)) {
     w <- sort(as.numeric(unlist(params$widths)))[2]
     x <- rw_data(as.numeric(params$n_rows))$x
@@ -510,7 +714,7 @@ bench_runstats <- local({
   } else {
     out <- NULL
   }
-  list(timings = out, secs = proc.time()[["elapsed"]] - t_start)
+  list(timings = out, secs = proc.time()[["elapsed"]] - t_start, started = t_clock)
 })
 ```
 
@@ -520,43 +724,76 @@ bench_runstats <- local({
 #| include: false
 # One-thread timings may depend on which core the scheduler picks when the CPU
 # mixes core types (performance and efficiency cores run at different speeds).
-# This chunk pins the R process to one fast and one slow logical CPU in turn
-# and times one single-thread RcppRoll rolling mean on each. The affinity and
-# the RcppRoll thread setting are restored on exit, also after an error. NULL
-# when lscpu or taskset is missing. (No cuplyr call here: nothing to probe.)
+# This chunk pins the R process to two logical CPUs of each kind and times one
+# single-thread RcppRoll rolling mean on each, one sample per CPU in turn (the
+# order reversed every round, as in rw_time_interleaved()): a busy CPU or
+# cluster then shows up as two CPUs of one kind that disagree, which the claims
+# chunk reports instead of a ratio, and a disturbance of the whole machine hits
+# every CPU alike, so it moves the figures more than their ratio. The second CPU of
+# a kind is on another L2 cluster when lscpu shows one (the efficiency cores
+# share an L2 per cluster of four), else on another core. Before every sample
+# the process is pinned and the call runs once untimed on that CPU, so a sample
+# never includes a migration or a core waking up. The affinity and the RcppRoll
+# thread setting are restored on exit, also after an error. NULL when lscpu or
+# taskset is missing. (No cuplyr call here: nothing to probe.)
 bench_cores <- local({
   t_start <- proc.time()[["elapsed"]]
+  t_clock <- Sys.time()
   n_rows <- as.numeric(params$n_rows)
   w <- sort(as.numeric(unlist(params$widths)))[2]
-  lscpu <- tryCatch(suppressWarnings(system2("lscpu", "-e=CPU,MAXMHZ", stdout = TRUE, stderr = FALSE)), error = function(e) character())
+  lscpu_cols <- function(cols) tryCatch(suppressWarnings(system2("lscpu", paste0("-e=", cols), stdout = TRUE, stderr = FALSE)), error = function(e) character())
+  lscpu <- lscpu_cols("CPU,CORE,CACHE,MAXMHZ")
+  has_topo <- length(lscpu) > 1L
+  if (!has_topo) lscpu <- lscpu_cols("CPU,MAXMHZ")
   taskset <- unname(Sys.which("taskset"))
   out <- NULL
   if (length(lscpu) > 1L && nzchar(taskset) && requireNamespace("RcppRoll", quietly = TRUE)) {
-    cpus <- do.call(rbind, lapply(strsplit(trimws(lscpu[-1]), "\\s+"), function(z) data.frame(cpu = as.integer(z[1]), mhz = as.numeric(z[2]))))
+    cpus <- do.call(rbind, lapply(strsplit(trimws(lscpu[-1]), "\\s+"), function(z) {
+      if (has_topo) data.frame(cpu = as.integer(z[1]), core = z[2], l2 = strsplit(z[3], ":", fixed = TRUE)[[1]][3], mhz = suppressWarnings(as.numeric(z[4])))
+      else data.frame(cpu = as.integer(z[1]), core = NA_character_, l2 = NA_character_, mhz = suppressWarnings(as.numeric(z[2])))
+    }))
     cpus <- cpus[!is.na(cpus$cpu) & !is.na(cpus$mhz), ]
     cut <- mean(range(cpus$mhz))
     cpus$kind <- ifelse(cpus$mhz >= cut, "fast", "slow")
+    # per kind: the last CPU, then the last one on another L2 (else another core)
+    pick_two <- function(k) {
+      d <- cpus[cpus$kind == k, ]
+      if (!nrow(d)) return(NULL)
+      first <- d[nrow(d), ]
+      other <- d[!is.na(d$l2) & d$l2 != first$l2, ]
+      apart <- "L2"
+      if (!nrow(other)) { other <- d[!is.na(d$core) & d$core != first$core, ]; apart <- "core" }
+      if (!nrow(other)) { other <- d[d$cpu != first$cpu, ]; apart <- "cpu" }
+      sel <- if (nrow(other)) rbind(first, other[nrow(other), ]) else first
+      sel$n_cpus <- nrow(d); sel$kind_mhz <- max(d$mhz)
+      sel$apart <- if (nrow(sel) > 1L) apart else NA_character_
+      sel
+    }
+    pins <- do.call(rbind, lapply(c("fast", "slow"), pick_two))
     pid <- Sys.getpid()
     mask <- sub("^.*: ", "", system2(taskset, c("-p", pid), stdout = TRUE))
     x <- rw_data(n_rows)$x
+    f <- function() RcppRoll::roll_meanr(x, w, fill = NA)
+    labs <- as.character(pins$cpu)
+    fns <- stats::setNames(rep(list(f), nrow(pins)), labs)
+    prep <- stats::setNames(lapply(pins$cpu, function(cpu) function() {
+      system2(taskset, c("-cp", cpu, pid), stdout = FALSE)
+      invisible(f())
+      gc(verbose = FALSE)
+    }), labs)
+    rw_say("== core placement: ", paste(sprintf("%s cpu %s", pins$kind, pins$cpu), collapse = ", "), ", interleaved")
     restore <- rw_set_threads("RcppRoll", 1)
-    rows <- tryCatch(
-      lapply(c("fast", "slow"), function(k) {
-        pick <- cpus[cpus$kind == k, ]
-        if (!nrow(pick)) return(NULL)
-        cpu <- pick$cpu[nrow(pick)]
-        system2(taskset, c("-cp", cpu, pid), stdout = FALSE)
-        rw_say("== core placement: ", k, " cpu ", cpu)
-        ms <- rw_time(function() RcppRoll::roll_meanr(x, w, fill = NA), params$times)
-        data.frame(kind = k, cpu = cpu, mhz = pick$mhz[nrow(pick)], n_cpus = nrow(pick), ms = ms)
-      }),
+    d <- tryCatch(rw_time_interleaved(fns, params$times, prepare = prep),
       finally = {
         restore()
         system2(taskset, c("-p", mask, pid), stdout = FALSE)
       })
-    out <- do.call(rbind, rows)
+    m <- match(d$label, labs)
+    out <- data.frame(kind = pins$kind[m], cpu = pins$cpu[m], mhz = pins$mhz[m], kind_mhz = pins$kind_mhz[m],
+                      n_cpus = pins$n_cpus[m], l2 = pins$l2[m], apart = pins$apart[m], sample = d$sample, ms = d$ms,
+                      stringsAsFactors = FALSE)
   }
-  list(timings = out, secs = proc.time()[["elapsed"]] - t_start)
+  list(timings = out, secs = proc.time()[["elapsed"]] - t_start, started = t_clock)
 })
 ```
 
@@ -565,24 +802,72 @@ bench_cores <- local({
 #| include: false
 # Plain data from here on. Nothing below is cached, so the document always
 # reflects the current code; only the timing chunks above are expensive.
-main <- bench_main$timings
+# polars and DuckDB (bench-engines) are rows of the same tables as every other
+# entry: timings, correctness and the extension. The claims chunk says which
+# statements stay scoped to the post's packages and which count every engine.
+main <- rbind(bench_main$timings, bench_engines$timings)
 main <- main[!is.na(main$ms), ]
 oh <- bench_overhead$timings
-ext <- bench_ext$ext
-cr <- bench_main$correctness
+ext <- rbind(bench_ext$ext, bench_engines$ext)
+# one block per experiment (grouped first, then the ungrouped sizes by width), the
+# entries in the order they were measured within it (the post's, then the engines')
+ext <- ext[order(match(ext$experiment, c("grouped mean", "ungrouped mean")), ext$width,
+                 match(ext$fn, unique(ext$fn))), ]
+rownames(ext) <- NULL
+cr <- rbind(bench_main$correctness, bench_engines$correctness)
+engine_threads <- bench_engines$threads
 thread_info <- bench_main$thread_info
 mem_breakdown <- bench_memory$breakdown
 if (is.null(mem_breakdown)) mem_breakdown <- data.frame()
 mem_finding <- bench_memory$finding
 # every cuplyr cell whose probe call fell back to the CPU: not timed, listed here
 sk <- rbind(bench_main$skipped, bench_overhead$skipped, bench_ext$skipped,
-            bench_memory$skipped, bench_fence$skipped)
+            bench_memory$skipped, bench_fence$skipped, bench_engines$skipped)
 rownames(sk) <- NULL
 secs_by_chunk <- c("bench-main" = bench_main$secs, "bench-overhead" = bench_overhead$secs,
-                   "bench-ext" = bench_ext$secs, "bench-memory" = bench_memory$secs,
+                   "bench-ext" = bench_ext$secs, "bench-engines" = bench_engines$secs,
+                   "bench-memory" = bench_memory$secs,
                    "bench-fence" = bench_fence$secs, "bench-runstats-shift" = bench_runstats$secs,
                    "bench-cores" = bench_cores$secs)
 wall_secs <- sum(secs_by_chunk)
+# When each timing chunk ran (its own clock at the start): a cached chunk comes back
+# with the time of the render that ran it, so "ran in this render" is a start at or
+# after this render's start (render_t0, in the setup chunk).
+chunk_started <- vapply(list("bench-main" = bench_main, "bench-overhead" = bench_overhead,
+                             "bench-ext" = bench_ext, "bench-engines" = bench_engines,
+                             "bench-memory" = bench_memory, "bench-fence" = bench_fence,
+                             "bench-runstats-shift" = bench_runstats, "bench-cores" = bench_cores),
+                        function(b) if (is.null(b$started)) NA_real_ else as.numeric(b$started), 0)
+chunk_ran <- !is.na(chunk_started) & chunk_started >= as.numeric(render_t0)
+# The render-time record (render-time.csv, written by the render-time chunk at the
+# end of a render in which every timing chunk ran) describes "this code" only when
+# (a) its key is this render's cache key, (b) its code key is the md5 of the code of
+# the timing chunks now (a code edit reruns that chunk through knitr's own key but
+# leaves cache_key unchanged), and (c) every cached result comes from that render:
+# each chunk started inside the record's [start - 1 s, end] and at the start time
+# the record stored for it. Otherwise the record belongs to other code or results.
+bench_code_key <- local({
+  tf <- tempfile("rw-code-")
+  on.exit(unlink(tf), add = TRUE)
+  writeLines(unlist(lapply(names(chunk_started), function(l) c(l, knitr::knit_code$get(l)))), tf)
+  unname(tools::md5sum(tf))
+})
+chunk_starts_txt <- paste(sprintf("%s=%.3f", names(chunk_started), chunk_started), collapse = ";")
+rt_path <- file.path(params$out_dir, "render-time.csv")
+rt <- if (file.exists(rt_path)) tryCatch(utils::read.csv(rt_path, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
+rt_have <- !is.null(rt) && nrow(rt) == 1L && all(c("key", "code_key", "start_epoch", "end_epoch", "chunk_starts") %in% names(rt))
+rt_starts <- if (rt_have) {
+  kv <- strsplit(strsplit(as.character(rt$chunk_starts), ";", fixed = TRUE)[[1]], "=", fixed = TRUE)
+  stats::setNames(as.numeric(vapply(kv, `[`, "", 2)), vapply(kv, `[`, "", 1))
+} else numeric()
+rt_key_ok <- rt_have && identical(as.character(rt$key), cache_key)
+rt_code_ok <- rt_have && identical(as.character(rt$code_key), bench_code_key)
+rt_from_it <- rt_have && !anyNA(chunk_started) &&
+  all(chunk_started >= rt$start_epoch - 1 & chunk_started <= rt$end_epoch) &&
+  setequal(names(rt_starts), names(chunk_started)) &&
+  isTRUE(all(abs(rt_starts[names(chunk_started)] - chunk_started) < 0.01))
+rt_ok <- rt_key_ok && rt_code_ok && rt_from_it
+rt_span <- function(start, end) sprintf("%s to %s on %s", substr(start, 12, 16), substr(end, 12, 16), substr(start, 1, 10))
 
 # one row per (statistic, function, width): median, quartiles, recorded samples
 cells <- do.call(rbind, lapply(split(main, list(main$stat, main$fn, main$width), drop = TRUE), function(d) {
@@ -629,7 +914,8 @@ colnames(omp) <- c("compiled", "symbols", "tbb")
 ver_table <- data.frame(
   package = c("R", "cuplyr", "data.table", "roll", "RollingWindow", "runstats", "slider", "RcppRoll",
               "zoo", "runner", "microbenchmark", "RcppParallel", "dplyr", "ggplot2", "scales",
-              "patchwork", "ggdist", "paletteer", "ggtext", "fftwtools", "tibble", "knitr", "rmarkdown"),
+              "patchwork", "ggdist", "paletteer", "ggtext", "fftwtools", "tibble", "knitr", "rmarkdown",
+              "polars", "duckdb", "DBI", "callr"),
   stringsAsFactors = FALSE)
 ver_table$version <- unname(ver[ver_table$package])
 ver_table$note <- ""
@@ -638,6 +924,15 @@ ver_table$note[ver_table$package == "RollingWindow"] <- "GitHub master tarball"
 ver_table$note[ver_table$package == "runstats"] <- "CRAN Archive"
 ver_table$note[ver_table$package == "fftwtools"] <- "runstats dependency"
 ver_table$note[ver_table$package == "tibble"] <- "used by the grouped slider entry"
+# polars and DuckDB: where they came from and how they were built (the install
+# record itself is read in the claims chunk)
+polars_nightly <- isTRUE(bench_engines$polars$nightly)
+duckdb_lib <- bench_engines$duckdb_lib
+ver_table$note[ver_table$package == "polars"] <- paste0("R-multiverse; prebuilt Rust library, crate ", polars_crate,
+  ", nightly (SIMD) feature ", if (polars_nightly) "on" else "off", "; run in child processes")
+ver_table$note[ver_table$package == "duckdb"] <- paste0("CRAN source build at R's default flags (not DuckDB's release flags); DuckDB library ", duckdb_lib)
+ver_table$note[ver_table$package == "DBI"] <- "DuckDB's interface"
+ver_table$note[ver_table$package == "callr"] <- "starts the polars child processes"
 ver_table$note[ver_table$package == "ggtext"] <- paste0("installed but not used: element_markdown() did not render under ggplot2 ", ver[["ggplot2"]])
 ver_table <- rbind(ver_table, data.frame(
   package = c("Quarto", "cudf (libcudf)"), version = c(quarto_ver, cudf_ver), note = "", stringsAsFactors = FALSE))
@@ -645,7 +940,8 @@ ver_table <- rbind(ver_table, data.frame(
 # versions.csv: R, Quarto, libcudf and package versions, hardware, thread
 # settings as found
 versions_csv <- rbind(
-  data.frame(item = c(names(ver), "Quarto", "libcudf"), version = c(unname(ver), quarto_ver, cudf_ver),
+  data.frame(item = c(names(ver), "Quarto", "libcudf", "DuckDB library", "polars Rust crate"),
+             version = c(unname(ver), quarto_ver, cudf_ver, duckdb_lib, polars_crate),
              stringsAsFactors = FALSE),
   data.frame(item = c("CPU", "CPU logical cores", "GPU"),
              version = c(cpu_name, cpu_cores, if (!is.null(gpu)) paste0(gpu_name, ", ", gpu_gb, " GB, compute capability ", gpu_cc) else NA),
@@ -691,9 +987,10 @@ ms_s <- function(v) ifelse(v >= 1000, paste(fmt_ms(v / 1000), "s"), paste(fmt_ms
 ms_nt <- function(v) ifelse(is.na(v), "not timed", paste(fmt_ms(v), "ms"))
 # a signed difference in ms, or nothing when either side is missing
 ms_delta <- function(a, b, vs = "") if (anyNA(c(a, b))) "" else sprintf(" (%+.2f ms%s)", a - b, vs)
-fmt_dur <- function(secs) vapply(secs, function(z) {
+# whole seconds first, so a duration just under a whole minute cannot read as 60 s
+fmt_dur <- function(secs) vapply(round(secs), function(z) {
   m <- floor(z / 60)
-  if (m < 1) sprintf("%.0f s", z) else sprintf("%d min %02d s", as.integer(m), as.integer(round(z - 60 * m)))
+  if (m < 1) sprintf("%.0f s", z) else sprintf("%d min %02d s", as.integer(m), as.integer(z - 60 * m))
 }, "")
 num_words <- c("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
                "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
@@ -847,6 +1144,47 @@ ptr_probe <- local({
 # sentences built here say so.
 stat_order <- c("mean", "sum", "min", "max", "sd", "median")
 stats_main <- intersect(stat_order, unique(cells$stat))
+
+# where the cached timing results come from, for the wall-time line at the top:
+# one run (this render, or the cold render of the record) or several
+fmt_clock <- function(t) format(as.POSIXct(t, origin = "1970-01-01"), "%Y-%m-%d %H:%M:%S")
+# The timing chunks follow each other in the document with nothing slow between
+# them, so in one run each starts within seconds of the previous one's end (30 s
+# allowed); a start anywhere else (or not recorded) begins another run.
+ch_end <- chunk_started + secs_by_chunk
+run_id <- cumsum(c(TRUE, !(abs(chunk_started[-1] - ch_end[-length(ch_end)]) <= 30) %in% TRUE))
+n_runs <- length(unique(run_id))
+run_desc <- vapply(split(names(chunk_started), run_id), function(l) {
+  span <- if (length(l) == 1L) l else sprintf("%s to %s", l[1], l[length(l)])
+  if (all(chunk_ran[l])) sprintf("%s in this render", span) else if (is.na(chunk_started[l[1]])) sprintf("%s at an unrecorded time", span) else
+    sprintf("%s in an earlier run (%s started at %s)", span, l[1], fmt_clock(chunk_started[l[1]]))
+}, "")
+wall_origin_txt <- if (all(chunk_ran)) {
+  "every timing chunk ran in this render, so these are the elapsed times of this render's run"
+} else if (rt_ok) {
+  sprintf("the elapsed times of the complete cold render from %s, which produced every cached result", rt_span(rt$render_start, rt$render_end))
+} else if (n_runs == 1L) {
+  sprintf("the elapsed times of the one earlier run that produced every cached result (%s started at %s)", names(chunk_started)[1], fmt_clock(chunk_started[1]))
+} else {
+  sprintf("the cached results come from %s runs, so this sum is not the time of one run: %s", words(n_runs), join_and(run_desc))
+}
+# the timed work of a cold run of this code, for "How to render"
+cold_work_txt <- if (all(chunk_ran) || rt_ok) sprintf("A cold run (empty cache) took %s of timed work on this machine", fmt_dur(wall_secs)) else
+  "How much timed work a cold run (empty cache) of this code takes is not known from this render (see the render time above)"
+
+# ---- which entries a statement counts (F73) --------------------------------------------
+# polars and DuckDB are added entries; the post compared its own packages. Every
+# statement about who is fastest in the post (cpu_bases and what is built on it:
+# the headline verdict, RcppRoll's lead, the one-thread exceptions), about roll,
+# slider, zoo, runner and the custom functions, and about the threads of each
+# package (the post's thread table rows, unctl, the omp check) stays scoped to
+# `post_fns`, so adding an engine cannot change a conclusion about the post's
+# packages. Every statement about where cuplyr lands (vs_text, rank_of and
+# rank_pos, the sd ranking, the grouped and ungrouped extension sentences, Net,
+# and the section on the engines) counts every entry, engines included.
+eng_base <- c("polars", "DuckDB")
+eng_labels <- c(eng_base, vapply(eng_base, rw_one_thread_label, ""))
+post_fns <- setdiff(unique(cells$fn), c(eng_labels, "cuplyr", "cuplyr (froll alias)"))
 n_st <- length(stats_main)
 rows_txt <- fmt_rows(n_rows); ext_txt <- fmt_rows(ext_rows)
 groups_txt <- fmt_rows(n_groups); grp_rows_txt <- fmt_rows(group_rows)
@@ -915,37 +1253,51 @@ thr_all <- rbind(
                where = paste0(ifelse(e$experiment == "grouped mean", grp_lab, ung_lab), ", w=", w_mid),
                statistic = "mean", fn = e$fn, med = e$median_ms, q25 = e$q25_ms, q75 = e$q75_ms, n = e$times,
                stringsAsFactors = FALSE) })
+# the thread count of an engine is the one read back from it (engine-threads.csv)
+engine_default_threads <- function(e) engine_threads$threads[engine_threads$engine == e & engine_threads$config == "default"]
+engine_one_threads <- function(e) engine_threads$threads[engine_threads$engine == e & engine_threads$config == "1 thread"]
 default_threads <- function(fn) {
+  if (fn %in% eng_base) return(paste0(engine_default_threads(fn), if (fn == "DuckDB") " (current_setting)" else " (polars_info)"))
   pkg <- rw_threaded_pkg(fn)
   if (is.na(pkg)) return(NA_character_)
   switch(pkg, data.table = paste0(n_dt_threads, " (setDTthreads)"), RcppRoll = paste0(n_rr_threads, " (OpenMP)"),
          roll = paste0(n_roll_threads, " (RcppParallel)"))
 }
-thr <- do.call(rbind, lapply(grep("1 thread\\)$", thr_all$fn), function(i) {
-  b <- thr_all[i, ]
-  a <- thr_all[thr_all$where == b$where & thr_all$statistic == b$statistic & thr_all$fn == rw_base_label(b$fn), ]
-  if (nrow(a) != 1L) return(NULL)
-  ratio <- b$med / a$med
-  data.frame(kind = b$kind, where = b$where, statistic = b$statistic, entry = a$fn, threads = default_threads(a$fn),
-             default_med = a$med, default_q25 = a$q25, default_q75 = a$q75, one_med = b$med, one_q25 = b$q25,
-             one_q75 = b$q75, ratio = ratio, n_default = a$n, n_one = b$n,
-             class = if (ratio >= thr_yes) "scales" else if (ratio <= thr_no) "flat" else "weak", stringsAsFactors = FALSE)
-}))
-thr <- thr[order(match(thr$kind, c("main", "grouped", "ungrouped")), thr$entry, match(thr$statistic, c(stat_order, "custom"))), ]
-rownames(thr) <- NULL
-thr_table <- data.frame(
+thr_build <- function(ta) {
+  t <- do.call(rbind, lapply(grep("1 thread\\)$", ta$fn), function(i) {
+    b <- ta[i, ]
+    a <- ta[ta$where == b$where & ta$statistic == b$statistic & ta$fn == rw_base_label(b$fn), ]
+    if (nrow(a) != 1L) return(NULL)
+    ratio <- b$med / a$med
+    data.frame(kind = b$kind, where = b$where, statistic = b$statistic, entry = a$fn, threads = default_threads(a$fn),
+               default_med = a$med, default_q25 = a$q25, default_q75 = a$q75, one_med = b$med, one_q25 = b$q25,
+               one_q75 = b$q75, ratio = ratio, n_default = a$n, n_one = b$n,
+               class = if (ratio >= thr_yes) "scales" else if (ratio <= thr_no) "flat" else "weak", stringsAsFactors = FALSE)
+  }))
+  t <- t[order(match(t$kind, c("main", "grouped", "ungrouped")), t$entry, match(t$statistic, c(stat_order, "custom"))), ]
+  rownames(t) <- NULL
+  t
+}
+# the post's packages (every statement about them below uses `thr`), and the engines
+thr <- thr_build(thr_all[!thr_all$fn %in% eng_labels, ])
+thr_eng <- thr_build(thr_all[thr_all$fn %in% eng_labels, ])
+thr_both <- rbind(thr, thr_eng)
+thr_both <- thr_both[order(match(thr_both$kind, c("main", "grouped", "ungrouped")), thr_both$entry, match(thr_both$statistic, c(stat_order, "custom"))), ]
+rownames(thr_both) <- NULL
+thr_tab <- function(thr) data.frame(
   experiment = thr$where, statistic = thr$statistic, entry = thr$entry, default_threads = thr$threads,
   default_ms = sprintf("%s (%s-%s)", fmt_ms(thr$default_med), fmt_ms(thr$default_q25), fmt_ms(thr$default_q75)),
   one_thread_ms = sprintf("%s (%s-%s)", fmt_ms(thr$one_med), fmt_ms(thr$one_q25), fmt_ms(thr$one_q75)),
   ratio = sprintf("%.2f", thr$ratio),
   scales = ifelse(thr$class == "scales", sprintf("yes (%s slower at 1 thread)", fmt_x(thr$ratio)),
                   ifelse(thr$class == "flat", "no", "weakly")), stringsAsFactors = FALSE)
+thr_table <- thr_tab(thr_both)
 samples_txt <- function(n) { r <- range(n); if (r[1] == r[2]) as.character(r[1]) else paste0(r[1], "-", r[2]) }
-thr_main_std <- thr[thr$kind == "main" & thr$statistic != "custom", ]
-thr_main_cus <- thr[thr$kind == "main" & thr$statistic == "custom", ]
+thr_main_std <- thr_both[thr_both$kind == "main" & thr_both$statistic != "custom", ]
+thr_main_cus <- thr_both[thr_both$kind == "main" & thr_both$statistic == "custom", ]
 n_thr_std <- samples_txt(c(thr_main_std$n_default, thr_main_std$n_one))
 n_thr_cus <- samples_txt(c(thr_main_cus$n_default, thr_main_cus$n_one))
-n_thr_ext <- samples_txt(c(thr$n_default[thr$kind != "main"], thr$n_one[thr$kind != "main"]))
+n_thr_ext <- samples_txt(c(thr_both$n_default[thr_both$kind != "main"], thr_both$n_one[thr_both$kind != "main"]))
 within_pct <- function(r) fmt_pct(max(abs(r - 1)))
 
 froll_one <- function(entry, statistic) {
@@ -1029,6 +1381,7 @@ unctl_check <- if (!nm_ok) {
 # ---- who is fastest ---------------------------------------------------------------
 cpu_bases <- function(stat) {
   f <- unique(cells$fn[cells$stat == stat])
+  f <- f[f %in% post_fns]   # the post's packages only: an added engine never becomes "the fastest package"
   f[!grepl("1 thread|^cuplyr|exact|::", f)]
 }
 view_def <- function(stat, width) { b <- cpu_bases(stat); stats::setNames(vapply(b, function(e) med(stat, e, width), 0), b) }
@@ -1131,7 +1484,14 @@ widths_slash <- paste(widths, collapse = " / ")
 excl_cup <- c("cuplyr", "cuplyr (froll alias)")
 # RcppRoll runs on many threads by default when its one-thread control scales (the
 # threads table says so); name it that way wherever it is compared
-lab_cpu <- function(fn) ifelse(fn == "RcppRoll" & rr_scales, paste0(n_rr_threads, "-thread RcppRoll"), fn)
+# (the same for an engine that scales on every statistic of the main grid)
+eng_scales <- vapply(eng_base, function(e) { r <- thr_eng[thr_eng$entry == e & thr_eng$kind == "main", ]; nrow(r) > 0 && all(r$class == "scales") }, TRUE)
+lab_cpu <- function(fn) {
+  out <- ifelse(fn == "RcppRoll" & rr_scales, paste0(n_rr_threads, "-thread RcppRoll"), fn)
+  e <- fn %in% eng_base
+  out[e] <- ifelse(eng_scales[fn[e]], paste0(vapply(fn[e], engine_default_threads, 0), "-thread ", fn[e]), fn[e])
+  out
+}
 vs_text <- function(stat, mine = "cuplyr") {
   comp <- setdiff(unique(cells$fn[cells$stat == stat]), excl_cup)
   pats <- vapply(comp, function(e) paste(vapply(widths, function(w) verdict(trip(stat, mine, w), trip(stat, e, w)), ""), collapse = "|"), "")
@@ -1142,15 +1502,19 @@ vs_text <- function(stat, mine = "cuplyr") {
   }, ""), collapse = "; ")
 }
 mean_vs <- vs_text("mean")
+# The ranked entries are the ones at their default settings, the same population as
+# the win table; the one-thread controls are not ranked. (Counting them would move
+# cuplyr's rank only because controls were added, not because anything got faster.)
 rank_of <- function(stat, width, fn = "cuplyr") {
-  v <- vapply(setdiff(unique(cells$fn[cells$stat == stat]), setdiff(excl_cup, fn)), function(e) med(stat, e, width), 0)
+  f <- setdiff(unique(cells$fn[cells$stat == stat]), setdiff(excl_cup, fn))
+  v <- vapply(f[!grepl("1 thread", f)], function(e) med(stat, e, width), 0)
   c(rank = unname(rank(v)[fn]), n = length(v))
 }
 mean_rank <- rank_of("mean", w_mid)
 rank_pos <- if (is.na(mean_rank[["rank"]])) "not ranked (its mean at this width was not timed)" else
   if (mean_rank[["rank"]] / mean_rank[["n"]] <= th_front) "near the front" else
   if (mean_rank[["rank"]] / mean_rank[["n"]] >= 1 - th_front) "near the back" else "mid-pack"
-rank_detail <- if (is.na(mean_rank[["rank"]])) "" else sprintf(" (rank %s of %s entries for mean at w=%s)", mean_rank[["rank"]], mean_rank[["n"]], w_mid)
+rank_detail <- if (is.na(mean_rank[["rank"]])) "" else sprintf(" (rank %s of %s entries at their default settings for mean at w=%s; the one-thread controls are not ranked)", mean_rank[["rank"]], mean_rank[["n"]], w_mid)
 sum_v <- vapply(widths, function(w) verdict(trip("sum", "cuplyr", w), trip("sum", "roll", w)), "")
 sum_roll_txt <- sprintf("For sum against roll, cuplyr is %s (%s vs %s ms at w=%s).", runs_txt(sum_v), fmt_ms(med("sum", "cuplyr", w_mid)), fmt_ms(med("sum", "roll", w_mid)), w_mid)
 mm_win <- widths[vapply(widths, function(w) all(vapply(c("min", "max"), function(s) is_faster(verdict(trip(s, "cuplyr", w), trip(s, "data.table", w))), TRUE)), TRUE)]
@@ -1163,11 +1527,12 @@ rank_word <- function(r) if (is.na(r[["rank"]])) "not timed" else if (r[["rank"]
 sd_rank_txt <- join_and(mapply(function(r, w) sprintf("%s at w=%s", rank_word(r), w), sd_ranks, widths))
 sd_last <- isTRUE(sd_ranks[[3]][["rank"]] == sd_ranks[[3]][["n"]])
 sd_others_hi <- setdiff(unique(cells$fn[cells$stat == "sd"]), excl_cup)
+sd_others_hi <- sd_others_hi[!grepl("1 thread", sd_others_hi)]
 sd_next <- sd_others_hi[which.max(vapply(sd_others_hi, function(e) med("sd", e, w_hi), 0))]
 sd_tail <- if (sd_last) sprintf(" (data.table %s; the slowest other entry is %s, %s ms)", fmt_ms(med("sd", "data.table", w_hi)), sd_next, fmt_ms(med("sd", sd_next, w_hi))) else ""
 sd_line <- paste0(sd_rank_txt, sd_tail)
 sd_sent <- if (all(is.na(sd_ms))) "cuplyr sd was not timed in this run (see the skipped cells)." else
-  sprintf("cuplyr sd takes %s ms: %s.", slash(sd_ms), sd_line)
+  sprintf("cuplyr sd takes %s ms; among the entries at their default settings it is %s.", slash(sd_ms), sd_line)
 fb_txt <- if (median_skipped) sprintf("cuplyr %s is not timed: it has no GPU path and runs on the CPU fallback, so it is left out of every figure here (F3).", code("roll_median()")) else
   if (has_cell("median", "cuplyr", w_mid)) sprintf("cuplyr median takes %s ms (native in this run).", slash(med_w("median", "cuplyr"))) else
   "cuplyr has no median entry in this run."
@@ -1214,18 +1579,23 @@ rescan_txt <- if (!cup_grow_known) "" else if (cup_grows) {
 g_cup <- ext_med(grp_lab, "cuplyr", group_width); g_dt <- ext_med(grp_lab, "data.table (by = g)", group_width)
 g_sl <- ext_med(grp_lab, "slider (grouped_df)", group_width); g_dt1 <- ext_med(grp_lab, "data.table (by = g, 1 thread)", group_width)
 g_dir <- function(r) if (is.na(r)) "not comparable with" else if (r >= 1 + th_level) sprintf("about %s faster than", fmt_xr(r)) else if (r <= 1 / (1 + th_level)) sprintf("about %s slower than", fmt_xr(1 / r)) else "level with"
-g_txt <- if (is.na(g_cup)) sprintf("cuplyr was not timed (%s), so there is no grouped comparison; data.table by group took %s ms and slider %s ms",
+g_pl <- ext_med(grp_lab, "polars", group_width); g_dd <- ext_med(grp_lab, "DuckDB", group_width)
+g_pl1 <- ext_med(grp_lab, "polars (1 thread)", group_width); g_dd1 <- ext_med(grp_lab, "DuckDB (1 thread)", group_width)
+g_txt <- if (is.na(g_cup)) sprintf("cuplyr was not timed (%s), so there is no grouped comparison; data.table by group took %s ms, slider %s ms, polars %s ms and DuckDB %s ms",
                                    if (any(sk$chunk == "bench-ext" & sk$stat == "grouped mean")) "its probe call fell back to the CPU" else "its cell failed",
-                                   fmt_ms(g_dt), fmt_ms(g_sl)) else
-  sprintf("cuplyr %s ms vs data.table by group %s ms and slider %s ms, so cuplyr is %s data.table and %s slider, computation only",
-          fmt_ms(g_cup), fmt_ms(g_dt), fmt_ms(g_sl), g_dir(g_dt / g_cup), g_dir(g_sl / g_cup))
-g_fast <- isTRUE(g_cup < min(g_dt, g_sl, g_dt1, na.rm = TRUE))
+                                   fmt_ms(g_dt), fmt_ms(g_sl), fmt_ms(g_pl), fmt_ms(g_dd)) else
+  sprintf("cuplyr %s ms vs data.table by group %s ms, slider %s ms, polars %s ms and DuckDB %s ms, so cuplyr is %s data.table, %s slider, %s polars and %s DuckDB, computation only",
+          fmt_ms(g_cup), fmt_ms(g_dt), fmt_ms(g_sl), fmt_ms(g_pl), fmt_ms(g_dd),
+          g_dir(g_dt / g_cup), g_dir(g_sl / g_cup), g_dir(g_pl / g_cup), g_dir(g_dd / g_cup))
+# the fastest entry means against every other entry of the experiment (the one-thread controls included)
+g_others <- ext$median_ms[ext$experiment == grp_lab & ext$fn != "cuplyr"]
+g_fast <- isTRUE(g_cup < min(g_others, na.rm = TRUE))
 by_verb <- if (by_flat) "ran effectively single-threaded" else "used threads"
 by_tail <- if (by_flat && !is.na(g_cup)) sprintf(", so the %s is the GPU against **one CPU thread making %s per-group calls**, not against %s threads", fmt_xr(g_dt / g_cup), fmt_int(n_groups), n_dt_threads) else ""
 ung_fns <- unique(ext$fn[ext$experiment == "ungrouped mean"])
 thr_label <- function(fn) {
   base <- fn
-  r <- thr[thr$kind == "ungrouped" & thr$entry == base, ]
+  r <- thr_both[thr_both$kind == "ungrouped" & thr_both$entry == base, ]
   if (nrow(r) && r$class[1] == "scales") paste0(sub(" .*", "", r$threads[1]), "-thread ", base) else base
 }
 ung_at <- function(w) {
@@ -1241,11 +1611,11 @@ ung_txt <- function(w) {
   d <- ung_at(w)
   cup <- ext_med("ungrouped mean", "cuplyr", w)
   scaled <- d$fn[grepl("1 thread", d$fn)]
-  scaled <- scaled[vapply(scaled, function(e) { b <- rw_base_label(e); r <- thr[thr$kind == "ungrouped" & thr$entry == b, ]; nrow(r) > 0 && r$class[1] == "scales" }, TRUE)]
+  scaled <- scaled[vapply(scaled, function(e) { b <- rw_base_label(e); r <- thr_both[thr_both$kind == "ungrouped" & thr_both$entry == b, ]; nrow(r) > 0 && r$class[1] == "scales" }, TRUE)]
   dflt <- d[!grepl("1 thread", d$fn), ]
   if (all(is_faster(d$v))) {
     sprintf("%s ms vs %s%s", fmt_ms(cup), join_and(sprintf("%s %s", vapply(dflt$fn, thr_label, ""), fmt_ms(dflt$med))),
-            if (length(scaled)) paste0("; ", join_and(sprintf("one-thread %s %s", rw_base_label(scaled), fmt_ms(d$med[match(scaled, d$fn)])))) else "")
+            if (length(scaled)) paste0("; ", join_and(sprintf("one-thread %s %s", vapply(scaled, rw_base_label, ""), fmt_ms(d$med[match(scaled, d$fn)])))) else "")
   } else {
     ahead <- dflt[is_slower(dflt$v), ]; lvl <- dflt[dflt$v == "level" | grepl("slightly", dflt$v), ]
     sprintf("%s ms vs %s%s", fmt_ms(cup), join_and(sprintf("%s %s", vapply(ahead$fn, thr_label, ""), fmt_ms(ahead$med))),
@@ -1302,18 +1672,6 @@ floor_share_txt <- if (is.na(floor_share)) sprintf("not set against the cuplyr m
   sprintf("about %s of the %s ms measured at %s rows / width %s", fmt_pct(floor_share, 0), fmt_ms(med("mean", "cuplyr", w_lo)), rows_txt, w_lo)
 f4_share_txt <- if (is.na(floor_share)) "" else sprintf(", and the floor is about %s of the narrow-window rolling cost", fmt_pct(floor_share, 0))
 n_floor_samples <- nrow(floor_df)
-w_lo_vs_cum <- med("mean", "cuplyr", w_lo) - cum_big
-narrow_chain <- w_lo_vs_cum / med("mean", "cuplyr", w_lo) < th_chain
-# the narrow-window rolling mean against the cumsum mutate, at the post's size;
-# either cell can be missing (not timed), and then nothing is compared
-narrow_txt <- if (is.na(narrow_chain)) {
-  sprintf("not compared with the %s mutate here, because %s was not timed", code("cumsum"),
-          if (is.na(med("mean", "cuplyr", w_lo))) "the narrow-window rolling mean" else "the cumsum mutate")
-} else paste0(
-  if (w_lo_vs_cum >= 0) sprintf("only %s ms above", fmt_ms(w_lo_vs_cum)) else sprintf("%s ms below", fmt_ms(-w_lo_vs_cum)),
-  " the ", code("cumsum"), " mutate: ",
-  if (narrow_chain) "at narrow widths, most of cuplyr's time at this size is the call chain and the copies, not the rolling kernel" else
-    "at narrow widths the rolling kernel is a visible part of cuplyr's time at this size")
 
 plan_nodes <- lapply(bench_overhead$plans, function(l) { x <- regmatches(l, regexpr("ast_[a-z_]+", l)); x })
 plan_plain <- plan_nodes[[lab_plain]]; plan_win <- plan_nodes[[lab_roll]]
@@ -1336,22 +1694,127 @@ bytes_per_row <- col_b / n_mem
 win_out <- 2 * col_b + mask_bytes(n_mem); mut_out <- 3 * col_b + 2 * mask_bytes(n_mem); sel_out <- 2 * col_b + mask_bytes(n_mem)
 pred_held <- win_out + mut_out + sel_out
 held_roll <- mb_roll$held_after_call_bytes; result_roll <- mb_roll$held_after_gc_bytes
-decomp_txt <- if (is.na(held_roll)) "could not be checked here (the call was skipped)" else if (pred_held == held_roll) "matches the measured total exactly" else sprintf("differs from the measured total by %s B", fmt_int(abs(pred_held - held_roll)))
-mem_lead <- if (isTRUE(pred_held == held_roll)) "GPU memory shows it, to the byte" else if (is.na(held_roll)) "GPU memory of the rolling call was not measured" else "GPU memory shows it, though not to the byte"
-plain_pred <- 2 * col_b
-held_peak_txt <- if (is.na(mb_roll$peak_bytes)) "not measured" else if (mb_roll$held_after_call_bytes == mb_roll$peak_bytes) "held = peak" else sprintf("held %s B, peak %s B", fmt_int(mb_roll$held_after_call_bytes), fmt_int(mb_roll$peak_bytes))
 held_ratio <- held_roll / result_roll
+mem_measured <- !is.na(held_roll) && !is.na(result_roll)
+# What F57 changed, as the bytes show it. The result's own new column is r (8 bytes a
+# row) with its validity mask; a result of less than two columns holds no copy of x
+# (x is shared with the input table). F1 is resolved when what is held right after
+# the call is the result alone (within th_same): nothing else awaits finalization.
+new_col_bytes <- col_b + mask_bytes(n_mem)
+x_shared <- mem_measured && result_roll < 2 * col_b
+f1_resolved <- mem_measured && abs(held_ratio - 1) < th_same
+alloc_ratio <- mb_roll$allocated_bytes / result_roll
+mem_lead <- if (!mem_measured) "GPU memory of the rolling call was not measured" else
+  if (f1_resolved && x_shared) "GPU memory agrees: right after the call only the result is held, and it holds no copy of x" else
+  if (f1_resolved) "GPU memory shows only the result held right after the call, but the result holds a copy of x" else
+  "GPU memory shows more than the result held right after the call"
+mem_txt <- if (!mem_measured) "The rolling call was not measured for memory in this run, so the sharing is not checked here." else paste0(
+  sprintf("Right after a %s mutate %s B are held, and after a %s the result alone holds %s B: %s. ",
+          code("roll_mean"), fmt_int(held_roll), code("gc()"), fmt_int(result_roll),
+          if (f1_resolved) sprintf("what is held right after the call is the result (held / result %s), and nothing else awaits finalization", fmt_x(held_ratio)) else
+            sprintf("%s the result is held right after the call, so intermediates still await finalization", fmt_x(held_ratio))),
+  if (isTRUE(result_roll == new_col_bytes)) sprintf("The result is exactly one %s-byte column of %s rows plus its validity mask (%s + %s B), the size of the new column %s: %s is shared with the input table, not copied. ",
+                                                    bytes_per_row, ext_txt, fmt_int(col_b), fmt_int(mask_bytes(n_mem)), code("r"), code("x")) else
+    if (x_shared) sprintf("The result holds less than two %s-byte columns of %s rows (%s B each), so it holds no copy of %s. ", bytes_per_row, ext_txt, fmt_int(col_b), code("x")) else
+    sprintf("The result holds at least two columns of %s B, so it may hold a copy of %s. ", fmt_int(col_b), code("x")),
+  sprintf("Before F57 the node chain built %s tables, one per node: %s (window output: x + %s + validity mask) + %s (mutate output: x + %s + %s + two masks) + %s (select output, the result) = %s B, reasoned from the node chain and sized from the column bytes and the padded validity mask, not measured here; the %s B measured now are %s of that sum. ",
+          words(n_mat_win), fmt_int(win_out), code("..win1.."), fmt_int(mut_out), code("..win1.."), code("r"), fmt_int(sel_out), fmt_int(pred_held),
+          fmt_int(held_roll), fmt_pct(held_roll / pred_held, 0)),
+  if (is.na(mb_plain$held_after_call_bytes)) "" else
+    sprintf("A plain mutate holds %s B right after the call%s and allocates %s B in total. ", fmt_int(mb_plain$held_after_call_bytes),
+            if (mb_plain$held_after_call_bytes == col_b) sprintf(" (exactly one %s-byte column of %s rows, the size of the new column %s alone)", bytes_per_row, ext_txt, code("y")) else "",
+            fmt_int(mb_plain$allocated_bytes)),
+  if (isTRUE(mb_roll$allocated_bytes > held_roll)) sprintf("One %s mutate allocates %s B in total while it runs (%s its result; peak %s B) and frees all of it but the result before it returns; I did not break that transient allocation down.",
+                                                        code("roll_mean"), fmt_int(mb_roll$allocated_bytes), fmt_x(alloc_ratio, 0), fmt_int(mb_roll$peak_bytes)) else "")
+# the allocation side of the per-call cost: a copy of x only when the bytes show one
+alloc_part <- if (x_shared) "allocation" else "copy and allocation"
+
+# the narrow-window rolling mean against the cumsum mutate, at the post's size;
+# either cell can be missing (not timed), and then nothing is compared
+w_lo_vs_cum <- med("mean", "cuplyr", w_lo) - cum_big
+narrow_chain <- w_lo_vs_cum / med("mean", "cuplyr", w_lo) < th_chain
+narrow_txt <- if (is.na(narrow_chain)) {
+  sprintf("not compared with the %s mutate here, because %s was not timed", code("cumsum"),
+          if (is.na(med("mean", "cuplyr", w_lo))) "the narrow-window rolling mean" else "the cumsum mutate")
+} else paste0(
+  if (w_lo_vs_cum >= 0) sprintf("only %s ms above", fmt_ms(w_lo_vs_cum)) else sprintf("%s ms below", fmt_ms(-w_lo_vs_cum)),
+  " the ", code("cumsum"), " mutate: ",
+  if (narrow_chain) sprintf("at narrow widths, most of cuplyr's time at this size is the call chain and the %s, not the rolling kernel", if (x_shared) "allocations" else "copies") else
+    "at narrow widths the rolling kernel is a visible part of cuplyr's time at this size")
+
+# Read this first: what the window chain costs per call, as the code and the bytes show it
+chain_share_txt <- if (x_shared) sprintf("which run as one chain that shares the input column %s instead of copying it, so only the computed columns and their validity masks are allocated", code("x")) else
+  if (mem_measured) sprintf("which run as one chain, although the bytes held after a call show a copy of %s in the result, and the allocation of the results and their validity masks", code("x")) else
+  sprintf("which run as one chain that is meant to share the input column %s (the memory of the call was not measured in this run), and the allocation of the results and their validity masks", code("x"))
+
+# F1, from the same bytes
+f1_head <- if (!mem_measured) "addressed by F57; not measured in this run" else if (f1_resolved && x_shared) "resolved by F57" else "addressed by F57, not resolved in this run"
+f1_meas_txt <- if (!mem_measured) "The memory of the call was not measured in this run, so whether the fix holds is not checked here." else paste0(
+  sprintf("In this run, right after the call %s B are held (%s), and after a %s the result alone holds %s B (held / result %s; %s, %s). ",
+          fmt_int(held_roll), code("gpu_alloc_tracking()"), code("gc()"), fmt_int(result_roll), fmt_x(held_ratio), code("memory-breakdown.csv"), code("memory-finding.csv")),
+  if (f1_resolved && x_shared) sprintf("No intermediate table outlives the call and the result holds no copy of %s, so F1 is resolved: the remaining per-call cost has no materialization component (no table is copied and nothing beyond the result is held).", code("x")) else
+    if (f1_resolved) sprintf("Nothing beyond the result is held, but the result holds a copy of %s, so F1 is only partly resolved.", code("x")) else
+    sprintf("Right after the call %s the result is held, so intermediates still await finalization and F1 is not resolved in this run.", fmt_x(held_ratio)),
+  if (isTRUE(mb_roll$allocated_bytes > held_roll)) sprintf(" While it runs, the call still allocates %s B in total (peak %s B) and frees all of it but the result before it returns (see \"Per-call cost breakdown\").",
+                                                        fmt_int(mb_roll$allocated_bytes), fmt_int(mb_roll$peak_bytes)) else "")
+f1_tail <- if (f1_resolved && x_shared) "" else
+  " Freeing per-call intermediates deterministically (or an automatic `gpu_gc()` and retry on `bad_alloc`) would remain a separate hardening."
 
 # the no-gc() finding
 failed_at <- mem_finding$failed_at_call; n_calls <- mem_finding$n_calls
 oom_quote <- sub("^(GPU operation '[^']*' failed).*(std::bad_alloc: out_of_memory: CUDA).*$", "\\1 ... \\2", gsub("\\s+", " ", mem_finding$error))
 oom_quote <- if (!is.na(failed_at) && grepl("out_of_memory", mem_finding$error)) oom_quote else NA_character_
 gc_lead <- if (!is.na(failed_at)) paste("cuplyr needs the", code("gc()")) else paste("cuplyr is given the", code("gc()"), "too")
+# what waits for R's GC: since F57 the dropped results only (F1 resolved), else intermediates too
+gc_wait <- if (f1_resolved) "the dropped results" else "the intermediates"
+gc_why_txt <- if (f1_resolved) sprintf("the result of an eager %s, once dropped, is freed only when R finalizes its pointer", code("mutate()")) else
+  sprintf("an eager %s holds its GPU intermediates until R finalizes their pointers", code("mutate()"))
 gc_need_txt <- if (!is.na(failed_at)) sprintf("%s back-to-back %s-row calls without it ran the %s GB card out of memory", words(n_calls), ext_txt, gpu_gb) else
-  sprintf("%s back-to-back %s-row calls without it did not run the %s GB card out of memory in this run, but the intermediates still pile up until a collection", words(n_calls), ext_txt, gpu_gb)
+  sprintf("%s back-to-back %s-row calls without it did not run the %s GB card out of memory in this run, but %s still pile up until a collection", words(n_calls), ext_txt, gpu_gb, gc_wait)
+f1_oom_lead <- if (f1_resolved) "A dropped result is still freed only when R finalizes its pointer" else "The intermediates are freed only when R finalizes their pointers"
 f1_oom_txt <- if (!is.na(failed_at)) sprintf("%s back-to-back calls without %s ran out of memory at the %s (%s) on the %s GB card, with the results dropped each time",
                                              words(n_calls), code("gc()"), ordinal(failed_at), if (is.na(oom_quote)) "no error text" else paste0("\"", oom_quote, "\""), gpu_gb) else
   sprintf("%s back-to-back calls without %s did not run out of memory at this size on the %s GB card", words(n_calls), code("gc()"), gpu_gb)
+# where cuplyr's dropped tables go in that gc(): the memory resource cuplyr runs on
+# (read at render time; the timings ran under the same package defaults)
+mr_kind <- tryCatch(cuplyr:::gpu_memory_state()$resource, error = function(e) NA_character_)
+mr_release <- tryCatch(cuplyr:::memory_resource_release_threshold(), error = function(e) NA_real_)
+free_txt <- switch(if (is.na(mr_kind)) "unknown" else mr_kind,
+  async = paste0(sprintf("cuplyr's GPU tables go back to CUDA's asynchronous memory pool, cuplyr's default memory resource, with %s inside that untimed %s", code("cudaFreeAsync"), code("gc()")),
+                 if (is.na(mr_release)) ", and the pool keeps the memory for reuse (no release threshold is set)" else
+                   sprintf(", although with the release threshold set here (%s B) CUDA may return memory to the device at the next synchronisation, which is the fence inside the timed call", fmt_int(mr_release))),
+  pool = sprintf("cuplyr's GPU tables go back to RMM's pool inside that untimed %s", code("gc()")),
+  cuda = sprintf("cuplyr's GPU tables are freed with %s inside that untimed %s", code("cudaFree"), code("gc()")),
+  sprintf("cuplyr's GPU tables are freed inside that untimed %s", code("gc()")))
+
+# the per-call floor against the native calls at the post's size, per width: a floor
+# measured in another chunk on a small table is not a strict lower bound, and where
+# it exceeds a whole call the text says so instead of calling it a part of it
+nat_w <- lapply(widths, function(w) { v <- vapply(cup_native, function(s) med(s, "cuplyr", w), 0); v[!is.na(v)] })
+floor_over_all <- widths[vapply(nat_w, function(v) length(v) > 0 && floor_ms > max(v), TRUE)]
+floor_over_some <- widths[vapply(nat_w, function(v) length(v) > 0 && floor_ms > min(v) && floor_ms <= max(v), TRUE)]
+nat_all <- unlist(nat_w)
+nat_floor_txt <- paste0(sprintf("against a per-call floor of about %s ms for window mutates (on a %s-row table)", fmt_1(floor_ms), small_txt),
+  if (length(floor_over_all) || length(floor_over_some)) paste0(", which ", join_and(c(
+      if (length(floor_over_all)) sprintf("exceeds the whole call at %s", join_and(paste0("w=", floor_over_all))),
+      if (length(floor_over_some)) sprintf("exceeds some of the calls at %s", join_and(paste0("w=", floor_over_some))))),
+    " (the floor was timed in another chunk, so it is not a strict lower bound)") else
+  if (length(nat_all)) sprintf(", which is %s of these calls", { p <- fmt_pct(range(floor_ms / nat_all), 0); if (p[1] == p[2]) p[1] else paste0(p[1], "-", p[2]) }) else "")
+# the same for Net: how much of cuplyr's mean call the floor is
+floor_share_mid <- floor_ms / med("mean", "cuplyr", w_mid)
+floor_shares <- c(floor_share, floor_share_mid)
+net_floor_txt <- if (all(is.na(floor_shares))) sprintf("its per-call floor is about %s ms", fmt_1(floor_ms)) else
+  sprintf("per-call cost is %s its time there (the %s-row floor of about %s ms is %s)",
+          if (min(floor_shares, na.rm = TRUE) >= 0.5) "most of" else "a part of", small_txt, fmt_1(floor_ms),
+          join_and(c(if (!is.na(floor_share)) sprintf("%s of its mean call at w=%s", fmt_pct(floor_share, 0), w_lo),
+                     if (!is.na(floor_share_mid)) sprintf("%s at w=%s", fmt_pct(floor_share_mid, 0), w_mid))))
+# the peak of the large call, in the Conclusions: transient once F1 is resolved
+peak_f1_txt <- if (f1_resolved && x_shared && is.finite(peak_bytes)) sprintf(", and transient: right after the call only the %s result is held (F1)", fmt_mb(result_roll)) else ", but see F1"
+# F4's candidate row: with F1 resolved there is no materialization left to remove
+f4_chain_txt <- sprintf("%s nodes, run as one execution", words(n_mat_win))
+f4_row_txt <- if (f1_resolved && x_shared) sprintf("Since F57 this cost has no materialization component: no table is copied and nothing beyond the result is held (F1). Candidate row: profile the window path's extra %s ms (the %s node builds and schema inferences in R, the lowering, the kernel launches) and the %s ms every eager mutate pays (R dispatch, AST build, schema inference), since I did not.",
+                                             fmt_1(win_extra), words(n_mat_win), fmt_1(plain_small)) else
+  sprintf("Candidate row (same as F1): remove the remaining materializations, then re-measure the %s-row floor; profile the remaining %s ms plain-mutate cost (R dispatch, AST build, schema inference) separately, since I did not.", small_txt, fmt_1(plain_small))
 
 # ---- Deviations -------------------------------------------------------------------------------
 # What the fence costs: the on and off calls were timed in alternation, so the
@@ -1399,18 +1862,61 @@ rs_agree_txt <- if (!have_rs) "" else if (rs_within(rs_side("mean", "outside"), 
 # "Hardware and versions" section; these are its data-dependent pieces.
 core <- bench_cores$timings
 core_ok <- !is.null(core) && all(c("fast", "slow") %in% core$kind)
-core_med <- function(k) if (core_ok) stats::median(core$ms[core$kind == k]) else NA_real_
-core_row <- function(k) if (core_ok) core[core$kind == k, ][1, ] else list(n_cpus = NA, mhz = NA)
+# one row per pinned CPU (in the order they were pinned): its median
+core_cpu <- if (core_ok) do.call(rbind, lapply(unique(core$cpu), function(cp) {
+  d <- core[core$cpu == cp, ]
+  data.frame(kind = d$kind[1], cpu = cp, apart = d$apart[1], med = stats::median(d$ms), n = nrow(d), stringsAsFactors = FALSE)
+})) else NULL
+# The sanity check: the two CPUs of one kind must agree within th_x, else the
+# measurement was disturbed (one CPU busy, or a transient disturbance) and no
+# figure from it is quoted. NA for a kind with one CPU (nothing to check against).
+core_spread <- vapply(c(fast = "fast", slow = "slow"), function(k) {
+  m <- core_cpu$med[core_cpu$kind == k]
+  if (length(m) < 2L) NA_real_ else max(m) / min(m)
+}, 0)
+core_disturbed <- names(core_spread)[!is.na(core_spread) & core_spread > th_x]
+core_clean <- core_ok && !length(core_disturbed)
+# the median of all samples of one kind, only from a clean measurement
+core_med <- function(k) if (core_clean) stats::median(core$ms[core$kind == k]) else NA_real_
+core_row <- function(k) if (core_ok) core[core$kind == k, ][1, ] else list(n_cpus = NA, kind_mhz = NA)
 core_fast <- core_row("fast"); core_slow <- core_row("slow")
 core_ratio <- core_med("slow") / core_med("fast")
 core_matters <- isTRUE(core_ratio >= th_core)
-core_effect_txt <- if (core_matters) sprintf("landing on a slow core can cost a single-threaded call up to %s, which is what pinning shows for this one", fmt_x(core_ratio)) else
-  "core placement does not matter measurably for that call"
+apart_words <- c(L2 = "with separate L2 caches", core = "on different cores", cpu = "on one core")
+core_pins_txt <- if (!core_ok) "" else paste(vapply(c("fast", "slow"), function(k) {
+  d <- core_cpu[core_cpu$kind == k, ]
+  if (nrow(d) == 1L) sprintf("%s CPU %s (the only one of its kind)", k, d$cpu) else
+    sprintf("%s CPUs %s (%s)", k, join_and(d$cpu), apart_words[[d$apart[1]]])
+}, ""), collapse = " and ")
+core_n_samples <- if (core_ok) max(core_cpu$n) else NA
+# the per-CPU medians, only from a clean measurement (a disturbed one is not
+# quoted; its samples are still in cores.csv)
+core_figs_txt <- if (!core_clean) "" else paste0(": ", paste(vapply(c("fast", "slow"), function(k) {
+  d <- core_cpu[core_cpu$kind == k, ]
+  sprintf("%s ms on %s CPU%s %s", join_and(fmt_ms(d$med)), k, if (nrow(d) > 1L) "s" else "", join_and(d$cpu))
+}, ""), collapse = " and "), " (medians)")
+core_unchecked <- names(core_spread)[is.na(core_spread)]
+core_effect_txt <- if (!core_ok) "" else if (!core_clean) {
+  sprintf("%s (%s, more than a factor of %s), so this measurement was disturbed and is not quoted: no figure from it and no fast/slow ratio is used anywhere in this report, and how much landing on a slow core costs a single-threaded call is not known from this render.",
+          if (length(core_disturbed) == 2L) "The two CPUs of each kind disagree" else sprintf("The two %s CPUs disagree", core_disturbed),
+          join_and(sprintf("%s%s apart", if (length(core_disturbed) == 2L) paste0(core_disturbed, " ") else "", fmt_x(core_spread[core_disturbed], 2))), th_x)
+} else {
+  paste0(if (length(core_unchecked) == 2L) "Each kind has only one CPU, so the figures are not checked against a second CPU" else
+           if (length(core_unchecked)) sprintf("The two %s CPUs agree within a factor of %s (the %s kind has one CPU, so it is not checked against a second)", setdiff(c("fast", "slow"), core_unchecked), th_x, core_unchecked) else
+           sprintf("The two CPUs of each kind agree within a factor of %s", th_x),
+         ", so the measurement is quoted: ",
+         if (core_matters) sprintf("over all the samples of each kind, landing on a slow core costs this single-threaded call %s.", fmt_x(core_ratio)) else
+           "over all the samples of each kind, core placement does not matter measurably for that call.",
+         # what the check cannot see (N18): it compares two CPUs of one kind only
+         if (length(core_unchecked) < 2L) " The check compares the two CPUs of a kind with each other, so it cannot detect load that slows both of them alike; the machine's load during the chunk was not recorded, so such load is not ruled out." else "")
+}
 
 # The calls of the threads table at w=101, named per call: data.table by
 # function (frollmean/sum/..., frollapply), any other entry by package, or by
 # statistic when only some of its calls are in the group.
-thr_main <- thr[thr$kind == "main", ]
+# The threads table has the post's packages and the engines (thr_both): the lists
+# below name every call of it, polars and DuckDB included.
+thr_main <- thr_both[thr_both$kind == "main", ]
 calls_other <- function(rows) {
   e_all <- unique(rows$entry[!grepl("^data\\.table", rows$entry)])
   vapply(e_all, function(e) {
@@ -1443,8 +1949,8 @@ xc_main <- med("mean", "RcppRoll (1 thread)", w_mid)
 xc_ext <- ext_med("ungrouped mean", "RcppRoll (1 thread)", w_mid) * n_rows / ext_rows
 xc_ext_ok <- within_x(xc_main, xc_ext)
 xc_fast_ok <- within_x(xc_main, core_med("fast")); xc_slow_ok <- within_x(xc_main, core_med("slow"))
-xc_ok <- xc_ext_ok && (!core_ok || xc_fast_ok || xc_slow_ok)
-xc_core_figs <- if (core_ok) sprintf(", %s ms on a fast core and %s ms on a slow one", fmt_ms(core_med("fast")), fmt_ms(core_med("slow"))) else ""
+xc_ok <- xc_ext_ok && (!core_clean || xc_fast_ok || xc_slow_ok)
+xc_core_figs <- if (core_clean) sprintf(", %s ms on a fast core and %s ms on a slow one", fmt_ms(core_med("fast")), fmt_ms(core_med("slow"))) else ""
 xc_figs <- c(ext = sprintf("the %s-row rate", ext_txt), fast = "the fast-core figure", slow = "the slow-core figure")
 xc_vals <- c(ext = xc_ext, fast = core_med("fast"), slow = core_med("slow"))
 xc_hit <- c(ext = xc_ext_ok, fast = xc_fast_ok, slow = xc_slow_ok)
@@ -1461,10 +1967,12 @@ xc_verdict <- if (is.na(xc_main)) {
 } else {
   paste0("The table figure ", xc_agree_txt,
          if (length(xc_miss)) paste0(" and is ", xc_miss_txt) else "",
-         if (!core_ok) "." else if (xc_fast_ok && !xc_slow_ok) ", so this render's one-thread RcppRoll cell ran at fast-core speed." else
+         if (!core_clean) "." else if (xc_fast_ok && !xc_slow_ok) ", so this render's one-thread RcppRoll cell ran at fast-core speed." else
            if (xc_slow_ok && !xc_fast_ok) ", so this render's one-thread RcppRoll cell ran at slow-core speed." else
            "; the two pinned figures are too close to tell which kind of core it ran on.")
 }
+# a disturbed pinning measurement is left out of the cross-check, and the text says so
+if (core_ok && !core_clean) xc_verdict <- paste(xc_verdict, "The pinned figures of chunk `bench-cores` are not used here, because that measurement was disturbed (see above).")
 
 # the one call this render timed twice in different chunks
 rs_moved_txt <- if (!have_rs) "" else if (!rs_within(rs_main[["mean"]], rs_side("mean", "outside")))
@@ -1493,7 +2001,7 @@ median_entry_txt <- if (median_skipped) sprintf("There is no cuplyr median entry
 dt_med_rng <- range_ms(med_w("median", "data.table"))
 
 # ---- install logs -----------------------------------------------------------------------------------
-logs <- sort(list.files(params$out_dir, pattern = "^install.*\\.log$"))
+logs <- sort(setdiff(list.files(params$out_dir, pattern = "^install.*\\.log$"), "install-engines.log"))
 log_failed <- lapply(logs, function(f) {
   l <- readLines(file.path(params$out_dir, f), warn = FALSE)
   m <- regmatches(l, regexec("^\\s*(\\S+)\\s+(?:<NA>|\\S+)\\s+not run: install failed", l))
@@ -1534,19 +2042,325 @@ f3_lead <- if (median_skipped) sprintf("%s's CPU fallback is an R loop, not meas
 ```
 
 ```{r}
+#| label: claims-engines
+#| include: false
+# polars and DuckDB (F73): the install record, the thread counts read back from
+# the engines, and every statement about where cuplyr wins and loses against
+# them. These count every entry (the post's packages and both engines); the
+# statements about the post's own packages are in the chunk above and stay
+# scoped to post_fns.
+
+# ---- the install record (written by the install run, read here, never typed) -----------
+inst_path <- file.path(params$out_dir, "install-engines.csv")
+inst <- if (file.exists(inst_path)) utils::read.csv(inst_path, stringsAsFactors = FALSE) else NULL
+inst_table <- if (is.null(inst)) NULL else data.frame(
+  package = inst$package, version = inst$version,
+  repository = ifelse(is.na(inst$repo) | !nzchar(inst$repo), "(not installed here)", inst$repo),
+  how = inst$how, install_time = vapply(inst$secs, function(z) if (is.na(z)) "-" else fmt_dur(z), ""), status = inst$status,
+  stringsAsFactors = FALSE)
+inst_row_txt <- function(i) {
+  r <- inst[i, ]
+  if (is.na(r$secs)) sprintf("%s %s was %s (%s)", code(r$package), r$version, r$status, r$how)
+  else sprintf("%s %s: %s; %s", code(r$package), r$version, r$how, fmt_dur(r$secs))
+}
+inst_txt <- if (is.null(inst)) "No install record (install-engines.csv) was found next to the output, so how polars and DuckDB were installed is not described here." else
+  paste0("The install of the engines, read from install-engines.csv in the output directory: ", paste(vapply(seq_len(nrow(inst)), inst_row_txt, ""), collapse = ". "), ".")
+inst_note_txt <- if (is.null(inst)) "" else sprintf(" The %s build compiles at R's default flags, not at the flags DuckDB uses for its own releases, so its speed here is the speed of this build; %s downloads a prebuilt Rust library and was not built with cargo.",
+                                                    code("duckdb"), code("polars"))
+
+# ---- the engines' per-call floor (bench-engines, on the small table) --------------------
+# The same measurement as cuplyr's floor: one call on a small table, where the
+# computation is negligible, at the middle width, the median over the statistics of
+# each statistic's median.
+stopifnot(identical(bench_engines$small_rows, small_rows))
+eng_floor_df <- bench_engines$floor
+eng_floor <- function(label) {
+  d <- eng_floor_df[eng_floor_df$fn == paste0(label, " (1e3-row overhead floor)"), ]
+  stats::median(tapply(d$ms, d$stat, stats::median))
+}
+eng_floor_ms <- stats::setNames(vapply(unname(eng_labels), eng_floor, 0), unname(eng_labels))
+eng_floor_n <- length(unique(eng_floor_df$stat))
+eng_floor_txt <- sprintf("For comparison, the same call at w=%s on the %s-row table, measured the same way for the engines (the median over the %s statistics of each statistic's median; chunk `bench-engines`, samples in `timings.csv`), takes %s ms for polars (%s ms at one thread) and %s ms for DuckDB (%s ms at one thread). DuckDB's figure includes the sort that its `ORDER BY i` implies; I did not time that sort separately.",
+                         w_mid, small_txt, words(eng_floor_n), fmt_ms(eng_floor_ms[["polars"]]), fmt_ms(eng_floor_ms[["polars (1 thread)"]]),
+                         fmt_ms(eng_floor_ms[["DuckDB"]]), fmt_ms(eng_floor_ms[["DuckDB (1 thread)"]]))
+
+# ---- the thread counts in effect ---------------------------------------------------------
+eng_thr_tab <- data.frame(engine = engine_threads$engine, configuration = engine_threads$config,
+                          setting = ifelse(engine_threads$engine == "DuckDB",
+                                           ifelse(engine_threads$config == "1 thread", "SET threads = 1", "(default)"),
+                                           ifelse(engine_threads$config == "1 thread", "POLARS_MAX_THREADS=1", "(unset)")),
+                          threads_in_effect = engine_threads$threads, stringsAsFactors = FALSE)
+# how an engine's one-thread / default ratios read, per statistic, in the document's words
+eng_how <- function(r) {
+  if (all(r$class == "scales")) "scales on every statistic" else if (all(r$class == "flat")) "does not scale on any statistic" else
+    paste(c(if (any(r$class == "scales")) paste("scales for", join_and(r$statistic[r$class == "scales"])),
+            if (any(r$class == "weak")) paste("scales only weakly for", join_and(r$statistic[r$class == "weak"])),
+            if (any(r$class == "flat")) paste("does not scale for", join_and(r$statistic[r$class == "flat"]))), collapse = "; ")
+}
+# The measured thread behaviour of an engine in one clause, for the Conclusions:
+# what the threads table shows (the one-thread / default ratio), not the pool size.
+eng_lead <- function(e) {
+  r <- thr_eng[thr_eng$entry == e & thr_eng$kind == "main", ]
+  if (!nrow(r)) return(sprintf("%s has no one-thread control in this run", e))
+  if (all(r$class == "flat")) sprintf("%s ran effectively on one thread (one-thread / default ratio %s), although its pool has %s threads", e, range_num(r$ratio), engine_default_threads(e))
+  else if (all(r$class == "scales")) sprintf("%s scaled with its threads on every statistic (pool of %s; %s slower at one thread)", e, engine_default_threads(e), range_x(r$ratio))
+  else sprintf("%s %s (one-thread / default ratio %s)", e, eng_how(r), range_num(r$ratio))
+}
+eng_lead_txt <- paste(vapply(eng_base, eng_lead, ""), collapse = "; ")
+eng_default_thr <- vapply(eng_base, engine_default_threads, 0)
+eng_one_thr <- vapply(eng_base, engine_one_threads, 0)
+eng_reading <- function(e) {
+  r <- thr_eng[thr_eng$entry == e & thr_eng$kind == "main", ]
+  u <- thr_eng[thr_eng$entry == e & thr_eng$kind == "ungrouped", ]
+  g <- thr_eng[thr_eng$entry == e & thr_eng$kind == "grouped", ]
+  if (!nrow(r)) return(sprintf("%s has no one-thread control in this run.", e))
+  how <- eng_how(r)
+  # the extension ratios carry the word the document's thresholds give them
+  cls_word <- c(scales = "scales", weak = "scales weakly", flat = "does not scale")
+  extra <- c(if (nrow(g)) sprintf("%.2f grouped (%s)", g$ratio[1], cls_word[[g$class[1]]]),
+             if (nrow(u)) sprintf("%.2f at %s rows (%s)", u$ratio[1], ext_txt, cls_word[[u$class[1]]]))
+  sprintf("%s %s (one-thread / default median ratio %s at w=%s%s); it ran with %s threads by default and %s at one, as read back from the engine (`engine-threads.csv`).",
+          e, how, range_num(r$ratio), w_mid, if (length(extra)) paste0("; ", paste(extra, collapse = "; ")) else "",
+          engine_default_threads(e), engine_one_threads(e))
+}
+
+# ---- cuplyr against every other entry, per cell ------------------------------------------
+# "Other entries" are every non-cuplyr entry at its default setting: the post's
+# packages and polars and DuckDB alike. The one-thread controls are not in the
+# table. verdict() is the document's own comparison (see "Comparison words").
+others_at <- function(stat, w) {
+  f <- unique(cells$fn[cells$stat == stat & cells$width == w])
+  f[!grepl("1 thread", f) & !f %in% excl_cup]
+}
+mark_slightly <- function(nm, v) ifelse(grepl("slightly", v), paste0(nm, " (slightly)"), nm)
+win_row <- function(where, cup, others) {
+  meds <- vapply(others, function(o) o[["med"]], 0)
+  have <- !is.na(cup[["med"]])
+  v <- if (have) vapply(others, function(o) verdict(cup, o), "") else rep(NA_character_, length(others))
+  fastest <- if (any(!is.na(meds))) names(which.min(meds)) else NA_character_
+  list_or <- function(keep, lab) if (!have) "-" else if (!any(keep)) "none" else join_and(lab[keep])
+  list(row = data.frame(
+    where = where, cuplyr_ms = if (have) fmt_ms(cup[["med"]]) else "not timed",
+    fastest_other = if (is.na(fastest)) "-" else sprintf("%s (%s)", fastest, fmt_ms(min(meds, na.rm = TRUE))),
+    cuplyr_loses_to = list_or(is_slower(v), mark_slightly(names(others), v)),
+    cuplyr_level_with = list_or(v %in% "level", names(others)),
+    cuplyr_beats = if (!have) "-" else sprintf("%s of %s", sum(is_faster(v)), length(v)),
+    stringsAsFactors = FALSE),
+    long = data.frame(entry = names(others), v = v, stringsAsFactors = FALSE))
+}
+win_parts <- list()
+add_win <- function(kind, stat, width, where, cup, others) {
+  w <- win_row(where, cup, others)
+  w$long$kind <- kind; w$long$stat <- stat; w$long$width <- width
+  win_parts[[length(win_parts) + 1]] <<- w
+}
+for (s in stats_main) for (w in widths) {
+  fs <- others_at(s, w)
+  add_win("main", s, w, sprintf("%s, w=%s", s, w), trip(s, "cuplyr", w), stats::setNames(lapply(fs, function(f) trip(s, f, w)), fs))
+}
+g_fs <- setdiff(unique(ext$fn[ext$experiment == grp_lab]), "cuplyr"); g_fs <- g_fs[!grepl("1 thread", g_fs)]
+add_win("grouped", "mean", group_width, sprintf("%s, %s rows, %s groups, w=%s", grp_lab, grp_rows_txt, groups_txt, group_width),
+        ext_trip(grp_lab, "cuplyr", group_width), stats::setNames(lapply(g_fs, function(f) ext_trip(grp_lab, f, group_width)), g_fs))
+u_fs <- setdiff(ung_fns, "cuplyr"); u_fs <- u_fs[!grepl("1 thread", u_fs)]
+for (w in widths) {
+  add_win("ungrouped", "mean", w, sprintf("%s, w=%s", ung_lab, w), ext_trip("ungrouped mean", "cuplyr", w),
+          stats::setNames(lapply(u_fs, function(f) ext_trip("ungrouped mean", f, w)), u_fs))
+}
+win_tab <- do.call(rbind, lapply(win_parts, `[[`, "row"))
+win_long <- do.call(rbind, lapply(win_parts, `[[`, "long"))
+rownames(win_tab) <- NULL
+
+# ---- each engine against cuplyr: ratio = engine median / cuplyr median -------------------
+eng_cmp <- do.call(rbind, lapply(eng_labels, function(e) {
+  m <- expand.grid(stat = stats_main, width = widths, stringsAsFactors = FALSE)
+  main_rows <- data.frame(engine = e, kind = "main", stat = m$stat, width = m$width,
+    v = mapply(function(s, w) verdict(trip(s, "cuplyr", w), trip(s, e, w)), m$stat, m$width, USE.NAMES = FALSE),
+    ratio = mapply(function(s, w) med(s, e, w) / med(s, "cuplyr", w), m$stat, m$width, USE.NAMES = FALSE), stringsAsFactors = FALSE)
+  g_row <- data.frame(engine = e, kind = "grouped", stat = "mean", width = group_width,
+    v = verdict(ext_trip(grp_lab, "cuplyr", group_width), ext_trip(grp_lab, e, group_width)),
+    ratio = ext_med(grp_lab, e, group_width) / ext_med(grp_lab, "cuplyr", group_width), stringsAsFactors = FALSE)
+  u_rows <- data.frame(engine = e, kind = "ungrouped", stat = "mean", width = widths,
+    v = vapply(widths, function(w) verdict(ext_trip("ungrouped mean", "cuplyr", w), ext_trip("ungrouped mean", e, w)), ""),
+    ratio = vapply(widths, function(w) ext_med("ungrouped mean", e, w) / ext_med("ungrouped mean", "cuplyr", w), 0), stringsAsFactors = FALSE)
+  rbind(main_rows, g_row, u_rows)
+}))
+rownames(eng_cmp) <- NULL
+eng_ratio <- function(e, kind, stat, width) {
+  r <- eng_cmp$ratio[eng_cmp$engine == e & eng_cmp$kind == kind & eng_cmp$stat == stat & eng_cmp$width == width]
+  if (!length(r) || is.na(r)) NA_real_ else r[1]
+}
+ratio_rows <- rbind(
+  data.frame(where = paste0(rows_txt, " rows, ", stats_main, ", w=", w_mid), kind = "main", stat = stats_main, width = w_mid, stringsAsFactors = FALSE),
+  data.frame(where = sprintf("%s, w=%s", grp_lab, group_width), kind = "grouped", stat = "mean", width = group_width, stringsAsFactors = FALSE),
+  data.frame(where = sprintf("%s, w=%s", ung_lab, w_mid), kind = "ungrouped", stat = "mean", width = w_mid, stringsAsFactors = FALSE))
+ratio_tab <- data.frame(row = ratio_rows$where, stringsAsFactors = FALSE)
+for (e in eng_labels) {
+  ratio_tab[[e]] <- vapply(seq_len(nrow(ratio_rows)), function(i) {
+    r <- eng_ratio(e, ratio_rows$kind[i], ratio_rows$stat[i], ratio_rows$width[i])
+    if (is.na(r)) "cuplyr not timed" else fmt_x(r, 2)
+  }, "")
+}
+
+# ---- core placement as polars' own samples show it (the paragraph is in "Hardware") ----------
+# polars ran effectively on one thread, so its samples can land on either kind of
+# core: the spread inside each main-grid cell (slowest over fastest sample) is the
+# effect actually observed, next to the pinned ratio. And cuplyr's margin over
+# polars against polars' fastest sample of each cell (the speed of a fast core, if
+# the spread is core placement) says whether core placement could explain it.
+pol_cells <- main[main$fn %in% c("polars", "polars (1 thread)") & main$stat %in% stats_main & main$width %in% widths, ]
+pol_spread <- if (nrow(pol_cells)) vapply(split(pol_cells$ms, list(pol_cells$fn, pol_cells$stat, pol_cells$width), drop = TRUE), function(v) max(v) / min(v), 0) else numeric()
+pol_margin <- unlist(lapply(stats_main, function(st) vapply(widths, function(w) {
+  v <- main$ms[main$fn == "polars" & main$stat == st & main$width == w]
+  if (!length(v) || !has_cell(st, "cuplyr", w)) NA_real_ else min(v) / med(st, "cuplyr", w)
+}, 0)))
+pol_margin <- pol_margin[!is.na(pol_margin)]
+pol_single <- "polars" %in% thr_main$entry[thr_main$class == "flat"]
+# The widest spread is compared with the pinned ratio: within th_x of it, the
+# samples split the way pinning does; above, something besides core placement
+# moved them; below, they did not visibly split across the two kinds.
+core_obs_txt <- if (!core_clean || !core_matters || !pol_single || !length(pol_spread)) "" else {
+  sp_max <- max(pol_spread)
+  paste0(sprintf("polars ran effectively on one thread (threads table), so its own samples show what an unpinned single-threaded call meets: within each of its %s main-grid cells (default and one thread) the slowest sample is %s the fastest; the widest spread, %s, %s.",
+                 words(length(pol_spread)), range_x(pol_spread, 2), fmt_x(sp_max, 2),
+                 if (sp_max > core_ratio * th_x) sprintf("is more than a factor of %s above the pinned ratio, so core placement alone does not account for it", th_x) else
+                   if (within_x(sp_max, core_ratio)) sprintf("agrees with the pinned ratio within a factor of %s, as when some samples land on a fast core and some on a slow one", th_x) else
+                     sprintf("is more than a factor of %s below the pinned ratio, so in this render polars' samples did not visibly split between the two kinds of core", th_x)),
+         # polars' fastest sample is the speed it reaches on a fast core, so a lead
+         # over it is not a product of polars landing on slow cores
+         if (!length(pol_margin)) "" else if (min(pol_margin) > 1) sprintf(" Even polars' fastest sample of each cell (default threads) takes at least %s as long as cuplyr's median, so core placement does not explain cuplyr's lead over polars.", fmt_x(min(pol_margin), 2)) else
+           sprintf(" In at least one cell polars' fastest sample (default threads) is below cuplyr's median (it takes %s as long), so there cuplyr's lead holds for polars' typical sample but not for its fastest.", fmt_x(min(pol_margin), 2)))
+}
+
+# ---- cells whose samples fall into two groups (any entry) ---------------------------------
+# Sorted, a cell's samples split into two groups where two neighbours are more than th_x
+# apart, with at least two samples on each side. The median of such a cell depends on
+# how many samples land in each group, and with an even split it falls between them.
+tg_src <- main[main$n_rows == n_rows & !is.na(main$ms), ]
+tg <- do.call(rbind, lapply(split(tg_src, list(tg_src$fn, tg_src$stat, tg_src$width), drop = TRUE), function(d) {
+  v <- sort(d$ms); n <- length(v)
+  if (n < 4L) return(NULL)
+  g <- v[-1] / v[-n]; i <- which.max(g)
+  if (g[i] <= th_x || i < 2L || n - i < 2L) return(NULL)
+  m <- stats::median(v)
+  data.frame(fn = d$fn[1], stat = d$stat[1], width = d$width[1], n = n, n_lo = i, lo_a = v[1], lo_b = v[i], hi_a = v[i + 1L], hi_b = v[n],
+             med = m, between = m > v[i] && m < v[i + 1L], stringsAsFactors = FALSE)
+}))
+tg_n_cells <- length(unique(paste(tg_src$fn, tg_src$stat, tg_src$width)))
+tg_cell <- function(d) sprintf("%s %s w=%s", d$fn, d$stat, d$width)
+tg_txt <- if (is.null(tg) || !nrow(tg)) {
+  sprintf("No cell's samples fall into two groups (sorted, no two neighbouring samples are more than a factor of %s apart with at least two samples on each side).", th_x)
+} else {
+  tg <- tg[order(tg$fn, match(tg$stat, stat_order), tg$width), ]
+  tg_fns <- unique(tg$fn)
+  tg_btw <- tg[tg$between, ]
+  tg_pol <- all(sub(" \\(1 thread\\)$", "", tg_fns) == "polars")
+  paste0(sprintf("**Two-group cells.** In %s of the %s cells the samples fall into two groups: sorted, two neighbouring samples are more than a factor of %s apart, with at least two samples on each side. %s: %s.",
+                 words(nrow(tg)), tg_n_cells, th_x, if (tg_pol) "All of them are polars cells" else "They are",
+                 join_and(sprintf("%s (%s at %s-%s ms, %s at %s-%s ms)", tg_cell(tg), tg$n_lo, fmt_ms(tg$lo_a), fmt_ms(tg$lo_b), tg$n - tg$n_lo, fmt_ms(tg$hi_a), fmt_ms(tg$hi_b)))),
+         if (nrow(tg_btw)) sprintf(" In %s the median (%s) falls between the two groups, so it is the time of neither%s.", join_and(tg_cell(tg_btw)), join_and(paste(fmt_ms(tg_btw$med), "ms")),
+                                   if (nrow(tg_btw) < nrow(tg)) "; in the others it falls inside the larger group" else "") else
+           " In each of them the median falls inside the larger group.",
+         if (tg_pol && pol_single) " polars ran effectively on one thread, so its samples can land on either kind of core (see \"Core placement\"); which one each sample ran on is not recorded." else "",
+         " The median of such a cell depends on how many samples land in each group, so it can move between runs by more than its IQR suggests.")
+}
+
+# ---- prose pieces ---------------------------------------------------------------------------
+# counts over the main grid (statistic x width) where cuplyr has a number
+eng_counts <- function(e) {
+  d <- eng_cmp[eng_cmp$engine == e & eng_cmp$kind == "main" & !is.na(eng_cmp$v), ]
+  c(n = nrow(d), faster = sum(is_faster(d$v)), level = sum(d$v %in% "level"), slower = sum(is_slower(d$v)))
+}
+count_txt <- function(cn) {
+  if (cn[["n"]] == 0) "not compared here (cuplyr was not timed)" else
+  if (cn[["faster"]] == cn[["n"]]) sprintf("faster in every one of the %s (statistic x width) cells", words(cn[["n"]])) else
+  if (cn[["slower"]] == cn[["n"]]) sprintf("slower in every one of the %s (statistic x width) cells", words(cn[["n"]])) else
+    sprintf("faster in %s, level in %s and slower in %s of the %s (statistic x width) cells", words(cn[["faster"]]), words(cn[["level"]]), words(cn[["slower"]]), words(cn[["n"]]))
+}
+eng_pat <- function(e) {
+  d <- eng_cmp[eng_cmp$engine == e & eng_cmp$kind == "main" & !is.na(eng_cmp$v), c("stat", "width", "v")]
+  if (!nrow(d)) "not compared" else pattern_txt(d)
+}
+single_kind <- function(e, kind) {
+  d <- eng_cmp[eng_cmp$engine == e & eng_cmp$kind == kind, ]
+  if (all(is.na(d$v))) return("not comparable")
+  if (kind == "main") return(eng_pat(e))
+  runs_txt(d$v, d$width, vocab_basic)
+}
+# the fastest entry per statistic at the middle width, cuplyr included where it was timed
+all_at <- function(stat, w) {
+  f <- others_at(stat, w)
+  m <- c(vapply(f, function(x) med(stat, x, w), 0), if (has_cell(stat, "cuplyr", w)) c(cuplyr = med(stat, "cuplyr", w)))
+  m[!is.na(m)]
+}
+fast_all <- vapply(stats_main, function(s) names(which.min(all_at(s, w_mid))), "")
+fast_all_txt <- paste(vapply(unique(fast_all), function(n) sprintf("%s for %s", lab_cpu(n), join_and(names(fast_all)[fast_all == n])), ""), collapse = "; ")
+# which of the two engines is faster per statistic (default settings): the document's
+# own comparison words (verdict()), so within th_level is "level", and a cell that
+# was not timed for either is left out instead of stopping the render
+eng_pair_v <- vapply(stats_main, function(s) verdict(trip(s, "polars", w_mid), trip(s, "DuckDB", w_mid)), "")
+eng_pair_stats <- function(keep) mark_slightly(stats_main[keep], eng_pair_v[keep])
+eng_pair_parts <- c(
+  if (any(is_faster(eng_pair_v))) sprintf("polars is faster for %s", join_and(eng_pair_stats(is_faster(eng_pair_v)))),
+  if (any(is_slower(eng_pair_v))) sprintf("DuckDB is faster for %s", join_and(eng_pair_stats(is_slower(eng_pair_v)))),
+  if (any(eng_pair_v %in% "level")) sprintf("they are level for %s", join_and(stats_main[eng_pair_v %in% "level"])),
+  if (anyNA(eng_pair_v)) sprintf("they are not compared for %s (not timed)", join_and(stats_main[is.na(eng_pair_v)])))
+eng_pair_txt <- if (length(eng_pair_parts)) paste(eng_pair_parts, collapse = "; ") else "they are not compared (not timed)"
+eng_pair_decided <- is_faster(eng_pair_v) | is_slower(eng_pair_v)
+eng_pair_ratio <- vapply(stats_main[eng_pair_decided], function(s) max(med(s, "polars", w_mid), med(s, "DuckDB", w_mid)) / min(med(s, "polars", w_mid), med(s, "DuckDB", w_mid)), 0)
+eng_pair_ratio_txt <- if (length(eng_pair_ratio)) sprintf(" (where one is faster, the other takes %s as long)", range_x(eng_pair_ratio)) else ""
+# A decided pair whose medians still agree within th_x, with an engine that ran
+# effectively on one thread for that statistic (its samples can land on either kind
+# of core), rests on this one run: the text says so instead of leaving a bare verdict.
+eng_flat_at <- function(e, s) any(thr_main$entry == e & thr_main$statistic == s & thr_main$class == "flat")
+eng_close <- names(eng_pair_ratio)[eng_pair_ratio < th_x]
+eng_close_one <- lapply(stats::setNames(eng_close, eng_close), function(s) Filter(function(e) eng_flat_at(e, s), eng_base))
+eng_close <- eng_close[lengths(eng_close_one) > 0]
+eng_pair_hedge <- if (!length(eng_close)) "" else sprintf(" For %s the two still agree within a factor of %s (%s), and %s ran effectively on one thread there, so its samples can land on either kind of core (see \"Core placement\"): that order rests on this one run and may not hold in another.",
+  join_and(eng_close), th_x,
+  paste(vapply(eng_close, function(s) sprintf("%spolars %s ms, DuckDB %s ms", if (length(eng_close) > 1L) paste0(s, ": ") else "",
+                                              fmt_ms(med(s, "polars", w_mid)), fmt_ms(med(s, "DuckDB", w_mid))), ""), collapse = "; "),
+  join_and(unique(unlist(eng_close_one[eng_close]))))
+# ratio ranges at the middle width, per engine and setting (below one: the engine is faster than cuplyr)
+eng_rng <- function(e) {
+  r <- eng_cmp$ratio[eng_cmp$engine == e & eng_cmp$kind == "main" & eng_cmp$width == w_mid]
+  r <- r[!is.na(r)]
+  if (!length(r)) "not compared" else range_x(r, 2)
+}
+cup_beats_any_eng <- any(is_faster(eng_cmp$v[eng_cmp$engine %in% eng_base & eng_cmp$kind == "main"]))
+cup_loses_any_eng <- any(is_slower(eng_cmp$v[eng_cmp$engine %in% eng_base & eng_cmp$kind == "main"]))
+eng_u_txt <- function(e) single_kind(e, "ungrouped")
+# the same words for both engines are said once
+eng_core <- function(e) sprintf("%s; by statistic, %s. Grouped: cuplyr is %s. At %s rows (one size): %s.",
+                                count_txt(eng_counts(e)), eng_pat(e), single_kind(e, "grouped"), ext_txt, eng_u_txt(e))
+eng_summary <- function(e) sprintf("Against %s at its default threads cuplyr is %s", e, eng_core(e))
+eng_summary_both <- if (identical(eng_core("polars"), eng_core("DuckDB"))) sprintf("Against polars and DuckDB at their default threads cuplyr is %s", eng_core("polars")) else
+  paste(eng_summary("polars"), eng_summary("DuckDB"))
+if (median_skipped) eng_summary_both <- paste(eng_summary_both, "The median is left out of these counts, because cuplyr's is not timed.")
+eng_1t_txt <- if (identical(count_txt(eng_counts("polars (1 thread)")), count_txt(eng_counts("DuckDB (1 thread)")))) sprintf("Against both engines at one thread, cuplyr is %s", count_txt(eng_counts("polars (1 thread)"))) else
+  sprintf("Against the engines at one thread, cuplyr is %s for polars and %s for DuckDB", count_txt(eng_counts("polars (1 thread)")), count_txt(eng_counts("DuckDB (1 thread)")))
+eng_net_txt <- if (identical(count_txt(eng_counts("polars")), count_txt(eng_counts("DuckDB")))) sprintf("against both polars and DuckDB at default threads cuplyr is %s", count_txt(eng_counts("polars"))) else
+  sprintf("against polars cuplyr is %s and against DuckDB %s, both at default threads", count_txt(eng_counts("polars")), count_txt(eng_counts("DuckDB")))
+# the edge semantics, in the correctness section, say what is and is not covered
+eng_cells_ok <- all(cr$ok[cr$fn %in% eng_labels])
+n_eng_cells <- sum(cr$fn %in% eng_labels)
+```
+
+```{r}
 #| label: csv
 #| include: false
 # The CSVs next to the rendered HTML, written from the (possibly cached) data
 # on every render, so they always match the numbers in the text.
 ext_csv <- ext
 ext_csv$experiment <- ifelse(ext$experiment == "grouped mean", grp_lab, ung_lab)
-utils::write.csv(rbind(bench_main$timings, bench_overhead$timings), file.path(params$out_dir, "timings.csv"), row.names = FALSE)
+utils::write.csv(rbind(bench_main$timings, bench_engines$timings, bench_engines$floor, bench_overhead$timings), file.path(params$out_dir, "timings.csv"), row.names = FALSE)
 utils::write.csv(cr, file.path(params$out_dir, "correctness.csv"), row.names = FALSE)
 utils::write.csv(ext_csv, file.path(params$out_dir, "extension.csv"), row.names = FALSE)
 utils::write.csv(versions_csv, file.path(params$out_dir, "versions.csv"), row.names = FALSE)
 utils::write.csv(mem_breakdown, file.path(params$out_dir, "memory-breakdown.csv"), row.names = FALSE)
 utils::write.csv(mem_finding, file.path(params$out_dir, "memory-finding.csv"), row.names = FALSE)
 utils::write.csv(sk_csv, file.path(params$out_dir, "skipped.csv"), row.names = FALSE)
+utils::write.csv(engine_threads, file.path(params$out_dir, "engine-threads.csv"), row.names = FALSE)
+if (!is.null(bench_cores$timings)) utils::write.csv(bench_cores$timings, file.path(params$out_dir, "cores.csv"), row.names = FALSE)
 ```
 
 ```{r}
@@ -1659,40 +2473,45 @@ stat_table <- function(stat) {
 }
 ```
 
-Redo of <https://roald-arboel.com/blog/posts/2024/10/03/Benchmark-rolling/> with cuplyr added as one more entry in every statistic panel. Produced by this document (`bench/rolling-window.qmd`; helpers in `bench/rolling-lib.R`, installs in `bench/install-deps.R`): the code that produces every number, table and figure is in the same file as the prose, and every number in the prose is computed from the results. Raw data, written to `r params$out_dir` on every render: `timings.csv`, `correctness.csv`, `extension.csv`, `versions.csv`, `memory-breakdown.csv`, `memory-finding.csv`, `skipped.csv`.
+Redo of <https://roald-arboel.com/blog/posts/2024/10/03/Benchmark-rolling/> with cuplyr added as one more entry in every statistic panel, and polars and DuckDB added as further entries (Theo, 2026-10-25) at their default threads and at one thread. The rendered report is published at `r file.path(params$out_dir, "rolling-window.html")`. Produced by this document (`bench/rolling-window.qmd`; helpers in `bench/rolling-lib.R`, installs in `bench/install-deps.R`): the code that produces every number, table and figure is in the same file as the prose, and every number in the prose is computed from the results. Raw data, written to `r params$out_dir` on every render: `timings.csv`, `correctness.csv`, `extension.csv`, `versions.csv`, `memory-breakdown.csv`, `memory-finding.csv`, `skipped.csv`, `engine-threads.csv``r if (is.null(bench_cores$timings)) "" else ", \x60cores.csv\x60 (the core-placement samples)"`.
 
 **Run configuration:** cell budget `r cell_budget` s, probe limit `r probe_limit` s, `times` `r times`, `times_custom` `r times_c`, `ext_times` `r ext_times`. `r cfg_txt`. See "How to render" at the end for the command.
 
-Wall time of the timing chunks, which hold the GPU: **`r fmt_dur(wall_secs)`** (`r paste0(names(secs_by_chunk), " ", fmt_dur(secs_by_chunk), collapse = ", ")`; the elapsed times of the run that produced the cached results). Every number below is computed in this document from those results.
+Wall time of the timing chunks, which hold the GPU: **`r fmt_dur(wall_secs)`** (`r paste0(names(secs_by_chunk), " ", fmt_dur(secs_by_chunk), collapse = ", ")`; `r wall_origin_txt`). Every number below is computed in this document from those results.
 
 ## Read this first: what the numbers are
 
-**What cuplyr's number is.** The cuplyr timing is the **computation on a table that is already on the GPU**: `res <- compute(mutate(gt, r = roll_mean(x, n)))` followed by `gpu_sync()` as a fence, with `gt <- tbl_gpu(df)` built once outside timing. By decision (Theo, 2026-10-21) it contains **no upload and no `collect()`**. The CPU packages operate on an R vector already in memory, so both sides time the computation only. A real pipeline that starts and ends in R would also pay the PCIe transfers that are excluded here (not measured in this study). `r only_native_txt`
+**What cuplyr's number is.** The cuplyr timing is the **computation on a table that is already on the GPU**: `res <- compute(mutate(gt, r = roll_mean(x, n)))` followed by `gpu_sync()` as a fence, with `gt <- tbl_gpu(df)` built once outside timing. By decision (Theo, 2026-10-21) it contains **no upload and no `collect()`**. The post's CPU packages operate on an R vector already in memory, and polars and DuckDB on their own in-engine copy of the data (next paragraph), so every entry times the computation only. A real pipeline that starts and ends in R would also pay the PCIe transfers that are excluded here (not measured in this study). `r only_native_txt`
 
-**What the CPU numbers are: measured thread behaviour, not settings.** Package thread settings do not say what a call did, so each multi-thread-capable entry (data.table, RcppRoll, roll) was timed twice, at its default setting and with its threads set to one (entries labelled `(1 thread)`), and the "Threads actually used" section reports both. The result:
+**What the CPU numbers are: measured thread behaviour, not settings.** Package thread settings do not say what a call did, so each multi-thread-capable entry (data.table, RcppRoll, roll, and the engines polars and DuckDB) was timed twice, at its default setting and with its threads set to one (entries labelled `(1 thread)`), and the "Threads actually used" section reports both. The result:
 
 - **RcppRoll `r rr_runs` `r n_rr_threads` OpenMP threads by default** (`RcppRoll::roll_threads()` = `r n_rr_threads`) and `r rr_claim`.
 - **`r dt_lead`** (default vs `setDTthreads(1)` within `r dt_within`), although `getDTthreads()` is `r n_dt_threads`. `r dt_only` `r dt_weak_txt`
 - **`r roll_lead`** `r roll_claim`. `r roll_omp_txt`
 - `r join_and(unctl)` were not given a thread control. `r unctl_check`
+- `r eng_reading("polars")`
+- `r eng_reading("DuckDB")`
 
 So there is no blanket "GPU against N CPU threads" framing in this report: the comparison is to the per-entry thread behaviour above. Medians are reported with their spread (IQR in the tables, all samples in `timings.csv`). No headline speedup is claimed.
 
-**What the cuplyr number still includes, per call.** R dispatch of `mutate()`/`compute()`, the AST node builds and schema inference, lowering to C++, **`r words(n_mat_win)` full-table materializations** (an eager window `mutate()` runs `r node_list`, each of which builds a new table, so the input column `x` is deep-copied `r times_word(n_mat_win)` per call; see "Per-call cost breakdown"), allocation of the results and their validity masks, and the fence. The same call on a `r small_txt`-row table, where kernel time is negligible, takes about `r fmt_1(floor_ms)` ms for window functions (a plain `mutate(y = x + 1)` takes `r fmt_1(plain_small)` ms). That floor is `r floor_share_txt` and `r floor_vs_dt` the whole data.table call (`r fmt_ms(med("mean", "data.table", w_mid))` ms). The copy and allocation part grows with the row count and is **inside every `r rows_txt` and `r ext_txt` cuplyr timing** but not in the `r small_txt`-row floor.
+**What the polars and DuckDB numbers are.** polars and DuckDB follow the same rule as cuplyr: each engine gets its data once, outside timing, and the timed call is only the rolling computation, to a result that stays inside the engine. For polars the timed call is `pdf$with_columns(<rolling expression>$alias("r"))` on a polars DataFrame built once (eager, so the expression is evaluated when the call returns; `over("g")` when grouped), and the result is never converted to R inside timing. For DuckDB it is one `CREATE TEMP TABLE rw_out AS SELECT i, <guarded window aggregate> AS r FROM rw_x WINDOW w AS (ORDER BY i ROWS BETWEEN n - 1 PRECEDING AND CURRENT ROW)` on an in-memory DuckDB table loaded once; the result is materialized inside DuckDB and nothing is fetched into R. The sort that `ORDER BY i` implies is inside the timed query, because SQL has no row order without it. That is "closest to computation only" for DuckDB: fetching the result into R would add a copy that cuplyr's timing does not have either. Both engines ran at their default threads (polars `r eng_default_thr[["polars"]]`, DuckDB `r eng_default_thr[["DuckDB"]]`, read back from the engine) and at one thread (polars `r eng_one_thr[["polars"]]`, DuckDB `r eng_one_thr[["DuckDB"]]`). The comparison with cuplyr is therefore engine against GPU on in-engine data, not against an R vector.
+
+**What the cuplyr number still includes, per call.** R dispatch of `mutate()`/`compute()`, the AST node builds and schema inference, lowering to C++, the `r words(n_mat_win)` nodes of an eager window `mutate()` (`r node_list`), `r chain_share_txt` (see "Per-call cost breakdown"), and the fence. The same call on a `r small_txt`-row table, where kernel time is negligible, takes about `r fmt_1(floor_ms)` ms for window functions (a plain `mutate(y = x + 1)` takes `r fmt_1(plain_small)` ms). That floor is `r floor_share_txt` and `r floor_vs_dt` the whole data.table call (`r fmt_ms(med("mean", "data.table", w_mid))` ms). The `r alloc_part` part grows with the row count and is **inside every `r rows_txt` and `r ext_txt` cuplyr timing** but not in the `r small_txt`-row floor. `r eng_floor_txt`
 
 ## Method
 
 - Data: `rw_data(n)` (`set.seed(12345)` by default, then `rnorm(n)`) with n = `r rows_txt`, no NAs, widths `r widths_slash`, right-aligned, output the same length as the input, `NA` padded. Same functions and arguments as the post (see `rw_functions()` in `bench/rolling-lib.R`), `times` = `r times`, `times` = `r times_c` for the custom function.
-- **Deviation 1, one harness for everyone.** The post used `microbenchmark(times = 20)`, which interleaves expressions and does not force a GC. Here every function (CPU packages and cuplyr) goes through `rw_time()`: untimed warmup calls, then `times` samples; an untimed `gc()` runs before every call with the previous result already dropped; each sample is timed with `microbenchmark::get_nanotime()`. `r gc_lead`: an eager `mutate()` holds its GPU intermediates until R finalizes their pointers (finding F1), and `r gc_need_txt`. Applying the same `gc()` to everyone keeps the comparison symmetric. Consequence: no GC ever lands inside a timed region, which in the post's interleaved harness it sometimes did, and deallocation of each result is untimed for every engine (cuplyr's GPU tables are freed with cudaFree inside that untimed `gc()`; the CPU packages' vectors likewise). A test (`tests/testthat/test-bench-F54-harness-extra.R`) pins that `gc()` runs before every call and outside the timed region.
+- **Deviation 1, one harness for everyone.** The post used `microbenchmark(times = 20)`, which interleaves expressions and does not force a GC. Here every function (CPU packages, polars, DuckDB and cuplyr) goes through `rw_time()`: untimed warmup calls, then `times` samples; an untimed `gc()` runs before every call with the previous result already dropped; each sample is timed with `microbenchmark::get_nanotime()`. `r gc_lead`: `r gc_why_txt` (finding F1), and `r gc_need_txt`. Applying the same `gc()` to everyone keeps the comparison symmetric. Consequence: no GC ever lands inside a timed region, which in the post's interleaved harness it sometimes did, and deallocation of each result is untimed for every engine (`r free_txt`; the CPU packages' vectors and polars' DataFrames likewise; DuckDB's result table is dropped by the untimed `reset`). A test (`tests/testthat/test-bench-F54-harness-extra.R`) pins that `gc()` runs before every call and outside the timed region.
 - **Deviation 2, GPU completion.** cuplyr's API gives no "work finished" guarantee (`r sync_txt`). The timed closure ends with `cuplyr::gpu_sync()`, which waits for all queued GPU work (no copy back to the host). The fence adds `r fence_cost` (chunk `bench-fence` timed `r fence_txt`); the call without the fence returns once the work is queued, so it times the launch only, and the difference is the GPU time the fence waits for.
 - **Deviation 3, slow cells get fewer samples** (`cell_budget` = `r cell_budget` s of timed work per cell). Each cell starts with one cold probe call; its duration sets the sample count through `rw_plan_cell()` (`bench/rolling-lib.R`). A cuplyr cell has one more untimed call before that one, the native probe of the fallback check below, so its "cold" call is its second call and it gets one more warm-up call than the CPU packages. The probe call is *not* a recorded sample (unless it alone exceeds `probe_limit` = `r probe_limit` s, `r probe_txt`); warmup calls (`r warmup_txt`) and then `k` timed calls follow, and the `note` column of `timings.csv` records exactly this per cell. Every cut is listed in the `times` cuts table.
 - **Deviation 4, runstats alignment moved out of timing.** `runstats::RunningMean/RunningSd` return left-aligned windows (the window starts at i; the last `n - 1` values are `NA`). The timed closure returns that raw result and only tags it in place (`attr(out, "rw_align") <- "left"`, plus the window width in `rw_window`, on the local fresh vector: no copy). `rw_normalize()` shifts tagged output to right-aligned, outside timing, before the correctness check. So runstats is timed as the package returns it: mean `r fmt_ms(rs_main[["mean"]])` ms, sd `r fmt_ms(rs_main[["sd"]])` ms at w=`r w_mid` in the results tables. `r rs_txt` `r rs_agree_txt`
 - **Deviation 5, argument choices the brief left open.** `RcppRoll::roll_medianr(fill = NA)` is used (right-aligned; plain `roll_median` is centred). The custom function is `sum_custom <- function(x) sum(x)`, a naive window sum (my reading of "unoptimised"; I did not have the post's exact body). Calls: `data.table::frollapply(x, n, sum_custom)` and `zoo::rollapply(x, n, sum_custom, fill = NA, align = "right")`.
-- **Single-thread controls.** `data.table (1 thread)` is `setDTthreads(1)` for the cell (restored afterwards); `RcppRoll (1 thread)` is `options(RcppRoll.threads = 1)`; `roll (1 thread)` is `RcppParallel::setThreadOptions(numThreads = 1)` (restored to `"auto"`). The one-thread entry is timed right after its default-thread entry on the same data, through the same harness, and is also checked for correctness. Thread settings as found, before any change: `OMP_NUM_THREADS` `r omp_env`, `getDTthreads()` `r n_dt_threads`, `RcppRoll::roll_threads()` `r n_rr_threads`, `RcppParallel::defaultNumThreads()` `r n_roll_threads` (`versions.csv`).
+- **Single-thread controls.** `data.table (1 thread)` is `setDTthreads(1)` for the cell (restored afterwards); `RcppRoll (1 thread)` is `options(RcppRoll.threads = 1)`; `roll (1 thread)` is `RcppParallel::setThreadOptions(numThreads = 1)` (restored to `"auto"`). The one-thread entry of these three is timed right after its default-thread entry on the same data, through the same harness, and is also checked for correctness. The engines are ordered differently: each whole grid runs once per thread setting (all the DuckDB cells at the default threads, then all at one thread; then the polars grid in one fresh process at the default and in another at one thread), so an engine's default and one-thread cells are not neighbours. Thread settings as found, before any change: `OMP_NUM_THREADS` `r omp_env`, `getDTthreads()` `r n_dt_threads`, `RcppRoll::roll_threads()` `r n_rr_threads`, `RcppParallel::defaultNumThreads()` `r n_roll_threads` (`versions.csv`).
 - **Correctness check (not in the post).** Results are computed outside timing, normalized (`as.numeric`, runstats shifted, left-pad with `NA`) and compared with `data.table::froll<stat>` via `all.equal(tolerance = tol)` (tol = `r tol_txt`) plus identical NA positions. cuplyr results are collected for this check only. A cell whose call errors counts as a failure in the table (it does not drop out of the count); `r if (n_err == 0) "there were none" else paste(words(n_err), "cell(s) errored")`.
 - **Fallback check.** Every cuplyr cell is probed before it is timed: one untimed call under `options(cuplyr.fallback = "error")` (`rw_native_probe()` in `bench/rolling-lib.R`). A cell whose probe call falls back to the CPU (cuplyr's "fell back to CPU evaluation" error) is not timed, not checked for correctness and not plotted; it is recorded in the skipped-cells table below and in `skipped.csv`. A probe call that fails for any other reason is not a skip: in the main and extension experiments the cell is recorded as failed (an error row, which counts against the correctness total), and in the overhead, memory and fence chunks it stops the render. `r skip_count_txt` As a second check the timed cells catch `cuplyr_cpu_fallback` conditions: `r caught_txt`.
+- **polars and DuckDB (F73).** Both are checked against data.table like every other entry, and both go through the same `run_cell()` and `rw_time()` as everything else (cold probe call, budgeted samples, gc before every call). DuckDB: an in-memory database (`shared_home = FALSE`, so nothing is written under the home directory) with the data loaded once into a real table by `dbWriteTable()` (not a re-scanned R data frame); one connection per (thread setting, dataset), with the default or `SET threads = 1`, each loading its dataset once outside timing and closed with `shutdown = TRUE` when its cells are done. A raw `ROWS` frame is partial at the start of the table (and of each group): it holds fewer than `n` rows and DuckDB aggregates them, where data.table gives NA, so the timed SQL guards the aggregate (`CASE WHEN i >= n`, with `row_number() OVER w` when grouped) and returns NULL until the window is full. The plain `CREATE TEMP TABLE` (no `OR REPLACE`) leaves the result inside DuckDB, and the `DROP TABLE` of the previous result runs untimed before every call (the `reset` hook of `run_cell()` and `rw_time()`, the probe call included); a drop inside timing would be an error, because the table would still exist. polars: the thread pool is fixed when polars first loads and is read from the environment variable `POLARS_MAX_THREADS`, so each polars configuration runs in its own fresh R process (`callr`, started by `rw_polars_child()`), with `POLARS_MAX_THREADS` set to one or unset before polars loads. That process puts `params$lib` first on its library path, sources the same `rolling-lib.R` this document sourced (by absolute path), never loads cuplyr (so it holds no CUDA context), runs its cells with the same harness, compares them with `rw_reference()` on the same seeded data and returns plain data frames. For both engines the thread count in effect is read back from the engine (`polars_info()$thread_pool_size`, `current_setting('threads')`), not assumed from the setting: `engine-threads.csv` has them (polars `r eng_default_thr[["polars"]]` by default and `r eng_one_thr[["polars"]]` at one thread; DuckDB `r eng_default_thr[["DuckDB"]]` and `r eng_one_thr[["DuckDB"]]`). The `custom` function has no polars or DuckDB entry (neither applies an R function over windows). No cuplyr CPU-fallback cell is timed, as before.
 - cuplyr entries: `cuplyr` is native `roll_<stat>(x, n)` inside `mutate()`; `cuplyr (froll alias)` is `data.table::froll<stat>(x, n)` inside `mutate()` (cuplyr maps it to the same kernel; `r alias_txt`). `r median_entry_txt` Custom: n/a (cuplyr cannot apply an arbitrary R function over windows).
-- **Comparison words.** Two medians are "level" when they are within `r fmt_pct(th_level, 0)` of each other, unless their interquartile ranges do not overlap, in which case one is "slightly faster" than the other; outside that band they are "faster" and "slower". A cost "grows" with the window width when the median at w=`r w_hi` is at least `r th_trend` times the median at w=`r w_lo` (it "shrinks" at the inverse ratio and is "flat" in between); slider is "growing" above `r th_grow` times. An entry "scales" with threads at a one-thread over default ratio of at least `r thr_yes`, and does not at `r thr_no` or less. Two figures "agree" within a factor of `r th_x`; a slow core is measurably slower above `r th_core` times; two calls "cost the same" within `r fmt_pct(th_same, 0)`; a custom function is clearly slower above `r th_avoid` times its optimized equivalent; the narrow-window call is "mostly call chain" when it is within `r fmt_pct(th_chain, 0)` of the `cumsum` mutate; a peak is "well inside" the card below `r fmt_pct(th_mem, 0)` of its memory. cuplyr's rank among the entries is "near the front" when its rank divided by the number of entries is at most `r th_front`, "near the back" at `r 1 - th_front` or more and "mid-pack" in between; the runstats alignment shift is "a sizeable part" of the mean figure when it adds more than `r fmt_pct(th_part, 0)` to it.
+- **Comparison words.** Two medians are "level" when they are within `r fmt_pct(th_level, 0)` of each other, unless their interquartile ranges do not overlap, in which case one is "slightly faster" than the other; outside that band they are "faster" and "slower". A cost "grows" with the window width when the median at w=`r w_hi` is at least `r th_trend` times the median at w=`r w_lo` (it "shrinks" at the inverse ratio and is "flat" in between); slider is "growing" above `r th_grow` times. An entry "scales" with threads at a one-thread over default ratio of at least `r thr_yes`, and does not at `r thr_no` or less. Two figures "agree" within a factor of `r th_x` (so do the two pinned CPUs of one kind in chunk `bench-cores`, or that measurement counts as disturbed and none of its figures is quoted); a slow core is measurably slower above `r th_core` times; two calls "cost the same" within `r fmt_pct(th_same, 0)`; a custom function is clearly slower above `r th_avoid` times its optimized equivalent; the narrow-window call is "mostly call chain" when it is within `r fmt_pct(th_chain, 0)` of the `cumsum` mutate; a peak is "well inside" the card below `r fmt_pct(th_mem, 0)` of its memory. cuplyr's rank among the entries at their default settings (the one-thread controls are not ranked) is "near the front" when its rank divided by the number of those entries is at most `r th_front`, "near the back" at `r 1 - th_front` or more and "mid-pack" in between; the runstats alignment shift is "a sizeable part" of the mean figure when it adds more than `r fmt_pct(th_part, 0)` to it.
 
 ### Skipped cells (cuplyr cells that run on the CPU fallback)
 
@@ -1705,7 +2524,7 @@ if (nrow(sk_show)) knitr::kable(sk_show, row.names = FALSE)
 
 ## Threads actually used
 
-Default vs one thread, median ms (IQR) over the samples of each entry (`r n_thr_std` per cell for the `r rows_txt`-row rows, `r n_thr_cus` for `frollapply`; `r n_thr_ext` for the extension rows), width `r w_mid`. `ratio` = one-thread median / default median; "scales" says whether the entry used the extra threads (ratio >= `r thr_yes`: yes; <= `r thr_no`: no). The `default_threads` column is what the package reports, not what the call used.
+Default vs one thread, median ms (IQR) over the samples of each entry (`r n_thr_std` per cell for the `r rows_txt`-row rows, `r n_thr_cus` for `frollapply`; `r n_thr_ext` for the extension rows), width `r w_mid`. `ratio` = one-thread median / default median; "scales" says whether the entry used the extra threads (ratio >= `r thr_yes`: yes; <= `r thr_no`: no). The `default_threads` column is what the package reports, not what the call used; for polars and DuckDB it is the count read back from the engine in the process that ran the cells.
 
 ```{r}
 #| label: threads-table
@@ -1717,6 +2536,8 @@ Reading it:
 - RcppRoll `r rr_reading`. Its `r n_rr_threads`-thread numbers are what the "RcppRoll" rows in the tables show.
 - data.table `r dt_reading` `r dt_flat_reading`
 - roll `r roll_reading`
+- `r eng_reading("polars")`
+- `r eng_reading("DuckDB")`
 
 ## Hardware and versions
 
@@ -1727,10 +2548,12 @@ GPU: `r gpu_name`, `r gpu_gb` GB, compute capability `r gpu_cc`. CPU: `r cpu_nam
 knitr::kable(ver_table, row.names = FALSE)
 ```
 
+Engines: polars `r ver[["polars"]]` (Rust crate `r polars_crate`, thread pool `r eng_default_thr[["polars"]]` by default), DuckDB `r ver[["duckdb"]]` (DuckDB library `r duckdb_lib`, `r eng_default_thr[["DuckDB"]]` threads by default), both read back from the engines (`engine-threads.csv`).
+
 Thread settings as found: `OMP_NUM_THREADS` `r omp_env`; `data.table::getDTthreads()` `r n_dt_threads`; `RcppRoll::roll_threads()` `r n_rr_threads`; `RcppParallel::defaultNumThreads()` `r n_roll_threads`.
 
 ::: {`r if (core_ok) ".content-visible" else ".content-hidden"`}
-**Core placement.** This CPU mixes core types (`r core_fast$n_cpus` logical CPUs at up to `r core_fast$mhz` MHz, `r core_slow$n_cpus` at up to `r core_slow$mhz` MHz), and the benchmark does not pin threads, so a single-threaded call can land on either kind. Chunk `bench-cores` pinned RcppRoll's one-thread rolling mean (w=`r w_mid`) to each kind in turn: `r fmt_ms(core_med("fast"))` ms on a fast core and `r fmt_ms(core_med("slow"))` ms on a slow one, so `r core_effect_txt`. Which kind of core each benchmark timing ran on is not recorded. The calls that run on one thread, default-thread rows included, are exposed to this: `r single_calls_txt`; the `(1 thread)` controls; and cuplyr's host-side R work. `r multi_txt`
+**Core placement.** This CPU mixes core types (`r core_fast$n_cpus` logical CPUs at up to `r core_fast$kind_mhz` MHz, `r core_slow$n_cpus` at up to `r core_slow$kind_mhz` MHz), and the benchmark does not pin threads, so a single-threaded call can land on either kind. Chunk `bench-cores` pinned RcppRoll's one-thread rolling mean (w=`r w_mid`) to `r core_pins_txt`, one sample on each CPU in turn for `r core_n_samples` rounds (the order reversed every round; before every sample the process was pinned and the call ran once untimed on that CPU; every sample is in `cores.csv`)`r core_figs_txt`. `r core_effect_txt` `r core_obs_txt` Which kind of core each benchmark timing ran on is not recorded. The calls that run on one thread, default-thread rows included, are exposed to this: `r single_calls_txt`; the `(1 thread)` controls; and cuplyr's host-side R work. `r multi_txt`
 :::
 
 ::: {`r if (core_ok) ".content-hidden" else ".content-visible"`}
@@ -1755,11 +2578,20 @@ Logs, in order, with the packages whose install failed in each (read from the su
 if (nrow(log_table)) knitr::kable(log_table, row.names = FALSE)
 ```
 
+**polars and DuckDB (F73).** `r inst_txt``r inst_note_txt` The F73 additions to `bench/install-deps.R` (duckdb, DBI, callr and polars from R-multiverse with `NOT_CRAN=true`, and the `secs` column of its summary) were not run through that script: the engines were installed with the same base `install.packages()` calls in a separate run (`install-engines.log` next to the output), so that branch of the script is untested.
+
+```{r}
+#| label: install-engines-table
+if (!is.null(inst_table)) knitr::kable(inst_table, row.names = FALSE)
+```
+
 `r if (!length(logs)) "No install logs were found next to the output, so the install history cannot be summarized here. " else ""`A single clean run from an empty library was not repeated, so reproducibility from scratch rests on those incremental runs. The installer script's last edits (the `finally =` that unsets the temporary Makevars variable, and knitr and rmarkdown added to `cran_pkgs`) have not been exercised by an install run: nothing was reinstalled. Base `install.packages()` only; nothing went into the pixi library and cuplyr was not installed. knitr `r ver[["knitr"]]` and rmarkdown `r ver[["rmarkdown"]]`, which this document needs, are listed in `bench/install-deps.R`; `r deps_txt`.
 
 ## Results: median ms per call at `r rows_txt` rows
 
 Cell format: median (IQR) n=samples. Rows sorted by the width-`r w_mid` median. `(1 thread)` rows are the single-thread controls. Each statistic's table is followed by its plot (log10 ms axis, point = median, bars = `r plot_levels` of samples, colour = width, width-`r w_mid` median labelled). `r median_panel_txt`
+
+`r tg_txt`
 
 ### mean (median ms (IQR) n=samples)
 
@@ -1840,11 +2672,19 @@ n_cut <- nrow(cuts)
 
 ## Correctness
 
-Every timed (statistic x function x width) cell, including every timed cuplyr entry and every one-thread control, was compared with data.table's result. Reference: `frollmean/frollmedian/frollmin/frollmax/frollsum/frollsd`, and `frollsum` for the custom sum.
+Every timed (statistic x function x width) cell, including every timed cuplyr entry, every one-thread control and every polars and DuckDB cell (`r n_eng_cells` of them, `r if (eng_cells_ok) "all" else "not all"` matching), was compared with data.table's result. Reference: `frollmean/frollmedian/frollmin/frollmax/frollsum/frollsd`, and `frollsum` for the custom sum.
 
 `r n_ok` of `r n_cells` (function x width) cells match data.table (all.equal tol `r tol_txt`, same NA positions). The denominator counts the cells that were timed. `r denom_txt`
 
 `r if (nrow(bad) == 0) "No cuplyr mismatch, and none for any other package." else sprintf("%s %s did not match; %s listed below.", cap1(words(nrow(bad))), plural(nrow(bad), "cell"), plural(nrow(bad), "it is", "they are"))` "Match" includes the leading `NA` padding after normalization (runstats after the right-alignment shift in `rw_normalize()`); a padding or sd-convention difference would have shown up as a mismatch. Not covered: data with `NA`s, `na.rm = TRUE`, non-default alignment.
+
+**Edge semantics of polars and DuckDB.** Where an engine differs from data.table by definition, the benchmark either makes the result equal or keeps the difference out of what is compared:
+
+- DuckDB's `ROWS BETWEEN n - 1 PRECEDING AND CURRENT ROW` frame is partial at the start of the table (and of each group): it holds fewer than `n` rows, and DuckDB aggregates them where data.table has `NA`. The timed SQL guards the aggregate and returns NULL until the window is full, so the padding is the same as data.table's, and the check above compares it.
+- polars returns null for an incomplete window, because `min_samples` defaults to the window size; the null positions are data.table's `NA` positions.
+- The standard deviation is the sample standard deviation (`ddof = 1`) in all three: `STDDEV_SAMP`, `rolling_std` and `frollsd`.
+- For an even window the median is the average of the two middle values in all three. Only odd widths are timed here (`r widths_slash`); the tests of the helpers in `bench/rolling-lib.R` check an even width as well.
+- With `NA` in the input the engines differ: DuckDB's aggregates skip NULLs, so a window holding `NA`s still has a value once it holds enough non-null values (at least one for the mean, sum, min, max and median, at least two for the standard deviation), where polars and data.table give `NA` for any window that holds one. This data has no `NA`, so that difference is not exercised, and it would have to be handled before any comparison on data with missing values.
 
 ```{r}
 #| label: correctness-bad
@@ -1876,6 +2716,37 @@ ext_plot()
 
 cuplyr grouped is `group_by(tbl_gpu(df), g)` built outside timing, then `compute(mutate(gtg, r = roll_mean(x, n)))` plus the fence, with n the grouped width (`r group_width`). data.table is `dt[, r := frollmean(x, n), by = g]`, timed at the default thread setting and with `setDTthreads(1)`: **`r fmt_ms(g_dt1)` ms at one thread vs `r fmt_ms(g_dt)` ms by default, so its `by=` evaluation `r if (by_flat) "ran effectively single-threaded (it did not use the extra threads)" else "used threads"`**. slider is a grouped_df `mutate(r = slider::slide_mean(x, before = n - 1, complete = TRUE))`.
 
+## polars and DuckDB
+
+polars `r ver[["polars"]]` and DuckDB `r ver[["duckdb"]]` (DuckDB library `r duckdb_lib`) were added at Theo's request (2026-10-25): the same statistics, widths and sizes as above (the `r rows_txt`-row grid, the `r grp_rows_txt`-row grouped mean with `r groups_txt` groups, the `r ext_txt`-row ungrouped mean), each at the engine's default threads and at one thread. How they are timed is in "Read this first" and "Method"; they sit in the tables and plots above and in `timings.csv`, `correctness.csv` and `extension.csv` like every other entry. The thread counts in effect, read back from each engine and written to `engine-threads.csv`:
+
+```{r}
+#| label: engine-threads-table
+knitr::kable(eng_thr_tab, row.names = FALSE)
+```
+
+### Where cuplyr wins and loses against every engine
+
+One row per cell: the main grid (statistic x width), the grouped mean and the `r ext_txt`-row ungrouped mean. "Other entries" are every non-cuplyr entry at its default setting, the post's packages and polars and DuckDB alike; the one-thread controls are not in this table (they are in the one below and in the threads table). The columns: `cuplyr_ms` is cuplyr's median; `fastest_other` is the fastest other entry; `cuplyr_loses_to` lists the other entries that are faster than cuplyr by the document's comparison words (see "Comparison words"; "slightly" is marked); `cuplyr_level_with` lists the ones level with it (within `r fmt_pct(th_level, 0)`, unless the interquartile ranges are disjoint); `cuplyr_beats` counts the other entries cuplyr is faster than (slightly faster included), out of all the other entries in the cell. `r if (median_skipped) "The median rows have no cuplyr number (not timed: no GPU path), so only the fastest other entry is shown." else ""` Medians in ms.
+
+```{r}
+#| label: win-table
+knitr::kable(win_tab, row.names = FALSE)
+```
+
+polars and DuckDB against cuplyr, as the ratio engine median / cuplyr median (above one: the engine is slower than cuplyr; below one: faster), at default threads and at one thread, per statistic at w=`r w_mid`, plus the grouped mean and the `r ext_txt`-row ungrouped mean:
+
+```{r}
+#| label: engine-ratio-table
+knitr::kable(ratio_tab, row.names = FALSE)
+```
+
+`r eng_summary_both`
+
+`r eng_1t_txt`. At w=`r w_mid` the ratio of engine to cuplyr over the statistics is `r eng_rng("polars")` for polars and `r eng_rng("DuckDB")` for DuckDB at default threads, and `r eng_rng("polars (1 thread)")` and `r eng_rng("DuckDB (1 thread)")` at one thread (below one the engine is faster than cuplyr).
+
+At w=`r w_mid` the fastest entry per statistic at default settings, all entries counted and cuplyr where it was timed, is: `r fast_all_txt`. Between the two engines at default threads: `r eng_pair_txt``r eng_pair_ratio_txt`.`r eng_pair_hedge`
+
 ## Per-call cost breakdown (overhead)
 
 Measured on the same harness as everything else (gc-separated, fenced, `compute()` of an eager `mutate()`), on a `r small_txt`-row table (kernel negligible; `r unique(oh$times[oh$n_rows == small_rows])[1]` samples) and, for contrast, on the `r rows_txt`-row table (`r unique(oh$times[oh$n_rows == n_rows & oh$stat == "overhead"])[1]` samples). The per-statistic `r small_txt`-row rolling floors are listed too.
@@ -1894,7 +2765,7 @@ knitr::kable(oh_tab, row.names = FALSE)
 
 - **The about-`r fmt_1(floor_ms)` ms floor is for window-function mutates; a plain mutate is about `r fmt_1(plain_small)` ms.** At `r small_txt` rows: plain `mutate(y = x + 1)` `r fmt_ms(plain_small)` ms, `mutate(r = cumsum(x))` `r ms_nt(cum_small)`, `mutate(r = roll_mean(x, n))` `r fmt_ms(roll_small)` ms (the `r words(length(floor_by_stat))` rolling statistics: `r range_num(floor_by_stat)` ms medians; all `r n_floor_samples` samples between `r fmt_ms(min(floor_df$ms))` and `r fmt_ms(max(floor_df$ms))` ms). `r cum_vs_roll_txt`
 - **What the path does (read from the code, confirmed with `show_query()`).** A plain mutate is `r words(n_mat_plain)` `r plural(n_mat_plain, "node")` (`r code(chain_plain)`). An eager window mutate is `r code(chain_win)` (`R/mutate.R` lines `r ln_window`, `r ln_mutate` and `r ln_select` push the window, mutate and select nodes), and an eager call runs that chain as one execution (`push_chain()` in `R/execute.R`, F57): the nodes' outputs share the input table's columns instead of deep-copying them (`src/ops_window.cpp` about line `r ln_copy` passes the input columns through as shared pointers), so only the computed columns are allocated. Before F57 each node built a full table and `x` was copied `r times_word(n_mat_win)` per call. The per-node R work (node build, schema inference) is still done `r words(n_mat_win)` times; I did not profile where the `r fmt_1(win_extra)` ms goes at `r small_txt` rows.
-**`r mem_lead`** (`r ext_txt` rows, `memory-breakdown.csv`; the decomposition below `r decomp_txt`):
+**`r mem_lead`** (`r ext_txt` rows, `memory-breakdown.csv`):
 
 ```{r}
 #| label: memory-table
@@ -1903,30 +2774,82 @@ for (cn in setdiff(names(mb_tab), "call")) mb_tab[[cn]] <- fmt_int(mb_tab[[cn]])
 if (nrow(mb_tab)) knitr::kable(mb_tab, row.names = FALSE)
 ```
 
-The `r fmt_int(held_roll)` B held right after a `roll_mean` mutate are compared here with the three tables the node chain built before F57 (one per node, `r fmt_int(win_out)` (window output: x + `..win1..` + validity mask) + `r fmt_int(mut_out)` (mutate output: x + `..win1..` + `r` + two masks) + `r fmt_int(sel_out)` (select output, the result) = `r fmt_int(pred_held)`); F57 executes the chain once and shares the input columns, so the measured figure is expected to be far below that sum. The decomposition is reasoned from the node chain and sized from the column bytes (`r bytes_per_row` bytes per row per column) and the padded validity mask; it `r decomp_txt`. I did not measure the three tables separately. A plain mutate holds `r fmt_int(mb_plain$held_after_call_bytes)` B (x copy + `y`, `r words(n_mat_plain)` `r plural(n_mat_plain, "materialization")`; the node chain predicts `r fmt_int(plain_pred)`) and allocates `r fmt_int(mb_plain$allocated_bytes)` B in total, against `r fmt_int(mb_roll$allocated_bytes)` B allocated by one `roll_mean` mutate. After a `gc()` the `roll_mean` result alone is `r fmt_int(result_roll)` B, so about `r fmt_x(held_ratio)` the result is held while the intermediates await finalization.
-**The copy and allocation cost scales with rows and is inside every `r rows_txt` and `r ext_txt` cuplyr timing.** At `r rows_txt` rows the plain mutate takes `r ms_nt(plain_big)``r ms_delta(plain_big, plain_small, paste(" vs", small_txt, "rows"))`, the `cumsum` window mutate `r ms_nt(cum_big)``r ms_delta(cum_big, cum_small)` and `roll_mean(x, n)` `r ms_nt(roll_big)``r ms_delta(roll_big, roll_small)`. The narrow-window rolling mean (w=`r w_lo`, `r ms_nt(med("mean", "cuplyr", w_lo))` in the tables above) is `r narrow_txt`.`r if (!is.na(narrow_chain)) " (This is an inference from comparing two different kernels, not a profile.)" else ""`
+`r mem_txt`
+**The `r alloc_part` cost scales with rows and is inside every `r rows_txt` and `r ext_txt` cuplyr timing.** At `r rows_txt` rows the plain mutate takes `r ms_nt(plain_big)``r ms_delta(plain_big, plain_small, paste(" vs", small_txt, "rows"))`, the `cumsum` window mutate `r ms_nt(cum_big)``r ms_delta(cum_big, cum_small)` and `roll_mean(x, n)` `r ms_nt(roll_big)``r ms_delta(roll_big, roll_small)`. The narrow-window rolling mean (w=`r w_lo`, `r ms_nt(med("mean", "cuplyr", w_lo))` in the tables above) is `r narrow_txt`.`r if (!is.na(narrow_chain)) " (This is an inference from comparing two different kernels, not a profile.)" else ""`
 
 ## Conclusions (in the post's style, updated)
 
-All figures: `r rows_txt` rows, width `r w_mid`, median ms, computation only. cuplyr excludes transfers. Thread behaviour of the CPU entries is the measured one in "Threads actually used": RcppRoll `r if (rr_scales) paste("ran on", n_rr_threads, "OpenMP threads") else "did not scale cleanly"`; `r dt_lead`; `r roll_lead`; `r dt_scale_sentence`.
+All figures: `r rows_txt` rows, width `r w_mid`, median ms, computation only. cuplyr excludes transfers. Thread behaviour of the entries is the measured one in "Threads actually used": RcppRoll `r if (rr_scales) paste("ran on", n_rr_threads, "OpenMP threads") else "did not scale cleanly"`; `r dt_lead`; `r roll_lead`; `r dt_scale_sentence`; `r eng_lead_txt`.
 
 - **The post's headline ("data.table wins") `r headline_verdict` at equal, one-thread conditions; RcppRoll's lead at default settings `r lead_clause`.** At default settings `r rr_leader`: `r rr_default_list`. With `RcppRoll.threads = 1` it takes `r rr1_list` ms `r rr1_ratio`. Against that one-thread RcppRoll, data.table`r dt_single_txt` compares as follows, with both at one thread: `r dt1_rr1_txt`. For the median, data.table at one thread takes `r dt1_med` ms (RcppRoll at one thread: `r rr1_med`); RollingWindow's median (`r rw_med` ms) compared with data.table at one thread is `r rw_med_txt`. `r dt_med_txt` `r exc_txt`
 - **roll** (`r roll_ms`) is a reasonable choice for the statistics it covers, but `r roll_vs_dt_txt`. `r roll_ran_txt`
 - **`r slider_txt`.** `r zoo_runner_txt`. Custom functions cost `r ms_s(cus_fa)` (`frollapply`; `r ms_s(cus_fa1)` at one thread) and `r range_ms(cus_zoo)` (`zoo::rollapply`, `r cus_grow_txt`) against `r range_ms(opt_equiv)` for the optimized equivalent (data.table's `frollsum`). `r cus_verdict`
-- **Where cuplyr lands (ungrouped, `r rows_txt` rows).** Native mean/sum/min/max take `r nat_txt` ms at widths `r widths_slash`, of which about `r fmt_1(floor_ms)` ms is the per-call floor for window mutates. For mean, per competitor (median at w=`r w_mid` in parentheses): `r mean_vs`. `r sum_roll_txt` `r mm_txt`. `r sd_sent` `r fb_txt` Custom functions: not supported.
+- **Where cuplyr lands (ungrouped, `r rows_txt` rows).** Native mean/sum/min/max take `r nat_txt` ms at widths `r widths_slash`, `r nat_floor_txt`. For mean, per competitor (median at w=`r w_mid` in parentheses): `r mean_vs`. `r sum_roll_txt` `r mm_txt`. `r sd_sent` `r fb_txt` Custom functions: not supported.
 - **`r grow_txt`** while `r trend_txt`. `r rescan_txt` `r incr_txt`
-- **Grouped data and large data, in the configurations measured here.** Grouped mean (one configuration: `r grp_rows_txt` rows, **`r groups_txt` groups**, w=`r group_width`): `r g_txt`. data.table's `by=` evaluation `r by_verb` (`r fmt_ms(g_dt)` ms by default, `r fmt_ms(g_dt1)` ms at `setDTthreads(1)`)`r by_tail`. I did not vary the group count; data.table's cost is expected to grow with the number of groups, so the ratio is specific to `r groups_txt` groups. `r ung_sent` `r peak_txt`, but see F1.
-- Net: at the post's size cuplyr is `r rank_pos``r rank_detail` and bounded below by about `r fmt_1(floor_ms)` ms of per-call cost. `r net_txt`
+- **polars and DuckDB (added 2026-10-25), computation only, both on in-engine data.** `r eng_summary_both` At w=`r w_mid` the fastest entry per statistic is `r fast_all_txt`. Their one-thread controls are in the section "polars and DuckDB".
+- **Grouped data and large data, in the configurations measured here.** Grouped mean (one configuration: `r grp_rows_txt` rows, **`r groups_txt` groups**, w=`r group_width`): `r g_txt`. data.table's `by=` evaluation `r by_verb` (`r fmt_ms(g_dt)` ms by default, `r fmt_ms(g_dt1)` ms at `setDTthreads(1)`)`r by_tail`. I did not vary the group count; data.table's cost is expected to grow with the number of groups, so the ratio is specific to `r groups_txt` groups. `r ung_sent` `r peak_txt``r peak_f1_txt`.
+- Net: at the post's size cuplyr is `r rank_pos``r rank_detail`, and `r net_floor_txt`. `r net_txt` On the main grid, `r eng_net_txt`.
 
 ## Findings (candidate backlog rows; nothing was fixed in this feature)
 
-- **F1 (addressed by F57). An eager window mutate materialized `r words(n_mat_win)` full tables and held them until R's GC.** One eager `mutate(r = roll_mean(x, n))` on `r ext_txt` rows runs `r code(paste(rev(plan_win[plan_win != "ast_source"]), collapse = " -> "))` (`R/mutate.R` `r ln_window`, `r ln_mutate`, `r ln_select`); in F54 each node built a new table and `src/ops_window.cpp` deep-copied every input column, so `x` was copied `r times_word(n_mat_win)`; F57 runs the chain once and shares the columns (`src/ops_window.cpp` about line `r ln_copy`). Right after the call `r fmt_int(held_roll)` bytes are held (`gpu_alloc_tracking()`: `r held_peak_txt`) = `r fmt_int(win_out)` + `r fmt_int(mut_out)` + `r fmt_int(sel_out)`, against `r fmt_int(result_roll)` for the result alone, and `r fmt_int(mb_roll$allocated_bytes)` bytes are allocated in total (`memory-breakdown.csv`, `memory-finding.csv`). A plain mutate holds `r fmt_int(mb_plain$held_after_call_bytes)` bytes (`r words(n_mat_plain)` `r plural(n_mat_plain, "materialization")`). The intermediates are freed only when R finalizes their pointers: `r f1_oom_txt`. The fix (F57) appends the window results to the input table's shared columns instead of copying every input column, with no full-table copies in the mutate and select steps. The expected effect is to take the `r ext_txt`-row call from `r fmt_mb(held_roll)` to about `r fmt_mb(result_roll)` (`r fmt_x(held_ratio)`). Freeing per-call intermediates deterministically (or an automatic `gpu_gc()` and retry on `bad_alloc`) would remain a separate hardening.
+- **F1 (`r f1_head`). Before F57 an eager window mutate materialized `r words(n_mat_win)` full tables and held them until R's GC.** One eager `mutate(r = roll_mean(x, n))` on `r ext_txt` rows runs `r code(paste(rev(plan_win[plan_win != "ast_source"]), collapse = " -> "))` (`R/mutate.R` `r ln_window`, `r ln_mutate`, `r ln_select`); in F54 each node built a new table and `src/ops_window.cpp` deep-copied every input column, so `x` was copied `r times_word(n_mat_win)`; F57 runs the chain once and shares the columns (`src/ops_window.cpp` about line `r ln_copy`). `r f1_meas_txt` `r f1_oom_lead`: `r f1_oom_txt`.`r f1_tail`
 - **F2. `r f2_lead`** At `r rows_txt` rows, from w=`r w_mid` to w=`r w_hi`, mean goes from `r ms_nt(med("mean", "cuplyr", w_mid))` to `r ms_nt(med("mean", "cuplyr", w_hi))` and sd from `r ms_nt(med("sd", "cuplyr", w_mid))` to `r ms_nt(med("sd", "cuplyr", w_hi))` (data.table is `r trend("sd", "data.table")` in the width: `r fmt_ms(med("sd", "data.table", w_hi))` ms for sd at w=`r w_hi`). At `r ext_txt` rows mean at w=`r w_hi` takes `r ms_nt(u_hi("cuplyr"))` for cuplyr vs data.table `r fmt_ms(u_hi("data.table"))` and `r lab_cpu("RcppRoll")` `r fmt_ms(u_hi("RcppRoll"))`. `r f2_infer` `r f2_row_if`: an incremental mean/sum (prefix sums) and a Welford or sum-of-squares sd, checked against `all.equal()` at the correctness tolerance (`r tol_txt`), or find a cudf aggregation that does not rescan each window (needs a probe).
 - **F3. `r f3_lead`** `r f3_body`
-- **F4. A fixed overhead of about `r fmt_1(floor_ms)` ms per eager window-function `mutate()` on a `r small_txt`-row table (`r fmt_1(plain_small)` ms for a plain mutate).** About `r fmt_1(win_extra)` ms of the `r fmt_1(floor_ms)` is specific to the window path, i.e. the `r chain_win` chain (`r words(n_mat_win)` nodes, `r words(n_mat_win)` materializations; `cumsum` costs `r ms_nt(cum_small)` against `r ms_nt(roll_small)` for `roll_mean`), `r kernel_txt`; the rest is the `r fmt_1(plain_small)` ms every eager mutate pays. At `r rows_txt` rows the same chain costs `r ms_nt(cum_big)` for `cumsum` against `r ms_nt(plain_big)` for a plain mutate`r f4_share_txt`. Candidate row (same fix as F1): remove the extra materializations, then re-measure the `r small_txt`-row floor; profile the remaining `r fmt_1(plain_small)` ms plain-mutate cost (R dispatch, AST build, schema inference) separately, since I did not.
+- **F4. A fixed overhead of about `r fmt_1(floor_ms)` ms per eager window-function `mutate()` on a `r small_txt`-row table (`r fmt_1(plain_small)` ms for a plain mutate).** About `r fmt_1(win_extra)` ms of the `r fmt_1(floor_ms)` is specific to the window path, i.e. the `r chain_win` chain (`r f4_chain_txt`; `cumsum` costs `r ms_nt(cum_small)` against `r ms_nt(roll_small)` for `roll_mean`), `r kernel_txt`; the rest is the `r fmt_1(plain_small)` ms every eager mutate pays. At `r rows_txt` rows the same chain costs `r ms_nt(cum_big)` for `cumsum` against `r ms_nt(plain_big)` for a plain mutate`r f4_share_txt`. `r f4_row_txt`
 - **F5 (minor). No documented completion semantics.** `r f5_sync`, so wall-clock timing of cuplyr from R is only meaningful after a wait; the benchmark uses `gpu_sync()` as its fence (F57 added it; before, a one-row `gpu_head()` read did the job). Related: `x$ptr` on a `tbl_gpu` from outside the namespace `r ptr_txt`.
 
 ## How to render
+
+```{r}
+#| label: render-time
+# How long this render took, and which timing chunks ran in it. A cached timing
+# chunk comes back with the start time of the render that ran it, so a chunk ran
+# in this render when it started at or after this render's start (chunk_ran, in
+# the data chunk). Only a render in which every timing chunk ran is a complete
+# cold render. It writes render-time.csv (the cache key, the md5 of the timing
+# chunks' code and each chunk's start time), so a later warm render whose cached
+# results all come from that render can still say what a cold render took (and
+# bench/rolling-window.R adds the Quarto and pandoc total to that record).
+render_end <- Sys.time()
+render_secs <- as.numeric(difftime(render_end, render_t0, units = "secs"))
+# rt_path, rt and rt_ok come from the data chunk: the record is this code's only
+# when its cache key, its code key and the start times of the cached chunks match
+if (all(chunk_ran)) {
+  utils::write.csv(data.frame(key = cache_key, code_key = bench_code_key,
+                              render_start = format(render_t0, "%Y-%m-%d %H:%M:%S"),
+                              render_end = format(render_end, "%Y-%m-%d %H:%M:%S"),
+                              start_epoch = sprintf("%.3f", as.numeric(render_t0)), end_epoch = sprintf("%.3f", as.numeric(render_end)),
+                              chunk_starts = chunk_starts_txt, knit_secs = render_secs,
+                              timing_secs = wall_secs, total_secs = NA_real_, stringsAsFactors = FALSE),
+                   rt_path, row.names = FALSE)
+}
+n_chunks <- length(chunk_ran)
+render_rest_txt <- if (all(chunk_ran)) {
+  sprintf(", of which the timing chunks took %s. Every timing chunk ran in this render, so it is a complete cold render of this code, from %s",
+          fmt_dur(wall_secs), rt_span(format(render_t0, "%Y-%m-%d %H:%M:%S"), format(render_end, "%Y-%m-%d %H:%M:%S")))
+} else {
+  last_cold <- if (rt_ok) sprintf("The last complete cold render of this code took %s (knitting, from %s%s), of which the timing chunks took %s.",
+                                  fmt_dur(rt$knit_secs), rt_span(rt$render_start, rt$render_end),
+                                  if (is.na(rt$total_secs)) "" else sprintf("; %s with Quarto and pandoc included", fmt_dur(rt$total_secs)),
+                                  fmt_dur(rt$timing_secs)) else
+    sprintf("The time of a complete cold render of this code is not known: %s.",
+            if (!rt_have) "there is no `render-time.csv` next to the output (a render in which every timing chunk ran writes it)" else
+              if (!rt_key_ok) "the `render-time.csv` next to the output records a render with another cache key (other helper or cuplyr code, versions or parameters)" else
+                if (!rt_code_ok) sprintf("the `render-time.csv` next to the output records the cold render from %s, but the code of a timing chunk has changed since", rt_span(rt$render_start, rt$render_end)) else
+                  sprintf("the `render-time.csv` next to the output records the cold render from %s, but not every cached timing result comes from that render", rt_span(rt$render_start, rt$render_end)))
+  if (!any(chunk_ran)) {
+    paste0(sprintf(" and ran none of the timing chunks: all %s were cache hits, so none of their time is part of this render. ", words(n_chunks)), last_cold)
+  } else {
+    sprintf(", of which the timing chunks that ran in it (%s) took %s; the other %s (%s) were cache hits, so this is not a complete cold render and its time is not the time of one. %s",
+            join_and(names(chunk_ran)[chunk_ran]), fmt_dur(sum(secs_by_chunk[chunk_ran])), words(sum(!chunk_ran)),
+            join_and(names(chunk_ran)[!chunk_ran]), last_cold)
+  }
+}
+# the sentence in the text closes with its own full stop
+render_rest_txt <- sub("\\.$", "", render_rest_txt)
+```
+
+This render took `r fmt_dur(render_secs)` (knitting, from the setup chunk to the last chunk)`r render_rest_txt`. The report is published at `r file.path(params$out_dir, "rolling-window.html")`.
 
 Render only through `tools/r`, because the benchmark holds the GPU and the project has one GPU lock for every R process. From the checkout:
 
@@ -1934,7 +2857,7 @@ Render only through `tools/r`, because the benchmark holds the GPU and the proje
 tools/r 'source("bench/rolling-window.R")'
 ```
 
-That runs `quarto render` on this file with `params$root` set to the checkout, writes `rolling-window.html` and the CSVs to `params$out_dir` and keeps the knitr cache of the `bench-*` chunks in `params$cache_dir`. Quarto empties the directory given to `--output-dir` before it renders, and `params$out_dir` holds the install logs this document reads (and, by default, the cache), so the wrapper renders into a temporary directory and copies the HTML over. Do the same by hand: never pass `params$out_dir` as `--output-dir`. A cold run (empty cache) took `r fmt_dur(wall_secs)` of timed work on this machine; a render with a warm cache re-renders only the prose, tables and figures and takes seconds. Quarto `r quarto_ver` is used; it is a user install and is not installed or upgraded by anything here.
+That runs `quarto render` on this file with `params$root` set to the checkout, writes `rolling-window.html` and the CSVs to `params$out_dir` and keeps the knitr cache of the `bench-*` chunks in `params$cache_dir`. Quarto empties the directory given to `--output-dir` before it renders, and `params$out_dir` holds the install logs this document reads (and, by default, the cache), so the wrapper renders into a temporary directory and copies the HTML over. Do the same by hand: never pass `params$out_dir` as `--output-dir`. `r cold_work_txt`; a render with a warm cache re-renders only the prose, tables and figures and takes seconds. A render in which every timing chunk ran also writes `render-time.csv` to `params$out_dir` (the cache key, a hash of the timing chunks' code, the start and end of the render, the start time of each timing chunk, its knitting time and the time of the timing chunks; `bench/rolling-window.R` adds the total with Quarto and pandoc), so that a later warm render can still say what a cold render took. A warm render quotes that record only when the cache key and the code of the timing chunks are unchanged and every cached result started inside that render at the time the record gives for it; after a timing chunk is edited and rerun, the record is not quoted. Quarto `r quarto_ver` is used; it is a user install and is not installed or upgraded by anything here.
 
 To try it at smoke size (a few seconds), put the overrides in a YAML file and render this file in place with `--execute-params`; the keys are the front matter's `params`, and with the output and cache directories under `/tmp` the default cache is left alone:
 
@@ -1961,4 +2884,4 @@ The test `tests/testthat/test-parity-F63-qmd-render.R` does the same on a copy o
 
 **Forcing a full rerun.** Set `FULL_RERUN <- TRUE` before `source("bench/rolling-window.R")`; it passes `-P rebuild:true`, which makes the setup chunk set `cache.rebuild` for the `bench-*` chunks, so every timing chunk runs again and saves its cache anew (`rebuild` is not part of the cache key). Do the same by hand with `-P rebuild:true` (or `rebuild: true` in the parameters file), or delete the cache directory (`r params$cache_dir`). Do not use `quarto render --cache-refresh`. In a review probe it re-ran none of the timing chunks, switched caching on for every other chunk, the setup chunk included, and left cache and figure directories next to the source; a later render would then restore the setup chunk from that cache instead of running it (reasoned, not run).
 
-**What invalidates the cache.** A `bench-*` chunk reruns when any of these change: the chunk's own code or options; the content (not the modification time) of `bench/rolling-lib.R`; the content of cuplyr's `R/*.R` and `src/*.{cpp,cu,cuh,h,hpp}` files and of `src/Makevars` (the compile flags) under `params$root`; the version of R, of libcudf (`r cudf_ver`) or of any package the benchmark uses (`r join_and(code(names(ver)[names(ver) != "R"]))`); or any run parameter other than the directories and the rebuild switch (`root`, `out_dir`, `cache_dir`, `rebuild`). Prose, tables and figures are never cached, so editing them never reruns a benchmark. The cached chunks return plain data frames only: a GPU object left in a cached chunk would be restored as a dead pointer.
+**What invalidates the cache.** A `bench-*` chunk reruns when any of these change: the chunk's own code or options; the content (not the modification time) of `bench/rolling-lib.R`; the content of cuplyr's `R/*.R` and `src/*.{cpp,cu,cuh,h,hpp}` files and of `src/Makevars` (the compile flags) under `params$root`; the version of R, of libcudf (`r cudf_ver`), of polars' Rust crate (`r polars_crate`) or of any package the benchmark uses (`r join_and(code(names(ver)[names(ver) != "R"]))`); or any run parameter other than the directories and the rebuild switch (`root`, `out_dir`, `cache_dir`, `rebuild`). Prose, tables and figures are never cached, so editing them never reruns a benchmark. The cached chunks return plain data frames only: a GPU object left in a cached chunk would be restored as a dead pointer.

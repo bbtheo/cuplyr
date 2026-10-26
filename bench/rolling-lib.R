@@ -69,18 +69,23 @@ rw_clock <- function() {
 # the previous result already dropped: cuplyr frees its GPU intermediates only
 # when R finalizes their pointers, so without it back-to-back calls exhaust
 # the card. Every function gets the same treatment.
-rw_time <- function(fn, times, warmup = 2) {
+# `reset`, when given, is called before every call (after the gc(), outside the
+# timed region): an engine that keeps its result inside itself (DuckDB's
+# CREATE TEMP TABLE) drops the previous one there, untimed.
+rw_time <- function(fn, times, warmup = 2, reset = NULL) {
   clock <- rw_clock()
   res <- NULL
   for (i in seq_len(warmup)) {
     res <- NULL
     gc(verbose = FALSE)
+    if (!is.null(reset)) reset()
     res <- fn()
   }
   out <- numeric(times)
   for (i in seq_len(times)) {
     res <- NULL
     gc(verbose = FALSE)
+    if (!is.null(reset)) reset()
     t0 <- clock()
     res <- fn()
     out[[i]] <- clock() - t0
@@ -118,14 +123,19 @@ rw_plan_cell <- function(probe_s, times, cell_budget, probe_limit) {
 # `times` rounds times every closure once (same gc-before-every-call treatment),
 # alternating the order from round to round, so a slow drift or a change of
 # process state hits all of them alike. `warmup` untimed calls per closure come
-# first. Returns a data frame (label, sample, ms).
-rw_time_interleaved <- function(fns, times, warmup = 2) {
+# first. `prepare`, when given, is a list of functions named like `fns`:
+# prepare[[nm]]() runs before every call of fns[[nm]] (after the gc, outside the
+# timed region, warmup calls included), e.g. to pin the process to a CPU.
+# Returns a data frame (label, sample, ms).
+rw_time_interleaved <- function(fns, times, warmup = 2, prepare = NULL) {
   clock <- rw_clock()
   res <- NULL
+  before <- function(nm) if (!is.null(prepare[[nm]])) prepare[[nm]]()
   for (nm in names(fns)) {
     for (i in seq_len(warmup)) {
       res <- NULL
       gc(verbose = FALSE)
+      before(nm)
       res <- fns[[nm]]()
     }
   }
@@ -135,6 +145,7 @@ rw_time_interleaved <- function(fns, times, warmup = 2) {
     for (nm in if (i %% 2L == 1L) names(fns) else rev(names(fns))) {
       res <- NULL
       gc(verbose = FALSE)
+      before(nm)
       t0 <- clock()
       res <- fns[[nm]]()
       k <- k + 1L
@@ -432,11 +443,13 @@ rw_skip_table <- function(rows) {
 # call is a probe: its duration decides, through rw_plan_cell(), how many
 # samples fit in `cell_budget`, and its output feeds the correctness check. The
 # probe is not a recorded sample unless it alone exceeds `probe_limit`. `note`
-# says exactly which calls were recorded.
+# says exactly which calls were recorded. `reset` (see rw_time()) also runs
+# before the probe call.
 run_cell <- function(call, extract, times, ref = NULL, expect_fallback = FALSE,
-                     cell_budget = 20, probe_limit = 60) {
+                     cell_budget = 20, probe_limit = 60, reset = NULL) {
   note <- character()
   gc(verbose = FALSE)
+  if (!is.null(reset)) reset()
   fell_back <- FALSE
   t0 <- microbenchmark::get_nanotime()
   out <- withCallingHandlers(call(), cuplyr_cpu_fallback = function(cnd) fell_back <<- TRUE)
@@ -454,7 +467,7 @@ run_cell <- function(call, extract, times, ref = NULL, expect_fallback = FALSE,
   if (plan$probe_is_sample) {
     ms <- probe_s * 1e3
   } else {
-    ms <- rw_time(call, plan$k, warmup = plan$warmup)
+    ms <- rw_time(call, plan$k, warmup = plan$warmup, reset = reset)
   }
   note <- c(note, if (nzchar(plan$note)) plan$note)
   list(ms = ms, times = length(ms), note = paste(note, collapse = "; "), cmp = cmp, fell_back = fell_back)
@@ -506,6 +519,142 @@ rw_overhead_fn <- function(f) function(g) {
   r <- dplyr::compute(f(g))
   rw_gpu_finish(r)
   r
+}
+
+# ---- polars and DuckDB (F73) --------------------------------------------------------
+# Each engine gets its data once, outside timing, and the timed call is only
+# the rolling computation, to a result that stays inside the engine (the same
+# rule as cuplyr's, whose result stays on the GPU). The result is read into R
+# only by extract(), outside timing, for the correctness check.
+
+# The timed SQL of one DuckDB cell. A raw ROWS frame gives partial windows at
+# the start (a value where data.table has NA), so the aggregate is guarded:
+# only rows with a full window get a value, which makes the NA padding equal to
+# data.table's. The guard is the row index `i` (ungrouped) or the row's
+# position in its partition (grouped). The ORDER BY i sort is inside the timed
+# query, since SQL has no row order without it. CREATE TEMP TABLE (not CREATE
+# OR REPLACE) keeps the result inside DuckDB; rw_out must be dropped first, by
+# the untimed reset.
+rw_duckdb_sql <- function(stat, n, grouped = FALSE) {
+  agg <- switch(stat,
+    mean = "AVG", sum = "SUM", min = "MIN", max = "MAX", sd = "STDDEV_SAMP", median = "MEDIAN",
+    stop("no DuckDB window aggregate for statistic: ", stat))
+  n <- as.integer(n)
+  guard <- if (grouped) "row_number() OVER w" else "i"
+  sprintf(paste0("CREATE TEMP TABLE rw_out AS SELECT i, CASE WHEN %s >= %d THEN %s(x) OVER w END AS r ",
+                 "FROM rw_x WINDOW w AS (%sORDER BY i ROWS BETWEEN %d PRECEDING AND CURRENT ROW)"),
+          guard, n, agg, if (grouped) "PARTITION BY g " else "", n - 1L)
+}
+
+# An in-memory DuckDB holding `df` as the real table rw_x (i = 1..n, the
+# columns of df), loaded once. `threads` = NULL leaves DuckDB's default, a
+# number runs SET threads. Returns list(con, threads(), fun(stat, grouped) ->
+# function(n), reset(), extract(res), close()). The timed closure returns a
+# token, not data; threads() reads the setting back from DuckDB.
+# shared_home = FALSE: nothing is written under the user's home directory.
+rw_duckdb_engine <- function(df, threads = NULL) {
+  con <- DBI::dbConnect(duckdb::duckdb(shared_home = FALSE))
+  ok <- FALSE
+  on.exit(if (!ok) DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
+  if (!is.null(threads)) DBI::dbExecute(con, sprintf("SET threads = %d", as.integer(threads)))
+  DBI::dbWriteTable(con, "rw_x", cbind(data.frame(i = seq_len(nrow(df))), df))
+  ok <- TRUE
+  list(
+    con = con,
+    threads = function() as.integer(DBI::dbGetQuery(con, "SELECT current_setting('threads') AS t")$t),
+    version = function() DBI::dbGetQuery(con, "SELECT version() AS v")$v,
+    fun = function(stat, grouped = FALSE) {
+      rw_duckdb_sql(stat, 3, grouped)   # an unsupported statistic stops here
+      function(n) {
+        DBI::dbExecute(con, rw_duckdb_sql(stat, n, grouped))
+        structure("rw_out", class = "rw_duckdb_result")
+      }
+    },
+    reset = function() invisible(DBI::dbExecute(con, "DROP TABLE IF EXISTS rw_out")),
+    extract = function(res) {
+      force(res)
+      DBI::dbGetQuery(con, "SELECT r FROM rw_out ORDER BY i")$r
+    },
+    close = function() DBI::dbDisconnect(con, shutdown = TRUE)
+  )
+}
+
+# polars: `df` converted to a polars DataFrame once. The timed closure is
+# DataFrame$with_columns(<rolling expression>) (eager, so the expression is
+# evaluated when the call returns), with $over("g") when grouped; it returns the
+# polars DataFrame. Incomplete windows are null (min_samples defaults to the
+# window), like data.table's NA. The thread pool is fixed when polars first
+# loads, so this process's pool is whatever it started with: use
+# rw_polars_child() to choose it.
+rw_polars_engine <- function(df) {
+  pl <- polars::pl
+  pdf <- polars::as_polars_df(df)
+  expr <- function(stat, n) {
+    col <- pl$col("x")
+    switch(stat,
+      mean = col$rolling_mean(n), sum = col$rolling_sum(n), min = col$rolling_min(n),
+      max = col$rolling_max(n), sd = col$rolling_std(n), median = col$rolling_median(n),
+      stop("no polars rolling expression for statistic: ", stat))
+  }
+  list(
+    threads = function() as.integer(polars::polars_info()$thread_pool_size),
+    fun = function(stat, grouped = FALSE) {
+      expr(stat, 3)   # an unsupported statistic stops here
+      function(n) {
+        e <- expr(stat, n)
+        if (grouped) e <- e$over("g")
+        pdf$with_columns(e$alias("r"))
+      }
+    },
+    reset = function() invisible(NULL),
+    extract = function(res) as.vector(res$get_column("r")),
+    close = function() invisible(NULL)
+  )
+}
+
+# Run do.call(fn, args) in a fresh R process (callr) whose .libPaths() starts
+# with `libs`, and return its value. polars reads POLARS_MAX_THREADS once, when
+# it loads, so a thread count needs its own process: `threads` is set in the
+# child's environment before anything loads; NULL leaves it unset (a value
+# inherited from this process is removed too). No profile files are read and
+# nothing is loaded for the child: cuplyr is not in it, so no CUDA context.
+# `show` passes the child's output (its rw_say() progress lines) on to this
+# process's stderr while it runs, which is the render log (rw_say() writes
+# there too); it is not captured into a knitr chunk, as callr's own `show`
+# would be. The output is drained either way, so the child never blocks on a
+# full pipe.
+rw_polars_child <- function(threads, fn, args = list(), libs = .libPaths(), show = FALSE) {
+  env <- callr::rcmd_safe_env()
+  env <- env[names(env) != "POLARS_MAX_THREADS"]
+  if (!is.null(threads)) env <- c(env, POLARS_MAX_THREADS = as.character(threads))
+  p <- callr::r_bg(function(fn, args, unset) {
+                     if (unset) Sys.unsetenv("POLARS_MAX_THREADS")
+                     do.call(fn, args)
+                   }, list(fn = fn, args = args, unset = is.null(threads)),
+                   libpath = libs, env = env, stdout = "|", stderr = "2>&1",
+                   user_profile = FALSE, system_profile = FALSE)
+  on.exit(if (p$is_alive()) p$kill(), add = TRUE)
+  # TRUE when at least one complete line was read
+  drain <- function() {
+    got <- FALSE
+    repeat {
+      l <- p$read_output_lines()
+      if (!length(l)) break
+      got <- TRUE
+      if (show) cat(l, sep = "\n", file = stderr())
+    }
+    got
+  }
+  while (p$is_alive()) {
+    p$poll_io(500)   # returns as soon as the child has output (or exits), so a chatty child never waits on us
+    # An unfinished line makes poll_io() report output ready while no complete line
+    # can be read yet; without a pause the loop would spin on one core until the
+    # child ends the line. The pause only delays this process's reading (by at
+    # most 50 ms); the child keeps running, and its pipe holds what it writes.
+    if (!drain()) Sys.sleep(0.05)
+  }
+  drain()
+  p$get_result()
 }
 
 # ---- cache key for the rendered document ------------------------------------------
