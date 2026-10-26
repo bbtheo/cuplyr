@@ -453,7 +453,7 @@ substitute_cur_group_id <- function(.data, dots, group_cols, by = FALSE, rowwise
     new_data <- rowwise_with_row_ids(.data, helper_name)
   } else if (length(group_cols) == 0) {
     # Ungrouped (or `.by=` resolving to no columns): every row is group 1.
-    step <- make_mutate_expr(helper_name, ir_lit_from_r(1L), .data$schema)
+    step <- make_mutate_expr(helper_name, ir_lit_from_r(1L), .subset2(.data, "schema"))
     new_data <- push_op(.data, ast_mutate(input_node(.data), list(step)))
   } else {
     # group_by() groups: numbering runs over group_data() as the table has it,
@@ -462,9 +462,9 @@ substitute_cur_group_id <- function(.data, dots, group_cols, by = FALSE, rowwise
     # groups and are numbered in first-appearance order.
     fixed <- if (!by) fixed_keys_of(.data)
     tmp_grouped <- new_tbl_gpu(
-      ptr = .data$ptr, schema = .data$schema, groups = group_cols,
-      exec_mode = .data$exec_mode, fixed_keys = fixed,
-      group_drop = if (by) TRUE else .data$group_drop
+      ptr = .subset2(.data, "ptr"), schema = .subset2(.data, "schema"), groups = group_cols,
+      exec_mode = .subset2(.data, "exec_mode"), fixed_keys = fixed,
+      group_drop = if (by) TRUE else .subset2(.data, "group_drop")
     )
     gd <- compute_group_data(tmp_grouped)
     if (by && nrow(gd) > 1L) {

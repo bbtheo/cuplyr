@@ -596,3 +596,28 @@ test_that("perf: roll_sd_w1001_eager", {
     out
   }, calibration = "kernel")
 })
+
+# F68a: R-side cost of a lazy verb pipeline. F62's 5-verb pipeline on a 1e3-row
+# lazy table, with the plan RECORDED inside the timed call (the verbs' parsing,
+# the optimizer, the lowering, collect()): at this size the GPU work is a few
+# small kernels and the time is R's. Calibration "kernel".
+perf_lazy_small_df <- local({
+  set.seed(68)
+  n <- 1e3
+  data.frame(g = sample.int(100L, n, TRUE), x = runif(n), y = runif(n), w = rnorm(n))
+})
+
+test_that("perf: lazy_pipeline5_1e3", {
+  skip_if_no_gpu()
+  gpu_df <- tbl_gpu(perf_lazy_small_df, lazy = TRUE)
+
+  expect_no_perf_regression("lazy_pipeline5_1e3", function() {
+    gpu_df |>
+      dplyr::filter(x > 0.1) |>
+      dplyr::mutate(z = x * y + w) |>
+      dplyr::group_by(g) |>
+      dplyr::summarise(m = mean(z), n = n()) |>
+      dplyr::arrange(dplyr::desc(m)) |>
+      collect()
+  }, calibration = "kernel")
+})

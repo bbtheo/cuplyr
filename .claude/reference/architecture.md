@@ -119,7 +119,7 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
 - Written at upload (`tbl_gpu.data.frame()`), restored by `collect_frame()`
   (`restore_tz()`, the C++ collect tags every column "UTC") and by
   `print()`/`glimpse()` previews. Carried by `propagate_schema_meta()`
-  (`R/execute.R`: `push_op()` and `infer_schema_full()`, hence `compute()`)
+  (`R/execute.R`: `push_op()` stores it on the table, `infer_schema_full()` re-derives it, and `compute()`/`current_schema()` read the stored one)
   through `propagate_tz()`; joins (`build_join_output_info()`, a merged key
   takes `tz_fold()` of the two sides, `keep = TRUE` and other columns keep
   their own), `bind_rows()`/set ops (`compute_unified_schema()`,
@@ -354,7 +354,7 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
 | `R/tbl-gpu.R` | `tbl_gpu()`, `new_tbl_gpu()`, `is_tbl_gpu()`, `resolve_exec_mode()`. `dim()`/`nrow()` of a lazy table with pending ops run the plan on the GPU (`compute()`, no collect, caller untouched); `ncol()`/`NCOL()` are answered from the schema (`dim.tbl_gpu` checks that its caller is `base::ncol`/`NCOL`). Internal code that only needs a cheap size uses `base_dim()` (base table's dims, never executes). |
 | `R/utils.R` | `gpu_type_from_r()`, `col_index()` |
 | `R/tz.R` | POSIXct time zone metadata (F32): `tz_is_utc()`, `tz_fold()`, `tz_by_position()`/`tz_from_positions()`, `propagate_tz()`, `propagate_schema_meta()`, `restore_tz()`; see "POSIXct time zones" above |
-| `R/execute.R` | unified execution helpers: `push_op()` (the sole exec_mode branch point; carries `groups` and `.drop` -- `.drop` only while a group column survives; `input_schema=` skips re-deriving a schema the caller has, `carry = FALSE` leaves the frame metadata to the caller), `push_chain()` (an eager verb's several nodes as one execution, see "Eager chains"), `input_node()`, `current_schema()`, `propagate_groups()`, `propagate_factor_levels()`, `auto_name_dots()`, `cuplyr_fallback_notify()`, join analogues `join_input_node()`/`push_join()` |
+| `R/execute.R` | unified execution helpers: `push_op()` (the sole exec_mode branch point; carries `groups` and `.drop` -- `.drop` only while a group column survives; `input_schema=` skips re-deriving a schema the caller has, `carry = FALSE` leaves the frame metadata to the caller), `push_chain()` (an eager verb's several nodes as one execution, see "Eager chains"), `input_node()`, `current_schema()` (the stored `$schema`, see "Schemas of lazy plans"), `infer_schema_full()`, `infer_push_schema()`, `propagate_groups()`, `propagate_factor_levels()`, `auto_name_dots()`, `cuplyr_fallback_notify()`, join analogues `join_input_node()`/`push_join()` |
 | `R/ir.R` | Expression IR shared by filter/mutate: `ir_parse_quo()`, `ir_cols()`, `ir_cost()`, `ir_is_const()`, `ir_bind()`, `ir_infer_type()`, `ir_call_registry` |
 | `R/filter.R` | filter verb — parses expressions via `ir_parse_quo()` into `make_predicate()` records, builds one `ast_filter` node via `push_op()`; constant expressions (TRUE/FALSE/vectors) are evaluated in R, not the GPU IR path; unparseable expressions fall back to a CPU-eval boolean mask (`filter_eval_mask()`) |
 | `R/mutate.R` | mutate verb — parses expressions into `make_mutate_expr()` structs, builds one `ast_mutate` node via `push_op()`; type inference lives in `R/ast.R::infer_mutate_output_type()` |
@@ -368,8 +368,8 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
 | `R/bind.R` | `bind_rows()`, `bind_cols()` (plain functions, not S3 generics, so `!!!` splices work; errors cite the user's call; `bind_rows()` keeps the first input's groups/`.drop` and NA-pads zero-column inputs; `bind_cols()` follows vctrs' size rules: size-1 recycles, zero-column inputs give their size) with schema unification; `compute_unified_schema()` computes a factor level UNION (Phase 11 L2 Bug 2), `align_to_schema()`/`cast_column()` remap (`gpu_remap_codes()`) or decode (`gpu_decode_factor()`, Bug 3) factor columns as needed |
 | `R/collect.R` | pulls data to R, warns on INT64 precision loss. `collect_frame()` is the UNGROUPED tibble (what every internal caller that needs rows uses: fallbacks, pull, sets, joins, vctrs, `$`); `collect()` = `collect_frame()` + `dplyr::grouped_df()` with the table's `.drop` (dplyr/dbplyr contract: a grouped tbl_gpu collects grouped). `as.data.frame()`/`as_tibble()` (ungrouped)/`as.list()`/`as.matrix()` also go through `collect_frame()` |
 | `R/generics.R` | dplyr backend generics (`dplyr_col_modify()` etc.), `[`, and the base-R object contract (F04): `$`, `[[`, `$<-`, `[[<-`, `[<-`. For user code `gt$x` / `gt[["x"]]` fetch ONE column (ungroup + select + collect), `gt$x <- v` / `gt[[j]] <- v` are a GPU column modification (`gpu_assign_column()` -> `apply_col_changes()`: upload the new columns, `bind_cols()`, reorder; exec_mode and surviving groups kept), `[<-` and cell assignment are loud errors pointing at `mutate()`. Subscript checks, recycling and messages are tibble's own, run on a placeholder "stub" tibble; `[[`, `[[<-` and `$<-` take `(x, ...)` and forward the user's original promises to tibble (subscripts are evaluated once, in their own frame; labels in messages stay the user's expressions). A plain non-missing length-one `$<-`/`[[<-` value becomes a literal `mutate()` (a lazy plan is extended, not run); `x[[i, j]]` gathers one row on the GPU. **Internal fields**: a field name (`tbl_gpu_fields`) read/written by package code (caller's `topenv()` is the namespace, or its env chain below the global env holds the test marker `.cuplyr_internal_access` from `tests/testthat/helper-gpu.R`) is the raw list element; anything else (user code, other packages, global-env functions) gets the column. Code that must reach a field from elsewhere uses `unclass(x)$field` |
-| `R/compute.R` | `compute()`, `collapse()`, `as_lazy()`, `as_eager()`, `show_query()` — `compute()` is the only caller of `optimize_ast()` |
-| `R/ast.R` | AST node constructors (`ast_source`, `ast_filter`, etc.) and `infer_schema()` methods |
+| `R/compute.R` | `compute()`, `collapse()`, `as_lazy()`, `as_eager()`, `show_query()` — `compute()` (via `compute_plan()`, which `collect()` also uses) is the only caller of `optimize_ast()` |
+| `R/ast.R` | AST node constructors (`ast_source`, `ast_filter`, etc.), `infer_schema()` methods, `infer_schema_from()`/`infer_join_schema()` (schema from a known input schema) and the schema memo (`infer_schema_memo()`), see "Schemas of lazy plans" |
 | `R/optimizer.R` | AST optimization passes (projection, filter pushdown, fusion) — runs only via `compute()`, never on the eager single-op path |
 | `R/lower.R` | `lower_and_execute()` — the single execution path for every AST node in both eager and lazy modes |
 | `R/gpu-memory.R` | memory reporting and GC helpers: `gpu_memory_state()`, `gpu_gc()`, `gpu_sync()`, and the load-time resource switches (`memory_resource_config()`, `memory_resource_install()`, called by `.onLoad`) |
@@ -427,7 +427,7 @@ only place that branches on eager vs lazy. Execution happens in
 ```r
 # R/ast.R -- constructor + schema inference
 ast_<verb> <- function(input, ...) ast_node("<verb>", input = input, ...)
-infer_schema.ast_<verb> <- function(node) { ... }   # output names/types
+infer_schema.ast_<verb> <- function(node) { ... }   # output names/types, via infer_schema_from()
 
 # R/<verb>.R -- the verb
 #' @export
@@ -441,7 +441,7 @@ infer_schema.ast_<verb> <- function(node) { ... }   # output names/types
 # R/lower.R -- add a case to the switch(ast$type, ...) in lower_and_execute()
 lower_<verb> <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
-  input_schema <- infer_schema(ast$input)
+  input_schema <- infer_schema_memo(ast$input)
   gpu_<verb>(input_ptr, ...)               # 0-based column indices
 }
 ```
@@ -494,6 +494,52 @@ lazy table with pending ops. `R/lower.R::lower_and_execute()` is the single
 execution path for every AST node in both schedules — there are no
 separate eager/lazy implementations (`*_lazy()`/`*_one()` functions) per
 verb any more.
+
+### Schemas of lazy plans (F68a)
+Recording a lazy verb and running a plan are linear in the plan's depth, so a
+pipeline of any length costs the same per verb:
+- **`current_schema(.data)` is the stored `$schema`.** Every writer of
+  `lazy_ops` stores the schema the plan implies (`push_op()`, `push_join()`,
+  `compute()`, `collapse()`'s barrier, the callers that copy both fields from a
+  table), so `schema == infer_schema_full(lazy_ops)` always holds, factor levels
+  and POSIXct zones included. A new code path that changes `lazy_ops` or
+  `$schema` of a table with pending ops must keep the two in step (the same
+  holds for rewriting the stored schema alone, as `align_set_op_side()` used to
+  do: such a write is only legal on a table without pending ops). Debug switch:
+  `options(cuplyr.check_schema_cache = TRUE)` or the environment variable
+  `CUPLYR_CHECK_SCHEMA_CACHE=1` (read once per session) makes `current_schema()`
+  compare the stored schema with `infer_schema_full()` and abort with
+  `cuplyr_error_internal` and an `all.equal()` difference on a mismatch; off by default
+  (`tools/test-file` and `tools/test` pass the variable through).
+- **`push_op()` derives the new node's schema from the `input_schema` it has**,
+  `infer_schema_from(node, input_schema)` (R/ast.R; the body of every
+  `infer_schema.ast_*()` method), never by walking the pending plan.
+  `infer_push_schema()` handles a verb's short chain of fresh nodes (a rename
+  over a select) by walking only down to `input_node(.data)`. `push_join()` uses
+  `infer_join_schema()` with `current_schema(x)`/`current_schema(y)`.
+  `infer_schema_full()` is one bottom-up pass (not a recursion that re-infers
+  each level).
+- **The schema memo** (`infer_schema_memo()`, R/ast.R): inside one outermost
+  `compute()` (`compute_plan()`), an eager `push_chain()` lowering or
+  `optimize_ast()`, node schemas are remembered by node identity
+  (`obj_address()`; the entry holds the node, so the address cannot be reused,
+  and `node$input <- ...` copies a shared node, so a rewritten node is a new key).
+  A scope saves `.schema_memo$plain`, registers the `on.exit()` that restores it
+  and only then calls `schema_memo_open()` (which creates the memo unless one is
+  active), so an interrupt can't leave a scope open; a nested scope shares the
+  outer one.
+  Optimizer passes and every `lower_*()` call `infer_schema_memo()`, not
+  `infer_schema()`. Nothing is cached on the nodes themselves.
+- **Optimizer skipping**: `optimize_segment()` runs the projection pass, then
+  scans the segment (`segment_features()`) and runs `fuse_mutates()`,
+  `prune_dead_columns()`, `push_down_filters()` and `reorder_filters()` only
+  when the scan finds what they act on (mutate over mutate; any mutate/select;
+  filter over mutate/select/join; filter over filter), rescanning after a pass
+  that ran. The plans are the same as running all five.
+  `opt_union()`/`opt_diff()`/`opt_intersect()` replace the base set functions
+  there.
+- `collect()` of a lazy table uses `compute_plan()` (pointer + schema) without
+  building the intermediate `tbl_gpu` that `compute()` returns.
 
 ### Lazy Mode Mechanics
 - Lazy tables defer execution by building an AST in `$lazy_ops`

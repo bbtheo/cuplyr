@@ -49,26 +49,62 @@ infer_schema_full <- function(node) {
   }
 
   input_schema <- infer_schema_full(node$input)
-  propagate_schema_meta(node, input_schema, infer_schema(node))
+  propagate_schema_meta(node, input_schema, infer_schema_from(node, input_schema))
 }
 
 #' Get the schema a new op should be built against
 #'
-#' Pending-lazy-AST-aware: if `.data` is lazy and has pending operations,
-#' infers the schema from the AST (`$lazy_ops`) via `infer_schema_full()`
-#' (factor_levels-aware, see its own docs); otherwise returns the table's
-#' base `$schema`. This is the canonical replacement for the
-#' `current_schema`/`current schema` blocks duplicated inline across verbs.
+#' The table's stored `$schema`. For a lazy table with pending operations it is
+#' the output schema of `$lazy_ops`, factor levels and POSIXct zones included:
+#' every writer of `lazy_ops` (`push_op()`, `push_join()`, `compute()`,
+#' `collapse()`'s barrier, the callers that copy both fields) stores
+#' the schema it implies, so the invariant `schema == infer_schema_full(lazy_ops)`
+#' holds and reading it is O(1), whatever the plan's depth. Set
+#' `options(cuplyr.check_schema_cache = TRUE)` or the environment variable
+#' `CUPLYR_CHECK_SCHEMA_CACHE=1` to verify the invariant on every call (internal
+#' debug switch for test runs; aborts with `cuplyr_error_internal`).
 #'
 #' @param .data A `tbl_gpu` object
-#' @return List with `names` and `types` (and possibly `factor_levels`)
+#' @return List with `names` and `types` (and possibly `factor_levels`, `tz`)
 #' @keywords internal
 current_schema <- function(.data) {
-  if (identical(.subset2(.data, "exec_mode"), "lazy") && has_pending_ops(.data)) {
-    infer_schema_full(.subset2(.data, "lazy_ops"))
-  } else {
-    .subset2(.data, "schema")
+  schema <- .subset2(.data, "schema")
+  if (check_schema_cache_on() && identical(.subset2(.data, "exec_mode"), "lazy") &&
+      has_pending_ops(.data)) {
+    expected <- infer_schema_full(.subset2(.data, "lazy_ops"))
+    if (!identical(schema, expected)) {
+      rlang::abort(c(
+        "Internal error: a lazy table's stored schema differs from its pending plan's.",
+        i = paste0("stored: ", paste0(schema$names, collapse = ", "), " (",
+                   paste0(unname(schema$types), collapse = ", "), ")"),
+        i = paste0("plan:   ", paste0(expected$names, collapse = ", "), " (",
+                   paste0(unname(expected$types), collapse = ", "), ")"),
+        i = paste0("difference: ", paste(
+          if (isTRUE(d <- all.equal(schema, expected))) {
+            "none up to representation (storage type, NULL slots; see waldo::compare())"
+          } else {
+            d
+          }, collapse = "; "))
+      ), class = "cuplyr_error_internal")
+    }
   }
+  schema
+}
+
+# The debug switch of current_schema(): option `cuplyr.check_schema_cache`, else
+# env var `CUPLYR_CHECK_SCHEMA_CACHE` ("1"/"true"). Off unless asked for.
+# @keywords internal
+check_schema_cache_on <- function() {
+  opt <- getOption("cuplyr.check_schema_cache")
+  if (!is.null(opt)) {
+    return(isTRUE(opt))
+  }
+  on <- .schema_memo$check_env
+  if (is.null(on)) {
+    on <- Sys.getenv("CUPLYR_CHECK_SCHEMA_CACHE") %in% c("1", "true", "TRUE", "yes")
+    .schema_memo$check_env <- on  # read once per session
+  }
+  on
 }
 
 # dplyr's verbs that read columns (filter, mutate, summarise, arrange, ...)
@@ -446,7 +482,7 @@ zero_column_result <- function(.data, verb, n = NULL) {
     n <- zero_column_nrow(.data, verb)
   }
   carry_frame_meta(
-    tbl_gpu(tibble::tibble(.rows = n), lazy = identical(.data$exec_mode, "lazy")),
+    tbl_gpu(tibble::tibble(.rows = n), lazy = identical(.subset2(.data, "exec_mode"), "lazy")),
     .data
   )
 }
@@ -466,12 +502,35 @@ zero_column_nrow <- function(.data, verb) {
   n
 }
 
+# Names and types of `node`, a verb's node over `input_node(.data)`, from the
+# schema of that input alone. A verb may push a short chain of fresh nodes
+# (select_node under a rename, ...): the walk goes down the fresh nodes only,
+# stopping at `base` (the pending plan, by reference) or at a source, so the
+# cost is the chain's length, never the plan's depth.
+# @param base `.data$lazy_ops`, or NULL when `.data` has no pending ops
+# @keywords internal
+infer_push_schema <- function(node, input_schema, base) {
+  input <- .subset2(node, "input")
+  if (!is.null(input) && !(!is.null(base) && is_reference(input, base))) {
+    if (identical(.subset2(input, "type"), "source")) {
+      # `input_node(.data)`'s source; one that is not (a node built over another
+      # table's plan) is inferred from its own plan, as before
+      if (!identical(.subset2(.subset2(input, "schema"), "names"), input_schema$names)) {
+        return(infer_schema(node))
+      }
+    } else {
+      input_schema <- infer_push_schema(input, input_schema, base)
+    }
+  }
+  infer_schema_from(node, input_schema)
+}
+
 #' Apply an AST node to a tbl_gpu, dispatching on exec_mode
 #'
 #' The only exec_mode branch point (D1). Lazy mode stores `node` as the new
 #' `$lazy_ops` and does no GPU work; eager mode lowers and executes `node`
-#' immediately. Both modes uniformly recompute `schema` (via `infer_schema()`,
-#' with factor_levels reattached per D3) and `groups` (via
+#' immediately. Both modes uniformly compute `schema` from `input_schema` alone
+#' (via `infer_schema_from()`, with factor_levels reattached per D3) and `groups` (via
 #' `propagate_groups()`).
 #'
 #' @param .data A `tbl_gpu` object
@@ -488,7 +547,8 @@ push_op <- function(.data, node, input_schema = current_schema(.data), carry = T
     abort_duplicate_names(rlang::caller_env())
   }
 
-  new_schema <- propagate_schema_meta(node, input_schema, infer_schema(node))
+  base <- if (has_pending_ops(.data)) .subset2(.data, "lazy_ops")
+  new_schema <- propagate_schema_meta(node, input_schema, infer_push_schema(node, input_schema, base))
 
   new_groups <- propagate_groups(node, .subset2(.data, "groups"), new_schema)
   check_dup_names_ungrouped(new_schema$names, new_groups)
@@ -566,6 +626,9 @@ push_chain <- function(.data, build) {
   node <- .subset2(res, "lazy_ops")
   new_ptr <- .subset2(.data, "ptr")
   if (inherits(node, "ast_node")) {
+    memo_prev <- .schema_memo$plain
+    on.exit(.schema_memo$plain <- memo_prev, add = TRUE)
+    schema_memo_open()
     ops <- character()
     n <- node
     while (!is.null(n) && !identical(n$type, "source")) {
@@ -715,7 +778,8 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
     cross_by = cross_by
   )
 
-  new_schema <- infer_schema(join_ast)
+  # both sides' schemas are stored on x and y: no walk of either plan
+  new_schema <- infer_join_schema(join_ast, current_schema(x), current_schema(y))
 
   new_groups <- set_intersect(x$groups, new_schema$names)
   # As in push_op(): `.drop` goes with the last surviving group column.
@@ -834,7 +898,7 @@ resolve_by <- function(.data, by_quo, arg_name = ".by", call = rlang::caller_env
     return(character())
   }
 
-  if (length(.data$groups) > 0) {
+  if (length(.subset2(.data, "groups")) > 0) {
     rlang::abort(paste0("Can't supply `", arg_name,
                         "` when `.data` is a grouped data frame."), call = call)
   }

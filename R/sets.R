@@ -293,6 +293,13 @@ align_set_op_side <- function(tbl, target_schema, groups = character()) {
   }
 
   tbl$groups <- groups
+  # A table that still has pending ops keeps its stored schema: that is the
+  # plan's output schema (current_schema()), which already matches the target
+  # here (otherwise the plan was computed above), and rewriting it would
+  # leave the table's schema and its lazy_ops disagreeing.
+  if (has_pending_ops(tbl)) {
+    return(tbl)
+  }
   tbl$schema$factor_levels <- target_schema$factor_levels
   # `align_to_schema()`'s slow path always returns an unnamed `$types`
   # (its own `unname()` calls), but a fast-path passthrough (schema

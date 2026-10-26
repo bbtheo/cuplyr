@@ -404,7 +404,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # data-frame splice and evaluate across() lambdas sequentially).
   orig_dots <- user_dots
 
-  summarise_groups <- if (by_given) by_cols else .data$groups
+  summarise_groups <- if (by_given) by_cols else .subset2(.data, "groups")
   expanded <- expand_across_dots(dots, current_schema(.data), summarise_groups, "summarise")
   if (isTRUE(attr(expanded, "needs_fallback"))) {
     return(gpu_fallback("summarise", .data, function(tbl) {
@@ -473,13 +473,13 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
     return(gpu_or_cpu(function() summarise_by_desugar(.data, dots, by_cols)))
   }
 
-  retained_groups <- resolve_summarise_groups(.data$groups, .groups, caller_env)
+  retained_groups <- resolve_summarise_groups(.subset2(.data, "groups"), .groups, caller_env)
 
   # F33: a `.drop = FALSE` grouping with a factor key also emits the empty
   # groups. The test reads the schema only, so the default path pays nothing.
   if (summarise_wants_empty_groups(.data)) {
     # An aggregate named like a key replaces it; rare enough for the CPU.
-    if (any(names(dots) %in% .data$groups)) return(cpu())
+    if (any(names(dots) %in% .subset2(.data, "groups"))) return(cpu())
     return(gpu_or_cpu(function() summarise_with_empty_groups(.data, dots, retained_groups, cpu)))
   }
 
@@ -513,10 +513,10 @@ summarise_has_constant_agg <- function(dots, schema) {
 # `group_by(.drop = FALSE)` with some factor key. Metadata checks only.
 # @keywords internal
 summarise_wants_empty_groups <- function(.data) {
-  length(.data$groups) > 0L &&
+  length(.subset2(.data, "groups")) > 0L &&
     (!is.null(fixed_keys_of(.data)) ||
-       (isFALSE(.data$group_drop) &&
-          any(.data$groups %in% names(current_schema(.data)$factor_levels))))
+       (isFALSE(.subset2(.data, "group_drop")) &&
+          any(.subset2(.data, "groups") %in% names(current_schema(.data)$factor_levels))))
 }
 
 # Internal: grouped summarise() whose groups include empty ones (F33, F74). The
@@ -543,13 +543,13 @@ summarise_wants_empty_groups <- function(.data) {
 #   can't give exactly
 # @keywords internal
 summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) {
-  was_lazy <- identical(.data$exec_mode, "lazy")
+  was_lazy <- identical(.subset2(.data, "exec_mode"), "lazy")
   # A GPU materialization of the pending ops, not a CPU fallback: no notice.
   base <- compute(.data)
   base$exec_mode <- "eager"
-  keys <- base$groups
+  keys <- .subset2(base, "groups")
   # dplyr regroups with group_by_drop_default(.data) while a group is retained
-  out_drop <- if (length(retained_groups) > 0L) base$group_drop %||% TRUE else TRUE
+  out_drop <- if (length(retained_groups) > 0L) .subset2(base, "group_drop") %||% TRUE else TRUE
 
   finish <- function(result) {
     if (was_lazy) result$exec_mode <- "lazy"
@@ -721,9 +721,9 @@ summarise_zero_dots <- function(.data, by_cols, by_given, groups_arg, caller_env
     return(strip_frame_attrs(dplyr::distinct(.data, !!!rlang::syms(by_cols))))
   }
 
-  retained_groups <- resolve_summarise_groups(.data$groups, groups_arg, caller_env)
+  retained_groups <- resolve_summarise_groups(.subset2(.data, "groups"), groups_arg, caller_env)
 
-  if (length(.data$groups) == 0) {
+  if (length(.subset2(.data, "groups")) == 0) {
     # The result is always the same 1 x 0 table, uploaded fresh (a lazy join
     # result has no `$ptr` to build on). Pending ops still run first, as in
     # dplyr, so their errors (`unmatched = "error"`, ...) surface.
@@ -732,7 +732,7 @@ summarise_zero_dots <- function(.data, by_cols, by_given, groups_arg, caller_env
       compute(.data)
     }
     return(copy_frame_meta(
-      tbl_gpu(tibble::tibble(.rows = 1L), lazy = .data$exec_mode == "lazy"),
+      tbl_gpu(tibble::tibble(.rows = 1L), lazy = .subset2(.data, "exec_mode") == "lazy"),
       .data, attrs = FALSE
     ))
   }
@@ -742,7 +742,7 @@ summarise_zero_dots <- function(.data, by_cols, by_given, groups_arg, caller_env
   }
 
   # gpu_summarise() sorts the keys itself (F33).
-  push_op(.data, ast_summarise(input_node(.data), list(), .data$groups, retained_groups))
+  push_op(.data, ast_summarise(input_node(.data), list(), .subset2(.data, "groups"), retained_groups))
 }
 
 # Internal: zero-dots summarise() with empty groups (F33, F74): the keys of
@@ -752,7 +752,7 @@ summarise_zero_dots <- function(.data, by_cols, by_given, groups_arg, caller_env
 # the GPU (not a CPU fallback: no notice).
 # @keywords internal
 summarise_group_keys <- function(.data, retained_groups) {
-  was_lazy <- identical(.data$exec_mode, "lazy")
+  was_lazy <- identical(.subset2(.data, "exec_mode"), "lazy")
   base <- compute(.data)
   base$exec_mode <- "eager"
   # (group_data() carries a `.drop` attribute, which is not the table's)
@@ -1213,7 +1213,7 @@ summarise_core <- function(.data, dots, retained_groups = character(),
 # in the input's exec_mode with no pending ops.
 # @keywords internal
 summarise_run_now <- function(.data, aggregations, retained_groups, sort_groups = TRUE) {
-  was_lazy <- identical(.data$exec_mode, "lazy")
+  was_lazy <- identical(.subset2(.data, "exec_mode"), "lazy")
 
   if (was_lazy && has_pending_ops(.data)) {
     notify_materialization("summarise", paste0(
@@ -1900,7 +1900,7 @@ resolve_agg_window_plan <- function(working_data, plan, fn_name, dot_index) {
 # @return Modified tbl_gpu with the new column appended
 # @keywords internal
 create_temp_column <- function(.data, col_name, ir, keep_bool = FALSE) {
-  schema <- .data$schema
+  schema <- .subset2(.data, "schema")
   inferred_type <- ir_infer_type(ir, schema)
 
   # A boolean-producing expression (comparisons, &/|/!, is.na(), between(),
@@ -1919,7 +1919,7 @@ create_temp_column <- function(.data, col_name, ir, keep_bool = FALSE) {
 
   new_ptr <- warn_int_overflow(wrap_gpu_call(
     "summarise_mutate_expr",
-    gpu_mutate_expr(.data$ptr, list(bound_ir), col_name, new_type, schema$names)
+    gpu_mutate_expr(.subset2(.data, "ptr"), list(bound_ir), col_name, new_type, schema$names)
   ))
 
   # Everything else on the schema (notably `factor_levels`, which a factor
@@ -1929,10 +1929,10 @@ create_temp_column <- function(.data, col_name, ir, keep_bool = FALSE) {
   copy_frame_meta(new_tbl_gpu(
     ptr = new_ptr,
     schema = new_schema,
-    lazy_ops = .data$lazy_ops,
-    groups = .data$groups,
-    group_drop = .data$group_drop %||% TRUE,
-    exec_mode = .data$exec_mode
+    lazy_ops = .subset2(.data, "lazy_ops"),
+    groups = .subset2(.data, "groups"),
+    group_drop = .subset2(.data, "group_drop") %||% TRUE,
+    exec_mode = .subset2(.data, "exec_mode")
   ), .data)
 }
 
@@ -2111,7 +2111,7 @@ summarise_group_id_split <- function(.data, dots, by_cols, by_given) {
   # An unnamed other dot (`mean(x)`, `across()`) takes its name from dplyr's
   # naming rules, which the final select() by name can't reproduce
   if (any(!nzchar(nms[!is_id]))) return(NULL)
-  keys <- if (by_given) by_cols else .data$groups
+  keys <- if (by_given) by_cols else .subset2(.data, "groups")
   if (any(id_names %in% c(keys, current_schema(.data)$names))) return(NULL)
   # A dot reading an id name sees the id (sequential evaluation)
   rest <- dots[!is_id]

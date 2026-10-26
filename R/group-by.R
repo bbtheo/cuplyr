@@ -125,27 +125,27 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   # dplyr's group_by() (with or without dots) rebuilds the table with tibble,
   # which refuses duplicated names; grouping metadata would name an ambiguous
   # column.
-  dup <- anyDuplicated(.data$schema$names)
+  dup <- anyDuplicated(.subset2(.data, "schema")$names)
   if (dup > 0L) {
-    rlang::abort(paste0("Column name `", .data$schema$names[[dup]], "` must not be duplicated.\n",
+    rlang::abort(paste0("Column name `", .subset2(.data, "schema")$names[[dup]], "` must not be duplicated.\n",
                         "Use `.name_repair` to specify repair."),
                  class = c("tibble_error_column_names_must_be_unique", "tibble_error"))
   }
 
   if (length(dots) == 0) {
-    new_groups <- if (.add) .data$groups else character()
-    new_drop <- if (.add && length(.data$groups) > 0L) .drop else TRUE
+    new_groups <- if (.add) .subset2(.data, "groups") else character()
+    new_drop <- if (.add && length(.subset2(.data, "groups")) > 0L) .drop else TRUE
     # group_by() keeps the attributes but always gives a tibble (F31). On an
     # already grouped table dplyr rebuilds through as_tibble() and loses them
     # unless `.add` leaves the grouping as it was.
-    keep_attrs <- (length(.data$groups) == 0L && !is_rowwise_gpu(.data)) || length(new_groups) > 0L
+    keep_attrs <- (length(.subset2(.data, "groups")) == 0L && !is_rowwise_gpu(.data)) || length(new_groups) > 0L
     return(copy_frame_meta(new_tbl_gpu(
-      ptr = .data$ptr,
-      schema = .data$schema,
-      lazy_ops = .data$lazy_ops,
+      ptr = .subset2(.data, "ptr"),
+      schema = .subset2(.data, "schema"),
+      lazy_ops = .subset2(.data, "lazy_ops"),
       groups = new_groups,
       group_drop = new_drop,
-      exec_mode = .data$exec_mode,
+      exec_mode = .subset2(.data, "exec_mode"),
       nrow = .data[["nrow"]],
       unspecified = .data[["unspecified"]]
     ), .data, attrs = keep_attrs, bare = FALSE))
@@ -277,25 +277,25 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   }
   new_groups <- unique(new_groups)
 
-  if (.add && length(.data$groups) > 0) {
-    new_groups <- unique(c(.data$groups, new_groups))
+  if (.add && length(.subset2(.data, "groups")) > 0) {
+    new_groups <- unique(c(.subset2(.data, "groups"), new_groups))
   }
 
   # A grouped input keeps its attributes only through a plain regroup (every
   # dot a column reference, new_grouped_df()); computed dots go through
   # dplyr_col_modify.grouped_df() and an empty grouping through as_tibble(),
   # which drop them. An ungrouped input always keeps them.
-  keep_attrs <- (length(.data$groups) == 0L && !is_rowwise_gpu(.data)) ||
+  keep_attrs <- (length(.subset2(.data, "groups")) == 0L && !is_rowwise_gpu(.data)) ||
     (all(kind == "var") && length(new_groups) > 0L)
 
   copy_frame_meta(new_tbl_gpu(
-    ptr = working$ptr,
-    schema = working$schema,
-    lazy_ops = working$lazy_ops,
+    ptr = .subset2(working, "ptr"),
+    schema = .subset2(working, "schema"),
+    lazy_ops = .subset2(working, "lazy_ops"),
     groups = new_groups,
     # dots that select no column leave the table ungrouped, `.drop` and all
     group_drop = if (length(new_groups) > 0L) .drop else TRUE,
-    exec_mode = working$exec_mode,
+    exec_mode = .subset2(working, "exec_mode"),
     nrow = working[["nrow"]],
     unspecified = working[["unspecified"]]
   ), .data, attrs = keep_attrs, bare = FALSE)
@@ -330,13 +330,13 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
 #'   length(group_vars(ungrouped))  # 0
 #' }
 ungroup.tbl_gpu <- function(x, ...) {
-  groups <- x$groups
+  groups <- .subset2(x, "groups")
   drop <- TRUE
   if (is_rowwise_gpu(x)) {
     # ungroup.rowwise_df(): nothing may be named, and it is as_tibble()
     rlang::check_dots_empty()
     return(new_tbl_gpu(
-      ptr = x$ptr, schema = x$schema, lazy_ops = x$lazy_ops, exec_mode = x$exec_mode,
+      ptr = .subset2(x, "ptr"), schema = .subset2(x, "schema"), lazy_ops = .subset2(x, "lazy_ops"), exec_mode = .subset2(x, "exec_mode"),
       nrow = x[["nrow"]], unspecified = x[["unspecified"]]
     ))
   }
@@ -368,16 +368,16 @@ ungroup.tbl_gpu <- function(x, ...) {
   # goes through as_tibble() and loses its attributes, a partial one through
   # group_by(x, <remaining>) which keeps them (as a tibble, F31).
   out <- new_tbl_gpu(
-    ptr = x$ptr,
-    schema = x$schema,
-    lazy_ops = x$lazy_ops,
+    ptr = .subset2(x, "ptr"),
+    schema = .subset2(x, "schema"),
+    lazy_ops = .subset2(x, "lazy_ops"),
     groups = groups,
     group_drop = drop,
-    exec_mode = x$exec_mode,
+    exec_mode = .subset2(x, "exec_mode"),
     nrow = x[["nrow"]],
     unspecified = x[["unspecified"]]
   )
-  if (length(x$groups) > 0L && length(groups) > 0L) {
+  if (length(.subset2(x, "groups")) > 0L && length(groups) > 0L) {
     copy_frame_meta(out, x, bare = FALSE)
   } else {
     carry_frame_meta(out, x)

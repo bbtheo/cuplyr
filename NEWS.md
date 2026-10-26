@@ -1,5 +1,31 @@
 # cuplyr (development version)
 
+## Faster lazy verb calls (F68a)
+
+* Recording a verb on a lazy table no longer depends on how many verbs are
+  already pending. It used to infer the schema of the whole pending plan, and
+  more than once per verb; it now reads the schema the table stores. Adding a
+  `filter()` or `mutate()` to a lazy table cost 0.6 ms on a 1-verb plan,
+  16.5 ms on 50 and 64 ms on 100, and now costs 0.5 ms at every length.
+  Recording a join on a very deep plan still grows with the plan's depth
+  (0.9 ms at 120 nodes against 0.35 ms at 3).
+* `collect()` and `compute()` take time in proportion to the plan's length: the
+  optimizer passes and the lowering infer each node's schema once per call
+  instead of walking the plan below every node, and the optimizer skips the
+  passes that cannot apply to a plan. `collect()` of a 100-verb `mutate()` plan
+  takes 9.5 ms instead of 53.
+* Verb-time errors and warnings are unchanged: every check still runs when the
+  verb is called, lazily as eagerly.
+* The five-verb pipeline of `vignette("performance", package = "cuplyr")` (data
+  on the GPU, result collected, median of three runs) now takes 3.00 ms lazy
+  against 3.10 eager at 1e3 rows (it was 4.14 against 3.10) and 3.20 against
+  3.38 ms at 1e6 rows (4.25 against 3.25). At 1e7 rows lazy is still slower, 6.20
+  against 5.00 ms (it was 7.20 against 4.83), and at 5e7 rows 19.5 against 18.0
+  ms (it was 20.5 against 17.5). In the vignette's optimizer case lazy is now
+  faster than eager at 1e7 rows (6.40 against 7.20 ms). Recording the five verbs
+  takes 2.07 ms (it was 2.7). The vignette's tables, text and dates are
+  re-measured. The default execution mode is unchanged (eager).
+
 ## gibble: the user-facing name for GPU tables (F51)
 
 * cuplyr's GPU tables are called gibbles. `print()` now starts with tibble's

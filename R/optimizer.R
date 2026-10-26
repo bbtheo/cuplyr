@@ -17,6 +17,38 @@
 # projection -> mutate fusion -> dead column pruning -> filter pushdown
 # -> filter reorder
 
+# Set helpers of the passes below: base `union()`/`setdiff()`/`intersect()` for
+# the character vectors (or NULL) the passes carry, without their
+# `as.vector()`/class dispatch, which the passes pay at every node. Same values
+# and order as the base functions (first occurrence, names dropped).
+opt_union <- function(x, y) unique.default(c(x, y))
+opt_diff <- function(x, y) {
+  x <- unique.default(x)
+  x[match(x, y, 0L) == 0L]
+}
+opt_intersect <- function(x, y) {
+  if (is.null(x) || is.null(y)) return(NULL)
+  x <- unique.default(x)
+  x[match(x, y, 0L) > 0L]
+}
+# The output column names of a mutate node's expressions.
+mutate_output_cols <- function(expressions) {
+  if (length(expressions) == 1L) {
+    .subset2(.subset2(expressions, 1L), "output_col")
+  } else {
+    vapply(expressions, `[[`, character(1), "output_col")
+  }
+}
+# unique(unlist(lapply(items, `[[`, field))): the columns a node's predicates or
+# expressions read. One item is the common case.
+node_field_union <- function(items, field) {
+  if (length(items) == 1L) {
+    unique.default(.subset2(.subset2(items, 1L), field))
+  } else {
+    unique.default(unlist(lapply(items, `[[`, field)))
+  }
+}
+
 #' Optimize an AST for GPU execution
 #'
 #' Applies all optimization passes in the correct order.
@@ -29,6 +61,12 @@ optimize_ast <- function(ast) {
   if (!inherits(ast, "ast_node")) {
     stop("Invalid lazy_ops: expected an AST node or NULL.", call. = FALSE)
   }
+
+  # Schema memo (R/ast.R): the passes ask for the same nodes' schemas again
+  # and again; compute() has already opened one that lowering shares.
+  memo_prev <- .schema_memo$plain
+  on.exit(.schema_memo$plain <- memo_prev, add = TRUE)
+  schema_memo_open()
 
   # Handle barriers: optimize segments separately
   ast <- optimize_with_barriers(ast)
@@ -78,7 +116,7 @@ optimize_with_barriers <- function(ast) {
     # with any pre-existing barrier, e.g. `arrange() |> filter()` in lazy
     # mode -- this was a latent, pre-existing bug in the barrier-splitting
     # logic itself, not specific to any one barrier type).
-    required_cols <- infer_schema(ast)$names
+    required_cols <- infer_schema_memo(ast)$names
 
     segment_root <- extract_segment_above_barrier(ast, barrier_node)
     optimized_segment <- optimize_segment(segment_root, required_cols)
@@ -103,12 +141,82 @@ optimize_with_barriers <- function(ast) {
 optimize_segment <- function(ast, required_cols = NULL) {
   if (is.null(ast)) return(NULL)
 
-  ast |>
-    push_down_projections(required_cols) |>
-    fuse_mutates() |>
-    prune_dead_columns(required_cols) |>
-    push_down_filters() |>
-    reorder_filters()
+  # The segment's output columns, once for both passes: projection pushdown
+  # keeps them as they are, so the second pass would infer the same names from
+  # its (rebuilt) tree.
+  if (is.null(required_cols)) {
+    required_cols <- infer_schema_memo(ast)$names
+  }
+
+  ast <- push_down_projections(ast, required_cols)
+
+  # A cheap scan of the node types says which later passes can change the
+  # plan; a pass that can't is skipped (it would rebuild the same tree). Each
+  # pass that runs can create what the next one looks for, so the scan is
+  # repeated after it.
+  feats <- segment_features(ast)
+  if (feats[["mutate_pair"]]) {
+    ast <- fuse_mutates(ast)
+  }
+  if (feats[["column_nodes"]]) {
+    ast <- prune_dead_columns(ast, required_cols)
+    feats <- segment_features(ast)
+  }
+  if (feats[["filter_over"]]) {
+    ast <- push_down_filters(ast)
+    feats <- segment_features(ast)
+  }
+  if (feats[["filter_pair"]]) {
+    ast <- reorder_filters(ast)
+  }
+  ast
+}
+
+#' What a segment holds, for skipping optimizer passes that cannot apply
+#'
+#' One walk over the plan (both sides of a join):
+#' - `mutate_pair`: a mutate directly over a mutate (`fuse_mutates()`)
+#' - `column_nodes`: any mutate or select (`prune_dead_columns()` only ever
+#'   changes those)
+#' - `filter_over`: a filter directly over a mutate, select or join
+#'   (`push_down_filters()`)
+#' - `filter_pair`: a filter directly over a filter (`reorder_filters()`)
+#'
+#' @param ast Root of a segment
+#' @return Named logical vector
+#' @keywords internal
+segment_features <- function(ast) {
+  mutate_pair <- column_nodes <- filter_over <- filter_pair <- FALSE
+  pending <- list(ast)
+  while (length(pending) > 0L) {
+    node <- pending[[length(pending)]]
+    pending[[length(pending)]] <- NULL
+    while (!is.null(node)) {
+      type <- .subset2(node, "type")
+      if (identical(type, "join")) {
+        pending[[length(pending) + 1L]] <- .subset2(node, "right")
+        node <- .subset2(node, "left")
+        next
+      }
+      input <- .subset2(node, "input")
+      input_type <- .subset2(input, "type")
+      if (identical(type, "mutate")) {
+        column_nodes <- TRUE
+        if (identical(input_type, "mutate")) mutate_pair <- TRUE
+      } else if (identical(type, "select")) {
+        column_nodes <- TRUE
+      } else if (identical(type, "filter") && !is.null(input_type)) {
+        if (input_type == "filter") {
+          filter_pair <- TRUE
+        } else if (input_type %in% c("mutate", "select", "join")) {
+          filter_over <- TRUE
+        }
+      }
+      node <- input
+    }
+  }
+  c(mutate_pair = mutate_pair, column_nodes = column_nodes,
+    filter_over = filter_over, filter_pair = filter_pair)
 }
 
 #' Find the next barrier node walking down from root
@@ -182,11 +290,17 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
   if (is.null(ast)) return(NULL)
 
   if (is.null(required_cols)) {
-    required_cols <- infer_schema(ast)$names
+    required_cols <- infer_schema_memo(ast)$names
   }
 
   # Always preserve group columns
-  required_cols <- union(required_cols, group_cols)
+  # With no group columns `required_cols` is used as passed and may hold
+  # duplicates (the base `union()` this replaced always deduped it). Most
+  # consumers dedupe again with opt_union()/opt_intersect(); the filter case's
+  # truncated-chain `else required_cols` branch and the rename pass-through do
+  # not, but duplicates can only come from a segment root with duplicated
+  # output names, which only positional (barrier) nodes produce.
+  if (length(group_cols) > 0L) required_cols <- opt_union(required_cols, group_cols)
 
   switch(ast$type,
     "source" = {
@@ -194,7 +308,7 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       if (anyDuplicated(ast$schema$names) > 0L) {
         return(ast)
       }
-      keep <- intersect(ast$schema$names, required_cols)
+      keep <- opt_intersect(ast$schema$names, required_cols)
       # A downstream node that reads no column at all (a constant
       # `mutate(a = TRUE)` under a select) would prune the source to zero
       # columns, and a zero-column table has no row count to broadcast the
@@ -209,11 +323,11 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       }
     },
     "filter" = {
-      pred_cols <- unique(unlist(lapply(ast$predicates, `[[`, "cols")))
-      needed <- union(required_cols, pred_cols)
+      pred_cols <- node_field_union(.subset2(ast, "predicates"), "cols")
+      needed <- opt_union(required_cols, pred_cols)
       ast$input <- push_down_projections(ast$input, needed, group_cols)
 
-      extra_cols <- setdiff(pred_cols, required_cols)
+      extra_cols <- opt_diff(pred_cols, required_cols)
       if (length(extra_cols) > 0) {
         # With a complete input chain, keep the input's column order and
         # only names it actually has: `required_cols` is in the parent's
@@ -224,7 +338,7 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
         # `required_cols` (computed from the untruncated tree by
         # optimize_with_barriers()).
         keep <- if (input_chain_complete(ast$input)) {
-          intersect(infer_schema(ast$input)$names, required_cols)
+          opt_intersect(infer_schema_memo(ast$input)$names, required_cols)
         } else {
           required_cols
         }
@@ -233,7 +347,7 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
         # keep one predicate column (same guard as the "source" case).
         if (length(keep) == 0L) {
           keep <- if (input_chain_complete(ast$input)) {
-            intersect(infer_schema(ast$input)$names, pred_cols)[1]
+            opt_intersect(infer_schema_memo(ast$input)$names, pred_cols)[1]
           } else {
             pred_cols[1]
           }
@@ -245,8 +359,8 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       }
     },
     "mutate" = {
-      expr_inputs <- unique(unlist(lapply(ast$expressions, `[[`, "input_cols")))
-      outputs <- vapply(ast$expressions, `[[`, character(1), "output_col")
+      expr_inputs <- node_field_union(.subset2(ast, "expressions"), "input_cols")
+      outputs <- mutate_output_cols(.subset2(ast, "expressions"))
       # Only genuinely NEW output columns can be safely dropped from the
       # requirement passed upstream -- an output whose name already exists
       # in the input schema is a REPLACE-in-place (e.g. `mutate(s = sin(x))`
@@ -261,9 +375,9 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       # schema used to label the collected result still expected the
       # original column order, producing a silent column-value rotation
       # bug (found via the T6 oracle tests -- see test-dplyr-mutate.R).
-      input_schema_names <- infer_schema(ast$input)$names
-      new_outputs <- setdiff(outputs, input_schema_names)
-      needed <- union(setdiff(required_cols, new_outputs), expr_inputs)
+      input_schema_names <- infer_schema_memo(ast$input)$names
+      new_outputs <- opt_diff(outputs, input_schema_names)
+      needed <- opt_union(opt_diff(required_cols, new_outputs), expr_inputs)
       ast$input <- push_down_projections(ast$input, needed, group_cols)
       ast
     },
@@ -280,7 +394,7 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
         # already a left column, no origin split needed. The right side
         # contributes nothing to the output at all; it only needs its own
         # join-key columns (`by$right`) to probe against.
-        left_needed <- union(required_cols, ast$by$left)
+        left_needed <- opt_union(required_cols, ast$by$left)
         right_needed <- unique(ast$by$right)
       } else {
         needed <- join_side_requirements(ast, required_cols)
@@ -321,20 +435,20 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
     "arrange" = {
       # `.by_group = TRUE` sorts by `ast$groups` too (lower_arrange())
       sort_cols <- vapply(ast$sort_specs, `[[`, character(1), "col_name")
-      needed <- union(union(required_cols, sort_cols), ast$groups)
+      needed <- opt_union(opt_union(required_cols, sort_cols), ast$groups)
       ast$input <- push_down_projections(ast$input, needed, group_cols)
       ast
     },
     "summarise" = {
       agg_inputs <- unique(unlist(lapply(ast$aggregations, `[[`, "input_col")))
       agg_inputs <- agg_inputs[!is.na(agg_inputs)]
-      needed <- union(ast$groups, agg_inputs)
+      needed <- opt_union(ast$groups, agg_inputs)
       ast$input <- push_down_projections(ast$input, needed, ast$groups)
       ast
     },
     "reframe" = {
       # reads every column of its (wide) input; nothing is pruned below it
-      ast$input <- push_down_projections(ast$input, infer_schema(ast$input)$names)
+      ast$input <- push_down_projections(ast$input, infer_schema_memo(ast$input)$names)
       ast
     },
     "window" = {
@@ -343,7 +457,7 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
         use.names = FALSE
       ))
       spec_cols <- spec_cols[!is.na(spec_cols)]
-      needed <- union(union(required_cols, ast$group_cols), spec_cols)
+      needed <- opt_union(opt_union(required_cols, ast$group_cols), spec_cols)
       ast$input <- push_down_projections(ast$input, needed, ast$group_cols)
       ast
     },
@@ -369,7 +483,7 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       # `required_cols` (computed from this node's own OUTPUT schema)
       # references them -- true even for `.keep_all = TRUE`, where
       # `required_cols` can be a strict subset of the full input schema.
-      needed <- union(required_cols, ast$key_cols)
+      needed <- opt_union(required_cols, ast$key_cols)
       # keyed by position (duplicated names): nothing below is pruned by name
       if (!is.null(ast$key_positions)) needed <- NULL
       ast$input <- push_down_projections(ast$input, needed, group_cols)
@@ -382,7 +496,7 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       # excluded from this node's own output schema by
       # `infer_schema.ast_slice`).
       extra <- if (!is.null(ast$order_col)) ast$order_col else character(0)
-      needed <- union(required_cols, extra)
+      needed <- opt_union(required_cols, extra)
       ast$input <- push_down_projections(ast$input, needed, group_cols)
       ast
     },
@@ -492,7 +606,7 @@ try_fuse_mutate_pair <- function(lower, upper) {
   upper_inputs <- unique(unlist(lapply(upper$expressions, `[[`, "input_cols")))
 
   # Guard 2: Count intermediate columns (lower outputs the upper reads)
-  if (length(intersect(upper_inputs, lower_outputs)) > 4) {
+  if (length(opt_intersect(upper_inputs, lower_outputs)) > 4) {
     return(NULL)
   }
 
@@ -518,18 +632,24 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
   if (is.null(ast)) return(NULL)
 
   if (is.null(required_cols)) {
-    required_cols <- infer_schema(ast)$names
+    required_cols <- infer_schema_memo(ast)$names
   }
 
-  required_cols <- union(required_cols, group_cols)
+  # As in push_down_projections(), with no group columns `required_cols` is
+  # used as passed and may hold duplicates. Most cases dedupe again with
+  # opt_union()/opt_intersect(); the mutate, rename and default cases can pass
+  # it down as is (mutate only tests membership with it), and duplicates can
+  # only come from a segment root with duplicated output names, which only
+  # positional (barrier) nodes produce.
+  if (length(group_cols) > 0L) required_cols <- opt_union(required_cols, group_cols)
 
   switch(ast$type,
     "source" = {
       ast
     },
     "filter" = {
-      pred_cols <- unique(unlist(lapply(ast$predicates, `[[`, "cols")))
-      needed <- union(required_cols, pred_cols)
+      pred_cols <- node_field_union(.subset2(ast, "predicates"), "cols")
+      needed <- opt_union(required_cols, pred_cols)
       ast$input <- prune_dead_columns(ast$input, needed, group_cols)
       ast
     },
@@ -559,7 +679,7 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
           # unoptimized schema -- values under the wrong names. Cost: every
           # earlier writer of a still-required name is kept, including pure
           # dead overwrites (`mutate(a = x) |> mutate(a = y)` computes both).
-          required <- union(required, expr$input_cols)
+          required <- opt_union(required, expr$input_cols)
         }
       }
 
@@ -574,7 +694,7 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
     "summarise" = {
       agg_inputs <- unique(unlist(lapply(ast$aggregations, `[[`, "input_col")))
       agg_inputs <- agg_inputs[!is.na(agg_inputs)]
-      needed <- union(ast$groups, agg_inputs)
+      needed <- opt_union(ast$groups, agg_inputs)
       ast$input <- prune_dead_columns(ast$input, needed, ast$groups)
       ast
     },
@@ -583,7 +703,7 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
         ast$input <- prune_dead_columns(ast$input, NULL, group_cols)
         return(ast)
       }
-      keep <- intersect(ast$columns, required_cols)
+      keep <- opt_intersect(ast$columns, required_cols)
       if (length(keep) == 0) {
         keep <- ast$columns
       }
@@ -596,7 +716,7 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
         # Same rationale as push_down_projections()'s "join" case above:
         # semi/anti's output is x's schema verbatim, right only needs its
         # own join keys.
-        left_needed <- union(required_cols, ast$by$left)
+        left_needed <- opt_union(required_cols, ast$by$left)
         right_needed <- unique(ast$by$right)
       } else {
         needed <- join_side_requirements(ast, required_cols)
@@ -619,12 +739,12 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
     "arrange" = {
       # `.by_group = TRUE` sorts by `ast$groups` too (lower_arrange())
       sort_cols <- vapply(ast$sort_specs, `[[`, character(1), "col_name")
-      needed <- union(union(required_cols, sort_cols), ast$groups)
+      needed <- opt_union(opt_union(required_cols, sort_cols), ast$groups)
       ast$input <- prune_dead_columns(ast$input, needed, group_cols)
       ast
     },
     "reframe" = {
-      ast$input <- prune_dead_columns(ast$input, infer_schema(ast$input)$names)
+      ast$input <- prune_dead_columns(ast$input, infer_schema_memo(ast$input)$names)
       ast
     },
     "window" = {
@@ -633,7 +753,7 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
         use.names = FALSE
       ))
       spec_cols <- spec_cols[!is.na(spec_cols)]
-      needed <- union(union(required_cols, ast$group_cols), spec_cols)
+      needed <- opt_union(opt_union(required_cols, ast$group_cols), spec_cols)
       ast$input <- prune_dead_columns(ast$input, needed, ast$group_cols)
       ast
     },
@@ -656,14 +776,14 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
       ast
     },
     "distinct" = {
-      needed <- union(required_cols, ast$key_cols)
+      needed <- opt_union(required_cols, ast$key_cols)
       if (!is.null(ast$key_positions)) needed <- NULL
       ast$input <- prune_dead_columns(ast$input, needed, group_cols)
       ast
     },
     "slice" = {
       extra <- if (!is.null(ast$order_col)) ast$order_col else character(0)
-      needed <- union(required_cols, extra)
+      needed <- opt_union(required_cols, extra)
       ast$input <- prune_dead_columns(ast$input, needed, group_cols)
       ast
     },
@@ -696,11 +816,11 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
 #' subtree.)
 #' @keywords internal
 join_side_requirements <- function(ast, required_cols) {
-  left_schema <- infer_schema(ast$left)
-  right_schema <- infer_schema(ast$right)
+  left_schema <- infer_schema_memo(ast$left)
+  right_schema <- infer_schema_memo(ast$right)
   info <- build_join_output_info(left_schema, right_schema, ast$by,
                                  suffix = ast$suffix, keep = ast$keep)
-  idx <- match(intersect(required_cols, info$names), info$names)
+  idx <- match(opt_intersect(required_cols, info$names), info$names)
   idx <- idx[!is.na(idx)]
   is_left <- info$origin[idx] == "left"
   src <- info$source_names[idx]
@@ -709,8 +829,8 @@ join_side_requirements <- function(ast, required_cols) {
 
   # Collision partners of renamed (suffixed) required columns.
   renamed <- info$names[idx] != src
-  left_needed <- unique(c(left_needed, intersect(src[renamed & !is_left], left_schema$names)))
-  right_needed <- unique(c(right_needed, intersect(src[renamed & is_left], right_schema$names)))
+  left_needed <- unique(c(left_needed, opt_intersect(src[renamed & !is_left], left_schema$names)))
+  right_needed <- unique(c(right_needed, opt_intersect(src[renamed & is_left], right_schema$names)))
 
   prune <- function(schema, keep) {
     k <- schema$names %in% keep
@@ -751,7 +871,7 @@ join_keep_a_column <- function(ast, side, needed) {
   if (length(needed) > 0L || !(isTRUE(ast$cross_by) || identical(ast$join_type, "cross"))) {
     return(needed)
   }
-  infer_schema(side)$names[1L]
+  infer_schema_memo(side)$names[1L]
 }
 
 # -----------------------------------------------------------------------------
@@ -844,7 +964,7 @@ push_down_filters <- function(ast) {
     return(ast)
   }
 
-  filter_cols <- unique(unlist(lapply(ast$predicates, `[[`, "cols")))
+  filter_cols <- node_field_union(.subset2(ast, "predicates"), "cols")
 
   if (input$type == "mutate") {
     # A vector literal is tied to row positions (and its length to the row
@@ -856,10 +976,10 @@ push_down_filters <- function(ast) {
     if (any(vapply(input$expressions, function(e) ir_has_rw_flag_agg(e$ir), logical(1)))) {
       return(ast)
     }
-    mutate_outputs <- vapply(input$expressions, `[[`, character(1), "output_col")
+    mutate_outputs <- mutate_output_cols(.subset2(input, "expressions"))
 
     # Do not push if filter references any mutate outputs (including replacements)
-    if (length(intersect(filter_cols, mutate_outputs)) > 0) {
+    if (length(opt_intersect(filter_cols, mutate_outputs)) > 0) {
       return(ast)
     }
 
@@ -897,8 +1017,8 @@ push_down_filters <- function(ast) {
       return(input)
     }
 
-    left_schema <- infer_schema(input$left)
-    right_schema <- infer_schema(input$right)
+    left_schema <- infer_schema_memo(input$left)
+    right_schema <- infer_schema_memo(input$right)
     info <- build_join_output_info(left_schema, right_schema, input$by,
                                    suffix = input$suffix, keep = input$keep)
 

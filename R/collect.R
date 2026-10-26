@@ -120,18 +120,21 @@ ungrouped_frame_meta <- function(frame, x) {
 # `collect()` is this plus the group structure.
 collect_frame <- function(x) {
   # Handle lazy evaluation: compute first if there are pending ops
-  if (is_tbl_gpu(x) && identical(x$exec_mode, "lazy") && has_pending_ops(x)) {
-    x <- compute(x)
+  if (is_tbl_gpu(x) && identical(.subset2(x, "exec_mode"), "lazy") && has_pending_ops(x)) {
+    plan <- compute_plan(x)
+    ptr <- plan$ptr
+    final_schema <- plan$schema
+  } else {
+    ptr <- .subset2(x, "ptr")
+    # Get final schema (might have been updated by lazy ops)
+    final_schema <- .subset2(x, "schema")
   }
 
-  if (is.null(x$ptr)) {
+  if (is.null(ptr)) {
     stop("Cannot collect: GPU table pointer is NULL.\n",
          "The table may have been garbage collected or never materialized.",
          call. = FALSE)
   }
-
-  # Get final schema (might have been updated by lazy ops)
-  final_schema <- x$schema
 
   if (length(final_schema$names) == 0L) {
     # Zero-column table: the row count lives on the R side (new_tbl_gpu()).
@@ -143,7 +146,7 @@ collect_frame <- function(x) {
     return(tibble::tibble(.rows = x[["nrow"]]))
   }
 
-  df <- wrap_gpu_call("collect", gpu_collect(x$ptr, final_schema$names))
+  df <- wrap_gpu_call("collect", gpu_collect(ptr, final_schema$names))
   # "minimal": a relocate()/rename() result may carry duplicated names
   result <- tibble::as_tibble(df, .name_repair = "minimal")
 

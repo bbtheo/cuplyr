@@ -304,7 +304,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   by_cols <- resolve_by(.data, by_quo, ".by", call = call)
   # (a rowwise table's groups are its rowwise vars: nothing is computed over them)
   rowwise <- is_rowwise_gpu(.data)
-  verb_groups <- if (!rlang::quo_is_null(by_quo)) by_cols else if (rowwise) character() else .data$groups
+  verb_groups <- if (!rlang::quo_is_null(by_quo)) by_cols else if (rowwise) character() else .subset2(.data, "groups")
 
   if (!rlang::quo_is_null(by_quo) && isTRUE(.preserve)) return(cpu())
   if (complement && length(current_schema(.data)$names) == 0L) return(cpu())
@@ -505,7 +505,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     # overflowing integer arithmetic), and a sum nested in another window call
     # (`max(x * sum(y))`), which a later stage reads as INT32, raises
     # `cuplyr_error_sum_overflow` at collect() (filter_plan_window()).
-    eager <- identical(.data$exec_mode, "eager")
+    eager <- identical(.subset2(.data, "exec_mode"), "eager")
     push_stages <- function(d) {
       for (stage in plan$stages) {
         if (length(stage$pre) > 0) {
@@ -1057,7 +1057,7 @@ parse_filter_ir <- function(quo, schema) {
 # @return A filtered tbl_gpu object
 # @keywords internal
 filter_eval_mask <- function(.data, quo, eval_result = rlang::eval_tidy(quo)) {
-  if (identical(.data$exec_mode, "lazy") && has_pending_ops(.data)) {
+  if (identical(.subset2(.data, "exec_mode"), "lazy") && has_pending_ops(.data)) {
     .data <- compute(.data)
   }
 
@@ -1074,7 +1074,7 @@ filter_eval_mask <- function(.data, quo, eval_result = rlang::eval_tidy(quo)) {
 
   n_rows <- dim(.data)[1]
 
-  if (length(.data$schema$names) == 0L) {
+  if (length(.subset2(.data, "schema")$names) == 0L) {
     # Zero-column table: no cudf column to mask, so only the R-side count
     # changes (dim() is NA when nobody recorded one).
     if (is.na(n_rows)) {
@@ -1086,10 +1086,10 @@ filter_eval_mask <- function(.data, quo, eval_result = rlang::eval_tidy(quo)) {
            ") must match number of rows (", n_rows, ")", call. = FALSE)
     }
     return(carry_frame_meta(new_tbl_gpu(
-      ptr = .data$ptr,
-      schema = .data$schema,
-      groups = .data$groups,
-      exec_mode = .data$exec_mode,
+      ptr = .subset2(.data, "ptr"),
+      schema = .subset2(.data, "schema"),
+      groups = .subset2(.data, "groups"),
+      exec_mode = .subset2(.data, "exec_mode"),
       nrow = sum(rep_len(eval_result, n_rows) %in% TRUE)
     ), .data))
   }
@@ -1097,9 +1097,9 @@ filter_eval_mask <- function(.data, quo, eval_result = rlang::eval_tidy(quo)) {
   if (length(eval_result) == 1) {
     # Single boolean: TRUE keeps all rows, FALSE keeps none
     if (isTRUE(eval_result)) {
-      new_ptr <- wrap_gpu_call("filter_bool_true", gpu_filter_bool(.data$ptr, TRUE))
+      new_ptr <- wrap_gpu_call("filter_bool_true", gpu_filter_bool(.subset2(.data, "ptr"), TRUE))
     } else {
-      new_ptr <- wrap_gpu_call("filter_bool_false", gpu_filter_bool(.data$ptr, FALSE))
+      new_ptr <- wrap_gpu_call("filter_bool_false", gpu_filter_bool(.subset2(.data, "ptr"), FALSE))
     }
   } else {
     # Logical vector: use as mask
@@ -1110,21 +1110,21 @@ filter_eval_mask <- function(.data, quo, eval_result = rlang::eval_tidy(quo)) {
 
     # Check for all TRUE or all FALSE (optimize common cases)
     if (all(eval_result, na.rm = TRUE) && !any(is.na(eval_result))) {
-      new_ptr <- wrap_gpu_call("filter_bool_all_true", gpu_filter_bool(.data$ptr, TRUE))
+      new_ptr <- wrap_gpu_call("filter_bool_all_true", gpu_filter_bool(.subset2(.data, "ptr"), TRUE))
     } else if (!any(eval_result, na.rm = TRUE)) {
-      new_ptr <- wrap_gpu_call("filter_bool_all_false", gpu_filter_bool(.data$ptr, FALSE))
+      new_ptr <- wrap_gpu_call("filter_bool_all_false", gpu_filter_bool(.subset2(.data, "ptr"), FALSE))
     } else {
       # Mixed: apply mask
-      new_ptr <- wrap_gpu_call("filter_mask", gpu_filter_mask(.data$ptr, eval_result))
+      new_ptr <- wrap_gpu_call("filter_mask", gpu_filter_mask(.subset2(.data, "ptr"), eval_result))
     }
   }
 
   carry_frame_meta(new_tbl_gpu(
     ptr = new_ptr,
-    schema = .data$schema,
-    groups = .data$groups,
-    group_drop = .data$group_drop %||% TRUE,
-    exec_mode = .data$exec_mode
+    schema = .subset2(.data, "schema"),
+    groups = .subset2(.data, "groups"),
+    group_drop = .subset2(.data, "group_drop") %||% TRUE,
+    exec_mode = .subset2(.data, "exec_mode")
   ), .data)
 }
 

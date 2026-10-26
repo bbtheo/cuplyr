@@ -96,8 +96,8 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
 
   if (length(dots) == 0) {
     # `arrange(group_by(df, g), .by_group = TRUE)` still sorts by the groups
-    if (isTRUE(.by_group) && length(.data$groups) > 0) {
-      return(push_op(.data, ast_arrange(input_node(.data), list(), .data$groups)))
+    if (isTRUE(.by_group) && length(.subset2(.data, "groups")) > 0) {
+      return(push_op(.data, ast_arrange(input_node(.data), list(), .subset2(.data, "groups"))))
     }
     return(.data)
   }
@@ -129,7 +129,7 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
 
   # `arrange(pick(NULL))` and friends select no column: nothing to sort by,
   # unless `.by_group = TRUE` (then the same node as the no-dots case)
-  if (length(sort_specs) == 0 && !(isTRUE(.by_group) && length(.data$groups) > 0)) {
+  if (length(sort_specs) == 0 && !(isTRUE(.by_group) && length(.subset2(.data, "groups")) > 0)) {
     return(.data)
   }
 
@@ -146,8 +146,8 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
   # dplyr's arrange.grouped_df); the user's own desc() on a group column
   # survives as a later no-op tiebreaker via lower_arrange()'s dedup logic.
   groups_for_arrange <- character()
-  if (isTRUE(.by_group) && length(.data$groups) > 0) {
-    groups_for_arrange <- .data$groups
+  if (isTRUE(.by_group) && length(.subset2(.data, "groups")) > 0) {
+    groups_for_arrange <- .subset2(.data, "groups")
   }
 
   push_op(.data, ast_arrange(input_node(.data), sort_specs, groups_for_arrange))
@@ -193,7 +193,7 @@ arrange_dot_is_native <- function(quo, schema) {
 # @keywords internal
 parse_arrange_expr <- function(quo, .data, schema = NULL) {
   if (is.null(schema)) {
-    schema <- .data$schema
+    schema <- .subset2(.data, "schema")
   }
   expr <- rlang::quo_get_expr(quo)
 

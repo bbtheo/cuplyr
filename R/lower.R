@@ -36,7 +36,7 @@ lower_and_execute <- function(ast, source_ptr) {
 #' @keywords internal
 lower_select <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
-  input_schema <- infer_schema(ast$input)
+  input_schema <- infer_schema_memo(ast$input)
   indices <- (ast$positions %||% match(ast$columns, input_schema$names)) - 1L
   gpu_select(input_ptr, indices)
 }
@@ -53,7 +53,7 @@ lower_select <- function(ast, source_ptr) {
 #' @keywords internal
 lower_filter <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
-  input_schema <- infer_schema(ast$input)
+  input_schema <- infer_schema_memo(ast$input)
 
   if (length(ast$predicates) == 0) {
     return(input_ptr)
@@ -144,7 +144,7 @@ check_rowwise_flags <- function(flags, in_filter = FALSE) {
 #' @keywords internal
 lower_mutate <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
-  input_schema <- infer_schema(ast$input)
+  input_schema <- infer_schema_memo(ast$input)
   expressions <- ast$expressions
 
   # Vector literals (`y = 1:5`): upload each as a temp column appended to the
@@ -227,7 +227,7 @@ mutate_vector_size_error <- function(n_rows, vec) {
 #' @keywords internal
 lower_arrange <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
-  input_schema <- infer_schema(ast$input)
+  input_schema <- infer_schema_memo(ast$input)
 
   col_indices <- integer(length(ast$sort_specs))
   descending <- logical(length(ast$sort_specs))
@@ -256,7 +256,7 @@ lower_arrange <- function(ast, source_ptr) {
 #' @keywords internal
 lower_summarise <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
-  input_schema <- infer_schema(ast$input)
+  input_schema <- infer_schema_memo(ast$input)
 
   # Build aggregation specs
   group_indices <- if (length(ast$groups) > 0) {
@@ -337,7 +337,7 @@ lower_summarise <- function(ast, source_ptr) {
 #' @keywords internal
 lower_reframe <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
-  input_schema <- infer_schema(ast$input)
+  input_schema <- infer_schema_memo(ast$input)
   k <- ast$k
 
   # No groups at all (a grouped 0-row input) and a multi-row result: dplyr
@@ -387,7 +387,7 @@ abort_sum_overflow <- function() {
 #' @keywords internal
 lower_distinct <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
-  input_schema <- infer_schema(ast$input)
+  input_schema <- infer_schema_memo(ast$input)
 
   key_idx <- (ast$key_positions %||% match(ast$key_cols, input_schema$names)) - 1L
 
@@ -432,7 +432,7 @@ lower_slice <- function(ast, source_ptr) {
       gpu_gather_rows(list(input_ptr), as.numeric(pos) - 1)
     },
     "rank" = {
-      input_schema <- infer_schema(ast$input)
+      input_schema <- infer_schema_memo(ast$input)
       col_idx <- match(ast$order_col, input_schema$names) - 1L
 
       result_ptr <- gpu_slice_rank(input_ptr, col_idx, ast$descending, ast$amount,
@@ -497,8 +497,8 @@ lower_join <- function(ast, source_ptr) {
   left_ptr <- lower_and_execute(ast$left, source_ptr)
   right_ptr <- lower_and_execute(ast$right, source_ptr)
 
-  left_schema <- infer_schema(ast$left)
-  right_schema <- infer_schema(ast$right)
+  left_schema <- infer_schema_memo(ast$left)
+  right_schema <- infer_schema_memo(ast$right)
 
   if (isTRUE(ast$cross_by)) {
     return(lower_cross_by_join(ast, left_ptr, right_ptr, left_schema, right_schema))
@@ -956,7 +956,7 @@ lower_cross_by_join <- function(ast, left_ptr, right_ptr, left_schema, right_sch
 #' @keywords internal
 lower_window <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(ast$input, source_ptr)
-  input_schema <- infer_schema(ast$input)
+  input_schema <- infer_schema_memo(ast$input)
 
   specs <- ast$specs
   if (length(specs) == 0) {

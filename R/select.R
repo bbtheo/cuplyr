@@ -96,7 +96,7 @@ select.tbl_gpu <- function(.data, ...) {
   vars <- sel$loc
   .data <- sel$data
 
-  groups <- .data$groups
+  groups <- .subset2(.data, "groups")
   if (length(groups) > 0L) {
     vars <- select_ensure_group_vars(vars, schema$names, groups)
   }
@@ -405,7 +405,7 @@ type_only_body <- function(expr, args, env) {
 #   had to be read, so the plan does not run twice)
 # @keywords internal
 resolve_selection <- function(.data, schema, quos, verb, resolve) {
-  groups <- .data$groups
+  groups <- .subset2(.data, "groups")
   if (selection_is_type_only(quos, NULL, schema$names)) {
     return(list(loc = resolve(tidyselect_proxy(schema, groups)), data = .data))
   }

@@ -55,33 +55,62 @@ compute.tbl_gpu <- function(x, ..., name = NULL) {
   }
 
   # Backward compatibility: older objects may store no pending ops as list().
-  if (is.list(x$lazy_ops) && length(x$lazy_ops) == 0) {
+  ops <- .subset2(x, "lazy_ops")
+  if (is.list(ops) && length(ops) == 0) {
     x$lazy_ops <- NULL
+    ops <- NULL
   }
 
-  if (!is.null(x$lazy_ops) && !inherits(x$lazy_ops, "ast_node")) {
+  if (!is.null(ops) && !inherits(ops, "ast_node")) {
     stop("Invalid lazy_ops: expected an AST node or NULL.", call. = FALSE)
   }
 
   # Nothing to do if no pending ops or in eager mode
-  if (is.null(x$lazy_ops) || x$exec_mode == "eager") {
+  if (is.null(ops) || .subset2(x, "exec_mode") == "eager") {
     return(x)
   }
 
+  plan <- compute_plan(x, ops)
+
+  copy_frame_meta(new_tbl_gpu(
+    ptr = plan$ptr,
+    schema = plan$schema,
+    lazy_ops = NULL,
+    groups = .subset2(x, "groups"),
+    exec_mode = .subset2(x, "exec_mode"),
+    group_drop = .subset2(x, "group_drop") %||% TRUE,
+    nrow = .subset2(x, "nrow"),
+    fixed_keys = .subset2(x, "fixed_keys"),
+    unspecified = .subset2(x, "unspecified"),
+    rowwise = is_rowwise_gpu(x)
+  ), x)
+}
+
+# Optimize and run the pending plan of a lazy `x`: the GPU pointer of the result
+# and its schema, which is all `collect()` needs (compute() wraps them in a
+# tbl_gpu).
+# @param ops `x$lazy_ops`, an AST node
+# @keywords internal
+compute_plan <- function(x, ops = .subset2(x, "lazy_ops")) {
+  # One schema memo for the optimizer and the lowering (R/ast.R): each node's
+  # schema is inferred once, so both are linear in the plan's depth.
+  memo_prev <- .schema_memo$plain
+  on.exit(.schema_memo$plain <- memo_prev, add = TRUE)
+  schema_memo_open()
+
   # Run optimizer and execute
-  optimized <- optimize_ast(x$lazy_ops)
-  # infer_schema_full() (R/execute.R), not plain infer_schema(): the latter
-  # only threads factor_levels through an ast_join node (Phase 11 L2 Bug 1)
-  # -- every other node type needs propagate_factor_levels() reapplied at
-  # each level, which infer_schema_full() does recursively.
-  final_schema <- infer_schema_full(x$lazy_ops)
+  optimized <- optimize_ast(ops)
+  # The stored schema (R/execute.R `current_schema()`) is the plan's output
+  # schema with its factor levels and POSIXct zones: every writer of
+  # `lazy_ops` stores what `infer_schema_full(lazy_ops)` would give.
+  final_schema <- current_schema(x)
 
   # Safety net: the result is named by the unoptimized schema but holds the
   # optimized plan's columns by position. Passes keep the output columns and
   # their order by contract; if one ever reorders them, gather back by name
   # (rather than return values under the wrong names). A different column set
   # is a bug in a pass, so fail loudly.
-  optimized_names <- infer_schema(optimized)$names
+  optimized_names <- infer_schema_memo(optimized)$names
   reorder <- NULL
   if (!identical(optimized_names, final_schema$names)) {
     if (anyDuplicated(optimized_names) > 0 ||
@@ -98,22 +127,11 @@ compute.tbl_gpu <- function(x, ..., name = NULL) {
   # errors pass through as lowering raised them (`reword = FALSE`), as they
   # did before F58.
   new_ptr <- wrap_gpu_call("compute", reword = FALSE, {
-    ptr <- lower_and_execute(optimized, x$ptr)
+    ptr <- lower_and_execute(optimized, .subset2(x, "ptr"))
     if (is.null(reorder)) ptr else gpu_select(ptr, reorder)
   })
 
-  copy_frame_meta(new_tbl_gpu(
-    ptr = new_ptr,
-    schema = final_schema,
-    lazy_ops = NULL,
-    groups = x$groups,
-    exec_mode = x$exec_mode,
-    group_drop = x$group_drop %||% TRUE,
-    nrow = x[["nrow"]],
-    fixed_keys = x[["fixed_keys"]],
-    unspecified = x[["unspecified"]],
-    rowwise = is_rowwise_gpu(x)
-  ), x)
+  list(ptr = new_ptr, schema = final_schema)
 }
 
 #' Create a subquery barrier without executing
@@ -152,6 +170,10 @@ collapse.tbl_gpu <- function(x, ...) {
   }
 
   x$lazy_ops <- ast_barrier(x$lazy_ops)
+  # A barrier passes its input's columns through; the stored schema is the plan's
+  # (current_schema()), which also normalizes the empty metadata slots a table
+  # fresh from tbl_gpu() carries as explicit NULLs.
+  x$schema <- infer_schema_full(x$lazy_ops)
   x
 }
 

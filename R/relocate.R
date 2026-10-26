@@ -80,7 +80,7 @@ relocate.tbl_gpu <- function(.data, ..., .before = NULL, .after = NULL) {
 
   out <- push_select_rename(.data, schema$names, loc)
 
-  if (length(.data$groups) > 0L) {
+  if (length(.subset2(.data, "groups")) > 0L) {
     out <- set_groups_by_position(out, .data, loc, schema$names)
   }
   if (is_rowwise_gpu(.data) && !is_rowwise_gpu(out)) {

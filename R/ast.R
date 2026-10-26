@@ -575,6 +575,174 @@ infer_schema <- function(node) {
   UseMethod("infer_schema")
 }
 
+#' `infer_schema()` through the schema memo
+#'
+#' What the methods, the optimizer and the lowering call to get a node's
+#' schema. Outside a memo scope (see `schema_memo_open()`) it is plain
+#' `infer_schema()`. Inside one (an outermost `compute()`, an eager chain's
+#' lowering, `show_query()`) the result is remembered by node identity, so
+#' inferring every node's input schema along a plan is linear in its depth
+#' instead of quadratic.
+#'
+#' @param node An AST node (or `NULL`)
+#' @return List with `names`, `types` (plus whatever `infer_schema()` gives)
+#' @keywords internal
+infer_schema_memo <- function(node) {
+  memo <- .schema_memo$plain
+  if (is.null(memo) || !is.list(node)) {
+    return(infer_schema(node))
+  }
+  key <- obj_address(node)
+  hit <- memo[[key]]
+  if (!is.null(hit)) {
+    return(.subset2(hit, "schema"))
+  }
+  # What the infer_schema() methods say, without their S3 dispatch.
+  schema <- switch(.subset2(node, "type"),
+    source = .subset2(node, "schema"),
+    join = infer_schema(node),
+    infer_schema_from(node, infer_schema_memo(.subset2(node, "input")))
+  )
+  # The entry holds `node`, so its address cannot be reused while the memo
+  # lives, and a rewritten node (`node$input <- ...` copies a shared list) has
+  # a new address: an entry is never stale.
+  memo[[key]] <- list(node = node, schema = schema)
+  schema
+}
+
+# Memo of `infer_schema()` by node identity, alive for one outermost
+# `compute()` / eager chain lowering. Nodes are never annotated: the
+# optimizer rewrites them with `node$input <- ...`.
+.schema_memo <- new.env(parent = emptyenv())
+
+# Start a memo scope unless an enclosing one is active (nested
+# compute()/lowering), which is shared: entries are keyed by identity of nodes
+# the memo holds, so sharing is always correct. Callers save the old state and
+# register the restoring handler BEFORE opening, so an interrupt can't leave a
+# scope open for the session (the pattern of wrap_gpu_call()):
+#   memo_prev <- .schema_memo$plain
+#   on.exit(.schema_memo$plain <- memo_prev, add = TRUE)
+#   schema_memo_open()
+# @return TRUE when this call opened the scope.
+# @keywords internal
+schema_memo_open <- function() {
+  if (!is.null(.schema_memo$plain)) {
+    return(FALSE)
+  }
+  .schema_memo$plain <- new.env(hash = TRUE, parent = emptyenv())
+  TRUE
+}
+
+#' Output `names`/`types` of a node from its input's schema
+#'
+#' The body of every `infer_schema.ast_*()` method, with the input schema
+#' passed in: `push_op()` calls it with the schema it already has, so recording
+#' a verb never walks the pending plan. Joins have two inputs and go through
+#' `infer_join_schema()`.
+#'
+#' @param node A single-input AST node
+#' @param input_schema Schema of `node$input` (extra fields such as
+#'   `factor_levels` are tolerated; pass-through nodes return it unchanged)
+#' @return List with `names` and `types`
+#' @keywords internal
+infer_schema_from <- function(node, input_schema) {
+  switch(.subset2(node, "type"),
+    filter = , arrange = , barrier = input_schema,
+    select = {
+      idx <- node$positions %||% match(node$columns, input_schema$names)
+      list(
+        names = input_schema$names[idx],
+        types = input_schema$types[idx]
+      )
+    },
+    mutate = {
+      result_names <- input_schema$names
+      result_types <- input_schema$types
+
+      for (expr in node$expressions) {
+        existing_idx <- match(expr$output_col, result_names)
+        if (!is.na(existing_idx)) {
+          result_types[existing_idx] <- expr$output_type
+        } else {
+          result_names <- c(result_names, expr$output_col)
+          result_types <- c(result_types, expr$output_type)
+        }
+      }
+
+      list(names = result_names, types = result_types)
+    },
+    rename = {
+      result_names <- input_schema$names
+      idx <- node$positions %||% match(node$old_names, result_names)
+      result_names[idx] <- node$new_names
+      list(names = result_names, types = input_schema$types)
+    },
+    distinct = {
+      if (isTRUE(node$keep_all)) {
+        return(input_schema)
+      }
+
+      idx <- node$key_positions %||% match(node$key_cols, input_schema$names)
+      list(names = input_schema$names[idx], types = input_schema$types[idx])
+    },
+    slice = {
+      if (identical(node$mode, "rank") && isTRUE(node$order_is_temp)) {
+        idx <- input_schema$names != node$order_col
+        return(list(names = input_schema$names[idx], types = input_schema$types[idx]))
+      }
+
+      input_schema
+    },
+    summarise = {
+      # Group columns come first
+      if (length(node$groups) > 0) {
+        group_idx <- match(node$groups, input_schema$names)
+        group_names <- input_schema$names[group_idx]
+        group_types <- input_schema$types[group_idx]
+      } else {
+        group_names <- character(0)
+        group_types <- character(0)
+      }
+
+      # Then aggregation columns
+      agg_names <- vapply(node$aggregations, `[[`, character(1), "output_col")
+      agg_types <- vapply(node$aggregations, `[[`, character(1), "output_type")
+
+      # F07: an aggregate named like a grouping column replaces that key IN
+      # PLACE (see summarise_output_index()).
+      idx <- summarise_output_index(node$groups, agg_names)
+
+      list(
+        names = c(group_names, agg_names)[idx],
+        types = c(group_types, agg_types)[idx]
+      )
+    },
+    reframe = {
+      types <- vapply(node$outputs, function(o) {
+        switch(o$kind,
+          literal = gpu_type_from_r(o$value),
+          {
+            src <- unname(input_schema$types[match(o$src, input_schema$names)])
+            if (length(unique(src)) == 1L) src[[1]] else "FLOAT64"  # INT32 vs FLOAT64 drift
+          }
+        )
+      }, character(1))
+      list(names = vapply(node$outputs, `[[`, character(1), "name"), types = types)
+    },
+    window = {
+      out_names <- vapply(node$specs, `[[`, character(1), "output_col")
+      out_types <- vapply(node$specs, `[[`, character(1), "output_type")
+
+      list(
+        names = c(input_schema$names, out_names),
+        types = c(input_schema$types, out_types)
+      )
+    },
+    source = node$schema,
+    infer_schema(node)  # join: two inputs
+  )
+}
+
 #' @export
 infer_schema.ast_source <- function(node) {
   node$schema
@@ -582,107 +750,47 @@ infer_schema.ast_source <- function(node) {
 
 #' @export
 infer_schema.ast_filter <- function(node) {
-  infer_schema(node$input)
+  infer_schema_memo(node$input)
 }
 
 #' @export
 infer_schema.ast_select <- function(node) {
-  input_schema <- infer_schema(node$input)
-  idx <- node$positions %||% match(node$columns, input_schema$names)
-  list(
-    names = input_schema$names[idx],
-    types = input_schema$types[idx]
-  )
+  infer_schema_from(node, infer_schema_memo(node$input))
 }
 
 #' @export
 infer_schema.ast_mutate <- function(node) {
-  input_schema <- infer_schema(node$input)
-  result_names <- input_schema$names
-  result_types <- input_schema$types
-
-  for (expr in node$expressions) {
-    existing_idx <- match(expr$output_col, result_names)
-    if (!is.na(existing_idx)) {
-      result_types[existing_idx] <- expr$output_type
-    } else {
-      result_names <- c(result_names, expr$output_col)
-      result_types <- c(result_types, expr$output_type)
-    }
-  }
-
-  list(names = result_names, types = result_types)
+  infer_schema_from(node, infer_schema_memo(node$input))
 }
 
 #' @export
 infer_schema.ast_arrange <- function(node) {
-  infer_schema(node$input)
+  infer_schema_memo(node$input)
 }
 
 #' @export
 infer_schema.ast_barrier <- function(node) {
-  infer_schema(node$input)
+  infer_schema_memo(node$input)
 }
 
 #' @export
 infer_schema.ast_rename <- function(node) {
-  input_schema <- infer_schema(node$input)
-  result_names <- input_schema$names
-  idx <- node$positions %||% match(node$old_names, result_names)
-  result_names[idx] <- node$new_names
-  list(names = result_names, types = input_schema$types)
+  infer_schema_from(node, infer_schema_memo(node$input))
 }
 
 #' @export
 infer_schema.ast_distinct <- function(node) {
-  input_schema <- infer_schema(node$input)
-
-  if (isTRUE(node$keep_all)) {
-    return(input_schema)
-  }
-
-  idx <- node$key_positions %||% match(node$key_cols, input_schema$names)
-  list(names = input_schema$names[idx], types = input_schema$types[idx])
+  infer_schema_from(node, infer_schema_memo(node$input))
 }
 
 #' @export
 infer_schema.ast_slice <- function(node) {
-  input_schema <- infer_schema(node$input)
-
-  if (identical(node$mode, "rank") && isTRUE(node$order_is_temp)) {
-    idx <- input_schema$names != node$order_col
-    return(list(names = input_schema$names[idx], types = input_schema$types[idx]))
-  }
-
-  input_schema
+  infer_schema_from(node, infer_schema_memo(node$input))
 }
 
 #' @export
 infer_schema.ast_summarise <- function(node) {
-  input_schema <- infer_schema(node$input)
-
-  # Group columns come first
-  if (length(node$groups) > 0) {
-    group_idx <- match(node$groups, input_schema$names)
-    group_names <- input_schema$names[group_idx]
-    group_types <- input_schema$types[group_idx]
-  } else {
-    group_names <- character(0)
-    group_types <- character(0)
-  }
-
-  # Then aggregation columns
-  agg_names <- vapply(node$aggregations, `[[`, character(1), "output_col")
-  agg_types <- vapply(node$aggregations, `[[`, character(1), "output_type")
-
-  # F07: an aggregate named like a grouping column replaces that key IN
-  # PLACE (see summarise_output_index()).
-  idx <- summarise_output_index(node$groups, agg_names)
-
-  list(
-    names = c(group_names, agg_names)[idx],
-    types = c(group_types, agg_types)[idx]
-  )
+  infer_schema_from(node, infer_schema_memo(node$input))
 }
 
 #' Output column order of a summarise node
@@ -703,6 +811,9 @@ infer_schema.ast_summarise <- function(node) {
 summarise_output_index <- function(groups, agg_names) {
   n_groups <- length(groups)
   over <- match(groups, agg_names)
+  if (all(is.na(over))) {
+    return(seq_len(n_groups + length(agg_names)))  # nothing replaced: [keys, aggregates]
+  }
   key_idx <- ifelse(is.na(over), seq_len(n_groups), n_groups + over)
   rest <- set_diff(seq_along(agg_names), over[!is.na(over)])
   as.integer(c(key_idx, n_groups + rest))
@@ -710,17 +821,7 @@ summarise_output_index <- function(groups, agg_names) {
 
 #' @export
 infer_schema.ast_reframe <- function(node) {
-  input_schema <- infer_schema(node$input)
-  types <- vapply(node$outputs, function(o) {
-    switch(o$kind,
-      literal = gpu_type_from_r(o$value),
-      {
-        src <- unname(input_schema$types[match(o$src, input_schema$names)])
-        if (length(unique(src)) == 1L) src[[1]] else "FLOAT64"  # INT32 vs FLOAT64 drift
-      }
-    )
-  }, character(1))
-  list(names = vapply(node$outputs, `[[`, character(1), "name"), types = types)
+  infer_schema_from(node, infer_schema_memo(node$input))
 }
 
 #' @export
@@ -728,7 +829,15 @@ infer_schema.ast_join <- function(node) {
   # *_full(): the children's factor levels and POSIXct zones (F32) are
   # metadata that plain infer_schema() drops above a source.
   left_schema <- infer_schema_full(node$left)
+  right_schema <- if (!node$join_type %in% c("semi", "anti")) infer_schema_full(node$right)
+  infer_join_schema(node, left_schema, right_schema)
+}
 
+# A join's output schema from the (full) schemas of its two inputs;
+# `right_schema` is unused for semi/anti. push_join() passes the schemas it
+# already has, so recording a join doesn't walk either side's plan.
+# @keywords internal
+infer_join_schema <- function(node, left_schema, right_schema) {
   # semi/anti joins are row filters, not column merges (Phase 7 J2): the
   # output is x's (the left input's) own schema verbatim, factor_levels
   # included -- there is no right-side column to merge in and no
@@ -740,7 +849,6 @@ infer_schema.ast_join <- function(node) {
     return(left_schema)
   }
 
-  right_schema <- infer_schema_full(node$right)
   # cross (Phase 7 J3): reuses this same general (non-semi/anti) branch
   # unchanged -- cross_join.tbl_gpu() (R/join.R) already builds an empty
   # `by` spec + `keep = TRUE`, which makes build_join_schema()/
@@ -754,15 +862,7 @@ infer_schema.ast_join <- function(node) {
 
 #' @export
 infer_schema.ast_window <- function(node) {
-  input_schema <- infer_schema(node$input)
-
-  out_names <- vapply(node$specs, `[[`, character(1), "output_col")
-  out_types <- vapply(node$specs, `[[`, character(1), "output_type")
-
-  list(
-    names = c(input_schema$names, out_names),
-    types = c(input_schema$types, out_types)
-  )
+  infer_schema_from(node, infer_schema_memo(node$input))
 }
 
 #' @export
@@ -860,9 +960,12 @@ is_opaque_expression <- function(expr_text) {
 #' @keywords internal
 is_barrier <- function(node) {
   if (is.null(node)) return(FALSE)
-  node$type %in% c("arrange", "barrier", "summarise", "distinct", "slice", "rename", "window",
-                   "reframe") ||
-    (identical(node$type, "select") && !is.null(node$positions))
+  switch(.subset2(node, "type"),
+    arrange = , barrier = , summarise = , distinct = , slice = , rename = , window = ,
+    reframe = TRUE,
+    select = !is.null(.subset2(node, "positions")),
+    FALSE
+  )
 }
 
 #' Get the depth of an AST tree

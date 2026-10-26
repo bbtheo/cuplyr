@@ -7,7 +7,7 @@
 # dplyr itself (a pipeline run on a plain data frame from a test namespace).
 #' @useDynLib cuplyr, .registration = TRUE
 #' @importFrom Rcpp sourceCpp
-#' @importFrom rlang %||%
+#' @importFrom rlang %||% obj_address is_reference
 #' @importFrom dplyr n group_cols n_distinct
 NULL
 

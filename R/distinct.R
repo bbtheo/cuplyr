@@ -70,7 +70,7 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
   }
   dots <- rlang::enquos(...)
   orig_dots <- dots
-  group_vars <- .data$groups
+  group_vars <- .subset2(.data, "groups")
 
   if (length(dots) == 0) {
     # dplyr: "If omitted, will use all variables" -- this is already

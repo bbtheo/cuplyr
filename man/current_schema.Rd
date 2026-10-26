@@ -10,13 +10,17 @@ current_schema(.data)
 \item{.data}{A \code{tbl_gpu} object}
 }
 \value{
-List with \code{names} and \code{types} (and possibly \code{factor_levels})
+List with \code{names} and \code{types} (and possibly \code{factor_levels}, \code{tz})
 }
 \description{
-Pending-lazy-AST-aware: if \code{.data} is lazy and has pending operations,
-infers the schema from the AST (\verb{$lazy_ops}) via \code{infer_schema_full()}
-(factor_levels-aware, see its own docs); otherwise returns the table's
-base \verb{$schema}. This is the canonical replacement for the
-\code{current_schema}/\verb{current schema} blocks duplicated inline across verbs.
+The table's stored \verb{$schema}. For a lazy table with pending operations it is
+the output schema of \verb{$lazy_ops}, factor levels and POSIXct zones included:
+every writer of \code{lazy_ops} (\code{push_op()}, \code{push_join()}, \code{compute()},
+\code{collapse()}'s barrier, the callers that copy both fields) stores
+the schema it implies, so the invariant \code{schema == infer_schema_full(lazy_ops)}
+holds and reading it is O(1), whatever the plan's depth. Set
+\code{options(cuplyr.check_schema_cache = TRUE)} or the environment variable
+\code{CUPLYR_CHECK_SCHEMA_CACHE=1} to verify the invariant on every call (internal
+debug switch for test runs; aborts with \code{cuplyr_error_internal}).
 }
 \keyword{internal}
