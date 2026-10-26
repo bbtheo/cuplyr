@@ -55,6 +55,11 @@ gpu_type_from_r <- function(x) {
 #' @return `"INT32"` for `"DICTIONARY32"`, `type` unchanged otherwise
 #' @keywords internal
 gpu_physical_type <- function(type) {
+  if (is.character(type) && length(type) > 0L && !anyNA(type)) {
+    # (ifelse() on a character vector, without its general machinery)
+    type[which(type == "DICTIONARY32")] <- "INT32"
+    return(type)
+  }
   ifelse(type == "DICTIONARY32", "INT32", type)
 }
 
@@ -141,9 +146,7 @@ gpu_wrap_state$depth <- 0L
 # What runs in frame `p`: 1L cuplyr code, 2L a base closure (looked through),
 # 0L anything else (user code, another package, an eval() context). `ns` is
 # cuplyr's namespace.
-gpu_frame_kind <- function(p, ns) {
-  env <- environment(sys.function(p))
-  frames <- NULL
+gpu_frame_kind <- function(p, ns, frames = sys.frames(), env = environment(sys.function(p))) {
   repeat {
     if (is.null(env)) {
       return(0L)
@@ -154,13 +157,18 @@ gpu_frame_kind <- function(p, ns) {
     if (identical(env, .BaseNamespaceEnv)) {
       return(2L)
     }
+    # Top-level code: the global environment is no running call's frame (an
+    # eval() context that evaluates in it is a builtin's, kind 0 below), so the
+    # search below can only end in 0.
+    if (identical(env, .GlobalEnv)) {
+      return(0L)
+    }
     # A closure made inside a function (`lapply(x, function(t) ...)`) is the
     # code of the function that made it, if that call is still running. Under
     # load_all() a test's environment also descends from the namespace, so
-    # the namespace is only reached through running frames.
-    if (is.null(frames)) {
-      frames <- sys.frames()
-    }
+    # the namespace is only reached through running frames. (`frames` is a
+    # promise: the stack is read only when a frame needs the search, once per
+    # gpu_entry_frame() walk.)
     q <- 0L
     for (j in rev(seq_len(p - 1L))) {
       if (identical(frames[[j]], env)) {
@@ -180,6 +188,7 @@ gpu_frame_kind <- function(p, ns) {
 gpu_entry_frame <- function(n) {
   ns <- environment(gpu_entry_frame)
   parents <- sys.parents()
+  delayedAssign("frames", sys.frames())
   entry <- n
   i <- n
   repeat {
@@ -189,7 +198,15 @@ gpu_entry_frame <- function(n) {
     if (p <= 0L || p >= i) {
       return(entry)
     }
-    kind <- gpu_frame_kind(p, ns)
+    # (the two common answers, cuplyr code and a base closure, without the call)
+    env <- environment(sys.function(p))
+    kind <- if (identical(env, ns)) {
+      1L
+    } else if (identical(env, .BaseNamespaceEnv)) {
+      2L
+    } else {
+      gpu_frame_kind(p, ns, frames, env)
+    }
     if (kind == 0L) {
       return(entry)
     }
@@ -240,8 +257,6 @@ wrap_gpu_call <- function(op_name, expr, reword = TRUE) {
   state <- gpu_wrap_state
   depth <- state$depth
   outermost <- depth == 0L
-  ex <- substitute(expr)
-  env <- parent.frame()
   # The handler is registered before any state changes, and restores the saved
   # depth instead of decrementing it, so an interrupt anywhere in here can't
   # leave the counter (and with it "outermost") wrong for the session.
@@ -276,6 +291,9 @@ wrap_gpu_call <- function(op_name, expr, reword = TRUE) {
 
   if (is_gpu_oom_error(err)) {
     if (!outermost) stop(err)
+    # (only the retry needs the expression and the caller's frame)
+    ex <- substitute(expr)
+    env <- parent.frame()
     # Free what the failed attempt left to R's collector, then try once more.
     invisible(gc(full = TRUE))
     try(gpu_gc(aggressive = FALSE), silent = TRUE)
@@ -357,6 +375,10 @@ set_union <- function(x, y) {
 set_diff <- function(x, y) {
   if (is_plain_vector(x) && is_plain_vector(y)) {
     if (is.null(x)) return(NULL)
+    if (length(x) == 0L) {
+      names(x) <- NULL
+      return(x)
+    }
     x <- unique(x)
     names(x) <- NULL
     y <- unique(y)
@@ -369,6 +391,10 @@ set_diff <- function(x, y) {
 set_intersect <- function(x, y) {
   if (is_plain_vector(x) && is_plain_vector(y)) {
     if (is.null(x) || is.null(y)) return(NULL)
+    if (length(x) == 0L && typeof(x) == typeof(y)) {
+      names(x) <- NULL
+      return(x)
+    }
     x <- unique(x)
     names(x) <- NULL
     y <- unique(y)

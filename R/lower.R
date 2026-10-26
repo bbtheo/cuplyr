@@ -14,8 +14,8 @@ lower_and_execute <- function(ast, source_ptr) {
     return(source_ptr)
   }
 
-  switch(ast$type,
-    "source" = if (!is.null(ast$source_ptr)) ast$source_ptr else source_ptr,
+  switch(.subset2(ast, "type"),
+    "source" = if (!is.null(.subset2(ast, "source_ptr"))) .subset2(ast, "source_ptr") else source_ptr,
     "select" = lower_select(ast, source_ptr),
     "filter" = lower_filter(ast, source_ptr),
     "mutate" = lower_mutate(ast, source_ptr),
@@ -27,17 +27,17 @@ lower_and_execute <- function(ast, source_ptr) {
     "rename" = lower_rename(ast, source_ptr),
     "window" = lower_window(ast, source_ptr),
     "reframe" = lower_reframe(ast, source_ptr),
-    "barrier" = lower_and_execute(ast$input, source_ptr),
-    stop("Unknown AST node type: ", ast$type, call. = FALSE)
+    "barrier" = lower_and_execute(.subset2(ast, "input"), source_ptr),
+    stop("Unknown AST node type: ", .subset2(ast, "type"), call. = FALSE)
   )
 }
 
 #' Lower select node
 #' @keywords internal
 lower_select <- function(ast, source_ptr) {
-  input_ptr <- lower_and_execute(ast$input, source_ptr)
-  input_schema <- infer_schema_memo(ast$input)
-  indices <- (ast$positions %||% match(ast$columns, input_schema$names)) - 1L
+  input_ptr <- lower_and_execute(.subset2(ast, "input"), source_ptr)
+  input_schema <- infer_schema_memo(.subset2(ast, "input"))
+  indices <- (.subset2(ast, "positions") %||% match(.subset2(ast, "columns"), input_schema$names)) - 1L
   gpu_select(input_ptr, indices)
 }
 
@@ -52,15 +52,15 @@ lower_select <- function(ast, source_ptr) {
 #' flag) to check.
 #' @keywords internal
 lower_filter <- function(ast, source_ptr) {
-  input_ptr <- lower_and_execute(ast$input, source_ptr)
-  input_schema <- infer_schema_memo(ast$input)
+  input_ptr <- lower_and_execute(.subset2(ast, "input"), source_ptr)
+  input_schema <- infer_schema_memo(.subset2(ast, "input"))
 
-  if (length(ast$predicates) == 0) {
+  if (length(.subset2(ast, "predicates")) == 0) {
     return(input_ptr)
   }
 
-  combined_ir <- ast$predicates[[1]]$ir
-  for (pred in ast$predicates[-1]) {
+  combined_ir <- .subset2(ast, "predicates")[[1]]$ir
+  for (pred in .subset2(ast, "predicates")[-1]) {
     combined_ir <- ir_call("&", list(combined_ir, pred$ir))
   }
 
@@ -143,13 +143,27 @@ check_rowwise_flags <- function(flags, in_filter = FALSE) {
 #' place that expression's result at.
 #' @keywords internal
 lower_mutate <- function(ast, source_ptr) {
-  input_ptr <- lower_and_execute(ast$input, source_ptr)
-  input_schema <- infer_schema_memo(ast$input)
-  expressions <- ast$expressions
+  input_ptr <- lower_and_execute(.subset2(ast, "input"), source_ptr)
+  input_schema <- infer_schema_memo(.subset2(ast, "input"))
+  expressions <- .subset2(ast, "expressions")
 
   # Vector literals (`y = 1:5`): upload each as a temp column appended to the
   # input, make the expression a copy of it, and drop the temps afterwards.
-  vec_idx <- which(vapply(expressions, function(e) identical(e$ir$kind, "vec"), logical(1)))
+  n_expr <- length(expressions)
+  is_vec <- logical(n_expr)
+  is_copy <- logical(n_expr)
+  out_names <- character(n_expr)
+  out_types <- character(n_expr)
+  for (i in seq_len(n_expr)) {
+    expr <- .subset2(expressions, i)
+    kind <- .subset2(.subset2(expr, "ir"), "kind")
+    is_vec[[i]] <- identical(kind, "vec")
+    # (a vector literal is replaced by a copy of its temp column below)
+    is_copy[[i]] <- identical(kind, "col") || identical(kind, "vec")
+    out_names[[i]] <- .subset2(expr, "output_col")
+    out_types[[i]] <- .subset2(expr, "output_type")
+  }
+  vec_idx <- which(is_vec)
   n_input_cols <- length(input_schema$names)
   if (length(vec_idx) > 0) {
     n_rows <- gpu_dim(input_ptr)[[1L]]
@@ -179,25 +193,27 @@ lower_mutate <- function(ast, source_ptr) {
     lookup_schema <- list(names = index_names, types = index_types)
     bound_exprs[[i]] <- ir_bind(expr$ir, lookup_schema)
 
-    stale <- which(index_names == expr$output_col)
-    if (length(stale) > 0) {
-      index_names[stale] <- NA_character_
+    # (the index map is read by the next expression only)
+    if (i < n_expr) {
+      stale <- which(index_names == expr$output_col)
+      if (length(stale) > 0) {
+        index_names[stale] <- NA_character_
+      }
+      index_names <- c(index_names, expr$output_col)
+      index_types <- c(index_types, expr$output_type)
     }
-    index_names <- c(index_names, expr$output_col)
-    index_types <- c(index_types, expr$output_type)
   }
 
-  out_names <- vapply(expressions, `[[`, character(1), "output_col")
-  out_types <- vapply(expressions, `[[`, character(1), "output_type")
   # A bare factor-column copy is typed DICTIONARY32 (logical); the column
   # that comes out is the INT32 codes. Any other factor-valued expression is
   # sent to the CPU by parse_mutate_dots(); if one gets here anyway, fail
   # rather than return codes with no levels.
-  is_copy <- vapply(expressions, function(e) identical(e$ir$kind, "col"), logical(1))
-  bad <- out_types == "DICTIONARY32" & !is_copy
-  if (any(bad)) {
-    stop("Can't compute factor-valued expression `", out_names[bad][1],
-         "` on the GPU.", call. = FALSE)
+  if (any(out_types == "DICTIONARY32")) {
+    bad <- out_types == "DICTIONARY32" & !is_copy
+    if (any(bad)) {
+      stop("Can't compute factor-valued expression `", out_names[bad][1],
+           "` on the GPU.", call. = FALSE)
+    }
   }
   out_types <- gpu_physical_type(out_types)
 
@@ -226,14 +242,14 @@ mutate_vector_size_error <- function(n_rows, vec) {
 #' Lower arrange node
 #' @keywords internal
 lower_arrange <- function(ast, source_ptr) {
-  input_ptr <- lower_and_execute(ast$input, source_ptr)
-  input_schema <- infer_schema_memo(ast$input)
+  input_ptr <- lower_and_execute(.subset2(ast, "input"), source_ptr)
+  input_schema <- infer_schema_memo(.subset2(ast, "input"))
 
-  col_indices <- integer(length(ast$sort_specs))
-  descending <- logical(length(ast$sort_specs))
+  col_indices <- integer(length(.subset2(ast, "sort_specs")))
+  descending <- logical(length(.subset2(ast, "sort_specs")))
 
-  for (i in seq_along(ast$sort_specs)) {
-    spec <- ast$sort_specs[[i]]
+  for (i in seq_along(.subset2(ast, "sort_specs"))) {
+    spec <- .subset2(ast, "sort_specs")[[i]]
     col_indices[i] <- match(spec$col_name, input_schema$names) - 1L
     descending[i] <- isTRUE(spec$descending)
   }
@@ -243,8 +259,8 @@ lower_arrange <- function(ast, source_ptr) {
   # keys (D8), even if the user's dots already sort by one of those columns
   # (possibly with desc()) -- that user key simply becomes a later, no-op
   # tiebreaker since the ascending group prepend already fully orders it.
-  if (length(ast$groups) > 0) {
-    group_indices <- match(ast$groups, input_schema$names) - 1L
+  if (length(.subset2(ast, "groups")) > 0) {
+    group_indices <- match(.subset2(ast, "groups"), input_schema$names) - 1L
     col_indices <- c(group_indices, col_indices)
     descending <- c(rep(FALSE, length(group_indices)), descending)
   }
@@ -255,32 +271,36 @@ lower_arrange <- function(ast, source_ptr) {
 #' Lower summarise node
 #' @keywords internal
 lower_summarise <- function(ast, source_ptr) {
-  input_ptr <- lower_and_execute(ast$input, source_ptr)
-  input_schema <- infer_schema_memo(ast$input)
+  input_ptr <- lower_and_execute(.subset2(ast, "input"), source_ptr)
+  input_schema <- infer_schema_memo(.subset2(ast, "input"))
 
   # Build aggregation specs
-  group_indices <- if (length(ast$groups) > 0) {
-    match(ast$groups, input_schema$names) - 1L
+  group_indices <- if (length(.subset2(ast, "groups")) > 0) {
+    match(.subset2(ast, "groups"), input_schema$names) - 1L
   } else {
     integer(0)
   }
 
-  agg_col_indices <- integer(length(ast$aggregations))
-  agg_fns <- character(length(ast$aggregations))
+  agg_col_indices <- integer(length(.subset2(ast, "aggregations")))
+  agg_fns <- character(length(.subset2(ast, "aggregations")))
   # Phase 6, task 6.1 (Fix A): per-aggregation na.rm flag, threaded through
   # to gpu_summarise() (src/ops_groupby.cpp) so it knows which aggregations
   # need the extra whole-group-null propagation step (na_rm == FALSE, R's
   # own default) vs. cudf's native null-excluding behavior (na_rm == TRUE).
-  na_rm_flags <- logical(length(ast$aggregations))
+  na_rm_flags <- logical(length(.subset2(ast, "aggregations")))
   # Phase 6, task 6.2: per-aggregation extra scalar shape parameter --
   # quantile()'s probability, nth()'s (possibly negative) element
   # position, NA_real_ for every other function -- see make_aggregation()'s
   # own docs.
-  agg_extra <- numeric(length(ast$aggregations))
+  agg_extra <- numeric(length(.subset2(ast, "aggregations")))
+  # F07: min()/max() over INT32/FLOAT64 apply base R's empty-group identity
+  # (see make_aggregation()'s `identity`).
+  identity_flags <- logical(length(.subset2(ast, "aggregations")))
 
-  for (i in seq_along(ast$aggregations)) {
-    agg <- ast$aggregations[[i]]
+  for (i in seq_along(.subset2(ast, "aggregations"))) {
+    agg <- .subset2(ast, "aggregations")[[i]]
     agg_fns[i] <- agg$fn
+    identity_flags[i] <- isTRUE(agg$identity)
     na_rm_flags[i] <- isTRUE(agg$na_rm)
     agg_extra[i] <- if (is.null(agg$extra)) NA_real_ else agg$extra
     if (agg$fn == "n") {
@@ -290,18 +310,14 @@ lower_summarise <- function(ast, source_ptr) {
     }
   }
 
-  # F07: min()/max() over INT32/FLOAT64 apply base R's empty-group identity
-  # (see make_aggregation()'s `identity`).
-  identity_flags <- vapply(ast$aggregations, function(agg) isTRUE(agg$identity), logical(1))
-
   result <- gpu_summarise(input_ptr, group_indices, agg_col_indices, agg_fns,
                           na_rm_flags, agg_extra, identity_flags,
-                          !isFALSE(ast$sort_groups))
+                          !isFALSE(.subset2(ast, "sort_groups")))
 
   # dplyr warns whenever min()/max() hit the identity, with base R's text.
   used <- attr(result, "identity_used")
   for (i in which(used)) {
-    fn <- ast$aggregations[[i]]$fn
+    fn <- .subset2(ast, "aggregations")[[i]]$fn
     warning("no non-missing arguments to ", fn, "; returning ",
             if (identical(fn, "min")) "Inf" else "-Inf", call. = FALSE)
   }
@@ -309,19 +325,19 @@ lower_summarise <- function(ast, source_ptr) {
   # F41: a Date mean()/median() with a fractional result was floored.
   frac <- attr(result, "ts_fraction")
   if (any(frac)) {
-    warn_fractional_dates(vapply(ast$aggregations[which(frac)], `[[`, character(1), "output_col"))
+    warn_fractional_dates(vapply(.subset2(ast, "aggregations")[which(frac)], `[[`, character(1), "output_col"))
   }
 
   # F34: an integer/logical sum() that left R's integer range came back as
   # FLOAT64 (dplyr returns a double there). A lazy plan declared INT32
   # statically, so it can't absorb that: fail loudly rather than drift.
-  if (any(attr(result, "sum_overflow")) && !identical(ast$on_sum_overflow, "double")) {
+  if (any(attr(result, "sum_overflow")) && !identical(.subset2(ast, "on_sum_overflow"), "double")) {
     abort_sum_overflow()
   }
 
   # An aggregate named like a grouping column replaces that key in place.
-  agg_names <- vapply(ast$aggregations, `[[`, character(1), "output_col")
-  out_idx <- summarise_output_index(ast$groups, agg_names)
+  agg_names <- vapply(.subset2(ast, "aggregations"), `[[`, character(1), "output_col")
+  out_idx <- summarise_output_index(.subset2(ast, "groups"), agg_names)
   if (!identical(out_idx, seq_along(out_idx))) {
     result <- gpu_select(result, out_idx - 1L)
   }

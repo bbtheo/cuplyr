@@ -25,6 +25,8 @@ the environment). It may stay on the GPU only
 \enumerate{
 \item as a bare column reference (plain copy, key, or sort key on its own);
 \item directly inside \code{is.na()} / \code{n_distinct()};
+\item as the column of F50's \code{factor_codes()}/\code{factor_labels()} (the parse
+hooks turn a label comparison or \code{as.character(f)} into these);
 \item as both operands of \code{==}/\code{!=} when both are factor \emph{columns} with
 identical level vectors (labels, order and \code{ordered} flag); \code{<}/\code{<=}/
 \code{>}/\code{>=} additionally need both ordered. (\code{\%in\%} is not here: the GPU's

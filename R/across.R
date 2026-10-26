@@ -195,6 +195,37 @@ expr_contains_zero_arg_call <- function(expr, fn_name, .scan = TRUE) {
 deferred_fallback_fns <- c("pick", "cur_group", "cur_group_rows",
                             "cur_data", "cur_data_all", "c_across")
 
+# The names the dot screens look for (colwise_rewrite_dots() aside, which looks
+# for function objects): the cur_group*()/pick()/c_across() family that
+# rewrite_context_dots(), substitute_cur_group_id() and dots_need_fallback()
+# handle, and the across()/if_any()/if_all() that expand_across_dots() expands. A
+# dot list that mentions none of them (dots_are_plain()) passes every one of
+# those screens unchanged, so the verbs skip them.
+dots_screen_fns <- c(deferred_fallback_fns, "cur_group_id", "across", "if_any", "if_all")
+
+# TRUE iff no dot mentions a name in dots_screen_fns.
+# @keywords internal
+dots_are_plain <- function(dots) {
+  !dots_mention(dots, dots_screen_fns)
+}
+
+# Does any dot of `dots` (quosures) mention one of the names `fns` anywhere in its
+# expression, as a symbol: a call head, an argument, inside an embedded quosure?
+# all.names() is a C walk, so this is the cheap pre-check the dot walkers below
+# (and expand_across_dots(), substitute_cur_group_id(), rewrite_context_dots(),
+# summarise_has_cur_group_id()) use before their R-level walks: a dot that does
+# not mention a name the walk looks for cannot match it. Conservative: a symbol
+# that is not a call head (a column called `across`) also counts.
+# @keywords internal
+dots_mention <- function(dots, fns) {
+  for (i in seq_along(dots)) {
+    if (any(fns %in% all.names(rlang::quo_get_expr(dots[[i]])))) {
+      return(TRUE)
+    }
+  }
+  FALSE
+}
+
 # TRUE iff any dot in `dots` needs the whole-call CPU fallback.
 #
 # @param dots A list of quosures (as captured by `rlang::enquos(...)`,
@@ -213,6 +244,12 @@ dots_need_fallback <- function(dots, treat_cur_group_id_as_deferred = FALSE) {
     c(deferred_fallback_fns, "cur_group_id")
   } else {
     deferred_fallback_fns
+  }
+  # Every shape below is a call to one of these names (a named top-level
+  # across(), expr_needs_fallback()'s own all.names() gate): a call that
+  # mentions none of them needs nothing from the R-level walk.
+  if (!dots_mention(dots, c(extra_names, "across", "if_any", "if_all"))) {
+    return(FALSE)
   }
   dot_names <- names(dots) %||% rep("", length(dots))
   any(vapply(
@@ -333,10 +370,11 @@ verb_across_fallback <- function(verb_name, .data, call_fn) {
 #   fallbacks)
 # @keywords internal
 rewrite_context_dots <- function(dots, group_cols, sequential = FALSE, name_unnamed = FALSE) {
-  has_ctx <- any(vapply(dots, function(q) {
-    expr_contains_zero_arg_call(rlang::quo_get_expr(q), "cur_group") ||
-      expr_contains_zero_arg_call(rlang::quo_get_expr(q), "cur_group_rows")
-  }, logical(1)))
+  has_ctx <- dots_mention(dots, c("cur_group", "cur_group_rows")) &&
+    any(vapply(dots, function(q) {
+      expr_contains_zero_arg_call(rlang::quo_get_expr(q), "cur_group") ||
+        expr_contains_zero_arg_call(rlang::quo_get_expr(q), "cur_group_rows")
+    }, logical(1)))
   if (!has_ctx) {
     return(dots)
   }
@@ -434,7 +472,7 @@ rewrite_context_expr <- function(expr, keys) {
 #   <possibly-rewritten dots>)`
 # @keywords internal
 substitute_cur_group_id <- function(.data, dots, group_cols, by = FALSE, rowwise = FALSE) {
-  has_any <- any(vapply(
+  has_any <- dots_mention(dots, "cur_group_id") && any(vapply(
     dots, function(q) expr_contains_zero_arg_call(rlang::quo_get_expr(q), "cur_group_id"),
     logical(1)
   ))
@@ -1481,6 +1519,11 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filte
 #'   which original dot a value computed from the expanded dots belongs to.
 #' @keywords internal
 expand_across_dots <- function(dots, schema, group_cols, verb) {
+  # No dot mentions across()/if_any()/if_all(): every dot passes through as it
+  # is, and nothing below it (the running schema, the staging) is ever used.
+  if (length(dots) > 0L && !dots_mention(dots, c("across", "if_any", "if_all"))) {
+    return(expand_plain_dots(dots))
+  }
   out_quos <- list()
   out_names <- character()
   prov_origin <- integer()
@@ -1596,6 +1639,27 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
   attr(out_quos, "needs_fallback") <- needs_fallback
   attr(out_quos, "staged_temps") <- staged_temps
   attr(out_quos, "provenance") <- list(origin = prov_origin, kind = prov_kind)
+  out_quos
+}
+
+# expand_across_dots() of dots none of which mentions across()/if_any()/if_all():
+# the loop's "dot" branch for each of them, without its bookkeeping of the
+# running schema and the names in scope (only a later across() would read them).
+# @keywords internal
+expand_plain_dots <- function(dots) {
+  n <- length(dots)
+  in_names <- names(dots)
+  out_quos <- vector("list", n)
+  out_names <- character(n)
+  for (i in seq_len(n)) {
+    out_quos[[i]] <- dots[[i]]
+    nm <- in_names[i]
+    out_names[[i]] <- if (!is.null(nm) && !is.na(nm) && nzchar(nm)) nm else ""
+  }
+  names(out_quos) <- out_names
+  attr(out_quos, "needs_fallback") <- FALSE
+  attr(out_quos, "staged_temps") <- character()
+  attr(out_quos, "provenance") <- list(origin = seq_len(n), kind = rep("dot", n))
   out_quos
 }
 

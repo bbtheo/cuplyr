@@ -43,6 +43,9 @@ equivalent and cheaper). A NAMED top-level \code{across()} dot (e.g.
 here: \code{\link[=dots_need_fallback]{dots_need_fallback()}} sends the whole call to the CPU fallback.
 }
 \details{
+Expansion stops at the first dot that needs dplyr (the result is then partial
+and only its \code{"needs_fallback"} attribute is meaningful).
+
 The result carries a \code{"needs_fallback"} attribute. It is \code{TRUE} when the
 schema or the \code{.fns} values show that dplyr must run the call:
 an unsupported \code{.fns}/extra-argument shape (a non-inlinable lambda, a

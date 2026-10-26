@@ -69,8 +69,22 @@ infer_schema_full <- function(node) {
 #' @keywords internal
 current_schema <- function(.data) {
   schema <- .subset2(.data, "schema")
-  if (check_schema_cache_on() && identical(.subset2(.data, "exec_mode"), "lazy") &&
-      has_pending_ops(.data)) {
+  # (the cheap tests first: the switch reads an option on every call. A lazy
+  # verb calls this a few times per node, so has_pending_ops() and
+  # check_schema_cache_on() are inline: the same tests, in the same order.)
+  if (identical(.subset2(.data, "exec_mode"), "lazy") &&
+      inherits(.subset2(.data, "lazy_ops"), "ast_node") && inherits(.data, "tbl_gpu")) {
+    on <- getOption("cuplyr.check_schema_cache")
+    if (is.null(on)) {
+      on <- .schema_memo$check_env
+      if (is.null(on)) on <- check_schema_cache_on()
+    } else {
+      on <- isTRUE(on)
+    }
+  } else {
+    on <- FALSE
+  }
+  if (on) {
     expected <- infer_schema_full(.subset2(.data, "lazy_ops"))
     if (!identical(schema, expected)) {
       rlang::abort(c(
@@ -407,15 +421,21 @@ propagate_factor_levels <- function(node, input_schema, surviving_names) {
 #' @keywords internal
 propagate_groups <- function(node, groups, schema) {
   abort_positional_rename_with_groups(node, groups)
-  if (identical(node$type, "summarise")) {
+  type <- .subset2(node, "type")
+  if (identical(type, "summarise")) {
     return(set_intersect(node$result_groups, schema$names))
   }
   # reframe() always returns an ungrouped table
-  if (identical(node$type, "reframe")) {
+  if (identical(type, "reframe")) {
     return(character())
   }
 
-  if (identical(node$type, "rename")) {
+  # (an ungrouped table: what set_intersect() gives for no groups)
+  if (length(groups) == 0L && is.character(groups) && is.character(schema$names)) {
+    return(character())
+  }
+
+  if (identical(type, "rename")) {
     idx <- match(groups, node$old_names)
     renamed <- !is.na(idx)
     groups[renamed] <- node$new_names[idx[renamed]]
@@ -428,7 +448,8 @@ propagate_groups <- function(node, groups, schema) {
 # invariant above keeps it off grouped tables, so this is unreachable.
 # @keywords internal
 abort_positional_rename_with_groups <- function(node, groups) {
-  if (identical(node$type, "rename") && !is.null(node$positions) && length(groups) > 0L) {
+  if (length(groups) > 0L && identical(.subset2(node, "type"), "rename") &&
+      !is.null(node$positions)) {
     rlang::abort("Internal error: positional rename on a grouped tbl_gpu.",
                  class = "cuplyr_error_internal")
   }
@@ -542,7 +563,8 @@ infer_push_schema <- function(node, input_schema, base) {
 #' @return A new `tbl_gpu` object
 #' @keywords internal
 push_op <- function(.data, node, input_schema = current_schema(.data), carry = TRUE) {
-  check_zero_column_input(.data, input_schema, node$type)
+  type <- .subset2(node, "type")
+  check_zero_column_input(.data, input_schema, type)
   if (anyDuplicated(input_schema$names) > 0L && !node_is_position_safe(node)) {
     abort_duplicate_names(rlang::caller_env())
   }
@@ -556,17 +578,25 @@ push_op <- function(.data, node, input_schema = current_schema(.data), carry = T
   # to the default once the table is ungrouped (a later group_by() starts over).
   new_group_drop <- if (length(new_groups) > 0L) .subset2(.data, "group_drop") %||% TRUE else TRUE
   new_keys <- carry_fixed_keys(node, .data, new_groups)
-  new_unspec <- if (node$type %in% c("filter", "arrange", "slice", "barrier")) {
+  new_unspec <- if (type %in% c("filter", "arrange", "slice", "barrier")) {
     .subset2(.data, "unspecified")
   }
   # F49: a rowwise table stays rowwise through every node but the ones that
   # rebuild the rows or their grouping (their verbs never reach push_op() with a
   # rowwise input: they run through the whole-call fallback or build their own).
-  new_rowwise <- is_rowwise_gpu(.data) && !node$type %in% c("summarise", "reframe", "distinct")
+  new_rowwise <- is_rowwise_gpu(.data) && !type %in% c("summarise", "reframe", "distinct")
 
   # F31: summarise() rebuilds the frame, so only the bare data.frame class
   # survives it; every other node is dplyr_reconstruct(out, .data).
-  keep_attrs <- !identical(node$type, "summarise")
+  keep_attrs <- !identical(type, "summarise")
+
+  # A table with only its names and class as attributes (the usual one) hands
+  # nothing over but the bare data.frame class, which an ungrouped input gives
+  # to an ungrouped result: new_tbl_gpu() sets that field itself, which is what
+  # carry_frame_meta() would do with one more copy of the table.
+  plain_frame <- carry && identical(names(attributes(.data)), c("names", "class"))
+  bare_df <- plain_frame && isTRUE(.subset2(.data, "bare_df")) &&
+    length(.subset2(.data, "groups")) == 0L && !isTRUE(.subset2(.data, "rowwise"))
 
   if (identical(.subset2(.data, "exec_mode"), "lazy")) {
     out <- new_tbl_gpu(
@@ -579,12 +609,13 @@ push_op <- function(.data, node, input_schema = current_schema(.data), carry = T
       nrow = .subset2(.data, "nrow"),
       fixed_keys = new_keys,
       unspecified = new_unspec,
+      bare_df = bare_df,
       rowwise = new_rowwise
     )
-    return(if (carry) carry_frame_meta(out, .data, attrs = keep_attrs) else out)
+    return(if (carry && !plain_frame) carry_frame_meta(out, .data, attrs = keep_attrs) else out)
   }
 
-  new_ptr <- wrap_gpu_call(node$type, lower_and_execute(node, .subset2(.data, "ptr")))
+  new_ptr <- wrap_gpu_call(type, lower_and_execute(node, .subset2(.data, "ptr")))
 
   out <- new_tbl_gpu(
     ptr = new_ptr,
@@ -596,9 +627,10 @@ push_op <- function(.data, node, input_schema = current_schema(.data), carry = T
     nrow = .subset2(.data, "nrow"),
     fixed_keys = new_keys,
     unspecified = new_unspec,
+    bare_df = bare_df,
     rowwise = new_rowwise
   )
-  carry_frame_meta(out, .data, attrs = keep_attrs)
+  if (plain_frame) out else carry_frame_meta(out, .data, attrs = keep_attrs)
 }
 
 #' Run a verb's node chain as ONE eager execution
@@ -930,18 +962,39 @@ retry_on_sum_overflow <- function(attempt, on_overflow, class = "cuplyr_error_su
   held <- list()
   on.exit(for (w in held) warning(w), add = TRUE)
   overflowed <- FALSE
-  handlers <- list(function(e) {
+  on_class <- function(e) {
     overflowed <<- TRUE
     NULL
-  })
-  names(handlers) <- class
-  result <- rlang::inject(tryCatch(
-    withCallingHandlers(attempt(), warning = function(w) {
-      held[[length(held) + 1L]] <<- w
-      invokeRestart("muffleWarning")
-    }),
-    !!!handlers
-  ))
+  }
+  # (the two classes callers pass are spelled out: a computed handler name
+  # needs rlang::inject(), which costs more than the verb's own wrapping)
+  result <- if (identical(class, "cuplyr_error_sum_overflow")) {
+    tryCatch(
+      withCallingHandlers(attempt(), warning = function(w) {
+        held[[length(held) + 1L]] <<- w
+        invokeRestart("muffleWarning")
+      }),
+      cuplyr_error_sum_overflow = on_class
+    )
+  } else if (identical(class, "cuplyr_summarise_rerun")) {
+    tryCatch(
+      withCallingHandlers(attempt(), warning = function(w) {
+        held[[length(held) + 1L]] <<- w
+        invokeRestart("muffleWarning")
+      }),
+      cuplyr_summarise_rerun = on_class
+    )
+  } else {
+    handlers <- list(on_class)
+    names(handlers) <- class
+    rlang::inject(tryCatch(
+      withCallingHandlers(attempt(), warning = function(w) {
+        held[[length(held) + 1L]] <<- w
+        invokeRestart("muffleWarning")
+      }),
+      !!!handlers
+    ))
+  }
   if (overflowed) {
     held <- list()
     return(on_overflow())

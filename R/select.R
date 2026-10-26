@@ -92,7 +92,7 @@ select.tbl_gpu <- function(.data, ...) {
   call <- rlang::current_env()
   sel <- resolve_selection(.data, schema, quos, "select", function(data) {
     tidyselect::eval_select(rlang::expr(c(!!!quos)), data, error_call = call)
-  })
+  }, plain = TRUE)
   vars <- sel$loc
   .data <- sel$data
 
@@ -391,6 +391,52 @@ type_only_body <- function(expr, args, env) {
   FALSE
 }
 
+# `eval_select(c(!!!quos), data)` for the commonest selection, without
+# tidyselect: every dot unnamed and a bare symbol (or an unnamed length-1 string
+# with no attributes) that names a column, no column repeated, on a table with
+# unique column names. A column wins over an environment variable of the same
+# name, so the result is just the positions named by the columns. Returns NULL for anything else
+# (named dots, calls, numbers, `-x`, helpers, an empty selection, a name that is
+# no column, `.data`/`.env`, duplicated schema names, a repeated column), which
+# keeps tidyselect's errors, warnings and messages. Reads nothing but the
+# quosures' expressions and the schema, so nothing is cached across calls.
+# @keywords internal
+plain_selection_loc <- function(quos, names) {
+  n <- length(quos)
+  if (n == 0L) {
+    return(NULL)
+  }
+  if (!is.null(qn <- names(quos)) && any(nzchar(qn))) {
+    return(NULL)
+  }
+  cols <- character(n)
+  for (i in seq_len(n)) {
+    q <- .subset2(quos, i)
+    # .subset2(): `[[.quosure` is deprecated and signals. No variable may hold
+    # the expression: an empty argument is the missing arg
+    if (is.symbol(.subset2(q, 2L))) {
+      cols[[i]] <- as.character(.subset2(q, 2L))
+    } else if (is.character(.subset2(q, 2L)) && length(.subset2(q, 2L)) == 1L &&
+                 !is.na(.subset2(q, 2L)) && is.null(attributes(.subset2(q, 2L)))) {
+      # an injected string with a name (`!!c(a = "x")`: tidyselect renames) or
+      # any other attribute is not a plain column name
+      cols[[i]] <- .subset2(q, 2L)
+    } else {
+      return(NULL)
+    }
+  }
+  if (anyDuplicated(cols) > 0L || anyDuplicated(names) > 0L ||
+        any(cols == "" | cols == ".data" | cols == ".env")) {
+    return(NULL)
+  }
+  loc <- match(cols, names)
+  if (anyNA(loc)) {
+    return(NULL)
+  }
+  names(loc) <- cols
+  loc
+}
+
 # Resolve a selection to positions, for select()/relocate()/rename()/
 # rename_with(): on the proxy when selection_is_type_only(), otherwise on the
 # real data with a notified CPU fallback.
@@ -400,11 +446,16 @@ type_only_body <- function(expr, args, env) {
 # @param quos The quosures of the selection (all slots that take one)
 # @param verb Verb name, for the fallback notification
 # @param resolve `function(data)` running tidyselect on a data frame
+# @param plain Whether `plain_selection_loc()` may answer the selection without
+#   tidyselect (only for `eval_select()`'s own contract: select())
 # @return list(loc = positions as `resolve()` returns them, data = the input
 #   to build the result on: `.data`, or its computed table when the real data
 #   had to be read, so the plan does not run twice)
 # @keywords internal
-resolve_selection <- function(.data, schema, quos, verb, resolve) {
+resolve_selection <- function(.data, schema, quos, verb, resolve, plain = FALSE) {
+  if (plain && !is.null(loc <- plain_selection_loc(quos, schema$names))) {
+    return(list(loc = loc, data = .data))
+  }
   groups <- .subset2(.data, "groups")
   if (selection_is_type_only(quos, NULL, schema$names)) {
     return(list(loc = resolve(tidyselect_proxy(schema, groups)), data = .data))

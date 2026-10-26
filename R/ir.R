@@ -20,10 +20,9 @@
 #'   an `index` field (0-based) only after [ir_bind()] runs.
 #' @keywords internal
 ir_col <- function(name) {
-  structure(
-    list(kind = "col", name = name),
-    class = c("cuplyr_ir_col", "cuplyr_ir")
-  )
+  node <- list(kind = "col", name = name)
+  class(node) <- c("cuplyr_ir_col", "cuplyr_ir")
+  node
 }
 
 #' Create an IR literal node
@@ -37,10 +36,9 @@ ir_col <- function(name) {
 #' @return A `cuplyr_ir_lit` node
 #' @keywords internal
 ir_lit <- function(value, type, na = FALSE) {
-  structure(
-    list(kind = "lit", value = value, type = type, na = na),
-    class = c("cuplyr_ir_lit", "cuplyr_ir")
-  )
+  node <- list(kind = "lit", value = value, type = type, na = na)
+  class(node) <- c("cuplyr_ir_lit", "cuplyr_ir")
+  node
 }
 
 #' Create an IR function-call node
@@ -54,10 +52,9 @@ ir_lit <- function(value, type, na = FALSE) {
 #' @return A `cuplyr_ir_call` node
 #' @keywords internal
 ir_call <- function(op, args, meta = list()) {
-  structure(
-    list(kind = "call", op = op, args = args, meta = meta),
-    class = c("cuplyr_ir_call", "cuplyr_ir")
-  )
+  node <- list(kind = "call", op = op, args = args, meta = meta)
+  class(node) <- c("cuplyr_ir_call", "cuplyr_ir")
+  node
 }
 
 #' Create an IR vector-literal node (mutate()/transmute() only)
@@ -108,6 +105,18 @@ ir_vec <- function(value, type, quo, name) {
 ir_lit_from_r <- function(value, allow_vector = FALSE) {
   if (is.null(value)) {
     return(ir_lit(value = NULL, type = NULL, na = FALSE))
+  }
+
+  # A plain scalar (no class or other attribute) is neither a tbl_gpu nor a
+  # timestamp and has the type of its storage; a NA logical is the bare NA
+  # below. (Checked first: it is what a constant in an expression almost always is.)
+  if (is.atomic(value) && length(value) == 1L && is.null(attributes(value)) &&
+        !(is.logical(value) && is.na(value))) {
+    type <- switch(typeof(value), double = "FLOAT64", integer = "INT32", character = "STRING",
+                   logical = "BOOL8", NULL)
+    if (!is.null(type)) {
+      return(ir_lit(value = value, type = type, na = FALSE))
+    }
   }
 
   if (is_tbl_gpu(value)) {
@@ -253,6 +262,29 @@ pronoun_call_name <- function(expr) {
 # unsupported call is not the place to raise the "not found" diagnostic;
 # the caller falls back instead).
 expr_has_column_ref <- function(expr, schema) {
+  # Two exact shortcuts for an expression of calls, symbols and constants,
+  # both from C walks of its names (all.names(): every symbol, call heads
+  # included; all.vars(): those that are not a call head):
+  # - the walk can only take a symbol it finds in the expression, so one with
+  #   no column name and no `.data` in it is FALSE;
+  # - with no `.data`/`.env` pronoun, function literal or formula/quosure (the
+  #   cases the walk treats specially), a non-head symbol that is a column is
+  #   what the walk finds.
+  if (is.call(expr)) {
+    nm <- all.names(expr)
+    if (!any(nm %in% schema$names) && !".data" %in% nm) {
+      return(FALSE)
+    }
+    if (!any(c(".data", ".env", "function", "~") %in% nm) && any(all.vars(expr) %in% schema$names)) {
+      return(TRUE)
+    }
+  }
+  expr_has_column_ref_walk(expr, schema)
+}
+
+# The recursive walk behind expr_has_column_ref().
+# @keywords internal
+expr_has_column_ref_walk <- function(expr, schema) {
   # An empty/missing argument slot (e.g. the elided row-index in `x[, 1]`)
   # is a special R sentinel: forcing it (is.symbol()/is.call(), even just
   # reading it as a plain value) always raises "argument ... is missing,
@@ -279,7 +311,7 @@ expr_has_column_ref <- function(expr, schema) {
   # look through it to its expression. An unsupplied `{{ arg }}` wraps the
   # missing-argument sentinel, which the guard above answers.
   if (rlang::is_quosure(expr)) {
-    return(expr_has_column_ref(rlang::quo_get_expr(expr), schema))
+    return(expr_has_column_ref_walk(rlang::quo_get_expr(expr), schema))
   }
   if (is.call(expr)) {
     # unclass(): the subsetting below must not dispatch on a formula-like
@@ -291,7 +323,7 @@ expr_has_column_ref <- function(expr, schema) {
     if (is.symbol(parts[[1]])) {
       parts <- parts[-1]
     }
-    return(any(vapply(parts, expr_has_column_ref, logical(1), schema = schema)))
+    return(any(vapply(parts, expr_has_column_ref_walk, logical(1), schema = schema)))
   }
   FALSE
 }
@@ -313,11 +345,269 @@ ir_foldable_window_fns <- c(
 ir_internal_ops <- c("cast_int32", "factor_codes", "factor_labels", "cast_float64",
                      "rw_agg_i32", "rw_agg_f64", "recode_lookup")
 
+# The call heads ir_parse_expr() treats specially before registry dispatch
+# (everything ir_parse_pre_registry() tests `fn_name` against). A head outside
+# this set goes straight to the registry; test-perf-F68b-fastpaths.R checks
+# that the set holds every name the helper tests.
+ir_pre_registry_fns <- c(
+  ".cuplyr_rw", "&&", "||", "as.character", "as.integer", "as.numeric", "as.double",
+  ir_foldable_window_fns,
+  "case_when", "case_match", "recode_values", "recode", "replace_values",
+  "replace_when", "when_all", "when_any", "lag", "lead", "first", "last", "nth",
+  "ntile", "order_by", "with_order", "sum", "mean", "median",
+  "roll_mean", "roll_sum", "roll_min", "roll_max", "roll_sd", "roll_median",
+  "frollmean", "frollsum", "frollmin", "frollmax", "frollsd", "frollmedian",
+  "nchar", "substr", "trimws", "paste0", "paste", "grepl", "sub", "gsub",
+  "startsWith", "endsWith",
+  "year", "month", "day", "hour", "minute", "second", "quarter", "yday", "wday",
+  "as.Date", "as.POSIXct", "floor_date", "ceiling_date", "round_date"
+)
+
+# Returned by ir_parse_pre_registry() when no special case took the call.
+ir_no_special <- new.env(parent = emptyenv())
+
+# The special cases of a call head that precede registry dispatch in
+# ir_parse_expr() (moved out of it unchanged so the common heads skip the long
+# run of name tests). Returns the parse, `NULL` for unsupported, or
+# `ir_no_special` when the call falls through to the registry.
+ir_parse_pre_registry <- function(expr, env, schema, allow_vector, fn_name, head) {
+  # F49: an IR node the rowwise rewrite (R/rowwise.R) built for a horizontal
+  # aggregate, embedded as `.cuplyr_rw(<node>, <columns it reads>)`. The
+  # trailing symbols only let walkers of the raw expression (all.vars(), the
+  # constant-folding checks) see the columns; the node is the value.
+  if (identical(fn_name, ".cuplyr_rw")) {
+    return(expr[[2]])
+  }
+
+  if (fn_name %in% c("&&", "||")) {
+    replacement <- if (fn_name == "&&") "&" else "|"
+    stop("'", fn_name, "' is not supported in filter(); use '", replacement, "'",
+         call. = FALSE)
+  }
+
+  # F50: as.character()/as.integer()/as.numeric()/as.double() of a bare
+  # factor column. Registry dispatch (below) runs before constant folding, so
+  # these names are intercepted only for that one shape; every other
+  # argument flows on exactly as before (`as.integer(lim)` still folds).
+  # Base-only assumption: the match is on the name alone (namespace already
+  # stripped), so a user-masked `as.character` would get the same GPU decode.
+  if (fn_name %in% c("as.character", "as.integer", "as.numeric", "as.double")) {
+    converted <- ir_parse_factor_conversion(expr, schema, fn_name)
+    if (!is.null(converted)) {
+      return(converted)
+    }
+  }
+
+  # A window call whose arguments read no column (`row_number("a")`,
+  # `cumsum(2)`, `lag(5)`) runs on a length-1 constant in dplyr and the
+  # result is recycled; evaluate it in R and use the value. Zero-arg
+  # `row_number()`/`n()` and anything reading a column are left alone (an
+  # evaluation error outside the data mask also means "not constant").
+  if (fn_name %in% ir_foldable_window_fns && length(expr) > 1 &&
+      !any(vapply(as.list(expr)[-1], expr_has_column_ref, logical(1), schema = schema))) {
+    folded <- tryCatch(
+      list(value = rlang::eval_tidy(rlang::new_quosure(expr, env), data = list())),
+      error = function(e) NULL
+    )
+    if (!is.null(folded) && is.atomic(folded$value) && !is.null(folded$value)) {
+      if (length(folded$value) != 1) {
+        return(NULL)
+      }
+      return(ir_lit_from_r(folded$value))
+    }
+  }
+
+  # case_when()'s dots are `~` formulas, not ordinary expressions the
+  # generic per-arg parse loop below understands (a formula's LHS/RHS need
+  # pulling apart before recursing, and `.default=` is a named value
+  # argument, not a formula at all) -- so it's special-cased here, before
+  # canonical/registry dispatch, the same way `&&`/`||` are. See
+  # ir_parse_case_when()'s own docs for exactly what it accepts.
+  if (identical(fn_name, "case_when")) {
+    return(ir_parse_case_when(expr, env, schema))
+  }
+
+  # Phase 4 wave 2: case_match()/recode_values()/replace_values()/
+  # replace_when()'s dots are ALSO `~` formulas (case_match()/
+  # recode_values() additionally take a leading `.x`/`x` vector argument
+  # before the formulas), and when_all()/when_any()'s dots need their
+  # `na_rm=`/`size=` named controls pulled out before the remaining dots
+  # are parsed as ordinary logical expressions -- none of that fits the
+  # generic per-arg parse loop below, so all are special-cased here
+  # exactly like case_when() above. See each parse function's own docs.
+  if (identical(fn_name, "case_match")) {
+    return(ir_parse_case_match(expr, env, schema))
+  }
+  if (identical(fn_name, "recode_values")) {
+    return(ir_parse_recode_values(expr, env, schema))
+  }
+  if (identical(fn_name, "recode")) {
+    return(ir_parse_recode(expr, env, schema))
+  }
+  if (identical(fn_name, "replace_values")) {
+    return(ir_parse_replace_values(expr, env, schema))
+  }
+  if (identical(fn_name, "replace_when")) {
+    return(ir_parse_replace_when(expr, env, schema))
+  }
+  if (fn_name %in% c("when_all", "when_any")) {
+    return(ir_parse_when_reduce(expr, env, schema, fn_name))
+  }
+
+  # Phase 5 (window functions): lag()/lead() (n=/default=/order_by= named
+  # controls), first()/last()/nth() (order_by=/default=/na_rm=), and
+  # ntile() (x= is optional with a non-trivial default, and its
+  # "supplied or not" distinction changes the desugar -- see
+  # ir_parse_ntile()'s own docs) all need real argument-name-aware
+  # matching the generic per-arg registry loop below can't do (it only
+  # ever sees positional args, see ir_parse_shift_call()'s own docs) --
+  # so, like case_when()/case_match()/etc. above, these are special-cased
+  # here, before registry dispatch.
+  if (fn_name %in% c("lag", "lead")) {
+    return(ir_parse_shift_call(expr, env, schema, fn_name))
+  }
+  if (fn_name %in% c("first", "last", "nth")) {
+    return(ir_parse_first_last_nth(expr, env, schema, fn_name))
+  }
+  if (identical(fn_name, "ntile")) {
+    return(ir_parse_ntile(expr, env, schema))
+  }
+  if (identical(fn_name, "order_by")) {
+    return(ir_parse_order_by_call(expr, env, schema))
+  }
+  if (identical(fn_name, "with_order")) {
+    return(ir_parse_with_order_call(expr, env, schema))
+  }
+
+  # Phase 5, task W9: `sum()`'s ordinary registry entry only accepts the
+  # bare 1-arg form (see ir_parse_sum_call()'s own docs for why the 2-arg
+  # `sum(x, na.rm = TRUE)` shape needs real argument-NAME inspection the
+  # generic per-arg registry loop below can't do) -- special-cased here
+  # alongside lag()/lead()/first()/last()/nth()/ntile() above, for the
+  # same reason.
+  if (identical(fn_name, "sum")) {
+    return(ir_parse_sum_call(expr, env, schema))
+  }
+  if (fn_name %in% c("mean", "median") && length(expr) == 3L) {
+    return(ir_parse_mean_median_call(expr, env, schema, fn_name))
+  }
+
+  # Rolling windows (scratchpad/todo.md "Rolling-window benchmark
+  # target"): cuplyr's own roll_*() names, and an alias for
+  # data.table::froll*() (verified against benchmark_rolling.R's actual
+  # cuplyr probe call shape) -- both need real argument-name matching
+  # (na.rm=/fill=/align=/... can be omitted or out of position), so both
+  # get dedicated dispatch like lag()/lead()/ntile() above. See the
+  # file-level comment above ir_parse_roll_call()'s definition.
+  if (fn_name %in% c("roll_mean", "roll_sum", "roll_min", "roll_max", "roll_sd", "roll_median")) {
+    return(ir_parse_roll_call(expr, env, schema, fn_name))
+  }
+  if (fn_name %in% c("frollmean", "frollsum", "frollmin", "frollmax", "frollsd", "frollmedian")) {
+    return(ir_parse_froll_call(expr, env, schema, fn_name))
+  }
+
+  # Phase 11 L5 (base-R strings): nchar()/substr()/trimws()/paste0()/
+  # paste()/grepl()/sub()/gsub()/startsWith()/endsWith() all have optional
+  # named controls (type=/which=/sep=/collapse=/fixed=/ignore.case=/...)
+  # the generic per-arg registry loop can't validate (it only ever sees
+  # positional args -- same reason lag()/lead()/ntile()/roll_*() above
+  # need dedicated dispatch). toupper()/tolower() need no such dispatch
+  # (fixed 1-arg signature, ordinary registry entries below).
+  if (identical(fn_name, "nchar")) {
+    return(ir_parse_nchar(expr, env, schema))
+  }
+  if (identical(fn_name, "substr")) {
+    return(ir_parse_substr(expr, env, schema))
+  }
+  if (identical(fn_name, "trimws")) {
+    return(ir_parse_trimws(expr, env, schema))
+  }
+  if (fn_name %in% c("paste0", "paste")) {
+    return(ir_parse_paste_call(expr, env, schema, fn_name))
+  }
+  if (identical(fn_name, "grepl")) {
+    return(ir_parse_grepl(expr, env, schema))
+  }
+  if (fn_name %in% c("sub", "gsub")) {
+    return(ir_parse_sub_gsub(expr, env, schema, fn_name))
+  }
+  if (fn_name %in% c("startsWith", "endsWith")) {
+    return(ir_parse_starts_ends_with(expr, env, schema, fn_name))
+  }
+
+  # Phase 11 L6 (lubridate datetime accessors): MANDATORY namespace guard
+  # -- year()/month()/day()/hour()/minute()/second()/quarter()/yday()/
+  # wday() are lubridate names, not base R (base R has no year()) -- go
+  # native ONLY if the call's function symbol resolves (in the quosure's
+  # own environment, or via an explicit `lubridate::` qualification) to
+  # exactly lubridate's own function; otherwise NULL (fall back), so a
+  # user's own same-named function (or lubridate not being
+  # installed/attached at all) reproduces dplyr's ordinary "could not
+  # find function"/user-function behavior on the CPU fallback path
+  # instead of cuplyr silently misinterpreting an unrelated call. See
+  # ir_require_lubridate_fn()'s own docs.
+  if (fn_name %in% c("year", "month", "day", "hour", "minute", "second",
+                      "quarter", "yday", "wday")) {
+    if (!ir_require_lubridate_fn(head, env, fn_name)) {
+      return(NULL)
+    }
+    return(ir_parse_lubridate_accessor(expr, env, schema, fn_name))
+  }
+
+  # F41/F46: a column-free as.Date()/as.POSIXct()/floor_date()/
+  # ceiling_date()/round_date() is a constant, whatever its arguments (`tz =`,
+  # `format =`, a vector set for `%in%`, a unit the native rounding doesn't
+  # cover): the registry entries below only take one parsed argument. An
+  # error means "not constant" (NULL, CPU), as in the generic fold further
+  # down. Folded before the namespace guard, so a user's own floor_date() is
+  # evaluated as it would be on dev.
+  if (fn_name %in% c("as.Date", "as.POSIXct", "floor_date", "ceiling_date",
+                      "round_date") &&
+      length(expr) > 1 && !expr_has_column_ref(expr, schema)) {
+    folded <- tryCatch(
+      list(value = rlang::eval_tidy(rlang::new_quosure(expr, env))),
+      error = function(e) NULL
+    )
+    if (is.null(folded)) {
+      return(NULL)
+    }
+    return(ir_lit_from_r(folded$value, allow_vector = allow_vector))
+  }
+
+  # F46: lubridate floor_date()/ceiling_date()/round_date(), same guard.
+  if (fn_name %in% c("floor_date", "ceiling_date", "round_date")) {
+    if (!ir_require_lubridate_fn(head, env, fn_name)) {
+      return(NULL)
+    }
+    return(ir_parse_lubridate_rounding(expr, env, schema, fn_name))
+  }
+  ir_no_special
+}
+
+# The `(` symbol, compared against call heads.
+ir_paren_sym <- as.name("(")
+ir_dollar_sym <- as.name("$")
+ir_bracket2_sym <- as.name("[[")
+
 # The recursive walker behind ir_parse_quo(). Carries the quosure's
 # environment explicitly (rather than re-deriving a quosure at every
 # recursive step) and an `allow_vector` flag threaded down only to the
 # `%in%` RHS argument position.
 ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
+  # Case 2 first (a symbol is neither a quosure nor a call, so no case before
+  # it applies to one): a bare symbol. Columns shadow the environment.
+  if (is.symbol(expr)) {
+    nm <- as.character(expr)
+    if (match(nm, schema$names, 0L) > 0L) {
+      return(ir_col(nm))
+    }
+    val <- tryCatch(
+      rlang::eval_tidy(rlang::new_quosure(expr, env)),
+      error = function(e) stop(conditionMessage(e), call. = FALSE)
+    )
+    return(ir_lit_from_r(val, allow_vector = allow_vector))
+  }
+
   # Case 0: a quosure embedded INSIDE the expression tree (as opposed to
   # the top-level quosure ir_parse_quo() itself unwraps) -- unwrap to its
   # own expr/env and recurse. This arises whenever a language tree is built
@@ -333,47 +623,45 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
   # transparently; this walker doesn't use tidy-eval for structural
   # dispatch (it inspects the raw language tree directly), so it needs this
   # explicit unwrap instead.
-  if (rlang::is_quosure(expr)) {
+  if (inherits(expr, "quosure")) {
     return(ir_parse_expr(rlang::quo_get_expr(expr), rlang::quo_get_env(expr), schema, allow_vector))
   }
 
-  # Case 1: "(" is transparent.
-  if (rlang::is_call(expr, "(") && length(expr) == 2) {
-    return(ir_parse_expr(expr[[2]], env, schema, allow_vector))
+  # Case 1: "(" is transparent. (A symbol head is compared directly; any other
+  # head, e.g. a namespaced one, takes rlang's matching.)
+  is_call <- is.call(expr)
+  if (is_call) {
+    head <- expr[[1L]]
+    is_paren <- if (is.symbol(head)) identical(head, ir_paren_sym) else rlang::is_call(expr, "(")
+    if (is_paren && length(expr) == 2) {
+      return(ir_parse_expr(expr[[2]], env, schema, allow_vector))
+    }
   }
 
-  # Case 2: bare symbol. Columns shadow the environment.
-  if (is.symbol(expr)) {
-    nm <- as.character(expr)
-    if (nm %in% schema$names) {
+  # Cases 3 and 4 are the `$` / `[[` calls of the `.data` / `.env` pronouns
+  # (three elements, that head): any other call skips both tests.
+  if (is_call && length(expr) == 3L &&
+        (identical(head, ir_dollar_sym) || identical(head, ir_bracket2_sym))) {
+    # Case 3: .data[["x"]] / .data$x - forced column reference.
+    if (is_data_pronoun_call(expr)) {
+      nm <- pronoun_call_name(expr)
+      if (!nm %in% schema$names) {
+        stop("Column '", nm, "' not found.\n",
+             "Available columns: ", paste(schema$names, collapse = ", "),
+             call. = FALSE)
+      }
       return(ir_col(nm))
     }
-    val <- tryCatch(
-      rlang::eval_tidy(rlang::new_quosure(expr, env)),
-      error = function(e) stop(conditionMessage(e), call. = FALSE)
-    )
-    return(ir_lit_from_r(val, allow_vector = allow_vector))
-  }
 
-  # Case 3: .data[["x"]] / .data$x - forced column reference.
-  if (is_data_pronoun_call(expr)) {
-    nm <- pronoun_call_name(expr)
-    if (!nm %in% schema$names) {
-      stop("Column '", nm, "' not found.\n",
-           "Available columns: ", paste(schema$names, collapse = ", "),
-           call. = FALSE)
+    # Case 4: .env$x / .env[["x"]] - forced environment lookup.
+    if (is_env_pronoun_call(expr)) {
+      nm <- pronoun_call_name(expr)
+      val <- tryCatch(
+        get(nm, envir = env, inherits = TRUE),
+        error = function(e) stop("object '", nm, "' not found", call. = FALSE)
+      )
+      return(ir_lit_from_r(val, allow_vector = allow_vector))
     }
-    return(ir_col(nm))
-  }
-
-  # Case 4: .env$x / .env[["x"]] - forced environment lookup.
-  if (is_env_pronoun_call(expr)) {
-    nm <- pronoun_call_name(expr)
-    val <- tryCatch(
-      get(nm, envir = env, inherits = TRUE),
-      error = function(e) stop("object '", nm, "' not found", call. = FALSE)
-    )
-    return(ir_lit_from_r(val, allow_vector = allow_vector))
   }
 
   # Case 5: literal constant (numeric/character/logical/NA/NULL).
@@ -385,7 +673,7 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
   }
 
   # Case 6: call f(...).
-  if (rlang::is_call(expr)) {
+  if (is_call) {
     head <- expr[[1]]
 
     if (is.call(head) && length(head) == 3 && identical(head[[1]], as.name("::"))) {
@@ -396,215 +684,11 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       return(NULL)  # exotic call head (e.g. a function literal): unsupported
     }
 
-    # F49: an IR node the rowwise rewrite (R/rowwise.R) built for a horizontal
-    # aggregate, embedded as `.cuplyr_rw(<node>, <columns it reads>)`. The
-    # trailing symbols only let walkers of the raw expression (all.vars(), the
-    # constant-folding checks) see the columns; the node is the value.
-    if (identical(fn_name, ".cuplyr_rw")) {
-      return(expr[[2]])
-    }
-
-    if (fn_name %in% c("&&", "||")) {
-      replacement <- if (fn_name == "&&") "&" else "|"
-      stop("'", fn_name, "' is not supported in filter(); use '", replacement, "'",
-           call. = FALSE)
-    }
-
-    # F50: as.character()/as.integer()/as.numeric()/as.double() of a bare
-    # factor column. Registry dispatch (below) runs before constant folding, so
-    # these names are intercepted only for that one shape; every other
-    # argument flows on exactly as before (`as.integer(lim)` still folds).
-    # Base-only assumption: the match is on the name alone (namespace already
-    # stripped), so a user-masked `as.character` would get the same GPU decode.
-    if (fn_name %in% c("as.character", "as.integer", "as.numeric", "as.double")) {
-      converted <- ir_parse_factor_conversion(expr, schema, fn_name)
-      if (!is.null(converted)) {
-        return(converted)
+    if (match(fn_name, ir_pre_registry_fns, 0L) > 0L) {
+      special <- ir_parse_pre_registry(expr, env, schema, allow_vector, fn_name, head)
+      if (!identical(special, ir_no_special)) {
+        return(special)
       }
-    }
-
-    # A window call whose arguments read no column (`row_number("a")`,
-    # `cumsum(2)`, `lag(5)`) runs on a length-1 constant in dplyr and the
-    # result is recycled; evaluate it in R and use the value. Zero-arg
-    # `row_number()`/`n()` and anything reading a column are left alone (an
-    # evaluation error outside the data mask also means "not constant").
-    if (fn_name %in% ir_foldable_window_fns && length(expr) > 1 &&
-        !any(vapply(as.list(expr)[-1], expr_has_column_ref, logical(1), schema = schema))) {
-      folded <- tryCatch(
-        list(value = rlang::eval_tidy(rlang::new_quosure(expr, env), data = list())),
-        error = function(e) NULL
-      )
-      if (!is.null(folded) && is.atomic(folded$value) && !is.null(folded$value)) {
-        if (length(folded$value) != 1) {
-          return(NULL)
-        }
-        return(ir_lit_from_r(folded$value))
-      }
-    }
-
-    # case_when()'s dots are `~` formulas, not ordinary expressions the
-    # generic per-arg parse loop below understands (a formula's LHS/RHS need
-    # pulling apart before recursing, and `.default=` is a named value
-    # argument, not a formula at all) -- so it's special-cased here, before
-    # canonical/registry dispatch, the same way `&&`/`||` are. See
-    # ir_parse_case_when()'s own docs for exactly what it accepts.
-    if (identical(fn_name, "case_when")) {
-      return(ir_parse_case_when(expr, env, schema))
-    }
-
-    # Phase 4 wave 2: case_match()/recode_values()/replace_values()/
-    # replace_when()'s dots are ALSO `~` formulas (case_match()/
-    # recode_values() additionally take a leading `.x`/`x` vector argument
-    # before the formulas), and when_all()/when_any()'s dots need their
-    # `na_rm=`/`size=` named controls pulled out before the remaining dots
-    # are parsed as ordinary logical expressions -- none of that fits the
-    # generic per-arg parse loop below, so all are special-cased here
-    # exactly like case_when() above. See each parse function's own docs.
-    if (identical(fn_name, "case_match")) {
-      return(ir_parse_case_match(expr, env, schema))
-    }
-    if (identical(fn_name, "recode_values")) {
-      return(ir_parse_recode_values(expr, env, schema))
-    }
-    if (identical(fn_name, "recode")) {
-      return(ir_parse_recode(expr, env, schema))
-    }
-    if (identical(fn_name, "replace_values")) {
-      return(ir_parse_replace_values(expr, env, schema))
-    }
-    if (identical(fn_name, "replace_when")) {
-      return(ir_parse_replace_when(expr, env, schema))
-    }
-    if (fn_name %in% c("when_all", "when_any")) {
-      return(ir_parse_when_reduce(expr, env, schema, fn_name))
-    }
-
-    # Phase 5 (window functions): lag()/lead() (n=/default=/order_by= named
-    # controls), first()/last()/nth() (order_by=/default=/na_rm=), and
-    # ntile() (x= is optional with a non-trivial default, and its
-    # "supplied or not" distinction changes the desugar -- see
-    # ir_parse_ntile()'s own docs) all need real argument-name-aware
-    # matching the generic per-arg registry loop below can't do (it only
-    # ever sees positional args, see ir_parse_shift_call()'s own docs) --
-    # so, like case_when()/case_match()/etc. above, these are special-cased
-    # here, before registry dispatch.
-    if (fn_name %in% c("lag", "lead")) {
-      return(ir_parse_shift_call(expr, env, schema, fn_name))
-    }
-    if (fn_name %in% c("first", "last", "nth")) {
-      return(ir_parse_first_last_nth(expr, env, schema, fn_name))
-    }
-    if (identical(fn_name, "ntile")) {
-      return(ir_parse_ntile(expr, env, schema))
-    }
-    if (identical(fn_name, "order_by")) {
-      return(ir_parse_order_by_call(expr, env, schema))
-    }
-    if (identical(fn_name, "with_order")) {
-      return(ir_parse_with_order_call(expr, env, schema))
-    }
-
-    # Phase 5, task W9: `sum()`'s ordinary registry entry only accepts the
-    # bare 1-arg form (see ir_parse_sum_call()'s own docs for why the 2-arg
-    # `sum(x, na.rm = TRUE)` shape needs real argument-NAME inspection the
-    # generic per-arg registry loop below can't do) -- special-cased here
-    # alongside lag()/lead()/first()/last()/nth()/ntile() above, for the
-    # same reason.
-    if (identical(fn_name, "sum")) {
-      return(ir_parse_sum_call(expr, env, schema))
-    }
-    if (fn_name %in% c("mean", "median") && length(expr) == 3L) {
-      return(ir_parse_mean_median_call(expr, env, schema, fn_name))
-    }
-
-    # Rolling windows (scratchpad/todo.md "Rolling-window benchmark
-    # target"): cuplyr's own roll_*() names, and an alias for
-    # data.table::froll*() (verified against benchmark_rolling.R's actual
-    # cuplyr probe call shape) -- both need real argument-name matching
-    # (na.rm=/fill=/align=/... can be omitted or out of position), so both
-    # get dedicated dispatch like lag()/lead()/ntile() above. See the
-    # file-level comment above ir_parse_roll_call()'s definition.
-    if (fn_name %in% c("roll_mean", "roll_sum", "roll_min", "roll_max", "roll_sd", "roll_median")) {
-      return(ir_parse_roll_call(expr, env, schema, fn_name))
-    }
-    if (fn_name %in% c("frollmean", "frollsum", "frollmin", "frollmax", "frollsd", "frollmedian")) {
-      return(ir_parse_froll_call(expr, env, schema, fn_name))
-    }
-
-    # Phase 11 L5 (base-R strings): nchar()/substr()/trimws()/paste0()/
-    # paste()/grepl()/sub()/gsub()/startsWith()/endsWith() all have optional
-    # named controls (type=/which=/sep=/collapse=/fixed=/ignore.case=/...)
-    # the generic per-arg registry loop can't validate (it only ever sees
-    # positional args -- same reason lag()/lead()/ntile()/roll_*() above
-    # need dedicated dispatch). toupper()/tolower() need no such dispatch
-    # (fixed 1-arg signature, ordinary registry entries below).
-    if (identical(fn_name, "nchar")) {
-      return(ir_parse_nchar(expr, env, schema))
-    }
-    if (identical(fn_name, "substr")) {
-      return(ir_parse_substr(expr, env, schema))
-    }
-    if (identical(fn_name, "trimws")) {
-      return(ir_parse_trimws(expr, env, schema))
-    }
-    if (fn_name %in% c("paste0", "paste")) {
-      return(ir_parse_paste_call(expr, env, schema, fn_name))
-    }
-    if (identical(fn_name, "grepl")) {
-      return(ir_parse_grepl(expr, env, schema))
-    }
-    if (fn_name %in% c("sub", "gsub")) {
-      return(ir_parse_sub_gsub(expr, env, schema, fn_name))
-    }
-    if (fn_name %in% c("startsWith", "endsWith")) {
-      return(ir_parse_starts_ends_with(expr, env, schema, fn_name))
-    }
-
-    # Phase 11 L6 (lubridate datetime accessors): MANDATORY namespace guard
-    # -- year()/month()/day()/hour()/minute()/second()/quarter()/yday()/
-    # wday() are lubridate names, not base R (base R has no year()) -- go
-    # native ONLY if the call's function symbol resolves (in the quosure's
-    # own environment, or via an explicit `lubridate::` qualification) to
-    # exactly lubridate's own function; otherwise NULL (fall back), so a
-    # user's own same-named function (or lubridate not being
-    # installed/attached at all) reproduces dplyr's ordinary "could not
-    # find function"/user-function behavior on the CPU fallback path
-    # instead of cuplyr silently misinterpreting an unrelated call. See
-    # ir_require_lubridate_fn()'s own docs.
-    if (fn_name %in% c("year", "month", "day", "hour", "minute", "second",
-                        "quarter", "yday", "wday")) {
-      if (!ir_require_lubridate_fn(head, env, fn_name)) {
-        return(NULL)
-      }
-      return(ir_parse_lubridate_accessor(expr, env, schema, fn_name))
-    }
-
-    # F41/F46: a column-free as.Date()/as.POSIXct()/floor_date()/
-    # ceiling_date()/round_date() is a constant, whatever its arguments (`tz =`,
-    # `format =`, a vector set for `%in%`, a unit the native rounding doesn't
-    # cover): the registry entries below only take one parsed argument. An
-    # error means "not constant" (NULL, CPU), as in the generic fold further
-    # down. Folded before the namespace guard, so a user's own floor_date() is
-    # evaluated as it would be on dev.
-    if (fn_name %in% c("as.Date", "as.POSIXct", "floor_date", "ceiling_date",
-                        "round_date") &&
-        length(expr) > 1 && !expr_has_column_ref(expr, schema)) {
-      folded <- tryCatch(
-        list(value = rlang::eval_tidy(rlang::new_quosure(expr, env))),
-        error = function(e) NULL
-      )
-      if (is.null(folded)) {
-        return(NULL)
-      }
-      return(ir_lit_from_r(folded$value, allow_vector = allow_vector))
-    }
-
-    # F46: lubridate floor_date()/ceiling_date()/round_date(), same guard.
-    if (fn_name %in% c("floor_date", "ceiling_date", "round_date")) {
-      if (!ir_require_lubridate_fn(head, env, fn_name)) {
-        return(NULL)
-      }
-      return(ir_parse_lubridate_rounding(expr, env, schema, fn_name))
     }
 
     canonical <- ir_op_alias(fn_name)
@@ -612,9 +696,9 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
 
     # The registry reads arguments by position, R binds names first: a call
     # where the two differ is dplyr's (ir_args_bind_by_position()).
-    in_registry <- canonical %in% names(ir_call_registry) && !canonical %in% ir_internal_ops
-    if (in_registry &&
-        !ir_args_bind_by_position(fn_name, args_raw, ir_call_registry[[canonical]]$arity)) {
+    entry <- ir_call_registry[[canonical]]
+    in_registry <- !is.null(entry) && match(canonical, ir_internal_ops, 0L) == 0L
+    if (in_registry && !ir_args_bind_by_position(fn_name, args_raw, entry$arity)) {
       return(NULL)
     }
 
@@ -623,7 +707,7 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
     # R/window.R turns the flag into the spec's `order_desc`. Any other
     # `desc()` shape (nested, extra args) parses `desc` as an unknown call
     # and falls back as before.
-    if (canonical %in% ir_rank_desc_fns && length(args_raw) == 1L) {
+    if (length(args_raw) == 1L && match(canonical, ir_rank_desc_fns, 0L) > 0L) {
       # F53: an unsupplied `{{ v }}` (`min_rank({{ v }})`, `min_rank(desc({{ v }}))`)
       # is dplyr's to evaluate: it raises its own "`x` must be a vector, not
       # absent." error through the CPU route.
@@ -651,30 +735,36 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
     }
 
     if (in_registry) {
-      entry <- ir_call_registry[[canonical]]
-
       if (!is.na(entry$arity) && length(args_raw) != entry$arity) {
         return(NULL)  # wrong arg count for this op: not this shape, fall back
       }
 
       parsed_args <- vector("list", length(args_raw))
+      is_in_op <- identical(canonical, "%in%")
+      all_lit <- TRUE
       for (i in seq_along(args_raw)) {
         # %in%'s RHS (2nd argument) is the one set-argument position where
         # a vector literal is legal (section 1.2/1.1).
-        arg_allow_vector <- identical(canonical, "%in%") && i == 2L
+        arg_allow_vector <- is_in_op && i == 2L
         parsed <- ir_parse_expr(args_raw[[i]], env, schema, allow_vector = arg_allow_vector)
         if (is.null(parsed)) {
           return(NULL)
         }
         parsed_args[[i]] <- parsed
+        if (!identical(.subset2(parsed, "kind"), "lit")) {
+          all_lit <- FALSE
+        }
       }
 
       # F53: a pure op over literals (`k == ""` with `k` an R variable) is a
       # scalar in R; fold it here, bottom-up, so no literal-only subtree
-      # reaches the evaluator.
-      folded <- ir_fold_literal_call(canonical, parsed_args)
-      if (!is.null(folded)) {
-        return(folded)
+      # reaches the evaluator. (ir_fold_literal_call() declines a call with a
+      # non-literal argument, so only an all-literal call asks.)
+      if (all_lit) {
+        folded <- ir_fold_literal_call(canonical, parsed_args)
+        if (!is.null(folded)) {
+          return(folded)
+        }
       }
 
       if (!is.null(entry$parse)) {
@@ -728,7 +818,7 @@ ir_lit_r_value <- function(node) {
   }
   v <- node$value
   if (!is.atomic(v) || length(v) != 1L || is.object(v) ||
-      grepl("^TIMESTAMP", unname(node$type))) {
+      isTRUE(startsWith(unname(node$type), "TIMESTAMP"))) {
     return(no)
   }
   list(ok = TRUE, value = v)
@@ -761,6 +851,12 @@ ir_eval_pure_op <- function(op, vals) {
 ir_fold_literal_call <- function(op, args) {
   if (!op %in% ir_foldable_pure_ops || length(args) == 0L) {
     return(NULL)
+  }
+  # (only literal arguments have a value to fold)
+  for (i in seq_along(args)) {
+    if (!identical(.subset2(.subset2(args, i), "kind"), "lit")) {
+      return(NULL)
+    }
   }
   # `-3` stays a unary minus of the literal (its IR shape is relied on)
   if (identical(op, "-") && length(args) == 1L) {
@@ -2705,14 +2801,40 @@ ir_cols <- function(ir) {
   if (is.null(ir)) {
     return(character())
   }
-  switch(ir$kind,
-    col = ir$name,
+  switch(.subset2(ir, "kind"),
+    col = .subset2(ir, "name"),
     # (F49: a rewritten length(c_across(..)) is a literal that still reads its
     # operand columns, which .keep = "used"/"unused" must see)
-    lit = ir$reads %||% character(),
+    lit = .subset2(ir, "reads") %||% character(),
     vec = character(),
-    call = unique(unlist(lapply(ir$args, ir_cols), use.names = FALSE))
+    call = {
+      args <- .subset2(ir, "args")
+      # no arguments: unique(unlist(list())), which is NULL
+      if (length(args) == 0L) NULL else unique(ir_arg_cols(args))
+    }
   )
+}
+
+# The columns every argument of a call reads, in order and with repeats (the
+# caller takes unique() once, which is what unique() at each level of nesting
+# gives): the walk of ir_cols() without a vector and an unlist() per call node.
+# @keywords internal
+ir_arg_cols <- function(args) {
+  out <- NULL
+  for (i in seq_along(args)) {
+    arg <- .subset2(args, i)
+    kind <- .subset2(arg, "kind")
+    out <- c(out, if (identical(kind, "col")) {
+      .subset2(arg, "name")
+    } else if (identical(kind, "call")) {
+      ir_arg_cols(.subset2(arg, "args"))
+    } else if (identical(kind, "lit")) {
+      .subset2(arg, "reads") %||% character()
+    } else if (identical(kind, "vec") || is.null(arg)) {
+      character()
+    })
+  }
+  out
 }
 
 #' Estimate the relative evaluation cost of an IR subtree
@@ -2744,7 +2866,24 @@ ir_cost <- function(ir) {
 #' @return `TRUE` iff [ir_cols()] is empty
 #' @keywords internal
 ir_is_const <- function(ir) {
-  length(ir_cols(ir)) == 0
+  # (walks like ir_cols() but stops at the first column it would collect)
+  if (is.null(ir)) {
+    return(TRUE)
+  }
+  switch(.subset2(ir, "kind"),
+    col = FALSE,
+    lit = length(ir$reads) == 0L,
+    call = {
+      args <- .subset2(ir, "args")
+      for (i in seq_along(args)) {
+        if (!ir_is_const(.subset2(args, i))) {
+          return(FALSE)
+        }
+      }
+      TRUE
+    },
+    TRUE
+  )
 }
 
 #' Does an IR (sub)tree contain a window-function call anywhere?
@@ -2772,18 +2911,34 @@ ir_has_window <- function(ir) {
   }
 
   if (inherits(ir, "cuplyr_ir")) {
-    if (!identical(ir$kind, "call")) {
+    if (!identical(.subset2(ir, "kind"), "call")) {
       return(FALSE)
     }
-    entry <- ir_call_registry[[ir$op]]
+    entry <- ir_call_registry[[.subset2(ir, "op")]]
     if (!is.null(entry) && !is.null(entry$window)) {
       return(TRUE)
     }
-    return(any(vapply(ir$args, ir_has_window, logical(1))))
+    args <- .subset2(ir, "args")
+    for (i in seq_along(args)) {
+      arg <- .subset2(args, i)
+      # (an IR leaf is no window call: answered without the call)
+      if (inherits(arg, "cuplyr_ir") && !identical(.subset2(arg, "kind"), "call")) {
+        next
+      }
+      if (ir_has_window(arg)) {
+        return(TRUE)
+      }
+    }
+    return(FALSE)
   }
 
   # A plain list of IR nodes (e.g. a call node's `$args`).
-  any(vapply(ir, ir_has_window, logical(1)))
+  for (i in seq_along(ir)) {
+    if (ir_has_window(.subset2(ir, i))) {
+      return(TRUE)
+    }
+  }
+  FALSE
 }
 
 #' Bind 0-based column indices onto every `col` node in an IR tree
@@ -2804,7 +2959,8 @@ ir_bind <- function(ir, schema) {
     return(ir)
   }
 
-  if (ir$kind == "col") {
+  kind <- .subset2(ir, "kind")
+  if (kind == "col") {
     idx <- match(ir$name, schema$names)
     if (is.na(idx)) {
       stop("Column '", ir$name, "' not found.\n",
@@ -2815,7 +2971,7 @@ ir_bind <- function(ir, schema) {
     return(ir)
   }
 
-  if (ir$kind == "lit" || ir$kind == "vec") {
+  if (kind == "lit" || kind == "vec") {
     return(ir)
   }
 
@@ -2831,18 +2987,41 @@ ir_bind <- function(ir, schema) {
   # currently-live mutate()/filter() call that now happens to *parse*
   # successfully because "mean"/"lag"/etc. are registry entries) fails
   # loudly here instead of silently mis-executing as an ordinary AST op.
-  entry <- ir_call_registry[[ir$op]]
+  op <- .subset2(ir, "op")
+  entry <- ir_call_registry[[op]]
   if (!is.null(entry) && !is.null(entry$window)) {
-    stop("internal: window op '", ir$op, "' reached lowering", call. = FALSE)
+    stop("internal: window op '", op, "' reached lowering", call. = FALSE)
   }
 
   # F50: a factor column already IS its INT32 codes, so factor_codes(f) binds
   # to the column itself (a comparison on it stays one cudf AST kernel).
-  if (identical(ir$op, "factor_codes")) {
-    return(ir_bind(ir$args[[1]], schema))
+  if (identical(op, "factor_codes")) {
+    return(ir_bind(.subset2(ir, "args")[[1]], schema))
   }
 
-  ir$args <- lapply(ir$args, ir_bind, schema = schema)
+  args <- .subset2(ir, "args")
+  for (i in seq_along(args)) {
+    arg <- .subset2(args, i)
+    arg_kind <- .subset2(arg, "kind")
+    # (a literal binds to itself, and a column is bound here, without a call
+    # per leaf; a call node, or anything else, goes through ir_bind())
+    if (identical(arg_kind, "lit") || identical(arg_kind, "vec")) {
+      next
+    }
+    if (identical(arg_kind, "col")) {
+      idx <- match(.subset2(arg, "name"), schema$names)
+      if (is.na(idx)) {
+        stop("Column '", .subset2(arg, "name"), "' not found.\n",
+             "Available columns: ", paste(schema$names, collapse = ", "),
+             call. = FALSE)
+      }
+      arg$index <- idx - 1L
+      args[i] <- list(arg)
+    } else {
+      args[i] <- list(ir_bind(arg, schema))
+    }
+  }
+  ir$args <- args
   ir
 }
 
@@ -2988,6 +3167,11 @@ ir_deparse <- function(ir) {
 #'   (the root itself is a bare factor column), or `"cpu"`
 #' @keywords internal
 ir_factor_rule <- function(ir, schema) {
+  # no DICTIONARY32 column and no such literal: nothing in the tree is "bare" or
+  # "cpu", so every node is "none"
+  if (!"DICTIONARY32" %in% schema$types && !ir_has_dictionary_value(ir)) {
+    return("none")
+  }
   dup <- anyDuplicated(schema$names) > 0L
   levels_of <- function(name) {
     if (dup) {
@@ -3046,6 +3230,40 @@ ir_factor_rule <- function(ir, schema) {
   visit(ir)
 }
 
+# Is there a DICTIONARY32 literal or vector node in `node` (call arguments and
+# IR nodes in `meta`, as ir_factor_rule() visits them)?
+# @keywords internal
+ir_has_dictionary_value <- function(node) {
+  if (is.null(node)) {
+    return(FALSE)
+  }
+  kind <- .subset2(node, "kind")
+  if (identical(kind, "call")) {
+    args <- .subset2(node, "args")
+    for (i in seq_along(args)) {
+      arg <- .subset2(args, i)
+      arg_kind <- .subset2(arg, "kind")
+      # (a call argument recurses; a leaf is answered here, without a call)
+      if (identical(arg_kind, "call")) {
+        if (ir_has_dictionary_value(arg)) {
+          return(TRUE)
+        }
+      } else if ((identical(arg_kind, "lit") || identical(arg_kind, "vec")) &&
+                   identical(unname(.subset2(arg, "type")), "DICTIONARY32")) {
+        return(TRUE)
+      }
+    }
+    for (m in .subset2(node, "meta")) {
+      if (is.list(m) && !is.null(m$kind) && ir_has_dictionary_value(m)) {
+        return(TRUE)
+      }
+    }
+    return(FALSE)
+  }
+  (identical(kind, "lit") || identical(kind, "vec")) &&
+    identical(unname(.subset2(node, "type")), "DICTIONARY32")
+}
+
 #' Infer the GPU output type of an IR node
 #'
 #' Recurses; for arithmetic call nodes this delegates to the existing
@@ -3059,21 +3277,23 @@ ir_factor_rule <- function(ir, schema) {
 #' @return GPU type string
 #' @keywords internal
 ir_infer_type <- function(ir, schema) {
-  if (ir$kind == "col") {
-    idx <- match(ir$name, schema$names)
+  # .subset2(): the nodes are classed lists, `$` would dispatch on them
+  kind <- .subset2(ir, "kind")
+  if (kind == "col") {
+    idx <- match(.subset2(ir, "name"), schema$names)
     if (is.na(idx)) {
-      stop("Column '", ir$name, "' not found.\n",
+      stop("Column '", .subset2(ir, "name"), "' not found.\n",
            "Available columns: ", paste(schema$names, collapse = ", "),
            call. = FALSE)
     }
     return(schema$types[idx])
   }
 
-  if (ir$kind == "vec") {
-    return(ir$type)
+  if (kind == "vec") {
+    return(.subset2(ir, "type"))
   }
 
-  if (ir$kind == "lit") {
+  if (kind == "lit") {
     # A bare NA (type = NULL) defaults to BOOL8 when asked in isolation --
     # matching `typeof(NA)` ("logical") in R, so `mutate(y = NA)` types `y`
     # as a logical column exactly like dplyr (T6 finding: this used to
@@ -3083,25 +3303,35 @@ ir_infer_type <- function(ir, schema) {
     # expression, which never reaches a call node at all). See the "call"
     # branch below for the sibling-adoption logic that keeps this default
     # from over-eagerly promoting a *nested* NA in e.g. `x + NA`.
-    if (is.null(ir$type)) {
+    type <- .subset2(ir, "type")
+    if (is.null(type)) {
       return("BOOL8")
     }
-    ir_check_ts_lit(ir)
-    ir_check_timespan_lit(ir$value)
-    return(ir$type)
+    # (both literal checks return at once unless the literal is a Date value
+    # or a Period/Duration/difftime object)
+    if (identical(unname(type), "TIMESTAMP_DAYS")) {
+      ir_check_ts_lit(ir)
+    }
+    value <- .subset2(ir, "value")
+    if (isS4(value) || inherits(value, "difftime")) {
+      ir_check_timespan_lit(value)
+    }
+    return(type)
   }
 
-  entry <- ir_call_registry[[ir$op]]
+  op <- .subset2(ir, "op")
+  entry <- ir_call_registry[[op]]
   if (is.null(entry)) {
-    stop("Unknown IR op: '", ir$op, "'", call. = FALSE)
+    stop("Unknown IR op: '", op, "'", call. = FALSE)
   }
 
-  arg_types <- vapply(ir$args, ir_infer_type, character(1), schema = schema)
-
+  args <- .subset2(ir, "args")
+  n <- length(args)
+  arg_types <- character(n)
   # A bare, untyped NA literal argument (kind="lit", na=TRUE, type=NULL) is
   # a type no-op in R's arithmetic: `1L + NA` is integer, not double (NA is
   # coerced to the OTHER operand's type, it never forces a promotion). Since
-  # each arg's type is inferred independently above, an isolated NA arg
+  # each arg's type is inferred independently, an isolated NA arg
   # would otherwise surface as the "in isolation" BOOL8 default from the
   # branch above and incorrectly feed into infer_mutate_output_type()'s
   # promotion union. Substitute it with a sibling arg's type first (mirrors
@@ -3109,19 +3339,51 @@ ir_infer_type <- function(ir, schema) {
   # adoption when building the actual AST) -- T6 finding: without this,
   # `mutate(y = int_col + NA)` came back FLOAT64 instead of matching
   # dplyr's INT32.
-  is_isolated_na <- vapply(ir$args, function(a) {
-    identical(a$kind, "lit") && isTRUE(a$na) && is.null(a$type)
-  }, logical(1))
+  is_isolated_na <- logical(n)
+  for (i in seq_len(n)) {
+    a <- .subset2(args, i)
+    a_kind <- .subset2(a, "kind")
+    # (a column's type is read here, without a call per leaf)
+    t <- if (identical(a_kind, "col")) {
+      idx <- match(.subset2(a, "name"), schema$names)
+      if (is.na(idx)) {
+        stop("Column '", .subset2(a, "name"), "' not found.\n",
+             "Available columns: ", paste(schema$names, collapse = ", "),
+             call. = FALSE)
+      }
+      schema$types[idx]
+    } else {
+      ir_infer_type(a, schema)
+    }
+    if (!is.character(t) || length(t) != 1L) {
+      # not a single type string: vapply() raises its error for it
+      vapply(args, ir_infer_type, character(1), schema = schema)
+    }
+    arg_types[[i]] <- t
+    is_isolated_na[[i]] <- identical(a_kind, "lit") && isTRUE(.subset2(a, "na")) &&
+      is.null(.subset2(a, "type"))
+  }
+  if (!is.null(nms <- names(args))) {
+    names(arg_types) <- nms
+  }
   if (any(is_isolated_na) && !all(is_isolated_na)) {
     arg_types[is_isolated_na] <- arg_types[!is_isolated_na][1]
   }
 
   # F37: a timestamp argument the GPU can't take goes to the CPU, whatever
-  # built the node (see ir_check_ts_operands()).
-  ir_check_ts_operands(ir, arg_types)
+  # built the node (see ir_check_ts_operands(), which returns at once unless
+  # an argument is a timestamp).
+  if (any(match(arg_types, cuplyr_timestamp_types, 0L) > 0L)) {
+    ir_check_ts_operands(ir, arg_types)
+  }
   # F48: the same for the STRING/BOOL8/INT32 arguments of reducers, windows
-  # and comparisons (see ir_native_arg_types).
-  ir_check_type_operands(ir, arg_types)
+  # and comparisons (see ir_native_arg_types). ir_check_type_operands()
+  # judges the ops of ir_native_arg_types, and a comparison or `%in%` that has
+  # a STRING argument; it returns at once for anything else.
+  if (match(op, ir_native_arg_op_names, 0L) > 0L ||
+        (match(op, ir_string_checked_ops, 0L) > 0L && "STRING" %in% arg_types)) {
+    ir_check_type_operands(ir, arg_types)
+  }
 
   entry$type(arg_types)
 }
@@ -3447,12 +3709,56 @@ ir_strings_are_utf8 <- function(x) {
   !anyNA(iconv(native, "ASCII", "ASCII"))
 }
 
+# Does a factor_labels call occur anywhere in `node`, walked as
+# ir_decode_meets_non_utf8()'s collecting walk does (call arguments, IR nodes
+# in `meta`, plain lists)?
+# @keywords internal
+ir_has_factor_labels <- function(node) {
+  if (inherits(node, "cuplyr_ir")) {
+    if (!identical(.subset2(node, "kind"), "call")) {
+      return(FALSE)
+    }
+    if (identical(.subset2(node, "op"), "factor_labels")) {
+      return(TRUE)
+    }
+    args <- .subset2(node, "args")
+    for (i in seq_along(args)) {
+      arg <- .subset2(args, i)
+      # (an IR leaf has no factor_labels call: answered without the call)
+      if (inherits(arg, "cuplyr_ir") && !identical(.subset2(arg, "kind"), "call")) {
+        next
+      }
+      if (ir_has_factor_labels(arg)) {
+        return(TRUE)
+      }
+    }
+    for (m in .subset2(node, "meta")) {
+      if (is.list(m) && !is.null(m$kind) && ir_has_factor_labels(m)) {
+        return(TRUE)
+      }
+    }
+    return(FALSE)
+  }
+  if (is.list(node)) {
+    for (i in seq_along(node)) {
+      if (ir_has_factor_labels(.subset2(node, i))) {
+        return(TRUE)
+      }
+    }
+  }
+  FALSE
+}
+
 # F50: TRUE iff `ir` decodes factor labels (factor_labels, whose levels
 # ir_parse_factor_conversion() only builds from UTF-8 strings) and also holds
 # a string literal that isn't UTF-8 (`as.character(f) == lit` with a latin1
 # `lit`): the GPU would compare the two byte encodings and never match.
 # @keywords internal
 ir_decode_meets_non_utf8 <- function(ir) {
+  # the result needs a factor_labels call; look for one before collecting strings
+  if (!ir_has_factor_labels(ir)) {
+    return(FALSE)
+  }
   decodes <- FALSE
   strings <- list()
   walk <- function(node) {
@@ -3715,12 +4021,18 @@ ir_posixct_shift <- function(ir, schema) {
 # and a bare NA, infer_mutate_output_type() for a shift and `ts - ts`).
 # @keywords internal
 ir_args_may_be_timestamp <- function(args, schema) {
-  if (any(unname(schema$types) %in% cuplyr_timestamp_types)) {
+  if (any(match(schema$types, cuplyr_timestamp_types, 0L) > 0L)) {
     return(TRUE)
   }
-  any(vapply(args, function(a) {
-    a$kind %in% c("lit", "vec") && unname(a$type %||% "") %in% cuplyr_timestamp_types
-  }, logical(1)))
+  for (i in seq_along(args)) {
+    a <- .subset2(args, i)
+    kind <- .subset2(a, "kind")
+    if ((identical(kind, "lit") || identical(kind, "vec")) &&
+          match(unname(.subset2(a, "type") %||% ""), cuplyr_timestamp_types, 0L) > 0L) {
+      return(TRUE)
+    }
+  }
+  FALSE
 }
 
 # TRUE iff the node's inferred type is a timestamp (Date/POSIXct).
@@ -3925,6 +4237,11 @@ ir_native_arg_types <- local({
   )
 })
 
+# The ops ir_check_type_operands() judges: those of ir_native_arg_types, and the
+# comparisons and `%in%` when an argument is a STRING.
+ir_native_arg_op_names <- names(ir_native_arg_types)
+ir_string_checked_ops <- c("==", "!=", "<", "<=", ">", ">=", "%in%")
+
 # Ops whose STRING argument is native only under a byte-order collation: the
 # one place the collation rule lives (ir_type_gate()). The comparisons are
 # not in ir_native_arg_types (ir_check_type_operands() judges them), but
@@ -3992,7 +4309,20 @@ ir_check_type_operands <- function(ir, arg_types) {
 # Small type-fn builders shared by several registry entries below.
 type_arith_op <- function(op) {
   force(op)
-  function(arg_types) infer_mutate_output_type(op, arg_types, NULL)
+  function(arg_types) {
+    type <- ir_numeric_arith_type(arg_types)
+    if (is.null(type)) infer_mutate_output_type(op, arg_types, NULL) else type
+  }
+}
+# infer_mutate_output_type()'s rule 5 (`+ - * %% %/%`, no scalar) for operands
+# that are all BOOL8/INT32/INT64/FLOAT64, the types no earlier rule rejects:
+# FLOAT64 if any is, else INT64 if any is, else INT32. NULL for any other mix.
+ir_plain_numeric_types <- c("BOOL8", "INT32", "INT64", "FLOAT64")
+ir_numeric_arith_type <- function(arg_types) {
+  if (anyNA(match(arg_types, ir_plain_numeric_types))) {
+    return(NULL)
+  }
+  if (match("FLOAT64", arg_types, 0L) > 0L) "FLOAT64" else if (match("INT64", arg_types, 0L) > 0L) "INT64" else "INT32"
 }
 type_bool8 <- function(arg_types) "BOOL8"
 type_float64 <- function(arg_types) "FLOAT64"
@@ -4054,7 +4384,8 @@ type_minus <- function(arg_types) {
   if (length(arg_types) == 1) {
     return(arg_types[1])
   }
-  infer_mutate_output_type("-", arg_types, NULL)
+  type <- ir_numeric_arith_type(arg_types)
+  if (is.null(type)) infer_mutate_output_type("-", arg_types, NULL) else type
 }
 
 # -----------------------------------------------------------------------------

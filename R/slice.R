@@ -762,8 +762,8 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 # @return list(data = x (computed if keys may be taken), keep, preserve)
 # @keywords internal
 row_slice_prepare <- function(x, preserve = FALSE, eligible = TRUE) {
-  keep <- eligible && (isTRUE(preserve) || isFALSE(x$group_drop)) &&
-    length(x$groups) > 0L && !is_rowwise_gpu(x)
+  keep <- eligible && (isTRUE(preserve) || isFALSE(.subset2(x, "group_drop"))) &&
+    length(.subset2(x, "groups")) > 0L && !is_rowwise_gpu(x)
   if (keep && has_pending_ops(x)) x <- compute(x)
   list(data = x, keep = keep, preserve = isTRUE(preserve))
 }
@@ -778,7 +778,7 @@ row_slice_finish <- function(result, prep) {
   }
   if (!is.null(keys)) {
     result$fixed_keys <- keys
-  } else if (!is.null(result[["fixed_keys"]])) {
+  } else if (!is.null(.subset2(result, "fixed_keys"))) {
     result <- drop_fixed_keys(result)
   }
   result

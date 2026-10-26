@@ -15,6 +15,8 @@ shared typeof; string keys = names, numeric keys = \code{as.double(names)} (whol
 int32 for an INT32 \code{.x}) or positions; no duplicate keys; and, without
 \code{.default}, a value type equal to \code{.x}'s (otherwise dplyr's data-dependent
 "Unreplaced values treated as NA" warning must stay on the CPU). Lowers to
-\verb{case_when(is.na(x) ~ .missing, x == key ~ val, ..., .default = .default or x)}, every literal explicitly typed. See \code{features/F30.md}.
+one \code{recode_lookup(x, keys, values, default, missing)} node (F61: the keys
+and values are two vector literals, one hash lookup on the GPU instead of
+a clause per key), every literal explicitly typed. See \code{features/F30.md}.
 }
 \keyword{internal}

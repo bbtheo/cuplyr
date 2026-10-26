@@ -266,7 +266,8 @@ is_lazy <- function(.data) {
 #'
 #' @export
 has_pending_ops <- function(.data) {
-  is_tbl_gpu(.data) && inherits(.subset2(.data, "lazy_ops"), "ast_node")
+  # (is_tbl_gpu() inline: verbs ask this several times per call)
+  inherits(.data, "tbl_gpu") && inherits(.subset2(.data, "lazy_ops"), "ast_node")
 }
 
 #' Show pending operations for a lazy tbl_gpu

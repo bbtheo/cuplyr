@@ -63,15 +63,15 @@ optimize_ast <- function(ast) {
   }
 
   # Schema memo (R/ast.R): the passes ask for the same nodes' schemas again
-  # and again; compute() has already opened one that lowering shares.
-  memo_prev <- .schema_memo$plain
-  on.exit(.schema_memo$plain <- memo_prev, add = TRUE)
-  schema_memo_open()
+  # and again; compute() has already opened one that lowering shares (then
+  # there is nothing to open, or to restore on exit).
+  if (is.null(.schema_memo$plain)) {
+    on.exit(.schema_memo$plain <- NULL, add = TRUE)
+    schema_memo_open()
+  }
 
   # Handle barriers: optimize segments separately
-  ast <- optimize_with_barriers(ast)
-
-  ast
+  optimize_with_barriers(ast)
 }
 
 #' Optimize AST respecting barrier nodes
@@ -83,11 +83,22 @@ optimize_with_barriers <- function(ast) {
   if (is.null(ast)) return(NULL)
 
   if (is_barrier(ast)) {
-    # Optimize below the barrier, not across
-    if (!is.null(ast$input)) {
-      ast$input <- optimize_with_barriers(ast$input)
+    # Optimize below the barrier, not across (an input that comes back as it
+    # was is not assigned again: the node stays the same object)
+    input <- .subset2(ast, "input")
+    if (!is.null(input)) {
+      optimized <- optimize_with_barriers(input)
+      if (!is_reference(optimized, input)) ast$input <- optimized
     }
     return(ast)
+  }
+
+  # A settled chain that leaves no later pass anything to do (settled_chain()
+  # gives 2L) reaches its source through filters and mutates only, so it
+  # holds no barrier, and optimize_segment() would return settled_prune() of
+  # it.
+  if (settled_chain(ast, NULL) == 2L) {
+    return(settled_prune(ast))
   }
 
   # Find the next barrier down the tree
@@ -141,14 +152,27 @@ optimize_with_barriers <- function(ast) {
 optimize_segment <- function(ast, required_cols = NULL) {
   if (is.null(ast)) return(NULL)
 
-  # The segment's output columns, once for both passes: projection pushdown
+  # The segment's output columns (`required_cols = NULL`), inferred once from
+  # the tree as given, and only when a pass needs them: projection pushdown
   # keeps them as they are, so the second pass would infer the same names from
   # its (rebuilt) tree.
-  if (is.null(required_cols)) {
-    required_cols <- infer_schema_memo(ast)$names
-  }
+  root <- ast
+  own <- is.null(required_cols)
 
-  ast <- push_down_projections(ast, required_cols)
+  # A chain of filters and mutates on a source whose every output column is
+  # required (settled_chain()): projection pushdown leaves it as it is, and
+  # dead-column pruning only re-subsets each mutate's expression list.
+  settled <- settled_chain(ast, required_cols)
+  if (settled == 2L) {
+    # ... and no later pass applies either (segment_features() would find no
+    # mutate or filter over a mutate or filter): the pruning is all there is.
+    return(settled_prune(ast))
+  }
+  settled <- settled == 1L
+  if (!settled) {
+    if (own) required_cols <- infer_schema_memo(root)$names
+    ast <- push_down_projections(ast, required_cols)
+  }
 
   # A cheap scan of the node types says which later passes can change the
   # plan; a pass that can't is skipped (it would rebuild the same tree). Each
@@ -157,10 +181,21 @@ optimize_segment <- function(ast, required_cols = NULL) {
   feats <- segment_features(ast)
   if (feats[["mutate_pair"]]) {
     ast <- fuse_mutates(ast)
+    if (settled) {
+      # (fusion keeps a settled chain settled; checked again all the same)
+      if (own) required_cols <- infer_schema_memo(root)$names
+      settled <- settled_chain(ast, required_cols) > 0L
+    }
   }
   if (feats[["column_nodes"]]) {
-    ast <- prune_dead_columns(ast, required_cols)
-    feats <- segment_features(ast)
+    if (settled) {
+      # (same node types and links: the scan would read the same features)
+      ast <- settled_prune(ast)
+    } else {
+      if (is.null(required_cols)) required_cols <- infer_schema_memo(root)$names
+      ast <- prune_dead_columns(ast, required_cols)
+      feats <- segment_features(ast)
+    }
   }
   if (feats[["filter_over"]]) {
     ast <- push_down_filters(ast)
@@ -219,15 +254,134 @@ segment_features <- function(ast) {
     filter_over = filter_over, filter_pair = filter_pair)
 }
 
+#' Is a segment a chain no projection or pruning pass can change?
+#'
+#' Settled when `ast` is a chain of filter and mutate nodes (each mutate with
+#' at least one expression) ending in a source, every predicate reads only
+#' columns of its filter's input, and `required_cols` holds every output
+#' column of `ast` (`NULL`: they are `ast`'s own output columns, as
+#' `optimize_segment()` takes it). Then, by induction from the top (a node's
+#' required set always covers its output columns: a filter's output is its
+#' input, and a mutate's is its input plus its outputs, so taking its new
+#' outputs away and adding what its expressions read still covers the input):
+#' - `push_down_projections()` returns the same tree: the source keeps all
+#'   its columns, and no filter has a predicate column that isn't required.
+#' - `prune_dead_columns()` keeps every mutate expression (each output column
+#'   is required), so its only change is `exprs[keep]` with `keep` all TRUE,
+#'   which `settled_prune()` repeats.
+#' Anything else (a select, a join, a truncated segment cut at a barrier, an
+#' empty mutate) is not settled, and the passes run as usual. Only output
+#' column NAMES are needed, as sets, so they are built bottom-up without
+#' inferring types.
+#'
+#' @param ast Root of a segment
+#' @param required_cols Columns required by whatever consumes the segment, or
+#'   `NULL` for all of its output columns
+#' @return `0L` not settled; `1L` settled; `2L` settled, and no mutate or
+#'   filter sits directly on a mutate or filter, so `segment_features()` would
+#'   find no pair for `fuse_mutates()`, `push_down_filters()` or
+#'   `reorder_filters()` either
+#' @keywords internal
+settled_chain <- function(ast, required_cols) {
+  # First walk: the node types, the pairs, and the predicates of a filter on
+  # the source (whose input columns are the source's).
+  pair <- FALSE
+  node <- ast
+  repeat {
+    type <- .subset2(node, "type")
+    if (is.null(type)) {
+      return(0L)
+    }
+    input <- .subset2(node, "input")
+    input_type <- .subset2(input, "type")
+    switch(type,
+      source = break,
+      mutate = {
+        if (length(.subset2(node, "expressions")) == 0L) return(0L)
+        if (identical(input_type, "mutate")) pair <- TRUE
+      },
+      filter = {
+        if (identical(input_type, "source")) {
+          cols <- node_field_union(.subset2(node, "predicates"), "cols")
+          if (!all(match(cols, .subset2(.subset2(input, "schema"), "names"), 0L) > 0L)) return(0L)
+        } else {
+          # (a filter on a mutate or a filter; anything else ends the walk below)
+          pair <- TRUE
+        }
+      },
+      return(0L)
+    )
+    node <- input
+  }
+  if (!pair && is.null(required_cols)) {
+    return(2L)
+  }
+
+  # Otherwise the output columns, bottom-up: the input columns of every filter
+  # (above a mutate or a filter) and the segment's own.
+  chain <- list()
+  node <- ast
+  while (!identical(.subset2(node, "type"), "source")) {
+    chain[[length(chain) + 1L]] <- node
+    node <- .subset2(node, "input")
+  }
+  cols <- .subset2(.subset2(node, "schema"), "names")
+  for (i in rev(seq_along(chain))) {
+    node <- chain[[i]]
+    if (identical(.subset2(node, "type"), "filter")) {
+      if (!all(node_field_union(.subset2(node, "predicates"), "cols") %in% cols)) return(0L)
+    } else {
+      cols <- opt_union(cols, mutate_output_cols(.subset2(node, "expressions")))
+    }
+  }
+  if (!is.null(required_cols) && !all(cols %in% required_cols)) {
+    return(0L)
+  }
+  if (pair) 1L else 2L
+}
+
+#' `prune_dead_columns()` on a settled chain
+#'
+#' What the pass returns for a chain `settled_chain()` accepts: the same nodes,
+#' each mutate's expressions replaced by `exprs[keep]` with every `keep`
+#' TRUE. That subset drops the list's attributes but its names (the
+#' parse-time flags `parse_mutate_dots()` sets), so a mutate whose list has
+#' other attributes is rebuilt with it; a node nothing changes, with nothing
+#' changed below it, is returned as it is.
+#'
+#' @param ast A chain `settled_chain()` accepted
+#' @return The pruned chain
+#' @keywords internal
+settled_prune <- function(ast) {
+  if (identical(.subset2(ast, "type"), "source")) {
+    return(ast)
+  }
+  input <- .subset2(ast, "input")
+  pruned <- settled_prune(input)
+  if (!is_reference(pruned, input)) {
+    ast$input <- pruned
+  }
+  if (identical(.subset2(ast, "type"), "mutate")) {
+    exprs <- .subset2(ast, "expressions")
+    attrs <- names(attributes(exprs))
+    if (!(is.null(attrs) || identical(attrs, "names"))) {
+      ast$expressions <- exprs[rep(TRUE, length(exprs))]
+    }
+  }
+  ast
+}
+
 #' Find the next barrier node walking down from root
 #'
 #' @param ast AST node
 #' @return Barrier node or NULL
 #' @keywords internal
 find_next_barrier <- function(ast) {
-  if (is.null(ast)) return(NULL)
-  if (is_barrier(ast)) return(ast)
-  find_next_barrier(ast$input)
+  while (!is.null(ast)) {
+    if (is_barrier(ast)) return(ast)
+    ast <- .subset2(ast, "input")
+  }
+  NULL
 }
 
 #' Extract segment above a barrier (returns copy)

@@ -16,15 +16,24 @@
 #' @return An ast_node object
 #' @keywords internal
 ast_node <- function(type, ..., input = NULL) {
-  structure(
-    list(
-      type = type,
-      input = input,
-      ...
-    ),
-    class = c(paste0("ast_", type), "ast_node")
+  node <- list(
+    type = type,
+    input = input,
+    ...
   )
+  # (the class vectors of the node types the verbs build on every call are
+  # kept ready; any other type builds its own)
+  class(node) <- ast_node_classes[[type]] %||% c(paste0("ast_", type), "ast_node")
+  node
 }
+
+# `c(paste0("ast_", type), "ast_node")` for the node types built per verb call.
+# @keywords internal
+ast_node_classes <- lapply(
+  stats::setNames(nm = c("source", "filter", "mutate", "select", "arrange", "summarise", "rename",
+                         "window", "slice", "distinct", "join", "barrier", "reframe")),
+  function(type) c(paste0("ast_", type), "ast_node")
+)
 
 # -----------------------------------------------------------------------------
 # Node Type Constructors
@@ -412,9 +421,11 @@ infer_mutate_output_type <- function(op, input_types, scalar) {
   }
 
   # Rule 2: no arithmetic on STRING/DICTIONARY32/TIMESTAMP_* columns.
+  # (startsWith() with NA taken as FALSE is grepl("^TIMESTAMP_", .), faster)
+  is_ts <- startsWith(input_types, "TIMESTAMP_") & !is.na(input_types)
   is_unsupported <- input_types == "STRING" |
     input_types == "DICTIONARY32" |
-    grepl("^TIMESTAMP_", input_types)
+    is_ts
   if (any(is_unsupported)) {
     bad_type <- input_types[is_unsupported][1]
     msg <- paste0("mutate() does not support arithmetic on ", bad_type, " columns")
@@ -430,7 +441,6 @@ infer_mutate_output_type <- function(op, input_types, scalar) {
     if ("DICTIONARY32" %in% input_types) {
       stop_factor_needs_cpu(msg)
     }
-    is_ts <- grepl("^TIMESTAMP_", input_types)
     if (op %in% c("+", "-") && !any(is_unsupported & !is_ts) &&
         (sum(is_ts) == 1L || (op == "-" && sum(is_ts) == 2L))) {
       stop_timestamp_needs_cpu(msg)
@@ -590,6 +600,10 @@ infer_schema <- function(node) {
 infer_schema_memo <- function(node) {
   memo <- .schema_memo$plain
   if (is.null(memo) || !is.list(node)) {
+    # (a source node's schema is infer_schema.ast_source()'s answer)
+    if (is.list(node) && identical(.subset2(node, "type"), "source")) {
+      return(.subset2(node, "schema"))
+    }
     return(infer_schema(node))
   }
   key <- obj_address(node)
@@ -705,8 +719,17 @@ infer_schema_from <- function(node, input_schema) {
       }
 
       # Then aggregation columns
-      agg_names <- vapply(node$aggregations, `[[`, character(1), "output_col")
-      agg_types <- vapply(node$aggregations, `[[`, character(1), "output_type")
+      aggs <- .subset2(node, "aggregations")
+      agg_names <- character(length(aggs))
+      agg_types <- character(length(aggs))
+      for (i in seq_along(aggs)) {
+        agg_names[[i]] <- .subset2(.subset2(aggs, i), "output_col")
+        agg_types[[i]] <- .subset2(.subset2(aggs, i), "output_type")
+      }
+      if (!is.null(agg_labels <- names(aggs))) {
+        names(agg_names) <- agg_labels
+        names(agg_types) <- agg_labels
+      }
 
       # F07: an aggregate named like a grouping column replaces that key IN
       # PLACE (see summarise_output_index()).
@@ -1030,19 +1053,25 @@ set_ast_source_ptr <- function(node, ptr) {
   # A lazy join result has no pointer of its own: its sources already carry
   # theirs (attached by the inner push_join()), so there is nothing to do.
   if (is.null(ptr)) return(node)
-  if (node$type == "source") {
+  if (.subset2(node, "type") == "source") {
     # Never overwrite an attached pointer (a chained join's inner sources).
-    if (is.null(node$source_ptr)) node$source_ptr <- ptr
+    if (is.null(.subset2(node, "source_ptr"))) node$source_ptr <- ptr
     return(node)
   }
-  if (!is.null(node$input)) {
-    node$input <- set_ast_source_ptr(node$input, ptr)
+  # (fields read by exact name, without `$`'s dispatch on the node class: this
+  # runs once per node of a join side's pending plan; only a join node has
+  # `left`/`right`)
+  child <- .subset2(node, "input")
+  if (!is.null(child)) {
+    node$input <- set_ast_source_ptr(child, ptr)
   }
-  if (!is.null(node$left)) {
-    node$left <- set_ast_source_ptr(node$left, ptr)
+  child <- .subset2(node, "left")
+  if (!is.null(child)) {
+    node$left <- set_ast_source_ptr(child, ptr)
   }
-  if (!is.null(node$right)) {
-    node$right <- set_ast_source_ptr(node$right, ptr)
+  child <- .subset2(node, "right")
+  if (!is.null(child)) {
+    node$right <- set_ast_source_ptr(child, ptr)
   }
   node
 }

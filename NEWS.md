@@ -1,5 +1,37 @@
 # cuplyr (development version)
 
+## Faster eager verb calls (F68b)
+
+* An eager verb call takes 36% (`arrange()`) to 82% (`select()`) less time,
+  and recording a verb on a lazy table is cheaper by the same R-side work. At
+  1e3 rows, where a verb is a few small kernels and nearly all of its time is
+  R, an eager call takes (median of three runs, before -> after, ms)
+  `filter()` 0.73 -> 0.36, `mutate()` 0.83 -> 0.37, `select()` 0.57 -> 0.10,
+  `arrange()` 0.22 -> 0.14 and a grouped `summarise()` 0.81 -> 0.40. Adding a
+  `filter()` or `mutate()` to a lazy table takes 0.16 to 0.19 ms (it was 0.5).
+  Results, errors, warnings and messages, and the moment they are raised (at
+  the verb, eager or lazy), are unchanged; nothing is cached across calls. The
+  one exception: a dot named like an argument of `rlang::enquos()` that
+  `rlang::quos()` lacks (`.homonyms`, `.check_assign`, `.ignore_null`) is now an
+  ordinary named expression in `filter()`, `filter_out()`, `mutate()` and
+  `summarise()`, as in dplyr, where it used to be taken as that argument.
+* `select()` with plain column names skips tidyselect (anything else, and every
+  error, warning and message, is still tidyselect's). Expression parsing and
+  type checks skip the walks they cannot need (no timestamp, STRING or factor
+  among the operands, no `across()`/`cur_group*()` in the dots), `summarise()`
+  of `fn(column)` goes straight to its aggregation, and `filter()`,
+  `filter_out()`, `mutate()` and `summarise()` capture their dots with `quos()`
+  (the same quosures at a seventh of the cost).
+* `collect()` and `compute()` of a lazy table: the optimizer recognises in one
+  walk a plan its column passes would leave as it is (a chain of `filter()` and
+  `mutate()` steps on the table itself, below any barrier such as `summarise()`
+  or `arrange()`, whose columns are all used) and skips those passes; the plan
+  it returns is the same. The five-verb pipeline of `vignette("performance", package =
+  "cuplyr")` (median of three runs) takes 1.87 ms eager and 1.75 ms lazy at 1e3
+  rows (it was 3.10 and 3.00) and 2.00 ms in both modes at 1e6 rows (3.38 and
+  3.20). Recording a join on a deep lazy plan grows half as fast with the
+  plan's depth (0.61 ms at 120 nodes against 0.30 at 3; it was 0.87).
+
 ## Faster lazy verb calls (F68a)
 
 * Recording a verb on a lazy table no longer depends on how many verbs are

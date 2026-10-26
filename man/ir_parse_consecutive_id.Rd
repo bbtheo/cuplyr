@@ -22,7 +22,9 @@ group, which the \code{is.na(x) & is.na(lx)} disjunct captures):
 \verb{1,2,2,3,3,4}.
 
 Builds \code{cumsum(if_else(rn==1L, 1L, if_else(same_as_prev, 0L, 1L)))}
-where \code{rn = row_number()} and \code{same_as_prev = coalesce(x == lag(x), FALSE) | (is.na(x) & is.na(lag(x)))}. \code{lag(x)}/\code{row_number()} are
+where \code{rn = row_number()} and \code{same_as_prev = coalesce(x == lag(x), FALSE) | (is.na(x) & is.na(lag(x)))}; for a double \code{x} the "both missing"
+clause is split into "both NaN" and "both NA but not NaN" (vctrs keeps NaN
+and NA apart). \code{lag(x)}/\code{row_number()} are
 themselves window calls nested inside \code{cumsum()}'s argument -- exactly
 the "nested window calls needing 2 decomposition passes" shape \code{R/ window.R}'s \code{ir_extract_windows()}/\code{plan_window_stages()} handles
 generically (see test-window-plan.R), so this desugar doesn't need to

@@ -197,7 +197,9 @@
 #'     collect()
 #' }
 filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
-  filter_impl(.data, rlang::enquos(...), rlang::enquo(.by), .preserve,
+  # (an argument that wasn't given is the NULL quosure, which skips an enquo())
+  by_quo <- if (missing(.by) && is.null(substitute(.by))) null_quo else rlang::enquo(.by)
+  filter_impl(.data, rlang::quos(...), by_quo, .preserve,
               complement = FALSE, call = rlang::current_env())
 }
 
@@ -219,7 +221,8 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 #' @export
 #' @importFrom dplyr filter_out
 filter_out.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
-  filter_impl(.data, rlang::enquos(...), rlang::enquo(.by), .preserve,
+  by_quo <- if (missing(.by) && is.null(substitute(.by))) null_quo else rlang::enquo(.by)
+  filter_impl(.data, rlang::quos(...), by_quo, .preserve,
               complement = TRUE, call = rlang::current_env())
 }
 
@@ -286,7 +289,8 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # table with no columns.
   cpu <- function() filter_cpu_fallback(.data, dots, by_quo, .preserve, complement)
   nms <- names(dots)
-  if (!is.null(nms) && any(nzchar(nms) & !vapply(dots, function(q) is.logical(rlang::quo_get_expr(q)), logical(1)))) {
+  if (!is.null(nms) && any(nzchar(nms)) &&
+      any(nzchar(nms) & !vapply(dots, function(q) is.logical(rlang::quo_get_expr(q)), logical(1)))) {
     return(cpu())
   }
 
@@ -325,9 +329,14 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # CPU fallbacks keep the dots as the user wrote them.
   user_dots <- dots
   dots <- colwise_rewrite_dots(dots, current_schema(.data))
-  dots <- rewrite_context_dots(dots, verb_groups)
+  # (dots that mention none of the names the next screens look for pass them
+  # all unchanged: dots_are_plain())
+  plain <- length(dots) > 0L && dots_are_plain(dots)
+  if (!plain) {
+    dots <- rewrite_context_dots(dots, verb_groups)
+  }
   dots <- rewrite_top_n_rank_dots(dots, .data)
-  if (dots_need_fallback(dots)) {
+  if (!plain && dots_need_fallback(dots)) {
     return(filter_across_fallback(.data, user_dots, by_quo, .preserve, complement))
   }
 
@@ -336,11 +345,18 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # `.cols`'s selectable set alongside the group columns.
   fallback_data <- .data
   fallback_dots <- user_dots
-  cgid <- substitute_cur_group_id(.data, dots, verb_groups, by = !rlang::quo_is_null(by_quo),
-                                  rowwise = rowwise)
+  cgid <- if (plain) {
+    list(data = .data, dots = dots, used = FALSE)
+  } else {
+    substitute_cur_group_id(.data, dots, verb_groups, by = !rlang::quo_is_null(by_quo),
+                            rowwise = rowwise)
+  }
   .data <- cgid$data
-  dots <- expand_across_dots(cgid$dots, current_schema(.data),
-                             c(verb_groups, cgid$helper_name), "filter")
+  dots <- if (plain) {
+    expand_plain_dots(cgid$dots)
+  } else {
+    expand_across_dots(cgid$dots, current_schema(.data), c(verb_groups, cgid$helper_name), "filter")
+  }
   # An unsupported `.fns` shape: dplyr runs the call on the table and dots as
   # the user wrote them (no cur_group_id() helper column)
   if (isTRUE(attr(dots, "needs_fallback"))) {
@@ -418,13 +434,17 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # but references no schema column (a genuine constant/environment-vector
   # shape, e.g. `rep(TRUE, n)`) is untouched -- it still flows to
   # `filter_eval_mask()` below, unchanged from before L1.
-  needs_expr_fallback <- vapply(seq_along(dots), function(i) {
-    (is.null(parsed[[i]]) && dot_references_schema_col(dots[[i]], orig_names)) ||
-      (!is.null(parsed[[i]]) && ir_factor_rule(parsed[[i]], schema) != "none") ||
-      filter_ir_not_logical(parsed[[i]], schema, i %in% window_idx)
-  }, logical(1))
+  # (every dot is judged, as a vapply() over them did, before any is acted on)
+  needs_expr_fallback <- FALSE
+  for (i in seq_along(dots)) {
+    if ((is.null(parsed[[i]]) && dot_references_schema_col(dots[[i]], orig_names)) ||
+          (!is.null(parsed[[i]]) && ir_factor_rule(parsed[[i]], schema) != "none") ||
+          filter_ir_not_logical(parsed[[i]], schema, i %in% window_idx)) {
+      needs_expr_fallback <- TRUE
+    }
+  }
 
-  if (any(needs_expr_fallback)) {
+  if (needs_expr_fallback) {
     return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
   }
 
@@ -435,7 +455,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # decided here before any predicate is pushed. Each such dot is evaluated
   # exactly once: the value is cached for the loop below.
   standalone <- vector("list", length(dots))
-  for (i in set_diff(seq_along(dots), window_idx)) {
+  for (i in if (length(window_idx) > 0L) set_diff(seq_along(dots), window_idx) else seq_along(dots)) {
     if (is.null(parsed[[i]]) || ir_is_const(parsed[[i]])) {
       res <- tryCatch(list(value = rlang::eval_tidy(dots[[i]], data = list())), error = function(e) NULL)
       if (is.null(res)) {
@@ -772,6 +792,12 @@ filter_expr_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complem
 # @keywords internal
 filter_ir_not_logical <- function(ir, schema, is_window) {
   if (is.null(ir) || is_window || ir_is_const(ir)) {
+    return(FALSE)
+  }
+  # a call whose type function is the constant "BOOL8" (comparisons, &, |, !,
+  # is.na(), ...) is logical whether its arguments type or fail to
+  if (identical(.subset2(ir, "kind"), "call") &&
+        identical(ir_call_registry[[.subset2(ir, "op")]]$type, type_bool8)) {
     return(FALSE)
   }
   !identical(unname(tryCatch(ir_infer_type(ir, schema), error = function(e) "BOOL8")), "BOOL8")

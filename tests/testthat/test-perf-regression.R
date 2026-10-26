@@ -621,3 +621,23 @@ test_that("perf: lazy_pipeline5_1e3", {
       collect()
   }, calibration = "kernel")
 })
+
+# F68b: R-side floor of one EAGER verb call. Each verb on a 1e3-row table is a
+# few small kernels, so its time is the verb's parsing, validation, metadata and
+# wrapping in R (a result is never copied back to R). The closure runs one
+# filter, mutate, select, arrange and grouped summarise. Calibration "kernel".
+test_that("perf: eager_verb_floor_1e3", {
+  skip_if_no_gpu()
+  eager <- tbl_gpu(perf_lazy_small_df, lazy = FALSE)
+  grouped <- dplyr::group_by(eager, g)
+
+  expect_no_perf_regression("eager_verb_floor_1e3", function() {
+    f <- dplyr::filter(eager, x > 0.5)
+    m <- dplyr::mutate(eager, z = x * 2 + y)
+    s <- dplyr::select(eager, g, x)
+    a <- dplyr::arrange(eager, x)
+    u <- dplyr::summarise(grouped, m = mean(x))
+    gpu_sync()
+    u
+  }, calibration = "kernel")
+})

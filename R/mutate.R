@@ -327,12 +327,19 @@
 mutate.tbl_gpu <- function(.data, ..., .by = NULL,
                            .keep = c("all", "used", "unused", "none"),
                            .before = NULL, .after = NULL) {
-  .keep <- match.arg(.keep)
+  # (the default is the first choice; an argument forwarded from a caller's
+  # missing one goes through match.arg(), whose error it keeps)
+  .keep <- if (missing(.keep) && is.call(substitute(.keep))) "all" else match.arg(.keep)
   p <- sys.parent()
   inform_colwise_grouped(.data, "mutate", if (p > 0L) sys.function(p))
   check_unique_input_names(.data)
 
-  dots <- rlang::enquos(...)
+  # quos(...) of the method's own dots is what enquos(...) returns (the same
+  # quosures, names and unquoting), at a seventh of the cost of enquos()'s
+  # argument matching, except for dots named like enquos()'s own arguments
+  # (see the "Capture" bullet in .claude/reference/architecture.md); dplyr's
+  # dplyr_quosures() captures mutate()'s dots with quos() too.
+  dots <- rlang::quos(...)
   # (an argument that wasn't given is the NULL quosure; skips three enquo()s.
   # missing() is also TRUE for an argument forwarded from a caller's missing
   # one, whose substitute() is that caller's symbol rather than the NULL
@@ -425,15 +432,20 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   # CPU fallbacks keep the dots as the user wrote them.
   user_dots <- dots
   dots <- colwise_rewrite_dots(dots, orig_schema)
-  dots <- rewrite_context_dots(dots, verb_groups, sequential = TRUE, name_unnamed = TRUE)
-  if (dots_need_fallback(dots)) {
-    return(mutate_across_fallback(.data, user_dots, .keep, before_quo, after_quo, by_quo))
+  # (dots that mention none of the names the next screens look for pass them
+  # all unchanged: dots_are_plain())
+  plain <- length(dots) > 0L && dots_are_plain(dots)
+  if (!plain) {
+    dots <- rewrite_context_dots(dots, verb_groups, sequential = TRUE, name_unnamed = TRUE)
+    if (dots_need_fallback(dots)) {
+      return(mutate_across_fallback(.data, user_dots, .keep, before_quo, after_quo, by_quo))
+    }
   }
 
   # Expand before cur_group_id() substitution, so a call that falls back
   # never pays for the substitution's GPU work and the helper column is never
   # in `.cols`'s selectable universe.
-  expanded <- expand_across_dots(dots, orig_schema, verb_groups, "mutate")
+  expanded <- if (plain) expand_plain_dots(dots) else expand_across_dots(dots, orig_schema, verb_groups, "mutate")
   if (isTRUE(attr(expanded, "needs_fallback"))) {
     return(mutate_across_fallback(.data, user_dots, .keep, before_quo, after_quo, by_quo))
   }
@@ -448,7 +460,11 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   provenance <- attr(expanded, "provenance")
   fallback_data <- .data
   fallback_dots <- user_dots
-  cgid <- substitute_cur_group_id(.data, expanded, verb_groups, by = by_given, rowwise = rowwise)
+  cgid <- if (plain) {
+    list(data = .data, dots = expanded, used = FALSE)
+  } else {
+    substitute_cur_group_id(.data, expanded, verb_groups, by = by_given, rowwise = rowwise)
+  }
   .data <- cgid$data
   if (isTRUE(cgid$used)) orig_schema <- current_schema(.data)
   dots <- cgid$dots
@@ -526,7 +542,7 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
                            staged_temps, dropped, helper = isTRUE(cgid$used))) {
     result <- .data
     if (length(expressions) > 0) {
-      result <- push_op(.data, ast_mutate(input_node(.data), expressions))
+      result <- push_op(.data, ast_mutate(input_node(.data), expressions), input_schema = orig_schema)
     }
   } else {
     result <- push_chain(.data, function(x) {
@@ -966,17 +982,22 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
   frac_origin <- integer()
   frac_vec <- logical()
   forget_frac <- function(nm) {
+    if (length(frac) == 0L) {
+      return(invisible())
+    }
     keep <- frac != nm
     frac <<- frac[keep]
     frac_origin <<- frac_origin[keep]
     frac_vec <<- frac_vec[keep]
   }
+  # The user dot an expanded dot came from (read only when a floored value is
+  # in play).
+  origin_of <- function(i) if (is.null(provenance)) i else provenance$origin[i]
+  dot_names <- names(dots)
 
   for (i in seq_along(dots)) {
-    new_name <- names(dots)[i]
+    new_name <- dot_names[i]
     expr <- dots[[i]]
-    origin <- if (is.null(provenance)) i else provenance$origin[i]
-    from_across <- !is.null(provenance) && provenance$kind[i] %in% c("across", "combined")
 
     # A dot that may read a floored fractional Date column must see the
     # fraction: CPU route. Checked before evaluating anything of this dot.
@@ -987,6 +1008,8 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     # Expansions of the across() that floored the value don't read it.
     copied <- NA_integer_
     if (length(frac) > 0) {
+      origin <- origin_of(i)
+      from_across <- !is.null(provenance) && provenance$kind[i] %in% c("across", "combined")
       e <- rlang::quo_get_expr(expr)
       if (is.symbol(e)) {
         copied <- match(as.character(e), frac)
@@ -1129,19 +1152,21 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
       )
     }
 
-    expressions <- c(expressions, list(step))
-    dropped <- set_diff(dropped, new_name)
+    expressions[[length(expressions) + 1L]] <- step
+    if (length(dropped) > 0L) {
+      dropped <- set_diff(dropped, new_name)
+    }
     copied_vec <- !is.na(copied) && frac_vec[copied]
     # F41: a native mean()/median() of a Date/POSIXct is rounded to the column
     # type (a fractional Date mean is floored, lower_window() warns), where
     # dplyr's value is a double. Same reader rule as a floored constant; the
     # warning comes from the window lowering, so it isn't in `fractional`.
-    ts_mean <- identical(ir$kind, "call") && ir$op %in% c("mean", "median") &&
+    ts_mean <- identical(.subset2(ir, "kind"), "call") && .subset2(ir, "op") %in% c("mean", "median") &&
       unname(step$output_type) %in% c("TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS")
     forget_frac(new_name)
     if (!is.null(floored) || floored_vec || ts_mean || !is.na(copied)) {
       frac <- c(frac, new_name)
-      frac_origin <- c(frac_origin, origin)
+      frac_origin <- c(frac_origin, origin_of(i))
       frac_vec <- c(frac_vec, floored_vec || ts_mean || copied_vec)
     }
 
@@ -1367,6 +1392,9 @@ expr_has_mask_only_call <- function(expr) {
 # dplyr refuses to drop a grouping column of a grouped table (`.by` allows it).
 # @keywords internal
 check_droppable_groups <- function(dropped, groups) {
+  if (length(dropped) == 0L) {
+    return(invisible(NULL))
+  }
   bad <- set_intersect(dropped, groups)
   if (length(bad) > 0) {
     stop("Can't drop grouping column", if (length(bad) > 1) "s", " ",
@@ -1496,9 +1524,13 @@ mutate_needs_select <- function(orig_names, expressions, keep, before_quo, after
       !rlang::quo_is_null(before_quo) || !rlang::quo_is_null(after_quo)) {
     return(TRUE)
   }
+  dot_order <- attr(expressions, "dot_order")
+  # (one output name, or none: its position among the new columns is moot)
+  if (length(expressions) <= 1L && length(dot_order) <= 1L) {
+    return(FALSE)
+  }
   touched <- unique(vapply(expressions, `[[`, character(1), "output_col"))
   new_cols <- touched[!touched %in% orig_names]
-  dot_order <- attr(expressions, "dot_order")
   !is.null(dot_order) && !identical(dot_order[dot_order %in% new_cols], new_cols)
 }
 
@@ -1622,6 +1654,9 @@ transmute.tbl_gpu <- function(.data, ...) {
   p <- sys.parent()
   inform_colwise_grouped(.data, "transmute", if (p > 0L) sys.function(p))
   check_unique_input_names(.data)
+  # enquos(), not quos(): dplyr's transmute() captures its dots with enquos()
+  # (check_transmute_args()), so a dot named like one of its arguments
+  # (`.homonyms`, ...) binds to that argument here too.
   dots <- rlang::enquos(...)
 
   if (is_rowwise_gpu(.data)) {

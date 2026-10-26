@@ -295,14 +295,14 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
 
   # A rowwise table summarises once per row (F49, R/rowwise.R).
   if (is_rowwise_gpu(.data)) {
-    return(summarise_rowwise(.data, rlang::enquos(...), .groups, rlang::enquo(.by), caller_env))
+    return(summarise_rowwise(.data, rlang::quos(...), .groups, rlang::enquo(.by), caller_env))
   }
 
   # `.groups = "rowwise"`: summarise keeping every group, then the result is
   # rowwise by those groups (F49: a rowwise tbl_gpu; collect() gives dplyr's
   # rowwise_df). The host rowwise_df of a CPU route is rowwise already.
   if (identical(.groups, "rowwise")) {
-    res <- summarise_impl_dots(.data, rlang::enquos(...), "keep", rlang::enquo(.by),
+    res <- summarise_impl_dots(.data, rlang::quos(...), "keep", rlang::enquo(.by),
                                caller_env)
     if (is_tbl_gpu(res)) {
       return(rowwise_mark(res, res$groups))
@@ -310,7 +310,9 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
     return(dplyr::rowwise(dplyr::ungroup(res), dplyr::all_of(dplyr::group_vars(res))))
   }
 
-  by_quo <- rlang::enquo(.by)
+  # (an argument that wasn't given is the NULL quosure, which skips an enquo(); a
+  # `.by` forwarded from a caller's missing one is not NULL here and takes it)
+  by_quo <- if (missing(.by) && is.null(substitute(.by))) null_quo else rlang::enquo(.by)
 
   # Phase 5, task W9: `.by=` resolution -- checked up front (before the
   # zero-dots branch just below), matching mutate()/filter()'s own `.by=`
@@ -321,7 +323,7 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   by_cols <- resolve_by(.data, by_quo, ".by")
   by_given <- !rlang::quo_is_null(by_quo)
 
-  dots <- rlang::enquos(...)
+  dots <- rlang::quos(...)
   summarise_impl(.data, dots, .groups, by_quo, by_cols, by_given, caller_env)
 }
 
@@ -358,7 +360,8 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # F07: a zero-column table has rows but no cudf column to count them with,
   # so even n() can't run on the GPU. The CPU fallback sees the real row
   # count (collect() honours `$nrow`).
-  if (length(current_schema(.data)$names) == 0L) {
+  in_schema <- current_schema(.data)
+  if (length(in_schema$names) == 0L) {
     return(gpu_fallback("summarise", .data, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo))
     }))
@@ -378,12 +381,17 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # native shape, a dot that is exactly `cur_group_id()`, is handled just above.
   # length(cur_group_rows()) is n(); the CPU fallbacks keep the user's dots.
   user_dots <- dots
-  dots <- colwise_rewrite_dots(dots, current_schema(.data))
-  dots <- rewrite_context_dots(dots, character(), name_unnamed = TRUE)
+  dots <- colwise_rewrite_dots(dots, in_schema)
+  # (dots that mention none of the names the next screens look for pass them
+  # all unchanged: dots_are_plain())
+  plain <- dots_are_plain(dots)
+  if (!plain) {
+    dots <- rewrite_context_dots(dots, character(), name_unnamed = TRUE)
+  }
   # A dot that is exactly cur_group_id() is the output row number: the rows of
   # a summarise result are in group_data() order. Anything more involved with
   # cur_group_id() (or a reduced call that would reach the CPU) stays on dplyr.
-  if (summarise_has_cur_group_id(dots)) {
+  if (!plain && summarise_has_cur_group_id(dots)) {
     reduced <- summarise_group_id_split(.data, dots, by_cols, by_given)
     if (!is.null(reduced)) {
       res <- summarise_with_group_id(
@@ -393,7 +401,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
     }
   }
 
-  if (dots_need_fallback(dots, treat_cur_group_id_as_deferred = TRUE)) {
+  if (!plain && dots_need_fallback(dots, treat_cur_group_id_as_deferred = TRUE)) {
     return(gpu_fallback("summarise", .data, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
     }))
@@ -405,7 +413,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   orig_dots <- user_dots
 
   summarise_groups <- if (by_given) by_cols else .subset2(.data, "groups")
-  expanded <- expand_across_dots(dots, current_schema(.data), summarise_groups, "summarise")
+  expanded <- if (plain) expand_plain_dots(dots) else expand_across_dots(dots, in_schema, summarise_groups, "summarise")
   if (isTRUE(attr(expanded, "needs_fallback"))) {
     return(gpu_fallback("summarise", .data, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
@@ -420,7 +428,11 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # the same value in every group, but how often dplyr evaluates it (once per
   # group), and what it warns, is observable. The call goes to dplyr
   # unevaluated; it is never evaluated here.
-  if (summarise_has_constant_agg(dots, current_schema(.data))) {
+  # `fn(<column>)` dots (summarise_simple_aggregations()) read a column, so they
+  # are no constant reducers; summarise_core() reuses the aggregations built here.
+  simple_plan <- summarise_simple_plan(dots, in_schema)
+  simple_aggs <- .subset2(simple_plan, "aggregations")
+  if (is.null(simple_aggs) && summarise_has_constant_agg(dots, in_schema)) {
     return(gpu_fallback("summarise", .data, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
     }))
@@ -443,7 +455,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # evaluated sequentially by dplyr. The GPU path computes every aggregate
   # from the input columns at once, so these go to the CPU fallback.
   if (summarise_dots_are_sequential(dots) ||
-      !summarise_dots_parseable(dots, current_schema(.data))) {
+      !(if (is.null(simple_plan)) summarise_dots_parseable(dots, in_schema) else simple_plan$parseable)) {
     return(gpu_fallback("summarise", .data, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo))
     }))
@@ -483,7 +495,8 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
     return(gpu_or_cpu(function() summarise_with_empty_groups(.data, dots, retained_groups, cpu)))
   }
 
-  gpu_or_cpu(function() summarise_core(.data, dots, retained_groups))
+  retry_on_sum_overflow(function() summarise_core(.data, dots, retained_groups, simple_aggs = simple_aggs),
+                        cpu, class = "cuplyr_summarise_rerun")
 }
 
 # Internal (F53): TRUE iff some dot is a reducer call (`sum(1L)`, `max(th)`)
@@ -943,11 +956,18 @@ inform_regrouped_output <- function(old_groups, new_groups) {
 # @return Logical scalar
 # @keywords internal
 summarise_dots_parseable <- function(dots, schema) {
-  known_agg_fns <- c("sum", "mean", "min", "max", "n", "sd", "var", "count",
-                      "median", "quantile", "n_distinct", "first", "last", "nth",
-                      "any", "all")
+  known_agg_fns <- agg_functions
 
   for (i in seq_along(dots)) {
+    # A `fn(<column>)` dot is decided by the column's type alone: the rules
+    # below for a bare column argument (timestamp, factor, typed allowlist).
+    simple <- summarise_simple_dot(dots[[i]], schema)
+    if (!is.null(simple)) {
+      if (summarise_simple_cpu(simple, schema)) {
+        return(FALSE)
+      }
+      next
+    }
     # An NA flag the reducer doesn't take, or a value the native path can't
     # take exactly (extract_na_rm()), is dplyr's to evaluate: CPU.
     stripped <- extract_na_rm(dots[[i]], schema)
@@ -968,7 +988,7 @@ summarise_dots_parseable <- function(dots, schema) {
     expr <- rlang::quo_get_expr(quo)
     env <- rlang::quo_get_env(quo)
 
-    if (grepl("^n\\(\\)$", strip_ns_prefix(rlang::quo_text(quo)))) {
+    if (summarise_is_bare_n(quo)) {
       next  # bare n(): always valid, no column argument to check
     }
 
@@ -1053,6 +1073,31 @@ summarise_dots_parseable <- function(dots, schema) {
   TRUE
 }
 
+# Internal: is the dot exactly `n()` (also `pkg::n()`)? The test the screening
+# makes on the dot's text, `^n\\(\\)$` on `strip_ns_prefix(quo_text())`, answered
+# from the expression when it can be: a call with no argument and the head `n`
+# is bare n(), any other call or non-call (no argument, a different symbol
+# head, a constant) is not, and only a head that is itself a call
+# (`dplyr::n()`) or a quosure inside the dot takes the text test.
+# @keywords internal
+summarise_is_bare_n <- function(quo) {
+  expr <- rlang::quo_get_expr(quo)
+  if (!is.call(expr)) {
+    return(FALSE)
+  }
+  if (!inherits(expr, "quosure")) {
+    if (length(expr) != 1L) {
+      return(FALSE)
+    }
+    head <- expr[[1L]]
+    if (is.symbol(head)) {
+      return(identical(head, summarise_n_sym))
+    }
+  }
+  grepl("^n\\(\\)$", strip_ns_prefix(rlang::quo_text(quo)))
+}
+summarise_n_sym <- as.name("n")
+
 # Internal: per-group length analysis of an aggregate's argument (F34).
 # dplyr evaluates `sum(<arg>)` once per group, so `<arg>` is either a
 # length-n vector (n = the group's rows) or a length-1 value. A column is
@@ -1108,6 +1153,86 @@ ir_agg_arg_is_scalar_reduction <- function(ir) {
   isTRUE(info$unsafe) || (identical(info$len, "1") && isTRUE(info$reducer))
 }
 
+# The reducers summarise_simple_aggregations() takes: those whose `fn(<column>)`
+# dot needs nothing but the column's type (no shape parameter, no
+# n_distinct()/first()/last()/any()/all() rules).
+summarise_simple_fns <- c("sum", "mean", "min", "max", "sd", "var", "median")
+
+# Internal: is `quo` a `fn(<column>)` dot: a call with a symbol head from
+# summarise_simple_fns and one unnamed argument, a symbol naming a column of
+# `schema`? For such a dot extract_na_rm() and extract_agg_shape_param() return
+# it unchanged, preprocess_agg_expressions() adds no temp column, and
+# parse_aggregations() makes exactly the aggregation summarise_simple_aggregations()
+# builds. NULL for any other dot (and for a median() of a STRING column, whose
+# error parse_aggregations() raises), which takes the general steps.
+# @return `list(fn, col, idx)` (`idx`: the column's position), or NULL
+# @keywords internal
+summarise_simple_dot <- function(quo, schema) {
+  expr <- rlang::quo_get_expr(quo)
+  # (the argument is read in place: an empty slot can't be bound to a variable)
+  if (!is.call(expr) || length(expr) != 2L || !is.null(names(expr)) ||
+      !is.symbol(expr[[1L]]) || !is.symbol(expr[[2L]])) {
+    return(NULL)
+  }
+  fn <- as.character(expr[[1L]])
+  col <- as.character(expr[[2L]])
+  idx <- match(col, schema$names)
+  if (!fn %in% summarise_simple_fns || is.na(idx) ||
+      (identical(fn, "median") && identical(unname(schema$types[idx]), "STRING"))) {
+    return(NULL)
+  }
+  list(fn = fn, col = col, idx = idx)
+}
+
+# Internal: parse_aggregations() of dots that are all summarise_simple_dot()s, or
+# NULL when some dot is not.
+# @param dots Named quosures (after auto_name_dots())
+# @param schema The input's schema
+# @keywords internal
+summarise_simple_aggregations <- function(dots, schema) {
+  .subset2(summarise_simple_plan(dots, schema), "aggregations")
+}
+
+# Internal: summarise_simple_aggregations() together with the verdict of
+# summarise_dots_parseable() on the same dots, in one pass over them: for dots
+# that are all summarise_simple_dot()s, `parseable` is what that function says
+# (TRUE iff none is summarise_simple_cpu()).
+# @return `list(aggregations =, parseable =)`, or NULL when some dot is not simple
+# @keywords internal
+summarise_simple_plan <- function(dots, schema) {
+  n <- length(dots)
+  dot_names <- names(dots)
+  if (n == 0L || is.null(dot_names)) {
+    return(NULL)
+  }
+  aggregations <- vector("list", n)
+  parseable <- TRUE
+  for (i in seq_len(n)) {
+    simple <- summarise_simple_dot(dots[[i]], schema)
+    if (is.null(simple)) {
+      return(NULL)
+    }
+    if (summarise_simple_cpu(simple, schema)) {
+      parseable <- FALSE
+    }
+    aggregations[[i]] <- make_aggregation(
+      dot_names[i], simple$col, unname(agg_fn_map[simple$fn]), schema$types[simple$idx],
+      na_rm = FALSE, extra = NA_real_
+    )
+  }
+  list(aggregations = aggregations, parseable = parseable)
+}
+
+# Internal: does a `fn(<column>)` dot (summarise_simple_dot()) go to the CPU?
+# The rules for a bare column argument: a timestamp under a reducer that has
+# no timestamp form, a factor, a type the typed allowlist refuses.
+# @keywords internal
+summarise_simple_cpu <- function(simple, schema) {
+  type <- schema$types[simple$idx]
+  (!simple$fn %in% c("min", "max", "mean", "median") && unname(type) %in% cuplyr_timestamp_types) ||
+    identical(unname(type), "DICTIONARY32") || !ir_type_gate(simple$fn, type)
+}
+
 # Internal: the shared aggregation pipeline -- temp-column preprocessing,
 # aggregation parsing, one ast_summarise push -- used both by the ordinary
 # group_by()-or-ungrouped path and by summarise_by_desugar()'s own internal
@@ -1125,56 +1250,65 @@ ir_agg_arg_is_scalar_reduction <- function(ir) {
 #   (`.by=` summarise is always ungrouped, matching dplyr).
 # @param agg_info `NULL`, or an environment that receives the parsed
 #   `aggregations` (summarise_with_empty_groups() reads their functions and types)
+# @param simple_aggs `NULL`, or `summarise_simple_aggregations(dots, schema)` when
+#   the caller has already built it
 # @return A new tbl_gpu, grouped by `retained_groups` (see
 #   propagate_groups(), R/execute.R, which reads `node$result_groups`)
 # @keywords internal
 summarise_core <- function(.data, dots, retained_groups = character(),
                            internal_cols = character(), sort_groups = TRUE,
-                           agg_info = NULL) {
+                           agg_info = NULL, simple_aggs = NULL) {
   # No wrapper of its own (F58): the work below is R logic (quosure parsing,
   # which may evaluate a `probs =`/`n =` argument) around wrapped GPU steps, so
   # a retry belongs to each step, not to a rerun of this parsing. The tables
   # its steps create are freed when the user-level call returns.
-  # Phase 6, task 6.1 (Fix A): extract and strip any `na.rm = <literal>`
-  # named argument BEFORE temp-column preprocessing -- this must happen
-  # first so a sub-expression call like `sum(sqrt(x), na.rm = TRUE)` is
-  # reduced to the `fn(single_arg)` shape preprocess_agg_expressions() (and
-  # parse_aggregations()'s own regex) already understand, with na.rm
-  # tracked out-of-band per dot instead of embedded in the call shape.
-  # Each reducer's own spelling only (`na_rm` for first()/last()/nth()) --
-  # see extract_na_rm()'s docs.
-  extracted <- lapply(dots, extract_na_rm, schema = current_schema(.data))
-  if (any(vapply(extracted, is.null, logical(1)))) {
-    # Unreachable from summarise(): summarise_dots_parseable() sends these
-    # dots to the CPU first.
-    stop("internal error: summarise_core() given an NA flag the native path can't take",
-         call. = FALSE)
+  # The common dots, `fn(<column>)` with nothing else in the call, go straight
+  # to their aggregations (summarise_simple_aggregations()); anything else
+  # takes the general steps below.
+  aggregations <- simple_aggs %||% summarise_simple_aggregations(dots, current_schema(.data))
+  working_data <- .data
+  if (is.null(aggregations)) {
+    # Phase 6, task 6.1 (Fix A): extract and strip any `na.rm = <literal>`
+    # named argument BEFORE temp-column preprocessing -- this must happen
+    # first so a sub-expression call like `sum(sqrt(x), na.rm = TRUE)` is
+    # reduced to the `fn(single_arg)` shape preprocess_agg_expressions() (and
+    # parse_aggregations()'s own regex) already understand, with na.rm
+    # tracked out-of-band per dot instead of embedded in the call shape.
+    # Each reducer's own spelling only (`na_rm` for first()/last()/nth()) --
+    # see extract_na_rm()'s docs.
+    extracted <- lapply(dots, extract_na_rm, schema = current_schema(.data))
+    if (any(vapply(extracted, is.null, logical(1)))) {
+      # Unreachable from summarise(): summarise_dots_parseable() sends these
+      # dots to the CPU first.
+      stop("internal error: summarise_core() given an NA flag the native path can't take",
+           call. = FALSE)
+    }
+    na_rm_flags <- vapply(extracted, `[[`, logical(1), "na_rm")
+    dots <- lapply(extracted, `[[`, "quo")
+
+    # Phase 6, task 6.2: extract and strip quantile()'s `probs=` / nth()'s
+    # `n=` scalar shape parameter -- run AFTER na.rm/na_rm extraction (so
+    # this function's own argument-matching never has to understand that
+    # control), reducing both to the same single-argument `fn(x)` shape
+    # every other aggregation already produces.
+    extracted2 <- lapply(dots, extract_agg_shape_param)
+    agg_extra <- vapply(extracted2, `[[`, numeric(1), "extra")
+    dots <- lapply(extracted2, `[[`, "quo")
+
+    # Pre-process: create temporary columns for expressions inside agg functions
+    # (e.g. sum(carb == 4)). Per D4, if a temp column is needed and .data is
+    # lazy with pending ops, this materializes (compute()) before creating the
+    # temp column and notifies via cuplyr_fallback_notify().
+    preprocess_result <- preprocess_agg_expressions(.data, dots)
+    working_data <- preprocess_result$data
+    processed_dots <- preprocess_result$dots
+
+    # Parse the aggregation expressions (now with simple column refs), emitting
+    # aggregation structs that carry the cudf-accepted function name (fixes
+    # lazy sd()/var(), which used to reach C++ as "sd"/"var" and error out).
+    aggregations <- parse_aggregations(current_schema(working_data), processed_dots,
+                                       na_rm_flags, agg_extra)
   }
-  na_rm_flags <- vapply(extracted, `[[`, logical(1), "na_rm")
-  dots <- lapply(extracted, `[[`, "quo")
-
-  # Phase 6, task 6.2: extract and strip quantile()'s `probs=` / nth()'s
-  # `n=` scalar shape parameter -- run AFTER na.rm/na_rm extraction (so
-  # this function's own argument-matching never has to understand that
-  # control), reducing both to the same single-argument `fn(x)` shape
-  # every other aggregation already produces.
-  extracted2 <- lapply(dots, extract_agg_shape_param)
-  agg_extra <- vapply(extracted2, `[[`, numeric(1), "extra")
-  dots <- lapply(extracted2, `[[`, "quo")
-
-  # Pre-process: create temporary columns for expressions inside agg functions
-  # (e.g. sum(carb == 4)). Per D4, if a temp column is needed and .data is
-  # lazy with pending ops, this materializes (compute()) before creating the
-  # temp column and notifies via cuplyr_fallback_notify().
-  preprocess_result <- preprocess_agg_expressions(.data, dots)
-  working_data <- preprocess_result$data
-  processed_dots <- preprocess_result$dots
-
-  # Parse the aggregation expressions (now with simple column refs), emitting
-  # aggregation structs that carry the cudf-accepted function name (fixes
-  # lazy sd()/var(), which used to reach C++ as "sd"/"var" and error out).
-  aggregations <- parse_aggregations(current_schema(working_data), processed_dots,
-                                     na_rm_flags, agg_extra)
 
   # F07: internal helper aggregations (summarise_by_desugar()'s row-position
   # min()) must stay INT32 and never warn.
@@ -1200,9 +1334,9 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   # F34: an integer sum() that overflows is a double in dplyr. An eager
   # table reconciles its schema from the result; a lazy plan keeps INT32 and
   # errors at execution (see ast_summarise(on_sum_overflow=)).
-  eager <- !identical(working_data$exec_mode, "lazy")
+  eager <- !identical(.subset2(working_data, "exec_mode"), "lazy")
   result <- push_op(working_data, ast_summarise(
-    input_node(working_data), aggregations, working_data$groups, retained_groups,
+    input_node(working_data), aggregations, .subset2(working_data, "groups"), retained_groups,
     on_sum_overflow = if (eager) "double" else "error", sort_groups = sort_groups
   ))
   if (eager) reconcile_summarise_types(result) else result
@@ -1241,9 +1375,11 @@ summarise_run_now <- function(.data, aggregations, retained_groups, sort_groups 
 # that overflowed R's integer range (F34).
 # @keywords internal
 reconcile_summarise_types <- function(result) {
-  actual <- gpu_col_types(result$ptr)
-  promoted <- result$schema$types == "INT32" & actual == "dbl"  # gpu_col_types() spelling
-  result$schema$types[promoted] <- "FLOAT64"
+  actual <- gpu_col_types(.subset2(result, "ptr"))
+  promoted <- .subset2(result, "schema")$types == "INT32" & actual == "dbl"  # gpu_col_types() spelling
+  if (any(promoted)) {
+    result$schema$types[promoted] <- "FLOAT64"
+  }
   result
 }
 
@@ -1936,6 +2072,22 @@ create_temp_column <- function(.data, col_name, ir, keep_bool = FALSE) {
   ), .data)
 }
 
+# dplyr-facing aggregation function names (order matches the historical
+# error message from parse_agg_expressions()) and their cudf-accepted
+# equivalents (src/ops_groupby.cpp::get_groupby_agg(), plus the
+# dedicated non-get_groupby_agg() handling gpu_summarise() gives
+# quantile()/n_distinct()/first()/last()/nth()/any()/all() -- Phase 6,
+# task 6.2).
+agg_functions <- c("sum", "mean", "min", "max", "n", "sd", "var", "count",
+                    "median", "quantile", "n_distinct", "first", "last", "nth",
+                    "any", "all")
+agg_fn_map <- c(
+  sum = "sum", mean = "mean", min = "min", max = "max",
+  n = "n", sd = "std", var = "variance", count = "n",
+  median = "median", quantile = "quantile", n_distinct = "n_distinct",
+  first = "first", last = "last", nth = "nth", any = "any", all = "all"
+)
+
 # Internal: Parse aggregation expressions into make_aggregation() structs
 #
 # The one parser used by both eager and lazy scheduling (D1): given a
@@ -1969,22 +2121,6 @@ create_temp_column <- function(.data, col_name, ir, keep_bool = FALSE) {
 # @keywords internal
 parse_aggregations <- function(schema, dots, na_rm_flags = rep(FALSE, length(dots)),
                                agg_extra = rep(NA_real_, length(dots))) {
-  # dplyr-facing aggregation function names (order matches the historical
-  # error message from parse_agg_expressions()) and their cudf-accepted
-  # equivalents (src/ops_groupby.cpp::get_groupby_agg(), plus the
-  # dedicated non-get_groupby_agg() handling gpu_summarise() gives
-  # quantile()/n_distinct()/first()/last()/nth()/any()/all() -- Phase 6,
-  # task 6.2).
-  agg_functions <- c("sum", "mean", "min", "max", "n", "sd", "var", "count",
-                      "median", "quantile", "n_distinct", "first", "last", "nth",
-                      "any", "all")
-  agg_fn_map <- c(
-    sum = "sum", mean = "mean", min = "min", max = "max",
-    n = "n", sd = "std", var = "variance", count = "n",
-    median = "median", quantile = "quantile", n_distinct = "n_distinct",
-    first = "first", last = "last", nth = "nth", any = "any", all = "all"
-  )
-
   # Aggregations restricted to a numeric-ish input (median()/quantile(): a
   # STRING column has no well-defined median/quantile) vs. restricted to a
   # logical input (any()/all(): dplyr's own three-valued-logic contract is
@@ -1999,7 +2135,6 @@ parse_aggregations <- function(schema, dots, na_rm_flags = rep(FALSE, length(dot
 
   for (i in seq_along(dots)) {
     expr <- dots[[i]]
-    expr_text <- rlang::quo_text(expr)
 
     # F34: read the call off the expression, not its deparsed text (a
     # backticked name like `my x` has no usable text form). A one-argument
@@ -2019,7 +2154,7 @@ parse_aggregations <- function(schema, dots, na_rm_flags = rep(FALSE, length(dot
       # reaching here, which already routes this exact shape to the CPU
       # fallback -- unreachable from any dplyr-facing call, kept only as a
       # safety net.
-      stop("Invalid aggregation expression: ", expr_text,
+      stop("Invalid aggregation expression: ", rlang::quo_text(expr),
            "\nExpected format: function(column), e.g., mean(mpg)",
            call. = FALSE)
     }
@@ -2081,7 +2216,7 @@ parse_aggregations <- function(schema, dots, na_rm_flags = rep(FALSE, length(dot
 # Internal: TRUE iff some dot of a summarise() mentions cur_group_id().
 # @keywords internal
 summarise_has_cur_group_id <- function(dots) {
-  any(vapply(
+  dots_mention(dots, "cur_group_id") && any(vapply(
     dots, function(q) expr_contains_zero_arg_call(rlang::quo_get_expr(q), "cur_group_id"),
     logical(1)
   ))

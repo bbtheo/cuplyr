@@ -223,11 +223,17 @@ propagate_tz <- function(node, input_schema, new_schema) {
 
   if (identical(node$type, "mutate")) {
     # Without a zone to carry and no POSIXct output there is nothing to track.
-    if (is.null(input_schema$tz) &&
-        !any(vapply(node$expressions, function(e) {
-          identical(unname(e$output_type), "TIMESTAMP_MICROSECONDS")
-        }, logical(1)))) {
-      return(NULL)
+    if (is.null(input_schema$tz)) {
+      posixct_out <- FALSE
+      for (e in node$expressions) {
+        if (identical(unname(e$output_type), "TIMESTAMP_MICROSECONDS")) {
+          posixct_out <- TRUE
+          break
+        }
+      }
+      if (!posixct_out) {
+        return(NULL)
+      }
     }
     s <- input_schema
     for (expr in node$expressions) {
@@ -313,9 +319,33 @@ propagate_tz <- function(node, input_schema, new_schema) {
 # zones), for a node whose input schema is known.
 # @keywords internal
 propagate_schema_meta <- function(node, input_schema, new_schema) {
+  # Nothing to carry: no factor levels or zones on the input and (a mutate) no
+  # POSIXct output that would start one. The two propagators return NULL then;
+  # only their assignments are left (they also drop NULL slots).
+  if (length(.subset2(input_schema, "factor_levels")) == 0L && is.null(.subset2(input_schema, "tz")) &&
+        !node_outputs_posixct(node)) {
+    new_schema$factor_levels <- NULL
+    new_schema$tz <- NULL
+    return(new_schema)
+  }
   new_schema$factor_levels <- propagate_factor_levels(node, input_schema, new_schema$names)
   new_schema$tz <- propagate_tz(node, input_schema, new_schema)
   new_schema
+}
+
+# Does a mutate node make a POSIXct column (propagate_tz()'s test for a mutate
+# over a table with no zones)?
+# @keywords internal
+node_outputs_posixct <- function(node) {
+  if (!identical(.subset2(node, "type"), "mutate")) {
+    return(FALSE)
+  }
+  for (e in .subset2(node, "expressions")) {
+    if (identical(unname(.subset2(e, "output_type")), "TIMESTAMP_MICROSECONDS")) {
+      return(TRUE)
+    }
+  }
+  FALSE
 }
 
 # Give the POSIXct columns of a collected tibble their schema zone (the C++

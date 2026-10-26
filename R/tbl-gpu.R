@@ -271,6 +271,16 @@ copy_frame_meta <- function(out, from, attrs = TRUE, bare = TRUE) {
 # rebuilds with grouped_df().
 # @keywords internal
 carry_frame_meta <- function(out, from, attrs = TRUE) {
+  # A table with only its names and class as attributes (the usual one) has no
+  # attributes to hand over; all that is left is the bare data.frame class,
+  # which an ungrouped input gives to an ungrouped result.
+  if (is_tbl_gpu(from) && identical(names(attributes(from)), c("names", "class"))) {
+    if (isTRUE(.subset2(from, "bare_df")) && length(.subset2(from, "groups")) == 0L &&
+        !is_rowwise_gpu(from) && length(.subset2(out, "groups")) == 0L && !is_rowwise_gpu(out)) {
+      out <- set_tbl_gpu_field(out, "bare_df", TRUE)
+    }
+    return(out)
+  }
   if (frame_meta(from)$grouped) {
     return(out)
   }
@@ -437,7 +447,8 @@ new_tbl_gpu <- function(ptr = NULL,
   } else if (isTRUE(bare_df) && length(groups) == 0L) {
     out$bare_df <- TRUE
   }
-  structure(out, class = c("tbl_gpu", "tbl"))
+  class(out) <- c("tbl_gpu", "tbl")
+  out
 }
 
 #' Resolve execution mode from explicit value, option, or environment variable

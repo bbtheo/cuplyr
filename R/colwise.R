@@ -39,11 +39,13 @@
 # @keywords internal
 colwise_has_fn_head <- function(expr) {
   if (rlang::is_missing(expr)) return(FALSE)
-  if (rlang::is_quosure(expr)) return(colwise_has_fn_head(rlang::quo_get_expr(expr)))
+  if (inherits(expr, "quosure")) return(colwise_has_fn_head(rlang::quo_get_expr(expr)))
   if (!is.call(expr)) return(FALSE)
   if (is.function(expr[[1L]])) return(TRUE)
-  for (part in as.list(expr)) {
-    if (colwise_has_fn_head(part)) return(TRUE)
+  # (only a call part can have a function-object head; reading the part inline
+  # keeps an empty argument slot, `x[, 1]`, from being forced)
+  for (i in seq_along(expr)) {
+    if (is.call(expr[[i]]) && colwise_has_fn_head(expr[[i]])) return(TRUE)
   }
   FALSE
 }
@@ -55,7 +57,14 @@ colwise_has_fn_head <- function(expr) {
 # @param schema The table's current schema
 # @keywords internal
 colwise_rewrite_dots <- function(dots, schema) {
-  if (!any(vapply(dots, function(q) colwise_has_fn_head(rlang::quo_get_expr(q)), logical(1)))) {
+  has_fn <- FALSE
+  for (i in seq_along(dots)) {
+    if (colwise_has_fn_head(rlang::quo_get_expr(dots[[i]]))) {
+      has_fn <- TRUE
+      break
+    }
+  }
+  if (!has_fn) {
     return(dots)
   }
   nms <- names(dots) %||% character(length(dots))
