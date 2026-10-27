@@ -1,5 +1,20 @@
 # cuplyr (development version)
 
+## Docs: query-optimization vignette matches the optimizer (F69)
+
+* `vignette("query-optimization", package = "cuplyr")` is rewritten against the
+  optimizer's code, with `explain()` output you can reproduce. It describes the
+  five passes as they are (no filter fusion pass; mutate fusion keeps written
+  order and has two limits; a filter moves at most one node per optimization),
+  the nine barrier node types, when a filter moves into a join (never for an
+  `==` `inner_join()`, `left_join()` or `right_join()` called from your own
+  code with `relationship` unset and `multiple = "all"`, the default; those
+  joins with other conditions, `by = character()` or called from inside a
+  package are recorded as many-to-many, and the pushdown rules for many-to-many
+  joins apply to them), and when a pass is skipped because it cannot change the
+  plan. It makes no speed claims; `vignette("performance", package = "cuplyr")`
+  has the measurements.
+
 ## Faster eager verb calls (F68b)
 
 * An eager verb call takes 36% (`arrange()`) to 82% (`select()`) less time,

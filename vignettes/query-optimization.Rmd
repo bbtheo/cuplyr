@@ -17,611 +17,704 @@ knitr::opts_chunk$set(
 
 ## Introduction
 
-When you use cuplyr in lazy mode, operations aren't executed immediately.
-Instead, they build an Abstract Syntax Tree (AST) that represents your query.
-Before execution, the AST passes through an optimizer that rewrites the query
-for better performance.
+When you use cuplyr in lazy mode, most verbs are not executed as you call them.
+They add nodes to an Abstract Syntax Tree (AST) that describes the query.
+(A verb or filter predicate that runs on the CPU as a fallback computes the
+pending plan first.) When `compute()` or `collect()` runs the tree, an optimizer
+first rewrites it into a plan that gives the same result. A table in eager mode
+has no pending tree, so the optimizer has nothing to run on.
 
-This vignette explains:
-
-1. How the AST represents your operations
-2. The six optimization passes applied to your queries
-3. How filter pushdown works in detail
-4. When and why optimization matters
+This vignette describes what the optimizer does, with `explain()` output you
+can reproduce. It does not time anything. For measurements, see
+`vignette("performance", package = "cuplyr")`.
 
 ```{r setup}
 library(cuplyr)
 library(dplyr)
+
+# Prints only the optimized plan of explain(), to keep the output short
+optimized <- function(x) {
+  out <- capture.output(explain(x))
+  cat(out[(grep("^Optimized plan", out) + 1):length(out)], sep = "\n")
+}
 ```
 
 ## The Abstract Syntax Tree (AST)
 
-When you write a dplyr pipeline in lazy mode, each operation creates a node
-in the AST. The tree grows from bottom (source data) to top (final operation).
+Most verbs add one node. The tree grows from a `source` node at the bottom to
+the last verb at the top. `tbl_gpu()` itself records nothing: the first verb
+that records a node adds the `source` node below its own. `show_query()`
+prints the tree: each node with its key metadata, one `|` per level of depth,
+then the tree's depth and node count:
 
 ```{r ast-example}
-# Create a lazy pipeline
 pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
   filter(mpg > 20) |>
   mutate(power_ratio = hp / wt) |>
   select(mpg, cyl, power_ratio) |>
   arrange(desc(mpg))
 
-# View the AST
 show_query(pipeline)
 ```
 
-### AST Node Types
+The node a call of each verb typically adds:
 
-Each dplyr verb creates a specific node type:
+| Verb | AST node |
+|------|----------|
+| `filter()` | `filter` |
+| `mutate()` | `mutate` |
+| `select()` | `select`, with a `rename` node above it when it renames a column |
+| `arrange()` | `arrange` |
+| `summarise()` | `summarise` |
+| `distinct()` | `distinct` |
+| `rename()` | `rename` |
+| `head()` | `slice` |
+| `slice()`, `slice_head()`, `slice_min()` on an ungrouped table | `slice` |
+| `collapse()` | `barrier` |
+| `group_by()` on columns | none: grouping is metadata on the table |
+| `group_by()` on an expression, e.g. `group_by(x = a + 1)` | `mutate`, which computes the grouping column |
+| `mutate()` or `filter()` with a window function such as `row_number()` | `window`, with other nodes around it |
 
-| Verb | AST Node | Description |
-|------|----------|-------------|
-| `tbl_gpu()` | `source` | Leaf node with schema metadata |
-| `filter()` | `filter` | Row filtering predicates |
-| `mutate()` | `mutate` | Column transformations |
-| `select()` | `select` | Column projection |
-| `arrange()` | `arrange` | Sort specification |
-| `group_by()` | `group_by` | Grouping metadata |
-| `summarise()` | `summarise` | Aggregation operations |
-| `head()` | `head` | Row limit |
-| `collapse()` | `barrier` | Optimization fence |
+Some calls add other nodes as well, or instead. A grouped `slice_head()`, for
+example, records `arrange`, `window`, `mutate`, `filter` and `select` nodes.
 
-### How the AST Grows
+## The Optimization Passes
 
-Each operation wraps the previous one:
+The optimizer has five passes, which run in this order:
 
-```{r ast-growth, eval=FALSE}
-# This pipeline:
-tbl_gpu(mtcars, lazy = TRUE) |>
-  filter(mpg > 20) |>
-  mutate(x = hp * 2)
+1. **Projection pruning** can add `select` nodes that drop columns no later
+   step uses.
+2. **Mutate fusion** can combine a `mutate` node with the `mutate` node below
+   it.
+3. **Dead-column pruning** can drop `mutate` expressions whose result is not
+   used, and columns of a `select` node that nothing above it uses.
+4. **Filter pushdown** can move a `filter` node below the `mutate` or `select`
+   node under it, or move its predicates into the inputs of a join under it.
+5. **Filter reordering** can merge consecutive `filter` nodes into one and sorts
+   the merged predicates by an estimated cost.
 
-# Creates this AST structure:
-# mutate[x]
-#   filter[1 predicates]
-#     source[11 cols]
-```
+The sections below say when each pass does so. Each pass runs at most once on
+each part of the plan (see "Segments" below for how a plan is cut into parts).
+There is no separate filter fusion pass: see "One filter node, one expression"
+below.
 
-The source node is at the bottom. Operations stack on top. When executed,
-the tree is traversed from bottom to top.
+Each pass sees the plan the passes before it left:
 
-## The Optimization Pipeline
+- Dead-column pruning runs after mutate fusion, so it can drop an unused
+  expression from a fused node.
+- Mutate fusion runs before filter pushdown, so a filter can move below two
+  mutates that fused, but only below the top one of two mutates that did not
+  fuse (see "One node per optimization").
+- Filter reordering runs after pushdown, so a filter that pushdown moves next
+  to another filter can be merged with it.
+- Fusion does not run after pushdown. Two mutates that become adjacent
+  because pushdown moved a filter out from between them stay separate. Example 2
+  below shows this.
 
-Before execution, the AST passes through six optimization passes in order:
+### Passes that cannot apply are skipped
 
-1. **Projection Pruning** - Remove unused columns early
-2. **Mutate Fusion** - Combine consecutive mutates
-3. **Dead Column Pruning** - Remove unused computed columns
-4. **Filter Pushdown** - Move filters closer to the source
-5. **Filter Reordering** - Cheapest filters first
-6. **Filter Fusion** - Combine simple filters into one kernel
+Before running mutate fusion, dead-column pruning, filter pushdown or filter
+reordering, the optimizer looks at the node types in the part of the plan it is
+optimizing and skips the pass when that part has nothing it works on: mutate
+fusion needs a `mutate` node directly on a `mutate` node, dead-column pruning a
+`mutate` or `select` node, filter pushdown a `filter` directly on a `mutate`,
+`select` or join, and filter reordering a `filter` directly on a `filter`.
 
-### Why Order Matters
-
-The passes are carefully ordered:
-
-- Projection pruning runs first to reduce data width
-- Mutate fusion happens before filter pushdown to create larger blocks
-- Dead column pruning cleans up after projection changes
-- Filter passes run last since earlier passes may create new opportunities
+Projection pruning is skipped for a part of the plan that is only a chain of
+`filter` and `mutate` nodes down to the source table, when every `mutate` holds
+at least one expression and every predicate reads only columns its input has:
+the pass would not change such a chain. If the chain also has no `mutate`
+directly on a `mutate` and no `filter` directly on a `mutate` or `filter`, no
+later pass can change it either, and the optimizer returns it as it is. The plan
+is the same as if every pass had run, so `explain()` does not show which passes
+were skipped.
 
 ## Pass 1: Projection Pruning
 
-This pass pushes column selections down the tree to reduce data width early.
+The pass works out which columns each node needs, from the top of the plan
+down, and can add `select` nodes that drop the columns no node above needs. In
+this plan only `mpg`, `hp` and `wt` are read from the 11-column source:
 
-### Before Optimization
-
-```{r proj-before, eval=FALSE}
-# User writes:
+```{r proj}
 tbl_gpu(mtcars, lazy = TRUE) |>
   mutate(power_ratio = hp / wt) |>
   select(mpg, power_ratio) |>
-  collect()
-
-# Unoptimized AST processes all 11 columns through mutate
+  explain()
 ```
 
-### After Optimization
-
-The optimizer inserts a `select` node below the `mutate` to fetch only the
-columns needed (`mpg`, `hp`, `wt`):
-
-```{r proj-after, eval=FALSE}
-# Optimized execution order:
-# 1. Select only mpg, hp, wt from source
-# 2. Compute power_ratio = hp / wt
-# 3. Select mpg, power_ratio for output
-
-# Benefit: 11 columns -> 3 columns early
-```
-
-### Impact
-
-On wide tables, projection pruning dramatically reduces memory bandwidth.
-Instead of copying all columns through every operation, only needed columns
-flow through the pipeline.
+The inner `select [3 cols]` is the node the pass added. The `select [2 cols]`
+at the top is the one written in the pipeline.
 
 ## Pass 2: Mutate Fusion
 
-Consecutive `mutate()` calls are combined when safe.
+Three `mutate()` calls become one `mutate` node:
 
-### Before Optimization
-
-```{r mutate-fusion-before, eval=FALSE}
-# User writes (or code generates):
+```{r fusion}
 tbl_gpu(mtcars, lazy = TRUE) |>
   mutate(a = hp + 10) |>
   mutate(b = wt * 2) |>
   mutate(c = a + b) |>
+  explain()
+```
+
+The fused node holds the expressions in the order they were written, lower
+mutate first, and evaluates them in that order, each seeing the columns the
+earlier ones left. That is dplyr's order, so fusing does not change the result.
+Here `c` is computed from the original `a` and `b`, as in dplyr:
+
+```{r fusion-order}
+df <- tibble::tibble(a = 1, b = 2, hp = 3, wt = 4)
+
+tbl_gpu(df, lazy = TRUE) |>
+  mutate(c = a + b) |>
+  mutate(a = hp + 10, b = wt * 2) |>
   collect()
 
-# Three separate mutate nodes = three intermediate tables
+df |>
+  mutate(c = a + b) |>
+  mutate(a = hp + 10, b = wt * 2)
 ```
 
-### After Optimization
+Two adjacent `mutate` nodes are not fused when they hold more than 8
+expressions together, or when the upper one reads more than 4 of the columns the
+lower one writes, new or overwritten. Here 5 + 4 expressions stay as two nodes:
 
-```{r mutate-fusion-after, eval=FALSE}
-# Fused into single mutate:
-# mutate(a = hp + 10, b = wt * 2, c = a + b)
-
-# One intermediate table instead of three
-```
-
-### Fusion Guards
-
-Fusion is blocked when:
-
-- Combined expressions exceed 8 (memory bandwidth tradeoff)
-- Circular dependencies exist
-- Too many intermediate columns are reused (>4 intermediates or >3 uses each)
-
-### Dependency Handling
-
-When fusing creates dependencies, expressions are topologically sorted:
-
-```{r topo-sort, eval=FALSE}
-# Input expressions:
-#   c = a + b
-#   a = hp + 10
-#   b = wt * 2
-
-# After topological sort:
-#   a = hp + 10    (no deps)
-#   b = wt * 2     (no deps)
-#   c = a + b      (depends on a, b)
-```
-
-## Pass 3: Dead Column Pruning
-
-After projection pushdown and mutate fusion, some computed columns may no
-longer be used. This pass removes them.
-
-### Example
-
-```{r dead-column, eval=FALSE}
-# User writes:
+```{r fusion-guard}
 tbl_gpu(mtcars, lazy = TRUE) |>
-  mutate(
-    a = hp + 10,
-    b = wt * 2,
-    c = mpg * 2
-  ) |>
-  select(mpg, a) |>  # Only using 'a', not 'b' or 'c'
-  collect()
-
-# After dead column pruning:
-# mutate(a = hp + 10) only - 'b' and 'c' are never computed
+  mutate(e1 = mpg + 1, e2 = mpg + 2, e3 = mpg + 3, e4 = mpg + 4, e5 = mpg + 5) |>
+  mutate(e6 = mpg + 6, e7 = mpg + 7, e8 = mpg + 8, e9 = mpg + 9) |>
+  optimized()
 ```
 
-This pass walks backward through the AST, tracking which columns are actually
-required by downstream operations.
+Overwritten columns count as written. Here the lower `mutate` creates no new
+column, but it overwrites 5, and the upper one reads all 5, so they stay as two
+nodes. If the upper one read only 4 of them, they would fuse into one node with
+6 expressions:
+
+```{r fusion-guard-overwrite}
+lower <- tbl_gpu(mtcars, lazy = TRUE) |>
+  mutate(mpg = mpg + 1, cyl = cyl + 1, disp = disp + 1, hp = hp + 1, drat = drat + 1)
+
+lower |>
+  mutate(s = mpg + cyl + disp + hp + drat) |>
+  optimized()
+
+lower |>
+  mutate(s = mpg + cyl + disp + hp) |>
+  optimized()
+```
+
+## Pass 3: Dead-Column Pruning
+
+The pass walks the plan from the top down, tracking the columns the nodes above
+still need, and drops each `mutate` expression whose result is not among them
+(with the two exceptions below). Here the `mutate` node keeps one of its three
+expressions, because the `select` keeps only `mpg` and `a`:
+
+```{r dead-column}
+tbl_gpu(mtcars, lazy = TRUE) |>
+  mutate(a = hp + 10, b = wt * 2, c = mpg * 2) |>
+  select(mpg, a) |>
+  optimized()
+```
+
+Because this pass runs after fusion, it also prunes across `mutate()` calls
+that fused. The optimized plan here has one `mutate` node with one expression:
+
+```{r dead-column-fused}
+tbl_gpu(mtcars, lazy = TRUE) |>
+  mutate(a = hp + 10) |>
+  mutate(b = wt * 2) |>
+  select(mpg, a) |>
+  optimized()
+```
+
+There are two exceptions. First, an earlier expression that writes a column name
+a later expression overwrites is kept while the name is still needed, even if
+its value is overwritten. In the next plan the fused node holds both:
+
+```{r dead-overwrite}
+tbl_gpu(mtcars, lazy = TRUE) |>
+  mutate(a = hp + 1) |>
+  mutate(a = wt + 1) |>
+  select(mpg, a) |>
+  optimized()
+```
+
+Second, an expression that is a vector literal, such as `v = c(10, 20, 30, 40)`,
+is kept even when nothing uses it, because dplyr checks its length either way.
+Here `v` is unused, yet the node keeps both expressions:
+
+```{r dead-vector-literal}
+tbl_gpu(data.frame(a = 1:4, b = 1), lazy = TRUE) |>
+  mutate(v = c(10, 20, 30, 40), w = a + 1) |>
+  select(a, w) |>
+  optimized()
+```
+
+The pass can also drop columns from a `select` node when nothing above it uses
+them. Here the first `select()` keeps three columns and the second keeps only
+`a`. In the optimized plan both `select` nodes keep 1 column:
+
+```{r dead-select}
+tbl_gpu(data.frame(a = 1:3, b = 1, c = 2), lazy = TRUE) |>
+  select(a, b, c) |>
+  select(a) |>
+  explain()
+```
 
 ## Pass 4: Filter Pushdown
 
-**Filter pushdown** is one of the most impactful optimizations. It moves
-`filter()` operations closer to the data source, reducing the number of rows
-processed by subsequent operations.
+**Filter pushdown** can move a `filter` node below the node under it, so that
+node sees only the rows the filter keeps. The sections below say when.
 
-### The Core Principle
+### Across mutate
 
-Fewer rows = faster everything. By filtering early:
+A filter directly on a `mutate` node moves below it, unless:
 
-- Less data flows through mutate computations
-- Less data to sort in arrange
-- Less memory bandwidth consumed
+- one of its predicates reads a column the mutate creates or overwrites,
+- the mutate holds a vector literal, such as `v = c(10, 20, 30, 40)`, or
+- the mutate holds a rowwise integer `sum()`, `min()` or `max()`, or a rowwise
+  double `min()` or `max()`.
 
-### When Pushdown Happens
-
-A filter can be pushed below a `mutate` when the filter's predicate columns
-are **not** produced by that mutate.
-
-#### Can Push
+`mpg` exists before the mutate, so this filter moves:
 
 ```{r pushdown-can}
-# This filter can be pushed down:
-pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
+tbl_gpu(mtcars, lazy = TRUE) |>
   mutate(power_ratio = hp / wt) |>
-  filter(mpg > 20) |>  # mpg exists before mutate
-  collect()
-
-# Optimized order:
-# 1. filter(mpg > 20) - removes rows first
-# 2. mutate(power_ratio) - computed on fewer rows
+  filter(mpg > 20) |>
+  explain()
 ```
 
-#### Cannot Push
+`power_ratio` is created by the mutate, so this one stays:
 
 ```{r pushdown-cannot}
-# This filter cannot be pushed:
-pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
+tbl_gpu(mtcars, lazy = TRUE) |>
   mutate(power_ratio = hp / wt) |>
-  filter(power_ratio > 50) |>  # power_ratio created by mutate
-  collect()
-
-# Must stay in order:
-# 1. mutate(power_ratio) - creates the column
-# 2. filter(power_ratio > 50) - uses it
+  filter(power_ratio > 50) |>
+  explain()
 ```
 
-### Pushdown Across Select
+### Across select
 
-Filters can also push below `select()` if the select keeps the predicate columns:
+On a table whose column names are all different, a `select()` that keeps
+columns under their own names, without picking any column twice, records one
+`select` node. A filter directly on that node moves below it when the select
+keeps every column the filter's predicates read:
 
-```{r pushdown-select, eval=FALSE}
-# Original:
-tbl_gpu(data, lazy = TRUE) |>
-  select(a, b, c) |>
-  filter(a > 10)
-
-# If select keeps 'a', filter pushes below:
-# filter(a > 10)
-# select(a, b, c)
+```{r pushdown-select}
+tbl_gpu(data.frame(a = 1:20, b = 1, c = 2), lazy = TRUE) |>
+  select(b, a) |>
+  filter(a > 10) |>
+  explain()
 ```
 
-### The Algorithm
+(The lower `select` was added by projection pruning, to drop `c`.)
 
-The filter pushdown algorithm:
+A `select()` that renames a column records a `rename` node above its `select`
+node. `rename` is a barrier (see "Optimization Barriers"), so a filter written
+after such a `select()` stays above it:
 
-1. Recursively process the AST from root to leaves
-2. When encountering a `filter` node:
-   - Extract the columns used in predicates
-   - Check if the input is a `mutate` node
-   - If mutate's output columns don't overlap with predicate columns, swap them
-3. Repeat until no more pushdowns are possible
-
-```{r pushdown-algorithm, eval=FALSE}
-# Implementation sketch (from optimizer.R):
-push_down_filters <- function(ast) {
-  # Get columns used in filter predicates
-  filter_cols <- get_predicate_columns(ast$predicates)
-
-  if (ast$input$type == "mutate") {
-    mutate_outputs <- get_output_columns(ast$input$expressions)
-
-    # Can push if no overlap
-    if (length(intersect(filter_cols, mutate_outputs)) == 0) {
-      # Swap: filter goes below mutate
-      new_filter <- ast_filter(ast$input$input, ast$predicates)
-      ast$input$input <- new_filter
-      return(ast$input)  # mutate is now on top
-    }
-  }
-
-  ast
-}
+```{r pushdown-select-rename}
+tbl_gpu(data.frame(a = 1:20, b = 1, c = 2), lazy = TRUE) |>
+  select(b2 = b, a) |>
+  filter(a > 10) |>
+  explain()
 ```
 
-### Real-World Impact
+(The lower `select [2 cols]` was added by projection pruning, to drop `c`.)
 
-Consider a 100-million row dataset where `filter(x > threshold)` keeps 10% of
-rows:
+### One node per optimization
 
-| Without Pushdown | With Pushdown |
-|------------------|---------------|
-| mutate: 100M rows | filter: 100M -> 10M rows |
-| filter: 100M -> 10M rows | mutate: 10M rows |
-| **Total work: 110M row-operations** | **Total work: 110M row-ops** |
+The pass handles the nodes below a `filter` first, then swaps the filter with
+the node directly under it if that is allowed. It does not look at the moved
+filter again. So in one optimization a filter moves below at most one node.
+Here the filter starts above a `select`, which is above a `mutate`. It ends
+between them, not below the mutate, even though it could pass the mutate:
 
-Wait - same total? Not quite. The critical difference is **memory**:
+```{r pushdown-one-step}
+tbl_gpu(data.frame(k = 1:20, a = 1, b = 2), lazy = TRUE) |>
+  mutate(z = a + 1) |>
+  select(k, a, z) |>
+  filter(k > 10) |>
+  optimized()
+```
 
-- **Without pushdown**: mutate allocates 100M-row output, then filter
-- **With pushdown**: filter first (minimal allocation), then mutate allocates 10M-row output
+(The innermost `select` was added by projection pruning, which runs first.)
 
-The memory savings compound through the pipeline. With multiple mutates and
-filters, pushdown can reduce peak memory by 10x or more.
+Mutate fusion runs before pushdown. Here the two mutates fuse, and the filter
+moves below the fused node:
+
+```{r pushdown-fused}
+tbl_gpu(mtcars, lazy = TRUE) |>
+  mutate(a = hp + 10) |>
+  mutate(b = wt * 2) |>
+  filter(mpg > 20) |>
+  optimized()
+```
+
+Here the two mutates do not fuse (5 + 4 expressions, as under "Pass 2"), and
+the filter moves below the top one only:
+
+```{r pushdown-unfused}
+tbl_gpu(mtcars, lazy = TRUE) |>
+  mutate(e1 = mpg + 1, e2 = mpg + 2, e3 = mpg + 3, e4 = mpg + 4, e5 = mpg + 5) |>
+  mutate(e6 = mpg + 6, e7 = mpg + 7, e8 = mpg + 8, e9 = mpg + 9) |>
+  filter(mpg > 20) |>
+  optimized()
+```
+
+### Across joins
+
+A filter directly on a join can move into the join's inputs, depending on the
+join type and its arguments. The examples use two small tables:
+
+```{r join-data}
+x <- tbl_gpu(data.frame(k = c(1, 2, 3, 4), a = c(5, 15, 25, 35)), lazy = TRUE)
+y <- tbl_gpu(data.frame(k = c(1, 2, 2, 4), v = c(10, 20, 30, 40)), lazy = TRUE)
+```
+
+- `semi_join()` and `anti_join()`: the whole filter moves into the left input.
+  (The `select` on the right input is projection pruning, which keeps only the
+  join key there.)
+
+```{r join-semi}
+x |> semi_join(y, by = "k") |> filter(a > 10) |> optimized()
+```
+
+For `inner_join()`, `left_join()` and `right_join()`:
+
+- dplyr checks a join's default `relationship` (it can warn about many-to-many
+  matches) only when the join has at least one condition, every condition is
+  `==`, and you call it from your own code (a script, the console, or functions
+  you define there). Such a join, with `relationship` unset and
+  `multiple = "all"` (the default), gets no pushdown: the check runs over the
+  full inputs, and a filter below the join could change it.
+
+```{r join-default}
+x |> inner_join(y, by = "k") |> filter(a > 10) |> optimized()
+```
+
+- Any other inner, left or right join with `relationship` unset is recorded
+  as `relationship = "many-to-many"`, and the rules below apply to it. This
+  covers a join with a `join_by()` condition other than `==` (an inequality,
+  `closest()`, `between()`, `overlaps()` or `within()`), a join with
+  `by = character()`, and an `==` join called from inside a package's
+  functions. Here the filter moves into the left input although no argument is
+  set:
+
+```{r join-inequality}
+y_k2 <- tbl_gpu(data.frame(k2 = c(1, 2, 2, 4), v = c(10, 20, 30, 40)), lazy = TRUE)
+
+x |> inner_join(y_k2, join_by(k >= k2)) |> filter(a > 10) |> optimized()
+```
+
+- Nothing moves when `unmatched = "error"` is set for either input, or when
+  `relationship` is `"one-to-one"`, `"one-to-many"` or `"many-to-one"`.
+
+- In every other case, for example with `relationship = "many-to-many"` (set by
+  you or recorded as above), a predicate that reads only left columns moves into
+  the left input (inner and left joins), and one that reads only right columns
+  into the right input (inner and right joins). With a `multiple` other than
+  `"all"`, or a `closest()` condition, no predicate moves into the right input.
+  Predicates that read columns of both sides stay above the join, and so does a
+  predicate that cannot move into the side it reads (`v > 15` in the left join
+  below). A predicate on an `==` key that is merged into one column and whose
+  two sides have different types (such as integer and double) also stays above
+  the join.
+
+```{r join-m2m}
+x |>
+  inner_join(y, by = "k", relationship = "many-to-many") |>
+  filter(a > 10, v > 15) |>
+  optimized()
+
+x |>
+  left_join(y, by = "k", relationship = "many-to-many") |>
+  filter(a > 10, v > 15) |>
+  optimized()
+```
+
+With a double key `k` on both sides, a predicate on `k` moves into the left
+input. With an integer `k` on the left and a double `k` on the right, it stays:
+
+```{r join-key-types}
+x_int <- tbl_gpu(data.frame(k = 1:4, a = c(5, 15, 25, 35)), lazy = TRUE)
+
+x |>
+  inner_join(y, by = "k", relationship = "many-to-many") |>
+  filter(k > 2) |>
+  optimized()
+
+x_int |>
+  inner_join(y, by = "k", relationship = "many-to-many") |>
+  filter(k > 2) |>
+  optimized()
+```
+
+With `multiple = "first"`, the predicate on `a` still moves into the left
+input, and the one on `v` stays above the join:
+
+```{r join-multiple}
+x |>
+  inner_join(y, by = "k", relationship = "many-to-many", multiple = "first") |>
+  filter(a > 10, v > 15) |>
+  optimized()
+```
+
+For the other joins:
+
+- `cross_join()`: a predicate that reads only left columns moves into the left
+  input, and one that reads only right columns into the right input.
+
+```{r join-cross}
+x |>
+  cross_join(y_k2) |>
+  filter(a > 10, v > 15) |>
+  optimized()
+```
+
+- `full_join()`: nothing moves.
+
+```{r join-full}
+x |>
+  full_join(y, by = "k", relationship = "many-to-many") |>
+  filter(a > 10) |>
+  optimized()
+```
 
 ## Pass 5: Filter Reordering
 
-When multiple filter predicates exist, they're reordered by estimated cost.
+When a `filter` node sits directly on another `filter` node, the pass merges
+the chain of consecutive `filter` nodes into one node (with one exception on
+rowwise tables, at the end of this section). Two `filter()` calls become one
+node with two predicates:
 
-### Cost Model
+```{r filter-reorder}
+d <- data.frame(x = c(1, 5, 20, 30), y = c(0, 1, 2, 3), z = c(5, 11, 12, 1))
 
-| Predicate Type | Estimated Cost | Rationale |
-|----------------|----------------|-----------|
-| Scalar comparison (`x > 5`) | 1 | Single comparison per row |
-| Column comparison (`x > y`) | 2 | Two memory reads per row |
-
-### Example
-
-```{r filter-reorder, eval=FALSE}
-# User writes:
-filter(expensive_col > other_col, cheap_col > 10)
-
-# Reordered to:
-filter(cheap_col > 10, expensive_col > other_col)
+tbl_gpu(d, lazy = TRUE) |>
+  filter(x > y) |>
+  filter(z > 10) |>
+  explain()
 ```
 
-By running cheaper filters first, more rows are eliminated before expensive
-comparisons.
+While merging, the pass sorts the predicates by an estimated cost, cheapest
+first. The estimate is built from the size of the expression: 1 for a literal,
+2 for a column reference, and 1 plus the cost of its arguments for an operator
+or function call.
 
-### Safety Check
+| Predicate | Estimated cost |
+|-----------|----------------|
+| `x > 5` | 4 |
+| `x > y` | 5 |
+| `x > y * 10` | 7 |
 
-Non-deterministic predicates are not reordered to preserve correctness.
+So in the example above the merged node puts `z > 10` (cost 4) before
+`x > y` (cost 5). A filter node with no other filter node directly above or
+below it is not touched, so the predicates of such a node keep the order they
+were written in.
 
-## Pass 6: Filter Fusion
+Reordering runs after pushdown, so a filter that pushdown moves next to another
+filter can be merged with it. In this plan the second filter moves below the
+mutate, and the two filters become one node with two predicates:
 
-Simple scalar predicates can be fused into a single GPU kernel call.
-
-### Before Fusion
-
-```{r fusion-before, eval=FALSE}
-# Multiple filter conditions:
-filter(a > 10, b < 20, c == 5)
-
-# Without fusion: three separate filter kernel calls
+```{r filter-reorder-after-pushdown}
+tbl_gpu(mtcars, lazy = TRUE) |>
+  filter(cyl > 4) |>
+  mutate(r = hp / wt) |>
+  filter(mpg > 15) |>
+  explain()
 ```
 
-### After Fusion
+The exception: on a rowwise table, a predicate that holds one of the rowwise
+aggregates named under "Across mutate" limits the merge. The filter nodes from
+the top of the chain down to the lowest one holding such a predicate stay as
+they are, and only the filter nodes below it are merged.
 
-```{r fusion-after, eval=FALSE}
-# Fused: single kernel with AND-mask
+### One filter node, one expression
 
-# One kernel computes:
-# mask = (a > 10) & (b < 20) & (c == 5)
-# apply_boolean_mask(data, mask)
-```
-
-### Fusion Criteria
-
-Filters are fused when ALL conditions are met:
-
-1. All predicates are simple scalar comparisons (not column-to-column)
-2. Operators are basic comparisons: `==`, `!=`, `>`, `>=`, `<`, `<=`
-3. At most 4 predicates (GPU register limits)
-
-Column-to-column comparisons and complex expressions remain separate.
+When a filter node runs, in eager or lazy mode, its predicates are combined
+with `&` into one expression, which gives one row mask (`lower_filter()` in
+`R/lower.R`). A single `filter(a > 10, b < 20)` is already one node with two
+predicates, as is the merged node above.
 
 ## Optimization Barriers
 
-Some operations act as **barriers** that prevent optimization across them:
+Some nodes are **barriers**. Where a barrier is not inside a join's input, the
+optimizer splits the plan at it and optimizes the part above it and the part
+below it separately, so the passes do not move nodes across it. (A join's inputs
+are not split: see "Segments".) These node types are barriers; the second
+column gives common ways to record each, not every one:
 
-- `arrange()` - Sort order must be respected
-- `head()` - Row limit must apply at specific point
-- `summarise()` - Aggregation changes row count
-- `collapse()` - Explicit user barrier
+| Node | Recorded by |
+|------|-------------|
+| `arrange` | `arrange()` |
+| `summarise` | `summarise()` |
+| `reframe` | `reframe()`, when it records a `reframe` node |
+| `distinct` | `distinct()` |
+| `slice` | `head()`, `slice()`, `slice_head()`, `slice_min()` and the like |
+| `rename` | `rename()`; a `select()` that renames a column |
+| `window` | window functions in `mutate()` or `filter()` |
+| `barrier` | `collapse()` |
+| `select` by position | a `select()` that picks the same column more than once; `select()` on a table with repeated column names |
 
-### Why Barriers Exist
+One reason a barrier has to stay put is easy to see with `head()`. Moving the
+filter below it would keep the first four rows that pass the filter instead of
+filtering the first four rows, which is a different result:
 
-Consider:
+```{r barrier-head}
+d <- data.frame(x = 1:10, y = c(-1, 2, -3, 4, -5, 6, -7, 8, -9, 10))
 
-```{r barrier-example, eval=FALSE}
-tbl_gpu(data, lazy = TRUE) |>
-  arrange(x) |>           # Barrier: establishes order
-  mutate(rank = row_number()) |>  # Depends on order
-  filter(rank <= 10)      # Cannot push past arrange!
+q <- tbl_gpu(d, lazy = TRUE) |>
+  arrange(x) |>
+  head(4) |>
+  filter(y > 0)
+
+explain(q)
+
+all.equal(
+  as.data.frame(collect(q)),
+  d |> arrange(x) |> head(4) |> filter(y > 0),
+  check.attributes = FALSE
+)
 ```
 
-Pushing the filter past `arrange` would change which rows remain.
+### Segments
 
-### Segment Optimization
+Walking down from the top of the plan, the optimizer cuts the plan at each
+barrier it meets, optimizes each part, and puts them back together. The part
+below a barrier is optimized as if all of its output columns were used; only the
+part above the top barrier is pruned by the columns the query returns. Here the
+filters move below their mutates, one on each side of `arrange()`, and
+`arrange()` stays between them:
 
-The optimizer handles barriers by:
+```{r segments}
+d <- data.frame(a = c(5, 12, 20, 30), c = c(1, 6, 7, 8))
 
-1. Splitting the AST at barrier points
-2. Optimizing each segment independently
-3. Reconnecting the optimized segments
-
-```{r segments, eval=FALSE}
-# Pipeline with barrier:
-tbl_gpu(data, lazy = TRUE) |>
-  filter(a > 10) |>
+q <- tbl_gpu(d, lazy = TRUE) |>
   mutate(b = a + 1) |>
-  arrange(b) |>           # Barrier here
-  filter(c > 5) |>
-  mutate(d = c + 1)
+  filter(a > 10) |>
+  arrange(b) |>
+  mutate(d = c + 1) |>
+  filter(c > 5)
 
-# Optimized as two segments:
-# Segment 1: source -> filter(a>10) -> mutate(b)
-# Segment 2: arrange(b) -> filter(c>5) -> mutate(d)
+explain(q)
+```
+
+The walk stops at a join. The join, the nodes above it up to the nearest barrier
+above it (if any), and both of its inputs form one part, and each pass that runs
+works through both inputs without cutting them at barriers. So inside a join's
+input, the column-pruning passes can reach below a barrier. Here projection
+pruning adds a `select` that drops `b` below `arrange()` in the left input:
+
+```{r barrier-in-join}
+d2 <- tbl_gpu(data.frame(k = c(1, 2, 3, 4), a = c(5, 15, 25, 35), b = 1:4), lazy = TRUE)
+y2 <- tbl_gpu(data.frame(k = c(1, 2, 2, 4), v = c(10, 20, 30, 40)), lazy = TRUE)
+
+d2 |>
+  arrange(a) |>
+  inner_join(y2, by = "k", relationship = "many-to-many") |>
+  select(k, v) |>
+  optimized()
 ```
 
 ## Inspecting Optimization
 
-### show_query()
+`show_query()` prints the pending AST. `explain()` prints it and then the plan
+that `compute()` and `collect()` would run, which the optimizer builds. Nothing
+is executed:
 
-View the pending AST before optimization:
-
-```{r show-query-detail}
+```{r explain-detail}
 pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
   mutate(a = hp + 10) |>
   filter(mpg > 20) |>
   mutate(b = a + wt)
 
-show_query(pipeline)
+explain(pipeline)
 ```
 
-### Understanding the Output
+Here the filter moved below the first mutate. The two mutates end up next to
+each other but are not fused. Fusion comes before pushdown, and while the filter
+still sat between the two mutates, no mutate was directly on another, so the
+fusion pass was skipped (see "Passes that cannot apply are skipped"). No pass
+fuses them after pushdown.
 
-The `show_query()` output shows:
+## Examples
 
-- Node type and key metadata
-- Tree structure via indentation
-- AST depth (number of levels)
-- Node count (total operations)
+### Example 1: Filter pushdown
 
-## Practical Examples
-
-### Example 1: Filter Pushdown in Action
+The same pipeline in eager mode and in lazy mode gives the same result. In the
+lazy plan the filter comes before the mutate:
 
 ```{r example-pushdown}
-# Without lazy mode: operations execute in written order
 eager_result <- tbl_gpu(mtcars) |>
-  mutate(
-    a = hp + 10,
-    b = wt * 2,
-    c = mpg * 3
-  ) |>
-  filter(cyl == 4) |>  # Filters after computing all mutates
+  mutate(a = hp + 10, b = wt * 2, c = mpg * 3) |>
+  filter(cyl == 4) |>
   collect()
 
-# With lazy mode: filter pushes down
-lazy_result <- tbl_gpu(mtcars, lazy = TRUE) |>
-  mutate(
-    a = hp + 10,
-    b = wt * 2,
-    c = mpg * 3
-  ) |>
-  filter(cyl == 4) |>  # Optimizer moves this before mutate
-  collect()
+lazy_pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
+  mutate(a = hp + 10, b = wt * 2, c = mpg * 3) |>
+  filter(cyl == 4)
 
-# Same result, but lazy version filters first
-identical(eager_result, lazy_result)
+explain(lazy_pipeline)
+
+identical(eager_result, collect(lazy_pipeline))
 ```
 
-### Example 2: Complex Pipeline Optimization
+### Example 2: A longer pipeline
 
 ```{r example-complex}
-# A realistic analytics query
-result <- tbl_gpu(mtcars, lazy = TRUE) |>
-  # Step 1: Feature engineering
+pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
   mutate(
     power_to_weight = hp / wt,
     fuel_efficiency = mpg / cyl,
     is_powerful = hp > 150
   ) |>
-  # Step 2: Filter to interesting subset
-  filter(
-    cyl %in% c(4, 6),     # Can push down (cyl exists)
-    mpg > 18              # Can push down (mpg exists)
-  ) |>
-  # Step 3: More features using filtered data
-  mutate(
-    efficiency_score = fuel_efficiency * power_to_weight
-  ) |>
-  # Step 4: Aggregate
+  filter(cyl %in% c(4, 6), mpg > 18) |>
+  mutate(efficiency_score = fuel_efficiency * power_to_weight) |>
   group_by(cyl) |>
-  summarise(
-    avg_score = mean(efficiency_score),
-    count = n()
-  ) |>
-  # Step 5: Final ordering
-  arrange(desc(avg_score)) |>
-  collect()
+  summarise(avg_score = mean(efficiency_score), count = n()) |>
+  arrange(desc(avg_score))
 
-result
+explain(pipeline)
+
+collect(pipeline)
 ```
 
-In this example, the optimizer:
+The filter, a single node with two predicates, moved below the first mutate, so
+the three features are computed only for the rows that pass it. That is the
+only change to the pipeline:
 
-1. Pushes `filter(cyl %in% c(4,6), mpg > 18)` below the first mutate
-2. Reorders the filter predicates (scalar comparisons first)
-3. Fuses the two filter predicates into one kernel
-4. Prunes any computed columns not used downstream
+- `summarise()` is a barrier, and the part of the plan below it keeps all its
+  output columns, so `is_powerful` is still computed (the bottom `mutate`
+  still has 3 expressions) although nothing uses it.
+- The two mutates are not fused. Fusion comes before pushdown, and while the
+  filter still sat between them, no mutate was directly on another, so the
+  fusion pass was skipped. No pass fuses them after pushdown.
 
-### Example 3: When Pushdown Doesn't Help
+## Using `explain()`
 
-```{r example-no-pushdown}
-# Filter depends on computed column - cannot push
-result <- tbl_gpu(mtcars, lazy = TRUE) |>
-  mutate(power_ratio = hp / wt) |>
-  filter(power_ratio > 50) |>  # Must stay after mutate
-  collect()
+`vignette("performance", package = "cuplyr")` compares eager and lazy mode;
+the optimizer runs only in lazy mode. `explain()` shows where the optimizer put
+each filter and how many expressions each mutate keeps.
 
-# This is fine - the optimizer recognizes the dependency
-nrow(result)
-```
+To keep the optimizer from moving nodes across a point in a pipeline, put
+`collapse()` there. It records a `barrier` node. In this plan the filter above
+it is not merged with the filter below it, and neither moves across:
 
-## Performance Tips
-
-### 1. Use Lazy Mode for Complex Pipelines
-
-```{r tip-lazy, eval=FALSE}
-# Enable lazy mode for optimization benefits
-tbl_gpu(data, lazy = TRUE) |>
-  # ... complex pipeline ...
-  collect()
-```
-
-### 2. Filter on Source Columns When Possible
-
-```{r tip-filter-source, eval=FALSE}
-# Good: filter uses source columns
-tbl_gpu(data, lazy = TRUE) |>
-  filter(status == "active", date > cutoff) |>  # Can push down
-  mutate(computed = complex_calculation(a, b))
-
-# Less optimal: filter uses computed column
-tbl_gpu(data, lazy = TRUE) |>
-  mutate(computed = complex_calculation(a, b)) |>
-  filter(computed > threshold)  # Cannot push down
-```
-
-### 3. Let the Optimizer Reorder
-
-Write filters in logical order. The optimizer will reorder by cost:
-
-```{r tip-reorder, eval=FALSE}
-# Write for readability
-filter(
-  department == "Engineering",   # May be expensive
-  is_active == TRUE,             # Cheap
-  salary > 50000                 # Cheap
-)
-
-# Optimizer reorders to: is_active, salary, department
-```
-
-### 4. Use collapse() for Control
-
-If you need to prevent optimization across a boundary:
-
-```{r tip-collapse, eval=FALSE}
-tbl_gpu(data, lazy = TRUE) |>
+```{r tip-collapse}
+tbl_gpu(data.frame(x = c(5, 11, 20), z = c(1, 6, 9)), lazy = TRUE) |>
   filter(x > 10) |>
-  mutate(y = f(x)) |>
-  collapse() |>            # Barrier: optimize above and below separately
+  mutate(y = x * 2) |>
+  collapse() |>
   filter(z > 5) |>
-  collect()
-```
-
-## Conclusion
-
-cuplyr's query optimizer automatically improves your pipelines through:
-
-- **Projection pruning**: Only process needed columns
-- **Mutate fusion**: Reduce intermediate allocations
-- **Dead column pruning**: Skip unnecessary computations
-- **Filter pushdown**: Process fewer rows earlier
-- **Filter reordering**: Cheap filters first
-- **Filter fusion**: Combine filters into single kernels
-
-For most workloads, simply use lazy mode and write natural dplyr code. The
-optimizer handles the rest.
-
-```{r conclusion, eval=FALSE}
-# Just write natural dplyr:
-result <- tbl_gpu(big_data, lazy = TRUE) |>
-  mutate(derived = complex_expr) |>
-  filter(source_col > threshold) |>  # Automatically pushed down
-  group_by(category) |>
-  summarise(total = sum(derived)) |>
-  collect()
+  explain()
 ```
 
 ## Further Reading
 
-- `vignette("getting-started")` - Basic cuplyr usage
-- `vignette("performance")` - Measured eager vs lazy timings and memory
-- `?optimize_ast` - Internal optimizer documentation
-- RAPIDS cuDF documentation for GPU-specific optimizations
+- `vignette("getting-started", package = "cuplyr")` - Basic cuplyr usage
+- `vignette("performance", package = "cuplyr")` - Measured eager vs lazy
+  timings and memory
+- `?optimize_ast` - The optimizer's entry point (internal, short help page)
