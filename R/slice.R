@@ -724,7 +724,10 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
     if (!is.null(zero)) return(zero)
   }
 
-  idx <- tryCatch(resolve_slice_dots(dots), error = function(e) NULL)
+  # F77: a call whose head resolves to a function of the user's rather than the
+  # native op is dplyr's to run
+  shadowed <- shadow_screen_text(dots)
+  idx <- if (is.null(shadowed)) tryCatch(resolve_slice_dots(dots), error = function(e) NULL)
   if (!is.null(idx)) {
     result <- if (identical(gm$mode, "none")) {
       push_op(.data, ast_slice(input_node(.data), mode = "index", raw_indices = idx))
@@ -736,7 +739,7 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 
   with_keys(gpu_fallback("slice", .data, function(tbl) {
     rlang::inject(dplyr::slice(tbl, !!!dots, .by = !!by_quo, .preserve = .preserve))
-  }))
+  }, detail = shadowed))
 }
 
 # --- Fixed group keys of a row slice (F71) -------------------------------------
@@ -1020,7 +1023,10 @@ slice_min.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   .data <- prep$data
   with_keys <- function(result) row_slice_finish(result, prep)
 
-  if (length(dots) == 0) {
+  # F77: an `order_by` whose call head resolves to a function of the user's
+  # rather than the native op (a local `abs()`) is dplyr's to run
+  shadowed <- shadow_screen_text(list(order_quo))
+  if (length(dots) == 0 && is.null(shadowed)) {
     result <- if (identical(gm$mode, "none")) {
       slice_rank_native(.data, order_quo, amt, descending = FALSE,
                         with_ties = with_ties, na_rm = na_rm)
@@ -1034,7 +1040,7 @@ slice_min.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   with_keys(gpu_fallback("slice_min", .data, function(tbl) {
     rlang::inject(dplyr::slice_min(tbl, order_by = !!order_quo, !!!dots, !!!np,
                                     by = !!by_quo, with_ties = with_ties, na_rm = na_rm))
-  }))
+  }, detail = shadowed))
 }
 
 #' Select rows with the largest values of a variable
@@ -1068,7 +1074,10 @@ slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   .data <- prep$data
   with_keys <- function(result) row_slice_finish(result, prep)
 
-  if (length(dots) == 0) {
+  # F77: an `order_by` whose call head resolves to a function of the user's
+  # rather than the native op (a local `abs()`) is dplyr's to run
+  shadowed <- shadow_screen_text(list(order_quo))
+  if (length(dots) == 0 && is.null(shadowed)) {
     result <- if (identical(gm$mode, "none")) {
       slice_rank_native(.data, order_quo, amt, descending = TRUE,
                         with_ties = with_ties, na_rm = na_rm)
@@ -1082,7 +1091,7 @@ slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   with_keys(gpu_fallback("slice_max", .data, function(tbl) {
     rlang::inject(dplyr::slice_max(tbl, order_by = !!order_quo, !!!dots, !!!np,
                                     by = !!by_quo, with_ties = with_ties, na_rm = na_rm))
-  }))
+  }, detail = shadowed))
 }
 
 # Shared grouped/`by=` native-path builder for slice_min()/slice_max():

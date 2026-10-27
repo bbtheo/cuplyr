@@ -105,6 +105,24 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
   # Get current schema
   schema <- current_schema(.data)
   user_dots <- dots
+
+  # F77: a call whose head resolves to a function of the user's rather than the
+  # native op (a local `abs()`) is dplyr's to run, whole, before any rewrite.
+  # dplyr itself strips a top-level desc() by name, so that head is not looked up.
+  screened <- dots
+  for (i in seq_along(dots)) {
+    q <- .subset2(dots, i)
+    if (is.call(.subset2(q, 2L)) && rlang::quo_is_call(q, "desc", n = 1L, ns = c("", "dplyr"))) {
+      screened[[i]] <- rlang::new_quosure(.subset2(q, 2L)[[2L]], attr(q, ".Environment"))
+    }
+  }
+  shadowed <- shadow_screen_text(screened)
+  if (!is.null(shadowed)) {
+    return(gpu_fallback("arrange", .data, function(tbl) {
+      dplyr::arrange(tbl, !!!user_dots, .by_group = .by_group, .locale = .locale)
+    }, detail = shadowed))
+  }
+
   dots <- colwise_rewrite_dots(dots, schema)
 
   # Classify every dot first: `x` / `desc(x)` / `-x` and a resolvable

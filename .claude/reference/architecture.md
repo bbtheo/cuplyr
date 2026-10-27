@@ -229,6 +229,66 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
   naming the columns). No extra pass over whole Dates. Every upload goes
   through `tbl_gpu()`, so this is also what a CPU fallback producing `d + 0.5`
   or a fractional `mean(<Date>)` goes through.
+- **Shadowed function heads (F77)**: dplyr finds a call head by ordinary
+  function lookup from the quosure's env, so a user `abs()` (local, enclosing or
+  global) wins over `base::abs()`, where the IR maps a call by its name.
+  `shadow_screen_text()` (R/ir.R, after `impure_const_call_text()`) runs first
+  in every expression-taking verb on the user's own dots (before any rewrite,
+  expansion or parse, ungrouped and rowwise too; the colwise rewrite's
+  function-object heads are checked by the rewrite itself, see below):
+  `mutate_run()`/ `mutate_rowwise()`, `transmute_run()`/`transmute.tbl_gpu()`'s
+  rowwise branch, `filter_run()`/`filter_rowwise()` (so `top_n()`/`top_frac()`),
+  `summarise_impl()` (skipped inside a native reframe()'s wide step, whose dots
+  are rewritten; `reframe.tbl_gpu()` screens its own) and `summarise_rowwise()`,
+  `arrange.tbl_gpu()` (a top-level `desc()` is not looked up: dplyr strips it by
+  name), `group_by`, `distinct`, `count`/`add_count` (the grouping dots; `wt` is
+  screened by the summarise/mutate that sums it), `slice()`, `slice_min/max()`
+  (`order_by`). A hit sends the whole call to the verb's CPU fallback with the
+  user's quosures and a `gpu_fallback(detail =)` naming the dot and the head. A
+  head is shadowed (`ir_head_is_shadowed()`) iff its name is checked (in
+  `ir_pure_names()`, or has a canonical function in `ir_canonical_fns()`: F75's
+  table, no second one) and the function it resolves to (`get0(mode =
+  "function")`, or `pkg::fn` as R's `::` finds it: the export only, `pkg:::fn`
+  the namespace without its imports) is identical to none of the name's native
+  canonical functions. A bare head that does not resolve is not a shadow; a
+  `pkg::fn` that does not resolve is (`dplyr::abs` is not exported: dplyr's
+  error, not base's abs). Homonyms (`ir_shadow_homonyms`) are taken out of the
+  native set: `stats::lag` (`dplyr::lag` shifts), and data.table's
+  `between`/`first`/`last` and the lubridate accessors it also exports
+  (`second()` is integer there). Cost: the screen runs on every verb, so a dot
+  is first reduced to the names it CALLS (two `all.names()` passes, one with
+  `functions = FALSE`; a column or variable is never looked up, so no promise
+  bound to one is forced, as dplyr leaves it alone), and each that is checked at
+  all (`ir_shadow_name_checked()`) is looked up once per verb call (`st$cache`,
+  one cache per env). Only a dot with a head that resolves to a non-canonical
+  function, or with a formula (an embedded quosure may have another env), a
+  `pkg::` qualification, across()/if_any()/if_all() or with_order() (they take
+  functions as values), is walked (`ir_shadow_walk()`: embedded quosures with
+  their own env, lambda and formula bodies, the `.fns` of
+  across()/if_any()/if_all() and the `fun` of with_order() written as a name or
+  `pkg::name`, skipping syntax heads and pronoun calls). A `.fns` VALUE (a
+  closure or formula held in a variable) is inlined by `across_value_spec()`
+  only after `ir_shadow_hit()` found no shadow in its body, in the value's own
+  env; a function value is lowered by name only when it is identical to one of
+  that name's native canonical functions (`across_known_fn_name()` uses
+  `ir_native_canonical_fns()`, never an inheriting lookup from a namespace,
+  whose chain reaches the global env). The scoped verbs' dots have
+  function-object heads (`<fn>(x)`), which neither `all.names()` nor the walk
+  sees: they are checked where the colwise rewrite (`colwise_rewrite_dots()`,
+  after the screen) resolves them, by the same `across_value_spec()` for a
+  function and by `ir_shadow_hit()` in `colwise_body_plan()` for a formula or
+  lambda body in its own env. A hit gives up the rewrite; the dot keeps its
+  function-object head, which the IR does not parse, so the verb falls back to
+  dplyr with the user's dots. count()/tally()/add_count() build
+  `base::sum()`/`dplyr::n()` (as dplyr's `tally_n()`) so a user `sum`/`n` is
+  never called by them. Known limits: an attached package that masks a native
+  name (bit64's `%in%`, plyr's `desc`) sends the call to the CPU; a default
+  argument of a `function` literal is not walked; a checked name inside a
+  call-valued head (`c` in `fs[[c]](x)`) is looked up although it is no head
+  (any other name there is not: only checked names are,
+  `ir_shadow_name_checked()`); a quosure is read by its representation
+  (`.subset2(q, 2L)`, the `.Environment` attribute) because rlang's `[[` and
+  `length()` methods on it cost 100+ microseconds.
 - **Evaluate-once for column-free dots (F75 on top of F37)**: dplyr evaluates
   each dot once per group (`eval_all_summarise()`/`eval_all_mutate()`/
   `eval_all_filter()` loop over the groups), so a column-free call (`bump()`,

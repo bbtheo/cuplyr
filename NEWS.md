@@ -1,5 +1,28 @@
 # cuplyr (development version)
 
+## User functions that shadow a native function's name are called (F77)
+
+* A function of your own with the name of a function cuplyr runs on the GPU
+  (`abs()`, `mean()`, `round()`, `nchar()`, `lag()`, `n()`, `if_else()`, `+`,
+  ...), defined locally, in an enclosing function or globally, is now the
+  function that gets called, as in dplyr, in `mutate()`, `transmute()`,
+  `filter()`, `filter_out()`, `summarise()`, `reframe()`, `arrange()`,
+  `group_by()`, `distinct()`, `count()`, `add_count()`, `slice()`,
+  `slice_min()`, `slice_max()` and `top_n()`, including inside `across()`
+  lambdas, in `.fns` given by name or as a value (a list of functions held in
+  a variable, `!!f`), in the functions and lambdas of the scoped verbs
+  (`mutate_at()`, `summarise_all()`, `filter_if()`, `arrange_at()`, ...), and
+  on rowwise tables. Before, cuplyr ran its own
+  built-in under that name and silently ignored yours. The call now runs
+  whole in dplyr (a CPU fallback, reported under `cuplyr.fallback`).
+  `pkg::fn` is the function of that package: `stats::lag()` is not
+  `dplyr::lag()`, and `data.table::second()` is not `lubridate::second()`; a
+  `pkg::fn` that `pkg` does not export (`dplyr::abs(x)`) is dplyr's error.
+  An attached package that masks a native name (bit64's `%in%`, say) also
+  sends the call to the CPU. `count()`, `tally()` and `add_count()` build
+  `base::sum()` and `dplyr::n()`, so your own `sum()` or `n()` is never called
+  by them.
+
 ## Lazy plans keep dplyr's integer-overflow warning (F70)
 
 * In lazy mode the optimizer no longer changes which rows or columns an integer

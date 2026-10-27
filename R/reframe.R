@@ -77,10 +77,16 @@ reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(.by)
   caller_env <- rlang::caller_env()
-  cpu <- function() {
+  cpu <- function(detail = NULL) {
     gpu_fallback("reframe", .data, function(tbl) {
       rlang::inject(dplyr::reframe(tbl, !!!dots, .by = !!by_quo))
-    })
+    }, detail = detail)
+  }
+
+  # F77: a function of the user's with a native op's name runs in dplyr
+  shadowed <- shadow_screen_text(dots)
+  if (!is.null(shadowed)) {
+    return(cpu(shadowed))
   }
 
   schema <- current_schema(.data)

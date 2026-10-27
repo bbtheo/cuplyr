@@ -56,7 +56,15 @@
 #' ## Supported expressions
 #' `mutate()` parses its arguments through the same expression IR that
 #' `filter()` uses (see `R/ir.R`), lowered to `cudf::compute_column()` under
-#' the hood. The IR understands:
+#' the hood. A function is native only when its name resolves, in the
+#' expression's environment, to the base/dplyr/lubridate function itself: a
+#' function of your own with the same name (local, in an enclosing function or
+#' global) runs on the CPU, as dplyr would call it, and `pkg::fn` is the
+#' function of that package. The same holds for a function passed as a value
+#' (`across(x, f)`, a list of functions held in a variable, `!!f`) and for the
+#' functions and lambdas of the scoped verbs (`mutate_at()`, `summarise_all()`,
+#' `filter_if()`, ...): one that is, or calls, a function of yours with a
+#' native function's name runs on the CPU. The IR understands:
 #' \itemize{
 #'   \item Arithmetic: `+`, `-`, `*`, `/`, `^`, `%%`, `%/%`, unary `-`,
 #'     arbitrarily nested (`(x + y) * z - 1`), and scalar-on-either-side
@@ -365,9 +373,14 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 # produces its own result or error.
 # @keywords internal
 mutate_rowwise <- function(.data, dots, by_quo, keep, before_quo, after_quo) {
-  cpu <- function() mutate_expr_fallback(.data, dots, keep, before_quo, after_quo, by_quo)
+  cpu <- function(detail = NULL) mutate_expr_fallback(.data, dots, keep, before_quo, after_quo, by_quo, detail = detail)
   if (!rlang::quo_is_null(by_quo)) {
     return(cpu())
+  }
+  # F77: a function of the user's with a native op's name runs in dplyr
+  shadowed <- shadow_screen_text(dots)
+  if (!is.null(shadowed)) {
+    return(cpu(shadowed))
   }
   rw <- rowwise_rewrite_dots(.data, dots)
   if (is.null(rw)) {
@@ -419,6 +432,16 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   orig_schema <- current_schema(.data)
   orig_names <- orig_schema$names
   orig_groups <- if (rowwise) .subset2(.data, "groups") else verb_groups
+
+  # F77: a call whose head resolves to a function of the user's rather than the
+  # native op (a local `abs()`) is dplyr's to run, whole, before any rewrite.
+  # (A rowwise call was screened by mutate_rowwise(); its dots are rewritten.)
+  if (!rowwise) {
+    shadowed <- shadow_screen_text(dots)
+    if (!is.null(shadowed)) {
+      return(mutate_expr_fallback(.data, dots, .keep, before_quo, after_quo, by_quo, detail = shadowed))
+    }
+  }
 
   # F75: dplyr evaluates a dot once per group, the native path folds a
   # column-free call once. Only a pure call is the same either way
@@ -1673,10 +1696,15 @@ transmute.tbl_gpu <- function(.data, ...) {
   if (is_rowwise_gpu(.data)) {
     # as mutate_rowwise(): rewrite the row aggregates, attempt the native path,
     # else the whole call in dplyr
-    cpu <- function() {
+    cpu <- function(detail = NULL) {
       gpu_fallback("transmute", .data, function(tbl) {
         rlang::inject(dplyr::transmute(.data = tbl, !!!dots))
-      })
+      }, detail = detail)
+    }
+    # F77: a function of the user's with a native op's name runs in dplyr
+    shadowed <- shadow_screen_text(dots)
+    if (!is.null(shadowed)) {
+      return(cpu(shadowed))
     }
     rw <- if (length(dots) > 0L || length(.subset2(.data, "groups")) > 0L) rowwise_rewrite_dots(.data, dots)
     if (is.null(rw)) {
@@ -1704,6 +1732,17 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
   # No expressions on an ungrouped table: every column goes (n x 0 result).
   if (length(dots) == 0L && length(.subset2(.data, "groups")) == 0L) {
     return(zero_column_result(.data, "transmute"))
+  }
+
+  # F77: as mutate_run(): a shadowed head runs the whole call in dplyr.
+  # (A rowwise call was screened by transmute.tbl_gpu(); its dots are rewritten.)
+  if (!rowwise) {
+    shadowed <- shadow_screen_text(dots)
+    if (!is.null(shadowed)) {
+      return(gpu_fallback("transmute", .data, function(tbl) {
+        rlang::inject(dplyr::transmute(.data = tbl, !!!dots))
+      }, detail = shadowed))
+    }
   }
 
   # F75: as mutate_run(), a grouped call with an impure column-free call runs

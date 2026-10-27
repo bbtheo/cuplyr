@@ -235,6 +235,11 @@ colwise_body_plan <- function(build, env) {
   }
   native <- !colwise_sym_is_head(body1, p1)
   if (native && !across_expr_native(body1)) colwise_giveup()
+  # (F77) dplyr calls the function, so a head of its body resolves from the
+  # function's environment: a function of the user's there that shadows a
+  # native op wins. The dot keeps its function-object head, which the IR
+  # does not parse, so the verb's CPU fallback runs dplyr on the user's dots.
+  if (ir_shadow_hit(body1, env)) colwise_giveup()
   list(kind = "body", build = build, env = env, native = native)
 }
 

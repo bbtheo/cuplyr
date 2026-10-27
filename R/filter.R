@@ -256,9 +256,14 @@ filter_impl <- function(.data, dots, by_quo, .preserve, complement, call) {
 # constant that is not a single logical, ...) runs the whole call in dplyr.
 # @keywords internal
 filter_rowwise <- function(.data, dots, by_quo, .preserve, complement, call) {
-  cpu <- function() filter_cpu_fallback(.data, dots, by_quo, .preserve, complement)
+  cpu <- function(detail = NULL) filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, detail = detail)
   if (!rlang::quo_is_null(by_quo) || !identical(.preserve, FALSE)) {
     return(cpu())
+  }
+  # F77: a function of the user's with a native op's name runs in dplyr
+  shadowed <- shadow_screen_text(dots)
+  if (!is.null(shadowed)) {
+    return(cpu(shadowed))
   }
   rw <- rowwise_rewrite_dots(.data, dots, named = FALSE)
   if (is.null(rw)) {
@@ -312,6 +317,16 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
 
   if (!rlang::quo_is_null(by_quo) && isTRUE(.preserve)) return(cpu())
   if (complement && length(current_schema(.data)$names) == 0L) return(cpu())
+
+  # F77: a call whose head resolves to a function of the user's rather than the
+  # native op (a local `abs()`) is dplyr's to run, whole, before any rewrite.
+  # (A rowwise table's dots were screened by filter_rowwise(), then rewritten.)
+  if (!rowwise) {
+    shadowed <- shadow_screen_text(dots)
+    if (!is.null(shadowed)) {
+      return(filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, detail = shadowed))
+    }
+  }
 
   # F75: dplyr evaluates a predicate once per group, the native path folds a
   # column-free call once; only a pure call is the same either way, so a

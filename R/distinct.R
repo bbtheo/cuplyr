@@ -108,6 +108,13 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
                               n = min(zero_column_nrow(.data, "distinct"), 1L)))
   }
 
+  # F77: a call whose head resolves to a function of the user's rather than the
+  # native op (a local `abs()`) is dplyr's to run, whole.
+  shadowed <- shadow_screen_text(dots)
+  if (!is.null(shadowed)) {
+    return(distinct_fallback(.data, orig_dots, .keep_all, detail = shadowed))
+  }
+
   # Name dots: an unnamed bare column (`distinct(df, x)`) uses its own name;
   # an unnamed computed expression (`distinct(df, x + 1)`) uses the deparsed
   # expression as its name -- both silently, unlike mutate()'s
@@ -192,10 +199,10 @@ distinct_key_positions <- function(key_cols, names) {
 
 # Whole-call CPU fallback with the user's original dots.
 # @keywords internal
-distinct_fallback <- function(.data, dots, .keep_all) {
+distinct_fallback <- function(.data, dots, .keep_all, detail = NULL) {
   gpu_fallback("distinct", .data, function(tbl) {
     rlang::inject(dplyr::distinct(tbl, !!!dots, .keep_all = .keep_all))
-  })
+  }, detail = detail)
 }
 
 #' Unique rows of a GPU table

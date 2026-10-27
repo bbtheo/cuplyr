@@ -79,7 +79,15 @@ the literal \code{...} dot order (see \code{transmute()}'s own docs).
 
 \code{mutate()} parses its arguments through the same expression IR that
 \code{filter()} uses (see \code{R/ir.R}), lowered to \code{cudf::compute_column()} under
-the hood. The IR understands:
+the hood. A function is native only when its name resolves, in the
+expression's environment, to the base/dplyr/lubridate function itself: a
+function of your own with the same name (local, in an enclosing function or
+global) runs on the CPU, as dplyr would call it, and \code{pkg::fn} is the
+function of that package. The same holds for a function passed as a value
+(\code{across(x, f)}, a list of functions held in a variable, \code{!!f}) and for the
+functions and lambdas of the scoped verbs (\code{mutate_at()}, \code{summarise_all()},
+\code{filter_if()}, ...): one that is, or calls, a function of yours with a
+native function's name runs on the CPU. The IR understands:
 \itemize{
 \item Arithmetic: \code{+}, \code{-}, \code{*}, \code{/}, \code{^}, \code{\%\%}, \code{\%/\%}, unary \code{-},
 arbitrarily nested (\code{(x + y) * z - 1}), and scalar-on-either-side

@@ -704,6 +704,399 @@ impure_const_call_text <- function(dots, schema, grouped = TRUE) {
   NULL
 }
 
+# -----------------------------------------------------------------------------
+# F77: a function of the user's that shadows a native op's name.
+#
+# dplyr evaluates every dot in a data mask whose parent is the quosure's env, so
+# a call head is found by R's ordinary function lookup from there: a local, an
+# enclosing function's or a global `abs()` wins over `base::abs()`. The IR maps a
+# call by its NAME, so every expression-taking verb first screens the user's
+# dots (shadow_screen_text()): when the head of any call resolves to a function
+# that is none of the name's native canonical ones, the whole call runs in
+# dplyr, which calls the user's function. Nothing in the parser changes. `pkg::fn`
+# is resolved as written (`stats::lag` is not `dplyr::lag`). The canonical
+# functions are F75's (ir_canonical_fns()), minus the homonyms below.
+# -----------------------------------------------------------------------------
+
+# Functions of another package with the name of a native op but other
+# semantics: not the native op, though ir_canonical_fns() (purity) lists them.
+# lubridate's accessors that data.table exports too (`second()` is integer
+# seconds there, fractional in lubridate); `between()`/`first()`/`last()`
+# differ in data.table; `stats::lag()` is a time-series shift.
+ir_shadow_homonyms <- list(
+  stats = "lag",
+  data.table = c("between", "first", "last", "hour", "isoweek", "isoyear", "mday", "minute",
+                 "month", "quarter", "second", "wday", "week", "yday", "year")
+)
+ir_shadow_homonym_names <- unlist(ir_shadow_homonyms, use.names = FALSE)
+ir_shadow_homonym_set <- list2env(stats::setNames(as.list(rep(TRUE, length(ir_shadow_homonym_names))),
+                                                  ir_shadow_homonym_names))
+
+# The native canonical functions of `name`: ir_canonical_fns() minus homonyms.
+# Memoised with the list ir_canonical_fns() answered from (which that memo
+# keeps while no further namespace loads), so it is as fresh as that one.
+# @keywords internal
+ir_native_memo <- new.env(parent = emptyenv())
+ir_native_canonical_fns <- function(name) {
+  fns <- ir_canonical_fns(name)
+  if (is.null(ir_shadow_homonym_set[[name]])) {
+    return(fns)
+  }
+  hit <- ir_native_memo[[name]]
+  if (!is.null(hit) && identical(hit$from, fns)) {
+    return(hit$native)
+  }
+  native <- fns
+  for (pkg in names(ir_shadow_homonyms)) {
+    if (name %in% ir_shadow_homonyms[[pkg]] && isNamespaceLoaded(pkg)) {
+      other <- tryCatch(getExportedValue(pkg, name), error = function(e) NULL)
+      native <- native[!vapply(native, identical, logical(1), other)]
+    }
+  }
+  ir_native_memo[[name]] <- list(from = fns, native = native)
+  native
+}
+
+# TRUE iff the head `name` (of namespace `pkg`, or looked up from `env` when
+# `pkg` is NULL) is a function that is not one of the native canonical ones of
+# `name`. A name that is neither checked (in ir_pure_names()) nor has a
+# canonical function is not a shadow (a user's `myfun`: the existing paths send
+# a call reading a column to the CPU and fold a column-free one, F75 deciding
+# purity). A bare head that does not resolve is not a shadow (dplyr fails, or
+# the mask provides the name). A `pkg::fn` is resolved as R's `::` does (the
+# export only, `pkg:::fn` the namespace without its imports), and one that does
+# not resolve is a shadow: dplyr raises its own error for it.
+# @keywords internal
+ir_head_is_shadowed <- function(name, env, pkg = NULL, triple = FALSE) {
+  fn <- if (is.null(pkg)) {
+    get0(name, envir = env, mode = "function")
+  } else if (triple) {
+    tryCatch(get(name, envir = asNamespace(pkg), inherits = FALSE), error = function(e) NULL)
+  } else {
+    tryCatch(getExportedValue(pkg, name), error = function(e) NULL)
+  }
+  if (is.null(fn)) {
+    return(!is.null(pkg))
+  }
+  homonym <- !is.null(ir_shadow_homonym_set[[name]])
+  if (!homonym) {
+    # the common case: a function already known as a canonical one (no
+    # freshness check needed, the cached ones are real)
+    for (canon in ir_canonical_memo[[name]]$fns) {
+      if (identical(fn, canon)) {
+        return(FALSE)
+      }
+    }
+  }
+  canonical <- ir_canonical_fns(name)
+  if (length(canonical) == 0L) {
+    # no canonical function loaded: checked only if natively dispatched
+    return(name %in% ir_pure_names())
+  }
+  for (canon in if (homonym) ir_native_canonical_fns(name) else canonical) {
+    if (identical(fn, canon)) {
+      return(FALSE)
+    }
+  }
+  TRUE
+}
+
+# Is `name` checked at all: natively dispatched (ir_pure_names()) or the name
+# of a canonical function? Any other name is never a shadow.
+# @keywords internal
+ir_shadow_name_checked <- function(name) {
+  length(ir_canonical_fns(name)) > 0L || name %in% ir_pure_names()
+}
+
+# The state of one screen (one verb call): the first shadowed head (`name`) and
+# the head memo, keyed by name (and package) and dropped when the env changes.
+# @keywords internal
+ir_shadow_state <- function() {
+  st <- new.env(parent = emptyenv())
+  st$name <- NULL
+  st$env <- NULL
+  st$cache <- NULL
+  st
+}
+
+# Head lookup with the per-screen memo (`st`).
+# @keywords internal
+ir_shadow_check_head <- function(name, env, pkg, st, triple = FALSE) {
+  if (!identical(env, st$env)) {
+    st$env <- env
+    st$cache <- new.env(parent = emptyenv())
+  }
+  key <- if (is.null(pkg)) name else paste0(pkg, if (triple) ":::" else "::", name)
+  hit <- st$cache[[key]]
+  if (is.null(hit)) {
+    hit <- ir_head_is_shadowed(name, env, pkg, triple)
+    st$cache[[key]] <- hit
+  }
+  hit
+}
+
+ir_sym_colon2 <- as.name("::")
+ir_sym_colon3 <- as.name(":::")
+
+# `pkg` and `name` of a `pkg::name` / `pkg:::name` call (the head of a call, or
+# a function argument), or NULL.
+# @keywords internal
+ir_qualified_parts <- function(f) {
+  if (is.call(f) && length(f) == 3L && is.symbol(f[[3L]]) &&
+      (identical(f[[1L]], ir_sym_colon2) || identical(f[[1L]], ir_sym_colon3)) &&
+      (is.symbol(f[[2L]]) || is.character(f[[2L]]))) {
+    list(pkg = as.character(f[[2L]]), name = as.character(f[[3L]]),
+         triple = identical(f[[1L]], ir_sym_colon3))
+  }
+}
+
+# A function given as a value (the `.fns` of across(), the `fun` of
+# with_order()): a name or `pkg::name` is looked up like a call head. TRUE, with
+# `st$name` set, when it is shadowed.
+# @keywords internal
+ir_shadow_check_fn_value <- function(f, env, st) {
+  if (is.symbol(f)) {
+    if (ir_shadow_check_head(as.character(f), env, NULL, st)) {
+      st$name <- as.character(f)
+      return(TRUE)
+    }
+    return(FALSE)
+  }
+  q <- ir_qualified_parts(f)
+  if (!is.null(q) && ir_shadow_check_head(q$name, env, q$pkg, st, q$triple)) {
+    st$name <- paste0(q$pkg, if (q$triple) ":::" else "::", q$name)
+    return(TRUE)
+  }
+  FALSE
+}
+
+# Calls whose arguments are functions given by name (not calls): the plain walk
+# of the arguments never looks at them.
+ir_shadow_value_heads <- c("across", "if_any", "if_all", "with_order")
+
+# Walk `expr` (in `env`), setting `st$name` (the shadowed head) at the first
+# call whose head is shadowed. Skips syntax heads, pronoun calls and non-symbol
+# heads; looks through embedded quosures (own env), formula and function
+# literal bodies, and every argument. The `.fns` of across()/if_any()/if_all()
+# and the `fun` of with_order() written as a name are heads too.
+# @keywords internal
+ir_shadow_walk <- function(expr, env, st) {
+  if (!is.call(expr)) {
+    return(invisible())
+  }
+  # (.subset2(): rlang gives quosures slow `[[` and length() methods)
+  head <- .subset2(expr, 1L)
+  start <- 2L
+  if (is.symbol(head)) {
+    head_name <- as.character(head)
+    if (head_name == "~" && inherits(expr, "quosure")) {
+      # an embedded quosure: its own expression and env
+      if (!rlang::quo_is_missing(expr)) {
+        ir_shadow_walk(.subset2(expr, 2L), attr(expr, ".Environment"), st)
+      }
+      return(invisible())
+    }
+    if ((head_name == "$" || head_name == "[[") && length(expr) == 3L &&
+        (identical(expr[[2L]], quote(.data)) || identical(expr[[2L]], quote(.env)))) {
+      # a pronoun call: only a `[[` subscript can hold a call
+      start <- 3L
+    } else if (!(head_name %in% ir_transparent_heads) && ir_shadow_check_head(head_name, env, NULL, st)) {
+      st$name <- head_name
+      return(invisible())
+    } else if (head_name %in% ir_shadow_value_heads) {
+      ir_shadow_walk_value_args(expr, head_name, env, st)
+    }
+  } else if (is.call(head)) {
+    q <- ir_qualified_parts(head)
+    if (!is.null(q)) {
+      if (ir_shadow_check_head(q$name, env, q$pkg, st, q$triple)) {
+        st$name <- paste0(q$pkg, if (q$triple) ":::" else "::", q$name)
+        return(invisible())
+      }
+      if (q$name %in% ir_shadow_value_heads) {
+        ir_shadow_walk_value_args(expr, q$name, env, st)
+      }
+    } else {
+      # `obj$fn()`, a function literal call
+      ir_shadow_walk(head, env, st)
+    }
+  }
+  if (!is.null(st$name)) {
+    return(invisible())
+  }
+  # a `pkg::fn` that is not a head names a function: nothing to look up
+  if (length(expr) == 3L && (identical(head, ir_sym_colon2) || identical(head, ir_sym_colon3))) {
+    return(invisible())
+  }
+  for (i in seq_along(expr)[-seq_len(start - 1L)]) {
+    # (an empty argument, as in `x[, 1]`, is the missing arg: never assigned)
+    if (is.call(expr[[i]])) {
+      ir_shadow_walk(expr[[i]], env, st)
+      if (!is.null(st$name)) {
+        return(invisible())
+      }
+    }
+  }
+  invisible()
+}
+
+ir_with_order_proto <- function(order_by, fun, x, ...) NULL
+
+# The function-valued arguments of across()/if_any()/if_all() (`.fns`, alone or
+# in a list(); an embedded quosure keeps its own env) and with_order() (`fun`),
+# checked like call heads.
+# @keywords internal
+ir_shadow_walk_value_args <- function(expr, head_name, env, st) {
+  proto <- if (head_name == "across") across_proto else if (head_name == "with_order") ir_with_order_proto else if_any_all_proto
+  matched <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+  fns <- if (is.null(matched)) NULL else if (head_name == "with_order") matched$fun else matched$.fns
+  if (is.null(fns)) {
+    return(invisible())
+  }
+  if (inherits(fns, "quosure")) {
+    env <- rlang::quo_get_env(fns)
+    fns <- rlang::quo_get_expr(fns)
+  }
+  cands <- if (head_name != "with_order" && identical(call_head_name(fns), "list")) as.list(fns)[-1L] else list(fns)
+  for (f in cands) {
+    fenv <- env
+    if (inherits(f, "quosure")) {
+      fenv <- rlang::quo_get_env(f)
+      f <- rlang::quo_get_expr(f)
+    }
+    if (ir_shadow_check_fn_value(f, fenv, st)) {
+      return(invisible())
+    }
+  }
+  invisible()
+}
+
+# TRUE iff a call in `expr` (a formula right-hand side or a closure body,
+# evaluated in `env`) has a shadowed head.
+# @keywords internal
+ir_shadow_hit <- function(expr, env) {
+  st <- ir_shadow_state()
+  ir_shadow_walk(expr, env, st)
+  !is.null(st$name)
+}
+
+# Names the screen walks a dot for whatever they resolve to: a formula or a
+# qualified call can embed another env, and the others take functions as values.
+ir_shadow_walk_triggers <- c("~", "::", ":::", ir_shadow_value_heads)
+ir_shadow_trigger_set <- list2env(stats::setNames(as.list(rep(TRUE, length(ir_shadow_walk_triggers))),
+                                                  ir_shadow_walk_triggers))
+# the syntax heads that are never looked up (`~` walks)
+ir_shadow_skip_set <- list2env(list(`(` = TRUE, `{` = TRUE, `function` = TRUE, `if` = TRUE))
+
+# The detail for gpu_fallback() when a head of the dots `dots` (a list of
+# quosures, as the user wrote them) is shadowed by a function of the user's, or
+# NULL. Call it first in a verb, before anything is rewritten or parsed. Evaluates
+# nothing (but forces promises bound to head names, as dplyr's lookup does).
+#
+# Cost: this runs on every verb call. A dot is first screened by the names it
+# CALLS (a symbol head, found with two all.names() passes; a column or variable
+# is never looked up, as dplyr never evaluates a promise bound to one). Each
+# that is checked at all (ir_shadow_name_checked()) is looked up once from the
+# dot's env (memoised for the whole call) and only a dot
+# with a head that resolves to a shadowing function is walked, to see whether it
+# really is a call head (a head's name can also be a column). A dot with a
+# formula, a `pkg::` qualification, across(), if_any(), if_all() or with_order()
+# is always walked: it can embed another env or name a function as a value.
+# @param dots A list of quosures
+# @keywords internal
+shadow_screen_text <- function(dots) {
+  st <- NULL
+  ok <- NULL
+  ok_env <- NULL
+  for (dot in dots) {
+    # (a quosure is `~expr` with its env as an attribute; .subset2() because
+    # rlang gives quosures slow `[[` and length() methods. A missing one has
+    # the empty symbol for `expr`, which must not be assigned)
+    expr <- .subset2(dot, 2L)
+    if (!is.call(expr)) {
+      next
+    }
+    all <- all.names(expr)
+    values <- all.names(expr, functions = FALSE)
+    n_heads <- length(all) - length(values)
+    if (n_heads == 0L) {
+      next
+    }
+    # the names called: the root's head if it is the only one (all.names()
+    # lists a call's head first), else those that never occur as a value,
+    # unless a name occurs in both roles (then the counts tell)
+    heads <- if (n_heads == 1L && is.symbol(.subset2(expr, 1L))) {
+      all[[1L]]
+    } else {
+      only_called <- all[match(all, values, 0L) == 0L]
+      if (length(only_called) == n_heads) {
+        unique(only_called)
+      } else {
+        uniq <- unique(all)
+        uniq[tabulate(match(all, uniq), length(uniq)) > tabulate(match(values, uniq, 0L), length(uniq))]
+      }
+    }
+    env <- attr(dot, ".Environment")
+    if (!is.null(ok) && !identical(env, ok_env)) {
+      ok <- NULL
+    }
+    walk <- FALSE
+    for (nm in heads) {
+      if (!is.null(ir_shadow_trigger_set[[nm]])) {
+        walk <- TRUE
+        break
+      }
+      if (!is.null(ir_shadow_skip_set[[nm]]) || (!is.null(ok) && match(nm, ok, 0L) > 0L)) {
+        next
+      }
+      memo_fns <- ir_canonical_memo[[nm]]$fns
+      if (length(memo_fns) == 0L && !ir_shadow_name_checked(nm)) {
+        # never a shadow (ir_head_is_shadowed()), so never looked up. That
+        # also spares most names all.names() counts as heads only because they
+        # sit inside a call-valued head (`fn` in `obj$fn(x)`, `v` in
+        # `(function(v) v)(x)`); a checked name there still is (`c` in
+        # `fs[[c]](x)`), which can force a promise dplyr leaves alone
+        ok_env <- env
+        ok <- c(ok, nm)
+        next
+      }
+      fn <- get0(nm, envir = env, mode = "function")
+      if (!is.null(fn)) {
+        # the common case first: already known as a canonical function (no
+        # freshness check needed, the cached ones are real)
+        known <- FALSE
+        if (is.null(ir_shadow_homonym_set[[nm]])) {
+          for (canon in memo_fns) {
+            if (identical(fn, canon)) {
+              known <- TRUE
+              break
+            }
+          }
+        }
+        if (!known && ir_head_is_shadowed(nm, env)) {
+          walk <- TRUE
+          break
+        }
+      }
+      ok_env <- env
+      ok <- c(ok, nm)
+    }
+    if (!walk) {
+      next
+    }
+    if (is.null(st)) {
+      st <- ir_shadow_state()
+    }
+    ir_shadow_walk(expr, env, st)
+    if (!is.null(st$name)) {
+      one_line <- function(x) trimws(gsub("\\s+", " ", paste(x, collapse = " ")))
+      return(sprintf("`%s`: `%s` is a function of yours (or another package's) that dplyr calls, not the native one",
+                     substr(one_line(rlang::quo_text(dot)), 1L, 80L), st$name))
+    }
+  }
+  NULL
+}
+
 # Window-function names whose all-constant calls are folded in R (see
 # ir_parse_expr()).
 ir_foldable_window_fns <- c(

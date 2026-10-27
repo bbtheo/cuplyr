@@ -196,11 +196,13 @@ resolve_agg_name <- function(name, vars) {
 # @param schema The schema `wt` is evaluated against (the grouped table's)
 # @param for_mutate Logical, unused (kept for call-site clarity) -- both
 #   branches now build the identical `sum(<wt-expr>, na.rm = TRUE)` call
-# @return A language object: `quote(n())`, or `sum(<wt-expr>, na.rm = TRUE)`
+# @return A language object: `dplyr::n()`, or `base::sum(<wt-expr>, na.rm = TRUE)`
 # @keywords internal
 build_count_agg_call <- function(wt_quo, schema, for_mutate = FALSE) {
+  # (qualified, as dplyr's tally_n() builds them: a function of the caller's
+  # named `sum` or `n` is never what count() calls)
   if (rlang::quo_is_null(wt_quo)) {
-    return(quote(n()))
+    return(quote(dplyr::n()))
   }
   # The quosure itself, as dplyr's tally_n() splices it, so `wt` keeps the
   # caller's environment (`wt = y * k` with a local `k`, a call to a local
@@ -208,7 +210,7 @@ build_count_agg_call <- function(wt_quo, schema, for_mutate = FALSE) {
   # the summarise fast path. Any other name is the caller's variable, which a
   # symbol would look up in the wrong frame.
   expr <- rlang::quo_get_expr(wt_quo)
-  rlang::call2("sum", if (is.symbol(expr) && as.character(expr) %in% schema$names) expr else wt_quo,
+  rlang::call2(quote(base::sum), if (is.symbol(expr) && as.character(expr) %in% schema$names) expr else wt_quo,
                na.rm = TRUE)
 }
 
@@ -267,12 +269,16 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
   wt_quo <- rlang::enquo(wt)
   orig_groups <- x$groups
 
-  resolved <- resolve_grouping_dots(x, dots)
+  # F77: a grouping expression whose call head resolves to a function of the
+  # user's rather than the native op is dplyr's to run (`wt` is screened by the
+  # summarise() that sums it)
+  shadowed <- shadow_screen_text(dots)
+  resolved <- if (is.null(shadowed)) resolve_grouping_dots(x, dots)
   if (is.null(resolved)) {
     return(gpu_fallback("count", x, function(tbl) {
       rlang::inject(dplyr::count(tbl, !!!dots, wt = !!wt_quo, sort = sort,
                                  name = name, .drop = .drop))
-    }))
+    }, detail = shadowed))
   }
   working <- resolved$data
   dot_names <- resolved$names
@@ -438,12 +444,14 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
   wt_quo <- rlang::enquo(wt)
   orig_groups <- x$groups
 
-  resolved <- resolve_grouping_dots(x, dots)
+  # F77: as count()
+  shadowed <- shadow_screen_text(dots)
+  resolved <- if (is.null(shadowed)) resolve_grouping_dots(x, dots)
   if (is.null(resolved)) {
     return(gpu_fallback("add_count", x, function(tbl) {
       rlang::inject(dplyr::add_count(tbl, !!!dots, wt = !!wt_quo, sort = sort,
                                      name = name))
-    }))
+    }, detail = shadowed))
   }
   working <- resolved$data
   dot_names <- resolved$names

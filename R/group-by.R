@@ -167,10 +167,17 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   # only dplyr can resolve (pick() inside wrappers, across(), a named pick()
   # that makes a df-column, ...). Always reruns the ORIGINAL call, from the
   # original `.data`, so nothing half-applied leaks.
-  group_by_fallback <- function() {
+  group_by_fallback <- function(detail = NULL) {
     gpu_fallback("group_by", .data, function(tbl) {
       dplyr::group_by(tbl, !!!dots, .add = .add, .drop = .drop)
-    })
+    }, detail = detail)
+  }
+
+  # F77: a computed group whose call head resolves to a function of the user's
+  # rather than the native op (a local `abs()`) is dplyr's to run.
+  shadowed <- shadow_screen_text(dots)
+  if (!is.null(shadowed)) {
+    return(group_by_fallback(shadowed))
   }
 
   # Classify each dot like dplyr's group_by_prepare(): a variable reference

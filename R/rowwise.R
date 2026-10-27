@@ -613,10 +613,15 @@ rowwise_with_row_ids <- function(.data, helper) {
 # else is dplyr's error.
 # @keywords internal
 summarise_rowwise <- function(.data, dots, .groups, by_quo, caller_env) {
-  cpu <- function() {
+  cpu <- function(detail = NULL) {
     gpu_fallback("summarise", .data, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo))
-    })
+    }, detail = detail)
+  }
+  # F77: a function of the user's with a native op's name runs in dplyr
+  shadowed <- shadow_screen_text(dots)
+  if (!is.null(shadowed)) {
+    return(cpu(shadowed))
   }
   vars <- .subset2(.data, "groups")
   nms <- names(dots) %||% rep("", length(dots))

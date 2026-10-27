@@ -842,30 +842,63 @@ across_expr_native <- function(expr) {
 }
 
 # The registry name `value` is, or NULL. The IR lowers a call by its bare
-# name (it drops any `pkg::`), as the function dplyr itself sees under that
-# name, so `value` must be that function: `stats::lag` is not the IR's `lag`,
-# `dplyr::lag` is. A bare name must also resolve to `value` from `env`, so
-# the emitted `name(col)` means the same thing if an expression fallback
-# evaluates it.
+# name (it drops any `pkg::`), so `value` must be one of that name's native
+# canonical functions (F77's table, ir_native_canonical_fns()): `stats::lag`
+# is not the IR's `lag`, `dplyr::lag` is. Never an inheriting lookup from a
+# namespace: its chain reaches the global env, where a user's own `median`
+# would pass for stats'. A bare name must also resolve to `value` from `env`,
+# so the emitted `name(col)` means the same thing if an expression fallback
+# evaluates it. The name the value was written as (`mean`) is tried first. An
+# alias or a value with no name (a list held in a variable, a scoped verb's
+# function) is matched against every registry name, first by the binding of
+# that name where the value was defined (its own namespace, base for a
+# primitive; a non-inheriting lookup), which rejects nearly all of them in C.
+# A function exported under a name its own namespace does not bind is missed
+# there: it is then not known, which costs speed only.
 # @keywords internal
 across_known_fn_name <- function(value, env, fn_expr = NULL) {
+  # a canonical function is base's or a namespace's: a closure of the user's
+  # (its top env is the global env) is none
+  home <- baseenv()
+  if (!is.primitive(value)) {
+    home <- topenv(environment(value))
+    if (!identical(home, baseenv()) && !isNamespace(home)) {
+      return(NULL)
+    }
+  }
   qualified <- is.call(fn_expr) && length(fn_expr) == 3 &&
     identical(fn_expr[[1]], as.name("::")) && is.symbol(fn_expr[[3]])
   candidates <- across_registry_names()$candidates
   if (qualified) {
-    candidates <- set_intersect(as.character(fn_expr[[3]]), candidates)
+    nm <- as.character(fn_expr[[3]])
+    return(if (nm %in% candidates && across_is_native_fn(nm, value)) nm)
   }
-  dplyr_ns <- asNamespace("dplyr")
-  for (nm in candidates) {
-    canonical <- get0(nm, envir = dplyr_ns, mode = "function")
-    if (is.null(canonical) || !identical(canonical, value)) {
-      next
+  if (is.symbol(fn_expr)) {
+    nm <- as.character(fn_expr)
+    if (nm %in% candidates && across_is_native_fn(nm, value) &&
+        identical(get0(nm, envir = env, mode = "function"), value)) {
+      return(nm)
     }
-    if (qualified || identical(get0(nm, envir = env, mode = "function"), value)) {
+  }
+  for (nm in candidates) {
+    if (identical(get0(nm, envir = home, mode = "function", inherits = FALSE), value) &&
+        across_is_native_fn(nm, value) &&
+        identical(get0(nm, envir = env, mode = "function"), value)) {
       return(nm)
     }
   }
   NULL
+}
+
+# Is `value` one of the native canonical functions of `nm`?
+# @keywords internal
+across_is_native_fn <- function(nm, value) {
+  for (canon in ir_native_canonical_fns(nm)) {
+    if (identical(canon, value)) {
+      return(TRUE)
+    }
+  }
+  FALSE
 }
 
 # TRUE iff an inlined body would read a data column or the pronouns where
@@ -933,6 +966,11 @@ across_value_spec <- function(value, fn_expr, env, scope, extra_args) {
     if (across_free_vars_hit_data(set_diff(all.vars(rhs), c(".x", ".")), scope)) {
       return(NULL)
     }
+    # (a head in the value's own environment can be a function of the user's
+    # that shadows a native op: dplyr calls the value, so that one wins)
+    if (ir_shadow_hit(rhs, environment(value))) {
+      return(NULL)
+    }
     return(across_native_spec(make_fn_spec(NULL, across_formula_build(rhs), env = environment(value))))
   }
   if (!is.function(value)) {
@@ -962,6 +1000,9 @@ across_value_spec <- function(value, fn_expr, env, scope, extra_args) {
   }
   formal <- names(fmls)[1]
   if (across_free_vars_hit_data(set_diff(all.vars(body_expr), formal), scope)) {
+    return(NULL)
+  }
+  if (ir_shadow_hit(body_expr, environment(value))) {
     return(NULL)
   }
   across_native_spec(make_fn_spec(NULL, across_lambda_build(formal, body_expr), env = environment(value)))

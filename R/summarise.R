@@ -367,6 +367,18 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
     }))
   }
 
+  # F77: a call whose head resolves to a function of the user's rather than the
+  # native op (a local `mean()`) is dplyr's to run, whole, before anything is
+  # rewritten or parsed. (A rowwise table screens in summarise_rowwise(), and a
+  # native reframe() in reframe.tbl_gpu(); its rewritten dots, which come here with
+  # `wide` set, are not the user's and are skipped.)
+  shadowed <- if (!isTRUE(reframe_state$wide)) shadow_screen_text(dots)
+  if (!is.null(shadowed)) {
+    return(gpu_fallback("summarise", .data, function(tbl) {
+      rlang::inject(dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo))
+    }, detail = shadowed))
+  }
+
   # F75: dplyr evaluates every dot once per group, in group order, and the
   # native path folds a column-free call once. That is the same only for a
   # deterministic call without side effects, which is decided from the syntax
@@ -1107,6 +1119,13 @@ summarise_is_bare_n <- function(quo) {
     head <- expr[[1L]]
     if (is.symbol(head)) {
       return(identical(head, summarise_n_sym))
+    }
+    # `pkg::n()`, as count() builds it (strip_ns_prefix() only strips a plain
+    # identifier: any other package name takes the text test)
+    if (length(head) == 3L && identical(head[[1L]], ir_sym_colon2) && is.symbol(head[[2L]]) &&
+        identical(head[[3L]], summarise_n_sym) &&
+        grepl("^[a-zA-Z_][a-zA-Z0-9_.]*$", as.character(head[[2L]]))) {
+      return(TRUE)
     }
   }
   grepl("^n\\(\\)$", strip_ns_prefix(rlang::quo_text(quo)))
