@@ -348,11 +348,11 @@ ast_join <- function(type, left, right, by, keep = FALSE,
 #' none of them need to walk the IR tree themselves.
 #'
 #' @param ir An IR node (the parsed predicate expression)
-#' @param schema List with `names`/`types`, kept for signature parity with
-#'   [make_mutate_expr()] (not currently read: `ir_cols()`/`ir_cost()` don't
-#'   need a schema)
+#' @param schema List with `names`/`types` the IR is bound against; read only
+#'   by [ir_has_checked_int()] for `checked_int`
 #' @return A predicate list structure: `list(ir, cols, estimated_cost,
-#'   is_deterministic, na_sensitive)`
+#'   is_deterministic, na_sensitive, checked_int)`; `checked_int` (F70) says
+#'   the predicate holds an F42 checked integer node (read it with `isTRUE()`)
 #' @keywords internal
 make_predicate <- function(ir, schema) {
   list(
@@ -360,7 +360,8 @@ make_predicate <- function(ir, schema) {
     cols = ir_cols(ir),
     estimated_cost = ir_cost(ir),
     is_deterministic = TRUE,
-    na_sensitive = TRUE
+    na_sensitive = TRUE,
+    checked_int = ir_has_checked_int(ir, schema)
   )
 }
 
@@ -382,14 +383,16 @@ make_predicate <- function(ir, schema) {
 #'   via [ir_infer_type()] (which delegates to [infer_mutate_output_type()]
 #'   unchanged for arithmetic ops, per section 1.3)
 #' @return An expression list structure: `list(output_col, ir, input_cols,
-#'   output_type)`
+#'   output_type, checked_int)`; `checked_int` (F70) says the expression holds
+#'   an F42 checked integer node (read it with `isTRUE()`)
 #' @keywords internal
 make_mutate_expr <- function(output_col, ir, schema) {
   list(
     output_col = output_col,
     ir = ir,
     input_cols = ir_cols(ir),
-    output_type = ir_infer_type_memo(ir, schema)
+    output_type = ir_infer_type_memo(ir, schema),
+    checked_int = ir_has_checked_int(ir, schema)
   )
 }
 

@@ -23,7 +23,9 @@ test_that("an optimized lazy plan keeps a filter above a mutate with an integer 
     expect_false("filter" %in% chain[-1L], info = agg)
   }
   # a non-flagging aggregate and a plain mutate still let the filter through
-  for (e in c("mean(c(a, b))", "a + b")) {
+  # (`d + 1` is a double: an integer `a + b` is F42-checked and F70 keeps the
+  # filter above it)
+  for (e in c("mean(c(a, b))", "d + 1")) {
     q <- dplyr::filter(dplyr::mutate(rw, s = !!rlang::parse_expr(e)), a < 5L)
     chain <- f49r4_chain(optimize_ast(q$lazy_ops))
     expect_false(identical(chain[[1L]], "filter"), info = e)

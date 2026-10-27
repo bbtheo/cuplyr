@@ -738,6 +738,17 @@ ir_has_rw_flag_agg <- function(ir) {
   any(vapply(ir, ir_has_rw_flag_agg, logical(1)))
 }
 
+# F70: TRUE iff a mutate node holds an F42 checked integer expression
+# (`ir_has_checked_int()`, cached as `checked_int` by make_mutate_expr()).
+# dplyr evaluates it on every row its verb receives and warns on overflow, so
+# no filter may be moved below it and it may not be pruned as dead.
+mutate_has_checked_int <- function(node) {
+  any(vapply(.subset2(node, "expressions"), function(e) isTRUE(e$checked_int), logical(1)))
+}
+
+# F70: TRUE iff a predicate holds an F42 checked integer expression.
+pred_checked_int <- function(pred) isTRUE(pred$checked_int)
+
 #' Try to fuse two consecutive mutate nodes
 #'
 #' @param lower Lower (earlier) mutate node
@@ -822,6 +833,12 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
         # dplyr raises regardless of use.
         if (identical(expr$ir$kind, "vec")) {
           keep[i] <- TRUE
+        }
+        # Likewise a checked integer expression (F70): its overflow warning
+        # does not depend on the column being used. Its inputs stay required.
+        if (isTRUE(expr$checked_int)) {
+          keep[i] <- TRUE
+          required <- opt_union(required, expr$input_cols)
         }
         if (expr$output_col %in% required) {
           keep[i] <- TRUE
@@ -1130,6 +1147,10 @@ push_down_filters <- function(ast) {
     if (any(vapply(input$expressions, function(e) ir_has_rw_flag_agg(e$ir), logical(1)))) {
       return(ast)
     }
+    # So must a checked integer expression's overflow warning (F70).
+    if (mutate_has_checked_int(input)) {
+      return(ast)
+    }
     mutate_outputs <- mutate_output_cols(.subset2(input, "expressions"))
 
     # Do not push if filter references any mutate outputs (including replacements)
@@ -1167,6 +1188,14 @@ push_down_filters <- function(ast) {
       # filter(semi_join(x, y), pred) and semi_join(filter(x, pred), y)
       # select the identical row set. Right is NEVER a pushdown target --
       # it isn't part of the output at all.
+      #
+      # A checked integer predicate (F70) stays above: below the join it would
+      # also be evaluated on the x rows the join drops. dplyr evaluates every
+      # predicate of one filter() on the same rows, so its siblings stay with it
+      # (pushing them alone would hide rows from the checked predicate).
+      if (any(vapply(ast$predicates, pred_checked_int, logical(1)))) {
+        return(ast)
+      }
       input$left <- ast_filter(input$left, ast$predicates)
       return(input)
     }
@@ -1230,14 +1259,28 @@ push_down_filters <- function(ast) {
       # right-only predicate can always push to the right side without
       # changing the result, exactly like an inner join's own left/right
       # pushdown rule.
-      if (side == "left" && input$join_type %in% c("inner", "left", "cross")) {
+      #
+      # F70: a checked integer predicate is evaluated on every row of the input
+      # it moves into, so it may only go where every row reaches the join
+      # output: the left input of a left join, the right input of a right join.
+      checked <- pred_checked_int(pred)
+      if (side == "left" && input$join_type %in% c("inner", "left", "cross") &&
+          (!checked || input$join_type == "left")) {
         left_preds <- c(left_preds, list(join_source_predicate(pred, info, "left")))
       } else if (side == "right" && input$join_type %in% c("inner", "right", "cross") &&
-                 right_push_ok) {
+                 right_push_ok && (!checked || input$join_type == "right")) {
         right_preds <- c(right_preds, list(join_source_predicate(pred, info, "right")))
       } else {
         stay_preds <- c(stay_preds, list(pred))
       }
+    }
+
+    # F70: all predicates of one filter node see the same rows in dplyr. If a
+    # checked predicate stays above the join, pushing a sibling would hide rows
+    # from it, so the whole node stays (a checked predicate that moves is
+    # evaluated on every row that reaches the output, siblings may go as usual).
+    if (any(vapply(stay_preds, pred_checked_int, logical(1)))) {
+      return(ast)
     }
 
     if (length(left_preds) > 0) {
@@ -1287,13 +1330,19 @@ reorder_filters <- function(ast) {
     return(ast)
   }
 
-  # Collect consecutive filter chain
+  # Collect consecutive filter chain. A node holding a checked integer
+  # predicate ends the group (F70): the later filter() call sees only the rows
+  # the filters below it keep, so it may absorb the filters above it (it is
+  # then the bottom of the merged group and sees the same rows) but not those
+  # below.
   filters <- list()
   current <- ast
 
   while (!is.null(current) && current$type == "filter") {
     filters <- c(filters, list(current$predicates))
+    checked_here <- any(vapply(current$predicates, pred_checked_int, logical(1)))
     current <- current$input
+    if (checked_here) break
   }
 
   if (length(filters) <= 1) {

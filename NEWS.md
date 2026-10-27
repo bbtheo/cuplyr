@@ -1,5 +1,24 @@
 # cuplyr (development version)
 
+## Lazy plans keep dplyr's integer-overflow warning (F70)
+
+* In lazy mode the optimizer no longer changes which rows or columns an integer
+  `+`, `-` or `*` (both operands integer or logical) is computed on, so the
+  warning "NAs produced by integer overflow" now appears in the same pipelines
+  as in eager mode. Before, a lazy plan could lose the warning (a filter moved
+  below the `mutate()` holding the arithmetic, or the column was dropped before
+  it was computed) or give one dplyr does not (a `filter()` merged with the one
+  before it, or a predicate moved into a join input that holds rows the join
+  drops). Values were always the same. Dead-column pruning keeps such an
+  expression, filter pushdown does not move a filter below a `mutate()` holding
+  one, a filter holding one is not merged with the filters below it, and such a
+  predicate moves into a join only into the left input of a `left_join()` or the
+  right input of a `right_join()`. When such a predicate cannot move, the whole
+  `filter()` call stays above the join (dplyr computes all of a call's
+  predicates on the same rows), including its other predicates. A node with a
+  null literal operand (`a + NA`) never overflows and does not count. Plans for
+  pipelines without integer arithmetic are unchanged.
+
 ## Docs: query-optimization vignette matches the optimizer (F69)
 
 * `vignette("query-optimization", package = "cuplyr")` is rewritten against the

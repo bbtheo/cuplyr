@@ -2860,6 +2860,144 @@ ir_cost <- function(ir) {
   )
 }
 
+#' Does an IR subtree hold an F42 checked integer node?
+#'
+#' A checked node is a binary `+`, `-` or `*` whose operands are all
+#' INT32/BOOL8 (a bare untyped NA literal adopts its sibling's type): the
+#' rule of `checked_int_kind()` kind 1 in `src/expr_eval.hpp`. Such a node can
+#' warn "NAs produced by integer overflow", and dplyr's warning depends on the
+#' rows its verb receives, so the optimizer must not change them (F70).
+#' `%/%` and `%%` never warn and are not checked, nor is a node with a null
+#' literal operand (`a + NA`; its other operand is still walked). Cached by
+#' `make_predicate()` and `make_mutate_expr()`.
+#'
+#' One walk visits each node once and stops at the first checked node. Column,
+#' literal and vector operands are typed off the schema/IR (both first, so a
+#' double leaf settles a node without typing a call operand). A call operand is
+#' typed bottom-up as the walk descends into it (`ir_call_type()`, the step
+#' [ir_infer_type()] takes per node), so a chain of `+` nodes is typed once,
+#' not once per level. A type that cannot be inferred counts as checked.
+#'
+#' @param ir An IR node (or `NULL`)
+#' @param schema List with `names`/`types` the IR is bound against
+#' @return A single logical
+#' @keywords internal
+ir_has_checked_int <- function(ir, schema) {
+  if (is.null(ir) || !identical(.subset2(ir, "kind"), "call")) {
+    return(FALSE)
+  }
+  found <- FALSE
+  # Visit call node `node` and everything below it; when `typed`, also return
+  # its type (as ir_infer_type() would, errors included). Returns early once
+  # `found` is set.
+  walk <- function(node, typed) {
+    args <- .subset2(node, "args")
+    n <- length(args)
+    types <- if (typed) character(n)
+    seen <- logical(n)
+    isolated <- logical(n)
+    # A node with a null literal operand is NA on every row and never reports
+    # an overflow (checked_has_null_literal() in src/expr_eval.hpp); its other
+    # operand is still evaluated, so the walk goes on below it.
+    if (n == 2L && match(.subset2(node, "op"), c("+", "-", "*"), 0L) > 0L &&
+          !ir_lit_is_null(.subset2(args, 1L)) && !ir_lit_is_null(.subset2(args, 2L))) {
+      # Is every operand INT32/BOOL8? NA: the call operands decide.
+      checked <- NA
+      known <- 0L
+      for (i in 1:2) {
+        a <- .subset2(args, i)
+        kind <- .subset2(a, "kind")
+        if (kind == "call") next
+        if (kind == "col") {
+          idx <- match(.subset2(a, "name"), schema$names)
+          if (is.na(idx)) {
+            checked <- TRUE
+            break
+          }
+          type <- schema$types[idx]
+        } else {
+          type <- .subset2(a, "type")
+          # a bare untyped NA literal adopts its sibling's type
+          if (is.null(type)) next
+        }
+        known <- known + 1L
+        if (match(type, c("INT32", "BOOL8"), 0L) == 0L) {
+          checked <- FALSE
+          break
+        }
+      }
+      if (is.na(checked)) {
+        for (i in 1:2) {
+          a <- .subset2(args, i)
+          if (.subset2(a, "kind") != "call") next
+          # Inside a typed walk an error fails this node's own type as well, so
+          # it is left to the caught walk above, which counts it as checked.
+          type <- if (typed) {
+            walk(a, TRUE)
+          } else {
+            tryCatch(walk(a, TRUE), error = function(e) NA_character_)
+          }
+          if (found) return(NULL)
+          seen[[i]] <- TRUE
+          if (typed) types[[i]] <- ir_one_type(type)
+          if (is.na(type)) {
+            checked <- TRUE
+            break
+          }
+          known <- known + 1L
+          if (match(type, c("INT32", "BOOL8"), 0L) == 0L) {
+            checked <- FALSE
+            break
+          }
+        }
+        if (is.na(checked)) checked <- known > 0L
+      }
+      if (checked) {
+        found <<- TRUE
+        return(NULL)
+      }
+    }
+    for (i in seq_len(n)) {
+      if (seen[[i]]) next
+      a <- .subset2(args, i)
+      if (.subset2(a, "kind") == "call") {
+        type <- walk(a, typed)
+        if (found) return(NULL)
+      } else if (typed) {
+        type <- ir_infer_type(a, schema)
+        isolated[[i]] <- identical(.subset2(a, "kind"), "lit") && ir_is_untyped_na(a)
+      }
+      if (typed) types[[i]] <- ir_one_type(type)
+    }
+    if (!typed) return(NULL)
+    entry <- ir_call_registry[[.subset2(node, "op")]]
+    if (is.null(entry)) {
+      stop("Unknown IR op: '", .subset2(node, "op"), "'", call. = FALSE)
+    }
+    ir_call_type(node, entry, types, isolated)
+  }
+  walk(ir, FALSE)
+  found
+}
+
+# A single type string, else an error (ir_infer_type() raises one for it too).
+ir_one_type <- function(type) {
+  if (!is.character(type) || length(type) != 1L) {
+    stop("An IR node type must be a single string.", call. = FALSE)
+  }
+  type
+}
+
+# Mirrors checked_lit_is_null() in src/expr_eval.hpp.
+ir_lit_is_null <- function(a) {
+  if (!identical(.subset2(a, "kind"), "lit")) {
+    return(FALSE)
+  }
+  value <- .subset2(a, "value")
+  isTRUE(.subset2(a, "na")) || is.null(value) ||
+    ((is.numeric(value) || is.logical(value)) && length(value) == 1L && is.na(value))
+}
+
 #' Is an IR subtree constant (no column references)?
 #'
 #' @param ir An IR node
@@ -3328,17 +3466,6 @@ ir_infer_type <- function(ir, schema) {
   args <- .subset2(ir, "args")
   n <- length(args)
   arg_types <- character(n)
-  # A bare, untyped NA literal argument (kind="lit", na=TRUE, type=NULL) is
-  # a type no-op in R's arithmetic: `1L + NA` is integer, not double (NA is
-  # coerced to the OTHER operand's type, it never forces a promotion). Since
-  # each arg's type is inferred independently, an isolated NA arg
-  # would otherwise surface as the "in isolation" BOOL8 default from the
-  # branch above and incorrectly feed into infer_mutate_output_type()'s
-  # promotion union. Substitute it with a sibling arg's type first (mirrors
-  # src/expr_eval.hpp's resolve_static_type(), which does the same
-  # adoption when building the actual AST) -- T6 finding: without this,
-  # `mutate(y = int_col + NA)` came back FLOAT64 instead of matching
-  # dplyr's INT32.
   is_isolated_na <- logical(n)
   for (i in seq_len(n)) {
     a <- .subset2(args, i)
@@ -3360,9 +3487,34 @@ ir_infer_type <- function(ir, schema) {
       vapply(args, ir_infer_type, character(1), schema = schema)
     }
     arg_types[[i]] <- t
-    is_isolated_na[[i]] <- identical(a_kind, "lit") && isTRUE(.subset2(a, "na")) &&
-      is.null(.subset2(a, "type"))
+    is_isolated_na[[i]] <- identical(a_kind, "lit") && ir_is_untyped_na(a)
   }
+  ir_call_type(ir, entry, arg_types, is_isolated_na)
+}
+
+# A bare, untyped NA literal (its kind already known to be "lit").
+ir_is_untyped_na <- function(a) {
+  isTRUE(.subset2(a, "na")) && is.null(.subset2(a, "type"))
+}
+
+# The type of call node `ir` (registry entry `entry`) given the inferred types
+# of its arguments, in order, and which arguments are bare untyped NA literals:
+# the step ir_infer_type() takes once its arguments are typed, shared with
+# ir_has_checked_int(), which types each subtree once.
+ir_call_type <- function(ir, entry, arg_types, is_isolated_na) {
+  args <- .subset2(ir, "args")
+  op <- .subset2(ir, "op")
+  # A bare, untyped NA literal argument (kind="lit", na=TRUE, type=NULL) is
+  # a type no-op in R's arithmetic: `1L + NA` is integer, not double (NA is
+  # coerced to the OTHER operand's type, it never forces a promotion). Since
+  # each arg's type is inferred independently, an isolated NA arg
+  # would otherwise surface as the "in isolation" BOOL8 default from the
+  # branch above and incorrectly feed into infer_mutate_output_type()'s
+  # promotion union. Substitute it with a sibling arg's type first (mirrors
+  # src/expr_eval.hpp's resolve_static_type(), which does the same
+  # adoption when building the actual AST) -- T6 finding: without this,
+  # `mutate(y = int_col + NA)` came back FLOAT64 instead of matching
+  # dplyr's INT32.
   if (!is.null(nms <- names(args))) {
     names(arg_types) <- nms
   }

@@ -560,6 +560,13 @@ The optimizer transforms the AST before execution. Pass order matters:
 3. **Dead Column Pruning** (`prune_dead_columns`): Removes unused mutate outputs
    - Walks root to leaves tracking required columns
    - Empty mutate nodes are eliminated
+   - F70: a `checked_int` expression is kept even when dead, and its input columns
+     stay required (next to the vector-literal rule). `checked_int` is the flag
+     `ir_has_checked_int()` caches on predicate and mutate-expression records: a
+     binary `+ - *` over INT32/BOOL8 operands, without a null-literal operand
+     (C++ never reports overflow there); read it with `isTRUE()`. The detector
+     is one walk that types each call operand bottom-up with `ir_call_type()`
+     (the per-node step of `ir_infer_type()`), so it stays linear in chain length
    - Join pruning (here and in `push_down_projections`) shares
      `join_side_requirements()`: pruning must not change a required column's
      output name, so the collision partner of a suffixed (`v.x`) column is kept
@@ -567,6 +574,15 @@ The optimizer transforms the AST before execution. Pass order matters:
 
 4. **Filter Pushdown** (`push_down_filters`): Moves filters closer to data sources
    - Pushes across mutate when predicates don't depend on outputs
+   - F70: not below a mutate holding a `checked_int` expression (vector-literal
+     and F49 rowwise-flag guards sit next to it)
+   - F70: a `checked_int` predicate goes into a join input only for the left input of a
+     left join or the right input of a right join (every such row reaches the output);
+     never inner/cross/semi/anti
+   - F70: all predicates of one filter node see the same rows in dplyr, so if a
+     `checked_int` predicate stays above a join the whole node stays (nothing is
+     pushed, semi/anti included); a checked predicate that does move takes its
+     siblings by the usual rules
    - Join pushdown rules:
      - Inner join: left-only predicates -> left, right-only -> right
      - Left join: only left-only predicates pushed
@@ -588,6 +604,9 @@ The optimizer transforms the AST before execution. Pass order matters:
 5. **Filter Reordering** (`reorder_filters`): Executes cheaper filters first
    - Collects consecutive filter chains
    - Sorts by `estimated_cost` field
+   - F70: the chain collected top-down ends at (and includes) the first node with a
+     `checked_int` predicate: it absorbs filters above, never those below (a later
+     filter() call sees only the earlier calls' rows)
 
 There is no separate filter-fusion pass: `lower_filter()` always folds every
 predicate in a filter node together with `&` into one IR expression and

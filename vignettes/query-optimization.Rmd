@@ -208,7 +208,7 @@ lower |>
 
 The pass walks the plan from the top down, tracking the columns the nodes above
 still need, and drops each `mutate` expression whose result is not among them
-(with the two exceptions below). Here the `mutate` node keeps one of its three
+(with the three exceptions below). Here the `mutate` node keeps one of its three
 expressions, because the `select` keeps only `mpg` and `a`:
 
 ```{r dead-column}
@@ -229,7 +229,7 @@ tbl_gpu(mtcars, lazy = TRUE) |>
   optimized()
 ```
 
-There are two exceptions. First, an earlier expression that writes a column name
+There are three exceptions. First, an earlier expression that writes a column name
 a later expression overwrites is kept while the name is still needed, even if
 its value is overwritten. In the next plan the fused node holds both:
 
@@ -248,6 +248,24 @@ Here `v` is unused, yet the node keeps both expressions:
 ```{r dead-vector-literal}
 tbl_gpu(data.frame(a = 1:4, b = 1), lazy = TRUE) |>
   mutate(v = c(10, 20, 30, 40), w = a + 1) |>
+  select(a, w) |>
+  optimized()
+```
+
+Third, an expression with checked integer arithmetic is kept even when nothing
+uses it. That is a `+`, `-` or `*` whose two operands are both integer or
+logical, such as `a + b` on two integer columns. Such an expression gives `NA`
+and the warning "NAs produced by integer overflow" when a result leaves the
+integer range, and dplyr computes it whether or not a later verb uses the
+column, and the columns it reads stay required. An operation with a missing
+literal operand (`a + NA`) is `NA` on every row and never warns, so it is not
+checked, though an operand below it can be (`(a + b) - NA`). Here `y` is
+unused, yet the node keeps both expressions (`%/%` and `%%` never warn, so they
+are not checked):
+
+```{r dead-checked-int}
+tbl_gpu(data.frame(a = 1:4, b = 4:1, x = 1), lazy = TRUE) |>
+  mutate(y = a + b, w = x * 2) |>
   select(a, w) |>
   optimized()
 ```
@@ -273,9 +291,12 @@ node sees only the rows the filter keeps. The sections below say when.
 A filter directly on a `mutate` node moves below it, unless:
 
 - one of its predicates reads a column the mutate creates or overwrites,
-- the mutate holds a vector literal, such as `v = c(10, 20, 30, 40)`, or
+- the mutate holds a vector literal, such as `v = c(10, 20, 30, 40)`,
 - the mutate holds a rowwise integer `sum()`, `min()` or `max()`, or a rowwise
-  double `min()` or `max()`.
+  double `min()` or `max()`, or
+- the mutate holds checked integer arithmetic (see "Dead-Column Pruning"),
+  because dplyr computes it on every row and warns about an overflow in a row
+  the filter would drop.
 
 `mpg` exists before the mutate, so this filter moves:
 
@@ -292,6 +313,16 @@ tbl_gpu(mtcars, lazy = TRUE) |>
 tbl_gpu(mtcars, lazy = TRUE) |>
   mutate(power_ratio = hp / wt) |>
   filter(power_ratio > 50) |>
+  explain()
+```
+
+The filter here reads only `keep`, yet it stays above the mutate, because
+`a + b` is checked integer arithmetic:
+
+```{r pushdown-checked-int}
+tbl_gpu(data.frame(a = 1:4, b = 4:1, keep = c(TRUE, FALSE, TRUE, TRUE)), lazy = TRUE) |>
+  mutate(y = a + b) |>
+  filter(keep) |>
   explain()
 ```
 
@@ -375,8 +406,12 @@ y <- tbl_gpu(data.frame(k = c(1, 2, 2, 4), v = c(10, 20, 30, 40)), lazy = TRUE)
 ```
 
 - `semi_join()` and `anti_join()`: the whole filter moves into the left input.
-  (The `select` on the right input is projection pruning, which keeps only the
-  join key there.)
+  If one of its predicates has checked integer arithmetic (see "Dead-Column
+  Pruning"), the whole filter stays above the join instead: dplyr computes all
+  the predicates of one `filter()` call on the same rows, the rows the join
+  keeps, and a predicate moved into the left input would also be computed on
+  the rows the join drops. (The `select` on the right input is projection
+  pruning, which keeps only the join key there.)
 
 ```{r join-semi}
 x |> semi_join(y, by = "k") |> filter(a > 10) |> optimized()
@@ -423,6 +458,25 @@ x |> inner_join(y_k2, join_by(k >= k2)) |> filter(a > 10) |> optimized()
   two sides have different types (such as integer and double) also stays above
   the join.
 
+- A predicate with checked integer arithmetic moves only into the left input of
+  a left join or the right input of a right join, where every row reaches the
+  join's output. In an inner join it would also be computed on rows the join
+  drops, and dplyr never computes it on those. dplyr computes all the
+  predicates of one `filter()` call on the same rows, so when a checked
+  predicate stays above the join, the whole `filter` node stays with it and no
+  other predicate of that call moves. Here `k + 1L > 2L` stays, and `a > 10`
+  stays with it:
+
+```{r join-checked-int}
+x_i <- tbl_gpu(data.frame(k = 1:4, a = c(5, 15, 25, 35)), lazy = TRUE)
+y_i <- tbl_gpu(data.frame(k = c(1L, 2L, 2L, 4L), v = c(10, 20, 30, 40)), lazy = TRUE)
+
+x_i |>
+  inner_join(y_i, by = "k", relationship = "many-to-many") |>
+  filter(a > 10, k + 1L > 2L) |>
+  optimized()
+```
+
 ```{r join-m2m}
 x |>
   inner_join(y, by = "k", relationship = "many-to-many") |>
@@ -465,7 +519,9 @@ x |>
 For the other joins:
 
 - `cross_join()`: a predicate that reads only left columns moves into the left
-  input, and one that reads only right columns into the right input.
+  input, and one that reads only right columns into the right input. A
+  predicate with checked integer arithmetic does not move, and keeps the rest of
+  its `filter()` call above the join.
 
 ```{r join-cross}
 x |>
@@ -486,9 +542,9 @@ x |>
 ## Pass 5: Filter Reordering
 
 When a `filter` node sits directly on another `filter` node, the pass merges
-the chain of consecutive `filter` nodes into one node (with one exception on
-rowwise tables, at the end of this section). Two `filter()` calls become one
-node with two predicates:
+the chain of consecutive `filter` nodes into one node (with two exceptions, for
+rowwise tables and for checked integer arithmetic, at the end of this
+section). Two `filter()` calls become one node with two predicates:
 
 ```{r filter-reorder}
 d <- data.frame(x = c(1, 5, 20, 30), y = c(0, 1, 2, 3), z = c(5, 11, 12, 1))
@@ -527,10 +583,25 @@ tbl_gpu(mtcars, lazy = TRUE) |>
   explain()
 ```
 
-The exception: on a rowwise table, a predicate that holds one of the rowwise
-aggregates named under "Across mutate" limits the merge. The filter nodes from
-the top of the chain down to the lowest one holding such a predicate stay as
-they are, and only the filter nodes below it are merged.
+There are two exceptions. First, on a rowwise table, a predicate that holds one
+of the rowwise aggregates named under "Across mutate" limits the merge. The
+filter nodes from the top of the chain down to the lowest one holding such a
+predicate stay as they are, and only the filter nodes below it are merged.
+
+Second, a predicate with checked integer arithmetic (see "Dead-Column Pruning")
+also limits the merge, in a different way. A later `filter()` call sees only the
+rows the earlier ones keep, and dplyr warns about an overflow only in those rows,
+so the node holding the predicate is not merged with the filter nodes below it.
+It does take in the filter nodes above it, since the lowest node of a chain sees
+the same rows merged or not. So `filter(a < 100L) |> filter(a + b > 0L)` stays
+two nodes:
+
+```{r filter-reorder-checked-int}
+tbl_gpu(data.frame(a = 1:4, b = 4:1), lazy = TRUE) |>
+  filter(a < 100L) |>
+  filter(a + b > 0L) |>
+  explain()
+```
 
 ### One filter node, one expression
 
