@@ -328,6 +328,382 @@ expr_has_column_ref_walk <- function(expr, schema) {
   FALSE
 }
 
+# -----------------------------------------------------------------------------
+# Impure column-free calls (F75)
+#
+# dplyr evaluates a dot once per group (summarise(), grouped mutate()/filter()),
+# so a column-free call in it (`bump()`, `runif(1)`) runs once per group and
+# each group sees its own value. The native path evaluates such a call once, in
+# R, while parsing (ir_parse_expr() folds it) and broadcasts the value. That is
+# only the same thing when the call is deterministic and has no side effects,
+# which cuplyr cannot prove for an arbitrary function. So it decides from the
+# syntax alone, evaluating nothing: a column-free call is PURE iff its head
+# resolves, in the dot's environment, to the identical function object as the
+# canonical one (base, or an already-loaded dplyr/stats/lubridate/utils/methods/
+# data.table/cuplyr/tidyselect export) of an allowlisted name. A call that reads
+# a column is never folded, so its head does not matter. Purity is by name: an S3 method
+# or an active binding behind an allowlisted name can hide a side effect.
+# -----------------------------------------------------------------------------
+
+# Heads that are syntax: their contents are checked, the node itself is not.
+# (An inlined `.fns` lambda never reaches this: ir_impure_walk_fns() walks its
+# body with its formals bound. Any other `~` or `function` is only syntax.)
+ir_transparent_heads <- c("(", "{", "~", "function", "if")
+
+# Allowlisted names of deterministic, side-effect free functions, besides the
+# registry ops, the foldable window reducers and what the native `.cols`
+# resolver accepts (ir_pure_names()). A higher-order function (one that calls a
+# function it is given: with_order(), sapply(), Reduce(), do.call(), ...) is
+# never pure: the function may be a user closure passed by name, which the walk
+# cannot see. across()/if_any()/if_all() call their `.fns`, but only as a whole
+# dot, where the expansion inlines the call over a column (ir_across_fns_root());
+# where() calls its predicate once per column, as tidyselect does in dplyr.
+ir_pure_extra_names <- c(
+  # constructors, subsetting, shape
+  "c", ":", "seq", "seq_len", "seq_along", "rep", "rep_len", "rev", "sort", "order", "unique",
+  "length", "lengths", "nrow", "ncol", "names", "levels", "nlevels", "$", "[[", "[", "list", "numeric",
+  "integer", "character", "logical", "which", "any", "all", "diff", "setNames", "is.null",
+  "head", "tail", "match", "unlist", "as.vector", "append", "union", "intersect", "setdiff",
+  "is.element", "format", "getOption", "suppressWarnings", "suppressMessages",
+  # coercion
+  "as.numeric", "as.integer", "as.double", "as.character", "as.logical", "as.factor", "factor",
+  "as.Date", "as.POSIXct", "ISOdate", "ISOdatetime", "Sys.Date",
+  # math and summaries
+  "max", "min", "sum", "mean", "median", "quantile", "range", "prod", "sd", "var", "cor", "cov",
+  "pmin", "pmax", "abs", "sqrt", "exp", "log", "log1p", "expm1", "floor", "ceiling", "trunc",
+  "round", "signif", "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh",
+  "cumsum", "cumprod", "cummax", "cummin", "xor", "isTRUE", "isFALSE", "is.finite",
+  "is.infinite", "is.numeric", "is.character", "is.logical", "is.na", "is.nan",
+  "%in%", "%%", "%/%", "&&", "||", "!", "&", "|",
+  # strings
+  "paste", "paste0", "sprintf", "nchar", "toupper", "tolower", "substr", "substring", "grep",
+  # control
+  "ifelse", "identity", "if_else", "switch", "case_when", "case_match", "recode", "coalesce", "between",
+  "na_if", "desc", "order_by", "recode_values", "replace_values", "when_all", "when_any",
+  # dplyr context and column-wise helpers (their column selections are skipped)
+  "n", "cur_group_id", "cur_group", "cur_group_rows", "cur_data", "cur_data_all", "cur_column",
+  "row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist", "ntile", "lag", "lead",
+  "across", "if_any", "if_all", "c_across", "pick",
+  # tidyselect helpers (in `.cols`)
+  "everything", "last_col", "starts_with", "ends_with", "contains", "matches", "num_range",
+  "all_of", "any_of", "one_of", "where", "group_cols",
+  # lubridate parsers and constructors
+  "ymd", "ydm", "mdy", "myd", "dmy", "dym", "ymd_hms", "ymd_hm", "ymd_h", "mdy_hms", "dmy_hms",
+  "make_date", "make_datetime", "days", "weeks", "months", "years", "hours", "minutes",
+  "seconds", "period", "duration", "ddays", "dweeks", "dhours", "dminutes", "dseconds",
+  "today", "as_date", "as_datetime"
+)
+
+# The canonical function objects of a pure name: the ones R finds in base, then
+# in the namespaces below (the lookup order of ir_op_formals(), plus cuplyr's own
+# exports, e.g. `roll_mean()`, data.table's `froll*()` and the tidyselect
+# helpers dplyr re-exports). A function resolved
+# from the user's environment must be identical to one. Only namespaces that are
+# already loaded are consulted: a function of an unloaded namespace is not what
+# the environment resolved to (except through `pkg::fn`, where resolving it
+# loads the namespace, as R itself does), and looking one up must not load
+# lubridate or data.table as a side effect. The answer is memoised per name
+# together with the namespaces that were not loaded then; it holds until one of
+# them loads, so the common lookup costs one isNamespaceLoaded() per namespace
+# that is still unloaded.
+# @keywords internal
+ir_canonical_memo <- new.env(parent = emptyenv())
+ir_canonical_namespaces <- c("dplyr", "stats", "lubridate", "utils", "methods", "data.table", "cuplyr",
+                             "tidyselect")
+ir_canonical_fns <- function(name) {
+  hit <- ir_canonical_memo[[name]]
+  if (!is.null(hit)) {
+    fresh <- TRUE
+    for (ns in hit$unloaded) {
+      if (isNamespaceLoaded(ns)) {
+        fresh <- FALSE
+        break
+      }
+    }
+    if (fresh) {
+      return(hit$fns)
+    }
+  }
+  fns <- list()
+  base_fn <- get0(name, envir = baseenv(), mode = "function", inherits = FALSE)
+  if (!is.null(base_fn)) fns[[1L]] <- base_fn
+  unloaded <- character()
+  for (ns in ir_canonical_namespaces) {
+    if (!isNamespaceLoaded(ns)) {
+      unloaded <- c(unloaded, ns)
+      next
+    }
+    fn <- tryCatch(getExportedValue(ns, name), error = function(e) NULL)
+    if (is.function(fn)) fns[[length(fns) + 1L]] <- fn
+  }
+  ir_canonical_memo[[name]] <- list(fns = fns, unloaded = unloaded)
+  fns
+}
+
+# dplyr's context and column-wise functions. across()/if_any()/if_all()/pick()
+# are recognised by name in dplyr 1.2.1 (expanded before evaluation), so they
+# work with dplyr unattached; n(), cur_*() and c_across() must resolve from the
+# environment (dplyr attached or `dplyr::`), or dplyr itself fails. Taking them
+# as pure when they do not resolve changes nothing: the call fails either way.
+# tidyselect supplies its own helpers to a selection when the environment has
+# none (`starts_with()` with neither dplyr nor tidyselect attached).
+ir_mask_provided_names <- c("n", "cur_group_id", "cur_group", "cur_group_rows", "cur_data",
+                            "cur_data_all", "cur_column", "across", "if_any", "if_all",
+                            "c_across", "pick", "everything", "last_col", "starts_with",
+                            "ends_with", "contains", "matches", "num_range", "all_of",
+                            "any_of", "one_of", "where", "group_cols")
+
+# TRUE iff the function `name` (from namespace `pkg`, or looked up from `env`
+# when `pkg` is NULL) is an allowlisted pure function.
+# @keywords internal
+ir_head_is_pure <- function(name, env, pkg = NULL) {
+  if (!name %in% ir_pure_names()) {
+    return(FALSE)
+  }
+  fn <- if (is.null(pkg)) {
+    get0(name, envir = env, mode = "function")
+  } else {
+    tryCatch(getExportedValue(pkg, name), error = function(e) NULL)
+  }
+  if (is.null(fn)) {
+    # (see ir_mask_provided_names)
+    return(is.null(pkg) && name %in% ir_mask_provided_names)
+  }
+  for (canon in ir_canonical_fns(name)) {
+    if (identical(fn, canon)) {
+      return(TRUE)
+    }
+  }
+  FALSE
+}
+
+# (built once: the registry is fixed at load time). Everything the native
+# `.cols` resolver (selection_is_type_only(), R/select.R) accepts is pure: its
+# type tests and its name builders, so a `.cols` of `where(~ is.double(.x))` or
+# `any_of(colnames(lk))` stays native. with_order() is in ir_pre_registry_fns
+# (the parser dispatches on it) but calls its `fun`: not pure.
+ir_pure_names_cache <- new.env(parent = emptyenv())
+ir_pure_names <- function() {
+  cached <- ir_pure_names_cache$names
+  if (is.null(cached)) {
+    cached <- unique(c(set_diff(names(ir_call_registry), ir_internal_ops), "ceiling",
+                       ir_foldable_window_fns, ir_pure_extra_names,
+                       set_diff(ir_pre_registry_fns, c(".cuplyr_rw", "with_order")),
+                       base_type_test_names, "inherits", name_builder_fns))
+    ir_pure_names_cache$names <- cached
+  }
+  cached
+}
+
+# Lambda formals. The names a lambda binds stand for a column only where
+# cuplyr's across() expansion replaces them with one: in the `.fns` of an
+# across()/if_any()/if_all() that is a whole dot (expand_across_dots() expands
+# only those), when parse_single_fn() inlines the lambda. `f(.x)` there becomes
+# `f(<column>)`, which the parser never folds. Anywhere else the expansion
+# substitutes nothing, so the names are ordinary variables: the `.x` of a
+# two-sided `cond ~ value` (case_when()), the formal of a function literal
+# passed to with_order(), a lambda in a nested across() (which goes to dplyr
+# whole). A call over them is column-free there, and checked.
+
+# The formals a `.fns` lambda binds when the expansion inlines it: `.x` and `.`
+# of a one-sided formula without `.y`/`..N`/return() (across_formula_inlinable();
+# as_function() also binds `.y`/`..N`, but such a formula is not inlined), the
+# one formal of a function literal without return(). NULL for anything else (not
+# a lambda, or one the expansion hands to dplyr with the whole call).
+# @keywords internal
+ir_inlined_lambda_formals <- function(fn) {
+  if (is_formula_expr(fn)) {
+    return(if (across_formula_inlinable(fn)) c(".x", ".") else NULL)
+  }
+  if (is_lambda_expr(fn) && length(fn[[2L]]) == 1L && !"return" %in% all.names(fn[[3L]])) {
+    return(names(fn[[2L]]))
+  }
+  NULL
+}
+
+# For a dot that is an across()/if_any()/if_all() call the expansion inlines
+# lambdas of: the call matched to its prototype as expand_one_across()/
+# expand_if_any_all() match it, and the position of `.fns` in it. NULL when the
+# dot is anything else: another call, a named across() (a data-frame column,
+# which goes to dplyr), extra `...` arguments or a `.unpack` (no lambda is
+# inlined then), or a call the prototype does not match.
+# @keywords internal
+ir_across_fns_root <- function(expr, named) {
+  fn <- call_head_name(expr)
+  if (is.null(fn) || !fn %in% c("across", "if_any", "if_all") || (named && fn == "across")) {
+    return(NULL)
+  }
+  across <- fn == "across"
+  matched <- tryCatch(rlang::call_match(expr, if (across) across_proto else if_any_all_proto,
+                                        defaults = FALSE),
+                      error = function(e) NULL)
+  if (is.null(matched)) {
+    return(NULL)
+  }
+  arg_names <- names(matched) %||% character(length(matched))
+  if (!all(arg_names[-1L] %in% c(".cols", ".fns", ".names", if (across) ".unpack")) ||
+      (across && ".unpack" %in% arg_names && !identical(matched$.unpack, FALSE))) {
+    return(NULL)
+  }
+  fns_at <- match(".fns", arg_names)
+  if (is.na(fns_at)) {
+    return(NULL)
+  }
+  list(call = matched, fns_at = fns_at)
+}
+
+# One bottom-up walk of `expr` (in `env`): returns 2 when the subtree reads a
+# column (`cols`: the schema names), 1 when it reads only `formals` (the bound
+# formals of an enclosing inlined `.fns` lambda), else 0, and sets `st$impure`
+# when a call that reads neither and whose head is not pure turns up. `fns_at`
+# are the positions of `expr`'s arguments that are `.fns` (ir_impure_walk_fns()).
+# A formal stands for a column (see "Lambda formals" above): `f(.x)` in an
+# inlined `.fns` lambda is a call over a column, while `.x + bump()` is still
+# caught at `bump()`. A `~` or `function` anywhere else is syntax, like `(`.
+# The `.cols` of across()/if_any()/if_all() is walked like any argument: dplyr
+# evaluates it once, but so does cuplyr's expansion, and a CPU exit after the
+# expansion hands dplyr the original call, which evaluates it again; the
+# tidyselect helpers are pure. pick() and c_across() send the call to dplyr
+# before cuplyr evaluates their selection: they count as reading a column and
+# their arguments are not walked, so neither they nor a call over them
+# (`rowSums(pick(x, y))`) is reported. An embedded quosure keeps its own env.
+# Known limits: a default argument of a `function` literal is not walked.
+# @keywords internal
+ir_impure_walk <- function(expr, env, cols, st, formals = character(), fns_at = integer()) {
+  if (st$impure) {
+    return(2L)
+  }
+  if (is.symbol(expr)) {
+    nm <- as.character(expr)
+    return(if (nm %in% formals) 1L else if (nm %in% cols) 2L else 0L)
+  }
+  if (inherits(expr, "quosure")) {
+    if (rlang::quo_is_missing(expr)) {
+      return(0L)
+    }
+    return(ir_impure_walk(rlang::quo_get_expr(expr), rlang::quo_get_env(expr), cols, st, formals))
+  }
+  if (!is.call(expr)) {
+    return(0L)
+  }
+  if (is_data_pronoun_call(expr)) {
+    return(2L)
+  }
+  if (is_env_pronoun_call(expr)) {
+    return(0L)
+  }
+  # `pkg::fn` names a function (as the argument of with_order(), across()); it
+  # is not a call of one
+  if (length(expr) == 3L && (identical(expr[[1L]], as.name("::")) || identical(expr[[1L]], as.name(":::")))) {
+    return(0L)
+  }
+  parts <- unclass(as.list(expr))
+  head <- parts[[1L]]
+  head_name <- NULL
+  head_pkg <- NULL
+  if (is.symbol(head)) {
+    head_name <- as.character(head)
+  } else if (is.call(head) && length(head) == 3L && is.symbol(head[[3L]]) &&
+             (identical(head[[1L]], as.name("::")) || identical(head[[1L]], as.name(":::"))) &&
+             (is.symbol(head[[2L]]) || is.character(head[[2L]]))) {
+    head_name <- as.character(head[[3L]])
+    head_pkg <- as.character(head[[2L]])
+  }
+  reads <- 0L
+  if (is.null(head_name)) {
+    # `obj$fn()`, a function literal or an injected function object
+    if (is.call(head)) {
+      reads <- ir_impure_walk(head, env, cols, st, formals)
+    }
+  }
+  if (!is.null(head_name) && head_name %in% c("pick", "c_across")) {
+    # reads columns, and sends the call to dplyr whole (deferred_fallback_fns)
+    return(2L)
+  }
+  for (i in seq_along(parts)[-1L]) {
+    if (identical(parts[[i]], quote(expr = ))) {
+      next
+    }
+    reads <- max(reads, if (length(fns_at) > 0L && i %in% fns_at) {
+      ir_impure_walk_fns(parts[[i]], env, cols, st, formals)
+    } else {
+      ir_impure_walk(parts[[i]], env, cols, st, formals)
+    })
+    if (st$impure) {
+      return(2L)
+    }
+  }
+  if (!is.null(head_name) && head_name %in% ir_transparent_heads && is.null(head_pkg)) {
+    # syntax: the node is not a call to check
+    return(reads)
+  }
+  if (reads == 0L && (is.null(head_name) || !ir_head_is_pure(head_name, env, head_pkg))) {
+    st$impure <- TRUE
+    st$call <- expr
+  }
+  reads
+}
+
+# Walk one `.fns` argument (or one element of a `list()` of them) as
+# parse_across_fns()/parse_single_fn() read it: a quosure (`{{ fn }}`) is looked
+# through to its own expression and env, an inlined lambda's body is walked with
+# its formals bound, a `list()`'s elements are `.fns` themselves, and anything
+# else (a value: a name, `pkg::fn`, `make_fn()`) is an ordinary expression.
+# @keywords internal
+ir_impure_walk_fns <- function(fns, env, cols, st, formals) {
+  if (inherits(fns, "quosure")) {
+    if (rlang::quo_is_missing(fns)) {
+      return(0L)
+    }
+    return(ir_impure_walk_fns(rlang::quo_get_expr(fns), rlang::quo_get_env(fns), cols, st, formals))
+  }
+  bound <- ir_inlined_lambda_formals(fns)
+  if (!is.null(bound)) {
+    body <- if (is_formula_expr(fns)) fns[[2L]] else fns[[3L]]
+    reads <- ir_impure_walk(body, env, cols, st, c(formals, bound))
+    # the lambda reads a column only through a name that is not its own formal
+    return(if (reads < 2L) 0L else reads)
+  }
+  if (identical(call_head_name(fns), "list")) {
+    return(ir_impure_walk(fns, env, cols, st, formals, fns_at = seq_along(fns)[-1L]))
+  }
+  ir_impure_walk(fns, env, cols, st, formals)
+}
+
+# The text of the first dot (a quosure) that contains a column-free call whose
+# head is not known to be pure, with the call itself; NULL when every call is
+# pure. See the comment above. Evaluates nothing.
+# @param dots A list of quosures
+# @param schema The schema the dots are evaluated against
+# @param grouped Whether the verb has groups (or `.by`); only words the text
+# @keywords internal
+impure_const_call_text <- function(dots, schema, grouped = TRUE) {
+  cols <- schema$names
+  st <- new.env(parent = emptyenv())
+  st$impure <- FALSE
+  dot_names <- names(dots) %||% character(length(dots))
+  for (i in seq_along(dots)) {
+    dot <- dots[[i]]
+    root <- NULL
+    if (rlang::is_quosure(dot) && !rlang::quo_is_missing(dot)) {
+      root <- ir_across_fns_root(rlang::quo_get_expr(dot), named = !is.na(dot_names[i]) && nzchar(dot_names[i]))
+    }
+    if (is.null(root)) {
+      ir_impure_walk(dot, NULL, cols, st)
+    } else {
+      ir_impure_walk(root$call, rlang::quo_get_env(dot), cols, st, fns_at = root$fns_at)
+    }
+    if (st$impure) {
+      one_line <- function(x) trimws(gsub("\\s+", " ", paste(x, collapse = " ")))
+      return(sprintf("`%s`: `%s` is not known to be pure, and dplyr evaluates it %s",
+                     substr(one_line(rlang::quo_text(dot)), 1L, 80L),
+                     substr(one_line(deparse(st$call)), 1L, 40L),
+                     if (grouped) "once per group" else "exactly once"))
+    }
+  }
+  NULL
+}
+
 # Window-function names whose all-constant calls are folded in R (see
 # ir_parse_expr()).
 ir_foldable_window_fns <- c(

@@ -313,6 +313,23 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   if (!rlang::quo_is_null(by_quo) && isTRUE(.preserve)) return(cpu())
   if (complement && length(current_schema(.data)$names) == 0L) return(cpu())
 
+  # F75: dplyr evaluates a predicate once per group, the native path folds a
+  # column-free call once; only a pure call is the same either way, so a
+  # grouped or `.by` call with any other runs whole in dplyr.
+  if (length(verb_groups) > 0L) {
+    impure <- impure_const_call_text(dots, current_schema(.data))
+    if (!is.null(impure)) {
+      return(filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, detail = impure))
+    }
+  }
+
+  # F75: top_n()/top_frac() with a `wt` that parsing would evaluate more often
+  # than dplyr does runs whole in dplyr, before anything is parsed.
+  declined <- top_n_rank_decline(dots, .data)
+  if (!is.null(declined)) {
+    return(filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, detail = declined))
+  }
+
   if (length(dots) == 0 && !complement) return(.data)
 
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R's
@@ -715,7 +732,7 @@ filter_plan_window <- function(exprs, schema, group_cols) {
 # `complement`) on the CPU with the user's ORIGINAL dots, `.by` and
 # `.preserve`. The shared body of every filter fallback below.
 # @keywords internal
-filter_cpu_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE) {
+filter_cpu_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE, detail = NULL) {
   verb <- if (complement) "filter_out" else "filter"
   fn <- if (complement) dplyr::filter_out else dplyr::filter
   gpu_fallback(verb, .data, function(tbl) {
@@ -727,7 +744,7 @@ filter_cpu_fallback <- function(.data, dots, by_quo, .preserve = FALSE, compleme
     env <- rlang::new_environment(rlang::list2(!!verb := fn, tbl = tbl), parent = globalenv())
     call <- rlang::call2(verb, quote(tbl), !!!dots, .by = by_quo, .preserve = .preserve)
     rlang::eval_tidy(call, env = env)
-  })
+  }, detail = detail)
 }
 
 # Internal: whole-call CPU fallback for a window-bearing filter() call whose
@@ -982,10 +999,11 @@ rewrite_top_n_rank_dot <- function(dot, schema) {
   if (!top_n_rank_head(expr[[1]], env)) return(NULL)
 
   # `wt` before `n`: evaluating `n` and then declining would run it twice
-  # (once here, once on the CPU).
+  # (once here, once on the CPU). (top_n_rank_decline() has already sent a
+  # `wt` that must not be folded to dplyr.)
   wt <- top_n_unwrap(expr[[3]], env)
   if (rlang::is_missing(wt$expr) || top_n_has_quosure(wt$expr)) return(NULL)
-  # Parsing folds the column-free parts of `wt`. One that draws random
+  # Parsing still folds the column-free parts of `wt`. One that draws random
   # numbers (`x * rnorm(1)`) would be drawn here, again for the rewritten dot,
   # and once more when filter() parses it, where dplyr draws once (per group):
   # leave such a `wt` to dplyr, with the RNG as it was.
@@ -1016,6 +1034,85 @@ rewrite_top_n_rank_dot <- function(dot, schema) {
   ir <- tryCatch(ir_parse_quo(new, schema), error = function(e) NULL)
   if (is.null(ir)) return(NULL)
   new
+}
+
+# Why the `wt` of a top_n_rank(n, wt) dot must go to dplyr whole, or NULL.
+# Parsing a dot folds its column-free parts and filter()'s own route evaluates
+# it again standalone, so a `wt` that dplyr would run once is run twice or
+# more. Three kinds of `wt` are therefore never parsed: one that calls a
+# function of `deferred_fallback_fns` (pick, c_across, cur_group,
+# cur_group_rows, cur_data, cur_data_all), one with a column-free call that
+# impure_const_call_text() reports, and one with a `.env` subscript holding a
+# call (top_n_env_call_subscript()). All three checks see the quosures
+# embedded in `wt` (`{{ }}`), each with its own env. Evaluates nothing.
+# @param wt list(expr, env) of the dot's `wt`, as top_n_unwrap() returns it
+# @param schema the schema of the table being filtered
+# @keywords internal
+top_n_wt_decline <- function(wt, schema) {
+  if (rlang::is_missing(wt$expr)) return(NULL)
+  deferred <- intersect(deferred_fallback_fns, all.names(wt$expr))
+  if (length(deferred) > 0L) {
+    return(sprintf("`wt` calls %s, which dplyr evaluates inside the data mask",
+                   paste0(deferred[[1L]], "()")))
+  }
+  impure <- impure_const_call_text(list(rlang::new_quosure(wt$expr, wt$env)), schema, grouped = FALSE)
+  if (!is.null(impure)) return(impure)
+  pronoun <- top_n_env_call_subscript(wt$expr)
+  if (!is.null(pronoun)) {
+    return(sprintf("`wt` reads `%s`, whose subscript dplyr evaluates inside the data mask",
+                   substr(paste(deparse(pronoun), collapse = " "), 1L, 60L)))
+  }
+  NULL
+}
+
+# The first `.env[[s]]` in `expr` (through embedded quosures) whose subscript
+# `s` contains a call, or NULL. The purity walk doesn't look inside an `.env`
+# pronoun call (is_env_pronoun_call()), and the parser can't use such a
+# subscript: filter() folds the dot and then evaluates it again standalone.
+# `.env[s]` is not a pronoun call, so the purity walk already reaches its
+# subscript; `.env$s` takes a name. A string or a bare name as the subscript is
+# not reported. An empty argument (`m[, 1]`, `switch(k, a = , x)`) is skipped.
+# @keywords internal
+top_n_env_call_subscript <- function(expr) {
+  if (rlang::is_quosure(expr)) return(top_n_env_call_subscript(rlang::quo_get_expr(expr)))
+  if (!is.call(expr)) return(NULL)
+  # (an argument, not a local: an empty subscript, `.env[[]]`, is then a value)
+  has_call <- function(x) {
+    if (rlang::is_quosure(x)) return(has_call(rlang::quo_get_expr(x)))
+    is.call(x)
+  }
+  if (is_env_pronoun_call(expr) && identical(expr[[1L]], as.name("[[")) &&
+      has_call(expr[[3L]])) {
+    return(expr)
+  }
+  for (part in as.list(expr)) {
+    if (rlang::is_missing(part)) next
+    found <- top_n_env_call_subscript(part)
+    if (!is.null(found)) return(found)
+  }
+  NULL
+}
+
+# filter_run()'s screen for top_n()/top_frac(): the detail text of the first
+# top_n_rank(n, wt) dot whose `wt` must be left to dplyr (top_n_wt_decline()),
+# or NULL. It runs before any dot is parsed or evaluated, and the caller then
+# hands dplyr the user's dots whole.
+# @param dots filter() quosures
+# @param .data the table being filtered; its schema is read only once a dot
+#   turns out to be a top_n_rank() call
+# @keywords internal
+top_n_rank_decline <- function(dots, .data) {
+  schema <- NULL
+  for (i in seq_along(dots)) {
+    expr <- rlang::quo_get_expr(dots[[i]])
+    env <- rlang::quo_get_env(dots[[i]])
+    if (!is.call(expr) || length(expr) != 3L || !is.null(names(expr)) ||
+        !top_n_rank_head(expr[[1]], env)) next
+    schema <- schema %||% current_schema(.data)
+    detail <- top_n_wt_decline(top_n_unwrap(expr[[3]], env), schema)
+    if (!is.null(detail)) return(detail)
+  }
+  NULL
 }
 
 # @param dots filter() quosures

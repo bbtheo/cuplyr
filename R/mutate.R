@@ -420,6 +420,17 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   orig_names <- orig_schema$names
   orig_groups <- if (rowwise) .subset2(.data, "groups") else verb_groups
 
+  # F75: dplyr evaluates a dot once per group, the native path folds a
+  # column-free call once. Only a pure call is the same either way
+  # (impure_const_call_text()): any other call in a grouped or `.by`
+  # call sends the whole call to dplyr, before any rewrite or parse.
+  if (!rowwise && length(verb_groups) > 0L) {
+    impure <- impure_const_call_text(dots, orig_schema)
+    if (!is.null(impure)) {
+      return(mutate_expr_fallback(.data, dots, .keep, before_quo, after_quo, by_quo, detail = impure))
+    }
+  }
+
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R's
   # own module docs for the full design. Anything genuinely unsupported
   # (pick()-as-data-frame, cur_group()/cur_group_rows()/cur_data()/
@@ -849,7 +860,7 @@ mutate_across_fallback <- function(.data, dots, keep, before_quo, after_quo, by_
 # unrecognized shape, not just window/across-family ones.
 # @keywords internal
 mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo,
-                                consts = NULL, provenance = NULL) {
+                                consts = NULL, provenance = NULL, detail = NULL) {
   gpu_fallback("mutate", .data, function(tbl) {
     # Inlined here, where the row count is known (see inline_evaluated_dots()).
     dots <- inline_evaluated_dots(dots, consts, provenance, nrow(tbl))
@@ -857,7 +868,7 @@ mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_qu
       .data = tbl, !!!dots, .by = !!by_quo, .keep = keep,
       .before = !!before_quo, .after = !!after_quo
     ))
-  })
+  }, detail = detail)
 }
 
 # Parse mutate()/transmute()'s `...` dots into a list of mutate expression
@@ -1693,6 +1704,17 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
   # No expressions on an ungrouped table: every column goes (n x 0 result).
   if (length(dots) == 0L && length(.subset2(.data, "groups")) == 0L) {
     return(zero_column_result(.data, "transmute"))
+  }
+
+  # F75: as mutate_run(), a grouped call with an impure column-free call runs
+  # whole in dplyr.
+  if (!rowwise && length(eff_groups) > 0L) {
+    impure <- impure_const_call_text(dots, current_schema(.data))
+    if (!is.null(impure)) {
+      return(gpu_fallback("transmute", .data, function(tbl) {
+        rlang::inject(dplyr::transmute(.data = tbl, !!!dots))
+      }, detail = impure))
+    }
   }
 
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R

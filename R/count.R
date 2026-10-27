@@ -193,15 +193,23 @@ resolve_agg_name <- function(name, vars) {
 #
 # @param wt_quo A quosure, as returned by rlang::enquo(wt) -- possibly NULL
 #   (rlang::quo_is_null())
+# @param schema The schema `wt` is evaluated against (the grouped table's)
 # @param for_mutate Logical, unused (kept for call-site clarity) -- both
 #   branches now build the identical `sum(<wt-expr>, na.rm = TRUE)` call
 # @return A language object: `quote(n())`, or `sum(<wt-expr>, na.rm = TRUE)`
 # @keywords internal
-build_count_agg_call <- function(wt_quo, for_mutate = FALSE) {
+build_count_agg_call <- function(wt_quo, schema, for_mutate = FALSE) {
   if (rlang::quo_is_null(wt_quo)) {
     return(quote(n()))
   }
-  rlang::call2("sum", rlang::quo_get_expr(wt_quo), na.rm = TRUE)
+  # The quosure itself, as dplyr's tally_n() splices it, so `wt` keeps the
+  # caller's environment (`wt = y * k` with a local `k`, a call to a local
+  # function). A bare name that is a column stays a symbol: `sum(<column>)` is
+  # the summarise fast path. Any other name is the caller's variable, which a
+  # symbol would look up in the wrong frame.
+  expr <- rlang::quo_get_expr(wt_quo)
+  rlang::call2("sum", if (is.symbol(expr) && as.character(expr) %in% schema$names) expr else wt_quo,
+               na.rm = TRUE)
 }
 
 #' Count observations by group
@@ -277,7 +285,7 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
   }
 
   agg_name <- resolve_agg_name(name, grouped$groups)
-  agg_call <- build_count_agg_call(wt_quo)
+  agg_call <- build_count_agg_call(wt_quo, current_schema(grouped))
 
   # Defensive `dplyr.summarise.inform = FALSE` override (Phase 6, task 3),
   # matching real dplyr's own count()->tally() path (see
@@ -350,7 +358,7 @@ tally.tbl_gpu <- function(x, wt = NULL, sort = FALSE, name = NULL) {
   orig_groups <- x$groups
 
   agg_name <- resolve_agg_name(name, orig_groups)
-  agg_call <- build_count_agg_call(wt_quo)
+  agg_call <- build_count_agg_call(wt_quo, current_schema(x))
 
   # Matches real dplyr's own `tally.data.frame()`, which wraps its internal
   # `summarise()` call in `local_options(dplyr.summarise.inform = FALSE)` --
@@ -448,7 +456,7 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
 
   all_cols <- current_schema(grouped)$names
   agg_name <- resolve_agg_name(name, all_cols)
-  agg_call <- build_count_agg_call(wt_quo, for_mutate = TRUE)
+  agg_call <- build_count_agg_call(wt_quo, current_schema(grouped), for_mutate = TRUE)
 
   result <- rlang::inject(dplyr::mutate(grouped, !!agg_name := !!agg_call))
 

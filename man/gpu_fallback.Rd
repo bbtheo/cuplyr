@@ -4,7 +4,7 @@
 \alias{gpu_fallback}
 \title{Run a dplyr verb on the CPU and re-upload the result}
 \usage{
-gpu_fallback(verb_name, .data, expr_fn, ..., as_is = FALSE)
+gpu_fallback(verb_name, .data, expr_fn, ..., as_is = FALSE, detail = NULL)
 }
 \arguments{
 \item{verb_name}{Character, the verb name to use in the fallback
@@ -25,6 +25,9 @@ grouping-metadata queries, e.g. \code{group_data()}/\code{group_keys()}, used to
 be implemented this way -- Phase 9 task 1 made them GPU-native instead,
 see R/group-by.R -- but the parameter stays for any future fallback
 verb with the same "always a plain R object" shape).}
+
+\item{detail}{\code{NULL}, or text for the fallback notice saying why the call runs
+on the CPU (shown after the verb name by \code{\link[=cuplyr_fallback_notify]{cuplyr_fallback_notify()}}).}
 }
 \value{
 Either a new \code{tbl_gpu} (grouping, execution mode, and factor

@@ -367,6 +367,20 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
     }))
   }
 
+  # F75: dplyr evaluates every dot once per group, in group order, and the
+  # native path folds a column-free call once. That is the same only for a
+  # deterministic call without side effects, which is decided from the syntax
+  # (impure_const_call_text()); any other call (a user function, runif(),
+  # ...) sends the whole call to dplyr before anything is parsed, so no
+  # later CPU exit evaluates it a second time.
+  impure <- impure_const_call_text(dots, in_schema,
+                                   grouped = by_given || length(.subset2(.data, "groups")) > 0L)
+  if (!is.null(impure)) {
+    return(gpu_fallback("summarise", .data, function(tbl) {
+      rlang::inject(dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo))
+    }, detail = impure))
+  }
+
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R's
   # own module docs. Must run on the ORIGINAL (not yet auto_name_dots()'d)
   # dots: a top-level `across(...)` dot is unnamed by construction, and
@@ -454,8 +468,11 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # (`summarise(x = max(x), m = mean(x))`: the second dot sees the NEW x), are
   # evaluated sequentially by dplyr. The GPU path computes every aggregate
   # from the input columns at once, so these go to the CPU fallback.
+  # (the IR the pre-pass parses is kept in `ir_cache`: every later stage reuses
+  # it, so each aggregate argument is parsed, and evaluated, once)
+  ir_cache <- new.env(parent = emptyenv())
   if (summarise_dots_are_sequential(dots) ||
-      !(if (is.null(simple_plan)) summarise_dots_parseable(dots, in_schema) else simple_plan$parseable)) {
+      !(if (is.null(simple_plan)) summarise_dots_parseable(dots, in_schema, ir_cache) else simple_plan$parseable)) {
     return(gpu_fallback("summarise", .data, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo))
     }))
@@ -482,7 +499,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
     # `.by=` summarise is always ungrouped (Phase 5, task W9); `.groups=`
     # can never reach here alongside `.by=` (dplyr's own generic already
     # rejects that combination before this method is even dispatched to).
-    return(gpu_or_cpu(function() summarise_by_desugar(.data, dots, by_cols)))
+    return(gpu_or_cpu(function() summarise_by_desugar(.data, dots, by_cols, ir_cache)))
   }
 
   retained_groups <- resolve_summarise_groups(.subset2(.data, "groups"), .groups, caller_env)
@@ -492,10 +509,10 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   if (summarise_wants_empty_groups(.data)) {
     # An aggregate named like a key replaces it; rare enough for the CPU.
     if (any(names(dots) %in% .subset2(.data, "groups"))) return(cpu())
-    return(gpu_or_cpu(function() summarise_with_empty_groups(.data, dots, retained_groups, cpu)))
+    return(gpu_or_cpu(function() summarise_with_empty_groups(.data, dots, retained_groups, cpu, ir_cache)))
   }
 
-  retry_on_sum_overflow(function() summarise_core(.data, dots, retained_groups, simple_aggs = simple_aggs),
+  retry_on_sum_overflow(function() summarise_core(.data, dots, retained_groups, simple_aggs = simple_aggs, ir_cache = ir_cache),
                         cpu, class = "cuplyr_summarise_rerun")
 }
 
@@ -555,7 +572,7 @@ summarise_wants_empty_groups <- function(.data) {
 #   on the CPU, for the aggregates whose empty-group value the identity row
 #   can't give exactly
 # @keywords internal
-summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) {
+summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, ir_cache = NULL) {
   was_lazy <- identical(.subset2(.data, "exec_mode"), "lazy")
   # A GPU materialization of the pending ops, not a CPU fallback: no notice.
   base <- compute(.data)
@@ -579,14 +596,14 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) 
     full_keys <- expanded$keys
     n_present <- expanded$n_observed
     if (n_present == nrow(full_keys)) {
-      return(finish(summarise_core(base, dots, retained_groups)))
+      return(finish(summarise_core(base, dots, retained_groups, ir_cache = ir_cache)))
     }
   }
 
   # An aggregate with no exact empty-group value: with an empty group the
   # call goes to the CPU before any GPU summarise runs (which would warn a
   # second time). An unknown type (NA) is settled once the aggregations exist.
-  cpu_agg <- summarise_empty_value_on_cpu(dots, current_schema(base))
+  cpu_agg <- summarise_empty_value_on_cpu(dots, current_schema(base), ir_cache)
   if (isTRUE(cpu_agg)) {
     if (is.null(n_present)) n_present <- distinct_group_count(base)
     # (more groups than keys would be a broken fixed-keys invariant: also dplyr's)
@@ -594,7 +611,7 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) 
   }
 
   agg_info <- new.env(parent = emptyenv())
-  observed <- summarise_core(base, dots, retained_groups, agg_info = agg_info)
+  observed <- summarise_core(base, dots, retained_groups, agg_info = agg_info, ir_cache = ir_cache)
   n_obs <- dim(observed)[[1L]]
   # Observed keys are always among the full keys: equal counts mean no group is
   # empty and the observed result (in the same key order) is the answer.
@@ -611,7 +628,7 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback) 
     ptr = wrap_gpu_call("summarise", gpu_gather_rows(list(base$ptr), numeric(0))),
     schema = base$schema, exec_mode = "eager"
   )
-  identity_row <- summarise_core(empty_slice, dots, character())
+  identity_row <- summarise_core(empty_slice, dots, character(), ir_cache = ir_cache)
 
   n_keys <- length(keys)
   agg_names <- observed$schema$names[-seq_len(n_keys)]
@@ -689,11 +706,11 @@ summarise_agg_empty_on_cpu <- function(agg) {
 # can't be told without lowering, else FALSE. The dots have passed
 # summarise_dots_parseable(), so each is `fn(arg)` once its flags are stripped.
 # @keywords internal
-summarise_empty_value_on_cpu <- function(dots, schema) {
+summarise_empty_value_on_cpu <- function(dots, schema, ir_cache = NULL) {
   unknown <- FALSE
-  for (dot in dots) {
-    quo <- extract_na_rm(dot, schema)$quo
-    quo <- extract_agg_shape_param(quo)$quo
+  for (i in seq_along(dots)) {
+    dot <- dots[[i]]
+    quo <- agg_dot_parts(ir_cache, i, dot, schema)$quo
     expr <- rlang::quo_get_expr(quo)
     decomposed <- decompose_agg_call(expr)
     if (is.null(decomposed)) {
@@ -706,7 +723,7 @@ summarise_empty_value_on_cpu <- function(dots, schema) {
       unname(schema$types[match(as.character(arg), schema$names)])
     } else {
       tryCatch({
-        ir <- ir_parse_quo(rlang::new_quosure(arg, rlang::quo_get_env(quo)), schema)
+        ir <- agg_arg_ir(ir_cache, i, rlang::new_quosure(arg, rlang::quo_get_env(quo)), schema)
         if (is.null(ir)) NA_character_ else ir_infer_type(ir, schema)
       }, error = function(e) NA_character_)
     }
@@ -955,7 +972,7 @@ inform_regrouped_output <- function(old_groups, new_groups) {
 # @param schema `.data`'s current schema (list(names=, types=))
 # @return Logical scalar
 # @keywords internal
-summarise_dots_parseable <- function(dots, schema) {
+summarise_dots_parseable <- function(dots, schema, ir_cache = NULL) {
   known_agg_fns <- agg_functions
 
   for (i in seq_along(dots)) {
@@ -970,20 +987,15 @@ summarise_dots_parseable <- function(dots, schema) {
     }
     # An NA flag the reducer doesn't take, or a value the native path can't
     # take exactly (extract_na_rm()), is dplyr's to evaluate: CPU.
-    stripped <- extract_na_rm(dots[[i]], schema)
-    if (is.null(stripped)) {
-      return(FALSE)
-    }
-    quo <- stripped$quo
     # A shape the native path can't take (quantile() with type != 7 or a
     # probs it can't evaluate, a Period/Duration `n`/`probs` (F48), an nth()
     # it can't position) is not a user mistake until dplyr says so: CPU,
     # where dplyr gives its value or its own error.
-    shaped <- tryCatch(extract_agg_shape_param(quo), error = function(e) NULL)
-    if (is.null(shaped)) {
+    parts <- tryCatch(agg_dot_parts(ir_cache, i, dots[[i]], schema), error = function(e) NULL)
+    if (is.null(parts)) {
       return(FALSE)
     }
-    quo <- shaped$quo
+    quo <- parts$quo
 
     expr <- rlang::quo_get_expr(quo)
     env <- rlang::quo_get_env(quo)
@@ -1039,6 +1051,9 @@ summarise_dots_parseable <- function(dots, schema) {
 
     arg_quo <- rlang::new_quosure(arg_expr, env)
     ir <- ir_parse_quo(arg_quo, schema)  # may throw a genuine error -- propagates
+    if (!is.null(ir_cache)) {
+      ir_cache[[as.character(i)]] <- list(arg = arg_expr, ir = ir)
+    }
 
     status <- ir_factor_rule(ir, schema)
     if (status == "cpu" || (status == "bare" && !identical(decomposed$fn_name, "n_distinct"))) {
@@ -1257,7 +1272,7 @@ summarise_simple_cpu <- function(simple, schema) {
 # @keywords internal
 summarise_core <- function(.data, dots, retained_groups = character(),
                            internal_cols = character(), sort_groups = TRUE,
-                           agg_info = NULL, simple_aggs = NULL) {
+                           agg_info = NULL, simple_aggs = NULL, ir_cache = NULL) {
   # No wrapper of its own (F58): the work below is R logic (quosure parsing,
   # which may evaluate a `probs =`/`n =` argument) around wrapped GPU steps, so
   # a retry belongs to each step, not to a rerun of this parsing. The tables
@@ -1276,30 +1291,29 @@ summarise_core <- function(.data, dots, retained_groups = character(),
     # tracked out-of-band per dot instead of embedded in the call shape.
     # Each reducer's own spelling only (`na_rm` for first()/last()/nth()) --
     # see extract_na_rm()'s docs.
-    extracted <- lapply(dots, extract_na_rm, schema = current_schema(.data))
-    if (any(vapply(extracted, is.null, logical(1)))) {
+    # (agg_dot_parts() reuses what the pre-pass took from each dot)
+    in_schema <- current_schema(.data)
+    parts <- lapply(seq_along(dots), function(i) agg_dot_parts(ir_cache, i, dots[[i]], in_schema))
+    names(parts) <- names(dots)
+    if (any(vapply(parts, is.null, logical(1)))) {
       # Unreachable from summarise(): summarise_dots_parseable() sends these
       # dots to the CPU first.
       stop("internal error: summarise_core() given an NA flag the native path can't take",
            call. = FALSE)
     }
-    na_rm_flags <- vapply(extracted, `[[`, logical(1), "na_rm")
-    dots <- lapply(extracted, `[[`, "quo")
-
-    # Phase 6, task 6.2: extract and strip quantile()'s `probs=` / nth()'s
-    # `n=` scalar shape parameter -- run AFTER na.rm/na_rm extraction (so
-    # this function's own argument-matching never has to understand that
-    # control), reducing both to the same single-argument `fn(x)` shape
-    # every other aggregation already produces.
-    extracted2 <- lapply(dots, extract_agg_shape_param)
-    agg_extra <- vapply(extracted2, `[[`, numeric(1), "extra")
-    dots <- lapply(extracted2, `[[`, "quo")
+    na_rm_flags <- vapply(parts, `[[`, logical(1), "na_rm")
+    # Phase 6, task 6.2: quantile()'s `probs=` / nth()'s `n=` scalar shape
+    # parameter is taken out the same way, after the NA flag (so the argument
+    # matching never has to understand that control), reducing both to the
+    # same single-argument `fn(x)` shape every other aggregation produces.
+    agg_extra <- vapply(parts, `[[`, numeric(1), "extra")
+    dots <- lapply(parts, `[[`, "quo")
 
     # Pre-process: create temporary columns for expressions inside agg functions
     # (e.g. sum(carb == 4)). Per D4, if a temp column is needed and .data is
     # lazy with pending ops, this materializes (compute()) before creating the
     # temp column and notifies via cuplyr_fallback_notify().
-    preprocess_result <- preprocess_agg_expressions(.data, dots)
+    preprocess_result <- preprocess_agg_expressions(.data, dots, ir_cache)
     working_data <- preprocess_result$data
     processed_dots <- preprocess_result$dots
 
@@ -1655,7 +1669,7 @@ extract_nth_position <- function(expr, env, quo) {
 # @return A new (ungrouped) tbl_gpu, one row per distinct `by_cols`
 #   combination, in first-appearance order
 # @keywords internal
-summarise_by_desugar <- function(.data, dots, by_cols) {
+summarise_by_desugar <- function(.data, dots, by_cols, ir_cache = NULL) {
   reserved_names <- c(current_schema(.data)$names, names(dots))
 
   rowid_name <- unique_temp_name("..summarise_rowid..", reserved_names)
@@ -1676,7 +1690,8 @@ summarise_by_desugar <- function(.data, dots, by_cols) {
     rlang::call2("min", as.name(rowid_name)), rlang::base_env()
   )
 
-  result <- summarise_core(grouped, dots, internal_cols = first_name, sort_groups = FALSE)
+  result <- summarise_core(grouped, dots, internal_cols = first_name, sort_groups = FALSE,
+                          ir_cache = ir_cache)
   result <- dplyr::arrange(result, !!rlang::sym(first_name))
   # the grouping above was internal: summarise() keeps only the bare class
   copy_frame_meta(dplyr::select(result, -dplyr::all_of(first_name)), .data, attrs = FALSE)
@@ -1733,6 +1748,50 @@ decompose_agg_call <- function(expr) {
   NULL
 }
 
+# Internal (F75): the IR of aggregate argument `arg_quo` of dot `i`: the one
+# the pre-pass (summarise_dots_parseable()) parsed and kept in `ir_cache` when it
+# is for the same argument, else a fresh parse. Parsing evaluates the column-free
+# calls it folds (and warns for them), so a dot is parsed once per summarise().
+# @keywords internal
+agg_arg_ir <- function(ir_cache, i, arg_quo, schema) {
+  if (!is.null(ir_cache)) {
+    hit <- ir_cache[[as.character(i)]]
+    if (!is.null(hit) && identical(hit$arg, rlang::quo_get_expr(arg_quo))) {
+      return(hit$ir)
+    }
+  }
+  ir_parse_quo(arg_quo, schema)
+}
+
+# Internal (F75): dot `i` of summarise() with its `na.rm =` flag and its
+# `probs =`/`n =` value taken out (extract_na_rm(), extract_agg_shape_param()):
+# `list(quo, na_rm, extra)`, or NULL when the NA flag is not one the native path
+# takes. Both extractions evaluate the value they read, so the first call keeps
+# the answer in `ir_cache` and every later stage (summarise_core(), the
+# empty-value screen) reuses it: a dot's flag and shape value are evaluated, and
+# warn, once per summarise(). An error of the shape extraction propagates (and
+# is not cached).
+# @keywords internal
+agg_dot_parts <- function(ir_cache, i, dot, schema) {
+  key <- paste0("parts", i)
+  if (!is.null(ir_cache)) {
+    hit <- ir_cache[[key]]
+    if (!is.null(hit) && identical(hit$dot, dot)) {
+      return(hit$parts)
+    }
+  }
+  stripped <- extract_na_rm(dot, schema)
+  if (is.null(stripped)) {
+    return(NULL)
+  }
+  shaped <- extract_agg_shape_param(stripped$quo)
+  parts <- list(quo = shaped$quo, na_rm = stripped$na_rm, extra = shaped$extra)
+  if (!is.null(ir_cache)) {
+    ir_cache[[key]] <- list(dot = dot, parts = parts)
+  }
+  parts
+}
+
 # Internal: Pre-process aggregation expressions
 #
 # Detects expressions inside aggregation functions (e.g., sum(carb == 4),
@@ -1753,7 +1812,7 @@ decompose_agg_call <- function(expr) {
 # @param dots Quosures from summarise()
 # @return List with modified data and simplified dots
 # @keywords internal
-preprocess_agg_expressions <- function(.data, dots) {
+preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL) {
   working_data <- .data
   new_dots <- vector("list", length(dots))
   names(new_dots) <- names(dots)
@@ -1785,7 +1844,7 @@ preprocess_agg_expressions <- function(.data, dots) {
     }
 
     arg_quo <- rlang::new_quosure(arg_expr, env)
-    ir <- ir_parse_quo(arg_quo, current_schema(working_data))
+    ir <- agg_arg_ir(ir_cache, i, arg_quo, current_schema(working_data))
 
     # A factor column spelled through the pronoun or parentheses (`.data$f`,
     # `.data[["f"]]`, `(f)`) parses to a bare `col` node: rewrite to fn(<f>)

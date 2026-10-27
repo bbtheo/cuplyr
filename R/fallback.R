@@ -28,6 +28,8 @@
 #' @param expr_fn A function of one argument (a tibble, already grouped if
 #'   `.data` was grouped) that calls the corresponding real dplyr verb and
 #'   returns its result.
+#' @param detail `NULL`, or text for the fallback notice saying why the call runs
+#'   on the CPU (shown after the verb name by [cuplyr_fallback_notify()]).
 #' @param as_is Logical. If `TRUE`, `expr_fn`'s return value is always
 #'   returned unchanged, never re-uploaded -- for a verb that returns
 #'   metadata *about* the grouping/data rather than a transformed dataset,
@@ -50,7 +52,7 @@
 #'   returned `tbl_gpu` carries those keys as `$fixed_keys` (see
 #'   `fixed_keys_of()`); verbs that regroup get none.
 #' @keywords internal
-gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE) {
+gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE, detail = NULL) {
   if (!is_tbl_gpu(.data)) {
     stop("gpu_fallback() requires a tbl_gpu object.", call. = FALSE)
   }
@@ -71,7 +73,9 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE) {
   # (read once: a fallback inside the rerun's own per-row code is unrelated)
   why <- rowwise_state$why
   rowwise_state$why <- NULL
-  cuplyr_fallback_notify(verb_name, if (is.null(why)) {
+  cuplyr_fallback_notify(verb_name, if (!is.null(detail)) {
+    sprintf("%s() (%s)", verb_name, detail)
+  } else if (is.null(why)) {
     sprintf("%s()", verb_name)
   } else {
     sprintf("%s() (the native rowwise attempt failed: %s)", verb_name, why)

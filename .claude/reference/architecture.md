@@ -229,11 +229,96 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
   naming the columns). No extra pass over whole Dates. Every upload goes
   through `tbl_gpu()`, so this is also what a CPU fallback producing `d + 0.5`
   or a fractional `mean(<Date>)` goes through.
-- **Evaluate-once for column-free mutate()/transmute() dots**: dplyr evaluates
+- **Evaluate-once for column-free dots (F75 on top of F37)**: dplyr evaluates
+  each dot once per group (`eval_all_summarise()`/`eval_all_mutate()`/
+  `eval_all_filter()` loop over the groups), so a column-free call (`bump()`,
+  `runif(1)`) runs once per group and each group sees its own value, where the
+  parser folds it once in R and broadcasts. That is the same only for a pure
+  call, so `impure_const_call_text()` (R/ir.R,
+  next to `expr_has_column_ref()`) decides from the syntax, evaluating nothing:
+  every call node that reads no column must have a head that resolves in the
+  quosure's env to the IDENTICAL function as the canonical one of an
+  allowlisted name (`ir_pure_names()`: registry ops, the `ir_pre_registry_fns`
+  natives, deterministic constructors/coercions/math/strings/`head`/`format`/
+  `getOption`, lubridate parsers, tidyselect helpers, and everything the
+  native `.cols` resolver accepts: `base_type_test_names`, `inherits` and
+  `name_builder_fns` from R/select.R, plus `grep`, so `where(~ is.double(.x))`
+  or `any_of(colnames(lk))` stays native; a resolver change must keep that
+  list covered). A higher-order function, one that calls a function it is
+  given, is never pure, because the function may be a user closure passed by
+  name: `with_order()` stays in `ir_pre_registry_fns` for the parser but is
+  set-diffed out of `ir_pure_names()` (`with_order(o, bumpv, x)` folded once was
+  silent wrong); `sapply`/`Reduce`/`do.call`/`match.fun`/`outer`/`Map`/... are
+  not listed. across()/if_any()/if_all() call their `.fns` only as a whole
+  dot, inlined over a column; where() runs its predicate once per column as
+  tidyselect does in dplyr. The canonical functions
+  are base's plus those exported by the already-loaded namespaces dplyr, stats,
+  lubridate, utils, methods, data.table, cuplyr and tidyselect
+  (`ir_canonical_fns()` never loads a namespace; its per-name memo records the
+  namespaces that were not loaded and is redone once one of them is); a user
+  `c <- function(...)` masking `base::c` is impure. In dplyr 1.2.1 only
+  across()/if_any()/if_all()/pick() are recognised by name; n(), cur_*() and
+  c_across() must resolve from the env, and the classifier takes them as pure
+  even when they do not (dplyr then fails the same way); tidyselect supplies
+  its helpers itself. `(`, `{`, `if`, and `~`/`function` outside an inlined
+  `.fns` are transparent; `pkg::fn` as a value is not a call; pick() and c_across() count as reading
+  a column and their arguments are not walked (both send the call to dplyr
+  whole before cuplyr evaluates the selection, so neither they nor a call over
+  them is reported as impure). That holds because every pre-screen parse
+  declines such a dot first; for top_n()/top_frac() the guard is
+  `top_n_rank_decline()`, called from `filter_run()` before any dot is parsed,
+  which sends the whole filter() call to dplyr. The `.cols` of across()/if_any()/if_all() IS
+  walked: dplyr evaluates it once, but cuplyr's expansion
+  (`resolve_across_cols()`) evaluates it too, and a CPU exit after the
+  expansion runs the original call, so `all_of(cols_fn())` must go to dplyr up
+  front. An embedded quosure uses its own env. Lambda formals count as column
+  references only where the across() expansion substitutes them
+  (`ir_across_fns_root()`, `ir_impure_walk_fns()`): the `.fns` (a lambda, a
+  `list()` of them, through `{{ }}` quosures) of an across()/if_any()/if_all()
+  that is a whole dot (unnamed for across()), with no extra `...` arguments and
+  no `.unpack`, and only a lambda `parse_single_fn()` inlines: `.x`/`.` of a
+  one-sided formula without `.y`/`..N`/return(), the single formal of a
+  `function` literal without return(). There `~ roll_mean(.x, 2)` is a call
+  over a column (it becomes `roll_mean(<col>, 2)`), `~ .x + bump()` is still
+  caught at `bump()`, and a two-sided `~` inside the lambda
+  (`~ case_when(.x > 1 ~ f(.x))`) inherits the formals. Anywhere else the names
+  are ordinary variables: `case_when(x > 0 ~ bump(.x))` with a caller's `.x`,
+  the formal of `with_order(o, function(v) bump(v), x)`, a lambda of a nested
+  across(). The walk returns 0 none / 1 formals only / 2 a column, and an
+  inlined lambda reads a column only through a name that is not its formal, so
+  it never makes the call around it look column-ful. One bottom-up walk. An
+  impure call sends the whole call to dplyr, unevaluated, before any rewrite or parse (the fallback notice names
+  the dot and the call: `gpu_fallback(detail =)`): every `summarise()`
+  (`summarise_impl()`, grouped, ungrouped, `.by`, empty groups), and a grouped
+  or `.by` `mutate()`/`transmute()`/`filter()` (`mutate_run()`,
+  `transmute_run()`, `filter_run()`). Ungrouped and rowwise mutate() keep the
+  native path below. Ungrouped filter() does not evaluate once: a
+  column-free predicate is evaluated twice, once by the parser's fold and once
+  by the standalone eval in `filter_run()` (a known limit, not fixed; top_n()'s
+  `wt` is screened, see the filter section). Known limits: purity is by name, so an
+  S3 method or an active binding behind an allowlisted name can hide a side
+  effect; default arguments of a `function` literal are not walked; a `.fns`
+  given as a value (`f <- ~ .x + c(1)`, then `across(x, f)`) is not walked
+  (the expansion inlines it only when every head is native by name).
+- **Summarise parses each aggregate argument once (F75)**:
+  `summarise_dots_parseable()` keeps the IR it parses in an `ir_cache`
+  environment (by dot position, with the argument expression to check it is the
+  same dot); `preprocess_agg_expressions()`, `summarise_empty_value_on_cpu()`,
+  `summarise_by_desugar()` and both `summarise_core()` calls of the
+  empty-groups path read it through `agg_arg_ir()`. The value `extract_na_rm()`
+  and `extract_agg_shape_param()` take out of a dot (`na.rm =`, `probs =`,
+  nth()'s `n =`) is kept there too (`agg_dot_parts()`), so it is evaluated
+  once. A pure call's warning (`sum(y + as.integer("a"))`) is raised once. count()/tally()/add_count()
+  splice the `wt` quosure (`build_count_agg_call()`, as dplyr's `tally_n()`), so
+  `wt` keeps the caller's env; a bare name stays a symbol for the
+  `sum(<column>)` fast path only when it names a column of the grouped table
+  (else it is the caller's variable, and the quosure is spliced).
+- **Evaluate-once for column-free mutate()/transmute() dots (F37)**: dplyr evaluates
   each dot once (per group). `parse_mutate_dots()` evaluates a dot that reads
   no column itself (`mutate_constant_value()`, empty data mask) and builds the
   literal from that value, so `runif(1)`, a counter or `f()` runs once on the
-  native path. When the call then takes the CPU route anyway (some other dot
+  native path of an UNGROUPED call (a grouped one with an impure call never
+  gets here, see above). When the call then takes the CPU route anyway (some other dot
   is unparseable), the values of directly written column-free dots of an
   ungrouped call are recorded by expanded position and
   `inline_evaluated_dots()` hands dplyr the value instead of the expression,
@@ -241,8 +326,9 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
   `expand_across_dots()` maps expanded dots back to user dots). across() dots
   go to dplyr as written, since dplyr resolves `.cols` against the columns
   earlier dots create. Known limit: on the CPU route, column-free across()
-  bodies, grouped/`.by` constants and column-free sub-calls folded inside
-  other dots (`x + runif(1)`) run again.
+  bodies and column-free sub-calls folded inside other dots (`x + runif(1)`)
+  run again. Open note: grouped `slice(bump())` evaluates once (dplyr per
+  group).
 - **Running schema for across()/if_any()/if_all() (F45)**: this qualifies the
   across() sentence above. `expand_across_dots()` resolves each such dot's
   `.cols` against `run`: the input schema updated by every earlier dot
@@ -1011,7 +1097,7 @@ min; returning Inf" at lowering.
 - Expressions parse through `ir_parse_quo()` (`R/ir.R`) into `make_predicate()` records (`ir`, `cols`, `estimated_cost`, `is_deterministic`, `na_sensitive`); optimizer passes read `pred$cols`, never the IR tree directly
 - Constant expressions (`ir_is_const()` — no column reference anywhere, e.g. `TRUE`, `FALSE`, `rep(TRUE, n)`) never reach the GPU IR path: they're evaluated in R (`eval_tidy` on the original quosure, not the constant-folded IR) so an n-row mask always has a real column to broadcast against; `TRUE` is a genuine no-op, `FALSE`/`NA` build an impossible predicate (`ir_lit_from_r(FALSE)`) that still flows through the normal lazy `push_op()`/`ast_filter` path
 - Comparing a number/logical with a string (`filter(mpg > "a")`, `s == 2`) is dplyr's character comparison, not an error: `ir_check_type_operands()` (F48) sends it to the CPU (`check_filter_comparison_types()` is gone)
-- `top_n()`/`top_frac()` reach `filter()` as a `top_n_rank(n, wt)` dot; `rewrite_top_n_rank_dots()` (`R/filter.R`) rewrites it to `min_rank(desc(wt)) <= n` / `min_rank(wt) <= abs(n)` for a constant `n` or `c * n()` (CPU fallbacks keep the original dots). Rank-family calls with one `desc(e)` argument parse natively (`meta$rank_desc` -> the window spec's `order_desc`)
+- `top_n()`/`top_frac()` reach `filter()` as a `top_n_rank(n, wt)` dot; `rewrite_top_n_rank_dots()` (`R/filter.R`) rewrites it to `min_rank(desc(wt)) <= n` / `min_rank(wt) <= abs(n)` for a constant `n` or `c * n()` (CPU fallbacks keep the original dots). `filter_run()` first calls `top_n_rank_decline()` (before any dot is parsed or evaluated). When `wt` (or a quosure embedded in it) calls one of `deferred_fallback_fns` (pick, c_across, cur_group, cur_group_rows, cur_data, cur_data_all), or holds a column-free call `impure_const_call_text()` reports, or reads a `.env[[s]]` whose subscript `s` contains a call (`.env[[name_fn()]]`; `top_n_env_call_subscript()`, since the purity walk does not look inside a pronoun call; `.env[s]` is not a pronoun call, so the purity walk reaches its subscript; a string or bare-name subscript is not declined), the whole filter() call goes to dplyr with the user's dots (`filter_cpu_fallback()`, eager and lazy, grouped or not), so dplyr evaluates `wt` as often as it alone would. A `wt` that names no column is covered, which filter()'s own parse would otherwise fold and evaluate again. Rank-family calls with one `desc(e)` argument parse natively (`meta$rank_desc` -> the window spec's `order_desc`)
 - Expressions the IR doesn't recognize fall back to a CPU-eval boolean mask (`filter_eval_mask()`), with no data mask (only expressions that evaluate standalone, e.g. `rep(TRUE, n)`, can succeed there)
 
 ### Mutate Parsing

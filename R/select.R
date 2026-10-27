@@ -252,7 +252,8 @@ selection_is_type_only <- function(x, env, cols) {
 
 # Base functions that build names or positions out of their arguments and
 # can't return a predicate; `selection_is_type_only()` accepts a call to one
-# only when every argument is itself safe (name_builder_is_safe()).
+# only when every argument is itself safe (name_builder_is_safe()). (F75's
+# purity allowlist, ir_pure_names(), takes these names too.)
 name_builder_fns <- c(
   "names", "colnames", "sort", "rev", "unique", "setdiff", "union", "intersect",
   "paste", "paste0", "sprintf", "toupper", "tolower", "seq_len", "seq", "head",
@@ -350,12 +351,15 @@ where_predicate_is_type_only <- function(pred, env) {
   !anyNA(arg) && !identical(arg, "...") && type_only_body(body(pred), arg, environment(pred))
 }
 
-# Base R's class tests a proxy of the right class answers exactly.
+# Base R's class tests a proxy of the right class answers exactly. (F75's
+# purity allowlist, ir_pure_names(), takes these names too.)
+base_type_test_names <- c("is.numeric", "is.double", "is.integer", "is.character", "is.logical",
+                          "is.factor", "is.ordered")
+
 # @keywords internal
 is_base_type_test <- function(fn) {
-  for (test in list(is.numeric, is.double, is.integer, is.character, is.logical,
-                    is.factor, is.ordered)) {
-    if (identical(fn, test)) return(TRUE)
+  for (test in base_type_test_names) {
+    if (identical(fn, get(test, envir = baseenv()))) return(TRUE)
   }
   FALSE
 }
