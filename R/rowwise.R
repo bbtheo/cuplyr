@@ -97,7 +97,8 @@ rowwise_to_grouped <- function(x, vars) {
 rowwise.tbl_gpu <- function(.data, ...) {
   dots <- rlang::enquos(...)
   cpu <- function() {
-    gpu_fallback("rowwise", .data, function(tbl) rlang::inject(dplyr::rowwise(tbl, !!!dots)))
+    gpu_fallback("rowwise", .data, function(tbl) rlang::inject(dplyr::rowwise(tbl, !!!dots)),
+                 reason = "a rowwise() selection that reads column values, or duplicated column names, is resolved by dplyr.")
   }
   schema <- current_schema(.data)
   groups <- .subset2(.data, "groups")
@@ -133,9 +134,9 @@ rowwise.tbl_gpu <- function(.data, ...) {
 
 # Depth of rowwise_attempt() calls in progress. While a native rowwise attempt
 # runs, gpu_fallback() bails at once (before computing anything) so the attempt
-# is abandoned and the whole call reruns in dplyr; see rowwise_attempt().
-# `failed`/`why`: the message of the error the last attempt swallowed, and the
-# one the CPU rerun in progress reports (rowwise_rerun()).
+# is abandoned and the whole call reruns in dplyr; see rowwise_attempt(). What
+# the attempt learnt (the dot it stopped at, or the error it swallowed) is kept
+# in the verb call's reason collector (fallback_reasons_open()), not here.
 rowwise_state <- new.env(parent = emptyenv())
 rowwise_state$depth <- 0L
 
@@ -143,6 +144,19 @@ rowwise_state$depth <- 0L
 # @keywords internal
 rowwise_bail <- function(why = "no native rowwise form") {
   rlang::abort(why, class = "cuplyr_rowwise_bail")
+}
+
+# Note in the verb call's collector how the native rowwise route ended: the
+# message of the condition that stopped it, and whether that was the route
+# declining (a bail or a CPU-fallback request) rather than an error.
+# @keywords internal
+rowwise_note_attempt <- function(cnd, declined) {
+  col <- fallback_reasons$cur
+  if (!is.null(col)) {
+    msg <- if (inherits(cnd, "cuplyr_cpu_fallback") && !is.null(cnd$reason)) cnd$reason else conditionMessage(cnd)
+    col$attempt <- list(message = msg, declined = declined)
+  }
+  invisible(NULL)
 }
 
 # Run `native()`, a rowwise verb's native attempt, and return its result, or
@@ -156,30 +170,45 @@ rowwise_bail <- function(why = "no native rowwise form") {
 rowwise_attempt <- function(native) {
   rowwise_state$depth <- rowwise_state$depth + 1L
   on.exit(rowwise_state$depth <- rowwise_state$depth - 1L, add = TRUE)
-  rowwise_state$failed <- NULL
+  col <- fallback_reasons$cur
+  if (!is.null(col)) {
+    col$attempt <- NULL
+    col$failed <- NULL
+  }
   tryCatch(
     native(),
-    cuplyr_cpu_fallback = function(cnd) NULL,
+    cuplyr_cpu_fallback = function(cnd) {
+      rowwise_note_attempt(cnd, declined = TRUE)
+      NULL
+    },
     error = function(cnd) {
       # (re-raised from this outermost handler: from a sibling handler it would
       # be caught by this one)
       if (inherits(cnd, "cuplyr_error_gpu_oom")) stop(cnd)
-      rowwise_state$failed <- conditionMessage(cnd)
+      rowwise_note_attempt(cnd, declined = inherits(cnd, "cuplyr_rowwise_bail"))
       NULL
     }
   )
 }
 
-# Run `cpu()`, the CPU rerun of a rowwise verb whose native attempt or rewrite
-# gave NULL, with the message of the error that attempt swallowed (if any)
-# passed on to gpu_fallback()'s notification, so a native bug is not hidden
-# behind a plain "fell back" (options(cuplyr.fallback = "warn")).
+# Run `cpu(reason)`, the CPU rerun of a rowwise verb whose native rewrite or
+# attempt gave NULL, with the reason that route recorded (F88): the dot it
+# stopped at (`dots`, the user's, give its text) and the cause its parse or
+# judge claimed (fallback_dot_failed()), else the message it declined with. An
+# error the attempt swallowed is reported as such, so a native bug is not
+# hidden behind a plain "fell back" (options(cuplyr.fallback = "warn")).
+# gpu_fallback() prefixes "rowwise table: ".
 # @keywords internal
-rowwise_rerun <- function(cpu) {
-  rowwise_state$why <- rowwise_state$failed
-  rowwise_state$failed <- NULL
-  on.exit(rowwise_state$why <- NULL, add = TRUE)
-  cpu()
+rowwise_rerun <- function(cpu, dots = NULL) {
+  col <- fallback_reasons$cur
+  attempt <- if (!is.null(col)) col$attempt
+  if (!is.null(attempt) && !attempt$declined) {
+    return(cpu(paste0("the native rowwise attempt failed: ", attempt$message)))
+  }
+  if (is.null(fallback_failed())) {
+    return(cpu(attempt$message))
+  }
+  cpu(fallback_failed_reason(dots, attempt$message %||% "this call has no native rowwise form."))
 }
 
 # Run the verb that called this on the CPU: dplyr's own verb on a rowwise_df of
@@ -201,16 +230,23 @@ rowwise_cpu <- function(.data, verb, tables = character()) {
   caller <- parent.frame(2)
   mc <- match.call(fn, call, expand.dots = TRUE, envir = caller)
   first <- names(formals(fn))[[1L]]
+  # (a tbl_gpu is computed first, so the notice can size it too)
+  also <- list()
   for (nm in set_intersect(tables, names(mc))) {
     val <- rlang::eval_bare(mc[[nm]], caller)
-    mc[[nm]] <- if (is_tbl_gpu(val)) collect_other_side(val) else val
+    if (is_tbl_gpu(val)) {
+      val <- fallback_materialize(val)
+      also[[length(also) + 1L]] <- val
+      val <- collect_other_side(val)
+    }
+    mc[[nm]] <- val
   }
   verb_fn <- rlang::call2("::", quote(dplyr), rlang::sym(verb))
   gpu_fallback(verb, .data, function(tbl) {
     mc[[first]] <- tbl
     mc[[1L]] <- verb_fn
     rlang::eval_bare(mc, caller)
-  })
+  }, also = also)
 }
 
 # =============================================================================
@@ -278,14 +314,18 @@ rowwise_pure_fns <- c(
 # @param named Whether a rewritten dot needs a name
 # @keywords internal
 rowwise_rewrite_dots <- function(.data, dots, named = TRUE) {
-  rowwise_state$failed <- NULL
+  col <- fallback_reasons$cur
+  if (!is.null(col)) {
+    col$attempt <- NULL
+    col$failed <- NULL
+  }
   tryCatch(
     rowwise_rewrite_dots_(.data, dots, named),
     error = function(cnd) {
       # an OOM that survived the retry (F58) is the user's to see, not a reason
       # to rerun the call on the CPU
       if (inherits(cnd, "cuplyr_error_gpu_oom")) stop(cnd)
-      rowwise_state$failed <- conditionMessage(cnd)
+      rowwise_note_attempt(cnd, declined = FALSE)
       NULL
     }
   )
@@ -308,17 +348,24 @@ rowwise_rewrite_dots_ <- function(.data, dots, named) {
   nms <- names(dots) %||% rep("", length(dots))
   out <- dots
   for (i in seq_along(dots)) {
+    fallback_dot_begin()
     expr <- rlang::quo_get_expr(dots[[i]])
     env <- rlang::quo_get_env(dots[[i]])
     new <- rowwise_rewrite_expr(expr, env, ctx)
     if (!identical(new, expr)) {
       if (named && !nzchar(nms[i])) {
+        fallback_dot_failed(i, "an unnamed row aggregate takes its name from dplyr.")
         return(NULL)
       }
       out[[i]] <- rlang::new_quosure(new, env)
     }
-    if (any(all.names(new) %in% rowwise_forbidden_calls) ||
-        !rowwise_consts_ok(new, ctx$schema)) {
+    forbidden <- intersect(all.names(new), rowwise_forbidden_calls)
+    if (length(forbidden) > 0L) {
+      fallback_dot_failed(i, sprintf("`%s()` here has no native rowwise form.", forbidden[[1L]]))
+      return(NULL)
+    }
+    if (!rowwise_consts_ok(new, ctx$schema)) {
+      fallback_dot_failed(i, "a call that reads no column and is not known to be pure is evaluated once per row by dplyr.")
       return(NULL)
     }
     if (named) {
@@ -337,6 +384,8 @@ rowwise_rewrite_dots_ <- function(.data, dots, named) {
         typed <- substitute_zero_arg_call(rlang::quo_get_expr(out[[i]]), "cur_group_id", 1L)
         ir <- ir_parse_quo(rlang::new_quosure(typed, env), ctx$schema)
         if (is.null(ir)) {
+          # (the parse's cause, for the user's dot)
+          fallback_dot_failed(i)
           return(NULL)
         }
         ctx$schema <- update_schema_for_expr(ctx$schema, make_mutate_expr(name, ir, ctx$schema))
@@ -613,10 +662,10 @@ rowwise_with_row_ids <- function(.data, helper) {
 # else is dplyr's error.
 # @keywords internal
 summarise_rowwise <- function(.data, dots, .groups, by_quo, caller_env) {
-  cpu <- function(detail = NULL) {
+  cpu <- function(reason = NULL) {
     gpu_fallback("summarise", .data, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo))
-    }, detail = detail)
+    }, reason = reason)
   }
   # F77: a function of the user's with a native op's name runs in dplyr
   shadowed <- shadow_screen_text(dots)
@@ -634,11 +683,11 @@ summarise_rowwise <- function(.data, dots, .groups, by_quo, caller_env) {
   }
   rw <- rowwise_rewrite_dots(.data, dots)
   if (is.null(rw)) {
-    return(rowwise_rerun(cpu))
+    return(rowwise_rerun(cpu, dots))
   }
   res <- rowwise_attempt(function() transmute_run(.data, rw, rowwise = TRUE))
   if (is.null(res)) {
-    return(rowwise_rerun(cpu))
+    return(rowwise_rerun(cpu, dots))
   }
   # summarise() rebuilds the frame: nothing of the input's attributes stays
   res <- strip_frame_attrs(res)

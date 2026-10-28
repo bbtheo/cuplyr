@@ -153,14 +153,16 @@
 #' below to be notified when it's used.
 #'
 #' ## `options(cuplyr.fallback = ...)`
-#' Controls whether the CPU fallback described above (used by `filter()`
-#' and by `summarise()`'s temp-column preprocessing) notifies the caller.
-#' One of:
+#' Controls whether a CPU fallback (the one described above, and every other
+#' verb that runs in dplyr on the CPU) notifies the caller. One of:
 #' \itemize{
 #'   \item `"silent"` (default) - no notification
-#'   \item `"warn"` - emits a `warning()` naming the verb and expression
+#'   \item `"warn"` (or `"warning"`) - emits a warning naming the verb, the
+#'     expression, the reason and the size collected
 #'   \item `"error"` - `stop()`s instead of falling back
 #' }
+#' A lazy plan that only runs early on the GPU is a plan break, reported under
+#' `options(cuplyr.plan_break = )` instead. See [cuplyr-fallback].
 #'
 #' ## Performance
 #' Filtering on GPU is highly parallel and can process billions of rows
@@ -236,6 +238,9 @@ filter_out.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 # @keywords internal
 filter_impl <- function(.data, dots, by_quo, .preserve, complement, call) {
   check_unique_input_names(.data, call)
+  # (F88: the reasons this call's dots record for a CPU fallback, call-scoped)
+  prev <- fallback_reasons_open()
+  on.exit(fallback_reasons_close(prev), add = TRUE)
   if (is_rowwise_gpu(.data)) {
     return(filter_rowwise(.data, dots, by_quo, .preserve, complement, call))
   }
@@ -256,7 +261,7 @@ filter_impl <- function(.data, dots, by_quo, .preserve, complement, call) {
 # constant that is not a single logical, ...) runs the whole call in dplyr.
 # @keywords internal
 filter_rowwise <- function(.data, dots, by_quo, .preserve, complement, call) {
-  cpu <- function(detail = NULL) filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, detail = detail)
+  cpu <- function(reason = NULL) filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, reason = reason)
   if (!rlang::quo_is_null(by_quo) || !identical(.preserve, FALSE)) {
     return(cpu())
   }
@@ -267,12 +272,12 @@ filter_rowwise <- function(.data, dots, by_quo, .preserve, complement, call) {
   }
   rw <- rowwise_rewrite_dots(.data, dots, named = FALSE)
   if (is.null(rw)) {
-    return(rowwise_rerun(cpu))
+    return(rowwise_rerun(cpu, dots))
   }
   res <- rowwise_attempt(function() {
     filter_run(.data, rw, by_quo, .preserve, complement, call)
   })
-  if (is.null(res)) rowwise_rerun(cpu) else res
+  if (is.null(res)) rowwise_rerun(cpu, dots) else res
 }
 
 # A `tbl_gpu` without its fixed group keys.
@@ -292,11 +297,11 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # real verb on the CPU: named inputs (a named dot is only fine when its
   # expression is a logical literal), `.by` together with `.preserve`, and a
   # table with no columns.
-  cpu <- function() filter_cpu_fallback(.data, dots, by_quo, .preserve, complement)
+  cpu <- function(reason) filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, reason = reason)
   nms <- names(dots)
   if (!is.null(nms) && any(nzchar(nms)) &&
       any(nzchar(nms) & !vapply(dots, function(q) is.logical(rlang::quo_get_expr(q)), logical(1)))) {
-    return(cpu())
+    return(cpu("a named input that is not a logical literal is checked by dplyr."))
   }
 
   # Phase 5, task W6: `.by=` resolution -- checked up front (before the
@@ -315,8 +320,12 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   rowwise <- is_rowwise_gpu(.data)
   verb_groups <- if (!rlang::quo_is_null(by_quo)) by_cols else if (rowwise) character() else .subset2(.data, "groups")
 
-  if (!rlang::quo_is_null(by_quo) && isTRUE(.preserve)) return(cpu())
-  if (complement && length(current_schema(.data)$names) == 0L) return(cpu())
+  if (!rlang::quo_is_null(by_quo) && isTRUE(.preserve)) {
+    return(cpu("`.by` together with `.preserve = TRUE` is checked by dplyr."))
+  }
+  if (complement && length(current_schema(.data)$names) == 0L) {
+    return(cpu("filter_out() of a table with no columns is evaluated by dplyr."))
+  }
 
   # F77: a call whose head resolves to a function of the user's rather than the
   # native op (a local `abs()`) is dplyr's to run, whole, before any rewrite.
@@ -324,7 +333,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   if (!rowwise) {
     shadowed <- shadow_screen_text(dots)
     if (!is.null(shadowed)) {
-      return(filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, detail = shadowed))
+      return(filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, reason = shadowed))
     }
   }
 
@@ -334,7 +343,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   if (length(verb_groups) > 0L) {
     impure <- impure_const_call_text(dots, current_schema(.data))
     if (!is.null(impure)) {
-      return(filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, detail = impure))
+      return(filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, reason = impure))
     }
   }
 
@@ -342,7 +351,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # than dplyr does runs whole in dplyr, before anything is parsed.
   declined <- top_n_rank_decline(dots, .data)
   if (!is.null(declined)) {
-    return(filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, detail = declined))
+    return(filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, reason = declined))
   }
 
   if (length(dots) == 0 && !complement) return(.data)
@@ -426,9 +435,19 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # any const-folding logic ever runs, routes it correctly instead.
   parsed <- vector("list", length(dots))
   window_idx <- integer()
+  # (F88: the user's dot each parsed dot comes from, and the cause each
+  # unparsed one recorded, claimed below for the dot that falls back)
+  origin <- attr(dots, "provenance")$origin %||% seq_along(dots)
+  causes <- NULL
 
   for (i in seq_along(dots)) {
     ir <- parse_filter_ir(dots[[i]], schema)
+    if (is.null(ir)) {
+      cause <- fallback_cause_take()
+      if (!is.null(cause)) {
+        causes[[as.character(i)]] <- cause
+      }
+    }
     # `parsed[i] <- list(ir)`, NOT `parsed[[i]] <- ir`: the latter, when
     # `ir` is NULL (an opaque expression the IR doesn't understand -- a
     # perfectly ordinary, common case, see the opaque-dot branch below),
@@ -469,9 +488,16 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # (every dot is judged, as a vapply() over them did, before any is acted on)
   needs_expr_fallback <- FALSE
   for (i in seq_along(dots)) {
-    if ((is.null(parsed[[i]]) && dot_references_schema_col(dots[[i]], orig_names)) ||
-          (!is.null(parsed[[i]]) && ir_factor_rule(parsed[[i]], schema) != "none") ||
-          filter_ir_not_logical(parsed[[i]], schema, i %in% window_idx)) {
+    why <- if (is.null(parsed[[i]]) && dot_references_schema_col(dots[[i]], orig_names)) {
+      list(causes[[as.character(i)]])
+    } else if (!is.null(parsed[[i]]) && ir_factor_rule(parsed[[i]], schema) != "none") {
+      list("a factor in this predicate needs its labels, which dplyr compares (the GPU holds codes).")
+    } else if (filter_ir_not_logical(parsed[[i]], schema, i %in% window_idx)) {
+      list("this predicate is not a logical column expression; dplyr checks it.")
+    }
+    if (!is.null(why) && !needs_expr_fallback) {
+      # (the first dot that falls back is the one the notice names)
+      fallback_dot_failed(origin[[i]], why[[1L]])
       needs_expr_fallback <- TRUE
     }
   }
@@ -491,6 +517,10 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     if (is.null(parsed[[i]]) || ir_is_const(parsed[[i]])) {
       res <- tryCatch(list(value = rlang::eval_tidy(dots[[i]], data = list())), error = function(e) NULL)
       if (is.null(res)) {
+        fallback_dot_failed(origin[[i]], paste0(
+          "a predicate that reads no column fails outside the data mask ",
+          "(it may use pick(), n() or cur_*() inside a function); dplyr evaluates it."
+        ))
         return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
       }
       # Only a plain logical scalar is a constant predicate. A matrix/array
@@ -502,6 +532,10 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       scalar_lgl <- is.logical(value) && length(value) == 1L && is.null(dim(value))
       if (!is.null(dim(value)) || (length(verb_groups) > 0L && length(value) != 1L) ||
           (complement && !scalar_lgl) || !is.logical(value)) {
+        fallback_dot_failed(origin[[i]], paste0(
+          "a constant predicate that is not a plain logical scalar (a matrix, a per-group vector, ",
+          "a non-logical value, or any under filter_out()) is evaluated by dplyr."
+        ))
         return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
       }
       standalone[i] <- list(res)
@@ -572,7 +606,8 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       staged <- retry_on_sum_overflow(function() list(data = push_stages(.data)),
                                       function() NULL)
       if (is.null(staged)) {
-        return(filter_window_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
+        return(filter_window_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement,
+                                      reason = "an integer sum() overflowed in a window predicate; dplyr widens only the overflowing groups."))
       }
       .data <- staged$data
     } else {
@@ -747,7 +782,8 @@ filter_plan_window <- function(exprs, schema, group_cols) {
 # `complement`) on the CPU with the user's ORIGINAL dots, `.by` and
 # `.preserve`. The shared body of every filter fallback below.
 # @keywords internal
-filter_cpu_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE, detail = NULL) {
+filter_cpu_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE, detail = NULL,
+                                reason = detail) {
   verb <- if (complement) "filter_out" else "filter"
   fn <- if (complement) dplyr::filter_out else dplyr::filter
   gpu_fallback(verb, .data, function(tbl) {
@@ -759,7 +795,7 @@ filter_cpu_fallback <- function(.data, dots, by_quo, .preserve = FALSE, compleme
     env <- rlang::new_environment(rlang::list2(!!verb := fn, tbl = tbl), parent = globalenv())
     call <- rlang::call2(verb, quote(tbl), !!!dots, .by = by_quo, .preserve = .preserve)
     rlang::eval_tidy(call, env = env)
-  }, detail = detail)
+  }, reason = reason)
 }
 
 # Internal: whole-call CPU fallback for a window-bearing filter() call whose
@@ -787,8 +823,9 @@ filter_cpu_fallback <- function(.data, dots, by_quo, .preserve = FALSE, compleme
 # @return A new tbl_gpu (via gpu_fallback(), which also emits the
 #   cuplyr_fallback_notify() notification)
 # @keywords internal
-filter_window_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE) {
-  filter_cpu_fallback(.data, dots, by_quo, .preserve, complement)
+filter_window_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE,
+                                   reason = "a window predicate has no GPU plan (its stages cannot be lowered, or it is not logical).") {
+  filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, reason = reason)
 }
 
 # Internal: whole-call CPU fallback for a filter() call whose dots contain
@@ -798,7 +835,8 @@ filter_window_fallback <- function(.data, dots, by_quo, .preserve = FALSE, compl
 # substitution/expansion).
 # @keywords internal
 filter_across_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE) {
-  filter_cpu_fallback(.data, dots, by_quo, .preserve, complement)
+  filter_cpu_fallback(.data, dots, by_quo, .preserve, complement,
+                      reason = fallback_failed_reason(dots, across_fallback_default))
 }
 
 # Internal: whole-call CPU fallback for a filter() call with at least one dot
@@ -815,8 +853,15 @@ filter_across_fallback <- function(.data, dots, by_quo, .preserve = FALSE, compl
 # shapes never get here: filter_run() rewrites them to a native
 # `min_rank() <= n` first (rewrite_top_n_rank_dots()); this takes the rest.
 # @keywords internal
-filter_expr_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE) {
-  filter_cpu_fallback(.data, dots, by_quo, .preserve, complement)
+filter_expr_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE,
+                                 reason = NULL) {
+  if (is.null(reason)) {
+    # (the dot filter_run() judged to fail, with the reason its parse recorded)
+    reason <- fallback_failed_reason(
+      dots, "a predicate has a form the GPU engine does not support (or is not a logical column expression)."
+    )
+  }
+  filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, reason = reason)
 }
 
 # Internal: TRUE iff a (non-window, non-constant) dot's IR is not a logical
@@ -1022,8 +1067,9 @@ rewrite_top_n_rank_dot <- function(dot, schema) {
   # numbers (`x * rnorm(1)`) would be drawn here, again for the rewritten dot,
   # and once more when filter() parses it, where dplyr draws once (per group):
   # leave such a `wt` to dplyr, with the RNG as it was.
+  # (F88: probes; the dot's own parse records any cause)
   parsed <- top_n_rng_guard(function() {
-    tryCatch(ir_parse_expr(wt$expr, wt$env, schema), error = function(e) NULL)
+    fallback_probe(tryCatch(ir_parse_expr(wt$expr, wt$env, schema), error = function(e) NULL))
   })
   if (parsed$rng) return(NULL)
   wt_ir <- parsed$value
@@ -1046,7 +1092,7 @@ rewrite_top_n_rank_dot <- function(dot, schema) {
 
   # A rewrite that doesn't parse (unknown column, unsupported wt) is left to
   # dplyr, which raises its own error or computes the result.
-  ir <- tryCatch(ir_parse_quo(new, schema), error = function(e) NULL)
+  ir <- fallback_probe(tryCatch(ir_parse_quo(new, schema), error = function(e) NULL))
   if (is.null(ir)) return(NULL)
   new
 }
@@ -1208,7 +1254,11 @@ filter_eval_mask <- function(.data, quo, eval_result = rlang::eval_tidy(quo)) {
          "Expression: ", expr_chr, call. = FALSE)
   }
 
-  cuplyr_fallback_notify("filter", expr_chr)
+  cuplyr_fallback_notify(
+    "filter", expr_chr,
+    reason = "this predicate reads no column, so R evaluates it once.",
+    rows = max(0, dim(.data)[1], na.rm = TRUE), nothing_collected = TRUE
+  )
 
   n_rows <- dim(.data)[1]
 

@@ -4,7 +4,17 @@
 \alias{gpu_fallback}
 \title{Run a dplyr verb on the CPU and re-upload the result}
 \usage{
-gpu_fallback(verb_name, .data, expr_fn, ..., as_is = FALSE, detail = NULL)
+gpu_fallback(
+  verb_name,
+  .data,
+  expr_fn,
+  ...,
+  as_is = FALSE,
+  detail = NULL,
+  reason = detail,
+  expr = NA_character_,
+  also = NULL
+)
 }
 \arguments{
 \item{verb_name}{Character, the verb name to use in the fallback
@@ -26,8 +36,21 @@ be implemented this way -- Phase 9 task 1 made them GPU-native instead,
 see R/group-by.R -- but the parameter stays for any future fallback
 verb with the same "always a plain R object" shape).}
 
-\item{detail}{\code{NULL}, or text for the fallback notice saying why the call runs
-on the CPU (shown after the verb name by \code{\link[=cuplyr_fallback_notify]{cuplyr_fallback_notify()}}).}
+\item{detail}{Older spelling of \code{reason}.}
+
+\item{reason}{Text saying why the call runs on the CPU: the \code{reason} of the
+notice (\code{\link[=cuplyr_fallback_notify]{cuplyr_fallback_notify()}}, \link{cuplyr-fallback}). Every caller gives
+one; a reason made by \code{fallback_failed_reason()} or \code{shadow_screen_text()}
+carries the offending expression as its \code{"expr"} attribute. On a rowwise
+table it is prefixed with "rowwise table: " (\code{rowwise_rerun()} passes the
+reason its native attempt recorded).}
+
+\item{expr}{The offending expression as text, when the whole call is not at
+fault (\code{NA}: the call as a whole goes).}
+
+\item{also}{A second \code{tbl_gpu} (the \code{y} of a join, set operation or
+\verb{rows_*()}; or a list of them) the fallback collects too: its size is added
+to the notice. It must not have pending operations (compute it first).}
 }
 \value{
 Either a new \code{tbl_gpu} (grouping, execution mode, and factor

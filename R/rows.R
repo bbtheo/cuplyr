@@ -142,17 +142,18 @@ rows_run <- function(verb, x, y, by, copy, in_place, opts) {
   replay <- function() {
     for (m in msgs) rlang::cnd_signal(m)
   }
-  fallback <- function() {
+  fallback <- function(reason) {
+    y <- fallback_materialize(y)
     y_tbl <- collect_other_side(y)
     gpu_fallback(verb, x, function(tbl) {
       rows_call(verb, tbl, y_tbl, verb_args(list(copy = copy)))
-    })
+    }, reason = reason, also = y)
   }
   if (!is.null(proto)) {
     # An all-NA logical column casts to anything in dplyr, but its 0-row
     # prototype is not all-NA: only the real data can tell.
     if (rows_has_logical_y(x, y)) {
-      return(fallback())
+      return(fallback("an all-NA logical column in `y` casts to any type in dplyr; only the real data can tell."))
     }
     replay()
     rlang::cnd_signal(proto)
@@ -160,7 +161,7 @@ rows_run <- function(verb, x, y, by, copy, in_place, opts) {
 
   by_cols <- if (has_by) (by %||% current_schema(y)$names[[1L]]) else character()
   if (!rows_native_ok(verb, x, y, by_cols)) {
-    return(fallback())
+    return(fallback(paste0(verb, "() with these key or column types has no native GPU form.")))
   }
 
   mode <- if (!has_by || identical(verb, "rows_upsert")) {
@@ -172,7 +173,7 @@ rows_run <- function(verb, x, y, by, copy, in_place, opts) {
   xe <- as_eager(x)
   res <- rows_native(verb, dplyr::ungroup(xe), rows_eager(y), by_cols, mode)
   if (is.null(res)) {
-    return(fallback())
+    return(fallback("the keys conflict, repeat or are missing in a way dplyr reports itself (an error or its own result)."))
   }
 
   replay()

@@ -87,6 +87,33 @@ join_by_natively_supported <- function(by, x, y) {
   all(left_types[is_str] == "STRING" & right_types[is_str] == "STRING")
 }
 
+# Why join_by_natively_supported() said no (F88): the reason of the CPU
+# fallback notice. Runs on the fallback path only.
+# @keywords internal
+join_by_fallback_reason <- function(by, x, y) {
+  if (any(by$filter != "none")) {
+    return("this join_by() has a `closest()`, `overlaps()` or `within()` filter outside the native rolling shape (one `closest()` plus `==` conditions on searchable key types).")
+  }
+  if (!all(by$condition %in% join_native_non_equi_ops)) {
+    return(paste0("the join_by() operator ", paste0("`", setdiff(by$condition, join_native_non_equi_ops), "`", collapse = ", "),
+                  " is not a GPU join condition."))
+  }
+  "a non-equi join_by() compares a string column with a column of another type."
+}
+
+# The reason a join's resolved keys go to the CPU (factor levels that differ, a
+# Date against a POSIXct), or NULL (F88).
+# @keywords internal
+join_key_fallback_reason <- function(x_schema, y_schema, join_spec) {
+  if (join_factor_key_levels_conflict(x_schema, y_schema, join_spec)) {
+    return("factor join keys with different levels are combined by dplyr.")
+  }
+  if (join_date_posixct_needs_cpu(x_schema, y_schema, join_spec)) {
+    return("a Date key joined to a POSIXct key is compared by dplyr (local midnight of the zone).")
+  }
+  NULL
+}
+
 # Types `gpu_rolling_join()` can sort and binary-search (plus STRING, whose
 # cudf order is bytewise UTF-8, i.e. vctrs' C-locale order).
 join_rolling_types <- c("INT32", "FLOAT64", "TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS",
@@ -1400,7 +1427,9 @@ check_join_cardinality <- function(diag, join_type, multiple, relationship, unma
 #' defaulting/validation runs exactly as it would for a bare call) --
 #' `y_tbl` is collected once and reused across every retry-shaped caller.
 #' @keywords internal
-join_route_to_fallback <- function(verb_name, verb_fn, x, y, args, user_env = NULL) {
+join_route_to_fallback <- function(verb_name, verb_fn, x, y, args, user_env = NULL,
+                                   reason = "this join has a shape the GPU join does not support.") {
+  y <- fallback_materialize(y)
   y_tbl <- collect_other_side(y)
   # `by = character()`: dplyr's own deprecation warning would blame the
   # calling package (cuplyr) and add lifecycle's "report the issue" bullets, so
@@ -1424,7 +1453,7 @@ join_route_to_fallback <- function(verb_name, verb_fn, x, y, args, user_env = NU
       mute_cross_by_warning = mute_cross_by_warning
     )
   }
-  gpu_fallback(verb_name, x, run)
+  gpu_fallback(verb_name, x, run, reason = reason, also = y)
 }
 
 #' Evaluate `expr`, muting dplyr's `by = character()` deprecation warning
@@ -1469,12 +1498,12 @@ mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
   check_join_cols_unique(by, x, keep = keep, call = rlang::caller_env())
   verb <- paste0(join_type, "_join")
   verb_fn <- get(verb, envir = asNamespace("dplyr"))
-  fallback_args <- function() {
+  fallback_args <- function(reason) {
     args <- list(by = by, suffix = suffix, keep = keep, na_matches = na_matches,
                  multiple = multiple)
     if (!is.null(unmatched)) args$unmatched <- unmatched
     args$relationship <- relationship
-    join_route_to_fallback(verb, verb_fn, x, y, args, user_env = user_env)
+    join_route_to_fallback(verb, verb_fn, x, y, args, user_env = user_env, reason = reason)
   }
 
   # `multiple = "error"`/`"warning"` are undocumented (defunct in dplyr's NEWS)
@@ -1482,11 +1511,11 @@ mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
   # shape, so the native code only ever sees all/any/first/last.
   if (is.character(multiple) && length(multiple) == 1 &&
       multiple %in% c("error", "warning")) {
-    return(fallback_args())
+    return(fallback_args("`multiple = \"error\"`/`\"warning\"` is defunct in dplyr but still works; dplyr runs it."))
   }
 
   if (!join_by_natively_supported(by, x, y)) {
-    return(fallback_args())
+    return(fallback_args(join_by_fallback_reason(by, x, y)))
   }
 
   suffix <- validate_join_suffix(suffix)
@@ -1509,9 +1538,9 @@ mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
   validate_join_cols(join_spec$right, y, "Right")
   join_spec <- resolve_join_key_types(x$schema, y$schema, join_spec)
 
-  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec) ||
-      join_date_posixct_needs_cpu(x$schema, y$schema, join_spec)) {
-    return(fallback_args())
+  key_reason <- join_key_fallback_reason(x$schema, y$schema, join_spec)
+  if (!is.null(key_reason)) {
+    return(fallback_args(key_reason))
   }
 
   # `by = character()` suffixes every common name whatever `keep` says, which
@@ -1519,7 +1548,7 @@ mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
   keep_resolved <- if (cross_by) TRUE else resolve_join_keep(keep, join_spec)
 
   if (join_output_would_collide(x$schema, y$schema, join_spec, suffix, keep_resolved)) {
-    return(fallback_args())
+    return(fallback_args("`suffix` would give two output columns the same name; dplyr resolves the clash."))
   }
 
   if (cross_by) {
@@ -1540,13 +1569,13 @@ filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
   check_join_cols_unique(by, x, call = rlang::caller_env())
   verb <- paste0(join_type, "_join")
   verb_fn <- get(verb, envir = asNamespace("dplyr"))
-  fallback_args <- function() {
+  fallback_args <- function(reason) {
     join_route_to_fallback(verb, verb_fn, x, y, list(by = by, na_matches = na_matches),
-                           user_env = user_env)
+                           user_env = user_env, reason = reason)
   }
 
   if (!join_by_natively_supported(by, x, y)) {
-    return(fallback_args())
+    return(fallback_args(join_by_fallback_reason(by, x, y)))
   }
 
   na_matches <- validate_join_na_matches(na_matches)
@@ -1557,9 +1586,9 @@ filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
   validate_join_cols(join_spec$right, y, "Right")
   join_spec <- resolve_join_key_types(x$schema, y$schema, join_spec)
 
-  if (join_factor_key_levels_conflict(x$schema, y$schema, join_spec) ||
-      join_date_posixct_needs_cpu(x$schema, y$schema, join_spec)) {
-    return(fallback_args())
+  key_reason <- join_key_fallback_reason(x$schema, y$schema, join_spec)
+  if (!is.null(key_reason)) {
+    return(fallback_args(key_reason))
   }
 
   if (cross_by) {
@@ -1868,7 +1897,7 @@ cross_join.tbl_gpu <- function(x, y, ..., copy = FALSE, suffix = c(".x", ".y")) 
   if (join_output_would_collide(x$schema, y$schema, join_spec, suffix, TRUE)) {
     return(join_route_to_fallback("cross_join", dplyr::cross_join, x, y, list(
       suffix = suffix
-    )))
+    ), reason = "`suffix` would give two output columns the same name; dplyr resolves the clash."))
   }
 
   push_join("cross", x, y, join_spec, suffix = suffix, keep = TRUE,

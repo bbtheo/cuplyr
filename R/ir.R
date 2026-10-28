@@ -695,10 +695,13 @@ impure_const_call_text <- function(dots, schema, grouped = TRUE) {
     }
     if (st$impure) {
       one_line <- function(x) trimws(gsub("\\s+", " ", paste(x, collapse = " ")))
-      return(sprintf("`%s`: `%s` is not known to be pure, and dplyr evaluates it %s",
-                     substr(one_line(rlang::quo_text(dot)), 1L, 80L),
-                     substr(one_line(deparse(st$call)), 1L, 40L),
-                     if (grouped) "once per group" else "exactly once"))
+      # (the dot is the notice's `expr`; the reason names the call in it)
+      return(structure(
+        sprintf("`%s` is not known to be pure, and dplyr evaluates it %s.",
+                substr(one_line(deparse(st$call)), 1L, 40L),
+                if (grouped) "once per group" else "exactly once"),
+        expr = notice_expr_text(dot)
+      ))
     }
   }
   NULL
@@ -1090,8 +1093,11 @@ shadow_screen_text <- function(dots) {
     ir_shadow_walk(expr, env, st)
     if (!is.null(st$name)) {
       one_line <- function(x) trimws(gsub("\\s+", " ", paste(x, collapse = " ")))
-      return(sprintf("`%s`: `%s` is a function of yours (or another package's) that dplyr calls, not the native one",
-                     substr(one_line(rlang::quo_text(dot)), 1L, 80L), st$name))
+      return(structure(
+        sprintf("`%s`: `%s` is a function of yours (or another package's) that dplyr calls, not the native one",
+                substr(one_line(rlang::quo_text(dot)), 1L, 80L), st$name),
+        expr = notice_expr_text(dot)
+      ))
     }
   }
   NULL
@@ -1456,6 +1462,11 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
     if (match(fn_name, ir_pre_registry_fns, 0L) > 0L) {
       special <- ir_parse_pre_registry(expr, env, schema, allow_vector, fn_name, head)
       if (!identical(special, ir_no_special)) {
+        if (is.null(special)) {
+          # (F88: a shape of this head the GPU has no form for, when nothing
+          # inside it recorded a more precise cause first)
+          fallback_cause(fallback_no_gpu_text(fn_name))
+        }
         return(special)
       }
     }
@@ -1468,6 +1479,7 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
     entry <- ir_call_registry[[canonical]]
     in_registry <- !is.null(entry) && match(canonical, ir_internal_ops, 0L) == 0L
     if (in_registry && !ir_args_bind_by_position(fn_name, args_raw, entry$arity)) {
+      fallback_cause(sprintf("`%s()` is not on the GPU with these named arguments.", fn_name))
       return(NULL)
     }
 
@@ -1505,7 +1517,9 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
 
     if (in_registry) {
       if (!is.na(entry$arity) && length(args_raw) != entry$arity) {
-        return(NULL)  # wrong arg count for this op: not this shape, fall back
+        # wrong arg count for this op: not this shape, fall back
+        fallback_cause(sprintf("`%s()` is not on the GPU with %d arguments.", fn_name, length(args_raw)))
+        return(NULL)
       }
 
       parsed_args <- vector("list", length(args_raw))
@@ -1560,6 +1574,8 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       return(ir_lit_from_r(folded$value, allow_vector = allow_vector))
     }
 
+    # (F88: the reason a CPU-fallback notice gives, recorded where it is true)
+    fallback_cause(fallback_no_gpu_text(fn_name))
     return(NULL)
   }
 
@@ -1694,11 +1710,17 @@ ir_infer_type_memo <- function(ir, schema) {
 ir_parse_quo <- function(quo, schema) {
   expr <- rlang::quo_get_expr(quo)
   env <- rlang::quo_get_env(quo)
-  tryCatch(
+  # F88: a new dot has no cause yet; the parse records one where it gives up
+  # (fallback_cause()), and a parse that succeeds drops one a sub-attempt left.
+  col <- fallback_reasons$cur
+  if (!is.null(col)) {
+    col$cause <- NULL
+  }
+  ir <- tryCatch(
     {
       ir <- ir_parse_expr(expr, env, schema, allow_vector = FALSE)
       if (!is.null(ir) && ir_decode_meets_non_utf8(ir)) {
-        return(NULL)
+        ir <- NULL
       }
       # Timestamp arithmetic (`t + 3600`) parses fine and only its type check
       # says "CPU", as does every timestamp argument the GPU can't take
@@ -1719,8 +1741,15 @@ ir_parse_quo <- function(quo, schema) {
       }
       ir
     },
-    cuplyr_factor_needs_cpu = function(e) NULL
+    cuplyr_factor_needs_cpu = function(e) {
+      fallback_cause(fallback_type_text(e))
+      NULL
+    }
   )
+  if (!is.null(ir) && !is.null(col)) {
+    col$cause <- NULL
+  }
+  ir
 }
 
 #' Parse a `case_when()` call into IR (Phase 4)

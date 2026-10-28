@@ -441,6 +441,12 @@ plain_selection_loc <- function(quos, names) {
   loc
 }
 
+# The reason of the CPU fallback of a selection that reads values (F88).
+selection_fallback_reason <- paste0(
+  "a selection that reads column values (a `where()` predicate that is not a base type test, ",
+  "or a function call) is evaluated on the data."
+)
+
 # Resolve a selection to positions, for select()/relocate()/rename()/
 # rename_with(): on the proxy when selection_is_type_only(), otherwise on the
 # real data with a notified CPU fallback.
@@ -470,8 +476,11 @@ resolve_selection <- function(.data, schema, quos, verb, resolve, plain = FALSE)
          "duplicated column names: it needs the column values (a `where()` ",
          "predicate that is not a base type test, or a function call).", call. = FALSE)
   }
-  cuplyr_fallback_notify(verb, "a selection that may read column values (resolved on the data)")
   data <- if (has_pending_ops(.data)) compute(.data) else .data
+  size <- fallback_size(data)
+  cuplyr_fallback_notify(
+    verb, reason = selection_fallback_reason, rows = size$rows, cols = size$cols, bytes = size$bytes
+  )
   frame <- collect_frame(data)
   if (length(groups) > 0L) {
     frame <- dplyr::grouped_df(frame, groups)

@@ -339,7 +339,23 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   # missing one goes through match.arg(), whose error it keeps)
   .keep <- if (missing(.keep) && is.call(substitute(.keep))) "all" else match.arg(.keep)
   p <- sys.parent()
-  inform_colwise_grouped(.data, "mutate", if (p > 0L) sys.function(p))
+  caller_fn <- if (p > 0L) sys.function(p)
+  inform_colwise_grouped(.data, "mutate", caller_fn)
+  # (F88: dplyr's add_tally() builds this mutate() from its `wt`, so a fallback
+  # of it is add_tally()'s, for that wt. `wt` is read only once add_tally() has
+  # turned it into a quosure: a still-lazy binding is the user's promise, which
+  # reading here would force.)
+  if (p > 0L && identical(caller_fn, dplyr::add_tally)) {
+    wt_env <- sys.frame(p)
+    wt_quo <- if (exists("wt", wt_env, inherits = FALSE) &&
+                  !rlang::env_binding_are_lazy(wt_env, "wt")) {
+      get0("wt", wt_env, inherits = FALSE)
+    }
+    if (rlang::is_quosure(wt_quo) && !rlang::quo_is_null(wt_quo)) {
+      prev_as <- fallback_notice_as("add_tally", notice_expr_text(wt_quo))
+      on.exit(fallback_notice_restore(prev_as), add = TRUE)
+    }
+  }
   check_unique_input_names(.data)
 
   # quos(...) of the method's own dots is what enquos(...) returns (the same
@@ -356,6 +372,9 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   before_quo <- if (missing(.before) && is.null(substitute(.before))) null_quo else rlang::enquo(.before)
   after_quo <- if (missing(.after) && is.null(substitute(.after))) null_quo else rlang::enquo(.after)
 
+  # (F88: the reasons this call's dots record for a CPU fallback, call-scoped)
+  prev <- fallback_reasons_open()
+  on.exit(fallback_reasons_close(prev), add = TRUE)
   if (is_rowwise_gpu(.data)) {
     return(mutate_rowwise(.data, dots, by_quo, .keep, before_quo, after_quo))
   }
@@ -384,12 +403,12 @@ mutate_rowwise <- function(.data, dots, by_quo, keep, before_quo, after_quo) {
   }
   rw <- rowwise_rewrite_dots(.data, dots)
   if (is.null(rw)) {
-    return(rowwise_rerun(cpu))
+    return(rowwise_rerun(cpu, dots))
   }
   res <- rowwise_attempt(function() {
     mutate_run(.data, rw, by_quo, keep, before_quo, after_quo, rowwise = TRUE)
   })
-  if (is.null(res)) rowwise_rerun(cpu) else rowwise_column_order(res)
+  if (is.null(res)) rowwise_rerun(cpu, dots) else rowwise_column_order(res)
 }
 
 # mutate.tbl_gpu()'s body on captured arguments. `rowwise = TRUE` (a rowwise
@@ -411,7 +430,7 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   # case, and push_op()'s propagate_groups() only ever propagates
   # `.data$groups` (never `verb_groups`) into the result.
   by_given <- !rlang::quo_is_null(by_quo)
-  by_cols <- if (rowwise) character() else resolve_by(.data, by_quo, ".by")
+  by_cols <- if (rowwise) character() else resolve_by(.data, by_quo, ".by", verb = "mutate")
   verb_groups <- if (by_given) by_cols else if (rowwise) character() else .subset2(.data, "groups")
 
   if (!rlang::quo_is_null(before_quo) && !rlang::quo_is_null(after_quo)) {
@@ -421,7 +440,8 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   # Zero-column table with rows: after the arguments are validated against
   # `.data` (an invalid `.by` must still error), dplyr runs the call.
   if (length(dots) > 0L && is_zero_column_with_rows(.data)) {
-    return(mutate_expr_fallback(.data, dots, .keep, before_quo, after_quo, by_quo))
+    return(mutate_expr_fallback(.data, dots, .keep, before_quo, after_quo, by_quo,
+                                reason = "the table has no columns but has rows."))
   }
 
   if (length(dots) == 0 && identical(.keep, "all") &&
@@ -439,7 +459,7 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   if (!rowwise) {
     shadowed <- shadow_screen_text(dots)
     if (!is.null(shadowed)) {
-      return(mutate_expr_fallback(.data, dots, .keep, before_quo, after_quo, by_quo, detail = shadowed))
+      return(mutate_expr_fallback(.data, dots, .keep, before_quo, after_quo, by_quo, reason = shadowed))
     }
   }
 
@@ -450,7 +470,7 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   if (!rowwise && length(verb_groups) > 0L) {
     impure <- impure_const_call_text(dots, orig_schema)
     if (!is.null(impure)) {
-      return(mutate_expr_fallback(.data, dots, .keep, before_quo, after_quo, by_quo, detail = impure))
+      return(mutate_expr_fallback(.data, dots, .keep, before_quo, after_quo, by_quo, reason = impure))
     }
   }
 
@@ -530,12 +550,16 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   }
   if (is.null(expressions)) {
     return(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
-                                consts = evaluated$consts, provenance = provenance))
+                                consts = evaluated$consts, provenance = provenance,
+                                reason = fallback_failed_reason(
+                                  fallback_dots, "an expression has a form the GPU engine does not support."
+                                )))
   }
   # A vector literal next to a window call isn't planned together: let dplyr
   # run the whole call.
   if (isTRUE(attr(expressions, "has_window")) && isTRUE(attr(expressions, "has_vec"))) {
-    return(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo))
+    return(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
+                                reason = "a vector literal next to a window call in one mutate() is not planned together."))
   }
   dropped <- attr(expressions, "dropped")
   if (rowwise && any(dropped %in% .subset2(.data, "groups"))) {
@@ -737,7 +761,10 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
         warn_fractional_dates(fractional)
         result
       },
-      function() mutate_window_fallback(fallback_data, dots, keep, before_quo, after_quo, by_quo)
+      function() mutate_window_fallback(
+        fallback_data, dots, keep, before_quo, after_quo, by_quo,
+        reason = "an integer sum() overflowed in a window call; dplyr widens only the overflowing groups."
+      )
     ))
   }
   result <- push_chain(.data, emit)
@@ -842,13 +869,14 @@ plan_mutate_window_batches <- function(exprs, schema) {
 # @return A new tbl_gpu (via gpu_fallback(), which also emits the
 #   cuplyr_fallback_notify() notification)
 # @keywords internal
-mutate_window_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo) {
+mutate_window_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo,
+                                   reason = "a window call in this mutate() has no GPU plan (its stages cannot be lowered).") {
   gpu_fallback("mutate", .data, function(tbl) {
     rlang::inject(dplyr::mutate(
       .data = tbl, !!!dots, .by = !!by_quo, .keep = keep,
       .before = !!before_quo, .after = !!after_quo
     ))
-  })
+  }, reason = reason)
 }
 
 # Internal: whole-call CPU fallback for a mutate() call whose dots contain
@@ -865,7 +893,7 @@ mutate_across_fallback <- function(.data, dots, keep, before_quo, after_quo, by_
       .data = tbl, !!!dots, .by = !!by_quo, .keep = keep,
       .before = !!before_quo, .after = !!after_quo
     ))
-  })
+  }, reason = fallback_failed_reason(dots, across_fallback_default))
 }
 
 # Internal: whole-call CPU fallback for a mutate() call with at least one dot
@@ -883,7 +911,8 @@ mutate_across_fallback <- function(.data, dots, keep, before_quo, after_quo, by_
 # unrecognized shape, not just window/across-family ones.
 # @keywords internal
 mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo,
-                                consts = NULL, provenance = NULL, detail = NULL) {
+                                consts = NULL, provenance = NULL, detail = NULL,
+                                reason = detail) {
   gpu_fallback("mutate", .data, function(tbl) {
     # Inlined here, where the row count is known (see inline_evaluated_dots()).
     dots <- inline_evaluated_dots(dots, consts, provenance, nrow(tbl))
@@ -891,7 +920,7 @@ mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_qu
       .data = tbl, !!!dots, .by = !!by_quo, .keep = keep,
       .before = !!before_quo, .after = !!after_quo
     ))
-  }, detail = detail)
+  }, reason = reason)
 }
 
 # Parse mutate()/transmute()'s `...` dots into a list of mutate expression
@@ -1027,9 +1056,16 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
   # The user dot an expanded dot came from (read only when a floored value is
   # in play).
   origin_of <- function(i) if (is.null(provenance)) i else provenance$origin[i]
+  # (F88: the user dot that goes to the CPU, and why: the parser's cause, or
+  # `reason`; read by the caller's fallback, fallback_failed_reason())
+  fail <- function(i, reason = fallback_cause_take()) {
+    fallback_dot_failed(origin_of(i), reason)
+    NULL
+  }
   dot_names <- names(dots)
 
   for (i in seq_along(dots)) {
+    fallback_dot_begin()
     new_name <- dot_names[i]
     expr <- dots[[i]]
 
@@ -1051,7 +1087,7 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
       if (is.na(copied) &&
           (expr_may_read_cols(e, frac) || (from_across && any(frac_origin != origin)))) {
         if (!stop_on_unparseable) {
-          return(NULL)
+          return(fail(i, "it reads a fractional Date value an earlier expression made, which the GPU holds floored."))
         }
         stop(verb, "() can't read a fractional Date value on the GPU.\n",
              "Expression: ", rlang::quo_text(expr), call. = FALSE)
@@ -1089,13 +1125,23 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
           ir_check_timespan_lit(lit$value)
           lit
         },
-        cuplyr_timestamp_needs_cpu = function(e) NULL,
-        cuplyr_type_needs_cpu = function(e) NULL
+        cuplyr_timestamp_needs_cpu = function(e) {
+          fallback_cause(fallback_type_text(e))
+          NULL
+        },
+        cuplyr_type_needs_cpu = function(e) {
+          fallback_cause(fallback_type_text(e))
+          NULL
+        }
       )
     } else if (identical(const$kind, "vector")) {
       if (!vector_literals || !const$supported) {
         if (!stop_on_unparseable) {
-          return(NULL)
+          return(fail(i, if (!const$supported) {
+            "a vector constant of this type cannot be uploaded as a column."
+          } else {
+            "a vector constant is recycled per group (or per row) by dplyr."
+          }))
         }
         stop(verb, "() can't use a vector literal here.\n",
              "Expression: ", rlang::quo_text(expr), call. = FALSE)
@@ -1111,7 +1157,10 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
       # dplyr's elementwise job: CPU fallback.
       ir <- tryCatch(
         ir_parse_quo(expr, schema),
-        cuplyr_vector_literal = function(e) NULL
+        cuplyr_vector_literal = function(e) {
+          fallback_cause("a vector constant inside a larger expression is recycled by dplyr.")
+          NULL
+        }
       )
     }
 
@@ -1120,7 +1169,7 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
         # Phase 11, task L1: signal "route the whole call to the CPU
         # fallback" instead of erroring -- see this function's own
         # `stop_on_unparseable` docs.
-        return(NULL)
+        return(fail(i))
       }
 
       # Defensive, internal-only path (Phase 11, task L1): both real
@@ -1155,7 +1204,7 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     # labels, warnings and errors. Same CPU route as an unparseable dot.
     if (ir_factor_rule(ir, schema) == "cpu") {
       if (!stop_on_unparseable) {
-        return(NULL)
+        return(fail(i, "a factor in this expression needs its labels, which dplyr combines (the GPU holds codes)."))
       }
       stop(
         verb, "() can't use a factor in this expression on the GPU.\n",
@@ -1177,7 +1226,7 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     # the codes and lose or mislabel the levels.
     if (identical(unname(step$output_type), "DICTIONARY32") && !identical(ir$kind, "col")) {
       if (!stop_on_unparseable) {
-        return(NULL)
+        return(fail(i, "a factor-valued expression needs dplyr's levels (the GPU holds codes)."))
       }
       stop(
         verb, "() can't compute a factor-valued expression on the GPU.\n",
@@ -1693,13 +1742,16 @@ transmute.tbl_gpu <- function(.data, ...) {
   # (`.homonyms`, ...) binds to that argument here too.
   dots <- rlang::enquos(...)
 
+  # (F88: the reasons this call's dots record for a CPU fallback, call-scoped)
+  prev <- fallback_reasons_open()
+  on.exit(fallback_reasons_close(prev), add = TRUE)
   if (is_rowwise_gpu(.data)) {
     # as mutate_rowwise(): rewrite the row aggregates, attempt the native path,
     # else the whole call in dplyr
     cpu <- function(detail = NULL) {
       gpu_fallback("transmute", .data, function(tbl) {
         rlang::inject(dplyr::transmute(.data = tbl, !!!dots))
-      }, detail = detail)
+      }, reason = detail)
     }
     # F77: a function of the user's with a native op's name runs in dplyr
     shadowed <- shadow_screen_text(dots)
@@ -1708,10 +1760,10 @@ transmute.tbl_gpu <- function(.data, ...) {
     }
     rw <- if (length(dots) > 0L || length(.subset2(.data, "groups")) > 0L) rowwise_rewrite_dots(.data, dots)
     if (is.null(rw)) {
-      return(rowwise_rerun(cpu))
+      return(rowwise_rerun(cpu, dots))
     }
     res <- rowwise_attempt(function() transmute_run(.data, rw, rowwise = TRUE))
-    return(if (is.null(res)) rowwise_rerun(cpu) else rowwise_column_order(res))
+    return(if (is.null(res)) rowwise_rerun(cpu, dots) else rowwise_column_order(res))
   }
   transmute_run(.data, dots)
 }
@@ -1726,7 +1778,7 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
   if (length(dots) > 0L && is_zero_column_with_rows(.data)) {
     return(gpu_fallback("transmute", .data, function(tbl) {
       rlang::inject(dplyr::transmute(.data = tbl, !!!dots))
-    }))
+    }, reason = "the table has no columns but has rows."))
   }
 
   # No expressions on an ungrouped table: every column goes (n x 0 result).
@@ -1741,7 +1793,7 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
     if (!is.null(shadowed)) {
       return(gpu_fallback("transmute", .data, function(tbl) {
         rlang::inject(dplyr::transmute(.data = tbl, !!!dots))
-      }, detail = shadowed))
+      }, reason = shadowed))
     }
   }
 
@@ -1752,7 +1804,7 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
     if (!is.null(impure)) {
       return(gpu_fallback("transmute", .data, function(tbl) {
         rlang::inject(dplyr::transmute(.data = tbl, !!!dots))
-      }, detail = impure))
+      }, reason = impure))
     }
   }
 
@@ -1764,13 +1816,13 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
   if (dots_need_fallback(dots)) {
     return(gpu_fallback("transmute", .data, function(tbl) {
       rlang::inject(dplyr::transmute(.data = tbl, !!!user_dots))
-    }))
+    }, reason = fallback_failed_reason(user_dots, across_fallback_default)))
   }
   expanded <- expand_across_dots(dots, current_schema(.data), eff_groups, "transmute")
   if (isTRUE(attr(expanded, "needs_fallback"))) {
     return(gpu_fallback("transmute", .data, function(tbl) {
       rlang::inject(dplyr::transmute(.data = tbl, !!!user_dots))
-    }))
+    }, reason = fallback_failed_reason(user_dots, across_fallback_default)))
   }
   # As in mutate.tbl_gpu(): the CPU fallback runs on the pre-substitution
   # table with the ORIGINAL dots, so cur_group_id()'s helper column and the
@@ -1803,6 +1855,10 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
     return(gpu_fallback("transmute", fallback_data, function(tbl) {
       dots_cpu <- inline_evaluated_dots(fallback_dots, evaluated$consts, provenance, nrow(tbl))
       rlang::inject(dplyr::transmute(.data = tbl, !!!dots_cpu))
+    }, reason = if (is.null(expressions)) {
+      fallback_failed_reason(fallback_dots, "an expression has a form the GPU engine does not support.")
+    } else {
+      "a window call in transmute() is planned by mutate() only."
     }))
   }
 

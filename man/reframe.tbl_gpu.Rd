@@ -44,7 +44,7 @@ integer arithmetic on them, and literals.
 string column under a C collation. Sizes above 1 must agree, and no
 expression may read an earlier one's result.
 
-Anything else runs dplyr's \code{reframe()} on the CPU (see \code{\link[=cuplyr_fallback_notify]{cuplyr_fallback_notify()}}).
+Anything else runs dplyr's \code{reframe()} on the CPU (see \link{cuplyr-fallback}).
 One divergence remains on both paths: \code{quantile()}'s element names (\code{"10\%"})
 are dropped.
 }

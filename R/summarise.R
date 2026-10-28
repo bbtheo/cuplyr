@@ -292,6 +292,9 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   # specific conflict).
   caller_env <- rlang::caller_env()
   check_unique_input_names(.data)
+  # (F88: the reasons this call's dots record for a CPU fallback, call-scoped)
+  prev <- fallback_reasons_open()
+  on.exit(fallback_reasons_close(prev), add = TRUE)
 
   # A rowwise table summarises once per row (F49, R/rowwise.R).
   if (is_rowwise_gpu(.data)) {
@@ -320,7 +323,7 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   # `.data` is already grouped, and this must fire even when `...` is empty
   # (verified empirically: `summarise(group_by(df, g), .by = g)` raises the
   # grouped-`.data` error).
-  by_cols <- resolve_by(.data, by_quo, ".by")
+  by_cols <- resolve_by(.data, by_quo, ".by", verb = "summarise")
   by_given <- !rlang::quo_is_null(by_quo)
 
   dots <- rlang::quos(...)
@@ -329,13 +332,15 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
 
 # Internal: the notice for a summarise step that computes the pending lazy ops
 # early (a temp column, a window argument, an integer min()/max()). It is
-# reported like a CPU fallback (`cuplyr.fallback`), except inside the wide step
-# of a native reframe() (`with_reframe_wide()`), whose caller never wanted
-# laziness there: the wide table is computed right away anyway.
+# reported as a plan break (`cuplyr.plan_break`, F88: it runs on the GPU, nothing
+# is collected), except inside the wide step of a native reframe()
+# (`with_reframe_wide()`), whose caller never wanted laziness there: the wide
+# table is computed right away anyway. Call it BEFORE the plan is computed: it
+# counts the pending steps of `data`.
 # @keywords internal
-notify_materialization <- function(verb, expr_text) {
+notify_materialization <- function(verb, reason, expr = NA_character_, data) {
   if (!isTRUE(reframe_state$wide)) {
-    cuplyr_fallback_notify(verb, expr_text)
+    cuplyr_plan_break_notify(verb, reason, expr, data)
   }
   invisible(NULL)
 }
@@ -343,7 +348,7 @@ notify_materialization <- function(verb, expr_text) {
 # Internal: summarise_impl() with `.by=` resolved from its quosure.
 # @keywords internal
 summarise_impl_dots <- function(.data, dots, .groups, by_quo, caller_env) {
-  by_cols <- resolve_by(.data, by_quo, ".by")
+  by_cols <- resolve_by(.data, by_quo, ".by", verb = "summarise")
   by_given <- !rlang::quo_is_null(by_quo)
   summarise_impl(.data, dots, .groups, by_quo, by_cols, by_given, caller_env)
 }
@@ -364,7 +369,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   if (length(in_schema$names) == 0L) {
     return(gpu_fallback("summarise", .data, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo))
-    }))
+    }, reason = "the table has no columns but has rows, so even n() has nothing to count on the GPU."))
   }
 
   # F77: a call whose head resolves to a function of the user's rather than the
@@ -376,7 +381,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   if (!is.null(shadowed)) {
     return(gpu_fallback("summarise", .data, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo))
-    }, detail = shadowed))
+    }, reason = shadowed))
   }
 
   # F75: dplyr evaluates every dot once per group, in group order, and the
@@ -390,7 +395,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   if (!is.null(impure)) {
     return(gpu_fallback("summarise", .data, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo))
-    }, detail = impure))
+    }, reason = impure))
   }
 
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R's
@@ -419,10 +424,21 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # cur_group_id() (or a reduced call that would reach the CPU) stays on dplyr.
   if (!plain && summarise_has_cur_group_id(dots)) {
     reduced <- summarise_group_id_split(.data, dots, by_cols, by_given)
+    if (inherits(reduced, "summarise_group_id_decline")) {
+      return(gpu_fallback("summarise", .data, function(tbl) {
+        rlang::inject(dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
+      }, reason = structure(reduced$reason, expr = notice_expr_text(user_dots[[reduced$dot]]))))
+    }
     if (!is.null(reduced)) {
       res <- summarise_with_group_id(
         .data, dots, reduced, .groups, by_quo, by_cols, by_given, caller_env
       )
+      if (inherits(res, "summarise_group_id_cpu")) {
+        # (F88: the reduced call's own dot and reason, not the id dot's)
+        return(gpu_fallback("summarise", .data, function(tbl) {
+          rlang::inject(dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
+        }, reason = attr(res, "reason")))
+      }
       if (!is.null(res)) return(res)
     }
   }
@@ -430,7 +446,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   if (!plain && dots_need_fallback(dots, treat_cur_group_id_as_deferred = TRUE)) {
     return(gpu_fallback("summarise", .data, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
-    }))
+    }, reason = fallback_failed_reason(user_dots, across_fallback_default)))
   }
 
   # F34: the fallbacks below must re-run what the user wrote, not the
@@ -443,7 +459,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   if (isTRUE(attr(expanded, "needs_fallback"))) {
     return(gpu_fallback("summarise", .data, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
-    }))
+    }, reason = fallback_failed_reason(user_dots, across_fallback_default)))
   }
   # Named silently here: the "will use expression as column name" warning is
   # only true on the GPU path, so it is raised below, after the fallback
@@ -461,7 +477,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   if (is.null(simple_aggs) && summarise_has_constant_agg(dots, in_schema)) {
     return(gpu_fallback("summarise", .data, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
-    }))
+    }, reason = "a reducer whose arguments read no column is evaluated once per group by dplyr, and that is observable."))
   }
 
   # Phase 11, task L1: universal expression-level CPU fallback. Runs AFTER
@@ -483,10 +499,20 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # (the IR the pre-pass parses is kept in `ir_cache`: every later stage reuses
   # it, so each aggregate argument is parsed, and evaluated, once)
   ir_cache <- new.env(parent = emptyenv())
-  if (summarise_dots_are_sequential(dots) ||
+  sequential <- summarise_dots_are_sequential(dots)
+  if (sequential ||
       !(if (is.null(simple_plan)) summarise_dots_parseable(dots, in_schema, ir_cache) else simple_plan$parseable)) {
+    # (F88: the judge claimed the expanded dot that is not parseable; the notice
+    # names the user's dot it comes from)
+    if (!sequential) {
+      fallback_failed_remap(attr(expanded, "provenance")$origin)
+    }
     return(gpu_fallback("summarise", .data, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo))
+    }, reason = if (sequential) {
+      "a later expression reads or redefines the name an earlier one assigns; dplyr evaluates them in sequence."
+    } else {
+      fallback_failed_reason(orig_dots, "an aggregation has a form the GPU engine does not support.")
     }))
   }
 
@@ -494,10 +520,10 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
 
   # (`tbl`: the table to run on; the empty-group path hands over the pending
   # ops it has already computed)
-  cpu <- function(tbl = .data) {
+  cpu <- function(tbl = .data, reason = "an integer sum() inside an aggregation overflowed in some group; dplyr widens only those.") {
     gpu_fallback("summarise", tbl, function(tbl) {
       rlang::inject(dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo))
-    })
+    }, reason = reason)
   }
   # F42: an integer window sum() in an aggregation's argument that overflows
   # in some group reruns the whole call on the CPU (resolve_agg_window_arg()),
@@ -520,7 +546,9 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # groups. The test reads the schema only, so the default path pays nothing.
   if (summarise_wants_empty_groups(.data)) {
     # An aggregate named like a key replaces it; rare enough for the CPU.
-    if (any(names(dots) %in% .subset2(.data, "groups"))) return(cpu())
+    if (any(names(dots) %in% .subset2(.data, "groups"))) {
+      return(cpu(reason = "an output column has the name of a group column; dplyr resolves the clash."))
+    }
     return(gpu_or_cpu(function() summarise_with_empty_groups(.data, dots, retained_groups, cpu, ir_cache)))
   }
 
@@ -597,7 +625,10 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, 
     if (was_lazy) result$exec_mode <- "lazy"
     result
   }
-  cpu_route <- function() finish(fallback(base))
+  cpu_route <- function(reason = paste0("an empty group of a `.drop = FALSE` grouping meets an aggregate ",
+                                        "with no exact empty-group value (a string or timestamp min()/max(), ...).")) {
+    finish(fallback(base, reason))
+  }
 
   # Every group of group_data(), keys only (no `.rows` needed): the fixed keys
   # as they are, else the factor expansion of the observed keys.
@@ -630,7 +661,7 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, 
   if (n_obs == nrow(full_keys)) {
     return(finish(observed))
   }
-  if (n_obs > nrow(full_keys)) return(cpu_route())
+  if (n_obs > nrow(full_keys)) return(cpu_route("the observed groups outnumber the grouping keys."))
 
   if (is.na(cpu_agg) && any(vapply(agg_info$aggregations, summarise_agg_empty_on_cpu, logical(1)))) {
     return(cpu_route())
@@ -647,7 +678,7 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, 
   obs_types <- observed$schema$types[-seq_len(n_keys)]
   id_types <- identity_row$schema$types
   if (!identical(identity_row$schema$names, agg_names)) {
-    return(cpu_route())
+    return(cpu_route("the empty-group row has other columns than the observed result."))
   }
 
   # INT32 vs FLOAT64 (an integer min()/max() that did or didn't meet an empty
@@ -655,7 +686,7 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, 
   common <- ifelse(obs_types == id_types, obs_types, "FLOAT64")
   if (any(obs_types != id_types & !(obs_types %in% c("INT32", "FLOAT64") &
                                    id_types %in% c("INT32", "FLOAT64")))) {
-    return(cpu_route())
+    return(cpu_route("an aggregate changes type between observed and empty groups."))
   }
   casted <- wrap_gpu_call("summarise", {
     obs_ptr <- gpu_select(observed$ptr, n_keys + seq_along(agg_names) - 1L)
@@ -672,7 +703,7 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, 
   idx <- vctrs::vec_match(full_keys, obs_keys[keys])
   # An observed key that is not among the full keys would silently lose its
   # row: the key invariant is broken, so let dplyr do it.
-  if (sum(!is.na(idx)) != n_obs) return(cpu_route())
+  if (sum(!is.na(idx)) != n_obs) return(cpu_route("the observed groups cannot be matched to the grouping keys."))
   idx0 <- ifelse(is.na(idx), n_obs, idx - 1L)
 
   agg_ptr <- wrap_gpu_call("summarise", gpu_gather_rows(list(casted$obs, casted$id), as.numeric(idx0)))
@@ -770,7 +801,7 @@ summarise_zero_dots <- function(.data, by_cols, by_given, groups_arg, caller_env
     # result has no `$ptr` to build on). Pending ops still run first, as in
     # dplyr, so their errors (`unmatched = "error"`, ...) surface.
     if (has_pending_ops(.data)) {
-      cuplyr_fallback_notify("summarise", "no expressions (pending operations run first)")
+      cuplyr_plan_break_notify("summarise", "summarise() without expressions returns one empty row; the pending steps run first (their errors must surface)", data = .data)
       compute(.data)
     }
     return(copy_frame_meta(
@@ -986,14 +1017,23 @@ inform_regrouped_output <- function(old_groups, new_groups) {
 # @keywords internal
 summarise_dots_parseable <- function(dots, schema, ir_cache = NULL) {
   known_agg_fns <- agg_functions
+  # (F88: the dot that is not, claimed with the reason this judge found, or
+  # the cause its argument's parse recorded)
+  no <- function(i, reason = fallback_cause_take()) {
+    fallback_dot_failed(i, reason)
+    FALSE
+  }
+  # "`fn()` <what>" for the reducer of dot `i`
+  fn_says <- function(fn, what) sprintf("`%s()` %s", fn, what)
 
   for (i in seq_along(dots)) {
+    fallback_dot_begin()
     # A `fn(<column>)` dot is decided by the column's type alone: the rules
     # below for a bare column argument (timestamp, factor, typed allowlist).
     simple <- summarise_simple_dot(dots[[i]], schema)
     if (!is.null(simple)) {
       if (summarise_simple_cpu(simple, schema)) {
-        return(FALSE)
+        return(no(i, summarise_simple_cpu_reason(simple, schema)))
       }
       next
     }
@@ -1005,7 +1045,10 @@ summarise_dots_parseable <- function(dots, schema, ir_cache = NULL) {
     # where dplyr gives its value or its own error.
     parts <- tryCatch(agg_dot_parts(ir_cache, i, dots[[i]], schema), error = function(e) NULL)
     if (is.null(parts)) {
-      return(FALSE)
+      head <- call_head_name(rlang::quo_get_expr(dots[[i]]))
+      return(no(i, if (!is.null(head)) {
+        fn_says(head, "is not on the GPU with this `na.rm`, shape or position argument.")
+      }))
     }
     quo <- parts$quo
 
@@ -1018,10 +1061,20 @@ summarise_dots_parseable <- function(dots, schema, ir_cache = NULL) {
 
     decomposed <- decompose_agg_call(expr)
     if (is.null(decomposed) || is.null(decomposed$arg)) {
-      return(FALSE)  # not a `fn(single_arg)` shape (and not bare n())
+      # not a `fn(single_arg)` shape (and not bare n())
+      head <- call_head_name(expr)
+      return(no(i, if (is.null(head)) {
+        NULL
+      } else if (!head %in% known_agg_fns) {
+        summarise_shape_reason(expr, head)
+      } else {
+        fn_says(head, "is not on the GPU with these arguments.")
+      }))
     }
     if (!decomposed$fn_name %in% known_agg_fns) {
-      return(FALSE)  # unknown reducer, e.g. cor()/weighted.mean()
+      # not a reducer: an unknown one (cor()/weighted.mean()), or a function
+      # around one (`sqrt(mean(x))`)
+      return(no(i, summarise_shape_reason(expr, decomposed$fn_name)))
     }
     # n() takes no argument (`n(na.rm = TRUE)` is dplyr's "unused argument"),
     # and the one argument left must be the data: unnamed or `x =`, not a
@@ -1031,7 +1084,7 @@ summarise_dots_parseable <- function(dots, schema, ir_cache = NULL) {
     arg_name <- if (is.null(names(expr))) "" else names(expr)[[2]]
     if (identical(decomposed$fn_name, "n") || !arg_name %in% c("", "x") ||
         (identical(decomposed$fn_name, "n_distinct") && nzchar(arg_name))) {
-      return(FALSE)
+      return(no(i, fn_says(decomposed$fn_name, "is not on the GPU with this argument.")))
     }
 
     arg_expr <- decomposed$arg
@@ -1044,19 +1097,21 @@ summarise_dots_parseable <- function(dots, schema, ir_cache = NULL) {
                                          "mean", "median")
     if (ts_agg && is.symbol(arg_expr) && as.character(arg_expr) %in% schema$names &&
         unname(schema$types[match(as.character(arg_expr), schema$names)]) %in% cuplyr_timestamp_types) {
-      return(FALSE)
+      return(no(i, fn_says(decomposed$fn_name, sprintf(
+        "of a %s column is not on the GPU.", schema$types[[match(as.character(arg_expr), schema$names)]]
+      ))))
     }
     if (is.symbol(arg_expr) && as.character(arg_expr) %in% schema$names) {
       # A bare factor column only aggregates natively under n_distinct();
       # first()/max()/sum()/... need dplyr's factor semantics (CPU)
       if (identical(ir_factor_rule(ir_col(as.character(arg_expr)), schema), "bare") &&
           !identical(decomposed$fn_name, "n_distinct")) {
-        return(FALSE)
+        return(no(i, fn_says(decomposed$fn_name, "of a factor column is not on the GPU.")))
       }
       # F48: the typed allowlist (ir_native_arg_types) judges the column's type
-      if (!ir_type_gate(decomposed$fn_name,
-                        schema$types[match(as.character(arg_expr), schema$names)])) {
-        return(FALSE)
+      type <- schema$types[[match(as.character(arg_expr), schema$names)]]
+      if (!ir_type_gate(decomposed$fn_name, type)) {
+        return(no(i, fn_says(decomposed$fn_name, sprintf("of a %s column is not on the GPU.", type))))
       }
       next  # bare column reference: always valid, no temp column needed
     }
@@ -1069,24 +1124,25 @@ summarise_dots_parseable <- function(dots, schema, ir_cache = NULL) {
 
     status <- ir_factor_rule(ir, schema)
     if (status == "cpu" || (status == "bare" && !identical(decomposed$fn_name, "n_distinct"))) {
-      return(FALSE)  # a factor outside the allowed places (F18's rule): CPU
+      # a factor outside the allowed places (F18's rule): CPU
+      return(no(i, "a factor in this aggregation's argument needs its labels, which dplyr combines (the GPU holds codes)."))
     }
     if (is.null(ir)) {
-      return(FALSE)  # sub-expression shape not understood at all
+      return(no(i))  # sub-expression shape not understood at all: the parse's cause
     }
     if (ts_agg && ir_type_is_timestamp(ir, schema)) {
-      return(FALSE)
+      return(no(i, fn_says(decomposed$fn_name, "of a timestamp expression is not on the GPU.")))
     }
     # F48: the same typed allowlist for a computed argument
     arg_type <- tryCatch(ir_infer_type(ir, schema), error = function(e) NA_character_)
     if (!is.na(arg_type) && !ir_type_gate(decomposed$fn_name, arg_type)) {
-      return(FALSE)
+      return(no(i, fn_says(decomposed$fn_name, sprintf("of a %s value is not on the GPU.", arg_type))))
     }
     # F34: dplyr evaluates the argument once per group. A length-1 argument
     # that contains a reducer (`sum(mean(n))`, `sum(n())`) is a reduction of a
     # scalar, which the broadcast-then-reduce window path would get wrong.
     if (ir_agg_arg_is_scalar_reduction(ir)) {
-      return(FALSE)
+      return(no(i, "a reducer of a one-value argument (`sum(mean(x))`, `sum(n())`) is evaluated per group by dplyr."))
     }
     if (ir_has_window(ir)) {
       next  # windows-inside-summarise: always valid (Phase 6, task 4)
@@ -1098,6 +1154,14 @@ summarise_dots_parseable <- function(dots, schema, ir_cache = NULL) {
   }
 
   TRUE
+}
+
+# Internal: the reason summarise_simple_cpu() gives for a `fn(<column>)` dot.
+# @keywords internal
+summarise_simple_cpu_reason <- function(simple, schema) {
+  type <- unname(schema$types[[simple$idx]])
+  sprintf("`%s()` of a %s column is not on the GPU.", simple$fn,
+          if (identical(type, "DICTIONARY32")) "factor" else type)
 }
 
 # Internal: is the dot exactly `n()` (also `pkg::n()`)? The test the screening
@@ -1246,8 +1310,10 @@ summarise_simple_plan <- function(dots, schema) {
     if (is.null(simple)) {
       return(NULL)
     }
-    if (summarise_simple_cpu(simple, schema)) {
+    if (parseable && summarise_simple_cpu(simple, schema)) {
       parseable <- FALSE
+      # (F88: the dot that goes to the CPU, and why)
+      fallback_dot_failed(i, summarise_simple_cpu_reason(simple, schema))
     }
     aggregations[[i]] <- make_aggregation(
       dot_names[i], simple$col, unname(agg_fn_map[simple$fn]), schema$types[simple$idx],
@@ -1331,7 +1397,7 @@ summarise_core <- function(.data, dots, retained_groups = character(),
     # Pre-process: create temporary columns for expressions inside agg functions
     # (e.g. sum(carb == 4)). Per D4, if a temp column is needed and .data is
     # lazy with pending ops, this materializes (compute()) before creating the
-    # temp column and notifies via cuplyr_fallback_notify().
+    # temp column and notifies via cuplyr_plan_break_notify().
     preprocess_result <- preprocess_agg_expressions(.data, dots, ir_cache)
     working_data <- preprocess_result$data
     processed_dots <- preprocess_result$dots
@@ -1383,10 +1449,12 @@ summarise_run_now <- function(.data, aggregations, retained_groups, sort_groups 
   was_lazy <- identical(.subset2(.data, "exec_mode"), "lazy")
 
   if (was_lazy && has_pending_ops(.data)) {
-    notify_materialization("summarise", paste0(
-      "integer min()/max() (result type depends on the data): ",
-      paste(vapply(aggregations, function(a) a$output_col, character(1)), collapse = ", ")
-    ))
+    notify_materialization(
+      "summarise",
+      paste0("an integer min()/max() (result type depends on the data): ",
+             paste(vapply(aggregations, function(a) a$output_col, character(1)), collapse = ", ")),
+      data = .data
+    )
   }
   base <- compute(.data)
   base$exec_mode <- "eager"
@@ -1767,6 +1835,23 @@ decompose_agg_call <- function(expr) {
   NULL
 }
 
+# Internal (F88): why summarise() leaves dot `expr`, whose head `head` is not
+# one of its reducers, to dplyr. A head with no GPU handler anywhere is said to
+# have none (cor(), weighted.mean()); any other breaks summarise()'s own rule:
+# one reducer call per expression, optionally of a GPU expression of columns
+# (`max(x) - min(x)` combines reducers, `sqrt(mean(x))` wraps one).
+# @keywords internal
+summarise_shape_reason <- function(expr, head) {
+  rule <- "summarise() runs one reducer call per expression on the GPU (such as `mean(x * y)`)"
+  inner <- unlist(lapply(as.list(expr)[-1L], rowwise_call_heads), use.names = FALSE)
+  shape <- if (any(match(inner, agg_functions, 0L) > 0L)) {
+    sprintf("%s, not `%s()` around reducers; dplyr evaluates this one.", rule, head)
+  } else {
+    sprintf("%s, and this one calls no reducer; dplyr evaluates it.", rule)
+  }
+  fallback_no_gpu_text(head, shape)
+}
+
 # Internal (F75): the IR of aggregate argument `arg_quo` of dot `i`: the one
 # the pre-pass (summarise_dots_parseable()) parsed and kept in `ir_cache` when it
 # is for the same argument, else a fresh parse. Parsing evaluates the column-free
@@ -1823,7 +1908,7 @@ agg_dot_parts <- function(ir_cache, i, dot, schema) {
 #
 # Per D4: if a dot needs a temp column and `.data` is lazy with pending
 # operations, this materializes (`compute()`) once, up front, before
-# building any temp column, and notifies via `cuplyr_fallback_notify()` --
+# building any temp column, and notifies via `cuplyr_plan_break_notify()` --
 # `create_temp_column()` always operates on a materialized GPU pointer
 # rather than reaching into an in-progress AST.
 #
@@ -1916,8 +2001,9 @@ preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL) {
     # own docs for the full derivation and scope boundary.
     if (!is.null(ir) && ir_has_window(ir)) {
       if (has_pending_ops(working_data)) {
+        notify_materialization("summarise", "a window call inside an aggregation needs its input computed",
+                               notice_expr_text(quo), data = working_data)
         working_data <- compute(working_data)
-        notify_materialization("summarise", rlang::quo_text(quo))
       }
 
       resolved <- resolve_agg_window_arg(working_data, ir, decomposed$fn_name, i)
@@ -1944,8 +2030,9 @@ preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL) {
 
     # Materialize before building the temp column if lazy ops are pending.
     if (has_pending_ops(working_data)) {
+      notify_materialization("summarise", "an aggregation of an expression needs a temporary column computed first",
+                             notice_expr_text(quo), data = working_data)
       working_data <- compute(working_data)
-      notify_materialization("summarise", rlang::quo_text(quo))
     }
 
     # Create a temporary column name (index-based, so it stays unique even
@@ -2301,15 +2388,21 @@ summarise_has_cur_group_id <- function(dots) {
 }
 
 # Internal: split the dots of a summarise() with cur_group_id() into the dots
-# that are exactly `cur_group_id()` and the rest. `NULL` when the call is not
-# of that shape (the whole call then goes to dplyr): an unnamed or clashing
-# id dot, an id mentioned inside a longer expression, a later dot reading an
-# id name, an unnamed dot beside the id, or an ungrouped call with nothing else
-# to summarise.
-# @return `NULL`, or `list(id = <indices of the id dots>, rest = <dots>)`
+# that are exactly `cur_group_id()` and the rest. When the call is not of that
+# shape the whole call goes to dplyr: an id mentioned inside a longer
+# expression returns `NULL` (dots_need_fallback() says why), every other
+# decline returns a `summarise_group_id_decline` (an unnamed or clashing id
+# dot, a later dot reading an id name, an unnamed dot beside the id, or an
+# ungrouped call with nothing else to summarise) carrying the reason and the
+# index of the dot it is about.
+# @return `NULL`, a `summarise_group_id_decline` (`list(reason, dot)`), or
+#   `list(is_id = , rest = <dots>, keys = )`
 # @keywords internal
 summarise_group_id_split <- function(.data, dots, by_cols, by_given) {
   nms <- names(dots) %||% rep("", length(dots))
+  decline <- function(dot, reason) {
+    structure(list(reason = reason, dot = dot), class = "summarise_group_id_decline")
+  }
   is_id <- vapply(dots, function(q) {
     e <- rlang::quo_get_expr(q)
     is.call(e) && length(e) == 1L && identical(call_head_name(e), "cur_group_id")
@@ -2320,34 +2413,78 @@ summarise_group_id_split <- function(.data, dots, by_cols, by_given) {
   }, logical(1))
   if (any(mentions & !is_id)) return(NULL)
   id_names <- nms[is_id]
-  if (any(!nzchar(id_names)) || anyDuplicated(nms[nzchar(nms)]) > 0L) return(NULL)
+  if (any(!nzchar(id_names))) {
+    return(decline(which(is_id & !nzchar(nms))[[1L]],
+      "an unnamed `cur_group_id()` is named by dplyr; summarise()'s `cur_group_id()` path cannot name it."))
+  }
+  dup <- unique(nms[nzchar(nms)][duplicated(nms[nzchar(nms)])])
+  if (length(dup) > 0L) {
+    return(decline(which(nms == dup[[1L]])[[2L]],
+      sprintf("the name `%s` is used more than once, and dplyr's repeated-name rules are applied on the CPU.", dup[[1L]])))
+  }
   # An unnamed other dot (`mean(x)`, `across()`) takes its name from dplyr's
   # naming rules, which the final select() by name can't reproduce
-  if (any(!nzchar(nms[!is_id]))) return(NULL)
+  unnamed <- which(!is_id & !nzchar(nms))
+  if (length(unnamed) > 0L) {
+    return(decline(unnamed[[1L]],
+      "an unnamed dot beside `cur_group_id()` is named by dplyr; summarise()'s `cur_group_id()` path cannot name it."))
+  }
   keys <- if (by_given) by_cols else .subset2(.data, "groups")
-  if (any(id_names %in% c(keys, current_schema(.data)$names))) return(NULL)
-  # A dot reading an id name sees the id (sequential evaluation)
+  in_cols <- current_schema(.data)$names
+  clash <- which(is_id & nms %in% c(keys, in_cols))
+  if (length(clash) > 0L) {
+    nm <- nms[[clash[[1L]]]]
+    return(decline(clash[[1L]], if (nm %in% keys) {
+      sprintf("`%s` is a grouping column, and summarise()'s `cur_group_id()` path cannot take a name a group key has (dplyr replaces the key).", nm)
+    } else {
+      sprintf("`%s` is already a column of the data, and summarise()'s `cur_group_id()` path cannot take a name the data already has.", nm)
+    }))
+  }
+  # A dot reading an id name sees the id when it comes after the id dot, and
+  # the environment's value of that name when it comes before
+  rest_idx <- which(!is_id)
+  for (i in rest_idx) {
+    hit <- intersect(all.vars(rlang::quo_get_expr(dots[[i]])), id_names)
+    if (length(hit) > 0L) {
+      return(decline(i, if (i > which(is_id & nms == hit[[1L]])[[1L]]) {
+        sprintf("a later dot reads `%s`, the `cur_group_id()` result, which needs sequential evaluation on the CPU.", hit[[1L]])
+      } else {
+        sprintf("`%s` is read by this dot and also set by `cur_group_id()`; the GPU path does not order the two, so dplyr evaluates the call.", hit[[1L]])
+      }))
+    }
+  }
   rest <- dots[!is_id]
-  reads <- any(vapply(rest, function(q) {
-    any(all.vars(rlang::quo_get_expr(q)) %in% id_names)
-  }, logical(1)))
-  if (reads) return(NULL)
-  if (length(rest) == 0L && length(keys) == 0L) return(NULL)
+  if (length(rest) == 0L && length(keys) == 0L) {
+    return(decline(which(is_id)[[1L]],
+      "an ungrouped `cur_group_id()` with nothing else to summarise is evaluated by dplyr."))
+  }
   list(is_id = is_id, rest = rest, keys = keys)
 }
 
 # Internal: run a summarise() whose id dots are `cur_group_id()` on the
-# remaining dots, then append the row number under each id name. `NULL` when
-# the reduced call would reach the CPU (a "cuplyr_cpu_fallback" signal from
-# gpu_fallback()), so the caller sends the whole original call there instead:
-# a fallback result may have several rows per group.
+# remaining dots, then append the row number under each id name. When the
+# reduced call would reach the CPU (a "cuplyr_cpu_fallback" signal from
+# gpu_fallback()), a `summarise_group_id_cpu` object whose `reason` attribute
+# carries that notice's reason and expr: the caller sends the whole original
+# call there instead (a fallback result may have several rows per group).
+# NULL when the result is not a GPU table.
 # @keywords internal
 summarise_with_group_id <- function(.data, dots, split, .groups, by_quo, by_cols, by_given,
                                     caller_env) {
+  # (F88: when the reduced call would reach the CPU, its notice names the dot
+  # and the reason; the caller's whole-call fallback reports them)
+  cpu <- NULL
   res <- tryCatch(
     summarise_impl(.data, split$rest, .groups, by_quo, by_cols, by_given, caller_env),
-    cuplyr_cpu_fallback = function(cnd) NULL
+    cuplyr_cpu_fallback = function(cnd) {
+      cpu <<- cnd
+      NULL
+    }
   )
+  if (!is.null(cpu)) {
+    return(structure(list(), class = "summarise_group_id_cpu",
+                     reason = structure(cpu$reason, expr = cpu$expr)))
+  }
   if (is.null(res) || !is_tbl_gpu(res)) return(NULL)
 
   nms <- names(dots)

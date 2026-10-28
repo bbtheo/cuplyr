@@ -123,7 +123,13 @@ resolve_grouping_dots <- function(.data, dots) {
 
     # Not in the expression IR, or a factor outside the places F18's rule
     # allows (ir_factor_rule()): the caller hands the whole call to dplyr
-    if (is.null(ir) || ir_factor_rule(ir, schema) == "cpu") {
+    # (F88: claimed for the dot, with the parse's cause or the factor's)
+    if (is.null(ir)) {
+      fallback_dot_failed(expr)
+      return(NULL)
+    }
+    if (ir_factor_rule(ir, schema) == "cpu") {
+      fallback_dot_failed(expr, "a factor in this grouping expression needs its labels, which dplyr combines.")
       return(NULL)
     }
 
@@ -273,12 +279,17 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
   # user's rather than the native op is dplyr's to run (`wt` is screened by the
   # summarise() that sums it)
   shadowed <- shadow_screen_text(dots)
+  # (F88: the reasons the grouping parses record for a CPU fallback, call-scoped)
+  prev <- fallback_reasons_open()
+  on.exit(fallback_reasons_close(prev), add = TRUE)
   resolved <- if (is.null(shadowed)) resolve_grouping_dots(x, dots)
   if (is.null(resolved)) {
     return(gpu_fallback("count", x, function(tbl) {
       rlang::inject(dplyr::count(tbl, !!!dots, wt = !!wt_quo, sort = sort,
                                  name = name, .drop = .drop))
-    }, detail = shadowed))
+    }, reason = shadowed %||% fallback_failed_reason(
+      dots, "a grouping expression has a form the GPU engine does not support."
+    )))
   }
   working <- resolved$data
   dot_names <- resolved$names
@@ -292,6 +303,11 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
 
   agg_name <- resolve_agg_name(name, grouped$groups)
   agg_call <- build_count_agg_call(wt_quo, current_schema(grouped))
+  # (F88: a fallback of the summarise() below is count()'s, for `wt`)
+  if (!rlang::quo_is_null(wt_quo)) {
+    prev_as <- fallback_notice_as("count", notice_expr_text(wt_quo))
+    on.exit(fallback_notice_restore(prev_as), add = TRUE)
+  }
 
   # Defensive `dplyr.summarise.inform = FALSE` override (Phase 6, task 3),
   # matching real dplyr's own count()->tally() path (see
@@ -365,6 +381,11 @@ tally.tbl_gpu <- function(x, wt = NULL, sort = FALSE, name = NULL) {
 
   agg_name <- resolve_agg_name(name, orig_groups)
   agg_call <- build_count_agg_call(wt_quo, current_schema(x))
+  # (F88: a fallback of the summarise() below is tally()'s, for `wt`)
+  if (!rlang::quo_is_null(wt_quo)) {
+    prev_as <- fallback_notice_as("tally", notice_expr_text(wt_quo))
+    on.exit(fallback_notice_restore(prev_as), add = TRUE)
+  }
 
   # Matches real dplyr's own `tally.data.frame()`, which wraps its internal
   # `summarise()` call in `local_options(dplyr.summarise.inform = FALSE)` --
@@ -446,12 +467,17 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
 
   # F77: as count()
   shadowed <- shadow_screen_text(dots)
+  # (F88: the reasons the grouping parses record for a CPU fallback, call-scoped)
+  prev <- fallback_reasons_open()
+  on.exit(fallback_reasons_close(prev), add = TRUE)
   resolved <- if (is.null(shadowed)) resolve_grouping_dots(x, dots)
   if (is.null(resolved)) {
     return(gpu_fallback("add_count", x, function(tbl) {
       rlang::inject(dplyr::add_count(tbl, !!!dots, wt = !!wt_quo, sort = sort,
                                      name = name))
-    }, detail = shadowed))
+    }, reason = shadowed %||% fallback_failed_reason(
+      dots, "a grouping expression has a form the GPU engine does not support."
+    )))
   }
   working <- resolved$data
   dot_names <- resolved$names
@@ -465,6 +491,11 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
   all_cols <- current_schema(grouped)$names
   agg_name <- resolve_agg_name(name, all_cols)
   agg_call <- build_count_agg_call(wt_quo, current_schema(grouped), for_mutate = TRUE)
+  # (F88: a fallback of the mutate() below is add_count()'s, for `wt`)
+  if (!rlang::quo_is_null(wt_quo)) {
+    prev_as <- fallback_notice_as("add_count", notice_expr_text(wt_quo))
+    on.exit(fallback_notice_restore(prev_as), add = TRUE)
+  }
 
   result <- rlang::inject(dplyr::mutate(grouped, !!agg_name := !!agg_call))
 

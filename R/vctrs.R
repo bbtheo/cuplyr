@@ -532,7 +532,13 @@ vec_restore.tbl_gpu <- function(x, to, ...) {
 # value-based proxies: per-element over the whole table, so they collect
 
 collected_frame <- function(x, what) {
-  cuplyr_fallback_notify("vctrs", what)
+  x <- fallback_materialize(x)
+  size <- fallback_size(x)
+  cuplyr_fallback_notify(
+    "vctrs",
+    reason = paste0(what, ": vctrs compares and orders whole rows, which the GPU does not do for a tbl_gpu."),
+    rows = size$rows, cols = size$cols, bytes = size$bytes
+  )
   as.data.frame(collect_frame(x))
 }
 
@@ -625,7 +631,13 @@ cast_gpu_to_gpu <- function(x, to, ..., x_arg = "", to_arg = "", call = rlang::c
     x <- set_tbl_gpu_field(strip_frame_attrs(x), "bare_df", NULL)
     return(copy_frame_meta(x, to))
   }
-  cuplyr_fallback_notify("vctrs", "vec_cast() between tbl_gpu layouts")
+  x <- fallback_materialize(x)
+  size <- fallback_size(x)
+  cuplyr_fallback_notify(
+    "vctrs",
+    reason = "vec_cast() between tbl_gpu layouts: the two tables differ in column types or names, and vctrs casts them on the host.",
+    rows = size$rows, cols = size$cols, bytes = size$bytes
+  )
   casted <- vctrs::vec_cast(
     collect_frame(x), gpu_proto(to), x_arg = x_arg, to_arg = to_arg, call = call
   )

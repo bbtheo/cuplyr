@@ -495,7 +495,7 @@ check_zero_column_input <- function(.data, input_schema, verb) {
 #' materialization point, as for `summarise()` with no expressions).
 #'
 #' @param .data The input `tbl_gpu`
-#' @param verb Character, for the fallback notification
+#' @param verb Character, for the plan-break notification
 #' @param n Row count of the result, or `NULL` for `.data`'s own
 #' @keywords internal
 zero_column_result <- function(.data, verb, n = NULL) {
@@ -512,7 +512,10 @@ zero_column_result <- function(.data, verb, n = NULL) {
 # @keywords internal
 zero_column_nrow <- function(.data, verb) {
   if (has_pending_ops(.data)) {
-    cuplyr_fallback_notify(verb, "zero columns (pending operations run first)")
+    cuplyr_plan_break_notify(
+      verb, "a result with no columns keeps only its row count, so the pending steps run first",
+      data = .data
+    )
     .data <- compute(.data)
   }
   n <- base_dim(.data)[1]
@@ -917,6 +920,8 @@ auto_name_dots <- function(dots, verb) {
 #'   grouped-`.data` error message so it names the argument the caller
 #'   actually used
 #' @param call Environment of the user-facing verb, the call the error reports
+#' @param verb The verb's name for the CPU-fallback notice, when it is not the
+#'   name of `call`'s frame
 #' @return A character vector of column names: `character()` when `by_quo`
 #'   is NULL (absent or explicit `.by = NULL`, matching dplyr: both behave
 #'   identically, see the roxygen on the calling verb), otherwise the
@@ -925,7 +930,7 @@ auto_name_dots <- function(dots, verb) {
 #'   `starts_with("g")`, etc. all work exactly as they do for real
 #'   dplyr's own `.by=`)
 #' @keywords internal
-resolve_by <- function(.data, by_quo, arg_name = ".by", call = rlang::caller_env()) {
+resolve_by <- function(.data, by_quo, arg_name = ".by", call = rlang::caller_env(), verb = NULL) {
   if (rlang::quo_is_null(by_quo)) {
     return(character())
   }
@@ -942,10 +947,15 @@ resolve_by <- function(.data, by_quo, arg_name = ".by", call = rlang::caller_env
   if (selection_is_type_only(by_quo, NULL, schema$names)) {
     loc <- tidyselect::eval_select(by_quo, tidyselect_proxy(schema))
   } else {
-    verb <- tryCatch(rlang::call_name(rlang::frame_call(call)), error = function(e) NULL)
-    cuplyr_fallback_notify(verb %||% arg_name,
-                           "a selection that may read column values (resolved on the data)")
+    # (`verb`: the user's verb, when the caller's frame is an internal helper
+    # such as mutate_run() whose name is not it)
+    verb <- verb %||% tryCatch(rlang::call_name(rlang::frame_call(call)), error = function(e) NULL)
     data <- if (has_pending_ops(.data)) compute(.data) else .data
+    size <- fallback_size(data)
+    cuplyr_fallback_notify(
+      verb %||% arg_name, reason = selection_fallback_reason,
+      rows = size$rows, cols = size$cols, bytes = size$bytes
+    )
     loc <- tidyselect::eval_select(by_quo, collect_frame(data))
   }
   names(loc)
@@ -955,7 +965,8 @@ resolve_by <- function(.data, by_quo, arg_name = ".by", call = rlang::caller_env
 # (an eager table executes them on the spot), and run `on_overflow()` instead
 # if one does. The attempt's warnings are held back: they're re-raised when the
 # attempt succeeds and dropped when it overflows, since the rerun raises its
-# own (`mutate(s = sum(x + 1L))` would otherwise warn twice). `class` names the
+# own (`mutate(s = sum(x + 1L))` would otherwise warn twice), except a notice
+# about an invalid option, which is only said once. `class` names the
 # condition to catch (summarise() uses its own, see resolve_agg_window_arg()).
 # @keywords internal
 retry_on_sum_overflow <- function(attempt, on_overflow, class = "cuplyr_error_sum_overflow") {
@@ -996,46 +1007,291 @@ retry_on_sum_overflow <- function(attempt, on_overflow, class = "cuplyr_error_su
     ))
   }
   if (overflowed) {
-    held <- list()
+    # (an invalid-option warning is said once per session: not one to lose)
+    held <- Filter(function(w) inherits(w, "cuplyr_warning_invalid_option"), held)
     return(on_overflow())
   }
   result
 }
 
+#' CPU fallbacks and plan breaks: what cuplyr tells you, and how to hear it
+#'
+#' cuplyr runs a dplyr verb on the GPU whenever it can. Two things can happen
+#' that you may want to know about. Both are silent by default, and both are
+#' always *signalled* as conditions, so a calling handler sees them whatever the
+#' options say.
+#'
+#' @section CPU fallbacks:
+#' A verb (or part of one) that has no GPU implementation runs in dplyr on the
+#' host: cuplyr collects the table, runs the real dplyr verb and uploads the
+#' result. This is correct but slow for a big table. The condition has class
+#' `cuplyr_cpu_fallback` and the fields
+#' * `verb`: the verb, as you wrote it (`"mutate"`);
+#' * `expr`: the expression that forced the fallback (`"qnorm(x / 10)"`), or
+#'   `NA` when the call as a whole goes;
+#' * `reason`: why (`` "`qnorm()` has no GPU implementation." ``, a rowwise
+#'   table, a function of yours that shadows a native one, an unsupported
+#'   type, ...);
+#' * `rows`, `cols`, `bytes`: what is collected to the host (the table's
+#'   dimensions and an estimate of its size; a two-table verb adds both
+#'   tables).
+#'
+#' `options(cuplyr.fallback = )` decides what happens next: `"silent"` (the
+#' default), `"warn"` (a warning of class `cuplyr_warning_cpu_fallback`) or
+#' `"error"` (an error of class `cuplyr_error_fallback`, for a script that must
+#' stay on the GPU). `"warning"` is accepted as an alias of `"warn"`. The
+#' message reads
+#'
+#' ```
+#' cuplyr: mutate() fell back to CPU evaluation for: qnorm(x / 10)
+#' i Reason: `qnorm()` has no GPU implementation.
+#' i Collected 1,000 rows x 3 cols (about 24.4 kB) to run on the CPU.
+#' ```
+#'
+#' @section Plan breaks:
+#' A lazy table (`tbl_gpu(df, lazy = TRUE)`) collects its verbs into a plan and
+#' runs it when you `compute()` or `collect()`. A few steps need the result of
+#' the pending plan before it is asked for (a `summarise()` of an expression
+#' such as `mean(x * y)`, an integer `max()`, a verb that leaves no column).
+#' cuplyr then computes the plan early. This stays on the GPU and nothing is
+#' collected, but the plan is not fused across that step. The condition has
+#' class `cuplyr_plan_break` and the fields `verb`, `expr`, `reason` and
+#' `steps` (the number of pending steps that ran early).
+#'
+#' `options(cuplyr.plan_break = )` is `"silent"` (the default) or `"warn"` (a
+#' warning of class `cuplyr_warning_plan_break`); `"warning"` is an alias of
+#' `"warn"`. A plan break is never an error: nothing left the GPU.
+#'
+#' @section Invalid option values:
+#' Any other value of either option (including `"error"` for
+#' `cuplyr.plan_break`) warns once per session and value, with class
+#' `cuplyr_warning_invalid_option` (fields `option` and `value`), and the
+#' default (`"silent"`) is used.
+#'
+#' @examples
+#' \dontrun{
+#' # Count the fallbacks of a pipeline without changing its behaviour
+#' n <- 0L
+#' res <- withCallingHandlers(
+#'   my_pipeline(),
+#'   cuplyr_cpu_fallback = function(cnd) {
+#'     message("fallback in ", cnd$verb, ": ", cnd$reason)
+#'     n <<- n + 1L
+#'   }
+#' )
+#'
+#' options(cuplyr.fallback = "warn", cuplyr.plan_break = "warn")
+#' }
+#' @name cuplyr-fallback
+#' @aliases cuplyr-fallback cuplyr.fallback cuplyr.plan_break
+#' @seealso [cuplyr_fallback_notify()], [fallback-verbs]
+NULL
+
+# The valid values of the notice options. "warning" is accepted as "warn".
+cuplyr_notice_values <- list(
+  cuplyr.fallback = c("silent", "warn", "error"),
+  cuplyr.plan_break = c("silent", "warn")
+)
+
+# Invalid option values already warned about this session ("option value")
+cuplyr_notice_state <- new.env(parent = emptyenv())
+
+# The mode `option` ("cuplyr.fallback" or "cuplyr.plan_break") asks for:
+# "silent", "warn" or "error". An unknown value warns once per session and
+# value and means "silent". Runs on the notify path only.
+# @keywords internal
+cuplyr_notice_mode <- function(option) {
+  value <- getOption(option)
+  if (is.null(value)) {
+    return("silent")
+  }
+  valid <- cuplyr_notice_values[[option]]
+  if (is.character(value) && length(value) == 1L && !is.na(value)) {
+    if (identical(value, "warning")) {
+      value <- "warn"
+    }
+    if (value %in% valid) {
+      return(value)
+    }
+  }
+  shown <- paste(deparse(value, nlines = 1L), collapse = "")
+  key <- paste(option, shown)
+  if (is.null(cuplyr_notice_state[[key]])) {
+    cuplyr_notice_state[[key]] <- TRUE
+    rlang::warn(
+      sprintf("`options(%s = )` is %s, which is not one of %s (or \"warning\" for \"warn\"). Using \"silent\".",
+              option, shown, paste0("\"", valid, "\"", collapse = ", ")),
+      class = "cuplyr_warning_invalid_option",
+      option = option, value = getOption(option)
+    )
+  }
+  "silent"
+}
+
+# Estimated bytes per element of each GPU column type (strings estimated),
+# plus the validity bitmask. The one table gpu_memory_usage() uses.
+# @keywords internal
+gpu_type_bytes <- function(types) {
+  vapply(types, function(type) {
+    switch(type,
+      "FLOAT64" = 8,
+      "FLOAT32" = 4,
+      "INT64" = 8,
+      "INT32" = 4,
+      "INT16" = 2,
+      "INT8" = 1,
+      "BOOL8" = 1,
+      "STRING" = 32,  # Average estimate
+      "TIMESTAMP_DAYS" = 4,
+      "TIMESTAMP_MICROSECONDS" = 8,
+      "TIMESTAMP_NANOSECONDS" = 8,
+      "DICTIONARY32" = 4,
+      8  # Default
+    )
+  }, numeric(1), USE.NAMES = FALSE)
+}
+
+# What a CPU fallback collects: rows, cols and an estimated byte count of the
+# tbl_gpu objects in `...` (summed), from their schemas and the row counts the
+# tables already carry. Reads no data and runs no plan: a table with pending
+# ops reports its output columns and 0 rows (callers compute first).
+# @keywords internal
+fallback_size <- function(...) {
+  rows <- 0
+  cols <- 0
+  bytes <- 0
+  for (tbl in list(...)) {
+    if (!is_tbl_gpu(tbl)) {
+      next
+    }
+    types <- current_schema(tbl)$types
+    n <- if (has_pending_ops(tbl)) NA_real_ else tryCatch(base_dim(tbl)[1L], error = function(e) NA_real_)
+    if (is.na(n)) {
+      n <- 0
+    }
+    rows <- rows + n
+    cols <- cols + length(types)
+    bytes <- bytes + sum(n * gpu_type_bytes(types)) + ceiling(n / 8) * length(types)
+  }
+  list(rows = rows, cols = cols, bytes = bytes)
+}
+
+# "1,000 rows x 3 cols (about 24.4 kB)"
+# @keywords internal
+fallback_size_text <- function(rows, cols, bytes) {
+  sprintf("%s rows x %s cols (about %s)",
+          format(rows, big.mark = ",", scientific = FALSE, trim = TRUE),
+          format(cols, big.mark = ",", scientific = FALSE, trim = TRUE),
+          format(structure(bytes, class = "object_size"), units = "auto", standard = "SI"))
+}
+
+# One-line form of a quosure's text, the `expr` of a notice.
+# @keywords internal
+notice_expr_text <- function(x) {
+  if (rlang::is_quosure(x)) {
+    x <- rlang::quo_squash(x)
+  }
+  if (!is.character(x)) {
+    x <- rlang::expr_deparse(x, width = Inf)
+  }
+  trimws(gsub("\\s+", " ", paste(x, collapse = " ")))
+}
+
 #' Notify about a CPU-eval fallback, gated by `options(cuplyr.fallback = )`
 #'
-#' Per D4: default is silent (keeps existing eager behavior unchanged,
-#' e.g. `filter(rep(TRUE, n))` is legitimate dplyr, not an error). Set
-#' `options(cuplyr.fallback = "warn")` or `"error"` to surface fallbacks.
+#' The one channel for "this ran on the CPU". It always signals a
+#' `cuplyr_cpu_fallback` condition (fields `verb`, `expr`, `reason`, `rows`,
+#' `cols`, `bytes`) before any CPU work; `options(cuplyr.fallback = )` then
+#' decides whether that also warns or errors (default silent). See
+#' [cuplyr-fallback] for the options, classes and message. A lazy plan that is
+#' only computed early on the GPU goes through `cuplyr_plan_break_notify()`
+#' instead.
 #'
 #' @param verb Character, the verb name (e.g. `"filter"`, `"summarise"`)
-#' @param expr_text Character, the offending expression as text
+#' @param expr Character, the offending expression as text, or `NA` when the
+#'   call as a whole goes
+#' @param reason Character, why this runs on the CPU
+#' @param rows,cols,bytes What is collected to the host (see `fallback_size()`)
+#' @param nothing_collected `TRUE` when the CPU only evaluates an expression
+#'   that reads no column
 #' @return `invisible(NULL)`
 #' @keywords internal
-cuplyr_fallback_notify <- function(verb, expr_text) {
+cuplyr_fallback_notify <- function(verb, expr = NA_character_, reason = NULL,
+                                   rows = 0, cols = 0, bytes = 0,
+                                   nothing_collected = FALSE) {
+  if (is.null(reason) || length(reason) != 1L || is.na(reason) || !nzchar(reason)) {
+    reason <- "this operation has no GPU implementation here."
+  }
+  expr <- if (is.null(expr) || length(expr) != 1L) NA_character_ else as.character(expr)
+  # A verb built on another one reports as itself (fallback_notice_as())
+  as <- fallback_reasons$as
+  if (!is.null(as)) {
+    verb <- as$verb
+    if (!is.na(expr)) expr <- as$expr
+  }
+  head <- sprintf("cuplyr: %s() fell back to CPU evaluation for: %s",
+                  verb, if (is.na(expr)) sprintf("%s()", verb) else expr)
+  msg <- paste0(
+    head,
+    "\ni Reason: ", reason,
+    "\ni ", if (nothing_collected) {
+      "Nothing was collected: the expression reads no column."
+    } else {
+      sprintf("Collected %s to run on the CPU.", fallback_size_text(rows, cols, bytes))
+    }
+  )
+  fields <- list(verb = verb, expr = expr, reason = reason,
+                 rows = rows, cols = cols, bytes = bytes)
+
   # Lets a caller that can do without the CPU (summarise()'s cur_group_id()
   # path) catch the fallback. gpu_fallback() has already computed any pending
   # ops, but the CPU evaluation itself has not started.
-  rlang::signal(
-    sprintf("%s() fell back to CPU evaluation", verb),
-    class = "cuplyr_cpu_fallback", verb = verb
-  )
-  mode <- getOption("cuplyr.fallback", "silent")
-  msg <- sprintf(
-    "cuplyr: %s() fell back to CPU evaluation for: %s",
-    verb, expr_text
-  )
-
+  rlang::cnd_signal(rlang::cnd("cuplyr_cpu_fallback", message = msg, !!!fields,
+                               use_cli_format = FALSE))
+  mode <- cuplyr_notice_mode("cuplyr.fallback")
   switch(mode,
-    "warn" = warning(msg, call. = FALSE),
-    # classed (but a plain error otherwise) so wrap_gpu_call() lets it through
-    # unworded: nothing failed on the GPU
-    "error" = stop(structure(
-      class = c("cuplyr_error_fallback", "simpleError", "error", "condition"),
-      list(message = msg, call = NULL)
-    )),
-    invisible(NULL)
+    "warn" = rlang::exec(rlang::warn, msg, class = "cuplyr_warning_cpu_fallback", !!!fields),
+    # classed (but a plain rlang error otherwise) so wrap_gpu_call() lets it
+    # through unworded: nothing failed on the GPU
+    "error" = rlang::exec(rlang::abort, msg, class = "cuplyr_error_fallback", call = NULL, !!!fields),
+    NULL
   )
+  invisible(NULL)
+}
 
+#' Notify about a plan break, gated by `options(cuplyr.plan_break = )`
+#'
+#' A lazy plan that had to run early, on the GPU. Always signals a
+#' `cuplyr_plan_break` condition (fields `verb`, `expr`, `reason`, `steps`);
+#' `options(cuplyr.plan_break = "warn")` also warns. Never an error. Call it
+#' before the plan is computed: `steps` counts the pending non-source nodes of
+#' `data`. See [cuplyr-fallback].
+#'
+#' @param verb Character, the verb name
+#' @param reason Character, why the plan had to run
+#' @param expr Character, the expression that forced it, or `NA`
+#' @param data The lazy `tbl_gpu` whose plan is about to run
+#' @return `invisible(NULL)`
+#' @keywords internal
+cuplyr_plan_break_notify <- function(verb, reason, expr = NA_character_, data) {
+  steps <- max(1L, ast_count_ops(.subset2(data, "lazy_ops")))
+  expr <- if (is.null(expr) || length(expr) != 1L) NA_character_ else as.character(expr)
+  # (as in cuplyr_fallback_notify(): count()/tally() report their own wt)
+  as <- fallback_reasons$as
+  if (!is.null(as)) {
+    verb <- as$verb
+    if (!is.na(expr)) expr <- as$expr
+  }
+  msg <- paste0(
+    sprintf("cuplyr: %s() ran %d pending step%s on the GPU early (a plan break)",
+            verb, steps, if (steps == 1L) "" else "s"),
+    "\ni Reason: ", reason, if (!is.na(expr)) paste0(" (", expr, ")"), "."
+  )
+  fields <- list(verb = verb, expr = expr, reason = reason, steps = steps)
+  rlang::cnd_signal(rlang::cnd("cuplyr_plan_break", message = msg, !!!fields,
+                               use_cli_format = FALSE))
+  if (identical(cuplyr_notice_mode("cuplyr.plan_break"), "warn")) {
+    rlang::exec(rlang::warn, msg, class = "cuplyr_warning_plan_break", !!!fields)
+  }
   invisible(NULL)
 }

@@ -176,14 +176,16 @@ below to be notified when it's used.
 
 \subsection{\code{options(cuplyr.fallback = ...)}}{
 
-Controls whether the CPU fallback described above (used by \code{filter()}
-and by \code{summarise()}'s temp-column preprocessing) notifies the caller.
-One of:
+Controls whether a CPU fallback (the one described above, and every other
+verb that runs in dplyr on the CPU) notifies the caller. One of:
 \itemize{
 \item \code{"silent"} (default) - no notification
-\item \code{"warn"} - emits a \code{warning()} naming the verb and expression
+\item \code{"warn"} (or \code{"warning"}) - emits a warning naming the verb, the
+expression, the reason and the size collected
 \item \code{"error"} - \code{stop()}s instead of falling back
 }
+A lazy plan that only runs early on the GPU is a plan break, reported under
+\code{options(cuplyr.plan_break = )} instead. See \link{cuplyr-fallback}.
 }
 
 \subsection{Performance}{

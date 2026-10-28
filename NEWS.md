@@ -1,5 +1,30 @@
 # cuplyr (development version)
 
+## CPU fallbacks and plan breaks are told apart, and say why (F88)
+
+* A lazy plan that has to run early on the GPU (a lazy `summarise()` of an
+  expression such as `mean(x * y)`, an integer `min()`/`max()` or `sum()`, a
+  window argument, a verb that leaves no columns) used to be reported as a CPU
+  fallback, so `options(cuplyr.fallback = "error")` aborted code that never
+  left the GPU. It is now a plan break, a separate condition of class
+  `cuplyr_plan_break` with the fields `verb`, `expr`, `reason` and `steps`,
+  reported under the new `options(cuplyr.plan_break = "warn")` (default
+  `"silent"`; it never errors).
+* A CPU fallback (class `cuplyr_cpu_fallback`) now says why and how much: its
+  fields are `verb`, `expr`, `reason`, `rows`, `cols` and `bytes`, and the
+  message reads `cuplyr: mutate() fell back to CPU evaluation for: qnorm(x /
+  10)`, then the reason (`` `qnorm()` has no GPU implementation. ``) and
+  `Collected 1,000 rows x 3 cols (about 24.4 kB) to run on the CPU.` The
+  warning has class `cuplyr_warning_cpu_fallback`, the error
+  `cuplyr_error_fallback`. A selection that reads column values (`select(where(~
+  mean(.x) > 1))`, `.by = where(...)`) is a CPU fallback too, and `.by` now
+  names the verb you called.
+* `options(cuplyr.fallback = "warning")` is an alias of `"warn"` (it used to
+  mean "silent"). Any other unknown value of `cuplyr.fallback` or
+  `cuplyr.plan_break` warns once per session
+  (`cuplyr_warning_invalid_option`) and is treated as `"silent"`.
+  `?"cuplyr-fallback"` documents both options.
+
 ## User functions that shadow a native function's name are called (F77)
 
 * A function of your own with the name of a function cuplyr runs on the GPU

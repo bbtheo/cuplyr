@@ -28,8 +28,18 @@
 #' @param expr_fn A function of one argument (a tibble, already grouped if
 #'   `.data` was grouped) that calls the corresponding real dplyr verb and
 #'   returns its result.
-#' @param detail `NULL`, or text for the fallback notice saying why the call runs
-#'   on the CPU (shown after the verb name by [cuplyr_fallback_notify()]).
+#' @param reason Text saying why the call runs on the CPU: the `reason` of the
+#'   notice ([cuplyr_fallback_notify()], [cuplyr-fallback]). Every caller gives
+#'   one; a reason made by `fallback_failed_reason()` or `shadow_screen_text()`
+#'   carries the offending expression as its `"expr"` attribute. On a rowwise
+#'   table it is prefixed with "rowwise table: " (`rowwise_rerun()` passes the
+#'   reason its native attempt recorded).
+#' @param detail Older spelling of `reason`.
+#' @param expr The offending expression as text, when the whole call is not at
+#'   fault (`NA`: the call as a whole goes).
+#' @param also A second `tbl_gpu` (the `y` of a join, set operation or
+#'   `rows_*()`; or a list of them) the fallback collects too: its size is added
+#'   to the notice. It must not have pending operations (compute it first).
 #' @param as_is Logical. If `TRUE`, `expr_fn`'s return value is always
 #'   returned unchanged, never re-uploaded -- for a verb that returns
 #'   metadata *about* the grouping/data rather than a transformed dataset,
@@ -52,7 +62,8 @@
 #'   returned `tbl_gpu` carries those keys as `$fixed_keys` (see
 #'   `fixed_keys_of()`); verbs that regroup get none.
 #' @keywords internal
-gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE, detail = NULL) {
+gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE, detail = NULL,
+                         reason = detail, expr = NA_character_, also = NULL) {
   if (!is_tbl_gpu(.data)) {
     stop("gpu_fallback() requires a tbl_gpu object.", call. = FALSE)
   }
@@ -60,7 +71,8 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE, detail =
   # F49: a native rowwise attempt (rowwise_attempt()) abandons itself instead
   # of running dplyr on part of the call: bail before anything is computed.
   if (rowwise_state$depth > 0L) {
-    rowwise_bail("a CPU fallback was requested")
+    # (the attempt's error is reported by the rerun's notice: say what is missing)
+    rowwise_bail(if (is.null(reason)) "a CPU fallback was requested" else as.character(reason))
   }
 
   was_lazy <- identical(.data$exec_mode, "lazy")
@@ -69,17 +81,18 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE, detail =
   # always operates on a real, fully-computed GPU table.
   materialized <- if (has_pending_ops(.data)) compute(.data) else .data
 
-  # (with the error a failed native rowwise attempt swallowed: rowwise_rerun())
-  # (read once: a fallback inside the rerun's own per-row code is unrelated)
-  why <- rowwise_state$why
-  rowwise_state$why <- NULL
-  cuplyr_fallback_notify(verb_name, if (!is.null(detail)) {
-    sprintf("%s() (%s)", verb_name, detail)
-  } else if (is.null(why)) {
-    sprintf("%s()", verb_name)
-  } else {
-    sprintf("%s() (the native rowwise attempt failed: %s)", verb_name, why)
-  })
+  if (is.na(expr) && !is.null(attr(reason, "expr"))) {
+    expr <- attr(reason, "expr")
+  }
+  if (!is.null(reason)) {
+    attr(reason, "expr") <- NULL
+  }
+  if (is_rowwise_gpu(materialized)) {
+    reason <- paste0("rowwise table: ", reason %||% "this call has no native rowwise form.")
+  }
+  size <- do.call(fallback_size, c(list(materialized), if (is_tbl_gpu(also)) list(also) else unname(also)))
+  cuplyr_fallback_notify(verb_name, expr, reason,
+                         rows = size$rows, cols = size$cols, bytes = size$bytes)
 
   # dplyr sees the frame it would have: the input's attributes and class
   # (a bare data.frame stays one), so its own result carries them (F31). A
@@ -177,6 +190,231 @@ has_list_column <- function(df) {
   any(vapply(df, is.list, logical(1)))
 }
 
+# -----------------------------------------------------------------------------
+# Why a dot goes to the CPU (F88): the reason is recorded by the decision that
+# sends the dot there, never worked out afterwards.
+#
+# A verb call opens a collector (fallback_reasons_open(), restored by on.exit,
+# so it lives exactly as long as the call). Inside it:
+# - the expression parser records a cause where it gives up on the dot it is
+#   parsing (fallback_cause(): a call head with no GPU handler, a type the GPU
+#   hands to the CPU). ir_parse_quo() starts every dot with no cause and drops
+#   the cause of a parse that succeeded (a sub-attempt that recovered);
+# - the code that judges a dot claims the failure for it when it decides the
+#   dot goes to the CPU (fallback_dot_failed(): the dot's index in the dots the
+#   verb reports, and the pending cause or its own reason);
+# - the fallback reads that claim (fallback_failed_reason()).
+# A pending cause belongs to one dot: every per-dot judge loop starts a dot
+# with fallback_dot_begin(), and a parse made only to test something (a type,
+# a rewrite) runs inside fallback_probe(), which leaves the pending cause as
+# it found it. "`f()` has no GPU implementation." is built only by
+# fallback_no_gpu_text(), which says it only of a head cuplyr has no GPU
+# handler for anywhere (fallback_has_gpu_handler()).
+# The collector holds strings and integers only (no quosure, no environment),
+# and nothing is left of it once the verb returns. Recording happens only on
+# failure paths; a native call pays the open/close.
+# -----------------------------------------------------------------------------
+
+fallback_reasons <- new.env(parent = emptyenv())
+fallback_reasons$cur <- NULL
+fallback_reasons$as <- NULL
+
+# Open a fresh collector for a verb call; returns the one it replaces, which the
+# caller restores on exit: `prev <- fallback_reasons_open()`,
+# `on.exit(fallback_reasons_close(prev), add = TRUE)`.
+# @keywords internal
+fallback_reasons_open <- function() {
+  prev <- fallback_reasons$cur
+  fallback_reasons$cur <- new.env(parent = emptyenv())
+  prev
+}
+
+# @keywords internal
+fallback_reasons_close <- function(prev) {
+  fallback_reasons$cur <- prev
+  invisible(NULL)
+}
+
+# Record `reason` as the cause the parse in progress gives up for (the first one
+# recorded since the dot's parse began wins: the innermost failing call).
+# @keywords internal
+fallback_cause <- function(reason) {
+  col <- fallback_reasons$cur
+  if (!is.null(col) && is.null(col$cause)) {
+    col$cause <- reason
+  }
+  invisible(NULL)
+}
+
+# A judge starts dot `i`: whatever cause is pending belongs to an earlier dot
+# (or a probe) and is dropped, so only this dot's own parse can supply its
+# reason. Every per-dot judge loop calls it first (ir_parse_quo() does the
+# same for the dot it parses).
+# @keywords internal
+fallback_dot_begin <- function() {
+  col <- fallback_reasons$cur
+  if (!is.null(col)) {
+    col$cause <- NULL
+  }
+  invisible(NULL)
+}
+
+# Evaluate `expr`, a parse made only to test something (a type, a shape),
+# leaving the pending cause as it was: a probe never supplies a reason.
+# @keywords internal
+fallback_probe <- function(expr) {
+  col <- fallback_reasons$cur
+  if (is.null(col)) {
+    return(expr)
+  }
+  saved <- col$cause
+  on.exit(col$cause <- saved, add = TRUE)
+  expr
+}
+
+# A verb built on another (count()'s `wt` is summed by a summarise() it
+# calls) reports a fallback of the inner verb as its own: `verb`, and `expr`
+# (the user's argument text) for a notice that names an expression, which can
+# only be the one it built from that argument. Returns the setting it
+# replaces, for the caller's on.exit(fallback_notice_restore(prev)).
+# @keywords internal
+fallback_notice_as <- function(verb, expr) {
+  prev <- fallback_reasons$as
+  fallback_reasons$as <- list(verb = verb, expr = expr)
+  prev
+}
+
+# @keywords internal
+fallback_notice_restore <- function(prev) {
+  fallback_reasons$as <- prev
+  invisible(NULL)
+}
+
+# The cause pending since the last parse began, removed from the collector.
+# @keywords internal
+fallback_cause_take <- function() {
+  col <- fallback_reasons$cur
+  if (is.null(col)) {
+    return(NULL)
+  }
+  cause <- col$cause
+  col$cause <- NULL
+  cause
+}
+
+# The verb judged its dot `dot` to go to the CPU, for `reason` (by default the
+# cause the parse just recorded; NULL when nothing is known). `dot` is the index
+# of the dot in the list the verb reports (NA: the dots as a whole), or the dot
+# itself (a quosure, kept as its text). The last claim of the call is the one
+# read: a judge claims for the dot it stops at.
+# @keywords internal
+fallback_dot_failed <- function(dot, reason = fallback_cause_take()) {
+  col <- fallback_reasons$cur
+  if (is.null(col)) {
+    return(invisible(NULL))
+  }
+  if (rlang::is_quosure(dot)) {
+    dot <- notice_expr_text(dot)
+  }
+  col$failed <- list(dot = dot, reason = reason)
+  col$cause <- NULL
+  invisible(NULL)
+}
+
+# The claim of the call (`list(dot, reason)`), or NULL.
+# @keywords internal
+fallback_failed <- function() {
+  col <- fallback_reasons$cur
+  if (is.null(col)) NULL else col$failed
+}
+
+# Re-index the claim through `origin` (the user's dot each judged dot comes
+# from, as in the "provenance" of expand_across_dots()).
+# @keywords internal
+fallback_failed_remap <- function(origin) {
+  col <- fallback_reasons$cur
+  rec <- if (!is.null(col)) col$failed
+  if (!is.null(rec) && is.numeric(rec$dot) && !is.na(rec$dot) && rec$dot <= length(origin)) {
+    col$failed$dot <- origin[[rec$dot]]
+  }
+  invisible(NULL)
+}
+
+#' The reason a verb call's dot goes to the CPU (F88)
+#'
+#' Reads what the call's own decision recorded (see the collector notes in
+#' `R/fallback.R`): the reason claimed for the failing dot, with that dot's text
+#' as the `"expr"` attribute (which `gpu_fallback()` takes as the notice's
+#' `expr`). Call it only right after the judge of the dots said one fails.
+#'
+#' @param dots The dots the claim's index refers to (the user's)
+#' @param default The verb's own reason, used when the call claimed no dot or
+#'   the claim names no cause (then without, or with, an `expr`)
+#' @return A reason string, with an `"expr"` attribute when a dot is known
+#' @keywords internal
+fallback_failed_reason <- function(dots, default) {
+  rec <- fallback_failed()
+  if (is.null(rec)) {
+    return(default)
+  }
+  expr <- if (is.character(rec$dot)) {
+    rec$dot
+  } else if (!is.na(rec$dot) && rec$dot >= 1L && rec$dot <= length(dots)) {
+    notice_expr_text(dots[[rec$dot]])
+  } else {
+    NA_character_
+  }
+  structure(rec$reason %||% default, expr = expr)
+}
+
+# Call heads that are syntax or helpers some verb runs on the GPU without an
+# expression-engine op of their own: sort and pronoun syntax, the across()
+# family and its selection helpers, the context helpers some verb rewrites.
+fallback_syntax_heads <- c(
+  "desc", "$", "[[", "(", "~", "function", "c", "c_across",
+  "across", "if_any", "if_all", "pick", "where", "everything", "all_of",
+  "any_of", "contains", "matches", "num_range", "last_col",
+  "cur_group_id", "cur_group", "cur_group_rows", "cur_column", "n", "range"
+)
+
+# TRUE when cuplyr runs `name()` on the GPU somewhere: an expression-engine op
+# (not one only cuplyr's own rewrites build, ir_internal_ops), a head the
+# parser treats before the registry, a summarise() reducer, or syntax
+# (fallback_syntax_heads). Fallback paths only.
+# @keywords internal
+fallback_has_gpu_handler <- function(name) {
+  op <- ir_op_alias(name)
+  (!is.null(ir_call_registry[[op]]) && match(op, ir_internal_ops, 0L) == 0L) ||
+    match(name, c(ir_pre_registry_fns, agg_functions, fallback_syntax_heads), 0L) > 0L
+}
+
+# The one builder of "`f()` has no GPU implementation." (F88). It is said only
+# of a function cuplyr has no GPU handler for anywhere
+# (fallback_has_gpu_handler()); for one it has, the dot fell back for its
+# shape, which `shape` says (the caller knows it), else a generic text that is
+# true of any such head.
+# @keywords internal
+fallback_no_gpu_text <- function(name, shape = NULL) {
+  if (!fallback_has_gpu_handler(name)) {
+    return(sprintf("`%s()` has no GPU implementation.", name))
+  }
+  shape %||% sprintf("`%s()` runs on the GPU, but not in this form here; dplyr evaluates it.", name)
+}
+
+# The reason the parser records for a type signal it turns into "unsupported".
+# @keywords internal
+fallback_type_text <- function(cnd) {
+  paste0("unsupported type: ", sub("\\.$", "", trimws(conditionMessage(cnd))), ".")
+}
+
+# The other side `y` of a two-table fallback, computed if it holds pending ops,
+# so the notice can size it from the table it is about to collect (collect()
+# would run the plan anyway; the closure then reads the computed table).
+# @keywords internal
+fallback_materialize <- function(y) {
+  if (has_pending_ops(y)) compute(y) else y
+}
+
 # Collect the "other side" of a two-table verb (join, set operation, rows_*)
 # to a plain data frame if it's a tbl_gpu (materializing pending lazy ops via
 # collect()'s own compute() call), or pass a plain data.frame through as-is.
@@ -229,7 +467,8 @@ collect_other_side <- function(y) {
 #' Every fallback calls [cuplyr_fallback_notify()], so
 #' `options(cuplyr.fallback = "warn")` (or `"error"`) can be used to surface
 #' (or forbid) accidental fallbacks in code that's expected to stay fully
-#' GPU-native.
+#' GPU-native. The notice names the verb, the expression, the reason and the
+#' size collected; see [cuplyr-fallback].
 #'
 #' @param .data,x,y,tbl,.tbl A `tbl_gpu` object (or, for `y`/two-table verbs,
 #'   optionally a plain `data.frame`).
@@ -262,7 +501,7 @@ do.tbl_gpu <- function(.data, ...) {
   dots <- rlang::enquos(...)
   gpu_fallback("do", .data, function(tbl) {
     rlang::inject(dplyr::do(tbl, !!!dots))
-  })
+  }, reason = "do() runs arbitrary R code on each group's data frame.")
 }
 
 # =============================================================================
@@ -345,6 +584,7 @@ nest_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, keep = NULL,
   }
   # dplyr nests pieces of y's own class (dplyr_reconstruct(template = y)): a
   # grouped or rowwise tbl_gpu y is collected with its grouping (F49).
+  y <- fallback_materialize(y)
   y_tbl <- if (is_tbl_gpu(y)) collect(y) else collect_other_side(y)
   # `by = character()`: dplyr's own deprecation warning would blame the
   # calling package (cuplyr), so warn here with the user's frame and mute
@@ -359,7 +599,7 @@ nest_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, keep = NULL,
                        na_matches = na_matches, unmatched = unmatched),
       cross_by
     )
-  })
+  }, reason = "nest_join() builds a list column of data frames, which has no GPU form.", also = y)
 }
 
 # rows_insert()/rows_append()/rows_update()/rows_patch()/rows_upsert()/
@@ -433,7 +673,7 @@ group_split.tbl_gpu <- function(.tbl, ..., .keep = TRUE, keep = lifecycle::depre
   if (length(out$schema$names) == 0L) {
     return(gpu_fallback("group_split", .tbl, function(tbl) {
       dplyr::group_split(tbl, ..., .keep = .keep)
-    }))
+    }, reason = "the table has no columns left to split."))
   }
 
   rows <- compute_group_data(data)$.rows
@@ -476,7 +716,7 @@ group_split.tbl_gpu <- function(.tbl, ..., .keep = TRUE, keep = lifecycle::depre
 group_map.tbl_gpu <- function(.data, .f, ..., .keep = FALSE) {
   gpu_fallback("group_map", .data, function(tbl) {
     dplyr::group_map(tbl, .f, ..., .keep = .keep)
-  })
+  }, reason = "group_map() calls your function on each group's data frame.")
 }
 
 #' @rdname fallback-verbs
@@ -485,7 +725,7 @@ group_map.tbl_gpu <- function(.data, .f, ..., .keep = FALSE) {
 group_modify.tbl_gpu <- function(.data, .f, ..., .keep = FALSE) {
   gpu_fallback("group_modify", .data, function(tbl) {
     dplyr::group_modify(tbl, .f, ..., .keep = .keep)
-  })
+  }, reason = "group_modify() calls your function on each group's data frame.")
 }
 
 #' @rdname fallback-verbs
@@ -496,7 +736,7 @@ group_nest.tbl_gpu <- function(.tbl, ..., .key = "data", keep = FALSE) {
   # group_by() as a value; dplyr itself raises the grouped-input dots warning.
   gpu_fallback("group_nest", .tbl, function(tbl) {
     dplyr::group_nest(tbl, ..., .key = .key, keep = keep)
-  })
+  }, reason = "group_nest() builds a list column of data frames, which has no GPU form.")
 }
 
 #' @rdname fallback-verbs
@@ -506,5 +746,5 @@ nest_by.tbl_gpu <- function(.data, ..., .key = "data", .keep = FALSE) {
   # `...` forwarded unchanged, see group_nest.tbl_gpu().
   gpu_fallback("nest_by", .data, function(tbl) {
     dplyr::nest_by(tbl, ..., .key = .key, .keep = .keep)
-  })
+  }, reason = "nest_by() builds a list column of data frames, which has no GPU form.")
 }

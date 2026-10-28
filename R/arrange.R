@@ -91,7 +91,7 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
   if (legacy_locale || !(is.null(.locale) || identical(.locale, "C"))) {
     return(gpu_fallback("arrange", .data, function(tbl) {
       dplyr::arrange(tbl, !!!dots, .by_group = .by_group, .locale = .locale)
-    }))
+    }, reason = "only the C locale (byte order) sorts on the GPU; dplyr applies the other collation."))
   }
 
   if (length(dots) == 0) {
@@ -120,7 +120,7 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
   if (!is.null(shadowed)) {
     return(gpu_fallback("arrange", .data, function(tbl) {
       dplyr::arrange(tbl, !!!user_dots, .by_group = .by_group, .locale = .locale)
-    }, detail = shadowed))
+    }, reason = shadowed))
   }
 
   dots <- colwise_rewrite_dots(dots, schema)
@@ -141,7 +141,7 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
     } else {
       return(gpu_fallback("arrange", .data, function(tbl) {
         dplyr::arrange(tbl, !!!user_dots, .by_group = .by_group, .locale = .locale)
-      }))
+      }, reason = structure(arrange_key_reason(quo, schema), expr = notice_expr_text(quo))))
     }
   }
 
@@ -197,6 +197,50 @@ arrange_dot_is_native <- function(quo, schema) {
     return(ir_factor_rule(neg, schema) != "cpu")
   }
   TRUE
+}
+
+# Internal (F88): why the sort key `quo` is not native. arrange() sorts by
+# columns only (arrange_dot_is_native()) and never parses a key, so this is
+# arrange's own rule; it also names the first function the key calls on a
+# column that cuplyr has no GPU handler for anywhere (fallback_has_gpu_handler():
+# never desc(), a pronoun, `(` or an engine op), read without evaluating
+# anything (a column-free call, which the engine folds, and the body of a
+# lambda or formula are not looked at).
+# @keywords internal
+arrange_key_reason <- function(quo, schema) {
+  rule <- "sort key must be a column, `desc()` of one or `-` of one on the GPU"
+  missing_fn <- function(e) {
+    if (inherits(e, "quosure")) {
+      e <- rlang::quo_get_expr(e)
+    }
+    if (!is.call(e) || rlang::is_missing(e) || is_data_pronoun_call(e) || is_env_pronoun_call(e)) {
+      return(NULL)
+    }
+    name <- call_head_name(e)
+    # (the body of a lambda or formula, and the arguments of across() & co,
+    # which are column selections or `.fns`, never a sort expression)
+    if (!is.null(name) && name %in% c("~", "function", "across", "if_any", "if_all", "pick", "c_across")) {
+      return(NULL)
+    }
+    for (a in as.list(e)[-1L]) {
+      if (!rlang::is_missing(a)) {
+        hit <- missing_fn(a)
+        if (!is.null(hit)) {
+          return(hit)
+        }
+      }
+    }
+    if (!is.null(name) && !fallback_has_gpu_handler(name) && expr_has_column_ref(e, schema)) {
+      return(name)
+    }
+    NULL
+  }
+  fn <- missing_fn(rlang::quo_get_expr(quo))
+  if (is.null(fn)) {
+    paste0("a ", rule, "; dplyr evaluates this one.")
+  } else {
+    sprintf("%s A %s.", fallback_no_gpu_text(fn), rule)
+  }
 }
 
 # Internal: Parse a single arrange expression

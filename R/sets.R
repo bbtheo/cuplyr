@@ -173,7 +173,8 @@ check_set_op_compatible <- function(x_schema, y_schema) {
   # Duplicated names: the GPU paths match columns by name, so dplyr runs the
   # whole call (union_all() repairs the names, the others keep them).
   if (anyDuplicated(x_schema$names) > 0L || anyDuplicated(y_schema$names) > 0L) {
-    return(list(target_schema = NULL, needs_fallback = TRUE))
+    return(list(target_schema = NULL, needs_fallback = TRUE,
+                fallback_reason = "the tables have duplicated column names, and the GPU matches columns by name."))
   }
   nx <- length(x_schema$names)
   ny <- length(y_schema$names)
@@ -210,6 +211,7 @@ check_set_op_compatible <- function(x_schema, y_schema) {
   tz_x <- tz_by_position(x_schema)
   tz_y <- tz_by_position(y_schema)
   needs_fallback <- FALSE
+  fallback_reason <- NULL
 
   for (i in seq_len(nx)) {
     nm <- names_x[i]
@@ -238,6 +240,7 @@ check_set_op_compatible <- function(x_schema, y_schema) {
       if ((identical(tx, "TIMESTAMP_DAYS") || identical(ty, "TIMESTAMP_DAYS")) &&
           !tz_is_utc(zones[[i]])) {
         needs_fallback <- TRUE
+        fallback_reason <- "a Date next to a non-UTC POSIXct is cast to local midnight, which only the CPU computes exactly."
       }
     }
     if (!is.null(res$factor_levels)) {
@@ -252,7 +255,8 @@ check_set_op_compatible <- function(x_schema, y_schema) {
       factor_levels = if (length(factor_levels) > 0) factor_levels else NULL,
       tz = tz_from_positions(names_x, promoted_types, tz_localize(zones))
     ),
-    needs_fallback = needs_fallback
+    needs_fallback = needs_fallback,
+    fallback_reason = fallback_reason
   )
 }
 
@@ -380,9 +384,10 @@ union.tbl_gpu <- function(x, y, ...) {
   chk <- check_set_op_compatible(current_schema(x), current_schema(y))
 
   if (chk$needs_fallback) {
+    y <- fallback_materialize(y)
     return(gpu_fallback("union", x, function(tbl) {
       dplyr::union(tbl, collect_other_side(y))
-    }))
+    }, reason = chk$fallback_reason, also = y))
   }
 
   x_aligned <- align_set_op_side(x, chk$target_schema, groups = x$groups)
@@ -407,9 +412,10 @@ union_all.tbl_gpu <- function(x, y, ...) {
   chk <- check_set_op_compatible(current_schema(x), current_schema(y))
 
   if (chk$needs_fallback) {
+    y <- fallback_materialize(y)
     return(gpu_fallback("union_all", x, function(tbl) {
       dplyr::union_all(tbl, collect_other_side(y))
-    }))
+    }, reason = chk$fallback_reason, also = y))
   }
 
   x_aligned <- align_set_op_side(x, chk$target_schema, groups = x$groups)
@@ -443,9 +449,10 @@ intersect.tbl_gpu <- function(x, y, ...) {
   chk <- check_set_op_compatible(current_schema(x), current_schema(y))
 
   if (chk$needs_fallback) {
+    y <- fallback_materialize(y)
     return(gpu_fallback("intersect", x, function(tbl) {
       dplyr::intersect(tbl, collect_other_side(y))
-    }))
+    }, reason = chk$fallback_reason, also = y))
   }
 
   target_names <- chk$target_schema$names
@@ -470,9 +477,10 @@ setdiff.tbl_gpu <- function(x, y, ...) {
   chk <- check_set_op_compatible(current_schema(x), current_schema(y))
 
   if (chk$needs_fallback) {
+    y <- fallback_materialize(y)
     return(gpu_fallback("setdiff", x, function(tbl) {
       dplyr::setdiff(tbl, collect_other_side(y))
-    }))
+    }, reason = chk$fallback_reason, also = y))
   }
 
   target_names <- chk$target_schema$names
@@ -495,9 +503,10 @@ symdiff.tbl_gpu <- function(x, y, ...) {
   chk <- check_set_op_compatible(current_schema(x), current_schema(y))
 
   if (chk$needs_fallback) {
+    y <- fallback_materialize(y)
     return(gpu_fallback("symdiff", x, function(tbl) {
       dplyr::symdiff(tbl, collect_other_side(y))
-    }))
+    }, reason = chk$fallback_reason, also = y))
   }
 
   target_names <- chk$target_schema$names
@@ -529,9 +538,10 @@ setequal.tbl_gpu <- function(x, y, ...) {
   chk <- check_set_op_compatible(current_schema(x), current_schema(y))
 
   if (chk$needs_fallback) {
+    y <- fallback_materialize(y)
     return(gpu_fallback("setequal", x, function(tbl) {
       dplyr::setequal(tbl, collect_other_side(y))
-    }, as_is = TRUE))
+    }, as_is = TRUE, reason = chk$fallback_reason, also = y))
   }
 
   target_names <- chk$target_schema$names

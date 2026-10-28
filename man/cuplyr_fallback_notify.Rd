@@ -4,19 +4,39 @@
 \alias{cuplyr_fallback_notify}
 \title{Notify about a CPU-eval fallback, gated by \code{options(cuplyr.fallback = )}}
 \usage{
-cuplyr_fallback_notify(verb, expr_text)
+cuplyr_fallback_notify(
+  verb,
+  expr = NA_character_,
+  reason = NULL,
+  rows = 0,
+  cols = 0,
+  bytes = 0,
+  nothing_collected = FALSE
+)
 }
 \arguments{
 \item{verb}{Character, the verb name (e.g. \code{"filter"}, \code{"summarise"})}
 
-\item{expr_text}{Character, the offending expression as text}
+\item{expr}{Character, the offending expression as text, or \code{NA} when the
+call as a whole goes}
+
+\item{reason}{Character, why this runs on the CPU}
+
+\item{rows, cols, bytes}{What is collected to the host (see \code{fallback_size()})}
+
+\item{nothing_collected}{\code{TRUE} when the CPU only evaluates an expression
+that reads no column}
 }
 \value{
 \code{invisible(NULL)}
 }
 \description{
-Per D4: default is silent (keeps existing eager behavior unchanged,
-e.g. \code{filter(rep(TRUE, n))} is legitimate dplyr, not an error). Set
-\code{options(cuplyr.fallback = "warn")} or \code{"error"} to surface fallbacks.
+The one channel for "this ran on the CPU". It always signals a
+\code{cuplyr_cpu_fallback} condition (fields \code{verb}, \code{expr}, \code{reason}, \code{rows},
+\code{cols}, \code{bytes}) before any CPU work; \code{options(cuplyr.fallback = )} then
+decides whether that also warns or errors (default silent). See
+\link{cuplyr-fallback} for the options, classes and message. A lazy plan that is
+only computed early on the GPU goes through \code{cuplyr_plan_break_notify()}
+instead.
 }
 \keyword{internal}

@@ -64,6 +64,7 @@ stay CPU fallbacks.
 Every fallback calls \code{\link[=cuplyr_fallback_notify]{cuplyr_fallback_notify()}}, so
 \code{options(cuplyr.fallback = "warn")} (or \code{"error"}) can be used to surface
 (or forbid) accidental fallbacks in code that's expected to stay fully
-GPU-native.
+GPU-native. The notice names the verb, the expression, the reason and the
+size collected; see \link{cuplyr-fallback}.
 }
 \keyword{internal}

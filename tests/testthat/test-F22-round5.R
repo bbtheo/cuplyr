@@ -39,7 +39,8 @@ test_that("the lazy integer sum() notice names only the sum outputs", {
   skip_if_no_gpu()
   lz <- tbl_gpu(data.frame(g = 1:2, i = c(2e9L, 2e9L), d = c(1, 2)), lazy = TRUE)
   lz <- mutate(lz, k = i - 1L)
-  msg <- withr::with_options(list(cuplyr.fallback = "warn"), {
+  # F88: running the plan early on the GPU is a plan break, not a CPU fallback
+  msg <- withr::with_options(list(cuplyr.fallback = "warn", cuplyr.plan_break = "warn"), {
     tryCatch(
       reframe(lz, s = sum(i), m = mean(d), q = quantile(d, c(.1, .9)), .by = g),
       warning = function(w) conditionMessage(w)

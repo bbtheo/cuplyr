@@ -444,8 +444,20 @@ bind_first_is_rowwise <- function(dots) {
   length(dots) > 0L && (inherits(dots[[1L]], "rowwise_df") || is_rowwise_gpu(dots[[1L]]))
 }
 
+# `dots` with each tbl_gpu's pending plan computed (the collect that follows
+# would run it anyway), so a fallback notice can size what it collects.
+# @keywords internal
+bind_materialize_inputs <- function(dots) {
+  lapply(dots, function(d) if (is_tbl_gpu(d)) fallback_materialize(d) else d)
+}
+
 bind_rowwise_first <- function(verb, dots, ...) {
-  cuplyr_fallback_notify(verb, "a rowwise data frame as the first input")
+  dots <- bind_materialize_inputs(dots)
+  size <- do.call(fallback_size, unname(dots))
+  cuplyr_fallback_notify(
+    verb, reason = "a rowwise data frame as the first input makes dplyr's result a rowwise_df.",
+    rows = size$rows, cols = size$cols, bytes = size$bytes
+  )
   first_gpu <- is_rowwise_gpu(dots[[1L]])
   was_lazy <- first_gpu && identical(dots[[1L]]$exec_mode, "lazy")
   dots[-1L] <- lapply(dots[-1L], collect_other_side)
@@ -555,7 +567,13 @@ bind_rows_gpu <- function(dots, .id = NULL, call = rlang::caller_env()) {
   if (isTRUE(unified$cpu_tz)) {
     # A Date next to a non-UTC POSIXct: vctrs casts the Date to local midnight
     # of that zone, which R computes exactly (DST included).
-    cuplyr_fallback_notify("bind_rows", "a Date combined with a non-UTC POSIXct")
+    dots <- bind_materialize_inputs(dots)
+    size <- do.call(fallback_size, unname(dots))
+    cuplyr_fallback_notify(
+      "bind_rows",
+      reason = "a Date next to a non-UTC POSIXct is cast to local midnight of that zone, which R computes exactly (DST included).",
+      rows = size$rows, cols = size$cols, bytes = size$bytes
+    )
     frames <- lapply(dots, collect_frame)
     names(frames) <- if (!is.null(.id)) source_names
     result <- tbl_gpu(dplyr::bind_rows(!!!frames, .id = .id), lazy = FALSE)

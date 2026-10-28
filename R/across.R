@@ -246,69 +246,82 @@ dots_need_fallback <- function(dots, treat_cur_group_id_as_deferred = FALSE) {
     deferred_fallback_fns
   }
   # Every shape below is a call to one of these names (a named top-level
-  # across(), expr_needs_fallback()'s own all.names() gate): a call that
+  # across(), expr_fallback_shape()'s own all.names() gate): a call that
   # mentions none of them needs nothing from the R-level walk.
   if (!dots_mention(dots, c(extra_names, "across", "if_any", "if_all"))) {
     return(FALSE)
   }
   dot_names <- names(dots) %||% rep("", length(dots))
-  any(vapply(
-    seq_along(dots),
-    function(i) {
-      expr <- rlang::quo_get_expr(dots[[i]])
-      # A NAMED top-level across() packs a data-frame column, which a
-      # tbl_gpu can't hold: dplyr's own result (or, for filter(), its own
-      # named-input error) comes from the whole-call fallback.
-      if (!is.na(dot_names[i]) && nzchar(dot_names[i]) &&
-          identical(call_head_name(expr), "across")) {
-        return(TRUE)
-      }
-      expr_needs_fallback(expr, extra_names, top_level = TRUE)
-    },
-    logical(1)
-  ))
+  # (the first dot that needs it is claimed, with the shape that decided it, F88)
+  for (i in seq_along(dots)) {
+    expr <- rlang::quo_get_expr(dots[[i]])
+    # A NAMED top-level across() packs a data-frame column, which a
+    # tbl_gpu can't hold: dplyr's own result (or, for filter(), its own
+    # named-input error) comes from the whole-call fallback.
+    why <- if (!is.na(dot_names[i]) && nzchar(dot_names[i]) &&
+               identical(call_head_name(expr), "across")) {
+      "a named `across()` makes a data-frame column, which a GPU table cannot hold."
+    } else {
+      expr_fallback_shape(expr, extra_names, top_level = TRUE)
+    }
+    if (!is.null(why)) {
+      fallback_dot_failed(i, why)
+      return(TRUE)
+    }
+  }
+  FALSE
 }
 
+# The reason of a whole-call across()-family fallback whose dot has no claim.
+across_fallback_default <- "an across()-family call is used in a shape the GPU does not support."
+
+# Why `expr` needs the whole-call fallback (a deferred context function, a
+# nested across()-family call, `.unpack`), or NULL when it doesn't.
 # @keywords internal
-expr_needs_fallback <- function(expr, extra_names, top_level = FALSE) {
+expr_fallback_shape <- function(expr, extra_names, top_level = FALSE) {
   # See substitute_across_placeholders()'s identical guard for why this is
   # needed (the empty-argument-slot/rlang::is_missing() landmine) --
   # without it, dots_need_fallback() (called on EVERY mutate()/filter()/
   # summarise() dot) crashes for a dot like `scale(x)[, 1]`.
   if (rlang::is_missing(expr)) {
-    return(FALSE)
+    return(NULL)
   }
   # A quosure spliced into the tree (`f({{ var }})`); `{{ }}` of a missing
   # argument is a quosure wrapping the empty argument.
   if (rlang::is_quosure(expr)) {
-    return(expr_needs_fallback(rlang::quo_get_expr(expr), extra_names, top_level))
+    return(expr_fallback_shape(rlang::quo_get_expr(expr), extra_names, top_level))
   }
   if (!is.call(expr)) {
-    return(FALSE)
+    return(NULL)
   }
   # Every name the walk below can match is a call head, which all.names() (C)
   # lists: a dot with none of them needs no R-level walk.
   if (top_level && !any(c(extra_names, "across", "if_any", "if_all") %in% all.names(expr))) {
-    return(FALSE)
+    return(NULL)
   }
   head_name <- call_head_name(expr)
   if (!is.null(head_name)) {
     if (head_name %in% extra_names) {
-      return(TRUE)
+      # (only summarise() defers cur_group_id(), see dots_need_fallback())
+      if (identical(head_name, "cur_group_id")) {
+        return("summarise() runs `cur_group_id()` on the GPU only as a whole expression; dplyr evaluates this one.")
+      }
+      return(sprintf("`%s()` reads the data dplyr builds for each group (the whole table when ungrouped), which the GPU does not build.", head_name))
     }
     if (!top_level && head_name %in% c("across", "if_any", "if_all")) {
-      return(TRUE)
+      return(sprintf("a `%s()` nested inside another call has no GPU expansion.", head_name))
     }
     if (top_level && identical(head_name, "across") && across_call_has_unpack(expr)) {
-      return(TRUE)
+      return("`across(.unpack = )` has no GPU form.")
     }
   }
   for (part in as.list(expr)[-1]) {
-    if (expr_needs_fallback(part, extra_names, top_level = FALSE)) {
-      return(TRUE)
+    why <- expr_fallback_shape(part, extra_names, top_level = FALSE)
+    if (!is.null(why)) {
+      return(why)
     }
   }
-  FALSE
+  NULL
 }
 
 # TRUE iff a top-level `across(...)` call expression supplies any `.unpack = `
@@ -342,8 +355,9 @@ across_call_has_unpack <- function(expr) {
 #   (pre-expansion) dots and every other original argument
 # @return A new tbl_gpu (see gpu_fallback())
 # @keywords internal
-verb_across_fallback <- function(verb_name, .data, call_fn) {
-  gpu_fallback(verb_name, .data, call_fn)
+verb_across_fallback <- function(verb_name, .data, call_fn,
+                                 reason = "an across()-family call is used in a shape the GPU does not support.") {
+  gpu_fallback(verb_name, .data, call_fn, reason = reason)
 }
 
 # =============================================================================
@@ -991,6 +1005,16 @@ across_value_spec <- function(value, fn_expr, env, scope, extra_args) {
   }
 
   if (has_extra || is.primitive(value) || isNamespace(environment(value))) {
+    # (F88: a function of a package, or a primitive, that the IR has no op for:
+    # dplyr calls it. A function of the user's with extra arguments is not that.)
+    name <- if (is.symbol(fn_expr)) {
+      as.character(fn_expr)
+    } else if (is.call(fn_expr) && length(fn_expr) == 3L && identical(fn_expr[[1]], as.name("::"))) {
+      as.character(fn_expr[[3]])
+    }
+    if (!is.null(name) && (is.primitive(value) || isNamespace(environment(value)))) {
+      fallback_cause(fallback_no_gpu_text(name))
+    }
     return(NULL)
   }
   fmls <- formals(value)
@@ -1245,14 +1269,18 @@ expand_one_across <- function(expr, env, schema, group_cols, scope = schema$name
   cols <- resolve_across_cols(cols_expr, env, schema, group_cols)
   if (is.null(cols)) {
     # value-dependent selection: dplyr resolves it on the real data
-    return(across_fallback_result())
+    return(across_fallback_result("this `across()`'s `.cols` selection reads column values; dplyr resolves it on the data."))
   }
   if (length(cols) == 0) {
     return(stats::setNames(list(), character()))
   }
 
   # Anything this file can't express natively hands the whole call to dplyr
-  fallback <- function() across_fallback_result()
+  # (F88: with the cause the `.fns` resolution recorded, when there is one)
+  fallback <- function(reason = fallback_cause_take() %||%
+                         "this `across()`'s `.fns`, extra arguments or `.names` have no GPU expansion.") {
+    across_fallback_result(reason)
+  }
 
   extra_args <- across_extra_args(
     present[!names(present) %in% c(".cols", ".fns", ".names", ".unpack")], env, scope
@@ -1304,7 +1332,7 @@ expand_one_across <- function(expr, env, schema, group_cols, scope = schema$name
       # get()/get0()/mget() look a column up by string behind the IR's back
       # (it would fail to resolve the name): dplyr runs those.
       if (any(c("get", "get0", "mget") %in% all.names(built_expr))) {
-        return(fallback())
+        return(fallback("get()/get0()/mget() in `across()` look a column up by name, which dplyr resolves."))
       }
       out_name <- apply_names_template(names_tmpl, names(cols)[i], spec$label %||% "")
       reads <- across_string_reads(built_expr)
@@ -1317,7 +1345,7 @@ expand_one_across <- function(expr, env, schema, group_cols, scope = schema$name
     }
   }
   if (anyDuplicated(out_names)) {
-    return(fallback())
+    return(fallback("this `across()` names two outputs alike, which dplyr resolves."))
   }
   names(out_quos) <- out_names
   attr(out_quos, "needs_fallback") <- FALSE
@@ -1327,9 +1355,11 @@ expand_one_across <- function(expr, env, schema, group_cols, scope = schema$name
 
 # An empty expansion flagged for the whole-call CPU fallback.
 # @keywords internal
-across_fallback_result <- function() {
+across_fallback_result <- function(reason = NULL) {
   out <- stats::setNames(list(), character())
   attr(out, "needs_fallback") <- TRUE
+  # (F88: why, claimed for the dot by expand_across_dots())
+  attr(out, "reason") <- reason
   out
 }
 
@@ -1404,10 +1434,11 @@ check_across_predicate_piece <- function(piece, col, env, schema) {
     schema$names <- c(schema$names, helper)
     schema$types <- c(schema$types, "INT32")
   }
-  type <- tryCatch(suppressWarnings({
+  # (F88: a probe; the dot's own parse later records any cause)
+  type <- fallback_probe(tryCatch(suppressWarnings({
     ir <- ir_parse_quo(rlang::new_quosure(piece, env), schema)
     if (is.null(ir)) NULL else ir_infer_type(ir, schema)
-  }), error = function(e) NULL)
+  }), error = function(e) NULL))
   if (is.null(type) || identical(unname(type), "BOOL8")) {
     return(invisible(FALSE))
   }
@@ -1597,6 +1628,7 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
     if (needs_fallback) {
       break
     }
+    fallback_dot_begin()
     quo <- dots[[i]]
     nm <- names(dots)[i]
     expr <- rlang::quo_get_expr(quo)
@@ -1614,7 +1646,10 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
         )
       }
       expanded <- expand_one_across(expr, env, run, group_cols, scope)
-      needs_fallback <- needs_fallback || isTRUE(attr(expanded, "needs_fallback"))
+      if (isTRUE(attr(expanded, "needs_fallback"))) {
+        needs_fallback <- TRUE
+        fallback_dot_failed(i, attr(expanded, "reason") %||% "this `across()` has no GPU expansion.")
+      }
       # The outputs' types come from the expansion as written, against the
       # columns before this dot
       if (track && !needs_fallback) {
@@ -1633,6 +1668,8 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
           staged_temps <- c(staged_temps, attr(expanded, "temps"))
         } else {
           needs_fallback <- TRUE
+          fallback_dot_failed(i, paste0("an output of this `across()` is read by a later function of it; ",
+                                        "dplyr computes them all from the data before it."))
         }
       }
       out_quos <- c(out_quos, expanded)
@@ -1646,7 +1683,12 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
 
     if (identical(head_name, "if_any") || identical(head_name, "if_all")) {
       combined <- expand_if_any_all(expr, env, run, group_cols, head_name, verb, scope)
-      needs_fallback <- needs_fallback || isTRUE(attr(combined, "needs_fallback"))
+      if (isTRUE(attr(combined, "needs_fallback"))) {
+        needs_fallback <- TRUE
+        fallback_dot_failed(i, fallback_cause_take() %||% sprintf(
+          "this `%s()`: its `.cols`, `.fns` or extra arguments have no GPU expansion.", head_name
+        ))
+      }
       out_quos <- c(out_quos, list(combined))
       prov_origin <- c(prov_origin, i)
       prov_kind <- c(prov_kind, "combined")
@@ -1801,6 +1843,14 @@ across_infer_output <- function(quo, run) {
   if (!pure(expr)) {
     return(unknown)
   }
+  # (F88: a probe for a type, never a dot's reason)
+  fallback_probe(across_infer_parsed(quo, run, unknown))
+}
+
+# across_infer_output() once its checks let it parse `quo`.
+# @keywords internal
+across_infer_parsed <- function(quo, run, unknown) {
+  expr <- rlang::quo_get_expr(quo)
   tryCatch(suppressWarnings({
     ir <- ir_parse_quo(quo, run)
     if (is.null(ir) || identical(ir_factor_rule(ir, run), "cpu")) {
@@ -1891,10 +1941,10 @@ across_r_fixed_type_fns <- c(
 # @keywords internal
 across_r_typed <- function(expr, env, run) {
   arg_type <- function(a) {
-    tryCatch(
+    fallback_probe(tryCatch(
       ir_infer_type(ir_parse_expr(a, env, run, allow_vector = FALSE), run),
       error = function(e) NA_character_
-    )
+    ))
   }
   plain <- function(v) {
     is.atomic(v) && !is.factor(v) && (is.null(oldClass(v)) || inherits(v, c("Date", "POSIXct")))

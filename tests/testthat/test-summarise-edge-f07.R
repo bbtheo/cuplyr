@@ -132,16 +132,18 @@ test_that("F07: .data pronoun reads of an earlier dot count as references", {
 
 test_that("F07: a lazy summarise forced to run by an integer min()/max() notifies like other materializations", {
   skip_if_no_gpu()
-  withr::local_options(cuplyr.fallback = "error")
+  # F88: this is a plan break (it runs on the GPU), never a CPU fallback, so
+  # cuplyr.fallback = "error" does not fire and cuplyr.plan_break governs it
+  withr::local_options(cuplyr.fallback = "error", cuplyr.plan_break = "warn")
   lazy <- as_lazy(tbl_gpu(data.frame(g = c("a", "b"), x = c(1L, 2L))))
 
   # pending ops: materialized, so the notification fires
-  expect_error(
+  expect_warning(
     lazy |> dplyr::filter(x > 0L) |> dplyr::group_by(g) |> dplyr::summarise(m = min(x)),
-    "fell back"
+    class = "cuplyr_warning_plan_break"
   )
   # nothing pending: nothing to materialize, no notification
-  expect_no_error(lazy |> dplyr::group_by(g) |> dplyr::summarise(m = min(x)))
+  expect_no_warning(lazy |> dplyr::group_by(g) |> dplyr::summarise(m = min(x)))
 })
 
 test_that("F07: slice() family on a lazy zero-column table with pending ops computes first", {

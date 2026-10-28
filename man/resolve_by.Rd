@@ -4,7 +4,13 @@
 \alias{resolve_by}
 \title{Resolve a verb's \verb{.by=}/\verb{by=} quosure into group column names}
 \usage{
-resolve_by(.data, by_quo, arg_name = ".by", call = rlang::caller_env())
+resolve_by(
+  .data,
+  by_quo,
+  arg_name = ".by",
+  call = rlang::caller_env(),
+  verb = NULL
+)
 }
 \arguments{
 \item{.data}{A \code{tbl_gpu} object}
@@ -19,6 +25,9 @@ grouped-\code{.data} error message so it names the argument the caller
 actually used}
 
 \item{call}{Environment of the user-facing verb, the call the error reports}
+
+\item{verb}{The verb's name for the CPU-fallback notice, when it is not the
+name of \code{call}'s frame}
 }
 \value{
 A character vector of column names: \code{character()} when \code{by_quo}

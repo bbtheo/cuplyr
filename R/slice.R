@@ -292,7 +292,12 @@ unique_slice_order_name <- function(existing_names) {
 resolve_slice_order <- function(order_quo, schema) {
   ir <- ir_parse_quo(order_quo, schema)
   # A factor outside the places F18's rule allows needs dplyr's labels
-  if (is.null(ir) || ir_factor_rule(ir, schema) == "cpu") {
+  if (is.null(ir)) {
+    fallback_dot_failed(1L)  # (F88: the parse's cause, for `order_by`)
+    return(NULL)
+  }
+  if (ir_factor_rule(ir, schema) == "cpu") {
+    fallback_dot_failed(1L, "a factor `order_by` needs its labels, which dplyr orders (the GPU holds codes).")
     return(NULL)
   }
 
@@ -739,7 +744,8 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 
   with_keys(gpu_fallback("slice", .data, function(tbl) {
     rlang::inject(dplyr::slice(tbl, !!!dots, .by = !!by_quo, .preserve = .preserve))
-  }, detail = shadowed))
+  }, reason = shadowed %||%
+    "the row indices are not constants the GPU can resolve, or this slice has no native grouped form."))
 }
 
 # --- Fixed group keys of a row slice (F71) -------------------------------------
@@ -920,7 +926,7 @@ slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
 
   with_keys(gpu_fallback("slice_head", .data, function(tbl) {
     rlang::inject(dplyr::slice_head(tbl, !!!dots, !!!np, by = !!by_quo))
-  }))
+  }, reason = "this slice_head() has extra arguments or a grouped shape with no native GPU form."))
 }
 
 #' Select the last rows
@@ -970,7 +976,7 @@ slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
 
   with_keys(gpu_fallback("slice_tail", .data, function(tbl) {
     rlang::inject(dplyr::slice_tail(tbl, !!!dots, !!!np, by = !!by_quo))
-  }))
+  }, reason = "this slice_tail() has extra arguments or a grouped shape with no native GPU form."))
 }
 
 #' Select rows with the smallest values of a variable
@@ -1022,6 +1028,9 @@ slice_min.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   prep <- row_slice_prepare(.data, eligible = identical(gm$mode, "group_by"))
   .data <- prep$data
   with_keys <- function(result) row_slice_finish(result, prep)
+  # (F88: the reason the `order_by` parse records for a CPU fallback, call-scoped)
+  prev <- fallback_reasons_open()
+  on.exit(fallback_reasons_close(prev), add = TRUE)
 
   # F77: an `order_by` whose call head resolves to a function of the user's
   # rather than the native op (a local `abs()`) is dplyr's to run
@@ -1040,7 +1049,10 @@ slice_min.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   with_keys(gpu_fallback("slice_min", .data, function(tbl) {
     rlang::inject(dplyr::slice_min(tbl, order_by = !!order_quo, !!!dots, !!!np,
                                     by = !!by_quo, with_ties = with_ties, na_rm = na_rm))
-  }, detail = shadowed))
+  }, reason = shadowed %||% fallback_failed_reason(
+    list(order_quo),
+    "the order_by expression, its type or the grouping has no native GPU slice_min()/slice_max() form."
+  )))
 }
 
 #' Select rows with the largest values of a variable
@@ -1074,6 +1086,10 @@ slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   .data <- prep$data
   with_keys <- function(result) row_slice_finish(result, prep)
 
+  # (F88: the reason the `order_by` parse records for a CPU fallback, call-scoped)
+  prev <- fallback_reasons_open()
+  on.exit(fallback_reasons_close(prev), add = TRUE)
+
   # F77: an `order_by` whose call head resolves to a function of the user's
   # rather than the native op (a local `abs()`) is dplyr's to run
   shadowed <- shadow_screen_text(list(order_quo))
@@ -1091,7 +1107,10 @@ slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   with_keys(gpu_fallback("slice_max", .data, function(tbl) {
     rlang::inject(dplyr::slice_max(tbl, order_by = !!order_quo, !!!dots, !!!np,
                                     by = !!by_quo, with_ties = with_ties, na_rm = na_rm))
-  }, detail = shadowed))
+  }, reason = shadowed %||% fallback_failed_reason(
+    list(order_quo),
+    "the order_by expression, its type or the grouping has no native GPU slice_min()/slice_max() form."
+  )))
 }
 
 # Shared grouped/`by=` native-path builder for slice_min()/slice_max():
@@ -1348,7 +1367,7 @@ slice_sample_native <- function(.data, gm, amount, is_prop, replace, fallback) {
   groups <- slice_sample_groups(materialized, gm)
   if (any(lengths(groups$rows) == 0L) &&
       compute_slice_sample_size(amount, is_prop, 0L, replace) > 0) {
-    return(fallback(materialized))
+    return(fallback(materialized, "an empty group still asks for rows with replace = TRUE; sample.int() fails and dplyr reports it."))
   }
   slice_sample_gather(materialized, gm, groups, function(gsize) {
     size <- compute_slice_sample_size(amount, is_prop, gsize, replace)
@@ -1443,15 +1462,15 @@ sample_const_size <- function(size_quo, schema) {
 # @keywords internal
 sample_rows_impl <- function(tbl, size_quo, replace, weight_quo, env, frac, fallback) {
   verb <- if (frac) "sample_frac" else "sample_n"
-  cpu <- function(x) gpu_fallback(verb, x, fallback)
+  cpu <- function(x, reason) gpu_fallback(verb, x, fallback, reason = reason)
   was_lazy <- identical(tbl$exec_mode, "lazy")
 
   if (!rlang::quo_is_null(weight_quo) || !(isTRUE(replace) || isFALSE(replace)) ||
       length(current_schema(tbl)$names) == 0L) {
-    return(cpu(tbl))
+    return(cpu(tbl, "weights, a non-logical `replace` or a table with no columns are sampled by dplyr."))
   }
   size <- sample_const_size(size_quo, current_schema(tbl))
-  if (is.null(size)) return(cpu(tbl))
+  if (is.null(size)) return(cpu(tbl, "the sample size is not a constant the GPU can resolve without side effects."))
 
   materialized <- if (has_pending_ops(tbl)) compute(tbl) else tbl
   gm <- list(mode = if (length(materialized$groups) > 0L) "group_by" else "none",
@@ -1465,7 +1484,7 @@ sample_rows_impl <- function(tbl, size_quo, replace, weight_quo, env, frac, fall
     all(size <= gsizes | replace) && !(replace && size > 0 && any(gsizes == 0L))
   }
   if (!ok) {
-    res <- cpu(materialized)
+    res <- cpu(materialized, "the sample is larger than a group without replacement, or draws from an empty group; dplyr handles it.")
     return(if (was_lazy && is_tbl_gpu(res)) as_lazy(res) else res)
   }
 
@@ -1600,11 +1619,11 @@ slice_sample.tbl_gpu <- function(.data, ..., n, prop, by = NULL,
     if (!is.null(zero)) return(zero)
   }
 
-  cpu <- function(x) {
+  cpu <- function(x, reason) {
     gpu_fallback("slice_sample", x, function(tbl) {
       rlang::inject(dplyr::slice_sample(tbl, !!!dots, !!!np, by = !!by_quo,
                                          weight_by = !!weight_quo, replace = replace))
-    })
+    }, reason = reason)
   }
 
   if (length(dots) == 0 && rlang::quo_is_null(weight_quo)) {
@@ -1614,5 +1633,9 @@ slice_sample.tbl_gpu <- function(.data, ..., n, prop, by = NULL,
     return(result)
   }
 
-  cpu(.data)
+  cpu(.data, if (!rlang::quo_is_null(weight_quo)) {
+    "`weight_by` samples with probabilities that need the column values on the host."
+  } else {
+    "slice_sample() with extra arguments is evaluated by dplyr."
+  })
 }

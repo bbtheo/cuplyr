@@ -9,7 +9,7 @@ zero_column_result(.data, verb, n = NULL)
 \arguments{
 \item{.data}{The input \code{tbl_gpu}}
 
-\item{verb}{Character, for the fallback notification}
+\item{verb}{Character, for the plan-break notification}
 
 \item{n}{Row count of the result, or \code{NULL} for \code{.data}'s own}
 }

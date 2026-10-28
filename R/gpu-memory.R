@@ -56,23 +56,7 @@ gpu_memory_usage <- function(x) {
   types <- x$schema$types
 
   # Bytes per element for each GPU type
-  bytes_per_type <- vapply(types, function(type) {
-    switch(type,
-      "FLOAT64" = 8,
-      "FLOAT32" = 4,
-      "INT64" = 8,
-      "INT32" = 4,
-      "INT16" = 2,
-      "INT8" = 1,
-      "BOOL8" = 1,
-      "STRING" = 32,  # Average estimate
-      "TIMESTAMP_DAYS" = 4,
-      "TIMESTAMP_MICROSECONDS" = 8,
-      "TIMESTAMP_NANOSECONDS" = 8,
-      "DICTIONARY32" = 4,
-      8  # Default
-    )
-  }, numeric(1))
+  bytes_per_type <- gpu_type_bytes(types)
 
   # Data bytes
   data_bytes <- sum(nrow * bytes_per_type)

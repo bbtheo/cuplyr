@@ -96,13 +96,15 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
     # Only the grouping columns are keys.
     if (length(group_vars) > 0L) {
       if (isTRUE(.keep_all)) {
-        return(distinct_fallback(.data, orig_dots, .keep_all))
+        return(distinct_fallback(.data, orig_dots, .keep_all,
+                                 reason = "`.keep_all = TRUE` with only the grouping columns as keys is dplyr's."))
       }
       node <- ast_distinct(input_node(.data), group_vars, keep_all = FALSE)
       return(push_op(.data, node))
     }
     if (isTRUE(.keep_all)) {
-      return(distinct_fallback(.data, orig_dots, .keep_all))
+      return(distinct_fallback(.data, orig_dots, .keep_all,
+                               reason = "`.keep_all = TRUE` with only NULL keys is dplyr's."))
     }
     return(zero_column_result(.data, "distinct",
                               n = min(zero_column_nrow(.data, "distinct"), 1L)))
@@ -112,8 +114,11 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
   # native op (a local `abs()`) is dplyr's to run, whole.
   shadowed <- shadow_screen_text(dots)
   if (!is.null(shadowed)) {
-    return(distinct_fallback(.data, orig_dots, .keep_all, detail = shadowed))
+    return(distinct_fallback(.data, orig_dots, .keep_all, reason = shadowed))
   }
+  # (F88: the reasons the key parses record for a CPU fallback, call-scoped)
+  prev <- fallback_reasons_open()
+  on.exit(fallback_reasons_close(prev), add = TRUE)
 
   # Name dots: an unnamed bare column (`distinct(df, x)`) uses its own name;
   # an unnamed computed expression (`distinct(df, x + 1)`) uses the deparsed
@@ -154,7 +159,14 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
     # error. Same for a factor outside the places F18's rule allows
     # (ir_factor_rule()): dplyr resolves it through the labels.
     if (is.null(ir) || ir_factor_rule(ir, schema) == "cpu") {
-      return(distinct_fallback(.data, orig_dots, .keep_all))
+      # (F88: the parse's cause; a factor key has its own)
+      fallback_dot_failed(expr, if (is.null(ir)) fallback_cause_take() else {
+        "a factor key outside the places the GPU handles is resolved through its labels by dplyr."
+      })
+      return(distinct_fallback(
+        .data, orig_dots, .keep_all,
+        reason = fallback_failed_reason(orig_dots, "a key has a form the GPU engine does not support.")
+      ))
     }
 
     is_trivial_copy <- identical(ir$kind, "col") && identical(ir$name, new_name)
@@ -199,10 +211,10 @@ distinct_key_positions <- function(key_cols, names) {
 
 # Whole-call CPU fallback with the user's original dots.
 # @keywords internal
-distinct_fallback <- function(.data, dots, .keep_all, detail = NULL) {
+distinct_fallback <- function(.data, dots, .keep_all, detail = NULL, reason = detail) {
   gpu_fallback("distinct", .data, function(tbl) {
     rlang::inject(dplyr::distinct(tbl, !!!dots, .keep_all = .keep_all))
-  }, detail = detail)
+  }, reason = reason)
 }
 
 #' Unique rows of a GPU table

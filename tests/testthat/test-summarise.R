@@ -385,10 +385,11 @@ test_that("lazy summarise() with sum() of a comparison expression matches dplyr 
   expect_same_as_dplyr_lazy(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
 })
 
-test_that("lazy summarise() temp-column path materializes pending ops and notifies fallback", {
+test_that("lazy summarise() temp-column path materializes pending ops and notifies a plan break", {
   skip_if_no_gpu()
 
-  withr::local_options(cuplyr.fallback = "warn")
+  # F88: the plan runs early on the GPU: a plan break, not a CPU fallback
+  withr::local_options(cuplyr.fallback = "warn", cuplyr.plan_break = "warn")
 
   gpu_df <- tbl_gpu(mtcars, lazy = TRUE) |>
     dplyr::filter(mpg > 0)
@@ -398,7 +399,7 @@ test_that("lazy summarise() temp-column path materializes pending ops and notifi
       dplyr::group_by(cyl) |>
       dplyr::summarise(high_carb = sum(carb > 3)) |>
       collect(),
-    "fell back to CPU evaluation"
+    class = "cuplyr_warning_plan_break"
   )
 
   expect_equal(nrow(result), 3)

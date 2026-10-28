@@ -60,7 +60,7 @@ with_reframe_wide <- function(expr) {
 #' string column under a C collation. Sizes above 1 must agree, and no
 #' expression may read an earlier one's result.
 #'
-#' Anything else runs dplyr's `reframe()` on the CPU (see [cuplyr_fallback_notify()]).
+#' Anything else runs dplyr's `reframe()` on the CPU (see [cuplyr-fallback]).
 #' One divergence remains on both paths: `quantile()`'s element names (`"10%"`)
 #' are dropped.
 #'
@@ -77,10 +77,13 @@ reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
   dots <- rlang::enquos(...)
   by_quo <- rlang::enquo(.by)
   caller_env <- rlang::caller_env()
-  cpu <- function(detail = NULL) {
+  # (F88: the reasons this call's dots record for a CPU fallback, call-scoped)
+  prev <- fallback_reasons_open()
+  on.exit(fallback_reasons_close(prev), add = TRUE)
+  cpu <- function(reason) {
     gpu_fallback("reframe", .data, function(tbl) {
       rlang::inject(dplyr::reframe(tbl, !!!dots, .by = !!by_quo))
-    }, detail = detail)
+    }, reason = reason)
   }
 
   # F77: a function of the user's with a native op's name runs in dplyr
@@ -92,11 +95,18 @@ reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
   schema <- current_schema(.data)
   by_given <- !rlang::quo_is_null(by_quo)
   if (!reframe_input_is_native(.data, schema) || (by_given && length(.data$groups) > 0L)) {
-    return(cpu())
+    return(cpu(if (by_given && length(.data$groups) > 0L) {
+      "`.by` on a grouped table is an error dplyr raises itself."
+    } else {
+      "the input has fixed group keys, no columns or odd column names, which the native reframe() does not take."
+    }))
   }
   plan <- reframe_native_plan(dots, schema)
   if (is.null(plan)) {
-    return(cpu())
+    # (the dot the plan stopped at, with the reason it or its parse recorded)
+    return(cpu(fallback_failed_reason(
+      dots, "its expressions are not a native reframe() shape (quantile(), range(), a literal or a reducer)."
+    )))
   }
 
   by_cols <- if (by_given) {
@@ -106,7 +116,7 @@ reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
   }
   if (is.null(by_cols) || (by_given && length(by_cols) == 0L) ||
       any(names(dots) %in% by_cols)) {
-    return(cpu())
+    return(cpu("`.by` selects no column, or an output column has the name of a grouping column."))
   }
 
   # Step 1: the wide table, one row per group. `.groups = "drop"` (or `.by`)
@@ -119,10 +129,12 @@ reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
   input <- .data
   if (run_now) {
     if (has_pending_ops(.data)) {
-      cuplyr_fallback_notify("reframe", paste0(
-        "integer sum() (result type depends on the data): ",
-        paste(plan$int32_sum, collapse = ", ")
-      ))
+      cuplyr_plan_break_notify(
+        "reframe",
+        paste0("an integer sum() (result type depends on the data): ",
+               paste(plan$int32_sum, collapse = ", ")),
+        data = .data
+      )
     }
     input <- compute(.data)
     input$exec_mode <- "eager"
@@ -434,6 +446,16 @@ reframe_arg_info <- function(expr, schema, env) {
   }
   fn <- reframe_head_name(expr)
   if (is.null(fn) || !fn %in% reframe_arg_fns || !reframe_head_is(expr, env, "base", fn)) {
+    if (!is.null(fn)) {
+      # (a function with no GPU handler at all is said so; a call that reads
+      # no column, which mutate() and summarise() fold, is reframe()'s rule)
+      shape <- sprintf("`%s()` is not among the functions a reframe() argument calls on the GPU.", fn)
+      fallback_cause(if (!expr_has_column_ref(expr, schema)) {
+        sprintf("reframe() runs a reducer of columns on the GPU; `%s()` here reads no column, so dplyr evaluates it.", fn)
+      } else {
+        fallback_no_gpu_text(fn, shape)
+      })
+    }
     return(NULL)
   }
   args <- as.list(expr)[-1]
@@ -510,6 +532,11 @@ reframe_agg_arg_type <- function(arg, schema, env) {
     }
     return(list(type = unname(schema$types[match(nm, schema$names)]), bare = TRUE))
   }
+  # (F88: a new argument has no cause yet; reframe_arg_info() records one)
+  col <- fallback_reasons$cur
+  if (!is.null(col)) {
+    col$cause <- NULL
+  }
   info <- reframe_arg_info(arg, schema, env)
   if (is.null(info) || !info$cols) {
     return(NULL)
@@ -533,14 +560,27 @@ reframe_agg_arg_type <- function(arg, schema, env) {
 #   leave R's integer range, which a lazy plan can't turn into a double.
 # @keywords internal
 reframe_wide_dots_ok <- function(quos, schema, verified) {
+  # (F88: the wide dot that is off the list is claimed; the caller re-indexes it)
+  no <- function(i, reason = NULL) {
+    fallback_dot_failed(i, reason)
+    NULL
+  }
   tryCatch({
     parts <- vector("list", length(quos))
     for (i in seq_along(quos)) {
-      parts[[i]] <- reframe_agg_parts(rlang::quo_get_expr(quos[[i]]),
-                                      rlang::quo_get_env(quos[[i]]), verified[[i]])
-      if (is.null(parts[[i]])) {
-        return(NULL)
+      fallback_dot_begin()
+      # (via a local: `parts[[i]] <- NULL` would delete the slot)
+      part <- reframe_agg_parts(rlang::quo_get_expr(quos[[i]]),
+                                rlang::quo_get_env(quos[[i]]), verified[[i]])
+      if (is.null(part)) {
+        fn <- reframe_head_name(rlang::quo_get_expr(quos[[i]]))
+        return(no(i, if (!is.null(fn) && !fn %in% names(reframe_agg_ns)) {
+          sprintf("`%s()` is not among the reducers reframe() runs on the GPU.", fn)
+        } else if (!is.null(fn)) {
+          sprintf("`%s()` is not on the GPU in this form in reframe().", fn)
+        }))
       }
+      parts[[i]] <- part
     }
     # The k dots of one quantile() share fn and argument: check each distinct
     # (fn, argument, environment) once.
@@ -559,14 +599,20 @@ reframe_wide_dots_ok <- function(quos, schema, verified) {
         next  # n()
       }
       arg <- reframe_agg_arg_type(parts[[i]]$arg, schema, rlang::quo_get_env(quos[[i]]))
-      if (is.null(arg) || !arg$type %in% reframe_agg_arg_types(parts[[i]]$fn, arg$bare)) {
-        return(NULL)
+      if (is.null(arg)) {
+        # (the argument's parse, when it ran, recorded why)
+        return(no(i, fallback_cause_take()))
+      }
+      if (!arg$type %in% reframe_agg_arg_types(parts[[i]]$fn, arg$bare)) {
+        return(no(i, sprintf("`%s()` of a %s value is not on the GPU in reframe().", parts[[i]]$fn, arg$type)))
       }
       if (identical(parts[[i]]$fn, "sum") && identical(arg$type, "INT32")) {
         int32_sum <- c(int32_sum, names(quos)[same_as == same_as[[i]]])
       }
     }
     if (!summarise_dots_parseable(quos[first], schema)) {
+      # (its claim is for the index among `quos[first]`)
+      fallback_failed_remap(which(first))
       return(NULL)
     }
     list(int32_sum = int32_sum)
@@ -588,24 +634,41 @@ reframe_wide_dots_ok <- function(quos, schema, verified) {
 #   error on an empty table)
 # @keywords internal
 reframe_native_plan <- function(dots, schema) {
+  # (F88: the user's dot that is off the native shapes is claimed, with the
+  # reason found here or the cause its parse recorded)
+  no <- function(i, reason = fallback_cause_take()) {
+    fallback_dot_failed(i, reason)
+    NULL
+  }
   nms <- names(dots)
-  if (length(dots) == 0L || is.null(nms) || anyNA(nms) || any(!nzchar(nms)) ||
-      anyDuplicated(nms) > 0L) {
+  if (length(dots) == 0L) {
     return(NULL)
+  }
+  if (is.null(nms) || anyNA(nms) || any(!nzchar(nms))) {
+    return(no(if (is.null(nms)) 1L else which(is.na(nms) | !nzchar(nms))[[1L]],
+              "an unnamed expression takes its name from dplyr in reframe()."))
+  }
+  if (anyDuplicated(nms) > 0L) {
+    return(no(anyDuplicated(nms), "two expressions have the same name; dplyr resolves it."))
   }
   col_names <- schema$names
   # Dots that read earlier dots' results are sequential in dplyr (the second
   # `quantile(x, probs)` below sees the `probs` column dot, ...).
-  if (summarise_dots_are_sequential(dots) || dots_need_fallback(dots)) {
-    return(NULL)
+  if (summarise_dots_are_sequential(dots)) {
+    return(no(NA_integer_, "a later expression reads or redefines the name an earlier one assigns; dplyr evaluates them in sequence."))
+  }
+  if (dots_need_fallback(dots)) {
+    return(NULL)  # (dots_need_fallback() claimed the dot)
   }
 
   reserved <- c(col_names, nms)
   wide_dots <- list()
   verified <- logical()  # per wide dot: from the rewrite (head already resolved)
+  owner <- integer()     # per wide dot: the user's dot it comes from
   outputs <- list()
   sizes <- integer(length(dots))
   for (i in seq_along(dots)) {
+    fallback_dot_begin()
     quo <- dots[[i]]
     expr <- rlang::quo_get_expr(quo)
     env <- rlang::quo_get_env(quo)
@@ -626,22 +689,30 @@ reframe_native_plan <- function(dots, schema) {
     is_range <- identical(r_name, "range") && reframe_head_is(expr, env, "base", "range")
     if (is_quantile) {
       parsed <- reframe_parse_quantile(expr, env, col_names)
-      if (is.null(parsed)) return(NULL)
+      if (is.null(parsed)) {
+        return(no(i, "`quantile()` is on the GPU only with constant `probs`, a literal `na.rm` and `type = 7`."))
+      }
       calls <- lapply(parsed$probs, function(p) {
         rlang::call2("quantile", parsed$x, probs = p, na.rm = parsed$na_rm)
       })
     } else if (is_range) {
       parsed <- reframe_parse_range(expr)
-      if (is.null(parsed)) return(NULL)
+      if (is.null(parsed)) {
+        return(no(i, "`range()` is on the GPU only with one argument and a literal `na.rm`."))
+      }
       calls <- list(rlang::call2("min", parsed$x, na.rm = parsed$na_rm),
                     rlang::call2("max", parsed$x, na.rm = parsed$na_rm))
     } else {
       # A multi-row call we don't rewrite (another namespace, ...) is dplyr's.
-      if (isTRUE(reframe_head_name(expr) %in% c("quantile", "range"))) return(NULL)
+      if (isTRUE(reframe_head_name(expr) %in% c("quantile", "range"))) {
+        return(no(i, sprintf("this `%s()` is not stats::quantile()/base::range(), which dplyr calls.",
+                             reframe_head_name(expr))))
+      }
       # Anything else must be an allowlisted scalar aggregation (checked
       # below); it keeps the user's name.
       wide_dots[[name]] <- quo
       verified[[name]] <- FALSE
+      owner[[name]] <- i
       outputs[[length(outputs) + 1L]] <- list(name = name, kind = "rep", src = name)
       sizes[[i]] <- 1L
       next
@@ -651,6 +722,7 @@ reframe_native_plan <- function(dots, schema) {
     if (length(calls) == 1L) {
       wide_dots[[name]] <- rlang::new_quosure(calls[[1]], env)
       verified[[name]] <- TRUE
+      owner[[name]] <- i
       outputs[[length(outputs) + 1L]] <- list(name = name, kind = "rep", src = name)
     } else {
       temps <- character(length(calls))
@@ -659,6 +731,7 @@ reframe_native_plan <- function(dots, schema) {
         reserved <- c(reserved, temps[[j]])
         wide_dots[[temps[[j]]]] <- rlang::new_quosure(calls[[j]], env)
         verified[[temps[[j]]]] <- TRUE
+        owner[[temps[[j]]]] <- i
       }
       outputs[[length(outputs) + 1L]] <- list(name = name, kind = "interleave", src = temps)
     }
@@ -668,15 +741,21 @@ reframe_native_plan <- function(dots, schema) {
   # rest is size 1, which recycles); a size mismatch is dplyr's error.
   big <- unique(sizes[sizes > 1L])
   if (length(wide_dots) == 0L || length(big) > 1L) {
-    return(NULL)
+    return(no(NA_integer_, if (length(wide_dots) == 0L) {
+      "no expression aggregates anything (only constants)."
+    } else {
+      "the multi-row expressions have different sizes, which is dplyr's error."
+    }))
   }
   # Every wide dot must be an allowlisted scalar aggregation.
   wide_quos <- rlang::new_quosures(wide_dots)
   if (summarise_dots_are_sequential(wide_quos)) {
-    return(NULL)
+    return(no(NA_integer_, "a later expression reads or redefines the name an earlier one assigns; dplyr evaluates them in sequence."))
   }
   wide_info <- reframe_wide_dots_ok(wide_quos, schema, unname(verified[names(wide_quos)]))
   if (is.null(wide_info)) {
+    # (the claim names a wide dot: the user's dot is its owner)
+    fallback_failed_remap(unname(owner[names(wide_quos)]))
     return(NULL)
   }
 

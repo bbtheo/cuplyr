@@ -167,10 +167,10 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   # only dplyr can resolve (pick() inside wrappers, across(), a named pick()
   # that makes a df-column, ...). Always reruns the ORIGINAL call, from the
   # original `.data`, so nothing half-applied leaks.
-  group_by_fallback <- function(detail = NULL) {
+  group_by_fallback <- function(reason) {
     gpu_fallback("group_by", .data, function(tbl) {
       dplyr::group_by(tbl, !!!dots, .add = .add, .drop = .drop)
-    }, detail = detail)
+    }, reason = reason)
   }
 
   # F77: a computed group whose call head resolves to a function of the user's
@@ -216,7 +216,7 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   is_comp <- kind == "computed"
   # A column named twice has no single "type at this position"
   if (anyDuplicated(comp_names[is_comp])) {
-    return(group_by_fallback())
+    return(group_by_fallback("a computed grouping column is named twice."))
   }
 
   # Computed dots run as ONE mutate() on the UNGROUPED data (#5598), so n(),
@@ -227,7 +227,7 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
     comp_dots <- stats::setNames(dots[is_comp], comp_names[is_comp])
     working <- rlang::inject(dplyr::mutate(dplyr::ungroup(working), !!!comp_dots))
     if (!is_tbl_gpu(working)) {
-      return(group_by_fallback())
+      return(group_by_fallback("the computed grouping columns could not be built on the GPU."))
     }
   }
 
@@ -277,7 +277,7 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
       pick_schema <- list(names = pick_names, types = unname(pick_types))
       picked <- resolve_pick_call(dots[[i]], pick_schema)
       if (is.null(picked)) {
-        return(group_by_fallback())
+        return(group_by_fallback("a pick() or across() grouping selection reads column values, which dplyr must resolve."))
       }
       new_groups <- c(new_groups, picked)
     }
@@ -359,7 +359,8 @@ ungroup.tbl_gpu <- function(x, ...) {
     if (!all(vapply(dots, function(q) {
       pick_selection_is_type_only(rlang::quo_get_expr(q), rlang::quo_get_env(q), schema$names)
     }, logical(1)))) {
-      return(gpu_fallback("ungroup", x, function(tbl) dplyr::ungroup(tbl, !!!dots)))
+      return(gpu_fallback("ungroup", x, function(tbl) dplyr::ungroup(tbl, !!!dots),
+                          reason = "an ungroup() selection that reads column values is resolved by dplyr."))
     }
     # the proxy carries the grouping: group_cols() reads it from peek_data()
     proxy <- tidyselect_proxy(schema, groups)
@@ -532,23 +533,23 @@ group_trim.tbl_gpu <- function(.tbl, .drop = dplyr::group_by_drop_default(.tbl))
     rlang::abort("`.drop` must be `TRUE` or `FALSE`.")
   }
 
-  fallback <- function() {
+  fallback <- function(reason) {
     gpu_fallback("group_trim", .tbl, function(tbl) {
       dplyr::group_trim(tbl, .drop = .drop)
-    })
+    }, reason = reason)
   }
 
   vars <- .tbl$groups
   tbl <- if (has_pending_ops(.tbl)) compute(.tbl) else .tbl
   names_ <- tbl$schema$names
   if (anyDuplicated(names_) || !all(vars %in% names_)) {
-    return(fallback())
+    return(fallback("the table has duplicated column names, or a group column is missing."))
   }
   idx0 <- match(vars, names_) - 1L
   is_fct <- tbl$schema$types[idx0 + 1L] == "DICTIONARY32"
   levels_ <- tbl$schema$factor_levels
   if (any(is_fct) && !all(vars[is_fct] %in% names(levels_))) {
-    return(fallback())
+    return(fallback("a factor group column has no recorded levels."))
   }
 
   for (k in which(is_fct)) {
