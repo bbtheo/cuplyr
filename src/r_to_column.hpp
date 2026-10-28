@@ -22,7 +22,7 @@ std::unique_ptr<cudf::column> numeric_to_gpu(Rcpp::NumericVector x);
 std::unique_ptr<cudf::column> integer_to_gpu(Rcpp::IntegerVector x);
 
 // Create GPU column from R character vector (STRING, NA -> null)
-std::unique_ptr<cudf::column> character_to_gpu(Rcpp::CharacterVector x);
+std::unique_ptr<cudf::column> character_to_gpu(Rcpp::CharacterVector x, const char* col_name = nullptr);
 
 // Create GPU column from R logical vector (BOOL8, NA -> null)
 std::unique_ptr<cudf::column> logical_to_gpu(Rcpp::LogicalVector x);

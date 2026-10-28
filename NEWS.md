@@ -1,5 +1,24 @@
 # cuplyr (development version)
 
+## String columns over 2 GiB of characters (F97)
+
+* A string column holding more than 2^31 - 1 bytes of characters now uploads
+  and collects correctly. `tbl_gpu()` uses libcudf's 64-bit string offsets once
+  a column reaches `LIBCUDF_LARGE_STRINGS_THRESHOLD` (as libcudf does itself),
+  and `collect()`, `print()` and friends read string columns of either offset
+  width. Before, such a column wrapped its offsets silently, and a result that
+  libcudf built with 64-bit offsets crashed or returned garbage at `collect()`.
+* With large strings disabled (`LIBCUDF_LARGE_STRINGS_ENABLED` set to anything
+  but `1`), uploading a column at or above the threshold (`tbl_gpu()`,
+  `gt$x <- v` with a vector `v`, a CPU-fallback re-upload) is an error of class
+  `cuplyr_error_string_too_large`, raised before anything is uploaded. It names
+  the column, its size, the variable's value and how to fix it. A GPU operation
+  whose string result crosses the limit with large strings disabled still fails
+  with libcudf's own "Size of output exceeds the column size limit" error
+  (class `cuplyr_error_gpu`).
+* Collecting a table now honours the row offset of a sliced column view for
+  every column type (no verb produced one before).
+
 ## CPU fallbacks and plan breaks are told apart, and say why (F88)
 
 * A lazy plan that has to run early on the GPU (a lazy `summarise()` of an

@@ -110,6 +110,28 @@ tbl_gpu <- function(data, ..., lazy = NULL) {
 #' @export
 gibble <- tbl_gpu
 
+# With libcudf's large strings disabled (LIBCUDF_LARGE_STRINGS_ENABLED not "1"),
+# a column whose characters reach the INT64-offsets threshold cannot be stored.
+# Refuse it here, before df_to_gpu() allocates the columns ahead of it. With
+# large strings enabled (the default) this costs one libcudf flag check.
+check_string_columns_fit <- function(upload) {
+  limit <- large_strings_limit_if_disabled()
+  if (limit < 0) return(invisible())
+  hit <- first_string_column_over(upload, limit)
+  if (is.null(hit)) return(invisible())
+  env <- Sys.getenv("LIBCUDF_LARGE_STRINGS_THRESHOLD", unset = NA)
+  rlang::abort(
+    c(sprintf(
+        "Column `%s` holds %s bytes of characters, at or above libcudf's large-strings threshold (%s bytes%s), and large strings are disabled (LIBCUDF_LARGE_STRINGS_ENABLED=\"%s\").",
+        names(upload)[hit$index], format(hit$bytes, scientific = FALSE, big.mark = ""),
+        format(limit, scientific = FALSE),
+        if (is.na(env)) "" else paste0("; LIBCUDF_LARGE_STRINGS_THRESHOLD=\"", env, "\""),
+        Sys.getenv("LIBCUDF_LARGE_STRINGS_ENABLED")),
+      i = "Unset LIBCUDF_LARGE_STRINGS_ENABLED or set it to \"1\" to upload it with 64-bit string offsets."),
+    class = "cuplyr_error_string_too_large", call = NULL
+  )
+}
+
 #' @rdname tbl_gpu
 #' @export
 tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
@@ -141,6 +163,7 @@ tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
       upload[[j]] <- timestamp_as_double(col)
     }
   }
+  check_string_columns_fit(upload)
   ptr <- wrap_gpu_call("tbl_gpu", df_to_gpu(upload))
   # TIMESTAMP_DAYS holds whole days: the upload floors a fractional Date (the
   # day R prints) and flags the columns it touched on the pointer.

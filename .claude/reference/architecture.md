@@ -475,7 +475,7 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
 | `src/cuda_utils.hpp` | `check_cuda()` error helper |
 | `src/r_strings.hpp` | R string <-> cudf boundary (F53): `r_string_utf8()`/`r_scalar_utf8()` translate every R string that becomes cudf data to UTF-8 (a "bytes" string is an error); `r_mk_utf8_char()` marks strings read back from cudf as UTF-8. Use them at any new site that sends R strings to cudf. |
 | `src/ops_common.hpp` | `get_compare_op()` (used by `expr_eval.hpp`'s string-comparison handler) |
-| `src/transfer_io.cpp` | `df_to_gpu()`, `gpu_collect()`, `gpu_head()`, `gpu_dim()` |
+| `src/transfer_io.cpp` | `df_to_gpu()`, `gpu_collect()`, `gpu_head()`, `gpu_dim()`. Large strings (F97): `character_to_gpu()` gives the STRING offsets child INT64 when the column's bytes reach `cudf::strings::get_offset64_threshold()` (INT32 below; libcudf's own rule), and with large strings disabled `tbl_gpu()` refuses such a column before any upload (`check_string_columns_fit()` in `R/tbl-gpu.R` asks `large_strings_limit_if_disabled()` and `first_string_column_over()`, class `cuplyr_error_string_too_large`); `character_to_gpu()` keeps a plain C++ error as the backstop for its other callers. Collect is one converter, `collect_column()`, behind `gpu_collect()`, `gpu_head()` (a `cudf::slice` of the table) and the test hook `gpu_collect_slice()`; it never assumes `offset() == 0` (`HostValidity` reads the null mask at bit `offset()+i`; strings dispatch once on the offsets width and read chars from the first offset). Internal hooks `gpu_string_offsets_width()` and `gpu_collect_slice()` are not exported. |
 | `src/ops_filter.cpp` | `gpu_filter_bool()`, `gpu_filter_mask()` — CPU-eval fallback mask application only; every IR-parseable predicate now goes through `gpu_filter_expr()` (`ops_expr.cpp`) |
 | `src/expr_eval.hpp` | Expression-IR evaluator shared by filter/mutate/summarise temp columns (`eval_ctx`, `ast_expressible()`, `build_ast()`, `materialize()`, `apply_handler()`); `recode_lookup` (F61, internal op built only by `ir_parse_recode()`): `recode()` with literal keys is one node whose key and value vectors are literals; the handler finds each row's key with one `cudf::inner_join` (null/NaN rows read as null never match; -0 matches 0), `gather`s the values and `scatter`s them over `.default`/`x`, then `.missing` takes the missing rows (5000 keys at 1e6 rows: 2-4.6 s -> 37 ms); `build_join_ast()` (Phase 7 J7) is a side-aware sibling for non-equi `join_by()` conditions — emits `column_reference(LEFT\|RIGHT)`, never retrofitted into `build_ast()` |
 | `src/int_sum.hpp` | `narrow_int_sum()`/`is_int_sum()` (F34/F42): INT64 total of an integer/logical `sum()` -> INT32, or FLOAT64 plus a flag when it leaves R's integer range; shared by `gpu_summarise()` and the window "agg" family |
@@ -961,10 +961,32 @@ R schema types MUST match actual GPU column types. If changing type handling:
 - Update tests for round-trip behavior
 
 ### String Column Operations
-String columns use offset-based storage (Apache Arrow format):
-- `col.child(0)` = offsets column (int32, n+1 elements)
-- `col.data<char>()` = concatenated character data
-- When slicing (e.g., head), must slice both offsets and chars correctly
+A STRING column is a parent (null mask, row offset) with one child: the offsets
+column. Its width is INT32, or INT64 once the column's characters reach
+`cudf::strings::get_offset64_threshold()` (default INT32_MAX, env
+`LIBCUDF_LARGE_STRINGS_THRESHOLD`); a cudf-made result can be either, so never
+assume 32 bits.
+- Read through `cudf::strings_column_view`: `offsets()` is the offsets child and
+  `chars_begin(stream)` is the first byte of the chars buffer. Neither applies the
+  view's `offset()`: row i of a sliced view uses offsets `[offset() + i]` and
+  `[offset() + i + 1]`, and its bytes start at `chars_begin() + offsets[offset()]`.
+  Never use `col.data<char>()`: the parent's data buffer is the chars, but
+  `data<T>()` adds `offset()`, a row count, to that byte pointer.
+- A 0-row strings column from cudf can have no children (`num_children() == 0`),
+  so check before `child(0)`.
+- Upload (`character_to_gpu()` in `src/transfer_io.cpp`): the width is chosen once
+  per column from its total UTF-8 bytes (`>= threshold` -> INT64, libcudf's rule).
+  With large strings disabled (`LIBCUDF_LARGE_STRINGS_ENABLED` not exactly `"1"`)
+  `tbl_gpu()` refuses such a column up front (`check_string_columns_fit()` in
+  `R/tbl-gpu.R`, class `cuplyr_error_string_too_large`, before any column is
+  uploaded); `character_to_gpu()` keeps a plain C++ error for its other callers.
+  A GPU op whose result crosses the limit fails with libcudf's own error
+  (`cuplyr_error_gpu`).
+- Collect (`gpu_to_character()` -> `fill_strings<OffT>()`): `HostValidity` copies
+  only the mask bytes the view's rows cover and applies the bit offset, so a
+  sliced view reads correctly for every column type.
+- Test hooks (internal): `gpu_string_offsets_width(ptr, col_idx)` (32L/64L/NA) and
+  `gpu_collect_slice(ptr, names, begin, end)` (collect a zero-copy `cudf::slice`).
 
 ### Memory Semantics
 - Ops that build new rows (filter, arrange, slice, joins, summarise, bind_rows) allocate new columns; ops that pass columns through (select, relocate, rename, the untouched columns of mutate/transmute, a bare copy `a = x`, the input columns of a window mutate, bind_cols) **share** the input's columns, so they allocate nothing for them (see "Shared columns")
