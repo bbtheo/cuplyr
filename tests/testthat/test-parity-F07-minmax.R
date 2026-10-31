@@ -156,8 +156,7 @@ test_that("F07: the promoted column's schema type is FLOAT64", {
   df <- f07m_df()
 
   for (lazy in c(FALSE, TRUE)) {
-    gpu <- tbl_gpu(df)
-    if (lazy) gpu <- as_lazy(gpu)
+    gpu <- tbl_gpu(df, lazy = lazy)
     res <- suppressWarnings(
       gpu |> dplyr::group_by(g) |> dplyr::summarise(mn = min(x, na.rm = TRUE))
     )
@@ -211,8 +210,7 @@ test_that("F07: no warning when no group needs the identity", {
   df <- f07m_df()
 
   for (lazy in c(FALSE, TRUE)) {
-    gpu <- tbl_gpu(df)
-    if (lazy) gpu <- as_lazy(gpu)
+    gpu <- tbl_gpu(df, lazy = lazy)
     gpu <- dplyr::group_by(gpu, g)
     expect_no_warning(collect(dplyr::summarise(gpu, mn = min(z, na.rm = TRUE), mx = max(y))))
     expect_no_warning(collect(dplyr::summarise(gpu, mn = min(x), m = mean(y, na.rm = TRUE))))

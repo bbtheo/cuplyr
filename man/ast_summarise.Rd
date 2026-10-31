@@ -34,7 +34,8 @@ the old hardcoded "summarise always drops all groups" rule.}
 leaves R's integer range at execution. \code{"double"}: the column comes back
 FLOAT64, as in dplyr (eager mode reconciles the schema from the result).
 \code{"error"} (lazy plans, whose schema was declared INT32 statically): raise
-\code{cuplyr_error_sum_overflow}.}
+\code{cuplyr_error_sum_overflow}. A lazy \code{summarise()} plans only a sum of a
+logical this way (F80): an INT32 sum runs at the verb with \code{"double"}.}
 
 \item{sort_groups}{(F33) Sort the grouped result by the group keys
 (ascending, \code{NA} last), dplyr's \code{group_by()} order. \code{FALSE} only for

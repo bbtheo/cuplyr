@@ -743,6 +743,16 @@ join_input_node <- function(tbl) {
   set_ast_source_ptr(node, tbl$ptr)
 }
 
+# Does a join's `unmatched` / `relationship` check need the joined rows?
+# ("many-to-many" and NULL, the advisory default, check nothing that stops the
+# join.)
+# @keywords internal
+join_check_reads_data <- function(unmatched, relationship) {
+  any(unmatched != "drop") ||
+    (!is.null(relationship) &&
+       relationship %in% c("one-to-one", "one-to-many", "many-to-one"))
+}
+
 #' Apply a two-input join AST node, dispatching on exec_mode
 #'
 #' The join analogue of `push_op()` (D1). Joins can't reuse `push_op()`
@@ -825,6 +835,13 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
 
   # F31: x's attributes and class win (dplyr_reconstruct(out, x)).
   if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
+    # The size estimate reads the row counts of the two uploaded tables, so it
+    # is made only while neither side has pending steps (their row counts are
+    # not known before the plan runs).
+    if (!has_pending_ops(x) && !has_pending_ops(y)) {
+      warn_if_join_too_large(if (cross_by) "cross" else join_type, x, y, join_spec,
+                             suffix, keep)
+    }
     out <- new_tbl_gpu(
       ptr = NULL,
       schema = new_schema,
@@ -835,7 +852,19 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
       unspecified = join_unspec,
       rowwise = is_rowwise_gpu(x)
     )
-    return(row_slice_finish(carry_frame_meta(out, x), prep))
+    out <- row_slice_finish(carry_frame_meta(out, x), prep)
+    # `unmatched = "error"` and a one-to-one / one-to-many / many-to-one
+    # `relationship` are checks on the join's rows, and dplyr raises them at the
+    # verb: the join runs now (the result is the computed table, so it is not
+    # run twice).
+    if (join_check_reads_data(unmatched, relationship)) {
+      cuplyr_plan_break_notify(
+        verb, "its unmatched = \"error\" / relationship check reads the joined rows, which dplyr raises at the verb",
+        data = out, own_step = TRUE
+      )
+      out <- compute(out)
+    }
+    return(out)
   }
 
   warn_if_join_too_large(if (cross_by) "cross" else join_type, x, y, join_spec,
@@ -1049,7 +1078,7 @@ retry_on_sum_overflow <- function(attempt, on_overflow, class = "cuplyr_error_su
 #' ```
 #'
 #' @section Plan breaks:
-#' A lazy table (`tbl_gpu(df, lazy = TRUE)`) collects its verbs into a plan and
+#' A lazy table (the default, `tbl_gpu(df)`) collects its verbs into a plan and
 #' runs it when you `compute()` or `collect()`. A few steps need the result of
 #' the pending plan before it is asked for (a `summarise()` of an expression
 #' such as `mean(x * y)`, an integer `max()`, a verb that leaves no column).
@@ -1259,6 +1288,43 @@ cuplyr_fallback_notify <- function(verb, expr = NA_character_, reason = NULL,
   invisible(NULL)
 }
 
+# F80: a verb on a lazy table whose result TYPE depends on the data (an integer
+# sum() that can leave R's integer range) can't be planned, since a plan has a
+# fixed schema. It runs at the verb instead, the way an eager table runs it:
+# the pending steps run now (a plan break, notified with `reason`), the verb
+# then sees an eager table, and its result goes back to lazy with nothing
+# pending (`plan_back_to_lazy()`). `.data` is a lazy `tbl_gpu`. The notice is
+# about the user's steps: `notice_data` is the verb's input as the user gave it
+# when `.data` holds steps of the verb's own (a cur_group_id() helper column).
+# @keywords internal
+plan_run_now <- function(.data, verb, reason, notice_data = .data) {
+  if (has_pending_ops(notice_data)) {
+    cuplyr_plan_break_notify(verb, reason, data = notice_data)
+  }
+  set_tbl_gpu_field(compute(.data), "exec_mode", "eager")
+}
+
+# `plan_run_now()`'s result `now` with only the columns `names`: the verb's
+# input without the helper columns the verb added before the break, for a CPU
+# rerun, which then starts from the computed table instead of running the
+# user's plan again. It is a lazy select, run only if the rerun happens.
+# @keywords internal
+plan_now_columns <- function(now, names) {
+  now <- set_tbl_gpu_field(now, "exec_mode", "lazy")
+  push_op(now, ast_select(input_node(now), names))
+}
+
+# The lazy form of `plan_run_now()`'s eager result (anything that is not a
+# gibble, such as a CPU route's data frame, is returned as it is).
+# @keywords internal
+plan_back_to_lazy <- function(result) {
+  if (is_tbl_gpu(result) && identical(.subset2(result, "exec_mode"), "eager") &&
+      !has_pending_ops(result)) {
+    result <- set_tbl_gpu_field(result, "exec_mode", "lazy")
+  }
+  result
+}
+
 #' Notify about a plan break, gated by `options(cuplyr.plan_break = )`
 #'
 #' A lazy plan that had to run early, on the GPU. Always signals a
@@ -1271,9 +1337,12 @@ cuplyr_fallback_notify <- function(verb, expr = NA_character_, reason = NULL,
 #' @param reason Character, why the plan had to run
 #' @param expr Character, the expression that forced it, or `NA`
 #' @param data The lazy `tbl_gpu` whose plan is about to run
+#' @param own_step `TRUE` when `data` already holds the verb's own step (a join
+#'   that has to check its rows at the verb), so the notice says the verb ran
+#'   with its pending steps rather than that it ran them early.
 #' @return `invisible(NULL)`
 #' @keywords internal
-cuplyr_plan_break_notify <- function(verb, reason, expr = NA_character_, data) {
+cuplyr_plan_break_notify <- function(verb, reason, expr = NA_character_, data, own_step = FALSE) {
   steps <- max(1L, ast_count_ops(.subset2(data, "lazy_ops")))
   expr <- if (is.null(expr) || length(expr) != 1L) NA_character_ else as.character(expr)
   # (as in cuplyr_fallback_notify(): count()/tally() report their own wt)
@@ -1282,9 +1351,17 @@ cuplyr_plan_break_notify <- function(verb, reason, expr = NA_character_, data) {
     verb <- as$verb
     if (!is.na(expr)) expr <- as$expr
   }
+  earlier <- if (own_step) steps - 1L else steps
   msg <- paste0(
-    sprintf("cuplyr: %s() ran %d pending step%s on the GPU early (a plan break)",
-            verb, steps, if (steps == 1L) "" else "s"),
+    if (own_step && earlier == 0L) {
+      sprintf("cuplyr: %s() ran on the GPU at the verb (a plan break)", verb)
+    } else if (own_step) {
+      sprintf("cuplyr: %s() ran on the GPU at the verb, with %d pending step%s (a plan break)",
+              verb, earlier, if (earlier == 1L) "" else "s")
+    } else {
+      sprintf("cuplyr: %s() ran %d pending step%s on the GPU early (a plan break)",
+              verb, steps, if (steps == 1L) "" else "s")
+    },
     "\ni Reason: ", reason, if (!is.na(expr)) paste0(" (", expr, ")"), "."
   )
   fields <- list(verb = verb, expr = expr, reason = reason, steps = steps)

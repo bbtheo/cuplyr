@@ -188,7 +188,7 @@ f70d_check <- function(pipeline, warns, arrange_by = NULL) {
   srcs <- list(
     dplyr = function(x) tibble::as_tibble(x),
     lazy = function(x) as_lazy(tbl_gpu(x)),
-    eager = function(x) tbl_gpu(x)
+    eager = function(x) tbl_gpu(x, lazy = FALSE)
   )
   oracle <- f70d_run(function() pipeline(srcs$dplyr(df), srcs$dplyr))
   expect_identical(oracle$overflow, warns, label = "dplyr's warning (test premise)")

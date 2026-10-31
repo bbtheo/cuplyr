@@ -29,12 +29,16 @@ Use \code{compute()} when you want to:
 \item Prepare data for non-cuplyr functions that need a materialized table
 }
 
-In eager mode, \code{compute()} is a no-op since operations execute immediately.
+Tables are lazy by default, so \code{compute()} is how you run a pipeline and keep
+the result on the GPU. In eager mode (\code{tbl_gpu(df, lazy = FALSE)}),
+\code{compute()} is a no-op since operations execute immediately. Printing a lazy
+table also runs its plan, but keeps nothing; \code{compute()} first if you want to
+look at the result repeatedly.
 }
 \examples{
 if (has_gpu()) {
   # Lazy pipeline
-  lazy_result <- tbl_gpu(mtcars, lazy = TRUE) |>
+  lazy_result <- tbl_gpu(mtcars) |>  # lazy by default
     filter(mpg > 20) |>
     mutate(kpl = mpg * 0.425)
 

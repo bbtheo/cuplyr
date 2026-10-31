@@ -16,7 +16,7 @@ f42x_same <- function(df, pipeline, lazy = TRUE) {
   # itself must match too (dplyr wraps it, so match on the text).
   overflow_warned <- function(expr) any(grepl("integer overflow", f42x_warnings(expr)))
   oracle <- overflow_warned(pipeline(tibble::as_tibble(df)))
-  expect_identical(overflow_warned(collect(pipeline(tbl_gpu(df)))), oracle,
+  expect_identical(overflow_warned(collect(pipeline(tbl_gpu(df, lazy = FALSE)))), oracle,
                    info = "eager overflow warning differs from dplyr")
   if (lazy) {
     expect_identical(overflow_warned(collect(pipeline(as_lazy(tbl_gpu(df))))), oracle,
@@ -72,6 +72,7 @@ test_that("filter() and summarise() temp columns warn on integer overflow", {
 
 test_that("eager window sum() overflow reruns on the CPU for .keep, .before and .by", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
   big <- data.frame(g = c(1, 1, 2, 2), v = c(M, 5L, 1L, 2L), w = 1:4)
   f42x_same(big, function(d) mutate(d, s = sum(v), .by = g, .keep = "used"), lazy = FALSE)
   f42x_same(big, function(d) mutate(d, s = sum(v), t = cumsum(w), .before = w), lazy = FALSE)
@@ -115,9 +116,9 @@ test_that("typed NA operands give NA without a warning, in every verb and mode",
   skip_if_no_gpu()
   d <- data.frame(x = 1:3, y = c(1L, NA, 3L))
   for (mk in list(identity, as_lazy)) {
-    expect_length(f42x_warnings(collect(mutate(mk(tbl_gpu(d)), a = x + NA_integer_, b = NA_integer_ * y))), 0)
-    expect_length(f42x_warnings(collect(filter(mk(tbl_gpu(d)), x - NA_integer_ > 0L))), 0)
-    expect_length(f42x_warnings(collect(summarise(mk(tbl_gpu(d)), s = sum(x + NA_integer_, na.rm = TRUE)))), 0)
+    expect_length(f42x_warnings(collect(mutate(mk(tbl_gpu(d, lazy = FALSE)), a = x + NA_integer_, b = NA_integer_ * y))), 0)
+    expect_length(f42x_warnings(collect(filter(mk(tbl_gpu(d, lazy = FALSE)), x - NA_integer_ > 0L))), 0)
+    expect_length(f42x_warnings(collect(summarise(mk(tbl_gpu(d, lazy = FALSE)), s = sum(x + NA_integer_, na.rm = TRUE)))), 0)
   }
 })
 
@@ -140,9 +141,9 @@ test_that("integer arithmetic on a window sum is checked in filter() and summari
   skip_if_no_gpu()
   d <- data.frame(g = c(1, 1, 2, 2), x = c(M - 5L, 5L, 1L, 2L))
   f42x_same(d, function(t) filter(t, sum(x) + 1L > 0L, .by = g))
-  # The ungrouped sum overflows inside mean(): a lazy plan raises
-  # `cuplyr_error_sum_overflow` there (tested below), eager reruns on the CPU.
-  f42x_same(d, function(t) filter(t, x * 1000L > mean(sum(x))), lazy = FALSE)
+  # The ungrouped sum overflows inside mean(): both modes rerun on the CPU (F80:
+  # a lazy integer window sum runs at the verb).
+  f42x_same(d, function(t) filter(t, x * 1000L > mean(sum(x))))
   f42x_same(d, function(t) filter(t, x * 1000L > mean(sum(x)), .by = g))
   # An overflowing sum is a double, and the arithmetic on it follows.
   big <- data.frame(g = c(1, 1), x = c(M, 5L))
@@ -161,6 +162,7 @@ test_that("a zero-row table keeps integer arithmetic typed", {
 
 test_that("the eager window-sum fallback does not repeat a warning", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
   # x + 1L overflows on one row and the remaining sum overflows too: dplyr
   # warns once, and so must the rerun.
   d <- data.frame(x = c(M, M - 1L, M - 1L))
@@ -199,20 +201,23 @@ test_that("a checked chain longer than the fused cap is exact on both sides of e
 test_that("filter() keeps a top-level sum's double next to a nested in-range sum", {
   skip_if_no_gpu()
   # Both sums sit in the same window stage; only the top-level one overflows.
-  # Eager reruns on the CPU; lazy stays on the GPU with the double sum.
+  # Both modes rerun on the CPU (F80: a lazy integer window sum runs at the verb).
   e <- data.frame(x = c(1L, 2L), y = c(M, 5L), z = c(1L, 2L))
   f42x_same(e, function(t) filter(t, sum(y) > 0L, max(x * sum(z)) > 0L))
+  # with nothing overflowing, both stay on the GPU
+  ok <- data.frame(x = c(1L, 2L), y = c(7L, 5L), z = c(1L, 2L))
   withr::local_options(cuplyr.fallback = "error")
-  expect_same_as_dplyr_lazy(e, function(t) filter(t, sum(y) > 0L, max(x * sum(z)) > 0L))
+  expect_same_as_dplyr(ok, function(t) filter(t, sum(y) > 0L, max(x * sum(z)) > 0L))
+  expect_same_as_dplyr_lazy(ok, function(t) filter(t, sum(y) > 0L, max(x * sum(z)) > 0L))
 })
 
-test_that("filter() on an overflowing nested sum: eager matches dplyr, lazy fails loudly", {
+test_that("filter() on an overflowing nested sum matches dplyr in both modes", {
   skip_if_no_gpu()
   e <- data.frame(x = c(1L, 2L), y = c(M, 5L))
-  f42x_same(e, function(t) filter(t, max(x * sum(y)) > 0L), lazy = FALSE)
-  f42x_same(e, function(t) filter(t, max(x * sum(y)) > 0L, .by = x), lazy = FALSE)
-  expect_error(collect(filter(as_lazy(tbl_gpu(e)), max(x * sum(y)) > 0L)),
-               class = "cuplyr_error_sum_overflow")
+  f42x_same(e, function(t) filter(t, max(x * sum(y)) > 0L))
+  f42x_same(e, function(t) filter(t, max(x * sum(y)) > 0L, .by = x))
+  # F80: the lazy table runs the sum at the verb, so collect() has nothing to raise
+  expect_no_error(collect(filter(tbl_gpu(e, lazy = TRUE), max(x * sum(y)) > 0L)))
   # y + 1L overflows (one warning in dplyr) and the remaining sum overflows too:
   # the rerun must not repeat the attempt's warning.
   d <- data.frame(x = c(1L, 2L, 3L), y = c(M, M - 1L, M - 1L))
@@ -245,16 +250,21 @@ test_that("summarise() with a mixed-overflow window sum reruns on the CPU in bot
   expect_identical(suppressWarnings(summarise(lz, m = max(x * sum(x)), .by = g))$exec_mode, "lazy")
 })
 
-test_that("summarise() leaves an earlier lazy op's sum overflow alone", {
+test_that("a lazy mutate() with an overflowing sum runs at the verb, then summarise() matches dplyr", {
   skip_if_no_gpu()
-  # The pending mutate()'s own overflow is F34's lazy error, not a rerun.
-  lz <- as_lazy(tbl_gpu(data.frame(x = c(M, 5L))))
-  expect_error(lz |> mutate(s = sum(x)) |> summarise(m = max(x * sum(x))),
-               class = "cuplyr_error_sum_overflow")
+  # The mutate()'s own overflow is a double now (F80: an integer sum runs at
+  # the verb), so the summarise() after it sees that column and the nested
+  # window sum of its own, and the pipeline is dplyr's.
+  d <- data.frame(x = c(M, 5L))
+  pipeline <- function(t) t |> mutate(s = sum(x)) |> summarise(m = max(x * sum(x)))
+  oracle <- suppressWarnings(pipeline(tibble::as_tibble(d)))
+  got <- suppressWarnings(collect(pipeline(as_lazy(tbl_gpu(d)))))
+  expect_equal(tibble::as_tibble(got), oracle)
 })
 
 test_that("in-range window sums stay native in eager filter() and summarise()", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
   withr::local_options(cuplyr.fallback = "error")
   d <- data.frame(g = c(1, 1, 2, 2), x = c(M - 5L, 5L, 50000L, 50000L))
   f42x_same(d, function(t) filter(t, x * sum(x) > 0L, .by = g))

@@ -182,9 +182,13 @@
 #'         row regardless of `NA`s. `sum()` of an integer or logical is an
 #'         integer, as in dplyr. When a sum leaves the integer range dplyr
 #'         returns a double (for the whole column, and for any expression
-#'         on it): an eager call is then rerun by dplyr on the CPU, and a
-#'         lazy plan, whose schema is fixed, raises
-#'         `cuplyr_error_sum_overflow` at `collect()`
+#'         on it): the call is then rerun by dplyr on the CPU. A lazy table
+#'         can't plan for that (the type depends on the data), so a lazy
+#'         `mutate()` with an integer `sum()` runs at the verb like an eager
+#'         one (a plan break first runs the pending steps) and returns a lazy
+#'         table with nothing pending; a logical `sum()` stays in the plan
+#'         (it overflows only past 2^31 `TRUE` rows, with a
+#'         `cuplyr_error_sum_overflow` at `collect()`)
 #'       \item `first(x, order_by = NULL)` / `last(x, order_by = NULL)` /
 #'         `nth(x, n, order_by = NULL)` -- the first/last/`n`th row of the
 #'         group in its current row order, or in `order_by`'s order when
@@ -401,7 +405,11 @@ mutate_rowwise <- function(.data, dots, by_quo, keep, before_quo, after_quo) {
   if (!is.null(shadowed)) {
     return(cpu(shadowed))
   }
-  rw <- rowwise_rewrite_dots(.data, dots)
+  exact <- rowwise_exact_sums(.data, dots, TRUE, "mutate")
+  if (!is.null(exact$now)) {
+    return(plan_back_to_lazy(mutate_rowwise(exact$now, dots, by_quo, keep, before_quo, after_quo)))
+  }
+  rw <- if (exact$rewritten) exact$rw else rowwise_rewrite_dots(.data, dots)
   if (is.null(rw)) {
     return(rowwise_rerun(cpu, dots))
   }
@@ -561,6 +569,7 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
     return(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
                                 reason = "a vector literal next to a window call in one mutate() is not planned together."))
   }
+  .data <- check_vector_constant_sizes(.data, expressions, "mutate")
   dropped <- attr(expressions, "dropped")
   if (rowwise && any(dropped %in% .subset2(.data, "groups"))) {
     rowwise_bail("a rowwise var is dropped")
@@ -623,6 +632,42 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   }
   warn_fractional_dates(fractional)
   result
+}
+
+# A vector constant (`y = 1:4`) must be the table's row count (dplyr: "Can't
+# recycle"). An eager table checks it when the node runs (lower_mutate()); a
+# lazy one would only fail at collect(), so it is checked at the verb against the
+# row count: known for a table with nothing pending, otherwise the plan runs
+# first (a plan break). Returns `.data`, the computed table in that case.
+# @keywords internal
+check_vector_constant_sizes <- function(.data, expressions, verb) {
+  if (!isTRUE(attr(expressions, "has_vec")) || !identical(.subset2(.data, "exec_mode"), "lazy")) {
+    return(.data)
+  }
+  vecs <- lapply(expressions, function(e) {
+    ir <- .subset2(e, "ir")
+    if (identical(.subset2(ir, "kind"), "vec")) ir
+  })
+  vecs <- vecs[!vapply(vecs, is.null, logical(1))]
+  if (length(vecs) == 0L) {
+    return(.data)
+  }
+  if (has_pending_ops(.data)) {
+    cuplyr_plan_break_notify(
+      verb, "a vector constant must match the row count, which the pending steps decide",
+      data = .data
+    )
+    .data <- compute(.data)
+  }
+  n_rows <- base_dim(.data)[[1L]]
+  if (!is.na(n_rows)) {
+    for (vec in vecs) {
+      if (length(.subset2(vec, "value")) != n_rows) {
+        mutate_vector_size_error(n_rows, vec)
+      }
+    }
+  }
+  .data
 }
 
 # Internal: window-bearing mutate() dispatch (Phase 5, task W3)
@@ -715,6 +760,25 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
     return(mutate_window_fallback(fallback_data, dots, keep, before_quo, after_quo, by_quo))
   }
 
+  # F80: a lazy table runs a call with an integer sum() now, as an eager one
+  # does (the type of the column is the data's to decide; see below), and the
+  # result goes back to lazy with nothing pending. With cur_group_id()'s helper
+  # column on `.data`, the notice counts the user's steps and a CPU rerun
+  # starts from the computed table without the helper (not from the lazy
+  # input, which would run the user's plan again).
+  if (identical(.subset2(.data, "exec_mode"), "lazy") &&
+      any(vapply(plan$all_specs, window_spec_int_sum, logical(1)))) {
+    same <- identical(fallback_data, .data)
+    now <- plan_run_now(.data, "mutate", "an integer sum() (result type depends on the data)",
+                        notice_data = fallback_data)
+    return(plan_back_to_lazy(mutate_window(
+      now, dots, expressions, orig_schema, orig_names, orig_groups, keep, before_quo, after_quo,
+      by_quo,
+      fallback_data = if (same) now else plan_now_columns(now, current_schema(fallback_data)$names),
+      drop = drop, dropped = dropped, fractional = fractional
+    )))
+  }
+
   # Each push is handed the schema the previous one produced, so none of them
   # re-derives it from the pending chain.
   emit <- function(result) {
@@ -749,8 +813,10 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
   # double when a sum leaves the integer range (one overflowing group makes the
   # whole column double, and `sum(x) + 1L` follows). The eager schema is only
   # known after the fact, so such a call is rerun whole by dplyr; overflow is
-  # rare, so the CPU path costs nothing in the common case. A lazy plan has a
-  # fixed schema and raises `cuplyr_error_sum_overflow` at collect() instead.
+  # rare, so the CPU path costs nothing in the common case. A lazy table with
+  # such a sum is run as an eager one above (F80), so a lazy plan reaching here
+  # holds no integer sum (a BOOL8 sum is the exception: it can only overflow
+  # with 2^31 TRUE rows in a group, and raises `cuplyr_error_sum_overflow`).
   if (identical(.subset2(.data, "exec_mode"), "eager")) {
     # The CPU rerun's upload warns about fractional dates itself.
     return(retry_on_sum_overflow(
@@ -1118,11 +1184,13 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
       floored <- floor_fractional_date(const$value)
       ir <- tryCatch(
         {
-          lit <- ir_lit_from_r(floored %||% const$value)
-          ir_check_ts_lit(lit)
-          # A Period/Duration/difftime value is the CPU's (F48); the signal
-          # must not reach make_mutate_expr()'s ir_infer_type().
-          ir_check_timespan_lit(lit$value)
+          lit <- ir_lit_or_unsupported(floored %||% const$value)
+          if (!is.null(lit)) {
+            ir_check_ts_lit(lit)
+            # A Period/Duration/difftime value is the CPU's (F48); the signal
+            # must not reach make_mutate_expr()'s ir_infer_type().
+            ir_check_timespan_lit(lit$value)
+          }
           lit
         },
         cuplyr_timestamp_needs_cpu = function(e) {
@@ -1758,7 +1826,15 @@ transmute.tbl_gpu <- function(.data, ...) {
     if (!is.null(shadowed)) {
       return(cpu(shadowed))
     }
-    rw <- if (length(dots) > 0L || length(.subset2(.data, "groups")) > 0L) rowwise_rewrite_dots(.data, dots)
+    exact <- rowwise_exact_sums(.data, dots, TRUE, "transmute")
+    if (!is.null(exact$now)) {
+      return(plan_back_to_lazy(transmute.tbl_gpu(exact$now, !!!dots)))
+    }
+    rw <- if (exact$rewritten) {
+      exact$rw
+    } else if (length(dots) > 0L || length(.subset2(.data, "groups")) > 0L) {
+      rowwise_rewrite_dots(.data, dots)
+    }
     if (is.null(rw)) {
       return(rowwise_rerun(cpu, dots))
     }
@@ -1862,6 +1938,7 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
     }))
   }
 
+  .data <- check_vector_constant_sizes(.data, expressions, "transmute")
   dropped <- attr(expressions, "dropped")
   if (rowwise && any(dropped %in% .subset2(.data, "groups"))) {
     rowwise_bail("a rowwise var is dropped")

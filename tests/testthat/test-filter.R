@@ -327,6 +327,7 @@ test_that("filter() result stays on GPU", {
 
 test_that("filter() creates new GPU allocation (immutable)", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
 
   gpu_df <- tbl_gpu(mtcars)
   filtered <- dplyr::filter(gpu_df, mpg > 20)

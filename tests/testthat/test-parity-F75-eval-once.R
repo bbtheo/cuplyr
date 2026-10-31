@@ -283,8 +283,7 @@ test_that("F75: a pure call's warning is raised once by an ungrouped summarise()
   skip_if_no_gpu()
   df <- f75_df()
   for (lazy in c(FALSE, TRUE)) {
-    gt <- tbl_gpu(df)
-    if (lazy) gt <- as_lazy(gt)
+    gt <- tbl_gpu(df, lazy = lazy)
     w <- testthat::capture_warnings(
       res <- collect(summarise(gt, s = sum(y + as.integer("a"))))
     )
@@ -334,8 +333,7 @@ test_that("F75: a pure call in na.rm=, probs= or nth()'s n warns once", {
   skip_if_no_gpu()
   df <- tibble::tibble(g = c(1L, 1L, 2L), y = c(10, 20, 30))
   gt <- function(lazy, d = df) {
-    t <- tbl_gpu(d)
-    if (lazy) as_lazy(t) else t
+    tbl_gpu(d, lazy = lazy)
   }
   f75_expect_one_warning(function(lazy) summarise(gt(lazy), s = sum(y, na.rm = is.na(as.integer("a")))))
   f75_expect_one_warning(function(lazy) {
@@ -349,8 +347,7 @@ test_that("F75: a pure call warns once on the .by and .drop = FALSE paths", {
   df <- tibble::tibble(g = c(1L, 1L, 2L), y = c(10, 20, 30))
   ff <- tibble::tibble(f = factor(c("a", "a", "c"), levels = c("a", "b", "c")), y = c(1, 2, 3))
   gt <- function(lazy, d) {
-    t <- tbl_gpu(d)
-    if (lazy) as_lazy(t) else t
+    tbl_gpu(d, lazy = lazy)
   }
   f75_expect_one_warning(function(lazy) summarise(gt(lazy, df), s = sum(y + as.integer("a")), .by = g))
   f75_expect_one_warning(function(lazy) {

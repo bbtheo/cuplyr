@@ -1,5 +1,78 @@
 # cuplyr (development version)
 
+## Gibbles are lazy by default (F80) -- breaking change
+
+* `tbl_gpu()` (and `gibble()`, `as_gibble()`, `as_tbl_gpu()`) now returns a
+  lazy gibble unless you ask otherwise. Each verb records a step; `collect()`,
+  `compute()` or anything else that needs the data runs the optimized plan.
+  Errors in a verb's arguments (a missing column, a type error) are still
+  raised when the verb is called. **To get the old behaviour, run
+  `options(cuplyr.exec_mode = "eager")`** (or set the environment variable
+  `CUPLYR_EXEC_MODE=eager`, or pass `lazy = FALSE` per table). The argument
+  beats the option, which beats the variable.
+* Why: lazy holds no GPU memory between calls and takes about as long as eager
+  (see the README and `vignette("performance")`: within about a millisecond on
+  a single pipeline, level at 1e6 rows and below, and 3.6 times faster than
+  five eager pipelines run back to back at 5e7 rows, 18.5 against 66.7 ms
+  each).
+* `print()` of a lazy gibble with pending steps now runs the plan once and
+  shows the first rows like an eager gibble, under `# A gibble [lazy]: n x m`
+  (the real row count). Nothing is kept: the table stays lazy, holds no GPU
+  memory afterwards, and printing it twice runs the plan twice. If the plan
+  fails (an error, out of GPU memory), `print()` shows `# A gibble [lazy]: ?? x
+  m`, the schema, the number of pending steps and the message instead of
+  raising. `glimpse()` does the same and adds one `Lazy:` line after
+  `Columns:`. A lazy table with nothing pending prints as before. (The old
+  `# A gibble [lazy, not materialized]` block is gone.)
+* `bind_rows()`, `bind_cols()` and the set operations (`union()`,
+  `union_all()`, `intersect()`, `setdiff()`, `symdiff()`) return a lazy table
+  when any gibble input is lazy, as the joins always did. A join with
+  `copy = TRUE` uploads `y` in `x`'s mode.
+* Fixed in lazy mode: `nrow()`/`dim()` of a lazy join or set-operation result
+  was `NA`; a join's `unmatched = "error"` and `relationship = "one-to-one"` /
+  `"one-to-many"` / `"many-to-one"` checks were raised at `collect()` (now at
+  the verb, as in dplyr: the join runs then and is reported as a plan break);
+  a vector constant of the wrong size in an ungrouped `mutate()`,
+  `transmute()` or `group_by()` was raised at `collect()`; and a rowwise
+  `mutate()` that makes list columns failed at `collect()` instead of giving
+  dplyr's result.
+* An integer `sum()` is an integer in dplyr, but a double when it leaves R's
+  integer range, and a plan can't know which before it runs. So on a lazy
+  table, `summarise()` of an integer `sum()`, `mutate()` with an integer
+  `sum()` (grouped, `.by` or not), `filter()`/`filter_out()` with an integer
+  window `sum()` (`filter(x * sum(x) > 0L, .by = g)`) and a rowwise integer
+  `sum()` (`sum(c_across(...))`, `sum(a, b)`) run at the verb, as an eager
+  table runs them: the pending steps run first (a plan break, reported under
+  `options(cuplyr.plan_break = "warn")` when you had steps pending) and the
+  result is a lazy table with nothing pending, holding dplyr's integer or
+  double, or dplyr's rows. The same holds for an integer `min()`/`max()` in
+  `summarise()`, as before. A `sum()` whose argument is a logical expression
+  (`sum(l)`, `sum(x > 0)` in `mutate()` or `filter()`) stays in the plan: it
+  can only overflow past 2^31 `TRUE` rows in one group, which raises
+  `cuplyr_error_sum_overflow` at `collect()`. A logical sum that cuplyr turns
+  into an integer one first runs at the verb like any integer sum, with the
+  same result: `sum(l, na.rm = TRUE)`, `add_count(wt = l)`, and in
+  `summarise()` a `sum()` of an expression such as `sum(x > 0)`. Before this
+  change a lazy table raised `cuplyr_error_sum_overflow` for an integer sum,
+  and a lazy `filter()` could keep rows dplyr drops or raise that error (the
+  limitations listed under F42 below); nothing changes for eager tables.
+* Warnings dplyr raises when a verb is called now appear when the plan runs,
+  at `collect()`/`compute()`/`print()`, and again on every `print()`: the
+  many-to-many join warning and the `NAs produced by integer overflow` warning
+  of integer arithmetic. (An eager table raises them at the verb, as before.)
+  The cross-join size warning still fires at the verb while neither table has
+  pending steps.
+* A value the GPU cannot hold in a `mutate()`/`transmute()`/`group_by()`
+  expression (an environment, a function, a list, a `POSIXlt`) gives dplyr's
+  own result or error at the verb, as it did for eager tables, instead of a
+  `Plan failed: Unsupported GPU type string: UNKNOWN` at `collect()`.
+* A join that has to check its rows at the verb (`unmatched = "error"`, a
+  `relationship` of `"one-to-one"`, `"one-to-many"` or `"many-to-one"`) runs
+  at the verb and holds its result, so declaring those checks on a lazy table
+  costs the join's memory and stops the optimizer from pruning across it; its
+  plan-break notice says the join ran at the verb.
+* The unused options `cuplyr.lazy` and `cuplyr.verbose` are no longer set.
+
 ## String columns over 2 GiB of characters (F97)
 
 * A string column holding more than 2^31 - 1 bytes of characters now uploads
@@ -389,7 +462,9 @@
   Use `sum(as.numeric(x))` or eager mode. A lazy `filter()` on a top-level
   sum that overflows still compares the double value, but if another group's
   in-range sum then meets overflowing integer arithmetic, that row is not
-  dropped (known limitation).
+  dropped (known limitation). (Since F80, above, a lazy table runs an integer
+  sum at the verb and gets dplyr's result; only a logical sum keeps these
+  rules.)
 * Checked integer arithmetic costs more than the old wrapping arithmetic:
   each group of up to four `+`/`-`/`*` nodes takes a second pass for the
   range test and a reduction. At 5e6 rows, `x + y` takes about 1.6 ms

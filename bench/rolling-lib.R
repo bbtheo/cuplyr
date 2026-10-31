@@ -355,7 +355,7 @@ rw_grouped_data <- function(n_rows, n_groups, seed = 12345) {
 rw_grouped_setup <- function(df, n) {
   out <- list()
 
-  gtg <- dplyr::group_by(cuplyr::tbl_gpu(df), g)
+  gtg <- dplyr::group_by(cuplyr::tbl_gpu(df, lazy = FALSE), g)
   out$cuplyr <- list(
     run = function() {
       r <- dplyr::compute(dplyr::mutate(gtg, r = roll_mean(x, n)))

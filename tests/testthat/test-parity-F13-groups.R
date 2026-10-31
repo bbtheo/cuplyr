@@ -21,7 +21,7 @@ f13_both <- function(df, pipeline, ...) {
 }
 
 f13_modes <- function(df) {
-  list(eager = tbl_gpu(df), lazy = tbl_gpu(df, lazy = TRUE))
+  list(eager = tbl_gpu(df, lazy = FALSE), lazy = tbl_gpu(df, lazy = TRUE))
 }
 
 f13_df <- data.frame(

@@ -164,7 +164,7 @@ test_that("rw_cuplyr_fun() runs natively on the GPU, never collects, matches dat
   rw <- load_rw_lib()
   skip_if_not_installed("data.table")
   df <- rw$rw_data(5000)
-  gt <- tbl_gpu(df)
+  gt <- tbl_gpu(df, lazy = FALSE)
 
   for (alias in c(FALSE, TRUE)) {
     for (stat in c("mean", "sum", "min", "max", "sd")) {

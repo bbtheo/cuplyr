@@ -31,7 +31,7 @@ f16_parity <- function(df, pipeline, ...) {
 }
 
 f16_inputs <- function(df) {
-  list(eager = tbl_gpu(df), lazy = as_lazy(tbl_gpu(df)))
+  list(eager = tbl_gpu(df, lazy = FALSE), lazy = as_lazy(tbl_gpu(df)))
 }
 
 # Both sides fail with the same condition message. `gpu` and `cpu` are

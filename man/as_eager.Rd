@@ -18,8 +18,8 @@ execute all subsequent operations immediately.
 }
 \examples{
 if (has_gpu()) {
-  # Start lazy, switch to eager mid-pipeline
-  result <- tbl_gpu(mtcars, lazy = TRUE) |>
+  # Tables are lazy by default; switch to eager mid-pipeline
+  result <- tbl_gpu(mtcars) |>
     filter(mpg > 20) |>
     as_eager() |>
     mutate(x = hp * 2) |>  # executes immediately

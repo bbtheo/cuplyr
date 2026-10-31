@@ -82,7 +82,9 @@ rowwise_to_grouped <- function(x, vars) {
 #' into GPU operations over the columns of each row, with dplyr's NA rules and
 #' result types (integer inputs give an integer `sum()`/`min()`/`max()`, a
 #' double sum if the integer range is left; an all-`NA` row of
-#' `min()`/`max(na.rm = TRUE)` is `Inf`/`-Inf` with dplyr's warning). Only
+#' `min()`/`max(na.rm = TRUE)` is `Inf`/`-Inf` with dplyr's warning; on a lazy
+#' table a call with such an integer `sum()` runs at the verb, since its type
+#' depends on the data). Only
 #' logical, integer and double columns take part. Everything else (a function
 #' that needs the row as a vector, list-columns, window functions, `.by`) runs
 #' the whole call in dplyr on the CPU and comes back as a rowwise `tbl_gpu`.
@@ -139,6 +141,9 @@ rowwise.tbl_gpu <- function(.data, ...) {
 # in the verb call's reason collector (fallback_reasons_open()), not here.
 rowwise_state <- new.env(parent = emptyenv())
 rowwise_state$depth <- 0L
+# F80: set by rowwise_agg_call() when a lazy table's dots hold an integer sum()
+# (see rowwise_exact_sums())
+rowwise_state$int_sum <- FALSE
 
 # Abandon the native attempt in progress (it is always inside rowwise_attempt()).
 # @keywords internal
@@ -176,7 +181,9 @@ rowwise_attempt <- function(native) {
     col$failed <- NULL
   }
   tryCatch(
-    native(),
+    {
+      native()
+    },
     cuplyr_cpu_fallback = function(cnd) {
       rowwise_note_attempt(cnd, declined = TRUE)
       NULL
@@ -242,11 +249,14 @@ rowwise_cpu <- function(.data, verb, tables = character()) {
     mc[[nm]] <- val
   }
   verb_fn <- rlang::call2("::", quote(dplyr), rlang::sym(verb))
-  gpu_fallback(verb, .data, function(tbl) {
+  res <- gpu_fallback(verb, .data, function(tbl) {
     mc[[first]] <- tbl
     mc[[1L]] <- verb_fn
     rlang::eval_bare(mc, caller)
   }, also = also)
+  # (F80) a two-table verb is lazy when either table is, as push_join() and the
+  # set operations decide; the result is in `.data`'s mode otherwise
+  result_mode_of_inputs(res, c(list(.data), also))
 }
 
 # =============================================================================
@@ -577,9 +587,10 @@ rowwise_rewrite_agg <- function(expr, fn, env, ctx) {
 # of those depend on the data: an integer sum() that leaves the integer range
 # is a double, and an integer min()/max(na.rm = TRUE) of an all-NA row is
 # +-Inf (a double, with a warning). An eager table asks the GPU first and
-# builds the double form when it has to; a lazy plan has a fixed schema, so
-# its integer sum() is the INT32 form that fails loudly (cuplyr_error_sum_overflow,
-# like F42's window sums) and its integer min()/max(na.rm = TRUE) has no native form.
+# builds the double form when it has to; a lazy plan has a fixed schema, so a
+# lazy table with an integer sum() runs the verb as an eager one (F80,
+# rowwise_exact_sums(): the form built here is then the eager one) and its
+# integer min()/max(na.rm = TRUE) has no native form.
 # On zero rows dplyr still evaluates min()/max() once (+-Inf, a double, with
 # base R's warning): an eager table sends that to dplyr; in a lazy plan the
 # kernel flags it (check_rowwise_flags()).
@@ -612,9 +623,43 @@ rowwise_agg_call <- function(fn, na_rm, cols, ctx) {
       }
     } else if (fn != "sum") {
       rowwise_bail("an integer min()/max(na.rm = TRUE) has a data-dependent type")
+    } else {
+      # (the verb then runs on an eager table, rowwise_exact_sums())
+      rowwise_state$int_sum <- TRUE
     }
   }
   rlang::call2(".cuplyr_rw", node, !!!rlang::syms(unique(cols)))
+}
+
+# F80: the table a rowwise verb on a LAZY `.data` must run on, or NULL. An
+# integer sum() over several columns is a double when a row's sum leaves the
+# integer range, which only the data can say (rowwise_agg_call()); a lazy plan
+# can't hold that, so such a call runs now, the way an eager table runs it: the
+# pending steps run (a plan break), the verb is run again by the caller on the
+# computed eager table, and its result goes back to lazy (plan_back_to_lazy()).
+# The test is a pure planning pass over the dots, no GPU work: it is the
+# caller's rowwise_rewrite_dots() call, handed back when nothing has to run now
+# (so a lazy call rewrites its dots once).
+# @param .data The rowwise tbl_gpu
+# @param dots,named As rowwise_rewrite_dots()
+# @param verb The verb's name, for the plan-break notice
+# @return `list(now, rewritten, rw)`: `now` is the computed eager table to run
+#   the verb on again, or NULL; with `now` NULL and `rewritten` TRUE, `rw` is
+#   `rowwise_rewrite_dots(.data, dots, named)` (`rewritten` is FALSE for an
+#   eager table or no dots: the caller rewrites, if it needs to)
+# @keywords internal
+rowwise_exact_sums <- function(.data, dots, named, verb) {
+  if (!identical(.subset2(.data, "exec_mode"), "lazy") || length(dots) == 0L) {
+    return(list(now = NULL, rewritten = FALSE, rw = NULL))
+  }
+  rowwise_state$int_sum <- FALSE
+  on.exit(rowwise_state$int_sum <- FALSE, add = TRUE)
+  rw <- rowwise_rewrite_dots(.data, dots, named)
+  if (!isTRUE(rowwise_state$int_sum)) {
+    return(list(now = NULL, rewritten = TRUE, rw = rw))
+  }
+  list(now = plan_run_now(.data, verb, "an integer sum() (result type depends on the data)"),
+       rewritten = FALSE, rw = NULL)
 }
 
 # The post-parse allowlist (mutate/transmute/summarise): the parsed dots of a
@@ -681,7 +726,11 @@ summarise_rowwise <- function(.data, dots, .groups, by_quo, caller_env) {
       !all(nzchar(nms)) || anyDuplicated(nms) > 0L || any(nms %in% vars)) {
     return(cpu())
   }
-  rw <- rowwise_rewrite_dots(.data, dots)
+  exact <- rowwise_exact_sums(.data, dots, TRUE, "summarise")
+  if (!is.null(exact$now)) {
+    return(plan_back_to_lazy(summarise_rowwise(exact$now, dots, .groups, by_quo, caller_env)))
+  }
+  rw <- if (exact$rewritten) exact$rw else rowwise_rewrite_dots(.data, dots)
   if (is.null(rw)) {
     return(rowwise_rerun(cpu, dots))
   }

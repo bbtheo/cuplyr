@@ -53,7 +53,7 @@ sales_data <- data.frame(
 )
 
 # Transfer to GPU
-gpu_sales <- tbl_gpu(sales_data, lazy = TRUE)
+gpu_sales <- tbl_gpu(sales_data)
 ```
 
 ### Multi-Step Revenue Analysis
@@ -230,7 +230,7 @@ sales_with_dates <- sales_data |>
  )
 
 # Now analyze on GPU
-monthly_trend <- tbl_gpu(sales_with_dates, lazy = TRUE) |>
+monthly_trend <- tbl_gpu(sales_with_dates) |>
  mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
  group_by(month) |>
  summarise(
@@ -246,7 +246,7 @@ monthly_trend
 ### Quarterly Analysis
 
 ```{r quarterly}
-quarterly_analysis <- tbl_gpu(sales_with_dates, lazy = TRUE) |>
+quarterly_analysis <- tbl_gpu(sales_with_dates) |>
  mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
  group_by(quarter, region) |>
  summarise(
@@ -324,7 +324,7 @@ sales_with_period <- sales_data |>
    period = ifelse(date < as.Date("2023-07-01"), "H1", "H2")
  )
 
-period_comparison <- tbl_gpu(sales_with_period, lazy = TRUE) |>
+period_comparison <- tbl_gpu(sales_with_period) |>
  mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
  group_by(period, product_category) |>
  summarise(
@@ -368,7 +368,7 @@ When working with very large data, minimize memory usage:
 
 ```{r memory-efficient, eval=FALSE}
 # Pattern 1: Filter early, select only needed columns
-result <- tbl_gpu(huge_data, lazy = TRUE) |>
+result <- tbl_gpu(huge_data) |>
  filter(status == "active") |>      # Reduce rows first
  select(id, date, amount, category) |>  # Then reduce columns
  mutate(amount_adj = amount * 1.1) |>
@@ -377,7 +377,7 @@ result <- tbl_gpu(huge_data, lazy = TRUE) |>
  collect()
 
 # Pattern 2: Process in logical segments
-base <- tbl_gpu(huge_data, lazy = TRUE) |>
+base <- tbl_gpu(huge_data) |>
  filter(date >= start_date, date < end_date) |>
  select(required_columns) |>
  compute()  # Checkpoint: clear intermediate memory
@@ -424,7 +424,7 @@ sales_enriched <- sales_data |>
  left_join(category_totals, by = "product_category")
 
 # Second pass: analyze with category context
-regional_share <- tbl_gpu(sales_enriched, lazy = TRUE) |>
+regional_share <- tbl_gpu(sales_enriched) |>
  mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
  group_by(product_category, region) |>
  summarise(
@@ -585,7 +585,7 @@ safe_analysis <- function(data, min_rows = 100) {
 
  # Perform analysis
  tryCatch({
-   tbl_gpu(data, lazy = TRUE) |>
+   tbl_gpu(data) |>
      mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
      filter(revenue > 0) |>
      summarise(
@@ -667,7 +667,7 @@ library(bench)
 # Benchmark: GPU vs CPU for aggregation
 comparison <- bench::mark(
  gpu = {
-   tbl_gpu(sales_data, lazy = TRUE) |>
+   tbl_gpu(sales_data) |>
      mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
      group_by(product_category, region) |>
      summarise(
@@ -707,7 +707,7 @@ The GPU advantage becomes clear with millions of rows.
 ## Best Practices Summary
 
 1. **Filter and select early** to reduce data size
-2. **Use lazy mode** for complex multi-step pipelines
+2. **Stay lazy** (the default) for complex multi-step pipelines
 3. **Use compute()** to checkpoint before branching
 4. **Prepare date components in R** before transfer
 5. **Use hybrid GPU/CPU** - GPU for aggregation, R for complex logic

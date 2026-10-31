@@ -127,7 +127,7 @@ f60_ratio <- function(a, b, warm = 5L, batches = 7L, k = 3L) {
 test_that("warm colwise verbs on 200 columns cost about what across() costs", {
   skip_if_no_gpu()
   num <- f60_wide(n = 1000L, w = 200L, na = FALSE)[-1L]
-  g <- tbl_gpu(num)
+  g <- tbl_gpu(num, lazy = FALSE)
   withr::local_options(cuplyr.fallback = "error")
 
   r1 <- f60_ratio(function() summarise_all(g, mean),

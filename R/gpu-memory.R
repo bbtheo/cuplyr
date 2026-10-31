@@ -392,7 +392,10 @@ gpu_size_comparison <- function(x) {
 #'       after$pool_used_bytes - before$pool_used_bytes, "bytes\n")
 #' }
 gpu_memory_state <- function() {
-  info <- gpu_details()
+  # (only the memory figures: gpu_details() also reads the device properties,
+  # which costs most of a millisecond, and a join calls this on every verb)
+  mem <- tryCatch(gpu_mem_info(), error = function(e) c(NA_real_, NA_real_))
+  info <- list(available = !anyNA(mem), free_memory = mem[[1]], total_memory = mem[[2]])
 
   if (!isTRUE(info$available)) {
     return(list(

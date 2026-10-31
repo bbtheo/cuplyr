@@ -207,8 +207,7 @@ test_that("a fractional Date mean/median is floored natively with the warning", 
   # mean of the 5 non-NA days is 15865.2; dplyr keeps the fraction.
   want <- summarise(df, m = mean(d, na.rm = TRUE))
   for (lazy in c(FALSE, TRUE)) {
-    g <- tbl_gpu(df)
-    if (lazy) g <- as_lazy(g)
+    g <- tbl_gpu(df, lazy = lazy)
     expect_warning(
       got <- collect(summarise(g, m = mean(d, na.rm = TRUE))),
       class = "cuplyr_warning_fractional_date"
@@ -258,8 +257,7 @@ test_that("mean()/median() of timestamps on empty input match dplyr", {
   # timestamp column), its median NA.
   want <- summarise(df, m = mean(tn), md = median(t), dm = mean(d), dmd = median(d))
   for (lazy in c(FALSE, TRUE)) {
-    g <- tbl_gpu(df)
-    if (lazy) g <- as_lazy(g)
+    g <- tbl_gpu(df, lazy = lazy)
     got <- collect(summarise(g, m = mean(tn), md = median(t), dm = mean(d), dmd = median(d)))
     expect_equal(nrow(got), 1L)
     for (col in names(want)) {
@@ -292,8 +290,7 @@ test_that("a later dot compares against dplyr's unfloored Date mean/median", {
     want <- tibble::as_tibble(dplyr::ungroup(pipeline(data)))
     rest <- setdiff(names(want), "m")
     for (lazy in c(FALSE, TRUE)) {
-      g <- tbl_gpu(data)
-      if (lazy) g <- as_lazy(g)
+      g <- tbl_gpu(data, lazy = lazy)
       expect_warning(got <- collect(pipeline(g)), class = "cuplyr_warning_fractional_date")
       got <- tibble::as_tibble(dplyr::ungroup(got))
       expect_equal(names(got), names(want))

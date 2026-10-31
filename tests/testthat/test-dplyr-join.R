@@ -36,7 +36,7 @@
 compare_na_join <- function(left_df, right_df, join_fn, by, ..., arrange_by) {
   expected <- join_fn(left_df, right_df, by = by, ...)
 
-  eager <- join_fn(tbl_gpu(left_df), tbl_gpu(right_df), by = by, ...) |>
+  eager <- join_fn(tbl_gpu(left_df, lazy = FALSE), tbl_gpu(right_df, lazy = FALSE), by = by, ...) |>
     collect()
   lazy <- join_fn(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df, lazy = TRUE),
                   by = by, ...) |>
@@ -374,7 +374,7 @@ test_that("parse_join_by() returns the 4-vector spec for every existing by= form
 compare_semi_anti <- function(left_df, right_df, join_fn, by, ...) {
   expected <- join_fn(left_df, right_df, by = by, ...)
 
-  eager <- join_fn(tbl_gpu(left_df), tbl_gpu(right_df), by = by, ...) |>
+  eager <- join_fn(tbl_gpu(left_df, lazy = FALSE), tbl_gpu(right_df, lazy = FALSE), by = by, ...) |>
     collect()
   lazy <- join_fn(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df, lazy = TRUE),
                   by = by, ...) |>
@@ -568,7 +568,7 @@ test_that("right_join() row order matches dplyr: x-matched order then unmatched-
   # 2) in x's order, then the unmatched-y row (5) last.
   expect_equal(expected$id, c(3, 1, 2, 5))
 
-  eager <- dplyr::right_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "id") |>
+  eager <- dplyr::right_join(tbl_gpu(left_df, lazy = FALSE), tbl_gpu(right_df, lazy = FALSE), by = "id") |>
     collect()
   lazy <- dplyr::right_join(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df, lazy = TRUE),
                             by = "id") |>
@@ -590,7 +590,7 @@ test_that("right_join() duplicate matches: right rows for one left row appear in
   expected <- dplyr::right_join(left_df, right_df, by = "id")
   expect_equal(expected$w, c(100, 200, 400, 300))
 
-  eager <- dplyr::right_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "id") |>
+  eager <- dplyr::right_join(tbl_gpu(left_df, lazy = FALSE), tbl_gpu(right_df, lazy = FALSE), by = "id") |>
     collect()
   lazy <- dplyr::right_join(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df, lazy = TRUE),
                             by = "id") |>
@@ -617,7 +617,7 @@ test_that("left_join() preserves factor levels on a non-key factor column", {
 
   expected <- dplyr::left_join(left_df, right_df, by = "id")
 
-  eager <- dplyr::left_join(tbl_gpu(left_df), tbl_gpu(right_df), by = "id") |> collect()
+  eager <- dplyr::left_join(tbl_gpu(left_df, lazy = FALSE), tbl_gpu(right_df, lazy = FALSE), by = "id") |> collect()
   lazy <- dplyr::left_join(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df, lazy = TRUE),
                            by = "id") |> collect()
 

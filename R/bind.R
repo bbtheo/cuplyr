@@ -292,6 +292,10 @@ bind_row_as_df <- function(x, call) {
 #' @return A tbl_gpu
 #' @keywords internal
 bind_cols_gpu <- function(dots, .name_repair = "unique", call = rlang::caller_env()) {
+  result_mode_of_inputs(bind_cols_gpu_run(dots, .name_repair, call), dots)
+}
+
+bind_cols_gpu_run <- function(dots, .name_repair, call) {
   if (length(dots) == 0) {
     stop("No tables provided to bind_cols", call. = FALSE)
   }
@@ -473,6 +477,19 @@ bind_rowwise_first <- function(verb, dots, ...) {
   out
 }
 
+# The mode of a multi-input verb's result: lazy when any gibble input is lazy
+# (push_join()'s rule), else the result's own. The bind and set-operation code
+# computes its inputs and builds results from eager helper tables, so the
+# mode is put back on the way out. A data-frame input never decides it.
+# @keywords internal
+result_mode_of_inputs <- function(result, inputs) {
+  if (is_tbl_gpu(result) && !identical(.subset2(result, "exec_mode"), "lazy") &&
+      any(vapply(inputs, is_lazy, logical(1)))) {
+    result$exec_mode <- "lazy"
+  }
+  result
+}
+
 # A bind input that has data-frame attributes and a class to hand over: a table,
 # not a bare vector.
 bind_has_meta <- function(x) is.data.frame(x) || is_tbl_gpu(x)
@@ -489,6 +506,10 @@ bind_has_meta <- function(x) is.data.frame(x) || is_tbl_gpu(x)
 #' @return A tbl_gpu
 #' @keywords internal
 bind_rows_gpu <- function(dots, .id = NULL, call = rlang::caller_env()) {
+  result_mode_of_inputs(bind_rows_gpu_run(dots, .id, call), dots)
+}
+
+bind_rows_gpu_run <- function(dots, .id, call) {
   if (length(dots) == 0) {
     stop("No tables provided to bind_rows", call. = FALSE)
   }

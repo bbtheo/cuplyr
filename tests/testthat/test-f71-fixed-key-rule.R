@@ -52,6 +52,7 @@ test_that("gpu_null_counts() counts the NAs of each column", {
 
 test_that("eager: no group lost means no fixed keys (and summarise() stays native)", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
   yall <- data.frame(g = c("a", "b", "c", "d", NA))
   gt <- dplyr::group_by(tbl_gpu(r2_df), g, .drop = FALSE)
   semi <- dplyr::semi_join(gt, tbl_gpu(yall), by = "g")
@@ -78,6 +79,7 @@ test_that("eager: no group lost means no fixed keys (and summarise() stays nativ
 
 test_that("factor-only keys: none while no NA, kept when an NA group can be lost", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
   noNA <- r2_df[!is.na(r2_df$f), ]
   yf <- data.frame(f = factor("x", levels = c("x", "y", "z", "w")))
   for (lazy in c(FALSE, TRUE)) {
@@ -111,6 +113,7 @@ test_that("an equal row count does not mean no group was lost (duplicated slice 
 
 test_that("preserve = TRUE on a .drop = TRUE table: keys only when a group is lost", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
   gt <- dplyr::group_by(tbl_gpu(r2_df), g)
   expect_null(r2_keys(dplyr::filter(gt, x > 0, .preserve = TRUE)))
   kept <- dplyr::filter(gt, x < 3, .preserve = TRUE)

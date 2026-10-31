@@ -71,12 +71,15 @@
 #' \itemize{
 #'   \item `sum(x)` - Sum of values. Over an integer or logical `x` the result
 #'     is an integer, as in dplyr; if it leaves R's integer range
-#'     (`+-(2^31 - 1)`) dplyr returns a double, and so does an eager `tbl_gpu`.
-#'     A lazy plan has a fixed schema and raises a
-#'     `cuplyr_error_sum_overflow` error instead (use `sum(as.numeric(x))`),
-#'     except that a lazy `summarise()` which also takes the `min()`/`max()`
-#'     of an integer or logical column runs immediately and then behaves like
-#'     an eager one (double on overflow).
+#'     (`+-(2^31 - 1)`) dplyr returns a double, and so does `tbl_gpu`. Which
+#'     one it is depends on the data, which a lazy plan (its schema is fixed
+#'     before it runs) can't know, so a lazy `summarise()` of an integer
+#'     (INT32) `sum(x)` runs at the verb, like an eager one: the pending steps
+#'     run first (a plan break, see `cuplyr.plan_break`) and the result is a
+#'     lazy table with nothing pending. The same goes for a lazy `min()`/`max()`
+#'     of an integer. A `sum()` of a logical `x` stays in the plan: it can
+#'     only overflow with more than 2^31 `TRUE` rows in a group, and then raises a
+#'     `cuplyr_error_sum_overflow` error at `collect()`.
 #'   \item `mean(x)` - Arithmetic mean
 #'   \item `min(x)` - Minimum value
 #'   \item `max(x)` - Maximum value
@@ -1352,12 +1355,16 @@ summarise_simple_cpu <- function(simple, schema) {
 #   `aggregations` (summarise_with_empty_groups() reads their functions and types)
 # @param simple_aggs `NULL`, or `summarise_simple_aggregations(dots, schema)` when
 #   the caller has already built it
+# @param notice_data The table a plan-break notice counts the pending steps of:
+#   `.data`, or the user's input when `.data` holds steps of summarise()'s own
+#   (summarise_by_desugar()'s row-id column)
 # @return A new tbl_gpu, grouped by `retained_groups` (see
 #   propagate_groups(), R/execute.R, which reads `node$result_groups`)
 # @keywords internal
 summarise_core <- function(.data, dots, retained_groups = character(),
                            internal_cols = character(), sort_groups = TRUE,
-                           agg_info = NULL, simple_aggs = NULL, ir_cache = NULL) {
+                           agg_info = NULL, simple_aggs = NULL, ir_cache = NULL,
+                           notice_data = .data) {
   # No wrapper of its own (F58): the work below is R logic (quosure parsing,
   # which may evaluate a `probs =`/`n =` argument) around wrapped GPU steps, so
   # a retry belongs to each step, not to a rerun of this parsing. The tables
@@ -1398,7 +1405,7 @@ summarise_core <- function(.data, dots, retained_groups = character(),
     # (e.g. sum(carb == 4)). Per D4, if a temp column is needed and .data is
     # lazy with pending ops, this materializes (compute()) before creating the
     # temp column and notifies via cuplyr_plan_break_notify().
-    preprocess_result <- preprocess_agg_expressions(.data, dots, ir_cache)
+    preprocess_result <- preprocess_agg_expressions(.data, dots, ir_cache, notice_data)
     working_data <- preprocess_result$data
     processed_dots <- preprocess_result$dots
 
@@ -1425,15 +1432,28 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   # schema inferred before running can't know. Such a summarise runs right
   # away (a lazy table first materializes its pending ops, like the
   # temp-column case above) and the schema is corrected from the real result.
-  if (any(vapply(aggregations, function(agg) isTRUE(agg$identity) &&
-                 identical(unname(agg$input_type), "INT32"), logical(1)))) {
-    return(summarise_run_now(working_data, aggregations, retained_groups, sort_groups))
+  # F80: so does an INT32 sum() on a lazy table: it is a double when a group's
+  # sum leaves R's integer range, which a plan with a fixed schema can't say.
+  # (BOOL8 sums stay lazy: they overflow only past 2^31 TRUE rows in a group.)
+  eager <- !identical(.subset2(working_data, "exec_mode"), "lazy")
+  int32_input <- vapply(aggregations, function(agg) identical(unname(agg$input_type), "INT32"), logical(1))
+  min_max_now <- int32_input & vapply(aggregations, function(agg) isTRUE(agg$identity), logical(1))
+  sum_now <- !eager & int32_input & vapply(aggregations, function(agg) identical(agg$fn, "sum"), logical(1))
+  if (any(min_max_now | sum_now)) {
+    # (the notice names the user's columns that need it, never an internal one)
+    named <- vapply(aggregations[min_max_now | sum_now], `[[`, character(1), "output_col")
+    reason <- paste0(
+      "an integer ", paste(c(if (any(min_max_now)) "min()/max()", if (any(sum_now)) "sum()"), collapse = " or "),
+      " (result type depends on the data): ", paste(set_diff(named, internal_cols), collapse = ", ")
+    )
+    return(summarise_run_now(working_data, aggregations, retained_groups, sort_groups, reason,
+                             notice_data = notice_data))
   }
 
   # F34: an integer sum() that overflows is a double in dplyr. An eager
-  # table reconciles its schema from the result; a lazy plan keeps INT32 and
-  # errors at execution (see ast_summarise(on_sum_overflow=)).
-  eager <- !identical(.subset2(working_data, "exec_mode"), "lazy")
+  # table reconciles its schema from the result; a lazy plan only gets here
+  # for a BOOL8 sum (see above), which keeps INT32 and errors at execution
+  # (see ast_summarise(on_sum_overflow=)).
   result <- push_op(working_data, ast_summarise(
     input_node(working_data), aggregations, .subset2(working_data, "groups"), retained_groups,
     on_sum_overflow = if (eager) "double" else "error", sort_groups = sort_groups
@@ -1445,16 +1465,13 @@ summarise_core <- function(.data, dots, retained_groups = character(),
 # the result's real column types (F07, see summarise_core()). Returns a table
 # in the input's exec_mode with no pending ops.
 # @keywords internal
-summarise_run_now <- function(.data, aggregations, retained_groups, sort_groups = TRUE) {
+summarise_run_now <- function(.data, aggregations, retained_groups, sort_groups = TRUE, reason,
+                              notice_data = .data) {
   was_lazy <- identical(.subset2(.data, "exec_mode"), "lazy")
 
-  if (was_lazy && has_pending_ops(.data)) {
-    notify_materialization(
-      "summarise",
-      paste0("an integer min()/max() (result type depends on the data): ",
-             paste(vapply(aggregations, function(a) a$output_col, character(1)), collapse = ", ")),
-      data = .data
-    )
+  # (only the user's steps: none of summarise()'s own, see summarise_core())
+  if (was_lazy && has_pending_ops(.data) && has_pending_ops(notice_data)) {
+    notify_materialization("summarise", reason, data = notice_data)
   }
   base <- compute(.data)
   base$exec_mode <- "eager"
@@ -1777,8 +1794,9 @@ summarise_by_desugar <- function(.data, dots, by_cols, ir_cache = NULL) {
     rlang::call2("min", as.name(rowid_name)), rlang::base_env()
   )
 
+  # (a plan-break notice counts the user's steps, not the row-id column's)
   result <- summarise_core(grouped, dots, internal_cols = first_name, sort_groups = FALSE,
-                          ir_cache = ir_cache)
+                          ir_cache = ir_cache, notice_data = .data)
   result <- dplyr::arrange(result, !!rlang::sym(first_name))
   # the grouping above was internal: summarise() keeps only the bare class
   copy_frame_meta(dplyr::select(result, -dplyr::all_of(first_name)), .data, attrs = FALSE)
@@ -1914,9 +1932,11 @@ agg_dot_parts <- function(ir_cache, i, dot, schema) {
 #
 # @param .data A tbl_gpu object
 # @param dots Quosures from summarise()
+# @param notice_data The table a notice counts the pending steps of (see
+#   summarise_core())
 # @return List with modified data and simplified dots
 # @keywords internal
-preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL) {
+preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL, notice_data = .data) {
   working_data <- .data
   new_dots <- vector("list", length(dots))
   names(new_dots) <- names(dots)
@@ -2001,8 +2021,10 @@ preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL) {
     # own docs for the full derivation and scope boundary.
     if (!is.null(ir) && ir_has_window(ir)) {
       if (has_pending_ops(working_data)) {
-        notify_materialization("summarise", "a window call inside an aggregation needs its input computed",
-                               notice_expr_text(quo), data = working_data)
+        if (has_pending_ops(notice_data)) {
+          notify_materialization("summarise", "a window call inside an aggregation needs its input computed",
+                                 notice_expr_text(quo), data = notice_data)
+        }
         working_data <- compute(working_data)
       }
 
@@ -2030,8 +2052,10 @@ preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL) {
 
     # Materialize before building the temp column if lazy ops are pending.
     if (has_pending_ops(working_data)) {
-      notify_materialization("summarise", "an aggregation of an expression needs a temporary column computed first",
-                             notice_expr_text(quo), data = working_data)
+      if (has_pending_ops(notice_data)) {
+        notify_materialization("summarise", "an aggregation of an expression needs a temporary column computed first",
+                               notice_expr_text(quo), data = notice_data)
+      }
       working_data <- compute(working_data)
     }
 

@@ -43,7 +43,7 @@ string_bytes <- function(x) sum(nchar(x[!is.na(x)], type = "bytes"))
 test_that("collect() reads string columns that libcudf builds with INT64 offsets", {
   skip_if_no_gpu()
   df <- f97_df()
-  g <- tbl_gpu(df)
+  g <- tbl_gpu(df, lazy = FALSE)
   local_large_strings()
   r <- mutate(g, t = paste0(s, "_x"), u = toupper(k), w = substr(s, 2, 4))
   expect_identical(offsets_width(r, "t"), 64L)
@@ -204,7 +204,7 @@ test_that("every path that brings strings back to R reads INT64 offsets", {
   skip_if_no_gpu()
   df <- f97_df()
   local_large_strings()
-  g <- tbl_gpu(df)
+  g <- tbl_gpu(df, lazy = FALSE)
   expect_identical(offsets_width(g, "s"), 64L)
 
   expect_equal(tibble::as_tibble(collect(g)), df)

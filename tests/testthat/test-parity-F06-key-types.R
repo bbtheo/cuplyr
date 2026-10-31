@@ -272,7 +272,7 @@ test_that("explicit compute() of a coerced-key lazy join matches eager", {
   skip_if_no_gpu()
   fx <- data.frame(id = factor(c("a", "b", "c")), v = 1:3)
   cy <- data.frame(id = c("c", "a"), w = c(30, 10))
-  eager <- left_join(tbl_gpu(fx), tbl_gpu(cy), by = "id") |> collect()
+  eager <- left_join(tbl_gpu(fx, lazy = FALSE), tbl_gpu(cy, lazy = FALSE), by = "id") |> collect()
   lazy <- left_join(tbl_gpu(fx, lazy = TRUE), tbl_gpu(cy, lazy = TRUE), by = "id") |>
     compute() |>
     collect()

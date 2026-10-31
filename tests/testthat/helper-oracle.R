@@ -99,10 +99,8 @@ oracle_compare <- function(df, pipeline, arrange_by, ignore_col_types, label) {
   oracle_groups <- oracle_group_vars(oracle_result)
 
   # --- GPU side ---
-  gpu_input <- tbl_gpu(df)
-  if (identical(label, "lazy")) {
-    gpu_input <- as_lazy(gpu_input)
-  }
+  # the mode is explicit: the package default is lazy
+  gpu_input <- tbl_gpu(df, lazy = identical(label, "lazy"))
   gpu_result <- pipeline(gpu_input)
   gpu_groups <- oracle_group_vars(gpu_result)
 
@@ -162,7 +160,7 @@ expect_same_as_dplyr <- function(df, pipeline, ...,
 #' Compare a lazy tbl_gpu pipeline against dplyr-on-tibble
 #'
 #' Same contract as [expect_same_as_dplyr()], but runs the GPU side through
-#' `tbl_gpu(df) |> as_lazy()`, verifying that the lazy execution path
+#' `tbl_gpu(df, lazy = TRUE)`, verifying that the lazy execution path
 #' (AST build -> optimizer -> lower_and_execute on `collect()`) also matches
 #' the dplyr oracle.
 #'

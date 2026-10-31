@@ -247,6 +247,7 @@ test_that("Multiple GPU tables can coexist with separate memory", {
 
 test_that("filter() creates new GPU allocation", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
 
   gpu_df <- tbl_gpu(create_large_test_data(nrow = 10000, ncol = 5))
   before <- gpu_memory_snapshot()
@@ -265,6 +266,7 @@ test_that("filter() creates new GPU allocation", {
 
 test_that("mutate() creates new GPU allocation", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
 
   gpu_df <- tbl_gpu(mtcars)
 
@@ -284,6 +286,7 @@ test_that("mutate() creates new GPU allocation", {
 
 test_that("select() creates new GPU allocation", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
 
   gpu_df <- tbl_gpu(mtcars)
 
@@ -300,7 +303,7 @@ test_that("select() creates new GPU allocation", {
 test_that("chained operations maintain GPU residency", {
   skip_if_no_gpu()
 
-  gpu_df <- tbl_gpu(mtcars)
+  gpu_df <- tbl_gpu(mtcars, lazy = FALSE)
 
   # Chain multiple operations
   result <- gpu_df |>
@@ -415,7 +418,7 @@ test_that("GPU operations fail gracefully on invalid pointer", {
 test_that("GPU pointer remains valid through operations", {
   skip_if_no_gpu()
 
-  gpu_df <- tbl_gpu(mtcars)
+  gpu_df <- tbl_gpu(mtcars, lazy = FALSE)
 
   # Perform many operations with simple filter expressions
   thresholds <- c(11, 12, 13, 14, 15)
@@ -474,7 +477,7 @@ test_that("filter() does not copy data to R", {
   skip_if_no_gpu()
 
   df <- create_large_test_data(nrow = 50000, ncol = 10)
-  gpu_df <- tbl_gpu(df)
+  gpu_df <- tbl_gpu(df, lazy = FALSE)
 
   filtered <- dplyr::filter(gpu_df, col1 > 0.5)
   filtered_size <- as.numeric(object.size(filtered))
@@ -488,7 +491,7 @@ test_that("mutate() does not copy data to R", {
   skip_if_no_gpu()
 
   df <- create_large_test_data(nrow = 50000, ncol = 10)
-  gpu_df <- tbl_gpu(df)
+  gpu_df <- tbl_gpu(df, lazy = FALSE)
 
   mutated <- dplyr::mutate(gpu_df, new_col = col1 + col2)
   mutated_size <- as.numeric(object.size(mutated))
@@ -501,7 +504,7 @@ test_that("select() does not copy data to R", {
   skip_if_no_gpu()
 
   df <- create_large_test_data(nrow = 50000, ncol = 10)
-  gpu_df <- tbl_gpu(df)
+  gpu_df <- tbl_gpu(df, lazy = FALSE)
 
   selected <- dplyr::select(gpu_df, col1, col2)
   selected_size <- as.numeric(object.size(selected))

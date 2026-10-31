@@ -373,7 +373,7 @@ test_that("lazy .by_group arrange followed by a join that drops the group column
   )
   for (f in pipes) {
     expected <- f(x, y)
-    eager <- dplyr::collect(f(tbl_gpu(x), tbl_gpu(y)))
+    eager <- dplyr::collect(f(tbl_gpu(x, lazy = FALSE), tbl_gpu(y, lazy = FALSE)))
     lazy <- dplyr::collect(f(tbl_gpu(x, lazy = TRUE), tbl_gpu(y, lazy = TRUE)))
     expect_equal(tibble::as_tibble(eager), expected)
     expect_equal(tibble::as_tibble(lazy), expected)

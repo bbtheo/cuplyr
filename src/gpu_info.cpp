@@ -46,3 +46,18 @@ List gpu_info() {
         Named("multiprocessors") = prop.multiProcessorCount
     );
 }
+
+// c(free_bytes, total_bytes) of the current device, or NA, NA without one.
+// cudaMemGetInfo() only: gpu_info()'s cudaGetDeviceProperties() costs most of a
+// millisecond, too much for gpu_memory_state(), which a join calls on every
+// verb (its size warning).
+// [[Rcpp::export]]
+NumericVector gpu_mem_info() {
+    int device_count = 0;
+    size_t free_mem = 0, total_mem = 0;
+    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0 ||
+        cudaMemGetInfo(&free_mem, &total_mem) != cudaSuccess) {
+        return NumericVector::create(NA_REAL, NA_REAL);
+    }
+    return NumericVector::create(static_cast<double>(free_mem), static_cast<double>(total_mem));
+}

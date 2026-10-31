@@ -29,8 +29,7 @@ f50d_native <- function(df, pipeline, ...) {
 
 f50d_collect_native <- function(df, pipeline, lazy = FALSE) {
   withr::with_options(list(cuplyr.fallback = "error"), {
-    g <- tbl_gpu(df)
-    if (lazy) g <- as_lazy(g)
+    g <- tbl_gpu(df, lazy = lazy)
     dplyr::collect(pipeline(g))
   })
 }

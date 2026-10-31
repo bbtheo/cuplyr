@@ -26,7 +26,11 @@
 #'   \item Prepare data for non-cuplyr functions that need a materialized table
 #' }
 #'
-#' In eager mode, `compute()` is a no-op since operations execute immediately.
+#' Tables are lazy by default, so `compute()` is how you run a pipeline and keep
+#' the result on the GPU. In eager mode (`tbl_gpu(df, lazy = FALSE)`),
+#' `compute()` is a no-op since operations execute immediately. Printing a lazy
+#' table also runs its plan, but keeps nothing; `compute()` first if you want to
+#' look at the result repeatedly.
 #'
 #' @seealso
 #' \code{\link{collect.tbl_gpu}} to bring data back to R,
@@ -38,7 +42,7 @@
 #' @examples
 #' if (has_gpu()) {
 #'   # Lazy pipeline
-#'   lazy_result <- tbl_gpu(mtcars, lazy = TRUE) |>
+#'   lazy_result <- tbl_gpu(mtcars) |>  # lazy by default
 #'     filter(mpg > 20) |>
 #'     mutate(kpl = mpg * 0.425)
 #'
@@ -189,8 +193,8 @@ collapse.tbl_gpu <- function(x, ...) {
 #'
 #' @examples
 #' if (has_gpu()) {
-#'   # Start lazy, switch to eager mid-pipeline
-#'   result <- tbl_gpu(mtcars, lazy = TRUE) |>
+#'   # Tables are lazy by default; switch to eager mid-pipeline
+#'   result <- tbl_gpu(mtcars) |>
 #'     filter(mpg > 20) |>
 #'     as_eager() |>
 #'     mutate(x = hp * 2) |>  # executes immediately
@@ -223,7 +227,7 @@ as_eager <- function(.data) {
 #' @examples
 #' if (has_gpu()) {
 #'   # Create in eager mode, switch to lazy
-#'   gpu_data <- tbl_gpu(mtcars) |>
+#'   gpu_data <- tbl_gpu(mtcars, lazy = FALSE) |>
 #'     as_lazy() |>
 #'     filter(mpg > 20) |>
 #'     mutate(kpl = mpg * 0.425)  # not yet executed
@@ -249,11 +253,11 @@ as_lazy <- function(.data) {
 #'
 #' @examples
 #' if (has_gpu()) {
-#'   eager_tbl <- tbl_gpu(mtcars)
-#'   is_lazy(eager_tbl)  # FALSE
-#'
-#'   lazy_tbl <- tbl_gpu(mtcars, lazy = TRUE)
+#'   lazy_tbl <- tbl_gpu(mtcars)
 #'   is_lazy(lazy_tbl)   # TRUE
+#'
+#'   eager_tbl <- tbl_gpu(mtcars, lazy = FALSE)
+#'   is_lazy(eager_tbl)  # FALSE
 #' }
 is_lazy <- function(.data) {
   is_tbl_gpu(.data) && identical(.data$exec_mode, "lazy")
@@ -350,5 +354,6 @@ auto_copy.tbl_gpu <- function(x, y, copy = FALSE, ...) {
   if (!is.data.frame(y)) {
     y <- as.data.frame(y)
   }
-  upload_other_side(y, lazy = NULL)
+  # in `x`'s mode: a lazy y would make an eager x's join result lazy
+  upload_other_side(y, lazy = identical(.subset2(x, "exec_mode"), "lazy"))
 }

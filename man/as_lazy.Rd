@@ -19,7 +19,7 @@ Returns a \code{tbl_gpu} that will defer operations until \code{collect()} or
 \examples{
 if (has_gpu()) {
   # Create in eager mode, switch to lazy
-  gpu_data <- tbl_gpu(mtcars) |>
+  gpu_data <- tbl_gpu(mtcars, lazy = FALSE) |>
     as_lazy() |>
     filter(mpg > 20) |>
     mutate(kpl = mpg * 0.425)  # not yet executed

@@ -18,7 +18,7 @@
 compare_set_op <- function(x_df, y_df, op_fn, ..., arrange_by = NULL) {
   expected <- op_fn(x_df, y_df, ...)
 
-  eager <- op_fn(tbl_gpu(x_df), tbl_gpu(y_df), ...) |> collect()
+  eager <- op_fn(tbl_gpu(x_df, lazy = FALSE), tbl_gpu(y_df, lazy = FALSE), ...) |> collect()
   lazy <- op_fn(tbl_gpu(x_df, lazy = TRUE), tbl_gpu(y_df, lazy = TRUE), ...) |> collect()
 
   expected_df <- as.data.frame(expected)

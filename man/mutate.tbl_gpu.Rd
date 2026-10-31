@@ -204,9 +204,13 @@ makes the WHOLE group's result \code{NA}); \code{n()} always counts every
 row regardless of \code{NA}s. \code{sum()} of an integer or logical is an
 integer, as in dplyr. When a sum leaves the integer range dplyr
 returns a double (for the whole column, and for any expression
-on it): an eager call is then rerun by dplyr on the CPU, and a
-lazy plan, whose schema is fixed, raises
-\code{cuplyr_error_sum_overflow} at \code{collect()}
+on it): the call is then rerun by dplyr on the CPU. A lazy table
+can't plan for that (the type depends on the data), so a lazy
+\code{mutate()} with an integer \code{sum()} runs at the verb like an eager
+one (a plan break first runs the pending steps) and returns a lazy
+table with nothing pending; a logical \code{sum()} stays in the plan
+(it overflows only past 2^31 \code{TRUE} rows, with a
+\code{cuplyr_error_sum_overflow} at \code{collect()})
 \item \code{first(x, order_by = NULL)} / \code{last(x, order_by = NULL)} /
 \code{nth(x, n, order_by = NULL)} -- the first/last/\code{n}th row of the
 group in its current row order, or in \code{order_by}'s order when

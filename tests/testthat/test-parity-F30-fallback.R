@@ -45,7 +45,7 @@ f30f_warnings <- function(df, pipeline) {
   }
   list(
     cpu = capture(function() tibble::as_tibble(df)),
-    eager = capture(function() tbl_gpu(df)),
+    eager = capture(function() tbl_gpu(df, lazy = FALSE)),
     lazy = capture(function() tbl_gpu(df, lazy = TRUE))
   )
 }

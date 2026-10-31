@@ -32,7 +32,9 @@ arguments, \code{n()}, \code{cur_group_id()} and \code{length(c_across(...))} ar
 into GPU operations over the columns of each row, with dplyr's NA rules and
 result types (integer inputs give an integer \code{sum()}/\code{min()}/\code{max()}, a
 double sum if the integer range is left; an all-\code{NA} row of
-\code{min()}/\code{max(na.rm = TRUE)} is \code{Inf}/\code{-Inf} with dplyr's warning). Only
+\code{min()}/\code{max(na.rm = TRUE)} is \code{Inf}/\code{-Inf} with dplyr's warning; on a lazy
+table a call with such an integer \code{sum()} runs at the verb, since its type
+depends on the data). Only
 logical, integer and double columns take part. Everything else (a function
 that needs the row as a vector, list-columns, window functions, \code{.by}) runs
 the whole call in dplyr on the CPU and comes back as a rowwise \code{tbl_gpu}.

@@ -137,7 +137,7 @@ test_that("frees of memory allocated before the window are not counted", {
 test_that("tracking covers cudf-internal allocations of verbs, eager and lazy", {
   skip_if_no_gpu()
   df <- create_large_test_data(nrow = 100000, ncol = 2)
-  g <- tbl_gpu(df)
+  g <- tbl_gpu(df, lazy = FALSE)
 
   m <- gpu_alloc_tracking(mutate(g, z = col1 + col2))
   expect_true(m$held_bytes >= 100000 * 8)

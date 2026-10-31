@@ -355,7 +355,7 @@ perf_calibration_transfer_time <- function() {
   df <- perf_calibration_transfer_data()
 
   perf_time(function() {
-    tbl_gpu(df) |>
+    tbl_gpu(df, lazy = FALSE) |>
       collect()
   }, batch = FALSE)
 }

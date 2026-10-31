@@ -9,8 +9,9 @@
 #   (no warning); grouped, one overflowing group makes the whole column double
 #   (vctrs combine), and an expression on the sum follows (sum(x) + 1L is
 #   double). Sums of exactly M or -M stay integer.
-# - cuplyr's lazy mode keeps a static integer schema and raises
-#   `cuplyr_error_sum_overflow` instead (F34 design decision kept by Theo).
+# - A lazy table runs a mutate() with an INT32 sum at the verb (F80), as an
+#   eager one does, so the type comes from the data. Only a BOOL8 sum stays a
+#   pending step with a static integer schema.
 # - filter() on an overflowing sum compares the double value; there is no
 #   schema to drift, so lazy filter() must keep matching dplyr.
 
@@ -83,14 +84,24 @@ test_that("eager: an overflowing window sum is double, like dplyr", {
   f42w_parity(big, function(d) mutate(d, s = sum(v), .by = g), lazy = FALSE)
 })
 
-test_that("lazy: an overflowing window sum is a classed error", {
+test_that("lazy: an overflowing window sum is double, like dplyr (the call runs at the verb)", {
   skip_if_no_gpu()
-  lz <- as_lazy(tbl_gpu(f42w_big()))
-  expect_error(collect(mutate(lz, s = sum(v))), class = "cuplyr_error_sum_overflow")
-  expect_error(
-    lz |> group_by(g) |> mutate(s = sum(v)) |> mutate(t = s + 1L) |> collect(),
-    class = "cuplyr_error_sum_overflow"
-  )
+  big <- f42w_big()
+  f42w_parity(big, function(d) mutate(d, s = sum(v)))
+  f42w_parity(big, function(d) d |> group_by(g) |> mutate(s = sum(v)) |> mutate(t = s + 1L))
+  f42w_parity(big, function(d) mutate(d, s = sum(v), .by = g))
+  # the result is lazy with nothing pending, and a pending plan ran first
+  lz <- as_lazy(tbl_gpu(big))
+  out <- mutate(filter(lz, v > 0L), s = sum(v))
+  expect_true(is_lazy(out))
+  expect_false(has_pending_ops(out))
+})
+
+test_that("lazy: a BOOL8 window sum stays a pending step", {
+  skip_if_no_gpu()
+  lz <- as_lazy(tbl_gpu(data.frame(g = c(1, 1, 2), l = c(TRUE, FALSE, TRUE))))
+  expect_true(has_pending_ops(mutate(lz, s = sum(l))))
+  expect_true(has_pending_ops(mutate(lz, s = sum(l), .by = g)))
 })
 
 test_that("filter() on an overflowing integer sum keeps matching dplyr", {
@@ -157,10 +168,12 @@ test_that("summarise(): an overflowing sum doesn't turn in-range sums into doubl
   f42w_eager_or_lazy_error(d, function(t) summarise(t, m = dplyr::last(cumsum(x * sum(x))), .by = g))
 })
 
-test_that("eager filter(): an overflowing group's sum doesn't hide another group's overflow", {
+test_that("filter(): an overflowing group's sum doesn't hide another group's overflow", {
   skip_if_no_gpu()
+  # F80: a lazy table runs an integer window sum at the verb, as eager does
   d <- data.frame(g = c(1, 1, 2, 2), x = c(M, 5L, 50000L, 50000L))
-  f42w_parity(d, function(t) filter(t, x * sum(x) > 0L, .by = g), lazy = FALSE)
-  f42w_parity(d, function(t) t |> group_by(g) |> filter(x * sum(x) > 0L), lazy = FALSE)
-  expect_warning(filter(tbl_gpu(d), x * sum(x) > 0L, .by = g), "NAs produced by integer overflow")
+  f42w_parity(d, function(t) filter(t, x * sum(x) > 0L, .by = g))
+  f42w_parity(d, function(t) t |> group_by(g) |> filter(x * sum(x) > 0L))
+  expect_warning(filter(tbl_gpu(d, lazy = FALSE), x * sum(x) > 0L, .by = g), "NAs produced by integer overflow")
+  expect_warning(filter(tbl_gpu(d, lazy = TRUE), x * sum(x) > 0L, .by = g), "NAs produced by integer overflow")
 })

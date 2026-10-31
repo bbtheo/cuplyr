@@ -124,7 +124,7 @@ bench_main <- local({
 
   df <- rw_data(n_rows)
   x <- df$x
-  gt <- cuplyr::tbl_gpu(df)
+  gt <- cuplyr::tbl_gpu(df, lazy = FALSE)
   fns <- rw_functions()
   timing_rows <- list()
   corr_rows <- list()
@@ -237,7 +237,7 @@ bench_overhead <- local({
     pr
   }
 
-  gt_small <- cuplyr::tbl_gpu(rw_data(small_rows))
+  gt_small <- cuplyr::tbl_gpu(rw_data(small_rows), lazy = FALSE)
   for (stat in intersect(stats_run, c("mean", "sum", "min", "max", "sd"))) {
     rw_say("== overhead floor: ", stat)
     cf <- rw_cuplyr_fun(stat)
@@ -249,7 +249,7 @@ bench_overhead <- local({
              "same call on 1e3 rows; kernel time negligible")
   }
 
-  gt <- cuplyr::tbl_gpu(rw_data(n_rows))
+  gt <- cuplyr::tbl_gpu(rw_data(n_rows), lazy = FALSE)
   calls <- rw_overhead_calls(w)
   inputs <- list(list(g = gt_small, n = small_rows, times = small_times),
                  list(g = gt, n = n_rows, times = params$times))
@@ -339,7 +339,7 @@ bench_ext <- local({
   rw_say("== extension (b): ungrouped")
   dfb <- rw_data(params$ext_rows)
   xb <- dfb$x
-  gtb <- cuplyr::tbl_gpu(dfb)
+  gtb <- cuplyr::tbl_gpu(dfb, lazy = FALSE)
   engines <- list(
     cuplyr = NULL,
     data.table = function(x, n) data.table::frollmean(x, n, align = "right"),
@@ -587,7 +587,7 @@ bench_memory <- local({
   w <- sort(as.numeric(unlist(params$widths)))[2]
   n_ext <- as.numeric(params$ext_rows)
   dfm <- rw_data(n_ext)
-  gtm <- cuplyr::tbl_gpu(dfm)
+  gtm <- cuplyr::tbl_gpu(dfm, lazy = FALSE)
   cf <- rw_cuplyr_fun("mean")
   calls <- rw_overhead_calls(w)
   mem_calls <- stats::setNames(list(
@@ -662,7 +662,7 @@ bench_fence <- local({
   t_clock <- Sys.time()
   w <- sort(as.numeric(unlist(params$widths)))[2]
   dfb <- rw_data(as.numeric(params$ext_rows))
-  gtb <- cuplyr::tbl_gpu(dfb)
+  gtb <- cuplyr::tbl_gpu(dfb, lazy = FALSE)
   with_fence <- rw_cuplyr_fun("mean", fence = TRUE)
   without_fence <- rw_cuplyr_fun("mean", fence = FALSE)
   rw_say("== fence on / off")

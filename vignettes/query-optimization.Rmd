@@ -17,7 +17,8 @@ knitr::opts_chunk$set(
 
 ## Introduction
 
-When you use cuplyr in lazy mode, most verbs are not executed as you call them.
+cuplyr tables are lazy by default (`tbl_gpu(df, lazy = FALSE)` makes an eager
+one), and most verbs on a lazy table are not executed as you call them.
 They add nodes to an Abstract Syntax Tree (AST) that describes the query.
 (A verb or filter predicate that runs on the CPU as a fallback computes the
 pending plan first.) When `compute()` or `collect()` runs the tree, an optimizer
@@ -48,7 +49,7 @@ prints the tree: each node with its key metadata, one `|` per level of depth,
 then the tree's depth and node count:
 
 ```{r ast-example}
-pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
+pipeline <- tbl_gpu(mtcars) |>
   filter(mpg > 20) |>
   mutate(power_ratio = hp / wt) |>
   select(mpg, cyl, power_ratio) |>
@@ -136,7 +137,7 @@ down, and can add `select` nodes that drop the columns no node above needs. In
 this plan only `mpg`, `hp` and `wt` are read from the 11-column source:
 
 ```{r proj}
-tbl_gpu(mtcars, lazy = TRUE) |>
+tbl_gpu(mtcars) |>
   mutate(power_ratio = hp / wt) |>
   select(mpg, power_ratio) |>
   explain()
@@ -150,7 +151,7 @@ at the top is the one written in the pipeline.
 Three `mutate()` calls become one `mutate` node:
 
 ```{r fusion}
-tbl_gpu(mtcars, lazy = TRUE) |>
+tbl_gpu(mtcars) |>
   mutate(a = hp + 10) |>
   mutate(b = wt * 2) |>
   mutate(c = a + b) |>
@@ -165,7 +166,7 @@ Here `c` is computed from the original `a` and `b`, as in dplyr:
 ```{r fusion-order}
 df <- tibble::tibble(a = 1, b = 2, hp = 3, wt = 4)
 
-tbl_gpu(df, lazy = TRUE) |>
+tbl_gpu(df) |>
   mutate(c = a + b) |>
   mutate(a = hp + 10, b = wt * 2) |>
   collect()
@@ -180,7 +181,7 @@ expressions together, or when the upper one reads more than 4 of the columns the
 lower one writes, new or overwritten. Here 5 + 4 expressions stay as two nodes:
 
 ```{r fusion-guard}
-tbl_gpu(mtcars, lazy = TRUE) |>
+tbl_gpu(mtcars) |>
   mutate(e1 = mpg + 1, e2 = mpg + 2, e3 = mpg + 3, e4 = mpg + 4, e5 = mpg + 5) |>
   mutate(e6 = mpg + 6, e7 = mpg + 7, e8 = mpg + 8, e9 = mpg + 9) |>
   optimized()
@@ -192,7 +193,7 @@ nodes. If the upper one read only 4 of them, they would fuse into one node with
 6 expressions:
 
 ```{r fusion-guard-overwrite}
-lower <- tbl_gpu(mtcars, lazy = TRUE) |>
+lower <- tbl_gpu(mtcars) |>
   mutate(mpg = mpg + 1, cyl = cyl + 1, disp = disp + 1, hp = hp + 1, drat = drat + 1)
 
 lower |>
@@ -212,7 +213,7 @@ still need, and drops each `mutate` expression whose result is not among them
 expressions, because the `select` keeps only `mpg` and `a`:
 
 ```{r dead-column}
-tbl_gpu(mtcars, lazy = TRUE) |>
+tbl_gpu(mtcars) |>
   mutate(a = hp + 10, b = wt * 2, c = mpg * 2) |>
   select(mpg, a) |>
   optimized()
@@ -222,7 +223,7 @@ Because this pass runs after fusion, it also prunes across `mutate()` calls
 that fused. The optimized plan here has one `mutate` node with one expression:
 
 ```{r dead-column-fused}
-tbl_gpu(mtcars, lazy = TRUE) |>
+tbl_gpu(mtcars) |>
   mutate(a = hp + 10) |>
   mutate(b = wt * 2) |>
   select(mpg, a) |>
@@ -234,7 +235,7 @@ a later expression overwrites is kept while the name is still needed, even if
 its value is overwritten. In the next plan the fused node holds both:
 
 ```{r dead-overwrite}
-tbl_gpu(mtcars, lazy = TRUE) |>
+tbl_gpu(mtcars) |>
   mutate(a = hp + 1) |>
   mutate(a = wt + 1) |>
   select(mpg, a) |>
@@ -246,7 +247,7 @@ is kept even when nothing uses it, because dplyr checks its length either way.
 Here `v` is unused, yet the node keeps both expressions:
 
 ```{r dead-vector-literal}
-tbl_gpu(data.frame(a = 1:4, b = 1), lazy = TRUE) |>
+tbl_gpu(data.frame(a = 1:4, b = 1)) |>
   mutate(v = c(10, 20, 30, 40), w = a + 1) |>
   select(a, w) |>
   optimized()
@@ -264,7 +265,7 @@ unused, yet the node keeps both expressions (`%/%` and `%%` never warn, so they
 are not checked):
 
 ```{r dead-checked-int}
-tbl_gpu(data.frame(a = 1:4, b = 4:1, x = 1), lazy = TRUE) |>
+tbl_gpu(data.frame(a = 1:4, b = 4:1, x = 1)) |>
   mutate(y = a + b, w = x * 2) |>
   select(a, w) |>
   optimized()
@@ -275,7 +276,7 @@ them. Here the first `select()` keeps three columns and the second keeps only
 `a`. In the optimized plan both `select` nodes keep 1 column:
 
 ```{r dead-select}
-tbl_gpu(data.frame(a = 1:3, b = 1, c = 2), lazy = TRUE) |>
+tbl_gpu(data.frame(a = 1:3, b = 1, c = 2)) |>
   select(a, b, c) |>
   select(a) |>
   explain()
@@ -301,7 +302,7 @@ A filter directly on a `mutate` node moves below it, unless:
 `mpg` exists before the mutate, so this filter moves:
 
 ```{r pushdown-can}
-tbl_gpu(mtcars, lazy = TRUE) |>
+tbl_gpu(mtcars) |>
   mutate(power_ratio = hp / wt) |>
   filter(mpg > 20) |>
   explain()
@@ -310,7 +311,7 @@ tbl_gpu(mtcars, lazy = TRUE) |>
 `power_ratio` is created by the mutate, so this one stays:
 
 ```{r pushdown-cannot}
-tbl_gpu(mtcars, lazy = TRUE) |>
+tbl_gpu(mtcars) |>
   mutate(power_ratio = hp / wt) |>
   filter(power_ratio > 50) |>
   explain()
@@ -320,7 +321,7 @@ The filter here reads only `keep`, yet it stays above the mutate, because
 `a + b` is checked integer arithmetic:
 
 ```{r pushdown-checked-int}
-tbl_gpu(data.frame(a = 1:4, b = 4:1, keep = c(TRUE, FALSE, TRUE, TRUE)), lazy = TRUE) |>
+tbl_gpu(data.frame(a = 1:4, b = 4:1, keep = c(TRUE, FALSE, TRUE, TRUE))) |>
   mutate(y = a + b) |>
   filter(keep) |>
   explain()
@@ -334,7 +335,7 @@ columns under their own names, without picking any column twice, records one
 keeps every column the filter's predicates read:
 
 ```{r pushdown-select}
-tbl_gpu(data.frame(a = 1:20, b = 1, c = 2), lazy = TRUE) |>
+tbl_gpu(data.frame(a = 1:20, b = 1, c = 2)) |>
   select(b, a) |>
   filter(a > 10) |>
   explain()
@@ -347,7 +348,7 @@ node. `rename` is a barrier (see "Optimization Barriers"), so a filter written
 after such a `select()` stays above it:
 
 ```{r pushdown-select-rename}
-tbl_gpu(data.frame(a = 1:20, b = 1, c = 2), lazy = TRUE) |>
+tbl_gpu(data.frame(a = 1:20, b = 1, c = 2)) |>
   select(b2 = b, a) |>
   filter(a > 10) |>
   explain()
@@ -364,7 +365,7 @@ Here the filter starts above a `select`, which is above a `mutate`. It ends
 between them, not below the mutate, even though it could pass the mutate:
 
 ```{r pushdown-one-step}
-tbl_gpu(data.frame(k = 1:20, a = 1, b = 2), lazy = TRUE) |>
+tbl_gpu(data.frame(k = 1:20, a = 1, b = 2)) |>
   mutate(z = a + 1) |>
   select(k, a, z) |>
   filter(k > 10) |>
@@ -377,7 +378,7 @@ Mutate fusion runs before pushdown. Here the two mutates fuse, and the filter
 moves below the fused node:
 
 ```{r pushdown-fused}
-tbl_gpu(mtcars, lazy = TRUE) |>
+tbl_gpu(mtcars) |>
   mutate(a = hp + 10) |>
   mutate(b = wt * 2) |>
   filter(mpg > 20) |>
@@ -388,7 +389,7 @@ Here the two mutates do not fuse (5 + 4 expressions, as under "Pass 2"), and
 the filter moves below the top one only:
 
 ```{r pushdown-unfused}
-tbl_gpu(mtcars, lazy = TRUE) |>
+tbl_gpu(mtcars) |>
   mutate(e1 = mpg + 1, e2 = mpg + 2, e3 = mpg + 3, e4 = mpg + 4, e5 = mpg + 5) |>
   mutate(e6 = mpg + 6, e7 = mpg + 7, e8 = mpg + 8, e9 = mpg + 9) |>
   filter(mpg > 20) |>
@@ -401,8 +402,8 @@ A filter directly on a join can move into the join's inputs, depending on the
 join type and its arguments. The examples use two small tables:
 
 ```{r join-data}
-x <- tbl_gpu(data.frame(k = c(1, 2, 3, 4), a = c(5, 15, 25, 35)), lazy = TRUE)
-y <- tbl_gpu(data.frame(k = c(1, 2, 2, 4), v = c(10, 20, 30, 40)), lazy = TRUE)
+x <- tbl_gpu(data.frame(k = c(1, 2, 3, 4), a = c(5, 15, 25, 35)))
+y <- tbl_gpu(data.frame(k = c(1, 2, 2, 4), v = c(10, 20, 30, 40)))
 ```
 
 - `semi_join()` and `anti_join()`: the whole filter moves into the left input.
@@ -439,7 +440,7 @@ x |> inner_join(y, by = "k") |> filter(a > 10) |> optimized()
   set:
 
 ```{r join-inequality}
-y_k2 <- tbl_gpu(data.frame(k2 = c(1, 2, 2, 4), v = c(10, 20, 30, 40)), lazy = TRUE)
+y_k2 <- tbl_gpu(data.frame(k2 = c(1, 2, 2, 4), v = c(10, 20, 30, 40)))
 
 x |> inner_join(y_k2, join_by(k >= k2)) |> filter(a > 10) |> optimized()
 ```
@@ -468,8 +469,8 @@ x |> inner_join(y_k2, join_by(k >= k2)) |> filter(a > 10) |> optimized()
   stays with it:
 
 ```{r join-checked-int}
-x_i <- tbl_gpu(data.frame(k = 1:4, a = c(5, 15, 25, 35)), lazy = TRUE)
-y_i <- tbl_gpu(data.frame(k = c(1L, 2L, 2L, 4L), v = c(10, 20, 30, 40)), lazy = TRUE)
+x_i <- tbl_gpu(data.frame(k = 1:4, a = c(5, 15, 25, 35)))
+y_i <- tbl_gpu(data.frame(k = c(1L, 2L, 2L, 4L), v = c(10, 20, 30, 40)))
 
 x_i |>
   inner_join(y_i, by = "k", relationship = "many-to-many") |>
@@ -493,7 +494,7 @@ With a double key `k` on both sides, a predicate on `k` moves into the left
 input. With an integer `k` on the left and a double `k` on the right, it stays:
 
 ```{r join-key-types}
-x_int <- tbl_gpu(data.frame(k = 1:4, a = c(5, 15, 25, 35)), lazy = TRUE)
+x_int <- tbl_gpu(data.frame(k = 1:4, a = c(5, 15, 25, 35)))
 
 x |>
   inner_join(y, by = "k", relationship = "many-to-many") |>
@@ -549,7 +550,7 @@ section). Two `filter()` calls become one node with two predicates:
 ```{r filter-reorder}
 d <- data.frame(x = c(1, 5, 20, 30), y = c(0, 1, 2, 3), z = c(5, 11, 12, 1))
 
-tbl_gpu(d, lazy = TRUE) |>
+tbl_gpu(d) |>
   filter(x > y) |>
   filter(z > 10) |>
   explain()
@@ -576,7 +577,7 @@ filter can be merged with it. In this plan the second filter moves below the
 mutate, and the two filters become one node with two predicates:
 
 ```{r filter-reorder-after-pushdown}
-tbl_gpu(mtcars, lazy = TRUE) |>
+tbl_gpu(mtcars) |>
   filter(cyl > 4) |>
   mutate(r = hp / wt) |>
   filter(mpg > 15) |>
@@ -597,7 +598,7 @@ the same rows merged or not. So `filter(a < 100L) |> filter(a + b > 0L)` stays
 two nodes:
 
 ```{r filter-reorder-checked-int}
-tbl_gpu(data.frame(a = 1:4, b = 4:1), lazy = TRUE) |>
+tbl_gpu(data.frame(a = 1:4, b = 4:1)) |>
   filter(a < 100L) |>
   filter(a + b > 0L) |>
   explain()
@@ -637,7 +638,7 @@ filtering the first four rows, which is a different result:
 ```{r barrier-head}
 d <- data.frame(x = 1:10, y = c(-1, 2, -3, 4, -5, 6, -7, 8, -9, 10))
 
-q <- tbl_gpu(d, lazy = TRUE) |>
+q <- tbl_gpu(d) |>
   arrange(x) |>
   head(4) |>
   filter(y > 0)
@@ -663,7 +664,7 @@ filters move below their mutates, one on each side of `arrange()`, and
 ```{r segments}
 d <- data.frame(a = c(5, 12, 20, 30), c = c(1, 6, 7, 8))
 
-q <- tbl_gpu(d, lazy = TRUE) |>
+q <- tbl_gpu(d) |>
   mutate(b = a + 1) |>
   filter(a > 10) |>
   arrange(b) |>
@@ -680,8 +681,8 @@ input, the column-pruning passes can reach below a barrier. Here projection
 pruning adds a `select` that drops `b` below `arrange()` in the left input:
 
 ```{r barrier-in-join}
-d2 <- tbl_gpu(data.frame(k = c(1, 2, 3, 4), a = c(5, 15, 25, 35), b = 1:4), lazy = TRUE)
-y2 <- tbl_gpu(data.frame(k = c(1, 2, 2, 4), v = c(10, 20, 30, 40)), lazy = TRUE)
+d2 <- tbl_gpu(data.frame(k = c(1, 2, 3, 4), a = c(5, 15, 25, 35), b = 1:4))
+y2 <- tbl_gpu(data.frame(k = c(1, 2, 2, 4), v = c(10, 20, 30, 40)))
 
 d2 |>
   arrange(a) |>
@@ -697,7 +698,7 @@ that `compute()` and `collect()` would run, which the optimizer builds. Nothing
 is executed:
 
 ```{r explain-detail}
-pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
+pipeline <- tbl_gpu(mtcars) |>
   mutate(a = hp + 10) |>
   filter(mpg > 20) |>
   mutate(b = a + wt)
@@ -719,12 +720,12 @@ The same pipeline in eager mode and in lazy mode gives the same result. In the
 lazy plan the filter comes before the mutate:
 
 ```{r example-pushdown}
-eager_result <- tbl_gpu(mtcars) |>
+eager_result <- tbl_gpu(mtcars, lazy = FALSE) |>
   mutate(a = hp + 10, b = wt * 2, c = mpg * 3) |>
   filter(cyl == 4) |>
   collect()
 
-lazy_pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
+lazy_pipeline <- tbl_gpu(mtcars) |>
   mutate(a = hp + 10, b = wt * 2, c = mpg * 3) |>
   filter(cyl == 4)
 
@@ -736,7 +737,7 @@ identical(eager_result, collect(lazy_pipeline))
 ### Example 2: A longer pipeline
 
 ```{r example-complex}
-pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
+pipeline <- tbl_gpu(mtcars) |>
   mutate(
     power_to_weight = hp / wt,
     fuel_efficiency = mpg / cyl,
@@ -775,7 +776,7 @@ To keep the optimizer from moving nodes across a point in a pipeline, put
 it is not merged with the filter below it, and neither moves across:
 
 ```{r tip-collapse}
-tbl_gpu(data.frame(x = c(5, 11, 20), z = c(1, 6, 9)), lazy = TRUE) |>
+tbl_gpu(data.frame(x = c(5, 11, 20), z = c(1, 6, 9))) |>
   filter(x > 10) |>
   mutate(y = x * 2) |>
   collapse() |>

@@ -24,11 +24,13 @@ column types include: numeric (double), integer, character, and logical.}
 \item{lazy}{Logical or character. Controls execution mode:
 \itemize{
 \item \code{TRUE} or \code{"lazy"} - Operations are deferred until collect()/compute()
-\item \code{FALSE} or \code{"eager"} - Operations execute immediately (default)
-\item \code{NULL} - Use session option or environment variable
+\item \code{FALSE} or \code{"eager"} - Operations execute immediately
+\item \code{NULL} (default) - Use the session option, then the environment
+variable, then the package default, which is lazy
 }
-Can also be set via \code{options(cuplyr.exec_mode = "lazy")} or
-environment variable \code{CUPLYR_EXEC_MODE=lazy}.}
+The default can be changed with \code{options(cuplyr.exec_mode = "eager")} or
+the environment variable \code{CUPLYR_EXEC_MODE=eager}; the argument beats
+the option, which beats the variable.}
 }
 \value{
 A \code{tbl_gpu} object containing:
@@ -49,21 +51,32 @@ like \code{filter()}, \code{mutate()}, \code{select()}, and collected back to R 
 \code{collect()}.
 }
 \details{
-The data is immediately copied to GPU memory when \code{tbl_gpu()} is called.
+The data is immediately copied to GPU memory when \code{tbl_gpu()} is called
+(also in lazy mode; only the verbs are deferred).
 GPU memory is automatically freed when the R object is garbage collected.
 \subsection{Execution Modes}{
 
-In \strong{eager mode} (default), each dplyr verb executes immediately on the GPU.
-This is simple but can lead to unnecessary intermediate allocations.
-
-In \strong{lazy mode}, operations build an AST (Abstract Syntax Tree) that is
-optimized and executed only when \code{collect()} or \code{compute()} is called.
+In \strong{lazy mode} (the default), operations build an AST (Abstract Syntax
+Tree) that is optimized and executed only when \code{collect()} or \code{compute()}
+is called.
 This enables optimizations like:
 \itemize{
 \item Projection pruning (only load needed columns)
 \item Mutate fusion (combine multiple mutates)
 \item Filter reordering (cheapest filters first)
 }
+
+Errors in a verb's arguments (a missing column, a type error) are still
+raised when the verb is called. Printing a lazy table with pending
+operations (or calling \code{glimpse()} on it) runs the plan to show its first
+rows, under a \verb{# A gibble [lazy]:} header; the table itself is unchanged and
+nothing is kept, so printing it twice runs the plan twice (\code{compute()} it
+first to look at it repeatedly). If the plan fails (an error, out of GPU
+memory), the print shows the schema and the message instead of raising.
+
+In \strong{eager mode} (\code{lazy = FALSE}), each dplyr verb executes immediately on
+the GPU. This is simple but can lead to unnecessary intermediate
+allocations.
 
 For measured timings and memory use of the two modes, see
 \code{vignette("performance", package = "cuplyr")}.
@@ -103,18 +116,21 @@ one attached last masks the other; \code{cuplyr::gibble()} always works.
 }
 \examples{
 if (has_gpu()) {
-  # Transfer mtcars to GPU (eager mode)
+  # Transfer mtcars to GPU (lazy by default)
   gpu_mtcars <- tbl_gpu(mtcars)
   print(gpu_mtcars)
 
-  # Lazy mode - operations deferred until collect()
-  result <- tbl_gpu(mtcars, lazy = TRUE) |>
+  # Operations are deferred until collect()
+  result <- tbl_gpu(mtcars) |>
     filter(mpg > 20) |>
     mutate(kpl = mpg * 0.425) |>
     collect()
 
-  # Set lazy mode globally
-  options(cuplyr.exec_mode = "lazy")
+  # Eager mode: each verb runs at once
+  eager_tbl <- tbl_gpu(mtcars, lazy = FALSE)
+
+  # Or make every new table eager:
+  # options(cuplyr.exec_mode = "eager")
 }
 }
 \seealso{

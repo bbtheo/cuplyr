@@ -32,7 +32,7 @@ compare_join_by <- function(left_df, right_df, join_fn, by, ...,
                             arrange_by = NULL) {
   expected <- join_fn(left_df, right_df, by = by, ...)
 
-  eager <- join_fn(tbl_gpu(left_df), tbl_gpu(right_df), by = by, ...) |>
+  eager <- join_fn(tbl_gpu(left_df, lazy = FALSE), tbl_gpu(right_df, lazy = FALSE), by = by, ...) |>
     collect()
   lazy <- join_fn(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df, lazy = TRUE),
                   by = by, ...) |>
@@ -428,7 +428,7 @@ test_that("join_by() non-equi produces a correct empty result", {
   compare_join_by(left_df, right_df, dplyr::inner_join, by = dplyr::join_by(a >= b))
   compare_join_by(left_df, right_df, dplyr::semi_join, by = dplyr::join_by(a >= b))
 
-  eager <- dplyr::inner_join(tbl_gpu(left_df), tbl_gpu(right_df),
+  eager <- dplyr::inner_join(tbl_gpu(left_df, lazy = FALSE), tbl_gpu(right_df, lazy = FALSE),
                              by = dplyr::join_by(a >= b)) |> collect()
   expect_equal(nrow(eager), 0)
   expect_identical(names(eager), c("a", "v", "b", "w"))

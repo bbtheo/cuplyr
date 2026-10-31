@@ -194,7 +194,7 @@ test_that("F75: nth()'s n and na.rm warn once on a grouped table", {
   skip_if_no_gpu()
   df <- tibble::tibble(g = c(1L, 1L, 2L), y = c(10, 20, 30))
   for (lazy in c(FALSE, TRUE)) {
-    t <- group_by(if (lazy) as_lazy(tbl_gpu(df)) else tbl_gpu(df), g)
+    t <- group_by(tbl_gpu(df, lazy = lazy), g)
     expect_length(testthat::capture_warnings(collect(
       summarise(t, v = dplyr::nth(y, length(as.integer(c("1", "a")))))
     )), 1L)

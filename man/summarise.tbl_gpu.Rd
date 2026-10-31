@@ -88,12 +88,15 @@ performed entirely on the GPU for maximum performance.
 \itemize{
 \item \code{sum(x)} - Sum of values. Over an integer or logical \code{x} the result
 is an integer, as in dplyr; if it leaves R's integer range
-(\code{+-(2^31 - 1)}) dplyr returns a double, and so does an eager \code{tbl_gpu}.
-A lazy plan has a fixed schema and raises a
-\code{cuplyr_error_sum_overflow} error instead (use \code{sum(as.numeric(x))}),
-except that a lazy \code{summarise()} which also takes the \code{min()}/\code{max()}
-of an integer or logical column runs immediately and then behaves like
-an eager one (double on overflow).
+(\code{+-(2^31 - 1)}) dplyr returns a double, and so does \code{tbl_gpu}. Which
+one it is depends on the data, which a lazy plan (its schema is fixed
+before it runs) can't know, so a lazy \code{summarise()} of an integer
+(INT32) \code{sum(x)} runs at the verb, like an eager one: the pending steps
+run first (a plan break, see \code{cuplyr.plan_break}) and the result is a
+lazy table with nothing pending. The same goes for a lazy \code{min()}/\code{max()}
+of an integer. A \code{sum()} of a logical \code{x} stays in the plan: it can
+only overflow with more than 2^31 \code{TRUE} rows in a group, and then raises a
+\code{cuplyr_error_sum_overflow} error at \code{collect()}.
 \item \code{mean(x)} - Arithmetic mean
 \item \code{min(x)} - Minimum value
 \item \code{max(x)} - Maximum value

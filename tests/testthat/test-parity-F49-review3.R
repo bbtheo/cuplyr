@@ -41,6 +41,7 @@ f49r3_lazy_ok <- function(df, pipeline, oracle, label) {
 
 test_that("an integer row sum that overflows stays dplyr's double (or fails loudly) when a filter follows", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
   withr::local_options(cuplyr.fallback = "silent")
   df <- tibble::tibble(a = c(1L, .Machine$integer.max, 3L), b = c(2L, 1L, 4L))
   pipes <- list(
@@ -76,7 +77,7 @@ test_that("a lazy integer row aggregate followed by a filter stays integer when 
     oracle <- p(df)
     expect_type(oracle$s, "integer")
     withr::with_options(list(cuplyr.fallback = "silent"), {
-      f49r3_same(collect(p(tbl_gpu(df))), oracle, paste(nm, "eager"))
+      f49r3_same(collect(p(tbl_gpu(df, lazy = FALSE))), oracle, paste(nm, "eager"))
       f49r3_same(collect(p(tbl_gpu(df, lazy = TRUE))), oracle, paste(nm, "lazy"))
     })
   }
@@ -95,6 +96,7 @@ test_that("a lazy integer row aggregate followed by a filter stays integer when 
 
 test_that("rowwise min()/max() on a zero-row table have dplyr's type and warning", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
   withr::local_options(cuplyr.fallback = "silent", dplyr.summarise.inform = FALSE)
   df0 <- tibble::tibble(a = integer(), b = integer(), l = logical(), d = double())
   pipes <- list(

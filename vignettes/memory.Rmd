@@ -152,7 +152,8 @@ table) overlap in this estimate.
 
 ## When is memory freed?
 
-1. **A call frees its own intermediates.** An eager verb, `compute()`,
+1. **A call frees its own intermediates.** A lazy table (the default) holds
+   nothing for its pending steps. An eager verb, `compute()`,
    `collect()` or `bind_rows()` releases the temporary tables its steps built
    (casts, temp columns, uploads of a data frame argument) when it returns.
 2. **What you hold lives until R's garbage collector runs.** A table you

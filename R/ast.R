@@ -111,7 +111,8 @@ ast_arrange <- function(input, sort_specs, groups = character()) {
 #'   leaves R's integer range at execution. `"double"`: the column comes back
 #'   FLOAT64, as in dplyr (eager mode reconciles the schema from the result).
 #'   `"error"` (lazy plans, whose schema was declared INT32 statically): raise
-#'   `cuplyr_error_sum_overflow`.
+#'   `cuplyr_error_sum_overflow`. A lazy `summarise()` plans only a sum of a
+#'   logical this way (F80): an INT32 sum runs at the verb with `"double"`.
 #' @param sort_groups (F33) Sort the grouped result by the group keys
 #'   (ascending, `NA` last), dplyr's `group_by()` order. `FALSE` only for
 #'   `summarise_by_desugar()`, which re-sorts by first appearance anyway.
@@ -252,7 +253,8 @@ ast_slice <- function(input, mode, amount = NULL, is_prop = NULL,
 #' @param on_sum_overflow (F42) What to do when an integer/logical window
 #'   `sum()` (declared INT32) leaves R's integer range at execution. `"error"`:
 #'   raise `cuplyr_error_sum_overflow` (mutate() and eager filter(): eager
-#'   reruns the call on the CPU, lazy fails loudly). `"double"`: the column
+#'   reruns the call on the CPU; a lazy `mutate()` only plans a sum of a
+#'   logical, an INT32 sum runs at the verb, F80). `"double"`: the column
 #'   comes back FLOAT64, as in dplyr, for a consumer that reads the real column
 #'   type (lazy `filter()`'s predicate). A spec's own `on_sum_overflow` field,
 #'   when set, overrides this for that spec (`filter()` sets `"error"` on a sum

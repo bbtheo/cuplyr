@@ -27,11 +27,16 @@ few values -- similar to \code{dplyr::glimpse()}.
 \details{
 Unlike the (now-removed) Phase 2 CPU-fallback \code{glimpse()}, this
 implementation never collects the whole table to R: any pending lazy
-operations are materialized (via \code{\link[dplyr:compute]{compute()}}, exactly as any other verb
-would need to before doing GPU work), but the actual preview data comes
+operations are materialized (via \code{\link[dplyr:compute]{compute()}}), but the actual preview data comes
 from a small, capped row sample (like \code{\link[=print.tbl_gpu]{print.tbl_gpu()}}), and row/column
 counts/types come from lightweight metadata calls -- never a full
 \code{collect()}.
+
+A lazy table with pending operations runs its plan once for the preview
+(the result is freed when \code{glimpse()} returns; the table itself is
+unchanged), and one extra line starting \verb{Lazy:} follows \verb{Columns:}. If the
+plan fails (an error, out of GPU memory), \code{glimpse()} prints \verb{Rows: ??}, the
+\verb{Lazy:} line, the message and the stored schema instead of raising.
 
 Column value/type formatting does not attempt to reproduce dplyr's own
 \code{glimpse()} output (which is formatted via \code{pillar}) byte-for-byte --

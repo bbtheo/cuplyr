@@ -18,8 +18,7 @@ test_that("F07: an INT32 min()/max() with no empty group keeps INT32 in the sche
   df <- data.frame(g = c("a", "a", "b"), x = c(1L, NA, 3L))
 
   for (lazy in c(FALSE, TRUE)) {
-    gpu <- tbl_gpu(df)
-    if (lazy) gpu <- as_lazy(gpu)
+    gpu <- tbl_gpu(df, lazy = lazy)
     res <- gpu |> dplyr::group_by(g) |> dplyr::summarise(mn = min(x, na.rm = TRUE))
     expect_identical(unname(res$schema$types), c("STRING", "INT32"))
     expect_type(collect(res)$mn, "integer")
@@ -31,8 +30,7 @@ test_that("F07: a promoted INT32 min()/max() updates the schema to FLOAT64 (eage
   df <- data.frame(g = c("a", "a", "b"), x = c(1L, NA, NA))
 
   for (lazy in c(FALSE, TRUE)) {
-    gpu <- tbl_gpu(df)
-    if (lazy) gpu <- as_lazy(gpu)
+    gpu <- tbl_gpu(df, lazy = lazy)
     res <- suppressWarnings(
       gpu |> dplyr::group_by(g) |> dplyr::summarise(mx = max(x, na.rm = TRUE))
     )

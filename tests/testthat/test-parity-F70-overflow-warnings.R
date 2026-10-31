@@ -56,7 +56,7 @@ f70_run <- function(f) {
 # table as `d` (tibble, eager tbl_gpu or lazy tbl_gpu), for joins.
 f70_check <- function(df, pipeline, warns, arrange_by = NULL) {
   as_tbl <- function(x) tibble::as_tibble(x)
-  as_eager <- function(x) tbl_gpu(x)
+  as_eager <- function(x) tbl_gpu(x, lazy = FALSE)
   as_lz <- function(x) as_lazy(tbl_gpu(x))
 
   oracle <- f70_run(function() pipeline(as_tbl(df), as_tbl))

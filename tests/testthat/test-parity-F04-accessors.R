@@ -40,8 +40,7 @@ f04_shapes <- function() {
 }
 
 f04_up <- function(df, lazy = FALSE) {
-  g <- tbl_gpu(df)
-  if (lazy) as_lazy(g) else g
+  tbl_gpu(df, lazy = lazy)
 }
 
 # Run `expr`, recording its value, warnings (class + message) and error.

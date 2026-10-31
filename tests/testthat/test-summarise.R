@@ -27,6 +27,7 @@ test_that("summarise() with sum() works ungrouped", {
 
 test_that("eager summarise result has no pending lazy ops", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
 
   out <- tbl_gpu(data.frame(x = 1:5)) |>
     dplyr::summarise(total = sum(x))

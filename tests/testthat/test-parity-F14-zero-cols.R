@@ -68,13 +68,13 @@ test_that("select() to zero columns after pending lazy ops counts their rows", {
 test_that("zero-column select() keeps the exec mode and reports its size", {
   skip_if_no_gpu()
   df <- f14z_df()
-  e <- select(tbl_gpu(df), -everything())
+  e <- select(tbl_gpu(df, lazy = FALSE), -everything())
   f14z_expect_shape(e, 5)
   expect_identical(e$exec_mode, "eager")
   l <- tbl_gpu(df, lazy = TRUE) |> filter(x > 1L) |> select(-everything())
   expect_identical(l$exec_mode, "lazy")
   f14z_expect_shape(l, 3)
-  expect_identical(group_vars(select(tbl_gpu(df), -everything())), character())
+  expect_identical(group_vars(select(tbl_gpu(df, lazy = FALSE), -everything())), character())
 })
 
 test_that("select()/relocate() on a zero-column table keep its rows", {

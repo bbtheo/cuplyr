@@ -25,7 +25,7 @@
 compare_cross_join <- function(left_df, right_df, ..., arrange_by = NULL) {
   expected <- dplyr::cross_join(left_df, right_df, ...)
 
-  eager <- dplyr::cross_join(tbl_gpu(left_df), tbl_gpu(right_df), ...) |> collect()
+  eager <- dplyr::cross_join(tbl_gpu(left_df, lazy = FALSE), tbl_gpu(right_df, lazy = FALSE), ...) |> collect()
   lazy <- dplyr::cross_join(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df, lazy = TRUE), ...) |>
     collect()
 
@@ -50,7 +50,7 @@ test_that("cross_join() basic row order matches dplyr (left-major)", {
 
   expected <- dplyr::cross_join(x, y)
 
-  eager <- dplyr::cross_join(tbl_gpu(x), tbl_gpu(y)) |> collect()
+  eager <- dplyr::cross_join(tbl_gpu(x, lazy = FALSE), tbl_gpu(y, lazy = FALSE)) |> collect()
   lazy <- dplyr::cross_join(tbl_gpu(x, lazy = TRUE), tbl_gpu(y, lazy = TRUE)) |> collect()
 
   # No arrange_by: row order itself is the contract under test here.
@@ -67,7 +67,7 @@ test_that("cross_join() suffixes EVERY common column name, not just keys", {
   expected <- dplyr::cross_join(x, y)
   expect_equal(names(expected), c("id.x", "val.x", "extra.x", "id.y", "val.y", "extra.y"))
 
-  eager <- dplyr::cross_join(tbl_gpu(x), tbl_gpu(y)) |> collect()
+  eager <- dplyr::cross_join(tbl_gpu(x, lazy = FALSE), tbl_gpu(y, lazy = FALSE)) |> collect()
   lazy <- dplyr::cross_join(tbl_gpu(x, lazy = TRUE), tbl_gpu(y, lazy = TRUE)) |> collect()
 
   expect_equal(as.data.frame(eager), as.data.frame(expected))
@@ -83,7 +83,7 @@ test_that("cross_join() with a custom suffix matches dplyr", {
   expected <- dplyr::cross_join(x, y, suffix = c("_L", "_R"))
   expect_equal(names(expected), c("id_L", "val_L", "id_R", "val_R"))
 
-  eager <- dplyr::cross_join(tbl_gpu(x), tbl_gpu(y), suffix = c("_L", "_R")) |> collect()
+  eager <- dplyr::cross_join(tbl_gpu(x, lazy = FALSE), tbl_gpu(y, lazy = FALSE), suffix = c("_L", "_R")) |> collect()
   lazy <- dplyr::cross_join(tbl_gpu(x, lazy = TRUE), tbl_gpu(y, lazy = TRUE),
                             suffix = c("_L", "_R")) |> collect()
 
@@ -147,8 +147,8 @@ test_that("cross_join() preserves x's grouping when the group var's name doesn't
   oracle <- dplyr::cross_join(dplyr::group_by(x, g), y)
   expect_equal(dplyr::group_vars(oracle), "g")
 
-  gt <- tbl_gpu(x) |> dplyr::group_by(g)
-  eager_result <- dplyr::cross_join(gt, tbl_gpu(y))
+  gt <- tbl_gpu(x, lazy = FALSE) |> dplyr::group_by(g)
+  eager_result <- dplyr::cross_join(gt, tbl_gpu(y, lazy = FALSE))
   expect_equal(eager_result$groups, "g")
 
   lazy_result <- dplyr::cross_join(as_lazy(gt), tbl_gpu(y, lazy = TRUE))
@@ -172,8 +172,8 @@ test_that("cross_join() drops a group var from grouping when its name collides (
   oracle <- dplyr::cross_join(dplyr::group_by(x, g, id), y)
   expect_equal(dplyr::group_vars(oracle), character(0))
 
-  gt <- tbl_gpu(x) |> dplyr::group_by(g, id)
-  eager_result <- dplyr::cross_join(gt, tbl_gpu(y))
+  gt <- tbl_gpu(x, lazy = FALSE) |> dplyr::group_by(g, id)
+  eager_result <- dplyr::cross_join(gt, tbl_gpu(y, lazy = FALSE))
   expect_equal(eager_result$groups, character(0))
 
   lazy_result <- dplyr::cross_join(as_lazy(gt), tbl_gpu(y, lazy = TRUE))
@@ -194,8 +194,8 @@ test_that("cross_join() partial grouping: only the non-colliding group var survi
   oracle <- dplyr::cross_join(dplyr::group_by(x, g, id), y)
   expect_equal(dplyr::group_vars(oracle), "g")
 
-  gt <- tbl_gpu(x) |> dplyr::group_by(g, id)
-  eager_result <- dplyr::cross_join(gt, tbl_gpu(y))
+  gt <- tbl_gpu(x, lazy = FALSE) |> dplyr::group_by(g, id)
+  eager_result <- dplyr::cross_join(gt, tbl_gpu(y, lazy = FALSE))
   expect_equal(eager_result$groups, "g")
 
   expect_equal(as.data.frame(collect(eager_result)), as.data.frame(oracle))
@@ -210,7 +210,7 @@ test_that("cross_join() never uses y's grouping (only x's own is the template)",
   oracle <- dplyr::cross_join(x, dplyr::group_by(y, k))
   expect_equal(dplyr::group_vars(oracle), character(0))
 
-  eager_result <- dplyr::cross_join(tbl_gpu(x), tbl_gpu(y) |> dplyr::group_by(k))
+  eager_result <- dplyr::cross_join(tbl_gpu(x, lazy = FALSE), tbl_gpu(y, lazy = FALSE) |> dplyr::group_by(k))
   expect_equal(eager_result$groups, character(0))
   expect_equal(as.data.frame(collect(eager_result)), as.data.frame(oracle))
 })
@@ -250,8 +250,14 @@ test_that("cross_join() size warning fires when the estimated output exceeds fre
     .package = "cuplyr"
   )
 
+  # eager, and the lazy default (two uploaded tables: the row counts are known)
   expect_warning(
-    dplyr::cross_join(tbl_gpu(x), tbl_gpu(y)),
+    dplyr::cross_join(tbl_gpu(x, lazy = FALSE), tbl_gpu(y, lazy = FALSE)),
+    "estimated at"
+  )
+  expect_warning(dplyr::cross_join(tbl_gpu(x), tbl_gpu(y)), "estimated at")
+  expect_warning(
+    dplyr::cross_join(tbl_gpu(x, lazy = FALSE), tbl_gpu(y, lazy = TRUE)),
     "estimated at"
   )
 })
@@ -272,7 +278,7 @@ test_that("cross_join() size warning does not fire when there is ample free GPU 
   )
 })
 
-test_that("cross_join() size warning is skipped (not lowered) for a lazy join", {
+test_that("cross_join() size warning is skipped for a lazy join when a side has pending steps", {
   skip_if_no_gpu()
 
   x <- data.frame(id = 1:100)
@@ -283,10 +289,11 @@ test_that("cross_join() size warning is skipped (not lowered) for a lazy join", 
     .package = "cuplyr"
   )
 
-  # warn_if_join_too_large() only runs on the eager path (push_join()); a
-  # lazy cross_join() defers execution entirely, so building the AST node
-  # itself must not warn.
-  expect_no_warning(
-    dplyr::cross_join(tbl_gpu(x, lazy = TRUE), tbl_gpu(y, lazy = TRUE))
-  )
+  # warn_if_join_too_large() reads the row counts of the two uploaded tables; a
+  # side with pending steps has no row count before its plan runs, so the join
+  # is only recorded, without a warning.
+  x_pending <- dplyr::filter(tbl_gpu(x, lazy = TRUE), id > 0L)
+  y_pending <- dplyr::filter(tbl_gpu(y, lazy = TRUE), k > 0L)
+  expect_no_warning(dplyr::cross_join(x_pending, tbl_gpu(y, lazy = TRUE)))
+  expect_no_warning(dplyr::cross_join(tbl_gpu(x, lazy = TRUE), y_pending))
 })

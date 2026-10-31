@@ -22,7 +22,7 @@ test_that("group_split() runs on the GPU and returns tbl_gpu chunks and a tbl_gp
   withr::local_options(cuplyr.fallback = "error")
   df <- f21n_df()
   for (lazy in c(FALSE, TRUE)) {
-    gt <- tbl_gpu(df)
+    gt <- tbl_gpu(df, lazy = FALSE)
     if (lazy) gt <- dplyr::mutate(as_lazy(gt), y = x * 2L)
     cases <- list(
       dplyr::group_split(gt, g),

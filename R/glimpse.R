@@ -33,11 +33,16 @@
 #' @details
 #' Unlike the (now-removed) Phase 2 CPU-fallback `glimpse()`, this
 #' implementation never collects the whole table to R: any pending lazy
-#' operations are materialized (via [compute()], exactly as any other verb
-#' would need to before doing GPU work), but the actual preview data comes
+#' operations are materialized (via [compute()]), but the actual preview data comes
 #' from a small, capped row sample (like [print.tbl_gpu()]), and row/column
 #' counts/types come from lightweight metadata calls -- never a full
 #' `collect()`.
+#'
+#' A lazy table with pending operations runs its plan once for the preview
+#' (the result is freed when `glimpse()` returns; the table itself is
+#' unchanged), and one extra line starting `Lazy:` follows `Columns:`. If the
+#' plan fails (an error, out of GPU memory), `glimpse()` prints `Rows: ??`, the
+#' `Lazy:` line, the message and the stored schema instead of raising.
 #'
 #' Column value/type formatting does not attempt to reproduce dplyr's own
 #' `glimpse()` output (which is formatted via `pillar`) byte-for-byte --
@@ -54,7 +59,21 @@
 glimpse.tbl_gpu <- function(x, width = NULL, ...) {
   width <- width %||% getOption("width", 80)
 
-  materialized <- if (has_pending_ops(x)) compute(x) else x
+  # A lazy table with pending ops runs its plan once for the preview and keeps
+  # nothing; if the plan fails, the failure is shown instead of raised.
+  lazy_line <- NULL
+  materialized <- x
+  if (has_pending_ops(x)) {
+    n_ops <- ast_count_ops(.subset2(x, "lazy_ops"))
+    lazy_line <- paste0("Lazy: ", n_ops, " pending step", if (n_ops != 1L) "s",
+                        " ran for this preview; nothing is kept\n")
+    res <- tryCatch(compute(x), error = function(e) e)
+    if (inherits(res, "error")) {
+      glimpse_lazy_failure(x, res, lazy_line)
+      return(invisible(x))
+    }
+    materialized <- res
+  }
 
   dims <- dim(materialized)
   col_names <- display_names(materialized$schema$names)
@@ -62,6 +81,7 @@ glimpse.tbl_gpu <- function(x, width = NULL, ...) {
 
   cat("Rows: ", format(dims[1], big.mark = ","), "\n", sep = "")
   cat("Columns: ", dims[2], "\n", sep = "")
+  cat(lazy_line)
 
   if (is_rowwise_gpu(materialized)) {
     # one group per row: the vars are the table's header, as pillar prints it
@@ -109,6 +129,28 @@ glimpse.tbl_gpu <- function(x, width = NULL, ...) {
   }
 
   invisible(x)
+}
+
+# glimpse() of a lazy table whose plan failed: unknown rows, the stored
+# schema's columns and types, and the condition's message.
+# @keywords internal
+glimpse_lazy_failure <- function(x, err, lazy_line) {
+  schema <- .subset2(x, "schema")
+  col_names <- display_names(schema$names)
+  cat("Rows: ??\n")
+  cat("Columns: ", length(col_names), "\n", sep = "")
+  cat(lazy_line)
+  msg <- strsplit(conditionMessage(err), "\n", fixed = TRUE)[[1L]]
+  cat(paste0(c("Plan failed: ", rep("  ", max(length(msg), 1L) - 1L)), msg), sep = "\n")
+  grouping <- lazy_grouping_sum(x)
+  if (length(grouping) > 0L) {
+    cat(names(grouping), ": ", grouping, "\n", sep = "")
+  }
+  max_name_width <- max(nchar(col_names), 1)
+  for (i in seq_along(col_names)) {
+    cat("$ ", format(col_names[i], width = max_name_width), " <",
+        unname(schema$types)[i], ">\n", sep = "")
+  }
 }
 
 # Number of distinct group-key combinations in a materialized (non-lazy)

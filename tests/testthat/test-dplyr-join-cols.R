@@ -42,7 +42,7 @@ compare_join_cols <- function(left_df, right_df, join_fn, by, ...,
                               arrange_by = NULL) {
   expected <- join_fn(left_df, right_df, by = by, ...)
 
-  eager <- join_fn(tbl_gpu(left_df), tbl_gpu(right_df), by = by, ...) |>
+  eager <- join_fn(tbl_gpu(left_df, lazy = FALSE), tbl_gpu(right_df, lazy = FALSE), by = by, ...) |>
     collect()
   lazy <- join_fn(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df, lazy = TRUE),
                   by = by, ...) |>

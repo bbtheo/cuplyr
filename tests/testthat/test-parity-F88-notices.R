@@ -536,6 +536,7 @@ test_that("F88: summarise()/reframe() blame the dot that fell back, not a native
 
 test_that("F88: an eager mutate() rerun after an integer sum() overflow says so", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
   withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = NULL)
   d <- tibble::tibble(i = c(.Machine$integer.max, 1L))
   got <- f88_capture(tbl_gpu(d) |> mutate(s = sum(i)) |> collect())

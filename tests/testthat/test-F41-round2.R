@@ -7,8 +7,7 @@ f41r2_check <- function(data, pipeline, floored = "m", tol = 0) {
   want <- tibble::as_tibble(dplyr::ungroup(pipeline(data)))
   rest <- setdiff(names(want), floored)
   for (lazy in c(FALSE, TRUE)) {
-    g <- tbl_gpu(data)
-    if (lazy) g <- as_lazy(g)
+    g <- tbl_gpu(data, lazy = lazy)
     expect_warning(got <- collect(pipeline(g)), class = "cuplyr_warning_fractional_date")
     got <- tibble::as_tibble(dplyr::ungroup(got))
     expect_equal(names(got), names(want))
@@ -48,8 +47,7 @@ test_that("a native timestamp mean/median stays native when nothing reads it", {
   df <- f41r2_dates()
   withr::local_options(cuplyr.fallback = "error")
   for (lazy in c(FALSE, TRUE)) {
-    tb <- tbl_gpu(df)
-    if (lazy) tb <- as_lazy(tb)
+    tb <- tbl_gpu(df, lazy = lazy)
     expect_warning(
       got <- collect(mutate(tb, m = mean(d), y = x + 1, m2 = m, .by = g)),
       class = "cuplyr_warning_fractional_date"
@@ -66,8 +64,7 @@ test_that("a later dot compares against the unrounded POSIXct mean", {
   df <- tibble::tibble(t = as.POSIXct(c(0, 1e-6), origin = "1970-01-01", tz = "UTC"))
   want <- tibble::as_tibble(mutate(df, m = mean(t), early = t < m))
   for (lazy in c(FALSE, TRUE)) {
-    g <- tbl_gpu(df)
-    if (lazy) g <- as_lazy(g)
+    g <- tbl_gpu(df, lazy = lazy)
     got <- collect(mutate(g, m = mean(t), early = t < m))
     expect_identical(got$early, want$early)
     expect_lte(abs(as.numeric(got$m[1]) - as.numeric(want$m[1])), 1e-6)

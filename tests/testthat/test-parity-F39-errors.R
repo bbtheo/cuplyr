@@ -9,7 +9,7 @@ f39_df <- function() {
 f39_tables <- function() {
   df <- f39_df()
   list(
-    eager = tbl_gpu(df),
+    eager = tbl_gpu(df, lazy = FALSE),
     lazy = tbl_gpu(df, lazy = TRUE),
     grouped = dplyr::group_by(tbl_gpu(df), g)
   )

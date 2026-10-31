@@ -20,8 +20,7 @@ f02_df <- function() {
 }
 
 f02_up <- function(df, lazy = FALSE) {
-  g <- tbl_gpu(df)
-  if (lazy) as_lazy(g) else g
+  tbl_gpu(df, lazy = lazy)
 }
 
 # fn(...) on tibbles vs fn(...) on tbl_gpu. Data-frame arguments are uploaded;

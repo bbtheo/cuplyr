@@ -36,7 +36,7 @@ test_that("length-one assignment keeps types, groups and .drop, and replaces in 
   skip_if_no_gpu()
   df <- r2_df()
   for (lazy in c(FALSE, TRUE)) {
-    gt <- dplyr::group_by(if (lazy) as_lazy(tbl_gpu(df)) else tbl_gpu(df), g, .drop = FALSE)
+    gt <- dplyr::group_by(tbl_gpu(df, lazy = lazy), g, .drop = FALSE)
     tb <- dplyr::group_by(tibble::as_tibble(df), g, .drop = FALSE)
     fn <- function(t) { t$x <- 7L; t$b <- TRUE; t$s <- "q"; t$f <- 1L; t$i <- 2.5; t }
     environment(fn) <- globalenv()
@@ -96,7 +96,7 @@ test_that(".drop = FALSE survives push_op verbs, joins and a group-column rename
   )
   other <- data.frame(f = factor(c("a", "b"), levels = c("a", "b", "c")), y = c(10, 20))
   for (lazy in c(FALSE, TRUE)) {
-    up <- function(d) if (lazy) as_lazy(tbl_gpu(d)) else tbl_gpu(d)
+    up <- function(d) tbl_gpu(d, lazy = lazy)
     g <- dplyr::group_by(up(df), f, .drop = FALSE)
     drop_of <- function(t) dplyr::group_by_drop_default(t)
     expect_false(drop_of(dplyr::arrange(g, x)))

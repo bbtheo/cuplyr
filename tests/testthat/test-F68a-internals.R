@@ -86,18 +86,28 @@ test_that("a memo scope is closed again, also after an error", {
 
 test_that("compute() closes its memo scope when lowering fails", {
   skip_if_no_gpu()
-  # a grouped INT32 sum that overflows raises cuplyr_error_sum_overflow at collect
-  lz <- tbl_gpu(data.frame(g = c(1L, 1L), v = c(.Machine$integer.max, 1L)), lazy = TRUE) |>
-    dplyr::group_by(g) |>
-    dplyr::mutate(s = sum(v))
+  lz <- tbl_gpu(data.frame(a = 1:3), lazy = TRUE) |> dplyr::mutate(b = a + 1L)
   expect_null(.schema_memo$plain)
-  expect_error(dplyr::collect(lz), class = "cuplyr_error_sum_overflow")
-  expect_null(.schema_memo$plain)
-  expect_error(dplyr::compute(lz), class = "cuplyr_error_sum_overflow")
-  expect_null(.schema_memo$plain)
+  # make lowering fail, with the memo scope open as compute_plan() leaves it
+  # while it lowers; the mock is gone again after the block
+  local({
+    open_in_lowering <- NULL
+    testthat::local_mocked_bindings(
+      lower_and_execute = function(ast, source_ptr) {
+        open_in_lowering <<- !is.null(.schema_memo$plain)
+        rlang::abort("lowering failed", class = "test_lowering_error")
+      }
+    )
+    expect_error(dplyr::collect(lz), class = "test_lowering_error")
+    expect_true(open_in_lowering)
+    expect_null(.schema_memo$plain)
+    expect_error(dplyr::compute(lz), class = "test_lowering_error")
+    expect_null(.schema_memo$plain)
+  })
   # the next plan still runs
   ok <- tbl_gpu(data.frame(a = 1:3), lazy = TRUE) |> dplyr::mutate(b = a + 1L) |> dplyr::collect()
   expect_identical(ok$b, 2:4)
+  expect_null(.schema_memo$plain)
 })
 
 test_that("the optimizer's set helpers match base union/setdiff/intersect", {

@@ -19,7 +19,7 @@ f16p_df <- function() {
 }
 
 f16p_inputs <- function(df) {
-  list(eager = tbl_gpu(df), lazy = as_lazy(tbl_gpu(df)))
+  list(eager = tbl_gpu(df, lazy = FALSE), lazy = as_lazy(tbl_gpu(df)))
 }
 
 # Compare the full grouping structure of `pipeline` run on a tbl_gpu (eager

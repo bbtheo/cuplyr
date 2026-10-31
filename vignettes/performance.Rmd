@@ -23,17 +23,20 @@ one machine, a list of cases where the GPU loses to plain dplyr, and advice
 that follows from both. `vignette("query-optimization", package = "cuplyr")`
 explains what the optimizer passes do. This one measures what they buy.
 
-The short version: lazy is the better choice for pipelines, though not because
-it is faster. When GPU memory is clean it is as fast as eager or a little
-faster up to 1e6 rows (1.75 against 1.87 ms at 1e3, 2.00 against 2.00 ms at
-1e6) and slower on big tables: by 0.67 ms at 1e7 rows and 1.0 ms at 5e7. What it gives you is that
-every intermediate column is freed when the pipeline finishes, so it stays safe
-on big tables and in loops. In a loop an eager pipeline's leftovers pile up, and
-once they fill the card cuplyr's out-of-memory handler has to run. That made
-eager 3 to 7 times slower than lazy in the measurements below. Until the card
-is full eager stays faster: in a separate run at 2.5e7 rows, five back-to-back
-eager calls left about 4 GB behind and still took 9.2 ms each, against 10 ms
-lazy.
+The short version: lazy, the default, is the better choice for pipelines,
+though not because it is faster. With the memory pool cleaned before each run it
+takes as long as eager or a little less up to 1e6 rows (2.53 against 2.66 ms at
+1e3 rows, 2.85 against 2.99 ms at 1e6) and is slower on big tables: by 0.69 ms
+at 1e7 rows and 0.98 ms at 5e7. (These are the README's numbers. The tables
+below were timed with a plain `gc()` before each batch, which favours eager a
+little: there the gaps are 0.67 ms at 1e7 and 1.0 ms at 5e7.) What it gives you
+is that every intermediate column is freed when the pipeline finishes, so it
+stays safe on big tables and in loops. In a loop an eager pipeline's leftovers
+pile up, and once they fill the card cuplyr's out-of-memory handler has to run.
+That made eager 3 to 7 times slower than lazy in the measurements below. Until
+the card is full eager stays faster: in a separate run at 2.5e7 rows, five
+back-to-back eager calls left about 4 GB behind and still took 9.2 ms each,
+against 10 ms lazy.
 
 ```{r setup}
 library(cuplyr)
@@ -62,13 +65,17 @@ The two modes differ in when the GPU work happens.
   then copies the result to R. The intermediates are freed when the call
   returns.
 
-You choose the mode per table with `tbl_gpu(df, lazy = TRUE)`, or for every
-table created afterwards with `options(cuplyr.exec_mode = "lazy")`.
+Lazy is the default. You choose eager per table with
+`tbl_gpu(df, lazy = FALSE)`, or for every table created afterwards with
+`options(cuplyr.exec_mode = "eager")` (or the environment variable
+`CUPLYR_EXEC_MODE=eager`). Printing a lazy table with pending steps runs the
+plan to show its first rows and keeps nothing, so it costs about as much as a
+`collect()` of the same plan (see the README for a measurement).
 `show_query()` prints the pending steps of a lazy table. `explain()` prints them
 next to the plan the optimizer will actually run:
 
 ```{r explain, eval = FALSE}
-lazy <- tbl_gpu(mtcars, lazy = TRUE) |>
+lazy <- tbl_gpu(mtcars) |>
   filter(mpg > 20) |>
   mutate(kpl = mpg * 0.425, hp2 = hp * 2) |>
   select(cyl, kpl)
@@ -94,7 +101,7 @@ explain(lazy)
 ```{r explain-run, echo = FALSE}
 # The output above is pasted so a default build shows it. A build with GPU
 # evaluation runs the same code and fails if explain() no longer prints it.
-lazy <- tbl_gpu(mtcars, lazy = TRUE) |>
+lazy <- tbl_gpu(mtcars) |>
   filter(mpg > 20) |>
   mutate(kpl = mpg * 0.425, hp2 = hp * 2) |>
   select(cyl, kpl)

@@ -85,7 +85,9 @@ warn_int_overflow <- function(ptr, in_filter = FALSE) {
 # F49: the flags the rowwise horizontal aggregates (rw_agg_*, R/rowwise.R) leave
 # on a result pointer, bit by bit (see src/expr_eval.hpp): 1 an integer sum()
 # left the integer range (base R returns a double there; a static INT32 schema
-# can't, so it fails loudly like F42's window sums); 2 an integer min()/max()
+# can't, so a lazy table runs such a verb as an eager one, F80, and this flag
+# only reaches a plan built some other way, where it fails loudly like F42's
+# window sums); 2 an integer min()/max()
 # with na.rm = TRUE had an all-NA row (a double +-Inf in base R; only the eager
 # path builds that INT32 form, after checking it away first); 4/8 a double
 # min()/max() of an all-NA row (or of zero rows) gave +-Inf, with base R's

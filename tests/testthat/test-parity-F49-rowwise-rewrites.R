@@ -317,6 +317,7 @@ test_that("integer min()/max(na.rm = TRUE) with an all-NA row become double like
 
 test_that("an integer row sum that leaves the integer range is double, like dplyr", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
   df <- tibble::tibble(i1 = c(.Machine$integer.max, 1L, NA), i2 = c(1L, 2L, 3L))
   pipe <- function(x) dplyr::rowwise(x) |> dplyr::mutate(s = sum(dplyr::c_across(c(i1, i2))))
   oracle <- pipe(df)

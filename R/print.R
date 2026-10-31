@@ -35,29 +35,58 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
   body_w <- body_width(width)
   width <- print_width(width)
 
-  # A lazy table with pending operations is never run to print it: show the
-  # result's schema, its grouping (metadata only) and how many plan steps
-  # (AST nodes) are pending.
-  if (has_pending_ops(x) || is.null(.subset2(x, "ptr"))) {
+  # A lazy table with pending operations runs its plan once and prints the
+  # result like an eager table, with "[lazy]" in the header. Nothing is kept:
+  # `res` is a local, freed when print() returns, and `x` stays as it is.
+  if (has_pending_ops(x)) {
+    res <- tryCatch(compute(x), error = function(e) e)
+    if (inherits(res, "error")) {
+      print_lazy_failure(x, res, width)
+    } else {
+      print_gibble_body(res, width, body_w, "A gibble [lazy]")
+    }
+    return(invisible(x))
+  }
+
+  # No GPU data and nothing to run: show the schema only
+  if (is.null(.subset2(x, "ptr"))) {
     cat("# A gibble [lazy, not materialized]\n")
     cat("# Schema: ", paste(display_names(.subset2(x, "schema")$names), collapse = ", "), "\n", sep = "")
     cat("# Operations pending: ", ast_count_ops(.subset2(x, "lazy_ops")), "\n", sep = "")
     grouping <- lazy_grouping_sum(x)
     if (length(grouping) > 0L) {
-      # a group count only when fixed group keys hold it (lazy_grouping_sum());
-      # otherwise it would need the plan. Same layout as the eager header,
-      # whose first line is dropped.
       cat(gibble_header(x, width, c("A gibble" = "", grouping))[-1L], sep = "\n")
     }
     return(invisible(x))
   }
 
+  print_gibble_body(x, width, body_w, "A gibble")
+  invisible(x)
+}
+
+# A lazy table whose plan failed (an error, out of GPU memory): the header with
+# unknown rows, the grouping (metadata), the schema, the plan size and the
+# condition's message. print() never re-raises it.
+print_lazy_failure <- function(x, err, width) {
+  ncols <- length(.subset2(x, "schema")$names)
+  dims <- sub("^1", "??", pillar::dim_desc(matrix(0L, 1L, ncols)))
+  sum <- c(dims, lazy_grouping_sum(x))
+  cat(gibble_header(x, width, sum, name = "A gibble [lazy]"), sep = "\n")
+  cat("# Schema: ", paste(display_names(.subset2(x, "schema")$names), collapse = ", "), "\n", sep = "")
+  cat("# Operations pending: ", ast_count_ops(.subset2(x, "lazy_ops")), "\n", sep = "")
+  msg <- strsplit(conditionMessage(err), "\n", fixed = TRUE)[[1L]]
+  cat(paste0(c("# Plan failed: ", rep("#   ", max(length(msg), 1L) - 1L)), msg), sep = "\n")
+}
+
+# The header and the glimpse-style body of a table with GPU data and nothing
+# pending, `name` being the header's first name ("A gibble").
+print_gibble_body <- function(x, width, body_w, name) {
   ptr <- .subset2(x, "ptr")
   schema <- .subset2(x, "schema")
   types <- gpu_col_types(ptr)
   col_names <- display_names(schema$names)
 
-  cat(gibble_header(x, width), sep = "\n")
+  cat(gibble_header(x, width, name = name), sep = "\n")
 
   # Get preview data (first 10 rows for value display)
   preview <- tryCatch(
@@ -159,10 +188,16 @@ body_width <- function(width = NULL) {
 # tbl_format_header(), so the "name:" padding, wrapping at `width` with "#   "
 # continuation lines and subtle styling are exactly tibble's. `setup` carries
 # the fields that method reads (tbl_sum, width; see ?pillar::tbl_format_setup).
-# `width` is the resolved print width (print_width()).
-gibble_header <- function(x, width, sum = tbl_sum(x)) {
+# `width` is the resolved print width (print_width()). A different `name`
+# ("A gibble [lazy]") only replaces the text of the first line, after the
+# padding, so the other lines stay those of an eager table.
+gibble_header <- function(x, width, sum = tbl_sum(x), name = "A gibble") {
   names(sum)[1] <- "A gibble"
-  pillar::tbl_format_header(x, list(tbl_sum = sum, width = width))
+  out <- pillar::tbl_format_header(x, list(tbl_sum = sum, width = width))
+  if (!identical(name, "A gibble")) {
+    out[1L] <- sub("A gibble", name, out[1L], fixed = TRUE)
+  }
+  out
 }
 
 # Column names as printed: an NA name shows as "NA" (nchar(NA_character_) is

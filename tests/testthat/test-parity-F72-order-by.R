@@ -58,8 +58,7 @@ f72_same_error <- function(df, pipeline) {
   expect_s3_class(cpu, "error")
   for (lazy in c(FALSE, TRUE)) {
     gpu <- tryCatch({
-      t <- tbl_gpu(df)
-      if (lazy) t <- as_lazy(t)
+      t <- tbl_gpu(df, lazy = lazy)
       collect(pipeline(t))
     }, error = identity)
     expect_s3_class(gpu, class(cpu)[[1]])

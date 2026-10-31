@@ -43,7 +43,7 @@ i Collected 1,000 rows x 3 cols (about 24.4 kB) to run on the CPU.
 
 \section{Plan breaks}{
 
-A lazy table (\code{tbl_gpu(df, lazy = TRUE)}) collects its verbs into a plan and
+A lazy table (the default, \code{tbl_gpu(df)}) collects its verbs into a plan and
 runs it when you \code{compute()} or \code{collect()}. A few steps need the result of
 the pending plan before it is asked for (a \code{summarise()} of an expression
 such as \code{mean(x * y)}, an integer \code{max()}, a verb that leaves no column).

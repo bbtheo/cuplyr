@@ -19,7 +19,8 @@ a constant key column and skips the sort when there's also no
 \item{on_sum_overflow}{(F42) What to do when an integer/logical window
 \code{sum()} (declared INT32) leaves R's integer range at execution. \code{"error"}:
 raise \code{cuplyr_error_sum_overflow} (mutate() and eager filter(): eager
-reruns the call on the CPU, lazy fails loudly). \code{"double"}: the column
+reruns the call on the CPU; a lazy \code{mutate()} only plans a sum of a
+logical, an INT32 sum runs at the verb, F80). \code{"double"}: the column
 comes back FLOAT64, as in dplyr, for a consumer that reads the real column
 type (lazy \code{filter()}'s predicate). A spec's own \code{on_sum_overflow} field,
 when set, overrides this for that spec (\code{filter()} sets \code{"error"} on a sum

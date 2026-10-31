@@ -13,7 +13,8 @@ window_spec(
   output_type,
   n = NA_integer_,
   default = NULL,
-  na_rm = FALSE
+  na_rm = FALSE,
+  input_type = NA_character_
 )
 }
 \arguments{
@@ -49,6 +50,11 @@ value), or \code{NULL} if not applicable/not supplied}
 
 \item{na_rm}{Logical scalar, \code{FALSE} unless a future wave adds an
 \verb{na_rm=}-aware window op}
+
+\item{input_type}{(F80) GPU type string of an integer \code{sum()}'s argument
+(\code{"INT32"} or \code{"BOOL8"}), \code{NA_character_} for every other call; a lazy
+\code{mutate()} runs a call holding an INT32 sum at the verb (see
+\code{window_spec_int_sum()})}
 }
 \value{
 A list with exactly these named fields

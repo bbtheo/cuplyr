@@ -16,8 +16,7 @@ f72x_same_error <- function(df, pipeline) {
   expect_s3_class(cpu, "error")
   for (lazy in c(FALSE, TRUE)) {
     gpu <- tryCatch({
-      t <- tbl_gpu(df)
-      if (lazy) t <- as_lazy(t)
+      t <- tbl_gpu(df, lazy = lazy)
       collect(pipeline(t))
     }, error = identity)
     expect_s3_class(gpu, class(cpu)[[1]])
@@ -168,8 +167,7 @@ f72x_count <- function(df, pipeline, lazy = FALSE) {
   cpu <- pipeline(df, bump)
   cpu_calls <- calls
   calls <- 0L
-  t <- tbl_gpu(df)
-  if (lazy) t <- as_lazy(t)
+  t <- tbl_gpu(df, lazy = lazy)
   gpu <- tibble::as_tibble(collect(pipeline(t, bump)))
   list(cpu = tibble::as_tibble(cpu), cpu_calls = cpu_calls, gpu = gpu, gpu_calls = calls)
 }

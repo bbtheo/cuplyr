@@ -20,7 +20,7 @@ test_that("user code reads columns named like the internal fields, in every shap
   skip_if_no_gpu()
   df <- f04x_df()
   shapes <- list(
-    eager = tbl_gpu(df),
+    eager = tbl_gpu(df, lazy = FALSE),
     lazy = as_lazy(tbl_gpu(df)),
     pending = dplyr::filter(as_lazy(tbl_gpu(df)), i > 1L | is.na(i)),
     grouped = dplyr::group_by(tbl_gpu(df), schema)
@@ -42,6 +42,7 @@ test_that("user code reads columns named like the internal fields, in every shap
 
 test_that("package-internal code still reaches the raw fields", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
   gt <- dplyr::group_by(tbl_gpu(f04x_df()), schema)
   expect_true(inherits(gt$ptr, "externalptr"))
   expect_identical(gt$groups, "schema")

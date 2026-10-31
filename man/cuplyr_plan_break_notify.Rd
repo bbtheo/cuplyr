@@ -4,7 +4,13 @@
 \alias{cuplyr_plan_break_notify}
 \title{Notify about a plan break, gated by \code{options(cuplyr.plan_break = )}}
 \usage{
-cuplyr_plan_break_notify(verb, reason, expr = NA_character_, data)
+cuplyr_plan_break_notify(
+  verb,
+  reason,
+  expr = NA_character_,
+  data,
+  own_step = FALSE
+)
 }
 \arguments{
 \item{verb}{Character, the verb name}
@@ -14,6 +20,10 @@ cuplyr_plan_break_notify(verb, reason, expr = NA_character_, data)
 \item{expr}{Character, the expression that forced it, or \code{NA}}
 
 \item{data}{The lazy \code{tbl_gpu} whose plan is about to run}
+
+\item{own_step}{\code{TRUE} when \code{data} already holds the verb's own step (a join
+that has to check its rows at the verb), so the notice says the verb ran
+with its pending steps rather than that it ran them early.}
 }
 \value{
 \code{invisible(NULL)}

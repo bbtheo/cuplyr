@@ -155,6 +155,22 @@ ir_lit_from_r <- function(value, allow_vector = FALSE) {
   ir_lit(value = value, type = gpu_type_from_r(value), na = FALSE)
 }
 
+# `ir_lit_from_r()` for a value an expression evaluated to in R (a variable, a
+# folded column-free call). A value the GPU has no type for (an environment, a
+# function, a list, a complex or POSIXlt vector) is "unsupported" like any other
+# call the parser can't take: NULL, so the verb's CPU route lets dplyr give its
+# own result or error at the verb, in both modes. Left to the literal it would
+# be typed "UNKNOWN" and fail only when the plan runs.
+# @keywords internal
+ir_lit_or_unsupported <- function(value, allow_vector = FALSE) {
+  lit <- ir_lit_from_r(value, allow_vector = allow_vector)
+  if (identical(lit$type, "UNKNOWN")) {
+    fallback_cause("a value that is not an atomic vector the GPU can hold.")
+    return(NULL)
+  }
+  lit
+}
+
 # -----------------------------------------------------------------------------
 # Parsing: rlang quosure -> IR (or NULL for "unsupported, caller should
 # fall back")
@@ -1380,7 +1396,7 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       rlang::eval_tidy(rlang::new_quosure(expr, env)),
       error = function(e) stop(conditionMessage(e), call. = FALSE)
     )
-    return(ir_lit_from_r(val, allow_vector = allow_vector))
+    return(ir_lit_or_unsupported(val, allow_vector = allow_vector))
   }
 
   # Case 0: a quosure embedded INSIDE the expression tree (as opposed to
@@ -1435,7 +1451,7 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
         get(nm, envir = env, inherits = TRUE),
         error = function(e) stop("object '", nm, "' not found", call. = FALSE)
       )
-      return(ir_lit_from_r(val, allow_vector = allow_vector))
+      return(ir_lit_or_unsupported(val, allow_vector = allow_vector))
     }
   }
 
@@ -1444,7 +1460,7 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
     return(ir_lit_from_r(NULL))
   }
   if (is.atomic(expr) && length(expr) == 1) {
-    return(ir_lit_from_r(expr, allow_vector = allow_vector))
+    return(ir_lit_or_unsupported(expr, allow_vector = allow_vector))
   }
 
   # Case 6: call f(...).
@@ -1571,7 +1587,7 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       if (is.null(folded)) {
         return(NULL)
       }
-      return(ir_lit_from_r(folded$value, allow_vector = allow_vector))
+      return(ir_lit_or_unsupported(folded$value, allow_vector = allow_vector))
     }
 
     # (F88: the reason a CPU-fallback notice gives, recorded where it is true)
@@ -3450,7 +3466,9 @@ ir_parse_ntile <- function(expr, env, schema) {
     # dplyr counts a NaN as missing, and so does is.na() (F55).
     missing_ir <- ir_call("is.na", list(x_ir))
     indicator <- ir_call("if_else", list(missing_ir, ir_lit_from_r(0L), ir_lit_from_r(1L)))
-    len <- ir_call("sum", list(indicator))
+    # (a count of at most one per row: it can't leave the integer range, so a
+    # lazy mutate() needn't run at the verb for it, see window_spec_int_sum())
+    len <- ir_call("sum", list(indicator), meta = list(counts = TRUE))
   } else {
     rn <- ir_call("row_number", list())
     len <- ir_call("n", list())
@@ -5309,8 +5327,9 @@ type_window_sum <- function(arg_types) {
 
 # mutate()'s window sum(): like dplyr, the sum of an integer or logical is an
 # integer (F42). The GPU total is INT64; an overflow is flagged by gpu_window()
-# and handled by the caller (eager mutate() reruns the call on the CPU, a lazy
-# plan raises `cuplyr_error_sum_overflow`). Everything else stays double.
+# and handled by the caller (mutate() reruns the call on the CPU; a lazy table
+# only plans a BOOL8 sum, which raises `cuplyr_error_sum_overflow`: an INT32 sum
+# runs at the verb, F80). Everything else stays double.
 type_window_int_sum <- function(arg_types) {
   if (arg_types[1] %in% c("INT32", "BOOL8")) "INT32" else "FLOAT64"
 }

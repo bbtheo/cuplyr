@@ -17,10 +17,10 @@ Check if a tbl_gpu uses lazy execution
 }
 \examples{
 if (has_gpu()) {
-  eager_tbl <- tbl_gpu(mtcars)
-  is_lazy(eager_tbl)  # FALSE
-
-  lazy_tbl <- tbl_gpu(mtcars, lazy = TRUE)
+  lazy_tbl <- tbl_gpu(mtcars)
   is_lazy(lazy_tbl)   # TRUE
+
+  eager_tbl <- tbl_gpu(mtcars, lazy = FALSE)
+  is_lazy(eager_tbl)  # FALSE
 }
 }

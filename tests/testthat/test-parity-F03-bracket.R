@@ -19,8 +19,7 @@ f03_df <- function() {
 }
 
 f03_up <- function(df, lazy = FALSE) {
-  g <- tbl_gpu(df)
-  if (lazy) as_lazy(g) else g
+  tbl_gpu(df, lazy = lazy)
 }
 
 # `prep` turns the uploaded/oracle table into the real input (e.g. group_by()).

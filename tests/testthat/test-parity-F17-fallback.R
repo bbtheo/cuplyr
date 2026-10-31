@@ -20,7 +20,7 @@ f17_df <- function() {
 }
 
 f17_inputs <- function(df) {
-  list(eager = tbl_gpu(df), lazy = as_lazy(tbl_gpu(df)))
+  list(eager = tbl_gpu(df, lazy = FALSE), lazy = as_lazy(tbl_gpu(df)))
 }
 
 # An R function the GPU expression IR doesn't know, so any verb using it runs

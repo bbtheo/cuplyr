@@ -339,6 +339,15 @@ restore_set_op_factor_levels <- function(result, target_schema) {
   result
 }
 
+# A set operation's result is lazy when `x` or `y` is a lazy gibble (the
+# push_join() rule), eager otherwise. The verbs built from bind_rows() and
+# align_to_schema() materialize their inputs, whose helpers return eager
+# tables, so the mode is put back here.
+# @keywords internal
+set_op_mode <- function(result, x, y) {
+  result_mode_of_inputs(result, list(x, y))
+}
+
 #' Set operations on `tbl_gpu` tables
 #'
 #' GPU-native implementations of dplyr's row-set operations, composed
@@ -385,9 +394,9 @@ union.tbl_gpu <- function(x, y, ...) {
 
   if (chk$needs_fallback) {
     y <- fallback_materialize(y)
-    return(gpu_fallback("union", x, function(tbl) {
+    return(set_op_mode(gpu_fallback("union", x, function(tbl) {
       dplyr::union(tbl, collect_other_side(y))
-    }, reason = chk$fallback_reason, also = y))
+    }, reason = chk$fallback_reason, also = y), x, y))
   }
 
   x_aligned <- align_set_op_side(x, chk$target_schema, groups = x$groups)
@@ -397,7 +406,10 @@ union.tbl_gpu <- function(x, y, ...) {
   combined <- dplyr::ungroup(bind_rows(x_aligned, y_aligned))
   result <- dplyr::distinct(combined)
   result$groups <- x$groups
-  reset_frame_meta(restore_set_op_factor_levels(result, chk$target_schema), x)
+  set_op_mode(
+    reset_frame_meta(restore_set_op_factor_levels(result, chk$target_schema), x),
+    x, y
+  )
 }
 
 #' @rdname set-ops
@@ -413,9 +425,9 @@ union_all.tbl_gpu <- function(x, y, ...) {
 
   if (chk$needs_fallback) {
     y <- fallback_materialize(y)
-    return(gpu_fallback("union_all", x, function(tbl) {
+    return(set_op_mode(gpu_fallback("union_all", x, function(tbl) {
       dplyr::union_all(tbl, collect_other_side(y))
-    }, reason = chk$fallback_reason, also = y))
+    }, reason = chk$fallback_reason, also = y), x, y))
   }
 
   x_aligned <- align_set_op_side(x, chk$target_schema, groups = x$groups)
@@ -423,7 +435,10 @@ union_all.tbl_gpu <- function(x, y, ...) {
 
   result <- bind_rows(x_aligned, y_aligned)
   result$groups <- x$groups
-  reset_frame_meta(restore_set_op_factor_levels(result, chk$target_schema), x)
+  set_op_mode(
+    reset_frame_meta(restore_set_op_factor_levels(result, chk$target_schema), x),
+    x, y
+  )
 }
 
 # `result` (the ungrouped rows of a set operation) regrouped like `x`, `.drop`
@@ -450,9 +465,9 @@ intersect.tbl_gpu <- function(x, y, ...) {
 
   if (chk$needs_fallback) {
     y <- fallback_materialize(y)
-    return(gpu_fallback("intersect", x, function(tbl) {
+    return(set_op_mode(gpu_fallback("intersect", x, function(tbl) {
       dplyr::intersect(tbl, collect_other_side(y))
-    }, reason = chk$fallback_reason, also = y))
+    }, reason = chk$fallback_reason, also = y), x, y))
   }
 
   target_names <- chk$target_schema$names
@@ -462,7 +477,10 @@ intersect.tbl_gpu <- function(x, y, ...) {
   y_aligned <- align_set_op_side(y, chk$target_schema, groups = character())
 
   matched <- dplyr::semi_join(x_aligned, y_aligned, by = target_names, na_matches = "na")
-  reset_frame_meta(regroup_set_op(dplyr::distinct(matched), x), x)
+  set_op_mode(
+    reset_frame_meta(regroup_set_op(dplyr::distinct(matched), x), x),
+    x, y
+  )
 }
 
 #' @rdname set-ops
@@ -478,9 +496,9 @@ setdiff.tbl_gpu <- function(x, y, ...) {
 
   if (chk$needs_fallback) {
     y <- fallback_materialize(y)
-    return(gpu_fallback("setdiff", x, function(tbl) {
+    return(set_op_mode(gpu_fallback("setdiff", x, function(tbl) {
       dplyr::setdiff(tbl, collect_other_side(y))
-    }, reason = chk$fallback_reason, also = y))
+    }, reason = chk$fallback_reason, also = y), x, y))
   }
 
   target_names <- chk$target_schema$names
@@ -488,7 +506,10 @@ setdiff.tbl_gpu <- function(x, y, ...) {
   y_aligned <- align_set_op_side(y, chk$target_schema, groups = character())
 
   unmatched <- dplyr::anti_join(x_aligned, y_aligned, by = target_names, na_matches = "na")
-  reset_frame_meta(regroup_set_op(dplyr::distinct(unmatched), x), x)
+  set_op_mode(
+    reset_frame_meta(regroup_set_op(dplyr::distinct(unmatched), x), x),
+    x, y
+  )
 }
 
 #' @rdname set-ops
@@ -504,9 +525,9 @@ symdiff.tbl_gpu <- function(x, y, ...) {
 
   if (chk$needs_fallback) {
     y <- fallback_materialize(y)
-    return(gpu_fallback("symdiff", x, function(tbl) {
+    return(set_op_mode(gpu_fallback("symdiff", x, function(tbl) {
       dplyr::symdiff(tbl, collect_other_side(y))
-    }, reason = chk$fallback_reason, also = y))
+    }, reason = chk$fallback_reason, also = y), x, y))
   }
 
   target_names <- chk$target_schema$names
@@ -523,7 +544,10 @@ symdiff.tbl_gpu <- function(x, y, ...) {
   y_minus_x <- dplyr::distinct(dplyr::anti_join(y_aligned, x_aligned, by = target_names, na_matches = "na"))
 
   result <- regroup_set_op(bind_rows(x_minus_y, y_minus_x), x)
-  reset_frame_meta(restore_set_op_factor_levels(result, chk$target_schema), x)
+  set_op_mode(
+    reset_frame_meta(restore_set_op_factor_levels(result, chk$target_schema), x),
+    x, y
+  )
 }
 
 #' @rdname set-ops

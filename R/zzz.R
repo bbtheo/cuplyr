@@ -33,8 +33,6 @@ NULL
   # Set package options
   op <- options()
   op.cuplyr <- list(
-    cuplyr.verbose = FALSE,
-    cuplyr.lazy = TRUE,
     cuplyr.gpu_available = gpu_ok
   )
   toset <- !(names(op.cuplyr) %in% names(op))

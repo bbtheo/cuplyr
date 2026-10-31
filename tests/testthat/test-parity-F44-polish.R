@@ -36,7 +36,7 @@ test_that("tbl_gpu() keeps empty/NA names and select() picks named columns (eage
   for (nm in names(f44_name_cases)) {
     nms <- f44_name_cases[[nm]]
     df <- f44_names_df(nms)
-    g <- tbl_gpu(df)
+    g <- tbl_gpu(df, lazy = FALSE)
     expect_identical(names(g), names(df), info = nm)
 
     expected <- tibble::as_tibble(select(df, y))
@@ -144,8 +144,7 @@ test_that("count()/tally()/add_count()/add_tally() inform when `n` is already pr
     f <- cases[[nm]]
     ref <- f44_capture_msg(function() f(tibble::as_tibble(df)))
     for (lazy in c(FALSE, TRUE)) {
-      g <- tbl_gpu(df)
-      if (lazy) g <- as_lazy(g)
+      g <- tbl_gpu(df, lazy = lazy)
       got <- f44_capture_msg(function() collect(f(g)))
       info <- paste(nm, if (lazy) "lazy" else "eager")
       expect_s3_class(got$msg, "rlang_message")
@@ -190,8 +189,7 @@ test_that("mutate_all/mutate_if/transmute_all/transmute_if inform about ignored 
     f <- cases[[nm]]
     ref <- f44_capture_msg(function() f(tibble::as_tibble(df)))
     for (lazy in c(FALSE, TRUE)) {
-      g <- tbl_gpu(df)
-      if (lazy) g <- as_lazy(g)
+      g <- tbl_gpu(df, lazy = lazy)
       got <- f44_capture_msg(function() f(g))
       info <- paste(nm, if (lazy) "lazy" else "eager")
       expect_false(is.null(got$msg), info = info)
@@ -322,8 +320,7 @@ test_that("tidyselect inside mutate()/transmute() on a zero-column table never s
     p <- pipes[[i]]
     expected <- p(tibble::as_tibble(df))
     for (lazy in c(FALSE, TRUE)) {
-      g <- tbl_gpu(df)
-      if (lazy) g <- as_lazy(g)
+      g <- tbl_gpu(df, lazy = lazy)
       res <- tryCatch(collect(p(g)), error = function(e) e)
       if (!inherits(res, "error")) {
         expect_equal(tibble::as_tibble(res), expected, info = paste(i, lazy))

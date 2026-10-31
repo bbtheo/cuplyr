@@ -169,7 +169,7 @@ test_that("lazy plans built by the verbs optimize, explain and collect as with t
     rename = function(d) d |> mutate(z = x) |> rename(zz = z) |> filter(zz > 0.5),
     distinct = function(d) d |> mutate(z = g * 2L) |> distinct(z, .keep_all = TRUE),
     slice = function(d) d |> filter(x > 0.2) |> slice_head(n = 3),
-    join = function(d) d |> mutate(z = x + 1) |> left_join(other, by = "g", relationship = "many-to-one") |>
+    join = function(d) d |> mutate(z = x + 1) |> left_join(other, by = "g", relationship = "many-to-many") |>
       filter(z > 1.2),
     collapse = function(d) d |> mutate(z = x + 1) |> collapse() |> filter(z > 1.5) |> mutate(q = z * 2),
     by_summarise = function(d) d |> mutate(z = x * y) |> summarise(m = sum(z), .by = s)

@@ -270,7 +270,11 @@ filter_rowwise <- function(.data, dots, by_quo, .preserve, complement, call) {
   if (!is.null(shadowed)) {
     return(cpu(shadowed))
   }
-  rw <- rowwise_rewrite_dots(.data, dots, named = FALSE)
+  exact <- rowwise_exact_sums(.data, dots, FALSE, "filter")
+  if (!is.null(exact$now)) {
+    return(plan_back_to_lazy(filter_rowwise(exact$now, dots, by_quo, .preserve, complement, call)))
+  }
+  rw <- if (exact$rewritten) exact$rw else rowwise_rewrite_dots(.data, dots, named = FALSE)
   if (is.null(rw)) {
     return(rowwise_rerun(cpu, dots))
   }
@@ -554,6 +558,8 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # predicate (plain or window-derived) has removed a single row -- and
   # only afterward building/pushing ONE combined ast_filter node folding in
   # every dot's (possibly rewritten) predicate, in original dot order.
+  # (set when a lazy call runs at the verb, see the integer-sum rule below)
+  back_to_lazy <- FALSE
   if (length(window_idx) > 0) {
     window_exprs <- stats::setNames(
       parsed[window_idx],
@@ -586,12 +592,28 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     # in dplyr. dplyr makes only the overflowing groups' sums doubles; the
     # other groups' sums stay integers and arithmetic on them still overflows
     # to NA. An eager call therefore reruns on the CPU when any sum overflows
-    # (exact, and overflow is rare). A lazy plan lets a top-level sum come back
-    # FLOAT64 (inexact only when another group's in-range sum then meets
-    # overflowing integer arithmetic), and a sum nested in another window call
-    # (`max(x * sum(y))`), which a later stage reads as INT32, raises
-    # `cuplyr_error_sum_overflow` at collect() (filter_plan_window()).
+    # (exact, and overflow is rare).
     eager <- identical(.subset2(.data, "exec_mode"), "eager")
+    # F80: a lazy plan can't do that (its schema is fixed before the data is
+    # seen), so a lazy call with an INT32 sum runs at the verb as an eager one:
+    # the pending steps run now (a plan break, notified for the user's own
+    # steps, not the cur_group_id() helper), the rest of this call runs eagerly
+    # on the parsed plan (nothing is parsed or evaluated twice), and the result
+    # goes back to lazy with nothing pending, as mutate_window()'s does. The
+    # CPU rerun starts from the computed table, without the helper column. A
+    # window filter is an optimizer barrier, so no pruning is lost. (A BOOL8
+    # sum stays in the plan: it overflows only past 2^31 TRUE rows in a group,
+    # and then comes back FLOAT64 or, nested, raises
+    # `cuplyr_error_sum_overflow`; see filter_plan_window().)
+    if (!eager && any(vapply(unlist(lapply(plan$stages, `[[`, "specs"), recursive = FALSE),
+                             window_spec_int_sum, logical(1)))) {
+      .data <- plan_run_now(.data, if (complement) "filter_out" else "filter",
+                            "an integer sum() (result type depends on the data)",
+                            notice_data = fallback_data)
+      fallback_data <- if (isTRUE(cgid$used)) plan_now_columns(.data, real_orig_names) else .data
+      eager <- TRUE
+      back_to_lazy <- TRUE
+    }
     push_stages <- function(d) {
       for (stage in plan$stages) {
         if (length(stage$pre) > 0) {
@@ -606,8 +628,9 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       staged <- retry_on_sum_overflow(function() list(data = push_stages(.data)),
                                       function() NULL)
       if (is.null(staged)) {
-        return(filter_window_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement,
-                                      reason = "an integer sum() overflowed in a window predicate; dplyr widens only the overflowing groups."))
+        res <- filter_window_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement,
+                                      reason = "an integer sum() overflowed in a window predicate; dplyr widens only the overflowing groups.")
+        return(if (back_to_lazy) plan_back_to_lazy(res) else res)
       }
       .data <- staged$data
     } else {
@@ -720,7 +743,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     .data <- push_op(.data, ast_select(input_node(.data), real_orig_names))
   }
 
-  .data
+  if (back_to_lazy) plan_back_to_lazy(.data) else .data
 }
 
 # Internal: plan + validate the window stages for filter()'s window-bearing
@@ -758,12 +781,13 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
 # @keywords internal
 filter_plan_window <- function(exprs, schema, group_cols) {
   # sums = "lenient": an integer window sum() is INT32 (checked integer
-  # arithmetic on it, as in dplyr). A lazy call pushes the window nodes with
-  # on_sum_overflow = "double", so a top-level sum becomes a double only when
-  # it overflows (F42); the temp columns never reach the output schema. A sum
-  # nested in another window call can't change type mid-plan: its spec raises
-  # on overflow instead. An eager call reruns on the CPU on any overflow (see
-  # the caller).
+  # arithmetic on it, as in dplyr). An eager call reruns on the CPU on any
+  # overflow, and a lazy call with an INT32 sum runs as an eager one (see the
+  # caller). Only a lazy BOOL8 sum stays in the plan: its window node is pushed
+  # with on_sum_overflow = "double", so a top-level sum becomes a double only
+  # when it overflows (F42); the temp columns never reach the output schema. A
+  # sum nested in another window call can't change type mid-plan: its spec
+  # raises on overflow instead.
   plan <- tryCatch(plan_window_stages(exprs, schema, group_cols, sums = "lenient"),
                    error = function(e) NULL)
   if (is.null(plan)) {

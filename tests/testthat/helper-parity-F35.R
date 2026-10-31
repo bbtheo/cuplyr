@@ -8,7 +8,7 @@
 f35_inputs <- function(tables, mode) {
   switch(mode,
     dplyr = lapply(tables, tibble::as_tibble),
-    eager = lapply(tables, tbl_gpu),
+    eager = lapply(tables, tbl_gpu, lazy = FALSE),
     lazy = lapply(tables, tbl_gpu, lazy = TRUE),
     mixed = Map(function(t, i) tbl_gpu(t, lazy = i %% 2L == 1L),
                 tables, seq_along(tables))

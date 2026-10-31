@@ -45,12 +45,16 @@
 #'   value), or `NULL` if not applicable/not supplied
 #' @param na_rm Logical scalar, `FALSE` unless a future wave adds an
 #'   `na_rm=`-aware window op
+#' @param input_type (F80) GPU type string of an integer `sum()`'s argument
+#'   (`"INT32"` or `"BOOL8"`), `NA_character_` for every other call; a lazy
+#'   `mutate()` runs a call holding an INT32 sum at the verb (see
+#'   `window_spec_int_sum()`)
 #' @return A list with exactly these named fields
 #' @keywords internal
 window_spec <- function(output_col, fn, value_col = NA_character_,
                          order_cols = character(), order_desc = logical(),
                          output_type, n = NA_integer_, default = NULL,
-                         na_rm = FALSE) {
+                         na_rm = FALSE, input_type = NA_character_) {
   list(
     output_col = output_col,
     fn = fn,
@@ -60,8 +64,16 @@ window_spec <- function(output_col, fn, value_col = NA_character_,
     output_type = output_type,
     n = n,
     default = default,
-    na_rm = na_rm
+    na_rm = na_rm,
+    input_type = input_type
   )
+}
+
+# TRUE iff `spec` is a window sum() of an INT32 argument: dplyr's integer sum,
+# which is a double when it leaves R's integer range (F80).
+# @keywords internal
+window_spec_int_sum <- function(spec) {
+  identical(spec$fn, "sum") && identical(unname(spec$input_type), "INT32")
 }
 
 # -----------------------------------------------------------------------------
@@ -226,7 +238,8 @@ extract_one_window_call <- function(node, schema, state, key = NULL) {
     output_type = out_type,
     n = if (is.null(node$meta$n)) NA_integer_ else node$meta$n,
     default = node$meta$default,
-    na_rm = isTRUE(node$meta$na_rm)
+    na_rm = isTRUE(node$meta$na_rm),
+    input_type = if (int_sum && !isTRUE(node$meta$counts)) unname(ir_infer_type(node$args[[1]], schema)) else NA_character_
   )
   # "lenient" (filter(), whose window nodes are flagged `on_sum_overflow =
   # "double"`): a sum that feeds a later stage (it sits inside another window

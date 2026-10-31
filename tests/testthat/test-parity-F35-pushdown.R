@@ -171,6 +171,34 @@ test_that("filter on suffixed columns of a self-join", {
 
 # ---- pushdown stays narrow: the safe cases still push -----------------------
 
+test_that("a join with a data-reading check runs at the verb, like dplyr", {
+  skip_if_no_gpu()
+  lx <- tbl_gpu(px, lazy = TRUE)
+  ly <- tbl_gpu(py, lazy = TRUE)
+
+  # data that fails the check: dplyr's error at the verb
+  for (join in list(
+    function() inner_join(lx, ly, by = "k", unmatched = "error"),
+    function() left_join(lx, ly, by = "k", unmatched = "error"),
+    function() inner_join(lx, ly, by = "k", relationship = "one-to-one")
+  )) {
+    expect_error(join(), class = "dplyr_error_join")
+  }
+
+  # data that passes it: the join has run (nothing pending), and a filter
+  # after it matches dplyr
+  x <- tibble::tibble(k = 1:3, a = c(10, 20, 30))
+  y <- tibble::tibble(k = 1:3, b = c("p", "q", "r"))
+  joined <- inner_join(tbl_gpu(x, lazy = TRUE), tbl_gpu(y, lazy = TRUE), by = "k",
+                       unmatched = "error")
+  expect_false(has_pending_ops(joined))
+  expect_true(is_lazy(joined))
+  expect_equal(
+    tibble::as_tibble(collect(filter(joined, a > 15, b != "q"))),
+    tibble::as_tibble(filter(inner_join(x, y, by = "k", unmatched = "error"), a > 15, b != "q"))
+  )
+})
+
 test_that("pushdown is blocked only where it is unsafe", {
   skip_if_no_gpu()
   lx <- tbl_gpu(px, lazy = TRUE)
@@ -189,15 +217,24 @@ test_that("pushdown is blocked only where it is unsafe", {
     expect_equal(p, list(above = TRUE, left = TRUE, right = FALSE), info = m)
   }
 
-  # unmatched = "error": nothing pushed
-  p <- f35_plan(both(inner_join(lx, ly, by = "k", unmatched = "error")))
-  expect_equal(p, list(above = TRUE, left = FALSE, right = FALSE))
-  p <- f35_plan(lx |> left_join(ly, by = "k", unmatched = "error") |> filter(a > 15))
-  expect_equal(p, list(above = TRUE, left = FALSE, right = FALSE))
-
-  # constraining relationship: nothing pushed; many-to-many: both pushed
-  p <- f35_plan(both(inner_join(lx, ly, by = "k", relationship = "one-to-one")))
-  expect_equal(p, list(above = TRUE, left = FALSE, right = FALSE))
+  # unmatched = "error" and a constraining relationship check the joined rows,
+  # which dplyr raises at the verb: the verb computes such a join (F80), so a
+  # filter after it is a plain filter on a table with nothing pending, and the
+  # optimizer rule below only guards an AST that reaches it some other way.
+  # (A node built with the check set by hand, off a many-to-many join:)
+  checked <- function(field, value) {
+    ops <- .subset2(lx |> inner_join(ly, by = "k", relationship = "many-to-many") |>
+                      filter(a > 15, b != "q"), "lazy_ops")
+    ops$input[[field]] <- value
+    f35_plan(list(lazy_ops = ops))
+  }
+  expect_equal(checked("unmatched", c("error", "error")),
+               list(above = TRUE, left = FALSE, right = FALSE))
+  for (rel in c("one-to-one", "one-to-many", "many-to-one")) {
+    expect_equal(checked("relationship", rel),
+                 list(above = TRUE, left = FALSE, right = FALSE), info = rel)
+  }
+  # many-to-many: both pushed
   p <- f35_plan(both(inner_join(lx, ly, by = "k", relationship = "many-to-many")))
   expect_equal(p, list(above = FALSE, left = TRUE, right = TRUE))
 

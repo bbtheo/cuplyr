@@ -2,8 +2,7 @@
 # acceptance tests pin), `[[` error calls, bind_cols() groups after repair.
 
 r4_up <- function(df, lazy) {
-  g <- tbl_gpu(df)
-  if (lazy) as_lazy(g) else g
+  tbl_gpu(df, lazy = lazy)
 }
 
 r4_df <- function() {

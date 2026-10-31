@@ -10,9 +10,10 @@
 # - A3: sum() of an integer or logical column is integer (0L for 0 rows or
 #   an all-NA group with na.rm, NA_integer_ for NA without na.rm). When a sum
 #   leaves R's integer range (+-(2^31 - 1)), base R returns a double, and one
-#   overflowing group makes the whole column double. cuplyr's lazy mode keeps
-#   a static integer schema and raises `cuplyr_error_sum_overflow` instead
-#   (design decision, see the F34 brief).
+#   overflowing group makes the whole column double. A lazy table (F80) runs
+#   a summarise() with an INT32 sum() at the verb, as an eager one does, so the
+#   type comes from the data; only a BOOL8 sum stays a pending step, with a
+#   static integer schema (`cuplyr_error_sum_overflow` past 2^31 TRUE rows).
 #
 # Grouped summarise row order is cudf hash order in cuplyr (F33), hence
 # arrange_by. expect_equal() does not tell integer from double, or a factor
@@ -214,14 +215,20 @@ test_that("A3: an overflowing integer sum is double in eager mode, as in dplyr",
   f34_parity(neg, function(d) d |> summarise(s = sum(v)), lazy = FALSE)
 })
 
-test_that("A3: an overflowing integer sum in a lazy plan is a classed error", {
+test_that("A3: an overflowing integer sum on a lazy table is dplyr's double (the summarise runs at the verb)", {
   skip_if_no_gpu()
+  f34_parity(f34_big(), function(d) d |> summarise(s = sum(v)))
+  f34_parity(f34_big(), function(d) d |> group_by(g) |> summarise(s = sum(v)), arrange_by = "g")
+  f34_parity(f34_big(), function(d) {
+    d |> group_by(g) |> summarise(s = sum(v)) |> mutate(t = s + 1L)
+  }, arrange_by = "g")
   lz <- as_lazy(tbl_gpu(f34_big()))
-  expect_error(collect(summarise(lz, s = sum(v))), class = "cuplyr_error_sum_overflow")
-  expect_error(
-    lz |> group_by(g) |> summarise(s = sum(v)) |> mutate(t = s + 1L) |> collect(),
-    class = "cuplyr_error_sum_overflow"
-  )
+  out <- lz |> filter(v > 0L) |> summarise(s = sum(v))
+  expect_true(is_lazy(out))
+  expect_false(has_pending_ops(out))
+  # a BOOL8 sum stays a pending step
+  lb <- as_lazy(tbl_gpu(data.frame(g = c(1, 1, 2), l = c(TRUE, FALSE, TRUE))))
+  expect_true(has_pending_ops(summarise(lb, s = sum(l))))
 })
 
 # Added after round 1 (review B1): a reducer whose length-1 result feeds

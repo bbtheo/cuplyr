@@ -488,6 +488,7 @@ test_that("mutate() floor(int_col) promotes to double like dplyr (lazy)", {
 
 test_that("mutate() INT32 arithmetic overflow is NA with a warning, like dplyr", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
   # R gives NA with the warning "NAs produced by integer overflow" (F42; the
   # F42 acceptance tests cover the full contract). -2^31 is R's NA_integer_,
   # so .Machine$integer.max + 2L must be NA too, not a wrapped -2147483647L.

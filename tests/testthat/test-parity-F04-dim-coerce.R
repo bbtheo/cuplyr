@@ -16,8 +16,7 @@ f04d_df <- function() {
 }
 
 f04d_up <- function(df = f04d_df(), lazy = FALSE) {
-  g <- tbl_gpu(df)
-  if (lazy) as_lazy(g) else g
+  tbl_gpu(df, lazy = lazy)
 }
 
 f04d_no_exec <- function(expr) {

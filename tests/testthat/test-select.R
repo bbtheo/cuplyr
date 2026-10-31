@@ -218,6 +218,7 @@ test_that("select() result stays on GPU", {
 
 test_that("select() creates new GPU allocation", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
 
   gpu_df <- tbl_gpu(mtcars)
   selected <- dplyr::select(gpu_df, mpg, cyl)

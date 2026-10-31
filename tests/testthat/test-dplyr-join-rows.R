@@ -84,7 +84,7 @@ expect_join_condition_matches_dplyr <- function(cuplyr_expr, dplyr_expr) {
 compare_multiple_join <- function(left_df, right_df, join_fn, by, ...) {
   expected <- join_fn(left_df, right_df, by = by, ...)
 
-  eager <- join_fn(tbl_gpu(left_df), tbl_gpu(right_df), by = by, ...) |>
+  eager <- join_fn(tbl_gpu(left_df, lazy = FALSE), tbl_gpu(right_df, lazy = FALSE), by = by, ...) |>
     collect()
   lazy <- join_fn(tbl_gpu(left_df, lazy = TRUE), tbl_gpu(right_df, lazy = TRUE),
                   by = by, ...) |>

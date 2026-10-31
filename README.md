@@ -23,7 +23,7 @@ regions <- data.frame(
   manager = c("Ana", "Ben", "Chi", "Dev")
 )
 
-tbl_gpu(sales_data, lazy = TRUE) |>
+tbl_gpu(sales_data) |>
   filter(year >= 2020, amount > 0) |>
   mutate(revenue = amount * price) |>
   group_by(region, quarter) |>
@@ -37,7 +37,7 @@ tbl_gpu(sales_data, lazy = TRUE) |>
 
 cuplyr translates dplyr operations into cuDF execution on NVIDIA GPUs. It follows the same backend pattern as dbplyr: write standard R code, execute on GPU hardware. This approach can provide significant speedups on larger datasets (typically >1M rows) without requiring major code changes.
 
-`tbl_gpu()` makes cuplyr's GPU tables, called gibbles (they print as `# A gibble:` followed by the dimensions). `gibble()`, `as_gibble()` and `is_gibble()` are aliases of `tbl_gpu()`, `as_tbl_gpu()` and `is_tbl_gpu()`; the class stays `tbl_gpu`. The CRAN package gibble also exports a `gibble()`: if both are attached, the last one attached masks the other, and `cuplyr::gibble()` always works.
+`tbl_gpu()` makes cuplyr's GPU tables, called gibbles (they print as `# A gibble:` followed by the dimensions, `# A gibble [lazy]:` for a lazy table with pending steps). `gibble()`, `as_gibble()` and `is_gibble()` are aliases of `tbl_gpu()`, `as_tbl_gpu()` and `is_tbl_gpu()`; the class stays `tbl_gpu`. The CRAN package gibble also exports a `gibble()`: if both are attached, the last one attached masks the other, and `cuplyr::gibble()` always works.
 
 **Built on [RAPIDS cuDF](https://rapids.ai/)**: cuDF is an open-source GPU DataFrame library developed by NVIDIA's RAPIDS team. It provides optimized CUDA kernels for data manipulation operations, backed by Apache Arrow's columnar memory format. cuplyr provides an R interface to this execution engine.
 
@@ -57,26 +57,37 @@ This is experimental software under active development. Breaking changes should 
 - `group_by()` + `summarise()` – grouped aggregations (`sum`, `mean`, `min`, `max`, `n`)
 - `left_join()`, `right_join()`, `inner_join()`, `full_join()` – GPU joins on key columns
 - `collect()` – transfer results back to R
-- `compute()` – execute lazy operations, keep on GPU
-- `tbl_gpu(..., lazy = TRUE)` – enable lazy evaluation with AST optimization
+- `compute()` – execute pending operations, keep on GPU
+- `tbl_gpu(..., lazy = FALSE)` – run each verb at once (eager) instead of the default lazy plan
 
-### Eager vs lazy
+### Lazy by default, eager on request
 
-`tbl_gpu()` is eager by default: each verb runs on the GPU as soon as you call it and returns a gibble. In lazy mode each verb only records a step. `collect()` (result to R) or `compute()` (result stays on the GPU) then optimizes the recorded plan, runs it, and frees every intermediate column.
+`tbl_gpu()` is lazy by default. Each verb checks its arguments, works out the new schema and records a step; nothing runs on the GPU until you need the data. `collect()` (result to R) or `compute()` (result stays on the GPU) optimizes the recorded plan, runs it, and frees every intermediate column. Errors in your code (a missing column, a type error) still appear at the verb, not at `collect()`.
 
-Use lazy for pipelines, especially on big tables or inside loops. An eager pipeline leaves its intermediates on the GPU until R's next `gc()`. In a loop they pile up, and once they fill the card cuplyr's out-of-memory handler has to run: on 5e7 rows, five back-to-back runs of a five-verb pipeline took 69 ms each eager and 19 ms each lazy. The eager figure depends on what the memory pool already holds: two earlier runs of the same loop took 145 and 155 ms each eager. Before the card fills, eager stays faster: at 2.5e7 rows, five back-to-back eager runs left about 4 GB behind and took 9.6 ms each, against 11 ms lazy. The optimizer also drops columns the result never uses. With clean GPU memory lazy is level with eager on small and mid-sized tables (3.10 ms eager, 3.00 lazy at 1e3 rows; 3.38 and 3.20 at 1e6) and slower on big ones: 1.2 ms at 1e7 rows (6.20 ms lazy against 5.00 eager) and 1.5 ms at 5e7. Use eager for interactive exploration and single calls, where you want each result at once.
+Printing a lazy table with pending steps runs the plan and shows the first rows, under a `# A gibble [lazy]:` header. The table stays lazy and keeps nothing: printing it twice runs the plan twice, so `compute()` it first if you want to look at it repeatedly. At 1e7 rows, `print()` of a five-verb pipeline took about as long as `collect()` of it (6.6 against 5.9 ms median of 5, for a 100-row result).
+
+Why lazy is the default: it holds no GPU memory between calls, and a single pipeline takes within a millisecond of eager. Each number below is the median of 15 runs (single) or 7 runs of five calls (back to back, ms per call) of a five-verb pipeline (`filter() |> mutate() |> group_by() |> summarise() |> arrange() |> collect()`) with the memory pool cleaned before each run; on this machine (RTX 5070):
+
+| rows | eager ms | lazy ms | five back to back, eager ms each | five back to back, lazy ms each |
+|---|---|---|---|---|
+| 1e3 | 2.66 | 2.53 | 2.17 | 2.07 |
+| 1e6 | 2.99 | 2.85 | 2.41 | 2.28 |
+| 1e7 | 5.22 | 5.90 | 4.76 | 5.25 |
+| 5e7 | 18.7 | 19.6 | 66.7 | 18.5 |
+
+So with clean GPU memory lazy is level with eager, or a little faster, up to 1e6 rows, and 0.7 to 1.0 ms slower on a single pipeline at 1e7 and 5e7 rows (0.5 ms at 1e7 when five run back to back). The difference is that an eager pipeline leaves its intermediates on the GPU until R's next `gc()`. If you never call `gc()`, they pile up, and once they fill the card cuplyr's out-of-memory handler has to run: at 5e7 rows five eager pipelines run back to back, with no `gc()` between them, took 66.7 ms each against 18.5 ms lazy. The optimizer also drops columns the result never uses. (`vignette("performance")` has the detailed tables, timed with a plain `gc()` before each batch rather than a cleaned pool, and the cases where the GPU loses to dplyr.)
+
+To run each verb at once instead, which can be easier to step through:
 
 ```r
 # Per table
-lazy_tbl <- tbl_gpu(mtcars, lazy = TRUE)
+eager_tbl <- tbl_gpu(mtcars, lazy = FALSE)
 
 # Or for every table created afterwards
-old <- options(cuplyr.exec_mode = "lazy")
+options(cuplyr.exec_mode = "eager")   # or the environment variable CUPLYR_EXEC_MODE=eager
 
 # Pending steps, then the plan the optimizer will run
-lazy_tbl |> filter(mpg > 20) |> mutate(kpl = mpg * 0.425) |> select(cyl, kpl) |> explain()
-
-options(old)
+tbl_gpu(mtcars) |> filter(mpg > 20) |> mutate(kpl = mpg * 0.425) |> select(cyl, kpl) |> explain()
 ```
 
 The optimizer applies, in this order:

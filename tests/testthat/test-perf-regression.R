@@ -450,7 +450,7 @@ test_that("perf: fused_pipeline_lazy", {
   skip_if_no_gpu()
 
   expect_no_perf_regression("fused_pipeline_lazy", function() {
-    tbl_gpu(perf_big_df) |>
+    tbl_gpu(perf_big_df, lazy = FALSE) |>
       as_lazy() |>
       dplyr::filter(x > 0.1) |>
       dplyr::mutate(a = x + y, b = a * z) |>
@@ -472,7 +472,7 @@ test_that("perf: transfer_roundtrip", {
   skip_if_no_gpu()
 
   expect_no_perf_regression("transfer_roundtrip", function() {
-    tbl_gpu(perf_big_df) |>
+    tbl_gpu(perf_big_df, lazy = FALSE) |>
       collect()
   }, calibration = "transfer")
 })

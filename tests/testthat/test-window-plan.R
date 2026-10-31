@@ -180,7 +180,7 @@ test_that("plan_window_stages() output shape matches section 1.2 exactly", {
   expect_named(
     spec,
     c("output_col", "fn", "value_col", "order_cols", "order_desc",
-      "output_type", "n", "default", "na_rm")
+      "output_type", "n", "default", "na_rm", "input_type")  # (input_type: F80)
   )
   expect_equal(spec$fn, "mean")
 
