@@ -86,7 +86,8 @@
 #' width 1001 with 1% `NA`) and on thousands of small groups (several times
 #' slower). If it is requested but data.table is missing or too
 #' old, the exact engine is used and a message says so once per session. Any
-#' other value of the option is an error. `data.table::frollmedian()` written
+#' other value of the option warns once (class `cuplyr_warning_invalid_option`)
+#' and the exact engine is used; see [cuplyr-options]. `data.table::frollmedian()` written
 #' inside `mutate()` keeps data.table's own result.
 #'
 #' The internal option `cuplyr.roll_path` (else the environment variable
@@ -137,7 +138,7 @@ roll_median <- function(x, n, na.rm = FALSE) {
   roll_check_n(n)
   n <- as.integer(n)
   nx <- length(x)
-  engine <- roll_median_engine() # an invalid option errors even on short input
+  engine <- roll_median_engine() # an invalid option warns even on short input
   if (nx == 0 || n > nx) {
     return(rep(NA_real_, nx))
   }
@@ -156,19 +157,23 @@ roll_median <- function(x, n, na.rm = FALSE) {
 
 # Which engine roll_median() uses: the option cuplyr.roll_median, else the
 # environment variable CUPLYR_ROLL_MEDIAN, read per call (like
-# roll_path_option()). "exact" (the default) or "frollmedian".
+# roll_path_option()). "exact" (the default) or "frollmedian"; an invalid value
+# warns once and means "exact" (registry: R/options.R).
 roll_median_engine <- function() {
+  # Per group, so the valid and unset paths cost what a bare getOption() does
+  # (like resolve_exec_mode()); anything else goes to the registry, which warns
+  # once about an invalid value and gives "exact".
   opt <- getOption("cuplyr.roll_median")
-  if (is.null(opt)) opt <- Sys.getenv("CUPLYR_ROLL_MEDIAN", "")
-  if (identical(opt, "")) {
-    return("exact")
+  if (is.null(opt)) {
+    opt <- Sys.getenv("CUPLYR_ROLL_MEDIAN", "")
+    if (identical(opt, "")) {
+      return("exact")
+    }
   }
-  if (!is.character(opt) || length(opt) != 1 || is.na(opt) ||
-      !opt %in% c("exact", "frollmedian")) {
-    stop("`cuplyr.roll_median` (or CUPLYR_ROLL_MEDIAN) must be \"exact\" or ",
-         "\"frollmedian\", not ", paste(deparse(opt), collapse = " "), ".", call. = FALSE)
+  if (is.character(opt) && length(opt) == 1L && opt %in% cuplyr_roll_medians) {
+    return(opt)
   }
-  opt
+  cuplyr_opt("roll_median")
 }
 
 # Per-session state of the opt-in engine: `noted` is the one-time message flag
@@ -192,17 +197,18 @@ roll_median_note_exact <- function() {
 # option cuplyr.roll_path, else the environment variable CUPLYR_ROLL_PATH,
 # read when a plan is lowered (like cuplyr.memory_pool in R/gpu-memory.R).
 roll_path_option <- function() {
+  # The same fast path as roll_median_engine().
   opt <- getOption("cuplyr.roll_path")
-  if (is.null(opt)) opt <- Sys.getenv("CUPLYR_ROLL_PATH", "")
-  if (identical(opt, "")) {
-    return("auto")
+  if (is.null(opt)) {
+    opt <- Sys.getenv("CUPLYR_ROLL_PATH", "")
+    if (identical(opt, "")) {
+      return("auto")
+    }
   }
-  if (!is.character(opt) || length(opt) != 1 || is.na(opt) ||
-      !opt %in% c("auto", "scans", "cudf")) {
-    stop("`cuplyr.roll_path` (or CUPLYR_ROLL_PATH) must be \"auto\", \"scans\" or ",
-         "\"cudf\", not ", paste(deparse(opt), collapse = " "), ".", call. = FALSE)
+  if (is.character(opt) && length(opt) == 1L && opt %in% cuplyr_roll_paths) {
+    return(opt)
   }
-  opt
+  cuplyr_opt("roll_path")
 }
 
 # data.table gained frollmedian() in 1.18.0; 1.18.4 is the release its output

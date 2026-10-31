@@ -321,7 +321,8 @@ result <- eager_tbl |>
 
 To get eager tables everywhere, set `options(cuplyr.exec_mode = "eager")` or the
 environment variable `CUPLYR_EXEC_MODE=eager`; the `lazy =` argument of
-`tbl_gpu()` wins over both.
+`tbl_gpu()` wins over both. `cuplyr_options()` lists every cuplyr option with the
+value in use; `?"cuplyr-options"` documents them.
 
 ## Controlling Execution
 

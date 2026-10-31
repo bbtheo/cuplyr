@@ -264,16 +264,24 @@ test_that("F66: the default engine never shows the fallback message", {
   expect_no_message(roll_median(c(1, 2, 3), 2))
 })
 
-test_that("F66: an invalid cuplyr.roll_median value is an error naming the option", {
+test_that("F66: an invalid cuplyr.roll_median value warns, naming the option, and the exact engine runs", {
   withr::local_envvar(CUPLYR_ROLL_MEDIAN = NA)
-  for (bad in list("fast", NA_character_, c("exact", "frollmedian"), 1, TRUE)) {
+  # An invalid value warns once per session; NA, 1 and TRUE may have been used
+  # by another file, so forget what was warned about before each one.
+  forget <- function() rm(list = ls(cuplyr_opt_state, all.names = TRUE), envir = cuplyr_opt_state)
+  for (bad in list("fast-f66a", NA_character_, c("exact", "frollmedian"), 1, TRUE)) {
+    forget()
     withr::local_options(cuplyr.roll_median = bad)
-    expect_error(roll_median(c(1, 2, 3), 2), "cuplyr.roll_median", fixed = TRUE,
-                 info = paste(deparse(bad), collapse = " "))
+    expect_warning(res <- roll_median(c(1, 2, 3), 2), "cuplyr.roll_median", fixed = TRUE,
+                   class = "cuplyr_warning_invalid_option",
+                   info = paste(deparse(bad), collapse = " "))
+    expect_identical(res, c(NA, 1.5, 2.5))
   }
   withr::local_options(cuplyr.roll_median = NULL)
-  withr::local_envvar(CUPLYR_ROLL_MEDIAN = "bogus")
-  expect_error(roll_median(c(1, 2, 3), 2), "cuplyr.roll_median", fixed = TRUE)
+  withr::local_envvar(CUPLYR_ROLL_MEDIAN = "bogus-f66a")
+  expect_warning(res <- roll_median(c(1, 2, 3), 2), "cuplyr.roll_median", fixed = TRUE,
+                 class = "cuplyr_warning_invalid_option")
+  expect_identical(res, c(NA, 1.5, 2.5))
 })
 
 # -----------------------------------------------------------------------------

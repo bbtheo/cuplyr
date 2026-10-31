@@ -1,11 +1,18 @@
 # F66 round 2: details of roll_median()'s engine selection that the
 # acceptance tests (test-parity-F66-median-exact.R) do not pin.
 
-test_that("F66: an invalid cuplyr.roll_median errors on short and empty input too", {
+test_that("F66: an invalid cuplyr.roll_median warns on short and empty input too", {
   withr::local_envvar(CUPLYR_ROLL_MEDIAN = NA)
-  withr::local_options(cuplyr.roll_median = "fast")
-  expect_error(roll_median(c(1, 2), 5), "cuplyr.roll_median", fixed = TRUE)
-  expect_error(roll_median(numeric(0), 3), "cuplyr.roll_median", fixed = TRUE)
+  withr::local_options(cuplyr.roll_median = "fast-f66b")
+  expect_warning(res <- roll_median(c(1, 2), 5), "cuplyr.roll_median", fixed = TRUE,
+                 class = "cuplyr_warning_invalid_option")
+  expect_identical(res, c(NA_real_, NA_real_))
+  # warned once for this value: the empty input is silent but still works
+  expect_no_warning(res <- roll_median(numeric(0), 3))
+  expect_identical(res, numeric(0))
+  withr::local_options(cuplyr.roll_median = "fast-f66c")
+  expect_warning(roll_median(numeric(0), 3), "cuplyr.roll_median", fixed = TRUE,
+                 class = "cuplyr_warning_invalid_option")
 })
 
 test_that("F66: roll_has_frollmedian() computes the data.table check once per session", {

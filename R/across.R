@@ -1435,7 +1435,7 @@ check_across_predicate_piece <- function(piece, col, env, schema) {
     schema$types <- c(schema$types, "INT32")
   }
   # (F88: a probe; the dot's own parse later records any cause)
-  type <- fallback_probe(tryCatch(suppressWarnings({
+  type <- fallback_probe(tryCatch(suppress_probe_warnings({
     ir <- ir_parse_quo(rlang::new_quosure(piece, env), schema)
     if (is.null(ir)) NULL else ir_infer_type(ir, schema)
   }), error = function(e) NULL))
@@ -1851,7 +1851,7 @@ across_infer_output <- function(quo, run) {
 # @keywords internal
 across_infer_parsed <- function(quo, run, unknown) {
   expr <- rlang::quo_get_expr(quo)
-  tryCatch(suppressWarnings({
+  tryCatch(suppress_probe_warnings({
     ir <- ir_parse_quo(quo, run)
     if (is.null(ir) || identical(ir_factor_rule(ir, run), "cpu")) {
       return(unknown)

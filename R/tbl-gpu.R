@@ -19,7 +19,8 @@
 #'   }
 #'   The default can be changed with `options(cuplyr.exec_mode = "eager")` or
 #'   the environment variable `CUPLYR_EXEC_MODE=eager`; the argument beats
-#'   the option, which beats the variable.
+#'   the option, which beats the variable. An invalid option value warns once
+#'   and the default is used. All options are listed on [cuplyr-options].
 #'
 #' @return A `tbl_gpu` object containing:
 #'   \itemize{
@@ -508,20 +509,23 @@ resolve_exec_mode <- function(explicit = NULL) {
     }
   }
 
-  # Session option (second priority)
+  # Session option (second priority), then the environment variable (third).
+  # The valid path is one getOption() and at most one Sys.getenv(); anything
+  # else goes to the registry (R/options.R), which warns once about an invalid
+  # value and gives the default, "lazy".
   opt <- getOption("cuplyr.exec_mode")
-  if (!is.null(opt) && opt %in% c("lazy", "eager")) {
+  if (is.null(opt)) {
+    env <- Sys.getenv("CUPLYR_EXEC_MODE", unset = "")
+    if (identical(env, "")) {
+      return("lazy")
+    }
+    if (env %in% cuplyr_exec_modes) {
+      return(env)
+    }
+  } else if (is.character(opt) && length(opt) == 1L && opt %in% cuplyr_exec_modes) {
     return(opt)
   }
-
-  # Environment variable (third priority)
-  env <- Sys.getenv("CUPLYR_EXEC_MODE", unset = "")
-  if (env %in% c("lazy", "eager")) {
-    return(env)
-  }
-
-  # Default: lazy
-  "lazy"
+  cuplyr_opt("exec_mode")
 }
 
 #' Test if an object is a GPU table

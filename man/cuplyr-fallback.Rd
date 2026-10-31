@@ -2,8 +2,6 @@
 % Please edit documentation in R/execute.R
 \name{cuplyr-fallback}
 \alias{cuplyr-fallback}
-\alias{cuplyr.fallback}
-\alias{cuplyr.plan_break}
 \title{CPU fallbacks and plan breaks: what cuplyr tells you, and how to hear it}
 \description{
 cuplyr runs a dplyr verb on the GPU whenever it can. Two things can happen
@@ -62,7 +60,8 @@ warning of class \code{cuplyr_warning_plan_break}); \code{"warning"} is an alias
 Any other value of either option (including \code{"error"} for
 \code{cuplyr.plan_break}) warns once per session and value, with class
 \code{cuplyr_warning_invalid_option} (fields \code{option} and \code{value}), and the
-default (\code{"silent"}) is used.
+default (\code{"silent"}) is used. All cuplyr options are listed on
+\link{cuplyr-options}.
 }
 
 \examples{
@@ -81,5 +80,5 @@ options(cuplyr.fallback = "warn", cuplyr.plan_break = "warn")
 }
 }
 \seealso{
-\code{\link[=cuplyr_fallback_notify]{cuplyr_fallback_notify()}}, \link{fallback-verbs}
+\link{cuplyr-options}, \code{\link[=cuplyr_fallback_notify]{cuplyr_fallback_notify()}}, \link{fallback-verbs}
 }

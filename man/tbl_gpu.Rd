@@ -30,7 +30,8 @@ variable, then the package default, which is lazy
 }
 The default can be changed with \code{options(cuplyr.exec_mode = "eager")} or
 the environment variable \code{CUPLYR_EXEC_MODE=eager}; the argument beats
-the option, which beats the variable.}
+the option, which beats the variable. An invalid option value warns once
+and the default is used. All options are listed on \link{cuplyr-options}.}
 }
 \value{
 A \code{tbl_gpu} object containing:

@@ -1,5 +1,35 @@
 # cuplyr (development version)
 
+## One options registry (F93)
+
+* `cuplyr_options()` lists every cuplyr option with the value in use, where it
+  came from (option, environment variable or default), its environment
+  variable and a description; `cuplyr_options(internal = TRUE)` adds the
+  internal switches. `?"cuplyr-options"` documents them all on one page.
+* An invalid option or environment-variable value now always warns once per
+  session and value, with class `cuplyr_warning_invalid_option` (fields
+  `option`, `value`, `source`), names the allowed values, and uses the default.
+  New: `cuplyr.exec_mode = "Lazy"` (it was silently ignored), a misspelt
+  `cuplyr.memory_pool`, and an invalid `cuplyr.pool_initial`. Changed:
+  `cuplyr.roll_median` and `cuplyr.roll_path` with an invalid value warn and
+  use `"exact"` / `"auto"` instead of raising an error. The memory options'
+  warnings (already present) now appear once per session instead of on each
+  read. A set but invalid `cuplyr.exec_mode` no longer falls through to
+  `CUPLYR_EXEC_MODE`. Blank values keep their meaning: `""` for
+  `cuplyr.memory_resource`, `cuplyr.memory_pool`, `cuplyr.roll_median` and
+  `cuplyr.roll_path`, and `NA` or `""` for `cuplyr.pool_initial`, are the default
+  without a warning (and the environment variable is not consulted). An
+  environment variable that is empty or only spaces counts as unset for every
+  option, so the default is used without a warning (a blank
+  `CUPLYR_ROLL_MEDIAN` or `CUPLYR_ROLL_PATH` used to be an error).
+* A `cuplyr_warning_invalid_option` caught by an exiting handler
+  (`tryCatch(warning = )`) is raised again on the next read; with
+  `suppressWarnings()` or a calling handler it is still given once per session.
+* With `options(warn = 2)` set before loading, a typo in `cuplyr.memory_pool` or
+  an invalid `cuplyr.pool_initial` now makes loading fail, as a typo in
+  `cuplyr.memory_resource` or `cuplyr.release_threshold` already did. The
+  invalid values not yet raised are reported on the next read.
+
 ## Gibbles are lazy by default (F80) -- breaking change
 
 * `tbl_gpu()` (and `gibble()`, `as_gibble()`, `as_tbl_gpu()`) now returns a

@@ -84,7 +84,8 @@ default with \code{NA}s and \code{na.rm = TRUE} on wide windows (about 4x slower
 width 1001 with 1\% \code{NA}) and on thousands of small groups (several times
 slower). If it is requested but data.table is missing or too
 old, the exact engine is used and a message says so once per session. Any
-other value of the option is an error. \code{data.table::frollmedian()} written
+other value of the option warns once (class \code{cuplyr_warning_invalid_option})
+and the exact engine is used; see \link{cuplyr-options}. \code{data.table::frollmedian()} written
 inside \code{mutate()} keeps data.table's own result.
 
 The internal option \code{cuplyr.roll_path} (else the environment variable

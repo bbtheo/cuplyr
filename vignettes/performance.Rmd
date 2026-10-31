@@ -68,7 +68,7 @@ The two modes differ in when the GPU work happens.
 Lazy is the default. You choose eager per table with
 `tbl_gpu(df, lazy = FALSE)`, or for every table created afterwards with
 `options(cuplyr.exec_mode = "eager")` (or the environment variable
-`CUPLYR_EXEC_MODE=eager`). Printing a lazy table with pending steps runs the
+`CUPLYR_EXEC_MODE=eager`; see `?"cuplyr-options"`). Printing a lazy table with pending steps runs the
 plan to show its first rows and keeps nothing, so it costs about as much as a
 `collect()` of the same plan (see the README for a measurement).
 `show_query()` prints the pending steps of a lazy table. `explain()` prints them

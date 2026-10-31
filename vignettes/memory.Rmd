@@ -83,8 +83,11 @@ R process. To change it, restart R. Set the switch before `library(cuplyr)`.
 | How much the resource reserves at load, in bytes (not a limit) | `cuplyr.pool_initial` | `CUPLYR_POOL_INITIAL` |
 | Async only: release unused memory automatically while the whole reservation is above this many bytes | `cuplyr.release_threshold` | `CUPLYR_RELEASE_THRESHOLD` |
 
-An option wins over its environment variable. Case and surrounding blanks do
-not matter. An unknown kind (say `"managed"`) is not silently accepted: cuplyr
+Every option is documented on `?"cuplyr-options"`, and `cuplyr_options()` lists
+them. For these four it reports the option or environment variable as it is set
+now, which takes effect the next time cuplyr is loaded; it does not report what
+the resource in this session was installed with. An option wins over its
+environment variable. Case and surrounding blanks do not matter. An unknown kind (say `"managed"`) is not silently accepted: cuplyr
 warns, naming the option or variable and the value as you typed it, and uses
 `"async"`; if `cuplyr.memory_pool` switches the resource off, the warning says
 the kind is ignored and no resource (`"cuda"`) is used. A

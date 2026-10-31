@@ -118,6 +118,9 @@ other value that is not a non-negative number gives a warning naming the
 option or variable, and means unset. Ignored under \code{"pool"} and
 \code{"cuda"}.}
 }
+
+All cuplyr options, and how an invalid value is handled, are listed on
+\link{cuplyr-options}.
 }
 
 \examples{
@@ -138,5 +141,6 @@ if (has_gpu()) {
 }
 \seealso{
 \code{\link{gpu_details}} for device information (device level only),
-\code{\link{gpu_memory_usage}} for per-object memory estimates
+\code{\link{gpu_memory_usage}} for per-object memory estimates,
+\link{cuplyr-options} for the options
 }

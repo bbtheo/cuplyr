@@ -84,7 +84,7 @@ To run each verb at once instead, which can be easier to step through:
 eager_tbl <- tbl_gpu(mtcars, lazy = FALSE)
 
 # Or for every table created afterwards
-options(cuplyr.exec_mode = "eager")   # or the environment variable CUPLYR_EXEC_MODE=eager
+options(cuplyr.exec_mode = "eager")   # or the environment variable CUPLYR_EXEC_MODE=eager (cuplyr_options() lists all options)
 
 # Pending steps, then the plan the optimizer will run
 tbl_gpu(mtcars) |> filter(mpg > 20) |> mutate(kpl = mpg * 0.425) |> select(cyl, kpl) |> explain()

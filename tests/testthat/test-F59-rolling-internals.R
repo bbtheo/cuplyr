@@ -412,7 +412,7 @@ test_that("forced scans: mean, sum and sd of one column at one width share their
   }
 })
 
-test_that("the cuplyr.roll_path switch: option first, then the environment, unknown values error", {
+test_that("the cuplyr.roll_path switch: option first, then the environment, unknown values warn", {
   withr::local_options(cuplyr.roll_path = NULL)
   withr::local_envvar(CUPLYR_ROLL_PATH = NA)
   expect_identical(roll_path_option(), "auto")
@@ -420,14 +420,20 @@ test_that("the cuplyr.roll_path switch: option first, then the environment, unkn
   expect_identical(roll_path_option(), "cudf")
   withr::local_options(cuplyr.roll_path = "scans")
   expect_identical(roll_path_option(), "scans")
-  withr::local_options(cuplyr.roll_path = "Scans")
-  expect_error(roll_path_option(), "must be \"auto\", \"scans\" or \"cudf\"")
+  withr::local_options(cuplyr.roll_path = "Scans-f59")
+  expect_warning(res <- roll_path_option(), "one of \"auto\", \"scans\", \"cudf\"", fixed = TRUE,
+                 class = "cuplyr_warning_invalid_option")
+  expect_identical(res, "auto")
   withr::local_options(cuplyr.roll_path = NULL)
-  withr::local_envvar(CUPLYR_ROLL_PATH = "gpu")
-  expect_error(roll_path_option(), "not \"gpu\"")
+  withr::local_envvar(CUPLYR_ROLL_PATH = "gpu-f59")
+  expect_warning(res <- roll_path_option(), "gpu-f59", fixed = TRUE,
+                 class = "cuplyr_warning_invalid_option")
+  expect_identical(res, "auto")
   skip_if_no_gpu()
-  expect_error(collect(dplyr::mutate(tbl_gpu(data.frame(x = 1:5 + 0.5)), y = roll_mean(x, 2))),
-               "cuplyr.roll_path")
+  withr::local_envvar(CUPLYR_ROLL_PATH = "gpu-f59-pipe")
+  expect_warning(res <- collect(dplyr::mutate(tbl_gpu(data.frame(x = 1:5 + 0.5)), y = roll_mean(x, 2))),
+                 "cuplyr.roll_path", class = "cuplyr_warning_invalid_option")
+  expect_equal(res$y, c(NA, 2, 3, 4, 5))
 })
 
 test_that("forcing either path gives the reference values", {

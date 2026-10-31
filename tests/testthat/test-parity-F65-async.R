@@ -174,8 +174,8 @@ test_that("an unknown resource kind warns, names its source, and means async", {
     expect_warning(cfg <- memory_resource_config(), "cuplyr.memory_resource")
     expect_identical(cfg$kind, "async")
   })
-  withr::with_options(list(cuplyr.memory_resource = "bogus"),
-    expect_warning(memory_resource_config(), "bogus"))
+  withr::with_options(list(cuplyr.memory_resource = "bogus2"),
+    expect_warning(memory_resource_config(), "bogus2"))
 
   withr::with_envvar(c(CUPLYR_MEMORY_RESOURCE = "managed"), {
     expect_warning(cfg <- memory_resource_config(), "CUPLYR_MEMORY_RESOURCE")

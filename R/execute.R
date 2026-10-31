@@ -115,7 +115,7 @@ check_schema_cache_on <- function() {
   }
   on <- .schema_memo$check_env
   if (is.null(on)) {
-    on <- Sys.getenv("CUPLYR_CHECK_SCHEMA_CACHE") %in% c("1", "true", "TRUE", "yes")
+    on <- Sys.getenv("CUPLYR_CHECK_SCHEMA_CACHE") %in% cuplyr_check_env_on
     .schema_memo$check_env <- on  # read once per session
   }
   on
@@ -1000,7 +1000,7 @@ resolve_by <- function(.data, by_quo, arg_name = ".by", call = rlang::caller_env
 # @keywords internal
 retry_on_sum_overflow <- function(attempt, on_overflow, class = "cuplyr_error_sum_overflow") {
   held <- list()
-  on.exit(for (w in held) warning(w), add = TRUE)
+  on.exit(if (length(held)) opt_reraise(held), add = TRUE)
   overflowed <- FALSE
   on_class <- function(e) {
     overflowed <<- TRUE
@@ -1095,7 +1095,8 @@ retry_on_sum_overflow <- function(attempt, on_overflow, class = "cuplyr_error_su
 #' Any other value of either option (including `"error"` for
 #' `cuplyr.plan_break`) warns once per session and value, with class
 #' `cuplyr_warning_invalid_option` (fields `option` and `value`), and the
-#' default (`"silent"`) is used.
+#' default (`"silent"`) is used. All cuplyr options are listed on
+#' [cuplyr-options].
 #'
 #' @examples
 #' \dontrun{
@@ -1112,49 +1113,17 @@ retry_on_sum_overflow <- function(attempt, on_overflow, class = "cuplyr_error_su
 #' options(cuplyr.fallback = "warn", cuplyr.plan_break = "warn")
 #' }
 #' @name cuplyr-fallback
-#' @aliases cuplyr-fallback cuplyr.fallback cuplyr.plan_break
-#' @seealso [cuplyr_fallback_notify()], [fallback-verbs]
+#' @aliases cuplyr-fallback
+#' @seealso [cuplyr-options], [cuplyr_fallback_notify()], [fallback-verbs]
 NULL
-
-# The valid values of the notice options. "warning" is accepted as "warn".
-cuplyr_notice_values <- list(
-  cuplyr.fallback = c("silent", "warn", "error"),
-  cuplyr.plan_break = c("silent", "warn")
-)
-
-# Invalid option values already warned about this session ("option value")
-cuplyr_notice_state <- new.env(parent = emptyenv())
 
 # The mode `option` ("cuplyr.fallback" or "cuplyr.plan_break") asks for:
 # "silent", "warn" or "error". An unknown value warns once per session and
-# value and means "silent". Runs on the notify path only.
+# value and means "silent" (the registry, R/options.R, holds the valid values;
+# "warning" is accepted as "warn"). Runs on the notify path only.
 # @keywords internal
 cuplyr_notice_mode <- function(option) {
-  value <- getOption(option)
-  if (is.null(value)) {
-    return("silent")
-  }
-  valid <- cuplyr_notice_values[[option]]
-  if (is.character(value) && length(value) == 1L && !is.na(value)) {
-    if (identical(value, "warning")) {
-      value <- "warn"
-    }
-    if (value %in% valid) {
-      return(value)
-    }
-  }
-  shown <- paste(deparse(value, nlines = 1L), collapse = "")
-  key <- paste(option, shown)
-  if (is.null(cuplyr_notice_state[[key]])) {
-    cuplyr_notice_state[[key]] <- TRUE
-    rlang::warn(
-      sprintf("`options(%s = )` is %s, which is not one of %s (or \"warning\" for \"warn\"). Using \"silent\".",
-              option, shown, paste0("\"", valid, "\"", collapse = ", ")),
-      class = "cuplyr_warning_invalid_option",
-      option = option, value = getOption(option)
-    )
-  }
-  "silent"
+  cuplyr_opt(sub("^cuplyr\\.", "", option))
 }
 
 # Estimated bytes per element of each GPU column type (strings estimated),

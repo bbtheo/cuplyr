@@ -43,7 +43,7 @@ test_that("a default async that can't be created falls back to the pool, with a 
 })
 
 test_that("an unknown kind (which means async) falls back like the default", {
-  f65r3_local_switches(cuplyr.memory_resource = "bogus")
+  f65r3_local_switches(cuplyr.memory_resource = "bogus-r3")
   calls <- f65r3_mock_install()
   w <- character()
   kind <- withCallingHandlers(memory_resource_install(), warning = function(cnd) {

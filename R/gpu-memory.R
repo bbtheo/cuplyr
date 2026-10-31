@@ -371,9 +371,13 @@ gpu_size_comparison <- function(x) {
 #'     `"cuda"`.}
 #' }
 #'
+#' All cuplyr options, and how an invalid value is handled, are listed on
+#' [cuplyr-options].
+#'
 #' @seealso
 #' \code{\link{gpu_details}} for device information (device level only),
-#' \code{\link{gpu_memory_usage}} for per-object memory estimates
+#' \code{\link{gpu_memory_usage}} for per-object memory estimates,
+#' [cuplyr-options] for the options
 #'
 #' @export
 #' @examples
@@ -450,27 +454,11 @@ gpu_allocatable_bytes <- function(state = gpu_memory_state()) {
 
 # The memory resource (F57, internal). The switches are read at load; only the
 # first load that creates the resource uses them.
-memory_resource_flag_off <- function(x) {
-  tolower(trimws(as.character(x))) %in% c("0", "false", "no", "off")
-}
-
 memory_resource_config <- function() {
-  opt <- getOption("cuplyr.memory_pool")
-  # A zero-length or NA option counts as unset: the env var decides.
-  if (length(opt) == 0 || is.na(opt[[1]])) opt <- NULL
-  enabled <- if (!is.null(opt)) {
-    !(isFALSE(opt) || memory_resource_flag_off(opt[[1]]))
-  } else {
-    !memory_resource_flag_off(Sys.getenv("CUPLYR_MEMORY_POOL", "1"))
-  }
+  enabled <- cuplyr_opt("memory_pool")
 
-  initial <- getOption("cuplyr.pool_initial")
-  if (is.null(initial)) {
-    env <- Sys.getenv("CUPLYR_POOL_INITIAL", "")
-    initial <- if (nzchar(env)) suppressWarnings(as.numeric(env)) else NULL
-  }
-  initial <- suppressWarnings(as.numeric(initial)[1])
-  if (length(initial) == 0 || is.na(initial) || initial < 0) {
+  initial <- cuplyr_opt("pool_initial")
+  if (is.na(initial)) {
     free <- tryCatch(gpu_info()$free_memory, error = function(e) 0)
     initial <- min(2^30, 0.25 * free)
   }
@@ -480,32 +468,26 @@ memory_resource_config <- function() {
   # quoting the value as typed. `explicit` is TRUE when the kind was asked for
   # by name ("async" or "pool"): only a default async falls back to the pool
   # when it can't be created (memory_resource_install()).
-  kind <- getOption("cuplyr.memory_resource")
-  source <- "cuplyr.memory_resource"
-  if (length(kind) == 0 || is.na(kind[[1]])) {
-    kind <- Sys.getenv("CUPLYR_MEMORY_RESOURCE", "")
-    source <- "CUPLYR_MEMORY_RESOURCE"
-  }
-  typed <- as.character(kind)[1]
-  kind <- tolower(trimws(typed))
-  explicit <- kind %in% c("pool", "async")
-  if (!nzchar(kind)) {
-    kind <- "async"
-  } else if (kind %in% c("cuda", "none")) {
-    enabled <- FALSE
-    kind <- "async"
-  } else if (!explicit) {
+  invalid_kind <- function(shown, r) {
+    typed <- opt_typed(r)
+    source <- opt_source_label(r)
     valid <- "Valid values are \"async\", \"pool\" and \"cuda\" (or \"none\", no resource)."
     if (enabled) {
-      warning(sprintf("Unknown memory resource '%s' in %s; using \"async\". %s",
-                      typed, source, valid), call. = FALSE)
+      sprintf("Unknown memory resource '%s' in %s; using \"async\". %s",
+              typed, source, valid)
     } else {
       # The off switch decides: no resource, whatever the kind says.
-      warning(sprintf(paste0(
+      sprintf(paste0(
         "Unknown memory resource '%s' in %s, ignored: cuplyr.memory_pool / ",
         "CUPLYR_MEMORY_POOL switches the resource off, so none is used (\"cuda\"). %s"),
-        typed, source, valid), call. = FALSE)
+        typed, source, valid)
     }
+  }
+  res <- cuplyr_opt_resolve("memory_resource", invalid_kind)
+  kind <- res$value
+  explicit <- !identical(res$source, "default") && kind %in% c("pool", "async")
+  if (kind %in% c("cuda", "none")) {
+    enabled <- FALSE
     kind <- "async"
   }
 
@@ -519,28 +501,7 @@ memory_resource_config <- function() {
 # decides), as for the other switches. Any other value that is not a
 # non-negative number warns, naming where it came from, and means unset.
 memory_resource_release_threshold <- function() {
-  value <- getOption("cuplyr.release_threshold")
-  source <- "cuplyr.release_threshold"
-  if (length(value) == 0 ||
-      (is.atomic(value) && (is.na(value[[1]]) ||
-                            (is.character(value) && !nzchar(trimws(value[[1]])))))) {
-    value <- Sys.getenv("CUPLYR_RELEASE_THRESHOLD", "")
-    source <- "CUPLYR_RELEASE_THRESHOLD"
-    if (!nzchar(trimws(value))) return(NA_real_)
-  }
-  typed <- as.character(value)[1]
-  num <- if (is.numeric(value) || is.character(value)) {
-    suppressWarnings(as.numeric(value[[1]]))
-  } else {
-    NA_real_
-  }
-  if (is.na(num) || num < 0) {
-    warning(sprintf(
-      "Invalid release threshold '%s' in %s (expected a number of bytes, 0 or more); no automatic release.",
-      typed, source), call. = FALSE)
-    return(NA_real_)
-  }
-  num
+  cuplyr_opt("release_threshold")
 }
 
 # Make the process's resource current for this load, creating it when this is
@@ -554,8 +515,21 @@ memory_resource_release_threshold <- function() {
 # warning. An async that was asked for by name, a pool that fails, or an error
 # before anything was created (say an option memory_resource_config() can't
 # read) leaves plain cudaMalloc ("cuda"), with a warning naming every error.
+#
+# Every warning (the switches' invalid-value warnings included) is held and
+# signalled once the resource is settled, outside the tryCatch()es: when
+# warnings are errors (options(warn = 2)) a converted warning must neither be
+# taken for a failure to create a resource nor stop the one that was chosen.
 memory_resource_install <- function() {
   called <- FALSE
+  held <- list()
+  hold <- function(w) {
+    held[[length(held) + 1L]] <<- w
+    invokeRestart("muffleWarning")
+  }
+  say <- function(...) {
+    held[[length(held) + 1L]] <<- simpleWarning(paste0(...), call = NULL)
+  }
   install <- function(enabled, kind, initial = 0, release_threshold = NA_real_) {
     called <<- TRUE
     gpu_mr_install(enabled, kind, initial, release_threshold)
@@ -565,9 +539,8 @@ memory_resource_install <- function() {
     # call it switched off, which creates nothing (it reuses a resource only if
     # one exists, else returns "cuda") but still pins.
     kind <- if (called) "cuda" else tryCatch(install(FALSE, "async"), error = function(e) "cuda")
-    warning("cuplyr: no memory resource, using plain cudaMalloc (",
-            paste(vapply(list(...), conditionMessage, ""), collapse = "; "), ").",
-            call. = FALSE)
+    say("cuplyr: no memory resource, using plain cudaMalloc (",
+        paste(vapply(list(...), conditionMessage, ""), collapse = "; "), ").")
     kind
   }
   kind <- tryCatch({
@@ -575,7 +548,7 @@ memory_resource_install <- function() {
       # Reuse only: with `enabled = FALSE` the other arguments are ignored.
       install(FALSE, "async")
     } else {
-      cfg <- memory_resource_config()
+      cfg <- withCallingHandlers(memory_resource_config(), warning = hold)
       create <- function(kind) {
         install(cfg$enabled, kind, cfg$initial, cfg$release_threshold)
       }
@@ -583,13 +556,21 @@ memory_resource_install <- function() {
         if (!identical(cfg$kind, "async") || isTRUE(cfg$explicit)) return(fail(e))
         tryCatch({
           kind <- create("pool")
-          warning("cuplyr: default \"async\" unavailable, using \"pool\" instead (",
-                  conditionMessage(e), ").", call. = FALSE)
+          say("cuplyr: default \"async\" unavailable, using \"pool\" instead (",
+              conditionMessage(e), ").")
           kind
         }, error = function(e2) fail(e, e2))
       })
     }
   }, error = fail)
+  # (when re-raising one does not return -- options(warn = 2) -- the invalid-
+  # option warnings from it on stay un-given: the next read reports them)
+  raised <- 0L
+  on.exit(opt_forget_warned(held[seq_along(held) > raised]))
+  for (w in held) {
+    warning(w)
+    raised <- raised + 1L
+  }
   invisible(kind)
 }
 
