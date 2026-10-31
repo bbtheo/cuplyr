@@ -1,5 +1,21 @@
 # cuplyr (development version)
 
+## print() and glimpse() show R types, factor labels and a lazy hint (F91)
+
+* The `<type>` labels of `print()` and `glimpse()` are the ones pillar shows for
+  the collected column (`<fct>`, `<ord>`, `<date>`, `<dttm>`, `<???>` for a
+  `vctrs::unspecified()` column, ...), taken from the table's schema without
+  collecting. A failed or not-materialized lazy table lists `name <type>` too,
+  instead of bare names or raw GPU type names.
+* Factor columns preview their level labels instead of the integer codes,
+  quoted when a level contains a comma (as pillar does). Strings are quoted and
+  escaped like pillar (`"say \"hi\""`, `"a\tb"`).
+* A missing string or factor value prints as a bare `NA`; a real `"NA"` string
+  keeps its quotes, and a `NaN` prints as `NaN`.
+* A lazy print with pending steps (and the plan-failed and not-materialized
+  views) ends with one line pointing to `collect()` for the data and
+  `explain()` for the plan. Eager prints and `glimpse()` have no such line.
+
 ## One options registry (F93)
 
 * `cuplyr_options()` lists every cuplyr option with the value in use, where it

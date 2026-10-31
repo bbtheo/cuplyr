@@ -383,3 +383,37 @@ preview_values <- function(vals, zone) {
   }
   vals
 }
+
+# One preview column as display strings, shared by print() and glimpse(), the
+# way pillar's glimpse formats a column. `vals` is the raw gpu_head() column;
+# `lvls` the schema levels of a factor (DICTIONARY32) column, whose codes are
+# decoded to labels (quoted only when a level contains a comma, as pillar does);
+# `truncate` shortens strings over 20 characters (print). The NA mask is taken
+# first, so a missing value is always a bare NA while a real "NA" string keeps
+# its quotes; a NaN is not missing and prints as NaN. Quoted values are escaped
+# with encodeString(), after truncation so an escape sequence is never cut.
+# @keywords internal
+preview_strings <- function(vals, zone, lvls, type, truncate = FALSE) {
+  quote <- FALSE
+  if (identical(type, "DICTIONARY32") && !is.null(lvls)) {
+    quote <- any(grepl(",", lvls, fixed = TRUE))
+    vals <- as.character(factor_from_codes(vals, lvls))
+  } else {
+    quote <- is.character(vals)
+    vals <- preview_values(vals, zone)
+  }
+  na <- is.na(vals)
+  if (is.double(vals)) {
+    na <- na & !is.nan(vals)
+  }
+  vals <- as.character(vals)
+  if (quote) {
+    if (truncate) {
+      long <- !na & nchar(vals) > 20
+      vals[long] <- paste0(substr(vals[long], 1, 17), "...")
+    }
+    vals[!na] <- encodeString(vals[!na], quote = "\"")
+  }
+  vals[na] <- "NA"
+  vals
+}

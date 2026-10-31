@@ -170,7 +170,7 @@ test_that("a lazy table whose plan fails prints the lazy block with the schema a
   f51_local_failing_plan()
   out <- utils::capture.output(print(lz))
   expect_match(out[1], "^# A gibble \\[lazy\\]: \\?\\? . 3$")
-  expect_true(any(grepl("^# Schema:\\s+g, x, y\\s*$", out)))
+  expect_true(any(grepl("^# Schema:\\s+g <dbl>, x <chr>, y <dbl>\\s*$", out)))
   expect_true(any(grepl("^# Operations pending:\\s+2\\s*$", out)))
   expect_true(any(grepl("^# Plan failed: f51: plan not run$", out)))
   # no source-dims glimpse of the un-run table
@@ -188,7 +188,7 @@ test_that("a pending lazy join prints its result, and the lazy block with the re
   f51_local_failing_plan()
   out <- utils::capture.output(print(lz))
   expect_match(out[1], "^# A gibble \\[lazy\\]: \\?\\? . 3$")
-  expect_true(any(grepl("^# Schema:\\s+g, x, lab\\s*$", out)))
+  expect_true(any(grepl("^# Schema:\\s+g <dbl>, x <chr>, lab <chr>\\s*$", out)))
   expect_true(any(grepl("^# Operations pending:\\s+1\\s*$", out)))
   expect_false(any(grepl("GPU tibble", out)))
 })
@@ -409,7 +409,7 @@ test_that("a failed lazy plan still shows its group or rowwise vars, nothing run
 
   out <- utils::capture.output(print(joined))
   expect_true(any(grepl("^# Groups:\\s+g\\s*$", out)))
-  expect_true(any(grepl("^# Schema:\\s+g, id, x, lab\\s*$", out)))
+  expect_true(any(grepl("^# Schema:\\s+g <dbl>, id <int>, x <dbl>, lab <chr>\\s*$", out)))
 
   out <- utils::capture.output(print(plain))
   expect_false(any(grepl("Groups|Rowwise", out)))
@@ -430,7 +430,7 @@ test_that("the pending-operation count includes both sides of a join", {
   f51_local_failing_plan()
   out <- utils::capture.output(print(lz))
   expect_true(any(grepl("^# Operations pending:\\s+4\\s*$", out)))
-  expect_true(any(grepl("^# Schema:\\s+g, id, x, lab, k, z\\s*$", out)))
+  expect_true(any(grepl("^# Schema:\\s+g <dbl>, id <int>, x <dbl>, lab <chr>, k <dbl>, z <dbl>\\s*$", out)))
 })
 
 # B3: the header's group count must not build the full group_data() (an

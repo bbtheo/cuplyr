@@ -3,7 +3,7 @@
 # No AST node (glimpse() is a terminal, side-effecting print method, not a
 # transformation): reuses the same bounded-preview approach as
 # print.tbl_gpu() (R/print.R) -- gpu_head() for a small, capped row sample
-# and gpu_dim()/gpu_col_types() for the row/column counts and types --
+# and gpu_dim() plus the schema (schema_type_abbr()) for the counts and types --
 # rather than dplyr::glimpse()'s own approach of collect()-ing the entire
 # table first. This keeps glimpse() cheap even on a huge (or huge
 # pending-lazy) tbl_gpu: only pending lazy ops need to run (via compute(),
@@ -77,7 +77,8 @@ glimpse.tbl_gpu <- function(x, width = NULL, ...) {
 
   dims <- dim(materialized)
   col_names <- display_names(materialized$schema$names)
-  types <- gpu_col_types(materialized$ptr)
+  lvls <- levels_by_position(materialized$schema)
+  types <- schema_type_abbr(materialized$schema, materialized[["unspecified"]], lvls)
 
   cat("Rows: ", format(dims[1], big.mark = ","), "\n", sep = "")
   cat("Columns: ", dims[2], "\n", sep = "")
@@ -101,6 +102,7 @@ glimpse.tbl_gpu <- function(x, width = NULL, ...) {
 
   max_name_width <- max(nchar(col_names), 1)
   zones <- tz_by_position(materialized$schema)
+  stypes <- unname(materialized$schema$types)
 
   for (i in seq_along(col_names)) {
     col_name <- col_names[i]
@@ -109,12 +111,7 @@ glimpse.tbl_gpu <- function(x, width = NULL, ...) {
     type_str <- paste0("<", col_type, ">")
 
     if (!is.null(preview) && length(preview[[i]]) > 0) {
-      is_time <- inherits(preview[[i]], c("POSIXct", "Date"))
-      vals <- preview_values(preview[[i]], zones[[i]])
-      if (is.character(vals) && !is_time) {
-        vals <- paste0("\"", vals, "\"")
-      }
-      vals[is.na(vals)] <- "NA"
+      vals <- preview_strings(preview[[i]], zones[[i]], lvls[[i]], stypes[[i]])
       val_str <- paste(vals, collapse = ", ")
 
       available_width <- width - max_name_width - nchar(type_str) - 6
@@ -147,9 +144,10 @@ glimpse_lazy_failure <- function(x, err, lazy_line) {
     cat(names(grouping), ": ", grouping, "\n", sep = "")
   }
   max_name_width <- max(nchar(col_names), 1)
+  abbr <- schema_type_abbr(schema, x[["unspecified"]])
   for (i in seq_along(col_names)) {
     cat("$ ", format(col_names[i], width = max_name_width), " <",
-        unname(schema$types)[i], ">\n", sep = "")
+        abbr[i], ">\n", sep = "")
   }
 }
 

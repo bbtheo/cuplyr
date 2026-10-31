@@ -44,6 +44,7 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
       print_lazy_failure(x, res, width)
     } else {
       print_gibble_body(res, width, body_w, "A gibble [lazy]")
+      cat(lazy_footer(), "\n", sep = "")
     }
     return(invisible(x))
   }
@@ -51,12 +52,13 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
   # No GPU data and nothing to run: show the schema only
   if (is.null(.subset2(x, "ptr"))) {
     cat("# A gibble [lazy, not materialized]\n")
-    cat("# Schema: ", paste(display_names(.subset2(x, "schema")$names), collapse = ", "), "\n", sep = "")
+    cat(schema_line(.subset2(x, "schema"), width, .subset2(x, "unspecified")), sep = "\n")
     cat("# Operations pending: ", ast_count_ops(.subset2(x, "lazy_ops")), "\n", sep = "")
     grouping <- lazy_grouping_sum(x)
     if (length(grouping) > 0L) {
       cat(gibble_header(x, width, c("A gibble" = "", grouping))[-1L], sep = "\n")
     }
+    cat(lazy_footer(), "\n", sep = "")
     return(invisible(x))
   }
 
@@ -72,10 +74,72 @@ print_lazy_failure <- function(x, err, width) {
   dims <- sub("^1", "??", pillar::dim_desc(matrix(0L, 1L, ncols)))
   sum <- c(dims, lazy_grouping_sum(x))
   cat(gibble_header(x, width, sum, name = "A gibble [lazy]"), sep = "\n")
-  cat("# Schema: ", paste(display_names(.subset2(x, "schema")$names), collapse = ", "), "\n", sep = "")
+  cat(schema_line(.subset2(x, "schema"), width, .subset2(x, "unspecified")), sep = "\n")
   cat("# Operations pending: ", ast_count_ops(.subset2(x, "lazy_ops")), "\n", sep = "")
   msg <- strsplit(conditionMessage(err), "\n", fixed = TRUE)[[1L]]
   cat(paste0(c("# Plan failed: ", rep("#   ", max(length(msg), 1L) - 1L)), msg), sep = "\n")
+  cat(lazy_footer(), "\n", sep = "")
+}
+
+# The one-line hint ending a lazy print: where the data and the plan are.
+lazy_footer <- function() {
+  pillar::style_subtle(paste0("# ", cli::symbol$info,
+                              " Use collect() to get the data and explain() to see the plan"))
+}
+
+# "# Schema: a <dbl>, b <chr>" wrapped at `width`, continuation lines "#   ".
+# A single entry wider than the width keeps its own line.
+schema_line <- function(schema, width, unspecified = NULL) {
+  entries <- paste0(display_names(schema$names), " <",
+                    schema_type_abbr(schema, unspecified), ">")
+  lead <- "# Schema: "
+  cont <- "#   "
+  lines <- character()
+  cur <- lead
+  first <- TRUE
+  for (k in seq_along(entries)) {
+    piece <- paste0(entries[[k]], if (k < length(entries)) "," else "")
+    sep <- if (first) "" else " "
+    if (!first && nchar(cur) + nchar(sep) + nchar(piece) > width) {
+      lines <- c(lines, cur)
+      cur <- paste0(cont, piece)
+    } else {
+      cur <- paste0(cur, sep, piece)
+    }
+    first <- FALSE
+  }
+  c(lines, cur)
+}
+
+# The label pillar shows for each column of the collected table, from the
+# schema alone (no collect()): by position, so duplicated names are safe.
+# `unspecified` is the table's `$unspecified` field: collect_frame() turns those
+# BOOL8 columns (the first column of each name) back into vctrs::unspecified(),
+# which pillar labels "???". `lvls` is levels_by_position(schema), when the
+# caller already has it.
+schema_type_abbr <- function(schema, unspecified = NULL, lvls = levels_by_position(schema)) {
+  types <- unname(schema$types)
+  out <- character(length(types))
+  for (i in seq_along(types)) {
+    out[[i]] <- switch(types[[i]],
+      DICTIONARY32 = if (is.null(lvls[[i]])) "int"
+                     else if (isTRUE(attr(lvls[[i]], "ordered"))) "ord" else "fct",
+      FLOAT64 = , FLOAT32 = , INT64 = "dbl",
+      INT32 = "int",
+      INT16 = "i16",
+      INT8 = "i8",
+      BOOL8 = "lgl",
+      STRING = "chr",
+      TIMESTAMP_DAYS = "date",
+      if (isTRUE(startsWith(types[[i]], "TIMESTAMP_"))) "dttm" else tolower(types[[i]])
+    )
+  }
+  if (length(unspecified) > 0L) {
+    hit <- match(unspecified, schema$names)
+    hit <- hit[!is.na(hit) & types[hit] %in% "BOOL8"]
+    out[hit] <- "???"
+  }
+  out
 }
 
 # The header and the glimpse-style body of a table with GPU data and nothing
@@ -83,7 +147,8 @@ print_lazy_failure <- function(x, err, width) {
 print_gibble_body <- function(x, width, body_w, name) {
   ptr <- .subset2(x, "ptr")
   schema <- .subset2(x, "schema")
-  types <- gpu_col_types(ptr)
+  lvls <- levels_by_position(schema)
+  types <- schema_type_abbr(schema, .subset2(x, "unspecified"), lvls)
   col_names <- display_names(schema$names)
 
   cat(gibble_header(x, width, name = name), sep = "\n")
@@ -98,6 +163,7 @@ print_gibble_body <- function(x, width, body_w, name) {
   max_name_width <- max(nchar(col_names), 1)
 
   zones <- tz_by_position(schema)
+  stypes <- unname(schema$types)
 
   # Print each column
   for (i in seq_along(col_names)) {
@@ -110,15 +176,9 @@ print_gibble_body <- function(x, width, body_w, name) {
 
     # Get preview values
     if (!is.null(preview)) {
-      is_time <- inherits(preview[[i]], c("POSIXct", "Date"))
-      vals <- preview_values(preview[[i]], zones[[i]])
+      vals <- preview_strings(preview[[i]], zones[[i]], lvls[[i]], stypes[[i]],
+                              truncate = TRUE)
       if (length(vals) > 0) {
-        # Truncate strings for display
-        if (is.character(vals) && !is_time) {
-          vals <- ifelse(nchar(vals) > 20, paste0(substr(vals, 1, 17), "..."), vals)
-          vals <- paste0("\"", vals, "\"")
-        }
-        vals[is.na(vals)] <- "NA"
         val_str <- paste(vals, collapse = ", ")
 
         # Truncate to fit width

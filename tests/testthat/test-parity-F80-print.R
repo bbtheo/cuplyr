@@ -30,7 +30,7 @@ f80p_print <- function(x, ...) utils::capture.output(print(x, ...))
 f80p_glimpse <- function(x, ...) utils::capture.output(dplyr::glimpse(x, ...))
 
 # The lazy print of `pipeline` must be the eager print with "[lazy]" in the
-# first line.
+# first line, plus F91's one footer line (collect()/explain()) at the end.
 f80p_expect_lazy_print <- function(df, pipeline, label) {
   lz <- pipeline(tbl_gpu(df))
   expect_true(has_pending_ops(lz), info = label)
@@ -40,7 +40,9 @@ f80p_expect_lazy_print <- function(df, pipeline, label) {
   expect_match(out_eager[1], "^# A gibble: ", info = label)
   expected <- out_eager
   expected[1] <- sub("^# A gibble: ", "# A gibble [lazy]: ", expected[1])
-  expect_identical(out_lazy, expected, info = label)
+  n <- length(out_lazy)
+  expect_match(out_lazy[n], "^# .*collect\\(\\).*explain\\(\\)", info = label)
+  expect_identical(out_lazy[-n], expected, info = label)
 }
 
 test_that("printing a lazy table with pending ops previews its rows like the eager print", {
