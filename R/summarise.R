@@ -1985,11 +1985,10 @@ preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL, notice_data
       next
     }
 
-    # any()/all() (Phase 6, task 6.2): keep a BOOL8-inferred sub-expression
+    # any()/all()/first()/last()/nth(): keep a BOOL8-inferred sub-expression
     # (e.g. `any(x > 3)`) as BOOL8 rather than the sum()-oriented INT32
-    # promotion every other aggregation wants -- see create_temp_column()'s
-    # own `keep_bool` docs.
-    keep_bool <- decomposed$fn_name %in% c("any", "all")
+    # promotion every other aggregation wants -- see agg_keeps_bool().
+    keep_bool <- agg_keeps_bool(decomposed$fn_name)
 
     # F22: dots that aggregate the same expression (reframe()'s k quantiles
     # of `x * 2` or `cumsum(x)`) share one temp column: the parsed IR already
@@ -1999,10 +1998,13 @@ preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL, notice_data
     # column (and each window stage) copies the whole table, so k of them cost
     # k times the table. The IR is compared bitwise (num.eq = FALSE): by
     # default identical() calls 0 and -0 equal, and `x / 0` and `x / -0` are
-    # different columns (F67).
+    # different columns (F67). A window argument that resolved to a bare column
+    # (`lag(b)`) is the window's own output whatever `keep_bool` is, so any
+    # later dot shares it.
     if (!is.null(ir)) {
       shared <- Find(function(t) {
-        identical(t$keep_bool, keep_bool) && identical(t$ir, ir, num.eq = FALSE)
+        (isTRUE(t$bare) || identical(t$keep_bool, keep_bool)) &&
+          identical(t$ir, ir, num.eq = FALSE)
       }, temp_cols)
       if (!is.null(shared)) {
         new_dots[[i]] <- rlang::new_quosure(
@@ -2031,7 +2033,8 @@ preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL, notice_data
       resolved <- resolve_agg_window_arg(working_data, ir, decomposed$fn_name, i)
       working_data <- resolved$data
       temp_cols[[length(temp_cols) + 1L]] <- list(ir = ir, keep_bool = keep_bool,
-                                                  name = resolved$col_name)
+                                                  name = resolved$col_name,
+                                                  bare = isTRUE(resolved$bare))
 
       new_dots[[i]] <- rlang::new_quosure(
         as.call(list(as.name(decomposed$fn_name), as.name(resolved$col_name))),
@@ -2125,17 +2128,17 @@ preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL, notice_data
 # @param ir A parsed (unbound) IR node for the aggregation's argument,
 #   confirmed by the caller to contain a window call (`ir_has_window(ir)`)
 # @param fn_name Character scalar, the aggregation function's OWN name
-#   (e.g. `"sum"`, `"last"`) -- used only to decide `keep_bool` for
-#   any()/all(), identically to `create_temp_column()`'s own parameter of
-#   the same name, if the post-decomposition expression still needs its
-#   own temp-column computation
+#   (e.g. `"sum"`, `"last"`) -- used only to decide `keep_bool` (see
+#   `agg_keeps_bool()`: any/all/first/last/nth), if the post-decomposition
+#   expression still needs its own temp-column computation
 # @param dot_index Integer, this dot's 1-based position in the summarise()
 #   call -- used only for a readable, collision-free temp column name if a
 #   `create_temp_column()` step ends up needed
 # @return `list(data = <tbl_gpu, with every window stage already pushed>,
 #   col_name = <character scalar, a real column name in the returned
 #   data's schema, safe to reference directly as the aggregation's own
-#   argument>)`
+#   argument>, bare = <TRUE when col_name is the window's own output column,
+#   whose type does not depend on `fn_name`>)`
 # @keywords internal
 resolve_agg_window_arg <- function(working_data, ir, fn_name, dot_index) {
   exprs <- stats::setNames(list(ir), "..agg_arg..")
@@ -2194,13 +2197,24 @@ resolve_agg_window_plan <- function(working_data, plan, fn_name, dot_index) {
   post_ir <- plan$post[["..agg_arg.."]]
 
   if (identical(post_ir$kind, "col")) {
-    return(list(data = working_data, col_name = post_ir$name))
+    return(list(data = working_data, col_name = post_ir$name, bare = TRUE))
   }
 
   temp_col_name <- paste0(".temp_agg_win_", dot_index)
-  keep_bool <- fn_name %in% c("any", "all")
+  keep_bool <- agg_keeps_bool(fn_name)
   working_data <- create_temp_column(working_data, temp_col_name, post_ir, keep_bool = keep_bool)
-  list(data = working_data, col_name = temp_col_name)
+  list(data = working_data, col_name = temp_col_name, bare = FALSE)
+}
+
+# Internal: does this aggregation keep a BOOL8 argument BOOL8?
+#
+# any()/all() work on the logical values directly, and first()/last()/nth()
+# return an element of their argument, so (like dplyr's `vec_slice2()`) the
+# result has the argument's type. Everything else (sum, mean, min, max,
+# n_distinct, ...) sees a logical as an integer, as R does.
+# @keywords internal
+agg_keeps_bool <- function(fn_name) {
+  fn_name %in% c("any", "all", "first", "last", "nth")
 }
 
 # Internal: Create a temporary column from a parsed IR expression
@@ -2218,10 +2232,11 @@ resolve_agg_window_plan <- function(working_data, plan, fn_name, dot_index) {
 # @param keep_bool Logical scalar (Phase 6, task 6.2). `FALSE` (default)
 #   matches the original sum()-oriented behavior: a BOOL8-inferred
 #   sub-expression is declared INT32. `any()`/`all()` need the OPPOSITE --
-#   their argument (e.g. `any(x > 3)`) must stay BOOL8, since their
-#   three-valued-logic implementation (`gpu_summarise()`) dispatches on
-#   the aggregation's own MIN/MAX-of-BOOL8 semantics, not a sum-style
-#   integer promotion.
+#   their argument (e.g. `any(x > 3)`) must stay BOOL8, as must that of
+#   `first()`/`last()`/`nth()`, which return the argument's type (see
+#   `agg_keeps_bool()`). The any()/all() three-valued-logic implementation
+#   (`gpu_summarise()`) dispatches on the aggregation's own MIN/MAX-of-BOOL8
+#   semantics, not a sum-style integer promotion.
 # @return Modified tbl_gpu with the new column appended
 # @keywords internal
 create_temp_column <- function(.data, col_name, ir, keep_bool = FALSE) {
@@ -2236,8 +2251,8 @@ create_temp_column <- function(.data, col_name, ir, keep_bool = FALSE) {
   # via make_aggregation()'s INT32->INT64 promotion rule. gpu_mutate_expr()
   # performs the actual GPU-side cast (BOOL8 -> INT32) since the declared
   # output type differs from the computed one (src/ops_expr.cpp). Skipped
-  # for any()/all() (`keep_bool = TRUE`), which need the argument to stay
-  # logical -- see this function's own `keep_bool` docs.
+  # for `agg_keeps_bool()` reducers (`keep_bool = TRUE`), which need the
+  # argument to stay logical -- see this function's own `keep_bool` docs.
   new_type <- if (identical(inferred_type, "BOOL8") && !keep_bool) "INT32" else inferred_type
 
   bound_ir <- ir_bind(ir, schema)

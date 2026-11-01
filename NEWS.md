@@ -1,5 +1,11 @@
 # cuplyr (development version)
 
+## summarise() of a computed logical keeps its type (F76)
+
+* `first()`, `last()` and `nth()` of a computed logical argument in `summarise()`
+  (e.g. `last(cumall(b))`, `first(x > 2)`) now return a logical column like
+  dplyr, not an integer.
+
 ## integer64 columns are exact on the GPU (F96)
 
 * A `bit64::integer64` column is uploaded as an exact 64-bit integer column
