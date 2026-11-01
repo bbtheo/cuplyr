@@ -1,5 +1,39 @@
 # cuplyr (development version)
 
+## integer64 columns are exact on the GPU (F96)
+
+* A `bit64::integer64` column is uploaded as an exact 64-bit integer column
+  (`<int64>` in `print()` and `glimpse()`) and collected back as `integer64`,
+  `NA` included. Before, its bits were read as doubles, so every value came back
+  wrong, and a generic "may lose precision" warning fired on every upload; that
+  warning is gone.
+* Comparisons (`==`, `<`, ...), `is.na()`, `arrange()`, `distinct()`,
+  `group_by()`, `count()`, joins, `bind_rows()` and the set operations,
+  `row_number()`/`min_rank()`/`dense_rank()` of an integer64, and `lag()`/`lead()`
+  without a default run on the GPU exactly. Arithmetic, casts,
+  `if_else()`/`coalesce()`, `%in%` and the aggregates `sum()`, `mean()`, `min()`,
+  `max()`, ... of an integer64 use bit64's rules (overflow gives `NA`, doubles are
+  truncated), so those calls run on the CPU, and their result goes back to the
+  GPU exactly. `n()` and `n_distinct()` stay on the GPU.
+* Joining or binding an integer64 with a double is an error, as in dplyr; with an
+  integer or logical it gives an integer64.
+* Without bit64 installed, an INT64 result collects to a double, warning (class
+  `cuplyr_warning_int64_precision`) only for the columns that hold a value beyond
+  2^53. The column then stays a double: a verb that runs on the CPU hands the
+  result back as a double column, not as integer64.
+* An integer64 value used as a number inside an expression (`x > k` with
+  `k <- bit64::as.integer64(-1)`, a `lag()` default, `between()` bounds, a
+  `lag()`/`ntile()` `n`) is compared exactly as a 64-bit integer or handed to
+  dplyr, never read as a double; `where(bit64::is.integer64)` selects integer64
+  columns.
+* `desc()` of an integer64 (`min_rank(desc(x))`, `order_by = desc(x)`, `top_n()`)
+  runs on the CPU and gives dplyr's result. bit64 has no `xtfrm()` method, so
+  dplyr ranks the raw bits there: `NA` gets a rank and negative values rank as
+  `NA`. `arrange(desc(x))` is unaffected and sorts by value.
+* `roll_sum()` of an integer or logical is a double, as `roll_sum()` on a
+  tibble is.
+* `glimpse()` cuts a long value line the way pillar does.
+
 ## print() and glimpse() show R types, factor labels and a lazy hint (F91)
 
 * The `<type>` labels of `print()` and `glimpse()` are the ones pillar shows for

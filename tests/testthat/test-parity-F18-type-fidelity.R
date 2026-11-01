@@ -304,7 +304,8 @@ test_that("F18 B: supported classes still upload silently; integer64 still warns
   expect_equal(out, df)
 
   skip_if_not_installed("bit64")
-  expect_warning(tbl_gpu(tibble::tibble(k = bit64::as.integer64(1:3))), "integer64")
+  # F96: integer64 is an exact INT64 column now, so there is nothing to warn about
+  expect_no_warning(tbl_gpu(tibble::tibble(k = bit64::as.integer64(1:3))))
 })
 
 # ---------------------------------------------------------------------------

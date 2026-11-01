@@ -477,6 +477,9 @@ warn_join_cross_by <- function(user_env) {
 #' (including the levels hash in `<factor<4d52a>>`) match dplyr's exactly.
 #' @keywords internal
 join_key_type_label <- function(type, levels = NULL) {
+  if (identical(type, "INT64")) {
+    return("integer64")  # vctrs' label for bit64::integer64()
+  }
   proto <- switch(type,
     DICTIONARY32 = factor(character(), levels = levels),
     BOOL8 = logical(),

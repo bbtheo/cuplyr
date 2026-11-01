@@ -375,6 +375,10 @@ restore_tz <- function(result, schema) {
 # replacement the printers do is a character assignment.
 # @keywords internal
 preview_values <- function(vals, zone) {
+  if (inherits(vals, "integer64") && !bit64_available()) {
+    vals <- int64_bits_to_double(unclass(vals))
+    attr(vals, "beyond_2_53") <- NULL
+  }
   if (inherits(vals, "POSIXct")) {
     attr(vals, "tzone") <- if (is.na(zone)) NULL else zone
   }
@@ -403,7 +407,7 @@ preview_strings <- function(vals, zone, lvls, type, truncate = FALSE) {
     vals <- preview_values(vals, zone)
   }
   na <- is.na(vals)
-  if (is.double(vals)) {
+  if (is.double(vals) && !inherits(vals, "integer64")) {
     na <- na & !is.nan(vals)
   }
   vals <- as.character(vals)

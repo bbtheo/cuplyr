@@ -325,6 +325,8 @@ inline bool ir_lit_is_nan(Rcpp::List node) {
     if (ir_lit_is_na(node)) return false;
     SEXP v = node["value"];
     if (TYPEOF(v) != REALSXP || Rf_xlength(v) != 1) return false;
+    // F96: an integer64 holds int64 bits, many of which are NaN doubles
+    if (Rf_inherits(v, "integer64")) return false;
     double d = REAL(v)[0];
     return std::isnan(d) && !R_IsNA(d);
 }
@@ -795,6 +797,13 @@ inline std::unique_ptr<cudf::scalar> build_scalar(const std::string& type_str,
     cudf::data_type dtype = expr_type_from_str(type_str);
     bool is_na = force_na || Rf_isNull(value_sexp);
 
+    // F96: an integer64 value is int64 bits, never a double or an int. Only an
+    // INT64 target reads them; a non-NA one anywhere else would be garbage.
+    if (!is_na && dtype.id() != cudf::type_id::INT64 && TYPEOF(value_sexp) == REALSXP &&
+        Rf_inherits(value_sexp, "integer64")) {
+        Rcpp::stop("internal error: an integer64 value cannot be built as a %s scalar", type_str);
+    }
+
     switch (dtype.id()) {
         case cudf::type_id::FLOAT64: {
             double v = 0.0;
@@ -819,7 +828,15 @@ inline std::unique_ptr<cudf::scalar> build_scalar(const std::string& type_str,
         }
         case cudf::type_id::INT64: {
             int64_t v = 0;
-            if (!is_na) {
+            if (!is_na && TYPEOF(value_sexp) == REALSXP && Rf_inherits(value_sexp, "integer64")) {
+                // a bit64::integer64 literal holds the int64 bits; INT64_MIN is its NA
+                if (Rf_xlength(value_sexp) < 1) {
+                    is_na = true;
+                } else {
+                    v = *reinterpret_cast<const int64_t*>(REAL(value_sexp));
+                    if (v == std::numeric_limits<int64_t>::min()) is_na = true;
+                }
+            } else if (!is_na) {
                 double rv = Rcpp::as<double>(value_sexp);
                 if (Rcpp::NumericVector::is_na(rv)) {
                     is_na = true;
@@ -1477,7 +1494,13 @@ inline bool checked_lit_is_null(Rcpp::List a) {
     if (ir_lit_is_na(a)) return true;
     SEXP v = a["value"];
     if (Rf_isNull(v)) return true;
-    // As build_scalar("INT64", ...) reads it, without building a device scalar.
+    // As build_scalar("INT64", ...) reads it, without building a device scalar:
+    // an integer64 holds int64 bits (INT64_MIN is its NA, other bits can be a
+    // NaN double).
+    if (TYPEOF(v) == REALSXP && Rf_inherits(v, "integer64")) {
+        if (Rf_xlength(v) < 1) return true;
+        return *reinterpret_cast<const int64_t*>(REAL(v)) == std::numeric_limits<int64_t>::min();
+    }
     return Rcpp::NumericVector::is_na(Rcpp::as<double>(v));
 }
 

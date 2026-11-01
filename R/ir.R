@@ -1520,11 +1520,15 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
         # dplyr's desc() is `-xtfrm(x)`: a character `x` is ranked in the
         # session collation, which the GPU (bytes) matches only under C.
         # (A bare min_rank(s) is vec_rank(), C-ordered, so stays native.)
-        if (!session_collation_is_c()) {
-          type <- tryCatch(ir_infer_type(parsed, schema), error = function(e) "STRING")
-          if (identical(unname(type), "STRING")) {
-            return(NULL)
-          }
+        # F96: bit64 has no xtfrm() method, so an integer64 `x` is ranked by
+        # its raw bits read as doubles (NA is 0, a negative value NaN): dplyr's.
+        type <- unname(tryCatch(ir_infer_type(parsed, schema), error = function(e) NA_character_))
+        if (identical(type, "INT64")) {
+          fallback_cause("`desc()` of an integer64 is `-xtfrm()` of its bits in dplyr: not on the GPU.")
+          return(NULL)
+        }
+        if (!session_collation_is_c() && (is.na(type) || identical(type, "STRING"))) {
+          return(NULL)
         }
         node <- ir_call(canonical, list(parsed), meta = list(rank_desc = TRUE))
         return(node)
@@ -1564,6 +1568,11 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
         if (!is.null(folded)) {
           return(folded)
         }
+      }
+
+      if (length(parsed_args) == 2L && match("INT64", schema$types, 0L) > 0L &&
+            match(canonical, ir_int64_cmp_ops, 0L) > 0L) {
+        parsed_args <- ir_int64_retype_cmp(parsed_args, schema)
       }
 
       if (!is.null(entry$parse)) {
@@ -2506,13 +2515,21 @@ ir_parse_when_reduce <- function(expr, env, schema, fn_name) {
 #'
 #' @param raw_expr A language object (not a quosure)
 #' @param env The environment to evaluate against
+#' An integer64 value is `ok = FALSE` (F96).
+#'
 #' @return `list(ok = <logical>, value = <the evaluated R value, or NULL>)`
 #' @keywords internal
 ir_eval_constant <- function(raw_expr, env) {
-  tryCatch(
-    list(ok = TRUE, value = rlang::eval_tidy(rlang::new_quosure(raw_expr, env))),
-    error = function(e) list(ok = FALSE, value = NULL)
-  )
+  tryCatch({
+    value <- rlang::eval_tidy(rlang::new_quosure(raw_expr, env))
+    # F96: a parameter (`n`, `default`, a pattern, ...) that is an integer64
+    # is vctrs' to cast or reject, and its bits are not a number: the CPU's
+    if (inherits(value, "integer64")) {
+      list(ok = FALSE, value = NULL)
+    } else {
+      list(ok = TRUE, value = value)
+    }
+  }, error = function(e) list(ok = FALSE, value = NULL))
 }
 
 # The value of an NA flag argument (`na.rm =` / `na_rm =`) when the native
@@ -2793,6 +2810,11 @@ ir_parse_order_ref <- function(expr, schema) {
       } else if (type == "STRING" && !session_collation_is_c()) {
         # desc() is `-xtfrm(s)`: the session collation orders it, the GPU
         # sorts bytes
+        return(NULL)
+      } else if (type == "INT64") {
+        # F96: and of an integer64 the raw bits read as doubles (bit64 has
+        # no xtfrm() method), which dplyr orders. `-x` is bit64's negation.
+        fallback_cause("`desc()` of an integer64 is `-xtfrm()` of its bits in dplyr: not on the GPU.")
         return(NULL)
       }
       return(list(col = col, desc = TRUE))
@@ -4308,6 +4330,64 @@ ir_infer_type <- function(ir, schema) {
   ir_call_type(ir, entry, arg_types, is_isolated_na)
 }
 
+# F96: the rule for a call node with an INT64 (integer64) argument. Native:
+# the six comparisons against INT64/INT32 operands (a whole double literal was
+# already retyped to INT64 by ir_int64_retype_cmp(); a fractional or double
+# operand is bit64's truncation, not a FLOAT64 comparison), is.na(), a
+# lag()/lead() without a default and the rank functions. Everything else
+# (arithmetic, casts, if_else()/coalesce(), %in%, cumulative and window
+# aggregates, ...) signals `cuplyr_type_needs_cpu`, so dplyr runs on the CPU with
+# bit64's semantics and the result re-uploads exactly. A call with a
+# timestamp operand is ir_check_ts_operands()'s (it carries an internal INT64
+# literal for POSIXct shifts).
+# @keywords internal
+ir_int64_native_ops <- c("is.na", "row_number", "min_rank", "dense_rank")
+ir_int64_cmp_ops <- c("==", "!=", "<", "<=", ">", ">=")
+ir_check_int64_operands <- function(ir, arg_types) {
+  if (any(match(arg_types, cuplyr_timestamp_types, 0L) > 0L)) {
+    return(invisible())
+  }
+  op <- .subset2(ir, "op")
+  ok <- if (match(op, ir_int64_cmp_ops, 0L) > 0L) {
+    all(arg_types == "INT64" | arg_types == "INT32")
+  } else if (match(op, ir_int64_native_ops, 0L) > 0L) {
+    TRUE
+  } else if (op == "lag" || op == "lead") {
+    default <- .subset2(.subset2(ir, "meta"), "default")
+    is.null(default) || isTRUE(.subset2(default, "na"))
+  } else {
+    FALSE
+  }
+  if (!ok) {
+    stop_type_needs_cpu("`", op, "()` of an integer64 value: bit64's rules run on the CPU.")
+  }
+  invisible()
+}
+
+# F96: `int64_col == 5` (a whole double literal, in int64 range) compares in
+# integer64 in bit64, so the literal becomes an INT64 one and the comparison
+# stays exact; any other double operand makes ir_check_int64_operands() send
+# the call to the CPU. `args` are the two parsed operands of a comparison.
+# @keywords internal
+ir_int64_retype_cmp <- function(args, schema) {
+  is_lit <- vapply(args, function(a) identical(.subset2(a, "kind"), "lit"), logical(1))
+  if (sum(is_lit) != 1L) {
+    return(args)
+  }
+  lit <- args[[which(is_lit)]]
+  v <- .subset2(lit, "value")
+  if (!identical(unname(.subset2(lit, "type")), "FLOAT64") || !is.double(v) || is.object(v) ||
+        length(v) != 1L || !is.finite(v) || v != trunc(v) || abs(v) >= 2^63) {
+    return(args)
+  }
+  other <- args[[which(!is_lit)]]
+  type <- tryCatch(ir_infer_type(other, schema), error = function(e) NA_character_)
+  if (identical(unname(type), "INT64")) {
+    args[[which(is_lit)]] <- ir_lit(v, "INT64")
+  }
+  args
+}
+
 # A bare, untyped NA literal (its kind already known to be "lit").
 ir_is_untyped_na <- function(a) {
   isTRUE(.subset2(a, "na")) && is.null(.subset2(a, "type"))
@@ -4343,6 +4423,12 @@ ir_call_type <- function(ir, entry, arg_types, is_isolated_na) {
   # an argument is a timestamp).
   if (any(match(arg_types, cuplyr_timestamp_types, 0L) > 0L)) {
     ir_check_ts_operands(ir, arg_types)
+  }
+  # F96: INT64 is integer64 (bit64's overflow-to-NA, truncation and ordering
+  # rules): an argument of that type is native only for the few ops that are
+  # exact on it (ir_check_int64_operands()). One match() for everything else.
+  if (match("INT64", arg_types, 0L) > 0L) {
+    ir_check_int64_operands(ir, arg_types)
   }
   # F48: the same for the STRING/BOOL8/INT32 arguments of reducers, windows
   # and comparisons (see ir_native_arg_types). ir_check_type_operands()
@@ -5102,8 +5188,12 @@ ir_check_ts_operands <- function(ir, arg_types) {
     }
   }
   if (op %in% c("==", "!=", "<", "<=", ">", ">=")) {
+    # A plain numeric NA literal takes the timestamp's type. A classed one
+    # (NA_integer64_, a Date/POSIXct NA) keeps its own, which its Ops method
+    # compares: CPU when it differs.
     missing_num <- vapply(ir$args, function(a) {
-      identical(a$kind, "lit") && is.numeric(a$value) && length(a$value) == 1L && is.na(a$value)
+      identical(a$kind, "lit") && is.numeric(a$value) && !is.object(a$value) &&
+        length(a$value) == 1L && is.na(a$value)
     }, logical(1))
     if (length(unique(unname(arg_types[!missing_num]))) > 1L) {
       stop_timestamp_needs_cpu(
@@ -5187,16 +5277,17 @@ ir_check_timespan_lit <- function(value) {
 # - min()/max() of a STRING follow the session collation (ir_type_gate()).
 # @keywords internal
 ir_native_arg_types <- local({
-  num <- c("BOOL8", "INT32", "INT64", "FLOAT64")
+  # (no INT64: integer64 reducers/windows run through bit64 on the CPU, F96)
+  num <- c("BOOL8", "INT32", "FLOAT64")
   c(
     stats::setNames(rep(list(num), 14L),
              c("mean", "sd", "var", "sum", "quantile", "cumsum", "cumprod",
                "cummean", "roll_mean", "roll_sum", "roll_sd", "roll_median",
                "roll_min", "roll_max")),
     list(
-      median = c("INT64", "FLOAT64"),
-      cummax = c("INT32", "INT64", "FLOAT64"),
-      cummin = c("INT32", "INT64", "FLOAT64"),
+      median = "FLOAT64",
+      cummax = c("INT32", "FLOAT64"),
+      cummin = c("INT32", "FLOAT64"),
       any = "BOOL8", all = "BOOL8", cumall = "BOOL8", cumany = "BOOL8",
       min = num, max = num,
       # a STRING gets dplyr's "non-numeric argument" error from the CPU
@@ -5313,17 +5404,6 @@ ts_mean_type <- function(input_type) {
 cuplyr_timestamp_types <- c("TIMESTAMP_DAYS", "TIMESTAMP_SECONDS",
                             "TIMESTAMP_MILLISECONDS", "TIMESTAMP_MICROSECONDS",
                             "TIMESTAMP_NANOSECONDS")
-
-# Window-class `sum()`'s output type -- reuses make_aggregation()'s own
-# switch verbatim (R/ast.R): INT32 promotes to INT64, everything else
-# (including INT64 itself, matching that function's existing behavior)
-# defaults to FLOAT64. Phase 5 (window functions) note: this intentionally
-# mirrors that pre-existing table rather than "fixing" it, per
-# scratchpad/phase5_window_design.md section 4's "output types reuse
-# make_aggregation()'s table verbatim" instruction.
-type_window_sum <- function(arg_types) {
-  if (identical(arg_types[1], "INT32")) "INT64" else "FLOAT64"
-}
 
 # mutate()'s window sum(): like dplyr, the sum of an integer or logical is an
 # integer (F42). The GPU total is INT64; an overflow is flagged by gpu_window()
@@ -6380,6 +6460,18 @@ ir_call_registry <- list(
       x <- args[[1]]
       lo <- args[[2]]
       hi <- args[[3]]
+      # F96: vctrs casts x and both bounds to one type, and integer64 has no
+      # common type with a double (an error in dplyr). The two comparisons
+      # below are typed one at a time, so the pair would slip through.
+      if (match("INT64", schema$types, 0L) > 0L || any(vapply(
+            list(x, lo, hi), function(a) identical(.subset2(a, "type"), "INT64"), logical(1)))) {
+        types <- vapply(list(x, lo, hi), function(a) {
+          tryCatch(unname(ir_infer_type(a, schema)), error = function(e) NA_character_)
+        }, character(1))
+        if (match("INT64", types, 0L) > 0L && match("FLOAT64", types, 0L) > 0L) {
+          return(NULL)
+        }
+      }
       # dplyr's between() compares with vctrs (byte order for strings), so the
       # comparisons skip F48's session-collation rule.
       ir_call("&", list(ir_call(">=", list(x, lo), meta = list(c_order = TRUE)),
@@ -6654,9 +6746,9 @@ ir_call_registry <- list(
   # which parses the *argument* of an aggregation call, never the
   # aggregation function name itself). Output types reuse
   # make_aggregation()'s own table verbatim (R/ast.R) except where that
-  # table doesn't cover a case at all (sum(): type_window_sum reimplements
-  # its exact switch branch, since arg_types here come from a window call's
-  # own arg rather than an aggregation struct's `input_type` field).
+  # table doesn't cover a case at all (sum(): type_window_int_sum, since
+  # arg_types here come from a window call's own arg rather than an
+  # aggregation struct's `input_type` field).
   "mean" = list(arity = 1L, parse = NULL, type = type_mean_median,
                  lower = NULL, window = list(kind = "agg")),
   "sum" = list(arity = 1L, parse = NULL, type = type_window_int_sum,
@@ -6738,8 +6830,7 @@ ir_call_registry <- list(
   # generic per-arg loop can't express, same reason as lag()/lead()).
   # Output types: roll_mean/roll_sd/roll_median always FLOAT64 (matching
   # data.table::frollmean()/frollsd()/frollmedian(), always double);
-  # roll_sum reuses type_window_sum verbatim (identical promotion rule to
-  # window sum()/summarise's sum(): INT32 -> INT64, else FLOAT64);
+  # roll_sum is a double too (INT64 in a schema means integer64, F96);
   # roll_min/roll_max preserve the argument's own type (type_arg1, matching
   # cudf::rolling_window()'s own documented "MIN/MAX return a column of the
   # same type as the input" rule). `window_spec_lowerable()` (R/lower.R)
@@ -6749,7 +6840,7 @@ ir_call_registry <- list(
   # through the existing CPU-fallback path instead (see R/roll.R).
   "roll_mean" = list(arity = 1L, parse = NULL, type = type_float64,
                       lower = NULL, window = list(kind = "rolling")),
-  "roll_sum" = list(arity = 1L, parse = NULL, type = type_window_sum,
+  "roll_sum" = list(arity = 1L, parse = NULL, type = type_float64,
                      lower = NULL, window = list(kind = "rolling")),
   "roll_min" = list(arity = 1L, parse = NULL, type = type_arg1,
                      lower = NULL, window = list(kind = "rolling")),

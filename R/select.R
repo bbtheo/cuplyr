@@ -163,6 +163,17 @@ tidyselect_proxy_value <- function(type, levels = NULL) {
   if (!is.null(hit <- proxy_cache[[type]])) {
     return(hit)
   }
+  if (identical(type, "INT64")) {
+    # F96: collect() gives integer64 (the bits of 1L) when bit64 is installed,
+    # else a double; a predicate such as bit64::is.integer64 must see which.
+    # Not cached: the answer follows bit64_available()
+    return(if (bit64_available()) {
+      structure(readBin(as.raw(c(1L, rep(0L, 7L))), "double", endian = "little"),
+                class = "integer64")
+    } else {
+      1
+    })
+  }
   v <- switch(type,
     BOOL8 = TRUE,
     INT32 = 1L,

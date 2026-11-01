@@ -358,7 +358,7 @@ warn_fractional_dates <- function(cols) {
 # Internal: classes a column may carry and still have a GPU representation.
 # Anything else (ts, difftime, hms, IDate, AsIs, POSIXlt, S4, ...) would upload
 # as its bare storage type and silently change what later verbs return, so it
-# is an error. integer64 keeps its own warning (gpu_type_from_r()).
+# is an error.
 # @keywords internal
 check_supported_column_classes <- function(data) {
   ok <- list(c("factor"), c("ordered", "factor"), "Date", c("POSIXct", "POSIXt"), "integer64")

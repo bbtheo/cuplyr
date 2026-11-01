@@ -71,6 +71,41 @@ std::unique_ptr<column> numeric_to_gpu(NumericVector x) {
     );
 }
 
+// Create GPU INT64 column from a bit64::integer64 vector: a REALSXP whose 8
+// bytes are the int64 value, NA being INT64_MIN. The payload is copied as is
+// and INT64_MIN becomes null (the one place this mapping is written for upload;
+// int64_to_bits() below is its inverse for collect).
+std::unique_ptr<column> int64_to_gpu(SEXP x) {
+    size_type n = Rf_xlength(x);
+    const int64_t* src = reinterpret_cast<const int64_t*>(REAL(x));
+
+    rmm::device_buffer data(n * sizeof(int64_t),
+                            rmm::cuda_stream_view(),
+                            rmm::mr::get_current_device_resource_ref());
+    if (n > 0) {
+        check_cuda(cudaMemcpy(data.data(), src, n * sizeof(int64_t), cudaMemcpyHostToDevice),
+                   "int64_to_gpu memcpy");
+    }
+
+    rmm::device_buffer null_mask;
+    size_type null_count = 0;
+    std::vector<uint8_t> validity(bitmask_allocation_size_bytes(n), 0xFF);
+    for (size_type i = 0; i < n; ++i) {
+        if (src[i] == std::numeric_limits<int64_t>::min()) {
+            validity[i / 8] &= ~(1 << (i % 8));
+            null_count++;
+        }
+    }
+    if (null_count > 0) {
+        null_mask = rmm::device_buffer(validity.data(), validity.size(),
+                                       rmm::cuda_stream_view(),
+                                       rmm::mr::get_current_device_resource_ref());
+    }
+
+    return std::make_unique<column>(
+        data_type{type_id::INT64}, n, std::move(data), std::move(null_mask), null_count);
+}
+
 // Create GPU column from R integer vector
 std::unique_ptr<column> integer_to_gpu(IntegerVector x) {
     size_type n = x.size();
@@ -516,6 +551,26 @@ static NumericVector fixed_to_numeric(const cudf::column_view& col, double scale
     return rv;
 }
 
+// INT64 column to a bit64::integer64 vector: the int64 bits in a REALSXP with
+// class "integer64", nulls as INT64_MIN (bit64's NA).
+static SEXP int64_to_bits(const cudf::column_view& col) {
+    const size_type n = col.size();
+    Rcpp::NumericVector rv(n);
+    int64_t* dst = reinterpret_cast<int64_t*>(REAL(rv));
+    if (n > 0) {
+        check_cuda(cudaMemcpy(dst, col.data<int64_t>(), n * sizeof(int64_t), cudaMemcpyDeviceToHost),
+                   "collect memcpy");
+    }
+    HostValidity v(col);
+    if (v.any()) {
+        for (size_type j = 0; j < n; ++j) {
+            if (v.is_null(j)) dst[j] = std::numeric_limits<int64_t>::min();
+        }
+    }
+    rv.attr("class") = "integer64";
+    return rv;
+}
+
 // One column to its R vector; the single converter behind gpu_collect(),
 // gpu_collect_slice() and gpu_head().
 static SEXP collect_column(const cudf::column_view& col) {
@@ -529,7 +584,7 @@ static SEXP collect_column(const cudf::column_view& col) {
         case type_id::BOOL8:
             return gpu_to_logical(col);
         case type_id::INT64:
-            return fixed_to_numeric<int64_t>(col, 1.0);
+            return int64_to_bits(col);
         case type_id::TIMESTAMP_DAYS: {
             NumericVector rv = fixed_to_numeric<int32_t>(col, 1.0);
             rv.attr("class") = "Date";
@@ -666,6 +721,29 @@ SEXP first_string_column_over(List cols, double limit) {
     return R_NilValue;
 }
 
+// The values of an integer64 vector (REALSXP holding int64 bits) as doubles,
+// NA for INT64_MIN. Used when bit64 is not installed, to collect and print an
+// INT64 column. Exact up to 2^53: the "beyond_2_53" attribute is TRUE when a
+// value is larger in magnitude (the conversion rounds it).
+// [[Rcpp::export]]
+NumericVector int64_bits_to_double(NumericVector x) {
+    const R_xlen_t n = x.size();
+    NumericVector out(n);
+    const int64_t* src = reinterpret_cast<const int64_t*>(REAL(x));
+    const int64_t lim = static_cast<int64_t>(1) << 53;
+    bool beyond = false;
+    for (R_xlen_t i = 0; i < n; ++i) {
+        if (src[i] == std::numeric_limits<int64_t>::min()) {
+            out[i] = NA_REAL;
+        } else {
+            out[i] = static_cast<double>(src[i]);
+            if (src[i] > lim || src[i] < -lim) beyond = true;
+        }
+    }
+    out.attr("beyond_2_53") = beyond;
+    return out;
+}
+
 // [[Rcpp::export]]
 SEXP df_to_gpu(DataFrame df) {
     using namespace cuplyr;
@@ -690,6 +768,8 @@ SEXP df_to_gpu(DataFrame df) {
                     if (saw_fraction) fractional_dates.push_back(i + 1);
                 } else if (is_posixct) {
                     columns.push_back(posixct_to_gpu(col));
+                } else if (Rf_inherits(col, "integer64")) {
+                    columns.push_back(int64_to_gpu(col));
                 } else {
                     columns.push_back(numeric_to_gpu(col));
                 }

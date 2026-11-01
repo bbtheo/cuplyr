@@ -179,22 +179,46 @@ collect_frame <- function(x) {
     }
   }
 
-  if (any(final_schema$types == "INT64")) {
-    int64_cols <- which(final_schema$types == "INT64")
-    for (col_idx in int64_cols) {
-      col_name <- final_schema$names[col_idx]
-      values <- result[[col_name]]
-      if (is.numeric(values) && any(abs(values) > 2^53, na.rm = TRUE)) {
-        warning(
-          "INT64 values may lose precision when collected into R numeric vectors. ",
-          "Consider converting to integer64 or avoid values > 2^53.",
-          call. = FALSE
-        )
-        break
-      }
-    }
-  }
+  result <- int64_columns_to_r(result, final_schema)
 
+  result
+}
+
+# The R class of an INT64 column follows the schema: INT64 is integer64. The
+# C++ collect hands every physical INT64 column back as integer64; without
+# bit64 that class has no methods, so such a column becomes a double (exact up
+# to 2^53) with one warning naming the columns that hold a larger value. A
+# physical INT64 under another schema type is a producer bug; it is returned
+# as a double so it is not mistaken for integer64.
+# @keywords internal
+int64_columns_to_r <- function(result, schema) {
+  is64 <- vapply(result, inherits, logical(1), what = "integer64", USE.NAMES = FALSE)
+  if (!any(is64)) {
+    return(result)
+  }
+  types <- unname(schema$types)
+  keep <- is64 & types == "INT64" & bit64_available()
+  big <- character()
+  for (j in which(is64 & !keep)) {
+    vals <- int64_bits_to_double(unclass(result[[j]]))
+    if (types[j] == "INT64" && isTRUE(attr(vals, "beyond_2_53"))) {
+      big <- c(big, names(result)[j])
+    }
+    attr(vals, "beyond_2_53") <- NULL
+    result[[j]] <- vals
+  }
+  if (length(big) > 0L) {
+    warning(structure(
+      class = c("cuplyr_warning_int64_precision", "warning", "condition"),
+      list(message = paste0(
+        "INT64 column", if (length(big) > 1L) "s", " ",
+        paste0("`", big, "`", collapse = ", "),
+        " hold", if (length(big) == 1L) "s",
+        " values beyond 2^53 that a double cannot store exactly. ",
+        "Install bit64 to collect them as integer64."
+      ), call = NULL)
+    ))
+  }
   result
 }
 

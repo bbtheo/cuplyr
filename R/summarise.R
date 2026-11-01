@@ -1683,8 +1683,8 @@ extract_quantile_probs <- function(expr, env, quo) {
     error = function(e) NULL
   )
   ir_check_timespan_lit(probs_val)  # F48: a Period/Duration `probs`: CPU
-  if (is.null(probs_val) || !is.numeric(probs_val) || length(probs_val) != 1 ||
-      is.na(probs_val) || probs_val < 0 || probs_val > 1) {
+  if (is.null(probs_val) || !is.numeric(probs_val) || inherits(probs_val, "integer64") ||
+      length(probs_val) != 1 || is.na(probs_val) || probs_val < 0 || probs_val > 1) {
     stop("summarise()'s quantile() requires a single probability in [0, 1]: ",
          rlang::quo_text(quo), call. = FALSE)
   }
@@ -1733,8 +1733,8 @@ extract_nth_position <- function(expr, env, quo) {
     error = function(e) NULL
   )
   ir_check_timespan_lit(n_val)  # F48: a Period/Duration `n`: CPU (parseable pre-pass)
-  if (is.null(n_val) || !is.numeric(n_val) || length(n_val) != 1 || is.na(n_val) ||
-      n_val != round(n_val) || n_val == 0) {
+  if (is.null(n_val) || !is.numeric(n_val) || inherits(n_val, "integer64") ||
+      length(n_val) != 1 || is.na(n_val) || n_val != round(n_val) || n_val == 0) {
     stop("nth() requires a single non-zero integer position: ",
          rlang::quo_text(quo), call. = FALSE)
   }

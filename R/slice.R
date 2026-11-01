@@ -246,8 +246,9 @@ resolve_slice_dots <- function(dots) {
   vals <- lapply(dots, function(d) {
     v <- rlang::eval_tidy(d)
     # A Period/Duration index is dplyr's error to raise (F48): the stop
-    # sends the call to the CPU fallback like any non-numeric index
-    if (!is.numeric(v) || is_timespan_value(v)) {
+    # sends the call to the CPU fallback like any non-numeric index (an
+    # integer64 index too: its bits are not a number, and dplyr rejects it)
+    if (!is.numeric(v) || is_timespan_value(v) || inherits(v, "integer64")) {
       stop("slice() only supports plain numeric index expressions in the ",
            "GPU-native path.", call. = FALSE)
     }
@@ -570,7 +571,7 @@ slice_grouped_native <- function(.data, group_mode, group_cols, mode,
                   order_cols = order_col, order_desc = isTRUE(descending),
                   output_type = "INT32"),
       window_spec(nn_name, fn = "sum", value_col = valid_name,
-                  output_type = type_window_sum("INT32"))
+                  output_type = "INT32")  # a row count
     ))
   }
 

@@ -124,7 +124,8 @@ schema_type_abbr <- function(schema, unspecified = NULL, lvls = levels_by_positi
     out[[i]] <- switch(types[[i]],
       DICTIONARY32 = if (is.null(lvls[[i]])) "int"
                      else if (isTRUE(attr(lvls[[i]], "ordered"))) "ord" else "fct",
-      FLOAT64 = , FLOAT32 = , INT64 = "dbl",
+      FLOAT64 = , FLOAT32 = "dbl",
+      INT64 = "int64",
       INT32 = "int",
       INT16 = "i16",
       INT8 = "i8",

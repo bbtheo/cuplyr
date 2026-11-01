@@ -1,5 +1,8 @@
 # Utility functions for cuplyr
 
+# Is bit64 installed? (a function so a test can mock it)
+bit64_available <- function() requireNamespace("bit64", quietly = TRUE)
+
 # Type mapping from R to GPU types
 gpu_type_from_r <- function(x) {
   if (is.logical(x)) return("BOOL8")
@@ -8,14 +11,8 @@ gpu_type_from_r <- function(x) {
   if (inherits(x, "POSIXct")) return("TIMESTAMP_MICROSECONDS")
   if (is.integer(x)) return("INT32")
   if (is.double(x)) {
-    # integer64 is stored as REALSXP in R but represents int64
-    # Currently we ingest it as FLOAT64 (may lose precision for large values)
-    if (inherits(x, "integer64")) {
-      warning("integer64 columns are currently stored as FLOAT64 on GPU. ",
-              "Values exceeding 2^53 may lose precision.",
-              call. = FALSE)
-      return("FLOAT64")
-    }
+    # integer64 is a REALSXP holding int64 bits: an exact INT64 column
+    if (inherits(x, "integer64")) return("INT64")
     return("FLOAT64")
   }
   if (is.character(x)) return("STRING")

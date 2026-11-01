@@ -1238,7 +1238,6 @@ std::vector<std::unique_ptr<cudf::column>> roll_columns(
 
     auto out_type = [&](const RollReq& rq) {
         if (rq.fn == "roll_min" || rq.fn == "roll_max") return x.type();
-        if (rq.fn == "roll_sum" && int_input) return kInt64;
         return kFloat64;
     };
 
@@ -1256,7 +1255,8 @@ std::vector<std::unique_ptr<cudf::column>> roll_columns(
                 out[i] = cudf::cast(x, out_type(rq));  // min/max/sum/mean of one value
             }
         } else if (rq.fn == "roll_sum" && int_input) {
-            out[i] = int_sum(rows, X, rq);
+            // exact in INT64, handed on as the double R's roll_sum() gives
+            out[i] = cudf::cast(*int_sum(rows, X, rq), kFloat64);
         } else if (rq.fn == "roll_sum" || rq.fn == "roll_mean" || rq.fn == "roll_sd" ||
                    rq.fn == "roll_min" || rq.fn == "roll_max") {
             by_w[rq.w].push_back(i);

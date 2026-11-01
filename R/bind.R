@@ -699,7 +699,8 @@ repair_names <- function(names, method = "unique") {
 #'     incompatibility (`$ok = FALSE`) -- real `vctrs::vec_ptype2()` refuses
 #'     this too.
 #'   \item Identical types: a no-op.
-#'   \item Both in the numeric ladder (`BOOL8 < INT32 < INT64 < FLOAT64`) or
+#'   \item Both in the numeric ladder (`BOOL8 < INT32 < INT64 < FLOAT64`, except
+#'     that INT64 (integer64) and FLOAT64 have no common type) or
 #'     both in the timestamp ladder (`TIMESTAMP_DAYS < ... <
 #'     TIMESTAMP_NANOSECONDS`): promotes to the wider member. The timestamp
 #'     cast (Date <-> POSIXct, etc.) is genuinely native as of Phase 11 L3
@@ -747,6 +748,12 @@ resolve_common_col_type <- function(tx, ty, fx = FALSE, fy = FALSE,
 
   if (identical(tx, ty)) {
     return(list(ok = TRUE, type = tx, factor_levels = NULL))
+  }
+
+  # (F96) INT64 is integer64: vctrs widens a logical/integer into it, but has no
+  # common type for integer64 and double
+  if (setequal(c(tx, ty), c("INT64", "FLOAT64"))) {
+    return(list(ok = FALSE))
   }
 
   if (tx %in% numeric_ladder && ty %in% numeric_ladder) {

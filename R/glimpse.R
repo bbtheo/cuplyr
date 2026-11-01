@@ -104,25 +104,31 @@ glimpse.tbl_gpu <- function(x, width = NULL, ...) {
   zones <- tz_by_position(materialized$schema)
   stypes <- unname(materialized$schema$types)
 
+  type_strs <- paste0("<", types, ">")
+  val_strs <- character(length(col_names))
   for (i in seq_along(col_names)) {
-    col_name <- col_names[i]
-    col_type <- types[i]
-    name_pad <- format(col_name, width = max_name_width)
-    type_str <- paste0("<", col_type, ">")
-
     if (!is.null(preview) && length(preview[[i]]) > 0) {
       vals <- preview_strings(preview[[i]], zones[[i]], lvls[[i]], stypes[[i]])
-      val_str <- paste(vals, collapse = ", ")
-
-      available_width <- width - max_name_width - nchar(type_str) - 6
-      if (nchar(val_str) > available_width && available_width > 10) {
-        val_str <- paste0(substr(val_str, 1, available_width - 3), "...")
-      }
-    } else {
-      val_str <- ""
+      val_strs[i] <- paste(vals, collapse = ", ")
     }
+  }
 
-    cat("$ ", name_pad, " ", type_str, " ", val_str, "\n", sep = "")
+  # pillar's rule (str_trunc()): column i's values get what its "$ name <type> "
+  # prefix leaves, less one column, and a longer line ends in one ellipsis
+  # character. pillar hands the widths of ALL columns to the lines that are too
+  # wide, in order (the first too-wide line gets the first column's width), so
+  # that is what is done here: the lines then equal a tibble's.
+  data_width <- width - (max_name_width + nchar(type_strs) + 4L) - 1L
+  too_wide <- which(nchar(val_strs) > data_width)
+  if (length(too_wide) > 0L) {
+    keep <- pmax(rep_len(data_width, length(too_wide)) - 1L, 0L)
+    val_strs[too_wide] <- paste0(substr(val_strs[too_wide], 1L, keep),
+                                 if (cli::is_utf8_output()) "\u2026" else "~")
+  }
+
+  for (i in seq_along(col_names)) {
+    name_pad <- format(col_names[i], width = max_name_width)
+    cat("$ ", name_pad, " ", type_strs[i], " ", val_strs[i], "\n", sep = "")
   }
 
   invisible(x)
