@@ -82,7 +82,7 @@ reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
   on.exit(fallback_reasons_close(prev), add = TRUE)
   cpu <- function(reason) {
     gpu_fallback("reframe", .data, function(tbl) {
-      rlang::inject(dplyr::reframe(tbl, !!!dots, .by = !!by_quo))
+      dplyr::reframe(tbl, !!!dots, .by = !!by_quo)
     }, reason = reason)
   }
 

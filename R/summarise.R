@@ -371,7 +371,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   in_schema <- current_schema(.data)
   if (length(in_schema$names) == 0L) {
     return(gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo))
+      dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo)
     }, reason = "the table has no columns but has rows, so even n() has nothing to count on the GPU."))
   }
 
@@ -383,7 +383,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   shadowed <- if (!isTRUE(reframe_state$wide)) shadow_screen_text(dots)
   if (!is.null(shadowed)) {
     return(gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo))
+      dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo)
     }, reason = shadowed))
   }
 
@@ -397,7 +397,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
                                    grouped = by_given || length(.subset2(.data, "groups")) > 0L)
   if (!is.null(impure)) {
     return(gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo))
+      dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo)
     }, reason = impure))
   }
 
@@ -429,7 +429,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
     reduced <- summarise_group_id_split(.data, dots, by_cols, by_given)
     if (inherits(reduced, "summarise_group_id_decline")) {
       return(gpu_fallback("summarise", .data, function(tbl) {
-        rlang::inject(dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
+        dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo)
       }, reason = structure(reduced$reason, expr = notice_expr_text(user_dots[[reduced$dot]]))))
     }
     if (!is.null(reduced)) {
@@ -439,7 +439,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
       if (inherits(res, "summarise_group_id_cpu")) {
         # (F88: the reduced call's own dot and reason, not the id dot's)
         return(gpu_fallback("summarise", .data, function(tbl) {
-          rlang::inject(dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
+          dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo)
         }, reason = attr(res, "reason")))
       }
       if (!is.null(res)) return(res)
@@ -448,7 +448,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
 
   if (!plain && dots_need_fallback(dots, treat_cur_group_id_as_deferred = TRUE)) {
     return(gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
+      dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo)
     }, reason = fallback_failed_reason(user_dots, across_fallback_default)))
   }
 
@@ -461,7 +461,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   expanded <- if (plain) expand_plain_dots(dots) else expand_across_dots(dots, in_schema, summarise_groups, "summarise")
   if (isTRUE(attr(expanded, "needs_fallback"))) {
     return(gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
+      dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo)
     }, reason = fallback_failed_reason(user_dots, across_fallback_default)))
   }
   # Named silently here: the "will use expression as column name" warning is
@@ -479,7 +479,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   simple_aggs <- .subset2(simple_plan, "aggregations")
   if (is.null(simple_aggs) && summarise_has_constant_agg(dots, in_schema)) {
     return(gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo))
+      dplyr::summarise(.data = tbl, !!!user_dots, .groups = .groups, .by = !!by_quo)
     }, reason = "a reducer whose arguments read no column is evaluated once per group by dplyr, and that is observable."))
   }
 
@@ -511,7 +511,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
       fallback_failed_remap(attr(expanded, "provenance")$origin)
     }
     return(gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo))
+      dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo)
     }, reason = if (sequential) {
       "a later expression reads or redefines the name an earlier one assigns; dplyr evaluates them in sequence."
     } else {
@@ -525,7 +525,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # ops it has already computed)
   cpu <- function(tbl = .data, reason = "an integer sum() inside an aggregation overflowed in some group; dplyr widens only those.") {
     gpu_fallback("summarise", tbl, function(tbl) {
-      rlang::inject(dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo))
+      dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo)
     }, reason = reason)
   }
   # F42: an integer window sum() in an aggregation's argument that overflows
@@ -855,7 +855,9 @@ summarise_dots_are_sequential <- function(dots) {
   }
   for (i in seq_along(dots)[-1]) {
     expr <- rlang::quo_get_expr(dots[[i]])
-    if (any(c(all.vars(expr), expr_data_pronoun_names(expr)) %in% nms[seq_len(i - 1)])) {
+    pn <- expr_data_pronoun_names(expr)
+    # an unresolvable `.data[[k]]` subscript (NA) may name any earlier dot
+    if (anyNA(pn) || any(c(all.vars(expr), pn) %in% nms[seq_len(i - 1)])) {
       return(TRUE)
     }
   }
@@ -869,7 +871,7 @@ expr_data_pronoun_names <- function(expr) {
   # An empty argument slot (`x[, 1]`) errors when forced: it names nothing.
   tryCatch({
     if (is_data_pronoun_call(expr)) {
-      pronoun_call_name(expr)
+      pronoun_call_name(expr) %||% NA_character_
     } else if (is.call(expr)) {
       unlist(lapply(as.list(expr), expr_data_pronoun_names), use.names = FALSE) %||% character()
     } else {

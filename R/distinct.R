@@ -213,7 +213,7 @@ distinct_key_positions <- function(key_cols, names) {
 # @keywords internal
 distinct_fallback <- function(.data, dots, .keep_all, detail = NULL, reason = detail) {
   gpu_fallback("distinct", .data, function(tbl) {
-    rlang::inject(dplyr::distinct(tbl, !!!dots, .keep_all = .keep_all))
+    dplyr::distinct(tbl, !!!dots, .keep_all = .keep_all)
   }, reason = reason)
 }
 

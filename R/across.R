@@ -1434,6 +1434,17 @@ check_across_predicate_piece <- function(piece, col, env, schema) {
     schema$names <- c(schema$names, helper)
     schema$types <- c(schema$types, "INT32")
   }
+  # F82: a piece with a call that may be impure (`bump()`, also next to a column:
+  # `.x > bump()`) is not parsed to learn its type, since the parse would run it
+  # and the dot's own parse runs it again; dplyr checks it, and runs the whole
+  # call. (Staying native is no way out: the dot's parse folds the call once,
+  # and a later CPU route for the call hands dplyr the if_any() as written, so
+  # it runs again.) A clock read is safe to run twice, so a date filter
+  # (`.x >= Sys.Date() - 30`) is typed and stays native.
+  if (is.call(piece) && !across_expr_is_pure(piece, schema, clock_env = env)) {
+    fallback_cause("a call in the lambda may have side effects, and dplyr evaluates it once per column.")
+    return(TRUE)
+  }
   # (F88: a probe; the dot's own parse later records any cause)
   type <- fallback_probe(tryCatch(suppress_probe_warnings({
     ir <- ir_parse_quo(rlang::new_quosure(piece, env), schema)
@@ -1807,6 +1818,141 @@ across_pure_heads <- function() {
     "when_all", "when_any", "order_by", "with_order")
 }
 
+# TRUE iff every call in `expr` is safe to parse twice (across_pure_heads()) or
+# reads a column of `schema`. With `clock_env`, a clock read found from there
+# (across_is_clock_call()) is safe too, and so is a plain read of a variable
+# bound from there (across_is_plain_read()).
+# @keywords internal
+across_expr_is_pure <- function(expr, schema, clock_env = NULL) {
+  pure_heads <- across_pure_heads()
+  pure <- function(e) {
+    if (rlang::is_missing(e) || !is.call(e)) {
+      return(TRUE)
+    }
+    if (!is.null(clock_env) && across_is_plain_read(e, schema, clock_env, pure)) {
+      return(TRUE)
+    }
+    head <- call_head_name(e)
+    if (is.null(head) || (!head %in% pure_heads && !expr_has_column_ref(e, schema) &&
+                            !(!is.null(clock_env) && across_is_clock_call(e, clock_env)))) {
+      return(FALSE)
+    }
+    # the head of `pkg::fn` is the call `::`(pkg, fn), not an argument
+    all(vapply(as.list(e)[-1], pure, logical(1)))
+  }
+  pure(expr)
+}
+
+# Clock reads: no side effect, and two reads a moment apart are as good as one,
+# so a type probe may run one before the dot's own parse does. Only base's
+# Sys.Date()/Sys.time() and lubridate's today()/now(), qualified or found from
+# `env` (a function of the user's named today() is not one).
+# @keywords internal
+across_clock_fns <- list(base = c("Sys.Date", "Sys.time"), lubridate = c("today", "now"))
+
+# The binding of `name` seen from `env`: its value when it is an unclassed list
+# or atomic vector (no `$` method to run, not an environment, S4 or R6 object)
+# held in an ordinary or promise binding (a promise runs once, cached; an active
+# binding runs at every read), otherwise NULL.
+# @keywords internal
+across_plain_value <- function(name, env) {
+  while (!identical(env, emptyenv())) {
+    if (exists(name, envir = env, inherits = FALSE)) {
+      if (bindingIsActive(name, env)) {
+        return(NULL)
+      }
+      # a missing argument or failing promise is not a plain read: dplyr raises it
+      value <- tryCatch(get(name, envir = env, inherits = FALSE), error = function(e) NULL)
+      return(if (!is.object(value) && (is.list(value) || is.atomic(value))) value)
+    }
+    env <- parent.env(env)
+  }
+  NULL
+}
+
+# A read of a variable that has no side effect, so a type probe may run it
+# before the dot's own parse does: `.env$name`, `.env[["name"]]`, and
+# `obj$name`, `obj[...]`, `obj[[...]]`, `names(obj)`, `length(obj)` where `obj`
+# is a symbol bound from `env` to a plain value (across_plain_value()) and the
+# operators are base's. A subscript that is a call must itself be pure
+# (`cfg[[bump()]]` is not).
+# @param pure The caller's purity test, applied to the subscripts
+# @keywords internal
+across_is_plain_read <- function(e, schema, env, pure) {
+  head <- e[[1L]]
+  if (!is.symbol(head)) {
+    return(FALSE)
+  }
+  fn <- as.character(head)
+  if (!fn %in% c("$", "[[", "[", "names", "length") || length(e) < 2L ||
+        !identical(get0(fn, envir = env, mode = "function"), get(fn, envir = baseenv()))) {
+    return(FALSE)
+  }
+  obj <- e[[2L]]
+  if (!is.symbol(obj) || as.character(obj) %in% schema$names) {
+    return(FALSE)
+  }
+  obj <- as.character(obj)
+  if (fn %in% c("names", "length")) {
+    return(length(e) == 2L && !is.null(across_plain_value(obj, env)))
+  }
+  if (fn == "$") {
+    if (length(e) != 3L || !(is.symbol(e[[3L]]) || rlang::is_string(e[[3L]]))) {
+      return(FALSE)
+    }
+  } else if (!is.null(names(e)) && any(names(e)[-1L] != "")) {
+    return(FALSE)
+  }
+  if (identical(obj, ".env")) {
+    # the environment's own binding of the name, which must not be active
+    if (length(e) != 3L || !fn %in% c("$", "[[")) {
+      return(FALSE)
+    }
+    # `.env[[k]]` names the variable `k` holds, which is not known here: only a
+    # literal string subscript is a plain read
+    if (fn == "[[" && !(rlang::is_string(e[[3L]]) && nzchar(e[[3L]]))) {
+      return(FALSE)
+    }
+    name <- as.character(e[[3L]])
+    if (!nzchar(name)) {
+      return(FALSE)
+    }
+    while (!identical(env, emptyenv())) {
+      if (exists(name, envir = env, inherits = FALSE)) {
+        return(!bindingIsActive(name, env))
+      }
+      env <- parent.env(env)
+    }
+    return(TRUE)
+  }
+  if (is.null(across_plain_value(obj, env))) {
+    return(FALSE)
+  }
+  fn == "$" || all(vapply(as.list(e)[-(1:2)], pure, logical(1)))
+}
+
+across_is_clock_call <- function(e, env) {
+  head <- e[[1L]]
+  if (is.call(head) && length(head) == 3L && identical(head[[1L]], quote(`::`))) {
+    pkg <- head[[2L]]
+    if (!(is.symbol(pkg) || rlang::is_string(pkg))) {
+      return(FALSE)
+    }
+    return(as.character(head[[3L]]) %in% across_clock_fns[[as.character(pkg)]])
+  }
+  if (!is.symbol(head)) {
+    return(FALSE)
+  }
+  fn <- as.character(head)
+  for (pkg in names(across_clock_fns)) {
+    if (fn %in% across_clock_fns[[pkg]]) {
+      return(isNamespaceLoaded(pkg) &&
+               identical(get0(fn, envir = env, mode = "function"), getExportedValue(pkg, fn)))
+    }
+  }
+  FALSE
+}
+
 # The type, factor levels and zone the native path gives the column that `quo`
 # computes on `run`, or `list(type = NA, maybe = TRUE)` when that can't be said
 # without running anything (the column may not even exist, see above), or
@@ -1828,19 +1974,7 @@ across_infer_output <- function(quo, run) {
   if (length(no_type) > 0L && (any(all.vars(expr) %in% no_type) || ".data" %in% all.vars(expr))) {
     return(unknown)
   }
-  pure_heads <- across_pure_heads()
-  pure <- function(e) {
-    if (rlang::is_missing(e) || !is.call(e)) {
-      return(TRUE)
-    }
-    head <- call_head_name(e)
-    if (is.null(head) || (!head %in% pure_heads && !expr_has_column_ref(e, run))) {
-      return(FALSE)
-    }
-    # the head of `pkg::fn` is the call `::`(pkg, fn), not an argument
-    all(vapply(as.list(e)[-1], pure, logical(1)))
-  }
-  if (!pure(expr)) {
+  if (!across_expr_is_pure(expr, run)) {
     return(unknown)
   }
   # (F88: a probe for a type, never a dot's reason)
@@ -1952,8 +2086,11 @@ across_r_typed <- function(expr, env, run) {
   if (rlang::is_quosure(expr)) {
     return(across_r_typed(rlang::quo_get_expr(expr), rlang::quo_get_env(expr), run))
   }
-  if (rlang::is_missing(expr) || is.null(expr) || is_data_pronoun_call(expr)) {
+  if (rlang::is_missing(expr) || is.null(expr)) {
     return(TRUE)
+  }
+  if (is_data_pronoun_call(expr)) {
+    return(!is.null(pronoun_call_name(expr, env, run)))
   }
   # a constant, possibly a classed one injected with `!!`
   if (is.atomic(expr)) {
@@ -1964,7 +2101,8 @@ across_r_typed <- function(expr, env, run) {
     return(nm %in% run$names || plain(get0(nm, envir = env, inherits = TRUE)))
   }
   if (is_env_pronoun_call(expr)) {
-    return(plain(get0(pronoun_call_name(expr), envir = env, inherits = TRUE)))
+    nm <- pronoun_call_name(expr, env, run)
+    return(!is.null(nm) && plain(get0(nm, envir = env, inherits = TRUE)))
   }
   if (!is.call(expr)) {
     return(FALSE)

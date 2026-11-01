@@ -709,7 +709,7 @@ rowwise_with_row_ids <- function(.data, helper) {
 summarise_rowwise <- function(.data, dots, .groups, by_quo, caller_env) {
   cpu <- function(reason = NULL) {
     gpu_fallback("summarise", .data, function(tbl) {
-      rlang::inject(dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo))
+      dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo)
     }, reason = reason)
   }
   # F77: a function of the user's with a native op's name runs in dplyr

@@ -263,12 +263,53 @@ is_env_pronoun_call <- function(expr) {
     identical(expr[[2]], as.name(".env"))
 }
 
-# Extract the bare name out of a `.data$name`/`.data[["name"]]` (or `.env`
-# equivalent) call's third element, which is a symbol for `$` and a string
-# for `[[`.
-pronoun_call_name <- function(expr) {
-  as.character(expr[[3]])
+# The name a `.data`/`.env` pronoun call reads, or NULL when it is not known
+# from the syntax. `$` takes a symbol or string; `[[` a single non-NA string
+# (the fast path). A bare-symbol `[[` subscript is a variable dplyr evaluates
+# in the data mask: with `env` and `schema` it is looked up in `env` and used
+# if it is a single non-NA string and not a column; without them, or for
+# anything else (a call, a number, NA, a column, a missing variable), NULL.
+pronoun_call_name <- function(expr, env = NULL, schema = NULL) {
+  idx <- expr[[3L]]
+  if (is.character(idx)) {
+    return(if (length(idx) == 1L && !is.na(idx)) idx else NULL)
+  }
+  if (!is.symbol(idx)) {
+    return(NULL)
+  }
+  nm <- as.character(idx)
+  if (identical(expr[[1L]], ir_dollar_sym)) {
+    return(nm)
+  }
+  if (is.null(env) || is.null(schema) || nm %in% schema$names || nm %in% c(".data", ".env")) {
+    return(NULL)
+  }
+  val <- get0(nm, envir = env, inherits = TRUE)
+  if (is.character(val) && length(val) == 1L && !is.na(val) && is.null(attributes(val))) val else NULL
 }
+
+# Handing user quosures back to dplyr (or to a cuplyr verb) on a CPU route:
+# rlang's capture rewrites a raw `.data[[s]]` (one that reached the parser
+# through `!!`) to `.data[["<value of s>"]]`, evaluating `s` in the frame the
+# captured argument's promise belongs to. When the quosure object is inlined
+# in a call that is built first and evaluated later (`rlang::inject()`,
+# `call2()` + `eval()`/`eval_tidy()`, `do.call()`, `exec()`), that frame is the
+# one evaluating the call, a cuplyr frame, not the quosure's. A `!!q`/`!!!dots`
+# the verb's own capture splices is never walked again. So every fallback
+# splices user quosures directly (`dplyr::summarise(tbl, !!!dots, ...)`), and a
+# call that has to be built leaves the splice as syntax for the verb's capture
+# (`!!quote(!!q)` inside inject(), `quote(!!!dots)` in a call2()). Labels then
+# stay dplyr's.
+# A direct splice hides the dots' names from the callee's argument matching:
+# its `...` holds one unnamed `!!!dots`. dplyr checks only the names written in
+# the call (a name spliced with `!!!` reaches its capture, as a column name),
+# so a cuplyr method whose dplyr counterpart matches or checks `...` names
+# before capturing runs that check itself, first, on its own `...`, forcing no
+# dot: slice() (rlang::check_dots_unnamed()), transmute()
+# (check_transmute_dots()), group_by(), count() and add_count()
+# (check_group_by_dots(), check_regroup_dots()). Rebuilding the call with one
+# `name = !!.dots[[i]]` argument per dot instead would turn a spliced name into
+# a written one, which dplyr rejects or matches where it would not.
 
 # TRUE iff `expr` contains a symbol matching a schema column name anywhere
 # in its subtree (used to decide whether an unrecognized call's subtree can
@@ -298,6 +339,53 @@ expr_has_column_ref <- function(expr, schema) {
   expr_has_column_ref_walk(expr, schema)
 }
 
+# TRUE iff `expr` evaluates a free symbol that is no column of `schema`, not
+# `.data`/`.env`, and bound nowhere from `env` up: dplyr's "object not found".
+# Not walked: function literals, formulas, `quote()`-like calls (their symbols
+# are not evaluated here), `pkg::name` operands, and the right-hand side of
+# `$`/`@`. A call head is a function lookup, not a value; an embedded quosure
+# is looked up in its own environment. Nothing is evaluated. The walk is
+# syntactic, so a name the expression binds while it runs (`{ v <- f(); v }`)
+# or never reaches (`TRUE || nope`) counts too: ask only once the expression
+# has failed.
+# @keywords internal
+expr_has_unbound_symbol <- function(expr, env, schema) {
+  unevaluated <- c("function", "~", "quote", "bquote", "expression", "substitute", "::", ":::")
+  walk <- function(e, env) {
+    if (rlang::is_missing(e)) {
+      return(FALSE)
+    }
+    if (is.symbol(e)) {
+      nm <- as.character(e)
+      return(!(nm %in% c(schema$names, ".data", ".env")) && !exists(nm, envir = env, inherits = TRUE))
+    }
+    if (rlang::is_quosure(e)) {
+      return(walk(rlang::quo_get_expr(e), rlang::quo_get_env(e)))
+    }
+    if (!is.call(e)) {
+      return(FALSE)
+    }
+    parts <- unclass(as.list(e))
+    head <- parts[[1L]]
+    if (is.symbol(head)) {
+      if (as.character(head) %in% unevaluated) {
+        return(FALSE)
+      }
+      if (as.character(head) %in% c("$", "@")) {
+        return(length(parts) > 1L && walk(parts[[2L]], env))
+      }
+      parts <- parts[-1L]
+    }
+    for (i in seq_along(parts)) {
+      if (walk(parts[[i]], env)) {
+        return(TRUE)
+      }
+    }
+    FALSE
+  }
+  walk(expr, env)
+}
+
 # The recursive walk behind expr_has_column_ref().
 # @keywords internal
 expr_has_column_ref_walk <- function(expr, schema) {
@@ -321,6 +409,11 @@ expr_has_column_ref_walk <- function(expr, schema) {
   }
   # `.env$b` / `.env[["b"]]` read the environment even when a column is named b.
   if (is_env_pronoun_call(expr)) {
+    # the `[[` subscript is evaluated in the mask: `.env[[nm]]` with a column
+    # `nm` reads that column
+    if (identical(expr[[1L]], as.name("[[")) && !is.character(expr[[3L]])) {
+      return(expr_has_column_ref_walk(expr[[3L]], schema))
+    }
     return(FALSE)
   }
   # A quosure embedded in the tree (`{{ arg }}`, `!!quo`) is a `~` call to R;
@@ -606,6 +699,9 @@ ir_impure_walk <- function(expr, env, cols, st, formals = character(), fns_at = 
     return(2L)
   }
   if (is_env_pronoun_call(expr)) {
+    if (identical(expr[[1L]], as.name("[[")) && !is.character(expr[[3L]])) {
+      return(ir_impure_walk(expr[[3L]], env, cols, st, formals))
+    }
     return(0L)
   }
   # `pkg::fn` names a function (as the argument of with_order(), across()); it
@@ -1172,8 +1268,11 @@ ir_parse_pre_registry <- function(expr, env, schema, allow_vector, fn_name, head
 
   if (fn_name %in% c("&&", "||")) {
     replacement <- if (fn_name == "&&") "&" else "|"
-    stop("'", fn_name, "' is not supported in filter(); use '", replacement, "'",
-         call. = FALSE)
+    # (classed so filter_run() can leave a column-free dot that failed to dplyr)
+    stop(structure(class = c("cuplyr_error_short_circuit", "error", "condition"), list(
+      message = paste0("'", fn_name, "' is not supported in filter(); use '", replacement, "'"),
+      call = NULL
+    )))
   }
 
   # F50: as.character()/as.integer()/as.numeric()/as.double() of a bare
@@ -1435,7 +1534,10 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
         (identical(head, ir_dollar_sym) || identical(head, ir_bracket2_sym))) {
     # Case 3: .data[["x"]] / .data$x - forced column reference.
     if (is_data_pronoun_call(expr)) {
-      nm <- pronoun_call_name(expr)
+      nm <- pronoun_call_name(expr, env, schema)
+      if (is.null(nm)) {
+        return(NULL)  # a subscript only dplyr can evaluate
+      }
       if (!nm %in% schema$names) {
         stop("Column '", nm, "' not found.\n",
              "Available columns: ", paste(schema$names, collapse = ", "),
@@ -1446,11 +1548,14 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
 
     # Case 4: .env$x / .env[["x"]] - forced environment lookup.
     if (is_env_pronoun_call(expr)) {
-      nm <- pronoun_call_name(expr)
-      val <- tryCatch(
-        get(nm, envir = env, inherits = TRUE),
-        error = function(e) stop("object '", nm, "' not found", call. = FALSE)
-      )
+      nm <- pronoun_call_name(expr, env, schema)
+      if (is.null(nm)) {
+        return(NULL)
+      }
+      if (!exists(nm, envir = env, inherits = TRUE)) {
+        return(NULL)  # dplyr gives the wrapped "object not found" error
+      }
+      val <- get(nm, envir = env, inherits = TRUE)
       return(ir_lit_or_unsupported(val, allow_vector = allow_vector))
     }
   }
@@ -4876,7 +4981,7 @@ ir_parse_factor_conversion <- function(expr, schema, fn_name) {
   } else {
     return(NULL)
   }
-  if (!name %in% schema$names) {
+  if (is.null(name) || !name %in% schema$names) {
     return(NULL)
   }
   col <- ir_col(name)

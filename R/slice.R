@@ -709,6 +709,11 @@ slice_zero_column <- function(.data, fn) {
 #' @export
 #' @importFrom dplyr slice
 slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
+  # dplyr's slice.data.frame() starts with this, on the names written in the
+  # call; here it covers the native route too, and the CPU route's direct
+  # splice hides the names from dplyr's own (the splice rule after
+  # pronoun_call_name(), R/ir.R)
+  rlang::check_dots_unnamed()
   if (is_rowwise_gpu(.data)) {
     return(rowwise_cpu(.data, "slice"))
   }
@@ -725,7 +730,7 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 
   if (identical(gm$mode, "none")) {
     zero <- slice_zero_column(.data, function(tbl) {
-      rlang::inject(dplyr::slice(tbl, !!!dots, .preserve = .preserve))
+      dplyr::slice(tbl, !!!dots, .preserve = .preserve)
     })
     if (!is.null(zero)) return(zero)
   }
@@ -744,7 +749,7 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   }
 
   with_keys(gpu_fallback("slice", .data, function(tbl) {
-    rlang::inject(dplyr::slice(tbl, !!!dots, .by = !!by_quo, .preserve = .preserve))
+    dplyr::slice(tbl, !!!dots, .by = !!by_quo, .preserve = .preserve)
   }, reason = shadowed %||%
     "the row indices are not constants the GPU can resolve, or this slice has no native grouped form."))
 }
@@ -1048,7 +1053,10 @@ slice_min.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   }
 
   with_keys(gpu_fallback("slice_min", .data, function(tbl) {
-    rlang::inject(dplyr::slice_min(tbl, order_by = !!order_quo, !!!dots, !!!np,
+    # (`!!quote(!!order_quo)` leaves the splice to slice_min()'s own capture: an
+    # inlined quosure would have its raw `.data[[k]]` read in this frame, see
+    # the splice rule after pronoun_call_name(), R/ir.R)
+    rlang::inject(dplyr::slice_min(tbl, order_by = !!quote(!!order_quo), !!!dots, !!!np,
                                     by = !!by_quo, with_ties = with_ties, na_rm = na_rm))
   }, reason = shadowed %||% fallback_failed_reason(
     list(order_quo),
@@ -1106,7 +1114,10 @@ slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   }
 
   with_keys(gpu_fallback("slice_max", .data, function(tbl) {
-    rlang::inject(dplyr::slice_max(tbl, order_by = !!order_quo, !!!dots, !!!np,
+    # (`!!quote(!!order_quo)` leaves the splice to slice_max()'s own capture: an
+    # inlined quosure would have its raw `.data[[k]]` read in this frame, see
+    # the splice rule after pronoun_call_name(), R/ir.R)
+    rlang::inject(dplyr::slice_max(tbl, order_by = !!quote(!!order_quo), !!!dots, !!!np,
                                     by = !!by_quo, with_ties = with_ties, na_rm = na_rm))
   }, reason = shadowed %||% fallback_failed_reason(
     list(order_quo),
@@ -1533,8 +1544,7 @@ sample_n.tbl_gpu <- function(tbl, size, replace = FALSE, weight = NULL,
   size_quo <- rlang::enquo(size)
   weight_quo <- rlang::enquo(weight)
   sample_rows_impl(tbl, size_quo, replace, weight_quo, .env, frac = FALSE, function(t) {
-    rlang::inject(dplyr::sample_n(t, !!size_quo, replace = replace, weight = !!weight_quo,
-                                  .env = .env, ...))
+    dplyr::sample_n(t, !!size_quo, replace = replace, weight = !!weight_quo, .env = .env, ...)
   })
 }
 
@@ -1549,8 +1559,7 @@ sample_frac.tbl_gpu <- function(tbl, size = 1, replace = FALSE, weight = NULL,
   size_quo <- rlang::enquo(size)
   weight_quo <- rlang::enquo(weight)
   sample_rows_impl(tbl, size_quo, replace, weight_quo, .env, frac = TRUE, function(t) {
-    rlang::inject(dplyr::sample_frac(t, !!size_quo, replace = replace, weight = !!weight_quo,
-                                     .env = .env, ...))
+    dplyr::sample_frac(t, !!size_quo, replace = replace, weight = !!weight_quo, .env = .env, ...)
   })
 }
 
@@ -1614,7 +1623,8 @@ slice_sample.tbl_gpu <- function(.data, ..., n, prop, by = NULL,
   # stand-in of that height (same RNG use, see slice_zero_column()).
   if (identical(gm$mode, "none")) {
     zero <- slice_zero_column(.data, function(tbl) {
-      rlang::inject(dplyr::slice_sample(tbl, !!!dots, !!!np, weight_by = !!weight_quo,
+      # (`!!quote(!!weight_quo)`: as slice_min())
+      rlang::inject(dplyr::slice_sample(tbl, !!!dots, !!!np, weight_by = !!quote(!!weight_quo),
                                          replace = replace))
     })
     if (!is.null(zero)) return(zero)
@@ -1623,7 +1633,7 @@ slice_sample.tbl_gpu <- function(.data, ..., n, prop, by = NULL,
   cpu <- function(x, reason) {
     gpu_fallback("slice_sample", x, function(tbl) {
       rlang::inject(dplyr::slice_sample(tbl, !!!dots, !!!np, by = !!by_quo,
-                                         weight_by = !!weight_quo, replace = replace))
+                                         weight_by = !!quote(!!weight_quo), replace = replace))
     }, reason = reason)
   }
 

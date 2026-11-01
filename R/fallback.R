@@ -500,7 +500,7 @@ NULL
 do.tbl_gpu <- function(.data, ...) {
   dots <- rlang::enquos(...)
   gpu_fallback("do", .data, function(tbl) {
-    rlang::inject(dplyr::do(tbl, !!!dots))
+    dplyr::do(tbl, !!!dots)
   }, reason = "do() runs arbitrary R code on each group's data frame.")
 }
 

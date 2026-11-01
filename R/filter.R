@@ -341,6 +341,13 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     }
   }
 
+  # F75: top_n()/top_frac() with a `wt` that parsing would evaluate more often
+  # than dplyr does runs whole in dplyr, before anything is parsed.
+  declined <- top_n_rank_decline(dots, .data)
+  if (!is.null(declined)) {
+    return(filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, reason = declined))
+  }
+
   # F75: dplyr evaluates a predicate once per group, the native path folds a
   # column-free call once; only a pure call is the same either way, so a
   # grouped or `.by` call with any other runs whole in dplyr.
@@ -349,13 +356,6 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     if (!is.null(impure)) {
       return(filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, reason = impure))
     }
-  }
-
-  # F75: top_n()/top_frac() with a `wt` that parsing would evaluate more often
-  # than dplyr does runs whole in dplyr, before anything is parsed.
-  declined <- top_n_rank_decline(dots, .data)
-  if (!is.null(declined)) {
-    return(filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, reason = declined))
   }
 
   if (length(dots) == 0 && !complement) return(.data)
@@ -438,13 +438,48 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # fixes (see the regression test): checking ir_has_window() here, before
   # any const-folding logic ever runs, routes it correctly instead.
   parsed <- vector("list", length(dots))
+  inline_consts <- list()
   window_idx <- integer()
   # (F88: the user's dot each parsed dot comes from, and the cause each
   # unparsed one recorded, claimed below for the dot that falls back)
   origin <- attr(dots, "provenance")$origin %||% seq_along(dots)
   causes <- NULL
 
+  # F82: a dot that reads no column is evaluated here, once, at its position
+  # (dplyr's order), and not parsed (the parser would fold it a second time).
+  # The value or the error is recorded for the checks below, and for the
+  # dplyr fallbacks, which get the value inlined (`inline`). After an error
+  # nothing more is evaluated: dplyr stops there.
+  standalone <- vector("list", length(dots))
+  evaluated_free <- !rowwise
+  errored <- NA_integer_
   for (i in seq_along(dots)) {
+    if (evaluated_free && filter_dot_is_column_free(dots[[i]], schema)) {
+      res <- tryCatch(list(value = rlang::eval_tidy(dots[[i]], data = list())),
+                      error = function(e) list(error = e))
+      standalone[i] <- list(res)
+      if (!is.null(res$error)) {
+        # A free name bound nowhere may be a typo: the parser raises dev's
+        # "object not found" for it at once, with no table copied to the host.
+        # Decided only now, after the evaluation: a name the dot binds while it
+        # runs (`{ v <- f(); v }`) or never reaches (`TRUE || nope`) is no typo.
+        # A parse that raises nothing (a fold swallowed the error) or rejects
+        # `&&`/`||` leaves the error to dplyr, as below.
+        if (expr_has_unbound_symbol(rlang::quo_get_expr(dots[[i]]), rlang::quo_get_env(dots[[i]]), schema)) {
+          tryCatch(parse_filter_ir(dots[[i]], schema), cuplyr_error_short_circuit = function(e) NULL)
+          fallback_cause_take()
+        }
+        errored <- i
+        break
+      }
+      value <- res$value
+      # a plain logical scalar keeps the constant-predicate route
+      parsed[i] <- list(if (is.logical(value) && length(value) == 1L && is.null(dim(value))) {
+        ir_lit_from_r(value)
+      })
+      inline_consts[[as.character(i)]] <- res
+      next
+    }
     ir <- parse_filter_ir(dots[[i]], schema)
     if (is.null(ir)) {
       cause <- fallback_cause_take()
@@ -463,6 +498,11 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     if (!is.null(ir) && ir_has_window(ir)) {
       window_idx <- c(window_idx, i)
     }
+  }
+
+  # (grouped, `.by` and rowwise calls keep their dots as written)
+  inline <- if (length(verb_groups) == 0L && !rowwise && length(inline_consts) > 0L) {
+    list(consts = inline_consts, provenance = attr(dots, "provenance"))
   }
 
   # A window call sees one row on a rowwise table: dplyr's result, not ours.
@@ -491,8 +531,12 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # `filter_eval_mask()` below, unchanged from before L1.
   # (every dot is judged, as a vapply() over them did, before any is acted on)
   needs_expr_fallback <- FALSE
-  for (i in seq_along(dots)) {
-    why <- if (is.null(parsed[[i]]) && dot_references_schema_col(dots[[i]], orig_names)) {
+  # (a column-free dot that errored ends the loop above: the dots after it were
+  # never parsed, and dplyr stops there)
+  for (i in seq_len(if (is.na(errored)) length(dots) else errored)) {
+    why <- if (identical(i, errored)) {
+      list(filter_free_dot_failed_reason)
+    } else if (is.null(parsed[[i]]) && dot_references_schema_col(dots[[i]], orig_names)) {
       list(causes[[as.character(i)]])
     } else if (!is.null(parsed[[i]]) && ir_factor_rule(parsed[[i]], schema) != "none") {
       list("a factor in this predicate needs its labels, which dplyr compares (the GPU holds codes).")
@@ -507,7 +551,8 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   }
 
   if (needs_expr_fallback) {
-    return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
+    return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement,
+                                inline = inline))
   }
 
   # A dot with no column reference whose IR is NULL (opaque) or constant is
@@ -515,17 +560,20 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # may still succeed (the call can use pick()/n()/cur_*() inside a user
   # function, valid only in the mask), so hand the WHOLE call to dplyr,
   # decided here before any predicate is pushed. Each such dot is evaluated
-  # exactly once: the value is cached for the loop below.
-  standalone <- vector("list", length(dots))
+  # exactly once: the value is cached for the loop below. (The dots that read
+  # no column were evaluated by the parse loop; only the rest, such as a
+  # literal or a call that reaches the mask, are evaluated here.)
   for (i in if (length(window_idx) > 0L) set_diff(seq_along(dots), window_idx) else seq_along(dots)) {
-    if (is.null(parsed[[i]]) || ir_is_const(parsed[[i]])) {
-      res <- tryCatch(list(value = rlang::eval_tidy(dots[[i]], data = list())), error = function(e) NULL)
+    res <- standalone[[i]]
+    if (!is.null(res) || is.null(parsed[[i]]) || ir_is_const(parsed[[i]])) {
       if (is.null(res)) {
-        fallback_dot_failed(origin[[i]], paste0(
-          "a predicate that reads no column fails outside the data mask ",
-          "(it may use pick(), n() or cur_*() inside a function); dplyr evaluates it."
-        ))
-        return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
+        res <- tryCatch(list(value = rlang::eval_tidy(dots[[i]], data = list())),
+                        error = function(e) list(error = e))
+      }
+      if (!is.null(res$error)) {
+        fallback_dot_failed(origin[[i]], filter_free_dot_failed_reason)
+        return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement,
+                                    inline = inline))
       }
       # Only a plain logical scalar is a constant predicate. A matrix/array
       # (dplyr's own error or deprecation warning), a vector on a grouped
@@ -540,7 +588,8 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
           "a constant predicate that is not a plain logical scalar (a matrix, a per-group vector, ",
           "a non-logical value, or any under filter_out()) is evaluated by dplyr."
         ))
-        return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
+        return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement,
+                                    inline = inline))
       }
       standalone[i] <- list(res)
     }
@@ -576,7 +625,8 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       # nothing has been pushed onto `.data` yet at this point, so falling
       # back to CPU evaluation of the WHOLE call, from the pristine
       # original table and dots, is safe.
-      return(filter_window_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
+      return(filter_window_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement,
+                                    inline = inline))
     }
 
     # A non-logical predicate must raise dplyr's own "`..1` must be a logical
@@ -585,7 +635,8 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     # stage is pushed, and let dplyr raise its error on the CPU.
     if (any(vapply(plan$post, filter_ir_not_logical, logical(1),
                                  schema = plan$schema, is_window = FALSE))) {
-      return(filter_window_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement))
+      return(filter_window_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement,
+                                    inline = inline))
     }
 
     # F42: an integer window sum() is INT32, so arithmetic on it is checked as
@@ -629,7 +680,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
                                       function() NULL)
       if (is.null(staged)) {
         res <- filter_window_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement,
-                                      reason = "an integer sum() overflowed in a window predicate; dplyr widens only the overflowing groups.")
+                                      inline = inline, reason = "an integer sum() overflowed in a window predicate; dplyr widens only the overflowing groups.")
         return(if (back_to_lazy) plan_back_to_lazy(res) else res)
       }
       .data <- staged$data
@@ -807,17 +858,25 @@ filter_plan_window <- function(exprs, schema, group_cols) {
 # `.preserve`. The shared body of every filter fallback below.
 # @keywords internal
 filter_cpu_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE, detail = NULL,
-                                reason = detail) {
+                                reason = detail, inline = NULL) {
   verb <- if (complement) "filter_out" else "filter"
   fn <- if (complement) dplyr::filter_out else dplyr::filter
   gpu_fallback(verb, .data, function(tbl) {
+    # Inlined here, where the row count is known
+    dots <- filter_inline_evaluated(dots, inline, nrow(tbl))
     # Evaluated below the global environment: dplyr attributes a deprecation
     # (a one-column matrix) to the env of its caller, and an internal frame
     # would make lifecycle treat it as indirect use and warn only once.
     # The verb is bound under its own name so dplyr's error header reads
-    # `filter()` / `filter_out()`.
-    env <- rlang::new_environment(rlang::list2(!!verb := fn, tbl = tbl), parent = globalenv())
-    call <- rlang::call2(verb, quote(tbl), !!!dots, .by = by_quo, .preserve = .preserve)
+    # `filter()` / `filter_out()`. The dots and `.by` stay splices for the
+    # verb's own capture (not inlined quosures, whose raw `.data[[k]]` would be
+    # read in this frame: see the splice rule after pronoun_call_name(), R/ir.R).
+    env <- rlang::new_environment(
+      rlang::list2(!!verb := fn, tbl = tbl, .cuplyr_dots = dots, .cuplyr_by = by_quo),
+      parent = globalenv()
+    )
+    call <- rlang::call2(verb, quote(tbl), quote(!!!.cuplyr_dots), .by = quote(!!.cuplyr_by),
+                         .preserve = .preserve)
     rlang::eval_tidy(call, env = env)
   }, reason = reason)
 }
@@ -848,8 +907,9 @@ filter_cpu_fallback <- function(.data, dots, by_quo, .preserve = FALSE, compleme
 #   cuplyr_fallback_notify() notification)
 # @keywords internal
 filter_window_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE,
-                                   reason = "a window predicate has no GPU plan (its stages cannot be lowered, or it is not logical).") {
-  filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, reason = reason)
+                                   reason = "a window predicate has no GPU plan (its stages cannot be lowered, or it is not logical).",
+                                   inline = NULL) {
+  filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, reason = reason, inline = inline)
 }
 
 # Internal: whole-call CPU fallback for a filter() call whose dots contain
@@ -878,14 +938,65 @@ filter_across_fallback <- function(.data, dots, by_quo, .preserve = FALSE, compl
 # `min_rank() <= n` first (rewrite_top_n_rank_dots()); this takes the rest.
 # @keywords internal
 filter_expr_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complement = FALSE,
-                                 reason = NULL) {
+                                 reason = NULL, inline = NULL) {
   if (is.null(reason)) {
     # (the dot filter_run() judged to fail, with the reason its parse recorded)
     reason <- fallback_failed_reason(
       dots, "a predicate has a form the GPU engine does not support (or is not a logical column expression)."
     )
   }
-  filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, reason = reason)
+  filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, reason = reason, inline = inline)
+}
+
+# F82: TRUE iff a filter() dot is a symbol or call that reads no column and
+# needs no data mask, so it can be evaluated outside one. It is the test
+# mutate_constant_value() makes, plus the shapes that reach the mask without
+# naming a column (expr_reaches_mask(): `exists("x")`, `get()`, ...), which are
+# not evaluated out here. (A typo in such a dot is caught after it fails, in
+# filter_run().)
+# @keywords internal
+filter_dot_is_column_free <- function(quo, schema) {
+  expr <- rlang::quo_get_expr(quo)
+  (is.symbol(expr) || is.call(expr)) && !expr_has_column_ref(expr, schema) &&
+    !expr_has_mask_only_call(expr) && !expr_reaches_mask(expr)
+}
+
+# The notice's reason for a dot that reads no column and fails when evaluated
+# outside the data mask.
+filter_free_dot_failed_reason <- paste0(
+  "a predicate that reads no column fails outside the data mask ",
+  "(it may use pick(), n() or cur_*() inside a function); dplyr evaluates it."
+)
+
+# F82: the dots handed to dplyr when filter_run() sends the call there after
+# evaluating its column-free dots (`inline`: values recorded by expanded
+# position and the expansion's provenance). A dot passed through unchanged whose
+# recorded value is a logical without dim and of vctrs size 1 or `n` is replaced
+# by that value, so dplyr does not evaluate it again; it stays UNNAMED (dplyr
+# rejects a named filter input). Anything else stays as written.
+# @keywords internal
+filter_inline_evaluated <- function(dots, inline, n) {
+  if (is.null(inline)) {
+    return(dots)
+  }
+  prov <- inline$provenance
+  for (d in seq_along(dots)) {
+    idx <- which(prov$origin == d)
+    if (length(idx) != 1L || !identical(prov$kind[idx], "dot") ||
+        !(as.character(idx) %in% names(inline$consts))) {
+      next
+    }
+    value <- inline$consts[[as.character(idx)]]$value
+    size <- NA_integer_
+    if (is.logical(value) && is.null(dim(value))) {
+      size <- tryCatch(vctrs::vec_size(value), error = function(e) NA_integer_)
+    }
+    if (!size %in% c(1L, n)) {
+      next
+    }
+    dots[[d]] <- rlang::new_quosure(value, rlang::quo_get_env(dots[[d]]))
+  }
+  dots
 }
 
 # Internal: TRUE iff a (non-window, non-constant) dot's IR is not a logical
@@ -1122,14 +1233,16 @@ rewrite_top_n_rank_dot <- function(dot, schema) {
 }
 
 # Why the `wt` of a top_n_rank(n, wt) dot must go to dplyr whole, or NULL.
-# Parsing a dot folds its column-free parts and filter()'s own route evaluates
-# it again standalone, so a `wt` that dplyr would run once is run twice or
-# more. Three kinds of `wt` are therefore never parsed: one that calls a
-# function of `deferred_fallback_fns` (pick, c_across, cur_group,
-# cur_group_rows, cur_data, cur_data_all), one with a column-free call that
-# impure_const_call_text() reports, and one with a `.env` subscript holding a
-# call (top_n_env_call_subscript()). All three checks see the quosures
-# embedded in `wt` (`{{ }}`), each with its own env. Evaluates nothing.
+# The rewrite to `min_rank() <= n` parses `wt` (and the rewritten dot parses it
+# again, as filter_run() does), and each parse folds the column-free parts of
+# `wt`, so a `wt` that dplyr runs once would run several times. Three kinds of
+# `wt` are therefore never parsed: one that calls a function of
+# `deferred_fallback_fns` (pick, c_across, cur_group, cur_group_rows, cur_data,
+# cur_data_all), one with a `.env` subscript holding a call
+# (top_n_env_call_subscript()), and one with a column-free call that
+# impure_const_call_text() reports, checked in that order. All three checks see
+# the quosures embedded in `wt` (`{{ }}`), each with its own env. Evaluates
+# nothing.
 # @param wt list(expr, env) of the dot's `wt`, as top_n_unwrap() returns it
 # @param schema the schema of the table being filtered
 # @keywords internal
@@ -1140,20 +1253,17 @@ top_n_wt_decline <- function(wt, schema) {
     return(sprintf("`wt` calls %s, which dplyr evaluates inside the data mask",
                    paste0(deferred[[1L]], "()")))
   }
-  impure <- impure_const_call_text(list(rlang::new_quosure(wt$expr, wt$env)), schema, grouped = FALSE)
-  if (!is.null(impure)) return(impure)
   pronoun <- top_n_env_call_subscript(wt$expr)
   if (!is.null(pronoun)) {
     return(sprintf("`wt` reads `%s`, whose subscript dplyr evaluates inside the data mask",
                    substr(paste(deparse(pronoun), collapse = " "), 1L, 60L)))
   }
-  NULL
+  impure_const_call_text(list(rlang::new_quosure(wt$expr, wt$env)), schema, grouped = FALSE)
 }
 
 # The first `.env[[s]]` in `expr` (through embedded quosures) whose subscript
-# `s` contains a call, or NULL. The purity walk doesn't look inside an `.env`
-# pronoun call (is_env_pronoun_call()), and the parser can't use such a
-# subscript: filter() folds the dot and then evaluates it again standalone.
+# `s` contains a call, or NULL. The parser can't use such a subscript, and
+# the notice for it names the pronoun.
 # `.env[s]` is not a pronoun call, so the purity walk already reaches its
 # subscript; `.env$s` takes a name. A string or a bare name as the subscript is
 # not reported. An empty argument (`m[, 1]`, `switch(k, a = , x)`) is skipped.

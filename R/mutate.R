@@ -938,10 +938,10 @@ plan_mutate_window_batches <- function(exprs, schema) {
 mutate_window_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo,
                                    reason = "a window call in this mutate() has no GPU plan (its stages cannot be lowered).") {
   gpu_fallback("mutate", .data, function(tbl) {
-    rlang::inject(dplyr::mutate(
+    dplyr::mutate(
       .data = tbl, !!!dots, .by = !!by_quo, .keep = keep,
       .before = !!before_quo, .after = !!after_quo
-    ))
+    )
   }, reason = reason)
 }
 
@@ -955,10 +955,10 @@ mutate_window_fallback <- function(.data, dots, keep, before_quo, after_quo, by_
 # @keywords internal
 mutate_across_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo) {
   gpu_fallback("mutate", .data, function(tbl) {
-    rlang::inject(dplyr::mutate(
+    dplyr::mutate(
       .data = tbl, !!!dots, .by = !!by_quo, .keep = keep,
       .before = !!before_quo, .after = !!after_quo
-    ))
+    )
   }, reason = fallback_failed_reason(dots, across_fallback_default))
 }
 
@@ -982,10 +982,10 @@ mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_qu
   gpu_fallback("mutate", .data, function(tbl) {
     # Inlined here, where the row count is known (see inline_evaluated_dots()).
     dots <- inline_evaluated_dots(dots, consts, provenance, nrow(tbl))
-    rlang::inject(dplyr::mutate(
+    dplyr::mutate(
       .data = tbl, !!!dots, .by = !!by_quo, .keep = keep,
       .before = !!before_quo, .after = !!after_quo
-    ))
+    )
   }, reason = reason)
 }
 
@@ -1477,6 +1477,8 @@ expr_may_read_cols <- function(expr, cols) {
 # naming a column as a symbol: pick(), a nested across() and friends,
 # cur_data(), get()/mget()/exists(), eval(), environment()... Such a dot's
 # value depends on the mask, so it can't be computed outside it either.
+# (`local()` is not one: its body sees the mask as plain symbols, which the
+# column tests find, and any of these calls inside it is found by the walk.)
 # @keywords internal
 expr_reaches_mask <- function(expr) {
   mask_wide <- c(
@@ -1484,7 +1486,7 @@ expr_reaches_mask <- function(expr) {
     "cur_group", "get", "get0", "mget", "exists", "dynGet", "eval", "evalq",
     "eval_tidy", "eval_bare", "parse", "str2lang", "str2expression",
     "environment", "parent.frame", "sys.frame", "sys.frames", "sys.function",
-    "as.environment", "ls", "objects", "local", "with", "within",
+    "as.environment", "ls", "objects", "with", "within",
     "do.call", "match.fun"
   )
   walk <- function(e) {
@@ -1763,6 +1765,26 @@ set_schema_factor_levels <- function(schema, name, levels) {
   schema
 }
 
+# dplyr's transmute.data.frame() starts with check_transmute_args(...), which
+# rejects mutate()'s `.keep`, `.before` and `.after`, in that order, by the
+# names written in the call (one spliced with `!!!` is a column there). The
+# same check at entry, forcing no dot: native transmute would make a column of
+# them, and the CPU route's direct splice hides the names from dplyr's own
+# check (the splice rule after pronoun_call_name(), R/ir.R).
+# @keywords internal
+check_transmute_dots <- function(..., .keep, .before, .after, error_call = rlang::caller_env()) {
+  if (!missing(.keep)) {
+    rlang::abort("The `.keep` argument is not supported.", call = error_call)
+  }
+  if (!missing(.before)) {
+    rlang::abort("The `.before` argument is not supported.", call = error_call)
+  }
+  if (!missing(.after)) {
+    rlang::abort("The `.after` argument is not supported.", call = error_call)
+  }
+  invisible()
+}
+
 #' Create a new GPU table with only the specified columns
 #'
 #' Computes new columns (or replaces existing ones) from expressions, like
@@ -1802,6 +1824,7 @@ set_schema_factor_levels <- function(schema, name, levels) {
 #'     collect()
 #' }
 transmute.tbl_gpu <- function(.data, ...) {
+  check_transmute_dots(...)
   p <- sys.parent()
   inform_colwise_grouped(.data, "transmute", if (p > 0L) sys.function(p))
   check_unique_input_names(.data)
@@ -1818,7 +1841,7 @@ transmute.tbl_gpu <- function(.data, ...) {
     # else the whole call in dplyr
     cpu <- function(detail = NULL) {
       gpu_fallback("transmute", .data, function(tbl) {
-        rlang::inject(dplyr::transmute(.data = tbl, !!!dots))
+        dplyr::transmute(.data = tbl, !!!dots)
       }, reason = detail)
     }
     # F77: a function of the user's with a native op's name runs in dplyr
@@ -1853,7 +1876,7 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
 
   if (length(dots) > 0L && is_zero_column_with_rows(.data)) {
     return(gpu_fallback("transmute", .data, function(tbl) {
-      rlang::inject(dplyr::transmute(.data = tbl, !!!dots))
+      dplyr::transmute(.data = tbl, !!!dots)
     }, reason = "the table has no columns but has rows."))
   }
 
@@ -1868,7 +1891,7 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
     shadowed <- shadow_screen_text(dots)
     if (!is.null(shadowed)) {
       return(gpu_fallback("transmute", .data, function(tbl) {
-        rlang::inject(dplyr::transmute(.data = tbl, !!!dots))
+        dplyr::transmute(.data = tbl, !!!dots)
       }, reason = shadowed))
     }
   }
@@ -1879,7 +1902,7 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
     impure <- impure_const_call_text(dots, current_schema(.data))
     if (!is.null(impure)) {
       return(gpu_fallback("transmute", .data, function(tbl) {
-        rlang::inject(dplyr::transmute(.data = tbl, !!!dots))
+        dplyr::transmute(.data = tbl, !!!dots)
       }, reason = impure))
     }
   }
@@ -1891,13 +1914,13 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
   dots <- rewrite_context_dots(dots, eff_groups, sequential = TRUE, name_unnamed = TRUE)
   if (dots_need_fallback(dots)) {
     return(gpu_fallback("transmute", .data, function(tbl) {
-      rlang::inject(dplyr::transmute(.data = tbl, !!!user_dots))
+      dplyr::transmute(.data = tbl, !!!user_dots)
     }, reason = fallback_failed_reason(user_dots, across_fallback_default)))
   }
   expanded <- expand_across_dots(dots, current_schema(.data), eff_groups, "transmute")
   if (isTRUE(attr(expanded, "needs_fallback"))) {
     return(gpu_fallback("transmute", .data, function(tbl) {
-      rlang::inject(dplyr::transmute(.data = tbl, !!!user_dots))
+      dplyr::transmute(.data = tbl, !!!user_dots)
     }, reason = fallback_failed_reason(user_dots, across_fallback_default)))
   }
   # As in mutate.tbl_gpu(): the CPU fallback runs on the pre-substitution
@@ -1930,7 +1953,7 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
   if (is.null(expressions) || isTRUE(attr(expressions, "has_window"))) {
     return(gpu_fallback("transmute", fallback_data, function(tbl) {
       dots_cpu <- inline_evaluated_dots(fallback_dots, evaluated$consts, provenance, nrow(tbl))
-      rlang::inject(dplyr::transmute(.data = tbl, !!!dots_cpu))
+      dplyr::transmute(.data = tbl, !!!dots_cpu)
     }, reason = if (is.null(expressions)) {
       fallback_failed_reason(fallback_dots, "an expression has a form the GPU engine does not support.")
     } else {

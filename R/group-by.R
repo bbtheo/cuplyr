@@ -120,6 +120,7 @@
 #' }
 group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
                              .drop = dplyr::group_by_drop_default(.data)) {
+  check_group_by_dots(..., .add = .add, error_call = NULL)
   dots <- rlang::enquos(...)
 
   # dplyr's group_by() (with or without dots) rebuilds the table with tibble,
@@ -154,12 +155,6 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   dot_names <- names(dots)
   if (is.null(dot_names)) {
     dot_names <- rep("", length(dots))
-  }
-  if (any(c("add", ".dots") %in% dot_names)) {
-    if ("add" %in% dot_names) {
-      lifecycle::deprecate_stop("1.0.0", "group_by(add = )", "group_by(.add = )")
-    }
-    lifecycle::deprecate_stop("1.0.0", "group_by(.dots = )")
   }
   is_named <- !is.na(dot_names) & dot_names != ""
 
@@ -200,7 +195,7 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
     } else if (is.symbol(expr)) {
       kind[i] <- "var"
       var_name[i] <- as.character(expr)
-    } else if (is_data_pronoun_call(expr)) {
+    } else if (is_data_pronoun_call(expr) && !is.null(pronoun_call_name(expr))) {
       # `.data[[var]]` arrives as `.data[["name"]]`: rlang evaluates the
       # subscript when capturing the quosure
       kind[i] <- "var"
@@ -225,7 +220,9 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   working <- .data
   if (any(is_comp)) {
     comp_dots <- stats::setNames(dots[is_comp], comp_names[is_comp])
-    working <- rlang::inject(dplyr::mutate(dplyr::ungroup(working), !!!comp_dots))
+    # (spliced by mutate()'s own capture, so a raw `.data[[k]]` reads the
+    # quosure's `k`, see the splice rule after pronoun_call_name(), R/ir.R)
+    working <- dplyr::mutate(dplyr::ungroup(working), !!!comp_dots)
     if (!is_tbl_gpu(working)) {
       return(group_by_fallback("the computed grouping columns could not be built on the GPU."))
     }
@@ -306,6 +303,36 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
     nrow = working[["nrow"]],
     unspecified = working[["unspecified"]]
   ), .data, attrs = keep_attrs, bare = FALSE)
+}
+
+# dplyr's group_by.data.frame() hands its `...` to group_by_prepare(.data, ...,
+# .add = .add, error_call = current_env()), which rejects the defunct `add` and
+# `.dots` before it captures anything. This stub has that call's formals, so
+# called with a verb's own `...` R matches the dots exactly as there: a dot
+# named `error_call` is R's "matched by multiple actual arguments" error, one
+# named `add`/`.dots` dplyr's lifecycle error. Only names written in the call
+# count, as in dplyr: a name spliced with `!!!` reaches the capture and is a
+# grouping column. Forces no dot. It runs at the method's entry because the CPU
+# route splices the captured dots directly, which hides their names from
+# dplyr's own check (the splice rule after pronoun_call_name(), R/ir.R).
+# @keywords internal
+check_group_by_dots <- function(..., .add, .dots, add, error_call) {
+  if (!missing(add)) {
+    lifecycle::deprecate_stop("1.0.0", "group_by(add = )", "group_by(.add = )",
+                              env = asNamespace("dplyr"))
+  }
+  if (!missing(.dots)) {
+    lifecycle::deprecate_stop("1.0.0", "group_by(.dots = )", env = asNamespace("dplyr"))
+  }
+  invisible()
+}
+
+# The same for count() and add_count(), whose dplyr methods regroup with
+# `group_by(x, ..., .add = TRUE)`: R's matching of that call rejects a dot
+# named `.add` first.
+# @keywords internal
+check_regroup_dots <- function(..., .add) {
+  check_group_by_dots(..., .add = .add, error_call = NULL)
 }
 
 #' Remove grouping from a GPU table

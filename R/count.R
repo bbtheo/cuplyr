@@ -268,6 +268,9 @@ build_count_agg_call <- function(wt_quo, schema, for_mutate = FALSE) {
 #' }
 count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
                           .drop = dplyr::group_by_drop_default(x)) {
+  # (dplyr's group_by() checks of the names written in `...`, before anything
+  # is captured; see check_group_by_dots())
+  check_regroup_dots(..., .add = TRUE)
   if (is_rowwise_gpu(x)) {
     return(rowwise_cpu(x, "count"))
   }
@@ -285,8 +288,7 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
   resolved <- if (is.null(shadowed)) resolve_grouping_dots(x, dots)
   if (is.null(resolved)) {
     return(gpu_fallback("count", x, function(tbl) {
-      rlang::inject(dplyr::count(tbl, !!!dots, wt = !!wt_quo, sort = sort,
-                                 name = name, .drop = .drop))
+      dplyr::count(tbl, !!!dots, wt = !!wt_quo, sort = sort, name = name, .drop = .drop)
     }, reason = shadowed %||% fallback_failed_reason(
       dots, "a grouping expression has a form the GPU engine does not support."
     )))
@@ -320,7 +322,9 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
   on.exit(options(dplyr.summarise.inform = old_opt), add = TRUE)
   options(dplyr.summarise.inform = FALSE)
 
-  result <- rlang::inject(dplyr::summarise(grouped, !!agg_name := !!agg_call))
+  # (spliced by summarise()'s own capture, as dplyr's tally() does: `wt` is not
+  # walked again in this frame, see the splice rule after pronoun_call_name(), R/ir.R)
+  result <- dplyr::summarise(grouped, !!agg_name := !!agg_call)
   out_groups <- set_intersect(orig_groups, result$schema$names)
 
   if (isTRUE(sort)) {
@@ -402,7 +406,7 @@ tally.tbl_gpu <- function(x, wt = NULL, sort = FALSE, name = NULL) {
   on.exit(options(dplyr.summarise.inform = old_opt), add = TRUE)
   options(dplyr.summarise.inform = FALSE)
 
-  result <- rlang::inject(dplyr::summarise(x, !!agg_name := !!agg_call))
+  result <- dplyr::summarise(x, !!agg_name := !!agg_call)
 
   if (isTRUE(sort)) {
     result <- dplyr::arrange(result, dplyr::desc(!!rlang::sym(agg_name)))
@@ -460,6 +464,8 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
     stop("`add_count(.drop = )` was deprecated in dplyr 1.0.0 and is no ",
          "longer accepted.", call. = FALSE)
   }
+  # (as count(), after `.drop` as in dplyr's add_count_impl())
+  check_regroup_dots(..., .add = TRUE)
 
   dots <- rlang::enquos(...)
   wt_quo <- rlang::enquo(wt)
@@ -473,8 +479,7 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
   resolved <- if (is.null(shadowed)) resolve_grouping_dots(x, dots)
   if (is.null(resolved)) {
     return(gpu_fallback("add_count", x, function(tbl) {
-      rlang::inject(dplyr::add_count(tbl, !!!dots, wt = !!wt_quo, sort = sort,
-                                     name = name))
+      dplyr::add_count(tbl, !!!dots, wt = !!wt_quo, sort = sort, name = name)
     }, reason = shadowed %||% fallback_failed_reason(
       dots, "a grouping expression has a form the GPU engine does not support."
     )))
@@ -497,7 +502,7 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
     on.exit(fallback_notice_restore(prev_as), add = TRUE)
   }
 
-  result <- rlang::inject(dplyr::mutate(grouped, !!agg_name := !!agg_call))
+  result <- dplyr::mutate(grouped, !!agg_name := !!agg_call)
 
   if (isTRUE(sort)) {
     result <- dplyr::arrange(result, dplyr::desc(!!rlang::sym(agg_name)))
