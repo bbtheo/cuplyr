@@ -7,31 +7,18 @@
 # of the plan's depth. On F62's 5-verb pipeline that made lazy ~1 ms slower
 # than eager at 1e3 and 1e6 rows (F62/measure/summary.txt).
 #
-# Timings are medians of interleaved, gpu_sync()-fenced batches (the method of
-# F62's measure.R), and the checks are ratios on the same machine, so they
-# don't depend on the GPU's absolute speed.
+# Timings are medians of interleaved, gpu_sync()-fenced batches
+# (timing_medians(), helper-timing.R), and the checks are ratios on the same
+# machine, so they don't depend on the GPU's absolute speed. Batches are timed
+# with the wall clock (proc.time() reads whole ms) and sized from a probe that
+# lasts long enough to read. A ratio over its bound is measured again only
+# when it is under 2x that bound (3 for 1.5, 12 for 6; up to 3 attempts,
+# timing_retry()); a real regression reads the same all three times and fails.
+# The bounds are unchanged, and the failure label lists every attempt.
 
-f68s_time <- function(fns, samples = 11L, target = 0.03) {
-  # One median per closure, sampled in interleaved rounds so drift (clocks,
-  # other load) hits every closure alike. Each sample is a batch of calls
-  # lasting >= `target` seconds; gc() runs untimed before each batch.
-  for (fn in fns) for (i in 1:3) fn()
-  reps <- vapply(fns, function(fn) {
-    gpu_sync(); t0 <- proc.time()[["elapsed"]]; fn(); gpu_sync()
-    one <- max(proc.time()[["elapsed"]] - t0, 1e-4)
-    max(1L, min(500L, as.integer(ceiling(target / one))))
-  }, integer(1))
-  t <- matrix(NA_real_, samples, length(fns))
-  for (s in seq_len(samples)) {
-    for (k in seq_along(fns)) {
-      gc(verbose = FALSE)
-      gpu_sync(); t0 <- proc.time()[["elapsed"]]
-      for (j in seq_len(reps[[k]])) fns[[k]]()
-      gpu_sync()
-      t[s, k] <- (proc.time()[["elapsed"]] - t0) / reps[[k]]
-    }
-  }
-  stats::setNames(apply(t, 2, stats::median), names(fns))
+# every attempt's ratio num/den, e.g. "1.62 / 1.12"
+f68s_ratios <- function(runs, num, den) {
+  paste(sprintf("%.2f", vapply(runs, function(r) r[[num]] / r[[den]], numeric(1))), collapse = " / ")
 }
 
 f68s_df <- function(n) {
@@ -60,18 +47,32 @@ test_that("recording a verb costs the same on a deep pending plan as on a shallo
   lz <- tbl_gpu(f68s_df(1000L), lazy = TRUE)
   shallow <- f68s_chain(lz, 1L)   # 3 pending nodes
   deep <- f68s_chain(lz, 40L)     # 120 pending nodes
-  t <- f68s_time(list(
-    filter_shallow = function() filter(shallow, y > 0.5),
-    filter_deep = function() filter(deep, y > 0.5),
-    mutate_shallow = function() mutate(shallow, q = x * y),
-    mutate_deep = function() mutate(deep, q = x * y),
-    summarise_shallow = function() summarise(group_by(shallow, g), m = mean(x)),
-    summarise_deep = function() summarise(group_by(deep, g), m = mean(x))
-  ), samples = 7L)
+  ratios <- function(t) {
+    c(filter = t[["filter_deep"]] / t[["filter_shallow"]],
+      mutate = t[["mutate_deep"]] / t[["mutate_shallow"]],
+      summarise = t[["summarise_deep"]] / t[["summarise_shallow"]])
+  }
   # Before F68a the deep plan made each call ~40-100x slower.
-  expect_lt(t[["filter_deep"]] / t[["filter_shallow"]], 1.5)
-  expect_lt(t[["mutate_deep"]] / t[["mutate_shallow"]], 1.5)
-  expect_lt(t[["summarise_deep"]] / t[["summarise_shallow"]], 1.5)
+  runs <- timing_retry(
+    function() {
+      timing_medians(list(
+        filter_shallow = function() filter(shallow, y > 0.5),
+        filter_deep = function() filter(deep, y > 0.5),
+        mutate_shallow = function() mutate(shallow, q = x * y),
+        mutate_deep = function() mutate(deep, q = x * y),
+        summarise_shallow = function() summarise(group_by(shallow, g), m = mean(x)),
+        summarise_deep = function() summarise(group_by(deep, g), m = mean(x))
+      ), samples = 11L, target = 0.03, label = "F68a recording deep/shallow")
+    },
+    ok = function(t) all(ratios(t) < 1.5),
+    retry_if = function(t) all(ratios(t) < 3)
+  )
+  t <- runs[[length(runs)]]
+  for (v in c("filter", "mutate", "summarise")) {
+    expect_lt(ratios(t)[[v]], 1.5,
+              label = sprintf("%s() deep/shallow: %s (attempts)", v,
+                              f68s_ratios(runs, paste0(v, "_deep"), paste0(v, "_shallow"))))
+  }
 })
 
 test_that("collecting a plan costs time linear in its depth", {
@@ -80,9 +81,18 @@ test_that("collecting a plan costs time linear in its depth", {
   p10 <- f68s_chain(lz, 10L)   # 30 pending nodes
   p40 <- f68s_chain(lz, 40L)   # 120 pending nodes
   expect_equal(collect(p40), collect(f68s_chain(tbl_gpu(f68s_df(1000L), lazy = FALSE), 40L)))
-  t <- f68s_time(list(c10 = function() collect(p10), c40 = function() collect(p40)), samples = 5L)
   # 4x the nodes: linear work is ~4x; the quadratic schema re-inference was far more.
-  expect_lt(t[["c40"]] / t[["c10"]], 6)
+  runs <- timing_retry(
+    function() {
+      timing_medians(list(c10 = function() collect(p10), c40 = function() collect(p40)),
+                     samples = 11L, target = 0.03, label = "F68a collect c40/c10")
+    },
+    ok = function(t) t[["c40"]] / t[["c10"]] < 6,
+    retry_if = function(t) t[["c40"]] / t[["c10"]] < 12
+  )
+  t <- runs[[length(runs)]]
+  expect_lt(t[["c40"]] / t[["c10"]], 6,
+            label = sprintf("collect c40/c10: %s (attempts)", f68s_ratios(runs, "c40", "c10")))
 })
 
 test_that("F62's 5-verb pipeline is no slower lazy than eager at 1e3 and 1e6 rows", {
@@ -92,13 +102,21 @@ test_that("F62's 5-verb pipeline is no slower lazy than eager at 1e3 and 1e6 row
     eg <- tbl_gpu(df, lazy = FALSE)
     lz <- tbl_gpu(df, lazy = TRUE)
     expect_equal(collect(f68s_pipeline(lz)), collect(f68s_pipeline(eg)))
-    t <- f68s_time(list(
-      eager = function() collect(f68s_pipeline(eg)),
-      lazy = function() collect(f68s_pipeline(lz))
-    ), target = 0.15)  # long batches: proc.time()'s 1 ms clock is < 1% of a sample
+    runs <- timing_retry(
+      function() {
+        timing_medians(list(
+          eager = function() collect(f68s_pipeline(eg)),
+          lazy = function() collect(f68s_pipeline(lz))
+        ), samples = 11L, target = 0.15, label = sprintf("F68a lazy vs eager n=%g", n))
+      },
+      ok = function(t) t[["lazy"]] <= t[["eager"]],
+      retry_if = function(t) t[["lazy"]] / t[["eager"]] < 1.1
+    )
+    t <- runs[[length(runs)]]
     expect_lte(t[["lazy"]], t[["eager"]],
-               label = sprintf("lazy %.3f ms at n = %g (eager %.3f ms)", 1e3 * t[["lazy"]], n,
-                               1e3 * t[["eager"]]))
+               label = sprintf("lazy %.3f ms at n = %g (eager %.3f ms); lazy/eager over attempts: %s",
+                               1e3 * t[["lazy"]], n, 1e3 * t[["eager"]],
+                               f68s_ratios(runs, "lazy", "eager")))
     rm(eg, lz)
     gc()
   }

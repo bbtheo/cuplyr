@@ -10,25 +10,36 @@
 # -----------------------------------------------------------------------------
 
 test_that("perf_time() resolves sub-millisecond differences between calls", {
-  # Sys.sleep(0.0025) measures 2.55-2.65 ms per call on this machine (median
-  # of 20-call batches, 200 batches): overshoot is ~0.05-0.15 ms and is
-  # common to both closures below, so it cancels in the difference. A
-  # single-call 1 ms timer reports 0.002 vs 0.003 here (difference 1 ms) or
-  # two equal values (difference 0). Comparing a difference rather than
-  # absolute bounds keeps this robust to scheduler load (round-1 review N4).
-  short <- perf_time(function() Sys.sleep(0.0022), iterations = 5, warmup = 1)
-  long <- perf_time(function() Sys.sleep(0.0027), iterations = 5, warmup = 1)
-  expect_true(is.numeric(short))
-  expect_length(short, 1)
-  short <- as.numeric(short)
-  long <- as.numeric(long)
-  expect_gt(long - short, 0.00025)
-  expect_lt(long - short, 0.00075)
-  expect_gt(short, 0.0021)
-  # Sys.sleep(0.0022) is ~2.27 ms; 0.73 ms headroom for overshoot under load,
-  # still tight enough to catch a constant per-call overhead in perf_time()
-  # (round-2 review N4).
-  expect_lt(short, 0.0030)
+  # The fixture busy-waits on the wall clock, so each call lasts its time on any
+  # core at any speed; only a descheduling across the deadline overshoots. It
+  # replaces Sys.sleep(), whose overshoot is the kernel's (timer slack and
+  # wake-up latency), differs between the two closures and between their two
+  # sequential measurements: solo dev runs read a long - short difference of
+  # 0.748 and 0.727 ms against the 0.75 ms cap (F106). The pair is measured 3
+  # times, interleaved, and the median difference is asserted: a single-call
+  # 1 ms timer reports 0.002 vs 0.003 here (difference 1 ms) or two equal
+  # values (difference 0), and a constant per-call overhead in perf_time()
+  # shows in `short`.
+  short <- numeric(3)
+  long <- numeric(3)
+  raw <- perf_time(function() timing_spin(0.0022), iterations = 5, warmup = 1)
+  expect_true(is.numeric(raw) && length(raw) == 1L)
+  for (i in 1:3) {
+    short[[i]] <- as.numeric(perf_time(function() timing_spin(0.0022), iterations = 5, warmup = 1))
+    long[[i]] <- as.numeric(perf_time(function() timing_spin(0.0027), iterations = 5, warmup = 1))
+  }
+  diff_ms <- 1e3 * (long - short)
+  d <- stats::median(long - short)
+  s <- stats::median(short)
+  lbl <- sprintf("long - short per pair: %s ms; short per pair: %s ms",
+                 paste(sprintf("%.3f", diff_ms), collapse = " / "),
+                 paste(sprintf("%.3f", 1e3 * short), collapse = " / "))
+  expect_gt(d, 0.00025, label = lbl)
+  expect_lt(d, 0.00075, label = lbl)
+  expect_gt(s, 0.0021, label = lbl)
+  # timing_spin(0.0022) is ~2.2 ms; 0.8 ms headroom for overshoot under load, still
+  # tight enough to catch a constant per-call overhead in perf_time().
+  expect_lt(s, 0.0030, label = lbl)
 })
 
 test_that("perf_time() batches short calls so each timed sample is >= ~50 ms", {

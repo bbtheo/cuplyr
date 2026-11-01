@@ -1252,7 +1252,12 @@ gc_gpu()                   # Force GPU garbage collection
 gpu_memory_snapshot()      # Device-level memory state (a pool hides it; see "Memory resource")
 gpu_alloc_snapshot()       # Allocator-level state (pool_used_bytes), what memory tests should use
 run_with_pool_off(fn)      # Run fn in a subprocess with the memory pool off (device-level claims)
+timing_now()               # Wall clock in seconds, sub-microsecond resolution (helper-timing.R)
+timing_spin(s)             # Busy-wait s seconds on the wall clock (a steadier stand-in for Sys.sleep())
+timing_medians(fns, ...)   # Median per-call seconds per closure: interleaved, fenced, ~50 ms batches
+timing_retry(measure, ok, retry_if)  # Re-measure near misses a bounded number of times; far misses fail at once
 ```
+New timing tests should use these rather than proc.time() loops.
 
 ### Test Pattern
 ```r
