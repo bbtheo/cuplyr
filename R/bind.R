@@ -365,36 +365,23 @@ bind_cols_gpu_run <- function(dots, .name_repair, call) {
     return(if (bind_has_meta(first)) carry_frame_meta(out, first) else out)
   }
 
-  # Convert data frames and vectors to tbl_gpu and recycle size-1 inputs.
-  col_names <- vector("list", length(keep))
-  pieces <- vector("list", length(keep))
-  for (j in seq_along(keep)) {
-    i <- keep[[j]]
+  # Column names and their repair come first: an upload's warnings (fractional
+  # / +-Inf / out-of-range dates) name the columns of the result, so each piece
+  # goes up under its repaired name.
+  col_names <- lapply(keep, function(i) {
     x <- dots[[i]]
-    if (is_gpu[[i]]) {
-      if (sizes[[i]] != n) {
-        x <- dplyr_row_slice.tbl_gpu(x, rep(1L, n))
-      }
-      col_names[[j]] <- x$schema$names
-    } else if (is.data.frame(x)) {
-      if (sizes[[i]] != n) {
-        x <- vctrs::vec_recycle(x, n)
-      }
-      col_names[[j]] <- names(x)
-      x <- upload_other_side(x, lazy = FALSE)
-    } else {
-      col_names[[j]] <- nms[[i]]
-      col <- vctrs::vec_recycle(x, n, x_arg = nms[[i]])
-      x <- tbl_gpu(vctrs::new_data_frame(list(value = col), n = n), lazy = FALSE)
-    }
-    pieces[[j]] <- x
-  }
-
-  # Collect column names and handle duplicates
-  all_names <- unlist(col_names)
+    if (is_gpu[[i]]) x$schema$names
+    else if (is.data.frame(x)) names(x)
+    else nms[[i]]
+  })
+  # (use.names = FALSE: a named input would otherwise name `schema$names`.)
+  all_names <- unlist(col_names, use.names = FALSE)
   repaired_names <- repair_names(all_names, .name_repair)
+  at <- cumsum(c(0L, lengths(col_names)))
 
   # dplyr regroups the output with tibble, which refuses duplicated names.
+  # Checked before the uploads, whose warnings would describe a table that
+  # never exists.
   if (is_tbl_gpu(first) && length(first$groups) > 0L && anyDuplicated(repaired_names) > 0L) {
     dups <- unique(repaired_names[duplicated(repaired_names)])
     rlang::abort(
@@ -404,6 +391,32 @@ bind_cols_gpu_run <- function(dots, .name_repair, call) {
       class = c("tibble_error_column_names_must_be_unique", "tibble_error"),
       call = call
     )
+  }
+
+  # Convert data frames and vectors to tbl_gpu and recycle size-1 inputs.
+  pieces <- vector("list", length(keep))
+  for (j in seq_along(keep)) {
+    i <- keep[[j]]
+    x <- dots[[i]]
+    piece_names <- repaired_names[at[[j]] + seq_along(col_names[[j]])]
+    if (is_gpu[[i]]) {
+      if (sizes[[i]] != n) {
+        x <- dplyr_row_slice.tbl_gpu(x, rep(1L, n))
+      }
+    } else if (is.data.frame(x)) {
+      if (sizes[[i]] != n) {
+        x <- vctrs::vec_recycle(x, n)
+      }
+      # (an upload keeps no grouping of a non-first input, so names<- is safe)
+      if (dplyr::is_grouped_df(x)) x <- dplyr::ungroup(x)
+      names(x) <- piece_names
+      x <- upload_other_side(x, lazy = FALSE)
+    } else {
+      col <- vctrs::vec_recycle(x, n, x_arg = nms[[i]])
+      x <- tbl_gpu(vctrs::new_data_frame(rlang::set_names(list(col), piece_names), n = n),
+                   lazy = FALSE)
+    }
+    pieces[[j]] <- x
   }
 
   # Collect types (unname to avoid issues)

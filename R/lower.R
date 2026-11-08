@@ -184,6 +184,10 @@ lower_mutate <- function(ast, source_ptr) {
       tmp_cols[[tmp_names[k]]] <- vec$value
       expressions[[vec_idx[k]]]$ir <- ir_col(tmp_names[k])
     }
+    # The upload's names only matter for its warnings (fractional / +-Inf /
+    # out-of-range Dates), which should name the user's output columns, not
+    # the temps; the pointer and types are positional.
+    names(tmp_cols) <- out_names[vec_idx]
     upload <- tbl_gpu(tibble::as_tibble(tmp_cols, .name_repair = "minimal"), lazy = FALSE)
     input_ptr <- gpu_bind_cols_impl(list(input_ptr, upload$ptr))
     input_schema$names <- c(input_schema$names, tmp_names)

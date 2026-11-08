@@ -1,5 +1,21 @@
 # cuplyr (development version)
 
+## Dates and times the GPU can't hold now warn (F81)
+
+* Uploading `Inf`/`-Inf` in a `Date` or `POSIXct` column used to give `NA`
+  silently. It now warns once per upload with
+  `cuplyr_warning_infinite_timestamp`, naming each column and its count.
+* A finite value beyond the GPU type (int32 days, int64 microseconds) used to
+  go through an undefined cast and could come back as a garbage date. It is now
+  `NA` with `cuplyr_warning_timestamp_out_of_range`. Both classes also inherit
+  `cuplyr_warning_timestamp_unrepresentable`. `NA` and `NaN` never warn.
+* A `POSIXct` literal that is `Inf` or out of range in `filter()` now matches
+  dplyr (it returned no rows, or a garbage date in `mutate()`), because the
+  expression runs on the CPU.
+* A whole-column Date constant in `mutate()` (`e = as.Date(c(1, Inf, 3))`) now
+  names `e` in its warnings, including the fractional-date one, instead of an
+  internal `..vec1..` name.
+
 ## summarise() of a computed logical keeps its type (F76)
 
 * `first()`, `last()` and `nth()` of a computed logical argument in `summarise()`

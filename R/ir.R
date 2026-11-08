@@ -4631,9 +4631,9 @@ ir_infer_type <- function(ir, schema) {
     if (is.null(type)) {
       return("BOOL8")
     }
-    # (both literal checks return at once unless the literal is a Date value
+    # (both literal checks return at once unless the literal is a Date or POSIXct value
     # or a Period/Duration/difftime object)
-    if (identical(unname(type), "TIMESTAMP_DAYS")) {
+    if (unname(type) %in% c("TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS")) {
       ir_check_ts_lit(ir)
     }
     value <- .subset2(ir, "value")
@@ -5569,16 +5569,28 @@ ir_check_ts_operands <- function(ir, arg_types) {
 # value in if_else()/coalesce()/... would be truncated rather than floored
 # like an upload (tbl_gpu()) is. So a Date literal with any non-whole (or
 # out of int32 range) value sends its expression to the CPU, where dplyr
-# compares the real value. NA values are fine (a null scalar). POSIXct
-# literals are left alone: build_scalar() rounds them to microseconds exactly
-# as posixct_to_gpu() rounds the columns they meet.
+# compares the real value. NA values are fine (a null scalar). A POSIXct
+# literal is rounded to microseconds by build_scalar() exactly as
+# posixct_to_gpu() rounds the columns they meet, so only one that is +-Inf or
+# beyond int64 microseconds (F81, the same range test as the upload) goes to
+# the CPU: filter() then gives dplyr's result, and a mutate() re-uploads the
+# value with the unrepresentable-timestamp warning.
 # @keywords internal
 ir_check_ts_lit <- function(ir) {
-  if (!identical(unname(ir$type), "TIMESTAMP_DAYS") || is.null(ir$value)) {
+  type <- unname(ir$type)
+  if (!(identical(type, "TIMESTAMP_DAYS") || identical(type, "TIMESTAMP_MICROSECONDS")) ||
+      is.null(ir$value)) {
     return(invisible())
   }
   v <- unclass(ir$value)
   v <- v[!is.na(v)]
+  if (identical(type, "TIMESTAMP_MICROSECONDS")) {
+    s <- v * 1e6
+    if (!all(is.finite(v) & s >= -2^63 & s < 2^63)) {
+      stop_timestamp_needs_cpu("a POSIXct value the GPU can't hold: not on the GPU.")
+    }
+    return(invisible())
+  }
   if (!all(is.finite(v) & v == trunc(v) & abs(v) <= .Machine$integer.max)) {
     stop_timestamp_needs_cpu("a Date value that isn't a whole day: not on the GPU.")
   }

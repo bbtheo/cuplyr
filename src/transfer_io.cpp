@@ -2,6 +2,7 @@
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
 #include "r_strings.hpp"
+#include "r_to_column.hpp"
 
 #include <cudf/null_mask.hpp>
 #include <cudf/column/column.hpp>
@@ -291,9 +292,11 @@ std::unique_ptr<column> logical_to_gpu(LogicalVector x) {
 
 // Create GPU column from R Date vector (days since epoch). TIMESTAMP_DAYS holds
 // whole days, so a fractional Date is floored (the calendar day R prints; a
-// truncating cast gives the wrong day below zero) and `saw_fraction` is set so
-// the R side can warn.
-std::unique_ptr<column> date_to_gpu(NumericVector x, bool& saw_fraction) {
+// truncating cast gives the wrong day below zero) and `up.saw_fraction` is set
+// so the R side can warn. NA and NaN are silent nulls; +-Inf and finite values
+// beyond int32 days are nulls too, counted in `up.infinite` / `up.out_of_range`
+// (the int32 cast of such a double is undefined behaviour).
+std::unique_ptr<column> date_to_gpu(NumericVector x, TimestampUpload& up) {
     size_type n = x.size();
 
     rmm::device_buffer data(n * sizeof(int32_t),
@@ -307,22 +310,25 @@ std::unique_ptr<column> date_to_gpu(NumericVector x, bool& saw_fraction) {
     const double* xp = REAL(x);
     for (size_type i = 0; i < n; ++i) {
         const double v = xp[i];
-        // NA, NaN and +-Inf are null: a TIMESTAMP_DAYS can't hold them, and
-        // the int32 cast of a non-finite double is undefined behaviour.
-        if (!std::isfinite(v)) {
-            days[i] = 0;
-            validity[i / 8] &= ~(1 << (i % 8));
-            null_count++;
-        } else {
+        // One range test (before the floor: equivalent to floor(v) fitting
+        // int32) that is false for NA, NaN and +-Inf, so only the rare branch
+        // tells those apart.
+        if (v >= -2147483648.0 && v < 2147483648.0) {
             // Whole days (the common case) round-trip through the truncating
             // cast; only the rest pay for floor().
             int32_t t = static_cast<int32_t>(v);
             if (static_cast<double>(t) != v) {
                 const double whole = std::floor(v);
-                if (whole != v) saw_fraction = true;
+                if (whole != v) up.saw_fraction = true;
                 t = static_cast<int32_t>(whole);
             }
             days[i] = t;
+        } else {
+            if (std::isinf(v)) up.infinite++;
+            else if (!std::isnan(v)) up.out_of_range++;
+            days[i] = 0;
+            validity[i / 8] &= ~(1 << (i % 8));
+            null_count++;
         }
     }
 
@@ -347,8 +353,9 @@ std::unique_ptr<column> date_to_gpu(NumericVector x, bool& saw_fraction) {
     );
 }
 
-// Create GPU column from R POSIXct vector (seconds since epoch)
-std::unique_ptr<column> posixct_to_gpu(NumericVector x) {
+// Create GPU column from R POSIXct vector (seconds since epoch). Nulls and
+// counts as in date_to_gpu(), against int64 microseconds.
+std::unique_ptr<column> posixct_to_gpu(NumericVector x, TimestampUpload& up) {
     size_type n = x.size();
 
     rmm::device_buffer data(n * sizeof(int64_t),
@@ -360,14 +367,16 @@ std::unique_ptr<column> posixct_to_gpu(NumericVector x) {
     size_type null_count = 0;
 
     for (size_type i = 0; i < n; ++i) {
-        // NA, NaN and +-Inf are null (see date_to_gpu()); llround() of an
-        // infinity is undefined.
-        if (!std::isfinite(x[i])) {
+        const double s = x[i] * 1e6;
+        // -2^63 and 2^63 are exact doubles; the test is false for NA/NaN/Inf.
+        if (s >= -9223372036854775808.0 && s < 9223372036854775808.0) {
+            micros[i] = static_cast<int64_t>(std::llround(s));
+        } else {
+            if (std::isinf(x[i])) up.infinite++;
+            else if (!std::isnan(x[i])) up.out_of_range++;
             micros[i] = 0;
             validity[i / 8] &= ~(1 << (i % 8));
             null_count++;
-        } else {
-            micros[i] = static_cast<int64_t>(std::llround(x[i] * 1e6));
         }
     }
 
@@ -744,6 +753,23 @@ NumericVector int64_bits_to_double(NumericVector x) {
     return out;
 }
 
+static void note_unrepresentable(const cuplyr::TimestampUpload& up, int col,
+                                 std::vector<int>& inf_cols, std::vector<double>& inf_n,
+                                 std::vector<int>& oor_cols, std::vector<double>& oor_n) {
+    if (up.infinite > 0) { inf_cols.push_back(col); inf_n.push_back(static_cast<double>(up.infinite)); }
+    if (up.out_of_range > 0) { oor_cols.push_back(col); oor_n.push_back(static_cast<double>(up.out_of_range)); }
+}
+
+// `attr` = integer column indices carrying a double `counts` attribute.
+static void set_count_attr(SEXP out, const char* attr,
+                           const std::vector<int>& cols, const std::vector<double>& counts) {
+    if (cols.empty()) return;
+    Rcpp::Shield<SEXP> idx(Rcpp::wrap(cols));
+    Rcpp::Shield<SEXP> cnt(Rcpp::wrap(counts));
+    Rf_setAttrib(idx, Rf_install("n"), cnt);
+    Rf_setAttrib(out, Rf_install(attr), idx);
+}
+
 // [[Rcpp::export]]
 SEXP df_to_gpu(DataFrame df) {
     using namespace cuplyr;
@@ -753,6 +779,8 @@ SEXP df_to_gpu(DataFrame df) {
     std::vector<std::unique_ptr<cudf::column>> columns;
     columns.reserve(ncol);
     std::vector<int> fractional_dates;   // 1-based indices of floored Date columns
+    std::vector<int> inf_cols, oor_cols; // 1-based timestamp columns with +-Inf / out-of-range values
+    std::vector<double> inf_n, oor_n;    // ... and their counts
 
     for (int i = 0; i < ncol; ++i) {
         SEXP col = df[i];
@@ -763,11 +791,14 @@ SEXP df_to_gpu(DataFrame df) {
         switch (TYPEOF(col)) {
             case REALSXP:
                 if (is_date) {
-                    bool saw_fraction = false;
-                    columns.push_back(date_to_gpu(col, saw_fraction));
-                    if (saw_fraction) fractional_dates.push_back(i + 1);
+                    TimestampUpload up;
+                    columns.push_back(date_to_gpu(col, up));
+                    if (up.saw_fraction) fractional_dates.push_back(i + 1);
+                    note_unrepresentable(up, i + 1, inf_cols, inf_n, oor_cols, oor_n);
                 } else if (is_posixct) {
-                    columns.push_back(posixct_to_gpu(col));
+                    TimestampUpload up;
+                    columns.push_back(posixct_to_gpu(col, up));
+                    note_unrepresentable(up, i + 1, inf_cols, inf_n, oor_cols, oor_n);
                 } else if (Rf_inherits(col, "integer64")) {
                     columns.push_back(int64_to_gpu(col));
                 } else {
@@ -796,6 +827,9 @@ SEXP df_to_gpu(DataFrame df) {
         Rcpp::Shield<SEXP> idx(Rcpp::wrap(fractional_dates));
         Rf_setAttrib(out, Rf_install("fractional_dates"), idx);
     }
+    // Same for +-Inf / out-of-range timestamps: column indices plus counts.
+    set_count_attr(out, "infinite_timestamps", inf_cols, inf_n);
+    set_count_attr(out, "out_of_range_timestamps", oor_cols, oor_n);
     return out;
 }
 

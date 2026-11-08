@@ -232,8 +232,9 @@
 #' `.drop`. Three shapes differ from dplyr or leave the GPU: `min()`/`max()`
 #' of a Date or POSIXct column is `NA` for an empty group (dplyr's `Inf`/`-Inf`
 #' cannot be held by a GPU timestamp column; an uploaded non-finite Date or
-#' POSIXct is `NA` as well), `mean()` of a Date or POSIXct column is `NA` for
-#' an empty group where dplyr gives a `NaN` Date/POSIXct, and `min()`/`max()`
+#' POSIXct is `NA` as well, with the warning described in [tbl_gpu()]),
+#' `mean()` of a Date or POSIXct column is `NA` for an empty group where dplyr
+#' gives a `NaN` Date/POSIXct, and `min()`/`max()`
 #' of a character column runs the whole call on the CPU when a group is empty.
 #'
 #' ## `.by` group order

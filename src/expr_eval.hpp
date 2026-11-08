@@ -886,7 +886,9 @@ inline std::unique_ptr<cudf::scalar> build_scalar(const std::string& type_str,
             int32_t v = 0;
             if (!is_na) {
                 double rv = Rcpp::as<double>(value_sexp);
-                if (Rcpp::NumericVector::is_na(rv)) {
+                // Non-finite or beyond int32 days: null, not an undefined
+                // cast (R/ir.R routes such literals to the CPU first).
+                if (!(rv >= -2147483648.0 && rv < 2147483648.0)) {
                     is_na = true;
                 } else {
                     v = static_cast<int32_t>(rv);
@@ -899,7 +901,7 @@ inline std::unique_ptr<cudf::scalar> build_scalar(const std::string& type_str,
             int64_t v = 0;
             if (!is_na) {
                 double rv = Rcpp::as<double>(value_sexp);
-                if (Rcpp::NumericVector::is_na(rv)) {
+                if (!(rv >= -9223372036854775808.0 && rv < 9223372036854775808.0)) {
                     is_na = true;
                 } else {
                     v = static_cast<int64_t>(std::llround(rv));
@@ -912,7 +914,7 @@ inline std::unique_ptr<cudf::scalar> build_scalar(const std::string& type_str,
             int64_t v = 0;
             if (!is_na) {
                 double rv = Rcpp::as<double>(value_sexp);
-                if (Rcpp::NumericVector::is_na(rv)) {
+                if (!(rv * 1e3 >= -9223372036854775808.0 && rv * 1e3 < 9223372036854775808.0)) {
                     is_na = true;
                 } else {
                     v = static_cast<int64_t>(std::llround(rv * 1e3));
@@ -925,7 +927,7 @@ inline std::unique_ptr<cudf::scalar> build_scalar(const std::string& type_str,
             int64_t v = 0;
             if (!is_na) {
                 double rv = Rcpp::as<double>(value_sexp);
-                if (Rcpp::NumericVector::is_na(rv)) {
+                if (!(rv * 1e6 >= -9223372036854775808.0 && rv * 1e6 < 9223372036854775808.0)) {
                     is_na = true;
                 } else {
                     v = static_cast<int64_t>(std::llround(rv * 1e6));
@@ -938,7 +940,7 @@ inline std::unique_ptr<cudf::scalar> build_scalar(const std::string& type_str,
             int64_t v = 0;
             if (!is_na) {
                 double rv = Rcpp::as<double>(value_sexp);
-                if (Rcpp::NumericVector::is_na(rv)) {
+                if (!(rv * 1e9 >= -9223372036854775808.0 && rv * 1e9 < 9223372036854775808.0)) {
                     is_na = true;
                 } else {
                     v = static_cast<int64_t>(std::llround(rv * 1e9));
@@ -1916,10 +1918,12 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
                 for (R_xlen_t i = 0; i < v.size(); ++i) {
                     if (std::isnan(v[i])) set_has_na = true;
                 }
-                bool saw_fraction = false;
+                // Counts are ignored: a null in the set matches nothing, and
+                // R's %in% is FALSE for a value that isn't in the set.
+                TimestampUpload ignored;
                 haystack = set_dtype.id() == cudf::type_id::TIMESTAMP_DAYS
-                    ? date_to_gpu(v, saw_fraction)
-                    : posixct_to_gpu(v);
+                    ? date_to_gpu(v, ignored)
+                    : posixct_to_gpu(v, ignored);
                 break;
             }
             default:

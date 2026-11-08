@@ -27,10 +27,19 @@ std::unique_ptr<cudf::column> character_to_gpu(Rcpp::CharacterVector x, const ch
 // Create GPU column from R logical vector (BOOL8, NA -> null)
 std::unique_ptr<cudf::column> logical_to_gpu(Rcpp::LogicalVector x);
 
-// Create GPU column from R Date (TIMESTAMP_DAYS, floored; `saw_fraction` set
-// if any value was fractional) / POSIXct (TIMESTAMP_MICROSECONDS, rounded) vector
-std::unique_ptr<cudf::column> date_to_gpu(Rcpp::NumericVector x, bool& saw_fraction);
-std::unique_ptr<cudf::column> posixct_to_gpu(Rcpp::NumericVector x);
+// What a Date / POSIXct upload had to do to its values: floor a fraction (Date
+// only), or null a +-Inf / a finite value the GPU type can't hold. NA and NaN
+// are legitimate nulls and are not counted.
+struct TimestampUpload {
+    bool saw_fraction = false;
+    long long infinite = 0;
+    long long out_of_range = 0;
+};
+
+// Create GPU column from R Date (TIMESTAMP_DAYS, floored) / POSIXct
+// (TIMESTAMP_MICROSECONDS, rounded) vector; `up` records what was lost.
+std::unique_ptr<cudf::column> date_to_gpu(Rcpp::NumericVector x, TimestampUpload& up);
+std::unique_ptr<cudf::column> posixct_to_gpu(Rcpp::NumericVector x, TimestampUpload& up);
 
 } // namespace cuplyr
 

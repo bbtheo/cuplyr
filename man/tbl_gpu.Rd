@@ -102,6 +102,27 @@ Column type mappings from R to GPU:
 }
 }
 
+\subsection{Dates and times the GPU can't hold}{
+
+A GPU \code{Date} holds whole days in an int32 and a \code{POSIXct} holds int64
+microseconds. A value that doesn't fit becomes \code{NA} when it is uploaded, with
+a warning:
+\itemize{
+\item \code{cuplyr_warning_infinite_timestamp}: \code{Inf} or \code{-Inf}.
+\item \code{cuplyr_warning_timestamp_out_of_range}: a finite value beyond about
+5.8 million years either side of 1970 (\code{Date}) or 292,000 years
+(\code{POSIXct}).
+}
+Both also inherit \code{cuplyr_warning_timestamp_unrepresentable}, so one handler
+covers both. An upload raises at most one warning per class, listing every
+affected column with its count, e.g. \verb{`d` (2 values), `t` (1 value)}.
+\code{NA} and \code{NaN} are ordinary missing values and never warn. The same applies
+to every other way values reach the GPU: \code{copy = TRUE} joins,
+\code{bind_rows()}, \verb{$<-}, a constant in \code{mutate()}, and the result of a verb
+that ran on the CPU. A fractional \code{Date} is floored with its own warning,
+\code{cuplyr_warning_fractional_date}.
+}
+
 \subsection{Gibbles}{
 
 "Gibble" is the user-facing name of a \code{tbl_gpu}: \code{print()} starts

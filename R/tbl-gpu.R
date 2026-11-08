@@ -82,6 +82,26 @@
 #'   \item `POSIXct` -> TIMESTAMP_MICROSECONDS
 #' }
 #'
+#' ## Dates and times the GPU can't hold
+#'
+#' A GPU `Date` holds whole days in an int32 and a `POSIXct` holds int64
+#' microseconds. A value that doesn't fit becomes `NA` when it is uploaded, with
+#' a warning:
+#' \itemize{
+#'   \item `cuplyr_warning_infinite_timestamp`: `Inf` or `-Inf`.
+#'   \item `cuplyr_warning_timestamp_out_of_range`: a finite value beyond about
+#'     5.8 million years either side of 1970 (`Date`) or 292,000 years
+#'     (`POSIXct`).
+#' }
+#' Both also inherit `cuplyr_warning_timestamp_unrepresentable`, so one handler
+#' covers both. An upload raises at most one warning per class, listing every
+#' affected column with its count, e.g. `` `d` (2 values), `t` (1 value) ``.
+#' `NA` and `NaN` are ordinary missing values and never warn. The same applies
+#' to every other way values reach the GPU: `copy = TRUE` joins,
+#' `bind_rows()`, `$<-`, a constant in `mutate()`, and the result of a verb
+#' that ran on the CPU. A fractional `Date` is floored with its own warning,
+#' `cuplyr_warning_fractional_date`.
+#'
 #' ## Gibbles
 #'
 #' "Gibble" is the user-facing name of a `tbl_gpu`: `print()` starts
@@ -189,6 +209,9 @@ tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
     attr(ptr, "fractional_dates") <- NULL
     warn_fractional_dates(names(upload)[frac])
   }
+  # Same for +-Inf and values beyond the GPU type's range, which became NA.
+  warn_unrepresentable_timestamps(names(upload), ptr)
+  ptr <- strip_timestamp_flags(ptr)
 
   # Build schema with factor levels for round-trip fidelity
   factor_levels <- lapply(data, function(col) {
@@ -353,6 +376,47 @@ warn_fractional_dates <- function(cols) {
     )),
     class = "cuplyr_warning_fractional_date"
   )
+}
+
+# The warnings for Date/POSIXct values the GPU type can't hold, which an upload
+# turned into NA: `cuplyr_warning_infinite_timestamp` (+-Inf) and
+# `cuplyr_warning_timestamp_out_of_range` (finite, beyond int32 days / int64
+# microseconds), both also `cuplyr_warning_timestamp_unrepresentable`. One
+# warning per class per upload, listing every affected column with its count.
+# `ptr` carries the flags df_to_gpu() set; `col_names` are the uploaded columns'
+# names (the user's output names, so a constant uploaded under a temp name
+# passes the real ones).
+# @keywords internal
+warn_unrepresentable_timestamps <- function(col_names, ptr) {
+  kinds <- list(
+    list(attr = "infinite_timestamps", class = "cuplyr_warning_infinite_timestamp"),
+    list(attr = "out_of_range_timestamps", class = "cuplyr_warning_timestamp_out_of_range")
+  )
+  for (k in kinds) {
+    idx <- attr(ptr, k$attr)
+    if (is.null(idx)) next
+    n <- attr(idx, "n")
+    listed <- paste0("`", col_names[as.integer(idx)], "` (", format(n, scientific = FALSE, trim = TRUE),
+                     ifelse(n == 1, " value)", " values)"), collapse = ", ")
+    msg <- if (identical(k$attr, "infinite_timestamps")) {
+      "A GPU Date or POSIXct cannot hold +-Inf: replaced with NA in "
+    } else {
+      "A GPU Date holds int32 days and a POSIXct int64 microseconds: values beyond that were replaced with NA in "
+    }
+    rlang::warn(
+      paste0(msg, listed, "."),
+      class = c(k$class, "cuplyr_warning_timestamp_unrepresentable")
+    )
+  }
+  invisible()
+}
+
+# Drop the flags warn_unrepresentable_timestamps() reads from the pointer.
+# @keywords internal
+strip_timestamp_flags <- function(ptr) {
+  attr(ptr, "infinite_timestamps") <- NULL
+  attr(ptr, "out_of_range_timestamps") <- NULL
+  ptr
 }
 
 # Internal: classes a column may carry and still have a GPU representation.

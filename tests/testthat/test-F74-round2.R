@@ -116,10 +116,12 @@ test_that("a Date/POSIXct non-finite value stays NA through filter and arrange",
   skip_if_no_gpu()
   df <- data.frame(g = c("a", "b"), x = 1:2)
   df$d <- structure(c(Inf, 18262), class = "Date")
-  got <- tbl_gpu(df) |> arrange(d) |> collect()
+  expect_warning(got <- tbl_gpu(df) |> arrange(d) |> collect(),
+                 class = "cuplyr_warning_infinite_timestamp")
   expect_identical(got$g, c("b", "a"))
   expect_identical(is.na(unclass(got$d)), c(FALSE, TRUE))
-  kept <- tbl_gpu(df) |> filter(d < as.Date("2000-01-01") | is.na(d)) |> collect()
+  expect_warning(kept <- tbl_gpu(df) |> filter(d < as.Date("2000-01-01") | is.na(d)) |> collect(),
+                 class = "cuplyr_warning_infinite_timestamp")
   expect_identical(kept$g, "a")
 })
 

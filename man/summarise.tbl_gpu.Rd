@@ -265,8 +265,9 @@ row count is data-dependent). The result is regrouped with the input's
 \code{.drop}. Three shapes differ from dplyr or leave the GPU: \code{min()}/\code{max()}
 of a Date or POSIXct column is \code{NA} for an empty group (dplyr's \code{Inf}/\code{-Inf}
 cannot be held by a GPU timestamp column; an uploaded non-finite Date or
-POSIXct is \code{NA} as well), \code{mean()} of a Date or POSIXct column is \code{NA} for
-an empty group where dplyr gives a \code{NaN} Date/POSIXct, and \code{min()}/\code{max()}
+POSIXct is \code{NA} as well, with the warning described in \code{\link[=tbl_gpu]{tbl_gpu()}}),
+\code{mean()} of a Date or POSIXct column is \code{NA} for an empty group where dplyr
+gives a \code{NaN} Date/POSIXct, and \code{min()}/\code{max()}
 of a character column runs the whole call on the CPU when a group is empty.
 }
 

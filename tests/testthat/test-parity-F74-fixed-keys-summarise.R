@@ -447,7 +447,8 @@ test_that("an uploaded non-finite Date/POSIXct is NA on the GPU", {
     d = structure(c(Inf, 18262, -Inf, NA), class = "Date"),
     t = structure(c(-Inf, 1577872800, Inf, NA), class = c("POSIXct", "POSIXt"), tzone = "UTC")
   )
-  got <- collect(tbl_gpu(df))
+  expect_warning(g <- tbl_gpu(df), class = "cuplyr_warning_infinite_timestamp")
+  got <- collect(g)
   expect_identical(is.na(unclass(got$d)), c(TRUE, FALSE, TRUE, TRUE))
   expect_identical(unclass(got$d)[2], 18262)
   expect_identical(is.na(unclass(got$t)), c(TRUE, FALSE, TRUE, TRUE))
