@@ -137,7 +137,7 @@ check_unique_input_names <- function(.data, call = rlang::caller_env()) {
   if (any(nms == "")) {
     rlang::abort("Can't transform a data frame with `NA` or `\"\"` names.", call = call)
   }
-  if (anyDuplicated(nms) > 0L) {
+  if (anyDuplicated.default(nms) > 0L) {
     abort_duplicate_names(call)
   }
   invisible(.data)
@@ -154,7 +154,7 @@ abort_duplicate_names <- function(call = rlang::caller_env()) {
 # @param names,groups The column names and group columns the table would get
 # @keywords internal
 check_dup_names_ungrouped <- function(names, groups, call = rlang::caller_env()) {
-  if (length(groups) > 0L && anyDuplicated(names) > 0L) {
+  if (length(groups) > 0L && anyDuplicated.default(names) > 0L) {
     rlang::abort(c(
       "Can't give a grouped tbl_gpu duplicated column names.",
       i = "`ungroup()` first, or pick unique names."
@@ -568,7 +568,7 @@ infer_push_schema <- function(node, input_schema, base) {
 push_op <- function(.data, node, input_schema = current_schema(.data), carry = TRUE) {
   type <- .subset2(node, "type")
   check_zero_column_input(.data, input_schema, type)
-  if (anyDuplicated(input_schema$names) > 0L && !node_is_position_safe(node)) {
+  if (anyDuplicated.default(input_schema$names) > 0L && !node_is_position_safe(node)) {
     abort_duplicate_names(rlang::caller_env())
   }
 
@@ -960,7 +960,7 @@ auto_name_dots <- function(dots, verb) {
 #'   dplyr's own `.by=`)
 #' @keywords internal
 resolve_by <- function(.data, by_quo, arg_name = ".by", call = rlang::caller_env(), verb = NULL) {
-  if (rlang::quo_is_null(by_quo)) {
+  if (quo_is_null_fast(by_quo)) {
     return(character())
   }
 

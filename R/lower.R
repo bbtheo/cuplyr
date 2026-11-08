@@ -283,32 +283,38 @@ lower_summarise <- function(ast, source_ptr) {
     integer(0)
   }
 
-  agg_col_indices <- integer(length(.subset2(ast, "aggregations")))
-  agg_fns <- character(length(.subset2(ast, "aggregations")))
+  aggs <- .subset2(ast, "aggregations")
+  n_aggs <- length(aggs)
+  agg_col_indices <- integer(n_aggs)
+  agg_fns <- character(n_aggs)
   # Phase 6, task 6.1 (Fix A): per-aggregation na.rm flag, threaded through
   # to gpu_summarise() (src/ops_groupby.cpp) so it knows which aggregations
   # need the extra whole-group-null propagation step (na_rm == FALSE, R's
   # own default) vs. cudf's native null-excluding behavior (na_rm == TRUE).
-  na_rm_flags <- logical(length(.subset2(ast, "aggregations")))
+  na_rm_flags <- logical(n_aggs)
   # Phase 6, task 6.2: per-aggregation extra scalar shape parameter --
   # quantile()'s probability, nth()'s (possibly negative) element
   # position, NA_real_ for every other function -- see make_aggregation()'s
   # own docs.
-  agg_extra <- numeric(length(.subset2(ast, "aggregations")))
+  agg_extra <- numeric(n_aggs)
   # F07: min()/max() over INT32/FLOAT64 apply base R's empty-group identity
   # (see make_aggregation()'s `identity`).
-  identity_flags <- logical(length(.subset2(ast, "aggregations")))
+  identity_flags <- logical(n_aggs)
+  agg_names <- character(n_aggs)
 
-  for (i in seq_along(.subset2(ast, "aggregations"))) {
-    agg <- .subset2(ast, "aggregations")[[i]]
-    agg_fns[i] <- agg$fn
-    identity_flags[i] <- isTRUE(agg$identity)
-    na_rm_flags[i] <- isTRUE(agg$na_rm)
-    agg_extra[i] <- if (is.null(agg$extra)) NA_real_ else agg$extra
-    if (agg$fn == "n") {
-      agg_col_indices[i] <- 0L  # n() doesn't need a column
+  for (i in seq_len(n_aggs)) {
+    agg <- .subset2(aggs, i)
+    fn <- .subset2(agg, "fn")
+    agg_fns[[i]] <- fn
+    identity_flags[[i]] <- isTRUE(.subset2(agg, "identity"))
+    na_rm_flags[[i]] <- isTRUE(.subset2(agg, "na_rm"))
+    extra <- .subset2(agg, "extra")
+    agg_extra[[i]] <- if (is.null(extra)) NA_real_ else extra
+    agg_names[[i]] <- .subset2(agg, "output_col")
+    if (fn == "n") {
+      agg_col_indices[[i]] <- 0L  # n() doesn't need a column
     } else {
-      agg_col_indices[i] <- match(agg$input_col, input_schema$names) - 1L
+      agg_col_indices[[i]] <- match(.subset2(agg, "input_col"), input_schema$names) - 1L
     }
   }
 
@@ -319,7 +325,7 @@ lower_summarise <- function(ast, source_ptr) {
   # dplyr warns whenever min()/max() hit the identity, with base R's text.
   used <- attr(result, "identity_used")
   for (i in which(used)) {
-    fn <- .subset2(ast, "aggregations")[[i]]$fn
+    fn <- agg_fns[[i]]
     warning("no non-missing arguments to ", fn, "; returning ",
             if (identical(fn, "min")) "Inf" else "-Inf", call. = FALSE)
   }
@@ -327,7 +333,7 @@ lower_summarise <- function(ast, source_ptr) {
   # F41: a Date mean()/median() with a fractional result was floored.
   frac <- attr(result, "ts_fraction")
   if (any(frac)) {
-    warn_fractional_dates(vapply(.subset2(ast, "aggregations")[which(frac)], `[[`, character(1), "output_col"))
+    warn_fractional_dates(agg_names[which(frac)])
   }
 
   # F34: an integer/logical sum() that left R's integer range came back as
@@ -338,7 +344,6 @@ lower_summarise <- function(ast, source_ptr) {
   }
 
   # An aggregate named like a grouping column replaces that key in place.
-  agg_names <- vapply(.subset2(ast, "aggregations"), `[[`, character(1), "output_col")
   out_idx <- summarise_output_index(.subset2(ast, "groups"), agg_names)
   if (!identical(out_idx, seq_along(out_idx))) {
     result <- gpu_select(result, out_idx - 1L)

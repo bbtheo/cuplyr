@@ -247,7 +247,7 @@ filter_impl <- function(.data, dots, by_quo, .preserve, complement, call) {
   # dplyr keeps a `.drop = FALSE` table's whole group structure whatever
   # `.preserve` says, so those tables take the same route (row_slice_prepare()
   # computes a lazy input first, so its plan runs once).
-  prep <- row_slice_prepare(.data, .preserve, eligible = rlang::quo_is_null(by_quo))
+  prep <- row_slice_prepare(.data, .preserve, eligible = quo_is_null_fast(by_quo))
   .data <- prep$data
   out <- filter_run(.data, dots, by_quo, .preserve, complement, call)
   row_slice_finish(out, prep)
@@ -262,7 +262,7 @@ filter_impl <- function(.data, dots, by_quo, .preserve, complement, call) {
 # @keywords internal
 filter_rowwise <- function(.data, dots, by_quo, .preserve, complement, call) {
   cpu <- function(reason = NULL) filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, reason = reason)
-  if (!rlang::quo_is_null(by_quo) || !identical(.preserve, FALSE)) {
+  if (!quo_is_null_fast(by_quo) || !identical(.preserve, FALSE)) {
     return(cpu())
   }
   # F77: a function of the user's with a native op's name runs in dplyr
@@ -322,9 +322,9 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   by_cols <- resolve_by(.data, by_quo, ".by", call = call)
   # (a rowwise table's groups are its rowwise vars: nothing is computed over them)
   rowwise <- is_rowwise_gpu(.data)
-  verb_groups <- if (!rlang::quo_is_null(by_quo)) by_cols else if (rowwise) character() else .subset2(.data, "groups")
+  verb_groups <- if (!quo_is_null_fast(by_quo)) by_cols else if (rowwise) character() else .subset2(.data, "groups")
 
-  if (!rlang::quo_is_null(by_quo) && isTRUE(.preserve)) {
+  if (!quo_is_null_fast(by_quo) && isTRUE(.preserve)) {
     return(cpu("`.by` together with `.preserve = TRUE` is checked by dplyr."))
   }
   if (complement && length(current_schema(.data)$names) == 0L) {
@@ -393,7 +393,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   cgid <- if (plain) {
     list(data = .data, dots = dots, used = FALSE)
   } else {
-    substitute_cur_group_id(.data, dots, verb_groups, by = !rlang::quo_is_null(by_quo),
+    substitute_cur_group_id(.data, dots, verb_groups, by = !quo_is_null_fast(by_quo),
                             rowwise = rowwise)
   }
   .data <- cgid$data
@@ -956,6 +956,10 @@ filter_expr_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complem
 # filter_run().)
 # @keywords internal
 filter_dot_is_column_free <- function(quo, schema) {
+  # (F110) a call that provably reads a column is not column-free
+  if (quo_reads_column_fast(quo, schema)) {
+    return(FALSE)
+  }
   expr <- rlang::quo_get_expr(quo)
   (is.symbol(expr) || is.call(expr)) && !expr_has_column_ref(expr, schema) &&
     !expr_has_mask_only_call(expr) && !expr_reaches_mask(expr)
@@ -1171,6 +1175,27 @@ top_n_parse_n <- function(n_arg, env, schema) {
   NULL
 }
 
+# F110: FALSE only when top_n_rank_head() is FALSE for the root head of every
+# dot (top_n_rank_head() is TRUE only for the symbol `top_n_rank` or a call head,
+# `dplyr:::top_n_rank`): the two top_n screens run on every filter(). A dot that
+# is not a quosure takes the full test.
+top_n_rank_any <- function(dots) {
+  for (i in seq_along(dots)) {
+    dot <- .subset2(dots, i)
+    if (!inherits(dot, "quosure")) {
+      return(TRUE)
+    }
+    if (is.call(.subset2(dot, 2L))) {
+      head <- .subset2(.subset2(dot, 2L), 1L)
+      if (if (is.symbol(head)) identical(head, ir_sym_top_n_rank) else is.call(head)) {
+        return(TRUE)
+      }
+    }
+  }
+  FALSE
+}
+ir_sym_top_n_rank <- as.name("top_n_rank")
+
 # TRUE iff `head` (the call head of a dot's expression) names dplyr's own
 # top_n_rank() as seen from the dot's environment.
 top_n_rank_head <- function(head, env) {
@@ -1297,6 +1322,9 @@ top_n_env_call_subscript <- function(expr) {
 #   turns out to be a top_n_rank() call
 # @keywords internal
 top_n_rank_decline <- function(dots, .data) {
+  if (!top_n_rank_any(dots)) {
+    return(NULL)
+  }
   schema <- NULL
   for (i in seq_along(dots)) {
     expr <- rlang::quo_get_expr(dots[[i]])
@@ -1316,6 +1344,9 @@ top_n_rank_decline <- function(dots, .data) {
 # @return the dots with each eligible top_n_rank() dot replaced
 # @keywords internal
 rewrite_top_n_rank_dots <- function(dots, .data) {
+  if (!top_n_rank_any(dots)) {
+    return(dots)
+  }
   schema <- NULL
   for (i in seq_along(dots)) {
     expr <- rlang::quo_get_expr(dots[[i]])

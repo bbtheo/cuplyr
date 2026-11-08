@@ -353,8 +353,9 @@ ast_join <- function(type, left, right, by, keep = FALSE,
 #' @param schema List with `names`/`types` the IR is bound against; read only
 #'   by [ir_has_checked_int()] for `checked_int`
 #' @return A predicate list structure: `list(ir, cols, estimated_cost,
-#'   is_deterministic, na_sensitive, checked_int)`; `checked_int` (F70) says
-#'   the predicate holds an F42 checked integer node (read it with `isTRUE()`)
+#'   is_deterministic, na_sensitive, checked_int)`; `checked_int` (F70) is
+#'   the cell of new_checked_int_cell(): read whether the predicate holds an
+#'   F42 checked integer node with record_checked_int()
 #' @keywords internal
 make_predicate <- function(ir, schema) {
   list(
@@ -363,8 +364,47 @@ make_predicate <- function(ir, schema) {
     estimated_cost = ir_cost(ir),
     is_deterministic = TRUE,
     na_sensitive = TRUE,
-    checked_int = ir_has_checked_int(ir, schema)
+    checked_int = new_checked_int_cell(ir, schema)
   )
+}
+
+# The F70 checked-integer flag of a predicate or mutate expression, on demand
+#
+# Only the optimizer reads the flag (a filter may not move below, and a
+# checked expression may not be pruned as dead: `mutate_has_checked_int()`,
+# `pred_checked_int()`, `prune_dead_columns()`), and an eager node is lowered
+# and dropped without ever reaching it. So a record holds a cell with the
+# inputs of [ir_has_checked_int()] and the answer is worked out the first time
+# it is asked for (F110). Always read the flag through record_checked_int():
+# the cell itself is not a logical.
+#
+# @param ir The record's IR
+# @param schema The schema the IR is bound against
+# @return An environment holding `ir`, `schema` and, once asked, `flag`
+# @keywords internal
+new_checked_int_cell <- function(ir, schema) {
+  cell <- new.env(hash = FALSE, parent = emptyenv())
+  cell$ir <- ir
+  cell$schema <- schema
+  cell
+}
+
+# @param record A predicate or mutate expression from [make_predicate()] or
+#   [make_mutate_expr()]
+# @return `record_checked_int()`: `TRUE` iff the record holds an F42 checked
+#   integer node ([ir_has_checked_int()])
+# @keywords internal
+record_checked_int <- function(record) {
+  cell <- .subset2(record, "checked_int")
+  if (!is.environment(cell)) {
+    return(isTRUE(cell))
+  }
+  flag <- cell[["flag"]]
+  if (is.null(flag)) {
+    flag <- ir_has_checked_int(cell[["ir"]], cell[["schema"]])
+    cell[["flag"]] <- flag
+  }
+  flag
 }
 
 #' Create a mutate expression structure
@@ -385,8 +425,9 @@ make_predicate <- function(ir, schema) {
 #'   via [ir_infer_type()] (which delegates to [infer_mutate_output_type()]
 #'   unchanged for arithmetic ops, per section 1.3)
 #' @return An expression list structure: `list(output_col, ir, input_cols,
-#'   output_type, checked_int)`; `checked_int` (F70) says the expression holds
-#'   an F42 checked integer node (read it with `isTRUE()`)
+#'   output_type, checked_int)`; `checked_int` (F70) is the cell of
+#'   new_checked_int_cell(): read whether the expression holds an F42 checked
+#'   integer node with record_checked_int()
 #' @keywords internal
 make_mutate_expr <- function(output_col, ir, schema) {
   list(
@@ -394,7 +435,7 @@ make_mutate_expr <- function(output_col, ir, schema) {
     ir = ir,
     input_cols = ir_cols(ir),
     output_type = ir_infer_type_memo(ir, schema),
-    checked_int = ir_has_checked_int(ir, schema)
+    checked_int = new_checked_int_cell(ir, schema)
   )
 }
 

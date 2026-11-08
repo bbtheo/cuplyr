@@ -349,13 +349,17 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   # of it is add_tally()'s, for that wt. `wt` is read only once add_tally() has
   # turned it into a quosure: a still-lazy binding is the user's promise, which
   # reading here would force.)
-  if (p > 0L && identical(caller_fn, dplyr::add_tally)) {
+  # (dplyr's add_tally() lives in dplyr's namespace: a caller that does not is
+  # not it, which spares the `::` lookup on the usual call from a test or a
+  # user's function)
+  if (p > 0L && identical(environmentName(environment(caller_fn)), "dplyr") &&
+      identical(caller_fn, dplyr::add_tally)) {
     wt_env <- sys.frame(p)
     wt_quo <- if (exists("wt", wt_env, inherits = FALSE) &&
                   !rlang::env_binding_are_lazy(wt_env, "wt")) {
       get0("wt", wt_env, inherits = FALSE)
     }
-    if (rlang::is_quosure(wt_quo) && !rlang::quo_is_null(wt_quo)) {
+    if (rlang::is_quosure(wt_quo) && !quo_is_null_fast(wt_quo)) {
       prev_as <- fallback_notice_as("add_tally", notice_expr_text(wt_quo))
       on.exit(fallback_notice_restore(prev_as), add = TRUE)
     }
@@ -397,7 +401,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
 # @keywords internal
 mutate_rowwise <- function(.data, dots, by_quo, keep, before_quo, after_quo) {
   cpu <- function(detail = NULL) mutate_expr_fallback(.data, dots, keep, before_quo, after_quo, by_quo, detail = detail)
-  if (!rlang::quo_is_null(by_quo)) {
+  if (!quo_is_null_fast(by_quo)) {
     return(cpu())
   }
   # F77: a function of the user's with a native op's name runs in dplyr
@@ -437,11 +441,11 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   # resolve_by() already guarantees `.data` itself is ungrouped in that
   # case, and push_op()'s propagate_groups() only ever propagates
   # `.data$groups` (never `verb_groups`) into the result.
-  by_given <- !rlang::quo_is_null(by_quo)
+  by_given <- !quo_is_null_fast(by_quo)
   by_cols <- if (rowwise) character() else resolve_by(.data, by_quo, ".by", verb = "mutate")
   verb_groups <- if (by_given) by_cols else if (rowwise) character() else .subset2(.data, "groups")
 
-  if (!rlang::quo_is_null(before_quo) && !rlang::quo_is_null(after_quo)) {
+  if (!quo_is_null_fast(before_quo) && !quo_is_null_fast(after_quo)) {
     stop("Can't supply both `.before` and `.after`.", call. = FALSE)
   }
 
@@ -453,7 +457,7 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   }
 
   if (length(dots) == 0 && identical(.keep, "all") &&
-      rlang::quo_is_null(before_quo) && rlang::quo_is_null(after_quo)) {
+      quo_is_null_fast(before_quo) && quo_is_null_fast(after_quo)) {
     return(.data)
   }
 
@@ -1084,7 +1088,8 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
   dropped <- character()
   # dplyr places a new column where its name first appears, even when that
   # dot is `col = NULL` (and a later dot fills it in).
-  dot_order <- unique(names(dots))
+  dot_order <- names(dots)
+  if (length(dot_order) > 1L) dot_order <- unique.default(dot_order)
 
   # Record the value of the column-free dot at position `j`, so the CPU route
   # inlines it instead of evaluating it again. Only for an ungrouped call
@@ -1161,7 +1166,8 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     }
 
     const <- mutate_constant_value(expr, schema)
-    record_const(i, const, expr)
+    # (a dot that is not a constant records nothing)
+    if (!identical(.subset2(const, "kind"), "none")) record_const(i, const, expr)
 
     # `col = NULL` (or a constant that evaluates to NULL) drops the column:
     # later dots no longer see it, and a later dot of the same name re-adds it.
@@ -1345,6 +1351,10 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
 # @keywords internal
 mutate_constant_value <- function(quo, schema) {
   none <- list(kind = "none")
+  # (F110) a call that provably reads a column is not a constant
+  if (quo_reads_column_fast(quo, schema)) {
+    return(none)
+  }
   expr <- rlang::quo_get_expr(quo)
   if (is.null(expr)) {
     return(list(kind = "null"))
@@ -1638,7 +1648,7 @@ mutate_keep_select_node <- function(result, orig_names, orig_groups,
   full_names <- c(full_names[!full_names %in% new_cols], new_cols)
 
   if (length(new_cols) > 0 &&
-      (!rlang::quo_is_null(before_quo) || !rlang::quo_is_null(after_quo))) {
+      (!quo_is_null_fast(before_quo) || !quo_is_null_fast(after_quo))) {
     # A column dropped by `col = NULL` is already gone for .before/.after.
     full_names <- full_names[!full_names %in% dropped]
     name_vec <- stats::setNames(full_names, full_names)
@@ -1674,7 +1684,7 @@ mutate_keep_select_node <- function(result, orig_names, orig_groups,
 mutate_needs_select <- function(orig_names, expressions, keep, before_quo, after_quo,
                                 drop, dropped, helper = FALSE) {
   if (helper || !identical(keep, "all") || length(drop) > 0L || length(dropped) > 0L ||
-      !rlang::quo_is_null(before_quo) || !rlang::quo_is_null(after_quo)) {
+      !quo_is_null_fast(before_quo) || !quo_is_null_fast(after_quo)) {
     return(TRUE)
   }
   dot_order <- attr(expressions, "dot_order")
@@ -2017,6 +2027,11 @@ NULL
 inform_colwise_grouped <- function(.data, verb, caller) {
   # (dplyr's check_grouped() tests is_grouped_df(): a rowwise_df is not)
   if (length(.subset2(.data, "groups")) == 0L || is_rowwise_gpu(.data) || !is.function(caller)) {
+    return(invisible())
+  }
+  # (the colwise verbs are dplyr's own: a caller from another namespace is
+  # neither, without the two getExportedValue() lookups below; F110)
+  if (!identical(environmentName(environment(caller)), "dplyr")) {
     return(invisible())
   }
   for (suffix in c("all", "if")) {

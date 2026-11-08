@@ -360,9 +360,9 @@ is_plain_vector <- function(x) {
 
 set_union <- function(x, y) {
   if (is_plain_vector(x) && is_plain_vector(y)) {
-    x <- unique(x)
+    x <- unique.default(x)
     names(x) <- NULL
-    y <- unique(y)
+    y <- unique.default(y)
     names(y) <- NULL
     return(c(x, y[match(y, x, 0L) == 0L]))
   }
@@ -376,9 +376,9 @@ set_diff <- function(x, y) {
       names(x) <- NULL
       return(x)
     }
-    x <- unique(x)
+    x <- unique.default(x)
     names(x) <- NULL
-    y <- unique(y)
+    y <- unique.default(y)
     names(y) <- NULL
     return(x[match(x, y, 0L) == 0L])
   }
@@ -392,9 +392,9 @@ set_intersect <- function(x, y) {
       names(x) <- NULL
       return(x)
     }
-    x <- unique(x)
+    x <- unique.default(x)
     names(x) <- NULL
-    y <- unique(y)
+    y <- unique.default(y)
     names(y) <- NULL
     return(c(x[match(x, y, 0L) > 0L], y[0L]))
   }
@@ -404,3 +404,11 @@ set_intersect <- function(x, y) {
 # The quosure of an argument nobody gave (mutate()'s `.by`, `.before`, `.after`
 # default to NULL), so a call doesn't pay an enquo() per absent argument.
 null_quo <- rlang::new_quosure(NULL, rlang::empty_env())
+
+# rlang::quo_is_null() without the `::` lookup and the S3 round trip: the
+# verbs' `.by`/`.before`/`.after` quosures are asked about on every call (F110).
+# A quosure's expression is its second element.
+# @keywords internal
+quo_is_null_fast <- function(quo) {
+  inherits(quo, "quosure") && is.null(.subset2(quo, 2L))
+}

@@ -164,7 +164,7 @@ ir_lit_from_r <- function(value, allow_vector = FALSE) {
 # @keywords internal
 ir_lit_or_unsupported <- function(value, allow_vector = FALSE) {
   lit <- ir_lit_from_r(value, allow_vector = allow_vector)
-  if (identical(lit$type, "UNKNOWN")) {
+  if (identical(.subset2(lit, "type"), "UNKNOWN")) {
     fallback_cause("a value that is not an atomic vector the GPU can hold.")
     return(NULL)
   }
@@ -310,6 +310,20 @@ pronoun_call_name <- function(expr, env = NULL, schema = NULL) {
 # (check_group_by_dots(), check_regroup_dots()). Rebuilding the call with one
 # `name = !!.dots[[i]]` argument per dot instead would turn a spliced name into
 # a written one, which dplyr rejects or matches where it would not.
+
+# F110: TRUE only when the call in quosure `quo` provably reads a column, by
+# expr_has_column_ref()'s second shortcut alone (no `.data`/`.env` pronoun,
+# function literal or formula in it, and a non-head symbol that is a column);
+# FALSE means "ask expr_has_column_ref()". The verbs ask this of every dot.
+# @keywords internal
+quo_reads_column_fast <- function(quo, schema) {
+  if (!inherits(quo, "quosure") || !is.call(.subset2(quo, 2L))) {
+    return(FALSE)
+  }
+  !any(match(ir_pronoun_syntax_names, all.names(.subset2(quo, 2L)), 0L) > 0L) &&
+    any(match(all.vars(.subset2(quo, 2L)), .subset2(schema, "names"), 0L) > 0L)
+}
+ir_pronoun_syntax_names <- c(".data", ".env", "function", "~")
 
 # TRUE iff `expr` contains a symbol matching a schema column name anywhere
 # in its subtree (used to decide whether an unrecognized call's subtree can
@@ -782,6 +796,48 @@ ir_impure_walk_fns <- function(fns, env, cols, st, formals) {
   ir_impure_walk(fns, env, cols, st, formals)
 }
 
+# TRUE only when `expr` is a call in which EVERY call node has a column among
+# its arguments, directly (a symbol naming one of `cols`) or through a call
+# that has one itself, so ir_impure_walk() reads a column at every call and
+# finds nothing to report: a call is impure only when its subtree reads no
+# column. Anything this does not see through is FALSE (the walk then decides):
+# a head that is not a symbol, `$`/`[[`/`::`/`:::` heads (pronouns,
+# qualification), `~`/`function` heads (the walk scores a lambda's formals
+# apart from the columns, so a column named like a formal reads differently
+# there), a call argument with no column below it, a non-call root.
+# Other arguments (a symbol that is no column, an atomic constant, a pairlist)
+# are walked as 0 reads by ir_impure_walk() and cannot set `impure`.
+# @keywords internal
+ir_impure_none <- function(expr, cols) {
+  if (!is.call(expr)) {
+    return(FALSE)
+  }
+  head <- .subset2(expr, 1L)
+  if (!is.symbol(head) || identical(head, ir_sym_dollar) || identical(head, ir_sym_bracket2) ||
+        identical(head, ir_sym_colon2) || identical(head, ir_sym_colon3) ||
+        identical(head, ir_sym_tilde) || identical(head, ir_sym_function)) {
+    return(FALSE)
+  }
+  reads <- FALSE
+  for (i in seq_along(expr)[-1L]) {
+    # (not assigned: an empty argument, as in `x[, 1]`, is the missing arg)
+    if (is.symbol(.subset2(expr, i))) {
+      if (match(as.character(.subset2(expr, i)), cols, 0L) > 0L) reads <- TRUE
+    } else if (is.call(.subset2(expr, i))) {
+      # (an embedded quosure has its own env and length(): the walk's)
+      if (is.object(.subset2(expr, i)) || !ir_impure_none(.subset2(expr, i), cols)) {
+        return(FALSE)
+      }
+      reads <- TRUE
+    }
+  }
+  reads
+}
+ir_sym_dollar <- as.name("$")
+ir_sym_bracket2 <- as.name("[[")
+ir_sym_tilde <- as.name("~")
+ir_sym_function <- as.name("function")
+
 # The text of the first dot (a quosure) that contains a column-free call whose
 # head is not known to be pure, with the call itself; NULL when every call is
 # pure. See the comment above. Evaluates nothing.
@@ -790,12 +846,21 @@ ir_impure_walk_fns <- function(fns, env, cols, st, formals) {
 # @param grouped Whether the verb has groups (or `.by`); only words the text
 # @keywords internal
 impure_const_call_text <- function(dots, schema, grouped = TRUE) {
-  cols <- schema$names
-  st <- new.env(parent = emptyenv())
-  st$impure <- FALSE
-  dot_names <- names(dots) %||% character(length(dots))
+  cols <- .subset2(schema, "names")
+  st <- NULL
+  dot_names <- NULL
   for (i in seq_along(dots)) {
     dot <- dots[[i]]
+    # (F110) a dot in which every call reads a column has no column-free call
+    # to check: skip the walk (ir_impure_none()).
+    if (inherits(dot, "quosure") && ir_impure_none(.subset2(dot, 2L), cols)) {
+      next
+    }
+    if (is.null(st)) {
+      st <- new.env(parent = emptyenv())
+      st$impure <- FALSE
+      dot_names <- names(dots) %||% character(length(dots))
+    }
     root <- NULL
     if (rlang::is_quosure(dot) && !rlang::quo_is_missing(dot)) {
       root <- ir_across_fns_root(rlang::quo_get_expr(dot), named = !is.na(dot_names[i]) && nzchar(dot_names[i]))
@@ -1145,7 +1210,8 @@ shadow_screen_text <- function(dots) {
     } else {
       only_called <- all[match(all, values, 0L) == 0L]
       if (length(only_called) == n_heads) {
-        unique(only_called)
+        # (a repeated name is looked up once: `ok` skips it afterwards)
+        only_called
       } else {
         uniq <- unique(all)
         uniq[tabulate(match(all, uniq), length(uniq)) > tabulate(match(values, uniq, 0L), length(uniq))]
@@ -1513,7 +1579,17 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
   # transparently; this walker doesn't use tidy-eval for structural
   # dispatch (it inspects the raw language tree directly), so it needs this
   # explicit unwrap instead.
-  if (inherits(expr, "quosure")) {
+  # (F110: a quosure is a classed call, so a plain symbol/constant skips the
+  # test; and Case 5's constants, which no other case before it can claim, are
+  # answered here for anything that is not a call)
+  if (!is.call(expr)) {
+    if (is.null(expr)) {
+      return(ir_lit_from_r(NULL))
+    }
+    if (is.atomic(expr) && length(expr) == 1) {
+      return(ir_lit_or_unsupported(expr, allow_vector = allow_vector))
+    }
+  } else if (is.object(expr) && inherits(expr, "quosure")) {
     return(ir_parse_expr(rlang::quo_get_expr(expr), rlang::quo_get_env(expr), schema, allow_vector))
   }
 
@@ -1838,8 +1914,14 @@ ir_infer_type_memo <- function(ir, schema) {
 #' @return An IR node, or `NULL` if unsupported
 #' @keywords internal
 ir_parse_quo <- function(quo, schema) {
-  expr <- rlang::quo_get_expr(quo)
-  env <- rlang::quo_get_env(quo)
+  # (a quosure's fields directly: its expression, and its env attribute)
+  if (inherits(quo, "quosure")) {
+    expr <- .subset2(quo, 2L)
+    env <- attr(quo, ".Environment")
+  } else {
+    expr <- rlang::quo_get_expr(quo)
+    env <- rlang::quo_get_env(quo)
+  }
   # F88: a new dot has no cause yet; the parse records one where it gives up
   # (fallback_cause()), and a parse that succeeds drops one a sub-attempt left.
   col <- fallback_reasons$cur
@@ -1849,7 +1931,10 @@ ir_parse_quo <- function(quo, schema) {
   ir <- tryCatch(
     {
       ir <- ir_parse_expr(expr, env, schema, allow_vector = FALSE)
-      if (!is.null(ir) && ir_decode_meets_non_utf8(ir)) {
+      # (a factor_labels call is built only for a DICTIONARY32 column,
+      # ir_parse_factor_conversion(): none of those, none to find)
+      if (!is.null(ir) && match("DICTIONARY32", .subset2(schema, "types"), 0L) > 0L &&
+            ir_decode_meets_non_utf8(ir)) {
         ir <- NULL
       }
       # Timestamp arithmetic (`t + 3600`) parses fine and only its type check
@@ -3753,7 +3838,13 @@ ir_cols <- function(ir) {
     call = {
       args <- .subset2(ir, "args")
       # no arguments: unique(unlist(list())), which is NULL
-      if (length(args) == 0L) NULL else unique(ir_arg_cols(args))
+      if (length(args) == 0L) {
+        NULL
+      } else {
+        cols <- ir_arg_cols(args)
+        # (unique() of at most one name is that name)
+        if (length(cols) <= 1L) cols else unique.default(cols)
+      }
     }
   )
 }
@@ -3795,11 +3886,19 @@ ir_cost <- function(ir) {
   if (is.null(ir)) {
     return(0L)
   }
-  switch(ir$kind,
+  switch(.subset2(ir, "kind"),
     lit = 1L,
     vec = 1L,
     col = 2L,
-    call = sum(vapply(ir$args, ir_cost, integer(1))) + 1L
+    call = {
+      # (a loop, not a vapply() closure: this runs for every filter())
+      args <- .subset2(ir, "args")
+      total <- 1L
+      for (i in seq_along(args)) {
+        total <- total + ir_cost(.subset2(args, i))
+      }
+      total
+    }
   )
 }
 
@@ -3811,8 +3910,8 @@ ir_cost <- function(ir) {
 #' warn "NAs produced by integer overflow", and dplyr's warning depends on the
 #' rows its verb receives, so the optimizer must not change them (F70).
 #' `%/%` and `%%` never warn and are not checked, nor is a node with a null
-#' literal operand (`a + NA`; its other operand is still walked). Cached by
-#' `make_predicate()` and `make_mutate_expr()`.
+#' literal operand (`a + NA`; its other operand is still walked). Asked through
+#' `record_checked_int()`, once per record and only by the optimizer (F110).
 #'
 #' One walk visits each node once and stops at the first checked node. Column,
 #' literal and vector operands are typed off the schema/IR (both first, so a
@@ -3820,6 +3919,8 @@ ir_cost <- function(ir) {
 #' typed bottom-up as the walk descends into it (`ir_call_type()`, the step
 #' [ir_infer_type()] takes per node), so a chain of `+` nodes is typed once,
 #' not once per level. A type that cannot be inferred counts as checked.
+#' The walk is `ir_checked_walk()`, a top-level function: it runs when the
+#' optimizer asks, not on every eager verb call.
 #'
 #' @param ir An IR node (or `NULL`)
 #' @param schema List with `names`/`types` the IR is bound against
@@ -3829,98 +3930,155 @@ ir_has_checked_int <- function(ir, schema) {
   if (is.null(ir) || !identical(.subset2(ir, "kind"), "call")) {
     return(FALSE)
   }
-  found <- FALSE
-  # Visit call node `node` and everything below it; when `typed`, also return
-  # its type (as ir_infer_type() would, errors included). Returns early once
-  # `found` is set.
-  walk <- function(node, typed) {
-    args <- .subset2(node, "args")
-    n <- length(args)
-    types <- if (typed) character(n)
-    seen <- logical(n)
-    isolated <- logical(n)
-    # A node with a null literal operand is NA on every row and never reports
-    # an overflow (checked_has_null_literal() in src/expr_eval.hpp); its other
-    # operand is still evaluated, so the walk goes on below it.
-    if (n == 2L && match(.subset2(node, "op"), c("+", "-", "*"), 0L) > 0L &&
-          !ir_lit_is_null(.subset2(args, 1L)) && !ir_lit_is_null(.subset2(args, 2L))) {
-      # Is every operand INT32/BOOL8? NA: the call operands decide.
-      checked <- NA
-      known <- 0L
-      for (i in 1:2) {
-        a <- .subset2(args, i)
-        kind <- .subset2(a, "kind")
-        if (kind == "call") next
-        if (kind == "col") {
-          idx <- match(.subset2(a, "name"), schema$names)
-          if (is.na(idx)) {
-            checked <- TRUE
-            break
-          }
-          type <- schema$types[idx]
-        } else {
-          type <- .subset2(a, "type")
-          # a bare untyped NA literal adopts its sibling's type
-          if (is.null(type)) next
-        }
-        known <- known + 1L
-        if (match(type, c("INT32", "BOOL8"), 0L) == 0L) {
-          checked <- FALSE
-          break
-        }
+  identical(ir_checked_walk(ir, FALSE, schema), ir_checked_found)
+}
+
+# What ir_checked_walk() returns once it has found a checked node.
+ir_checked_found <- structure(list(), class = "ir_checked_found")
+ir_checked_ops <- c("+", "-", "*")
+ir_checked_int_types <- c("INT32", "BOOL8")
+
+# Visit call node `node` and everything below it; when `typed`, also return its
+# type (as ir_infer_type() would, errors included). Returns `ir_checked_found`
+# at once when a checked node turns up, else NULL (untyped) or the type. A
+# top-level function, not a closure made per call (F110): this runs for every
+# mutate() and filter().
+# @keywords internal
+ir_checked_walk <- function(node, typed, schema) {
+  args <- .subset2(node, "args")
+  n <- length(args)
+  seen <- NULL
+  types <- NULL
+  if (n == 2L) {
+    a1 <- .subset2(args, 1L)
+    a2 <- .subset2(args, 2L)
+    k1 <- .subset2(a1, "kind")
+    k2 <- .subset2(a2, "kind")
+    if (match(.subset2(node, "op"), ir_checked_ops, 0L) > 0L) {
+      # A node with a null literal operand is NA on every row and never reports
+      # an overflow (checked_has_null_literal() in src/expr_eval.hpp); its other
+      # operand is still evaluated, so the walk goes on below it. (A literal
+      # with `na` FALSE and an atomic non-NA scalar value is not null:
+      # ir_lit_is_null() answers the rest.)
+      null1 <- null2 <- FALSE
+      if (k1 == "lit") {
+        v <- .subset2(a1, "value")
+        null1 <- !(identical(.subset2(a1, "na"), FALSE) && is.atomic(v) && length(v) == 1L && !is.na(v)) &&
+          ir_lit_is_null(a1)
       }
-      if (is.na(checked)) {
-        for (i in 1:2) {
-          a <- .subset2(args, i)
-          if (.subset2(a, "kind") != "call") next
-          # Inside a typed walk an error fails this node's own type as well, so
-          # it is left to the caught walk above, which counts it as checked.
-          type <- if (typed) {
-            walk(a, TRUE)
+      if (k2 == "lit") {
+        v <- .subset2(a2, "value")
+        null2 <- !(identical(.subset2(a2, "na"), FALSE) && is.atomic(v) && length(v) == 1L && !is.na(v)) &&
+          ir_lit_is_null(a2)
+      }
+      if (!null1 && !null2) {
+        # Is every operand INT32/BOOL8? NA: the call operands decide. Each
+        # operand in order: a column that is not in the schema is checked, a
+        # known type that is not INT32/BOOL8 is not; a call is left to the
+        # typing below, a bare untyped NA literal adopts its sibling's type.
+        checked <- NA
+        known <- 0L
+        if (k1 != "call") {
+          type <- if (k1 == "col") {
+            idx <- match(.subset2(a1, "name"), .subset2(schema, "names"))
+            if (is.na(idx)) checked <- TRUE else .subset2(schema, "types")[idx]
           } else {
-            tryCatch(walk(a, TRUE), error = function(e) NA_character_)
+            .subset2(a1, "type")
           }
-          if (found) return(NULL)
-          seen[[i]] <- TRUE
-          if (typed) types[[i]] <- ir_one_type(type)
-          if (is.na(type)) {
-            checked <- TRUE
-            break
-          }
-          known <- known + 1L
-          if (match(type, c("INT32", "BOOL8"), 0L) == 0L) {
-            checked <- FALSE
-            break
+          if (is.na(checked) && !is.null(type)) {
+            known <- 1L
+            if (match(type, ir_checked_int_types, 0L) == 0L) checked <- FALSE
           }
         }
-        if (is.na(checked)) checked <- known > 0L
-      }
-      if (checked) {
-        found <<- TRUE
-        return(NULL)
+        if (is.na(checked) && k2 != "call") {
+          type <- if (k2 == "col") {
+            idx <- match(.subset2(a2, "name"), .subset2(schema, "names"))
+            if (is.na(idx)) checked <- TRUE else .subset2(schema, "types")[idx]
+          } else {
+            .subset2(a2, "type")
+          }
+          if (is.na(checked) && !is.null(type)) {
+            known <- known + 1L
+            if (match(type, ir_checked_int_types, 0L) == 0L) checked <- FALSE
+          }
+        }
+        if (is.na(checked)) {
+          seen <- logical(2L)
+          if (typed) types <- character(2L)
+          for (i in 1:2) {
+            a <- if (i == 1L) a1 else a2
+            if (.subset2(a, "kind") != "call") next
+            # Inside a typed walk an error fails this node's own type as well, so
+            # it is left to the caught walk above, which counts it as checked.
+            type <- if (typed) {
+              ir_checked_walk(a, TRUE, schema)
+            } else {
+              tryCatch(ir_checked_walk(a, TRUE, schema), error = function(e) NA_character_)
+            }
+            if (identical(type, ir_checked_found)) return(type)
+            seen[[i]] <- TRUE
+            if (typed) types[[i]] <- ir_one_type(type)
+            if (is.na(type)) {
+              checked <- TRUE
+              break
+            }
+            known <- known + 1L
+            if (match(type, ir_checked_int_types, 0L) == 0L) {
+              checked <- FALSE
+              break
+            }
+          }
+          if (is.na(checked)) checked <- known > 0L
+        }
+        if (checked) {
+          return(ir_checked_found)
+        }
       }
     }
+    if (!typed) {
+      # (the call operands not typed above)
+      if (k1 == "call" && (is.null(seen) || !seen[[1L]]) &&
+            identical(ir_checked_walk(a1, FALSE, schema), ir_checked_found)) {
+        return(ir_checked_found)
+      }
+      if (k2 == "call" && (is.null(seen) || !seen[[2L]]) &&
+            identical(ir_checked_walk(a2, FALSE, schema), ir_checked_found)) {
+        return(ir_checked_found)
+      }
+      return(NULL)
+    }
+  } else if (!typed) {
     for (i in seq_len(n)) {
-      if (seen[[i]]) next
       a <- .subset2(args, i)
-      if (.subset2(a, "kind") == "call") {
-        type <- walk(a, typed)
-        if (found) return(NULL)
-      } else if (typed) {
-        type <- ir_infer_type(a, schema)
-        isolated[[i]] <- identical(.subset2(a, "kind"), "lit") && ir_is_untyped_na(a)
+      if (.subset2(a, "kind") == "call" &&
+            identical(ir_checked_walk(a, FALSE, schema), ir_checked_found)) {
+        return(ir_checked_found)
       }
-      if (typed) types[[i]] <- ir_one_type(type)
     }
-    if (!typed) return(NULL)
-    entry <- ir_call_registry[[.subset2(node, "op")]]
-    if (is.null(entry)) {
-      stop("Unknown IR op: '", .subset2(node, "op"), "'", call. = FALSE)
-    }
-    ir_call_type(node, entry, types, isolated)
+    return(NULL)
   }
-  walk(ir, FALSE)
-  found
+  if (is.null(seen)) {
+    seen <- logical(n)
+    types <- character(n)
+  }
+  isolated <- logical(n)
+  for (i in seq_len(n)) {
+    if (seen[[i]]) next
+    a <- .subset2(args, i)
+    if (.subset2(a, "kind") == "call") {
+      type <- ir_checked_walk(a, TRUE, schema)
+      if (identical(type, ir_checked_found)) return(type)
+    } else {
+      type <- ir_infer_type(a, schema)
+      isolated[[i]] <- identical(.subset2(a, "kind"), "lit") && ir_is_untyped_na(a)
+    }
+    types[[i]] <- ir_one_type(type)
+  }
+  entry <- ir_call_registry[[.subset2(node, "op")]]
+  if (is.null(entry)) {
+    stop("Unknown IR op: '", .subset2(node, "op"), "'", call. = FALSE)
+  }
+  ir_call_type(node, entry, types, isolated)
 }
 
 # A single type string, else an error (ir_infer_type() raises one for it too).
@@ -5420,14 +5578,14 @@ ir_gated_types <- c("STRING", "BOOL8", "INT32", "INT64", "FLOAT64")
 # @keywords internal
 ir_type_gate <- function(op, type, c_order = FALSE) {
   type <- unname(type)
-  if (identical(type, "STRING") && op %in% ir_collated_ops) {
+  if (identical(type, "STRING") && match(op, ir_collated_ops, 0L) > 0L) {
     return(c_order || session_collation_is_c())
   }
   allowed <- ir_native_arg_types[[op]]
-  if (is.null(allowed) || !type %in% ir_gated_types) {
+  if (is.null(allowed) || match(type, ir_gated_types, 0L) == 0L) {
     return(TRUE)
   }
-  type %in% allowed
+  match(type, allowed, 0L) > 0L
 }
 
 # F48: the typed-allowlist rule of ir_infer_type(), run on every call node

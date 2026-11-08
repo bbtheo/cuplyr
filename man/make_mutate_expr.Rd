@@ -16,8 +16,9 @@ via \code{\link[=ir_infer_type]{ir_infer_type()}} (which delegates to \code{\lin
 unchanged for arithmetic ops, per section 1.3)}
 }
 \value{
-An expression list structure: \code{list(output_col, ir, input_cols, output_type, checked_int)}; \code{checked_int} (F70) says the expression holds
-an F42 checked integer node (read it with \code{isTRUE()})
+An expression list structure: \code{list(output_col, ir, input_cols, output_type, checked_int)}; \code{checked_int} (F70) is the cell of
+new_checked_int_cell(): read whether the expression holds an F42 checked
+integer node with record_checked_int()
 }
 \description{
 Section 3 of \code{scratchpad/phase1_expression_engine.md}: the IR cutover's

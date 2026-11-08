@@ -739,15 +739,15 @@ ir_has_rw_flag_agg <- function(ir) {
 }
 
 # F70: TRUE iff a mutate node holds an F42 checked integer expression
-# (`ir_has_checked_int()`, cached as `checked_int` by make_mutate_expr()).
+# (`ir_has_checked_int()`, asked through `record_checked_int()`).
 # dplyr evaluates it on every row its verb receives and warns on overflow, so
 # no filter may be moved below it and it may not be pruned as dead.
 mutate_has_checked_int <- function(node) {
-  any(vapply(.subset2(node, "expressions"), function(e) isTRUE(e$checked_int), logical(1)))
+  any(vapply(.subset2(node, "expressions"), record_checked_int, logical(1)))
 }
 
 # F70: TRUE iff a predicate holds an F42 checked integer expression.
-pred_checked_int <- function(pred) isTRUE(pred$checked_int)
+pred_checked_int <- function(pred) record_checked_int(pred)
 
 #' Try to fuse two consecutive mutate nodes
 #'
@@ -836,7 +836,7 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
         }
         # Likewise a checked integer expression (F70): its overflow warning
         # does not depend on the column being used. Its inputs stay required.
-        if (isTRUE(expr$checked_int)) {
+        if (record_checked_int(expr)) {
           keep[i] <- TRUE
           required <- opt_union(required, expr$input_cols)
         }

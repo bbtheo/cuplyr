@@ -21,8 +21,8 @@ rule of \code{checked_int_kind()} kind 1 in \code{src/expr_eval.hpp}. Such a nod
 warn "NAs produced by integer overflow", and dplyr's warning depends on the
 rows its verb receives, so the optimizer must not change them (F70).
 \code{\%/\%} and \code{\%\%} never warn and are not checked, nor is a node with a null
-literal operand (\code{a + NA}; its other operand is still walked). Cached by
-\code{make_predicate()} and \code{make_mutate_expr()}.
+literal operand (\code{a + NA}; its other operand is still walked). Asked through
+\code{record_checked_int()}, once per record and only by the optimizer (F110).
 }
 \details{
 One walk visits each node once and stops at the first checked node. Column,
@@ -31,5 +31,7 @@ double leaf settles a node without typing a call operand). A call operand is
 typed bottom-up as the walk descends into it (\code{ir_call_type()}, the step
 \code{\link[=ir_infer_type]{ir_infer_type()}} takes per node), so a chain of \code{+} nodes is typed once,
 not once per level. A type that cannot be inferred counts as checked.
+The walk is \code{ir_checked_walk()}, a top-level function: it runs when the
+optimizer asks, not on every eager verb call.
 }
 \keyword{internal}

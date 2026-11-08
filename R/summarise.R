@@ -327,7 +327,7 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   # (verified empirically: `summarise(group_by(df, g), .by = g)` raises the
   # grouped-`.data` error).
   by_cols <- resolve_by(.data, by_quo, ".by", verb = "summarise")
-  by_given <- !rlang::quo_is_null(by_quo)
+  by_given <- !quo_is_null_fast(by_quo)
 
   dots <- rlang::quos(...)
   summarise_impl(.data, dots, .groups, by_quo, by_cols, by_given, caller_env)
@@ -352,7 +352,7 @@ notify_materialization <- function(verb, reason, expr = NA_character_, data) {
 # @keywords internal
 summarise_impl_dots <- function(.data, dots, .groups, by_quo, caller_env) {
   by_cols <- resolve_by(.data, by_quo, ".by", verb = "summarise")
-  by_given <- !rlang::quo_is_null(by_quo)
+  by_given <- !quo_is_null_fast(by_quo)
   summarise_impl(.data, dots, .groups, by_quo, by_cols, by_given, caller_env)
 }
 
@@ -1271,7 +1271,7 @@ summarise_simple_fns <- c("sum", "mean", "min", "max", "sd", "var", "median")
 # @return `list(fn, col, idx)` (`idx`: the column's position), or NULL
 # @keywords internal
 summarise_simple_dot <- function(quo, schema) {
-  expr <- rlang::quo_get_expr(quo)
+  expr <- if (inherits(quo, "quosure")) .subset2(quo, 2L) else rlang::quo_get_expr(quo)
   # (the argument is read in place: an empty slot can't be bound to a variable)
   if (!is.call(expr) || length(expr) != 2L || !is.null(names(expr)) ||
       !is.symbol(expr[[1L]]) || !is.symbol(expr[[2L]])) {
@@ -1280,7 +1280,7 @@ summarise_simple_dot <- function(quo, schema) {
   fn <- as.character(expr[[1L]])
   col <- as.character(expr[[2L]])
   idx <- match(col, schema$names)
-  if (!fn %in% summarise_simple_fns || is.na(idx) ||
+  if (match(fn, summarise_simple_fns, 0L) == 0L || is.na(idx) ||
       (identical(fn, "median") && identical(unname(schema$types[idx]), "STRING"))) {
     return(NULL)
   }
@@ -1333,10 +1333,12 @@ summarise_simple_plan <- function(dots, schema) {
 # no timestamp form, a factor, a type the typed allowlist refuses.
 # @keywords internal
 summarise_simple_cpu <- function(simple, schema) {
-  type <- schema$types[simple$idx]
-  (!simple$fn %in% c("min", "max", "mean", "median") && unname(type) %in% cuplyr_timestamp_types) ||
-    identical(unname(type), "DICTIONARY32") || !ir_type_gate(simple$fn, type)
+  type <- .subset2(schema, "types")[.subset2(simple, "idx")]
+  fn <- .subset2(simple, "fn")
+  (match(fn, summarise_ts_ok_fns, 0L) == 0L && match(unname(type), cuplyr_timestamp_types, 0L) > 0L) ||
+    identical(unname(type), "DICTIONARY32") || !ir_type_gate(fn, type)
 }
+summarise_ts_ok_fns <- c("min", "max", "mean", "median")
 
 # Internal: the shared aggregation pipeline -- temp-column preprocessing,
 # aggregation parsing, one ast_summarise push -- used both by the ordinary
@@ -1420,9 +1422,11 @@ summarise_core <- function(.data, dots, retained_groups = character(),
 
   # F07: internal helper aggregations (summarise_by_desugar()'s row-position
   # min()) must stay INT32 and never warn.
-  for (i in seq_along(aggregations)) {
-    if (aggregations[[i]]$output_col %in% internal_cols) {
-      aggregations[[i]]$identity <- FALSE
+  if (length(internal_cols) > 0L) {
+    for (i in seq_along(aggregations)) {
+      if (aggregations[[i]]$output_col %in% internal_cols) {
+        aggregations[[i]]$identity <- FALSE
+      }
     }
   }
 
@@ -1438,9 +1442,15 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   # sum leaves R's integer range, which a plan with a fixed schema can't say.
   # (BOOL8 sums stay lazy: they overflow only past 2^31 TRUE rows in a group.)
   eager <- !identical(.subset2(working_data, "exec_mode"), "lazy")
-  int32_input <- vapply(aggregations, function(agg) identical(unname(agg$input_type), "INT32"), logical(1))
-  min_max_now <- int32_input & vapply(aggregations, function(agg) isTRUE(agg$identity), logical(1))
-  sum_now <- !eager & int32_input & vapply(aggregations, function(agg) identical(agg$fn, "sum"), logical(1))
+  # (one loop over the aggregations, not three vapply() closures)
+  min_max_now <- sum_now <- logical(length(aggregations))
+  for (i in seq_along(aggregations)) {
+    agg <- .subset2(aggregations, i)
+    if (identical(unname(.subset2(agg, "input_type")), "INT32")) {
+      min_max_now[[i]] <- isTRUE(.subset2(agg, "identity"))
+      sum_now[[i]] <- !eager && identical(.subset2(agg, "fn"), "sum")
+    }
+  }
   if (any(min_max_now | sum_now)) {
     # (the notice names the user's columns that need it, never an internal one)
     named <- vapply(aggregations[min_max_now | sum_now], `[[`, character(1), "output_col")

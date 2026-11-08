@@ -13,8 +13,9 @@ make_predicate(ir, schema)
 by \code{\link[=ir_has_checked_int]{ir_has_checked_int()}} for \code{checked_int}}
 }
 \value{
-A predicate list structure: \code{list(ir, cols, estimated_cost, is_deterministic, na_sensitive, checked_int)}; \code{checked_int} (F70) says
-the predicate holds an F42 checked integer node (read it with \code{isTRUE()})
+A predicate list structure: \code{list(ir, cols, estimated_cost, is_deterministic, na_sensitive, checked_int)}; \code{checked_int} (F70) is
+the cell of new_checked_int_cell(): read whether the predicate holds an
+F42 checked integer node with record_checked_int()
 }
 \description{
 Section 3 of \code{scratchpad/phase1_expression_engine.md}: the IR cutover's

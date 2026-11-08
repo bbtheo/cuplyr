@@ -219,7 +219,10 @@ dots_are_plain <- function(dots) {
 # @keywords internal
 dots_mention <- function(dots, fns) {
   for (i in seq_along(dots)) {
-    if (any(fns %in% all.names(rlang::quo_get_expr(dots[[i]])))) {
+    dot <- .subset2(dots, i)
+    # (a quosure's expression is its second element)
+    if (any(match(all.names(if (inherits(dot, "quosure")) .subset2(dot, 2L) else rlang::quo_get_expr(dot)),
+                  fns, 0L) > 0L)) {
       return(TRUE)
     }
   }
@@ -1750,10 +1753,9 @@ expand_plain_dots <- function(dots) {
     nm <- in_names[i]
     out_names[[i]] <- if (!is.null(nm) && !is.na(nm) && nzchar(nm)) nm else ""
   }
-  names(out_quos) <- out_names
-  attr(out_quos, "needs_fallback") <- FALSE
-  attr(out_quos, "staged_temps") <- character()
-  attr(out_quos, "provenance") <- list(origin = seq_len(n), kind = rep("dot", n))
+  attributes(out_quos) <- list(names = out_names, needs_fallback = FALSE,
+                               staged_temps = character(),
+                               provenance = list(origin = seq_len(n), kind = rep("dot", n)))
   out_quos
 }
 

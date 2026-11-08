@@ -35,6 +35,41 @@
 # compiles it over a verb's first few calls, the same for across(). To time
 # a verb, make several warm-up calls first.
 
+# colwise_has_fn_head() of a dot's expression, reading a quosure's field
+# directly: anything but a call (a symbol, a constant, a missing argument) has no
+# function-object head, and a call is walked by colwise_call_has_fn_head() with
+# no rlang call per node (F110).
+# @keywords internal
+colwise_dot_has_fn_head <- function(dot) {
+  if (!inherits(dot, "quosure")) {
+    return(colwise_has_fn_head(rlang::quo_get_expr(dot)))
+  }
+  if (!is.call(.subset2(dot, 2L))) {
+    return(FALSE)
+  }
+  colwise_call_has_fn_head(.subset2(dot, 2L))
+}
+
+# colwise_has_fn_head() of the call `expr`. An embedded quosure (or any other
+# classed call) takes the general function.
+# @keywords internal
+colwise_call_has_fn_head <- function(expr) {
+  if (is.function(.subset2(expr, 1L))) {
+    return(TRUE)
+  }
+  for (i in seq_along(expr)) {
+    # (not assigned: an empty argument slot, `x[, 1]`, must not be forced)
+    if (is.call(.subset2(expr, i))) {
+      if (is.object(.subset2(expr, i))) {
+        if (colwise_has_fn_head(.subset2(expr, i))) return(TRUE)
+      } else if (colwise_call_has_fn_head(.subset2(expr, i))) {
+        return(TRUE)
+      }
+    }
+  }
+  FALSE
+}
+
 # Does `expr` contain a call whose head is a function object? (cheap scan)
 # @keywords internal
 colwise_has_fn_head <- function(expr) {
@@ -59,7 +94,7 @@ colwise_has_fn_head <- function(expr) {
 colwise_rewrite_dots <- function(dots, schema) {
   has_fn <- FALSE
   for (i in seq_along(dots)) {
-    if (colwise_has_fn_head(rlang::quo_get_expr(dots[[i]]))) {
+    if (colwise_dot_has_fn_head(dots[[i]])) {
       has_fn <- TRUE
       break
     }
