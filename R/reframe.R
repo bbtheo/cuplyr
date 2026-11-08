@@ -74,7 +74,7 @@ reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
   if (is_rowwise_gpu(.data)) {
     return(rowwise_cpu(.data, "reframe"))
   }
-  dots <- rlang::enquos(...)
+  dots <- rlang::enquos(..., .ignore_empty = "all")
   by_quo <- rlang::enquo(.by)
   caller_env <- rlang::caller_env()
   # (F88: the reasons this call's dots record for a CPU fallback, call-scoped)

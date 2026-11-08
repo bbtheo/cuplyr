@@ -389,6 +389,45 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
   bodies and column-free sub-calls folded inside other dots (`x + runif(1)`)
   run again. Open note: grouped `slice(bump())` evaluates once (dplyr per
   group).
+- **Evaluate-once and silent-wrong follow-ups (F111)**: (1) a NULL value is no
+  literal: `ir_lit_or_unsupported(NULL)` (Case 5's source `NULL`, a variable, and
+  the column-free date fold, where `floor_date(NULL)` is NULL) records a cause
+  and returns NULL, so `x > cfg$trh` or `mutate(y = x + nul)` goes to dplyr for
+  its size-0 error. A whole dot that is NULL is decided before the parser and
+  still drops the column natively, except the collapse of a one-column
+  `if_any()`/`if_all()` (provenance kind `"combined"`), which goes to dplyr for
+  its error. `x %in% NULL` and `coalesce(x, NULL)` take the CPU; a literal
+  `missing = NULL` of `if_else()` is "not supplied" and is dropped before its
+  arguments are parsed (native). (2) `mutate_constant_value()` treats a dot with
+  `expr_reaches_mask()` as not constant, and `resolve_slice_dots()` stops at one
+  before `eval_tidy()`, so `mutate(z = exists("flag"))` and
+  `slice(if (exists("flag")) ...)` are dplyr's. `expr_has_mask_only_call()` also
+  counts `ntile()` without an `x` (its default is `row_number()`), so
+  `ntile(n = 2)` is parsed natively, not evaluated outside the mask. (3) A bound
+  name that cannot be read (a missing argument, a promise that errors, the empty
+  symbol of an empty call argument) in Case 2 (symbol), Case 4 (`.env$`) and
+  `pronoun_call_name()`'s `.env[[sym]]` subscript sends the dot to the CPU, so
+  dplyr wraps the error; an unbound name keeps the native "object not found"
+  error. (4) A non-trailing empty dot: mutate/filter/summarise/reframe capture
+  their dots with `.ignore_empty = "all"` (dplyr's rule; a named empty `y = ` is
+  kept and errors in dplyr), and `shadow_screen_text()` returns a reason for an
+  empty dot so the verbs that keep it (transmute, slice, distinct) go to dplyr
+  for its error. (5) A column-free CALL dot whose evaluation raised, with every
+  name in it bound (`expr_has_unbound_symbol()`: `$` operands and `pkg::` names
+  are not variables), is `kind = "failed"` in `mutate_constant_value()` and goes
+  to the CPU at once without a second fold: a failing dot runs twice (cuplyr
+  once, dplyr once), not three times. (6) An if_any()/if_all() piece, a call or a
+  bare variable body (`~ ab`), that reads an active binding
+  (`expr_reads_active_binding()`) sends the call to dplyr before the type probe,
+  so the binding is read as many times as dplyr reads it. Known limits, not
+  fixed: a failing column-free dot still runs twice (an error outside the mask
+  proves nothing about dplyr); a side-effecting call folded inside a dot that a
+  type rule then sends to the CPU (`filter(g > bump())`) runs again; across()
+  lambdas are handed to dplyr as written and cannot be replayed;
+  `expr_reaches_mask()` is syntactic (an alias of `exists`, or a user function
+  calling it, is evaluated without a mask); a two-column `if_any()` over a NULL
+  predicate raises dplyr's `mutate_error` from the expanded `a | b`, whose parent
+  differs from the one dplyr's own `if_any()` gives.
 - **Running schema for across()/if_any()/if_all() (F45)**: this qualifies the
   across() sentence above. `expand_across_dots()` resolves each such dot's
   `.cols` against `run`: the input schema updated by every earlier dot

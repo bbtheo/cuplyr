@@ -371,7 +371,7 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   # argument matching, except for dots named like enquos()'s own arguments
   # (see the "Capture" bullet in .claude/reference/architecture.md); dplyr's
   # dplyr_quosures() captures mutate()'s dots with quos() too.
-  dots <- rlang::quos(...)
+  dots <- rlang::quos(..., .ignore_empty = "all")
   # (an argument that wasn't given is the NULL quosure; skips three enquo()s.
   # missing() is also TRUE for an argument forwarded from a caller's missing
   # one, whose substitute() is that caller's symbol rather than the NULL
@@ -1097,14 +1097,13 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
   # change what the CPU route does). A vector is recorded too;
   # inline_evaluated_dots() skips one whose vec_size() can't match the data. A
   # name an earlier `col = NULL` dot removed is NULL in dplyr's mask,
-  # but was read from the environment here: dplyr must evaluate such a dot,
-  # and one that can see the mask without naming a column (`exists("x")`,
-  # expr_reaches_mask()).
+  # but was read from the environment here: dplyr must evaluate such a dot.
+  # (A dot that can see the mask without naming a column, `exists("x")`, is
+  # never a constant: mutate_constant_value() says "none" for it.)
   record_const <- function(j, const, quo) {
     if (!is.null(evaluated) && ungrouped &&
         (const$kind %in% c("scalar", "vector") || (identical(const$kind, "null") && isTRUE(const$evaluated))) &&
-        !any(all.vars(rlang::quo_get_expr(quo)) %in% dropped) &&
-        !expr_reaches_mask(rlang::quo_get_expr(quo))) {
+        !any(all.vars(rlang::quo_get_expr(quo)) %in% dropped)) {
       evaluated$consts[[as.character(j)]] <- list(value = const$raw %||% const$value)
     }
   }
@@ -1171,6 +1170,16 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
 
     # `col = NULL` (or a constant that evaluates to NULL) drops the column:
     # later dots no longer see it, and a later dot of the same name re-adds it.
+    # An if_any()/if_all() over one column collapses to its bare predicate, so
+    # a NULL there is not a dropped column but dplyr's error, which it raises.
+    if (identical(const$kind, "null") && !is.null(provenance) &&
+        identical(provenance$kind[i], "combined")) {
+      if (!stop_on_unparseable) {
+        return(fail(i, "an if_any()/if_all() predicate that is NULL; dplyr reports the error."))
+      }
+      stop(verb, "() can't use an if_any()/if_all() predicate that is NULL.\n",
+           "Expression: ", rlang::quo_text(expr), call. = FALSE)
+    }
     if (identical(const$kind, "null")) {
       dropped <- set_union(dropped, new_name)
       keep_idx <- schema$names != new_name
@@ -1226,6 +1235,9 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
         v <- as.double(unclass(const$value))
         any(is.finite(v) & v != floor(v))
       }
+    } else if (identical(const$kind, "failed")) {
+      fallback_cause("evaluating it outside the data mask raised an error; dplyr runs it and reports.")
+      ir <- NULL
     } else {
       # A vector constant nested inside a larger expression (`x + 1:5`) is
       # dplyr's elementwise job: CPU fallback.
@@ -1342,12 +1354,14 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
 # Classify a mutate()/transmute() dot that reads no column: `kind` is
 # "null" (the dot is, or evaluates to, NULL), "vector" (an atomic vector of
 # length != 1; `supported` says whether it can be uploaded as a column),
+# "failed" (a call whose evaluation raised, with every name in it bound),
 # "scalar" (an evaluated call/symbol with a length-1 atomic value, returned
 # as `value` so the caller doesn't evaluate the dot a second time; a "null"
 # also says, in `evaluated`, whether evaluating the dot was needed), or
 # "none" (everything else). Evaluated in R, in the dot's environment,
-# with an empty data mask so `.env` works and data-only calls (`n()`) fail
-# and count as "none".
+# with an empty data mask so `.env` works. A call that needs the mask
+# (`n()`, `ntile(n = 2)`, `exists("x")`) is "none" without being evaluated; so
+# is a symbol or a call with an unbound name, which the parser reports.
 # @keywords internal
 mutate_constant_value <- function(quo, schema) {
   none <- list(kind = "none")
@@ -1361,7 +1375,8 @@ mutate_constant_value <- function(quo, schema) {
   }
 
   if (is.symbol(expr) || is.call(expr)) {
-    if (expr_has_column_ref(expr, schema) || expr_has_mask_only_call(expr)) {
+    if (expr_has_column_ref(expr, schema) || expr_has_mask_only_call(expr) ||
+          expr_reaches_mask(expr)) {
       return(none)
     }
     got <- tryCatch(
@@ -1369,7 +1384,15 @@ mutate_constant_value <- function(quo, schema) {
       error = function(e) NULL
     )
     if (is.null(got)) {
-      return(none)
+      # A call that raised is dplyr's to run (only it can wrap the error, and
+      # the failure out here is no proof it fails inside the mask). The parser
+      # would fold it a second time, so the caller skips it. A bare symbol
+      # keeps the parser's own error.
+      # An unbound name in it is the typo error the parser raises natively.
+      # (`$`/`@` operands and `pkg::` names are not variables here)
+      bound <- is.call(expr) &&
+        !expr_has_unbound_symbol(expr, rlang::quo_get_env(quo), schema)
+      return(if (bound) list(kind = "failed") else none)
     }
     value <- got$value
     ran <- TRUE
@@ -1563,6 +1586,11 @@ expr_has_mask_only_call <- function(expr) {
   }
   head <- call_head_name(expr)
   if (!is.null(head) && ((head %in% zero_arg && length(expr) == 1L) || head %in% any_arg)) {
+    return(TRUE)
+  }
+  # ntile() without an `x` (`ntile(n = 2)`) ranks row_number(), its default
+  if (identical(head, "ntile") &&
+      (length(expr) == 1L || (!is.null(names(expr)) && !any(names(expr)[-1L] %in% c("", "x"))))) {
     return(TRUE)
   }
   parts <- as.list(expr)[-1]

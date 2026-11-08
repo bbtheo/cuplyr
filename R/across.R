@@ -1419,6 +1419,26 @@ stage_across_expansion <- function(expanded, taken) {
   out
 }
 
+# TRUE iff a name `expr` reads that is not one of `cols` is an active binding
+# in `env` or an enclosing environment (found in its own frame; nothing is
+# read or forced).
+# @keywords internal
+expr_reads_active_binding <- function(expr, cols, env) {
+  for (v in setdiff(all.vars(expr), cols)) {
+    e <- env
+    while (!identical(e, emptyenv())) {
+      if (exists(v, envir = e, inherits = FALSE)) {
+        if (bindingIsActive(v, e)) {
+          return(TRUE)
+        }
+        break
+      }
+      e <- parent.env(e)
+    }
+  }
+  FALSE
+}
+
 # if_any()/if_all() require every per-column predicate to be logical. dplyr
 # checks the values; here the piece's inferred type stands in for them. A piece
 # the IR can't parse is left to the normal parse path; one whose type is
@@ -1446,6 +1466,13 @@ check_across_predicate_piece <- function(piece, col, env, schema) {
   # (`.x >= Sys.Date() - 30`) is typed and stays native.
   if (is.call(piece) && !across_expr_is_pure(piece, schema, clock_env = env)) {
     fallback_cause("a call in the lambda may have side effects, and dplyr evaluates it once per column.")
+    return(TRUE)
+  }
+  # F111: the probe below reads a variable of the piece, and the dot's own
+  # parse reads it again: an active binding would run twice per column, where
+  # dplyr reads it once. (A bare variable body, `~ ab`, counts too.)
+  if (expr_reads_active_binding(piece, schema$names, env)) {
+    fallback_cause("a variable in the lambda is an active binding, and dplyr reads it once per column.")
     return(TRUE)
   }
   # (F88: a probe; the dot's own parse later records any cause)

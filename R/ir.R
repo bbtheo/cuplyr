@@ -163,6 +163,13 @@ ir_lit_from_r <- function(value, allow_vector = FALSE) {
 # be typed "UNKNOWN" and fail only when the plan runs.
 # @keywords internal
 ir_lit_or_unsupported <- function(value, allow_vector = FALSE) {
+  # NULL is no value: dplyr raises its size-0 error where a typeless literal
+  # would give 0 rows or an all-NA column (a whole dot that is NULL is decided
+  # before the parser, and drops the column natively)
+  if (is.null(value)) {
+    fallback_cause("a NULL value, a size-0 vector in dplyr, which it accepts or rejects per call.")
+    return(NULL)
+  }
   lit <- ir_lit_from_r(value, allow_vector = allow_vector)
   if (identical(.subset2(lit, "type"), "UNKNOWN")) {
     fallback_cause("a value that is not an atomic vector the GPU can hold.")
@@ -284,7 +291,9 @@ pronoun_call_name <- function(expr, env = NULL, schema = NULL) {
   if (is.null(env) || is.null(schema) || nm %in% schema$names || nm %in% c(".data", ".env")) {
     return(NULL)
   }
-  val <- get0(nm, envir = env, inherits = TRUE)
+  # (a missing argument or a promise that errors cannot be read: NULL, so
+  # the caller's CPU route lets dplyr report it)
+  val <- tryCatch(get0(nm, envir = env, inherits = TRUE), error = function(e) NULL)
   if (is.character(val) && length(val) == 1L && !is.na(val) && is.null(attributes(val))) val else NULL
 }
 
@@ -1191,11 +1200,17 @@ shadow_screen_text <- function(dots) {
   for (dot in dots) {
     # (a quosure is `~expr` with its env as an attribute; .subset2() because
     # rlang gives quosures slow `[[` and length() methods. A missing one has
-    # the empty symbol for `expr`, which must not be assigned)
-    expr <- .subset2(dot, 2L)
-    if (!is.call(expr)) {
+    # the empty symbol for `expr`, which must not be assigned: reading the
+    # variable would raise "argument is missing")
+    if (!is.call(.subset2(dot, 2L))) {
+      if (identical(.subset2(dot, 2L), quote(expr = ))) {
+        # an empty dot (`mutate(df, , y = 1)`): dplyr drops it or raises its
+        # own error, per verb
+        return("an empty argument; dplyr drops it or reports it, per verb.")
+      }
       next
     }
+    expr <- .subset2(dot, 2L)
     all <- all.names(expr)
     values <- all.names(expr, functions = FALSE)
     n_heads <- length(all) - length(values)
@@ -1533,7 +1548,8 @@ ir_parse_pre_registry <- function(expr, env, schema, allow_vector, fn_name, head
     if (is.null(folded)) {
       return(NULL)
     }
-    return(ir_lit_from_r(folded$value, allow_vector = allow_vector))
+    # (floor_date(NULL) is NULL: no literal, see ir_lit_or_unsupported())
+    return(ir_lit_or_unsupported(folded$value, allow_vector = allow_vector))
   }
 
   # F46: lubridate floor_date()/ceiling_date()/round_date(), same guard.
@@ -1563,10 +1579,29 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
     if (match(nm, schema$names, 0L) > 0L) {
       return(ir_col(nm))
     }
+    # (a name that is bound but cannot be read, a missing argument or a
+    # promise that errors, is dplyr's to report, wrapped: the CPU route)
+    unreadable <- FALSE
     val <- tryCatch(
       rlang::eval_tidy(rlang::new_quosure(expr, env)),
-      error = function(e) stop(conditionMessage(e), call. = FALSE)
+      error = function(e) {
+        # (the empty symbol of an empty call argument, `f(a, , b)`, has no name
+        # to look up; dplyr reports the missing argument)
+        if (!nzchar(nm) || exists(nm, envir = env, inherits = TRUE)) {
+          unreadable <<- TRUE
+          return(NULL)
+        }
+        stop(conditionMessage(e), call. = FALSE)
+      }
     )
+    if (unreadable) {
+      fallback_cause(if (nzchar(nm)) {
+        sprintf("`%s` cannot be read here; dplyr reports it.", nm)
+      } else {
+        "an empty argument; dplyr reports it."
+      })
+      return(NULL)
+    }
     return(ir_lit_or_unsupported(val, allow_vector = allow_vector))
   }
 
@@ -1590,7 +1625,7 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
   # answered here for anything that is not a call)
   if (!is.call(expr)) {
     if (is.null(expr)) {
-      return(ir_lit_from_r(NULL))
+      return(ir_lit_or_unsupported(NULL))
     }
     if (is.atomic(expr) && length(expr) == 1) {
       return(ir_lit_or_unsupported(expr, allow_vector = allow_vector))
@@ -1637,14 +1672,23 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       if (!exists(nm, envir = env, inherits = TRUE)) {
         return(NULL)  # dplyr gives the wrapped "object not found" error
       }
-      val <- get(nm, envir = env, inherits = TRUE)
+      unreadable <- FALSE
+      val <- tryCatch(get(nm, envir = env, inherits = TRUE), error = function(e) {
+        unreadable <<- TRUE
+        NULL
+      })
+      if (unreadable) {
+        # a missing argument or a promise that errors: dplyr wraps the error
+        fallback_cause(sprintf("`.env$%s` cannot be read here; dplyr reports it.", nm))
+        return(NULL)
+      }
       return(ir_lit_or_unsupported(val, allow_vector = allow_vector))
     }
   }
 
   # Case 5: literal constant (numeric/character/logical/NA/NULL).
   if (is.null(expr)) {
-    return(ir_lit_from_r(NULL))
+    return(ir_lit_or_unsupported(NULL))
   }
   if (is.atomic(expr) && length(expr) == 1) {
     return(ir_lit_or_unsupported(expr, allow_vector = allow_vector))
@@ -1723,6 +1767,12 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
     }
 
     if (in_registry) {
+      # `if_else(.., missing = NULL)`: a literal NULL there is "not supplied"
+      # (dplyr's default), not a NULL operand
+      if (identical(canonical, "if_else") && length(args_raw) == 4L &&
+            identical(names(args_raw)[4L], "missing") && is.null(.subset2(args_raw, 4L))) {
+        args_raw <- args_raw[1:3]
+      }
       if (!is.na(entry$arity) && length(args_raw) != entry$arity) {
         # wrong arg count for this op: not this shape, fall back
         fallback_cause(sprintf("`%s()` is not on the GPU with %d arguments.", fn_name, length(args_raw)))
@@ -5000,7 +5050,7 @@ ir_parse_factor_cmp <- function(op) {
 }
 
 # F50: the parse hook of %in%. A bare factor column against a set of labels (a
-# STRING literal/vector, the bare NA, an empty set, or a factor value, whose
+# STRING literal/vector, the bare NA, an empty vector, or a factor value, whose
 # labels are matched, as base R's match() does) becomes `codes %in% positions`.
 # Non-levels drop out of the set; an NA in it stays NA and matches the NA
 # codes. Everything else (a number set, a factor on the right) keeps the
@@ -5018,8 +5068,6 @@ ir_parse_factor_in <- function(args, schema) {
   }
   labels <- if (isTRUE(set$na) && is.null(set$type)) {
     NA_character_
-  } else if (is.null(set$type) && is.null(set$value)) {
-    character(0)
   } else if (identical(unname(set$type), "STRING")) {
     set$value
   } else if (identical(unname(set$type), "DICTIONARY32") && is.factor(set$value)) {

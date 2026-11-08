@@ -205,7 +205,7 @@
 filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   # (an argument that wasn't given is the NULL quosure, which skips an enquo())
   by_quo <- if (missing(.by) && is.null(substitute(.by))) null_quo else rlang::enquo(.by)
-  filter_impl(.data, rlang::quos(...), by_quo, .preserve,
+  filter_impl(.data, rlang::quos(..., .ignore_empty = "all"), by_quo, .preserve,
               complement = FALSE, call = rlang::current_env())
 }
 
@@ -228,7 +228,7 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 #' @importFrom dplyr filter_out
 filter_out.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   by_quo <- if (missing(.by) && is.null(substitute(.by))) null_quo else rlang::enquo(.by)
-  filter_impl(.data, rlang::quos(...), by_quo, .preserve,
+  filter_impl(.data, rlang::quos(..., .ignore_empty = "all"), by_quo, .preserve,
               complement = TRUE, call = rlang::current_env())
 }
 

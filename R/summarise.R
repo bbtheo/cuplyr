@@ -301,14 +301,14 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
 
   # A rowwise table summarises once per row (F49, R/rowwise.R).
   if (is_rowwise_gpu(.data)) {
-    return(summarise_rowwise(.data, rlang::quos(...), .groups, rlang::enquo(.by), caller_env))
+    return(summarise_rowwise(.data, rlang::quos(..., .ignore_empty = "all"), .groups, rlang::enquo(.by), caller_env))
   }
 
   # `.groups = "rowwise"`: summarise keeping every group, then the result is
   # rowwise by those groups (F49: a rowwise tbl_gpu; collect() gives dplyr's
   # rowwise_df). The host rowwise_df of a CPU route is rowwise already.
   if (identical(.groups, "rowwise")) {
-    res <- summarise_impl_dots(.data, rlang::quos(...), "keep", rlang::enquo(.by),
+    res <- summarise_impl_dots(.data, rlang::quos(..., .ignore_empty = "all"), "keep", rlang::enquo(.by),
                                caller_env)
     if (is_tbl_gpu(res)) {
       return(rowwise_mark(res, res$groups))
@@ -329,7 +329,7 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   by_cols <- resolve_by(.data, by_quo, ".by", verb = "summarise")
   by_given <- !quo_is_null_fast(by_quo)
 
-  dots <- rlang::quos(...)
+  dots <- rlang::quos(..., .ignore_empty = "all")
   summarise_impl(.data, dots, .groups, by_quo, by_cols, by_given, caller_env)
 }
 

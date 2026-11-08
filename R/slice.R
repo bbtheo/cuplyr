@@ -244,6 +244,11 @@ resolve_slice_dots <- function(dots) {
   }
 
   vals <- lapply(dots, function(d) {
+    # a dot that reaches the data mask by name (`exists("flag")`) has no value
+    # out here; dplyr evaluates it
+    if (expr_reaches_mask(rlang::quo_get_expr(d))) {
+      stop("slice() index reaches the data mask; dplyr evaluates it.", call. = FALSE)
+    }
     v <- rlang::eval_tidy(d)
     # A Period/Duration index is dplyr's error to raise (F48): the stop
     # sends the call to the CPU fallback like any non-numeric index (an
