@@ -1483,28 +1483,55 @@ expr_may_read_cols <- function(expr, cols) {
   any(all.vars(expr) %in% c(cols, ".data")) || expr_reaches_mask(expr)
 }
 
+# The functions expr_reaches_mask() looks for. parse(), str2lang() and
+# str2expression() are not among them: they only build language objects, and
+# what evaluates one (eval(), do.call(), exec()...) is. match.fun() is: it can
+# hand back exists() or get(), which read the calling frame, the mask, when the
+# result is called in the dot (`match.fun("exists")("x")`).
+mask_wide_fns <- c(
+  "pick", "across", "c_across", "if_any", "if_all", "cur_data", "cur_data_all",
+  "cur_group", "get", "get0", "mget", "exists", "dynGet", "eval", "evalq",
+  "eval_tidy", "eval_bare", "environment", "current_env", "caller_env",
+  "parent.frame", "sys.frame", "sys.frames", "sys.function",
+  "as.environment", "ls", "objects", "do.call", "exec", "match.fun"
+)
+
+# The function name the head of call `e` reads as: call_head_name(), and also
+# `pkg:::fn`, which call_head_name() leaves alone for its other callers.
+# @keywords internal
+mask_call_head_name <- function(e) {
+  head <- e[[1L]]
+  if (is.call(head) && length(head) == 3L && identical(head[[1L]], as.name(":::")) &&
+      is.symbol(head[[3L]])) {
+    return(as.character(head[[3L]]))
+  }
+  call_head_name(e)
+}
+
 # TRUE iff `expr` calls something that can reach dplyr's data mask without
 # naming a column as a symbol: pick(), a nested across() and friends,
 # cur_data(), get()/mget()/exists(), eval(), environment()... Such a dot's
 # value depends on the mask, so it can't be computed outside it either.
-# (`local()` is not one: its body sees the mask as plain symbols, which the
-# column tests find, and any of these calls inside it is found by the walk.)
+# (`local()`, `with()` and `within()` are not: their body sees the mask as
+# plain symbols, which the column tests find, and any of these calls inside it
+# is found by the walk.)
+# Syntactic: only a call spelled with one of these names counts (bare, `::` or
+# `:::`). Not detected: an alias (`ex <- exists; ex("x")`), a function passed
+# as a value, and a user function that makes such a call itself; those still
+# run without a mask wherever a column-free piece is evaluated.
 # @keywords internal
 expr_reaches_mask <- function(expr) {
-  mask_wide <- c(
-    "pick", "across", "c_across", "if_any", "if_all", "cur_data", "cur_data_all",
-    "cur_group", "get", "get0", "mget", "exists", "dynGet", "eval", "evalq",
-    "eval_tidy", "eval_bare", "parse", "str2lang", "str2expression",
-    "environment", "parent.frame", "sys.frame", "sys.frames", "sys.function",
-    "as.environment", "ls", "objects", "with", "within",
-    "do.call", "match.fun"
-  )
+  # (all.names() is a C walk over every symbol, call heads and embedded
+  # quosures included, so a dot with none of the names costs no R-level walk)
+  if (rlang::is_missing(expr) || !is.call(expr) || !any(all.names(expr) %in% mask_wide_fns)) {
+    return(FALSE)
+  }
   walk <- function(e) {
     if (rlang::is_missing(e) || !is.call(e)) {
       return(FALSE)
     }
-    head <- call_head_name(e)
-    if (!is.null(head) && head %in% mask_wide) {
+    head <- mask_call_head_name(e)
+    if (!is.null(head) && head %in% mask_wide_fns) {
       return(TRUE)
     }
     for (part in as.list(e)) {

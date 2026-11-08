@@ -158,20 +158,24 @@ to CPU evaluation, see below
 \subsection{Expressions the IR doesn't understand (CPU fallback)}{
 
 An expression shape the IR doesn't recognize (see \code{R/ir.R}'s
-\code{ir_parse_quo()}) is handed to a CPU-side fallback: it's evaluated with
-\code{rlang::eval_tidy()} and, if the result is a logical scalar or vector,
-applied back to the GPU table as a boolean mask (materializing first,
-via \code{compute()}, if \code{.data} is lazy with pending operations). Because
-this evaluation happens with \emph{no data mask}, it can only succeed for
-expressions that evaluate to a logical value on their own without
-referencing table columns -- e.g. a pre-computed logical vector or
-\code{filter(rep(TRUE, n))}. An expression that references a table column
-but doesn't parse (a rare shape given how much of dplyr's filter surface
-the IR now covers) will still error with the "only supports comparisons"
-message, since the column symbol can't resolve outside the table. This
-fallback path is legitimate, supported behavior for the cases it does
-cover, not an error condition -- see \code{getOption("cuplyr.fallback")}
-below to be notified when it's used.
+\code{ir_parse_quo()}) is handled in one of two ways. A dot that reads no table
+column (a pre-computed logical vector, \code{rep(TRUE, n)}) is evaluated once in
+R, with no data mask: a logical scalar is a constant predicate. On an
+ungrouped \code{filter()} a logical vector is a row mask: all the vectors of one
+call are sized against the input table (a wrong size is dplyr's own error)
+and combined with \code{&} with the call's other predicates, which see the same
+input rows. On a grouped, \code{.by} or rowwise table, or in \code{filter_out()}, a
+logical vector runs the whole call in dplyr. A dot that reads a table
+column but doesn't parse (a rare shape given how much of
+dplyr's filter surface the IR now covers), or that visibly calls something
+reaching the data mask by name (\code{exists("x")}, \code{get("ok")}), runs the whole
+call in dplyr on the CPU (see \code{getOption("cuplyr.fallback")} below to be
+notified when it does). The check reads the dot's syntax, so an alias of
+such a function or a user function calling it is not seen and has no data
+mask when the dot names no column. A
+lazy \code{.data} with pending operations runs them early, on the GPU, when a
+logical vector needs the row count (a plan break, see
+\code{getOption("cuplyr.plan_break")}).
 }
 
 \subsection{\code{options(cuplyr.fallback = ...)}}{

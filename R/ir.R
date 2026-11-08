@@ -1361,6 +1361,9 @@ ir_parse_pre_registry <- function(expr, env, schema, allow_vector, fn_name, head
   # evaluation error outside the data mask also means "not constant").
   if (fn_name %in% ir_foldable_window_fns && length(expr) > 1 &&
       !any(vapply(as.list(expr)[-1], expr_has_column_ref, logical(1), schema = schema))) {
+    if (ir_fold_reaches_mask(expr)) {
+      return(NULL)
+    }
     folded <- tryCatch(
       list(value = rlang::eval_tidy(rlang::new_quosure(expr, env), data = list())),
       error = function(e) NULL
@@ -1520,6 +1523,9 @@ ir_parse_pre_registry <- function(expr, env, schema, allow_vector, fn_name, head
   if (fn_name %in% c("as.Date", "as.POSIXct", "floor_date", "ceiling_date",
                       "round_date") &&
       length(expr) > 1 && !expr_has_column_ref(expr, schema)) {
+    if (ir_fold_reaches_mask(expr)) {
+      return(NULL)
+    }
     folded <- tryCatch(
       list(value = rlang::eval_tidy(rlang::new_quosure(expr, env))),
       error = function(e) NULL
@@ -1765,6 +1771,11 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
     # f not in the registry: constant-fold if the subtree has no column
     # reference (how c(4, 6), nrow(df), Sys.Date() work), else unsupported.
     if (!expr_has_column_ref(expr, schema)) {
+      # A call that reaches the mask by name has no value out here, and is not
+      # run: `exists("ok")` would write FALSE into the dot for a column `ok`.
+      if (ir_fold_reaches_mask(expr)) {
+        return(NULL)
+      }
       # An error here is NOT proof of a user error: dplyr evaluates the call
       # inside the data mask, where pick()/n()/cur_*() (possibly inside user
       # functions) are valid but fail out here. NULL = unsupported, so the
@@ -1786,6 +1797,26 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
   }
 
   NULL
+}
+
+# The fallback reason of a call that reaches dplyr's data mask by name.
+mask_reaching_reason <- paste0(
+  "a call that reaches the data mask by name (exists(), get(), eval(), ...) ",
+  "has no value outside it; dplyr evaluates it."
+)
+
+# F79: TRUE, with the cause recorded, when `expr`, about to be evaluated here
+# with no data mask because it names no column, can reach the mask by name
+# (expr_reaches_mask(), a syntactic test with the limits stated there). Every
+# such evaluation in the parser asks first: the caller gives up on the call
+# without running it, and dplyr evaluates it.
+# @keywords internal
+ir_fold_reaches_mask <- function(expr) {
+  if (!expr_reaches_mask(expr)) {
+    return(FALSE)
+  }
+  fallback_cause(mask_reaching_reason)
+  TRUE
 }
 
 # F53: pure registry ops that are evaluated in R when every argument is a
@@ -2701,15 +2732,19 @@ ir_parse_when_reduce <- function(expr, env, schema, fn_name) {
 #' error, caught here and reported as "not a constant" (`ok = FALSE`)
 #' rather than propagating -- the same "no data mask" trick
 #' `resolve_slice_dots()` (`R/slice.R`) already relies on to distinguish
-#' plain R values from column references.
+#' plain R values from column references. An integer64 value is `ok = FALSE`
+#' (F96), and so, unevaluated, is a call that reaches the data mask by name
+#' (F79, `expr_reaches_mask()`).
 #'
 #' @param raw_expr A language object (not a quosure)
 #' @param env The environment to evaluate against
-#' An integer64 value is `ok = FALSE` (F96).
 #'
 #' @return `list(ok = <logical>, value = <the evaluated R value, or NULL>)`
 #' @keywords internal
 ir_eval_constant <- function(raw_expr, env) {
+  if (ir_fold_reaches_mask(raw_expr)) {
+    return(list(ok = FALSE, value = NULL))
+  }
   tryCatch({
     value <- rlang::eval_tidy(rlang::new_quosure(raw_expr, env))
     # F96: a parameter (`n`, `default`, a pattern, ...) that is an integer64
@@ -3178,7 +3213,7 @@ ir_parse_with_order <- function(order_ref, head, a1, rest, env, schema) {
   # column reference before anything is evaluated, so a call that goes to the
   # CPU for that reason has run nothing here.
   for (arg in rest) {
-    if (expr_has_column_ref(arg, schema)) {
+    if (expr_has_column_ref(arg, schema) || ir_fold_reaches_mask(arg)) {
       return(NULL)
     }
   }

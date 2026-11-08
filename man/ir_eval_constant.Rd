@@ -20,6 +20,8 @@ else that isn't resolvable from \code{env} alone) raises an ordinary R
 error, caught here and reported as "not a constant" (\code{ok = FALSE})
 rather than propagating -- the same "no data mask" trick
 \code{resolve_slice_dots()} (\code{R/slice.R}) already relies on to distinguish
-plain R values from column references.
+plain R values from column references. An integer64 value is \code{ok = FALSE}
+(F96), and so, unevaluated, is a call that reaches the data mask by name
+(F79, \code{expr_reaches_mask()}).
 }
 \keyword{internal}

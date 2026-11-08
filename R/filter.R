@@ -137,20 +137,24 @@
 #'
 #' ## Expressions the IR doesn't understand (CPU fallback)
 #' An expression shape the IR doesn't recognize (see `R/ir.R`'s
-#' `ir_parse_quo()`) is handed to a CPU-side fallback: it's evaluated with
-#' `rlang::eval_tidy()` and, if the result is a logical scalar or vector,
-#' applied back to the GPU table as a boolean mask (materializing first,
-#' via `compute()`, if `.data` is lazy with pending operations). Because
-#' this evaluation happens with *no data mask*, it can only succeed for
-#' expressions that evaluate to a logical value on their own without
-#' referencing table columns -- e.g. a pre-computed logical vector or
-#' `filter(rep(TRUE, n))`. An expression that references a table column
-#' but doesn't parse (a rare shape given how much of dplyr's filter surface
-#' the IR now covers) will still error with the "only supports comparisons"
-#' message, since the column symbol can't resolve outside the table. This
-#' fallback path is legitimate, supported behavior for the cases it does
-#' cover, not an error condition -- see `getOption("cuplyr.fallback")`
-#' below to be notified when it's used.
+#' `ir_parse_quo()`) is handled in one of two ways. A dot that reads no table
+#' column (a pre-computed logical vector, `rep(TRUE, n)`) is evaluated once in
+#' R, with no data mask: a logical scalar is a constant predicate. On an
+#' ungrouped `filter()` a logical vector is a row mask: all the vectors of one
+#' call are sized against the input table (a wrong size is dplyr's own error)
+#' and combined with `&` with the call's other predicates, which see the same
+#' input rows. On a grouped, `.by` or rowwise table, or in `filter_out()`, a
+#' logical vector runs the whole call in dplyr. A dot that reads a table
+#' column but doesn't parse (a rare shape given how much of
+#' dplyr's filter surface the IR now covers), or that visibly calls something
+#' reaching the data mask by name (`exists("x")`, `get("ok")`), runs the whole
+#' call in dplyr on the CPU (see `getOption("cuplyr.fallback")` below to be
+#' notified when it does). The check reads the dot's syntax, so an alias of
+#' such a function or a user function calling it is not seen and has no data
+#' mask when the dot names no column. A
+#' lazy `.data` with pending operations runs them early, on the GPU, when a
+#' logical vector needs the row count (a plan break, see
+#' `getOption("cuplyr.plan_break")`).
 #'
 #' ## `options(cuplyr.fallback = ...)`
 #' Controls whether a CPU fallback (the one described above, and every other
@@ -419,7 +423,6 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # `real_orig_names` (captured before that helper was ever added) is used
   # for the trailing select instead of `orig_names` whenever either
   # mechanism added a temp column.
-  orig_data <- .data
   schema <- current_schema(.data)
   orig_names <- schema$names
   real_orig_names <- if (isTRUE(cgid$used)) set_diff(orig_names, cgid$helper_name) else orig_names
@@ -432,7 +435,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # (ir_cols() only walks `$args`), so `ir_is_const(ir_parse_quo(quo(n() >
   # 2)))` would itself read TRUE -- without routing window calls through
   # this dedicated path first, `filter(n() > 2)` fell into the
-  # constant-expression branch instead (eval_tidy()-ing `n() > 2` with no
+  # constant-expression branch instead (evaluating `n() > 2` with no
   # table in scope, which either errors or silently misbehaves) rather than
   # being planned as a real window predicate. This was the crash this task
   # fixes (see the regression test): checking ir_has_window() here, before
@@ -514,8 +517,8 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # `ir_parse_quo()` couldn't parse at all (`ir` is NULL -- as opposed to a
   # genuine thrown error, which already propagated out of the loop above)
   # AND that references a real schema column somewhere in its raw
-  # expression tree (`dot_references_schema_col()`) can NEVER be handled by
-  # `filter_eval_mask()`'s no-data-mask `eval_tidy()` -- that column symbol
+  # expression tree (`dot_references_schema_col()`) can NEVER be evaluated
+  # outside the data mask (the standalone evaluation below) -- that column symbol
   # either errors "object not found" or, worse, silently resolves to an
   # unrelated same-named object in the calling environment, giving a wrong
   # (not just missing) result. Route the WHOLE filter() call to the CPU
@@ -527,8 +530,8 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # toupper(y) == "A"` fails to parse as ONE unit, so it's never even added
   # to `window_idx` above -- it's caught here instead). A dot that's NULL
   # but references no schema column (a genuine constant/environment-vector
-  # shape, e.g. `rep(TRUE, n)`) is untouched -- it still flows to
-  # `filter_eval_mask()` below, unchanged from before L1.
+  # shape, e.g. `rep(TRUE, n)`) is untouched -- it is evaluated in R below,
+  # and a vector of that kind is applied as one mask (mask_idx).
   # (every dot is judged, as a vapply() over them did, before any is acted on)
   needs_expr_fallback <- FALSE
   # (a column-free dot that errored ends the loop above: the dots after it were
@@ -561,12 +564,23 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # function, valid only in the mask), so hand the WHOLE call to dplyr,
   # decided here before any predicate is pushed. Each such dot is evaluated
   # exactly once: the value is cached for the loop below. (The dots that read
-  # no column were evaluated by the parse loop; only the rest, such as a
-  # literal or a call that reaches the mask, are evaluated here.)
+  # no column were evaluated by the parse loop; only the rest are evaluated
+  # here: a bare literal, a dot of a rowwise call, or one naming a mask-only
+  # function. A call expr_reaches_mask() recognizes is dplyr's, unevaluated; an
+  # alias or a user function making that call is not recognized and runs here.)
+  # (a plain logical vector reaching the mask is combined below, see mask_idx)
+  mask_idx <- integer()
   for (i in if (length(window_idx) > 0L) set_diff(seq_along(dots), window_idx) else seq_along(dots)) {
     res <- standalone[[i]]
     if (!is.null(res) || is.null(parsed[[i]]) || ir_is_const(parsed[[i]])) {
       if (is.null(res)) {
+        # A dot that reaches the data mask by name (`exists("x")`, `get("ok")`)
+        # has no value outside it: dplyr evaluates the call, as mutate() does.
+        if (expr_reaches_mask(rlang::quo_get_expr(dots[[i]]))) {
+          fallback_dot_failed(origin[[i]], mask_reaching_reason)
+          return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement,
+                                      inline = inline))
+        }
         res <- tryCatch(list(value = rlang::eval_tidy(dots[[i]], data = list())),
                         error = function(e) list(error = e))
       }
@@ -592,6 +606,64 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
                                     inline = inline))
       }
       standalone[i] <- list(res)
+      if (!scalar_lgl) {
+        mask_idx <- c(mask_idx, i)
+      }
+    }
+  }
+
+  # F79: dplyr evaluates every dot of one call against the same input rows and
+  # checks each vector's size against them. A logical vector constant (the only
+  # value left here with a size other than 1) is sized against the input now,
+  # and all of them are combined with `&` into one mask: applying them where
+  # they stand would size a later vector against the rows an earlier dot left.
+  mask_keep <- NULL
+  mask_name <- NULL
+  mask_ran_plan <- FALSE
+  if (length(mask_idx) > 0L) {
+    if (rowwise) {
+      rowwise_bail("a logical vector in a rowwise filter()")
+    }
+    # (the row count of a lazy table with pending steps needs them run: a plan
+    # break, notified for the user's own steps. The table stays lazy, and the
+    # dplyr fallbacks start from the computed table)
+    if (identical(.subset2(.data, "exec_mode"), "lazy") && has_pending_ops(.data)) {
+      if (has_pending_ops(fallback_data)) {
+        cuplyr_plan_break_notify(
+          if (complement) "filter_out" else "filter",
+          "the row count is needed to size a logical vector", data = fallback_data
+        )
+      }
+      .data <- compute(.data)
+      mask_ran_plan <- TRUE
+      fallback_data <- if (isTRUE(cgid$used)) plan_now_columns(.data, real_orig_names) else .data
+    }
+    n_in <- dim(.data)[1L]
+    for (i in mask_idx) {
+      if (!length(standalone[[i]]$value) %in% c(1L, n_in)) {
+        fallback_dot_failed(origin[[i]], "a logical vector whose size is not that of the table is checked by dplyr.")
+        return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement,
+                                    inline = inline))
+      }
+    }
+    # No window dot and nothing else but constants (on a table with no columns:
+    # a call with a vector and no window or cur_group_id() dot): all the dots
+    # are one mask. Otherwise the native dots see the same rows through a temp
+    # column holding it, below.
+    mask_only <- length(window_idx) == 0L &&
+      all(vapply(set_diff(seq_along(dots), mask_idx), function(i) {
+        is.null(parsed[[i]]) || ir_is_const(parsed[[i]])
+      }, logical(1)))
+    use_idx <- if (mask_only) seq_along(dots) else mask_idx
+    mask_keep <- Reduce(`&`, lapply(use_idx, function(i) standalone[[i]]$value)) %in% TRUE
+    if (mask_only) {
+      res <- filter_eval_mask(.data, dots[[mask_idx[[1L]]]], mask_keep)
+      # (the cur_group_id() helper column does not leave with the rows)
+      return(if (isTRUE(cgid$used)) {
+        push_op(res, ast_select(input_node(res), real_orig_names))
+      } else {
+        res
+      })
     }
   }
 
@@ -660,7 +732,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
                              window_spec_int_sum, logical(1)))) {
       .data <- plan_run_now(.data, if (complement) "filter_out" else "filter",
                             "an integer sum() (result type depends on the data)",
-                            notice_data = fallback_data)
+                            notice_data = if (mask_ran_plan) .data else fallback_data)
       fallback_data <- if (isTRUE(cgid$used)) plan_now_columns(.data, real_orig_names) else .data
       eager <- TRUE
       back_to_lazy <- TRUE
@@ -694,14 +766,24 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     schema <- plan$schema
   }
 
-  predicates <- list()
-
-  flush_predicates <- function() {
-    if (length(predicates) > 0) {
-      .data <<- push_op(.data, ast_filter(input_node(.data), predicates))
-      predicates <<- list()
-    }
+  # F79, mixed call: R evaluated a vector here too, so the notice is the
+  # mask-only route's, and it comes after the window block because a window
+  # plan that falls back to dplyr has its own. The combined mask rides along as
+  # one temp column, so that the one ast_filter below evaluates every native
+  # predicate on the same rows (a dropped row still raises its integer
+  # overflow). All TRUE: nothing to do.
+  if (!is.null(mask_keep)) {
+    filter_mask_notify(dots[[mask_idx[[1L]]]], n_in)
   }
+  if (!is.null(mask_keep) && !all(mask_keep)) {
+    mask_name <- unique_temp_name("..filtermask..", schema$names)
+    .data <- push_op(.data, ast_mutate(input_node(.data), list(make_mutate_expr(
+      mask_name, ir_vec(mask_keep, "BOOL8", dots[[mask_idx[[1L]]]], mask_name), schema
+    ))))
+    schema <- current_schema(.data)
+  }
+
+  predicates <- list()
 
   # filter_out(): only IR predicates are collected; they are ANDed into one P
   # and complemented once, after the loop. A constant FALSE/NA dot makes P
@@ -710,7 +792,6 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   keep_all <- FALSE
 
   for (i in seq_along(dots)) {
-    quo <- dots[[i]]
     ir <- parsed[[i]]
 
     if (complement) {
@@ -722,12 +803,11 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       next
     }
 
-    if (is.null(ir)) {
-      # Opaque expression (the IR doesn't understand this shape): flush any
-      # predicates accumulated so far into a real ast_filter node, then
-      # fall back to CPU-side evaluation of this expression (D4).
-      flush_predicates()
-      .data <- filter_eval_mask(.data, quo, standalone[[i]]$value)
+    if (length(mask_idx) > 0L && i %in% mask_idx) {
+      # (the combined mask is one predicate, on its temp column)
+      if (!is.null(mask_name) && i == mask_idx[[1L]]) {
+        predicates <- c(predicates, list(make_predicate(ir_col(mask_name), schema)))
+      }
       next
     }
 
@@ -740,7 +820,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       # constant subtree gives them nothing to anchor that broadcast to.
       # Evaluate in R instead (on the original quosure, not the already-
       # constant-folded IR) and route to the same no-op / impossible-
-      # predicate / mask-apply paths the pre-IR parser used.
+      # predicate paths the pre-IR parser used (a vector is one combined mask, above).
       value <- standalone[[i]]$value
 
       if (is.logical(value) && length(value) == 1 && isTRUE(value)) {
@@ -760,19 +840,15 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
         next
       }
 
-      # Anything else constant (a non-logical value, or a logical vector
-      # such as `rep(TRUE, n)`): same CPU-eval fallback as an opaque
-      # expression -- filter_eval_mask() has the exact error/mask-apply
-      # logic for these shapes already.
-      flush_predicates()
-      .data <- filter_eval_mask(.data, quo, value)
-      next
+      stop("internal error: a constant filter() predicate that is not a logical scalar", call. = FALSE)
     }
 
     predicates <- c(predicates, list(make_predicate(ir, schema)))
   }
 
-  flush_predicates()
+  if (length(predicates) > 0) {
+    .data <- push_op(.data, ast_filter(input_node(.data), predicates))
+  }
 
   if (complement && !keep_all) {
     # keep iff !(P %in% TRUE) = is.na(P) | !P; no dot (or only TRUE dots)
@@ -786,7 +862,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     .data <- push_op(.data, ast_filter(input_node(.data), list(make_predicate(keep_ir, schema))))
   }
 
-  if (length(window_idx) > 0 || isTRUE(cgid$used)) {
+  if (length(window_idx) > 0 || isTRUE(cgid$used) || !is.null(mask_name)) {
     # Drop every `..win*../..winarg*..` temp column introduced by the
     # window-planning block above, and/or Phase 10's `..cur_group_id..`
     # helper column (if used), restoring the table's real, user-visible
@@ -888,8 +964,8 @@ filter_cpu_fallback <- function(.data, dots, by_quo, .preserve = FALSE, compleme
 # every window kind has C++ support (window_spec_lowerable()), so this is
 # only reachable for a genuinely new, not-yet-implemented window kind added
 # by some FUTURE phase -- there is currently no dplyr syntax that reaches
-# it. Unlike filter_eval_mask() (which evaluates a single quosure with NO
-# data mask, and so can never work for a window call referencing real table
+# it. Unlike the standalone evaluation of a column-free dot (with NO data
+# mask, which can never work for a window call referencing real table
 # columns), this re-runs the real dplyr::filter() call, with every original
 # dot, on the CPU via gpu_fallback() -- the only correct way to evaluate a
 # window/aggregate predicate that cuplyr can't lower natively.
@@ -951,9 +1027,10 @@ filter_expr_fallback <- function(.data, dots, by_quo, .preserve = FALSE, complem
 # F82: TRUE iff a filter() dot is a symbol or call that reads no column and
 # needs no data mask, so it can be evaluated outside one. It is the test
 # mutate_constant_value() makes, plus the shapes that reach the mask without
-# naming a column (expr_reaches_mask(): `exists("x")`, `get()`, ...), which are
-# not evaluated out here. (A typo in such a dot is caught after it fails, in
-# filter_run().)
+# naming a column by a call expr_reaches_mask() recognizes (`exists("x")`,
+# `get()`, ...), which are not evaluated out here; an alias of one, or a user
+# function making the call, is not recognized and is. (A typo in such a dot is
+# caught after it fails, in filter_run().)
 # @keywords internal
 filter_dot_is_column_free <- function(quo, schema) {
   # (F110) a call that provably reads a column is not column-free
@@ -1022,8 +1099,8 @@ filter_ir_not_logical <- function(ir, schema, is_window) {
 # Internal: TRUE iff `quo`'s raw expression references at least one symbol
 # matching a current schema column name, anywhere in its tree (Phase 11,
 # task L1). Used only to decide, for a dot `ir_parse_quo()` couldn't parse
-# at all, whether it's safe to hand to `filter_eval_mask()`'s no-data-mask
-# `eval_tidy()` (safe only when the expression is genuinely
+# at all, whether it's safe to evaluate outside the data mask
+# (safe only when the expression is genuinely
 # column-independent, e.g. a pre-computed logical vector or `rep(TRUE,
 # n)`) or whether it must instead go to `filter_expr_fallback()` (any
 # reference to a real column can never evaluate correctly with no data
@@ -1135,7 +1212,7 @@ top_n_const <- function(x, env, schema) {
   if (rlang::is_missing(x)) return(NULL)
   syms <- top_n_symbols(x)
   if (any(syms$vars %in% c(schema$names, top_n_mask_pronouns)) ||
-      any(syms$fns %in% top_n_mask_fns)) {
+      any(syms$fns %in% top_n_mask_fns) || expr_reaches_mask(x)) {
     return(NULL)
   }
   q <- if (rlang::is_quosure(x)) x else rlang::new_quosure(x, env)
@@ -1387,89 +1464,57 @@ parse_filter_ir <- function(quo, schema) {
   )
 }
 
-# Internal: CPU-eval fallback for filter expressions that aren't a
-# recognized comparison shape.
+# Internal: the notice of a filter() call that applied a logical vector, once
+# per call and the same on both routes: R evaluated `quo`, the first vector,
+# and no table column was collected for it.
 #
-# Materializes any pending lazy operations first (so the fallback always
-# operates on a real GPU table), eval_tidy()s the quosure (no explicit data
-# mask - matches the historical behavior of only supporting expressions
-# that evaluate directly, e.g. `rep(TRUE, n)`, not column references),
-# validates the result is logical, and applies it via gpu_filter_bool()
-# (scalar/uniform case) or gpu_filter_mask() (mixed mask), same as the
-# renamed-from filter_logical() did. Notifies via cuplyr_fallback_notify()
-# (D4: silent by default).
+# @param quo The first dot of the mask
+# @param rows The input's row count
+# @keywords internal
+filter_mask_notify <- function(quo, rows) {
+  cuplyr_fallback_notify(
+    "filter", rlang::quo_text(quo),
+    reason = "this predicate reads no column, so R evaluates it once.",
+    rows = rows, nothing_collected = TRUE
+  )
+}
+
+# Internal: apply the one combined row mask of a filter() call whose dots are
+# all constants (no native predicate, no window dot; filter_run()'s mask-only
+# route). A table with no columns gets here only with a logical vector and no
+# window or cur_group_id() dot: scalars alone take the constant-predicate route
+# (which can't run with no columns), and that helper column makes a call mixed.
 #
-# @param .data A tbl_gpu object
-# @param quo A quosure whose evaluated result must be logical
-# @param eval_result The quosure's already-evaluated value (callers that
-#   evaluated it once to decide routing pass it so it isn't run twice)
+# The caller evaluated the dots (once, with no data mask), sized every vector
+# against the table, combined them with `&` and turned NA into FALSE: `keep` is
+# a logical vector of the table's row count with no NA. `.data` has no pending
+# steps. A table with no columns has no cudf column to mask, so only its row
+# count changes. Notifies via filter_mask_notify() (D4: silent by default).
+#
+# @param .data A tbl_gpu object with a known row count and nothing pending
+# @param quo The first dot of the mask, named in the notification
+# @param keep The combined mask: logical, no NA, one value per row
 # @return A filtered tbl_gpu object
 # @keywords internal
-filter_eval_mask <- function(.data, quo, eval_result = rlang::eval_tidy(quo)) {
-  if (identical(.subset2(.data, "exec_mode"), "lazy") && has_pending_ops(.data)) {
-    .data <- compute(.data)
-  }
-
-  expr_chr <- rlang::quo_text(quo)
-  eval_result <- tryCatch(eval_result, error = function(e) NULL)
-
-  if (is.null(eval_result) || !is.logical(eval_result)) {
-    stop("filter() only supports comparisons: ==, !=, >, >=, <, <=\n",
-         "Or logical values: TRUE, FALSE, logical vectors\n",
-         "Expression: ", expr_chr, call. = FALSE)
-  }
-
-  cuplyr_fallback_notify(
-    "filter", expr_chr,
-    reason = "this predicate reads no column, so R evaluates it once.",
-    rows = max(0, dim(.data)[1], na.rm = TRUE), nothing_collected = TRUE
-  )
-
-  n_rows <- dim(.data)[1]
+filter_eval_mask <- function(.data, quo, keep) {
+  filter_mask_notify(quo, max(0, dim(.data)[1], na.rm = TRUE))
 
   if (length(.subset2(.data, "schema")$names) == 0L) {
-    # Zero-column table: no cudf column to mask, so only the R-side count
-    # changes (dim() is NA when nobody recorded one).
-    if (is.na(n_rows)) {
-      stop("filter() needs a known row count on a tbl_gpu with no columns.",
-           call. = FALSE)
-    }
-    if (length(eval_result) != 1L && length(eval_result) != n_rows) {
-      stop("Logical vector length (", length(eval_result),
-           ") must match number of rows (", n_rows, ")", call. = FALSE)
-    }
     return(carry_frame_meta(new_tbl_gpu(
       ptr = .subset2(.data, "ptr"),
       schema = .subset2(.data, "schema"),
       groups = .subset2(.data, "groups"),
       exec_mode = .subset2(.data, "exec_mode"),
-      nrow = sum(rep_len(eval_result, n_rows) %in% TRUE)
+      nrow = sum(keep)
     ), .data))
   }
 
-  if (length(eval_result) == 1) {
-    # Single boolean: TRUE keeps all rows, FALSE keeps none
-    if (isTRUE(eval_result)) {
-      new_ptr <- wrap_gpu_call("filter_bool_true", gpu_filter_bool(.subset2(.data, "ptr"), TRUE))
-    } else {
-      new_ptr <- wrap_gpu_call("filter_bool_false", gpu_filter_bool(.subset2(.data, "ptr"), FALSE))
-    }
+  new_ptr <- if (all(keep)) {
+    wrap_gpu_call("filter_bool_all_true", gpu_filter_bool(.subset2(.data, "ptr"), TRUE))
+  } else if (!any(keep)) {
+    wrap_gpu_call("filter_bool_all_false", gpu_filter_bool(.subset2(.data, "ptr"), FALSE))
   } else {
-    # Logical vector: use as mask
-    if (length(eval_result) != n_rows) {
-      stop("Logical vector length (", length(eval_result),
-           ") must match number of rows (", n_rows, ")", call. = FALSE)
-    }
-
-    # Check for all TRUE or all FALSE (optimize common cases)
-    if (all(eval_result, na.rm = TRUE) && !any(is.na(eval_result))) {
-      new_ptr <- wrap_gpu_call("filter_bool_all_true", gpu_filter_bool(.subset2(.data, "ptr"), TRUE))
-    } else if (!any(eval_result, na.rm = TRUE)) {
-      new_ptr <- wrap_gpu_call("filter_bool_all_false", gpu_filter_bool(.subset2(.data, "ptr"), FALSE))
-    } else {
-      # Mixed: apply mask
-      new_ptr <- wrap_gpu_call("filter_mask", gpu_filter_mask(.subset2(.data, "ptr"), eval_result))
-    }
+    wrap_gpu_call("filter_mask", gpu_filter_mask(.subset2(.data, "ptr"), keep))
   }
 
   carry_frame_meta(new_tbl_gpu(

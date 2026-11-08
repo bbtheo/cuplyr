@@ -169,7 +169,12 @@ lower_mutate <- function(ast, source_ptr) {
   n_input_cols <- length(input_schema$names)
   if (length(vec_idx) > 0) {
     n_rows <- gpu_dim(input_ptr)[[1L]]
-    tmp_names <- paste0("..vec", seq_along(vec_idx), "..")
+    # (a name the input or an output already has would bind in the temp's place)
+    tmp_names <- character(length(vec_idx))
+    for (k in seq_along(vec_idx)) {
+      tmp_names[[k]] <- unique_temp_name(paste0("..vec", k, ".."),
+                                         c(input_schema$names, out_names, tmp_names[seq_len(k - 1L)]))
+    }
     tmp_cols <- list()
     for (k in seq_along(vec_idx)) {
       vec <- expressions[[vec_idx[k]]]$ir
