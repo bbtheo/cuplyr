@@ -76,18 +76,34 @@ optimize_ast <- function(ast) {
 
 #' Optimize AST respecting barrier nodes
 #'
+#' A plan is optimized one segment at a time: the nodes above a barrier (down
+#' to it), then the barrier, then what is below it as a plan of its own. Each
+#' segment is told what its consumer reads of its output, so the columns a
+#' barrier does not need are pruned below it as well (F99).
+#'
 #' @param ast Root AST node
+#' @param required Columns the consumer of `ast` reads from its output
+#'   (`NULL`: all of them)
 #' @return Optimized AST
 #' @keywords internal
-optimize_with_barriers <- function(ast) {
+optimize_with_barriers <- function(ast, required = NULL) {
   if (is.null(ast)) return(NULL)
+
+  # `required` as names of ast's own output, in its order (a barrier's input
+  # requirement may name outputs the input does not have); everything, or a
+  # duplicated name that cannot be told apart, is NULL.
+  if (!is.null(required)) {
+    out <- infer_schema_memo(ast)$names
+    required <- if (anyDuplicated(out) > 0L) NULL else opt_intersect(out, required)
+    if (length(required) == length(out)) required <- NULL
+  }
 
   if (is_barrier(ast)) {
     # Optimize below the barrier, not across (an input that comes back as it
     # was is not assigned again: the node stays the same object)
     input <- .subset2(ast, "input")
     if (!is.null(input)) {
-      optimized <- optimize_with_barriers(input)
+      optimized <- optimize_with_barriers(input, barrier_input_required(ast, required))
       if (!is_reference(optimized, input)) ast$input <- optimized
     }
     return(ast)
@@ -96,8 +112,9 @@ optimize_with_barriers <- function(ast) {
   # A settled chain that leaves no later pass anything to do (settled_chain()
   # gives 2L) reaches its source through filters and mutates only, so it
   # holds no barrier, and optimize_segment() would return settled_prune() of
-  # it.
-  if (settled_chain(ast, NULL) == 2L) {
+  # it. (Only when the consumer reads every column: a narrower requirement
+  # makes projection pushdown insert a select.)
+  if (is.null(required) && settled_chain(ast, NULL) == 2L) {
     return(settled_prune(ast))
   }
 
@@ -106,36 +123,120 @@ optimize_with_barriers <- function(ast) {
 
   if (is.null(barrier_node)) {
     # No barrier: optimize entire subtree
-    optimize_segment(ast)
+    optimize_segment(ast, required, keep_mutates = !is.null(required))
   } else {
-    # `extract_segment_above_barrier()` truncates the segment's bottom
-    # node's `$input` to NULL (the barrier itself, and everything below
-    # it, is optimized separately -- see the recursive call a few lines
-    # down). That truncation means `infer_schema()` can no longer be
-    # called on any node *within* the segment without hitting the severed
-    # NULL and returning an empty schema (`infer_schema.NULL()`) instead
-    # of the barrier's real output schema -- which is exactly what
-    # `push_down_projections()`/`prune_dead_columns()` do internally
-    # whenever they're handed a NULL `required_cols` (their signal to
-    # infer it from the ast they were just given). So `required_cols`
-    # MUST be precomputed here, from the real (untruncated) `ast`, and
-    # threaded through explicitly -- letting `optimize_segment()` compute
-    # its own default from `segment_root` would silently produce an empty
-    # required-columns set and `push_down_projections()` would insert a
-    # zero-column `ast_select` on top of the segment (found via the
-    # slice()-composes-with-filter oracle test, but equally reproducible
-    # with any pre-existing barrier, e.g. `arrange() |> filter()` in lazy
-    # mode -- this was a latent, pre-existing bug in the barrier-splitting
-    # logic itself, not specific to any one barrier type).
-    required_cols <- infer_schema_memo(ast)$names
+    # The segment above the barrier ends in a stub source holding the
+    # barrier's output schema, so it is a complete chain: every schema lookup
+    # inside it (and the passes' use of it) answers for real. What the segment
+    # reads of the barrier's output is what the pruning select
+    # on the stub keeps (projection pushdown puts one there when it can drop a
+    # column; none means all of them). That, mapped through the barrier, is what the
+    # barrier's input has to deliver, and the barrier plus everything below it
+    # is optimized on that basis.
+    stub <- ast_source(infer_schema_memo(barrier_node)[c("names", "types")])
+    segment_root <- extract_segment_above_barrier(ast, barrier_node, stub)
+    optimized_segment <- optimize_segment(segment_root, required, keep_mutates = !is.null(required))
 
-    segment_root <- extract_segment_above_barrier(ast, barrier_node)
-    optimized_segment <- optimize_segment(segment_root, required_cols)
+    input <- .subset2(barrier_node, "input")
+    optimized <- optimize_with_barriers(
+      input,
+      barrier_input_required(barrier_node, segment_stub_requirement(optimized_segment))
+    )
+    if (!is_reference(optimized, input)) barrier_node$input <- optimized
 
-    # Reconnect: find the bottom of optimized segment and attach barrier
-    barrier_node$input <- optimize_with_barriers(barrier_node$input)
+    replace_segment_stub(optimized_segment, barrier_node)
+  }
+}
 
-    attach_ast_bottom(optimized_segment, barrier_node)
+#' What a barrier's input has to deliver
+#'
+#' The single rule for "the columns below this node that its consumer and the
+#' node itself read", for the barrier nodes (`optimize_with_barriers()`,
+#' `push_down_projections()` and `prune_dead_columns()` all ask it). The result
+#' may name columns the input does not have (a window's outputs, a mutate's
+#' intermediates above): they are harmless where a source intersects with its
+#' names, but a select must be built from real names only.
+#'
+#' @param node A barrier node
+#' @param required Columns read from `node`'s output (`NULL`: all)
+#' @return Character vector, or `NULL` for "all the input's columns" (what a
+#'   node that reads positions, the whole table, or has duplicated input names
+#'   needs)
+#' @keywords internal
+barrier_input_required <- function(node, required) {
+  type <- .subset2(node, "type")
+  if (!(type %in% c("summarise", "arrange", "distinct", "window", "rename", "slice"))) {
+    return(NULL)  # collapse(), reframe(), a positional select
+  }
+  # (summarise and distinct read their own columns whatever is above; every
+  # other node needs its consumer's requirement to narrow anything)
+  if (is.null(required) && type != "summarise" && type != "distinct") {
+    return(NULL)
+  }
+  if (anyDuplicated(infer_schema_memo(.subset2(node, "input"))$names) > 0L) {
+    return(NULL)
+  }
+  if (identical(type, "summarise")) {
+    agg_inputs <- unique.default(unlist(lapply(.subset2(node, "aggregations"), `[[`, "input_col")))
+    return(opt_union(.subset2(node, "groups"), agg_inputs[!is.na(agg_inputs)]))
+  }
+  if (identical(type, "distinct")) {
+    if (isTRUE(.subset2(node, "keep_all")) || !is.null(.subset2(node, "key_positions"))) {
+      return(NULL)
+    }
+    return(opt_union(character(), .subset2(node, "key_cols")))
+  }
+  switch(type,
+    # `.by_group = TRUE` sorts by the groups too (lower_arrange())
+    arrange = {
+      sort_cols <- vapply(.subset2(node, "sort_specs"), `[[`, character(1), "col_name")
+      opt_union(opt_union(required, sort_cols), .subset2(node, "groups"))
+    },
+    window = {
+      spec_cols <- unique.default(unlist(
+        lapply(.subset2(node, "specs"), function(s) c(s$value_col, s$order_cols)),
+        use.names = FALSE
+      ))
+      opt_union(opt_union(required, .subset2(node, "group_cols")), spec_cols[!is.na(spec_cols)])
+    },
+    # `required` is in post-rename names, the input's schema has the old ones.
+    # Every old name stays: infer_schema_from() looks them up in the input, and
+    # a missing one is an NA subscript. A positional rename (duplicated names)
+    # can't be translated by name.
+    rename = {
+      if (!is.null(.subset2(node, "positions"))) return(NULL)
+      idx <- match(required, .subset2(node, "new_names"))
+      hit <- !is.na(idx)
+      required[hit] <- .subset2(node, "old_names")[idx[hit]]
+      opt_union(required, .subset2(node, "old_names"))
+    },
+    # `mode = "rank"`'s order_col is read for the ranking even when nothing
+    # above reads it (it may also be a temp column absent from the output)
+    slice = opt_union(required, .subset2(node, "order_col"))
+  )
+}
+
+#' What a segment reads of the stub at its bottom
+#'
+#' The columns of the pruning select that projection pushdown put directly on
+#' the stub (`pruned = TRUE`: it exists because some stub columns are not read),
+#' or `NULL` when the node on the stub is anything else: every stub column is
+#' then read or passed on. A select higher up is not looked at: one above a
+#' filter keeps fewer columns than the filter reads (the filter case wraps
+#' itself in a select to drop its predicate columns), and a user select on the
+#' stub keeps only what the stub delivers anyway.
+#'
+#' @param segment An optimized segment ending in a stub source
+#' @return Character vector or `NULL`
+#' @keywords internal
+segment_stub_requirement <- function(segment) {
+  node <- segment
+  while (!identical(.subset2(.subset2(node, "input"), "type"), "source")) {
+    node <- .subset2(node, "input")
+    if (is.null(node)) return(NULL)  # (the segment is the stub)
+  }
+  if (isTRUE(.subset2(node, "pruned")) && is.null(.subset2(node, "positions"))) {
+    .subset2(node, "columns")
   }
 }
 
@@ -143,13 +244,15 @@ optimize_with_barriers <- function(ast) {
 #'
 #' @param ast Root of segment
 #' @param required_cols Columns required by whatever consumes this
-#'   segment's output (`NULL` means "infer from `ast` itself", correct
-#'   only when `ast` is a genuine, untruncated subtree -- see the caller
-#'   comment in `optimize_with_barriers()` for why a barrier-truncated
-#'   segment must instead pass this explicitly)
+#'   segment's output (`NULL` means all of `ast`'s own output columns)
+#' @param keep_mutates `TRUE` when `required_cols` is a barrier's narrower
+#'   requirement (F99): that pruning removes columns only, so a mutate
+#'   expression nothing reads stays and is computed (it can warn, as in dplyr),
+#'   and `prune_dead_columns()` does not run. Its inputs stay required
+#'   (`push_down_projections()` keeps them).
 #' @return Optimized segment
 #' @keywords internal
-optimize_segment <- function(ast, required_cols = NULL) {
+optimize_segment <- function(ast, required_cols = NULL, keep_mutates = FALSE) {
   if (is.null(ast)) return(NULL)
 
   # The segment's output columns (`required_cols = NULL`), inferred once from
@@ -166,7 +269,7 @@ optimize_segment <- function(ast, required_cols = NULL) {
   if (settled == 2L) {
     # ... and no later pass applies either (segment_features() would find no
     # mutate or filter over a mutate or filter): the pruning is all there is.
-    return(settled_prune(ast))
+    return(if (keep_mutates) ast else settled_prune(ast))
   }
   settled <- settled == 1L
   if (!settled) {
@@ -187,7 +290,7 @@ optimize_segment <- function(ast, required_cols = NULL) {
       settled <- settled_chain(ast, required_cols) > 0L
     }
   }
-  if (feats[["column_nodes"]]) {
+  if (feats[["column_nodes"]] && !keep_mutates) {
     if (settled) {
       # (same node types and links: the scan would read the same features)
       ast <- settled_prune(ast)
@@ -269,10 +372,18 @@ segment_features <- function(ast) {
 #' - `prune_dead_columns()` keeps every mutate expression (each output column
 #'   is required), so its only change is `exprs[keep]` with `keep` all TRUE,
 #'   which `settled_prune()` repeats.
-#' Anything else (a select, a join, a truncated segment cut at a barrier, an
-#' empty mutate) is not settled, and the passes run as usual. Only output
-#' column NAMES are needed, as sets, so they are built bottom-up without
-#' inferring types.
+#' Anything else (a select, a join, a barrier, an empty mutate) is not settled,
+#' and the passes run as usual. A segment above a barrier ends in a stub source
+#' and is settled like any other. Only output column NAMES are needed, as sets,
+#' so they are built bottom-up without inferring types.
+#'
+#' A narrower `required_cols` (F99: what a barrier above reads) is settled when
+#' the requirement walked down the chain needs no select above a filter, finds
+#' no dead mutate expression and keeps every source column. One set does for
+#' both passes: a mutate's new outputs, the only names projection pushdown
+#' takes back out of its requirement, are neither source columns nor a lower
+#' node's input, so they change no answer here. When every output is required
+#' the walk passes by the induction above.
 #'
 #' @param ast Root of a segment
 #' @param required_cols Columns required by whatever consumes the segment, or
@@ -317,8 +428,37 @@ settled_chain <- function(ast, required_cols) {
     return(2L)
   }
 
-  # Otherwise the output columns, bottom-up: the input columns of every filter
-  # (above a mutate or a filter) and the segment's own.
+  # A narrower requirement, walked down from the root (see above): a filter
+  # whose predicates are not all required needs a select above it, a dead
+  # expression is one prune_dead_columns() would drop, and a source column
+  # left over needs a select below.
+  if (!is.null(required_cols)) {
+    need <- required_cols
+    node <- ast
+    repeat {
+      type <- .subset2(node, "type")
+      if (type == "source") break
+      if (type == "filter") {
+        if (!all(node_field_union(.subset2(node, "predicates"), "cols") %in% need)) return(0L)
+      } else {
+        exprs <- .subset2(node, "expressions")
+        for (j in rev(seq_along(exprs))) {
+          expr <- .subset2(exprs, j)
+          if (!(.subset2(expr, "output_col") %in% need)) return(0L)
+          need <- opt_union(need, .subset2(expr, "input_cols"))
+        }
+      }
+      node <- .subset2(node, "input")
+    }
+    if (!all(.subset2(.subset2(node, "schema"), "names") %in% need)) return(0L)
+  }
+
+  # With a filter on a mutate or a filter, every predicate must read columns
+  # of its filter's input: built bottom-up. (A filter on the source was
+  # checked in the first walk.)
+  if (!pair) {
+    return(2L)
+  }
   chain <- list()
   node <- ast
   while (!identical(.subset2(node, "type"), "source")) {
@@ -334,10 +474,7 @@ settled_chain <- function(ast, required_cols) {
       cols <- opt_union(cols, mutate_output_cols(.subset2(node, "expressions")))
     }
   }
-  if (!is.null(required_cols) && !all(cols %in% required_cols)) {
-    return(0L)
-  }
-  if (pair) 1L else 2L
+  1L
 }
 
 #' `prune_dead_columns()` on a settled chain
@@ -388,45 +525,32 @@ find_next_barrier <- function(ast) {
 #'
 #' @param ast Root node
 #' @param barrier Target barrier node
-#' @return Copy of segment with NULL input at barrier point
+#' @param stub Source node that takes the barrier's place
+#' @return Copy of segment with `stub` at the barrier point
 #' @keywords internal
-extract_segment_above_barrier <- function(ast, barrier) {
-  if (is.null(ast) || identical(ast, barrier)) {
-    return(NULL)
+extract_segment_above_barrier <- function(ast, barrier, stub) {
+  if (identical(ast, barrier)) {
+    return(stub)
   }
 
   # Shallow copy the node
   new_node <- ast
-  new_node$input <- extract_segment_above_barrier(ast$input, barrier)
+  new_node$input <- extract_segment_above_barrier(ast$input, barrier, stub)
   new_node
 }
 
-#' Find the bottom node of an AST (deepest non-NULL input)
+#' Put the barrier back where the segment's stub source is
 #'
-#' @param ast AST node
-#' @return Bottom node
+#' @param segment Optimized segment, a chain of nodes ending in the stub
+#' @param barrier Node to put in its place
+#' @return The segment on top of `barrier`
 #' @keywords internal
-find_ast_bottom <- function(ast) {
-  if (is.null(ast$input)) return(ast)
-  find_ast_bottom(ast$input)
-}
-
-#' Attach a node at the bottom of an AST
-#'
-#' Returns a new AST with the bottom input replaced by `new_input`.
-#'
-#' @param ast AST node
-#' @param new_input Node to attach at bottom
-#' @return AST with bottom input replaced
-#' @keywords internal
-attach_ast_bottom <- function(ast, new_input) {
-  if (is.null(ast)) return(NULL)
-  if (is.null(ast$input)) {
-    ast$input <- new_input
-    return(ast)
+replace_segment_stub <- function(segment, barrier) {
+  if (identical(.subset2(segment, "type"), "source")) {
+    return(barrier)
   }
-  ast$input <- attach_ast_bottom(ast$input, new_input)
-  ast
+  segment$input <- replace_segment_stub(.subset2(segment, "input"), barrier)
+  segment
 }
 
 # -----------------------------------------------------------------------------
@@ -451,9 +575,9 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
   # With no group columns `required_cols` is used as passed and may hold
   # duplicates (the base `union()` this replaced always deduped it). Most
   # consumers dedupe again with opt_union()/opt_intersect(); the filter case's
-  # truncated-chain `else required_cols` branch and the rename pass-through do
-  # not, but duplicates can only come from a segment root with duplicated
-  # output names, which only positional (barrier) nodes produce.
+  # `else required_cols` branch (a hand-cut chain) does not, but duplicates can
+  # only come from a segment root with duplicated output names, which only
+  # positional (barrier) nodes produce.
   if (length(group_cols) > 0L) required_cols <- opt_union(required_cols, group_cols)
 
   switch(ast$type,
@@ -471,7 +595,7 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
         keep <- ast$schema$names[1]
       }
       if (length(keep) < length(ast$schema$names)) {
-        ast_select(ast, keep)
+        ast_select(ast, keep, pruned = TRUE)
       } else {
         ast
       }
@@ -485,12 +609,10 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       if (length(extra_cols) > 0) {
         # With a complete input chain, keep the input's column order and
         # only names it actually has: `required_cols` is in the parent's
-        # order (and a window above this filter in a join side passes its
-        # own outputs down), and a reordered join side changes which column
-        # gets which stacked suffix (`v.x.x` vs `v.x`). In a segment cut at
-        # a barrier the input schema is partial or empty, so fall back to
-        # `required_cols` (computed from the untruncated tree by
-        # optimize_with_barriers()).
+        # order (it may name a mutate's intermediates, or a window's outputs
+        # above this filter in a join side), and a reordered join side changes
+        # which column gets which stacked suffix (`v.x.x` vs `v.x`). (A
+        # segment's chain is complete: it ends in the barrier's stub source.)
         keep <- if (input_chain_complete(ast$input)) {
           opt_intersect(infer_schema_memo(ast$input)$names, required_cols)
         } else {
@@ -537,8 +659,19 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
     },
     "select" = {
       # a positional select (duplicated names) can't be translated by name
-      needed <- if (is.null(ast$positions)) ast$columns
-      ast$input <- push_down_projections(ast$input, needed, group_cols)
+      needed <- NULL
+      if (is.null(ast$positions)) {
+        # narrowed to what is read, as prune_dead_columns() does (a select
+        # nothing reads from keeps its columns)
+        needed <- opt_intersect(ast$columns, required_cols)
+        if (length(needed) == 0L) needed <- ast$columns
+        ast$columns <- needed
+      }
+      inner <- push_down_projections(ast$input, needed, group_cols)
+      # (a pruning select just inserted below that keeps the same columns
+      # makes this one redundant, and stays: it is the one that holds a filter)
+      if (isTRUE(inner$pruned) && identical(inner$columns, needed)) return(inner)
+      ast$input <- inner
       ast
     },
     "join" = {
@@ -568,9 +701,9 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
     # Phase 12 audit note: "arrange"/"summarise"/"window" (and, added here,
     # "rename"/"distinct"/"slice") are all barriers (`is_barrier()`,
     # R/ast.R), so none of these cases are reached via the *normal*
-    # barrier-splitting entry point (`optimize_with_barriers()` truncates a
-    # segment right before the first barrier it finds walking down `$input`,
-    # so a barrier node is never the `ast` a segment's own
+    # barrier-splitting entry point (`optimize_with_barriers()` ends a
+    # segment in a stub right before the first barrier it finds walking down
+    # `$input`, so a barrier node is never the `ast` a segment's own
     # `push_down_projections()` call is invoked on). They ARE reached,
     # however, via the "join" case below: `ast$left`/`ast$right` are
     # recursed into with a direct `push_down_projections()` call, NOT
@@ -587,17 +720,11 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
     # still needed -- a real, reproducible miscorrectness bug, not just a
     # missed optimization (see `tests/testthat/test-optimizer.R`).
     "arrange" = {
-      # `.by_group = TRUE` sorts by `ast$groups` too (lower_arrange())
-      sort_cols <- vapply(ast$sort_specs, `[[`, character(1), "col_name")
-      needed <- opt_union(opt_union(required_cols, sort_cols), ast$groups)
-      ast$input <- push_down_projections(ast$input, needed, group_cols)
+      ast$input <- push_down_projections(ast$input, barrier_input_required(ast, required_cols), group_cols)
       ast
     },
     "summarise" = {
-      agg_inputs <- unique(unlist(lapply(ast$aggregations, `[[`, "input_col")))
-      agg_inputs <- agg_inputs[!is.na(agg_inputs)]
-      needed <- opt_union(ast$groups, agg_inputs)
-      ast$input <- push_down_projections(ast$input, needed, ast$groups)
+      ast$input <- push_down_projections(ast$input, barrier_input_required(ast, required_cols), ast$groups)
       ast
     },
     "reframe" = {
@@ -606,52 +733,13 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       ast
     },
     "window" = {
-      spec_cols <- unique(unlist(
-        lapply(ast$specs, function(s) c(s$value_col, s$order_cols)),
-        use.names = FALSE
-      ))
-      spec_cols <- spec_cols[!is.na(spec_cols)]
-      needed <- opt_union(opt_union(required_cols, ast$group_cols), spec_cols)
-      ast$input <- push_down_projections(ast$input, needed, ast$group_cols)
+      ast$input <- push_down_projections(ast$input, barrier_input_required(ast, required_cols), ast$group_cols)
       ast
     },
-    "rename" = {
-      # `required_cols` is expressed in POST-rename names (the schema seen
-      # by everything above this node); `ast$input`'s own schema still uses
-      # the PRE-rename names, so translate any renamed entry back through
-      # `new_names -> old_names` before recursing. Columns untouched by the
-      # rename pass through unchanged (their name is the same on both sides
-      # of the map).
-      rev_idx <- match(required_cols, ast$new_names)
-      translated <- required_cols
-      hit <- !is.na(rev_idx)
-      translated[hit] <- ast$old_names[rev_idx[hit]]
-      # A positional rename (duplicated names) can't be translated by name:
-      # everything below it stays.
-      if (!is.null(ast$positions)) translated <- NULL
-      ast$input <- push_down_projections(ast$input, translated, group_cols)
-      ast
-    },
-    "distinct" = {
-      # `key_cols` are required for the dedup itself regardless of whether
-      # `required_cols` (computed from this node's own OUTPUT schema)
-      # references them -- true even for `.keep_all = TRUE`, where
-      # `required_cols` can be a strict subset of the full input schema.
-      needed <- opt_union(required_cols, ast$key_cols)
-      # keyed by position (duplicated names): nothing below is pruned by name
-      if (!is.null(ast$key_positions)) needed <- NULL
-      ast$input <- push_down_projections(ast$input, needed, group_cols)
-      ast
-    },
-    "slice" = {
-      # `mode = "rank"`'s `order_col` is required for the ranking itself
-      # even when it isn't otherwise referenced downstream (it may be a
-      # real user column not selected further up, or a temp column already
-      # excluded from this node's own output schema by
-      # `infer_schema.ast_slice`).
-      extra <- if (!is.null(ast$order_col)) ast$order_col else character(0)
-      needed <- opt_union(required_cols, extra)
-      ast$input <- push_down_projections(ast$input, needed, group_cols)
+    # (the rules for what each of these needs below it, rename's mapping
+    # from post- to pre-rename names included, are in barrier_input_required())
+    "rename" = , "distinct" = , "slice" = {
+      ast$input <- push_down_projections(ast$input, barrier_input_required(ast, required_cols), group_cols)
       ast
     },
     {
@@ -863,10 +951,7 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
       ast
     },
     "summarise" = {
-      agg_inputs <- unique(unlist(lapply(ast$aggregations, `[[`, "input_col")))
-      agg_inputs <- agg_inputs[!is.na(agg_inputs)]
-      needed <- opt_union(ast$groups, agg_inputs)
-      ast$input <- prune_dead_columns(ast$input, needed, ast$groups)
+      ast$input <- prune_dead_columns(ast$input, barrier_input_required(ast, required_cols), ast$groups)
       ast
     },
     "select" = {
@@ -908,10 +993,7 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
     # ever reached via a join's `left`/`right` recursion below, never via
     # the normal barrier-splitting entry point.
     "arrange" = {
-      # `.by_group = TRUE` sorts by `ast$groups` too (lower_arrange())
-      sort_cols <- vapply(ast$sort_specs, `[[`, character(1), "col_name")
-      needed <- opt_union(opt_union(required_cols, sort_cols), ast$groups)
-      ast$input <- prune_dead_columns(ast$input, needed, group_cols)
+      ast$input <- prune_dead_columns(ast$input, barrier_input_required(ast, required_cols), group_cols)
       ast
     },
     "reframe" = {
@@ -919,43 +1001,12 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
       ast
     },
     "window" = {
-      spec_cols <- unique(unlist(
-        lapply(ast$specs, function(s) c(s$value_col, s$order_cols)),
-        use.names = FALSE
-      ))
-      spec_cols <- spec_cols[!is.na(spec_cols)]
-      needed <- opt_union(opt_union(required_cols, ast$group_cols), spec_cols)
-      ast$input <- prune_dead_columns(ast$input, needed, ast$group_cols)
+      ast$input <- prune_dead_columns(ast$input, barrier_input_required(ast, required_cols), ast$group_cols)
       ast
     },
-    "rename" = {
-      # Same old_names/new_names translation as push_down_projections()'s
-      # "rename" case: without it, a mutate producing the pre-rename column
-      # further down could be wrongly judged "not required" (since
-      # `required_cols` would only ever contain the post-rename name) and
-      # pruned away entirely -- confirmed empirically (Phase 12 audit),
-      # worse than the projection-only bug since it drops a whole
-      # expression, not just narrows a source projection.
-      rev_idx <- match(required_cols, ast$new_names)
-      translated <- required_cols
-      hit <- !is.na(rev_idx)
-      translated[hit] <- ast$old_names[rev_idx[hit]]
-      # A positional rename (duplicated names) can't be translated by name:
-      # everything below it stays.
-      if (!is.null(ast$positions)) translated <- NULL
-      ast$input <- prune_dead_columns(ast$input, translated, group_cols)
-      ast
-    },
-    "distinct" = {
-      needed <- opt_union(required_cols, ast$key_cols)
-      if (!is.null(ast$key_positions)) needed <- NULL
-      ast$input <- prune_dead_columns(ast$input, needed, group_cols)
-      ast
-    },
-    "slice" = {
-      extra <- if (!is.null(ast$order_col)) ast$order_col else character(0)
-      needed <- opt_union(required_cols, extra)
-      ast$input <- prune_dead_columns(ast$input, needed, group_cols)
+    # (same rules as push_down_projections(): see barrier_input_required())
+    "rename" = , "distinct" = , "slice" = {
+      ast$input <- prune_dead_columns(ast$input, barrier_input_required(ast, required_cols), group_cols)
       ast
     },
     {
@@ -1020,10 +1071,9 @@ join_side_requirements <- function(ast, required_cols) {
 
 #' Does an input chain reach a real leaf?
 #'
-#' `extract_segment_above_barrier()` truncates a segment's bottom `$input`
-#' to NULL, so `infer_schema()` inside such a segment sees a partial (or
-#' empty) schema. "source" and "join" are the only node types without an
-#' `$input`; a chain ending anywhere else was cut at a barrier.
+#' A segment of `optimize_with_barriers()` ends in a stub source, so it is
+#' complete. "source" and "join" are the only node types without an `$input`;
+#' a chain ending anywhere else was cut by hand (a test).
 #' @keywords internal
 input_chain_complete <- function(node) {
   if (is.null(node)) return(FALSE)
@@ -1089,8 +1139,8 @@ join_source_predicate <- function(pred, info, side) {
 #' (`is_barrier()`, R/ast.R), so under the current `optimize_with_barriers()`
 #' architecture a `filter` immediately above a `distinct` is split into two
 #' INDEPENDENT segments before any pass runs (see `optimize_with_barriers()`'s
-#' own comments) -- the filter's segment has its `$input` truncated to NULL
-#' at extraction, so `distinct` is never actually present as `ast$input` in
+#' own comments) -- the filter's segment ends in a stub source in place
+#' of the `distinct`, so `distinct` is never actually present as `ast$input` in
 #' the same `push_down_filters()` call for the ordinary linear-chain case.
 #' Reaching across deliberately would require a barrier-aware special case in
 #' `optimize_with_barriers()` itself (matching on "is the barrier specifically
@@ -1167,7 +1217,10 @@ push_down_filters <- function(ast) {
   if (input$type == "select") {
     # Only push if select keeps all predicate columns (a positional select
     # renames nothing by name, but its columns can't be matched by name)
-    if (!is.null(input$positions) || !all(filter_cols %in% input$columns)) {
+    # (and not below a select that pruning inserted: the filter then sees only
+    # the columns that are read, F99)
+    if (!is.null(input$positions) || isTRUE(input$pruned) ||
+        !all(filter_cols %in% input$columns)) {
       return(ast)
     }
 

@@ -76,10 +76,16 @@ ast_mutate <- function(input, expressions) {
 #'   the kept columns in `input`'s schema: used instead of the names when the
 #'   input has duplicated column names, where a name is ambiguous. Such a node
 #'   is an optimizer barrier and never pruned through.
+#' @param pruned `TRUE` for a select the optimizer inserted to drop columns
+#'   nothing reads (`push_down_projections()`); `push_down_filters()` leaves a
+#'   filter above it, as moving the filter below would undo the pruning. The
+#'   field is only present when `TRUE`.
 #' @return An ast_select node
 #' @keywords internal
-ast_select <- function(input, columns, positions = NULL) {
-  ast_node("select", input = input, columns = columns, positions = positions)
+ast_select <- function(input, columns, positions = NULL, pruned = FALSE) {
+  node <- ast_node("select", input = input, columns = columns, positions = positions)
+  if (isTRUE(pruned)) node$pruned <- TRUE
+  node
 }
 
 #' Create an arrange AST node

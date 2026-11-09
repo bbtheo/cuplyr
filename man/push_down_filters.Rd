@@ -30,8 +30,8 @@ Deliberately NOT implemented here. \code{distinct} is a barrier
 (\code{is_barrier()}, R/ast.R), so under the current \code{optimize_with_barriers()}
 architecture a \code{filter} immediately above a \code{distinct} is split into two
 INDEPENDENT segments before any pass runs (see \code{optimize_with_barriers()}'s
-own comments) -- the filter's segment has its \verb{$input} truncated to NULL
-at extraction, so \code{distinct} is never actually present as \code{ast$input} in
+own comments) -- the filter's segment ends in a stub source in place
+of the \code{distinct}, so \code{distinct} is never actually present as \code{ast$input} in
 the same \code{push_down_filters()} call for the ordinary linear-chain case.
 Reaching across deliberately would require a barrier-aware special case in
 \code{optimize_with_barriers()} itself (matching on "is the barrier specifically

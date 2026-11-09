@@ -4,7 +4,7 @@
 \alias{ast_select}
 \title{Create a select AST node}
 \usage{
-ast_select(input, columns, positions = NULL)
+ast_select(input, columns, positions = NULL, pruned = FALSE)
 }
 \arguments{
 \item{input}{Input AST node}
@@ -15,6 +15,11 @@ ast_select(input, columns, positions = NULL)
 the kept columns in \code{input}'s schema: used instead of the names when the
 input has duplicated column names, where a name is ambiguous. Such a node
 is an optimizer barrier and never pruned through.}
+
+\item{pruned}{\code{TRUE} for a select the optimizer inserted to drop columns
+nothing reads (\code{push_down_projections()}); \code{push_down_filters()} leaves a
+filter above it, as moving the filter below would undo the pruning. The
+field is only present when \code{TRUE}.}
 }
 \value{
 An ast_select node

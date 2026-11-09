@@ -4,15 +4,17 @@
 \alias{extract_segment_above_barrier}
 \title{Extract segment above a barrier (returns copy)}
 \usage{
-extract_segment_above_barrier(ast, barrier)
+extract_segment_above_barrier(ast, barrier, stub)
 }
 \arguments{
 \item{ast}{Root node}
 
 \item{barrier}{Target barrier node}
+
+\item{stub}{Source node that takes the barrier's place}
 }
 \value{
-Copy of segment with NULL input at barrier point
+Copy of segment with \code{stub} at the barrier point
 }
 \description{
 Extract segment above a barrier (returns copy)

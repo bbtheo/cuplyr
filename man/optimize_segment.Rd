@@ -4,16 +4,19 @@
 \alias{optimize_segment}
 \title{Optimize a single segment (no barriers)}
 \usage{
-optimize_segment(ast, required_cols = NULL)
+optimize_segment(ast, required_cols = NULL, keep_mutates = FALSE)
 }
 \arguments{
 \item{ast}{Root of segment}
 
 \item{required_cols}{Columns required by whatever consumes this
-segment's output (\code{NULL} means "infer from \code{ast} itself", correct
-only when \code{ast} is a genuine, untruncated subtree -- see the caller
-comment in \code{optimize_with_barriers()} for why a barrier-truncated
-segment must instead pass this explicitly)}
+segment's output (\code{NULL} means all of \code{ast}'s own output columns)}
+
+\item{keep_mutates}{\code{TRUE} when \code{required_cols} is a barrier's narrower
+requirement (F99): that pruning removes columns only, so a mutate
+expression nothing reads stays and is computed (it can warn, as in dplyr),
+and \code{prune_dead_columns()} does not run. Its inputs stay required
+(\code{push_down_projections()} keeps them).}
 }
 \value{
 Optimized segment

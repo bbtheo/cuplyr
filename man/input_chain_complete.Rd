@@ -7,9 +7,8 @@
 input_chain_complete(node)
 }
 \description{
-\code{extract_segment_above_barrier()} truncates a segment's bottom \verb{$input}
-to NULL, so \code{infer_schema()} inside such a segment sees a partial (or
-empty) schema. "source" and "join" are the only node types without an
-\verb{$input}; a chain ending anywhere else was cut at a barrier.
+A segment of \code{optimize_with_barriers()} ends in a stub source, so it is
+complete. "source" and "join" are the only node types without an \verb{$input};
+a chain ending anywhere else was cut by hand (a test).
 }
 \keyword{internal}

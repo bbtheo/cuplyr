@@ -50,7 +50,8 @@ factor, the other anything else (numeric, timestamp, ...): a hard
 incompatibility (\verb{$ok = FALSE}) -- real \code{vctrs::vec_ptype2()} refuses
 this too.
 \item Identical types: a no-op.
-\item Both in the numeric ladder (\verb{BOOL8 < INT32 < INT64 < FLOAT64}) or
+\item Both in the numeric ladder (\verb{BOOL8 < INT32 < INT64 < FLOAT64}, except
+that INT64 (integer64) and FLOAT64 have no common type) or
 both in the timestamp ladder (\verb{TIMESTAMP_DAYS < ... < TIMESTAMP_NANOSECONDS}): promotes to the wider member. The timestamp
 cast (Date <-> POSIXct, etc.) is genuinely native as of Phase 11 L3
 (\code{gpu_cast_column()}, \code{src/ops_bind.cpp}, gained the 5 TIMESTAMP_*

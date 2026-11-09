@@ -33,10 +33,19 @@ its columns, and no filter has a predicate column that isn't required.
 \item \code{prune_dead_columns()} keeps every mutate expression (each output column
 is required), so its only change is \code{exprs[keep]} with \code{keep} all TRUE,
 which \code{settled_prune()} repeats.
-Anything else (a select, a join, a truncated segment cut at a barrier, an
-empty mutate) is not settled, and the passes run as usual. Only output
-column NAMES are needed, as sets, so they are built bottom-up without
-inferring types.
+Anything else (a select, a join, a barrier, an empty mutate) is not settled,
+and the passes run as usual. A segment above a barrier ends in a stub source
+and is settled like any other. Only output column NAMES are needed, as sets,
+so they are built bottom-up without inferring types.
 }
+}
+\details{
+A narrower \code{required_cols} (F99: what a barrier above reads) is settled when
+the requirement walked down the chain needs no select above a filter, finds
+no dead mutate expression and keeps every source column. One set does for
+both passes: a mutate's new outputs, the only names projection pushdown
+takes back out of its requirement, are neither source columns nor a lower
+node's input, so they change no answer here. When every output is required
+the walk passes by the induction above.
 }
 \keyword{internal}

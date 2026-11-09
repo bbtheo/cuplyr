@@ -4,15 +4,21 @@
 \alias{optimize_with_barriers}
 \title{Optimize AST respecting barrier nodes}
 \usage{
-optimize_with_barriers(ast)
+optimize_with_barriers(ast, required = NULL)
 }
 \arguments{
 \item{ast}{Root AST node}
+
+\item{required}{Columns the consumer of \code{ast} reads from its output
+(\code{NULL}: all of them)}
 }
 \value{
 Optimized AST
 }
 \description{
-Optimize AST respecting barrier nodes
+A plan is optimized one segment at a time: the nodes above a barrier (down
+to it), then the barrier, then what is below it as a plan of its own. Each
+segment is told what its consumer reads of its output, so the columns a
+barrier does not need are pruned below it as well (F99).
 }
 \keyword{internal}
