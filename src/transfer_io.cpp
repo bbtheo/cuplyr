@@ -10,12 +10,15 @@
 #include <cudf/types.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/strings/strings_column_view.hpp>
+#include <cudf/dictionary/dictionary_column_view.hpp>
 #include <cudf/strings/utilities.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <rmm/device_buffer.hpp>
 #include <rmm/mr/per_device_resource.hpp>
 #include <cuda_runtime.h>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <algorithm>
 #include <string>
@@ -580,9 +583,240 @@ static SEXP int64_to_bits(const cudf::column_view& col) {
     return rv;
 }
 
+// Rows of a fixed-width column as T (the column's own storage type), honouring
+// the view's offset. Null slots hold whatever the device had.
+template <typename T>
+static std::vector<T> fetch_fixed(const cudf::column_view& col) {
+    const size_type n = col.size();
+    std::vector<T> out(n);
+    if (n > 0) {
+        check_cuda(cudaMemcpy(out.data(),
+                              static_cast<const char*>(col.head()) + sizeof(T) * col.offset(),
+                              n * sizeof(T), cudaMemcpyDeviceToHost),
+                   "collect memcpy");
+    }
+    return out;
+}
+
+// INT8/INT16/UINT8/UINT16 to an R integer vector.
+template <typename T>
+static SEXP small_int_to_r(const cudf::column_view& col) {
+    const size_type n = col.size();
+    std::vector<T> v = fetch_fixed<T>(col);
+    IntegerVector rv(n);
+    for (size_type j = 0; j < n; ++j) rv[j] = static_cast<int>(v[j]);
+    HostValidity hv(col);
+    if (hv.any()) {
+        for (size_type j = 0; j < n; ++j) if (hv.is_null(j)) rv[j] = NA_INTEGER;
+    }
+    return rv;
+}
+
+// UINT32 to double (every value fits exactly).
+static SEXP uint32_to_r(const cudf::column_view& col) {
+    const size_type n = col.size();
+    std::vector<uint32_t> v = fetch_fixed<uint32_t>(col);
+    NumericVector rv(n);
+    for (size_type j = 0; j < n; ++j) rv[j] = static_cast<double>(v[j]);
+    HostValidity hv(col);
+    if (hv.any()) {
+        for (size_type j = 0; j < n; ++j) if (hv.is_null(j)) rv[j] = NA_REAL;
+    }
+    return rv;
+}
+
+// UINT64 to integer64 bits; a value past INT64_MAX has no integer64 form, so
+// the column is reported unholdable (NULL) rather than wrapped.
+static SEXP uint64_to_bits(const cudf::column_view& col) {
+    const size_type n = col.size();
+    std::vector<uint64_t> v = fetch_fixed<uint64_t>(col);
+    HostValidity hv(col);
+    NumericVector rv(n);
+    int64_t* dst = reinterpret_cast<int64_t*>(REAL(rv));
+    const uint64_t max = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+    for (size_type j = 0; j < n; ++j) {
+        if (hv.any() && hv.is_null(j)) {
+            dst[j] = std::numeric_limits<int64_t>::min();
+        } else if (v[j] > max) {
+            return R_NilValue;
+        } else {
+            dst[j] = static_cast<int64_t>(v[j]);
+        }
+    }
+    rv.attr("class") = "integer64";
+    return rv;
+}
+
+static void as_posixct(NumericVector& rv) {
+    rv.attr("class") = CharacterVector::create("POSIXct", "POSIXt");
+    rv.attr("tzone") = "UTC";
+}
+
+// TIMESTAMP_NANOSECONDS to POSIXct seconds. Whole seconds and the remainder are
+// divided apart so a 19-digit epoch loses nothing before the final addition;
+// `lossy` is set when a value is not a whole microsecond (a double cannot hold
+// the rest at current epochs).
+static SEXP timestamp_ns_to_r(const cudf::column_view& col, bool& lossy) {
+    const size_type n = col.size();
+    std::vector<int64_t> v = fetch_fixed<int64_t>(col);
+    HostValidity hv(col);
+    NumericVector rv(n);
+    for (size_type j = 0; j < n; ++j) {
+        if (hv.any() && hv.is_null(j)) { rv[j] = NA_REAL; continue; }
+        const int64_t sec = v[j] / 1000000000;
+        const int64_t rem = v[j] % 1000000000;
+        rv[j] = static_cast<double>(sec) + static_cast<double>(rem) / 1e9;
+        if (v[j] % 1000 != 0) lossy = true;
+    }
+    as_posixct(rv);
+    return rv;
+}
+
+// DURATION_SECONDS..NANOSECONDS to difftime in seconds (R has no sub-second
+// unit); `lossy` when a tick count is past 2^53.
+static SEXP duration_to_r(const cudf::column_view& col, double ticks_per_sec, bool& lossy) {
+    const size_type n = col.size();
+    std::vector<int64_t> v = fetch_fixed<int64_t>(col);
+    HostValidity hv(col);
+    const int64_t lim = static_cast<int64_t>(1) << 53;
+    NumericVector rv(n);
+    for (size_type j = 0; j < n; ++j) {
+        if (hv.any() && hv.is_null(j)) { rv[j] = NA_REAL; continue; }
+        if (v[j] > lim || v[j] < -lim) lossy = true;
+        rv[j] = static_cast<double>(v[j]) / ticks_per_sec;
+    }
+    rv.attr("class") = "difftime";
+    rv.attr("units") = "secs";
+    return rv;
+}
+
+static const double kPow10[] = {1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,
+                                1e8,  1e9,  1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+                                1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22};
+
+// unscaled * 10^scale as the nearest double. Exact operands (|unscaled| <= 2^53,
+// |scale| <= 22) need one correctly rounded multiply/divide; anything else goes
+// through strtod of the decimal text. Returns false when the value is beyond
+// the double range. `lossy`: more than 15 significant digits, or a non-zero
+// value that underflows to 0.
+static bool decimal_to_double(__int128_t x, int scale, double& out, bool& lossy) {
+    if (x == 0) { out = 0.0; return true; }
+    const bool neg = x < 0;
+    unsigned __int128 m = neg ? -static_cast<unsigned __int128>(x) : static_cast<unsigned __int128>(x);
+    const unsigned __int128 e15 = 1000000000000000ULL;
+    if (m >= e15) {
+        unsigned __int128 t = m;
+        while (t % 10 == 0) t /= 10;
+        if (t >= e15) lossy = true;
+    }
+    if (m <= (static_cast<unsigned __int128>(1) << 53) && scale >= -22 && scale <= 22) {
+        const double d = static_cast<double>(static_cast<uint64_t>(m));
+        out = scale < 0 ? d / kPow10[-scale] : d * kPow10[scale];
+        if (neg) out = -out;
+        return true;
+    }
+    char buf[96];
+    int len = 0;
+    char digits[48];
+    int nd = 0;
+    for (unsigned __int128 t = m; t > 0; t /= 10) {
+        digits[nd++] = static_cast<char>('0' + static_cast<int>(t % 10));
+    }
+    if (neg) buf[len++] = '-';
+    while (nd > 0) buf[len++] = digits[--nd];
+    std::snprintf(buf + len, sizeof(buf) - len, "e%d", scale);
+    out = std::strtod(buf, nullptr);
+    if (std::isinf(out)) return false;
+    if (out == 0.0) lossy = true;
+    return true;
+}
+
+// DECIMAL32/64/128 (rep type Rep) to double; NULL when a value is beyond the
+// double range.
+template <typename Rep>
+static SEXP decimal_to_r(const cudf::column_view& col, bool& lossy) {
+    const size_type n = col.size();
+    std::vector<Rep> v = fetch_fixed<Rep>(col);
+    HostValidity hv(col);
+    const int scale = static_cast<int>(col.type().scale());
+    NumericVector rv(n);
+    for (size_type j = 0; j < n; ++j) {
+        if (hv.any() && hv.is_null(j)) { rv[j] = NA_REAL; continue; }
+        double d;
+        if (!decimal_to_double(static_cast<__int128_t>(v[j]), scale, d, lossy)) return R_NilValue;
+        rv[j] = d;
+    }
+    return rv;
+}
+
+// The codes (index + 1, NA where the row is null) of a dictionary column whose
+// index child is stored as T.
+template <typename T>
+static IntegerVector dictionary_codes(const cudf::column_view& col) {
+    const size_type n = col.size();
+    // the indices child at the parent's offset (indices() does not apply it)
+    const cudf::column_view& ic = col.child(0);
+    cudf::column_view iv(ic.type(), n, ic.head(), nullptr, 0, col.offset() + ic.offset());
+    std::vector<T> idx = fetch_fixed<T>(iv);
+    HostValidity hv(col);
+    IntegerVector codes(n);
+    for (size_type j = 0; j < n; ++j) {
+        codes[j] = (hv.any() && hv.is_null(j)) ? NA_INTEGER : static_cast<int>(idx[j]) + 1;
+    }
+    return codes;
+}
+
+// A dictionary with string keys to a factor (levels = every key in key order,
+// code = index + 1), whatever integer type the indices have. Other key types are
+// unholdable (NULL). Whether there are keys to read is a property of the column,
+// not of its size: a zero-row view keeps its levels. An empty dictionary built
+// without children has none.
+static SEXP dictionary_to_factor(const cudf::column_view& col) {
+    const size_type n = col.size();
+    CharacterVector levels(0);
+    IntegerVector codes(n);
+    if (col.num_children() == 2) {
+        cudf::dictionary_column_view dv(col);
+        if (dv.keys().type().id() != type_id::STRING) return R_NilValue;
+        levels = gpu_to_character(dv.keys());
+        switch (col.child(0).type().id()) {
+            case type_id::INT8:   codes = dictionary_codes<int8_t>(col); break;
+            case type_id::INT16:  codes = dictionary_codes<int16_t>(col); break;
+            case type_id::INT32:  codes = dictionary_codes<int32_t>(col); break;
+            case type_id::INT64: {
+                // codes are R integers: a key count past INT_MAX cannot be held
+                if (dv.keys().size() >= std::numeric_limits<int32_t>::max()) return R_NilValue;
+                codes = dictionary_codes<int64_t>(col);
+                break;
+            }
+            case type_id::UINT8:  codes = dictionary_codes<uint8_t>(col); break;
+            case type_id::UINT16: codes = dictionary_codes<uint16_t>(col); break;
+            case type_id::UINT32: {
+                if (dv.keys().size() >= std::numeric_limits<int32_t>::max()) return R_NilValue;
+                codes = dictionary_codes<uint32_t>(col);
+                break;
+            }
+            case type_id::UINT64: {
+                if (dv.keys().size() >= std::numeric_limits<int32_t>::max()) return R_NilValue;
+                codes = dictionary_codes<uint64_t>(col);
+                break;
+            }
+            default:
+                return R_NilValue;
+        }
+    } else if (n > 0) {
+        return R_NilValue;
+    }
+    codes.attr("levels") = levels;
+    codes.attr("class") = "factor";
+    return codes;
+}
+
 // One column to its R vector; the single converter behind gpu_collect(),
-// gpu_collect_slice() and gpu_head().
-static SEXP collect_column(const cudf::column_view& col) {
+// gpu_collect_slice() and gpu_head(). R_NilValue means the column cannot be held
+// in R (a LIST, a value past INT64_MAX, ...); `lossy` is set when values were
+// rounded. The conditions themselves are raised on the R side (collect_frame()).
+static SEXP collect_column(const cudf::column_view& col, bool& lossy) {
     switch (col.type().id()) {
         case type_id::FLOAT64:
             return gpu_to_numeric(col);
@@ -601,14 +835,59 @@ static SEXP collect_column(const cudf::column_view& col) {
         }
         case type_id::TIMESTAMP_MICROSECONDS: {
             NumericVector rv = fixed_to_numeric<int64_t>(col, 1e6);
-            rv.attr("class") = CharacterVector::create("POSIXct", "POSIXt");
-            rv.attr("tzone") = "UTC";
+            as_posixct(rv);
             return rv;
         }
         case type_id::STRING:
             return gpu_to_character(col);
+        case type_id::INT8:
+            return small_int_to_r<int8_t>(col);
+        case type_id::INT16:
+            return small_int_to_r<int16_t>(col);
+        case type_id::UINT8:
+            return small_int_to_r<uint8_t>(col);
+        case type_id::UINT16:
+            return small_int_to_r<uint16_t>(col);
+        case type_id::UINT32:
+            return uint32_to_r(col);
+        case type_id::UINT64:
+            return uint64_to_bits(col);
+        case type_id::TIMESTAMP_SECONDS: {
+            NumericVector rv = fixed_to_numeric<int64_t>(col, 1.0);
+            as_posixct(rv);
+            return rv;
+        }
+        case type_id::TIMESTAMP_MILLISECONDS: {
+            NumericVector rv = fixed_to_numeric<int64_t>(col, 1e3);
+            as_posixct(rv);
+            return rv;
+        }
+        case type_id::TIMESTAMP_NANOSECONDS:
+            return timestamp_ns_to_r(col, lossy);
+        case type_id::DURATION_DAYS: {
+            NumericVector rv = fixed_to_numeric<int32_t>(col, 1.0);
+            rv.attr("class") = "difftime";
+            rv.attr("units") = "days";
+            return rv;
+        }
+        case type_id::DURATION_SECONDS:
+            return duration_to_r(col, 1.0, lossy);
+        case type_id::DURATION_MILLISECONDS:
+            return duration_to_r(col, 1e3, lossy);
+        case type_id::DURATION_MICROSECONDS:
+            return duration_to_r(col, 1e6, lossy);
+        case type_id::DURATION_NANOSECONDS:
+            return duration_to_r(col, 1e9, lossy);
+        case type_id::DECIMAL32:
+            return decimal_to_r<int32_t>(col, lossy);
+        case type_id::DECIMAL64:
+            return decimal_to_r<int64_t>(col, lossy);
+        case type_id::DECIMAL128:
+            return decimal_to_r<__int128_t>(col, lossy);
+        case type_id::DICTIONARY32:
+            return dictionary_to_factor(col);
         default:
-            return NumericVector(col.size(), NA_REAL);
+            return R_NilValue;
     }
 }
 
@@ -617,11 +896,19 @@ static List collect_view(const cudf::table_view& view, CharacterVector col_names
     int ncol = view.num_columns();
 
     List result(ncol);
+    std::vector<int> lossy_cols, unholdable_cols;  // 1-based
     for (int i = 0; i < ncol; ++i) {
-        result[i] = collect_column(view.column(i));
+        bool lossy = false;
+        SEXP col = collect_column(view.column(i), lossy);
+        if (col == R_NilValue) unholdable_cols.push_back(i + 1);
+        if (lossy) lossy_cols.push_back(i + 1);
+        result[i] = col;
     }
 
     result.names() = col_names;
+    // collect_frame() turns these into the classed warning / error
+    if (!lossy_cols.empty()) result.attr("cuplyr_lossy") = Rcpp::wrap(lossy_cols);
+    if (!unholdable_cols.empty()) result.attr("cuplyr_unholdable") = Rcpp::wrap(unholdable_cols);
     result.attr("class") = "data.frame";
     result.attr("row.names") = IntegerVector::create(NA_INTEGER, -nrow);
     return result;
@@ -693,6 +980,23 @@ CharacterVector gpu_col_types(SEXP xptr) {
             case type_id::TIMESTAMP_MICROSECONDS:
             case type_id::TIMESTAMP_NANOSECONDS:
                 result[i] = "dttm"; break;
+            case type_id::UINT8: result[i] = "u8"; break;
+            case type_id::UINT16: result[i] = "u16"; break;
+            case type_id::UINT32: result[i] = "u32"; break;
+            case type_id::UINT64: result[i] = "u64"; break;
+            case type_id::DURATION_DAYS:
+            case type_id::DURATION_SECONDS:
+            case type_id::DURATION_MILLISECONDS:
+            case type_id::DURATION_MICROSECONDS:
+            case type_id::DURATION_NANOSECONDS:
+                result[i] = "drtn"; break;
+            case type_id::DECIMAL32:
+            case type_id::DECIMAL64:
+            case type_id::DECIMAL128:
+                result[i] = "dec"; break;
+            case type_id::DICTIONARY32: result[i] = "fct"; break;
+            case type_id::LIST: result[i] = "list"; break;
+            case type_id::STRUCT: result[i] = "struct"; break;
             default: result[i] = "???"; break;
         }
     }

@@ -125,14 +125,17 @@ schema_type_abbr <- function(schema, unspecified = NULL, lvls = levels_by_positi
       DICTIONARY32 = if (is.null(lvls[[i]])) "int"
                      else if (isTRUE(attr(lvls[[i]], "ordered"))) "ord" else "fct",
       FLOAT64 = , FLOAT32 = "dbl",
-      INT64 = "int64",
-      INT32 = "int",
-      INT16 = "i16",
-      INT8 = "i8",
+      INT64 = , UINT64 = "int64",
+      INT32 = , INT16 = , INT8 = , UINT16 = , UINT8 = "int",
+      UINT32 = , DECIMAL32 = , DECIMAL64 = , DECIMAL128 = "dbl",
       BOOL8 = "lgl",
       STRING = "chr",
       TIMESTAMP_DAYS = "date",
-      if (isTRUE(startsWith(types[[i]], "TIMESTAMP_"))) "dttm" else tolower(types[[i]])
+      LIST = "list",
+      STRUCT = "struct",
+      if (isTRUE(startsWith(types[[i]], "TIMESTAMP_"))) "dttm"
+      else if (isTRUE(startsWith(types[[i]], "DURATION_"))) "drtn"
+      else tolower(types[[i]])
     )
   }
   if (length(unspecified) > 0L) {
@@ -141,6 +144,24 @@ schema_type_abbr <- function(schema, unspecified = NULL, lvls = levels_by_positi
     out[hit] <- "???"
   }
   out
+}
+
+# What a preview shows for a column R cannot hold (gpu_head() returns NULL for
+# it, F105): the other columns still preview, and nothing raises.
+unholdable_placeholder <- "[cannot be shown in R]"
+
+# A real GPU dictionary (schema DICTIONARY32, no schema levels) collects to a
+# factor, not the "int" a level-less schema would suggest; the preview column
+# says so.
+# @keywords internal
+preview_type_abbr <- function(types, preview, lvls) {
+  if (is.null(preview)) {
+    return(types)
+  }
+  for (i in which(types == "int" & vapply(lvls, is.null, logical(1)))) {
+    if (is.factor(preview[[i]])) types[[i]] <- "fct"
+  }
+  types
 }
 
 # The header and the glimpse-style body of a table with GPU data and nothing
@@ -159,6 +180,7 @@ print_gibble_body <- function(x, width, body_w, name) {
     gpu_head(ptr, 10L, col_names),
     error = function(e) NULL
   )
+  types <- preview_type_abbr(types, preview, lvls)
 
   # Calculate column name width for alignment
   max_name_width <- max(nchar(col_names), 1)
@@ -176,7 +198,9 @@ print_gibble_body <- function(x, width, body_w, name) {
     type_str <- paste0("<", col_type, ">")
 
     # Get preview values
-    if (!is.null(preview)) {
+    if (!is.null(preview) && is.null(preview[[i]])) {
+      val_str <- unholdable_placeholder
+    } else if (!is.null(preview)) {
       vals <- preview_strings(preview[[i]], zones[[i]], lvls[[i]], stypes[[i]],
                               truncate = TRUE)
       if (length(vals) > 0) {

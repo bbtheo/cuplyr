@@ -211,6 +211,33 @@ SEXP gpu_make_null_column(int nrows, std::string type_str) {
         dtype = cudf::data_type{cudf::type_id::TIMESTAMP_SECONDS};
     } else if (type_str == "TIMESTAMP_NANOSECONDS") {
         dtype = cudf::data_type{cudf::type_id::TIMESTAMP_NANOSECONDS};
+    } else if (type_str == "UINT8") {
+        dtype = cudf::data_type{cudf::type_id::UINT8};
+    } else if (type_str == "UINT16") {
+        dtype = cudf::data_type{cudf::type_id::UINT16};
+    } else if (type_str == "UINT32") {
+        dtype = cudf::data_type{cudf::type_id::UINT32};
+    } else if (type_str == "UINT64") {
+        dtype = cudf::data_type{cudf::type_id::UINT64};
+    } else if (type_str == "DURATION_DAYS") {
+        dtype = cudf::data_type{cudf::type_id::DURATION_DAYS};
+    } else if (type_str == "DURATION_SECONDS") {
+        dtype = cudf::data_type{cudf::type_id::DURATION_SECONDS};
+    } else if (type_str == "DURATION_MILLISECONDS") {
+        dtype = cudf::data_type{cudf::type_id::DURATION_MILLISECONDS};
+    } else if (type_str == "DURATION_MICROSECONDS") {
+        dtype = cudf::data_type{cudf::type_id::DURATION_MICROSECONDS};
+    } else if (type_str == "DURATION_NANOSECONDS") {
+        dtype = cudf::data_type{cudf::type_id::DURATION_NANOSECONDS};
+    } else if (type_str == "DECIMAL32") {  // scale 0: only the R class matters
+        dtype = cudf::data_type{cudf::type_id::DECIMAL32, 0};
+    } else if (type_str == "DECIMAL64") {
+        dtype = cudf::data_type{cudf::type_id::DECIMAL64, 0};
+    } else if (type_str == "DECIMAL128") {
+        dtype = cudf::data_type{cudf::type_id::DECIMAL128, 0};
+    } else if (type_str == "DICTIONARY32" && n == 0) {
+        // a real (non-cuplyr-factor) dictionary: gpu_proto() of one
+        dtype = cudf::data_type{cudf::type_id::DICTIONARY32};
     } else {
         Rcpp::stop("Unsupported type for null column: %s", type_str.c_str());
     }
@@ -533,6 +560,21 @@ std::string gpu_column_type(SEXP xptr, int col_idx) {
         case cudf::type_id::TIMESTAMP_MILLISECONDS: return "TIMESTAMP_MILLISECONDS";
         case cudf::type_id::TIMESTAMP_MICROSECONDS: return "TIMESTAMP_MICROSECONDS";
         case cudf::type_id::TIMESTAMP_NANOSECONDS: return "TIMESTAMP_NANOSECONDS";
+        case cudf::type_id::UINT8: return "UINT8";
+        case cudf::type_id::UINT16: return "UINT16";
+        case cudf::type_id::UINT32: return "UINT32";
+        case cudf::type_id::UINT64: return "UINT64";
+        case cudf::type_id::DURATION_DAYS: return "DURATION_DAYS";
+        case cudf::type_id::DURATION_SECONDS: return "DURATION_SECONDS";
+        case cudf::type_id::DURATION_MILLISECONDS: return "DURATION_MILLISECONDS";
+        case cudf::type_id::DURATION_MICROSECONDS: return "DURATION_MICROSECONDS";
+        case cudf::type_id::DURATION_NANOSECONDS: return "DURATION_NANOSECONDS";
+        case cudf::type_id::DECIMAL32: return "DECIMAL32";
+        case cudf::type_id::DECIMAL64: return "DECIMAL64";
+        case cudf::type_id::DECIMAL128: return "DECIMAL128";
+        case cudf::type_id::DICTIONARY32: return "DICTIONARY32";
+        case cudf::type_id::LIST: return "LIST";
+        case cudf::type_id::STRUCT: return "STRUCT";
         default: return "UNKNOWN";
     }
 }

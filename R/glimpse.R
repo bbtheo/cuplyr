@@ -94,11 +94,10 @@ glimpse.tbl_gpu <- function(x, width = NULL, ...) {
   }
 
   preview_n <- min(100L, dims[1])
-  preview <- if (preview_n > 0) {
-    tryCatch(gpu_head(materialized$ptr, preview_n, col_names), error = function(e) NULL)
-  } else {
-    NULL
-  }
+  # also at zero rows: the empty preview still tells a real dictionary from an int
+  preview <- tryCatch(gpu_head(materialized$ptr, preview_n, col_names), error = function(e) NULL)
+
+  types <- preview_type_abbr(types, preview, lvls)
 
   max_name_width <- max(nchar(col_names), 1)
   zones <- tz_by_position(materialized$schema)
@@ -107,7 +106,9 @@ glimpse.tbl_gpu <- function(x, width = NULL, ...) {
   type_strs <- paste0("<", types, ">")
   val_strs <- character(length(col_names))
   for (i in seq_along(col_names)) {
-    if (!is.null(preview) && length(preview[[i]]) > 0) {
+    if (!is.null(preview) && is.null(preview[[i]])) {
+      val_strs[i] <- unholdable_placeholder
+    } else if (!is.null(preview) && length(preview[[i]]) > 0) {
       vals <- preview_strings(preview[[i]], zones[[i]], lvls[[i]], stypes[[i]])
       val_strs[i] <- paste(vals, collapse = ", ")
     }

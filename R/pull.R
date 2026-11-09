@@ -61,12 +61,14 @@ pull.tbl_gpu <- function(.data, var = -1, name = NULL, ...) {
 
   var_name <- rlang::inject(tidyselect::vars_pull(schema$names, !!var_quo))
 
-  result_tbl <- collect_frame(materialized)
+  # Only the pulled column(s) are collected: another column that R cannot hold
+  # (F105) must not make pull() fail.
+  values <- fetch_column(materialized, match(var_name, schema$names))
 
   if (rlang::quo_is_null(name_quo)) {
-    return(result_tbl[[var_name]])
+    return(values)
   }
 
   name_col <- rlang::inject(tidyselect::vars_pull(schema$names, !!name_quo))
-  stats::setNames(result_tbl[[var_name]], as.character(result_tbl[[name_col]]))
+  stats::setNames(values, as.character(fetch_column(materialized, match(name_col, schema$names))))
 }

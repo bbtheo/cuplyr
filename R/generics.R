@@ -603,8 +603,15 @@ with_user_call <- function(expr, call) {
 # One column of `x` as an R vector: ungroup, select it, collect that
 # one-column table. Lazy tables only append a node to the plan (so the
 # optimizer prunes everything else), eager ones gather one column on the GPU.
-fetch_column <- function(x, col) {
-  .subset2(collect_frame(select_one_column(x, col)), 1L)
+fetch_column <- function(x, col, call = rlang::caller_env()) {
+  values <- .subset2(collect_frame(select_one_column(x, col), call = call), 1L)
+  # a vctrs::unspecified() column keeps its class (collect_frame() restores the
+  # marker by name, and the one-column table no longer carries it)
+  if (current_schema(x)$names[[col]] %in% .subset2(x, "unspecified") &&
+      is.logical(values) && all(is.na(values))) {
+    values <- vctrs::unspecified(length(values))
+  }
+  values
 }
 
 # One cell: the same, with a one-row gather before the transfer.

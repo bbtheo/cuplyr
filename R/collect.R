@@ -16,10 +16,26 @@
 #'   Column types are converted back to R types:
 #'   \itemize{
 #'     \item FLOAT64/FLOAT32 -> numeric (double)
-#'     \item INT32/INT64 -> integer or numeric
+#'     \item INT8/INT16/INT32, UINT8/UINT16 -> integer
+#'     \item UINT32 -> double (exact)
+#'     \item INT64/UINT64 -> `bit64::integer64` (a double with a warning when
+#'       `bit64` is absent and a value is past 2^53); a UINT64 value past
+#'       `INT64_MAX` is an error, never a wrap
 #'     \item STRING -> character
 #'     \item BOOL8 -> logical (TRUE/FALSE)
+#'     \item DATE (TIMESTAMP_DAYS) -> `Date`; TIMESTAMP_SECONDS/MILLISECONDS/
+#'       MICROSECONDS/NANOSECONDS -> `POSIXct` (nanoseconds finer than a
+#'       microsecond are rounded, with a warning)
+#'     \item DURATION_DAYS -> `difftime` in days; the other DURATION_* -> `difftime`
+#'       in seconds (a warning past 2^53 ticks)
+#'     \item DECIMAL32/64/128 -> double, the nearest one (a warning when it
+#'       needs more than 15 significant digits; an error beyond the double range)
+#'     \item a dictionary with string keys -> factor
 #'   }
+#'   Any other type (LIST, STRUCT, a dictionary with other keys) is an error of
+#'   class `cuplyr_error_unsupported_gpu_type` naming the column; the warnings
+#'   have class `cuplyr_warning_collect_precision` and name every column
+#'   concerned. `print()` and `glimpse()` show such a column as a placeholder.
 #'
 #' @details
 #' ## Grouped tables and `.drop`
@@ -118,7 +134,7 @@ ungrouped_frame_meta <- function(frame, x) {
 # The data of a tbl_gpu as an UNGROUPED tibble. This is what every internal
 # caller that needs the rows (fallbacks, joins, sets, vctrs, `$`) wants;
 # `collect()` is this plus the group structure.
-collect_frame <- function(x) {
+collect_frame <- function(x, call = rlang::caller_env()) {
   # Handle lazy evaluation: compute first if there are pending ops
   if (is_tbl_gpu(x) && identical(.subset2(x, "exec_mode"), "lazy") && has_pending_ops(x)) {
     plan <- compute_plan(x)
@@ -147,6 +163,7 @@ collect_frame <- function(x) {
   }
 
   df <- wrap_gpu_call("collect", gpu_collect(ptr, final_schema$names))
+  df <- raise_collect_issues(df, final_schema, call = call)
   # "minimal": a relocate()/rename() result may carry duplicated names
   result <- tibble::as_tibble(df, .name_repair = "minimal")
 
@@ -184,6 +201,56 @@ collect_frame <- function(x) {
   result
 }
 
+# The conditions of a collect (F105), raised in this one place. The C++ collect
+# marks what it could not hold with attributes on the column list:
+# `cuplyr_unholdable` (1-based columns that came back NULL: a LIST, a UINT64 past
+# INT64_MAX, a DECIMAL past the double range, a dictionary with non-string keys)
+# is the classed error; `cuplyr_lossy` (columns whose values were rounded) is one
+# classed warning naming all of them. Previews read gpu_head() directly and never
+# come through here.
+# @keywords internal
+raise_collect_issues <- function(df, schema, call = rlang::caller_env()) {
+  bad <- attr(df, "cuplyr_unholdable", exact = TRUE)
+  lossy <- attr(df, "cuplyr_lossy", exact = TRUE)
+  if (is.null(bad) && is.null(lossy)) {
+    return(df)
+  }
+  if (!is.null(bad)) {
+    abort_unsupported_gpu_type(names(df)[[bad[[1L]]]], unname(schema$types)[[bad[[1L]]]], call = call)
+  }
+  attr(df, "cuplyr_lossy") <- NULL
+  cols <- paste0("`", names(df)[lossy], "`", collapse = ", ")
+  warning(structure(
+    class = c("cuplyr_warning_collect_precision", "warning", "condition"),
+    list(message = paste0(
+      "Column", if (length(lossy) > 1L) "s", " ", cols,
+      " cannot be held exactly in R and ", if (length(lossy) > 1L) "were" else "was",
+      " rounded to the nearest double (a double keeps 15 significant decimal digits ",
+      "and whole numbers up to 2^53; POSIXct keeps microseconds)."
+    ), call = NULL)
+  ))
+  df
+}
+
+abort_unsupported_gpu_type <- function(column, type, call = rlang::caller_env()) {
+  rlang::abort(
+    c(paste0("Can't collect column `", column, "` of GPU type ", type, " to R."),
+      x = unholdable_reason(type)),
+    class = "cuplyr_error_unsupported_gpu_type",
+    call = call
+  )
+}
+
+unholdable_reason <- function(type) {
+  switch(type,
+    UINT64 = "It holds a value past INT64_MAX (9223372036854775807), which R cannot represent without wrapping.",
+    DECIMAL32 = , DECIMAL64 = , DECIMAL128 = "It holds a value beyond the range of a double.",
+    DICTIONARY32 = "Only a dictionary with string keys can be collected.",
+    LIST = , STRUCT = "Nested columns have no R equivalent yet.",
+    "R has no equivalent of this type."
+  )
+}
+
 # The R class of an INT64 column follows the schema: INT64 is integer64. The
 # C++ collect hands every physical INT64 column back as integer64; without
 # bit64 that class has no methods, so such a column becomes a double (exact up
@@ -197,11 +264,12 @@ int64_columns_to_r <- function(result, schema) {
     return(result)
   }
   types <- unname(schema$types)
-  keep <- is64 & types == "INT64" & bit64_available()
+  is_int64 <- types == "INT64" | types == "UINT64"  # UINT64 arrives as integer64 bits too (F105)
+  keep <- is64 & is_int64 & bit64_available()
   big <- character()
   for (j in which(is64 & !keep)) {
     vals <- int64_bits_to_double(unclass(result[[j]]))
-    if (types[j] == "INT64" && isTRUE(attr(vals, "beyond_2_53"))) {
+    if (is_int64[j] && isTRUE(attr(vals, "beyond_2_53"))) {
       big <- c(big, names(result)[j])
     }
     attr(vals, "beyond_2_53") <- NULL
@@ -211,7 +279,7 @@ int64_columns_to_r <- function(result, schema) {
     warning(structure(
       class = c("cuplyr_warning_int64_precision", "warning", "condition"),
       list(message = paste0(
-        "INT64 column", if (length(big) > 1L) "s", " ",
+        "INT64/UINT64 column", if (length(big) > 1L) "s", " ",
         paste0("`", big, "`", collapse = ", "),
         " hold", if (length(big) == 1L) "s",
         " values beyond 2^53 that a double cannot store exactly. ",

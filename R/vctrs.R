@@ -232,10 +232,14 @@ vctrs_pin_until_exit <- function(id, tbl, frame) {
 
 # A column-less all-null table of `n` rows with `schema`'s physical layout.
 vctrs_null_table_ptr <- function(schema, n) {
+  types <- gpu_physical_type(unname(schema$types))
+  if (n == 0L) {
+    # a real dictionary (no schema levels) keeps its factor class in the ptype (F105)
+    real <- unname(schema$types) == "DICTIONARY32" & vapply(levels_by_position(schema), is.null, NA)
+    types[real] <- "DICTIONARY32"
+  }
   wrap_gpu_call("vctrs", {
-    cols <- lapply(seq_along(schema$names), function(i) {
-      gpu_make_null_column(n, gpu_physical_type(unname(schema$types[i])))
-    })
+    cols <- lapply(seq_along(schema$names), function(i) gpu_make_null_column(n, types[[i]]))
     if (length(cols) == 1L) cols[[1L]] else gpu_bind_cols_impl(cols)
   })
 }
@@ -245,6 +249,10 @@ gpu_proto <- function(x) {
   schema <- current_schema(x)
   if (length(schema$names) == 0L) {
     return(tibble::tibble())
+  }
+  nested <- which(unname(schema$types) %in% c("LIST", "STRUCT"))
+  if (length(nested) > 0L) {
+    abort_unsupported_gpu_type(schema$names[[nested[[1L]]]], unname(schema$types)[[nested[[1L]]]])
   }
   ptr <- vctrs_null_table_ptr(schema, 0L)
   out <- collect_frame(new_tbl_gpu(ptr = ptr, schema = schema))

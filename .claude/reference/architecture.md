@@ -38,6 +38,26 @@ list(
 | factor | DICTIONARY32 (physical: INT32) | codes only, 1-based, `schema$factor_levels` holds labels |
 | integer64 | FLOAT64 | loses precision >2^53, warns |
 
+#### Collecting every libcudf type (F105)
+
+`collect_column()` (`src/transfer_io.cpp`, behind `gpu_collect()`, `gpu_head()`,
+`gpu_collect_slice()`) is the one GPU -> R mapping; F85 (parquet) reuses it.
+Static by type: INT8/16, UINT8/16 -> integer; UINT32 -> double; INT64/UINT64 ->
+integer64 bits (`int64_columns_to_r()` makes a double without bit64);
+TIMESTAMP_S/MS/NS -> POSIXct (UTC); DURATION_DAYS -> difftime days, other
+DURATION_* -> difftime secs; DECIMAL* -> the nearest double; a DICTIONARY32 with
+string keys -> factor (a real dictionary, unlike a cuplyr factor, which is INT32
++ `schema$factor_levels`). Nothing is ever returned as silent NA. C++ never
+raises: it returns NULL for a column R cannot hold (LIST, STRUCT, UINT64 past
+INT64_MAX, DECIMAL past the double range, non-string dictionary keys) and sets
+the `cuplyr_unholdable` / `cuplyr_lossy` attributes on the column list;
+`raise_collect_issues()` (`R/collect.R`) turns them into
+`cuplyr_error_unsupported_gpu_type` / one `cuplyr_warning_collect_precision`
+naming all the columns. Previews read the NULL as a placeholder and never raise.
+`pull()` and `$` collect only the column they return. `schema_type_abbr()`
+labels are `vec_ptype_abbr()` of the collected column. Test hook:
+`gpu_test_make_column()` (`src/test_fixture_column.cpp`).
+
 #### Logical vs. physical type: factor columns (Phase 11 L2)
 
 cuplyr deliberately does **not** adopt cudf's real `DICTIONARY32` column
