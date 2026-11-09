@@ -88,7 +88,7 @@ test_that("F88: cuplyr.fallback = 'error' never fires for a lazy summarise that 
     d |> filter(x > 1) |> group_by(g) |> summarise(m = mean(x * y), s = sum(cumsum(x)))
   })
 
-  got <- f88_capture(f88_lazy2() |> summarise(m = mean(x * y)) |> collect())
+  got <- f88_capture(f88_lazy2() |> summarise(s = sum(i + 1L)) |> collect())
   expect_length(got$cpu, 0L)
   expect_length(got$pb, 1L)
   expect_length(got$warns, 0L)
@@ -96,7 +96,7 @@ test_that("F88: cuplyr.fallback = 'error' never fires for a lazy summarise that 
   expect_identical(pb$verb, "summarise")
   expect_equal(pb$steps, 2)
   expect_true(is.character(pb$reason) && nzchar(pb$reason))
-  expect_match(conditionMessage(pb), "mean(x * y)", fixed = TRUE)
+  expect_match(conditionMessage(pb), "integer sum()", fixed = TRUE)
   expect_match(conditionMessage(pb), "summarise()", fixed = TRUE)
   expect_match(conditionMessage(pb), "2 pending step")
   expect_no_match(conditionMessage(pb), "fell back|CPU evaluation")
@@ -107,10 +107,10 @@ test_that("F88: cuplyr.fallback = 'warn' reports no plan break as a CPU fallback
   withr::local_options(cuplyr.fallback = "warn", cuplyr.plan_break = NULL)
   df <- f88_small()
   pipelines <- list(
-    temp_col = function(t) t |> summarise(m = mean(x * y)),
-    window_arg = function(t) t |> summarise(s = sum(cumsum(x))),
+    temp_col = function(t) t |> summarise(s = sum(i + 1L)),
+    window_arg = function(t) t |> summarise(s = mean(i * sum(i))),
     int_max = function(t) t |> summarise(m = max(i)),
-    grouped_temp = function(t) t |> group_by(g) |> summarise(m = mean(x * y)),
+    grouped_temp = function(t) t |> group_by(g) |> summarise(s = sum(i + 1L)),
     no_dots = function(t) t |> summarise(),
     zero_select = function(t) t |> select(-everything()),
     zero_transmute = function(t) t |> transmute(),
@@ -134,8 +134,8 @@ test_that("F88: every plan-break site warns under cuplyr.plan_break = 'warn', wi
   withr::local_options(cuplyr.fallback = "error", cuplyr.plan_break = "warn")
   df <- f88_small()
   cases <- list(
-    list(f = function(t) t |> summarise(m = mean(x * y)), verb = "summarise", text = "mean(x * y)"),
-    list(f = function(t) t |> summarise(s = sum(cumsum(x))), verb = "summarise", text = "sum(cumsum(x))"),
+    list(f = function(t) t |> summarise(s = sum(i + 1L)), verb = "summarise", text = "integer sum()"),
+    list(f = function(t) t |> summarise(s = mean(i * sum(i))), verb = "summarise", text = "mean(i * sum(i))"),
     list(f = function(t) t |> summarise(m = max(i)), verb = "summarise", text = "max"),
     list(f = function(t) t |> summarise(), verb = "summarise", text = NULL),
     list(f = function(t) t |> select(-everything()), verb = "select", text = NULL),
@@ -419,7 +419,7 @@ test_that("F88: cuplyr.fallback = 'warning' is an alias of 'warn'", {
 test_that("F88: cuplyr.plan_break = 'warning' is an alias of 'warn'", {
   skip_if_no_gpu()
   withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = "warning")
-  got <- f88_capture(f88_lazy2() |> summarise(m = mean(x * y)) |> collect())
+  got <- f88_capture(f88_lazy2() |> summarise(s = sum(i + 1L)) |> collect())
   expect_length(f88_of_class(got$warns, "cuplyr_warning_plan_break"), 1L)
   expect_length(got$warns, 1L)
 })
@@ -456,7 +456,7 @@ test_that("F88: an invalid cuplyr.fallback value warns once and is treated as si
 test_that("F88: an invalid cuplyr.plan_break value ('error' included) warns once, never errors", {
   skip_if_no_gpu()
   withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = "error")
-  got <- f88_capture(f88_lazy2() |> summarise(m = mean(x * y)) |> collect())
+  got <- f88_capture(f88_lazy2() |> summarise(s = sum(i + 1L)) |> collect())
   inv <- f88_of_class(got$warns, "cuplyr_warning_invalid_option")
   expect_length(inv, 1L)
   expect_length(got$warns, 1L)
@@ -465,11 +465,11 @@ test_that("F88: an invalid cuplyr.plan_break value ('error' included) warns once
   expect_length(got$pb, 1L)
   expect_equal(nrow(got$value), 1L)
 
-  got <- f88_capture(f88_lazy2() |> summarise(m = mean(x * y)) |> collect())
+  got <- f88_capture(f88_lazy2() |> summarise(s = sum(i + 1L)) |> collect())
   expect_length(got$warns, 0L)
 
   withr::local_options(cuplyr.plan_break = TRUE)
-  got <- f88_capture(f88_lazy2() |> summarise(m = mean(x * y)) |> collect())
+  got <- f88_capture(f88_lazy2() |> summarise(s = sum(i + 1L)) |> collect())
   expect_length(f88_of_class(got$warns, "cuplyr_warning_invalid_option"), 1L)
   expect_length(got$warns, 1L)
 })
@@ -478,7 +478,7 @@ test_that("F88: the default stays silent for fallbacks and plan breaks, but both
   skip_if_no_gpu()
   f88_quiet_options()
   got <- f88_capture({
-    a <- f88_lazy2() |> summarise(m = mean(x * y)) |> collect()
+    a <- f88_lazy2() |> summarise(s = sum(i + 1L)) |> collect()
     b <- tbl_gpu(f88_small()) |> mutate(w = qnorm(x / 10)) |> collect()
     list(a, b)
   })

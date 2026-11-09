@@ -386,19 +386,29 @@ test_that("lazy summarise() with sum() of a comparison expression matches dplyr 
   expect_same_as_dplyr_lazy(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
 })
 
-test_that("lazy summarise() temp-column path materializes pending ops and notifies a plan break", {
+test_that("lazy summarise() temp-column path stays in the plan; an integer sum() breaks it", {
   skip_if_no_gpu()
 
   # F88: the plan runs early on the GPU: a plan break, not a CPU fallback
   withr::local_options(cuplyr.fallback = "warn", cuplyr.plan_break = "warn")
 
-  gpu_df <- tbl_gpu(mtcars, lazy = TRUE) |>
+  gpu_df <- tbl_gpu(transform(mtcars, ic = as.integer(carb)), lazy = TRUE) |>
     dplyr::filter(mpg > 0)
 
+  # F101: the temp column is a plan mutate: nothing computes, nothing is reported
+  expect_no_warning(
+    result <- gpu_df |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(m = mean(carb * 2)) |>
+      collect()
+  )
+  expect_equal(nrow(result), 3)
+
+  # an integer sum() has a data-dependent result type: it runs at the verb
   expect_warning(
     result <- gpu_df |>
       dplyr::group_by(cyl) |>
-      dplyr::summarise(high_carb = sum(carb > 3)) |>
+      dplyr::summarise(high_carb = sum(ic + 1L)) |>
       collect(),
     class = "cuplyr_warning_plan_break"
   )

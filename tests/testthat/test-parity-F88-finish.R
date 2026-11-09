@@ -217,10 +217,16 @@ test_that("F88 N27: a plan break inside count()/tally() reports that verb and th
   skip_if_no_gpu()
   withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = NULL)
   df <- f88f_df()
+  df$i <- c(1L, 2L, 3L, 4L, 5L, 6L)
   pre <- function(t) filter(t, x > 1) |> mutate(w = x + 1)
+  # (F101) a double wt expression stays in the plan: no break at all
+  got <- f88f_capture(count(pre(tbl_gpu(df, lazy = TRUE)), g, wt = x * 2) |> collect())
+  expect_equal(f88f_flat(got$value), f88f_flat(count(pre(df), g, wt = x * 2)))
+  expect_length(got$pb, 0L)
+  # an integer wt sums at the verb (the result type depends on the data)
   cases <- list(
-    list(verb = "count", f = function(t) count(t, g, wt = x * 2)),
-    list(verb = "tally", f = function(t) group_by(t, g) |> tally(wt = x * 2))
+    list(verb = "count", f = function(t) count(t, g, wt = i * 2L)),
+    list(verb = "tally", f = function(t) group_by(t, g) |> tally(wt = i * 2L))
   )
   for (cs in cases) {
     got <- f88f_capture(cs$f(pre(tbl_gpu(df, lazy = TRUE))) |> collect())
@@ -229,7 +235,7 @@ test_that("F88 N27: a plan break inside count()/tally() reports that verb and th
     expect_length(got$pb, 1L)
     p <- got$pb[[1L]]
     expect_identical(p$verb, cs$verb)
-    expect_identical(p$expr, "x * 2")
+    expect_identical(p$expr, "i * 2L")
     expect_true(is.numeric(p$steps) && p$steps >= 1)
   }
 })
@@ -321,11 +327,12 @@ test_that("F88 N37: a plan break after a count() call is not relabelled as count
   skip_if_no_gpu()
   withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = NULL)
   df <- f88f_df()
+  df$i <- c(1L, 2L, 3L, 4L, 5L, 6L)
   pre <- function(t) filter(t, x > 1) |> mutate(w = x + 1)
-  got1 <- f88f_capture(count(pre(tbl_gpu(df, lazy = TRUE)), g, wt = x * 2) |> collect())
+  got1 <- f88f_capture(count(pre(tbl_gpu(df, lazy = TRUE)), g, wt = i * 2L) |> collect())
   expect_identical(got1$pb[[1L]]$verb, "count")
-  got2 <- f88f_capture(pre(tbl_gpu(df, lazy = TRUE)) |> summarise(m = mean(x * y)) |> collect())
+  got2 <- f88f_capture(pre(tbl_gpu(df, lazy = TRUE)) |> summarise(s = sum(i + 1L)) |> collect())
   expect_length(got2$pb, 1L)
   expect_identical(got2$pb[[1L]]$verb, "summarise")
-  expect_identical(got2$pb[[1L]]$expr, "mean(x * y)")
+  expect_identical(got2$pb[[1L]]$expr, "sum(i + 1L)")
 })

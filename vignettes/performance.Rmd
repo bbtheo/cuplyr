@@ -340,7 +340,7 @@ running the filter below the mutate, and dropping `b` and `c`.
   Set `options(cuplyr.fallback = "warn")` to be told when it happens, or
   `"error"` to forbid it. The message names the verb, the expression, the
   reason and how much data was copied. A lazy plan that has to run early (a
-  `summarise()` of `mean(x * y)`, say) stays on the GPU and is a different
+  `summarise()` of an integer `sum(i + j)`, say) stays on the GPU and is a different
   thing, a plan break: `options(cuplyr.plan_break = "warn")` reports it, and
   it never errors. `?"cuplyr-fallback"` has the details.
 

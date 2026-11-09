@@ -1,5 +1,12 @@
 # cuplyr (development version)
 
+## A lazy summarise() with an expression argument stays in the plan (F101)
+
+* A lazy `summarise()` with an expression argument (`mean(x * y)`, or a window
+  call such as `sum(lag(x))`) now stays in the plan: filters and pruning still
+  apply and no plan break is reported. An integer overflow inside such an
+  expression now warns at `collect()`, like a `mutate()`.
+
 ## Dates and times the GPU can't hold now warn (F81)
 
 * Uploading `Inf`/`-Inf` in a `Date` or `POSIXct` column used to give `NA`

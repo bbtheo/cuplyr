@@ -158,9 +158,9 @@ test_that("summarise(.by) notices count the user's steps and name the user's col
   expect_match(breaks[[1]]$reason, "an integer min()/max() (result type depends on the data): mx", fixed = TRUE)
   expect_no_match(breaks[[1]]$reason, "summarise_first", fixed = TRUE)
   expect_no_match(breaks[[1]]$reason, ", m", fixed = TRUE)
+  # (F101) a double expression is a plan mutate: nothing breaks
   breaks <- f80r3_breaks(summarise(pending, m = mean(v * 2), .by = g))
-  expect_length(breaks, 1L)
-  expect_equal(breaks[[1]]$steps, 1L)
+  expect_length(breaks, 0L)
   # results are dplyr's
   expect_equal(f80r3_plain(summarise(pending, s = sum(i), mx = max(i), .by = g)),
                f80r3_plain(summarise(d, s = sum(i), mx = max(i), .by = g)))

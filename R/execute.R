@@ -996,7 +996,8 @@ resolve_by <- function(.data, by_quo, arg_name = ".by", call = rlang::caller_env
 # attempt succeeds and dropped when it overflows, since the rerun raises its
 # own (`mutate(s = sum(x + 1L))` would otherwise warn twice), except a notice
 # about an invalid option, which is only said once. `class` names the
-# condition to catch (summarise() uses its own, see resolve_agg_window_arg()).
+# condition to catch (summarise() uses its own, see
+# resolve_deferred_agg_windows() and resolve_agg_window_arg()).
 # @keywords internal
 retry_on_sum_overflow <- function(attempt, on_overflow, class = "cuplyr_error_sum_overflow") {
   held <- list()
@@ -1080,8 +1081,8 @@ retry_on_sum_overflow <- function(attempt, on_overflow, class = "cuplyr_error_su
 #' @section Plan breaks:
 #' A lazy table (the default, `tbl_gpu(df)`) collects its verbs into a plan and
 #' runs it when you `compute()` or `collect()`. A few steps need the result of
-#' the pending plan before it is asked for (a `summarise()` of an expression
-#' such as `mean(x * y)`, an integer `max()`, a verb that leaves no column).
+#' the pending plan before it is asked for (a `summarise()` of an integer
+#' `sum(i + j)` or `max()`, a verb that leaves no column).
 #' cuplyr then computes the plan early. This stays on the GPU and nothing is
 #' collected, but the plan is not fused across that step. The condition has
 #' class `cuplyr_plan_break` and the fields `verb`, `expr`, `reason` and

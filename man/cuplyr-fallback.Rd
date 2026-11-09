@@ -43,8 +43,8 @@ i Collected 1,000 rows x 3 cols (about 24.4 kB) to run on the CPU.
 
 A lazy table (the default, \code{tbl_gpu(df)}) collects its verbs into a plan and
 runs it when you \code{compute()} or \code{collect()}. A few steps need the result of
-the pending plan before it is asked for (a \code{summarise()} of an expression
-such as \code{mean(x * y)}, an integer \code{max()}, a verb that leaves no column).
+the pending plan before it is asked for (a \code{summarise()} of an integer
+\code{sum(i + j)} or \code{max()}, a verb that leaves no column).
 cuplyr then computes the plan early. This stays on the GPU and nothing is
 collected, but the plan is not fused across that step. The condition has
 class \code{cuplyr_plan_break} and the fields \code{verb}, \code{expr}, \code{reason} and

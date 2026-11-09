@@ -335,7 +335,8 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
 }
 
 # Internal: the notice for a summarise step that computes the pending lazy ops
-# early (a temp column, a window argument, an integer min()/max()). It is
+# early (a window argument holding an integer sum(), an integer min()/max() or
+# sum()). A temp column is no reason: it is a plan mutate (F101). It is
 # reported as a plan break (`cuplyr.plan_break`, F88: it runs on the GPU, nothing
 # is collected), except inside the wide step of a native reframe()
 # (`with_reframe_wide()`), whose caller never wanted laziness there: the wide
@@ -531,9 +532,12 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
     }, reason = reason)
   }
   # F42: an integer window sum() in an aggregation's argument that overflows
-  # in some group reruns the whole call on the CPU (resolve_agg_window_arg()),
-  # in both modes, as the window stages run at summarise(). The GPU attempt's
-  # warnings are dropped then: dplyr raises its own.
+  # in some group reruns the whole call on the CPU, as the window stages run
+  # at summarise(): resolve_deferred_agg_windows() raises it on a lazy table,
+  # resolve_agg_window_arg() on an eager one (a lazy call that may add empty
+  # groups, see summarise_wants_empty_groups(), is computed first and takes the
+  # eager route), each as the condition `cuplyr_summarise_rerun`. The GPU
+  # attempt's warnings are dropped then: dplyr raises its own.
   gpu_or_cpu <- function(attempt) {
     retry_on_sum_overflow(attempt, function() cpu(), class = "cuplyr_summarise_rerun")
   }
@@ -999,7 +1003,7 @@ inform_regrouped_output <- function(old_groups, new_groups) {
 # decompose_agg_call()/ir_parse_quo() calls, same
 # ir_has_window()-before-ir_is_const() ordering), rather than reusing that
 # function directly, since preprocess_agg_expressions() has real
-# side-effects (create_temp_column() mutates a GPU pointer, compute()
+# side-effects (a temp column pushes a node or mutates a GPU pointer, compute()
 # materializes a lazy table) this pre-pass must never trigger -- this is a
 # pure, repeatable dry run over quosures/schema only.
 #
@@ -1388,6 +1392,8 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   # takes the general steps below.
   aggregations <- simple_aggs %||% summarise_simple_aggregations(dots, current_schema(.data))
   working_data <- .data
+  bool_temps <- character()
+  user_dots <- NULL  # the dots as written, for a verb-time notice's expression
   if (is.null(aggregations)) {
     # Phase 6, task 6.1 (Fix A): extract and strip any `na.rm = <literal>`
     # named argument BEFORE temp-column preprocessing -- this must happen
@@ -1413,15 +1419,19 @@ summarise_core <- function(.data, dots, retained_groups = character(),
     # matching never has to understand that control), reducing both to the
     # same single-argument `fn(x)` shape every other aggregation produces.
     agg_extra <- vapply(parts, `[[`, numeric(1), "extra")
+    user_dots <- dots
     dots <- lapply(parts, `[[`, "quo")
 
     # Pre-process: create temporary columns for expressions inside agg functions
-    # (e.g. sum(carb == 4)). Per D4, if a temp column is needed and .data is
-    # lazy with pending ops, this materializes (compute()) before creating the
-    # temp column and notifies via cuplyr_plan_break_notify().
+    # (e.g. sum(carb == 4)). On a lazy table the call's temps go in one plan
+    # mutate (F101), so nothing computes here, except that a window argument
+    # holding an integer sum() makes the call compute its pending ops and every
+    # window stage.
     preprocess_result <- preprocess_agg_expressions(.data, dots, ir_cache, notice_data)
     working_data <- preprocess_result$data
     processed_dots <- preprocess_result$dots
+    bool_temps <- preprocess_result$bool_temps
+    notice_data <- preprocess_result$notice_data
 
     # Parse the aggregation expressions (now with simple column refs), emitting
     # aggregation structs that carry the cudf-accepted function name (fixes
@@ -1446,11 +1456,13 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   # F07: an INT32 min()/max() turns the WHOLE result column into FLOAT64
   # (Inf/-Inf) iff some group is empty -- a property of the data, which a
   # schema inferred before running can't know. Such a summarise runs right
-  # away (a lazy table first materializes its pending ops, like the
-  # temp-column case above) and the schema is corrected from the real result.
+  # away (a lazy table first materializes its pending ops) and the schema is
+  # corrected from the real result.
   # F80: so does an INT32 sum() on a lazy table: it is a double when a group's
   # sum leaves R's integer range, which a plan with a fixed schema can't say.
-  # (BOOL8 sums stay lazy: they overflow only past 2^31 TRUE rows in a group.)
+  # (BOOL8 sums stay lazy: they overflow only past 2^31 TRUE rows in a group.
+  # So does a sum() of a temp column built from a logical expression, F101:
+  # its INT32 is a cast of BOOL8.)
   eager <- !identical(.subset2(working_data, "exec_mode"), "lazy")
   # (one loop over the aggregations, not three vapply() closures)
   min_max_now <- sum_now <- logical(length(aggregations))
@@ -1458,7 +1470,8 @@ summarise_core <- function(.data, dots, retained_groups = character(),
     agg <- .subset2(aggregations, i)
     if (identical(unname(.subset2(agg, "input_type")), "INT32")) {
       min_max_now[[i]] <- isTRUE(.subset2(agg, "identity"))
-      sum_now[[i]] <- !eager && identical(.subset2(agg, "fn"), "sum")
+      sum_now[[i]] <- !eager && identical(.subset2(agg, "fn"), "sum") &&
+        !(.subset2(agg, "input_col") %in% bool_temps)
     }
   }
   if (any(min_max_now | sum_now)) {
@@ -1468,8 +1481,9 @@ summarise_core <- function(.data, dots, retained_groups = character(),
       "an integer ", paste(c(if (any(min_max_now)) "min()/max()", if (any(sum_now)) "sum()"), collapse = " or "),
       " (result type depends on the data): ", paste(set_diff(named, internal_cols), collapse = ", ")
     )
+    expr <- summarise_notice_expr(dots, user_dots, which(min_max_now | sum_now))
     return(summarise_run_now(working_data, aggregations, retained_groups, sort_groups, reason,
-                             notice_data = notice_data))
+                             notice_data = notice_data, expr = expr))
   }
 
   # F34: an integer sum() that overflows is a double in dplyr. An eager
@@ -1483,17 +1497,33 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   if (eager) reconcile_summarise_types(result) else result
 }
 
+# Internal: the text a verb-time notice shows: the first of the `forcing` dots
+# whose argument is an expression (`fn(<expression>)`), as the user wrote it,
+# flags included; NA when `user_dots` is NULL or none is. Called only when a
+# notice can fire, so a call that never notifies deparses nothing.
+# @keywords internal
+summarise_notice_expr <- function(dots, user_dots, forcing) {
+  if (is.null(user_dots)) return(NA_character_)
+  for (i in forcing) {
+    e <- rlang::quo_get_expr(dots[[i]])
+    if (is.call(e) && length(e) >= 2L && !is.symbol(e[[2L]])) {
+      return(notice_expr_text(user_dots[[i]]))
+    }
+  }
+  NA_character_
+}
+
 # Internal: run a summarise node immediately, then reconcile the schema with
 # the result's real column types (F07, see summarise_core()). Returns a table
 # in the input's exec_mode with no pending ops.
 # @keywords internal
 summarise_run_now <- function(.data, aggregations, retained_groups, sort_groups = TRUE, reason,
-                              notice_data = .data) {
+                              notice_data = .data, expr = NA_character_) {
   was_lazy <- identical(.subset2(.data, "exec_mode"), "lazy")
 
   # (only the user's steps: none of summarise()'s own, see summarise_core())
   if (was_lazy && has_pending_ops(.data) && has_pending_ops(notice_data)) {
-    notify_materialization("summarise", reason, data = notice_data)
+    notify_materialization("summarise", reason, expr = expr, data = notice_data)
   }
   base <- compute(.data)
   base$exec_mode <- "eager"
@@ -1938,23 +1968,40 @@ agg_dot_parts <- function(ir_cache, i, dot, schema) {
 # sub-expression (T7 widens this from the previous single-operator-only
 # regex whitelist to "ir_parse_quo() succeeds").
 #
-# Per D4: if a dot needs a temp column and `.data` is lazy with pending
-# operations, this materializes (`compute()`) once, up front, before
-# building any temp column, and notifies via `cuplyr_plan_break_notify()` --
-# `create_temp_column()` always operates on a materialized GPU pointer
-# rather than reaching into an in-progress AST.
+# On a lazy table (F101) the loop only classifies: every window argument is
+# planned together and every temp column of the call goes in one plan mutate
+# below the summarise node (`push_agg_temps()`), so nothing computes here, the
+# optimizer sees the whole plan, and the plan's depth follows the windows'
+# nesting, not the number of dots (a plan walker recurses once per node). The
+# one exception is a window argument holding an integer sum(): the call computes
+# (and notifies) first, because an overflow must raise here, where the call
+# reruns on the CPU (F42). See resolve_deferred_agg_windows(). An eager table
+# builds each dot's temp column as the loop reaches it.
 #
 # @param .data A tbl_gpu object
 # @param dots Quosures from summarise()
 # @param notice_data The table a notice counts the pending steps of (see
 #   summarise_core())
-# @return List with modified data and simplified dots
+# @return List with modified data, simplified dots, `bool_temps`: the names
+#   of the temp columns built from a logical expression (declared INT32), whose
+#   sum() cannot change type (summarise_core()), and `notice_data`: the table
+#   later notices count the pending steps of (the input after a compute here,
+#   which ran the user's steps)
 # @keywords internal
 preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL, notice_data = .data) {
   working_data <- .data
   new_dots <- vector("list", length(dots))
   names(new_dots) <- names(dots)
   temp_cols <- list()
+  bool_temps <- character()
+  # (lazy only) what the dots queue: the plain temps, the window arguments, and
+  # for each dot sharing a window argument its index there and its reducer
+  lazy <- identical(.subset2(.data, "exec_mode"), "lazy")
+  plain_temps <- list()
+  reserved <- character()
+  window_args <- list()
+  dot_window <- integer(length(dots))
+  dot_fn <- character(length(dots))
 
   for (i in seq_along(dots)) {
     quo <- dots[[i]]
@@ -2014,17 +2061,22 @@ preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL, notice_data
     # default identical() calls 0 and -0 equal, and `x / 0` and `x / -0` are
     # different columns (F67). A window argument that resolved to a bare column
     # (`lag(b)`) is the window's own output whatever `keep_bool` is, so any
-    # later dot shares it.
+    # later dot shares it. (On a lazy table a window argument's column isn't
+    # known yet: a sharing dot records which queued argument it follows. Whether
+    # it is bare isn't known either, so two `keep_bool`s queue two arguments,
+    # and the plan's CSE gives both the one window column when it is bare.)
     if (!is.null(ir)) {
       shared <- Find(function(t) {
         (isTRUE(t$bare) || identical(t$keep_bool, keep_bool)) &&
           identical(t$ir, ir, num.eq = FALSE)
       }, temp_cols)
       if (!is.null(shared)) {
-        new_dots[[i]] <- rlang::new_quosure(
-          as.call(list(as.name(decomposed$fn_name), as.name(shared$name))),
-          rlang::base_env()
-        )
+        if (!is.null(shared$window)) {
+          dot_window[[i]] <- shared$window
+          dot_fn[[i]] <- decomposed$fn_name
+        } else {
+          new_dots[[i]] <- agg_temp_dot(decomposed$fn_name, shared$name)
+        }
         next
       }
     }
@@ -2036,24 +2088,25 @@ preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL, notice_data
     # (wrongly) treated as a constant subtree. See resolve_agg_window_arg()'s
     # own docs for the full derivation and scope boundary.
     if (!is.null(ir) && ir_has_window(ir)) {
-      if (has_pending_ops(working_data)) {
-        if (has_pending_ops(notice_data)) {
-          notify_materialization("summarise", "a window call inside an aggregation needs its input computed",
-                                 notice_expr_text(quo), data = notice_data)
-        }
-        working_data <- compute(working_data)
+      if (lazy) {
+        window_args[[length(window_args) + 1L]] <- list(i = i, ir = ir, keep_bool = keep_bool)
+        temp_cols[[length(temp_cols) + 1L]] <- list(ir = ir, keep_bool = keep_bool,
+                                                    window = length(window_args))
+        dot_window[[i]] <- length(window_args)
+        dot_fn[[i]] <- decomposed$fn_name
+        next
       }
 
-      resolved <- resolve_agg_window_arg(working_data, ir, decomposed$fn_name, i)
+      win_plan <- plan_window_stages(stats::setNames(list(ir), "..agg_arg.."),
+                                     current_schema(working_data), working_data$groups)
+      resolved <- resolve_agg_window_arg(working_data, win_plan, decomposed$fn_name, i)
       working_data <- resolved$data
+      if (isTRUE(resolved$bool_origin)) bool_temps <- c(bool_temps, resolved$col_name)
       temp_cols[[length(temp_cols) + 1L]] <- list(ir = ir, keep_bool = keep_bool,
                                                   name = resolved$col_name,
                                                   bare = isTRUE(resolved$bare))
 
-      new_dots[[i]] <- rlang::new_quosure(
-        as.call(list(as.name(decomposed$fn_name), as.name(resolved$col_name))),
-        rlang::base_env()
-      )
+      new_dots[[i]] <- agg_temp_dot(decomposed$fn_name, resolved$col_name)
       next
     }
 
@@ -2067,30 +2120,149 @@ preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL, notice_data
       next
     }
 
-    # Materialize before building the temp column if lazy ops are pending.
-    if (has_pending_ops(working_data)) {
-      if (has_pending_ops(notice_data)) {
-        notify_materialization("summarise", "an aggregation of an expression needs a temporary column computed first",
-                               notice_expr_text(quo), data = notice_data)
-      }
-      working_data <- compute(working_data)
-    }
-
     # Create a temporary column name (index-based, so it stays unique even
-    # though not every dot ends up needing one).
-    temp_col_name <- paste0(".temp_agg_", i)
+    # though not every dot ends up needing one; unique against the table, so a
+    # plan mutate never overwrites a user column of that name, and against the
+    # names already queued: `.temp_agg_1` can become `.temp_agg_11`).
+    if (lazy) {
+      temp_col_name <- unique_temp_name(paste0(".temp_agg_", i),
+                                        c(current_schema(working_data)$names, reserved))
+      reserved <- c(reserved, temp_col_name)
+      plain_temps[[length(plain_temps) + 1L]] <- list(name = temp_col_name, ir = ir,
+                                                      keep_bool = keep_bool)
+    } else {
+      temp_col_name <- unique_temp_name(paste0(".temp_agg_", i), current_schema(working_data)$names)
+      if (temp_is_bool_origin(ir, current_schema(working_data), keep_bool)) {
+        bool_temps <- c(bool_temps, temp_col_name)
+      }
+      working_data <- create_temp_column(working_data, temp_col_name, ir, keep_bool = keep_bool)
+    }
     temp_cols[[length(temp_cols) + 1L]] <- list(ir = ir, keep_bool = keep_bool, name = temp_col_name)
 
-    working_data <- create_temp_column(working_data, temp_col_name, ir, keep_bool = keep_bool)
-
     # Create a new quosure with the temp column name, e.g. `sum(.temp_agg_3)`.
-    new_dots[[i]] <- rlang::new_quosure(
-      as.call(list(as.name(decomposed$fn_name), as.name(temp_col_name))),
-      rlang::base_env()
-    )
+    new_dots[[i]] <- agg_temp_dot(decomposed$fn_name, temp_col_name)
   }
 
-  list(data = working_data, dots = new_dots)
+  if (lazy) {
+    if (length(window_args) > 0L) {
+      resolved <- resolve_deferred_agg_windows(working_data, window_args, dots, notice_data, reserved)
+      working_data <- resolved$data
+      notice_data <- resolved$notice_data
+      plain_temps <- c(plain_temps, resolved$temps)
+      for (i in which(dot_window > 0L)) {
+        new_dots[[i]] <- agg_temp_dot(dot_fn[[i]], resolved$cols[[dot_window[[i]]]])
+      }
+    }
+    pushed <- push_agg_temps(working_data, plain_temps)
+    working_data <- pushed$data
+    bool_temps <- pushed$bool_temps
+  }
+
+  list(data = working_data, dots = new_dots, bool_temps = bool_temps, notice_data = notice_data)
+}
+
+# Internal: the dot `fn(col)` an aggregation becomes once its argument is a column
+# @keywords internal
+agg_temp_dot <- function(fn_name, col_name) {
+  rlang::new_quosure(as.call(list(as.name(fn_name), as.name(col_name))), rlang::base_env())
+}
+
+# Internal (F101): plan every window argument a lazy summarise() queued in one
+# plan_window_stages() call, so the same stage holds the specs of every dot and
+# the stage count follows the nesting depth. The stages stay in the plan, unless
+# a spec is an integer window sum(): then the pending ops compute first (one
+# notice, naming the first dot that holds one) and the stages run here, so an
+# overflow reruns the call on the CPU where it is caught (F42).
+#
+# @param working_data A lazy tbl_gpu
+# @param window_args Queued arguments, `list(i, ir, keep_bool)` in dot order
+# @param dots The dots, for the notice's expression
+# @param notice_data The table a notice counts the pending steps of
+# @param reserved Temp names already taken by the call's plain temps
+# @return `list(data, notice_data, cols, temps)`: `cols` is each argument's
+#   column; `temps` is `list(name, ir, keep_bool)` for the arguments that are not
+#   a bare window output and still need a temp column
+# @keywords internal
+resolve_deferred_agg_windows <- function(working_data, window_args, dots, notice_data, reserved) {
+  schema <- current_schema(working_data)
+  groups <- .subset2(working_data, "groups")
+  # (not a name a window call could read, which would start a new batch)
+  arg_names <- vapply(window_args, function(w) {
+    unique_temp_name(paste0("..agg_arg..", w$i), schema$names)
+  }, character(1))
+  plan <- plan_window_stages(stats::setNames(lapply(window_args, `[[`, "ir"), arg_names),
+                             schema, groups)
+  all_specs <- unlist(lapply(plan$stages, `[[`, "specs"), recursive = FALSE)
+  check_agg_window_specs(all_specs)
+
+  int_sum <- any(vapply(all_specs, window_spec_int_sum, logical(1)))
+  if (int_sum && has_pending_ops(working_data)) {
+    if (has_pending_ops(notice_data)) {
+      first <- first_agg_int_sum_dot(window_args, schema, groups)
+      notify_materialization("summarise", "a window call inside an aggregation needs its input computed",
+                             notice_expr_text(dots[[first]]), data = notice_data)
+    }
+    working_data <- compute(working_data)
+    # (the user's steps have run: a later site counts none of them)
+    notice_data <- working_data
+  }
+  working_data <- agg_window_rerun_on_overflow(
+    push_agg_window_stages(working_data, plan$stages, run_now = int_sum)
+  )
+
+  after <- current_schema(working_data)$names
+  cols <- character(length(window_args))
+  temps <- list()
+  for (k in seq_along(window_args)) {
+    post_ir <- plan$post[[k]]
+    if (identical(post_ir$kind, "col")) {
+      cols[[k]] <- post_ir$name
+      next
+    }
+    cols[[k]] <- unique_temp_name(paste0(".temp_agg_win_", window_args[[k]]$i), c(after, reserved))
+    reserved <- c(reserved, cols[[k]])
+    temps[[length(temps) + 1L]] <- list(name = cols[[k]], ir = post_ir,
+                                        keep_bool = window_args[[k]]$keep_bool)
+  }
+  list(data = working_data, notice_data = notice_data, cols = cols, temps = temps)
+}
+
+# Internal: the first queued window argument that holds an integer window sum()
+# on its own (the joint plan's CSE can't say which dot a spec came from). Only
+# reached when the call is about to compute anyway.
+# @keywords internal
+first_agg_int_sum_dot <- function(window_args, schema, groups) {
+  for (w in window_args) {
+    plan <- plan_window_stages(list(..agg_arg.. = w$ir), schema, groups)
+    specs <- unlist(lapply(plan$stages, `[[`, "specs"), recursive = FALSE)
+    if (any(vapply(specs, window_spec_int_sum, logical(1)))) {
+      return(w$i)
+    }
+  }
+  window_args[[1L]]$i
+}
+
+# Internal (F101): push the single mutate holding every temp column of a lazy
+# summarise(), each `list(name, ir, keep_bool)`, typed against the table after the
+# window stages. Declared INT32 under create_temp_column()'s rule; the temps read
+# only the input and the window columns, never each other. Nothing to add: no node.
+# @return `list(data, bool_temps)`, `bool_temps` as preprocess_agg_expressions()
+# @keywords internal
+push_agg_temps <- function(working_data, temps) {
+  if (length(temps) == 0L) {
+    return(list(data = working_data, bool_temps = character()))
+  }
+  schema <- current_schema(working_data)
+  bool_origin <- logical(length(temps))
+  exprs <- vector("list", length(temps))
+  for (k in seq_along(temps)) {
+    temp <- temps[[k]]
+    exprs[[k]] <- make_mutate_expr(temp$name, temp$ir, schema)
+    bool_origin[[k]] <- temp_is_bool_origin(temp$ir, schema, temp$keep_bool)
+    if (bool_origin[[k]]) exprs[[k]]$output_type <- "INT32"
+  }
+  list(data = push_op(working_data, ast_mutate(input_node(working_data), exprs)),
+       bool_temps = vapply(temps[bool_origin], `[[`, character(1), "name"))
 }
 
 # Internal: windows-inside-summarise (Phase 6, task 4) -- resolve an
@@ -2136,40 +2308,44 @@ preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL, notice_data
 # back to the way `mutate_window_fallback()` can, so this is a hard error
 # rather than a silent re-route.
 #
-# @param working_data A tbl_gpu (already materialized -- no pending lazy
-#   ops; the caller guarantees this, same precondition as
-#   `create_temp_column()`)
-# @param ir A parsed (unbound) IR node for the aggregation's argument,
-#   confirmed by the caller to contain a window call (`ir_has_window(ir)`)
+# Eager tables only: a lazy table queues its window arguments and takes
+# resolve_deferred_agg_windows() (F101).
+#
+# @param working_data An eager tbl_gpu
+# @param plan `plan_window_stages()` of the aggregation's argument (named
+#   `..agg_arg..`), planned by the caller against `working_data`'s schema
 # @param fn_name Character scalar, the aggregation function's OWN name
 #   (e.g. `"sum"`, `"last"`) -- used only to decide `keep_bool` (see
 #   `agg_keeps_bool()`: any/all/first/last/nth), if the post-decomposition
 #   expression still needs its own temp-column computation
 # @param dot_index Integer, this dot's 1-based position in the summarise()
-#   call -- used only for a readable, collision-free temp column name if a
-#   `create_temp_column()` step ends up needed
+#   call -- used only for a readable temp column name if a temp column step
+#   ends up needed
 # @return `list(data = <tbl_gpu, with every window stage already pushed>,
 #   col_name = <character scalar, a real column name in the returned
 #   data's schema, safe to reference directly as the aggregation's own
 #   argument>, bare = <TRUE when col_name is the window's own output column,
 #   whose type does not depend on `fn_name`>)`
 # @keywords internal
-resolve_agg_window_arg <- function(working_data, ir, fn_name, dot_index) {
-  exprs <- stats::setNames(list(ir), "..agg_arg..")
-  schema <- current_schema(working_data)
-
+resolve_agg_window_arg <- function(working_data, plan, fn_name, dot_index) {
   # F42: an integer window sum() inside the aggregation's argument is INT32, so
   # arithmetic on it is checked like dplyr's (`x * sum(x)`, also under a
   # row-level window: `last(cumsum(x * sum(x)))`). Such a sum can't become a
   # double mid-plan (later stages and the temp column below are typed from the
   # INT32), and dplyr makes only the overflowing groups' sums doubles: the
   # others stay integers, and arithmetic on them still overflows to NA. So an
-  # overflow (raised here: resolve_agg_window_plan() computes the stages, and
-  # the caller has already computed any earlier pending ops) asks
-  # summarise.tbl_gpu() to rerun the whole call on the CPU.
-  plan <- plan_window_stages(exprs, schema, working_data$groups)
+  # overflow asks summarise.tbl_gpu() to rerun the whole call on the CPU.
+  agg_window_rerun_on_overflow(
+    resolve_agg_window_plan(working_data, plan, fn_name, dot_index)
+  )
+}
+
+# Internal: an integer window sum()'s overflow during `expr` reruns the summarise
+# on the CPU (F42)
+# @keywords internal
+agg_window_rerun_on_overflow <- function(expr) {
   tryCatch(
-    resolve_agg_window_plan(working_data, plan, fn_name, dot_index),
+    expr,
     cuplyr_error_sum_overflow = function(e) {
       rlang::abort("An integer window sum() overflowed inside summarise().",
                    class = "cuplyr_summarise_rerun")
@@ -2177,10 +2353,9 @@ resolve_agg_window_arg <- function(working_data, ir, fn_name, dot_index) {
   )
 }
 
-# Internal: run a planned window decomposition for resolve_agg_window_arg()
+# Internal: reject a window spec summarise() can't lower, before any stage is pushed
 # @keywords internal
-resolve_agg_window_plan <- function(working_data, plan, fn_name, dot_index) {
-  all_specs <- unlist(lapply(plan$stages, `[[`, "specs"), recursive = FALSE)
+check_agg_window_specs <- function(all_specs) {
   unlowerable <- Filter(Negate(window_spec_lowerable), all_specs)
   if (length(unlowerable) > 0) {
     stop(
@@ -2189,8 +2364,14 @@ resolve_agg_window_plan <- function(working_data, plan, fn_name, dot_index) {
       call. = FALSE
     )
   }
+  invisible(TRUE)
+}
 
-  for (stage in plan$stages) {
+# Internal: push a window plan's stages. `run_now` also executes them (silently:
+# the caller has reported its own materialization), for an integer window sum().
+# @keywords internal
+push_agg_window_stages <- function(working_data, stages, run_now = FALSE) {
+  for (stage in stages) {
     if (length(stage$pre) > 0) {
       working_data <- push_op(working_data, ast_mutate(input_node(working_data), stage$pre))
     }
@@ -2198,15 +2379,18 @@ resolve_agg_window_plan <- function(working_data, plan, fn_name, dot_index) {
       working_data, ast_window(input_node(working_data), stage$specs, working_data$groups)
     )
   }
-
-  # create_temp_column() reads `$ptr`, which is stale while the window stages
-  # above are still pending lazy ops: run them (silently -- the caller has
-  # already reported its own materialization). Also for a bare column, so an
-  # integer sum overflow is raised here, where resolve_agg_window_arg() can
-  # replan, and not at collect().
-  if (has_pending_ops(working_data)) {
+  if (run_now && has_pending_ops(working_data)) {
     working_data <- compute(working_data)
   }
+  working_data
+}
+
+# Internal: run a planned window decomposition for resolve_agg_window_arg()
+# @keywords internal
+resolve_agg_window_plan <- function(working_data, plan, fn_name, dot_index) {
+  all_specs <- unlist(lapply(plan$stages, `[[`, "specs"), recursive = FALSE)
+  check_agg_window_specs(all_specs)
+  working_data <- push_agg_window_stages(working_data, plan$stages)
 
   post_ir <- plan$post[["..agg_arg.."]]
 
@@ -2214,10 +2398,19 @@ resolve_agg_window_plan <- function(working_data, plan, fn_name, dot_index) {
     return(list(data = working_data, col_name = post_ir$name, bare = TRUE))
   }
 
-  temp_col_name <- paste0(".temp_agg_win_", dot_index)
+  temp_col_name <- unique_temp_name(paste0(".temp_agg_win_", dot_index),
+                                    current_schema(working_data)$names)
   keep_bool <- agg_keeps_bool(fn_name)
+  bool_origin <- temp_is_bool_origin(post_ir, current_schema(working_data), keep_bool)
   working_data <- create_temp_column(working_data, temp_col_name, post_ir, keep_bool = keep_bool)
-  list(data = working_data, col_name = temp_col_name, bare = FALSE)
+  list(data = working_data, col_name = temp_col_name, bare = FALSE, bool_origin = bool_origin)
+}
+
+# Internal: is this temp column built from a logical expression that is
+# declared INT32 (the cast create_temp_column() documents)?
+# @keywords internal
+temp_is_bool_origin <- function(ir, schema, keep_bool) {
+  !keep_bool && identical(ir_infer_type(ir, schema), "BOOL8")
 }
 
 # Internal: does this aggregation keep a BOOL8 argument BOOL8?
@@ -2239,7 +2432,7 @@ agg_keeps_bool <- function(fn_name) {
 # the same evaluator entry point `mutate()` uses.
 #
 # @param .data A tbl_gpu object (already materialized -- no pending lazy
-#   ops; `preprocess_agg_expressions()` guarantees this)
+#   ops; called only for an eager table, see preprocess_agg_expressions())
 # @param col_name Name for the new column
 # @param ir A parsed (not yet bound) IR node, non-const (references at
 #   least one column)
