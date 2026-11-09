@@ -17,7 +17,8 @@ ast_slice(
   na_rm = NULL,
   bracket_arg = NULL,
   bracket_call = NULL,
-  rows_resolved = FALSE
+  rows_resolved = FALSE,
+  top_k = FALSE
 )
 }
 \arguments{
@@ -60,6 +61,10 @@ real row count (\code{rows_resolved = TRUE}, \code{NA} = all-\code{NA} row), or 
 the user's raw subscript, in which case \code{bracket_arg} (the user's
 subscript expression) and \code{bracket_call} (the \code{[} call) label any error
 raised when it is resolved at lowering}
+
+\item{top_k}{For \code{mode} \code{"rank"}: \code{TRUE} on a node the optimizer made from
+\code{arrange(x) |> head(n)} (\code{rewrite_slice_over_arrange()}); the node is then
+\code{slice_min(x, n, with_ties = FALSE)} and nothing else}
 }
 \value{
 An ast_slice node

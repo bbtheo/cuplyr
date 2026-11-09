@@ -641,3 +641,28 @@ test_that("perf: eager_verb_floor_1e3", {
     u
   }, calibration = "kernel")
 })
+
+# F98: top-k. arrange() |> head() in a lazy plan and slice_min() select the cut
+# value instead of sorting the table (a few ms at 1e6 rows). Calibration "kernel".
+test_that("perf: topk_arrange_head_lazy", {
+  skip_if_no_gpu()
+  gpu_df <- tbl_gpu(perf_big_df, lazy = TRUE)
+
+  expect_no_perf_regression("topk_arrange_head_lazy", function() {
+    gpu_df |>
+      dplyr::arrange(x) |>
+      head(10) |>
+      collect()
+  }, calibration = "kernel")
+})
+
+test_that("perf: topk_slice_min_eager", {
+  skip_if_no_gpu()
+  gpu_df <- tbl_gpu(perf_big_df, lazy = FALSE)
+
+  expect_no_perf_regression("topk_slice_min_eager", function() {
+    gpu_df |>
+      dplyr::slice_min(x, n = 10) |>
+      collect()
+  }, calibration = "kernel")
+})

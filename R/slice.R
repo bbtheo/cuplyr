@@ -996,7 +996,9 @@ slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
 #' values, similar to `dplyr::slice_min()`. Ungrouped, `group_by()`-grouped,
 #' and `by=` calls with a plain `order_by` (a bare column, or an expression
 #' the mutate/filter IR recognizes) all run entirely on the GPU (Phase 5,
-#' task W7): ungrouped via `cudf::rank()` + sort + filter; grouped/`by=`
+#' task W7): ungrouped via a top-k cut plus a sort of the survivors when the
+#' key is numeric or a date and `n` is a small share of the rows, otherwise a
+#' stable sort (with `cudf::rank()` for ties); grouped/`by=`
 #' via a per-group window desugar (see R/slice.R's module docs for the
 #' exact group-ordering rules, including `by=`'s first-appearance-order
 #' rule, which applies here too, not just to the positional slice_*()s).

@@ -31,19 +31,20 @@
 //   empirically: `slice_min(df, x, n=3)` on x=c(1,2,2,3,NA,NA,1) returns
 //   rows in ascending-x order, not original-row order.
 //
-//   This is implemented as: stable-sort the whole table by `order_by`
-//   (NA last, either direction -- see the null_order comment below),
-//   compute a per-original-row `keep` mask via `cudf::rank()` (MIN method
-//   for with_ties=TRUE == SQL RANK(), FIRST method for with_ties=FALSE ==
-//   stable position, both exactly matching dplyr's `ties=` choice), gather
-//   that mask into the same sorted order, and `apply_boolean_mask()` the
-//   sorted table by the sorted mask. `apply_boolean_mask()` preserves the
-//   relative order of TRUE rows, so the result is exactly "kept rows, in
-//   sorted order" -- dplyr's contract, achieved with no CPU round-trip at
-//   all (an earlier design considered collecting a single boundary value
-//   to determine the with_ties cutoff on the CPU; `cudf::rank()` makes
-//   that unnecessary since it's a direct public API for exactly this
-//   ranking/tie-breaking problem).
+//   Three routes, picked in gpu_slice_rank():
+//   - top-k (numeric/date keys, 1 <= size <= non-NA rows, and under "auto" a
+//     size of at most kTopkFraction of the rows): find the size-th best key
+//     with cudf::top_k_order(), then stable-sort only the rows no worse than
+//     it (all ties included), so the cost follows the survivors.
+//   - with_ties = FALSE otherwise: stable-sort the key (NA last, either
+//     direction -- see the null_order comment below), keep the first `size`
+//     positions, and gather; na_rm drops NA rows among them afterwards.
+//   - with_ties = TRUE otherwise: stable-sort, build a keep mask from
+//     `cudf::rank()` (MIN method == SQL RANK()), gather the mask into sorted
+//     order and apply_boolean_mask(), which preserves the sorted order.
+//   Every route returns the kept rows in sorted order, with no CPU round-trip.
+//   The "cuplyr.topk_path" option ("auto", "topk", "sort") forces a route and
+//   the result pointer's "topk" attribute records which one ran.
 
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
@@ -56,6 +57,11 @@
 #include <cudf/binaryop.hpp>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/transform.hpp>
+#include <cudf/reduction.hpp>
+#include <cudf/aggregation.hpp>
+#include <cudf/filling.hpp>
+#include <cudf/unary.hpp>
+#include <cudf/utilities/bit.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/column/column_view.hpp>
@@ -65,6 +71,8 @@
 #include <rmm/mr/device/per_device_resource.hpp>
 
 #include <climits>
+#include <cstdint>
+#include <string>
 #include <cmath>
 #include <vector>
 
@@ -274,10 +282,136 @@ Rcpp::List gpu_split_rows(SEXP xptr, IntegerVector idx0, IntegerVector sizes) {
     return out;
 }
 
+namespace {
+
+// Largest fraction of the rows that "auto" still sends down the top-k route.
+// Above it the survivors of the cut, which the route stable-sorts, approach the
+// whole table and the plain sort is as fast (measured in the F98 brief).
+constexpr double kTopkFraction = 0.25;
+
+bool topk_key_type(cudf::type_id id) {
+    switch (id) {
+        case cudf::type_id::INT32:
+        case cudf::type_id::INT64:
+        case cudf::type_id::FLOAT32:
+        case cudf::type_id::FLOAT64:
+        case cudf::type_id::TIMESTAMP_DAYS:
+        case cudf::type_id::TIMESTAMP_MICROSECONDS:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// A non-null float key as an INT64 whose signed order is the float order, so
+// cudf::top_k_order() takes its radix-select fast path (it sorts any float or
+// nullable key in full). Negative floats have the sign bit set; flipping their
+// other 63 bits reverses their order. -0 lands below +0 here, which is why the
+// cut value is compared in the original domain.
+std::unique_ptr<cudf::column> sortable_int64(cudf::column_view key,
+                                             rmm::cuda_stream_view stream,
+                                             rmm::device_async_resource_ref mr) {
+    std::unique_ptr<cudf::column> wide;
+    if (key.type().id() == cudf::type_id::FLOAT32) {
+        wide = cudf::cast(key, cudf::data_type(cudf::type_id::FLOAT64), stream, mr);
+        key = wide->view();
+    }
+    cudf::column_view bits = cudf::bit_cast(key, cudf::data_type(cudf::type_id::INT64));
+    auto i64 = cudf::data_type(cudf::type_id::INT64);
+    auto sign = cudf::binary_operation(bits, cudf::numeric_scalar<int64_t>(63, true),
+                                       cudf::binary_operator::SHIFT_RIGHT, i64, stream, mr);
+    auto flip = cudf::binary_operation(
+        sign->view(), cudf::numeric_scalar<int64_t>(INT64_MAX, true),
+        cudf::binary_operator::BITWISE_AND, i64, stream, mr);
+    sign.reset();
+    return cudf::binary_operation(bits, flip->view(), cudf::binary_operator::BITWISE_XOR, i64,
+                                  stream, mr);
+}
+
+// Row positions (INT32, in result order) of the `size` best rows of `key` for
+// slice_min()/slice_max(), `1 <= size <= valid rows`. The cut value t is the
+// size-th best key; rows no worse than t (all ties included, in input order)
+// are the only ones sorted. Equal to a stable sort of the whole key, first
+// `size` rows (or every survivor with ties), at a cost that depends on the
+// survivors, not the table.
+std::unique_ptr<cudf::column> topk_positions(cudf::column_view key, cudf::size_type size,
+                                             bool descending, bool with_ties,
+                                             rmm::cuda_stream_view stream,
+                                             rmm::device_async_resource_ref mr) {
+    const cudf::order col_order = descending ? cudf::order::DESCENDING : cudf::order::ASCENDING;
+    const bool is_float = key.type().id() == cudf::type_id::FLOAT64 ||
+                          key.type().id() == cudf::type_id::FLOAT32;
+
+    // top_k_order() wants no nulls (and NaN is null here)
+    std::unique_ptr<cudf::table> valid_only;
+    cudf::column_view dense = key;
+    if (key.null_count() > 0) {
+        valid_only = cudf::drop_nulls(cudf::table_view({key}), {0}, stream, mr);
+        dense = valid_only->view().column(0);
+    }
+
+    std::unique_ptr<cudf::column> mapped;
+    cudf::column_view top_key = dense;
+    if (is_float) {
+        mapped = sortable_int64(dense, stream, mr);
+        top_key = mapped->view();
+    }
+    std::unique_ptr<cudf::column> best = cudf::top_k_order(top_key, size, col_order, stream, mr);
+    mapped.reset();
+
+    std::unique_ptr<cudf::table> best_keys = cudf::gather(
+        cudf::table_view({dense}), best->view(), cudf::out_of_bounds_policy::DONT_CHECK, stream, mr);
+    best.reset();
+    valid_only.reset();
+    std::unique_ptr<cudf::scalar> cut = cudf::reduce(
+        best_keys->view().column(0),
+        descending ? *cudf::make_min_aggregation<cudf::reduce_aggregation>()
+                   : *cudf::make_max_aggregation<cudf::reduce_aggregation>(),
+        key.type(), stream, mr);
+    best_keys.reset();
+
+    // A null or NaN key compares to null, which apply_boolean_mask() drops
+    std::unique_ptr<cudf::column> within = cudf::binary_operation(
+        key, *cut,
+        descending ? cudf::binary_operator::GREATER_EQUAL : cudf::binary_operator::LESS_EQUAL,
+        cudf::data_type(cudf::type_id::BOOL8), stream, mr);
+
+    std::unique_ptr<cudf::column> seq = cudf::sequence(
+        key.size(), cudf::numeric_scalar<int32_t>(0, true), cudf::numeric_scalar<int32_t>(1, true),
+        stream, mr);
+    std::unique_ptr<cudf::table> survivors = cudf::apply_boolean_mask(
+        cudf::table_view({seq->view(), key}), within->view(), stream, mr);
+    seq.reset();
+    within.reset();
+
+    cudf::column_view surv_key = survivors->view().column(1);
+    std::unique_ptr<cudf::column> order = cudf::stable_sorted_order(
+        cudf::table_view({surv_key}), {col_order}, {cudf::null_order::AFTER}, stream, mr);
+    std::unique_ptr<cudf::table> sorted_pos = cudf::gather(
+        cudf::table_view({survivors->view().column(0)}), order->view(),
+        cudf::out_of_bounds_policy::DONT_CHECK, stream, mr);
+    std::unique_ptr<cudf::column> positions = std::move(sorted_pos->release().front());
+    if (!with_ties && positions->size() > size) {
+        positions = std::make_unique<cudf::column>(
+            cudf::slice(positions->view(), {0, size}).front(), stream, mr);
+    }
+    return positions;
+}
+
+} // namespace
+
+// `path` picks the route: "auto" (top-k when the cut is selective, see
+// kTopkFraction), "topk" (whenever it applies) or "sort" (never). The result
+// pointer's "topk" attribute says which route ran.
 // [[Rcpp::export]]
 SEXP gpu_slice_rank(SEXP xptr, int order_col_idx, bool descending, double amount,
-                     bool is_prop, bool with_ties, bool na_rm) {
+                     bool is_prop, bool with_ties, bool na_rm,
+                     std::string path = "auto") {
     using namespace cuplyr;
+
+    if (path != "auto" && path != "topk" && path != "sort") {
+        Rcpp::stop("path must be \"auto\", \"topk\" or \"sort\"");
+    }
 
     Rcpp::XPtr<GpuTablePtr> ptr(xptr);
     cudf::table_view view = get_table_view(ptr);
@@ -325,6 +459,51 @@ SEXP gpu_slice_rank(SEXP xptr, int order_col_idx, bool descending, double amount
     // fixed to flip with direction the same way this function already did).
     cudf::null_order null_prec = descending ? cudf::null_order::BEFORE : cudf::null_order::AFTER;
 
+    // Top-k route: needs 1 <= size <= valid rows (a larger size puts NA rows
+    // in the result, size 0 has nothing to select), so na_rm cannot matter.
+    const cudf::size_type valid = nrow - order_col.null_count();
+    if (path != "sort" && topk_key_type(order_col.type().id()) && size >= 1 &&
+        size <= valid &&
+        (path == "topk" || static_cast<double>(size) <= kTopkFraction * static_cast<double>(nrow))) {
+        // Timestamps compare as their integer ticks (no timestamp scalar needed)
+        cudf::column_view key = order_col;
+        if (order_col.type().id() == cudf::type_id::TIMESTAMP_DAYS) {
+            key = cudf::bit_cast(order_col, cudf::data_type(cudf::type_id::INT32));
+        } else if (order_col.type().id() == cudf::type_id::TIMESTAMP_MICROSECONDS) {
+            key = cudf::bit_cast(order_col, cudf::data_type(cudf::type_id::INT64));
+        }
+        std::unique_ptr<cudf::column> positions =
+            topk_positions(key, size, descending, with_ties, stream, mr);
+        auto out = make_gpu_table_xptr(cudf::gather(
+            view, positions->view(), cudf::out_of_bounds_policy::DONT_CHECK, stream, mr));
+        out.attr("topk") = true;
+        return out;
+    }
+
+    // Without ties the answer is a stable sort and its first `size` rows,
+    // arrange() |> head()'s cost; the rank below costs about twice that.
+    if (!with_ties) {
+        std::unique_ptr<cudf::column> sorted = cudf::stable_sorted_order(
+            cudf::table_view({order_col}), {col_order}, {null_prec}, stream, mr);
+        std::unique_ptr<cudf::column> first = std::make_unique<cudf::column>(
+            cudf::slice(sorted->view(), {0, size}).front(), stream, mr);
+        sorted.reset();
+        if (na_rm && order_col.nullable() && size > 0) {
+            // dplyr ranks first and then drops the NA rows among the first `size`
+            std::unique_ptr<cudf::table> keys = cudf::gather(
+                cudf::table_view({order_col}), first->view(),
+                cudf::out_of_bounds_policy::DONT_CHECK, stream, mr);
+            std::unique_ptr<cudf::column> present = cudf::is_valid(keys->view().column(0), stream, mr);
+            std::unique_ptr<cudf::table> kept = cudf::apply_boolean_mask(
+                cudf::table_view({first->view()}), present->view(), stream, mr);
+            first = std::move(kept->release().front());
+        }
+        auto out = make_gpu_table_xptr(cudf::gather(
+            view, first->view(), cudf::out_of_bounds_policy::DONT_CHECK, stream, mr));
+        out.attr("topk") = false;
+        return out;
+    }
+
     cudf::rank_method method = with_ties ? cudf::rank_method::MIN : cudf::rank_method::FIRST;
     std::unique_ptr<cudf::column> rank_col = cudf::rank(
         order_col, method, col_order, cudf::null_policy::INCLUDE, null_prec, false,
@@ -357,5 +536,7 @@ SEXP gpu_slice_rank(SEXP xptr, int order_col_idx, bool descending, double amount
     std::unique_ptr<cudf::table> result = cudf::apply_boolean_mask(
         sorted_table->view(), sorted_mask_tbl->view().column(0), stream, mr);
 
-    return make_gpu_table_xptr(std::move(result));
+    auto out = make_gpu_table_xptr(std::move(result));
+    out.attr("topk") = false;
+    return out;
 }

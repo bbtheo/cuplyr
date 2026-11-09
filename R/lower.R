@@ -468,7 +468,10 @@ lower_slice <- function(ast, source_ptr) {
       col_idx <- match(ast$order_col, input_schema$names) - 1L
 
       result_ptr <- gpu_slice_rank(input_ptr, col_idx, ast$descending, ast$amount,
-                                   ast$is_prop, ast$with_ties, ast$na_rm)
+                                   ast$is_prop, ast$with_ties, ast$na_rm,
+                                   getOption("cuplyr.topk_path", "auto"))
+      # which route ran is for the tests; it must not outlive the lowering
+      attr(result_ptr, "topk") <- NULL
 
       if (isTRUE(ast$order_is_temp)) {
         keep_idx <- set_diff(seq_along(input_schema$names) - 1L, col_idx)

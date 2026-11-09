@@ -47,7 +47,9 @@ Keeps the \code{n} (or \code{prop} fraction of) rows with the smallest \code{ord
 values, similar to \code{dplyr::slice_min()}. Ungrouped, \code{group_by()}-grouped,
 and \verb{by=} calls with a plain \code{order_by} (a bare column, or an expression
 the mutate/filter IR recognizes) all run entirely on the GPU (Phase 5,
-task W7): ungrouped via \code{cudf::rank()} + sort + filter; grouped/\verb{by=}
+task W7): ungrouped via a top-k cut plus a sort of the survivors when the
+key is numeric or a date and \code{n} is a small share of the rows, otherwise a
+stable sort (with \code{cudf::rank()} for ties); grouped/\verb{by=}
 via a per-group window desugar (see R/slice.R's module docs for the
 exact group-ordering rules, including \verb{by=}'s first-appearance-order
 rule, which applies here too, not just to the positional slice_*()s).

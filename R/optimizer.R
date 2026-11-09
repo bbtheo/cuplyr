@@ -99,6 +99,7 @@ optimize_with_barriers <- function(ast, required = NULL) {
   }
 
   if (is_barrier(ast)) {
+    if (identical(.subset2(ast, "type"), "slice")) ast <- rewrite_slice_over_arrange(ast)
     # Optimize below the barrier, not across (an input that comes back as it
     # was is not assigned again: the node stays the same object)
     input <- .subset2(ast, "input")
@@ -137,6 +138,11 @@ optimize_with_barriers <- function(ast, required = NULL) {
     segment_root <- extract_segment_above_barrier(ast, barrier_node, stub)
     optimized_segment <- optimize_segment(segment_root, required, keep_mutates = !is.null(required))
 
+    # (after the extraction, which finds the barrier by identity; the stub's
+    # schema is the same either way)
+    if (identical(.subset2(barrier_node, "type"), "slice")) {
+      barrier_node <- rewrite_slice_over_arrange(barrier_node)
+    }
     input <- .subset2(barrier_node, "input")
     optimized <- optimize_with_barriers(
       input,
@@ -147,6 +153,48 @@ optimize_with_barriers <- function(ast, required = NULL) {
     replace_segment_stub(optimized_segment, barrier_node)
   }
 }
+
+#' Turn `arrange(x) |> head(n)` into a top-k slice
+#'
+#' `head(n)` over a one-key `arrange()` is `slice_min(x, n, with_ties = FALSE)`
+#' (or `slice_max()` for `desc()`): both stable-sort with NA last and take the
+#' first `compute_slice_size()` rows. The rank-mode slice node runs
+#' `gpu_slice_rank()`, which selects the cut value instead of sorting the
+#' table when the cut is selective. Only a head slice sitting directly on an
+#' ungrouped one-key arrange of a numeric, Date or POSIXct column is rewritten;
+#' strings (collation), factors and logicals, several keys, `.by_group` and
+#' anything between the two nodes keep the sort. The new node is a slice, so it
+#' stays a barrier: no filter crosses it, and `barrier_input_required()` reports
+#' its key. Called on a barrier node only, and only slices are tested at the
+#' call sites.
+#'
+#' @param node A slice node
+#' @return The rewritten node, or `node` itself
+#' @keywords internal
+rewrite_slice_over_arrange <- function(node) {
+  if (!identical(.subset2(node, "mode"), "head")) return(node)
+  arr <- .subset2(node, "input")
+  if (!identical(.subset2(arr, "type"), "arrange")) return(node)
+  specs <- .subset2(arr, "sort_specs")
+  if (length(specs) != 1L || length(.subset2(arr, "groups")) > 0L) return(node)
+
+  spec <- .subset2(specs, 1L)
+  below <- .subset2(arr, "input")
+  schema <- infer_schema_memo(below)
+  col <- .subset2(spec, "col_name")
+  pos <- match(col, schema$names)
+  if (is.na(pos) || anyDuplicated(schema$names) > 0L) return(node)
+  if (!(schema$types[[pos]] %in% topk_key_types)) return(node)
+
+  ast_slice(below, mode = "rank", amount = .subset2(node, "amount"),
+            is_prop = .subset2(node, "is_prop"), order_col = col,
+            order_is_temp = FALSE, descending = isTRUE(.subset2(spec, "descending")),
+            with_ties = FALSE, na_rm = FALSE, top_k = TRUE)
+}
+
+# The key types gpu_slice_rank() has a top-k route for
+topk_key_types <- c("INT32", "INT64", "FLOAT32", "FLOAT64",
+                    "TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS")
 
 #' What a barrier's input has to deliver
 #'

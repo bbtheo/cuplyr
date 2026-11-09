@@ -225,6 +225,9 @@ ast_distinct <- function(input, key_cols, keep_all = FALSE, key_positions = NULL
 #'   for `slice_max()`
 #' @param with_ties,na_rm For `mode` `"rank"`: as documented on
 #'   `slice_min()`/`slice_max()`
+#' @param top_k For `mode` `"rank"`: `TRUE` on a node the optimizer made from
+#'   `arrange(x) |> head(n)` (`rewrite_slice_over_arrange()`); the node is then
+#'   `slice_min(x, n, with_ties = FALSE)` and nothing else
 #' @return An ast_slice node
 #' @keywords internal
 ast_slice <- function(input, mode, amount = NULL, is_prop = NULL,
@@ -232,13 +235,13 @@ ast_slice <- function(input, mode, amount = NULL, is_prop = NULL,
                       order_is_temp = FALSE, descending = NULL,
                       with_ties = NULL, na_rm = NULL,
                       bracket_arg = NULL, bracket_call = NULL,
-                      rows_resolved = FALSE) {
+                      rows_resolved = FALSE, top_k = FALSE) {
   ast_node("slice", input = input, mode = mode, amount = amount, is_prop = is_prop,
            raw_indices = raw_indices, order_col = order_col,
            order_is_temp = order_is_temp, descending = descending,
            with_ties = with_ties, na_rm = na_rm,
            bracket_arg = bracket_arg, bracket_call = bracket_call,
-           rows_resolved = rows_resolved)
+           rows_resolved = rows_resolved, top_k = top_k)
 }
 
 #' Create a window AST node
@@ -1170,7 +1173,8 @@ describe_slice_detail <- function(node) {
       "order_by=", node$order_col,
       ", desc=", node$descending,
       ", ", size(),
-      ", with_ties=", node$with_ties
+      ", with_ties=", node$with_ties,
+      if (isTRUE(node$top_k)) ", top_k" else ""
     ),
     ""
   )

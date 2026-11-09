@@ -110,39 +110,68 @@ test_that("0-row wide inputs give dplyr's results", {
 
 # --- speed: warm colwise vs its across() equivalent ----------------------------
 
-# Median per-call ms ratio of `a` over `b`: warm both, then interleave batches.
-f60_ratio <- function(a, b, warm = 5L, batches = 7L, k = 3L) {
-  for (i in seq_len(warm)) {
-    a()
-    b()
-  }
-  ta <- tb <- numeric(batches)
-  for (j in seq_len(batches)) {
-    ta[j] <- system.time(for (i in seq_len(k)) a())[["elapsed"]]
-    tb[j] <- system.time(for (i in seq_len(k)) b())[["elapsed"]]
-  }
-  stats::median(ta) / stats::median(tb)
-}
-
+# Each pair is timed with timing_medians() (interleaved batches, an untimed gc()
+# before each one, wall clock) and a near miss is measured again (up to 3
+# attempts, 1 s apart; timing_retry()); a miss of 10% or more fails at once.
+#
+# Batches last about 0.5 s because the earlier method (system.time() around 3
+# calls, which runs a gc() first) read one code base two ways: a process read
+# mutate_if / across as either about 1.33 or about 1.45, the same mode for every
+# repeat in that process. Full-suite readings, 2026-11-09, one per suite: dev
+# fb7e7c5 1.440, 1.463, 1.342, 1.333; F98 1.359, 1.319, 1.435, 1.316; F98 without
+# test-F98-topk-large.R 1.345, 1.454 (the 1.463 and the 1.454 failed the 1.45
+# limit). F98's merge gate read 1.48 and 1.47. What sets the mode was not
+# established. One call right after a gc() is 1.36-1.38 in the six suites that
+# recorded it (the last two of dev and of F98, both of F98 without that file) and
+# in lone processes. Those six suites also timed batches at the settings below:
+# 1.354-1.399, dev 1.375 and 1.373. Shorter batches stay split: 0.25 s read
+# 1.375-1.412 with the two modes apart, and timing_medians()'s default 0.05 s (one
+# or two calls per batch) read 1.37-1.53 over all ten suites. The limit stays 1.45.
 test_that("warm colwise verbs on 200 columns cost about what across() costs", {
   skip_if_no_gpu()
   num <- f60_wide(n = 1000L, w = 200L, na = FALSE)[-1L]
   g <- tbl_gpu(num, lazy = FALSE)
   withr::local_options(cuplyr.fallback = "error")
 
-  r1 <- f60_ratio(function() summarise_all(g, mean),
-                  function() dplyr::summarise(g, dplyr::across(dplyr::everything(), mean)))
-  r2 <- f60_ratio(function() summarise_all(g, list(m = mean, s = sd)),
-                  function() dplyr::summarise(g, dplyr::across(dplyr::everything(), list(m = mean, s = sd))))
-  r3 <- f60_ratio(function() mutate_all(g, ~ .x + 1),
-                  function() dplyr::mutate(g, dplyr::across(dplyr::everything(), ~ .x + 1)))
-  # mutate_if also pays dplyr's own per-column predicate loop (tbl_if_vars()
-  # pulls every column of the tbl_ptype() proxy), which across(where()) does not
-  r4 <- f60_ratio(function() mutate_if(g, is.numeric, ~ .x * 2),
-                  function() dplyr::mutate(g, dplyr::across(dplyr::where(is.numeric), ~ .x * 2)))
+  pairs <- list(
+    "summarise_all(mean)" = list(
+      limit = 1.25,
+      colwise = function() summarise_all(g, mean),
+      across = function() dplyr::summarise(g, dplyr::across(dplyr::everything(), mean))
+    ),
+    "summarise_all(list(m, s))" = list(
+      limit = 1.25,
+      colwise = function() summarise_all(g, list(m = mean, s = sd)),
+      across = function() dplyr::summarise(g, dplyr::across(dplyr::everything(), list(m = mean, s = sd)))
+    ),
+    "mutate_all(~ .x + 1)" = list(
+      limit = 1.25,
+      colwise = function() mutate_all(g, ~ .x + 1),
+      across = function() dplyr::mutate(g, dplyr::across(dplyr::everything(), ~ .x + 1))
+    ),
+    # mutate_if also pays dplyr's own per-column predicate loop (tbl_if_vars()
+    # pulls every column of the tbl_ptype() proxy), which across(where()) does not
+    "mutate_if(is.numeric, ~ .x * 2)" = list(
+      limit = 1.45,
+      colwise = function() mutate_if(g, is.numeric, ~ .x * 2),
+      across = function() dplyr::mutate(g, dplyr::across(dplyr::where(is.numeric), ~ .x * 2))
+    )
+  )
 
-  expect_lt(r1, 1.25, label = sprintf("summarise_all(mean) / across ratio %.2f", r1))
-  expect_lt(r2, 1.25, label = sprintf("summarise_all(list(m, s)) / across ratio %.2f", r2))
-  expect_lt(r3, 1.25, label = sprintf("mutate_all(~ .x + 1) / across ratio %.2f", r3))
-  expect_lt(r4, 1.45, label = sprintf("mutate_if(is.numeric, ~ .x * 2) / across ratio %.2f", r4))
+  for (nm in names(pairs)) {
+    p <- pairs[[nm]]
+    runs <- timing_retry(
+      function() {
+        t <- timing_medians(p[c("colwise", "across")], samples = 7L, target = 0.5,
+                            label = paste("F60", nm))
+        t[["colwise"]] / t[["across"]]
+      },
+      ok = function(r) r < p$limit,
+      retry_if = function(r) r < p$limit * 1.1,
+      pause = 1
+    )
+    expect_lt(runs[[length(runs)]], p$limit,
+              label = sprintf("%s / across ratio: %s (attempts)", nm,
+                              paste(sprintf("%.3f", unlist(runs)), collapse = " / ")))
+  }
 })
