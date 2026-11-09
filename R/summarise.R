@@ -401,6 +401,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
       dplyr::summarise(.data = tbl, !!!dots, .groups = .groups, .by = !!by_quo)
     }, reason = impure))
   }
+  fallback_mark_screened()
 
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R's
   # own module docs. Must run on the ORIGINAL (not yet auto_name_dots()'d)
@@ -1123,7 +1124,15 @@ summarise_dots_parseable <- function(dots, schema, ir_cache = NULL) {
     }
 
     arg_quo <- rlang::new_quosure(arg_expr, env)
-    ir <- ir_parse_quo(arg_quo, schema)  # may throw a genuine error -- propagates
+    # (may throw a genuine error -- propagates; a vector constant inside the
+    # argument (`x * dnorm(c(0, 1))`) is dplyr's elementwise job, as in mutate())
+    ir <- tryCatch(
+      ir_parse_quo(arg_quo, schema),
+      cuplyr_vector_literal = function(e) {
+        fallback_cause("a vector constant inside a larger expression is recycled by dplyr.")
+        NULL
+      }
+    )
     if (!is.null(ir_cache)) {
       ir_cache[[as.character(i)]] <- list(arg = arg_expr, ir = ir)
     }
@@ -1677,10 +1686,8 @@ extract_quantile_probs <- function(expr, env, quo) {
   }
 
   if (!is.null(present_args$type)) {
-    type_val <- tryCatch(
-      rlang::eval_tidy(rlang::new_quosure(present_args$type, env)),
-      error = function(e) NULL
-    )
+    # (F83: a value that warns is dplyr's, ir_fold_eval(): NULL, so the CPU)
+    type_val <- ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(present_args$type, env)))$value
     if (is.null(type_val) || !is.numeric(type_val) || length(type_val) != 1 || type_val != 7) {
       stop("summarise()'s quantile() only supports type = 7 (R's own default): ",
            rlang::quo_text(quo), call. = FALSE)
@@ -1691,10 +1698,7 @@ extract_quantile_probs <- function(expr, env, quo) {
     stop("summarise()'s quantile() requires a single `probs` value: ",
          rlang::quo_text(quo), call. = FALSE)
   }
-  probs_val <- tryCatch(
-    rlang::eval_tidy(rlang::new_quosure(present_args$probs, env)),
-    error = function(e) NULL
-  )
+  probs_val <- ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(present_args$probs, env)))$value
   ir_check_timespan_lit(probs_val)  # F48: a Period/Duration `probs`: CPU
   if (is.null(probs_val) || !is.numeric(probs_val) || inherits(probs_val, "integer64") ||
       length(probs_val) != 1 || is.na(probs_val) || probs_val < 0 || probs_val > 1) {
@@ -1741,10 +1745,7 @@ extract_nth_position <- function(expr, env, quo) {
     stop("nth() requires `x` and `n` arguments: ", rlang::quo_text(quo), call. = FALSE)
   }
 
-  n_val <- tryCatch(
-    rlang::eval_tidy(rlang::new_quosure(present_args$n, env)),
-    error = function(e) NULL
-  )
+  n_val <- ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(present_args$n, env)))$value
   ir_check_timespan_lit(n_val)  # F48: a Period/Duration `n`: CPU (parseable pre-pass)
   if (is.null(n_val) || !is.numeric(n_val) || inherits(n_val, "integer64") ||
       length(n_val) != 1 || is.na(n_val) || n_val != round(n_val) || n_val == 0) {

@@ -360,6 +360,13 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     if (!is.null(impure)) {
       return(filter_cpu_fallback(.data, dots, by_quo, .preserve, complement, reason = impure))
     }
+    # (F83: every column-free call is pure, so a fold that warns may be given up)
+    fallback_mark_screened()
+  } else if (!rowwise) {
+    # F83: top_n()/top_frac() ungrouped: the rewrite below folds `n` and `wt`,
+    # where dev left an unlisted `wt` to dplyr. Marked only when both are pure,
+    # so an impure `n` keeps its one evaluation.
+    top_n_rank_mark_screened(dots, .data)
   }
 
   if (length(dots) == 0 && !complement) return(.data)
@@ -458,8 +465,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   errored <- NA_integer_
   for (i in seq_along(dots)) {
     if (evaluated_free && filter_dot_is_column_free(dots[[i]], schema)) {
-      res <- tryCatch(list(value = rlang::eval_tidy(dots[[i]], data = list())),
-                      error = function(e) list(error = e))
+      res <- filter_free_eval(dots[[i]])
       standalone[i] <- list(res)
       if (!is.null(res$error)) {
         # A free name bound nowhere may be a typo: the parser raises dev's
@@ -538,7 +544,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # never parsed, and dplyr stops there)
   for (i in seq_len(if (is.na(errored)) length(dots) else errored)) {
     why <- if (identical(i, errored)) {
-      list(filter_free_dot_failed_reason)
+      list(filter_free_reason(standalone[[i]]))
     } else if (is.null(parsed[[i]]) && dot_references_schema_col(dots[[i]], orig_names)) {
       list(causes[[as.character(i)]])
     } else if (!is.null(parsed[[i]]) && ir_factor_rule(parsed[[i]], schema) != "none") {
@@ -581,11 +587,10 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
           return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement,
                                       inline = inline))
         }
-        res <- tryCatch(list(value = rlang::eval_tidy(dots[[i]], data = list())),
-                        error = function(e) list(error = e))
+        res <- filter_free_eval(dots[[i]])
       }
       if (!is.null(res$error)) {
-        fallback_dot_failed(origin[[i]], filter_free_dot_failed_reason)
+        fallback_dot_failed(origin[[i]], filter_free_reason(res))
         return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement,
                                     inline = inline))
       }
@@ -1042,6 +1047,25 @@ filter_dot_is_column_free <- function(quo, schema) {
     !expr_has_mask_only_call(expr) && !expr_reaches_mask(expr)
 }
 
+# A column-free predicate evaluated once, with no data mask: `list(value = )`,
+# `list(error = )`, or (F83) an error marked `declined` when a call warned in a
+# screened (grouped) filter: dplyr evaluates it and raises its own warning
+# (ir_fold_eval()).
+filter_free_eval <- function(dot) {
+  got <- ir_fold_eval(rlang::eval_tidy(dot, data = list()), keep_error = TRUE)
+  if (!is.null(got$declined)) {
+    return(list(error = simpleError("a call warned"), declined = TRUE))
+  }
+  got
+}
+
+filter_free_declined_reason <- paste0(
+  "a predicate that reads no column raised a warning; dplyr evaluates it and reports the warning."
+)
+filter_free_reason <- function(res) {
+  if (isTRUE(res$declined)) filter_free_declined_reason else filter_free_dot_failed_reason
+}
+
 # The notice's reason for a dot that reads no column and fails when evaluated
 # outside the data mask.
 filter_free_dot_failed_reason <- paste0(
@@ -1216,7 +1240,8 @@ top_n_const <- function(x, env, schema) {
     return(NULL)
   }
   q <- if (rlang::is_quosure(x)) x else rlang::new_quosure(x, env)
-  res <- top_n_rng_guard(function() tryCatch(rlang::eval_tidy(q), error = function(e) NULL))
+  # (F83: a value that warns is dplyr's, ir_fold_eval(): NULL, so the CPU)
+  res <- top_n_rng_guard(function() ir_fold_eval(rlang::eval_tidy(q))$value)
   if (res$rng) return(NULL)
   val <- res$value
   if (is.numeric(val) && !is.object(val) && length(val) == 1L && is.finite(val)) val else NULL
@@ -1350,7 +1375,7 @@ rewrite_top_n_rank_dot <- function(dot, schema) {
 # @keywords internal
 top_n_wt_decline <- function(wt, schema) {
   if (rlang::is_missing(wt$expr)) return(NULL)
-  deferred <- intersect(deferred_fallback_fns, all.names(wt$expr))
+  deferred <- intersect(deferred_fallback_fns, top_n_symbols(wt$expr)$fns)
   if (length(deferred) > 0L) {
     return(sprintf("`wt` calls %s, which dplyr evaluates inside the data mask",
                    paste0(deferred[[1L]], "()")))
@@ -1413,6 +1438,43 @@ top_n_rank_decline <- function(dots, .data) {
     if (!is.null(detail)) return(detail)
   }
   NULL
+}
+
+# filter_run()'s ungrouped screen for top_n()/top_frac(): marks the call as
+# screened (fallback_mark_screened()) when a dot is a top_n_rank(n, wt) call and
+# every column-free call is pure, so a fold of `n` or `wt` that warns is given up
+# and dplyr raises its own warning. The screen reads `n` and `wt` rather than the
+# top_n_rank() call around them, which is itself column-free when `wt` is and is
+# not on the allowlist. Evaluates nothing; a filter() with no top_n_rank() dot
+# pays for top_n_rank_any() only.
+# @param dots filter() quosures
+# @param .data the table being filtered
+# @keywords internal
+top_n_rank_mark_screened <- function(dots, .data) {
+  if (!top_n_rank_any(dots)) {
+    return(invisible(NULL))
+  }
+  found <- FALSE
+  screen <- list()
+  for (i in seq_along(dots)) {
+    expr <- rlang::quo_get_expr(dots[[i]])
+    env <- rlang::quo_get_env(dots[[i]])
+    if (!is.call(expr) || length(expr) != 3L || !is.null(names(expr)) ||
+        !top_n_rank_head(expr[[1]], env)) {
+      screen <- c(screen, dots[i])
+      next
+    }
+    found <- TRUE
+    for (arg in as.list(expr)[2:3]) {
+      if (rlang::is_missing(arg)) next
+      arg <- top_n_unwrap(arg, env)
+      screen <- c(screen, list(rlang::new_quosure(arg$expr, arg$env)))
+    }
+  }
+  if (found && is.null(impure_const_call_text(unname(screen), current_schema(.data), grouped = FALSE))) {
+    fallback_mark_screened()
+  }
+  invisible(NULL)
 }
 
 # @param dots filter() quosures

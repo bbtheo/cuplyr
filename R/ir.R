@@ -490,6 +490,18 @@ ir_transparent_heads <- c("(", "{", "~", "function", "if")
 # cannot see. across()/if_any()/if_all() call their `.fns`, but only as a whole
 # dot, where the expansion inlines the call over a column (ir_across_fns_root());
 # where() calls its predicate once per column, as tidyselect does in dplyr.
+#
+# Criteria for a name (F83): the same output for the same input; no reading of
+# the RNG, the clock, options, the file system, the data mask or the calling
+# frame; no side effects; no calling of a function the user supplied. So no
+# r*() random draw, no function-taking function (sapply, Reduce, do.call, Map,
+# all.equal with its `formatFUN`), and nothing like Sys.time(). `getOption` (options), `Sys.Date`/`today` (the
+# clock) and `format` (digits/scipen/OutDec options) are on the list from F75
+# and do NOT meet these criteria; they stay as they are. A new name needs its
+# real function reachable by ir_canonical_fns() (base or a loaded namespace
+# such as stats), so a user's own `qnorm` is still called by dplyr. A new name
+# that can return a string stays off, because a fold to a string reaches native
+# ops that don't guard a string operand.
 ir_pure_extra_names <- c(
   # constructors, subsetting, shape
   "c", ":", "seq", "seq_len", "seq_along", "rep", "rep_len", "rev", "sort", "order", "unique",
@@ -523,7 +535,17 @@ ir_pure_extra_names <- c(
   "ymd", "ydm", "mdy", "myd", "dmy", "dym", "ymd_hms", "ymd_hm", "ymd_h", "mdy_hms", "dmy_hms",
   "make_date", "make_datetime", "days", "weeks", "months", "years", "hours", "minutes",
   "seconds", "period", "duration", "ddays", "dweeks", "dhours", "dminutes", "dseconds",
-  "today", "as_date", "as_datetime"
+  "today", "as_date", "as_datetime",
+  # stats distribution functions d/p/q (never r*)
+  paste0(rep(c("d", "p", "q"), each = 19L),
+         c("norm", "t", "chisq", "f", "binom", "pois", "exp", "gamma", "beta", "unif", "lnorm",
+           "geom", "hyper", "nbinom", "logis", "cauchy", "weibull", "signrank", "wilcox")),
+  "ptukey", "qtukey",
+  # base math
+  "sign", "gamma", "lgamma", "digamma", "trigamma", "beta", "lbeta", "choose", "lchoose",
+  "factorial", "lfactorial",
+  # helpers
+  "identical", "NROW", "NCOL", "seq.int", "is.data.frame", "is.list"
 )
 
 # The canonical function objects of a pure name: the ones R finds in base, then
@@ -892,6 +914,43 @@ impure_const_call_text <- function(dots, schema, grouped = TRUE) {
   }
   NULL
 }
+
+# F83: evaluate a column-free expression to fold it. `value` is a promise (the
+# evaluation, forced inside the handlers). Returns `list(value = )`; NULL when it
+# raised (`list(error = )` with `keep_error`); or `list(declined = TRUE)` when it
+# raised a plain warning and the verb call has screened its dots
+# (fallback_is_screened(): every column-free call in them is pure, so none runs
+# twice). The caller then gives the fold up like a failed one, and dplyr evaluates
+# the call and raises its own warning (per group, naming the argument) where the
+# fold would raise one bare warning. Where the screen did not run (ungrouped
+# mutate()/filter()), or outside a verb call, the fold keeps its one evaluation
+# and its warning. A classed warning (cuplyr_opt_warn()'s once-only options
+# warning) passes through: dplyr's rerun would not repeat it the same way. The
+# handler asks only when a warning fires, so the no-warning path pays for nothing.
+# `$value` of the result is the folded value or NULL, whichever way it ended.
+# @keywords internal
+ir_fold_eval <- function(value, keep_error = FALSE) {
+  tryCatch(
+    withCallingHandlers(
+      list(value = value),
+      warning = function(w) {
+        if (identical(class(w), ir_plain_warning_class) && fallback_is_screened()) {
+          stop(ir_fold_declined)
+        }
+      }
+    ),
+    cuplyr_fold_declined = function(cnd) list(declined = TRUE),
+    error = function(e) if (keep_error) list(error = e)
+  )
+}
+ir_plain_warning_class <- c("simpleWarning", "warning", "condition")
+ir_fold_declined <- structure(class = c("cuplyr_fold_declined", "condition"),
+                              list(message = "", call = NULL))
+
+# The cause a declined fold records where the parse gives the call up.
+ir_fold_declined_text <- paste0(
+  "it raised a warning when evaluated once; dplyr evaluates it per group and reports the warning."
+)
 
 # -----------------------------------------------------------------------------
 # F77: a function of the user's that shadows a native op's name.
@@ -1379,10 +1438,11 @@ ir_parse_pre_registry <- function(expr, env, schema, allow_vector, fn_name, head
     if (ir_fold_reaches_mask(expr)) {
       return(NULL)
     }
-    folded <- tryCatch(
-      list(value = rlang::eval_tidy(rlang::new_quosure(expr, env), data = list())),
-      error = function(e) NULL
-    )
+    folded <- ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(expr, env), data = list()))
+    if (!is.null(folded$declined)) {
+      fallback_cause(ir_fold_declined_text)
+      return(NULL)
+    }
     if (!is.null(folded) && is.atomic(folded$value) && !is.null(folded$value)) {
       if (length(folded$value) != 1) {
         return(NULL)
@@ -1541,11 +1601,9 @@ ir_parse_pre_registry <- function(expr, env, schema, allow_vector, fn_name, head
     if (ir_fold_reaches_mask(expr)) {
       return(NULL)
     }
-    folded <- tryCatch(
-      list(value = rlang::eval_tidy(rlang::new_quosure(expr, env))),
-      error = function(e) NULL
-    )
-    if (is.null(folded)) {
+    folded <- ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(expr, env)))
+    if (is.null(folded) || !is.null(folded$declined)) {
+      if (!is.null(folded)) fallback_cause(ir_fold_declined_text)
       return(NULL)
     }
     # (floor_date(NULL) is NULL: no literal, see ir_lit_or_unsupported())
@@ -1802,6 +1860,10 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       # non-literal argument, so only an all-literal call asks.)
       if (all_lit) {
         folded <- ir_fold_literal_call(canonical, parsed_args)
+        if (inherits(folded, "cuplyr_fold_declined")) {
+          fallback_cause(ir_fold_declined_text)
+          return(NULL)
+        }
         if (!is.null(folded)) {
           return(folded)
         }
@@ -1831,11 +1893,10 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
       # functions) are valid but fail out here. NULL = unsupported, so the
       # caller's CPU fallback reruns it through dplyr (which raises its own
       # error if the call really is broken).
-      folded <- tryCatch(
-        list(value = rlang::eval_tidy(rlang::new_quosure(expr, env))),
-        error = function(e) NULL
-      )
-      if (is.null(folded)) {
+      # (F83: a pure call that warns is dplyr's too, see ir_fold_eval())
+      folded <- ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(expr, env)))
+      if (is.null(folded) || !is.null(folded$declined)) {
+        if (!is.null(folded)) fallback_cause(ir_fold_declined_text)
         return(NULL)
       }
       return(ir_lit_or_unsupported(folded$value, allow_vector = allow_vector))
@@ -1898,6 +1959,9 @@ ir_lit_r_value <- function(node) {
 
 # Evaluate the pure op `op` (ir_foldable_pure_ops) on R values with base R:
 # `ok = FALSE` when R errors or warns, or the result isn't a plain scalar.
+# The call goes through ir_fold_eval(), so in a screened verb call a plain
+# warning declines (`declined = TRUE`: dplyr evaluates it per group and reports
+# the warning). Elsewhere a warning is swallowed here and the op is not folded.
 # @keywords internal
 ir_eval_pure_op <- function(op, vals) {
   no <- list(ok = FALSE)
@@ -1906,9 +1970,19 @@ ir_eval_pure_op <- function(op, vals) {
   if (is.null(fn)) {
     return(no)
   }
-  value <- tryCatch(do.call(fn, vals), error = function(e) NULL,
-                    warning = function(w) NULL)
-  if (!is.atomic(value) || length(value) != 1L || is.object(value)) {
+  warned <- FALSE
+  got <- withCallingHandlers(
+    ir_fold_eval(do.call(fn, vals)),
+    warning = function(w) {
+      warned <<- TRUE
+      invokeRestart("muffleWarning")
+    }
+  )
+  if (isTRUE(got$declined)) {
+    return(list(ok = FALSE, declined = TRUE))
+  }
+  value <- got$value
+  if (warned || !is.atomic(value) || length(value) != 1L || is.object(value)) {
     return(no)
   }
   list(ok = TRUE, value = value)
@@ -1919,6 +1993,8 @@ ir_eval_pure_op <- function(op, vals) {
 # a logical NA). Returns the literal node, or NULL when the call isn't foldable
 # (an op outside the pure list, a non-literal or vector argument, a warning or
 # error in R, a result that isn't a plain scalar): the call then parses as before.
+# A fold that raised a plain warning in a screened verb call returns
+# `ir_fold_declined` instead: the caller gives the call up to the CPU.
 # @keywords internal
 ir_fold_literal_call <- function(op, args) {
   if (!op %in% ir_foldable_pure_ops || length(args) == 0L) {
@@ -1943,6 +2019,9 @@ ir_fold_literal_call <- function(op, args) {
     vals[i] <- list(got$value)
   }
   got <- ir_eval_pure_op(op, vals)
+  if (isTRUE(got$declined)) {
+    return(ir_fold_declined)
+  }
   if (!got$ok) {
     return(NULL)
   }
@@ -2795,16 +2874,18 @@ ir_eval_constant <- function(raw_expr, env) {
   if (ir_fold_reaches_mask(raw_expr)) {
     return(list(ok = FALSE, value = NULL))
   }
-  tryCatch({
-    value <- rlang::eval_tidy(rlang::new_quosure(raw_expr, env))
-    # F96: a parameter (`n`, `default`, a pattern, ...) that is an integer64
-    # is vctrs' to cast or reject, and its bits are not a number: the CPU's
-    if (inherits(value, "integer64")) {
-      list(ok = FALSE, value = NULL)
-    } else {
-      list(ok = TRUE, value = value)
-    }
-  }, error = function(e) list(ok = FALSE, value = NULL))
+  # (F83: a pure call that warns is dplyr's, see ir_fold_eval())
+  got <- ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(raw_expr, env)))
+  if (is.null(got) || !is.null(got$declined)) {
+    return(list(ok = FALSE, value = NULL))
+  }
+  # F96: a parameter (`n`, `default`, a pattern, ...) that is an integer64
+  # is vctrs' to cast or reject, and its bits are not a number: the CPU's
+  if (inherits(got$value, "integer64")) {
+    list(ok = FALSE, value = NULL)
+  } else {
+    list(ok = TRUE, value = got$value)
+  }
 }
 
 # The value of an NA flag argument (`na.rm =` / `na_rm =`) when the native
@@ -3291,10 +3372,9 @@ ir_parse_with_order <- function(order_ref, head, a1, rest, env, schema) {
   # The others, each evaluated once; the call is parsed with the VALUE in its
   # place. `.env$k` resolves: the mask is empty, as no column is read.
   for (i in seq_along(rest)) {
-    value <- tryCatch(
-      list(ok = TRUE, value = rlang::eval_tidy(rest[[i]], data = list(), env = env)),
-      error = function(e) list(ok = FALSE, value = NULL)
-    )
+    got <- ir_fold_eval(rlang::eval_tidy(rest[[i]], data = list(), env = env))
+    value <- if (is.null(got) || !is.null(got$declined)) list(ok = FALSE, value = NULL) else
+      list(ok = TRUE, value = got$value)
     if (!value$ok || !is.atomic(value$value) || length(value$value) != 1L) {
       return(NULL)
     }
@@ -5057,6 +5137,11 @@ ir_parse_factor_cmp <- function(op) {
 # plain node.
 # @keywords internal
 ir_parse_factor_in <- function(args, schema) {
+  # A set that is not a literal (a column, a folded call) has no native path.
+  if (length(args) == 2L && !identical(.subset2(args[[2L]], "kind"), "lit")) {
+    fallback_cause("%in% needs a literal set on the right.")
+    return(NULL)
+  }
   plain <- ir_call("%in%", args)
   if (length(args) != 2L || !"DICTIONARY32" %in% schema$types) {
     return(plain)
@@ -5238,6 +5323,20 @@ ir_parse_factor_conversion <- function(expr, schema, fn_name) {
     as.integer = ir_factor_codes(col),
     ir_call("cast_float64", list(ir_factor_codes(col)))
   )
+}
+
+# xor(): BITWISE_XOR needs BOOL8 operands, but R's xor() coerces numbers and
+# strings. Anything that is not logical on both sides is left to dplyr.
+ir_parse_xor <- function(args, schema) {
+  bool <- vapply(args, function(a) {
+    identical(unname(tryCatch(ir_infer_type(a, schema), error = function(e) NA_character_)),
+              "BOOL8")
+  }, logical(1))
+  if (!all(bool)) {
+    fallback_cause("xor() needs logical operands.")
+    return(NULL)
+  }
+  ir_call("xor", args)
 }
 
 # R gives a logical operand a numeric type the GPU evaluator doesn't: window
@@ -6798,7 +6897,7 @@ ir_call_registry <- list(
   "&" = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(ast_op = "NULL_LOGICAL_AND")),
   "|" = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(ast_op = "NULL_LOGICAL_OR")),
   "!" = list(arity = 1L, parse = NULL, type = type_bool8, lower = list(ast_op = "NOT")),
-  "xor" = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(ast_op = "BITWISE_XOR")),
+  "xor" = list(arity = 2L, parse = ir_parse_xor, type = type_bool8, lower = list(ast_op = "BITWISE_XOR")),
 
   "is.na" = list(arity = 1L, parse = NULL, type = type_bool8, lower = list(ast_op = "IS_NULL")),
 

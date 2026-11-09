@@ -33,12 +33,14 @@ test_that("F50: as.integer()/as.character() of anything but a factor column are 
 
 test_that("F50: shapes outside the allowlist still go through F18's rule", {
   sch <- f50g_schema(c("a", "b"))
-  for (e in list(quote(f < "a"), quote("a" %in% f), quote(f == 1), quote(f %in% c(1, 2)),
+  for (e in list(quote(f < "a"), quote(f == 1), quote(f %in% c(1, 2)),
                  quote(f == x))) {
     ir <- ir_parse_quo(rlang::new_quosure(e), sch)
     expect_false(is.null(ir), info = deparse(e))
     expect_identical(ir_factor_rule(ir, sch), "cpu", info = deparse(e))
   }
+  # a set that is a column is the parser's CPU route (F83)
+  expect_null(ir_parse_quo(rlang::new_quosure(quote("a" %in% f)), sch))
 })
 
 test_that("F50: a column named like a called function does not block constant folding", {

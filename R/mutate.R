@@ -484,6 +484,8 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
     if (!is.null(impure)) {
       return(mutate_expr_fallback(.data, dots, .keep, before_quo, after_quo, by_quo, reason = impure))
     }
+    # (F83: every column-free call is pure, so a fold that warns may be given up)
+    fallback_mark_screened()
   }
 
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R's
@@ -1236,7 +1238,11 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
         any(is.finite(v) & v != floor(v))
       }
     } else if (identical(const$kind, "failed")) {
-      fallback_cause("evaluating it outside the data mask raised an error; dplyr runs it and reports.")
+      fallback_cause(if (isTRUE(const$declined)) {
+        ir_fold_declined_text
+      } else {
+        "evaluating it outside the data mask raised an error; dplyr runs it and reports."
+      })
       ir <- NULL
     } else {
       # A vector constant nested inside a larger expression (`x + 1:5`) is
@@ -1379,10 +1385,11 @@ mutate_constant_value <- function(quo, schema) {
           expr_reaches_mask(expr)) {
       return(none)
     }
-    got <- tryCatch(
-      list(value = rlang::eval_tidy(quo, data = list())),
-      error = function(e) NULL
-    )
+    got <- ir_fold_eval(rlang::eval_tidy(quo, data = list()))
+    # (F83: a call that warned, with the dots screened, is dplyr's, as a failed fold is)
+    if (!is.null(got$declined)) {
+      return(list(kind = "failed", declined = TRUE))
+    }
     if (is.null(got)) {
       # A call that raised is dplyr's to run (only it can wrap the error, and
       # the failure out here is no proof it fails inside the mask). The parser
@@ -1970,6 +1977,7 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
         dplyr::transmute(.data = tbl, !!!dots)
       }, reason = impure))
     }
+    fallback_mark_screened()
   }
 
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R

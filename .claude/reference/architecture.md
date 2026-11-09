@@ -301,7 +301,9 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
   quosure's env to the IDENTICAL function as the canonical one of an
   allowlisted name (`ir_pure_names()`: registry ops, the `ir_pre_registry_fns`
   natives, deterministic constructors/coercions/math/strings/`head`/`format`/
-  `getOption`, lubridate parsers, tidyselect helpers, and everything the
+  `getOption`, the stats d/p/q distribution functions, `choose`/`gamma`-style math and
+  `NROW`/`is.list`-style helpers (F83; criteria in the comment at `ir_pure_extra_names`), lubridate
+  parsers, tidyselect helpers, and everything the
   native `.cols` resolver accepts: `base_type_test_names`, `inherits` and
   `name_builder_fns` from R/select.R, plus `grep`, so `where(~ is.double(.x))`
   or `any_of(colnames(lk))` stays native; a resolver change must keep that
@@ -352,11 +354,27 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
   the dot and the call: `gpu_fallback(detail =)`): every `summarise()`
   (`summarise_impl()`, grouped, ungrouped, `.by`, empty groups), and a grouped
   or `.by` `mutate()`/`transmute()`/`filter()` (`mutate_run()`,
-  `transmute_run()`, `filter_run()`). Ungrouped and rowwise mutate() keep the
+  `transmute_run()`, `filter_run()`). A verb that passes the screen marks its
+  reason collector (`fallback_mark_screened()`), and then a fold that raises a
+  plain warning (`x * qnorm(2)`; a classed one passes through) is given up like a
+  failed fold (`ir_fold_eval()`), so dplyr raises its own per-group warning; the
+  mark ends with the call, so a nested verb has none. A rerun is safe because
+  every column-free call in the dots is pure. An ungrouped top_n()/top_frac()
+  is screened and marked too, on its `n` and `wt` (`top_n_rank_mark_screened()`).
+  Where no screen ran (ungrouped mutate()/filter(), whose sibling calls may be
+  impure) the fold keeps its one evaluation and bare warning, as before. A
+  rowwise mutate()/filter() has no mark either, but `rowwise_rewrite_dots()`
+  sends a call with a column-free sub-call outside `rowwise_pure_fns` and the
+  registry (`qnorm(2)`) whole to dplyr, which raises its per-row warnings; a
+  column-free registry op (`sqrt(-1)`) folds natively with no warning. They keep the
   native path below. Ungrouped filter() evaluates a
   column-free predicate once (F82): `filter_run()` evaluates it with no data
   mask and does not parse it, and the dplyr fallbacks get the value inlined
-  (top_n()'s `wt` is screened, see the filter section). Known limits: purity is by name, so an
+  (top_n()'s `wt` is screened, see the filter section). `class`, `typeof`,
+  `mode`, `storage.mode`, `abbreviate` and `unname` are left off the list because
+  each can return a string, and a fold to a string reaches native ops that don't
+  guard a string operand.
+  Known limits: purity is by name, so an
   S3 method or an active binding behind an allowlisted name can hide a side
   effect; default arguments of a `function` literal are not walked; a `.fns`
   given as a value (`f <- ~ .x + c(1)`, then `across(x, f)`) is not walked

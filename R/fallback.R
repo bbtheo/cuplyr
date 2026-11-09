@@ -235,6 +235,25 @@ fallback_reasons_close <- function(prev) {
   invisible(NULL)
 }
 
+# F83: the verb call has screened its dots with impure_const_call_text() and
+# every column-free call in them is pure. The mark lives on the call's collector,
+# so it ends with the call and a verb nested inside a dot has none of its own
+# (ir_fold_eval() reads it). No collector, no mark.
+# @keywords internal
+fallback_mark_screened <- function() {
+  col <- fallback_reasons$cur
+  if (!is.null(col)) {
+    col$screened <- TRUE
+  }
+  invisible(NULL)
+}
+
+# @keywords internal
+fallback_is_screened <- function() {
+  col <- fallback_reasons$cur
+  !is.null(col) && isTRUE(col$screened)
+}
+
 # Record `reason` as the cause the parse in progress gives up for (the first one
 # recorded since the dot's parse began wins: the innermost failing call).
 # @keywords internal

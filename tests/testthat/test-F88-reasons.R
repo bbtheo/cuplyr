@@ -419,9 +419,9 @@ test_that("F88: reframe() and pick() reasons are true where they are said (N20, 
 test_that("F88: an impure-call reason names the call once, as a sentence", {
   skip_if_no_gpu()
   withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = NULL)
-  got <- f88r_run(function(t) group_by(t, g) |> mutate(m = mean(x), z = qnorm(m / 10)))
+  got <- f88r_run(function(t) group_by(t, g) |> mutate(m = mean(x), z = besselI(m / 10, 1)))
   expect_length(got, 1L)
-  expect_identical(got[[1L]]$expr, "qnorm(m / 10)")
+  expect_identical(got[[1L]]$expr, "besselI(m / 10, 1)")
   expect_identical(got[[1L]]$reason,
-                   "`qnorm(m/10)` is not known to be pure, and dplyr evaluates it once per group.")
+                   "`besselI(m/10, 1)` is not known to be pure, and dplyr evaluates it once per group.")
 })
