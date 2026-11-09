@@ -259,8 +259,10 @@ barrier_input_required <- function(node, required) {
       opt_union(required, .subset2(node, "old_names"))
     },
     # `mode = "rank"`'s order_col is read for the ranking even when nothing
-    # above reads it (it may also be a temp column absent from the output)
-    slice = opt_union(required, .subset2(node, "order_col"))
+    # above reads it (it may also be a temp column absent from the output);
+    # `"rank_grouped"` reads its group columns too
+    slice = opt_union(opt_union(required, .subset2(node, "order_col")),
+                      .subset2(node, "group_cols"))
   )
 }
 

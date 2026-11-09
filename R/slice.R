@@ -25,6 +25,16 @@
 # with duplicates/reordering (dplyr's own arbitrary per-group gather can't
 # be expressed as a single membership predicate) -- still fall back to CPU.
 #
+# Grouped slice_min()/slice_max() on a numeric or date key (the types in
+# `topk_key_types`; F115) skip that desugar: `slice_rank_grouped()` pushes one
+# `ast_slice(mode = "rank_grouped")` node, which `lower_slice()` runs as
+# `gpu_slice_rank_grouped()` (src/ops_slice.cpp): stable radix sorts of the row
+# positions (key, missing-key flag, group), in-group ranks from a sorted
+# groupby scan, one mask for the survivors and one gather. Same rows and order
+# as the desugar (group order, or first appearance for `by=`; rank order inside
+# a group). Any other key type (strings, factors, logicals) and the option
+# `cuplyr.topk_path = "sort"` keep the desugar.
+#
 # Row-count-dependent resolution (the n=/prop= clamp for head/tail/rank,
 # and slice()'s index-vector validation/negative-index handling) is
 # deliberately NOT done here in R for the UNGROUPED path: for a lazy
@@ -998,8 +1008,9 @@ slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
 #' the mutate/filter IR recognizes) all run entirely on the GPU (Phase 5,
 #' task W7): ungrouped via a top-k cut plus a sort of the survivors when the
 #' key is numeric or a date and `n` is a small share of the rows, otherwise a
-#' stable sort (with `cudf::rank()` for ties); grouped/`by=`
-#' via a per-group window desugar (see R/slice.R's module docs for the
+#' stable sort (with `cudf::rank()` for ties); grouped/`by=` on such a key
+#' by stable radix sorts of the row positions and per-group ranks, other
+#' grouped/`by=` keys via a per-group window desugar (see R/slice.R's module docs for the
 #' exact group-ordering rules, including `by=`'s first-appearance-order
 #' rule, which applies here too, not just to the positional slice_*()s).
 #' An unsupported `order_by` expression (one the IR can't parse) still
@@ -1132,13 +1143,41 @@ slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
   )))
 }
 
-# Shared grouped/`by=` native-path builder for slice_min()/slice_max():
-# delegates to `slice_grouped_native(mode = "rank")` with the already-
-# resolved `amt` (see resolve_slice_amount()), or returns `NULL` (caller falls
-# back to CPU).
+# Shared grouped/`by=` native-path builder for slice_min()/slice_max() (F115).
+# A numeric or date `order_by` (the types in `topk_key_types`) gets one
+# `ast_slice(mode = "rank_grouped")` node, run by `gpu_slice_rank_grouped()`
+# (sorted positions, in-group ranks, one gather). Any other key type, or the
+# option `cuplyr.topk_path = "sort"`, delegates to
+# `slice_grouped_native(mode = "rank")` (the window desugar) with the already-
+# resolved `amt` (see resolve_slice_amount()). Returns `NULL` (caller falls
+# back to CPU) when `order_by` is not something the IR parses.
 #
 # @keywords internal
 slice_rank_grouped <- function(.data, gm, order_quo, amt, descending, with_ties, na_rm) {
+  if (!identical(getOption("cuplyr.topk_path", "auto"), "sort")) {
+    schema <- current_schema(.data)
+    resolved <- tryCatch(resolve_slice_order(order_quo, schema), error = function(e) NULL)
+    if (is.null(resolved)) {
+      return(NULL)
+    }
+    input <- input_node(.data)
+    if (!is.null(resolved$extra_mutate)) {
+      input <- ast_mutate(input, resolved$extra_mutate)
+    }
+    in_schema <- infer_schema_memo(input)
+    key_type <- in_schema$types[[match(resolved$order_col, in_schema$names)]]
+    if (key_type %in% topk_key_types) {
+      node <- ast_slice(input, mode = "rank_grouped",
+                        order_col = resolved$order_col,
+                        order_is_temp = !is.null(resolved$extra_mutate),
+                        descending = descending,
+                        amount = amt$amount, is_prop = amt$is_prop,
+                        with_ties = with_ties, na_rm = na_rm,
+                        group_cols = gm$group_cols,
+                        by_first = identical(gm$mode, "by"))
+      return(push_op(.data, node))
+    }
+  }
   slice_grouped_native(.data, gm$mode, gm$group_cols, mode = "rank",
                        amount = amt$amount, is_prop = amt$is_prop,
                        order_quo = order_quo, descending = descending,

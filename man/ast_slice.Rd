@@ -18,14 +18,17 @@ ast_slice(
   bracket_arg = NULL,
   bracket_call = NULL,
   rows_resolved = FALSE,
-  top_k = FALSE
+  top_k = FALSE,
+  group_cols = NULL,
+  by_first = FALSE
 )
 }
 \arguments{
 \item{input}{Input AST node}
 
-\item{mode}{One of \code{"head"}, \code{"tail"}, \code{"index"}, \code{"rank"}, \code{"bracket"} (tibble
-\code{x[i, ]} row subscript in \code{raw_indices}, NA / out-of-range give NA rows)}
+\item{mode}{One of \code{"head"}, \code{"tail"}, \code{"index"}, \code{"rank"}, \code{"rank_grouped"},
+\code{"bracket"} (tibble \code{x[i, ]} row subscript in \code{raw_indices}, NA / out-of-range
+give NA rows)}
 
 \item{amount}{For \code{mode} \code{"head"}/\code{"tail"}/\code{"rank"}: the raw (unresolved)
 \code{n}/\code{prop} value (sign preserved; resolved against the actual row
@@ -65,6 +68,13 @@ raised when it is resolved at lowering}
 \item{top_k}{For \code{mode} \code{"rank"}: \code{TRUE} on a node the optimizer made from
 \code{arrange(x) |> head(n)} (\code{rewrite_slice_over_arrange()}); the node is then
 \code{slice_min(x, n, with_ties = FALSE)} and nothing else}
+
+\item{group_cols, by_first}{For \code{mode == "rank_grouped"} (F115, a grouped
+\code{slice_min()}/\code{slice_max()} on a numeric or date key, run by
+\code{gpu_slice_rank_grouped()}): the grouping columns, and whether the groups
+come out in order of their first row (\verb{by=}/\verb{.by=}) rather than sorted by
+key (\code{group_by()}). The other rank fields mean what they do for
+\code{"rank"}.}
 }
 \value{
 An ast_slice node

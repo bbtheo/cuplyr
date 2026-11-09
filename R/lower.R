@@ -480,6 +480,23 @@ lower_slice <- function(ast, source_ptr) {
 
       result_ptr
     },
+    # F115: grouped slice_min()/slice_max() on a numeric or date key
+    "rank_grouped" = {
+      input_schema <- infer_schema_memo(ast$input)
+      col_idx <- match(ast$order_col, input_schema$names) - 1L
+      group_idx <- match(ast$group_cols, input_schema$names) - 1L
+
+      result_ptr <- gpu_slice_rank_grouped(input_ptr, group_idx, col_idx, ast$descending,
+                                           ast$amount, ast$is_prop, ast$with_ties,
+                                           ast$na_rm, ast$by_first)
+
+      if (isTRUE(ast$order_is_temp)) {
+        keep_idx <- set_diff(seq_along(input_schema$names) - 1L, col_idx)
+        result_ptr <- gpu_select(result_ptr, keep_idx)
+      }
+
+      result_ptr
+    },
     stop("Unknown slice mode: ", ast$mode, call. = FALSE)
   )
 }

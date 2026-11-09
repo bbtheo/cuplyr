@@ -45,12 +45,21 @@
 //   Every route returns the kept rows in sorted order, with no CPU round-trip.
 //   The "cuplyr.topk_path" option ("auto", "topk", "sort") forces a route and
 //   the result pointer's "topk" attribute records which one ran.
+//
+// - gpu_slice_rank_grouped() (F115): the same for group_by()/by= input and a
+//   numeric or date key. It is the one grouped route; any other key type, and
+//   "cuplyr.topk_path" = "sort", stay on R/slice.R's window desugar. It sets no
+//   "topk" attribute: the route shows as a slice node of mode "rank_grouped" in
+//   the plan. See the comment above it for the algorithm.
 
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
 #include "ops_common.hpp"
 
 #include <cudf/copying.hpp>
+#include <cudf/concatenate.hpp>
+#include <cudf/groupby.hpp>
+#include <cudf/replace.hpp>
 #include <cudf/contiguous_split.hpp>
 #include <cudf/sorting.hpp>
 #include <cudf/stream_compaction.hpp>
@@ -66,6 +75,8 @@
 #include <cudf/table/table_view.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/utilities/span.hpp>
+#include <cudf/column/column_factories.hpp>
+#include <cudf/scalar/scalar_factories.hpp>
 
 #include <rmm/device_uvector.hpp>
 #include <rmm/mr/device/per_device_resource.hpp>
@@ -539,4 +550,322 @@ SEXP gpu_slice_rank(SEXP xptr, int order_col_idx, bool descending, double amount
     auto out = make_gpu_table_xptr(std::move(result));
     out.attr("topk") = false;
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// F115: grouped slice_min()/slice_max() on a numeric or date key.
+//
+// dplyr's rule per group: rank the key (NA last in both directions, NaN is NA,
+// ties "min" or "sequential"), keep rank <= size, order the kept rows by rank.
+// The route sorts row POSITIONS only, with stable single-column radix sorts
+// (least significant first): the key, then "is the key missing" (so missing
+// rows end up last, in row order, in either direction), then the group
+// columns. Equal keys keep row order throughout, which is dplyr's tie order.
+// The rows are then in (group, rank) order; the in-group position comes from a
+// sorted-groupby scan, the rank of a tied row from the start of its run of
+// equal keys, and one boolean mask picks the survivors. Only the survivors are
+// gathered from the table. cudf::segmented_top_k_order() is not used: it is not
+// stable, takes one k for every segment and cannot keep ties (see the F115
+// brief). `by_first` (by=/.by=) orders the groups by the first row each has
+// instead of by group value.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using ColumnPtr = std::unique_ptr<cudf::column>;
+
+// rows of `cols` picked by `perm` (DONT_CHECK: perm is a sort result)
+std::unique_ptr<cudf::table> gather_rows(const cudf::table_view& cols, cudf::column_view perm,
+                                         rmm::cuda_stream_view stream,
+                                         rmm::device_async_resource_ref mr) {
+    return cudf::gather(cols, perm, cudf::out_of_bounds_policy::DONT_CHECK, stream, mr);
+}
+
+// The composed permutation: element i is inner[outer[i]]
+ColumnPtr compose(cudf::column_view inner, cudf::column_view outer, rmm::cuda_stream_view stream,
+                  rmm::device_async_resource_ref mr) {
+    auto t = gather_rows(cudf::table_view({inner}), outer, stream, mr);
+    return std::move(t->release().front());
+}
+
+// A key as an INT64 or INT32 column whose signed order is the key's order, with
+// no nulls and -0 equal to 0 (sort passes need a dense, comparable column).
+// Missing rows (null or NaN-nulled) take 0; they are put last by their own pass.
+// New columns are owned by `keep`.
+cudf::column_view dense_sort_key(cudf::column_view key, rmm::cuda_stream_view stream,
+                                 rmm::device_async_resource_ref mr, std::vector<ColumnPtr>& keep) {
+    if (key.type().id() == cudf::type_id::FLOAT32) {
+        keep.push_back(cudf::cast(key, cudf::data_type(cudf::type_id::FLOAT64), stream, mr));
+        key = keep.back()->view();
+    }
+    if (key.type().id() == cudf::type_id::FLOAT64) {
+        if (key.null_count() > 0) {
+            keep.push_back(cudf::replace_nulls(
+                key, *cudf::make_fixed_width_scalar<double>(0.0, stream, mr), stream, mr));
+            key = keep.back()->view();
+        }
+        // -0 + 0 is +0: the two must tie, and as INT64 they would sort apart
+        keep.push_back(cudf::binary_operation(
+            key, cudf::numeric_scalar<double>(0.0, true, stream, mr), cudf::binary_operator::ADD,
+            cudf::data_type(cudf::type_id::FLOAT64), stream, mr));
+        keep.push_back(sortable_int64(keep.back()->view(), stream, mr));
+        return keep.back()->view();
+    }
+    // integers and (bit-cast) timestamps
+    if (key.null_count() > 0) {
+        if (key.type().id() == cudf::type_id::INT32) {
+            keep.push_back(cudf::replace_nulls(
+                key, *cudf::make_fixed_width_scalar<int32_t>(0, stream, mr), stream, mr));
+        } else {
+            keep.push_back(cudf::replace_nulls(
+                key, *cudf::make_fixed_width_scalar<int64_t>(0, stream, mr), stream, mr));
+        }
+        return keep.back()->view();
+    }
+    return key;
+}
+
+// 0, 1, ..., n-1 as INT32
+ColumnPtr iota(cudf::size_type n, rmm::cuda_stream_view stream, rmm::device_async_resource_ref mr) {
+    return cudf::sequence(n, cudf::numeric_scalar<int32_t>(0, true, stream, mr),
+                          cudf::numeric_scalar<int32_t>(1, true, stream, mr), stream, mr);
+}
+
+} // namespace
+
+// [[Rcpp::export]]
+SEXP gpu_slice_rank_grouped(SEXP xptr, IntegerVector group_idx, int order_col_idx,
+                            bool descending, double amount, bool is_prop, bool with_ties,
+                            bool na_rm, bool by_first) {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
+    cudf::table_view view = get_table_view(ptr);
+    check_row_limit(view, "slice_min()/slice_max()");
+
+    if (order_col_idx < 0 || order_col_idx >= view.num_columns()) {
+        Rcpp::stop("order_by column index out of bounds: %d (table has %d columns)",
+                   order_col_idx, view.num_columns());
+    }
+    if (group_idx.size() == 0) {
+        Rcpp::stop("gpu_slice_rank_grouped: no group columns");
+    }
+    std::vector<cudf::column_view> group_views;
+    for (int i = 0; i < group_idx.size(); ++i) {
+        if (group_idx[i] < 0 || group_idx[i] >= view.num_columns()) {
+            Rcpp::stop("group column index out of bounds: %d (table has %d columns)",
+                       group_idx[i], view.num_columns());
+        }
+        group_views.push_back(view.column(group_idx[i]));
+    }
+
+    auto stream = cudf::get_default_stream();
+    auto mr = rmm::mr::get_current_device_resource();
+
+    const cudf::size_type m = view.num_rows();
+    if (m == 0) {
+        return make_gpu_table_xptr(cudf::empty_like(view));
+    }
+
+    // The key as the ranking sees it: a floating NaN is missing (as in
+    // gpu_slice_rank()); the gathered rows keep their NaN. Timestamps compare
+    // as their integer ticks.
+    cudf::column_view key = view.column(order_col_idx);
+    std::unique_ptr<cudf::column> nan_nulled = nan_nulled_copy(key);
+    if (nan_nulled) key = nan_nulled->view();
+    if (key.type().id() == cudf::type_id::TIMESTAMP_DAYS) {
+        key = cudf::bit_cast(key, cudf::data_type(cudf::type_id::INT32));
+    } else if (key.type().id() == cudf::type_id::TIMESTAMP_MICROSECONDS) {
+        key = cudf::bit_cast(key, cudf::data_type(cudf::type_id::INT64));
+    }
+    if (!topk_key_type(key.type().id())) {
+        Rcpp::stop("gpu_slice_rank_grouped: unsupported order_by type");
+    }
+    const bool has_missing = key.null_count() > 0;
+    const cudf::order col_order = descending ? cudf::order::DESCENDING : cudf::order::ASCENDING;
+
+    // Pass 1: the key. `order` holds row positions, composed pass by pass.
+    std::vector<ColumnPtr> keepalive;
+    ColumnPtr order;
+    {
+        cudf::column_view sort_key = dense_sort_key(key, stream, mr, keepalive);
+        order = cudf::stable_sorted_order(cudf::table_view({sort_key}), {col_order},
+                                          {cudf::null_order::AFTER}, stream, mr);
+    }
+    keepalive.clear();
+
+    // Pass 2: missing rows last, in row order (they all tied at 0 in pass 1)
+    if (has_missing) {
+        ColumnPtr missing = cudf::is_null(key, stream, mr);
+        ColumnPtr by_order = std::move(gather_rows(cudf::table_view({missing->view()}), order->view(), stream, mr)->release().front());
+        missing.reset();
+        ColumnPtr o2 = cudf::stable_sorted_order(cudf::table_view({by_order->view()}),
+                                                 {cudf::order::ASCENDING}, {cudf::null_order::AFTER},
+                                                 stream, mr);
+        by_order.reset();
+        order = compose(order->view(), o2->view(), stream, mr);
+    }
+
+    // Pass 3: the groups (a single radix sort for one integer column, a
+    // comparator sort of the group columns otherwise)
+    {
+        auto g = gather_rows(cudf::table_view(group_views), order->view(), stream, mr);
+        std::vector<cudf::order> g_order(group_views.size(), cudf::order::ASCENDING);
+        std::vector<cudf::null_order> g_null(group_views.size(), cudf::null_order::AFTER);
+        ColumnPtr o3 = cudf::stable_sorted_order(g->view(), g_order, g_null, stream, mr);
+        g.reset();
+        order = compose(order->view(), o3->view(), stream, mr);
+    }
+
+    // The group columns and the key in (group, rank) order
+    std::vector<cudf::column_view> gk_views = group_views;
+    gk_views.push_back(key);
+    std::unique_ptr<cudf::table> sorted = gather_rows(cudf::table_view(gk_views), order->view(), stream, mr);
+    const cudf::size_type ng = static_cast<cudf::size_type>(group_views.size());
+    std::vector<cudf::column_view> sg_views;
+    for (cudf::size_type i = 0; i < ng; ++i) sg_views.push_back(sorted->view().column(i));
+    cudf::table_view sorted_groups(sg_views);
+    cudf::column_view sorted_key = sorted->view().column(ng);
+
+    // Partition exactly as gpu_window() does: the rows are sorted by group, NaN
+    // and NA group keys included (sorted::YES, never NOT_EQUAL on the values)
+    std::vector<cudf::order> key_order(ng, cudf::order::ASCENDING);
+    std::vector<cudf::null_order> key_null(ng, cudf::null_order::AFTER);
+    cudf::groupby::groupby gb(sorted_groups, cudf::null_policy::INCLUDE, cudf::sorted::YES,
+                              key_order, key_null);
+
+    // 1-based position in the group
+    ColumnPtr rn;
+    {
+        std::vector<cudf::groupby::scan_request> reqs(1);
+        reqs[0].values = sorted_groups.column(0);
+        reqs[0].aggregations.push_back(
+            cudf::make_count_aggregation<cudf::groupby_scan_aggregation>(cudf::null_policy::INCLUDE));
+        auto res = gb.scan(reqs, stream, mr);
+        rn = std::move(res.second[0].results[0]);
+        if (rn->type().id() != cudf::type_id::INT32) {
+            rn = cudf::cast(rn->view(), cudf::data_type(cudf::type_id::INT32), stream, mr);
+        }
+    }
+    const auto i32 = cudf::data_type(cudf::type_id::INT32);
+    const auto bool8 = cudf::data_type(cudf::type_id::BOOL8);
+    const auto f64 = cudf::data_type(cudf::type_id::FLOAT64);
+
+    // 0-based rank within the group
+    ColumnPtr rank0 = cudf::binary_operation(rn->view(), cudf::numeric_scalar<int32_t>(1, true, stream, mr),
+                                             cudf::binary_operator::SUB, i32, stream, mr);
+    if (with_ties) {
+        // the start of the run of equal keys (missing keys are all equal) the
+        // row sits in, as a global position; its offset from the row, which is
+        // <= 0, moves the rank back to the run start
+        ColumnPtr seq = iota(m, stream, mr);
+        ColumnPtr first_of_group = cudf::binary_operation(
+            rn->view(), cudf::numeric_scalar<int32_t>(1, true, stream, mr),
+            cudf::binary_operator::EQUAL, bool8, stream, mr);
+        ColumnPtr flag;  // row starts a run: first of a group, or key differs from the row above
+        {
+            auto cur = cudf::slice(sorted_key, {1, m}).front();
+            auto prev = cudf::slice(sorted_key, {0, m - 1}).front();
+            ColumnPtr same = cudf::binary_operation(cur, prev, cudf::binary_operator::NULL_EQUALS, bool8, stream, mr);
+            ColumnPtr differs = cudf::unary_operation(same->view(), cudf::unary_operator::NOT, stream, mr);
+            same.reset();
+            auto first_tail = cudf::slice(first_of_group->view(), {1, m}).front();
+            ColumnPtr tail = cudf::binary_operation(differs->view(), first_tail,
+                                                    cudf::binary_operator::LOGICAL_OR, bool8, stream, mr);
+            differs.reset();
+            ColumnPtr head = cudf::make_column_from_scalar(cudf::numeric_scalar<bool>(true, true, stream, mr), 1, stream, mr);
+            flag = cudf::concatenate(std::vector<cudf::column_view>{head->view(), tail->view()}, stream, mr);
+        }
+        first_of_group.reset();
+        ColumnPtr flag32 = cudf::cast(flag->view(), i32, stream, mr);
+        flag.reset();
+        ColumnPtr marked = cudf::binary_operation(seq->view(), flag32->view(), cudf::binary_operator::MUL, i32, stream, mr);
+        flag32.reset();
+        ColumnPtr run_start = cudf::scan(marked->view(), *cudf::make_max_aggregation<cudf::scan_aggregation>(),
+                                         cudf::scan_type::INCLUSIVE, cudf::null_policy::INCLUDE, stream, mr);
+        marked.reset();
+        ColumnPtr back = cudf::binary_operation(run_start->view(), seq->view(), cudf::binary_operator::SUB, i32, stream, mr);
+        rank0 = cudf::binary_operation(rank0->view(), back->view(), cudf::binary_operator::ADD, i32, stream, mr);
+    }
+    rn.reset();
+
+    // Per group: its row count (for prop/negative sizes) and, for by=, the
+    // first row it has. Both are per sorted group, then repeated to every row.
+    ColumnPtr group_rows;   // rows of the row's group, INT32
+    ColumnPtr group_first;  // first row position of the row's group, INT32
+    const bool size_per_row = is_prop || amount < 0;
+    if (size_per_row || by_first) {
+        std::vector<cudf::groupby::aggregation_request> reqs(by_first ? 2 : 1);
+        reqs[0].values = sorted_groups.column(0);
+        reqs[0].aggregations.push_back(
+            cudf::make_count_aggregation<cudf::groupby_aggregation>(cudf::null_policy::INCLUDE));
+        if (by_first) {
+            reqs[1].values = order->view();
+            reqs[1].aggregations.push_back(cudf::make_min_aggregation<cudf::groupby_aggregation>());
+        }
+        auto res = gb.aggregate(reqs, stream, mr);
+        cudf::column_view counts = res.second[0].results[0]->view();
+        std::vector<cudf::column_view> per_group = {counts};
+        if (by_first) per_group.push_back(res.second[1].results[0]->view());
+        auto rep = cudf::repeat(cudf::table_view(per_group), counts, stream, mr);
+        auto cols = rep->release();
+        group_rows = std::move(cols[0]);
+        if (by_first) group_first = std::move(cols[1]);
+    }
+
+    // keep = rank0 < size, i.e. rank <= size (sizes are whole numbers). The
+    // size is dplyr's get_slice_size() in FLOAT64, so Inf works; it needs no
+    // clamp, since a size below 0 keeps nothing and one past the group keeps all.
+    ColumnPtr keep;
+    if (!size_per_row) {
+        // n >= 0: one size for every group
+        const double whole = std::floor(amount);
+        const int32_t size = whole >= static_cast<double>(INT32_MAX) ? INT32_MAX
+                                                                     : static_cast<int32_t>(whole);
+        keep = cudf::binary_operation(rank0->view(), cudf::numeric_scalar<int32_t>(size, true, stream, mr),
+                                      cudf::binary_operator::LESS, bool8, stream, mr);
+    } else {
+        ColumnPtr gs = cudf::cast(group_rows->view(), f64, stream, mr);
+        ColumnPtr size;
+        if (is_prop) {
+            ColumnPtr raw = cudf::binary_operation(gs->view(), cudf::numeric_scalar<double>(amount, true, stream, mr),
+                                                   cudf::binary_operator::MUL, f64, stream, mr);
+            if (amount >= 0) {
+                size = cudf::unary_operation(raw->view(), cudf::unary_operator::FLOOR, stream, mr);
+            } else {
+                ColumnPtr total = cudf::binary_operation(gs->view(), raw->view(), cudf::binary_operator::ADD, f64, stream, mr);
+                size = cudf::unary_operation(total->view(), cudf::unary_operator::CEIL, stream, mr);
+            }
+        } else {
+            ColumnPtr total = cudf::binary_operation(gs->view(), cudf::numeric_scalar<double>(amount, true, stream, mr),
+                                                     cudf::binary_operator::ADD, f64, stream, mr);
+            size = cudf::unary_operation(total->view(), cudf::unary_operator::CEIL, stream, mr);
+        }
+        gs.reset();
+        ColumnPtr r = cudf::cast(rank0->view(), f64, stream, mr);
+        keep = cudf::binary_operation(r->view(), size->view(), cudf::binary_operator::LESS, bool8, stream, mr);
+    }
+    rank0.reset();
+
+    if (na_rm && has_missing) {
+        ColumnPtr present = cudf::is_valid(sorted_key, stream, mr);
+        keep = cudf::binary_operation(keep->view(), present->view(), cudf::binary_operator::LOGICAL_AND,
+                                      bool8, stream, mr);
+    }
+
+    // Survivors, still in (group, rank) order; by= puts the groups in order of
+    // their first row (stable, so each group keeps its rank order)
+    std::vector<cudf::column_view> carried = {order->view()};
+    if (by_first) carried.push_back(group_first->view());
+    std::unique_ptr<cudf::table> kept =
+        cudf::apply_boolean_mask(cudf::table_view(carried), keep->view(), stream, mr);
+    std::vector<ColumnPtr> kept_cols = kept->release();
+    ColumnPtr positions = std::move(kept_cols[0]);
+    if (by_first && positions->size() > 1) {
+        ColumnPtr by_group = cudf::stable_sorted_order(
+            cudf::table_view({kept_cols[1]->view()}), {cudf::order::ASCENDING},
+            {cudf::null_order::AFTER}, stream, mr);
+        positions = compose(positions->view(), by_group->view(), stream, mr);
+    }
+    return make_gpu_table_xptr(gather_rows(view, positions->view(), stream, mr));
 }

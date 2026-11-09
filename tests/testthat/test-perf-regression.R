@@ -666,3 +666,16 @@ test_that("perf: topk_slice_min_eager", {
       collect()
   }, calibration = "kernel")
 })
+
+# F115: grouped slice_min() on a numeric key (5000 integer groups)
+test_that("perf: topk_slice_min_grouped_eager", {
+  skip_if_no_gpu()
+  gpu_df <- tbl_gpu(perf_big_df, lazy = FALSE)
+
+  expect_no_perf_regression("topk_slice_min_grouped_eager", function() {
+    gpu_df |>
+      dplyr::group_by(id) |>
+      dplyr::slice_min(x, n = 3) |>
+      collect()
+  }, calibration = "kernel")
+})

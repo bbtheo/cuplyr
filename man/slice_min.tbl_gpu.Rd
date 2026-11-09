@@ -49,8 +49,9 @@ and \verb{by=} calls with a plain \code{order_by} (a bare column, or an expressi
 the mutate/filter IR recognizes) all run entirely on the GPU (Phase 5,
 task W7): ungrouped via a top-k cut plus a sort of the survivors when the
 key is numeric or a date and \code{n} is a small share of the rows, otherwise a
-stable sort (with \code{cudf::rank()} for ties); grouped/\verb{by=}
-via a per-group window desugar (see R/slice.R's module docs for the
+stable sort (with \code{cudf::rank()} for ties); grouped/\verb{by=} on such a key
+by stable radix sorts of the row positions and per-group ranks, other
+grouped/\verb{by=} keys via a per-group window desugar (see R/slice.R's module docs for the
 exact group-ordering rules, including \verb{by=}'s first-appearance-order
 rule, which applies here too, not just to the positional slice_*()s).
 An unsupported \code{order_by} expression (one the IR can't parse) still

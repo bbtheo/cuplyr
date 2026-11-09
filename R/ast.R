@@ -196,8 +196,9 @@ ast_distinct <- function(input, key_cols, keep_all = FALSE, key_positions = NULL
 #' the CPU fallback (`R/fallback.R`) instead.
 #'
 #' @param input Input AST node
-#' @param mode One of `"head"`, `"tail"`, `"index"`, `"rank"`, `"bracket"` (tibble
-#'   `x[i, ]` row subscript in `raw_indices`, NA / out-of-range give NA rows)
+#' @param mode One of `"head"`, `"tail"`, `"index"`, `"rank"`, `"rank_grouped"`,
+#'   `"bracket"` (tibble `x[i, ]` row subscript in `raw_indices`, NA / out-of-range
+#'   give NA rows)
 #' @param amount For `mode` `"head"`/`"tail"`/`"rank"`: the raw (unresolved)
 #'   `n`/`prop` value (sign preserved; resolved against the actual row
 #'   count only at lowering time, see `src/ops_common.hpp::compute_slice_size()`)
@@ -228,6 +229,12 @@ ast_distinct <- function(input, key_cols, keep_all = FALSE, key_positions = NULL
 #' @param top_k For `mode` `"rank"`: `TRUE` on a node the optimizer made from
 #'   `arrange(x) |> head(n)` (`rewrite_slice_over_arrange()`); the node is then
 #'   `slice_min(x, n, with_ties = FALSE)` and nothing else
+#' @param group_cols,by_first For `mode == "rank_grouped"` (F115, a grouped
+#'   `slice_min()`/`slice_max()` on a numeric or date key, run by
+#'   `gpu_slice_rank_grouped()`): the grouping columns, and whether the groups
+#'   come out in order of their first row (`by=`/`.by=`) rather than sorted by
+#'   key (`group_by()`). The other rank fields mean what they do for
+#'   `"rank"`.
 #' @return An ast_slice node
 #' @keywords internal
 ast_slice <- function(input, mode, amount = NULL, is_prop = NULL,
@@ -235,13 +242,15 @@ ast_slice <- function(input, mode, amount = NULL, is_prop = NULL,
                       order_is_temp = FALSE, descending = NULL,
                       with_ties = NULL, na_rm = NULL,
                       bracket_arg = NULL, bracket_call = NULL,
-                      rows_resolved = FALSE, top_k = FALSE) {
+                      rows_resolved = FALSE, top_k = FALSE,
+                      group_cols = NULL, by_first = FALSE) {
   ast_node("slice", input = input, mode = mode, amount = amount, is_prop = is_prop,
            raw_indices = raw_indices, order_col = order_col,
            order_is_temp = order_is_temp, descending = descending,
            with_ties = with_ties, na_rm = na_rm,
            bracket_arg = bracket_arg, bracket_call = bracket_call,
-           rows_resolved = rows_resolved, top_k = top_k)
+           rows_resolved = rows_resolved, top_k = top_k,
+           group_cols = group_cols, by_first = by_first)
 }
 
 #' Create a window AST node
@@ -755,7 +764,7 @@ infer_schema_from <- function(node, input_schema) {
       list(names = input_schema$names[idx], types = input_schema$types[idx])
     },
     slice = {
-      if (identical(node$mode, "rank") && isTRUE(node$order_is_temp)) {
+      if (node$mode %in% c("rank", "rank_grouped") && isTRUE(node$order_is_temp)) {
         idx <- input_schema$names != node$order_col
         return(list(names = input_schema$names[idx], types = input_schema$types[idx]))
       }
@@ -1175,6 +1184,14 @@ describe_slice_detail <- function(node) {
       ", ", size(),
       ", with_ties=", node$with_ties,
       if (isTRUE(node$top_k)) ", top_k" else ""
+    ),
+    "rank_grouped" = paste0(
+      "order_by=", node$order_col,
+      ", desc=", node$descending,
+      ", ", size(),
+      ", with_ties=", node$with_ties,
+      ", groups=[", paste(node$group_cols, collapse = ","), "]",
+      if (isTRUE(node$by_first)) ", by_first" else ""
     ),
     ""
   )
