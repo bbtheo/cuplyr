@@ -40,10 +40,14 @@
 #' Later dots may reference earlier dots' newly-computed columns, exactly
 #' like `mutate()`'s own chain semantics (e.g. `group_by(df, g = x %/% 2, h
 #' = g * 10)`). An **unnamed** argument is a column reference (`x`,
-#' `.data$x`, `.data[["x"]]`), a top-level `pick()`, or -- anything else --
-#' a data-masking expression computed into a new column named
+#' `.data$x`, `.data[["x"]]`), which names an existing column, a top-level
+#' `pick()`, which adds the columns it selects, or -- anything else -- a
+#' data-masking expression computed into a new column named
 #' `rlang::as_label()` of the expression (`group_by(df, a + 1)` makes a column
-#' called `a + 1`). All computed dots (named and unnamed) run as one
+#' called `a + 1`). As soon as one dot is named or is not a column reference
+#' (a `pick()` or a `NULL` counts), every dot is data-masking, so a bare name
+#' that is not a column (a variable in the calling environment) is computed
+#' too, as in `mutate()`. All computed dots (named and unnamed) run as one
 #' `mutate()` on the ungrouped data, in argument order. Every dot's resulting
 #' group column name(s) are combined in the order the arguments were written.
 #' The old `add =` and `.dots =` arguments are defunct and error.
@@ -175,38 +179,74 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
     return(group_by_fallback(shadowed))
   }
 
-  # Classify each dot like dplyr's group_by_prepare(): a variable reference
-  # (`x`, `.data$x`, `.data[["x"]]`) or a top-level pick() names existing
-  # columns; everything else -- every named dot, and any unnamed expression
-  # (`a + 1`, `2`, `"g"`, `-a`, ...) -- is data-masking and computed into a
-  # column called as_label(expr).
+  # Classify each dot like dplyr's group_by_prepare() (add_computed_columns()):
+  # when every dot is an unnamed variable reference (`x`, `.data$x`,
+  # `.data[["x"]]`) the dots name existing columns, labelled by dot_label();
+  # once any dot is named or is not a variable reference (`a + 1`, `2`, `"g"`,
+  # `-a`, a pick(), a NULL, ...), dplyr evaluates every dot with mutate(), so a
+  # reference that is not a column of the table (an environment variable) is
+  # computed too. A computed dot becomes a column called dot_label(expr).
   kind <- character(length(dots))     # "named", "var", "pick", "computed"
   var_name <- character(length(dots))
   comp_names <- dot_names
+  is_null_dot <- !is_named & vapply(dots, rlang::quo_is_null, logical(1), USE.NAMES = FALSE)
+  # (decided over every dot: a NULL is not a variable reference either)
+  needs_mutate <- dots_need_mutate(dots)
+  # the columns a reference can name: the table's, and those earlier computed
+  # dots make (`group_by(z = k + 1L, z)` groups by the computed `z`)
+  visible_names <- current_schema(.data)$names
+  # set once an earlier dot can make columns whose names aren't known here: a
+  # pick()/across(), or an unnamed computed dot, which may return a data frame
+  unknown_columns <- FALSE
   for (i in seq_along(dots)) {
     if (is_named[i]) {
       kind[i] <- "computed"
+      visible_names <- c(visible_names, dot_names[i])
       next
     }
     expr <- rlang::quo_get_expr(dots[[i]])
-    if (is.null(expr)) {
+    if (is_null_dot[i]) {
       # an unnamed NULL (e.g. an unused `{{ arg }}`) is ignored by dplyr
       kind[i] <- "null"
-    } else if (is.symbol(expr)) {
-      kind[i] <- "var"
-      var_name[i] <- as.character(expr)
-    } else if (is_data_pronoun_call(expr) && !is.null(pronoun_call_name(expr))) {
-      # `.data[[var]]` arrives as `.data[["name"]]`: rlang evaluates the
-      # subscript when capturing the quosure
-      kind[i] <- "var"
-      var_name[i] <- pronoun_call_name(expr)
+    } else if (quo_is_variable_reference(dots[[i]])) {
+      var_name[i] <- dot_label(dots[[i]])
+      # In the mutate branch only a reference that reads the column its label
+      # names can skip the mutate: `.data$"b"` is labelled `<unknown>`, reads b,
+      # and overwrites any `<unknown>` column. Without the branch dplyr looks
+      # the label itself up, so a real `<unknown>` column is what it groups by.
+      computed_ref <- needs_mutate && !reference_reads_label(dots[[i]], var_name[i])
+      # A name that is no column so far but is bound where the dot was written
+      # is an environment variable, which mutate() makes a column, unless an
+      # earlier dot has made a column of that name, which masks the variable.
+      # Only dplyr can tell. Anything else not visible stays "var", so a column
+      # an earlier across() makes is found or the call reaches its fallback.
+      if (needs_mutate && !computed_ref && !var_name[i] %in% visible_names &&
+          quo_symbol_is_bound(dots[[i]], var_name[i])) {
+        if (unknown_columns) {
+          return(group_by_fallback(paste0(
+            "`", var_name[i], "` is an environment variable unless an earlier dot makes a column of that name, which dplyr must resolve."
+          )))
+        }
+        computed_ref <- TRUE
+      }
+      if (computed_ref) {
+        kind[i] <- "computed"
+        comp_names[i] <- var_name[i]
+      } else {
+        kind[i] <- "var"
+      }
     } else if (rlang::is_call(expr) &&
                (call_head_name(expr) %in% c("pick", "across"))) {
       kind[i] <- "pick"
     } else {
       kind[i] <- "computed"
-      comp_names[i] <- rlang::as_label(dots[[i]])
+      comp_names[i] <- dot_label(dots[[i]])
     }
+    if (kind[i] == "computed") {
+      visible_names <- c(visible_names, comp_names[i])
+    }
+    # (a named dot never gets here: its one column has a known name)
+    unknown_columns <- unknown_columns || kind[i] %in% c("computed", "pick")
   }
   is_comp <- kind == "computed"
   # A column named twice has no single "type at this position"

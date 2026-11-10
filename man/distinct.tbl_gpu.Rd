@@ -9,12 +9,14 @@
 \arguments{
 \item{.data}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
 
-\item{...}{Optional variables to use when determining uniqueness. Bare
-column names (\code{distinct(df, x, y)}) and computed expressions
-(\code{distinct(df, z = x + 1)}) are both supported, parsed through the same
-expression IR \code{mutate()} uses (see \code{R/ir.R}); any computed expressions
-are evaluated once via an internal \code{mutate()} step before the dedup
-runs. If omitted, uniqueness is determined using all columns.}
+\item{...}{Optional variables to use when determining uniqueness. When
+every dot is an unnamed column reference (\code{distinct(df, x, .data$y)}) the
+keys are those columns, looked up by name without evaluating anything.
+When any dot is named or computed (\code{distinct(df, z = x + 1)}), every dot
+is parsed through the same expression IR \code{mutate()} uses (see \code{R/ir.R})
+and any computed expressions are evaluated once via an internal
+\code{mutate()} step before the dedup runs. If omitted, uniqueness is
+determined using all columns.}
 
 \item{.keep_all}{If \code{TRUE}, keeps all columns (in their original order,
 with any newly computed key columns appended at the end, matching

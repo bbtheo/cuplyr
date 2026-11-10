@@ -97,21 +97,32 @@
 #   (NOT yet named -- this function names unnamed dots itself, silently,
 #   matching dplyr's count()/group_by(), which don't warn for an unnamed
 #   computed grouping expression)
+# @param call The verb's frame, which a missing-column error reports
 # @return `list(data = <tbl_gpu, with any needed mutate step applied>,
 #   names = <character vector of resolved column names, in dot order>)`, or
 #   `NULL` when a dot is not in the expression IR (a user function, a
 #   column-free call that needs the data mask, ...): the caller then re-runs
 #   the whole call through dplyr (`gpu_fallback()`)
 # @keywords internal
-resolve_grouping_dots <- function(.data, dots) {
+resolve_grouping_dots <- function(.data, dots, call = rlang::caller_env()) {
+  # dplyr's branch is decided over every dot, a NULL (not a variable
+  # reference) included
+  needs_mutate <- dots_need_mutate(dots)
   # count(df, NULL) is count(df): NULL dots are dropped
   dots <- dots[!vapply(dots, rlang::quo_is_null, logical(1))]
   if (length(dots) == 0) {
     return(list(data = .data, names = character(0)))
   }
 
-  dots <- name_dots_silently(dots)
   schema <- current_schema(.data)
+  # dplyr's add_computed_columns(): all-variable-reference dots just name
+  # existing columns (a missing one is an error), nothing is evaluated
+  if (!needs_mutate) {
+    return(list(data = .data,
+                names = unique(variable_reference_names(dots, schema, distinct = FALSE,
+                                                        call = call))))
+  }
+  dots <- name_dots_silently(dots)
   expressions <- list()
   names_out <- character(length(dots))
 

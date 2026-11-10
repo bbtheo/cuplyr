@@ -1473,10 +1473,7 @@ inline_evaluated_dots <- function(dots, consts, provenance, n) {
     quo <- dots[[d]]
     if (is.na(dot_names[d]) || dot_names[d] == "") {
       # dplyr's own rule for an unnamed dot
-      dot_names[d] <- rlang::with_options(
-        "rlang:::use_as_label_infix" = FALSE,
-        rlang::as_label(quo)
-      )
+      dot_names[d] <- dot_label(quo)
     }
     dots[[d]] <- rlang::new_quosure(value, rlang::quo_get_env(quo))
   }
@@ -1640,7 +1637,7 @@ name_dots_silently <- function(dots) {
 
   for (i in seq_along(dots)) {
     if (is.na(dot_names[i]) || dot_names[i] == "") {
-      dot_names[i] <- rlang::as_label(dots[[i]])
+      dot_names[i] <- dot_label(dots[[i]])
     }
   }
 

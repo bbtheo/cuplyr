@@ -380,9 +380,7 @@ rowwise_rewrite_dots_ <- function(.data, dots, named) {
     }
     if (named) {
       # the dot's output joins the running schema (parse_mutate_dots()'s rule)
-      name <- if (nzchar(nms[i])) nms[i] else {
-        rlang::with_options("rlang:::use_as_label_infix" = FALSE, rlang::as_label(dots[[i]]))
-      }
+      name <- if (nzchar(nms[i])) nms[i] else dot_label(dots[[i]])
       ctx$produced <- set_union(ctx$produced, name)
       if (is.null(new)) {
         keep <- ctx$schema$names != name

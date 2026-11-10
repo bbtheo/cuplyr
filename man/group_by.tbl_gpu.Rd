@@ -51,10 +51,14 @@ the original column (if any) is kept, a new (or overwritten) column is
 added under the given name, and the table is then grouped by that name.
 Later dots may reference earlier dots' newly-computed columns, exactly
 like \code{mutate()}'s own chain semantics (e.g. \code{group_by(df, g = x \%/\% 2, h = g * 10)}). An \strong{unnamed} argument is a column reference (\code{x},
-\code{.data$x}, \code{.data[["x"]]}), a top-level \code{pick()}, or -- anything else --
-a data-masking expression computed into a new column named
+\code{.data$x}, \code{.data[["x"]]}), which names an existing column, a top-level
+\code{pick()}, which adds the columns it selects, or -- anything else -- a
+data-masking expression computed into a new column named
 \code{rlang::as_label()} of the expression (\code{group_by(df, a + 1)} makes a column
-called \code{a + 1}). All computed dots (named and unnamed) run as one
+called \code{a + 1}). As soon as one dot is named or is not a column reference
+(a \code{pick()} or a \code{NULL} counts), every dot is data-masking, so a bare name
+that is not a column (a variable in the calling environment) is computed
+too, as in \code{mutate()}. All computed dots (named and unnamed) run as one
 \code{mutate()} on the ungrouped data, in argument order. Every dot's resulting
 group column name(s) are combined in the order the arguments were written.
 The old \verb{add =} and \verb{.dots =} arguments are defunct and error.

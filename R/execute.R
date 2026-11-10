@@ -914,8 +914,7 @@ auto_name_dots <- function(dots, verb) {
     new_name <- dot_names[i]
 
     if (is.na(new_name) || new_name == "") {
-      # as_label() is dplyr's own naming rule (a bare `.data$x` is `x`).
-      new_name <- rlang::as_label(dots[[i]])
+      new_name <- dot_label(dots[[i]])
       # A `.data$x` / `.data[["x"]]` dot is a column reference: no warning.
       if (!is_data_pronoun_call(rlang::quo_get_expr(dots[[i]]))) {
         warning("Unnamed ", verb, " expression '", new_name, "' will use expression as column name.\n",
@@ -928,6 +927,99 @@ auto_name_dots <- function(dots, verb) {
 
   names(dots) <- dot_names
   dots
+}
+
+# The name dplyr gives an unnamed dot: dplyr_quosure_name(), as_label() with
+# rlang's infix labelling off (a long `b + b + ...` is `+...`, not `... + b`).
+# The one naming rule every verb that auto-names a dot uses. A bare symbol is
+# its own label (fast path: this runs once per dot on mutate()'s and count()'s
+# path). Takes a quosure or a bare expression. An empty dot is as_label()'s
+# `<empty>`: its expression is the empty symbol, which must not be assigned
+# (reading the variable would raise "argument is missing"), so `expr` stays NULL.
+# @keywords internal
+dot_label <- function(quo) {
+  expr <- if (!rlang::is_quosure(quo)) {
+    quo
+  } else if (!rlang::quo_is_missing(quo)) {
+    rlang::quo_get_expr(quo)
+  }
+  if (is.symbol(expr)) {
+    return(as.character(expr))
+  }
+  rlang::with_options("rlang:::use_as_label_infix" = FALSE, rlang::as_label(quo))
+}
+
+# Mirror of dplyr's quo_is_variable_reference() (R/group-by.R): a bare symbol,
+# or `.data$<symbol or string>` / `.data[[<symbol or string>]]`. An empty dot is
+# a symbol too, as in dplyr (read in place: see dot_label()).
+# @keywords internal
+quo_is_variable_reference <- function(quo) {
+  if (is.symbol(.subset2(quo, 2L))) {
+    return(TRUE)
+  }
+  expr <- .subset2(quo, 2L)
+  if (!is_data_pronoun_call(expr)) {
+    return(FALSE)
+  }
+  param <- expr[[3L]]
+  is.symbol(param) || (is.character(param) && length(param) == 1L && !is.na(param))
+}
+
+# Whether a variable reference reads the column its `label` names. A bare name,
+# `.data$x` and `.data[["x"]]` do. `.data$"x"` and a raw `.data[[v]]` are labelled
+# `<unknown>` by as_label() but read `x` and the value of `v`.
+# @keywords internal
+reference_reads_label <- function(quo, label) {
+  if (is.symbol(.subset2(quo, 2L))) {
+    return(TRUE)
+  }
+  identical(pronoun_call_name(.subset2(quo, 2L)), label)
+}
+
+# Whether a variable reference is a bare `name` bound where the dot was written.
+# exists() forces no promise, and finds nothing from a quosure's empty env.
+# @keywords internal
+quo_symbol_is_bound <- function(quo, name) {
+  is.symbol(.subset2(quo, 2L)) && exists(name, envir = rlang::quo_get_env(quo), inherits = TRUE)
+}
+
+# dplyr's add_computed_columns() decision for group_by()/count()/distinct():
+# TRUE when some dot is named or is not a variable reference, so every dot is
+# evaluated by mutate(); FALSE when each dot just names an existing column.
+# A NULL dot is not a variable reference, so the caller passes every dot, NULLs
+# included, even if it drops them afterwards.
+# @param dots A list of quosures
+# @keywords internal
+dots_need_mutate <- function(dots) {
+  nms <- names(dots)
+  if (!is.null(nms) && any(!is.na(nms) & nzchar(nms))) {
+    return(TRUE)
+  }
+  !all(vapply(dots, quo_is_variable_reference, logical(1), USE.NAMES = FALSE))
+}
+
+# The names of an all-variable-reference dot list, which must be columns of
+# `schema` ("existing variables"); a missing one is dplyr's error, naming each.
+# @param distinct TRUE for distinct()'s wording, FALSE for group_by()/count()'s
+# @param call The verb's frame, which the error reports (as dplyr's does)
+# @keywords internal
+variable_reference_names <- function(dots, schema, distinct, call = rlang::caller_env()) {
+  labels <- vapply(dots, dot_label, character(1), USE.NAMES = FALSE)
+  missing <- unique(labels[!labels %in% schema$names])
+  if (length(missing) > 0L) {
+    if (distinct) {
+      rlang::abort(c("Must use existing variables.",
+                     stats::setNames(paste0("`", missing, "` not found in `.data`."),
+                                     rep("x", length(missing)))),
+                   call = call)
+    }
+    # (dplyr's own `c(x = glue(...))`: two or more are named x1, x2, ..., which
+    # rlang prints without a bullet)
+    rlang::abort(c("Must group by variables found in `.data`.",
+                   x = paste0("Column `", missing, "` is not found.")),
+                 call = call)
+  }
+  labels
 }
 
 #' Resolve a verb's `.by=`/`by=` quosure into group column names

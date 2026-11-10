@@ -1547,19 +1547,16 @@ fuzz_quick_seeds <- function() {
     109L, 110L, 111L, 112L, 114L, 115L, 116L, 117L, 118L, 119L, 120L, 121L, 123L, 126L,
     127L, 128L, 129L, 131L, 133L, 134L, 135L, 136L, 137L, 138L, 139L, 140L, 141L, 142L,
     143L, 144L, 145L, 147L, 148L, 149L, 150L, 151L, 155L, 157L, 159L,
+    # F122 turned these on (the .data-pronoun column name)
+    9L, 28L, 122L, 146L, 551L,
     as.integer(names(fuzz_quick_skips())))
 }
 
 # seed (as a name) -> the finding that makes it fail. Provisional ids: the
 # ledger rows for them are the PM's to open (see the F118 report).
 fuzz_quick_skips <- function() {
-  c(`9` = "F118-data-pronoun-column-name",
-    `28` = "F118-data-pronoun-column-name",
-    `122` = "F118-data-pronoun-column-name",
-    `551` = "F118-data-pronoun-column-name",
-    `42` = "F118-unknown-column-error-class",
+  c(`42` = "F118-unknown-column-error-class",
     `209` = "F118-mutate-after-missing-column",
-    `146` = "F118-data-pronoun-column-name",
     `423` = "F118-zero-column-collect",
     `435` = "F118-distinct-window-lowering",
     `451` = "F118-min-empty-integer-type",

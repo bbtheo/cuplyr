@@ -406,7 +406,7 @@ rewrite_context_dots <- function(dots, group_cols, sequential = FALSE, name_unna
     expr <- rewrite_context_expr(old, keys)
     # An unnamed dot is named after the expression the user wrote
     if (name_unnamed && !identical(expr, old) && !nzchar(nms[i])) {
-      names(dots)[i] <- rlang::as_label(old)
+      names(dots)[i] <- dot_label(dots[[i]])
     }
     dots[[i]] <- rlang::new_quosure(expr, rlang::quo_get_env(dots[[i]]))
   }
@@ -1734,7 +1734,7 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
       prov_origin <- c(prov_origin, i)
       prov_kind <- c(prov_kind, "combined")
       # dplyr names an unnamed if_any()/if_all() dot after the original call
-      out_names <- c(out_names, if (is_named) nm else if (identical(verb, "filter")) "" else rlang::as_label(expr))
+      out_names <- c(out_names, if (is_named) nm else if (identical(verb, "filter")) "" else dot_label(expr))
       if (!identical(verb, "filter")) scope <- set_union(scope, out_names[length(out_names)])
       if (track && !needs_fallback) {
         run <- across_run_set(run, out_names[length(out_names)],
@@ -1754,7 +1754,7 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
       unknown <- !is_named && !(is.symbol(expr) && as.character(expr) %in% scope)
       # c(), not set_union(): `scope` is only matched against (%in%, anyNA()),
       # and a union per dot is quadratic in a wide call's dot count
-      scope <- c(scope, if (is_named) nm else if (unknown) NA_character_ else rlang::as_label(expr))
+      scope <- c(scope, if (is_named) nm else if (unknown) NA_character_ else dot_label(expr))
       if (track) run <- across_run_step(run, nm, quo, verb)
     }
   }
@@ -2216,5 +2216,5 @@ across_run_step <- function(run, nm, quo, verb) {
     run$unknown_set <- TRUE
     return(run)
   }
-  across_run_set(run, rlang::as_label(expr), info$type, info$levels, info$zone %||% "UTC")
+  across_run_set(run, dot_label(expr), info$type, info$levels, info$zone %||% "UTC")
 }

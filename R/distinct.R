@@ -6,12 +6,14 @@
 #' matching dplyr's contract exactly.
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
-#' @param ... Optional variables to use when determining uniqueness. Bare
-#'   column names (`distinct(df, x, y)`) and computed expressions
-#'   (`distinct(df, z = x + 1)`) are both supported, parsed through the same
-#'   expression IR `mutate()` uses (see `R/ir.R`); any computed expressions
-#'   are evaluated once via an internal `mutate()` step before the dedup
-#'   runs. If omitted, uniqueness is determined using all columns.
+#' @param ... Optional variables to use when determining uniqueness. When
+#'   every dot is an unnamed column reference (`distinct(df, x, .data$y)`) the
+#'   keys are those columns, looked up by name without evaluating anything.
+#'   When any dot is named or computed (`distinct(df, z = x + 1)`), every dot
+#'   is parsed through the same expression IR `mutate()` uses (see `R/ir.R`)
+#'   and any computed expressions are evaluated once via an internal
+#'   `mutate()` step before the dedup runs. If omitted, uniqueness is
+#'   determined using all columns.
 #' @param .keep_all If `TRUE`, keeps all columns (in their original order,
 #'   with any newly computed key columns appended at the end, matching
 #'   `mutate()`'s own append/replace rule). If `FALSE` (the default), only
@@ -88,7 +90,10 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
     return(push_op(.data, node))
   }
 
-  # NULL dots are dropped after the "no dots" check above, as in dplyr.
+  # dplyr's branch is decided over every dot, a NULL (not a variable
+  # reference) included; NULL dots are then dropped after the "no dots" check
+  # above, as in dplyr.
+  needs_mutate <- dots_need_mutate(dots)
   dots <- dots[!vapply(dots, rlang::quo_is_null, logical(1))]
   if (length(dots) == 0) {
     # dplyr runs these through mutate(), which refuses duplicated names
@@ -120,31 +125,40 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
   prev <- fallback_reasons_open()
   on.exit(fallback_reasons_close(prev), add = TRUE)
 
-  # Name dots: an unnamed bare column (`distinct(df, x)`) uses its own name;
-  # an unnamed computed expression (`distinct(df, x + 1)`) uses the deparsed
-  # expression as its name -- both silently, unlike mutate()'s
-  # auto_name_dots(), which warns for the latter. dplyr's own distinct()
-  # does not warn for this (verified empirically against dplyr 1.2.1).
+  # dplyr's two branches (distinct_prepare() -> add_computed_columns()): when
+  # every dot is an unnamed variable reference (`x`, `.data$x`,
+  # `.data[["x"]]`) the keys are the columns called as_label(dot), nothing is
+  # evaluated, and a name the table lacks is an error (an environment variable
+  # is not a column). Otherwise every dot is evaluated like mutate()'s, an
+  # unnamed one named by dot_label() (silently, unlike mutate()'s
+  # auto_name_dots()).
+  if (!needs_mutate) {
+    schema <- current_schema(.data)
+    labels <- variable_reference_names(dots, schema, distinct = TRUE)
+    key_cols <- unique(c(set_diff(group_vars, labels), labels))
+    node <- ast_distinct(input_node(.data), key_cols, keep_all = .keep_all,
+                         key_positions = distinct_key_positions(key_cols, schema$names))
+    return(push_op(.data, node))
+  }
   dot_names <- names(dots)
   if (is.null(dot_names)) {
     dot_names <- rep("", length(dots))
   }
   for (i in seq_along(dots)) {
     if (is.na(dot_names[i]) || dot_names[i] == "") {
-      dot_names[i] <- rlang::quo_text(dots[[i]])
+      dot_names[i] <- dot_label(dots[[i]])
     }
   }
   names(dots) <- dot_names
 
   # Parse each dot through the same IR mutate() uses, accumulating a running
   # schema exactly like mutate.tbl_gpu() so a later dot could (in principle)
-  # reference an earlier one's output. A dot that's nothing but a reference
-  # to an existing column under its own name (the common case --
-  # `distinct(df, x, y)`) contributes no mutate expression at all: it's
-  # already present in the input schema, so there's nothing to compute.
-  # Only genuine renames (`x = y`) or computed expressions (`z = x + 1`)
-  # need a preceding mutate step -- this keeps the common bare-column-key
-  # case a single dedup kernel with no extra mutate pass.
+  # reference an earlier one's output. Some dot here is named or computed (an
+  # all-reference call returned above). A dot that's nothing but a reference
+  # to an existing column under its own name (the `x` of `distinct(df, x, z =
+  # y + 1)`) contributes no mutate expression at all: it's already present in
+  # the input schema, so there's nothing to compute. Only genuine renames
+  # (`x = y`) or computed expressions (`z = x + 1`) need the mutate step.
   schema <- current_schema(.data)
   expressions <- list()
 
