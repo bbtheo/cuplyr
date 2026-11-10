@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# Randomized differential test of cuplyr against dplyr (F118), under the GPU lock.
+#
+#   tools/fuzz [--seeds N] [--start S] [--out f.tsv] [--batch B] [--timeout SEC]
+#              [--shrink-timeout SEC] [--no-shrink]
+#
+# Seeds S..S+N-1 (defaults 1000 from 1) run in batches of B (default 250): each
+# batch is one tools/gpu-run call and one R process, so the lock is released
+# between batches and other worktrees interleave. A segfault or a hang (the
+# per-batch timeout, default 300 s) does not lose the campaign: the R process
+# writes the current seed to a progress file before every case and its findings
+# as it goes; the driver records a crash (or hang) row for that seed and
+# restarts after it. Three crashes in a row on the first seed of a batch (a
+# package that won't load) stop the campaign instead of costing one lock cycle
+# per seed. Failures are then shrunk once per distinct signature, each in its
+# own locked call; a shrink that crashes or times out is reported, not hidden.
+# The TSV goes to scratchpad/fuzz/<date>-<start>-<n>.tsv of the main checkout
+# unless --out is given; a summary grouped by category and cause is printed.
+# Until that report is written, the findings and stats so far sit beside it as
+# <out>.partial and <out>.partial.stats, refreshed after each batch: a driver
+# killed mid-batch loses that batch's findings, and shrink results are not in
+# them. Leftovers of an earlier run at the same --out are moved aside with a
+# timestamp suffix, not deleted.
+#
+# Columns: seed mode kind category signature detail code shrunk. The code
+# columns keep line breaks as the two characters \n (fuzz_decode() in
+# tests/testthat/helper-fuzz.R puts them back).
+source "$(dirname "$0")/lib.sh"
+cd "$CUPLYR_WT_ROOT"
+
+seeds=1000; start=1; out=""; batch=250; tmo=300; stmo=300; shrink=1
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --seeds) seeds="$2"; shift 2 ;;
+    --start) start="$2"; shift 2 ;;
+    --out) out="$2"; shift 2 ;;
+    --batch) batch="$2"; shift 2 ;;
+    --timeout) tmo="$2"; shift 2 ;;
+    --shrink-timeout) stmo="$2"; shift 2 ;;
+    --no-shrink) shrink=0; shift ;;
+    *) echo "usage: tools/fuzz [--seeds N] [--start S] [--out f.tsv] [--batch B] [--timeout SEC] [--shrink-timeout SEC] [--no-shrink]" >&2; exit 2 ;;
+  esac
+done
+if [[ -z "$out" ]]; then
+  mkdir -p "$CUPLYR_MAIN/scratchpad/fuzz"
+  out="$CUPLYR_MAIN/scratchpad/fuzz/$(date +%F)-$start-$seeds.tsv"
+fi
+out="$(realpath -m "$out")"
+mkdir -p "$(dirname "$out")"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+findings="$work/findings.tsv"; stats="$work/stats.tsv"; progress="$work/progress"
+partial="$out.partial"; partial_stats="$out.partial.stats"
+: > "$stats"
+stamp="$(date +%Y%m%d-%H%M%S)"
+for left in "$partial" "$partial_stats"; do
+  if [[ -e "$left" ]]; then
+    mv -- "$left" "$left.$stamp"
+    echo "[fuzz] kept an earlier run's $left as $left.$stamp" >&2
+  fi
+done
+# the work dir goes with the EXIT trap; these copies stay until the report is written
+keep_partial() {
+  if [[ -e "$findings" ]]; then cp "$findings" "$partial"; fi
+  cp "$stats" "$partial_stats"
+}
+HDR=$'seed\tmode\tkind\tcategory\tsignature\tdetail\tcode'
+last=$((start + seeds - 1))
+s=$start
+first_crashes=0; aborted=0
+
+while (( s <= last )); do
+  e=$((s + batch - 1)); (( e > last )) && e=$last
+  rm -f "$progress" "$work/batch.tsv"
+  set +e
+  "$(dirname "$0")/gpu-run" --label fuzz -- timeout -k 15 "$tmo" \
+    Rscript tools/run-fuzz.R batch --from "$s" --to "$e" --out "$work/batch.tsv" \
+      --progress "$progress" --stats "$stats"
+  rc=$?
+  set -e
+  if [[ -s "$work/batch.tsv" ]]; then
+    [[ -s "$findings" ]] || echo "$HDR" > "$findings"
+    tail -n +2 "$work/batch.tsv" >> "$findings"
+  fi
+  if (( rc == 0 )); then
+    keep_partial
+    echo "[fuzz] seeds $s..$e done" >&2
+    s=$((e + 1))
+    first_crashes=0
+    continue
+  fi
+  # died or timed out: the progress file names the seed that did it
+  dead="$(cat "$progress" 2>/dev/null || true)"
+  [[ "$dead" =~ ^[0-9]+$ ]] || dead="$s"
+  if (( dead < s )) || (( dead > e )); then dead="$s"; fi
+  if (( rc == 124 || rc == 137 )); then
+    kind=hang; sig="hang"; what="the batch exceeded the ${tmo}s timeout"
+  else
+    kind=crash; sig="crash:exit$rc"; what="the R process exited with status $rc"
+  fi
+  echo "[fuzz] seed $dead: $what" >&2
+  [[ -s "$findings" ]] || echo "$HDR" > "$findings"
+  printf '%s\tboth\t%s\tcrash_or_raw\t%s\t%s\t\n' "$dead" "$kind" "$sig" "$what" >> "$findings"
+  keep_partial
+  # a crash on the first seed of a batch, again and again, is the setup (load_all
+  # failing, a dead GPU), not the seeds
+  if (( dead == s )); then first_crashes=$((first_crashes + 1)); else first_crashes=0; fi
+  if (( first_crashes >= 3 )); then
+    echo "[fuzz] stopping: $first_crashes consecutive crashes on the first seed of a batch (last: seed $dead, exit $rc). Does the package load? Try tools/r '1'." >&2
+    aborted=1
+    break
+  fi
+  s=$((dead + 1))
+done
+
+# one shrink per distinct signature (a crash or hang can't be shrunk safely)
+shrunk="$work/shrunk.tsv"
+failed_shrinks=0; unreproduced=0
+if (( shrink == 1 && aborted == 0 )) && [[ -s "$findings" ]]; then
+  sigs="$work/sigs.tsv"
+  printf 'seed\tmode\tkind\tsignature\n' > "$sigs"
+  awk -F'\t' 'NR > 1 && $3 != "crash" && $3 != "hang" && !seen[$5]++ {print $1 "\t" $2 "\t" $3 "\t" $5}' "$findings" >> "$sigs"
+  n=$(( $(wc -l < "$sigs") - 1 ))
+  for ((i = 1; i <= n; i++)); do
+    set +e
+    "$(dirname "$0")/gpu-run" --label fuzz-shrink -- timeout -k 15 "$stmo" \
+      Rscript tools/run-fuzz.R shrink --sig-file "$sigs" --line "$i" --out "$shrunk"
+    rc=$?
+    set -e
+    if (( rc == 0 )); then
+      echo "[fuzz] shrunk signature $i/$n" >&2
+    elif (( rc == 3 )); then
+      unreproduced=$((unreproduced + 1))
+      echo "[fuzz] signature $i/$n did not reproduce; its finding keeps the unshrunk case" >&2
+    else
+      failed_shrinks=$((failed_shrinks + 1))
+      sig="$(sed -n "$((i + 1))p" "$sigs" | cut -f1,4 | tr '\t' ' ')"
+      if (( rc == 124 || rc == 137 )); then why="timed out after ${stmo}s"; else why="exited with status $rc"; fi
+      echo "[fuzz] SHRINK FAILED for signature $i/$n (seed, signature: $sig): $why; its finding keeps the unshrunk case" >&2
+    fi
+  done
+fi
+
+[[ -e "$findings" ]] || echo "$HDR" > "$findings"
+keep_partial
+set +e
+"$(dirname "$0")/gpu-run" --label fuzz-report -- Rscript tools/run-fuzz.R report \
+  --findings "$findings" --shrunk "$shrunk" --stats "$stats" --out "$out"
+rc=$?
+set -e
+if (( rc != 0 )); then
+  echo "[fuzz] the report step failed (exit $rc); the findings so far are in $partial and the stats in $partial_stats" >&2
+  exit "$rc"
+fi
+rm -f "$partial" "$partial_stats"
+if (( failed_shrinks > 0 )); then
+  echo "[fuzz] $failed_shrinks shrink(s) failed (see SHRINK FAILED above); those findings are unshrunk" >&2
+fi
+if (( unreproduced > 0 )); then
+  echo "[fuzz] $unreproduced finding(s) did not reproduce when shrinking; those are unshrunk" >&2
+fi
+if (( aborted == 1 )); then
+  echo "[fuzz] campaign STOPPED EARLY (see above); the report covers the seeds up to the stop" >&2
+  exit 1
+fi
+exit 0
