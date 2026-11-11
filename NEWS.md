@@ -6,13 +6,22 @@
   `mutate()` and `filter()` gives dplyr's warning: one condition per verb call
   ("There was 1 warning in `summarise()`." / "There were N warnings in
   `mutate()`.", with the first warning's argument, group and calling function),
-  not one per aggregation. A string or Date/POSIXct `min()`/`max()` of an empty
+  not one per aggregation. The warning names the verb as it was called
+  (`summarize()`, `dplyr::mutate()`) and the dot as the user wrote it, also for an
+  `across()`/`if_any()` dot. A string or Date/POSIXct `min()`/`max()` of an empty
   or all-`NA` group warns too (it did not). A Date/POSIXct result is `NA` on the
   GPU where dplyr has `Inf`; it also gives a `cuplyr_warning_infinite_timestamp`.
 * A window `min()`/`max()` of an integer or logical column in `mutate()` is a
   double over an empty group (a zero-row table, or a `.drop = FALSE` group no row
-  belongs to), as in dplyr; a lazy `mutate()` that a row-changing step precedes
-  runs its earlier steps at the verb for it, like an integer `sum()`.
+  belongs to), as in dplyr. A lazy `mutate()` or `filter()` runs its earlier
+  steps at the verb (a plan break, like an integer `sum()`) only when it must:
+  after a step that can change the row count, for a `min()`/`max()` of an integer
+  or logical column (its type depends on the data), and after any pending step on
+  a grouping that keeps empty groups (`.drop = FALSE`, `.preserve = TRUE`), for
+  any `min()`/`max()` (the warning names the empty groups). A double, string or
+  Date `min()`/`max()` over rows the plan cannot count never breaks it: the plan
+  warns when it runs on an empty input. Finding the empty groups of a
+  `.drop = FALSE` table costs one distinct count when none is empty.
 
 ## Read and write parquet on the GPU (F85)
 
