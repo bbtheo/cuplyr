@@ -125,14 +125,24 @@ minmax_attach_dots <- function(aggregations, ir_cache, data = NULL) {
   if (is.null(ir_cache)) {
     return(aggregations)
   }
-  # (make_aggregation() stores both flags as TRUE/FALSE; vapply() over
-  # .subset2 keeps this check off the interpreter, it runs on every summarise())
-  identity <- vapply(aggregations, .subset2, logical(1), "identity")
-  if (!any(identity)) {
+  # (this check runs on every summarise() with a min()/max(): a plain loop,
+  # which costs less than a vapply() call for the usual few aggregations)
+  hit <- FALSE
+  na_rm <- FALSE
+  for (agg in aggregations) {
+    if (isTRUE(.subset2(agg, "identity"))) {
+      hit <- TRUE
+      if (isTRUE(.subset2(agg, "na_rm"))) {
+        na_rm <- TRUE
+        break
+      }
+    }
+  }
+  if (!hit) {
     return(aggregations)
   }
-  if (!is.null(data) && !any(identity & vapply(aggregations, .subset2, logical(1), "na_rm"))) {
-    rows <- minmax_lazy_rows(data)
+  if (!na_rm && !is.null(data)) {
+    rows <- if (inherits(.subset2(data, "lazy_ops"), "ast_node")) minmax_lazy_rows(data) else base_dim(data)[[1L]]
     if (!is.na(rows) && rows > 0L) {
       return(aggregations)
     }
@@ -385,9 +395,10 @@ minmax_summarise_records <- function(aggs, hits, rank, key_at, grouped) {
 #
 # A call whose argument has one value per group (`max(n())`, `max(sum(x))`,
 # ir_is_group_scalar()) never meets an empty vector: it neither warns nor turns
-# double. A Date shifted by an integer min()/max() (`d + max(a)`) is a Date
-# whatever that call's type, so the shift keeps the integer call (native) and
-# the call's type decides nothing (`typed = FALSE` in its record).
+# double. A Date shifted by an integer amount made of min()/max() calls
+# (`d + max(a)`, `d + max(a) * 2L`) is a Date whatever those calls' type, so the
+# shift keeps the integer calls (native, ir_minmax_int_shift()) and their type
+# decides nothing (`typed = FALSE` in their records).
 #
 # The state of one verb call is the environment minmax_win_open() makes, only
 # when a hit is possible (the facts say an empty group, or cannot say yet); the
@@ -603,8 +614,8 @@ minmax_win_needs_run <- function(w) {
 # The min()/max() calls of a parsed expression that can meet an empty group, in
 # R's evaluation order (arguments left to right, then the call): `list(op,
 # type, typed)` each, `type` the GPU type of the argument, `typed = FALSE` for
-# the shift of a Date (`date_add_days(d, max(a))`: the result is a Date whatever
-# the call's type). A call whose argument has one value per group
+# a call in the amount of a Date shift (`date_add_days(d, max(a) * 2L)`: the
+# result is a Date whatever the call's type). A call whose argument has one value per group
 # (ir_is_group_scalar(): `max(n())`, the outer max() of `max(max(x))`) is not
 # one: dplyr hands it one value.
 # @keywords internal
@@ -615,7 +626,7 @@ minmax_ir_calls <- function(ir, schema) {
       return(invisible())
     }
     shifts <- node$op %in% c("date_add_days", "date_sub_days")
-    for (k in seq_along(node$args)) walk(node$args[[k]], shifts && k == 2L)
+    for (k in seq_along(node$args)) walk(node$args[[k]], shift || (shifts && k == 2L))
     if (node$op %in% c("min", "max") && length(node$args) == 1L && !ir_is_group_scalar(node$args[[1L]])) {
       type <- tryCatch(unname(ir_infer_type(node$args[[1L]], schema)), error = function(e) NA_character_)
       calls[[length(calls) + 1L]] <<- list(op = node$op, type = type, typed = !shift)

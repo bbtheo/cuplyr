@@ -5610,7 +5610,9 @@ ir_parse_minmax <- function(op) {
         !ir_is_group_scalar(args[[1L]])) {
       type <- tryCatch(ir_infer_type(args[[1L]], schema), error = function(e) NA_character_)
       if (isTRUE(unname(type) %in% c("INT32", "BOOL8"))) {
-        args[[1L]] <- ir_call("cast_float64", list(args[[1L]]))
+        # (marked: ir_minmax_int_shift() reverts only this cast, not a user's
+        # as.numeric())
+        args[[1L]] <- ir_call("cast_float64", list(args[[1L]]), meta = list(minmax_cast = TRUE))
       } else {
         args <- ir_cast_bool8_first(args, schema, "cast_int32")
       }
@@ -5620,31 +5622,48 @@ ir_parse_minmax <- function(op) {
   }
 }
 
-# F124: the shift of a Date by a min()/max() whose INT32/BOOL8 argument
-# ir_parse_minmax() cast to a double (`d + max(a)` with an empty group): the
-# shifted Date only has rows where the group has one, where the call's value is
-# the integer's, and dplyr's result is a Date either way. So the shift takes the
-# integer call (`max(a)`, a logical as INT32) and stays native. NULL for any
-# other double shift.
+# F124: the shift amount of a Date whose min()/max() calls ir_parse_minmax()
+# cast to a double (`d + max(a)`, `d + max(a) * 2L` with an empty group): the
+# shifted Date only has rows where the group has one, where each call's value is
+# the integer's (dplyr evaluates the amount group by group), and dplyr's result
+# is a Date either way. So the amount takes the integer calls back (a logical
+# argument as INT32) and the shift stays native when that amount is an INT32.
+# NULL when no such cast is in the amount or it is not an INT32 without them.
 # @keywords internal
 ir_minmax_int_shift <- function(n, schema) {
-  if (!identical(.subset2(n, "kind"), "call") || !.subset2(n, "op") %in% c("min", "max") ||
-      length(n$args) != 1L) {
+  reverted <- FALSE
+  revert <- function(node) {
+    if (!identical(.subset2(node, "kind"), "call")) {
+      return(node)
+    }
+    args <- .subset2(node, "args")
+    if (.subset2(node, "op") %in% c("min", "max") && length(args) == 1L) {
+      a <- args[[1L]]
+      if (identical(.subset2(a, "kind"), "call") && identical(.subset2(a, "op"), "cast_float64") &&
+          isTRUE(.subset2(.subset2(a, "meta"), "minmax_cast"))) {
+        x <- a$args[[1L]]
+        type <- tryCatch(unname(ir_infer_type(x, schema)), error = function(e) NA_character_)
+        if (identical(type, "BOOL8")) {
+          x <- ir_call("cast_int32", list(x))
+        }
+        reverted <<- TRUE
+        return(ir_call(node$op, list(x), node$meta))
+      }
+    }
+    if (length(args) > 0L) {
+      node$args <- lapply(args, revert)
+    }
+    node
+  }
+  m <- revert(n)
+  if (!reverted) {
     return(NULL)
   }
-  a <- n$args[[1L]]
-  if (!identical(.subset2(a, "kind"), "call") || !identical(.subset2(a, "op"), "cast_float64") ||
-      length(a$args) != 1L) {
+  type <- tryCatch(unname(ir_infer_type(m, schema)), error = function(e) NA_character_)
+  if (!identical(type, "INT32")) {
     return(NULL)
   }
-  x <- a$args[[1L]]
-  type <- tryCatch(unname(ir_infer_type(x, schema)), error = function(e) NA_character_)
-  if (identical(type, "BOOL8")) {
-    x <- ir_call("cast_int32", list(x))
-  } else if (!identical(type, "INT32")) {
-    return(NULL)
-  }
-  ir_call(n$op, list(x))
+  m
 }
 
 # The R value of a column-free IR subtree made of literals and pure ops
