@@ -41,6 +41,11 @@ struct TimestampUpload {
 std::unique_ptr<cudf::column> date_to_gpu(Rcpp::NumericVector x, TimestampUpload& up);
 std::unique_ptr<cudf::column> posixct_to_gpu(Rcpp::NumericVector x, TimestampUpload& up);
 
+// F85: DECIMAL32/64/128 column -> FLOAT64 column via collect()'s converter.
+// `lossy`: some value needed rounding; `overflow`: a value is past the double range.
+std::unique_ptr<cudf::column> decimal_to_f64_column(const cudf::column_view& col,
+                                                    bool& lossy, bool& overflow);
+
 } // namespace cuplyr
 
 #endif // CUPLYR_R_TO_COLUMN_HPP

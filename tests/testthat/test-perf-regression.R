@@ -461,6 +461,25 @@ test_that("perf: fused_pipeline_lazy", {
 })
 
 # =============================================================================
+# Parquet read path (F85: the reader, its footer probes and collect())
+#
+# Calibration class: "transfer" -- like transfer_roundtrip, 1e6 rows come to the
+# host at collect(); the file is in the page cache after the write above it.
+# =============================================================================
+
+test_that("perf: parquet_read", {
+  skip_if_no_gpu()
+  skip_if_not(identical(Sys.getenv("CUPLYR_PERF"), "1"), "CUPLYR_PERF not set")
+  path <- withr::local_tempfile(fileext = ".parquet")
+  write_parquet_gpu(tbl_gpu(perf_big_df, lazy = FALSE), path)
+
+  expect_no_perf_regression("parquet_read", function() {
+    read_parquet_gpu(path, lazy = TRUE) |>
+      collect()
+  }, calibration = "transfer")
+})
+
+# =============================================================================
 # Transfer layer (guards df -> GPU -> R round trip in isolation)
 #
 # Calibration class: "transfer" -- this benchmark *is* the transfer probe's

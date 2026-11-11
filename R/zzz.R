@@ -24,6 +24,22 @@ NULL
 # on line-wrapping, not any real content difference.
 .__rlang_use_cli__. <- c(format = TRUE, inline = FALSE)
 .onLoad <- function(libname, pkgname) {
+  # libcudf reads this once, when it first builds its stream pool, so it comes
+  # before anything below that touches libcudf. It is a libcudf debug switch:
+  # with it, forked CUDA streams are all the default stream. Under the async
+  # memory resource, the streams parquet reads and writes fork otherwise slow
+  # later arrange(), filter() and summarise() calls in the process a few percent;
+  # with it, reads with a warm page cache up to 1e8 rows and a cold one at 1e7
+  # rows, and writes up to 1e8 rows, were no slower. libcudf only tests whether
+  # the variable exists, so a user's own setting, whatever its value ("0"
+  # included), is left alone and turns the switch on. Sys.unsetenv() after load
+  # and before the first read_parquet_gpu() or write_parquet_gpu() call turns it
+  # off (a lazy read counts: every read_parquet_gpu() runs libcudf's reader when
+  # called); later, the pool exists and it has no effect.
+  if (is.na(Sys.getenv("LIBCUDF_USE_DEBUG_STREAM_POOL", NA_character_))) {
+    Sys.setenv(LIBCUDF_USE_DEBUG_STREAM_POOL = "1")
+  }
+
   # Check GPU availability
   gpu_ok <- tryCatch(
     gpu_is_available(),

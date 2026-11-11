@@ -1,5 +1,44 @@
 # cuplyr (development version)
 
+## Read and write parquet on the GPU (F85)
+
+* `read_parquet_gpu()` decodes a parquet file with libcudf: only the compressed
+  bytes cross the PCIe bus. A lazy read holds a scan that reads the file when
+  the plan runs; the column names and types come from the footer at call time.
+  `write_parquet_gpu()` writes a GPU table. Factors written by cuplyr come back
+  as the same factor (levels are kept in the footer); a factor written by
+  `arrow::write_parquet()` reads as a string. Errors are classed
+  `cuplyr_error_parquet_*` and name the file. `print()` and `glimpse()` of a
+  scan read only the first rows (when the row groups holding them have more
+  than 65,536 rows or 128 MB of column data, the schema is printed instead).
+* A scan reads only the columns a plan uses, and passes the conditions of a
+  `filter()` that libcudf can decide exactly (comparisons of an integer,
+  `integer64`, `Date` or `POSIXct` column with a literal, and `!is.na()` of an
+  `integer` or `integer64` column) to the reader, which skips row groups from
+  the file's statistics. Filters on double and string columns are applied after
+  the read, because libcudf 25.12 can skip a row group wrongly from a double
+  column's `NaN` statistics or a string column's deprecated min/max statistics
+  (signed byte order) and would lose rows: they give the same rows but skip no
+  row groups. A factor written by `arrow::write_parquet()` reads as a string
+  because arrow keeps its levels only in dictionary pages, which libcudf does
+  not expose.
+  Anything else is applied after the read, so the answer is the same;
+  `options(cuplyr.parquet_pushdown = FALSE)` turns it off.
+* A file whose footer statistics are malformed (for example a fixed-width
+  statistic of the wrong length; an invalid file that no common writer
+  produces) can crash the R session when a filter is pushed into the scan.
+  `options(cuplyr.parquet_pushdown = FALSE)` avoids it for files you don't trust.
+* An `INT32`/`INT64` value stored in a file as `-2147483648` / `-9223372036854775808`
+  (R's `NA`) reads as missing. libcudf's file layer runs in compatibility mode
+  unless `KVIKIO_COMPAT_MODE` is set, so no `cufile.log` is written.
+* cuplyr sets `LIBCUDF_USE_DEBUG_STREAM_POOL` when it loads, unless it is already
+  set, so that reading or writing a parquet file does not slow later `arrange()`,
+  `filter()` and `summarise()` calls in the session. Reads and writes of the
+  files measured, up to 1e8 rows, were no slower with it. Any value turns it
+  on, `0` included; `Sys.unsetenv("LIBCUDF_USE_DEBUG_STREAM_POOL")` after
+  loading cuplyr and before the first `read_parquet_gpu()` or
+  `write_parquet_gpu()` call in the session, lazy reads included, turns it off.
+
 ## A lazy summarise() with an expression argument stays in the plan (F101)
 
 * A lazy `summarise()` with an expression argument (`mean(x * y)`, or a window

@@ -63,19 +63,45 @@ glimpse.tbl_gpu <- function(x, width = NULL, ...) {
   # nothing; if the plan fails, the failure is shown instead of raised.
   lazy_line <- NULL
   materialized <- x
+  scan_rows <- NULL
   if (has_pending_ops(x)) {
     n_ops <- ast_count_ops(.subset2(x, "lazy_ops"))
+    kind <- scan_plan_kind(x)
+    if (identical(kind, "other")) {
+      # a plan over a parquet file (F85) is never run to print it
+      glimpse_lazy_failure(x, NULL, paste0("Lazy: ", n_ops, " pending step", if (n_ops != 1L) "s",
+                                           " over a parquet file; not run for this preview\n"))
+      return(invisible(x))
+    }
     lazy_line <- paste0("Lazy: ", n_ops, " pending step", if (n_ops != 1L) "s",
                         " ran for this preview; nothing is kept\n")
-    res <- tryCatch(compute(x), error = function(e) e)
+    res <- tryCatch(
+      if (identical(kind, "projection")) {
+        preview <- scan_preview_table(x, 100L)
+        if (!is.null(preview)) {
+          scan_rows <- scan_footer_nrow(x)
+        }
+        preview
+      } else {
+        compute(x)
+      },
+      error = function(e) e
+    )
     if (inherits(res, "error")) {
       glimpse_lazy_failure(x, res, lazy_line)
+      return(invisible(x))
+    }
+    if (is.null(res)) {
+      # (the file's first row groups are large: not read for a preview)
+      glimpse_lazy_failure(x, NULL, paste0("Lazy: ", n_ops, " pending step", if (n_ops != 1L) "s",
+                                           " over a parquet file; not run for this preview\n"))
       return(invisible(x))
     }
     materialized <- res
   }
 
   dims <- dim(materialized)
+  if (!is.null(scan_rows)) dims[1L] <- scan_rows
   col_names <- display_names(materialized$schema$names)
   lvls <- levels_by_position(materialized$schema)
   types <- schema_type_abbr(materialized$schema, materialized[["unspecified"]], lvls)
@@ -93,7 +119,7 @@ glimpse.tbl_gpu <- function(x, width = NULL, ...) {
         " [", format(n_groups, big.mark = ","), "]\n", sep = "")
   }
 
-  preview_n <- min(100L, dims[1])
+  preview_n <- min(100L, dim(materialized)[1L])
   # also at zero rows: the empty preview still tells a real dictionary from an int
   preview <- tryCatch(gpu_head(materialized$ptr, preview_n, col_names), error = function(e) NULL)
 
@@ -144,8 +170,10 @@ glimpse_lazy_failure <- function(x, err, lazy_line) {
   cat("Rows: ??\n")
   cat("Columns: ", length(col_names), "\n", sep = "")
   cat(lazy_line)
-  msg <- strsplit(conditionMessage(err), "\n", fixed = TRUE)[[1L]]
-  cat(paste0(c("Plan failed: ", rep("  ", max(length(msg), 1L) - 1L)), msg), sep = "\n")
+  if (!is.null(err)) {
+    msg <- strsplit(conditionMessage(err), "\n", fixed = TRUE)[[1L]]
+    cat(paste0(c("Plan failed: ", rep("  ", max(length(msg), 1L) - 1L)), msg), sep = "\n")
+  }
   grouping <- lazy_grouping_sum(x)
   if (length(grouping) > 0L) {
     cat(names(grouping), ": ", grouping, "\n", sep = "")

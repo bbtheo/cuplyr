@@ -4,10 +4,14 @@
 \alias{ast_source}
 \title{Create a source AST node (leaf node)}
 \usage{
-ast_source(schema, source_ptr = NULL)
+ast_source(schema, source_ptr = NULL, scan = NULL)
 }
 \arguments{
 \item{schema}{List with names and types vectors}
+
+\item{source_ptr}{External pointer to the table the plan starts from}
+
+\item{scan}{A parquet scan record (\code{read_parquet_gpu()}), or NULL}
 }
 \value{
 An ast_source node

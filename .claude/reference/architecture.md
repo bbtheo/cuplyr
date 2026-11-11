@@ -58,6 +58,133 @@ naming all the columns. Previews read the NULL as a placeholder and never raise.
 labels are `vec_ptype_abbr()` of the collected column. Test hook:
 `gpu_test_make_column()` (`src/test_fixture_column.cpp`).
 
+#### Parquet scans (F85)
+
+`read_parquet_gpu()` (`R/io.R`, `src/io_parquet.cpp`) reads with libcudf's reader.
+A lazy read is `new_tbl_gpu(ptr = NULL, lazy_ops = ast_source(schema, scan = ))`:
+the `scan` field exists only on such a source (`format`, `paths`, `file_names` /
+`file_types` = the reader's columns before normalising = the fingerprint, `nrow`,
+`columns` (NULL = all), `predicates` (the pushed conjuncts, see below), `meta`).
+`lower_and_execute()`'s `"source"` case calls `lower_scan()`, which probes the
+footers again, compares them with the fingerprint (`cuplyr_error_parquet_schema_changed`),
+reads and normalises. Several files are compared with each other when opened
+(`cuplyr_error_parquet_schema_mismatch` naming the file that differs); libcudf is stricter, it
+compares the footers' schemas element by element (type annotations included: DuckDB sets
+`converted_type = INT_32` where arrow sets none), so files whose columns agree can still fail
+at the read, and `parquet_cpp_error()` maps its "All sources must have the same schema" to the
+same class, naming the files. The reader's type -> the R-facing type is `parquet_type_map()`
+(FLOAT32/UINT32/DECIMAL -> FLOAT64, INT8/16/UINT8/16 -> INT32, UINT64 -> INT64 after a
+max check, s/ms/ns timestamps -> microseconds, a STRING with `cuplyr.levels.<col>` in the
+footer -> codes + `factor_levels`). The schema carries only mapped types, so no verb sees
+a new type; a real DICTIONARY32 never comes back from the reader (it is refused as
+unsupported). An INT32/INT64 file value equal to INT_MIN/INT64_MIN (R's and bit64's NA) is
+nulled at read (`null_int_min()`, one min() per column): the GPU never holds it, and F42
+would call it an overflow. Pandas metadata is switched off in every read (libcudf would put
+an index column first) and the reader's column names are checked against the scan's.
+kvikio is put in compatibility mode at the first parquet file operation (read, write or
+footer probe; `kvikio_defaults()`) unless the user set `KVIKIO_COMPAT_MODE`: its AUTO default
+loads libcufile, which writes a `cufile.log` into the working directory. `.onLoad`
+(`R/zzz.R`), first of all, sets `LIBCUDF_USE_DEBUG_STREAM_POOL=1` unless the variable exists
+with any value. It is a libcudf debug switch, documented in the 25.12 header
+`/home/theo/cuplr/.pixi/envs/default/include/cudf/detail/utilities/stream_pool.hpp`: with the variable set, the
+pool always returns `cudf::get_default_stream()` (:91-94), and 25.12 has one global pool,
+created once (`create_global_cuda_stream_pool()`, :77-85). libcudf tests only for presence
+(the 26.12 source, `stream_pool.cpp:155-168`, where pools are per thread), so no value, `0`
+included, selects the forking pool. `Sys.unsetenv()` after loading cuplyr and before the first
+`read_parquet_gpu()` or `write_parquet_gpu()` call in the session does. A lazy read counts:
+every `read_parquet_gpu()` call, lazy or eager, runs libcudf's reader with `num_rows(0)` when
+called (`parquet_make_scan()` -> `parquet_probe()` -> `gpu_parquet_probe()` in
+`src/io_parquet.cpp`). After that the pool exists and unsetting has no effect. Without the switch,
+under the async memory resource (not the pool resource), later `arrange`, `filter` and
+`summarise` calls ran 1-8% slower by verb (median per call at 1e3 rows; `mutate` did not move)
+once parquet reads or writes had forked streams, and `gc(); gpu_gc()` did not undo it. With it the
+rise is gone, and reads with a warm page cache up to 1e8 rows and a cold one at 1e7 rows, and
+writes up to 1e8 rows, ran at the same speed (1e8 is one 3-column file, read warm and written
+with snappy; on/off ratios 0.98-1.02; `scratchpad/parity/features/F85-a2.md`,
+B7 and the N10 measurement).
+A write goes to a temporary file in the target's
+directory and is renamed into place. C++ reports conversions through attributes on the
+returned pointer (`lossy`, `u64_over`, ...) and R raises. libcudf erases `ARROW:schema` from the key-values
+it returns, so `footer_arrow_schema()` finds it in the footer bytes and `parquet_arrow_tz()`
+walks the flatbuffer (bounds-checked; nothing from a footer is ever unserialized).
+`print()`/`glimpse()`: `scan_plan_kind()` is "projection" (a bare scan or a select/rename
+chain: `scan$limit` reads only the first rows, the row count comes from the footer, but
+only when the row groups holding them have at most 65,536 rows and 128 MB of column data,
+`scan_preview_table()`; the
+preview shows a placeholder for a LIST/STRUCT/DURATION column, `scan$preview`) or "other" (a
+schema-only print, no read). `dim()` of a bare scan is the footer row count.
+`parquet_last_read()` is the test hook for what the reader was asked (columns, pushed
+conjunct texts, rows read, `row_groups_total` / `row_groups_after_stats` from libcudf's
+metadata).
+
+**Pushdown (`R/pushdown.R`, option `cuplyr.parquet_pushdown`, default on).**
+*Projection*: the `"source"` case of `push_down_projections()` narrows the scan instead of
+inserting a pruning select (`scan_project()`: `scan$columns` and the schema, rebuilt from
+`scan$meta` by `parquet_schema_for()`; the schema's order is kept, a plan that reads nothing
+keeps one readable column). `settled_chain()` returns 0 for a chain over a scan, so neither
+the projection nor the predicate pass is skipped. `summarise_run_now()` appends a select of
+the columns it reads (`plan_keep_columns()`) so the plan it computes early reads only them;
+the other `plan_run_now()` callers do not (they read the whole scan).
+*Predicates*: `push_into_scan()` is the last pass of `optimize_segment()` (a segment under
+a barrier gets it like the top one; both sides of a join are walked). A `filter` directly on
+a scan gives the reader what `scan_atom()` accepts. If anything is not pushable the whole
+filter stays above as the user wrote it, pushed conjuncts included: a conjunct alone is not
+the expression it was beside its siblings (a bare NA or `if_else(l, NA, NA)` takes its sibling's
+type and is FLOAT64 on its own, which `gpu_filter_expr()` refuses), and this keeps what runs
+above the scan equal to the pushdown-off plan. A filter fully pushed has no node left above. Nothing is pushed from a `grouped` filter (`ast_filter(grouped =)`,
+set by `filter_run()` for grouped, `.by` and rowwise; the optimizer carries it, and
+`reorder_filters()` does not merge filters of different `grouped`), nor from a filter node
+holding an F70 checked-integer predicate (every predicate of one filter() sees the same rows,
+and the overflow warning is about the rows its siblings would drop). The same F70 rule keeps
+a filter above a checked-integer `mutate()` (`id + 1L`) from moving to the scan.
+An atom is `col <cmp> literal` (literal first is flipped) or `!is.na(col)` of an integer
+or integer64 column, and only on a column whose SCHEMA type equals its FILE type and is INT32,
+INT64, TIMESTAMP_DAYS or TIMESTAMP_MICROSECONDS (no cast column; a factor's schema type is
+DICTIONARY32 although the file says STRING). The literal must convert exactly:
+INT32 a whole number in +-(2^31-1) (a double included); INT64 an integer or an integer64
+literal below 2^53 in magnitude (a whole double literal is retyped INT64 by
+`ir_int64_retype_cmp()`, has no integer64 class, and stays above); Date a whole day count;
+POSIXct whole seconds; NA, logical and everything else stay above. **STRING is never pushed,
+for any comparison** (`scan_pushable_types`): libcudf 25.12 uses a string column's deprecated
+min/max footer fields, which hold signed byte order, as byte-order bounds, so it can skip a
+row group wrongly and lose its rows. A string filter runs above the scan with the same rows;
+what is lost is row-group skipping on strings only.
+**FLOAT64 is never pushed, for any comparison**:
+libcudf 25.12 takes a NaN in a row group's footer min or max for a bound and skips the group,
+losing its rows, and the Parquet spec says to ignore such a statistic (the 26.12 source does). A
+double filter runs above the scan: the rows are identical, and what is lost is row-group
+skipping on doubles only. Pushing them again would also need the reader's `!=` (TRUE on NaN)
+kept above, and `==` with a zero (-0 and 0 differ in the bits a Bloom filter holds).
+INT32/INT64: the reader sees R's NA value as a number, so `<`, `<=` and `!=`
+carry an extra `col > MIN` atom, and `!is.na(col)` is just that atom (the literal can never be
+MIN). `is.na()` is never pushed, and `!is.na()` only on an integer or integer64 column, as the `col > MIN`
+atom: IS_NULL itself is not used, since it decides from each column's null count, which a
+writer may leave out next to min/max (the 26.12 source fixed an uninitialized read there).
+`col > MIN` on such a file is tested: `tests/testthat/fixtures/parquet/no_null_count_stats.parquet`
+is a patched footer with no null count, and the filter over it passes. **Malformed footer
+statistics are trusted**: a fixed-width statistic of the wrong length (an invalid file that no
+common writer produces, and DuckDB refuses it) is used as it is when a filter is pushed. Round 1
+saw two behaviours on an INT32 column. A zero-byte statistic crashed the R session (segfault
+inside libcudf's reader). A two-byte one didn't crash but was read past its end: `i > 5L` kept
+a row group that the same file with 8-byte statistics pruned. The rows returned were right; a
+bound misread the other way would prune a group holding matching rows and lose them, which is
+reasoned, not observed (`scratchpad/parity/features/F85-a2/reviews/round-1.md`, N1). The 26.12
+source rejects both with `CUDF_EXPECTS(stats_size == sizeof(T))`
+(`scratchpad/reference/cudf/cpp/src/io/parquet/stats_filter_helpers.hpp:70-75`). Theo chose to ship this documented in
+`?read_parquet_gpu` and NEWS, with `options(cuplyr.parquet_pushdown = FALSE)` as the way round
+it for untrusted files; validating footer statistics before trusting them is ledger row F129.
+The `&`s of a predicate
+are split only when every operand is
+logical (`ir_infer_type()`). The atoms reach `gpu_parquet_read()` as a list and become libcudf
+AST nodes with `column_name_reference` (so projection cannot shift a column), ANDed with
+`LOGICAL_AND`. The comparisons also skip row groups from the statistics
+(`row_groups_after_stats`) and, for `==`, from a Bloom filter if the file has one
+(`row_groups_after_bloom`). **The Bloom assumption**: an `==` atom's literal has the bits of
+every value R calls equal to it, since a Bloom filter probes a value's bits. INT32/INT64 are one
+bit pattern per value, and a timestamp is pushed only when its file unit is the literal's.
+`tests/testthat/test-parquet-pushdown-fuzz.R` fuzzes the
+atoms; `test-parquet-pushdown-bloom.R` runs them over a DuckDB-written file with Bloom filters.
+
 #### Logical vs. physical type: factor columns (Phase 11 L2)
 
 cuplyr deliberately does **not** adopt cudf's real `DICTIONARY32` column
@@ -560,6 +687,7 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
 | `src/ops_expr.cpp` | `gpu_compute_column()`, `gpu_filter_expr()`, `gpu_mutate_expr()` — the IR entry points |
 | `src/ops_select.cpp` | `gpu_select()` |
 | `src/ops_groupby.cpp` | `gpu_summarise()`. An ungrouped call (no group columns) builds one device-side constant INT32 key column and one sorted-keys `cudf::groupby::groupby` per call, shared by every aggregation and the quantile batch (F61; 6 aggregations at 1e7 rows 50.8 -> 7.2 ms). All `quantile()` aggregations of one call that read the same value column share one groupby request (`QuantileRequests`), so cudf sorts it once however many probabilities there are (F22: reframe's k rewritten dots). `median()` of a float column is one of them, at 0.5 (keeping median's NA propagation for na.rm = FALSE, not quantile's error); an integer median stays cudf MEDIAN. The value is R's type 7, which cudf LINEAR is not exactly: it blends `(1-f)*lo + f*hi` even at f = 0 (`0 * Inf = NaN`, noise next to a far neighbour such as 8 next to 1e9), where R takes `x[lo]`, and R's index `1 + (n-1)*p` rounds in two steps, so it can be whole where cudf's position is not. So EVERY quantile request (FLOAT64 and INT32 columns, and the float median) carries COUNT_VALID (once per request) + LOWER + HIGHER, and `QuantileRequests::take()` recomputes R's index in separate (non-FMA) binary ops, with `n1 = max(count-1, 0)` once per request: a whole index takes that element, otherwise the lower value is used wherever LOWER == HIGHER. LOWER/HIGHER of an INT32 column are INT32 and are cast to LINEAR's FLOAT64 first. This costs about 2x the LINEAR-only time at k = 101 (2e6 rows, 1000 groups: 0.04 s to 0.08 s). GPU-computed NaN (`0 / 0`; an upload already turns R's NaN into null) is missing like in R: `inspect_float_column()` (one sum reduction as the gate, exact checks only when the sum isn't finite) finds NaN/Inf once per float column, and every na.rm = TRUE aggregation, plus min/max/median/quantile under na.rm = FALSE (`agg_reads_nan_as_null()`), reads the column with NaN made null, so quantile() errors and min/max/median give NA (R: NaN/NA). sum/mean/sd/var keep cudf's NaN; n_distinct/first/last/nth with na.rm = FALSE see the value |
+| `src/io_parquet.cpp` | F85: parquet probe / read (normalisation, INT_MIN nulling, the pushed AST filter) / write, footer netstrings and `ARROW:schema` time zones; see "Parquet scans" |
 | `src/ops_arrange.cpp` | `gpu_arrange()` |
 | `src/ops_reframe.cpp` | `gpu_reframe_expand()` (F22): wide one-row-per-group table -> k rows per group on the device (`cudf::repeat` for keys/size-1 results, `cudf::interleave_columns` for a size-k result, a `sequence % m` gather map for literals) |
 | `src/ops_join.cpp` | join logic (equi hash joins, native `semi`/`anti`/`cross`/`right`, `gpu_cond_join()` for non-equi `join_by()` via `mixed_join`/`conditional_join`, `gpu_rolling_join()` for `closest()` (F24), `gpu_string_codes()` for non-equi STRING conditions) with the shared device-side sanitize→stable-sort→diag→`multiple=`-filter→gather/coalesce pipeline (`build_join_result()`) for dplyr row-order/cardinality parity |
@@ -577,6 +705,7 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
 |------|---------|
 | `R/tbl-gpu.R` | `tbl_gpu()`, `new_tbl_gpu()`, `is_tbl_gpu()`, `resolve_exec_mode()` (argument > `options(cuplyr.exec_mode)` > `CUPLYR_EXEC_MODE` > **lazy**, F80). `dim()`/`nrow()` of a lazy table with pending ops (a join/set-op result has a NULL `ptr`) run the plan on the GPU (`compute()`, no collect, caller untouched); `ncol()`/`NCOL()` are answered from the schema (`dim.tbl_gpu` checks that its caller is `base::ncol`/`NCOL`). Internal code that only needs a cheap size uses `base_dim()` (base table's dims, never executes). |
 | `R/utils.R` | `gpu_type_from_r()`, `col_index()` |
+| `R/io.R`, `R/pushdown.R` | F85: `read_parquet_gpu()`/`write_parquet_gpu()`, the scan record, `lower_scan()`, previews; the scan's projection and predicate pushdown (see "Parquet scans") |
 | `R/tz.R` | POSIXct time zone metadata (F32): `tz_is_utc()`, `tz_fold()`, `tz_by_position()`/`tz_from_positions()`, `propagate_tz()`, `propagate_schema_meta()`, `restore_tz()`; see "POSIXct time zones" above |
 | `R/execute.R` | unified execution helpers: `push_op()` (the sole exec_mode branch point; carries `groups` and `.drop` -- `.drop` only while a group column survives; `input_schema=` skips re-deriving a schema the caller has, `carry = FALSE` leaves the frame metadata to the caller), `push_chain()` (an eager verb's several nodes as one execution, see "Eager chains"), `input_node()`, `current_schema()` (the stored `$schema`, see "Schemas of lazy plans"), `infer_schema_full()`, `infer_push_schema()`, `propagate_groups()`, `propagate_factor_levels()`, `auto_name_dots()`, `dot_label()` (the one naming rule for an unnamed dot: dplyr's `as_label()` with infix labelling off; every auto-naming site uses it), `quo_is_variable_reference()`/`dots_need_mutate()`/`variable_reference_names()` (dplyr's two-branch `add_computed_columns()` rule, used by `distinct()`, `count()`/`add_count()` and `group_by()`), `cuplyr_fallback_notify()`, join analogues `join_input_node()`/`push_join()` |
 | `R/ir.R` | Expression IR shared by filter/mutate: `ir_parse_quo()`, `ir_cols()`, `ir_cost()`, `ir_is_const()`, `ir_bind()`, `ir_infer_type()`, `ir_call_registry` |

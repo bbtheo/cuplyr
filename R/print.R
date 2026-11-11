@@ -39,6 +39,34 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
   # result like an eager table, with "[lazy]" in the header. Nothing is kept:
   # `res` is a local, freed when print() returns, and `x` stays as it is.
   if (has_pending_ops(x)) {
+    # A plan over a parquet file (F85) is never run to print it: a bare scan or
+    # a select/rename chain over one reads just the first rows (when its first
+    # row groups are small, scan_preview_table()), any other plan shows its
+    # schema.
+    kind <- scan_plan_kind(x)
+    if (identical(kind, "other")) {
+      print_unmaterialized(x, width)
+      return(invisible(x))
+    }
+    if (identical(kind, "projection")) {
+      res <- tryCatch(
+        {
+          preview <- scan_preview_table(x, 10L)
+          if (!is.null(preview)) list(table = preview, nrow = scan_footer_nrow(x))
+        },
+        error = function(e) e
+      )
+      if (is.null(res)) {
+        print_unmaterialized(x, width)
+      } else if (inherits(res, "error")) {
+        print_lazy_failure(x, res, width)
+      } else {
+        print_gibble_body(res$table, width, body_w, "A gibble [lazy]",
+                          dims = dim_desc_n(res$nrow, length(res$table$schema$names)))
+        cat(lazy_footer(), "\n", sep = "")
+      }
+      return(invisible(x))
+    }
     res <- tryCatch(compute(x), error = function(e) e)
     if (inherits(res, "error")) {
       print_lazy_failure(x, res, width)
@@ -51,19 +79,25 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
 
   # No GPU data and nothing to run: show the schema only
   if (is.null(.subset2(x, "ptr"))) {
-    cat("# A gibble [lazy, not materialized]\n")
-    cat(schema_line(.subset2(x, "schema"), width, .subset2(x, "unspecified")), sep = "\n")
-    cat("# Operations pending: ", ast_count_ops(.subset2(x, "lazy_ops")), "\n", sep = "")
-    grouping <- lazy_grouping_sum(x)
-    if (length(grouping) > 0L) {
-      cat(gibble_header(x, width, c("A gibble" = "", grouping))[-1L], sep = "\n")
-    }
-    cat(lazy_footer(), "\n", sep = "")
+    print_unmaterialized(x, width)
     return(invisible(x))
   }
 
   print_gibble_body(x, width, body_w, "A gibble")
   invisible(x)
+}
+
+# The schema of a lazy table that is not run (no data to show, or a plan over
+# a file that printing must not read).
+print_unmaterialized <- function(x, width) {
+  cat("# A gibble [lazy, not materialized]\n")
+  cat(schema_line(.subset2(x, "schema"), width, .subset2(x, "unspecified")), sep = "\n")
+  cat("# Operations pending: ", ast_count_ops(.subset2(x, "lazy_ops")), "\n", sep = "")
+  grouping <- lazy_grouping_sum(x)
+  if (length(grouping) > 0L) {
+    cat(gibble_header(x, width, c("A gibble" = "", grouping))[-1L], sep = "\n")
+  }
+  cat(lazy_footer(), "\n", sep = "")
 }
 
 # A lazy table whose plan failed (an error, out of GPU memory): the header with
@@ -166,14 +200,22 @@ preview_type_abbr <- function(types, preview, lvls) {
 
 # The header and the glimpse-style body of a table with GPU data and nothing
 # pending, `name` being the header's first name ("A gibble").
-print_gibble_body <- function(x, width, body_w, name) {
+# `dims` replaces the dimensions in the header (a preview of a file knows its
+# row count from the footer, not from the rows it holds).
+print_gibble_body <- function(x, width, body_w, name, dims = NULL) {
   ptr <- .subset2(x, "ptr")
   schema <- .subset2(x, "schema")
   lvls <- levels_by_position(schema)
   types <- schema_type_abbr(schema, .subset2(x, "unspecified"), lvls)
   col_names <- display_names(schema$names)
 
-  cat(gibble_header(x, width, name = name), sep = "\n")
+  if (is.null(dims)) {
+    cat(gibble_header(x, width, name = name), sep = "\n")
+  } else {
+    sum <- tbl_sum(x)
+    sum[[1L]] <- dims
+    cat(gibble_header(x, width, sum, name = name), sep = "\n")
+  }
 
   # Get preview data (first 10 rows for value display)
   preview <- tryCatch(

@@ -41,7 +41,7 @@ options(repos = c(CRAN = repos), Ncpus = 4L)
 
 cran_pkgs <- c("roll", "slider", "RcppRoll", "zoo", "runner", "microbenchmark",
                "ggdist", "paletteer", "ggtext", "data.table", "ggplot2",
-               "scales", "patchwork", "knitr", "rmarkdown", "DBI", "callr", "duckdb")
+               "scales", "patchwork", "knitr", "rmarkdown", "DBI", "callr", "duckdb", "arrow")
 polars_repo <- "https://community.r-multiverse.org"
 
 # RcppParallel's bundled TBB build does not configure under the pixi

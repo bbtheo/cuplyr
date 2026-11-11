@@ -677,6 +677,10 @@ dim.tbl_gpu <- function(x) {
         return(c(NA_integer_, length(current_schema(x)$names)))
       }
     }
+    # a bare parquet scan knows its rows from the footer (F85)
+    if (!is.null(scan <- bare_scan_of(x))) {
+      return(c(as.integer(parquet_nrow(scan$paths)), length(current_schema(x)$names)))
+    }
     return(gpu_dim(compute(x)$ptr))
   }
   gpu_dim(x$ptr)

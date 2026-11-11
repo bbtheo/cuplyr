@@ -851,8 +851,10 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     predicates <- c(predicates, list(make_predicate(ir, schema)))
   }
 
+  # (a grouped, `.by` or rowwise filter is never pushed into a parquet scan)
+  grouped <- rowwise || length(verb_groups) > 0L
   if (length(predicates) > 0) {
-    .data <- push_op(.data, ast_filter(input_node(.data), predicates))
+    .data <- push_op(.data, ast_filter(input_node(.data), predicates, grouped = grouped))
   }
 
   if (complement && !keep_all) {
@@ -864,7 +866,8 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     } else {
       ir_call("|", list(ir_call("is.na", list(p_ir)), ir_call("!", list(p_ir))))
     }
-    .data <- push_op(.data, ast_filter(input_node(.data), list(make_predicate(keep_ir, schema))))
+    .data <- push_op(.data, ast_filter(input_node(.data), list(make_predicate(keep_ir, schema)),
+                                       grouped = grouped))
   }
 
   if (length(window_idx) > 0 || isTRUE(cgid$used) || !is.null(mask_name)) {

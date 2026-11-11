@@ -15,7 +15,13 @@ lower_and_execute <- function(ast, source_ptr) {
   }
 
   switch(.subset2(ast, "type"),
-    "source" = if (!is.null(.subset2(ast, "source_ptr"))) .subset2(ast, "source_ptr") else source_ptr,
+    "source" = if (!is.null(.subset2(ast, "source_ptr"))) {
+      .subset2(ast, "source_ptr")
+    } else if (!is.null(scan <- .subset2(ast, "scan"))) {
+      lower_scan(scan, .subset2(ast, "schema"))
+    } else {
+      source_ptr
+    },
     "select" = lower_select(ast, source_ptr),
     "filter" = lower_filter(ast, source_ptr),
     "mutate" = lower_mutate(ast, source_ptr),

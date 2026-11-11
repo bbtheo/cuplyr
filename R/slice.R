@@ -645,7 +645,8 @@ slice_grouped_native <- function(.data, group_mode, group_cols, mode,
   )
 
   schema <- current_schema(result)
-  result <- push_op(result, ast_filter(input_node(result), list(make_predicate(pred, schema))))
+  result <- push_op(result, ast_filter(input_node(result), list(make_predicate(pred, schema)),
+                                       grouped = TRUE))
 
   push_op(result, ast_select(input_node(result), orig_names))
 }

@@ -1525,7 +1525,10 @@ summarise_run_now <- function(.data, aggregations, retained_groups, sort_groups 
   if (was_lazy && has_pending_ops(.data) && has_pending_ops(notice_data)) {
     notify_materialization("summarise", reason, expr = expr, data = notice_data)
   }
-  base <- compute(.data)
+  # (the summarise reads its groups and aggregation inputs: a parquet scan
+  # underneath reads just those columns, F85)
+  inputs <- unlist(lapply(aggregations, `[[`, "input_col"), use.names = FALSE)
+  base <- compute(plan_keep_columns(.data, c(.subset2(.data, "groups"), inputs[!is.na(inputs)])))
   base$exec_mode <- "eager"
   result <- push_op(base, ast_summarise(input_node(base), aggregations,
                                         base$groups, retained_groups,

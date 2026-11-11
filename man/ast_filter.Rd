@@ -4,12 +4,16 @@
 \alias{ast_filter}
 \title{Create a filter AST node}
 \usage{
-ast_filter(input, predicates)
+ast_filter(input, predicates, grouped = FALSE)
 }
 \arguments{
 \item{input}{Input AST node}
 
 \item{predicates}{List of predicate structures}
+
+\item{grouped}{\code{TRUE} for a filter() on a grouped table, with \code{.by}, or on a
+rowwise table (\code{filter_run()} sets it; the optimizer carries it): nothing
+of such a filter is pushed into a parquet scan (R/pushdown.R)}
 }
 \value{
 An ast_filter node

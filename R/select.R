@@ -174,7 +174,14 @@ tidyselect_proxy_value <- function(type, levels = NULL) {
       1
     })
   }
+  # a scan can carry types collect() can't hold (F85): what R's class
+  # predicates (is.numeric, is.list, inherits(, "difftime")) would see
   v <- switch(type,
+    LIST = list(NULL),
+    STRUCT = vctrs::new_data_frame(list(), n = 1L),
+    DURATION_DAYS = as.difftime(1, units = "days"),
+    DURATION_SECONDS = , DURATION_MILLISECONDS = , DURATION_MICROSECONDS = ,
+    DURATION_NANOSECONDS = as.difftime(1, units = "secs"),
     BOOL8 = TRUE,
     INT32 = 1L,
     STRING = "a",

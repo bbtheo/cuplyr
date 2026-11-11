@@ -42,20 +42,30 @@ ast_node_classes <- lapply(
 #' Create a source AST node (leaf node)
 #'
 #' @param schema List with names and types vectors
+#' @param source_ptr External pointer to the table the plan starts from
+#' @param scan A parquet scan record (`read_parquet_gpu()`), or NULL
 #' @return An ast_source node
 #' @keywords internal
-ast_source <- function(schema, source_ptr = NULL) {
-  ast_node("source", schema = schema, source_ptr = source_ptr, input = NULL)
+ast_source <- function(schema, source_ptr = NULL, scan = NULL) {
+  if (is.null(scan)) {
+    return(ast_node("source", schema = schema, source_ptr = source_ptr, input = NULL))
+  }
+  # F85: a parquet scan is a source whose rows are read when the plan runs
+  # (R/io.R); the field exists only on such a node
+  ast_node("source", schema = schema, source_ptr = source_ptr, scan = scan, input = NULL)
 }
 
 #' Create a filter AST node
 #'
 #' @param input Input AST node
 #' @param predicates List of predicate structures
+#' @param grouped `TRUE` for a filter() on a grouped table, with `.by`, or on a
+#'   rowwise table (`filter_run()` sets it; the optimizer carries it): nothing
+#'   of such a filter is pushed into a parquet scan (R/pushdown.R)
 #' @return An ast_filter node
 #' @keywords internal
-ast_filter <- function(input, predicates) {
-  ast_node("filter", input = input, predicates = predicates)
+ast_filter <- function(input, predicates, grouped = FALSE) {
+  ast_node("filter", input = input, predicates = predicates, grouped = grouped)
 }
 
 #' Create a mutate AST node
@@ -1216,6 +1226,7 @@ print.ast_node <- function(x, ..., indent = 0) {
   switch(x$type,
     "source" = {
       cat(" [", length(x$schema$names), " cols]", sep = "")
+      if (!is.null(x$scan)) cat(" ", scan_to_string(x$scan, x$schema), sep = "")
     },
     "filter" = {
       cat(" [", length(x$predicates), " predicates]", sep = "")
@@ -1280,7 +1291,11 @@ ast_to_string <- function(node) {
   if (is.null(node)) return("NULL")
 
   info <- switch(node$type,
-    "source" = paste0("source[", paste(node$schema$names, collapse = ","), "]"),
+    "source" = if (is.null(node$scan)) {
+      paste0("source[", paste(node$schema$names, collapse = ","), "]")
+    } else {
+      scan_to_string(node$scan, node$schema)
+    },
     "filter" = paste0("filter[", length(node$predicates), "]"),
     "mutate" = paste0("mutate[", paste(vapply(node$expressions, `[[`, character(1), "output_col"), collapse = ","), "]"),
     "select" = paste0("select[", paste(node$columns, collapse = ","), "]"),

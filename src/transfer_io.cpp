@@ -6,6 +6,7 @@
 
 #include <cudf/null_mask.hpp>
 #include <cudf/column/column.hpp>
+#include <cudf/column/column_factories.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/types.hpp>
 #include <cudf/copying.hpp>
@@ -747,6 +748,27 @@ static SEXP decimal_to_r(const cudf::column_view& col, bool& lossy) {
         rv[j] = d;
     }
     return rv;
+}
+
+// F85: a DECIMAL32/64/128 column as a FLOAT64 device column, through the same
+// converter collect() uses (correctly rounded for <= 15 digits and a scale within
+// 10^22; `lossy` otherwise). `overflow` is set, and the column is all null, when
+// a value is beyond the double range. R raises both conditions.
+std::unique_ptr<cudf::column> decimal_to_f64_column(const cudf::column_view& col,
+                                                    bool& lossy, bool& overflow) {
+    SEXP r = R_NilValue;
+    switch (col.type().id()) {
+        case type_id::DECIMAL32: r = decimal_to_r<int32_t>(col, lossy); break;
+        case type_id::DECIMAL64: r = decimal_to_r<int64_t>(col, lossy); break;
+        default: r = decimal_to_r<__int128_t>(col, lossy); break;
+    }
+    if (r == R_NilValue) {
+        overflow = true;
+        return cudf::make_numeric_column(data_type{type_id::FLOAT64}, col.size(),
+                                         mask_state::ALL_NULL);
+    }
+    Rcpp::NumericVector v(r);
+    return numeric_to_gpu(v);
 }
 
 // The codes (index + 1, NA where the row is null) of a dictionary column whose

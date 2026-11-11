@@ -357,6 +357,11 @@ optimize_segment <- function(ast, required_cols = NULL, keep_mutates = FALSE) {
   if (feats[["filter_pair"]]) {
     ast <- reorder_filters(ast)
   }
+  # F85: what a parquet reader can decide of a filter on a scan moves into it
+  # (segment_filters_on_scan() before the option: a plan with no scan pays one walk)
+  if (segment_filters_on_scan(ast) && scan_pushdown_enabled()) {
+    ast <- push_into_scan(ast)
+  }
   ast
 }
 
@@ -473,6 +478,11 @@ settled_chain <- function(ast, required_cols) {
       return(0L)
     )
     node <- input
+  }
+  # A scan has the passes of F85's pushdown to take (projection into the reader,
+  # predicates into the reader): the chain over it is never settled
+  if (!is.null(.subset2(node, "scan")) && scan_pushdown_enabled()) {
+    return(0L)
   }
   if (!pair && is.null(required_cols)) {
     return(2L)
@@ -641,11 +651,15 @@ push_down_projections <- function(ast, required_cols = NULL, group_cols = charac
       # `mutate(a = TRUE)` under a select) would prune the source to zero
       # columns, and a zero-column table has no row count to broadcast the
       # constant over: keep one column.
+      # (a parquet scan keeps a column it can read, F85)
+      into_scan <- !is.null(ast$scan) && scan_pushdown_enabled()
       if (length(keep) == 0 && length(ast$schema$names) > 0) {
-        keep <- ast$schema$names[1]
+        keep <- if (into_scan) scan_row_count_column(ast) else ast$schema$names[1]
       }
       if (length(keep) < length(ast$schema$names)) {
-        ast_select(ast, keep, pruned = TRUE)
+        # F85: a parquet scan reads just those columns (still in the schema's
+        # order); any other source gets a select
+        if (into_scan) scan_project(ast, keep) else ast_select(ast, keep, pruned = TRUE)
       } else {
         ast
       }
@@ -1259,7 +1273,7 @@ push_down_filters <- function(ast) {
     }
 
     # Swap: filter below mutate
-    new_filter <- ast_filter(input$input, ast$predicates)
+    new_filter <- ast_filter(input$input, ast$predicates, grouped = isTRUE(.subset2(ast, "grouped")))
     input$input <- new_filter
     return(input)
   }
@@ -1274,7 +1288,7 @@ push_down_filters <- function(ast) {
       return(ast)
     }
 
-    new_filter <- ast_filter(input$input, ast$predicates)
+    new_filter <- ast_filter(input$input, ast$predicates, grouped = isTRUE(.subset2(ast, "grouped")))
     input$input <- new_filter
     return(input)
   }
@@ -1299,7 +1313,7 @@ push_down_filters <- function(ast) {
       if (any(vapply(ast$predicates, pred_checked_int, logical(1)))) {
         return(ast)
       }
-      input$left <- ast_filter(input$left, ast$predicates)
+      input$left <- ast_filter(input$left, ast$predicates, grouped = isTRUE(.subset2(ast, "grouped")))
       return(input)
     }
 
@@ -1387,10 +1401,10 @@ push_down_filters <- function(ast) {
     }
 
     if (length(left_preds) > 0) {
-      input$left <- ast_filter(input$left, left_preds)
+      input$left <- ast_filter(input$left, left_preds, grouped = isTRUE(.subset2(ast, "grouped")))
     }
     if (length(right_preds) > 0) {
-      input$right <- ast_filter(input$right, right_preds)
+      input$right <- ast_filter(input$right, right_preds, grouped = isTRUE(.subset2(ast, "grouped")))
     }
 
     if (length(stay_preds) == 0) {
@@ -1440,8 +1454,12 @@ reorder_filters <- function(ast) {
   # below.
   filters <- list()
   current <- ast
+  grouped <- isTRUE(.subset2(ast, "grouped"))
 
-  while (!is.null(current) && current$type == "filter") {
+  # (filters on a grouped table and on an ungrouped one are not merged: a
+  # parquet scan can take the predicates of the ungrouped one, F85)
+  while (!is.null(current) && current$type == "filter" &&
+         identical(isTRUE(.subset2(current, "grouped")), grouped)) {
     filters <- c(filters, list(current$predicates))
     checked_here <- any(vapply(current$predicates, pred_checked_int, logical(1)))
     current <- current$input
@@ -1474,7 +1492,7 @@ reorder_filters <- function(ast) {
   }
 
   # Rebuild single filter node
-  result <- ast_filter(current, all_preds)
+  result <- ast_filter(current, all_preds, grouped = grouped)
   result$input <- reorder_filters(result$input)
   result
 }
