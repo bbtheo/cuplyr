@@ -297,8 +297,11 @@ test_that("min()/max() on empty groups give Inf/-Inf doubles and warn", {
         invokeRestart("muffleWarning")
       }
     )
-    expect_true(any(grepl("no non-missing arguments to min", msgs)))
-    expect_true(any(grepl("no non-missing arguments to max", msgs)))
+    # (F124: dplyr folds a verb's warnings into one condition whose body shows
+    # the first, the `mn = min(...)` hit of the first empty group)
+    expect_length(msgs, 1L)
+    expect_match(msgs, "There were 4 warnings in `summarise()`", fixed = TRUE)
+    expect_match(msgs, "no non-missing arguments to min", fixed = TRUE)
   }
 })
 
