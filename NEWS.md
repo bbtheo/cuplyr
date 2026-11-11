@@ -1,5 +1,19 @@
 # cuplyr (development version)
 
+## min() and max() over empty or all-NA input match dplyr (F124)
+
+* A `min()`/`max()` with no non-missing value in `summarise()`, `reframe()`,
+  `mutate()` and `filter()` gives dplyr's warning: one condition per verb call
+  ("There was 1 warning in `summarise()`." / "There were N warnings in
+  `mutate()`.", with the first warning's argument, group and calling function),
+  not one per aggregation. A string or Date/POSIXct `min()`/`max()` of an empty
+  or all-`NA` group warns too (it did not). A Date/POSIXct result is `NA` on the
+  GPU where dplyr has `Inf`; it also gives a `cuplyr_warning_infinite_timestamp`.
+* A window `min()`/`max()` of an integer or logical column in `mutate()` is a
+  double over an empty group (a zero-row table, or a `.drop = FALSE` group no row
+  belongs to), as in dplyr; a lazy `mutate()` that a row-changing step precedes
+  runs its earlier steps at the verb for it, like an integer `sum()`.
+
 ## Read and write parquet on the GPU (F85)
 
 * `read_parquet_gpu()` decodes a parquet file with libcudf: only the compressed

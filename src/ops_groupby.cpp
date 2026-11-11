@@ -649,10 +649,10 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
 
     // F07: per-aggregation "min()/max() hit the empty-group identity" report,
     // returned to the R side as the "identity_rows" attribute of the result
-    // pointer (the R side warns with base R's text and reconciles the
+    // pointer (the R side warns like dplyr and reconciles the
     // INT32 -> FLOAT64 promotion in the schema). `identity[i]` is TRUE only
-    // for min()/max() over FLOAT64/INT32 input that is not an internal
-    // helper aggregation.
+    // for min()/max() over FLOAT64/INT32/STRING/timestamp input that is not an
+    // internal helper aggregation.
     // F124: the report is the 1-based result rows that hit (NA for the one
     // evaluation dplyr makes on a zero-row grouped input, which has no row),
     // per aggregation, so R can count the hits and name the first group.
