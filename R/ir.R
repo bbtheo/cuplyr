@@ -5595,13 +5595,16 @@ ir_parse_bool8_cast <- function(op, cast_to) {
 
 # The parse hook of min()/max() in mutate()/filter()/summarise() arguments: a
 # logical argument is an integer (dplyr), and over an empty group an INT32
-# argument is a double: when the verb has found one (minmax_window_facts(), R/minmax-warn.R),
-# an INT32/BOOL8 argument is cast to FLOAT64 first.
+# argument is a double: when the verb has found one (minmax_window_facts(),
+# R/minmax-warn.R), it marks the schema it parses against (`minmax_double`,
+# parse_mutate_dots()) and an INT32/BOOL8 argument is cast to FLOAT64 first.
+# The mark rides on the schema, so a verb run while a dot is parsed (a
+# column-free call that calls one) never sees another verb's.
 # @keywords internal
 ir_parse_minmax <- function(op) {
   force(op)
   function(args, schema) {
-    if (isTRUE(minmax_state$win$double)) {
+    if (isTRUE(.subset2(schema, "minmax_double"))) {
       type <- tryCatch(ir_infer_type(args[[1L]], schema), error = function(e) NA_character_)
       if (isTRUE(unname(type) %in% c("INT32", "BOOL8"))) {
         args[[1L]] <- ir_call("cast_float64", list(args[[1L]]))

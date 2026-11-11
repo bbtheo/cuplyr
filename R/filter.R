@@ -686,6 +686,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # every dot's (possibly rewritten) predicate, in original dot order.
   # (set when a lazy call runs at the verb, see the integer-sum rule below)
   back_to_lazy <- FALSE
+  mm <- NULL  # (F124: the window min()/max() state of the call)
   if (length(window_idx) > 0) {
     window_exprs <- stats::setNames(
       parsed[window_idx],
@@ -743,17 +744,18 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       back_to_lazy <- TRUE
     }
     # F124: the empty groups of a call with window min()/max() (their warning
-    # is dplyr's; the predicate is the same whatever the type)
+    # is dplyr's; the predicate is the same whatever the type, so no step is
+    # run to look for them: a lazy table's plan carries the warning)
     if (minmax_dots_mention(dots)) {
-      setup <- minmax_window_setup(.data, !quo_is_null_fast(by_quo))
-      mm_prev <- minmax_win_open(if (complement) "filter_out" else "filter", setup$facts,
-                                 setup$carry, typed = FALSE)
-      on.exit(minmax_win_close(mm_prev), add = TRUE)
+      mm <- minmax_win_new(if (complement) filter_out.tbl_gpu else filter.tbl_gpu,
+                           if (complement) "filter_out" else "filter",
+                           minmax_labels(user_dots, dots, origin),
+                           minmax_window_setup(.data, !quo_is_null_fast(by_quo)), typed = FALSE)
       for (i in window_idx) {
-        minmax_record_dot("", rlang::quo_get_expr(dots[[i]]), parsed[[i]], schema)
+        minmax_record_dot(mm, i, parsed[[i]], schema)
       }
     }
-    minmax_prep <- minmax_win_lazy_prep()
+    minmax_prep <- minmax_win_lazy_prep(mm)
     push_stages <- function(d) {
       for (stage in plan$stages) {
         if (length(stage$pre) > 0) {
@@ -892,7 +894,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     .data <- push_op(.data, ast_select(input_node(.data), real_orig_names))
   }
 
-  minmax_win_emit()
+  minmax_win_emit(mm)
   if (back_to_lazy) plan_back_to_lazy(.data) else .data
 }
 

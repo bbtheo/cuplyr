@@ -361,7 +361,8 @@ summarise_impl_dots <- function(.data, dots, .groups, by_quo, caller_env) {
 # Internal: the body of summarise.tbl_gpu() on captured dots, so the
 # cur_group_id() path can run it again on a reduced set of dots.
 # @keywords internal
-summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, caller_env) {
+summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, caller_env,
+                           minmax_source = NULL) {
   # F07: zero dots is a valid call (dplyr returns the group keys).
   if (length(dots) == 0) {
     return(summarise_zero_dots(.data, by_cols, by_given, .groups, caller_env))
@@ -471,12 +472,6 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # only true on the GPU path, so it is raised below, after the fallback
   # checks (dplyr itself does not warn for an unnamed splice or expression).
   dots <- name_dots_silently(expanded)
-  # (F124: the aggregations built from these dots say which dot a min()/max()
-  # warning belongs to; reframe() has set its own, with its wide dots)
-  if (!isTRUE(reframe_state$wide)) {
-    mm_prev <- minmax_ctx_open("summarise", expanded)
-    on.exit(minmax_ctx_close(mm_prev), add = TRUE)
-  }
 
   # F53: a reducer whose arguments read no column (`sum(1L)`, `max(th)`) has
   # the same value in every group, but how often dplyr evaluates it (once per
@@ -511,6 +506,10 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # (the IR the pre-pass parses is kept in `ir_cache`: every later stage reuses
   # it, so each aggregate argument is parsed, and evaluated, once)
   ir_cache <- new.env(parent = emptyenv())
+  # (F124: the aggregations built from these dots say which of the user's dots a
+  # min()/max() warning belongs to; reframe() gives the source of its wide dots)
+  ir_cache$.minmax <- minmax_source %||%
+    minmax_dot_source(user_dots, expanded, summarise.tbl_gpu, "summarise")
   sequential <- summarise_dots_are_sequential(dots)
   if (sequential ||
       !(if (is.null(simple_plan)) summarise_dots_parseable(dots, in_schema, ir_cache) else simple_plan$parseable)) {
@@ -674,7 +673,7 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, 
   # one warning, signalled below once the call stays on the GPU)
   n_in <- dim(base)[[1L]]
   collected <- minmax_collect(
-    summarise_core(base, dots, retained_groups, agg_info = agg_info, ir_cache = ir_cache)
+    ir_cache, summarise_core(base, dots, retained_groups, agg_info = agg_info, ir_cache = ir_cache)
   )
   observed <- collected$value
   n_obs <- dim(observed)[[1L]]
@@ -694,7 +693,9 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, 
     ptr = wrap_gpu_call("summarise", gpu_gather_rows(list(base$ptr), numeric(0))),
     schema = base$schema, exec_mode = "eager"
   )
-  identity_collected <- minmax_collect(summarise_core(empty_slice, dots, character(), ir_cache = ir_cache))
+  identity_collected <- minmax_collect(
+    ir_cache, summarise_core(empty_slice, dots, character(), ir_cache = ir_cache)
+  )
   identity_row <- identity_collected$value
 
   n_keys <- length(keys)
@@ -775,18 +776,21 @@ summarise_empty_hits_emit <- function(observed, empty, full_keys, idx, n_in) {
   records <- list()
   for (i in seq_along(src$aggs)) {
     rows <- obs$hits[[i]]
+    # (an NA row is the one evaluation dplyr makes when there are no groups at
+    # all: a hit without a group)
+    n_none <- sum(is.na(rows))
     rows <- rows[!is.na(rows)]
     pos <- c(if (is.null(idx)) rows else match(rows, idx), if (length(emp$hits[[i]]) > 0L) empty_pos)
-    if (length(pos) == 0L) next
+    if (length(pos) + n_none == 0L) next
     agg <- src$aggs[[i]]
-    first <- min(pos)
+    first <- if (length(pos) > 0L) min(pos) else NA_integer_
     records[[length(records) + 1L]] <- local({
       first <- first
       list(
         dot = agg$dot %||% list(id = i, name = agg$output_col, expr = rlang::call2(agg$fn, as.name(agg$input_col)),
-                                verb = "summarise"),
-        op = agg$fn, type = agg$input_type, col = agg$output_col, n = length(pos),
-        id = if (n_in > 0L) as.integer(first) else NA_integer_,
+                                head = quote(summarise)),
+        op = agg$fn, type = agg$input_type, col = agg$output_col, n = length(pos) + n_none,
+        id = if (n_in > 0L && !is.na(first)) as.integer(first) else NA_integer_,
         keys = function() full_keys[first, , drop = FALSE]
       )
     })
@@ -1504,7 +1508,7 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   }
 
   # F124: dplyr's warning for an empty min()/max() names the dot it came from
-  aggregations <- minmax_attach_dots(aggregations)
+  aggregations <- minmax_attach_dots(aggregations, ir_cache)
 
   # (F74) the caller wants to see which aggregations ran
   if (!is.null(agg_info)) agg_info$aggregations <- aggregations

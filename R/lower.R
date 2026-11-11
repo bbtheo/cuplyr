@@ -373,7 +373,13 @@ lower_summarise <- function(ast, source_ptr) {
 lower_summarise_hits <- function(ast, aggs, hits, result, input_ptr, input_schema) {
   groups <- .subset2(ast, "groups")
   n_in <- gpu_dim(input_ptr)[[1L]]
-  collector <- minmax_state$collector
+  # (the collector of summarise_with_empty_groups() hangs on the call's own
+  # ctx, which only its aggregations carry)
+  collector <- NULL
+  for (i in which(lengths(hits) > 0L)) {
+    collector <- .subset2(.subset2(.subset2(.subset2(aggs, i), "dot"), "ctx"), "sink")
+    if (!is.null(collector)) break
+  }
   if (!is.null(collector)) {
     collector$items[[length(collector$items) + 1L]] <- list(aggs = aggs, hits = hits, n_in = n_in)
     return(invisible())
