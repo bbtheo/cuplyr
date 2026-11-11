@@ -425,7 +425,12 @@ minmax_dots_call <- function(dots) {
     if (is.symbol(head) && as.character(head) %in% c("min", "max")) {
       return(TRUE)
     }
-    for (a in as.list(x)) {
+    # (by index: an empty argument, `m[, 1]` or `switch(x, a = , 1)`, is never
+    # bound to a variable, whose evaluation would be R's missing-argument error)
+    parts <- as.list(x)
+    for (i in seq_along(parts)) {
+      if (identical(parts[[i]], quote(expr = ))) next
+      a <- parts[[i]]
       if (rlang::is_quosure(a)) a <- rlang::quo_get_expr(a)
       if (calls(a)) {
         return(TRUE)

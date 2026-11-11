@@ -43,8 +43,11 @@ test_that("F124: a Date shifted by an integer amount of min()/max() calls stays 
   f124_check(dd, function(d) mutate(filter(d, a > 10L), e = d + max(a) * 2L), lazy_warns_at = "collect")
 })
 
-test_that("F124: a lazy re-parse that leaves the GPU takes the CPU route and stays lazy", {
+test_that("F124: a lazy call whose first parse leaves the GPU takes the CPU route and stays lazy", {
   skip_if_no_gpu()
+  # (as.character() of a number has no GPU form, so this leaves at the first
+  # parse, before any plan break: it does not reach the re-parse, whose exit to
+  # the CPU no known input takes)
   dd <- tibble::tibble(f = factor(c("a", "a", "c"), levels = c("a", "b", "c")), a = 1:3)
   pipe <- function(d) mutate(mutate(group_by(d, f, .drop = FALSE), z = a + 1L), s = as.character(max(a)))
   expected <- suppressWarnings(pipe(dd))
@@ -73,4 +76,11 @@ test_that("F124: a column called max next to an impure call runs no pending step
   got <- f124_capture(mutate(filter(tbl_gpu(df, lazy = TRUE), a > 10L), z = max + runif(1)))
   expect_length(got$plan_break, 0L)
   expect_identical(unclass(got$value)$exec_mode, "lazy")
+})
+
+test_that("F124: the min()/max() call walker skips an empty argument", {
+  expect_true(minmax_dots_call(rlang::quos(z = a + m[, 1][1], k = max(a))))
+  expect_true(minmax_dots_call(rlang::quos(z = switch(v, low = , mid = 1L, 2L), k = max(a))))
+  expect_true(minmax_dots_call(rlang::quos(k = m[, 1][1] + max(a))))
+  expect_false(minmax_dots_call(rlang::quos(z = a + m[, 1][1], s = switch(v, low = , 2L))))
 })

@@ -19,8 +19,10 @@
   or logical column (its type depends on the data), and after any pending step on
   a grouping that keeps empty groups (`.drop = FALSE`, `.preserve = TRUE`), for
   any `min()`/`max()` (the warning names the empty groups). A double, string or
-  Date `min()`/`max()` over rows the plan cannot count never breaks it: the plan
-  warns when it runs on an empty input. Finding the empty groups of a
+  Date `min()`/`max()` over rows the plan cannot count does not break it (the
+  plan warns when it runs on an empty input), unless the same `mutate()` has a
+  column-free call not known to be pure (`runif(1)`): then the earlier steps run
+  first, so that call is evaluated once. Finding the empty groups of a
   `.drop = FALSE` table costs one distinct count when none is empty, and a table
   whose row count is known and not zero only pays a check of a few microseconds.
 * A `min()`/`max()` whose argument has one value per group (`max(n())`,
