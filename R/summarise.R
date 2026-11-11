@@ -471,6 +471,12 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # only true on the GPU path, so it is raised below, after the fallback
   # checks (dplyr itself does not warn for an unnamed splice or expression).
   dots <- name_dots_silently(expanded)
+  # (F124: the aggregations built from these dots say which dot a min()/max()
+  # warning belongs to; reframe() has set its own, with its wide dots)
+  if (!isTRUE(reframe_state$wide)) {
+    mm_prev <- minmax_ctx_open("summarise", expanded)
+    on.exit(minmax_ctx_close(mm_prev), add = TRUE)
+  }
 
   # F53: a reducer whose arguments read no column (`sum(1L)`, `max(th)`) has
   # the same value in every group, but how often dplyr evaluates it (once per
@@ -528,7 +534,8 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # ops it has already computed)
   cpu <- function(tbl = .data, reason = "an integer sum() inside an aggregation overflowed in some group; dplyr widens only those.") {
     gpu_fallback("summarise", tbl, function(tbl) {
-      dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo)
+      # (the bare name: dplyr's warnings name the call as written, F124)
+      summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo)
     }, reason = reason)
   }
   # F42: an integer window sum() in an aggregation's argument that overflows
@@ -663,11 +670,18 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, 
   }
 
   agg_info <- new.env(parent = emptyenv())
-  observed <- summarise_core(base, dots, retained_groups, agg_info = agg_info, ir_cache = ir_cache)
+  # (F124: the min()/max() hits of the observed groups and of the empty ones are
+  # one warning, signalled below once the call stays on the GPU)
+  n_in <- dim(base)[[1L]]
+  collected <- minmax_collect(
+    summarise_core(base, dots, retained_groups, agg_info = agg_info, ir_cache = ir_cache)
+  )
+  observed <- collected$value
   n_obs <- dim(observed)[[1L]]
   # Observed keys are always among the full keys: equal counts mean no group is
   # empty and the observed result (in the same key order) is the answer.
   if (n_obs == nrow(full_keys)) {
+    summarise_empty_hits_emit(collected$items, NULL, full_keys, NULL, n_in)
     return(finish(observed))
   }
   if (n_obs > nrow(full_keys)) return(cpu_route("the observed groups outnumber the grouping keys."))
@@ -680,7 +694,8 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, 
     ptr = wrap_gpu_call("summarise", gpu_gather_rows(list(base$ptr), numeric(0))),
     schema = base$schema, exec_mode = "eager"
   )
-  identity_row <- summarise_core(empty_slice, dots, character(), ir_cache = ir_cache)
+  identity_collected <- minmax_collect(summarise_core(empty_slice, dots, character(), ir_cache = ir_cache))
+  identity_row <- identity_collected$value
 
   n_keys <- length(keys)
   agg_names <- observed$schema$names[-seq_len(n_keys)]
@@ -716,14 +731,9 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, 
   idx0 <- ifelse(is.na(idx), n_obs, idx - 1L)
 
   agg_ptr <- wrap_gpu_call("summarise", gpu_gather_rows(list(casted$obs, casted$id), as.numeric(idx0)))
-  # dplyr warns for an empty group's min()/max() with base R's text. The
-  # numeric identity row raises it itself; a timestamp's is a plain null.
-  for (agg in agg_info$aggregations) {
-    if (agg$fn %in% c("min", "max") && unname(agg$input_type %||% "") %in% cuplyr_timestamp_types) {
-      warning("no non-missing arguments to ", agg$fn, "; returning ",
-              if (identical(agg$fn, "min")) "Inf" else "-Inf", call. = FALSE)
-    }
-  }
+  # dplyr's one warning for the min()/max() of the observed groups that had no
+  # value and of every empty group (F124)
+  summarise_empty_hits_emit(collected$items, identity_collected$items, full_keys, idx, n_in)
   key_tbl <- tbl_gpu(strip_frame_attrs(tibble::as_tibble(full_keys)), lazy = FALSE)
   obs_levels <- observed$schema$factor_levels
   levels_out <- c(key_tbl$schema$factor_levels,
@@ -742,6 +752,46 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, 
     schema = schema, groups = retained_groups, group_drop = out_drop,
     exec_mode = "eager"
   ))
+}
+
+# Internal (F124): the folded min()/max() warning of summarise_with_empty_groups().
+# `observed`/`empty` are the hit reports lower_summarise_hits() collected for the
+# observed groups and for the one empty slice every empty group takes its values
+# from (`items` lists, one entry per gpu_summarise() call); `idx` is the row of
+# each group_data() group in the observed result, NA for an empty group (NULL:
+# there is none, the observed rows are the groups). A hit of the observed groups
+# is at its group_data() position; an aggregation that hits on the empty slice
+# hits in every empty group. A zero-row input has no group line (dplyr's mask is
+# ungrouped there).
+# @keywords internal
+summarise_empty_hits_emit <- function(observed, empty, full_keys, idx, n_in) {
+  obs <- if (length(observed) > 0L) observed[[1L]]
+  emp <- if (length(empty) > 0L) empty[[1L]]
+  src <- obs %||% emp
+  if (is.null(src)) {
+    return(invisible())
+  }
+  empty_pos <- if (!is.null(emp)) which(is.na(idx)) else integer()
+  records <- list()
+  for (i in seq_along(src$aggs)) {
+    rows <- obs$hits[[i]]
+    rows <- rows[!is.na(rows)]
+    pos <- c(if (is.null(idx)) rows else match(rows, idx), if (length(emp$hits[[i]]) > 0L) empty_pos)
+    if (length(pos) == 0L) next
+    agg <- src$aggs[[i]]
+    first <- min(pos)
+    records[[length(records) + 1L]] <- local({
+      first <- first
+      list(
+        dot = agg$dot %||% list(id = i, name = agg$output_col, expr = rlang::call2(agg$fn, as.name(agg$input_col)),
+                                verb = "summarise"),
+        op = agg$fn, type = agg$input_type, col = agg$output_col, n = length(pos),
+        id = if (n_in > 0L) as.integer(first) else NA_integer_,
+        keys = function() full_keys[first, , drop = FALSE]
+      )
+    })
+  }
+  minmax_emit(records)
 }
 
 # Internal: TRUE iff a parsed aggregation's value over an empty group is one
@@ -1446,9 +1496,15 @@ summarise_core <- function(.data, dots, retained_groups = character(),
     for (i in seq_along(aggregations)) {
       if (aggregations[[i]]$output_col %in% internal_cols) {
         aggregations[[i]]$identity <- FALSE
+        # (the position of a group's first row: lower_summarise() orders the
+        # groups of a `.by` call by it, F124)
+        aggregations[[i]]$first_pos <- TRUE
       }
     }
   }
+
+  # F124: dplyr's warning for an empty min()/max() names the dot it came from
+  aggregations <- minmax_attach_dots(aggregations)
 
   # (F74) the caller wants to see which aggregations ran
   if (!is.null(agg_info)) agg_info$aggregations <- aggregations

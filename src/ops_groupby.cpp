@@ -217,7 +217,7 @@ std::unique_ptr<cudf::column> null_out_groups_with_any_null(
 // test-dplyr-summarise.R's own module doc): sum(numeric(0)) is 0,
 // mean(numeric(0)) is NaN, min(numeric(0))/max(numeric(0)) are Inf/-Inf
 // (the latter two WITH a warning, which R raises from the
-// "identity_used" attribute gpu_summarise() returns -- see
+// "identity_rows" attribute gpu_summarise() returns -- see
 // apply_minmax_identity()). sd()/var()/median() need NO fix: their
 // NULL-for-an-all-excluded-group result already collects to NA, which IS
 // base R's own sd(numeric(0))/var(numeric(0))/median(numeric(0)) value.
@@ -234,6 +234,57 @@ std::unique_ptr<cudf::column> null_out_groups_with_any_null(
 // promotes the WHOLE result column to FLOAT64 the moment any group is empty,
 // which is what dplyr does. A request is only needed when the column has
 // nulls at all: with no nulls and at least one row no group can be empty.
+// F124: STRING and Date/POSIXct min()/max() are counted the same way (their
+// value stays null), see minmax_counts_hits().
+// min()/max() the identity scalar can only represent when the input is one
+// of these (everything else keeps its own type and never gets an identity).
+bool minmax_has_identity(const std::string& agg_type, cudf::type_id id) {
+    return (agg_type == "min" || agg_type == "max") &&
+           (id == cudf::type_id::FLOAT64 || id == cudf::type_id::INT32);
+}
+
+// F124: the min()/max() inputs whose empty group dplyr warns about: the
+// identity-valued ones above, and the STRING / Date / POSIXct ones, whose
+// empty-group value stays a null (NA for a string; a GPU timestamp cannot hold
+// the +-Inf of dplyr's Date, R warns about that itself) but still counts.
+bool minmax_counts_hits(const std::string& agg_type, cudf::type_id id) {
+    return minmax_has_identity(agg_type, id) ||
+           ((agg_type == "min" || agg_type == "max") &&
+            (id == cudf::type_id::STRING || id == cudf::type_id::TIMESTAMP_DAYS ||
+             id == cudf::type_id::TIMESTAMP_MICROSECONDS));
+}
+
+// The 1-based positions of the true rows of a BOOL8 mask (no nulls), on the
+// host. Only called when some group is known to be a hit.
+Rcpp::IntegerVector mask_rows(const cudf::column_view& mask) {
+    std::vector<int8_t> host(static_cast<size_t>(mask.size()));
+    if (!host.empty()) {
+        check_cuda(cudaMemcpy(host.data(), mask.data<int8_t>(), host.size(), cudaMemcpyDeviceToHost),
+                   "gpu_summarise identity mask download");
+    }
+    std::vector<int> rows;
+    for (size_t j = 0; j < host.size(); ++j) {
+        if (host[j]) rows.push_back(static_cast<int>(j) + 1);
+    }
+    return Rcpp::IntegerVector(rows.begin(), rows.end());
+}
+
+// F124: which groups of a min()/max() hit an empty group, as a BOOL8 mask
+// (`valid_count_per_group` == 0), or nullptr when none does.
+std::unique_ptr<cudf::column> empty_group_mask(const cudf::column_view& valid_count_per_group) {
+    cudf::numeric_scalar<int32_t> zero_i32(0, true);
+    auto is_empty = cudf::binary_operation(
+        valid_count_per_group, zero_i32, cudf::binary_operator::EQUAL,
+        cudf::data_type{cudf::type_id::BOOL8});
+    auto any_empty = cudf::reduce(
+        is_empty->view(), *cudf::make_any_aggregation<cudf::reduce_aggregation>(),
+        cudf::data_type{cudf::type_id::BOOL8});
+    if (!static_cast<cudf::numeric_scalar<bool>*>(any_empty.get())->value()) {
+        return nullptr;
+    }
+    return is_empty;
+}
+
 bool needs_identity_fix(const std::string& agg_type, bool na_rm_flag,
                          const cudf::column_view& value_view, bool identity_flag) {
     if (!na_rm_flag) {
@@ -243,18 +294,10 @@ bool needs_identity_fix(const std::string& agg_type, bool na_rm_flag,
         return true;
     }
     if (agg_type == "min" || agg_type == "max") {
-        auto id = value_view.type().id();
         return identity_flag && value_view.has_nulls() &&
-               (id == cudf::type_id::FLOAT64 || id == cudf::type_id::INT32);
+               minmax_counts_hits(agg_type, value_view.type().id());
     }
     return false;
-}
-
-// min()/max() the identity scalar can only represent when the input is one
-// of these (everything else keeps its own type and never gets an identity).
-bool minmax_has_identity(const std::string& agg_type, cudf::type_id id) {
-    return (agg_type == "min" || agg_type == "max") &&
-           (id == cudf::type_id::FLOAT64 || id == cudf::type_id::INT32);
 }
 
 // Build the identity scalar for `agg_type`, matching `out_type` (the
@@ -306,26 +349,22 @@ std::unique_ptr<cudf::column> substitute_identity_for_empty_groups(
 }
 
 // F07: min()/max() empty-group identity for FLOAT64/INT32 inputs. Returns
-// true iff some group was empty (the caller reports it so R can warn with
-// base R's own text). `valid_count_per_group` is nullptr when the whole
-// input has zero rows (no group exists at all, e.g. a 0-row grouped
+// true iff some group was empty (the caller reports it so R can warn like
+// dplyr), and then leaves the BOOL8 mask of the empty groups in `hit_mask`
+// (F124: R names the groups). `valid_count_per_group` is nullptr when the
+// whole input has zero rows (no group exists at all, e.g. a 0-row grouped
 // summarise): nothing to substitute, but dplyr still evaluated the reduction
 // on an empty chunk, so an INT32 result is typed double and the warning
 // fires. Otherwise an INT32 result is promoted to FLOAT64 only when a group
 // is actually empty; FLOAT64 results just get the +-Inf substituted.
 bool apply_minmax_identity(std::unique_ptr<cudf::column>& result, bool is_min,
-                           const cudf::column_view* valid_count_per_group) {
+                           const cudf::column_view* valid_count_per_group,
+                           std::unique_ptr<cudf::column>& hit_mask) {
     bool input_empty = valid_count_per_group == nullptr;
     std::unique_ptr<cudf::column> is_empty;
     if (!input_empty) {
-        cudf::numeric_scalar<int32_t> zero_i32(0, true);
-        is_empty = cudf::binary_operation(
-            *valid_count_per_group, zero_i32, cudf::binary_operator::EQUAL,
-            cudf::data_type{cudf::type_id::BOOL8});
-        auto any_empty = cudf::reduce(
-            is_empty->view(), *cudf::make_any_aggregation<cudf::reduce_aggregation>(),
-            cudf::data_type{cudf::type_id::BOOL8});
-        if (!static_cast<cudf::numeric_scalar<bool>*>(any_empty.get())->value()) {
+        is_empty = empty_group_mask(*valid_count_per_group);
+        if (!is_empty) {
             return false;
         }
     }
@@ -338,13 +377,14 @@ bool apply_minmax_identity(std::unique_ptr<cudf::column>& result, bool is_min,
         if (!is_min) v = -v;
         cudf::numeric_scalar<double> identity(v, true);
         result = cudf::copy_if_else(identity, result->view(), is_empty->view());
+        hit_mask = std::move(is_empty);
     }
     return true;
 }
 
 // One-row result of a reduction over ZERO input rows (ungrouped summarise()
 // of an empty table), using base R's empty-vector values: n() 0L, sum 0,
-// mean NaN, min Inf / max -Inf (double, flagged via `identity_used`),
+// mean NaN, min Inf / max -Inf (double, flagged via `identity_rows`),
 // median/sd/var/quantile NA_real_, n_distinct 0L, first/last/nth typed NA,
 // any FALSE, all TRUE. Mirrors what dplyr returns when it evaluates each
 // dot once on an empty vector.
@@ -377,6 +417,11 @@ std::unique_ptr<cudf::column> empty_input_reduction(const std::string& agg_type,
         identity_used = true;
         double inf = std::numeric_limits<double>::infinity();
         return num(agg_type == "min" ? inf : -inf);
+    }
+    if (minmax_counts_hits(agg_type, in_type.id()) && identity_flag) {
+        // F124: a STRING / Date / POSIXct min()/max() of zero rows is a null
+        // (below) and a hit like the numeric ones.
+        identity_used = true;
     }
     if (agg_type == "median" || agg_type == "std" || agg_type == "variance" ||
         agg_type == "quantile") {
@@ -603,12 +648,20 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     }
 
     // F07: per-aggregation "min()/max() hit the empty-group identity" report,
-    // returned to the R side as the "identity_used" attribute of the result
+    // returned to the R side as the "identity_rows" attribute of the result
     // pointer (the R side warns with base R's text and reconciles the
     // INT32 -> FLOAT64 promotion in the schema). `identity[i]` is TRUE only
     // for min()/max() over FLOAT64/INT32 input that is not an internal
     // helper aggregation.
-    LogicalVector identity_used(num_aggs, false);
+    // F124: the report is the 1-based result rows that hit (NA for the one
+    // evaluation dplyr makes on a zero-row grouped input, which has no row),
+    // per aggregation, so R can count the hits and name the first group.
+    // STRING and Date/POSIXct min()/max() report too (their value is just null).
+    List identity_rows(num_aggs);
+    for (int i = 0; i < num_aggs; ++i) identity_rows[i] = IntegerVector(0);
+    // The BOOL8 mask of an aggregation's hit groups before the key sort, which
+    // carries it along as a hidden trailing column of the result.
+    std::vector<std::unique_ptr<cudf::column>> hit_masks(num_aggs);
     // F34: per-aggregation "an integer/logical sum() left R's integer range
     // and was returned as FLOAT64" report (see narrow_int_sum()).
     LogicalVector sum_overflow(num_aggs, false);
@@ -618,7 +671,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     auto finish = [&](std::unique_ptr<cudf::table> result) {
         SEXP out = make_gpu_table_xptr(std::move(result));
         Rcpp::Shield<SEXP> keep(out);
-        Rf_setAttrib(out, Rf_install("identity_used"), identity_used);
+        Rf_setAttrib(out, Rf_install("identity_rows"), identity_rows);
         Rf_setAttrib(out, Rf_install("sum_overflow"), sum_overflow);
         Rf_setAttrib(out, Rf_install("ts_fraction"), ts_fraction);
         return out;
@@ -747,7 +800,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
             result_columns.push_back(empty_input_reduction(
                 agg_type, agg_col(i).type(),
                 static_cast<bool>(identity[i]), used));
-            identity_used[i] = used;
+            if (used) identity_rows[i] = IntegerVector::create(1);
             finish_sum(i, result_columns.back());
             ts_finish(i, result_columns.back());
         }
@@ -961,7 +1014,14 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                         std::move(agg_result), result_aggs[1].results[0]->view());
                 } else if (need_identity_fix && minmax_has_identity(agg_type, col.type().id())) {
                     cudf::column_view counts = result_aggs[1].results[0]->view();
-                    identity_used[i] = apply_minmax_identity(agg_result, agg_type == "min", &counts);
+                    std::unique_ptr<cudf::column> hit;
+                    if (apply_minmax_identity(agg_result, agg_type == "min", &counts, hit)) {
+                        identity_rows[i] = mask_rows(hit->view());
+                    }
+                } else if (need_identity_fix && minmax_counts_hits(agg_type, col.type().id())) {
+                    // F124: STRING / Date / POSIXct: the value stays null
+                    auto hit = empty_group_mask(result_aggs[1].results[0]->view());
+                    if (hit) identity_rows[i] = mask_rows(hit->view());
                 } else if (need_identity_fix) {
                     auto identity_scalar = make_identity_scalar(agg_type, agg_result->view().type());
                     agg_result = substitute_identity_for_empty_groups(
@@ -1172,7 +1232,11 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         auto& main_result = result_aggs[main_request_idx[i]].results[0];
         if (minmax_has_identity(agg_type, agg_col(i).type().id())) {
             cudf::column_view counts = result_aggs[identity_fix_request_idx[i]].results[0]->view();
-            identity_used[i] = apply_minmax_identity(main_result, agg_type == "min", &counts);
+            apply_minmax_identity(main_result, agg_type == "min", &counts, hit_masks[i]);
+            continue;
+        }
+        if (minmax_counts_hits(agg_type, agg_col(i).type().id())) {
+            hit_masks[i] = empty_group_mask(result_aggs[identity_fix_request_idx[i]].results[0]->view());
             continue;
         }
         auto identity_scalar = make_identity_scalar(agg_type, main_result->view().type());
@@ -1187,11 +1251,14 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     if (view.num_rows() == 0) {
         for (int i = 0; i < num_aggs; ++i) {
             std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
-            if (identity[i] &&
-                minmax_has_identity(agg_type, agg_col(i).type().id())) {
+            if (!identity[i]) continue;
+            if (minmax_has_identity(agg_type, agg_col(i).type().id())) {
+                std::unique_ptr<cudf::column> none;
                 apply_minmax_identity(result_aggs[main_request_idx[i]].results[0],
-                                      agg_type == "min", nullptr);
-                identity_used[i] = true;
+                                      agg_type == "min", nullptr, none);
+                identity_rows[i] = IntegerVector::create(NA_INTEGER);
+            } else if (minmax_counts_hits(agg_type, agg_col(i).type().id())) {
+                identity_rows[i] = IntegerVector::create(NA_INTEGER);
             }
         }
     }
@@ -1227,6 +1294,14 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         ts_finish(i, result_columns.back());
     }
 
+    // F124: the hit masks ride along as trailing columns, so the key sort below
+    // permutes them with their rows.
+    std::vector<int> mask_agg;
+    for (int i = 0; i < num_aggs; ++i) {
+        if (!hit_masks[i]) continue;
+        mask_agg.push_back(i);
+        result_columns.push_back(std::move(hit_masks[i]));
+    }
     auto result = std::make_unique<cudf::table>(std::move(result_columns));
 
     // F33: dplyr's group_by() order -- keys ascending, NA last. Bytewise
@@ -1241,6 +1316,15 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         auto idx = cudf::sorted_order(key_view, order, nulls);
         result = cudf::gather(result->view(), idx->view(),
                               cudf::out_of_bounds_policy::DONT_CHECK);
+    }
+
+    if (!mask_agg.empty()) {
+        auto cols = result->release();
+        for (size_t k = mask_agg.size(); k-- > 0;) {
+            identity_rows[mask_agg[k]] = mask_rows(cols.back()->view());
+            cols.pop_back();
+        }
+        result = std::make_unique<cudf::table>(std::move(cols));
     }
 
     return finish(std::move(result));

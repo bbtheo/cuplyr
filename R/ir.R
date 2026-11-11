@@ -5593,6 +5593,27 @@ ir_parse_bool8_cast <- function(op, cast_to) {
   }
 }
 
+# The parse hook of min()/max() in mutate()/filter()/summarise() arguments: a
+# logical argument is an integer (dplyr), and over an empty group an INT32
+# argument is a double: when the verb has found one (minmax_window_facts(), R/minmax-warn.R),
+# an INT32/BOOL8 argument is cast to FLOAT64 first.
+# @keywords internal
+ir_parse_minmax <- function(op) {
+  force(op)
+  function(args, schema) {
+    if (isTRUE(minmax_state$win$double)) {
+      type <- tryCatch(ir_infer_type(args[[1L]], schema), error = function(e) NA_character_)
+      if (isTRUE(unname(type) %in% c("INT32", "BOOL8"))) {
+        args[[1L]] <- ir_call("cast_float64", list(args[[1L]]))
+      } else {
+        args <- ir_cast_bool8_first(args, schema, "cast_int32")
+      }
+      return(ir_call(op, args))
+    }
+    ir_call(op, ir_cast_bool8_first(args, schema, "cast_int32"))
+  }
+}
+
 # The R value of a column-free IR subtree made of literals and pure ops
 # (`-1`, `-(2)`, `1 + 1`), or `ok = FALSE`. Unlike ir_fold_literal_call() it also
 # evaluates a unary minus, which that fold leaves as a call.
@@ -7446,9 +7467,9 @@ ir_call_registry <- list(
                  lower = NULL, window = list(kind = "agg")),
   "sum" = list(arity = 1L, parse = NULL, type = type_window_int_sum,
                 lower = NULL, window = list(kind = "agg")),
-  "min" = list(arity = 1L, parse = ir_parse_bool8_cast("min", "cast_int32"),
+  "min" = list(arity = 1L, parse = ir_parse_minmax("min"),
                 type = type_arg1, lower = NULL, window = list(kind = "agg")),
-  "max" = list(arity = 1L, parse = ir_parse_bool8_cast("max", "cast_int32"),
+  "max" = list(arity = 1L, parse = ir_parse_minmax("max"),
                 type = type_arg1, lower = NULL, window = list(kind = "agg")),
   "n" = list(arity = 0L, parse = NULL, type = type_int32,
               lower = NULL, window = list(kind = "agg")),

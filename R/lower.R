@@ -337,12 +337,11 @@ lower_summarise <- function(ast, source_ptr) {
                           na_rm_flags, agg_extra, identity_flags,
                           !isFALSE(.subset2(ast, "sort_groups")))
 
-  # dplyr warns whenever min()/max() hit the identity, with base R's text.
-  used <- attr(result, "identity_used")
-  for (i in which(used)) {
-    fn <- agg_fns[[i]]
-    warning("no non-missing arguments to ", fn, "; returning ",
-            if (identical(fn, "min")) "Inf" else "-Inf", call. = FALSE)
+  # F124: dplyr warns whenever min()/max() meet an empty group, with one
+  # condition for the verb (R/minmax-warn.R).
+  hits <- attr(result, "identity_rows")
+  if (any(lengths(hits) > 0L)) {
+    lower_summarise_hits(ast, aggs, hits, result, input_ptr, input_schema)
   }
 
   # F41: a Date mean()/median() with a fractional result was floored.
@@ -365,6 +364,40 @@ lower_summarise <- function(ast, source_ptr) {
   }
 
   result
+}
+
+# F124: signal (or, for summarise_with_empty_groups(), collect) the min()/max()
+# hits of one gpu_summarise() result. `hits` is its `identity_rows` report;
+# `result` still has the keys first and the aggregations in dot order.
+# @keywords internal
+lower_summarise_hits <- function(ast, aggs, hits, result, input_ptr, input_schema) {
+  groups <- .subset2(ast, "groups")
+  n_in <- gpu_dim(input_ptr)[[1L]]
+  collector <- minmax_state$collector
+  if (!is.null(collector)) {
+    collector$items[[length(collector$items) + 1L]] <- list(aggs = aggs, hits = hits, n_in = n_in)
+    return(invisible())
+  }
+  # dplyr names the group only for a grouped mask that has rows
+  grouped <- length(groups) > 0L && n_in > 0L
+  # A `.by` call leaves the groups unsorted and arranges them by the position
+  # of their first row (summarise_by_desugar()): that is the group order.
+  rank <- NULL
+  if (grouped && isFALSE(.subset2(ast, "sort_groups"))) {
+    first_pos <- which(vapply(aggs, function(a) isTRUE(.subset2(a, "first_pos")), logical(1)))
+    if (length(first_pos) > 0L) {
+      col <- group_keys_frame(gpu_select(result, length(groups) + first_pos[[1L]] - 1L),
+                              list(names = "pos", types = "INT32"))
+      rank <- rank(col[[1L]], ties.method = "first")
+    }
+  }
+  key_at <- function(row) {
+    group_keys_frame(
+      gpu_gather_rows(list(gpu_select(result, seq_along(groups) - 1L)), as.numeric(row - 1L)),
+      group_keys_schema(list(schema = input_schema, groups = groups))
+    )
+  }
+  minmax_emit(minmax_summarise_records(aggs, hits, rank, key_at, grouped))
 }
 
 #' Lower reframe node
@@ -1058,6 +1091,12 @@ lower_window <- function(ast, source_ptr) {
   })
 
   result <- gpu_window(input_ptr, frames, group_indices)
+
+  # F124: a lazy mutate()/filter() with a min()/max() call that could not know
+  # its row count at the verb: dplyr's warning for an empty input, every run.
+  if (!is.null(ast$minmax_warn) && gpu_dim(input_ptr)[[1L]] == 0L) {
+    minmax_signal_prepared(ast$minmax_warn)
+  }
 
   # F42: an integer/logical window sum() that left the integer range came
   # back as FLOAT64 (dplyr returns a double there; `sum_overflow` has one flag

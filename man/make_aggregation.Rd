@@ -57,10 +57,12 @@ scalar parameter beyond the input column: \code{quantile()}'s probability
 \code{min()}/\code{max()} over an INT32/FLOAT64 column apply base R's empty-vector
 identity (\code{Inf}/\code{-Inf}, with dplyr's warning) for an empty group, which
 promotes an INT32 result column to FLOAT64 when it happens; see
-\code{gpu_summarise()} (\code{src/ops_groupby.cpp}). \code{FALSE} is for internal helper
+\code{gpu_summarise()} (\code{src/ops_groupby.cpp}). A STRING or Date/POSIXct one
+(F124) keeps its null value but is counted the same way, for dplyr's
+warning. \code{FALSE} is for internal helper
 aggregations (\code{summarise_by_desugar()}'s row-position \code{min()}) that must
 stay INT32 and never warn. Only meaningful for \code{min}/\code{max} over
-INT32/FLOAT64; stored as \code{FALSE} for everything else.}
+INT32/FLOAT64/STRING/timestamps; stored as \code{FALSE} for everything else.}
 }
 \value{
 An aggregation list structure

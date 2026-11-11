@@ -742,13 +742,27 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       eager <- TRUE
       back_to_lazy <- TRUE
     }
+    # F124: the empty groups of a call with window min()/max() (their warning
+    # is dplyr's; the predicate is the same whatever the type)
+    if (minmax_dots_mention(dots)) {
+      setup <- minmax_window_setup(.data, !quo_is_null_fast(by_quo))
+      mm_prev <- minmax_win_open(if (complement) "filter_out" else "filter", setup$facts,
+                                 setup$carry, typed = FALSE)
+      on.exit(minmax_win_close(mm_prev), add = TRUE)
+      for (i in window_idx) {
+        minmax_record_dot("", rlang::quo_get_expr(dots[[i]]), parsed[[i]], schema)
+      }
+    }
+    minmax_prep <- minmax_win_lazy_prep()
     push_stages <- function(d) {
       for (stage in plan$stages) {
         if (length(stage$pre) > 0) {
           d <- push_op(d, ast_mutate(input_node(d), stage$pre))
         }
         d <- push_op(d, ast_window(input_node(d), stage$specs, verb_groups,
-                                   on_sum_overflow = if (eager) "error" else "double"))
+                                   on_sum_overflow = if (eager) "error" else "double",
+                                   minmax_warn = minmax_prep))
+        minmax_prep <<- NULL
       }
       d
     }
@@ -878,6 +892,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     .data <- push_op(.data, ast_select(input_node(.data), real_orig_names))
   }
 
+  minmax_win_emit()
   if (back_to_lazy) plan_back_to_lazy(.data) else .data
 }
 

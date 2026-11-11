@@ -139,6 +139,9 @@ reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
     input <- compute(.data)
     input$exec_mode <- "eager"
   }
+  # (F124: a min()/max() warning names the user's dot a wide dot comes from)
+  mm_prev <- minmax_ctx_open("reframe", dots[plan$owner], plan$owner)
+  on.exit(minmax_ctx_close(mm_prev), add = TRUE)
   wide <- with_reframe_wide(summarise_impl(
     input, plan$wide_dots, if (by_given) NULL else "drop", by_quo, by_cols, by_given, caller_env
   ))
@@ -625,11 +628,12 @@ reframe_wide_dots_ok <- function(quos, schema, verified) {
 #
 # @param dots enquos(...) of the call
 # @param schema the input's current schema
-# @return NULL, or `list(wide_dots, outputs, k, int32_sum, first_k_name)`: the named
+# @return NULL, or `list(wide_dots, outputs, k, int32_sum, owner, first_k_name)`: the named
 #   quosures for summarise_impl(), the output columns after the keys in dot
 #   order (`list(name, kind = "rep"|"interleave"|"literal", src | value)`),
 #   the common size, the (user) names of the wide dots that sum an INT32
-#   argument (character(0) if none), and the
+#   argument (character(0) if none), the user's dot each wide dot comes from
+#   (`owner`), and the
 #   first dot of that size (for dplyr's recycling
 #   error on an empty table)
 # @keywords internal
@@ -765,6 +769,7 @@ reframe_native_plan <- function(dots, schema) {
     outputs = outputs,
     k = as.integer(k),
     int32_sum = wide_info$int32_sum,
+    owner = unname(owner[names(wide_quos)]),
     first_k_name = if (k > 1L) nms[[which(sizes > 1L)[[1]]]] else NA_character_
   )
 }
