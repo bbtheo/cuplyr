@@ -755,7 +755,6 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       # call head of the warning)
       verb_frame <- sys.parent(2L)
       mm <- minmax_win_open(.data, !quo_is_null_fast(by_quo),
-                            if (complement) filter_out.tbl_gpu else filter.tbl_gpu,
                             if (complement) "filter_out" else "filter", verb_frame,
                             user_dots, dots, origin, typed = FALSE)
       for (i in window_idx) {

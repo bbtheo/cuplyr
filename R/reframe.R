@@ -143,7 +143,7 @@ reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
   wide <- with_reframe_wide(summarise_impl(
     input, plan$wide_dots, if (by_given) NULL else "drop", by_quo, by_cols, by_given, caller_env,
     minmax_source = list(user_dots = dots, origin = plan$owner, ids = plan$owner,
-                         method = reframe.tbl_gpu, default = "reframe")
+                         default = "reframe")
   ))
 
   # The wide table is computed; the reshape below stays pending again.

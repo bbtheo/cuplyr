@@ -17,10 +17,11 @@
 # per summarise_impl() call, handed to every stage of it) holds `.minmax`, the
 # user's dots the aggregations were built from (`user_dots`, one per
 # aggregation in order, through `origin`; `ids` give the dot order: reframe()
-# rewrites a dot into several), and the S3 method whose call the warning names
-# (`method`, `default`), built from `.minmax_src` only when an aggregation can
-# hit (minmax_dot_info()). Those aggregations carry a
-# small `$dot` built from it (minmax_attach_dots()): the dot's name and
+# rewrites a dot into several), the dplyr verb whose call the warning names
+# (`default`) and the frame of its S3 method (`frame`), built from
+# `.minmax_src` only when an aggregation can hit (minmax_dot_info()). Those
+# aggregations carry a small `$dot` built from it (minmax_attach_dots()): the
+# dot's name and
 # expression (not the quosure, so a plan does not hold the environment), the
 # verb's call head and `ctx`, the environment that routes the hits of
 # summarise_with_empty_groups() to its collector (minmax_collect()). Nothing is
@@ -32,7 +33,7 @@
 # warning.
 # @return a list with `user_dots`, `origin` and `ids`
 # @keywords internal
-minmax_dot_source <- function(user_dots, dots, method, default, ids = NULL) {
+minmax_dot_source <- function(user_dots, dots, default, ids = NULL) {
   origin <- attr(dots, "provenance")$origin
   if (length(origin) != length(dots) || length(user_dots) < max(origin, 0L)) {
     # (no provenance: the dots are the user's own)
@@ -40,7 +41,7 @@ minmax_dot_source <- function(user_dots, dots, method, default, ids = NULL) {
     user_dots <- dots
   }
   list(user_dots = user_dots, origin = origin, ids = ids %||% seq_along(origin),
-       method = method, default = default)
+       default = default)
 }
 
 # The environment shared by the aggregations of one summarise_impl() call.
@@ -56,18 +57,20 @@ minmax_ctx <- function(ir_cache) {
 
 # The call head the verb was called by (`summarise`, `summarize`,
 # `dplyr::mutate`): the head of the call of its dplyr generic, the frame under
-# the S3 `method`'s (R rewrites the head of the method's own call to the method
+# the S3 method's (R rewrites the head of the method's own call to the method
 # name): dplyr names the call as written. `frame` is the method's frame number
 # as its helper saw it (sys.parent()), so the usual call reads two frames; a
-# caller that is not the method (an internal rerun) is looked for on the stack.
-# Pointer comparisons only: identical() of two different closures compares
-# their bodies.
+# caller that is not the method (an internal rerun) is looked for down the
+# stack. The method's frame is known by the `.Generic` UseMethod() defines in
+# it, an environment lookup (sys.function() gives a copy of the closure, so no
+# pointer comparison can match it, and identical() would compare bodies).
 # @keywords internal
-minmax_verb_head <- function(method, default, frame = NA_integer_) {
-  if (is.na(frame) || frame < 2L || !rlang::is_reference(sys.function(frame), method)) {
+minmax_verb_head <- function(default, frame = NA_integer_) {
+  n <- sys.nframe()
+  if (is.na(frame) || frame < 2L || frame >= n || !minmax_dispatched_at(frame, default)) {
     frame <- NA_integer_
-    for (i in rev(seq_len(sys.nframe() - 1L))) {
-      if (rlang::is_reference(sys.function(i), method)) {
+    for (i in rev(seq_len(n - 1L))) {
+      if (minmax_dispatched_at(i, default)) {
         frame <- i
         break
       }
@@ -76,14 +79,18 @@ minmax_verb_head <- function(method, default, frame = NA_integer_) {
       return(as.name(default))
     }
   }
-  if (rlang::is_reference(sys.function(frame - 1L), getExportedValue("dplyr", default))) {
-    head <- sys.call(frame - 1L)[[1L]]
-    if (is.symbol(head) ||
-        (is.call(head) && length(head) == 3L && identical(head[[1L]], quote(`::`)))) {
-      return(head)
-    }
+  head <- sys.call(frame - 1L)[[1L]]
+  if (is.symbol(head) ||
+      (is.call(head) && length(head) == 3L && identical(head[[1L]], quote(`::`)))) {
+    return(head)
   }
   as.name(default)
+}
+
+# Is frame `i` a method UseMethod() dispatched for the dplyr generic `generic`?
+# @keywords internal
+minmax_dispatched_at <- function(i, generic) {
+  identical(get0(".Generic", envir = sys.frame(i), inherits = FALSE), generic)
 }
 
 # The dot source of one summarise_impl() call (minmax_dot_source()), built the
@@ -98,7 +105,7 @@ minmax_dot_info <- function(ir_cache) {
     if (is.null(src)) {
       return(NULL)
     }
-    info <- src[[1L]] %||% minmax_dot_source(src[[2L]], src[[3L]], summarise.tbl_gpu, "summarise")
+    info <- src[[1L]] %||% minmax_dot_source(src[[2L]], src[[3L]], "summarise")
     info$frame <- src[[4L]]
     ir_cache$.minmax <- info
   }
@@ -150,7 +157,7 @@ minmax_attach_dots <- function(aggregations, ir_cache, data = NULL) {
   ctx <- minmax_ctx(ir_cache)
   head <- ctx$head
   if (is.null(head)) {
-    head <- ctx$head <- minmax_verb_head(info$method, info$default, info$frame %||% NA_integer_)
+    head <- ctx$head <- minmax_verb_head(info$default, info$frame %||% NA_integer_)
   }
   names <- rlang::names2(info$user_dots)
   for (i in seq_len(k)) {
@@ -538,23 +545,22 @@ minmax_label_of <- function(w, i) {
 # The window min()/max() state of one verb call, or NULL when no call of it can
 # meet an empty group (the facts are known and none is empty: nothing is built,
 # the dots are parsed as they would be without F124). It keeps what the labels
-# and the call head are built from when a warning is prepared: the verb's S3
-# `method`, its dplyr name `default`, the method's `frame` number (the verb's
-# frames are on the stack until it returns), the user's dots, the parsed `dots`
+# and the call head are built from when a warning is prepared: the verb's dplyr
+# name `default`, its S3 method's `frame` number (the verb's frames are on the
+# stack until it returns), the user's dots, the parsed `dots`
 # and their `origin`. Then `facts` (NULL: not known yet), `carry` (the plan, not
 # the verb, signals the warning: a lazy table warns when it runs), `double`
 # (parse an INT32/BOOL8 argument as a double, read by ir_parse_minmax() through
 # the schema), and the `records` of the parsed dots. `typed = FALSE` (filter():
 # the predicate does not change type) never sets `double`.
 # @keywords internal
-minmax_win_open <- function(.data, by_given, method, default, frame, user_dots, dots, origin,
+minmax_win_open <- function(.data, by_given, default, frame, user_dots, dots, origin,
                             typed = TRUE) {
   setup <- minmax_window_setup(.data, by_given)
   if (!is.null(setup$facts) && setup$facts$E == 0L) {
     return(NULL)
   }
   w <- new.env(parent = emptyenv())
-  w$method <- method
   w$default <- default
   w$frame <- frame
   w$user_dots <- user_dots
@@ -656,7 +662,7 @@ minmax_win_warning <- function(w, per_group = w$facts$E) {
   first <- w$records[[1L]]
   lab <- minmax_label_of(w, first$i)
   n <- per_group * sum(vapply(w$records, function(r) length(r$calls), integer(1)))
-  list(head = minmax_verb_head(w$method, w$default, w$frame), n = n, name = lab$name,
+  list(head = minmax_verb_head(w$default, w$frame), n = n, name = lab$name,
        expr = lab$expr, op = first$calls[[1L]]$op, type = first$calls[[1L]]$type,
        id = w$facts$id, keys = w$facts$keys)
 }

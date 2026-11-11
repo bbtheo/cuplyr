@@ -569,7 +569,7 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   if (!rowwise && (if (plain) scan == 1L else minmax_dots_mention(dots))) {
     # (the frame of mutate.tbl_gpu(), for the call head of the warning)
     verb_frame <- sys.parent()
-    mm <- minmax_win_open(.data, by_given, mutate.tbl_gpu, "mutate", verb_frame,
+    mm <- minmax_win_open(.data, by_given, "mutate", verb_frame,
                           user_dots, dots, provenance$origin)
     # A column-free call that is not known to be pure (`max(x + runif(1))` in
     # an ungrouped call) must be evaluated once, so it is not parsed twice: the
