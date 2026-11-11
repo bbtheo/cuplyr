@@ -122,28 +122,22 @@ minmax_dot_info <- function(ir_cache) {
 # slice has no rows. A count the source does not explain is a bug of the caller.
 # @keywords internal
 minmax_attach_dots <- function(aggregations, ir_cache, data = NULL) {
-  n <- length(aggregations)
-  hit <- FALSE
-  na_rm <- FALSE
-  for (i in seq_len(n)) {
-    agg <- .subset2(aggregations, i)
-    if (isTRUE(.subset2(agg, "identity"))) {
-      hit <- TRUE
-      if (isTRUE(.subset2(agg, "na_rm"))) {
-        na_rm <- TRUE
-        break
-      }
-    }
-  }
-  if (!hit || is.null(ir_cache)) {
+  if (is.null(ir_cache)) {
     return(aggregations)
   }
-  if (!na_rm && !is.null(data)) {
+  # (make_aggregation() stores both flags as TRUE/FALSE; vapply() over
+  # .subset2 keeps this check off the interpreter, it runs on every summarise())
+  identity <- vapply(aggregations, .subset2, logical(1), "identity")
+  if (!any(identity)) {
+    return(aggregations)
+  }
+  if (!is.null(data) && !any(identity & vapply(aggregations, .subset2, logical(1), "na_rm"))) {
     rows <- minmax_lazy_rows(data)
     if (!is.na(rows) && rows > 0L) {
       return(aggregations)
     }
   }
+  n <- length(aggregations)
   info <- minmax_dot_info(ir_cache)
   if (is.null(info)) {
     return(aggregations)
@@ -556,6 +550,16 @@ minmax_label_of <- function(w, i) {
 # @keywords internal
 minmax_win_open <- function(.data, by_given, default, frame, user_dots, dots, origin,
                             typed = TRUE) {
+  # (the usual call, inline: nothing pending, a grouping that cannot keep an
+  # empty group, rows: no call can hit)
+  if (!inherits(.subset2(.data, "lazy_ops"), "ast_node") &&
+      (by_given || length(.subset2(.data, "groups")) == 0L ||
+         (is.null(.subset2(.data, "fixed_keys")) && !isFALSE(.subset2(.data, "group_drop"))))) {
+    rows <- base_dim(.data)[[1L]]
+    if (!is.na(rows) && rows > 0L) {
+      return(NULL)
+    }
+  }
   setup <- minmax_window_setup(.data, by_given)
   if (!is.null(setup$facts) && setup$facts$E == 0L) {
     return(NULL)
