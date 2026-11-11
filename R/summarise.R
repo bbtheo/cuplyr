@@ -777,8 +777,9 @@ summarise_empty_hits_emit <- function(observed, empty, full_keys, idx, n_in) {
   for (i in seq_along(src$aggs)) {
     rows <- obs$hits[[i]]
     # (an NA row is the one evaluation dplyr makes when there are no groups at
-    # all: a hit without a group)
-    n_none <- sum(is.na(rows))
+    # all: a hit without a group; where the grouping lists groups, the empty
+    # slice stands for them and the NA row is not one more)
+    n_none <- if (nrow(full_keys) == 0L) sum(is.na(rows)) else 0L
     rows <- rows[!is.na(rows)]
     pos <- c(if (is.null(idx)) rows else match(rows, idx), if (length(emp$hits[[i]]) > 0L) empty_pos)
     if (length(pos) + n_none == 0L) next

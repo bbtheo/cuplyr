@@ -54,17 +54,24 @@ minmax_ctx <- function(ir_cache) {
 }
 
 # The call head the verb was called by (`summarise`, `summarize`,
-# `dplyr::mutate`), found from the frame of its S3 `method` on the stack: dplyr
-# names the call as written. Only called when a warning is to be built for
-# the verb (not on the hot path).
+# `dplyr::mutate`), found from the frame of its dplyr generic on the stack, the
+# one under the S3 `method`'s (R rewrites the head of the method's own call to
+# the method name): dplyr names the call as written. Called once per verb call
+# that has a min()/max() to warn about, a few frames deep.
 # @keywords internal
 minmax_verb_head <- function(method, default) {
+  generic <- tryCatch(getExportedValue("dplyr", default), error = function(e) NULL)
   for (i in rev(seq_len(sys.nframe() - 1L))) {
     if (identical(sys.function(i), method)) {
-      head <- sys.call(i)[[1L]]
-      if (is.symbol(head) ||
-          (is.call(head) && length(head) == 3L && identical(head[[1L]], quote(`::`)))) {
-        return(head)
+      for (j in rev(seq_len(i - 1L))) {
+        if (identical(sys.function(j), generic)) {
+          head <- sys.call(j)[[1L]]
+          if (is.symbol(head) ||
+              (is.call(head) && length(head) == 3L && identical(head[[1L]], quote(`::`)))) {
+            return(head)
+          }
+          break
+        }
       }
       break
     }
@@ -465,8 +472,24 @@ minmax_win_new <- function(method, default, labels, setup, typed = TRUE) {
 minmax_win_set_setup <- function(w, setup) {
   w$facts <- setup$facts
   w$carry <- setup$carry
+  w$unknown_empty <- setup$unknown_empty
   w$double <- w$typed && !is.null(setup$facts) && setup$facts$E > 0L
   invisible(w)
+}
+
+# Does the verb need the data's answer (its steps run now) before it can say
+# what its parsed min()/max() calls do? Only a lazy table whose facts are not
+# known: when the grouping keeps empty groups that pending steps may leave
+# (any call: the warning names them), or when the rows may be none and a call's
+# INT32/BOOL8 argument would become a double (not for filter(): its type never
+# changes). A column called `max`, or a double call over unknown rows, needs
+# nothing: the plan carries that warning.
+# @keywords internal
+minmax_win_needs_run <- function(w) {
+  if (is.null(w) || !is.null(w$facts) || length(w$records) == 0L) {
+    return(FALSE)
+  }
+  isTRUE(w$unknown_empty) || (w$typed && minmax_win_int_call(w))
 }
 
 # The min()/max() calls of a parsed expression in R's evaluation order
@@ -583,5 +606,6 @@ minmax_window_setup <- function(.data, by_given) {
   wants_empty <- minmax_wants_empty(.data, by_given)
   rows <- if (pending) minmax_lazy_rows(.data) else base_dim(.data)[[1L]]
   facts <- if (!is.na(rows) && !(wants_empty && pending)) minmax_window_facts(.data, rows, wants_empty)
-  list(facts = facts, carry = lazy && (is.null(facts) || !wants_empty))
+  list(facts = facts, carry = lazy && (is.null(facts) || !wants_empty),
+       unknown_empty = lazy && pending && wants_empty)
 }

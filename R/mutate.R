@@ -560,11 +560,25 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   # argument's type. The empty groups of the call are read before its dots are
   # parsed when the table can say (minmax_window_setup()); a lazy table whose
   # pending steps change the rows is parsed as if none were empty, and runs
-  # them below if a parsed call needs the answer (an integer one).
+  # them below if a parsed call needs the answer (minmax_win_needs_run()).
   mm <- NULL
+  back_to_lazy <- FALSE
   if (!rowwise && (if (plain) scan == 1L else minmax_dots_mention(dots))) {
     mm <- minmax_win_new(mutate.tbl_gpu, "mutate", minmax_labels(user_dots, dots, provenance$origin),
                          minmax_window_setup(.data, by_given))
+    # A column-free call that is not known to be pure (`max(x + runif(1))` in
+    # an ungrouped call) must be evaluated once, so it is not parsed twice: the
+    # steps run before the one parse (F75).
+    if (is.null(mm$facts) && identical(.subset2(.data, "exec_mode"), "lazy") &&
+        !is.null(impure_const_call_text(dots, orig_schema, grouped = FALSE))) {
+      same <- identical(fallback_data, .data)
+      now <- plan_run_now(.data, "mutate", "a min()/max() next to a call that must run once",
+                          notice_data = fallback_data)
+      fallback_data <- if (same) now else plan_now_columns(now, current_schema(fallback_data)$names)
+      .data <- now
+      back_to_lazy <- TRUE
+      minmax_win_set_setup(mm, minmax_window_setup(.data, by_given))
+    }
   }
   # (A rowwise call evaluates each dot once per row: no vector literals, and
   # no constant is evaluated once for the CPU route to inline.)
@@ -592,15 +606,15 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
                                 reason = "a vector literal next to a window call in one mutate() is not planned together."))
   }
   # F124: a lazy table that could not say whether a group is empty runs its
-  # steps now when a parsed min()/max() has an integer or logical argument (its
-  # type is the data's to decide; F80's rule for an integer sum()), and the
-  # result goes back to lazy. The call is parsed again only if the data has an
-  # empty group, which makes the argument a double.
-  back_to_lazy <- FALSE
-  if (!is.null(mm) && is.null(mm$facts) && identical(.subset2(.data, "exec_mode"), "lazy") &&
-      minmax_win_int_call(mm)) {
+  # steps now when the PARSED min()/max() calls need the answer: an integer or
+  # logical argument (its type is the data's to decide; F80's rule for an
+  # integer sum()), or a grouping that keeps empty groups the pending steps may
+  # leave (their warning names them). The result goes back to lazy. The call is
+  # parsed again only if the data has an empty group, which makes the argument
+  # a double.
+  if (minmax_win_needs_run(mm) && identical(.subset2(.data, "exec_mode"), "lazy")) {
     same <- identical(fallback_data, .data)
-    now <- plan_run_now(.data, "mutate", "an integer min()/max() (result type depends on the data)",
+    now <- plan_run_now(.data, "mutate", "a min()/max() whose result depends on the empty groups of the data",
                         notice_data = fallback_data)
     fallback_data <- if (same) now else plan_now_columns(now, current_schema(fallback_data)$names)
     .data <- now
