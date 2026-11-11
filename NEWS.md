@@ -22,7 +22,7 @@
   Date `min()`/`max()` over rows the plan cannot count never breaks it: the plan
   warns when it runs on an empty input. Finding the empty groups of a
   `.drop = FALSE` table costs one distinct count when none is empty, and a table
-  whose row count is known and not zero pays nothing.
+  whose row count is known and not zero only pays a check of a few microseconds.
 * A `min()`/`max()` whose argument has one value per group (`max(n())`,
   `max(sum(x))`, the outer call of `max(max(x))`) keeps its type and does not
   warn, as in dplyr. A Date shifted by an integer amount made of `min()`/`max()`
