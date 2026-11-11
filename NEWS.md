@@ -21,7 +21,13 @@
   any `min()`/`max()` (the warning names the empty groups). A double, string or
   Date `min()`/`max()` over rows the plan cannot count never breaks it: the plan
   warns when it runs on an empty input. Finding the empty groups of a
-  `.drop = FALSE` table costs one distinct count when none is empty.
+  `.drop = FALSE` table costs one distinct count when none is empty, and a table
+  whose row count is known and not zero pays nothing.
+* A `min()`/`max()` whose argument has one value per group (`max(n())`,
+  `max(sum(x))`, the outer call of `max(max(x))`) keeps its type and does not
+  warn, as in dplyr. A Date shifted by an integer amount made of `min()`/`max()`
+  calls (`d + max(a)`, `d + max(a) * 2L`) stays a Date on the GPU when a group is
+  empty.
 
 ## Read and write parquet on the GPU (F85)
 
