@@ -5599,12 +5599,15 @@ ir_parse_bool8_cast <- function(op, cast_to) {
 # R/minmax-warn.R), it marks the schema it parses against (`minmax_double`,
 # parse_mutate_dots()) and an INT32/BOOL8 argument is cast to FLOAT64 first.
 # The mark rides on the schema, so a verb run while a dot is parsed (a
-# column-free call that calls one) never sees another verb's.
+# column-free call that calls one) never sees another verb's. An argument with
+# one value per group (`max(n())`, `max(sum(x))`: ir_is_group_scalar()) is never
+# empty, so it keeps its type.
 # @keywords internal
 ir_parse_minmax <- function(op) {
   force(op)
   function(args, schema) {
-    if (isTRUE(.subset2(schema, "minmax_double"))) {
+    if (isTRUE(.subset2(schema, "minmax_double")) && length(args) == 1L &&
+        !ir_is_group_scalar(args[[1L]])) {
       type <- tryCatch(ir_infer_type(args[[1L]], schema), error = function(e) NA_character_)
       if (isTRUE(unname(type) %in% c("INT32", "BOOL8"))) {
         args[[1L]] <- ir_call("cast_float64", list(args[[1L]]))
@@ -5615,6 +5618,33 @@ ir_parse_minmax <- function(op) {
     }
     ir_call(op, ir_cast_bool8_first(args, schema, "cast_int32"))
   }
+}
+
+# F124: the shift of a Date by a min()/max() whose INT32/BOOL8 argument
+# ir_parse_minmax() cast to a double (`d + max(a)` with an empty group): the
+# shifted Date only has rows where the group has one, where the call's value is
+# the integer's, and dplyr's result is a Date either way. So the shift takes the
+# integer call (`max(a)`, a logical as INT32) and stays native. NULL for any
+# other double shift.
+# @keywords internal
+ir_minmax_int_shift <- function(n, schema) {
+  if (!identical(.subset2(n, "kind"), "call") || !.subset2(n, "op") %in% c("min", "max") ||
+      length(n$args) != 1L) {
+    return(NULL)
+  }
+  a <- n$args[[1L]]
+  if (!identical(.subset2(a, "kind"), "call") || !identical(.subset2(a, "op"), "cast_float64") ||
+      length(a$args) != 1L) {
+    return(NULL)
+  }
+  x <- a$args[[1L]]
+  type <- tryCatch(unname(ir_infer_type(x, schema)), error = function(e) NA_character_)
+  if (identical(type, "BOOL8")) {
+    x <- ir_call("cast_int32", list(x))
+  } else if (!identical(type, "INT32")) {
+    return(NULL)
+  }
+  ir_call(n$op, list(x))
 }
 
 # The R value of a column-free IR subtree made of literals and pure ops
@@ -5723,7 +5753,10 @@ ir_parse_ts_arith <- function(op) {
       }
       n <- ir_lit(as.integer(v), "INT32")
     } else if (!identical(unname(types[3L - ts_pos]), "INT32")) {
-      return(plain)   # a double/logical shift: dplyr may be fractional
+      n <- ir_minmax_int_shift(n, schema)
+      if (is.null(n)) {
+        return(plain)   # a double/logical shift: dplyr may be fractional
+      }
     }
     ir_call(if (op == "+") "date_add_days" else "date_sub_days",
             list(args[[ts_pos]], n))

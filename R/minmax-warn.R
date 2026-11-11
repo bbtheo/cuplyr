@@ -18,7 +18,8 @@
 # user's dots the aggregations were built from (`user_dots`, one per
 # aggregation in order, through `origin`; `ids` give the dot order: reframe()
 # rewrites a dot into several), and the S3 method whose call the warning names
-# (`method`, `default`). The aggregations that can hit an empty group carry a
+# (`method`, `default`), built from `.minmax_src` only when an aggregation can
+# hit (minmax_dot_info()). Those aggregations carry a
 # small `$dot` built from it (minmax_attach_dots()): the dot's name and
 # expression (not the quosure, so a plan does not hold the environment), the
 # verb's call head and `ctx`, the environment that routes the hits of
@@ -54,57 +55,102 @@ minmax_ctx <- function(ir_cache) {
 }
 
 # The call head the verb was called by (`summarise`, `summarize`,
-# `dplyr::mutate`), found from the frame of its dplyr generic on the stack, the
-# one under the S3 `method`'s (R rewrites the head of the method's own call to
-# the method name): dplyr names the call as written. Called once per verb call
-# that has a min()/max() to warn about, a few frames deep.
+# `dplyr::mutate`): the head of the call of its dplyr generic, the frame under
+# the S3 `method`'s (R rewrites the head of the method's own call to the method
+# name): dplyr names the call as written. `frame` is the method's frame number
+# as its helper saw it (sys.parent()), so the usual call reads two frames; a
+# caller that is not the method (an internal rerun) is looked for on the stack.
+# Pointer comparisons only: identical() of two different closures compares
+# their bodies.
 # @keywords internal
-minmax_verb_head <- function(method, default) {
-  generic <- tryCatch(getExportedValue("dplyr", default), error = function(e) NULL)
-  for (i in rev(seq_len(sys.nframe() - 1L))) {
-    if (identical(sys.function(i), method)) {
-      for (j in rev(seq_len(i - 1L))) {
-        if (identical(sys.function(j), generic)) {
-          head <- sys.call(j)[[1L]]
-          if (is.symbol(head) ||
-              (is.call(head) && length(head) == 3L && identical(head[[1L]], quote(`::`)))) {
-            return(head)
-          }
-          break
-        }
+minmax_verb_head <- function(method, default, frame = NA_integer_) {
+  if (is.na(frame) || frame < 2L || !rlang::is_reference(sys.function(frame), method)) {
+    frame <- NA_integer_
+    for (i in rev(seq_len(sys.nframe() - 1L))) {
+      if (rlang::is_reference(sys.function(i), method)) {
+        frame <- i
+        break
       }
-      break
+    }
+    if (is.na(frame) || frame < 2L) {
+      return(as.name(default))
+    }
+  }
+  if (rlang::is_reference(sys.function(frame - 1L), getExportedValue("dplyr", default))) {
+    head <- sys.call(frame - 1L)[[1L]]
+    if (is.symbol(head) ||
+        (is.call(head) && length(head) == 3L && identical(head[[1L]], quote(`::`)))) {
+      return(head)
     }
   }
   as.name(default)
 }
 
-# Put the dot (id, name, expression, call head) on every min()/max()
-# aggregation that can hit an empty group (`identity`); the others pay nothing.
-# A count the source does not explain is a bug of the caller.
+# The dot source of one summarise_impl() call (minmax_dot_source()), built the
+# first time an aggregation needs it from what summarise_impl() left in
+# `ir_cache$.minmax_src`: `list(source, user_dots, expanded, frame)`, `source`
+# being reframe()'s own (or NULL) and `frame` the method's frame number.
 # @keywords internal
-minmax_attach_dots <- function(aggregations, ir_cache) {
-  info <- if (!is.null(ir_cache)) .subset2(ir_cache, ".minmax")
+minmax_dot_info <- function(ir_cache) {
+  info <- .subset2(ir_cache, ".minmax")
+  if (is.null(info)) {
+    src <- .subset2(ir_cache, ".minmax_src")
+    if (is.null(src)) {
+      return(NULL)
+    }
+    info <- src[[1L]] %||% minmax_dot_source(src[[2L]], src[[3L]], summarise.tbl_gpu, "summarise")
+    info$frame <- src[[4L]]
+    ir_cache$.minmax <- info
+  }
+  info
+}
+
+# Put the dot (id, name, expression, call head) on every min()/max()
+# aggregation that can hit an empty group (`identity`), when one can: an
+# aggregation hits only an empty group (or an all-NA one under `na.rm = TRUE`),
+# so with no `na.rm = TRUE` one a table whose row count is known and not zero
+# (`data`: eager, or a lazy plan that keeps its rows, minmax_lazy_rows()) has
+# nothing to label. Its groups are dplyr's, each with a row: a grouping that
+# keeps empty ones is summarised by summarise_with_empty_groups(), whose empty
+# slice has no rows. A count the source does not explain is a bug of the caller.
+# @keywords internal
+minmax_attach_dots <- function(aggregations, ir_cache, data = NULL) {
   n <- length(aggregations)
   hit <- FALSE
+  na_rm <- FALSE
   for (i in seq_len(n)) {
-    if (isTRUE(.subset2(.subset2(aggregations, i), "identity"))) {
+    agg <- .subset2(aggregations, i)
+    if (isTRUE(.subset2(agg, "identity"))) {
       hit <- TRUE
-      break
+      if (isTRUE(.subset2(agg, "na_rm"))) {
+        na_rm <- TRUE
+        break
+      }
     }
   }
-  if (!hit || is.null(info)) {
+  if (!hit || is.null(ir_cache)) {
+    return(aggregations)
+  }
+  if (!na_rm && !is.null(data)) {
+    rows <- minmax_lazy_rows(data)
+    if (!is.na(rows) && rows > 0L) {
+      return(aggregations)
+    }
+  }
+  info <- minmax_dot_info(ir_cache)
+  if (is.null(info)) {
     return(aggregations)
   }
   k <- length(info$origin)
-  if (!(n == k || n == k + 1L)) {
+  # (one more: the `.by` call's first-row position, last, summarise_by_desugar())
+  if (!(n == k || (n == k + 1L && isTRUE(.subset2(.subset2(aggregations, n), "first_pos"))))) {
     stop("internal error: ", n, " aggregations for ", k, " dots (min()/max() warning labels)",
          call. = FALSE)
   }
   ctx <- minmax_ctx(ir_cache)
   head <- ctx$head
   if (is.null(head)) {
-    head <- ctx$head <- minmax_verb_head(info$method, info$default)
+    head <- ctx$head <- minmax_verb_head(info$method, info$default, info$frame %||% NA_integer_)
   }
   names <- rlang::names2(info$user_dots)
   for (i in seq_len(k)) {
@@ -336,13 +382,51 @@ minmax_summarise_records <- function(aggs, hits, rank, key_at, grouped) {
 # answer, and runs the plan now (minmax_win_int_call()). A double, string or
 # timestamp call only has a warning to raise, which the plan carries.
 #
-# The state of one verb call is the environment minmax_win_new() makes. The verb
-# hands it to parse_mutate_dots() and to its own emit; nothing is global.
+# A call whose argument has one value per group (`max(n())`, `max(sum(x))`,
+# ir_is_group_scalar()) never meets an empty vector: it neither warns nor turns
+# double. A Date shifted by an integer min()/max() (`d + max(a)`) is a Date
+# whatever that call's type, so the shift keeps the integer call (native) and
+# the call's type decides nothing (`typed = FALSE` in its record).
+#
+# The state of one verb call is the environment minmax_win_open() makes, only
+# when a hit is possible (the facts say an empty group, or cannot say yet); the
+# labels and the call head are built when a warning is prepared. The verb hands
+# it to parse_mutate_dots() and to its own emit; nothing is global.
 
 # TRUE iff a dot mentions min() or max() (any call, any depth).
 # @keywords internal
 minmax_dots_mention <- function(dots) {
   dots_mention(dots, c("min", "max"))
+}
+
+# TRUE iff a dot CALLS min() or max() (a column named `max` is not a call).
+# @keywords internal
+minmax_dots_call <- function(dots) {
+  calls <- function(x) {
+    if (!is.call(x)) {
+      return(FALSE)
+    }
+    head <- x[[1L]]
+    if (is.call(head) && length(head) == 3L && identical(head[[1L]], quote(`::`))) {
+      head <- head[[3L]]
+    }
+    if (is.symbol(head) && as.character(head) %in% c("min", "max")) {
+      return(TRUE)
+    }
+    for (a in as.list(x)) {
+      if (rlang::is_quosure(a)) a <- rlang::quo_get_expr(a)
+      if (calls(a)) {
+        return(TRUE)
+      }
+    }
+    FALSE
+  }
+  for (dot in dots) {
+    if (calls(rlang::quo_get_expr(dot))) {
+      return(TRUE)
+    }
+  }
+  FALSE
 }
 
 # The row count of a lazy table the pending steps cannot change (mutate,
@@ -435,33 +519,47 @@ minmax_window_facts <- function(.data, rows, wants_empty) {
   list(E = E, n_in = n_in, id = g$id, keys = g$keys)
 }
 
-# The user's dot each parsed dot of a verb call comes from, for the label
-# dplyr gives it: `list(name, expr)` per parsed dot (across() expanded), the name
-# as the user wrote it ("" for none). `origin` is the user dot of each parsed
-# dot (the `provenance` of expand_across_dots()). Built only when a min()/max()
-# is in play.
+# The label dplyr gives parsed dot `i` of a verb call: `list(name, expr)` of the
+# user's dot it comes from (across() expanded), the name as the user wrote it
+# ("" for none). `origin` is the user dot of each parsed dot (the `provenance`
+# of expand_across_dots()). Built only for the dot a warning names.
 # @keywords internal
-minmax_labels <- function(user_dots, dots, origin) {
-  if (length(origin) != length(dots) || (length(origin) > 0L && max(origin) > length(user_dots))) {
-    origin <- seq_along(dots)
-    user_dots <- dots
+minmax_label_of <- function(w, i) {
+  user_dots <- w$user_dots
+  origin <- w$origin
+  if (length(origin) != length(w$dots) || (length(origin) > 0L && max(origin) > length(user_dots))) {
+    origin <- seq_along(w$dots)
+    user_dots <- w$dots
   }
-  nms <- rlang::names2(user_dots)
-  lapply(origin, function(o) list(name = nms[[o]], expr = rlang::quo_get_expr(user_dots[[o]])))
+  o <- origin[[i]]
+  list(name = rlang::names2(user_dots)[[o]], expr = rlang::quo_get_expr(user_dots[[o]]))
 }
 
-# The window min()/max() state of one verb call: `labels` (minmax_labels()),
-# `head` its call head (found now, while the verb's frame is on the stack),
-# `facts` (NULL: not known yet), `carry` (the plan, not the verb, signals the
-# warning: a lazy table warns when it runs), `double` (parse an INT32/BOOL8
-# argument as a double, read by ir_parse_minmax() through the schema), and the
-# `records` of the parsed dots. `typed = FALSE` (filter(): the predicate does
-# not change type) never sets `double`.
+# The window min()/max() state of one verb call, or NULL when no call of it can
+# meet an empty group (the facts are known and none is empty: nothing is built,
+# the dots are parsed as they would be without F124). It keeps what the labels
+# and the call head are built from when a warning is prepared: the verb's S3
+# `method`, its dplyr name `default`, the method's `frame` number (the verb's
+# frames are on the stack until it returns), the user's dots, the parsed `dots`
+# and their `origin`. Then `facts` (NULL: not known yet), `carry` (the plan, not
+# the verb, signals the warning: a lazy table warns when it runs), `double`
+# (parse an INT32/BOOL8 argument as a double, read by ir_parse_minmax() through
+# the schema), and the `records` of the parsed dots. `typed = FALSE` (filter():
+# the predicate does not change type) never sets `double`.
 # @keywords internal
-minmax_win_new <- function(method, default, labels, setup, typed = TRUE) {
+minmax_win_open <- function(.data, by_given, method, default, frame, user_dots, dots, origin,
+                            typed = TRUE) {
+  setup <- minmax_window_setup(.data, by_given)
+  if (!is.null(setup$facts) && setup$facts$E == 0L) {
+    return(NULL)
+  }
   w <- new.env(parent = emptyenv())
-  w$head <- minmax_verb_head(method, default)
-  w$labels <- labels
+  w$method <- method
+  w$default <- default
+  w$frame <- frame
+  w$user_dots <- user_dots
+  w$dots <- dots
+  w$origin <- origin
   w$typed <- typed
   w$records <- list()
   minmax_win_set_setup(w, setup)
@@ -492,20 +590,25 @@ minmax_win_needs_run <- function(w) {
   isTRUE(w$unknown_empty) || (w$typed && minmax_win_int_call(w))
 }
 
-# The min()/max() calls of a parsed expression in R's evaluation order
-# (arguments left to right, then the call): `list(op, type)` each, `type` the
-# GPU type of the argument.
+# The min()/max() calls of a parsed expression that can meet an empty group, in
+# R's evaluation order (arguments left to right, then the call): `list(op,
+# type, typed)` each, `type` the GPU type of the argument, `typed = FALSE` for
+# the shift of a Date (`date_add_days(d, max(a))`: the result is a Date whatever
+# the call's type). A call whose argument has one value per group
+# (ir_is_group_scalar(): `max(n())`, the outer max() of `max(max(x))`) is not
+# one: dplyr hands it one value.
 # @keywords internal
 minmax_ir_calls <- function(ir, schema) {
   calls <- list()
-  walk <- function(node) {
+  walk <- function(node, shift = FALSE) {
     if (!inherits(node, "cuplyr_ir") || !identical(node$kind, "call")) {
       return(invisible())
     }
-    for (a in node$args) walk(a)
-    if (node$op %in% c("min", "max") && length(node$args) == 1L) {
+    shifts <- node$op %in% c("date_add_days", "date_sub_days")
+    for (k in seq_along(node$args)) walk(node$args[[k]], shifts && k == 2L)
+    if (node$op %in% c("min", "max") && length(node$args) == 1L && !ir_is_group_scalar(node$args[[1L]])) {
       type <- tryCatch(unname(ir_infer_type(node$args[[1L]], schema)), error = function(e) NA_character_)
-      calls[[length(calls) + 1L]] <<- list(op = node$op, type = type)
+      calls[[length(calls) + 1L]] <<- list(op = node$op, type = type, typed = !shift)
     }
   }
   walk(ir)
@@ -520,19 +623,19 @@ minmax_record_dot <- function(w, i, ir, schema) {
   }
   calls <- minmax_ir_calls(ir, schema)
   if (length(calls) > 0L) {
-    lab <- w$labels[[i]]
-    w$records[[length(w$records) + 1L]] <- list(name = lab$name, expr = lab$expr, calls = calls)
+    w$records[[length(w$records) + 1L]] <- list(i = i, calls = calls)
   }
   invisible()
 }
 
 # Does a parsed call of the verb take an INT32 or logical argument (or one whose
-# type is not known)? Then the type of its result is the data's to decide.
+# type is not known) and decide a type? Then the type of its result is the
+# data's to decide.
 # @keywords internal
 minmax_win_int_call <- function(w) {
   for (r in w$records) {
     for (cl in r$calls) {
-      if (is.na(cl$type) || cl$type %in% c("INT32", "BOOL8")) {
+      if (!isFALSE(cl$typed) && (is.na(cl$type) || cl$type %in% c("INT32", "BOOL8"))) {
         return(TRUE)
       }
     }
@@ -543,7 +646,7 @@ minmax_win_int_call <- function(w) {
 # The warning every window min()/max() call of the verb meets for the empty
 # groups: `n` = calls x empty groups, the first being the first call of the
 # first dot that has one, in the first empty group. NULL when there is nothing
-# to say.
+# to say. Called while the verb runs (its frames give the call head).
 # @return `list(head, n, name, expr, op, type, id, keys)` or NULL
 # @keywords internal
 minmax_win_warning <- function(w, per_group = w$facts$E) {
@@ -551,9 +654,10 @@ minmax_win_warning <- function(w, per_group = w$facts$E) {
     return(NULL)
   }
   first <- w$records[[1L]]
+  lab <- minmax_label_of(w, first$i)
   n <- per_group * sum(vapply(w$records, function(r) length(r$calls), integer(1)))
-  list(head = w$head, n = n, name = first$name, expr = first$expr,
-       op = first$calls[[1L]]$op, type = first$calls[[1L]]$type,
+  list(head = minmax_verb_head(w$method, w$default, w$frame), n = n, name = lab$name,
+       expr = lab$expr, op = first$calls[[1L]]$op, type = first$calls[[1L]]$type,
        id = w$facts$id, keys = w$facts$keys)
 }
 

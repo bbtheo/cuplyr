@@ -748,12 +748,16 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     # plan carries the warning for an empty input; when the grouping keeps empty
     # groups that pending steps may leave, the steps run now (the computed
     # table is used from here on, nothing runs twice) and the result goes
-    # back to lazy.
+    # back to lazy. Nothing is built when no group can be empty
+    # (minmax_win_open() gives NULL).
     if (minmax_dots_mention(dots)) {
-      mm <- minmax_win_new(if (complement) filter_out.tbl_gpu else filter.tbl_gpu,
-                           if (complement) "filter_out" else "filter",
-                           minmax_labels(user_dots, dots, origin),
-                           minmax_window_setup(.data, !quo_is_null_fast(by_quo)), typed = FALSE)
+      # (the frame of filter.tbl_gpu(), the caller of filter_impl(), for the
+      # call head of the warning)
+      verb_frame <- sys.parent(2L)
+      mm <- minmax_win_open(.data, !quo_is_null_fast(by_quo),
+                            if (complement) filter_out.tbl_gpu else filter.tbl_gpu,
+                            if (complement) "filter_out" else "filter", verb_frame,
+                            user_dots, dots, origin, typed = FALSE)
       for (i in window_idx) {
         minmax_record_dot(mm, i, parsed[[i]], schema)
       }

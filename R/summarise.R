@@ -507,9 +507,11 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # it, so each aggregate argument is parsed, and evaluated, once)
   ir_cache <- new.env(parent = emptyenv())
   # (F124: the aggregations built from these dots say which of the user's dots a
-  # min()/max() warning belongs to; reframe() gives the source of its wide dots)
-  ir_cache$.minmax <- minmax_source %||%
-    minmax_dot_source(user_dots, expanded, summarise.tbl_gpu, "summarise")
+  # min()/max() warning belongs to; reframe() gives the source of its wide dots.
+  # Built only when an aggregation can hit, minmax_dot_info(); the frame is the
+  # method's, for the verb's call head.)
+  verb_frame <- sys.parent()
+  ir_cache$.minmax_src <- list(minmax_source, user_dots, expanded, verb_frame)
   sequential <- summarise_dots_are_sequential(dots)
   if (sequential ||
       !(if (is.null(simple_plan)) summarise_dots_parseable(dots, in_schema, ir_cache) else simple_plan$parseable)) {
@@ -1509,7 +1511,7 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   }
 
   # F124: dplyr's warning for an empty min()/max() names the dot it came from
-  aggregations <- minmax_attach_dots(aggregations, ir_cache)
+  aggregations <- minmax_attach_dots(aggregations, ir_cache, .data)
 
   # (F74) the caller wants to see which aggregations ran
   if (!is.null(agg_info)) agg_info$aggregations <- aggregations

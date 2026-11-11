@@ -558,19 +558,26 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   # F124: a window min()/max() over an empty group (a zero-row table, the empty
   # groups of a `.drop = FALSE` grouping) is a double in dplyr whatever the
   # argument's type. The empty groups of the call are read before its dots are
-  # parsed when the table can say (minmax_window_setup()); a lazy table whose
-  # pending steps change the rows is parsed as if none were empty, and runs
-  # them below if a parsed call needs the answer (minmax_win_needs_run()).
+  # parsed when the table can say (minmax_window_setup()); none empty, nothing
+  # more is done (minmax_win_open() gives NULL). A lazy table whose pending steps
+  # change the rows is parsed as if none were empty, and runs them below if a
+  # parsed call needs the answer (minmax_win_needs_run()). Every exit after a
+  # run goes back to lazy (done()).
   mm <- NULL
   back_to_lazy <- FALSE
+  done <- function(result) if (back_to_lazy) plan_back_to_lazy(result) else result
   if (!rowwise && (if (plain) scan == 1L else minmax_dots_mention(dots))) {
-    mm <- minmax_win_new(mutate.tbl_gpu, "mutate", minmax_labels(user_dots, dots, provenance$origin),
-                         minmax_window_setup(.data, by_given))
+    # (the frame of mutate.tbl_gpu(), for the call head of the warning)
+    verb_frame <- sys.parent()
+    mm <- minmax_win_open(.data, by_given, mutate.tbl_gpu, "mutate", verb_frame,
+                          user_dots, dots, provenance$origin)
     # A column-free call that is not known to be pure (`max(x + runif(1))` in
     # an ungrouped call) must be evaluated once, so it is not parsed twice: the
-    # steps run before the one parse (F75).
-    if (is.null(mm$facts) && identical(.subset2(.data, "exec_mode"), "lazy") &&
-        !is.null(impure_const_call_text(dots, orig_schema, grouped = FALSE))) {
+    # steps run before the one parse (F75). Only a dot that calls min() or max()
+    # can need a second parse (a column named `max` does not).
+    if (!is.null(mm) && is.null(mm$facts) && identical(.subset2(.data, "exec_mode"), "lazy") &&
+        !is.null(impure_const_call_text(dots, orig_schema, grouped = FALSE)) &&
+        minmax_dots_call(dots)) {
       same <- identical(fallback_data, .data)
       now <- plan_run_now(.data, "mutate", "a min()/max() next to a call that must run once",
                           notice_data = fallback_data)
@@ -592,27 +599,17 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   if (rowwise && !rowwise_expressions_ok(expressions)) {
     rowwise_bail("a window call or vector literal in a rowwise mutate()")
   }
-  if (is.null(expressions)) {
-    return(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
-                                consts = evaluated$consts, provenance = provenance,
-                                reason = fallback_failed_reason(
-                                  fallback_dots, "an expression has a form the GPU engine does not support."
-                                )))
-  }
-  # A vector literal next to a window call isn't planned together: let dplyr
-  # run the whole call.
-  if (isTRUE(attr(expressions, "has_window")) && isTRUE(attr(expressions, "has_vec"))) {
-    return(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
-                                reason = "a vector literal next to a window call in one mutate() is not planned together."))
-  }
   # F124: a lazy table that could not say whether a group is empty runs its
   # steps now when the PARSED min()/max() calls need the answer: an integer or
   # logical argument (its type is the data's to decide; F80's rule for an
   # integer sum()), or a grouping that keeps empty groups the pending steps may
   # leave (their warning names them). The result goes back to lazy. The call is
   # parsed again only if the data has an empty group, which makes the argument
-  # a double.
-  if (minmax_win_needs_run(mm) && identical(.subset2(.data, "exec_mode"), "lazy")) {
+  # a double; that parse may route differently (a double the GPU can't take
+  # there), and then takes the CPU route below from the computed table. Its
+  # warnings were the first parse's already (a fold that warns, F83): dplyr
+  # evaluates each dot once.
+  if (!is.null(expressions) && minmax_win_needs_run(mm) && identical(.subset2(.data, "exec_mode"), "lazy")) {
     same <- identical(fallback_data, .data)
     now <- plan_run_now(.data, "mutate", "a min()/max() whose result depends on the empty groups of the data",
                         notice_data = fallback_data)
@@ -622,13 +619,26 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
     minmax_win_set_setup(mm, minmax_window_setup(.data, by_given))
     if (isTRUE(mm$double)) {
       mm$records <- list()
-      expressions <- parse_all()
-      if (is.null(expressions)) {
-        stop("internal error: mutate() parsed a call twice with different results", call. = FALSE)
-      }
+      expressions <- withCallingHandlers(
+        parse_all(),
+        warning = function(w) invokeRestart("muffleWarning"),
+        message = function(m) invokeRestart("muffleMessage")
+      )
     }
   }
-  done <- function(result) if (back_to_lazy) plan_back_to_lazy(result) else result
+  if (is.null(expressions)) {
+    return(done(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
+                                     consts = evaluated$consts, provenance = provenance,
+                                     reason = fallback_failed_reason(
+                                       fallback_dots, "an expression has a form the GPU engine does not support."
+                                     ))))
+  }
+  # A vector literal next to a window call isn't planned together: let dplyr
+  # run the whole call.
+  if (isTRUE(attr(expressions, "has_window")) && isTRUE(attr(expressions, "has_vec"))) {
+    return(done(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
+                                     reason = "a vector literal next to a window call in one mutate() is not planned together.")))
+  }
   .data <- check_vector_constant_sizes(.data, expressions, "mutate")
   dropped <- attr(expressions, "dropped")
   if (rowwise && any(dropped %in% .subset2(.data, "groups"))) {
@@ -1103,7 +1113,7 @@ mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_qu
 #   for `dots`: which user dot each expanded dot came from, and whether it is
 #   an across()/if_any()/if_all() expansion (see the reader rule below).
 # @param minmax Optional window min()/max() state of the verb call
-#   (minmax_win_new(), R/minmax-warn.R): the parsed dots' min()/max() calls are
+#   (minmax_win_open(), R/minmax-warn.R): the parsed dots' min()/max() calls are
 #   recorded in it, and its `double` makes an integer argument a double.
 #
 # Evaluate-once and fractional Dates (F37). dplyr evaluates each dot once. A
@@ -1149,7 +1159,7 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
                                ungrouped = FALSE, evaluated = NULL, provenance = NULL,
                                minmax = NULL) {
   dots <- if (warn_unnamed) auto_name_dots(dots, verb) else name_dots_silently(dots)
-  # F124: the verb's window min()/max() state (minmax_win_new()): its calls are
+  # F124: the verb's window min()/max() state (minmax_win_open()): its calls are
   # counted per dot, and an empty group makes an integer argument a double,
   # which the parse hook of min()/max() reads from the schema it parses against.
   if (!is.null(minmax) && isTRUE(minmax$double)) {
