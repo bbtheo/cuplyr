@@ -485,10 +485,13 @@ rewrite_context_expr <- function(expr, keys) {
 # @param by Logical, `TRUE` when `group_cols` come from `.by=` (first-appearance
 #   numbering, no empty groups) rather than group_by()
 # @param rowwise `TRUE` for a rowwise `.data` (F49): the id is the row number
+# @param frame The verb's frame: the helper's name stays registered with the
+#   parser until it exits (ir_cgid_helper_scope())
 # @return `list(data = <possibly-materialized-and-joined tbl_gpu>, dots =
 #   <possibly-rewritten dots>)`
 # @keywords internal
-substitute_cur_group_id <- function(.data, dots, group_cols, by = FALSE, rowwise = FALSE) {
+substitute_cur_group_id <- function(.data, dots, group_cols, by = FALSE, rowwise = FALSE,
+                                    frame = parent.frame()) {
   has_any <- dots_mention(dots, "cur_group_id") && any(vapply(
     dots, function(q) expr_contains_zero_arg_call(rlang::quo_get_expr(q), "cur_group_id"),
     logical(1)
@@ -553,6 +556,11 @@ substitute_cur_group_id <- function(.data, dots, group_cols, by = FALSE, rowwise
     )
   })
   names(new_dots) <- names(dots)
+  # The parser must tell the helper (one value per group) from a user column
+  # named alike, in every quosure built from these until the verb returns
+  # (ir_is_group_scalar()): registered for the caller's frame, not tagged on
+  # the quosures, which expansions rebuild.
+  ir_cgid_helper_scope(helper_name, frame)
 
   list(data = new_data, dots = new_dots, used = TRUE, helper_name = helper_name)
 }
@@ -1456,6 +1464,7 @@ check_across_predicate_piece <- function(piece, col, env, schema) {
     piece <- substitute_zero_arg_call(piece, "cur_group_id", as.name(helper))
     schema$names <- c(schema$names, helper)
     schema$types <- c(schema$types, "INT32")
+    ir_cgid_helper_scope(helper, environment())
   }
   # F82: a piece with a call that may be impure (`bump()`, also next to a column:
   # `.x > bump()`) is not parsed to learn its type, since the parse would run it

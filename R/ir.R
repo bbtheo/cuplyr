@@ -2056,6 +2056,193 @@ ir_infer_type_memo <- function(ir, schema) {
   ir_infer_type(ir, schema)
 }
 
+# -----------------------------------------------------------------------------
+# F123: window calls over a value that has ONE value per group in dplyr
+#
+# dplyr evaluates `sum(n())`, `lag(max(k))`, `var(n() * 2)`, ... on the group's
+# length-1 value and recycles the result (mutate_col(), vec_recycle()). The
+# window machinery materializes the argument as a full column and runs the
+# call over n broadcast copies instead: `sum(n())` would be n^2, `var()` 0
+# instead of NA, `lag()` a shifted copy. ir_rewrite_group_scalar() replaces
+# such a call, bottom-up and at parse time, by the value dplyr's length-1 call
+# gives (a function of the argument, still one value per group), so the shapes
+# stay native. Calls whose answer over n equal copies is already the length-1
+# answer (mean, median, min, max, first, last, n_distinct, cummax, cummin,
+# min_rank, dense_rank, cume_dist) are left alone.
+# -----------------------------------------------------------------------------
+
+# Window ops that reduce a group to one value whatever their argument.
+ir_group_scalar_aggs <- c("sum", "mean", "min", "max", "n", "sd", "var", "median",
+                          "n_distinct", "first", "last", "nth")
+
+# The `..cur_group_id..` helper columns live while the verb that made them
+# runs: substitute_cur_group_id() registers its helper's name here for the
+# rest of its caller's frame (ir_cgid_helper_scope()), so every parse in that
+# verb call sees it, whatever rebuilt the quosure (if_any()/if_all() and
+# across() expansions make new ones). Only the exact names made count: a user
+# column with a similar name is a column.
+ir_group_scalar_state <- new.env(parent = emptyenv())
+
+# Register `helper_name` until `frame` (the verb's own frame) exits; nested
+# verbs stack theirs and restore the previous set on their own exit.
+ir_cgid_helper_scope <- function(helper_name, frame) {
+  prev <- ir_group_scalar_state$cols
+  ir_group_scalar_state$cols <- c(prev, helper_name)
+  restore <- function() ir_group_scalar_state$cols <- prev
+  do.call(base::on.exit, list(as.call(list(restore)), TRUE, FALSE), envir = frame)
+  invisible()
+}
+
+#' Does `node` have one value per group in dplyr?
+#'
+#' TRUE for a scalar literal, `n()`, `cur_group_id()` (the helper column
+#' `substitute_cur_group_id()` made of it), an aggregate (`sum()`, `mean()`,
+#' ... of anything, a column included: `sum(k)` is one value), an elementwise
+#' call whose non-literal arguments all are, and a shift/scan/rank/rolling call
+#' whose value argument is. FALSE for a bare column (a stored column has n
+#' rows in dplyr), bare `row_number()`, and an elementwise call with a column
+#' or `row_number()` among its arguments.
+#' @keywords internal
+ir_is_group_scalar <- function(node) {
+  kind <- .subset2(node, "kind")
+  if (identical(kind, "lit")) {
+    return(TRUE)
+  }
+  if (identical(kind, "col")) {
+    return(match(.subset2(node, "name"), ir_group_scalar_state$cols, 0L) > 0L)
+  }
+  if (!identical(kind, "call")) {
+    return(FALSE)
+  }
+  op <- .subset2(node, "op")
+  args <- .subset2(node, "args")
+  entry <- ir_call_registry[[op]]
+  if (!is.null(entry) && !is.null(entry$window)) {
+    if (op %in% ir_group_scalar_aggs) {
+      return(TRUE)
+    }
+    return(length(args) > 0L && ir_is_group_scalar(args[[1L]]))
+  }
+  for (a in args) {
+    if (!identical(.subset2(a, "kind"), "lit") && !ir_is_group_scalar(a)) {
+      return(FALSE)
+    }
+  }
+  TRUE
+}
+
+# A constant that stays tied to `v` (the group-scalar it replaces):
+# `if_else(is.na(v), value, value)`. filter() reads a window-free, column-free
+# predicate as a constant it evaluates outside the data mask (`n()` fails
+# there), and `.keep = "used"` counts the columns `v` reads.
+ir_tied_const <- function(v, value) {
+  ir_call("if_else", list(ir_call("is.na", list(v)), value, value))
+}
+
+# The value of one window call whose value argument `v` has one value per
+# group: what dplyr gets for a length-1 vector. `node`'s arguments are already
+# rewritten. A call this doesn't know how to rewrite signals the CPU.
+ir_group_scalar_call <- function(node, schema) {
+  entry <- ir_call_registry[[node$op]]
+  if (is.null(entry) || is.null(entry$window) || length(node$args) == 0L) {
+    return(node)
+  }
+  v <- node$args[[1L]]
+  if (!ir_is_group_scalar(v)) {
+    return(node)
+  }
+  # dplyr runs `vec_check_size(order_by, size = 1)` (an error) for a window
+  # call ordered by another column over one value: dplyr evaluates this one.
+  op <- node$op
+  bail <- function() {
+    rlang::abort(paste0(op, "() of a one-value-per-group argument: dplyr evaluates this one."),
+                 class = "cuplyr_group_scalar_cpu")
+  }
+  if (!is.null(node$meta$order_override)) {
+    bail()
+  }
+  # (a type error of the argument is the verb's to raise, as it was: leave the call)
+  vt <- tryCatch(unname(ir_infer_type(v, schema)), error = function(e) NULL)
+  if (is.null(vt)) {
+    return(node)
+  }
+  na_of <- function(type) ir_lit(value = NULL, type = type, na = TRUE)
+  tied <- function(value) ir_tied_const(v, value)
+  numeric_v <- vt %in% c("BOOL8", "INT32", "FLOAT64")
+
+  switch(op,
+    sum = , cumsum = {
+      if (!numeric_v) bail()
+      if (identical(vt, "BOOL8")) ir_call("cast_int32", list(v)) else v
+    },
+    var = , sd = {
+      if (!numeric_v) bail()
+      tied(na_of("FLOAT64"))
+    },
+    cumprod = {
+      if (!numeric_v) bail()
+      if (identical(vt, "FLOAT64")) v else ir_call("cast_float64", list(v))
+    },
+    lag = , lead = {
+      if (identical(vt, "DICTIONARY32")) bail()
+      if (identical(node$meta$n, 0L)) {
+        return(v)
+      }
+      # (dplyr's result has x's zone; an if_else of two literals has its own)
+      if (identical(vt, "TIMESTAMP_MICROSECONDS")) bail()
+      d <- node$meta$default
+      if (is.null(d) || isTRUE(d$na) || is.null(d$type)) {
+        tied(na_of(vt))
+      } else if (identical(d$type, vt)) {
+        tied(d)
+      } else if (identical(vt, "FLOAT64") && identical(d$type, "INT32")) {
+        tied(ir_lit_from_r(as.double(d$value)))
+      } else if (identical(vt, "INT32") && identical(d$type, "FLOAT64") &&
+                   isTRUE(d$value == trunc(d$value)) && abs(d$value) <= .Machine$integer.max) {
+        tied(ir_lit_from_r(as.integer(d$value)))  # vec_cast() keeps a whole double
+      } else {
+        bail()
+      }
+    },
+    nth = {
+      if (identical(vt, "DICTIONARY32")) bail()
+      if (node$meta$n %in% c(1L, -1L)) {
+        return(v)
+      }
+      if (identical(vt, "TIMESTAMP_MICROSECONDS")) bail()  # (as lag(): x's zone)
+      tied(na_of(vt))
+    },
+    row_number = {
+      ir_call("if_else", list(ir_call("is.na", list(v)), na_of("INT32"), ir_lit_from_r(1L)))
+    },
+    percent_rank = {
+      ir_call("if_else", list(
+        ir_call("is.na", list(v)), na_of("FLOAT64"),
+        ir_call("/", list(ir_lit_from_r(0), ir_lit_from_r(0)))
+      ))
+    },
+    roll_mean = , roll_sum = , roll_min = , roll_max = , roll_sd = , roll_median = bail(),
+    node
+  )
+}
+
+#' Rewrite window calls over one-value-per-group arguments (F123)
+#'
+#' Bottom-up over a parsed expression; see the section comment above.
+#' @param ir An IR node that contains a window call
+#' @param schema The schema the expression was parsed against
+#' @keywords internal
+ir_rewrite_group_scalar <- function(ir, schema) {
+  walk <- function(node) {
+    if (!identical(.subset2(node, "kind"), "call")) {
+      return(node)
+    }
+    node <- ir_call(node$op, lapply(node$args, walk), node$meta)
+    ir_group_scalar_call(node, schema)
+  }
+  walk(ir)
+}
+
 #' Parse an rlang quosure into cuplyr IR
 #'
 #' Implements the parse rule of section 1.2: columns shadow the
@@ -2091,6 +2278,9 @@ ir_parse_quo <- function(quo, schema) {
   ir <- tryCatch(
     {
       ir <- ir_parse_expr(expr, env, schema, allow_vector = FALSE)
+      if (!is.null(ir) && ir_has_window(ir)) {
+        ir <- ir_rewrite_group_scalar(ir, schema)
+      }
       # (a factor_labels call is built only for a DICTIONARY32 column,
       # ir_parse_factor_conversion(): none of those, none to find)
       if (!is.null(ir) && match("DICTIONARY32", .subset2(schema, "types"), 0L) > 0L &&
@@ -2118,6 +2308,10 @@ ir_parse_quo <- function(quo, schema) {
     },
     cuplyr_factor_needs_cpu = function(e) {
       fallback_cause(fallback_type_text(e))
+      NULL
+    },
+    cuplyr_group_scalar_cpu = function(e) {
+      fallback_cause(conditionMessage(e))
       NULL
     }
   )
@@ -2298,6 +2492,23 @@ ir_check_cast_to_x <- function(types, op_name) {
   invisible()
 }
 
+#' Would dplyr's `vec_cast(from, x)` fail on a value-match clause's left side?
+#'
+#' `replace_values()` / `case_match()` / `recode_values()` cast the matched
+#' values to `x`'s type and raise vctrs' lossy-cast error (`1.5` for an integer
+#' `x`, `4L` for a logical one). The clause desugars to `x %in% lhs`, which
+#' compares in the common type and would silently match nothing, so a lossy
+#' literal makes the caller return `NULL` (CPU fallback; dplyr raises its own
+#' error). Only logical / integer / double `x` are checked here.
+#' @keywords internal
+ir_value_match_lossy <- function(x_type, lhs_ir) {
+  proto <- switch(x_type, BOOL8 = logical(), INT32 = integer(), FLOAT64 = double(), NULL)
+  if (is.null(proto) || is.null(lhs_ir$value) || !is.atomic(lhs_ir$value)) {
+    return(FALSE)
+  }
+  inherits(tryCatch(vctrs::vec_cast(lhs_ir$value, proto), error = identity), "error")
+}
+
 #' Shared clause-parsing helper for case_match()/recode_values() (Phase 4 wave 2)
 #'
 #' Both functions share an identical clause shape once "match by value" is
@@ -2389,6 +2600,9 @@ ir_parse_value_match_clauses <- function(expr, env, schema, default_key) {
       if (identical(x_type, "STRING") != identical(lhs_type, "STRING")) {
         stop("case_match()/recode_values(): can't convert the matched value (",
              lhs_type, ") to match the type of `x` (", x_type, ").", call. = FALSE)
+      }
+      if (ir_value_match_lossy(x_type, lhs_ir)) {
+        return(NULL)  # vctrs' lossy-cast error: let dplyr raise it
       }
     }
     val_ir <- ir_parse_expr(f[[3]], env, schema)
@@ -2674,6 +2888,9 @@ ir_parse_replace_values <- function(expr, env, schema) {
       if (identical(x_type, "STRING") != identical(lhs_type, "STRING")) {
         stop("replace_values(): can't convert the matched value (", lhs_type,
              ") to match the type of `x` (", x_type, ").", call. = FALSE)
+      }
+      if (ir_value_match_lossy(x_type, lhs_ir)) {
+        return(NULL)  # vctrs' lossy-cast error: let dplyr raise it
       }
     }
     val_ir <- ir_parse_expr(f[[3]], env, schema)
@@ -3839,6 +4056,13 @@ ir_parse_ntile <- function(expr, env, schema) {
     if (is.null(x_ir)) {
       return(NULL)
     }
+    if (ir_is_group_scalar(x_ir)) {
+      # F123: one value per group is the only rank, in bin 1 (NA stays NA)
+      return(ir_call("if_else", list(
+        ir_call("is.na", list(x_ir)), ir_lit(value = NULL, type = "INT32", na = TRUE),
+        ir_lit_from_r(1L)
+      )))
+    }
     rn <- ir_call("row_number", list(x_ir))
     # dplyr counts a NaN as missing, and so does is.na() (F55).
     missing_ir <- ir_call("is.na", list(x_ir))
@@ -3861,18 +4085,20 @@ ir_parse_ntile <- function(expr, env, schema) {
   smaller_size     <- ir_call("floor", list(size))
   larger_threshold <- ir_call("*", list(larger_size, n_larger))
 
-  branch_a <- ir_call("%/%", list(
+  # (floor(a / b), dplyr's own steps, not `%/%`: F123 gave a double `%/%` R's
+  # exact algorithm, which these whole-number operands don't need)
+  branch_a <- ir_call("floor", list(ir_call("/", list(
     ir_call("+", list(rn, ir_call("-", list(larger_size, ir_lit_from_r(1L))))),
     larger_size
-  ))
+  ))))
   branch_b <- ir_call("+", list(
-    ir_call("%/%", list(
+    ir_call("floor", list(ir_call("/", list(
       ir_call("+", list(
         ir_call("-", list(rn, larger_threshold)),
         ir_call("-", list(smaller_size, ir_lit_from_r(1L)))
       )),
       smaller_size
-    )),
+    )))),
     n_larger
   ))
 
@@ -6117,6 +6343,10 @@ ir_parse_cummean <- function(args, schema) {
   if (!ir_type_gate("cummean", x_type)) {
     stop_type_needs_cpu("cummean() of a ", x_type, ": not on the GPU.")
   }
+  # F123: a one-value-per-group argument is its own running mean.
+  if (ir_is_group_scalar(x)) {
+    return(if (identical(x_type, "FLOAT64")) x else ir_call("cast_float64", list(x)))
+  }
   # dplyr accumulates in double: an integer/logical argument must not go
   # through the (overflow-checked) integer cumsum (F42).
   if (!identical(x_type, "FLOAT64")) {
@@ -6151,6 +6381,9 @@ ir_parse_cumall_cumany <- function(args, schema, scan_op) {
   if (!is.na(x_type) && !ir_type_gate(if (scan_op == "cummin") "cumall" else "cumany", x_type)) {
     stop_type_needs_cpu(if (scan_op == "cummin") "cumall" else "cumany",
                         "() of a ", x_type, ": not on the GPU.")
+  }
+  if (ir_is_group_scalar(x)) {
+    return(x)  # F123: a running all/any of one value is that value
   }
   encoded <- ir_call("if_else", list(
     ir_call("is.na", list(x)),
@@ -6195,6 +6428,9 @@ ir_parse_cumall_cumany <- function(args, schema, scan_op) {
 #' @keywords internal
 ir_parse_consecutive_id <- function(args, schema) {
   x <- args[[1]]
+  if (ir_is_group_scalar(x)) {
+    return(ir_tied_const(x, ir_lit_from_r(1L)))  # F123: one value is one run
+  }
   lx <- ir_call("lag", list(x), meta = list(n = 1L, default = NULL))
   rn <- ir_call("row_number", list())
 

@@ -73,6 +73,7 @@
 #include <cudf/round.hpp>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/search.hpp>
+#include <cudf/stream_compaction.hpp>
 #include <cudf/strings/attributes.hpp>
 #include <cudf/strings/case.hpp>
 #include <cudf/strings/combine.hpp>
@@ -732,13 +733,18 @@ inline int checked_int_kind(const std::string& op, Rcpp::List node, const eval_c
     Rcpp::List args = node["args"];
     if (args.size() != 2) return 0;
     bool any_operand = false;
+    bool has_f64 = false;
     for (int i = 0; i < args.size(); ++i) {
         Rcpp::List a = args[i];
         if (ir_kind(a) == "lit" && Rf_isNull(a["type"]) && ir_lit_is_na(a)) continue;
         any_operand = true;
         cudf::type_id id = resolve_static_type(a, ctx).id();
-        if (id != cudf::type_id::INT32 && id != cudf::type_id::BOOL8) return 0;
+        if (id == cudf::type_id::FLOAT64 && kind == 2) has_f64 = true;
+        else if (id != cudf::type_id::INT32 && id != cudf::type_id::BOOL8) return 0;
     }
+    // Kind 3 (F123): a double %% / %/% follows R's myfmod() / myfloor(), not
+    // cudf's PYMOD / FLOOR_DIV (apply_double_mod()).
+    if (has_f64) return 3;
     return any_operand ? kind : 0;
 }
 
@@ -1726,7 +1732,532 @@ inline std::unique_ptr<cudf::column> apply_checked_int_div(Rcpp::List node, eval
     return cudf::cast(wide->view(), cudf::data_type{cudf::type_id::INT32});
 }
 
+// TRUE when every valid value of FLOAT64 column `col` (at least one) is
+// finite: their sum is (a NaN or an infinity anywhere makes it non-finite,
+// whatever the order; an overflow of finite values gives FALSE as well).
+inline bool column_sum_is_finite(cudf::column_view col) {
+    auto total = cudf::reduce(col, *cudf::make_sum_aggregation<cudf::reduce_aggregation>(),
+                              cudf::data_type{cudf::type_id::FLOAT64});
+    auto* sum = static_cast<cudf::numeric_scalar<double>*>(total.get());
+    return sum->is_valid() && std::isfinite(sum->value());
+}
+
+// F123: double %% and %/% as R computes them (arithmetic.c myfmod()/myfloor()),
+// not as cudf's PYMOD (fmod(fmod(x, y) + y, y)) and FLOOR_DIV (floor(x / y)):
+// those give NaN for x %% +-Inf, floor the ROUNDED quotient (1 %/% 0.1 is 10,
+// R's 9), lose 6 %% 1e17 to rounding, and make NA %% 0 NA instead of NaN.
+//
+//   x %% y   r = fmod(x, y) (exact; NaN for a non-finite x, y == 0 or NaN y),
+//            plus y where r and y have strictly different signs. That covers
+//            R's branch for |y| > 1/LDBL_EPSILON and x %% +-Inf too. NA %% 0
+//            is NaN.
+//   x %/% y  q = x / y where y == 0, q is infinite or |q| > 2^63 (R's
+//            myfloor() returns q; its threshold is 1/LDBL_EPSILON on x86-64),
+//            else floor(q) + floor(t / y) with the residual t = x - floor(q) * y
+//            computed exactly (R's long-double step): R's whole number, see the
+//            %/% part of the body.
+//
+// Every arithmetic step is a node of an AST per output column (cudf's AST has
+// no select, so a choice between two values is a copy_if_else): operands are
+// column references (cast in the tree) or AST literals, never copies. A null
+// operand makes the result null (a null mask in copy_if_else selects the
+// else side, which is null itself). `+ 0.0` turns a -0 (fmod(-3, 3),
+// floor(-0)) into R's +0. Where R warns "probable complete loss of accuracy"
+// in %% (|x / y| > 1/LDBL_EPSILON, finite) R's long-double value can't be
+// reproduced; the fmod value is returned and no warning given.
+inline std::unique_ptr<cudf::column> apply_double_mod(Rcpp::List node, eval_ctx& ctx) {
+    namespace ast = cudf::ast;
+    using aop = ast::ast_operator;
+    using expr = ast::expression;
+    using col_ptr = std::unique_ptr<cudf::column>;
+    bool is_mod = Rcpp::as<std::string>(node["op"]) == "%%";
+    Rcpp::List args = node["args"];
+
+    ast::tree tree;
+    std::vector<std::unique_ptr<cudf::scalar>> scalars;
+    auto lit = [&](double v) -> expr const& {
+        return make_literal("FLOAT64", Rcpp::wrap(v), false, tree, scalars);
+    };
+    auto bin = [&](aop o, expr const& a, expr const& b) -> expr const& {
+        return tree.emplace<ast::operation>(o, a, b);
+    };
+    auto un = [&](aop o, expr const& a) -> expr const& {
+        return tree.emplace<ast::operation>(o, a);
+    };
+
+    // An operand: a literal (an AST literal, no column) or a column read
+    // through a reference, cast to FLOAT64 in the tree when it is INT32/BOOL8.
+    // A literal beside a literal is materialized, so the tree reads a column.
+    struct operand {
+        expr const* e;
+        bool is_lit;
+        bool lit_null;      // a literal that is NA
+        double lit_value;
+        bool may_be_null;   // a literal NA, or a column with nulls
+        cudf::size_type col_idx;  // the ctx column (-1 for a literal)
+    };
+    // A literal, or a unary minus of one (`x %/% -2` parses as a call), folded
+    // on the host so a negative divisor is a literal too. `neg` is set for the
+    // folded form. (An integer64 value is left to the column path.)
+    auto as_lit = [](Rcpp::List a, bool& neg) -> bool {
+        neg = false;
+        if (ir_kind(a) == "lit") return true;
+        if (ir_kind(a) != "call" || Rcpp::as<std::string>(a["op"]) != "-") return false;
+        Rcpp::List inner = a["args"];
+        if (inner.size() != 1) return false;
+        Rcpp::List b = inner[0];
+        if (ir_kind(b) != "lit" || Rf_inherits(b["value"], "integer64")) return false;
+        neg = true;
+        return true;
+    };
+    bool neg0 = false, neg1 = false;
+    bool both_lit = as_lit(args[0], neg0) && as_lit(args[1], neg1);
+    auto make_operand = [&](int i) -> operand {
+        Rcpp::List a = args[i];
+        bool neg = false;
+        if (as_lit(a, neg) && !(both_lit && i == 0)) {
+            Rcpp::List l = neg ? Rcpp::List(Rcpp::List(a["args"])[0]) : a;
+            // (a NaN literal is a value, as in the AST path: only NA is null)
+            SEXP lv = l["value"];
+            bool nan_value = !ir_lit_is_na(l) && TYPEOF(lv) == REALSXP &&
+                             !Rf_inherits(lv, "integer64") && Rf_xlength(lv) >= 1 &&
+                             std::isnan(REAL(lv)[0]) && !R_IsNA(REAL(lv)[0]);
+            bool na = !nan_value && checked_lit_is_null(l);
+            double v = na ? 0.0 : Rcpp::as<double>(l["value"]);
+            // R's minus of a double 0 is -0, of an integer/logical 0 it is
+            // integer 0, i.e. +0 once a double (`0 - v` keeps that +0).
+            if (neg) v = TYPEOF(lv) == REALSXP ? -v : 0.0 - v;
+            SEXP value = na ? R_NilValue : (neg ? Rcpp::wrap(v) : SEXP(l["value"]));
+            return {&make_literal("FLOAT64", value, na, tree, scalars), true, na, v, na, -1};
+        }
+        cudf::size_type idx = materialize(a, ctx);
+        cudf::column_view cv = ctx.cols[idx];
+        expr const& ref = tree.emplace<ast::column_reference>(idx);
+        expr const* e = cv.type().id() == cudf::type_id::FLOAT64
+            ? &ref : &un(aop::CAST_TO_FLOAT64, ref);
+        return {e, false, false, 0.0, cv.nullable() && cv.null_count() > 0, idx};
+    };
+    operand xo = make_operand(0);
+    operand yo = make_operand(1);
+    expr const& x = *xo.e;
+    expr const& y = *yo.e;
+    cudf::size_type nrows = ctx.view().num_rows();
+
+    // x %% 0 is NaN whatever x is, NA included.
+    if (is_mod && yo.is_lit && !yo.lit_null && yo.lit_value == 0.0) {
+        cudf::numeric_scalar<double> nan_s(std::numeric_limits<double>::quiet_NaN(), true);
+        return cudf::make_column_from_scalar(nan_s, nrows);
+    }
+
+    // Strictly different signs (so a nonzero remainder needs `+ y`). A literal
+    // divisor's sign is known on the host: one comparison.
+    bool y_signed = yo.is_lit && !yo.lit_null && !std::isnan(yo.lit_value) && yo.lit_value != 0.0;
+    auto differs = [&](expr const& r) -> expr const& {
+        if (y_signed) {
+            return yo.lit_value > 0.0 ? bin(aop::LESS, r, lit(0.0)) : bin(aop::GREATER, r, lit(0.0));
+        }
+        return bin(aop::LOGICAL_OR,
+                   bin(aop::LOGICAL_AND, bin(aop::LESS, r, lit(0.0)), bin(aop::GREATER, y, lit(0.0))),
+                   bin(aop::LOGICAL_AND, bin(aop::GREATER, r, lit(0.0)), bin(aop::LESS, y, lit(0.0))));
+    };
+    bool y_plain = yo.is_lit && !yo.lit_null && std::isfinite(yo.lit_value) && yo.lit_value != 0.0;
+
+    // fmod is the costly step (a loop on the GPU) and the AST shares no
+    // subexpressions: where several kernels or the long sign test of a column
+    // divisor read the remainder, it is one materialized column (8 B/row,
+    // freed before returning). A literal divisor's one-kernel %% reads it twice
+    // and recomputes it, which is cheaper than the round trip.
+    size_t mark = ctx.cols.size();
+    auto remainder = [&]() -> expr const& {
+        cudf::size_type r_idx = ctx.push(cudf::compute_column(ctx.view(), bin(aop::MOD, x, y)));
+        return tree.emplace<ast::column_reference>(r_idx);
+    };
+
+    if (is_mod) {
+        // `z`, added last: +0, which turns fmod's -0 into R's +0; NaN where
+        // x / y overflows (a finite x, where R's long-double step is Inf - Inf);
+        // and -0 in R's branch for |y| > 1/LDBL_EPSILON (2^63 on x86-64; R's
+        // q_1_eps) at x == +-0, which returns x itself. A literal |y| >= 1 or an
+        // INT32/BOOL8 divisor can't overflow the quotient (|x / y| <= |x|, or
+        // y == 0, where fmod is NaN already), and neither takes that branch.
+        const double q_1_eps = 1.0 / static_cast<double>(std::numeric_limits<long double>::epsilon());
+        bool y_known = yo.is_lit && !yo.lit_null;
+        bool y_int_col = !yo.is_lit && ctx.cols[yo.col_idx].type().id() != cudf::type_id::FLOAT64;
+        bool y_huge = y_known && std::fabs(yo.lit_value) > q_1_eps;   // +-Inf too
+        bool y_big = (y_known && std::fabs(yo.lit_value) >= 1.0) || y_int_col;
+        expr const& z0 = y_big ? lit(0.0) : bin(aop::SUB, bin(aop::TRUE_DIV, x, y), bin(aop::TRUE_DIV, x, y));
+        expr const* zp = &z0;
+        if ((!y_known && !y_int_col) || y_huge) {
+            expr const& at0 = bin(aop::EQUAL, x, lit(0.0));
+            expr const& cond = y_huge ? at0
+                : bin(aop::LOGICAL_AND, at0, bin(aop::GREATER, un(aop::ABS, y), lit(q_1_eps)));
+            // (a zero times 1 - 2 * cond: -0 where cond holds)
+            zp = &bin(aop::MUL, z0, bin(aop::SUB, lit(1.0), bin(aop::MUL, lit(2.0), un(aop::CAST_TO_FLOAT64, cond))));
+        }
+        expr const& z = *zp;
+        col_ptr res;
+        // A FLOAT64 column divisor whose sum is finite holds no infinity or
+        // NaN (an INT32/BOOL8 one never does), so the one-kernel form holds.
+        bool y_finite_col = y_int_col ||
+            (!yo.is_lit && column_sum_is_finite(ctx.cols[yo.col_idx]));
+        if (y_plain && !y_huge) {
+            // A finite literal divisor: `+ y * adj` can't make a NaN out of a 0
+            // adj, and its sign test is one comparison: one kernel.
+            expr const& r0 = bin(aop::MOD, x, y);
+            res = cudf::compute_column(ctx.view(),
+                bin(aop::ADD, bin(aop::ADD, r0, bin(aop::MUL, y, un(aop::CAST_TO_FLOAT64, differs(r0)))), z));
+        } else if (y_finite_col) {
+            expr const& r0 = remainder();
+            expr const* one = &bin(aop::ADD, bin(aop::ADD, r0, bin(aop::MUL, y, un(aop::CAST_TO_FLOAT64, differs(r0)))), z);
+            if (!y_int_col) {
+                // `+ y * adj` is +0 for y > 0 at adj 0, which turns R's -0 (x == -0,
+                // y > 2^63) into +0: flip that one back. For y < -2^63 it is -0 and
+                // the sum keeps the -0. (1 / x tells -0.)
+                expr const& neg0 = bin(aop::LOGICAL_AND,
+                    bin(aop::LOGICAL_AND, bin(aop::EQUAL, x, lit(0.0)), bin(aop::LESS, bin(aop::TRUE_DIV, lit(1.0), x), lit(0.0))),
+                    bin(aop::GREATER, y, lit(q_1_eps)));
+                one = &bin(aop::MUL, *one, bin(aop::SUB, lit(1.0), bin(aop::MUL, lit(2.0), un(aop::CAST_TO_FLOAT64, neg0))));
+            }
+            res = cudf::compute_column(ctx.view(), *one);
+        } else {
+            // (`r0 + y` is nonzero where it is chosen: |r0| < |y|, opposite signs)
+            expr const& r0 = remainder();
+            auto adj = cudf::compute_column(ctx.view(), differs(r0));
+            auto shifted = cudf::compute_column(ctx.view(), bin(aop::ADD, bin(aop::ADD, r0, y), z));
+            auto plain = cudf::compute_column(ctx.view(), bin(aop::ADD, r0, z));
+            res = cudf::copy_if_else(shifted->view(), plain->view(), adj->view());
+        }
+        ctx.release_from(mark);
+        // NA %% 0 is NaN (fmod already gives NaN for every non-null x).
+        if (xo.may_be_null && !yo.is_lit) {
+            auto y_is0 = cudf::compute_column(ctx.view(), bin(aop::EQUAL, y, lit(0.0)));
+            cudf::numeric_scalar<double> nan_s(std::numeric_limits<double>::quiet_NaN(), true);
+            res = cudf::copy_if_else(nan_s, res->view(), y_is0->view());
+        }
+        return res;
+    }
+
+    // %/% (R's myfloor()). R returns q = x / y where y == 0, q is infinite or
+    // |q| > 2^63, gives -1 (strictly different signs) or 0 for |q| < 1, and
+    // otherwise adds floorl(T / y) to fq = floor(q), where T = x - P and
+    // P = fq * y, both rounded to long double (64 bits). That is not always
+    // the floor of the exact quotient (fq * y can need 106 bits): R's
+    // rounding is what is reproduced.
+    //
+    // Every row first gets Python's float floor division, the floor of the
+    // EXACT quotient (1 %/% 0.1 is 9): mod = fmod(x, y) (exact);
+    // div = (x - mod) / y, minus 1 where mod and y differ in sign, rounded
+    // to the nearest whole number. It also gives R's |q| < 1 branch and NaN
+    // for NaN. That is R's value except where
+    //   - |q| >= 2^50: `x - mod` and the division round by more than 1/2;
+    //   - R's 64-bit P is off the exact product by more than the residual
+    //     x - fq * y, which is mod or mod -+ y: only where that is at most
+    //     2^-63 |p| (|p| ~ |x|), so a row with mod != 0 and
+    //     |mod| <= 2^-61 |x|, or |y| - |mod| <= 2^-61 |x| (exact by Sterbenz
+    //     where it is small), is flagged. Such a residual is a multiple of
+    //     ulp(y) / 2, so it needs |fq| > 2^10;
+    //   - |y| < 2^-960 (the flag's 2^-61 |x| could underflow).
+    // A mask kernel and an any() look for those rows and R's "return q" rows
+    // (the usual answer: none). The flagged rows are gathered and recomputed
+    // the way R does (`fix` below) and scattered back; R's q is copied in
+    // where R returns it. A finite literal divisor d skips the mask when x is
+    // provably finite and |x| <= 2^10 |d|. A power-of-two literal divisor
+    // makes x / y and every product exact: floor(x / y) (minus 1 where it
+    // underflowed to 0 with signs that differ) is the whole answer.
+    const double q_1_eps = 1.0 / static_cast<double>(std::numeric_limits<long double>::epsilon());
+    const double two50 = std::ldexp(1.0, 50), two53 = std::ldexp(1.0, 53);
+    const double y_hi = std::ldexp(1.0, 900), y_lo = std::ldexp(1.0, -960);
+    const double inf = std::numeric_limits<double>::infinity();
+    auto f64 = [&](expr const& b) -> expr const& { return un(aop::CAST_TO_FLOAT64, b); };
+    auto plus0 = [&](expr const& e) -> expr const& { return bin(aop::ADD, e, lit(0.0)); };
+    auto run = [&](eval_ctx& c, expr const& e) { return cudf::compute_column(c.view(), e); };
+    auto ref = [&](eval_ctx& c, col_ptr col) -> expr const& {
+        return tree.emplace<ast::column_reference>(c.push(std::move(col)));
+    };
+    auto any_true = [&](cudf::column_view m) -> bool {
+        auto r = cudf::reduce(m, *cudf::make_any_aggregation<cudf::reduce_aggregation>(),
+                              cudf::data_type{cudf::type_id::BOOL8});
+        auto* flag = static_cast<cudf::numeric_scalar<bool>*>(r.get());
+        return flag->is_valid() && flag->value();
+    };
+    bool y_fp_col = !yo.is_lit && ctx.cols[yo.col_idx].type().id() == cudf::type_id::FLOAT64;
+    expr const& q = bin(aop::TRUE_DIV, x, y);
+
+    // A literal NA, NaN, 0 or +-Inf: every row is R's q, or for +-Inf its
+    // |q| < 1 rule (q is +-0 there; -1 for strictly different signs). (An
+    // infinite column divisor needs nothing: fmod(x, +-Inf) is x, so the first
+    // pass below gives that rule.)
+    if (yo.is_lit && !y_plain) {
+        bool inf_y = !yo.lit_null && std::isinf(yo.lit_value);
+        return run(ctx, inf_y ? plus0(bin(aop::SUB, q, f64(differs(x)))) : plus0(q));
+    }
+
+    // Significant bits of a literal divisor (1 for a power of two).
+    int y_bits = 53;
+    if (y_plain) {
+        int ex;
+        double m = std::frexp(std::fabs(yo.lit_value), &ex);
+        auto mant = static_cast<uint64_t>(std::ldexp(m, 53));
+        y_bits = 53 - __builtin_ctzll(mant);
+    }
+    if (y_plain && y_bits == 1) {
+        // (q is exact; an underflow to 0 is the only lost sign)
+        expr const& under = bin(aop::LOGICAL_AND, bin(aop::EQUAL, q, lit(0.0)), differs(x));
+        return run(ctx, plus0(bin(aop::SUB, un(aop::FLOOR, q), f64(under))));
+    }
+
+    // `fix`: R's computation for the rows of `c` (X, Y over its columns; a
+    // literal Y is the value yv). Exact pieces:
+    //   - fq * y = p + e (Dekker's product: fq and y split into 26-bit
+    //     halves, four exact partial products; the AST has no FMA). A literal
+    //     y of at most 26 significant bits (3, 2.5, 1e6) needs no split:
+    //     e = (fh * y - p) + fl * y.
+    //   - d = x - p (Sterbenz: x and p within a factor 2 for |fq| >= 1; fq is
+    //     0 or -1 otherwise, where p is 0 or -y and e = 0).
+    //   - P = p + e rounded to the 64-bit grid at p, 2^-63 * ufp(p) (half that
+    //     where p is a power of two and e points below it; ufp() is Rump's,
+    //     |c - (1 - 2^-53) c| with c = (2^52 + 1) p), so T = d - rint(e / g) * g.
+    //     Its sign is R's; from |fq| = 2^53 it is exact (14 bits of the grid).
+    // Below |fq| = 2^53, floorl(T / y) is -1 or 0: the sign of T against y
+    // (x itself where fq is +-0, as x * s may underflow). Above, n = rint(T / y)
+    // and the exact r = T - n * y: one below n unless T / y rounds up to n in
+    // 64 bits (|r| at most half a step at n, finer below a power of two). The
+    // sum fq + k is rounded once, as in R. fq, e and T are materialized (the
+    // AST shares no subexpressions; e is freed once T is made), and so is a
+    // FLOAT64 divisor scaled by s = 2^-128 above 2^900 and 2^128 below 2^-960
+    // where some row needs it (x times the same s, s = ys / y; R's long double
+    // doesn't see the scale).
+    const double split_c = 134217729.0;   // 2^27 + 1
+    bool y_narrow = y_plain && y_bits <= 26;
+    auto fix = [&](eval_ctx& c, expr const& X, expr const& Y, bool lit_y, double yv, bool y_float) {
+        // v * sign(y), exact
+        auto sy = [&](expr const& v) -> expr const& {
+            if (lit_y) return yv > 0.0 ? v : bin(aop::MUL, v, lit(-1.0));
+            expr const& sgn = bin(aop::SUB, f64(bin(aop::GREATER, Y, lit(0.0))), f64(bin(aop::LESS, Y, lit(0.0))));
+            return bin(aop::MUL, v, sgn);
+        };
+        // strictly different signs of v and y
+        auto vs_y = [&](expr const& v) -> expr const& { return bin(aop::LESS, sy(v), lit(0.0)); };
+        // sign(v) differs from sign(F * y), v nonzero
+        auto against_p = [&](expr const& v, expr const& F) -> expr const& {
+            expr const& vs = sy(v);
+            return bin(aop::LOGICAL_OR,
+                       bin(aop::LOGICAL_AND, bin(aop::LESS, vs, lit(0.0)), bin(aop::GREATER, F, lit(0.0))),
+                       bin(aop::LOGICAL_AND, bin(aop::GREATER, vs, lit(0.0)), bin(aop::LESS, F, lit(0.0))));
+        };
+        auto ufp = [&](expr const& a) -> expr const& {
+            expr const& cc = bin(aop::MUL, lit(4503599627370497.0), a);   // 2^52 + 1
+            return un(aop::ABS, bin(aop::SUB, cc, bin(aop::MUL, lit(1.0 - std::ldexp(1.0, -53)), cc)));
+        };
+        auto halve_if = [&](expr const& cond) -> expr const& {
+            return bin(aop::SUB, lit(1.0), bin(aop::MUL, lit(0.5), f64(cond)));
+        };
+        auto split = [&](expr const& a, expr const*& hi, expr const*& lo) {
+            expr const& cc = bin(aop::MUL, lit(split_c), a);
+            hi = &bin(aop::SUB, cc, bin(aop::SUB, cc, a));
+            lo = &bin(aop::SUB, a, *hi);
+        };
+        size_t fmark = c.cols.size();
+        expr const& Q = bin(aop::TRUE_DIV, X, Y);
+        expr const& F = ref(c, run(c, un(aop::FLOOR, Q)));
+        expr const* Ys = &Y;
+        expr const* Xs = &X;
+        double ysv = yv;
+        if (y_float) {
+            expr const& ay = un(aop::ABS, Y);
+            bool scaled = any_true(run(c, bin(aop::LOGICAL_OR,
+                bin(aop::LOGICAL_AND, bin(aop::GREATER, ay, lit(y_hi)), bin(aop::LESS, ay, lit(inf))),
+                bin(aop::LOGICAL_AND, bin(aop::LESS, ay, lit(y_lo)), bin(aop::GREATER, ay, lit(0.0)))))->view());
+            if (scaled) {
+                expr const& bh = f64(bin(aop::GREATER, ay, lit(y_hi)));
+                expr const& bl = f64(bin(aop::LESS, ay, lit(y_lo)));
+                expr const& s = bin(aop::ADD,
+                    bin(aop::ADD, bin(aop::SUB, bin(aop::SUB, lit(1.0), bh), bl), bin(aop::MUL, bh, lit(std::ldexp(1.0, -128)))),
+                    bin(aop::MUL, bl, lit(std::ldexp(1.0, 128))));
+                Ys = &ref(c, run(c, bin(aop::MUL, Y, s)));
+                Xs = &bin(aop::MUL, X, bin(aop::TRUE_DIV, *Ys, Y));
+            }
+        } else if (lit_y) {
+            double ya = std::fabs(yv);
+            double sc = ya > y_hi ? std::ldexp(1.0, -128) : ya < y_lo ? std::ldexp(1.0, 128) : 1.0;
+            ysv = yv * sc;
+            Ys = &lit(ysv);
+            if (sc != 1.0) Xs = &bin(aop::MUL, X, lit(sc));
+        }
+        // the divisor's halves (a literal's on the host: hi rounded to 26 bits)
+        auto y_halves = [&](expr const*& yh, expr const*& yl) {
+            if (lit_y) {
+                int ex;
+                double m = std::frexp(ysv, &ex);
+                double h = std::ldexp(std::nearbyint(std::ldexp(m, 26)), ex - 26);
+                yh = &lit(h);
+                yl = &lit(ysv - h);
+            } else {
+                split(*Ys, yh, yl);
+            }
+        };
+        expr const& p = bin(aop::MUL, F, *Ys);
+        size_t emark = c.cols.size();
+        expr const *fh, *fl;
+        split(F, fh, fl);
+        expr const* e = nullptr;
+        if (lit_y && y_narrow) {
+            e = &bin(aop::ADD, bin(aop::SUB, bin(aop::MUL, *fh, *Ys), p), bin(aop::MUL, *fl, *Ys));
+        } else {
+            expr const *yh, *yl;
+            y_halves(yh, yl);
+            e = &bin(aop::ADD,
+                bin(aop::ADD, bin(aop::ADD, bin(aop::SUB, bin(aop::MUL, *fh, *yh), p), bin(aop::MUL, *fh, *yl)),
+                    bin(aop::MUL, *fl, *yh)),
+                bin(aop::MUL, *fl, *yl));
+        }
+        expr const& E = ref(c, run(c, *e));
+        // (p + [fq == 0]: a grid of 2^-63 where p = 0 and e = 0)
+        expr const& S = ufp(bin(aop::ADD, p, f64(bin(aop::EQUAL, F, lit(0.0)))));
+        expr const& down = bin(aop::LOGICAL_AND, bin(aop::EQUAL, un(aop::ABS, p), S), against_p(E, F));
+        expr const& grid = bin(aop::MUL, bin(aop::MUL, S, lit(std::ldexp(1.0, -63))), halve_if(down));
+        auto t_col = run(c, bin(aop::SUB, bin(aop::SUB, *Xs, p),
+                                bin(aop::MUL, un(aop::RINT, bin(aop::TRUE_DIV, E, grid)), grid)));
+        c.release_from(emark);
+        expr const& T = ref(c, std::move(t_col));
+        expr const& xy_differ = lit_y ? (yv > 0.0 ? bin(aop::LESS, X, lit(0.0)) : bin(aop::GREATER, X, lit(0.0)))
+            : bin(aop::LOGICAL_OR,
+                  bin(aop::LOGICAL_AND, bin(aop::LESS, X, lit(0.0)), bin(aop::GREATER, Y, lit(0.0))),
+                  bin(aop::LOGICAL_AND, bin(aop::GREATER, X, lit(0.0)), bin(aop::LESS, Y, lit(0.0))));
+        expr const& ks = f64(bin(aop::LOGICAL_OR, vs_y(T),
+                                 bin(aop::LOGICAL_AND, bin(aop::EQUAL, F, lit(0.0)), xy_differ)));
+        expr const& n = un(aop::RINT, bin(aop::TRUE_DIV, T, *Ys));
+        expr const* r = nullptr;
+        if (lit_y && y_narrow) {
+            r = &bin(aop::SUB, T, bin(aop::MUL, n, *Ys));
+        } else {
+            expr const *yh, *yl;
+            y_halves(yh, yl);
+            r = &bin(aop::SUB, bin(aop::SUB, T, bin(aop::MUL, n, *yh)), bin(aop::MUL, n, *yl));
+        }
+        expr const& Sn = ufp(un(aop::ABS, n));
+        expr const& half = bin(aop::MUL, bin(aop::MUL, Sn, lit(std::ldexp(1.0, -64))),
+            halve_if(bin(aop::LOGICAL_AND, bin(aop::GREATER, n, lit(0.0)), bin(aop::EQUAL, un(aop::ABS, n), Sn))));
+        expr const& stays = bin(aop::GREATER, un(aop::ABS, *r), bin(aop::MUL, un(aop::ABS, *Ys), half));
+        expr const& kb = bin(aop::SUB, n, f64(bin(aop::LOGICAL_AND, vs_y(*r), stays)));
+        expr const& big = f64(bin(aop::GREATER_EQUAL, un(aop::ABS, F), lit(two53)));
+        expr const& k = bin(aop::SUB, bin(aop::MUL, big, kb), bin(aop::MUL, bin(aop::SUB, lit(1.0), big), ks));
+        auto out = run(c, plus0(bin(aop::ADD, F, k)));
+        c.release_from(fmark);
+        return out;
+    };
+
+    // A literal divisor below 2^-960: every row is recomputed (the flag's
+    // 2^-61 |x| could underflow).
+    if (y_plain && std::fabs(yo.lit_value) < y_lo) {
+        auto fixed = fix(ctx, x, y, true, yo.lit_value, false);
+        auto use_q = run(ctx, bin(aop::GREATER, un(aop::ABS, q), lit(q_1_eps)));
+        if (!any_true(use_q->view())) return fixed;
+        auto quotient = run(ctx, plus0(q));
+        return cudf::copy_if_else(quotient->view(), fixed->view(), use_q->view());
+    }
+
+    // The skip, for a finite literal divisor d: a finite sum of x (a NaN or
+    // an infinity makes the sum non-finite in any order; an overflow only
+    // fails the test), then a min/max read (min/max compare with `<`, which a
+    // NaN fails, so on their own a NaN can hide an infinity) proving
+    // |x| <= 2^10 |d|: then |fq| <= 2^10, and a residual at most 2^-63 |x|
+    // needs |fq| >= 2^11, so no row is flagged. The bound is exact unless it
+    // overflows (then no skip). An INT32/BOOL8 x needs no read when the bound
+    // reaches 2^31.
+    bool skip = false;
+    if (y_plain && xo.col_idx >= 0) {
+        cudf::column_view xv = ctx.cols[xo.col_idx];
+        double bound = std::ldexp(std::fabs(yo.lit_value), 10);
+        if (!std::isfinite(bound)) {
+            skip = false;
+        } else if (xv.type().id() != cudf::type_id::FLOAT64) {
+            skip = bound >= 2147483648.0;
+        } else if (xv.null_count() == xv.size()) {
+            skip = true;
+        } else if (column_sum_is_finite(xv)) {
+            auto mm = cudf::minmax(xv);
+            auto* lo = static_cast<cudf::numeric_scalar<double>*>(mm.first.get());
+            auto* hi = static_cast<cudf::numeric_scalar<double>*>(mm.second.get());
+            skip = lo->is_valid() && hi->is_valid() &&
+                   std::max(std::fabs(lo->value()), std::fabs(hi->value())) <= bound;
+        }
+    }
+
+    // The first pass. (Under the skip a literal divisor's fmod is recomputed
+    // where it is read, as fast as a materialized remainder; otherwise the
+    // mask reads it too, and it is materialized.)
+    expr const& mod = skip ? bin(aop::MOD, x, y) : remainder();
+    expr const& div = bin(aop::SUB, bin(aop::TRUE_DIV, bin(aop::SUB, x, mod), y), f64(differs(mod)));
+    auto res = run(ctx, plus0(un(aop::RINT, div)));
+    if (skip) return res;
+
+    // The flagged rows (none of them R's q rows) and R's q rows (y == 0,
+    // |q| > 2^63 or q infinite). One mask finds both: |q| >= 2^50 covers the
+    // q tests, |y| < 2^-960 the zero.
+    expr const& tiny = bin(aop::MUL, un(aop::ABS, x), lit(std::ldexp(1.0, -61)));
+    expr const& near0 = bin(aop::LOGICAL_AND, bin(aop::NOT_EQUAL, mod, lit(0.0)),
+                            bin(aop::LESS_EQUAL, un(aop::ABS, mod), tiny));
+    expr const& near_y = bin(aop::LESS_EQUAL, bin(aop::SUB, un(aop::ABS, y), un(aop::ABS, mod)), tiny);
+    expr const& amb = bin(aop::LOGICAL_OR, near0, near_y);
+    expr const& big_q = bin(aop::GREATER_EQUAL, un(aop::ABS, q), lit(two50));
+    expr const& odd = y_plain ? bin(aop::LOGICAL_OR, big_q, amb)
+        : bin(aop::LOGICAL_OR, bin(aop::LOGICAL_OR, big_q, amb), bin(aop::LESS, un(aop::ABS, y), lit(y_lo)));
+    auto odd_rows = run(ctx, odd);
+    if (!any_true(odd_rows->view())) {
+        ctx.release_from(mark);
+        return res;
+    }
+    expr const& aq = un(aop::ABS, q);
+    expr const& ay = un(aop::ABS, y);
+    expr const& fix_q = bin(aop::LOGICAL_AND, bin(aop::GREATER_EQUAL, aq, lit(two50)), bin(aop::LESS_EQUAL, aq, lit(q_1_eps)));
+    expr const& flag = y_plain ? bin(aop::LOGICAL_OR, fix_q, amb)
+        : bin(aop::LOGICAL_OR, bin(aop::LOGICAL_OR, fix_q, amb),
+              bin(aop::LOGICAL_AND, bin(aop::LESS, ay, lit(y_lo)), bin(aop::GREATER, ay, lit(0.0))));
+    expr const& huge = bin(aop::GREATER, aq, lit(q_1_eps));
+    expr const& special = y_plain ? huge : bin(aop::LOGICAL_OR, bin(aop::EQUAL, y, lit(0.0)), huge);
+    // (a null row is not flagged)
+    auto flagged = run(ctx, flag);
+    if (flagged->has_nulls()) {
+        flagged = cudf::replace_nulls(flagged->view(), cudf::numeric_scalar<bool>(false, true));
+    }
+    ctx.release_from(mark);
+    bool has_flagged = any_true(flagged->view());
+    if (has_flagged) {
+        std::vector<cudf::column_view> src;
+        if (xo.col_idx >= 0) src.push_back(ctx.cols[xo.col_idx]);
+        if (yo.col_idx >= 0) src.push_back(ctx.cols[yo.col_idx]);
+        auto rows = cudf::apply_boolean_mask(cudf::table_view(src), flagged->view())->release();
+        // (the gathered columns are the sub-context's inputs, owned here, so
+        // that its release_from() frees what `fix` pushes)
+        eval_ctx sub;
+        for (auto& col : rows) sub.cols.push_back(col->view());
+        cudf::size_type j = 0;
+        auto operand_in = [&](operand const& o) -> expr const& {
+            if (o.col_idx < 0) return *o.e;
+            bool fp = sub.cols[j].type().id() == cudf::type_id::FLOAT64;
+            expr const& r0 = tree.emplace<ast::column_reference>(j++);
+            return fp ? r0 : f64(r0);
+        };
+        expr const& X = operand_in(xo);
+        expr const& Y = operand_in(yo);
+        auto fixed = fix(sub, X, Y, yo.is_lit, yo.lit_value, y_fp_col);
+        res = std::move(cudf::boolean_mask_scatter(cudf::table_view({fixed->view()}),
+                                                   cudf::table_view({res->view()}), flagged->view())->release()[0]);
+    }
+    // (with nothing flagged, the mask's rows are exactly R's q rows)
+    col_ptr use_q = std::move(odd_rows);
+    flagged.reset();
+    if (has_flagged) {
+        use_q = run(ctx, special);
+        if (!any_true(use_q->view())) return res;
+    }
+    auto quotient = run(ctx, plus0(q));
+    return cudf::copy_if_else(quotient->view(), res->view(), use_q->view());
+}
+
 inline std::unique_ptr<cudf::column> apply_checked_int(Rcpp::List node, eval_ctx& ctx, int kind) {
+    if (kind == 3) return apply_double_mod(node, ctx);
     return kind == 1 ? apply_checked_int_add(node, ctx) : apply_checked_int_div(node, ctx);
 }
 
@@ -1873,6 +2404,7 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
 
         std::unique_ptr<cudf::column> haystack;
         bool set_has_na = false;
+        const cudf::type_id x_id = x_col.type().id();
 
         switch (set_dtype.id()) {
             case cudf::type_id::FLOAT64: {
@@ -1882,7 +2414,27 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
                 for (R_xlen_t i = 0; i < v.size(); ++i) {
                     if (R_IsNA(v[i])) set_has_na = true;
                 }
-                haystack = numeric_to_gpu(v);
+                // F123: match() compares in the common type, so a double set
+                // beside an INT32/BOOL8 x keeps exactly the values x can hold
+                // (the set is small, x is not: x stays as it is).
+                if (x_id == cudf::type_id::INT32) {
+                    std::vector<int> keep;
+                    for (R_xlen_t i = 0; i < v.size(); ++i) {
+                        if (std::isfinite(v[i]) && v[i] == std::trunc(v[i]) &&
+                            std::fabs(v[i]) <= std::numeric_limits<int>::max()) {
+                            keep.push_back(static_cast<int>(v[i]));
+                        }
+                    }
+                    haystack = integer_to_gpu(Rcpp::IntegerVector(keep.begin(), keep.end()));
+                } else if (x_id == cudf::type_id::BOOL8) {
+                    std::vector<int> keep;
+                    for (R_xlen_t i = 0; i < v.size(); ++i) {
+                        if (v[i] == 0.0 || v[i] == 1.0) keep.push_back(static_cast<int>(v[i]));
+                    }
+                    haystack = logical_to_gpu(Rcpp::LogicalVector(keep.begin(), keep.end()));
+                } else {
+                    haystack = numeric_to_gpu(v);
+                }
                 break;
             }
             case cudf::type_id::INT32: {
@@ -1890,7 +2442,15 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
                 for (R_xlen_t i = 0; i < v.size(); ++i) {
                     if (Rcpp::IntegerVector::is_na(v[i])) set_has_na = true;
                 }
-                haystack = integer_to_gpu(v);
+                if (x_id == cudf::type_id::BOOL8) {  // F123: only 0L / 1L can equal a logical
+                    std::vector<int> keep;
+                    for (R_xlen_t i = 0; i < v.size(); ++i) {
+                        if (v[i] == 0 || v[i] == 1) keep.push_back(v[i]);
+                    }
+                    haystack = logical_to_gpu(Rcpp::LogicalVector(keep.begin(), keep.end()));
+                } else {
+                    haystack = integer_to_gpu(v);
+                }
                 break;
             }
             case cudf::type_id::STRING: {
@@ -1930,6 +2490,13 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
                 Rcpp::stop("Unsupported %%in%% set type: %s", set_type.c_str());
         }
 
+        // Nothing in the set can equal x (every value was dropped above): FALSE,
+        // or TRUE for x's NA rows when the set has an NA.
+        if (haystack->size() == 0) {
+            if (set_has_na) return cudf::is_null(x_col);
+            cudf::numeric_scalar<bool> false_scalar(false, true);
+            return cudf::make_column_from_scalar(false_scalar, x_col.size());
+        }
         if (haystack->type().id() != x_col.type().id()) {
             haystack = cudf::cast(haystack->view(), x_col.type());
         }

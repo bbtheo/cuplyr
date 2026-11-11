@@ -1270,9 +1270,10 @@ test_that("an embedded quosure resolves against its OWN environment, not the out
   local_env <- new.env()
   local_env$outer_var <- 42
   wt <- rlang::new_quosure(quote(outer_var), local_env)
-  embedded_call <- rlang::expr(base::sum(!!wt))
+  # (max(), not sum(): F123 turns a sum() of a literal into the literal)
+  embedded_call <- rlang::expr(base::max(!!wt))
   ir <- ir_parse_quo(rlang::new_quosure(embedded_call, rlang::empty_env()), schema_xyz)
-  expect_equal(ir$op, "sum")
+  expect_equal(ir$op, "max")
   expect_equal(ir$args[[1]]$kind, "lit")
   expect_equal(ir$args[[1]]$value, 42)
 })
