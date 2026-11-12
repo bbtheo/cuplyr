@@ -8,7 +8,10 @@ deny() { echo "BLOCKED by .claude/hooks/guard-bash.sh: $1" >&2; exit 2; }
 # optionally behind VAR=val assignments or `env`.
 pos='(^|[;&|(]|\$\()[[:space:]]*(env[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
 
-if grep -Eq 'R CMD INSTALL|devtools::install|remotes::install|pak::|install_cuplyr' <<<"$cmd"; then
+# R CMD INSTALL only as a command, so commit messages and PR bodies can quote it;
+# the R-level installers anywhere, since they hide inside tools/r '<expr>'.
+if grep -Eq "${pos}R[[:space:]]+CMD[[:space:]]+INSTALL" <<<"$cmd" ||
+   grep -Eq 'devtools::install|remotes::install|pak::|install_cuplyr' <<<"$cmd"; then
   deny "cuplyr is never installed. Tests run via pkgload::load_all() through tools/test, tools/test-file, tools/r."
 fi
 if grep -Eq "${pos}pixi([[:space:]]|$)" <<<"$cmd"; then
