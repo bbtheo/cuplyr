@@ -7,7 +7,7 @@
 install_cuplyr(
   method = c("auto", "pixi", "conda", "system"),
   repo = NULL,
-  ref = "master",
+  ref = "main",
   conda_prefix = NULL,
   configure_args = character(),
   dry_run = FALSE,

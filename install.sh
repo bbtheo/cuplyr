@@ -4,7 +4,7 @@ set -euo pipefail
 # install.sh - Install cuplyr from source
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/bbtheo/cuplyr/master/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/bbtheo/cuplyr/main/install.sh | bash
 #   # or locally:
 #   ./install.sh [--method=auto|pixi|conda|system] [--dry-run] [--verbose]
 
@@ -18,7 +18,7 @@ Usage:
 Options:
   --method=METHOD    Install method: auto, pixi, conda, system (default: auto)
   --conda-prefix=DIR RAPIDS install location (default: /opt/rapids or tmpdir)
-  --ref=REF          Git branch/tag to install (default: master)
+  --ref=REF          Git branch/tag to install (default: main)
   --dry-run          Print what would be done without executing
   --verbose          Print detailed progress
   -h, --help         Show this help
@@ -40,7 +40,7 @@ USAGE
 # --- Defaults ---
 METHOD="auto"
 CONDA_PREFIX_ARG=""
-REF="master"
+REF="main"
 DRY_RUN=false
 VERBOSE=false
 

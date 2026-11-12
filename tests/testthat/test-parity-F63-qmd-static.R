@@ -96,7 +96,7 @@ test_that("front matter: self-contained HTML and the run parameters with the F54
   expect_false(isTRUE(f63_param(front, "rebuild")))
   expect_equal(f63_param(front, "lib"), "/home/theo/cuplr/scratchpad/benchmarks/rlib")
   expect_equal(normalizePath(f63_param(front, "out_dir"), mustWork = FALSE),
-               "/home/theo/cuplr/scratchpad/benchmarks/rolling")
+               normalizePath("/home/theo/cuplr/scratchpad/benchmarks/rolling", mustWork = FALSE))
 })
 
 test_that("timing chunks are cached, keyed on code, versions and config, and load the worktree", {

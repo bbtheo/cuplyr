@@ -1,5 +1,11 @@
 # cuplyr <img src="man/figures/logo.png" align="right" height="138" />
 
+<!-- badges: start -->
+[![Lifecycle: experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
+[![pkgdown](https://github.com/bbtheo/cuplyr/actions/workflows/pkgdown.yaml/badge.svg)](https://github.com/bbtheo/cuplyr/actions/workflows/pkgdown.yaml)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+<!-- badges: end -->
+
 #### dplyr backend for GPU acceleration via RAPIDS cuDF
 
 cuplyr implements a dplyr backend powered by [RAPIDS cuDF](https://github.com/rapidsai/cudf), NVIDIA's GPU DataFrame library. Write standard dplyr code, execute on GPU hardware.
@@ -192,7 +198,7 @@ diagnostics()
 
 ### Developer setup
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor workflow using `pixi shell`.
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the developer setup, how issues and pull requests work, and the merge gate.
 GitHub Actions trigger/run instructions are in [docs/github-actions-runbook.md](docs/github-actions-runbook.md).
 
 ## Performance

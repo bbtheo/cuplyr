@@ -25,7 +25,6 @@
 ^\.github$
 ^\.github/
 ^src/Makevars$
-^CONTRIBUTING\.md$
 ^install\.sh$
 ^notebooks$
 ^notebooks/

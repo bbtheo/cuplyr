@@ -1,5 +1,8 @@
 # cuplyr (development version)
 
+* `install_cuplyr()` and `install.sh` install from the `main` branch by
+  default. The repository's default branch was renamed from `master`.
+
 ## Read and write parquet on the GPU (F85)
 
 * `read_parquet_gpu()` decodes a parquet file with libcudf: only the compressed

@@ -20,7 +20,7 @@ test_that("get_source_dir() finds cloned child cuplyr directory", {
 
   detected <- get_source_dir(
     repo = NULL,
-    ref = "master",
+    ref = "main",
     dry_run = FALSE,
     verbose = FALSE
   )

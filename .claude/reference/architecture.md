@@ -1517,10 +1517,10 @@ expect_equal(
 
 ## Code Review Checklist
 
-Before merging dev to master, verify:
-- [ ] **Branch references**: Update Colab links back to `master` branch:
-  - `README.md`: Change `blob/dev` to `blob/master` in Colab badge URLs
-  - `notebooks/install_cuplyr.ipynb`: Change git clone from `-b dev` to remove the flag (or use `-b master`)
+Before merging dev to main, verify:
+- [ ] **Branch references**: Update Colab links back to `main` branch:
+  - `README.md`: Change `blob/dev` to `blob/main` in Colab badge URLs
+  - `notebooks/install_cuplyr.ipynb`: Change git clone from `-b dev` to remove the flag (or use `-b main`)
 - [ ] **Type alignment**: `R/utils.R` and `src/transfer_io.cpp` agree on type mapping
 - [ ] **Head/collect parity**: If a type is supported in `gpu_collect()`, ensure `gpu_head()` uses the same conversion path
 - [ ] **Arrange semantics**: Stable sort support, NA ordering, group-prepend behavior

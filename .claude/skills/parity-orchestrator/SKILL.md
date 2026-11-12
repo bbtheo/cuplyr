@@ -198,7 +198,7 @@ perf ratchet failed (merge-queue exit 6), and the final summary. Everything else
 ## Never
 
 - write implementation code or tests, or edit inside a feature worktree
-- merge any way other than `tools/merge-queue`, push, or touch `master`
+- merge any way other than `tools/merge-queue`, push, or touch `main`
 - touch `perf_baseline.json` or `conformance_baseline.tsv`, or run
   `tools/perf-baseline-set` (the merge queue ratchets them; raising a perf entry is Theo's)
 - dispatch a third attempt of a feature: after two failed PMs it's Theo's call
