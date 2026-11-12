@@ -6,10 +6,6 @@ src/Makevars
 *.html
 */libs/*
 
-# R/C++ auto-generated
-src/RcppExports.cpp
-R/RcppExports.R
-
 # Package build artifacts
 *.Rcheck/
 .Rproj.user/

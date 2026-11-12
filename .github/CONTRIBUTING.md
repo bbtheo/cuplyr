@@ -148,6 +148,8 @@ it before a larger change.
 
 Never edit `NAMESPACE` or the Rcpp export files by hand. Add roxygen tags
 (`@export`, `@importFrom`) and run `pixi run document`.
+Commit the regenerated `src/RcppExports.cpp` and `R/RcppExports.R` along
+with your C++ change: a source install from a clone uses them as they are.
 
 ### Tests
 
