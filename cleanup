@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+
+set -eu
+
+# Remove configure-generated Makevars so source checks do not see both
+# src/Makevars.in and src/Makevars in the package tree.
+rm -f src/Makevars

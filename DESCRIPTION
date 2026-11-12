@@ -1,6 +1,6 @@
 Package: cuplyr
-Title: GPU-Accelerated Data Manipulation with dplyr Syntax
-Version: 0.1.1
+Title: GPU-Accelerated Data Manipulation with Dplyr Syntax
+Version: 0.1.1.9000
 Authors@R: c(
     person("Theo", "Blauberg", email = "theo.blauberg@outlook.com", role = c("aut", "cre")),
     person("RAPIDS Team", role = "cph", comment = "libcudf library")
@@ -14,10 +14,9 @@ URL: https://github.com/bbtheo/cuplyr, https://bbtheo.github.io/cuplyr/
 BugReports: https://github.com/bbtheo/cuplyr/issues
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.3
 SystemRequirements:
-    NVIDIA GPU with Compute Capability >= 6.0,
-    CUDA Toolkit >= 12.0,
+    NVIDIA GPU with Compute Capability >= 7.0 (Volta or newer),
+    CUDA Toolkit >= 12.2,
     RAPIDS libcudf >= 25.12
 Depends:
     R (>= 4.3.0)
@@ -26,11 +25,12 @@ Imports:
     dplyr (>= 1.1.0),
     rlang (>= 1.1.0),
     vctrs (>= 0.6.0),
-    pillar (>= 1.9.0),
-    glue (>= 1.6.0),
     cli (>= 3.6.0),
+    lifecycle (>= 1.0.5),
     tidyselect (>= 1.2.0),
-    tibble (>= 3.2.0)
+    tibble (>= 3.2.0),
+    pillar,
+    stats
 Suggests:
     testthat (>= 3.0.0),
     bench,
@@ -40,9 +40,14 @@ Suggests:
     reticulate,
     knitr,
     rmarkdown,
-    pkgdown
+    pkgdown,
+    data.table,
+    lubridate,
+    waldo,
+    withr
 VignetteBuilder: knitr
 LinkingTo:
     Rcpp
 Config/testthat/edition: 3
 NeedsCompilation: yes
+Config/roxygen2/version: 8.0.0

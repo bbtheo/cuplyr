@@ -24,3 +24,17 @@
 ^docs/
 ^\.github$
 ^\.github/
+^src/Makevars$
+^install\.sh$
+^notebooks$
+^notebooks/
+^pkgdown$
+^pkgdown/
+^scripts$
+^scripts/
+^inst/dplyr-conformance$
+^inst/dplyr-conformance/
+^tools$
+^tools/
+^bench$
+^bench/

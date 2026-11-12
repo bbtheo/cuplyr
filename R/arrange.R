@@ -10,6 +10,9 @@
 #'   of precedence (first column is primary sort key).
 #' @param .by_group If `TRUE` and `.data` is grouped, sort within groups by
 #'   prepending group columns to the sort specification. Default is `FALSE`.
+#' @param .locale The locale to sort character vectors in. `NULL` (the default)
+#'   and `"C"` sort by byte order on the GPU; any other locale is sorted by
+#'   dplyr on the CPU (via stringi) through the usual fallback.
 #'
 #' @return A `tbl_gpu` object with rows reordered. The GPU memory for the
 #'   sorted result is newly allocated (approximately 2x table size peak memory).
@@ -23,8 +26,10 @@
 #' - Sorting is stable: ties preserve their original relative order
 #'
 #' ## NA handling
-#' - `NA` values are placed last for ascending order
-#' - `NA` values are placed first for descending order
+#' - `NA` values are always placed last, for both ascending order and
+#'   `desc()`/descending order, matching dplyr exactly (verified empirically
+#'   against dplyr 1.2.1; fixed in Phase 6 -- older versions of this package
+#'   placed `NA` first for descending sorts, a divergence from dplyr)
 #'
 #' ## Memory usage
 #' The arrange operation requires approximately 2x the table size in GPU memory:
@@ -38,7 +43,8 @@
 #' All column types supported by `tbl_gpu` can be sorted:
 #' numeric, integer, character, logical, Date, POSIXct.
 #'
-#' Note: Character sorting uses binary/UTF-8 ordering, not locale-aware collation.
+#' Note: Character sorting on the GPU uses binary/UTF-8 ordering (dplyr's
+#' `"C"` locale). A non-`"C"` `.locale` falls back to dplyr.
 #'
 #' @seealso
 #' \code{\link{filter.tbl_gpu}} for filtering rows,
@@ -73,96 +79,168 @@
 #'     arrange(mpg, .by_group = TRUE) |>
 #'     collect()
 #' }
-arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE) {
+arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
   dots <- rlang::enquos(...)
+  if (length(dots) > 0L) check_unique_input_names(.data)
+
+  # The GPU sort is byte order, i.e. dplyr's "C" locale. Any other `.locale`
+  # (or an invalid one, which dplyr must reject, even with no dots) reruns the
+  # whole call in dplyr, and so does the deprecated system-locale option, which
+  # only applies while `.locale` is NULL
+  legacy_locale <- is.null(.locale) && isTRUE(getOption("dplyr.legacy_locale"))
+  if (legacy_locale || !(is.null(.locale) || identical(.locale, "C"))) {
+    return(gpu_fallback("arrange", .data, function(tbl) {
+      dplyr::arrange(tbl, !!!dots, .by_group = .by_group, .locale = .locale)
+    }, reason = "only the C locale (byte order) sorts on the GPU; dplyr applies the other collation."))
+  }
 
   if (length(dots) == 0) {
+    # `arrange(group_by(df, g), .by_group = TRUE)` still sorts by the groups
+    if (isTRUE(.by_group) && length(.subset2(.data, "groups")) > 0) {
+      return(push_op(.data, ast_arrange(input_node(.data), list(), .subset2(.data, "groups"))))
+    }
     return(.data)
   }
 
   # Get current schema
-  current_schema <- if (!is.null(.data$lazy_ops) && .data$exec_mode == "lazy") {
-    infer_schema(.data$lazy_ops)
-  } else {
-    .data$schema
+  schema <- current_schema(.data)
+  user_dots <- dots
+
+  # F77: a call whose head resolves to a function of the user's rather than the
+  # native op (a local `abs()`) is dplyr's to run, whole, before any rewrite.
+  # dplyr itself strips a top-level desc() by name, so that head is not looked up.
+  screened <- dots
+  for (i in seq_along(dots)) {
+    q <- .subset2(dots, i)
+    if (is.call(.subset2(q, 2L)) && rlang::quo_is_call(q, "desc", n = 1L, ns = c("", "dplyr"))) {
+      screened[[i]] <- rlang::new_quosure(.subset2(q, 2L)[[2L]], attr(q, ".Environment"))
+    }
+  }
+  shadowed <- shadow_screen_text(screened)
+  if (!is.null(shadowed)) {
+    return(gpu_fallback("arrange", .data, function(tbl) {
+      dplyr::arrange(tbl, !!!user_dots, .by_group = .by_group, .locale = .locale)
+    }, reason = shadowed))
   }
 
-  # Parse sort specifications
-  sort_specs <- lapply(dots, parse_arrange_expr, .data = .data, schema = current_schema)
+  dots <- colwise_rewrite_dots(dots, schema)
+
+  # Classify every dot first: `x` / `desc(x)` / `-x` and a resolvable
+  # top-level pick() are native (pick() expands to one ascending spec per
+  # column, selected on the full data); anything else is evaluated by dplyr.
+  # Decided before any op is pushed, so the fallback reruns the whole call.
+  sort_specs <- list()
+  for (quo in dots) {
+    picked <- resolve_pick_call(quo, schema)
+    if (!is.null(picked)) {
+      sort_specs <- c(sort_specs, lapply(picked, function(col) {
+        list(col_name = col, descending = FALSE)
+      }))
+    } else if (arrange_dot_is_native(quo, schema)) {
+      sort_specs <- c(sort_specs, list(parse_arrange_expr(quo, .data = .data, schema = schema)))
+    } else {
+      return(gpu_fallback("arrange", .data, function(tbl) {
+        dplyr::arrange(tbl, !!!user_dots, .by_group = .by_group, .locale = .locale)
+      }, reason = structure(arrange_key_reason(quo, schema), expr = notice_expr_text(quo))))
+    }
+  }
+
+  # `arrange(pick(NULL))` and friends select no column: nothing to sort by,
+  # unless `.by_group = TRUE` (then the same node as the no-dots case)
+  if (length(sort_specs) == 0 && !(isTRUE(.by_group) && length(.subset2(.data, "groups")) > 0)) {
+    return(.data)
+  }
 
   # Validate columns exist
   for (spec in sort_specs) {
-    if (!spec$col_name %in% current_schema$names) {
+    if (!spec$col_name %in% schema$names) {
       stop("Column '", spec$col_name, "' not found.\n",
-           "Available columns: ", paste(current_schema$names, collapse = ", "),
+           "Available columns: ", paste(schema$names, collapse = ", "),
            call. = FALSE)
     }
   }
 
-  # Handle .by_group
+  # Handle .by_group: group columns are prepended ascending (D8, matches
+  # dplyr's arrange.grouped_df); the user's own desc() on a group column
+  # survives as a later no-op tiebreaker via lower_arrange()'s dedup logic.
   groups_for_arrange <- character()
-  if (isTRUE(.by_group) && length(.data$groups) > 0) {
-    groups_for_arrange <- .data$groups
+  if (isTRUE(.by_group) && length(.subset2(.data, "groups")) > 0) {
+    groups_for_arrange <- .subset2(.data, "groups")
   }
 
-  # Lazy path: build AST (arrange is a barrier)
-  if (.data$exec_mode == "lazy") {
-    return(arrange_lazy(.data, sort_specs, groups_for_arrange))
-  }
-
-  # Eager path: execute immediately
-  col_indices <- integer(length(sort_specs))
-  descending <- logical(length(sort_specs))
-
-  for (i in seq_along(sort_specs)) {
-    spec <- sort_specs[[i]]
-    col_indices[i] <- match(spec$col_name, current_schema$names) - 1L
-    descending[i] <- spec$descending
-  }
-
-  # Handle grouped arrange
-  if (length(groups_for_arrange) > 0) {
-    group_indices <- match(groups_for_arrange, current_schema$names) - 1L
-    user_col_names <- vapply(sort_specs, `[[`, character(1), "col_name")
-
-    group_descending <- logical(length(groups_for_arrange))
-    for (i in seq_along(groups_for_arrange)) {
-      grp <- groups_for_arrange[i]
-      user_idx <- match(grp, user_col_names)
-      if (!is.na(user_idx)) {
-        group_descending[i] <- sort_specs[[user_idx]]$descending
-      }
-    }
-
-    keep <- !user_col_names %in% groups_for_arrange
-    col_indices <- c(group_indices, col_indices[keep])
-    descending <- c(group_descending, descending[keep])
-  }
-
-  new_ptr <- wrap_gpu_call(
-    "arrange",
-    gpu_arrange(.data$ptr, col_indices, descending)
-  )
-
-  new_tbl_gpu(
-    ptr = new_ptr,
-    schema = current_schema,
-    groups = .data$groups,
-    exec_mode = .data$exec_mode
-  )
+  push_op(.data, ast_arrange(input_node(.data), sort_specs, groups_for_arrange))
 }
 
-# Lazy arrange: build AST node (arrange is a barrier)
-arrange_lazy <- function(.data, sort_specs, groups) {
-  # Initialize AST if needed
-  if (is.null(.data$lazy_ops)) {
-    .data$lazy_ops <- ast_source(.data$schema)
+# Internal: is this dot one of the shapes parse_arrange_expr() handles
+# natively -- `x`, `desc(x)` / `dplyr::desc(x)`, `-x` with a bare symbol
+# (not on a factor column)?
+# @keywords internal
+arrange_dot_is_native <- function(quo, schema) {
+  expr <- rlang::quo_get_expr(quo)
+  if (is.symbol(expr)) {
+    return(TRUE)
   }
+  if (!rlang::is_call(expr) || length(expr) != 2L || !is.symbol(expr[[2]])) {
+    return(FALSE)
+  }
+  head <- expr[[1]]
+  if (rlang::is_call(head, "::") && identical(head[[2]], quote(dplyr))) {
+    head <- head[[3]]
+  }
+  if (!is.symbol(head) || !as.character(head) %in% c("desc", "-")) {
+    return(FALSE)
+  }
+  # `-x` is arithmetic: on a factor column dplyr warns and keeps the input
+  # order (F18's rule), so only `desc(x)` / `x` sort a factor natively
+  if (identical(as.character(head), "-")) {
+    neg <- ir_call("-", list(ir_col(as.character(expr[[2]]))))
+    return(ir_factor_rule(neg, schema) != "cpu")
+  }
+  TRUE
+}
 
-  # Add arrange node (this is a barrier)
-  .data$lazy_ops <- ast_arrange(.data$lazy_ops, sort_specs, groups)
-
-  .data
+# Internal (F88): why the sort key `quo` is not native. arrange() sorts by
+# columns only (arrange_dot_is_native()) and never parses a key, so this is
+# arrange's own rule; it also names the first function the key calls on a
+# column that cuplyr has no GPU handler for anywhere (fallback_has_gpu_handler():
+# never desc(), a pronoun, `(` or an engine op), read without evaluating
+# anything (a column-free call, which the engine folds, and the body of a
+# lambda or formula are not looked at).
+# @keywords internal
+arrange_key_reason <- function(quo, schema) {
+  rule <- "sort key must be a column, `desc()` of one or `-` of one on the GPU"
+  missing_fn <- function(e) {
+    if (inherits(e, "quosure")) {
+      e <- rlang::quo_get_expr(e)
+    }
+    if (!is.call(e) || rlang::is_missing(e) || is_data_pronoun_call(e) || is_env_pronoun_call(e)) {
+      return(NULL)
+    }
+    name <- call_head_name(e)
+    # (the body of a lambda or formula, and the arguments of across() & co,
+    # which are column selections or `.fns`, never a sort expression)
+    if (!is.null(name) && name %in% c("~", "function", "across", "if_any", "if_all", "pick", "c_across")) {
+      return(NULL)
+    }
+    for (a in as.list(e)[-1L]) {
+      if (!rlang::is_missing(a)) {
+        hit <- missing_fn(a)
+        if (!is.null(hit)) {
+          return(hit)
+        }
+      }
+    }
+    if (!is.null(name) && !fallback_has_gpu_handler(name) && expr_has_column_ref(e, schema)) {
+      return(name)
+    }
+    NULL
+  }
+  fn <- missing_fn(rlang::quo_get_expr(quo))
+  if (is.null(fn)) {
+    paste0("a ", rule, "; dplyr evaluates this one.")
+  } else {
+    sprintf("%s A %s.", fallback_no_gpu_text(fn), rule)
+  }
 }
 
 # Internal: Parse a single arrange expression
@@ -177,7 +255,7 @@ arrange_lazy <- function(.data, sort_specs, groups) {
 # @keywords internal
 parse_arrange_expr <- function(quo, .data, schema = NULL) {
   if (is.null(schema)) {
-    schema <- .data$schema
+    schema <- .subset2(.data, "schema")
   }
   expr <- rlang::quo_get_expr(quo)
 

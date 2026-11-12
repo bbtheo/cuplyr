@@ -1,25 +1,230 @@
 #' Create or modify columns in a GPU table
 #'
 #' Adds new columns or modifies existing columns in a GPU table using
-#' arithmetic expressions, similar to `dplyr::mutate()`. All computations
-#' are performed on the GPU for maximum performance.
+#' expressions, similar to `dplyr::mutate()`. All computations are
+#' performed on the GPU for maximum performance.
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
 #' @param ... Name-value pairs of expressions. The name gives the column name
-#'   (new or existing), and the value is an arithmetic expression involving
-#'   existing columns and/or scalar values.
+#'   (new or existing), and the value is an expression involving existing
+#'   columns and/or scalar values (see "Supported expressions" below).
+#' @param .by Optional on-the-fly grouping columns (tidyselect), GPU-native
+#'   (Phase 5, task W6): `mutate(df, y = mean(x), .by = g)` behaves
+#'   identically to `df |> group_by(g) |> mutate(y = mean(x)) |> ungroup()`
+#'   -- same window-function machinery, same row-order-preservation
+#'   contract, but the *result* is always ungrouped (`.by` never leaves
+#'   grouping metadata behind, unlike [dplyr::group_by()]). Supplying
+#'   `.by` when `.data` is already grouped (via `group_by()`) is an error,
+#'   matching dplyr exactly.
+#' @param .keep One of `"all"` (default), `"used"`, `"unused"`, `"none"`;
+#'   controls which of `.data`'s *other* columns (besides ones `...`
+#'   creates or modifies, and group columns, both of which are always kept)
+#'   survive in the output -- see "`.keep` semantics" below.
+#' @param .before,.after Optionally, control where new columns should
+#'   appear, using the same tidyselect syntax as [relocate.tbl_gpu()].
+#'   Only genuinely *new* columns are repositioned; a modified existing
+#'   column stays at its original position.
 #'
 #' @return A `tbl_gpu` object with the new or modified columns. If a column
-#'   name already exists, it is replaced. New columns are appended.
+#'   name already exists, it is replaced. New columns are appended (subject
+#'   to `.before`/`.after`), and `.data`'s other columns are kept or dropped
+#'   per `.keep`.
 #'
 #' @details
-#' ## Supported arithmetic operators
+#' ## `.keep` semantics
+#' Verified empirically against dplyr 1.2.1 (dplyr's own docs understate the
+#' exact rule): the columns created or modified by `...` (i.e. every dot's
+#' output column, whether new or an existing name being replaced) and every
+#' group column are **always** kept, regardless of `.keep`. `.keep` only
+#' controls which *other* (untouched, non-group) columns of `.data` survive
+#' alongside them:
 #' \itemize{
-#'   \item `+` - addition
-#'   \item `-` - subtraction
-#'   \item `*` - multiplication
-#'   \item `/` - division
-#'   \item `^` - exponentiation (power)
+#'   \item `"all"` (default): every other column.
+#'   \item `"used"`: other columns that are referenced as an *input* to any
+#'     of `...`'s expressions (union across all dots).
+#'   \item `"unused"`: other columns NOT referenced as an input to any
+#'     expression -- the complement of `"used"`.
+#'   \item `"none"`: no other columns at all.
+#' }
+#' Column order: `.data`'s original columns keep their original relative
+#' order (modified columns don't move), and genuinely new columns are
+#' appended at the end (or repositioned via `.before`/`.after`); the final
+#' set is then filtered down according to `.keep`, preserving that same
+#' relative order. This differs from [transmute()], whose output order is
+#' the literal `...` dot order (see `transmute()`'s own docs).
+#'
+#' ## Supported expressions
+#' `mutate()` parses its arguments through the same expression IR that
+#' `filter()` uses (see `R/ir.R`), lowered to `cudf::compute_column()` under
+#' the hood. A function is native only when its name resolves, in the
+#' expression's environment, to the base/dplyr/lubridate function itself: a
+#' function of your own with the same name (local, in an enclosing function or
+#' global) runs on the CPU, as dplyr would call it, and `pkg::fn` is the
+#' function of that package. The same holds for a function passed as a value
+#' (`across(x, f)`, a list of functions held in a variable, `!!f`) and for the
+#' functions and lambdas of the scoped verbs (`mutate_at()`, `summarise_all()`,
+#' `filter_if()`, ...): one that is, or calls, a function of yours with a
+#' native function's name runs on the CPU. The IR understands:
+#' \itemize{
+#'   \item Arithmetic: `+`, `-`, `*`, `/`, `^`, `%%`, `%/%`, unary `-`,
+#'     arbitrarily nested (`(x + y) * z - 1`), and scalar-on-either-side
+#'     (`mutate(y = 10 - x)`)
+#'   \item Comparisons and logic: `==`, `!=`, `<`, `<=`, `>`, `>=`, `&`,
+#'     `|`, `!`, `xor()` -- these produce a `BOOL8` column, e.g.
+#'     `mutate(is_big = x > 100)`
+#'   \item `is.na()`, `between(x, lo, hi)`, `near(x, y, tol = )`
+#'     (`abs(x - y) < tol`, matching `dplyr::near()`'s own definition
+#'     exactly), `%in%` (including a bare `NA` on the right-hand side,
+#'     e.g. `x %in% NA`, matching `NA %in% NA` being `TRUE` in base R --
+#'     not the same as an *empty* set, which is always `FALSE`)
+#'   \item Math functions: `sqrt()`, `log()` (including `log(x, base)`),
+#'     `log2()`, `log10()`, `exp()`, `abs()`, `floor()`, `ceiling()`,
+#'     `sin()`, `cos()`, `tan()`, `round(x)`/`round(x, digits)` (banker's
+#'     rounding, matching R)
+#'   \item `if_else(cond, yes, no, missing = NULL)` -- strict-but-promoting
+#'     type unification across `yes`/`no`/`missing` (int/double/logical mix
+#'     freely, like dplyr's vctrs-based common type; `STRING` only unifies
+#'     with `STRING`). A `NA` condition produces `NA` (or `missing`, if
+#'     supplied) in the output, matching dplyr exactly (this is NOT the same
+#'     as treating a `NA` condition like `FALSE`)
+#'   \item `case_when(cond1 ~ val1, cond2 ~ val2, ..., .default = val)` --
+#'     first-match-wins; a `NA` condition is treated as no match (falls
+#'     through to the next clause, or `.default`); unmatched rows become a
+#'     typed `NA` when `.default` isn't supplied; the same value-type
+#'     unification rule as `if_else()` applies across every `val_i` plus
+#'     `.default`. `.ptype=`/`.size=`/`.unmatched=` are not yet supported.
+#'   \item `coalesce(...)` -- first non-NA value per row, left to right,
+#'     across any number of columns/scalars; same value-type unification
+#'     rule as `if_else()`
+#'   \item `na_if(x, y)` -- `x` with `NA` wherever `x == y`; the output
+#'     always keeps `x`'s own type exactly (unlike `if_else()`/`coalesce()`,
+#'     `y` is never promoted into the result, only compared against)
+#'   \item `case_match(.x, old_values ~ new_value, ..., .default = val)` --
+#'     matches `.x` by VALUE against each clause's (possibly multi-element)
+#'     left-hand side, first match wins; `NA` on a clause's left-hand side
+#'     matches `.x`'s own `NA` elements (base R's `NA %in% NA` is `TRUE`);
+#'     unmatched rows become `.default` (typed `NA` if not supplied), with
+#'     the same value-type unification rule as `case_when()` across every
+#'     `new_value` plus `.default`. Deprecated upstream in dplyr 1.2 in
+#'     favor of `recode_values()`/`replace_values()`, but still supported
+#'     here. `.ptype=` is not yet supported.
+#'   \item `recode(.x, old = new, ..., .default =, .missing =)` -- native only
+#'     for a bare character/integer/double column `.x` and scalar literal
+#'     replacements of one shared type (`dplyr::recode`, including `!!!`
+#'     lookups); duplicate keys, factor `.x`, `recode_factor()`, and a result
+#'     type different from `.x` without `.default` run on the CPU.
+#'   \item `recode_values(x, old_values ~ new_value, ..., default = val)` --
+#'     the non-deprecated equivalent of `case_match()` above (identical
+#'     semantics, `default` instead of `.default`). The `from=`/`to=`
+#'     vector-lookup-table interface and `unmatched=`/`ptype=` are not yet
+#'     supported.
+#'   \item `replace_values(x, old_values ~ new_value, ...)` -- like
+#'     `recode_values()`, but TYPE STABLE: the output always keeps `x`'s own
+#'     type (every `new_value` is cast to it, never unified/promoted), and
+#'     unmatched rows keep their original `x` value (there is no
+#'     `default=`). The `from=`/`to=` interface is not yet supported.
+#'   \item `replace_when(x, cond1 ~ val1, cond2 ~ val2, ...)` -- like
+#'     `case_when()`, but boolean-condition clauses feeding the same
+#'     type-stable-to-`x` / "unmatched rows keep `x`" behavior as
+#'     `replace_values()` (a `NA` condition is treated as no match, same as
+#'     `case_when()`)
+#'   \item `when_all(..., na_rm = FALSE)` / `when_any(..., na_rm = FALSE)`
+#'     -- elementwise `&`/`|` generalized to any number of logical inputs
+#'     (`when_any(x, y, z)` is `x | y | z`). `na_rm = TRUE` treats `NA` as
+#'     each operator's identity element (`FALSE` for `when_any()`, `TRUE`
+#'     for `when_all()`) rather than propagating it -- e.g.
+#'     `when_any(NA, NA, na_rm = TRUE)` is `FALSE`, not `NA`. `size=` is not
+#'     yet supported.
+#'   \item Plain column copies (`mutate(y = x)`)
+#'   \item A later dot in the same `mutate()` call referencing an earlier
+#'     dot's output column (`mutate(a = x + y, b = a * 2)`), INCLUDING one
+#'     that's itself a window function's output (`mutate(a = cumsum(x), b =
+#'     lag(a))`)
+#'   \item The `.data`/`.env` pronouns, and ordinary R symbols (a bare name
+#'     that matches a column resolves to that column; otherwise it's
+#'     evaluated as an environment variable -- "columns shadow the
+#'     environment")
+#'   \item Window functions, GPU-native for both ungrouped and grouped
+#'     (`group_by()`) tables, arbitrarily nested with any of the above
+#'     (`mutate(y = x - lag(x))`, `mutate(z = lag(cumsum(x)))`,
+#'     `mutate(centered = x - mean(x))`):
+#'     \itemize{
+#'       \item `row_number()` (sequential position) / `row_number(x)`
+#'         (ranked position, ties broken by original position) --
+#'         per-group under `group_by()`
+#'       \item `lag(x, n = 1, default = NA, order_by = NULL)` / `lead(...)`
+#'         -- row-order-preserving shift; `order_by=` (a bare column,
+#'         `desc(column)`, or `-column`) re-frames the shift to follow that
+#'         ordering instead of the table's/group's current row order
+#'       \item `cumsum()`/`cummax()`/`cummin()`/`cumprod()` -- matching R's
+#'         own NA-propagation (`cumsum(c(1, 2, NA, 4))` is `1, 3, NA, NA`:
+#'         once an NA is seen, every later cumulative value in that group is
+#'         NA too). The `cumsum()` of an integer or logical is an integer
+#'         that is `NA` from the first overflow on (with R's warning), as in R
+#'       \item `cummean()` (`cumsum(x) / row_number()`, accumulated in
+#'         double), `cumall()`/
+#'         `cumany()` (tri-state-encoded `cummin()`/`cummax()`), and
+#'         `consecutive_id()` (single-column only; a run-length group id
+#'         that increments whenever the input value changes, treating
+#'         adjacent `NA`s as unchanged) -- all built from the primitives
+#'         above
+#'       \item `min_rank()`/`dense_rank()`/`percent_rank()`/`cume_dist()` --
+#'         ties/`NA` handling matches dplyr exactly (`NA` input -> `NA`
+#'         rank; `percent_rank()` is `(min_rank(x) - 1) / (n_non_NA - 1)`,
+#'         `NaN` for a group with exactly one non-`NA` value, matching
+#'         dplyr's own `NaN`, not `NA`; `cume_dist()` is
+#'         `rank(x, ties = "max") / n_non_NA`)
+#'       \item `mean()`/`sum()`/`min()`/`max()`/`n()`/`sd()`/`var()` --
+#'         one aggregate broadcast to every row of its group (or the whole
+#'         table, ungrouped); `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()`
+#'         match R's own `na.rm = FALSE` default (ANY `NA` in the group
+#'         makes the WHOLE group's result `NA`); `n()` always counts every
+#'         row regardless of `NA`s. `sum()` of an integer or logical is an
+#'         integer, as in dplyr. When a sum leaves the integer range dplyr
+#'         returns a double (for the whole column, and for any expression
+#'         on it): the call is then rerun by dplyr on the CPU. A lazy table
+#'         can't plan for that (the type depends on the data), so a lazy
+#'         `mutate()` with an integer `sum()` runs at the verb like an eager
+#'         one (a plan break first runs the pending steps) and returns a lazy
+#'         table with nothing pending; a logical `sum()` stays in the plan
+#'         (it overflows only past 2^31 `TRUE` rows, with a
+#'         `cuplyr_error_sum_overflow` at `collect()`)
+#'       \item `first(x, order_by = NULL)` / `last(x, order_by = NULL)` /
+#'         `nth(x, n, order_by = NULL)` -- the first/last/`n`th row of the
+#'         group in its current row order, or in `order_by`'s order when
+#'         supplied; negative `n` counts from the end (`nth(x, -1)` ==
+#'         `last(x)`); an out-of-range `n` gives `NA`; `default=`/`na_rm=`
+#'         are not yet supported
+#'       \item `ntile(x = row_number(), n)` -- desugars into `row_number()`/
+#'         `sum()`, so it's native as a consequence of those being native
+#'       \item `order_by(order_by, call)` / `with_order(order_by, fun, x, ...)`
+#'         -- like dplyr, only the FIRST argument of `call` is put in
+#'         `order_by`'s order (stable, `NA` last); the other arguments are
+#'         evaluated in row order, and the call stays native only when each
+#'         of them is a non-`NULL` scalar that reads no column. Native: a
+#'         window call wrapped directly (`cumsum()`/`cummax()`/`cummin()`/
+#'         `cumprod()`/`lag()`/`lead()`/`roll_*()` except `roll_median()`,
+#'         and the calls cuplyr desugars into several windows,
+#'         `cummean()`/`cumall()`/`cumany()`/`consecutive_id()`, each part in
+#'         `order_by`'s order), the value-only rank functions
+#'         (`min_rank()`, `dense_rank()`, ... are unaffected by the order),
+#'         and an elementwise call whose other arguments are scalars
+#'         (`order_by(o, cumsum(x) * 2)` is `cumsum(x) * 2`: the window
+#'         inside the first argument runs in row order, as in dplyr).
+#'         Everything else runs the whole call on the CPU, which gives
+#'         dplyr's value or error: `roll_median()`, an elementwise call with
+#'         another column argument (`order_by(o, cumsum(x) + lag(x))`), a
+#'         `NULL` or empty extra argument (`lag(x, default = NULL)`),
+#'         `row_number(x)`/`ntile(x, n)` (ties broken by the order),
+#'         `first()`/`last()`/`nth()`, aggregates, a nested `order_by()` as
+#'         the wrapped call itself (`order_by(o, order_by(i, cumsum(x)))`;
+#'         nested inside the first argument it stays native), and shapes
+#'         dplyr rejects (`order_by(o, row_number())`)
+#'     }
+#'     Every one of these is evaluated within each `group_by()` group when
+#'     `.data` is grouped (matching `dplyr`'s own grouped-mutate semantics:
+#'     row order is always preserved in the output, unlike grouped
+#'     `slice()`).
 #' }
 #'
 #' ## Column replacement behavior
@@ -27,13 +232,70 @@
 #' column is replaced in-place (preserving column order). For example,
 #' `mutate(x = x + 1)` will modify `x` rather than creating a duplicate.
 #'
-#' ## Current limitations
+#' ## Result type (type promotion)
+#' The output column's GPU type is inferred from the operation and its
+#' inputs (column type(s) and, for a column-scalar expression, the R
+#' literal's own type), applied in this order:
 #' \itemize{
-#'   \item Only binary operations are supported (col op value or col op col)
-#'   \item Complex expressions like `(x + y) * z` are not yet supported
-#'   \item Functions like `sqrt()`, `log()`, `abs()` are not yet implemented
-#'   \item Result type is always FLOAT64 (double precision)
+#'   \item A plain column copy (`mutate(y = x)`) preserves the source
+#'     column's type exactly.
+#'   \item Arithmetic on `STRING`, factor (`DICTIONARY32`), or `Date`/
+#'     `POSIXct` (`TIMESTAMP_*`) columns is an error: cuplyr does not
+#'     support arithmetic on those types.
+#'   \item `/` and `^` always promote to `FLOAT64` (matching R/dplyr:
+#'     `1L / 2L` and `2L ^ 2L` are both doubles).
+#'   \item `+`, `-`, `*`, `%%`, `%/%` preserve integer types: the result is
+#'     `INT32` when every input column and R literal involved is integer
+#'     or logical (`TRUE + TRUE` is `2L`, matching R). Like R, an
+#'     integer `+`, `-` or `*` whose result leaves
+#'     `.Machine$integer.max` is `NA` with the warning "NAs produced by
+#'     integer overflow" (once per call; at `collect()` for a lazy table),
+#'     and `%/%`/`%%` by `0L` are `NA`. If any input is `FLOAT64`/`FLOAT32`, the result is
+#'     `FLOAT64`; otherwise if any input is `INT64`, the result is
+#'     `INT64`. A bare R numeric literal (e.g. the `1` in
+#'     `mutate(y = int_col + 1)`) is a *double* in R, so it promotes the
+#'     result to `FLOAT64` -- write `1L` to keep an integer result.
+#'   \item Comparisons, logic, `is.na()`, `between()`, `%in%` all produce
+#'     `BOOL8`.
+#'   \item `sqrt()`, `log()`, `exp()`, `floor()`, `ceiling()`, `sin()`,
+#'     `cos()`, `tan()` always promote to `FLOAT64` (matching R, e.g.
+#'     `floor(1L)` is a double) -- as does `round()`, for the same reason
+#'     (`typeof(round(1L))` is also a double in R, unlike `abs()` below).
+#'   \item `abs()` preserves the argument's type, except a logical column,
+#'     which promotes to `INT32` (matching R: `typeof(abs(TRUE))` is
+#'     `"integer"`, not `"logical"`).
+#'   \item A bare `NA` (untyped) is `BOOL8` when it's an entire mutate
+#'     expression by itself (`mutate(y = NA)`, matching `typeof(NA)`); as an
+#'     operand inside an arithmetic expression (`mutate(y = int_col + NA)`)
+#'     it's a type no-op instead, adopting the other operand's type
+#'     (matching R: `1L + NA` is an integer, not a double). A typed NA
+#'     literal (`NA_real_`, `NA_integer_`, ...) always keeps its own type.
 #' }
+#'
+#' ## Not yet supported
+#' \itemize{
+#'   \item `order_by()`/`with_order()` with a general expression as the
+#'     ordering argument (only a bare column, `desc(column)`, or `-column`
+#'     is native, with `-` for numeric/logical columns and `desc()` of a
+#'     string only under a C collation: `order_by(a + b, cumsum(x))` runs on
+#'     the CPU); see the `order_by()` item above for what the wrapped call
+#'     may be natively
+#'   \item Multi-column `consecutive_id(a, b, ...)` -- single-column only
+#'   \item Rolling/sliding-window functions (`slider::slide_*()` and
+#'     similar) -- planned for a later phase
+#'   \item String manipulation (concatenation, case conversion, substr,
+#'     regex, ...) -- only string *comparison* is supported
+#'   \item `case_when()`'s/`case_match()`'s `.ptype=`/`.size=`/`.unmatched=`
+#'     arguments, `recode_values()`'s/`replace_values()`'s `from=`/`to=`
+#'     vector-lookup-table interface and `unmatched=`/`ptype=`, and
+#'     `when_all()`'s/`when_any()`'s `size=` -- planned for a later phase
+#' }
+#' An expression shape the IR doesn't recognize at all (no window function,
+#' no aggregate, not one of the arithmetic/comparison/string-comparison
+#' shapes listed above) is a hard error (unlike `filter()`, which falls back
+#' to CPU evaluation for some unrecognized shapes) -- a general CPU fallback
+#' for `mutate()` covering every unrecognized shape (not just window/
+#' aggregate ones) is planned for a later phase.
 #'
 #' ## Performance
 #' GPU arithmetic operations are highly vectorized and can process
@@ -74,360 +336,1466 @@
 #'     mutate(efficiency = mpg * power_weight) |>
 #'     collect()
 #' }
-mutate.tbl_gpu <- function(.data, ...) {
-  dots <- rlang::enquos(...)
-
-  if (length(dots) == 0) return(.data)
-
-  # Lazy path: build AST instead of executing
-  if (.data$exec_mode == "lazy") {
-    return(mutate_lazy(.data, dots))
-  }
-
-  # Eager path: execute immediately
-  result <- .data
-
-  for (i in seq_along(dots)) {
-    new_name <- names(dots)[i]
-    expr <- dots[[i]]
-
-    # Handle unnamed expressions: use expression text as column name (dplyr behavior)
-    if (is.null(new_name) || new_name == "") {
-      new_name <- rlang::quo_text(expr)
-      # Warn user about auto-generated name
-      warning("Unnamed mutate expression '", new_name, "' will use expression as column name.\n",
-              "Consider using explicit names: mutate(name = ", new_name, ")",
-              call. = FALSE)
+mutate.tbl_gpu <- function(.data, ..., .by = NULL,
+                           .keep = c("all", "used", "unused", "none"),
+                           .before = NULL, .after = NULL) {
+  # (the default is the first choice; an argument forwarded from a caller's
+  # missing one goes through match.arg(), whose error it keeps)
+  .keep <- if (missing(.keep) && is.call(substitute(.keep))) "all" else match.arg(.keep)
+  p <- sys.parent()
+  caller_fn <- if (p > 0L) sys.function(p)
+  inform_colwise_grouped(.data, "mutate", caller_fn)
+  # (F88: dplyr's add_tally() builds this mutate() from its `wt`, so a fallback
+  # of it is add_tally()'s, for that wt. `wt` is read only once add_tally() has
+  # turned it into a quosure: a still-lazy binding is the user's promise, which
+  # reading here would force.)
+  # (dplyr's add_tally() lives in dplyr's namespace: a caller that does not is
+  # not it, which spares the `::` lookup on the usual call from a test or a
+  # user's function)
+  if (p > 0L && identical(environmentName(environment(caller_fn)), "dplyr") &&
+      identical(caller_fn, dplyr::add_tally)) {
+    wt_env <- sys.frame(p)
+    wt_quo <- if (exists("wt", wt_env, inherits = FALSE) &&
+                  !rlang::env_binding_are_lazy(wt_env, "wt")) {
+      get0("wt", wt_env, inherits = FALSE)
     }
+    if (rlang::is_quosure(wt_quo) && !quo_is_null_fast(wt_quo)) {
+      prev_as <- fallback_notice_as("add_tally", notice_expr_text(wt_quo))
+      on.exit(fallback_notice_restore(prev_as), add = TRUE)
+    }
+  }
+  check_unique_input_names(.data)
 
-    result <- mutate_one(result, new_name, expr)
+  # quos(...) of the method's own dots is what enquos(...) returns (the same
+  # quosures, names and unquoting), at a seventh of the cost of enquos()'s
+  # argument matching, except for dots named like enquos()'s own arguments
+  # (see the "Capture" bullet in .claude/reference/architecture.md); dplyr's
+  # dplyr_quosures() captures mutate()'s dots with quos() too.
+  dots <- rlang::quos(..., .ignore_empty = "all")
+  # (an argument that wasn't given is the NULL quosure; skips three enquo()s.
+  # missing() is also TRUE for an argument forwarded from a caller's missing
+  # one, whose substitute() is that caller's symbol rather than the NULL
+  # default: that one goes through enquo(), so dplyr's error stays.)
+  by_quo <- if (missing(.by) && is.null(substitute(.by))) null_quo else rlang::enquo(.by)
+  before_quo <- if (missing(.before) && is.null(substitute(.before))) null_quo else rlang::enquo(.before)
+  after_quo <- if (missing(.after) && is.null(substitute(.after))) null_quo else rlang::enquo(.after)
+
+  # (F88: the reasons this call's dots record for a CPU fallback, call-scoped)
+  prev <- fallback_reasons_open()
+  on.exit(fallback_reasons_close(prev), add = TRUE)
+  if (is_rowwise_gpu(.data)) {
+    return(mutate_rowwise(.data, dots, by_quo, .keep, before_quo, after_quo))
+  }
+  mutate_run(.data, dots, by_quo, .keep, before_quo, after_quo)
+}
+
+# mutate() of a rowwise table (F49). Elementwise expressions are the
+# vectorised mutate() (every column is one value per row), so the native path is
+# the ordinary one run with the rowwise vars as protected columns instead of
+# groups (mutate_run(rowwise = TRUE)), after rowwise_rewrite_dots() turned the
+# row aggregates into horizontal GPU ops. The attempt is all-or-nothing
+# (rowwise_attempt()): `.by` (an error in dplyr), a shape the rewrite or the
+# parser does not know, a window call, anything that would fall back or fail
+# natively reruns the WHOLE call in dplyr with the user's dots, so dplyr
+# produces its own result or error.
+# @keywords internal
+mutate_rowwise <- function(.data, dots, by_quo, keep, before_quo, after_quo) {
+  cpu <- function(detail = NULL) mutate_expr_fallback(.data, dots, keep, before_quo, after_quo, by_quo, detail = detail)
+  if (!quo_is_null_fast(by_quo)) {
+    return(cpu())
+  }
+  # F77: a function of the user's with a native op's name runs in dplyr
+  shadowed <- shadow_screen_text(dots)
+  if (!is.null(shadowed)) {
+    return(cpu(shadowed))
+  }
+  exact <- rowwise_exact_sums(.data, dots, TRUE, "mutate")
+  if (!is.null(exact$now)) {
+    return(plan_back_to_lazy(mutate_rowwise(exact$now, dots, by_quo, keep, before_quo, after_quo)))
+  }
+  rw <- if (exact$rewritten) exact$rw else rowwise_rewrite_dots(.data, dots)
+  if (is.null(rw)) {
+    return(rowwise_rerun(cpu, dots))
+  }
+  res <- rowwise_attempt(function() {
+    mutate_run(.data, rw, by_quo, keep, before_quo, after_quo, rowwise = TRUE)
+  })
+  if (is.null(res)) rowwise_rerun(cpu, dots) else rowwise_column_order(res)
+}
+
+# mutate.tbl_gpu()'s body on captured arguments. `rowwise = TRUE` (a rowwise
+# `.data`, whose dots rowwise_rewrite_dots() has rewritten): the table's groups
+# are the rowwise vars, which this treats as columns to keep, never as groups
+# to compute over; the checks of rowwise_expressions_ok() bail out of the call.
+mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwise = FALSE) {
+
+  # Phase 5, task W6: `.by=` resolution. resolve_by() (R/execute.R) errors
+  # immediately if `.data` is already grouped (matching dplyr's own
+  # "Can't supply `.by`..." message verbatim) -- checked up front, before
+  # any dots-related early return, since dplyr raises this error even for
+  # a zero-dot call (verified empirically). `verb_groups` is what actually
+  # drives the window-function machinery below: `by_cols` when `.by=` was
+  # supplied, `.data$groups` otherwise (identical to `group_by()`-driven
+  # mutate). The result is ALWAYS ungrouped when `.by=` was used -- this
+  # falls out automatically, with no special-casing needed, because
+  # resolve_by() already guarantees `.data` itself is ungrouped in that
+  # case, and push_op()'s propagate_groups() only ever propagates
+  # `.data$groups` (never `verb_groups`) into the result.
+  by_given <- !quo_is_null_fast(by_quo)
+  by_cols <- if (rowwise) character() else resolve_by(.data, by_quo, ".by", verb = "mutate")
+  verb_groups <- if (by_given) by_cols else if (rowwise) character() else .subset2(.data, "groups")
+
+  if (!quo_is_null_fast(before_quo) && !quo_is_null_fast(after_quo)) {
+    stop("Can't supply both `.before` and `.after`.", call. = FALSE)
   }
 
+  # Zero-column table with rows: after the arguments are validated against
+  # `.data` (an invalid `.by` must still error), dplyr runs the call.
+  if (length(dots) > 0L && is_zero_column_with_rows(.data)) {
+    return(mutate_expr_fallback(.data, dots, .keep, before_quo, after_quo, by_quo,
+                                reason = "the table has no columns but has rows."))
+  }
+
+  if (length(dots) == 0 && identical(.keep, "all") &&
+      quo_is_null_fast(before_quo) && quo_is_null_fast(after_quo)) {
+    return(.data)
+  }
+
+  orig_schema <- current_schema(.data)
+  orig_names <- orig_schema$names
+  orig_groups <- if (rowwise) .subset2(.data, "groups") else verb_groups
+
+  # F77: a call whose head resolves to a function of the user's rather than the
+  # native op (a local `abs()`) is dplyr's to run, whole, before any rewrite.
+  # (A rowwise call was screened by mutate_rowwise(); its dots are rewritten.)
+  if (!rowwise) {
+    shadowed <- shadow_screen_text(dots)
+    if (!is.null(shadowed)) {
+      return(mutate_expr_fallback(.data, dots, .keep, before_quo, after_quo, by_quo, reason = shadowed))
+    }
+  }
+
+  # F75: dplyr evaluates a dot once per group, the native path folds a
+  # column-free call once. Only a pure call is the same either way
+  # (impure_const_call_text()): any other call in a grouped or `.by`
+  # call sends the whole call to dplyr, before any rewrite or parse.
+  if (!rowwise && length(verb_groups) > 0L) {
+    impure <- impure_const_call_text(dots, orig_schema)
+    if (!is.null(impure)) {
+      return(mutate_expr_fallback(.data, dots, .keep, before_quo, after_quo, by_quo, reason = impure))
+    }
+    # (F83: every column-free call is pure, so a fold that warns may be given up)
+    fallback_mark_screened()
+  }
+
+  # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R's
+  # own module docs for the full design. Anything genuinely unsupported
+  # (pick()-as-data-frame, cur_group()/cur_group_rows()/cur_data()/
+  # cur_data_all()/c_across(), a nested (non-top-level) across()/if_any()/
+  # if_all(), or `across(.unpack = TRUE)`) routes the WHOLE mutate() call
+  # through the CPU fallback below -- checked BEFORE cur_group_id()
+  # substitution/materialization, so a call that's going to fall back
+  # anyway never pays for that materialization first.
+  # cur_group()$key and length(cur_group_rows()) are plain expressions; the
+  # CPU fallbacks keep the dots as the user wrote them.
+  user_dots <- dots
+  dots <- colwise_rewrite_dots(dots, orig_schema)
+  # (dots that mention none of the names the next screens look for pass them
+  # all unchanged: dots_are_plain())
+  plain <- length(dots) > 0L && dots_are_plain(dots)
+  if (!plain) {
+    dots <- rewrite_context_dots(dots, verb_groups, sequential = TRUE, name_unnamed = TRUE)
+    if (dots_need_fallback(dots)) {
+      return(mutate_across_fallback(.data, user_dots, .keep, before_quo, after_quo, by_quo))
+    }
+  }
+
+  # Expand before cur_group_id() substitution, so a call that falls back
+  # never pays for the substitution's GPU work and the helper column is never
+  # in `.cols`'s selectable universe.
+  expanded <- if (plain) expand_plain_dots(dots) else expand_across_dots(dots, orig_schema, verb_groups, "mutate")
+  if (isTRUE(attr(expanded, "needs_fallback"))) {
+    return(mutate_across_fallback(.data, user_dots, .keep, before_quo, after_quo, by_quo))
+  }
+  # The CPU fallbacks below re-run dplyr on the table and the ORIGINAL user
+  # dots as they were BEFORE across() expansion and cur_group_id()
+  # substitution. dplyr then computes cur_group_id() itself (the helper column
+  # never reaches the result), does its own pre-dot evaluation for a staged
+  # across() (the temps never exist there), and calls `.fns` values with
+  # their own environment: an inlined body would instead read any column an
+  # earlier dot creates, including ones an unnamed data-frame dot splices in.
+  staged_temps <- attr(expanded, "staged_temps")
+  provenance <- attr(expanded, "provenance")
+  fallback_data <- .data
+  fallback_dots <- user_dots
+  cgid <- if (plain) {
+    list(data = .data, dots = expanded, used = FALSE)
+  } else {
+    substitute_cur_group_id(.data, expanded, verb_groups, by = by_given, rowwise = rowwise)
+  }
+  .data <- cgid$data
+  if (isTRUE(cgid$used)) orig_schema <- current_schema(.data)
+  dots <- cgid$dots
+
+  # Phase 11, task L1: universal expression-level CPU fallback. Every dot is
+  # parsed via the SAME ir_parse_quo()-driven parser as before -- the only
+  # change is what happens when a dot's shape isn't recognized at all
+  # (`ir_parse_quo()` returns NULL, as opposed to throwing a genuine parse
+  # error like "column not found"): instead of parse_mutate_dots()'s old
+  # hard stop() (now a defensive, internal-only fallback -- see that
+  # function's `stop_on_unparseable` docs), it signals NULL back here, and
+  # the WHOLE mutate() call is re-run on the CPU via mutate_expr_fallback(),
+  # on the pre-substitution table with the original dots re-injected.
+  # A genuine THROWN error (e.g. an undefined column/environment variable)
+  # is NOT caught here -- it propagates normally, preserving every existing
+  # pinned error-message test (scratchpad/phase11_design.md's "NULL-vs-throw
+  # trigger rule").
+  # Vector literals (`y = 1:5`) are native only for an ungrouped, no-`.by`
+  # call; per-group evaluation is dplyr's job (CPU fallback).
+  evaluated <- new.env(parent = emptyenv())
+  # (A rowwise call evaluates each dot once per row: no vector literals, and
+  # no constant is evaluated once for the CPU route to inline.)
+  expressions <- parse_mutate_dots(dots, orig_schema, "mutate", stop_on_unparseable = FALSE,
+                                   vector_literals = length(verb_groups) == 0 && !rowwise,
+                                   ungrouped = length(verb_groups) == 0 && !rowwise,
+                                   evaluated = evaluated, provenance = provenance)
+  if (rowwise && !rowwise_expressions_ok(expressions)) {
+    rowwise_bail("a window call or vector literal in a rowwise mutate()")
+  }
+  if (is.null(expressions)) {
+    return(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
+                                consts = evaluated$consts, provenance = provenance,
+                                reason = fallback_failed_reason(
+                                  fallback_dots, "an expression has a form the GPU engine does not support."
+                                )))
+  }
+  # A vector literal next to a window call isn't planned together: let dplyr
+  # run the whole call.
+  if (isTRUE(attr(expressions, "has_window")) && isTRUE(attr(expressions, "has_vec"))) {
+    return(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
+                                reason = "a vector literal next to a window call in one mutate() is not planned together."))
+  }
+  .data <- check_vector_constant_sizes(.data, expressions, "mutate")
+  dropped <- attr(expressions, "dropped")
+  if (rowwise && any(dropped %in% .subset2(.data, "groups"))) {
+    rowwise_bail("a rowwise var is dropped")
+  }
+  check_droppable_groups(dropped, if (by_given) character() else verb_groups)
+  # Floored fractional Date constants (parse_mutate_dots()); staged temps
+  # aren't output columns. Warned once the native call has run (eager) or
+  # been planned (lazy); a CPU fallback's upload warns by itself.
+  fractional <- set_diff(attr(expressions, "fractional_dates"), staged_temps)
+
+  # Phase 5, task W3: any dot containing a window-function call (row_number(),
+  # lag()/lead(), cumsum()/cummax()/cummin()/cumprod(), and their R desugars
+  # cummean()/cumall()/cumany()/consecutive_id()) routes the WHOLE mutate()
+  # call through mutate_window() instead of the plain single-ast_mutate path
+  # below -- see that function's own docs and
+  # scratchpad/phase5_window_design.md section 1.3.
+  if (isTRUE(attr(expressions, "has_window"))) {
+    return(mutate_window(
+      .data, fallback_dots, expressions, orig_schema, orig_names, orig_groups,
+      .keep, before_quo, after_quo, by_quo, fallback_data = fallback_data,
+      drop = staged_temps, dropped = dropped, fractional = fractional
+    ))
+  }
+
+  # One ast_mutate node carries every expression from every dot -- lowered
+  # to a single gpu_mutate_expr() call by lower_mutate() (R/lower.R), and a
+  # fusion target for fuse_mutates() (R/optimizer.R)
+  # across consecutive mutate() calls in lazy mode. Skipped entirely when
+  # there are no expressions (e.g. `mutate(gdf, .keep = "none")`) -- an
+  # ast_mutate with zero expressions would be a pure no-op anyway (see
+  # R/ast.R::is_barrier()'s "empty mutate nodes are eliminated" comment on
+  # the optimizer side), so there's nothing to gain by building one here.
+  # The mutate alone when no select can follow it (the common `.keep = "all"`
+  # call: mutate_needs_select()); otherwise an eager call runs the mutate and
+  # the `.keep`/`.before`/`.after` select as one execution, push_chain().
+  if (!mutate_needs_select(orig_names, expressions, .keep, before_quo, after_quo,
+                           staged_temps, dropped, helper = isTRUE(cgid$used))) {
+    result <- .data
+    if (length(expressions) > 0) {
+      result <- push_op(.data, ast_mutate(input_node(.data), expressions), input_schema = orig_schema)
+    }
+  } else {
+    result <- push_chain(.data, function(x) {
+      result <- x
+      if (length(expressions) > 0) {
+        result <- push_op(x, ast_mutate(input_node(x), expressions),
+                          input_schema = orig_schema, carry = FALSE)
+      }
+      select_node <- mutate_keep_select_node(
+        result, orig_names, orig_groups, expressions, .keep, before_quo, after_quo,
+        drop = staged_temps, dropped = dropped,
+        result_names = if (length(expressions) > 0) .subset2(result, "schema")$names else orig_names
+      )
+      if (!is.null(select_node)) {
+        result <- push_op(result, select_node, input_schema = .subset2(result, "schema"),
+                          carry = FALSE)
+      }
+      result
+    })
+  }
+  warn_fractional_dates(fractional)
   result
 }
 
-# Lazy mutate: build AST node
-mutate_lazy <- function(.data, dots) {
-  expressions <- list()
-
-  # Get current schema (from AST or base)
-  current_schema <- if (!is.null(.data$lazy_ops)) {
-    infer_schema(.data$lazy_ops)
-  } else {
-    .data$schema
+# A vector constant (`y = 1:4`) must be the table's row count (dplyr: "Can't
+# recycle"). An eager table checks it when the node runs (lower_mutate()); a
+# lazy one would only fail at collect(), so it is checked at the verb against the
+# row count: known for a table with nothing pending, otherwise the plan runs
+# first (a plan break). Returns `.data`, the computed table in that case.
+# @keywords internal
+check_vector_constant_sizes <- function(.data, expressions, verb) {
+  if (!isTRUE(attr(expressions, "has_vec")) || !identical(.subset2(.data, "exec_mode"), "lazy")) {
+    return(.data)
   }
-
-  for (i in seq_along(dots)) {
-    new_name <- names(dots)[i]
-    expr <- dots[[i]]
-
-    if (is.null(new_name) || new_name == "") {
-      new_name <- rlang::quo_text(expr)
-      warning("Unnamed mutate expression '", new_name, "' will use expression as column name.\n",
-              "Consider using explicit names: mutate(name = ", new_name, ")",
-              call. = FALSE)
-    }
-
-    parsed <- parse_mutate_exprs(new_name, expr, current_schema)
-
-    if (is.null(parsed)) {
-      # Opaque expression - fall back to eager
-      warning("Opaque mutate expression '", new_name, "', falling back to eager execution",
-              call. = FALSE)
-      .data <- as_eager(.data)
-      for (j in seq_along(dots)) {
-        nm <- names(dots)[j]
-        if (is.null(nm) || nm == "") nm <- rlang::quo_text(dots[[j]])
-        .data <- mutate_one(.data, nm, dots[[j]])
+  vecs <- lapply(expressions, function(e) {
+    ir <- .subset2(e, "ir")
+    if (identical(.subset2(ir, "kind"), "vec")) ir
+  })
+  vecs <- vecs[!vapply(vecs, is.null, logical(1))]
+  if (length(vecs) == 0L) {
+    return(.data)
+  }
+  if (has_pending_ops(.data)) {
+    cuplyr_plan_break_notify(
+      verb, "a vector constant must match the row count, which the pending steps decide",
+      data = .data
+    )
+    .data <- compute(.data)
+  }
+  n_rows <- base_dim(.data)[[1L]]
+  if (!is.na(n_rows)) {
+    for (vec in vecs) {
+      if (length(.subset2(vec, "value")) != n_rows) {
+        mutate_vector_size_error(n_rows, vec)
       }
-      return(as_lazy(.data))
-    }
-
-    expressions <- c(expressions, parsed)
-
-    # Update schema for subsequent expressions
-    for (expr_step in parsed) {
-      current_schema <- update_schema_for_expr(current_schema, expr_step)
     }
   }
-
-  # Initialize AST if needed
-  if (is.null(.data$lazy_ops)) {
-    .data$lazy_ops <- ast_source(.data$schema)
-  }
-
-  # Add mutate node
-  .data$lazy_ops <- ast_mutate(.data$lazy_ops, expressions)
-
-  # Update schema
-  .data$schema <- current_schema
-
   .data
 }
 
-# Parse a mutate expression into expression structure
-parse_mutate_expr <- function(new_name, expr, schema) {
-  expr_chr <- rlang::quo_text(expr)
+# Internal: window-bearing mutate() dispatch (Phase 5, task W3)
+#
+# Called from mutate.tbl_gpu() whenever at least one dot's parsed IR
+# contains a window-function call. Implements
+# scratchpad/phase5_window_design.md section 1.3's AST emission sequence
+# (pre-mutate -> ast_window per stage -> the verb's own node -> trailing
+# select dropping temps), generalized to interleave per BATCH (see
+# window_batches()/plan_mutate_window_batches() below) rather than emitting
+# every stage before a single combined final ast_mutate: a later batch's
+# window-call arguments may reference an EARLIER batch's own dot output by
+# name (e.g. `mutate(a = cumsum(x), b = lag(a))` -- this is exactly what
+# forces "b" into its own batch, per window_batches()'s chunking rule), which
+# requires "a" to already be a REAL materialized column (not just a schema
+# entry) by the time "b"'s own window stage runs -- so each batch's own dots
+# must be materialized via their own ast_mutate node before the NEXT batch's
+# stages are pushed. Section 1.3's pseudocode is the correct picture for the
+# (overwhelmingly common) single-batch case; interleaving generalizes it
+# correctly for the cross-batch case without changing behavior when there is
+# only one batch.
+#
+# Two-pass structure (plan, then emit) is mandatory, not just tidy: emitting
+# AST nodes via push_op() executes immediately in eager mode, so we cannot
+# discover mid-emission that some spec isn't lowerable yet and "undo" partial
+# GPU work -- every spec across every batch must be validated BEFORE any
+# push_op() call (see plan_mutate_window_batches()/window_spec_lowerable(),
+# R/lower.R). This is the "detect at plan time... never half-lower"
+# requirement from the design doc.
+#
+# @param .data The tbl_gpu to compute on (with cur_group_id()'s helper
+#   column, if this call substituted one)
+# @param dots The user's ORIGINAL dots (before across() expansion and
+#   cur_group_id() substitution) -- only used by the CPU fallback path,
+#   which re-runs the real dplyr::mutate() call on `fallback_data`
+# @param expressions parse_mutate_dots()'s result: one make_mutate_expr()
+#   struct per dot, built from the RAW (window-containing) per-dot IR,
+#   parsed against `orig_schema` with the usual left-to-right dot-visibility
+#   schema threading. Used here only as the source of per-dot raw IR (via
+#   `$ir`) -- and, unchanged, handed straight to mutate_keep_select_node()
+#   for `.keep`/`.before`/`.after` accounting, exactly as the non-window
+#   path does: `$output_col`/`$input_cols` (dot output names / the USER's
+#   own referenced columns, e.g. "x" for `cumsum(x)`) are identical whether
+#   or not the dot happens to contain a window call, so no separate
+#   accounting is needed for `.keep="used"` to correctly count "x" as used
+#   even though the actual GPU computation reads a `..win*..` temp column,
+#   never "x" directly, once decomposed
+# @param orig_schema,orig_names `.data`'s schema/names before this call
+# @param orig_groups The EFFECTIVE group columns to window over -- Phase 5
+#   task W6's `verb_groups`: `by_cols` when `.by=` was supplied,
+#   `.data$groups` otherwise (mutate.tbl_gpu() already resolved this before
+#   calling here). Threaded straight into every ast_window() stage's
+#   group_cols argument below, and into mutate_keep_select_node()'s
+#   always-keep set (an on-the-fly `.by=` column is always kept in the
+#   output, exactly like a `group_by()` column, verified empirically)
+# @param keep,before_quo,after_quo As in mutate.tbl_gpu()
+# @param by_quo The `.by=` quosure, as captured by mutate.tbl_gpu()
+#   (`rlang::enquo(.by)`) -- only used if this call's plan turns out
+#   unlowerable and we must re-run the original `dplyr::mutate()` call on
+#   the CPU (mutate_window_fallback()), so that fallback re-run honors
+#   `.by=` too
+# @param fallback_data The tbl_gpu as it was before cur_group_id()
+#   substitution; the CPU fallback runs on it so no helper column leaks
+# @param drop Staged across() temp columns, removed from the result
+# @param dropped Columns set to `NULL` by a dot (and not re-added), removed
+#   from the result
+# @param fractional Columns built from a floored fractional Date constant:
+#   warned about only if the call stays native (the CPU fallback's upload
+#   warns itself)
+# @return A new tbl_gpu
+# @keywords internal
+mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, orig_groups,
+                           keep, before_quo, after_quo, by_quo, fallback_data = .data,
+                           drop = character(), dropped = character(),
+                           fractional = character()) {
+  exprs_raw <- stats::setNames(
+    lapply(expressions, `[[`, "ir"),
+    vapply(expressions, `[[`, character(1), "output_col")
+  )
 
-  # Check if expression is just a column name (simple copy)
-  if (expr_chr %in% schema$names) {
-    col_type <- schema$types[match(expr_chr, schema$names)]
-    return(make_mutate_expr(new_name, expr_chr, "copy",
-                            input_types = col_type))
+  plan <- tryCatch(
+    plan_mutate_window_batches(exprs_raw, orig_schema),
+    error = function(e) NULL
+  )
+
+  all_lowerable <- !is.null(plan) &&
+    all(vapply(plan$all_specs, window_spec_lowerable, logical(1)))
+
+  if (!all_lowerable) {
+    return(mutate_window_fallback(fallback_data, dots, keep, before_quo, after_quo, by_quo))
   }
 
-  # Parse arithmetic: col op value or col op col
-  ops <- c("+", "-", "*", "/", "^")
-  op_found <- NULL
-  op_pos <- NULL
+  # F80: a lazy table runs a call with an integer sum() now, as an eager one
+  # does (the type of the column is the data's to decide; see below), and the
+  # result goes back to lazy with nothing pending. With cur_group_id()'s helper
+  # column on `.data`, the notice counts the user's steps and a CPU rerun
+  # starts from the computed table without the helper (not from the lazy
+  # input, which would run the user's plan again).
+  if (identical(.subset2(.data, "exec_mode"), "lazy") &&
+      any(vapply(plan$all_specs, window_spec_int_sum, logical(1)))) {
+    same <- identical(fallback_data, .data)
+    now <- plan_run_now(.data, "mutate", "an integer sum() (result type depends on the data)",
+                        notice_data = fallback_data)
+    return(plan_back_to_lazy(mutate_window(
+      now, dots, expressions, orig_schema, orig_names, orig_groups, keep, before_quo, after_quo,
+      by_quo,
+      fallback_data = if (same) now else plan_now_columns(now, current_schema(fallback_data)$names),
+      drop = drop, dropped = dropped, fractional = fractional
+    )))
+  }
 
-  for (op in ops) {
-    pos <- regexpr(op, expr_chr, fixed = TRUE)
-    if (pos > 0) {
-      if (is.null(op_pos) || pos < op_pos) {
-        op_found <- op
-        op_pos <- pos
+  # Each push is handed the schema the previous one produced, so none of them
+  # re-derives it from the pending chain.
+  emit <- function(result) {
+    sch <- orig_schema
+    for (batch_plan in plan$batch_plans) {
+      for (stage in batch_plan$stages) {
+        if (length(stage$pre) > 0) {
+          result <- push_op(result, ast_mutate(input_node(result), stage$pre),
+                            input_schema = sch, carry = FALSE)
+          sch <- .subset2(result, "schema")
+        }
+        result <- push_op(result, ast_window(input_node(result), stage$specs, orig_groups),
+                          input_schema = sch, carry = FALSE)
+        sch <- .subset2(result, "schema")
       }
+      result <- push_op(result, ast_mutate(input_node(result), batch_plan$expressions),
+                        input_schema = sch, carry = FALSE)
+      sch <- .subset2(result, "schema")
     }
+
+    select_node <- mutate_keep_select_node(
+      result, orig_names, orig_groups, expressions, keep, before_quo, after_quo,
+      drop = drop, dropped = dropped, result_names = sch$names
+    )
+    if (!is.null(select_node)) {
+      result <- push_op(result, select_node, input_schema = sch, carry = FALSE)
+    }
+    result
   }
 
-  if (is.null(op_found)) {
-    return(NULL)  # Opaque expression
+  # F42: an integer/logical window sum() is declared INT32, but dplyr returns a
+  # double when a sum leaves the integer range (one overflowing group makes the
+  # whole column double, and `sum(x) + 1L` follows). The eager schema is only
+  # known after the fact, so such a call is rerun whole by dplyr; overflow is
+  # rare, so the CPU path costs nothing in the common case. A lazy table with
+  # such a sum is run as an eager one above (F80), so a lazy plan reaching here
+  # holds no integer sum (a BOOL8 sum is the exception: it can only overflow
+  # with 2^31 TRUE rows in a group, and raises `cuplyr_error_sum_overflow`).
+  if (identical(.subset2(.data, "exec_mode"), "eager")) {
+    # The CPU rerun's upload warns about fractional dates itself.
+    return(retry_on_sum_overflow(
+      function() {
+        # The whole chain (window stages, mutates, trailing select) runs as one
+        # execution and builds one table.
+        result <- push_chain(.data, emit)
+        warn_fractional_dates(fractional)
+        result
+      },
+      function() mutate_window_fallback(
+        fallback_data, dots, keep, before_quo, after_quo, by_quo,
+        reason = "an integer sum() overflowed in a window call; dplyr widens only the overflowing groups."
+      )
+    ))
   }
-
-  lhs <- trimws(substr(expr_chr, 1, op_pos - 1))
-  rhs <- trimws(substr(expr_chr, op_pos + 1, nchar(expr_chr)))
-
-  # Validate LHS is a column
-  if (!lhs %in% schema$names) {
-    return(NULL)
-  }
-
-  lhs_type <- schema$types[match(lhs, schema$names)]
-
-  # Check if RHS is a column
-  if (rhs %in% schema$names) {
-    rhs_type <- schema$types[match(rhs, schema$names)]
-    return(make_mutate_expr(new_name, c(lhs, rhs), op_found,
-                            input_types = c(lhs_type, rhs_type)))
-  }
-
-  # Try to parse RHS as scalar
-  value <- tryCatch(eval(parse(text = rhs)), error = function(e) NULL)
-  if (is.null(value) || !is.numeric(value) || length(value) != 1) {
-    return(NULL)
-  }
-
-  make_mutate_expr(new_name, lhs, op_found, scalar = value,
-                   input_types = lhs_type)
+  result <- push_chain(.data, emit)
+  warn_fractional_dates(fractional)
+  result
 }
 
-# Parse a mutate expression into one or more expression structures
-parse_mutate_exprs <- function(new_name, expr, schema) {
-  tree <- parse_mutate_exprs_tree(new_name, expr, schema)
-  if (!is.null(tree)) {
-    return(tree)
-  }
+# Internal: pure planning pass for mutate_window() -- no push_op()/GPU work
+#
+# Splits `exprs` into window_batches() and, for each batch in order, drives
+# decompose_window_group() (R/window.R) to a fixed point, then builds that
+# batch's OWN final expressions (make_mutate_expr() per dot, from the
+# batch's window-free "post" IR) threading the schema across the batch's
+# dots exactly as mutate()'s own non-window loop does (parse_mutate_dots()/
+# update_schema_for_expr()) -- so a later dot in the SAME batch that plainly
+# references an earlier dot's output (no window call of its own, e.g.
+# `mutate(a = cumsum(x), c = a * 2)`) resolves correctly.
+#
+# `..win<k>..`/`..winarg<k>..` temp name counters (`win_n`/`winarg_n`) are
+# threaded across batches (not reset per batch) so names stay sequential
+# and collision-free across the whole plan, mirroring plan_window_stages()'s
+# own single-call threading.
+#
+# @param exprs A named list of per-dot RAW (window-containing) IR, in
+#   verb-call order (see window_batches()'s own docs for the naming
+#   requirement)
+# @param schema `.data`'s schema before any dot of this mutate() call
+# @return `list(batch_plans, all_specs)`: `batch_plans` is a list (one per
+#   batch, in order) of `list(stages = <window_spec()-bearing stage list,
+#   from decompose_window_group()>, expressions = <list of
+#   make_mutate_expr() structs, one per dot in this batch>)`; `all_specs` is
+#   the flat list of every window_spec() produced across every stage of
+#   every batch, for window_spec_lowerable() validation
+# @keywords internal
+plan_mutate_window_batches <- function(exprs, schema) {
+  batches <- window_batches(exprs)
 
-  linear <- parse_linear_mutate_exprs(new_name, expr, schema)
-  if (!is.null(linear)) {
-    return(linear)
-  }
+  schema_cursor <- schema
+  win_n <- 0L
+  winarg_n <- 0L
+  batch_plans <- vector("list", length(batches))
+  all_specs <- list()
 
-  parsed <- parse_mutate_expr(new_name, expr, schema)
-  if (is.null(parsed)) {
-    return(NULL)
-  }
-  list(parsed)
-}
+  for (bi in seq_along(batches)) {
+    batch_idx <- batches[[bi]]
+    batch_exprs <- exprs[batch_idx]
 
-# Parse nested arithmetic expression trees into sequential steps
-parse_mutate_exprs_tree <- function(new_name, expr, schema) {
-  expr_obj <- rlang::quo_get_expr(expr)
-  node <- parse_mutate_node(expr_obj)
-  if (is.null(node)) return(NULL)
+    decomposed <- decompose_window_group(batch_exprs, schema_cursor, win_n, winarg_n)
+    win_n <- decomposed$win_n
+    winarg_n <- decomposed$winarg_n
 
-  steps <- list()
-  current_schema <- schema
-
-  emit_col_scalar <- function(lhs_col, op, scalar) {
-    lhs_idx <- match(lhs_col, current_schema$names)
-    if (is.na(lhs_idx)) return(FALSE)
-    lhs_type <- current_schema$types[lhs_idx]
-    step <- make_mutate_expr(new_name, lhs_col, op, scalar = scalar,
-                             input_types = lhs_type)
-    steps <<- c(steps, list(step))
-    current_schema <<- update_schema_for_expr(current_schema, step)
-    TRUE
-  }
-
-  emit_col_col <- function(lhs_col, op, rhs_col) {
-    lhs_idx <- match(lhs_col, current_schema$names)
-    rhs_idx <- match(rhs_col, current_schema$names)
-    if (is.na(lhs_idx) || is.na(rhs_idx)) return(FALSE)
-    lhs_type <- current_schema$types[lhs_idx]
-    rhs_type <- current_schema$types[rhs_idx]
-    step <- make_mutate_expr(new_name, c(lhs_col, rhs_col), op,
-                             input_types = c(lhs_type, rhs_type))
-    steps <<- c(steps, list(step))
-    current_schema <<- update_schema_for_expr(current_schema, step)
-    TRUE
-  }
-
-  build <- function(n) {
-    if (n$type == "col" || n$type == "scalar") {
-      return(FALSE)
+    for (stage in decomposed$stages) {
+      all_specs <- c(all_specs, stage$specs)
     }
 
-    if (n$type != "call") return(FALSE)
-
-    lhs_node <- parse_mutate_node(n$lhs)
-    rhs_node <- parse_mutate_node(n$rhs)
-    if (is.null(lhs_node) || is.null(rhs_node)) return(FALSE)
-
-    op <- n$op
-
-    if (lhs_node$type == "call" && rhs_node$type == "call") {
-      return(FALSE)
+    batch_schema <- decomposed$schema
+    batch_expressions <- vector("list", length(batch_idx))
+    for (k in seq_along(batch_idx)) {
+      nm <- names(exprs)[batch_idx[k]]
+      step <- make_mutate_expr(nm, decomposed$post[[k]], batch_schema)
+      batch_expressions[[k]] <- step
+      batch_schema <- update_schema_for_expr(batch_schema, step)
     }
 
-    if (lhs_node$type == "call") {
-      if (!build(lhs_node)) return(FALSE)
-      if (rhs_node$type == "col") {
-        return(emit_col_col(new_name, op, rhs_node$name))
-      }
-      if (rhs_node$type == "scalar") {
-        return(emit_col_scalar(new_name, op, rhs_node$value))
-      }
-      return(FALSE)
-    }
-
-    if (rhs_node$type == "call") {
-      if (!build(rhs_node)) return(FALSE)
-      if (lhs_node$type == "col") {
-        return(emit_col_col(lhs_node$name, op, new_name))
-      }
-      if (lhs_node$type == "scalar") {
-        if (op %in% c("+", "*")) {
-          return(emit_col_scalar(new_name, op, lhs_node$value))
+    # F41: a window spec that IS a dot's whole value carries the dot's name, so
+    # a fractional Date warning can name the output column.
+    for (k in seq_along(batch_idx)) {
+      post <- decomposed$post[[k]]
+      if (!identical(post$kind, "col")) next
+      for (si in seq_along(decomposed$stages)) {
+        for (pi in seq_along(decomposed$stages[[si]]$specs)) {
+          if (identical(decomposed$stages[[si]]$specs[[pi]]$output_col, post$name)) {
+            decomposed$stages[[si]]$specs[[pi]]$label <- names(exprs)[batch_idx[k]]
+          }
         }
       }
-      return(FALSE)
     }
 
-    if (lhs_node$type == "col" && rhs_node$type == "col") {
-      return(emit_col_col(lhs_node$name, op, rhs_node$name))
-    }
-
-    if (lhs_node$type == "col" && rhs_node$type == "scalar") {
-      return(emit_col_scalar(lhs_node$name, op, rhs_node$value))
-    }
-
-    if (lhs_node$type == "scalar" && rhs_node$type == "col") {
-      if (op %in% c("+", "*")) {
-        return(emit_col_scalar(rhs_node$name, op, lhs_node$value))
-      }
-    }
-
-    FALSE
+    batch_plans[[bi]] <- list(stages = decomposed$stages, expressions = batch_expressions)
+    schema_cursor <- batch_schema
   }
 
-  if (!build(node)) return(NULL)
-
-  steps
+  list(batch_plans = batch_plans, all_specs = all_specs)
 }
 
-# Parse left-associative chains of + or - into multiple expressions
-parse_linear_mutate_exprs <- function(new_name, expr, schema) {
-  expr_obj <- rlang::quo_get_expr(expr)
-  flat <- flatten_left_assoc_ops(expr_obj)
-  if (is.null(flat)) {
-    return(NULL)
-  }
+# Internal: CPU fallback for a window-bearing mutate() call whose plan isn't
+# (yet) fully lowerable. As of Phase 5 task W4, every window kind (shift/
+# rank/scan/agg) has C++ support (see window_spec_lowerable(), R/lower.R),
+# so what reaches it is a window spec that is still unlowerable: today
+# roll_median() (CPU-only, window_spec_lowerable() excludes it), including
+# one under order_by()/with_order(). An order_by()/with_order()-wrapped
+# agg-kind call, the other way a window spec used to become unlowerable, now
+# returns NULL from the parser -- see ir_parse_with_order(), R/ir.R -- so the
+# whole call runs on the CPU, which raises dplyr's own error. Re-injects
+# `.by=` (Phase 5 task W6) so the CPU re-run
+# honors on-the-fly grouping too, exactly as the real call would have.
+#
+# @param .data The original tbl_gpu
+# @param dots The original (already rlang::enquos()'d) dots
+# @param keep,before_quo,after_quo As in mutate.tbl_gpu()
+# @param by_quo The `.by=` quosure, as captured by mutate.tbl_gpu()
+# @return A new tbl_gpu (via gpu_fallback(), which also emits the
+#   cuplyr_fallback_notify() notification)
+# @keywords internal
+mutate_window_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo,
+                                   reason = "a window call in this mutate() has no GPU plan (its stages cannot be lowered).") {
+  gpu_fallback("mutate", .data, function(tbl) {
+    dplyr::mutate(
+      .data = tbl, !!!dots, .by = !!by_quo, .keep = keep,
+      .before = !!before_quo, .after = !!after_quo
+    )
+  }, reason = reason)
+}
 
-  terms <- flat$terms
-  ops <- flat$ops
+# Internal: whole-call CPU fallback for a mutate() call whose dots contain
+# a deferred across()-family shape (Phase 10; dots_need_fallback(),
+# R/across.R) -- pick()-as-data-frame, cur_group()/cur_group_rows()/
+# cur_data()/cur_data_all()/c_across(), a nested (non-top-level) across()/
+# if_any()/if_all(), or `across(.unpack = TRUE)`. Mirrors
+# mutate_window_fallback() exactly (re-runs the real dplyr::mutate() call
+# with the ORIGINAL dots, before any Phase 10 substitution/expansion).
+# @keywords internal
+mutate_across_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo) {
+  gpu_fallback("mutate", .data, function(tbl) {
+    dplyr::mutate(
+      .data = tbl, !!!dots, .by = !!by_quo, .keep = keep,
+      .before = !!before_quo, .after = !!after_quo
+    )
+  }, reason = fallback_failed_reason(dots, across_fallback_default))
+}
 
-  if (length(terms) < 2) {
-    return(NULL)
-  }
+# Internal: whole-call CPU fallback for a mutate() call with at least one dot
+# whose shape the expression IR doesn't recognize at all (Phase 11, task L1
+# -- the "universal expression-level CPU fallback"; see
+# scratchpad/phase11_design.md). Mirrors mutate_window_fallback()/
+# mutate_across_fallback() exactly (same re-injection pattern). The caller
+# passes the table and the ORIGINAL dots from BEFORE across() expansion and
+# cur_group_id() substitution, so dplyr evaluates across() and
+# cur_group_id() itself and the helper column never appears in the result.
+# `consts`/`provenance` (parse_mutate_dots()'s recorded values) are inlined
+# by inline_evaluated_dots() so dot values aren't computed twice.
+# This is what subsumes identity()/ifelse()/scale()/lengths()/
+# toupper()/local-closure mutate dots -- and, more generally, ANY
+# unrecognized shape, not just window/across-family ones.
+# @keywords internal
+mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo,
+                                consts = NULL, provenance = NULL, detail = NULL,
+                                reason = detail) {
+  gpu_fallback("mutate", .data, function(tbl) {
+    # Inlined here, where the row count is known (see inline_evaluated_dots()).
+    dots <- inline_evaluated_dots(dots, consts, provenance, nrow(tbl))
+    dplyr::mutate(
+      .data = tbl, !!!dots, .by = !!by_quo, .keep = keep,
+      .before = !!before_quo, .after = !!after_quo
+    )
+  }, reason = reason)
+}
 
-  # First term must be a column
-  if (!rlang::is_symbol(terms[[1]])) {
-    return(NULL)
-  }
-  lhs_name <- as.character(terms[[1]])
-  if (!lhs_name %in% schema$names) {
-    return(NULL)
-  }
+# Parse mutate()/transmute()'s `...` dots into a list of mutate expression
+# structures (see make_mutate_expr(), R/ast.R). Shared by both verbs: they
+# differ only in what they do with the finished `expressions` list
+# afterwards (mutate.tbl_gpu() computes a `.keep`/`.before`/`.after`
+# column set; transmute.tbl_gpu() always keeps just the dot outputs, in dot
+# order, plus any un-dotted group columns prepended).
+#
+# @param dots A list of quosures, as returned by rlang::enquos(...)
+#   (NOT yet auto-named -- this function names unnamed dots itself)
+# @param schema The schema to parse/type expressions against (before this
+#   call's dots -- i.e. .data's current schema)
+# @param verb Character, the verb name for auto_name_dots()'s warning and
+#   the unrecognized-expression error message
+# @param warn_unnamed Logical, `TRUE` to warn on unnamed dots (mutate()'s
+#   existing behavior, see auto_name_dots()), `FALSE` to silently name them
+#   from their deparsed text instead -- transmute() passes `FALSE`, matching
+#   real `dplyr::transmute()` (verified empirically: dplyr never warns for
+#   an unnamed transmute dot, not even a bare column reference, which is
+#   transmute's single most common idiom, e.g. `transmute(df, a = x + 1, y)`)
+# @param stop_on_unparseable Logical (Phase 11, task L1). `TRUE` (default):
+#   the historical behavior -- a dot whose expression `ir_parse_quo()`
+#   doesn't recognize at all (returns `NULL`, as opposed to throwing a
+#   genuine parse error) is a hard `stop()`. `FALSE`: instead of stopping,
+#   the WHOLE FUNCTION returns `NULL` immediately (abandoning whatever
+#   dots have already been parsed) the moment such a dot is found --
+#   `mutate.tbl_gpu()`/`transmute.tbl_gpu()` read this `NULL` as "route the
+#   whole call to the CPU fallback" (`mutate_expr_fallback()`). Either way,
+#   a genuinely THROWN error from `ir_parse_quo()` (e.g. "object ... not
+#   found") is never caught here -- it always propagates, which is exactly
+#   the "NULL-vs-throw trigger rule" scratchpad/phase11_design.md specifies:
+#   an unrecognized *shape* falls back, a genuine user error stays fast.
+#   With `stop_on_unparseable = FALSE`, the old hard `stop()` becomes
+#   unreachable from any real mutate()/transmute() call (both callers pass
+#   `FALSE`) -- kept only as a defensive, internal-only safety net.
+# @param ungrouped `TRUE` for a call with no groups and no `.by`. Only then
+#   are evaluated constants recorded in `evaluated`.
+# @param evaluated Optional environment. Each column-free dot (scalar, vector
+#   or NULL) this function evaluates in an ungrouped call
+#   (see mutate_constant_value()) is stored in `evaluated$consts`, a list
+#   keyed by the dot's position (as.character(i)), as list(value). When the
+#   function returns `NULL` the caller hands those values to the CPU route
+#   (inline_evaluated_dots()) so dplyr doesn't evaluate the dot a second time.
+# @param provenance Optional `"provenance"` attribute of expand_across_dots()
+#   for `dots`: which user dot each expanded dot came from, and whether it is
+#   an across()/if_any()/if_all() expansion (see the reader rule below).
+#
+# Evaluate-once and fractional Dates (F37). dplyr evaluates each dot once. A
+# column-free dot is evaluated here (mutate_constant_value()) and becomes a
+# literal, so the native path evaluates it once too. A fractional Date value
+# can't be a TIMESTAMP_DAYS literal (ir_check_ts_lit()); it is built from its
+# floored value instead, which is the column the CPU route would give after
+# the upload floor, and its name is listed in the `"fractional_dates"`
+# attribute: the caller raises `cuplyr_warning_fractional_date` once it has
+# committed to the native path (warn_fractional_dates()). That only holds
+# while nothing in the call sees the fraction, so a later dot that may read
+# the column (expr_may_read_cols(); a bare copy `b = dd` copies the floored
+# column and isn't a reader, its output is floored too) sends the call to
+# the CPU, where dplyr computes it from the real value. The same goes for the
+# output of a whole-value mean()/median() of a Date/POSIXct (rounded to the
+# column type on the GPU, dplyr's is a double). Any expansion of a
+# later user dot's across()/if_any()/if_all() counts as a reader (its `.cols`
+# was resolved before this call's columns existed, so it can't be checked
+# by name); expansions of the across() that floored the value don't. A
+# fractional Date vector constant is floored by its upload (lower_mutate(),
+# which warns itself) and follows the same reader rule. Known limit: on a
+# zero-row table nothing is floored, but the native path still warns.
+# Accepted limit: in a call that takes the CPU route for any reason, dplyr
+# evaluates again what wasn't inlined -- column-free across() bodies (passed
+# to dplyr as written, so it resolves `.cols` against the columns earlier
+# dots create), constants of a grouped or `.by` call, and column-free
+# sub-calls folded inside other dots (`runif(1)` in `x + runif(1)`).
+# @return A list of expression structures, one per dot (or `NULL`, only
+#   possible when `stop_on_unparseable = FALSE`, see above). Carries an extra
+#   `"has_window"` attribute (Phase 5, task W3): `TRUE` iff any dot's parsed
+#   IR contains a window-function call anywhere (`ir_has_window()`) --
+#   `mutate.tbl_gpu()` reads this to decide whether to route the whole call
+#   through `mutate_window()` instead of pushing `expressions` straight into
+#   a single `ast_mutate()` node (which would later hit `ir_bind()`'s window
+#   guard at lowering time). `transmute.tbl_gpu()` ignores the attribute --
+#   window-function support inside `transmute()` is not yet wired (W3 scope
+#   is `mutate()` only, per `scratchpad/phase5_window_design.md` section 8's
+#   W3 row). Also carries `"fractional_dates"`: the output names whose
+#   final value is a floored fractional Date constant (see above).
+# @keywords internal
+parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
+                               stop_on_unparseable = TRUE, vector_literals = FALSE,
+                               ungrouped = FALSE, evaluated = NULL, provenance = NULL) {
+  dots <- if (warn_unnamed) auto_name_dots(dots, verb) else name_dots_silently(dots)
 
   expressions <- list()
-  current_schema <- schema
+  has_window <- FALSE
+  has_vec <- FALSE
+  dropped <- character()
+  # dplyr places a new column where its name first appears, even when that
+  # dot is `col = NULL` (and a later dot fills it in).
+  dot_order <- names(dots)
+  if (length(dot_order) > 1L) dot_order <- unique.default(dot_order)
 
-  for (i in 2:length(terms)) {
-    op <- ops[i - 1]
-    term <- terms[[i]]
-
-    lhs_type <- current_schema$types[match(lhs_name, current_schema$names)]
-
-    if (rlang::is_symbol(term)) {
-      rhs_name <- as.character(term)
-      if (!rhs_name %in% current_schema$names) {
-        return(NULL)
-      }
-      rhs_type <- current_schema$types[match(rhs_name, current_schema$names)]
-      expr_step <- make_mutate_expr(new_name, c(lhs_name, rhs_name), op,
-                                    input_types = c(lhs_type, rhs_type))
-    } else if (is.numeric(term) && length(term) == 1) {
-      expr_step <- make_mutate_expr(new_name, lhs_name, op, scalar = term,
-                                    input_types = lhs_type)
-    } else {
-      return(NULL)
+  # Record the value of the column-free dot at position `j`, so the CPU route
+  # inlines it instead of evaluating it again. Only for an ungrouped call
+  # (dplyr evaluates a grouped call per group, so a value computed once would
+  # change what the CPU route does). A vector is recorded too;
+  # inline_evaluated_dots() skips one whose vec_size() can't match the data. A
+  # name an earlier `col = NULL` dot removed is NULL in dplyr's mask,
+  # but was read from the environment here: dplyr must evaluate such a dot.
+  # (A dot that can see the mask without naming a column, `exists("x")`, is
+  # never a constant: mutate_constant_value() says "none" for it.)
+  record_const <- function(j, const, quo) {
+    if (!is.null(evaluated) && ungrouped &&
+        (const$kind %in% c("scalar", "vector") || (identical(const$kind, "null") && isTRUE(const$evaluated))) &&
+        !any(all.vars(rlang::quo_get_expr(quo)) %in% dropped)) {
+      evaluated$consts[[as.character(j)]] <- list(value = const$raw %||% const$value)
     }
-
-    expressions <- c(expressions, list(expr_step))
-    current_schema <- update_schema_for_expr(current_schema, expr_step)
-    lhs_name <- new_name
   }
 
+  # Names whose column holds a floored fractional Date constant, in order,
+  # with the user dot each came from (`provenance`) and whether it is a
+  # vector constant (floored, and warned, when lower_mutate() uploads it).
+  frac <- character()
+  frac_origin <- integer()
+  frac_vec <- logical()
+  forget_frac <- function(nm) {
+    if (length(frac) == 0L) {
+      return(invisible())
+    }
+    keep <- frac != nm
+    frac <<- frac[keep]
+    frac_origin <<- frac_origin[keep]
+    frac_vec <<- frac_vec[keep]
+  }
+  # The user dot an expanded dot came from (read only when a floored value is
+  # in play).
+  origin_of <- function(i) if (is.null(provenance)) i else provenance$origin[i]
+  # (F88: the user dot that goes to the CPU, and why: the parser's cause, or
+  # `reason`; read by the caller's fallback, fallback_failed_reason())
+  fail <- function(i, reason = fallback_cause_take()) {
+    fallback_dot_failed(origin_of(i), reason)
+    NULL
+  }
+  dot_names <- names(dots)
+
+  for (i in seq_along(dots)) {
+    fallback_dot_begin()
+    new_name <- dot_names[i]
+    expr <- dots[[i]]
+
+    # A dot that may read a floored fractional Date column must see the
+    # fraction: CPU route. Checked before evaluating anything of this dot.
+    # An across()/if_any()/if_all() expansion resolved `.cols` against the
+    # running schema, which doesn't know which names an earlier user dot
+    # floored, so it may read one without naming it (dplyr would select it):
+    # conservatively a reader.
+    # Expansions of the across() that floored the value don't read it.
+    copied <- NA_integer_
+    if (length(frac) > 0) {
+      origin <- origin_of(i)
+      from_across <- !is.null(provenance) && provenance$kind[i] %in% c("across", "combined")
+      e <- rlang::quo_get_expr(expr)
+      if (is.symbol(e)) {
+        copied <- match(as.character(e), frac)
+      }
+      if (is.na(copied) &&
+          (expr_may_read_cols(e, frac) || (from_across && any(frac_origin != origin)))) {
+        if (!stop_on_unparseable) {
+          return(fail(i, "it reads a fractional Date value an earlier expression made, which the GPU holds floored."))
+        }
+        stop(verb, "() can't read a fractional Date value on the GPU.\n",
+             "Expression: ", rlang::quo_text(expr), call. = FALSE)
+      }
+    }
+
+    const <- mutate_constant_value(expr, schema)
+    # (a dot that is not a constant records nothing)
+    if (!identical(.subset2(const, "kind"), "none")) record_const(i, const, expr)
+
+    # `col = NULL` (or a constant that evaluates to NULL) drops the column:
+    # later dots no longer see it, and a later dot of the same name re-adds it.
+    # An if_any()/if_all() over one column collapses to its bare predicate, so
+    # a NULL there is not a dropped column but dplyr's error, which it raises.
+    if (identical(const$kind, "null") && !is.null(provenance) &&
+        identical(provenance$kind[i], "combined")) {
+      if (!stop_on_unparseable) {
+        return(fail(i, "an if_any()/if_all() predicate that is NULL; dplyr reports the error."))
+      }
+      stop(verb, "() can't use an if_any()/if_all() predicate that is NULL.\n",
+           "Expression: ", rlang::quo_text(expr), call. = FALSE)
+    }
+    if (identical(const$kind, "null")) {
+      dropped <- set_union(dropped, new_name)
+      keep_idx <- schema$names != new_name
+      schema$names <- schema$names[keep_idx]
+      schema$types <- schema$types[keep_idx]
+      schema <- set_schema_factor_levels(schema, new_name, NULL)
+      forget_frac(new_name)
+      next
+    }
+
+    floored <- NULL
+    floored_vec <- FALSE
+    if (identical(const$kind, "scalar")) {
+      # Build the literal from the value already computed: evaluating the
+      # dot again (ir_parse_quo()) would run RNG/side effects twice. A
+      # fractional Date is built floored (see this function's docs).
+      floored <- floor_fractional_date(const$value)
+      ir <- tryCatch(
+        {
+          lit <- ir_lit_or_unsupported(floored %||% const$value)
+          if (!is.null(lit)) {
+            ir_check_ts_lit(lit)
+            # A Period/Duration/difftime value is the CPU's (F48); the signal
+            # must not reach make_mutate_expr()'s ir_infer_type().
+            ir_check_timespan_lit(lit$value)
+          }
+          lit
+        },
+        cuplyr_timestamp_needs_cpu = function(e) {
+          fallback_cause(fallback_type_text(e))
+          NULL
+        },
+        cuplyr_type_needs_cpu = function(e) {
+          fallback_cause(fallback_type_text(e))
+          NULL
+        }
+      )
+    } else if (identical(const$kind, "vector")) {
+      if (!vector_literals || !const$supported) {
+        if (!stop_on_unparseable) {
+          return(fail(i, if (!const$supported) {
+            "a vector constant of this type cannot be uploaded as a column."
+          } else {
+            "a vector constant is recycled per group (or per row) by dplyr."
+          }))
+        }
+        stop(verb, "() can't use a vector literal here.\n",
+             "Expression: ", rlang::quo_text(expr), call. = FALSE)
+      }
+      ir <- ir_vec(const$value, gpu_type_from_r(const$value), expr, new_name)
+      has_vec <- TRUE
+      floored_vec <- inherits(const$value, "Date") && {
+        v <- as.double(unclass(const$value))
+        any(is.finite(v) & v != floor(v))
+      }
+    } else if (identical(const$kind, "failed")) {
+      fallback_cause(if (isTRUE(const$declined)) {
+        ir_fold_declined_text
+      } else {
+        "evaluating it outside the data mask raised an error; dplyr runs it and reports."
+      })
+      ir <- NULL
+    } else {
+      # A vector constant nested inside a larger expression (`x + 1:5`) is
+      # dplyr's elementwise job: CPU fallback.
+      ir <- tryCatch(
+        ir_parse_quo(expr, schema),
+        cuplyr_vector_literal = function(e) {
+          fallback_cause("a vector constant inside a larger expression is recycled by dplyr.")
+          NULL
+        }
+      )
+    }
+
+    if (is.null(ir)) {
+      if (!stop_on_unparseable) {
+        # Phase 11, task L1: signal "route the whole call to the CPU
+        # fallback" instead of erroring -- see this function's own
+        # `stop_on_unparseable` docs.
+        return(fail(i))
+      }
+
+      # Defensive, internal-only path (Phase 11, task L1): both real
+      # callers (mutate.tbl_gpu()/transmute.tbl_gpu()) pass
+      # `stop_on_unparseable = FALSE`, so this stop() is unreachable from
+      # any dplyr-facing call -- kept only as a safety net for any future
+      # internal caller that doesn't want the fallback behavior.
+      stop(
+        verb, "() only supports column copies, arithmetic (+, -, *, /, ^, ",
+        "%%, %/%), comparisons (==, !=, <, <=, >, >=), logical operators ",
+        "(&, |, !, xor), is.na(), between(), near(), %in%, sqrt()/log()/log2()/",
+        "log10()/exp()/abs()/floor()/ceiling()/sin()/cos()/tan()/round(), ",
+        "if_else()/case_when()/coalesce()/na_if()/case_match()/recode_values()/",
+        "replace_values()/replace_when()/when_all()/when_any(), or window ",
+        "functions (row_number()/lag()/lead()/cumsum()/cummax()/cummin()/",
+        "cumprod()/cummean()/cumall()/cumany()/consecutive_id(), ",
+        "min_rank()/dense_rank()/percent_rank()/cume_dist()/ntile(), ",
+        "mean()/sum()/min()/max()/n()/sd()/var()/median()/n_distinct()/",
+        "first()/last()/nth(), ",
+        "order_by()/with_order(), roll_mean()/roll_sum()/roll_min()/",
+        "roll_max()/roll_sd() (data.table::frollmean()/frollsum()/frollmin()/",
+        "frollmax()/frollsd() also accepted, align=\"right\" only)) ",
+        "(some named arguments of these are not yet supported -- see ",
+        "?mutate.tbl_gpu).\n",
+        "Expression: ", rlang::quo_text(expr),
+        call. = FALSE
+      )
+    }
+
+    # A factor outside the places F18's rule allows (ir_factor_rule(): bare
+    # copy, is.na()/n_distinct(), identical-level comparison) needs dplyr's
+    # labels, warnings and errors. Same CPU route as an unparseable dot.
+    if (ir_factor_rule(ir, schema) == "cpu") {
+      if (!stop_on_unparseable) {
+        return(fail(i, "a factor in this expression needs its labels, which dplyr combines (the GPU holds codes)."))
+      }
+      stop(
+        verb, "() can't use a factor in this expression on the GPU.\n",
+        "Expression: ", rlang::quo_text(expr),
+        call. = FALSE
+      )
+    }
+
+    if (ir_has_window(ir)) {
+      has_window <- TRUE
+    }
+
+    step <- make_mutate_expr(new_name, ir, schema)
+
+    # The GPU holds a factor as bare INT32 codes, so only a bare copy of a
+    # factor column can stay native (its levels follow it, see
+    # propagate_factor_levels()). Any other factor-valued expression
+    # (if_else()/coalesce()/case_when()/lag() over factors) would compute on
+    # the codes and lose or mislabel the levels.
+    if (identical(unname(step$output_type), "DICTIONARY32") && !identical(ir$kind, "col")) {
+      if (!stop_on_unparseable) {
+        return(fail(i, "a factor-valued expression needs dplyr's levels (the GPU holds codes)."))
+      }
+      stop(
+        verb, "() can't compute a factor-valued expression on the GPU.\n",
+        "Expression: ", rlang::quo_text(expr),
+        call. = FALSE
+      )
+    }
+
+    expressions[[length(expressions) + 1L]] <- step
+    if (length(dropped) > 0L) {
+      dropped <- set_diff(dropped, new_name)
+    }
+    copied_vec <- !is.na(copied) && frac_vec[copied]
+    # F41: a native mean()/median() of a Date/POSIXct is rounded to the column
+    # type (a fractional Date mean is floored, lower_window() warns), where
+    # dplyr's value is a double. Same reader rule as a floored constant; the
+    # warning comes from the window lowering, so it isn't in `fractional`.
+    ts_mean <- identical(.subset2(ir, "kind"), "call") && .subset2(ir, "op") %in% c("mean", "median") &&
+      unname(step$output_type) %in% c("TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS")
+    forget_frac(new_name)
+    if (!is.null(floored) || floored_vec || ts_mean || !is.na(copied)) {
+      frac <- c(frac, new_name)
+      frac_origin <- c(frac_origin, origin_of(i))
+      frac_vec <- c(frac_vec, floored_vec || ts_mean || copied_vec)
+    }
+
+    # Update the running schema so subsequent dots see this dot's output.
+    schema <- update_schema_for_expr(schema, step)
+  }
+
+  attr(expressions, "has_window") <- has_window
+  attr(expressions, "has_vec") <- has_vec
+  attr(expressions, "dropped") <- dropped
+  attr(expressions, "dot_order") <- dot_order
+  attr(expressions, "fractional_dates") <- frac[!frac_vec]
   expressions
 }
 
-# Flatten left-associative + / - chains, return terms and ops or NULL
-flatten_left_assoc_ops <- function(expr) {
-  if (!rlang::is_call(expr)) {
-    return(NULL)
+# Classify a mutate()/transmute() dot that reads no column: `kind` is
+# "null" (the dot is, or evaluates to, NULL), "vector" (an atomic vector of
+# length != 1; `supported` says whether it can be uploaded as a column),
+# "failed" (a call whose evaluation raised, with every name in it bound),
+# "scalar" (an evaluated call/symbol with a length-1 atomic value, returned
+# as `value` so the caller doesn't evaluate the dot a second time; a "null"
+# also says, in `evaluated`, whether evaluating the dot was needed), or
+# "none" (everything else). Evaluated in R, in the dot's environment,
+# with an empty data mask so `.env` works. A call that needs the mask
+# (`n()`, `ntile(n = 2)`, `exists("x")`) is "none" without being evaluated; so
+# is a symbol or a call with an unbound name, which the parser reports.
+# @keywords internal
+mutate_constant_value <- function(quo, schema) {
+  none <- list(kind = "none")
+  # (F110) a call that provably reads a column is not a constant
+  if (quo_reads_column_fast(quo, schema)) {
+    return(none)
+  }
+  expr <- rlang::quo_get_expr(quo)
+  if (is.null(expr)) {
+    return(list(kind = "null"))
   }
 
-  op <- rlang::call_name(expr)
-  if (is.null(op) || !op %in% c("+", "-")) {
-    return(NULL)
-  }
-
-  terms <- list()
-  ops <- character()
-  current <- expr
-
-  while (rlang::is_call(current) && rlang::call_name(current) %in% c("+", "-")) {
-    current_op <- rlang::call_name(current)
-    rhs <- current[[3]]
-
-    # Only handle left-associative chains (reject nested right ops)
-    if (rlang::is_call(rhs) && rlang::call_name(rhs) %in% c("+", "-")) {
-      return(NULL)
+  if (is.symbol(expr) || is.call(expr)) {
+    if (expr_has_column_ref(expr, schema) || expr_has_mask_only_call(expr) ||
+          expr_reaches_mask(expr)) {
+      return(none)
     }
-
-    terms <- c(list(rhs), terms)
-    ops <- c(current_op, ops)
-    current <- current[[2]]
+    got <- ir_fold_eval(rlang::eval_tidy(quo, data = list()))
+    # (F83: a call that warned, with the dots screened, is dplyr's, as a failed fold is)
+    if (!is.null(got$declined)) {
+      return(list(kind = "failed", declined = TRUE))
+    }
+    if (is.null(got)) {
+      # A call that raised is dplyr's to run (only it can wrap the error, and
+      # the failure out here is no proof it fails inside the mask). The parser
+      # would fold it a second time, so the caller skips it. A bare symbol
+      # keeps the parser's own error.
+      # An unbound name in it is the typo error the parser raises natively.
+      # (`$`/`@` operands and `pkg::` names are not variables here)
+      bound <- is.call(expr) &&
+        !expr_has_unbound_symbol(expr, rlang::quo_get_env(quo), schema)
+      return(if (bound) list(kind = "failed") else none)
+    }
+    value <- got$value
+    ran <- TRUE
+  } else {
+    value <- expr
+    ran <- FALSE
   }
 
-  terms <- c(list(current), terms)
-  list(terms = terms, ops = ops)
+  if (is.null(value)) {
+    return(list(kind = "null", evaluated = ran))
+  }
+  if (!is.atomic(value)) {
+    return(none)
+  }
+  if (length(value) == 1L) {
+    # A bare literal (no evaluation happened) takes the ordinary parse path.
+    return(if (ran) list(kind = "scalar", value = value) else none)
+  }
+
+  supported <- (is.logical(value) || is.integer(value) || is.double(value) || is.character(value)) &&
+    (!is.object(value) || identical(class(value), "Date")) &&
+    is.null(dim(value))
+  # `value` is unnamed for ir_vec(); `raw` keeps the names a CPU-route
+  # recorded constant (record_const()) must still carry (`names(v)`).
+  list(kind = "vector", value = if (supported) unname(value) else value, raw = value,
+       supported = supported)
 }
 
-# Update schema after adding an expression
+# The CPU route must not evaluate again a column-free dot that
+# parse_mutate_dots() already evaluated (RNG, counters, side effects).
+# `dots` are the user's dots from before across() expansion; `consts` holds
+# the values recorded per EXPANDED dot position, and `provenance` (see
+# expand_across_dots()) says which original dot each expanded dot came from.
+# A dot passed through unchanged ("dot") whose value was recorded is
+# replaced by that value, under the name dplyr gives the original
+# expression. Everything else stays as written for dplyr; in particular an
+# across() dot, which dplyr resolves against the columns earlier dots
+# create (its column-free bodies run again there, see parse_mutate_dots()).
+# A recorded non-NULL value is inlined only if its vctrs::vec_size() is 1 or
+# `n` (dplyr's own constant size rule): otherwise dplyr's size error would
+# name the value ("<date>") instead of the user's expression, so the dot
+# stays as written (and is evaluated again before the error). NULL is always
+# inlined (dplyr doesn't size-check it). A value vec_size() errors on stays
+# as written.
+# @param dots list of quosures (user dots, before expansion)
+# @param consts named list keyed by expanded-dot position, each list(value), or NULL
+# @param provenance the `"provenance"` attribute of expand_across_dots()
+# @param n row count of the data the CPU route runs on
+# @keywords internal
+inline_evaluated_dots <- function(dots, consts, provenance, n) {
+  if (length(consts) == 0) {
+    return(dots)
+  }
+  dot_names <- names(dots)
+  if (is.null(dot_names)) {
+    dot_names <- rep("", length(dots))
+  }
+  for (d in seq_along(dots)) {
+    idx <- which(provenance$origin == d)
+    if (length(idx) != 1L || !identical(provenance$kind[idx], "dot") ||
+        !(as.character(idx) %in% names(consts))) {
+      next
+    }
+    value <- consts[[as.character(idx)]]$value
+    if (!is.null(value)) {
+      size <- tryCatch(vctrs::vec_size(value), error = function(e) NA_integer_)
+      if (!size %in% c(1L, n)) {
+        next
+      }
+    }
+    quo <- dots[[d]]
+    if (is.na(dot_names[d]) || dot_names[d] == "") {
+      # dplyr's own rule for an unnamed dot
+      dot_names[d] <- dot_label(quo)
+    }
+    dots[[d]] <- rlang::new_quosure(value, rlang::quo_get_env(quo))
+  }
+  names(dots) <- dot_names
+  dots
+}
+
+# The floored value of a column-free Date constant that isn't a whole day,
+# or NULL for anything else. Floored like the upload (date_to_gpu()):
+# -0.5 -> -1. Non-finite or out-of-int32 values keep going to the CPU.
+# @keywords internal
+floor_fractional_date <- function(value) {
+  if (!inherits(value, "Date") || length(value) != 1L) {
+    return(NULL)
+  }
+  v <- as.double(unclass(value))
+  if (!is.finite(v) || v == floor(v) || abs(floor(v)) > .Machine$integer.max) {
+    return(NULL)
+  }
+  structure(floor(v), class = "Date")
+}
+
+# TRUE iff dot expression `expr` may read a column named in `cols` when
+# dplyr evaluates it. Syntactic and conservative: the names as symbols
+# anywhere (also under `.env$`), the `.data` pronoun, or a call that can
+# reach a mask column without naming it (expr_reaches_mask()). A top-level
+# across()/if_any()/if_all() dot is already expanded when this runs (its
+# `.cols` resolved against the pre-call columns, so the expansion never
+# names a column an earlier dot of the call creates): parse_mutate_dots()
+# treats those expansions as readers through their provenance instead.
+# Not detected: a user function that calls pick()/cur_data() itself.
+# @keywords internal
+expr_may_read_cols <- function(expr, cols) {
+  any(all.vars(expr) %in% c(cols, ".data")) || expr_reaches_mask(expr)
+}
+
+# The functions expr_reaches_mask() looks for. parse(), str2lang() and
+# str2expression() are not among them: they only build language objects, and
+# what evaluates one (eval(), do.call(), exec()...) is. match.fun() is: it can
+# hand back exists() or get(), which read the calling frame, the mask, when the
+# result is called in the dot (`match.fun("exists")("x")`).
+mask_wide_fns <- c(
+  "pick", "across", "c_across", "if_any", "if_all", "cur_data", "cur_data_all",
+  "cur_group", "get", "get0", "mget", "exists", "dynGet", "eval", "evalq",
+  "eval_tidy", "eval_bare", "environment", "current_env", "caller_env",
+  "parent.frame", "sys.frame", "sys.frames", "sys.function",
+  "as.environment", "ls", "objects", "do.call", "exec", "match.fun"
+)
+
+# The function name the head of call `e` reads as: call_head_name(), and also
+# `pkg:::fn`, which call_head_name() leaves alone for its other callers.
+# @keywords internal
+mask_call_head_name <- function(e) {
+  head <- e[[1L]]
+  if (is.call(head) && length(head) == 3L && identical(head[[1L]], as.name(":::")) &&
+      is.symbol(head[[3L]])) {
+    return(as.character(head[[3L]]))
+  }
+  call_head_name(e)
+}
+
+# TRUE iff `expr` calls something that can reach dplyr's data mask without
+# naming a column as a symbol: pick(), a nested across() and friends,
+# cur_data(), get()/mget()/exists(), eval(), environment()... Such a dot's
+# value depends on the mask, so it can't be computed outside it either.
+# (`local()`, `with()` and `within()` are not: their body sees the mask as
+# plain symbols, which the column tests find, and any of these calls inside it
+# is found by the walk.)
+# Syntactic: only a call spelled with one of these names counts (bare, `::` or
+# `:::`). Not detected: an alias (`ex <- exists; ex("x")`), a function passed
+# as a value, and a user function that makes such a call itself; those still
+# run without a mask wherever a column-free piece is evaluated.
+# @keywords internal
+expr_reaches_mask <- function(expr) {
+  # (all.names() is a C walk over every symbol, call heads and embedded
+  # quosures included, so a dot with none of the names costs no R-level walk)
+  if (rlang::is_missing(expr) || !is.call(expr) || !any(all.names(expr) %in% mask_wide_fns)) {
+    return(FALSE)
+  }
+  walk <- function(e) {
+    if (rlang::is_missing(e) || !is.call(e)) {
+      return(FALSE)
+    }
+    head <- mask_call_head_name(e)
+    if (!is.null(head) && head %in% mask_wide_fns) {
+      return(TRUE)
+    }
+    for (part in as.list(e)) {
+      if (walk(part)) {
+        return(TRUE)
+      }
+    }
+    FALSE
+  }
+  walk(expr)
+}
+
+# TRUE iff `expr` calls a function that only works inside dplyr's data mask
+# (n(), zero-arg row_number(), cur_*(), pick(), across()...). Such a dot
+# can't be pre-evaluated out here: evaluation would run its column-free
+# sub-calls (`runif(1)` in `runif(1) + n()`) and then fail on the mask-only
+# call, and ir_parse_quo() would run them a second time. A user function
+# that calls n() internally is not detected (it double-evaluates as before).
+# @keywords internal
+expr_has_mask_only_call <- function(expr) {
+  zero_arg <- c("n", "row_number", "cur_group_id", "cur_group_rows", "cur_column",
+                "cur_group", "cur_data", "cur_data_all")
+  any_arg <- c("pick", "across", "c_across", "if_any", "if_all")
+  if (rlang::is_quosure(expr)) {
+    return(expr_has_mask_only_call(rlang::quo_get_expr(expr)))
+  }
+  if (rlang::is_missing(expr) || !is.call(expr)) {
+    return(FALSE)
+  }
+  head <- call_head_name(expr)
+  if (!is.null(head) && ((head %in% zero_arg && length(expr) == 1L) || head %in% any_arg)) {
+    return(TRUE)
+  }
+  # ntile() without an `x` (`ntile(n = 2)`) ranks row_number(), its default
+  if (identical(head, "ntile") &&
+      (length(expr) == 1L || (!is.null(names(expr)) && !any(names(expr)[-1L] %in% c("", "x"))))) {
+    return(TRUE)
+  }
+  parts <- as.list(expr)[-1]
+  for (i in seq_along(parts)) {
+    # an empty subscript slot (`m[, 1]`) is the missing-argument sentinel:
+    # reading it into a variable and forcing it errors
+    if (rlang::is_missing(parts[[i]])) {
+      next
+    }
+    if (expr_has_mask_only_call(parts[[i]])) {
+      return(TRUE)
+    }
+  }
+  FALSE
+}
+
+# dplyr refuses to drop a grouping column of a grouped table (`.by` allows it).
+# @keywords internal
+check_droppable_groups <- function(dropped, groups) {
+  if (length(dropped) == 0L) {
+    return(invisible(NULL))
+  }
+  bad <- set_intersect(dropped, groups)
+  if (length(bad) > 0) {
+    stop("Can't drop grouping column", if (length(bad) > 1) "s", " ",
+         paste0("`", bad, "`", collapse = ", "), " with NULL.", call. = FALSE)
+  }
+  invisible(NULL)
+}
+
+# Fill in unnamed dots' names from their deparsed expression text, with no
+# warning -- the silent counterpart to auto_name_dots() (R/execute.R), used
+# by parse_mutate_dots(warn_unnamed = FALSE) for transmute().
+# @keywords internal
+name_dots_silently <- function(dots) {
+  dot_names <- names(dots)
+  if (is.null(dot_names)) {
+    dot_names <- rep("", length(dots))
+  }
+
+  for (i in seq_along(dots)) {
+    if (is.na(dot_names[i]) || dot_names[i] == "") {
+      dot_names[i] <- dot_label(dots[[i]])
+    }
+  }
+
+  names(dots) <- dot_names
+  dots
+}
+
+# Build the ast_select node (if any) implementing mutate()'s `.keep`/
+# `.before`/`.after` controls, per the empirically-verified rule (see
+# mutate.tbl_gpu()'s roxygen "`.keep` semantics" section):
+#
+#   - Columns created or modified by any dot (`expr$output_col`, whether a
+#     brand new name or an existing one being replaced), and every group
+#     column, are ALWAYS kept.
+#   - `.keep` controls which *other* original columns additionally survive
+#     ("all" = all of them, "used" = ones referenced as an input to any
+#     dot's expression, "unused" = the complement of "used", "none" =
+#     none).
+#   - Column order: original columns keep their original relative
+#     position; genuinely new columns are appended at the end (or moved
+#     via `.before`/`.after`, using the same tidyselect machinery as
+#     relocate.tbl_gpu()); the final kept set is filtered down from that
+#     ordered list, preserving relative order.
+#
+# @param result The tbl_gpu AFTER the mutate node has been pushed (or
+#   .data unchanged if there were no expressions)
+# @param orig_names Character vector, .data's column names BEFORE this
+#   mutate() call
+# @param orig_groups Character vector, .data's group columns
+# @param expressions The finished expressions list (see parse_mutate_dots())
+# @param keep One of "all"/"used"/"unused"/"none"
+# @param before_quo,after_quo Quosures for `.before`/`.after` (already
+#   checked not to be BOTH non-NULL)
+# @param drop Temp columns (staged across() expansions) the result must not
+#   keep: they are not new columns, but their inputs still count as used
+# @param dropped Columns a dot set to `NULL` (and no later dot re-added)
+# @return An ast_select node to stack on `result` via push_op(), or `NULL`
+#   if no select node is needed (the "all", no `.before`/`.after` case is
+#   always a pure identity and is skipped to avoid an unnecessary AST node)
+# @keywords internal
+mutate_keep_select_node <- function(result, orig_names, orig_groups,
+                                     expressions, keep, before_quo, after_quo,
+                                     drop = character(), dropped = character(),
+                                     result_names = current_schema(result)$names) {
+  touched_cols <- unique(vapply(expressions, `[[`, character(1), "output_col"))
+  new_cols <- touched_cols[!touched_cols %in% c(orig_names, drop, dropped)]
+  # New columns sit where their name first appeared among the dots, which
+  # includes a `col = NULL` dot that a later dot re-fills.
+  dot_order <- attr(expressions, "dot_order")
+  if (!is.null(dot_order)) {
+    new_cols <- dot_order[dot_order %in% new_cols]
+  }
+  existing_touched <- touched_cols[touched_cols %in% orig_names]
+  input_cols_union <- unique(unlist(lapply(expressions, `[[`, "input_cols")))
+
+  mode_extra <- switch(keep,
+    all = orig_names,
+    used = input_cols_union,
+    unused = set_diff(orig_names, input_cols_union),
+    none = character()
+  )
+
+  always_kept <- set_union(orig_groups, existing_touched)
+  kept_orig_names <- orig_names[orig_names %in% set_union(always_kept, mode_extra)]
+
+  full_names <- result_names
+  full_names <- c(full_names[!full_names %in% new_cols], new_cols)
+
+  if (length(new_cols) > 0 &&
+      (!quo_is_null_fast(before_quo) || !quo_is_null_fast(after_quo))) {
+    # A column dropped by `col = NULL` is already gone for .before/.after.
+    full_names <- full_names[!full_names %in% dropped]
+    name_vec <- stats::setNames(full_names, full_names)
+    loc <- tidyselect::eval_relocate(
+      expr = rlang::expr(c(!!!rlang::syms(new_cols))), data = name_vec,
+      before = before_quo, after = after_quo,
+      before_arg = ".before", after_arg = ".after"
+    )
+    full_names <- full_names[loc]
+  }
+
+  final_order <- full_names[full_names %in% set_union(kept_orig_names, new_cols)]
+  final_order <- final_order[!final_order %in% dropped]
+  if (length(dropped) > 0 && length(final_order) == 0) {
+    stop("Can't drop every column of a tbl_gpu.", call. = FALSE)
+  }
+
+  if (identical(final_order, result_names)) {
+    return(NULL)
+  }
+
+  ast_select(input_node(result), final_order)
+}
+
+# TRUE unless mutate_keep_select_node() is certain to find nothing to select:
+# `.keep = "all"` with no `.before`/`.after`, no staged temp and no dropped
+# column keeps every original column where it is, and the new columns land at
+# the end in the order the dots introduced them, which is the order the mutate
+# node appends them in; the one exception is a `col = NULL` dot that a later dot
+# re-fills (dplyr puts the column where its NAME first appeared). `helper`: the
+# input carries a cur_group_id() helper column, which the select drops.
+# @keywords internal
+mutate_needs_select <- function(orig_names, expressions, keep, before_quo, after_quo,
+                                drop, dropped, helper = FALSE) {
+  if (helper || !identical(keep, "all") || length(drop) > 0L || length(dropped) > 0L ||
+      !quo_is_null_fast(before_quo) || !quo_is_null_fast(after_quo)) {
+    return(TRUE)
+  }
+  dot_order <- attr(expressions, "dot_order")
+  # (one output name, or none: its position among the new columns is moot)
+  if (length(expressions) <= 1L && length(dot_order) <= 1L) {
+    return(FALSE)
+  }
+  touched <- unique(vapply(expressions, `[[`, character(1), "output_col"))
+  new_cols <- touched[!touched %in% orig_names]
+  !is.null(dot_order) && !identical(dot_order[dot_order %in% new_cols], new_cols)
+}
+
+# Update the running schema after adding a mutate expression: a replacement
+# keeps its existing position and just gets a new type; a new output column
+# is appended. Shared by mutate.tbl_gpu()'s per-dot loop and (independently)
+# by infer_schema.ast_mutate() (R/ast.R), which recomputes the same result
+# from a finished `expressions` list.
+#
+# @param schema List with names/types
+# @param expr A mutate expression structure (see make_mutate_expr())
+# @return Updated schema
+# @keywords internal
 update_schema_for_expr <- function(schema, expr) {
+  # Nothing to carry (no factor levels, no zones) and an output that is neither
+  # a factor nor a POSIXct: only the name and type change.
+  if (is.null(schema$factor_levels) && is.null(schema$tz) &&
+      !(unname(expr$output_type) %in% c("TIMESTAMP_MICROSECONDS", "DICTIONARY32"))) {
+    existing_idx <- match(expr$output_col, schema$names)
+    if (!is.na(existing_idx)) {
+      schema$types[existing_idx] <- expr$output_type
+    } else {
+      schema$names <- c(schema$names, expr$output_col)
+      schema$types <- c(schema$types, expr$output_type)
+    }
+    return(schema)
+  }
+
+  # The output name's levels, read BEFORE writing (`f = f` is its own
+  # source). ir_factor_rule() reads these for the dots that follow.
+  schema <- set_schema_factor_levels(
+    schema, expr$output_col, mutate_output_levels(schema$factor_levels, expr)
+  )
+
+  # F32: a POSIXct output takes the zone of its expression (read before the
+  # output name is overwritten, `t = t + 1` is its own source); anything else
+  # has no zone.
+  zone <- if (identical(unname(expr$output_type), "TIMESTAMP_MICROSECONDS")) {
+    ir_infer_tz(expr$ir, schema)
+  } else {
+    "UTC"
+  }
+
   existing_idx <- match(expr$output_col, schema$names)
 
   if (!is.na(existing_idx)) {
@@ -437,375 +1805,325 @@ update_schema_for_expr <- function(schema, expr) {
     schema$types <- c(schema$types, expr$output_type)
   }
 
+  set_schema_tz(schema, expr$output_col, zone)
+}
+
+# The factor levels one mutate output takes: a bare copy of a factor column
+# takes its source's levels; anything else (including a copy whose source
+# has no recorded levels) is not a known factor, so the output name's old
+# entry must go (NULL). The one rule for update_schema_for_expr() and
+# propagate_factor_levels()'s mutate branch.
+# @param factor_levels The running `factor_levels` list (before this output)
+# @param expr A mutate expression (output_col, output_type, ir)
+# @keywords internal
+mutate_output_levels <- function(factor_levels, expr) {
+  if (identical(unname(expr$output_type), "DICTIONARY32") && identical(expr$ir$kind, "col")) {
+    factor_levels[[expr$ir$name]]
+  } else {
+    NULL
+  }
+}
+
+# Set (or, with NULL, drop) one column's entry in a running schema's
+# `factor_levels`, leaving no empty list behind.
+# @keywords internal
+set_schema_factor_levels <- function(schema, name, levels) {
+  fl <- schema$factor_levels %||% list()
+  fl[[name]] <- levels
+  schema$factor_levels <- if (length(fl) == 0L) NULL else fl
   schema
 }
 
-# -----------------------------------------------------------------------------
-# Structured mutate evaluation (eager path)
-# -----------------------------------------------------------------------------
-
-parse_mutate_node <- function(expr) {
-  if (rlang::is_call(expr) && identical(rlang::call_name(expr), "(") && length(expr) == 2) {
-    return(parse_mutate_node(expr[[2]]))
-  }
-  if (rlang::is_symbol(expr)) {
-    return(list(type = "col", name = as.character(expr)))
-  }
-  if (is.numeric(expr) && length(expr) == 1) {
-    return(list(type = "scalar", value = expr))
-  }
-  if (rlang::is_call(expr)) {
-    op <- rlang::call_name(expr)
-    if (op %in% c("+", "-") && length(expr) == 2) {
-      arg_node <- parse_mutate_node(expr[[2]])
-      if (!is.null(arg_node) && arg_node$type == "scalar") {
-        value <- if (op == "-") -arg_node$value else arg_node$value
-        return(list(type = "scalar", value = value))
-      }
-    }
-    if (!is.null(op) && op %in% c("+", "-", "*", "/", "^") && length(expr) >= 3) {
-      return(list(type = "call", op = op, lhs = expr[[2]], rhs = expr[[3]]))
-    }
-  }
-  NULL
-}
-
-mutate_apply_col_scalar <- function(.data, output_col, lhs_col, op, scalar) {
-  existing_idx <- match(output_col, .data$schema$names)
-  is_replace <- !is.na(existing_idx)
-  replace_idx <- if (is_replace) existing_idx - 1L else -1L
-  col_idx <- match(lhs_col, .data$schema$names)
-  if (is.na(col_idx)) {
-    stop("Column '", lhs_col, "' not found.\n",
-         "Available columns: ", paste(.data$schema$names, collapse = ", "),
-         call. = FALSE)
-  }
-  col_idx <- col_idx - 1L
-
-  if (is_replace) {
-    new_ptr <- gpu_mutate_binary_scalar_replace(.data$ptr, col_idx, op, scalar, replace_idx)
-  } else {
-    new_ptr <- gpu_mutate_binary_scalar(.data$ptr, col_idx, op, scalar)
-  }
-
-  lhs_type <- .data$schema$types[match(lhs_col, .data$schema$names)]
-  expr_step <- make_mutate_expr(output_col, lhs_col, op, scalar = scalar,
-                                input_types = lhs_type)
-  new_schema <- update_schema_for_expr(.data$schema, expr_step)
-  new_tbl_gpu(
-    ptr = new_ptr,
-    schema = new_schema,
-    groups = .data$groups,
-    exec_mode = .data$exec_mode
-  )
-}
-
-mutate_apply_col_col <- function(.data, output_col, lhs_col, op, rhs_col) {
-  existing_idx <- match(output_col, .data$schema$names)
-  is_replace <- !is.na(existing_idx)
-  replace_idx <- if (is_replace) existing_idx - 1L else -1L
-  col_idx1 <- match(lhs_col, .data$schema$names)
-  col_idx2 <- match(rhs_col, .data$schema$names)
-  if (is.na(col_idx1)) {
-    stop("Column '", lhs_col, "' not found.\n",
-         "Available columns: ", paste(.data$schema$names, collapse = ", "),
-         call. = FALSE)
-  }
-  if (is.na(col_idx2)) {
-    stop("Column '", rhs_col, "' not found.\n",
-         "Available columns: ", paste(.data$schema$names, collapse = ", "),
-         call. = FALSE)
-  }
-  col_idx1 <- col_idx1 - 1L
-  col_idx2 <- col_idx2 - 1L
-
-  if (is_replace) {
-    new_ptr <- gpu_mutate_binary_cols_replace(.data$ptr, col_idx1, op, col_idx2, replace_idx)
-  } else {
-    new_ptr <- gpu_mutate_binary_cols(.data$ptr, col_idx1, op, col_idx2)
-  }
-
-  lhs_type <- .data$schema$types[match(lhs_col, .data$schema$names)]
-  rhs_type <- .data$schema$types[match(rhs_col, .data$schema$names)]
-  expr_step <- make_mutate_expr(output_col, c(lhs_col, rhs_col), op,
-                                input_types = c(lhs_type, rhs_type))
-  new_schema <- update_schema_for_expr(.data$schema, expr_step)
-  new_tbl_gpu(
-    ptr = new_ptr,
-    schema = new_schema,
-    groups = .data$groups,
-    exec_mode = .data$exec_mode
-  )
-}
-
-mutate_eval_expr <- function(.data, output_col, expr) {
-  node <- parse_mutate_node(expr)
-  if (is.null(node)) return(NULL)
-
-  if (node$type == "col") {
-    return(mutate_copy_column(.data, output_col, node$name))
-  }
-  if (node$type == "scalar") {
-    return(NULL)
-  }
-
-  lhs_node <- parse_mutate_node(node$lhs)
-  rhs_node <- parse_mutate_node(node$rhs)
-  if (is.null(lhs_node) || is.null(rhs_node)) return(NULL)
-
-  op <- node$op
-
-  if (lhs_node$type == "call" && rhs_node$type == "call") {
-    return(NULL)
-  }
-
-  if (lhs_node$type == "call") {
-    data_step <- mutate_eval_expr(.data, output_col, node$lhs)
-    if (is.null(data_step)) return(NULL)
-
-    if (rhs_node$type == "col") {
-      return(mutate_apply_col_col(data_step, output_col, output_col, op, rhs_node$name))
-    }
-    if (rhs_node$type == "scalar") {
-      return(mutate_apply_col_scalar(data_step, output_col, output_col, op, rhs_node$value))
-    }
-  }
-
-  if (rhs_node$type == "call") {
-    data_step <- mutate_eval_expr(.data, output_col, node$rhs)
-    if (is.null(data_step)) return(NULL)
-
-    if (lhs_node$type == "col") {
-      return(mutate_apply_col_col(data_step, output_col, lhs_node$name, op, output_col))
-    }
-    if (lhs_node$type == "scalar") {
-      if (op %in% c("+", "*")) {
-        return(mutate_apply_col_scalar(data_step, output_col, output_col, op, lhs_node$value))
-      }
-      return(NULL)
-    }
-  }
-
-  if (lhs_node$type == "col" && rhs_node$type == "col") {
-    return(mutate_apply_col_col(.data, output_col, lhs_node$name, op, rhs_node$name))
-  }
-
-  if (lhs_node$type == "col" && rhs_node$type == "scalar") {
-    return(mutate_apply_col_scalar(.data, output_col, lhs_node$name, op, rhs_node$value))
-  }
-
-  if (lhs_node$type == "scalar" && rhs_node$type == "col") {
-    if (op %in% c("+", "*")) {
-      return(mutate_apply_col_scalar(.data, output_col, rhs_node$name, op, lhs_node$value))
-    }
-  }
-
-  NULL
-}
-
-# Internal: Parse and execute a single mutate expression
-#
-# Parses a quosure containing an arithmetic expression and calls the
-# appropriate GPU binary operation function.
-#
-# @param .data A tbl_gpu object
-# @param new_name Name for the output column
-# @param expr A quosure with an arithmetic expression
-# @return A tbl_gpu with the new/modified column
+# dplyr's transmute.data.frame() starts with check_transmute_args(...), which
+# rejects mutate()'s `.keep`, `.before` and `.after`, in that order, by the
+# names written in the call (one spliced with `!!!` is a column there). The
+# same check at entry, forcing no dot: native transmute would make a column of
+# them, and the CPU route's direct splice hides the names from dplyr's own
+# check (the splice rule after pronoun_call_name(), R/ir.R).
 # @keywords internal
-mutate_one <- function(.data, new_name, expr) {
-  expr_chr <- rlang::quo_text(expr)
-  expr_obj <- rlang::quo_get_expr(expr)
-
-  linear <- parse_linear_mutate_exprs(new_name, expr, .data$schema)
-  if (!is.null(linear)) {
-    apply_expr <- function(.data_step, expr_step) {
-      output_col <- expr_step$output_col
-      input_cols <- expr_step$input_cols
-      op <- expr_step$op
-      existing_idx <- match(output_col, .data_step$schema$names)
-      is_replace <- !is.na(existing_idx)
-      replace_idx <- if (is_replace) existing_idx - 1L else -1L
-
-      if (op == "copy") {
-        source_idx <- match(input_cols[1], .data_step$schema$names) - 1L
-        if (is_replace) {
-          new_ptr <- gpu_copy_column_replace(.data_step$ptr, source_idx, replace_idx)
-        } else {
-          new_ptr <- gpu_copy_column(.data_step$ptr, source_idx)
-        }
-      } else if (!is.null(expr_step$scalar)) {
-        col_idx <- match(input_cols[1], .data_step$schema$names) - 1L
-        if (is_replace) {
-          new_ptr <- gpu_mutate_binary_scalar_replace(.data_step$ptr, col_idx, op,
-                                                      expr_step$scalar, replace_idx)
-        } else {
-          new_ptr <- gpu_mutate_binary_scalar(.data_step$ptr, col_idx, op, expr_step$scalar)
-        }
-      } else {
-        col_idx1 <- match(input_cols[1], .data_step$schema$names) - 1L
-        col_idx2 <- match(input_cols[2], .data_step$schema$names) - 1L
-        if (is_replace) {
-          new_ptr <- gpu_mutate_binary_cols_replace(.data_step$ptr, col_idx1, op,
-                                                    col_idx2, replace_idx)
-        } else {
-          new_ptr <- gpu_mutate_binary_cols(.data_step$ptr, col_idx1, op, col_idx2)
-        }
-      }
-
-      new_schema <- update_schema_for_expr(.data_step$schema, expr_step)
-      new_tbl_gpu(
-        ptr = new_ptr,
-        schema = new_schema,
-        groups = .data_step$groups,
-        exec_mode = .data_step$exec_mode
-      )
-    }
-
-    result <- .data
-    for (expr_step in linear) {
-      result <- apply_expr(result, expr_step)
-    }
-    return(result)
+check_transmute_dots <- function(..., .keep, .before, .after, error_call = rlang::caller_env()) {
+  if (!missing(.keep)) {
+    rlang::abort("The `.keep` argument is not supported.", call = error_call)
   }
-
-  # Try structured evaluation for nested arithmetic expressions
-  structured <- mutate_eval_expr(.data, new_name, expr_obj)
-  if (!is.null(structured)) {
-    return(structured)
+  if (!missing(.before)) {
+    rlang::abort("The `.before` argument is not supported.", call = error_call)
   }
-
-  # Check if expression is just a column name (simple copy)
-  if (expr_chr %in% .data$schema$names) {
-    return(mutate_copy_column(.data, new_name, expr_chr))
+  if (!missing(.after)) {
+    rlang::abort("The `.after` argument is not supported.", call = error_call)
   }
-
-  # Parse simple arithmetic: col op value or col op col
-  # Find the first operator
-  ops <- c("+", "-", "*", "/", "^")
-  op_found <- NULL
-  op_pos <- NULL
-
-  for (op in ops) {
-    pos <- regexpr(op, expr_chr, fixed = TRUE)
-    if (pos > 0) {
-      if (is.null(op_pos) || pos < op_pos) {
-        op_found <- op
-        op_pos <- pos
-      }
-    }
-  }
-
-  if (is.null(op_found)) {
-    stop("mutate() only supports column copies or arithmetic operations: +, -, *, /, ^\n",
-         "Expression: ", expr_chr, call. = FALSE)
-  }
-
-  lhs <- trimws(substr(expr_chr, 1, op_pos - 1))
-  rhs <- trimws(substr(expr_chr, op_pos + 1, nchar(expr_chr)))
-
-  lhs_idx <- tryCatch(col_index(.data, lhs), error = function(e) NULL)
-  rhs_idx <- tryCatch(col_index(.data, rhs), error = function(e) NULL)
-
-  if (is.null(lhs_idx)) {
-    stop("Column '", lhs, "' not found.\n",
-         "Available columns: ", paste(.data$schema$names, collapse = ", "),
-         call. = FALSE)
-  }
-
-  existing_idx <- match(new_name, .data$schema$names)
-
-  if (!is.null(rhs_idx)) {
-    # Column to column operation
-    if (!is.na(existing_idx)) {
-      new_ptr <- wrap_gpu_call(
-        "mutate_binary_cols_replace",
-        gpu_mutate_binary_cols_replace(.data$ptr, lhs_idx, op_found, rhs_idx, existing_idx - 1L)
-      )
-    } else {
-      new_ptr <- wrap_gpu_call(
-        "mutate_binary_cols",
-        gpu_mutate_binary_cols(.data$ptr, lhs_idx, op_found, rhs_idx)
-      )
-    }
-  } else {
-    # Column to scalar operation
-    value <- tryCatch(eval(parse(text = rhs)), error = function(e) {
-      stop("Cannot parse value: ", rhs, call. = FALSE)
-    })
-    if (!is.numeric(value) || length(value) != 1) {
-      stop("mutate() currently only supports numeric scalar operations.\n",
-           "Got: ", class(value)[1], " of length ", length(value), call. = FALSE)
-    }
-    if (!is.na(existing_idx)) {
-      new_ptr <- wrap_gpu_call(
-        "mutate_binary_scalar_replace",
-        gpu_mutate_binary_scalar_replace(.data$ptr, lhs_idx, op_found, as.double(value), existing_idx - 1L)
-      )
-    } else {
-      new_ptr <- wrap_gpu_call(
-        "mutate_binary_scalar",
-        gpu_mutate_binary_scalar(.data$ptr, lhs_idx, op_found, as.double(value))
-      )
-    }
-  }
-
-  if (!is.na(existing_idx)) {
-    new_schema <- .data$schema
-    new_schema$types[existing_idx] <- "FLOAT64"
-  } else {
-    # Adding new column
-    new_schema <- .data$schema
-    new_schema$names <- c(new_schema$names, new_name)
-    new_schema$types <- c(new_schema$types, "FLOAT64")
-  }
-
-  new_tbl_gpu(
-    ptr = new_ptr,
-    schema = new_schema,
-    groups = .data$groups,
-    exec_mode = .data$exec_mode
-  )
+  invisible()
 }
 
-# Internal: Copy a column with a new name
-#
-# @param .data A tbl_gpu object
-# @param new_name Name for the new column
-# @param source_col Name of the column to copy
-# @return A tbl_gpu with the copied column
-# @keywords internal
-mutate_copy_column <- function(.data, new_name, source_col) {
-  source_idx <- col_index(.data, source_col)
-  source_type <- .data$schema$types[source_idx + 1L]  # col_index returns 0-based
+#' Create a new GPU table with only the specified columns
+#'
+#' Computes new columns (or replaces existing ones) from expressions, like
+#' [mutate.tbl_gpu()], but keeps ONLY the columns named/created by `...`
+#' (plus group columns), similar to `dplyr::transmute()`. `transmute()` is
+#' superseded in dplyr (in favor of `mutate(.keep = "none")`) but still
+#' fully supported, and its column-ordering rule is subtly different from
+#' `mutate(.keep = "none")`'s -- see "Details" below.
+#'
+#' @param .data A `tbl_gpu` object created by [tbl_gpu()].
+#' @param ... Name-value pairs of expressions, exactly as for
+#'   [mutate.tbl_gpu()]. A bare column name (`transmute(df, x)`) keeps that
+#'   column.
+#'
+#' @return A `tbl_gpu` object with only the columns `...` names/creates,
+#'   plus any group columns not otherwise mentioned.
+#'
+#' @details
+#' Verified empirically against dplyr 1.2.1: unlike `mutate()` (whose output
+#' order keeps existing columns in their original relative position and
+#' appends new ones at the end, see [mutate.tbl_gpu()]'s docs),
+#' `transmute()`'s output order is simply the literal `...` dot order --
+#' whether a dot is a bare existing column or a brand-new expression. Group
+#' columns NOT explicitly mentioned in `...` are prepended at the very
+#' front (in `group_vars()` order); a group column that IS explicitly
+#' mentioned in `...` takes its dot position instead of being prepended.
+#'
+#' @export
+#' @importFrom dplyr transmute
+#'
+#' @examples
+#' if (has_gpu()) {
+#'   gpu_mtcars <- tbl_gpu(mtcars)
+#'
+#'   result <- gpu_mtcars |>
+#'     transmute(kpl = mpg * 0.425, cyl) |>
+#'     collect()
+#' }
+transmute.tbl_gpu <- function(.data, ...) {
+  check_transmute_dots(...)
+  p <- sys.parent()
+  inform_colwise_grouped(.data, "transmute", if (p > 0L) sys.function(p))
+  check_unique_input_names(.data)
+  # enquos(), not quos(): dplyr's transmute() captures its dots with enquos()
+  # (check_transmute_args()), so a dot named like one of its arguments
+  # (`.homonyms`, ...) binds to that argument here too.
+  dots <- rlang::enquos(...)
 
-  # Check if we're replacing an existing column
-  existing_idx <- match(new_name, .data$schema$names)
+  # (F88: the reasons this call's dots record for a CPU fallback, call-scoped)
+  prev <- fallback_reasons_open()
+  on.exit(fallback_reasons_close(prev), add = TRUE)
+  if (is_rowwise_gpu(.data)) {
+    # as mutate_rowwise(): rewrite the row aggregates, attempt the native path,
+    # else the whole call in dplyr
+    cpu <- function(detail = NULL) {
+      gpu_fallback("transmute", .data, function(tbl) {
+        dplyr::transmute(.data = tbl, !!!dots)
+      }, reason = detail)
+    }
+    # F77: a function of the user's with a native op's name runs in dplyr
+    shadowed <- shadow_screen_text(dots)
+    if (!is.null(shadowed)) {
+      return(cpu(shadowed))
+    }
+    exact <- rowwise_exact_sums(.data, dots, TRUE, "transmute")
+    if (!is.null(exact$now)) {
+      return(plan_back_to_lazy(transmute.tbl_gpu(exact$now, !!!dots)))
+    }
+    rw <- if (exact$rewritten) {
+      exact$rw
+    } else if (length(dots) > 0L || length(.subset2(.data, "groups")) > 0L) {
+      rowwise_rewrite_dots(.data, dots)
+    }
+    if (is.null(rw)) {
+      return(rowwise_rerun(cpu, dots))
+    }
+    res <- rowwise_attempt(function() transmute_run(.data, rw, rowwise = TRUE))
+    return(if (is.null(res)) rowwise_rerun(cpu, dots) else rowwise_column_order(res))
+  }
+  transmute_run(.data, dots)
+}
 
-  if (!is.na(existing_idx)) {
-    # Replacing existing column with a copy
-    new_ptr <- wrap_gpu_call(
-      "copy_column_replace",
-      gpu_copy_column_replace(.data$ptr, source_idx, existing_idx - 1L)
-    )
-    new_schema <- .data$schema
-    new_schema$types[existing_idx] <- source_type
-  } else {
-    # Adding new column as copy
-    new_ptr <- wrap_gpu_call(
-      "copy_column",
-      gpu_copy_column(.data$ptr, source_idx)
-    )
+# transmute.tbl_gpu()'s body on captured dots; `rowwise = TRUE` as in
+# mutate_run(): the rowwise vars are the columns kept in front, not groups.
+transmute_run <- function(.data, dots, rowwise = FALSE) {
+  orig_dots <- dots
+  # the groups every window/cur_group/vector-literal decision is made over
+  eff_groups <- if (rowwise) character() else .subset2(.data, "groups")
 
-    new_schema <- .data$schema
-    new_schema$names <- c(new_schema$names, new_name)
-    new_schema$types <- c(new_schema$types, source_type)
+  if (length(dots) > 0L && is_zero_column_with_rows(.data)) {
+    return(gpu_fallback("transmute", .data, function(tbl) {
+      dplyr::transmute(.data = tbl, !!!dots)
+    }, reason = "the table has no columns but has rows."))
   }
 
-  new_tbl_gpu(
-    ptr = new_ptr,
-    schema = new_schema,
-    groups = .data$groups,
-    exec_mode = .data$exec_mode
+  # No expressions on an ungrouped table: every column goes (n x 0 result).
+  if (length(dots) == 0L && length(.subset2(.data, "groups")) == 0L) {
+    return(zero_column_result(.data, "transmute"))
+  }
+
+  # F77: as mutate_run(): a shadowed head runs the whole call in dplyr.
+  # (A rowwise call was screened by transmute.tbl_gpu(); its dots are rewritten.)
+  if (!rowwise) {
+    shadowed <- shadow_screen_text(dots)
+    if (!is.null(shadowed)) {
+      return(gpu_fallback("transmute", .data, function(tbl) {
+        dplyr::transmute(.data = tbl, !!!dots)
+      }, reason = shadowed))
+    }
+  }
+
+  # F75: as mutate_run(), a grouped call with an impure column-free call runs
+  # whole in dplyr.
+  if (!rowwise && length(eff_groups) > 0L) {
+    impure <- impure_const_call_text(dots, current_schema(.data))
+    if (!is.null(impure)) {
+      return(gpu_fallback("transmute", .data, function(tbl) {
+        dplyr::transmute(.data = tbl, !!!dots)
+      }, reason = impure))
+    }
+    fallback_mark_screened()
+  }
+
+  # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R
+  # and mutate.tbl_gpu()'s own identical handling.
+  user_dots <- dots
+  dots <- colwise_rewrite_dots(dots, current_schema(.data))
+  dots <- rewrite_context_dots(dots, eff_groups, sequential = TRUE, name_unnamed = TRUE)
+  if (dots_need_fallback(dots)) {
+    return(gpu_fallback("transmute", .data, function(tbl) {
+      dplyr::transmute(.data = tbl, !!!user_dots)
+    }, reason = fallback_failed_reason(user_dots, across_fallback_default)))
+  }
+  expanded <- expand_across_dots(dots, current_schema(.data), eff_groups, "transmute")
+  if (isTRUE(attr(expanded, "needs_fallback"))) {
+    return(gpu_fallback("transmute", .data, function(tbl) {
+      dplyr::transmute(.data = tbl, !!!user_dots)
+    }, reason = fallback_failed_reason(user_dots, across_fallback_default)))
+  }
+  # As in mutate.tbl_gpu(): the CPU fallback runs on the pre-substitution
+  # table with the ORIGINAL dots, so cur_group_id()'s helper column and the
+  # staged temps can't leak and `.fns` values keep their own environment.
+  staged_temps <- attr(expanded, "staged_temps")
+  provenance <- attr(expanded, "provenance")
+  fallback_data <- .data
+  fallback_dots <- orig_dots
+  cgid <- substitute_cur_group_id(.data, expanded, eff_groups, rowwise = rowwise)
+  .data <- cgid$data
+  schema <- current_schema(.data)
+  dots <- cgid$dots
+
+  # Phase 11, task L1: same universal expression-level CPU fallback as
+  # mutate.tbl_gpu() -- see mutate_expr_fallback()'s own docs for the full
+  # "NULL-vs-throw trigger rule" derivation.
+  evaluated <- new.env(parent = emptyenv())
+  expressions <- parse_mutate_dots(dots, schema, "transmute", warn_unnamed = FALSE,
+                                    stop_on_unparseable = FALSE,
+                                    vector_literals = length(eff_groups) == 0 && !rowwise,
+                                    ungrouped = length(eff_groups) == 0 && !rowwise,
+                                    evaluated = evaluated, provenance = provenance)
+  # A window call (mean()/cumsum()/lag()/..., also a timestamp mean()/median())
+  # needs the staged plan of mutate_window(), which transmute() doesn't use:
+  # without this the call died at lowering ("window op reached lowering").
+  if (rowwise && !rowwise_expressions_ok(expressions)) {
+    rowwise_bail("a window call or vector literal in a rowwise transmute()")
+  }
+  if (is.null(expressions) || isTRUE(attr(expressions, "has_window"))) {
+    return(gpu_fallback("transmute", fallback_data, function(tbl) {
+      dots_cpu <- inline_evaluated_dots(fallback_dots, evaluated$consts, provenance, nrow(tbl))
+      dplyr::transmute(.data = tbl, !!!dots_cpu)
+    }, reason = if (is.null(expressions)) {
+      fallback_failed_reason(fallback_dots, "an expression has a form the GPU engine does not support.")
+    } else {
+      "a window call in transmute() is planned by mutate() only."
+    }))
+  }
+
+  .data <- check_vector_constant_sizes(.data, expressions, "transmute")
+  dropped <- attr(expressions, "dropped")
+  if (rowwise && any(dropped %in% .subset2(.data, "groups"))) {
+    rowwise_bail("a rowwise var is dropped")
+  }
+  check_droppable_groups(dropped, eff_groups)
+
+  # Order: literal dot order (whether bare-column or newly computed), with
+  # any un-dotted group column prepended -- see the roxygen "Details" above
+  # for how this differs from mutate(.keep = "none")'s ordering rule.
+  dot_output_cols <- set_diff(
+    attr(expressions, "dot_order"), c(staged_temps, dropped)
   )
+  missing_groups <- set_diff(.subset2(.data, "groups"), dot_output_cols)
+  final_order <- c(missing_groups, dot_output_cols)
+
+  # (An eager call runs the mutate and the select as one execution, push_chain().)
+  result <- push_chain(.data, function(x) {
+    result <- x
+    if (length(expressions) > 0) {
+      result <- push_op(x, ast_mutate(input_node(x), expressions),
+                        input_schema = schema, carry = FALSE)
+    }
+    if (length(final_order) > 0L) {
+      result <- push_op(result, ast_select(input_node(result), final_order),
+                        carry = FALSE)
+    }
+    result
+  })
+  if (length(final_order) == 0L) {
+    return(zero_column_result(result, "transmute"))
+  }
+  # As in mutate.tbl_gpu(): floored fractional Date constants, warned now
+  # that the call is native.
+  warn_fractional_dates(set_diff(attr(expressions, "fractional_dates"), staged_temps))
+  result
+}
+
+# dplyr's own (non-generic) colwise verbs and add_tally() reach the tbl_gpu
+# methods through dplyr's generics; imported so they resolve inside the package
+# (inform_colwise_grouped() compares against them, and the tests call them).
+#' @importFrom dplyr mutate_all mutate_if mutate_at transmute_all transmute_if summarise_all add_tally
+#' @name colwise-imports
+#' @keywords internal
+#' @noRd
+NULL
+
+# dplyr's check_grouped() for mutate_all()/mutate_if()/transmute_all()/
+# transmute_if(): they inform that the grouping variables are ignored, but test
+# is_grouped_df(), which is FALSE for a tbl_gpu. `caller` is the function that
+# called the mutate()/transmute() generic (with UseMethod() dispatch the
+# method's parent frame is the generic's caller), so only the colwise verbs
+# trigger it.
+inform_colwise_grouped <- function(.data, verb, caller) {
+  # (dplyr's check_grouped() tests is_grouped_df(): a rowwise_df is not)
+  if (length(.subset2(.data, "groups")) == 0L || is_rowwise_gpu(.data) || !is.function(caller)) {
+    return(invisible())
+  }
+  # (the colwise verbs are dplyr's own: a caller from another namespace is
+  # neither, without the two getExportedValue() lookups below; F110)
+  if (!identical(environmentName(environment(caller)), "dplyr")) {
+    return(invisible())
+  }
+  for (suffix in c("all", "if")) {
+    fn <- getExportedValue("dplyr", paste0(verb, "_", suffix))
+    if (identical(caller, fn)) {
+      cols <- .subset2(.data, "groups")
+      msg <- paste0(if (length(cols) == 1L) "Column " else "Columns ",
+                    paste0(if (length(cols) > 6L) c(paste0("`", cols[1:5], "`"), "...")
+                           else paste0("`", cols, "`"), collapse = ", "))
+      alt <- if (suffix == "all") {
+        sprintf("Use `%s_at(df, vars(-group_cols()), myoperation)` to silence the message.", verb)
+      }
+      rlang::inform(c(
+        sprintf("`%s_%s()` ignored the following grouping variables:", verb, suffix),
+        "*" = msg,
+        i = alt
+      ))
+    }
+  }
+  invisible()
+}
+
+# A zero-column table with rows: dplyr recycles a constant `mutate(b = 1)` to
+# the row count, but there is no column to size a constant against (and
+# push_op() refuses the input, check_zero_column_input()). mutate() and
+# transmute() hand such a call to dplyr on the CPU: there is no data to move,
+# and dplyr's tidyselect then sees exactly the columns the user has (none),
+# so if_all() over nothing is TRUE, if_any() FALSE and an empty across() adds
+# nothing. FALSE when `.data` has columns, no rows, or an unknown row count
+# (the usual checks then apply).
+# @keywords internal
+is_zero_column_with_rows <- function(.data) {
+  n <- .subset2(.data, "nrow")
+  length(current_schema(.data)$names) == 0L && !is.null(n) && !is.na(n) && n > 0L
 }

@@ -16,8 +16,7 @@ filter(.data, ..., .preserve = FALSE)
 
 - .data:
 
-  A `tbl_gpu` object created by
-  [`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md).
+  A `tbl_gpu` object created by [`tbl_gpu()`](tbl_gpu.md).
 
 - ...:
 
@@ -68,12 +67,9 @@ than using compound expressions.
 
 ## See also
 
-[`mutate.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/mutate.tbl_gpu.md)
-for creating new columns,
-[`select.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/select.tbl_gpu.md)
-for selecting columns,
-[`collect.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/collect.tbl_gpu.md)
-for retrieving results
+[`mutate.tbl_gpu`](mutate.tbl_gpu.md) for creating new columns,
+[`select.tbl_gpu`](select.tbl_gpu.md) for selecting columns,
+[`collect.tbl_gpu`](collect.tbl_gpu.md) for retrieving results
 
 ## Examples
 

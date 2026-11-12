@@ -2,9 +2,12 @@
 % Please edit documentation in R/tbl-gpu.R
 \name{as_tbl_gpu}
 \alias{as_tbl_gpu}
+\alias{as_gibble}
 \title{Coerce to a GPU table}
 \usage{
 as_tbl_gpu(x, ...)
+
+as_gibble(x, ...)
 }
 \arguments{
 \item{x}{A data frame or object coercible to a data frame.}

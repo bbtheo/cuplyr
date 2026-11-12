@@ -196,6 +196,12 @@ test_that("filter() with all matching rows returns all rows", {
 test_that("filter() with scalar TRUE returns all rows", {
   skip_if_no_gpu()
 
+  # S4 note: filter(TRUE) is now a genuine no-op (parse_filter_expr()
+  # returns an empty predicate list, so no ast_filter node is pushed and
+  # `.data` is returned unchanged -- same GPU pointer as the input). None
+  # of the assertions below check pointer/object freshness, so no
+  # relaxation was needed here; see test-filter.R's "creates new GPU
+  # allocation (immutable)" test below for the case that does.
   gpu_df <- tbl_gpu(mtcars)
   filtered <- dplyr::filter(gpu_df, TRUE)
 
@@ -321,6 +327,7 @@ test_that("filter() result stays on GPU", {
 
 test_that("filter() creates new GPU allocation (immutable)", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
 
   gpu_df <- tbl_gpu(mtcars)
   filtered <- dplyr::filter(gpu_df, mpg > 20)
@@ -362,28 +369,35 @@ test_that("filter() errors on non-existent column", {
   )
 })
 
-test_that("filter() errors on non-numeric comparison value", {
+test_that("filter() compares a number with a string like dplyr", {
   skip_if_no_gpu()
 
   gpu_df <- tbl_gpu(mtcars)
 
-  # Character value should error
-  expect_error(
-    dplyr::filter(gpu_df, mpg > "twenty"),
-    "numeric scalar"
-  )
+  # dplyr compares the number as character (F48: CPU fallback, no error).
+  # "2" selects some rows ("21" > "2") and drops others ("10.4" < "2").
+  want <- dplyr::filter(mtcars, mpg > "2")
+  got <- collect(dplyr::filter(gpu_df, mpg > "2"))
+  expect_gt(nrow(want), 0L)
+  expect_lt(nrow(want), nrow(mtcars))
+  expect_equal(got$mpg, want$mpg)
+  expect_equal(got$cyl, want$cyl)
 })
 
-test_that("filter() errors on unsupported operator", {
+test_that("filter() with %in% works (IR cutover, task T3)", {
   skip_if_no_gpu()
 
+  # %in% used to fall back to the "only supports comparisons" error; the
+  # Phase 1 expression-engine cutover parses it directly into a GPU
+  # predicate (ir_call_registry's "%in%" entry, already implemented in T2),
+  # so this is now rewritten as a correctness test rather than an error
+  # pin (scratchpad/phase1_expression_engine.md section 4 / task T3 item 7).
   gpu_df <- tbl_gpu(mtcars)
+  filtered <- dplyr::filter(gpu_df, cyl %in% c(4, 6))
 
-  # %in% is not supported
-  expect_error(
-    dplyr::filter(gpu_df, cyl %in% c(4, 6)),
-    "only supports"
-  )
+  result <- collect(filtered)
+  expect_true(all(result$cyl %in% c(4, 6)))
+  expect_equal(nrow(result), sum(mtcars$cyl %in% c(4, 6)))
 })
 
 # =============================================================================
@@ -435,4 +449,197 @@ test_that("filter() works with large datasets", {
 
   result <- collect(filtered)
   expect_true(all(result$col1 > 0.5))
+})
+
+# =============================================================================
+# Lazy variants of TRUE / FALSE / vector-mask cases (S4)
+# =============================================================================
+
+test_that("filter() with scalar TRUE returns all rows (lazy)", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars, lazy = TRUE)
+  filtered <- dplyr::filter(gpu_df, TRUE)
+
+  expect_data_on_gpu(filtered)
+  expect_equal(dim(filtered)[1], 32)
+
+  result <- collect(filtered)
+  expect_equal(nrow(result), 32)
+  expect_equal(result, mtcars, ignore_attr = TRUE)
+})
+
+test_that("filter() with scalar FALSE returns no rows (lazy)", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars, lazy = TRUE)
+  filtered <- dplyr::filter(gpu_df, FALSE)
+
+  # FALSE builds a real (impossible) predicate, so this stays a pending AST
+  # node rather than executing immediately. dim() reads gpu_dim() off the
+  # *unmaterialized* source pointer for lazy tables with pending ops (a
+  # pre-existing, orthogonal limitation, not introduced by S4) so only the
+  # column count is meaningful before collect()/compute(); row count is
+  # checked after materializing.
+  expect_data_on_gpu(filtered)
+  expect_true(has_pending_ops(filtered))
+  expect_equal(dim(filtered)[2], 11)
+
+  result <- collect(filtered)
+  expect_equal(nrow(result), 0)
+  expect_equal(names(result), names(mtcars))
+})
+
+test_that("filter() with vector of TRUE returns all rows (lazy)", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars, lazy = TRUE)
+  filtered <- dplyr::filter(gpu_df, rep(TRUE, nrow(mtcars)))
+
+  expect_data_on_gpu(filtered)
+  expect_equal(dim(filtered)[1], 32)
+
+  result <- collect(filtered)
+  expect_equal(nrow(result), 32)
+})
+
+test_that("filter() with vector of FALSE returns no rows (lazy)", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars, lazy = TRUE)
+  filtered <- dplyr::filter(gpu_df, rep(FALSE, nrow(mtcars)))
+
+  expect_data_on_gpu(filtered)
+  expect_equal(dim(filtered)[1], 0)
+
+  result <- collect(filtered)
+  expect_equal(nrow(result), 0)
+})
+
+# =============================================================================
+# Oracle parity (S4)
+# =============================================================================
+
+test_that("filter() column-vs-column predicate chain matches dplyr (eager and lazy)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(
+    x = c(5, 3, 8, 1, 9, 4),
+    y = c(2, 4, 1, 6, 3, 4),
+    z = c(1, 10, 2, 3, 20, 5)
+  )
+
+  pipeline <- function(d) {
+    d |> dplyr::filter(x > y, z <= 5)
+  }
+
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+# =============================================================================
+# IR cutover smoke tests (task T3): a handful of compound-predicate shapes
+# that were previously opaque (CPU-fallback or error) and now parse
+# directly into one fused GPU predicate. Comprehensive coverage (string
+# comparisons, is.na()/between() oracle parity, arbitrary nesting) is
+# task T4's job (test-dplyr-filter.R); these just prove the cutover is
+# live in the same commit that made it live.
+# =============================================================================
+
+test_that("filter() with a single & expression in one dot works", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars)
+  filtered <- dplyr::filter(gpu_df, mpg > 20 & cyl == 4)
+
+  result <- collect(filtered)
+  expect_true(all(result$mpg > 20 & result$cyl == 4))
+  expect_equal(nrow(result), sum(mtcars$mpg > 20 & mtcars$cyl == 4))
+})
+
+test_that("filter() with a single | expression in one dot works", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars)
+  filtered <- dplyr::filter(gpu_df, cyl == 4 | cyl == 8)
+
+  result <- collect(filtered)
+  expect_true(all(result$cyl == 4 | result$cyl == 8))
+  expect_equal(nrow(result), sum(mtcars$cyl == 4 | mtcars$cyl == 8))
+})
+
+test_that("filter() with is.na() works", {
+  skip_if_no_gpu()
+
+  df <- data.frame(x = c(1, NA, 3, NA, 5))
+  gpu_df <- tbl_gpu(df)
+  filtered <- dplyr::filter(gpu_df, is.na(x))
+
+  result <- collect(filtered)
+  expect_equal(nrow(result), 2)
+})
+
+test_that("filter() with between() works", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars)
+  filtered <- dplyr::filter(gpu_df, dplyr::between(mpg, 15, 20))
+
+  result <- collect(filtered)
+  expect_true(all(result$mpg >= 15 & result$mpg <= 20))
+  expect_equal(nrow(result), sum(mtcars$mpg >= 15 & mtcars$mpg <= 20))
+})
+
+test_that("filter() combines multiple dots and a compound expression into one fused predicate", {
+  skip_if_no_gpu()
+
+  df <- data.frame(
+    x = c(5, 3, 8, 1, 9, 4),
+    y = c(2, 4, 1, 6, 3, 4),
+    z = c(1, 10, 2, 3, 20, 5)
+  )
+
+  pipeline <- function(d) {
+    d |> dplyr::filter(x > y, z <= 5 | z > 15)
+  }
+
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+# =============================================================================
+# Fallback notifier (D4)
+# =============================================================================
+
+test_that("filter() vector-mask fallback warns under cuplyr.fallback = 'warn'", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "warn")
+
+  gpu_df <- tbl_gpu(mtcars)
+
+  expect_warning(
+    dplyr::filter(gpu_df, rep(TRUE, nrow(mtcars))),
+    "fell back to CPU evaluation"
+  )
+})
+
+test_that("filter() vector-mask fallback errors under cuplyr.fallback = 'error'", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+
+  gpu_df <- tbl_gpu(mtcars)
+
+  expect_error(
+    dplyr::filter(gpu_df, rep(TRUE, nrow(mtcars))),
+    "fell back to CPU evaluation"
+  )
+})
+
+test_that("filter() vector-mask fallback is silent by default", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = NULL)
+
+  gpu_df <- tbl_gpu(mtcars)
+
+  expect_no_warning(dplyr::filter(gpu_df, rep(TRUE, nrow(mtcars))))
 })

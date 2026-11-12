@@ -1,0 +1,1804 @@
+---
+title: "Parquet to summary: cuplyr, DuckDB, dplyr and data.table"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 3
+    code-tools: false
+execute:
+  echo: false
+  warning: false
+  message: false
+params:
+  root: ".."
+  lib: "/home/theo/cuplr/scratchpad/benchmarks/rlib"
+  out_dir: "/home/theo/cuplr/scratchpad/benchmarks/parquet-pipeline"
+---
+
+```{r}
+#| label: setup
+#| include: false
+# This document reads the measurements; it never takes one. bench/parquet-pipeline.R
+# writes the CSV files (the timings need quiet stretches of the machine, across
+# several GPU lock windows, which one render cannot give). parquet-lib.R is
+# sourced only to print each engine's code.
+.libPaths(c(params$lib, .libPaths()))
+out <- params$out_dir
+rd <- function(f) {
+  p <- file.path(out, f)
+  if (file.exists(p)) utils::read.csv(p, stringsAsFactors = FALSE) else NULL
+}
+files <- rd("files.csv"); cr <- rd("correctness.csv"); pd <- rd("pushdown.csv")
+th <- rd("threads.csv"); rdr <- rd("readers.csv"); tm <- rd("timings.csv")
+fc <- rd("firstcall.csv"); forms <- rd("forms.csv")
+wu <- rd("warmup.csv"); pv <- rd("provenance.csv"); sg <- rd("stages.csv")
+sh <- rd("shapes.csv"); jc <- rd("joincost.csv")
+sup <- rd("timings-superseded.csv")  # absent when no timing was ever replaced
+lk <- rd("lockjobs.csv")             # the lock log's rows, copied by the render step
+# the rowwise chunk: timings, correctness, cuplyr's native/fallback verdict, warm-ups
+rw <- rd("rowwise.csv"); rwc <- rd("rowwise-correctness.csv"); rwn <- rd("rowwise-native.csv")
+rww <- rd("rowwise-warmup.csv"); rwsup <- rd("rowwise-superseded.csv")
+il <- rd("idle.csv")                 # the idle step: cuplyr after the GPU was left idle
+ilsup <- rd("idle-superseded.csv")   # an earlier run of it, when there is one
+# the three probe files are optional: the report says so when they are missing
+for (nm in c("files", "cr", "pd", "th", "rdr", "tm", "fc", "wu", "pv")) {
+  if (is.null(get(nm))) stop("the measurement file for `", nm, "` is missing from ", out, ": run bench/parquet-pipeline.R first")
+}
+source(file.path(params$root, "bench", "parquet-lib.R"), keep.source = TRUE)
+engines <- pp_engines()
+variants <- pp_variants()
+k_const <- pp_constants()
+
+# ---- small helpers ---------------------------------------------------------------
+join_and <- function(x) {
+  x <- as.character(x)
+  if (length(x) <= 1L) return(paste(x, collapse = ""))
+  paste0(paste(x[-length(x)], collapse = ", "), " and ", x[length(x)])
+}
+join_or <- function(x) {
+  x <- as.character(x)
+  if (length(x) <= 1L) return(paste(x, collapse = ""))
+  paste0(paste(x[-length(x)], collapse = ", "), " or ", x[length(x)])
+}
+lab_n <- function(n) sub("e\\+0?", "e", format(as.numeric(n), scientific = TRUE, digits = 3), perl = TRUE)
+lab_n <- Vectorize(lab_n)
+fs <- function(x) {
+  ifelse(is.na(x), "n/a", paste0(format(signif(x, 3), scientific = FALSE, trim = TRUE, drop0trailing = TRUE), " s"))
+}
+fx <- function(x, digits = 2) ifelse(is.na(x), "n/a", format(round(x, digits), nsmall = 0, trim = TRUE))
+pct <- function(x) ifelse(is.na(x), "n/a", paste0(format(round(100 * x), trim = TRUE), "%"))
+# one decimal, for small shares
+pct1 <- function(x) ifelse(is.na(x), "n/a", paste0(format(round(100 * x, 1), nsmall = 1, trim = TRUE), "%"))
+# "1 call was" / "2 calls were"
+n_of <- function(n, word) paste0(n, " ", word, if (n != 1) "s")
+was_were <- function(n) if (n == 1) "was" else "were"
+mb <- function(b) format(round(b / 1e6), big.mark = ",", trim = TRUE)
+# "x times faster/slower" for a ratio r = (this engine's time) / (the other's)
+ratio_phrase <- function(r, tol = 1.1) {
+  if (is.na(r)) return("not comparable with")
+  if (r < 1 / tol) paste0(fx(1 / r, 1), " times faster than")
+  else if (r > tol) paste0(fx(r, 1), " times slower than")
+  else "about as fast as"
+}
+setting <- function(engine, name) {
+  v <- th$value[th$engine == engine & th$setting == name]
+  if (length(v)) v[[1L]] else NA_character_
+}
+code_block <- function(txt, lang = "r") {
+  fence <- strrep("`", 3L)
+  cat("\n", fence, lang, "\n", paste(txt, collapse = "\n"), "\n", fence, "\n\n", sep = "")
+}
+src_of <- function(fn) paste(deparse(fn, control = "useSource"), collapse = "\n")
+# a function written inside another one: its lines after the first lose the enclosing indentation
+src_nested <- function(fn, indent = 4L) {
+  l <- deparse(fn, control = "useSource")
+  if (length(l) > 1L) l[-1L] <- sub(paste0("^ {0,", indent, "}"), "", l[-1L])
+  paste(l, collapse = "\n")
+}
+
+# ---- machine and versions ----------------------------------------------------------
+cpu_model <- setting("machine", "cpu_model")
+n_cpu <- setting("machine", "logical_cpus")
+ram_gb <- round(as.numeric(setting("machine", "ram_bytes")) / 2^30)
+gpu_name <- setting("machine", "gpu_name")
+gpu_gb <- round(as.numeric(setting("machine", "gpu_memory_bytes")) / 2^30)
+ver_cuplyr <- setting("cuplyr", "version"); git_head <- setting("cuplyr", "git_head")
+ver_duckdb <- setting("duckdb", "version"); ver_arrow <- setting("dplyr", "arrow_version")
+ver_dplyr <- setting("dplyr", "version"); ver_dt <- setting("data.table", "version")
+ver_r <- paste(R.version$major, R.version$minor, sep = ".")
+conda <- Sys.getenv("CONDA_PREFIX")
+cudf_meta <- if (nzchar(conda)) list.files(file.path(conda, "conda-meta"), pattern = "^libcudf-[0-9]") else character()
+ver_cudf <- if (length(cudf_meta)) sub("^libcudf-([0-9.]+)-.*$", "\\1", cudf_meta[[1L]]) else "unknown"
+
+# ---- data and files ----------------------------------------------------------------
+files <- files[order(files$table, files$rows), ]
+sizes <- sort(unique(tm$rows))   # the sizes of the three main pipelines (the rowwise chunk has its own)
+rw_only_files <- files[!files$rows %in% sizes, ]
+tables <- unique(files$table)
+rg_rows <- if ("row_group_max_rows" %in% names(files)) format(max(files$row_group_max_rows), big.mark = ",", trim = TRUE) else "n/a"
+n_cols <- tapply(files$columns, files$table, max)
+codec <- tolower(paste(unique(files$codec), collapse = "/"))
+kept <- cr[cr$engine == "dplyr" & !is.na(cr$kept_rows) & cr$kept_rows > 0, ]
+keep_frac <- function(filter) {
+  d <- kept[grepl(paste0("_", filter, "$"), kept$variant) & startsWith(kept$variant, "p1"), ]
+  if (!nrow(d)) return(NA_real_)
+  mean(d$kept_rows / d$rows)
+}
+groups_of <- function(pipeline) {
+  g <- cr$result_rows[startsWith(cr$variant, pipeline) & cr$engine == "dplyr" & cr$status == "ok"]
+  if (length(g)) max(g) else NA
+}
+
+# ---- correctness -------------------------------------------------------------------
+n_cr <- nrow(cr); n_cr_ok <- sum(cr$status == "ok")
+big_result <- max(cr$result_rows, na.rm = TRUE)
+# ---- timings: quiet reps, summaries, cell states -------------------------------------
+tm$quiet <- as.logical(tm$quiet); tm$ok <- as.logical(tm$ok)
+key_of <- function(d) paste(d$engine, d$variant, d$table, d$rows, d$cache, sep = "|")
+tq <- tm[tm$rep >= 1L & tm$ok & tm$quiet, ]
+cells <- unique(tm[c("engine", "variant", "table", "rows", "cache")])
+cells$key <- key_of(cells)
+summ <- lapply(split(tq, key_of(tq)), function(d) {
+  data.frame(key = key_of(d)[1L], n = nrow(d), med = stats::median(d$secs),
+             q25 = unname(stats::quantile(d$secs, 0.25)), q75 = unname(stats::quantile(d$secs, 0.75)),
+             lo = min(d$secs), hi = max(d$secs), busy = stats::median(d$busy), stringsAsFactors = FALSE)
+})
+S <- if (length(summ)) do.call(rbind, summ) else data.frame(key = character(), n = integer(), med = numeric())
+S <- merge(cells, S, by = "key", all.x = TRUE)
+S$n[is.na(S$n)] <- 0L
+bad_status <- tapply(tm$status, key_of(tm), function(s) {
+  s <- s[s != "ok"]; if (length(s)) s[[1L]] else "ok"
+})
+S$status <- unname(bad_status[S$key])
+S$status[S$status == "ok" & S$n == 0L] <- "noisy"
+S$pipeline <- substr(S$variant, 1L, 2L)
+S$filter <- sub("^p[0-9]_", "", S$variant)
+first0 <- tm[tm$rep == 0L & tm$ok, ]
+first0 <- first0[order(first0$started), ]
+rep_n <- tapply(tm$rep[tm$rep >= 1L], tm$rows[tm$rep >= 1L], function(r) max(r))
+n_calls <- nrow(tm); n_busy <- sum(tm$rep >= 1L & tm$ok & !tm$quiet)
+n_rep0 <- sum(tm$rep == 0L)
+n_cpu_num <- as.numeric(setting("machine", "logical_cpus"))
+busy_max <- as.numeric(setting("harness", "busy_max"))
+busy_max_rows <- sort(unique(tm$busy_max))   # the limit recorded on each call
+busy_quiet_max <- if (nrow(tq)) max(tq$busy) else NA_real_
+resident_warm <- tm$resident[tm$cache == "warm" & tm$ok]
+resident_cold <- tm$resident[tm$cache == "cold" & tm$ok]
+# the best other engine of a cell (cuplyr excluded) and cuplyr's ratio to it
+wide_cells <- function(d) {
+  e <- split(d, d$engine)
+  base <- e[["cuplyr"]]
+  if (is.null(base)) return(NULL)
+  others <- d[d$engine != "cuplyr" & d$status == "ok" & d$n > 0, ]
+  if (!nrow(others)) return(NULL)
+  best <- stats::aggregate(med ~ variant + table + rows + cache, data = others, FUN = min)
+  names(best)[names(best) == "med"] <- "best_med"
+  who <- merge(others, best, by = c("variant", "table", "rows", "cache"))
+  who <- who[who$med == who$best_med, c("variant", "table", "rows", "cache", "engine")]
+  names(who)[5L] <- "best_engine"
+  who <- who[!duplicated(who[c("variant", "table", "rows", "cache")]), ]
+  base <- base[c("variant", "table", "rows", "cache", "pipeline", "filter", "med", "n", "status")]
+  m <- merge(merge(base, best, by = c("variant", "table", "rows", "cache")), who, by = c("variant", "table", "rows", "cache"))
+  m$ratio <- m$med / m$best_med
+  m[m$status == "ok" & m$n > 0, ]
+}
+W <- wide_cells(S)
+if (is.null(W)) W <- data.frame(variant = character(), table = character(), rows = numeric(), cache = character(),
+                                ratio = numeric(), best_engine = character(), filter = character(), pipeline = character())
+n_oom <- sum(S$status == "oom")
+n_cu_cells <- sum(S$engine == "cuplyr"); n_cu_early <- sum(S$engine == "cuplyr" & S$pipeline %in% c("p1", "p2"))
+oom_cells <- S[S$status == "oom", ]
+
+# ---- provenance: which code produced the measurements ----------------------------------
+tstamp <- function(x) as.POSIXct(x, format = "%Y-%m-%dT%H:%M:%OS")
+# every render appends a row too (its bench/ copy is dirty until committed): the table
+# and the claims below are about the steps that took the measurements
+pv <- pv[pv$step != "render", ]
+pv$t0 <- tstamp(pv$started); pv$t1 <- tstamp(pv$ended)
+pv$minutes <- as.numeric(difftime(pv$t1, pv$t0, units = "mins"))
+# a run of a step is superseded when the same step ran later for the same piece (its
+# rows were replaced; the timing rows are archived): the data in use come from the rest
+pv_key <- paste(pv$step, pv$sizes, pv$tables, pv$caches, pv$variants, pv$engines)
+pv$superseded <- rev(duplicated(rev(pv_key)))
+pvu <- pv[!pv$superseded, ]
+n_pv_super <- sum(pv$superseded)
+bench_heads <- unique(pvu$git_head); pkg_commits <- unique(pvu$cuplyr_commit)
+heads_text <- if (length(bench_heads) == 1L) paste0("benchmark commit `", bench_heads, "`") else paste0(
+  length(bench_heads), " benchmark commits, ", join_and(vapply(bench_heads, function(h) {
+    st <- unique(pvu$step[pvu$git_head == h])
+    paste0("`", h, "` for the ", paste(st, collapse = ", "), " step", if (length(st) > 1L) "s")
+  }, "")), ",")
+same_day <- format(min(pvu$t0), "%Y-%m-%d") == format(max(pvu$t1), "%Y-%m-%d")
+span_text <- if (same_day) paste0("between ", format(min(pvu$t0), "%H:%M"), " and ", format(max(pvu$t1), "%H:%M"), " on ", format(min(pvu$t0), "%Y-%m-%d")) else
+  paste0("between ", format(min(pvu$t0), "%Y-%m-%d %H:%M"), " and ", format(max(pvu$t1), "%Y-%m-%d %H:%M"))
+all_clean <- !any(as.logical(pvu$bench_dirty)) && !any(as.logical(pvu$cuplyr_dirty))
+all_ok <- all(pvu$outcome == "ok")
+time_pieces <- pv[pv$step == "time", ]
+n_pieces_rerun <- sum(duplicated(time_pieces[c("sizes", "tables", "caches")]))
+n_super <- if (is.null(sup)) 0L else nrow(sup)
+prov_label <- function(d) {
+  num <- function(x) vapply(x, function(v) if (v == "all") "all" else paste(lab_n(as.numeric(strsplit(v, " ", fixed = TRUE)[[1L]])), collapse = " "), "")
+  ifelse(d$step %in% c("time", "rowwise", "rowwise_check", "idle"), paste(num(d$sizes), d$tables, d$caches), "")
+}
+
+# ---- the load rule: one limit, every engine, rep and cache ---------------------------------
+timed <- tm[tm$rep >= 1L & tm$ok, ]
+load_tab <- do.call(rbind, lapply(split(timed, paste(timed$engine, timed$cache)), function(d) {
+  data.frame(engine = d$engine[1L], cache = d$cache[1L], calls = nrow(d),
+             foreign_med = stats::median(d$busy), foreign_max = max(d$busy),
+             kernel_med = stats::median(d$kernel), kernel_max = max(d$kernel),
+             own_med = stats::median(d$own), own_max = max(d$own), stringsAsFactors = FALSE)
+}))
+load_tab <- load_tab[order(factor(load_tab$engine, engines), factor(load_tab$cache, c("warm", "cold"))), ]
+kern_cold_up <- vapply(engines, function(e) {
+  k <- load_tab[load_tab$engine == e, ]
+  k$kernel_med[k$cache == "cold"] > k$kernel_med[k$cache == "warm"]
+}, NA)
+kern_top <- timed[which.max(timed$kernel), ]
+# (the table's "highest" is over every timed call, the ones over the limit included)
+busy_over <- timed[!timed$quiet, ]
+foreign_sentence <- paste0(
+  "The median foreign share, by engine and cache state, is between ", pct1(min(load_tab$foreign_med)), " and ", pct1(max(load_tab$foreign_med)),
+  ". The highest in a quiet call is ", pct1(busy_quiet_max), ", against the limit of ", pct(busy_max),
+  if (busy_quiet_max < busy_max / 2) ", so every quiet call stays well below the limit (under half of it)" else ", more than half of the limit",
+  if (nrow(busy_over)) paste0("; ", n_of(nrow(busy_over), "timed call"), " went over the limit (the highest at ", pct1(max(busy_over$busy)), ", the top of the table's column), ",
+                              was_were(nrow(busy_over)), " run again and ", if (nrow(busy_over) == 1L) "is" else "are", " not used in any median") else "",
+  ".")
+wait_gave_up <- sum(tm$wait_load > tm$busy_max, na.rm = TRUE)
+cell_id <- paste(tm$variant, tm$table, tm$rows, tm$cache)
+interleaved <- vapply(split(tm, cell_id), function(d) {
+  t <- as.numeric(tstamp(d$started))
+  first_t <- tapply(t, d$engine, min); last_t <- tapply(t, d$engine, max)
+  length(first_t) == length(engines) && max(first_t) < min(last_t)
+}, NA)
+n_cells_t <- length(interleaved); n_interleaved <- sum(interleaved)
+cell_limits <- vapply(split(tm$busy_max, cell_id), function(x) length(unique(x)), 1L)
+# the storage under the data directory (findmnt, lsblk): the machine's set-up, no more
+disk <- tryCatch({
+  m <- system2("findmnt", c("-no", "SOURCE,FSTYPE", "-T", out), stdout = TRUE, stderr = FALSE)[1L]
+  src <- sub("\\[.*$", "", strsplit(m, " +")[[1L]][1L])
+  list(src = src, fs = strsplit(m, " +")[[1L]][2L],
+       type = trimws(system2("lsblk", c("-no", "TYPE", src), stdout = TRUE, stderr = FALSE)[1L]))
+}, error = function(e) list(src = NA_character_, fs = NA_character_, type = NA_character_))
+disk_text <- if (is.na(disk$src)) "The storage under the data directory could not be read." else paste0(
+  "The data directory is on `", disk$src, "` (device type `", disk$type, "`, file system `", disk$fs, "`).")
+
+# ---- the untimed process warm-up and the first timed rep -----------------------------------
+wu_calls <- max(wu$call)
+wu_pieces <- nrow(unique(wu[c("table", "rows", "cache")]))
+wu_variants <- length(unique(wu$variant))
+keys5 <- c("engine", "variant", "table", "rows", "cache")
+# (S is built just below; the rep-1 ratio is filled in after it)
+
+# ---- the lock log during the timing windows ------------------------------------------------
+lock_ok <- !is.null(lk) && nrow(lk) > 0L
+if (lock_ok) {
+  lk_time <- function(x) as.POSIXct(sub("([+-][0-9]{2}):([0-9]{2})$", "\\1\\2", x), format = "%Y-%m-%dT%H:%M:%S%z")
+  lk$q <- lk_time(lk$start); lk$acq <- lk$q + lk$wait_s; lk$rel <- lk$acq + lk$hold_s
+  win <- pvu[pvu$step %in% c("readers", "time", "rowwise", "idle", "first", "probe"), ]
+  n_windows <- nrow(win)
+  own_job <- vapply(seq_len(n_windows), function(i) {
+    j <- which(lk$acq <= win$t0[i] + 2 & lk$rel >= win$t1[i] - 2)
+    if (length(j)) lk$worktree[j[1L]] else NA_character_
+  }, "")
+  n_win_in_job <- sum(!is.na(own_job))
+  own_wt <- if (n_win_in_job) names(sort(table(own_job), decreasing = TRUE))[1L] else NA_character_
+  # a job is logged when it ends, so a window that is still running has no hold of its own
+  others <- if (is.na(own_wt)) lk else lk[lk$worktree != own_wt, ]
+  ov <- vapply(seq_len(nrow(others)), function(a) {
+    max(vapply(seq_len(n_windows), function(b) {
+      max(0, min(as.numeric(win$t1[b]), as.numeric(others$rel[a])) - max(as.numeric(win$t0[b]), as.numeric(others$acq[a])))
+    }, 0))
+  }, 0)
+  ov_max <- if (length(ov)) max(ov, na.rm = TRUE) else 0
+  n_overlap <- sum(ov > 1.5, na.rm = TRUE)
+  # a job counts when it was queued inside at least one window [t0, t1], not in a gap between two
+  in_window <- vapply(others$q, function(q) any(q >= win$t0 & q <= win$t1), NA)
+  queued <- others[in_window, ]
+  queued_in_gaps <- sum(!in_window & others$q >= min(win$t0) & others$q <= max(win$t1))
+  queued_by <- table(queued$worktree)
+  n_f123 <- sum(queued$worktree == "F123") + sum(others$worktree == "F123" & ov > 0, na.rm = TRUE)
+}
+
+# ---- derived text and numbers used in the prose -------------------------------------
+ncol_of <- function(tab) if (tab %in% names(n_cols)) n_cols[[tab]] else NA
+med_of <- function(e, v, tab, n, cache) {
+  x <- S$med[S$engine == e & S$variant == v & S$table == tab & S$rows == n & S$cache == cache & S$n > 0]
+  if (length(x)) x[[1L]] else NA_real_
+}
+# the largest size at which every engine in `engs` has a median for every variant in `vs`
+pick_size <- function(vs, tab, cache, engs = engines) {
+  ok <- vapply(sizes, function(n) all(!is.na(unlist(lapply(engs, function(e) vapply(vs, function(v) med_of(e, v, tab, n, cache), 0))))), NA)
+  if (any(ok)) max(sizes[ok]) else NA_real_
+}
+cores_word <- function(x) paste0(fx(x, 1), if (round(x, 1) == 1) " core" else " cores")
+cu_own <- timed[timed$engine == "cuplyr", ]
+cu_big <- cu_own[cu_own$rows == max(cu_own$rows) & cu_own$cache == "warm", ]
+cu_cores <- function(d) c(med = stats::median(d$own) * n_cpu_num, max = max(d$own) * n_cpu_num)
+cores_all <- cu_cores(cu_own); cores_big <- cu_cores(cu_big)
+other_cores <- vapply(setdiff(engines, "cuplyr"), function(e) stats::median(timed$own[timed$engine == e]) * n_cpu_num, 0)
+thread_text <- local({
+  g <- function(e, nm) setting(e, nm)
+  paste0("DuckDB runs ", g("duckdb", "threads"), " threads, arrow ", g("dplyr", "arrow_cpu"), " CPU and ",
+         g("dplyr", "arrow_io"), " I/O threads (dplyr and data.table both read with it), data.table ",
+         g("data.table", "threads"), " threads, and cuplyr runs the query on the GPU (", g("cuplyr", "gpu_devices"),
+         " device)")
+})
+cores_text <- paste0(
+  "That does not make cuplyr's process idle on the CPU: its own CPU time (user and system, all threads) is a share of all ",
+  n_cpu, " logical CPUs; multiplied by ", n_cpu, " it is ", cores_word(cores_all[["med"]]), " at the median over its timed calls and ",
+  cores_word(cores_big[["med"]]), " at the median for ", lab_n(max(cu_own$rows)), " rows with a warm cache (the highest single call: ",
+  cores_word(cores_big[["max"]]), "). The medians for the other engines over all their timed calls are ",
+  join_and(sprintf("%s %s", names(other_cores), vapply(other_cores, cores_word, ""))), ". What the CPU time is spent on in cuplyr is not examined here.")
+
+# readers
+rdr$quiet <- as.logical(rdr$quiet); rdr$ok <- as.logical(rdr$ok)
+rq <- rdr[rdr$rep >= 1L & rdr$ok & rdr$quiet, ]
+rsum <- if (nrow(rq)) stats::aggregate(secs ~ reader + table + rows, data = rq, FUN = stats::median) else data.frame()
+reader_used <- if (grepl("nanoparquet", paste(deparse(pp_read_arrow), collapse = " "))) "nanoparquet" else "arrow"
+reader_wide <- if (nrow(rsum)) stats::reshape(rsum, idvar = c("table", "rows"), timevar = "reader", direction = "wide") else data.frame()
+if (nrow(reader_wide)) {
+  names(reader_wide) <- sub("^secs\\.", "", names(reader_wide))
+  reader_wide$faster <- ifelse(reader_wide$arrow <= reader_wide$nanoparquet, "arrow", "nanoparquet")
+  reader_wide$ratio <- reader_wide$nanoparquet / reader_wide$arrow
+}
+n_reader_cells <- nrow(reader_wide)
+n_arrow_faster <- if (n_reader_cells) sum(reader_wide$faster == "arrow") else 0L
+reader_faster <- if (n_reader_cells && n_arrow_faster >= n_reader_cells / 2) "arrow" else "nanoparquet"
+n_reader_faster <- if (reader_faster == "arrow") n_arrow_faster else n_reader_cells - n_arrow_faster
+reader_agrees <- identical(reader_used, reader_faster) && n_reader_faster == n_reader_cells
+reader_agree_text <- if (reader_agrees) "The reader the code uses is the faster one in every cell." else paste0("The code uses ", reader_used, ", which is not the faster reader in every cell; the dplyr and data.table numbers include that.")
+reader_sentence <- if (!n_reader_cells) "The reader step has no quiet reps." else paste0(
+  reader_faster, " is faster in ", n_reader_faster, " of ", n_reader_cells, " cells (a table and a size each)",
+  if (n_reader_cells) paste0("; nanoparquet takes ", fx(min(reader_wide$ratio), 1), " to ", fx(max(reader_wide$ratio), 1),
+                             " times arrow's time") else "")
+
+# the two data.table idioms
+form_sentence <- "The idiom timing (forms.csv) is not part of this data set."
+form_p2_sentence <- ""
+dt_form <- k_const$dt_form
+if (!is.null(forms)) {
+  forms$quiet <- as.logical(forms$quiet); forms$ok <- as.logical(forms$ok)
+  fq <- forms[forms$rep >= 1L & forms$ok & forms$quiet, ]
+  if (nrow(fq)) {
+    fm <- stats::reshape(stats::aggregate(secs ~ form + variant + table + rows, data = fq, FUN = stats::median),
+                         idvar = c("variant", "table", "rows"), timevar = "form", direction = "wide")
+    names(fm) <- sub("^secs\\.", "", names(fm))
+    fm$ratio <- fm$stepwise / fm$single
+    fm$pipeline <- substr(fm$variant, 1L, 2L)
+    n_single_faster <- sum(fm$single <= fm$stepwise)
+    fm_p2 <- fm[fm$pipeline == "p2", ]
+    form_sentence <- paste0("Two idioms were timed on one variant of each pipeline, in every table and size (forms.csv): a single call (the filter in `i`, the arithmetic inside `j`) and a stepwise form (filter, then `:=`, then aggregate). The single call was faster in ",
+                            n_single_faster, " of ", nrow(fm), " cells; the benchmark uses the ", dt_form, " form",
+                            if (dt_form == "single" && n_single_faster < nrow(fm) / 2) ", although the other was faster in most cells" else
+                              if (dt_form != "single" && n_single_faster >= nrow(fm) / 2) ", although the single-call form was faster in most cells" else "", ".")
+    if (nrow(fm_p2)) {
+      form_p2_sentence <- paste0("The join pipeline joins the filtered facts to the dimension first (a keyed `data.table` join), so its result is a new table either way: in its ",
+                                 nrow(fm_p2), " cells the stepwise time is ", fx(min(fm_p2$ratio), 2), " to ", fx(max(fm_p2$ratio), 2),
+                                 " times the single-call time (the stepwise form was faster in ", sum(fm_p2$stepwise < fm_p2$single), "), so the choice hardly matters there.")
+    }
+  }
+}
+
+# pipeline descriptions
+pipe_desc <- c(
+  p1 = paste0("filter, mutate, group by store and channel, summarise (", groups_of("p1"), " groups)"),
+  p2 = paste0("filter, mutate, join to the store dimension, group by region and channel, summarise (", groups_of("p2"), " groups)"),
+  p3 = paste0("filter, mutate, group by product, sum the revenue, keep the top ", k_const$top_n, " (ties kept)"))
+
+# ---- correctness text ----------------------------------------------------------------
+ref_counts <- table(cr$engine[cr$detail == "reference"])
+ref_text <- if (length(ref_counts)) join_and(sprintf("%s in %d cells", names(ref_counts), as.integer(ref_counts))) else "none"
+cr_counts <- table(factor(cr$engine, engines), factor(cr$status, unique(c("ok", cr$status))))
+cr_bad <- cr[cr$status != "ok", ]
+cr_text <- if (!nrow(cr_bad)) "No engine gave a wrong result or an error in any cell." else paste0(nrow(cr_bad), " results are not ok; each is listed above and under Findings.")
+cr_find <- if (!nrow(cr_bad)) "None: every engine matched the reference in every cell." else paste0(
+  nrow(cr_bad), " cells: ", join_and(unique(sprintf("%s on the %s table, %s at %s rows (%s)", cr_bad$engine, cr_bad$table, cr_bad$variant, lab_n(cr_bad$rows), cr_bad$status))), ".")
+
+# ---- result tables and plots ---------------------------------------------------------
+fnum <- function(x) format(signif(x, 3), scientific = FALSE, trim = TRUE, drop0trailing = TRUE)
+cell_text <- function(d) {
+  ifelse(d$status == "oom", "does not fit",
+         ifelse(d$status %in% c("error", "mismatch"), d$status,
+                ifelse(d$n == 0L | is.na(d$med), "no quiet rep",
+                       sprintf("%s (%s-%s) n=%d", fnum(d$med), fnum(d$q25), fnum(d$q75), d$n))))
+}
+res_tab <- function(p, cache) {
+  d <- S[S$pipeline == p & S$cache == cache, ]
+  if (!nrow(d)) return(NULL)
+  d$text <- cell_text(d)
+  keys <- unique(d[c("filter", "table", "rows")])
+  keys <- keys[order(factor(keys$filter, c("push", "nopush")), keys$table, keys$rows), ]
+  rows <- lapply(seq_len(nrow(keys)), function(i) {
+    r <- d[d$filter == keys$filter[i] & d$table == keys$table[i] & d$rows == keys$rows[i], ]
+    usable <- r$n > 0L & r$status == "ok"
+    best <- if (any(usable)) r$engine[usable][which.min(r$med[usable])] else NA_character_
+    cells <- vapply(engines, function(e) {
+      x <- r[r$engine == e, ]
+      if (!nrow(x)) "-" else if (identical(e, best)) paste0("**", x$text[[1L]], "**") else x$text[[1L]]
+    }, "")
+    out <- data.frame(filter = keys$filter[i], table = keys$table[i], rows = lab_n(keys$rows[i]), stringsAsFactors = FALSE)
+    for (e in engines) out[[e]] <- cells[[e]]
+    out
+  })
+  do.call(rbind, rows)
+}
+show_tab <- function(p, cache) {
+  t <- res_tab(p, cache)
+  if (is.null(t)) { cat("\nNo ", cache, " cells for this pipeline.\n\n", sep = ""); return(invisible()) }
+  cat("\n", paste(knitr::kable(t, format = "pipe", row.names = FALSE), collapse = "\n"), "\n\n", sep = "")
+}
+eng_cols <- c(cuplyr = "#009E73", duckdb = "#E69F00", dplyr = "#0072B2", data.table = "#CC79A7")
+plot_pipeline <- function(p) {
+  d <- S[S$pipeline == p & S$n > 0L & S$status == "ok", ]
+  if (!nrow(d)) return(invisible(NULL))
+  d$engine <- factor(d$engine, engines)
+  d$filter <- factor(d$filter, c("push", "nopush"))
+  g <- ggplot2::ggplot(d, ggplot2::aes(x = rows, y = med, colour = engine, group = engine)) +
+    ggplot2::geom_linerange(ggplot2::aes(ymin = q25, ymax = q75), alpha = 0.6) +
+    ggplot2::geom_line() + ggplot2::geom_point(size = 1.6) +
+    ggplot2::scale_x_log10(breaks = sizes, labels = lab_n(sizes)) +
+    ggplot2::scale_y_log10() +
+    ggplot2::scale_colour_manual(values = eng_cols, drop = FALSE) +
+    ggplot2::facet_grid(table + cache ~ filter, labeller = ggplot2::label_both) +
+    ggplot2::labs(x = "rows in the fact table", y = "seconds per call (median, bars = interquartile range)", colour = NULL) +
+    ggplot2::theme_minimal(base_size = 10) +
+    ggplot2::theme(legend.position = "bottom", panel.grid.minor = ggplot2::element_blank())
+  oo <- S[S$pipeline == p & S$status == "oom", ]
+  if (nrow(oo)) {
+    oo$filter <- factor(oo$filter, c("push", "nopush"))
+    oo$engine <- factor(oo$engine, engines)
+    oo$y <- max(d$med)
+    g <- g + ggplot2::geom_point(data = oo, ggplot2::aes(x = rows, y = y, colour = engine), shape = 4, size = 3, stroke = 1.2) +
+      ggplot2::labs(caption = "a cross marks a cell that does not fit in memory")
+  }
+  g
+}
+
+# ---- where cuplyr wins and loses -------------------------------------------------------
+W$win <- W$ratio < 1
+n_cmp <- nrow(W); n_win <- sum(W$win)
+cnt <- function(cache) c(win = sum(W$win & W$cache == cache), all = sum(W$cache == cache))
+cw <- cnt("warm"); cc <- cnt("cold")
+gs <- if (n_cmp) do.call(rbind, lapply(split(W, paste(W$rows, W$cache, W$filter)), function(d) {
+  data.frame(rows = d$rows[1L], cache = d$cache[1L], filter = d$filter[1L], cells = nrow(d), wins = sum(d$win),
+             median_ratio = stats::median(d$ratio), worst = max(d$ratio), stringsAsFactors = FALSE)
+})) else data.frame()
+if (nrow(gs)) gs <- gs[order(gs$rows, gs$cache, factor(gs$filter, c("push", "nopush"))), ]
+lose_groups <- if (nrow(gs)) gs[gs$wins < gs$cells / 2, ] else gs
+lose_text <- if (!n_cmp) "There are no cells in which cuplyr and another engine both have quiet reps." else if (!nrow(lose_groups)) {
+  "There is no combination of size, cache state and filter in which cuplyr has the lowest median in fewer than half of its cells."
+} else paste0("cuplyr has the lowest median in fewer than half of its cells for ",
+              join_and(sprintf("%s rows with a %s cache and the %s filter (%d of %d cells)", lab_n(lose_groups$rows),
+                               lose_groups$cache, lose_groups$filter, lose_groups$wins, lose_groups$cells)), ".")
+lose_by <- if (any(!W$win)) table(W$best_engine[!W$win]) else NULL
+lose_by_text <- if (is.null(lose_by)) "cuplyr never loses a cell." else paste0(
+  "In the cells it loses, the fastest engine is ", join_and(sprintf("%s (%d)", names(lose_by), as.integer(lose_by))), ".")
+lost <- W[!W$win, ]
+lost_pipes <- table(factor(lost$pipeline, sort(unique(W$pipeline))))
+all_pipes <- table(factor(W$pipeline, sort(unique(W$pipeline))))
+join_size <- pick_size(c("p1_push", "p2_push"), "narrow", "warm")
+join_x <- function(e) med_of(e, "p2_push", "narrow", join_size, "warm") / med_of(e, "p1_push", "narrow", join_size, "warm")
+lose_pipe_text <- if (!nrow(lost)) "" else paste0(
+  " By pipeline, the cells in which cuplyr is not the fastest are ",
+  join_and(sprintf("%s (%d of its %d cells)", names(lost_pipes)[lost_pipes > 0], as.integer(lost_pipes[lost_pipes > 0]), as.integer(all_pipes[lost_pipes > 0]))), ".",
+  if (is.na(join_size)) "" else paste0(" With the pushed filter at ", lab_n(join_size), " rows (narrow table, warm cache), the join pipeline p2 takes ",
+    fx(join_x("cuplyr"), 1), " times the time of p1 in cuplyr and ", fx(join_x("duckdb"), 1), " times in DuckDB."))
+range_text <- if (n_cmp) paste0("cuplyr's median is ", fx(min(W$ratio)), " to ", fx(max(W$ratio)),
+                                " times the fastest other engine's, over the cells where cuplyr and at least one other engine have quiet reps") else ""
+n_dt_best <- if (n_cmp) sum(W$best_engine == "data.table") else 0L
+# cells decided within a tolerance (a near-tie), next to the win and loss counts
+tie_tol <- 1.1
+W$near <- W$ratio < tie_tol & W$ratio > 1 / tie_tol
+n_near <- sum(W$near); n_clear_win <- sum(W$ratio <= 1 / tie_tol); n_clear_loss <- sum(W$ratio >= tie_tol)
+n_near_win <- sum(W$near & W$win); n_near_loss <- sum(W$near & !W$win)
+near_text <- if (!n_cmp) "" else paste0(
+  "Counted with a margin of a factor of ", fx(tie_tol, 1), ", the best other engine's median is at least ", fx(tie_tol, 1), " times cuplyr's in ", n_of(n_clear_win, "cell"),
+  ", cuplyr's is at least ", fx(tie_tol, 1), " times the best other engine's in ", n_clear_loss, ", and the two are within that factor of each other in ", n_near,
+  " (", n_near_win, " of them counted above as ", if (n_near_win == 1L) "a win" else "wins", " and ", n_near_loss, " as ", if (n_near_loss == 1L) "a loss" else "losses", ").")
+# what each CPU engine is good at: the lowest median among DuckDB, dplyr and data.table
+cpu_engs <- setdiff(engines, "cuplyr")
+cpu_cells <- S[S$engine %in% cpu_engs & S$status == "ok" & S$n > 0L, ]
+cpu_best <- do.call(rbind, lapply(split(cpu_cells, paste(cpu_cells$variant, cpu_cells$table, cpu_cells$rows, cpu_cells$cache)), function(d) {
+  if (nrow(d) < length(cpu_engs)) return(NULL)
+  data.frame(pipeline = d$pipeline[1L], rows = d$rows[1L], best = d$engine[which.min(d$med)], stringsAsFactors = FALSE)
+}))
+cpu_sentence <- if (is.null(cpu_best) || !nrow(cpu_best)) "" else {
+  tab_all <- table(factor(cpu_best$best, cpu_engs))
+  by_pipe <- vapply(sort(unique(cpu_best$pipeline)), function(p) {
+    t <- table(factor(cpu_best$best[cpu_best$pipeline == p], cpu_engs))
+    paste0(p, ": ", join_and(sprintf("%s %d", names(t)[t > 0], as.integer(t[t > 0]))), " of ", sum(t))
+  }, "")
+  paste0("Among the three CPU engines alone (cuplyr left out), the lowest median is ", join_and(sprintf("%s's in %d", names(tab_all)[tab_all > 0], as.integer(tab_all[tab_all > 0]))),
+         " of the ", nrow(cpu_best), " cells where all three have quiet reps. By pipeline: ", join_and(by_pipe), ".")
+}
+
+# pushdown evidence
+pdf <- pd[startsWith(pd$source, "fact"), ]
+pdf$n_read <- lengths(strsplit(pdf$columns_read, ","))
+pdf$total_cols <- unname(n_cols[pdf$table])
+push_size <- pick_size(c("p1_push", "p1_nopush"), "narrow", "warm")
+ratio_pn <- function(e, tab = "narrow", cache = "warm", n = push_size) {
+  med_of(e, "p1_push", tab, n, cache) / med_of(e, "p1_nopush", tab, n, cache)
+}
+pd_row <- function(v, tab = "narrow", n = push_size) pdf[pdf$variant == v & pdf$table == tab & pdf$rows == n, ][1L, ]
+# the pushed filter's time relative to the other filter's (first pipeline, narrow, warm), by size
+pn_size <- do.call(rbind, lapply(sizes, function(n) {
+  r <- pd_row("p1_push", "narrow", n)
+  data.frame(rows = n, kept = r$row_groups_after_stats, total = r$row_groups_total,
+             decoded = r$rows_decoded / n, returned = r$rows_read / n,
+             t(vapply(engines, function(e) ratio_pn(e, n = n), 0)), check.names = FALSE, stringsAsFactors = FALSE)
+}))
+pn_big <- unlist(pn_size[pn_size$rows == max(sizes), engines])
+pn_cpu <- unlist(pn_size[c("dplyr", "data.table")])
+pn_cpu_big <- unlist(pn_size[pn_size$rows == max(sizes), c("dplyr", "data.table")])
+pn_pruned <- pn_size[!is.na(pn_size$kept) & pn_size$kept < pn_size$total, ]
+pn_whole <- pn_size[!is.na(pn_size$kept) & pn_size$kept == pn_size$total, ]
+pn_cu_lower_at <- if (nrow(pn_pruned)) pn_pruned$rows[pn_pruned$cuplyr < vapply(seq_len(nrow(pn_pruned)), function(i) min(unlist(pn_pruned[i, c("dplyr", "data.table")])), 0)] else numeric()
+pn_cu_not_lower_at <- setdiff(pn_pruned$rows, pn_cu_lower_at)
+keep_push <- keep_frac("push"); keep_nopush <- keep_frac("nopush")
+push_sentence <- paste0(
+  "Both filters keep about the same share of the rows (", pct(keep_push), " and ", pct(keep_nopush), "), but the pushed filter is not the same work as the other one: ",
+  "dplyr and data.table push nothing and read every row, and their time for the pushed variant is ", fx(min(pn_cpu), 2), " to ", fx(max(pn_cpu), 2),
+  " times that of the other, over the sizes in the table below. So the filters differ in cost on their own, and the gap in cuplyr's time cannot be put down to the pushdown alone. ",
+  if (nrow(pn_whole)) paste0("Where the pushed filter skips no row group (", join_and(lab_n(pn_whole$rows)), " rows: the file has a single row group), cuplyr's ratio is ",
+                            join_and(fx(pn_whole$cuplyr, 2)), ". ") else "",
+  if (nrow(pn_pruned)) paste0("Where it skips row groups (", join_and(sprintf("%d of %d kept at %s rows", as.integer(pn_pruned$kept), as.integer(pn_pruned$total), lab_n(pn_pruned$rows))),
+                             "), cuplyr's ratio is ", join_and(fx(pn_pruned$cuplyr, 2)), ". It is lower than both CPU engines' ratios at ",
+                             if (length(pn_cu_lower_at)) join_and(lab_n(pn_cu_lower_at)) else "none of those sizes",
+                             if (length(pn_cu_not_lower_at)) paste0(" rows and not at ", join_and(lab_n(pn_cu_not_lower_at)), " rows") else " rows",
+                             if (length(pn_cu_lower_at)) ". Where it is lower, skipping row groups may be adding to the filters' own cost difference; this table does not separate the two."
+                             else ", so this data does not show a gain from skipping row groups beyond the filters' own cost difference.") else "",
+  if (length(pn_cu_lower_at) && !is.na(pn_big[["duckdb"]]) && pn_big[["duckdb"]] < min(pn_cpu_big)) paste0(" DuckDB's ratio at ", lab_n(max(sizes)), " rows is lower than the CPU engines' too (", fx(pn_big[["duckdb"]], 2),
+                                                                             "), which fits it using row group statistics as well (not checked here).") else "")
+
+# projection: the wide table against the narrow one, same variant and size
+proj_size <- pick_size("p1_nopush", "wide", "warm")
+proj_size <- if (is.na(proj_size)) NA_real_ else proj_size
+proj_ratio <- vapply(engines, function(e) med_of(e, "p1_nopush", "wide", proj_size, "warm") / med_of(e, "p1_nopush", "narrow", proj_size, "warm"), 0)
+proj_row <- pdf[pdf$variant == "p1_nopush" & pdf$table == "wide" & pdf$rows == proj_size, ][1L, ]
+proj_words <- function(r) if (is.na(r)) "has no comparable cells" else if (r > 1.25) paste0("is ", fx(r), " times slower on the wide table") else "does not slow down on the wide table"
+proj_sentence <- if (is.na(proj_size)) "Wide and narrow cells with quiet reps do not overlap." else paste0(
+  "At ", lab_n(proj_size), " rows with the nopush filter and a warm cache, the wide table has ", ncol_of("wide"), " columns against ",
+  ncol_of("narrow"), "; every engine is asked for the same ", proj_row$n_read, " columns. ",
+  join_and(sprintf("%s %s", engines, vapply(proj_ratio[engines], proj_words, ""))), ".")
+
+# cold against warm
+cold_size <- pick_size("p1_nopush", "narrow", "cold")
+cw_ratio <- vapply(engines, function(e) med_of(e, "p1_nopush", "narrow", cold_size, "cold") / med_of(e, "p1_nopush", "narrow", cold_size, "warm"), 0)
+cold_sentence <- if (is.na(cold_size)) "No size has quiet cold and warm reps for every engine." else paste0(
+  "At ", lab_n(cold_size), " rows (narrow table, nopush filter, first pipeline) the cold call takes ",
+  join_and(sprintf("%s times the warm call for %s", fx(cw_ratio[engines], 2), engines)), ".")
+
+# the first call of a cell (rep 0) against the median of its quiet reps
+rep0 <- merge(first0[c("engine", "variant", "table", "rows", "cache", "secs")], S[c("engine", "variant", "table", "rows", "cache", "med")],
+              by = c("engine", "variant", "table", "rows", "cache"))
+rep0$ratio <- rep0$secs / rep0$med
+rep0_med <- tapply(rep0$ratio, rep0$engine, stats::median)
+rep0_sentence <- if (!nrow(rep0)) "" else paste0(
+  "Within a cell, the first call (rep 0, after the warm-up, not in the medians) takes this multiple of the cell's median (median over cells): ",
+  join_and(sprintf("%s %s", engines, fx(rep0_med[engines], 2))), ".")
+
+# the first timed rep (rep 1) against its cell's median, after the untimed warm-up
+rep1 <- merge(tm[tm$rep == 1L & tm$ok, c(keys5, "secs")], S[c(keys5, "med")], by = keys5)
+rep1$ratio <- rep1$secs / rep1$med
+rep1_med <- tapply(rep1$ratio, rep1$engine, stats::median)
+rep1_top <- rep1[which.max(rep1$ratio), ]
+
+# ---- what cuplyr's time is spent on: the stages probe -------------------------------------------
+have_stages <- !is.null(sg)
+small_share <- 0.05   # what counts as a small part of a call
+stages_intro <- "The stages probe (`stages.csv`) is not part of this data set."
+stage_sentence <- ""
+if (have_stages) {
+  sg$quiet <- as.logical(sg$quiet); sg$ok <- as.logical(sg$ok)
+  n_sg_calls <- sum(sg$rep >= 1L); n_sg_busy <- sum(sg$rep >= 1L & !sg$quiet)
+  sgm <- stats::aggregate(secs ~ stage + variant + rows, data = sg[sg$rep >= 1L & sg$ok & sg$quiet, ], FUN = stats::median)
+  sgw <- stats::reshape(sgm, idvar = c("variant", "rows"), timevar = "stage", direction = "wide")
+  names(sgw) <- sub("^secs\\.", "", names(sgw))
+  sgw$read_share <- sgw$read / sgw$full
+  sgw$rest_share <- (sgw$compute - sgw$read) / sgw$full
+  sgw$collect_share <- sgw$collect_only / sgw$full
+  sgw <- sgw[order(sgw$rows, sgw$variant), ]
+  sg_big <- sgw[sgw$rows == max(sgw$rows), ]
+  sg_ranges <- function(x, f = pct) paste0(f(min(x)), " to ", f(max(x)))
+  stages_intro <- paste0(
+    "The results are small (at most ", big_result, " rows). To see how cuplyr's time divides, the `probe` step ran four separate calls for the two variants of the first pipeline at ", join_and(lab_n(sort(unique(sgw$rows)))),
+    " rows (narrow table, warm cache, the same quiet-machine rule as above): the scan alone (the lazy `read_parquet_gpu` read, the pushed filter if the variant has one, and the needed columns, computed into a GPU table), the whole plan computed into a GPU table, a `collect()` of a table that was computed beforehand (the transfer to R), and the benchmark's whole call. Each stage ends with `gpu_sync()`, so queued GPU work is counted in the stage that queued it. The stages are separate calls, so their times do not add up exactly; the shares are relative to the whole call. Each stage ran ", wu_calls, " times untimed before its timed reps (after one untimed run of the plan to build the computed table), so the stages leave out the start-up cost of a first call (see the first-call section). ",
+    n_sg_busy, " of the ", n_sg_calls, " probe calls ", was_were(n_sg_busy), " not quiet and ", if (n_sg_busy == 1L) "is" else "are", " left out.")
+  stage_sentence <- paste0(
+    "At ", lab_n(max(sgw$rows)), " rows (warm cache, narrow table), the scan alone takes ", sg_ranges(sg_big$read_share), " of the whole call in the two first-pipeline variants, the rest of the plan (filter, mutate, aggregate) ",
+    sg_ranges(sg_big$rest_share), ", and collecting a result that is already computed takes ", sg_ranges(sg_big$collect_share, pct1), ". ",
+    paste0(
+      if (all(sg_big$collect_share < small_share)) paste0("So, in these calls, bringing the answer to R is under ", pct(small_share), " of cuplyr's time in both variants")
+      else paste0("So, in these calls, bringing the answer to R is not negligible (", sg_ranges(sg_big$collect_share, pct1), " of the call)"),
+      if (all(sg_big$read_share > sg_big$rest_share & sg_big$read_share > sg_big$collect_share)) ", and the scan (reading and decoding the file) is the largest of the three parts in both."
+      else if (any(sg_big$read_share > sg_big$rest_share & sg_big$read_share > sg_big$collect_share)) ", and the scan is the largest of the three parts in only some of the variants."
+      else ", and the scan is not the largest of the three parts in either variant."))
+}
+
+# ---- why cuplyr loses the join pipeline: the join probe ------------------------------------------
+have_join <- !is.null(jc)
+join_sentence <- "The join probe (`joincost.csv`) is not part of this data set."
+join_busy_note <- ""
+if (have_join) {
+  jc$quiet <- as.logical(jc$quiet); jc$ok <- as.logical(jc$ok)
+  n_jc_busy <- sum(jc$rep >= 1L & !jc$quiet)
+  join_busy_note <- paste0(n_jc_busy, " of the probe's calls ", was_were(n_jc_busy), " not quiet and ", if (n_jc_busy == 1L) "is" else "are", " left out.")
+  jm <- stats::aggregate(secs ~ engine + op + variant + rows, data = jc[jc$rep >= 1L & jc$ok & jc$quiet, ], FUN = stats::median)
+  jget <- function(e, op, v, n) { x <- jm$secs[jm$engine == e & jm$op == op & jm$variant == v & jm$rows == n]; if (length(x)) x[[1L]] else NA_real_ }
+  j_n <- max(jm$rows)
+  jt <- do.call(rbind, lapply(sort(unique(jm$rows)), function(n) do.call(rbind, lapply(c("p2_push", "p2_nopush"), function(v) {
+    data.frame(rows = n, variant = v,
+               cj = jget("cuplyr", "join", v, n), cs = jget("cuplyr", "summarise", v, n), cjs = jget("cuplyr", "join+summarise", v, n),
+               dj = jget("duckdb", "join", v, n), ds = jget("duckdb", "summarise", v, n), djs = jget("duckdb", "join+summarise", v, n),
+               stringsAsFactors = FALSE)
+  }))))
+  jt_big <- jt[jt$rows == j_n, ]
+  j_over <- jt_big$cj / jt_big$cs                    # cuplyr: the join against the aggregate of the same rows
+  j_share <- jt_big$cj / jt_big$cjs                  # cuplyr: the join's share of join + aggregate
+  p2_extra <- vapply(c("p2_push", "p2_nopush"), function(v) {
+    med_of("cuplyr", v, "narrow", j_n, "warm") - med_of("cuplyr", sub("p2", "p1", v), "narrow", j_n, "warm")
+  }, 0)
+  p2_push_fact <- pdf[pdf$variant == "p2_push" & pdf$table == "narrow" & pdf$rows == j_n & pdf$plan == "fact scan under the join", ]
+  p1_push_fact <- pdf[pdf$variant == "p1_push" & pdf$table == "narrow" & pdf$rows == j_n & pdf$plan == "pipeline", ]
+  same_scan <- nrow(p2_push_fact) == 1L && nrow(p1_push_fact) == 1L && !is.na(p2_push_fact$row_groups_after_stats) &&
+    identical(p2_push_fact$row_groups_after_stats, p1_push_fact$row_groups_after_stats) && identical(p2_push_fact$row_groups_total, p1_push_fact$row_groups_total)
+  p2_close <- all(abs(p2_extra - jt_big$cj) / jt_big$cj < 0.2)
+  join_sentence <- paste0(
+    "On inputs already on the device at ", lab_n(j_n), " rows, cuplyr's join of the filtered facts to the dimension takes ", fs(jt_big$cj[1L]), " (pushed filter) and ", fs(jt_big$cj[2L]),
+    " (other filter), which is ", fx(j_over[1L], 1), " and ", fx(j_over[2L], 1), " times its aggregate of the same rows (", fs(jt_big$cs[1L]), " and ", fs(jt_big$cs[2L]),
+    "), and ", pct(j_share[1L]), " and ", pct(j_share[2L]), " of its join and aggregate together. With the pushed filter, cuplyr's join alone is ", ratio_phrase(jt_big$cj[1L] / jt_big$dj[1L]),
+    " DuckDB's join into a table, while DuckDB's join and aggregate in one query (", fs(jt_big$djs[1L]), ") is ", ratio_phrase(jt_big$djs[1L] / jt_big$cjs[1L]), " cuplyr's (", fs(jt_big$cjs[1L]),
+    "). In the benchmark itself the join pipeline takes ", fs(p2_extra[[1L]]), " (pushed filter) and ", fs(p2_extra[[2L]]), " (other filter) longer than the first pipeline in cuplyr at ",
+    lab_n(j_n), " rows (narrow table, warm cache), ", if (p2_close) "close to the join's time here. " else "which differs from the join's time here. ",
+    if (nrow(p2_push_fact) == 1L && !is.na(p2_push_fact$row_groups_after_stats)) paste0("The check step ran the join pipeline with the pushed filter once more with the dimension computed first, so that the fact file is the plan's only parquet read (the `fact scan under the join` row of `pushdown.csv`): the scan keeps ", p2_push_fact$row_groups_after_stats, " of ", p2_push_fact$row_groups_total,
+      " row groups and decodes ", pct(p2_push_fact$rows_decoded / p2_push_fact$rows), " of the rows, and the first pipeline's scan keeps ", p1_push_fact$row_groups_after_stats, " of ", p1_push_fact$row_groups_total, ", ",
+      if (same_scan) "so the pushdown works the same under the join. " else "so the pushdown under the join differs from the first pipeline's. ") else "",
+    "The probe shows where the time goes (the join, not the scan or the aggregate); it does not show why the join takes that long.")
+}
+
+# ---- slow calls per new pipeline shape: the shapes probe ------------------------------------------
+have_shapes <- !is.null(sh)
+shapes_sentence <- "The shapes probe (`shapes.csv`) is not part of this data set."
+shapes_short <- shapes_sentence
+shapes_intro <- ""
+shapes_calls <- "n/a"
+shapes_rows <- NA
+smallest <- "scan"
+sh_alone <- data.frame(shape = character(), secs = numeric())
+if (have_shapes) {
+  shape_names <- unique(sh$shape)
+  best_of <- tapply(sh$secs, sh$shape, min)
+  sh$best <- unname(best_of[sh$shape])
+  sh$slow <- sh$secs > 3 * sh$best
+  sh_alone <- sh[sh$mode == "alone", ]; sh_seq <- sh[sh$mode == "sequence", ]
+  n_shapes <- length(shape_names)
+  alone_slow <- tapply(sh_alone$slow, sh_alone$shape, sum)
+  alone_first2 <- tapply(sh_alone$slow[sh_alone$call <= 2L], sh_alone$shape[sh_alone$call <= 2L], sum)
+  n_alone_both <- sum(alone_first2 == 2L)
+  seq_first2 <- tapply(sh_seq$slow[sh_seq$call <= 2L], sh_seq$shape[sh_seq$call <= 2L], sum)
+  seq_later <- setdiff(shape_names, shape_names[[1L]])
+  n_seq_later <- sum(seq_first2[seq_later] >= 1L)
+  smallest <- shape_names[[1L]]
+  sh_ratio <- function(d, j) d$secs[d$call == j] / d$best[d$call == j]
+  alone_ratio1 <- vapply(shape_names, function(z) sh_ratio(sh_alone[sh_alone$shape == z, ], 1L), 0)
+  seq_ratio_max <- vapply(seq_later, function(z) max(sh_seq$secs[sh_seq$shape == z & sh_seq$call <= 2L] / sh_seq$best[sh_seq$shape == z][1L]), 0)
+  shapes_rows <- sh$rows_in_file[[1L]]
+  shapes_calls <- join_and(fs(sh_alone$secs[sh_alone$shape == smallest]))
+  shapes_intro <- paste0("The first-call finding is not confined to a process's first calls, and the shapes probe shows it. The shapes are `scan` (read one column and collect it), `filter_int` (an integer filter on the whole file), `filter_date_int` (the pushed Date and integer filter), `summarise` (a grouped count), `mutate_sum` (a new column and its sum) and `p1_push` (the first pipeline).")
+  shapes_sentence <- paste0(
+    "The probe repeats small cuplyr pipelines in fresh processes (", n_shapes, " shapes, each alone for ", max(sh_alone$call), " calls, then all in one process in order for ", max(sh_seq$call),
+    " calls each; the file has ", lab_n(shapes_rows), " rows). A call is slow when it takes more than three times the shape's fastest call in the probe. Alone, the first two calls are slow in ",
+    n_alone_both, " of the ", n_shapes, " shapes, and the first call takes ", fx(min(alone_ratio1), 0), " to ", fx(max(alone_ratio1), 0), " times the fastest. This includes the smallest shape (`",
+    smallest, "`: read one column and collect it), which has ", alone_slow[[smallest]], " slow calls. In the sequence, ", n_seq_later, " of the ", length(seq_later),
+    " shapes after the first have a slow call among their first two, up to ", fx(max(seq_ratio_max), 0), " times their fastest call",
+    if (n_seq_later >= 1L) ". So a new pipeline shape in an already warm process can be slow for its first calls, and the cost is not paid once per process." else ".")
+  shapes_short <- paste0(
+    "The shapes probe (in the first-call section) finds the pattern beyond the full pipeline: alone, ", n_alone_both, " of ", n_shapes, " shapes have two slow first calls, and in one process, ",
+    n_seq_later, " of the ", length(seq_later), " shapes after the first have a slow call among their first two.")
+}
+
+# ---- the timing process against a fresh process (data.table's caveat) ---------------------------------
+fcm <- stats::aggregate(secs ~ engine + variant, data = fc[fc$call >= 2L, ], FUN = stats::median)
+tn <- S[S$table == "narrow" & S$rows == unique(fc$rows)[1L] & S$cache == "warm" & S$n > 0L, c("engine", "variant", "med")]
+shared <- merge(tn, fcm, by = c("engine", "variant"))
+shared$ratio <- shared$med / shared$secs
+shared_med <- tapply(shared$ratio, shared$engine, stats::median)
+
+# ---- the first call in a fresh process ----------------------------------------------------
+fc <- fc[order(fc$engine, fc$variant, fc$call), ]
+fc_k <- max(fc$call)
+fc_one <- function(d) {
+  d <- d[order(d$call), ]
+  steady <- stats::median(d$secs[d$call > fc_k / 2])
+  slow <- d$secs > 3 * steady
+  lead <- 0L
+  while (lead < nrow(d) && isTRUE(slow[lead + 1L])) lead <- lead + 1L
+  data.frame(engine = d$engine[1L], variant = d$variant[1L], lead = lead,
+             lead_secs = if (lead) mean(d$secs[seq_len(lead)]) else NA_real_, steady = steady,
+             first = d$secs[1L], load = d$load_secs[1L], stringsAsFactors = FALSE)
+}
+FC <- do.call(rbind, lapply(split(fc, paste(fc$engine, fc$variant)), fc_one))
+fc_cu <- FC[FC$engine == "cuplyr", ]
+cu_lead_med <- if (nrow(fc_cu)) stats::median(fc_cu$lead) else NA
+cu_p1 <- FC[FC$engine == "cuplyr" & FC$variant == "p1_push", ]
+n_var <- nrow(fc_cu); n_var_lead <- sum(fc_cu$lead >= 1L)
+fc_rows <- unique(fc$rows)
+fc_secs <- function(e, v, j) { x <- fc$secs[fc$engine == e & fc$variant == v & fc$call == j]; if (length(x)) x[[1L]] else NA_real_ }
+first_finding <- if (!nrow(cu_p1)) {
+  "The first-call step has no cuplyr rows for the first pipeline."
+} else if (cu_p1$lead[[1L]] >= 1L) {
+  paste0(
+  "In a fresh process the first ", cu_p1$lead[[1L]], " call", if (cu_p1$lead[[1L]] > 1L) "s", " of cuplyr's pipeline `p1_push` at ", lab_n(fc_rows[[1L]]),
+  " rows take about ", fs(cu_p1$lead_secs[[1L]]), " each (the first takes ", fs(fc_secs("cuplyr", "p1_push", 1L)), ", the second ", fs(fc_secs("cuplyr", "p1_push", 2L)), ", the third ",
+  fs(fc_secs("cuplyr", "p1_push", 3L)), "), and the later calls about ", fs(cu_p1$steady[[1L]]), ". The slowness appears in ", n_var_lead, " of the ", n_var,
+  " cuplyr variants, with a median of ", fx(cu_lead_med, 0), " slow calls per variant.")
+} else "The first calls of cuplyr's pipeline `p1_push` are no slower than its later calls in a fresh process."
+
+rep_text <- if (length(rep_n)) join_and(sprintf("%s rows: %d", lab_n(as.numeric(names(rep_n))), as.integer(rep_n))) else "none"
+oom_text <- if (!n_oom) "No cell ran out of memory." else local({
+  g <- unique(oom_cells[c("engine", "rows", "table")])
+  paste0("Cells that do not fit: ", join_and(vapply(seq_len(nrow(g)), function(i) {
+    o <- oom_cells[oom_cells$engine == g$engine[i] & oom_cells$rows == g$rows[i] & oom_cells$table == g$table[i], ]
+    sprintf("%s at %s rows on the %s table (%d variants, %s)", g$engine[i], lab_n(g$rows[i]), g$table[i],
+            length(unique(o$variant)), join_and(unique(o$cache)))
+  }, "")), ".")
+})
+lock_sentence <- if (!lock_ok) "The lock log (`lockjobs.csv`) is not part of this data set, so what else used the GPU while the timings ran is not known." else paste0(
+  "The lock log lists the GPU jobs of every worktree. ", n_win_in_job, " of the ", n_windows, " timing windows (the readers, time, rowwise, idle, first and probe steps of `provenance.csv` whose data are in use) lie inside one lock hold of ",
+  if (is.na(own_wt)) "a logged job (a job is logged when it ends)" else own_wt,
+  ". Jobs of other worktrees held the lock for at most ", fx(ov_max, 1), " seconds inside a window (the log's resolution is one second), and ", n_overlap, " of them overlapped by more than that. ",
+  if (nrow(queued)) paste0(nrow(queued), " jobs of other worktrees (", join_and(sprintf("%s: %d", names(queued_by), as.integer(queued_by))), ") were queued inside a window, each tested against every window's start and end",
+                           if (queued_in_gaps) paste0("; ", queued_in_gaps, " more were queued in the gaps between windows and are not counted") else "", ". ")
+  else paste0("No job of another worktree was queued inside a window",
+              if (queued_in_gaps) paste0(" (", queued_in_gaps, " were queued in the gaps between windows)") else "", ". "),
+  "F123 has ", n_f123, " jobs in the log during the windows. Work outside the lock (compiles, `tools/build`) is not in the log. A compile's user-space CPU time would show as foreign load, which the quiet-machine rule bounds; its system time would show only as kernel time, which is outside the rule.")
+shared_sentence <- paste0(
+  "Each engine's median time in the shared timing process at ", lab_n(unique(fc$rows)[1L]), " rows (narrow table, warm cache, over the variants), relative to its median over calls 2 to ", max(fc$call),
+  " in a fresh process of its own: ", join_and(sprintf("%s %s", engines, fx(shared_med[engines], 2))), ". ",
+  if (max(shared_med) > 1.2) paste0(names(which.max(shared_med)), "'s numbers in the tables above are therefore likely higher than they would be in a process of its own; the data do not show why. ") else "",
+  if (n_dt_best == 0L) "data.table is the fastest other engine in no cell, so no win or loss of cuplyr depends on its numbers."
+  else paste0("data.table is the fastest other engine in ", n_dt_best, " of the ", n_cmp, " cells, and those comparisons depend on its numbers."))
+
+# ---- the GPU's idle cost: the idle probe, and the gaps before cuplyr's timed calls ---------------------
+have_idle <- !is.null(il) && nrow(il) > 0L
+idle_factor <- 1.25   # a median this many times the no-idle median counts as slowed by the idle time
+idle_gpu <- c("cuplyr_rowwise", "cuplyr_scan")
+idle_label <- c(cuplyr_rowwise = "cuplyr's rowwise form", cuplyr_scan = "the one-column cuplyr scan", duckdb = "DuckDB's rowwise form")
+idle_safe <- NA_real_; idle_first_slow <- NA_real_
+idle_finding <- "The idle probe (`idle.csv`, the driver's idle step) is not part of this data set."
+idle_tab <- NULL; idle_scan_slowed <- FALSE; idle_rows_n <- NA
+if (have_idle) {
+  il$ok <- as.logical(il$ok); il$quiet <- as.logical(il$quiet)
+  ilq <- il[il$ok & il$quiet, ]
+  n_il_bad <- sum(!(il$ok & il$quiet))
+  im <- stats::aggregate(secs ~ name + idle, data = ilq, FUN = stats::median)
+  il_lv <- sort(unique(im$idle))
+  im$base <- vapply(seq_len(nrow(im)), function(i) im$secs[im$name == im$name[i] & im$idle == min(il_lv)], 0)
+  im$x <- im$secs / im$base
+  slowed_at <- vapply(il_lv, function(t) any(im$x[im$idle == t & im$name %in% idle_gpu] > idle_factor), NA)
+  idle_first_slow <- if (any(slowed_at)) il_lv[which(slowed_at)[1L]] else NA_real_
+  idle_safe <- if (is.na(idle_first_slow)) max(il_lv) else max(il_lv[il_lv < idle_first_slow])
+  idle_scan_slowed <- any(im$x[im$name == "cuplyr_scan" & im$idle > idle_safe] > idle_factor)
+  imget <- function(nm, t, col = "secs") { x <- im[[col]][im$name == nm & im$idle == t]; if (length(x)) x[[1L]] else NA_real_ }
+  ig <- il[il$name %in% idle_gpu, ]
+  il_mem <- vapply(il_lv, function(t) stats::median(ig$mem_mhz_before[ig$idle == t], na.rm = TRUE), 0)
+  il_mem_after <- stats::median(ig$mem_mhz_after, na.rm = TRUE)
+  il_reps <- max(il$rep); idle_rows_n <- il$rows[[1L]]
+  top <- max(il_lv)
+  # nvidia-smi's performance state lags the clocks: reads with no idle time that report the
+  # state read after the longest idle while the memory clock is already above that idle's
+  ps_mode <- function(x) { x <- x[!is.na(x)]; if (!length(x)) NA_character_ else names(sort(table(x), decreasing = TRUE))[1L] }
+  ps_top <- ps_mode(ig$pstate_before[ig$idle == top])
+  ig0 <- ig[ig$idle == min(il_lv), ]
+  n_ps_lag <- sum(ig0$pstate_before %in% ps_top & ig0$mem_mhz_before > il_mem[il_lv == top], na.rm = TRUE)
+  ps_text <- if (is.na(ps_top)) "" else if (n_ps_lag) paste0(
+    " The performance state `nvidia-smi` reported is not used: it lags the clocks. With no idle time ", n_ps_lag, " of the ", nrow(ig0), " reads before a cuplyr call report ", ps_top,
+    ", the state reported after ", top, " seconds of idle, while the memory clock reads ", fnum(stats::median(ig0$mem_mhz_before[ig0$pstate_before %in% ps_top], na.rm = TRUE)),
+    " MHz. The memory clock is the measure here.") else " The table gives the memory clock; the performance state is in `idle.csv`."
+  # the median of the quiet reps, the lowest and highest in brackets, and their number
+  spread_of <- function(x) if (!length(x)) "n/a" else sprintf("%s (%s-%s) n=%d", fnum(stats::median(x)), fnum(min(x)), fnum(max(x)), length(x))
+  idle_tab <- data.frame(`idle (s)` = il_lv, check.names = FALSE)
+  for (il_nm in intersect(names(idle_label), unique(im$name))) {
+    idle_tab[[paste(idle_label[[il_nm]], "(s)")]] <- vapply(il_lv, function(t) spread_of(ilq$secs[ilq$name == il_nm & ilq$idle == t]), "")
+  }
+  idle_tab$`memory clock before a cuplyr call (MHz)` <- vapply(il_lv, function(t) {
+    x <- ig$mem_mhz_before[ig$idle == t & !is.na(ig$mem_mhz_before)]
+    if (!length(x)) "n/a" else if (min(x) == max(x)) fnum(x[[1L]]) else sprintf("%s (%s-%s)", fnum(stats::median(x)), fnum(min(x)), fnum(max(x)))
+  }, "")
+  idle_finding <- paste0(
+    if (is.na(idle_first_slow)) "In this data set cuplyr does not pay for a GPU left idle. " else "cuplyr pays for a GPU that has been left idle. ",
+    "The idle step (`idle.csv`) ran three calls on the wide table at ", lab_n(idle_rows_n),
+    " rows (warm cache): cuplyr's rowwise form, a one-column cuplyr scan (one column read with `read_parquet_gpu` and collected), and DuckDB's rowwise form as a CPU control. Each call ran after the machine had been left idle for ",
+    join_and(il_lv), " seconds, ", il_reps, " times for each idle time. Right before its pause every call was preceded by an untimed call of the same function, so the GPU had been idle for the pause whatever ran before (the time from the end of that call to the start of the timed one is the pause plus ",
+    fx(min(il$gap_s - il$idle, na.rm = TRUE), 2), " to ", fx(max(il$gap_s - il$idle, na.rm = TRUE), 2), " seconds for the quiet-machine wait and the state query). `nvidia-smi` read the GPU's performance state and memory clock just before and just after every timed call (",
+    n_of(n_il_bad, "call"), " of ", nrow(il), " ", if (n_il_bad == 1L) "was" else "were", " not quiet or failed and ", if (n_il_bad == 1L) "is" else "are", " left out). ",
+    "With no idle time cuplyr's rowwise form takes ", fs(imget("cuplyr_rowwise", min(il_lv))), " and the scan ", fs(imget("cuplyr_scan", min(il_lv))), " (median); after ", top, " seconds of idle they take ",
+    fs(imget("cuplyr_rowwise", top)), " and ", fs(imget("cuplyr_scan", top)), ", ", fx(imget("cuplyr_rowwise", top, "x"), 1), " and ", fx(imget("cuplyr_scan", top, "x"), 1),
+    " times as long. DuckDB's form takes ", fs(imget("duckdb", min(il_lv))), " and ", fs(imget("duckdb", top)), " (", fx(imget("duckdb", top, "x"), 2), " times), so the CPU engine does not pay it. ",
+    if (is.na(idle_first_slow)) paste0("No cuplyr median was more than ", fx(idle_factor, 2), " times its no-idle median at any idle time. ")
+    else paste0("After ", idle_safe, " seconds of idle or less no cuplyr median is more than ", fx(idle_factor, 2), " times its no-idle median; after ", idle_first_slow, " seconds at least one is. "),
+    "Before the calls after ", top, " seconds of idle, `nvidia-smi` reported a memory clock of ", fnum(il_mem[il_lv == top]),
+    " MHz (median), against ", fnum(il_mem[il_lv == min(il_lv)]), " MHz with no idle time; just after a cuplyr call the memory clock was ", fnum(il_mem_after),
+    " MHz (median over all of them). ",
+    if (isTRUE(il_mem[il_lv == top] < il_mem[il_lv == min(il_lv)])) "So the slow calls are the ones that start on a GPU whose memory clock has come down; what decides when the clocks drop and how fast they come back (the driver's power management) is not examined here."
+    else "The clocks read before the calls do not differ that way, so these data do not show what slows the calls down.",
+    ps_text,
+    " In the table each time is the median of the quiet reps, with the lowest and highest in brackets and their number (n).",
+    if (!is.null(ilsup) && nrow(ilsup) && !"primed" %in% names(ilsup)) paste0(
+      " An earlier run of the probe, without the untimed call before each pause (so a cuplyr call could follow DuckDB's pause as well as its own), is kept in `idle-superseded.csv` (", nrow(ilsup), " rows) and not used.") else "")
+}
+# the main cells: cuplyr's quiet reps that came more than idle_safe seconds after its previous call in the cell
+gap_of <- function(d) {
+  d <- d[order(d$started), ]
+  t <- as.numeric(tstamp(d$started))
+  d$gap <- c(NA, t[-1L] - (t[-length(t)] + ifelse(is.na(d$secs[-nrow(d)]), 0, d$secs[-nrow(d)])))
+  d
+}
+gap_text <- "The idle probe is not part of this data set, so the gaps before cuplyr's calls are not judged."
+gap_n_long <- 0L
+if (have_idle) {
+  cg <- do.call(rbind, lapply(split(tm[tm$engine == "cuplyr", ], paste(tm$variant, tm$table, tm$rows, tm$cache)[tm$engine == "cuplyr"]), gap_of))
+  cgq <- cg[cg$rep >= 1L & cg$ok & cg$quiet, ]
+  cgq$long <- !is.na(cgq$gap) & cgq$gap > idle_safe
+  gap_n_long <- sum(cgq$long)
+  gc_cells <- do.call(rbind, lapply(split(cgq, paste(cgq$variant, cgq$table, cgq$rows, cgq$cache)), function(d) {
+    short <- d$secs[!d$long]
+    data.frame(variant = d$variant[1L], table = d$table[1L], rows = d$rows[1L], cache = d$cache[1L], n_long = sum(d$long), n_short = length(short),
+               med = stats::median(d$secs), med_short = if (length(short)) stats::median(short) else NA_real_, stringsAsFactors = FALSE)
+  }))
+  gw <- merge(gc_cells, W[c("variant", "table", "rows", "cache", "best_med")], by = c("variant", "table", "rows", "cache"))
+  gw$change <- gw$med_short / gw$med - 1
+  gw$ratio <- gw$med / gw$best_med; gw$ratio_short <- gw$med_short / gw$best_med
+  cls <- function(r) ifelse(r <= 1 / tie_tol, "win", ifelse(r >= tie_tol, "loss", ifelse(r < 1, "near win", "near loss")))
+  gl <- gw[gw$n_long > 0L, ]
+  flip_win <- sum((gl$ratio < 1) != (gl$ratio_short < 1), na.rm = TRUE)
+  flip_cls <- sum(cls(gl$ratio) != cls(gl$ratio_short), na.rm = TRUE)
+  gl_x <- gl[!is.na(gl$ratio_short) & cls(gl$ratio) != cls(gl$ratio_short), ]
+  long_by_size <- tapply(cgq$long, cgq$rows, sum)
+  long_sizes <- as.numeric(names(long_by_size)[long_by_size > 0])
+  # how many short-gap reps the medians without the long ones rest on
+  # (a cell with no short rep left is counted once, in the clause on cells that keep none)
+  rest_tab <- table(gl$n_short[gl$n_short > 0L])
+  reps_word <- function(k) if (k == 1) "a single rep" else paste(k, "reps")
+  rest_text <- if (!nrow(gl)) "" else if (!length(rest_tab)) paste0(" Without them, none of those ", nrow(gl), " cells keeps a rep.") else paste0(
+    " Without them, cuplyr's median rests on ", join_and(sprintf("%s in %d", vapply(as.integer(names(rest_tab)), reps_word, ""), as.integer(rest_tab))), " of those ", nrow(gl), " cells",
+    if (any(gl$n_short == 0L)) paste0(", and ", sum(gl$n_short == 0L), " keep no rep at all") else "", ", so these medians are rough.")
+  # the split is conservative: the probe's own gaps at idle_safe ran a little past idle_safe
+  probe_gap <- max(il$gap_s[il$idle == idle_safe & il$name %in% idle_gpu & il$ok & il$quiet], na.rm = TRUE)
+  long_gaps <- cgq$gap[cgq$long]
+  n_long_in_probe <- sum(long_gaps <= probe_gap)
+  n_long_untested <- if (is.na(idle_first_slow)) NA_integer_ else sum(long_gaps < idle_first_slow)
+  split_text <- paste0(
+    " The split is conservative: a rep counts as long once its gap passes ", idle_safe, " seconds, although the probe's own gaps at ", idle_safe,
+    " seconds of idle ran to ", fx(probe_gap, 1), " seconds with no slowdown. Of the ", gap_n_long, " long reps, ", n_long_in_probe, " followed a gap no longer than that",
+    if (!is.na(n_long_untested)) paste0(" and ", n_long_untested, " (those included) a gap shorter than ", idle_first_slow, " seconds, the shortest idle time at which the probe saw a slowdown (it tested none in between)") else "",
+    ".")
+  gap_text <- if (!gap_n_long) paste0(
+    "In the main cells, every quiet cuplyr rep came at most ", fx(max(cgq$gap, na.rm = TRUE), 1), " seconds after cuplyr's previous call in its cell, within the ", idle_safe,
+    " seconds of idle after which the idle probe saw no slowdown.") else paste0(
+    "In the main cells, ", gap_n_long, " of cuplyr's ", nrow(cgq), " quiet reps came more than ", idle_safe, " seconds after cuplyr's previous call in the same cell, while the other engines ran (",
+    idle_safe, " seconds is the longest idle after which the idle probe saw no slowdown): ",
+    join_and(sprintf("%d of %d at %s rows", as.integer(long_by_size[long_by_size > 0]), as.integer(tapply(cgq$long, cgq$rows, length)[long_by_size > 0]), lab_n(long_sizes))),
+    ", in ", nrow(gl), " cells, with gaps of up to ", fx(max(cgq$gap[cgq$long]), 1), " seconds. Leaving those reps out moves cuplyr's median in those cells by ", pct1(min(abs(gl$change), na.rm = TRUE)), " to ", pct1(max(abs(gl$change), na.rm = TRUE)),
+    " (it is lower without them in ", sum(gl$change < 0, na.rm = TRUE), " of the ", nrow(gl), "), changes whether cuplyr has the lowest median in ", flip_win, " of them, and moves ", flip_cls,
+    " across the ", fx(tie_tol, 1), " margin",
+    if (nrow(gl_x)) paste0(" (", join_and(sprintf("%s on the %s table at %s rows, %s cache: ratio %s with them, %s without, from %s", gl_x$variant, gl_x$table, lab_n(gl_x$rows), gl_x$cache,
+                                                 fx(gl_x$ratio, 3), fx(gl_x$ratio_short, 3), vapply(gl_x$n_short, reps_word, ""))), ")") else "",
+    ".", rest_text, split_text, " The medians in the tables keep these reps.")
+}
+
+# ---- the rowwise pipeline ----------------------------------------------------------------------------
+# (rowwise.csv, rowwise-correctness.csv, rowwise-native.csv: the driver's rowwise_check and rowwise steps)
+have_rw <- !is.null(rw) && !is.null(rwc) && !is.null(rwn)
+rw_forms <- pp_rowwise_forms()
+rw_label <- c(cuplyr_rowwise = "cuplyr rowwise", dplyr_rowwise = "dplyr rowwise", dplyr_vectorised = "dplyr vectorised",
+              datatable_vectorised = "data.table vectorised", duckdb = "DuckDB")
+rw_cols <- k_const$rowwise_cols
+rw_cols_text <- paste0("`", rw_cols, "`")
+RS <- data.frame(form = character(), rows = numeric(), cache = character(), status = character(), n = integer(), med = numeric())
+rw_cap <- NA_real_; rw_sizes <- numeric(); cap_size <- c(); rw_cap_text <- ""
+rw_correct_text <- rw_native_text <- rw_time_text <- rw_ratio_text <- rw_quiet_text <- rw_warm_text <- rw_groups_text <- ""
+rw_best_text <- rw_reps_text <- rw_intro <- rw_method_text <- rw_cells_text <- rw_sup_text <- rw_gap_text <- ""
+cap_at <- c()
+rw_needed_text <- join_and(paste0("`", pp_columns("rowwise"), "`"))
+rw_missing <- "The rowwise chunk is not part of this data set: `rowwise.csv`, `rowwise-correctness.csv` or `rowwise-native.csv` is missing, so the rowwise steps of the driver have not run."
+rw_native_tab <- NULL; RR <- NULL
+if (have_rw) {
+  rw$quiet <- as.logical(rw$quiet); rw$ok <- as.logical(rw$ok)
+  rw_sizes <- sort(unique(rw$rows))
+  rw_cap <- max(rw$cap, na.rm = TRUE)
+  rw_key <- function(d) paste(d$form, d$rows, d$cache, sep = "|")
+  rwq <- rw[rw$rep >= 1L & rw$ok & rw$quiet, ]
+  rw_cells <- unique(rw[c("form", "rows", "cache")])
+  rw_cells$key <- rw_key(rw_cells)
+  rw_sum <- lapply(split(rwq, rw_key(rwq)), function(d) {
+    data.frame(key = rw_key(d)[1L], n = nrow(d), med = stats::median(d$secs),
+               q25 = unname(stats::quantile(d$secs, 0.25)), q75 = unname(stats::quantile(d$secs, 0.75)),
+               lo = min(d$secs), hi = max(d$secs), busy = stats::median(d$busy), stringsAsFactors = FALSE)
+  })
+  RS <- if (length(rw_sum)) merge(rw_cells, do.call(rbind, rw_sum), by = "key", all.x = TRUE) else cbind(rw_cells, n = NA_integer_, med = NA_real_, q25 = NA_real_, q75 = NA_real_, lo = NA_real_, hi = NA_real_, busy = NA_real_)
+  RS$n[is.na(RS$n)] <- 0L
+  rw_stat <- tapply(rw$status, rw_key(rw), function(x) { bad <- x[x != "ok"]; if (length(bad)) bad[[1L]] else "ok" })
+  RS$status <- unname(rw_stat[RS$key])
+  RS$status[RS$status == "ok" & RS$n == 0L] <- "noisy"
+  RS$form <- factor(RS$form, rw_forms); RS <- RS[order(RS$cache != "warm", RS$rows, RS$form), ]; RS$form <- as.character(RS$form)
+  capd <- RS[RS$status == "capped", ]
+  cap_size <- if (nrow(capd)) tapply(capd$rows, capd$form, min) else c()
+  # the elapsed time at the abort of each capped call (NA in data taken before it was recorded)
+  rw_capped_rows <- rw[rw$status == "capped", ]
+  cap_at <- if (nrow(rw_capped_rows)) tapply(rw_capped_rows$secs, rw_key(rw_capped_rows), max) else c()
+  rw_cap_text <- paste0(fnum(rw_cap), " seconds")
+  # groups in the result
+  rw_groups <- max(rwc$result_rows, na.rm = TRUE)
+  rw_groups_text <- paste0(rw_groups, " groups")
+
+  # correctness
+  rwc_n <- nrow(rwc); rwc_ok <- sum(rwc$status == "ok")
+  rwc_other <- rwc[!rwc$status %in% c("ok", "capped", "not_run"), ]
+  rw_correct_text <- paste0(
+    rwc_ok, " of the ", rwc_n, " results (form and size) equal the base-R reference (keys exactly, measures within a relative tolerance of ", format(k_const$tol), ")",
+    if (any(rwc$status == "capped")) paste0(". Aborted at the cap before they could be compared: ",
+                                            join_and(sprintf("%s at %s rows", rw_label[rwc$form[rwc$status == "capped"]], lab_n(rwc$rows[rwc$status == "capped"]))), "") else "",
+    if (any(rwc$status == "not_run")) paste0(". Not run, because the form had been capped at a smaller size: ",
+                                             join_and(sprintf("%s at %s rows", rw_label[rwc$form[rwc$status == "not_run"]], lab_n(rwc$rows[rwc$status == "not_run"]))), "") else "",
+    if (nrow(rwc_other)) paste0(". Wrong or failed: ", join_and(sprintf("%s at %s rows (%s)", rw_label[rwc_other$form], lab_n(rwc_other$rows), rwc_other$status))) else "",
+    ". Every timed call's result was compared with the same reference, untimed.")
+
+  # cuplyr's verdict, from F88's cuplyr_cpu_fallback condition
+  rwn$native <- as.logical(rwn$native)
+  rwn <- rwn[order(rwn$rows), ]
+  rw_native_tab <- data.frame(rows = lab_n(rwn$rows),
+                              verdict = ifelse(is.na(rwn$native), "error", ifelse(rwn$native, "native (no fallback condition)", "CPU fallback")),
+                              `columns read` = ifelse(is.na(rwn$columns_read) | !nzchar(rwn$columns_read), "n/a", paste(lengths(strsplit(rwn$columns_read, ",")), "of", ncol_of("wide"))),
+                              reason = ifelse(is.na(rwn$reason) | !nzchar(rwn$reason), "", rwn$reason), check.names = FALSE)
+  # every timed cuplyr call watched for the same condition (rowwise.csv's `fallback`)
+  cu_rows <- rw[rw$form == "cuplyr_rowwise" & rw$status != "not_run", ]
+  have_fb <- "fallback" %in% names(rw)
+  fb <- if (have_fb) as.logical(cu_rows$fallback) else rep(NA, nrow(cu_rows))
+  n_fb_watched <- sum(!is.na(fb)); n_fb_hit <- sum(fb %in% TRUE)
+  rw_fb_text <- if (!have_fb) "The timed calls of this data set were not watched for a fallback, so the verdict rests on the check step's run." else paste0(
+    "The timed calls were watched too: a calling handler on `cuplyr_cpu_fallback` around each of the ", nrow(cu_rows), " timed cuplyr calls (every rep, the first call of each cell included) recorded ",
+    if (n_fb_hit == 0L) "no fallback" else n_of(n_fb_hit, "fallback"), " (the `fallback` column of `rowwise.csv`)",
+    if (n_fb_watched < nrow(cu_rows)) paste0("; ", nrow(cu_rows) - n_fb_watched, " of the calls have no record") else "", ".")
+  rw_gpu_only <- all(rwn$native %in% TRUE) && have_fb && n_fb_hit == 0L && n_fb_watched == nrow(cu_rows)
+  rw_native_text <- paste0(
+    if (all(rwn$native %in% TRUE)) paste0("cuplyr's rowwise form ran natively at every size (", join_and(lab_n(rwn$rows)), " rows): the check step's run saw no `cuplyr_cpu_fallback` condition. ")
+    else paste0("cuplyr's rowwise form ", join_and(sprintf("%s at %s rows", ifelse(is.na(rwn$native), "failed with an error", ifelse(rwn$native, "ran natively", "fell back to the CPU")), lab_n(rwn$rows))),
+                ". Where it fell back, its timing is a CPU timing (the reasons are in the table). "),
+    rw_fb_text,
+    if (rw_gpu_only) " So every timed cuplyr call ran without a fallback, and the timings of that form are GPU timings." else "")
+
+  # warm-up
+  rw_warm_text <- if (is.null(rww)) "" else paste0(
+    "Right before each cell, its forms were called ", n_of(max(rww$call), "time"), " each, untimed, on the ", lab_n(max(rww$warm_rows)),
+    "-row file (", nrow(rww), " calls in all, `rowwise-warmup.csv`), so each form's start-up costs fall before its timed calls; the first call of a cell (rep 0) is recorded and kept out of the medians. ",
+    "A warm-up does not keep the GPU from idling later in a cell; the separate cells and the gaps below are about that.")
+
+  # timed calls and the load rule
+  rw_timed <- rw[rw$rep >= 1L & rw$ok, ]
+  rw_quiet_text <- paste0(
+    "Of the ", nrow(rw_timed), " timed rowwise calls, ", sum(!rw_timed$quiet), " ", was_were(sum(!rw_timed$quiet)), " not quiet; the highest foreign share in a quiet call is ", pct1(max(rw_timed$busy[rw_timed$quiet])),
+    " (limit ", pct(max(rw$busy_max)), "), and the highest wait before a call was ", fx(max(rw$wait_secs, na.rm = TRUE), 2), " seconds. The number of quiet reps behind every median is in the tables (n). ",
+    "Residency before the calls: lowest ", pct(min(rw$resident[rw$cache == "warm" & rw$ok])), " (warm), highest ", pct(max(rw$resident[rw$cache == "cold" & rw$ok])), " (cold).")
+
+  # ratios of cuplyr rowwise to every other form
+  rw_get <- function(f, n, cache) RS[RS$form == f & RS$rows == n & RS$cache == cache, ]
+  RR <- do.call(rbind, lapply(setdiff(rw_forms, "cuplyr_rowwise"), function(o) do.call(rbind, lapply(rw_sizes, function(n) do.call(rbind, lapply(c("warm", "cold"), function(cache) {
+    cu <- rw_get("cuplyr_rowwise", n, cache); ot <- rw_get(o, n, cache)
+    if (!nrow(cu) || !nrow(ot)) return(NULL)
+    cu_ok <- cu$status == "ok" && cu$n > 0L
+    data.frame(other = o, rows = n, cache = cache, other_status = ot$status, cu_med = if (cu_ok) cu$med else NA_real_,
+               ratio = if (cu_ok && ot$status == "ok" && ot$n > 0L) cu$med / ot$med else NA_real_,
+               bound = if (cu_ok && ot$status == "capped") cu$med / rw_cap else NA_real_, stringsAsFactors = FALSE)
+  }))))))
+  span_of <- function(x) if (fnum(min(x)) == fnum(max(x))) fnum(min(x)) else paste("between", fnum(min(x)), "and", fnum(max(x)))
+  cap1 <- function(x) paste0(toupper(substr(x, 1L, 1L)), substring(x, 2L))
+  # dplyr rowwise has cells of its own, so a comparison is per size and cache state, not per cell
+  sc_of <- function(n, more = FALSE) paste0(n, if (more) " more", if (n == 1) " combination" else " combinations", " of size and cache state")
+  rw_vs_text <- function(o) {
+    r <- RR[RR$other == o, ]; ok <- r[!is.na(r$ratio), ]; bd <- r[is.na(r$ratio) & !is.na(r$bound), ]
+    lab <- rw_label[[o]]
+    parts <- character()
+    if (nrow(ok)) parts <- c(parts, sprintf("against %s, cuplyr's median is %s times its median in the %s where both have quiet reps (cuplyr is faster in %d of them and slower in %d)",
+                                            lab, span_of(ok$ratio), sc_of(nrow(ok)), sum(ok$ratio < 1), sum(ok$ratio > 1)))
+    if (nrow(bd)) parts <- c(parts, sprintf("in %s %s was capped, so there the ratio is below cuplyr's median divided by the cap, which is %s (a bound, not a measurement)",
+                                            sc_of(nrow(bd), more = nrow(ok) > 0L), lab, span_of(bd$bound)))
+    if (!length(parts)) paste0("There is no cell in which cuplyr rowwise and ", lab, " both have a quiet median or a cap.")
+    else paste0(cap1(paste(parts, collapse = "; ")), ".")
+  }
+  rw_ratio_text <- paste(vapply(c("dplyr_rowwise", "dplyr_vectorised", "datatable_vectorised", "duckdb"), function(o) rw_vs_text(o), ""), collapse = " ")
+
+  # the lowest median of each cell, by form
+  ok_cells <- RS[RS$status == "ok" & RS$n > 0L, ]
+  best_by <- vapply(split(ok_cells, paste(ok_cells$rows, ok_cells$cache)), function(d) d$form[which.min(d$med)], "")
+  best_tab <- table(factor(best_by, rw_forms))
+  # how many forms each combination compares (a capped or not-run form has no median)
+  nf_tab <- table(vapply(split(ok_cells, paste(ok_cells$rows, ok_cells$cache)), nrow, 1L))
+  nf_tab <- nf_tab[order(-as.integer(names(nf_tab)))]
+  nf_text <- if (length(nf_tab) == 1L) paste0(names(nf_tab), " forms in each") else join_and(sprintf("%s forms in %d", names(nf_tab), as.integer(nf_tab)))
+  rw_best_text <- paste0("Of the ", length(best_by), " combinations of size and cache state, comparing the forms with a quiet median in each, from both cells where there are two (",
+                         nf_text, "), the lowest median belongs to ",
+                         join_and(sprintf("%s in %d", rw_label[names(best_tab)[best_tab > 0]], as.integer(best_tab[best_tab > 0]))), ".")
+  rw_reps_text <- join_and(sprintf("%s rows: %d", lab_n(rw_sizes), vapply(rw_sizes, function(n) max(rw$rep[rw$rows == n]), 1L)))
+  rw_intro <- paste0(
+    "The rowwise pipeline is a per-row computation. It reads the wide table, computes for every row the largest (`m`) and the sum (`s`) of the four double columns ",
+    join_and(rw_cols_text), " (the filler columns have no missing values), and summarises by `category`: the count, the mean of `m` and the sum of `s`, ", rw_groups_text,
+    ". It ran at ", join_and(lab_n(rw_sizes)), " rows. dplyr's rowwise route evaluates the expression once per row and gets slow fast, so every call had a cap of ", rw_cap_text,
+    ", and a call over the cap was aborted and recorded as capped.")
+
+  # the timing tables' prose (rw_method_text is built after rw_time_text, below)
+  capped_cells <- RS[RS$status == "capped", ]
+  abort_of <- function(key) { x <- if (length(cap_at) && key %in% names(cap_at)) cap_at[[key]] else NA_real_; if (is.na(x)) "" else paste0(", aborted after ", fs(x)) }
+  rw_time_text <- paste0(
+    if (nrow(capped_cells)) paste0("A call was aborted at the cap of ", rw_cap_text, " in ", n_of(nrow(capped_cells), "cell"), ": ",
+                                   join_and(sprintf("%s at %s rows (%s cache%s)", rw_label[capped_cells$form], lab_n(capped_cells$rows), capped_cells$cache,
+                                                    vapply(capped_cells$key, abort_of, ""))),
+                                   ". These cells are shown as capped, not as a number (a capped call is never part of a median); a form capped at one size was not run at larger sizes, and those cells say so.")
+    else paste0("No call reached the cap of ", rw_cap_text, "."))
+  rw_method_text <- paste0("The quiet reps per cell are ", rw_reps_text, ". ", rw_warm_text, " ", rw_quiet_text, " ", rw_time_text)
+
+  # how the forms shared cells: dplyr rowwise in cells of its own, the others together
+  has_cf <- "cell_forms" %in% names(rw)
+  rw_sh <- rw[rw$form != "dplyr_rowwise" & rw$status != "not_run", ]
+  rw_own <- rw[rw$form == "dplyr_rowwise" & rw$status != "not_run", ]
+  cell_chk <- do.call(rbind, lapply(split(rw_sh, paste(rw_sh$rows, rw_sh$cache)), function(d) {
+    t <- as.numeric(tstamp(d$started)); t_end <- t + ifelse(is.na(d$secs), 0, d$secs)
+    first_t <- tapply(t, d$form, min); last_t <- tapply(t, d$form, max)
+    o <- rw_own[rw_own$rows == d$rows[1L] & rw_own$cache == d$cache[1L], ]
+    to <- as.numeric(tstamp(o$started))
+    data.frame(rows = d$rows[1L], cache = d$cache[1L], forms = length(first_t), interleaved = length(first_t) > 1L && max(first_t) < min(last_t),
+               own_inside = any(to >= min(t) & to <= max(t_end)), has_own = nrow(o) > 0L, stringsAsFactors = FALSE)
+  }))
+  rw_split <- has_cf && !any(cell_chk$own_inside)
+  dr <- rw_get("dplyr_rowwise", min(rw_sizes), "warm"); cu0 <- rw_get("cuplyr_rowwise", min(rw_sizes), "warm")
+  dr_x <- if (nrow(dr) && nrow(cu0) && dr$n > 0L && cu0$n > 0L) dr$med / cu0$med else NA_real_
+  four_sizes <- sort(unique(cell_chk$rows[!cell_chk$has_own]))
+  shared_forms <- setdiff(rw_forms, "dplyr_rowwise")
+  rw_cells_text <- if (!rw_split) "In this data set dplyr rowwise shared its cells with the other forms, so a cuplyr call could follow one of its long calls." else paste0(
+    "A size in a cache state makes two cells, run one after the other with the same cache control, check, cap and load rule. dplyr rowwise is timed in a cell of its own: ",
+    if (!is.na(dr_x)) paste0("at ", lab_n(min(rw_sizes)), " rows (warm cache) its median call takes ", fs(dr$med), ", ", format(round(dr_x), big.mark = ","), " times cuplyr rowwise's, ") else "",
+    "so in a shared cell each of its calls would leave the GPU idle for that long between two cuplyr calls, and an idle GPU makes the next cuplyr call slower (see Findings). ",
+    "The other forms (", join_and(rw_label[shared_forms]), ") are timed together in the other cell, interleaved: their start times interleave in ", sum(cell_chk$interleaved), " of the ", nrow(cell_chk),
+    " such cells, and no dplyr rowwise call started while one of them ran (both checked in `rowwise.csv`)",
+    if (length(four_sizes)) paste0(". At ", join_and(lab_n(four_sizes)), " rows dplyr rowwise was not run (it had been capped at a smaller size), so there the shared cell is the only one and has four forms") else "",
+    ". The ratios against dplyr rowwise below compare medians from the two cells of a size and cache state.")
+
+  # the gaps before cuplyr's timed rowwise calls, against the idle probe
+  rcg <- do.call(rbind, lapply(split(cu_rows, paste(cu_rows$rows, cu_rows$cache)), gap_of))
+  rcq <- rcg[rcg$rep >= 1L & rcg$ok & rcg$quiet, ]
+  rw_gap_max <- max(rcq$gap, na.rm = TRUE)
+  rw_gap_text <- paste0(
+    "Every quiet cuplyr rep came at most ", fx(rw_gap_max, 1), " seconds after cuplyr's previous call in its cell",
+    if (!have_idle) "." else if (rw_gap_max <= idle_safe) paste0(", within the ", idle_safe, " seconds of idle after which the idle probe saw no slowdown.")
+    else paste0("; ", sum(rcq$gap > idle_safe, na.rm = TRUE), " came more than the ", idle_safe, " seconds of idle after which the idle probe saw no slowdown, and their times may include it."))
+
+  # the earlier measurement, archived when the chunk was re-timed. Built in local(): only
+  # the paragraph leaves it, so its working names cannot replace a name the prose uses
+  if (!is.null(rwsup) && nrow(rwsup)) rw_sup_text <- local({
+    rwsup$ok <- as.logical(rwsup$ok); rwsup$quiet <- as.logical(rwsup$quiet)
+    old_shared <- if ("cell_forms" %in% names(rwsup)) is.na(rwsup$cell_forms) | !nzchar(rwsup$cell_forms) else rep(TRUE, nrow(rwsup))
+    os <- rwsup[which(old_shared & rwsup$form == "cuplyr_rowwise" & rwsup$rep >= 1L & rwsup$ok & rwsup$quiet & rwsup$rows == min(rw_sizes)), ]
+    old_med <- vapply(c("warm", "cold"), function(cc) { x <- os$secs[os$cache == cc]; if (length(x)) stats::median(x) else NA_real_ }, 0)
+    new_med <- vapply(c("warm", "cold"), function(cc) { x <- rw_get("cuplyr_rowwise", min(rw_sizes), cc); if (nrow(x) && x$n > 0L) x$med else NA_real_ }, 0)
+    # each archived row's run: the superseded rowwise step whose window it started in
+    pv_rw_old <- pv[pv$step == "rowwise" & pv$superseded, ]
+    sup_t <- tstamp(rwsup$started)
+    rwsup$head <- vapply(seq_along(sup_t), function(i) {
+      j <- which(pv_rw_old$t0 <= sup_t[i] & pv_rw_old$t1 >= sup_t[i]); if (length(j)) pv_rw_old$git_head[j[1L]] else NA_character_
+    }, "")
+    # a form that was not run has no start time: its run is the run of the rows archived with it
+    # (the driver stamps every row of a replaced piece with the same superseded_at)
+    if ("superseded_at" %in% names(rwsup)) {
+      at_head <- tapply(rwsup$head, rwsup$superseded_at, function(h) { h <- unique(h[!is.na(h)]); if (length(h) == 1L) h else NA_character_ })
+      miss <- is.na(rwsup$head)
+      rwsup$head[miss] <- unname(at_head[rwsup$superseded_at[miss]])
+    }
+    n_unmatched <- sum(is.na(rwsup$head))
+    sup_heads <- unique(rwsup$head[!is.na(rwsup$head)])
+    # the same method as the data in use: dplyr rowwise in cells of its own; the latest such run is the replicate
+    same_heads <- unique(rwsup$head[!old_shared & !is.na(rwsup$head)])
+    rw_rep_text <- ""
+    if (length(same_heads)) {
+      rep_head <- same_heads[length(same_heads)]
+      rp <- rwsup[rwsup$head %in% rep_head, ]
+      rpq <- rp[rp$rep >= 1L & rp$ok & rp$quiet, ]
+      rp_med <- tapply(rpq$secs, rw_key(rpq), stats::median)
+      rp_stat <- tapply(rp$status, rw_key(rp), function(x) { bad <- x[x != "ok"]; if (length(bad)) bad[[1L]] else "ok" })
+      cur <- RS[RS$status == "ok" & RS$n > 0L, ]
+      cur$old <- unname(rp_med[cur$key])
+      both <- cur[!is.na(cur$old), ]
+      # verdict 1: per size and cache state, the form with the lowest median among the forms with a median in both runs
+      lowest <- function(col) vapply(split(both, paste(both$rows, both$cache)), function(z) z$form[which.min(z[[col]])], "")
+      b_new <- lowest("med"); b_old <- lowest("old")[names(b_new)]
+      n_best_same <- sum(b_new == b_old)
+      # verdict 2: cuplyr rowwise faster or slower than each other form
+      side <- do.call(rbind, lapply(split(both, paste(both$rows, both$cache)), function(z) {
+        cu <- z[z$form == "cuplyr_rowwise", ]; ot <- z[z$form != "cuplyr_rowwise", ]
+        if (!nrow(cu) || !nrow(ot)) return(NULL)
+        data.frame(form = ot$form, rows = ot$rows, cache = ot$cache, new = cu$med / ot$med, old = cu$old / ot$old, stringsAsFactors = FALSE)
+      }))
+      if (is.null(side)) side <- data.frame(form = character(), rows = numeric(), cache = character(), new = numeric(), old = numeric())
+      n_side_same <- sum((side$new < 1) == (side$old < 1))
+      # verdict 3: the same cells capped or not run (the not-run rows matched above included)
+      st_keys <- intersect(RS$key, names(rp_stat))
+      n_stat_same <- sum(unname(rp_stat[st_keys]) == RS$status[match(st_keys, RS$key)])
+      agrees <- n_best_same == length(b_new) && n_side_same == nrow(side) && n_stat_same == length(st_keys)
+      # cuplyr at the smallest size (warm), and its ratio to DuckDB at the largest size both runs have (warm)
+      cu_old_small <- rp_med[paste("cuplyr_rowwise", min(rw_sizes), "warm", sep = "|")]
+      dk <- side[side$form == "duckdb" & side$cache == "warm", ]
+      dk <- dk[dk$rows == max(dk$rows), ]
+      # the spread between the runs: the largest difference of a median, and the rest
+      both$rel <- abs(both$old / both$med - 1)
+      both$outside <- both$old < both$q25 | both$old > both$q75
+      top <- which.max(both$rel); ex <- both[top, ]
+      rest_rel <- if (nrow(both) > 1L) max(both$rel[-top]) else NA_real_
+      # the chance that a replicate median lies outside this run's interquartile range if both runs
+      # are draws from one distribution: the pooled quiet reps of a form, size and cache state, split
+      # between the runs in every possible way (up to max_splits ways) or else in n_perm random ways
+      # (a fixed seed; the session's random state is put back afterwards)
+      n_perm <- 4000L; max_splits <- 1000
+      seed_old <- if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) get(".Random.seed", envir = globalenv()) else NULL
+      set.seed(121L)
+      chance <- do.call(rbind, lapply(both$key, function(k) {
+        x <- rwq$secs[rw_key(rwq) == k]; pool <- c(x, rpq$secs[rw_key(rpq) == k]); nx <- length(x)
+        outside <- function(i) {
+          q <- stats::quantile(pool[i], c(0.25, 0.75), names = FALSE); m <- stats::median(pool[-i])
+          m < q[1L] || m > q[2L]
+        }
+        every <- choose(length(pool), nx) <= max_splits
+        p <- if (every) mean(apply(utils::combn(length(pool), nx), 2L, outside)) else mean(vapply(seq_len(n_perm), function(b) outside(sample.int(length(pool), nx)), NA))
+        data.frame(nx = nx, ny = length(pool) - nx, every = every, p = p)
+      }))
+      if (is.null(seed_old)) rm(".Random.seed", envir = globalenv()) else assign(".Random.seed", seed_old, envir = globalenv())
+      n_out <- sum(both$outside)
+      exp_out <- sum(chance$p)
+      # the count's distribution, the cells taken as independent (a Poisson-binomial), and its upper tail
+      dist <- 1
+      for (p in chance$p) dist <- c(dist * (1 - p), 0) + c(0, dist * p)
+      p_out <- sum(dist[(n_out + 1L):length(dist)])
+      split_of <- function(z) join_or(unique(sprintf("%d and %d reps", z$nx, z$ny)))
+      spread_text <- if (!nrow(both)) "No median has quiet reps in both runs" else paste0(
+        "The largest difference between the runs is for ", rw_label[[ex$form]], " at ", lab_n(ex$rows), " rows (", ex$cache, " cache): ", fs(ex$old), " there against ", fs(ex$med), " here, ",
+        pct1(ex$rel), " apart and ", if (ex$outside) "outside" else "inside", " this run's interquartile range (", fnum(ex$q25), "-", fnum(ex$q75), " s)",
+        if (!is.na(rest_rel)) paste0("; the other ", nrow(both) - 1L, " medians (a form at a size and cache state) differ by ", pct1(rest_rel), " or less") else "",
+        ". The replicate's median lies outside this run's interquartile range in ", n_out, " of the ", nrow(both), ". If the two runs were draws from one distribution, about ", fx(exp_out, 1),
+        " would, and ", n_out, " or more would with a chance of ", pct(p_out), " (from splitting the pooled quiet reps of each form, size and cache state between the two runs: ",
+        join_and(c(if (any(chance$every)) paste0("every possible split for a cell of ", split_of(chance[chance$every, ])),
+                   if (any(!chance$every)) paste0(format(n_perm, big.mark = ","), " random splits for a cell of ", split_of(chance[!chance$every, ])))),
+        "). So the count gives ", if (p_out >= 0.05) "no sign that the runs differ by more than the spread within one run" else "a sign that the runs differ by more than the spread within one run")
+      rw_rep_text <- paste0(
+        ". The ", if (length(sup_heads) == 2L) "second" else "last", " of them, from benchmark commit `", rep_head, "`, timed dplyr rowwise in cells of its own, as the data in use do, and so is a replicate of them. ",
+        if (agrees) "It agrees on every verdict: " else "It does not agree on every verdict: ",
+        "in ", n_best_same, " of the ", length(b_new), " combinations of size and cache state the same form has the lowest median among the forms with a median in both runs, in ",
+        n_side_same, " of the ", nrow(side), " comparisons with another form cuplyr rowwise is faster in both runs or slower in both, and ", n_stat_same, " of the ", length(st_keys), " combinations of form, size and cache state in both runs have the same status (",
+        join_or(gsub("_", " ", sort(unique(c(RS$status[match(st_keys, RS$key)], unname(rp_stat[st_keys])))), fixed = TRUE)), ")",
+        if (n_unmatched) paste0("; ", n_of(n_unmatched, "archived row"), " match no run and ", if (n_unmatched == 1L) "is" else "are", " left out") else "", ". ",
+        "cuplyr's median at ", lab_n(min(rw_sizes)), " rows (warm cache) was ", fs(cu_old_small), " there and ", fs(new_med[["warm"]]), " here",
+        if (nrow(dk)) paste0(", and its ratio to DuckDB at ", lab_n(dk$rows), " rows (warm cache) ", fx(dk$old, 2), " there and ", fx(dk$new, 2), " here") else "", ". ",
+        spread_text)
+    }
+    paste0(
+      "Earlier runs of this chunk are kept in `rowwise-superseded.csv` (", nrow(rwsup), " rows) and not used",
+      if (any(old_shared) && !any(is.na(old_med)) && !any(is.na(new_med))) paste0(
+        ". The first of them timed dplyr rowwise in the same cells as the other forms, and there cuplyr's median at ", lab_n(min(rw_sizes)), " rows was ", fs(old_med[["warm"]]), " (warm) and ", fs(old_med[["cold"]]),
+        " (cold), ", fx(old_med[["warm"]] / new_med[["warm"]], 1), " and ", fx(old_med[["cold"]] / new_med[["cold"]], 1), " times the medians above") else "", rw_rep_text, ".")
+  })
+}
+rw_ratio_cell <- function(r) {
+  if (!is.na(r$ratio)) fnum(r$ratio) else if (!is.na(r$bound)) paste0("< ", fnum(r$bound), " (capped)")
+  else if (r$other_status == "not_run") "not run" else "n/a"
+}
+rw_cell_text <- function(d) {
+  vapply(seq_len(nrow(d)), function(i) {
+    x <- d[i, ]
+    cs <- if (length(cap_size) && x$form %in% names(cap_size)) cap_size[[x$form]] else NA_real_
+    switch(x$status,
+      ok = sprintf("%s (%s-%s) n=%d", fnum(x$med), fnum(x$q25), fnum(x$q75), x$n),
+      capped = paste0("capped: a call ran over ", fnum(rw_cap), " s",
+                      if (length(cap_at) && x$key %in% names(cap_at) && !is.na(cap_at[[x$key]])) paste0(" (aborted at ", fnum(cap_at[[x$key]]), " s)") else "",
+                      if (x$n > 0L) sprintf(" (%d quiet reps before)", x$n) else ""),
+      not_run = paste0("not run: capped at ", if (is.na(cs)) "a smaller size" else paste(lab_n(cs), "rows")),
+      oom = "does not fit", noisy = "no quiet rep", x$status)
+  }, "")
+}
+rw_tab <- function(cache) {
+  d <- RS[RS$cache == cache, ]
+  if (!nrow(d)) return(NULL)
+  rows <- lapply(sort(unique(d$rows)), function(n) {
+    r <- d[d$rows == n, ]
+    usable <- r$status == "ok" & r$n > 0L
+    best <- if (any(usable)) r$form[usable][which.min(r$med[usable])] else NA_character_
+    txt <- rw_cell_text(r)
+    cells <- vapply(rw_forms, function(f) { i <- match(f, r$form); if (is.na(i)) "-" else if (identical(f, best)) paste0("**", txt[[i]], "**") else txt[[i]] }, "")
+    out <- data.frame(rows = lab_n(n), stringsAsFactors = FALSE)
+    for (f in rw_forms) out[[rw_label[[f]]]] <- cells[[f]]
+    out
+  })
+  do.call(rbind, rows)
+}
+rw_cols_pal <- c(`cuplyr rowwise` = "#009E73", `dplyr rowwise` = "#0072B2", `dplyr vectorised` = "#56B4E9", `data.table vectorised` = "#CC79A7", DuckDB = "#E69F00")
+plot_rowwise <- function() {
+  d <- RS[RS$status == "ok" & RS$n > 0L, ]
+  if (!nrow(d)) return(invisible(NULL))
+  d$form <- factor(rw_label[d$form], rw_label)
+  d$cache <- factor(d$cache, c("warm", "cold"))
+  g <- ggplot2::ggplot(d, ggplot2::aes(x = rows, y = med, colour = form, group = form)) +
+    ggplot2::geom_linerange(ggplot2::aes(ymin = q25, ymax = q75), alpha = 0.6) +
+    ggplot2::geom_line() + ggplot2::geom_point(size = 1.8) +
+    ggplot2::scale_x_log10(breaks = rw_sizes, labels = lab_n(rw_sizes)) + ggplot2::scale_y_log10() +
+    ggplot2::scale_colour_manual(values = rw_cols_pal, drop = FALSE) +
+    ggplot2::facet_wrap(~cache, nrow = 1, labeller = ggplot2::label_both) +
+    ggplot2::labs(x = "rows in the wide table", y = "seconds per call (median, bars = interquartile range)", colour = NULL) +
+    ggplot2::theme_minimal(base_size = 10) +
+    ggplot2::theme(legend.position = "bottom", panel.grid.minor = ggplot2::element_blank())
+  cp <- RS[RS$status == "capped", ]; nr <- RS[RS$status == "not_run", ]
+  mk <- function(z) { z$form <- factor(rw_label[z$form], rw_label); z$cache <- factor(z$cache, c("warm", "cold")); z$y <- rw_cap; z }
+  if (nrow(cp)) g <- g + ggplot2::geom_point(data = mk(cp), ggplot2::aes(x = rows, y = y, colour = form), shape = 4, size = 3.5, stroke = 1.3, inherit.aes = FALSE)
+  if (nrow(nr)) g <- g + ggplot2::geom_point(data = mk(nr), ggplot2::aes(x = rows, y = y, colour = form), shape = 1, size = 3.5, stroke = 1.1, inherit.aes = FALSE)
+  if (nrow(cp) || nrow(nr)) {
+    marks <- c(if (nrow(cp)) paste0("a cross marks a cell capped at ", fnum(rw_cap), " seconds"),
+               if (nrow(nr)) "a circle a form not run at that size (it was capped at a smaller one)")
+    g <- g + ggplot2::labs(caption = paste0(paste(marks, collapse = ", "),
+                                            if (length(marks) > 1L) "; both are drawn at the cap" else ", drawn at the cap"))
+  }
+  g
+}
+rw_caveat <- if (!have_rw) "It is not part of this data set." else paste0(
+  "Its sizes (", join_and(lab_n(rw_sizes)), " rows) are smaller than the main pipelines' because dplyr's per-row route is slow; the cap of ", rw_cap_text, " per call was chosen before the run, and a capped cell is a lower bound on that form's time, not a measurement. ",
+  "The four double columns are fillers with few distinct values, the wide table is the same synthetic table as in the other pipelines",
+  if (nrow(rw_only_files)) paste0(" (the file at ", join_and(lab_n(rw_only_files$rows)), " rows, used only here, comes from the same generator and seed)") else "",
+  ", and the forms are one author's reading of each engine's natural style. ",
+  "The rowwise forms ran in one shared process too, like the main pipelines; there data.table's median in the shared process was ", fx(shared_med[["data.table"]], 2),
+  " times its median in a process of its own (the process-effects caveat), and its rowwise numbers ", if (shared_med[["data.table"]] > 1.2) "may be high in the same way" else "are not expected to differ much", " (not measured for the rowwise pipeline).")
+```
+
+## Setup
+
+### Machine and software
+
+All numbers come from one machine: a `r cpu_model` with `r n_cpu` logical CPUs and `r ram_gb` GB of RAM, and a `r gpu_name` with `r gpu_gb` GB of memory. `r disk_text` Versions: cuplyr `r ver_cuplyr` (package code at commit `r join_and(pkg_commits)`, libcudf `r ver_cudf`), DuckDB `r ver_duckdb`, dplyr `r ver_dplyr`, arrow `r ver_arrow`, data.table `r ver_dt`, R `r ver_r`. cuplyr is loaded from the checkout with `pkgload::load_all()`; nothing is installed.
+
+### Provenance
+
+The driver appends a row to `provenance.csv` for every step it runs: the benchmark code's commit, whether `bench/` had uncommitted changes, the commit of the package code and whether it was modified, and the start and end of the step. The steps that take timings refuse to run with uncommitted changes in `bench/`. The `r nrow(pvu)` step runs whose data are in use ran `r span_text`, from `r heads_text` and package commit `r join_and(pkg_commits)`; `r if (all_clean) "none of them ran with uncommitted changes" else "some ran with uncommitted changes"`, and `r if (all_ok) "every one ended ok" else "some did not end ok"`. `r if (n_pv_super) paste0(n_of(n_pv_super, "earlier step run"), " of the same step and piece ", was_were(n_pv_super), " replaced by a later run (marked in the table; the replaced timing rows are archived and not used).") else "No step run was replaced by a later one."` The timings are the `r nrow(time_pieces)` time steps (one size, table and cache each); `r n_pieces_rerun` of them ran more than once, and `r n_of(n_super, "timing row")` `r was_were(n_super)` superseded (`timings-superseded.csv` keeps any attempt that a re-run replaces).
+
+```{r}
+#| label: provenance-table
+pt <- data.frame(step = pv$step, piece = prov_label(pv), started = format(pv$t0, if (same_day) "%H:%M:%S" else "%m-%d %H:%M:%S"), minutes = fx(pv$minutes, 1),
+                 `benchmark commit` = pv$git_head, `bench/ clean` = !as.logical(pv$bench_dirty),
+                 `package commit` = pv$cuplyr_commit, `package clean` = !as.logical(pv$cuplyr_dirty),
+                 `in use` = ifelse(pv$superseded, "no: run again later", "yes"), check.names = FALSE)
+knitr::kable(pt, format = "pipe", row.names = FALSE)
+```
+
+### Data
+
+The data are synthetic and seeded, written once with arrow (`ParquetFileWriter`, snappy compression: the codec in `files.csv` is `r codec`, row groups of `r rg_rows` rows, the last one shorter). The narrow table has `r ncol_of("narrow")` columns: `day` (a Date, sorted ascending, like an event log), `store`, `product` and `qty` (integers), `price` and `discount` (doubles; `discount` has missing values), `channel` and `category` (strings). The wide table has the same columns with identical values plus the filler columns `x01` to `x32` (integers and doubles with few distinct values), `r ncol_of("wide")` columns in all; a pipeline reads at most `r max(lengths(lapply(variants$variant, pp_columns)))` of them. A dimension file `stores.parquet` maps `store` to `region`. `r if (nrow(rw_only_files)) paste0("The rowwise pipeline (see its section) also reads the wide table at ", join_and(lab_n(rw_only_files$rows)), " rows, a file the main pipelines do not use, written by the same generator with the same seed.") else ""`
+
+```{r}
+#| label: files-table
+ft <- data.frame(table = files$table, rows = lab_n(files$rows), `size in MB` = mb(files$bytes),
+                 `row groups` = files$row_groups, codec = files$codec, columns = files$columns, check.names = FALSE)
+knitr::kable(ft, format = "pipe", row.names = FALSE)
+```
+
+### Pipelines
+
+Three pipelines, each with two filters, make six variants (`p1_push`, `p1_nopush`, and so on).
+
+```{r}
+#| label: pipelines
+#| results: asis
+for (p in names(pipe_desc)) cat("- `", p, "`: ", pipe_desc[[p]], "\n", sep = "")
+cat("\n")
+```
+
+The **push** filter is on the Date and the integer column (`day` on or after `r format(k_const$day_from)` and `qty` at least `r k_const$qty_min`). cuplyr moves such filters into the parquet scan (they are pushed), so row groups whose statistics rule them out are never read. The **nopush** filter is on the double and the string column (`price` at least `r k_const$price_min` and `channel` not `r k_const$channel_drop`); cuplyr never pushes those. The two keep a similar share of the rows (`r pct(keep_frac("push"))` and `r pct(keep_frac("nopush"))`), but they are not the same amount of work for an engine, and the CPU engines show it (see the pushdown section). Because `day` is sorted, the pushed date filter can skip whole row groups; how many row groups each pushed filter really skipped is in the pushdown table below.
+
+### Engines and their code
+
+Each engine is written the way its users write it, and reads only the columns the variant needs.
+
+**cuplyr** reads with `read_parquet_gpu()`, which is lazy by default: the projection and the pushed filter go into the scan. The verbs build a plan (the function below). For the first and second pipelines the final `summarise()` runs the plan at the moment it is called, because `max()` of an integer column has a result type that depends on the data (F07), and `collect()` then only transfers the result to R; for the third pipeline `collect()` runs the plan (`r n_cu_early` of cuplyr's `r n_cu_cells` cells are of the first two kinds). The option `cuplyr.fallback = "error"` makes a CPU fallback an error, so every number is a GPU number: `r sum(tm$engine == "cuplyr" & tm$status == "error")` of cuplyr's `r sum(tm$engine == "cuplyr")` calls in `timings.csv` ended with an error.
+
+```{r}
+#| label: code-cuplyr
+#| results: asis
+code_block(src_of(pp_cuplyr_plan))
+```
+
+**DuckDB** keeps one in-memory connection per process (`duckdb(shared_home = FALSE)`), opened before timing like a package load. The query is SQL over `read_parquet('<path>')` with explicit columns, fetched with `dbGetQuery()`. It is SQL rather than dbplyr or duckplyr because that is what a DuckDB user writes. Three of the six queries:
+
+```{r}
+#| label: code-duckdb
+#| results: asis
+for (v in c("p1_push", "p2_nopush", "p3_push")) code_block(pp_sql(v, "<fact>.parquet", "<stores>.parquet"), "sql")
+```
+
+**dplyr** reads with `arrow::read_parquet(path, col_select = cols)` and runs the same verbs on the tibble.
+
+```{r}
+#| label: code-dplyr
+#| results: asis
+code_block(src_of(pp_dplyr))
+```
+
+**data.table** uses the same reader, then `setDT()` and data.table syntax. `r form_sentence` `r form_p2_sentence`
+
+```{r}
+#| label: code-datatable
+#| results: asis
+code_block(src_of(pp_datatable))
+```
+
+None of the results is sorted inside the timed region (dplyr's `summarise()` sorts, DuckDB does not); the comparison sorts them.
+
+### Threads and other settings
+
+Every engine runs at its default thread count, read back from the running engine: `r thread_text`. `r cores_text`
+
+The settings that bear on what a timing means were read back from the running engines into `threads.csv` (the machine and version rows are in the text above):
+
+```{r}
+#| label: settings-table
+st <- th[!(th$engine == "machine") & !(th$setting %in% c("version", "arrow_version", "git_head")), c("engine", "setting", "value", "step")]
+knitr::kable(st, format = "pipe", row.names = FALSE)
+```
+
+DuckDB's `cache_local_files` is `r setting("duckdb", "cache_local_files")` and `enable_external_file_cache` is `r setting("duckdb", "enable_external_file_cache")`, so with these settings DuckDB keeps no copy of a local file between queries and warm and cold mean the operating system's page cache for it too. libcudf's debug stream pool, which cuplyr's `.onLoad` switches on by default (`LIBCUDF_USE_DEBUG_STREAM_POOL`), read back as `r setting("cuplyr", "debug_stream_pool")` in the timing process.
+
+### The parquet reader of dplyr and data.table
+
+dplyr and data.table read with `r reader_used`. The `readers` step timed `arrow::read_parquet(path, col_select = cols)` and `nanoparquet::read_parquet(path, col_select = cols)` on the columns of the first variant, on every table and size with a warm cache: `r reader_sentence`. `r reader_agree_text`
+
+### How the calls were timed
+
+- One **cell** is a variant on a table at a size in a cache state; there are `r n_cells_t` cells. All engines run in every cell, taking turns in a rotating order; the start times of all engines interleave in `r n_interleaved` of the `r n_cells_t` cells (checked in `timings.csv`). No cell and no engine has a different rule: the limit on other processes' load is `r join_and(pct(busy_max_rows))` on every call (recorded per row), and `r if (all(cell_limits == 1L)) "every cell has a single value of it" else "cells differ in it"`. After the first call, each engine takes the number of quiet reps its size needs (`r rep_text`). An untimed `gc()` precedes every call. Every timed result is compared, untimed, with the reference.
+- **Warm-up**: before the first cell of each size, table and cache (`r wu_pieces` pieces), every engine ran every variant `r wu_calls` times, untimed (`warmup.csv`, `r nrow(wu)` calls in all, for all `r wu_variants` variants), so one-time costs fall before the timed cells. The first call in a cell (the rep numbered zero in `timings.csv`) is still recorded for every engine and kept out of the medians. The first timed rep takes `r fx(min(rep1_med), 2)` to `r fx(max(rep1_med), 2)` times its cell's median, by engine (the largest single ratio is `r fx(rep1_top$ratio, 2)`, for `r rep1_top$engine`).
+- **Warm**: the files are read into the page cache before the cell, and `fincore` checks their residency before every call (lowest `r pct(min(resident_warm))`). **Cold**: before every call the files are `fsync`ed and dropped with `posix_fadvise(DONTNEED)`, and `fincore` shows what is left (highest `r pct(max(resident_cold))`).
+- **Quiet machine**: one rule for every engine, rep and cache state. The CPU time of the machine's `/proc/stat` is split, over each call, into this process's own time, other processes' user time (the **foreign** share), and kernel time (system, irq and softirq time that this process's own system time does not account for). A call is quiet when its foreign share is at most `r pct(busy_max)`. The wait before each call, which samples the machine for `r fx(stats::median(tm$wait_secs), 2)` seconds with the benchmark idle, uses the same limit. Kernel time is recorded in `timings.csv` but is not part of the rule. A call that is not quiet stays in the raw data, flagged, and is run again (up to a fixed multiple of the reps per engine). Of the `r nrow(timed)` timed calls, `r n_busy` `r was_were(n_busy)` not quiet, and `r n_of(wait_gave_up, "wait")` gave up before the machine was quiet; the highest foreign share in any quiet call is `r pct1(busy_quiet_max)`. `r n_of(n_super, "row")` `r was_were(n_super)` superseded by a re-run. Each piece ran under the GPU lock (`tools/r`), so no other GPU job ran while it did; CPU work outside the lock is not excluded, and only its user-space time would show as foreign load (a compile's system time would show as kernel time, which is outside the rule).
+- Medians, quartiles and counts below are over the quiet reps only. A classed out-of-memory error is recorded as such and shown as "does not fit".
+
+The shares during the timed calls, by engine and cache state (median and highest single call, as a share of all `r n_cpu` logical CPUs):
+
+```{r}
+#| label: load-table
+lt <- data.frame(engine = load_tab$engine, cache = load_tab$cache, calls = load_tab$calls,
+                 `foreign (median / highest)` = paste(pct1(load_tab$foreign_med), "/", pct1(load_tab$foreign_max)),
+                 `kernel (median / highest)` = paste(pct1(load_tab$kernel_med), "/", pct1(load_tab$kernel_max)),
+                 `own CPU as cores (median / highest)` = paste(fx(load_tab$own_med * n_cpu_num, 1), "/", fx(load_tab$own_max * n_cpu_num, 1)),
+                 check.names = FALSE)
+knitr::kable(lt, format = "pipe", row.names = FALSE)
+```
+
+`r foreign_sentence` The median kernel share is higher on a cold cache than on a warm one for `r if (any(kern_cold_up)) join_and(engines[kern_cold_up]) else "no engine"`, and the highest single kernel share is `r pct1(kern_top$kernel)` (`r kern_top$engine`, `r kern_top$cache` cache, `r lab_n(kern_top$rows)` rows). The data do not say what runs in the kernel; reading the files from the storage described above is a candidate (not tested here).
+
+## Correctness
+
+`r n_cr_ok` of the `r n_cr` results (engine, variant, table and size) equal the reference: keys exactly, measures within a relative tolerance of `r format(k_const$tol)`. The reference is the first engine that ran of dplyr, data.table and DuckDB, in that order (it was: `r ref_text`). Only cells that passed were timed.
+
+```{r}
+#| label: correctness
+#| results: asis
+cat("\n", paste(knitr::kable(as.data.frame.matrix(cr_counts), format = "pipe"), collapse = "\n"), "\n\n", sep = "")
+if (nrow(cr_bad)) {
+  cat(paste(knitr::kable(cr_bad[c("engine", "variant", "table", "rows", "status", "detail")], format = "pipe", row.names = FALSE), collapse = "\n"), "\n\n", sep = "")
+}
+```
+
+`r cr_text`
+
+## Results
+
+Each table gives the median in seconds of the quiet reps, the interquartile range in brackets, and the number of quiet reps; the fastest engine of a row is in bold. The plots use log scales. A cell shows "does not fit" when the engine ran out of memory.
+
+```{r}
+#| label: results-p1
+#| results: asis
+cat("\n### Pipeline `p1`\n\n", pipe_desc[["p1"]], ". Warm cache:\n", sep = "")
+show_tab("p1", "warm")
+cat("Cold cache:\n")
+show_tab("p1", "cold")
+```
+
+```{r}
+#| label: plot-p1
+#| fig-width: 9
+#| fig-height: 7.5
+#| fig-cap: !expr paste("Pipeline p1:", pipe_desc[["p1"]])
+plot_pipeline("p1")
+```
+
+```{r}
+#| label: results-p2
+#| results: asis
+cat("\n### Pipeline `p2`\n\n", pipe_desc[["p2"]], ". Warm cache:\n", sep = "")
+show_tab("p2", "warm")
+cat("Cold cache:\n")
+show_tab("p2", "cold")
+```
+
+```{r}
+#| label: plot-p2
+#| fig-width: 9
+#| fig-height: 7.5
+#| fig-cap: !expr paste("Pipeline p2:", pipe_desc[["p2"]])
+plot_pipeline("p2")
+```
+
+```{r}
+#| label: results-p3
+#| results: asis
+cat("\n### Pipeline `p3`\n\n", pipe_desc[["p3"]], ". Warm cache:\n", sep = "")
+show_tab("p3", "warm")
+cat("Cold cache:\n")
+show_tab("p3", "cold")
+```
+
+```{r}
+#| label: plot-p3
+#| fig-width: 9
+#| fig-height: 7.5
+#| fig-cap: !expr paste("Pipeline p3:", pipe_desc[["p3"]])
+plot_pipeline("p3")
+```
+
+## Where cuplyr wins and loses
+
+### Overall
+
+cuplyr has the lowest median in `r n_win` of the `r n_cmp` cells where it and another engine both have quiet reps (`r cw[["win"]]` of `r cw[["all"]]` warm, `r cc[["win"]]` of `r cc[["all"]]` cold). `r range_text`. `r lose_text` `r lose_by_text``r lose_pipe_text` `r near_text` `r cpu_sentence`
+
+```{r}
+#| label: win-table
+if (nrow(gs)) {
+  wt <- data.frame(rows = lab_n(gs$rows), cache = gs$cache, filter = gs$filter, cells = gs$cells,
+                   `cuplyr fastest` = gs$wins, `median ratio to the best other` = fx(gs$median_ratio),
+                   `worst ratio` = fx(gs$worst), check.names = FALSE)
+  knitr::kable(wt, format = "pipe", row.names = FALSE)
+}
+```
+
+### What cuplyr's time is spent on
+
+`r stages_intro`
+
+```{r}
+#| label: stages-table
+if (have_stages) {
+stt <- data.frame(rows = lab_n(sgw$rows), variant = sgw$variant, `scan` = fs(sgw$read), `plan to a GPU table` = fs(sgw$compute),
+                  `collect of a computed table` = fs(sgw$collect_only), `whole call` = fs(sgw$full),
+                  `scan share` = pct(sgw$read_share), `collect share` = pct1(sgw$collect_share), check.names = FALSE)
+knitr::kable(stt, format = "pipe", row.names = FALSE)
+}
+```
+
+`r stage_sentence`
+
+### Pushdown
+
+```{r}
+#| label: pushdown-table
+if (nrow(pdf)) {
+  pdt <- pdf[order(pdf$variant, pdf$table, pdf$rows), ]
+  knitr::kable(data.frame(variant = pdt$variant, table = pdt$table, rows = lab_n(pdt$rows),
+                          read = ifelse(pdt$plan == "pipeline", "whole pipeline", pdt$plan),
+                          `columns read` = paste(pdt$n_read, "of", pdt$total_cols),
+                          `row groups kept` = ifelse(is.na(pdt$row_groups_after_stats), paste("all", pdt$row_groups_total), paste(pdt$row_groups_after_stats, "of", pdt$row_groups_total)),
+                          `rows decoded` = pct(pdt$rows_decoded / pdt$rows), `rows returned` = pct(pdt$rows_read / pdt$rows),
+                          pushed = ifelse(nzchar(pdt$predicates), pdt$predicates, "none"),
+                          check.names = FALSE), format = "pipe", row.names = FALSE)
+}
+```
+
+The table is what `parquet_last_read()` reported after each cuplyr check run of the fact file. For the join pipeline the last read of the whole pipeline is the dimension file, so the table has a second row for it, from a run with the dimension computed first: the fact file is then the only parquet read of the plan, and the row shows its scan as it runs under the join. **Rows decoded** is the rows in the row groups kept after the statistics, from the file's metadata: the reader decodes whole row groups. **Rows returned** is what the scan hands on, after the pushed filter. `r push_sentence`
+
+```{r}
+#| label: push-ratio-table
+prt <- data.frame(rows = lab_n(pn_size$rows), `row groups kept` = paste(pn_size$kept, "of", pn_size$total), `rows decoded` = pct(pn_size$decoded), check.names = FALSE)
+for (e in engines) prt[[e]] <- fx(pn_size[[e]], 2)
+knitr::kable(prt, format = "pipe", row.names = FALSE)
+```
+
+The last four columns are the median time of the pushed variant divided by that of the other variant of the first pipeline (narrow table, warm cache).
+
+### Why cuplyr loses the join pipeline
+
+The join pipeline accounts for `r lost_pipes[["p2"]]` of cuplyr's `r sum(lost_pipes)` lost cells. `r join_sentence` `r join_busy_note`
+
+```{r}
+#| label: join-table
+if (have_join) {
+jtt <- data.frame(rows = lab_n(jt$rows), variant = jt$variant,
+                  `cuplyr join` = fs(jt$cj), `cuplyr aggregate` = fs(jt$cs), `cuplyr join and aggregate` = fs(jt$cjs),
+                  `DuckDB join` = fs(jt$dj), `DuckDB aggregate` = fs(jt$ds), `DuckDB join and aggregate` = fs(jt$djs), check.names = FALSE)
+knitr::kable(jtt, format = "pipe", row.names = FALSE)
+}
+```
+
+The inputs of the probe are the filtered fact columns as a table on the device (cuplyr) or as a temporary table (DuckDB), and the dimension; the aggregate is the first pipeline's. DuckDB's "join" creates a table of the joined rows, which cuplyr's "join" also computes. A repro for the join is under Findings.
+
+### Projection on the wide table
+
+`r proj_sentence` cuplyr reads `r if (nrow(proj_row)) proj_row$n_read else "n/a"` of the `r if (nrow(proj_row)) proj_row$total_cols else "n/a"` columns of the wide file (see the table above), and DuckDB and arrow are given the same column list.
+
+### Cold cache
+
+`r cold_sentence`
+
+### The first call of a cell
+
+`r rep0_sentence` The fresh-process first calls are in the next section.
+
+### Memory
+
+`r oom_text`
+
+## Rowwise
+
+`r if (have_rw) rw_intro else rw_missing`
+
+### The five forms
+
+Each form is how its engine's users write it. The two dplyr forms and data.table read with the same arrow reader as the main pipelines, asking for the needed columns only (`r rw_needed_text`).
+
+**cuplyr rowwise** reads with `read_parquet_gpu()`, makes the table rowwise with `rowwise()` and takes the per-row maximum and sum with `c_across()`. cuplyr does not evaluate these once per row: its rowwise support (F49) rewrites `max()` and `sum()` of `c_across()` into expressions across the columns (`rowwise_rewrite_dots()` in `R/rowwise.R`), so the GPU computes them over whole columns, as the vectorised forms do. If a rewrite is not possible the whole call falls back to dplyr on the CPU; whether this form stayed on the GPU is checked below (from F88's `cuplyr_cpu_fallback` condition, not guessed).
+
+```{r}
+#| label: code-rw-cuplyr
+#| results: asis
+code_block(src_nested(pp_rowwise_fn("cuplyr_rowwise")))
+```
+
+**dplyr rowwise** is the same verbs on a tibble: `rowwise()` and `c_across()`, which dplyr evaluates once per row.
+
+```{r}
+#| label: code-rw-dplyr
+#| results: asis
+code_block(src_nested(pp_rowwise_fn("dplyr_rowwise")))
+```
+
+**dplyr vectorised** is the expert's form, over whole columns with `pmax()` and `+`: the fair comparison for what a dplyr user would write. (The correctness reference for every form is a separate computation in base R; see below.)
+
+```{r}
+#| label: code-rw-dplyr-vec
+#| results: asis
+code_block(src_nested(pp_rowwise_fn("dplyr_vectorised")))
+```
+
+**data.table vectorised** uses `pmax()` and `rowSums()` over the columns, then an aggregate by `category`: the form this benchmark's brief names. `rowSums(.SD)` first copies the four columns into a matrix; adding them (`r paste0("\x60", paste(rw_cols, collapse = " + "), "\x60")`, as the dplyr and DuckDB forms do) would avoid that copy and may be faster. That form was not timed.
+
+```{r}
+#| label: code-rw-datatable
+#| results: asis
+code_block(src_nested(pp_rowwise_fn("datatable_vectorised")))
+```
+
+**DuckDB** is SQL over `read_parquet()` with explicit columns: `greatest()` and arithmetic, then a group by.
+
+```{r}
+#| label: code-rw-duckdb
+#| results: asis
+code_block(pp_rowwise_sql("<fact>.parquet"), "sql")
+```
+
+### How the rowwise calls were timed
+
+The rules are those of the main pipelines (the section on how the calls were timed), except for which forms share a cell. `r rw_cells_text` In a cell the forms take turns in a rotating order, an untimed `gc()` precedes every call, warm and cold are the page cache of the wide file (`fincore` before every call, `posix_fadvise(DONTNEED)` before every cold call), and a call is quiet when other processes' user-space CPU share is at most the same limit as everywhere else. `r rw_method_text` `r rw_gap_text` `r rw_sup_text`
+
+### Correctness of the rowwise results
+
+`r rw_correct_text`
+
+### Does cuplyr's rowwise form stay on the GPU?
+
+`r rw_native_text`
+
+```{r}
+#| label: rowwise-native-table
+if (have_rw) knitr::kable(rw_native_tab, format = "pipe", row.names = FALSE)
+```
+
+```{r}
+#| label: rowwise-results
+#| results: asis
+if (have_rw) {
+  cat("\n### Rowwise timings\n\n")
+  cat("Median seconds of the quiet reps, the interquartile range in brackets, and the number of quiet reps (n); the lowest median of a row is in bold. A capped cell says so and a form that was not run says why.\n\n")
+  cat("Warm cache:\n\n")
+  cat(paste(knitr::kable(rw_tab("warm"), format = "pipe", row.names = FALSE), collapse = "\n"), "\n\n", sep = "")
+  cat("Cold cache:\n\n")
+  cat(paste(knitr::kable(rw_tab("cold"), format = "pipe", row.names = FALSE), collapse = "\n"), "\n\n", sep = "")
+  cat(rw_best_text, "\n\n", sep = "")
+}
+```
+
+```{r}
+#| label: plot-rowwise
+#| fig-width: 9
+#| fig-height: 4.5
+#| fig-cap: "Rowwise pipeline: seconds per call by size, form and cache state"
+if (have_rw) plot_rowwise()
+```
+
+```{r}
+#| label: rowwise-ratios
+#| results: asis
+if (have_rw) {
+  cat("\n### Rowwise ratios\n\n")
+  cat("Each ratio is cuplyr rowwise's median divided by the other form's median in the same size and cache state, so a value below one means cuplyr rowwise is faster. Where the other form was capped, its time is above the cap and the ratio is bounded by cuplyr's median over the cap (shown as a bound).\n\n")
+  rt <- do.call(rbind, lapply(sort(unique(RR$rows)), function(n) do.call(rbind, lapply(c("warm", "cold"), function(cache) {
+    r <- RR[RR$rows == n & RR$cache == cache, ]
+    if (!nrow(r)) return(NULL)
+    out <- data.frame(rows = lab_n(n), cache = cache, `cuplyr rowwise (s)` = fnum(r$cu_med[1L]), check.names = FALSE, stringsAsFactors = FALSE)
+    for (o in setdiff(rw_forms, "cuplyr_rowwise")) {
+      i <- match(o, r$other)
+      out[[paste("against", rw_label[[o]])]] <- if (is.na(i)) "-" else rw_ratio_cell(r[i, ])
+    }
+    out
+  }))))
+  cat(paste(knitr::kable(rt, format = "pipe", row.names = FALSE), collapse = "\n"), "\n\n", sep = "")
+  cat(rw_ratio_text, "\n\n", sep = "")
+}
+```
+
+
+
+## First call
+
+Each engine and variant ran in a fresh R process at `r lab_n(fc_rows[[1L]])` rows (narrow table, warm cache): the packages were loaded first (`load_secs`; for cuplyr that is `pkgload::load_all()` of the checkout, which is not what an installed package would pay), DuckDB's connection was opened, and then the calls ran one after another, each timed separately. A call is slow when it takes more than three times the median of the later half of the calls.
+
+```{r}
+#| label: first-call-table
+fw <- stats::reshape(fc[fc$variant == "p1_push", c("engine", "call", "secs")], idvar = "engine", timevar = "call", direction = "wide")
+names(fw) <- sub("^secs\\.", "call ", names(fw))
+fw <- fw[match(engines, fw$engine), ]
+fw$`load (s)` <- vapply(fw$engine, function(e) fc$load_secs[fc$engine == e][1L], 0)
+for (j in seq_len(ncol(fw))) if (is.numeric(fw[[j]])) fw[[j]] <- fnum(fw[[j]])
+knitr::kable(fw, format = "pipe", row.names = FALSE)
+```
+
+```{r}
+#| label: first-call-summary
+fs_tab <- do.call(rbind, lapply(engines, function(e) {
+  d <- FC[FC$engine == e, ]
+  data.frame(engine = e, `variants with a slow start` = sum(d$lead >= 1L), `slow calls (median)` = stats::median(d$lead),
+             `first call, median (s)` = fnum(stats::median(d$first)), `later calls, median (s)` = fnum(stats::median(d$steady)),
+             check.names = FALSE)
+}))
+knitr::kable(fs_tab, format = "pipe", row.names = FALSE)
+```
+
+```{r}
+#| label: first-call-plot
+#| fig-width: 9
+#| fig-height: 4
+#| fig-cap: "Seconds per call in a fresh process, by call number and variant"
+d <- fc
+d$engine <- factor(d$engine, engines)
+ggplot2::ggplot(d, ggplot2::aes(x = call, y = secs, colour = variant, group = variant)) +
+  ggplot2::geom_line() + ggplot2::geom_point(size = 1.4) +
+  ggplot2::scale_y_log10() + ggplot2::scale_x_continuous(breaks = sort(unique(d$call))) +
+  ggplot2::facet_wrap(~engine, nrow = 1) +
+  ggplot2::labs(x = "call number in the process", y = "seconds", colour = NULL) +
+  ggplot2::theme_minimal(base_size = 10) + ggplot2::theme(legend.position = "bottom", panel.grid.minor = ggplot2::element_blank())
+```
+
+### New pipeline shapes in a warm process
+
+`r shapes_intro` `r shapes_sentence`
+
+```{r}
+#| label: shapes-table
+#| results: asis
+if (have_shapes) {
+shape_tab <- function(d) {
+  w <- stats::reshape(d[c("shape", "call", "secs")], idvar = "shape", timevar = "call", direction = "wide")
+  names(w) <- sub("^secs\\.", "call ", names(w))
+  w <- w[match(shape_names, w$shape), ]
+  w <- w[!is.na(w$shape), ]
+  for (j in seq_len(ncol(w))) if (is.numeric(w[[j]])) w[[j]] <- fnum(w[[j]])
+  w
+}
+cat("\nEach shape in a fresh process of its own (seconds per call):\n\n")
+cat(paste(knitr::kable(shape_tab(sh_alone), format = "pipe", row.names = FALSE), collapse = "\n"), "\n\n", sep = "")
+cat("All shapes in one process, in this order (seconds per call):\n\n")
+cat(paste(knitr::kable(shape_tab(sh_seq), format = "pipe", row.names = FALSE), collapse = "\n"), "\n\n", sep = "")
+}
+```
+
+## Findings
+
+### cuplyr's slow first calls of each new pipeline shape
+
+`r first_finding` `r shapes_short`
+
+The smallest repro found, in a fresh R process (the file is the benchmark's narrow table at `r if (have_shapes) lab_n(shapes_rows) else "n/a"` rows from `pp_gen_fact()`; the probe's calls took `r shapes_calls`, in this order):
+
+```r
+pkgload::load_all("."); library(dplyr)
+f <- "fact-narrow-10000000.parquet"
+for (i in 1:5) print(system.time(collect(read_parquet_gpu(f, columns = "store")))[["elapsed"]])
+```
+
+What the extra time is spent on is not examined here.
+
+### A GPU left idle makes cuplyr's next call slower
+
+`r idle_finding`
+
+```{r}
+#| label: idle-table
+if (!is.null(idle_tab)) knitr::kable(idle_tab, format = "pipe", row.names = FALSE)
+```
+
+`r if (have_idle) paste0("A repro uses the probe's one-column scan", if (idle_scan_slowed) "" else " (in this data set the scan itself was not slowed by more than the factor above, so the rowwise form is the one that shows it)", ", in a fresh R process (the file is the benchmark's wide table at ", lab_n(idle_rows_n), " rows):") else "A repro, in a fresh R process (the file is the benchmark's wide table):"`
+
+```r
+pkgload::load_all("."); library(dplyr)
+f <- "fact-wide-100000.parquet"
+scan <- function() collect(read_parquet_gpu(f, columns = "x17"))
+for (i in 1:3) scan()
+for (idle in c(0, 10, 20, 40)) {
+  Sys.sleep(idle)
+  system("nvidia-smi --query-gpu=clocks.mem --format=csv,noheader")   # the memory clock, the measure the text uses
+  print(c(idle = idle, secs = system.time(scan())[["elapsed"]]))
+}
+```
+
+This is how the GPU behaves, not a wrong result; it is recorded for cuplyr and for anyone timing it, and nothing was changed. It is why dplyr rowwise has cells of its own here, and the caveats say what it means for the main cells.
+
+### summarise() runs the plan at once in the first two pipelines
+
+For the first and second pipelines (`r n_cu_early` of cuplyr's `r n_cu_cells` cells) the final `summarise()` runs the plan when it is called, because `max(qty)` is an integer `max()` whose result type depends on the data (F07). The GPU work happens inside `summarise()`, `collect()` only transfers the result, and a lazy table that ends in such a `summarise()` has nothing pending to inspect. This is not a wrong result and no timing here depends on it; it is recorded as a follow-up for cuplyr, and nothing was changed. A repro, in a fresh R process (the file is the benchmark's narrow table; `explain()` prints the pending operations of a lazy table):
+
+```r
+pkgload::load_all("."); library(dplyr)
+f <- "fact-narrow-1000000.parquet"
+x <- read_parquet_gpu(f) |> filter(qty >= 2L) |> group_by(store) |> summarise(m = max(qty))
+explain(x)   # no pending operations: the plan ran inside summarise()
+y <- read_parquet_gpu(f) |> filter(qty >= 2L) |> group_by(store) |> summarise(m = mean(qty))
+explain(y)   # pending: summarise, filter and the parquet source
+```
+
+### The join of the second pipeline
+
+`r join_sentence`
+
+A repro of the join alone, on inputs that are already on the device (`stores.parquet` is the dimension from `pp_gen_dim()`; run it in a process that has already run the plan a few times, so that the first-call cost is out of it):
+
+```r
+pkgload::load_all("."); library(dplyr)
+f <- "fact-narrow-100000000.parquet"
+x <- read_parquet_gpu(f) |>
+  filter(day >= as.Date("2024-01-01"), qty >= 2L) |>
+  mutate(revenue = price * qty * (1 - discount)) |>
+  select(store, channel, price, qty, revenue) |>
+  compute()
+d <- compute(read_parquet_gpu("stores.parquet"))
+for (i in 1:5) print(system.time({ j <- compute(inner_join(x, d, by = "store")); cuplyr::gpu_sync() })[["elapsed"]])
+```
+
+### Wrong results and errors
+
+`r cr_find`
+
+### Memory
+
+`r oom_text` In cuplyr this is a classed `cuplyr_error_gpu_oom` error; it is recorded as "does not fit", not retried.
+
+## Caveats
+
+- cuplyr runs with libcudf's debug stream pool switched on, which its `.onLoad` does by default since the second attempt at F85 (`LIBCUDF_USE_DEBUG_STREAM_POOL`, read back as `r setting("cuplyr", "debug_stream_pool")`). Every cuplyr number here includes that setting.
+- F128 (the memory resource), F86 (transfers) and F87 (chunked streaming) may change cuplyr's numbers; this is a first set of measurements, to be repeated after they land.
+- Other jobs on the machine. F123 was expected to share the machine with this benchmark; the lock log shows whether it did. `r lock_sentence`
+- Process effects. `r shared_sentence`
+- The GPU's idle cost (see Findings). `r gap_text`
+- The rowwise chunk. `r rw_caveat`
+- The first call. The tables are medians of warm-process calls after an untimed warm-up. In a fresh process, cuplyr's first call takes `r fs(stats::median(fc_cu$first))` and its later calls `r fs(stats::median(fc_cu$steady))` (median over the variants), and each new pipeline shape repeats part of that (see the first-call section); a script that runs each pipeline once is not what the tables measure.
+- The data are sorted by date, which favours date pruning for any engine that uses row group statistics. Unsorted data would show less of the pushdown gap.
+- DuckDB's local file caching is off by default (`cache_local_files` read back as `r setting("duckdb", "cache_local_files")`), so for DuckDB warm and cold mean the operating system's page cache, as for the others.
+- One machine, one GPU, synthetic data, one codec (`r codec`), and the default thread counts of every engine; other settings or hardware will move the ratios.

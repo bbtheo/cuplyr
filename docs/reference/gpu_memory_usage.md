@@ -43,10 +43,8 @@ This is an estimate and actual GPU memory usage may be higher due to:
 
 ## See also
 
-[`gpu_details`](https://bbtheo.github.io/cuplyr/reference/gpu_details.md)
-for overall GPU memory info,
-[`gpu_object_info`](https://bbtheo.github.io/cuplyr/reference/gpu_object_info.md)
-for detailed object information
+[`gpu_details`](gpu_details.md) for overall GPU memory info,
+[`gpu_object_info`](gpu_object_info.md) for detailed object information
 
 ## Examples
 

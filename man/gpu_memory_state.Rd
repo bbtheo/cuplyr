@@ -12,16 +12,117 @@ A list with:
 \item{available}{Logical: TRUE if GPU is available}
 \item{total_bytes}{Total GPU memory in bytes}
 \item{free_bytes}{Free GPU memory in bytes}
-\item{used_bytes}{Used GPU memory in bytes}
+\item{used_bytes}{Used GPU memory in bytes: device level, \code{total - free},
+for every process on the card. It includes everything the memory resource
+holds from the device, so freeing a table does not lower it while the
+resource keeps the memory for reuse (always under \code{"pool"}; under
+\code{"async"} until \code{\link[=gpu_gc]{gpu_gc()}} or an automatic release hands it back, see
+below). Use \code{pool_used_bytes} for what cuplyr's tables occupy.}
 \item{total_gb}{Total GPU memory in gigabytes}
 \item{free_gb}{Free GPU memory in gigabytes}
 \item{used_gb}{Used GPU memory in gigabytes}
+\item{resource}{\code{"async"} (the default), \code{"pool"} or \code{"cuda"}: the RMM
+memory resource cuplyr installed at load time (see below). \code{"cuda"} means
+none: every allocation is a plain \code{cudaMalloc}.}
+\item{pool_bytes}{Bytes the resource currently holds from the device. Under
+\code{"pool"} that is the pool's size; under \code{"async"} it is the async pool's
+reserved memory (\code{cudaMemPoolAttrReservedMemCurrent}), which shrinks when
+memory is returned. \code{NA} when \code{resource} is \code{"cuda"}.}
+\item{pool_used_bytes}{Bytes currently allocated from the resource to live
+columns and scratch space: what cuplyr is using, as opposed to what it
+reserved. It rises when a table is created and falls when the table is
+garbage collected. Exact under both resources. \code{NA} when \code{resource} is
+\code{"cuda"}.}
 }
 }
 \description{
-Returns the current GPU memory state including total, free, and used memory.
-Useful for monitoring GPU memory usage during operations.
+Returns the current GPU memory state including total, free, and used memory,
+and what cuplyr's memory resource holds. Useful for monitoring GPU memory
+usage during operations.
 }
+\section{The memory resource}{
+
+Loading cuplyr installs an RMM memory resource as the current device
+resource, so the many short-lived columns a pipeline allocates are carved out
+of memory reserved once instead of going through \code{cudaMalloc}/\code{cudaFree}
+each time. There are three resources:
+\describe{
+\item{\code{"async"} (default)}{RMM's \code{cuda_async_memory_resource}, CUDA's
+stream-ordered allocator (\code{cudaMallocAsync}). By default it keeps freed
+memory cached for reuse, as the pool does, and runs at the same speed
+(measured, see the vignette). Unlike the pool it can give the memory back:
+\code{\link[=gpu_gc]{gpu_gc()}} synchronises the device and returns everything the pool holds
+unused, so other processes on the card can use it. With the opt-in
+\code{cuplyr.release_threshold} (below) CUDA also returns unused memory by
+itself, at the next synchronisation, while the pool's whole reservation
+is above that threshold. The reservation counts tables in use, so a
+session that holds more than the threshold keeps nothing cached and
+allocates from the driver again, at about plain \code{cudaMalloc} speed.}
+\item{\code{"pool"}}{RMM's \code{pool_memory_resource}. Same speed as async by
+default, but it keeps the high-water mark of its size until the R session
+ends, so the card's free memory (\code{free_bytes}) stays lower than the data
+you hold; use \code{pool_used_bytes} for the latter. \code{\link[=gpu_gc]{gpu_gc()}} cannot shrink
+it (\code{released_bytes} is 0).}
+\item{\code{"cuda"}}{No resource (\code{cuplyr.memory_pool = FALSE}, or
+\code{cuplyr.memory_resource = "cuda"}): plain \code{cudaMalloc}/\code{cudaFree} for
+every allocation. Slowest per allocation; device free memory is always
+the truth, and \code{pool_bytes} and \code{pool_used_bytes} are \code{NA}.}
+}
+Synchronisations happen at \code{collect()}, \code{print()} and \code{\link[=gpu_sync]{gpu_sync()}}, and also
+inside many libcudf calls (for example whenever one copies a size or count
+back to the host), so an automatic release can happen in the middle of a
+pipeline. See \code{vignette("memory", package = "cuplyr")} for measurements and
+advice on choosing.
+
+The resource is chosen when the package loads, from options (which win) or
+environment variables. There is one resource per R process: the switches are
+read by the first load that creates it, and loading the package again in the
+same session (\code{pkgload::load_all()}, or a reload after unloading) reuses that
+resource, whatever the switches say then, and reports it; such a load does
+not read the switches, so it does not warn about them either. Restart R to
+change them.
+
+Where the GPU or driver does not support \code{cudaMallocAsync}, the async
+resource cannot be created. If async was the default (nothing chosen, or an
+unknown kind), cuplyr then installs \code{"pool"} and gives a warning saying so.
+If \code{"async"} was asked for by name, the warning says the resource could not
+be installed and nothing is (\code{resource} is \code{"cuda"}).
+\describe{
+\item{\code{cuplyr.memory_pool} / \code{CUPLYR_MEMORY_POOL}}{\code{FALSE}, or \code{"0"},
+\code{"false"}, \code{"no"}, \code{"off"}, installs nothing (\code{resource} is \code{"cuda"},
+the behaviour before the pool existed) unless an earlier load in the
+session already created the resource. Anything else, or unset (a
+zero-length or \code{NA} option counts as unset), installs the resource.}
+\item{\code{cuplyr.memory_resource} / \code{CUPLYR_MEMORY_RESOURCE}}{\code{"async"}
+(default) or \code{"pool"} to pick the kind of resource; \code{"cuda"} or \code{"none"}
+install nothing, like \code{cuplyr.memory_pool = FALSE}. Case and surrounding
+blanks do not matter. Unset or empty means async. Any other value gives a
+warning naming the option or variable and the value as typed, and async is
+used; when \code{cuplyr.memory_pool} switches the resource off, the warning
+says the value is ignored and no resource (\code{"cuda"}) is used.}
+\item{\code{cuplyr.pool_initial} / \code{CUPLYR_POOL_INITIAL}}{How much the resource
+reserves at load, in bytes, so the first calls need no driver
+allocation. Default: a quarter of the free device memory, at most 1 GiB.
+A larger request is clamped to 90 percent of the free memory. \code{0}
+reserves nothing up front. Both \code{"pool"} and \code{"async"} grow by
+themselves when needed; this is not a limit and not a release threshold.}
+\item{\code{cuplyr.release_threshold} / \code{CUPLYR_RELEASE_THRESHOLD}}{Async only,
+opt-in, in bytes; unset (the default) means no automatic release. It is
+CUDA's release threshold for the async pool: at a synchronisation CUDA
+returns unused memory to the device until the pool's whole reservation,
+memory in use included, is at or below it. \code{0} keeps nothing, the "share
+the card" setting. The price is speed: while the session holds more than
+the threshold, every allocation goes to the driver. A zero-length, \code{NA}
+or empty option counts as unset (the environment variable decides). Any
+other value that is not a non-negative number gives a warning naming the
+option or variable, and means unset. Ignored under \code{"pool"} and
+\code{"cuda"}.}
+}
+
+All cuplyr options, and how an invalid value is handled, are listed on
+\link{cuplyr-options}.
+}
+
 \examples{
 if (has_gpu()) {
   # Check memory before allocation
@@ -34,9 +135,12 @@ if (has_gpu()) {
   after <- gpu_memory_state()
 
   cat("Memory used:", after$used_gb - before$used_gb, "GB\n")
+  cat("Allocated from the resource:",
+      after$pool_used_bytes - before$pool_used_bytes, "bytes\n")
 }
 }
 \seealso{
-\code{\link{gpu_details}} for device information,
-\code{\link{gpu_memory_usage}} for per-object memory estimates
+\code{\link{gpu_details}} for device information (device level only),
+\code{\link{gpu_memory_usage}} for per-object memory estimates,
+\link{cuplyr-options} for the options
 }

@@ -28,6 +28,11 @@ The estimate includes:
 String columns use an average estimate of 32 bytes per element, which may
 vary significantly based on actual string lengths.
 
+Columns are shared between tables: a verb that leaves a column untouched
+(\code{select()}, a bare copy in \code{mutate()}, ...) returns a table that holds the
+same device memory as its input. The estimates of such tables therefore
+overlap, and their sum can exceed what the GPU holds.
+
 This is an estimate and actual GPU memory usage may be higher due to:
 \itemize{
 \item Memory alignment requirements

@@ -98,34 +98,88 @@ test_that("tbl_gpu() allocates GPU memory", {
 
   gc_gpu()
 
-  # Get baseline
-  before <- gpu_memory_snapshot()
-
-  # Create GPU table
+  # Measured at the RMM allocator, not with device-level free memory
+  # (cudaMemGetInfo). Each column here is 781 KiB, and the CUDA driver serves
+  # allocations of up to 1 MiB from 2 MiB pages the process already holds, so
+  # when earlier tests leave partly used pages behind, device-level usage does
+  # not move at all (the 0 B failures in F56). RMM sees every allocation.
   df <- create_large_test_data(nrow = 100000, ncol = 5)
-  gpu_df <- tbl_gpu(df)
+  tracked <- gpu_alloc_tracking(tbl_gpu(df))
+  gpu_df <- tracked$value
+  expect_s3_class(gpu_df, "tbl_gpu")
+  expect_equal(dim(gpu_df), c(100000L, 5L))
 
-  after <- gpu_memory_snapshot()
-
-  # Memory usage should increase
-  diff <- gpu_memory_diff(before, after)
-  expect_true(diff > 0,
-              info = sprintf("Expected GPU memory to increase, but diff was %s",
-                             format_bytes(diff)))
-
-  # Memory increase should be roughly proportional to data size
-  # 100000 rows * 5 cols * 8 bytes = 4 MB minimum
+  # 100000 rows * 5 cols * 8 bytes = 4 MB of column data, still held by the
+  # table when tbl_gpu() returns (no NAs, so no null masks).
   expected_min <- 100000 * 5 * 8
-  expect_true(diff >= expected_min * 0.5,
+  expect_true(tracked$held_bytes >= expected_min,
+              info = sprintf("Upload holds %s on the GPU, expected at least %s",
+                             format_bytes(tracked$held_bytes),
+                             format_bytes(expected_min)))
+  expect_true(tracked$held_bytes < 2 * expected_min,
+              info = sprintf("Upload holds %s on the GPU, expected about %s",
+                             format_bytes(tracked$held_bytes),
+                             format_bytes(expected_min)))
+  expect_true(tracked$allocated_bytes >= tracked$held_bytes)
+})
+
+test_that("tbl_gpu() raises device-level GPU memory use", {
+  skip_if_no_gpu()
+
+  # Device-level check that the data really occupies device memory. Columns
+  # are 7.6 MiB each: the CUDA driver maps fresh pages for every allocation
+  # above 1 MiB, so memory the process already holds cannot absorb them
+  # (unlike the sub-1 MiB columns of the test above; see F56).
+  #
+  # A memory pool keeps its pages, so this claim about the driver is checked in
+  # a process with cuplyr's pool switched off; the allocator-level equivalent
+  # under the pool is the next test.
+  out <- run_with_pool_off(function() {
+    df <- as.data.frame(matrix(runif(1e6 * 5), ncol = 5))
+    gc(full = TRUE)
+    info0 <- gpu_details()
+    gpu_df <- tbl_gpu(df)
+    info1 <- gpu_details()
+    list(diff = (info1$total_memory - info1$free_memory) -
+           (info0$total_memory - info0$free_memory),
+         dim = dim(gpu_df))
+  })
+
+  expected_min <- 1000000 * 5 * 8
+  expect_true(out$diff >= expected_min * 0.5,
+              info = sprintf("Memory increase (%s) less than expected (%s)",
+                             format_bytes(out$diff), format_bytes(expected_min)))
+  expect_equal(out$dim, c(1000000L, 5L))
+})
+
+test_that("tbl_gpu() raises allocator-level GPU memory use under the pool", {
+  skip_if_no_gpu()
+
+  gc_gpu()
+
+  # What the table holds, measured as bytes allocated from cuplyr's resource
+  # (pool_used_bytes; device-level `used_bytes` when there is none).
+  df <- create_large_test_data(nrow = 1000000, ncol = 5)
+  before <- gpu_alloc_snapshot()
+  gpu_df <- tbl_gpu(df)
+  after <- gpu_alloc_snapshot()
+
+  diff <- gpu_memory_diff(before, after)
+  expected_min <- 1000000 * 5 * 8
+  expect_true(diff >= expected_min * 0.95,
               info = sprintf("Memory increase (%s) less than expected (%s)",
                              format_bytes(diff), format_bytes(expected_min)))
+  expect_true(diff < 2 * expected_min,
+              info = sprintf("Memory increase (%s) more than expected (%s)",
+                             format_bytes(diff), format_bytes(expected_min)))
+  expect_equal(dim(gpu_df), c(1000000L, 5L))
 })
 
 test_that("GPU memory is freed on garbage collection", {
   skip_if_no_gpu()
 
   gc_gpu()
-  before <- gpu_memory_snapshot()
+  before <- gpu_alloc_snapshot()
 
   # Create and discard in a local scope
   local({
@@ -135,7 +189,11 @@ test_that("GPU memory is freed on garbage collection", {
   })
 
   gc_gpu()
-  after <- gpu_memory_snapshot()
+  after <- gpu_alloc_snapshot()
+
+  # Allocator level (bytes allocated from cuplyr's resource): the 8 MB table is
+  # gone, so usage is back to baseline well inside the tolerance.
+  expect_lt(after$used_memory - before$used_memory, 100000 * 10 * 8 * 0.5)
 
   # Memory should be approximately back to baseline
   diff <- abs(after$used_memory - before$used_memory)
@@ -154,20 +212,24 @@ test_that("Multiple GPU tables can coexist with separate memory", {
   skip_if_no_gpu()
 
   gc_gpu()
-  baseline <- gpu_memory_snapshot()
+  baseline <- gpu_alloc_snapshot()
 
   # Create first table
   gpu_df1 <- tbl_gpu(create_large_test_data(nrow = 10000, ncol = 5))
-  after_first <- gpu_memory_snapshot()
+  after_first <- gpu_alloc_snapshot()
 
   # Create second table
   gpu_df2 <- tbl_gpu(create_large_test_data(nrow = 10000, ncol = 5))
-  after_second <- gpu_memory_snapshot()
+  after_second <- gpu_alloc_snapshot()
 
-  # Total memory should increase (RMM memory pooling may cause
-  # individual allocations to not always show incremental increase)
+  # Allocator-level usage (bytes allocated from cuplyr's resource) rises with
+  # each table by its data size: 10000 rows * 5 columns * 8 bytes each.
+  one_table <- 10000 * 5 * 8
+  first_diff <- gpu_memory_diff(baseline, after_first)
   total_diff <- gpu_memory_diff(baseline, after_second)
-  expect_true(total_diff >= 0,
+  expect_true(first_diff >= one_table * 0.95,
+              info = sprintf("First table diff: %s", format_bytes(first_diff)))
+  expect_true(total_diff >= 2 * one_table * 0.95,
               info = sprintf("Total memory diff: %s", format_bytes(total_diff)))
 
   # Both tables should work independently
@@ -185,6 +247,7 @@ test_that("Multiple GPU tables can coexist with separate memory", {
 
 test_that("filter() creates new GPU allocation", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
 
   gpu_df <- tbl_gpu(create_large_test_data(nrow = 10000, ncol = 5))
   before <- gpu_memory_snapshot()
@@ -203,6 +266,7 @@ test_that("filter() creates new GPU allocation", {
 
 test_that("mutate() creates new GPU allocation", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
 
   gpu_df <- tbl_gpu(mtcars)
 
@@ -222,6 +286,7 @@ test_that("mutate() creates new GPU allocation", {
 
 test_that("select() creates new GPU allocation", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
 
   gpu_df <- tbl_gpu(mtcars)
 
@@ -238,7 +303,7 @@ test_that("select() creates new GPU allocation", {
 test_that("chained operations maintain GPU residency", {
   skip_if_no_gpu()
 
-  gpu_df <- tbl_gpu(mtcars)
+  gpu_df <- tbl_gpu(mtcars, lazy = FALSE)
 
   # Chain multiple operations
   result <- gpu_df |>
@@ -353,7 +418,7 @@ test_that("GPU operations fail gracefully on invalid pointer", {
 test_that("GPU pointer remains valid through operations", {
   skip_if_no_gpu()
 
-  gpu_df <- tbl_gpu(mtcars)
+  gpu_df <- tbl_gpu(mtcars, lazy = FALSE)
 
   # Perform many operations with simple filter expressions
   thresholds <- c(11, 12, 13, 14, 15)
@@ -412,7 +477,7 @@ test_that("filter() does not copy data to R", {
   skip_if_no_gpu()
 
   df <- create_large_test_data(nrow = 50000, ncol = 10)
-  gpu_df <- tbl_gpu(df)
+  gpu_df <- tbl_gpu(df, lazy = FALSE)
 
   filtered <- dplyr::filter(gpu_df, col1 > 0.5)
   filtered_size <- as.numeric(object.size(filtered))
@@ -426,7 +491,7 @@ test_that("mutate() does not copy data to R", {
   skip_if_no_gpu()
 
   df <- create_large_test_data(nrow = 50000, ncol = 10)
-  gpu_df <- tbl_gpu(df)
+  gpu_df <- tbl_gpu(df, lazy = FALSE)
 
   mutated <- dplyr::mutate(gpu_df, new_col = col1 + col2)
   mutated_size <- as.numeric(object.size(mutated))
@@ -439,7 +504,7 @@ test_that("select() does not copy data to R", {
   skip_if_no_gpu()
 
   df <- create_large_test_data(nrow = 50000, ncol = 10)
-  gpu_df <- tbl_gpu(df)
+  gpu_df <- tbl_gpu(df, lazy = FALSE)
 
   selected <- dplyr::select(gpu_df, col1, col2)
   selected_size <- as.numeric(object.size(selected))
@@ -456,7 +521,7 @@ test_that("Many small allocations don't leak memory", {
   skip_if_no_gpu()
 
   gc_gpu()
-  before <- gpu_memory_snapshot()
+  before <- gpu_alloc_snapshot()
 
   # Create many small tables
   for (i in 1:50) {
@@ -471,7 +536,7 @@ test_that("Many small allocations don't leak memory", {
   }
 
   gc_gpu()
-  after <- gpu_memory_snapshot()
+  after <- gpu_alloc_snapshot()
 
   # Memory should be approximately back to baseline
   diff <- after$used_memory - before$used_memory
@@ -479,6 +544,10 @@ test_that("Many small allocations don't leak memory", {
 
   expect_true(abs(diff) < tolerance,
               info = sprintf("Memory leak detected: %s", format_bytes(diff)))
+
+  # Allocator level (bytes allocated from cuplyr's resource) sees every byte: the
+  # 50 tables hold 400 KB in all, and less than half of that may remain.
+  expect_lt(diff, 50 * 1000 * 8 * 0.5)
 })
 
 test_that("Large allocation followed by GC frees memory", {
@@ -486,7 +555,7 @@ test_that("Large allocation followed by GC frees memory", {
   skip_if_insufficient_gpu_memory(2 * 1024 * 1024 * 1024)  # Need 2GB free
 
   gc_gpu()
-  before <- gpu_memory_snapshot()
+  before <- gpu_alloc_snapshot()
 
   # Create large table
   local({
@@ -494,17 +563,19 @@ test_that("Large allocation followed by GC frees memory", {
     gpu_df <- tbl_gpu(df)
     expect_data_on_gpu(gpu_df)
 
-    during <- gpu_memory_snapshot()
+    during <- gpu_alloc_snapshot()
     allocation <- gpu_memory_diff(before, during)
     expect_true(allocation > 50 * 1024 * 1024)  # At least 50 MB allocated
   })
 
   gc_gpu()
-  after <- gpu_memory_snapshot()
+  after <- gpu_alloc_snapshot()
 
   # Memory should be freed
   diff <- after$used_memory - before$used_memory
   expect_true(diff < 50 * 1024 * 1024,
               info = sprintf("Large allocation not freed: %s remaining",
                              format_bytes(diff)))
+  # Allocator level: the 80 MB are gone, not just under the 50 MB tolerance.
+  expect_lt(diff, 0.1 * 1000000 * 10 * 8)
 })

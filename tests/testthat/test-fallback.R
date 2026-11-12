@@ -1,0 +1,622 @@
+# Tests for the Phase 2 transparent CPU fallback layer (R/fallback.R).
+#
+# `gpu_fallback()` is the shared primitive: materialize pending lazy ops,
+# collect() to a tibble (restoring group_by() structure), run the real dplyr
+# verb, and re-upload via tbl_gpu() (restoring groups/exec_mode/factor
+# levels). This file:
+#
+#   1. Sweeps a representative pipeline for every registered fallback verb
+#      that returns a transformed data frame, oracle-comparing eager tbl_gpu
+#      against dplyr-on-tibble via expect_same_as_dplyr() (helper-oracle.R).
+#   2. Dedicated tests for the verbs that don't fit that oracle shape (they
+#      return metadata, a list, or a list-column data frame).
+#   3. Dedicated tests for the cross-cutting behaviors: grouping restoration,
+#      lazy materialization/exec_mode, non-data-frame returns, factor
+#      round-trip, the cuplyr.fallback option, and the "no fallback for
+#      GPU-native verbs" guarantee.
+
+fallback_df <- function() {
+  tibble::tibble(
+    g = c(1, 1, 2, 2, 3),
+    x = c(10, 20, 30, 40, 50),
+    s = c("a", "b", "a", "b", "a")
+  )
+}
+
+# =============================================================================
+# 1. Sweep: one representative, deterministic, df-in/df-out pipeline per
+#    verb whose result an oracle_compare() (expect_same_as_dplyr()) can
+#    directly check.
+# =============================================================================
+
+fallback_sweep_pipelines <- function() {
+  list(
+    # transmute()/glimpse() are GPU-native now (Phase 3 task 4, see
+    # R/mutate.R, R/glimpse.R, test-dplyr-transmute.R) -- no longer part of
+    # this fallback sweep. reframe() takes over as this file's vehicle for
+    # the cross-cutting fallback behaviors below (materialization/exec_mode,
+    # factor round-trip, the cuplyr.fallback option).
+    reframe = list(fn = function(d) dplyr::reframe(d, mx = unique(x), .by = g), arrange_by = "g"),
+    # rowwise() is GPU-native since F49 (test-parity-F49-rowwise.R).
+    # slice()/slice_head()/slice_tail() are GPU-native for ungrouped input
+    # (Phase 3 task 2, see R/slice.R and test-dplyr-slice.R for that
+    # coverage) -- grouped here so this sweep still exercises their
+    # fallback path.
+    slice = list(fn = function(d) dplyr::group_by(d, g) |> dplyr::slice(1), arrange_by = "g"),
+    slice_head = list(fn = function(d) dplyr::group_by(d, g) |> dplyr::slice_head(n = 1), arrange_by = "g"),
+    slice_tail = list(fn = function(d) dplyr::group_by(d, g) |> dplyr::slice_tail(n = 1), arrange_by = "g"),
+    # slice_min()/slice_max() are GPU-native for a plain, ungrouped
+    # order_by, but `by = g` forces the fallback even on ungrouped input.
+    slice_min = list(fn = function(d) dplyr::slice_min(d, x, n = 1, by = g), arrange_by = "g"),
+    slice_max = list(fn = function(d) dplyr::slice_max(d, x, n = 1, by = g), arrange_by = "g"),
+    slice_sample = list(
+      fn = function(d) {
+        set.seed(42)
+        dplyr::slice_sample(d, n = 3)
+      },
+      arrange_by = c("g", "x")
+    ),
+    # rename()/rename_with()/relocate()/pull() are GPU-native now (Phase 3
+    # task 3, see R/rename.R, R/relocate.R, R/pull.R, test-dplyr-rename.R,
+    # test-dplyr-relocate.R, test-dplyr-pull.R) -- no longer part of this
+    # fallback sweep. See the "never triggers a fallback notification"
+    # block below instead.
+    # count()/tally()/add_count() are GPU-native now too (Phase 3 task 5,
+    # see R/count.R, test-dplyr-count.R) -- no longer part of this fallback
+    # sweep either. See the "never triggers a fallback notification" block
+    # below instead.
+    # semi_join()/anti_join() are GPU-native now (Phase 7 J2, see R/join.R,
+    # src/ops_join.cpp's gpu_semi_anti_join()) -- no longer part of this
+    # fallback sweep. See the "never trigger a fallback notification" block
+    # below instead.
+    # cross_join() is GPU-native now too (Phase 7 J3, see R/join.R,
+    # src/ops_join.cpp's gpu_cross_join()) -- no longer part of this
+    # fallback sweep. See the "never trigger a fallback notification" block
+    # below, and test-dplyr-join-cross.R for full oracle coverage.
+    # union()/union_all()/intersect()/setdiff()/setequal()/symdiff() are
+    # GPU-native now (Phase 8, see R/sets.R) -- no longer part of this
+    # fallback sweep. See test-dplyr-sets.R for full oracle coverage, and
+    # the "never trigger a fallback notification" block below for their
+    # happy-path native-execution guarantee. As of Phase 11 (L2 factor
+    # fidelity, L3 timestamp casts), every column-type combination real
+    # dplyr accepts for these verbs is GPU-native -- mismatched factor
+    # levels, factor vs. character, and Date vs. POSIXct all used to fall
+    # back here but no longer do (see R/sets.R's own docs); the remaining
+    # column-type MISMATCHES are genuine dplyr-parity errors, not fallbacks,
+    # pinned directly in test-dplyr-sets.R instead of here.
+    group_modify = list(
+      fn = function(d) dplyr::group_modify(dplyr::group_by(d, g), ~ dplyr::summarise(.x, s = sum(x))),
+      arrange_by = "g"
+    )
+    # rows_update()/rows_patch() are GPU-native since F26 (R/rows.R); see the
+    # "native rows_*() sweep" block below.
+  )
+}
+
+fallback_pipelines <- fallback_sweep_pipelines()
+for (.nm in names(fallback_pipelines)) {
+  local({
+    nm <- .nm
+    spec <- fallback_pipelines[[nm]]
+    test_that(sprintf("%s() fallback matches dplyr oracle", nm), {
+      skip_if_no_gpu()
+      expect_same_as_dplyr(fallback_df(), spec$fn, arrange_by = spec$arrange_by)
+    })
+  })
+}
+
+# The rows_update()/rows_patch() entries that used to live in the sweep above:
+# native now, so they are checked against the oracle here.
+rows_native_sweep <- list(
+  rows_update = function(d) dplyr::rows_update(d, tibble::tibble(g = 1, s = "a", x = 999),
+                                               by = c("g", "s"), copy = TRUE),
+  rows_patch = function(d) dplyr::rows_patch(d, tibble::tibble(g = 1, s = "a", x = 999),
+                                             by = c("g", "s"), copy = TRUE),
+  # group_trim() is native since F27 (R/group-by.R)
+  group_trim = function(d) dplyr::group_trim(dplyr::filter(dplyr::group_by(d, g), g != 2))
+)
+for (.nm in names(rows_native_sweep)) {
+  local({
+    nm <- .nm
+    fn <- rows_native_sweep[[nm]]
+    test_that(sprintf("%s() matches the dplyr oracle (native)", nm), {
+      skip_if_no_gpu()
+      withr::local_options(cuplyr.fallback = "error")
+      expect_same_as_dplyr(fallback_df(), fn)
+    })
+  })
+}
+
+# =============================================================================
+# 2. Dedicated tests for verbs that don't return a plain transformed data
+#    frame (metadata queries, list results, list-column results, superseded
+#    sampling verbs) -- one per remaining registered fallback verb.
+# =============================================================================
+
+test_that("nest_join() returns a plain data frame with a list-column, not a tbl_gpu", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  gt <- tbl_gpu(df) |> dplyr::select(g) |> dplyr::distinct()
+  y <- tibble::tibble(g = c(1, 2), extra = c("A", "B"))
+
+  result <- gt |> dplyr::nest_join(y, by = "g", copy = TRUE)
+  oracle <- dplyr::nest_join(dplyr::distinct(dplyr::select(df, g)), y, by = "g")
+
+  expect_false(is_tbl_gpu(result))
+  expect_true(any(vapply(result, is.list, logical(1))))
+  expect_equal(nrow(result), nrow(oracle))
+})
+
+test_that("nest_join() triggers the fallback notification", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  gt <- tbl_gpu(df) |> dplyr::select(g) |> dplyr::distinct()
+  y <- tibble::tibble(g = c(1, 2), extra = c("A", "B"))
+
+  withr::local_options(cuplyr.fallback = "warn")
+
+  expect_warning(
+    gt |> dplyr::nest_join(y, by = "g", copy = TRUE),
+    "fell back to CPU evaluation"
+  )
+})
+
+test_that("rows_insert() adds new rows matching dplyr", {
+  skip_if_no_gpu()
+  base_df <- tibble::tibble(id = 1:3, v = c("a", "b", "c"))
+  gt <- tbl_gpu(base_df)
+
+  result <- gt |> dplyr::rows_insert(tibble::tibble(id = 4, v = "d"), by = "id", copy = TRUE) |> collect()
+  oracle <- dplyr::rows_insert(base_df, tibble::tibble(id = 4, v = "d"), by = "id")
+
+  expect_equal(tibble::as_tibble(result), oracle)
+})
+
+test_that("rows_append() adds rows matching dplyr", {
+  skip_if_no_gpu()
+  base_df <- tibble::tibble(id = 1:3, v = c("a", "b", "c"))
+  gt <- tbl_gpu(base_df)
+
+  result <- gt |> dplyr::rows_append(tibble::tibble(id = 4, v = "d"), copy = TRUE) |> collect()
+  oracle <- dplyr::rows_append(base_df, tibble::tibble(id = 4, v = "d"))
+
+  expect_equal(tibble::as_tibble(result), oracle)
+})
+
+test_that("rows_upsert() updates and inserts rows matching dplyr", {
+  skip_if_no_gpu()
+  base_df <- tibble::tibble(id = 1:3, v = c("a", "b", "c"))
+  gt <- tbl_gpu(base_df)
+  y <- tibble::tibble(id = c(1, 4), v = c("Z", "d"))
+
+  result <- gt |> dplyr::rows_upsert(y, by = "id", copy = TRUE) |> collect()
+  oracle <- dplyr::rows_upsert(base_df, y, by = "id")
+
+  expect_equal(tibble::as_tibble(result), oracle)
+})
+
+test_that("rows_delete() removes rows matching dplyr", {
+  skip_if_no_gpu()
+  base_df <- tibble::tibble(id = 1:3, v = c("a", "b", "c"))
+  gt <- tbl_gpu(base_df)
+
+  result <- gt |> dplyr::rows_delete(tibble::tibble(id = 1), by = "id", copy = TRUE) |> collect()
+  oracle <- dplyr::rows_delete(base_df, tibble::tibble(id = 1), by = "id")
+
+  expect_equal(tibble::as_tibble(result), oracle)
+})
+
+test_that("rows_*(in_place = TRUE) is rejected for tbl_gpu", {
+  skip_if_no_gpu()
+  gt <- tbl_gpu(tibble::tibble(id = 1:3, v = c("a", "b", "c")))
+
+  expect_error(
+    gt |> dplyr::rows_update(tibble::tibble(id = 1, v = "Z"), by = "id", copy = TRUE,
+                             in_place = TRUE),
+    "in_place"
+  )
+})
+
+# The six rows_*() verbs are GPU-native since F26 (R/rows.R): with a GPU `y`
+# of x's column types they never reach the CPU fallback, and `in_place = TRUE`
+# is rejected by every one (dplyr's check comes before anything else).
+rows_verb_calls <- list(
+  rows_insert = function(gt) dplyr::rows_insert(gt, tbl_gpu(tibble::tibble(id = 4L, v = "d")), by = "id"),
+  rows_append = function(gt) dplyr::rows_append(gt, tbl_gpu(tibble::tibble(id = 4L, v = "d"))),
+  rows_update = function(gt) dplyr::rows_update(gt, tbl_gpu(tibble::tibble(id = 1L, v = "Z")), by = "id"),
+  rows_patch = function(gt) dplyr::rows_patch(gt, tbl_gpu(tibble::tibble(id = 1L, v = "Z")), by = "id"),
+  rows_upsert = function(gt) dplyr::rows_upsert(gt, tbl_gpu(tibble::tibble(id = c(1L, 4L), v = c("Z", "d"))), by = "id"),
+  rows_delete = function(gt) dplyr::rows_delete(gt, tbl_gpu(tibble::tibble(id = 1L)), by = "id")
+)
+
+for (.nm in names(rows_verb_calls)) {
+  local({
+    nm <- .nm
+    call_fn <- rows_verb_calls[[nm]]
+
+    test_that(sprintf("%s() stays native (no fallback notification)", nm), {
+      skip_if_no_gpu()
+      gt <- tbl_gpu(tibble::tibble(id = 1:3, v = c("a", "b", "c")))
+      withr::local_options(cuplyr.fallback = "error")
+
+      expect_no_error(collect(call_fn(gt)))
+    })
+
+    test_that(sprintf("%s(in_place = TRUE) is rejected for tbl_gpu", nm), {
+      skip_if_no_gpu()
+      gt <- tbl_gpu(tibble::tibble(id = 1:3, v = c("a", "b", "c")))
+
+      verb_fn <- getExportedValue("dplyr", nm)
+      args <- if (identical(nm, "rows_append")) list() else list(by = "id")
+      expect_error(
+        do.call(verb_fn, c(list(gt, tbl_gpu(tibble::tibble(id = 1L, v = "Z"))), args,
+                           list(in_place = TRUE))),
+        "in_place"
+      )
+    })
+  })
+}
+
+# Phase 11 L7 exit: do() is an ordinary S3 generic (do.data.frame/
+# do.grouped_df/do.rowwise_df/do.NULL exist in dplyr, but no do.default) --
+# test-first confirmed (per the repo's STRICT mandate) that calling
+# dplyr::do() on a tbl_gpu before do.tbl_gpu() existed hard-errored with "no
+# applicable method for 'do'", never reaching gpu_fallback() at all. See
+# do.tbl_gpu(), R/fallback.R.
+
+test_that("do() with an unnamed expression matches dplyr on ungrouped input", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  gt <- tbl_gpu(df)
+
+  # An unnamed do() clause returning a plain (no list-column) data frame is
+  # re-uploaded by gpu_fallback() as an ordinary tbl_gpu, exactly like any
+  # other fallback verb -- collect() first, like the rows_*() tests above.
+  result <- gt |> dplyr::do(head(., 2)) |> collect()
+  oracle <- dplyr::do(df, head(., 2))
+
+  expect_equal(tibble::as_tibble(result), tibble::as_tibble(oracle))
+})
+
+test_that("do() with an unnamed expression matches dplyr on grouped input (per-group dispatch)", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  gt <- tbl_gpu(df) |> dplyr::group_by(g)
+
+  result <- gt |> dplyr::do(head(., 1)) |> collect()
+  oracle <- dplyr::do(dplyr::group_by(df, g), head(., 1))
+
+  expect_equal(
+    dplyr::arrange(tibble::as_tibble(result), g),
+    dplyr::arrange(tibble::as_tibble(dplyr::ungroup(oracle)), g)
+  )
+})
+
+test_that("do() with a named expression returns a plain list-column data frame, not a tbl_gpu", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  gt <- tbl_gpu(df) |> dplyr::group_by(g)
+
+  result <- gt |> dplyr::do(top_x = max(.$x))
+  oracle <- dplyr::do(dplyr::group_by(df, g), top_x = max(.$x))
+
+  expect_false(is_tbl_gpu(result))
+  expect_true(any(vapply(result, is.list, logical(1))))
+  expect_equal(nrow(result), nrow(oracle))
+})
+
+test_that("do() triggers the fallback notification", {
+  skip_if_no_gpu()
+  gt <- tbl_gpu(fallback_df())
+  withr::local_options(cuplyr.fallback = "warn")
+
+  expect_warning(gt |> dplyr::do(head(., 1)), "fell back to CPU evaluation")
+})
+
+# group_data()/group_keys()/group_rows()/group_indices()/group_size()/
+# n_groups() are GPU-native now (Phase 9 task 1, see R/group-by.R's
+# compute_group_data()) -- no longer fallback verbs. See
+# test-dplyr-group-data.R for full oracle coverage (ascending/NA-last row
+# order, multi-key, .drop=FALSE factor expansion, computed group_by(),
+# and the "never trigger a fallback" pin).
+
+test_that("group_split() returns a plain list of tibbles matching dplyr", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  gt <- tbl_gpu(df) |> dplyr::group_by(g)
+
+  result <- gt |> dplyr::group_split()
+  oracle <- dplyr::group_split(dplyr::group_by(df, g))
+
+  expect_type(result, "list")
+  expect_false(is_tbl_gpu(result))
+  expect_equal(length(result), length(oracle))
+  for (i in seq_along(result)) {
+    expect_equal(
+      tibble::as_tibble(dplyr::ungroup(result[[i]])),
+      tibble::as_tibble(dplyr::ungroup(oracle[[i]]))
+    )
+  }
+})
+
+test_that("group_map() returns a plain list matching dplyr", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  gt <- tbl_gpu(df) |> dplyr::group_by(g)
+
+  result <- gt |> dplyr::group_map(~ sum(.x$x))
+  oracle <- dplyr::group_map(dplyr::group_by(df, g), ~ sum(.x$x))
+
+  expect_type(result, "list")
+  expect_false(is_tbl_gpu(result))
+  expect_equal(result, oracle)
+})
+
+test_that("group_nest() returns a data frame with a list-column, not a tbl_gpu", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  gt <- tbl_gpu(df) |> dplyr::group_by(g)
+
+  result <- gt |> dplyr::group_nest()
+
+  expect_false(is_tbl_gpu(result))
+  expect_true(any(vapply(result, is.list, logical(1))))
+  expect_equal(nrow(result), dplyr::n_groups(dplyr::group_by(df, g)))
+})
+
+test_that("nest_by() returns a rowwise data frame with a list-column, not a tbl_gpu", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  gt <- tbl_gpu(df)
+
+  result <- gt |> dplyr::nest_by(g)
+
+  expect_false(is_tbl_gpu(result))
+  expect_true(any(vapply(result, is.list, logical(1))))
+  expect_equal(nrow(result), length(unique(df$g)))
+})
+
+test_that("sample_n() draws a seeded sample matching dplyr", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  gt <- tbl_gpu(df)
+
+  set.seed(123)
+  oracle <- suppressWarnings(dplyr::sample_n(df, 3))
+  set.seed(123)
+  result <- suppressWarnings(gt |> dplyr::sample_n(3) |> collect())
+
+  expect_equal(tibble::as_tibble(result), oracle)
+})
+
+test_that("sample_frac() draws a seeded sample matching dplyr", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  gt <- tbl_gpu(df)
+
+  set.seed(123)
+  oracle <- suppressWarnings(dplyr::sample_frac(df, 0.6))
+  set.seed(123)
+  result <- suppressWarnings(gt |> dplyr::sample_frac(0.6) |> collect())
+
+  expect_equal(tibble::as_tibble(result), oracle)
+})
+
+# =============================================================================
+# 3. Cross-cutting behaviors
+# =============================================================================
+
+test_that("gpu_fallback() restores pre-existing group_by() grouping for count()", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  pipeline <- function(d) d |> dplyr::group_by(s) |> dplyr::count()
+  expect_same_as_dplyr(df, pipeline, arrange_by = "s")
+})
+
+test_that("gpu_fallback() restores pre-existing group_by() grouping for slice_min()", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  pipeline <- function(d) d |> dplyr::group_by(g) |> dplyr::slice_min(x, n = 1)
+  expect_same_as_dplyr(df, pipeline, arrange_by = "g")
+})
+
+test_that("fallback verbs materialize pending lazy ops and restore lazy exec_mode", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+
+  lazy_gt <- tbl_gpu(df, lazy = TRUE) |> dplyr::filter(x > 10)
+  expect_true(is_lazy(lazy_gt))
+  expect_true(has_pending_ops(lazy_gt))
+
+  # transmute() is GPU-native now (Phase 3 task 4, R/mutate.R) -- reframe()
+  # takes over as this test's fallback vehicle.
+  result <- lazy_gt |> dplyr::reframe(z = unique(x), .by = g)
+
+  expect_true(is_tbl_gpu(result))
+  expect_true(is_lazy(result))
+  expect_false(has_pending_ops(result))
+
+  oracle <- dplyr::reframe(dplyr::filter(df, x > 10), z = unique(x), .by = g)
+  expect_equal(
+    dplyr::arrange(collect(result), z),
+    dplyr::arrange(oracle, z)
+  )
+})
+
+test_that("eager fallback input stays eager after re-upload", {
+  skip_if_no_gpu()
+  df <- fallback_df()
+  gt <- tbl_gpu(df, lazy = FALSE)
+
+  result <- gt |> dplyr::reframe(z = unique(x), .by = g)
+
+  expect_true(is_tbl_gpu(result))
+  expect_false(is_lazy(result))
+})
+
+test_that("factor columns round-trip through a fallback verb", {
+  skip_if_no_gpu()
+  df <- tibble::tibble(
+    g = c(1, 1, 2),
+    f = factor(c("lo", "hi", "lo"), levels = c("lo", "hi"))
+  )
+  gt <- tbl_gpu(df)
+
+  # rename() is GPU-native now (Phase 3 task 3, R/rename.R) -- its own
+  # factor round-trip is covered directly in test-dplyr-rename.R.
+  # transmute() is GPU-native now too (Phase 3 task 4, R/mutate.R). Use
+  # reframe() here instead, which is still a genuine CPU fallback verb, to
+  # keep this test actually exercising gpu_fallback()'s factor restoration
+  # path.
+  result <- gt |> dplyr::reframe(f, grp = g) |> collect()
+
+  expect_true(is.factor(result$f))
+  expect_equal(levels(result$f), c("lo", "hi"))
+  expect_equal(as.character(result$f), as.character(df$f))
+})
+
+test_that("options(cuplyr.fallback = 'warn') warns for a fallback verb", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "warn")
+  gt <- tbl_gpu(fallback_df())
+
+  expect_warning(
+    gt |> dplyr::reframe(z = unique(x), .by = g),
+    "reframe.*fell back to CPU evaluation"
+  )
+})
+
+test_that("options(cuplyr.fallback = 'error') stops for a fallback verb", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gt <- tbl_gpu(fallback_df())
+
+  expect_error(
+    gt |> dplyr::reframe(z = unique(x), .by = g),
+    "reframe.*fell back to CPU evaluation"
+  )
+})
+
+test_that("fallback verbs are silent by default", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = NULL)
+  gt <- tbl_gpu(fallback_df())
+
+  expect_no_warning(gt |> dplyr::reframe(z = unique(x), .by = g))
+})
+
+test_that("GPU-native verbs never trigger a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "warn")
+  gt <- tbl_gpu(fallback_df())
+
+  expect_no_warning({
+    gt |>
+      dplyr::filter(x > 10) |>
+      dplyr::mutate(y = x * 2) |>
+      dplyr::select(g, y) |>
+      dplyr::arrange(g) |>
+      dplyr::group_by(g) |>
+      dplyr::summarise(total = sum(y), .groups = "drop") |>
+      dplyr::ungroup() |>
+      collect()
+  })
+})
+
+test_that("distinct() is GPU-native and never triggers a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gt <- tbl_gpu(fallback_df())
+
+  expect_no_error(gt |> dplyr::distinct())
+  expect_no_error(gt |> dplyr::distinct(g))
+  expect_no_error(gt |> dplyr::distinct(g, .keep_all = TRUE))
+  expect_no_error(gt |> dplyr::distinct(z = x + 1))
+  expect_no_error(gt |> dplyr::group_by(g) |> dplyr::distinct(x))
+})
+
+test_that("rename()/rename_with()/relocate() are GPU-native and never trigger a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gt <- tbl_gpu(fallback_df())
+
+  expect_no_error(gt |> dplyr::rename(y2 = x))
+  expect_no_error(gt |> dplyr::rename_with(toupper))
+  expect_no_error(gt |> dplyr::relocate(s))
+  expect_no_error(gt |> dplyr::select(renamed = x, g))
+  expect_no_error(gt |> dplyr::pull(x))
+})
+
+test_that("transmute()/glimpse() are GPU-native and never trigger a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gt <- tbl_gpu(fallback_df())
+
+  expect_no_error(gt |> dplyr::transmute(z = x * 2))
+  expect_no_error(gt |> dplyr::transmute(z = x * 2, g))
+  expect_no_error(gt |> dplyr::mutate(z = x * 2, .keep = "used"))
+  expect_no_error(gt |> dplyr::mutate(z = x * 2, .after = g))
+  expect_no_error(capture.output(dplyr::glimpse(gt)))
+})
+
+test_that("count()/tally()/add_count()/add_tally() are GPU-native and never trigger a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gt <- tbl_gpu(fallback_df())
+
+  expect_no_error(gt |> dplyr::count(g))
+  expect_no_error(gt |> dplyr::count())
+  expect_no_error(gt |> dplyr::count(g, wt = x, sort = TRUE))
+  expect_no_error(gt |> dplyr::group_by(g) |> dplyr::tally())
+  expect_no_error(gt |> dplyr::add_count(g))
+  # add_tally() is a plain (non-generic) dplyr function -- it works
+  # transparently via tbl_vars.tbl_gpu()/group_vars.tbl_gpu()/mutate()/
+  # arrange(), with no tbl_gpu-specific code of its own (R/count.R).
+  expect_no_error(gt |> dplyr::group_by(g) |> dplyr::add_tally())
+})
+
+test_that("semi_join()/anti_join() are GPU-native and never trigger a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gt <- tbl_gpu(fallback_df())
+  # Like the mutating joins, `y` must be a tbl_gpu unless `copy = TRUE`.
+  y_small <- tbl_gpu(tibble::tibble(g = c(1, 3)))
+
+  expect_no_error(gt |> dplyr::semi_join(y_small, by = "g"))
+  expect_no_error(gt |> dplyr::anti_join(y_small, by = "g"))
+  expect_no_error(gt |> dplyr::semi_join(y_small, by = "g", na_matches = "never"))
+  expect_no_error(gt |> dplyr::anti_join(y_small, by = "g", na_matches = "never"))
+  expect_no_error(gt |> dplyr::group_by(g) |> dplyr::semi_join(y_small, by = "g"))
+  expect_no_error(gt |> as_lazy() |> dplyr::semi_join(y_small, by = "g") |> collect())
+})
+
+test_that("cross_join() is GPU-native and never triggers a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gt <- tbl_gpu(fallback_df())
+  y_small <- tbl_gpu(tibble::tibble(k = 1:2))
+
+  expect_no_error(gt |> dplyr::cross_join(y_small))
+  expect_no_error(gt |> dplyr::group_by(g) |> dplyr::cross_join(y_small))
+  expect_no_error(gt |> as_lazy() |> dplyr::cross_join(y_small) |> collect())
+  expect_no_error(gt |> dplyr::cross_join(tibble::tibble(k = 1:2), copy = TRUE))
+})
+
+test_that("union()/union_all()/intersect()/setdiff()/setequal()/symdiff() are GPU-native and never trigger a fallback notification", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gt <- tbl_gpu(fallback_df()) |> dplyr::select(g)
+  y_small <- tbl_gpu(tibble::tibble(g = c(1, 9)))
+  y_small_df <- tibble::tibble(g = c(1, 9))
+
+  expect_no_error(gt |> dplyr::union(y_small))
+  expect_no_error(gt |> dplyr::union_all(y_small))
+  expect_no_error(gt |> dplyr::intersect(y_small))
+  expect_no_error(gt |> dplyr::setdiff(y_small))
+  expect_no_error(gt |> dplyr::symdiff(y_small))
+  expect_no_error(gt |> dplyr::setequal(y_small))
+  # A plain data.frame `y` (auto-uploaded, no `copy=` argument exists for
+  # these generics) is native too.
+  expect_no_error(gt |> dplyr::union(y_small_df))
+  expect_no_error(gt |> as_lazy() |> dplyr::intersect(y_small) |> collect())
+})

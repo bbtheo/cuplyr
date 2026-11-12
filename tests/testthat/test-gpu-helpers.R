@@ -160,6 +160,7 @@ test_that("verify_gpu_data() returns FALSE for tbl_gpu with NULL pointer", {
 
 test_that("verify_gpu_data() works after operations", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
 
   gpu_df <- tbl_gpu(mtcars)
 
@@ -306,6 +307,7 @@ test_that("helper functions work together for complete verification", {
 
 test_that("helper functions work on operation results", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
 
   result <- mtcars |>
     tbl_gpu() |>

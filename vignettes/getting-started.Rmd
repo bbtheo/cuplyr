@@ -264,37 +264,20 @@ cuplyr handles these R types:
 | `POSIXct` | TIMESTAMP_MICROSECONDS | |
 | `factor` | INT32 | Stored as codes |
 
-## Execution Modes: Eager vs Lazy
+## Execution Modes: Lazy vs Eager
 
-cuplyr supports two execution modes:
+cuplyr supports two execution modes. **Lazy is the default.**
 
-### Eager Mode (Default)
-
-Operations execute immediately. Simple and predictable:
-
-```{r eager-mode}
-# Default: eager execution
-eager_tbl <- tbl_gpu(mtcars)
-is_lazy(eager_tbl)  # FALSE
-
-# Each operation runs immediately
-result <- eager_tbl |>
-  filter(mpg > 20) |>   # Executes now
-
-  mutate(x = hp * 2) |> # Executes now
-  collect()
-```
-
-### Lazy Mode
+### Lazy Mode (Default)
 
 Operations are deferred and optimized before execution:
 
 ```{r lazy-mode}
-# Enable lazy execution
-lazy_tbl <- tbl_gpu(mtcars, lazy = TRUE)
+# Default: lazy execution
+lazy_tbl <- tbl_gpu(mtcars)
 is_lazy(lazy_tbl)  # TRUE
 
-# Operations build an AST without executing
+# Operations build a plan without executing
 pipeline <- lazy_tbl |>
   filter(mpg > 20) |>
   mutate(x = hp * 2) |>
@@ -307,8 +290,39 @@ has_pending_ops(pipeline)  # TRUE
 result <- pipeline |> collect()
 ```
 
+A mistake in your code (a column that doesn't exist, a type error) still shows
+up at the verb that has it, not at `collect()`. Printing a lazy table with
+pending steps runs the plan and shows the first rows under a
+`# A gibble [lazy]:` header; the table itself stays lazy and keeps nothing, so
+printing it twice runs the plan twice.
+
 Lazy mode enables query optimization like filter pushdown and operation fusion.
-See `vignette("query-optimization")` for details.
+See `vignette("query-optimization")` for details. `vignette("performance")` has
+measured timings and memory use for both modes, and says when each is the right
+choice.
+
+### Eager Mode
+
+Operations execute immediately. Simple and predictable, handy for stepping
+through a pipeline:
+
+```{r eager-mode}
+# Ask for eager execution on one table
+eager_tbl <- tbl_gpu(mtcars, lazy = FALSE)
+is_lazy(eager_tbl)  # FALSE
+
+# Each operation runs immediately
+result <- eager_tbl |>
+  filter(mpg > 20) |>   # Executes now
+
+  mutate(x = hp * 2) |> # Executes now
+  collect()
+```
+
+To get eager tables everywhere, set `options(cuplyr.exec_mode = "eager")` or the
+environment variable `CUPLYR_EXEC_MODE=eager`; the `lazy =` argument of
+`tbl_gpu()` wins over both. `cuplyr_options()` lists every cuplyr option with the
+value in use; `?"cuplyr-options"` documents them.
 
 ## Controlling Execution
 
@@ -318,7 +332,7 @@ Execute pending operations but keep data on GPU:
 
 ```{r compute}
 # Useful when branching into multiple analyses
-base_data <- tbl_gpu(mtcars, lazy = TRUE) |>
+base_data <- tbl_gpu(mtcars) |>
   filter(mpg > 15) |>
   mutate(power_ratio = hp / wt) |>
   compute()  # Execute and materialize on GPU
@@ -330,10 +344,10 @@ analysis_b <- base_data |> filter(cyl == 6) |> collect()
 
 ### show_query()
 
-Inspect pending operations in lazy mode:
+Inspect the pending operations of a lazy table:
 
 ```{r show-query}
-lazy_pipeline <- tbl_gpu(mtcars, lazy = TRUE) |>
+lazy_pipeline <- tbl_gpu(mtcars) |>
   filter(mpg > 20) |>
   mutate(x = hp * 2)
 
@@ -363,13 +377,13 @@ gpu_gc()
 
 1. **Filter early** - Reduce data size before expensive operations
 2. **Select only needed columns** - Less data to process
-3. **Use lazy mode for complex pipelines** - Enables optimization
+3. **Keep pipelines lazy (the default)** - Enables optimization
 4. **Keep data on GPU** - Avoid repeated transfers with `compute()`
 5. **Collect late** - Only transfer final results to R
 
 ```{r best-practices}
 # Good: filter and select early
-result <- tbl_gpu(mtcars, lazy = TRUE) |>
+result <- tbl_gpu(mtcars) |>
   filter(mpg > 20) |>                    # Reduce rows first
   select(mpg, cyl, hp, wt) |>            # Reduce columns
   mutate(power_ratio = hp / wt) |>       # Now compute
@@ -398,12 +412,13 @@ try({
 ## Next Steps
 
 - `vignette("query-optimization")` - Deep dive into the AST optimizer
-- `vignette("performance-tips")` - Maximizing GPU performance
+- `vignette("performance")` - Eager vs lazy: timings, memory, where the GPU loses
+- `vignette("memory")` - GPU memory resources and when memory is freed
 - Package documentation: `?tbl_gpu`, `?compute`, `?gpu_memory_state`
 
 ## System Requirements
 
-- NVIDIA GPU with CUDA support (Compute Capability >= 6.0)
-- CUDA Toolkit >= 12.0
+- NVIDIA GPU with CUDA support (Compute Capability >= 7.0)
+- CUDA Toolkit >= 12.2
 - RAPIDS cuDF >= 25.12
 - R >= 4.3.0

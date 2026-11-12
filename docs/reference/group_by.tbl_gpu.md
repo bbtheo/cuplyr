@@ -16,8 +16,7 @@ group_by(.data, ..., .add = FALSE, .drop = TRUE)
 
 - .data:
 
-  A `tbl_gpu` object created by
-  [`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md).
+  A `tbl_gpu` object created by [`tbl_gpu()`](tbl_gpu.md).
 
 - ...:
 
@@ -45,9 +44,9 @@ Unlike operations like
 [`dplyr::filter()`](https://dplyr.tidyverse.org/reference/filter.html)
 or
 [`dplyr::mutate()`](https://dplyr.tidyverse.org/reference/mutate.html),
-[`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html) does
-not perform any GPU computation. It simply records which columns should
-be used for grouping in subsequent aggregation operations.
+`group_by()` does not perform any GPU computation. It simply records
+which columns should be used for grouping in subsequent aggregation
+operations.
 
 The actual groupby computation happens when you call
 [`dplyr::summarise()`](https://dplyr.tidyverse.org/reference/summarise.html)
@@ -56,10 +55,8 @@ operations before executing the expensive groupby operation.
 
 ## See also
 
-[`summarise.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/summarise.tbl_gpu.md)
-for aggregating grouped data,
-[`ungroup.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/ungroup.tbl_gpu.md)
-for removing grouping
+[`summarise.tbl_gpu`](summarise.tbl_gpu.md) for aggregating grouped
+data, [`ungroup.tbl_gpu`](ungroup.tbl_gpu.md) for removing grouping
 
 ## Examples
 

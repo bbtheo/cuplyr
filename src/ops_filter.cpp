@@ -1,12 +1,16 @@
 // src/ops_filter.cpp
+//
+// Down to the two handlers filter_eval_mask() (R/filter.R) still needs for
+// its CPU-eval fallback path: gpu_filter_bool() (uniform TRUE/FALSE) and
+// gpu_filter_mask() (a mixed R logical vector applied as a boolean mask).
+// Every predicate the expression IR understands now goes through
+// gpu_filter_expr() (src/ops_expr.cpp) instead -- gpu_filter_scalar()/
+// gpu_filter_col() were deleted in Phase 1 T8 once that cutover left them
+// with no remaining R callers.
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
-#include "ops_common.hpp"
 
-#include <cudf/binaryop.hpp>
 #include <cudf/copying.hpp>
-#include <cudf/scalar/scalar.hpp>
-#include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/stream_compaction.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/null_mask.hpp>
@@ -20,57 +24,6 @@
 
 using namespace Rcpp;
 using namespace cudf;
-
-// [[Rcpp::export]]
-SEXP gpu_filter_scalar(SEXP xptr, int col_idx, std::string op, double value) {
-    using namespace cuplyr;
-
-    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
-    cudf::table_view view = get_table_view(ptr);
-
-    if (col_idx < 0 || col_idx >= view.num_columns()) {
-        Rcpp::stop("Column index out of bounds");
-    }
-
-    cudf::column_view col = view.column(col_idx);
-
-    auto scalar = cudf::make_numeric_scalar(cudf::data_type{cudf::type_id::FLOAT64});
-    static_cast<cudf::numeric_scalar<double>*>(scalar.get())->set_value(value);
-
-    auto mask = cudf::binary_operation(
-        col, *scalar, get_compare_op(op),
-        cudf::data_type{cudf::type_id::BOOL8}
-    );
-
-    auto result = cudf::apply_boolean_mask(view, mask->view());
-
-    return make_gpu_table_xptr(std::move(result));
-}
-
-// [[Rcpp::export]]
-SEXP gpu_filter_col(SEXP xptr, int col_idx, std::string op, int col_idx2) {
-    using namespace cuplyr;
-
-    Rcpp::XPtr<GpuTablePtr> ptr(xptr);
-    cudf::table_view view = get_table_view(ptr);
-
-    if (col_idx < 0 || col_idx >= view.num_columns() ||
-        col_idx2 < 0 || col_idx2 >= view.num_columns()) {
-        Rcpp::stop("Column index out of bounds");
-    }
-
-    cudf::column_view col1 = view.column(col_idx);
-    cudf::column_view col2 = view.column(col_idx2);
-
-    auto mask = cudf::binary_operation(
-        col1, col2, get_compare_op(op),
-        cudf::data_type{cudf::type_id::BOOL8}
-    );
-
-    auto result = cudf::apply_boolean_mask(view, mask->view());
-
-    return make_gpu_table_xptr(std::move(result));
-}
 
 // [[Rcpp::export]]
 SEXP gpu_filter_bool(SEXP xptr, bool keep_all) {

@@ -2,9 +2,13 @@
 
 # Basic S3 wiring --------------------------------------------------------------
 
-test_that("bind_rows and bind_cols register S3 methods for tbl_gpu", {
-  expect_true(is.function(getS3method("bind_rows", "tbl_gpu", optional = TRUE)))
-  expect_true(is.function(getS3method("bind_cols", "tbl_gpu", optional = TRUE)))
+# Plain functions like dplyr's (a generic would force `!!!` splices), so there
+# are no tbl_gpu methods to register.
+test_that("bind_rows and bind_cols are plain functions, not S3 generics", {
+  expect_null(getS3method("bind_rows", "tbl_gpu", optional = TRUE))
+  expect_null(getS3method("bind_cols", "tbl_gpu", optional = TRUE))
+  expect_false(any(grepl("UseMethod", deparse(body(bind_rows)))))
+  expect_false(any(grepl("UseMethod", deparse(body(bind_cols)))))
 })
 
 test_that("bind_rows delegates to dplyr for non-tbl_gpu inputs", {
@@ -224,6 +228,226 @@ test_that("bind_rows promotes logical to double", {
 })
 
 # =============================================================================
+# bind_rows: strict vctrs-style type compatibility (Phase 11 L4)
+#
+# The old "STRING is widest" rule (promote_types()) is RETIRED: a
+# numeric/logical column against a character column of the same name is now
+# a hard error, matching real dplyr/vctrs' own `vctrs_error_incompatible_type`
+# EXACTLY (verified empirically against dplyr 1.2.1 / vctrs 0.7.3: the error
+# text format is `` Can't combine `..1$x` <double> and `..2$x` <character>. ``
+# -- see resolve_common_col_type()/abort_bind_rows_incompatible(), R/bind.R).
+# `cudf::strings::from_floats()`'s own "4.0" vs. R's "4" formatting
+# divergence (previously pinned in this file) is no longer reachable from
+# bind_rows() at all: no schema unification can produce a numeric-source/
+# STRING-target pair any more (see gpu_cast_to_string()'s updated header
+# comment, src/ops_bind.cpp).
+# =============================================================================
+
+test_that("bind_rows errors identically to dplyr for integer + character", {
+  skip_if_no_gpu()
+
+  df1 <- data.frame(x = 1:3)
+  df2 <- data.frame(x = c("p", "q"), stringsAsFactors = FALSE)
+
+  oracle_err <- tryCatch(dplyr::bind_rows(df1, df2), error = function(e) e)
+  cuplyr_err <- tryCatch(bind_rows(tbl_gpu(df1), tbl_gpu(df2)), error = function(e) e)
+
+  expect_s3_class(cuplyr_err, "error")
+  expect_equal(conditionMessage(cuplyr_err), conditionMessage(oracle_err))
+})
+
+test_that("bind_rows errors identically to dplyr for double + character", {
+  skip_if_no_gpu()
+
+  df1 <- data.frame(x = c(1.5, 2.25, 3.75))
+  df2 <- data.frame(x = c("p", "q"), stringsAsFactors = FALSE)
+
+  oracle_err <- tryCatch(dplyr::bind_rows(df1, df2), error = function(e) e)
+  cuplyr_err <- tryCatch(bind_rows(tbl_gpu(df1), tbl_gpu(df2)), error = function(e) e)
+
+  expect_equal(conditionMessage(cuplyr_err), conditionMessage(oracle_err))
+})
+
+test_that("bind_rows errors identically to dplyr for logical + character", {
+  skip_if_no_gpu()
+
+  df1 <- data.frame(x = c(TRUE, FALSE, TRUE))
+  df2 <- data.frame(x = c("p", "q"), stringsAsFactors = FALSE)
+
+  oracle_err <- tryCatch(dplyr::bind_rows(df1, df2), error = function(e) e)
+  cuplyr_err <- tryCatch(bind_rows(tbl_gpu(df1), tbl_gpu(df2)), error = function(e) e)
+
+  expect_equal(conditionMessage(cuplyr_err), conditionMessage(oracle_err))
+})
+
+test_that("bind_rows errors identically to dplyr regardless of table order", {
+  skip_if_no_gpu()
+
+  # Character table FIRST this time -- the `..1$x`/`..2$x` labels always
+  # follow the tables' own positional order in `...`, not "whichever side
+  # happens to be numeric."
+  df1 <- data.frame(x = c("p", "q"), stringsAsFactors = FALSE)
+  df2 <- data.frame(x = 1:3)
+
+  oracle_err <- tryCatch(dplyr::bind_rows(df1, df2), error = function(e) e)
+  cuplyr_err <- tryCatch(bind_rows(tbl_gpu(df1), tbl_gpu(df2)), error = function(e) e)
+
+  expect_equal(conditionMessage(cuplyr_err), conditionMessage(oracle_err))
+})
+
+test_that("bind_rows reports the FIRST table (..1) against the first genuinely conflicting table across 3+ tables", {
+  skip_if_no_gpu()
+
+  # Verified empirically against real dplyr/vctrs (a documented quirk, not a
+  # simplification on cuplyr's part): the error's LEFT-hand label is ALWAYS
+  # the literal `..1`, even when table 1 doesn't establish the running type
+  # itself (e.g. it's missing the conflicting column entirely) -- see
+  # abort_bind_rows_incompatible()'s own doc comment, R/bind.R.
+  df1 <- data.frame(x = 1)
+  df2 <- data.frame(x = 2L)
+  df3 <- data.frame(x = "a", stringsAsFactors = FALSE)
+
+  oracle_err <- tryCatch(dplyr::bind_rows(df1, df2, df3), error = function(e) e)
+  cuplyr_err <- tryCatch(
+    bind_rows(tbl_gpu(df1), tbl_gpu(df2), tbl_gpu(df3)),
+    error = function(e) e
+  )
+
+  expect_equal(conditionMessage(cuplyr_err), conditionMessage(oracle_err))
+  expect_match(conditionMessage(cuplyr_err), "\\.\\.1\\$x.*\\.\\.3\\$x")
+})
+
+test_that("bind_rows factor + character decodes to character labels (Phase 11 L2 Bug 3)", {
+  skip_if_no_gpu()
+
+  # dplyr's real contract (verified empirically: vctrs::vec_ptype2(factor,
+  # character) -> character, and bind_rows(factor, character) decodes to
+  # LABELS): factor's own physical GPU column is INT32 codes (per
+  # CLAUDE.md's logical/physical type split), so cast_column() must decode
+  # via gpu_decode_factor() (this column's OWN levels), not reuse the
+  # numeric integer->string cast path -- that would silently emit codes
+  # ("2") instead of labels ("m"), a previously-locked-down (now fixed)
+  # silent-corruption bug.
+  df1 <- data.frame(x = factor(c("m", "f", "m")))
+  df2 <- data.frame(x = c("a", "b"), stringsAsFactors = FALSE)
+
+  expected <- dplyr::bind_rows(df1, df2)
+
+  result_tbl <- bind_rows(tbl_gpu(df1), tbl_gpu(df2))
+  expect_equal(result_tbl$schema$types[[1]], "STRING")
+
+  result <- result_tbl |> collect()
+  expect_type(result$x, "character")
+  expect_equal(result$x, expected$x)
+})
+
+test_that("bind_rows factor + factor with different levels unions levels (Phase 11 L2 Bug 2)", {
+  skip_if_no_gpu()
+
+  # dplyr's real contract (verified empirically:
+  # vctrs::vec_c(factor("a"), factor("b")) -> factor c("a","b") with levels
+  # c("a","b"), i.e. union(levels(x), levels(y)), x's order first). Before
+  # this fix, bind_rows() concatenated the raw INT32 codes verbatim with no
+  # remap AND dropped `schema$factor_levels` entirely -- collect() would
+  # present the column as plain integers, not even a factor.
+  df1 <- data.frame(x = factor(c("a", "b"), levels = c("a", "b")))
+  df2 <- data.frame(x = factor(c("b", "c"), levels = c("b", "c")))
+
+  expected <- dplyr::bind_rows(df1, df2)
+
+  result_tbl <- bind_rows(tbl_gpu(df1), tbl_gpu(df2))
+  expect_equal(result_tbl$schema$types[[1]], "DICTIONARY32")
+
+  result <- result_tbl |> collect()
+  expect_s3_class(result$x, "factor")
+  expect_equal(levels(result$x), levels(expected$x))
+  expect_equal(as.character(result$x), as.character(expected$x))
+})
+
+test_that("bind_rows factor + factor with identical levels is a no-op union (native, no remap needed)", {
+  skip_if_no_gpu()
+
+  lvls <- c("lo", "mid", "hi")
+  df1 <- data.frame(x = factor(c("hi", "lo"), levels = lvls))
+  df2 <- data.frame(x = factor(c("mid", "hi"), levels = lvls))
+
+  expected <- dplyr::bind_rows(df1, df2)
+
+  result <- bind_rows(tbl_gpu(df1), tbl_gpu(df2)) |> collect()
+  expect_s3_class(result$x, "factor")
+  expect_equal(levels(result$x), lvls)
+  expect_equal(as.character(result$x), as.character(expected$x))
+})
+
+test_that("bind_rows factor + integer errors in dplyr's own message shape (Phase 11 L4)", {
+  skip_if_no_gpu()
+
+  # Real dplyr: `` Can't combine `..1$x` <factor<4d52a>> and `..2$x`
+  # <integer>. `` -- the level-derived hash in the factor label can't be
+  # byte-matched (bind_rows_type_label()'s own doc comment, R/bind.R;
+  # mirrors set_op_type_label()'s identical, pre-existing limitation), so
+  # this checks the message SHAPE (prefix/suffix around the un-matchable
+  # hash) rather than full equality.
+  df1 <- data.frame(x = factor(c("a", "b")))
+  df2 <- data.frame(x = 1:2)
+
+  oracle_err <- tryCatch(dplyr::bind_rows(df1, df2), error = function(e) e)
+  expect_match(conditionMessage(oracle_err), "^Can't combine `\\.\\.1\\$x` <factor<.*>> and `\\.\\.2\\$x` <integer>\\.$")
+
+  expect_error(
+    bind_rows(tbl_gpu(df1), tbl_gpu(df2)),
+    "Can't combine `\\.\\.1\\$x` <factor<\\.\\.\\.>> and `\\.\\.2\\$x` <integer>\\."
+  )
+})
+
+# =============================================================================
+# bind_rows: timestamp-mix (Phase 11 L3 -- native TIMESTAMP_DAYS <->
+# TIMESTAMP_MICROSECONDS cast, gpu_cast_column())
+# =============================================================================
+
+test_that("bind_rows Date + Date is a same-type no-op", {
+  skip_if_no_gpu()
+
+  df1 <- data.frame(a = as.Date(c("2020-01-01", "2020-01-02")))
+  df2 <- data.frame(a = as.Date("2020-01-03"))
+
+  result <- bind_rows(tbl_gpu(df1), tbl_gpu(df2)) |> collect()
+  oracle <- dplyr::bind_rows(df1, df2)
+  expect_equal(result$a, oracle$a)
+})
+
+test_that("bind_rows Date + POSIXct promotes to POSIXct natively (Phase 11 L3, no fallback)", {
+  skip_if_no_gpu()
+
+  # Real dplyr: `vec_ptype2(Date, POSIXct)` -> POSIXct (verified
+  # empirically). This used to be entirely unreachable for bind_rows() (a
+  # raw C++ "Unsupported target type for casting" exception) -- now a
+  # genuine `cudf::cast()` between timestamp granularities.
+  df1 <- data.frame(a = as.Date("2020-01-01"))
+  df2 <- data.frame(a = as.POSIXct("2020-01-02 10:00:00", tz = "UTC"))
+
+  result_tbl <- bind_rows(tbl_gpu(df1), tbl_gpu(df2))
+  expect_equal(result_tbl$schema$types[[1]], "TIMESTAMP_MICROSECONDS")
+
+  result <- result_tbl |> collect()
+  oracle <- dplyr::bind_rows(df1, df2)
+  expect_s3_class(result$a, "POSIXct")
+  expect_equal(as.numeric(result$a), as.numeric(oracle$a))
+})
+
+test_that("bind_rows POSIXct + Date (order swapped) also promotes to POSIXct natively", {
+  skip_if_no_gpu()
+
+  df1 <- data.frame(a = as.POSIXct("2020-01-02 10:00:00", tz = "UTC"))
+  df2 <- data.frame(a = as.Date("2020-01-01"))
+
+  result <- bind_rows(tbl_gpu(df1), tbl_gpu(df2)) |> collect()
+  oracle <- dplyr::bind_rows(df1, df2)
+  expect_s3_class(result$a, "POSIXct")
+  expect_equal(as.numeric(result$a), as.numeric(oracle$a))
+})
+
+# =============================================================================
 # bind_rows: .id parameter optionally adds a column identifying source table
 # =============================================================================
 
@@ -268,10 +492,11 @@ test_that("bind_rows .id column appears first", {
 })
 
 # =============================================================================
-# bind_rows: Groups are discarded after binding
+# bind_rows: the first input's groups are kept (as dplyr does)
 # =============================================================================
 
-test_that("bind_rows discards groups from single grouped table", {
+# dplyr's bind_rows() keeps the first input's groups, so these assert that.
+test_that("bind_rows keeps groups of a single grouped table", {
  skip_if_no_gpu()
 
  df <- data.frame(g = c("a", "a", "b", "b"), x = 1:4)
@@ -279,10 +504,10 @@ test_that("bind_rows discards groups from single grouped table", {
 
  result <- bind_rows(gpu_grouped)
 
- expect_equal(result$groups, character(0))
+ expect_equal(result$groups, "g")
 })
 
-test_that("bind_rows discards groups from multiple grouped tables", {
+test_that("bind_rows keeps the first of multiple grouped tables' groups", {
  skip_if_no_gpu()
 
  df1 <- data.frame(g = c("a", "a"), x = 1:2)
@@ -293,10 +518,10 @@ test_that("bind_rows discards groups from multiple grouped tables", {
 
  result <- bind_rows(g1, g2)
 
- expect_equal(result$groups, character(0))
+ expect_equal(result$groups, "g")
 })
 
-test_that("bind_rows discards groups even with different grouping columns", {
+test_that("bind_rows keeps the first table's groups with different grouping columns", {
  skip_if_no_gpu()
 
  df1 <- data.frame(g1 = c("a", "b"), x = 1:2)
@@ -307,7 +532,7 @@ test_that("bind_rows discards groups even with different grouping columns", {
 
  result <- bind_rows(g1, g2)
 
- expect_equal(result$groups, character(0))
+ expect_equal(result$groups, "g1")
 })
 
 # =============================================================================
@@ -412,6 +637,7 @@ test_that("bind_cols with single table returns equivalent table", {
 # bind_cols: All tables must have same row count
 # =============================================================================
 
+# dplyr/vctrs' size rule: size-1 recycles, other mismatches are vctrs errors.
 test_that("bind_cols errors when row counts differ", {
  skip_if_no_gpu()
 
@@ -420,7 +646,7 @@ test_that("bind_cols errors when row counts differ", {
 
  expect_error(
    bind_cols(tbl_gpu(df1), tbl_gpu(df2)),
-   "same number of rows|row count"
+   "Can't recycle", class = "vctrs_error_incompatible_size"
  )
 })
 
@@ -432,7 +658,7 @@ test_that("bind_cols errors when first table has more rows", {
 
  expect_error(
    bind_cols(tbl_gpu(df1), tbl_gpu(df2)),
-   "same number of rows|row count"
+   "Can't recycle", class = "vctrs_error_incompatible_size"
  )
 })
 
@@ -445,7 +671,7 @@ test_that("bind_cols errors when any table in chain has different row count", {
 
  expect_error(
    bind_cols(tbl_gpu(df1), tbl_gpu(df2), tbl_gpu(df3)),
-   "same number of rows|row count"
+   "Can't recycle", class = "vctrs_error_incompatible_size"
  )
 })
 
@@ -641,4 +867,30 @@ test_that("bind_rows result can be used with bind_cols", {
  expect_equal(ncol(result), 2)
  expect_equal(result$a, 1:4)
  expect_equal(result$b, 5:8)
+})
+
+# =============================================================================
+# bind_cols size errors label data-frame inputs by position
+# =============================================================================
+
+test_that("bind_cols size errors label data frame arguments `..N`, ignoring their names", {
+  skip_if_no_gpu()
+
+  gt <- tbl_gpu(tibble::tibble(x = 1:3))
+  tb <- tibble::tibble(x = 1:3)
+  other <- tibble::tibble(z = 1:2)
+
+  msg <- function(expr) conditionMessage(tryCatch(expr, error = identity))
+
+  # dplyr clears the names of data frame inputs, so `a` never shows up.
+  expect_identical(
+    msg(cuplyr::bind_cols(gt, a = other)),
+    msg(dplyr::bind_cols(tb, a = other))
+  )
+  expect_identical(
+    msg(cuplyr::bind_cols(a = gt, other)),
+    msg(dplyr::bind_cols(a = tb, other))
+  )
+  expect_match(msg(cuplyr::bind_cols(gt, a = other)),
+               "Can't recycle `..1` (size 3) to match `..2` (size 2)", fixed = TRUE)
 })

@@ -9,7 +9,9 @@
 \arguments{
 \item{x}{A \code{tbl_gpu} object.}
 
-\item{value}{A character vector of new column names.}
+\item{value}{A character vector of new column names. Must have the same
+length as the number of columns. \code{NA} and \code{""} are allowed, as in a
+data frame (data-masking verbs then refuse the table, like dplyr).}
 }
 \value{
 The modified \code{tbl_gpu} object.

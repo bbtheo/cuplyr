@@ -73,10 +73,8 @@ call. Other applications or CUDA contexts may be using GPU memory.
 
 ## See also
 
-[`has_gpu`](https://bbtheo.github.io/cuplyr/reference/has_gpu.md) for
-simple availability check,
-[`show_gpu`](https://bbtheo.github.io/cuplyr/reference/show_gpu.md) for
-formatted display
+[`has_gpu`](has_gpu.md) for simple availability check,
+[`show_gpu`](show_gpu.md) for formatted display
 
 ## Examples
 

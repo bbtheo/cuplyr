@@ -4,33 +4,249 @@
 \alias{mutate.tbl_gpu}
 \title{Create or modify columns in a GPU table}
 \usage{
-\method{mutate}{tbl_gpu}(.data, ...)
+\method{mutate}{tbl_gpu}(
+  .data,
+  ...,
+  .by = NULL,
+  .keep = c("all", "used", "unused", "none"),
+  .before = NULL,
+  .after = NULL
+)
 }
 \arguments{
 \item{.data}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
 
 \item{...}{Name-value pairs of expressions. The name gives the column name
-(new or existing), and the value is an arithmetic expression involving
-existing columns and/or scalar values.}
+(new or existing), and the value is an expression involving existing
+columns and/or scalar values (see "Supported expressions" below).}
+
+\item{.by}{Optional on-the-fly grouping columns (tidyselect), GPU-native
+(Phase 5, task W6): \code{mutate(df, y = mean(x), .by = g)} behaves
+identically to \code{df |> group_by(g) |> mutate(y = mean(x)) |> ungroup()}
+-- same window-function machinery, same row-order-preservation
+contract, but the \emph{result} is always ungrouped (\code{.by} never leaves
+grouping metadata behind, unlike \code{\link[dplyr:group_by]{dplyr::group_by()}}). Supplying
+\code{.by} when \code{.data} is already grouped (via \code{group_by()}) is an error,
+matching dplyr exactly.}
+
+\item{.keep}{One of \code{"all"} (default), \code{"used"}, \code{"unused"}, \code{"none"};
+controls which of \code{.data}'s \emph{other} columns (besides ones \code{...}
+creates or modifies, and group columns, both of which are always kept)
+survive in the output -- see "\code{.keep} semantics" below.}
+
+\item{.before, .after}{Optionally, control where new columns should
+appear, using the same tidyselect syntax as \code{\link[=relocate.tbl_gpu]{relocate.tbl_gpu()}}.
+Only genuinely \emph{new} columns are repositioned; a modified existing
+column stays at its original position.}
 }
 \value{
 A \code{tbl_gpu} object with the new or modified columns. If a column
-name already exists, it is replaced. New columns are appended.
+name already exists, it is replaced. New columns are appended (subject
+to \code{.before}/\code{.after}), and \code{.data}'s other columns are kept or dropped
+per \code{.keep}.
 }
 \description{
 Adds new columns or modifies existing columns in a GPU table using
-arithmetic expressions, similar to \code{dplyr::mutate()}. All computations
-are performed on the GPU for maximum performance.
+expressions, similar to \code{dplyr::mutate()}. All computations are
+performed on the GPU for maximum performance.
 }
 \details{
-\subsection{Supported arithmetic operators}{
+\subsection{\code{.keep} semantics}{
 
+Verified empirically against dplyr 1.2.1 (dplyr's own docs understate the
+exact rule): the columns created or modified by \code{...} (i.e. every dot's
+output column, whether new or an existing name being replaced) and every
+group column are \strong{always} kept, regardless of \code{.keep}. \code{.keep} only
+controls which \emph{other} (untouched, non-group) columns of \code{.data} survive
+alongside them:
 \itemize{
-\item \code{+} - addition
-\item \code{-} - subtraction
-\item \code{*} - multiplication
-\item \code{/} - division
-\item \code{^} - exponentiation (power)
+\item \code{"all"} (default): every other column.
+\item \code{"used"}: other columns that are referenced as an \emph{input} to any
+of \code{...}'s expressions (union across all dots).
+\item \code{"unused"}: other columns NOT referenced as an input to any
+expression -- the complement of \code{"used"}.
+\item \code{"none"}: no other columns at all.
+}
+Column order: \code{.data}'s original columns keep their original relative
+order (modified columns don't move), and genuinely new columns are
+appended at the end (or repositioned via \code{.before}/\code{.after}); the final
+set is then filtered down according to \code{.keep}, preserving that same
+relative order. This differs from \code{\link[dplyr:transmute]{transmute()}}, whose output order is
+the literal \code{...} dot order (see \code{transmute()}'s own docs).
+}
+
+\subsection{Supported expressions}{
+
+\code{mutate()} parses its arguments through the same expression IR that
+\code{filter()} uses (see \code{R/ir.R}), lowered to \code{cudf::compute_column()} under
+the hood. A function is native only when its name resolves, in the
+expression's environment, to the base/dplyr/lubridate function itself: a
+function of your own with the same name (local, in an enclosing function or
+global) runs on the CPU, as dplyr would call it, and \code{pkg::fn} is the
+function of that package. The same holds for a function passed as a value
+(\code{across(x, f)}, a list of functions held in a variable, \code{!!f}) and for the
+functions and lambdas of the scoped verbs (\code{mutate_at()}, \code{summarise_all()},
+\code{filter_if()}, ...): one that is, or calls, a function of yours with a
+native function's name runs on the CPU. The IR understands:
+\itemize{
+\item Arithmetic: \code{+}, \code{-}, \code{*}, \code{/}, \code{^}, \code{\%\%}, \code{\%/\%}, unary \code{-},
+arbitrarily nested (\code{(x + y) * z - 1}), and scalar-on-either-side
+(\code{mutate(y = 10 - x)})
+\item Comparisons and logic: \code{==}, \code{!=}, \code{<}, \code{<=}, \code{>}, \code{>=}, \code{&},
+\code{|}, \code{!}, \code{xor()} -- these produce a \code{BOOL8} column, e.g.
+\code{mutate(is_big = x > 100)}
+\item \code{is.na()}, \code{between(x, lo, hi)}, \code{near(x, y, tol = )}
+(\code{abs(x - y) < tol}, matching \code{dplyr::near()}'s own definition
+exactly), \code{\%in\%} (including a bare \code{NA} on the right-hand side,
+e.g. \code{x \%in\% NA}, matching \code{NA \%in\% NA} being \code{TRUE} in base R --
+not the same as an \emph{empty} set, which is always \code{FALSE})
+\item Math functions: \code{sqrt()}, \code{log()} (including \code{log(x, base)}),
+\code{log2()}, \code{log10()}, \code{exp()}, \code{abs()}, \code{floor()}, \code{ceiling()},
+\code{sin()}, \code{cos()}, \code{tan()}, \code{round(x)}/\code{round(x, digits)} (banker's
+rounding, matching R)
+\item \code{if_else(cond, yes, no, missing = NULL)} -- strict-but-promoting
+type unification across \code{yes}/\code{no}/\code{missing} (int/double/logical mix
+freely, like dplyr's vctrs-based common type; \code{STRING} only unifies
+with \code{STRING}). A \code{NA} condition produces \code{NA} (or \code{missing}, if
+supplied) in the output, matching dplyr exactly (this is NOT the same
+as treating a \code{NA} condition like \code{FALSE})
+\item \code{case_when(cond1 ~ val1, cond2 ~ val2, ..., .default = val)} --
+first-match-wins; a \code{NA} condition is treated as no match (falls
+through to the next clause, or \code{.default}); unmatched rows become a
+typed \code{NA} when \code{.default} isn't supplied; the same value-type
+unification rule as \code{if_else()} applies across every \code{val_i} plus
+\code{.default}. \verb{.ptype=}/\verb{.size=}/\verb{.unmatched=} are not yet supported.
+\item \code{coalesce(...)} -- first non-NA value per row, left to right,
+across any number of columns/scalars; same value-type unification
+rule as \code{if_else()}
+\item \code{na_if(x, y)} -- \code{x} with \code{NA} wherever \code{x == y}; the output
+always keeps \code{x}'s own type exactly (unlike \code{if_else()}/\code{coalesce()},
+\code{y} is never promoted into the result, only compared against)
+\item \code{case_match(.x, old_values ~ new_value, ..., .default = val)} --
+matches \code{.x} by VALUE against each clause's (possibly multi-element)
+left-hand side, first match wins; \code{NA} on a clause's left-hand side
+matches \code{.x}'s own \code{NA} elements (base R's \code{NA \%in\% NA} is \code{TRUE});
+unmatched rows become \code{.default} (typed \code{NA} if not supplied), with
+the same value-type unification rule as \code{case_when()} across every
+\code{new_value} plus \code{.default}. Deprecated upstream in dplyr 1.2 in
+favor of \code{recode_values()}/\code{replace_values()}, but still supported
+here. \verb{.ptype=} is not yet supported.
+\item \code{recode(.x, old = new, ..., .default =, .missing =)} -- native only
+for a bare character/integer/double column \code{.x} and scalar literal
+replacements of one shared type (\code{dplyr::recode}, including \verb{!!!}
+lookups); duplicate keys, factor \code{.x}, \code{recode_factor()}, and a result
+type different from \code{.x} without \code{.default} run on the CPU.
+\item \code{recode_values(x, old_values ~ new_value, ..., default = val)} --
+the non-deprecated equivalent of \code{case_match()} above (identical
+semantics, \code{default} instead of \code{.default}). The \verb{from=}/\verb{to=}
+vector-lookup-table interface and \verb{unmatched=}/\verb{ptype=} are not yet
+supported.
+\item \code{replace_values(x, old_values ~ new_value, ...)} -- like
+\code{recode_values()}, but TYPE STABLE: the output always keeps \code{x}'s own
+type (every \code{new_value} is cast to it, never unified/promoted), and
+unmatched rows keep their original \code{x} value (there is no
+\verb{default=}). The \verb{from=}/\verb{to=} interface is not yet supported.
+\item \code{replace_when(x, cond1 ~ val1, cond2 ~ val2, ...)} -- like
+\code{case_when()}, but boolean-condition clauses feeding the same
+type-stable-to-\code{x} / "unmatched rows keep \code{x}" behavior as
+\code{replace_values()} (a \code{NA} condition is treated as no match, same as
+\code{case_when()})
+\item \code{when_all(..., na_rm = FALSE)} / \code{when_any(..., na_rm = FALSE)}
+-- elementwise \code{&}/\code{|} generalized to any number of logical inputs
+(\code{when_any(x, y, z)} is \code{x | y | z}). \code{na_rm = TRUE} treats \code{NA} as
+each operator's identity element (\code{FALSE} for \code{when_any()}, \code{TRUE}
+for \code{when_all()}) rather than propagating it -- e.g.
+\code{when_any(NA, NA, na_rm = TRUE)} is \code{FALSE}, not \code{NA}. \verb{size=} is not
+yet supported.
+\item Plain column copies (\code{mutate(y = x)})
+\item A later dot in the same \code{mutate()} call referencing an earlier
+dot's output column (\code{mutate(a = x + y, b = a * 2)}), INCLUDING one
+that's itself a window function's output (\code{mutate(a = cumsum(x), b = lag(a))})
+\item The \code{.data}/\code{.env} pronouns, and ordinary R symbols (a bare name
+that matches a column resolves to that column; otherwise it's
+evaluated as an environment variable -- "columns shadow the
+environment")
+\item Window functions, GPU-native for both ungrouped and grouped
+(\code{group_by()}) tables, arbitrarily nested with any of the above
+(\code{mutate(y = x - lag(x))}, \code{mutate(z = lag(cumsum(x)))},
+\code{mutate(centered = x - mean(x))}):
+\itemize{
+\item \code{row_number()} (sequential position) / \code{row_number(x)}
+(ranked position, ties broken by original position) --
+per-group under \code{group_by()}
+\item \code{lag(x, n = 1, default = NA, order_by = NULL)} / \code{lead(...)}
+-- row-order-preserving shift; \verb{order_by=} (a bare column,
+\code{desc(column)}, or \code{-column}) re-frames the shift to follow that
+ordering instead of the table's/group's current row order
+\item \code{cumsum()}/\code{cummax()}/\code{cummin()}/\code{cumprod()} -- matching R's
+own NA-propagation (\code{cumsum(c(1, 2, NA, 4))} is \verb{1, 3, NA, NA}:
+once an NA is seen, every later cumulative value in that group is
+NA too). The \code{cumsum()} of an integer or logical is an integer
+that is \code{NA} from the first overflow on (with R's warning), as in R
+\item \code{cummean()} (\code{cumsum(x) / row_number()}, accumulated in
+double), \code{cumall()}/
+\code{cumany()} (tri-state-encoded \code{cummin()}/\code{cummax()}), and
+\code{consecutive_id()} (single-column only; a run-length group id
+that increments whenever the input value changes, treating
+adjacent \code{NA}s as unchanged) -- all built from the primitives
+above
+\item \code{min_rank()}/\code{dense_rank()}/\code{percent_rank()}/\code{cume_dist()} --
+ties/\code{NA} handling matches dplyr exactly (\code{NA} input -> \code{NA}
+rank; \code{percent_rank()} is \code{(min_rank(x) - 1) / (n_non_NA - 1)},
+\code{NaN} for a group with exactly one non-\code{NA} value, matching
+dplyr's own \code{NaN}, not \code{NA}; \code{cume_dist()} is
+\code{rank(x, ties = "max") / n_non_NA})
+\item \code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{n()}/\code{sd()}/\code{var()} --
+one aggregate broadcast to every row of its group (or the whole
+table, ungrouped); \code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{sd()}/\code{var()}
+match R's own \code{na.rm = FALSE} default (ANY \code{NA} in the group
+makes the WHOLE group's result \code{NA}); \code{n()} always counts every
+row regardless of \code{NA}s. \code{sum()} of an integer or logical is an
+integer, as in dplyr. When a sum leaves the integer range dplyr
+returns a double (for the whole column, and for any expression
+on it): the call is then rerun by dplyr on the CPU. A lazy table
+can't plan for that (the type depends on the data), so a lazy
+\code{mutate()} with an integer \code{sum()} runs at the verb like an eager
+one (a plan break first runs the pending steps) and returns a lazy
+table with nothing pending; a logical \code{sum()} stays in the plan
+(it overflows only past 2^31 \code{TRUE} rows, with a
+\code{cuplyr_error_sum_overflow} at \code{collect()})
+\item \code{first(x, order_by = NULL)} / \code{last(x, order_by = NULL)} /
+\code{nth(x, n, order_by = NULL)} -- the first/last/\code{n}th row of the
+group in its current row order, or in \code{order_by}'s order when
+supplied; negative \code{n} counts from the end (\code{nth(x, -1)} ==
+\code{last(x)}); an out-of-range \code{n} gives \code{NA}; \verb{default=}/\verb{na_rm=}
+are not yet supported
+\item \code{ntile(x = row_number(), n)} -- desugars into \code{row_number()}/
+\code{sum()}, so it's native as a consequence of those being native
+\item \code{order_by(order_by, call)} / \code{with_order(order_by, fun, x, ...)}
+-- like dplyr, only the FIRST argument of \code{call} is put in
+\code{order_by}'s order (stable, \code{NA} last); the other arguments are
+evaluated in row order, and the call stays native only when each
+of them is a non-\code{NULL} scalar that reads no column. Native: a
+window call wrapped directly (\code{cumsum()}/\code{cummax()}/\code{cummin()}/
+\code{cumprod()}/\code{lag()}/\code{lead()}/\verb{roll_*()} except \code{roll_median()},
+and the calls cuplyr desugars into several windows,
+\code{cummean()}/\code{cumall()}/\code{cumany()}/\code{consecutive_id()}, each part in
+\code{order_by}'s order), the value-only rank functions
+(\code{min_rank()}, \code{dense_rank()}, ... are unaffected by the order),
+and an elementwise call whose other arguments are scalars
+(\code{order_by(o, cumsum(x) * 2)} is \code{cumsum(x) * 2}: the window
+inside the first argument runs in row order, as in dplyr).
+Everything else runs the whole call on the CPU, which gives
+dplyr's value or error: \code{roll_median()}, an elementwise call with
+another column argument (\code{order_by(o, cumsum(x) + lag(x))}), a
+\code{NULL} or empty extra argument (\code{lag(x, default = NULL)}),
+\code{row_number(x)}/\code{ntile(x, n)} (ties broken by the order),
+\code{first()}/\code{last()}/\code{nth()}, aggregates, a nested \code{order_by()} as
+the wrapped call itself (\code{order_by(o, order_by(i, cumsum(x)))};
+nested inside the first argument it stays native), and shapes
+dplyr rejects (\code{order_by(o, row_number())})
+}
+Every one of these is evaluated within each \code{group_by()} group when
+\code{.data} is grouped (matching \code{dplyr}'s own grouped-mutate semantics:
+row order is always preserved in the output, unlike grouped
+\code{slice()}).
 }
 }
 
@@ -41,14 +257,73 @@ column is replaced in-place (preserving column order). For example,
 \code{mutate(x = x + 1)} will modify \code{x} rather than creating a duplicate.
 }
 
-\subsection{Current limitations}{
+\subsection{Result type (type promotion)}{
+
+The output column's GPU type is inferred from the operation and its
+inputs (column type(s) and, for a column-scalar expression, the R
+literal's own type), applied in this order:
+\itemize{
+\item A plain column copy (\code{mutate(y = x)}) preserves the source
+column's type exactly.
+\item Arithmetic on \code{STRING}, factor (\code{DICTIONARY32}), or \code{Date}/
+\code{POSIXct} (\verb{TIMESTAMP_*}) columns is an error: cuplyr does not
+support arithmetic on those types.
+\item \code{/} and \code{^} always promote to \code{FLOAT64} (matching R/dplyr:
+\code{1L / 2L} and \code{2L ^ 2L} are both doubles).
+\item \code{+}, \code{-}, \code{*}, \code{\%\%}, \code{\%/\%} preserve integer types: the result is
+\code{INT32} when every input column and R literal involved is integer
+or logical (\code{TRUE + TRUE} is \code{2L}, matching R). Like R, an
+integer \code{+}, \code{-} or \code{*} whose result leaves
+\code{.Machine$integer.max} is \code{NA} with the warning "NAs produced by
+integer overflow" (once per call; at \code{collect()} for a lazy table),
+and \code{\%/\%}/\code{\%\%} by \code{0L} are \code{NA}. If any input is \code{FLOAT64}/\code{FLOAT32}, the result is
+\code{FLOAT64}; otherwise if any input is \code{INT64}, the result is
+\code{INT64}. A bare R numeric literal (e.g. the \code{1} in
+\code{mutate(y = int_col + 1)}) is a \emph{double} in R, so it promotes the
+result to \code{FLOAT64} -- write \code{1L} to keep an integer result.
+\item Comparisons, logic, \code{is.na()}, \code{between()}, \code{\%in\%} all produce
+\code{BOOL8}.
+\item \code{sqrt()}, \code{log()}, \code{exp()}, \code{floor()}, \code{ceiling()}, \code{sin()},
+\code{cos()}, \code{tan()} always promote to \code{FLOAT64} (matching R, e.g.
+\code{floor(1L)} is a double) -- as does \code{round()}, for the same reason
+(\code{typeof(round(1L))} is also a double in R, unlike \code{abs()} below).
+\item \code{abs()} preserves the argument's type, except a logical column,
+which promotes to \code{INT32} (matching R: \code{typeof(abs(TRUE))} is
+\code{"integer"}, not \code{"logical"}).
+\item A bare \code{NA} (untyped) is \code{BOOL8} when it's an entire mutate
+expression by itself (\code{mutate(y = NA)}, matching \code{typeof(NA)}); as an
+operand inside an arithmetic expression (\code{mutate(y = int_col + NA)})
+it's a type no-op instead, adopting the other operand's type
+(matching R: \code{1L + NA} is an integer, not a double). A typed NA
+literal (\code{NA_real_}, \code{NA_integer_}, ...) always keeps its own type.
+}
+}
+
+\subsection{Not yet supported}{
 
 \itemize{
-\item Only binary operations are supported (col op value or col op col)
-\item Complex expressions like \code{(x + y) * z} are not yet supported
-\item Functions like \code{sqrt()}, \code{log()}, \code{abs()} are not yet implemented
-\item Result type is always FLOAT64 (double precision)
+\item \code{order_by()}/\code{with_order()} with a general expression as the
+ordering argument (only a bare column, \code{desc(column)}, or \code{-column}
+is native, with \code{-} for numeric/logical columns and \code{desc()} of a
+string only under a C collation: \code{order_by(a + b, cumsum(x))} runs on
+the CPU); see the \code{order_by()} item above for what the wrapped call
+may be natively
+\item Multi-column \code{consecutive_id(a, b, ...)} -- single-column only
+\item Rolling/sliding-window functions (\verb{slider::slide_*()} and
+similar) -- planned for a later phase
+\item String manipulation (concatenation, case conversion, substr,
+regex, ...) -- only string \emph{comparison} is supported
+\item \code{case_when()}'s/\code{case_match()}'s \verb{.ptype=}/\verb{.size=}/\verb{.unmatched=}
+arguments, \code{recode_values()}'s/\code{replace_values()}'s \verb{from=}/\verb{to=}
+vector-lookup-table interface and \verb{unmatched=}/\verb{ptype=}, and
+\code{when_all()}'s/\code{when_any()}'s \verb{size=} -- planned for a later phase
 }
+An expression shape the IR doesn't recognize at all (no window function,
+no aggregate, not one of the arithmetic/comparison/string-comparison
+shapes listed above) is a hard error (unlike \code{filter()}, which falls back
+to CPU evaluation for some unrecognized shapes) -- a general CPU fallback
+for \code{mutate()} covering every unrecognized shape (not just window/
+aggregate ones) is planned for a later phase.
 }
 
 \subsection{Performance}{

@@ -1,10 +1,7 @@
 # Articles
 
-### Guides
+### All vignettes
 
-- [Getting Started with
-  cuplyr](https://bbtheo.github.io/cuplyr/articles/getting-started.md):
-- [Query Optimization in
-  cuplyr](https://bbtheo.github.io/cuplyr/articles/query-optimization.md):
-- [Complex Data Analysis with
-  cuplyr](https://bbtheo.github.io/cuplyr/articles/complex-analysis.md):
+- [Complex Data Analysis with cuplyr](complex-analysis.md):
+- [Getting Started with cuplyr](getting-started.md):
+- [Query Optimization in cuplyr](query-optimization.md):

@@ -6,6 +6,7 @@
 
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
+#include "ops_common.hpp"
 
 #include <cudf/sorting.hpp>
 #include <cudf/copying.hpp>
@@ -58,10 +59,19 @@ SEXP gpu_arrange(SEXP xptr, IntegerVector col_indices, LogicalVector descending)
     }
 
     // Build key columns view (memory-efficient: just views, no copy)
+    // F55: a floating NaN sorts as NA (vctrs ties NaN with NA, both last in
+    // either direction, original order kept); cudf would order it above +Inf.
+    // Only the sort key is nulled, the gather below takes the original rows.
     std::vector<cudf::column_view> key_views;
+    std::vector<std::unique_ptr<cudf::column>> nan_nulled_keys;
     key_views.reserve(num_keys);
     for (int i = 0; i < num_keys; ++i) {
-        key_views.push_back(view.column(col_indices[i]));
+        cudf::column_view key = view.column(col_indices[i]);
+        if (auto nulled = nan_nulled_copy(key)) {
+            nan_nulled_keys.push_back(std::move(nulled));
+            key = nan_nulled_keys.back()->view();
+        }
+        key_views.push_back(key);
     }
     cudf::table_view keys_table(key_views);
 
@@ -75,10 +85,22 @@ SEXP gpu_arrange(SEXP xptr, IntegerVector col_indices, LogicalVector descending)
         column_order.push_back(
             descending[i] ? cudf::order::DESCENDING : cudf::order::ASCENDING
         );
-        // NAs last for ascending, first for descending (dplyr convention)
-        // cudf null_order::AFTER treats nulls as larger than all values,
-        // so they end up last for ascending and first for descending
-        null_precedence.push_back(cudf::null_order::AFTER);
+        // dplyr places NA LAST regardless of sort direction (verified
+        // empirically against dplyr 1.2.1: arrange(desc(x)) still sorts NA
+        // last, same as arrange(x)). cudf's null_order is a
+        // physical-placement convention, not a value-magnitude one --
+        // null_order::AFTER means "nulls sort after every non-null value in
+        // THIS column's chosen order::", so for an ASCENDING column that
+        // places nulls last, but for a DESCENDING column it would place
+        // nulls FIRST (a real, previously-shipped bug: this file used
+        // null_order::AFTER unconditionally, which put NAs first for
+        // descending keys). Achieving "last" in both directions means
+        // flipping null_order together with the direction -- the same
+        // technique already used by the window rank kernel
+        // (src/ops_window.cpp) and ops_slice.cpp's gpu_slice_rank().
+        null_precedence.push_back(
+            descending[i] ? cudf::null_order::BEFORE : cudf::null_order::AFTER
+        );
     }
 
     // Phase 1: Compute sort order (memory: nrow * 4 bytes)

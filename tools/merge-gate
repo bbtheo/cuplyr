@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# The pre-merge gate. Run by tools/merge-queue inside the integration worktree,
+# under `tools/gpu-run --gate`. Not for agents to call directly.
+#
+#   tools/merge-gate <out-dir>
+#
+# Passes only if ALL of:
+#   1. the testthat suite has no fail/error
+#   2. the perf gate passes against the main checkout's perf_baseline.json
+#      (each benchmark's calibrated median goes to $out/perf_observations.tsv,
+#      which tools/merge-queue hands to tools/perf-ratchet after the merge)
+#   3. no dplyr conformance test that passes in conformance_baseline.tsv
+#      regresses (strict per-test check, tools/conformance-gate.R; the rules
+#      are conformance_gate_check() in tools/conformance-lib.R):
+#        pass -> fail/error   regression, unless listed in
+#                             tools/conformance-known-failures.tsv (the
+#                             candidate's or dev's copy): accepted known failure
+#        pass -> skip/missing always a regression
+#        pass -> excluded     reclassified (needs a manifest row), not a regression
+#        pass -> not_exercised reclassified only when the candidate changes the
+#                             harness vs dev (tools/conformance-lib.R,
+#                             run-dplyr-conformance.R, conformance-exclusions.tsv,
+#                             inst/dplyr-conformance/); on a package-only merge a
+#                             fixture that stops uploading is a cuplyr regression
+#      and, when the merging feature (from the gate dir name; F07-a2 counts as
+#      F07) owns known-failure rows in either copy, all of them pass and the
+#      candidate's copy no longer lists them. A listed test that passes on
+#      another feature's merge only warns. Any script error fails the gate.
+source "$(dirname "$0")/lib.sh"
+cd "$CUPLYR_WT_ROOT"
+out="$1"; mkdir -p "$out"
+baseline="$CUPLYR_PARITY_DIR/conformance_baseline.tsv"
+[[ -f "$baseline" ]] || { echo "no conformance baseline at $baseline; run tools/parity-init" >&2; exit 2; }
+
+ok=1
+summary="$out/summary.txt"
+: > "$summary"
+
+if Rscript tools/run-tests.R suite --out "$out/suite.tsv" > "$out/suite.log" 2>&1; then
+  echo "suite: PASS" >> "$summary"
+else
+  echo "suite: FAIL" >> "$summary"; ok=0
+fi
+grep -E '^RESULT:' "$out/suite.log" >> "$summary" || true
+
+if CUPLYR_PERF_BASELINE="$CUPLYR_MAIN/scratchpad/perf_baseline.json" \
+   CUPLYR_PERF_OBSERVATIONS="$out/perf_observations.tsv" \
+   Rscript tools/run-tests.R perf --out "$out/perf.tsv" > "$out/perf.log" 2>&1; then
+  echo "perf: PASS" >> "$summary"
+else
+  echo "perf: FAIL" >> "$summary"; ok=0
+fi
+
+Rscript tools/run-dplyr-conformance.R --ids "$out/conformance.tsv" \
+  --report "$out/conformance.md" > "$out/conformance.log" 2>&1 || true
+if [[ ! -s "$out/conformance.tsv" ]]; then
+  echo "conformance: FAIL (harness produced no per-test IDs; see conformance.log)" >> "$summary"; ok=0
+else
+  # Exit 0 = PASS, 3 = FAIL (its lines say why), anything else = script error.
+  rc=0
+  Rscript tools/conformance-gate.R --baseline "$baseline" --new "$out/conformance.tsv" \
+    --out "$out" --base-ref dev > "$out/conformance_gate.log" 2>&1 || rc=$?
+  grep -E '^conformance: ' "$out/conformance_gate.log" >> "$summary" || true
+  if [[ $rc -eq 3 ]]; then
+    ok=0
+  elif [[ $rc -ne 0 ]]; then
+    echo "conformance: FAIL (gate script error, exit $rc; see conformance_gate.log)" >> "$summary"; ok=0
+  fi
+fi
+
+cat "$summary"
+[[ $ok == 1 ]]

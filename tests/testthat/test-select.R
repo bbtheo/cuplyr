@@ -192,15 +192,13 @@ test_that("select() single column from large table works", {
   expect_equal(dim(selected)[1], 32)
 })
 
-test_that("select() errors when no columns match", {
+test_that("select() with no matching columns gives a zero-column table", {
   skip_if_no_gpu()
 
   gpu_df <- tbl_gpu(mtcars)
 
-  expect_error(
-    dplyr::select(gpu_df, starts_with("xyz")),
-    "no columns|resulted in no"
-  )
+  res <- dplyr::select(gpu_df, starts_with("xyz"))
+  expect_identical(dim(res), c(32L, 0L))
 })
 
 # =============================================================================
@@ -220,6 +218,7 @@ test_that("select() result stays on GPU", {
 
 test_that("select() creates new GPU allocation", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
 
   gpu_df <- tbl_gpu(mtcars)
   selected <- dplyr::select(gpu_df, mpg, cyl)
@@ -365,6 +364,40 @@ test_that("select() works with large datasets", {
   result <- collect(selected)
   expect_equal(result$col1, df$col1)
   expect_equal(result$col5, df$col5)
+})
+
+test_that("select() of a factor column preserves factor_levels (D3)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(
+    f = factor(c("low", "high", "medium"), levels = c("low", "medium", "high")),
+    x = 1:3
+  )
+  gpu_df <- tbl_gpu(df, lazy = FALSE)
+
+  selected <- dplyr::select(gpu_df, f, x)
+
+  expect_equal(names(selected$schema$factor_levels), "f")
+  expect_equal(selected$schema$factor_levels$f, levels(df$f))
+
+  result <- collect(selected)
+  expect_s3_class(result$f, "factor")
+  expect_equal(levels(result$f), levels(df$f))
+  expect_equal(as.character(result$f), as.character(df$f))
+})
+
+test_that("select() with tidyselect helper matches dplyr in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  df <- mtcars
+
+  pipeline <- function(tbl) {
+    tbl |>
+      dplyr::select(mpg, dplyr::starts_with("c"))
+  }
+
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
 })
 
 test_that("select() reduces memory footprint", {

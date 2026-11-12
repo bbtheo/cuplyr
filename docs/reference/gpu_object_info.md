@@ -62,10 +62,8 @@ A list with the following components:
 
 ## See also
 
-[`gpu_memory_usage`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_usage.md)
-for just the memory estimate,
-[`verify_gpu_data`](https://bbtheo.github.io/cuplyr/reference/verify_gpu_data.md)
-to check if data is on GPU
+[`gpu_memory_usage`](gpu_memory_usage.md) for just the memory estimate,
+[`verify_gpu_data`](verify_gpu_data.md) to check if data is on GPU
 
 ## Examples
 

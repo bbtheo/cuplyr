@@ -4,19 +4,48 @@
 
 #include "cuda_utils.hpp"
 #include "gpu_table.hpp"
+#include "expr_eval.hpp"
 
+#if __has_include(<cudf/join/join.hpp>)
 #include <cudf/join/join.hpp>
+#elif __has_include(<cudf/join.hpp>)
+#include <cudf/join.hpp>
+#else
+#error "cuDF join headers not found (expected cudf/join/join.hpp or cudf/join.hpp)"
+#endif
+#include <cudf/join/filtered_join.hpp>
+#include <cudf/join/mixed_join.hpp>
+#include <cudf/join/conditional_join.hpp>
+#include <cudf/aggregation.hpp>
+#include <cudf/ast/expressions.hpp>
+#include <cudf/binaryop.hpp>
+#include <cudf/column/column_factories.hpp>
+#include <cudf/concatenate.hpp>
 #include <cudf/copying.hpp>
+#include <cudf/filling.hpp>
+#include <cudf/groupby.hpp>
+#include <cudf/reduction.hpp>
+#include <cudf/scalar/scalar.hpp>
+#include <cudf/scalar/scalar_factories.hpp>
+#include <cudf/stream_compaction.hpp>
+#include <cudf/transform.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/null_mask.hpp>
+#include <cudf/replace.hpp>
+#include <cudf/unary.hpp>
 #include <cudf/utilities/span.hpp>
 #include <cudf/sorting.hpp>
+#include <cudf/search.hpp>
 #include <rmm/mr/device/per_device_resource.hpp>
 #include <rmm/device_uvector.hpp>
 
+#include <limits>
 #include <set>
+#include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -40,47 +69,393 @@ cudf::table_view select_table_view(const cudf::table_view& view,
     return cudf::table_view(cols);
 }
 
-std::unique_ptr<cudf::table> build_join_result(
+// F55: equi keys of a join. Under na_matches = "never" (`nulls_equal` false) a
+// floating NaN is incomplete like an NA, so it must not match: its key is read
+// with NaN as null. Under the default na_matches = "na" NaN matches NaN only
+// (vec_locate_matches(nan_distinct = TRUE)), which cudf's row equality already
+// does, so the keys are used as is. Only the key view changes; the output is
+// gathered from the original tables.
+cudf::table_view select_join_keys(const cudf::table_view& view,
+                                  const std::vector<cudf::size_type>& indices,
+                                  bool nulls_equal,
+                                  std::vector<std::unique_ptr<cudf::column>>& keepalive) {
+    std::vector<cudf::column_view> cols;
+    cols.reserve(indices.size());
+    for (auto idx : indices) {
+        cudf::column_view key = view.column(idx);
+        if (!nulls_equal) {
+            if (auto nulled = cuplyr::nan_nulled_copy(key)) {
+                keepalive.push_back(std::move(nulled));
+                key = keepalive.back()->view();
+            }
+        }
+        cols.push_back(key);
+    }
+    return cudf::table_view(cols);
+}
+
+// Wrap a raw join-map device_uvector<size_type> as a column_view (no copy).
+cudf::column_view map_as_column_view(const rmm::device_uvector<cudf::size_type>& map) {
+    cudf::device_span<cudf::size_type const> span(map.data(), map.size());
+    return cudf::column_view(span);
+}
+
+// -----------------------------------------------------------------------
+// Device-side join-map sanitization (Phase 7 J4 pipeline restructure).
+//
+// cuDF's join primitives (left_join/full_join, and this file's own
+// right_join/semi/anti assembly below) report an unmatched row via a
+// negative sentinel (cudf::JoinNoMatch == numeric_limits<size_type>::min(),
+// per cudf/join/join.hpp). The OLD implementation round-tripped the entire
+// map to the host, remapped negatives to `nrows` there, and copied it back
+// -- two D2H/H2D transfers per join, on the map's full row count. This does
+// the equivalent remap entirely on-device via one compute_column() (an AST
+// boolean mask: `v < 0 || v >= nrows`) and one copy_if_else() (replace
+// flagged entries with the literal `nrows`), with zero host round-trips.
+//
+// The `>= nrows` half of the check is a real (if latent) gap the old code
+// never had: it only ever checked `v < 0`. cudf's own join primitives never
+// emit an out-of-range *positive* sentinel today, but gpu_right_join()
+// below deliberately constructs its assembled map using `nrows` itself as
+// the sentinel for unmatched-right rows (see there for why) -- so any
+// consumer of a join map, this function included, needs to treat both
+// "negative" and "already exactly nrows" (or beyond) as the canonical
+// out-of-bounds marker uniformly. After this function, every join map in
+// the pipeline uses exactly one canonical sentinel value (`nrows`), which
+// both (a) makes cudf::gather()'s out_of_bounds_policy::NULLIFY behave
+// correctly and (b) sorts strictly after every real index [0, nrows) in the
+// ascending stable sort build_join_result() performs -- the mechanism
+// gpu_right_join() relies on to reproduce dplyr's row-order contract.
+std::unique_ptr<cudf::column> sanitize_join_map(
+    const cudf::column_view& map_col,
+    cudf::size_type nrows,
+    rmm::cuda_stream_view stream,
+    rmm::mr::device_memory_resource* mr) {
+
+    cudf::numeric_scalar<cudf::size_type> zero_scalar(0, true, stream);
+    cudf::numeric_scalar<cudf::size_type> nrows_scalar(nrows, true, stream);
+
+    cudf::ast::tree tree;
+    auto const& col_ref  = tree.emplace<cudf::ast::column_reference>(0);
+    auto const& lit_zero  = tree.emplace<cudf::ast::literal>(zero_scalar);
+    auto const& lit_nrows = tree.emplace<cudf::ast::literal>(nrows_scalar);
+    auto const& is_neg    = tree.emplace<cudf::ast::operation>(
+        cudf::ast::ast_operator::LESS, col_ref, lit_zero);
+    auto const& is_oob    = tree.emplace<cudf::ast::operation>(
+        cudf::ast::ast_operator::GREATER_EQUAL, col_ref, lit_nrows);
+    auto const& invalid   = tree.emplace<cudf::ast::operation>(
+        cudf::ast::ast_operator::LOGICAL_OR, is_neg, is_oob);
+
+    cudf::table_view single_col_tbl({map_col});
+    auto mask = cudf::compute_column(single_col_tbl, invalid, stream, mr);
+
+    return cudf::copy_if_else(nrows_scalar, map_col, mask->view(), stream, mr);
+}
+
+// -----------------------------------------------------------------------
+// join_map_stats(): four "first offender" diagnostics over an already-
+// sanitized pair of join maps (see sanitize_join_map() above -- both maps
+// use exactly one canonical sentinel value, `n_left`/`n_right`
+// respectively, for "no match").
+//
+//   - left_multi_first / right_multi_first: the smallest left/right row
+//     index that appears more than once among that map's MATCHED (i.e.
+//     non-sentinel) entries -- the first row whose join key had more than
+//     one match on the other side. -1 if no such row exists.
+//   - left_unmatched_first / right_unmatched_first: the smallest left/right
+//     row index in [0, n_left)/[0, n_right) that never appears among that
+//     map's matched entries at all -- the first row with no match on the
+//     other side. -1 if every row matched at least once.
+//
+// These are dormant in Phase 7 J4 (nothing consumes `diag` yet --
+// check_join_cardinality()'s multiple=/unmatched=/relationship= semantics
+// land in J5), but the computation itself is real: every reduction below
+// only ever transfers a single scalar to the host (`scalar::value()`), so
+// this stays cheap and never round-trips a full map to host memory --
+// consistent with the "single conditional D2H" restructure goal (the
+// removed host round-trip was sanitize_join_map()'s old job, not this
+// function's; see the block comment above).
+Rcpp::List join_map_stats(
+    const cudf::column_view& left_map,
+    const cudf::column_view& right_map,
+    cudf::size_type n_left,
+    cudf::size_type n_right,
+    rmm::cuda_stream_view stream,
+    rmm::mr::device_memory_resource* mr) {
+
+    // Smallest value that appears more than once in `map_col`'s entries
+    // that are NOT equal to `sentinel` (i.e. among real matches only).
+    // -1 if there is no such duplicated value.
+    auto first_multi = [&](const cudf::column_view& map_col,
+                           cudf::size_type sentinel) -> int {
+        cudf::numeric_scalar<cudf::size_type> sentinel_scalar(sentinel, true, stream);
+        auto valid_mask = cudf::binary_operation(
+            map_col, sentinel_scalar, cudf::binary_operator::NOT_EQUAL,
+            cudf::data_type(cudf::type_id::BOOL8), stream, mr);
+
+        cudf::table_view map_tbl({map_col});
+        auto valid_tbl = cudf::apply_boolean_mask(map_tbl, valid_mask->view(), stream, mr);
+        auto valid_col = valid_tbl->view().column(0);
+        if (valid_col.size() == 0) return -1;
+
+        cudf::groupby::groupby gb(cudf::table_view({valid_col}));
+        std::vector<cudf::groupby::aggregation_request> requests(1);
+        requests[0].values = valid_col;
+        requests[0].aggregations.push_back(
+            cudf::make_count_aggregation<cudf::groupby_aggregation>());
+        auto agg_result = gb.aggregate(requests, stream, mr);
+        auto& keys_tbl = agg_result.first;
+        auto& counts_col = agg_result.second[0].results[0];
+
+        auto counts_i32 = cudf::cast(
+            counts_col->view(), cudf::data_type(cudf::type_id::INT32), stream, mr);
+        cudf::numeric_scalar<cudf::size_type> one_scalar(1, true, stream);
+        auto dup_mask = cudf::binary_operation(
+            counts_i32->view(), one_scalar, cudf::binary_operator::GREATER,
+            cudf::data_type(cudf::type_id::BOOL8), stream, mr);
+
+        cudf::table_view keys_view({keys_tbl->view().column(0)});
+        auto dup_keys_tbl = cudf::apply_boolean_mask(keys_view, dup_mask->view(), stream, mr);
+        auto dup_keys = dup_keys_tbl->view().column(0);
+        if (dup_keys.size() == 0) return -1;
+
+        auto min_scalar = cudf::reduce(
+            dup_keys, *cudf::make_min_aggregation<cudf::reduce_aggregation>(),
+            cudf::data_type(cudf::type_id::INT32), stream, mr);
+        if (!min_scalar->is_valid(stream)) return -1;
+        return static_cast<cudf::numeric_scalar<cudf::size_type> const&>(*min_scalar)
+            .value(stream);
+    };
+
+    // Smallest value in [0, n) that never appears among `map_col`'s
+    // non-sentinel entries. -1 if every value in [0, n) is matched (or
+    // n == 0).
+    auto first_unmatched = [&](const cudf::column_view& map_col,
+                               cudf::size_type sentinel,
+                               cudf::size_type n) -> int {
+        if (n == 0) return -1;
+
+        cudf::numeric_scalar<cudf::size_type> sentinel_scalar(sentinel, true, stream);
+        auto valid_mask = cudf::binary_operation(
+            map_col, sentinel_scalar, cudf::binary_operator::NOT_EQUAL,
+            cudf::data_type(cudf::type_id::BOOL8), stream, mr);
+        cudf::table_view map_tbl({map_col});
+        auto valid_tbl = cudf::apply_boolean_mask(map_tbl, valid_mask->view(), stream, mr);
+        auto valid_col = valid_tbl->view().column(0);
+
+        cudf::numeric_scalar<cudf::size_type> zero_scalar(0, true, stream);
+        auto seq = cudf::sequence(n, zero_scalar, stream, mr);
+
+        cudf::table_view build_tbl({valid_col});
+        cudf::filtered_join joiner(build_tbl, cudf::null_equality::EQUAL,
+                                   cudf::set_as_build_table::RIGHT, stream);
+        cudf::table_view probe_tbl({seq->view()});
+        auto unmatched_idx = joiner.anti_join(probe_tbl, stream, mr);
+        if (unmatched_idx->size() == 0) return -1;
+
+        cudf::column_view idx_view(cudf::device_span<cudf::size_type const>(
+            unmatched_idx->data(), unmatched_idx->size()));
+        auto min_scalar = cudf::reduce(
+            idx_view, *cudf::make_min_aggregation<cudf::reduce_aggregation>(),
+            cudf::data_type(cudf::type_id::INT32), stream, mr);
+        if (!min_scalar->is_valid(stream)) return -1;
+        return static_cast<cudf::numeric_scalar<cudf::size_type> const&>(*min_scalar)
+            .value(stream);
+    };
+
+    int left_multi_first = first_multi(left_map, n_left);
+    int right_multi_first = first_multi(right_map, n_right);
+    int left_unmatched_first = first_unmatched(left_map, n_left, n_left);
+    int right_unmatched_first = first_unmatched(right_map, n_right, n_right);
+
+    return Rcpp::List::create(
+        Rcpp::Named("left_multi_first") = left_multi_first,
+        Rcpp::Named("right_multi_first") = right_multi_first,
+        Rcpp::Named("left_unmatched_first") = left_unmatched_first,
+        Rcpp::Named("right_unmatched_first") = right_unmatched_first
+    );
+}
+
+// -----------------------------------------------------------------------
+// `multiple=` device-side filtering (Phase 7 J5, scratchpad/
+// phase7_joins_design.md section 1.3 steps 4-5).
+//
+// dplyr's `multiple=` semantics group by LEFT (x/"needles") regardless of
+// join type -- empirically verified (a right_join(x, y, multiple = "first")
+// still caps the number of Y rows per X row, not the reverse) -- so this
+// operates on `left_map` alone, and is called AFTER build_join_result()'s
+// stable sort (map rows are already ascending by (left_map, right_map),
+// which makes every left-value's matches a contiguous run: "first"/"last"
+// per group is just "first/last row of each run").
+//
+// Sentinel-left rows (`left_map == n_left`, the unmatched-right tail
+// gpu_full_join()/gpu_right_join() assemble) are EXEMPT from grouping --
+// they don't represent any real x row's multiplicity, and multiple of them
+// legitimately share the same sentinel value without being "the same
+// group" -- so they must never be collapsed down to one row.
+//
+// `reclassify_excess`: false for left_join/inner_join -- their contract
+// never surfaces an "extra" row for a capped-out match (verified
+// empirically: left_join(multiple = "first") returns exactly one row per
+// left row, no phantom row for the dropped match), so excess rows are
+// simply DROPPED via a boolean mask. true for full_join/right_join --
+// their contract is that EVERY right row survives regardless of `multiple=`
+// capping (verified empirically: the capped-out right row reappears as an
+// additional unmatched-right row, left columns NA) -- so excess rows are
+// RECLASSIFIED (one sentinel row per y row no kept pair uses) rather than
+// dropped, which requires a second stable sort afterward to relocate them
+// into the unmatched-right tail (in right_map order, same contract as any
+// other unmatched-right row).
+std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>> apply_multiple_filter(
+    cudf::column_view left_map_view,
+    cudf::column_view right_map_view,
+    const std::string& multiple,
+    cudf::size_type n_left,
+    bool reclassify_excess,
+    rmm::cuda_stream_view stream,
+    rmm::mr::device_memory_resource* mr) {
+
+    // "any" behaves like "first" in this backend -- verified empirically
+    // against dplyr 1.2.1 (both pick the smallest matching right-row index
+    // deterministically on the data.frame/vctrs backend dplyr itself uses),
+    // so no separate code path is needed. Anything else is a caller bug: R
+    // validates `multiple`, and "error"/"warning" never get this far.
+    if (multiple != "all" && multiple != "any" && multiple != "first" &&
+        multiple != "last") {
+        Rcpp::stop("internal error: unsupported multiple = \"%s\"", multiple);
+    }
+    if (multiple == "all") {
+        return {std::make_unique<cudf::column>(left_map_view, stream, mr),
+                std::make_unique<cudf::column>(right_map_view, stream, mr)};
+    }
+
+    // Never a real left index (>= 0) or the sentinel (== n_left): safe as a
+    // shift boundary-fill value so the first/last row of the whole array is
+    // always its own "edge", regardless of what real value it holds.
+    cudf::numeric_scalar<cudf::size_type> boundary_scalar(-1, true, stream);
+    cudf::size_type offset = (multiple == "last") ? -1 : 1;
+    auto neighbor = cudf::shift(left_map_view, offset, boundary_scalar, stream, mr);
+
+    // is_edge: this row's left_map differs from its "previous" (multiple =
+    // "first"/"any", offset = 1) or "next" (multiple = "last", offset = -1)
+    // neighbor -- i.e. it is the first/last row of its contiguous run of
+    // equal left_map values (guaranteed contiguous by the caller's ascending
+    // sort on (left_map, right_map)).
+    auto is_edge = cudf::binary_operation(
+        left_map_view, neighbor->view(), cudf::binary_operator::NOT_EQUAL,
+        cudf::data_type(cudf::type_id::BOOL8), stream, mr);
+
+    cudf::numeric_scalar<cudf::size_type> n_left_scalar(n_left, true, stream);
+    auto is_sentinel = cudf::binary_operation(
+        left_map_view, n_left_scalar, cudf::binary_operator::EQUAL,
+        cudf::data_type(cudf::type_id::BOOL8), stream, mr);
+
+    // keep_mask: the chosen edge of each real group, OR any sentinel row
+    // (always kept, never collapsed with its sentinel-sharing neighbors).
+    auto keep_mask = cudf::binary_operation(
+        is_edge->view(), is_sentinel->view(), cudf::binary_operator::LOGICAL_OR,
+        cudf::data_type(cudf::type_id::BOOL8), stream, mr);
+
+    if (!reclassify_excess) {
+        cudf::table_view map_tbl({left_map_view, right_map_view});
+        auto filtered = cudf::apply_boolean_mask(map_tbl, keep_mask->view(), stream, mr);
+        auto cols = filtered->release();
+        return {std::move(cols[0]), std::move(cols[1])};
+    }
+
+    // Excess rows: a y row that only appears in capped-out pairs becomes ONE
+    // unmatched-y row (left sentinel `n_left`); a y row that survives in some
+    // kept pair is not unmatched at all (dplyr: the remaining y rows are the
+    // ones no kept pair uses, each once -- a tied/duplicated match used to
+    // reappear once per capped-out pair).
+    auto excess_mask = cudf::unary_operation(keep_mask->view(), cudf::unary_operator::NOT, stream, mr);
+    cudf::table_view map_tbl({left_map_view, right_map_view});
+    auto kept = cudf::apply_boolean_mask(map_tbl, keep_mask->view(), stream, mr);
+    cudf::table_view excess_right_in({right_map_view});
+    auto excess_right = cudf::apply_boolean_mask(excess_right_in, excess_mask->view(), stream, mr);
+    if (excess_right->num_rows() == 0) {
+        auto cols = kept->release();
+        return {std::move(cols[0]), std::move(cols[1])};
+    }
+    auto distinct_excess = cudf::distinct(excess_right->view(), {0},
+                                          cudf::duplicate_keep_option::KEEP_ANY,
+                                          cudf::null_equality::EQUAL,
+                                          cudf::nan_equality::ALL_EQUAL, stream, mr);
+    cudf::table_view kept_right({kept->view().column(1)});
+    cudf::filtered_join used(kept_right, cudf::null_equality::EQUAL,
+                             cudf::set_as_build_table::RIGHT, stream);
+    auto unused_idx = used.anti_join(distinct_excess->view(), stream, mr);
+    cudf::column_view unused_idx_view(cudf::device_span<cudf::size_type const>(
+        unused_idx->data(), unused_idx->size()));
+    auto tail_right = cudf::gather(distinct_excess->view(), unused_idx_view,
+                                   cudf::out_of_bounds_policy::DONT_CHECK, stream, mr);
+    auto tail_left = cudf::make_column_from_scalar(n_left_scalar, tail_right->num_rows(), stream, mr);
+
+    auto new_left_map = cudf::concatenate(
+        std::vector<cudf::column_view>{kept->view().column(0), tail_left->view()}, stream, mr);
+    auto new_right_map = cudf::concatenate(
+        std::vector<cudf::column_view>{kept->view().column(1), tail_right->view().column(0)},
+        stream, mr);
+
+    // Re-sort: the tail rows must land in the unmatched-right tail, in
+    // right_map order, like any other unmatched-right row (same mechanism
+    // gpu_right_join() itself relies on for its own sentinel-tagged rows).
+    cudf::table_view remapped_tbl({new_left_map->view(), new_right_map->view()});
+    std::vector<cudf::order> order_cols = {cudf::order::ASCENDING, cudf::order::ASCENDING};
+    auto order = cudf::stable_sorted_order(remapped_tbl, order_cols);
+    auto resorted = cudf::gather(remapped_tbl, order->view(),
+                                 cudf::out_of_bounds_policy::DONT_CHECK, stream, mr);
+    auto cols = resorted->release();
+    return {std::move(cols[0]), std::move(cols[1])};
+}
+
+struct JoinBuildResult {
+    std::unique_ptr<cudf::table> table;
+    Rcpp::List diag;
+};
+
+// The seven-step join-map pipeline (Phase 7 J4/J5, scratchpad/
+// phase7_joins_design.md section 1.3): device sanitize (incl. the >= nrows
+// sentinel gap) -> diag stats -> stable sort (this IS dplyr's row-order
+// contract) -> multiple= filter (J5) -> gather/coalesce. Applied uniformly
+// to left/inner/full/right -- semi/anti/cross never call this (they have no
+// multiple=/unmatched=/relationship= in dplyr's own signatures, so no
+// diagnostics/filtering are needed there).
+//
+// `multiple`/`reclassify_excess`: see apply_multiple_filter()'s own comment.
+// `reclassify_excess` is meaningless (never read) when `multiple == "all"`,
+// so callers may pass either value in that case -- gpu_left_join()/
+// gpu_inner_join() pass `false` (their own contract) unconditionally.
+JoinBuildResult build_join_result(
     const cudf::table_view& left_view,
     const cudf::table_view& right_view,
-    const rmm::device_uvector<cudf::size_type>& left_map_in,
-    const rmm::device_uvector<cudf::size_type>& right_map_in,
-    const std::vector<cudf::size_type>& right_keep_cols) {
+    const cudf::column_view& left_map_in,
+    const cudf::column_view& right_map_in,
+    const std::vector<cudf::size_type>& right_keep_cols,
+    const std::vector<cudf::size_type>& left_key_cols = {},
+    const std::vector<cudf::size_type>& right_key_cols = {},
+    const std::string& multiple = "all",
+    bool reclassify_excess = false) {
 
     auto stream = cudf::get_default_stream();
     auto mr = rmm::mr::get_current_device_resource();
 
-    auto sanitize_map = [&](const rmm::device_uvector<cudf::size_type>& map,
-                            cudf::size_type nrows) {
-        std::vector<cudf::size_type> host(map.size());
-        cuplyr::check_cuda(
-            cudaMemcpy(host.data(), map.data(), map.size() * sizeof(cudf::size_type),
-                       cudaMemcpyDeviceToHost),
-            "copy join map to host");
+    // Step 1: device-side sanitize (replaces the old host round-trip;
+    // fixes the latent >= nrows sentinel gap). Every join map downstream of
+    // this point uses exactly one canonical sentinel value per side
+    // (left_view.num_rows() / right_view.num_rows()).
+    auto left_map_col = sanitize_join_map(left_map_in, left_view.num_rows(), stream, mr);
+    auto right_map_col = sanitize_join_map(right_map_in, right_view.num_rows(), stream, mr);
 
-        for (auto& v : host) {
-            if (v == cudf::JoinNoMatch) v = nrows;
-        }
+    cudf::column_view left_map_view = left_map_col->view();
+    cudf::column_view right_map_view = right_map_col->view();
 
-        rmm::device_uvector<cudf::size_type> out(map.size(), stream);
-        cuplyr::check_cuda(
-            cudaMemcpy(out.data(), host.data(), host.size() * sizeof(cudf::size_type),
-                       cudaMemcpyHostToDevice),
-            "copy join map to device");
-
-        return out;
-    };
-
-    auto left_map = sanitize_map(left_map_in, left_view.num_rows());
-    auto right_map = sanitize_map(right_map_in, right_view.num_rows());
-
-    cudf::device_span<cudf::size_type const> left_span(left_map.data(), left_map.size());
-    cudf::device_span<cudf::size_type const> right_span(right_map.data(), right_map.size());
-
-    cudf::column_view left_map_view(left_span);
-    cudf::column_view right_map_view(right_span);
-
-    // Stable sort by left_map then right_map to preserve left-row order
+    // Step 3: stable sort by (left_map, right_map) -- KEEP, this IS the
+    // dplyr row-order contract (left/inner/full: left-row order, right
+    // matches in right-index order; right: x-matched order then unmatched-y
+    // tail, since gpu_right_join() below assembles its map so unmatched-y
+    // rows carry the sentinel n_left as their left_map value, which sorts
+    // strictly after every real left index).
     cudf::table_view map_tbl({left_map_view, right_map_view});
     std::vector<cudf::order> order_cols = {cudf::order::ASCENDING, cudf::order::ASCENDING};
     auto order = cudf::stable_sorted_order(map_tbl, order_cols);
@@ -91,8 +466,43 @@ std::unique_ptr<cudf::table> build_join_result(
     left_map_view = sorted_view.column(0);
     right_map_view = sorted_view.column(1);
 
+    // Step 3.5 (Phase 7 J5): multiple= filtering, on the now-sorted maps
+    // (see apply_multiple_filter()'s own comment for the grouping/
+    // sentinel-exemption/reclassification rules). Skipped entirely -- no
+    // extra allocation, no extra kernel launch -- when multiple == "all"
+    // (the overwhelmingly common case, and the only value every join call
+    // site used before Phase 7 J5), so a default-argument join call pays
+    // exactly the same cost it did before this filtering step existed.
+    // `filtered_left`/`filtered_right` hold ownership so the views below
+    // stay valid for the rest of this function when filtering did run.
+    std::unique_ptr<cudf::column> filtered_left;
+    std::unique_ptr<cudf::column> filtered_right;
+    if (multiple != "all") {
+        std::tie(filtered_left, filtered_right) = apply_multiple_filter(
+            left_map_view, right_map_view, multiple,
+            left_view.num_rows(), reclassify_excess, stream, mr);
+        left_map_view = filtered_left->view();
+        right_map_view = filtered_right->view();
+    }
+
+    // Step 3.6: first-offender diagnostics (Phase 7 J5: consumed by
+    // check_join_cardinality() in R, R/join.R), computed on the maps the
+    // result is gathered from, i.e. AFTER the multiple= filter: vctrs
+    // resolves `multiple` before it checks `relationship=` and before it
+    // decides which y rows are "remaining" for `unmatched = "error"`
+    // (verified against dplyr 1.2.1: y rows capped out by
+    // multiple = "first" make `unmatched = "error"` fail, and a
+    // many-to-one relationship passes once each x row keeps one match).
+    // Only individual scalars are transferred to the host (see
+    // join_map_stats()'s own comment), never the full map. For right/full
+    // joins the capped-out y rows are the reclassified unmatched-y tail.
+    Rcpp::List diag = join_map_stats(left_map_view, right_map_view,
+                                     left_view.num_rows(), right_view.num_rows(),
+                                     stream, mr);
+
     auto right_subview = select_table_view(right_view, right_keep_cols);
 
+    // Step 4/6: gather + key coalescing.
     auto left_gathered = cudf::gather(
         left_view, left_map_view,
         cudf::out_of_bounds_policy::NULLIFY,
@@ -105,8 +515,44 @@ std::unique_ptr<cudf::table> build_join_result(
         stream, mr
     );
 
+    // Join-key coalescing (scratchpad/unification_design.md Part C, P1):
+    // right-only rows (full_join) or unmatched-right rows (right_join) have
+    // no left source row, so left_map points out of bounds and
+    // left_gathered's key columns come back NULL for them, even though the
+    // right table's own key columns (which this function's caller has NOT
+    // included in right_keep_cols, since keep = FALSE drops them) hold the
+    // real values for those exact rows. Gather the right table's raw key
+    // columns via the same right_map (before they were dropped) and
+    // coalesce them into the left-gathered key columns so those rows get
+    // the key filled in from the right side, matching dplyr's full_join()/
+    // right_join() contract. Only full_join()/right_join() pass non-empty
+    // left_key_cols/right_key_cols; left/inner joins are unaffected (and
+    // for those join types every left-gathered key value is already
+    // non-null, so this would be a no-op anyway).
+    std::vector<std::unique_ptr<cudf::column>> coalesced_keys;
+    if (!left_key_cols.empty()) {
+        auto right_key_view = select_table_view(right_view, right_key_cols);
+        auto right_key_gathered = cudf::gather(
+            right_key_view, right_map_view,
+            cudf::out_of_bounds_policy::NULLIFY,
+            stream, mr
+        );
+        auto right_key_cols_vec = right_key_gathered->release();
+        coalesced_keys.reserve(left_key_cols.size());
+        for (size_t i = 0; i < left_key_cols.size(); ++i) {
+            coalesced_keys.push_back(cudf::replace_nulls(
+                left_gathered->view().column(left_key_cols[i]),
+                right_key_cols_vec[i]->view(),
+                stream, mr));
+        }
+    }
+
     auto left_cols = left_gathered->release();
     auto right_cols = right_gathered->release();
+
+    for (size_t i = 0; i < left_key_cols.size(); ++i) {
+        left_cols[left_key_cols[i]] = std::move(coalesced_keys[i]);
+    }
 
     std::vector<std::unique_ptr<cudf::column>> result_cols;
     result_cols.reserve(left_cols.size() + right_cols.size());
@@ -118,7 +564,10 @@ std::unique_ptr<cudf::table> build_join_result(
         result_cols.push_back(std::move(col));
     }
 
-    return std::make_unique<cudf::table>(std::move(result_cols));
+    return JoinBuildResult{
+        std::make_unique<cudf::table>(std::move(result_cols)),
+        diag
+    };
 }
 
 std::vector<cudf::size_type> compute_right_keep_cols(
@@ -135,6 +584,13 @@ std::vector<cudf::size_type> compute_right_keep_cols(
     return keep;
 }
 
+SEXP wrap_join_build_result(JoinBuildResult&& build) {
+    return Rcpp::List::create(
+        Rcpp::Named("ptr") = cuplyr::make_gpu_table_xptr(std::move(build.table)),
+        Rcpp::Named("diag") = build.diag
+    );
+}
+
 } // namespace
 
 // [[Rcpp::export]]
@@ -142,7 +598,9 @@ SEXP gpu_left_join(SEXP xptr_left,
                    SEXP xptr_right,
                    Rcpp::IntegerVector left_key_cols,
                    Rcpp::IntegerVector right_key_cols,
-                   Rcpp::IntegerVector right_drop_cols) {
+                   Rcpp::IntegerVector right_drop_cols,
+                   bool nulls_equal = true,
+                   std::string multiple = "all") {
     using namespace cuplyr;
 
     Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
@@ -155,16 +613,26 @@ SEXP gpu_left_join(SEXP xptr_left,
     auto right_keys = to_index_vec(right_key_cols);
     auto right_drop = to_index_vec(right_drop_cols);
 
-    auto left_key_view = select_table_view(left_view, left_keys);
-    auto right_key_view = select_table_view(right_view, right_keys);
+    std::vector<std::unique_ptr<cudf::column>> nan_nulled_keys;
+    auto left_key_view = select_join_keys(left_view, left_keys, nulls_equal, nan_nulled_keys);
+    auto right_key_view = select_join_keys(right_view, right_keys, nulls_equal, nan_nulled_keys);
 
+    auto null_equality = nulls_equal ? cudf::null_equality::EQUAL
+                                     : cudf::null_equality::UNEQUAL;
     auto [left_map, right_map] = cudf::left_join(
-        left_key_view, right_key_view, cudf::null_equality::EQUAL);
+        left_key_view, right_key_view, null_equality);
 
     auto right_keep = compute_right_keep_cols(right_view, right_drop);
-    auto result = build_join_result(left_view, right_view, *left_map, *right_map, right_keep);
+    // reclassify_excess = false: left_join never surfaces a capped-out
+    // right match as its own row (verified empirically, Phase 7 J5) -- an
+    // excess match beyond multiple = "first"/"last"'s pick is dropped
+    // outright, not reclassified.
+    auto build = build_join_result(left_view, right_view,
+                                   map_as_column_view(*left_map),
+                                   map_as_column_view(*right_map),
+                                   right_keep, {}, {}, multiple, false);
 
-    return make_gpu_table_xptr(std::move(result));
+    return wrap_join_build_result(std::move(build));
 }
 
 // [[Rcpp::export]]
@@ -172,7 +640,9 @@ SEXP gpu_inner_join(SEXP xptr_left,
                     SEXP xptr_right,
                     Rcpp::IntegerVector left_key_cols,
                     Rcpp::IntegerVector right_key_cols,
-                    Rcpp::IntegerVector right_drop_cols) {
+                    Rcpp::IntegerVector right_drop_cols,
+                    bool nulls_equal = true,
+                    std::string multiple = "all") {
     using namespace cuplyr;
 
     Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
@@ -185,16 +655,25 @@ SEXP gpu_inner_join(SEXP xptr_left,
     auto right_keys = to_index_vec(right_key_cols);
     auto right_drop = to_index_vec(right_drop_cols);
 
-    auto left_key_view = select_table_view(left_view, left_keys);
-    auto right_key_view = select_table_view(right_view, right_keys);
+    std::vector<std::unique_ptr<cudf::column>> nan_nulled_keys;
+    auto left_key_view = select_join_keys(left_view, left_keys, nulls_equal, nan_nulled_keys);
+    auto right_key_view = select_join_keys(right_view, right_keys, nulls_equal, nan_nulled_keys);
 
+    auto null_equality = nulls_equal ? cudf::null_equality::EQUAL
+                                     : cudf::null_equality::UNEQUAL;
     auto [left_map, right_map] = cudf::inner_join(
-        left_key_view, right_key_view, cudf::null_equality::EQUAL);
+        left_key_view, right_key_view, null_equality);
 
     auto right_keep = compute_right_keep_cols(right_view, right_drop);
-    auto result = build_join_result(left_view, right_view, *left_map, *right_map, right_keep);
+    // reclassify_excess = false: same rationale as gpu_left_join() above --
+    // inner_join never surfaces unmatched rows of either side at all, so a
+    // capped-out excess match is dropped outright.
+    auto build = build_join_result(left_view, right_view,
+                                   map_as_column_view(*left_map),
+                                   map_as_column_view(*right_map),
+                                   right_keep, {}, {}, multiple, false);
 
-    return make_gpu_table_xptr(std::move(result));
+    return wrap_join_build_result(std::move(build));
 }
 
 // [[Rcpp::export]]
@@ -202,7 +681,9 @@ SEXP gpu_full_join(SEXP xptr_left,
                    SEXP xptr_right,
                    Rcpp::IntegerVector left_key_cols,
                    Rcpp::IntegerVector right_key_cols,
-                   Rcpp::IntegerVector right_drop_cols) {
+                   Rcpp::IntegerVector right_drop_cols,
+                   bool nulls_equal = true,
+                   std::string multiple = "all") {
     using namespace cuplyr;
 
     Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
@@ -215,14 +696,920 @@ SEXP gpu_full_join(SEXP xptr_left,
     auto right_keys = to_index_vec(right_key_cols);
     auto right_drop = to_index_vec(right_drop_cols);
 
-    auto left_key_view = select_table_view(left_view, left_keys);
-    auto right_key_view = select_table_view(right_view, right_keys);
+    std::vector<std::unique_ptr<cudf::column>> nan_nulled_keys;
+    auto left_key_view = select_join_keys(left_view, left_keys, nulls_equal, nan_nulled_keys);
+    auto right_key_view = select_join_keys(right_view, right_keys, nulls_equal, nan_nulled_keys);
 
+    auto null_equality = nulls_equal ? cudf::null_equality::EQUAL
+                                     : cudf::null_equality::UNEQUAL;
     auto [left_map, right_map] = cudf::full_join(
-        left_key_view, right_key_view, cudf::null_equality::EQUAL);
+        left_key_view, right_key_view, null_equality);
 
     auto right_keep = compute_right_keep_cols(right_view, right_drop);
-    auto result = build_join_result(left_view, right_view, *left_map, *right_map, right_keep);
+
+    // Only coalesce when the right table's key columns were actually dropped
+    // (i.e. `keep = FALSE`, dplyr's default). With `keep = TRUE` both tables'
+    // raw key columns survive uncombined in the output, and the left copy
+    // must stay exactly as gathered (NA for right-only rows) -- coalescing
+    // it would silently corrupt the `keep = TRUE` contract.
+    std::vector<cudf::size_type> coalesce_left_keys;
+    std::vector<cudf::size_type> coalesce_right_keys;
+    if (!right_drop.empty()) {
+        coalesce_left_keys = left_keys;
+        coalesce_right_keys = right_keys;
+    }
+
+    // reclassify_excess = true: full_join always keeps every right row --
+    // a capped-out excess match (multiple = "first"/"last") reappears as
+    // an additional unmatched-right row (verified empirically, Phase 7 J5),
+    // rather than being dropped.
+    auto build = build_join_result(left_view, right_view,
+                                   map_as_column_view(*left_map),
+                                   map_as_column_view(*right_map),
+                                   right_keep, coalesce_left_keys, coalesce_right_keys,
+                                   multiple, true);
+
+    return wrap_join_build_result(std::move(build));
+}
+
+// [[Rcpp::export]]
+SEXP gpu_right_join(SEXP xptr_left,
+                    SEXP xptr_right,
+                    Rcpp::IntegerVector left_key_cols,
+                    Rcpp::IntegerVector right_key_cols,
+                    Rcpp::IntegerVector right_drop_cols,
+                    bool nulls_equal = true,
+                    std::string multiple = "all") {
+    using namespace cuplyr;
+
+    // Native right_join (Phase 7 J4 -- see scratchpad/phase7_joins_design.md
+    // section 2). The OLD implementation ran a swapped left_join(y, x) and
+    // reordered columns after the fact, which put unmatched-y rows in
+    // *y's own row order* (cudf::left_join's left-table-order contract,
+    // applied to the swapped call where y played the "left" role). dplyr's
+    // actual right_join() contract is different: x-matched rows in
+    // x('s left_join-style) order FIRST, then unmatched-y rows appended
+    // LAST -- i.e. the same shape as build_join_result()'s existing stable
+    // sort already produces for left_join, just with the roles of "which
+    // side always survives" swapped.
+    //
+    // This reproduces that contract directly: cudf::inner_join(x, y) gives
+    // every MATCHED (x, y) index pair (unspecified order -- the stable sort
+    // below fixes that). Every remaining y row (no x match at all) is found
+    // via a filtered_join anti-join built from x's keys and probed with y's
+    // keys, which returns Y-side (probe-side) indices per the same
+    // build/probe contract gpu_semi_anti_join() above already established --
+    // here the build/probe roles are just swapped (x is the build/filter
+    // side) so the returned indices are into y instead of x. Those
+    // unmatched-y rows are assigned the sentinel `n_left` (one past x's
+    // last valid row index) as their LEFT map value: build_join_result()'s
+    // ascending stable sort on (left_map, right_map) then places every real
+    // left index [0, n_left) -- i.e. every matched row, in x order -- before
+    // the sentinel-tagged unmatched-y rows, which is exactly dplyr's
+    // x-matched-then-unmatched-y-tail contract. (Empirically verified: see
+    // tests/testthat/test-dplyr-join.R's right_join order-pin tests.)
+    Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
+    Rcpp::XPtr<GpuTablePtr> right_ptr(xptr_right);
+
+    cudf::table_view left_view = get_table_view(left_ptr);
+    cudf::table_view right_view = get_table_view(right_ptr);
+
+    auto left_keys = to_index_vec(left_key_cols);
+    auto right_keys = to_index_vec(right_key_cols);
+    auto right_drop = to_index_vec(right_drop_cols);
+
+    std::vector<std::unique_ptr<cudf::column>> nan_nulled_keys;
+    auto left_key_view = select_join_keys(left_view, left_keys, nulls_equal, nan_nulled_keys);
+    auto right_key_view = select_join_keys(right_view, right_keys, nulls_equal, nan_nulled_keys);
+
+    auto null_equality = nulls_equal ? cudf::null_equality::EQUAL
+                                     : cudf::null_equality::UNEQUAL;
+
+    auto stream = cudf::get_default_stream();
+    auto mr = rmm::mr::get_current_device_resource();
+
+    auto [inner_left_map, inner_right_map] = cudf::inner_join(
+        left_key_view, right_key_view, null_equality);
+
+    // Build the hash table from x's keys, probe with y's keys, so the
+    // returned indices are PROBE-side (y) indices with no match in the
+    // build (x) table -- the mirror image of gpu_semi_anti_join()'s
+    // build=right/probe=left arrangement above (there, build=y/probe=x
+    // returns x-side unmatched/matched indices; here it's flipped).
+    //
+    // `reuse_tbl` is passed RIGHT here even though x (this call's build
+    // table) is NOT this join's right-hand table -- verified empirically
+    // (this cudf build's filtered_join.cu) that `set_as_build_table::LEFT`
+    // is simply unimplemented ("Left table reuse is yet to be implemented.
+    // Filtered join requires the right table to be the build table"), so
+    // RIGHT is the only supported value regardless of which real table is
+    // passed as `build`. It only selects the underlying hash structure
+    // (`cuco::static_set`, a plain membership set -- exactly what an
+    // anti-join's "is this key present at all" check needs); it does not
+    // change which table is `build` vs which is the `probe` argument to
+    // anti_join() below.
+    cudf::filtered_join x_filter(left_key_view, null_equality,
+                                cudf::set_as_build_table::RIGHT, stream);
+    auto unmatched_y = x_filter.anti_join(right_key_view, stream, mr);
+
+    cudf::size_type n_left = left_view.num_rows();
+
+    cudf::column_view inner_left_view = map_as_column_view(*inner_left_map);
+    cudf::column_view inner_right_view = map_as_column_view(*inner_right_map);
+    cudf::column_view unmatched_y_view = map_as_column_view(*unmatched_y);
+
+    // Sentinel column: n_left, repeated once per unmatched-y row. This is
+    // deliberately NOT a negative JoinNoMatch-style sentinel -- it needs to
+    // sort strictly after every real left index [0, n_left) in the
+    // ascending stable sort build_join_result() performs, and `n_left`
+    // itself already is (and is also the same canonical sentinel
+    // sanitize_join_map() would have produced for a genuine negative
+    // sentinel, so this assembled map is already in "sanitized" form for
+    // the left side -- sanitize_join_map() is still applied uniformly
+    // below, but is a no-op for these particular entries).
+    auto sentinel_col = cudf::make_numeric_column(
+        cudf::data_type(cudf::type_to_id<cudf::size_type>()),
+        unmatched_y->size(),
+        cudf::mask_state::UNALLOCATED, stream, mr);
+    if (unmatched_y->size() > 0) {
+        cudf::numeric_scalar<cudf::size_type> sentinel_scalar(n_left, true, stream);
+        cudf::mutable_column_view sentinel_mview = sentinel_col->mutable_view();
+        cudf::fill_in_place(sentinel_mview, 0, unmatched_y->size(), sentinel_scalar, stream);
+    }
+
+    auto full_left_map = cudf::concatenate(
+        std::vector<cudf::column_view>{inner_left_view, sentinel_col->view()}, stream, mr);
+    auto full_right_map = cudf::concatenate(
+        std::vector<cudf::column_view>{inner_right_view, unmatched_y_view}, stream, mr);
+
+    auto right_keep = compute_right_keep_cols(right_view, right_drop);
+
+    // keep = FALSE key coalescing: right_join's single output key column
+    // displays under x's name (dplyr's by = c(x_col = y_col) convention,
+    // handled entirely R-side by build_join_output_info()) but its VALUES
+    // must come from y, since right_join is driven by y (every y row
+    // survives; the rows needing coalescing here are exactly the
+    // unmatched-y ones, whose left_map is the sentinel above -- the same
+    // shape of gap full_join()'s coalescing already handles for its
+    // right-only rows). Reuse that exact machinery: pass the same
+    // left_keys/right_keys full_join() does when keep = FALSE.
+    std::vector<cudf::size_type> coalesce_left_keys;
+    std::vector<cudf::size_type> coalesce_right_keys;
+    if (!right_drop.empty()) {
+        coalesce_left_keys = left_keys;
+        coalesce_right_keys = right_keys;
+    }
+
+    // reclassify_excess = true: same rationale as gpu_full_join() above --
+    // right_join always keeps every right (y) row, so a capped-out excess
+    // match reappears as an additional unmatched-right row rather than
+    // being dropped.
+    auto build = build_join_result(left_view, right_view,
+                                   full_left_map->view(), full_right_map->view(),
+                                   right_keep, coalesce_left_keys, coalesce_right_keys,
+                                   multiple, true);
+
+    return wrap_join_build_result(std::move(build));
+}
+
+// [[Rcpp::export]]
+SEXP gpu_semi_anti_join(SEXP xptr_left,
+                        SEXP xptr_right,
+                        Rcpp::IntegerVector left_key_cols,
+                        Rcpp::IntegerVector right_key_cols,
+                        bool is_anti,
+                        bool nulls_equal = true) {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
+    Rcpp::XPtr<GpuTablePtr> right_ptr(xptr_right);
+
+    cudf::table_view left_view = get_table_view(left_ptr);
+    cudf::table_view right_view = get_table_view(right_ptr);
+
+    auto left_keys = to_index_vec(left_key_cols);
+    auto right_keys = to_index_vec(right_key_cols);
+
+    std::vector<std::unique_ptr<cudf::column>> nan_nulled_keys;
+    auto left_key_view = select_join_keys(left_view, left_keys, nulls_equal, nan_nulled_keys);
+    auto right_key_view = select_join_keys(right_view, right_keys, nulls_equal, nan_nulled_keys);
+
+    auto null_equality = nulls_equal ? cudf::null_equality::EQUAL
+                                     : cudf::null_equality::UNEQUAL;
+
+    auto stream = cudf::get_default_stream();
+    auto mr = rmm::mr::get_current_device_resource();
+
+    // Build the hash table from the right/filter table (scratchpad/
+    // phase7_joins_design.md J2's verified fact); probe with the left table.
+    // Returned indices are UNORDERED left-table row indices with no
+    // duplication -- even when multiple right rows match the same left key,
+    // a left row appears at most once.
+    cudf::filtered_join joiner(right_key_view, null_equality,
+                               cudf::set_as_build_table::RIGHT, stream);
+
+    auto indices = is_anti ? joiner.anti_join(left_key_view, stream, mr)
+                           : joiner.semi_join(left_key_view, stream, mr);
+
+    // Sort the index vector ascending before gathering, to reproduce dplyr's
+    // left-row-order contract (filtered_join's result order is unspecified).
+    cudf::device_span<cudf::size_type const> idx_span(indices->data(), indices->size());
+    cudf::column_view idx_col_view(idx_span);
+    cudf::table_view idx_tbl({idx_col_view});
+    auto sorted_idx_tbl = cudf::sort(idx_tbl, {cudf::order::ASCENDING},
+                                     {}, stream, mr);
+    auto sorted_idx_view = sorted_idx_tbl->view().column(0);
+
+    auto result = cudf::gather(left_view, sorted_idx_view,
+                               cudf::out_of_bounds_policy::DONT_CHECK,
+                               stream, mr);
 
     return make_gpu_table_xptr(std::move(result));
+}
+
+// [[Rcpp::export]]
+SEXP gpu_cross_join(SEXP xptr_left, SEXP xptr_right) {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
+    Rcpp::XPtr<GpuTablePtr> right_ptr(xptr_right);
+
+    cudf::table_view left_view = get_table_view(left_ptr);
+    cudf::table_view right_view = get_table_view(right_ptr);
+
+    // 0-column guard: cudf::cross_join() throws cudf::logic_error if either
+    // side has 0 columns (scratchpad/phase7_joins_design.md J3 spec, verified
+    // against the cudf/join/join.hpp doc comment). The R side
+    // (cross_join.tbl_gpu(), R/join.R) already stops with a clearer,
+    // dplyr-flavored message before this is ever called; this is a
+    // defensive backstop against any other caller reaching this entry point
+    // directly with a malformed/empty table.
+    if (left_view.num_columns() == 0 || right_view.num_columns() == 0) {
+        Rcpp::stop("cross_join() requires both tables to have at least one column.");
+    }
+
+    // No keys, no drops: cudf::cross_join() returns the full cartesian
+    // product with left's columns first (in their original order) followed
+    // by right's columns (in their original order) -- exactly the column
+    // order build_join_output_info() produces for an empty spec with
+    // keep = TRUE (every common name suffixed, nothing dropped), so no
+    // further reordering/selecting is needed here. 0-row inputs on either
+    // side are handled natively by cudf (empty cartesian product, no error);
+    // only the 0-column case above needs a guard.
+    auto result = cudf::cross_join(left_view, right_view);
+
+    return make_gpu_table_xptr(std::move(result));
+}
+
+// -----------------------------------------------------------------------
+// gpu_cond_join(): Phase 7 J7 (scratchpad/phase7_joins_design.md section
+// 1.4/2), the native non-equi join_by() entry point -- one condition IR
+// (already `&`-folded across every non-equi entry and bound to per-side
+// 0-based indices by R/join.R's join_cond_ir_from_spec() + ir_bind_join())
+// dispatched through cuDF's mixed_join (equality keys + AST residual
+// condition) whenever the spec has >= 1 equi condition alongside the
+// non-equi one(s), or conditional_join (pure AST predicate, no equality
+// keys at all) otherwise -- exactly the split R/join.R's
+// join_equi_spec()/join_cond_spec() already compute.
+//
+// Every mutating result (left/inner/full/right) is fed through the SAME
+// build_join_result() pipeline every equi join uses (device sanitize ->
+// diag -> stable sort -> multiple= filter -> gather), so
+// check_join_cardinality()'s multiple=/relationship=/unmatched= behavior
+// (R/join.R) applies identically whether the by= spec was equi or non-equi
+// -- verified empirically against dplyr 1.2.1 that these arguments are
+// independent of join_by()'s condition shape. `keep` is always forced
+// TRUE for a non-equi spec (resolve_join_keep(), R/join.R), so there is no
+// join-key column to drop or coalesce on either side: every column of both
+// tables survives untouched, hence the empty `right_drop_cols`/
+// `left_key_cols`/`right_key_cols` arguments to build_join_result() below.
+//
+// right_join() DECISION (see the "right" branch's own comment): cuDF has
+// no mixed_right_join/conditional_right_join at all. Rather than punting
+// non-equi right_join() to the CPU fallback, this reframes it as a LEFT
+// join with x and y's PHYSICAL roles swapped (every y row kept, matched
+// against x), then swaps the two returned index maps back into this
+// package's x-is-left/y-is-right convention before handing them to
+// build_join_result() -- whose own ascending stable sort on (left_map,
+// right_map) then reproduces dplyr's right_join() row-order contract
+// (x-matched order, then unmatched-y tail) exactly the way gpu_right_join()
+// does for the equi case.
+// [[Rcpp::export]]
+SEXP gpu_cond_join(SEXP xptr_left,
+                   SEXP xptr_right,
+                   Rcpp::IntegerVector equi_left_keys,
+                   Rcpp::IntegerVector equi_right_keys,
+                   Rcpp::IntegerVector right_drop_cols,
+                   Rcpp::List cond_ir,
+                   std::string join_kind,
+                   bool nulls_equal = true,
+                   std::string multiple = "all") {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
+    Rcpp::XPtr<GpuTablePtr> right_ptr(xptr_right);
+
+    cudf::table_view left_view = get_table_view(left_ptr);
+    cudf::table_view right_view = get_table_view(right_ptr);
+
+    auto equi_left = to_index_vec(equi_left_keys);
+    auto equi_right = to_index_vec(equi_right_keys);
+    bool has_equi = !equi_left.empty();
+    // F55: the equi keys read a NaN as null under na_matches = "never"
+    // (select_join_keys()); the copies must outlive the join calls below.
+    std::vector<std::unique_ptr<cudf::column>> nan_nulled_keys;
+
+    // Phase 7 J7 finding: `keep`'s real `NULL` default is PER CONDITION,
+    // not a whole-join TRUE/FALSE (see resolve_join_keep()'s/
+    // build_join_output_info()'s own R-side docs) -- `right_drop_cols` (R:
+    // lower_join()) only ever names the EQUI subset's right-side columns.
+    // Dropping (right_keep) applies uniformly to every mutating join kind,
+    // exactly like gpu_left_join()/gpu_inner_join()/gpu_full_join() already
+    // drop a redundant right key column whenever keep = FALSE. Coalescing
+    // (filling a right-only/unmatched-right row's null left-gathered key
+    // from the right table) is a DIFFERENT question, gated by join_kind
+    // below (only "full"/"right" can ever produce such a row -- inner/left
+    // never do, same rationale as the equi paths' own {}, {} for those two).
+    auto right_drop = to_index_vec(right_drop_cols);
+    auto right_keep = compute_right_keep_cols(right_view, right_drop);
+
+    auto null_equality = nulls_equal ? cudf::null_equality::EQUAL
+                                     : cudf::null_equality::UNEQUAL;
+
+    auto stream = cudf::get_default_stream();
+    auto mr = rmm::mr::get_current_device_resource();
+
+    if (join_kind == "right") {
+        // See this function's own file-level comment for the full
+        // derivation. build_join_ast()'s `swap_sides = true` tags x's
+        // columns as the physical RIGHT table and y's as the physical LEFT
+        // table (the same logical predicate join_by()'s x/y columns always
+        // mean -- only the AST's table_reference tagging changes), matching
+        // the argument order below: y plays the "left" role (every row
+        // kept), x plays the "right" role (matched-or-sentinel).
+        cudf::ast::tree tree;
+        cudf::ast::expression const& predicate =
+            build_join_ast(cond_ir, tree, left_view, right_view, /*swap_sides=*/true, nulls_equal);
+
+        std::unique_ptr<rmm::device_uvector<cudf::size_type>> y_map;
+        std::unique_ptr<rmm::device_uvector<cudf::size_type>> x_map;
+
+        if (has_equi) {
+            auto x_equi_view = select_join_keys(left_view, equi_left, nulls_equal, nan_nulled_keys);
+            auto y_equi_view = select_join_keys(right_view, equi_right, nulls_equal, nan_nulled_keys);
+            std::tie(y_map, x_map) = cudf::mixed_left_join(
+                y_equi_view, x_equi_view, right_view, left_view,
+                predicate, null_equality, {}, stream, mr);
+        } else {
+            std::tie(y_map, x_map) = cudf::conditional_left_join(
+                right_view, left_view, predicate, {}, stream, mr);
+        }
+
+        // Coalescing: right_join can produce unmatched-y rows (left_map ==
+        // sentinel), same shape of gap gpu_right_join()/gpu_full_join()
+        // already coalesce for -- gated on right_drop non-empty exactly
+        // like those two.
+        std::vector<cudf::size_type> coalesce_left_keys;
+        std::vector<cudf::size_type> coalesce_right_keys;
+        if (!right_drop.empty()) {
+            coalesce_left_keys = equi_left;
+            coalesce_right_keys = equi_right;
+        }
+
+        // reclassify_excess = true: right_join always keeps every y row
+        // regardless of multiple= capping (same rationale as
+        // gpu_right_join()/gpu_full_join() above).
+        auto build = build_join_result(left_view, right_view,
+                                       map_as_column_view(*x_map),
+                                       map_as_column_view(*y_map),
+                                       right_keep,
+                                       coalesce_left_keys, coalesce_right_keys,
+                                       multiple, true);
+        return wrap_join_build_result(std::move(build));
+    }
+
+    cudf::ast::tree tree;
+    cudf::ast::expression const& predicate =
+        build_join_ast(cond_ir, tree, left_view, right_view, /*swap_sides=*/false, nulls_equal);
+
+    if (join_kind == "semi" || join_kind == "anti") {
+        std::unique_ptr<rmm::device_uvector<cudf::size_type>> idx;
+        if (has_equi) {
+            auto left_equi_view = select_join_keys(left_view, equi_left, nulls_equal, nan_nulled_keys);
+            auto right_equi_view = select_join_keys(right_view, equi_right, nulls_equal, nan_nulled_keys);
+            idx = (join_kind == "anti")
+                ? cudf::mixed_left_anti_join(left_equi_view, right_equi_view,
+                                             left_view, right_view,
+                                             predicate, null_equality, stream, mr)
+                : cudf::mixed_left_semi_join(left_equi_view, right_equi_view,
+                                             left_view, right_view,
+                                             predicate, null_equality, stream, mr);
+        } else {
+            idx = (join_kind == "anti")
+                ? cudf::conditional_left_anti_join(left_view, right_view, predicate, {}, stream, mr)
+                : cudf::conditional_left_semi_join(left_view, right_view, predicate, {}, stream, mr);
+        }
+
+        // Same left-row-order contract as gpu_semi_anti_join() above: the
+        // returned index vector's order is unspecified, so sort ascending
+        // before gathering.
+        cudf::device_span<cudf::size_type const> idx_span(idx->data(), idx->size());
+        cudf::column_view idx_col_view(idx_span);
+        cudf::table_view idx_tbl({idx_col_view});
+        auto sorted_idx_tbl = cudf::sort(idx_tbl, {cudf::order::ASCENDING},
+                                         {}, stream, mr);
+        auto sorted_idx_view = sorted_idx_tbl->view().column(0);
+
+        auto result = cudf::gather(left_view, sorted_idx_view,
+                                   cudf::out_of_bounds_policy::DONT_CHECK,
+                                   stream, mr);
+        return make_gpu_table_xptr(std::move(result));
+    }
+
+    std::unique_ptr<rmm::device_uvector<cudf::size_type>> left_map;
+    std::unique_ptr<rmm::device_uvector<cudf::size_type>> right_map;
+
+    if (has_equi) {
+        auto left_equi_view = select_join_keys(left_view, equi_left, nulls_equal, nan_nulled_keys);
+        auto right_equi_view = select_join_keys(right_view, equi_right, nulls_equal, nan_nulled_keys);
+
+        if (join_kind == "inner") {
+            std::tie(left_map, right_map) = cudf::mixed_inner_join(
+                left_equi_view, right_equi_view, left_view, right_view,
+                predicate, null_equality, {}, stream, mr);
+        } else if (join_kind == "left") {
+            std::tie(left_map, right_map) = cudf::mixed_left_join(
+                left_equi_view, right_equi_view, left_view, right_view,
+                predicate, null_equality, {}, stream, mr);
+        } else if (join_kind == "full") {
+            std::tie(left_map, right_map) = cudf::mixed_full_join(
+                left_equi_view, right_equi_view, left_view, right_view,
+                predicate, null_equality, {}, stream, mr);
+        } else {
+            Rcpp::stop("internal: unknown mutating non-equi join kind '%s'", join_kind.c_str());
+        }
+    } else {
+        if (join_kind == "inner") {
+            std::tie(left_map, right_map) = cudf::conditional_inner_join(
+                left_view, right_view, predicate, {}, stream, mr);
+        } else if (join_kind == "left") {
+            std::tie(left_map, right_map) = cudf::conditional_left_join(
+                left_view, right_view, predicate, {}, stream, mr);
+        } else if (join_kind == "full") {
+            std::tie(left_map, right_map) = cudf::conditional_full_join(
+                left_view, right_view, predicate, stream, mr);
+        } else {
+            Rcpp::stop("internal: unknown mutating non-equi join kind '%s'", join_kind.c_str());
+        }
+    }
+
+    // reclassify_excess: false for inner/left (a capped-out match is simply
+    // dropped, never surfaced as its own row -- same contract as the equi
+    // paths above), true for full (every row of both sides always survives
+    // regardless of multiple= capping) -- identical rationale to
+    // gpu_left_join()/gpu_inner_join()/gpu_full_join().
+    bool reclassify_excess = (join_kind == "full");
+
+    // Coalescing: only full_join() can produce BOTH a left-unmatched
+    // (right-only) row -- inner/left never do (every output row has a real
+    // left source), same rationale as gpu_inner_join()/gpu_left_join()
+    // passing {}, {} unconditionally.
+    std::vector<cudf::size_type> coalesce_left_keys;
+    std::vector<cudf::size_type> coalesce_right_keys;
+    if (join_kind == "full" && !right_drop.empty()) {
+        coalesce_left_keys = equi_left;
+        coalesce_right_keys = equi_right;
+    }
+
+    auto build = build_join_result(left_view, right_view,
+                                   map_as_column_view(*left_map),
+                                   map_as_column_view(*right_map),
+                                   right_keep,
+                                   coalesce_left_keys, coalesce_right_keys,
+                                   multiple, reclassify_excess);
+
+    return wrap_join_build_result(std::move(build));
+}
+
+// -----------------------------------------------------------------------
+// Rolling (closest()) joins, F24.
+//
+// dplyr's join_by(closest(x$t >= y$s)) keeps, per x row, the matching y rows
+// (equi keys equal, inequality true) whose rolling value is the max (`>=`,
+// `>`) or min (`<=`, `<`) -- ALL y rows tied at that value, in y order. Built
+// as a conditional join plus a per-row filter that is O(n*m) pairs, so this is
+// a sort + binary search (the pandas/cuDF merge_asof idea):
+//
+//   1. sort y by (equi keys, rolling key), nulls first, stable (ties keep y
+//      order): Ys, with the order map `yo`;
+//   2. per x row: [g_lo, g_hi) = its equi group in Ys; the boundary position
+//      p of (equi, rolling) in Ys (upper_bound for `>=`/`<`, lower_bound for
+//      `>`/`<=`) and the candidate c = p - 1 (`>=`/`>`) or p (`<=`/`<`);
+//   3. c is a match iff g_lo <= c < g_hi and the missing-value rules hold
+//      (below); the tie block of c is [lower_bound(Ys[c]), upper_bound(Ys[c]));
+//   4. the blocks are expanded into gather maps with scan/repeat/sequence and
+//      handed to build_join_result(), so multiple=/unmatched=/relationship=
+//      act on the post-filter matches like dplyr's.
+//
+// Missing values: a non-missing x rolling value needs a non-missing candidate
+// (nulls sort first, so the candidate can be a null below the group's values);
+// a missing x rolling value matches only a missing candidate, and only for
+// `>=`/`<=` under na_matches = "na". na_matches = "never": any missing key in
+// the x row (equi or rolling) matches nothing. Equi group bounds treat null as
+// equal to null (cudf's row order), which is exactly na_matches = "na".
+// NaN: a NaN, uploaded (F55 keeps it) or computed on the GPU (`0 / 0`), is a
+// real NaN, which dplyr (nan_distinct = TRUE) treats as a missing value
+// distinct from NA. cudf sorts NaN after +Inf and compares NaN equal to
+// NaN, so a FLOAT64 rolling value has three kinds (present, null, NaN): a
+// candidate must have the x row's kind, a missing kind (null or NaN) matches
+// only for `>=`/`<=` under "na", and under "never" a NaN in any FLOAT64 key
+// of the x row means no match, like a null.
+// -----------------------------------------------------------------------
+namespace {
+
+using ColPtr = std::unique_ptr<cudf::column>;
+
+ColPtr roll_i32_const(cudf::size_type v, cudf::size_type n,
+                      rmm::cuda_stream_view stream, rmm::mr::device_memory_resource* mr) {
+    cudf::numeric_scalar<cudf::size_type> s(v, true, stream);
+    return cudf::make_column_from_scalar(s, n, stream, mr);
+}
+
+ColPtr roll_bool_const(bool v, cudf::size_type n,
+                       rmm::cuda_stream_view stream, rmm::mr::device_memory_resource* mr) {
+    cudf::numeric_scalar<bool> s(v, true, stream);
+    return cudf::make_column_from_scalar(s, n, stream, mr);
+}
+
+ColPtr roll_seq(cudf::size_type n, rmm::cuda_stream_view stream,
+                rmm::mr::device_memory_resource* mr) {
+    if (n == 0) {
+        return cudf::make_numeric_column(cudf::data_type(cudf::type_id::INT32), 0,
+                                         cudf::mask_state::UNALLOCATED, stream, mr);
+    }
+    cudf::numeric_scalar<cudf::size_type> zero(0, true, stream);
+    return cudf::sequence(n, zero, stream, mr);
+}
+
+ColPtr roll_binop(const cudf::column_view& a, const cudf::column_view& b,
+                  cudf::binary_operator op, cudf::type_id out,
+                  rmm::cuda_stream_view stream, rmm::mr::device_memory_resource* mr) {
+    return cudf::binary_operation(a, b, op, cudf::data_type(out), stream, mr);
+}
+
+ColPtr roll_binop_s(const cudf::column_view& a, cudf::size_type v, cudf::binary_operator op,
+                    cudf::type_id out, rmm::cuda_stream_view stream,
+                    rmm::mr::device_memory_resource* mr) {
+    cudf::numeric_scalar<cudf::size_type> s(v, true, stream);
+    return cudf::binary_operation(a, s, op, cudf::data_type(out), stream, mr);
+}
+
+ColPtr roll_and(const cudf::column_view& a, const cudf::column_view& b,
+                rmm::cuda_stream_view stream, rmm::mr::device_memory_resource* mr) {
+    return roll_binop(a, b, cudf::binary_operator::LOGICAL_AND, cudf::type_id::BOOL8, stream, mr);
+}
+
+ColPtr roll_not(const cudf::column_view& a, rmm::cuda_stream_view stream,
+                rmm::mr::device_memory_resource* mr) {
+    return cudf::unary_operation(a, cudf::unary_operator::NOT, stream, mr);
+}
+
+bool roll_is_float(const cudf::column_view& col) {
+    return col.type().id() == cudf::type_id::FLOAT64 || col.type().id() == cudf::type_id::FLOAT32;
+}
+
+// BOOL8, true where a floating-point value is NaN. A null is not NaN (the data
+// under a null slot can hold NA_real_'s NaN payload, so is_nan alone is wrong).
+ColPtr roll_is_nan(const cudf::column_view& col, rmm::cuda_stream_view stream,
+                   rmm::mr::device_memory_resource* mr) {
+    auto nan = cudf::is_nan(col, stream, mr);
+    auto valid = cudf::is_valid(col, stream, mr);
+    return roll_and(nan->view(), valid->view(), stream, mr);
+}
+
+ColPtr roll_one_col(std::unique_ptr<cudf::table> t) {
+    auto cols = t->release();
+    return std::move(cols[0]);
+}
+
+}  // namespace
+
+// [[Rcpp::export]]
+SEXP gpu_rolling_join(SEXP xptr_left,
+                      SEXP xptr_right,
+                      Rcpp::IntegerVector equi_left_keys,
+                      Rcpp::IntegerVector equi_right_keys,
+                      int roll_left,
+                      int roll_right,
+                      std::string op,
+                      Rcpp::IntegerVector right_drop_cols,
+                      std::string join_kind,
+                      bool nulls_equal = true,
+                      std::string multiple = "all") {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
+    Rcpp::XPtr<GpuTablePtr> right_ptr(xptr_right);
+    cudf::table_view left_view = get_table_view(left_ptr);
+    cudf::table_view right_view = get_table_view(right_ptr);
+
+    auto equi_left = to_index_vec(equi_left_keys);
+    auto equi_right = to_index_vec(equi_right_keys);
+    auto right_drop = to_index_vec(right_drop_cols);
+    const size_t nE = equi_left.size();
+
+    if (op != ">=" && op != ">" && op != "<=" && op != "<") {
+        Rcpp::stop("internal: unsupported rolling operator '%s'", op.c_str());
+    }
+    const bool below = (op == ">=" || op == ">");       // candidates are y <= x
+    const bool inclusive = (op == ">=" || op == "<=");
+    // `>=` and `<` search with upper_bound, `>` and `<=` with lower_bound.
+    const bool use_upper = (below == inclusive);
+
+    auto stream = cudf::get_default_stream();
+    auto mr = rmm::mr::get_current_device_resource();
+
+    const cudf::size_type nx = left_view.num_rows();
+    const cudf::size_type ny = right_view.num_rows();
+
+    // Key tables: [equi keys..., rolling key].
+    std::vector<cudf::column_view> xk_cols, yk_cols;
+    for (size_t i = 0; i < nE; ++i) {
+        xk_cols.push_back(left_view.column(equi_left[i]));
+        yk_cols.push_back(right_view.column(equi_right[i]));
+    }
+    xk_cols.push_back(left_view.column(roll_left));
+    yk_cols.push_back(right_view.column(roll_right));
+    cudf::table_view x_keys(xk_cols);
+    cudf::table_view y_keys(yk_cols);
+
+    std::vector<cudf::order> asc_all(nE + 1, cudf::order::ASCENDING);
+    std::vector<cudf::null_order> nb_all(nE + 1, cudf::null_order::BEFORE);
+    std::vector<cudf::order> asc_e(nE, cudf::order::ASCENDING);
+    std::vector<cudf::null_order> nb_e(nE, cudf::null_order::BEFORE);
+
+    // 1. y sorted by (equi, rolling), nulls first, stable.
+    auto yo = cudf::stable_sorted_order(y_keys, asc_all, nb_all, stream, mr);
+    auto ys = cudf::gather(y_keys, yo->view(), cudf::out_of_bounds_policy::DONT_CHECK, stream, mr);
+    cudf::table_view ys_view = ys->view();
+
+    // 2./3. `valid` (an x row has a closest match), `start` (first sorted
+    // position of its tie block, `ny` when none), `cnt` (block size, 0 when none).
+    ColPtr valid, start, cnt;
+    if (nx == 0 || ny == 0) {
+        valid = roll_bool_const(false, nx, stream, mr);
+        start = roll_i32_const(ny, nx, stream, mr);
+        cnt = roll_i32_const(0, nx, stream, mr);
+    } else {
+        ColPtr g_lo, g_hi;
+        if (nE > 0) {
+            std::vector<cudf::size_type> e_idx(nE);
+            for (size_t i = 0; i < nE; ++i) e_idx[i] = static_cast<cudf::size_type>(i);
+            cudf::table_view ys_e = ys_view.select(e_idx);
+            cudf::table_view x_e = x_keys.select(e_idx);
+            g_lo = cudf::lower_bound(ys_e, x_e, asc_e, nb_e, stream, mr);
+            g_hi = cudf::upper_bound(ys_e, x_e, asc_e, nb_e, stream, mr);
+        } else {
+            g_lo = roll_i32_const(0, nx, stream, mr);
+            g_hi = roll_i32_const(ny, nx, stream, mr);
+        }
+
+        auto p = use_upper ? cudf::upper_bound(ys_view, x_keys, asc_all, nb_all, stream, mr)
+                           : cudf::lower_bound(ys_view, x_keys, asc_all, nb_all, stream, mr);
+        ColPtr c = below ? roll_binop_s(p->view(), 1, cudf::binary_operator::SUB,
+                                        cudf::type_id::INT32, stream, mr)
+                         : std::move(p);
+
+        auto ge_lo = roll_binop(c->view(), g_lo->view(), cudf::binary_operator::GREATER_EQUAL,
+                                cudf::type_id::BOOL8, stream, mr);
+        auto lt_hi = roll_binop(c->view(), g_hi->view(), cudf::binary_operator::LESS,
+                                cudf::type_id::BOOL8, stream, mr);
+        valid = roll_and(ge_lo->view(), lt_hi->view(), stream, mr);
+
+        // Keep the candidate index inside [0, ny) for the gathers below; the
+        // range test above already used the raw value.
+        cudf::numeric_scalar<cudf::size_type> lo_s(0, true, stream);
+        cudf::numeric_scalar<cudf::size_type> hi_s(ny - 1, true, stream);
+        auto cc = cudf::clamp(c->view(), lo_s, hi_s, stream, mr);
+
+        // Missing-value rules for the rolling key.
+        auto x_rnull = cudf::is_null(x_keys.column(nE), stream, mr);
+        cudf::table_view cand_in({ys_view.column(nE)});
+        auto cand_r = roll_one_col(cudf::gather(cand_in, cc->view(),
+                                                cudf::out_of_bounds_policy::DONT_CHECK, stream, mr));
+        auto c_rnull = cudf::is_null(cand_r->view(), stream, mr);
+        auto same_null = roll_binop(x_rnull->view(), c_rnull->view(), cudf::binary_operator::EQUAL,
+                                    cudf::type_id::BOOL8, stream, mr);
+        valid = roll_and(valid->view(), same_null->view(), stream, mr);
+
+        // A FLOAT64 rolling value is present, null or NaN (dplyr: NaN is a
+        // missing value distinct from NA). A candidate must be of the x row's
+        // kind; NaN sorts after +Inf, so a NaN candidate is reached only when
+        // no present value qualifies, or from a NaN x row.
+        const bool roll_float = roll_is_float(x_keys.column(nE));
+        ColPtr x_rmissing;  // null or NaN
+        if (roll_float) {
+            auto x_rnan = roll_is_nan(x_keys.column(nE), stream, mr);
+            auto c_rnan = roll_is_nan(cand_r->view(), stream, mr);
+            auto same_nan = roll_binop(x_rnan->view(), c_rnan->view(), cudf::binary_operator::EQUAL,
+                                       cudf::type_id::BOOL8, stream, mr);
+            valid = roll_and(valid->view(), same_nan->view(), stream, mr);
+            x_rmissing = roll_binop(x_rnull->view(), x_rnan->view(), cudf::binary_operator::LOGICAL_OR,
+                                    cudf::type_id::BOOL8, stream, mr);
+        } else {
+            x_rmissing = std::make_unique<cudf::column>(x_rnull->view(), stream, mr);
+        }
+
+        // A missing x value matches a missing candidate only for `>=`/`<=`
+        // under na_matches = "na".
+        if (!(inclusive && nulls_equal)) {
+            auto x_rpresent = roll_not(x_rmissing->view(), stream, mr);
+            valid = roll_and(valid->view(), x_rpresent->view(), stream, mr);
+        }
+        // na_matches = "never": a missing (null or NaN) key in the x row, equi
+        // or rolling, matches nothing.
+        if (!nulls_equal) {
+            for (size_t i = 0; i < nE; ++i) {
+                auto nn = cudf::is_valid(x_keys.column(i), stream, mr);
+                valid = roll_and(valid->view(), nn->view(), stream, mr);
+                if (roll_is_float(x_keys.column(i))) {
+                    auto not_nan = roll_not(roll_is_nan(x_keys.column(i), stream, mr)->view(), stream, mr);
+                    valid = roll_and(valid->view(), not_nan->view(), stream, mr);
+                }
+            }
+        }
+
+        // Tie block of the candidate row.
+        auto cand_rows = cudf::gather(ys_view, cc->view(),
+                                      cudf::out_of_bounds_policy::DONT_CHECK, stream, mr);
+        auto first = cudf::lower_bound(ys_view, cand_rows->view(), asc_all, nb_all, stream, mr);
+        auto last = cudf::upper_bound(ys_view, cand_rows->view(), asc_all, nb_all, stream, mr);
+        auto width = roll_binop(last->view(), first->view(), cudf::binary_operator::SUB,
+                                cudf::type_id::INT32, stream, mr);
+        cudf::numeric_scalar<cudf::size_type> zero_s(0, true, stream);
+        cudf::numeric_scalar<cudf::size_type> ny_s(ny, true, stream);
+        cnt = cudf::copy_if_else(width->view(), zero_s, valid->view(), stream, mr);
+        start = cudf::copy_if_else(first->view(), ny_s, valid->view(), stream, mr);
+    }
+
+    // semi/anti: x rows with / without a closest match, in x order.
+    if (join_kind == "semi" || join_kind == "anti") {
+        ColPtr mask = (join_kind == "semi")
+            ? std::make_unique<cudf::column>(valid->view(), stream, mr)
+            : roll_not(valid->view(), stream, mr);
+        auto xseq = roll_seq(nx, stream, mr);
+        cudf::table_view seq_tbl({xseq->view()});
+        auto kept = cudf::apply_boolean_mask(seq_tbl, mask->view(), stream, mr);
+        auto result = cudf::gather(left_view, kept->view().column(0),
+                                   cudf::out_of_bounds_policy::DONT_CHECK, stream, mr);
+        return make_gpu_table_xptr(std::move(result));
+    }
+    if (join_kind != "left" && join_kind != "inner" && join_kind != "right" &&
+        join_kind != "full") {
+        Rcpp::stop("internal: unknown rolling join kind '%s'", join_kind.c_str());
+    }
+
+    // 4. Expansion: x row i yields out_cnt[i] pairs (the tie block, or one
+    // sentinel pair for an unmatched x row of a left/full join).
+    const bool keep_x = (join_kind == "left" || join_kind == "full");
+    const bool keep_y = (join_kind == "right" || join_kind == "full");
+    ColPtr out_cnt;
+    if (keep_x) {
+        auto is_zero = roll_binop_s(cnt->view(), 0, cudf::binary_operator::EQUAL,
+                                    cudf::type_id::BOOL8, stream, mr);
+        cudf::numeric_scalar<cudf::size_type> one_s(1, true, stream);
+        out_cnt = cudf::copy_if_else(one_s, cnt->view(), is_zero->view(), stream, mr);
+    } else {
+        out_cnt = std::move(cnt);
+    }
+
+    int64_t total = 0;
+    if (nx > 0) {
+        auto tot = cudf::reduce(out_cnt->view(),
+                                *cudf::make_sum_aggregation<cudf::reduce_aggregation>(),
+                                cudf::data_type(cudf::type_id::INT64), stream, mr);
+        total = static_cast<cudf::numeric_scalar<int64_t> const&>(*tot).value(stream);
+    }
+    if (total > std::numeric_limits<cudf::size_type>::max()) {
+        Rcpp::stop("The rolling join result has more than 2^31 - 1 rows.");
+    }
+
+    ColPtr left_map, right_map;
+    ColPtr yo_ext;
+    {
+        std::vector<cudf::column_view> parts{yo->view()};
+        auto sent = roll_i32_const(ny, 1, stream, mr);
+        parts.push_back(sent->view());
+        yo_ext = cudf::concatenate(parts, stream, mr);
+    }
+    ColPtr ypos;  // sorted positions of the right side of every pair
+    if (total == 0) {
+        left_map = roll_i32_const(0, 0, stream, mr);
+        right_map = roll_i32_const(0, 0, stream, mr);
+        ypos = roll_i32_const(0, 0, stream, mr);
+    } else {
+        cudf::numeric_scalar<cudf::size_type> zero_s(0, true, stream);
+        auto offsets = cudf::scan(out_cnt->view(),
+                                  *cudf::make_sum_aggregation<cudf::scan_aggregation>(),
+                                  cudf::scan_type::EXCLUSIVE, cudf::null_policy::EXCLUDE, stream, mr);
+        auto xseq = roll_seq(nx, stream, mr);
+        cudf::table_view per_x({xseq->view(), offsets->view(), start->view()});
+        auto rep = cudf::repeat(per_x, out_cnt->view(), stream, mr)->release();
+        left_map = std::move(rep[0]);
+        auto gseq = roll_seq(static_cast<cudf::size_type>(total), stream, mr);
+        auto local = roll_binop(gseq->view(), rep[1]->view(), cudf::binary_operator::SUB,
+                                cudf::type_id::INT32, stream, mr);
+        ypos = roll_binop(rep[2]->view(), local->view(), cudf::binary_operator::ADD,
+                          cudf::type_id::INT32, stream, mr);
+        cudf::table_view yo_tbl({yo_ext->view()});
+        right_map = roll_one_col(cudf::gather(yo_tbl, ypos->view(),
+                                              cudf::out_of_bounds_policy::DONT_CHECK, stream, mr));
+    }
+
+    // right/full: y rows that are nobody's closest match, after the x rows,
+    // with the left sentinel `nx` (sorted after every real x index).
+    if (keep_y && ny > 0) {
+        ColPtr hit = roll_bool_const(false, ny + 1, stream, mr);
+        if (total > 0) {
+            cudf::numeric_scalar<bool> t_s(true, true, stream);
+            std::vector<std::reference_wrapper<cudf::scalar const>> src{t_s};
+            cudf::table_view tgt({hit->view()});
+            hit = roll_one_col(cudf::scatter(src, ypos->view(), tgt, stream, mr));
+        }
+        auto hit_y = cudf::slice(hit->view(), std::vector<cudf::size_type>{0, ny}, stream)[0];
+        auto miss = roll_not(hit_y, stream, mr);
+        auto pos_seq = roll_seq(ny, stream, mr);
+        cudf::table_view pos_tbl({pos_seq->view()});
+        auto miss_pos = cudf::apply_boolean_mask(pos_tbl, miss->view(), stream, mr);
+        if (miss_pos->num_rows() > 0) {
+            cudf::table_view yo_only({yo->view()});
+            auto miss_y = roll_one_col(cudf::gather(yo_only, miss_pos->view().column(0),
+                                                    cudf::out_of_bounds_policy::DONT_CHECK, stream, mr));
+            auto tail_left = roll_i32_const(nx, miss_y->size(), stream, mr);
+            left_map = cudf::concatenate(
+                std::vector<cudf::column_view>{left_map->view(), tail_left->view()}, stream, mr);
+            right_map = cudf::concatenate(
+                std::vector<cudf::column_view>{right_map->view(), miss_y->view()}, stream, mr);
+        }
+    }
+
+    auto right_keep = compute_right_keep_cols(right_view, right_drop);
+    std::vector<cudf::size_type> coalesce_left_keys;
+    std::vector<cudf::size_type> coalesce_right_keys;
+    if (keep_y && !right_drop.empty()) {
+        coalesce_left_keys = equi_left;
+        coalesce_right_keys = equi_right;
+    }
+
+    auto build = build_join_result(left_view, right_view, left_map->view(), right_map->view(),
+                                   right_keep, coalesce_left_keys, coalesce_right_keys,
+                                   multiple, keep_y);
+    return wrap_join_build_result(std::move(build));
+}
+
+// Two STRING columns as INT32 codes of ONE order (dense rank of the two
+// together, bytewise UTF-8 like vctrs' C-locale comparison; nulls stay null),
+// so a non-equi STRING condition can run on the AST evaluator (F24).
+// Returns list(left = 1-column table, right = 1-column table).
+// [[Rcpp::export]]
+SEXP gpu_string_codes(SEXP xptr_left, int left_idx, SEXP xptr_right, int right_idx) {
+    using namespace cuplyr;
+
+    Rcpp::XPtr<GpuTablePtr> left_ptr(xptr_left);
+    Rcpp::XPtr<GpuTablePtr> right_ptr(xptr_right);
+    cudf::table_view left_view = get_table_view(left_ptr);
+    cudf::table_view right_view = get_table_view(right_ptr);
+    if (left_idx < 0 || left_idx >= left_view.num_columns() ||
+        right_idx < 0 || right_idx >= right_view.num_columns()) {
+        Rcpp::stop("Column index out of bounds in gpu_string_codes()");
+    }
+
+    auto stream = cudf::get_default_stream();
+    auto mr = rmm::mr::get_current_device_resource();
+
+    auto lcol = left_view.column(left_idx);
+    auto rcol = right_view.column(right_idx);
+    const cudf::size_type nl = lcol.size();
+    const cudf::size_type nr = rcol.size();
+
+    ColPtr codes;
+    if (nl + nr == 0) {
+        codes = cudf::make_numeric_column(cudf::data_type(cudf::type_id::INT32), 0,
+                                          cudf::mask_state::UNALLOCATED, stream, mr);
+    } else {
+        auto both = cudf::concatenate(std::vector<cudf::column_view>{lcol, rcol}, stream, mr);
+        auto ranks = cudf::rank(both->view(), cudf::rank_method::DENSE, cudf::order::ASCENDING,
+                                cudf::null_policy::EXCLUDE, cudf::null_order::AFTER,
+                                false, stream, mr);
+        codes = cudf::cast(ranks->view(), cudf::data_type(cudf::type_id::INT32), stream, mr);
+    }
+
+    auto part = [&](cudf::size_type begin, cudf::size_type end) {
+        auto v = cudf::slice(codes->view(), std::vector<cudf::size_type>{begin, end}, stream)[0];
+        std::vector<std::unique_ptr<cudf::column>> cols;
+        cols.push_back(std::make_unique<cudf::column>(v, stream, mr));
+        return make_gpu_table_xptr(std::make_unique<cudf::table>(std::move(cols)));
+    };
+    return Rcpp::List::create(Rcpp::Named("left") = part(0, nl),
+                              Rcpp::Named("right") = part(nl, nl + nr));
 }

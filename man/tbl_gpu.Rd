@@ -2,66 +2,162 @@
 % Please edit documentation in R/tbl-gpu.R
 \name{tbl_gpu}
 \alias{tbl_gpu}
+\alias{gibble}
 \alias{tbl_gpu.data.frame}
 \alias{tbl_gpu.tbl_gpu}
 \title{Create a GPU-backed data frame}
 \usage{
-tbl_gpu(data, ...)
+tbl_gpu(data, ..., lazy = NULL)
 
-\method{tbl_gpu}{data.frame}(data, ...)
+gibble(data, ..., lazy = NULL)
 
-\method{tbl_gpu}{tbl_gpu}(data, ...)
+\method{tbl_gpu}{data.frame}(data, ..., lazy = NULL)
+
+\method{tbl_gpu}{tbl_gpu}(data, ..., lazy = NULL)
 }
 \arguments{
 \item{data}{A data frame or tibble to transfer to GPU memory. Supported
 column types include: numeric (double), integer, character, and logical.}
 
 \item{...}{Additional arguments passed to methods (currently unused).}
+
+\item{lazy}{Logical or character. Controls execution mode:
+\itemize{
+\item \code{TRUE} or \code{"lazy"} - Operations are deferred until collect()/compute()
+\item \code{FALSE} or \code{"eager"} - Operations execute immediately
+\item \code{NULL} (default) - Use the session option, then the environment
+variable, then the package default, which is lazy
+}
+The default can be changed with \code{options(cuplyr.exec_mode = "eager")} or
+the environment variable \code{CUPLYR_EXEC_MODE=eager}; the argument beats
+the option, which beats the variable. An invalid option value warns once
+and the default is used. All options are listed on \link{cuplyr-options}.}
 }
 \value{
 A \code{tbl_gpu} object containing:
 \itemize{
 \item \code{ptr} - External pointer to the GPU table
 \item \code{schema} - List with column names and types
-\item \code{lazy_ops} - Pending operations (for future lazy evaluation)
-\item \code{groups} - Grouping variables (for future group_by support)
+\item \code{lazy_ops} - AST for pending operations (lazy mode only)
+\item \code{groups} - Grouping variables
+\item \code{exec_mode} - Execution mode ("lazy" or "eager")
 }
 }
 \description{
-Transfers an R data frame to GPU memory using NVIDIA's libcudf library,
-enabling high-performance data manipulation operations. The resulting
-\code{tbl_gpu} object can be used with dplyr verbs like \code{filter()}, \code{mutate()},
-\code{select()}, and collected back to R with \code{collect()}.
+cuplyr's GPU tables, called gibbles, live in GPU memory. \code{gibble()} is
+another name for \code{tbl_gpu()}. It transfers an R data frame to GPU memory
+using NVIDIA's libcudf library, enabling high-performance data manipulation
+operations. The resulting \code{tbl_gpu} object can be used with dplyr verbs
+like \code{filter()}, \code{mutate()}, \code{select()}, and collected back to R with
+\code{collect()}.
 }
 \details{
-The data is immediately copied to GPU memory when \code{tbl_gpu()} is called.
+The data is immediately copied to GPU memory when \code{tbl_gpu()} is called
+(also in lazy mode; only the verbs are deferred).
 GPU memory is automatically freed when the R object is garbage collected.
+\subsection{Execution Modes}{
+
+In \strong{lazy mode} (the default), operations build an AST (Abstract Syntax
+Tree) that is optimized and executed only when \code{collect()} or \code{compute()}
+is called.
+This enables optimizations like:
+\itemize{
+\item Projection pruning (only load needed columns)
+\item Mutate fusion (combine multiple mutates)
+\item Filter reordering (cheapest filters first)
+}
+
+Errors in a verb's arguments (a missing column, a type error) are still
+raised when the verb is called. Printing a lazy table with pending
+operations (or calling \code{glimpse()} on it) runs the plan to show its first
+rows, under a \verb{# A gibble [lazy]:} header; the table itself is unchanged and
+nothing is kept, so printing it twice runs the plan twice (\code{compute()} it
+first to look at it repeatedly). If the plan fails (an error, out of GPU
+memory), the print shows the schema and the message instead of raising.
+
+In \strong{eager mode} (\code{lazy = FALSE}), each dplyr verb executes immediately on
+the GPU. This is simple but can lead to unnecessary intermediate
+allocations.
+
+For measured timings and memory use of the two modes, see
+\code{vignette("performance", package = "cuplyr")}.
+
+A \code{vctrs::unspecified()} column (all \code{NA}, no type yet) is stored as BOOL8.
+It collects back as \code{vctrs::unspecified()} only while it passes through
+\code{filter()}, \code{arrange()}, \code{slice()} and \code{semi_join()}/\code{anti_join()} (as a
+column of \code{x}, as in dplyr); every other verb (\code{select()}, \code{mutate()},
+\code{group_by()} with computed expressions, \code{slice_min()}/\code{slice_max()}, a
+mutating join, \code{vctrs::vec_slice()}) returns it as a plain logical column.
+An unspecified column joined against a string, \code{Date} or factor key, or
+bound to a character column in \code{bind_rows()}, still errors.
 
 Column type mappings from R to GPU:
 \itemize{
 \item \code{numeric} -> FLOAT64
 \item \code{integer} -> INT32
 \item \code{character} -> STRING
-\item \code{logical} -> BOOL8 (stored as INT32)
+\item \code{logical} -> BOOL8
 \item \code{Date} -> TIMESTAMP_DAYS
 \item \code{POSIXct} -> TIMESTAMP_MICROSECONDS
 }
 }
+
+\subsection{Dates and times the GPU can't hold}{
+
+A GPU \code{Date} holds whole days in an int32 and a \code{POSIXct} holds int64
+microseconds. A value that doesn't fit becomes \code{NA} when it is uploaded, with
+a warning:
+\itemize{
+\item \code{cuplyr_warning_infinite_timestamp}: \code{Inf} or \code{-Inf}.
+\item \code{cuplyr_warning_timestamp_out_of_range}: a finite value beyond about
+5.8 million years either side of 1970 (\code{Date}) or 292,000 years
+(\code{POSIXct}).
+}
+Both also inherit \code{cuplyr_warning_timestamp_unrepresentable}, so one handler
+covers both. An upload raises at most one warning per class, listing every
+affected column with its count, e.g. \verb{`d` (2 values), `t` (1 value)}.
+\code{NA} and \code{NaN} are ordinary missing values and never warn. The same applies
+to every other way values reach the GPU: \code{copy = TRUE} joins,
+\code{bind_rows()}, \verb{$<-}, a constant in \code{mutate()}, and the result of a verb
+that ran on the CPU. A fractional \code{Date} is floored with its own warning,
+\code{cuplyr_warning_fractional_date}.
+}
+
+\subsection{Gibbles}{
+
+"Gibble" is the user-facing name of a \code{tbl_gpu}: \code{print()} starts
+with \verb{# A gibble:} and the dimensions, and \code{gibble()}, \code{as_gibble()} and
+\code{is_gibble()} are aliases of \code{tbl_gpu()}, \code{as_tbl_gpu()} and
+\code{is_tbl_gpu()}. The class stays \code{tbl_gpu}, and \code{tbl_sum()} still returns
+dplyr's values.
+
+The CRAN package gibble (geometry decomposition, Michael Sumner) also
+exports a function called \code{gibble()}. When both packages are attached, the
+one attached last masks the other; \code{cuplyr::gibble()} always works.
+}
+}
 \examples{
 if (has_gpu()) {
-  # Transfer mtcars to GPU
+  # Transfer mtcars to GPU (lazy by default)
   gpu_mtcars <- tbl_gpu(mtcars)
   print(gpu_mtcars)
 
-  # Chain operations
-  result <- gpu_mtcars |>
+  # Operations are deferred until collect()
+  result <- tbl_gpu(mtcars) |>
     filter(mpg > 20) |>
     mutate(kpl = mpg * 0.425) |>
     collect()
+
+  # Eager mode: each verb runs at once
+  eager_tbl <- tbl_gpu(mtcars, lazy = FALSE)
+
+  # Or make every new table eager:
+  # options(cuplyr.exec_mode = "eager")
 }
 }
 \seealso{
 \code{\link{collect.tbl_gpu}} to transfer data back to R,
+\code{\link{compute.tbl_gpu}} to execute and keep on GPU,
 \code{\link{filter.tbl_gpu}}, \code{\link{mutate.tbl_gpu}},
 \code{\link{select.tbl_gpu}} for data manipulation
 }

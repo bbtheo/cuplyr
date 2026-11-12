@@ -1,0 +1,29 @@
+file	test	item	reason
+test-distinct.R	distinct preserves grouping	C2	asserts dplyr-internal count_regroups() (counts grouped_df rebuilds inside dplyr), which has no meaning for a GPU backend
+test-filter.R	filter and filter_out preserve grouping	C2	asserts dplyr-internal count_regroups() (counts grouped_df rebuilds inside dplyr), which has no meaning for a GPU backend; it would also fail on its own: filter_out() is missing (F16)
+test-join.R	joins preserve groups	C2	asserts dplyr-internal count_regroups() (counts grouped_df rebuilds inside dplyr), which has no meaning for a GPU backend; it would also fail on its own: nest_join() loses the grouping of the nested data
+test-mutate.R	mutate preserves grouping	C2	asserts dplyr-internal count_regroups() (counts grouped_df rebuilds inside dplyr), which has no meaning for a GPU backend
+test-relocate.R	works with zero column data frames (#6167)	C3	calls the non-exported dplyr:::eval_relocate() directly, so it tests dplyr tidyselect plumbing and never reaches cuplyr
+test-relocate.R	works with `before` and `after` `everything()`	C3	calls the non-exported dplyr:::eval_relocate() directly, so it tests dplyr tidyselect plumbing and never reaches cuplyr
+test-relocate.R	moves columns to the front when neither `before` nor `after` are specified	C3	calls the non-exported dplyr:::eval_relocate() directly, so it tests dplyr tidyselect plumbing and never reaches cuplyr
+test-relocate.R	Empty `before` selection moves columns to front	C3	calls the non-exported dplyr:::eval_relocate() directly, so it tests dplyr tidyselect plumbing and never reaches cuplyr
+test-relocate.R	Empty `after` selection moves columns to end	C3	calls the non-exported dplyr:::eval_relocate() directly, so it tests dplyr tidyselect plumbing and never reaches cuplyr
+test-relocate.R	Empty `before` and `after` selections work with 0-col data frames	C3	calls the non-exported dplyr:::eval_relocate() directly, so it tests dplyr tidyselect plumbing and never reaches cuplyr
+test-relocate.R	retains the last duplicate when renaming while moving (#6209)	C3	calls the non-exported dplyr:::eval_relocate() directly, so it tests dplyr tidyselect plumbing and never reaches cuplyr
+test-rename.R	rename preserves grouping	C2	asserts dplyr-internal count_regroups() (counts grouped_df rebuilds inside dplyr), which has no meaning for a GPU backend
+test-rows.R	rows_check_unique() requires uniqueness	C3	calls the non-exported dplyr:::rows_check_unique() directly, so it tests dplyr helper code and never reaches cuplyr
+test-select.R	select preserves grouping	C2	asserts dplyr-internal count_regroups() (counts grouped_df rebuilds inside dplyr), which has no meaning for a GPU backend
+test-summarise.R	can modify grouping variables	C2	asserts dplyr-internal count_regroups() (counts grouped_df rebuilds inside dplyr), which has no meaning for a GPU backend
+test-transmute.R	transmute preserves grouping	C2	asserts dplyr-internal count_regroups() (counts grouped_df rebuilds inside dplyr), which has no meaning for a GPU backend
+test-filter.R	can filter() with unruly class	C6	runs a user S3 subclass (foobar) through dplyr_row_slice(); the harness cannot pre-upload that fixture to a tbl_gpu without invalidating the test, so it only exercises CPU dplyr
+test-arrange.R	can arrange() with unruly class	C6	runs a user S3 subclass (foobar) through dplyr_row_slice(); the harness cannot pre-upload that fixture to a tbl_gpu without invalidating the test, so it only exercises CPU dplyr
+test-group-by.R	group_by_drop_default() is forgiving about corrupt grouped df (#4306)	C8	hand-builds a corrupt grouped_df with structure(class = ...) and asks dplyr's group_by_drop_default() about it; a tbl_gpu has no groups attribute to corrupt
+test-group-by.R	grouped_df() does not break row.names (#5745)	C8	checks .row_names_info() of the `groups` data frame built by dplyr-internal compute_groups(); that attribute does not exist on a tbl_gpu
+test-group-data.R	group_indices() handles 0 rows data frames (#5541)	C8	builds a zero-row grouped_df by hand with new_grouped_df(groups = <stale .rows>); a tbl_gpu cannot hold an inconsistent groups attribute
+test-group-split.R	group_split(.keep=FALSE) does not try to remove virtual grouping columns (#4045)	C8	builds a grouped_df by hand with new_grouped_df() whose groups column (.bootstrap) is not a column of the data; a tbl_gpu groups are always real columns
+test-rowwise.R	new_rowwise_df() does not require `group_data=`	C8	tests dplyr's rowwise_df constructor new_rowwise_df() and attr(x, 'groups'); tbl_gpu has no such constructor or attribute
+test-rowwise.R	new_rowwise_df() can add class and attributes (#5918)	C8	tests dplyr's rowwise_df constructor new_rowwise_df() adding classes and attributes; tbl_gpu has no such constructor
+test-rowwise.R	validate_rowwise_df() gives useful errors	C8	corrupts attr(x, 'groups') of a rowwise_df and snapshots dplyr's validate_rowwise_df() errors; it passes only because any error satisfies a relaxed snapshot, not because of cuplyr
+test-arrange.R	arrange handles S4 classes (#1105)	C5	cuplyr refuses S4/custom-class columns at upload (F18 B); the fixture cannot reach the GPU
+test-arrange.R	legacy - arrange handles S4 classes (#1105)	C5	cuplyr refuses S4/custom-class columns at upload (F18 B); the fixture cannot reach the GPU
+test-mutate.R	mutate() handles symbol expressions	C5	cuplyr refuses S4/custom-class columns at upload (F18 B); the fixture cannot reach the GPU

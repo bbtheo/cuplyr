@@ -17,8 +17,7 @@ as_tbl_gpu(x, ...)
 
 - ...:
 
-  Additional arguments passed to
-  [`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md).
+  Additional arguments passed to [`tbl_gpu()`](tbl_gpu.md).
 
 ## Value
 
@@ -26,8 +25,7 @@ A `tbl_gpu` object with data stored on the GPU.
 
 ## See also
 
-[`tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md) for
-details on GPU table creation
+[`tbl_gpu`](tbl_gpu.md) for details on GPU table creation
 
 ## Examples
 

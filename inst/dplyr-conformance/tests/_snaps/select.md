@@ -1,0 +1,82 @@
+# grouping variables preserved with a message, unless already selected (#1511, #5841)
+
+    Code
+      res <- select(df, x)
+    Message
+      Adding missing grouping variables: `g`
+
+---
+
+    Code
+      expect_equal(select(df, a = c), group_by(tibble(b = 2, a = 3), b))
+    Message
+      Adding missing grouping variables: `b`
+    Code
+      expect_equal(select(df, b = c), group_by(tibble(a = 1, b = 3), a))
+    Message
+      Adding missing grouping variables: `a`
+
+# non-syntactic grouping variable is preserved (#1138)
+
+    Code
+      df <- select(group_by(tibble(`a b` = 1L), `a b`))
+    Message
+      Adding missing grouping variables: `a b`
+
+# select() provides informative errors
+
+    Code
+      (expect_error(select(mtcars, 1 + "")))
+    Output
+      <error/rlang_error>
+      Error in `select()`:
+      i In argument: `1 + ""`.
+      Caused by error in `1 + ""`:
+      ! non-numeric argument to binary operator
+
+# dplyr_col_select() aborts when `[` implementation is broken
+
+    Code
+      (expect_error(select(df1, 1:2)))
+    Output
+      <error/vctrs_error_subscript_oob>
+      Error in `select()`:
+      ! Can't select columns past the end.
+      i Location 2 doesn't exist.
+      i There is only 1 column.
+    Code
+      (expect_error(select(df1, 0)))
+    Output
+      <error/rlang_error>
+      Error in `select()`:
+      ! Can't reconstruct data frame.
+      x The `[` method for class <dplyr_test_broken_operator/tbl_df/tbl/data.frame> must return a data frame.
+      i It returned a <list>.
+
+---
+
+    Code
+      (expect_error(select(df1, 2)))
+    Output
+      <error/vctrs_error_subscript_oob>
+      Error in `select()`:
+      ! Can't select columns past the end.
+      i Location 2 doesn't exist.
+      i There is only 1 column.
+    Code
+      (expect_error(select(df1, 1)))
+    Output
+      <error/rlang_error>
+      Error in `select()`:
+      ! Can't reconstruct data frame.
+      x The `[` method for class <dplyr_test_broken_operator/tbl_df/tbl/data.frame> must return a data frame.
+      i It returned a <list>.
+    Code
+      (expect_error(select(df2, 1)))
+    Output
+      <error/rlang_error>
+      Error in `select()`:
+      ! Can't reconstruct data frame.
+      x The `[` method for class <dplyr_test_operator_wrong_size/tbl_df/tbl/data.frame> must return a data frame with 1 column.
+      i It returned a <data.frame> of 0 columns.
+

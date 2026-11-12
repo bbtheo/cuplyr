@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Full testthat suite under the GPU lock. Extra args go to run-tests.R (e.g. --out f.tsv).
+source "$(dirname "$0")/lib.sh"
+cd "$CUPLYR_WT_ROOT"
+exec "$(dirname "$0")/gpu-run" --label suite -- Rscript tools/run-tests.R suite "$@"

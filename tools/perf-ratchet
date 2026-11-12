@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Apply a passing gate's perf observations to the perf baseline (the ratchet).
+# Called by tools/merge-queue after a successful merge; no GPU.
+#
+#   tools/perf-ratchet --observations <tsv> --summary <txt> --out <dir>
+#                      [--commit <sha>] [--baseline <json>]
+#
+# Baseline: --baseline, else $CUPLYR_PERF_BASELINE, else an error. Does not
+# take merge.lock: merge-queue already holds it when it calls this.
+# Rules: tools/perf-ratchet-lib.R. Agents never run this on the real baseline.
+source "$(dirname "$0")/lib.sh"
+cuplyr_activate_env
+exec Rscript "$(dirname "$0")/perf-ratchet.R" ratchet "$@"

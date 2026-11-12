@@ -27,6 +27,7 @@ test_that("summarise() with sum() works ungrouped", {
 
 test_that("eager summarise result has no pending lazy ops", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
 
   out <- tbl_gpu(data.frame(x = 1:5)) |>
     dplyr::summarise(total = sum(x))
@@ -106,6 +107,58 @@ test_that("summarise() with n() works ungrouped", {
     collect()
 
   expect_equal(result$count, 32)
+})
+
+test_that("summarise(n = n()) declares a schema type matching the actual GPU column type (S7)", {
+  skip_if_no_gpu()
+
+  # Ground truth (see R/summarise.R::make_aggregation() / src/ops_groupby.cpp
+  # gpu_summarise()): both the grouped (cudf groupby count aggregation, which
+  # yields cudf::size_type = INT32) and ungrouped (explicit scalar column,
+  # built as INT32 in the C++) paths produce an INT32 "n" column, in both
+  # eager and lazy exec modes. The schema declaration in make_aggregation()
+  # ("n" -> "INT32") must match this for both.
+  df <- data.frame(g = rep(1:2, 5), x = 1:10)
+
+  for (mode in c("eager", "lazy")) {
+    tbl <- tbl_gpu(df, lazy = identical(mode, "lazy"))
+
+    # --- ungrouped ---
+    res_ungrouped <- tbl |> dplyr::summarise(count = n())
+    if (identical(mode, "lazy")) res_ungrouped <- compute(res_ungrouped)
+    count_idx <- match("count", res_ungrouped$schema$names)
+    expect_equal(unname(res_ungrouped$schema$types[count_idx]), "INT32",
+                 info = paste(mode, "ungrouped: schema$types"))
+    expect_equal(unname(gpu_col_types(res_ungrouped$ptr)[count_idx]), "int",
+                 info = paste(mode, "ungrouped: actual GPU column type"))
+    expect_type(collect(res_ungrouped)$count, "integer")
+
+    # --- grouped ---
+    res_grouped <- tbl |> dplyr::group_by(g) |> dplyr::summarise(count = n())
+    if (identical(mode, "lazy")) res_grouped <- compute(res_grouped)
+    count_idx_g <- match("count", res_grouped$schema$names)
+    expect_equal(unname(res_grouped$schema$types[count_idx_g]), "INT32",
+                 info = paste(mode, "grouped: schema$types"))
+    expect_equal(unname(gpu_col_types(res_grouped$ptr)[count_idx_g]), "int",
+                 info = paste(mode, "grouped: actual GPU column type"))
+    expect_type(collect(res_grouped)$count, "integer")
+  }
+})
+
+test_that("summarise(n = n()) matches dplyr's integer type exactly, ungrouped and grouped (S7)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(g = rep(1:2, 5), x = 1:10)
+
+  pipeline_ungrouped <- function(d) dplyr::summarise(d, count = dplyr::n())
+  pipeline_grouped <- function(d) {
+    d |> dplyr::group_by(g) |> dplyr::summarise(count = dplyr::n(), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(df, pipeline_ungrouped, ignore_col_types = FALSE)
+  expect_same_as_dplyr(df, pipeline_grouped, arrange_by = "g", ignore_col_types = FALSE)
+  expect_same_as_dplyr_lazy(df, pipeline_ungrouped, ignore_col_types = FALSE)
+  expect_same_as_dplyr_lazy(df, pipeline_grouped, arrange_by = "g", ignore_col_types = FALSE)
 })
 
 test_that("summarise() with multiple aggregations works ungrouped", {
@@ -285,6 +338,272 @@ test_that("summarise() with var() works", {
 })
 
 # =============================================================================
+# S6: lazy sd()/var() and namespaced aggregation calls (eager/lazy unification)
+# =============================================================================
+
+test_that("summarise() with sd() matches dplyr in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) d |> dplyr::summarise(sd_mpg = sd(mpg))
+
+  expect_same_as_dplyr(mtcars, pipeline, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, ignore_col_types = TRUE)
+})
+
+test_that("summarise() with var() matches dplyr in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) d |> dplyr::summarise(var_mpg = var(mpg))
+
+  expect_same_as_dplyr(mtcars, pipeline, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, ignore_col_types = TRUE)
+})
+
+test_that("summarise() with grouped sd()/var() matches dplyr in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(sd_mpg = sd(mpg), var_hp = var(hp), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+})
+
+test_that("lazy summarise() with sum() of a comparison expression matches dplyr (temp-column path)", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    d |>
+      dplyr::filter(mpg > 0) |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(high_carb = sum(carb > 3), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+})
+
+test_that("lazy summarise() temp-column path stays in the plan; an integer sum() breaks it", {
+  skip_if_no_gpu()
+
+  # F88: the plan runs early on the GPU: a plan break, not a CPU fallback
+  withr::local_options(cuplyr.fallback = "warn", cuplyr.plan_break = "warn")
+
+  gpu_df <- tbl_gpu(transform(mtcars, ic = as.integer(carb)), lazy = TRUE) |>
+    dplyr::filter(mpg > 0)
+
+  # F101: the temp column is a plan mutate: nothing computes, nothing is reported
+  expect_no_warning(
+    result <- gpu_df |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(m = mean(carb * 2)) |>
+      collect()
+  )
+  expect_equal(nrow(result), 3)
+
+  # an integer sum() has a data-dependent result type: it runs at the verb
+  expect_warning(
+    result <- gpu_df |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(high_carb = sum(ic + 1L)) |>
+      collect(),
+    class = "cuplyr_warning_plan_break"
+  )
+
+  expect_equal(nrow(result), 3)
+})
+
+test_that("summarise() accepts dplyr::n() (namespaced call) in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  pipeline_ungrouped <- function(d) d |> dplyr::summarise(count = dplyr::n())
+  pipeline_grouped <- function(d) {
+    d |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(count = dplyr::n(), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline_ungrouped, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline_ungrouped, ignore_col_types = TRUE)
+  expect_same_as_dplyr(mtcars, pipeline_grouped, arrange_by = "cyl", ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline_grouped, arrange_by = "cyl", ignore_col_types = TRUE)
+})
+
+test_that("summarise() accepts stats::sd() (namespaced call) in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  pipeline_ungrouped <- function(d) d |> dplyr::summarise(sd_mpg = stats::sd(mpg))
+  pipeline_grouped <- function(d) {
+    d |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(sd_mpg = stats::sd(mpg), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline_ungrouped, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline_ungrouped, ignore_col_types = TRUE)
+  expect_same_as_dplyr(mtcars, pipeline_grouped, arrange_by = "cyl", ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline_grouped, arrange_by = "cyl", ignore_col_types = TRUE)
+})
+
+# =============================================================================
+# Widened aggregation sub-expressions (Phase 1 T7 -- create_temp_column() is
+# now a single IR-based implementation, so any expression shape ir_parse_quo()
+# understands is a valid aggregation argument, not just one bare operator)
+# =============================================================================
+
+test_that("summarise() accepts a compound logical sub-expression (sum(x > 3 & y < 2)) ungrouped", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    dplyr::summarise(d, high_carb_light = sum(carb > 3 & wt < 4))
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, ignore_col_types = TRUE)
+})
+
+test_that("summarise() accepts a compound logical sub-expression (sum(x > 3 & y < 2)) grouped", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(high_carb_light = sum(carb > 3 & wt < 4), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+})
+
+test_that("summarise() accepts a math-function sub-expression (mean(sqrt(x))) ungrouped", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    dplyr::summarise(d, mean_sqrt_hp = mean(sqrt(hp)))
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, ignore_col_types = TRUE)
+})
+
+test_that("summarise() accepts a math-function sub-expression (mean(sqrt(x))) grouped", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(mean_sqrt_hp = mean(sqrt(hp)), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+})
+
+test_that("summarise() accepts a modulo comparison sub-expression (sum(x %% 2 == 0)) ungrouped", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    dplyr::summarise(d, even_carb = sum(carb %% 2 == 0))
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, ignore_col_types = TRUE)
+})
+
+test_that("summarise() accepts a modulo comparison sub-expression (sum(x %% 2 == 0)) grouped", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(even_carb = sum(carb %% 2 == 0), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+})
+
+test_that("summarise() accepts a column-vs-column arithmetic sub-expression (mean(x / y)) ungrouped", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    dplyr::summarise(d, power_weight = mean(hp / wt))
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, ignore_col_types = TRUE)
+})
+
+test_that("summarise() accepts a column-vs-column arithmetic sub-expression (mean(x / y)) grouped", {
+  skip_if_no_gpu()
+
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(cyl) |>
+      dplyr::summarise(power_weight = mean(hp / wt), .groups = "drop")
+  }
+
+  expect_same_as_dplyr(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+  expect_same_as_dplyr_lazy(mtcars, pipeline, arrange_by = "cyl", ignore_col_types = TRUE)
+})
+
+test_that("summarise() falls back (rather than erroring) for a genuinely unparseable aggregation sub-expression", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "warn")
+
+  # Phase 11, task L1 (universal expression-level CPU fallback):
+  # sum(paste0(carb)) no longer hard-errors with cuplyr's own "Invalid
+  # aggregation expression" message (a cuplyr-only message real dplyr
+  # never emits) -- it now falls back to real dplyr::summarise(), which
+  # itself errors here (sum() of a character vector is a base-R error, not
+  # a cuplyr-specific one).
+  expect_warning(
+    expect_error(
+      tbl_gpu(mtcars) |> dplyr::summarise(x = sum(paste0(carb))),
+      "invalid 'type' \\(character\\)"
+    ),
+    "fell back to CPU evaluation"
+  )
+})
+
+# =============================================================================
+# Unnamed expression auto-naming (S10)
+# =============================================================================
+
+test_that("summarise() warns and auto-names an unnamed aggregation (eager)", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars, lazy = FALSE)
+
+  expect_warning(
+    result <- dplyr::summarise(gpu_df, mean(mpg)),
+    "Unnamed summarise expression 'mean\\(mpg\\)' will use expression as column name"
+  )
+
+  collected <- collect(result)
+  expect_true("mean(mpg)" %in% names(collected))
+  expect_equal(collected[["mean(mpg)"]], mean(mtcars$mpg))
+})
+
+test_that("summarise() warns and auto-names an unnamed aggregation (lazy)", {
+  skip_if_no_gpu()
+
+  gpu_df <- tbl_gpu(mtcars, lazy = TRUE)
+
+  expect_warning(
+    result <- dplyr::summarise(gpu_df, mean(mpg)),
+    "Unnamed summarise expression 'mean\\(mpg\\)' will use expression as column name"
+  )
+
+  collected <- collect(result)
+  expect_true("mean(mpg)" %in% names(collected))
+  expect_equal(collected[["mean(mpg)"]], mean(mtcars$mpg))
+})
+
+# =============================================================================
 # Result Structure
 # =============================================================================
 
@@ -330,15 +649,14 @@ test_that("summarise() can be chained with collect()", {
 # Error Handling
 # =============================================================================
 
-test_that("summarise() errors with no expressions", {
+test_that("summarise() with no expressions returns a 1 x 0 table, like dplyr (F07)", {
   skip_if_no_gpu()
 
   gpu_df <- tbl_gpu(mtcars)
 
-  expect_error(
-    dplyr::summarise(gpu_df),
-    "requires at least one"
-  )
+  res <- dplyr::summarise(gpu_df)
+  expect_identical(dim(res), c(1L, 0L))
+  expect_identical(collect(res), dplyr::summarise(mtcars))
 })
 
 test_that("summarise() errors on non-existent column", {
@@ -352,25 +670,44 @@ test_that("summarise() errors on non-existent column", {
   )
 })
 
-test_that("summarise() errors on unsupported function", {
+test_that("summarise() falls back (rather than erroring) for an unsupported reducer function", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "warn")
 
   gpu_df <- tbl_gpu(mtcars)
 
-  expect_error(
-    dplyr::summarise(gpu_df, result = median(mpg)),
-    "Unsupported"
+  # median() USED to be unsupported (this test's original pin), but is now
+  # implemented natively (Phase 6, task 6.2 -- see test-dplyr-summarise.R).
+  # cor() has no native cudf groupby aggregation and never gets one in this
+  # package's scope (scratchpad/todo.md's Phase 6 aggregation list) -- but
+  # Phase 11, task L1 (universal expression-level CPU fallback) means it's
+  # no longer a hard "Unsupported aggregation function" error (a
+  # cuplyr-only message real dplyr never emits): it now transparently
+  # falls back to real dplyr::summarise() and SUCCEEDS.
+  expect_warning(
+    result <- dplyr::summarise(gpu_df, result = cor(mpg, wt)) |> collect(),
+    "fell back to CPU evaluation"
   )
+  expect_equal(result$result, cor(mtcars$mpg, mtcars$wt))
 })
 
-test_that("summarise() errors with invalid expression format", {
+test_that("summarise() falls back (rather than erroring) for a non-scalar aggregation result", {
   skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "warn")
 
   gpu_df <- tbl_gpu(mtcars)
 
-  expect_error(
-    dplyr::summarise(gpu_df, result = mpg + 1),
-    "Invalid aggregation"
+  # mpg + 1 isn't a `fn(single_arg)` aggregation shape at all -- Phase 11,
+  # task L1 routes it to the CPU fallback instead of cuplyr's own "Invalid
+  # aggregation expression" message (a cuplyr-only message real dplyr
+  # never emits). Real dplyr::summarise() itself still errors on this
+  # (result must be a single value per group), just with its own message.
+  expect_warning(
+    expect_error(
+      dplyr::summarise(gpu_df, result = mpg + 1),
+      "must be size 1"
+    ),
+    "fell back to CPU evaluation"
   )
 })
 
@@ -726,4 +1063,36 @@ test_that("summarise() with min/max of arithmetic expressions works", {
     expect_equal(gpu_row$min_hp_wt, r_row$min_hp_wt, tolerance = 1e-10)
     expect_equal(gpu_row$max_mpg_10, r_row$max_mpg_10, tolerance = 1e-10)
   }
+})
+
+# =============================================================================
+# NA group keys
+# =============================================================================
+
+test_that("summarise() keeps an NA group key as its own group (not dropped)", {
+  skip_if_no_gpu()
+
+  # Bug found while implementing count()/tally() (Phase 3 task 5): cudf's
+  # groupby::groupby constructor defaults to null_policy::EXCLUDE (silently
+  # DROPS every row whose group key is null), while dplyr's group_by()/
+  # summarise() always treats NA as its own group, same as every other
+  # value. gpu_summarise() (src/ops_groupby.cpp) must pass
+  # null_policy::INCLUDE explicitly.
+  df <- data.frame(g = c(1, NA, NA, 2, NA), x = c(1, 2, 3, 4, 5))
+  gpu_df <- tbl_gpu(df)
+
+  result <- gpu_df |>
+    dplyr::group_by(g) |>
+    dplyr::summarise(n = dplyr::n(), .groups = "drop") |>
+    collect()
+
+  oracle <- df |>
+    dplyr::group_by(g) |>
+    dplyr::summarise(n = dplyr::n(), .groups = "drop")
+
+  expect_equal(nrow(result), nrow(oracle))
+  expect_equal(
+    dplyr::arrange(tibble::as_tibble(result), g),
+    dplyr::arrange(tibble::as_tibble(oracle), g)
+  )
 })

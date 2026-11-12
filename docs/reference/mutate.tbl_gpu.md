@@ -16,8 +16,7 @@ mutate(.data, ...)
 
 - .data:
 
-  A `tbl_gpu` object created by
-  [`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md).
+  A `tbl_gpu` object created by [`tbl_gpu()`](tbl_gpu.md).
 
 - ...:
 
@@ -70,12 +69,9 @@ factor, not compute.
 
 ## See also
 
-[`filter.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/filter.tbl_gpu.md)
-for filtering rows,
-[`select.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/select.tbl_gpu.md)
-for selecting columns,
-[`collect.tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/collect.tbl_gpu.md)
-for retrieving results
+[`filter.tbl_gpu`](filter.tbl_gpu.md) for filtering rows,
+[`select.tbl_gpu`](select.tbl_gpu.md) for selecting columns,
+[`collect.tbl_gpu`](collect.tbl_gpu.md) for retrieving results
 
 ## Examples
 

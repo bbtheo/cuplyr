@@ -17,7 +17,8 @@ Useful for verifying GPU setup and checking available resources.
 Output includes:
 \itemize{
 \item Device name and compute capability
-\item Total, free, and used memory
+\item Total, free, and used memory (device level: includes the memory
+cuplyr's memory resource holds, see \code{\link[=gpu_memory_state]{gpu_memory_state()}})
 \item Number of streaming multiprocessors
 }
 }

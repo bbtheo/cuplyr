@@ -12,14 +12,35 @@
 \item{...}{Additional arguments (ignored, included for compatibility).}
 }
 \value{
-A \link[tibble:tibble]{tibble::tibble} containing the data from the GPU table.
+A \link[tibble:tibble]{tibble::tibble} containing the data from the GPU table (a
+\code{grouped_df}, with the same \code{.drop}, when \code{x} is grouped, as for
+\code{dplyr::collect()} on a database table). A table uploaded from a plain
+\code{data.frame} comes back as a bare \code{data.frame} while it is ungrouped, and
+custom data-frame attributes (\code{attr(df, "foo")}) are kept the way dplyr
+keeps them through verbs.
 Column types are converted back to R types:
 \itemize{
 \item FLOAT64/FLOAT32 -> numeric (double)
-\item INT32/INT64 -> integer or numeric
+\item INT8/INT16/INT32, UINT8/UINT16 -> integer
+\item UINT32 -> double (exact)
+\item INT64/UINT64 -> \code{bit64::integer64} (a double with a warning when
+\code{bit64} is absent and a value is past 2^53); a UINT64 value past
+\code{INT64_MAX} is an error, never a wrap
 \item STRING -> character
-\item BOOL8 -> integer (0/1)
+\item BOOL8 -> logical (TRUE/FALSE)
+\item DATE (TIMESTAMP_DAYS) -> \code{Date}; TIMESTAMP_SECONDS/MILLISECONDS/
+MICROSECONDS/NANOSECONDS -> \code{POSIXct} (nanoseconds finer than a
+microsecond are rounded, with a warning)
+\item DURATION_DAYS -> \code{difftime} in days; the other DURATION_* -> \code{difftime}
+in seconds (a warning past 2^53 ticks)
+\item DECIMAL32/64/128 -> double, the nearest one (a warning when it
+needs more than 15 significant digits; an error beyond the double range)
+\item a dictionary with string keys -> factor
 }
+Any other type (LIST, STRUCT, a dictionary with other keys) is an error of
+class \code{cuplyr_error_unsupported_gpu_type} naming the column; the warnings
+have class \code{cuplyr_warning_collect_precision} and name every column
+concerned. \code{print()} and \code{glimpse()} show such a column as a placeholder.
 }
 \description{
 Copies data from GPU memory back to R as a tibble. This is typically
@@ -27,6 +48,18 @@ the final step in a GPU data manipulation pipeline, after filtering,
 mutating, and selecting the data you need.
 }
 \details{
+\subsection{Grouped tables and \code{.drop}}{
+
+The \code{.drop} setting of \code{group_by()} travels with the table through the
+verbs that keep at least one group column (and is reset to the default when
+none is left; \code{group_by()} on a grouped table keeps it unless given a new
+\code{.drop}), so \code{group_by(f, .drop = FALSE) |> arrange(x) |> collect()} still
+keeps empty factor-level groups. Empty groups of a \emph{non-factor} column
+that \code{filter()} or \code{slice()} emptied are not kept, unlike in dplyr, except after
+\code{slice(.preserve = TRUE)}, which keeps its input's group keys: see the \code{.drop}
+section of \link[=group_by.tbl_gpu]{group_by()}.
+}
+
 \subsection{Memory considerations}{
 
 Collecting transfers all data from GPU to CPU memory. For large datasets,

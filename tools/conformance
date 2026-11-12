@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# dplyr conformance harness under the GPU lock. Args go to run-dplyr-conformance.R:
+#   tools/conformance [test-distinct.R ...] [--ids ids.tsv] [--report report.md]
+source "$(dirname "$0")/lib.sh"
+cd "$CUPLYR_WT_ROOT"
+exec "$(dirname "$0")/gpu-run" --label conformance -- Rscript tools/run-dplyr-conformance.R "$@"

@@ -27,7 +27,7 @@ generate_taxi_data <- function(n_rows = 1000000) {
 }
 
 # Generate data as data.table first
-data_dt <- generate_taxi_data(n_rows = 25000000)
+data_dt <- generate_taxi_data(n_rows = 10000000)
 data <- as.data.frame(data_dt)  # Convert to data.frame for dplyr
 
 # Create DuckDB in-memory database
@@ -290,7 +290,9 @@ for (i in seq_len(N_ITER)) {
       collect()
   })["elapsed"]
   rm(result)
-  gpu_gc()
+  # Plain gc(), not gpu_gc(): under the default "async" resource gpu_gc() also
+  # trims the pool, so every timed call would start by regrowing it.
+  gc(verbose = FALSE)
 }
 
 # Benchmark DuckDB with result materialization (query + collect)

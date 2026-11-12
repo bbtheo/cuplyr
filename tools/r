@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Ad-hoc R under the GPU lock, with the worktree's package loaded:
+#   tools/r 'tbl_gpu(mtcars) |> filter(mpg > 20) |> collect()'
+source "$(dirname "$0")/lib.sh"
+cd "$CUPLYR_WT_ROOT"
+# Rebuild a stale -O0 .so first (tools/ensure-optimized.R), so ad-hoc timings
+# never measure unoptimized code.
+exec "$(dirname "$0")/gpu-run" --label r -- Rscript -e "source('tools/ensure-optimized.R'); cuplyr_ensure_optimized_dll('.'); pkgload::load_all(quiet = TRUE, debug = FALSE); suppressPackageStartupMessages(library(dplyr)); $1"

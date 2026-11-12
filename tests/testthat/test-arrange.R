@@ -138,9 +138,15 @@ test_that("arrange() places NA last for ascending sort", {
   expect_true(is.na(result$x[4]))
 })
 
-test_that("arrange() places NA first for descending sort", {
+test_that("arrange() places NA last for descending sort", {
   skip_if_no_gpu()
 
+  # Phase 6 task 6.1 (Fix B): this test used to pin the WRONG behavior as
+  # intended -- cuplyr's gpu_arrange() (src/ops_arrange.cpp) used to place
+  # NA FIRST for descending sorts, diverging from real dplyr 1.2.1, which
+  # places NA LAST regardless of sort direction (verified empirically; see
+  # test-dplyr-arrange.R for the full oracle-test coverage of this fix).
+  # The old pin (`is.na(result$x[1])`) has been corrected to match dplyr.
   df <- data.frame(x = c(2, NA, 1, 3))
   gpu_df <- tbl_gpu(df)
 
@@ -148,8 +154,8 @@ test_that("arrange() places NA first for descending sort", {
     dplyr::arrange(dplyr::desc(x)) |>
     collect()
 
-  expect_true(is.na(result$x[1]))
-  expect_equal(result$x[2:4], c(3, 2, 1))
+  expect_equal(result$x[1:3], c(3, 2, 1))
+  expect_true(is.na(result$x[4]))
 })
 
 test_that("arrange() handles all-NA column", {
@@ -394,28 +400,21 @@ test_that("arrange() errors on non-existent column", {
   )
 })
 
-test_that("arrange() errors on invalid desc() argument", {
+# F10: expression dots used to be a hard error; dplyr accepts them, so they
+# now match dplyr (via the CPU fallback).
+test_that("arrange() with an expression inside desc() matches dplyr", {
   skip_if_no_gpu()
 
-  df <- data.frame(x = c(1, 2, 3))
-  gpu_df <- tbl_gpu(df)
-
-  expect_error(
-    dplyr::arrange(gpu_df, dplyr::desc(x + 1)),
-    "column name"
-  )
+  df <- tibble::tibble(x = c(1, 3, 2))
+  expect_same_as_dplyr(df, function(d) dplyr::arrange(d, dplyr::desc(x + 1)))
 })
 
-test_that("arrange() errors on complex expressions", {
+test_that("arrange() with an expression dot matches dplyr", {
   skip_if_no_gpu()
 
-  df <- data.frame(x = c(1, 2, 3))
-  gpu_df <- tbl_gpu(df)
-
-  expect_error(
-    dplyr::arrange(gpu_df, x + 1),
-    "column names"
-  )
+  df <- tibble::tibble(x = c(1, 3, 2))
+  expect_same_as_dplyr(df, function(d) dplyr::arrange(d, x + 1))
+  expect_same_as_dplyr(df, function(d) dplyr::arrange(d, -(x * 2)))
 })
 
 # =============================================================================
@@ -465,4 +464,64 @@ test_that("arrange() handles larger datasets", {
     subset_y <- result$y[result$x == val]
     expect_true(all(diff(subset_y) >= 0))
   }
+})
+
+# =============================================================================
+# Oracle parity tests (D8: .by_group prepends group keys ASCENDING regardless
+# of the user's desc() on them; the user's own desc(g) survives as a later
+# no-op tiebreaker -- verified empirically against dplyr::arrange.grouped_df)
+# =============================================================================
+
+test_that("arrange(desc(g), x, .by_group = TRUE) sorts groups ascending (D8)", {
+  skip_if_no_gpu()
+
+  # g's ascending order (1, 2) differs from descending order (2, 1), so this
+  # exercises the actual behavior change: dplyr ignores the user's desc(g)
+  # for group-key placement and always sorts groups ascending.
+  df <- data.frame(
+    g = c(2, 2, 1, 1),
+    x = c(1, 2, 3, 4)
+  )
+
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(g) |>
+      dplyr::arrange(dplyr::desc(g), x, .by_group = TRUE)
+  }
+
+  expect_same_as_dplyr(df, pipeline)
+})
+
+test_that("arrange(desc(g), x, .by_group = TRUE) sorts groups ascending in lazy mode (D8)", {
+  skip_if_no_gpu()
+
+  df <- data.frame(
+    g = c(2, 2, 1, 1),
+    x = c(1, 2, 3, 4)
+  )
+
+  pipeline <- function(d) {
+    d |>
+      dplyr::group_by(g) |>
+      dplyr::arrange(dplyr::desc(g), x, .by_group = TRUE)
+  }
+
+  expect_same_as_dplyr_lazy(df, pipeline)
+})
+
+test_that("arrange() with multiple desc() keys matches dplyr in eager and lazy modes", {
+  skip_if_no_gpu()
+
+  df <- data.frame(
+    x = c(1, 1, 2, 2, 3),
+    y = c(3, 1, 2, 4, 1),
+    z = c("a", "b", "a", "b", "a")
+  )
+
+  pipeline <- function(d) {
+    d |> dplyr::arrange(dplyr::desc(x), y, dplyr::desc(z))
+  }
+
+  expect_same_as_dplyr(df, pipeline)
+  expect_same_as_dplyr_lazy(df, pipeline)
 })

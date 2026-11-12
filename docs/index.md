@@ -7,7 +7,6 @@ cuDF](https://github.com/rapidsai/cudf), NVIDIA’s GPU DataFrame library.
 Write standard dplyr code, execute on GPU hardware.
 
 ``` r
-
 library(cuplyr)
 
 tbl_gpu(sales_data, lazy = TRUE) |>
@@ -44,40 +43,25 @@ should be expected.
 ### Supported operations
 
 **Data manipulation** -
-[`filter()`](https://dplyr.tidyverse.org/reference/filter.html) – row
-filtering with comparison and logical operators -
-[`select()`](https://dplyr.tidyverse.org/reference/select.html) – column
-selection and reordering -
-[`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) – column
-transformations and arithmetic -
-[`arrange()`](https://dplyr.tidyverse.org/reference/arrange.html) – row
-sorting with [`desc()`](https://dplyr.tidyverse.org/reference/desc.html)
-support, NA handling follows dplyr conventions -
-[`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html) +
-[`summarise()`](https://dplyr.tidyverse.org/reference/summarise.html) –
-grouped aggregations (`sum`, `mean`, `min`, `max`, `n`) -
-[`left_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html),
-[`right_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html),
-[`inner_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html),
-[`full_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html)
-– GPU joins on key columns -
-[`collect()`](https://dplyr.tidyverse.org/reference/compute.html) –
-transfer results back to R -
-[`compute()`](https://dplyr.tidyverse.org/reference/compute.html) –
-execute lazy operations, keep on GPU - `tbl_gpu(..., lazy = TRUE)` –
-enable lazy evaluation with AST optimization
+[`filter()`](https://rdrr.io/r/stats/filter.html) – row filtering with
+comparison and logical operators - `select()` – column selection and
+reordering - `mutate()` – column transformations and arithmetic -
+`arrange()` – row sorting with `desc()` support, NA handling follows
+dplyr conventions - `group_by()` + `summarise()` – grouped aggregations
+(`sum`, `mean`, `min`, `max`, `n`) - `left_join()`, `right_join()`,
+`inner_join()`, `full_join()` – GPU joins on key columns - `collect()` –
+transfer results back to R - `compute()` – execute lazy operations, keep
+on GPU - `tbl_gpu(..., lazy = TRUE)` – enable lazy evaluation with AST
+optimization
 
 ### Lazy evaluation
 
-Lazy mode defers execution until
-[`collect()`](https://dplyr.tidyverse.org/reference/compute.html) or
-[`compute()`](https://dplyr.tidyverse.org/reference/compute.html),
-enabling automatic optimizations: - Projection pruning (drop unused
-columns early) - Filter pushdown (move filters closer to data sources) -
-Mutate fusion (combine consecutive transformations)
+Lazy mode defers execution until `collect()` or `compute()`, enabling
+automatic optimizations: - Projection pruning (drop unused columns
+early) - Filter pushdown (move filters closer to data sources) - Mutate
+fusion (combine consecutive transformations)
 
 ``` r
-
 # Enable globally
 options(cuplyr.exec_mode = "lazy")
 
@@ -99,8 +83,7 @@ tbl_gpu(data, lazy = TRUE)
 
 ### Not yet implemented
 
-- Complex joins with
-  [`join_by()`](https://dplyr.tidyverse.org/reference/join_by.html)
+- Complex joins with `join_by()`
 - Window functions
 - String operations
 - Multi-GPU support
@@ -119,33 +102,71 @@ Contributions and feedback are welcome.
 
 ## Installation
 
+### Which path is right for me?
+
+| I want to…                         | Do this                               |
+|------------------------------------|---------------------------------------|
+| **Use it** (I have an NVIDIA GPU)  | [Quick install](#quick-install)       |
+| **Contribute** (modify C++/R code) | [Developer setup](#developer-setup)   |
+
 ### Requirements
 
-- NVIDIA GPU with Compute Capability \>= 6.0
-- CUDA Toolkit \>= 12.0
-- RAPIDS libcudf \>= 25.12
-- R \>= 4.3
+| Component      | Version                             |
+|----------------|-------------------------------------|
+| NVIDIA GPU     | Compute Capability \>= 7.0 (Volta+) |
+| CUDA Toolkit   | \>= 12.2                            |
+| RAPIDS libcudf | \>= 25.12                           |
+| R              | \>= 4.3                             |
+| OS             | Linux x86_64 only                   |
 
-### Using pixi (recommended)
+### Quick install
+
+**Option A: One-liner** (auto-detects pixi, conda, or system CUDA)
 
 ``` bash
-# Install pixi if not already installed (https://pixi.sh)
-# curl -fsSL https://pixi.sh/install.sh | bash
+git clone https://github.com/bbtheo/cuplyr.git && cd cuplyr && ./install.sh
+```
 
+**Option B: From R** (if you have CUDA + cuDF on your system)
+
+``` r
+# Install R dependencies first
+install.packages(c("Rcpp", "dplyr", "rlang", "vctrs", "pillar", "glue", "cli", "tidyselect", "tibble"))
+
+# Then from the cuplyr directory:
+cuplyr::install_cuplyr(method = "system")
+```
+
+**Option C: Using pixi** (reproducible, manages all CUDA/RAPIDS deps)
+
+``` bash
+# Install pixi: curl -fsSL https://pixi.sh/install.sh | bash
 git clone https://github.com/bbtheo/cuplyr.git
 cd cuplyr
 pixi run install
 ```
 
-### From source
+### Verify installation
 
-``` bash
-git clone https://github.com/bbtheo/cuplyr.git
-cd cuplyr
-
-# Ensure CUDA and cuDF are available, then:
-R CMD INSTALL .
+``` r
+library(cuplyr)
+verify_installation()
+# Or check dependencies first:
+check_deps()
 ```
+
+### Troubleshooting
+
+``` r
+# Full diagnostics for bug reports
+diagnostics()
+```
+
+### Developer setup
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor workflow
+using `pixi shell`. GitHub Actions trigger/run instructions are in
+[docs/github-actions-runbook.md](docs/github-actions-runbook.md).
 
 ## Performance
 
@@ -164,16 +185,6 @@ iterations):
 
 **Hardware**: Intel Core i9-12900K (16 cores), NVIDIA RTX 5070 (12 GB
 VRAM)
-
-End-to-end workflow including materialization/transfer:
-
-| Workflow | dplyr | DuckDB (collect) | cuplyr (with GPU transfer) | cuplyr vs dplyr | cuplyr vs DuckDB |
-|----|----|----|----|----|----|
-| Complete Workflow + transfer | 1175.0 ms | 133.5 ms | 1213.0 ms | 1.0x | 0.1x |
-
-GPU acceleration benefits grow with data size and compute intensity. For
-transfer-heavy workloads or smaller datasets, CPU-based engines can
-still be faster.
 
 ## Acknowledgments
 

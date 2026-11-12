@@ -6,6 +6,13 @@
 # - Object size calculation on GPU
 # - Data residency verification (ensuring data is on GPU, not CPU)
 
+# tbl_gpu's `$`/`[[` return COLUMNS for user code, and the raw internal fields
+# (`gt$ptr`, `gt$groups <- ...`) only for package code. testthat runs test
+# files in a child of the global environment, so test code opts in with this
+# binding (see `internal_caller()`, R/generics.R). Functions re-homed to
+# `globalenv()` do not see it and get user (column) semantics.
+.cuplyr_internal_access <- TRUE
+
 # =============================================================================
 # Skip Helpers
 # =============================================================================
@@ -21,14 +28,15 @@ skip_if_no_gpu <- function() {
 
 #' Skip test if GPU memory is insufficient
 #'
-#' @param required_bytes Minimum free GPU memory needed in bytes
+#' @param required_bytes Minimum GPU memory cuplyr can allocate, in bytes: the
+#'   device's free memory plus the unused pages of cuplyr's memory pool
 skip_if_insufficient_gpu_memory <- function(required_bytes) {
   skip_if_no_gpu()
-  info <- gpu_details()
-  if (info$free_memory < required_bytes) {
+  available <- gpu_allocatable_bytes()
+  if (available < required_bytes) {
     skip(sprintf("Insufficient GPU memory: need %s, have %s",
                  format_bytes(required_bytes),
-                 format_bytes(info$free_memory)))
+                 format_bytes(available)))
   }
 }
 
@@ -233,8 +241,12 @@ verify_no_r_copy <- function(x) {
     return(FALSE)
   }
 
-  # Check the structure - should only have ptr, schema, lazy_ops, groups, exec_mode
-  expected_fields <- c("ptr", "schema", "lazy_ops", "groups", "exec_mode")
+  # Check the structure - should only have ptr, schema, lazy_ops, groups,
+  # exec_mode, group_drop (Phase 9 task 1: group_by()'s own .drop= flag,
+  # a plain boolean -- metadata, not a data copy; F31: bare_df, the "came from a
+  # plain data.frame" flag)
+  expected_fields <- c("ptr", "schema", "lazy_ops", "groups", "exec_mode", "group_drop",
+                       "bare_df")
   actual_fields <- names(unclass(x))
 
   # Verify no extra fields that might contain data
@@ -377,14 +389,14 @@ create_large_test_data <- function(nrow = 1e6, ncol = 10) {
 #' @param info Additional info for error message
 expect_data_on_gpu <- function(x, info = NULL) {
   act <- quasi_label(rlang::enquo(x), arg = "x")
-
-  if (!verify_data_on_gpu(x)) {
-    fail(sprintf(
+  expect_true(
+    verify_data_on_gpu(x),
+    info = sprintf(
       "%s does not have valid data on GPU.%s",
       act$lab,
       if (!is.null(info)) paste0("\n", info) else ""
-    ))
-  }
+    )
+  )
 
   invisible(x)
 }
@@ -401,14 +413,15 @@ expect_lightweight_r_object <- function(x, max_bytes = 100000) {
   ncol <- length(x$schema$names)
   adjusted_max <- max_bytes + ncol * 500
 
-  if (r_size > adjusted_max) {
-    fail(sprintf(
+  expect_true(
+    r_size <= adjusted_max,
+    info = sprintf(
       "%s R object size (%s) exceeds maximum (%s).\nThis suggests data may have been copied to R memory.",
       act$lab,
       format_bytes(r_size),
       format_bytes(adjusted_max)
-    ))
-  }
+    )
+  )
 
   invisible(x)
 }
@@ -420,18 +433,15 @@ expect_lightweight_r_object <- function(x, max_bytes = 100000) {
 #' @param min_bytes Minimum expected allocation
 expect_gpu_memory_allocated <- function(before, after, min_bytes = 0) {
   diff <- gpu_memory_diff(before, after)
-
-  if (is.na(diff)) {
-    fail("Could not measure GPU memory difference")
-  }
-
-  if (diff < min_bytes) {
-    fail(sprintf(
+  expect_false(is.na(diff), info = "Could not measure GPU memory difference")
+  expect_true(
+    diff >= min_bytes,
+    info = sprintf(
       "Expected at least %s GPU memory allocation, but only %s was allocated",
       format_bytes(min_bytes),
       format_bytes(diff)
-    ))
-  }
+    )
+  )
 
   invisible(diff)
 }

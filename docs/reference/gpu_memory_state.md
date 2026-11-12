@@ -43,10 +43,9 @@ A list with:
 
 ## See also
 
-[`gpu_details`](https://bbtheo.github.io/cuplyr/reference/gpu_details.md)
-for device information,
-[`gpu_memory_usage`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_usage.md)
-for per-object memory estimates
+[`gpu_details`](gpu_details.md) for device information,
+[`gpu_memory_usage`](gpu_memory_usage.md) for per-object memory
+estimates
 
 ## Examples
 

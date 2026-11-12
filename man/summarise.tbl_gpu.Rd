@@ -5,52 +5,284 @@
 \alias{summarize.tbl_gpu}
 \title{Summarise groups in a GPU table}
 \usage{
-\method{summarise}{tbl_gpu}(.data, ..., .groups = "drop")
+\method{summarise}{tbl_gpu}(.data, ..., .groups = NULL, .by = NULL)
 
-\method{summarize}{tbl_gpu}(.data, ..., .groups = "drop")
+\method{summarize}{tbl_gpu}(.data, ..., .groups = NULL, .by = NULL)
 }
 \arguments{
-\item{.data}{A grouped \code{tbl_gpu} object created by \code{\link[dplyr:group_by]{dplyr::group_by()}}.}
+\item{.data}{A grouped \code{tbl_gpu} object created by \code{\link[dplyr:group_by]{group_by()}}.}
 
 \item{...}{Name-value pairs of summary functions. The name will be the
 name of the variable in the result. The value must be a single aggregation
-expression in the form \code{fun(column)}.}
+expression in the form \code{fun(column)}, where \code{column} can also be any
+expression the internal expression IR understands (see "Aggregation
+sub-expressions" below).}
 
-\item{.groups}{Controls grouping structure of the result. Currently only
-"drop" is supported (default).}
+\item{.groups}{Controls grouping structure of the result (Phase 6, task
+3; matches \code{dplyr::summarise()}'s own contract exactly, verified
+empirically against dplyr 1.2.1). One of:
+\itemize{
+\item \code{NULL} (default) -- \code{"drop_last"} (see below), PLUS an
+informational message when the result is still grouped (see
+"The regroup message" below).
+\item \code{"drop_last"} -- drop the LAST grouping variable, keeping the
+rest (e.g. \code{group_by(a, b, c)} -> result grouped by \verb{a, b}); with
+only one grouping variable, the result is ungrouped. Same as the
+default, minus the message.
+\item \code{"drop"} -- the result is always ungrouped.
+\item \code{"keep"} -- every original grouping variable is retained.
+\item \code{"rowwise"} -- the summary runs on the GPU keeping every
+grouping variable, and the result is a rowwise \code{tbl_gpu} by those
+variables (\code{\link[dplyr:rowwise]{dplyr::rowwise()}}); \code{collect()} returns dplyr's own
+\code{rowwise_df}.
+}
+On a rowwise \code{tbl_gpu} (see \code{\link[=rowwise.tbl_gpu]{rowwise.tbl_gpu()}}) \code{summarise()} computes one
+row per input row, the rowwise variables first. \code{.groups = NULL} (and
+\code{"keep"}) groups the result by those variables (with dplyr's message
+when \code{.groups} is not given), \code{"drop"} ungroups it, \code{"rowwise"} keeps it
+rowwise; \code{"drop_last"} is an error, as in dplyr.
+\verb{.groups=} is only validated against an already-grouped \code{.data} --
+matching a genuine (if surprising) dplyr quirk verified empirically:
+any value other than \code{"rowwise"} (including a typo) is silently a no-op on an
+UNGROUPED \code{.data}, since there is nothing to drop/keep/peel from an
+empty group set.
+\subsection{The regroup message}{
+
+When \code{.groups} is left \code{NULL} (the default) and the pre-summarise
+\code{.data} has MORE THAN ONE grouping variable, an informational message
+is emitted (loosely matching dplyr's own wording -- this is
+informational, not a value under parity test). It is suppressed by
+\code{options(dplyr.summarise.inform = FALSE)} (an explicit \code{TRUE}/\code{FALSE}
+value for this option always wins outright); with the option unset,
+dplyr's own rule applies: the message only fires when the CALLING
+code's top environment is the global environment (i.e. top-level/
+interactive use) -- it is silent when \code{summarise()} is called from
+inside a function/package (as in a \code{testthat} test, or one verb
+calling another, e.g. \code{\link[=tally.tbl_gpu]{tally.tbl_gpu()}}).
+}}
+
+\item{.by}{Optional on-the-fly grouping columns (tidyselect), GPU-native
+(Phase 5, task W9). Unlike \code{mutate()}/\code{filter()}'s \verb{.by=} (which behave
+exactly like \code{group_by()}), \code{summarise(.by=)} has one genuinely
+different rule verified empirically against dplyr 1.2.1: groups are
+emitted in FIRST-APPEARANCE order (the order each distinct \code{.by}
+combination first appears in \code{.data}), not sorted group-key order --
+see "\code{.by} group order" below. The result is always ungrouped -- unlike
+a \code{group_by()}-driven \code{summarise()}, whose result's grouping now
+depends on \verb{.groups=} (Phase 6, task 3); \verb{.groups=} can't be combined
+with \verb{.by=} at all (rejected by dplyr's own \code{summarise()} generic).
+Supplying \code{.by} when \code{.data} is already grouped (via \code{group_by()}) is
+an error, matching dplyr exactly.}
 }
 \value{
 A \code{tbl_gpu} object with one row per group containing the grouping
 columns and computed aggregations.
 }
 \description{
-Computes aggregations on groups defined by \code{\link[dplyr:group_by]{dplyr::group_by()}}. Operations are
+Computes aggregations on groups defined by \code{\link[dplyr:group_by]{group_by()}}. Operations are
 performed entirely on the GPU for maximum performance.
 }
 \details{
 \subsection{Supported aggregation functions}{
 
 \itemize{
-\item \code{sum(x)} - Sum of values
+\item \code{sum(x)} - Sum of values. Over an integer or logical \code{x} the result
+is an integer, as in dplyr; if it leaves R's integer range
+(\code{+-(2^31 - 1)}) dplyr returns a double, and so does \code{tbl_gpu}. Which
+one it is depends on the data, which a lazy plan (its schema is fixed
+before it runs) can't know, so a lazy \code{summarise()} of an integer
+(INT32) \code{sum(x)} runs at the verb, like an eager one: the pending steps
+run first (a plan break, see \code{cuplyr.plan_break}) and the result is a
+lazy table with nothing pending. The same goes for a lazy \code{min()}/\code{max()}
+of an integer. A \code{sum()} of a logical \code{x} stays in the plan: it can
+only overflow with more than 2^31 \code{TRUE} rows in a group, and then raises a
+\code{cuplyr_error_sum_overflow} error at \code{collect()}.
 \item \code{mean(x)} - Arithmetic mean
 \item \code{min(x)} - Minimum value
 \item \code{max(x)} - Maximum value
 \item \code{n()} - Count of rows in each group
 \item \code{sd(x)} - Standard deviation
 \item \code{var(x)} - Variance
+\item \code{median(x)} - Median value (Phase 6, task 6.2)
+\item \code{quantile(x, probs)} - A single quantile, \code{probs} a scalar in
+\verb{[0, 1]} (Phase 6, task 6.2; only one probability per call is
+supported)
+\item \code{n_distinct(x)} - Count of distinct values, \code{NA} counted as its
+own distinct value by default (Phase 6, task 6.2)
+\item \code{first(x)} / \code{last(x)} / \code{nth(x, n)} - The first/last/nth value
+in the group's current row order (Phase 6, task 6.2)
+\item \code{any(x)} / \code{all(x)} - Logical reductions with R's own
+three-valued logic (Phase 6, task 6.2; \code{x} must be logical)
 }
+}
+
+\subsection{Aggregation sub-expressions}{
+
+\code{column} is not limited to a bare column name: any expression the same
+expression IR that powers \code{\link[=filter.tbl_gpu]{filter.tbl_gpu()}}/\code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}} understands
+is computed as a hidden temporary column first, then aggregated. This
+covers comparisons and logic (\code{sum(carb > 3 & wt < 4)}, \code{any(carb > 3)}),
+arithmetic (\code{mean(hp / wt)}), and math functions (\code{mean(sqrt(hp))},
+\code{sum(carb \%\% 2 == 0)}), arbitrarily nested -- the same surface documented
+in \code{\link{mutate.tbl_gpu}}. A comparison/logical sub-expression is
+summed as \code{TRUE}/\code{FALSE} -> \code{1}/\code{0}, matching R's own coercion
+(\code{sum(c(TRUE, TRUE))} is \code{2L}) -- except inside \code{any()}/\code{all()}, which
+keep it logical. An expression shape the IR doesn't recognize raises the
+same "Invalid aggregation expression" error as any other unsupported
+aggregation shape.
+
+\code{column} may also be (or contain) a WINDOW-function call (Phase 6, task
+4), e.g. \code{last(cumsum(v))}, \code{sum(v - lag(v, default = 0))},
+\code{mean(cumsum(v) - lag(cumsum(v)))}: the window function is computed PER
+GROUP first (over each group's own row order, using the same
+window-decomposition engine \code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}} uses), and the
+aggregation then reduces that per-row window result -- matching dplyr's
+own two-step semantics exactly. Only ONE aggregation's own argument tree
+is decomposed this way: combining TWO SEPARATE aggregation calls at the
+dot level (\code{sum(cumsum(x)) - mean(y)}) is not supported (the same
+"Invalid aggregation expression" error as any other dot that isn't a
+bare \code{fn(single_arg)} shape).
 }
 
 \subsection{NA handling}{
 
-By default, NA values are excluded from aggregations. This matches
-the default behavior of R's base aggregation functions.
+\code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{sd()}/\code{var()}/\code{median()} all match R's
+own \code{na.rm = FALSE} default (Phase 6, tasks 6.1/6.2): if a group contains
+ANY \code{NA} in the aggregated column, the WHOLE group's result is \code{NA} for
+that aggregation -- e.g. \code{summarise(m = mean(x))} is \code{NA} for a group
+with even one \code{NA} value of \code{x}, matching real dplyr exactly. Pass
+\code{na.rm = TRUE} explicitly (e.g. \code{sum(x, na.rm = TRUE)}) to exclude \code{NA}
+values instead (cudf's own native aggregation behavior). \code{n()} is
+unaffected by \verb{na.rm=} (it counts every row regardless of nulls, like
+dplyr's own \code{n()}).
+
+When \code{na.rm = TRUE} and a group's aggregated column is ENTIRELY \code{NA}
+(Phase 6, task 4), the result matches base R's own empty-vector
+reduction identity, exactly like real dplyr: \code{sum()} -> \code{0}, \code{mean()} ->
+\code{NaN}, \code{min()} -> \code{Inf}, \code{max()} -> \code{-Inf} (with base R's warning "no
+non-missing arguments to min; returning Inf" / "... max; returning -Inf",
+as dplyr surfaces it, for double and integer input alike; it is only
+raised when some group actually hits the identity), \code{sd()}/\code{var()}/
+\code{median()} -> \code{NA} (their natural result already, no special-casing
+needed).
+
+Over an INTEGER column, dplyr promotes the WHOLE \code{min()}/\code{max()} result
+column to double the instant any group needs the identity, and keeps it
+integer otherwise; cuplyr does the same. Because that type depends on the
+data, a \code{summarise()} with an integer \code{min()}/\code{max()} runs immediately even
+on a lazy table (pending operations are computed first), and the result's
+schema reflects the real type. A 0-row input also counts as an empty
+group: ungrouped, \code{summarise()} returns one row of empty-vector reductions
+(\code{n()} 0, \code{mean()} \code{NaN}, \code{sum()} 0, \code{min()} \code{Inf}, ...); grouped, the
+result has no rows but an integer \code{min()}/\code{max()} is typed double, as in
+dplyr.
+
+\code{quantile()} diverges from the mean/sum/.../median family: matching base
+R's own \code{quantile.default()} exactly, \code{na.rm = FALSE} (the default) with
+an actual \code{NA} present is a hard ERROR ("missing values and NaN's not
+allowed if 'na.rm' is FALSE"), not a \code{NA} result -- pass
+\code{na.rm = TRUE} to compute the quantile over the non-\code{NA} values instead.
+
+\code{n_distinct()} counts \code{NA} as its own distinct value when
+\code{na.rm = FALSE} (the default, matching dplyr's own \code{n_distinct()}
+exactly) -- e.g. \code{n_distinct(c(1, 2, NA, 2))} is \code{3}. Pass
+\code{na.rm = TRUE} to exclude \code{NA} from the distinct count instead.
+
+\code{first()}/\code{last()}/\code{nth()} use dplyr's own \verb{na_rm=} spelling
+(underscore, not \code{na.rm}): \code{na_rm = FALSE} (the default) never skips a
+\code{NA} when picking the first/last/nth value (so the result can itself be
+\code{NA}); \code{na_rm = TRUE} skips \code{NA} values, returning the first/last/nth
+non-\code{NA} value in the group (or \code{NA} if the group has none).
+
+\code{any()}/\code{all()} implement R's exact three-valued logic: \code{any(x)} is
+\code{TRUE} if any element is \code{TRUE} (regardless of \code{NA}s present), \code{NA} if
+there's no \code{TRUE} but at least one \code{NA} (with \code{na.rm = FALSE}, the
+default), else \code{FALSE}; \code{all(x)} is \code{FALSE} if any element is \code{FALSE}
+(regardless of \code{NA}s present), \code{NA} if there's no \code{FALSE} but at least
+one \code{NA} (with \code{na.rm = FALSE}), else \code{TRUE}. \code{na.rm = TRUE} drops \code{NA}
+values first, matching base R's \code{any()}/\code{all()} exactly (an all-\code{NA}
+group with \code{na.rm = TRUE} is \code{FALSE} for \code{any()}, \code{TRUE} for \code{all()},
+the empty-vector identity in both cases).
 }
 
 \subsection{Ungrouped summarise}{
 
 If \code{.data} is not grouped, summarise will compute aggregations over all
 rows, returning a single-row table.
+}
+
+\subsection{No expressions}{
+
+\code{summarise(.data)} with no expressions follows dplyr: ungrouped, it
+returns a one-row table with no columns; grouped, it returns the distinct
+group keys (one row per group, in \code{group_by()}'s ascending, \code{NA}-last
+order) and peels one grouping layer per \code{.groups}; with \code{.by}, it returns
+the distinct \code{.by} combinations in first-appearance order.
+}
+
+\subsection{Tables with no columns}{
+
+cudf cannot hold rows without columns, so a zero-column \code{tbl_gpu} keeps its
+row count on the R side. What that covers: \code{tbl_gpu()}, \code{dim()},
+\code{collect()}/\code{as_tibble()}, \code{compute()}/\code{collapse()},
+\code{group_by()}/\code{ungroup()}, zero-dot \code{summarise()} (1 x 0), \code{summarise()}
+with dots (a CPU fallback, so \code{n()} counts correctly), ungrouped
+\code{slice()}/\code{slice_head()}/\code{slice_tail()}, \code{bind_rows()}/\code{bind_cols()} of
+zero-column tables only, a literal-mask \code{filter()}, \code{dplyr_row_slice()},
+and adding a column with \verb{$<-}/\verb{[[<-}. Every other verb, joins with a zero-column side,
+vctrs operations (\code{vec_size()}, \code{vec_slice()}, ...), and binding a
+zero-column table that has rows to one with columns raise an error instead
+of returning a wrong row count (full support is F14).
+}
+
+\subsection{Redefining columns}{
+
+An expression named like a grouping column replaces that key in place
+(same position, the expression's type; the table stays grouped by that
+name). An expression that mentions a name an earlier expression created
+(or a name created twice) sees the new value, as in dplyr; such calls run
+through the CPU fallback.
+}
+
+\subsection{Group order}{
+
+\code{group_by(g) |> summarise(...)} returns groups in dplyr's \code{group_by()}
+order: ascending, \code{NA} last, strings in the C locale, \code{FALSE < TRUE},
+factors in level order (\code{gpu_summarise()} sorts the small aggregated result
+by the keys). \code{count()}/\code{tally()} inherit it.
+}
+
+\subsection{\code{.drop = FALSE}}{
+
+On a \code{group_by(.drop = FALSE)} grouping with a factor key, or on a table
+whose group keys are fixed (a \code{.drop = FALSE} table after \code{filter()},
+\code{semi_join()}, \code{slice()}, ..., or a \code{.preserve = TRUE} slice), every group
+of \code{group_data()} gets a row, empty ones included, holding each expression
+evaluated on an empty vector (\code{n()} 0, \code{sum()} 0, \code{mean()} \code{NaN}, \code{min()}
+\code{Inf} with base R's warning, ...); with no expressions the result is the
+keys of every group. Such a call materializes a lazy table on the GPU (the
+row count is data-dependent). The result is regrouped with the input's
+\code{.drop}. Three shapes differ from dplyr or leave the GPU: \code{min()}/\code{max()}
+of a Date or POSIXct column is \code{NA} for an empty group (dplyr's \code{Inf}/\code{-Inf}
+cannot be held by a GPU timestamp column; an uploaded non-finite Date or
+POSIXct is \code{NA} as well, with the warning described in \code{\link[=tbl_gpu]{tbl_gpu()}}),
+\code{mean()} of a Date or POSIXct column is \code{NA} for an empty group where dplyr
+gives a \code{NaN} Date/POSIXct, and \code{min()}/\code{max()}
+of a character column runs the whole call on the CPU when a group is empty.
+}
+
+\subsection{\code{.by} group order}{
+
+Verified empirically against dplyr 1.2.1: \code{summarise(.by=)} emits one row
+per distinct \code{.by} combination in the order that combination FIRST
+appears in \code{.data} -- e.g. \code{summarise(tibble(g = c("b","a","b")), n = n(), .by = g)} returns \code{g} in the order \code{c("b", "a")}, not \code{c("a", "b")}.
+This differs from \code{group_by(g) |> summarise(...)}, whose groups are
+sorted. Implemented via a
+desugar (\code{summarise_by_desugar()}): an ungrouped \code{row_number()} marks
+each row's original position, a grouped summarise computes the user's
+aggregations plus \code{min()} of that position per group, and the result is
+sorted by that minimum (each group's first-appearance position) before
+the helper column is dropped.
 }
 }
 \examples{
