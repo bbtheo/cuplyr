@@ -28,7 +28,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        method: ${{ fromJSON(github.event_name == 'workflow_dispatch' && github.event.inputs.method != 'all' && format('["{0}"]', github.event.inputs.method) || '["pixi","conda","system"]') }}
+        # Pushes and pull requests run only the system dry-run. The pixi and
+        # conda jobs can't build on a hosted runner until configure finds
+        # CUDA inside a conda environment (issue #38); start them by hand.
+        method: ${{ fromJSON(github.event_name != 'workflow_dispatch' && '["system"]' || (github.event.inputs.method != 'all' && format('["{0}"]', github.event.inputs.method) || '["pixi","conda","system"]')) }}
 
     steps:
       - name: Checkout
@@ -64,7 +67,7 @@ jobs:
         if: ${{ matrix.method == 'conda' }}
         uses: conda-incubator/setup-miniconda@v3
         with:
-          miniforge-variant: Mambaforge
+          miniforge-variant: Miniforge3
           use-mamba: true
           auto-update-conda: true
           activate-environment: base

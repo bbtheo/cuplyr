@@ -2,7 +2,9 @@
 
 GPU-backed dplyr API in R, with C++/Rcpp bindings to libcudf (cuDF 25.12).
 The current goal is **full dplyr feature parity on the GPU**, built by a
-multi-agent workflow (see "Parity workflow" below).
+multi-agent workflow (see "Parity workflow" below). Work is tracked in GitHub
+issues and lands on `main` through pull requests; the contributor-facing
+description is `.github/CONTRIBUTING.md`.
 
 For how the code works (source map, AST/optimizer, joins, factor handling,
 cuDF API gotchas, test helpers), read `.claude/reference/architecture.md`
@@ -65,8 +67,15 @@ work around a block; if a rule stops legitimate work, say so in your report.
    (new ids are added). Raising a perf entry (`tools/perf-baseline-set`) and a
    full re-record are Theo's. A manual re-record takes no `merge.lock`:
    don't run one while `tools/merge-queue` is running.
-7. **Git**: never push. `dev` only moves through `tools/merge-queue`. Commits
-   keep Theo as author and end with the trailer
+7. **Git and GitHub**: `main` is the only long-lived branch. Every change is
+   a pull request from a `feat/<name>` branch, linked to an issue with
+   `Fixes #n`, and `main` only moves when `tools/merge-queue` squash-merges
+   that pull request after a passing gate. Agents push feature branches and
+   nothing else: `git push origin feat/<name>`, never forced, never `main`,
+   tags or other refs. Only the PM and the orchestrator push or write to
+   GitHub (pull requests, issue comments, labels); coders, testers and
+   reviewers don't. Nobody runs `gh pr merge` by hand. Commits keep Theo as
+   author and end with the trailer
    `Co-Authored-By: Claude <noreply@anthropic.com>`.
 8. **Non-publishable writing** (plans, post-mortems, reviews, logs) goes in
    `scratchpad/` (gitignored), never in the package.
@@ -83,8 +92,8 @@ work around a block; if a rule stops legitimate work, say so in your report.
 | `tools/perf [--out f.tsv]` | yes | Perf gate (`CUPLYR_PERF=1`, max ratio 1.5 vs the main checkout's baseline). Tester agents only. |
 | `tools/perf-baseline-set [--baseline f] <id>=<s>...` | merge.lock | Raise (or lower) perf baseline entries by hand. Theo only; `tools/merge-queue` runs `tools/perf-ratchet` itself. |
 | `tools/conformance [files] [--ids f.tsv] [--report f.md]` | yes | dplyr's own vendored test suite run against `tbl_gpu`. Tester agents only. |
-| `tools/wt-new <id> [attempt]` | no | Create feature worktree `../cuplr-wt/<id>` on branch `feat/<id>` off `dev`. PM only. |
-| `tools/merge-queue <name>` | gate | Squash-merge `feat/<name>` into `dev` behind the full gate. Orchestrator only. |
+| `tools/wt-new <id> [attempt]` | no | Create feature worktree `../cuplr-wt/<id>` on branch `feat/<id>` off `origin/main`. PM only. |
+| `tools/merge-queue [--no-merge] <name>` | gate | Run the full gate on `main` + the squashed `feat/<name>`, post the result on its pull request (comment and `gpu-gate` commit status), then squash-merge the pull request. `--no-merge` stops after the report. Orchestrator only. |
 
 `tools/gpu-run` is the lock itself; the wrappers above call it. A gate run
 blocks new GPU jobs from starting until it finishes. Lock waits are logged to
@@ -116,9 +125,33 @@ Roles (definitions in `.claude/agents/`, orchestrator procedure in
 | `tester` | Haiku | Runs the full suite, perf and conformance; writes logs; reports facts only. |
 | `reviewer` | Opus | Adversarial review of diff and logs. Never runs code; asks a tester instead. |
 
+How one feature moves:
+
+1. **Issue.** Every backlog item is a GitHub issue. It holds the problem, the
+   agreed approach and any discussion with outside contributors. The
+   orchestrator opens an issue for a new idea before it enters the backlog,
+   and Theo approves it.
+2. **Branch.** The PM works in a worktree on `feat/<name>`, cut from
+   `origin/main`.
+3. **Pull request.** When the reviewer approves, the PM merges `origin/main`
+   into the branch, pushes it and opens a pull request with `Fixes #n`.
+4. **Gate and merge.** The orchestrator runs `tools/merge-queue <name>`. The
+   gate result is posted on the pull request; on a pass the pull request is
+   squash-merged, which closes the issue.
+
+Labels follow the tidyverse set (`bug`, `feature`, `upkeep`, `documentation`,
+`breaking change ☠️`, `wip`, `reprex`) plus area labels (`performance`,
+`dplyr parity`, `io`, `fallback`). `wip` marks an issue a PM is working on;
+`needs decision` marks one that waits for Theo.
+
+Text that goes to GitHub is public and permanent. Write it for an outside
+reader: no local paths, agent ids or ledger jargon, and no secrets. Internal
+detail (round logs, reviews, post-mortems) stays in `scratchpad/`.
+
 State lives in `scratchpad/parity/` in the main checkout:
-`ledger.md` (backlog, status, merge queue), `features/<name>.md` (brief,
-design, round history), `features/<name>/` (test runs, reviews),
+`ledger.md` (dispatch state per backlog row with its issue number, merge
+queue, tick log), `features/<name>.md` (brief, design, round history),
+`features/<name>/` (test runs, reviews),
 `features/<name>.protected` and `.commit.txt` (read by `tools/merge-queue`),
 `gates/` (merge gate artifacts), `conformance_baseline.tsv`.
 

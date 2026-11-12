@@ -1,19 +1,31 @@
 #!/usr/bin/env bash
-# Squash-merge one feature branch into dev, gated. Orchestrator-only.
+# Gate one feature branch and squash-merge its pull request into main.
+# Orchestrator-only.
 #
-#   tools/merge-queue <name>        # branch feat/<name>
+#   tools/merge-queue <name>              # branch feat/<name>, its open PR
+#   tools/merge-queue --no-merge <name>   # gate and report on the PR; don't merge
 #
-# Needs, in scratchpad/parity/features/:
+# Needs an open pull request from feat/<name> to main, and in
+# scratchpad/parity/features/:
 #   <name>.commit.txt   commit message (conventional-commit subject + body)
 #   <name>.protected    line 1: SHA of the PM's acceptance-test commit;
 #                       remaining lines: test file paths the coder must not touch
 #
-# Exit codes: 0 merged | 1 gate failed | 2 setup error | 3 merge conflict
+# The gate runs on main + the squashed branch. The result goes to the pull
+# request as a comment and as the commit status `gpu-gate` on the branch head.
+#
+# Exit codes: 0 merged (or, with --no-merge, gate passed) | 1 gate failed
+#             2 setup error | 3 merge conflict
 #             4 protected tests modified after the PM's commit | 5 nothing to merge
 #             6 merged, but the perf ratchet failed (perf baseline unchanged)
+#             7 gate passed, but GitHub refused the merge (main unchanged)
+#             8 merged, but main's tree differs from the gated candidate
 # Gate artifacts land in scratchpad/parity/gates/<name>-<timestamp>/.
 source "$(dirname "$0")/lib.sh"
+do_merge=1
+if [[ "${1:-}" == "--no-merge" ]]; then do_merge=0; shift; fi
 name="$1"
+trunk="$CUPLYR_TRUNK"
 branch="feat/$name"
 integ="$CUPLYR_WT_PARENT/_integration"
 feat="$CUPLYR_PARITY_DIR/features"
@@ -28,8 +40,21 @@ flock 7
 [[ -f "$prot" ]] || { echo "missing $prot" >&2; exit 2; }
 git rev-parse --verify -q "$branch" >/dev/null || { echo "no branch $branch" >&2; exit 2; }
 cd "$integ"
-[[ "$(git branch --show-current)" == dev ]] || { echo "integration worktree is not on dev" >&2; exit 2; }
+[[ "$(git branch --show-current)" == "$trunk" ]] || { echo "integration worktree is not on $trunk" >&2; exit 2; }
 [[ -z "$(git status --porcelain)" ]] || { echo "integration worktree is dirty" >&2; exit 2; }
+
+# Local main follows GitHub's: pick up anything merged there since the last run.
+git pull -q --ff-only origin "$trunk" || { echo "local $trunk can't fast-forward to origin/$trunk" >&2; exit 2; }
+
+# The pull request must show exactly what is gated. A plain push: it fails if
+# the remote branch has commits the local one lacks.
+head_sha="$(git rev-parse "$branch")"
+if [[ "$(git ls-remote origin "refs/heads/$branch" | cut -f1)" != "$head_sha" ]]; then
+  git push -q origin "$branch" || { echo "can't push $branch to origin" >&2; exit 2; }
+fi
+pr="$(gh pr list --head "$branch" --base "$trunk" --state open --json number --jq '.[0].number // empty')" ||
+  { echo "can't list pull requests (gh failed)" >&2; exit 2; }
+[[ -n "$pr" ]] || { echo "no open pull request from $branch to $trunk; the PM opens it" >&2; exit 2; }
 
 pm_sha="$(head -n1 "$prot")"
 mapfile -t paths < <(tail -n +2 "$prot" | sed '/^\s*$/d')
@@ -39,38 +64,71 @@ if [[ ${#paths[@]} -gt 0 ]] && ! git diff --quiet "$pm_sha" "$branch" -- "${path
   exit 4
 fi
 
-git checkout -q --detach dev
+git checkout -q --detach "$trunk"
 if ! git merge -q --squash "$branch"; then
   git diff --name-only --diff-filter=U >&2
-  git reset -q --hard && git checkout -q dev
+  git reset -q --hard && git checkout -q "$trunk"
   exit 3
 fi
 if git diff --cached --quiet; then
-  git checkout -q dev; exit 5
+  git checkout -q "$trunk"; exit 5
 fi
-{
-  cat "$msg"
-  grep -q '^Co-Authored-By: Claude' "$msg" || printf '\nCo-Authored-By: Claude <noreply@anthropic.com>\n'
-} | git commit -q -F -
+trailer='Co-Authored-By: Claude <noreply@anthropic.com>'
+subject="$(head -n1 "$msg") (#$pr)"
+body="$(tail -n +2 "$msg" | sed '1{/^$/d}')"
+grep -q '^Co-Authored-By: Claude' "$msg" || body="$body"$'\n\n'"$trailer"
+printf '%s\n\n%s\n' "$subject" "$body" | git commit -q -F -
 candidate="$(git rev-parse HEAD)"
+
+# Tell the pull request what happened. A failed report never changes the verdict.
+report() {  # report <success|failure> <description>
+  local state="$1" desc="$2"
+  gh api -X POST "repos/{owner}/{repo}/statuses/$head_sha" \
+    -f state="$state" -f context=gpu-gate -f description="$desc" >/dev/null ||
+    echo "warning: could not set the gpu-gate status on $head_sha" >&2
+  {
+    printf 'GPU merge gate: **%s**\n\n' "$desc"
+    printf 'Ran on `%s` squashed onto `%s` at `%s`.\n\n```\n' \
+      "${head_sha:0:7}" "$trunk" "$(git rev-parse --short "$trunk")"
+    cat "$out/summary.txt"
+    printf '```\n'
+  } | gh pr comment "$pr" --body-file - >/dev/null ||
+    echo "warning: could not comment on pull request #$pr" >&2
+}
 
 out="$CUPLYR_PARITY_DIR/gates/$name-$(date +%Y%m%dT%H%M%S)"
 if tools/gpu-run --gate --label "gate:$name" -- tools/merge-gate "$out"; then
-  git checkout -q dev
-  git merge -q --ff-only "$candidate"
+  git checkout -q "$trunk"
+  report success "passed (suite, perf, conformance)"
+  if [[ $do_merge == 0 ]]; then
+    echo "GATE PASSED for $branch (pull request #$pr), not merged (--no-merge); artifacts: $out"
+    exit 0
+  fi
+  if ! gh pr merge "$pr" --squash --match-head-commit "$head_sha" --subject "$subject" --body "$body"; then
+    echo "GATE PASSED for $branch but GitHub refused to merge pull request #$pr; $trunk unchanged; artifacts: $out" >&2
+    exit 7
+  fi
+  synced=1
+  git fetch -q origin "$trunk" || synced=0
+  git merge -q --ff-only "origin/$trunk" || synced=0
+  if [[ $synced == 0 || "$(git rev-parse 'HEAD^{tree}')" != "$(git rev-parse "$candidate^{tree}")" ]]; then
+    echo "MERGED $branch as $(git rev-parse --short HEAD) (#$pr) but $trunk's tree differs from the gated candidate ${candidate:0:7}; baselines not ratcheted; artifacts: $out" >&2
+    exit 8
+  fi
   # Ratchet the conformance baseline: new passes become required passes.
   cp "$out/conformance.tsv" "$CUPLYR_PARITY_DIR/conformance_baseline.tsv"
   # Ratchet the perf baseline: lower entries confirmed by two passing gates,
-  # add new ids (rules in tools/perf-ratchet-lib.R). Runs the just-merged dev's copy.
+  # add new ids (rules in tools/perf-ratchet-lib.R). Runs the just-merged main's copy.
   if ! tools/perf-ratchet --baseline "$CUPLYR_MAIN/scratchpad/perf_baseline.json" \
        --observations "$out/perf_observations.tsv" --summary "$out/summary.txt" \
        --out "$out" --commit "$(git rev-parse --short HEAD)"; then
-    echo "MERGED $branch as $(git rev-parse --short HEAD) but the perf ratchet failed; dev is merged, perf baseline unchanged; artifacts: $out" >&2
+    echo "MERGED $branch as $(git rev-parse --short HEAD) (#$pr) but the perf ratchet failed; $trunk is merged, perf baseline unchanged; artifacts: $out" >&2
     exit 6
   fi
-  echo "MERGED $branch as $(git rev-parse --short HEAD); gate artifacts: $out"
+  echo "MERGED $branch as $(git rev-parse --short HEAD) (pull request #$pr); gate artifacts: $out"
 else
-  git checkout -q dev
-  echo "GATE FAILED for $branch; dev unchanged; artifacts: $out" >&2
+  git checkout -q "$trunk"
+  report failure "failed"
+  echo "GATE FAILED for $branch (pull request #$pr); $trunk unchanged; artifacts: $out" >&2
   exit 1
 fi

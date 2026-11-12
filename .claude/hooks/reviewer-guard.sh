@@ -7,6 +7,9 @@ deny() { echo "BLOCKED by .claude/hooks/reviewer-guard.sh: $1" >&2; exit 2; }
 if grep -Eq 'tools/(gpu-run|test|test-file|perf|conformance|r|build|document|merge-queue|merge-gate|wt-new)' <<<"$cmd"; then
   deny "reviewers don't run code. Spawn a tester subagent with the exact command you want run."
 fi
+if grep -Eq 'git[[:space:]]+(-C[[:space:]]+[^[:space:]]+[[:space:]]+)*push|gh[[:space:]]+(pr|issue|release|label|repo)[[:space:]]+(create|merge|close|comment|edit|delete|reopen|ready|review)|gh[[:space:]]+api[[:space:]].*(-X|--method|-f|-F)' <<<"$cmd"; then
+  deny "pushing and writing to GitHub (pull requests, issues) belong to the PM and orchestrator."
+fi
 if grep -Eq 'git[[:space:]]+(commit|checkout|switch|reset|restore|stash|merge|rebase|cherry-pick|am|apply|clean|rm|mv|add|tag|branch[[:space:]]+-)' <<<"$cmd" ||
    grep -Eq '>[^&]|sed[[:space:]]+-i|(^|[;&|[:space:]])(rm|mv|cp|tee|truncate)[[:space:]]' <<<"$cmd"; then
   deny "reviewers are read-only."

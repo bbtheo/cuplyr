@@ -16,6 +16,9 @@ CUPLYR_MAIN="$(dirname "$_common")"
 CUPLYR_LOCK_DIR="$_common/cuplyr-locks"
 CUPLYR_PARITY_DIR="$CUPLYR_MAIN/scratchpad/parity"
 CUPLYR_WT_PARENT="$(dirname "$CUPLYR_MAIN")/cuplr-wt"
+# The one long-lived branch. Feature branches start from origin's copy and
+# land on it through a pull request (tools/merge-queue).
+CUPLYR_TRUNK="main"
 mkdir -p "$CUPLYR_LOCK_DIR"
 
 cuplyr_activate_env() {

@@ -30,16 +30,28 @@ if grep -Eq 'perf_baseline\.json|conformance_baseline\.tsv' <<<"$cmd" &&
    grep -Eq '>|sed[[:space:]]+-i|(^|[[:space:]])(cp|mv|rm|tee|truncate|dd)[[:space:]]' <<<"$cmd"; then
   deny "the perf and conformance baselines are not writable by agents. tools/merge-queue ratchets both after a passing gate; raising a perf entry is Theo's (tools/perf-baseline-set)."
 fi
-if grep -Eq "${pos}git[[:space:]]+push" <<<"$cmd"; then
-  deny "agents never push. Theo pushes."
+# Pushing: only a feature branch, by name, to origin, and never forced:
+#   git [-C <dir>] push [-u|--set-upstream|-q|--quiet] origin feat/<name>
+# main moves on GitHub only when tools/merge-queue merges a pull request.
+gitc='git[[:space:]]+(-C[[:space:]]+[^[:space:]]+[[:space:]]+)*'
+if grep -Eq "${pos}${gitc}push([[:space:]]|$)" <<<"$cmd"; then
+  ok="^${gitc}push([[:space:]]+(-u|--set-upstream|-q|--quiet))*[[:space:]]+origin[[:space:]]+feat/[A-Za-z0-9._-]+[[:space:]]*$"
+  while IFS= read -r p; do
+    p="$(sed -E 's/[[:space:]]+[0-9]*>.*$//' <<<"$p")"
+    grep -Eq "$ok" <<<"$p" ||
+      deny "agents push feature branches only: git push origin feat/<name> (no force, no other refs). main moves through tools/merge-queue; everything else is Theo's."
+  done < <(grep -Eo "${gitc}push([[:space:]][^;&|]*)?" <<<"$cmd")
 fi
-# Checking dev out (outside the integration worktree) would let commits land
+if grep -Eq "${pos}gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)" <<<"$cmd"; then
+  deny "pull requests merge only through tools/merge-queue, after the gate passes."
+fi
+# Checking main out (outside the integration worktree) would let commits land
 # on it; --detach only moves HEAD, so it's allowed.
-if grep -Eq "${pos}git[[:space:]]+(checkout|switch)[[:space:]]+(-[^[:space:]]+[[:space:]]+)*dev([[:space:]]|$)" <<<"$cmd" &&
+if grep -Eq "${pos}${gitc}(checkout|switch)[[:space:]]+(-[^[:space:]]+[[:space:]]+)*main([[:space:]]|$)" <<<"$cmd" &&
    ! grep -q -- '--detach' <<<"$cmd"; then
-  deny "dev only moves via tools/merge-queue (git switch --detach dev is fine)."
+  deny "main only moves via tools/merge-queue (git switch --detach main is fine)."
 fi
-if grep -Eq "git[[:space:]]+branch[[:space:]]+(-f|-D|-d|-M|-m)[[:space:]].*\bdev\b|update-ref[[:space:]]+refs/heads/dev" <<<"$cmd"; then
-  deny "dev only moves via tools/merge-queue."
+if grep -Eq "git[[:space:]]+branch[[:space:]]+(-f|-D|-d|-M|-m)[[:space:]].*\bmain\b|update-ref[[:space:]]+refs/heads/main" <<<"$cmd"; then
+  deny "main only moves via tools/merge-queue."
 fi
 exit 0

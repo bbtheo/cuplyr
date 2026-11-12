@@ -18,6 +18,9 @@ if grep -Eq 'tools/(merge-queue|merge-gate|parity-init|wt-new)' <<<"$cmd"; then
   deny "worktrees and merging belong to the PM and orchestrator."
 fi
 
+if grep -Eq 'git[[:space:]]+(-C[[:space:]]+[^[:space:]]+[[:space:]]+)*push|gh[[:space:]]+(pr|issue|release|label|repo)[[:space:]]+(create|merge|close|comment|edit|delete|reopen|ready|review)|gh[[:space:]]+api[[:space:]].*(-X|--method|-f|-F)' <<<"$cmd"; then
+  deny "pushing and writing to GitHub (pull requests, issues) belong to the PM and orchestrator."
+fi
 if grep -Eq 'tools/(test|perf|conformance)([[:space:]]|$)' <<<"$cmd"; then
   deny "full-suite, perf and conformance runs belong to the tester. Use tools/test-file for targeted runs."
 fi

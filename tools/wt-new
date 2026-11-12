@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Create a feature worktree off dev and get it ready to build.
+# Create a feature worktree off the trunk (origin/main) and get it ready to build.
 #
 #   tools/wt-new <feature-id> [attempt]
 #
@@ -11,7 +11,8 @@ name="$id"; [[ "$attempt" == 1 ]] || name="$id-a$attempt"
 path="$CUPLYR_WT_PARENT/$name"
 
 [[ -e "$path" ]] && { echo "worktree path already exists: $path" >&2; exit 1; }
-git -C "$CUPLYR_MAIN" worktree add -b "feat/$name" "$path" dev >&2
+git -C "$CUPLYR_MAIN" fetch -q origin "$CUPLYR_TRUNK" >&2
+git -C "$CUPLYR_MAIN" worktree add --no-track -b "feat/$name" "$path" "origin/$CUPLYR_TRUNK" >&2
 
 cd "$path"
 cuplyr_activate_env
