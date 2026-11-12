@@ -12,7 +12,8 @@
 # NOT_CRAN=true so that the source package downloads the project's prebuilt Rust
 # library instead of building it with cargo (LIBR_POLARS_BUILD=true forces the
 # cargo build). callr runs the polars cells in their own processes and DBI is
-# DuckDB's interface. The summary table gives the elapsed `secs` of each install.
+# DuckDB's interface. arrow and nanoparquet are the two parquet readers of the
+# parquet-to-summary benchmark (F121, bench/parquet-pipeline.R). The summary table gives the elapsed `secs` of each install.
 #
 #   tools/r 'LIB <- "/path/to/rlib"; source("bench/install-deps.R")'
 #
@@ -41,7 +42,8 @@ options(repos = c(CRAN = repos), Ncpus = 4L)
 
 cran_pkgs <- c("roll", "slider", "RcppRoll", "zoo", "runner", "microbenchmark",
                "ggdist", "paletteer", "ggtext", "data.table", "ggplot2",
-               "scales", "patchwork", "knitr", "rmarkdown", "DBI", "callr", "duckdb", "arrow")
+               "scales", "patchwork", "knitr", "rmarkdown", "DBI", "callr", "duckdb", "arrow",
+               "nanoparquet")
 polars_repo <- "https://community.r-multiverse.org"
 
 # RcppParallel's bundled TBB build does not configure under the pixi
