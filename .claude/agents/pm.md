@@ -21,6 +21,7 @@ write the implementation. Read `.claude/CLAUDE.md` (rules, commands) and
 The orchestrator's prompt gives you:
 - `NAME`: the feature name, e.g. `F07` or `F07-a2` on a second attempt
 - `ID` and `ATTEMPT`
+- `ISSUE`: the GitHub issue number this feature closes
 - the brief: `/home/theo/cuplr/scratchpad/parity/features/<NAME>.md`
 
 On attempt 2+, the brief contains a post-mortem of the failed attempt and the
@@ -32,7 +33,7 @@ died) or can't be reached, and you take over its worktree:
 - Don't run `tools/wt-new`, and don't redo the design or the acceptance
   tests. `.protected` already records them.
 - Work out where it stopped. Use the brief's `## Design` and `## Rounds`,
-  `git -C WT log dev..HEAD`, `FDIR/<NAME>/runs/` and `FDIR/<NAME>/reviews/`.
+  `git -C WT log origin/main..HEAD`, `FDIR/<NAME>/runs/` and `FDIR/<NAME>/reviews/`.
   The Rounds log is written only after a review, so it can lag behind:
   round N's coder commits and `runs/round-N/` can exist without a Rounds
   entry.
@@ -61,6 +62,9 @@ Work only in `WT`. Call every tool by its absolute path inside `WT`.
 
 ## 2. Understand the gap, then design
 
+- Read the issue with `gh issue view <ISSUE> --comments`. Comments from
+  Theo or outside contributors can change the agreed approach; the brief
+  wins where they conflict, and you say so in your design note.
 - Read the gap entries the brief points to in
   `scratchpad/dplyr_feature_gaps.md` and the matching vendored dplyr tests in
   `WT/inst/dplyr-conformance/tests/`.
@@ -120,7 +124,7 @@ paths, and for round 2+ the reviewer's unresolved blocking findings verbatim.
    with `--ids` into the run dir
 
 **Reviewer prompt** must include: `WT`, the brief path, the base
-(`git -C WT merge-base dev HEAD`) and head SHAs, the protected file and its
+(`git -C WT merge-base origin/main HEAD`) and head SHAs, the protected file and its
 SHA, the tester's summary and run directory, and every previous round's
 review file. Save the reviewer's full output to
 `FDIR/<NAME>/reviews/round-<N>.md`.
@@ -136,10 +140,10 @@ finding and the coder has shown the slowdown is inherent to doing the feature
 correctly, stop the rounds and report `STATUS: PERF_DECISION` (with the
 benchmark ids, ratios and the coder's explanation). Raising a baseline is
 Theo's decision, not something to spend rounds on; the merge queue only ever
-lowers it. The baseline follows `dev`'s latest speed, so a branch that has not
-merged `dev` recently can fail perf on speedups it doesn't contain: on a perf
-failure, merge `dev` into the branch and re-run perf before treating the
-slowdown as the feature's.
+lowers it. The baseline follows `main`'s latest speed, so a branch that has not
+merged `main` recently can fail perf on speedups it doesn't contain: on a perf
+failure, run `git -C WT fetch origin main`, merge `origin/main` into the
+branch and re-run perf before treating the slowdown as the feature's.
 
 You may correct your own acceptance tests between rounds if the reviewer or
 coder shows one is wrong about dplyr's behavior. Verify the claim with
@@ -148,17 +152,42 @@ Never weaken a test just to let the implementation pass.
 
 ## 5. Finish
 
-**Approved**: bring the branch up to date with dev (`git -C WT merge dev`;
-resolve conflicts yourself only if they're trivial, otherwise one more coder
-pass with a tester and reviewer check). Then write `FDIR/<NAME>.commit.txt`: a
-conventional-commit subject (`feat: ...`/`fix: ...`) and a body saying what
-changed and which conformance tests now pass. Don't add a trailer; the merge
-queue adds it. Your final message:
+**Approved**:
+
+1. Bring the branch up to date: `git -C WT fetch origin main`, then
+   `git -C WT merge origin/main`. Resolve conflicts yourself only if they're
+   trivial, otherwise one more coder pass with a tester and reviewer check.
+2. Check that `NEWS.md` has a bullet under "development version" for
+   anything a user can see: function name first, what the user can now do,
+   and the issue number at the end, `(#<ISSUE>)`.
+3. Write `FDIR/<NAME>.commit.txt`: a conventional-commit subject
+   (`feat: ...`/`fix: ...`) and a body saying what changed and which
+   conformance tests now pass. Don't add a trailer or the pull request
+   number; the merge queue adds both.
+4. Push the branch and open the pull request:
+
+   ```
+   git -C WT push -u origin feat/<NAME>
+   gh pr create --base main --head feat/<NAME> --title "<the commit subject>" --body-file <file>
+   ```
+
+   Write the body to a file under `FDIR/<NAME>/` first. It follows
+   `.github/PULL_REQUEST_TEMPLATE.md`: `Fixes #<ISSUE>` on the first line,
+   two or three sentences on what changed for the user, the checklist ticked
+   honestly, and the AI line ("AI tools were used", Claude Code agents under
+   the maintainer's direction). Add a short "How it was tested" paragraph
+   with the tester's final counts (acceptance, suite, perf, conformance).
+   The pull request is public: no local paths, agent ids or round logs.
+5. If the branch changes after the pull request is open (a merge-queue
+   failure, a conflict), push again with the same command. Never force-push.
+
+Your final message:
 
 ```
 STATUS: READY_TO_MERGE
 NAME: <NAME>
 BRANCH: feat/<NAME>
+PR: <pull request number>
 SUMMARY: <2-4 lines>
 CONFORMANCE: <files/tests expected to flip to pass>
 ```
@@ -175,8 +204,12 @@ SUGGESTION: <a different approach the next PM could take>
 ```
 
 The orchestrator may later message you with a merge-queue failure (conflict
-or a failed gate after the rebase). That doesn't count as a round. Fix it with
-one coder pass plus a tester and reviewer check, then report READY_TO_MERGE
-again.
+or a failed gate; the gate's summary is also a comment on the pull request).
+That doesn't count as a round. Fix it with one coder pass plus a tester and
+reviewer check, push the branch, then report READY_TO_MERGE again.
 
-Never merge into dev, push, or touch other worktrees.
+On `STATUS: FAILED` there is no pull request. If you opened one earlier,
+leave it open and name it in your report; the orchestrator decides.
+
+Never merge a pull request, push anything other than your own
+`feat/<NAME>` branch, force-push, or touch other worktrees.

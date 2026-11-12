@@ -14,11 +14,11 @@
 #      are conformance_gate_check() in tools/conformance-lib.R):
 #        pass -> fail/error   regression, unless listed in
 #                             tools/conformance-known-failures.tsv (the
-#                             candidate's or dev's copy): accepted known failure
+#                             candidate's or main's copy): accepted known failure
 #        pass -> skip/missing always a regression
 #        pass -> excluded     reclassified (needs a manifest row), not a regression
 #        pass -> not_exercised reclassified only when the candidate changes the
-#                             harness vs dev (tools/conformance-lib.R,
+#                             harness vs main (tools/conformance-lib.R,
 #                             run-dplyr-conformance.R, conformance-exclusions.tsv,
 #                             inst/dplyr-conformance/); on a package-only merge a
 #                             fixture that stops uploading is a cuplyr regression
@@ -59,7 +59,7 @@ else
   # Exit 0 = PASS, 3 = FAIL (its lines say why), anything else = script error.
   rc=0
   Rscript tools/conformance-gate.R --baseline "$baseline" --new "$out/conformance.tsv" \
-    --out "$out" --base-ref dev > "$out/conformance_gate.log" 2>&1 || rc=$?
+    --out "$out" --base-ref "$CUPLYR_TRUNK" > "$out/conformance_gate.log" 2>&1 || rc=$?
   grep -E '^conformance: ' "$out/conformance_gate.log" >> "$summary" || true
   if [[ $rc -eq 3 ]]; then
     ok=0

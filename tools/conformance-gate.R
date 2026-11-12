@@ -3,10 +3,10 @@
 # agents). Pure R on two TSVs plus git: no GPU, no package load.
 #
 #   Rscript tools/conformance-gate.R --baseline <tsv> --new <tsv> --out <gate dir>
-#                                    [--base-ref dev]
+#                                    [--base-ref main]
 #
-# Run from the integration worktree, detached at the candidate (dev + the
-# squashed feature); <base-ref> is still the pre-merge dev. The rules are
+# Run from the integration worktree, detached at the candidate (main + the
+# squashed feature); <base-ref> is still the pre-merge main. The rules are
 # conformance_gate_check() in tools/conformance-lib.R. Writes into <gate dir>:
 #   conformance_regressions.txt, conformance_new_passes.txt,
 #   conformance_reclassified.txt, conformance_known_failures_accepted.txt
@@ -26,7 +26,7 @@ opt <- function(name, default = NULL) {
 baseline_path <- opt("--baseline")
 new_path <- opt("--new")
 out <- opt("--out")
-base_ref <- opt("--base-ref", "dev")
+base_ref <- opt("--base-ref", "main")
 
 script_dir <- dirname(normalizePath(sub("^--file=", "",
   grep("^--file=", commandArgs(FALSE), value = TRUE)[1])))
@@ -44,14 +44,14 @@ if (git_status(git("rev-parse", "--verify", "-q", paste0(base_ref, "^{commit}"))
   stop("base ref '", base_ref, "' is not a commit", call. = FALSE)
 }
 
-# harness_changed: does the candidate touch the harness relative to dev?
+# harness_changed: does the candidate touch the harness relative to the base ref?
 harness_paths <- c("tools/conformance-lib.R", "tools/run-dplyr-conformance.R",
   "tools/conformance-exclusions.tsv", "inst/dplyr-conformance/")
 d <- git("diff", "--quiet", base_ref, "HEAD", "--", harness_paths)
 harness_changed <- switch(as.character(git_status(d)), "0" = FALSE, "1" = TRUE,
   stop("git diff against ", base_ref, " failed: ", paste(d, collapse = "\n"), call. = FALSE))
 
-# dev's copy of a file as a temp path; absent at dev = NULL (empty list).
+# The base ref's copy of a file as a temp path; absent there = NULL (empty list).
 base_copy <- function(path) {
   if (git_status(git("cat-file", "-e", paste0(base_ref, ":", path))) != 0L) return(NULL)
   tmp <- tempfile(fileext = ".tsv")

@@ -2,7 +2,7 @@
 
 <!-- badges: start -->
 [![Lifecycle: experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
-[![pkgdown](https://github.com/bbtheo/cuplyr/actions/workflows/pkgdown.yaml/badge.svg)](https://github.com/bbtheo/cuplyr/actions/workflows/pkgdown.yaml)
+[![Install checks](https://github.com/bbtheo/cuplyr/actions/workflows/install-matrix.yml/badge.svg?branch=main)](https://github.com/bbtheo/cuplyr/actions/workflows/install-matrix.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 <!-- badges: end -->
 
