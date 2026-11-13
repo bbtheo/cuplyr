@@ -50,6 +50,13 @@ jobs:
             libssl-dev \
             libxml2-dev
 
+      - name: Install R package dependencies
+        if: ${{ matrix.method == 'pixi' }}
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          dependencies: '"hard"'
+          needs: build
+
       - name: Setup pixi
         if: ${{ matrix.method == 'pixi' }}
         uses: prefix-dev/setup-pixi@v0
