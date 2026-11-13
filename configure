@@ -4,8 +4,11 @@
 echo "Configuring cuplyr..."
 echo ""
 
-# Default paths
+# Default paths. Remember whether CUDA_HOME came from the user: an explicit
+# CUDA_HOME wins, otherwise a conda/pixi toolkit wins over a system one.
+CUDA_HOME_FROM_USER="${CUDA_HOME:+1}"
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+CUDA_INCLUDE=""
 CUDF_HOME="${CUDF_HOME:-}"
 CONDA_PREFIX="${CONDA_PREFIX:-}"
 CUDA_MIN_VERSION="${CUPLYR_CUDA_MIN_VERSION:-12.2}"
@@ -87,8 +90,32 @@ find_cudf() {
     return 1
 }
 
-# Detect CUDA
-if [ ! -d "$CUDA_HOME" ]; then
+# Detect CUDA.
+#
+# A system toolkit keeps everything under one CUDA_HOME. A conda or pixi
+# environment splits it: headers in $CONDA_PREFIX/targets/<arch>/include,
+# nvcc in $CONDA_PREFIX/bin. Prefer the environment's toolkit so the build
+# uses the CUDA libcudf was built against.
+find_conda_cuda_include() {
+    [ -n "$CONDA_PREFIX" ] && [ -x "$CONDA_PREFIX/bin/nvcc" ] || return 1
+    local target
+    for target in x86_64-linux sbsa-linux; do
+        if [ -f "$CONDA_PREFIX/targets/$target/include/cuda.h" ]; then
+            echo "$CONDA_PREFIX/targets/$target/include"
+            return 0
+        fi
+    done
+    if [ -f "$CONDA_PREFIX/include/cuda.h" ]; then
+        echo "$CONDA_PREFIX/include"
+        return 0
+    fi
+    return 1
+}
+
+if [ -z "$CUDA_HOME_FROM_USER" ] && CONDA_CUDA_INCLUDE=$(find_conda_cuda_include); then
+    CUDA_HOME="$CONDA_PREFIX"
+    CUDA_INCLUDE="$CONDA_CUDA_INCLUDE"
+elif [ ! -d "$CUDA_HOME" ]; then
     for cuda_path in /usr/local/cuda /opt/cuda /opt/conda/targets/x86_64-linux /usr/lib/cuda; do
         if [ -d "$cuda_path" ] && [ -f "$cuda_path/include/cuda.h" ]; then
             CUDA_HOME="$cuda_path"
@@ -96,11 +123,12 @@ if [ ! -d "$CUDA_HOME" ]; then
         fi
     done
 fi
+CUDA_INCLUDE="${CUDA_INCLUDE:-$CUDA_HOME/include}"
 
-if [ ! -f "$CUDA_HOME/include/cuda.h" ]; then
+if [ ! -f "$CUDA_INCLUDE/cuda.h" ]; then
     echo "ERROR: CUDA toolkit not found."
     echo ""
-    echo "Searched: CUDA_HOME=$CUDA_HOME and common paths"
+    echo "Searched: CUDA_HOME=$CUDA_HOME, CONDA_PREFIX=${CONDA_PREFIX:-(unset)} and common paths"
     echo "  (/usr/local/cuda, /opt/cuda, /opt/conda/targets/x86_64-linux, /usr/lib/cuda)"
     echo ""
     echo "To fix, install the CUDA toolkit:"
@@ -294,6 +322,7 @@ if [ -z "$CUDA_RUNTIME_LIB" ]; then
 fi
 
 echo "Found CUDA at: $CUDA_HOME"
+echo "Using CUDA headers at: $CUDA_INCLUDE"
 echo "CUDA version: $CUDA_VERSION"
 echo "Using CUDA driver link path: $CUDA_DRIVER_LIB"
 if [ -n "$CUDA_DRIVER_RPATH" ]; then
@@ -438,6 +467,7 @@ fi
 
 # Generate Makevars from template
 sed -e "s|@CUDA_HOME@|$CUDA_HOME|g" \
+    -e "s|@CUDA_INCLUDE@|$CUDA_INCLUDE|g" \
     -e "s|@CUDA_DRIVER_LIB@|$CUDA_DRIVER_LIB|g" \
     -e "s|@CUDA_DRIVER_RPATH_FLAG@|$CUDA_DRIVER_RPATH_FLAG|g" \
     -e "s|@CUDA_RUNTIME_LIB@|$CUDA_RUNTIME_LIB|g" \

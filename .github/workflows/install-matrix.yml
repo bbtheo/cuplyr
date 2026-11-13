@@ -28,10 +28,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pushes and pull requests run only the system dry-run. The pixi and
-        # conda jobs can't build on a hosted runner until configure finds
-        # CUDA inside a conda environment (issue #38); start them by hand.
-        method: ${{ fromJSON(github.event_name != 'workflow_dispatch' && '["system"]' || (github.event.inputs.method != 'all' && format('["{0}"]', github.event.inputs.method) || '["pixi","conda","system"]')) }}
+        # Pushes and pull requests run every method; a manual run can pick one.
+        method: ${{ fromJSON(github.event_name != 'workflow_dispatch' && '["pixi","conda","system"]' || (github.event.inputs.method != 'all' && format('["{0}"]', github.event.inputs.method) || '["pixi","conda","system"]')) }}
 
     steps:
       - name: Checkout
@@ -49,6 +47,13 @@ jobs:
             libcurl4-openssl-dev \
             libssl-dev \
             libxml2-dev
+
+      - name: Install R package dependencies
+        if: ${{ matrix.method == 'pixi' }}
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          dependencies: '"hard"'
+          needs: build
 
       - name: Setup pixi
         if: ${{ matrix.method == 'pixi' }}

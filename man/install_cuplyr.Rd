@@ -29,7 +29,10 @@ If \code{NULL}, assumes current directory is the cuplyr source tree.}
 \item{ref}{Git branch or tag to install. Only used when \code{repo} is a URL.}
 
 \item{conda_prefix}{Path for the conda environment when \code{method = "conda"}.
-Defaults to \code{"/opt/rapids"} or a temp directory.}
+Defaults to the active conda environment (unless it is \code{base}), then
+\code{"/opt/rapids"} on Colab and cloud GPUs, then
+\verb{~/.local/share/cuplyr/rapids} (or under \code{XDG_DATA_HOME}). An existing
+environment is added to, never replaced.}
 
 \item{configure_args}{Extra arguments passed to \code{./configure}.}
 
@@ -50,7 +53,7 @@ for providing CUDA/cuDF dependencies.
 
 \strong{auto} (default): Tries methods in order of preference:
 \enumerate{
-\item If \code{pixi} is on PATH and \code{pixi.toml} exists, use pixi
+\item If \code{pixi} is on PATH and the source tree has \code{pixi.toml}, use pixi
 \item If \code{mamba} or \code{conda} is on PATH, use conda
 \item If CUDA and cuDF are already available, use system
 }
@@ -58,8 +61,9 @@ for providing CUDA/cuDF dependencies.
 \strong{pixi}: Runs \verb{pixi run install} which handles everything.
 Requires \href{https://pixi.sh}{pixi} to be installed.
 
-\strong{conda}: Creates a conda environment with RAPIDS packages, then
-configures and builds cuplyr against it. Requires \code{mamba} or \code{conda}.
+\strong{conda}: Installs RAPIDS 25.12 for CUDA 12, with the CUDA compiler and
+headers, into a conda environment, then configures and builds cuplyr
+against it. Requires \code{mamba} or \code{conda}.
 
 \strong{system}: Assumes \code{CUDA_HOME} and \code{CONDA_PREFIX}/\code{CUDF_HOME} are
 already set. Runs \verb{./configure && R CMD INSTALL .} directly.

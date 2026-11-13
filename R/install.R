@@ -15,7 +15,10 @@
 #'   If `NULL`, assumes current directory is the cuplyr source tree.
 #' @param ref Git branch or tag to install. Only used when `repo` is a URL.
 #' @param conda_prefix Path for the conda environment when `method = "conda"`.
-#'   Defaults to `"/opt/rapids"` or a temp directory.
+#'   Defaults to the active conda environment (unless it is `base`), then
+#'   `"/opt/rapids"` on Colab and cloud GPUs, then
+#'   `~/.local/share/cuplyr/rapids` (or under `XDG_DATA_HOME`). An existing
+#'   environment is added to, never replaced.
 #' @param configure_args Extra arguments passed to `./configure`.
 #' @param dry_run If `TRUE`, print what would be done without executing.
 #' @param verbose If `TRUE`, print detailed progress.
@@ -26,15 +29,16 @@
 #' ## Method details
 #'
 #' **auto** (default): Tries methods in order of preference:
-#' 1. If `pixi` is on PATH and `pixi.toml` exists, use pixi
+#' 1. If `pixi` is on PATH and the source tree has `pixi.toml`, use pixi
 #' 2. If `mamba` or `conda` is on PATH, use conda
 #' 3. If CUDA and cuDF are already available, use system
 #'
 #' **pixi**: Runs `pixi run install` which handles everything.
 #' Requires [pixi](https://pixi.sh) to be installed.
 #'
-#' **conda**: Creates a conda environment with RAPIDS packages, then
-#' configures and builds cuplyr against it. Requires `mamba` or `conda`.
+#' **conda**: Installs RAPIDS 25.12 for CUDA 12, with the CUDA compiler and
+#' headers, into a conda environment, then configures and builds cuplyr
+#' against it. Requires `mamba` or `conda`.
 #'
 #' **system**: Assumes `CUDA_HOME` and `CONDA_PREFIX`/`CUDF_HOME` are
 #' already set. Runs `./configure && R CMD INSTALL .` directly.
@@ -78,13 +82,13 @@ install_cuplyr <- function(
 ) {
   method <- match.arg(method)
 
-  if (method == "auto") {
-    method <- detect_install_method(verbose = verbose)
-    message("Selected install method: ", method)
-  }
-
   # If repo is a URL, clone it first
   src_dir <- get_source_dir(repo, ref, dry_run = dry_run, verbose = verbose)
+
+  if (method == "auto") {
+    method <- detect_install_method(src_dir, verbose = verbose)
+    message("Selected install method: ", method)
+  }
 
   switch(method,
     pixi = install_via_pixi(src_dir, dry_run = dry_run, verbose = verbose),
@@ -108,9 +112,9 @@ install_cuplyr <- function(
 # Method detection
 # =============================================================================
 
-detect_install_method <- function(verbose = FALSE) {
-  # 1. pixi available + pixi.toml exists?
-  if (has_command("pixi") && file.exists("pixi.toml")) {
+detect_install_method <- function(src_dir = ".", verbose = FALSE) {
+  # 1. pixi available + pixi.toml in the source tree?
+  if (has_command("pixi") && file.exists(file.path(src_dir, "pixi.toml"))) {
     if (verbose) message("Found pixi + pixi.toml")
     return("pixi")
   }
@@ -238,12 +242,16 @@ install_via_conda <- function(src_dir, conda_prefix, configure_args,
 
   conda_cmd <- if (has_command("mamba")) "mamba" else "conda"
 
-  # Determine prefix
+  # Use the active environment unless it is base. The default prefix must
+  # outlive this session: the built package loads libcudf from it.
   if (is.null(conda_prefix)) {
     conda_prefix <- Sys.getenv("CONDA_PREFIX", "")
+    if (identical(Sys.getenv("CONDA_DEFAULT_ENV"), "base")) {
+      conda_prefix <- ""
+    }
     if (!nzchar(conda_prefix)) {
       conda_prefix <- if (env %in% c("colab", "cloud_gpu")) "/opt/rapids"
-                      else file.path(tempdir(), "cuplyr-rapids")
+                      else default_conda_prefix()
     }
   }
 
@@ -262,86 +270,46 @@ install_via_conda <- function(src_dir, conda_prefix, configure_args,
     file.exists(header) && any(file.exists(lib))
   }
 
+  # RAPIDS 25.12 on CUDA 12, as in pixi.toml. configure needs cuda.h and nvcc,
+  # which libcudf alone doesn't bring. Strict channel priority, which many
+  # .condarc files set, makes the 25.12 solve fail, so it is turned off here.
+  channel_args <- c("--no-channel-priority", "-c", "rapidsai", "-c", "conda-forge", "-c", "nvidia")
+  rapids_pkgs <- c("libcudf=25.12", "librmm=25.12", "libkvikio=25.12", "cuda-version>=12.2,<13")
+  cuda_pkgs <- c("cuda-nvcc", "cuda-cudart-dev")
+
+  # `create -y` on an existing environment replaces it; add to it instead.
+  verb <- if (dir.exists(file.path(conda_prefix, "conda-meta"))) "install" else "create"
+
+  # system2() goes through the shell: quote specs like "cuda-version>=12.2,<13".
+  run_conda <- function(args) {
+    as.integer(system2(conda_cmd, shQuote(args),
+                       stdout = if (verbose) "" else FALSE,
+                       stderr = if (verbose) "" else FALSE))
+  }
+
   # Check if RAPIDS already in this prefix
   has_cudf <- prefix_has_cudf(conda_prefix)
 
   if (!has_cudf) {
     message("Installing RAPIDS packages into ", conda_prefix, " ...")
-    base_create_args <- c(
-      "create", "-y", "-p", conda_prefix,
-      "-c", "rapidsai", "-c", "conda-forge", "-c", "nvidia"
-    )
-    create_arg_sets <- list(
-      c(base_create_args, "libcudf=25.12", "librmm=25.12", "libkvikio=25.12", "spdlog", "fmt"),
-      c(base_create_args, "libcudf", "librmm", "libkvikio", "spdlog", "fmt")
-    )
-
-    base_install_args <- c(
-      "install", "-y", "-p", conda_prefix,
-      "-c", "rapidsai", "-c", "conda-forge", "-c", "nvidia"
-    )
-    install_arg_sets <- list(
-      c(base_install_args, "libcudf-dev=25.12", "librmm-dev=25.12", "libkvikio-dev=25.12"),
-      c(base_install_args, "libcudf-dev", "librmm-dev", "libkvikio-dev")
-    )
+    conda_args <- c(verb, "-y", "-p", conda_prefix, channel_args, rapids_pkgs, cuda_pkgs)
 
     if (dry_run) {
-      message("[dry-run] Would run: ", conda_cmd, " ", paste(create_arg_sets[[1]], collapse = " "))
-      message("[dry-run] Fallback if solve fails: ", conda_cmd, " ",
-              paste(create_arg_sets[[2]], collapse = " "))
-      message("[dry-run] If headers are missing, would also run: ", conda_cmd, " ",
-              paste(install_arg_sets[[1]], collapse = " "))
+      message("[dry-run] Would run: ", conda_cmd, " ", paste(conda_args, collapse = " "))
     } else {
-      solved <- FALSE
-      last_status <- NA_integer_
-      last_args <- create_arg_sets[[length(create_arg_sets)]]
-
-      for (i in seq_along(create_arg_sets)) {
-        conda_args <- create_arg_sets[[i]]
-        if (i > 1) {
-          message("Retrying conda solve with relaxed RAPIDS constraints...")
-        }
-
-        status <- system2(conda_cmd, conda_args,
-                          stdout = if (verbose) "" else FALSE,
-                          stderr = if (verbose) "" else FALSE)
-        last_status <- as.integer(status)
-        last_args <- conda_args
-
-        if (!isTRUE(last_status == 0L)) {
-          next
-        }
-
-        if (prefix_has_cudf(conda_prefix)) {
-          solved <- TRUE
-          break
-        }
-
-        message("Conda solve succeeded but libcudf headers/libraries were not found; trying dev packages...")
-        for (install_args in install_arg_sets) {
-          status <- system2(conda_cmd, install_args,
-                            stdout = if (verbose) "" else FALSE,
-                            stderr = if (verbose) "" else FALSE)
-          last_status <- as.integer(status)
-          last_args <- install_args
-
-          if (isTRUE(last_status == 0L) && prefix_has_cudf(conda_prefix)) {
-            solved <- TRUE
-            break
-          }
-        }
-        if (solved) break
-      }
-
-      if (!solved) {
+      # No unpinned fallback: an older RAPIDS solves but cuplyr can't build
+      # against it.
+      status <- run_conda(conda_args)
+      if (!isTRUE(status == 0L) || !prefix_has_cudf(conda_prefix)) {
         stop(
-          conda_cmd, " dependency setup did not produce usable libcudf headers/libraries",
-          " under ", conda_prefix, " (last exit code ", last_status, ").\n",
+          conda_cmd, " could not install RAPIDS 25.12 for CUDA 12 with usable libcudf",
+          " headers/libraries under ", conda_prefix, " (exit code ", status, ").\n",
           "Expected files:\n",
           "  ", file.path(conda_prefix, "include", "cudf", "types.hpp"), "\n",
           "  ", file.path(conda_prefix, "lib", "libcudf.so"), " (or lib64)\n",
-          "Last command:\n  ",
-          conda_cmd, " ", paste(last_args, collapse = " "),
+          "Command:\n  ",
+          conda_cmd, " ", paste(conda_args, collapse = " "), "\n",
+          "Rerun with verbose = TRUE to see the solver output.",
           call. = FALSE
         )
       }
@@ -353,6 +321,19 @@ install_via_conda <- function(src_dir, conda_prefix, configure_args,
     }
   } else {
     message("RAPIDS packages already found at ", conda_prefix)
+    if (!file.exists(file.path(conda_prefix, "bin", "nvcc"))) {
+      conda_args <- c("install", "-y", "-p", conda_prefix, channel_args, cuda_pkgs)
+      if (dry_run) {
+        message("[dry-run] Would run: ", conda_cmd, " ", paste(conda_args, collapse = " "))
+      } else {
+        message("Installing the CUDA compiler and headers into ", conda_prefix, " ...")
+        status <- run_conda(conda_args)
+        if (!isTRUE(status == 0L)) {
+          stop(conda_cmd, " could not install ", paste(cuda_pkgs, collapse = " "),
+               " into ", conda_prefix, " (exit code ", status, ").", call. = FALSE)
+        }
+      }
+    }
   }
 
   # Configure and build
@@ -507,6 +488,17 @@ install_via_system <- function(src_dir, configure_args, dry_run, verbose) {
   }
 
   invisible(TRUE)
+}
+
+
+# Where install_via_conda() puts RAPIDS unless told otherwise; shared with
+# install.sh.
+default_conda_prefix <- function() {
+  data_home <- Sys.getenv("XDG_DATA_HOME", "")
+  if (!nzchar(data_home)) {
+    data_home <- file.path(path.expand("~"), ".local", "share")
+  }
+  file.path(data_home, "cuplyr", "rapids")
 }
 
 

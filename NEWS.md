@@ -3,6 +3,22 @@
 * `install_cuplyr()` and `install.sh` install from the `main` branch by
   default. The repository's default branch was renamed from `master`.
 
+* Installation works from a pixi or conda environment with no system CUDA
+  toolkit (#38). `configure` finds CUDA inside the environment and prefers it
+  to a system toolkit, so the build uses the CUDA libcudf was built against;
+  an explicit `CUDA_HOME` still wins.
+
+* The conda path of `install.sh` and `install_cuplyr()` installs RAPIDS 25.12
+  for CUDA 12 together with the CUDA compiler and headers, also under strict
+  channel priority, and stops instead of falling back to an older RAPIDS it
+  can't build against. RAPIDS goes to `~/.local/share/cuplyr/rapids` instead
+  of a temporary directory, and an active conda environment is added to
+  instead of being replaced.
+
+* `curl ... | bash` picks pixi when it is installed, and the system path finds
+  a toolkit in `/opt/cuda` without `CUDA_HOME`. `check_deps()` looks for `nvcc`
+  in the same places as `configure`.
+
 ## Read and write parquet on the GPU (F85)
 
 * `read_parquet_gpu()` decodes a parquet file with libcudf: only the compressed

@@ -85,12 +85,23 @@ detect_distro() {
 }
 
 # --- Method detection ---
+# The places configure searches for a system CUDA toolkit.
+has_system_cuda() {
+  local path
+  for path in ${CUDA_HOME:+"$CUDA_HOME"} /usr/local/cuda /opt/cuda /usr/lib/cuda; do
+    [ -f "$path/include/cuda.h" ] && return 0
+  done
+  return 1
+}
+
+# Runs after ensure_source, so pixi.toml is looked for in the source tree, not
+# in the directory the installer was started from.
 detect_method() {
-  if has_cmd pixi && [ -f "pixi.toml" ]; then
+  if has_cmd pixi && [ -f "$SRC_DIR/pixi.toml" ]; then
     echo "pixi"
   elif has_cmd mamba || has_cmd conda; then
     echo "conda"
-  elif [ -f "${CUDA_HOME:-/usr/local/cuda}/include/cuda.h" ]; then
+  elif has_system_cuda; then
     echo "system"
   else
     echo ""
@@ -199,19 +210,36 @@ install_conda() {
   local conda_cmd
   if has_cmd mamba; then conda_cmd="mamba"; else conda_cmd="conda"; fi
 
-  local prefix="${CONDA_PREFIX_ARG:-${CONDA_PREFIX:-}}"
+  # Use the active environment unless it is base. The default prefix must
+  # outlive this script: the built package loads libcudf from it.
+  local prefix="$CONDA_PREFIX_ARG"
+  if [ -z "$prefix" ] && [ -n "${CONDA_PREFIX:-}" ] && [ "${CONDA_DEFAULT_ENV:-}" != "base" ]; then
+    prefix="$CONDA_PREFIX"
+  fi
   if [ -z "$prefix" ]; then
     if [ "$env" = "colab" ] || [ "$env" = "cloud_gpu" ]; then
       prefix="/opt/rapids"
     else
-      prefix="$(mktemp -d)/cuplyr-rapids"
+      prefix="${XDG_DATA_HOME:-$HOME/.local/share}/cuplyr/rapids"
     fi
   fi
 
+  # `create -y` on an existing environment replaces it; add to it instead.
+  local verb="create"
+  if [ -d "$prefix/conda-meta" ]; then
+    verb="install"
+  fi
+
+  # RAPIDS 25.12 on CUDA 12, as in pixi.toml. configure needs cuda.h and nvcc,
+  # which libcudf alone doesn't bring. Strict channel priority, which many
+  # .condarc files set, makes the 25.12 solve fail, so it is turned off here.
+  local channel_args=(--no-channel-priority -c rapidsai -c conda-forge -c nvidia)
+  local rapids_pkgs=("libcudf=25.12" "librmm=25.12" "libkvikio=25.12" "cuda-version>=12.2,<13")
+  local cuda_pkgs=(cuda-nvcc cuda-cudart-dev)
+
   # Dry-run path: print intended commands and exit before filesystem checks.
   if $DRY_RUN; then
-    echo "[dry-run] $conda_cmd create -y -p \"$prefix\" -c rapidsai -c conda-forge -c nvidia libcudf=25.12 librmm=25.12 libkvikio=25.12 spdlog fmt"
-    echo "[dry-run] $conda_cmd install -y -p \"$prefix\" -c rapidsai -c conda-forge -c nvidia libcudf-dev librmm-dev libkvikio-dev"
+    echo "[dry-run] $conda_cmd $verb -y -p \"$prefix\" ${channel_args[*]} ${rapids_pkgs[*]} ${cuda_pkgs[*]}"
     echo "[dry-run] (cd \"$SRC_DIR\" && CONDA_PREFIX=\"$prefix\" ./configure)"
     echo "[dry-run] (cd \"$SRC_DIR\" && R CMD INSTALL .)"
     return
@@ -229,36 +257,17 @@ install_conda() {
   if [ ! -f "$prefix/include/cudf/types.hpp" ]; then
     log "Installing RAPIDS packages into $prefix ..."
 
-    # Try pinned versions first, fall back to unpinned
-    local solved=0
-    for attempt in 1 2; do
-      if [ "$attempt" -eq 1 ]; then
-        vlog "Trying pinned RAPIDS 25.12..."
-        run "$conda_cmd" create -y -p "$prefix" \
-          -c rapidsai -c conda-forge -c nvidia \
-          "libcudf=25.12" "librmm=25.12" "libkvikio=25.12" spdlog fmt && solved=1
-      else
-        log "Retrying with unpinned RAPIDS versions..."
-        run "$conda_cmd" create -y -p "$prefix" \
-          -c rapidsai -c conda-forge -c nvidia \
-          libcudf librmm libkvikio spdlog fmt && solved=1
-      fi
+    # No unpinned fallback: an older RAPIDS solves but cuplyr can't build
+    # against it.
+    if ! run "$conda_cmd" "$verb" -y -p "$prefix" "${channel_args[@]}" \
+      "${rapids_pkgs[@]}" "${cuda_pkgs[@]}"; then
+      echo "ERROR: Could not install RAPIDS 25.12 for CUDA 12 into $prefix" >&2
+      echo "Rerun with --verbose to see the solver output." >&2
+      exit 1
+    fi
 
-      if [ "$solved" -eq 1 ]; then
-        # Check for dev packages if headers missing
-        if [ ! -f "$prefix/include/cudf/types.hpp" ]; then
-          vlog "Installing -dev packages..."
-          run "$conda_cmd" install -y -p "$prefix" \
-            -c rapidsai -c conda-forge -c nvidia \
-            libcudf-dev librmm-dev libkvikio-dev || true
-        fi
-        [ -f "$prefix/include/cudf/types.hpp" ] && break
-        solved=0
-      fi
-    done
-
-    if [ "$solved" -eq 0 ] || [ ! -f "$prefix/include/cudf/types.hpp" ]; then
-      echo "ERROR: Failed to install RAPIDS packages with usable headers/libraries" >&2
+    if [ ! -f "$prefix/include/cudf/types.hpp" ]; then
+      echo "ERROR: RAPIDS installed into $prefix but cudf headers are missing" >&2
       exit 1
     fi
 
@@ -268,10 +277,16 @@ install_conda() {
     fi
   else
     log "RAPIDS packages found at $prefix"
+    if [ ! -x "$prefix/bin/nvcc" ]; then
+      log "Installing the CUDA compiler and headers into $prefix ..."
+      run "$conda_cmd" install -y -p "$prefix" "${channel_args[@]}" "${cuda_pkgs[@]}"
+    fi
   fi
 
+  # Leave CUDA_HOME unset unless the user set it, so configure can take the
+  # toolkit from the environment.
   export CONDA_PREFIX="$prefix"
-  export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+  local cuda_libdir="${CUDA_HOME:-/usr/local/cuda}/lib64"
 
   # Cloud: configure library paths
   local driver_lib=""
@@ -283,8 +298,8 @@ install_conda() {
     fi
     log "Real driver found at: $driver_lib"
     # CRITICAL ORDER: conda lib FIRST (newer libstdc++), then driver, then CUDA
-    export LD_LIBRARY_PATH="$prefix/lib:$driver_lib:$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
-    export R_LD_LIBRARY_PATH="$prefix/lib:$driver_lib:$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+    export LD_LIBRARY_PATH="$prefix/lib:$driver_lib:$cuda_libdir:${LD_LIBRARY_PATH:-}"
+    export R_LD_LIBRARY_PATH="$prefix/lib:$driver_lib:$cuda_libdir:${LD_LIBRARY_PATH:-}"
 
     # Register paths via ldconfig so library() can find them after process startup
     log "Registering library paths via ldconfig..."
@@ -319,14 +334,7 @@ install_system() {
     return
   fi
 
-  # Quick checks
-  if [ ! -f "${CUDA_HOME:-/usr/local/cuda}/include/cuda.h" ]; then
-    echo "ERROR: CUDA toolkit not found." >&2
-    echo "Set CUDA_HOME or install CUDA, then retry." >&2
-    echo "Or use: ./install.sh --method=conda" >&2
-    exit 1
-  fi
-
+  # configure searches for CUDA and explains what is missing.
   cd "$SRC_DIR"
 
   log "Configuring cuplyr..."
