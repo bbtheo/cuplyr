@@ -28,10 +28,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pushes and pull requests run only the system dry-run. The pixi and
-        # conda jobs can't build on a hosted runner until configure finds
-        # CUDA inside a conda environment (issue #38); start them by hand.
-        method: ${{ fromJSON(github.event_name != 'workflow_dispatch' && '["system"]' || (github.event.inputs.method != 'all' && format('["{0}"]', github.event.inputs.method) || '["pixi","conda","system"]')) }}
+        # Pushes and pull requests run the pixi build and the system dry-run.
+        # The conda job installs no nvcc yet, so it only runs when the
+        # workflow is started by hand.
+        method: ${{ fromJSON(github.event_name != 'workflow_dispatch' && '["pixi","system"]' || (github.event.inputs.method != 'all' && format('["{0}"]', github.event.inputs.method) || '["pixi","conda","system"]')) }}
 
     steps:
       - name: Checkout

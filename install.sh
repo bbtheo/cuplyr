@@ -270,8 +270,10 @@ install_conda() {
     log "RAPIDS packages found at $prefix"
   fi
 
+  # Leave CUDA_HOME unset unless the user set it, so configure can take the
+  # toolkit from the environment.
   export CONDA_PREFIX="$prefix"
-  export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+  local cuda_libdir="${CUDA_HOME:-/usr/local/cuda}/lib64"
 
   # Cloud: configure library paths
   local driver_lib=""
@@ -283,8 +285,8 @@ install_conda() {
     fi
     log "Real driver found at: $driver_lib"
     # CRITICAL ORDER: conda lib FIRST (newer libstdc++), then driver, then CUDA
-    export LD_LIBRARY_PATH="$prefix/lib:$driver_lib:$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
-    export R_LD_LIBRARY_PATH="$prefix/lib:$driver_lib:$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+    export LD_LIBRARY_PATH="$prefix/lib:$driver_lib:$cuda_libdir:${LD_LIBRARY_PATH:-}"
+    export R_LD_LIBRARY_PATH="$prefix/lib:$driver_lib:$cuda_libdir:${LD_LIBRARY_PATH:-}"
 
     # Register paths via ldconfig so library() can find them after process startup
     log "Registering library paths via ldconfig..."
