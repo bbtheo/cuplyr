@@ -144,13 +144,15 @@ is_cuda_version_supported <- function(version, required = "12.2") {
 check_cuda_toolkit <- function() {
   required <- "12.2"
 
-  # Try CUDA_HOME/bin/nvcc first, then PATH
-  cuda_home <- Sys.getenv("CUDA_HOME", "/usr/local/cuda")
-  nvcc <- file.path(cuda_home, "bin", "nvcc")
-
-  if (!file.exists(nvcc)) {
-    nvcc <- Sys.which("nvcc")
-  }
+  # Same order as configure: an explicit CUDA_HOME, the conda/pixi
+  # environment, the system toolkit paths, then PATH.
+  homes <- c(
+    Sys.getenv("CUDA_HOME", ""),
+    Sys.getenv("CONDA_PREFIX", ""),
+    "/usr/local/cuda", "/opt/cuda", "/usr/lib/cuda"
+  )
+  candidates <- file.path(homes[nzchar(homes)], "bin", "nvcc")
+  nvcc <- c(candidates[file.exists(candidates)], unname(Sys.which("nvcc")))[1]
 
   if (!nzchar(nvcc) || !file.exists(nvcc)) {
     return(list(
