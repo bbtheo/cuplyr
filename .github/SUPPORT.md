@@ -1,13 +1,15 @@
 # Getting help with cuplyr
 
-Thanks for using cuplyr!
-Before filing an issue, there are a few places to explore and pieces to put together to make the process as smooth as possible.
+Thanks for using cuplyr. Before you file an issue, work through the steps
+below. They make the problem faster to fix.
 
 ## Make a reprex
 
-Start by making a minimal **repr**oducible **ex**ample using the [reprex](https://reprex.tidyverse.org/) package.
-If you haven't used reprex before, the [Get help!](https://www.tidyverse.org/help/) section of the tidyverse site explains it in a few minutes.
-Build the data inside the example, and say whether the table is eager or lazy.
+Start with a minimal reproducible example, made with the
+[reprex](https://reprex.tidyverse.org/) package. If you haven't used reprex
+before, the [Get help!](https://www.tidyverse.org/help/) page on the tidyverse
+site explains it in a few minutes. Build the data inside the example, and say
+whether the table is eager or lazy.
 
 ## Check your installation
 
@@ -20,21 +22,22 @@ cuplyr::diagnostics()
 
 Paste the output of `diagnostics()` into any bug report.
 
-## Where to ask?
+## Where to ask
 
-Armed with your reprex, the next step is to figure out [where to ask](https://www.tidyverse.org/help/#where-to-ask).
+With your reprex ready, decide [where to ask](https://www.tidyverse.org/help/#where-to-ask).
 
-*   If it's a question: start with [forum.posit.co](https://forum.posit.co/) or StackOverflow. There are more people there to answer questions.
+* Questions go to [forum.posit.co](https://forum.posit.co/) or Stack Overflow.
+  More people can answer there.
+* Bugs go here. [File an issue](https://github.com/bbtheo/cuplyr/issues/new).
+* Not sure? File an issue anyway and say so.
 
-*   If it's a bug: you're in the right place, [file an issue](https://github.com/bbtheo/cuplyr/issues/new).
+Before you open a new issue, [search issues and pull requests](https://github.com/bbtheo/cuplyr/issues)
+to check that the bug isn't already reported or fixed in the development
+version. The search starts with `is:issue is:open`. Remove `is:open` to include
+closed issues.
 
-*   If you're not sure: file an issue anyway and say so.
+## What happens next
 
-Before opening a new issue, [search issues and pull requests](https://github.com/bbtheo/cuplyr/issues) to make sure the bug hasn't been reported or already fixed in the development version.
-The search starts with `is:issue is:open`. Remove `is:open` to search closed issues too.
-
-## What happens next?
-
-cuplyr has one maintainer, so a reply can take a few days.
-A good reprex matters because the first thing the maintainer does is run it.
-If we can't reproduce the bug, we can't fix it.
+cuplyr has one maintainer, so a reply can take a few days. The maintainer
+starts by running your reprex, and a bug that can't be reproduced can't be
+fixed.

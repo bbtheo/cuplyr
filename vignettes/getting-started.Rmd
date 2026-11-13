@@ -1,8 +1,8 @@
 ---
-title: "Getting Started with cuplyr"
+title: "Getting started with cuplyr"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{Getting Started with cuplyr}
+  %\VignetteIndexEntry{Getting started with cuplyr}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
@@ -15,410 +15,170 @@ knitr::opts_chunk$set(
 )
 ```
 
-## Introduction
-
-cuplyr is a dplyr backend that executes data manipulation operations on NVIDIA
-GPUs using the RAPIDS cuDF library. If you know dplyr, you already know cuplyr -
-the same verbs work with the same syntax, just faster on large datasets.
+cuplyr runs dplyr verbs on an NVIDIA GPU through the RAPIDS cuDF library. You
+write the same dplyr code. Only the table type changes.
 
 ```{r setup}
 library(cuplyr)
 library(dplyr)
 ```
 
-## When to Use GPU Acceleration
+The GPU pays off on large data, usually above 10 million rows. Below about
+100,000 rows, copying the data to the GPU costs more than it saves, so plain
+dplyr is the better choice there.
 
-GPU acceleration shines when:
+## Basic workflow
 
-- Your data has **millions of rows** (typically >10M for clear benefits)
-- Operations are computationally intensive (aggregations, sorting, filtering)
-- You're doing exploratory analysis with repeated queries
-
-For small datasets (<100K rows), the overhead of transferring data to the GPU
-often outweighs the speedup. Stick with regular dplyr for those cases.
-
-## Basic Workflow
-
-The typical cuplyr workflow has three steps:
-
-1. **Transfer data to GPU** with `tbl_gpu()`
-2. **Process with dplyr verbs** (filter, mutate, summarise, etc.)
-3. **Bring results back** with `collect()`
-
-### Creating a GPU Table
+Copy a data frame to the GPU with `tbl_gpu()`, use dplyr verbs on it, and bring
+the result back to R with `collect()`. The original data frame is not changed.
 
 ```{r create-tbl}
-# Transfer a data frame to GPU memory
 gpu_cars <- tbl_gpu(mtcars)
-
-# Check that it's on the GPU
 gpu_cars
 ```
 
-The data is now in GPU memory. The original R data frame is unchanged.
-
-### Using dplyr Verbs
-
-Use familiar dplyr verbs exactly as you would normally:
-```{r dplyr-verbs}
-# Filter rows
-efficient_cars <- gpu_cars |>
-  filter(mpg > 25)
-
-# Add computed columns
-with_kpl <- gpu_cars |>
-  mutate(kpl = mpg * 0.425144)
-
-# Select specific columns
-subset <- gpu_cars |>
-  select(mpg, cyl, hp)
-
-# Sort rows
-sorted <- gpu_cars |>
-  arrange(desc(mpg))
-
-# Group and summarize
-by_cyl <- gpu_cars |>
-  group_by(cyl) |>
-  summarise(
-    avg_mpg = mean(mpg),
-    avg_hp = mean(hp),
-    count = n()
-  )
-```
-
-### Collecting Results
-
-Operations build up on the GPU. Use `collect()` to bring results back to R:
-
-```{r collect}
-# Bring the grouped summary back to R
-result <- by_cyl |>
-  collect()
-
-result
-```
-
-## A Complete Example
-
-Here's a realistic workflow analyzing the mtcars dataset:
-
 ```{r complete-example}
-analysis <- tbl_gpu(mtcars) |>
-  # Keep only cars with reasonable fuel economy
-
+tbl_gpu(mtcars) |>
   filter(mpg > 15) |>
-  # Calculate power-to-weight ratio
-  mutate(
-    power_to_weight = hp / wt,
-    is_efficient = mpg > 20
-  ) |>
-  # Group by number of cylinders
+  mutate(power_to_weight = hp / wt) |>
   group_by(cyl) |>
-  # Calculate summary statistics
   summarise(
     n_cars = n(),
     avg_mpg = mean(mpg),
     avg_power_ratio = mean(power_to_weight),
     best_mpg = max(mpg)
   ) |>
-  # Sort by average MPG descending
   arrange(desc(avg_mpg)) |>
-  # Bring back to R
   collect()
-
-analysis
 ```
 
-## Chaining Multiple Operations
+## Common verbs
 
-You can chain as many operations as needed. cuplyr handles the execution
-efficiently:
+These work as they do in dplyr:
 
-```{r chaining}
-# Complex pipeline
-result <- tbl_gpu(mtcars) |>
-  filter(cyl %in% c(4, 6)) |>
-  mutate(
-    efficiency_score = mpg / hp * 100,
-    weight_class = wt * 1000
-  ) |>
-  filter(efficiency_score > 5) |>
-  select(mpg, cyl, hp, efficiency_score, weight_class) |>
-  arrange(desc(efficiency_score)) |>
-  collect()
-
-head(result)
-```
-
-## Supported Operations
-
-### filter()
-
-Filter rows based on conditions:
-
-```{r filter-examples, eval=FALSE}
-# Comparison operators
-filter(x > 10)
-filter(x >= 10)
-filter(x < 10)
-filter(x <= 10)
-filter(x == 10)
-filter(x != 10)
-
-# Multiple conditions (combined with AND)
-filter(x > 10, y < 5)
-
-# Column-to-column comparisons
+```{r verb-examples, eval=FALSE}
+filter(x > 10, y < 5)          # conditions are combined with AND
 filter(col_a > col_b)
-```
 
-### select()
-Select and reorder columns:
-
-```{r select-examples, eval=FALSE}
-# By name
 select(mpg, cyl, hp)
-
-# Exclude columns
 select(-disp, -drat)
-
-# Rename while selecting
-select(fuel_economy = mpg, cylinders = cyl)
-
-# Helper functions
+select(fuel_economy = mpg)     # rename while selecting
 select(starts_with("d"))
-select(ends_with("t"))
-select(contains("p"))
-```
 
-### mutate()
+mutate(a = x + y, b = a * 2)   # later columns can use earlier ones
+mutate(mpg = mpg * 0.425)      # replace a column
 
-Create or modify columns:
-
-```{r mutate-examples, eval=FALSE}
-# Arithmetic operations
-mutate(kpl = mpg * 0.425)
-mutate(power_ratio = hp / wt)
-mutate(hp_squared = hp ^ 2)
-
-# Multiple columns at once
-mutate(
-  a = x + y,
-  b = x - y,
-  c = a * 2  # Can reference newly created columns
-)
-
-# Replace existing columns
-mutate(mpg = mpg * 0.425)  # Converts to km/L in place
-```
-
-### arrange()
-
-Sort rows:
-
-```{r arrange-examples, eval=FALSE}
-# Ascending (default)
-arrange(mpg)
-
-# Descending
-arrange(desc(mpg))
-
-# Multiple columns
 arrange(cyl, desc(mpg))
-```
 
-### group_by() + summarise()
-
-Grouped aggregations:
-
-```{r summarise-examples, eval=FALSE}
-# Available aggregation functions
-group_by(cyl) |>
-  summarise(
-    total = sum(mpg),
-    average = mean(mpg),
-    minimum = min(mpg),
-    maximum = max(mpg),
-    count = n(),
-    std_dev = sd(mpg),
-    variance = var(mpg)
-  )
-
-# Multiple grouping columns
 group_by(cyl, gear) |>
-  summarise(avg_mpg = mean(mpg))
+  summarise(
+    total = sum(mpg), average = mean(mpg),
+    minimum = min(mpg), maximum = max(mpg),
+    std_dev = sd(mpg), variance = var(mpg),
+    count = n()
+  )
 ```
 
-## Supported Column Types
+## Column types
 
-cuplyr handles these R types:
-
-| R Type | GPU Type | Notes |
+| R type | GPU type | Notes |
 |--------|----------|-------|
-| `numeric` (double) | FLOAT64 | Full precision |
+| `double` | FLOAT64 | |
 | `integer` | INT32 | |
 | `character` | STRING | |
 | `logical` | BOOL8 | |
 | `Date` | TIMESTAMP_DAYS | |
 | `POSIXct` | TIMESTAMP_MICROSECONDS | |
-| `factor` | INT32 | Stored as codes |
+| `factor` | INT32 | Stored as integer codes, levels kept in R |
 
-## Execution Modes: Lazy vs Eager
+## Lazy and eager execution
 
-cuplyr supports two execution modes. **Lazy is the default.**
-
-### Lazy Mode (Default)
-
-Operations are deferred and optimized before execution:
+Tables are lazy by default. Each verb adds a step to a plan, and the plan runs
+when you call `collect()` or `compute()`. Before it runs, cuplyr optimizes it,
+for example by moving filters earlier and fusing steps.
 
 ```{r lazy-mode}
-# Default: lazy execution
-lazy_tbl <- tbl_gpu(mtcars)
-is_lazy(lazy_tbl)  # TRUE
-
-# Operations build a plan without executing
-pipeline <- lazy_tbl |>
+pipeline <- tbl_gpu(mtcars) |>
   filter(mpg > 20) |>
   mutate(x = hp * 2) |>
   filter(cyl == 4)
 
-# Check pending operations
+is_lazy(pipeline)          # TRUE
 has_pending_ops(pipeline)  # TRUE
-
-# Execute everything at once (optimized)
-result <- pipeline |> collect()
+show_query(pipeline)       # the pending steps
 ```
 
-A mistake in your code (a column that doesn't exist, a type error) still shows
-up at the verb that has it, not at `collect()`. Printing a lazy table with
-pending steps runs the plan and shows the first rows under a
-`# A gibble [lazy]:` header; the table itself stays lazy and keeps nothing, so
-printing it twice runs the plan twice.
+Errors such as a missing column or a type mismatch still appear at the verb that
+causes them, not at `collect()`:
 
-Lazy mode enables query optimization like filter pushdown and operation fusion.
-See `vignette("query-optimization")` for details. `vignette("performance")` has
-measured timings and memory use for both modes, and says when each is the right
-choice.
+```{r errors, error=TRUE}
+try(tbl_gpu(mtcars) |> filter(nonexistent_column > 5))
+try(tbl_gpu(mtcars) |> filter(mpg > "not a number"))
+```
 
-### Eager Mode
+Printing a lazy table runs the plan and shows the first rows under a
+`# A gibble [lazy]:` header. It keeps no result, so printing twice runs the plan
+twice.
 
-Operations execute immediately. Simple and predictable, handy for stepping
-through a pipeline:
+In eager mode each verb runs right away, which helps when you step through a
+pipeline:
 
 ```{r eager-mode}
-# Ask for eager execution on one table
 eager_tbl <- tbl_gpu(mtcars, lazy = FALSE)
 is_lazy(eager_tbl)  # FALSE
-
-# Each operation runs immediately
-result <- eager_tbl |>
-  filter(mpg > 20) |>   # Executes now
-
-  mutate(x = hp * 2) |> # Executes now
-  collect()
 ```
 
-To get eager tables everywhere, set `options(cuplyr.exec_mode = "eager")` or the
-environment variable `CUPLYR_EXEC_MODE=eager`; the `lazy =` argument of
-`tbl_gpu()` wins over both. `cuplyr_options()` lists every cuplyr option with the
-value in use; `?"cuplyr-options"` documents them.
+To make every table eager, set `options(cuplyr.exec_mode = "eager")` or the
+environment variable `CUPLYR_EXEC_MODE=eager`. The `lazy` argument of
+`tbl_gpu()` overrides both. `cuplyr_options()` lists every option with its
+current value, and `?"cuplyr-options"` documents them.
 
-## Controlling Execution
+## Reusing an intermediate result
 
-### compute()
-
-Execute pending operations but keep data on GPU:
+`compute()` runs the pending steps and keeps the result on the GPU. Use it when
+several analyses start from the same base, so the shared steps run once:
 
 ```{r compute}
-# Useful when branching into multiple analyses
 base_data <- tbl_gpu(mtcars) |>
   filter(mpg > 15) |>
   mutate(power_ratio = hp / wt) |>
-  compute()  # Execute and materialize on GPU
+  compute()
 
-# Now branch without re-running the filter/mutate
-analysis_a <- base_data |> filter(cyl == 4) |> collect()
-analysis_b <- base_data |> filter(cyl == 6) |> collect()
+four_cyl <- base_data |> filter(cyl == 4) |> collect()
+six_cyl <- base_data |> filter(cyl == 6) |> collect()
 ```
 
-### show_query()
+## Memory
 
-Inspect the pending operations of a lazy table:
-
-```{r show-query}
-lazy_pipeline <- tbl_gpu(mtcars) |>
-  filter(mpg > 20) |>
-  mutate(x = hp * 2)
-
-show_query(lazy_pipeline)
-```
-
-## Memory Management
-
-GPU memory is managed automatically through R's garbage collector. When a
-`tbl_gpu` object is no longer referenced, its GPU memory is freed.
-
-Check GPU memory usage:
+R's garbage collector frees a table's GPU memory once nothing refers to it.
+`gpu_memory_state()` shows current use, and `gpu_gc()` frees unreferenced
+tables right away.
 
 ```{r memory}
-# Current memory state
 gpu_memory_state()
 ```
 
-Force garbage collection if needed:
-
 ```{r gc, eval=FALSE}
-# Clean up unreferenced GPU objects
 gpu_gc()
 ```
 
-## Best Practices
+## Tips
 
-1. **Filter early** - Reduce data size before expensive operations
-2. **Select only needed columns** - Less data to process
-3. **Keep pipelines lazy (the default)** - Enables optimization
-4. **Keep data on GPU** - Avoid repeated transfers with `compute()`
-5. **Collect late** - Only transfer final results to R
+Filter and select early so later steps handle less data. Keep pipelines lazy so
+the optimizer can work on them. Call `collect()` once, at the end, so only the
+final result is copied back to R.
 
-```{r best-practices}
-# Good: filter and select early
-result <- tbl_gpu(mtcars) |>
-  filter(mpg > 20) |>                    # Reduce rows first
-  select(mpg, cyl, hp, wt) |>            # Reduce columns
-  mutate(power_ratio = hp / wt) |>       # Now compute
-  group_by(cyl) |>
-  summarise(avg_ratio = mean(power_ratio)) |>
-  collect()                               # Transfer only final result
-```
+## Next steps
 
-## Error Handling
+- `vignette("query-optimization")` explains the optimizer.
+- `vignette("performance")` has timings and memory use for lazy and eager mode,
+  and shows where the GPU is slower.
+- `vignette("memory")` covers GPU memory resources and when memory is freed.
+- See also `?tbl_gpu`, `?compute` and `?gpu_memory_state`.
 
-cuplyr validates operations and provides informative errors:
-```{r errors, error=TRUE}
-# Referencing non-existent column
-try({
-  tbl_gpu(mtcars) |>
-    filter(nonexistent_column > 5)
-})
+## System requirements
 
-# Type mismatches are caught
-try({
-  tbl_gpu(mtcars) |>
-    filter(mpg > "not a number")
-})
-```
-
-## Next Steps
-
-- `vignette("query-optimization")` - Deep dive into the AST optimizer
-- `vignette("performance")` - Eager vs lazy: timings, memory, where the GPU loses
-- `vignette("memory")` - GPU memory resources and when memory is freed
-- Package documentation: `?tbl_gpu`, `?compute`, `?gpu_memory_state`
-
-## System Requirements
-
-- NVIDIA GPU with CUDA support (Compute Capability >= 7.0)
-- CUDA Toolkit >= 12.2
-- RAPIDS cuDF >= 25.12
-- R >= 4.3.0
+- NVIDIA GPU with compute capability 7.0 or higher
+- CUDA Toolkit 12.2 or later
+- RAPIDS cuDF 25.12 or later
+- R 4.3.0 or later
