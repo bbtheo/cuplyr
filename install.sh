@@ -230,13 +230,16 @@ install_conda() {
     verb="install"
   fi
 
-  # configure needs cuda.h and nvcc; libcudf alone brings neither.
+  # RAPIDS 25.12 on CUDA 12, as in pixi.toml. configure needs cuda.h and nvcc,
+  # which libcudf alone doesn't bring. Strict channel priority, which many
+  # .condarc files set, makes the 25.12 solve fail, so it is turned off here.
+  local channel_args=(--no-channel-priority -c rapidsai -c conda-forge -c nvidia)
+  local rapids_pkgs=("libcudf=25.12" "librmm=25.12" "libkvikio=25.12" "cuda-version>=12.2,<13")
   local cuda_pkgs=(cuda-nvcc cuda-cudart-dev)
 
   # Dry-run path: print intended commands and exit before filesystem checks.
   if $DRY_RUN; then
-    echo "[dry-run] $conda_cmd $verb -y -p \"$prefix\" -c rapidsai -c conda-forge -c nvidia libcudf=25.12 librmm=25.12 libkvikio=25.12 spdlog fmt ${cuda_pkgs[*]}"
-    echo "[dry-run] $conda_cmd install -y -p \"$prefix\" -c rapidsai -c conda-forge -c nvidia libcudf-dev librmm-dev libkvikio-dev"
+    echo "[dry-run] $conda_cmd $verb -y -p \"$prefix\" ${channel_args[*]} ${rapids_pkgs[*]} ${cuda_pkgs[*]}"
     echo "[dry-run] (cd \"$SRC_DIR\" && CONDA_PREFIX=\"$prefix\" ./configure)"
     echo "[dry-run] (cd \"$SRC_DIR\" && R CMD INSTALL .)"
     return
@@ -254,36 +257,17 @@ install_conda() {
   if [ ! -f "$prefix/include/cudf/types.hpp" ]; then
     log "Installing RAPIDS packages into $prefix ..."
 
-    # Try pinned versions first, fall back to unpinned
-    local solved=0
-    for attempt in 1 2; do
-      if [ "$attempt" -eq 1 ]; then
-        vlog "Trying pinned RAPIDS 25.12..."
-        run "$conda_cmd" "$verb" -y -p "$prefix" \
-          -c rapidsai -c conda-forge -c nvidia \
-          "libcudf=25.12" "librmm=25.12" "libkvikio=25.12" spdlog fmt "${cuda_pkgs[@]}" && solved=1
-      else
-        log "Retrying with unpinned RAPIDS versions..."
-        run "$conda_cmd" "$verb" -y -p "$prefix" \
-          -c rapidsai -c conda-forge -c nvidia \
-          libcudf librmm libkvikio spdlog fmt "${cuda_pkgs[@]}" && solved=1
-      fi
+    # No unpinned fallback: an older RAPIDS solves but cuplyr can't build
+    # against it.
+    if ! run "$conda_cmd" "$verb" -y -p "$prefix" "${channel_args[@]}" \
+      "${rapids_pkgs[@]}" "${cuda_pkgs[@]}"; then
+      echo "ERROR: Could not install RAPIDS 25.12 for CUDA 12 into $prefix" >&2
+      echo "Rerun with --verbose to see the solver output." >&2
+      exit 1
+    fi
 
-      if [ "$solved" -eq 1 ]; then
-        # Check for dev packages if headers missing
-        if [ ! -f "$prefix/include/cudf/types.hpp" ]; then
-          vlog "Installing -dev packages..."
-          run "$conda_cmd" install -y -p "$prefix" \
-            -c rapidsai -c conda-forge -c nvidia \
-            libcudf-dev librmm-dev libkvikio-dev || true
-        fi
-        [ -f "$prefix/include/cudf/types.hpp" ] && break
-        solved=0
-      fi
-    done
-
-    if [ "$solved" -eq 0 ] || [ ! -f "$prefix/include/cudf/types.hpp" ]; then
-      echo "ERROR: Failed to install RAPIDS packages with usable headers/libraries" >&2
+    if [ ! -f "$prefix/include/cudf/types.hpp" ]; then
+      echo "ERROR: RAPIDS installed into $prefix but cudf headers are missing" >&2
       exit 1
     fi
 
@@ -295,8 +279,7 @@ install_conda() {
     log "RAPIDS packages found at $prefix"
     if [ ! -x "$prefix/bin/nvcc" ]; then
       log "Installing the CUDA compiler and headers into $prefix ..."
-      run "$conda_cmd" install -y -p "$prefix" \
-        -c rapidsai -c conda-forge -c nvidia "${cuda_pkgs[@]}"
+      run "$conda_cmd" install -y -p "$prefix" "${channel_args[@]}" "${cuda_pkgs[@]}"
     fi
   fi
 
