@@ -26,6 +26,9 @@ fi
 if grep -Eq "${pos}(bash[[:space:]]+|sh[[:space:]]+)?[^[:space:]]*perf-baseline-set([[:space:]]|$)" <<<"$cmd"; then
   deny "tools/perf-baseline-set raises perf baseline entries and is Theo's. tools/merge-queue ratchets both baselines after a passing gate. Report the perf result instead."
 fi
+if grep -Eq "${pos}(bash[[:space:]]+|sh[[:space:]]+)?[^[:space:]]*site-publish([[:space:]]|$)" <<<"$cmd"; then
+  deny "tools/site-publish pushes the website to gh-pages and is Theo's. Build the site with tools/site and look at docs/ instead."
+fi
 if grep -q 'perf-ratchet' <<<"$cmd" && grep -q 'perf_baseline\.json' <<<"$cmd"; then
   deny "tools/perf-ratchet on the real perf baseline is tools/merge-queue's job after a passing gate. Use a temp copy to test it."
 fi

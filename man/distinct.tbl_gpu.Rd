@@ -63,6 +63,7 @@ so no special-casing is needed here.
 }
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
 

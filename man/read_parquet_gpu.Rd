@@ -195,6 +195,7 @@ unsetting the variable later has no effect.
 }
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   path <- tempfile(fileext = ".parquet")
   write_parquet_gpu(tbl_gpu(mtcars), path)

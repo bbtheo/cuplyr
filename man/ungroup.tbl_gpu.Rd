@@ -20,6 +20,7 @@ Removes grouping from a grouped \code{tbl_gpu} object: all of it, or only the
 group columns selected in \code{...}.
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
 

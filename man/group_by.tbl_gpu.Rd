@@ -107,6 +107,7 @@ other verb, and any change of grouping, drops it.
 }
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
 

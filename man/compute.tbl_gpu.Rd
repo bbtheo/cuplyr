@@ -36,6 +36,7 @@ table also runs its plan, but keeps nothing; \code{compute()} first if you want 
 look at the result repeatedly.
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   # Lazy pipeline
   lazy_result <- tbl_gpu(mtcars) |>  # lazy by default

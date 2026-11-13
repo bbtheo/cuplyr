@@ -128,7 +128,7 @@ Daily commands:
 | Run the full suite | `pixi run test` |
 | Regenerate `NAMESPACE`, `man/` and the Rcpp exports | `pixi run document` |
 | Start R with the package environment | `pixi run r`, then `pkgload::load_all()` |
-| Build the pkgdown site | `pixi run pkgdown` |
+| Build the pkgdown site into `docs/` | `pixi run pkgdown` |
 
 The test commands load the package from the source tree with
 `pkgload::load_all()`, so you don't need to install it. They also take a file
@@ -195,9 +195,25 @@ trailer. Outside contributions may use AI tools as well, on these terms:
 The default branch always carries a development version that ends in
 `.9000`. A release is a pull request that sets the version in `DESCRIPTION`
 and tidies `NEWS.md`. After the merge the maintainer tags the commit,
-publishes a GitHub release from the NEWS section and returns the version to
-`.9000`. Release notes name the RAPIDS version that the release was built and
+publishes a GitHub release from the NEWS section, publishes the website (see
+below) and returns the version to `.9000`. Release notes name the RAPIDS version that the release was built and
 tested against.
+
+## Website
+
+The site at <https://bbtheo.github.io/cuplyr/> is built with pkgdown and
+served by GitHub Pages from the `gh-pages` branch. The vignettes and the
+reference examples run on the GPU, so GitHub's runners can't build it; the
+maintainer builds it locally and pushes the result.
+
+- `pixi run pkgdown` builds the site into `docs/` from the current checkout.
+  Open `docs/index.html` to check it. `docs/` is not committed.
+- `pixi run site-publish` builds the site from `main` and replaces the
+  contents of `gh-pages` with it. It refuses to run on a dirty checkout or on
+  any commit other than `origin/main`.
+
+The site is published at every release and after any merge that changes
+the documentation a user reads (vignettes, the README, exported functions).
 
 ## Code of conduct
 

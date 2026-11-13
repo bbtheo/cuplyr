@@ -92,6 +92,8 @@ work around a block; if a rule stops legitimate work, say so in your report.
 | `tools/perf [--out f.tsv]` | yes | Perf gate (`CUPLYR_PERF=1`, max ratio 1.5 vs the main checkout's baseline). Tester agents only. |
 | `tools/perf-baseline-set [--baseline f] <id>=<s>...` | merge.lock | Raise (or lower) perf baseline entries by hand. Theo only; `tools/merge-queue` runs `tools/perf-ratchet` itself. |
 | `tools/conformance [files] [--ids f.tsv] [--report f.md]` | yes | dplyr's own vendored test suite run against `tbl_gpu`. Tester agents only. |
+| `tools/site` | yes | Build the pkgdown site into `docs/` (vignettes and examples run on the GPU). |
+| `tools/site-publish [--no-push]` | yes | Build the site from `origin/main` and push it to `gh-pages`. Theo only. |
 | `tools/wt-new <id> [attempt]` | no | Create feature worktree `../cuplr-wt/<id>` on branch `feat/<id>` off `origin/main`. PM only. |
 | `tools/merge-queue [--no-merge] <name>` | gate | Run the full gate on `main` + the squashed `feat/<name>`, post the result on its pull request (comment and `gpu-gate` commit status), then squash-merge the pull request. `--no-merge` stops after the report. Orchestrator only. |
 
@@ -99,7 +101,7 @@ work around a block; if a rule stops legitimate work, say so in your report.
 blocks new GPU jobs from starting until it finishes. Lock waits are logged to
 `.git/cuplyr-locks/stats.tsv`.
 
-`pixi run test|perf|conformance|document|build` are aliases for Theo's
+`pixi run test|perf|conformance|document|build|pkgdown|site-publish` are aliases for Theo's
 terminal in the main checkout.
 
 ## Testing conventions
