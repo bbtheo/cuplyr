@@ -28,10 +28,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pushes and pull requests run the pixi build and the system dry-run.
-        # The conda job installs no nvcc yet, so it only runs when the
-        # workflow is started by hand.
-        method: ${{ fromJSON(github.event_name != 'workflow_dispatch' && '["pixi","system"]' || (github.event.inputs.method != 'all' && format('["{0}"]', github.event.inputs.method) || '["pixi","conda","system"]')) }}
+        # Pushes and pull requests run every method; a manual run can pick one.
+        method: ${{ fromJSON(github.event_name != 'workflow_dispatch' && '["pixi","conda","system"]' || (github.event.inputs.method != 'all' && format('["{0}"]', github.event.inputs.method) || '["pixi","conda","system"]')) }}
 
     steps:
       - name: Checkout
