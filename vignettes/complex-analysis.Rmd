@@ -1,8 +1,8 @@
 ---
-title: "Complex Data Analysis with cuplyr"
+title: "Complex data analysis with cuplyr"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{Complex Data Analysis with cuplyr}
+  %\VignetteIndexEntry{Complex data analysis with cuplyr}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
@@ -15,25 +15,18 @@ knitr::opts_chunk$set(
 )
 ```
 
-## Introduction
-This vignette demonstrates how to use cuplyr for real-world data analysis
-workflows. We'll cover multi-step analytical pipelines, branching analyses,
-working with different data types, and patterns for handling large datasets
-efficiently.
+This article works through longer pipelines on one synthetic sales table:
+multi-step aggregations, several analyses branching off a shared base, dates,
+joins, and reusable functions.
 
 ```{r setup}
 library(cuplyr)
 library(dplyr)
 ```
 
-## Building Analytical Workflows
+## The data
 
-Real analysis rarely consists of a single operation. Let's walk through
-progressively more complex workflows.
-
-### Example Dataset
-
-We'll create a synthetic sales dataset to demonstrate these patterns:
+Ten thousand transactions over one year.
 
 ```{r create-data}
 set.seed(42)
@@ -52,25 +45,22 @@ sales_data <- data.frame(
                        prob = c(0.5, 0.2, 0.15, 0.1, 0.05))
 )
 
-# Transfer to GPU
 gpu_sales <- tbl_gpu(sales_data)
 ```
 
-### Multi-Step Revenue Analysis
+## A multi-step pipeline
 
-Let's compute revenue with discounts applied, then analyze by multiple dimensions:
+Derive revenue, drop small transactions, then aggregate by category and
+region. Nothing runs until `collect()`.
 
 ```{r revenue-analysis}
 revenue_analysis <- gpu_sales |>
- # Step 1: Calculate derived metrics
  mutate(
    gross_amount = quantity * unit_price,
    discount_amount = gross_amount * discount_pct / 100,
    net_revenue = gross_amount - discount_amount
  ) |>
- # Step 2: Filter to significant transactions
  filter(net_revenue > 50) |>
- # Step 3: Aggregate by category and region
  group_by(product_category, region) |>
  summarise(
    total_revenue = sum(net_revenue),
@@ -78,70 +68,33 @@ revenue_analysis <- gpu_sales |>
    avg_transaction = mean(net_revenue),
    total_quantity = sum(quantity)
  ) |>
- # Step 4: Sort by revenue
  arrange(desc(total_revenue)) |>
  collect()
 
 head(revenue_analysis, 10)
 ```
 
-### Calculating Metrics Across Groups
+## Branching from a shared base
 
-Compute group-level statistics and compare to overall metrics:
-
-```{r group-metrics}
-# Overall metrics
-overall_stats <- gpu_sales |>
- mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
- summarise(
-   total_revenue = sum(revenue),
-   avg_revenue = mean(revenue),
-   total_orders = n()
- ) |>
- collect()
-
-# Per-category metrics
-category_stats <- gpu_sales |>
- mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
- group_by(product_category) |>
- summarise(
-   category_revenue = sum(revenue),
-   category_avg = mean(revenue),
-   category_orders = n()
- ) |>
- arrange(desc(category_revenue)) |>
- collect()
-
-# Display results
-overall_stats
-category_stats
-```
-
-## Branching Analyses
-
-Often you need to run multiple analyses from a common base. Use `compute()`
-to materialize intermediate results and branch efficiently.
-
-### Creating a Shared Base
+When several analyses start from the same prepared data, call `compute()` on
+the base. It runs the pending pipeline once and keeps the result on the GPU,
+so each branch starts from that result instead of repeating the work.
 
 ```{r branching-base}
-# Prepare base data (filter and add computed columns)
 base_analysis <- gpu_sales |>
  mutate(
-   revenue = quantity * unit_price * (1 - discount_pct/100),
+   revenue = quantity * unit_price * (1 - discount_pct / 100),
    is_high_value = unit_price > 200,
    is_bulk = quantity >= 5
  ) |>
  filter(revenue > 0) |>
- compute()  # Materialize on GPU
-
-# Now branch into different analyses
+ compute()
 ```
 
-### Branch 1: Regional Performance
+Regional performance:
 
 ```{r branch-regional}
-regional_performance <- base_analysis |>
+base_analysis |>
  group_by(region) |>
  summarise(
    revenue = sum(revenue),
@@ -155,13 +108,12 @@ regional_performance <- base_analysis |>
  ) |>
  arrange(desc(revenue)) |>
  collect()
-
-regional_performance
 ```
-### Branch 2: Category Deep-Dive
+
+Revenue per order by category:
 
 ```{r branch-category}
-category_analysis <- base_analysis |>
+base_analysis |>
  group_by(product_category) |>
  summarise(
    revenue = sum(revenue),
@@ -169,548 +121,201 @@ category_analysis <- base_analysis |>
    avg_quantity = mean(quantity),
    orders = n()
  ) |>
- mutate(
-   revenue_per_order = revenue / orders
- ) |>
+ mutate(revenue_per_order = revenue / orders) |>
  arrange(desc(revenue_per_order)) |>
  collect()
-
-category_analysis
 ```
 
-### Branch 3: Discount Effectiveness
+Share of revenue at each discount level:
 
 ```{r branch-discount}
-discount_analysis <- base_analysis |>
+base_analysis |>
  group_by(discount_pct) |>
  summarise(
    orders = n(),
    total_revenue = sum(revenue),
    avg_quantity = mean(quantity)
  ) |>
- mutate(
-   revenue_share = total_revenue * 100 / sum(total_revenue)
- ) |>
+ mutate(revenue_share = total_revenue * 100 / sum(total_revenue)) |>
  arrange(discount_pct) |>
  collect()
-
-discount_analysis
 ```
 
-## Working with Dates
+## Dates
 
-cuplyr supports Date and POSIXct columns. Here's how to work with temporal data.
-
-### Date-Based Filtering
+Date columns stay dates on the GPU, so you can filter on them directly.
 
 ```{r date-filtering}
-# Filter to Q1 2023
-q1_sales <- gpu_sales |>
- filter(
-   date >= as.Date("2023-01-01"),
-   date < as.Date("2023-04-01")
- ) |>
+gpu_sales |>
+ filter(date >= as.Date("2023-01-01"), date < as.Date("2023-04-01")) |>
+ count() |>
  collect()
-
-nrow(q1_sales)
 ```
 
-### Extracting Date Components
-
-For date component extraction (year, month, day), compute these in R before
-transferring or use integer arithmetic:
-
-```{r date-components}
-# Add date components in R, then transfer
-sales_with_dates <- sales_data |>
- mutate(
-   month = as.integer(format(date, "%m")),
-   quarter = ceiling(month / 3),
-   day_of_week = as.integer(format(date, "%u"))  # 1=Monday, 7=Sunday
- )
-
-# Now analyze on GPU
-monthly_trend <- tbl_gpu(sales_with_dates) |>
- mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
- group_by(month) |>
- summarise(
-   monthly_revenue = sum(revenue),
-   orders = n()
- ) |>
- arrange(month) |>
- collect()
-
-monthly_trend
-```
-
-### Quarterly Analysis
+lubridate's `month()` and `quarter()` also run on the GPU. Call them with the
+`lubridate::` prefix or with lubridate attached.
 
 ```{r quarterly}
-quarterly_analysis <- tbl_gpu(sales_with_dates) |>
- mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
+gpu_sales |>
+ mutate(
+   quarter = lubridate::quarter(date),
+   revenue = quantity * unit_price * (1 - discount_pct / 100)
+ ) |>
  group_by(quarter, region) |>
+ summarise(revenue = sum(revenue), orders = n()) |>
+ arrange(quarter, desc(revenue)) |>
+ collect()
+```
+
+A half-year comparison uses `if_else()` to label each row:
+
+```{r before-after}
+gpu_sales |>
+ mutate(
+   period = if_else(date < as.Date("2023-07-01"), "H1", "H2"),
+   revenue = quantity * unit_price * (1 - discount_pct / 100)
+ ) |>
+ group_by(period, product_category) |>
  summarise(
+   avg_order = mean(revenue),
    revenue = sum(revenue),
    orders = n()
  ) |>
- arrange(quarter, desc(revenue)) |>
+ arrange(product_category, period) |>
  collect()
-
-quarterly_analysis
 ```
 
-## Segmentation Analysis
+`avg_order` comes before `revenue` because, as in dplyr, a later expression
+in `summarise()` sees the summarised value of an earlier one.
 
-### Customer Segmentation by Purchase Behavior
+## Customer segments
+
+Aggregate per customer, then label each one with `case_when()`. Both steps run
+on the GPU.
 
 ```{r customer-segmentation}
 customer_segments <- gpu_sales |>
- mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
+ mutate(revenue = quantity * unit_price * (1 - discount_pct / 100)) |>
  group_by(customer_id) |>
  summarise(
    total_spent = sum(revenue),
    order_count = n(),
-   avg_order_value = mean(revenue),
-   total_items = sum(quantity)
+   avg_order_value = mean(revenue)
  ) |>
- collect()
-
-# Segment in R (for complex logic)
-customer_segments <- customer_segments |>
  mutate(
    segment = case_when(
      total_spent > 5000 & order_count > 20 ~ "VIP",
      total_spent > 2000 | order_count > 10 ~ "Regular",
      order_count > 5 ~ "Occasional",
-     TRUE ~ "New"
+     .default = "New"
    )
- )
+ ) |>
+ collect()
 
-# Summary by segment
 table(customer_segments$segment)
 ```
 
-### Product Performance Tiers
+## Two passes with a join
 
-```{r product-tiers}
-category_performance <- gpu_sales |>
- mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
+To put each region's revenue against its category total, aggregate once,
+then join the totals back. Both tables are `tbl_gpu`, so the join runs on the
+GPU too.
+
+```{r multi-pass}
+with_revenue <- gpu_sales |>
+ mutate(revenue = quantity * unit_price * (1 - discount_pct / 100))
+
+category_totals <- with_revenue |>
  group_by(product_category) |>
- summarise(
-   revenue = sum(revenue),
-   units_sold = sum(quantity),
-   avg_price = mean(unit_price),
-   transactions = n()
- ) |>
- mutate(
-   revenue_per_unit = revenue / units_sold
- ) |>
- arrange(desc(revenue)) |>
- collect()
+ summarise(category_total = sum(revenue))
 
-category_performance
-```
-
-## Comparative Analysis
-
-### Before/After Comparison
-
-Compare metrics across time periods:
-
-```{r before-after}
-# Add period indicator in R
-sales_with_period <- sales_data |>
- mutate(
-   period = ifelse(date < as.Date("2023-07-01"), "H1", "H2")
- )
-
-period_comparison <- tbl_gpu(sales_with_period) |>
- mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
- group_by(period, product_category) |>
- summarise(
-   revenue = sum(revenue),
-   orders = n(),
-   avg_order = mean(revenue)
- ) |>
- arrange(product_category, period) |>
- collect()
-
-period_comparison
-```
-
-### Region-to-Region Comparison
-
-```{r region-comparison}
-region_metrics <- gpu_sales |>
- mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
- group_by(region) |>
- summarise(
-   total_revenue = sum(revenue),
-   total_orders = n(),
-   avg_order_value = mean(revenue),
-   avg_quantity = mean(quantity),
-   avg_discount = mean(discount_pct)
- ) |>
- collect()
-
-# Calculate indices relative to mean
-overall_avg <- mean(region_metrics$total_revenue)
-region_metrics$revenue_index <- region_metrics$total_revenue / overall_avg * 100
-
-region_metrics
-```
-
-## Handling Large Datasets
-
-### Memory-Efficient Patterns
-
-When working with very large data, minimize memory usage:
-
-```{r memory-efficient, eval=FALSE}
-# Pattern 1: Filter early, select only needed columns
-result <- tbl_gpu(huge_data) |>
- filter(status == "active") |>      # Reduce rows first
- select(id, date, amount, category) |>  # Then reduce columns
- mutate(amount_adj = amount * 1.1) |>
- group_by(category) |>
- summarise(total = sum(amount_adj)) |>
- collect()
-
-# Pattern 2: Process in logical segments
-base <- tbl_gpu(huge_data) |>
- filter(date >= start_date, date < end_date) |>
- select(required_columns) |>
- compute()  # Checkpoint: clear intermediate memory
-
-result <- base |>
- # Continue analysis on reduced data
- group_by(segment) |>
- summarise(metrics) |>
- collect()
-```
-
-### Monitoring Memory Usage
-
-```{r memory-monitoring}
-# Check GPU memory state
-gpu_memory_state()
-
-# After large operations, clean up
-gpu_gc()
-```
-
-## Multi-Pass Analysis
-
-Some analyses require multiple passes over data. Structure these efficiently:
-
-### Pass 1: Compute Aggregates
-
-```{r multi-pass-1}
-# First pass: get category totals
-category_totals <- gpu_sales |>
- mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
- group_by(product_category) |>
- summarise(category_total = sum(revenue)) |>
- collect()
-
-category_totals
-```
-
-### Pass 2: Detailed Analysis with Context
-
-```{r multi-pass-2}
-# Add category totals back to data (in R)
-sales_enriched <- sales_data |>
- left_join(category_totals, by = "product_category")
-
-# Second pass: analyze with category context
-regional_share <- tbl_gpu(sales_enriched) |>
- mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
+with_revenue |>
+ left_join(category_totals, by = "product_category") |>
  group_by(product_category, region) |>
  summarise(
    region_revenue = sum(revenue),
-   category_total = max(category_total)  # Same value per group
+   category_total = max(category_total)
  ) |>
- mutate(
-   region_share = region_revenue * 100 / category_total
- ) |>
+ mutate(region_share = region_revenue * 100 / category_total) |>
  arrange(product_category, desc(region_share)) |>
  collect()
-
-regional_share
 ```
 
-## Building Reusable Analysis Functions
+## Reusable functions
 
-Encapsulate common patterns in functions:
+A `tbl_gpu` goes through ordinary functions like any data frame. Pass
+grouping columns through `...`.
 
 ```{r reusable-functions}
-#' Calculate revenue metrics by grouping columns
-#'
-#' @param gpu_data A tbl_gpu object with sales data
-#' @param ... Grouping columns
-#' @return Collected data frame with revenue metrics
-calculate_revenue_metrics <- function(gpu_data, ...) {
- gpu_data |>
+revenue_metrics <- function(data, ..., min_value = 0) {
+ data |>
    mutate(
      gross = quantity * unit_price,
-     net = gross * (1 - discount_pct/100)
+     net = gross * (1 - discount_pct / 100)
    ) |>
+   filter(net >= min_value) |>
    group_by(...) |>
    summarise(
      gross_revenue = sum(gross),
      net_revenue = sum(net),
-     total_discount = sum(gross) - sum(net),
      order_count = n(),
      avg_order = mean(net)
    ) |>
-   mutate(
-     discount_rate = total_discount * 100 / gross_revenue
-   ) |>
+   mutate(discount_rate = (gross_revenue - net_revenue) * 100 / gross_revenue) |>
    arrange(desc(net_revenue)) |>
    collect()
 }
 
-# Use the function
-by_category <- calculate_revenue_metrics(gpu_sales, product_category)
-by_region <- calculate_revenue_metrics(gpu_sales, region)
-by_both <- calculate_revenue_metrics(gpu_sales, product_category, region)
-
-head(by_both, 10)
+revenue_metrics(gpu_sales, region)
+revenue_metrics(gpu_sales, product_category, min_value = 500)
+head(revenue_metrics(gpu_sales, product_category, region), 10)
 ```
 
-### Parameterized Analysis
+## Finishing in R
 
-```{r parameterized}
-#' Analyze high-value transactions
-#'
-#' @param gpu_data A tbl_gpu object
-#' @param min_value Minimum transaction value
-#' @param group_col Column to group by
-analyze_high_value <- function(gpu_data, min_value = 100, group_col) {
- group_col <- rlang::enquo(group_col)
+Once the GPU has reduced the data to a few dozen rows, `collect()` it and
+carry on with any R code. Here the tiers use quantiles of the aggregated
+revenue.
 
- gpu_data |>
-   mutate(transaction_value = quantity * unit_price * (1 - discount_pct/100)) |>
-   filter(transaction_value >= min_value) |>
-   group_by(!!group_col) |>
-   summarise(
-     high_value_revenue = sum(transaction_value),
-     high_value_count = n(),
-     avg_high_value = mean(transaction_value)
-   ) |>
-   arrange(desc(high_value_revenue)) |>
-   collect()
-}
-
-# Different thresholds
-high_value_100 <- analyze_high_value(gpu_sales, 100, product_category)
-high_value_500 <- analyze_high_value(gpu_sales, 500, product_category)
-
-high_value_100
-high_value_500
-```
-
-## Combining GPU and CPU Processing
-
-Some operations are better suited for R. Use a hybrid approach:
-
-### GPU for Heavy Lifting
-
-```{r hybrid-gpu}
-# Heavy aggregation on GPU
+```{r hybrid}
 aggregated <- gpu_sales |>
- mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
+ mutate(revenue = quantity * unit_price * (1 - discount_pct / 100)) |>
  group_by(product_category, region, discount_pct) |>
- summarise(
-   revenue = sum(revenue),
-   orders = n(),
-   quantity = sum(quantity)
- ) |>
+ summarise(revenue = sum(revenue), orders = n()) |>
  collect()
 
-nrow(aggregated)  # Much smaller than original
-```
+nrow(aggregated)
 
-### R for Complex Logic
-
-```{r hybrid-r}
-# Complex categorization in R
-final_analysis <- aggregated |>
+aggregated |>
+ ungroup() |>
  mutate(
    performance = case_when(
      revenue > quantile(revenue, 0.9) ~ "Top 10%",
-     revenue > quantile(revenue, 0.5) ~ "Above Average",
-     revenue > quantile(revenue, 0.25) ~ "Below Average",
-     TRUE ~ "Bottom 25%"
-   ),
-   discount_tier = case_when(
-     discount_pct == 0 ~ "Full Price",
-     discount_pct <= 10 ~ "Light Discount",
-     discount_pct <= 15 ~ "Moderate Discount",
-     TRUE ~ "Heavy Discount"
+     revenue > quantile(revenue, 0.5) ~ "Above median",
+     revenue > quantile(revenue, 0.25) ~ "Below median",
+     .default = "Bottom 25%"
    )
  ) |>
- group_by(performance, discount_tier) |>
- summarise(
-   total_revenue = sum(revenue),
-   segments = n(),
-   .groups = "drop"
- )
-
-final_analysis
+ count(performance)
 ```
 
-## Error Handling in Analysis Pipelines
+## Large data
 
-Robust pipelines handle edge cases:
+On big tables, filter and `select()` early so fewer rows and columns reach
+the later steps. Check GPU memory with `gpu_memory_state()` and release
+unused memory with `gpu_gc()`:
 
-```{r error-handling}
-safe_analysis <- function(data, min_rows = 100) {
- # Validate input
- if (!is.data.frame(data)) {
-   stop("Input must be a data frame")
- }
-
- if (nrow(data) < min_rows) {
-   warning("Dataset has fewer than ", min_rows, " rows")
- }
-
- # Check required columns
- required <- c("quantity", "unit_price", "discount_pct")
- missing <- setdiff(required, names(data))
- if (length(missing) > 0) {
-   stop("Missing required columns: ", paste(missing, collapse = ", "))
- }
-
- # Perform analysis
- tryCatch({
-   tbl_gpu(data) |>
-     mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
-     filter(revenue > 0) |>
-     summarise(
-       total = sum(revenue),
-       avg = mean(revenue),
-       n = n()
-     ) |>
-     collect()
- }, error = function(e) {
-   message("Analysis failed: ", e$message)
-   data.frame(total = NA, avg = NA, n = 0)
- })
-}
-
-# Test with valid data
-safe_analysis(sales_data)
+```{r memory-monitoring}
+gpu_memory_state()
+gpu_gc()
 ```
 
-## Summary Statistics Dashboard
+On a table this small, plain dplyr is often faster because the data has to
+reach the GPU first. The GPU pays off at millions of rows.
 
-Create a comprehensive summary:
+## See also
 
-```{r dashboard}
-create_sales_dashboard <- function(gpu_data) {
- # Overall metrics
- overall <- gpu_data |>
-   mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
-   summarise(
-     total_revenue = sum(revenue),
-     total_orders = n(),
-     total_units = sum(quantity),
-     avg_order_value = mean(revenue),
-     avg_discount = mean(discount_pct)
-   ) |>
-   collect()
-
- # Top categories
- top_categories <- gpu_data |>
-   mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
-   group_by(product_category) |>
-   summarise(revenue = sum(revenue), orders = n()) |>
-   arrange(desc(revenue)) |>
-   collect()
-
- # Regional breakdown
- regional <- gpu_data |>
-   mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
-   group_by(region) |>
-   summarise(revenue = sum(revenue), orders = n()) |>
-   arrange(desc(revenue)) |>
-   collect()
-
- list(
-   overall = overall,
-   by_category = top_categories,
-   by_region = regional,
-   generated_at = Sys.time()
- )
-}
-
-dashboard <- create_sales_dashboard(gpu_sales)
-
-cat("=== Sales Dashboard ===\n\n")
-cat("Overall Metrics:\n")
-print(dashboard$overall)
-cat("\nBy Category:\n")
-print(dashboard$by_category)
-cat("\nBy Region:\n")
-print(dashboard$by_region)
-```
-
-## Performance Comparison
-
-Compare GPU vs CPU performance on your data:
-
-```{r performance-comparison, eval=FALSE}
-library(bench)
-
-# Benchmark: GPU vs CPU for aggregation
-comparison <- bench::mark(
- gpu = {
-   tbl_gpu(sales_data) |>
-     mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
-     group_by(product_category, region) |>
-     summarise(
-       total = sum(revenue),
-       avg = mean(revenue),
-       n = n()
-     ) |>
-     collect()
- },
- cpu = {
-   sales_data |>
-     mutate(revenue = quantity * unit_price * (1 - discount_pct/100)) |>
-     group_by(product_category, region) |>
-     summarise(
-       total = sum(revenue),
-       avg = mean(revenue),
-       n = n(),
-       .groups = "drop"
-     )
- },
- check = FALSE,
- min_iterations = 5
-)
-
-comparison
-```
-
-For small datasets like our example, CPU may be faster due to transfer overhead.
-The GPU advantage becomes clear with millions of rows.
-
-## Next Steps
-
-- `vignette("getting-started")` - Basic cuplyr usage
-- `vignette("query-optimization")` - Understanding the optimizer
-- Package documentation for specific functions
-
-## Best Practices Summary
-
-1. **Filter and select early** to reduce data size
-2. **Stay lazy** (the default) for complex multi-step pipelines
-3. **Use compute()** to checkpoint before branching
-4. **Prepare date components in R** before transfer
-5. **Use hybrid GPU/CPU** - GPU for aggregation, R for complex logic
-6. **Monitor memory** with `gpu_memory_state()` and `gpu_gc()`
-7. **Encapsulate patterns** in reusable functions
-8. **Handle errors gracefully** in production pipelines
+- `vignette("getting-started")` for the basics.
+- `vignette("query-optimization")` for what `compute()` and the optimizer do.
+- `vignette("memory")` and `vignette("performance")` for memory use and
+  benchmarks.

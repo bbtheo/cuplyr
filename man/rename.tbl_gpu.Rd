@@ -29,6 +29,7 @@ column errors, matching \code{dplyr::rename()}. A same-call swap (e.g.
 replaced at once.
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
 

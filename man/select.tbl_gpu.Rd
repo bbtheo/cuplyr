@@ -72,6 +72,7 @@ memory usage and improve performance of subsequent operations.
 }
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
 

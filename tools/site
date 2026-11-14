@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Build the pkgdown site into docs/ (GPU lock: the vignettes and the reference
+# examples run on the GPU). Open docs/index.html to look at it; publish it with
+# tools/site-publish.
+source "$(dirname "$0")/lib.sh"
+cd "$CUPLYR_WT_ROOT"
+exec "$(dirname "$0")/gpu-run" --label site -- Rscript -e 'source("tools/ensure-optimized.R"); cuplyr_ensure_optimized_dll("."); source("scripts/build_pkgdown.R")'

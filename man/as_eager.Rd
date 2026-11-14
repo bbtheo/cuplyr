@@ -17,6 +17,7 @@ Computes any pending operations and returns a \code{tbl_gpu} that will
 execute all subsequent operations immediately.
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   # Tables are lazy by default; switch to eager mid-pipeline
   result <- tbl_gpu(mtcars) |>

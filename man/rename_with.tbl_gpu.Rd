@@ -28,6 +28,7 @@ similar to \code{dplyr::rename_with()}. Runs entirely as a schema-only
 operation, like \code{\link[=rename.tbl_gpu]{rename.tbl_gpu()}}.
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
 

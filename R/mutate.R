@@ -311,6 +311,7 @@
 #' @importFrom dplyr mutate
 #'
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   gpu_mtcars <- tbl_gpu(mtcars)
 #'
@@ -1885,6 +1886,7 @@ check_transmute_dots <- function(..., .keep, .before, .after, error_call = rlang
 #' @importFrom dplyr transmute
 #'
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   gpu_mtcars <- tbl_gpu(mtcars)
 #'

@@ -9,14 +9,14 @@ Bug reports, feature ideas, documentation fixes and code are all welcome.
 1. Every bug and feature starts as a [GitHub issue](https://github.com/bbtheo/cuplyr/issues).
    The issue is where the approach gets discussed and agreed.
 2. Every change lands through a pull request that links its issue with
-   `Fixes #123`. This holds for the maintainer and for coding agents too.
-3. A maintainer runs the merge gate on the pull request (see
-   [The merge gate](#the-merge-gate)) and posts the result as a comment.
+   `Fixes #123`. The maintainer and coding agents work this way too.
+3. A maintainer runs [the merge gate](#the-merge-gate) on the pull request
+   and posts the result as a comment.
 4. A passing pull request is squash-merged, so the default branch gets one
    commit per pull request.
 
-Typos and small documentation fixes can skip step 1. Open the pull request
-directly.
+Typos and small documentation fixes can skip the issue. Open the pull
+request directly.
 
 ## Scope
 
@@ -24,8 +24,8 @@ In scope:
 
 - dplyr verbs, helpers and arguments, with dplyr's semantics. A result that
   differs from dplyr is a bug.
-- Native GPU paths for verbs that run through the CPU fallback today. The
-  fallback stays as the safety net.
+- GPU code for verbs that use the CPU fallback today. The fallback stays as
+  the safety net.
 - Reading and writing data on the GPU, memory management, and the lazy
   optimizer.
 - Installation and packaging.
@@ -38,12 +38,12 @@ Out of scope for now:
   Upload raises `cuplyr_error_unsupported_class`.
 - Multi-GPU execution.
 
-A request outside this list is not rejected for good. Open an issue and argue
-for it. A change of scope is a pull request against this section.
+Something outside this list can still come in. Open an issue and make the
+case. Changing the scope means a pull request against this section.
 
 ### Known differences from dplyr
 
-These are deliberate, so they are not bugs:
+These differences are deliberate, not bugs:
 
 - A `Date` with a fractional day is floored at upload, with a
   `cuplyr_warning_fractional_date` warning.
@@ -53,22 +53,23 @@ These are deliberate, so they are not bugs:
 
 ## Reporting a bug
 
-Open an issue with the template. A good report has three things:
+Open an issue with the template. A good report has:
 
 - a small example that builds its own data, ideally made with
   `reprex::reprex()`
 - what you expected, which is usually what dplyr returns for a data frame
 - the output of `cuplyr::diagnostics()`
 
-Say whether the problem shows on eager tables, lazy tables or both, if you
-know.
+If you know, say whether the problem shows on eager tables, lazy tables or
+both.
 
 ## Proposing a feature
 
-Open an issue and show the code you want to work. Wait for a
-maintainer to agree on the approach before you write a large pull request.
-Issues labelled `help wanted ❤️` are agreed and open for anyone to take. Comment
-on the issue so two people don't do the same work.
+Open an issue and show the code you want to work. Wait until a maintainer
+agrees on the approach before you write a large pull request.
+
+Issues labelled `help wanted ❤️` are agreed and open to anyone. Comment on the
+issue before you start so two people don't do the same work.
 
 ## Pull requests
 
@@ -83,14 +84,14 @@ on the issue so two people don't do the same work.
 - Give the pull request a conventional-commit title (`feat: ...`, `fix: ...`,
   `perf: ...`, `docs: ...`, `test: ...`, `refactor: ...`). The title becomes
   the squashed commit's subject.
-- Review comments get fixed with new commits. Don't force-push after a review
-  has started.
+- Fix review comments with new commits. Don't force-push once a review has
+  started.
 
 ### The merge gate
 
-Every test needs a CUDA GPU, and GitHub's free runners have none. So a
-maintainer runs the gate on a workstation GPU, on your branch merged into the
-current default branch. The gate has three parts and all must pass:
+Every test needs a CUDA GPU, and GitHub's free runners have none. A
+maintainer runs the gate on a workstation GPU instead, against your branch
+merged into the current default branch. All three parts must pass:
 
 | Part | What it checks | Run it yourself |
 |---|---|---|
@@ -98,12 +99,12 @@ current default branch. The gate has three parts and all must pass:
 | Performance | No benchmark is more than 1.5x slower than the recorded baseline | `pixi run perf` |
 | dplyr conformance | dplyr's own test suite, run against GPU tables. A test that passes today must still pass | `pixi run conformance` |
 
-The performance baseline is specific to the maintainer's GPU, so your own
-`pixi run perf` numbers are a rough guide only. If the gate fails, the
+The performance baseline comes from the maintainer's GPU, so your own
+`pixi run perf` numbers are only a rough guide. If the gate fails, the
 maintainer posts the failing tests or benchmarks on the pull request.
 
 You can contribute without a GPU. Say so in the pull request and a maintainer
-runs the tests for you. Expect a slower round trip.
+runs the tests for you. This takes longer.
 
 ## Developer setup
 
@@ -128,19 +129,19 @@ Daily commands:
 | Run the full suite | `pixi run test` |
 | Regenerate `NAMESPACE`, `man/` and the Rcpp exports | `pixi run document` |
 | Start R with the package environment | `pixi run r`, then `pkgload::load_all()` |
-| Build the pkgdown site | `pixi run pkgdown` |
+| Build the pkgdown site into `docs/` | `pixi run pkgdown` |
 
 The test commands load the package from the source tree with
 `pkgload::load_all()`, so you don't need to install it. They also take a file
-lock so that two runs never share the GPU, which keeps the memory tests
+lock so two runs never share the GPU. The memory tests need that to stay
 stable.
 
 `pixi run install` installs the package into the pixi environment. Use it to
 try cuplyr as a user would.
 
-How the code works (the AST and optimizer, joins, factors, the libcudf calls
-to be careful with) is described in `.claude/reference/architecture.md`. Read
-it before a larger change.
+`.claude/reference/architecture.md` explains how the code works: the AST and
+optimizer, joins, factors and the libcudf calls to be careful with. Read it
+before a larger change.
 
 ## Code guidelines
 
@@ -148,8 +149,8 @@ it before a larger change.
 
 Never edit `NAMESPACE` or the Rcpp export files by hand. Add roxygen tags
 (`@export`, `@importFrom`) and run `pixi run document`.
-Commit the regenerated `src/RcppExports.cpp` and `R/RcppExports.R` along
-with your C++ change: a source install from a clone uses them as they are.
+Commit the regenerated `src/RcppExports.cpp` and `R/RcppExports.R` with your
+C++ change. A source install from a clone uses them as they are.
 
 ### Tests
 
@@ -177,27 +178,49 @@ a class that starts with `cuplyr_error_`.
 
 ## AI-assisted contributions
 
-Most of cuplyr's own code is written by coding agents (Claude Code) that the
-maintainer directs and reviews, and those commits carry a `Co-Authored-By`
-trailer. Outside contributions may use AI tools as well, on these terms:
+Claude Code agents write most of cuplyr's code. The maintainer directs and
+reviews them, and their commits carry a `Co-Authored-By` trailer. You may use
+AI tools too, on these terms:
 
 - Say so in the pull request, using the line in the template.
-- You have read every changed line and can explain and debug it. A pull
-  request whose author can't answer review questions gets closed.
-- The tests still come first. Generated code without oracle tests against
-  dplyr is not reviewed.
+- Read every changed line and be able to explain and debug it. If you can't
+  answer review questions, the pull request gets closed.
+- Tests still come first. Generated code without oracle tests against dplyr
+  won't be reviewed.
 - Don't post generated text as issue comments or reviews without reading it.
 
 `AGENTS.md` holds the rules that agents working in this repository follow.
 
 ## Releases
 
-The default branch always carries a development version that ends in
-`.9000`. A release is a pull request that sets the version in `DESCRIPTION`
-and tidies `NEWS.md`. After the merge the maintainer tags the commit,
-publishes a GitHub release from the NEWS section and returns the version to
-`.9000`. Release notes name the RAPIDS version that the release was built and
-tested against.
+The default branch always carries a development version ending in `.9000`.
+A release is a pull request that sets the version in `DESCRIPTION` and tidies
+`NEWS.md`. After the merge, the maintainer:
+
+- tags the commit
+- publishes a GitHub release from the NEWS section
+- publishes the [website](#website)
+- returns the version to `.9000`
+
+Release notes name the RAPIDS version the release was built and tested
+against.
+
+## Website
+
+The site at <https://bbtheo.github.io/cuplyr/> is built with pkgdown and
+served by GitHub Pages from the `gh-pages` branch. The vignettes and
+reference examples run on the GPU, so GitHub's runners can't build it. The
+maintainer builds it locally and pushes the result.
+
+- `pixi run pkgdown` builds the site into `docs/` from the current checkout.
+  Open `docs/index.html` to check it. `docs/` is not committed.
+- `pixi run site-publish` builds the site from `main` and replaces the
+  contents of `gh-pages` with it. It refuses to run on a dirty checkout or on
+  any commit other than `origin/main`.
+
+The maintainer publishes the site at every release, and after any merge
+that changes user-facing docs such as the vignettes, the README or the
+documentation of exported functions.
 
 ## Code of conduct
 

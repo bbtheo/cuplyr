@@ -53,6 +53,7 @@
 #' @importFrom dplyr glimpse
 #'
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   tbl_gpu(mtcars) |> glimpse()
 #' }

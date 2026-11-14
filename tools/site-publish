@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Build the pkgdown site from main and publish it to the gh-pages branch, which
+# GitHub Pages serves at https://bbtheo.github.io/cuplyr/. Theo only.
+#
+#   tools/site-publish            # build, commit to gh-pages, push
+#   tools/site-publish --no-push  # build and commit to a local gh-pages; push yourself
+#
+# Refuses to run unless the checkout is clean and HEAD is origin/main, so the
+# site always documents a commit that is on main.
+source "$(dirname "$0")/lib.sh"
+push=1
+if [[ "${1:-}" == "--no-push" ]]; then push=0; shift; fi
+cd "$CUPLYR_WT_ROOT"
+
+git fetch -q origin "$CUPLYR_TRUNK" gh-pages
+[[ -z "$(git status --porcelain --untracked-files=no)" ]] ||
+  { echo "the checkout has uncommitted changes; the site must match a commit on $CUPLYR_TRUNK" >&2; exit 2; }
+sha="$(git rev-parse HEAD)"
+[[ "$sha" == "$(git rev-parse "origin/$CUPLYR_TRUNK")" ]] ||
+  { echo "HEAD is not origin/$CUPLYR_TRUNK; check out the current $CUPLYR_TRUNK first" >&2; exit 2; }
+
+"$(dirname "$0")/site"
+[[ -f docs/index.html ]] || { echo "the build left no docs/index.html" >&2; exit 1; }
+
+version="$(sed -n 's/^Version:[[:space:]]*//p' DESCRIPTION)"
+pages="$(mktemp -d)"
+trap 'git -C "$CUPLYR_WT_ROOT" worktree remove --force "$pages" 2>/dev/null || true; rm -rf "$pages"' EXIT
+git worktree add -q --detach "$pages" origin/gh-pages
+
+# Replace the whole branch content, so pages dropped from the site disappear.
+find "$pages" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+cp -a docs/. "$pages/"
+# Serve the files as they are; Jekyll would drop anything starting with "_".
+touch "$pages/.nojekyll"
+
+cd "$pages"
+git add -A
+if git diff --cached --quiet; then
+  echo "gh-pages already has this site; nothing to publish"
+  exit 0
+fi
+git commit -q -m "Site for cuplyr $version (${sha:0:7})"
+if [[ "$push" == 1 ]]; then
+  git push -q origin HEAD:refs/heads/gh-pages
+  echo "published cuplyr $version (${sha:0:7}); GitHub Pages updates within a few minutes"
+else
+  git branch -f gh-pages HEAD
+  echo "committed to the local gh-pages branch; publish it with: git push origin gh-pages"
+fi

@@ -53,6 +53,7 @@ fixed group keys (after \code{filter()}, \code{semi_join()}, ... on a \code{.dro
 table), which also collects the (small) group keys to add the empty groups.
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
   gpu_mtcars |> count(cyl) |> collect()
