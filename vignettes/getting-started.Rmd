@@ -89,7 +89,7 @@ group_by(cyl, gear) |>
 | `logical` | BOOL8 | |
 | `Date` | TIMESTAMP_DAYS | |
 | `POSIXct` | TIMESTAMP_MICROSECONDS | |
-| `factor` | INT32 | Stored as integer codes, levels kept in R |
+| `factor` | INT32 | Integer codes on the GPU, levels kept in R. The schema labels it DICTIONARY32 |
 
 ## Lazy and eager execution
 
