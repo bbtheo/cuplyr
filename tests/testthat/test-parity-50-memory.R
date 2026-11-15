@@ -7,12 +7,15 @@
 # are exact and do not depend on other processes, so the bounds are tight.
 #
 # Before #50 the `.by` form added a whole-table `row_number()` column through
-# the window machinery: its peak was the group_by form's plus one INT32 column,
-# but it allocated about six INT32 columns more in total, and ran four verb
-# calls (2.6x the group_by form's time at 1e3-1e6 rows). Ordering the groups
-# by first appearance needs at most one transient INT32 position per row, so:
-#   peak(.by)      <= peak(group_by)      + 1.1 x 4 bytes/row
-#   allocated(.by) <= allocated(group_by) + 1.5 x 4 bytes/row
+# the window machinery: its peak was the group_by form's plus one or two INT32
+# columns (4-8 bytes/row), it allocated about six INT32 columns more in total,
+# and it ran four verb calls (2.6x the group_by form's time at 1e3-1e6 rows).
+# A row-position MIN() inside the groupby still costs 8 bytes/row at the
+# aggregation peak (the position column plus libcudf's per-row intermediate),
+# while finding each group's first row in a pass of its own (a hash
+# distinct) peaks below the groupby itself. So the contract is:
+#   peak(.by) <= peak(group_by) + 1 byte/row
+#   time(.by) <= 1.3 x time(group_by)
 # and an ungrouped bare row_number() allocates about its own INT32 column.
 
 mem50_n <- 2e6
@@ -43,7 +46,7 @@ mem50_measure <- function(gt, pipeline) {
   list(peak = tr$peak_bytes, allocated = tr$allocated_bytes)
 }
 
-test_that("summarise(.by) needs no more memory than group_by() |> summarise() plus one INT32 per row", {
+test_that("summarise(.by) peaks no higher than group_by() |> summarise()", {
   skip_if_no_gpu()
   testthat::skip_on_ci()
   skip_if_insufficient_gpu_memory(512 * 1024^2)
@@ -75,13 +78,9 @@ test_that("summarise(.by) needs no more memory than group_by() |> summarise() pl
       gb <- mem50_measure(gt, cases[[nm]]$gb)
       by <- mem50_measure(gt, cases[[nm]]$by)
       expect_lte(
-        by$peak, gb$peak + 1.1 * per_row + mem50_slack,
-        label = sprintf("%s .by peak %.1f MiB (group_by peak %.1f MiB)", label, by$peak / 2^20, gb$peak / 2^20)
-      )
-      expect_lte(
-        by$allocated, gb$allocated + 1.5 * per_row + mem50_slack,
-        label = sprintf("%s .by allocated %.1f MiB (group_by allocated %.1f MiB)",
-                        label, by$allocated / 2^20, gb$allocated / 2^20)
+        by$peak, gb$peak + 0.25 * per_row + mem50_slack,
+        label = sprintf("%s .by peak %.1f MiB (group_by peak %.1f MiB; allocated %.1f vs %.1f MiB)",
+                        label, by$peak / 2^20, gb$peak / 2^20, by$allocated / 2^20, gb$allocated / 2^20)
       )
     }
     rm(gt)

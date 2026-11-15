@@ -67,6 +67,9 @@ test_that("summarise(.by) puts NA, NaN and the first -0/0 group where they first
   expect_by_parity(df, function(d) dplyr::summarise(d, n = dplyr::n(), s = sum(x), .by = d))
   expect_by_parity(df, function(d) dplyr::summarise(d, n = dplyr::n(), s = sum(x), .by = s))
   expect_by_parity(df, function(d) dplyr::summarise(d, n = dplyr::n(), .by = c(s, d)))
+  # NaN payloads and signs are one group (dplyr: vctrs), as are -0 and 0
+  df2 <- data.frame(d = c(NaN, -NaN, 1, NA, -0, 0, Inf, -NaN, -Inf), x = 1:9)
+  expect_by_parity(df2, function(d) dplyr::summarise(d, n = dplyr::n(), s = sum(x), .by = d))
 })
 
 test_that("summarise(.by) on a factor follows first appearance, not level order", {
@@ -90,6 +93,28 @@ test_that("summarise(.by) matches dplyr on many shuffled groups", {
   )
   expect_by_parity(df, function(d) dplyr::summarise(d, n = dplyr::n(), m = mean(x), .by = k))
   expect_by_parity(df, function(d) dplyr::summarise(d, n = dplyr::n(), s = sum(y), .by = c(s, k)))
+})
+
+test_that("summarise(.by) finds groups that first appear late", {
+  skip_if_no_gpu()
+  set.seed(5051)
+  n <- 300000L
+  df <- data.frame(
+    g = sample(c("a", "b", "c"), n, replace = TRUE),
+    k = sample.int(50L, n, replace = TRUE),
+    x = runif(n)
+  )
+  # one group only in the last row, one only in the middle
+  df$g[n] <- "last"
+  df$k[n %/% 2L] <- 999L
+  expect_by_parity(df, function(d) dplyr::summarise(d, n = dplyr::n(), m = mean(x), .by = g))
+  expect_by_parity(df, function(d) dplyr::summarise(d, n = dplyr::n(), .by = c(k, g)))
+  # input sorted by the key: every group starts after the previous one ends
+  srt <- df[order(df$k, df$g), ]
+  expect_by_parity(srt, function(d) dplyr::summarise(d, n = dplyr::n(), m = max(x), .by = k))
+  # every row its own group
+  uniq <- data.frame(k = sample.int(n), x = runif(n))
+  expect_by_parity(uniq, function(d) dplyr::summarise(d, m = sum(x), .by = k))
 })
 
 # -----------------------------------------------------------------------------
