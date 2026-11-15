@@ -44,6 +44,7 @@ together correctly and original row order is preserved, see
 \code{R/window.R}/\code{src/ops_window.cpp}).
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
   gpu_mtcars |> add_count(cyl) |> collect()

@@ -588,6 +588,7 @@ memory_resource_install <- function() {
 #'
 #' @export
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   g <- tbl_gpu(data.frame(x = runif(1e6)), lazy = FALSE)
 #'   t0 <- Sys.time()

@@ -405,6 +405,7 @@ parquet_diff <- function(want, got) {
 #' @seealso [tbl_gpu()], [collect.tbl_gpu()]
 #' @export
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   path <- tempfile(fileext = ".parquet")
 #'   write_parquet_gpu(tbl_gpu(mtcars), path)

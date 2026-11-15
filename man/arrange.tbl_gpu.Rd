@@ -70,6 +70,7 @@ Note: Character sorting on the GPU uses binary/UTF-8 ordering (dplyr's
 }
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
 

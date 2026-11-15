@@ -65,6 +65,7 @@ check_rename_unique <- function(names) {
 #' @importFrom dplyr rename
 #'
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   gpu_mtcars <- tbl_gpu(mtcars)
 #'
@@ -130,6 +131,7 @@ rename_positions <- function(names, loc) {
 #' @importFrom dplyr rename_with
 #'
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   gpu_mtcars <- tbl_gpu(mtcars)
 #'

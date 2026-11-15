@@ -32,7 +32,8 @@ bench = { cmd = "Rscript inst/benchmarks/run_benchmarks.R", description = "Run b
 r = { cmd = "R", description = "Start R with pixi environment" }
 load-dev = { cmd = "tools/r 'invisible(NULL)'", description = "Load package in dev mode (GPU lock)" }
 check-deps = { cmd = "R -e 'devtools::load_all(); check_deps()'", description = "Check dependencies for cuplyr" }
-pkgdown = { cmd = "XDG_CACHE_HOME=/tmp Rscript scripts/build_pkgdown.R", description = "Build pkgdown site into docs/" }
+pkgdown = { cmd = "tools/site", description = "Build pkgdown site into docs/ (GPU lock)" }
+site-publish = { cmd = "tools/site-publish", description = "Build the site from main and publish it to gh-pages" }
 
 [tasks.build]
 cmd = "./scripts/build-tarball.sh"

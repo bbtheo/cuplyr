@@ -1,8 +1,8 @@
 ---
-title: "Query Optimization in cuplyr"
+title: "Query optimization in cuplyr"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{Query Optimization in cuplyr}
+  %\VignetteIndexEntry{Query optimization in cuplyr}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
@@ -15,19 +15,14 @@ knitr::opts_chunk$set(
 )
 ```
 
-## Introduction
+cuplyr tables are lazy by default. A verb on a lazy table doesn't run. It adds
+a node to a tree, the AST, that describes the query. When `compute()` or
+`collect()` runs the tree, an optimizer first rewrites it into a plan that
+gives the same result. An eager table, `tbl_gpu(df, lazy = FALSE)`, runs each
+verb at once, so the optimizer never sees it.
 
-cuplyr tables are lazy by default (`tbl_gpu(df, lazy = FALSE)` makes an eager
-one), and most verbs on a lazy table are not executed as you call them.
-They add nodes to an Abstract Syntax Tree (AST) that describes the query.
-(A verb or filter predicate that runs on the CPU as a fallback computes the
-pending plan first.) When `compute()` or `collect()` runs the tree, an optimizer
-first rewrites it into a plan that gives the same result. A table in eager mode
-has no pending tree, so the optimizer has nothing to run on.
-
-This vignette describes what the optimizer does, with `explain()` output you
-can reproduce. It does not time anything. For measurements, see
-`vignette("performance", package = "cuplyr")`.
+This article shows what the optimizer does. It doesn't time anything. For
+timings, see `vignette("performance", package = "cuplyr")`.
 
 ```{r setup}
 library(cuplyr)
@@ -40,13 +35,11 @@ optimized <- function(x) {
 }
 ```
 
-## The Abstract Syntax Tree (AST)
+## Reading the tree
 
-Most verbs add one node. The tree grows from a `source` node at the bottom to
-the last verb at the top. `tbl_gpu()` itself records nothing: the first verb
-that records a node adds the `source` node below its own. `show_query()`
-prints the tree: each node with its key metadata, one `|` per level of depth,
-then the tree's depth and node count:
+`show_query()` prints the pending tree, one `|` per level, with the `source`
+node at the bottom and the last verb at the top. `explain()` prints the same
+tree and then the optimized plan. Neither runs anything.
 
 ```{r ast-example}
 pipeline <- tbl_gpu(mtcars) |>
@@ -58,83 +51,46 @@ pipeline <- tbl_gpu(mtcars) |>
 show_query(pipeline)
 ```
 
-The node a call of each verb typically adds:
+Most verbs add one node of the same name. The exceptions:
 
 | Verb | AST node |
 |------|----------|
-| `filter()` | `filter` |
-| `mutate()` | `mutate` |
-| `select()` | `select`, with a `rename` node above it when it renames a column |
-| `arrange()` | `arrange` |
-| `summarise()` | `summarise` |
-| `distinct()` | `distinct` |
-| `rename()` | `rename` |
-| `head()` | `slice` |
-| `slice()`, `slice_head()`, `slice_min()` on an ungrouped table | `slice` |
+| `select()` that renames | `select` with a `rename` above it |
+| `head()`, ungrouped `slice()`, `slice_head()`, `slice_min()` | `slice` |
 | `collapse()` | `barrier` |
-| `group_by()` on columns | none: grouping is metadata on the table |
-| `group_by()` on an expression, e.g. `group_by(x = a + 1)` | `mutate`, which computes the grouping column |
-| `mutate()` or `filter()` with a window function such as `row_number()` | `window`, with other nodes around it |
+| `group_by()` on columns | none, grouping is table metadata |
+| `group_by(x = a + 1)` | `mutate` |
+| window functions such as `row_number()` | `window`, plus other nodes |
 
-Some calls add other nodes as well, or instead. A grouped `slice_head()`, for
-example, records `arrange`, `window`, `mutate`, `filter` and `select` nodes.
+Some calls add several nodes. A grouped `slice_head()` records `arrange`,
+`window`, `mutate`, `filter` and `select`.
 
-## The Optimization Passes
+## The passes
 
-The optimizer has five passes, which run in this order:
+The optimizer runs these passes in order:
 
-1. **Projection pruning** can add `select` nodes that drop columns no later
-   step uses.
-2. **Mutate fusion** can combine a `mutate` node with the `mutate` node below
-   it.
-3. **Dead-column pruning** can drop `mutate` expressions whose result is not
-   used, and columns of a `select` node that nothing above it uses.
-4. **Filter pushdown** can move a `filter` node below the `mutate` or `select`
-   node under it, or move its predicates into the inputs of a join under it.
-5. **Filter reordering** can merge consecutive `filter` nodes into one and sorts
-   the merged predicates by an estimated cost.
+1. Projection pruning adds `select` nodes that drop columns nothing later
+   reads.
+2. Mutate fusion merges a `mutate` with the `mutate` directly below it.
+3. Dead-column pruning drops `mutate` expressions and `select` columns that
+   nothing above uses.
+4. Filter pushdown moves a `filter` below the `mutate` or `select` under it, or
+   into the inputs of a join.
+5. Filter reordering merges consecutive `filter` nodes into one and sorts the
+   predicates by estimated cost.
+6. Scan pushdown hands a filter on a lazy `read_parquet_gpu()` table to the
+   parquet reader.
 
-The sections below say when each pass does so. Each pass runs at most once on
-each part of the plan (see "Segments" below for how a plan is cut into parts).
-There is no separate filter fusion pass: see "One filter node, one expression"
-below.
+Each pass sees what the earlier ones left, and the order matters. Fusion runs
+before pushdown, so two mutates that become neighbours after a filter moves out
+from between them stay separate. A pass that has nothing to work on is skipped,
+which doesn't change the plan.
 
-Each pass sees the plan the passes before it left:
+## Projection pruning
 
-- Dead-column pruning runs after mutate fusion, so it can drop an unused
-  expression from a fused node.
-- Mutate fusion runs before filter pushdown, so a filter can move below two
-  mutates that fused, but only below the top one of two mutates that did not
-  fuse (see "One node per optimization").
-- Filter reordering runs after pushdown, so a filter that pushdown moves next
-  to another filter can be merged with it.
-- Fusion does not run after pushdown. Two mutates that become adjacent
-  because pushdown moved a filter out from between them stay separate. Example 2
-  below shows this.
-
-### Passes that cannot apply are skipped
-
-Before running mutate fusion, dead-column pruning, filter pushdown or filter
-reordering, the optimizer looks at the node types in the part of the plan it is
-optimizing and skips the pass when that part has nothing it works on: mutate
-fusion needs a `mutate` node directly on a `mutate` node, dead-column pruning a
-`mutate` or `select` node, filter pushdown a `filter` directly on a `mutate`,
-`select` or join, and filter reordering a `filter` directly on a `filter`.
-
-Projection pruning is skipped for a part of the plan that is only a chain of
-`filter` and `mutate` nodes down to the source table, when every `mutate` holds
-at least one expression and every predicate reads only columns its input has:
-the pass would not change such a chain. If the chain also has no `mutate`
-directly on a `mutate` and no `filter` directly on a `mutate` or `filter`, no
-later pass can change it either, and the optimizer returns it as it is. The plan
-is the same as if every pass had run, so `explain()` does not show which passes
-were skipped.
-
-## Pass 1: Projection Pruning
-
-The pass works out which columns each node needs, from the top of the plan
-down, and can add `select` nodes that drop the columns no node above needs. In
-this plan only `mpg`, `hp` and `wt` are read from the 11-column source:
+Only `mpg`, `hp` and `wt` are read from the 11 columns of `mtcars` here, so the
+pass adds a `select [3 cols]` above the source. The `select [2 cols]` at the
+top is the one in the pipeline.
 
 ```{r proj}
 tbl_gpu(mtcars) |>
@@ -143,12 +99,9 @@ tbl_gpu(mtcars) |>
   explain()
 ```
 
-The inner `select [3 cols]` is the node the pass added. The `select [2 cols]`
-at the top is the one written in the pipeline.
+## Mutate fusion
 
-## Pass 2: Mutate Fusion
-
-Three `mutate()` calls become one `mutate` node:
+Three `mutate()` calls become one node:
 
 ```{r fusion}
 tbl_gpu(mtcars) |>
@@ -158,10 +111,9 @@ tbl_gpu(mtcars) |>
   explain()
 ```
 
-The fused node holds the expressions in the order they were written, lower
-mutate first, and evaluates them in that order, each seeing the columns the
-earlier ones left. That is dplyr's order, so fusing does not change the result.
-Here `c` is computed from the original `a` and `b`, as in dplyr:
+The fused node evaluates its expressions in the order you wrote them, each one
+seeing the columns the earlier ones left. That's dplyr's order, so `c` below
+uses the original `a` and `b`, as in dplyr:
 
 ```{r fusion-order}
 df <- tibble::tibble(a = 1, b = 2, hp = 3, wt = 4)
@@ -176,9 +128,9 @@ df |>
   mutate(a = hp + 10, b = wt * 2)
 ```
 
-Two adjacent `mutate` nodes are not fused when they hold more than 8
-expressions together, or when the upper one reads more than 4 of the columns the
-lower one writes, new or overwritten. Here 5 + 4 expressions stay as two nodes:
+Two mutates don't fuse when they hold more than 8 expressions together, or
+when the upper one reads more than 4 columns the lower one writes. Overwritten
+columns count as written. Here 5 + 4 expressions stay as two nodes:
 
 ```{r fusion-guard}
 tbl_gpu(mtcars) |>
@@ -187,30 +139,10 @@ tbl_gpu(mtcars) |>
   optimized()
 ```
 
-Overwritten columns count as written. Here the lower `mutate` creates no new
-column, but it overwrites 5, and the upper one reads all 5, so they stay as two
-nodes. If the upper one read only 4 of them, they would fuse into one node with
-6 expressions:
+## Dead-column pruning
 
-```{r fusion-guard-overwrite}
-lower <- tbl_gpu(mtcars) |>
-  mutate(mpg = mpg + 1, cyl = cyl + 1, disp = disp + 1, hp = hp + 1, drat = drat + 1)
-
-lower |>
-  mutate(s = mpg + cyl + disp + hp + drat) |>
-  optimized()
-
-lower |>
-  mutate(s = mpg + cyl + disp + hp) |>
-  optimized()
-```
-
-## Pass 3: Dead-Column Pruning
-
-The pass walks the plan from the top down, tracking the columns the nodes above
-still need, and drops each `mutate` expression whose result is not among them
-(with the three exceptions below). Here the `mutate` node keeps one of its three
-expressions, because the `select` keeps only `mpg` and `a`:
+The `select()` keeps only `mpg` and `a`, so the `mutate` keeps one of its three
+expressions:
 
 ```{r dead-column}
 tbl_gpu(mtcars) |>
@@ -219,50 +151,20 @@ tbl_gpu(mtcars) |>
   optimized()
 ```
 
-Because this pass runs after fusion, it also prunes across `mutate()` calls
-that fused. The optimized plan here has one `mutate` node with one expression:
+The pass runs after fusion, so it also prunes across `mutate()` calls that
+fused. It keeps an unused expression in three cases:
 
-```{r dead-column-fused}
-tbl_gpu(mtcars) |>
-  mutate(a = hp + 10) |>
-  mutate(b = wt * 2) |>
-  select(mpg, a) |>
-  optimized()
-```
+- It writes a column that a later expression overwrites, and the column is
+  still needed. `mutate(a = hp + 1) |> mutate(a = wt + 1)` computes both.
+- It's a vector literal such as `v = c(10, 20, 30, 40)`. dplyr checks its
+  length whether you use it or not.
+- It does checked integer arithmetic: `+`, `-` or `*` on two integer or
+  logical operands. dplyr computes it and warns "NAs produced by integer
+  overflow" even if nothing reads the result. `%/%`, `%%` and an operation with
+  a literal `NA` operand never warn, so they aren't checked.
 
-There are three exceptions. First, an earlier expression that writes a column name
-a later expression overwrites is kept while the name is still needed, even if
-its value is overwritten. In the next plan the fused node holds both:
-
-```{r dead-overwrite}
-tbl_gpu(mtcars) |>
-  mutate(a = hp + 1) |>
-  mutate(a = wt + 1) |>
-  select(mpg, a) |>
-  optimized()
-```
-
-Second, an expression that is a vector literal, such as `v = c(10, 20, 30, 40)`,
-is kept even when nothing uses it, because dplyr checks its length either way.
-Here `v` is unused, yet the node keeps both expressions:
-
-```{r dead-vector-literal}
-tbl_gpu(data.frame(a = 1:4, b = 1)) |>
-  mutate(v = c(10, 20, 30, 40), w = a + 1) |>
-  select(a, w) |>
-  optimized()
-```
-
-Third, an expression with checked integer arithmetic is kept even when nothing
-uses it. That is a `+`, `-` or `*` whose two operands are both integer or
-logical, such as `a + b` on two integer columns. Such an expression gives `NA`
-and the warning "NAs produced by integer overflow" when a result leaves the
-integer range, and dplyr computes it whether or not a later verb uses the
-column, and the columns it reads stay required. An operation with a missing
-literal operand (`a + NA`) is `NA` on every row and never warns, so it is not
-checked, though an operand below it can be (`(a + b) - NA`). Here `y` is
-unused, yet the node keeps both expressions (`%/%` and `%%` never warn, so they
-are not checked):
+Here `y` is unused, but `a + b` is checked, so the node keeps both
+expressions:
 
 ```{r dead-checked-int}
 tbl_gpu(data.frame(a = 1:4, b = 4:1, x = 1)) |>
@@ -271,9 +173,8 @@ tbl_gpu(data.frame(a = 1:4, b = 4:1, x = 1)) |>
   optimized()
 ```
 
-The pass can also drop columns from a `select` node when nothing above it uses
-them. Here the first `select()` keeps three columns and the second keeps only
-`a`. In the optimized plan both `select` nodes keep 1 column:
+The pass also narrows `select` nodes. Here the first `select()` ends up keeping
+only `a`, like the second:
 
 ```{r dead-select}
 tbl_gpu(data.frame(a = 1:3, b = 1, c = 2)) |>
@@ -282,22 +183,20 @@ tbl_gpu(data.frame(a = 1:3, b = 1, c = 2)) |>
   explain()
 ```
 
-## Pass 4: Filter Pushdown
+## Filter pushdown
 
-**Filter pushdown** can move a `filter` node below the node under it, so that
-node sees only the rows the filter keeps. The sections below say when.
+Moving a filter down means the nodes below it see fewer rows.
 
-### Across mutate
+### Past a mutate
 
-A filter directly on a `mutate` node moves below it, unless:
+A filter moves below the `mutate` under it unless the mutate:
 
-- one of its predicates reads a column the mutate creates or overwrites,
-- the mutate holds a vector literal, such as `v = c(10, 20, 30, 40)`,
-- the mutate holds a rowwise integer `sum()`, `min()` or `max()`, or a rowwise
-  double `min()` or `max()`, or
-- the mutate holds checked integer arithmetic (see "Dead-Column Pruning"),
-  because dplyr computes it on every row and warns about an overflow in a row
-  the filter would drop.
+- creates or overwrites a column the filter reads,
+- holds a vector literal,
+- holds checked integer arithmetic, which dplyr would compute, and maybe warn
+  on, in rows the filter drops, or
+- holds a rowwise integer `sum()`, `min()` or `max()`, or a rowwise double
+  `min()` or `max()`.
 
 `mpg` exists before the mutate, so this filter moves:
 
@@ -308,7 +207,7 @@ tbl_gpu(mtcars) |>
   explain()
 ```
 
-`power_ratio` is created by the mutate, so this one stays:
+The mutate creates `power_ratio`, so this one stays:
 
 ```{r pushdown-cannot}
 tbl_gpu(mtcars) |>
@@ -317,22 +216,10 @@ tbl_gpu(mtcars) |>
   explain()
 ```
 
-The filter here reads only `keep`, yet it stays above the mutate, because
-`a + b` is checked integer arithmetic:
+### Past a select
 
-```{r pushdown-checked-int}
-tbl_gpu(data.frame(a = 1:4, b = 4:1, keep = c(TRUE, FALSE, TRUE, TRUE))) |>
-  mutate(y = a + b) |>
-  filter(keep) |>
-  explain()
-```
-
-### Across select
-
-On a table whose column names are all different, a `select()` that keeps
-columns under their own names, without picking any column twice, records one
-`select` node. A filter directly on that node moves below it when the select
-keeps every column the filter's predicates read:
+A filter moves below a `select` that keeps every column the filter reads. The
+lower `select` here is the one projection pruning added to drop `c`:
 
 ```{r pushdown-select}
 tbl_gpu(data.frame(a = 1:20, b = 1, c = 2)) |>
@@ -341,28 +228,14 @@ tbl_gpu(data.frame(a = 1:20, b = 1, c = 2)) |>
   explain()
 ```
 
-(The lower `select` was added by projection pruning, to drop `c`.)
+A filter never moves below a `select` that projection pruning added. A
+`select()` that renames a column, such as `select(b2 = b, a)`, records a
+`rename` node, which is a barrier, so a filter after it stays put.
 
-A `select()` that renames a column records a `rename` node above its `select`
-node. `rename` is a barrier (see "Optimization Barriers"), so a filter written
-after such a `select()` stays above it:
+### One step per filter
 
-```{r pushdown-select-rename}
-tbl_gpu(data.frame(a = 1:20, b = 1, c = 2)) |>
-  select(b2 = b, a) |>
-  filter(a > 10) |>
-  explain()
-```
-
-(The lower `select [2 cols]` was added by projection pruning, to drop `c`.)
-
-### One node per optimization
-
-The pass handles the nodes below a `filter` first, then swaps the filter with
-the node directly under it if that is allowed. It does not look at the moved
-filter again. So in one optimization a filter moves below at most one node.
-Here the filter starts above a `select`, which is above a `mutate`. It ends
-between them, not below the mutate, even though it could pass the mutate:
+Pushdown moves each filter below at most one node. Here the filter passes the
+`select` but stops above the `mutate`, even though it could pass that too:
 
 ```{r pushdown-one-step}
 tbl_gpu(data.frame(k = 1:20, a = 1, b = 2)) |>
@@ -372,10 +245,8 @@ tbl_gpu(data.frame(k = 1:20, a = 1, b = 2)) |>
   optimized()
 ```
 
-(The innermost `select` was added by projection pruning, which runs first.)
-
-Mutate fusion runs before pushdown. Here the two mutates fuse, and the filter
-moves below the fused node:
+This is where fusion matters. Two mutates that fused count as one node, so the
+filter gets below both:
 
 ```{r pushdown-fused}
 tbl_gpu(mtcars) |>
@@ -385,8 +256,8 @@ tbl_gpu(mtcars) |>
   optimized()
 ```
 
-Here the two mutates do not fuse (5 + 4 expressions, as under "Pass 2"), and
-the filter moves below the top one only:
+With the 5 + 4 expressions from above, the mutates don't fuse and the filter
+gets below the top one only:
 
 ```{r pushdown-unfused}
 tbl_gpu(mtcars) |>
@@ -396,48 +267,38 @@ tbl_gpu(mtcars) |>
   optimized()
 ```
 
-### Across joins
+### Into a join
 
-A filter directly on a join can move into the join's inputs, depending on the
-join type and its arguments. The examples use two small tables:
+What moves depends on the join type and its arguments. The examples use two
+small tables:
 
 ```{r join-data}
 x <- tbl_gpu(data.frame(k = c(1, 2, 3, 4), a = c(5, 15, 25, 35)))
 y <- tbl_gpu(data.frame(k = c(1, 2, 2, 4), v = c(10, 20, 30, 40)))
 ```
 
-- `semi_join()` and `anti_join()`: the whole filter moves into the left input.
-  If one of its predicates has checked integer arithmetic (see "Dead-Column
-  Pruning"), the whole filter stays above the join instead: dplyr computes all
-  the predicates of one `filter()` call on the same rows, the rows the join
-  keeps, and a predicate moved into the left input would also be computed on
-  the rows the join drops. (The `select` on the right input is projection
-  pruning, which keeps only the join key there.)
+For `semi_join()` and `anti_join()` the whole filter moves into the left input.
+The `select` on the right input is projection pruning keeping only the key:
 
 ```{r join-semi}
 x |> semi_join(y, by = "k") |> filter(a > 10) |> optimized()
 ```
 
-For `inner_join()`, `left_join()` and `right_join()`:
-
-- dplyr checks a join's default `relationship` (it can warn about many-to-many
-  matches) only when the join has at least one condition, every condition is
-  `==`, and you call it from your own code (a script, the console, or functions
-  you define there). Such a join, with `relationship` unset and
-  `multiple = "all"` (the default), gets no pushdown: the check runs over the
-  full inputs, and a filter below the join could change it.
+For `inner_join()`, `left_join()` and `right_join()`, the default
+`relationship` blocks pushdown. dplyr checks for many-to-many matches over the
+full inputs, and a filter below the join could change that check. dplyr runs
+the check only for joins whose conditions are all `==`, called from your own
+code. So with `relationship` and `multiple` left at their defaults, nothing
+moves:
 
 ```{r join-default}
 x |> inner_join(y, by = "k") |> filter(a > 10) |> optimized()
 ```
 
-- Any other inner, left or right join with `relationship` unset is recorded
-  as `relationship = "many-to-many"`, and the rules below apply to it. This
-  covers a join with a `join_by()` condition other than `==` (an inequality,
-  `closest()`, `between()`, `overlaps()` or `within()`), a join with
-  `by = character()`, and an `==` join called from inside a package's
-  functions. Here the filter moves into the left input although no argument is
-  set:
+Joins dplyr doesn't check are recorded as `relationship = "many-to-many"`. That
+covers inequality, `closest()`, `between()`, `overlaps()` and `within()`
+conditions, `by = character()`, and `==` joins called from inside a package.
+This filter moves although no argument is set:
 
 ```{r join-inequality}
 y_k2 <- tbl_gpu(data.frame(k2 = c(1, 2, 2, 4), v = c(10, 20, 30, 40)))
@@ -445,38 +306,19 @@ y_k2 <- tbl_gpu(data.frame(k2 = c(1, 2, 2, 4), v = c(10, 20, 30, 40)))
 x |> inner_join(y_k2, join_by(k >= k2)) |> filter(a > 10) |> optimized()
 ```
 
-- Nothing moves when `unmatched = "error"` is set for either input, or when
-  `relationship` is `"one-to-one"`, `"one-to-many"` or `"many-to-one"`.
+Nothing moves with `unmatched = "error"` or a `relationship` of
+`"one-to-one"`, `"one-to-many"` or `"many-to-one"`. Otherwise, for example with
+`relationship = "many-to-many"`, the filter is split by predicate:
 
-- In every other case, for example with `relationship = "many-to-many"` (set by
-  you or recorded as above), a predicate that reads only left columns moves into
-  the left input (inner and left joins), and one that reads only right columns
-  into the right input (inner and right joins). With a `multiple` other than
-  `"all"`, or a `closest()` condition, no predicate moves into the right input.
-  Predicates that read columns of both sides stay above the join, and so does a
-  predicate that cannot move into the side it reads (`v > 15` in the left join
-  below). A predicate on an `==` key that is merged into one column and whose
-  two sides have different types (such as integer and double) also stays above
-  the join.
+- A predicate on left columns only moves into the left input of an inner or
+  left join.
+- A predicate on right columns only moves into the right input of an inner or
+  right join, but not with a `multiple` other than `"all"` or a `closest()`
+  condition.
+- A predicate on both sides stays above the join. So does one on an `==` key
+  whose two sides have different types, such as integer and double.
 
-- A predicate with checked integer arithmetic moves only into the left input of
-  a left join or the right input of a right join, where every row reaches the
-  join's output. In an inner join it would also be computed on rows the join
-  drops, and dplyr never computes it on those. dplyr computes all the
-  predicates of one `filter()` call on the same rows, so when a checked
-  predicate stays above the join, the whole `filter` node stays with it and no
-  other predicate of that call moves. Here `k + 1L > 2L` stays, and `a > 10`
-  stays with it:
-
-```{r join-checked-int}
-x_i <- tbl_gpu(data.frame(k = 1:4, a = c(5, 15, 25, 35)))
-y_i <- tbl_gpu(data.frame(k = c(1L, 2L, 2L, 4L), v = c(10, 20, 30, 40)))
-
-x_i |>
-  inner_join(y_i, by = "k", relationship = "many-to-many") |>
-  filter(a > 10, k + 1L > 2L) |>
-  optimized()
-```
+In the left join, `v > 15` reads the right side, so it stays:
 
 ```{r join-m2m}
 x |>
@@ -490,25 +332,7 @@ x |>
   optimized()
 ```
 
-With a double key `k` on both sides, a predicate on `k` moves into the left
-input. With an integer `k` on the left and a double `k` on the right, it stays:
-
-```{r join-key-types}
-x_int <- tbl_gpu(data.frame(k = 1:4, a = c(5, 15, 25, 35)))
-
-x |>
-  inner_join(y, by = "k", relationship = "many-to-many") |>
-  filter(k > 2) |>
-  optimized()
-
-x_int |>
-  inner_join(y, by = "k", relationship = "many-to-many") |>
-  filter(k > 2) |>
-  optimized()
-```
-
-With `multiple = "first"`, the predicate on `a` still moves into the left
-input, and the one on `v` stays above the join:
+With `multiple = "first"`, `a > 10` still moves and `v > 15` stays:
 
 ```{r join-multiple}
 x |>
@@ -517,12 +341,8 @@ x |>
   optimized()
 ```
 
-For the other joins:
-
-- `cross_join()`: a predicate that reads only left columns moves into the left
-  input, and one that reads only right columns into the right input. A
-  predicate with checked integer arithmetic does not move, and keeps the rest of
-  its `filter()` call above the join.
+A `cross_join()` follows the inner join rules on both sides. A `full_join()`
+moves nothing.
 
 ```{r join-cross}
 x |>
@@ -531,21 +351,26 @@ x |>
   optimized()
 ```
 
-- `full_join()`: nothing moves.
+Checked integer arithmetic is stricter. dplyr computes every predicate of one
+`filter()` call on the same rows, the rows the join keeps. A checked predicate
+moves only into the left input of a left join or the right input of a right
+join, where every row reaches the output. In a semi, anti, inner or cross join
+it stays, and the rest of its `filter()` call stays with it:
 
-```{r join-full}
-x |>
-  full_join(y, by = "k", relationship = "many-to-many") |>
-  filter(a > 10) |>
+```{r join-checked-int}
+x_i <- tbl_gpu(data.frame(k = 1:4, a = c(5, 15, 25, 35)))
+y_i <- tbl_gpu(data.frame(k = c(1L, 2L, 2L, 4L), v = c(10, 20, 30, 40)))
+
+x_i |>
+  inner_join(y_i, by = "k", relationship = "many-to-many") |>
+  filter(a > 10, k + 1L > 2L) |>
   optimized()
 ```
 
-## Pass 5: Filter Reordering
+## Filter reordering
 
-When a `filter` node sits directly on another `filter` node, the pass merges
-the chain of consecutive `filter` nodes into one node (with two exceptions, for
-rowwise tables and for checked integer arithmetic, at the end of this
-section). Two `filter()` calls become one node with two predicates:
+A chain of `filter` nodes becomes one node. A filter node runs as one
+expression, its predicates joined with `&` into one row mask.
 
 ```{r filter-reorder}
 d <- data.frame(x = c(1, 5, 20, 30), y = c(0, 1, 2, 3), z = c(5, 11, 12, 1))
@@ -556,25 +381,14 @@ tbl_gpu(d) |>
   explain()
 ```
 
-While merging, the pass sorts the predicates by an estimated cost, cheapest
-first. The estimate is built from the size of the expression: 1 for a literal,
-2 for a column reference, and 1 plus the cost of its arguments for an operator
-or function call.
+The merged predicates are sorted cheapest first. The cost is the size of the
+expression: 1 for a literal, 2 for a column, and 1 plus its arguments for a
+call. `z > 10` costs 4 and `x > y` costs 5, so `z > 10` comes first. A single
+filter node isn't touched, and its predicates keep your order. Predicates that
+aren't deterministic are merged but not sorted.
 
-| Predicate | Estimated cost |
-|-----------|----------------|
-| `x > 5` | 4 |
-| `x > y` | 5 |
-| `x > y * 10` | 7 |
-
-So in the example above the merged node puts `z > 10` (cost 4) before
-`x > y` (cost 5). A filter node with no other filter node directly above or
-below it is not touched, so the predicates of such a node keep the order they
-were written in.
-
-Reordering runs after pushdown, so a filter that pushdown moves next to another
-filter can be merged with it. In this plan the second filter moves below the
-mutate, and the two filters become one node with two predicates:
+Reordering runs after pushdown, so filters that pushdown brings together are
+merged. Here the second filter moves below the mutate and joins the first:
 
 ```{r filter-reorder-after-pushdown}
 tbl_gpu(mtcars) |>
@@ -584,18 +398,16 @@ tbl_gpu(mtcars) |>
   explain()
 ```
 
-There are two exceptions. First, on a rowwise table, a predicate that holds one
-of the rowwise aggregates named under "Across mutate" limits the merge. The
-filter nodes from the top of the chain down to the lowest one holding such a
-predicate stay as they are, and only the filter nodes below it are merged.
+Some filters don't merge:
 
-Second, a predicate with checked integer arithmetic (see "Dead-Column Pruning")
-also limits the merge, in a different way. A later `filter()` call sees only the
-rows the earlier ones keep, and dplyr warns about an overflow only in those rows,
-so the node holding the predicate is not merged with the filter nodes below it.
-It does take in the filter nodes above it, since the lowest node of a chain sees
-the same rows merged or not. So `filter(a < 100L) |> filter(a + b > 0L)` stays
-two nodes:
+- A filter on a grouped table and one on an ungrouped table stay separate.
+- A filter with checked integer arithmetic isn't merged with the filters below
+  it, because dplyr only warns about overflow in the rows those filters keep.
+  It can still absorb the filters above it.
+- On a rowwise table, a filter holding one of the rowwise aggregates listed
+  under "Past a mutate" isn't merged. The filters below it still are.
+
+So this stays two nodes:
 
 ```{r filter-reorder-checked-int}
 tbl_gpu(data.frame(a = 1:4, b = 4:1)) |>
@@ -604,36 +416,35 @@ tbl_gpu(data.frame(a = 1:4, b = 4:1)) |>
   explain()
 ```
 
-### One filter node, one expression
+## Scan pushdown
 
-When a filter node runs, in eager or lazy mode, its predicates are combined
-with `&` into one expression, which gives one row mask (`lower_filter()` in
-`R/lower.R`). A single `filter(a > 10, b < 20)` is already one node with two
-predicates, as is the merged node above.
+On a lazy table from `read_parquet_gpu()`, a filter directly on the file scan
+gives the reader the comparisons it can decide exactly, so it can skip row
+groups. Only comparisons on integer, integer64, Date and POSIXct columns go to
+the reader. The rest of the filter runs after the read, and the rows are the
+same either way. Projection pruning also tells the reader which columns to
+read. `options(cuplyr.parquet_pushdown = FALSE)` turns both off. See
+`?read_parquet_gpu` for the full rules.
 
-## Optimization Barriers
+## Barriers
 
-Some nodes are **barriers**. Where a barrier is not inside a join's input, the
-optimizer splits the plan at it and optimizes the part above it and the part
-below it separately, so the passes do not move nodes across it. (A join's inputs
-are not split: see "Segments".) These node types are barriers; the second
-column gives common ways to record each, not every one:
+The optimizer splits the plan at barrier nodes and optimizes each part on its
+own, so no pass moves a node across a barrier. These nodes are barriers:
 
 | Node | Recorded by |
 |------|-------------|
 | `arrange` | `arrange()` |
 | `summarise` | `summarise()` |
-| `reframe` | `reframe()`, when it records a `reframe` node |
+| `reframe` | `reframe()` |
 | `distinct` | `distinct()` |
 | `slice` | `head()`, `slice()`, `slice_head()`, `slice_min()` and the like |
-| `rename` | `rename()`; a `select()` that renames a column |
+| `rename` | `rename()`, or a `select()` that renames |
 | `window` | window functions in `mutate()` or `filter()` |
 | `barrier` | `collapse()` |
-| `select` by position | a `select()` that picks the same column more than once; `select()` on a table with repeated column names |
+| `select` by position | a `select()` that picks a column twice, or any `select()` on a table with repeated names |
 
-One reason a barrier has to stay put is easy to see with `head()`. Moving the
-filter below it would keep the first four rows that pass the filter instead of
-filtering the first four rows, which is a different result:
+`head()` shows why. Filtering the first four rows is not the same as taking the
+first four rows that pass the filter:
 
 ```{r barrier-head}
 d <- data.frame(x = 1:10, y = c(-1, 2, -3, 4, -5, 6, -7, 8, -9, 10))
@@ -652,13 +463,16 @@ all.equal(
 )
 ```
 
+The plan has no `arrange` node. `head(n)` directly on an ungrouped `arrange()`
+of one numeric, Date or POSIXct column becomes a single top-k `slice`, which
+picks the rows without sorting the whole table. It is still a barrier.
+
 ### Segments
 
-Walking down from the top of the plan, the optimizer cuts the plan at each
-barrier it meets, optimizes each part, and puts them back together. The part
-below a barrier is optimized as if all of its output columns were used; only the
-part above the top barrier is pruned by the columns the query returns. Here the
-filters move below their mutates, one on each side of `arrange()`, and
+Each part between barriers is a segment. The optimizer works from the top
+down. A segment below a barrier keeps only the columns that the barrier and
+everything above it read, but it keeps every `mutate` expression, because dplyr
+would compute them. Here each filter moves below its own mutate, and
 `arrange()` stays between them:
 
 ```{r segments}
@@ -674,11 +488,10 @@ q <- tbl_gpu(d) |>
 explain(q)
 ```
 
-The walk stops at a join. The join, the nodes above it up to the nearest barrier
-above it (if any), and both of its inputs form one part, and each pass that runs
-works through both inputs without cutting them at barriers. So inside a join's
-input, the column-pruning passes can reach below a barrier. Here projection
-pruning adds a `select` that drops `b` below `arrange()` in the left input:
+A join and its two inputs form one segment, together with the nodes above it up
+to the next barrier. The passes don't split a join's inputs at barriers, so
+column pruning can reach below a barrier there. Projection pruning drops `b`
+below `arrange()` in the left input:
 
 ```{r barrier-in-join}
 d2 <- tbl_gpu(data.frame(k = c(1, 2, 3, 4), a = c(5, 15, 25, 35), b = 1:4))
@@ -691,50 +504,19 @@ d2 |>
   optimized()
 ```
 
-## Inspecting Optimization
+To stop the optimizer at a point of your choosing, put `collapse()` there. Here
+the two filters aren't merged and neither crosses it:
 
-`show_query()` prints the pending AST. `explain()` prints it and then the plan
-that `compute()` and `collect()` would run, which the optimizer builds. Nothing
-is executed:
-
-```{r explain-detail}
-pipeline <- tbl_gpu(mtcars) |>
-  mutate(a = hp + 10) |>
-  filter(mpg > 20) |>
-  mutate(b = a + wt)
-
-explain(pipeline)
+```{r tip-collapse}
+tbl_gpu(data.frame(x = c(5, 11, 20), z = c(1, 6, 9))) |>
+  filter(x > 10) |>
+  mutate(y = x * 2) |>
+  collapse() |>
+  filter(z > 5) |>
+  explain()
 ```
 
-Here the filter moved below the first mutate. The two mutates end up next to
-each other but are not fused. Fusion comes before pushdown, and while the filter
-still sat between the two mutates, no mutate was directly on another, so the
-fusion pass was skipped (see "Passes that cannot apply are skipped"). No pass
-fuses them after pushdown.
-
-## Examples
-
-### Example 1: Filter pushdown
-
-The same pipeline in eager mode and in lazy mode gives the same result. In the
-lazy plan the filter comes before the mutate:
-
-```{r example-pushdown}
-eager_result <- tbl_gpu(mtcars, lazy = FALSE) |>
-  mutate(a = hp + 10, b = wt * 2, c = mpg * 3) |>
-  filter(cyl == 4) |>
-  collect()
-
-lazy_pipeline <- tbl_gpu(mtcars) |>
-  mutate(a = hp + 10, b = wt * 2, c = mpg * 3) |>
-  filter(cyl == 4)
-
-explain(lazy_pipeline)
-
-identical(eager_result, collect(lazy_pipeline))
-```
-
-### Example 2: A longer pipeline
+## A longer pipeline
 
 ```{r example-complex}
 pipeline <- tbl_gpu(mtcars) |>
@@ -754,39 +536,15 @@ explain(pipeline)
 collect(pipeline)
 ```
 
-The filter, a single node with two predicates, moved below the first mutate, so
-the three features are computed only for the rows that pass it. That is the
-only change to the pipeline:
+The filter moved below the first mutate, so the three new columns are computed
+only for rows that pass it. `is_powerful` is still computed although nothing
+reads it, because it sits below the `summarise()` barrier, where mutate
+expressions are kept. The two mutates aren't fused. When fusion ran, the filter
+still sat between them.
 
-- `summarise()` is a barrier, and the part of the plan below it keeps all its
-  output columns, so `is_powerful` is still computed (the bottom `mutate`
-  still has 3 expressions) although nothing uses it.
-- The two mutates are not fused. Fusion comes before pushdown, and while the
-  filter still sat between them, no mutate was directly on another, so the
-  fusion pass was skipped. No pass fuses them after pushdown.
+## Further reading
 
-## Using `explain()`
-
-`vignette("performance", package = "cuplyr")` compares eager and lazy mode;
-the optimizer runs only in lazy mode. `explain()` shows where the optimizer put
-each filter and how many expressions each mutate keeps.
-
-To keep the optimizer from moving nodes across a point in a pipeline, put
-`collapse()` there. It records a `barrier` node. In this plan the filter above
-it is not merged with the filter below it, and neither moves across:
-
-```{r tip-collapse}
-tbl_gpu(data.frame(x = c(5, 11, 20), z = c(1, 6, 9))) |>
-  filter(x > 10) |>
-  mutate(y = x * 2) |>
-  collapse() |>
-  filter(z > 5) |>
-  explain()
-```
-
-## Further Reading
-
-- `vignette("getting-started", package = "cuplyr")` - Basic cuplyr usage
-- `vignette("performance", package = "cuplyr")` - Measured eager vs lazy
-  timings and memory
-- `?optimize_ast` - The optimizer's entry point (internal, short help page)
+- `vignette("getting-started", package = "cuplyr")` covers basic use.
+- `vignette("performance", package = "cuplyr")` measures eager and lazy
+  timings and memory.
+- `?optimize_ast` is the optimizer's internal entry point.

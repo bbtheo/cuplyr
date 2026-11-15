@@ -1,10 +1,14 @@
 # cuplyr (development version)
 
-* `summarise(.by =)` orders groups by first appearance inside the summarise
-  step, with no row-number column, arrange or select, so it needs about the
-  memory of `group_by() |> summarise()` plus one integer column and runs in a
-  single step. An ungrouped `row_number()` in `mutate()` is a plain sequence
-  and needs one integer column instead of six (#50).
+* `summarise(.by =)` no longer adds a row-number column to order its groups by
+  first appearance: it needs no more GPU memory at its peak than
+  `group_by() |> summarise()` and runs as one step, about as fast as the
+  `group_by()` form (it used to take 2-3 times as long on small and medium
+  tables). An ungrouped `row_number()` in `mutate()` now allocates one integer
+  column instead of six (#50).
+
+* The examples on the help pages of the dplyr verbs attach dplyr, so they run
+  with `example()` and render on the website (#39).
 
 * `install_cuplyr()` and `install.sh` install from the `main` branch by
   default. The repository's default branch was renamed from `master`.

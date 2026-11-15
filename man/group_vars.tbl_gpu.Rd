@@ -16,6 +16,7 @@ A character vector of grouping column names.
 Returns the names of columns used for grouping.
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
 

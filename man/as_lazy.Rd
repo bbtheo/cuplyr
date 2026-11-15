@@ -17,6 +17,7 @@ Returns a \code{tbl_gpu} that will defer operations until \code{collect()} or
 \code{compute()} is called.
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   # Create in eager mode, switch to lazy
   gpu_data <- tbl_gpu(mtcars, lazy = FALSE) |>

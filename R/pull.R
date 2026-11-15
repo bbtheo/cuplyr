@@ -43,6 +43,7 @@
 #' @importFrom dplyr pull
 #'
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   gpu_mtcars <- tbl_gpu(mtcars)
 #'   gpu_mtcars |> pull(mpg)

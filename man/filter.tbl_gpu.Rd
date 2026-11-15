@@ -201,6 +201,7 @@ above) over expressions that require the CPU fallback.
 }
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
 

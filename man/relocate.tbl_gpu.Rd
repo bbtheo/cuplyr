@@ -30,6 +30,7 @@ Moves columns of a GPU table to a new position, similar to
 }
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
 

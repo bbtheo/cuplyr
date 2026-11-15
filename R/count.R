@@ -272,6 +272,7 @@ build_count_agg_call <- function(wt_quo, schema, for_mutate = FALSE) {
 #' @importFrom dplyr count
 #'
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   gpu_mtcars <- tbl_gpu(mtcars)
 #'   gpu_mtcars |> count(cyl) |> collect()
@@ -383,6 +384,7 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
 #' @importFrom dplyr tally
 #'
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   gpu_mtcars <- tbl_gpu(mtcars)
 #'   gpu_mtcars |> group_by(cyl) |> tally() |> collect()
@@ -463,6 +465,7 @@ tally.tbl_gpu <- function(x, wt = NULL, sort = FALSE, name = NULL) {
 #' @importFrom dplyr add_count
 #'
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   gpu_mtcars <- tbl_gpu(mtcars)
 #'   gpu_mtcars |> add_count(cyl) |> collect()
