@@ -334,6 +334,7 @@ the limiting factor, not compute.
 }
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
 

@@ -29,6 +29,7 @@ Materializes any pending lazy operations first via \code{\link[dplyr:compute]{co
 \code{\link[dplyr:collect]{collect()}}s the table and picks out the requested column.
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
   gpu_mtcars |> pull(mpg)

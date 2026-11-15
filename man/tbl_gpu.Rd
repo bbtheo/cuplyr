@@ -137,6 +137,7 @@ one attached last masks the other; \code{cuplyr::gibble()} always works.
 }
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   # Transfer mtcars to GPU (lazy by default)
   gpu_mtcars <- tbl_gpu(mtcars)

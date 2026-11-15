@@ -7,7 +7,7 @@
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/bbtheo/cuplyr-material/blob/main/notebooks/try-cuplyr-colab.ipynb)
 <!-- badges: end -->
 
-cuplyr runs dplyr code on an NVIDIA GPU. It is a dplyr backend, like dbplyr, built on [RAPIDS cuDF](https://github.com/rapidsai/cudf): you upload a data frame with `tbl_gpu()`, use the dplyr verbs you already know, and `collect()` the result back into R.
+cuplyr runs dplyr code on an NVIDIA GPU. It is a dplyr backend, like dbplyr, built on [RAPIDS cuDF](https://github.com/rapidsai/cudf). Upload a data frame with `tbl_gpu()`, use the dplyr verbs you already know, and `collect()` the result back into R.
 
 ```r
 library(cuplyr)
@@ -43,7 +43,7 @@ cuplyr is experimental. Expect breaking changes before 1.0.
 
 ## What runs on the GPU
 
-The goal is every dplyr verb, with dplyr's results. A result that differs from dplyr's is a bug, and the test suite checks cuplyr against dplyr itself, including dplyr's own tests.
+The goal is every dplyr verb, with dplyr's results. Any difference from dplyr is a bug. The test suite checks cuplyr against dplyr, including dplyr's own tests.
 
 These run on the GPU:
 
@@ -53,11 +53,16 @@ These run on the GPU:
 - every join: mutating, filtering and cross joins, and `join_by()` with inequality, `between()`, `within()`, `overlaps()` and `closest()` conditions
 - `bind_rows()`, `bind_cols()`, the set operations and the `rows_*()` verbs
 - `across()`, `if_any()` and `if_all()`
-- inside expressions: arithmetic and comparisons, `if_else()`, `case_when()`, `case_match()`, `coalesce()`, `na_if()`, `between()`, the window functions (`lag()`, `lead()`, the ranking functions, `cumsum()` and the other cumulative functions), `first()`, `last()`, `nth()`, `n_distinct()`, `median()`, `quantile()`, `sd()`, `var()`, base string functions (`paste()`, `substr()`, `nchar()`, `grepl()`, `sub()`, `gsub()`, `toupper()` and others) and date parts (`year()`, `month()`, fixed-unit `floor_date()` and `round_date()`)
+- inside expressions:
+  - arithmetic, comparisons, `if_else()`, `case_when()`, `case_match()`, `coalesce()`, `na_if()` and `between()`
+  - window functions: `lag()`, `lead()`, the ranking functions, `cumsum()` and the other cumulative functions
+  - summaries: `first()`, `last()`, `nth()`, `n_distinct()`, `median()`, `quantile()`, `sd()` and `var()`
+  - base string functions such as `paste()`, `substr()`, `nchar()`, `grepl()`, `sub()`, `gsub()` and `toupper()`
+  - date parts: `year()`, `month()`, and fixed-unit `floor_date()` and `round_date()`
 - rolling windows with `roll_mean()`, `roll_sum()`, `roll_median()`, `roll_min()`, `roll_max()` and `roll_sd()`
 - Parquet files, read and written on the GPU with `read_parquet_gpu()` and `write_parquet_gpu()`
 
-Anything else falls back to the CPU: cuplyr collects the data, runs dplyr and uploads the result. Your code still works, but it copies data across. The fallback is silent by default. Set `options(cuplyr.fallback = "warn")` to see each one, with the expression and the reason, or `"error"` to forbid them.
+Anything else falls back to the CPU. cuplyr collects the data, runs dplyr and uploads the result. Your code still works, but the data makes a round trip. The fallback is silent by default. Set `options(cuplyr.fallback = "warn")` to see each fallback with its expression and reason, or `"error"` to forbid them.
 
 Column types:
 
@@ -72,13 +77,13 @@ Column types:
 | POSIXct | TIMESTAMP_MICROSECONDS, time zone kept |
 | integer64 | FLOAT64, with a warning: values above 2^53 lose precision |
 
-Not supported: list columns, other column classes (`difftime`, `hms`, `ts` and the like raise an error at upload) and more than one GPU. The [open issues](https://github.com/bbtheo/cuplyr/issues) track what is planned.
+Not supported: list columns, other column classes and more than one GPU. Uploading a `difftime`, `hms` or `ts` column raises an error. The [open issues](https://github.com/bbtheo/cuplyr/issues) track what is planned.
 
 ## Lazy by default
 
-`tbl_gpu()` is lazy. Each verb checks its arguments and records a step, so a typo or a type error still fails at the verb that caused it. Nothing runs until you `collect()` the result into R or `compute()` it into a table that stays on the GPU. cuplyr then optimizes the whole plan, runs it and frees every intermediate column.
+`tbl_gpu()` is lazy. Each verb checks its arguments and records a step, so a typo or type error still fails at the verb that caused it. Nothing runs until you `collect()` the result into R or `compute()` it into a table that stays on the GPU. Then cuplyr optimizes the whole plan, runs it and frees every intermediate column.
 
-Printing a lazy table runs the plan to show the first rows, and keeps nothing. Print it twice and it runs twice, so `compute()` a table you want to look at often.
+Printing a lazy table runs the plan to show the first rows and keeps nothing. Print it twice and it runs twice. `compute()` a table you want to look at often.
 
 `explain()` shows the recorded steps and the plan the optimizer will run:
 
@@ -92,7 +97,7 @@ tbl_gpu(mtcars) |>
 
 The optimizer drops columns the result never reads, fuses consecutive `mutate()` calls, pushes filters below mutates, selects and some joins, and merges consecutive filters into one. `vignette("query-optimization")` describes each pass.
 
-On a single pipeline lazy is level with eager up to 1e6 rows and under a millisecond slower at 1e7. In exchange it holds no GPU memory between calls. An eager pipeline keeps its intermediate results on the GPU until R's next `gc()`, and in a loop they fill the card. Five eager runs of a pipeline over 5e7 rows, back to back, took 68 ms each. Lazy took 18 ms.
+For a single pipeline, lazy is as fast as eager up to 1e6 rows and under a millisecond slower at 1e7. In exchange it holds no GPU memory between calls. Eager mode keeps intermediate results on the GPU until R's next `gc()`, and in a loop they fill the card. Over 5e7 rows, five back-to-back eager runs took 68 ms each. Lazy took 18 ms.
 
 Eager mode runs each verb as soon as you call it, which is easier when you step through code by hand:
 
@@ -113,11 +118,13 @@ A five-verb pipeline (`filter`, `mutate`, `group_by`, `summarise`, `arrange`) on
 | 1e6 | 2.00 | 22.0 |
 | 1e7 | 5.00 | 213 |
 
-The GPU loses when you upload a table, run one cheap verb and collect it. Uploading 1e7 rows takes 63 ms, and collecting them takes 54 ms. Keep data on the GPU between steps and collect once at the end. `vignette("performance")` has the method, eager timings, memory held per call and the other cases where dplyr wins. `vignette("memory")` explains how cuplyr allocates GPU memory and when `gpu_gc()` gives it back.
+The GPU loses when you upload a table, run one cheap verb and collect it. Uploading 1e7 rows takes 63 ms and collecting them takes 54 ms. Keep data on the GPU between steps and collect once at the end.
+
+`vignette("performance")` has the method, eager timings, memory per call and the other cases where dplyr wins. `vignette("memory")` explains how cuplyr allocates GPU memory and when `gpu_gc()` gives it back.
 
 ## Gibbles
 
-cuplyr's tables are called gibbles. They print as `# A gibble:`, or `# A gibble [lazy]:` with pending steps. `gibble()`, `as_gibble()` and `is_gibble()` are aliases of `tbl_gpu()`, `as_tbl_gpu()` and `is_tbl_gpu()`. The CRAN package gibble also has a `gibble()` function; `?gibble` explains which one wins when both are attached.
+cuplyr's tables are called gibbles. They print as `# A gibble:`, or `# A gibble [lazy]:` with pending steps. `gibble()`, `as_gibble()` and `is_gibble()` are aliases of `tbl_gpu()`, `as_tbl_gpu()` and `is_tbl_gpu()`. The CRAN package gibble also has a `gibble()` function. `?gibble` explains which one wins when both are attached.
 
 ## Installation
 
@@ -136,7 +143,7 @@ The install script clones cuplyr, finds CUDA and libcudf through pixi, conda or 
 curl -fsSL https://raw.githubusercontent.com/bbtheo/cuplyr/main/install.sh | bash
 ```
 
-Pick the method yourself with `--method=pixi`, `--method=conda` or `--method=system`, and see what it would do with `--dry-run`. From a clone, run `./install.sh` with the same options.
+To pick the method yourself, pass `--method=pixi`, `--method=conda` or `--method=system`. `--dry-run` shows what the script would do. From a clone, run `./install.sh` with the same options.
 
 Then check the installation from R:
 
@@ -145,13 +152,13 @@ library(cuplyr)
 verify_installation()
 ```
 
-If something is wrong, `check_deps()` lists what is missing, and `diagnostics()` prints the system details to paste into a bug report.
+If something is wrong, `check_deps()` lists what is missing. `diagnostics()` prints the system details to paste into a bug report.
 
 ## Learn more
 
 - [Documentation site](https://bbtheo.github.io/cuplyr/), with the reference and the vignettes
 - `vignette("getting-started")` and `vignette("complex-analysis")` for longer examples
-- [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the developer setup, the scope and the known differences from dplyr, and how issues and pull requests work
+- [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the scope, known differences from dplyr, the developer setup and how pull requests work
 
 ## Acknowledgments
 

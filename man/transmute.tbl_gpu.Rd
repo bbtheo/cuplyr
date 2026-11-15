@@ -36,6 +36,7 @@ front (in \code{group_vars()} order); a group column that IS explicitly
 mentioned in \code{...} takes its dot position instead of being prepended.
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
 

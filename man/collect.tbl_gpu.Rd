@@ -78,6 +78,7 @@ Data transfer between GPU and CPU is limited by PCIe bandwidth
 }
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
 

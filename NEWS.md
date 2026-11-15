@@ -1,5 +1,8 @@
 # cuplyr (development version)
 
+* The examples on the help pages of the dplyr verbs attach dplyr, so they run
+  with `example()` and render on the website (#39).
+
 * `install_cuplyr()` and `install.sh` install from the `main` branch by
   default. The repository's default branch was renamed from `master`.
 

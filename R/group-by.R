@@ -101,6 +101,7 @@
 #' @importFrom dplyr group_by
 #'
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   gpu_mtcars <- tbl_gpu(mtcars)
 #'
@@ -390,6 +391,7 @@ check_regroup_dots <- function(..., .add) {
 #' @importFrom dplyr ungroup
 #'
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   gpu_mtcars <- tbl_gpu(mtcars)
 #'
@@ -471,6 +473,7 @@ ungroup.tbl_gpu <- function(x, ...) {
 #' @importFrom dplyr group_vars
 #'
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   gpu_mtcars <- tbl_gpu(mtcars)
 #'
@@ -495,6 +498,7 @@ group_vars.tbl_gpu <- function(x) {
 #' @importFrom dplyr groups
 #'
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   gpu_mtcars <- tbl_gpu(mtcars)
 #'

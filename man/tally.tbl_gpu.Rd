@@ -33,6 +33,7 @@ groups \code{x} already has (or all rows, if ungrouped). Sugar over
 \code{\link[=summarise.tbl_gpu]{summarise.tbl_gpu()}}.
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
   gpu_mtcars |> group_by(cyl) |> tally() |> collect()

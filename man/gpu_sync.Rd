@@ -20,6 +20,7 @@ Results that are collected to R (\code{collect()}, \code{print()}) are already w
 for; this is for timing code that leaves its result on the GPU.
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   g <- tbl_gpu(data.frame(x = runif(1e6)), lazy = FALSE)
   t0 <- Sys.time()

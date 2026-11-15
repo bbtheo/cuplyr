@@ -122,6 +122,7 @@
 #'
 #' @export
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   # Transfer mtcars to GPU (lazy by default)
 #'   gpu_mtcars <- tbl_gpu(mtcars)

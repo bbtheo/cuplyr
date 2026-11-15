@@ -40,6 +40,7 @@
 #' @importFrom dplyr compute
 #'
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   # Lazy pipeline
 #'   lazy_result <- tbl_gpu(mtcars) |>  # lazy by default
@@ -192,6 +193,7 @@ collapse.tbl_gpu <- function(x, ...) {
 #' @export
 #'
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   # Tables are lazy by default; switch to eager mid-pipeline
 #'   result <- tbl_gpu(mtcars) |>
@@ -225,6 +227,7 @@ as_eager <- function(.data) {
 #' @export
 #'
 #' @examples
+#' library(dplyr)
 #' if (has_gpu()) {
 #'   # Create in eager mode, switch to lazy
 #'   gpu_data <- tbl_gpu(mtcars, lazy = FALSE) |>

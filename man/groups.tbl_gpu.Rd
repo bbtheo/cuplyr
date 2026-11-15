@@ -16,6 +16,7 @@ A list of symbols for the grouping columns.
 Returns a list of symbols representing the grouping columns.
 }
 \examples{
+library(dplyr)
 if (has_gpu()) {
   gpu_mtcars <- tbl_gpu(mtcars)
 
