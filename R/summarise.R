@@ -1786,9 +1786,10 @@ extract_nth_position <- function(expr, env, quo) {
 # Internal: `.by=` desugar for summarise() (Phase 5, task W9; #50)
 #
 # Groups `.data` by `by_cols` and runs ONE summarise with
-# `group_order = "first"`: gpu_summarise() adds a MIN over the row positions to
-# the same groupby call and orders the result by it, which is dplyr's `.by=`
-# group order (vctrs::vec_group_loc(), first appearance). No row-id column, no
+# `group_order = "first"`: gpu_summarise() runs the groupby as usual and then
+# reorders the key-sorted result by each group's first row (distinct_indices()
+# on a prefix + lower_bound()), which is dplyr's `.by=` group order
+# (vctrs::vec_group_loc(), first appearance). No row-id column, no
 # arrange(), no select(). The result is ungrouped (summarise_core() is called
 # with its default `retained_groups = character()`: the grouping is a pure
 # computation device, unrelated to `.groups=`), matching dplyr's `.by=`.
