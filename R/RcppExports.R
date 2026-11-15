@@ -185,8 +185,8 @@ gpu_gather_rows <- function(table_ptrs, idx) {
     .Call(`_cuplyr_gpu_gather_rows`, table_ptrs, idx)
 }
 
-gpu_summarise <- function(xptr, group_indices, agg_col_indices, agg_types, na_rm, agg_extra, identity, sort_keys) {
-    .Call(`_cuplyr_gpu_summarise`, xptr, group_indices, agg_col_indices, agg_types, na_rm, agg_extra, identity, sort_keys)
+gpu_summarise <- function(xptr, group_indices, agg_col_indices, agg_types, na_rm, agg_extra, identity, group_order) {
+    .Call(`_cuplyr_gpu_summarise`, xptr, group_indices, agg_col_indices, agg_types, na_rm, agg_extra, identity, group_order)
 }
 
 gpu_group_info <- function(xptr, group_col_indices) {

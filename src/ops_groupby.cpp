@@ -8,6 +8,7 @@
 #include <cudf/aggregation.hpp>
 #include <cudf/binaryop.hpp>
 #include <cudf/copying.hpp>
+#include <cudf/filling.hpp>
 #include <cudf/groupby.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/null_mask.hpp>
@@ -580,11 +581,19 @@ struct QuantileRequests {
 SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                    IntegerVector agg_col_indices, CharacterVector agg_types,
                    LogicalVector na_rm, NumericVector agg_extra,
-                   LogicalVector identity, bool sort_keys) {
+                   LogicalVector identity, std::string group_order) {
     using namespace cuplyr;
 
     Rcpp::XPtr<GpuTablePtr> ptr(xptr);
     cudf::table_view view = get_table_view(ptr);
+
+    // "keys": rows sorted by the group keys (F33); "first": groups in order of
+    // first appearance (dplyr's `.by =`, #50).
+    if (group_order != "keys" && group_order != "first") {
+        Rcpp::stop("group_order must be \"keys\" or \"first\"");
+    }
+    const bool sort_keys = group_order == "keys";
+    const bool first_order = group_order == "first";
 
     int num_aggs = agg_col_indices.size();
     int num_groups = group_indices.size();
@@ -1142,6 +1151,23 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         }
     }
 
+    // #50: first-appearance order. One more MIN request over the row positions
+    // goes into the SAME aggregate() call as every other request, so the
+    // position of a group is read from exactly the grouping the aggregations
+    // used (NA/NaN/-0 keys cannot be split differently by a second call).
+    std::unique_ptr<cudf::column> row_positions;
+    int first_request_idx = -1;
+    if (first_order) {
+        row_positions = cudf::sequence(
+            view.num_rows(), cudf::numeric_scalar<int32_t>(0, true),
+            cudf::numeric_scalar<int32_t>(1, true));
+        cudf::groupby::aggregation_request first_req;
+        first_req.values = row_positions->view();
+        first_req.aggregations.push_back(cudf::make_min_aggregation<cudf::groupby_aggregation>());
+        first_request_idx = static_cast<int>(requests.size());
+        requests.push_back(std::move(first_req));
+    }
+
     auto [result_keys, result_aggs] = gb.aggregate(requests);
     for (int i = 0; i < num_aggs; ++i) {
         if (split_mean(i, eff[i])) finish_mean(result_aggs[main_request_idx[i]]);
@@ -1228,6 +1254,16 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     }
 
     auto result = std::make_unique<cudf::table>(std::move(result_columns));
+
+    // #50: order the k-row result by each group's first row position (distinct
+    // per group). The position column is not part of `result`.
+    if (first_order && result->num_rows() > 1) {
+        cudf::table_view pos_view({result_aggs[first_request_idx].results[0]->view()});
+        auto idx = cudf::sorted_order(pos_view, {cudf::order::ASCENDING},
+                                      {cudf::null_order::AFTER});
+        result = cudf::gather(result->view(), idx->view(),
+                              cudf::out_of_bounds_policy::DONT_CHECK);
+    }
 
     // F33: dplyr's group_by() order -- keys ascending, NA last. Bytewise
     // string compare is the C locale, factor codes give level order, BOOL8

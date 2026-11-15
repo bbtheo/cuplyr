@@ -1373,14 +1373,15 @@ summarise_ts_ok_fns <- c("min", "max", "mean", "median")
 #   `aggregations` (summarise_with_empty_groups() reads their functions and types)
 # @param simple_aggs `NULL`, or `summarise_simple_aggregations(dots, schema)` when
 #   the caller has already built it
+# @param group_order `"keys"` (rows sorted by the group keys, F33) or `"first"`
+#   (groups in order of first appearance, what `.by =` gives; #50)
 # @param notice_data The table a plan-break notice counts the pending steps of:
 #   `.data`, or the user's input when `.data` holds steps of summarise()'s own
-#   (summarise_by_desugar()'s row-id column)
 # @return A new tbl_gpu, grouped by `retained_groups` (see
 #   propagate_groups(), R/execute.R, which reads `node$result_groups`)
 # @keywords internal
 summarise_core <- function(.data, dots, retained_groups = character(),
-                           internal_cols = character(), sort_groups = TRUE,
+                           group_order = "keys",
                            agg_info = NULL, simple_aggs = NULL, ir_cache = NULL,
                            notice_data = .data) {
   # No wrapper of its own (F58): the work below is R logic (quosure parsing,
@@ -1440,16 +1441,6 @@ summarise_core <- function(.data, dots, retained_groups = character(),
                                        na_rm_flags, agg_extra)
   }
 
-  # F07: internal helper aggregations (summarise_by_desugar()'s row-position
-  # min()) must stay INT32 and never warn.
-  if (length(internal_cols) > 0L) {
-    for (i in seq_along(aggregations)) {
-      if (aggregations[[i]]$output_col %in% internal_cols) {
-        aggregations[[i]]$identity <- FALSE
-      }
-    }
-  }
-
   # (F74) the caller wants to see which aggregations ran
   if (!is.null(agg_info)) agg_info$aggregations <- aggregations
 
@@ -1479,10 +1470,10 @@ summarise_core <- function(.data, dots, retained_groups = character(),
     named <- vapply(aggregations[min_max_now | sum_now], `[[`, character(1), "output_col")
     reason <- paste0(
       "an integer ", paste(c(if (any(min_max_now)) "min()/max()", if (any(sum_now)) "sum()"), collapse = " or "),
-      " (result type depends on the data): ", paste(set_diff(named, internal_cols), collapse = ", ")
+      " (result type depends on the data): ", paste(named, collapse = ", ")
     )
     expr <- summarise_notice_expr(dots, user_dots, which(min_max_now | sum_now))
-    return(summarise_run_now(working_data, aggregations, retained_groups, sort_groups, reason,
+    return(summarise_run_now(working_data, aggregations, retained_groups, group_order, reason,
                              notice_data = notice_data, expr = expr))
   }
 
@@ -1492,7 +1483,7 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   # (see ast_summarise(on_sum_overflow=)).
   result <- push_op(working_data, ast_summarise(
     input_node(working_data), aggregations, .subset2(working_data, "groups"), retained_groups,
-    on_sum_overflow = if (eager) "double" else "error", sort_groups = sort_groups
+    on_sum_overflow = if (eager) "double" else "error", group_order = group_order
   ))
   if (eager) reconcile_summarise_types(result) else result
 }
@@ -1517,7 +1508,7 @@ summarise_notice_expr <- function(dots, user_dots, forcing) {
 # the result's real column types (F07, see summarise_core()). Returns a table
 # in the input's exec_mode with no pending ops.
 # @keywords internal
-summarise_run_now <- function(.data, aggregations, retained_groups, sort_groups = TRUE, reason,
+summarise_run_now <- function(.data, aggregations, retained_groups, group_order = "keys", reason,
                               notice_data = .data, expr = NA_character_) {
   was_lazy <- identical(.subset2(.data, "exec_mode"), "lazy")
 
@@ -1533,7 +1524,7 @@ summarise_run_now <- function(.data, aggregations, retained_groups, sort_groups 
   result <- push_op(base, ast_summarise(input_node(base), aggregations,
                                         base$groups, retained_groups,
                                         on_sum_overflow = "double",
-                                        sort_groups = sort_groups))
+                                        group_order = group_order))
   result <- reconcile_summarise_types(result)
 
   if (was_lazy) {
@@ -1792,26 +1783,15 @@ extract_nth_position <- function(expr, env, quo) {
   )
 }
 
-# Internal: `.by=` desugar for summarise() (Phase 5, task W9)
+# Internal: `.by=` desugar for summarise() (Phase 5, task W9; #50)
 #
-# scratchpad/phase5_window_design.md section 6:
-#   1. mutate(..rowid.. = row_number()) -- an UNGROUPED window call (safe:
-#      resolve_by() already guarantees `.data` itself carries no groups
-#      when `.by=` is supplied, so this is never a grouped row_number()).
-#   2. Group by `by_cols` and run the user's own aggregation dots PLUS one
-#      extra `..first.. = min(..rowid..)` aggregation -- the smallest
-#      original row index surviving in each group is exactly that group's
-#      first-appearance position (every row of a group shares the same
-#      grouped-summarise result, so `min()` over the whole group is safe
-#      even though only one row's rowid "matters").
-#   3. arrange(..first..) orders the one-row-per-group result by that
-#      first-appearance position -- reproducing dplyr's empirically-verified
-#      `.by=` group order (see summarise.tbl_gpu()'s own roxygen).
-#   4. Drop `..first..`. The result is already ungrouped (summarise_core()
-#      is called with its default `retained_groups = character()`, Phase 6
-#      task 3 -- this internal grouped summarise is a pure computation
-#      device, unrelated to `.groups=` semantics), matching dplyr's own
-#      `.by=` contract.
+# Groups `.data` by `by_cols` and runs ONE summarise with
+# `group_order = "first"`: gpu_summarise() adds a MIN over the row positions to
+# the same groupby call and orders the result by it, which is dplyr's `.by=`
+# group order (vctrs::vec_group_loc(), first appearance). No row-id column, no
+# arrange(), no select(). The result is ungrouped (summarise_core() is called
+# with its default `retained_groups = character()`: the grouping is a pure
+# computation device, unrelated to `.groups=`), matching dplyr's `.by=`.
 #
 # @param .data A tbl_gpu, confirmed ungrouped by resolve_by() before this is
 #   ever called
@@ -1821,32 +1801,20 @@ extract_nth_position <- function(expr, env, quo) {
 #   combination, in first-appearance order
 # @keywords internal
 summarise_by_desugar <- function(.data, dots, by_cols, ir_cache = NULL) {
-  reserved_names <- c(current_schema(.data)$names, names(dots))
-
-  rowid_name <- unique_temp_name("..summarise_rowid..", reserved_names)
-  with_rowid <- dplyr::mutate(.data, !!rowid_name := dplyr::row_number())
-
   # Set groups directly (equivalent to group_by(by_cols), but avoids a
   # round trip through the group_by() generic for a purely internal step).
   grouped <- new_tbl_gpu(
-    ptr = with_rowid$ptr,
-    schema = with_rowid$schema,
-    lazy_ops = with_rowid$lazy_ops,
+    ptr = .data$ptr,
+    schema = .data$schema,
+    lazy_ops = .data$lazy_ops,
     groups = by_cols,
-    exec_mode = with_rowid$exec_mode
+    exec_mode = .data$exec_mode
   )
 
-  first_name <- unique_temp_name("..summarise_first..", c(reserved_names, rowid_name))
-  dots[[first_name]] <- rlang::new_quosure(
-    rlang::call2("min", as.name(rowid_name)), rlang::base_env()
-  )
-
-  # (a plan-break notice counts the user's steps, not the row-id column's)
-  result <- summarise_core(grouped, dots, internal_cols = first_name, sort_groups = FALSE,
-                          ir_cache = ir_cache, notice_data = .data)
-  result <- dplyr::arrange(result, !!rlang::sym(first_name))
+  result <- summarise_core(grouped, dots, group_order = "first", ir_cache = ir_cache,
+                           notice_data = .data)
   # the grouping above was internal: summarise() keeps only the bare class
-  copy_frame_meta(dplyr::select(result, -dplyr::all_of(first_name)), .data, attrs = FALSE)
+  copy_frame_meta(result, .data, attrs = FALSE)
 }
 
 #' @rdname summarise.tbl_gpu

@@ -533,8 +533,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // gpu_summarise
-SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices, IntegerVector agg_col_indices, CharacterVector agg_types, LogicalVector na_rm, NumericVector agg_extra, LogicalVector identity, bool sort_keys);
-RcppExport SEXP _cuplyr_gpu_summarise(SEXP xptrSEXP, SEXP group_indicesSEXP, SEXP agg_col_indicesSEXP, SEXP agg_typesSEXP, SEXP na_rmSEXP, SEXP agg_extraSEXP, SEXP identitySEXP, SEXP sort_keysSEXP) {
+SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices, IntegerVector agg_col_indices, CharacterVector agg_types, LogicalVector na_rm, NumericVector agg_extra, LogicalVector identity, std::string group_order);
+RcppExport SEXP _cuplyr_gpu_summarise(SEXP xptrSEXP, SEXP group_indicesSEXP, SEXP agg_col_indicesSEXP, SEXP agg_typesSEXP, SEXP na_rmSEXP, SEXP agg_extraSEXP, SEXP identitySEXP, SEXP group_orderSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -545,8 +545,8 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< LogicalVector >::type na_rm(na_rmSEXP);
     Rcpp::traits::input_parameter< NumericVector >::type agg_extra(agg_extraSEXP);
     Rcpp::traits::input_parameter< LogicalVector >::type identity(identitySEXP);
-    Rcpp::traits::input_parameter< bool >::type sort_keys(sort_keysSEXP);
-    rcpp_result_gen = Rcpp::wrap(gpu_summarise(xptr, group_indices, agg_col_indices, agg_types, na_rm, agg_extra, identity, sort_keys));
+    Rcpp::traits::input_parameter< std::string >::type group_order(group_orderSEXP);
+    rcpp_result_gen = Rcpp::wrap(gpu_summarise(xptr, group_indices, agg_col_indices, agg_types, na_rm, agg_extra, identity, group_order));
     return rcpp_result_gen;
 END_RCPP
 }

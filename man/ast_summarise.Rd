@@ -10,7 +10,7 @@ ast_summarise(
   groups,
   result_groups = character(),
   on_sum_overflow = "error",
-  sort_groups = TRUE
+  group_order = "keys"
 )
 }
 \arguments{
@@ -37,9 +37,10 @@ FLOAT64, as in dplyr (eager mode reconciles the schema from the result).
 \code{cuplyr_error_sum_overflow}. A lazy \code{summarise()} plans only a sum of a
 logical this way (F80): an INT32 sum runs at the verb with \code{"double"}.}
 
-\item{sort_groups}{(F33) Sort the grouped result by the group keys
-(ascending, \code{NA} last), dplyr's \code{group_by()} order. \code{FALSE} only for
-\code{summarise_by_desugar()}, which re-sorts by first appearance anyway.}
+\item{group_order}{Row order of a grouped result: \code{"keys"} (F33) sorts by the
+group keys (ascending, \code{NA} last), dplyr's \code{group_by()} order; \code{"first"}
+(#50) orders groups by first appearance, dplyr's \verb{.by =} order, and is
+what \code{summarise_by_desugar()} asks for.}
 }
 \value{
 An ast_summarise node

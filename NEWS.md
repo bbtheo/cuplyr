@@ -1,5 +1,11 @@
 # cuplyr (development version)
 
+* `summarise(.by =)` orders groups by first appearance inside the summarise
+  step, with no row-number column, arrange or select, so it needs about the
+  memory of `group_by() |> summarise()` plus one integer column and runs in a
+  single step. An ungrouped `row_number()` in `mutate()` is a plain sequence
+  and needs one integer column instead of six (#50).
+
 * `install_cuplyr()` and `install.sh` install from the `main` branch by
   default. The repository's default branch was renamed from `master`.
 
