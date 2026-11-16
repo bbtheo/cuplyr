@@ -243,12 +243,10 @@
 #' appears in `.data` -- e.g. `summarise(tibble(g = c("b","a","b")), n =
 #' n(), .by = g)` returns `g` in the order `c("b", "a")`, not `c("a", "b")`.
 #' This differs from `group_by(g) |> summarise(...)`, whose groups are
-#' sorted. Implemented via a
-#' desugar (`summarise_by_desugar()`): an ungrouped `row_number()` marks
-#' each row's original position, a grouped summarise computes the user's
-#' aggregations plus `min()` of that position per group, and the result is
-#' sorted by that minimum (each group's first-appearance position) before
-#' the helper column is dropped.
+#' sorted. The GPU does one grouped summarise and puts the groups in
+#' first-appearance order inside it (`summarise_by_desugar()`): no row-number
+#' column and no extra verbs, and about the GPU memory at its peak that the
+#' `group_by()` form needs.
 #'
 #' @seealso
 #' \code{\link{group_by.tbl_gpu}} for grouping data,
@@ -547,7 +545,7 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
     # `.by=` summarise is always ungrouped (Phase 5, task W9); `.groups=`
     # can never reach here alongside `.by=` (dplyr's own generic already
     # rejects that combination before this method is even dispatched to).
-    return(gpu_or_cpu(function() summarise_by_desugar(.data, dots, by_cols, ir_cache)))
+    return(gpu_or_cpu(function() summarise_by_desugar(.data, dots, by_cols, ir_cache, simple_aggs)))
   }
 
   retained_groups <- resolve_summarise_groups(.subset2(.data, "groups"), .groups, caller_env)
@@ -1358,8 +1356,7 @@ summarise_ts_ok_fns <- c("min", "max", "mean", "median")
 # Internal: the shared aggregation pipeline -- temp-column preprocessing,
 # aggregation parsing, one ast_summarise push -- used both by the ordinary
 # group_by()-or-ungrouped path and by summarise_by_desugar()'s own internal
-# grouped summarise call (with its extra `..summarise_first..` dot already
-# appended).
+# grouped summarise call.
 #
 # @param .data A tbl_gpu (its own `$groups` drive the aggregation)
 # @param dots Already auto_name_dots()'d aggregation quosures
@@ -1787,10 +1784,11 @@ extract_nth_position <- function(expr, env, quo) {
 # Internal: `.by=` desugar for summarise() (Phase 5, task W9; #50)
 #
 # Groups `.data` by `by_cols` and runs ONE summarise with
-# `group_order = "first"`: gpu_summarise() runs the groupby as usual and then
-# reorders the key-sorted result by each group's first row (distinct_indices()
-# on a prefix + lower_bound()), which is dplyr's `.by=` group order
-# (vctrs::vec_group_loc(), first appearance). No row-id column, no
+# `group_order = "first"`: gpu_summarise() puts the groups in order of first
+# appearance, dplyr's `.by=` order (vctrs::vec_group_loc()): under 2^17 rows
+# from a MIN over the row position in the same groupby, above that by
+# looking the groups' first rows up in the key-sorted result
+# (first_appearance_keys() + lower_bound()). No row-id column, no
 # arrange(), no select(). The result is ungrouped (summarise_core() is called
 # with its default `retained_groups = character()`: the grouping is a pure
 # computation device, unrelated to `.groups=`), matching dplyr's `.by=`.
@@ -1799,22 +1797,24 @@ extract_nth_position <- function(expr, env, quo) {
 #   ever called
 # @param dots The already-auto_name_dots()'d aggregation quosures (`...`)
 # @param by_cols Character vector, the resolved `.by=` columns
+# @param ir_cache,simple_aggs What summarise_impl() already built for the dots,
+#   passed on to summarise_core()
 # @return A new (ungrouped) tbl_gpu, one row per distinct `by_cols`
 #   combination, in first-appearance order
 # @keywords internal
-summarise_by_desugar <- function(.data, dots, by_cols, ir_cache = NULL) {
+summarise_by_desugar <- function(.data, dots, by_cols, ir_cache = NULL, simple_aggs = NULL) {
   # Set groups directly (equivalent to group_by(by_cols), but avoids a
   # round trip through the group_by() generic for a purely internal step).
   grouped <- new_tbl_gpu(
-    ptr = .data$ptr,
-    schema = .data$schema,
-    lazy_ops = .data$lazy_ops,
+    ptr = .subset2(.data, "ptr"),
+    schema = .subset2(.data, "schema"),
+    lazy_ops = .subset2(.data, "lazy_ops"),
     groups = by_cols,
-    exec_mode = .data$exec_mode
+    exec_mode = .subset2(.data, "exec_mode")
   )
 
-  result <- summarise_core(grouped, dots, group_order = "first", ir_cache = ir_cache,
-                           notice_data = .data)
+  result <- summarise_core(grouped, dots, group_order = "first", simple_aggs = simple_aggs,
+                           ir_cache = ir_cache)
   # the grouping above was internal: summarise() keeps only the bare class
   copy_frame_meta(result, .data, attrs = FALSE)
 }

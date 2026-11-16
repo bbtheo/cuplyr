@@ -2,9 +2,9 @@
 
 * `summarise(.by =)` no longer adds a row-number column to order its groups by
   first appearance: it needs no more GPU memory at its peak than
-  `group_by() |> summarise()` and runs as one step, about as fast as the
-  `group_by()` form (it used to take 2-3 times as long on small and medium
-  tables). An ungrouped `row_number()` in `mutate()` now allocates one integer
+  `group_by() |> summarise()` and runs as one step, within about 1.5 times
+  the time of the `group_by()` form (it used to take 2-3 times as long on
+  small and medium tables). An ungrouped `row_number()` in `mutate()` now allocates one integer
   column instead of six (#50).
 
 * The examples on the help pages of the dplyr verbs attach dplyr, so they run
