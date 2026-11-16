@@ -1,12 +1,13 @@
-# #50: summarise(.by =) on inputs of 2^17 rows and more takes the path that
-# runs the groupby as for group_by() and then looks up each group's first row
-# (src/ops_groupby.cpp, first_appearance_keys()). The result must still be
-# dplyr's first-appearance order, whichever way the first rows are found:
-#  - shuffled keys: a prefix of the rows shows every group;
-#  - a group that only appears at the very end: the prefix misses it;
-#  - sorted or clustered keys: the first rows are the run starts;
-#  - nearly all keys distinct: the result is aligned by sorting and a lookup,
-#    not by a hash join of the first-appearance keys.
+# #50: summarise(.by =) on inputs of 2^17 rows and more runs the groupby as for
+# group_by() (without its key sort), then scans the rows in chunks for each
+# group's first row (src/ops_groupby.cpp, first_appearance_order()). The result
+# must still be dplyr's first-appearance order, whichever branch finds them:
+#  - shuffled keys: the first chunk shows every group;
+#  - a group that first appears late: a later chunk (each 4x the last) has it;
+#  - sorted or clustered keys that revisit groups, so the first chunk misses
+#    some: the scan starts over on the run starts;
+#  - more than n/4 groups: chunks of n/8 rows, each adding the groups it is the
+#    first to see.
 # test-parity-50-by-order.R covers every key type under 2^17 rows.
 
 by50l_n <- 131072L + 4001L
@@ -170,5 +171,71 @@ test_that("a large summarise(.by) with a single group, or only NA keys, is one r
                    stringsAsFactors = FALSE)
   by50l_expect(df, function(d) dplyr::summarise(d, n = dplyr::n(), s = sum(x), .by = g))
   by50l_expect(df, function(d) dplyr::summarise(d, n = dplyr::n(), s = sum(x), .by = na))
+  by50l_release()
+})
+
+test_that("a large summarise(.by) on clustered keys that revisit groups uses the run starts", {
+  skip_if_no_gpu()
+  # 20 runs of 50000 rows: the first 2^17 rows hold three runs, so the scan
+  # starts over on the run starts. NA, NaN, -NaN, -0 and 0 keys among them.
+  n <- 1e6
+  each <- 50000L
+  lab <- c("r3", "r1", "r3", "r2", NA, "r1", "r4", "r2", "r5", "r3",
+           "r6", "r1", NA, "r7", "r2", "r8", "r3", "r9", "r1", "r10")
+  dv <- c(0, -0, NaN, -NaN, 2.5, NA, 2.5, 0, Inf, NaN,
+          -Inf, NA, -0, 7, NaN, 0, 7, -Inf, 2.5, -NaN)
+  iv <- c(5L, 9L, 5L, NA, 1L, 9L, 3L, 1L, NA, 5L,
+          8L, 3L, 2L, 9L, 6L, 1L, 4L, 8L, 7L, 5L)
+  set.seed(5017)
+  df <- data.frame(
+    cs = rep(lab, each = each),
+    cd = rep(dv, each = each),
+    ci = rep(iv, each = each),
+    cj = rep(rep(c(2L, 4L, 2L, 6L, NA), length.out = 34L), each = 30000L, length.out = n),
+    x = runif(n),
+    stringsAsFactors = FALSE
+  )
+  by50l_expect(df, function(d) dplyr::summarise(d, n = dplyr::n(), s = sum(x), .by = cs))
+  by50l_expect(df, function(d) dplyr::summarise(d, n = dplyr::n(), s = sum(x), .by = cd))
+  by50l_expect(df, function(d) dplyr::summarise(d, n = dplyr::n(), .by = ci))
+  by50l_expect(df, function(d) dplyr::summarise(d, n = dplyr::n(), s = sum(x), .by = c(cs, cj)))
+  by50l_expect(df, function(d) dplyr::summarise(d, n = dplyr::n(), .by = c(cd, ci, cs)))
+  by50l_release()
+})
+
+test_that("a large summarise(.by) finds a group in the second chunk and one in the last row", {
+  skip_if_no_gpu()
+  # 4e6 shuffled rows of two groups: "mid" at row 300000 is in the second chunk
+  # (rows 131073-655360), "end" in the last chunk
+  n <- 4e6
+  set.seed(5018)
+  g <- sample(c("a", "b"), n, replace = TRUE)
+  mid <- g
+  mid[300000] <- "mid"
+  both <- mid
+  both[n] <- "end"
+  df <- data.frame(mid = mid, both = both, x = runif(n), stringsAsFactors = FALSE)
+  by50l_expect(df, function(d) dplyr::summarise(d, n = dplyr::n(), m = mean(x), .by = mid))
+  by50l_expect(df, function(d) dplyr::summarise(d, n = dplyr::n(), m = mean(x), .by = both))
+  by50l_release()
+})
+
+test_that("a large summarise(.by) with n/2 groups keeps first-appearance order across chunks", {
+  skip_if_no_gpu()
+  # more than n/4 groups: chunks of n/8 rows, every one adding groups; doubles
+  # with NaN, -NaN, -0, 0 and NA among many distinct values
+  n <- 1e6
+  set.seed(5019)
+  special <- c(NaN, -NaN, -0, 0, NA)
+  d <- round(runif(n) * 3e5) / 7
+  d[sample.int(n, 5000L)] <- sample(special, 5000L, replace = TRUE)
+  df <- data.frame(
+    s2 = sprintf("key-%09d", sample(rep(seq_len(n / 2), 2))),
+    d = d,
+    x = runif(n),
+    stringsAsFactors = FALSE
+  )
+  by50l_expect(df, function(d) dplyr::summarise(d, n = dplyr::n(), s = sum(x), .by = s2))
+  by50l_expect(df, function(d) dplyr::summarise(d, n = dplyr::n(), .by = d))
   by50l_release()
 })

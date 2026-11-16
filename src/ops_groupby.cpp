@@ -15,6 +15,9 @@
 #else
 #include <cudf/join.hpp>
 #endif
+#if __has_include(<cudf/join/distinct_hash_join.hpp>)
+#include <cudf/join/distinct_hash_join.hpp>
+#endif
 #include <cudf/column/column_factories.hpp>
 #include <cudf/null_mask.hpp>
 #include <cudf/sorting.hpp>
@@ -565,55 +568,146 @@ struct QuantileRequests {
     }
 };
 
-// #50: the group keys of `keys` (the key columns of every input row) in order
-// of first appearance: k rows, one per distinct combination (NULLs equal,
-// NaNs equal: the groupby's own equality). `k` is the group count the groupby
-// found; a different count here is an internal error, never a wrong order.
-//  1. stable_distinct() on a prefix of m rows, m = max(2^17, 16k): rows drawn
-//     from k groups spread through the data show every group in about
-//     k ln k of them, so this is one cheap pass.
-//  2. A prefix that misses groups means rare or late groups, or clustered
-//     input. When consecutive duplicates collapse the table to at most n/8
-//     runs (sorted or clustered keys), the first row of each group is a run
-//     start (a row that differs from the one before it), and
-//     stable_distinct() over just the run starts is the answer. That holds
-//     whatever equality unique() uses, as long as it is no looser than the
-//     groupby's: a stricter one only adds run starts.
-//  3. Otherwise the prefix grows 4x; once the next prefix would cover half
-//     the rows it is the whole table, so no pass sits next to the full one.
-static std::unique_ptr<cudf::table> first_appearance_keys(const cudf::table_view& keys,
-                                                          cudf::size_type k) {
+// #50: the gather map that puts the groupby's k-row result in dplyr's `.by =`
+// order, first appearance. `keys` are the key columns of every input row,
+// `result_keys` the result's (distinct) keys in the groupby's own order.
+// A hash join built on `result_keys` labels every input row with its result
+// row. The rows are scanned in chunks; in each, distinct_indices (KEEP_FIRST)
+// over the INT32 labels gives the chunk's first row of every group it holds,
+// and the groups no earlier chunk saw (a BOOL8 per group), sorted by that row,
+// are the next entries of the order. No n-row column and no k-row sort: next
+// to the result, the scan holds the join's table (16 bytes a group, 10 with
+// more than n/4 groups), the k-row order and flags, and per chunk of c rows
+// its labels plus distinct_indices' 16 bytes a row (hash set, per-row
+// reduction, output). c is at most n/4 (n/8 with more than n/4 groups), so
+// the scan stays under the groupby's own peak (#50 measurements, 2e6 rows,
+// INT32/string/double keys, n/16 to n groups).
+//  1. The first chunk is max(2^17, 16k) rows: rows drawn from k groups spread
+//     through the data show every group in about k ln k of them, so one chunk
+//     usually finds them all, and its labels by first row are the order.
+//  2. If it misses groups and the input has at most n/8 runs of equal keys
+//     (sorted or clustered; only possible with k <= n/8), each group's first
+//     row is a run start, and the scan starts over on cudf::unique(keys), the
+//     run starts in row order. That holds whatever equality unique() uses, as
+//     long as it is no looser than the groupby's: a stricter one only adds run
+//     starts, which get the same label.
+//  3. Otherwise the scan goes on, each chunk 4x the last; no row is read twice.
+// A row the join matches to no group, or a group no row is matched to, means
+// the join and the groupby disagree on key equality: an internal error, never
+// a wrong order.
+static std::unique_ptr<cudf::column> first_appearance_order(const cudf::table_view& keys,
+                                                            const cudf::table_view& result_keys) {
+    using cudf::size_type;
+    const size_type k = result_keys.num_rows();
+    const cudf::data_type i32{cudf::type_id::INT32};
     const int64_t n = keys.num_rows();
-    std::vector<cudf::size_type> all(keys.num_columns());
-    std::iota(all.begin(), all.end(), 0);
-    auto distinct = [&](const cudf::table_view& t) {
-        return cudf::stable_distinct(t, all, cudf::duplicate_keep_option::KEEP_FIRST,
-                                     cudf::null_equality::EQUAL, cudf::nan_equality::ALL_EQUAL);
+    // With more than n/4 groups the join's table, the k-row order and the
+    // result together come close to the groupby's own peak, so the table is
+    // fuller (10 bytes a group instead of 16) and chunks are n/8 rows, not n/4.
+    const bool many = int64_t(k) > n / 4;
+    const int64_t min_chunk = int64_t(1) << 17;
+    const int64_t chunk_div = many ? 8 : 4;
+    const double load = many ? 0.8 : 0.5;
+    const int64_t max_chunk = std::max<int64_t>(min_chunk, (n + chunk_div - 1) / chunk_div);
+    auto disagree = [&]() {
+        Rcpp::stop("internal error: summarise(.by) could not match the input rows to the %d "
+                   "groups of the groupby (its hash join and the groupby disagree on key equality)",
+                   static_cast<int>(k));
     };
-    auto mismatch = [&](cudf::size_type found) {
-        Rcpp::stop("internal error: summarise(.by) found %d groups by sorting "
-                   "keys but %d by hashing them",
-                   static_cast<int>(k), static_cast<int>(found));
-    };
-    bool first_pass = true;
-    int64_t m = std::min<int64_t>(n, std::max<int64_t>(int64_t(1) << 17, int64_t(16) * k));
-    for (;;) {
-        auto fk = distinct(cudf::slice(keys, {0, static_cast<cudf::size_type>(m)})[0]);
-        if (fk->num_rows() == k) return fk;
-        if (m >= n) mismatch(fk->num_rows());
-        fk.reset();
-        if (first_pass) {
-            first_pass = false;
-            if (cudf::unique_count(keys, cudf::null_equality::EQUAL) <= n / 8) {
-                auto starts = cudf::unique(keys, all, cudf::duplicate_keep_option::KEEP_FIRST,
-                                           cudf::null_equality::EQUAL);
-                auto from_starts = distinct(starts->view());
-                if (from_starts->num_rows() != k) mismatch(from_starts->num_rows());
-                return from_starts;
+    auto one = [](std::unique_ptr<cudf::table> t) { return std::move(t->release()[0]); };
+
+    // Equality must be the groupby's: NULLs equal, NaNs equal, -0 == 0.
+    // libcudf 25.12's distinct_hash_join compares NaNs equal and hashes with
+    // MurmurHash3, which normalizes NaNs and zeros; recheck on a libcudf bump.
+    cudf::distinct_hash_join join(result_keys, cudf::null_equality::EQUAL, load);
+
+    // Scans `src` (rows in input order). nullptr: the first chunk missed groups
+    // and `src` collapses to at most n/8 run starts, to be scanned instead.
+    auto scan = [&](const cudf::table_view& src, bool may_collapse) -> std::unique_ptr<cudf::column> {
+        const int64_t rows = src.num_rows();
+        std::unique_ptr<cudf::column> order;  // filled front to back, chunk by chunk
+        std::unique_ptr<cudf::column> seen;   // BOOL8 per result row
+        int64_t found = 0;
+        int64_t a = 0;
+        int64_t c = std::min<int64_t>(max_chunk, std::max<int64_t>(min_chunk, int64_t(16) * k));
+        while (a < rows && found < k) {
+            const int64_t b = std::min<int64_t>(rows, a + c);
+            std::unique_ptr<cudf::column> pos;  // chunk-relative first row of each label
+            std::unique_ptr<cudf::column> lab;  // their labels: result rows
+            {
+                auto matched = join.left_join(cudf::slice(src, {static_cast<size_type>(a),
+                                                                static_cast<size_type>(b)})[0]);
+                const auto m = static_cast<size_type>(matched->size());
+                cudf::column labels(i32, m, matched->release(), rmm::device_buffer{}, 0);
+                matched.reset();
+                cudf::table_view labels_t({labels.view()});
+                pos = cudf::distinct_indices(labels_t, cudf::duplicate_keep_option::KEEP_FIRST,
+                                             cudf::null_equality::EQUAL, cudf::nan_equality::ALL_EQUAL);
+                lab = one(cudf::gather(labels_t, pos->view(), cudf::out_of_bounds_policy::DONT_CHECK));
             }
+            if (a > 0) {
+                pos = cudf::binary_operation(pos->view(), cudf::numeric_scalar<int32_t>(static_cast<int32_t>(a), true),
+                                             cudf::binary_operator::ADD, i32);
+            }
+            if (!seen) {
+                // a row no group matched has the label JoinNoMatch (INT32 min);
+                // later chunks drop such a label at the gather from `seen`, and
+                // then never find its group
+                auto lowest = cudf::reduce(lab->view(), *cudf::make_min_aggregation<cudf::reduce_aggregation>(), i32);
+                if (static_cast<cudf::numeric_scalar<int32_t>&>(*lowest).value() < 0) disagree();
+                // one chunk held every group: its labels by first row are the order
+                if (lab->size() == k) {
+                    return one(cudf::sort_by_key(cudf::table_view({lab->view()}),
+                                                 cudf::table_view({pos->view()})));
+                }
+                if (may_collapse && int64_t(k) <= rows / 8 && b < rows &&
+                    cudf::unique_count(src, cudf::null_equality::EQUAL) <= rows / 8) {
+                    return nullptr;
+                }
+                order = cudf::make_numeric_column(i32, k, cudf::mask_state::UNALLOCATED);
+                seen = cudf::make_column_from_scalar(cudf::numeric_scalar<bool>(false, true), k);
+            } else {
+                // keep the groups no earlier chunk saw
+                auto was_seen = one(cudf::gather(cudf::table_view({seen->view()}), lab->view(),
+                                                 cudf::out_of_bounds_policy::NULLIFY));
+                auto fresh_mask = cudf::unary_operation(was_seen->view(), cudf::unary_operator::NOT);
+                was_seen.reset();
+                auto fresh = cudf::apply_boolean_mask(cudf::table_view({lab->view(), pos->view()}),
+                                                      fresh_mask->view())->release();
+                lab = std::move(fresh[0]);
+                pos = std::move(fresh[1]);
+            }
+            const size_type fresh_n = lab->size();
+            if (fresh_n > 0) {
+                std::vector<std::reference_wrapper<const cudf::scalar>> yes;
+                cudf::numeric_scalar<bool> true_scalar(true, true);
+                yes.push_back(std::cref(static_cast<const cudf::scalar&>(true_scalar)));
+                seen = one(cudf::scatter(yes, lab->view(), cudf::table_view({seen->view()})));
+                // this chunk's new groups by first row follow the earlier chunks'
+                auto piece = one(cudf::sort_by_key(cudf::table_view({lab->view()}),
+                                                   cudf::table_view({pos->view()})));
+                lab.reset();
+                pos.reset();
+                cudf::mutable_column_view out = order->mutable_view();
+                cudf::copy_range_in_place(piece->view(), out, 0, fresh_n, static_cast<size_type>(found));
+                found += fresh_n;
+            }
+            a = b;
+            c = std::min<int64_t>(max_chunk, 4 * c);
         }
-        m = (4 * m >= n / 2) ? n : 4 * m;
+        if (found != k) disagree();
+        return order;
+    };
+
+    auto order = scan(keys, true);
+    if (!order) {
+        std::vector<size_type> all(keys.num_columns());
+        std::iota(all.begin(), all.end(), 0);
+        auto starts = cudf::unique(keys, all, cudf::duplicate_keep_option::KEEP_FIRST,
+                                   cudf::null_equality::EQUAL);
+        order = scan(starts->view(), false);
     }
+    return order;
 }
 
 } // namespace cuplyr
@@ -655,8 +749,8 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     // #50: below this many rows the first-appearance position rides in the one
     // groupby (a MIN over a row sequence: at most 8 bytes a row of extra scratch,
     // 1 MiB here), which is cheaper than any second pass over the keys. Above
-    // it the groupby runs as in "keys" mode and first_appearance_keys() finds
-    // the order without an n-row column.
+    // it the groupby runs as in "keys" mode without the F33 sort, and
+    // first_appearance_order() finds the order without an n-row column.
     const int64_t kSmallFirst = int64_t(1) << 17;
     const bool small_first = first_order && view.num_rows() > 0 && view.num_rows() < kSmallFirst;
     const bool large_first = first_order && !small_first;
@@ -1339,15 +1433,12 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     // F33: dplyr's group_by() order -- keys ascending, NA last. Bytewise
     // string compare is the C locale, factor codes give level order, BOOL8
     // gives FALSE < TRUE. The keys are distinct, so an unstable sort is
-    // fine. Done on the k-row result, before R permutes [keys, aggs]. A
-    // large `.by =` summary (#50) with at most n/2 groups skips it: it matches
-    // its groups by a hash join below, which costs far less than sorting
-    // strings (2.45e6 string keys: 41 ms of the group_by() form's 50).
+    // fine. Done on the k-row result, before R permutes [keys, aggs]. A `.by =`
+    // summary (#50) never sorts its keys: its order is first appearance.
     const cudf::size_type k = result->num_rows();
     std::vector<cudf::size_type> key_cols(num_groups);
     std::iota(key_cols.begin(), key_cols.end(), 0);
-    const bool join_align = large_first && k > 1 && k <= view.num_rows() / 2;
-    if ((!first_order || (large_first && !join_align)) && k > 1) {
+    if (!first_order && k > 1) {
         std::vector<cudf::order> order(num_groups, cudf::order::ASCENDING);
         std::vector<cudf::null_order> nulls(num_groups, cudf::null_order::AFTER);
         auto idx = cudf::sorted_order(result->view().select(key_cols), order, nulls);
@@ -1373,47 +1464,18 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     }
 
     // #50, large input: dplyr's `.by =` order is first appearance.
-    // first_appearance_keys() gives the keys in the order the groups first
-    // show up (FK). Which result row each FK row is comes from a hash join of
-    // FK with the result's keys (`result` is in the groupby's own order), or,
-    // with more than n/2 groups, where the join's scratch would be above the
-    // groupby's, from lower_bound() of FK in the key-sorted result (the same
-    // comparator as the F33 sort above). Gathering by those rows is the
-    // order. FK is freed before the final gather, so that gather's peak is
-    // the F33 reorder's.
+    // first_appearance_order() maps the input rows to the result's rows (still
+    // in the groupby's own order) and gives the result rows sorted by their
+    // group's first row. Everything it allocates is freed before this gather,
+    // whose peak (two copies of the result) is the F33 reorder's.
     if (large_first && k > 1) {
-        cudf::table_view result_keys_view = result->view().select(key_cols);
-        std::vector<cudf::column_view> all_keys;
-        for (int i = 0; i < num_groups; ++i) all_keys.push_back(view.column(group_indices[i]));
-
-        std::unique_ptr<cudf::column> pos;
+        std::unique_ptr<cudf::column> order;
         {
-            auto fk = first_appearance_keys(cudf::table_view(all_keys), k);
-            if (join_align) {
-                auto [fk_row, result_row] = cudf::inner_join(fk->view(), result_keys_view,
-                                                             cudf::null_equality::EQUAL);
-                fk.reset();
-                if (fk_row->size() != static_cast<size_t>(k)) {
-                    Rcpp::stop("internal error: summarise(.by) matched %d of %d groups to their keys",
-                               static_cast<int>(fk_row->size()), static_cast<int>(k));
-                }
-                auto as_column = [&](const rmm::device_uvector<cudf::size_type>& v) {
-                    return cudf::column_view(cudf::data_type{cudf::type_id::INT32},
-                                             static_cast<cudf::size_type>(v.size()), v.data(),
-                                             nullptr, 0);
-                };
-                // position[fk_row[i]] = result_row[i]: the result's row for each FK row
-                pos = std::move(cudf::scatter(cudf::table_view({as_column(*result_row)}),
-                                              as_column(*fk_row),
-                                              cudf::table_view({as_column(*result_row)}))
-                                    ->release()[0]);
-            } else {
-                std::vector<cudf::order> asc(num_groups, cudf::order::ASCENDING);
-                std::vector<cudf::null_order> nulls_after(num_groups, cudf::null_order::AFTER);
-                pos = cudf::lower_bound(result_keys_view, fk->view(), asc, nulls_after);
-            }
+            std::vector<cudf::column_view> all_keys;
+            for (int i = 0; i < num_groups; ++i) all_keys.push_back(view.column(group_indices[i]));
+            order = first_appearance_order(cudf::table_view(all_keys), result->view().select(key_cols));
         }
-        result = cudf::gather(result->view(), pos->view(),
+        result = cudf::gather(result->view(), order->view(),
                               cudf::out_of_bounds_policy::DONT_CHECK);
     }
 
