@@ -29,6 +29,10 @@ mem50_df <- function(n) {
     x = runif(n),
     y = runif(n),
     su = sprintf("key-%09d", sample.int(n)),
+    # n/2 string groups, short and long, and n/2 - 1000 pairs plus 2000 singletons
+    s2 = sprintf("key-%09d", sample(rep(seq_len(n / 2), 2))),
+    l2 = sprintf("customer-account-identifier-%012d", sample(rep(seq_len(n / 2), 2))),
+    s2p = sprintf("key-%09d", sample(c(rep(seq_len(n / 2 - 1000), 2), n / 2 - 1000 + seq_len(2000)))),
     stringsAsFactors = FALSE
   )
 }
@@ -76,6 +80,21 @@ test_that("summarise(.by) peaks no higher than group_by() |> summarise()", {
       gb = function(d) d |> dplyr::group_by(su) |>
         dplyr::summarise(s_x = sum(x), .groups = "drop"),
       by = function(d) d |> dplyr::summarise(s_x = sum(x), .by = su)
+    ),
+    half_strings = list(
+      gb = function(d) d |> dplyr::group_by(s2) |>
+        dplyr::summarise(s_x = sum(x), .groups = "drop"),
+      by = function(d) d |> dplyr::summarise(s_x = sum(x), .by = s2)
+    ),
+    half_long_strings = list(
+      gb = function(d) d |> dplyr::group_by(l2) |>
+        dplyr::summarise(s_x = sum(x), .groups = "drop"),
+      by = function(d) d |> dplyr::summarise(s_x = sum(x), .by = l2)
+    ),
+    half_plus_strings = list(
+      gb = function(d) d |> dplyr::group_by(s2p) |>
+        dplyr::summarise(s_x = sum(x), .groups = "drop"),
+      by = function(d) d |> dplyr::summarise(s_x = sum(x), .by = s2p)
     )
   )
   for (lazy in c(FALSE, TRUE)) {
@@ -183,6 +202,8 @@ test_that("summarise(.by) on input sorted by the key costs no more than it used 
         by = function() gt |> dplyr::summarise(n = dplyr::n(), m = mean(x), sy = sum(y), .by = k)
       )
     )
+    # today: 1.68-2.07 for the string key, 1.40-1.57 for the integer key
+    bound <- c(s = 1.6, k = 1.35)
     for (key in names(pipes)) {
       fns <- lapply(pipes[[key]], function(p) {
         force(p)
@@ -197,13 +218,74 @@ test_that("summarise(.by) on input sorted by the key costs no more than it used 
           m <- timing_medians(fns, samples = 9L)
           m[["by"]] / m[["gb"]]
         },
-        ok = function(v) v <= 1.6,
+        ok = function(v) v <= bound[[key]],
         retry_if = function(v) v <= 2
       )
       ratio <- attempts[[length(attempts)]]
       expect_lte(
-        ratio, 1.6,
+        ratio, bound[[key]],
         label = sprintf("sorted key %s (%s): .by / group_by time ratio (attempts: %s)",
+                        key, if (lazy) "lazy" else "eager",
+                        paste(sprintf("%.2f", unlist(attempts)), collapse = ", "))
+      )
+    }
+    rm(gt)
+  }
+})
+
+test_that("summarise(.by) with high-cardinality string keys costs less than group_by()", {
+  skip_if_no_gpu()
+  testthat::skip_on_ci()
+  skip_if_insufficient_gpu_memory(1024^3)
+
+  # The group_by() form sorts its k-row result by the string keys (F33), which
+  # dominates its time at high cardinality; the `.by` order is by first
+  # appearance, and before #50 `.by` never sorted the keys (0.17-0.25x of the
+  # group_by() form at 1e7 rows). A `.by` that pays that sort, and more, is a
+  # regression.
+  n <- 4e6
+  set.seed(5004)
+  df <- data.frame(
+    su = sprintf("key-%09d", sample.int(n)),
+    s2 = sprintf("key-%09d", sample(rep(seq_len(n / 2), 2))),
+    x = runif(n), y = runif(n),
+    stringsAsFactors = FALSE
+  )
+  for (lazy in c(FALSE, TRUE)) {
+    gt <- compute(tbl_gpu(df, lazy = lazy))
+    pipes <- list(
+      su = list(
+        gb = function() gt |> dplyr::group_by(su) |>
+          dplyr::summarise(n = dplyr::n(), m = mean(x), sy = sum(y), .groups = "drop"),
+        by = function() gt |> dplyr::summarise(n = dplyr::n(), m = mean(x), sy = sum(y), .by = su)
+      ),
+      s2 = list(
+        gb = function() gt |> dplyr::group_by(s2) |>
+          dplyr::summarise(n = dplyr::n(), m = mean(x), sy = sum(y), .groups = "drop"),
+        by = function() gt |> dplyr::summarise(n = dplyr::n(), m = mean(x), sy = sum(y), .by = s2)
+      )
+    )
+    for (key in names(pipes)) {
+      fns <- lapply(pipes[[key]], function(p) {
+        force(p)
+        function() {
+          r <- compute(p())
+          gpu_sync()
+          r
+        }
+      })
+      attempts <- timing_retry(
+        measure = function() {
+          m <- timing_medians(fns, samples = 7L)
+          m[["by"]] / m[["gb"]]
+        },
+        ok = function(v) v <= 0.8,
+        retry_if = function(v) v <= 1.0
+      )
+      ratio <- attempts[[length(attempts)]]
+      expect_lte(
+        ratio, 0.8,
+        label = sprintf("high-cardinality key %s (%s): .by / group_by time ratio (attempts: %s)",
                         key, if (lazy) "lazy" else "eager",
                         paste(sprintf("%.2f", unlist(attempts)), collapse = ", "))
       )
