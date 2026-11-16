@@ -28,6 +28,7 @@ mem50_df <- function(n) {
     s = sprintf("g%02d", sample.int(20L, n, replace = TRUE)),
     x = runif(n),
     y = runif(n),
+    su = sprintf("key-%09d", sample.int(n)),
     stringsAsFactors = FALSE
   )
 }
@@ -69,6 +70,12 @@ test_that("summarise(.by) peaks no higher than group_by() |> summarise()", {
       gb = function(d) d |> dplyr::group_by(s, k) |>
         dplyr::summarise(s_y = sum(y), .groups = "drop"),
       by = function(d) d |> dplyr::summarise(s_y = sum(y), .by = c(s, k))
+    ),
+    # every row its own string group: the reorder of the k-row result is the peak
+    unique_strings = list(
+      gb = function(d) d |> dplyr::group_by(su) |>
+        dplyr::summarise(s_x = sum(x), .groups = "drop"),
+      by = function(d) d |> dplyr::summarise(s_x = sum(x), .by = su)
     )
   )
   for (lazy in c(FALSE, TRUE)) {
@@ -142,5 +149,65 @@ test_that("summarise(.by) costs about what group_by() |> summarise() costs", {
                         paste(sprintf("%.2f", unlist(attempts)), collapse = ", "))
       )
     }
+  }
+})
+
+test_that("summarise(.by) on input sorted by the key costs no more than it used to", {
+  skip_if_no_gpu()
+  testthat::skip_on_ci()
+  skip_if_insufficient_gpu_memory(1024^3)
+
+  # Before #50 the `.by` form took 1.6-1.8x the group_by() form's time on
+  # key-sorted input (a row-number window plus the summarise). Every group
+  # starts where the previous one ends, so the first rows are the k run
+  # starts: finding them must not cost several hash passes over the table.
+  n <- 1e7
+  set.seed(5003)
+  df <- data.frame(
+    s = rep(sprintf("k%02d", 1:10), each = n / 10),
+    k = rep(seq_len(1000L), each = n / 1000),
+    x = runif(n), y = runif(n),
+    stringsAsFactors = FALSE
+  )
+  for (lazy in c(FALSE, TRUE)) {
+    gt <- compute(tbl_gpu(df, lazy = lazy))
+    pipes <- list(
+      s = list(
+        gb = function() gt |> dplyr::group_by(s) |>
+          dplyr::summarise(n = dplyr::n(), m = mean(x), sy = sum(y), .groups = "drop"),
+        by = function() gt |> dplyr::summarise(n = dplyr::n(), m = mean(x), sy = sum(y), .by = s)
+      ),
+      k = list(
+        gb = function() gt |> dplyr::group_by(k) |>
+          dplyr::summarise(n = dplyr::n(), m = mean(x), sy = sum(y), .groups = "drop"),
+        by = function() gt |> dplyr::summarise(n = dplyr::n(), m = mean(x), sy = sum(y), .by = k)
+      )
+    )
+    for (key in names(pipes)) {
+      fns <- lapply(pipes[[key]], function(p) {
+        force(p)
+        function() {
+          r <- compute(p())
+          gpu_sync()
+          r
+        }
+      })
+      attempts <- timing_retry(
+        measure = function() {
+          m <- timing_medians(fns, samples = 9L)
+          m[["by"]] / m[["gb"]]
+        },
+        ok = function(v) v <= 1.6,
+        retry_if = function(v) v <= 2
+      )
+      ratio <- attempts[[length(attempts)]]
+      expect_lte(
+        ratio, 1.6,
+        label = sprintf("sorted key %s (%s): .by / group_by time ratio (attempts: %s)",
+                        key, if (lazy) "lazy" else "eager",
+                        paste(sprintf("%.2f", unlist(attempts)), collapse = ", "))
+      )
+    }
+    rm(gt)
   }
 })
