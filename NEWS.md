@@ -1,14 +1,13 @@
 # cuplyr (development version)
 
-* `summarise(.by =)` no longer adds a row-number column to order its groups by
-  first appearance. It runs as one step and needs about the same peak GPU
-  memory as `group_by() |> summarise()`, where it used to need an extra integer
-  column per row. It takes at most about 1.5 times as long as the `group_by()`
-  form and is often faster, since it never sorts the keys; on small and medium
-  tables it used to take 2-3 times as long. With many groups in shuffled order
-  (more than about one group per 16 rows) it can be up to about 1.3 times
-  slower than before. An ungrouped `row_number()` in `mutate()` now allocates
-  one integer column instead of six (#50).
+* `summarise(.by =)` orders its groups by first appearance without adding a
+  row-number column, so it needs about the same peak GPU memory as
+  `group_by() |> summarise()`, where it used to need an extra integer column.
+  It runs as one step and is faster than before on small tables and with few
+  groups. With shuffled keys and many groups (more than about one group per 16
+  rows) it can take up to about twice as long as before, most with long
+  string keys. An ungrouped `row_number()` in `mutate()` now allocates one
+  integer column instead of six (#50).
 
 * The examples on the help pages of the dplyr verbs attach dplyr, so they run
   with `example()` and render on the website (#39).
