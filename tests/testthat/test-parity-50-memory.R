@@ -33,6 +33,9 @@ mem50_df <- function(n) {
     s2 = sprintf("key-%09d", sample(rep(seq_len(n / 2), 2))),
     l2 = sprintf("customer-account-identifier-%012d", sample(rep(seq_len(n / 2), 2))),
     s2p = sprintf("key-%09d", sample(c(rep(seq_len(n / 2 - 1000), 2), n / 2 - 1000 + seq_len(2000)))),
+    # narrow keys: all-unique INT32, and all-unique (INT32, small INT32) pairs
+    iu = sample.int(n),
+    ib = sample.int(3L, n, replace = TRUE),
     stringsAsFactors = FALSE
   )
 }
@@ -90,6 +93,17 @@ test_that("summarise(.by) peaks no higher than group_by() |> summarise()", {
       gb = function(d) d |> dplyr::group_by(l2) |>
         dplyr::summarise(s_x = sum(x), .groups = "drop"),
       by = function(d) d |> dplyr::summarise(s_x = sum(x), .by = l2)
+    ),
+    # a count over narrow keys keeps the groupby's own peak low
+    unique_pairs_count = list(
+      gb = function(d) d |> dplyr::group_by(iu, ib) |>
+        dplyr::summarise(n = dplyr::n(), .groups = "drop"),
+      by = function(d) d |> dplyr::summarise(n = dplyr::n(), .by = c(iu, ib))
+    ),
+    unique_int_count = list(
+      gb = function(d) d |> dplyr::group_by(iu) |>
+        dplyr::summarise(n = dplyr::n(), .groups = "drop"),
+      by = function(d) d |> dplyr::summarise(n = dplyr::n(), .by = iu)
     ),
     half_plus_strings = list(
       gb = function(d) d |> dplyr::group_by(s2p) |>
