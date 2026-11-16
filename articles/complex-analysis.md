@@ -1,0 +1,530 @@
+# Complex data analysis with cuplyr
+
+This article works through longer pipelines on one synthetic sales
+table: multi-step aggregations, several analyses branching off a shared
+base, dates, joins, and reusable functions.
+
+``` r
+
+library(cuplyr)
+library(dplyr)
+```
+
+## The data
+
+Ten thousand transactions over one year.
+
+``` r
+
+set.seed(42)
+n <- 10000
+
+sales_data <- data.frame(
+ transaction_id = seq_len(n),
+ date = as.Date("2023-01-01") + sample(0:364, n, replace = TRUE),
+ customer_id = sample(1:500, n, replace = TRUE),
+ product_category = sample(c("Electronics", "Clothing", "Food", "Home", "Sports"),
+                           n, replace = TRUE),
+ region = sample(c("North", "South", "East", "West"), n, replace = TRUE),
+ quantity = sample(1:10, n, replace = TRUE),
+ unit_price = round(runif(n, 5, 500), 2),
+ discount_pct = sample(c(0, 5, 10, 15, 20), n, replace = TRUE,
+                       prob = c(0.5, 0.2, 0.15, 0.1, 0.05))
+)
+
+gpu_sales <- tbl_gpu(sales_data)
+```
+
+## A multi-step pipeline
+
+Derive revenue, drop small transactions, then aggregate by category and
+region. Nothing runs until
+[`collect()`](https://dplyr.tidyverse.org/reference/compute.html).
+
+``` r
+
+revenue_analysis <- gpu_sales |>
+ mutate(
+   gross_amount = quantity * unit_price,
+   discount_amount = gross_amount * discount_pct / 100,
+   net_revenue = gross_amount - discount_amount
+ ) |>
+ filter(net_revenue > 50) |>
+ group_by(product_category, region) |>
+ summarise(
+   total_revenue = sum(net_revenue),
+   total_transactions = n(),
+   avg_transaction = mean(net_revenue),
+   total_quantity = sum(quantity)
+ ) |>
+ arrange(desc(total_revenue)) |>
+ collect()
+#> `summarise()` has regrouped the output by dropping the last grouping variable.
+#> Summaries were computed grouped by product_category, region.
+#> Output is grouped by product_category.
+#> Use `summarise(.groups = "drop_last")` to silence this message, or `.groups = "keep"`/`"drop"` to retain/drop every grouping level.
+
+head(revenue_analysis, 10)
+#> # A tibble: 10 × 6
+#> # Groups:   product_category [5]
+#>    product_category region total_revenue total_transactions avg_transaction
+#>    <chr>            <chr>          <dbl>              <int>           <dbl>
+#>  1 Sports           West         720716.                531           1357.
+#>  2 Food             West         711706.                517           1377.
+#>  3 Clothing         South        706586.                509           1388.
+#>  4 Food             East         701067.                514           1364.
+#>  5 Sports           East         698596.                501           1394.
+#>  6 Sports           South        691472.                507           1364.
+#>  7 Electronics      South        683388.                528           1294.
+#>  8 Clothing         North        664092.                487           1364.
+#>  9 Electronics      North        663955.                504           1317.
+#> 10 Home             East         663267.                504           1316.
+#> # ℹ 1 more variable: total_quantity <int>
+```
+
+## Branching from a shared base
+
+When several analyses start from the same prepared data, call
+[`compute()`](https://dplyr.tidyverse.org/reference/compute.html) on the
+base. It runs the pending pipeline once and keeps the result on the GPU,
+so each branch starts from that result instead of repeating the work.
+
+``` r
+
+base_analysis <- gpu_sales |>
+ mutate(
+   revenue = quantity * unit_price * (1 - discount_pct / 100),
+   is_high_value = unit_price > 200,
+   is_bulk = quantity >= 5
+ ) |>
+ filter(revenue > 0) |>
+ compute()
+```
+
+Regional performance:
+
+``` r
+
+base_analysis |>
+ group_by(region) |>
+ summarise(
+   revenue = sum(revenue),
+   orders = n(),
+   high_value_orders = sum(is_high_value),
+   bulk_orders = sum(is_bulk)
+ ) |>
+ mutate(
+   high_value_pct = high_value_orders * 100 / orders,
+   bulk_pct = bulk_orders * 100 / orders
+ ) |>
+ arrange(desc(revenue)) |>
+ collect()
+#> # A tibble: 4 × 7
+#>   region  revenue orders high_value_orders bulk_orders high_value_pct bulk_pct
+#>   <chr>     <dbl>  <int>             <int>       <int>          <dbl>    <dbl>
+#> 1 South  3394025.   2538              1547        1551           61.0     61.1
+#> 2 East   3296018.   2515              1533        1475           61.0     58.6
+#> 3 North  3268140.   2505              1536        1448           61.3     57.8
+#> 4 West   3234758.   2442              1499        1484           61.4     60.8
+```
+
+Revenue per order by category:
+
+``` r
+
+base_analysis |>
+ group_by(product_category) |>
+ summarise(
+   revenue = sum(revenue),
+   avg_price = mean(unit_price),
+   avg_quantity = mean(quantity),
+   orders = n()
+ ) |>
+ mutate(revenue_per_order = revenue / orders) |>
+ arrange(desc(revenue_per_order)) |>
+ collect()
+#> # A tibble: 5 × 6
+#>   product_category  revenue avg_price avg_quantity orders revenue_per_order
+#>   <chr>               <dbl>     <dbl>        <dbl>  <int>             <dbl>
+#> 1 Food             2700522.      252.         5.51   2021             1336.
+#> 2 Home             2588937.      254.         5.51   1954             1325.
+#> 3 Sports           2772454.      253.         5.53   2098             1321.
+#> 4 Electronics      2591229.      253.         5.42   1982             1307.
+#> 5 Clothing         2539799.      254.         5.43   1945             1306.
+```
+
+Share of revenue at each discount level:
+
+``` r
+
+base_analysis |>
+ group_by(discount_pct) |>
+ summarise(
+   orders = n(),
+   total_revenue = sum(revenue),
+   avg_quantity = mean(quantity)
+ ) |>
+ mutate(revenue_share = total_revenue * 100 / sum(total_revenue)) |>
+ arrange(discount_pct) |>
+ collect()
+#> # A tibble: 5 × 5
+#>   discount_pct orders total_revenue avg_quantity revenue_share
+#>          <dbl>  <int>         <dbl>        <dbl>         <dbl>
+#> 1            0   5022      6962233.         5.48         52.8 
+#> 2            5   1973      2557858.         5.40         19.4 
+#> 3           10   1505      1903060.         5.54         14.4 
+#> 4           15   1020      1213285.         5.55          9.20
+#> 5           20    480       556506.         5.47          4.22
+```
+
+## Dates
+
+Date columns stay dates on the GPU, so you can filter on them directly.
+
+``` r
+
+gpu_sales |>
+ filter(date >= as.Date("2023-01-01"), date < as.Date("2023-04-01")) |>
+ count() |>
+ collect()
+#>      n
+#> 1 2458
+```
+
+lubridate’s `month()` and `quarter()` also run on the GPU. Call them
+with the `lubridate::` prefix or with lubridate attached.
+
+``` r
+
+gpu_sales |>
+ mutate(
+   quarter = lubridate::quarter(date),
+   revenue = quantity * unit_price * (1 - discount_pct / 100)
+ ) |>
+ group_by(quarter, region) |>
+ summarise(revenue = sum(revenue), orders = n()) |>
+ arrange(quarter, desc(revenue)) |>
+ collect()
+#> `summarise()` has regrouped the output by dropping the last grouping variable.
+#> Summaries were computed grouped by quarter, region.
+#> Output is grouped by quarter.
+#> Use `summarise(.groups = "drop_last")` to silence this message, or `.groups = "keep"`/`"drop"` to retain/drop every grouping level.
+#> # A tibble: 16 × 4
+#> # Groups:   quarter [4]
+#>    quarter region revenue orders
+#>      <int> <chr>    <dbl>  <int>
+#>  1       1 South  830856.    620
+#>  2       1 West   823113.    622
+#>  3       1 North  803029.    623
+#>  4       1 East   742242.    593
+#>  5       2 South  891756.    667
+#>  6       2 North  805111.    609
+#>  7       2 East   803270.    619
+#>  8       2 West   776899.    600
+#>  9       3 East   867393.    645
+#> 10       3 South  856960.    639
+#> 11       3 North  812817.    625
+#> 12       3 West   812114.    631
+#> 13       4 East   883113.    658
+#> 14       4 North  847184.    648
+#> 15       4 West   822632.    589
+#> 16       4 South  814453.    612
+```
+
+A half-year comparison uses
+[`if_else()`](https://dplyr.tidyverse.org/reference/if_else.html) to
+label each row:
+
+``` r
+
+gpu_sales |>
+ mutate(
+   period = if_else(date < as.Date("2023-07-01"), "H1", "H2"),
+   revenue = quantity * unit_price * (1 - discount_pct / 100)
+ ) |>
+ group_by(period, product_category) |>
+ summarise(
+   avg_order = mean(revenue),
+   revenue = sum(revenue),
+   orders = n()
+ ) |>
+ arrange(product_category, period) |>
+ collect()
+#> `summarise()` has regrouped the output by dropping the last grouping variable.
+#> Summaries were computed grouped by period, product_category.
+#> Output is grouped by period.
+#> Use `summarise(.groups = "drop_last")` to silence this message, or `.groups = "keep"`/`"drop"` to retain/drop every grouping level.
+#> # A tibble: 10 × 5
+#> # Groups:   period [2]
+#>    period product_category avg_order  revenue orders
+#>    <chr>  <chr>                <dbl>    <dbl>  <int>
+#>  1 H1     Clothing             1296. 1188439.    917
+#>  2 H2     Clothing             1315. 1351360.   1028
+#>  3 H1     Electronics          1269. 1251712.    986
+#>  4 H2     Electronics          1345. 1339517.    996
+#>  5 H1     Food                 1370. 1380907.   1008
+#>  6 H2     Food                 1303. 1319615.   1013
+#>  7 H1     Home                 1301. 1289023.    991
+#>  8 H2     Home                 1350. 1299914.    963
+#>  9 H1     Sports               1300. 1366195.   1051
+#> 10 H2     Sports               1343. 1406259.   1047
+```
+
+`avg_order` comes before `revenue` because, as in dplyr, a later
+expression in
+[`summarise()`](https://dplyr.tidyverse.org/reference/summarise.html)
+sees the summarised value of an earlier one.
+
+## Customer segments
+
+Aggregate per customer, then label each one with
+[`case_when()`](https://dplyr.tidyverse.org/reference/case-and-replace-when.html).
+Both steps run on the GPU.
+
+``` r
+
+customer_segments <- gpu_sales |>
+ mutate(revenue = quantity * unit_price * (1 - discount_pct / 100)) |>
+ group_by(customer_id) |>
+ summarise(
+   total_spent = sum(revenue),
+   order_count = n(),
+   avg_order_value = mean(revenue)
+ ) |>
+ mutate(
+   segment = case_when(
+     total_spent > 5000 & order_count > 20 ~ "VIP",
+     total_spent > 2000 | order_count > 10 ~ "Regular",
+     order_count > 5 ~ "Occasional",
+     .default = "New"
+   )
+ ) |>
+ collect()
+
+table(customer_segments$segment)
+#> 
+#> Regular     VIP 
+#>     283     217
+```
+
+## Two passes with a join
+
+To put each region’s revenue against its category total, aggregate once,
+then join the totals back. Both tables are `tbl_gpu`, so the join runs
+on the GPU too.
+
+``` r
+
+with_revenue <- gpu_sales |>
+ mutate(revenue = quantity * unit_price * (1 - discount_pct / 100))
+
+category_totals <- with_revenue |>
+ group_by(product_category) |>
+ summarise(category_total = sum(revenue))
+
+with_revenue |>
+ left_join(category_totals, by = "product_category") |>
+ group_by(product_category, region) |>
+ summarise(
+   region_revenue = sum(revenue),
+   category_total = max(category_total)
+ ) |>
+ mutate(region_share = region_revenue * 100 / category_total) |>
+ arrange(product_category, desc(region_share)) |>
+ collect()
+#> `summarise()` has regrouped the output by dropping the last grouping variable.
+#> Summaries were computed grouped by product_category, region.
+#> Output is grouped by product_category.
+#> Use `summarise(.groups = "drop_last")` to silence this message, or `.groups = "keep"`/`"drop"` to retain/drop every grouping level.
+#> # A tibble: 20 × 5
+#> # Groups:   product_category [5]
+#>    product_category region region_revenue category_total region_share
+#>    <chr>            <chr>           <dbl>          <dbl>        <dbl>
+#>  1 Clothing         South         706925.       2539799.         27.8
+#>  2 Clothing         North         664283.       2539799.         26.2
+#>  3 Clothing         East          649561.       2539799.         25.6
+#>  4 Clothing         West          519030.       2539799.         20.4
+#>  5 Electronics      South         683738.       2591229.         26.4
+#>  6 Electronics      North         664510.       2591229.         25.6
+#>  7 Electronics      West          660805.       2591229.         25.5
+#>  8 Electronics      East          582175.       2591229.         22.5
+#>  9 Food             West          712050.       2700522.         26.4
+#> 10 Food             East          701645.       2700522.         26.0
+#> 11 Food             South         659368.       2700522.         24.4
+#> 12 Food             North         627458.       2700522.         23.2
+#> 13 Home             East          663610.       2588937.         25.6
+#> 14 Home             South         652333.       2588937.         25.2
+#> 15 Home             North         651189.       2588937.         25.2
+#> 16 Home             West          621806.       2588937.         24.0
+#> 17 Sports           West          721067.       2772454.         26.0
+#> 18 Sports           East          699027.       2772454.         25.2
+#> 19 Sports           South         691661.       2772454.         24.9
+#> 20 Sports           North         660699.       2772454.         23.8
+```
+
+## Reusable functions
+
+A `tbl_gpu` goes through ordinary functions like any data frame. Pass
+grouping columns through `...`.
+
+``` r
+
+revenue_metrics <- function(data, ..., min_value = 0) {
+ data |>
+   mutate(
+     gross = quantity * unit_price,
+     net = gross * (1 - discount_pct / 100)
+   ) |>
+   filter(net >= min_value) |>
+   group_by(...) |>
+   summarise(
+     gross_revenue = sum(gross),
+     net_revenue = sum(net),
+     order_count = n(),
+     avg_order = mean(net)
+   ) |>
+   mutate(discount_rate = (gross_revenue - net_revenue) * 100 / gross_revenue) |>
+   arrange(desc(net_revenue)) |>
+   collect()
+}
+
+revenue_metrics(gpu_sales, region)
+#> # A tibble: 4 × 6
+#>   region gross_revenue net_revenue order_count avg_order discount_rate
+#>   <chr>          <dbl>       <dbl>       <int>     <dbl>         <dbl>
+#> 1 South       3570728.    3394025.        2538     1337.          4.95
+#> 2 East        3468555.    3296018.        2515     1311.          4.97
+#> 3 North       3438415.    3268140.        2505     1305.          4.95
+#> 4 West        3414554.    3234758.        2442     1325.          5.27
+revenue_metrics(gpu_sales, product_category, min_value = 500)
+#> # A tibble: 5 × 6
+#>   product_category gross_revenue net_revenue order_count avg_order discount_rate
+#>   <chr>                    <dbl>       <dbl>       <int>     <dbl>         <dbl>
+#> 1 Sports                2752146.    2613453.        1459     1791.          5.04
+#> 2 Food                  2668530.    2542690.        1398     1819.          4.72
+#> 3 Electronics           2567281.    2444307.        1379     1773.          4.79
+#> 4 Home                  2576501.    2442535.        1387     1761.          5.20
+#> 5 Clothing              2529950.    2395459.        1362     1759.          5.32
+head(revenue_metrics(gpu_sales, product_category, region), 10)
+#> `summarise()` has regrouped the output by dropping the last grouping variable.
+#> Summaries were computed grouped by product_category, region.
+#> Output is grouped by product_category.
+#> Use `summarise(.groups = "drop_last")` to silence this message, or `.groups = "keep"`/`"drop"` to retain/drop every grouping level.
+#> # A tibble: 10 × 7
+#> # Groups:   product_category [5]
+#>    product_category region gross_revenue net_revenue order_count avg_order
+#>    <chr>            <chr>          <dbl>       <dbl>       <int>     <dbl>
+#>  1 Sports           West         761348.     721067.         543     1328.
+#>  2 Food             West         749524.     712050.         530     1343.
+#>  3 Clothing         South        746336.     706925.         518     1365.
+#>  4 Food             East         734231.     701645.         533     1316.
+#>  5 Sports           East         734639.     699027.         517     1352.
+#>  6 Sports           South        728101.     691661.         516     1340.
+#>  7 Electronics      South        718194.     683738.         540     1266.
+#>  8 Electronics      North        695830.     664510.         521     1275.
+#>  9 Clothing         North        701002.     664283.         493     1347.
+#> 10 Home             East         700863.     663610.         515     1289.
+#> # ℹ 1 more variable: discount_rate <dbl>
+```
+
+## Finishing in R
+
+Once the GPU has reduced the data to a few dozen rows,
+[`collect()`](https://dplyr.tidyverse.org/reference/compute.html) it and
+carry on with any R code. Here the tiers use quantiles of the aggregated
+revenue.
+
+``` r
+
+aggregated <- gpu_sales |>
+ mutate(revenue = quantity * unit_price * (1 - discount_pct / 100)) |>
+ group_by(product_category, region, discount_pct) |>
+ summarise(revenue = sum(revenue), orders = n()) |>
+ collect()
+#> `summarise()` has regrouped the output by dropping the last grouping variable.
+#> Summaries were computed grouped by product_category, region, discount_pct.
+#> Output is grouped by product_category, region.
+#> Use `summarise(.groups = "drop_last")` to silence this message, or `.groups = "keep"`/`"drop"` to retain/drop every grouping level.
+
+nrow(aggregated)
+#> [1] 100
+
+aggregated |>
+ ungroup() |>
+ mutate(
+   performance = case_when(
+     revenue > quantile(revenue, 0.9) ~ "Top 10%",
+     revenue > quantile(revenue, 0.5) ~ "Above median",
+     revenue > quantile(revenue, 0.25) ~ "Below median",
+     .default = "Bottom 25%"
+   )
+ ) |>
+ count(performance)
+#> # A tibble: 4 × 2
+#>   performance      n
+#>   <chr>        <int>
+#> 1 Above median    40
+#> 2 Below median    25
+#> 3 Bottom 25%      25
+#> 4 Top 10%         10
+```
+
+## Large data
+
+On big tables, filter and
+[`select()`](https://dplyr.tidyverse.org/reference/select.html) early so
+fewer rows and columns reach the later steps. Check GPU memory with
+[`gpu_memory_state()`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_state.md)
+and release unused memory with
+[`gpu_gc()`](https://bbtheo.github.io/cuplyr/reference/gpu_gc.md):
+
+``` r
+
+gpu_memory_state()
+#> $available
+#> [1] TRUE
+#> 
+#> $total_bytes
+#> [1] 12418416640
+#> 
+#> $free_bytes
+#> [1] 11571101696
+#> 
+#> $used_bytes
+#> [1] 847314944
+#> 
+#> $total_gb
+#> [1] 12.41842
+#> 
+#> $free_gb
+#> [1] 11.5711
+#> 
+#> $used_gb
+#> [1] 0.8473149
+#> 
+#> $resource
+#> [1] "async"
+#> 
+#> $pool_bytes
+#> [1] 67108864
+#> 
+#> $pool_used_bytes
+#> [1] 1124618
+gpu_gc()
+```
+
+On a table this small, plain dplyr is often faster because the data has
+to reach the GPU first. The GPU pays off at millions of rows.
+
+## See also
+
+- [`vignette("getting-started")`](https://bbtheo.github.io/cuplyr/articles/getting-started.md)
+  for the basics.
+- [`vignette("query-optimization")`](https://bbtheo.github.io/cuplyr/articles/query-optimization.md)
+  for what
+  [`compute()`](https://dplyr.tidyverse.org/reference/compute.html) and
+  the optimizer do.
+- [`vignette("memory")`](https://bbtheo.github.io/cuplyr/articles/memory.md)
+  and
+  [`vignette("performance")`](https://bbtheo.github.io/cuplyr/articles/performance.md)
+  for memory use and benchmarks.

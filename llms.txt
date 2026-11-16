@@ -1,0 +1,617 @@
+# cuplyr
+
+cuplyr runs dplyr code on an NVIDIA GPU. It is a dplyr backend, like
+dbplyr, built on [RAPIDS cuDF](https://github.com/rapidsai/cudf). Upload
+a data frame with
+[`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md), use
+the dplyr verbs you already know, and
+[`collect()`](https://dplyr.tidyverse.org/reference/compute.html) the
+result back into R.
+
+``` r
+
+library(cuplyr)
+library(dplyr)
+
+set.seed(1)
+n <- 1e5
+sales <- data.frame(
+  year    = sample(2018:2024, n, replace = TRUE),
+  region  = sample(c("north", "south", "east", "west"), n, replace = TRUE),
+  quarter = sample(1:4, n, replace = TRUE),
+  amount  = rnorm(n, mean = 50, sd = 30),
+  price   = runif(n, 1, 10)
+)
+regions <- data.frame(
+  region  = c("north", "south", "east", "west"),
+  manager = c("Ana", "Ben", "Chi", "Dev")
+)
+
+tbl_gpu(sales) |>
+  filter(year >= 2020, amount > 0) |>
+  mutate(revenue = amount * price) |>
+  group_by(region, quarter) |>
+  summarise(total = sum(revenue), .groups = "drop") |>
+  inner_join(tbl_gpu(regions), by = "region") |>
+  arrange(desc(total)) |>
+  collect()
+```
+
+No GPU? The [Colab
+notebook](https://colab.research.google.com/github/bbtheo/cuplyr-material/blob/main/notebooks/try-cuplyr-colab.ipynb)
+installs cuplyr on a free T4 and runs a few pipelines.
+
+cuplyr is experimental. Expect breaking changes before 1.0.
+
+## What runs on the GPU
+
+The goal is every dplyr verb, with dplyr’s results. Any difference from
+dplyr is a bug. The test suite checks cuplyr against dplyr, including
+dplyr’s own tests.
+
+These run on the GPU:
+
+- [`filter()`](https://dplyr.tidyverse.org/reference/filter.html),
+  [`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html),
+  [`transmute()`](https://dplyr.tidyverse.org/reference/transmute.html),
+  [`select()`](https://dplyr.tidyverse.org/reference/select.html),
+  [`rename()`](https://dplyr.tidyverse.org/reference/rename.html),
+  [`relocate()`](https://dplyr.tidyverse.org/reference/relocate.html),
+  [`arrange()`](https://dplyr.tidyverse.org/reference/arrange.html),
+  [`distinct()`](https://dplyr.tidyverse.org/reference/distinct.html),
+  [`pull()`](https://dplyr.tidyverse.org/reference/pull.html)
+- [`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html),
+  [`summarise()`](https://dplyr.tidyverse.org/reference/summarise.html),
+  [`reframe()`](https://dplyr.tidyverse.org/reference/reframe.html),
+  [`count()`](https://dplyr.tidyverse.org/reference/count.html),
+  [`tally()`](https://dplyr.tidyverse.org/reference/count.html),
+  [`rowwise()`](https://dplyr.tidyverse.org/reference/rowwise.html)
+- [`slice()`](https://dplyr.tidyverse.org/reference/slice.html) and its
+  variants, including grouped
+  [`slice_min()`](https://dplyr.tidyverse.org/reference/slice.html) and
+  [`slice_max()`](https://dplyr.tidyverse.org/reference/slice.html)
+- every join: mutating, filtering and cross joins, and
+  [`join_by()`](https://dplyr.tidyverse.org/reference/join_by.html) with
+  inequality,
+  [`between()`](https://dplyr.tidyverse.org/reference/between.html),
+  [`within()`](https://rdrr.io/r/base/with.html), `overlaps()` and
+  `closest()` conditions
+- [`bind_rows()`](https://bbtheo.github.io/cuplyr/reference/bind_rows.md),
+  [`bind_cols()`](https://bbtheo.github.io/cuplyr/reference/bind_cols.md),
+  the set operations and the `rows_*()` verbs
+- [`across()`](https://dplyr.tidyverse.org/reference/across.html),
+  [`if_any()`](https://dplyr.tidyverse.org/reference/across.html) and
+  [`if_all()`](https://dplyr.tidyverse.org/reference/across.html)
+- inside expressions:
+  - arithmetic, comparisons,
+    [`if_else()`](https://dplyr.tidyverse.org/reference/if_else.html),
+    [`case_when()`](https://dplyr.tidyverse.org/reference/case-and-replace-when.html),
+    [`case_match()`](https://dplyr.tidyverse.org/reference/case_match.html),
+    [`coalesce()`](https://dplyr.tidyverse.org/reference/coalesce.html),
+    [`na_if()`](https://dplyr.tidyverse.org/reference/na_if.html) and
+    [`between()`](https://dplyr.tidyverse.org/reference/between.html)
+  - window functions:
+    [`lag()`](https://dplyr.tidyverse.org/reference/lead-lag.html),
+    [`lead()`](https://dplyr.tidyverse.org/reference/lead-lag.html), the
+    ranking functions, [`cumsum()`](https://rdrr.io/r/base/cumsum.html)
+    and the other cumulative functions
+  - summaries:
+    [`first()`](https://dplyr.tidyverse.org/reference/nth.html),
+    [`last()`](https://dplyr.tidyverse.org/reference/nth.html),
+    [`nth()`](https://dplyr.tidyverse.org/reference/nth.html),
+    [`n_distinct()`](https://dplyr.tidyverse.org/reference/n_distinct.html),
+    [`median()`](https://rdrr.io/r/stats/median.html),
+    [`quantile()`](https://rdrr.io/r/stats/quantile.html),
+    [`sd()`](https://rdrr.io/r/stats/sd.html) and
+    [`var()`](https://rdrr.io/r/stats/cor.html)
+  - base string functions such as
+    [`paste()`](https://rdrr.io/r/base/paste.html),
+    [`substr()`](https://rdrr.io/r/base/substr.html),
+    [`nchar()`](https://rdrr.io/r/base/nchar.html),
+    [`grepl()`](https://rdrr.io/r/base/grep.html),
+    [`sub()`](https://rdrr.io/r/base/grep.html),
+    [`gsub()`](https://rdrr.io/r/base/grep.html) and
+    [`toupper()`](https://rdrr.io/r/base/chartr.html)
+  - date parts: `year()`, `month()`, and fixed-unit `floor_date()` and
+    `round_date()`
+- rolling windows with
+  [`roll_mean()`](https://bbtheo.github.io/cuplyr/reference/roll.md),
+  [`roll_sum()`](https://bbtheo.github.io/cuplyr/reference/roll.md),
+  [`roll_median()`](https://bbtheo.github.io/cuplyr/reference/roll.md),
+  [`roll_min()`](https://bbtheo.github.io/cuplyr/reference/roll.md),
+  [`roll_max()`](https://bbtheo.github.io/cuplyr/reference/roll.md) and
+  [`roll_sd()`](https://bbtheo.github.io/cuplyr/reference/roll.md)
+- Parquet files, read and written on the GPU with
+  [`read_parquet_gpu()`](https://bbtheo.github.io/cuplyr/reference/read_parquet_gpu.md)
+  and
+  [`write_parquet_gpu()`](https://bbtheo.github.io/cuplyr/reference/read_parquet_gpu.md)
+
+Anything else falls back to the CPU. cuplyr collects the data, runs
+dplyr and uploads the result. Your code still works, but the data makes
+a round trip. The fallback is silent by default. Set
+`options(cuplyr.fallback = "warn")` to see each fallback with its
+expression and reason, or `"error"` to forbid them.
+
+Column types:
+
+| R         | GPU                                                       |
+|-----------|-----------------------------------------------------------|
+| logical   | BOOL8                                                     |
+| integer   | INT32                                                     |
+| double    | FLOAT64                                                   |
+| character | STRING                                                    |
+| factor    | DICTIONARY32, levels kept                                 |
+| Date      | TIMESTAMP_DAYS                                            |
+| POSIXct   | TIMESTAMP_MICROSECONDS, time zone kept                    |
+| integer64 | FLOAT64, with a warning: values above 2^53 lose precision |
+
+Not supported: list columns, other column classes and more than one GPU.
+Uploading a `difftime`, `hms` or `ts` column raises an error. The [open
+issues](https://github.com/bbtheo/cuplyr/issues) track what is planned.
+
+## Lazy by default
+
+[`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md) is
+lazy. Each verb checks its arguments and records a step, so a typo or
+type error still fails at the verb that caused it. Nothing runs until
+you [`collect()`](https://dplyr.tidyverse.org/reference/compute.html)
+the result into R or
+[`compute()`](https://dplyr.tidyverse.org/reference/compute.html) it
+into a table that stays on the GPU. Then cuplyr optimizes the whole
+plan, runs it and frees every intermediate column.
+
+Printing a lazy table runs the plan to show the first rows and keeps
+nothing. Print it twice and it runs twice.
+[`compute()`](https://dplyr.tidyverse.org/reference/compute.html) a
+table you want to look at often.
+
+[`explain()`](https://dplyr.tidyverse.org/reference/explain.html) shows
+the recorded steps and the plan the optimizer will run:
+
+``` r
+
+tbl_gpu(mtcars) |>
+  filter(mpg > 20) |>
+  mutate(kpl = mpg * 0.425) |>
+  select(cyl, kpl) |>
+  explain()
+```
+
+The optimizer drops columns the result never reads, fuses consecutive
+[`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) calls,
+pushes filters below mutates, selects and some joins, and merges
+consecutive filters into one.
+[`vignette("query-optimization")`](https://bbtheo.github.io/cuplyr/articles/query-optimization.md)
+describes each pass.
+
+For a single pipeline, lazy is as fast as eager up to 1e6 rows and under
+a millisecond slower at 1e7. In exchange it holds no GPU memory between
+calls. Eager mode keeps intermediate results on the GPU until R’s next
+[`gc()`](https://rdrr.io/r/base/gc.html), and in a loop they fill the
+card. Over 5e7 rows, five back-to-back eager runs took 68 ms each. Lazy
+took 18 ms.
+
+Eager mode runs each verb as soon as you call it, which is easier when
+you step through code by hand:
+
+``` r
+
+tbl_gpu(mtcars, lazy = FALSE)          # one table
+options(cuplyr.exec_mode = "eager")    # every table created afterwards
+```
+
+[`cuplyr_options()`](https://bbtheo.github.io/cuplyr/reference/cuplyr-options.md)
+lists the other options.
+
+## Performance
+
+A five-verb pipeline (`filter`, `mutate`, `group_by`, `summarise`,
+`arrange`) on an RTX 5070, median ms per call:
+
+| rows | cuplyr, lazy | dplyr |
+|------|--------------|-------|
+| 1e3  | 1.75         | 3.50  |
+| 1e6  | 2.00         | 22.0  |
+| 1e7  | 5.00         | 213   |
+
+The GPU loses when you upload a table, run one cheap verb and collect
+it. Uploading 1e7 rows takes 63 ms and collecting them takes 54 ms. Keep
+data on the GPU between steps and collect once at the end.
+
+[`vignette("performance")`](https://bbtheo.github.io/cuplyr/articles/performance.md)
+has the method, eager timings, memory per call and the other cases where
+dplyr wins.
+[`vignette("memory")`](https://bbtheo.github.io/cuplyr/articles/memory.md)
+explains how cuplyr allocates GPU memory and when
+[`gpu_gc()`](https://bbtheo.github.io/cuplyr/reference/gpu_gc.md) gives
+it back.
+
+## Gibbles
+
+cuplyr’s tables are called gibbles. They print as `# A gibble:`, or
+`# A gibble [lazy]:` with pending steps.
+[`gibble()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md),
+[`as_gibble()`](https://bbtheo.github.io/cuplyr/reference/as_tbl_gpu.md)
+and
+[`is_gibble()`](https://bbtheo.github.io/cuplyr/reference/is_tbl_gpu.md)
+are aliases of
+[`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md),
+[`as_tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/as_tbl_gpu.md)
+and
+[`is_tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/is_tbl_gpu.md).
+The CRAN package gibble also has a
+[`gibble()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md)
+function.
+[`?gibble`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md)
+explains which one wins when both are attached.
+
+## Installation
+
+You need Linux x86_64 and:
+
+|                |                                         |
+|----------------|-----------------------------------------|
+| NVIDIA GPU     | compute capability 7.0 (Volta) or newer |
+| CUDA Toolkit   | 12.2 or newer                           |
+| RAPIDS libcudf | 25.12 or newer                          |
+| R              | 4.3 or newer                            |
+
+The install script clones cuplyr, finds CUDA and libcudf through pixi,
+conda or your system (in that order), and builds the package:
+
+``` bash
+curl -fsSL https://raw.githubusercontent.com/bbtheo/cuplyr/main/install.sh | bash
+```
+
+To pick the method yourself, pass `--method=pixi`, `--method=conda` or
+`--method=system`. `--dry-run` shows what the script would do. From a
+clone, run `./install.sh` with the same options.
+
+Then check the installation from R:
+
+``` r
+
+library(cuplyr)
+verify_installation()
+```
+
+If something is wrong,
+[`check_deps()`](https://bbtheo.github.io/cuplyr/reference/check_deps.md)
+lists what is missing.
+[`diagnostics()`](https://bbtheo.github.io/cuplyr/reference/diagnostics.md)
+prints the system details to paste into a bug report.
+
+## Learn more
+
+- [Documentation site](https://bbtheo.github.io/cuplyr/), with the
+  reference and the vignettes
+- [`vignette("getting-started")`](https://bbtheo.github.io/cuplyr/articles/getting-started.md)
+  and
+  [`vignette("complex-analysis")`](https://bbtheo.github.io/cuplyr/articles/complex-analysis.md)
+  for longer examples
+- [CONTRIBUTING.md](https://bbtheo.github.io/cuplyr/CONTRIBUTING.md) for
+  the scope, known differences from dplyr, the developer setup and how
+  pull requests work
+
+## Acknowledgments
+
+cuplyr is built on [RAPIDS cuDF](https://rapids.ai/), NVIDIA’s
+open-source GPU data frame library, by the RAPIDS team.
+
+# Package index
+
+## All functions
+
+- [`add_count(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/add_count.tbl_gpu.md)
+  : Add a count column without collapsing rows
+
+- [`arrange(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/arrange.tbl_gpu.md)
+  : Arrange rows of a GPU table by column values
+
+- [`as_eager()`](https://bbtheo.github.io/cuplyr/reference/as_eager.md)
+  : Switch to eager execution mode
+
+- [`as_lazy()`](https://bbtheo.github.io/cuplyr/reference/as_lazy.md) :
+  Switch to lazy execution mode
+
+- [`as_tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/as_tbl_gpu.md)
+  [`as_gibble()`](https://bbtheo.github.io/cuplyr/reference/as_tbl_gpu.md)
+  : Coerce to a GPU table
+
+- [`bind_cols()`](https://bbtheo.github.io/cuplyr/reference/bind_cols.md)
+  : Bind multiple data frames/tables by column
+
+- [`bind_rows()`](https://bbtheo.github.io/cuplyr/reference/bind_rows.md)
+  : Bind multiple data frames/tables by row
+
+- [`check_deps()`](https://bbtheo.github.io/cuplyr/reference/check_deps.md)
+  : Check cuplyr dependencies
+
+- [`collapse(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/collapse.tbl_gpu.md)
+  : Create a subquery barrier without executing
+
+- [`collect(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/collect.tbl_gpu.md)
+  : Transfer GPU table data back to R
+
+- [`compute(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/compute.tbl_gpu.md)
+  : Force computation of pending GPU operations
+
+- [`count(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/count.tbl_gpu.md)
+  : Count observations by group
+
+- [`cross_join(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/cross_join.tbl_gpu.md)
+  :
+
+  [`cross_join()`](https://dplyr.tidyverse.org/reference/cross_join.html):
+  native via `cudf::cross_join`
+
+- [`cuplyr-fallback`](https://bbtheo.github.io/cuplyr/reference/cuplyr-fallback.md)
+  : CPU fallbacks and plan breaks: what cuplyr tells you, and how to
+  hear it
+
+- [`cuplyr_options()`](https://bbtheo.github.io/cuplyr/reference/cuplyr-options.md)
+  : cuplyr options
+
+- [`detect_environment()`](https://bbtheo.github.io/cuplyr/reference/detect_environment.md)
+  : Detect the runtime environment
+
+- [`diagnose_loader()`](https://bbtheo.github.io/cuplyr/reference/diagnose_loader.md)
+  : Diagnose dynamic linker configuration for cuplyr
+
+- [`diagnostics()`](https://bbtheo.github.io/cuplyr/reference/diagnostics.md)
+  : System diagnostics for cuplyr
+
+- [`dim(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/dim.tbl_gpu.md)
+  : Get dimensions of a GPU table
+
+- [`` `dimnames<-`( ``*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/dimnames-set-.tbl_gpu.md)
+  : Set the dimnames of a GPU table
+
+- [`dimnames(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/dimnames.tbl_gpu.md)
+  : Dimnames of a GPU table
+
+- [`distinct(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/distinct.tbl_gpu.md)
+  : Keep only distinct/unique rows of a GPU table
+
+- [`explain(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/explain.tbl_gpu.md)
+  : Explain a tbl_gpu query
+
+- [`filter(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/filter.tbl_gpu.md)
+  : Filter rows of a GPU table
+
+- [`filter_out(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/filter_out.tbl_gpu.md)
+  : Drop rows of a GPU table where conditions are TRUE
+
+- [`glimpse(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/glimpse.tbl_gpu.md)
+  : Get a glimpse of a GPU table's structure
+
+- [`gpu_details()`](https://bbtheo.github.io/cuplyr/reference/gpu_details.md)
+  : Get detailed GPU information
+
+- [`gpu_gc()`](https://bbtheo.github.io/cuplyr/reference/gpu_gc.md) :
+  Force GPU memory cleanup
+
+- [`gpu_memory_state()`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_state.md)
+  : Get GPU memory snapshot
+
+- [`gpu_memory_usage()`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_usage.md)
+  : Estimate GPU memory usage of a tbl_gpu object
+
+- [`gpu_object_info()`](https://bbtheo.github.io/cuplyr/reference/gpu_object_info.md)
+  : Get detailed information about a GPU table object
+
+- [`gpu_size_comparison()`](https://bbtheo.github.io/cuplyr/reference/gpu_size_comparison.md)
+  : Compare R object size vs GPU data size
+
+- [`gpu_sync()`](https://bbtheo.github.io/cuplyr/reference/gpu_sync.md)
+  : Wait for the GPU to finish
+
+- [`group_by(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/group_by.tbl_gpu.md)
+  : Group a GPU table by one or more columns
+
+- [`group_split(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/group_split.tbl_gpu.md)
+  : Split a GPU table into one GPU table per group (dplyr backend
+  method)
+
+- [`group_trim(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/group_trim.tbl_gpu.md)
+  : Drop unused levels of the factor group columns (dplyr backend
+  method)
+
+- [`group_vars(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/group_vars.tbl_gpu.md)
+  : Get grouping variables from a GPU table
+
+- [`groups(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/groups.tbl_gpu.md)
+  : Get grouping information from a GPU table
+
+- [`has_gpu()`](https://bbtheo.github.io/cuplyr/reference/has_gpu.md) :
+  Check GPU availability
+
+- [`has_pending_ops()`](https://bbtheo.github.io/cuplyr/reference/has_pending_ops.md)
+  : Check if a tbl_gpu has pending lazy operations
+
+- [`head(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/head.tbl_gpu.md)
+  : First rows of a GPU table
+
+- [`infer_schema()`](https://bbtheo.github.io/cuplyr/reference/infer_schema.md)
+  : Infer output schema from an AST node
+
+- [`install_cuplyr()`](https://bbtheo.github.io/cuplyr/reference/install_cuplyr.md)
+  : Install cuplyr from source
+
+- [`is_lazy()`](https://bbtheo.github.io/cuplyr/reference/is_lazy.md) :
+  Check if a tbl_gpu uses lazy execution
+
+- [`is_tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/is_tbl_gpu.md)
+  [`is_gibble()`](https://bbtheo.github.io/cuplyr/reference/is_tbl_gpu.md)
+  : Test if an object is a GPU table
+
+- [`mutate(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/mutate.tbl_gpu.md)
+  : Create or modify columns in a GPU table
+
+- [`left_join(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/mutating-joins.md)
+  [`inner_join(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/mutating-joins.md)
+  [`full_join(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/mutating-joins.md)
+  [`right_join(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/mutating-joins.md)
+  :
+
+  Mutating joins for `tbl_gpu`
+  ([`left_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html),
+  [`inner_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html),
+  [`full_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html),
+  [`right_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html))
+
+- [`na.omit(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/na.omit.tbl_gpu.md)
+  : Drop rows with missing values
+
+- [`` `names<-`( ``*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/names-set-.tbl_gpu.md)
+  : Set column names of a GPU table
+
+- [`names(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/names.tbl_gpu.md)
+  : Get column names of a GPU table
+
+- [`pull(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/pull.tbl_gpu.md)
+  : Pull a single column from a GPU table
+
+- [`read_parquet_gpu()`](https://bbtheo.github.io/cuplyr/reference/read_parquet_gpu.md)
+  [`write_parquet_gpu()`](https://bbtheo.github.io/cuplyr/reference/read_parquet_gpu.md)
+  : Read a parquet file straight onto the GPU
+
+- [`reframe(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/reframe.tbl_gpu.md)
+  : Summarise each group to any number of rows
+
+- [`relocate(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/relocate.tbl_gpu.md)
+  : Reorder columns of a GPU table
+
+- [`rename(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/rename.tbl_gpu.md)
+  : Rename columns of a GPU table
+
+- [`rename_with(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/rename_with.tbl_gpu.md)
+  : Rename columns of a GPU table with a function
+
+- [`roll_mean()`](https://bbtheo.github.io/cuplyr/reference/roll.md)
+  [`roll_sum()`](https://bbtheo.github.io/cuplyr/reference/roll.md)
+  [`roll_min()`](https://bbtheo.github.io/cuplyr/reference/roll.md)
+  [`roll_max()`](https://bbtheo.github.io/cuplyr/reference/roll.md)
+  [`roll_sd()`](https://bbtheo.github.io/cuplyr/reference/roll.md)
+  [`roll_median()`](https://bbtheo.github.io/cuplyr/reference/roll.md) :
+  Rolling-window aggregates
+
+- [`rowwise(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/rowwise.tbl_gpu.md)
+  : Group a GPU table by rows
+
+- [`same_src(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/same_src.tbl_gpu.md)
+  [`auto_copy(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/same_src.tbl_gpu.md)
+  : Source compatibility and upload for tbl_gpu
+
+- [`sample_n(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/sample_n.tbl_gpu.md)
+  [`sample_frac(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/sample_n.tbl_gpu.md)
+  : Sample rows by number or fraction
+
+- [`select(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/select.tbl_gpu.md)
+  : Select columns from a GPU table
+
+- [`semi_join(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/semi-anti-joins.md)
+  [`anti_join(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/semi-anti-joins.md)
+  :
+
+  [`semi_join()`](https://dplyr.tidyverse.org/reference/filter-joins.html)/[`anti_join()`](https://dplyr.tidyverse.org/reference/filter-joins.html):
+  native via `cudf::filtered_join`
+
+- [`union(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/set-ops.md)
+  [`union_all(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/set-ops.md)
+  [`intersect(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/set-ops.md)
+  [`setdiff(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/set-ops.md)
+  [`symdiff(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/set-ops.md)
+  [`setequal(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/set-ops.md)
+  :
+
+  Set operations on `tbl_gpu` tables
+
+- [`show_gpu()`](https://bbtheo.github.io/cuplyr/reference/show_gpu.md)
+  : Display GPU information
+
+- [`show_query(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/show_query.tbl_gpu.md)
+  : Show pending operations for a lazy tbl_gpu
+
+- [`slice(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/slice.tbl_gpu.md)
+  : Select rows by position
+
+- [`slice_head(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/slice_head.tbl_gpu.md)
+  : Select the first rows
+
+- [`slice_max(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/slice_max.tbl_gpu.md)
+  : Select rows with the largest values of a variable
+
+- [`slice_min(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/slice_min.tbl_gpu.md)
+  : Select rows with the smallest values of a variable
+
+- [`slice_sample(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/slice_sample.tbl_gpu.md)
+  : Sample rows
+
+- [`slice_tail(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/slice_tail.tbl_gpu.md)
+  : Select the last rows
+
+- [`` `[`( ``*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/sub-.tbl_gpu.md)
+  :
+
+  Subset a GPU table with tibble's `[` semantics
+
+- [`summarise(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/summarise.tbl_gpu.md)
+  [`summarize(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/summarise.tbl_gpu.md)
+  : Summarise groups in a GPU table
+
+- [`tail(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/tail.tbl_gpu.md)
+  : Last rows of a GPU table
+
+- [`tally(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/tally.tbl_gpu.md)
+  : Count the rows in each group (no additional grouping)
+
+- [`as.data.frame(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu-coerce.md)
+  [`as_tibble(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu-coerce.md)
+  [`as.list(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu-coerce.md)
+  [`as.matrix(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu-coerce.md)
+  : Coerce a GPU table to a base data frame, tibble, list or matrix
+
+- [`rbind(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu-rbind.md)
+  [`cbind(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu-rbind.md)
+  :
+
+  Base [`rbind()`](https://rdrr.io/r/base/cbind.html) /
+  [`cbind()`](https://rdrr.io/r/base/cbind.html) for GPU tables
+
+- [`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md)
+  [`gibble()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md) :
+  Create a GPU-backed data frame
+
+- [`tbl_sum(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/tbl_sum.tbl_gpu.md)
+  : Summary header of a tbl_gpu (pillar)
+
+- [`transmute(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/transmute.tbl_gpu.md)
+  : Create a new GPU table with only the specified columns
+
+- [`ungroup(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/ungroup.tbl_gpu.md)
+  : Remove grouping from a GPU table
+
+- [`unique(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/unique.tbl_gpu.md)
+  : Unique rows of a GPU table
+
+- [`verify_gpu_data()`](https://bbtheo.github.io/cuplyr/reference/verify_gpu_data.md)
+  : Verify that data resides on GPU
+
+- [`verify_installation()`](https://bbtheo.github.io/cuplyr/reference/verify_installation.md)
+  : Verify cuplyr installation
+
+# Articles
+
+### All vignettes
+
+- [Complex data analysis with
+  cuplyr](https://bbtheo.github.io/cuplyr/articles/complex-analysis.md):
+- [Getting started with
+  cuplyr](https://bbtheo.github.io/cuplyr/articles/getting-started.md):
+- [GPU memory in
+  cuplyr](https://bbtheo.github.io/cuplyr/articles/memory.md):
+- [Performance: eager and lazy
+  pipelines](https://bbtheo.github.io/cuplyr/articles/performance.md):
+- [Query optimization in
+  cuplyr](https://bbtheo.github.io/cuplyr/articles/query-optimization.md):
