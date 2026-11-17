@@ -48,12 +48,26 @@ jobs:
             libssl-dev \
             libxml2-dev
 
+      # Not r-lib/actions/setup-r-dependencies: it nests quarto-dev/quarto-actions,
+      # which the repository's allowed-actions policy rejects for the whole workflow.
       - name: Install R package dependencies
         if: ${{ matrix.method == 'pixi' }}
-        uses: r-lib/actions/setup-r-dependencies@v2
-        with:
-          dependencies: '"hard"'
-          needs: build
+        shell: Rscript {0}
+        run: |
+          # pak comes from the r-lib binary repo, into its own library so it is
+          # not visible to the pixi R; the deps go to R_LIBS_USER.
+          pak_lib <- file.path(Sys.getenv("RUNNER_TEMP"), "pak")
+          lib <- Sys.getenv("R_LIBS_USER")
+          dir.create(pak_lib, recursive = TRUE, showWarnings = FALSE)
+          dir.create(lib, recursive = TRUE, showWarnings = FALSE)
+          install.packages("pak", lib = pak_lib, repos = sprintf(
+            "https://r-lib.github.io/p/pak/stable/%s/%s/%s",
+            .Platform$pkgType, R.Version()$os, R.Version()$arch))
+          # pak does its work in a callr session that inherits .libPaths(), so
+          # pak_lib has to be on the path before the first pak call.
+          .libPaths(c(pak_lib, .libPaths()))
+          pak::local_install_deps(".", lib = lib, upgrade = FALSE,
+                                  dependencies = c("Config/Needs/build", "hard"))
 
       - name: Setup pixi
         if: ${{ matrix.method == 'pixi' }}
