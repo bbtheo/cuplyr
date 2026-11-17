@@ -132,8 +132,12 @@ test_that("every action a workflow uses, nested ones included, is allowed", {
 
 test_that("the pixi job still installs the package's hard dependencies with pak", {
   path <- file.path(ci51_root(), ".github", "workflows", "install-matrix.yml")
-  txt <- paste(readLines(path, warn = FALSE), collapse = "\n")
+  lines <- readLines(path, warn = FALSE)
+  # Comments (YAML or R) don't count.
+  lines <- sub("#.*$", "", lines[!grepl("^\\s*#", lines)])
+  txt <- paste(lines, collapse = "\n")
   expect_match(txt, "pak::", fixed = TRUE)
   expect_match(txt, "\"hard\"", fixed = TRUE)
+  expect_match(txt, "Config/Needs/build", fixed = TRUE)
   expect_match(txt, "r-lib.github.io/p/pak", fixed = TRUE)
 })
