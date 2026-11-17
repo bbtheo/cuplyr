@@ -36,6 +36,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup R
+        id: setup-r
         uses: r-lib/actions/setup-r@v2
         with:
           r-version: '4.3'
@@ -48,12 +49,34 @@ jobs:
             libssl-dev \
             libxml2-dev
 
+      # Not r-lib/actions/setup-r-dependencies: it nests quarto-dev/quarto-actions,
+      # which the repository's allowed-actions policy rejects for the whole workflow.
+      - name: Cache R package dependencies
+        if: ${{ matrix.method == 'pixi' }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.R_LIBS_USER }}
+            !${{ env.R_LIBS_USER }}/cuplyr
+          key: r-deps-${{ runner.os }}-${{ steps.setup-r.outputs.installed-r-version }}-${{ hashFiles('DESCRIPTION') }}
+          restore-keys: r-deps-${{ runner.os }}-${{ steps.setup-r.outputs.installed-r-version }}-
+
       - name: Install R package dependencies
         if: ${{ matrix.method == 'pixi' }}
-        uses: r-lib/actions/setup-r-dependencies@v2
-        with:
-          dependencies: '"hard"'
-          needs: build
+        shell: Rscript {0}
+        run: |
+          # pak comes from the r-lib binary repo, into its own library so it is
+          # neither cached nor visible to the pixi R; the deps go to R_LIBS_USER.
+          pak_lib <- file.path(Sys.getenv("RUNNER_TEMP"), "pak")
+          lib <- Sys.getenv("R_LIBS_USER")
+          dir.create(pak_lib, recursive = TRUE, showWarnings = FALSE)
+          dir.create(lib, recursive = TRUE, showWarnings = FALSE)
+          install.packages("pak", lib = pak_lib, repos = sprintf(
+            "https://r-lib.github.io/p/pak/stable/%s/%s/%s",
+            .Platform$pkgType, R.Version()$os, R.Version()$arch))
+          library(pak, lib.loc = pak_lib)
+          pak::local_install_deps(".", lib = lib, upgrade = FALSE,
+                                  dependencies = c("Config/Needs/build", "hard"))
 
       - name: Setup pixi
         if: ${{ matrix.method == 'pixi' }}
