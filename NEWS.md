@@ -2,13 +2,14 @@
 
 * `summarise(.by =)` runs as one grouped summarise that finds each group's
   first row inside the groupby, with no row-number column and no extra steps,
-  and is faster than before: with numeric keys it takes at most about 1.4 times
-  as long as `group_by() |> summarise()`, where it took up to 3.2 times as
-  long. Its peak GPU memory is no higher than before: that of the `group_by()`
-  form plus 4 to 12 bytes a row (about 4 for summaries like those in #50, about
-  8 for a single `sum()` or `n()` with many groups, up to 12 when nearly every
-  row is its own group). `group_by() |> summarise()` with many groups now needs
-  less GPU memory at its peak, and an ungrouped `row_number()` in `mutate()`
+  and is faster than before. With numeric keys it takes at most about 1.6
+  times as long as `group_by() |> summarise()` (a single `n()` or `sum()` over
+  many groups is the slowest case), where it took up to 3.2 times as long. Its
+  peak GPU memory is no higher than before: that of the `group_by()` form plus
+  up to 12 bytes a row (about 4 for summaries like those in #50, about 8 for a
+  single `sum()` or `n()` with many groups, up to 12 when nearly every row is
+  its own group). `group_by() |> summarise()` with many groups now needs less
+  GPU memory at its peak, and an ungrouped `row_number()` in `mutate()`
   allocates one integer column instead of six (#50).
 
 * The examples on the help pages of the dplyr verbs attach dplyr, so they run

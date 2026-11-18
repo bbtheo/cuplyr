@@ -273,8 +273,8 @@ test_that("summarise(.by) after arrange, join and filter keeps first-appearance 
   )
   lk <- data.frame(k = 1:50, w = rep(1:3, length.out = 50))
   prep <- function(d) {
-    y <- if (inherits(d, "tbl_gpu")) tbl_gpu(lk, lazy = identical(d$exec_mode, "lazy")) else lk
-    d |> dplyr::arrange(dplyr::desc(x)) |> dplyr::left_join(y, by = "k") |>
+    lookup <- if (inherits(d, "tbl_gpu")) tbl_gpu(lk, lazy = identical(d$exec_mode, "lazy")) else lk
+    d |> dplyr::arrange(dplyr::desc(x)) |> dplyr::left_join(lookup, by = "k") |>
       dplyr::filter(w != 2L)
   }
   by50l_expect(df, function(d) {

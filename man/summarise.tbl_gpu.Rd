@@ -280,7 +280,7 @@ This differs from \code{group_by(g) |> summarise(...)}, whose groups are
 sorted. The GPU does one grouped summarise and puts the groups in
 first-appearance order inside it (\code{summarise_by_desugar()}): no row-number
 column and no extra verbs. Its peak GPU memory is that of the \code{group_by()}
-form plus 4 to 12 bytes a row.
+form plus up to 12 bytes a row.
 }
 }
 \examples{
