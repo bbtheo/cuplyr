@@ -1,14 +1,12 @@
-# #50: summarise(.by =) on inputs of 2^17 rows and more runs the groupby as for
-# group_by() (without its key sort), then scans the rows in chunks for each
-# group's first row (src/ops_groupby.cpp, first_appearance_order()). The result
-# must still be dplyr's first-appearance order, whichever branch finds them:
-#  - shuffled keys: the first chunk shows every group;
-#  - a group that first appears late: a later chunk (each 4x the last) has it;
-#  - sorted or clustered keys that revisit groups, so the first chunk misses
-#    some: the scan starts over on the run starts, in chunks of its own;
-#  - more than n/4 groups: chunks of n/16 rows (at least 2^15), each adding the
-#    groups it is the first to see.
-# test-parity-50-by-order.R covers every key type under 2^17 rows.
+# #50: summarise(.by =) puts each group's first row in the one groupby as a MIN
+# over the row position and sorts the k-row result by it
+# (src/ops_groupby.cpp, group_order = "first"). These inputs of 2^17 rows and
+# more must still give dplyr's first-appearance order:
+#  - shuffled keys of every type;
+#  - a group that first appears late (in a later part of the table);
+#  - sorted or clustered keys that revisit groups;
+#  - many groups, up to n/2.
+# test-parity-50-by-order.R covers the small cases.
 
 by50l_n <- 131072L + 4001L
 
@@ -174,10 +172,10 @@ test_that("a large summarise(.by) with a single group, or only NA keys, is one r
   by50l_release()
 })
 
-test_that("a large summarise(.by) on clustered keys that revisit groups uses the run starts", {
+test_that("a large summarise(.by) on clustered keys that revisit groups keeps first-appearance order", {
   skip_if_no_gpu()
-  # 20 runs of 50000 rows: the first 2^17 rows hold three runs, so the scan
-  # starts over on the run starts. NA, NaN, -NaN, -0 and 0 keys among them.
+  # 20 runs of 50000 rows, groups revisited between runs. NA, NaN, -NaN, -0
+  # and 0 keys among them.
   n <- 1e6
   each <- 50000L
   lab <- c("r3", "r1", "r3", "r2", NA, "r1", "r4", "r2", "r5", "r3",
@@ -203,11 +201,10 @@ test_that("a large summarise(.by) on clustered keys that revisit groups uses the
   by50l_release()
 })
 
-test_that("a large summarise(.by) finds a group in the second chunk and one in the last row", {
+test_that("a large summarise(.by) finds a one-row group in the middle and one in the last row", {
   skip_if_no_gpu()
-  # 4e6 shuffled rows of two groups: "mid" at row 300000 is in the third chunk
-  # (rows 163841-688128; the first is 2^15 rows, each next one 4x), "end" in
-  # the last chunk
+  # 4e6 shuffled rows of two groups: "mid" at row 300000 and "end" in the last
+  # row are the only rows of their groups
   n <- 4e6
   set.seed(5018)
   g <- sample(c("a", "b"), n, replace = TRUE)
@@ -221,10 +218,9 @@ test_that("a large summarise(.by) finds a group in the second chunk and one in t
   by50l_release()
 })
 
-test_that("a large summarise(.by) with n/2 groups keeps first-appearance order across chunks", {
+test_that("a large summarise(.by) with n/2 groups keeps first-appearance order", {
   skip_if_no_gpu()
-  # more than n/4 groups: chunks of n/16 rows, every one adding groups; doubles
-  # with NaN, -NaN, -0, 0 and NA among many distinct values
+  # n/2 groups; doubles with NaN, -NaN, -0, 0 and NA among many distinct values
   n <- 1e6
   set.seed(5019)
   special <- c(NaN, -NaN, -0, 0, NA)
@@ -241,13 +237,11 @@ test_that("a large summarise(.by) with n/2 groups keeps first-appearance order a
   by50l_release()
 })
 
-test_that("a large summarise(.by) on short runs finds groups in later chunks of the run starts", {
+test_that("a large summarise(.by) on short runs finds groups that first appear late", {
   skip_if_no_gpu()
-  # 2e5 runs of 10 rows over 999 labels (and NA): the first chunk misses labels,
-  # and the scan starts over on the 2e5 run starts. "mid", first seen in run
-  # 150000, is in their second chunk, "late", only in the last run, in their
-  # third. Crossed with a shuffled INT32 the keys change almost every row, so
-  # that scan goes on in chunks of the rows instead.
+  # 2e5 runs of 10 rows over 999 labels (and NA); "mid" first appears in run
+  # 150000, "late" only in the last run. Crossed with a shuffled INT32 the keys
+  # change almost every row.
   n <- 2e6
   set.seed(5305)
   nr <- n / 10
