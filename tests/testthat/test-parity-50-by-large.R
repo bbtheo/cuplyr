@@ -1,7 +1,7 @@
 # #50: summarise(.by =) puts each group's first row in the one groupby as a MIN
 # over the row position and sorts the k-row result by it
-# (src/ops_groupby.cpp, group_order = "first"). These inputs of 2^17 rows and
-# more must still give dplyr's first-appearance order:
+# (src/ops_groupby.cpp, group_order = "first"), at every size. These inputs of
+# 2^17 rows and more must give dplyr's first-appearance order:
 #  - shuffled keys of every type;
 #  - a group that first appears late (in a later part of the table);
 #  - sorted or clustered keys that revisit groups;
@@ -146,7 +146,7 @@ test_that("a large summarise(.by) with many groups keeps first-appearance order"
   by50l_release()
 })
 
-test_that("summarise(.by) around the 2^17-row switch keeps first-appearance order", {
+test_that("summarise(.by) around 2^17 rows keeps first-appearance order", {
   skip_if_no_gpu()
   set.seed(5016)
   for (n in c(131071L, 131072L, 131073L)) {
