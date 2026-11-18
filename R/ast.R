@@ -129,16 +129,17 @@ ast_arrange <- function(input, sort_specs, groups = character()) {
 #'   `"error"` (lazy plans, whose schema was declared INT32 statically): raise
 #'   `cuplyr_error_sum_overflow`. A lazy `summarise()` plans only a sum of a
 #'   logical this way (F80): an INT32 sum runs at the verb with `"double"`.
-#' @param sort_groups (F33) Sort the grouped result by the group keys
-#'   (ascending, `NA` last), dplyr's `group_by()` order. `FALSE` only for
-#'   `summarise_by_desugar()`, which re-sorts by first appearance anyway.
+#' @param group_order Row order of a grouped result: `"keys"` (F33) sorts by the
+#'   group keys (ascending, `NA` last), dplyr's `group_by()` order; `"first"`
+#'   (#50) orders groups by first appearance, dplyr's `.by =` order, and is
+#'   what `summarise_by_desugar()` asks for.
 #' @return An ast_summarise node
 #' @keywords internal
 ast_summarise <- function(input, aggregations, groups, result_groups = character(),
-                          on_sum_overflow = "error", sort_groups = TRUE) {
+                          on_sum_overflow = "error", group_order = "keys") {
   ast_node("summarise", input = input, aggregations = aggregations, groups = groups,
             result_groups = result_groups, on_sum_overflow = on_sum_overflow,
-            sort_groups = sort_groups)
+            group_order = group_order)
 }
 
 #' Create a reframe AST node
@@ -598,9 +599,8 @@ infer_mutate_output_type <- function(op, input_types, scalar) {
 #'   `min()`/`max()` over an INT32/FLOAT64 column apply base R's empty-vector
 #'   identity (`Inf`/`-Inf`, with dplyr's warning) for an empty group, which
 #'   promotes an INT32 result column to FLOAT64 when it happens; see
-#'   `gpu_summarise()` (`src/ops_groupby.cpp`). `FALSE` is for internal helper
-#'   aggregations (`summarise_by_desugar()`'s row-position `min()`) that must
-#'   stay INT32 and never warn. Only meaningful for `min`/`max` over
+#'   `gpu_summarise()` (`src/ops_groupby.cpp`). `FALSE` is for an internal helper
+#'   aggregation that must stay INT32 and never warn (none is in use). Only meaningful for `min`/`max` over
 #'   INT32/FLOAT64; stored as `FALSE` for everything else.
 #' @return An aggregation list structure
 #' @keywords internal

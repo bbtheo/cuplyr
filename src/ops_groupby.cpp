@@ -8,7 +8,9 @@
 #include <cudf/aggregation.hpp>
 #include <cudf/binaryop.hpp>
 #include <cudf/copying.hpp>
+#include <cudf/filling.hpp>
 #include <cudf/groupby.hpp>
+#include <cudf/join/distinct_hash_join.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/null_mask.hpp>
 #include <cudf/sorting.hpp>
@@ -19,8 +21,10 @@
 #include <cudf/transform.hpp>
 #include <cudf/unary.hpp>
 #include <rmm/device_buffer.hpp>
+#include <rmm/device_uvector.hpp>
 #include <rmm/mr/per_device_resource.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -556,6 +560,142 @@ struct QuantileRequests {
     }
 };
 
+// #50: the gather map that puts the groupby's k-row result in dplyr's `.by =`
+// order, first appearance. `keys` are the key columns of every input row,
+// `result_keys` the result's (distinct) keys in the groupby's own order.
+// A hash join built on `result_keys` labels every input row with its result
+// row. The rows are scanned in chunks; in each, stable_distinct (KEEP_FIRST)
+// over the INT32 labels gives the groups the chunk holds in order of their
+// first row there, and those no earlier chunk saw (a BOOL8 per group) are the
+// next entries of the order. No n-row column and no key sort. Next to the
+// result, the scan holds the join's table (16 bytes a group, 10 with more than
+// n/4 groups), the k-row order and flags (5 bytes a group), and per chunk of
+// c rows its labels plus stable_distinct's ~16 bytes a row (hash set, per-row
+// reduction, output), or a second copy of the flags while they are updated.
+// c is at most n/4 (n/16 with more than n/4 groups) and at least 2^15 (about
+// 0.5 MiB of scratch). Measured (#50, 2^17 to 1e7 rows; one to three INT32,
+// string and double keys, n/16 to n groups), the scan's peak is at most the
+// groupby's own peak + 0.25 bytes a row, + 0.5 MiB near 2^17 rows. The
+// tightest case is all-unique narrow keys with only n(): two INT32 keys make
+// 12-byte result rows and keep the groupby's own peak low.
+//  1. The first chunk is min(max chunk, max(2^15, 16k)) rows: rows drawn from
+//     k groups spread through the data show every group in about k ln k of
+//     them, so one chunk usually finds them all, and its labels are the order.
+//  2. If it misses groups but holds at most c/8 runs of equal labels (a cheap
+//     sign of sorted or clustered input), and the input has at most n/8 runs
+//     of equal keys (only possible with k <= n/8), each group's first row is a
+//     run start, and the scan starts over on cudf::unique(keys), the run
+//     starts in row order.
+//     That holds whatever equality unique() uses, as long as it is no looser
+//     than the groupby's: a stricter one only adds run starts, which get the
+//     same label.
+//  3. Otherwise the scan goes on, each chunk 4x the last up to the max chunk;
+//     no row is read twice.
+// A row the join matches to no group, or a group no row is matched to, means
+// the join and the groupby disagree on key equality: an internal error, never
+// a wrong order.
+static std::unique_ptr<cudf::column> first_appearance_order(const cudf::table_view& keys,
+                                                            const cudf::table_view& result_keys) {
+    using cudf::size_type;
+    const size_type k = result_keys.num_rows();
+    const cudf::data_type i32{cudf::type_id::INT32};
+    const int64_t n = keys.num_rows();
+    // With more than n/4 groups the join's table, the k-row order and the
+    // result together come close to the groupby's own peak, so the table is
+    // fuller (10 bytes a group instead of 16) and chunks are n/16 rows, not n/4.
+    const bool many = int64_t(k) > n / 4;
+    const int64_t min_chunk = int64_t(1) << 15;
+    const int64_t chunk_div = many ? 16 : 4;
+    const double load = many ? 0.8 : 0.5;
+    const int64_t max_chunk = std::max<int64_t>(min_chunk, (n + chunk_div - 1) / chunk_div);
+    auto disagree = [&]() {
+        Rcpp::stop("internal error: summarise(.by) could not match the input rows to the %d "
+                   "groups of the groupby (its hash join and the groupby disagree on key equality)",
+                   static_cast<int>(k));
+    };
+    auto one = [](std::unique_ptr<cudf::table> t) { return std::move(t->release()[0]); };
+
+    // Equality must be the groupby's: NULLs equal, NaNs equal, -0 == 0.
+    // libcudf 25.12's distinct_hash_join compares NaNs equal and hashes with
+    // MurmurHash3, which normalizes NaNs and zeros; recheck on a libcudf bump.
+    cudf::distinct_hash_join join(result_keys, cudf::null_equality::EQUAL, load);
+
+    // the result row of each row a..b-1 of `src`; JoinNoMatch (INT32 min) if none
+    auto label = [&](const cudf::table_view& src, int64_t a, int64_t b) {
+        auto matched = join.left_join(cudf::slice(src, {static_cast<size_type>(a),
+                                                        static_cast<size_type>(b)})[0]);
+        const auto m = static_cast<size_type>(matched->size());
+        return std::make_unique<cudf::column>(i32, m, matched->release(), rmm::device_buffer{}, 0);
+    };
+    // the distinct labels in order of their first row
+    auto firsts_of = [&](const cudf::column& labels) {
+        return one(cudf::stable_distinct(cudf::table_view({labels.view()}), {0},
+                                         cudf::duplicate_keep_option::KEEP_FIRST,
+                                         cudf::null_equality::EQUAL, cudf::nan_equality::ALL_EQUAL));
+    };
+
+    // Scans `src` (rows in input order). nullptr: the first chunk missed groups
+    // and `src` collapses to at most n/8 run starts, to be scanned instead.
+    auto scan = [&](const cudf::table_view& src, bool may_collapse) -> std::unique_ptr<cudf::column> {
+        const int64_t rows = src.num_rows();
+        int64_t c = std::min<int64_t>(max_chunk, std::max<int64_t>(min_chunk, int64_t(16) * k));
+        int64_t a = std::min<int64_t>(rows, c);
+        std::unique_ptr<cudf::column> fresh;  // groups first seen in the chunk, in order
+        bool collapse = false;
+        {
+            auto labels = label(src, 0, a);
+            fresh = firsts_of(*labels);
+            auto lowest = cudf::reduce(fresh->view(), *cudf::make_min_aggregation<cudf::reduce_aggregation>(), i32);
+            if (static_cast<cudf::numeric_scalar<int32_t>&>(*lowest).value() < 0) disagree();
+            // one chunk held every group: its labels in order are the order
+            if (fresh->size() == k) return fresh;
+            collapse = may_collapse && int64_t(k) <= rows / 8 && a < rows &&
+                       cudf::unique_count(cudf::table_view({labels->view()})) <= a / 8;
+        }
+        if (collapse && cudf::unique_count(src, cudf::null_equality::EQUAL) <= rows / 8) return nullptr;
+
+        auto order = cudf::make_numeric_column(i32, k, cudf::mask_state::UNALLOCATED);
+        auto unseen = cudf::make_column_from_scalar(cudf::numeric_scalar<bool>(true, true), k);
+        cudf::numeric_scalar<bool> no(false, true);
+        std::vector<std::reference_wrapper<const cudf::scalar>> to_no{std::cref(static_cast<const cudf::scalar&>(no))};
+        int64_t found = 0;
+        while (true) {
+            const size_type fresh_n = fresh->size();
+            if (fresh_n > 0) {
+                if (found + fresh_n > k) disagree();
+                unseen = one(cudf::scatter(to_no, fresh->view(), cudf::table_view({unseen->view()})));
+                cudf::mutable_column_view out = order->mutable_view();
+                cudf::copy_range_in_place(fresh->view(), out, 0, fresh_n, static_cast<size_type>(found));
+                found += fresh_n;
+            }
+            fresh.reset();
+            if (a >= rows || found >= k) break;
+            c = std::min<int64_t>(max_chunk, 4 * c);
+            const int64_t b = std::min<int64_t>(rows, a + c);
+            // keep the groups no earlier chunk saw; a JoinNoMatch label is out
+            // of bounds, so its flag is null
+            auto firsts = firsts_of(*label(src, a, b));
+            auto is_new = one(cudf::gather(cudf::table_view({unseen->view()}), firsts->view(),
+                                           cudf::out_of_bounds_policy::NULLIFY));
+            if (is_new->null_count() > 0) disagree();
+            fresh = one(cudf::apply_boolean_mask(cudf::table_view({firsts->view()}), is_new->view()));
+            a = b;
+        }
+        if (found != k) disagree();
+        return order;
+    };
+
+    auto order = scan(keys, true);
+    if (!order) {
+        std::vector<size_type> all(keys.num_columns());
+        std::iota(all.begin(), all.end(), 0);
+        auto starts = cudf::unique(keys, all, cudf::duplicate_keep_option::KEEP_FIRST,
+                                   cudf::null_equality::EQUAL);
+        order = scan(starts->view(), false);
+    }
+    return order;
+}
+
 } // namespace cuplyr
 
 // Phase 6, task 6.1 (Fix A): `na_rm` -- one flag per aggregation, same
@@ -580,11 +720,26 @@ struct QuantileRequests {
 SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                    IntegerVector agg_col_indices, CharacterVector agg_types,
                    LogicalVector na_rm, NumericVector agg_extra,
-                   LogicalVector identity, bool sort_keys) {
+                   LogicalVector identity, std::string group_order) {
     using namespace cuplyr;
 
     Rcpp::XPtr<GpuTablePtr> ptr(xptr);
     cudf::table_view view = get_table_view(ptr);
+
+    // "keys": rows sorted by the group keys (F33); "first": groups in order of
+    // first appearance (dplyr's `.by =`, #50).
+    if (group_order != "keys" && group_order != "first") {
+        Rcpp::stop("group_order must be \"keys\" or \"first\"");
+    }
+    const bool first_order = group_order == "first";
+    // #50: below this many rows the first-appearance position rides in the one
+    // groupby (a MIN over a row sequence: at most 8 bytes a row of extra scratch,
+    // 1 MiB here), which is cheaper than any second pass over the keys. Above
+    // it the groupby runs as in "keys" mode without the F33 sort, and
+    // first_appearance_order() finds the order without an n-row column.
+    const int64_t kSmallFirst = int64_t(1) << 17;
+    const bool small_first = first_order && view.num_rows() > 0 && view.num_rows() < kSmallFirst;
+    const bool large_first = first_order && !small_first;
 
     int num_aggs = agg_col_indices.size();
     int num_groups = group_indices.size();
@@ -987,259 +1142,326 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     // construction above -- dplyr's group_by()/summarise() always treats
     // NA as its own group; cudf's default (null_policy::EXCLUDE) would
     // silently drop every row whose group key is null.
-    cudf::groupby::groupby gb(keys_table, cudf::null_policy::INCLUDE);
+    // The groupby and its requests live in this block so their scratch is
+    // freed before the first-appearance pass below (#50): the peak is the
+    // larger of the two, not their sum.
+    std::unique_ptr<cudf::table> result;
+    {
+        cudf::groupby::groupby gb(keys_table, cudf::null_policy::INCLUDE);
 
-    std::vector<cudf::groupby::aggregation_request> requests;
-    // Phase 6, task 6.1 (Fix A): for every aggregation needing na.rm=FALSE
-    // whole-group-null propagation, an extra is_null-indicator MAX request
-    // is appended to this SAME requests vector (na_prop_request_idx[i] ==
-    // its index, -1 if not needed) so it's answered by the exact same
-    // gb.aggregate() call as every other request below -- one call
-    // guarantees identical group order across all results, with no
-    // assumption needed about repeated aggregate() calls on the same `gb`
-    // producing consistent ordering.
-    std::vector<int> na_prop_request_idx(num_aggs, -1);
-    // Each aggregation's OWN main request ends up at a DIFFERENT index than
-    // `i` as soon as any earlier aggregation needed an extra na-prop
-    // request interleaved into the same `requests` vector -- this tracks
-    // the true request-vector index of aggregation i's main result
-    // (`result_aggs[i]` would silently read a DIFFERENT aggregation's
-    // result once indices have shifted; this bug was caught by
-    // test-dplyr-summarise.R's mixed na.rm=TRUE/FALSE-on-the-same-column
-    // oracle test before this fix).
-    std::vector<int> main_request_idx(num_aggs, -1);
-    // Phase 6, task 6.2: any()/all()'s own "does this group have any null"
-    // companion request -- same interleave-into-the-shared-`requests`-
-    // vector discipline as na_prop_request_idx above (and for the exact
-    // same reason: `cudf::groupby::aggregate()`'s own docs explicitly warn
-    // that "successive aggregate() calls may return results in different
-    // orders", so any()/all()'s companion MUST be answered by this SAME
-    // call, never a separate one).
-    std::vector<int> any_all_null_request_idx(num_aggs, -1);
-    // Phase 6, task 4: entirely-NA-group na.rm=TRUE identity values -- same
-    // interleave-into-the-shared-`requests`-vector discipline as
-    // na_prop_request_idx above, holding each aggregation's own extra
-    // per-group "valid (non-null) count" COUNT(EXCLUDE) request (-1 if not
-    // needed). Mutually exclusive with na_prop_request_idx per aggregation
-    // (one requires na_rm==FALSE, the other na_rm==TRUE).
-    std::vector<int> identity_fix_request_idx(num_aggs, -1);
-    // Must outlive the gb.aggregate() call below (requests reference their views).
-    std::vector<std::unique_ptr<cudf::column>> null_indicator_cols;
-    QuantileRequests quantiles(num_aggs);
+        std::vector<cudf::groupby::aggregation_request> requests;
+        // Phase 6, task 6.1 (Fix A): for every aggregation needing na.rm=FALSE
+        // whole-group-null propagation, an extra is_null-indicator MAX request
+        // is appended to this SAME requests vector (na_prop_request_idx[i] ==
+        // its index, -1 if not needed) so it's answered by the exact same
+        // gb.aggregate() call as every other request below -- one call
+        // guarantees identical group order across all results, with no
+        // assumption needed about repeated aggregate() calls on the same `gb`
+        // producing consistent ordering.
+        std::vector<int> na_prop_request_idx(num_aggs, -1);
+        // Each aggregation's OWN main request ends up at a DIFFERENT index than
+        // `i` as soon as any earlier aggregation needed an extra na-prop
+        // request interleaved into the same `requests` vector -- this tracks
+        // the true request-vector index of aggregation i's main result
+        // (`result_aggs[i]` would silently read a DIFFERENT aggregation's
+        // result once indices have shifted; this bug was caught by
+        // test-dplyr-summarise.R's mixed na.rm=TRUE/FALSE-on-the-same-column
+        // oracle test before this fix).
+        std::vector<int> main_request_idx(num_aggs, -1);
+        // Phase 6, task 6.2: any()/all()'s own "does this group have any null"
+        // companion request -- same interleave-into-the-shared-`requests`-
+        // vector discipline as na_prop_request_idx above (and for the exact
+        // same reason: `cudf::groupby::aggregate()`'s own docs explicitly warn
+        // that "successive aggregate() calls may return results in different
+        // orders", so any()/all()'s companion MUST be answered by this SAME
+        // call, never a separate one).
+        std::vector<int> any_all_null_request_idx(num_aggs, -1);
+        // Phase 6, task 4: entirely-NA-group na.rm=TRUE identity values -- same
+        // interleave-into-the-shared-`requests`-vector discipline as
+        // na_prop_request_idx above, holding each aggregation's own extra
+        // per-group "valid (non-null) count" COUNT(EXCLUDE) request (-1 if not
+        // needed). Mutually exclusive with na_prop_request_idx per aggregation
+        // (one requires na_rm==FALSE, the other na_rm==TRUE).
+        std::vector<int> identity_fix_request_idx(num_aggs, -1);
+        // Must outlive the gb.aggregate() call below (requests reference their views).
+        std::vector<std::unique_ptr<cudf::column>> null_indicator_cols;
+        QuantileRequests quantiles(num_aggs);
 
-    for (int i = 0; i < num_aggs; ++i) {
-        std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
-        cudf::column_view value_view = eff[i];
-        AggKind kind = classify_agg(agg_type);
-        bool na_rm_flag = static_cast<bool>(na_rm[i]);
+        for (int i = 0; i < num_aggs; ++i) {
+            std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
+            cudf::column_view value_view = eff[i];
+            AggKind kind = classify_agg(agg_type);
+            bool na_rm_flag = static_cast<bool>(na_rm[i]);
 
-        // Phase 6, task 6.2: quantile()'s na.rm = FALSE (default) with an
-        // actual NA present is a hard ERROR in base R itself -- see the
-        // identical check (and its own docs) in the num_groups == 0 branch
-        // above.
-        if (kind == AggKind::QUANTILE || median_q[i]) {
-            bool has_na = !na_rm_flag && value_view.has_nulls();
-            if (kind == AggKind::QUANTILE && has_na) {
-                Rcpp::stop("quantile(): missing values and NaN's not allowed if na.rm = FALSE. "
-                           "Use na.rm = TRUE to ignore missing values.");
+            // Phase 6, task 6.2: quantile()'s na.rm = FALSE (default) with an
+            // actual NA present is a hard ERROR in base R itself -- see the
+            // identical check (and its own docs) in the num_groups == 0 branch
+            // above.
+            if (kind == AggKind::QUANTILE || median_q[i]) {
+                bool has_na = !na_rm_flag && value_view.has_nulls();
+                if (kind == AggKind::QUANTILE && has_na) {
+                    Rcpp::stop("quantile(): missing values and NaN's not allowed if na.rm = FALSE. "
+                               "Use na.rm = TRUE to ignore missing values.");
+                }
+                // F22: shares one request (one sort) per value column.
+                quantiles.add(requests, i, quantile_key(i), value_view,
+                              median_q[i] ? 0.5 : agg_extra[i]);
+                main_request_idx[i] = quantiles.slot[i].req;
+                // median()'s na.rm = FALSE: a group with an NA is NA (the usual
+                // na-prop step, applied to the quantile result below).
+                if (has_na) {
+                    auto null_indicator_bool = cudf::is_null(value_view);
+                    null_indicator_cols.push_back(cudf::cast(
+                        null_indicator_bool->view(), cudf::data_type{cudf::type_id::INT8}));
+                    cudf::groupby::aggregation_request null_req;
+                    null_req.values = null_indicator_cols.back()->view();
+                    null_req.aggregations.push_back(
+                        cudf::make_max_aggregation<cudf::groupby_aggregation>());
+                    na_prop_request_idx[i] = static_cast<int>(requests.size());
+                    requests.push_back(std::move(null_req));
+                }
+                continue;
             }
-            // F22: shares one request (one sort) per value column.
-            quantiles.add(requests, i, quantile_key(i), value_view,
-                          median_q[i] ? 0.5 : agg_extra[i]);
-            main_request_idx[i] = quantiles.slot[i].req;
-            // median()'s na.rm = FALSE: a group with an NA is NA (the usual
-            // na-prop step, applied to the quantile result below).
-            if (has_na) {
+
+            cudf::groupby::aggregation_request req;
+            req.values = value_view;
+            switch (kind) {
+                case AggKind::NUNIQUE: {
+                    cudf::null_policy np = na_rm_flag ? cudf::null_policy::EXCLUDE : cudf::null_policy::INCLUDE;
+                    req.aggregations.push_back(
+                        cudf::make_nunique_aggregation<cudf::groupby_aggregation>(np));
+                    break;
+                }
+                case AggKind::NTH_ELEMENT: {
+                    cudf::size_type n = nth_element_position(agg_type, agg_extra[i]);
+                    cudf::null_policy np = na_rm_flag ? cudf::null_policy::EXCLUDE : cudf::null_policy::INCLUDE;
+                    req.aggregations.push_back(
+                        cudf::make_nth_element_aggregation<cudf::groupby_aggregation>(n, np));
+                    break;
+                }
+                case AggKind::ANY:
+                    req.aggregations.push_back(cudf::make_max_aggregation<cudf::groupby_aggregation>());
+                    break;
+                case AggKind::ALL:
+                    req.aggregations.push_back(cudf::make_min_aggregation<cudf::groupby_aggregation>());
+                    break;
+                default:
+                    if (split_mean(i, value_view)) {
+                        add_mean_requests(req);
+                    } else {
+                        req.aggregations.push_back(get_groupby_agg(agg_type));
+                    }
+                    break;
+            }
+            main_request_idx[i] = static_cast<int>(requests.size());
+            requests.push_back(std::move(req));
+
+            if (kind == AggKind::ANY || kind == AggKind::ALL) {
+                if (!na_rm_flag) {
+                    auto null_indicator_bool = cudf::is_null(value_view);
+                    null_indicator_cols.push_back(cudf::cast(
+                        null_indicator_bool->view(), cudf::data_type{cudf::type_id::INT8}));
+
+                    cudf::groupby::aggregation_request null_req;
+                    null_req.values = null_indicator_cols.back()->view();
+                    null_req.aggregations.push_back(
+                        cudf::make_max_aggregation<cudf::groupby_aggregation>());
+                    any_all_null_request_idx[i] = static_cast<int>(requests.size());
+                    requests.push_back(std::move(null_req));
+                }
+                continue;  // any()/all() never need agg_na_propagates()'s own step
+            }
+
+            bool need_na_prop = kind == AggKind::SIMPLE && agg_na_propagates(agg_type) &&
+                !na_rm_flag && value_view.has_nulls();
+            if (need_na_prop) {
                 auto null_indicator_bool = cudf::is_null(value_view);
                 null_indicator_cols.push_back(cudf::cast(
                     null_indicator_bool->view(), cudf::data_type{cudf::type_id::INT8}));
+
                 cudf::groupby::aggregation_request null_req;
                 null_req.values = null_indicator_cols.back()->view();
                 null_req.aggregations.push_back(
                     cudf::make_max_aggregation<cudf::groupby_aggregation>());
                 na_prop_request_idx[i] = static_cast<int>(requests.size());
                 requests.push_back(std::move(null_req));
+                continue;
             }
-            continue;
+
+            // Phase 6, task 4: entirely-NA-group na.rm=TRUE identity values --
+            // see needs_identity_fix()'s own docs. Mutually exclusive with
+            // need_na_prop above (already `continue`d past if so).
+            if (kind == AggKind::SIMPLE &&
+                needs_identity_fix(agg_type, na_rm_flag, value_view, static_cast<bool>(identity[i]))) {
+                cudf::groupby::aggregation_request count_req;
+                count_req.values = value_view;
+                count_req.aggregations.push_back(
+                    cudf::make_count_aggregation<cudf::groupby_aggregation>(cudf::null_policy::EXCLUDE));
+                identity_fix_request_idx[i] = static_cast<int>(requests.size());
+                requests.push_back(std::move(count_req));
+            }
         }
 
-        cudf::groupby::aggregation_request req;
-        req.values = value_view;
-        switch (kind) {
-            case AggKind::NUNIQUE: {
-                cudf::null_policy np = na_rm_flag ? cudf::null_policy::EXCLUDE : cudf::null_policy::INCLUDE;
-                req.aggregations.push_back(
-                    cudf::make_nunique_aggregation<cudf::groupby_aggregation>(np));
-                break;
+        // #50: each group's first row, as the MIN of the row position. Not an
+        // aggregation of the call, so none of the loops over `num_aggs` below
+        // (identity, NaN propagation, narrowing) sees it.
+        std::unique_ptr<cudf::column> row_position;
+        int first_request_idx = -1;
+        if (small_first) {
+            row_position = cudf::sequence(view.num_rows(), cudf::numeric_scalar<int32_t>(0, true),
+                                          cudf::numeric_scalar<int32_t>(1, true));
+            cudf::groupby::aggregation_request first_req;
+            first_req.values = row_position->view();
+            first_req.aggregations.push_back(cudf::make_min_aggregation<cudf::groupby_aggregation>());
+            first_request_idx = static_cast<int>(requests.size());
+            requests.push_back(std::move(first_req));
+        }
+
+        auto [result_keys, result_aggs] = gb.aggregate(requests);
+        for (int i = 0; i < num_aggs; ++i) {
+            if (split_mean(i, eff[i])) finish_mean(result_aggs[main_request_idx[i]]);
+        }
+
+        // The quantile results leave their shared requests first, so everything
+        // below that reads `results[0]` of a request sees only its own aggregation.
+        std::vector<std::unique_ptr<cudf::column>> quantile_cols(num_aggs);
+        for (int i = 0; i < num_aggs; ++i) {
+            if (quantiles.has(i)) quantile_cols[i] = quantiles.take(result_aggs, i);
+        }
+
+        for (int i = 0; i < num_aggs; ++i) {
+            if (na_prop_request_idx[i] < 0) {
+                continue;
             }
-            case AggKind::NTH_ELEMENT: {
-                cudf::size_type n = nth_element_position(agg_type, agg_extra[i]);
-                cudf::null_policy np = na_rm_flag ? cudf::null_policy::EXCLUDE : cudf::null_policy::INCLUDE;
-                req.aggregations.push_back(
-                    cudf::make_nth_element_aggregation<cudf::groupby_aggregation>(n, np));
-                break;
+            auto& target = quantile_cols[i] ? quantile_cols[i]
+                                            : result_aggs[main_request_idx[i]].results[0];
+            target = null_out_groups_with_any_null(
+                std::move(target), result_aggs[na_prop_request_idx[i]].results[0]->view());
+        }
+
+        for (int i = 0; i < num_aggs; ++i) {
+            if (identity_fix_request_idx[i] < 0) {
+                continue;
             }
-            case AggKind::ANY:
-                req.aggregations.push_back(cudf::make_max_aggregation<cudf::groupby_aggregation>());
-                break;
-            case AggKind::ALL:
-                req.aggregations.push_back(cudf::make_min_aggregation<cudf::groupby_aggregation>());
-                break;
-            default:
-                if (split_mean(i, value_view)) {
-                    add_mean_requests(req);
-                } else {
-                    req.aggregations.push_back(get_groupby_agg(agg_type));
+            std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
+            auto& main_result = result_aggs[main_request_idx[i]].results[0];
+            if (minmax_has_identity(agg_type, agg_col(i).type().id())) {
+                cudf::column_view counts = result_aggs[identity_fix_request_idx[i]].results[0]->view();
+                identity_used[i] = apply_minmax_identity(main_result, agg_type == "min", &counts);
+                continue;
+            }
+            auto identity_scalar = make_identity_scalar(agg_type, main_result->view().type());
+            main_result = substitute_identity_for_empty_groups(
+                std::move(main_result), result_aggs[identity_fix_request_idx[i]].results[0]->view(),
+                *identity_scalar);
+        }
+
+        // F07: dplyr evaluates min()/max() once on an empty chunk when the input
+        // has no rows, so a 0-row grouped result types an INT32 min()/max()
+        // double (and warns) even though there is no group left to hold a value.
+        if (view.num_rows() == 0) {
+            for (int i = 0; i < num_aggs; ++i) {
+                std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
+                if (identity[i] &&
+                    minmax_has_identity(agg_type, agg_col(i).type().id())) {
+                    apply_minmax_identity(result_aggs[main_request_idx[i]].results[0],
+                                          agg_type == "min", nullptr);
+                    identity_used[i] = true;
                 }
-                break;
-        }
-        main_request_idx[i] = static_cast<int>(requests.size());
-        requests.push_back(std::move(req));
-
-        if (kind == AggKind::ANY || kind == AggKind::ALL) {
-            if (!na_rm_flag) {
-                auto null_indicator_bool = cudf::is_null(value_view);
-                null_indicator_cols.push_back(cudf::cast(
-                    null_indicator_bool->view(), cudf::data_type{cudf::type_id::INT8}));
-
-                cudf::groupby::aggregation_request null_req;
-                null_req.values = null_indicator_cols.back()->view();
-                null_req.aggregations.push_back(
-                    cudf::make_max_aggregation<cudf::groupby_aggregation>());
-                any_all_null_request_idx[i] = static_cast<int>(requests.size());
-                requests.push_back(std::move(null_req));
             }
-            continue;  // any()/all() never need agg_na_propagates()'s own step
         }
 
-        bool need_na_prop = kind == AggKind::SIMPLE && agg_na_propagates(agg_type) &&
-            !na_rm_flag && value_view.has_nulls();
-        if (need_na_prop) {
-            auto null_indicator_bool = cudf::is_null(value_view);
-            null_indicator_cols.push_back(cudf::cast(
-                null_indicator_bool->view(), cudf::data_type{cudf::type_id::INT8}));
-
-            cudf::groupby::aggregation_request null_req;
-            null_req.values = null_indicator_cols.back()->view();
-            null_req.aggregations.push_back(
-                cudf::make_max_aggregation<cudf::groupby_aggregation>());
-            na_prop_request_idx[i] = static_cast<int>(requests.size());
-            requests.push_back(std::move(null_req));
-            continue;
-        }
-
-        // Phase 6, task 4: entirely-NA-group na.rm=TRUE identity values --
-        // see needs_identity_fix()'s own docs. Mutually exclusive with
-        // need_na_prop above (already `continue`d past if so).
-        if (kind == AggKind::SIMPLE &&
-            needs_identity_fix(agg_type, na_rm_flag, value_view, static_cast<bool>(identity[i]))) {
-            cudf::groupby::aggregation_request count_req;
-            count_req.values = value_view;
-            count_req.aggregations.push_back(
-                cudf::make_count_aggregation<cudf::groupby_aggregation>(cudf::null_policy::EXCLUDE));
-            identity_fix_request_idx[i] = static_cast<int>(requests.size());
-            requests.push_back(std::move(count_req));
-        }
-    }
-
-    auto [result_keys, result_aggs] = gb.aggregate(requests);
-    for (int i = 0; i < num_aggs; ++i) {
-        if (split_mean(i, eff[i])) finish_mean(result_aggs[main_request_idx[i]]);
-    }
-
-    // The quantile results leave their shared requests first, so everything
-    // below that reads `results[0]` of a request sees only its own aggregation.
-    std::vector<std::unique_ptr<cudf::column>> quantile_cols(num_aggs);
-    for (int i = 0; i < num_aggs; ++i) {
-        if (quantiles.has(i)) quantile_cols[i] = quantiles.take(result_aggs, i);
-    }
-
-    for (int i = 0; i < num_aggs; ++i) {
-        if (na_prop_request_idx[i] < 0) {
-            continue;
-        }
-        auto& target = quantile_cols[i] ? quantile_cols[i]
-                                        : result_aggs[main_request_idx[i]].results[0];
-        target = null_out_groups_with_any_null(
-            std::move(target), result_aggs[na_prop_request_idx[i]].results[0]->view());
-    }
-
-    for (int i = 0; i < num_aggs; ++i) {
-        if (identity_fix_request_idx[i] < 0) {
-            continue;
-        }
-        std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
-        auto& main_result = result_aggs[main_request_idx[i]].results[0];
-        if (minmax_has_identity(agg_type, agg_col(i).type().id())) {
-            cudf::column_view counts = result_aggs[identity_fix_request_idx[i]].results[0]->view();
-            identity_used[i] = apply_minmax_identity(main_result, agg_type == "min", &counts);
-            continue;
-        }
-        auto identity_scalar = make_identity_scalar(agg_type, main_result->view().type());
-        main_result = substitute_identity_for_empty_groups(
-            std::move(main_result), result_aggs[identity_fix_request_idx[i]].results[0]->view(),
-            *identity_scalar);
-    }
-
-    // F07: dplyr evaluates min()/max() once on an empty chunk when the input
-    // has no rows, so a 0-row grouped result types an INT32 min()/max()
-    // double (and warns) even though there is no group left to hold a value.
-    if (view.num_rows() == 0) {
         for (int i = 0; i < num_aggs; ++i) {
             std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
-            if (identity[i] &&
-                minmax_has_identity(agg_type, agg_col(i).type().id())) {
-                apply_minmax_identity(result_aggs[main_request_idx[i]].results[0],
-                                      agg_type == "min", nullptr);
-                identity_used[i] = true;
+            AggKind kind = classify_agg(agg_type);
+            if (kind != AggKind::ANY && kind != AggKind::ALL) {
+                continue;
+            }
+            bool is_any = (kind == AggKind::ANY);
+            cudf::column_view reduced_view = result_aggs[main_request_idx[i]].results[0]->view();
+            if (any_all_null_request_idx[i] < 0) {
+                result_aggs[main_request_idx[i]].results[0] = combine_any_all(reduced_view, nullptr, is_any);
+            } else {
+                cudf::column_view has_null_view = result_aggs[any_all_null_request_idx[i]].results[0]->view();
+                result_aggs[main_request_idx[i]].results[0] =
+                    combine_any_all(reduced_view, &has_null_view, is_any);
             }
         }
-    }
 
-    for (int i = 0; i < num_aggs; ++i) {
-        std::string agg_type = Rcpp::as<std::string>(agg_types[i]);
-        AggKind kind = classify_agg(agg_type);
-        if (kind != AggKind::ANY && kind != AggKind::ALL) {
-            continue;
+        std::vector<std::unique_ptr<cudf::column>> result_columns;
+
+        for (int i = 0; i < result_keys->num_columns(); ++i) {
+            result_columns.push_back(std::make_unique<cudf::column>(result_keys->get_column(i)));
         }
-        bool is_any = (kind == AggKind::ANY);
-        cudf::column_view reduced_view = result_aggs[main_request_idx[i]].results[0]->view();
-        if (any_all_null_request_idx[i] < 0) {
-            result_aggs[main_request_idx[i]].results[0] = combine_any_all(reduced_view, nullptr, is_any);
-        } else {
-            cudf::column_view has_null_view = result_aggs[any_all_null_request_idx[i]].results[0]->view();
-            result_aggs[main_request_idx[i]].results[0] =
-                combine_any_all(reduced_view, &has_null_view, is_any);
+
+        for (int i = 0; i < num_aggs; ++i) {
+            result_columns.push_back(quantile_cols[i]
+                                         ? std::move(quantile_cols[i])
+                                         : std::move(result_aggs[main_request_idx[i]].results[0]));
+            finish_sum(i, result_columns.back());
+            ts_finish(i, result_columns.back());
         }
+        // last column: the first-row positions (small_first), dropped below
+        if (small_first) {
+            result_columns.push_back(std::move(result_aggs[first_request_idx].results[0]));
+        }
+
+        result = std::make_unique<cudf::table>(std::move(result_columns));
     }
-
-    std::vector<std::unique_ptr<cudf::column>> result_columns;
-
-    for (int i = 0; i < result_keys->num_columns(); ++i) {
-        result_columns.push_back(std::make_unique<cudf::column>(result_keys->get_column(i)));
+    // n-row scratch of the aggregation phase (casts, NaN-nulled copies) goes
+    // before the ordering pass, which needs the room (#50)
+    if (large_first) {
+        bool_minmax_cast.clear();
+        ts_float_cast.clear();
+        float_info.clear();
     }
-
-    for (int i = 0; i < num_aggs; ++i) {
-        result_columns.push_back(quantile_cols[i]
-                                     ? std::move(quantile_cols[i])
-                                     : std::move(result_aggs[main_request_idx[i]].results[0]));
-        finish_sum(i, result_columns.back());
-        ts_finish(i, result_columns.back());
-    }
-
-    auto result = std::make_unique<cudf::table>(std::move(result_columns));
 
     // F33: dplyr's group_by() order -- keys ascending, NA last. Bytewise
     // string compare is the C locale, factor codes give level order, BOOL8
     // gives FALSE < TRUE. The keys are distinct, so an unstable sort is
-    // fine. Done on the k-row result, before R permutes [keys, aggs].
-    if (sort_keys && result->num_rows() > 1) {
-        cudf::table_view key_view = result->view().select(
-            [&] { std::vector<cudf::size_type> k(num_groups); std::iota(k.begin(), k.end(), 0); return k; }());
+    // fine. Done on the k-row result, before R permutes [keys, aggs]. A `.by =`
+    // summary (#50) never sorts its keys: its order is first appearance.
+    const cudf::size_type k = result->num_rows();
+    std::vector<cudf::size_type> key_cols(num_groups);
+    std::iota(key_cols.begin(), key_cols.end(), 0);
+    if (!first_order && k > 1) {
         std::vector<cudf::order> order(num_groups, cudf::order::ASCENDING);
         std::vector<cudf::null_order> nulls(num_groups, cudf::null_order::AFTER);
-        auto idx = cudf::sorted_order(key_view, order, nulls);
+        auto idx = cudf::sorted_order(result->view().select(key_cols), order, nulls);
         result = cudf::gather(result->view(), idx->view(),
+                              cudf::out_of_bounds_policy::DONT_CHECK);
+    }
+
+    // #50, small input: `result` carries the first-row position as its last
+    // column. Sort by it (the positions are distinct) and drop it.
+    if (small_first) {
+        const cudf::size_type width = result->num_columns() - 1;
+        std::vector<cudf::size_type> kept(width);
+        std::iota(kept.begin(), kept.end(), 0);
+        if (k > 1) {
+            auto idx = cudf::sorted_order(cudf::table_view({result->view().column(width)}));
+            result = cudf::gather(result->view().select(kept), idx->view(),
+                                  cudf::out_of_bounds_policy::DONT_CHECK);
+        } else {
+            auto cols = result->release();
+            cols.pop_back();
+            result = std::make_unique<cudf::table>(std::move(cols));
+        }
+    }
+
+    // #50, large input: dplyr's `.by =` order is first appearance.
+    // first_appearance_order() maps the input rows to the result's rows (still
+    // in the groupby's own order) and gives the result rows sorted by their
+    // group's first row. Everything it allocates is freed before this gather,
+    // whose peak (two copies of the result) is the F33 reorder's.
+    if (large_first && k > 1) {
+        std::unique_ptr<cudf::column> order;
+        {
+            std::vector<cudf::column_view> all_keys;
+            for (int i = 0; i < num_groups; ++i) all_keys.push_back(view.column(group_indices[i]));
+            order = first_appearance_order(cudf::table_view(all_keys), result->view().select(key_cols));
+        }
+        result = cudf::gather(result->view(), order->view(),
                               cudf::out_of_bounds_policy::DONT_CHECK);
     }
 

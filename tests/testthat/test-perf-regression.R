@@ -227,6 +227,30 @@ test_that("perf: summarise_grouped_lazy", {
   }, calibration = "kernel")
 })
 
+# #50: summarise(.by =), groups in order of first appearance. Same data and
+# dots as summarise_grouped_*.
+test_that("perf: summarise_by_eager", {
+  skip_if_no_gpu()
+  gpu_df <- tbl_gpu(perf_big_df, lazy = FALSE)
+
+  expect_no_perf_regression("summarise_by_eager", function() {
+    gpu_df |>
+      dplyr::summarise(m = mean(x), s = sum(y), n = n(), .by = grp) |>
+      collect()
+  }, calibration = "kernel")
+})
+
+test_that("perf: summarise_by_lazy", {
+  skip_if_no_gpu()
+  gpu_df <- tbl_gpu(perf_big_df, lazy = TRUE)
+
+  expect_no_perf_regression("summarise_by_lazy", function() {
+    gpu_df |>
+      dplyr::summarise(m = mean(x), s = sum(y), n = n(), .by = grp) |>
+      collect()
+  }, calibration = "kernel")
+})
+
 # F74: summarise() on a `.drop = FALSE` table with fixed group keys (a lazy
 # semi_join() empties half of the 2e4 character-key groups). The cost over a
 # plain grouped summarise is the observed-key download/match and one gather;
