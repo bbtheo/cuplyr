@@ -1,4 +1,4 @@
-# #50: summarise(.by =) memory and speed parity with
+# #50: summarise(.by =) memory and speed against
 # group_by() |> summarise(.groups = "drop"), and a cheap ungrouped row_number().
 #
 # Memory is measured with gpu_alloc_tracking() (F56): an RMM statistics adaptor
@@ -7,15 +7,18 @@
 # are exact and do not depend on other processes, so the bounds are tight.
 #
 # Before #50 the `.by` form added a whole-table `row_number()` column through
-# the window machinery: its peak was the group_by form's plus one or two INT32
-# columns (4-8 bytes/row), it allocated about six INT32 columns more in total,
-# and it ran four verb calls (2.6x the group_by form's time at 1e3-1e6 rows).
-# A row-position MIN() inside the groupby still costs 8 bytes/row at the
-# aggregation peak (the position column plus libcudf's per-row intermediate),
-# while finding each group's first row in a pass of its own (a hash
-# distinct) peaks below the groupby itself. So the contract is:
-#   peak(.by) <= peak(group_by) + 1 byte/row
-#   time(.by) <= 1.3 x time(group_by)
+# the window machinery, then ran a grouped summarise with a `min()` of it, an
+# arrange() and a select(): four verb calls, 2-3x the group_by form's time up to
+# 1e6 rows and 1.2-2.3x at 1e7 with numeric keys. Its peak was the group_by
+# form's plus 4 bytes/row on the issue's pipelines (1.14-1.20x) and up to about
+# 10 bytes/row on narrow summaries.
+#
+# The contract (decided for #50): the first-appearance position is a MIN over a
+# row position inside the one groupby, which costs at most two INT32 columns
+# (the position and libcudf's per-row MIN intermediate) at the peak:
+#   peak(.by) <= 1.2 x peak(group_by)        on the issue's pipelines
+#   peak(.by) <= peak(group_by) + 8 bytes/row on any summary
+#   time(.by) no worse than before #50, and <= 1.3 x group_by at 1e3-1e6 rows
 # and an ungrouped bare row_number() allocates about its own INT32 column.
 
 mem50_n <- 2e6
@@ -33,9 +36,27 @@ mem50_df <- function(n) {
     s2 = sprintf("key-%09d", sample(rep(seq_len(n / 2), 2))),
     l2 = sprintf("customer-account-identifier-%012d", sample(rep(seq_len(n / 2), 2))),
     s2p = sprintf("key-%09d", sample(c(rep(seq_len(n / 2 - 1000), 2), n / 2 - 1000 + seq_len(2000)))),
-    # narrow keys: all-unique INT32, and all-unique (INT32, small INT32) pairs
+    # narrow keys: all-unique INT32, and all-unique (INT32, small INT32) and
+    # (INT32, logical) pairs
     iu = sample.int(n),
     ib = sample.int(3L, n, replace = TRUE),
+    lb = sample(c(TRUE, FALSE), n, replace = TRUE),
+    stringsAsFactors = FALSE
+  )
+}
+
+# the issue's table: 8 columns (4 integer, 2 double, 2 character), z 5% NA
+mem50_task_df <- function(n) {
+  set.seed(20261114L)
+  z <- sample.int(100L, n, replace = TRUE)
+  z[stats::runif(n) < 0.05] <- NA_integer_
+  data.frame(
+    id = seq_len(n),
+    g_low = sprintf("k%02d", sample.int(10L, n, replace = TRUE)),
+    g_high = sample.int(max(1L, as.integer(n) %/% 100L), n, replace = TRUE),
+    g_skew = sample.int(10000L, n, replace = TRUE, prob = 1 / seq_len(10000L)^1.1),
+    x = stats::rnorm(n), y = stats::runif(n), z = z,
+    s = sample(sprintf("s%04d", seq_len(1000L) * 7L), n, replace = TRUE),
     stringsAsFactors = FALSE
   )
 }
@@ -54,14 +75,61 @@ mem50_measure <- function(gt, pipeline) {
   list(peak = tr$peak_bytes, allocated = tr$allocated_bytes)
 }
 
-test_that("summarise(.by) peaks no higher than group_by() |> summarise()", {
+test_that("summarise(.by) on the issue's pipelines peaks within 1.2x of group_by()", {
+  skip_if_no_gpu()
+  testthat::skip_on_ci()
+  skip_if_insufficient_gpu_memory(512 * 1024^2)
+
+  df <- mem50_task_df(mem50_n)
+  cases <- list(
+    lowcard = list(
+      gb = function(d) d |> dplyr::group_by(g_low) |>
+        dplyr::summarise(n = dplyr::n(), mean_x = mean(x), sum_y = sum(y), .groups = "drop"),
+      by = function(d) d |> dplyr::summarise(n = dplyr::n(), mean_x = mean(x), sum_y = sum(y), .by = g_low)
+    ),
+    highcard = list(
+      gb = function(d) d |> dplyr::group_by(g_high) |>
+        dplyr::summarise(n = dplyr::n(), mean_x = mean(x), .groups = "drop"),
+      by = function(d) d |> dplyr::summarise(n = dplyr::n(), mean_x = mean(x), .by = g_high)
+    ),
+    skew = list(
+      gb = function(d) d |> dplyr::group_by(g_skew) |>
+        dplyr::summarise(n = dplyr::n(), sum_x = sum(x), .groups = "drop"),
+      by = function(d) d |> dplyr::summarise(n = dplyr::n(), sum_x = sum(x), .by = g_skew)
+    ),
+    across = list(
+      gb = function(d) d |> dplyr::group_by(g_low) |>
+        dplyr::summarise(dplyr::across(c(x, y), list(mean = mean, sd = sd)), .groups = "drop"),
+      by = function(d) d |> dplyr::summarise(dplyr::across(c(x, y), list(mean = mean, sd = sd)), .by = g_low)
+    ),
+    na = list(
+      gb = function(d) d |> dplyr::group_by(g_low) |>
+        dplyr::summarise(mean_z = mean(z, na.rm = TRUE), n_na = sum(is.na(z)), .groups = "drop"),
+      by = function(d) d |> dplyr::summarise(mean_z = mean(z, na.rm = TRUE), n_na = sum(is.na(z)), .by = g_low)
+    )
+  )
+  for (lazy in c(FALSE, TRUE)) {
+    gt <- compute(tbl_gpu(df, lazy = lazy))
+    for (nm in names(cases)) {
+      gb <- mem50_measure(gt, cases[[nm]]$gb)
+      by <- mem50_measure(gt, cases[[nm]]$by)
+      expect_lte(
+        by$peak, 1.2 * gb$peak + mem50_slack,
+        label = sprintf("%s (%s) .by peak %.1f MiB (group_by peak %.1f MiB, ratio %.3f)",
+                        nm, if (lazy) "lazy" else "eager", by$peak / 2^20, gb$peak / 2^20, by$peak / gb$peak)
+      )
+    }
+    rm(gt)
+  }
+})
+
+test_that("summarise(.by) peaks at most two INT32 columns above group_by()", {
   skip_if_no_gpu()
   testthat::skip_on_ci()
   skip_if_insufficient_gpu_memory(512 * 1024^2)
 
   n <- mem50_n
   df <- mem50_df(n)
-  per_row <- 4 * n
   cases <- list(
     int_key = list(
       gb = function(d) d |> dplyr::group_by(k) |>
@@ -78,7 +146,7 @@ test_that("summarise(.by) peaks no higher than group_by() |> summarise()", {
         dplyr::summarise(s_y = sum(y), .groups = "drop"),
       by = function(d) d |> dplyr::summarise(s_y = sum(y), .by = c(s, k))
     ),
-    # every row its own string group: the reorder of the k-row result is the peak
+    # every row its own group: the reorder of the k-row result is the peak
     unique_strings = list(
       gb = function(d) d |> dplyr::group_by(su) |>
         dplyr::summarise(s_x = sum(x), .groups = "drop"),
@@ -94,6 +162,11 @@ test_that("summarise(.by) peaks no higher than group_by() |> summarise()", {
         dplyr::summarise(s_x = sum(x), .groups = "drop"),
       by = function(d) d |> dplyr::summarise(s_x = sum(x), .by = l2)
     ),
+    half_plus_strings = list(
+      gb = function(d) d |> dplyr::group_by(s2p) |>
+        dplyr::summarise(s_x = sum(x), .groups = "drop"),
+      by = function(d) d |> dplyr::summarise(s_x = sum(x), .by = s2p)
+    ),
     # a count over narrow keys keeps the groupby's own peak low
     unique_pairs_count = list(
       gb = function(d) d |> dplyr::group_by(iu, ib) |>
@@ -105,10 +178,10 @@ test_that("summarise(.by) peaks no higher than group_by() |> summarise()", {
         dplyr::summarise(n = dplyr::n(), .groups = "drop"),
       by = function(d) d |> dplyr::summarise(n = dplyr::n(), .by = iu)
     ),
-    half_plus_strings = list(
-      gb = function(d) d |> dplyr::group_by(s2p) |>
-        dplyr::summarise(s_x = sum(x), .groups = "drop"),
-      by = function(d) d |> dplyr::summarise(s_x = sum(x), .by = s2p)
+    unique_logical_pairs_count = list(
+      gb = function(d) d |> dplyr::group_by(iu, lb) |>
+        dplyr::summarise(n = dplyr::n(), .groups = "drop"),
+      by = function(d) d |> dplyr::summarise(n = dplyr::n(), .by = c(iu, lb))
     )
   )
   for (lazy in c(FALSE, TRUE)) {
@@ -118,9 +191,9 @@ test_that("summarise(.by) peaks no higher than group_by() |> summarise()", {
       gb <- mem50_measure(gt, cases[[nm]]$gb)
       by <- mem50_measure(gt, cases[[nm]]$by)
       expect_lte(
-        by$peak, gb$peak + 0.25 * per_row + mem50_slack,
-        label = sprintf("%s .by peak %.1f MiB (group_by peak %.1f MiB; allocated %.1f vs %.1f MiB)",
-                        label, by$peak / 2^20, gb$peak / 2^20, by$allocated / 2^20, gb$allocated / 2^20)
+        by$peak, gb$peak + 8 * n + mem50_slack,
+        label = sprintf("%s .by peak %.1f MiB (group_by peak %.1f MiB, +%.2f B/row)",
+                        label, by$peak / 2^20, gb$peak / 2^20, (by$peak - gb$peak) / n)
       )
     }
     rm(gt)
@@ -305,5 +378,64 @@ test_that("summarise(.by) with high-cardinality string keys costs less than grou
       )
     }
     rm(gt)
+  }
+})
+
+test_that("summarise(.by) with shuffled keys is no slower than before #50", {
+  skip_if_no_gpu()
+  testthat::skip_on_ci()
+  skip_if_insufficient_gpu_memory(1024^3)
+
+  # `bound` is the .by / group_by time ratio of the row-number desugar before
+  # #50, measured on main (af9714b) at 1e7 rows with these keys, eager, plus 5%
+  # for timing noise. The group_by() form is the same code on both builds, so
+  # a ratio above it means `.by` got slower. A first-appearance pass that hashes
+  # every key a second time shows up as string keys over this bound.
+  n <- 1e7
+  specs <- list(
+    i4 = list(make = function(n) sample.int(n / 4, n, replace = TRUE), bound = 1.42),
+    iu = list(make = function(n) sample.int(n), bound = 1.19),
+    d4 = list(make = function(n) sample.int(n / 4, n, replace = TRUE) / 7, bound = 0.88),
+    s4 = list(make = function(n) sprintf("key-%08d", sample.int(n / 4, n, replace = TRUE)), bound = 0.25),
+    L4 = list(make = function(n) sprintf("customer-account-identifier-%012d", sample.int(n / 4, n, replace = TRUE)),
+              bound = 0.09)
+  )
+  for (key in names(specs)) {
+    set.seed(5600 + match(key, names(specs)))
+    df <- data.frame(k = specs[[key]]$make(n), x = runif(n), y = runif(n), stringsAsFactors = FALSE)
+    gt <- tbl_gpu(df, lazy = FALSE)
+    rm(df)
+    invisible(gc())
+    fns <- list(
+      gb = function() {
+        r <- gt |> dplyr::group_by(k) |>
+          dplyr::summarise(n = dplyr::n(), m = mean(x), sy = sum(y), .groups = "drop")
+        gpu_sync()
+        r
+      },
+      by = function() {
+        r <- gt |> dplyr::summarise(n = dplyr::n(), m = mean(x), sy = sum(y), .by = k)
+        gpu_sync()
+        r
+      }
+    )
+    bound <- 1.05 * specs[[key]]$bound
+    attempts <- timing_retry(
+      measure = function() {
+        m <- timing_medians(fns, samples = 7L)
+        m[["by"]] / m[["gb"]]
+      },
+      ok = function(v) v <= bound,
+      retry_if = function(v) v <= 2 * bound
+    )
+    ratio <- attempts[[length(attempts)]]
+    expect_lte(
+      ratio, bound,
+      label = sprintf("shuffled key %s: .by / group_by time ratio (attempts: %s)",
+                      key, paste(sprintf("%.3f", unlist(attempts)), collapse = ", "))
+    )
+    rm(gt)
+    invisible(gc())
+    gpu_gc(verbose = FALSE)
   }
 })
