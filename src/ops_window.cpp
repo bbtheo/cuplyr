@@ -394,6 +394,30 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
             specs.push_back(parse_window_spec(specs_r[i]));
         }
 
+        // #50: in a frame of an ungrouped node with no order columns, a bare
+        // row_number() is just 1..n: a sequence, with no zero-key column, sort
+        // or groupby. A frame made only of those skips the machinery below; in
+        // a mixed frame the other specs keep it and the sequences are placed
+        // beside them (no perm, so rows line up). Grouped or ordered
+        // row_number() is unchanged.
+        const bool plain_frame = group_indices.size() == 0 && order_idx_r.size() == 0;
+        auto is_plain_row_number = [&](const WindowSpec& sp) {
+            return plain_frame && sp.fn == "row_number" && !sp.has_value;
+        };
+        auto row_number_sequence = [&](const WindowSpec& sp) {
+            auto seq = cudf::sequence(nrow, cudf::numeric_scalar<int32_t>(1, true),
+                                      cudf::numeric_scalar<int32_t>(1, true));
+            cudf::data_type want = expr_type_from_str(sp.out_type);
+            if (want.id() != seq->type().id()) seq = cudf::cast(seq->view(), want);
+            return seq;
+        };
+        if (std::all_of(specs.begin(), specs.end(), is_plain_row_number)) {
+            for (const auto& sp : specs) {
+                appended[static_cast<size_t>(sp.out_pos)] = row_number_sequence(sp);
+            }
+            continue;
+        }
+
         // --- Step 1 (partial): assemble this frame's needed column set:
         // [group cols] ++ [order cols] ++ [unique value cols]. ---
         std::vector<cudf::column_view> group_col_views;
@@ -542,7 +566,9 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
         for (size_t i = 0; i < specs.size(); ++i) {
             const WindowSpec& sp = specs[i];
             const std::string& fn = sp.fn;
-            if (fn == "row_number" && !sp.has_value) {
+            if (is_plain_row_number(sp)) {
+                continue;  // a sequence, placed with the results below
+            } else if (fn == "row_number" && !sp.has_value) {
                 scan_spec_indices.push_back(static_cast<int>(i));
             } else if (is_cum_scan_fn(fn)) {
                 scan_spec_indices.push_back(static_cast<int>(i));
@@ -1200,6 +1226,10 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                     spec_results[static_cast<size_t>(kv.second[k])] = std::move(cols[k]);
                 }
             }
+        }
+
+        for (size_t i = 0; i < specs.size(); ++i) {
+            if (is_plain_row_number(specs[i])) spec_results[i] = row_number_sequence(specs[i]);
         }
 
         // Cast each result to its spec's DECLARED output type if it

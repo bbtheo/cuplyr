@@ -94,10 +94,9 @@ col_index <- function(x, name) {
 # its close on the call's frame (gpu_call_scope_ensure()). Each step's tables
 # that the step returns go to the call's scope. When the call returns, every
 # one of them that is not reachable from its return value is released: the
-# step tables of a multi-step verb (a window filter's stages, summarise(.by)'s
-# row ids, the keys cur_group_id() joins on, a lazy input that slice_sample()
-# or bind_rows() computes) are freed whichever verb runs them, with no code in
-# the verb. What a user-level call returns is the user's: no enclosing call's
+# step tables of a multi-step verb (a window filter's stages, the keys
+# cur_group_id() joins on, a lazy input that slice_sample() or bind_rows()
+# computes) are freed whichever verb runs them, with no code in the verb. What a user-level call returns is the user's: no enclosing call's
 # scope ever sees it, so a table user code builds (and maybe caches) while a
 # verb evaluates its arguments or predicates stays valid. When in doubt the
 # rule errs towards the user: a caller cuplyr can't identify (code evaluated

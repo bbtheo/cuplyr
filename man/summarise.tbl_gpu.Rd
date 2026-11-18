@@ -277,12 +277,10 @@ Verified empirically against dplyr 1.2.1: \code{summarise(.by=)} emits one row
 per distinct \code{.by} combination in the order that combination FIRST
 appears in \code{.data} -- e.g. \code{summarise(tibble(g = c("b","a","b")), n = n(), .by = g)} returns \code{g} in the order \code{c("b", "a")}, not \code{c("a", "b")}.
 This differs from \code{group_by(g) |> summarise(...)}, whose groups are
-sorted. Implemented via a
-desugar (\code{summarise_by_desugar()}): an ungrouped \code{row_number()} marks
-each row's original position, a grouped summarise computes the user's
-aggregations plus \code{min()} of that position per group, and the result is
-sorted by that minimum (each group's first-appearance position) before
-the helper column is dropped.
+sorted. The GPU does one grouped summarise and puts the groups in
+first-appearance order inside it (\code{summarise_by_desugar()}): no row-number
+column and no extra verbs. Its peak GPU memory is that of the \code{group_by()}
+form plus up to 12 bytes a row.
 }
 }
 \examples{
