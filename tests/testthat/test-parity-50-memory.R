@@ -16,9 +16,10 @@
 # The contract (decided for #50): the first-appearance position is a MIN over a
 # row position inside the one groupby. At libcudf's hash-groupby peak that is
 # at most three INT32 columns: the n-row position, the n-row sparse MIN
-# intermediate and its k-row dense result (12 bytes/row when every row is its
-# own group, 10 with n/2 groups; measured, and no more than the .by peak before
-# #50 on any of these shapes):
+# intermediate and its k-row dense result. Measured over group_by: about 4
+# bytes/row on the issue's pipelines, about 8 on a one-aggregation summary with
+# many groups, up to 12 with all-unique keys and logical key columns; never
+# more than the .by peak before #50 on any of these shapes:
 #   peak(.by) <= 1.2 x peak(group_by)         on the issue's pipelines
 #   peak(.by) <= peak(group_by) + 12 bytes/row on any summary
 #   time(.by) no worse than before #50, and <= 1.3 x group_by at 1e3-1e6 rows
