@@ -1,14 +1,15 @@
 # cuplyr (development version)
 
 * `summarise(.by =)` runs as one grouped summarise that finds each group's
-  first row inside the groupby, with no row-number column and no extra steps.
-  It is faster than before: with numeric keys it now takes 1.0-1.4 times as
-  long as `group_by() |> summarise()`, where it took 1.2-3.2 times as long.
-  Its peak GPU memory is no higher than before: that of the `group_by()` form
-  plus about 4 bytes a row, or up to 12 when nearly every row is its own group.
-  `group_by() |> summarise()` with many groups now needs less GPU memory at its
-  peak, and an ungrouped `row_number()` in `mutate()` allocates one integer
-  column instead of six (#50).
+  first row inside the groupby, with no row-number column and no extra steps,
+  and is faster than before: with numeric keys it takes at most about 1.4 times
+  as long as `group_by() |> summarise()`, where it took up to 3.2 times as
+  long. Its peak GPU memory is no higher than before: that of the `group_by()`
+  form plus 4 to 12 bytes a row (about 4 for summaries like those in #50, about
+  8 for a single `sum()` or `n()` with many groups, up to 12 when nearly every
+  row is its own group). `group_by() |> summarise()` with many groups now needs
+  less GPU memory at its peak, and an ungrouped `row_number()` in `mutate()`
+  allocates one integer column instead of six (#50).
 
 * The examples on the help pages of the dplyr verbs attach dplyr, so they run
   with `example()` and render on the website (#39).

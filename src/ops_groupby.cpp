@@ -22,7 +22,6 @@
 #include <rmm/device_buffer.hpp>
 #include <rmm/mr/per_device_resource.hpp>
 
-#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -596,7 +595,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     const bool first_order = group_order == "first";
     // #50: a `.by =` summary's groups come in first-appearance order: each
     // group's first row rides in the one groupby as the MIN of a row sequence.
-    const bool small_first = first_order && view.num_rows() > 0;
+    const bool order_by_first_row = first_order && view.num_rows() > 0;
 
     int num_aggs = agg_col_indices.size();
     int num_groups = group_indices.size();
@@ -1163,7 +1162,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         // (identity, NaN propagation, narrowing) sees it.
         std::unique_ptr<cudf::column> row_position;
         int first_request_idx = -1;
-        if (small_first) {
+        if (order_by_first_row) {
             row_position = cudf::sequence(view.num_rows(), cudf::numeric_scalar<int32_t>(0, true),
                                           cudf::numeric_scalar<int32_t>(1, true));
             cudf::groupby::aggregation_request first_req;
@@ -1174,7 +1173,8 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
         }
 
         auto [result_keys, result_aggs] = gb.aggregate(requests);
-        // the n-row sequence is not needed again (`requests` only views it)
+        // the n-row sequence is not needed again. `requests` still holds a view
+        // of the freed column: it must not be read after this line.
         row_position.reset();
         for (int i = 0; i < num_aggs; ++i) {
             if (split_mean(i, eff[i])) finish_mean(result_aggs[main_request_idx[i]]);
@@ -1259,8 +1259,8 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
             finish_sum(i, result_columns.back());
             ts_finish(i, result_columns.back());
         }
-        // last column: the first-row positions (small_first), dropped below
-        if (small_first) {
+        // last column: the first-row positions (order_by_first_row), dropped below
+        if (order_by_first_row) {
             result_columns.push_back(std::move(result_aggs[first_request_idx].results[0]));
         }
 
@@ -1284,7 +1284,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
 
     // #50: `result` carries the first-row position as its last column. Sort by
     // it (the positions are distinct), drop it, and gather keys + aggs only.
-    if (small_first) {
+    if (order_by_first_row) {
         auto cols = result->release();
         std::unique_ptr<cudf::column> idx;
         if (cols[0]->size() > 1) {

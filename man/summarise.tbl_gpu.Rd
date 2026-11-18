@@ -279,8 +279,8 @@ appears in \code{.data} -- e.g. \code{summarise(tibble(g = c("b","a","b")), n = 
 This differs from \code{group_by(g) |> summarise(...)}, whose groups are
 sorted. The GPU does one grouped summarise and puts the groups in
 first-appearance order inside it (\code{summarise_by_desugar()}): no row-number
-column and no extra verbs, and about the GPU memory at its peak that the
-\code{group_by()} form needs.
+column and no extra verbs. Its peak GPU memory is that of the \code{group_by()}
+form plus 4 to 12 bytes a row.
 }
 }
 \examples{

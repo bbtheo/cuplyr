@@ -111,8 +111,8 @@ test_that("a large summarise(.by) on sorted or clustered keys keeps first-appear
   }
   by50l_expect(sorted, function(d) dplyr::summarise(d, n = dplyr::n(), .by = c(s, k)))
 
-  # runs of a few thousand rows that revisit earlier groups: the first rows are
-  # only some of the run starts
+  # runs of a few thousand rows that revisit earlier groups, so a group's first
+  # row is not the start of its latest run
   runs <- rep(rep(c("r3", "r1", "r3", "r2", NA, "r1", "r4", "r2"), each = 2000L), length.out = n)
   df <- data.frame(s = runs, k = rep(c(2L, 2L, 1L, NA, 1L, 3L, 3L, 2L), each = 1999L, length.out = n),
                    x = runif(n), stringsAsFactors = FALSE)
@@ -254,5 +254,36 @@ test_that("a large summarise(.by) on short runs finds groups that first appear l
   df <- data.frame(rs = rep(rl, each = 10L), ip = ip, x = runif(n), stringsAsFactors = FALSE)
   by50l_expect(df, function(d) dplyr::summarise(d, n = dplyr::n(), s = sum(x), .by = rs))
   by50l_expect(df, function(d) dplyr::summarise(d, n = dplyr::n(), .by = c(rs, ip)))
+  by50l_release()
+})
+
+test_that("summarise(.by) after arrange, join and filter keeps first-appearance order with sort-path reducers", {
+  skip_if_no_gpu()
+  # thousands of groups; the rows reach the summarise reordered by arrange(desc(x))
+  # and a join, so first appearance is not input order. `min(y)` is an INT32
+  # min(), which makes the summarise run at once even in a lazy plan.
+  set.seed(501)
+  n <- 2e5
+  df <- data.frame(
+    g = sample(sprintf("g%04d", 1:5000), n, replace = TRUE),
+    k = sample.int(50L, n, replace = TRUE),
+    x = runif(n),
+    y = sample.int(100L, n, replace = TRUE),
+    stringsAsFactors = FALSE
+  )
+  lk <- data.frame(k = 1:50, w = rep(1:3, length.out = 50))
+  prep <- function(d) {
+    y <- if (inherits(d, "tbl_gpu")) tbl_gpu(lk, lazy = identical(d$exec_mode, "lazy")) else lk
+    d |> dplyr::arrange(dplyr::desc(x)) |> dplyr::left_join(y, by = "k") |>
+      dplyr::filter(w != 2L)
+  }
+  by50l_expect(df, function(d) {
+    dplyr::summarise(prep(d), n = dplyr::n(), lo = min(y), nd = dplyr::n_distinct(k),
+                     md = median(x), nt = dplyr::nth(x, 2), .by = c(g, w))
+  })
+  by50l_expect(df, function(d) {
+    dplyr::summarise(prep(d), n = dplyr::n(), hi = max(x), nd = dplyr::n_distinct(k),
+                     md = median(x), nt = dplyr::nth(x, 2), .by = c(g, w))
+  })
   by50l_release()
 })

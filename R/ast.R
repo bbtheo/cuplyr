@@ -599,9 +599,10 @@ infer_mutate_output_type <- function(op, input_types, scalar) {
 #'   `min()`/`max()` over an INT32/FLOAT64 column apply base R's empty-vector
 #'   identity (`Inf`/`-Inf`, with dplyr's warning) for an empty group, which
 #'   promotes an INT32 result column to FLOAT64 when it happens; see
-#'   `gpu_summarise()` (`src/ops_groupby.cpp`). `FALSE` is for an internal helper
-#'   aggregation that must stay INT32 and never warn (none is in use). Only meaningful for `min`/`max` over
-#'   INT32/FLOAT64; stored as `FALSE` for everything else.
+#'   `gpu_summarise()` (`src/ops_groupby.cpp`). `FALSE` would keep the result
+#'   INT32 and never warn, but nothing calls it with `FALSE` today. Only
+#'   meaningful for `min`/`max` over INT32/FLOAT64; stored as `FALSE` for
+#'   everything else.
 #' @return An aggregation list structure
 #' @keywords internal
 make_aggregation <- function(output_col, input_col, fn, input_type = NULL, na_rm = FALSE,
