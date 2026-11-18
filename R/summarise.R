@@ -1373,8 +1373,10 @@ summarise_ts_ok_fns <- c("min", "max", "mean", "median")
 #   the caller has already built it
 # @param group_order `"keys"` (rows sorted by the group keys, F33) or `"first"`
 #   (groups in order of first appearance, what `.by =` gives; #50)
-# @param notice_data The table a plan-break notice counts the pending steps of:
-#   `.data`, or the user's input when `.data` holds steps of summarise()'s own
+# @param notice_data The table a plan-break notice counts the pending steps of.
+#   It is `.data` by default; a caller whose `.data` holds helper steps of its
+#   own would pass the user's input instead, so the notice counts only the
+#   user's steps. No caller does so today.
 # @return A new tbl_gpu, grouped by `retained_groups` (see
 #   propagate_groups(), R/execute.R, which reads `node$result_groups`)
 # @keywords internal
