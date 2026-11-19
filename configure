@@ -403,8 +403,8 @@ read_cudf_version() {
     minor=$(sed -n 's/^[[:space:]]*#[[:space:]]*define[[:space:]][[:space:]]*CUDF_VERSION_MINOR[[:space:]][[:space:]]*\([0-9][0-9]*\).*/\1/p' "$header" | head -n1)
     patch=$(sed -n 's/^[[:space:]]*#[[:space:]]*define[[:space:]][[:space:]]*CUDF_VERSION_PATCH[[:space:]][[:space:]]*\([0-9][0-9]*\).*/\1/p' "$header" | head -n1)
     [ -n "$major" ] && [ -n "$minor" ] || return 1
-    # 10# keeps zero-padded values such as 08 from being read as octal
-    # zero-padded minor as RAPIDS writes it (26.02.0), not 26.2.0
+    # 10# reads zero-padded values such as 08 as decimal; %02d writes the
+    # minor as RAPIDS does (26.02.0, not 26.2.0)
     printf '%d.%02d.%d\n' "$((10#$major))" "$((10#$minor))" "$((10#${patch:-0}))"
 }
 
@@ -421,31 +421,36 @@ if CUDF_VERSION=$(read_cudf_version "$CUDF_VERSION_HEADER"); then
        [ "$(series_key "$CUDF_SERIES")" -lt "$(series_key "$CUDF_MAX_VERSION")" ]; then
         echo "Found libcudf version: $CUDF_VERSION"
     else
-        echo "ERROR: libcudf $CUDF_VERSION found at $CUDF_PREFIX, but cuplyr supports"
-        echo "       RAPIDS libcudf >=$CUDF_MIN_VERSION,<$CUDF_MAX_VERSION only."
-        echo ""
-        echo "Newer RAPIDS releases removed RMM interfaces that cuplyr uses,"
-        echo "and older ones lack the cuDF API it needs, so the build would fail."
-        echo ""
-        echo "To fix, install RAPIDS $CUDF_MIN_VERSION into the active conda environment:"
-        echo "  $CONDA_INSTALL_CMD"
-        echo "Or point CUDF_HOME at an existing RAPIDS $CUDF_MIN_VERSION prefix:"
-        echo "  export CUDF_HOME=/path/to/rapids-$CUDF_MIN_VERSION"
-        # Only when CUDF_HOME supplied this prefix and it isn't the active env
-        # (-ef: the same directory, however the two paths are spelled).
-        if CUDF_HOME_PREFIX=$(cudf_home_prefix) && [ "$CUDF_PREFIX" = "$CUDF_HOME_PREFIX" ] && \
-           ! [ "$CUDF_PREFIX" -ef "$CONDA_PREFIX" ]; then
+        # On stderr: install.sh hides a step's stdout unless --verbose
+        {
+            echo "ERROR: libcudf $CUDF_VERSION found at $CUDF_PREFIX, but cuplyr supports"
+            echo "       RAPIDS libcudf >=$CUDF_MIN_VERSION,<$CUDF_MAX_VERSION only."
             echo ""
-            echo "CUDF_HOME=$CUDF_HOME is set and takes precedence over CONDA_PREFIX, so"
-            echo "installing into the active environment won't change this. Unset"
-            echo "CUDF_HOME, or point it at a RAPIDS $CUDF_MIN_VERSION prefix."
-        fi
+            echo "Newer RAPIDS releases removed RMM interfaces that cuplyr uses,"
+            echo "and older ones lack the cuDF API it needs, so the build would fail."
+            echo ""
+            echo "To fix, install RAPIDS $CUDF_MIN_VERSION into the active conda environment:"
+            echo "  $CONDA_INSTALL_CMD"
+            echo "Or point CUDF_HOME at an existing RAPIDS $CUDF_MIN_VERSION prefix:"
+            echo "  export CUDF_HOME=/path/to/rapids-$CUDF_MIN_VERSION"
+            # Only when CUDF_HOME supplied this prefix and it isn't the active env
+            # (-ef: the same directory, however the two paths are spelled).
+            if CUDF_HOME_PREFIX=$(cudf_home_prefix) && [ "$CUDF_PREFIX" = "$CUDF_HOME_PREFIX" ] && \
+               ! [ "$CUDF_PREFIX" -ef "$CONDA_PREFIX" ]; then
+                echo ""
+                echo "CUDF_HOME=$CUDF_HOME is set and takes precedence over CONDA_PREFIX, so"
+                echo "installing into the active environment won't change this. Unset"
+                echo "CUDF_HOME, or point it at a RAPIDS $CUDF_MIN_VERSION prefix."
+            fi
+        } >&2
         exit 1
     fi
 else
-    echo "WARNING: could not read the libcudf version from $CUDF_VERSION_HEADER"
-    echo "         (version_config.hpp is missing or unparseable), so the version"
-    echo "         was not checked. cuplyr supports libcudf >=$CUDF_MIN_VERSION,<$CUDF_MAX_VERSION."
+    {
+        echo "WARNING: could not read the libcudf version from $CUDF_VERSION_HEADER"
+        echo "         (version_config.hpp is missing or unparseable), so the version"
+        echo "         was not checked. cuplyr supports libcudf >=$CUDF_MIN_VERSION,<$CUDF_MAX_VERSION."
+    } >&2
 fi
 
 # Find RMM headers - check both locations
