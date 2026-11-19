@@ -1,6 +1,6 @@
 # cuplyr builds against RAPIDS 25.12 only: 26.02 removed the
-# rmm/mr/device/*.hpp forwarding headers and 26.06 removed
-# rmm::mr::device_memory_resource. The declared ranges must say so, and
+# rmm/mr/device/*.hpp forwarding headers and RMM's legacy allocate(bytes,
+# stream) interface, and 26.06 removed rmm::mr::device_memory_resource. The declared ranges must say so, and
 # configure must reject an unsupported libcudf before the compiler does.
 #
 # None of these tests need a GPU. The configure tests run configure against
@@ -202,14 +202,17 @@ fake_prefix <- function(root, cudf_version = c("25", "12", "0")) {
 # Runs configure in a scratch package copy with the fake prefix as the conda
 # environment. Returns the exit status, the combined output and whether
 # src/Makevars was generated.
-run_configure_with <- function(prefix) {
+run_configure_with <- function(prefix, cudf_home = NULL) {
   pkg <- withr::local_tempdir("cuplyr-configure-", .local_envir = parent.frame())
   dir.create(file.path(pkg, "src"))
   file.copy(pkg_file("configure"), pkg)
   file.copy(pkg_file("src", "Makevars.in"), file.path(pkg, "src"))
 
+  # env's -u options must come before its NAME=value assignments
   args <- c(
-    "-u", "CUDF_HOME", "-u", "CUDA_HOME",
+    if (is.null(cudf_home)) c("-u", "CUDF_HOME"),
+    "-u", "CUDA_HOME",
+    if (!is.null(cudf_home)) sprintf("CUDF_HOME=%s", cudf_home),
     sprintf("CONDA_PREFIX=%s", prefix),
     "CUPLYR_ALLOW_CUDA_STUBS=1",
     "bash", "configure"
@@ -386,4 +389,86 @@ test_that("configure's libcudf-not-found hint installs the supported series", {
   expect_false(res$status == 0L, info = res$output)
   expect_match(res$output, "libcudf not found", info = res$output)
   expect_pinned_install_hint(res$output)
+})
+
+# ---------------------------------------------------------------------------
+# The rejection's CUDF_HOME note and other remedies
+# ---------------------------------------------------------------------------
+
+# The rejection message after its ERROR line.
+after_error <- function(output) {
+  lines <- strsplit(output, "\n", fixed = TRUE)[[1]]
+  at <- grep("^ERROR", lines)
+  if (length(at) == 0L) {
+    return("")
+  }
+  paste(lines[(at[[1]] + 1L):length(lines)], collapse = "\n")
+}
+
+# When CUDF_HOME supplied the rejected prefix (and it isn't the active env),
+# installing into the active env won't help, so the message says so and names
+# the variable with its value ("CUDF_HOME=<value>"). In every other case that
+# note would be false, so the value must not appear after the ERROR line.
+expect_cudf_home_note <- function(res, cudf_home, present) {
+  note <- paste0("CUDF_HOME=", cudf_home)
+  tail <- after_error(res$output)
+  if (present) {
+    expect_true(grepl(note, tail, fixed = TRUE), info = res$output)
+  } else {
+    expect_false(grepl(note, tail, fixed = TRUE), info = res$output)
+  }
+}
+
+test_that("a rejected libcudf from CUDF_HOME tells the user CUDF_HOME wins", {
+  skip_if_no_configure()
+  # the active env has a supported libcudf; CUDF_HOME points elsewhere at 26.06
+  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("25", "12", "0"))
+  cudf_home <- fake_prefix(withr::local_tempdir("cudf-home-"), c("26", "06", "0"))
+
+  res <- run_configure_with(env, cudf_home = cudf_home)
+
+  expect_rejected(res, "26\\.0?6")
+  expect_match(res$output, paste0("Found libcudf at: ", cudf_home), fixed = TRUE)
+  expect_cudf_home_note(res, cudf_home, present = TRUE)
+})
+
+test_that("a stale pip CUDF_HOME that configure skipped gets no CUDF_HOME note", {
+  skip_if_no_configure()
+  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "06", "0"))
+  stale <- file.path(
+    withr::local_tempdir("gone-"),
+    "lib", "python3.12", "site-packages", "libcudf"
+  )
+
+  res <- run_configure_with(env, cudf_home = stale)
+
+  expect_rejected(res, "26\\.0?6")
+  expect_match(res$output, paste0("Found libcudf at: ", env), fixed = TRUE)
+  expect_cudf_home_note(res, stale, present = FALSE)
+})
+
+test_that("CUDF_HOME equal to the active env gets no CUDF_HOME note", {
+  skip_if_no_configure()
+  # as inst/docker/Dockerfile does: CUDF_HOME=/opt/conda, the active env
+  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "06", "0"))
+
+  res <- run_configure_with(env, cudf_home = env)
+
+  expect_rejected(res, "26\\.0?6")
+  expect_cudf_home_note(res, env, present = FALSE)
+})
+
+test_that("the rejection never sends the user to an install.sh run that would skip RAPIDS", {
+  skip_if_no_configure()
+  # install.sh reuses an active env that already has libcudf, so it only helps
+  # with a fresh --conda-prefix
+  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "06", "0"))
+
+  res <- run_configure_with(env)
+
+  expect_rejected(res, "26\\.0?6")
+  lines <- strsplit(res$output, "\n", fixed = TRUE)[[1]]
+  for (l in grep("install\\.sh", lines, value = TRUE)) {
+    expect_match(l, "--conda-prefix", fixed = TRUE, info = l)
+  }
 })
