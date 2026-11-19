@@ -72,6 +72,41 @@ test_that("the README requirements table states both bounds for libcudf", {
   expect_no_match(row, "or newer")
 })
 
+test_that("README and the articles never state an open-ended RAPIDS requirement", {
+  docs <- c(
+    pkg_file("README.md"),
+    list.files(pkg_file("vignettes"), pattern = "\\.(Rmd|qmd|md)$", full.names = TRUE)
+  )
+  docs <- docs[file.exists(docs)]
+  skip_if(length(docs) == 0L, message = "README/vignettes not available in this test context")
+
+  open_ended <- character()
+  for (f in docs) {
+    lines <- readLines(f, warn = FALSE)
+    hit <- grep(
+      "(cudf|rapids)[^\n]*25\\.12[^\n]*(or later|or newer|and later|and newer|\\+)",
+      lines,
+      ignore.case = TRUE
+    )
+    hit <- hit[!grepl("26\\.02", lines[hit])]
+    if (length(hit) > 0L) {
+      open_ended <- c(open_ended, sprintf("%s:%d: %s", basename(f), hit, lines[hit]))
+    }
+  }
+
+  expect_identical(open_ended, character())
+})
+
+test_that("the getting-started article's RAPIDS requirement names both bounds", {
+  skip_if_no_pkg_file("vignettes", "getting-started.Rmd")
+  lines <- readLines(pkg_file("vignettes", "getting-started.Rmd"), warn = FALSE)
+  row <- grep("^\\s*[-*]\\s*RAPIDS", lines, value = TRUE)
+
+  expect_length(row, 1L)
+  expect_match(row, "25\\.12")
+  expect_match(row, "26\\.02")
+})
+
 test_that("configure never states an open-ended libcudf requirement", {
   skip_if_no_pkg_file("configure")
   lines <- readLines(pkg_file("configure"))
@@ -196,6 +231,26 @@ run_configure_with <- function(prefix) {
 # Shell errors that would mean the check crashed instead of reporting.
 shell_error <- "syntax error|value too great for base|integer expression expected|unbound variable|command not found"
 
+# Any conda/mamba command configure prints must install the supported series
+# with the recipe install.sh and install_cuplyr() use: pinned to 25.12, CUDA 12
+# builds, and no channel priority (the pinned solve fails under strict channel
+# priority, see #47). The cuda-version spec must be quoted for the shell.
+expect_pinned_install_hint <- function(output) {
+  lines <- strsplit(output, "\n", fixed = TRUE)[[1]]
+  hint <- grep("(mamba|conda)\\s+install", lines, value = TRUE)
+  expect_gt(length(hint), 0L)
+  for (h in hint) {
+    expect_match(h, "libcudf=25\\.12", info = h)
+    expect_match(h, "librmm=25\\.12", info = h)
+    expect_match(h, "libkvikio=25\\.12", info = h)
+    expect_match(h, "--no-channel-priority", fixed = TRUE, info = h)
+    expect_match(h, "-c rapidsai", fixed = TRUE, info = h)
+    expect_match(h, "-c conda-forge", fixed = TRUE, info = h)
+    expect_match(h, "-c nvidia", fixed = TRUE, info = h)
+    expect_match(h, "[\"']cuda-version>=12\\.2,<13[\"']", info = h)
+  }
+}
+
 expect_rejected <- function(res, found) {
   expect_false(res$status == 0L, info = res$output)
   expect_false(res$makevars, info = res$output)
@@ -204,6 +259,7 @@ expect_rejected <- function(res, found) {
   expect_match(res$output, "25\\.12", info = res$output)
   expect_match(res$output, "26\\.02", info = res$output)
   expect_no_match(res$output, shell_error)
+  expect_pinned_install_hint(res$output)
 }
 
 expect_accepted <- function(res) {
@@ -271,6 +327,16 @@ test_that("configure rejects a libcudf older than 25.12", {
   expect_rejected(res, "25\\.10")
 })
 
+test_that("configure rejects an older libcudf whose minor has one digit", {
+  skip_if_no_configure()
+  # CMake writes 25.08 as MINOR 8; a lexical comparison would accept "25.8".
+  prefix <- fake_prefix(withr::local_tempdir("conda-env-"), c("25", "8", "0"))
+
+  res <- run_configure_with(prefix)
+
+  expect_rejected(res, "25\\.0?8")
+})
+
 test_that("configure rejects a far newer libcudf (major bump)", {
   skip_if_no_configure()
   prefix <- fake_prefix(withr::local_tempdir("conda-env-"), c("27", "0", "0"))
@@ -302,4 +368,22 @@ test_that("configure warns and continues when the version header is unparseable"
   expect_accepted(res)
   expect_match(res$output, "WARNING", info = res$output)
   expect_match(res$output, "version", ignore.case = TRUE, info = res$output)
+  expect_match(res$output, "version_config\\.hpp", info = res$output)
+})
+
+test_that("configure's libcudf-not-found hint installs the supported series", {
+  skip_if_no_configure()
+  # CUDA but no libcudf in the environment
+  prefix <- fake_prefix(withr::local_tempdir("conda-env-"))
+  unlink(file.path(prefix, "include", "cudf"), recursive = TRUE)
+
+  res <- run_configure_with(prefix)
+  skip_if(
+    grepl("Found libcudf at", res$output),
+    message = "this machine has a system libcudf configure finds anyway"
+  )
+
+  expect_false(res$status == 0L, info = res$output)
+  expect_match(res$output, "libcudf not found", info = res$output)
+  expect_pinned_install_hint(res$output)
 })
