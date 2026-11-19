@@ -200,9 +200,11 @@ fake_prefix <- function(root, cudf_version = c("25", "12", "0")) {
 }
 
 # Runs configure in a scratch package copy with the fake prefix as the conda
-# environment. Returns the exit status, the combined output (only stderr with
-# `stderr_only = TRUE`) and whether src/Makevars was generated.
-run_configure_with <- function(prefix, cudf_home = NULL, stderr_only = FALSE) {
+# environment (`prefix = NULL`: no active environment). Returns the exit
+# status, the combined output (only stderr with `stderr_only = TRUE`) and
+# whether src/Makevars was generated.
+run_configure_with <- function(prefix, cudf_home = NULL, stderr_only = FALSE,
+                               cuda_home = NULL) {
   pkg <- withr::local_tempdir("cuplyr-configure-", .local_envir = parent.frame())
   dir.create(file.path(pkg, "src"))
   file.copy(pkg_file("configure"), pkg)
@@ -211,9 +213,11 @@ run_configure_with <- function(prefix, cudf_home = NULL, stderr_only = FALSE) {
   # env's -u options must come before its NAME=value assignments
   args <- c(
     if (is.null(cudf_home)) c("-u", "CUDF_HOME"),
-    "-u", "CUDA_HOME",
+    if (is.null(cuda_home)) c("-u", "CUDA_HOME"),
+    if (is.null(prefix)) c("-u", "CONDA_PREFIX"),
     if (!is.null(cudf_home)) sprintf("CUDF_HOME=%s", cudf_home),
-    sprintf("CONDA_PREFIX=%s", prefix),
+    if (!is.null(cuda_home)) sprintf("CUDA_HOME=%s", cuda_home),
+    if (!is.null(prefix)) sprintf("CONDA_PREFIX=%s", prefix),
     "CUPLYR_ALLOW_CUDA_STUBS=1",
     # system2() pastes its args into a shell command line, so quote the script
     if (stderr_only) c("bash", "-c", shQuote("bash configure 2>&1 1>/dev/null")) else c("bash", "configure")
@@ -545,4 +549,98 @@ test_that("install.sh without --verbose shows why configure rejected libcudf", {
   expect_match(output, "libcudf[^\n]*26\\.0?6", info = output)
   expect_match(output, "26\\.02", info = output)
   expect_pinned_install_hint(output)
+})
+
+# ---------------------------------------------------------------------------
+# The rejection's remedies never mix two RAPIDS installs
+# ---------------------------------------------------------------------------
+
+# The rejection after its ERROR line, split into blank-line separated
+# paragraphs.
+rejection_paragraphs <- function(output) {
+  lines <- strsplit(after_error(output), "\n", fixed = TRUE)[[1]]
+  para <- cumsum(!nzchar(trimws(lines)))
+  keep <- nzchar(trimws(lines))
+  unname(vapply(
+    split(lines[keep], para[keep]),
+    paste,
+    character(1),
+    collapse = "\n"
+  ))
+}
+
+# A cuplyr built against CUDF_HOME inside a conda environment that holds its
+# own libcudf loads the environment's libcudf at run time: configure puts
+# $CONDA_PREFIX/lib first on the runtime search path, and libcudf.so has no
+# versioned soname. So every paragraph that tells the user where to point
+# CUDF_HOME (it names 25.12, exports CUDF_HOME or says to point it somewhere)
+# must also tell them to leave the environment with `conda deactivate`.
+expect_cudf_home_advice_leaves_env <- function(res) {
+  paras <- rejection_paragraphs(res$output)
+  expect_gt(length(paras), 0L)
+  advice <- paras[
+    grepl("CUDF_HOME", paras, fixed = TRUE) &
+      grepl("25\\.12|export CUDF_HOME|point", paras)
+  ]
+  for (p in advice) {
+    expect_match(p, "conda deactivate", fixed = TRUE, info = p)
+  }
+}
+
+test_that("with the rejected libcudf in the active env, CUDF_HOME advice says to leave it first", {
+  skip_if_no_configure()
+  # the issue's case: the active conda env resolved RAPIDS 26.06
+  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "06", "0"))
+
+  res <- run_configure_with(env, stderr_only = TRUE)
+
+  expect_rejected(res, "26\\.0?6")
+  expect_cudf_home_advice_leaves_env(res)
+})
+
+test_that("CUDF_HOME advice says to leave the env when CUDF_HOME names the active env", {
+  skip_if_no_configure()
+  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "06", "0"))
+
+  res <- run_configure_with(env, cudf_home = env, stderr_only = TRUE)
+
+  expect_rejected(res, "26\\.0?6")
+  expect_cudf_home_advice_leaves_env(res)
+})
+
+test_that("the CUDF_HOME note says to leave an active env that holds a libcudf too", {
+  skip_if_no_configure()
+  # CUDF_HOME supplied the rejected 26.06 prefix, and the active env holds
+  # another newer libcudf
+  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "06", "0"))
+  cudf_home <- fake_prefix(withr::local_tempdir("cudf-home-"), c("26", "06", "0"))
+
+  res <- run_configure_with(env, cudf_home = cudf_home, stderr_only = TRUE)
+
+  expect_rejected(res, "26\\.0?6")
+  expect_cudf_home_note(res, cudf_home, present = TRUE)
+  expect_cudf_home_advice_leaves_env(res)
+})
+
+test_that("with no active conda env the rejection doesn't refer to one", {
+  skip_if_no_configure()
+  # a system CUDA and a CUDF_HOME prefix at 26.06, no conda environment
+  cuda <- withr::local_tempdir("system-cuda-")
+  touch(file.path(cuda, "include", "cuda.h"))
+  touch(file.path(cuda, "lib64", "stubs", "libcuda.so"))
+  touch(file.path(cuda, "lib64", "libcudart.so"))
+  fake_nvcc(file.path(cuda, "bin", "nvcc"))
+  cudf_home <- fake_prefix(withr::local_tempdir("cudf-home-"), c("26", "06", "0"))
+
+  res <- run_configure_with(NULL, cudf_home = cudf_home, cuda_home = cuda,
+                            stderr_only = TRUE)
+
+  expect_rejected(res, "26\\.0?6")
+  expect_cudf_home_note(res, cudf_home, present = TRUE)
+  expect_no_match(
+    after_error(res$output),
+    "active (conda )?env",
+    ignore.case = TRUE,
+    info = res$output
+  )
 })
