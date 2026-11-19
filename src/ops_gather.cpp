@@ -27,7 +27,7 @@
 #include <cudf/utilities/span.hpp>
 
 #include <rmm/device_uvector.hpp>
-#include <rmm/mr/device/per_device_resource.hpp>
+#include <rmm/mr/per_device_resource.hpp>
 
 #include <R_ext/Altrep.h>
 #include <R_ext/Rdynload.h>
