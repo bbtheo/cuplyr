@@ -12,6 +12,11 @@ CUDA_INCLUDE=""
 CUDF_HOME="${CUDF_HOME:-}"
 CONDA_PREFIX="${CONDA_PREFIX:-}"
 CUDA_MIN_VERSION="${CUPLYR_CUDA_MIN_VERSION:-12.2}"
+# Supported libcudf range: CUDF_MIN_VERSION <= version < CUDF_MAX_VERSION.
+# 26.02 removed the rmm/mr/device/*.hpp headers and 26.06 removes
+# rmm::mr::device_memory_resource, both of which cuplyr still uses.
+CUDF_MIN_VERSION="25.12"
+CUDF_MAX_VERSION="26.02"
 
 # Allow CUDA stub linking in non-GPU builder environments.
 # Modes:
@@ -169,7 +174,7 @@ fi
 
 if ! version_at_least "$CUDA_VERSION" "$CUDA_MIN_VERSION"; then
     echo "ERROR: CUDA $CUDA_VERSION found, but cuplyr requires CUDA >= $CUDA_MIN_VERSION"
-    echo "       with RAPIDS libcudf >= 25.12."
+    echo "       with RAPIDS libcudf >=$CUDF_MIN_VERSION,<$CUDF_MAX_VERSION."
     exit 1
 fi
 
@@ -369,6 +374,51 @@ else
 fi
 
 echo "Found libcudf at: $CUDF_PREFIX"
+
+# Check the libcudf version before anything else is derived from it, so an
+# unsupported RAPIDS fails here and not in the compiler.
+read_cudf_version() {
+    local header="$1"
+    [ -f "$header" ] || return 1
+    local major minor patch
+    major=$(sed -n 's/^[[:space:]]*#[[:space:]]*define[[:space:]][[:space:]]*CUDF_VERSION_MAJOR[[:space:]][[:space:]]*\([0-9][0-9]*\).*/\1/p' "$header" | head -n1)
+    minor=$(sed -n 's/^[[:space:]]*#[[:space:]]*define[[:space:]][[:space:]]*CUDF_VERSION_MINOR[[:space:]][[:space:]]*\([0-9][0-9]*\).*/\1/p' "$header" | head -n1)
+    patch=$(sed -n 's/^[[:space:]]*#[[:space:]]*define[[:space:]][[:space:]]*CUDF_VERSION_PATCH[[:space:]][[:space:]]*\([0-9][0-9]*\).*/\1/p' "$header" | head -n1)
+    [ -n "$major" ] && [ -n "$minor" ] || return 1
+    # 10# keeps zero-padded values such as 08 from being read as octal
+    echo "$((10#$major)).$((10#$minor)).$((10#${patch:-0}))"
+}
+
+# major.minor as one integer (25.12 -> 25012), safe for zero-padded minors
+series_key() {
+    local major="${1%%.*}" minor="${1#*.}"
+    echo "$((10#$major * 1000 + 10#$minor))"
+}
+
+CUDF_VERSION_HEADER="$CUDF_PREFIX/include/cudf/version_config.hpp"
+if CUDF_VERSION=$(read_cudf_version "$CUDF_VERSION_HEADER"); then
+    CUDF_SERIES="${CUDF_VERSION%.*}"
+    if [ "$(series_key "$CUDF_SERIES")" -ge "$(series_key "$CUDF_MIN_VERSION")" ] && \
+       [ "$(series_key "$CUDF_SERIES")" -lt "$(series_key "$CUDF_MAX_VERSION")" ]; then
+        echo "Found libcudf version: $CUDF_VERSION"
+    else
+        echo "ERROR: libcudf $CUDF_VERSION found at $CUDF_PREFIX, but cuplyr supports"
+        echo "       RAPIDS libcudf >=$CUDF_MIN_VERSION,<$CUDF_MAX_VERSION only."
+        echo ""
+        echo "Newer RAPIDS releases removed RMM headers and classes that cuplyr uses,"
+        echo "and older ones lack the cuDF API it needs, so the build would fail."
+        echo ""
+        echo "To fix, install RAPIDS $CUDF_MIN_VERSION:"
+        echo "  mamba install -c rapidsai -c conda-forge libcudf=$CUDF_MIN_VERSION librmm=$CUDF_MIN_VERSION libkvikio=$CUDF_MIN_VERSION"
+        echo "Or point CUDF_HOME at an existing RAPIDS $CUDF_MIN_VERSION prefix:"
+        echo "  export CUDF_HOME=/path/to/rapids-$CUDF_MIN_VERSION"
+        exit 1
+    fi
+else
+    echo "WARNING: could not read the libcudf version from $CUDF_VERSION_HEADER"
+    echo "         (version_config.hpp is missing or unparseable), so the version"
+    echo "         was not checked. cuplyr supports libcudf >=$CUDF_MIN_VERSION,<$CUDF_MAX_VERSION."
+fi
 
 # Find RMM headers - check both locations
 if [ -f "$CUDF_PREFIX/include/rmm/rmm.hpp" ]; then
