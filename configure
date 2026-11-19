@@ -429,18 +429,43 @@ if CUDF_VERSION=$(read_cudf_version "$CUDF_VERSION_HEADER"); then
             echo "Newer RAPIDS releases removed RMM interfaces that cuplyr uses,"
             echo "and older ones lack the cuDF API it needs, so the build would fail."
             echo ""
-            echo "To fix, install RAPIDS $CUDF_MIN_VERSION into the active conda environment:"
-            echo "  $CONDA_INSTALL_CMD"
-            echo "Or point CUDF_HOME at an existing RAPIDS $CUDF_MIN_VERSION prefix:"
-            echo "  export CUDF_HOME=/path/to/rapids-$CUDF_MIN_VERSION"
+            if [ -n "$CONDA_PREFIX" ]; then
+                echo "To fix, install RAPIDS $CUDF_MIN_VERSION into the active conda environment:"
+                echo "  $CONDA_INSTALL_CMD"
+                echo "Or activate another conda environment that has RAPIDS $CUDF_MIN_VERSION,"
+                echo "then re-run."
+                echo ""
+                # The active env's lib comes first on the runtime search path and
+                # libcudf.so has no versioned soname, so CUDF_HOME must be used
+                # outside conda or the build and the loaded library would differ.
+                echo "For a RAPIDS $CUDF_MIN_VERSION install outside conda (a pip wheel or a system"
+                echo "install), run \`conda deactivate\` until no environment is active, then"
+                echo "point CUDF_HOME at that prefix. Otherwise the active environment's libcudf"
+                echo "would be loaded instead of the one in CUDF_HOME:"
+                echo "  export CUDF_HOME=/path/to/rapids-$CUDF_MIN_VERSION"
+            else
+                echo "To fix, activate (or create) a conda environment, install RAPIDS"
+                echo "$CUDF_MIN_VERSION into it, and re-run:"
+                echo "  $CONDA_INSTALL_CMD"
+                echo ""
+                echo "Or point CUDF_HOME at an existing RAPIDS $CUDF_MIN_VERSION prefix:"
+                echo "  export CUDF_HOME=/path/to/rapids-$CUDF_MIN_VERSION"
+            fi
             # Only when CUDF_HOME supplied this prefix and it isn't the active env
             # (-ef: the same directory, however the two paths are spelled).
             if CUDF_HOME_PREFIX=$(cudf_home_prefix) && [ "$CUDF_PREFIX" = "$CUDF_HOME_PREFIX" ] && \
                ! [ "$CUDF_PREFIX" -ef "$CONDA_PREFIX" ]; then
                 echo ""
-                echo "CUDF_HOME=$CUDF_HOME is set and takes precedence over CONDA_PREFIX, so"
-                echo "installing into the active environment won't change this. Unset"
-                echo "CUDF_HOME, or point it at a RAPIDS $CUDF_MIN_VERSION prefix."
+                if [ -n "$CONDA_PREFIX" ]; then
+                    echo "CUDF_HOME=$CUDF_HOME is set and takes precedence over CONDA_PREFIX, so"
+                    echo "installing into the active environment won't change this. Unset"
+                    echo "CUDF_HOME, or run \`conda deactivate\` until no environment is active and"
+                    echo "point it at a RAPIDS $CUDF_MIN_VERSION prefix."
+                else
+                    echo "CUDF_HOME=$CUDF_HOME is set and takes precedence, so installing"
+                    echo "RAPIDS $CUDF_MIN_VERSION elsewhere won't change this. Unset CUDF_HOME, or"
+                    echo "point it at a RAPIDS $CUDF_MIN_VERSION prefix."
+                fi
             fi
         } >&2
         exit 1
