@@ -63,22 +63,32 @@ detect_distro() {
 }
 DISTRO=$(detect_distro)
 
+# The cuDF prefix CUDF_HOME points at: CUDF_HOME itself, or for a pip wheel
+# (.../lib/pythonX.Y/site-packages/libcudf) the environment four levels up.
+# Fails if CUDF_HOME is unset or neither holds the cudf headers.
+cudf_home_prefix() {
+    [ -n "$CUDF_HOME" ] && [ -d "$CUDF_HOME" ] || return 1
+    if [ -f "$CUDF_HOME/include/cudf/types.hpp" ]; then
+        echo "$CUDF_HOME"
+        return 0
+    fi
+    if [[ "$CUDF_HOME" == */site-packages/libcudf ]]; then
+        local pip_prefix
+        pip_prefix="$(dirname "$(dirname "$(dirname "$(dirname "$CUDF_HOME")")")")"
+        if [ -f "$pip_prefix/include/cudf/types.hpp" ]; then
+            echo "$pip_prefix"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 # Function to find libcudf
 find_cudf() {
     # Check if CUDF_HOME is set first (for pip installs)
     if [ -n "$CUDF_HOME" ]; then
-        if [ -d "$CUDF_HOME" ] && [ -f "$CUDF_HOME/include/cudf/types.hpp" ]; then
-            echo "$CUDF_HOME"
+        if cudf_home_prefix; then
             return 0
-        fi
-
-        if [ -d "$CUDF_HOME" ] && [[ "$CUDF_HOME" == */site-packages/libcudf ]]; then
-            local pip_prefix
-            pip_prefix="$(dirname "$(dirname "$(dirname "$(dirname "$CUDF_HOME")")")")"
-            if [ -f "$pip_prefix/include/cudf/types.hpp" ]; then
-                echo "$pip_prefix"
-                return 0
-            fi
         fi
 
         echo "WARNING: CUDF_HOME is set but does not look like a valid cuDF prefix: $CUDF_HOME" >&2
@@ -419,10 +429,12 @@ if CUDF_VERSION=$(read_cudf_version "$CUDF_VERSION_HEADER"); then
         echo ""
         echo "To fix, install RAPIDS $CUDF_MIN_VERSION into the active conda environment:"
         echo "  $CONDA_INSTALL_CMD"
-        echo "(git clone users can run ./install.sh --method=conda instead.)"
         echo "Or point CUDF_HOME at an existing RAPIDS $CUDF_MIN_VERSION prefix:"
         echo "  export CUDF_HOME=/path/to/rapids-$CUDF_MIN_VERSION"
-        if [ -n "$CUDF_HOME" ] && { [ "$CUDF_PREFIX" = "$CUDF_HOME" ] || [[ "$CUDF_HOME" == */site-packages/libcudf ]]; }; then
+        # Only when CUDF_HOME supplied this prefix and it isn't the active env
+        # (-ef: the same directory, however the two paths are spelled).
+        if CUDF_HOME_PREFIX=$(cudf_home_prefix) && [ "$CUDF_PREFIX" = "$CUDF_HOME_PREFIX" ] && \
+           ! [ "$CUDF_PREFIX" -ef "$CONDA_PREFIX" ]; then
             echo ""
             echo "CUDF_HOME=$CUDF_HOME is set and takes precedence over CONDA_PREFIX, so"
             echo "installing into the active environment won't change this. Unset"

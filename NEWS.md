@@ -3,8 +3,9 @@
 * cuplyr builds against RAPIDS 25.12 only (libcudf `>=25.12,<26.02`), because
   RAPIDS 26.02 and later removed RMM interfaces cuplyr uses. `configure` now
   checks the installed libcudf version and stops with the supported range and
-  a command that installs 25.12, instead of failing in the compiler. The
-  package metadata and docs state the same range (#61).
+  a command that installs 25.12, instead of failing in the compiler. When it
+  can't read the version (some pip wheel and system installs), it warns and
+  continues. The package metadata and docs state the same range (#61).
 
 * `summarise(.by =)` runs as one grouped summarise that finds each group's
   first row inside the groupby, with no row-number column and no extra steps,
