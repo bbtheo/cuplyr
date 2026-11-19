@@ -200,9 +200,9 @@ fake_prefix <- function(root, cudf_version = c("25", "12", "0")) {
 }
 
 # Runs configure in a scratch package copy with the fake prefix as the conda
-# environment. Returns the exit status, the combined output and whether
-# src/Makevars was generated.
-run_configure_with <- function(prefix, cudf_home = NULL) {
+# environment. Returns the exit status, the combined output (only stderr with
+# `stderr_only = TRUE`) and whether src/Makevars was generated.
+run_configure_with <- function(prefix, cudf_home = NULL, stderr_only = FALSE) {
   pkg <- withr::local_tempdir("cuplyr-configure-", .local_envir = parent.frame())
   dir.create(file.path(pkg, "src"))
   file.copy(pkg_file("configure"), pkg)
@@ -215,7 +215,8 @@ run_configure_with <- function(prefix, cudf_home = NULL) {
     if (!is.null(cudf_home)) sprintf("CUDF_HOME=%s", cudf_home),
     sprintf("CONDA_PREFIX=%s", prefix),
     "CUPLYR_ALLOW_CUDA_STUBS=1",
-    "bash", "configure"
+    # system2() pastes its args into a shell command line, so quote the script
+    if (stderr_only) c("bash", "-c", shQuote("bash configure 2>&1 1>/dev/null")) else c("bash", "configure")
   )
   output <- withr::with_dir(pkg, suppressWarnings(
     system2("env", args, stdout = TRUE, stderr = TRUE)
@@ -471,4 +472,77 @@ test_that("the rejection never sends the user to an install.sh run that would sk
   for (l in grep("install\\.sh", lines, value = TRUE)) {
     expect_match(l, "--conda-prefix", fixed = TRUE, info = l)
   }
+})
+
+# ---------------------------------------------------------------------------
+# The rejection reaches users whose tooling hides configure's stdout
+# ---------------------------------------------------------------------------
+
+test_that("configure prints the rejection on stderr", {
+  skip_if_no_configure()
+  # install.sh without --verbose discards configure's stdout and keeps stderr
+  prefix <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "06", "0"))
+
+  res <- run_configure_with(prefix, stderr_only = TRUE)
+
+  expect_rejected(res, "26\\.0?6")
+  expect_match(res$output, "ERROR", info = res$output)
+})
+
+test_that("install.sh without --verbose shows why configure rejected libcudf", {
+  skip_if_no_configure()
+  skip_if_no_pkg_file("install.sh")
+
+  # the issue's case: an active conda env that resolved a newer RAPIDS
+  env_dir <- fake_prefix(withr::local_tempdir("user-env-"), c("26", "06", "0"))
+  dir.create(file.path(env_dir, "conda-meta"))
+
+  # fake mamba records calls; fake R passes install.sh's dependency check
+  bin <- withr::local_tempdir("fake-bin-")
+  mamba_log <- file.path(bin, "mamba.log")
+  writeLines(
+    c("#!/usr/bin/env bash", sprintf("echo \"$*\" >> %s", shQuote(mamba_log)), "exit 0"),
+    file.path(bin, "mamba")
+  )
+  writeLines(
+    c(
+      "#!/usr/bin/env bash",
+      "if [ \"$1\" = CMD ]; then echo 'FAKE-BUILD-RAN' >&2; exit 1; fi",
+      "exit 0"
+    ),
+    file.path(bin, "R")
+  )
+  Sys.chmod(file.path(bin, c("mamba", "R")), "0755")
+
+  # a scratch source tree holding this configure
+  src <- withr::local_tempdir("cuplyr-src-")
+  dir.create(file.path(src, "src"))
+  file.copy(pkg_file("configure"), src)
+  file.copy(pkg_file("src", "Makevars.in"), file.path(src, "src"))
+  file.create(file.path(src, "DESCRIPTION"))
+
+  args <- c(
+    "-u", "CUDA_HOME", "-u", "CUDF_HOME",
+    paste0("HOME=", withr::local_tempdir("fake-home-")),
+    paste0("PATH=", paste(c(bin, "/usr/bin", "/bin"), collapse = ":")),
+    paste0("CONDA_PREFIX=", env_dir),
+    "CONDA_DEFAULT_ENV=myenv",
+    "CUPLYR_ALLOW_CUDA_STUBS=1",
+    "bash", pkg_file("install.sh")
+  )
+  output <- withr::with_dir(src, suppressWarnings(
+    system2("env", args, stdout = TRUE, stderr = TRUE)
+  ))
+  status <- attr(output, "status")
+  output <- paste(output, collapse = "\n")
+
+  skip_if_not(
+    grepl("Configuring cuplyr", output, fixed = TRUE),
+    message = "install.sh did not reach configure with this fake setup"
+  )
+  expect_false(is.null(status) || status == 0L, info = output)
+  expect_no_match(output, "FAKE-BUILD-RAN", fixed = TRUE)
+  expect_match(output, "libcudf[^\n]*26\\.0?6", info = output)
+  expect_match(output, "26\\.02", info = output)
+  expect_pinned_install_hint(output)
 })
