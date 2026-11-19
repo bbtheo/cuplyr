@@ -13,10 +13,18 @@ CUDF_HOME="${CUDF_HOME:-}"
 CONDA_PREFIX="${CONDA_PREFIX:-}"
 CUDA_MIN_VERSION="${CUPLYR_CUDA_MIN_VERSION:-12.2}"
 # Supported libcudf range: CUDF_MIN_VERSION <= version < CUDF_MAX_VERSION.
-# 26.02 removed the rmm/mr/device/*.hpp headers and 26.06 removes
-# rmm::mr::device_memory_resource, both of which cuplyr still uses.
+# cuplyr still uses RMM's legacy allocate(bytes, stream) memory-resource
+# interface (src/oom_inject.cpp and -DRMM_ENABLE_LEGACY_MR_INTERFACE in
+# src/Makevars.in). RMM 26.02 removed it (rmm#2150) and 26.06 removed
+# rmm::mr::device_memory_resource, so 26.02 and later don't compile.
 CUDF_MIN_VERSION="25.12"
 CUDF_MAX_VERSION="26.02"
+
+# The conda command that installs the supported series. One definition, so the
+# "not found" and "unsupported version" messages can't drift. Strict channel
+# priority makes the pinned solve fail, so it is turned off; the cuda-version
+# pin keeps the solve on CUDA 12 builds (the spec is quoted for the shell).
+CONDA_INSTALL_CMD="mamba install --no-channel-priority -c rapidsai -c conda-forge -c nvidia libcudf=$CUDF_MIN_VERSION librmm=$CUDF_MIN_VERSION libkvikio=$CUDF_MIN_VERSION \"cuda-version>=12.2,<13\""
 
 # Allow CUDA stub linking in non-GPU builder environments.
 # Modes:
@@ -353,7 +361,7 @@ if [ -z "$CUDF_PREFIX" ]; then
     echo "     pixi run install"
     echo ""
     echo "  2. Conda/Mamba:"
-    echo "     mamba install -c rapidsai -c conda-forge -c nvidia libcudf librmm"
+    echo "     $CONDA_INSTALL_CMD"
     echo "     # Then re-run: ./configure"
     echo ""
     echo "  3. Manual (set path to existing install):"
@@ -386,7 +394,8 @@ read_cudf_version() {
     patch=$(sed -n 's/^[[:space:]]*#[[:space:]]*define[[:space:]][[:space:]]*CUDF_VERSION_PATCH[[:space:]][[:space:]]*\([0-9][0-9]*\).*/\1/p' "$header" | head -n1)
     [ -n "$major" ] && [ -n "$minor" ] || return 1
     # 10# keeps zero-padded values such as 08 from being read as octal
-    echo "$((10#$major)).$((10#$minor)).$((10#${patch:-0}))"
+    # zero-padded minor as RAPIDS writes it (26.02.0), not 26.2.0
+    printf '%d.%02d.%d\n' "$((10#$major))" "$((10#$minor))" "$((10#${patch:-0}))"
 }
 
 # major.minor as one integer (25.12 -> 25012), safe for zero-padded minors
@@ -405,13 +414,20 @@ if CUDF_VERSION=$(read_cudf_version "$CUDF_VERSION_HEADER"); then
         echo "ERROR: libcudf $CUDF_VERSION found at $CUDF_PREFIX, but cuplyr supports"
         echo "       RAPIDS libcudf >=$CUDF_MIN_VERSION,<$CUDF_MAX_VERSION only."
         echo ""
-        echo "Newer RAPIDS releases removed RMM headers and classes that cuplyr uses,"
+        echo "Newer RAPIDS releases removed RMM interfaces that cuplyr uses,"
         echo "and older ones lack the cuDF API it needs, so the build would fail."
         echo ""
-        echo "To fix, install RAPIDS $CUDF_MIN_VERSION:"
-        echo "  mamba install -c rapidsai -c conda-forge libcudf=$CUDF_MIN_VERSION librmm=$CUDF_MIN_VERSION libkvikio=$CUDF_MIN_VERSION"
+        echo "To fix, install RAPIDS $CUDF_MIN_VERSION into the active conda environment:"
+        echo "  $CONDA_INSTALL_CMD"
+        echo "(git clone users can run ./install.sh --method=conda instead.)"
         echo "Or point CUDF_HOME at an existing RAPIDS $CUDF_MIN_VERSION prefix:"
         echo "  export CUDF_HOME=/path/to/rapids-$CUDF_MIN_VERSION"
+        if [ -n "$CUDF_HOME" ] && { [ "$CUDF_PREFIX" = "$CUDF_HOME" ] || [[ "$CUDF_HOME" == */site-packages/libcudf ]]; }; then
+            echo ""
+            echo "CUDF_HOME=$CUDF_HOME is set and takes precedence over CONDA_PREFIX, so"
+            echo "installing into the active environment won't change this. Unset"
+            echo "CUDF_HOME, or point it at a RAPIDS $CUDF_MIN_VERSION prefix."
+        fi
         exit 1
     fi
 else

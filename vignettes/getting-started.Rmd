@@ -180,5 +180,5 @@ final result is copied back to R.
 
 - NVIDIA GPU with compute capability 7.0 or higher
 - CUDA Toolkit 12.2 or later
-- RAPIDS cuDF 25.12 or later
+- RAPIDS libcudf 25.12 (26.02 and newer are not supported yet)
 - R 4.3.0 or later

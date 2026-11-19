@@ -1,12 +1,10 @@
 # cuplyr (development version)
 
-* cuplyr now declares that it builds against RAPIDS 25.12 only
-  (`>=25.12,<26.02` for libcudf, librmm and libkvikio in `pixi.toml`, the conda
-  recipe and `SystemRequirements`). RAPIDS 26.02 removed RMM headers cuplyr
-  still included, and 26.06 removes more RMM classes it uses. `configure` now
-  reads the installed libcudf version and stops early with a message naming the
-  version it found and the supported range, instead of failing in the
-  compiler. If it can't read the version it warns and continues (#61).
+* cuplyr builds against RAPIDS 25.12 only (libcudf `>=25.12,<26.02`), because
+  RAPIDS 26.02 and later removed RMM interfaces cuplyr uses. `configure` now
+  checks the installed libcudf version and stops with the supported range and
+  a command that installs 25.12, instead of failing in the compiler. The
+  package metadata and docs state the same range (#61).
 
 * `summarise(.by =)` runs as one grouped summarise that finds each group's
   first row inside the groupby, with no row-number column and no extra steps,
