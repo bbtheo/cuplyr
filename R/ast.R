@@ -44,15 +44,22 @@ ast_node_classes <- lapply(
 #' @param schema List with names and types vectors
 #' @param source_ptr External pointer to the table the plan starts from
 #' @param scan A parquet scan record (`read_parquet_gpu()`), or NULL
+#' @param origin The CPU step that produced the table (`plan_origin()`,
+#'   R/plan-text.R: plain text only), or NULL. Read only by `explain()` and
+#'   `show_query()`.
 #' @return An ast_source node
 #' @keywords internal
-ast_source <- function(schema, source_ptr = NULL, scan = NULL) {
-  if (is.null(scan)) {
+ast_source <- function(schema, source_ptr = NULL, scan = NULL, origin = NULL) {
+  if (is.null(scan) && is.null(origin)) {
     return(ast_node("source", schema = schema, source_ptr = source_ptr, input = NULL))
   }
   # F85: a parquet scan is a source whose rows are read when the plan runs
-  # (R/io.R); the field exists only on such a node
-  ast_node("source", schema = schema, source_ptr = source_ptr, scan = scan, input = NULL)
+  # (R/io.R); the field exists only on such a node. So does `origin` (#10), on a
+  # source that is the result of a CPU step.
+  node <- ast_node("source", schema = schema, source_ptr = source_ptr, input = NULL)
+  if (!is.null(scan)) node$scan <- scan
+  if (!is.null(origin)) node$origin <- origin
+  node
 }
 
 #' Create a filter AST node

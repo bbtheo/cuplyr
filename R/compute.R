@@ -170,8 +170,8 @@ collapse.tbl_gpu <- function(x, ...) {
 
   # Add barrier node to lazy_ops
   if (is.null(x$lazy_ops)) {
-    # Create source node first
-    x$lazy_ops <- ast_source(x$schema)
+    # Create source node first (carrying the CPU step that made the table, #10)
+    x$lazy_ops <- ast_source(x$schema, origin = table_origin(x))
   }
 
   x$lazy_ops <- ast_barrier(x$lazy_ops)
@@ -277,29 +277,70 @@ has_pending_ops <- function(.data) {
   inherits(.data, "tbl_gpu") && inherits(.subset2(.data, "lazy_ops"), "ast_node")
 }
 
-#' Show pending operations for a lazy tbl_gpu
+#' Show the plan of a lazy tbl_gpu
 #'
-#' `tbl_gpu` method for dplyr's [dplyr::show_query()] generic. Prints the
-#' pending AST (nothing is executed).
+#' `tbl_gpu` methods for dplyr's [dplyr::show_query()] and [dplyr::explain()]
+#' generics. Both print the same plan as R code and run nothing: no data is
+#' read and no GPU work is done. A plan prints in pipeline order, source first,
+#' one step per line, each step as the dplyr call it stands for:
+#'
+#' ```
+#' <cuplyr plan: optimized>
+#' CPU fallback: mutate() for pnorm(gain / 10)
+#'   reason: `pnorm()` has no GPU implementation.
+#'   columns: 2 of 4 (carrier, z)
+#'   input (computed at the mutate() call):
+#'     parquet scan: flights.parquet
+#'       columns: 5 of 41 (carrier, distance, air_time, dep_delay, arr_delay)
+#'       reader filter: distance > 1000
+#'     mutate(gain = dep_delay - arr_delay, speed = distance / air_time * 60)
+#'     filter(speed > 400, gain > 0)
+#'     select(carrier, speed, gain)
+#' filter(z > 0.5)
+#' select(carrier, z)
+#' ```
+#'
+#' * A table on the GPU, a parquet file (`parquet scan:`) or the result of a
+#'   step that ran on the CPU starts the plan, with the columns it supplies:
+#'   `columns: 5 of 41 (...)` is a scan reading 5 of the file's 41 columns.
+#'   A parquet scan also shows the comparisons the reader applies
+#'   (`reader filter:`).
+#' * A step that fell back to the CPU shows the verb, the expression, why it
+#'   could not run on the GPU (the reason of the [cuplyr-fallback] notice) and
+#'   the plan it computed at that call. The newest three CPU steps are shown;
+#'   under the oldest one the input reads `not shown (older CPU steps)`.
+#'   `compute()` drops the history.
+#' * A step that does not fit in 80 characters prints one argument per line.
+#' * A join prints its right-hand plan under `y:`.
+#'
+#' With `optimized = TRUE` the plan is what the optimizer made of the steps: the
+#' columns nothing reads are left out, consecutive `mutate()` calls are fused,
+#' filters moved and, for a parquet scan, the reader's filter and columns shown.
+#' `optimized = FALSE` shows the steps as you wrote them. An eager table has no
+#' plan: it runs each verb when it is called.
 #'
 #' @param x A `tbl_gpu` object.
-#' @param ... Not used.
+#' @param ... Must be empty.
+#' @param optimized `TRUE` (the default) prints the plan the optimizer will run,
+#'   `FALSE` the plan as written.
 #' @return `x`, invisibly.
 #'
 #' @export
 #' @importFrom dplyr show_query
-show_query.tbl_gpu <- function(x, ...) {
-  if (is.null(x$lazy_ops)) {
-    cat("No pending operations (eager mode or already computed)\n")
-  } else if (!inherits(x$lazy_ops, "ast_node")) {
-    cat("Invalid pending operations object (expected AST node)\n")
-  } else {
-    cat("Pending operations:\n")
-    print(x$lazy_ops)
-    cat("\nAST depth:", ast_depth(x$lazy_ops), "\n")
-    cat("Node count:", ast_count(x$lazy_ops), "\n")
-  }
-
+#' @examples
+#' library(dplyr)
+#' if (has_gpu()) {
+#'   q <- tbl_gpu(mtcars) |>
+#'     mutate(kpl = mpg * 0.425, hp2 = hp * 2) |>
+#'     filter(cyl == 4) |>
+#'     select(mpg, kpl)
+#'   show_query(q)
+#'   show_query(q, optimized = FALSE)
+#' }
+show_query.tbl_gpu <- function(x, ..., optimized = TRUE) {
+  rlang::check_dots_empty()
+  check_plan_optimized(optimized)
+  plan_show(x, optimized)
   invisible(x)
 }
 
@@ -309,24 +350,27 @@ dplyr::show_query
 
 #' Explain a tbl_gpu query
 #'
-#' `tbl_gpu` method for dplyr's [dplyr::explain()] generic. Prints
-#' [show_query()]'s output and, when operations are pending, the optimized
-#' plan `compute()` would run. Nothing is executed.
+#' `tbl_gpu` method for dplyr's [dplyr::explain()] generic. cuplyr has no query
+#' language apart from the plan, so it prints the same text as [show_query()];
+#' see there for the format. Nothing is executed.
 #'
-#' @param x A `tbl_gpu` object.
-#' @param ... Not used.
+#' @inheritParams show_query.tbl_gpu
 #' @return `x`, invisibly.
 #'
 #' @export
 #' @importFrom dplyr explain
-explain.tbl_gpu <- function(x, ...) {
-  show_query(x)
-  # Same condition compute() uses to decide whether it has a plan to run.
-  if (is_lazy(x) && has_pending_ops(x)) {
-    cat("\nOptimized plan:\n")
-    print(optimize_ast(x$lazy_ops))
-  }
+explain.tbl_gpu <- function(x, ..., optimized = TRUE) {
+  rlang::check_dots_empty()
+  check_plan_optimized(optimized)
+  plan_show(x, optimized)
   invisible(x)
+}
+
+# `optimized` of show_query()/explain() is one TRUE or FALSE
+check_plan_optimized <- function(optimized, call = rlang::caller_env()) {
+  if (!is.logical(optimized) || length(optimized) != 1L || is.na(optimized)) {
+    rlang::abort("`optimized` must be `TRUE` or `FALSE`.", call = call)
+  }
 }
 
 #' Source compatibility and upload for tbl_gpu
