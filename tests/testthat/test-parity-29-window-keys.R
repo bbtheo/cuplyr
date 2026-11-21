@@ -14,7 +14,9 @@
 # slice_min()/slice_max() evaluate `order_by` in the (grouped) data mask.
 #
 # cuplyr contract: the result matches dplyr in eager and lazy mode, and the
-# plain window keys below run on the GPU (no CPU fallback).
+# plain window keys below run on the GPU (no CPU fallback). Window functions
+# are written dplyr::f(): testthat does not attach dplyr, and the oracle
+# evaluates the same pipeline.
 
 w29_df <- function() {
   data.frame(
@@ -45,63 +47,63 @@ test_that("distinct() with a window key matches dplyr (the fuzz case)", {
   w29_both(x, function(t) {
     t |>
       mutate(m1 = factor("b"), .by = a) |>
-      distinct(g2 = dense_rank(k) > 1L)
+      distinct(g2 = dplyr::dense_rank(k) > 1L)
   })
 })
 
 test_that("distinct() with ranking, offset and cumulative keys matches dplyr", {
   skip_if_no_gpu()
   df <- w29_df()
-  w29_both(df, function(t) distinct(t, r = dense_rank(k)))
-  w29_both(df, function(t) distinct(t, r = min_rank(x)))
-  w29_both(df, function(t) distinct(t, r = row_number() %% 3L))
-  w29_both(df, function(t) distinct(t, p = lag(k)))
+  w29_both(df, function(t) distinct(t, r = dplyr::dense_rank(k)))
+  w29_both(df, function(t) distinct(t, r = dplyr::min_rank(x)))
+  w29_both(df, function(t) distinct(t, r = dplyr::row_number() %% 3L))
+  w29_both(df, function(t) distinct(t, p = dplyr::lag(k)))
   w29_both(df, function(t) distinct(t, s = cumsum(x > 0)))
   # an unnamed window key is named by its label
-  w29_both(df, function(t) distinct(t, dense_rank(k)))
+  w29_both(df, function(t) distinct(t, dplyr::dense_rank(k)))
   # a bare column next to a window key, and a key built from an earlier one
-  w29_both(df, function(t) distinct(t, g, r = dense_rank(k)))
-  w29_both(df, function(t) distinct(t, r = dense_rank(k), r2 = r * 2L))
+  w29_both(df, function(t) distinct(t, g, r = dplyr::dense_rank(k)))
+  w29_both(df, function(t) distinct(t, r = dplyr::dense_rank(k), r2 = r * 2L))
 })
 
 test_that("distinct() with an aggregate key matches dplyr", {
   skip_if_no_gpu()
   df <- w29_df()
   w29_both(df, function(t) distinct(t, big = x > mean(x, na.rm = TRUE)))
-  w29_both(df, function(t) distinct(t, g, m = n()))
+  w29_both(df, function(t) distinct(t, g, m = dplyr::n()))
   w29_both(df, function(t) distinct(t, m = max(k, na.rm = TRUE) - k))
 })
 
 test_that("distinct(.keep_all = TRUE) with a window key matches dplyr", {
   skip_if_no_gpu()
   df <- w29_df()
-  w29_both(df, function(t) distinct(t, r = dense_rank(k), .keep_all = TRUE))
+  w29_both(df, function(t) distinct(t, r = dplyr::dense_rank(k), .keep_all = TRUE))
   # a window key that replaces an existing column keeps its position
-  w29_both(df, function(t) distinct(t, k = dense_rank(k), .keep_all = TRUE))
+  w29_both(df, function(t) distinct(t, k = dplyr::dense_rank(k), .keep_all = TRUE))
 })
 
 test_that("grouped distinct() evaluates a window key over the whole table, like dplyr", {
   skip_if_no_gpu()
   df <- w29_df()
-  w29_both(df, function(t) t |> group_by(g) |> distinct(r = dense_rank(k)))
-  w29_both(df, function(t) t |> group_by(g) |> distinct(r = row_number() > 4L))
+  w29_both(df, function(t) t |> group_by(g) |> distinct(r = dplyr::dense_rank(k)))
+  w29_both(df, function(t) t |> group_by(g) |> distinct(r = dplyr::row_number() > 4L))
   w29_both(df, function(t) t |> group_by(g) |> distinct(k, m = mean(x, na.rm = TRUE)))
-  w29_both(df, function(t) t |> group_by(g) |> distinct(r = dense_rank(k), .keep_all = TRUE))
+  w29_both(df, function(t) t |> group_by(g) |> distinct(r = dplyr::dense_rank(k), .keep_all = TRUE))
 })
 
 test_that("distinct() with a window key on 0 rows matches dplyr", {
   skip_if_no_gpu()
   df <- w29_df()[0, ]
-  w29_both(df, function(t) distinct(t, r = dense_rank(k)))
-  w29_both(df, function(t) t |> group_by(g) |> distinct(r = dense_rank(k)))
+  w29_both(df, function(t) distinct(t, r = dplyr::dense_rank(k)))
+  w29_both(df, function(t) t |> group_by(g) |> distinct(r = dplyr::dense_rank(k)))
 })
 
 test_that("distinct() with a plain window key runs on the GPU", {
   skip_if_no_gpu()
   df <- w29_df()
-  w29_native(df, function(t) distinct(t, r = dense_rank(k)))
-  w29_native(df, function(t) distinct(t, g, r = row_number() > 4L))
-  w29_native(df, function(t) t |> group_by(g) |> distinct(r = dense_rank(k)))
+  w29_native(df, function(t) distinct(t, r = dplyr::dense_rank(k)))
+  w29_native(df, function(t) distinct(t, g, r = dplyr::row_number() > 4L))
+  w29_native(df, function(t) t |> group_by(g) |> distinct(r = dplyr::dense_rank(k)))
 })
 
 # --- count() / add_count() ----------------------------------------------------
@@ -109,41 +111,41 @@ test_that("distinct() with a plain window key runs on the GPU", {
 test_that("count() with a window key matches dplyr", {
   skip_if_no_gpu()
   df <- w29_df()
-  w29_both(df, function(t) count(t, r = dense_rank(k)))
-  w29_both(df, function(t) count(t, g, p = lag(k)))
-  w29_both(df, function(t) count(t, dense_rank(k)))
+  w29_both(df, function(t) count(t, r = dplyr::dense_rank(k)))
+  w29_both(df, function(t) count(t, g, p = dplyr::lag(k)))
+  w29_both(df, function(t) count(t, dplyr::dense_rank(k)))
   w29_both(df, function(t) count(t, big = x > mean(x, na.rm = TRUE)))
-  w29_both(df, function(t) count(t, r = dense_rank(k), sort = TRUE))
-  w29_both(df, function(t) count(t, r = dense_rank(k), wt = x))
-  w29_both(df, function(t) count(t, r = dense_rank(k), name = "rows"))
+  w29_both(df, function(t) count(t, r = dplyr::dense_rank(k), sort = TRUE))
+  w29_both(df, function(t) count(t, r = dplyr::dense_rank(k), wt = x))
+  w29_both(df, function(t) count(t, r = dplyr::dense_rank(k), name = "rows"))
 })
 
 test_that("grouped count() evaluates a window key over the whole table, like dplyr", {
   skip_if_no_gpu()
   df <- w29_df()
-  w29_both(df, function(t) t |> group_by(g) |> count(r = dense_rank(k)))
-  w29_both(df, function(t) t |> group_by(g) |> count(r = row_number() > 4L))
+  w29_both(df, function(t) t |> group_by(g) |> count(r = dplyr::dense_rank(k)))
+  w29_both(df, function(t) t |> group_by(g) |> count(r = dplyr::row_number() > 4L))
 })
 
 test_that("count() with a window key on 0 rows matches dplyr", {
   skip_if_no_gpu()
   df <- w29_df()[0, ]
-  w29_both(df, function(t) count(t, r = dense_rank(k)))
+  w29_both(df, function(t) count(t, r = dplyr::dense_rank(k)))
 })
 
 test_that("add_count() with a window key matches dplyr", {
   skip_if_no_gpu()
   df <- w29_df()
-  w29_both(df, function(t) add_count(t, r = dense_rank(k)))
-  w29_both(df, function(t) add_count(t, g, p = lag(k)))
-  w29_both(df, function(t) t |> group_by(g) |> add_count(r = dense_rank(k)))
+  w29_both(df, function(t) add_count(t, r = dplyr::dense_rank(k)))
+  w29_both(df, function(t) add_count(t, g, p = dplyr::lag(k)))
+  w29_both(df, function(t) t |> group_by(g) |> add_count(r = dplyr::dense_rank(k)))
 })
 
 test_that("count() with a plain window key runs on the GPU", {
   skip_if_no_gpu()
   df <- w29_df()
-  w29_native(df, function(t) count(t, r = dense_rank(k)))
-  w29_native(df, function(t) t |> group_by(g) |> count(r = dense_rank(k)))
+  w29_native(df, function(t) count(t, r = dplyr::dense_rank(k)))
+  w29_native(df, function(t) t |> group_by(g) |> count(r = dplyr::dense_rank(k)))
 })
 
 # --- slice_min() / slice_max() order_by ---------------------------------------
@@ -151,8 +153,8 @@ test_that("count() with a plain window key runs on the GPU", {
 test_that("slice_min()/slice_max() with a window order_by matches dplyr", {
   skip_if_no_gpu()
   df <- w29_df()
-  w29_both(df, function(t) slice_min(t, dense_rank(k), n = 2))
-  w29_both(df, function(t) slice_max(t, row_number(), n = 3))
-  w29_both(df, function(t) t |> group_by(g) |> slice_max(row_number(), n = 1))
-  w29_both(df, function(t) t |> group_by(g) |> slice_min(lag(x), n = 1))
+  w29_both(df, function(t) slice_min(t, dplyr::dense_rank(k), n = 2))
+  w29_both(df, function(t) slice_max(t, dplyr::row_number(), n = 3))
+  w29_both(df, function(t) t |> group_by(g) |> slice_max(dplyr::row_number(), n = 1))
+  w29_both(df, function(t) t |> group_by(g) |> slice_min(dplyr::lag(x), n = 1))
 })
