@@ -98,7 +98,7 @@ test_that("an unknown object in an ungrouped mutate() is a dplyr:::mutate_error"
   p30_same_error(df, function(d) mutate(d, m1 = a + no_such_col))
   p30_same_error(df, function(d) mutate(d, no_such_col * 2))
   p30_same_error(df, function(d) mutate(d, a2 = a, m1 = no_such_col))
-  p30_same_error(df, function(d) mutate(d, m1 = if_else(a > 1L, no_such_col, 0)))
+  p30_same_error(df, function(d) mutate(d, m1 = dplyr::if_else(a > 1L, no_such_col, 0)))
 })
 
 test_that("a grouped mutate() error names group 1 (sorted groups)", {
@@ -168,7 +168,7 @@ test_that("an unknown object inside a window call is wrapped", {
   skip_if_no_gpu()
   df <- p30_df()
   p30_same_error(df, function(d) mutate(d, m1 = cumsum(no_such_col)))
-  p30_same_error(df, function(d) d |> group_by(g) |> mutate(m1 = lag(no_such_col)))
+  p30_same_error(df, function(d) d |> group_by(g) |> mutate(m1 = dplyr::lag(no_such_col)))
   p30_same_error(df, function(d) mutate(d, m1 = mean(no_such_col), .by = s))
 })
 
@@ -207,8 +207,8 @@ test_that("a grouped across() selection error has no group bullet", {
 test_that("if_any()/if_all() selection errors inside mutate() are wrapped", {
   skip_if_no_gpu()
   df <- p30_df()
-  p30_same_error(df, function(d) mutate(d, m = if_any(no_such_col, is.na)))
-  p30_same_error(df, function(d) mutate(d, m = if_all(c(a, no_such_col), ~ .x > 0)))
+  p30_same_error(df, function(d) mutate(d, m = dplyr::if_any(no_such_col, is.na)))
+  p30_same_error(df, function(d) mutate(d, m = dplyr::if_all(c(a, no_such_col), ~ .x > 0)))
 })
 
 # =============================================================================
