@@ -56,17 +56,16 @@ test_that("large columns raise device usage even with half-used pages", {
   skip_if_no_gpu()
 
   # A claim about the CUDA driver (device-level usage), which cuplyr's memory
-  # pool would hide: it runs in a process with the pool switched off.
+  # pool would hide: it runs in a process with the pool switched off. Device
+  # usage is read as that process's own device memory, so other GPU users
+  # don't move it.
   out <- run_with_pool_off(function() {
     tabs <- lapply(1:60, function(i) tbl_gpu(data.frame(x = runif(1e5))))
     tabs[seq(1L, 60L, by = 2L)] <- list(NULL)
     gc(full = TRUE)
     Sys.sleep(0.1)
     gc(full = TRUE)
-    used <- function() {
-      info <- gpu_details()
-      info$total_memory - info$free_memory
-    }
+    used <- function() as.numeric(gpu_own_device_used_bytes())
 
     df <- as.data.frame(matrix(runif(1e6 * 5), ncol = 5))
     gc(full = TRUE)

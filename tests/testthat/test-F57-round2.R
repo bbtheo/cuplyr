@@ -16,9 +16,11 @@
 # Run `fn(load)` in a fresh R process that has loaded this worktree (no compile,
 # the library is already built) with the environment variables `env` set.
 # `load()` loads it again (a reload). callr ships `fn` without its environment,
-# so `fn` only uses package functions (export_all = TRUE) and `load`.
+# so `fn` only uses package functions (export_all = TRUE), `load` and
+# gpu_own_device_used_bytes() (this process's own device memory).
+# The process starts through gpu_child_r(), which frees this process's cached
+# GPU memory first.
 f57r2_subprocess <- function(fn, env = character(), globals = list()) {
-  skip_if_not_installed("callr")
   skip_if_not_installed("pkgload")
   root <- normalizePath(testthat::test_path("..", ".."), mustWork = TRUE)
   # Functions in `globals` are re-homed to the subprocess's global environment.
@@ -26,7 +28,7 @@ f57r2_subprocess <- function(fn, env = character(), globals = list()) {
     environment(f) <- globalenv()
     f
   })
-  callr::r(
+  gpu_child_r(
     function(root, fn, globals) {
       list2env(globals, envir = globalenv())
       load <- function() {
@@ -38,8 +40,7 @@ f57r2_subprocess <- function(fn, env = character(), globals = list()) {
       fn(load)
     },
     args = list(root = root, fn = fn, globals = globals),
-    env = c(callr::rcmd_safe_env(), env),
-    timeout = 600
+    env = env
   )
 }
 
@@ -118,10 +119,12 @@ test_that("reloading with live tables reuses the memory resource instead of orph
   skip_if_no_gpu()
   out <- f57r2_subprocess(function(load) {
     s0 <- gpu_memory_state()
+    own0 <- gpu_own_device_used_bytes()
     # No live table: the one resource is reused, nothing is freed or added.
     load()
     load()
     s_empty <- gpu_memory_state()
+    own_empty <- gpu_own_device_used_bytes()
 
     keep <- list()
     for (i in 1:3) {
@@ -129,22 +132,27 @@ test_that("reloading with live tables reuses the memory resource instead of orph
       load()
     }
     s_live <- gpu_memory_state()
+    own_live <- gpu_own_device_used_bytes()
     readable <- nrow(dplyr::collect(keep[[1]]))
     last <- dplyr::collect(dplyr::mutate(keep[[3]], y = x * 2))
     rm(keep, last)
     invisible(gc(full = TRUE))
     invisible(gc(full = TRUE))
     s1 <- gpu_memory_state()
-    list(s0 = s0, s_empty = s_empty, s_live = s_live, s1 = s1, readable = readable)
+    own1 <- gpu_own_device_used_bytes()
+    list(s0 = s0, s_empty = s_empty, s_live = s_live, s1 = s1, readable = readable,
+         own0 = as.numeric(own0), own_empty = as.numeric(own_empty),
+         own_live = as.numeric(own_live), own1 = as.numeric(own1))
   }, env = c(CUPLYR_MEMORY_POOL = "true", CUPLYR_MEMORY_RESOURCE = "pool"))
 
   mib <- 2^20
   expect_identical(out$readable, 100000L)
   expect_identical(out$s1$resource, "pool")
-  # What the device holds does not grow with each reload...
-  expect_lt(out$s_empty$used_bytes - out$s0$used_bytes, 128 * mib)
-  expect_lt(out$s_live$used_bytes - out$s0$used_bytes, 128 * mib)
-  expect_lt(out$s1$used_bytes - out$s0$used_bytes, 128 * mib)
+  # What the device holds for this process (its own device memory, which other
+  # GPU users don't move) does not grow with each reload...
+  expect_lt(out$own_empty - out$own0, 128 * mib)
+  expect_lt(out$own_live - out$own0, 128 * mib)
+  expect_lt(out$own1 - out$own0, 128 * mib)
   # ... and gpu_memory_state() reports the one resource, with the tables freed.
   expect_gte(out$s1$pool_bytes, 1)
   expect_lt(out$s1$pool_used_bytes - out$s0$pool_used_bytes, 16 * mib)
@@ -212,13 +220,17 @@ test_that("mutate() treats a forwarded missing .by/.before/.after as an error, a
   expect_same_as_dplyr(df, function(d) mutate(d, n = 1, .by = NULL, .before = NULL, .after = NULL))
 })
 
-# Upload 1e6 doubles (8,000,000 bytes) and report where they went. Shipped to the
-# subprocess as an argument of `fn`, so it only uses package functions.
+# Upload 1e6 doubles (8,000,000 bytes) and report where they went; `device_used`
+# is this process's own device memory (other GPU users don't move it). Shipped to
+# the subprocess as an argument of `fn`, so it only uses package functions and
+# gpu_own_device_used_bytes().
 f57r3_probe <- function() {
   invisible(gc(full = TRUE))
   s0 <- gpu_memory_state()
+  own0 <- gpu_own_device_used_bytes()
   g <- tbl_gpu(data.frame(v = runif(1e6)), lazy = FALSE)
   s1 <- gpu_memory_state()
+  own1 <- gpu_own_device_used_bytes()
   tr <- gpu_alloc_tracking(tbl_gpu(data.frame(v = runif(1e6)), lazy = FALSE))
   held <- tr$held_bytes
   rm(g)
@@ -227,7 +239,7 @@ f57r3_probe <- function() {
   invisible(gc(full = TRUE))
   list(resource = s1$resource, pool_bytes = s1$pool_bytes,
        pool_used = s1$pool_used_bytes - s0$pool_used_bytes,
-       device_used = s1$used_bytes - s0$used_bytes,
+       device_used = as.numeric(own1) - as.numeric(own0),
        held = held, freed = freed)
 }
 
@@ -271,6 +283,7 @@ test_that("no value of the old hand-over option crashes a load or adds a resourc
     df <- data.frame(g = c(1L, 2L, 1L, 2L, 3L), x = c(5, 1, 4, 2, 3))
     keep <- tbl_gpu(df, lazy = FALSE)
     start <- gpu_memory_state()
+    own_start <- gpu_own_device_used_bytes()
     h <- getOption(".cuplyr_mr_handle")
     junk <- list(
       stale_double = c(1, 4096), na = NA, minus_one = -1, nan = c(NaN, NaN),
@@ -292,7 +305,7 @@ test_that("no value of the old hand-over option crashes a load or adds a resourc
       res[[nm]] <- p
     }
     res$kept <- nrow(dplyr::collect(keep))
-    res$grew <- gpu_memory_state()$used_bytes - start$used_bytes
+    res$grew <- as.numeric(gpu_own_device_used_bytes()) - as.numeric(own_start)
     res$start_pool <- start$pool_bytes
     res
   }, env = c(CUPLYR_MEMORY_POOL = "true", CUPLYR_MEMORY_RESOURCE = "pool",

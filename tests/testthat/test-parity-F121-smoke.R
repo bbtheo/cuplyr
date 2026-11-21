@@ -12,6 +12,8 @@ f121_read_csv <- function(dir, name) {
 }
 
 f121_run_driver <- function(pp_list) {
+  # The driver starts GPU child processes: give them this process's cached memory.
+  gpu_free_for_child()
   driver <- f121_file("bench/parquet-pipeline.R")
   assign("PP", pp_list, envir = globalenv())
   on.exit(rm("PP", envir = globalenv()), add = TRUE)

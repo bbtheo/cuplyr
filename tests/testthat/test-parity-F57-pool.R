@@ -28,11 +28,10 @@ f57_pkg_root <- function() {
 # which is f57_state_fn() re-homed to the global environment.
 f57_subprocess <- function(fn = function(state) state(), env = character(),
                            opts = list(), reload = FALSE) {
-  skip_if_not_installed("callr")
   skip_if_not_installed("pkgload")
   state <- f57_state_fn
   environment(state) <- globalenv()
-  callr::r(
+  gpu_child_r(
     function(root, opts, fn, reload, state) {
       if (length(opts)) options(opts)
       load <- function() {
@@ -46,8 +45,7 @@ f57_subprocess <- function(fn = function(state) state(), env = character(),
     },
     args = list(root = f57_pkg_root(), opts = opts, fn = fn, reload = reload,
                 state = state),
-    env = c(callr::rcmd_safe_env(), env),
-    timeout = 600
+    env = env
   )
 }
 

@@ -458,12 +458,14 @@ test_that("tbl_gpu() allocates GPU memory", {
 
   gc_gpu()
 
-  before <- gpu_memory_snapshot()
+  # Allocator level: bytes allocated from cuplyr's resource, which other
+  # processes on the GPU don't move.
+  before <- gpu_alloc_snapshot()
   gpu_df <- tbl_gpu(mtcars)
-  after <- gpu_memory_snapshot()
+  after <- gpu_alloc_snapshot()
 
-  # Verify memory was allocated
-  expect_true(after$used_memory >= before$used_memory)
+  # Verify memory was allocated: the data is 32 rows * 11 columns * 8 bytes
+  expect_gte(gpu_memory_diff(before, after), 0.95 * 32 * 11 * 8)
 })
 
 test_that("tbl_gpu() GPU memory is freed on garbage collection", {
@@ -471,7 +473,7 @@ test_that("tbl_gpu() GPU memory is freed on garbage collection", {
 
   # Force clean state
   gc_gpu()
-  before <- gpu_memory_snapshot()
+  before <- gpu_alloc_snapshot()
 
   # Create and immediately discard GPU table
   local({
@@ -481,12 +483,13 @@ test_that("tbl_gpu() GPU memory is freed on garbage collection", {
 
   # Force garbage collection
   gc_gpu()
-  after <- gpu_memory_snapshot()
+  after <- gpu_alloc_snapshot()
 
-  # Memory should be approximately back to before
-  # (allowing some tolerance for other processes)
+  # Allocator readings don't carry other processes' memory, so the tolerance
+  # only has to be tight enough to catch a leak of the 100000 x 5 doubles
+  # (4 MB) table: usage is back to under half of it.
   diff <- after$used_memory - before$used_memory
-  tolerance <- 50 * 1024 * 1024  # 50 MB tolerance
+  tolerance <- 100000 * 5 * 8 * 0.5
 
   expect_true(
     diff < tolerance,
