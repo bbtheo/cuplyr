@@ -2,19 +2,71 @@
 % Please edit documentation in R/compute.R
 \name{show_query.tbl_gpu}
 \alias{show_query.tbl_gpu}
-\title{Show pending operations for a lazy tbl_gpu}
+\title{Show the plan of a lazy tbl_gpu}
 \usage{
-\method{show_query}{tbl_gpu}(x, ...)
+\method{show_query}{tbl_gpu}(x, ..., optimized = TRUE)
 }
 \arguments{
 \item{x}{A \code{tbl_gpu} object.}
 
-\item{...}{Not used.}
+\item{...}{Must be empty.}
+
+\item{optimized}{\code{TRUE} (the default) prints the plan the optimizer will run,
+\code{FALSE} the plan as written.}
 }
 \value{
 \code{x}, invisibly.
 }
 \description{
-\code{tbl_gpu} method for dplyr's \code{\link[dplyr:show_query]{dplyr::show_query()}} generic. Prints the
-pending AST (nothing is executed).
+\code{tbl_gpu} methods for dplyr's \code{\link[dplyr:show_query]{dplyr::show_query()}} and \code{\link[dplyr:explain]{dplyr::explain()}}
+generics. Both print the same plan as R code and run nothing: no data is
+read and no GPU work is done. A plan prints in pipeline order, source first,
+one step per line, each step as the dplyr call it stands for:
+}
+\details{
+\if{html}{\out{<div class="sourceCode">}}\preformatted{<cuplyr plan: optimized>
+CPU fallback: mutate() for pnorm(gain / 10)
+  reason: `pnorm()` has no GPU implementation.
+  columns: 2 of 4 (carrier, z)
+  input (computed at the mutate() call):
+    parquet scan: flights.parquet
+      columns: 5 of 41 (carrier, distance, air_time, dep_delay, arr_delay)
+      reader filter: distance > 1000
+    mutate(gain = dep_delay - arr_delay, speed = distance / air_time * 60)
+    filter(speed > 400, gain > 0)
+    select(carrier, speed, gain)
+filter(z > 0.5)
+select(carrier, z)
+}\if{html}{\out{</div>}}
+\itemize{
+\item A table on the GPU, a parquet file (\verb{parquet scan:}) or the result of a
+step that ran on the CPU starts the plan, with the columns it supplies:
+\verb{columns: 5 of 41 (...)} is a scan reading 5 of the file's 41 columns.
+A parquet scan also shows the comparisons the reader applies
+(\verb{reader filter:}).
+\item A step that fell back to the CPU shows the verb, the expression, why it
+could not run on the GPU (the reason of the \link{cuplyr-fallback} notice) and
+the plan it computed at that call. The newest three CPU steps are shown;
+under the oldest one the input reads \verb{not shown (older CPU steps)}.
+\code{compute()} drops the history.
+\item A step that does not fit in 80 characters prints one argument per line.
+\item A join prints its right-hand plan under \verb{y:}.
+}
+
+With \code{optimized = TRUE} the plan is what the optimizer made of the steps: the
+columns nothing reads are left out, consecutive \code{mutate()} calls are fused,
+filters moved and, for a parquet scan, the reader's filter and columns shown.
+\code{optimized = FALSE} shows the steps as you wrote them. An eager table has no
+plan: it runs each verb when it is called.
+}
+\examples{
+library(dplyr)
+if (has_gpu()) {
+  q <- tbl_gpu(mtcars) |>
+    mutate(kpl = mpg * 0.425, hp2 = hp * 2) |>
+    filter(cyl == 4) |>
+    select(mpg, kpl)
+  show_query(q)
+  show_query(q, optimized = FALSE)
+}
 }

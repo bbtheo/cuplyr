@@ -4,18 +4,21 @@
 \alias{explain.tbl_gpu}
 \title{Explain a tbl_gpu query}
 \usage{
-\method{explain}{tbl_gpu}(x, ...)
+\method{explain}{tbl_gpu}(x, ..., optimized = TRUE)
 }
 \arguments{
 \item{x}{A \code{tbl_gpu} object.}
 
-\item{...}{Not used.}
+\item{...}{Must be empty.}
+
+\item{optimized}{\code{TRUE} (the default) prints the plan the optimizer will run,
+\code{FALSE} the plan as written.}
 }
 \value{
 \code{x}, invisibly.
 }
 \description{
-\code{tbl_gpu} method for dplyr's \code{\link[dplyr:explain]{dplyr::explain()}} generic. Prints
-\code{\link[=show_query]{show_query()}}'s output and, when operations are pending, the optimized
-plan \code{compute()} would run. Nothing is executed.
+\code{tbl_gpu} method for dplyr's \code{\link[dplyr:explain]{dplyr::explain()}} generic. cuplyr has no query
+language apart from the plan, so it prints the same text as \code{\link[=show_query]{show_query()}};
+see there for the format. Nothing is executed.
 }
