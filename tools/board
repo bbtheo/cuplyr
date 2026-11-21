@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Read and update the roadmap board (GitHub Project "cuplyr roadmap").
+#
+#   tools/board list [<status>]        # board order: position, issue, status, area, labels, title
+#   tools/board next                   # first Approved issue without the tbd label
+#   tools/board show <issue>           # status, area and position of one issue
+#   tools/board add <issue> [<status>] # put an issue on the board (default Proposed), at the bottom
+#   tools/board status <issue> <status>
+#
+# The board order is the priority order: the top item is next. Statuses:
+# Proposed, Approved, In progress, In review, Done, Not planned. Moving an
+# item to Approved is a maintainer's decision; this script does it only when
+# asked by name. Needs a gh login with the `project` scope.
+source "$(dirname "$0")/lib.sh"
+
+owner="${CUPLYR_BOARD_OWNER:-bbtheo}"
+number="${CUPLYR_BOARD_NUMBER:-1}"
+repo="${CUPLYR_BOARD_REPO:-bbtheo/cuplyr}"
+statuses="Proposed|Approved|In progress|In review|Done|Not planned"
+
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+die() { echo "tools/board: $1" >&2; exit 1; }
+check_status() {
+  grep -Eqx "$statuses" <<<"$1" || die "unknown status '$1' (one of: ${statuses//|/, })"
+}
+
+items() {
+  gh project item-list "$number" --owner "$owner" --limit 1000 --format json
+}
+project_id() {
+  gh project view "$number" --owner "$owner" --format json --jq .id
+}
+# Status field id and the option id for a status name.
+status_ids() {
+  gh project field-list "$number" --owner "$owner" --format json |
+    jq -r --arg s "$1" '.fields[] | select(.name == "Status") |
+      [.id, (.options[] | select(.name == $s) | .id)] | @tsv'
+}
+item_id() {
+  items | jq -r --argjson n "$1" \
+    '[.items[] | select(.content.type == "Issue" and .content.number == $n)][0].id // empty'
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  list)
+    [[ $# -le 1 ]] || usage
+    [[ $# == 0 ]] || check_status "$1"
+    items | jq -r --arg s "${1:-}" '
+      .items | to_entries[]
+      | select(.value.content.type == "Issue")
+      | select($s == "" or .value.status == $s)
+      | [.key + 1, .value.content.number, (.value.status // "-"), (.value.area // "-"),
+         ((.value.labels // []) | join(",")), .value.content.title] | @tsv'
+    ;;
+  next)
+    [[ $# == 0 ]] || usage
+    items | jq -r '
+      [.items[] | select(.content.type == "Issue" and .status == "Approved"
+                         and (((.labels // []) | index("tbd")) | not))][0].content.number // empty'
+    ;;
+  show)
+    [[ $# == 1 ]] || usage
+    items | jq -r --argjson n "$1" '
+      .items | to_entries[]
+      | select(.value.content.type == "Issue" and .value.content.number == $n)
+      | "issue #\($n): \(.value.status // "-"), area \(.value.area // "-"), position \(.key + 1)"'
+    ;;
+  add)
+    [[ $# -ge 1 && $# -le 2 ]] || usage
+    st="${2:-Proposed}"; check_status "$st"
+    [[ -z "$(item_id "$1")" ]] || die "issue #$1 is already on the board"
+    id="$(gh project item-add "$number" --owner "$owner" \
+          --url "https://github.com/$repo/issues/$1" --format json --jq .id)"
+    IFS=$'\t' read -r field opt < <(status_ids "$st")
+    gh project item-edit --id "$id" --project-id "$(project_id)" \
+      --field-id "$field" --single-select-option-id "$opt" >/dev/null
+    echo "issue #$1 added as $st"
+    ;;
+  status)
+    [[ $# == 2 ]] || usage
+    check_status "$2"
+    id="$(item_id "$1")"
+    [[ -n "$id" ]] || die "issue #$1 is not on the board (tools/board add $1)"
+    IFS=$'\t' read -r field opt < <(status_ids "$2")
+    gh project item-edit --id "$id" --project-id "$(project_id)" \
+      --field-id "$field" --single-select-option-id "$opt" >/dev/null
+    echo "issue #$1 -> $2"
+    ;;
+  *) usage ;;
+esac

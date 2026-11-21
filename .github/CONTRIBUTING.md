@@ -7,7 +7,8 @@ Bug reports, feature ideas, documentation fixes and code are all welcome.
 ## How work moves
 
 1. Every bug and feature starts as a [GitHub issue](https://github.com/bbtheo/cuplyr/issues).
-   The issue is where the approach gets discussed and agreed.
+   The issue is where the approach gets discussed and agreed. Issues are
+   ordered on the [roadmap board](#the-roadmap-board).
 2. Every change lands through a pull request that links its issue with
    `Fixes #123`. The maintainer and coding agents work this way too.
 3. A maintainer runs [the merge gate](#the-merge-gate) on the pull request
@@ -17,6 +18,33 @@ Bug reports, feature ideas, documentation fixes and code are all welcome.
 
 Typos and small documentation fixes can skip the issue. Open the pull
 request directly.
+
+## The roadmap board
+
+The [roadmap board](https://github.com/users/bbtheo/projects/1) shows every
+open issue in priority order: the top of the list is worked on first. Each
+issue has a status:
+
+| Status | Meaning |
+|---|---|
+| Proposed | A report or an idea. Discussion is welcome; nothing is agreed yet. |
+| Approved | Agreed and ready to pick up, with the approach in the issue. |
+| In progress | Someone is working on it. |
+| In review | A pull request is open. |
+| Done | Merged. |
+| Not planned | Decided against; the issue says why. |
+
+New issues start as Proposed. A maintainer moves an issue to Approved once
+the problem and the approach are clear, and sets the order.
+
+The `tbd` label marks an open question: a design choice, a trade-off, or
+whether a difference from dplyr is worth fixing. The question is in the
+issue's comments. If you have a view or a use case, say so there; that is
+one of the most useful things an outside contributor can do.
+
+To pick up an issue, choose one that is Approved, ideally labelled
+`good first issue ❤️` or `help wanted ❤️`, and comment that you are taking
+it. A maintainer moves it to In progress so nobody else starts the same work.
 
 ## Scope
 
@@ -69,7 +97,8 @@ Open an issue and show the code you want to work. Wait until a maintainer
 agrees on the approach before you write a large pull request.
 
 Issues labelled `help wanted ❤️` are agreed and open to anyone. Comment on the
-issue before you start so two people don't do the same work.
+issue before you start so two people don't do the same work (see
+[the roadmap board](#the-roadmap-board)).
 
 ## Pull requests
 

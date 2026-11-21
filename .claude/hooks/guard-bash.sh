@@ -32,8 +32,13 @@ fi
 if grep -q 'perf-ratchet' <<<"$cmd" && grep -q 'perf_baseline\.json' <<<"$cmd"; then
   deny "tools/perf-ratchet on the real perf baseline is tools/merge-queue's job after a passing gate. Use a temp copy to test it."
 fi
-if grep -Eq 'perf_baseline\.json|conformance_baseline\.tsv' <<<"$cmd" &&
-   grep -Eq '>|sed[[:space:]]+-i|(^|[[:space:]])(cp|mv|rm|tee|truncate|dd)[[:space:]]' <<<"$cmd"; then
+# Reading a baseline is fine (cat, awk 'NR>1', diff ...); writing it is not:
+# a redirect into it, or a file-writing command on the same line.
+bl='(perf_baseline\.json|conformance_baseline\.tsv)'
+if grep -Eq "$bl" <<<"$cmd" &&
+   { grep -Eq ">>?[[:space:]]*[^[:space:]&|;]*$bl" <<<"$cmd" ||
+     grep -Eq 'sed[[:space:]]+-i|(^|[[:space:];&|(])(cp|mv|rm|tee|truncate|dd|ln)[[:space:]]' <<<"$cmd" ||
+     grep -Eq "(write|saveRDS|writeLines|write_tsv|fwrite|open\([^)]*['\"][wa])" <<<"$cmd"; }; then
   deny "the perf and conformance baselines are not writable by agents. tools/merge-queue ratchets both after a passing gate; raising a perf entry is Theo's (tools/perf-baseline-set)."
 fi
 # Pushing: only a feature branch, by name, to origin, and never forced:
