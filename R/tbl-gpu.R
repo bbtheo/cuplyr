@@ -701,12 +701,15 @@ zero_column_dim <- function(x) {
 # accounting, join-size warnings) that must never execute a plan, which
 # `dim()` does.
 base_dim <- function(x) {
-  if (length(x$schema$names) == 0L) {
+  # (.subset2(): no `$` dispatch, verbs ask this on their hot path)
+  n_cols <- length(.subset2(.subset2(x, "schema"), "names"))
+  ptr <- .subset2(x, "ptr")
+  if (n_cols == 0L) {
     zero_column_dim(x)
-  } else if (is.null(x$ptr)) {
-    c(NA_integer_, length(x$schema$names))
+  } else if (is.null(ptr)) {
+    c(NA_integer_, n_cols)
   } else {
-    gpu_dim(x$ptr)
+    gpu_dim(ptr)
   }
 }
 

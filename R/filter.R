@@ -687,6 +687,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # every dot's (possibly rewritten) predicate, in original dot order.
   # (set when a lazy call runs at the verb, see the integer-sum rule below)
   back_to_lazy <- FALSE
+  mm <- NULL  # (F124: the window min()/max() state of the call)
   if (length(window_idx) > 0) {
     window_exprs <- stats::setNames(
       parsed[window_idx],
@@ -743,13 +744,43 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       eager <- TRUE
       back_to_lazy <- TRUE
     }
+    # F124: the empty groups of a call with window min()/max() (their warning
+    # is dplyr's; the predicate is the same whatever the type). A lazy table's
+    # plan carries the warning for an empty input; when the grouping keeps empty
+    # groups that pending steps may leave, the steps run now (the computed
+    # table is used from here on, nothing runs twice) and the result goes
+    # back to lazy. Nothing is built when no group can be empty
+    # (minmax_win_open() gives NULL).
+    if (minmax_dots_mention(dots)) {
+      # (the frame of filter.tbl_gpu(), the caller of filter_impl(), for the
+      # call head of the warning)
+      verb_frame <- sys.parent(2L)
+      mm <- minmax_win_open(.data, !quo_is_null_fast(by_quo),
+                            if (complement) "filter_out" else "filter", verb_frame,
+                            user_dots, dots, origin, typed = FALSE)
+      for (i in window_idx) {
+        minmax_record_dot(mm, i, parsed[[i]], schema)
+      }
+      if (minmax_win_needs_run(mm)) {
+        .data <- plan_run_now(.data, if (complement) "filter_out" else "filter",
+                              "a min()/max() over groups that may be empty (their warning names them)",
+                              notice_data = if (mask_ran_plan) .data else fallback_data)
+        fallback_data <- if (isTRUE(cgid$used)) plan_now_columns(.data, real_orig_names) else .data
+        eager <- TRUE
+        back_to_lazy <- TRUE
+        minmax_win_set_setup(mm, minmax_window_setup(.data, !quo_is_null_fast(by_quo)))
+      }
+    }
+    minmax_prep <- minmax_win_lazy_prep(mm)
     push_stages <- function(d) {
       for (stage in plan$stages) {
         if (length(stage$pre) > 0) {
           d <- push_op(d, ast_mutate(input_node(d), stage$pre))
         }
         d <- push_op(d, ast_window(input_node(d), stage$specs, verb_groups,
-                                   on_sum_overflow = if (eager) "error" else "double"))
+                                   on_sum_overflow = if (eager) "error" else "double",
+                                   minmax_warn = minmax_prep))
+        minmax_prep <<- NULL
       }
       d
     }
@@ -879,6 +910,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     .data <- push_op(.data, ast_select(input_node(.data), real_orig_names))
   }
 
+  minmax_win_emit(mm)
   if (back_to_lazy) plan_back_to_lazy(.data) else .data
 }
 

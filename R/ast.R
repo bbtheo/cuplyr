@@ -288,10 +288,18 @@ ast_slice <- function(input, mode, amount = NULL, is_prop = NULL,
 #'   type (lazy `filter()`'s predicate). A spec's own `on_sum_overflow` field,
 #'   when set, overrides this for that spec (`filter()` sets `"error"` on a sum
 #'   a later stage consumes).
+#' @param minmax_warn (F124) `NULL`, or the prepared dplyr warning of a window
+#'   `min()`/`max()` call whose verb could not know the input's row count
+#'   (`minmax_win_lazy_prep()`): lowering signals it when the node's input has no
+#'   rows.
 #' @return An ast_window node
 #' @keywords internal
 ast_window <- function(input, specs, group_cols = character(),
-                       on_sum_overflow = "error") {
+                       on_sum_overflow = "error", minmax_warn = NULL) {
+  if (!is.null(minmax_warn)) {
+    return(ast_node("window", input = input, specs = specs, group_cols = group_cols,
+                    on_sum_overflow = on_sum_overflow, minmax_warn = minmax_warn))
+  }
   ast_node("window", input = input, specs = specs, group_cols = group_cols,
            on_sum_overflow = on_sum_overflow)
 }
@@ -599,10 +607,11 @@ infer_mutate_output_type <- function(op, input_types, scalar) {
 #'   `min()`/`max()` over an INT32/FLOAT64 column apply base R's empty-vector
 #'   identity (`Inf`/`-Inf`, with dplyr's warning) for an empty group, which
 #'   promotes an INT32 result column to FLOAT64 when it happens; see
-#'   `gpu_summarise()` (`src/ops_groupby.cpp`). `FALSE` would keep the result
-#'   INT32 and never warn, but nothing calls it with `FALSE` today. Only
-#'   meaningful for `min`/`max` over INT32/FLOAT64; stored as `FALSE` for
-#'   everything else.
+#'   `gpu_summarise()` (`src/ops_groupby.cpp`). A STRING or Date/POSIXct one
+#'   (F124) keeps its null value but is counted the same way, for dplyr's
+#'   warning. `FALSE` would keep the result INT32 and never warn, but nothing
+#'   calls it with `FALSE` today. Only meaningful for `min`/`max` over
+#'   INT32/FLOAT64/STRING/timestamps; stored as `FALSE` for everything else.
 #' @return An aggregation list structure
 #' @keywords internal
 make_aggregation <- function(output_col, input_col, fn, input_type = NULL, na_rm = FALSE,
@@ -643,7 +652,8 @@ make_aggregation <- function(output_col, input_col, fn, input_type = NULL, na_rm
     na_rm = isTRUE(na_rm),
     extra = as.double(extra),
     identity = isTRUE(identity) && fn %in% c("min", "max") &&
-      !is.null(input_type) && unname(input_type) %in% c("INT32", "FLOAT64")
+      !is.null(input_type) &&
+      unname(input_type) %in% c("INT32", "FLOAT64", "STRING", cuplyr_timestamp_types)
   )
 }
 
