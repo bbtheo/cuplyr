@@ -37,9 +37,10 @@ p30_err <- function(x, pipeline) {
   )
 }
 
-# The bullets of an rlang error's own message (no parent), as plain strings.
+# The bullets of an rlang error's own message (no parent), as plain strings:
+# rlang keeps the first in `message` and the rest (the group bullet) in `body`.
 p30_bullets <- function(e) {
-  m <- e$message
+  m <- c(e$message, if (is.character(e$body)) e$body)
   stats::setNames(as.character(m), names(m))
 }
 
