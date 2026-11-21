@@ -29,10 +29,16 @@ R version, and required R packages.
 The following checks are performed:
 \enumerate{
 \item \strong{NVIDIA Driver}: Verifies \code{nvidia-smi} is available and reports
-driver version
+the driver version, read with \code{nvidia-smi --query-gpu=driver_version}
+and, failing that, from the \verb{Driver Version:} or \verb{KMD Version:} header
 \item \strong{CUDA Toolkit}: Checks for \code{nvcc}, validates CUDA >= 12.2, and
 reports CUDA version
-\item \strong{libcudf}: Looks for cudf headers in standard paths
+\item \strong{libcudf}: Reports the libcudf that cuplyr has loaded, if any.
+Otherwise looks for cudf headers and \code{libcudf.so} under \code{CUDF_HOME},
+\code{CONDA_PREFIX}, the pixi environment (\code{PIXI_PROJECT_ROOT}, or \code{.pixi}
+in the working directory) and standard paths. A \code{CUDF_HOME} or
+\code{CONDA_PREFIX} that points to a missing directory is named in the
+message but does not fail the check by itself.
 \item \strong{R Version}: Checks R >= 4.3.0
 \item \strong{R Packages}: Verifies required R packages are installed
 \item \strong{GPU Access}: Tests if a GPU device is accessible (if cuplyr

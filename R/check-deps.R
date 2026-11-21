@@ -286,7 +286,8 @@ check_libcudf <- function(search_paths = NULL) {
   }
 
   if (length(notes) > 0) {
-    res$message <- paste0(res$message, ". Note: ", paste(notes, collapse = "; "), ".")
+    base <- sub("\\.$", "", res$message)
+    res$message <- paste0(base, ". Note: ", paste(notes, collapse = "; "), ".")
   }
   res
 }
