@@ -141,12 +141,8 @@ p78_timer_allow <- c(
     "1 s bound for has_gpu()",
   "test-parity-F49-rowwise-rewrites.R :: a 1e5-row rowwise sum/mean runs natively and in well under the CPU time" =
     "5 s bound; dplyr's per-row route takes ~20 s",
-  "test-parity-F59-median.R :: F59: roll_median() at 1e6 rows takes well under a second; the sorted engine a few seconds" =
-    "frollmedian ~20 ms vs 1 s; the sorted engine ~0.2 s vs 5 s",
   "test-parity-F66-median-exact.R :: F66: the exact default stays fast at 1e6 rows for w = 11/101/1001" =
-    "~0.2 s vs 2 s",
-  "test-parity-F61-recode.R :: f61r_time" =
-    "recode 32-35 ms vs bounds of 0.5 s or dplyr's own 0.4-0.6 s",
+    "0.14-0.21 s vs 2 s (measured 2026-11-22)",
   # not speed checks
   "helper-parity-F63.R :: f63_render" =
     "reports how long a render took; no bound",
@@ -177,7 +173,12 @@ p78_timer_converted <- list(
   c("test-parity-F61-group-split.R", "native group_split() at 10,000 groups on 1e6 rows reaches CPU parity"),
   c("test-parity-F59-rolling.R", "F59: narrow windows are no slower than dev, and wide windows cost about the same (ungrouped 1e7, grouped 2e6)"),
   c("test-F93-options-extra.R", "F93x: the unset lookup of the per-group readers stays cheap"),
-  c("test-parity-F18-factor-rule.R", "F18 rule: the factor check is linear in expression size (wide if_any)")
+  c("test-parity-F18-factor-rule.R", "F18 rule: the factor check is linear in expression size (wide if_any)"),
+  # measured 2026-11-22: frollmedian at w = 1001 takes 0.74-0.79 s against its
+  # 1 s bound; recode() 0.21-0.30 s against 0.5 s, and about half of dplyr's time
+  c("test-parity-F59-median.R", "F59: roll_median() at 1e6 rows takes well under a second; the sorted engine a few seconds"),
+  c("test-parity-F61-recode.R", "5000-key recode() on 1e3 rows is no slower than dplyr on a tibble"),
+  c("test-parity-F61-recode.R", "5000-key recode() on 1e6 rows takes well under a second")
 )
 
 test_that("raw timers are left only in order-of-magnitude bounds and in code that isn't a speed check", {
