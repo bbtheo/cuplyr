@@ -67,6 +67,9 @@ Out of scope for now:
 - General lubridate parity. lubridate functions run through the CPU fallback,
   apart from fixed-unit `floor_date()`, `ceiling_date()` and `round_date()`.
 - Multi-GPU execution.
+- A GPU version of `do()`. `do()` works on a GPU table through the CPU
+  fallback and stays there: it is superseded in dplyr, and it runs arbitrary
+  R code on each group's data frame.
 
 Something outside this list can still come in. Open an issue and make the
 case. Changing the scope means a pull request against this section.
