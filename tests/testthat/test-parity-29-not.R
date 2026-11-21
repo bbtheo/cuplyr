@@ -4,10 +4,10 @@
 # string column reached libcudf's AST and failed with its raw
 # "Invalid unary operation" (cudf::logic_error).
 #
-# Base R semantics (dplyr adds its usual `In argument:` wrapper,
-# dplyr:::mutate_error / dplyr:::filter_error):
-#   - `!` on a character vector is an error, "invalid argument type", at any
-#     length, 0 included.
+# Base R semantics (checked with dplyr 1.2.1; dplyr adds its `In argument:`
+# wrapper, dplyr:::mutate_error in mutate(), a plain rlang_error in filter()):
+#   - `!` on a non-empty character vector is an error, "invalid argument
+#     type"; `!character(0)` is logical(0), so a 0-row mutate() succeeds.
 #   - `!` on a Date or a POSIXct is an error ("unary ! not defined for ...").
 #   - `!` on a factor warns "`!` not meaningful for factors" and gives NA.
 #   - `!` on logical, integer and double is a logical (`!0` is TRUE).
@@ -65,12 +65,16 @@ test_that("`!` through across() on string columns raises dplyr's error (the fuzz
                          "invalid argument type")
 })
 
-test_that("`!` on a 0-row string column raises dplyr's error", {
+test_that("`!` on a 0-row string column matches dplyr's logical(0) result", {
   skip_if_no_gpu()
   df <- n29_df()[0, ]
-  n29_expect_dplyr_error(df, function(t) mutate(t, y = !s), "invalid argument type")
-  n29_expect_dplyr_error(df["s"], function(t) mutate(t, across(everything(), ~ !.x)),
-                         "invalid argument type")
+  for (pipeline in list(
+    function(t) mutate(t, y = !s),
+    function(t) mutate(t, across(everything(), ~ !.x))
+  )) {
+    expect_same_as_dplyr(df["s"], pipeline)
+    expect_same_as_dplyr_lazy(df["s"], pipeline)
+  }
 })
 
 test_that("`!` on a Date or POSIXct column raises dplyr's error", {
