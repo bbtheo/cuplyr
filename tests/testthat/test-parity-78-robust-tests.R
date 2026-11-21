@@ -76,9 +76,13 @@ p78_tags <- function(cl) {
     tags <- c(tags, paste0(as.character(cl[[2]]), "::", as.character(cl[[3]])))
   }
   if (length(cl) == 3L && is.name(h) && as.character(h) %in% c("$", "[[")) {
-    f <- cl[[3]]
-    if (is.name(f)) tags <- c(tags, paste0("$", as.character(f)))
-    if (is.character(f) && length(f) == 1L) tags <- c(tags, paste0("$", f))
+    # (an empty argument, as in x[[]], can't be held in a variable)
+    f <- as.list(cl)[3L]
+    if (!identical(f[[1]], quote(expr = ))) {
+      f <- f[[1]]
+      if (is.name(f)) tags <- c(tags, paste0("$", as.character(f)))
+      if (is.character(f) && length(f) == 1L) tags <- c(tags, paste0("$", f))
+    }
   }
   tags
 }
