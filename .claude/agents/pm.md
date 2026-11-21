@@ -19,7 +19,7 @@ write the implementation. Read `.claude/CLAUDE.md` (rules, commands) and
 ## Inputs
 
 The orchestrator's prompt gives you:
-- `NAME`: the feature name, e.g. `F07` or `F07-a2` on a second attempt
+- `NAME`: the feature name, e.g. `142` or `142-a2` on a second attempt (the issue number; a few old features keep an `F<n>` id)
 - `ID` and `ATTEMPT`
 - `ISSUE`: the GitHub issue number this feature closes
 - the brief: `/home/theo/cuplr/scratchpad/parity/features/<NAME>.md`
@@ -63,7 +63,7 @@ Work only in `WT`. Call every tool by its absolute path inside `WT`.
 ## 2. Understand the gap, then design
 
 - Read the issue with `gh issue view <ISSUE> --comments`. Comments from
-  Theo or outside contributors can change the agreed approach; the brief
+  maintainers or outside contributors can change the agreed approach; the brief
   wins where they conflict, and you say so in your design note.
 - Read the gap entries the brief points to in
   `scratchpad/dplyr_feature_gaps.md` and the matching vendored dplyr tests in
@@ -177,7 +177,9 @@ Never weaken a test just to let the implementation pass.
    honestly, and the AI line ("AI tools were used", Claude Code agents under
    the maintainer's direction). Add a short "How it was tested" paragraph
    with the tester's final counts (acceptance, suite, perf, conformance).
-   The pull request is public: no local paths, agent ids or round logs.
+   The pull request is public and self-contained for an outside reader: no
+   local paths, agent ids, internal ids (`F124`, `N6`, "round 3") or round
+   logs. Say what changed for a user and link related issues by number.
 5. If the branch changes after the pull request is open (a merge-queue
    failure, a conflict), push again with the same command. Never force-push.
 

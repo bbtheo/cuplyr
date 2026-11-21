@@ -172,7 +172,7 @@ reasoned, not observed (`scratchpad/parity/features/F85-a2/reviews/round-1.md`, 
 source rejects both with `CUDF_EXPECTS(stats_size == sizeof(T))`
 (`scratchpad/reference/cudf/cpp/src/io/parquet/stats_filter_helpers.hpp:70-75`). Theo chose to ship this documented in
 `?read_parquet_gpu` and NEWS, with `options(cuplyr.parquet_pushdown = FALSE)` as the way round
-it for untrusted files; validating footer statistics before trusting them is ledger row F129.
+it for untrusted files; validating footer statistics before trusting them is issue #33.
 The `&`s of a predicate
 are split only when every operand is
 logical (`ir_infer_type()`). The atoms reach `gpu_parquet_read()` as a list and become libcudf

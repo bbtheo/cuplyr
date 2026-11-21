@@ -77,7 +77,7 @@ Column types:
 | POSIXct | TIMESTAMP_MICROSECONDS, time zone kept |
 | integer64 | FLOAT64, with a warning: values above 2^53 lose precision |
 
-Not supported: list columns, other column classes and more than one GPU. Uploading a `difftime`, `hms` or `ts` column raises an error. The [open issues](https://github.com/bbtheo/cuplyr/issues) track what is planned.
+Not supported: list columns, other column classes and more than one GPU. Uploading a `difftime`, `hms` or `ts` column raises an error. The [open issues](https://github.com/bbtheo/cuplyr/issues) track what is planned, in priority order on the [roadmap board](https://github.com/users/bbtheo/projects/1).
 
 ## Lazy by default
 

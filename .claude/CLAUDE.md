@@ -3,7 +3,8 @@
 GPU-backed dplyr API in R, with C++/Rcpp bindings to libcudf (cuDF 25.12).
 The current goal is **full dplyr feature parity on the GPU**, built by a
 multi-agent workflow (see "Parity workflow" below). Work is tracked in GitHub
-issues and lands on `main` through pull requests; the contributor-facing
+issues, ordered on the [roadmap board](https://github.com/users/bbtheo/projects/1),
+and lands on `main` through pull requests; the contributor-facing
 description is `.github/CONTRIBUTING.md`.
 
 For how the code works (source map, AST/optimizer, joins, factor handling,
@@ -96,6 +97,7 @@ work around a block; if a rule stops legitimate work, say so in your report.
 | `tools/site-publish [--no-push]` | yes | Build the site from `origin/main` and push it to `gh-pages`. Theo only. |
 | `tools/wt-new <id> [attempt]` | no | Create feature worktree `../cuplr-wt/<id>` on branch `feat/<id>` off `origin/main`. PM only. |
 | `tools/merge-queue [--no-merge] <name>` | gate | Run the full gate on `main` + the squashed `feat/<name>`, post the result on its pull request (comment and `gpu-gate` commit status), then squash-merge the pull request. `--no-merge` stops after the report. Orchestrator only. |
+| `tools/board list\|next\|show\|add\|status ...` | no | Read the roadmap board and set an issue's status. Orchestrator only; moving an item to Approved or reordering is a maintainer's. |
 
 `tools/gpu-run` is the lock itself; the wrappers above call it. A gate run
 blocks new GPU jobs from starting until it finishes. Lock waits are logged to
@@ -121,7 +123,7 @@ Roles (definitions in `.claude/agents/`, orchestrator procedure in
 
 | Role | Model | Does |
 |---|---|---|
-| Orchestrator | Opus (main session) | Owns the backlog and ledger, dispatches PMs, writes post-mortems, runs the merge queue. |
+| Orchestrator | Opus (main session) | Dispatches PMs in board order, keeps the board status and the local run state, opens follow-up issues, writes post-mortems, runs the merge queue. |
 | `pm` | Opus | One feature in its own worktree. Writes the acceptance tests, then drives coder -> tester -> reviewer rounds. |
 | `coder` | Sonnet (rounds 1-2), Opus (rounds 3-4) | Writes the code. Can't touch the PM's acceptance tests. Runs only targeted test files. |
 | `tester` | Haiku | Runs the full suite, perf and conformance; writes logs; reports facts only. |
@@ -129,30 +131,37 @@ Roles (definitions in `.claude/agents/`, orchestrator procedure in
 
 How one feature moves:
 
-1. **Issue.** Every backlog item is a GitHub issue. It holds the problem, the
-   agreed approach and any discussion with outside contributors. The
-   orchestrator opens an issue for a new idea before it enters the backlog,
-   and Theo approves it.
+1. **Issue.** Every backlog item is a GitHub issue on the roadmap board. It
+   holds the problem, the agreed approach and any discussion with outside
+   contributors. New issues start as Proposed; an item is agreed when a
+   maintainer moves it to Approved. The board order is the priority order.
+   Open questions carry the `tbd` label and a comment stating the question.
 2. **Branch.** The PM works in a worktree on `feat/<name>`, cut from
    `origin/main`.
 3. **Pull request.** When the reviewer approves, the PM merges `origin/main`
    into the branch, pushes it and opens a pull request with `Fixes #n`.
-4. **Gate and merge.** The orchestrator runs `tools/merge-queue <name>`. The
-   gate result is posted on the pull request; on a pass the pull request is
-   squash-merged, which closes the issue.
+4. **Gate and merge.** The orchestrator moves the issue to In review and
+   runs `tools/merge-queue <name>`. The gate result is posted on the pull
+   request; on a pass the pull request is squash-merged, which closes the
+   issue (Done).
 
 Labels follow the tidyverse set (`bug`, `feature`, `upkeep`, `documentation`,
-`breaking change ☠️`, `wip`, `reprex`) plus area labels (`performance`,
-`dplyr parity`, `io`, `fallback`). `wip` marks an issue a PM is working on;
-`needs decision` marks one that waits for Theo.
+`breaking change ☠️`, `reprex`, `good first issue ❤️`, `help wanted ❤️`) plus
+area labels (`performance`, `dplyr parity`, `io`, `fallback`) and `tbd` (an
+open question). Who is working on an issue is its board status, not a label.
 
 Text that goes to GitHub is public and permanent. Write it for an outside
-reader: no local paths, agent ids or ledger jargon, and no secrets. Internal
-detail (round logs, reviews, post-mortems) stays in `scratchpad/`.
+reader: no local paths, agent ids, internal ids (`F124`, `N6`) or round
+logs, and no secrets. Decisions belong to "maintainers", not to a named
+person. Every issue is self-contained: what is wrong and why it matters, a
+reproducible example where there is one, links to related issues by number,
+and a **Done when** line. Internal detail (round logs, reviews,
+post-mortems) stays in `scratchpad/`.
 
-State lives in `scratchpad/parity/` in the main checkout:
-`ledger.md` (dispatch state per backlog row with its issue number, merge
-queue, tick log), `features/<name>.md` (brief, design, round history),
+Local state lives in `scratchpad/parity/` in the main checkout:
+`state.md` (runs in flight, merge queue, capacity), `log.md` (tick log),
+`ledger.md` (frozen history up to 2026-11-21), `features/<name>.md` (brief,
+design, round history),
 `features/<name>/` (test runs, reviews),
 `features/<name>.protected` and `.commit.txt` (read by `tools/merge-queue`),
 `gates/` (merge gate artifacts), `conformance_baseline.tsv`.
