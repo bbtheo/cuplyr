@@ -57,13 +57,15 @@ In scope:
 - Reading and writing data on the GPU, memory management, and the lazy
   optimizer.
 - Installation and packaging.
+- Column classes beyond the basic types (`ts`, `difftime`, `hms`, `IDate`,
+  `POSIXlt` and others). Today an upload raises
+  `cuplyr_error_unsupported_class`; the aim is that they work, natively where
+  a GPU type fits and through the CPU route otherwise.
 
 Out of scope for now:
 
 - General lubridate parity. lubridate functions run through the CPU fallback,
   apart from fixed-unit `floor_date()`, `ceiling_date()` and `round_date()`.
-- Custom and S4 column classes (`ts`, `difftime`, `hms`, `IDate` and others).
-  Upload raises `cuplyr_error_unsupported_class`.
 - Multi-GPU execution.
 
 Something outside this list can still come in. Open an issue and make the
