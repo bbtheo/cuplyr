@@ -1,5 +1,14 @@
 # cuplyr (development version)
 
+* `distinct()`, `count()` and `add_count()` accept window functions in computed
+  keys (`distinct(df, r = dense_rank(k))`, `count(df, p = lag(k))`), evaluated
+  over the whole table as in dplyr, and `slice_min()`/`slice_max()` accept
+  one in `order_by`; they stopped with an internal error before. `!` on a
+  string, Date or POSIXct column now raises dplyr's own error instead of a
+  libcudf one. A verb that produces a difftime on the CPU (`Date - Date`) now
+  stops with an error that names the verb and the column, and suggests
+  `as.numeric()` in the same call (#29).
+
 * cuplyr builds against RAPIDS 25.12 only (libcudf `>=25.12,<26.02`), because
   RAPIDS 26.02 and later removed RMM interfaces cuplyr uses. `configure` now
   checks the installed libcudf version and stops with the supported range and

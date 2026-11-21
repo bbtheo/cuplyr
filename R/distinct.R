@@ -162,6 +162,8 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
   # (`x = y`) or computed expressions (`z = x + 1`) need the mutate step.
   schema <- current_schema(.data)
   expressions <- list()
+  computed <- logical(length(dots))
+  any_window <- FALSE
 
   for (i in seq_along(dots)) {
     new_name <- dot_names[i]
@@ -190,12 +192,27 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
       step <- make_mutate_expr(new_name, ir, schema)
       expressions <- c(expressions, list(step))
       schema <- update_schema_for_expr(schema, step)
+      computed[i] <- TRUE
+      any_window <- any_window || ir_has_window(ir)
     }
   }
 
-  # Push the key mutate as its own op (as count() does) so push_op() carries
-  # factor levels onto renamed/copied factor keys in eager mode too.
-  if (length(expressions) > 0) {
+  if (any_window) {
+    # A window or aggregate key needs mutate()'s window planning, which a
+    # hand-built ast_mutate lacks. dplyr evaluates the keys over the whole
+    # table even when it is grouped (#29).
+    keyed <- mutate_keys_ungrouped(.data, dots[computed], "distinct")
+    if (is.null(keyed)) {
+      return(distinct_fallback(
+        .data, orig_dots, .keep_all,
+        reason = "the computed keys could not be built on the GPU."
+      ))
+    }
+    .data <- keyed
+    schema <- current_schema(.data)
+  } else if (length(expressions) > 0) {
+    # Push the key mutate as its own op (as count() does) so push_op() carries
+    # factor levels onto renamed/copied factor keys in eager mode too.
     .data <- push_op(.data, ast_mutate(input_node(.data), expressions))
   }
 

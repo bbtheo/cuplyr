@@ -426,6 +426,28 @@ strip_timestamp_flags <- function(ptr) {
 # is an error.
 # @keywords internal
 check_supported_column_classes <- function(data) {
+  bad <- unsupported_column_labels(data)
+  if (length(bad) == 0L) {
+    return(invisible())
+  }
+  rlang::abort(
+    c(
+      paste0("Can't upload column(s) with a class that has no GPU representation: ",
+             paste(bad, collapse = ", "), "."),
+      i = paste0("Convert them first, e.g. `unclass()` / `as.numeric()` / `as.character()`, ",
+                 "or `as.POSIXct()` for POSIXlt.")
+    ),
+    class = "cuplyr_error_unsupported_class",
+    call = NULL
+  )
+}
+
+# The columns of `data` whose class has no GPU representation, each as
+# "`name` <class>" (character(0) when every column can be uploaded). The one
+# class rule, shared by the upload check above and gpu_fallback()'s check of
+# a CPU result.
+# @keywords internal
+unsupported_column_labels <- function(data) {
   ok <- list(c("factor"), c("ordered", "factor"), "Date", c("POSIXct", "POSIXt"), "integer64")
   bad <- character()
   for (j in seq_along(data)) {
@@ -440,19 +462,7 @@ check_supported_column_classes <- function(data) {
     }
     bad <- c(bad, sprintf("`%s` <%s>", names(data)[j], paste(cls, collapse = "/")))
   }
-  if (length(bad) == 0L) {
-    return(invisible())
-  }
-  rlang::abort(
-    c(
-      paste0("Can't upload column(s) with a class that has no GPU representation: ",
-             paste(bad, collapse = ", "), "."),
-      i = paste0("Convert them first, e.g. `unclass()` / `as.numeric()` / `as.character()`, ",
-                 "or `as.POSIXct()` for POSIXlt.")
-    ),
-    class = "cuplyr_error_unsupported_class",
-    call = NULL
-  )
+  bad
 }
 
 #' @rdname tbl_gpu

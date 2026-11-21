@@ -5973,6 +5973,8 @@ ir_native_arg_types <- local({
       cummin = c("INT32", "FLOAT64"),
       any = "BOOL8", all = "BOOL8", cumall = "BOOL8", cumany = "BOOL8",
       min = num, max = num,
+      # `!` of a STRING is base R's "invalid argument type" error (#29)
+      "!" = num,
       # a STRING gets dplyr's "non-numeric argument" error from the CPU
       round = num
     )
