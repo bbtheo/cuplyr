@@ -1,5 +1,15 @@
 # cuplyr (development version)
 
+* `mutate()` and `transmute()` raise dplyr's errors. An error in a dot, such as
+  an unknown object or a missing `.data` column, is a `dplyr:::mutate_error`
+  that names the argument ("In argument: ...") and, for a grouped table or
+  `.by =`, the first group, with the original error as its parent. An
+  `across()`, `if_any()` or `if_all()` selection that names a missing column
+  is wrapped the same way, and a failure while `across()` computes a column
+  carries dplyr's "Can't compute column" step. `.before` and `.after` are now
+  resolved even when the call creates no column, so a column that doesn't
+  exist is an error as in dplyr, reported by `relocate()` (#30).
+
 * cuplyr builds against RAPIDS 25.12 only (libcudf `>=25.12,<26.02`), because
   RAPIDS 26.02 and later removed RMM interfaces cuplyr uses. `configure` now
   checks the installed libcudf version and stops with the supported range and

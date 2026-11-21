@@ -385,9 +385,17 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   prev <- fallback_reasons_open()
   on.exit(fallback_reasons_close(prev), add = TRUE)
   if (is_rowwise_gpu(.data)) {
+    # (a rowwise call abandons its native attempt on any error and reruns in
+    # dplyr, whose own errors these are)
     return(mutate_rowwise(.data, dots, by_quo, .keep, before_quo, after_quo))
   }
-  mutate_run(.data, dots, by_quo, .keep, before_quo, after_quo)
+  # (#30: an error a dot raises is dplyr's `dplyr:::mutate_error`, see R/mutate-errors.R)
+  err_ctx <- mutate_errors_open(dots, environment())
+  on.exit(mutate_errors_close(err_ctx), add = TRUE)
+  withCallingHandlers(
+    mutate_run(.data, dots, by_quo, .keep, before_quo, after_quo),
+    error = function(cnd) mutate_errors_handle(err_ctx, cnd)
+  )
 }
 
 # mutate() of a rowwise table (F49). Elementwise expressions are the
@@ -443,12 +451,18 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   # case, and push_op()'s propagate_groups() only ever propagates
   # `.data$groups` (never `verb_groups`) into the result.
   by_given <- !quo_is_null_fast(by_quo)
-  by_cols <- if (rowwise) character() else resolve_by(.data, by_quo, ".by", verb = "mutate")
-  verb_groups <- if (by_given) by_cols else if (rowwise) character() else .subset2(.data, "groups")
-
-  if (!quo_is_null_fast(before_quo) && !quo_is_null_fast(after_quo)) {
-    stop("Can't supply both `.before` and `.after`.", call. = FALSE)
+  # (its errors report mutate(), the verb frame mutate.tbl_gpu() opened, as dplyr's do)
+  by_cols <- if (rowwise || !by_given) {
+    character()
+  } else {
+    resolve_by(.data, by_quo, ".by", call = mutate_error_state$cur$call, verb = "mutate")
   }
+  verb_groups <- if (by_given) by_cols else if (rowwise) character() else .subset2(.data, "groups")
+  # (#30: for the group an error in a dot names)
+  if (length(verb_groups) > 0L) mutate_errors_set_groups(.data, verb_groups, by_given)
+
+  # (`.before` and `.after` together are an error of the relocation that follows
+  # the dots: mutate_keep_select_node())
 
   # Zero-column table with rows: after the arguments are validated against
   # `.data` (an invalid `.by` must still error), dplyr runs the call.
@@ -1137,8 +1151,24 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
   }
   dot_names <- names(dots)
 
+  # (#30: the verb's error context learns which user dot is being evaluated, so
+  # an error raised in it is dplyr's `dplyr:::mutate_error`; cleared when this
+  # function ends or unwinds, so no later error is wrapped)
+  err_ctx <- mutate_error_state$cur
+  if (!is.null(err_ctx)) {
+    on.exit(err_ctx$dot <- NULL, add = TRUE)
+  }
+
   for (i in seq_along(dots)) {
     fallback_dot_begin()
+    if (!is.null(err_ctx)) {
+      err_ctx$dot <- if (is.null(provenance)) i else .subset2(provenance, "origin")[i]
+      err_ctx$phase <- "eval"
+      # (an across() expansion: dplyr names the column it failed to compute)
+      err_ctx$col <- if (!is.null(provenance) && identical(.subset2(provenance, "kind")[i], "across")) {
+        dot_names[i]
+      }
+    }
     new_name <- dot_names[i]
     expr <- dots[[i]]
 
@@ -1707,15 +1737,22 @@ mutate_keep_select_node <- function(result, orig_names, orig_groups,
   full_names <- result_names
   full_names <- c(full_names[!full_names %in% new_cols], new_cols)
 
-  if (length(new_cols) > 0 &&
-      (!quo_is_null_fast(before_quo) || !quo_is_null_fast(after_quo))) {
+  if (!quo_is_null_fast(before_quo) || !quo_is_null_fast(after_quo)) {
+    # dplyr relocates whenever either is given, also with no new column
+    # (`relocate(out, all_of(<new>), .before =, .after =)`): a column that
+    # doesn't exist is an error then, and so are both arguments. Both are
+    # relocate()'s own errors, unwrapped.
+    if (!quo_is_null_fast(before_quo) && !quo_is_null_fast(after_quo)) {
+      rlang::abort("Can't supply both `.before` and `.after`.", call = call("relocate"))
+    }
     # A column dropped by `col = NULL` is already gone for .before/.after.
     full_names <- full_names[!full_names %in% dropped]
     name_vec <- stats::setNames(full_names, full_names)
     loc <- tidyselect::eval_relocate(
       expr = rlang::expr(c(!!!rlang::syms(new_cols))), data = name_vec,
       before = before_quo, after = after_quo,
-      before_arg = ".before", after_arg = ".after"
+      before_arg = ".before", after_arg = ".after",
+      error_call = call("relocate")
     )
     full_names <- full_names[loc]
   }
@@ -1935,7 +1972,13 @@ transmute.tbl_gpu <- function(.data, ...) {
     res <- rowwise_attempt(function() transmute_run(.data, rw, rowwise = TRUE))
     return(if (is.null(res)) rowwise_rerun(cpu, dots) else rowwise_column_order(res))
   }
-  transmute_run(.data, dots)
+  # (#30: an error a dot raises is dplyr's `dplyr:::mutate_error`, see R/mutate-errors.R)
+  err_ctx <- mutate_errors_open(dots, environment())
+  on.exit(mutate_errors_close(err_ctx), add = TRUE)
+  withCallingHandlers(
+    transmute_run(.data, dots),
+    error = function(cnd) mutate_errors_handle(err_ctx, cnd)
+  )
 }
 
 # transmute.tbl_gpu()'s body on captured dots; `rowwise = TRUE` as in
@@ -1944,6 +1987,8 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
   orig_dots <- dots
   # the groups every window/cur_group/vector-literal decision is made over
   eff_groups <- if (rowwise) character() else .subset2(.data, "groups")
+  # (#30: for the group an error in a dot names)
+  if (length(eff_groups) > 0L) mutate_errors_set_groups(.data, eff_groups, FALSE)
 
   if (length(dots) > 0L && is_zero_column_with_rows(.data)) {
     return(gpu_fallback("transmute", .data, function(tbl) {
