@@ -1,5 +1,11 @@
 # cuplyr (development version)
 
+* `check_deps()` reports libcudf as found on a pixi install: it uses the
+  libcudf cuplyr has loaded, or the pixi environment, even when
+  `CONDA_PREFIX` is unset. It names a `CUDF_HOME` or `CONDA_PREFIX` that
+  points to a missing directory, and it reads the driver version on newer
+  `nvidia-smi` versions, which print `KMD Version:` instead of
+  `Driver Version:` (#49).
 * cuplyr builds against RAPIDS 25.12 only (libcudf `>=25.12,<26.02`), because
   RAPIDS 26.02 and later removed RMM interfaces cuplyr uses. `configure` now
   checks the installed libcudf version and stops with the supported range and
