@@ -379,23 +379,29 @@ minmax_summarise_records <- function(aggs, hits, key_at, grouped) {
 # once on the empty input), or a group of a `.drop = FALSE` / fixed-key grouping
 # that no row belongs to. dplyr's value for an integer or logical min()/max()
 # over one is a double (`Inf`), and vctrs makes the WHOLE column double, so the
-# type is the data's to decide. The verb reads the row count and the empty
-# groups before its dots are parsed when it can (minmax_window_setup(): an eager
-# table, a lazy one nothing or only row-preserving steps are pending on), and
-# the parse hook of min()/max() (ir_parse_minmax()) then casts an INT32/BOOL8
-# argument to FLOAT64 when there is a hit, so the node, later operators, later
-# dots and a lazy schema all say double. When it cannot (a lazy table whose
-# pending steps change the rows), mutate() parses once as if nothing were empty
-# and looks at the PARSED calls: only an INT32/BOOL8 one needs the data's
-# answer, and runs the plan now (minmax_win_int_call()). A double, string or
-# timestamp call only has a warning to raise, which the plan carries.
+# type is the data's to decide, but only the TYPE: the groups that have rows
+# compute in integers (F42's overflow and `%/%` by 0L rules), as dplyr's do. So
+# a dot is parsed once, integer, and when a group is empty the dot's ROOT is cast
+# to the type it has in dplyr (minmax_dot_root(), ir_infer_type_minmax_double()).
+# A dot is type-dependent iff that type differs from the parsed one (`m = max(a)`,
+# `max(a) + 1L`; not `a == max(a)`). Later dots read the cast column.
+#
+# The verb reads the row count and the empty groups before its dots are parsed
+# when it can (minmax_window_setup(): an eager table, a lazy one nothing or only
+# row-preserving steps are pending on, a bare parquet scan's count coming from
+# its footer). When it cannot (a lazy table whose pending steps change the rows),
+# mutate() parses once as if nothing were empty and the data is asked only if a
+# parsed dot is type-dependent (minmax_win_needs_run()): an in-memory plan runs
+# its steps now (F80's rule for an integer sum()); a plan over a parquet scan
+# NEVER does (it would read every column of the file): a pruned facts query over
+# the pending plan answers instead (minmax_scan_resolve()), and the plan stays
+# lazy. A double, string or timestamp call, or a dot whose type does not depend
+# on the data, only has a warning to raise, which the plan carries.
 #
 # A call whose argument has one value per group (`max(n())`, `max(sum(x))`,
 # ir_is_group_scalar()) never meets an empty vector: it neither warns nor turns
 # double. A Date shifted by an integer amount made of min()/max() calls
-# (`d + max(a)`, `d + max(a) * 2L`) is a Date whatever those calls' type, so the
-# shift keeps the integer calls (native, ir_minmax_int_shift()) and their type
-# decides nothing (`typed = FALSE` in their records).
+# (`d + max(a)`) is a Date whatever those calls' type.
 #
 # The state of one verb call is the environment minmax_win_open() makes, only
 # when a hit is possible (the facts say an empty group, or cannot say yet); the
@@ -444,17 +450,49 @@ minmax_dots_call <- function(dots) {
 }
 
 # The row count of a lazy table the pending steps cannot change (mutate,
-# select, rename, window, arrange: a walk of the plan), else NA.
+# select, rename, window, arrange: a walk of the plan), else NA. A plan that
+# ends in a parquet scan with nothing pushed into it has its footers' count (as
+# dim() does, bare_scan_of()), so no read happens for it; any other scan is NA.
+# @param footer when TRUE, the result carries `attr(, "footer")` = TRUE if the
+#   count is a parquet footer's (a type decided from it must be checked when the
+#   file is read, lower_scan())
 # @keywords internal
-minmax_lazy_rows <- function(.data) {
+minmax_lazy_rows <- function(.data, footer = FALSE) {
   node <- .subset2(.data, "lazy_ops")
   while (inherits(node, "ast_node")) {
-    if (!node$type %in% c("source", "mutate", "select", "rename", "window", "arrange")) {
+    type <- .subset2(node, "type")
+    if (identical(type, "source")) {
+      scan <- .subset2(node, "scan")
+      if (!is.null(scan)) {
+        if (length(.subset2(scan, "predicates")) > 0L || !is.null(.subset2(scan, "limit"))) {
+          return(NA_integer_)
+        }
+        rows <- as.integer(parquet_nrow(.subset2(scan, "paths")))
+        if (footer) attr(rows, "footer") <- TRUE
+        return(rows)
+      }
+    } else if (!type %in% c("mutate", "select", "rename", "window", "arrange")) {
       return(NA_integer_)
     }
-    node <- node$input
+    node <- .subset2(node, "input")
   }
   base_dim(.data)[[1L]]
+}
+
+# `.data`'s plan with its scan marked: a min()/max() type was decided from the
+# scan's non-zero footer count, which lower_scan() holds the file to. The plan
+# is a row-preserving chain over the scan (minmax_lazy_rows()).
+# @keywords internal
+minmax_mark_scan <- function(.data) {
+  mark <- function(node) {
+    if (identical(.subset2(node, "type"), "source")) {
+      node$scan$typed_nonzero <- TRUE
+      return(node)
+    }
+    node$input <- mark(.subset2(node, "input"))
+    node
+  }
+  set_tbl_gpu_field(.data, "lazy_ops", mark(.subset2(.data, "lazy_ops")))
 }
 
 # Does the grouping keep empty groups (summarise_wants_empty_groups())?
@@ -557,8 +595,8 @@ minmax_label_of <- function(w, i) {
 # stack until it returns), the user's dots, the parsed `dots`
 # and their `origin`. Then `facts` (NULL: not known yet), `carry` (the plan, not
 # the verb, signals the warning: a lazy table warns when it runs), `double`
-# (parse an INT32/BOOL8 argument as a double, read by ir_parse_minmax() through
-# the schema), and the `records` of the parsed dots. `typed = FALSE` (filter():
+# (a type-dependent dot's root is cast to a double, minmax_dot_root()), and the
+# `records` of the parsed dots (`type_dep`: the dot's type is the data's to decide). `typed = FALSE` (filter():
 # the predicate does not change type) never sets `double`.
 # @keywords internal
 minmax_win_open <- function(.data, by_given, default, frame, user_dots, dots, origin,
@@ -574,7 +612,9 @@ minmax_win_open <- function(.data, by_given, default, frame, user_dots, dots, or
     }
   }
   setup <- minmax_window_setup(.data, by_given)
-  if (!is.null(setup$facts) && setup$facts$E == 0L) {
+  # (a type decided from a parquet footer's count keeps its state: the scan is
+  # marked when a dot's type depends on it)
+  if (!is.null(setup$facts) && setup$facts$E == 0L && !(typed && isTRUE(setup$footer))) {
     return(NULL)
   }
   w <- new.env(parent = emptyenv())
@@ -592,78 +632,102 @@ minmax_win_open <- function(.data, by_given, default, frame, user_dots, dots, or
 # @keywords internal
 minmax_win_set_setup <- function(w, setup) {
   w$facts <- setup$facts
-  w$carry <- setup$carry
+  # (nothing to warn about when no group is empty)
+  w$carry <- isTRUE(setup$carry) && !(!is.null(setup$facts) && setup$facts$E == 0L)
   w$unknown_empty <- setup$unknown_empty
+  w$scan <- isTRUE(setup$scan)
+  w$footer <- isTRUE(setup$footer)
   w$double <- w$typed && !is.null(setup$facts) && setup$facts$E > 0L
   invisible(w)
 }
 
-# Does the verb need the data's answer (its steps run now) before it can say
-# what its parsed min()/max() calls do? Only a lazy table whose facts are not
-# known: when the grouping keeps empty groups that pending steps may leave
-# (any call: the warning names them), or when the rows may be none and a call's
-# INT32/BOOL8 argument would become a double (not for filter(): its type never
-# changes). A column called `max`, or a double call over unknown rows, needs
-# nothing: the plan carries that warning.
+# Does the verb need the data's answer before it can say what its parsed
+# min()/max() calls do? Only a lazy table whose facts are not known: when the
+# grouping keeps empty groups that pending steps may leave (any call: the warning
+# names them), or when the rows may be none and a dot's type depends on it (an
+# INT32/BOOL8 call that changes the dot's type, minmax_dot_root(); not for
+# filter(): its type never changes). A column called `max`, a double call or a
+# dot like `a == max(a)` over unknown rows needs nothing: the plan carries that
+# warning.
 # @keywords internal
 minmax_win_needs_run <- function(w) {
   if (is.null(w) || !is.null(w$facts) || length(w$records) == 0L) {
     return(FALSE)
   }
-  isTRUE(w$unknown_empty) || (w$typed && minmax_win_int_call(w))
+  isTRUE(w$unknown_empty) ||
+    (w$typed && any(vapply(w$records, function(r) isTRUE(r$type_dep), logical(1))))
+}
+
+# Did a dot's type depend on a min()/max() call over a table whose rows were
+# known? (what a parquet footer's count decided)
+# @keywords internal
+minmax_win_type_decided <- function(w) {
+  !is.null(w) && w$typed && any(vapply(w$records, function(r) isTRUE(r$type_dep), logical(1)))
 }
 
 # The min()/max() calls of a parsed expression that can meet an empty group, in
 # R's evaluation order (arguments left to right, then the call): `list(op,
-# type, typed)` each, `type` the GPU type of the argument, `typed = FALSE` for
-# a call in the amount of a Date shift (`date_add_days(d, max(a) * 2L)`: the
-# result is a Date whatever the call's type). A call whose argument has one value per group
-# (ir_is_group_scalar(): `max(n())`, the outer max() of `max(max(x))`) is not
-# one: dplyr hands it one value.
+# type)` each, `type` the GPU type of the argument. A call whose argument has one
+# value per group (ir_is_group_scalar(): `max(n())`, the outer max() of
+# `max(max(x))`) is not one: dplyr hands it one value.
 # @keywords internal
 minmax_ir_calls <- function(ir, schema) {
   calls <- list()
-  walk <- function(node, shift = FALSE) {
+  walk <- function(node) {
     if (!inherits(node, "cuplyr_ir") || !identical(node$kind, "call")) {
       return(invisible())
     }
-    shifts <- node$op %in% c("date_add_days", "date_sub_days")
-    for (k in seq_along(node$args)) walk(node$args[[k]], shift || (shifts && k == 2L))
+    for (k in seq_along(node$args)) walk(node$args[[k]])
     if (node$op %in% c("min", "max") && length(node$args) == 1L && !ir_is_group_scalar(node$args[[1L]])) {
       type <- tryCatch(unname(ir_infer_type(node$args[[1L]], schema)), error = function(e) NA_character_)
-      calls[[length(calls) + 1L]] <<- list(op = node$op, type = type, typed = !shift)
+      calls[[length(calls) + 1L]] <<- list(op = node$op, type = type)
     }
   }
   walk(ir)
   calls
 }
 
-# Note the min()/max() calls of parsed dot `i` (a no-op without a state).
+# Note the min()/max() calls of parsed dot `i` (a no-op without a state) and,
+# for the root cast: is the dot's type the data's to decide? It is iff the type
+# it has with every INT32 min()/max() call that can meet an empty group a double
+# (ir_infer_type_minmax_double()) differs from the parsed one. When the facts
+# say a group is empty (`w$double`) the dot's root is cast to that type, and
+# later dots read the cast column; the inner calls stay integer, so the groups
+# with rows keep F42's integer rules. A type inference that fails, or one that
+# is not a double, can't be cast: NULL, the verb takes the CPU route.
+# @return `ir`, cast if needed; NULL when the dot can't be cast
 # @keywords internal
-minmax_record_dot <- function(w, i, ir, schema) {
-  if (is.null(w) || is.null(ir)) {
-    return(invisible())
+minmax_dot_root <- function(w, i, ir, schema) {
+  if (is.null(w)) {
+    return(ir)
   }
   calls <- minmax_ir_calls(ir, schema)
-  if (length(calls) > 0L) {
-    w$records[[length(w$records) + 1L]] <- list(i = i, calls = calls)
+  if (length(calls) == 0L) {
+    return(ir)
   }
-  invisible()
-}
-
-# Does a parsed call of the verb take an INT32 or logical argument (or one whose
-# type is not known) and decide a type? Then the type of its result is the
-# data's to decide.
-# @keywords internal
-minmax_win_int_call <- function(w) {
-  for (r in w$records) {
-    for (cl in r$calls) {
-      if (!isFALSE(cl$typed) && (is.na(cl$type) || cl$type %in% c("INT32", "BOOL8"))) {
-        return(TRUE)
+  type_dep <- FALSE
+  cast <- FALSE
+  if (w$typed && any(vapply(calls, function(cl) is.na(cl$type) || cl$type %in% c("INT32", "BOOL8"), logical(1)))) {
+    t_i <- tryCatch(unname(ir_infer_type(ir, schema)), error = function(e) NA_character_)
+    t_d <- tryCatch(unname(ir_infer_type_minmax_double(ir, schema)), error = function(e) NA_character_)
+    type_dep <- is.na(t_i) || is.na(t_d) || !identical(t_i, t_d)
+    if (type_dep && isTRUE(w$double)) {
+      if (!identical(t_d, "FLOAT64")) {
+        return(NULL)
       }
+      cast <- TRUE
     }
   }
-  FALSE
+  w$records[[length(w$records) + 1L]] <- list(i = i, calls = calls, type_dep = type_dep)
+  if (cast) ir_call("cast_float64", list(ir)) else ir
+}
+
+# @keywords internal
+minmax_record_dot <- function(w, i, ir, schema) {
+  if (!is.null(w) && !is.null(ir)) {
+    minmax_dot_root(w, i, ir, schema)
+  }
+  invisible()
 }
 
 # The warning every window min()/max() call of the verb meets for the empty
@@ -725,14 +789,64 @@ minmax_signal_prepared <- function(p) {
 # pending), else NULL; no step is ever run for it. A lazy table's warning is the
 # plan's (`carry`) unless its grouping keeps empty groups and the facts are
 # known: the plan cannot name them. It signals whenever the plan runs on an
-# empty input (F80: a plan warns when it runs).
+# empty input (F80: a plan warns when it runs). `scan`: the plan reads a parquet
+# scan somewhere, so when the facts are not known they are asked by a pruned
+# query, never by running the plan (minmax_scan_resolve()); `footer`: the row
+# count came from a parquet footer.
 # @keywords internal
 minmax_window_setup <- function(.data, by_given) {
   lazy <- identical(.subset2(.data, "exec_mode"), "lazy")
   pending <- lazy && has_pending_ops(.data)
   wants_empty <- minmax_wants_empty(.data, by_given)
-  rows <- if (pending) minmax_lazy_rows(.data) else base_dim(.data)[[1L]]
+  rows <- if (pending) minmax_lazy_rows(.data, footer = TRUE) else base_dim(.data)[[1L]]
+  footer <- isTRUE(attr(rows, "footer", exact = TRUE))
+  rows <- as.integer(rows)
   facts <- if (!is.na(rows) && !(wants_empty && pending)) minmax_window_facts(.data, rows, wants_empty)
   list(facts = facts, carry = lazy && (is.null(facts) || !wants_empty),
-       unknown_empty = lazy && pending && wants_empty)
+       unknown_empty = lazy && pending && wants_empty,
+       scan = pending && plan_has_scan(.subset2(.data, "lazy_ops")),
+       footer = footer && !is.null(facts))
+}
+
+# The facts of a lazy plan over a parquet scan whose rows (or empty groups) the
+# verb could not read, by a query over the pending plan through the normal
+# compute path: the optimizer prunes it, so the scan reads only the columns the
+# query needs (the predicate and key columns). The plan itself is not run, not
+# broken and not read whole. `.data` is the verb's input, lazy.
+# - a grouping that keeps empty groups: the distinct group keys (k rows), then
+#   the same empty-group logic as an eager table's (minmax_empty_groups())
+# - otherwise the row count, `n()` of the whole plan
+# @return what minmax_window_facts() returns
+# @keywords internal
+minmax_scan_facts <- function(.data, wants_empty) {
+  if (wants_empty) {
+    keys <- compute(push_op(.data, ast_distinct(input_node(.data), .subset2(.data, "groups"))))
+    if (!is.null(fixed <- .subset2(.data, "fixed_keys"))) {
+      keys <- set_tbl_gpu_field(keys, "fixed_keys", fixed)
+    }
+    n_keys <- gpu_dim(.subset2(keys, "ptr"))[[1L]]
+    # (the rows are only asked for being none: the keys of an empty input are none)
+    g <- minmax_empty_groups(keys, n_keys)
+    E <- g$E
+    if (E == 0L && n_keys == 0L) E <- 1L
+    return(list(E = E, n_in = n_keys, id = g$id, keys = g$keys))
+  }
+  flat <- dplyr::ungroup(.data)
+  counted <- compute(push_op(flat, ast_summarise(
+    input_node(flat), list(make_aggregation(".n", NA_character_, "n")), character()
+  )))
+  minmax_window_facts(.data, as.integer(collect(counted)[[1L]]), FALSE)
+}
+
+# Answer the facts of the verb state `w` (a plan over a parquet scan) with a
+# pruned query, instead of running the plan (minmax_scan_facts()). The plan stays
+# lazy: its warning is carried unless the grouping keeps empty groups, which the
+# verb names.
+# @keywords internal
+minmax_scan_resolve <- function(w, .data, by_given) {
+  wants_empty <- minmax_wants_empty(.data, by_given)
+  facts <- minmax_scan_facts(.data, wants_empty)
+  minmax_win_set_setup(w, list(facts = facts, carry = !wants_empty, unknown_empty = FALSE,
+                               scan = TRUE, footer = FALSE))
+  invisible(w)
 }

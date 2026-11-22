@@ -15,8 +15,8 @@ parquet_state <- new.env(parent = emptyenv())
 # -----------------------------------------------------------------------------
 
 # A classed parquet error naming the file. `kind` is one of not_found, invalid,
-# unsupported_type, schema_changed, schema_mismatch, write, compression,
-# unknown_column, columns.
+# unsupported_type, schema_changed, file_emptied, schema_mismatch, write,
+# compression, unknown_column, columns.
 abort_parquet <- function(kind, msg, path = NULL, bullets = NULL, call = NULL) {
   rlang::abort(
     c(msg, bullets),
@@ -497,6 +497,18 @@ lower_scan <- function(scan, schema) {
                     sprintf("Parquet file '%s' changed after it was opened.", paths[[k]]),
                     paths[[k]], bullets = c(x = d, i = "Call `read_parquet_gpu()` again."))
     }
+  }
+
+  # A min()/max() type was decided from this file's non-zero footer count
+  # (minmax_mark_scan(), F124): dplyr gives a double for a zero-row input, so the
+  # plan's type no longer holds if the rows are gone.
+  if (isTRUE(scan$typed_nonzero) && sum(vapply(infos, function(i) i$nrow, numeric(1))) == 0) {
+    abort_parquet("file_emptied",
+                  sprintf("Parquet file%s %s changed after it was opened: it has no rows now.",
+                          if (length(paths) > 1L) "s" else "", parquet_files_shown(paths)),
+                  paths[[1L]],
+                  bullets = c(x = "A min() or max() in this plan was typed from the rows the file had; dplyr types it differently for none.",
+                              i = "Call `read_parquet_gpu()` again."))
   }
 
   cols <- scan$columns %||% scan$file_names

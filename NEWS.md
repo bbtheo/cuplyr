@@ -55,20 +55,31 @@
   GPU where dplyr has `Inf`; it also gives a `cuplyr_warning_infinite_timestamp`
   (#28).
 
-* A window `min()`/`max()` of an integer or logical column in `mutate()` is a
-  double over an empty group (a zero-row table, or a `.drop = FALSE` group no row
-  belongs to), as in dplyr. A lazy `mutate()` or `filter()` runs its earlier
-  steps at the verb (a plan break, like an integer `sum()`) only when it must:
-  after a step that can change the row count, for a `min()`/`max()` of an integer
-  or logical column (its type depends on the data), and after any pending step on
-  a grouping that keeps empty groups (`.drop = FALSE`, `.preserve = TRUE`), for
-  any `min()`/`max()` (the warning names the empty groups). A double, string or
-  Date `min()`/`max()` over rows the plan cannot count does not break it (the
-  plan warns when it runs on an empty input), unless the same `mutate()` has a
+* A window `min()`/`max()` of an integer or logical column in `mutate()` gives a
+  double column when a group is empty (a zero-row table, or a `.drop = FALSE`
+  group no row belongs to), as in dplyr. Only the type changes: the groups that
+  have rows keep their integer values, so integer overflow is still `NA` and
+  `%/%`/`%%` by `0L` is still `NA` there, and a later `mutate()` dot reads the
+  double column. A lazy `mutate()` or `filter()` runs its earlier steps at the
+  verb (a plan break, like an integer `sum()`) only when it must: after a step
+  that can change the row count, for a dot whose type depends on the data
+  (`max(a)`, `max(a) + 1L`; not `a == max(a)`), and after any pending step on a
+  grouping that keeps empty groups (`.drop = FALSE`, `.preserve = TRUE`), for any
+  `min()`/`max()` (the warning names the empty groups). A double, string or Date
+  `min()`/`max()` over rows the plan cannot count does not break it (the plan
+  warns when it runs on an empty input), unless the same `mutate()` has a
   column-free call not known to be pure (`runif(1)`): then the earlier steps run
   first, so that call is evaluated once. Finding the empty groups of a
   `.drop = FALSE` table costs one distinct count when none is empty, and a table
   whose row count is known and not zero only pays a check of a few microseconds.
+
+* A lazy `read_parquet_gpu()` table is never read whole for a `min()`/`max()`:
+  the row count of a plan that keeps the rows comes from the file footers, and
+  when the rows or the empty groups of a filtered plan matter, a query that reads
+  only the columns it needs finds them, with the plan staying lazy (no plan
+  break). If the plan said a `min()`/`max()` result is an integer because the
+  file had rows, and the file has none when the plan runs, the run fails with a
+  `cuplyr_error_parquet_file_emptied` error: call `read_parquet_gpu()` again.
 
 * A `min()`/`max()` whose argument has one value per group (`max(n())`,
   `max(sum(x))`, the outer call of `max(max(x))`) keeps its type and does not

@@ -18,19 +18,21 @@ test_that("F124: the verb head is read from the frame UseMethod() dispatched", {
   expect_identical(f.default(1), quote(f))
 })
 
-test_that("F124: only the cast min()/max() inserts is reverted in a Date shift", {
-  schema <- list(names = c("a", "f"), types = c("INT32", "DICTIONARY32"))
-  marked <- ir_call("max", list(ir_call("cast_float64", list(ir_col("a")), meta = list(minmax_cast = TRUE))))
-  expect_identical(ir_minmax_int_shift(marked, schema), ir_call("max", list(ir_col("a"))))
-  amount <- ir_call("*", list(marked, ir_lit(2L, "INT32")))
-  expect_identical(ir_minmax_int_shift(amount, schema),
-                   ir_call("*", list(ir_call("max", list(ir_col("a"))), ir_lit(2L, "INT32"))))
-  # a user's as.numeric() is a double: not reverted
-  user <- ir_call("max", list(ir_call("cast_float64", list(ir_col("a")))))
-  expect_null(ir_minmax_int_shift(user, schema))
-  # an amount that is a double without the cast too stays a double
-  halved <- ir_call("/", list(marked, ir_lit(2L, "INT32")))
-  expect_null(ir_minmax_int_shift(halved, schema))
+test_that("F124: the type a dot has with every integer min()/max() call a double", {
+  schema <- list(names = c("a", "d"), types = c("INT32", "TIMESTAMP_DAYS"))
+  mx <- ir_call("max", list(ir_col("a")))
+  one <- ir_lit(1L, "INT32")
+  expect_identical(unname(ir_infer_type(mx, schema)), "INT32")
+  expect_identical(unname(ir_infer_type_minmax_double(mx, schema)), "FLOAT64")
+  expect_identical(unname(ir_infer_type_minmax_double(ir_call("+", list(mx, one)), schema)), "FLOAT64")
+  # a comparison is logical either way
+  expect_identical(unname(ir_infer_type_minmax_double(ir_call("==", list(ir_col("a"), mx)), schema)), "BOOL8")
+  # a call over one value per group never meets an empty vector
+  grp <- ir_call("max", list(ir_call("n", list())))
+  expect_identical(unname(ir_infer_type_minmax_double(grp, schema)), "INT32")
+  # the amount of a Date shift decides nothing
+  shift <- ir_call("date_add_days", list(ir_col("d"), mx))
+  expect_identical(unname(ir_infer_type_minmax_double(shift, schema)), "TIMESTAMP_DAYS")
 })
 
 test_that("F124: a Date shifted by an integer amount of min()/max() calls stays on the GPU", {

@@ -749,8 +749,8 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     # plan carries the warning for an empty input; when the grouping keeps empty
     # groups that pending steps may leave, the steps run now (the computed
     # table is used from here on, nothing runs twice) and the result goes
-    # back to lazy. Nothing is built when no group can be empty
-    # (minmax_win_open() gives NULL).
+    # back to lazy; over a parquet scan a pruned query finds them instead.
+    # Nothing is built when no group can be empty (minmax_win_open() gives NULL).
     if (minmax_dots_mention(dots)) {
       # (the frame of filter.tbl_gpu(), the caller of filter_impl(), for the
       # call head of the warning)
@@ -762,13 +762,19 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
         minmax_record_dot(mm, i, parsed[[i]], schema)
       }
       if (minmax_win_needs_run(mm)) {
-        .data <- plan_run_now(.data, if (complement) "filter_out" else "filter",
-                              "a min()/max() over groups that may be empty (their warning names them)",
-                              notice_data = if (mask_ran_plan) .data else fallback_data)
-        fallback_data <- if (isTRUE(cgid$used)) plan_now_columns(.data, real_orig_names) else .data
-        eager <- TRUE
-        back_to_lazy <- TRUE
-        minmax_win_set_setup(mm, minmax_window_setup(.data, !quo_is_null_fast(by_quo)))
+        if (isTRUE(mm$scan)) {
+          # (a plan over a parquet scan is never run whole: the empty groups come
+          # from a pruned query over the pending plan)
+          minmax_scan_resolve(mm, .data, !quo_is_null_fast(by_quo))
+        } else {
+          .data <- plan_run_now(.data, if (complement) "filter_out" else "filter",
+                                "a min()/max() over groups that may be empty (their warning names them)",
+                                notice_data = if (mask_ran_plan) .data else fallback_data)
+          fallback_data <- if (isTRUE(cgid$used)) plan_now_columns(.data, real_orig_names) else .data
+          eager <- TRUE
+          back_to_lazy <- TRUE
+          minmax_win_set_setup(mm, minmax_window_setup(.data, !quo_is_null_fast(by_quo)))
+        }
       }
     }
     minmax_prep <- minmax_win_lazy_prep(mm)
