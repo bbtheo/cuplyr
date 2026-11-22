@@ -56,6 +56,12 @@ f10_df <- function() {
   )
 }
 
+# expect_snapshot() skips itself unless NOT_CRAN is set, and the test runner
+# doesn't set it: these snapshots are the contract, so they always run.
+f10_snapshots_on <- function(envir = parent.frame()) {
+  withr::local_envvar(NOT_CRAN = "true", .local_envir = envir)
+}
+
 f10_lines <- function(x, optimized = FALSE) {
   utils::capture.output(show_query(x, optimized = optimized))
 }
@@ -82,18 +88,21 @@ f10_holds_ref <- function(v) {
 
 test_that("explain() shows the optimized plan with the scan's columns and the CPU step", {
   skip_if_no_gpu()
+  f10_snapshots_on()
   q <- f10_pipeline(f10_path())
   expect_snapshot(explain(q))
 })
 
 test_that("explain(optimized = FALSE) shows the plan as written", {
   skip_if_no_gpu()
+  f10_snapshots_on()
   q <- f10_pipeline(f10_path())
   expect_snapshot(explain(q, optimized = FALSE))
 })
 
 test_that("show_query() prints the same plan as explain()", {
   skip_if_no_gpu()
+  f10_snapshots_on()
   q <- f10_pipeline(f10_path())
   expect_snapshot(show_query(q))
   expect_snapshot(show_query(q, optimized = FALSE))
@@ -104,6 +113,7 @@ test_that("show_query() prints the same plan as explain()", {
 
 test_that("the plan before the CPU step is shown, fused and pruned, while it is pending", {
   skip_if_no_gpu()
+  f10_snapshots_on()
   q <- f10_pipeline_head(f10_path())
   expect_snapshot({
     explain(q)
@@ -115,14 +125,15 @@ test_that("explain() and show_query() run nothing and return x invisibly", {
   skip_if_no_gpu()
   q <- f10_pipeline_head(f10_path())
   parquet_last_read(reset = TRUE)
-  utils::capture.output(out <- withVisible(explain(q)))
-  expect_false(out$visible)
-  expect_identical(out$value, q)
-  utils::capture.output(out <- withVisible(show_query(q, optimized = FALSE)))
-  expect_false(out$visible)
-  expect_identical(out$value, q)
+  utils::capture.output(e <- withVisible(explain(q)))
+  utils::capture.output(s <- withVisible(show_query(q, optimized = FALSE)))
+  # (read before any expectation: comparing tibbles with waldo collects them)
   expect_null(parquet_last_read())
   expect_true(has_pending_ops(q))
+  expect_false(e$visible)
+  expect_false(s$visible)
+  expect_true(identical(e$value, q))
+  expect_true(identical(s$value, q))
 })
 
 test_that("printing the plan does not change the result", {
@@ -146,6 +157,7 @@ test_that("printing the plan does not change the result", {
 
 test_that("each step prints as the dplyr call, with its expressions as R code", {
   skip_if_no_gpu()
+  f10_snapshots_on()
   q <- tbl_gpu(f10_df(), lazy = TRUE) |>
     filter(!is.na(x), x %in% c(1, 3) | y == "q") |>
     mutate(r = if_else(x > 1, 10, 20), l = log(x) + 1, k = -i) |>
@@ -157,6 +169,7 @@ test_that("each step prints as the dplyr call, with its expressions as R code", 
 
 test_that("a step longer than 80 characters is split one argument per line", {
   skip_if_no_gpu()
+  f10_snapshots_on()
   q <- tbl_gpu(f10_df(), lazy = TRUE) |>
     mutate(first_long_name = x * 2 + 1, second_long_name = log(x) - 3, third_long_name = -i)
   expect_snapshot(show_query(q, optimized = FALSE))
@@ -187,7 +200,7 @@ test_that("the other verbs print as the dplyr call they stand for", {
   expect_plan_line(summarise(lz, s = sum(x, na.rm = TRUE), .by = g),
                    "summarise(s = sum(x, na.rm = TRUE), .by = g)")
 
-  windowed <- paste(f10_lines(mutate(group_by(lz, g), rn = row_number())), collapse = "\n")
+  windowed <- paste(f10_lines(mutate(group_by(lz, g), rn = dplyr::row_number())), collapse = "\n")
   expect_match(windowed, "row_number()", fixed = TRUE)
   expect_false(grepl("ast_", windowed, fixed = TRUE))
 })
@@ -202,6 +215,7 @@ test_that("the optimizer's top-k slice shows where it came from", {
 
 test_that("a join shows its right side as `y` under the join", {
   skip_if_no_gpu()
+  f10_snapshots_on()
   x <- tbl_gpu(tibble::tibble(k = 1:3, a = c(1, 2, 3)), lazy = TRUE)
   y <- tbl_gpu(tibble::tibble(k = 2:4, b = c("p", "q", "r")), lazy = TRUE) |>
     filter(b != "q")
@@ -216,8 +230,8 @@ test_that("join conditions and arguments print as in dplyr", {
   expect_plan_line(semi_join(x, y, by = "k"), "semi_join(y, by = join_by(k))")
   expect_plan_line(anti_join(x, y, by = "k"), "anti_join(y, by = join_by(k))")
   expect_plan_line(cross_join(x, y), "cross_join(y)")
-  expect_plan_line(inner_join(x, y, by = join_by(a >= b)), "inner_join(y, by = join_by(a >= b))")
-  expect_plan_line(left_join(x, y, by = join_by(k, closest(a >= b))),
+  expect_plan_line(inner_join(x, y, by = dplyr::join_by(a >= b)), "inner_join(y, by = join_by(a >= b))")
+  expect_plan_line(left_join(x, y, by = dplyr::join_by(k, closest(a >= b))),
                    "left_join(y, by = join_by(k, closest(a >= b)))")
   expect_plan_line(inner_join(x, y, by = "k", relationship = "many-to-many", suffix = c("_l", "_r")),
                    "inner_join(y, by = join_by(k), suffix = c(\"_l\", \"_r\"), relationship = \"many-to-many\")")
@@ -227,6 +241,7 @@ test_that("join conditions and arguments print as in dplyr", {
 
 test_that("a CPU step on a table with nothing pending is still shown", {
   skip_if_no_gpu()
+  f10_snapshots_on()
   withr::local_options(cuplyr.fallback = "silent")
   q <- tbl_gpu(f10_df(), lazy = TRUE) |> mutate(z = pnorm(x))
   expect_false(has_pending_ops(q))
@@ -235,6 +250,7 @@ test_that("a CPU step on a table with nothing pending is still shown", {
 
 test_that("CPU steps nest: the input of a CPU step can hold an earlier one", {
   skip_if_no_gpu()
+  f10_snapshots_on()
   withr::local_options(cuplyr.fallback = "silent")
   q <- tbl_gpu(f10_df(), lazy = TRUE) |>
     mutate(z = pnorm(x)) |>
@@ -290,6 +306,7 @@ test_that("compute() drops the history", {
 
 test_that("an eager table and a lazy table with nothing pending", {
   skip_if_no_gpu()
+  f10_snapshots_on()
   df <- f10_df()
   expect_snapshot({
     explain(tbl_gpu(df, lazy = FALSE))
