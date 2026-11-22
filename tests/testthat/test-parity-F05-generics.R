@@ -230,5 +230,5 @@ test_that("explain() prints a plan with steps only when there are pending lazy o
   expect_false(any(grepl("<cuplyr plan: optimized>", out, fixed = TRUE)))
   # a lazy table with nothing pending is its source alone
   out <- capture.output(dplyr::explain(tbl_gpu(f05_x(), lazy = TRUE)))
-  expect_identical(out, c("<cuplyr plan: optimized>", "table on the GPU", "  columns: all 3"))
+  expect_identical(out, c("<cuplyr plan: optimized>", "table on the GPU", "  columns read: all 3"))
 })

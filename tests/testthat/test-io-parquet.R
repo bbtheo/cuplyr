@@ -50,7 +50,7 @@ test_that("explain() names the file and the columns of a scan", {
   path <- pq_write(pq_sem_df())
   out <- capture.output(explain(select(read_parquet_gpu(path), id, s)))
   expect_true(paste0("parquet scan: ", basename(path)) %in% out)
-  expect_true(any(grepl("^  columns: 2 of [0-9]+ \\(id, s\\)$", out)))
+  expect_true(any(grepl("^  columns read: 2 of [0-9]+ \\(id, s\\)$", out)))
 })
 
 test_that("print() shows the row count of the file, not of the preview", {

@@ -50,7 +50,7 @@ explain(pipeline)
 ```
 
 The first line says which plan it is. The source line says where the rows come
-from, and `columns:` how many of the source's columns the plan reads. The
+from, and `columns read:` how many of the source's columns the plan reads. The
 optimized plan reads 4 of the 11 columns of `mtcars`.
 
 Most verbs print as the call you wrote. The exceptions:
@@ -75,8 +75,8 @@ prints its right-hand plan under `y:`.
 The optimizer runs these passes in order:
 
 1. Projection pruning drops the columns nothing later reads. On a table the
-   plan shows it as the source's `columns:` line, for example
-   `columns: 3 of 11 (mpg, hp, wt)`; elsewhere as a `select()` step.
+   plan shows it as the source's `columns read:` line, for example
+   `columns read: 3 of 11 (mpg, hp, wt)`; elsewhere as a `select()` step.
 2. Mutate fusion merges a `mutate()` with the `mutate()` directly below it.
 3. Dead-column pruning drops `mutate()` expressions and `select()` columns that
    nothing above uses.
@@ -95,7 +95,7 @@ which doesn't change the plan.
 ## Projection pruning
 
 Only `mpg`, `hp` and `wt` are read from the 11 columns of `mtcars` here, so the
-source line reads `columns: 3 of 11 (mpg, hp, wt)`. The `select(mpg,
+source line reads `columns read: 3 of 11 (mpg, hp, wt)`. The `select(mpg,
 power_ratio)` at the end is the one in the pipeline.
 
 ```{r proj}
@@ -286,7 +286,7 @@ y <- tbl_gpu(data.frame(k = c(1, 2, 2, 4), v = c(10, 20, 30, 40)))
 ```
 
 For `semi_join()` and `anti_join()` the whole filter moves into the left input.
-The right input's `columns:` line shows projection pruning keeping only the key:
+The right input's `columns read:` line shows projection pruning keeping only the key:
 
 ```{r join-semi}
 x |> semi_join(y, by = "k") |> filter(a > 10) |> explain()
@@ -435,12 +435,12 @@ read. `explain()` shows both: a scan prints as
 
 ```
 parquet scan: flights.parquet
-  columns: 5 of 41 (carrier, distance, air_time, dep_delay, arr_delay)
-  reader filter: distance > 1000
+  columns read: 5 of 41 (carrier, distance, air_time, dep_delay, arr_delay)
+  reader filter: distance > 1000L
 ```
 
 `options(cuplyr.parquet_pushdown = FALSE)` turns both off. Then the scan says
-`columns: all 41`, and any pruning shows as a `select()` step above it. See
+`columns read: all 41`, and any pruning shows as a `select()` step above it. See
 `?read_parquet_gpu` for the full rules.
 
 ## Steps that run on the CPU
@@ -459,8 +459,9 @@ tbl_gpu(mtcars) |>
   explain()
 ```
 
-The plan shows the newest three CPU steps, and `compute()` drops them. Printing
-the plan doesn't run anything.
+The plan shows the newest three CPU steps; `compute()` of a table with pending
+steps starts a new plan with no history. Printing the plan doesn't run
+anything.
 
 ## Barriers
 

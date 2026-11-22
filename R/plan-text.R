@@ -89,18 +89,18 @@ plan_num <- function(x) {
   sub("L$", "", paste(deparse(x, width.cutoff = 500L), collapse = ""))
 }
 
-# `columns: all 5` / `columns: 2 of 5 (a, b)`; more than 8 names show the first 8
+# `columns read: all 5` / `columns read: 2 of 5 (a, b)`; more than 8 names show the first 8
 plan_columns_text <- function(read, n_total) {
   k <- length(read)
   if (is.null(read) || k >= n_total) {
-    return(sprintf("columns: all %d", n_total))
+    return(sprintf("columns read: all %d", n_total))
   }
   shown <- if (k > 8L) {
     paste0(paste(read[seq_len(8L)], collapse = ", "), ", and ", k - 8L, " more")
   } else {
     paste(read, collapse = ", ")
   }
-  sprintf("columns: %d of %d (%s)", k, n_total, shown)
+  sprintf("columns read: %d of %d (%s)", k, n_total, shown)
 }
 
 # A literal vector as R code; more than `cap` values print as `<n values>`
@@ -151,7 +151,7 @@ plan_is_na_lit <- function(ir) {
   }
   value <- .subset2(ir, "value")
   isTRUE(.subset2(ir, "na")) ||
-    (length(value) == 1L && is.atomic(value) && !is.object(value) && is.na(value))
+    (length(value) == 1L && is.atomic(value) && !is.object(value) && is.na(value) && !is.nan(value))
 }
 
 # @return `list(text, prec)`: the code and how tightly its top operator binds
@@ -234,6 +234,10 @@ plan_call <- function(ir) {
   }
 
   texts <- vapply(parts, .subset2, character(1), "text")
+  user_call <- plan_user_call(op, args, texts, meta)
+  if (!is.null(user_call)) {
+    return(list(text = user_call, prec = plan_prec_atom))
+  }
   fn <- if (op %in% names(plan_op_names)) unname(plan_op_names[op]) else op
 
   if (identical(op, "factor_labels") && n >= 1L) {
@@ -263,6 +267,92 @@ plan_call <- function(ir) {
     texts <- c(texts, paste0(if (op %in% c("first", "last", "nth")) "na_rm" else "na.rm", " = TRUE"))
   }
   list(text = paste0(fn, "(", paste(texts, collapse = ", "), ")"), prec = plan_prec_atom)
+}
+
+# The IR encodes some calls in an order or a form of its own (R/ir.R): the
+# string functions take the column first, a paste carries its separator last,
+# substr() is 0-based, a recode is one lookup. This is the call the user wrote,
+# or an equivalent one, for those ops; NULL for any other op.
+# @param texts The printed arguments
+plan_user_call <- function(op, args, texts, meta) {
+  n <- length(args)
+  call_text <- function(fn, ...) paste0(fn, "(", paste(c(...), collapse = ", "), ")")
+  flag <- function(arg, name) {
+    if (isTRUE(.subset2(arg, "value"))) paste0(name, " = TRUE")
+  }
+  switch(op,
+    # (x, pattern, fixed): the pattern comes first, `fixed` only when set
+    grepl = if (n == 3L) call_text("grepl", texts[2L], texts[1L], flag(args[[3L]], "fixed")),
+    # (x, pattern, replacement, fixed)
+    sub = , gsub = if (n == 4L) {
+      call_text(op, texts[2L], texts[3L], texts[1L], flag(args[[4L]], "fixed"))
+    },
+    starts_with = if (n == 2L) call_text("startsWith", texts),
+    ends_with = if (n == 2L) call_text("endsWith", texts),
+    # (x, start - 1, stop): the start is 0-based
+    substr = if (n == 3L) {
+      start <- .subset2(args[[2L]], "value")
+      if (identical(.subset2(args[[2L]], "kind"), "lit") && is.numeric(start) && length(start) == 1L &&
+          !is.na(start)) {
+        call_text("substr", texts[1L], plan_value(as.integer(start) + 1L, NULL, 10L), texts[3L])
+      }
+    },
+    # (..., sep)
+    paste_cols = if (n >= 2L) {
+      sep <- .subset2(args[[n]], "value")
+      if (identical(sep, "")) {
+        call_text("paste0", texts[-n])
+      } else if (identical(sep, " ")) {
+        call_text("paste", texts[-n])
+      } else {
+        call_text("paste", texts[-n], paste0("sep = ", texts[n]))
+      }
+    },
+    # a cast to a day / a timestamp, at UTC
+    as_date = if (n == 1L) call_text("as.Date", texts, 'tz = "UTC"'),
+    as_posixct = if (n == 1L) call_text("as.POSIXct", texts, 'tz = "UTC"'),
+    # horizontal aggregates of a rowwise table: `sum(c(a, b))`
+    rw_agg_i32 = , rw_agg_f64 = {
+      fn <- as.character(meta[["fn"]] %||% "")
+      if (nzchar(fn) && n >= 1L) {
+        call_text(fn, if (n == 1L) texts else call_text("c", texts), if (isTRUE(meta[["na_rm"]])) "na.rm = TRUE")
+      }
+    },
+    # (x, keys, values, default, missing): recode()
+    recode_lookup = plan_recode(args, texts),
+    # (x, cond1, value1, ...): replace_when()
+    replace_when = {
+      nw <- meta[["n_when"]]
+      if (is.numeric(nw) && length(nw) == 1L && n == 2L * nw + 1L) {
+        idx <- seq_len(nw)
+        call_text("replace_when", texts[1L], paste0(texts[2L * idx], " ~ ", texts[2L * idx + 1L]))
+      }
+    },
+    {
+      round_op <- regmatches(op, regexec("^(floor_date|ceiling_date|round_date)_(second|minute|hour|day|week)$", op))[[1L]]
+      if (length(round_op) == 3L && n == 1L) {
+        call_text(round_op[[2L]], texts, deparse(round_op[[3L]]))
+      }
+    }
+  )
+}
+
+# `recode(x, a = "A", `1` = "b", .default = d, .missing = m)` from the lookup node
+# the parser builds for it
+plan_recode <- function(args, texts) {
+  if (length(args) != 5L) {
+    return(NULL)
+  }
+  keys <- .subset2(args[[2L]], "value")
+  vals <- .subset2(args[[3L]], "value")
+  if (length(keys) == 0L || length(keys) != length(vals) || length(keys) > 6L) {
+    return(NULL)
+  }
+  pairs <- paste0(plan_names(as.character(keys)), " = ",
+                  vapply(seq_along(vals), function(i) plan_value(vals[[i]], NULL, 1L), character(1)))
+  default <- if (!identical(args[[4L]], args[[1L]])) paste0(".default = ", texts[4L])
+  missing <- if (!plan_is_na_lit(args[[5L]])) paste0(".missing = ", texts[5L])
+  paste0("recode(", paste(c(texts[1L], pairs, default, missing), collapse = ", "), ")")
 }
 
 # -----------------------------------------------------------------------------
@@ -401,23 +491,28 @@ plan_join <- function(node, optimized) {
   type <- .subset2(node, "join_type")
   by <- .subset2(node, "by")
   cross <- identical(type, "cross") || isTRUE(.subset2(node, "cross_by"))
+  filtering <- type %in% c("semi", "anti")
   args <- "y"
   if (!cross) {
     args <- c(args, paste0("by = ", plan_join_by(by)))
   }
-  if (!cross && !type %in% c("semi", "anti")) {
-    if (isTRUE(.subset2(node, "keep"))) {
-      args <- c(args, "keep = TRUE")
-    }
-    suffix <- .subset2(node, "suffix")
-    if (!is.null(suffix) && !identical(unname(suffix), c(".x", ".y"))) {
-      args <- c(args, paste0("suffix = ", paste(deparse(unname(suffix), width.cutoff = 500L), collapse = "")))
-    }
-    for (arg in c("na_matches", "multiple")) {
-      value <- .subset2(node, arg)
-      if (!is.null(value) && !identical(value, c(na_matches = "na", multiple = "all")[[arg]])) {
-        args <- c(args, paste0(arg, " = ", deparse(value)))
-      }
+  if (!cross && !filtering && isTRUE(.subset2(node, "keep"))) {
+    args <- c(args, "keep = TRUE")
+  }
+  # (only the arguments the dplyr call has: no suffix on a semi/anti join, no
+  # na_matches on a cross join)
+  suffix <- .subset2(node, "suffix")
+  if (!filtering && !is.null(suffix) && !identical(unname(suffix), c(".x", ".y"))) {
+    args <- c(args, paste0("suffix = ", paste(deparse(unname(suffix), width.cutoff = 500L), collapse = "")))
+  }
+  na_matches <- .subset2(node, "na_matches")
+  if (!cross && !is.null(na_matches) && !identical(na_matches, "na")) {
+    args <- c(args, paste0("na_matches = ", deparse(na_matches)))
+  }
+  if (!cross && !filtering) {
+    multiple <- .subset2(node, "multiple")
+    if (!is.null(multiple) && !identical(multiple, "all")) {
+      args <- c(args, paste0("multiple = ", deparse(multiple)))
     }
     unmatched <- .subset2(node, "unmatched")
     if (!is.null(unmatched) && !all(unmatched == "drop")) {
@@ -492,7 +587,7 @@ plan_step <- function(node) {
 
 # A source: the table on the GPU, a parquet scan, or the result of a CPU step.
 # `columns` is what a select the optimizer added on top of it keeps (folded into
-# the source's `columns:` line).
+# the source's `columns read:` line).
 plan_source_block <- function(node, optimized, columns = NULL) {
   n_total <- length(.subset2(.subset2(node, "schema"), "names"))
   origin <- .subset2(node, "origin")
@@ -534,7 +629,10 @@ plan_source_block <- function(node, optimized, columns = NULL) {
     read <- .subset2(scan, "columns") %||% file_names
     preds <- .subset2(scan, "predicates")
     filter_line <- if (length(preds) > 0L) {
-      texts <- vapply(preds, function(p) as.character(.subset2(p, "text") %||% "?"), character(1))
+      # R code (`code`), the conjunct as the plan would write it; `text` is the reader's note
+      texts <- vapply(preds, function(p) {
+        as.character(.subset2(p, "code") %||% .subset2(p, "text") %||% "?")
+      }, character(1))
       paste0("  reader filter: ", paste(texts, collapse = ", "))
     }
     return(plan_block(c(head, paste0("  ", plan_columns_text(read, length(file_names))), filter_line)))
@@ -550,7 +648,7 @@ plan_source_block <- function(node, optimized, columns = NULL) {
 
 # The plan under `node`, source first. A select the optimizer inserted
 # (`pruned = TRUE`) directly on an in-memory or CPU-result source is folded into
-# the source's `columns:` line; on a parquet scan it stays a step, as the reader
+# the source's `columns read:` line; on a parquet scan it stays a step, as the reader
 # then reads every column (pushdown off).
 plan_node_block <- function(node, optimized) {
   steps <- list()
@@ -654,9 +752,10 @@ plan_show <- function(x, optimized) {
 # Rendering can never break a fallback: a failure is stored as one line.
 # @param .data The lazy `tbl_gpu` the verb was called on
 # @param note What `cuplyr_fallback_notify()` reported (verb, expr, reason)
-# @param names The result's column names, to tell a stale origin
+# @param result The lazy `tbl_gpu` the step produced: its columns and its GPU
+#   table (by address) tell a stale origin from a true one
 # @keywords internal
-plan_origin <- function(.data, note, names) {
+plan_origin <- function(.data, note, result) {
   input_of <- function(optimized) {
     block <- plan_node_text(plan_root_node(.data), optimized)
     keep <- block$level <= plan_cpu_cap
@@ -674,18 +773,27 @@ plan_origin <- function(.data, note, names) {
     verb = as.character(note$verb %||% "?"),
     expr = as.character(note$expr %||% NA_character_),
     reason = as.character(note$reason %||% ""),
-    names = unname(names),
+    names = unname(.subset2(.subset2(result, "schema"), "names")),
+    ptr = rlang::obj_address(.subset2(result, "ptr")),
     input = input
   )
 }
 
-# The origin of `x`'s data if it still describes it (the table's columns are
-# those the CPU step produced), else NULL
+# The origin of `x`'s data if it still describes it (the table holds the GPU
+# table the CPU step produced, with its columns), else NULL
 table_origin <- function(x) {
   origin <- .subset2(x, "origin")
   if (is.null(origin) ||
+      !identical(.subset2(origin, "ptr"), rlang::obj_address(.subset2(x, "ptr"))) ||
       !identical(.subset2(origin, "names"), unname(.subset2(.subset2(x, "schema"), "names")))) {
     return(NULL)
   }
   origin
+}
+
+# `out` with the CPU history of `from` (a table that keeps `from`'s GPU table and
+# schema, like group_by() and ungroup() do)
+carry_origin <- function(out, from) {
+  origin <- .subset2(from, "origin")
+  if (is.null(origin)) out else set_tbl_gpu_field(out, "origin", origin)
 }

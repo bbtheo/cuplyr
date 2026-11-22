@@ -43,6 +43,7 @@ test_that("literals print as R code", {
   expect_identical(pt_text(ir_lit(TRUE, "BOOL8")), "TRUE")
   expect_identical(pt_text(ir_lit(NULL, NULL, na = TRUE)), "NA")
   expect_identical(pt_text(ir_lit(NA_real_, "FLOAT64")), "NA")
+  expect_identical(pt_text(ir_lit(NaN, "FLOAT64")), "NaN")
   expect_identical(pt_text(ir_lit(as.Date("2024-02-01"), "TIMESTAMP_DAYS")), "as.Date(\"2024-02-01\")")
   expect_identical(
     pt_text(ir_lit(as.POSIXct("2024-02-01 03:04:05", tz = "UTC"), "TIMESTAMP_MICROSECONDS")),
@@ -109,22 +110,22 @@ test_that("a plan prints source first, with a pruning select folded into the sou
   mut <- ast_mutate(flt, list(make_mutate_expr("d", pt_call("+", pt_col("a"), pt_col("b")), pt_schema)))
   expect_identical(
     plan_node_block(mut, TRUE)$text,
-    c("table on the GPU", "  columns: 2 of 3 (a, b)", "filter(a > 1)", "mutate(d = a + b)")
+    c("table on the GPU", "  columns read: 2 of 3 (a, b)", "filter(a > 1)", "mutate(d = a + b)")
   )
   # not folded when it is the user's select
   user <- ast_select(src, c("a", "b"))
   expect_identical(plan_node_block(user, FALSE)$text,
-                   c("table on the GPU", "  columns: all 3", "select(a, b)"))
+                   c("table on the GPU", "  columns read: all 3", "select(a, b)"))
   # a grouped filter says so
   grp <- ast_filter(src, list(pt_pred(pt_call(">", pt_col("a"), pt_num(1)))), grouped = TRUE)
   expect_identical(plan_node_block(grp, FALSE)$text[[3L]], "filter(a > 1)  # grouped")
 })
 
 test_that("more than 8 columns are listed as the first 8 and a count", {
-  expect_identical(plan_columns_text(letters[1:5], 5L), "columns: all 5")
-  expect_identical(plan_columns_text(letters[1:3], 9L), "columns: 3 of 9 (a, b, c)")
+  expect_identical(plan_columns_text(letters[1:5], 5L), "columns read: all 5")
+  expect_identical(plan_columns_text(letters[1:3], 9L), "columns read: 3 of 9 (a, b, c)")
   expect_identical(plan_columns_text(letters[1:10], 20L),
-                   "columns: 10 of 20 (a, b, c, d, e, f, g, h, and 2 more)")
+                   "columns read: 10 of 20 (a, b, c, d, e, f, g, h, and 2 more)")
 })
 
 test_that("a join prints its right side under `y:`", {
@@ -133,8 +134,8 @@ test_that("a join prints its right side under `y:`", {
   by <- list(left = "k", right = "k", op = "==", filter = "none")
   expect_identical(
     plan_node_block(ast_join("left", x, y, by), FALSE)$text,
-    c("table on the GPU", "  columns: all 2", "left_join(y, by = join_by(k))",
-      "  y:", "    table on the GPU", "      columns: all 2")
+    c("table on the GPU", "  columns read: all 2", "left_join(y, by = join_by(k))",
+      "  y:", "    table on the GPU", "      columns read: all 2")
   )
   uneq <- list(left = c("k", "a"), right = c("k", "b"), op = c("==", ">="), filter = c("none", "closest"))
   one <- plan_node_block(ast_join("inner", x, y, uneq, relationship = "many-to-many", multiple = "first"), FALSE)$text[[3L]]
@@ -149,6 +150,80 @@ test_that("a join prints its right side under `y:`", {
                                    FALSE)$text[[3L]], "cross_join(y)")
 })
 
+test_that("arguments that change a semi, anti or cross join are printed", {
+  x <- ast_source(list(names = c("k", "a"), types = c("INT32", "FLOAT64")))
+  y <- ast_source(list(names = c("k", "b"), types = c("INT32", "FLOAT64")))
+  by <- list(left = "k", right = "k", op = "==", filter = "none")
+  no_by <- list(left = character(), right = character(), op = character(), filter = character())
+  line <- function(node) plan_node_block(node, FALSE)$text[[3L]]
+  expect_identical(line(ast_join("semi", x, y, by, na_matches = "never")),
+                   "semi_join(y, by = join_by(k), na_matches = \"never\")")
+  expect_identical(line(ast_join("anti", x, y, by, na_matches = "never")),
+                   "anti_join(y, by = join_by(k), na_matches = \"never\")")
+  expect_identical(line(ast_join("semi", x, y, by)), "semi_join(y, by = join_by(k))")
+  expect_identical(line(ast_join("cross", x, y, no_by, suffix = c("_l", "_r"))),
+                   "cross_join(y, suffix = c(\"_l\", \"_r\"))")
+})
+
+test_that("string, paste and substr calls print as the R call the user wrote", {
+  s <- pt_col("s")
+  lit <- function(v) ir_lit(v, if (is.logical(v)) "BOOL8" else "STRING")
+  expect_identical(pt_text(pt_call("grepl", s, lit("^A"), lit(FALSE))), "grepl(\"^A\", s)")
+  expect_identical(pt_text(pt_call("grepl", s, lit("a"), lit(TRUE))), "grepl(\"a\", s, fixed = TRUE)")
+  expect_identical(pt_text(pt_call("sub", s, lit("a"), lit("o"), lit(FALSE))), "sub(\"a\", \"o\", s)")
+  expect_identical(pt_text(pt_call("gsub", s, lit("a"), lit("o"), lit(TRUE))), "gsub(\"a\", \"o\", s, fixed = TRUE)")
+  expect_identical(pt_text(pt_call("starts_with", s, lit("x"))), "startsWith(s, \"x\")")
+  expect_identical(pt_text(pt_call("ends_with", s, lit("x"))), "endsWith(s, \"x\")")
+  # substr(): the IR's start is 0-based
+  expect_identical(pt_text(pt_call("substr", s, ir_lit(1L, "INT32"), ir_lit(4L, "INT32"))), "substr(s, 2L, 4L)")
+  expect_identical(pt_text(pt_call("paste_cols", s, pt_col("t"), lit(""))), "paste0(s, t)")
+  expect_identical(pt_text(pt_call("paste_cols", s, lit("_"), pt_col("t"), lit(""))), "paste0(s, \"_\", t)")
+  expect_identical(pt_text(pt_call("paste_cols", s, pt_col("t"), lit(" "))), "paste(s, t)")
+  expect_identical(pt_text(pt_call("paste_cols", s, pt_col("t"), lit("-"))), "paste(s, t, sep = \"-\")")
+  # a call inside another keeps its parentheses rules
+  expect_identical(pt_text(pt_call("==", pt_call("grepl", s, lit("a"), lit(FALSE)), ir_lit(TRUE, "BOOL8"))),
+                   "grepl(\"a\", s) == TRUE")
+})
+
+test_that("date, rowwise, recode and replace_when calls print as R calls", {
+  expect_identical(pt_text(pt_call("as_date", pt_col("t"))), "as.Date(t, tz = \"UTC\")")
+  expect_identical(pt_text(pt_call("as_posixct", pt_col("d"))), "as.POSIXct(d, tz = \"UTC\")")
+  expect_identical(pt_text(pt_call("floor_date_hour", pt_col("t"))), "floor_date(t, \"hour\")")
+  expect_identical(pt_text(pt_call("ceiling_date_day", pt_col("t"))), "ceiling_date(t, \"day\")")
+  expect_identical(pt_text(pt_call("round_date_minute", pt_col("t"))), "round_date(t, \"minute\")")
+  rw <- function(op, fn, na_rm, ...) ir_call(op, lapply(c(...), ir_col), meta = list(fn = fn, na_rm = na_rm))
+  expect_identical(pt_text(rw("rw_agg_f64", "sum", FALSE, "x", "i")), "sum(c(x, i))")
+  expect_identical(pt_text(rw("rw_agg_i32", "max", TRUE, "x", "i")), "max(c(x, i), na.rm = TRUE)")
+  expect_identical(pt_text(rw("rw_agg_f64", "mean", FALSE, "x")), "mean(x)")
+  rec <- ir_call("recode_lookup", list(
+    pt_col("s"), ir_lit(c("ab", "cd"), "STRING"), ir_lit(c("A", "C"), "STRING"),
+    ir_lit("z", "STRING"), ir_lit(NULL, "STRING", na = TRUE)
+  ), meta = list(na_step = TRUE))
+  expect_identical(pt_text(rec), "recode(s, ab = \"A\", cd = \"C\", .default = \"z\")")
+  num <- ir_call("recode_lookup", list(
+    pt_col("i"), ir_lit(1:2, "INT32"), ir_lit(c(10L, 20L), "INT32"), pt_col("i"), ir_lit(0L, "INT32")
+  ), meta = list(na_step = TRUE))
+  expect_identical(pt_text(num), "recode(i, `1` = 10L, `2` = 20L, .missing = 0L)")
+  rep <- ir_call("replace_when", list(
+    pt_col("x"), ir_call(">", list(pt_col("x"), pt_num(2))), pt_num(0),
+    ir_call("<", list(pt_col("x"), pt_num(1))), pt_num(9)
+  ), meta = list(n_when = 2L))
+  expect_identical(pt_text(rep), "replace_when(x, x > 2 ~ 0, x < 1 ~ 9)")
+  # no internal op name reaches the text
+  expect_false(grepl("rw_agg|recode_lookup|as_date|floor_date_|paste_cols", pt_text(rec)))
+})
+
+test_that("a pushed reader filter prints as R code, falling back to the reader's note", {
+  schema <- list(names = c("d", "i"), types = c("TIMESTAMP_DAYS", "INT32"))
+  scan <- list(paths = "/tmp/dates.parquet", file_names = c("d", "i"), file_types = schema$types,
+               columns = NULL, predicates = list(
+                 list(text = "d > 2024-02-01", code = "d > as.Date(\"2024-02-01\")", atoms = list()),
+                 list(text = "i < 5", atoms = list())
+               ))
+  text <- plan_node_block(ast_source(schema, scan = scan), TRUE)$text
+  expect_identical(text[[length(text)]], "  reader filter: d > as.Date(\"2024-02-01\"), i < 5")
+})
+
 # --- the CPU history ----------------------------------------------------------
 
 pt_origin <- function(verb, expr, input_block) {
@@ -160,7 +235,7 @@ test_that("a CPU step prints its verb, reason and input, and the newest three ar
   schema <- list(names = "a", types = "FLOAT64")
   # blocks[[i]] is the plan of a table that i CPU steps made, each one's input the one before
   blocks <- list()
-  block <- plan_block(c("table on the GPU", "  columns: all 1"))
+  block <- plan_block(c("table on the GPU", "  columns read: all 1"))
   for (i in 1:4) {
     origin <- pt_origin("mutate", paste0("f", i, "(a)"), block)
     block <- plan_node_block(ast_source(schema, origin = origin), TRUE)
@@ -168,8 +243,8 @@ test_that("a CPU step prints its verb, reason and input, and the newest three ar
   }
   one <- blocks[[1L]]
   expect_identical(one$text, c("CPU fallback: mutate() for f1(a)", "  reason: no GPU version.",
-                               "  columns: all 1", "  input (computed at the mutate() call):",
-                               "    table on the GPU", "      columns: all 1"))
+                               "  columns read: all 1", "  input (computed at the mutate() call):",
+                               "    table on the GPU", "      columns read: all 1"))
   expect_identical(one$level, rep(1L, 6L))
   expect_identical(one$role, c("", "", "", "input", "", ""))
   nothing <- plan_node_block(
@@ -198,26 +273,37 @@ test_that("plan_origin() records plain text only, and can never fail", {
   schema <- list(names = c("a", "b", "c"), types = rep("FLOAT64", 3L))
   plan <- ast_filter(ast_source(schema), list(pt_pred(pt_call(">", pt_col("a"), pt_num(1)))))
   fake <- structure(list(lazy_ops = plan, schema = schema, exec_mode = "lazy"), class = c("tbl_gpu", "tbl"))
+  result <- structure(list(schema = list(names = c("a", "b", "c", "z"), types = rep("FLOAT64", 4L)),
+                           ptr = new.env()), class = c("tbl_gpu", "tbl"))
   note <- list(verb = "mutate", expr = "pnorm(a)", reason = "no GPU version.")
-  origin <- plan_origin(fake, note, c("a", "b", "c", "z"))
+  origin <- plan_origin(fake, note, result)
   expect_false(pt_holds_ref(origin))
   expect_identical(origin$verb, "mutate")
-  expect_identical(origin$input$as_written$text, c("table on the GPU", "  columns: all 3", "filter(a > 1)"))
+  expect_identical(origin$input$as_written$text, c("table on the GPU", "  columns read: all 3", "filter(a > 1)"))
   expect_identical(origin$input$optimized$level, c(0L, 0L, 0L))
 
   local_mocked_bindings(plan_node_text = function(...) stop("boom"))
-  broken <- plan_origin(fake, note, c("a", "b", "c", "z"))
+  broken <- plan_origin(fake, note, result)
   expect_identical(broken$input$optimized$text, "plan could not be shown: boom")
   expect_identical(broken$input$as_written$text, "plan could not be shown: boom")
 })
 
-test_that("an origin only describes a table whose columns it produced", {
+test_that("an origin only describes the table, and the columns, the CPU step produced", {
   schema <- list(names = c("a", "b"), types = c("FLOAT64", "FLOAT64"))
+  ptr <- new.env()
   origin <- pt_origin("mutate", "f(a)", plan_block("table on the GPU"))
   origin$names <- c("a", "b")
-  tbl <- structure(list(schema = schema, origin = origin), class = c("tbl_gpu", "tbl"))
+  origin$ptr <- rlang::obj_address(ptr)
+  tbl <- structure(list(schema = schema, ptr = ptr, origin = origin), class = c("tbl_gpu", "tbl"))
   expect_identical(table_origin(tbl), origin)
-  other <- structure(list(schema = list(names = c("a", "c"), types = schema$types), origin = origin),
+  other <- structure(list(schema = list(names = c("a", "c"), types = schema$types), ptr = ptr, origin = origin),
                      class = c("tbl_gpu", "tbl"))
   expect_null(table_origin(other))
+  # the same columns on another GPU table (the origin was copied along by mistake)
+  elsewhere <- structure(list(schema = schema, ptr = new.env(), origin = origin), class = c("tbl_gpu", "tbl"))
+  expect_null(table_origin(elsewhere))
+  # a table that keeps the GPU table and schema (group_by(), ungroup()) hands the origin on
+  plain <- structure(list(schema = schema, ptr = ptr), class = c("tbl_gpu", "tbl"))
+  expect_identical(carry_origin(plain, tbl)$origin, origin)
+  expect_identical(carry_origin(plain, plain), plain)
 })

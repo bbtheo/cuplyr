@@ -70,7 +70,7 @@ lazy <- tbl_gpu(mtcars) |>
 explain(lazy)
 #> <cuplyr plan: optimized>
 #> table on the GPU
-#>   columns: 2 of 11 (mpg, cyl)
+#>   columns read: 2 of 11 (mpg, cyl)
 #> filter(mpg > 20)
 #> mutate(kpl = mpg * 0.425)
 #> select(cyl, kpl)
@@ -87,7 +87,7 @@ stopifnot(identical(
   trimws(capture.output(explain(lazy))),
   c("<cuplyr plan: optimized>",
     "table on the GPU",
-    "columns: 2 of 11 (mpg, cyl)",
+    "columns read: 2 of 11 (mpg, cyl)",
     "filter(mpg > 20)",
     "mutate(kpl = mpg * 0.425)",
     "select(cyl, kpl)")
@@ -102,7 +102,7 @@ has run on the GPU yet. `collect(lazy)` runs the plan.
 `compute()` and `collect()` run six optimizer passes.
 
 - Projection pruning keeps only the columns later steps need. This is the
-  `columns: 2 of 11` line above.
+  `columns read: 2 of 11` line above.
 - Mutate fusion merges consecutive `mutate()` calls into one step, keeping the
   order you wrote. It skips the merge if the result would have more than 8
   expressions, or if the later `mutate()` reads more than 4 columns the earlier

@@ -170,8 +170,7 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE, detail =
 # @param note What cuplyr_fallback_notify() reported
 # @keywords internal
 fallback_record_origin <- function(result, .data, note) {
-  set_tbl_gpu_field(result, "origin",
-                    plan_origin(.data, note, .subset2(.subset2(result, "schema"), "names")))
+  set_tbl_gpu_field(result, "origin", plan_origin(.data, note, result))
 }
 
 # The group keys of the grouped_df `result` when dplyr kept groups a plain

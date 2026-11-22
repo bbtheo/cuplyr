@@ -288,11 +288,11 @@ has_pending_ops <- function(.data) {
 #' <cuplyr plan: optimized>
 #' CPU fallback: mutate() for pnorm(gain / 10)
 #'   reason: `pnorm()` has no GPU implementation.
-#'   columns: 2 of 4 (carrier, z)
+#'   columns read: 2 of 4 (carrier, z)
 #'   input (computed at the mutate() call):
 #'     parquet scan: flights.parquet
-#'       columns: 5 of 41 (carrier, distance, air_time, dep_delay, arr_delay)
-#'       reader filter: distance > 1000
+#'       columns read: 5 of 41 (carrier, distance, air_time, dep_delay, arr_delay)
+#'       reader filter: distance > 1000L
 #'     mutate(gain = dep_delay - arr_delay, speed = distance / air_time * 60)
 #'     filter(speed > 400, gain > 0)
 #'     select(carrier, speed, gain)
@@ -301,15 +301,16 @@ has_pending_ops <- function(.data) {
 #' ```
 #'
 #' * A table on the GPU, a parquet file (`parquet scan:`) or the result of a
-#'   step that ran on the CPU starts the plan, with the columns it supplies:
-#'   `columns: 5 of 41 (...)` is a scan reading 5 of the file's 41 columns.
-#'   A parquet scan also shows the comparisons the reader applies
-#'   (`reader filter:`).
+#'   step that ran on the CPU starts the plan, with the columns the plan reads
+#'   from it: `columns read: 5 of 41 (...)` is a scan reading 5 of the file's
+#'   41 columns. A parquet scan also shows the comparisons the reader applies
+#'   (`reader filter:`), written as code.
 #' * A step that fell back to the CPU shows the verb, the expression, why it
 #'   could not run on the GPU (the reason of the [cuplyr-fallback] notice) and
 #'   the plan it computed at that call. The newest three CPU steps are shown;
 #'   under the oldest one the input reads `not shown (older CPU steps)`.
-#'   `compute()` drops the history.
+#'   `compute()` of a table with pending steps starts a new plan with no
+#'   history.
 #' * A step that does not fit in 80 characters prints one argument per line.
 #' * A join prints its right-hand plan under `y:`.
 #'
