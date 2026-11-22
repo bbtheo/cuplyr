@@ -308,14 +308,32 @@ plan_user_call <- function(op, args, texts, meta) {
         call_text("paste", texts[-n], paste0("sep = ", texts[n]))
       }
     },
-    # a cast to a day / a timestamp, at UTC
+    # (x, which): `which` only when it isn't the default
+    trimws = if (n == 2L) {
+      call_text("trimws", texts[1L], if (!identical(.subset2(args[[2L]], "value"), "both")) texts[2L])
+    },
+    # a cast to the UTC day; a POSIXct keeps its zone and a Date becomes UTC
+    # midnight, which as.POSIXct() does with no `tz`
     as_date = if (n == 1L) call_text("as.Date", texts, 'tz = "UTC"'),
-    as_posixct = if (n == 1L) call_text("as.POSIXct", texts, 'tz = "UTC"'),
-    # horizontal aggregates of a rowwise table: `sum(c(a, b))`
+    as_posixct = if (n == 1L) call_text("as.POSIXct", texts),
+    # horizontal aggregates of a rowwise table, its operands as written
+    # (meta$form): `max(a, b)`, `sum(c(a, b))`, `sum(c_across(c(a, b)))`; the
+    # step that holds one is marked rowwise (plan_step())
     rw_agg_i32 = , rw_agg_f64 = {
       fn <- as.character(meta[["fn"]] %||% "")
       if (nzchar(fn) && n >= 1L) {
-        call_text(fn, if (n == 1L) texts else call_text("c", texts), if (isTRUE(meta[["na_rm"]])) "na.rm = TRUE")
+        form <- meta[["form"]]
+        vec <- if (n == 1L) texts else call_text("c", texts)
+        operands <- if (identical(form, "args")) {
+          texts
+        } else if (identical(form, "c_across")) {
+          call_text("c_across", vec)
+        } else if (identical(form, "c")) {
+          call_text("c", texts)
+        } else {
+          vec
+        }
+        call_text(fn, operands, if (isTRUE(meta[["na_rm"]])) "na.rm = TRUE")
       }
     },
     # (x, keys, values, default, missing): recode()
@@ -337,19 +355,25 @@ plan_user_call <- function(op, args, texts, meta) {
   )
 }
 
+# Most replacements a printed recode() lists; the rest are counted
+plan_recode_cap <- 20L
+
 # `recode(x, a = "A", `1` = "b", .default = d, .missing = m)` from the lookup node
-# the parser builds for it
+# the parser builds for it; past `plan_recode_cap` pairs the first ones are
+# listed and the others counted (`<5 more>`). A node of another shape (none is
+# built) still prints as recode(), never as the lookup op.
 plan_recode <- function(args, texts) {
-  if (length(args) != 5L) {
-    return(NULL)
+  keys <- if (length(args) == 5L) .subset2(args[[2L]], "value")
+  vals <- if (length(args) == 5L) .subset2(args[[3L]], "value")
+  if (length(keys) == 0L || length(keys) != length(vals)) {
+    return(paste0("recode(", paste(c(texts[1L], "<replacements>"), collapse = ", "), ")"))
   }
-  keys <- .subset2(args[[2L]], "value")
-  vals <- .subset2(args[[3L]], "value")
-  if (length(keys) == 0L || length(keys) != length(vals) || length(keys) > 6L) {
-    return(NULL)
+  shown <- seq_len(min(length(keys), plan_recode_cap))
+  pairs <- paste0(plan_names(as.character(keys[shown])), " = ",
+                  vapply(shown, function(i) plan_value(vals[[i]], NULL, 1L), character(1)))
+  if (length(keys) > plan_recode_cap) {
+    pairs <- c(pairs, sprintf("<%d more>", length(keys) - plan_recode_cap))
   }
-  pairs <- paste0(plan_names(as.character(keys)), " = ",
-                  vapply(seq_along(vals), function(i) plan_value(vals[[i]], NULL, 1L), character(1)))
   default <- if (!identical(args[[4L]], args[[1L]])) paste0(".default = ", texts[4L])
   missing <- if (!plan_is_na_lit(args[[5L]])) paste0(".missing = ", texts[5L])
   paste0("recode(", paste(c(texts[1L], pairs, default, missing), collapse = ", "), ")")
@@ -534,22 +558,40 @@ plan_join <- function(node, optimized) {
   ))
 }
 
-# One node as the dplyr call(s) it stands for (not a source, not a join)
+# TRUE iff the IR `ir` holds a rowwise horizontal aggregate (rw_agg_*), which
+# only a rowwise table builds (R/rowwise.R): `max(x, i)` there is per row
+plan_has_rw_agg <- function(ir) {
+  if (!inherits(ir, "cuplyr_ir") || !identical(.subset2(ir, "kind"), "call")) {
+    return(FALSE)
+  }
+  .subset2(ir, "op") %in% c("rw_agg_i32", "rw_agg_f64") ||
+    any(vapply(.subset2(ir, "args"), plan_has_rw_agg, logical(1)))
+}
+
+# One node as the dplyr call(s) it stands for (not a source, not a join). A
+# filter or mutate on a rowwise table is marked `# rowwise` (its aggregates are
+# per row), a filter on a grouped one `# grouped`.
 plan_step <- function(node) {
   type <- .subset2(node, "type")
   switch(type,
-    filter = plan_block(plan_step_lines(
-      "filter",
-      vapply(.subset2(node, "predicates"), function(p) plan_ir_text(.subset2(p, "ir")), character(1),
-             USE.NAMES = FALSE),
-      comment = if (isTRUE(.subset2(node, "grouped"))) "grouped"
-    )),
-    mutate = plan_block(plan_step_lines(
-      "mutate",
-      vapply(.subset2(node, "expressions"), function(e) {
-        paste0(plan_names(.subset2(e, "output_col")), " = ", plan_ir_text(.subset2(e, "ir")))
-      }, character(1), USE.NAMES = FALSE)
-    )),
+    filter = {
+      irs <- lapply(.subset2(node, "predicates"), .subset2, "ir")
+      rowwise <- isTRUE(.subset2(node, "rowwise")) || any(vapply(irs, plan_has_rw_agg, logical(1)))
+      plan_block(plan_step_lines(
+        "filter", vapply(irs, plan_ir_text, character(1), USE.NAMES = FALSE),
+        comment = if (rowwise) "rowwise" else if (isTRUE(.subset2(node, "grouped"))) "grouped"
+      ))
+    },
+    mutate = {
+      exprs <- .subset2(node, "expressions")
+      plan_block(plan_step_lines(
+        "mutate",
+        vapply(exprs, function(e) {
+          paste0(plan_names(.subset2(e, "output_col")), " = ", plan_ir_text(.subset2(e, "ir")))
+        }, character(1), USE.NAMES = FALSE),
+        comment = if (any(vapply(exprs, function(e) plan_has_rw_agg(.subset2(e, "ir")), logical(1)))) "rowwise"
+      ))
+    },
     select = plan_block(plan_step_lines("select", plan_names(.subset2(node, "columns")))),
     rename = plan_block(plan_step_lines(
       "rename", paste0(plan_names(.subset2(node, "new_names")), " = ", plan_names(.subset2(node, "old_names")))

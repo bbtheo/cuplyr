@@ -465,7 +465,7 @@ rowwise_rewrite_expr <- function(expr, env, ctx) {
         # a literal that still reads its operands, so .keep = "used"/"unused"
         # count them (dplyr's mask marks them used)
         lit <- ir_lit_from_r(length(cols))
-        lit$reads <- cols
+        lit$reads <- as.vector(cols)
         return(rlang::call2(".cuplyr_rw", lit, !!!rlang::syms(unique(cols))))
       }
     }
@@ -499,23 +499,27 @@ rowwise_is_fn <- function(head, env, name) {
 
 # The columns a horizontal aggregate / length() reads, from its positional
 # arguments `args`: `c_across(<sel>)`, `c(<bare columns>)`, or bare columns.
-# NULL if the arguments have no such shape.
+# NULL if the arguments have no such shape. The `form` attribute says which
+# ("c_across", "c" or "args"), for the plan text (#10, plan_user_call()).
 # @keywords internal
 rowwise_operands <- function(args, env, ctx, fn) {
   as_column <- function(a) {
     if (is.symbol(a) && as.character(a) %in% ctx$schema$names) as.character(a) else NULL
   }
   cols <- NULL
+  form <- "args"
   if (length(args) == 1L) {
     a <- args[[1L]]
     if (rlang::is_call(a) && identical(call_head_name(a), "c_across")) {
       cols <- rowwise_c_across_cols(a, env, ctx)
+      form <- "c_across"
     } else if (rlang::is_call(a) && rowwise_is_fn(a[[1L]], env, "c")) {
       parts <- as.list(a)[-1L]
       if (length(parts) > 0L && is.null(names(parts))) {
         cols <- vapply(parts, function(p) as_column(p) %||% NA_character_, character(1))
         if (anyNA(cols)) cols <- NULL
       }
+      form <- "c"
     } else {
       cols <- as_column(a)
     }
@@ -530,7 +534,7 @@ rowwise_operands <- function(args, env, ctx, fn) {
   if (!all(types %in% c("BOOL8", "INT32", "FLOAT64"))) {
     return(NULL)
   }
-  unname(cols)
+  structure(unname(cols), form = form)
 }
 
 # c_across(<selection>) resolved against the table's columns minus the rowwise
@@ -597,10 +601,13 @@ rowwise_agg_call <- function(fn, na_rm, cols, ctx) {
   if (ctx$eager && fn %in% c("min", "max") && gpu_dim(ctx$ptr)[[1L]] == 0L) {
     rowwise_bail("a min()/max() of a zero-row table")
   }
+  # (meta$form, how the operands were written, is read by the plan text only)
+  form <- attr(cols, "form") %||% "c"
+  cols <- as.vector(cols)
   types <- ctx$schema$types[match(cols, ctx$schema$names)]
   any_dbl <- "FLOAT64" %in% types
   mk <- function(op) {
-    ir_call(op, lapply(cols, ir_col), meta = list(fn = fn, na_rm = na_rm))
+    ir_call(op, lapply(cols, ir_col), meta = list(fn = fn, na_rm = na_rm, form = form))
   }
   op <- if (fn %in% c("mean", "prod") || any_dbl) "rw_agg_f64" else "rw_agg_i32"
   node <- mk(op)

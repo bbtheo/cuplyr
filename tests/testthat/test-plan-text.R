@@ -116,9 +116,56 @@ test_that("a plan prints source first, with a pruning select folded into the sou
   user <- ast_select(src, c("a", "b"))
   expect_identical(plan_node_block(user, FALSE)$text,
                    c("table on the GPU", "  columns read: all 3", "select(a, b)"))
-  # a grouped filter says so
+  # a grouped filter says so, a rowwise one too
   grp <- ast_filter(src, list(pt_pred(pt_call(">", pt_col("a"), pt_num(1)))), grouped = TRUE)
   expect_identical(plan_node_block(grp, FALSE)$text[[3L]], "filter(a > 1)  # grouped")
+  rwf <- ast_filter(src, list(pt_pred(pt_call(">", pt_col("a"), pt_num(1)))), grouped = TRUE, rowwise = TRUE)
+  expect_identical(plan_node_block(rwf, FALSE)$text[[3L]], "filter(a > 1)  # rowwise")
+  expect_null(grp$rowwise)
+  # a step holding a rowwise aggregate is marked rowwise
+  agg <- ir_call("rw_agg_f64", list(pt_col("a"), pt_col("b")), meta = list(fn = "max", na_rm = FALSE))
+  mrw <- ast_mutate(src, list(make_mutate_expr("m", agg, pt_schema)))
+  expect_identical(plan_node_block(mrw, FALSE)$text[[3L]], "mutate(m = max(c(a, b)))  # rowwise")
+  frw <- ast_filter(src, list(pt_pred(pt_call(">", agg, pt_num(1)))), grouped = TRUE)
+  expect_identical(plan_node_block(frw, FALSE)$text[[3L]], "filter(max(c(a, b)) > 1)  # rowwise")
+})
+
+test_that("no internal op name is ever a call in the text", {
+  s <- pt_col("s")
+  str <- function(v) ir_lit(v, "STRING")
+  int <- function(v) ir_lit(v, "INT32")
+  # one call of every op printed under another name, each internal op included
+  samples <- list(
+    ceil = pt_call("ceil", pt_col("x")),
+    cast_float64 = pt_call("cast_float64", pt_col("i")),
+    cast_int32 = pt_call("cast_int32", pt_col("x")),
+    factor_codes = pt_call("factor_codes", pt_col("f")),
+    factor_labels = pt_call("factor_labels", pt_col("f"), str(c("a", "b"))),
+    date_add_days = pt_call("date_add_days", pt_col("d"), int(1L)),
+    date_sub_days = pt_call("date_sub_days", pt_col("d"), int(1L)),
+    ts_add_us = pt_call("ts_add_us", pt_col("t"), ir_lit(1e6, "INT64")),
+    ts_sub_us = pt_call("ts_sub_us", pt_col("t"), ir_lit(1e6, "INT64")),
+    starts_with = pt_call("starts_with", s, str("a")),
+    ends_with = pt_call("ends_with", s, str("a")),
+    paste_cols = pt_call("paste_cols", s, s, str("-")),
+    as_date = pt_call("as_date", pt_col("t")),
+    as_posixct = pt_call("as_posixct", pt_col("d")),
+    rw_agg_i32 = ir_call("rw_agg_i32", list(pt_col("i"), pt_col("j")), meta = list(fn = "sum", na_rm = FALSE)),
+    rw_agg_f64 = ir_call("rw_agg_f64", list(pt_col("x")), meta = list(fn = "mean", na_rm = TRUE, form = "c_across")),
+    recode_lookup = ir_call("recode_lookup", list(s, str(c("a", "b")), str(c("A", "B")), s,
+                                                  ir_lit(NULL, "STRING", na = TRUE))),
+    floor_date_hour = pt_call("floor_date_hour", pt_col("t")),
+    ceiling_date_day = pt_call("ceiling_date_day", pt_col("t")),
+    round_date_week = pt_call("round_date_week", pt_col("t"))
+  )
+  expect_true(all(ir_internal_ops %in% names(samples)))
+  for (op in names(samples)) {
+    text <- pt_text(samples[[op]])
+    expect_false(grepl(paste0("\\b", op, "\\("), text), info = paste(op, "->", text))
+    # nor inside another call
+    outer <- pt_text(pt_call("==", pt_call("is.na", samples[[op]]), ir_lit(FALSE, "BOOL8")))
+    expect_false(grepl(paste0("\\b", op, "\\("), outer), info = paste(op, "->", outer))
+  }
 })
 
 test_that("more than 8 columns are listed as the first 8 and a count", {
@@ -187,14 +234,35 @@ test_that("string, paste and substr calls print as the R call the user wrote", {
 
 test_that("date, rowwise, recode and replace_when calls print as R calls", {
   expect_identical(pt_text(pt_call("as_date", pt_col("t"))), "as.Date(t, tz = \"UTC\")")
-  expect_identical(pt_text(pt_call("as_posixct", pt_col("d"))), "as.POSIXct(d, tz = \"UTC\")")
+  expect_identical(pt_text(pt_call("as_posixct", pt_col("d"))), "as.POSIXct(d)")
+  expect_identical(pt_text(pt_call("trimws", pt_col("s"), ir_lit("both", "STRING"))), "trimws(s)")
+  expect_identical(pt_text(pt_call("trimws", pt_col("s"), ir_lit("left", "STRING"))), "trimws(s, \"left\")")
   expect_identical(pt_text(pt_call("floor_date_hour", pt_col("t"))), "floor_date(t, \"hour\")")
   expect_identical(pt_text(pt_call("ceiling_date_day", pt_col("t"))), "ceiling_date(t, \"day\")")
   expect_identical(pt_text(pt_call("round_date_minute", pt_col("t"))), "round_date(t, \"minute\")")
-  rw <- function(op, fn, na_rm, ...) ir_call(op, lapply(c(...), ir_col), meta = list(fn = fn, na_rm = na_rm))
+  rw <- function(op, fn, na_rm, ..., form = NULL) {
+    ir_call(op, lapply(c(...), ir_col), meta = list(fn = fn, na_rm = na_rm, form = form))
+  }
   expect_identical(pt_text(rw("rw_agg_f64", "sum", FALSE, "x", "i")), "sum(c(x, i))")
   expect_identical(pt_text(rw("rw_agg_i32", "max", TRUE, "x", "i")), "max(c(x, i), na.rm = TRUE)")
   expect_identical(pt_text(rw("rw_agg_f64", "mean", FALSE, "x")), "mean(x)")
+  # the operands as the user wrote them
+  expect_identical(pt_text(rw("rw_agg_f64", "max", FALSE, "x", "i", form = "args")), "max(x, i)")
+  expect_identical(pt_text(rw("rw_agg_f64", "sum", FALSE, "x", "i", form = "c")), "sum(c(x, i))")
+  expect_identical(pt_text(rw("rw_agg_f64", "sum", FALSE, "x", form = "c")), "sum(c(x))")
+  expect_identical(pt_text(rw("rw_agg_f64", "sum", TRUE, "x", "i", form = "c_across")),
+                   "sum(c_across(c(x, i)), na.rm = TRUE)")
+  expect_identical(pt_text(rw("rw_agg_f64", "sum", FALSE, "x", form = "c_across")), "sum(c_across(x))")
+  # recode() lists every replacement up to 20, then counts the rest
+  many <- function(k) {
+    ir_call("recode_lookup", list(
+      pt_col("i"), ir_lit(seq_len(k), "INT32"), ir_lit(sprintf("v%d", seq_len(k)), "STRING"),
+      pt_col("i"), ir_lit(NULL, "STRING", na = TRUE)
+    ), meta = list(na_step = TRUE))
+  }
+  expect_identical(pt_text(many(7L)), paste0("recode(i, ", paste0("`", 1:7, "` = \"v", 1:7, "\"", collapse = ", "), ")"))
+  expect_identical(pt_text(many(22L)),
+                   paste0("recode(i, ", paste0("`", 1:20, "` = \"v", 1:20, "\"", collapse = ", "), ", <2 more>)"))
   rec <- ir_call("recode_lookup", list(
     pt_col("s"), ir_lit(c("ab", "cd"), "STRING"), ir_lit(c("A", "C"), "STRING"),
     ir_lit("z", "STRING"), ir_lit(NULL, "STRING", na = TRUE)
