@@ -1282,19 +1282,14 @@ expand_one_across <- function(expr, env, schema, group_cols, scope = schema$name
   cols_expr <- if (".cols" %in% names(present)) present$.cols else default_across_cols("across")
   # (dplyr's own across(), with `...`, reports as the user wrote it; the one it
   # expands before the groups run, as `across()`)
-  select_call <- if (all(names(present) %in% c(".cols", ".fns", ".names", ".unpack"))) {
-    call("across")
-  } else {
-    as.call(list(expr[[1L]]))
-  }
-  cols <- tryCatch(
-    resolve_across_cols(cols_expr, env, schema, group_cols, error_call = select_call),
-    error = function(e) {
-      # dplyr evaluates `.fns` before it selects: an error of `.fns` comes first.
-      # A `.fns` this can't take is dplyr's to evaluate, whole.
-      if (across_fns_first_fallback(present, env, scope, c(".cols", ".fns", ".names", ".unpack"))) NULL else stop(e)
-    }
+  select_call <- if (across_expands(present)) call("across") else as.call(list(expr[[1L]]))
+  cols <- across_resolve_or_fns_first(
+    cols_expr, env, schema, group_cols, select_call, present, scope,
+    c(".cols", ".fns", ".names", ".unpack")
   )
+  if (isFALSE(cols)) {
+    return(across_fallback_result(fallback_cause_take()))
+  }
   if (is.null(cols)) {
     # value-dependent selection: dplyr resolves it on the real data
     return(across_fallback_result("this `across()`'s `.cols` selection reads column values; dplyr resolves it on the data."))
@@ -1379,6 +1374,45 @@ expand_one_across <- function(expr, env, schema, group_cols, scope = schema$name
   attr(out_quos, "needs_fallback") <- FALSE
   attr(out_quos, "hazard") <- hazard
   out_quos
+}
+
+# TRUE iff dplyr's expand_across() expands an unnamed across() call with these
+# matched arguments before the groups run: no `...` (an argument other than
+# `.cols`, `.fns`, `.names`, `.unpack`) and no `.unpack` other than FALSE.
+# @keywords internal
+across_expands <- function(present) {
+  nms <- names(present)
+  all(nms %in% c(".cols", ".fns", ".names", ".unpack")) &&
+    (!".unpack" %in% nms || isFALSE(present[[".unpack"]]))
+}
+
+# resolve_across_cols() of an across()/if_any()/if_all() (`select_call`: the call
+# its selection error reports), or FALSE when the selection raised an error and
+# the call's `.fns` can't be taken natively (across_fns_first_fallback()): dplyr
+# evaluates `.fns` first, so the call is its to run, and the reason is recorded
+# as the pending fallback cause. Any other error goes on as it was signalled
+# (no tryCatch() re-raise), so a caller's handler wraps it and it prints as
+# rlang's.
+# @keywords internal
+across_resolve_or_fns_first <- function(cols_expr, env, schema, group_cols, select_call,
+                                        present, scope, known) {
+  withRestarts(
+    withCallingHandlers(
+      resolve_across_cols(cols_expr, env, schema, group_cols, error_call = select_call),
+      error = function(e) {
+        if (across_fns_first_fallback(present, env, scope, known)) {
+          invokeRestart("cuplyr_across_fns_first")
+        }
+      }
+    ),
+    cuplyr_across_fns_first = function() {
+      fallback_cause(paste0(
+        "the `.cols` selection of this `", call_head_name(select_call), "()` failed; dplyr ",
+        "evaluates its `.fns` and extra arguments first, and those have no GPU expansion."
+      ))
+      FALSE
+    }
+  )
 }
 
 # TRUE iff the `.fns` of an across()/if_any() whose `.cols` selection raised an
@@ -1558,14 +1592,12 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filte
   # (mutate()/transmute() run an if_any() per group as dplyr's function, which
   # reports as the user wrote it: `dplyr::if_any()`)
   select_call <- if (verb %in% c("mutate", "transmute")) as.call(list(expr[[1L]])) else call(mode)
-  cols <- tryCatch(
-    resolve_across_cols(cols_expr, env, schema, group_cols, error_call = select_call),
-    error = function(e) {
-      # as in expand_one_across(): an error of `.fns` comes before the selection's
-      if (across_fns_first_fallback(present, env, scope, c(".cols", ".fns", ".names"))) NULL else stop(e)
-    }
+  # (as in expand_one_across(): an error of `.fns` comes before the selection's)
+  cols <- across_resolve_or_fns_first(
+    cols_expr, env, schema, group_cols, select_call, present, scope,
+    c(".cols", ".fns", ".names")
   )
-  if (is.null(cols)) {
+  if (is.null(cols) || isFALSE(cols)) {
     return(structure(rlang::new_quosure(FALSE, env), needs_fallback = TRUE))
   }
   cols <- unname(cols)
@@ -1627,7 +1659,8 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filte
     }
   }
 
-  rlang::new_quosure(combined, piece_env)
+  # (the column dplyr's "Can't compute column" names for an error: its first)
+  structure(rlang::new_quosure(combined, piece_env), first_col = cols[[1L]])
 }
 
 # =============================================================================
@@ -1685,8 +1718,9 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filte
 #'   expansion of an unnamed `across()` dot, staged or not) or `"combined"`
 #'   (an `if_any()`/`if_all()` dot). mutate()/transmute() use it to tell
 #'   which original dot a value computed from the expanded dots belongs to.
-#'   A call with staged temps (`"staged_temps"`) adds `col`: the column each
-#'   expansion stands for, which the temps' errors name (#30).
+#'   When an expansion names a column, `col` is the column each one stands for
+#'   (a staged one's, not its temp's; an `if_any()`/`if_all()`'s first; `""` for
+#'   a plain dot), which the errors name (#30).
 #' @keywords internal
 expand_across_dots <- function(dots, schema, group_cols, verb) {
   # No dot mentions across()/if_any()/if_all(): every dot passes through as it
@@ -1698,8 +1732,8 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
   out_names <- character()
   prov_origin <- integer()
   prov_kind <- character()
-  # the output name of each expansion, as dplyr names the column in its errors
-  # (a staged one is computed under a temp name first; kept only for those)
+  # the column each expansion computes, as dplyr names it in its errors (a
+  # staged one is computed under a temp name first; an if_any()'s first column)
   prov_col <- character()
   needs_fallback <- FALSE
   staged_temps <- character()
@@ -1789,6 +1823,8 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
 
     if (identical(head_name, "if_any") || identical(head_name, "if_all")) {
       combined <- expand_if_any_all(expr, env, run, group_cols, head_name, verb, scope)
+      first_col <- attr(combined, "first_col")
+      attr(combined, "first_col") <- NULL
       if (isTRUE(attr(combined, "needs_fallback"))) {
         needs_fallback <- TRUE
         fallback_dot_failed(i, fallback_cause_take() %||% sprintf(
@@ -1798,7 +1834,7 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
       out_quos <- c(out_quos, list(combined))
       prov_origin <- c(prov_origin, i)
       prov_kind <- c(prov_kind, "combined")
-      prov_col <- c(prov_col, "")
+      prov_col <- c(prov_col, first_col %||% "")
       # dplyr names an unnamed if_any()/if_all() dot after the original call
       out_names <- c(out_names, if (is_named) nm else if (identical(verb, "filter")) "" else dot_label(expr))
       if (!identical(verb, "filter")) scope <- set_union(scope, out_names[length(out_names)])
@@ -1832,8 +1868,9 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
   attr(out_quos, "needs_fallback") <- needs_fallback
   attr(out_quos, "staged_temps") <- staged_temps
   prov <- list(origin = prov_origin, kind = prov_kind)
-  # (only a staged call needs it: the names its temps stand for, for the errors)
-  if (length(staged_temps) > 0L) prov$col <- prov_col
+  # (only when an expansion names a column: dots with none have the provenance
+  # of expand_plain_dots())
+  if (any(nzchar(prov_col))) prov$col <- prov_col
   attr(out_quos, "provenance") <- prov
   out_quos
 }

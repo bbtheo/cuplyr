@@ -32,9 +32,11 @@
 # Nothing here runs on the success path but the withCallingHandlers() call.
 #
 # A CPU route runs dplyr's own mutate()/transmute() from inside the verb, so dplyr
-# reports ITS call (`dplyr::mutate()`), not the user's: cpu_verb_call() gives the
-# errors that name it the verb's name (`mutate()`) and leaves everything else of
-# the condition (class, parent, message) as dplyr made it.
+# would report ITS call (`dplyr::mutate()`), not the user's: cpu_verb_call()
+# points dplyr's own error call mechanism (`.__dplyr_error_call__.`, see
+# dplyr_error_call()) at the verb's method frame, so dplyr builds and signals its
+# errors and warnings with the user's call as written (`mutate()`,
+# `dplyr::mutate()`).
 
 # Conditions the loops never wrap: cuplyr's own runtime errors (GPU, memory, a
 # fallback the option turned into an error, an internal error, a column class
@@ -92,7 +94,7 @@ mutate_dot_error_args <- function(cnd, i, phase, provenance, names, verb, run, u
   # dplyr expands an unnamed across() without `...` before the groups run
   head <- call_head_name(expr)
   across_dot <- !named && identical(head, "across")
-  expands <- across_dot && mutate_error_across_expands(expr)
+  expands <- across_dot && isTRUE(tryCatch(mutate_error_across_expands(expr), error = function(e) FALSE))
   # (the call of the function the user wrote, for an error it reports itself)
   written <- if (is.call(expr)) as.call(list(expr[[1L]]))
 
@@ -106,34 +108,31 @@ mutate_dot_error_args <- function(cnd, i, phase, provenance, names, verb, run, u
     }
   }
 
-  parent <- cnd
   # An error while a column is computed has the layer of across() / if_any()
-  layer_call <- NULL
-  col <- NULL
-  if (eval_phase && identical(kind, "across")) {
-    col <- provenance$col[i] %||% names[i]
-    layer_call <- if (expands) call("across") else written
-  } else if (eval_phase && identical(kind, "combined")) {
-    col <- mutate_error_first_col(run, expr, quo, verb)
-    layer_call <- written
-  }
-  if (!is.null(col) && !is.na(col) && nzchar(col)) {
-    parent <- rlang::error_cnd(
-      message = paste0("Can't compute column `", col, "`."),
-      call = layer_call,
-      parent = cnd
-    )
+  # (one that can't be built leaves the error as the parent, still wrapped)
+  parent <- cnd
+  if (eval_phase && kind %in% c("across", "combined")) {
+    parent <- tryCatch({
+      # (the column the expansion stands for; an if_any()'s first one)
+      col <- provenance$col[i] %||% if (identical(kind, "across")) names[i]
+      if (length(col) == 1L && !is.na(col) && nzchar(col)) {
+        rlang::error_cnd(
+          message = paste0("Can't compute column `", col, "`."),
+          call = if (identical(kind, "across") && expands) call("across") else written,
+          parent = cnd
+        )
+      } else {
+        cnd
+      }
+    }, error = function(e) cnd)
   }
   list(bullets = bullets, parent = parent)
 }
 
-# TRUE iff dplyr's expand_across() expands this unnamed across() call: it has no
-# `...` (an argument other than `.cols`, `.fns`, `.names`, `.unpack`) and no
-# `.unpack`.
+# TRUE iff dplyr's expand_across() expands this unnamed across() call.
 # @keywords internal
 mutate_error_across_expands <- function(expr) {
-  present <- names(as.list(rlang::call_match(expr, across_proto, defaults = FALSE))[-1L])
-  all(present %in% c(".cols", ".fns", ".names"))
+  across_expands(as.list(rlang::call_match(expr, across_proto, defaults = FALSE))[-1L])
 }
 
 # dplyr's error_label_named(name, expr) of a user dot.
@@ -152,20 +151,6 @@ mutate_error_expr_label <- function(expr) {
   } else {
     rlang::with_options("rlang:::use_as_label_infix" = FALSE, rlang::as_label(expr))
   }
-}
-
-# The column an if_any()/if_all() reports in "Can't compute column": dplyr
-# computes the columns in order, so its first (the failing one unless the
-# predicate depends on the data). NULL when it can't be told.
-# @keywords internal
-mutate_error_first_col <- function(run, expr, quo, verb) {
-  proto <- if_any_all_proto
-  present <- as.list(rlang::call_match(expr, proto, defaults = FALSE))[-1L]
-  cols_expr <- if (".cols" %in% names(present)) present$.cols else default_across_cols(call_head_name(expr))
-  data <- get0(".data", run, inherits = FALSE)
-  cols <- resolve_across_cols(cols_expr, rlang::quo_get_env(quo), current_schema(data),
-                              mutate_error_groups(run, verb)$groups)
-  if (length(cols) > 0L) unname(cols)[1L]
 }
 
 # The groups of the call (`.by` ones included) and whether they came from `.by`,
@@ -219,21 +204,47 @@ mutate_error_group_details <- function(keys) {
   cli::format_inline("{.code {labels}}")
 }
 
-# Run `expr`, a CPU route's `dplyr::mutate()`/`dplyr::transmute()` call, so that an
-# error dplyr raises for the route's own frame (its `dplyr:::mutate_error`, or an
-# argument error of the verb) names the user's verb, `verb`, as dplyr's does when
-# the user calls it. Every error of a dot is wrapped by dplyr's own handler (below
-# this one) into one whose call is the route's frame, so only that kind reaches
-# here with a call to `dplyr::mutate()`/`dplyr::transmute()`. Nothing is added to
-# the success path of a native call: only a CPU route pays for the handler.
+# Run `expr`, a CPU route's `dplyr::mutate()`/`dplyr::transmute()` call made from
+# the caller's frame, so that dplyr reports the user's verb call: dplyr names in
+# its errors and warnings the call that `dplyr_error_call()` finds, which follows
+# a `.__dplyr_error_call__.` binding in the frame that called dplyr's verb
+# (dplyr_local_error_call()). Bound to the frame of the mutate.tbl_gpu() /
+# transmute.tbl_gpu() call (an environment, as dplyr binds its own: its warning
+# handler takes a backtrace up to it), dplyr reports that call as the user wrote
+# it and signals the condition itself, through rlang. Where no verb frame is on
+# the stack (a plan run by collect()), an error that names dplyr's verb is
+# signalled again through rlang with `verb`'s call. Only a CPU route pays.
 # @keywords internal
 cpu_verb_call <- function(expr, verb) {
+  frame <- cpu_verb_frame()
+  if (!is.null(frame)) {
+    caller <- parent.frame()
+    caller$.__dplyr_error_call__. <- frame
+    return(expr)
+  }
   withCallingHandlers(expr, error = function(cnd) {
     call <- cnd$call
     if (is.call(call) &&
         (identical(call[[1L]], quote(dplyr::mutate)) || identical(call[[1L]], quote(dplyr::transmute)))) {
       cnd$call <- call(verb)
-      stop(cnd)
+      rlang::cnd_signal(cnd)
     }
   })
+}
+
+# The frame of the innermost mutate.tbl_gpu()/transmute.tbl_gpu() call on the
+# stack (of the outermost of a method calling itself, the user's call), or NULL.
+# @keywords internal
+cpu_verb_frame <- function() {
+  parents <- sys.parents()
+  for (k in rev(seq_len(sys.nframe() - 1L))) {
+    fn <- sys.function(k)
+    if (identical(fn, mutate.tbl_gpu) || identical(fn, transmute.tbl_gpu)) {
+      while (parents[k] > 0L && identical(sys.function(parents[k]), fn)) {
+        k <- parents[k]
+      }
+      return(sys.frame(k))
+    }
+  }
+  NULL
 }

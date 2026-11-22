@@ -3,16 +3,19 @@
 * `mutate()` and `transmute()` raise dplyr's errors. An error in a dot, such as
   an unknown object or a missing `.data` column, is a `dplyr:::mutate_error`
   that names the argument ("In argument: ...") and, for a grouped table or
-  `.by =`, the first group, with the original error as its parent. An
-  `across()` selection that names a missing column is wrapped the same way
-  (with no group, as dplyr resolves it before the groups run), and so is an
-  `if_any()` or `if_all()` one (with the group, which dplyr evaluates per
-  group). A failure while `across()` or `if_any()` computes a column carries
-  dplyr's "Can't compute column" step. `.before` and `.after` are now
-  resolved even when the call creates no column, so a column that doesn't
-  exist is an error as in dplyr, reported by `relocate()`. Errors that come
-  from a CPU route report `mutate()` or `transmute()`, not `dplyr::mutate()`,
-  and `&&`/`||` in a `mutate()` dot are dplyr's to evaluate (#30).
+  `.by =` with rows, the first group, with the original error as its parent.
+  An `across()` selection that names a missing column is wrapped the same way:
+  with no group when the `across()` has no extra arguments (dplyr resolves it
+  before the groups run), with the group otherwise and for `if_any()` and
+  `if_all()` (dplyr evaluates those per group). A failure while `across()`,
+  `if_any()` or `if_all()` computes a column carries dplyr's "Can't compute
+  column" step. `.before` and `.after` are now resolved even when the call
+  creates no column, so a column that doesn't exist is an error as in dplyr,
+  reported by `relocate()`. When dplyr itself runs the call, its errors and
+  warnings name the call as written (`mutate()`, or `dplyr::mutate()` when
+  qualified) rather than cuplyr's internal one. `&&` and `||` of a column in
+  `mutate()` and `transmute()` are evaluated by dplyr, which gives its own
+  result or error (#30).
 
 * `distinct()`, `count()` and `add_count()` accept window functions and
   aggregates in computed keys (`distinct(df, r = dense_rank(k))`,
