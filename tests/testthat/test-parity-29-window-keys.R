@@ -158,3 +158,40 @@ test_that("slice_min()/slice_max() with a window order_by matches dplyr", {
   w29_both(df, function(t) t |> group_by(g) |> slice_max(dplyr::row_number(), n = 1))
   w29_both(df, function(t) t |> group_by(g) |> slice_min(dplyr::lag(x), n = 1))
 })
+
+# --- grouping metadata after a window key (review of #29) ---------------------
+# The oracle compares group_vars() and the ungrouped data only, so these pipe
+# the result into summarise(n()), which reads the group structure itself.
+# dplyr's mutate branch (add_computed_columns() -> dplyr_col_modify()) regroups
+# when a key dot names a group column, which drops the empty groups a
+# `.drop = FALSE` filter() kept.
+
+test_that("a window key that overwrites a group column regroups like dplyr", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c(10L, 10L, 20L, 30L), k = c(5L, 6L, 7L, 8L))
+  kept <- function(t) t |> group_by(g, .drop = FALSE) |> filter(k < 7L)
+  w29_both(df, function(t) kept(t) |> distinct(g = dplyr::dense_rank(k)) |>
+             summarise(n = dplyr::n()))
+  w29_both(df, function(t) kept(t) |> distinct(g = dplyr::dense_rank(k), .keep_all = TRUE) |>
+             summarise(n = dplyr::n(), k = sum(k)))
+})
+
+test_that("a window key next to a bare group column regroups like dplyr", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c(10L, 10L, 20L, 30L), k = c(5L, 6L, 7L, 8L))
+  kept <- function(t) t |> group_by(g, .drop = FALSE) |> filter(k < 7L)
+  w29_both(df, function(t) kept(t) |> distinct(g, r = dplyr::dense_rank(k)) |>
+             summarise(n = dplyr::n()))
+})
+
+test_that("a window key keeps a .drop = FALSE grouping that no key writes", {
+  skip_if_no_gpu()
+  df <- data.frame(
+    f = factor(c("a", "a", "b"), levels = c("a", "b", "z")),
+    k = c(5L, 6L, 7L)
+  )
+  w29_both(df, function(t) t |> group_by(f, .drop = FALSE) |>
+             distinct(r = dplyr::dense_rank(k)) |> summarise(n = dplyr::n()))
+  w29_both(df, function(t) t |> group_by(f, .drop = FALSE) |>
+             count(r = dplyr::dense_rank(k)))
+})

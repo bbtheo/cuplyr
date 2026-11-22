@@ -101,3 +101,24 @@ test_that("uploading a difftime column keeps tbl_gpu()'s own error", {
   expect_false(inherits(err, "cuplyr_error_unsupported_result_class"))
   expect_match(rlang::cnd_message(err), "`y` <difftime>", fixed = TRUE)
 })
+
+test_that("a difftime from a verb built on another verb names the verb the user called", {
+  skip_if_no_gpu()
+  df <- d29_df()
+  # count(wt =) sums the weight in a summarise(); the error is count()'s
+  for (lazy in c(FALSE, TRUE)) {
+    err <- expect_error(collect(count(tbl_gpu(df, lazy = lazy), g, wt = d2 - d)),
+                        class = "cuplyr_error_unsupported_result_class")
+    msg <- rlang::cnd_message(err)
+    expect_match(msg, "count()", fixed = TRUE)
+    expect_false(grepl("summarise()", msg, fixed = TRUE))
+  }
+  expect_no_error(count(df, g, wt = d2 - d))
+})
+
+test_that("a CPU fallback keeps a vctrs unspecified column, as before", {
+  skip_if_no_gpu()
+  df <- tibble::tibble(u = vctrs::unspecified(2), k = 1:2)
+  twice <- function(v) v * 2
+  d29_both(df, function(t) mutate(t, y = twice(k)))
+})
