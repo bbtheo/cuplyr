@@ -4,11 +4,15 @@
   an unknown object or a missing `.data` column, is a `dplyr:::mutate_error`
   that names the argument ("In argument: ...") and, for a grouped table or
   `.by =`, the first group, with the original error as its parent. An
-  `across()`, `if_any()` or `if_all()` selection that names a missing column
-  is wrapped the same way, and a failure while `across()` computes a column
-  carries dplyr's "Can't compute column" step. `.before` and `.after` are now
+  `across()` selection that names a missing column is wrapped the same way
+  (with no group, as dplyr resolves it before the groups run), and so is an
+  `if_any()` or `if_all()` one (with the group, which dplyr evaluates per
+  group). A failure while `across()` or `if_any()` computes a column carries
+  dplyr's "Can't compute column" step. `.before` and `.after` are now
   resolved even when the call creates no column, so a column that doesn't
-  exist is an error as in dplyr, reported by `relocate()` (#30).
+  exist is an error as in dplyr, reported by `relocate()`. Errors that come
+  from a CPU route report `mutate()` or `transmute()`, not `dplyr::mutate()`,
+  and `&&`/`||` in a `mutate()` dot are dplyr's to evaluate (#30).
 
 * `distinct()`, `count()` and `add_count()` accept window functions and
   aggregates in computed keys (`distinct(df, r = dense_rank(k))`,

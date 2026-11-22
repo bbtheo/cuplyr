@@ -385,17 +385,9 @@ mutate.tbl_gpu <- function(.data, ..., .by = NULL,
   prev <- fallback_reasons_open()
   on.exit(fallback_reasons_close(prev), add = TRUE)
   if (is_rowwise_gpu(.data)) {
-    # (a rowwise call abandons its native attempt on any error and reruns in
-    # dplyr, whose own errors these are)
     return(mutate_rowwise(.data, dots, by_quo, .keep, before_quo, after_quo))
   }
-  # (#30: an error a dot raises is dplyr's `dplyr:::mutate_error`, see R/mutate-errors.R)
-  err_ctx <- mutate_errors_open(dots, environment())
-  on.exit(mutate_errors_close(err_ctx), add = TRUE)
-  withCallingHandlers(
-    mutate_run(.data, dots, by_quo, .keep, before_quo, after_quo),
-    error = function(cnd) mutate_errors_handle(err_ctx, cnd)
-  )
+  mutate_run(.data, dots, by_quo, .keep, before_quo, after_quo)
 }
 
 # mutate() of a rowwise table (F49). Elementwise expressions are the
@@ -451,15 +443,13 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   # case, and push_op()'s propagate_groups() only ever propagates
   # `.data$groups` (never `verb_groups`) into the result.
   by_given <- !quo_is_null_fast(by_quo)
-  # (its errors report mutate(), the verb frame mutate.tbl_gpu() opened, as dplyr's do)
+  # (its errors report mutate(), the method's frame, as dplyr's do)
   by_cols <- if (rowwise || !by_given) {
     character()
   } else {
-    resolve_by(.data, by_quo, ".by", call = mutate_error_state$cur$call, verb = "mutate")
+    resolve_by(.data, by_quo, ".by", call = parent.frame(), verb = "mutate")
   }
   verb_groups <- if (by_given) by_cols else if (rowwise) character() else .subset2(.data, "groups")
-  # (#30: for the group an error in a dot names)
-  if (length(verb_groups) > 0L) mutate_errors_set_groups(.data, verb_groups, by_given)
 
   # (`.before` and `.after` together are an error of the relocation that follows
   # the dots: mutate_keep_select_node())
@@ -513,6 +503,8 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   # anyway never pays for that materialization first.
   # cur_group()$key and length(cur_group_rows()) are plain expressions; the
   # CPU fallbacks keep the dots as the user wrote them.
+  # (#30: an error in a dot loop names `user_dots`, `.data`/`fallback_data`,
+  # `verb_groups` and `by_given` of this frame, see R/mutate-errors.R)
   user_dots <- dots
   dots <- colwise_rewrite_dots(dots, orig_schema)
   # (dots that mention none of the names the next screens look for pass them
@@ -656,13 +648,13 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
 }
 
 # A vector constant (`y = 1:4`) must be the table's row count (dplyr: "Can't
-# recycle"). An eager table checks it when the node runs (lower_mutate()); a
-# lazy one would only fail at collect(), so it is checked at the verb against the
-# row count: known for a table with nothing pending, otherwise the plan runs
-# first (a plan break). Returns `.data`, the computed table in that case.
+# recycle"). A lazy table would only fail at collect(), so it is checked at the
+# verb against the row count: known for a table with nothing pending, otherwise
+# the plan runs first (a plan break). An eager table is checked here too, so the
+# error names the user's verb. Returns `.data`, the computed table in that case.
 # @keywords internal
 check_vector_constant_sizes <- function(.data, expressions, verb) {
-  if (!isTRUE(attr(expressions, "has_vec")) || !identical(.subset2(.data, "exec_mode"), "lazy")) {
+  if (!isTRUE(attr(expressions, "has_vec"))) {
     return(.data)
   }
   vecs <- lapply(expressions, function(e) {
@@ -684,7 +676,7 @@ check_vector_constant_sizes <- function(.data, expressions, verb) {
   if (!is.na(n_rows)) {
     for (vec in vecs) {
       if (length(.subset2(vec, "value")) != n_rows) {
-        mutate_vector_size_error(n_rows, vec)
+        mutate_vector_size_error(n_rows, vec, verb)
       }
     }
   }
@@ -959,10 +951,10 @@ plan_mutate_window_batches <- function(exprs, schema) {
 mutate_window_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo,
                                    reason = "a window call in this mutate() has no GPU plan (its stages cannot be lowered).") {
   gpu_fallback("mutate", .data, function(tbl) {
-    dplyr::mutate(
+    cpu_verb_call(dplyr::mutate(
       .data = tbl, !!!dots, .by = !!by_quo, .keep = keep,
       .before = !!before_quo, .after = !!after_quo
-    )
+    ), "mutate")
   }, reason = reason)
 }
 
@@ -976,10 +968,10 @@ mutate_window_fallback <- function(.data, dots, keep, before_quo, after_quo, by_
 # @keywords internal
 mutate_across_fallback <- function(.data, dots, keep, before_quo, after_quo, by_quo) {
   gpu_fallback("mutate", .data, function(tbl) {
-    dplyr::mutate(
+    cpu_verb_call(dplyr::mutate(
       .data = tbl, !!!dots, .by = !!by_quo, .keep = keep,
       .before = !!before_quo, .after = !!after_quo
-    )
+    ), "mutate")
   }, reason = fallback_failed_reason(dots, across_fallback_default))
 }
 
@@ -1003,10 +995,10 @@ mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_qu
   gpu_fallback("mutate", .data, function(tbl) {
     # Inlined here, where the row count is known (see inline_evaluated_dots()).
     dots <- inline_evaluated_dots(dots, consts, provenance, nrow(tbl))
-    dplyr::mutate(
+    cpu_verb_call(dplyr::mutate(
       .data = tbl, !!!dots, .by = !!by_quo, .keep = keep,
       .before = !!before_quo, .after = !!after_quo
-    )
+    ), "mutate")
   }, reason = reason)
 }
 
@@ -1151,24 +1143,10 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
   }
   dot_names <- names(dots)
 
-  # (#30: the verb's error context learns which user dot is being evaluated, so
-  # an error raised in it is dplyr's `dplyr:::mutate_error`; cleared when this
-  # function ends or unwinds, so no later error is wrapped)
-  err_ctx <- mutate_error_state$cur
-  if (!is.null(err_ctx)) {
-    on.exit(err_ctx$dot <- NULL, add = TRUE)
-  }
-
-  for (i in seq_along(dots)) {
+  # (#30: an error a dot raises is dplyr's `dplyr:::mutate_error`: the handler
+  # reads the dot's index `i` from this frame, see R/mutate-errors.R)
+  withCallingHandlers(for (i in seq_along(dots)) {
     fallback_dot_begin()
-    if (!is.null(err_ctx)) {
-      err_ctx$dot <- if (is.null(provenance)) i else .subset2(provenance, "origin")[i]
-      err_ctx$phase <- "eval"
-      # (an across() expansion: dplyr names the column it failed to compute)
-      err_ctx$col <- if (!is.null(provenance) && identical(.subset2(provenance, "kind")[i], "across")) {
-        dot_names[i]
-      }
-    }
     new_name <- dot_names[i]
     expr <- dots[[i]]
 
@@ -1378,7 +1356,14 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
 
     # Update the running schema so subsequent dots see this dot's output.
     schema <- update_schema_for_expr(schema, step)
-  }
+  }, error = function(cnd) {
+    # `&&`/`||` of a column: one value per call, so dplyr gives the result of a
+    # length-one one and its own error for a vector. Its to evaluate, whole.
+    if (!stop_on_unparseable && inherits(cnd, "cuplyr_error_short_circuit")) {
+      rlang::return_from(parent.env(environment()), fail(i, "`&&`/`||` of a column is evaluated by dplyr."))
+    }
+    mutate_dot_error(cnd, i, "eval", provenance, dot_names, verb)
+  })
 
   attr(expressions, "has_window") <- has_window
   attr(expressions, "has_vec") <- has_vec
@@ -1949,7 +1934,7 @@ transmute.tbl_gpu <- function(.data, ...) {
     # else the whole call in dplyr
     cpu <- function(detail = NULL) {
       gpu_fallback("transmute", .data, function(tbl) {
-        dplyr::transmute(.data = tbl, !!!dots)
+        cpu_verb_call(dplyr::transmute(.data = tbl, !!!dots), "transmute")
       }, reason = detail)
     }
     # F77: a function of the user's with a native op's name runs in dplyr
@@ -1972,13 +1957,7 @@ transmute.tbl_gpu <- function(.data, ...) {
     res <- rowwise_attempt(function() transmute_run(.data, rw, rowwise = TRUE))
     return(if (is.null(res)) rowwise_rerun(cpu, dots) else rowwise_column_order(res))
   }
-  # (#30: an error a dot raises is dplyr's `dplyr:::mutate_error`, see R/mutate-errors.R)
-  err_ctx <- mutate_errors_open(dots, environment())
-  on.exit(mutate_errors_close(err_ctx), add = TRUE)
-  withCallingHandlers(
-    transmute_run(.data, dots),
-    error = function(cnd) mutate_errors_handle(err_ctx, cnd)
-  )
+  transmute_run(.data, dots)
 }
 
 # transmute.tbl_gpu()'s body on captured dots; `rowwise = TRUE` as in
@@ -1987,12 +1966,10 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
   orig_dots <- dots
   # the groups every window/cur_group/vector-literal decision is made over
   eff_groups <- if (rowwise) character() else .subset2(.data, "groups")
-  # (#30: for the group an error in a dot names)
-  if (length(eff_groups) > 0L) mutate_errors_set_groups(.data, eff_groups, FALSE)
 
   if (length(dots) > 0L && is_zero_column_with_rows(.data)) {
     return(gpu_fallback("transmute", .data, function(tbl) {
-      dplyr::transmute(.data = tbl, !!!dots)
+      cpu_verb_call(dplyr::transmute(.data = tbl, !!!dots), "transmute")
     }, reason = "the table has no columns but has rows."))
   }
 
@@ -2007,7 +1984,7 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
     shadowed <- shadow_screen_text(dots)
     if (!is.null(shadowed)) {
       return(gpu_fallback("transmute", .data, function(tbl) {
-        dplyr::transmute(.data = tbl, !!!dots)
+        cpu_verb_call(dplyr::transmute(.data = tbl, !!!dots), "transmute")
       }, reason = shadowed))
     }
   }
@@ -2018,7 +1995,7 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
     impure <- impure_const_call_text(dots, current_schema(.data))
     if (!is.null(impure)) {
       return(gpu_fallback("transmute", .data, function(tbl) {
-        dplyr::transmute(.data = tbl, !!!dots)
+        cpu_verb_call(dplyr::transmute(.data = tbl, !!!dots), "transmute")
       }, reason = impure))
     }
     fallback_mark_screened()
@@ -2026,18 +2003,20 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
 
   # Phase 10: across()/if_any()/if_all()/pick()/cur_*() -- see R/across.R
   # and mutate.tbl_gpu()'s own identical handling.
+  # (#30: as in mutate_run(), an error in a dot loop reads `user_dots`,
+  # `.data`/`fallback_data` and `eff_groups` of this frame)
   user_dots <- dots
   dots <- colwise_rewrite_dots(dots, current_schema(.data))
   dots <- rewrite_context_dots(dots, eff_groups, sequential = TRUE, name_unnamed = TRUE)
   if (dots_need_fallback(dots)) {
     return(gpu_fallback("transmute", .data, function(tbl) {
-      dplyr::transmute(.data = tbl, !!!user_dots)
+      cpu_verb_call(dplyr::transmute(.data = tbl, !!!user_dots), "transmute")
     }, reason = fallback_failed_reason(user_dots, across_fallback_default)))
   }
   expanded <- expand_across_dots(dots, current_schema(.data), eff_groups, "transmute")
   if (isTRUE(attr(expanded, "needs_fallback"))) {
     return(gpu_fallback("transmute", .data, function(tbl) {
-      dplyr::transmute(.data = tbl, !!!user_dots)
+      cpu_verb_call(dplyr::transmute(.data = tbl, !!!user_dots), "transmute")
     }, reason = fallback_failed_reason(user_dots, across_fallback_default)))
   }
   # As in mutate.tbl_gpu(): the CPU fallback runs on the pre-substitution
@@ -2070,7 +2049,7 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
   if (is.null(expressions) || isTRUE(attr(expressions, "has_window"))) {
     return(gpu_fallback("transmute", fallback_data, function(tbl) {
       dots_cpu <- inline_evaluated_dots(fallback_dots, evaluated$consts, provenance, nrow(tbl))
-      dplyr::transmute(.data = tbl, !!!dots_cpu)
+      cpu_verb_call(dplyr::transmute(.data = tbl, !!!dots_cpu), "transmute")
     }, reason = if (is.null(expressions)) {
       fallback_failed_reason(fallback_dots, "an expression has a form the GPU engine does not support.")
     } else {
