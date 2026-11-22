@@ -1,5 +1,18 @@
 # cuplyr (development version)
 
+* `explain()` and `show_query()` print the plan as R code, in pipeline order,
+  and run nothing. Each step reads as the dplyr call it stands for, with its
+  expressions written out (`filter(speed > 400, gain > 0)`); a step whose
+  aggregates run per row, and any filter of a rowwise table, is marked
+  `# rowwise`. A parquet scan shows the file, the columns it reads
+  (`columns read: 5 of 41 (...)`) and the comparisons the reader applies,
+  written as code. A step that fell back to the CPU shows the
+  verb, the expression, the reason and the plan it computed; the newest three
+  are kept, and `compute()` of a table with pending steps starts a new plan
+  with no history. `optimized = FALSE` prints the plan as you wrote it,
+  instead of the plan the optimizer will run. `explain()` and `show_query()`
+  now print the same text, and they no longer print the `ast_*` tree (#10).
+
 * cuplyr builds against RAPIDS 25.12 only (libcudf `>=25.12,<26.02`), because
   RAPIDS 26.02 and later removed RMM interfaces cuplyr uses. `configure` now
   checks the installed libcudf version and stops with the supported range and

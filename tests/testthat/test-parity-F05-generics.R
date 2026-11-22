@@ -34,17 +34,18 @@ test_that("cuplyr's show_query is dplyr's generic, not a masking function", {
 test_that("dplyr::show_query() dispatches on a lazy tbl_gpu and returns x invisibly", {
   skip_if_no_gpu()
   lz <- f05_lazy_pipeline()
-  expect_output(out <- withVisible(dplyr::show_query(lz)), "Pending operations")
+  expect_output(out <- withVisible(dplyr::show_query(lz)), "<cuplyr plan: optimized>", fixed = TRUE)
   expect_false(out$visible)
   expect_identical(out$value, lz)
-  expect_output(dplyr::show_query(lz), "AST depth")
+  expect_output(dplyr::show_query(lz), "filter(a > 1)", fixed = TRUE)
+  expect_output(dplyr::show_query(lz, optimized = FALSE), "<cuplyr plan: as written>", fixed = TRUE)
   # Nothing was executed.
   expect_true(has_pending_ops(lz))
 })
 
 test_that("dplyr::show_query() on an eager / grouped tbl_gpu", {
   skip_if_no_gpu()
-  gt <- tbl_gpu(f05_x())
+  gt <- tbl_gpu(f05_x(), lazy = FALSE)
   expect_output(out <- withVisible(dplyr::show_query(gt)), "No pending operations")
   expect_false(out$visible)
   expect_identical(out$value, gt)
@@ -61,13 +62,13 @@ test_that("show_query() on a non-tbl_gpu falls through to dplyr's generic", {
 
 # --- explain() --------------------------------------------------------------
 
-test_that("explain() on a lazy tbl_gpu prints the pending AST and the optimized plan", {
+test_that("explain() on a lazy tbl_gpu prints the plan, optimized or as written", {
   skip_if_no_gpu()
   lz <- f05_lazy_pipeline()
-  expect_output(out <- withVisible(dplyr::explain(lz)), "Pending operations")
+  expect_output(out <- withVisible(dplyr::explain(lz)), "<cuplyr plan: optimized>", fixed = TRUE)
   expect_false(out$visible)
   expect_identical(out$value, lz)
-  expect_output(dplyr::explain(lz), "Optimized plan")
+  expect_output(dplyr::explain(lz, optimized = FALSE), "<cuplyr plan: as written>", fixed = TRUE)
   # explain() never executes: the ops are still pending and collect() still
   # gives dplyr's answer.
   expect_true(has_pending_ops(lz))
@@ -79,7 +80,7 @@ test_that("explain() on a lazy tbl_gpu prints the pending AST and the optimized 
 
 test_that("explain() on an eager tbl_gpu returns x invisibly", {
   skip_if_no_gpu()
-  gt <- tbl_gpu(f05_x())
+  gt <- tbl_gpu(f05_x(), lazy = FALSE)
   expect_output(out <- withVisible(dplyr::explain(gt)), "No pending operations")
   expect_false(out$visible)
   expect_identical(out$value, gt)
@@ -221,10 +222,13 @@ test_that("copy = TRUE coerces a non-data-frame y with as.data.frame(), like dpl
                    tibble::as_tibble(as.data.frame(y_list)))
 })
 
-test_that("explain() prints an optimized plan only when there are pending lazy ops", {
+test_that("explain() prints a plan with steps only when there are pending lazy ops", {
   skip_if_no_gpu()
-  out <- capture.output(dplyr::explain(tbl_gpu(f05_x())))
-  expect_false(any(grepl("Optimized plan", out)))
+  # an eager table has no plan
+  out <- capture.output(dplyr::explain(tbl_gpu(f05_x(), lazy = FALSE)))
+  expect_identical(out[[1L]], "<cuplyr plan>")
+  expect_false(any(grepl("<cuplyr plan: optimized>", out, fixed = TRUE)))
+  # a lazy table with nothing pending is its source alone
   out <- capture.output(dplyr::explain(tbl_gpu(f05_x(), lazy = TRUE)))
-  expect_false(any(grepl("Optimized plan", out)))
+  expect_identical(out, c("<cuplyr plan: optimized>", "table on the GPU", "  columns read: all 3"))
 })

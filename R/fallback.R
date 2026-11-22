@@ -21,6 +21,9 @@
 #' real dplyr verb), and re-uploads the result via [tbl_gpu()] (a `rowwise_df`
 #' result goes back up as a rowwise table).
 #'
+#' The lazy result of a lazy `.data` carries the step's history as its `origin`
+#' field (`fallback_record_origin()`), which `explain()` and `show_query()` print.
+#'
 #' @param verb_name Character, the verb name to use in the fallback
 #'   notification (e.g. `"transmute"`, `"slice_min"`), gated by
 #'   `options(cuplyr.fallback = )` (see [cuplyr_fallback_notify()]).
@@ -91,8 +94,8 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE, detail =
     reason <- paste0("rowwise table: ", reason %||% "this call has no native rowwise form.")
   }
   size <- do.call(fallback_size, c(list(materialized), if (is_tbl_gpu(also)) list(also) else unname(also)))
-  cuplyr_fallback_notify(verb_name, expr, reason,
-                         rows = size$rows, cols = size$cols, bytes = size$bytes)
+  note <- cuplyr_fallback_notify(verb_name, expr, reason,
+                                 rows = size$rows, cols = size$cols, bytes = size$bytes)
 
   # dplyr sees the frame it would have: the input's attributes and class
   # (a bare data.frame stays one), so its own result carries them (F31). A
@@ -127,7 +130,7 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE, detail =
   # other result, so a later native verb stays on the GPU.
   if (inherits(result, "rowwise_df")) {
     new_tbl <- tbl_gpu(result, lazy = FALSE)
-    return(if (was_lazy) as_lazy(new_tbl) else new_tbl)
+    return(if (was_lazy) fallback_record_origin(as_lazy(new_tbl), .data, note) else new_tbl)
   }
 
   # The verb may change grouping (e.g. summarise()-like verbs drop it,
@@ -151,10 +154,23 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE, detail =
   }
 
   if (was_lazy) {
-    new_tbl <- as_lazy(new_tbl)
+    new_tbl <- fallback_record_origin(as_lazy(new_tbl), .data, note)
   }
 
   new_tbl
+}
+
+# #10: the lazy result of a CPU step carries what the step was, why it ran
+# there and the plan it computed, as plain text (plan_origin(), R/plan-text.R),
+# so explain() can still show them: the result is a fresh table whose plan
+# starts at the re-upload. Set on the result's `origin` field, which the next
+# verb hands to its source node (input_node()). compute() results carry none.
+# @param result The lazy `tbl_gpu` the fallback returns
+# @param .data The lazy `tbl_gpu` the verb was called on
+# @param note What cuplyr_fallback_notify() reported
+# @keywords internal
+fallback_record_origin <- function(result, .data, note) {
+  set_tbl_gpu_field(result, "origin", plan_origin(.data, note, result))
 }
 
 # The group keys of the grouped_df `result` when dplyr kept groups a plain

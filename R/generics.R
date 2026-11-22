@@ -236,7 +236,7 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
 
   # (`nrow` is only present on a zero-column table, `fixed_keys` on a table
   # whose group keys were fixed, `bare_df` on a table from a plain data.frame)
-  optional <- c("nrow", "fixed_keys", "unspecified", "bare_df", "rowwise")
+  optional <- c("nrow", "fixed_keys", "unspecified", "bare_df", "rowwise", "origin")
   if (is.data.frame(data) &&
       identical(set_diff(names(data), optional), set_diff(tbl_gpu_fields, optional))) {
     # dplyr_reconstruct.grouped_df()/.data.frame(): the template's groups
@@ -495,9 +495,10 @@ bracket_row_positions <- function(i, n, i_arg, call) {
 # the group keys `slice(.preserve = TRUE)` fixed, `unspecified` the names of
 # vctrs::unspecified() columns, `bare_df` that the table came from a plain
 # data.frame (F31), `rowwise` that it is a rowwise table (F49); all four only
-# present when set.
+# present when set. `origin` (#10) is the plain-text history of the CPU step
+# that produced a lazy table (`plan_origin()`, R/plan-text.R), also only when set.
 tbl_gpu_fields <- c("ptr", "schema", "lazy_ops", "groups", "exec_mode", "group_drop", "nrow",
-                    "fixed_keys", "unspecified", "bare_df", "rowwise")
+                    "fixed_keys", "unspecified", "bare_df", "rowwise", "origin")
 
 # The cuplyr namespace (this file is evaluated in it).
 cuplyr_ns <- environment()
@@ -530,7 +531,7 @@ is_tbl_gpu_field <- function(name) {
 #' @export
 `$.tbl_gpu` <- function(x, name) {
   if (switch(name, ptr = , schema = , lazy_ops = , groups = , exec_mode = ,
-             group_drop = , nrow = , fixed_keys = , unspecified = , bare_df = , rowwise = TRUE, FALSE) &&
+             group_drop = , nrow = , fixed_keys = , unspecified = , bare_df = , rowwise = , origin = TRUE, FALSE) &&
       internal_caller(parent.frame())) {
     return(.subset2(x, name))
   }
@@ -631,7 +632,7 @@ select_one_column <- function(x, col) {
 #' @export
 `$<-.tbl_gpu` <- function(x, name, value) {
   if (switch(name, ptr = , schema = , lazy_ops = , groups = , exec_mode = ,
-             group_drop = , nrow = , fixed_keys = , unspecified = , bare_df = , rowwise = TRUE, FALSE) &&
+             group_drop = , nrow = , fixed_keys = , unspecified = , bare_df = , rowwise = , origin = TRUE, FALSE) &&
       internal_caller(parent.frame())) {
     return(set_tbl_gpu_field(x, name, value))
   }
