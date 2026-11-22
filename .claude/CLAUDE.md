@@ -24,6 +24,8 @@ list(
   # rowwise = TRUE          # present ONLY on a rowwise table (F49): `groups` then
   #                         # holds the rowwise vars, which are NOT groups; every verb
   #                         # is either rowwise-aware or runs whole on the CPU
+  # origin = list(...)      # present ONLY on a lazy result of a CPU step (#10):
+  #                         # plain-text history that explain() prints
 )
 ```
 
@@ -40,7 +42,8 @@ list(
 
 Every verb builds one AST node and hands it to `push_op()` (`R/execute.R`);
 `R/lower.R::lower_and_execute()` is the single execution path for eager and
-lazy. The optimizer runs only from `compute()`.
+lazy. Only `compute()` (and `collect()` through it) runs an optimized plan;
+`explain()`/`show_query()` call the optimizer only to print the plan.
 
 ## Hard rules
 
