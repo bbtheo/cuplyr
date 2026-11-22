@@ -5,14 +5,14 @@
 old_header <- c(
   "Fri Nov 21 10:00:00 2026",
   "+-----------------------------------------------------------------------------------------+",
-  "| NVIDIA-SMI 550.54.14              Driver Version: 550.54.14      CUDA Version: 12.4     |",
+  "| NVIDIA-SMI 550.54.15              Driver Version: 550.54.14      CUDA Version: 12.4     |",
   "|-----------------------------------------+------------------------+----------------------+"
 )
 
 new_header <- c(
   "Fri Nov 21 10:00:00 2026",
   "+-----------------------------------------------------------------------------------------+",
-  "| NVIDIA-SMI 615.78.08    KMD Version: 615.78.08    CUDA UMD Version: 13.4 |",
+  "| NVIDIA-SMI 615.78.09    KMD Version: 615.78.08    CUDA UMD Version: 13.4 |",
   "|-----------------------------------------+------------------------+----------------------+"
 )
 
@@ -82,7 +82,7 @@ test_that("check_nvidia_driver() uses the --query-gpu interface", {
     run_nvidia_smi = function(args = character()) {
       seen[[length(seen) + 1]] <<- args
       if (any(grepl("--query-gpu=driver_version", args, fixed = TRUE))) {
-        "615.78.08"
+        "620.10.01"
       } else {
         new_header
       }
@@ -90,9 +90,10 @@ test_that("check_nvidia_driver() uses the --query-gpu interface", {
   )
   res <- check_nvidia_driver()
   expect_true(res$ok)
-  expect_identical(res$value, "615.78.08")
+  # the query answer is used, not the header
+  expect_identical(res$value, "620.10.01")
   expect_identical(res$name, "NVIDIA Driver")
-  expect_match(res$message, "615.78.08", fixed = TRUE)
+  expect_match(res$message, "620.10.01", fixed = TRUE)
   expect_true(any(vapply(seen, function(a) {
     any(grepl("--query-gpu=driver_version", a, fixed = TRUE))
   }, logical(1))))
@@ -210,6 +211,17 @@ test_that("default_cudf_search_paths() puts CUDF_HOME, CONDA_PREFIX, then pixi b
   expect_length(i_pixi, 1)
   expect_lt(i_pixi, match("/usr/local", paths))
   expect_lt(i_pixi, match("/usr", paths))
+})
+
+test_that("default_cudf_search_paths() uses PIXI_ENVIRONMENT_NAME", {
+  root <- withr::local_tempdir()
+  withr::local_envvar(
+    CUDF_HOME = NA, CONDA_PREFIX = NA,
+    PIXI_PROJECT_ROOT = root, PIXI_ENVIRONMENT_NAME = "cuda12"
+  )
+  paths <- default_cudf_search_paths()
+  expect_true(any(vapply(paths, same_path, logical(1),
+                         b = file.path(root, ".pixi", "envs", "cuda12"))))
 })
 
 test_that("default_cudf_search_paths() drops unset variables", {
@@ -365,6 +377,58 @@ test_that("check_deps() JSON output carries the stale CUDF_HOME note", {
   expect_match(out, '"value": "615.78.08"', fixed = TRUE)
 })
 
+# --- check_cuda_toolkit() finds nvcc in the pixi env --------------------------
+
+# An executable nvcc stub under `prefix/bin` that prints a release line.
+make_nvcc_stub <- function(prefix, release = "12.9") {
+  dir.create(file.path(prefix, "bin"), recursive = TRUE, showWarnings = FALSE)
+  nvcc <- file.path(prefix, "bin", "nvcc")
+  writeLines(c(
+    "#!/bin/sh",
+    sprintf("echo 'Cuda compilation tools, release %s, V%s.86'", release, release)
+  ), nvcc)
+  Sys.chmod(nvcc, "0755")
+  invisible(prefix)
+}
+
+test_that("check_cuda_toolkit() finds nvcc in a pixi env in the working directory", {
+  skip_on_os("windows")
+  local_no_cudf_env()
+  withr::local_envvar(CUDA_HOME = NA)
+  make_nvcc_stub(file.path(getwd(), ".pixi", "envs", "default"), release = "12.9")
+
+  res <- check_cuda_toolkit()
+  expect_true(res$ok)
+  expect_identical(res$value, "12.9")
+  expect_match(res$message, file.path(".pixi", "envs", "default"), fixed = TRUE)
+})
+
+test_that("check_cuda_toolkit() finds nvcc in the pixi env named by PIXI_PROJECT_ROOT", {
+  skip_on_os("windows")
+  local_no_cudf_env()
+  root <- withr::local_tempdir()
+  withr::local_envvar(CUDA_HOME = NA, PIXI_PROJECT_ROOT = root, PIXI_ENVIRONMENT_NAME = "cuda12")
+  make_nvcc_stub(file.path(root, ".pixi", "envs", "cuda12"), release = "12.8")
+
+  res <- check_cuda_toolkit()
+  expect_true(res$ok)
+  expect_identical(res$value, "12.8")
+  expect_match(res$message, file.path(".pixi", "envs", "cuda12"), fixed = TRUE)
+})
+
+test_that("check_cuda_toolkit() prefers CUDA_HOME and CONDA_PREFIX over the pixi env", {
+  skip_on_os("windows")
+  local_no_cudf_env()
+  make_nvcc_stub(file.path(getwd(), ".pixi", "envs", "default"), release = "12.9")
+  conda <- make_nvcc_stub(withr::local_tempdir(), release = "12.6")
+  withr::local_envvar(CUDA_HOME = NA, CONDA_PREFIX = conda)
+  expect_identical(check_cuda_toolkit()$value, "12.6")
+
+  home <- make_nvcc_stub(withr::local_tempdir(), release = "12.4")
+  withr::local_envvar(CUDA_HOME = home)
+  expect_identical(check_cuda_toolkit()$value, "12.4")
+})
+
 # --- end to end on this machine -----------------------------------------------
 
 test_that("check_nvidia_driver() reads the real driver version", {
@@ -387,6 +451,7 @@ test_that("loaded_libcudf_path() finds the libcudf this session uses", {
 test_that("check_deps() is ok on a working install without CONDA_PREFIX and with a stale CUDF_HOME", {
   skip_if_no_gpu()
   skip_if_not(file.exists("/proc/self/maps"), "no /proc/self/maps")
+  skip_if(is.null(run_nvidia_smi()), "nvidia-smi not available")
   local_no_cudf_env()
   stale <- file.path(withr::local_tempdir(), "old-env")
   withr::local_envvar(CUDF_HOME = stale)
