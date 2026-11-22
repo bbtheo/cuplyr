@@ -1,5 +1,15 @@
 # cuplyr (development version)
 
+* `distinct()`, `count()` and `add_count()` accept window functions and
+  aggregates in computed keys (`distinct(df, r = dense_rank(k))`,
+  `count(df, p = lag(k))`), evaluated over the whole table as in dplyr, and
+  `slice_min()`/`slice_max()` accept one in `order_by`; they stopped with an
+  internal error before. `!` on a string column now raises dplyr's own error
+  instead of a libcudf one. A verb that produces a difftime on the CPU
+  (`mutate(days = end - start)` on Date columns) now stops with a classed
+  error that names the column and the verb, and suggests `as.numeric()` in
+  the same call. Native difftime columns are planned in #65 (#29).
+
 * `explain()` and `show_query()` print the plan as R code, in pipeline order,
   and run nothing. Each step reads as the dplyr call it stands for, with its
   expressions written out (`filter(speed > 400, gain > 0)`); a step whose

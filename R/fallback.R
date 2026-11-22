@@ -126,6 +126,11 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE, detail =
     return(result)
   }
 
+  # A column with no GPU type (a difftime from `Date - Date`) can't go back up:
+  # say which verb made it, not the upload's advice for an input table (#29)
+  # (as the notice does, a verb built on another reports as itself)
+  check_result_column_classes(result, fallback_reasons$as$verb %||% verb_name)
+
   # A rowwise_df result goes back up as a rowwise table (F49), like every
   # other result, so a later native verb stays on the GPU.
   if (inherits(result, "rowwise_df")) {
@@ -158,6 +163,27 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE, detail =
   }
 
   new_tbl
+}
+
+# Stop with a classed error when the CPU `result` of `verb_name` has a column
+# with no GPU representation (same class rule as tbl_gpu()'s upload check, a
+# subclass of its error), naming `verb_name`. A cheap class scan of the columns.
+# @keywords internal
+check_result_column_classes <- function(result, verb_name) {
+  bad <- unsupported_column_labels(result)
+  if (length(bad) == 0L) {
+    return(invisible())
+  }
+  rlang::abort(
+    c(
+      paste0("`", verb_name, "()` ran on the CPU and returned column(s) ",
+             paste(bad, collapse = ", "), ", which have no GPU type."),
+      i = paste0("Convert them in the same call, e.g. wrap the expression in `as.numeric()` ",
+                 "(`as.numeric(x, units = \"days\")` for a difftime).")
+    ),
+    class = c("cuplyr_error_unsupported_result_class", "cuplyr_error_unsupported_class"),
+    call = NULL
+  )
 }
 
 # #10: the lazy result of a CPU step carries what the step was, why it ran

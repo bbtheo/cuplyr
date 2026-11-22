@@ -320,6 +320,12 @@ resolve_slice_order <- function(order_quo, schema) {
   if (identical(ir$kind, "col")) {
     return(list(extra_mutate = NULL, order_col = ir$name))
   }
+  # A window op is only legal after mutate()'s window planning; one in a bare
+  # ast_mutate dies at lowering, so dplyr runs it (#29)
+  if (ir_has_window(ir)) {
+    fallback_dot_failed(1L, "a window call in `order_by` is evaluated by dplyr.")
+    return(NULL)
+  }
 
   temp_name <- unique_slice_order_name(schema$names)
   step <- make_mutate_expr(temp_name, ir, schema)
