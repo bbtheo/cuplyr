@@ -5,7 +5,8 @@
 #   tools/merge-queue <name>              # branch feat/<name>, its open PR
 #   tools/merge-queue --no-merge <name>   # gate and report on the PR; don't merge
 #
-# Needs an open pull request from feat/<name> to main, and in
+# Needs an open pull request from feat/<name> to main (not a draft, unless
+# --no-merge), and in
 # scratchpad/parity/features/:
 #   <name>.commit.txt   commit message (conventional-commit subject + body)
 #   <name>.protected    line 1: SHA of the PM's acceptance-test commit;
@@ -55,6 +56,13 @@ fi
 pr="$(gh pr list --head "$branch" --base "$trunk" --state open --json number --jq '.[0].number // empty')" ||
   { echo "can't list pull requests (gh failed)" >&2; exit 2; }
 [[ -n "$pr" ]] || { echo "no open pull request from $branch to $trunk; the PM opens it" >&2; exit 2; }
+# A draft is unfinished work: gate it only on request (--no-merge), never merge it.
+if [[ $do_merge -eq 1 ]]; then
+  draft="$(gh pr view "$pr" --json isDraft --jq .isDraft)" ||
+    { echo "can't read pull request #$pr (gh failed)" >&2; exit 2; }
+  [[ "$draft" == "false" ]] ||
+    { echo "pull request #$pr is a draft; the PM marks it ready (gh pr ready) at READY_TO_MERGE" >&2; exit 2; }
+fi
 
 pm_sha="$(head -n1 "$prot")"
 mapfile -t paths < <(tail -n +2 "$prot" | sed '/^\s*$/d')
