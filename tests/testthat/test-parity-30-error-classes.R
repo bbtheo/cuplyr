@@ -352,3 +352,73 @@ test_that("&& / || in mutate() behave as in dplyr", {
   one <- tibble::tibble(a = 2L, b = 1)
   p30_both(one, function(d) mutate(d, m = a > 1L && b > 0))
 })
+
+# =============================================================================
+# Added after the second review
+# =============================================================================
+
+# TRUE iff the condition `pipeline(x)` raises reaches the user's handlers
+# through rlang's abort() machinery (as dplyr's do), so it prints in rlang's
+# format and rlang::last_error() records it at top level.
+p30_rlang_signalled <- function(x, pipeline) {
+  calls <- NULL
+  tryCatch(
+    withCallingHandlers(
+      suppressWarnings({
+        out <- pipeline(x)
+        if (inherits(out, "tbl_gpu")) dplyr::collect(out)
+      }),
+      error = function(e) calls <<- sys.calls()
+    ),
+    error = function(e) NULL
+  )
+  # (the frame below the handler is the signaller: rlang's signal_abort() calls
+  # signalCondition(); a base stop(cnd) re-raise is its own frame)
+  n <- length(calls)
+  if (n < 2L) {
+    return(NA)
+  }
+  head <- paste(deparse(calls[[n - 1L]][[1L]]), collapse = "")
+  head %in% c("signalCondition", "base::signalCondition")
+}
+
+p30_same_signaller <- function(df, pipeline) {
+  cpu <- p30_rlang_signalled(tibble::as_tibble(df), pipeline)
+  expect_true(cpu, info = "dplyr signals through rlang")
+  for (lazy in c(FALSE, TRUE)) {
+    expect_identical(p30_rlang_signalled(tbl_gpu(df, lazy = lazy), pipeline), cpu,
+                     info = sprintf("signalled through rlang (lazy = %s)", lazy))
+  }
+}
+
+test_that("if_any() over a column the same call creates is wrapped", {
+  skip_if_no_gpu()
+  df <- p30_df()
+  p30_same_error(df, function(d) mutate(d, x = a + 1L, m = dplyr::if_any(c(x, b), ~ .x > no_such_col)),
+                 message = FALSE)
+})
+
+test_that("a qualified dplyr::mutate()/dplyr::transmute() keeps its call", {
+  skip_if_no_gpu()
+  df <- p30_df()
+  p30_same_error(df, function(d) dplyr::mutate(d, m = stop("boom")))
+  p30_same_error(df, function(d) dplyr::transmute(d, m = stop("boom")))
+  p30_same_error(df, function(d) dplyr::mutate(d, m = no_such_col))
+  p30_same_error(df, function(d) d |> dplyr::group_by(g) |> dplyr::mutate(m = stop("boom")))
+})
+
+test_that("a grouped across(.unpack = FALSE) selection error has no group bullet", {
+  skip_if_no_gpu()
+  df <- p30_df()
+  p30_same_error(df, function(d) d |> group_by(g) |> mutate(across(no_such_col, ~ .x + 1, .unpack = FALSE)))
+})
+
+test_that("errors are signalled through rlang, as dplyr's are", {
+  skip_if_no_gpu()
+  df <- p30_df()
+  p30_same_signaller(df, function(d) mutate(d, m = stop("boom")))
+  p30_same_signaller(df, function(d) transmute(d, m = stop("boom")))
+  p30_same_signaller(df, function(d) mutate(d, m = 1:2))
+  p30_same_signaller(df, function(d) d |> rowwise() |> mutate(m = no_such_col))
+  p30_same_signaller(df, function(d) mutate(d, m = no_such_col))
+})
