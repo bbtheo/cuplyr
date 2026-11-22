@@ -333,7 +333,7 @@ test_that("if_any()/if_all() errors are evaluated per group, as in dplyr", {
   df <- p30_df()
   p30_same_error(df, function(d) d |> group_by(g) |> mutate(m = dplyr::if_any(no_such_col, is.na)))
   p30_same_error(df, function(d) mutate(d, m = dplyr::if_all(no_such_col, is.na), .by = s))
-  p30_same_error(df, function(d) d |> group_by(g) |> mutate(across(no_such_col, mean, na.rm = TRUE)))
+  p30_same_error(df, function(d) d |> group_by(g) |> mutate(dplyr::across(no_such_col, mean, na.rm = TRUE)))
 })
 
 test_that("an if_any() evaluation error has dplyr's class chain", {
