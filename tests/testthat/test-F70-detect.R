@@ -34,8 +34,8 @@ test_that("a null-literal node does not block pushdown", {
   skip_if_no_gpu()
   d <- data.frame(a = 1:4, b = 4:1, keep = c(TRUE, FALSE, TRUE, TRUE))
   lz <- as_lazy(tbl_gpu(d))
-  out <- capture.output(explain(lz |> mutate(y = a + NA) |> filter(keep)))
-  p <- out[seq(match("Optimized plan:", out) + 1L, length(out))]
+  q <- lz |> mutate(y = a + NA) |> filter(keep)
+  p <- capture.output(print(optimize_ast(q$lazy_ops)))
   expect_match(p[1], "ast_mutate")
   expect_match(p[2], "ast_filter")
   expect_equal(

@@ -29,8 +29,8 @@ issue has a status:
 |---|---|
 | Proposed | A report or an idea. Discussion is welcome; nothing is agreed yet. |
 | Approved | Agreed and ready to pick up, with the approach in the issue. |
-| In progress | Someone is working on it. |
-| In review | A pull request is open. |
+| In progress | Someone is working on it. Its pull request, if there is one yet, is a draft. |
+| In review | The pull request is ready for review. |
 | Done | Merged. |
 | Not planned | Decided against; the issue says why. |
 
@@ -112,6 +112,9 @@ issue before you start so two people don't do the same work (see
 - Keep one topic per pull request. A feature plus an unrelated refactor is
   two pull requests.
 - Put `Fixes #123` in the description.
+- Open the pull request as a draft early if you like, so others can see the
+  approach and comment before it is finished. Mark it ready for review when
+  it is done; the merge gate doesn't run on drafts.
 - Add a bullet to `NEWS.md` under "development version" for anything a user
   can see. Start with the function name and write what the user can now do.
 - Don't change the version in `DESCRIPTION`. Only release pull requests do.

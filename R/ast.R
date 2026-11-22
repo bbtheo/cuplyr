@@ -44,15 +44,22 @@ ast_node_classes <- lapply(
 #' @param schema List with names and types vectors
 #' @param source_ptr External pointer to the table the plan starts from
 #' @param scan A parquet scan record (`read_parquet_gpu()`), or NULL
+#' @param origin The CPU step that produced the table (`plan_origin()`,
+#'   R/plan-text.R: plain text only), or NULL. Read only by `explain()` and
+#'   `show_query()`.
 #' @return An ast_source node
 #' @keywords internal
-ast_source <- function(schema, source_ptr = NULL, scan = NULL) {
-  if (is.null(scan)) {
+ast_source <- function(schema, source_ptr = NULL, scan = NULL, origin = NULL) {
+  if (is.null(scan) && is.null(origin)) {
     return(ast_node("source", schema = schema, source_ptr = source_ptr, input = NULL))
   }
   # F85: a parquet scan is a source whose rows are read when the plan runs
-  # (R/io.R); the field exists only on such a node
-  ast_node("source", schema = schema, source_ptr = source_ptr, scan = scan, input = NULL)
+  # (R/io.R); the field exists only on such a node. So does `origin` (#10), on a
+  # source that is the result of a CPU step.
+  node <- ast_node("source", schema = schema, source_ptr = source_ptr, input = NULL)
+  if (!is.null(scan)) node$scan <- scan
+  if (!is.null(origin)) node$origin <- origin
+  node
 }
 
 #' Create a filter AST node
@@ -62,10 +69,23 @@ ast_source <- function(schema, source_ptr = NULL, scan = NULL) {
 #' @param grouped `TRUE` for a filter() on a grouped table, with `.by`, or on a
 #'   rowwise table (`filter_run()` sets it; the optimizer carries it): nothing
 #'   of such a filter is pushed into a parquet scan (R/pushdown.R)
+#' @param rowwise `TRUE` for a filter() on a rowwise table (then `grouped` is
+#'   `TRUE` too); only the plan text reads it (#10). The field is present only
+#'   when `TRUE`.
 #' @return An ast_filter node
 #' @keywords internal
-ast_filter <- function(input, predicates, grouped = FALSE) {
-  ast_node("filter", input = input, predicates = predicates, grouped = grouped)
+ast_filter <- function(input, predicates, grouped = FALSE, rowwise = FALSE) {
+  node <- ast_node("filter", input = input, predicates = predicates, grouped = grouped)
+  if (isTRUE(rowwise)) node$rowwise <- TRUE
+  node
+}
+
+# A filter of `predicates` over `input` with the `grouped`/`rowwise` marks of
+# the filter node `like` (the optimizer moving or splitting a filter)
+# @keywords internal
+ast_filter_like <- function(like, input, predicates) {
+  ast_filter(input, predicates, grouped = isTRUE(.subset2(like, "grouped")),
+             rowwise = isTRUE(.subset2(like, "rowwise")))
 }
 
 #' Create a mutate AST node

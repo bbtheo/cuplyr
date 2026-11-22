@@ -28,7 +28,10 @@ call as a whole goes}
 that reads no column}
 }
 \value{
-\code{invisible(NULL)}
+The notice's fields (\code{verb}, \code{expr}, \code{reason}, \code{rows}, \code{cols},
+\code{bytes}) as a list, invisibly: \code{verb} and \code{expr} as reported, after a verb
+built on another one reported as itself. \code{gpu_fallback()} records them in
+the plan text (R/plan-text.R).
 }
 \description{
 The one channel for "this ran on the CPU". It always signals a
