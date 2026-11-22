@@ -195,3 +195,14 @@ test_that("a window key keeps a .drop = FALSE grouping that no key writes", {
   w29_both(df, function(t) t |> group_by(f, .drop = FALSE) |>
              count(r = dplyr::dense_rank(k)))
 })
+
+test_that("keys that write no group column keep the empty groups, like dplyr", {
+  skip_if_no_gpu()
+  df <- data.frame(g = c(10L, 10L, 20L, 30L), k = c(5L, 6L, 7L, 8L))
+  kept <- function(t) t |> group_by(g, .drop = FALSE) |> filter(k < 7L)
+  w29_both(df, function(t) kept(t) |> distinct(r = dplyr::dense_rank(k)) |>
+             summarise(n = dplyr::n()))
+  # a bare group column next to a non-window computed key regroups too
+  w29_both(df, function(t) kept(t) |> distinct(g, r = k + 1L) |>
+             summarise(n = dplyr::n()))
+})
