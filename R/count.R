@@ -173,6 +173,7 @@ resolve_grouping_dots <- function(.data, dots, call = rlang::caller_env(),
   } else if (length(expressions) > 0) {
     result <- push_op(.data, ast_mutate(input_node(.data), expressions))
   }
+  result <- regroup_for_keys(result, names_out)
 
   list(data = result, names = unique(names_out))
 }
@@ -181,7 +182,8 @@ resolve_grouping_dots <- function(.data, dots, call = rlang::caller_env(),
 # count()/add_count()/distinct() with mutate()'s own window planning, on the
 # table with its grouping removed (dplyr's add_computed_columns() evaluates
 # them on ungroup(.data), #5598), then give the table back its grouping:
-# mutate() keeps every row, so groups, `.drop` and fixed keys stay valid.
+# mutate() keeps every row, so groups and `.drop` stay valid; the fixed keys
+# stay too and are the caller's to drop (regroup_for_keys()).
 # Same pattern as group_by()'s computed dots. A CPU fallback of the inner
 # mutate() reports as `verb`.
 #
@@ -210,6 +212,20 @@ mutate_keys_ungrouped <- function(.data, comp_dots, verb) {
     fixed_keys = .subset2(.data, "fixed_keys"),
     unspecified = out[["unspecified"]]
   ), .data, bare = FALSE)
+}
+
+# dplyr's add_computed_columns() runs dplyr_col_modify() over every dot of the
+# mutate branch, which regroups the table when any dot is named like a group
+# column (a bare `g` next to a computed key included). With `.drop = FALSE`
+# the regroup keeps a factor's unused levels and loses the empty groups an
+# earlier filter()/slice() kept, i.e. the fixed keys.
+# @keywords internal
+regroup_for_keys <- function(.data, dot_names) {
+  if (any(dot_names %in% .subset2(.data, "groups")) && !is.null(.subset2(.data, "fixed_keys"))) {
+    drop_fixed_keys(.data)
+  } else {
+    .data
+  }
 }
 
 # Pick the aggregation's output column name: the user's explicit `name=` if

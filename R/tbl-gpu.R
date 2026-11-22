@@ -453,7 +453,9 @@ unsupported_column_labels <- function(data) {
   for (j in seq_along(data)) {
     col <- data[[j]]
     cls <- oldClass(col)
-    if (isS4(col)) {
+    if (identical(cls, "vctrs_unspecified")) {
+      next # tbl_gpu.data.frame() uploads it as logical and remembers the class
+    } else if (isS4(col)) {
       cls <- class(col)
     } else if (is.null(cls) || any(vapply(ok, identical, logical(1), cls))) {
       next

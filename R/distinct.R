@@ -215,6 +215,7 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
     # factor levels onto renamed/copied factor keys in eager mode too.
     .data <- push_op(.data, ast_mutate(input_node(.data), expressions))
   }
+  .data <- regroup_for_keys(.data, dot_names)
 
   # Group columns are always part of the key and the result; any group
   # column already named in `...` keeps its given position instead of being

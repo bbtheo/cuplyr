@@ -4,8 +4,7 @@
   keys (`distinct(df, r = dense_rank(k))`, `count(df, p = lag(k))`), evaluated
   over the whole table as in dplyr, and `slice_min()`/`slice_max()` accept
   one in `order_by`; they stopped with an internal error before. `!` on a
-  string, Date or POSIXct column now raises dplyr's own error instead of a
-  libcudf one. A verb that produces a difftime on the CPU (`Date - Date`) now
+  string column now raises dplyr's own error instead of a libcudf one. A verb that produces a difftime on the CPU (`Date - Date`) now
   stops with an error that names the verb and the column, and suggests
   `as.numeric()` in the same call (#29).
 
