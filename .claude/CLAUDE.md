@@ -24,6 +24,8 @@ list(
   # rowwise = TRUE          # present ONLY on a rowwise table (F49): `groups` then
   #                         # holds the rowwise vars, which are NOT groups; every verb
   #                         # is either rowwise-aware or runs whole on the CPU
+  # origin = list(...)      # present ONLY on a lazy result of a CPU step (#10):
+  #                         # plain-text history that explain() prints
 )
 ```
 
@@ -40,7 +42,8 @@ list(
 
 Every verb builds one AST node and hands it to `push_op()` (`R/execute.R`);
 `R/lower.R::lower_and_execute()` is the single execution path for eager and
-lazy. The optimizer runs only from `compute()`.
+lazy. Only `compute()` (and `collect()` through it) runs an optimized plan;
+`explain()`/`show_query()` call the optimizer only to print the plan.
 
 ## Hard rules
 
@@ -136,10 +139,13 @@ How one feature moves:
    contributors. New issues start as Proposed; an item is agreed when a
    maintainer moves it to Approved. The board order is the priority order.
    Open questions carry the `tbd` label and a comment stating the question.
-2. **Branch.** The PM works in a worktree on `feat/<name>`, cut from
-   `origin/main`.
-3. **Pull request.** When the reviewer approves, the PM merges `origin/main`
-   into the branch, pushes it and opens a pull request with `Fixes #n`.
+2. **Branch and draft.** The PM works in a worktree on `feat/<name>`, cut
+   from `origin/main`. Once the acceptance tests are committed, it pushes
+   the branch and opens a draft pull request with `Fixes #n`; after each
+   round it pushes again and comments on where the work stands.
+3. **Ready for review.** When the reviewer approves, the PM merges
+   `origin/main` into the branch, pushes it, completes the description and
+   marks the pull request ready. `tools/merge-queue` refuses drafts.
 4. **Gate and merge.** The orchestrator moves the issue to In review and
    runs `tools/merge-queue <name>`. The gate result is posted on the pull
    request; on a pass the pull request is squash-merged, which closes the

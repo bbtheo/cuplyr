@@ -145,7 +145,7 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
     # already grouped table dplyr rebuilds through as_tibble() and loses them
     # unless `.add` leaves the grouping as it was.
     keep_attrs <- (length(.subset2(.data, "groups")) == 0L && !is_rowwise_gpu(.data)) || length(new_groups) > 0L
-    return(copy_frame_meta(new_tbl_gpu(
+    return(carry_origin(copy_frame_meta(new_tbl_gpu(
       ptr = .subset2(.data, "ptr"),
       schema = .subset2(.data, "schema"),
       lazy_ops = .subset2(.data, "lazy_ops"),
@@ -154,7 +154,7 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
       exec_mode = .subset2(.data, "exec_mode"),
       nrow = .data[["nrow"]],
       unspecified = .data[["unspecified"]]
-    ), .data, attrs = keep_attrs, bare = FALSE))
+    ), .data, attrs = keep_attrs, bare = FALSE), .data))
   }
 
   dot_names <- names(dots)
@@ -333,7 +333,7 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   keep_attrs <- (length(.subset2(.data, "groups")) == 0L && !is_rowwise_gpu(.data)) ||
     (all(kind == "var") && length(new_groups) > 0L)
 
-  copy_frame_meta(new_tbl_gpu(
+  carry_origin(copy_frame_meta(new_tbl_gpu(
     ptr = .subset2(working, "ptr"),
     schema = .subset2(working, "schema"),
     lazy_ops = .subset2(working, "lazy_ops"),
@@ -343,7 +343,7 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
     exec_mode = .subset2(working, "exec_mode"),
     nrow = working[["nrow"]],
     unspecified = working[["unspecified"]]
-  ), .data, attrs = keep_attrs, bare = FALSE)
+  ), .data, attrs = keep_attrs, bare = FALSE), working)
 }
 
 # dplyr's group_by.data.frame() hands its `...` to group_by_prepare(.data, ...,
@@ -411,10 +411,10 @@ ungroup.tbl_gpu <- function(x, ...) {
   if (is_rowwise_gpu(x)) {
     # ungroup.rowwise_df(): nothing may be named, and it is as_tibble()
     rlang::check_dots_empty()
-    return(new_tbl_gpu(
+    return(carry_origin(new_tbl_gpu(
       ptr = .subset2(x, "ptr"), schema = .subset2(x, "schema"), lazy_ops = .subset2(x, "lazy_ops"), exec_mode = .subset2(x, "exec_mode"),
       nrow = x[["nrow"]], unspecified = x[["unspecified"]]
-    ))
+    ), x))
   }
   if (...length() > 0L) {
     if (length(groups) == 0L) {
@@ -454,11 +454,12 @@ ungroup.tbl_gpu <- function(x, ...) {
     nrow = x[["nrow"]],
     unspecified = x[["unspecified"]]
   )
-  if (length(.subset2(x, "groups")) > 0L && length(groups) > 0L) {
+  out <- if (length(.subset2(x, "groups")) > 0L && length(groups) > 0L) {
     copy_frame_meta(out, x, bare = FALSE)
   } else {
     carry_frame_meta(out, x)
   }
+  carry_origin(out, x)
 }
 
 #' Get grouping variables from a GPU table

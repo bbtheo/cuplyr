@@ -1273,7 +1273,7 @@ push_down_filters <- function(ast) {
     }
 
     # Swap: filter below mutate
-    new_filter <- ast_filter(input$input, ast$predicates, grouped = isTRUE(.subset2(ast, "grouped")))
+    new_filter <- ast_filter_like(ast, input$input, ast$predicates)
     input$input <- new_filter
     return(input)
   }
@@ -1288,7 +1288,7 @@ push_down_filters <- function(ast) {
       return(ast)
     }
 
-    new_filter <- ast_filter(input$input, ast$predicates, grouped = isTRUE(.subset2(ast, "grouped")))
+    new_filter <- ast_filter_like(ast, input$input, ast$predicates)
     input$input <- new_filter
     return(input)
   }
@@ -1313,7 +1313,7 @@ push_down_filters <- function(ast) {
       if (any(vapply(ast$predicates, pred_checked_int, logical(1)))) {
         return(ast)
       }
-      input$left <- ast_filter(input$left, ast$predicates, grouped = isTRUE(.subset2(ast, "grouped")))
+      input$left <- ast_filter_like(ast, input$left, ast$predicates)
       return(input)
     }
 
@@ -1401,10 +1401,10 @@ push_down_filters <- function(ast) {
     }
 
     if (length(left_preds) > 0) {
-      input$left <- ast_filter(input$left, left_preds, grouped = isTRUE(.subset2(ast, "grouped")))
+      input$left <- ast_filter_like(ast, input$left, left_preds)
     }
     if (length(right_preds) > 0) {
-      input$right <- ast_filter(input$right, right_preds, grouped = isTRUE(.subset2(ast, "grouped")))
+      input$right <- ast_filter_like(ast, input$right, right_preds)
     }
 
     if (length(stay_preds) == 0) {
@@ -1455,11 +1455,14 @@ reorder_filters <- function(ast) {
   filters <- list()
   current <- ast
   grouped <- isTRUE(.subset2(ast, "grouped"))
+  rowwise <- isTRUE(.subset2(ast, "rowwise"))
 
   # (filters on a grouped table and on an ungrouped one are not merged: a
-  # parquet scan can take the predicates of the ungrouped one, F85)
+  # parquet scan can take the predicates of the ungrouped one, F85; a rowwise
+  # one keeps its own node, so the plan text can mark it, #10)
   while (!is.null(current) && current$type == "filter" &&
-         identical(isTRUE(.subset2(current, "grouped")), grouped)) {
+         identical(isTRUE(.subset2(current, "grouped")), grouped) &&
+         identical(isTRUE(.subset2(current, "rowwise")), rowwise)) {
     filters <- c(filters, list(current$predicates))
     checked_here <- any(vapply(current$predicates, pred_checked_int, logical(1)))
     current <- current$input
@@ -1492,7 +1495,7 @@ reorder_filters <- function(ast) {
   }
 
   # Rebuild single filter node
-  result <- ast_filter(current, all_preds, grouped = grouped)
+  result <- ast_filter_like(ast, current, all_preds)
   result$input <- reorder_filters(result$input)
   result
 }

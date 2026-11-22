@@ -136,8 +136,8 @@ test_that("show_query() renders a chained lazy join", {
     inner_join(tbl_gpu(f35_z, lazy = TRUE), by = "k") |>
     filter(b == "q")
   out <- paste(capture.output(show_query(lz)), collapse = "\n")
-  expect_match(out, "left join")
-  expect_match(out, "inner join")
+  expect_match(out, "left_join(y, by = join_by(k))", fixed = TRUE)
+  expect_match(out, "inner_join(y, by = join_by(k))", fixed = TRUE)
 })
 
 # F35 goal 4: `.drop = FALSE` must survive a join and the verbs after it.

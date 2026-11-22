@@ -105,7 +105,7 @@ pipeline <- tbl_gpu(mtcars) |>
 
 is_lazy(pipeline)          # TRUE
 has_pending_ops(pipeline)  # TRUE
-show_query(pipeline)       # the pending steps
+show_query(pipeline)       # the plan, as R code
 ```
 
 Errors such as a missing column or a type mismatch still appear at the verb that

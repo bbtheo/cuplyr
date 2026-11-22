@@ -216,7 +216,9 @@ node_is_position_safe <- function(node) {
 #' - lazy + no pending ops: returns a fresh `ast_source(.data$schema)`,
 #'   matching the historical lazy-verb convention (e.g. the now-deleted
 #'   `filter_lazy()`, `select_lazy()`) of leaving the source pointer unset; `compute()`/
-#'   `collect()` supply `.data$ptr` as the lowering fallback `source_ptr`.
+#'   `collect()` supply `.data$ptr` as the lowering fallback `source_ptr`. A table
+#'   that is the result of a CPU step (`.data$origin`, #10) hands its history to
+#'   the source, for `explain()`.
 #' - eager: returns a fresh `ast_source(.data$schema, source_ptr = .data$ptr)`
 #'   so `push_op()` can call `lower_and_execute()` immediately without a
 #'   separate source table.
@@ -228,6 +230,9 @@ input_node <- function(.data) {
   if (identical(.subset2(.data, "exec_mode"), "lazy")) {
     if (has_pending_ops(.data)) {
       return(.subset2(.data, "lazy_ops"))
+    }
+    if (!is.null(.subset2(.data, "origin"))) {
+      return(ast_source(.subset2(.data, "schema"), origin = table_origin(.data)))
     }
     return(ast_source(.subset2(.data, "schema")))
   }
@@ -739,7 +744,7 @@ carry_fixed_keys <- function(node, .data, new_groups) {
 #' @return An `ast_node` with its leaf `source_ptr` set to `tbl$ptr`
 #' @keywords internal
 join_input_node <- function(tbl) {
-  node <- if (has_pending_ops(tbl)) tbl$lazy_ops else ast_source(tbl$schema)
+  node <- if (has_pending_ops(tbl)) tbl$lazy_ops else ast_source(tbl$schema, origin = table_origin(tbl))
   set_ast_source_ptr(node, tbl$ptr)
 }
 
@@ -1305,7 +1310,10 @@ notice_expr_text <- function(x) {
 #' @param rows,cols,bytes What is collected to the host (see `fallback_size()`)
 #' @param nothing_collected `TRUE` when the CPU only evaluates an expression
 #'   that reads no column
-#' @return `invisible(NULL)`
+#' @return The notice's fields (`verb`, `expr`, `reason`, `rows`, `cols`,
+#'   `bytes`) as a list, invisibly: `verb` and `expr` as reported, after a verb
+#'   built on another one reported as itself. `gpu_fallback()` records them in
+#'   the plan text (R/plan-text.R).
 #' @keywords internal
 cuplyr_fallback_notify <- function(verb, expr = NA_character_, reason = NULL,
                                    rows = 0, cols = 0, bytes = 0,
@@ -1347,7 +1355,7 @@ cuplyr_fallback_notify <- function(verb, expr = NA_character_, reason = NULL,
     "error" = rlang::exec(rlang::abort, msg, class = "cuplyr_error_fallback", call = NULL, !!!fields),
     NULL
   )
-  invisible(NULL)
+  invisible(fields)
 }
 
 # F80: a verb on a lazy table whose result TYPE depends on the data (an integer
