@@ -272,14 +272,13 @@ test_that("joins: every left row of a left join, and right row of a right join, 
 # ---------------------------------------------------------------------------
 # Plans. Pipelines without checked integer arithmetic (doubles, integer
 # comparisons, %/%, %%, unary minus) are optimized exactly as before F70; the
-# expected text is the optimized plan explain() printed on dev 3fd9d62. A
+# expected text is the optimized tree (print(optimize_ast())) printed on dev 3fd9d62. A
 # checked predicate may still move into a left join's left input (every left
 # row reaches the output).
 # ---------------------------------------------------------------------------
 
 f70_plan <- function(q) {
-  out <- capture.output(explain(q))
-  out[seq(match("Optimized plan:", out) + 1L, length(out))]
+  capture.output(print(optimize_ast(q$lazy_ops)))
 }
 
 test_that("plans without checked integer arithmetic are unchanged", {

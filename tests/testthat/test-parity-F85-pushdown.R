@@ -164,8 +164,9 @@ test_that("explain() shows the columns and the predicate of the scan", {
   path <- pq_write(pq_sem_df())
   q <- read_parquet_gpu(path, lazy = TRUE) |> filter(i > 1L) |> select(id)
   out <- paste(capture.output(explain(q)), collapse = "\n")
-  expect_match(out, "parquet")
-  expect_match(out, "i\\s*>\\s*1")
+  expect_match(out, "parquet scan: ")
+  expect_match(out, "columns read: [0-9]+ of [0-9]+ \\(")
+  expect_match(out, "reader filter: i > 1L", fixed = TRUE)
   expect_match(out, "\\bid\\b")
 })
 

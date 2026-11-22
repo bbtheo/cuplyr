@@ -426,20 +426,7 @@ strip_timestamp_flags <- function(ptr) {
 # is an error.
 # @keywords internal
 check_supported_column_classes <- function(data) {
-  ok <- list(c("factor"), c("ordered", "factor"), "Date", c("POSIXct", "POSIXt"), "integer64")
-  bad <- character()
-  for (j in seq_along(data)) {
-    col <- data[[j]]
-    cls <- oldClass(col)
-    if (isS4(col)) {
-      cls <- class(col)
-    } else if (is.null(cls) || any(vapply(ok, identical, logical(1), cls))) {
-      next
-    } else if (!is.atomic(col) && !inherits(col, "POSIXlt")) {
-      next # list / data-frame columns keep their existing errors
-    }
-    bad <- c(bad, sprintf("`%s` <%s>", names(data)[j], paste(cls, collapse = "/")))
-  }
+  bad <- unsupported_column_labels(data)
   if (length(bad) == 0L) {
     return(invisible())
   }
@@ -453,6 +440,31 @@ check_supported_column_classes <- function(data) {
     class = "cuplyr_error_unsupported_class",
     call = NULL
   )
+}
+
+# The columns of `data` whose class has no GPU representation, each as
+# "`name` <class>" (character(0) when every column can be uploaded). The one
+# class rule, shared by the upload check above and gpu_fallback()'s check of
+# a CPU result.
+# @keywords internal
+unsupported_column_labels <- function(data) {
+  ok <- list(c("factor"), c("ordered", "factor"), "Date", c("POSIXct", "POSIXt"), "integer64")
+  bad <- character()
+  for (j in seq_along(data)) {
+    col <- data[[j]]
+    cls <- oldClass(col)
+    if (identical(cls, "vctrs_unspecified")) {
+      next # tbl_gpu.data.frame() uploads it as logical and remembers the class
+    } else if (isS4(col)) {
+      cls <- class(col)
+    } else if (is.null(cls) || any(vapply(ok, identical, logical(1), cls))) {
+      next
+    } else if (!is.atomic(col) && !inherits(col, "POSIXlt")) {
+      next # list / data-frame columns keep their existing errors
+    }
+    bad <- c(bad, sprintf("`%s` <%s>", names(data)[j], paste(cls, collapse = "/")))
+  }
+  bad
 }
 
 #' @rdname tbl_gpu
