@@ -261,6 +261,48 @@ test_that("string functions print as the R call, with R's argument order", {
   expect_false(grepl("paste_cols|starts_with|ends_with|cast_|factor_codes|recode_lookup|rw_agg", out))
 })
 
+test_that("recode() prints as recode() for any number of replacements", {
+  skip_if_no_gpu()
+  lz <- tbl_gpu(tibble::tibble(d = c("Mon", "Tue", "Sun"), m = c(1L, 5L, 12L)), lazy = TRUE)
+  seven <- mutate(lz, n = dplyr::recode(d, Mon = "M", Tue = "T", Wed = "W", Thu = "R", Fri = "F",
+                                        Sat = "S", Sun = "U"))
+  twelve <- mutate(lz, n = dplyr::recode(m, `1` = "a", `2` = "b", `3` = "c", `4` = "d", `5` = "e", `6` = "f",
+                                         `7` = "g", `8` = "h", `9` = "i", `10` = "j", `11` = "k", `12` = "l",
+                                         .default = "?"))
+  for (q in list(seven, twelve)) {
+    for (optimized in c(FALSE, TRUE)) {
+      out <- paste(f10_lines(q, optimized), collapse = "\n")
+      expect_false(grepl("recode_lookup", out, fixed = TRUE), info = out)
+      expect_match(out, "recode(", fixed = TRUE)
+    }
+  }
+  expect_match(paste(f10_lines(seven), collapse = "\n"), "Sun = \"U\"", fixed = TRUE)
+})
+
+test_that("a step that runs per row is marked rowwise", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "silent")
+  rw <- tbl_gpu(tibble::tibble(x = c(1, 5), i = 3:4), lazy = TRUE) |> rowwise()
+  steps <- list(
+    mutate = mutate(rw, m = max(x, i)),
+    c_across = mutate(rw, s = sum(dplyr::c_across(c(x, i)))),
+    filter = filter(rw, max(x, i) > 3)
+  )
+  for (nm in names(steps)) {
+    for (optimized in c(FALSE, TRUE)) {
+      out <- trimws(f10_lines(steps[[nm]], optimized))
+      step <- out[grepl("^(mutate|filter)\\(", out)]
+      expect_length(step, 1L)
+      expect_true(endsWith(step, "  # rowwise"), info = paste(nm, step))
+      expect_false(grepl("rw_agg|# grouped", step), info = paste(nm, step))
+    }
+  }
+  # the marker survives into the history of a CPU step
+  cpu <- mutate(steps$mutate, z = pnorm(m))
+  out <- trimws(f10_lines(cpu, optimized = TRUE))
+  expect_true(any(startsWith(out, "mutate(m = max(") & endsWith(out, "  # rowwise")))
+})
+
 # --- CPU steps ---------------------------------------------------------------
 
 test_that("a CPU step on a table with nothing pending is still shown", {
