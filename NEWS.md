@@ -2,7 +2,8 @@
 
 * `check_deps()` reports libcudf as found on a pixi install: it uses the
   libcudf cuplyr has loaded, or the pixi environment, even when
-  `CONDA_PREFIX` is unset. It names a `CUDF_HOME` or `CONDA_PREFIX` that
+  `CONDA_PREFIX` is unset, and it finds `nvcc` in the pixi environment too.
+  It names a `CUDF_HOME` or `CONDA_PREFIX` that
   points to a missing directory, and it reads the driver version on newer
   `nvidia-smi` versions, which print `KMD Version:` instead of
   `Driver Version:` (#49).

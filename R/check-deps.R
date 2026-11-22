@@ -21,8 +21,10 @@
 #'   \item **NVIDIA Driver**: Verifies `nvidia-smi` is available and reports
 #'     the driver version, read with `nvidia-smi --query-gpu=driver_version`
 #'     and, failing that, from the `Driver Version:` or `KMD Version:` header
-#'   \item **CUDA Toolkit**: Checks for `nvcc`, validates CUDA >= 12.2, and
-#'     reports CUDA version
+#'   \item **CUDA Toolkit**: Looks for `nvcc` in `CUDA_HOME`, `CONDA_PREFIX`,
+#'     the pixi environment (`PIXI_PROJECT_ROOT`, or `.pixi` in the working
+#'     directory), the system CUDA directories and `PATH`. Validates
+#'     CUDA >= 12.2 and reports the CUDA version
 #'   \item **libcudf**: Reports the libcudf that cuplyr has loaded, if any.
 #'     Otherwise looks for cudf headers and `libcudf.so` under `CUDF_HOME`,
 #'     `CONDA_PREFIX`, the pixi environment (`PIXI_PROJECT_ROOT`, or `.pixi`
@@ -93,10 +95,11 @@ check_deps <- function(format = c("text", "json"), verbose = FALSE) {
 # --- Individual check functions ---
 
 # The one place that shells out to nvidia-smi (tests mock it). NULL when the
-# command is missing, errors or exits non-zero.
+# command is missing, errors, times out or exits non-zero.
 run_nvidia_smi <- function(args = character()) {
   out <- tryCatch(
-    suppressWarnings(system2("nvidia-smi", args, stdout = TRUE, stderr = TRUE)),
+    suppressWarnings(system2("nvidia-smi", args, stdout = TRUE, stderr = TRUE,
+                             timeout = 10)),
     error = function(e) NULL
   )
   if (is.null(out) || !is.null(attr(out, "status"))) {
@@ -185,6 +188,7 @@ check_cuda_toolkit <- function() {
   homes <- c(
     Sys.getenv("CUDA_HOME", ""),
     Sys.getenv("CONDA_PREFIX", ""),
+    pixi_env_prefixes(),
     "/usr/local/cuda", "/opt/cuda", "/usr/lib/cuda"
   )
   candidates <- file.path(homes[nzchar(homes)], "bin", "nvcc")
@@ -239,22 +243,33 @@ loaded_libcudf_path <- function(maps_file = "/proc/self/maps") {
     error = function(e) character()
   )
   # address perms offset dev inode  pathname (the path may contain spaces)
-  has_path <- grepl("^\\S+\\s+\\S+\\s+\\S+\\s+\\S+\\s+\\S+\\s+/", lines)
-  paths <- sub("^\\S+\\s+\\S+\\s+\\S+\\s+\\S+\\s+\\S+\\s+", "", lines[has_path])
-  hits <- paths[grepl("^libcudf\\.so(\\.[0-9]+)*$", basename(paths))]
+  # useBytes: a path with a non-UTF-8 byte must not raise a warning.
+  has_path <- grepl("^\\S+\\s+\\S+\\s+\\S+\\s+\\S+\\s+\\S+\\s+/", lines, useBytes = TRUE)
+  paths <- sub("^\\S+\\s+\\S+\\s+\\S+\\s+\\S+\\s+\\S+\\s+", "",
+               lines[has_path], useBytes = TRUE)
+  hits <- paths[grepl("/libcudf\\.so(\\.[0-9]+)*$", paths, useBytes = TRUE)]
   if (length(hits) == 0) NA_character_ else hits[1]
 }
 
-default_cudf_search_paths <- function() {
+# The pixi environment prefixes a pixi install may live in: the one named by
+# PIXI_PROJECT_ROOT / PIXI_ENVIRONMENT_NAME, and `.pixi/envs/default` under the
+# working directory (plain R outside `pixi run` sets neither variable).
+pixi_env_prefixes <- function() {
   pixi_root <- Sys.getenv("PIXI_PROJECT_ROOT", "")
   pixi_env <- Sys.getenv("PIXI_ENVIRONMENT_NAME", "")
   if (!nzchar(pixi_env)) pixi_env <- "default"
 
+  c(
+    if (nzchar(pixi_root)) file.path(pixi_root, ".pixi", "envs", pixi_env),
+    file.path(getwd(), ".pixi", "envs", "default")
+  )
+}
+
+default_cudf_search_paths <- function() {
   paths <- c(
     Sys.getenv("CUDF_HOME", ""),
     Sys.getenv("CONDA_PREFIX", ""),
-    if (nzchar(pixi_root)) file.path(pixi_root, ".pixi", "envs", pixi_env),
-    file.path(getwd(), ".pixi", "envs", "default"),
+    pixi_env_prefixes(),
     "/usr/local", "/opt/rapids", "/opt/conda", "/usr"
   )
   unique(paths[nzchar(paths)])
