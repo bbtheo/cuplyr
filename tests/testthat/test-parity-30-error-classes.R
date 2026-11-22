@@ -307,3 +307,48 @@ test_that("valid mutate()/transmute() calls stay on the GPU", {
   p30_both(df, function(d) transmute(d, m1 = a + 1L, b))
   p30_both(df, function(d) mutate(d, across(c(a, b), ~ .x * 2)))
 })
+
+# =============================================================================
+# Added after review: shapes round 1 got wrong
+# =============================================================================
+
+test_that("a grouped table with no rows has no group bullet, also with empty groups", {
+  skip_if_no_gpu()
+  df0 <- tibble::tibble(f = factor(character(), levels = c("x", "y")), a = integer())
+  p30_same_error(df0, function(d) d |> group_by(f, .drop = FALSE) |> mutate(m = no_such_col))
+  df <- tibble::tibble(g = c(1, 2), a = 1:2)
+  p30_same_error(df, function(d) {
+    d |> group_by(g) |> filter(a > 5L, .preserve = TRUE) |> mutate(m = no_such_col)
+  })
+})
+
+test_that("a staged across() names the column, not a temporary", {
+  skip_if_no_gpu()
+  df <- p30_df()
+  p30_same_error(df, function(d) mutate(d, across(c(a, b), ~ .x + a + no_such_col)))
+})
+
+test_that("if_any()/if_all() errors are evaluated per group, as in dplyr", {
+  skip_if_no_gpu()
+  df <- p30_df()
+  p30_same_error(df, function(d) d |> group_by(g) |> mutate(m = dplyr::if_any(no_such_col, is.na)))
+  p30_same_error(df, function(d) mutate(d, m = dplyr::if_all(no_such_col, is.na), .by = s))
+  p30_same_error(df, function(d) d |> group_by(g) |> mutate(across(no_such_col, mean, na.rm = TRUE)))
+})
+
+test_that("an if_any() evaluation error has dplyr's class chain", {
+  skip_if_no_gpu()
+  df <- p30_df()
+  # (the innermost call text of dplyr's chain is not compared)
+  p30_same_error(df, function(d) mutate(d, m = dplyr::if_any(c(a, b), ~ .x > no_such_col)),
+                 message = FALSE)
+})
+
+test_that("&& / || in mutate() behave as in dplyr", {
+  skip_if_no_gpu()
+  df <- p30_df()
+  p30_same_error(df, function(d) mutate(d, m = a > 1L && b > 0))
+  p30_same_error(df, function(d) transmute(d, m = a > 1L || b > 0))
+  one <- tibble::tibble(a = 2L, b = 1)
+  p30_both(one, function(d) mutate(d, m = a > 1L && b > 0))
+})
