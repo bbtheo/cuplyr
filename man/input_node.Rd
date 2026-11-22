@@ -18,7 +18,9 @@ An \code{ast_node} to use as the \code{input} of a new node
 \item lazy + no pending ops: returns a fresh \code{ast_source(.data$schema)},
 matching the historical lazy-verb convention (e.g. the now-deleted
 \code{filter_lazy()}, \code{select_lazy()}) of leaving the source pointer unset; \code{compute()}/
-\code{collect()} supply \code{.data$ptr} as the lowering fallback \code{source_ptr}.
+\code{collect()} supply \code{.data$ptr} as the lowering fallback \code{source_ptr}. A table
+that is the result of a CPU step (\code{.data$origin}, #10) hands its history to
+the source, for \code{explain()}.
 \item eager: returns a fresh \code{ast_source(.data$schema, source_ptr = .data$ptr)}
 so \code{push_op()} can call \code{lower_and_execute()} immediately without a
 separate source table.

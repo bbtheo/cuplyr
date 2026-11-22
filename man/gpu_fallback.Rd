@@ -76,4 +76,8 @@ of its rowwise vars, F49), applies \code{expr_fn} (which should call the
 real dplyr verb), and re-uploads the result via \code{\link[=tbl_gpu]{tbl_gpu()}} (a \code{rowwise_df}
 result goes back up as a rowwise table).
 }
+\details{
+The lazy result of a lazy \code{.data} carries the step's history as its \code{origin}
+field (\code{fallback_record_origin()}), which \code{explain()} and \code{show_query()} print.
+}
 \keyword{internal}

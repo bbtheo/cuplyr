@@ -98,13 +98,15 @@
 #   matching dplyr's count()/group_by(), which don't warn for an unnamed
 #   computed grouping expression)
 # @param call The verb's frame, which a missing-column error reports
+# @param notice_verb The verb a CPU fallback of the key mutate() reports as
 # @return `list(data = <tbl_gpu, with any needed mutate step applied>,
 #   names = <character vector of resolved column names, in dot order>)`, or
 #   `NULL` when a dot is not in the expression IR (a user function, a
 #   column-free call that needs the data mask, ...): the caller then re-runs
 #   the whole call through dplyr (`gpu_fallback()`)
 # @keywords internal
-resolve_grouping_dots <- function(.data, dots, call = rlang::caller_env()) {
+resolve_grouping_dots <- function(.data, dots, call = rlang::caller_env(),
+                                  notice_verb = "count") {
   # dplyr's branch is decided over every dot, a NULL (not a variable
   # reference) included
   needs_mutate <- dots_need_mutate(dots)
@@ -125,6 +127,8 @@ resolve_grouping_dots <- function(.data, dots, call = rlang::caller_env()) {
   dots <- name_dots_silently(dots)
   expressions <- list()
   names_out <- character(length(dots))
+  computed <- logical(length(dots))
+  any_window <- FALSE
 
   for (i in seq_along(dots)) {
     new_name <- names(dots)[i]
@@ -150,17 +154,78 @@ resolve_grouping_dots <- function(.data, dots, call = rlang::caller_env()) {
       step <- make_mutate_expr(new_name, ir, schema)
       expressions <- c(expressions, list(step))
       schema <- update_schema_for_expr(schema, step)
+      computed[i] <- TRUE
+      any_window <- any_window || ir_has_window(ir)
     }
 
     names_out[i] <- new_name
   }
 
   result <- .data
-  if (length(expressions) > 0) {
+  if (any_window) {
+    # As distinct(): a window or aggregate key is computed by mutate() over
+    # the whole table, grouped or not (#29)
+    result <- mutate_keys_ungrouped(.data, dots[computed], notice_verb)
+    if (is.null(result)) {
+      fallback_dot_failed(NA_integer_, "the computed grouping columns could not be built on the GPU.")
+      return(NULL)
+    }
+  } else if (length(expressions) > 0) {
     result <- push_op(.data, ast_mutate(input_node(.data), expressions))
   }
+  result <- regroup_for_keys(result, names_out)
 
   list(data = result, names = unique(names_out))
+}
+
+# Compute the computed grouping keys `comp_dots` (a named list of quosures) of
+# count()/add_count()/distinct() with mutate()'s own window planning, on the
+# table with its grouping removed (dplyr's add_computed_columns() evaluates
+# them on ungroup(.data), #5598), then give the table back its grouping:
+# mutate() keeps every row, so groups and `.drop` stay valid; the fixed keys
+# stay too and are the caller's to drop (regroup_for_keys()).
+# Same pattern as group_by()'s computed dots. A CPU fallback of the inner
+# mutate() reports as `verb`.
+#
+# @return The table with the key columns, or `NULL` when mutate() did not
+#   return a tbl_gpu (the caller falls back whole)
+# @keywords internal
+mutate_keys_ungrouped <- function(.data, comp_dots, verb) {
+  prev_as <- fallback_notice_as(verb, paste(vapply(comp_dots, notice_expr_text, character(1)),
+                                            collapse = ", "))
+  on.exit(fallback_notice_restore(prev_as), add = TRUE)
+  out <- dplyr::mutate(dplyr::ungroup(.data), !!!comp_dots)
+  if (!is_tbl_gpu(out)) {
+    return(NULL)
+  }
+  if (length(.subset2(.data, "groups")) == 0L) {
+    return(out)
+  }
+  copy_frame_meta(new_tbl_gpu(
+    ptr = .subset2(out, "ptr"),
+    schema = .subset2(out, "schema"),
+    lazy_ops = .subset2(out, "lazy_ops"),
+    groups = .subset2(.data, "groups"),
+    group_drop = .subset2(.data, "group_drop") %||% TRUE,
+    exec_mode = .subset2(out, "exec_mode"),
+    nrow = out[["nrow"]],
+    fixed_keys = .subset2(.data, "fixed_keys"),
+    unspecified = out[["unspecified"]]
+  ), .data, bare = FALSE)
+}
+
+# dplyr's add_computed_columns() runs dplyr_col_modify() over every dot of the
+# mutate branch, which regroups the table when any dot is named like a group
+# column (a bare `g` next to a computed key included). With `.drop = FALSE`
+# the regroup keeps a factor's unused levels and loses the empty groups an
+# earlier filter()/slice() kept, i.e. the fixed keys.
+# @keywords internal
+regroup_for_keys <- function(.data, dot_names) {
+  if (any(dot_names %in% .subset2(.data, "groups")) && !is.null(.subset2(.data, "fixed_keys"))) {
+    drop_fixed_keys(.data)
+  } else {
+    .data
+  }
 }
 
 # Pick the aggregation's output column name: the user's explicit `name=` if
@@ -490,7 +555,7 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
   # (F88: the reasons the grouping parses record for a CPU fallback, call-scoped)
   prev <- fallback_reasons_open()
   on.exit(fallback_reasons_close(prev), add = TRUE)
-  resolved <- if (is.null(shadowed)) resolve_grouping_dots(x, dots)
+  resolved <- if (is.null(shadowed)) resolve_grouping_dots(x, dots, notice_verb = "add_count")
   if (is.null(resolved)) {
     return(gpu_fallback("add_count", x, function(tbl) {
       dplyr::add_count(tbl, !!!dots, wt = !!wt_quo, sort = sort, name = name)

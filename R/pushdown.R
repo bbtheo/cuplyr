@@ -158,7 +158,8 @@ scan_int_min <- function(type) if (identical(type, "INT32")) -2147483648 else -9
 
 # The atoms (and their text) a conjunct stands for, or NULL when it can't be
 # pushed. An atom is list(col, op, type, value); the record is
-# list(text, atoms).
+# list(text, code, atoms): `text` is the reader's note (parquet_last_read()),
+# `code` the conjunct as R code (explain(), show_query()).
 #
 # Atoms, with the reasons they are exact:
 # - `col <cmp> lit` (or the literal first, flipped): a null column value gives a
@@ -214,7 +215,8 @@ scan_atom <- function(ir, scan, schema) {
     if (type %in% c("INT32", "INT64") && op %in% c("<", "<=", "!=")) {
       atoms <- c(atoms, list(int_min(col, type)))
     }
-    return(list(text = paste(col, op, scan_value_text(b)), atoms = atoms))
+    return(list(text = paste(col, op, scan_value_text(b)),
+                code = paste(plan_names(col), op, plan_ir_text(b)), atoms = atoms))
   }
 
   # !is.na(col) on an integer column
@@ -225,7 +227,8 @@ scan_atom <- function(ir, scan, schema) {
       col <- .subset2(.subset2(inner, "args")[[1L]], "name")
       type <- col_ok(col)
       if (isTRUE(type %in% c("INT32", "INT64"))) {
-        return(list(text = paste0("!is.na(", col, ")"), atoms = list(int_min(col, type))))
+        return(list(text = paste0("!is.na(", col, ")"), code = paste0("!is.na(", plan_names(col), ")"),
+                    atoms = list(int_min(col, type))))
       }
     }
   }
