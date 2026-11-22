@@ -32,9 +32,10 @@ The following checks are performed:
 the driver version, read with \code{nvidia-smi --query-gpu=driver_version}
 and, failing that, from the \verb{Driver Version:} or \verb{KMD Version:} header
 \item \strong{CUDA Toolkit}: Looks for \code{nvcc} in \code{CUDA_HOME}, \code{CONDA_PREFIX},
-the pixi environment (\code{PIXI_PROJECT_ROOT}, or \code{.pixi} in the working
-directory), the system CUDA directories and \code{PATH}. Validates
-CUDA >= 12.2 and reports the CUDA version
+the environment of the libcudf that cuplyr has loaded, the pixi
+environment (\code{PIXI_PROJECT_ROOT}, or \code{.pixi} in the working
+directory), the system CUDA directories and \code{PATH}, in that order.
+Validates CUDA >= 12.2 and reports the CUDA version
 \item \strong{libcudf}: Reports the libcudf that cuplyr has loaded, if any.
 Otherwise looks for cudf headers and \code{libcudf.so} under \code{CUDF_HOME},
 \code{CONDA_PREFIX}, the pixi environment (\code{PIXI_PROJECT_ROOT}, or \code{.pixi}

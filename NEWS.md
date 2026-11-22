@@ -1,10 +1,10 @@
 # cuplyr (development version)
 
-* `check_deps()` reports a working pixi install as OK outside `pixi run`:
-  it reports the libcudf cuplyr has loaded, and looks for libcudf and `nvcc`
-  in the pixi environment as well as `CUDF_HOME`, `CONDA_PREFIX` and the
-  system paths. It names a `CUDF_HOME` or `CONDA_PREFIX` that points to a
-  missing directory, and it reads the driver version on newer `nvidia-smi`
+* `check_deps()` passes on a working pixi install outside `pixi run`. The
+  libcudf check reports the libcudf that cuplyr has loaded, and `nvcc` is also
+  looked for in that library's environment and in the pixi environment. A
+  `CUDF_HOME` or `CONDA_PREFIX` that points to a missing directory is named
+  in the message, and the driver version is read on newer `nvidia-smi`
   versions, which print `KMD Version:` instead of `Driver Version:` (#49).
 
 * `distinct()`, `count()` and `add_count()` accept window functions and

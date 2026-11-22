@@ -22,9 +22,10 @@
 #'     the driver version, read with `nvidia-smi --query-gpu=driver_version`
 #'     and, failing that, from the `Driver Version:` or `KMD Version:` header
 #'   \item **CUDA Toolkit**: Looks for `nvcc` in `CUDA_HOME`, `CONDA_PREFIX`,
-#'     the pixi environment (`PIXI_PROJECT_ROOT`, or `.pixi` in the working
-#'     directory), the system CUDA directories and `PATH`. Validates
-#'     CUDA >= 12.2 and reports the CUDA version
+#'     the environment of the libcudf that cuplyr has loaded, the pixi
+#'     environment (`PIXI_PROJECT_ROOT`, or `.pixi` in the working
+#'     directory), the system CUDA directories and `PATH`, in that order.
+#'     Validates CUDA >= 12.2 and reports the CUDA version
 #'   \item **libcudf**: Reports the libcudf that cuplyr has loaded, if any.
 #'     Otherwise looks for cudf headers and `libcudf.so` under `CUDF_HOME`,
 #'     `CONDA_PREFIX`, the pixi environment (`PIXI_PROJECT_ROOT`, or `.pixi`
@@ -99,7 +100,7 @@ check_deps <- function(format = c("text", "json"), verbose = FALSE) {
 run_nvidia_smi <- function(args = character()) {
   out <- tryCatch(
     suppressWarnings(system2("nvidia-smi", args, stdout = TRUE, stderr = TRUE,
-                             timeout = 10)),
+                             timeout = 30)),
     error = function(e) NULL
   )
   if (is.null(out) || !is.null(attr(out, "status"))) {
@@ -183,11 +184,14 @@ is_cuda_version_supported <- function(version, required = "12.2") {
 check_cuda_toolkit <- function() {
   required <- "12.2"
 
-  # Same order as configure: an explicit CUDA_HOME, the conda/pixi
-  # environment, the system toolkit paths, then PATH.
+  # An explicit CUDA_HOME, the active conda/pixi environment, the environment
+  # whose libcudf cuplyr has loaded (a pixi install used outside `pixi run`),
+  # the guessed pixi environments, the system toolkit paths, then PATH.
+  lib <- loaded_libcudf_path()
   homes <- c(
     Sys.getenv("CUDA_HOME", ""),
     Sys.getenv("CONDA_PREFIX", ""),
+    if (!is.na(lib)) dirname(dirname(lib)),
     pixi_env_prefixes(),
     "/usr/local/cuda", "/opt/cuda", "/usr/lib/cuda"
   )
