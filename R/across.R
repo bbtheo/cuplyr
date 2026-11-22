@@ -628,16 +628,20 @@ resolve_across_cols <- function(cols_expr, env, schema, group_cols, error_call =
   }
   all_rows <- rep(TRUE, length(eligible))
 
-  sel <- tryCatch(
-    select_on(all_rows),
-    error = function(e) {
-      # The selection may only be broken by a column an earlier dot removed:
-      # dplyr raises its own error for that, on the real data.
-      if (!is.null(schema$base_names) && !all(schema$base_names %in% schema$names)) {
-        return(NULL)
+  # (decided in a calling handler: any other error goes on as it was signalled,
+  # through rlang, rather than re-raised with base stop())
+  sel <- withRestarts(
+    withCallingHandlers(
+      select_on(all_rows),
+      error = function(e) {
+        # The selection may only be broken by a column an earlier dot removed:
+        # dplyr raises its own error for that, on the real data.
+        if (!is.null(schema$base_names) && !all(schema$base_names %in% schema$names)) {
+          invokeRestart("cuplyr_across_select_on_data")
+        }
       }
-      stop(e)
-    }
+    ),
+    cuplyr_across_select_on_data = function() NULL
   )
   if (is.null(sel)) {
     return(NULL)
