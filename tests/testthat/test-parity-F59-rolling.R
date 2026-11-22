@@ -615,6 +615,10 @@ test_that("F59: narrow windows are no slower than dev, and wide windows cost abo
     if (!is.null(cell$na)) df$x[sample.int(cell$n, cell$n * cell$na)] <- NA
     src <- tbl_gpu(df)
     if (!is.null(cell$groups)) src <- dplyr::group_by(src, g)
+    # timing_medians() runs a full gc() before every batch (about a thousand
+    # per cell); with the 1e7-row frame still alive each one is slow, so drop it.
+    rm(df)
+    gc()
     for (stat in c("mean", "sum", "min", "max", "sd")) {
       for (na_rm in c(FALSE, TRUE)) {
         sd_cap <- if (!is.null(cell$na) && na_rm) 6.5 else 5
@@ -645,7 +649,7 @@ test_that("F59: narrow windows are no slower than dev, and wide windows cost abo
         # timing_retry()); a real excess reads the same every time.
         runs <- timing_retry(
           function() {
-            timing_medians(fns, samples = 5L, target = 0.01, warmup = 2L,
+            timing_medians(fns, samples = 5L, target = 0.01, warmup = 1L,
                            label = sprintf("F59 %s %s na.rm=%s", cell$label, stat, na_rm))
           },
           ok = function(t) all(t[-1] <= limit(t[["cumsum"]])),
@@ -665,7 +669,7 @@ test_that("F59: narrow windows are no slower than dev, and wide windows cost abo
         }
       }
     }
-    rm(src, df)
+    rm(src)
     gc()
   }
 })

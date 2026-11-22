@@ -109,11 +109,17 @@ test_that("F59: roll_median() at 1e6 rows takes well under a second; the sorted 
   # Timing: the median of 5 calls after 1 warmup, each call timed whole
   # (0.2-0.8 s). This is CPU work, so no GPU fence. A reading within 1.25x of
   # a bound is re-measured (up to 3 times); the last reading is asserted.
+  # frollmedian is data.table's multi-threaded code (measured 2026-11-22 at
+  # 1e6 rows, w = 1001): 0.40 s with 24 free threads, 6.9-7.0 s on 1 thread;
+  # under 12 busy CPU loops 0.73-0.94 s (24 threads), 9.9-11.1 s (1 thread).
+  # A 1 s bound tested that the threads were free, not that cuplyr avoids an R
+  # loop (9.5-32 s). 2 s stays 3.5x clear of single-threaded data.table and of
+  # the R loop, and passes on a loaded machine.
   fns <- list(sorted = function() sorted(x, 1001, TRUE))
   bounds <- c(sorted = 5)
   if (has_dt) {
     fns <- c(list(frollmedian = function() roll_median(x, 1001, na.rm = TRUE)), fns)
-    bounds <- c(frollmedian = 1, bounds)
+    bounds <- c(frollmedian = 2, bounds)
   }
   runs <- timing_retry(
     function() timing_medians(fns, samples = 5L, warmup = 1L, sync = FALSE,
