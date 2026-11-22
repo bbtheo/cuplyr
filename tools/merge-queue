@@ -5,8 +5,7 @@
 #   tools/merge-queue <name>              # branch feat/<name>, its open PR
 #   tools/merge-queue --no-merge <name>   # gate and report on the PR; don't merge
 #
-# Needs an open pull request from feat/<name> to main (not a draft, unless
-# --no-merge), and in
+# Needs an open, non-draft pull request from feat/<name> to main, and in
 # scratchpad/parity/features/:
 #   <name>.commit.txt   commit message (conventional-commit subject + body)
 #   <name>.protected    line 1: SHA of the PM's acceptance-test commit;
