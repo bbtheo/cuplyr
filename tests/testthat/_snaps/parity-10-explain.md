@@ -6,11 +6,11 @@
       <cuplyr plan: optimized>
       CPU fallback: mutate() for pnorm(gain / 10)
         reason: `pnorm()` has no GPU implementation.
-        columns: 2 of 4 (carrier, z)
+        columns read: 2 of 4 (carrier, z)
         input (computed at the mutate() call):
           parquet scan: flights.parquet
-            columns: 5 of 41 (carrier, distance, air_time, dep_delay, arr_delay)
-            reader filter: distance > 1000
+            columns read: 5 of 41 (carrier, distance, air_time, dep_delay, arr_delay)
+            reader filter: distance > 1000L
           mutate(gain = dep_delay - arr_delay, speed = distance / air_time * 60)
           filter(speed > 400, gain > 0)
           select(carrier, speed, gain)
@@ -25,10 +25,10 @@
       <cuplyr plan: as written>
       CPU fallback: mutate() for pnorm(gain / 10)
         reason: `pnorm()` has no GPU implementation.
-        columns: all 4
+        columns read: all 4
         input (computed at the mutate() call):
           parquet scan: flights.parquet
-            columns: all 41
+            columns read: all 41
           filter(distance > 1000L)
           mutate(gain = dep_delay - arr_delay)
           mutate(speed = distance / air_time * 60)
@@ -45,11 +45,11 @@
       <cuplyr plan: optimized>
       CPU fallback: mutate() for pnorm(gain / 10)
         reason: `pnorm()` has no GPU implementation.
-        columns: 2 of 4 (carrier, z)
+        columns read: 2 of 4 (carrier, z)
         input (computed at the mutate() call):
           parquet scan: flights.parquet
-            columns: 5 of 41 (carrier, distance, air_time, dep_delay, arr_delay)
-            reader filter: distance > 1000
+            columns read: 5 of 41 (carrier, distance, air_time, dep_delay, arr_delay)
+            reader filter: distance > 1000L
           mutate(gain = dep_delay - arr_delay, speed = distance / air_time * 60)
           filter(speed > 400, gain > 0)
           select(carrier, speed, gain)
@@ -64,10 +64,10 @@
       <cuplyr plan: as written>
       CPU fallback: mutate() for pnorm(gain / 10)
         reason: `pnorm()` has no GPU implementation.
-        columns: all 4
+        columns read: all 4
         input (computed at the mutate() call):
           parquet scan: flights.parquet
-            columns: all 41
+            columns read: all 41
           filter(distance > 1000L)
           mutate(gain = dep_delay - arr_delay)
           mutate(speed = distance / air_time * 60)
@@ -83,8 +83,8 @@
     Output
       <cuplyr plan: optimized>
       parquet scan: flights.parquet
-        columns: 5 of 41 (carrier, distance, air_time, dep_delay, arr_delay)
-        reader filter: distance > 1000
+        columns read: 5 of 41 (carrier, distance, air_time, dep_delay, arr_delay)
+        reader filter: distance > 1000L
       mutate(gain = dep_delay - arr_delay, speed = distance / air_time * 60)
       filter(speed > 400, gain > 0)
       select(carrier, speed, gain)
@@ -93,7 +93,7 @@
     Output
       <cuplyr plan: as written>
       parquet scan: flights.parquet
-        columns: all 41
+        columns read: all 41
       filter(distance > 1000L)
       mutate(gain = dep_delay - arr_delay)
       mutate(speed = distance / air_time * 60)
@@ -107,7 +107,7 @@
     Output
       <cuplyr plan: as written>
       table on the GPU
-        columns: all 4
+        columns read: all 4
       filter(!is.na(x), x %in% c(1, 3) | y == "q")
       mutate(r = if_else(x > 1, 10, 20), l = log(x) + 1, k = -i)
       arrange(desc(x), y)
@@ -121,7 +121,7 @@
     Output
       <cuplyr plan: as written>
       table on the GPU
-        columns: all 4
+        columns read: all 4
       mutate(
         first_long_name = x * 2 + 1,
         second_long_name = log(x) - 3,
@@ -135,11 +135,11 @@
     Output
       <cuplyr plan: as written>
       table on the GPU
-        columns: all 2
+        columns read: all 2
       left_join(y, by = join_by(k))
         y:
           table on the GPU
-            columns: all 2
+            columns read: all 2
           filter(b != "q")
       filter(a > 1)
 
@@ -151,10 +151,10 @@
       <cuplyr plan: optimized>
       CPU fallback: mutate() for pnorm(x)
         reason: `pnorm()` has no GPU implementation.
-        columns: all 5
+        columns read: all 5
         input (computed at the mutate() call):
           table on the GPU
-            columns: all 4
+            columns read: all 4
 
 # CPU steps nest: the input of a CPU step can hold an earlier one
 
@@ -164,14 +164,14 @@
       <cuplyr plan: optimized>
       CPU fallback: mutate() for qnorm(z)
         reason: `qnorm()` has no GPU implementation.
-        columns: all 6
+        columns read: all 6
         input (computed at the mutate() call):
           CPU fallback: mutate() for pnorm(x)
             reason: `pnorm()` has no GPU implementation.
-            columns: all 5
+            columns read: all 5
             input (computed at the mutate() call):
               table on the GPU
-                columns: all 4
+                columns read: all 4
           filter(z > 0)
 
 # an eager table and a lazy table with nothing pending
@@ -186,11 +186,11 @@
     Output
       <cuplyr plan: optimized>
       table on the GPU
-        columns: all 4
+        columns read: all 4
     Code
       show_query(tbl_gpu(df, lazy = TRUE), optimized = FALSE)
     Output
       <cuplyr plan: as written>
       table on the GPU
-        columns: all 4
+        columns read: all 4
 

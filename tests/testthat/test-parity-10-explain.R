@@ -235,6 +235,30 @@ test_that("join conditions and arguments print as in dplyr", {
                    "left_join(y, by = join_by(k, closest(a >= b)))")
   expect_plan_line(inner_join(x, y, by = "k", relationship = "many-to-many", suffix = c("_l", "_r")),
                    "inner_join(y, by = join_by(k), suffix = c(\"_l\", \"_r\"), relationship = \"many-to-many\")")
+  # arguments that change the result are printed for every join type
+  expect_plan_line(semi_join(x, y, by = "k", na_matches = "never"),
+                   "semi_join(y, by = join_by(k), na_matches = \"never\")")
+  expect_plan_line(anti_join(x, y, by = "k", na_matches = "never"),
+                   "anti_join(y, by = join_by(k), na_matches = \"never\")")
+  expect_plan_line(cross_join(x, y, suffix = c("_l", "_r")), "cross_join(y, suffix = c(\"_l\", \"_r\"))")
+})
+
+test_that("string functions print as the R call, with R's argument order", {
+  skip_if_no_gpu()
+  lz <- tbl_gpu(tibble::tibble(s = c("Apple", "banana", "Avocado"), t = c("x1", "y2", "x3")), lazy = TRUE)
+  expect_plan_line(filter(lz, grepl("^A", s)), "filter(grepl(\"^A\", s))")
+  expect_plan_line(filter(lz, grepl("a", s, fixed = TRUE)), "filter(grepl(\"a\", s, fixed = TRUE))")
+  expect_plan_line(filter(lz, startsWith(t, "x")), "filter(startsWith(t, \"x\"))")
+  expect_plan_line(filter(lz, endsWith(t, "2")), "filter(endsWith(t, \"2\"))")
+  expect_plan_line(mutate(lz, a = substr(s, 2, 4)), "mutate(a = substr(s, 2L, 4L))")
+  expect_plan_line(mutate(lz, b = gsub("a", "o", s, fixed = TRUE)), "mutate(b = gsub(\"a\", \"o\", s, fixed = TRUE))")
+  expect_plan_line(mutate(lz, b = sub("^A", "a", s)), "mutate(b = sub(\"^A\", \"a\", s))")
+  expect_plan_line(mutate(lz, c = paste0(s, "_", t)), "mutate(c = paste0(s, \"_\", t))")
+  expect_plan_line(mutate(lz, d = paste(s, t, sep = "-")), "mutate(d = paste(s, t, sep = \"-\"))")
+  expect_plan_line(mutate(lz, d = paste(s, t)), "mutate(d = paste(s, t))")
+  # no internal op name ever reaches the text
+  out <- paste(f10_lines(mutate(lz, a = substr(s, 2, 4), c = paste0(s, t), u = toupper(s))), collapse = "\n")
+  expect_false(grepl("paste_cols|starts_with|ends_with|cast_|factor_codes|recode_lookup|rw_agg", out))
 })
 
 # --- CPU steps ---------------------------------------------------------------
@@ -293,13 +317,58 @@ test_that("the CPU history holds text only, no GPU table or R environment", {
   expect_true("inner_join(y, by = join_by(k))" %in% out)
 })
 
+test_that("verbs that only change the grouping keep the CPU step", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "silent")
+  df <- tibble::tibble(g = c("a", "b", "a"), x = c(1, 2, 3), i = 1:3)
+  q <- tbl_gpu(df, lazy = TRUE) |> filter(x > 1) |> mutate(z = pnorm(x))
+  plans <- list(
+    group_by = group_by(q, g),
+    group_by_summarise = q |> group_by(g) |> summarise(m = mean(z)),
+    ungroup = q |> group_by(g) |> ungroup() |> filter(z > 0),
+    count = count(q, g),
+    add_count = add_count(q, g),
+    rowwise = rowwise(q)
+  )
+  for (nm in names(plans)) {
+    out <- trimws(f10_lines(plans[[nm]], optimized = TRUE))
+    expect_true("CPU fallback: mutate() for pnorm(x)" %in% out, info = nm)
+    expect_true("filter(x > 1)" %in% out, info = nm)
+  }
+
+  dir <- withr::local_tempdir()
+  path <- file.path(dir, "small.parquet")
+  write_parquet_gpu(tbl_gpu(df, lazy = FALSE), path)
+  pq <- read_parquet_gpu(path, lazy = TRUE) |>
+    filter(i > 1L) |>
+    mutate(z = pnorm(x)) |>
+    group_by(g) |>
+    summarise(m = mean(z))
+  out <- trimws(f10_lines(pq, optimized = TRUE))
+  expect_true("CPU fallback: mutate() for pnorm(x)" %in% out)
+  expect_true("parquet scan: small.parquet" %in% out)
+  expect_true("reader filter: i > 1L" %in% out)
+  expect_identical(utils::tail(out, 2), c("group_by(g)", "summarise(m = mean(z))"))
+})
+
+test_that("the reader filter is R code", {
+  skip_if_no_gpu()
+  dir <- withr::local_tempdir()
+  path <- file.path(dir, "dates.parquet")
+  df <- tibble::tibble(d = as.Date(c("2024-01-01", "2024-03-01", "2024-05-01")), i = 1:3)
+  write_parquet_gpu(tbl_gpu(df, lazy = FALSE), path)
+  q <- read_parquet_gpu(path, lazy = TRUE) |> filter(d > as.Date("2024-02-01"), i < 5L)
+  expect_plan_line(q, "filter(d > as.Date(\"2024-02-01\"), i < 5L)", optimized = FALSE)
+  expect_plan_line(q, "reader filter: d > as.Date(\"2024-02-01\"), i < 5L", optimized = TRUE)
+})
+
 test_that("compute() drops the history", {
   skip_if_no_gpu()
   withr::local_options(cuplyr.fallback = "silent")
   q <- tbl_gpu(f10_df(), lazy = TRUE) |> mutate(z = pnorm(x)) |> filter(z > 0)
   out <- f10_lines(compute(q), optimized = TRUE)
   expect_false(any(grepl("CPU fallback", out, fixed = TRUE)))
-  expect_identical(trimws(out[-1]), c("table on the GPU", "columns: all 5"))
+  expect_identical(trimws(out[-1]), c("table on the GPU", "columns read: all 5"))
 })
 
 # --- tables with nothing pending, arguments ----------------------------------
