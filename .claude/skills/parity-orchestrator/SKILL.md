@@ -67,8 +67,8 @@ Statuses and who sets them:
 |---|---|---|
 | Proposed | an idea or report, open for discussion | you (`tools/board add`), or GitHub when anyone opens an issue |
 | Approved | agreed and ready to pick up | **a maintainer only**. Never move an item to Approved yourself. |
-| In progress | a PM (or a contributor) is working on it | you, at dispatch |
-| In review | a pull request is open and waiting for the gate | you, on READY_TO_MERGE |
+| In progress | a PM (or a contributor) is working on it; its pull request, if any, is a draft | you, at dispatch |
+| In review | the pull request is marked ready and waiting for the gate | you, on READY_TO_MERGE |
 | Done | merged | GitHub when the pull request closes the issue; set it yourself if it didn't |
 | Not planned | decided against, reasons in the issue | a maintainer |
 
@@ -82,8 +82,14 @@ Statuses and who sets them:
 - **Issues opened by other people** reach the board as Proposed. They wait
   there until a maintainer approves them like any other item. Don't reply on
   them; list new ones in `P/log.md` and in the next notification.
-- A contributor's pull request for an issue (or an In progress item that
-  isn't in `P/state.md`) means someone else is on it: don't dispatch it.
+- A contributor's pull request for an issue, draft or not (or an In
+  progress item that isn't in `P/state.md`), means someone else is on it:
+  don't dispatch it.
+- **Pull requests start as drafts.** A PM opens a draft as soon as its
+  acceptance tests are committed, pushes after each round and comments on
+  where it stands, and marks it ready at READY_TO_MERGE. Linking a pull
+  request doesn't move the issue on the board (that automation is off);
+  you move it to In review when the PM reports READY_TO_MERGE.
 
 ## GitHub
 
@@ -112,7 +118,8 @@ Statuses and who sets them:
 - **Public text.** Everything you write to GitHub is public and permanent:
   no secrets, local paths or agent ids. Say what the feature does and what
   is being asked.
-- **Never** `gh pr merge`, close or reopen pull requests and issues by hand,
+- **Never** `gh pr merge`, close or reopen pull requests and issues by hand
+  (one exception: a failed attempt's draft, see "Collect finished PMs"),
   edit other people's comments, reorder the board, or push anything. A
   merged pull request closes its issue through `Fixes #n`.
 
@@ -175,12 +182,17 @@ For each final report:
     the original brief, then `## Previous attempt (failed)` with the PM's
     APPROACH, UNRESOLVED, DIAGNOSIS and SUGGESTION, your own read of the
     review files, and an explicit **Do not repeat** line naming the failed
-    method. Set the run to `REDISPATCH`; the issue stays In progress.
+    method. Set the run to `REDISPATCH`; the issue stays In progress. Close
+    attempt 1's draft pull request with a comment that the work continues
+    with a different approach in a new pull request
+    (`gh pr close <n> --comment "..."`); the attempt-2 PM opens its own.
   - attempt 2: remove the run from `P/state.md` (summary of both attempts
     in `P/log.md`), remove both attempts' worktrees (`git worktree remove`;
     keep the branches), and push-notify Theo. On GitHub: label the issue
     `tbd`, comment what was tried and what is still open (self-contained, no
-    internal ids), and move it back to Approved so it shows as free.
+    internal ids), close attempt 2's draft pull request with a comment
+    pointing to that issue comment, and move the issue back to Approved so
+    it shows as free.
 - `STATUS: PERF_DECISION` -> set the run to `WAITING`, label the issue `tbd`
   with a comment giving the benchmarks and ratios, and push-notify Theo.
   Theo either accepts the slowdown (he raises the entries with
@@ -209,7 +221,7 @@ squash-merges the pull request and fast-forwards the local `main`. On exit:
 | 6 | merged, perf ratchet failed | Main is merged and the perf baseline is unchanged. Treat the feature as merged (as in exit 0), read the error in the merge output, and push-notify Theo. Don't re-run the merge. |
 | 7 | gate passed, GitHub refused the merge | Main is unchanged. Read the error (a ruleset, a conflict that appeared on GitHub, the head moved). If the head moved or there is a conflict, treat it as exit 3. Otherwise push-notify Theo. Don't retry in a loop. |
 | 8 | merged, tree differs from the gated candidate | The pull request is merged, but `main` got something the gate didn't test (another merge landed in between, or the local `main` couldn't fast-forward). Treat the feature as merged (as in exit 0), don't ratchet anything by hand, and push-notify Theo with both SHAs. |
-| 2, 5 | setup / empty | Investigate yourself; fix `P/state.md` or the feature files; don't bother the PM unless it's theirs. `no open pull request` means the PM skipped its last step: SendMessage it. |
+| 2, 5 | setup / empty | Investigate yourself; fix `P/state.md` or the feature files; don't bother the PM unless it's theirs. `no open pull request` or `is a draft` means the PM skipped its last step (open the pull request, or `gh pr ready`): SendMessage it. |
 
 If SendMessage fails (the PM is gone), dispatch a new PM for the same
 `NAME` with `RESUME: <worktree path>` and the gate or conflict details.

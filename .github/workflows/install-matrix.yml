@@ -2,6 +2,7 @@ name: Install Matrix
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches:
       - main
@@ -24,6 +25,8 @@ permissions:
 jobs:
   install:
     name: "${{ matrix.method }}"
+    # Drafts are work in progress: run when the pull request is marked ready.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
