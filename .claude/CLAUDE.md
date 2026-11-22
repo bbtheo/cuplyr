@@ -136,10 +136,13 @@ How one feature moves:
    contributors. New issues start as Proposed; an item is agreed when a
    maintainer moves it to Approved. The board order is the priority order.
    Open questions carry the `tbd` label and a comment stating the question.
-2. **Branch.** The PM works in a worktree on `feat/<name>`, cut from
-   `origin/main`.
-3. **Pull request.** When the reviewer approves, the PM merges `origin/main`
-   into the branch, pushes it and opens a pull request with `Fixes #n`.
+2. **Branch and draft.** The PM works in a worktree on `feat/<name>`, cut
+   from `origin/main`. Once the acceptance tests are committed, it pushes
+   the branch and opens a draft pull request with `Fixes #n`; after each
+   round it pushes again and comments on where the work stands.
+3. **Ready for review.** When the reviewer approves, the PM merges
+   `origin/main` into the branch, pushes it, completes the description and
+   marks the pull request ready. `tools/merge-queue` refuses drafts.
 4. **Gate and merge.** The orchestrator moves the issue to In review and
    runs `tools/merge-queue <name>`. The gate result is posted on the pull
    request; on a pass the pull request is squash-merged, which closes the
