@@ -346,6 +346,21 @@ test_that("check_libcudf() says nothing about CUDF_HOME when it exists", {
   expect_no_match(res$message, "does not exist", fixed = TRUE)
 })
 
+test_that("check_libcudf() reports the loaded libcudf over a valid CUDF_HOME", {
+  local_no_cudf_env()
+  home <- make_cudf_prefix(withr::local_tempdir())
+  withr::local_envvar(CUDF_HOME = home)
+  loaded <- withr::local_tempdir()
+  testthat::local_mocked_bindings(
+    loaded_libcudf_path = function(...) file.path(loaded, "lib", "libcudf.so")
+  )
+
+  res <- check_libcudf()
+  expect_true(res$ok)
+  expect_true(same_path(res$value, loaded))
+  expect_no_match(res$message, "does not exist", fixed = TRUE)
+})
+
 test_that("check_libcudf(search_paths =) searches only the given paths", {
   local_no_cudf_env()
   testthat::local_mocked_bindings(
@@ -395,6 +410,7 @@ test_that("check_cuda_toolkit() finds nvcc in a pixi env in the working director
   skip_on_os("windows")
   local_no_cudf_env()
   withr::local_envvar(CUDA_HOME = NA)
+  testthat::local_mocked_bindings(loaded_libcudf_path = function(...) NA_character_)
   make_nvcc_stub(file.path(getwd(), ".pixi", "envs", "default"), release = "12.9")
 
   res <- check_cuda_toolkit()
@@ -408,6 +424,7 @@ test_that("check_cuda_toolkit() finds nvcc in the pixi env named by PIXI_PROJECT
   local_no_cudf_env()
   root <- withr::local_tempdir()
   withr::local_envvar(CUDA_HOME = NA, PIXI_PROJECT_ROOT = root, PIXI_ENVIRONMENT_NAME = "cuda12")
+  testthat::local_mocked_bindings(loaded_libcudf_path = function(...) NA_character_)
   make_nvcc_stub(file.path(root, ".pixi", "envs", "cuda12"), release = "12.8")
 
   res <- check_cuda_toolkit()
@@ -419,6 +436,7 @@ test_that("check_cuda_toolkit() finds nvcc in the pixi env named by PIXI_PROJECT
 test_that("check_cuda_toolkit() prefers CUDA_HOME and CONDA_PREFIX over the pixi env", {
   skip_on_os("windows")
   local_no_cudf_env()
+  testthat::local_mocked_bindings(loaded_libcudf_path = function(...) NA_character_)
   make_nvcc_stub(file.path(getwd(), ".pixi", "envs", "default"), release = "12.9")
   conda <- make_nvcc_stub(withr::local_tempdir(), release = "12.6")
   withr::local_envvar(CUDA_HOME = NA, CONDA_PREFIX = conda)
@@ -427,6 +445,49 @@ test_that("check_cuda_toolkit() prefers CUDA_HOME and CONDA_PREFIX over the pixi
   home <- make_nvcc_stub(withr::local_tempdir(), release = "12.4")
   withr::local_envvar(CUDA_HOME = home)
   expect_identical(check_cuda_toolkit()$value, "12.4")
+})
+
+test_that("check_cuda_toolkit() finds nvcc in the env whose libcudf cuplyr loaded", {
+  skip_on_os("windows")
+  local_no_cudf_env()
+  withr::local_envvar(CUDA_HOME = NA)
+  env <- make_nvcc_stub(withr::local_tempdir(), release = "12.7")
+  testthat::local_mocked_bindings(
+    loaded_libcudf_path = function(...) file.path(env, "lib", "libcudf.so")
+  )
+
+  res <- check_cuda_toolkit()
+  expect_true(res$ok)
+  expect_identical(res$value, "12.7")
+  expect_match(res$message, env, fixed = TRUE)
+})
+
+test_that("check_cuda_toolkit() puts the loaded env after CUDA_HOME/CONDA_PREFIX and before a pixi guess", {
+  skip_on_os("windows")
+  local_no_cudf_env()
+  withr::local_envvar(CUDA_HOME = NA)
+  env <- make_nvcc_stub(withr::local_tempdir(), release = "12.7")
+  testthat::local_mocked_bindings(
+    loaded_libcudf_path = function(...) file.path(env, "lib", "libcudf.so")
+  )
+  make_nvcc_stub(file.path(getwd(), ".pixi", "envs", "default"), release = "12.9")
+  expect_identical(check_cuda_toolkit()$value, "12.7")
+
+  conda <- make_nvcc_stub(withr::local_tempdir(), release = "12.6")
+  withr::local_envvar(CONDA_PREFIX = conda)
+  expect_identical(check_cuda_toolkit()$value, "12.6")
+})
+
+test_that("check_cuda_toolkit() ignores a loaded env without nvcc", {
+  skip_on_os("windows")
+  local_no_cudf_env()
+  withr::local_envvar(CUDA_HOME = NA)
+  env <- withr::local_tempdir()
+  testthat::local_mocked_bindings(
+    loaded_libcudf_path = function(...) file.path(env, "lib", "libcudf.so")
+  )
+  make_nvcc_stub(file.path(getwd(), ".pixi", "envs", "default"), release = "12.9")
+  expect_identical(check_cuda_toolkit()$value, "12.9")
 })
 
 # --- end to end on this machine -----------------------------------------------
