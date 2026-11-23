@@ -38,7 +38,7 @@ list(
 | Date | TIMESTAMP_DAYS | |
 | POSIXct | TIMESTAMP_MICROSECONDS | |
 | factor | DICTIONARY32 (logical) / INT32 (physical) | 1-based codes on GPU, labels in `schema$factor_levels`; see the reference for which call sites use which view |
-| integer64 | FLOAT64 | loses precision above 2^53, warns |
+| integer64 | INT64 | exact; `collect()` gives `bit64::integer64` (a double, with a warning past 2^53, when bit64 is absent) |
 
 Every verb builds one AST node and hands it to `push_op()` (`R/execute.R`);
 `R/lower.R::lower_and_execute()` is the single execution path for eager and

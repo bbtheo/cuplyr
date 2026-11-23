@@ -15,8 +15,8 @@ parquet_state <- new.env(parent = emptyenv())
 # -----------------------------------------------------------------------------
 
 # A classed parquet error naming the file. `kind` is one of not_found, invalid,
-# unsupported_type, schema_changed, schema_mismatch, write, compression,
-# unknown_column, columns.
+# unsupported_type, schema_changed, file_emptied, schema_mismatch, write,
+# compression, unknown_column, columns.
 abort_parquet <- function(kind, msg, path = NULL, bullets = NULL, call = NULL) {
   rlang::abort(
     c(msg, bullets),
@@ -327,12 +327,30 @@ parquet_diff <- function(want, got) {
 #' footer at the time you ask. Reading one lazy table twice reads the file
 #' twice.
 #'
+#' A window `min()` or `max()` in `mutate()` or `filter()` over a lazy table can
+#' also look at the files at the verb, before `collect()`: it may read the footers (the row count of a plan that
+#' keeps its rows, one footer per file, so a missing file is an error at the
+#' verb), or run a small query over the plan to learn whether a result or a
+#' `.drop = FALSE` group is empty, which decides whether an integer result is a
+#' double. The query reads only the columns the pending steps need to give
+#' their rows, and an error in one of those steps (a missing file included) is
+#' an error at the verb. The plan is not run early, and its warnings come when
+#' it runs. (An integer or logical `min()`/`max()` in `summarise()` runs the
+#' plan at the verb, as for any lazy table.) If a file changes after that, the types such a plan promised can be
+#' stale: a file emptied after the verb stops the run with
+#' `cuplyr_error_parquet_file_emptied` when the type came from the footer, and
+#' gives the type the plan said (not dplyr's) when it came from the query, whose
+#' warning also names the empty groups it found. Make the table again after
+#' changing a file.
+#'
 #' ## Errors
 #' All errors have class `cuplyr_error_parquet` and a more specific one, and
 #' name the file: `cuplyr_error_parquet_not_found`, `_invalid` (not a parquet
 #' file, corrupt footer), `_unsupported_type`, `_schema_changed`,
 #' `_schema_mismatch` (files that differ), `_unknown_column` and `_columns`
-#' (`columns =` names no column or is empty), `_write` and `_compression`.
+#' (`columns =` names no column or is empty), `_file_emptied` (a file emptied
+#' after a `min()`/`max()` typed a plan from its footer), `_write` and
+#' `_compression`.
 #' Several files are read by one libcudf call that doesn't say which file a
 #' problem is in, so those messages say "one of the parquet files". Running out
 #' of GPU memory is `cuplyr_error_gpu_oom`, with the file in the message.
@@ -497,6 +515,18 @@ lower_scan <- function(scan, schema) {
                     sprintf("Parquet file '%s' changed after it was opened.", paths[[k]]),
                     paths[[k]], bullets = c(x = d, i = "Call `read_parquet_gpu()` again."))
     }
+  }
+
+  # A min()/max() type was decided from this file's non-zero footer count
+  # (minmax_mark_scan(), F124): dplyr gives a double for a zero-row input, so the
+  # plan's type no longer holds if the rows are gone.
+  if (isTRUE(scan$typed_nonzero) && sum(vapply(infos, function(i) i$nrow, numeric(1))) == 0) {
+    abort_parquet("file_emptied",
+                  sprintf("Parquet file%s %s changed after it was opened: it has no rows now.",
+                          if (length(paths) > 1L) "s" else "", parquet_files_shown(paths)),
+                  paths[[1L]],
+                  bullets = c(x = "A min() or max() in this plan was typed from the rows the file had; dplyr types it differently for none.",
+                              i = "Call `read_parquet_gpu()` again."))
   }
 
   cols <- scan$columns %||% scan$file_names
