@@ -372,3 +372,58 @@ test_that("more filter()/arrange() shapes report a missing column as dplyr does"
   p13_same_error(df, function(d) summarise(d, x = mean(x), m = sum(.data$xx)), gpu_opts = strict)
   p13_same_error(df, function(d) group_by(d, a = x + 1, xx), gpu_opts = strict)
 })
+
+# Added after the second review: group_by() with an unnamed computed or pick()
+# dot, computed keys of count()/add_count()/distinct(), summarise() dots whose
+# arguments R doesn't force (S3 `...`, `..N`) or that return a data frame, and
+# reducers wrapped in another call.
+
+test_that("group_by() with an unnamed computed or pick() dot reports a missing column as dplyr does", {
+  skip_if_no_gpu()
+  df <- p13_df()
+  p13_same_error(df, function(d) group_by(d, x + 1, xx))
+  p13_same_error(df, function(d) group_by(d, pick(x), xx))
+})
+
+test_that("count(), add_count() and distinct() report a missing column in a computed key as dplyr does", {
+  skip_if_no_gpu()
+  df <- p13_df()
+  cpu <- p13_same_error(df, function(d) count(d, a = x + xx))
+  expect_true(inherits(cpu, "dplyr:::mutate_error"))
+  p13_same_error(df, function(d) count(d, x + xx))
+  p13_same_error(df, function(d) count(d, a = x + 1, xx))
+  p13_same_error(df, function(d) count(group_by(d, g), a = x + xx))
+  p13_same_error(df, function(d) add_count(d, a = x + xx))
+  p13_same_error(df, function(d) distinct(d, a = x + xx))
+  p13_same_error(df, function(d) distinct(d, a = x + 1, xx))
+})
+
+test_that("summarise() keeps working on arguments R doesn't force and on data-frame dots", {
+  skip_if_no_gpu()
+  df <- p13_df()
+  f <- function(d, ...) summarise(d, m = sum(x) + ..1)
+  pipelines <- list(
+    function(d) f(d, 5),
+    function(d) summarise(d, m = mean(x, foo = zz)),
+    function(d) summarise(d, first(tibble::tibble(a = x)), b = mean(a)),
+    function(d) suppressWarnings(summarise(d, m = mean(g, na.rm = zz)))
+  )
+  for (p in pipelines) {
+    expect_same_as_dplyr(df, p)
+    expect_same_as_dplyr_lazy(df, p)
+  }
+})
+
+test_that("summarise() reports a missing column inside other calls and on rowwise or empty input", {
+  skip_if_no_gpu()
+  df <- p13_df()
+  strict <- list(cuplyr.fallback = "error")
+  p13_same_error(df, function(d) summarise(d, m = round(mean(xx), 1)))
+  p13_same_error(df, function(d) summarise(d, m = quantile(xx, 0.5)))
+  p13_same_error(df, function(d) summarise(d, m = n() + xx))
+  p13_same_error(df, function(d) summarise(d, m = round(mean(xx), 1)), gpu_opts = strict)
+  p13_same_error(df, function(d) summarise(d, m = quantile(xx, 0.5)), gpu_opts = strict)
+  p13_same_error(df, function(d) summarise(d, m = n() + xx), gpu_opts = strict)
+  p13_same_error(df, function(d) summarise(rowwise(d), m = mean(xx)))
+  p13_same_error(df[0, ], function(d) summarise(d, m = mean(xx), .by = g))
+})
