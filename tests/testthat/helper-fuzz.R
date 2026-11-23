@@ -1549,6 +1549,8 @@ fuzz_quick_seeds <- function() {
     143L, 144L, 145L, 147L, 148L, 149L, 150L, 151L, 155L, 157L, 159L,
     # F122 turned these on (the .data-pronoun column name)
     9L, 28L, 122L, 146L, 551L,
+    # F124 turned these on (min()/max() over empty input)
+    451L, 567L,
     as.integer(names(fuzz_quick_skips())))
 }
 
@@ -1558,7 +1560,5 @@ fuzz_quick_skips <- function() {
   c(`42` = "F118-unknown-column-error-class",
     `209` = "F118-mutate-after-missing-column",
     `423` = "F118-zero-column-collect",
-    `435` = "F118-distinct-window-lowering",
-    `451` = "F118-min-empty-integer-type",
-    `567` = "F118-min-empty-string-warning")
+    `435` = "F118-distinct-window-lowering")
 }

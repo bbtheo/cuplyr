@@ -5593,6 +5593,56 @@ ir_parse_bool8_cast <- function(op, cast_to) {
   }
 }
 
+# The parse hook of min()/max() in mutate()/filter()/summarise() arguments: a
+# logical argument is an integer (dplyr). Over an empty group an INT32 argument
+# gives a double in dplyr, but that is the dot's TYPE, not its arithmetic (the
+# groups that have rows compute in integers, F42's rules included), so the call
+# stays integer here and the verb casts the dot's root (minmax_dot_root(),
+# R/minmax-warn.R).
+# @keywords internal
+ir_parse_minmax <- function(op) {
+  force(op)
+  function(args, schema) {
+    ir_call(op, ir_cast_bool8_first(args, schema, "cast_int32"))
+  }
+}
+
+# F124: the type a dot has in dplyr when every min()/max() call over an INT32
+# argument that can meet an empty group is a double: `ir_infer_type()` of `ir`
+# with those calls typed FLOAT64 (a call over a group scalar, `max(n())`, never
+# meets an empty vector and keeps its type). A type inference over the IR the
+# parser built once, not a second parse (which would evaluate a column-free
+# `runif(1)` again). The amount of a Date shift is left as it is: dplyr's result
+# is a Date whatever the amount's type.
+# @keywords internal
+ir_infer_type_minmax_double <- function(ir, schema) {
+  if (!identical(.subset2(ir, "kind"), "call")) {
+    return(ir_infer_type(ir, schema))
+  }
+  op <- .subset2(ir, "op")
+  if (op == "date_add_days" || op == "date_sub_days") {
+    return(ir_infer_type(ir, schema))
+  }
+  entry <- ir_call_registry[[op]]
+  if (is.null(entry)) {
+    stop("Unknown IR op: '", op, "'", call. = FALSE)
+  }
+  args <- .subset2(ir, "args")
+  n <- length(args)
+  arg_types <- character(n)
+  is_isolated_na <- logical(n)
+  for (i in seq_len(n)) {
+    a <- .subset2(args, i)
+    arg_types[[i]] <- ir_infer_type_minmax_double(a, schema)
+    is_isolated_na[[i]] <- identical(.subset2(a, "kind"), "lit") && ir_is_untyped_na(a)
+  }
+  if ((op == "min" || op == "max") && n == 1L && arg_types[[1L]] %in% c("INT32", "BOOL8") &&
+      !ir_is_group_scalar(args[[1L]])) {
+    return("FLOAT64")
+  }
+  ir_call_type(ir, entry, arg_types, is_isolated_na)
+}
+
 # The R value of a column-free IR subtree made of literals and pure ops
 # (`-1`, `-(2)`, `1 + 1`), or `ok = FALSE`. Unlike ir_fold_literal_call() it also
 # evaluates a unary minus, which that fold leaves as a call.
@@ -7448,9 +7498,9 @@ ir_call_registry <- list(
                  lower = NULL, window = list(kind = "agg")),
   "sum" = list(arity = 1L, parse = NULL, type = type_window_int_sum,
                 lower = NULL, window = list(kind = "agg")),
-  "min" = list(arity = 1L, parse = ir_parse_bool8_cast("min", "cast_int32"),
+  "min" = list(arity = 1L, parse = ir_parse_minmax("min"),
                 type = type_arg1, lower = NULL, window = list(kind = "agg")),
-  "max" = list(arity = 1L, parse = ir_parse_bool8_cast("max", "cast_int32"),
+  "max" = list(arity = 1L, parse = ir_parse_minmax("max"),
                 type = type_arg1, lower = NULL, window = list(kind = "agg")),
   "n" = list(arity = 0L, parse = NULL, type = type_int32,
               lower = NULL, window = list(kind = "agg")),

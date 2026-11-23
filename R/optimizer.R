@@ -49,6 +49,10 @@ node_field_union <- function(items, field) {
   }
 }
 
+# Options of the optimizer run in progress, set by whoever runs it
+# (`prune_unread`: see optimize_with_barriers()). Nothing else is kept here.
+.optimizer_opts <- new.env(parent = emptyenv())
+
 #' Optimize an AST for GPU execution
 #'
 #' Applies all optimization passes in the correct order.
@@ -72,6 +76,15 @@ optimize_ast <- function(ast) {
 
   # Handle barriers: optimize segments separately
   optimize_with_barriers(ast)
+}
+
+# Does a segment under a barrier's narrower requirement keep the mutate
+# expressions nothing reads (F99)? Yes, unless the plan is a query whose warnings
+# nobody sees and whose columns only matter by what they read (the facts query of
+# a min()/max() verb, `.optimizer_opts$prune_unread`).
+# @keywords internal
+keep_unread_mutates <- function(required) {
+  !is.null(required) && !isTRUE(.optimizer_opts$prune_unread)
 }
 
 #' Optimize AST respecting barrier nodes
@@ -124,7 +137,7 @@ optimize_with_barriers <- function(ast, required = NULL) {
 
   if (is.null(barrier_node)) {
     # No barrier: optimize entire subtree
-    optimize_segment(ast, required, keep_mutates = !is.null(required))
+    optimize_segment(ast, required, keep_mutates = keep_unread_mutates(required))
   } else {
     # The segment above the barrier ends in a stub source holding the
     # barrier's output schema, so it is a complete chain: every schema lookup
@@ -136,7 +149,7 @@ optimize_with_barriers <- function(ast, required = NULL) {
     # is optimized on that basis.
     stub <- ast_source(infer_schema_memo(barrier_node)[c("names", "types")])
     segment_root <- extract_segment_above_barrier(ast, barrier_node, stub)
-    optimized_segment <- optimize_segment(segment_root, required, keep_mutates = !is.null(required))
+    optimized_segment <- optimize_segment(segment_root, required, keep_mutates = keep_unread_mutates(required))
 
     # (after the extraction, which finds the barrier by identity; the stub's
     # schema is the same either way)
@@ -311,6 +324,13 @@ optimize_segment <- function(ast, required_cols = NULL, keep_mutates = FALSE) {
   # its (rebuilt) tree.
   root <- ast
   own <- is.null(required_cols)
+
+  # A facts query (`prune_unread`) drops the mutate expressions nothing reads
+  # first, a checked integer one too, so that projection pushdown does not
+  # read the columns they would have read.
+  if (!own && isTRUE(.optimizer_opts$prune_unread)) {
+    ast <- prune_dead_columns(ast, required_cols)
+  }
 
   # A chain of filters and mutates on a source whose every output column is
   # required (settled_chain()): projection pushdown leaves it as it is, and
@@ -988,7 +1008,7 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
         }
         # Likewise a checked integer expression (F70): its overflow warning
         # does not depend on the column being used. Its inputs stay required.
-        if (record_checked_int(expr)) {
+        if (record_checked_int(expr) && !isTRUE(.optimizer_opts$prune_unread)) {
           keep[i] <- TRUE
           required <- opt_union(required, expr$input_cols)
         }

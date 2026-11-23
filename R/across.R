@@ -209,6 +209,31 @@ dots_are_plain <- function(dots) {
   !dots_mention(dots, dots_screen_fns)
 }
 
+# dots_are_plain() and, in the same pass over the dots, whether one mentions
+# min() or max() (F124: mutate() opens its window min()/max() state for those;
+# one all.names() walk per dot serves both, since a second pass is measurable at
+# F110's 1e3 rows).
+# @return 2L if a dot mentions a name of dots_screen_fns (not plain; min()/max()
+#   not looked for), else 1L if one mentions min() or max(), else 0L
+# @keywords internal
+dots_scan <- function(dots) {
+  found <- 0L
+  for (i in seq_along(dots)) {
+    dot <- .subset2(dots, i)
+    hit <- match(all.names(if (inherits(dot, "quosure")) .subset2(dot, 2L) else rlang::quo_get_expr(dot)),
+                 dots_scan_fns, 0L)
+    if (any(hit > 0L)) {
+      if (any(hit > 0L & hit <= length(dots_screen_fns))) {
+        return(2L)
+      }
+      found <- 1L
+    }
+  }
+  found
+}
+
+dots_scan_fns <- c(dots_screen_fns, "min", "max")
+
 # Does any dot of `dots` (quosures) mention one of the names `fns` anywhere in its
 # expression, as a symbol: a call head, an argument, inside an embedded quosure?
 # all.names() is a C walk, so this is the cheap pre-check the dot walkers below
