@@ -1177,7 +1177,7 @@ slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
 #
 # @keywords internal
 slice_rank_grouped <- function(.data, gm, order_quo, amt, descending, with_ties, na_rm) {
-  if (!identical(getOption("cuplyr.topk_path", "auto"), "sort")) {
+  if (!identical(cuplyr_opt("topk_path"), "sort")) {
     schema <- current_schema(.data)
     resolved <- tryCatch(resolve_slice_order(order_quo, schema), error = function(e) NULL)
     if (is.null(resolved)) {

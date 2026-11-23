@@ -44,6 +44,7 @@ Suggests:
     data.table,
     lubridate,
     waldo,
+    jsonlite,
     withr
 VignetteBuilder: knitr
 LinkingTo:

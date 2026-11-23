@@ -36,7 +36,9 @@
 # points dplyr's own error call mechanism (`.__dplyr_error_call__.`, see
 # dplyr_error_call()) at the verb's method frame, so dplyr builds and signals its
 # errors and warnings with the user's call as written (`mutate()`,
-# `dplyr::mutate()`).
+# `dplyr::mutate()`). gpu_fallback() does the same for every other CPU route
+# (fallback_error_call(), R/verb-errors.R), and the loops here serve filter()
+# and summarise() too: their dots are wrapped the same way.
 
 # Conditions the loops never wrap: cuplyr's own runtime errors (GPU, memory, a
 # fallback the option turned into an error, an internal error, a column class
@@ -50,16 +52,24 @@ mutate_error_passthrough <- c(
 # The `error =` handler of a dot loop. Called from a closure defined in the
 # loop's function, whose frame is its enclosure: `i` is the index of the dot the
 # loop is on (of `provenance`'s expanded dots in the "eval" phase, of the user's
-# in the "expand" phase), `names` the expanded dots' names, `verb` "mutate" or
-# "transmute". Returns (the error goes on) unless it can raise dplyr's.
+# in the "expand" phase), `names` the expanded dots' names, `verb` "mutate",
+# "transmute", "filter" or "summarise". `run` is the frame that holds the user's
+# dots, groups and table: by default the caller of the loop's function
+# (mutate_run()/transmute_run()), for a loop that is part of the verb's own
+# function (filter_run()) that function's frame. Returns (the error goes on)
+# unless it can raise dplyr's.
 # @keywords internal
-mutate_dot_error <- function(cnd, i, phase, provenance, names, verb) {
-  if (inherits(cnd, mutate_error_passthrough)) {
+mutate_dot_error <- function(cnd, i, phase, provenance, names, verb, run = NULL) {
+  # (filter() reports a `&&` of a column itself)
+  if (inherits(cnd, mutate_error_passthrough) ||
+      (identical(verb, "filter") && inherits(cnd, "cuplyr_error_short_circuit"))) {
     return(invisible(NULL))
   }
-  # the loop's function, then mutate_run()/transmute_run(), then the verb's method
-  loop <- parent.env(parent.frame())
-  run <- rlang::eval_bare(quote(base::parent.frame()), loop)
+  if (is.null(run)) {
+    # the loop's function, then mutate_run()/transmute_run(), then the verb's method
+    loop <- parent.env(parent.frame())
+    run <- rlang::eval_bare(quote(base::parent.frame()), loop)
+  }
   # (a rowwise call's native attempt abandons on any error: dplyr gives its own
   # from the rerun; a loop called from elsewhere has no user dots to name)
   user_dots <- get0("user_dots", run, inherits = FALSE)
@@ -74,8 +84,8 @@ mutate_dot_error <- function(cnd, i, phase, provenance, names, verb) {
     return(invisible(NULL))
   }
   rlang::abort(
-    args$bullets, class = "dplyr:::mutate_error", parent = args$parent,
-    call = rlang::eval_bare(quote(base::parent.frame()), run)
+    args$bullets, class = if (verb %in% c("mutate", "transmute")) "dplyr:::mutate_error",
+    parent = args$parent, call = verb_error_call(run)
   )
 }
 
@@ -101,7 +111,8 @@ mutate_dot_error_args <- function(cnd, i, phase, provenance, names, verb, run, u
   bullets <- c(i = paste0("In argument: `", mutate_error_label(user_name, expr), "`."))
   # A group is current only while a dot is evaluated, not while the across()
   # that dplyr expands first is resolved.
-  if (!(identical(phase, "expand") && expands)) {
+  # (filter() expands if_any()/if_all() before the groups run, too)
+  if (!(identical(phase, "expand") && (expands || identical(verb, "filter")))) {
     group <- tryCatch(mutate_error_group_bullet(run, phase, verb), error = function(e) NULL)
     if (!is.null(group)) {
       bullets <- c(bullets, i = group)
@@ -111,7 +122,10 @@ mutate_dot_error_args <- function(cnd, i, phase, provenance, names, verb, run, u
   # An error while a column is computed has the layer of across() / if_any()
   # (one that can't be built leaves the error as the parent, still wrapped)
   parent <- cnd
-  if (eval_phase && kind %in% c("across", "combined")) {
+  if (identical(kind, "dot")) {
+    parent <- object_not_found_parent(cnd, expr, rlang::quo_get_env(quo))
+  }
+  if (eval_phase && kind %in% c("across", "combined") && verb %in% c("mutate", "transmute")) {
     parent <- tryCatch({
       # (the column the expansion stands for; an if_any()'s first one)
       col <- provenance$col[i] %||% if (identical(kind, "across")) names[i]
@@ -160,6 +174,13 @@ mutate_error_groups <- function(run, verb) {
   if (identical(verb, "mutate")) {
     list(groups = get0("verb_groups", run, inherits = FALSE),
          by = isTRUE(get0("by_given", run, inherits = FALSE)))
+  } else if (identical(verb, "filter")) {
+    list(groups = get0("verb_groups", run, inherits = FALSE),
+         by = !quo_is_null_fast(get0("by_quo", run, inherits = FALSE)))
+  } else if (identical(verb, "summarise")) {
+    by <- isTRUE(get0("by_given", run, inherits = FALSE))
+    list(groups = if (by) get0("by_cols", run, inherits = FALSE) else .subset2(get0(".data", run, inherits = FALSE), "groups"),
+         by = by)
   } else {
     list(groups = get0("eff_groups", run, inherits = FALSE), by = FALSE)
   }

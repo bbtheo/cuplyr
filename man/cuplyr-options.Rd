@@ -12,6 +12,8 @@
 \alias{cuplyr.roll_median}
 \alias{cuplyr.roll_path}
 \alias{cuplyr.check_schema_cache}
+\alias{cuplyr.parquet_pushdown}
+\alias{cuplyr.topk_path}
 \alias{cuplyr_options}
 \title{cuplyr options}
 \usage{
@@ -19,7 +21,7 @@ cuplyr_options(internal = FALSE)
 }
 \arguments{
 \item{internal}{Also list the internal switches (\code{cuplyr.roll_path},
-\code{cuplyr.check_schema_cache}).}
+\code{cuplyr.topk_path}, \code{cuplyr.check_schema_cache}).}
 }
 \value{
 \code{cuplyr_options()} returns a data frame of class \code{cuplyr_options}
@@ -58,6 +60,9 @@ bytes, 0 or more. Unset: a quarter of the free GPU memory, at most 1 GiB.
 \item \code{cuplyr.release_threshold} (\code{CUPLYR_RELEASE_THRESHOLD}): bytes the async
 resource keeps before returning memory to the driver, 0 or more. Unset
 (the default): no automatic release.
+\item \code{cuplyr.parquet_pushdown}: \code{TRUE} (the default) or \code{FALSE}. \code{FALSE} reads
+Parquet files without projection and predicate pushdown. See
+\code{\link[=read_parquet_gpu]{read_parquet_gpu()}}.
 \item \code{cuplyr.roll_median} (\code{CUPLYR_ROLL_MEDIAN}): \code{"exact"} (the default) or
 \code{"frollmedian"}, the engine of \code{\link[=roll_median]{roll_median()}}.
 }
@@ -72,6 +77,9 @@ Listed by \code{cuplyr_options(internal = TRUE)}; not for normal use.
 \itemize{
 \item \code{cuplyr.roll_path} (\code{CUPLYR_ROLL_PATH}): \code{"auto"} (the default),
 \code{"scans"} or \code{"cudf"}; forces the path of rolling-window functions.
+\item \code{cuplyr.topk_path}: \code{"auto"} (the default), \code{"topk"} or \code{"sort"}; forces
+the route of \code{slice_min()} and \code{slice_max()} (a top-k selection or a full
+sort).
 \item \code{cuplyr.check_schema_cache} (\code{CUPLYR_CHECK_SCHEMA_CACHE}): \code{TRUE} or
 \code{FALSE} (the default); checks the cached schema of every lazy table on use
 (the environment variable is \code{1}, \code{true} or \code{yes}).

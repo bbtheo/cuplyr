@@ -177,14 +177,15 @@ test_that("group_by() errors on non-existent column", {
   )
 })
 
-test_that("group_by() errors with helpful message listing available columns", {
+test_that("group_by() of a missing column gives dplyr's error, naming the column", {
   skip_if_no_gpu()
 
   gpu_df <- tbl_gpu(mtcars)
 
+  # (dplyr's text, without a list of the available columns: see test-parity-13-*)
   expect_error(
     dplyr::group_by(gpu_df, bad_column),
-    "Available columns"
+    "Column `bad_column` is not found"
   )
 })
 

@@ -166,12 +166,13 @@ test_that(".data$x forces a column reference", {
   expect_equal(ir$name, "mpg")
 })
 
-test_that(".data[[\"x\"]] on a missing column errors with the pinned message", {
+test_that(".data[[\"x\"]] on a missing column raises rlang's pronoun error", {
   schema <- list(names = c("mpg", "cyl"), types = c("FLOAT64", "INT32"))
 
   expect_error(
     ir_parse_quo(quo_in(quote(.data[["nonexistent"]])), schema),
-    "Column 'nonexistent' not found\\.\nAvailable columns: mpg, cyl"
+    "Column `nonexistent` not found in `.data`.",
+    class = "rlang_error_data_pronoun_not_found"
   )
 })
 

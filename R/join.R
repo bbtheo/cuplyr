@@ -344,15 +344,16 @@ validate_join_cols <- function(cols, tbl, side) {
 #' an equi and a non-equi condition. dplyr raises a plain `rlang_error`; x is
 #' checked before y. Runs on the raw `by` at the verb call (before routing to
 #' the fallback), so eager, lazy and fallback joins all fail the same way.
-#' Also raises dplyr's `keep = FALSE` + non-equi error first, and stops after
-#' x's duplicate check when x lacks a join column, so that error (raised later
-#' by the join) precedes y's duplicates, as in dplyr's `join_cols()`.
+#' Also raises dplyr's `keep = FALSE` + non-equi error first, and, per side after
+#' its duplicates, dplyr's "Join columns in `x` must be present in the data." (so
+#' x's missing column precedes y's duplicates, as in dplyr's `join_cols()`).
 #' @param by The user's `by=` (`NULL`, character, `join_by()`)
 #' @param x The left table
+#' @param y The right table, or `NULL` to leave its columns unchecked
 #' @param keep The user's `keep=` (`NULL` for filtering joins)
 #' @param call The verb's frame, reported as the error call
 #' @keywords internal
-check_join_cols_unique <- function(by, x, keep = NULL, call = rlang::caller_env()) {
+check_join_cols_unique <- function(by, x, keep = NULL, call = rlang::caller_env(), y = NULL) {
   if (is.null(by) || is_cross_by(by)) {
     return(invisible())
   }
@@ -370,33 +371,42 @@ check_join_cols_unique <- function(by, x, keep = NULL, call = rlang::caller_env(
   }
   non_equi <- op != "=="
   # dplyr's join_cols() order: `keep = FALSE` with a non-equi condition first,
-  # then per side unique-then-present (all of x before y).
+  # then per side unique-then-present (all of x before y). The errors report the
+  # join verb the user called, as dplyr's do.
   if (isFALSE(keep) && any(non_equi)) {
     rlang::abort(
       "Can't set `keep = FALSE` when using an inequality, rolling, or overlap join.",
-      call = call
+      call = verb_error_call(call)
     )
+  }
+  # dplyr's err_vars(): "`a`", "`a` and `b`", "`a`, `b`, and `c`"
+  listed <- function(vars) {
+    q <- encodeString(vars, quote = "`")
+    if (length(q) <= 2L) {
+      paste(q, collapse = " and ")
+    } else {
+      paste0(paste(q[-length(q)], collapse = ", "), ", and ", q[[length(q)]])
+    }
   }
   for (side in c("x", "y")) {
     vars <- cols[[side]]
     vars <- c(vars[!non_equi], unique(vars[non_equi]))
     dup <- unique(vars[duplicated(vars)])
     if (length(dup) > 0L) {
-      q <- encodeString(dup, quote = "`")
-      listed <- if (length(dup) <= 2L) {
-        paste(q, collapse = " and ")
-      } else {
-        paste0(paste(q[-length(q)], collapse = ", "), ", and ", q[[length(q)]])
-      }
       rlang::abort(c(
         sprintf("Join columns in `%s` must be unique.", side),
-        x = sprintf("Problem with %s.", listed)
-      ), call = call)
+        x = sprintf("Problem with %s.", listed(dup))
+      ), call = verb_error_call(call))
     }
-    # A missing column is reported by the join itself (native or dplyr's
-    # fallback); stop here so it comes before the other side's duplicates.
-    if (side == "x" && !all(cols$x %in% current_schema(x)$names)) {
-      break
+    tbl <- if (side == "x") x else y
+    if (!is.null(tbl)) {
+      missing <- setdiff(vars, if (is_tbl_gpu(tbl)) current_schema(tbl)$names else names(tbl))
+      if (length(missing) > 0L) {
+        rlang::abort(c(
+          sprintf("Join columns in `%s` must be present in the data.", side),
+          x = sprintf("Problem with %s.", listed(missing))
+        ), call = verb_error_call(call))
+      }
     }
   }
   invisible()
@@ -1498,7 +1508,7 @@ mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
                           multiple, unmatched, relationship, user_env) {
   y <- join_coerce_y(x, y, copy)
   check_unique_join_inputs(x, y, call = rlang::caller_env())
-  check_join_cols_unique(by, x, keep = keep, call = rlang::caller_env())
+  check_join_cols_unique(by, x, keep = keep, call = rlang::caller_env(), y = y)
   verb <- paste0(join_type, "_join")
   verb_fn <- get(verb, envir = asNamespace("dplyr"))
   fallback_args <- function(reason) {
@@ -1569,7 +1579,7 @@ mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
 filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
   y <- join_coerce_y(x, y, copy)
   check_unique_join_inputs(x, y, call = rlang::caller_env())
-  check_join_cols_unique(by, x, call = rlang::caller_env())
+  check_join_cols_unique(by, x, call = rlang::caller_env(), y = y)
   verb <- paste0(join_type, "_join")
   verb_fn <- get(verb, envir = asNamespace("dplyr"))
   fallback_args <- function(reason) {

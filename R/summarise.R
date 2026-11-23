@@ -390,6 +390,11 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
     }, reason = shadowed))
   }
 
+  # A dot that reads a column the table lacks is dplyr's error, before any CPU route.
+  if (!isTRUE(reframe_state$wide)) {
+    summarise_missing_column_check(dots, in_schema)
+  }
+
   # F75: dplyr evaluates every dot once per group, in group order, and the
   # native path folds a column-free call once. That is the same only for a
   # deterministic call without side effects, which is decided from the syntax

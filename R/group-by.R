@@ -189,6 +189,7 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   # computed too. A computed dot becomes a column called dot_label(expr).
   kind <- character(length(dots))     # "named", "var", "pick", "computed"
   var_name <- character(length(dots))
+  unbound_ref <- logical(length(dots))
   comp_names <- dot_names
   is_null_dot <- !is_named & vapply(dots, rlang::quo_is_null, logical(1), USE.NAMES = FALSE)
   # (decided over every dot: a NULL is not a variable reference either)
@@ -230,6 +231,12 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
         }
         computed_ref <- TRUE
       }
+      # A name nothing makes or binds goes through the mutate too, unnamed, in
+      # dot order: its error is the one dplyr raises for the dot (`xx`).
+      if (needs_mutate && !computed_ref && !unknown_columns && !var_name[i] %in% visible_names) {
+        computed_ref <- TRUE
+        unbound_ref[i] <- TRUE
+      }
       if (computed_ref) {
         kind[i] <- "computed"
         comp_names[i] <- var_name[i]
@@ -260,10 +267,15 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   # grouped, and later dots see earlier ones' columns.
   working <- .data
   if (any(is_comp)) {
-    comp_dots <- stats::setNames(dots[is_comp], comp_names[is_comp])
+    comp_dots <- stats::setNames(dots[is_comp], ifelse(unbound_ref[is_comp], "", comp_names[is_comp]))
     # (spliced by mutate()'s own capture, so a raw `.data[[k]]` reads the
     # quosure's `k`, see the splice rule after pronoun_call_name(), R/ir.R)
-    working <- dplyr::mutate(dplyr::ungroup(working), !!!comp_dots)
+    # (its error names an unnamed dot as the user wrote it)
+    unnamed <- !is_named[is_comp] & !unbound_ref[is_comp]
+    working <- withCallingHandlers(
+      dplyr::mutate(dplyr::ungroup(working), !!!comp_dots),
+      `dplyr:::mutate_error` = function(cnd) group_by_mutate_error(cnd, comp_dots, unnamed)
+    )
     if (!is_tbl_gpu(working)) {
       return(group_by_fallback("the computed grouping columns could not be built on the GPU."))
     }
@@ -284,19 +296,27 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
           rlang::abort(c(
             "Must group by variables found in `.data`.",
             x = paste0("Column `", comp_names[i], "` is not found.")
-          ))
+          ), call = verb_error_call(environment()))
         }
         next
       }
       new_groups <- c(new_groups, comp_names[i])
     } else if (kind[i] == "var") {
+      # In dplyr's mutate branch this dot is evaluated like the others, in order:
+      # a name no dot made (every earlier pick() was resolved here, and cuplyr
+      # names its computed dots, so none unpacks) and bound nowhere (a bound one
+      # after an unknown-columns dot fell back above) is that mutate's error.
+      if (needs_mutate && !var_name[i] %in% working_schema$names &&
+          (!is.symbol(rlang::quo_get_expr(dots[[i]])) || !quo_symbol_is_bound(dots[[i]], var_name[i]))) {
+        group_by_abort_unbound(dots[[i]], var_name[i], working_schema$names, environment())
+      }
       if (!var_name[i] %in% working_schema$names) {
+        # (dplyr names every missing column; `c(x = glue(...))` of two or more is x1, x2, ...)
+        missing <- unique(var_name[kind == "var" & !var_name %in% working_schema$names])
         rlang::abort(c(
           "Must group by variables found in `.data`.",
-          x = paste0("Column `", var_name[i], "` is not found."),
-          i = paste0("Available columns: ",
-                     paste(working_schema$names, collapse = ", "))
-        ))
+          x = paste0("Column `", missing, "` is not found.")
+        ), call = verb_error_call(environment()))
       }
       new_groups <- c(new_groups, var_name[i])
     } else {

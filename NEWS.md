@@ -8,6 +8,34 @@
   fuses it into the surrounding expression and sharing it measured slower.
   Results, warnings and errors are unchanged (#17).
 
+* `diagnostics()` now reports the libcudf and RMM versions cuplyr was built
+  against, the libcudf library loaded into the session and its version, the
+  active GPU memory resource and pool size, and every cuplyr option with its
+  value, source and default. `diagnostics(format = "json")` prints the same
+  information as one JSON object, and the libcudf path is redacted like the
+  other paths. `cuplyr.parquet_pushdown` and `cuplyr.topk_path` are now
+  registered options: an invalid value warns once and means the default.
+  `cuplyr.parquet_pushdown` is listed by `cuplyr_options()` and documented in
+  `?cuplyr-options`; `cuplyr.topk_path` is internal, so it is listed only by
+  `cuplyr_options(internal = TRUE)` (#14).
+
+* `filter()`, `arrange()`, `summarise()`, `count()`, `distinct()`,
+  `group_by()`, `relocate()` and the joins raise dplyr's error for a column
+  that doesn't exist: the same class, message and parent error, and the call
+  the user made (`filter()`, `count()`, `add_tally()`, ...) rather than an
+  internal one. `summarise()` reports a typo such as `mean(xx)` directly
+  instead of running the call on the CPU first, so
+  `options(cuplyr.fallback = "error")` no longer turns it into a fallback
+  error. `arrange()` ignores a `NULL` name and sorts by any other object that
+  is not a column, as dplyr does. dplyr gives no "did you mean" hint, so
+  neither does cuplyr (#13).
+
+* `cuplyr_error_gpu_oom`, raised when a GPU step still runs out of device
+  memory after cuplyr's retry, now shows the device's and the session's
+  memory, names what helps (`gpu_gc()`, lazy mode, the
+  `cuplyr.memory_resource` option under the "pool" resource), keeps the
+  allocator's error as its parent and reports the call the user made (#13).
+
 * `mutate()` and `transmute()` raise dplyr's errors. An error in a dot, such as
   an unknown object or a missing `.data` column, is a `dplyr:::mutate_error`
   that names the argument ("In argument: ...") and, for a grouped table or

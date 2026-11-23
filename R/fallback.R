@@ -120,7 +120,8 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE, detail =
     }
   }
 
-  result <- expr_fn(tbl)
+  # (dplyr's errors and warnings name the user's call, not the one made here)
+  result <- fallback_error_call(expr_fn, environment())(tbl)
 
   if (as_is || !is.data.frame(result) || has_list_column(result)) {
     return(result)
@@ -636,6 +637,8 @@ nest_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, keep = NULL,
   # taken before `y` is collected so it isn't the collected copy's name.
   name <- name %||% rlang::as_label(rlang::enexpr(y))
   user_env <- rlang::caller_env()
+  # (dplyr's own error would name its internal call, `dplyr::nest_join(tbl, ...)`)
+  check_join_cols_unique(by, x, keep = keep, call = rlang::current_env(), y = y)
   # The copy rule of every GPU join: a host `y` needs `copy = TRUE`, else
   # dplyr's auto_copy() error. Only the check is wanted here (the result is
   # discarded): nest_join() pieces keep y's own class, so a host `y` is not

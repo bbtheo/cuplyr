@@ -1041,6 +1041,16 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// cuplyr_build_versions
+Rcpp::CharacterVector cuplyr_build_versions();
+RcppExport SEXP _cuplyr_cuplyr_build_versions() {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    rcpp_result_gen = Rcpp::wrap(cuplyr_build_versions());
+    return rcpp_result_gen;
+END_RCPP
+}
 
 static const R_CallMethodDef CallEntries[] = {
     {"_cuplyr_gpu_alloc_window_push", (DL_FUNC) &_cuplyr_gpu_alloc_window_push, 0},
@@ -1126,6 +1136,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_cuplyr_df_to_gpu", (DL_FUNC) &_cuplyr_df_to_gpu, 1},
     {"_cuplyr_gpu_collect", (DL_FUNC) &_cuplyr_gpu_collect, 2},
     {"_cuplyr_gpu_collect_slice", (DL_FUNC) &_cuplyr_gpu_collect_slice, 4},
+    {"_cuplyr_cuplyr_build_versions", (DL_FUNC) &_cuplyr_cuplyr_build_versions, 0},
     {NULL, NULL, 0}
 };
 

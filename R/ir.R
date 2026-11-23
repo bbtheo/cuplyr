@@ -1714,9 +1714,7 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
         return(NULL)  # a subscript only dplyr can evaluate
       }
       if (!nm %in% schema$names) {
-        stop("Column '", nm, "' not found.\n",
-             "Available columns: ", paste(schema$names, collapse = ", "),
-             call. = FALSE)
+        stop_data_pronoun_missing(expr, env, schema$names, nm)
       }
       return(ir_col(nm))
     }
