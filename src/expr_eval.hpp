@@ -200,6 +200,13 @@ struct eval_ctx {
     };
     std::map<cudf::size_type, col_range> range_cache;
 
+    // #17: common subexpressions. IR call nodes the R side marked as repeated
+    // (`cse` = an id) map to the slot that holds their value; materialize()
+    // reuses it instead of evaluating the subtree again. Entries die with
+    // their slot (release_from()). One memo per eval_ctx, i.e. per set of
+    // rows: a context over different rows must not share it.
+    std::map<int, cudf::size_type> cse_slots;
+
     // F57: slots of `cols` that alias another slot (a bare column copy in
     // gpu_mutate_expr()), ctx index -> the index it aliases. `owned` holds a
     // placeholder for them; the result shares the aliased column instead of
@@ -249,6 +256,10 @@ struct eval_ctx {
         }
         for (auto it = range_cache.begin(); it != range_cache.end();) {
             if (static_cast<size_t>(it->first) >= mark) it = range_cache.erase(it);
+            else ++it;
+        }
+        for (auto it = cse_slots.begin(); it != cse_slots.end();) {
+            if (static_cast<size_t>(it->second) >= mark) it = cse_slots.erase(it);
             else ++it;
         }
     }
@@ -473,6 +484,7 @@ inline cudf::ast::expression const& build_ast(Rcpp::List node,
                                                eval_ctx& ctx,
                                                const std::string& type_hint);
 inline cudf::size_type materialize(Rcpp::List node, eval_ctx& ctx);
+inline cudf::size_type materialize_call(Rcpp::List node, eval_ctx& ctx);
 inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ctx);
 
 // Promotion hierarchy (D5 / section 1.3): BOOL8 < INT32 < INT64 < FLOAT64.
@@ -1563,7 +1575,24 @@ inline eval_ctx::col_range checked_col_range(eval_ctx& ctx, cudf::size_type idx)
     return r;
 }
 
-inline checked_vr fuse_checked(Rcpp::List node, checked_tree& ct, eval_ctx& ctx) {
+// #17: the node's common-subexpression id, or -1 (unmarked, or the memo is off
+// because FLOAT64 leaves are being read as NaN-as-null, F55).
+inline int ir_cse_id(Rcpp::List const& node, eval_ctx const& ctx) {
+    if (ctx.nan_leaves || !node.containsElementNamed("cse")) return -1;
+    return Rcpp::as<int>(node["cse"]);
+}
+
+// Reuses of a memoized subtree, cumulative over the session (a test hook,
+// read by gpu_cse_reuse_count()).
+inline double& cse_reuse_counter() {
+    static double n = 0;
+    return n;
+}
+
+// `is_root`: `node` is the checked chain materialize() is evaluating, so its
+// own cse id must not turn it into a leaf of itself.
+inline checked_vr fuse_checked(Rcpp::List node, checked_tree& ct, eval_ctx& ctx,
+                               bool is_root = false) {
     namespace ast = cudf::ast;
     std::string kind = ir_kind(node);
 
@@ -1584,6 +1613,9 @@ inline checked_vr fuse_checked(Rcpp::List node, checked_tree& ct, eval_ctx& ctx)
     if (kind == "call" && ct.fused < kMaxFusedChecked) {
         std::string op = Rcpp::as<std::string>(node["op"]);
         fusable = checked_int_kind(op, node, ctx) == 1 && !checked_has_null_literal(node);
+        // #17: a repeated checked subtree is a leaf, so its chain is computed
+        // once (materialize() memoizes it) and every user reads the column.
+        if (fusable && !is_root && ir_cse_id(node, ctx) >= 0) fusable = false;
         if (fusable) ++ct.fused;
     }
 
@@ -1661,7 +1693,7 @@ inline std::unique_ptr<cudf::column> apply_checked_int_add(Rcpp::List node, eval
     }
 
     checked_tree ct;
-    checked_vr top = fuse_checked(node, ct, ctx);
+    checked_vr top = fuse_checked(node, ct, ctx, /*is_root=*/true);
     // F61: every node's interval is inside the int32 range, so no row can
     // overflow: the INT32 value is the answer, with no range test and no
     // reduction.
@@ -3721,6 +3753,21 @@ inline cudf::size_type materialize(Rcpp::List node, eval_ctx& ctx) {
     }
 
     // kind == "call"
+    // #17: a subtree the R side marked as repeated is evaluated once.
+    const int cse = ir_cse_id(node, ctx);
+    if (cse >= 0) {
+        auto hit = ctx.cse_slots.find(cse);
+        if (hit != ctx.cse_slots.end()) {
+            ++cse_reuse_counter();
+            return hit->second;
+        }
+    }
+    cudf::size_type out = materialize_call(node, ctx);
+    if (cse >= 0) ctx.cse_slots[cse] = out;
+    return out;
+}
+
+inline cudf::size_type materialize_call(Rcpp::List node, eval_ctx& ctx) {
     std::string op = Rcpp::as<std::string>(node["op"]);
     if (op_dispatches_to_ast(op, node, ctx)) {
         cudf::ast::tree tree;

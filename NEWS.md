@@ -1,5 +1,13 @@
 # cuplyr (development version)
 
+* `mutate()`, `transmute()` and `filter()` compute a repeated `round()`,
+  `%in%`, string function, integer chain such as `(i + j)` or any other
+  subexpression that needs its own GPU step once per call instead of once per
+  use, so `mutate(a = round(x, 2) + 1, b = round(x, 2) * 2)` rounds once.
+  Plain double arithmetic such as `(x + y)` is left alone, because the GPU
+  fuses it into the surrounding expression and sharing it measured slower.
+  Results, warnings and errors are unchanged (#17).
+
 * `mutate()` and `transmute()` raise dplyr's errors. An error in a dot, such as
   an unknown object or a missing `.data` column, is a `dplyr:::mutate_error`
   that names the argument ("In argument: ...") and, for a grouped table or

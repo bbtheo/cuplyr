@@ -200,6 +200,31 @@ test_that("perf: arrange_multikey_lazy", {
 })
 
 # =============================================================================
+# mutate() with repeated handler subtrees (#17)
+#
+# round() and %in% are evaluated by their own kernels, so a repeat is computed
+# once and reused. The pipeline ends in a cheap reduction (not collect() of
+# every column), so the time is the mutate's kernel work.
+# =============================================================================
+
+test_that("perf: mutate_repeated_handler_eager", {
+  skip_if_no_gpu()
+  gpu_df <- tbl_gpu(perf_big_df, lazy = FALSE)
+
+  expect_no_perf_regression("mutate_repeated_handler_eager", function() {
+    gpu_df |>
+      dplyr::mutate(
+        a = round(x, 2) + 1,
+        b = round(x, 2) * z,
+        c = dplyr::if_else(id %in% c(1L, 5L, 77L), y, z),
+        d = dplyr::if_else(id %in% c(1L, 5L, 77L), 1, 0)
+      ) |>
+      dplyr::summarise(s = sum(a) + sum(b) + sum(c) + sum(d)) |>
+      collect()
+  }, calibration = "kernel")
+})
+
+# =============================================================================
 # group_by() |> summarise()
 # =============================================================================
 

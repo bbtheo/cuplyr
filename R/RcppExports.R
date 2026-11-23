@@ -157,6 +157,10 @@ gpu_distinct <- function(xptr, key_indices) {
     .Call(`_cuplyr_gpu_distinct`, xptr, key_indices)
 }
 
+gpu_cse_reuse_count <- function() {
+    .Call(`_cuplyr_gpu_cse_reuse_count`)
+}
+
 gpu_compute_column <- function(xptr, ir) {
     .Call(`_cuplyr_gpu_compute_column`, xptr, ir)
 }

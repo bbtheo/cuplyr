@@ -71,6 +71,7 @@ lower_filter <- function(ast, source_ptr) {
   }
 
   bound_ir <- ir_bind(combined_ir, input_schema)
+  bound_ir <- ir_mark_repeats(list(bound_ir))[[1L]]
   warn_int_overflow(gpu_filter_expr(input_ptr, bound_ir), in_filter = TRUE)
 }
 
@@ -233,6 +234,7 @@ lower_mutate <- function(ast, source_ptr) {
     }
   }
   out_types <- gpu_physical_type(out_types)
+  bound_exprs <- ir_mark_repeats(bound_exprs)
 
   result <- warn_int_overflow(
     gpu_mutate_expr(input_ptr, bound_exprs, out_names, out_types, input_schema$names)

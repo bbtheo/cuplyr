@@ -100,6 +100,13 @@ static SEXP finish_expr_result(std::unique_ptr<cudf::table> tbl, bool int_overfl
     return out;
 }
 
+// #17 test hook: how many times a memoized common subexpression was reused,
+// cumulative over the session.
+// [[Rcpp::export]]
+double gpu_cse_reuse_count() {
+    return cuplyr::cse_reuse_counter();
+}
+
 // [[Rcpp::export]]
 SEXP gpu_compute_column(SEXP xptr, Rcpp::List ir) {
     using namespace cuplyr;
