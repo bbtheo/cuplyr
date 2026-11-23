@@ -615,8 +615,9 @@ test_that("F59: narrow windows are no slower than dev, and wide windows cost abo
     if (!is.null(cell$na)) df$x[sample.int(cell$n, cell$n * cell$na)] <- NA
     src <- tbl_gpu(df)
     if (!is.null(cell$groups)) src <- dplyr::group_by(src, g)
-    # timing_medians() runs a full gc() before every batch (about a thousand
-    # per cell); with the 1e7-row frame still alive each one is slow, so drop it.
+    # The frame isn't needed once it is uploaded; drop it. The untimed gc()
+    # before each batch (timing_medians() runs about 320 per cell) then also
+    # frees the previous batch's 80 MB of results.
     rm(df)
     gc()
     for (stat in c("mean", "sum", "min", "max", "sd")) {

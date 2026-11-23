@@ -97,7 +97,9 @@ test_that("many-group chunks own their data: they outlive the input and each oth
 
 # Medians of interleaved, gpu_sync()-fenced batches (timing_medians(),
 # helper-timing.R), so the GPU and CPU calls see the same machine load. A GPU
-# call is 30-45 ms and the CPU one 100-110 ms: a batch is one or two calls.
+# call is 30-45 ms and the CPU one 100-110 ms; target = 0.02 makes a batch one
+# call of each, after a gc(), so the GPU's second call doesn't pay for the first
+# one's 10,000 table finalizers (the CPU closure is a single call too).
 # A near miss (GPU up to 10% over the CPU) is measured again, up to 3 attempts
 # (timing_retry()); a real regression reads the same every time and fails.
 f61s_ratios <- function(runs) {
@@ -118,7 +120,7 @@ test_that("native group_split() at 10,000 groups on 1e6 rows reaches CPU parity"
       timing_medians(list(
         gpu = function() dplyr::group_split(gt, g),
         cpu = function() dplyr::group_split(dplyr::collect(gt), g)
-      ), samples = 9L, warmup = 1L, label = "F61 group_split gpu vs cpu")
+      ), samples = 9L, warmup = 1L, target = 0.02, label = "F61 group_split gpu vs cpu")
     },
     ok = function(t) t[["gpu"]] <= t[["cpu"]],
     retry_if = function(t) t[["gpu"]] / t[["cpu"]] < 1.1

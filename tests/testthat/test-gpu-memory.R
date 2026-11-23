@@ -141,7 +141,7 @@ test_that("tbl_gpu() raises device-level GPU memory use", {
     own0 <- gpu_own_device_used_bytes()
     gpu_df <- tbl_gpu(df)
     own1 <- gpu_own_device_used_bytes()
-    list(diff = as.numeric(own1) - as.numeric(own0), dim = dim(gpu_df))
+    list(diff = gpu_own_delta(own0, own1), dim = dim(gpu_df))
   })
 
   expected_min <- 1000000 * 5 * 8

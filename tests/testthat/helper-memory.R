@@ -18,7 +18,9 @@ gpu_alloc_used_bytes <- function() {
   if (is.na(st$pool_used_bytes)) st$used_bytes else st$pool_used_bytes
 }
 
-# gpu_memory_snapshot() with `used_memory` measured by gpu_alloc_used_bytes().
+# A snapshot list of the shape the memory tests compare (`used_memory`,
+# `available`), with `used_memory` measured by gpu_alloc_used_bytes(). NA and
+# `available = FALSE` without a GPU.
 gpu_alloc_snapshot <- function() {
   if (!has_gpu()) {
     return(list(used_memory = NA_real_, available = FALSE))
@@ -31,11 +33,13 @@ gpu_alloc_snapshot <- function() {
 # to the device) can't read the allocator's counters, and the device-wide reading
 # (`used_bytes`) also moves when any other process uses the GPU (a compositor, a
 # browser). nvidia-smi reports the memory of each compute process, so this
-# process's figure is not moved by the others. It is in MiB: coarse, but the
-# bounds that use it are tens of MiB or more. When nvidia-smi is missing, fails,
-# or doesn't list this PID, the device-wide reading is returned instead, with
-# level "device". Self-contained on purpose: it also runs in child processes,
-# where only base/utils and gpu_memory_state() exist.
+# process's figure is not moved by the others. It has MiB resolution: coarse, but
+# fine for the bounds that use it (the smallest, 4 MiB in the F57 probe, checks a
+# delta that should be 0). When nvidia-smi is missing, fails, or doesn't list
+# this PID, the device-wide reading is returned instead, with level "device".
+# Two readings may differ in level (one nvidia-smi call can fail), so take their
+# difference with gpu_own_delta(). Self-contained on purpose: it also runs in
+# child processes, where only base/utils and gpu_memory_state() exist.
 gpu_own_device_used_bytes <- function() {
   smi <- Sys.which("nvidia-smi")
   if (nzchar(smi)) {
@@ -65,6 +69,20 @@ gpu_own_device_used_bytes <- function() {
   out
 }
 
+# `b - a` for two readings of gpu_own_device_used_bytes(), as a plain number.
+# A process-level and a device-level reading can't be subtracted (the device
+# figure includes other processes and the driver's own pages), so readings at
+# different levels are an error, not a wrong delta. Self-contained, like the
+# reader: it is shipped to child processes with it.
+gpu_own_delta <- function(a, b) {
+  level <- function(x) if (is.null(attr(x, "level"))) "unlabelled" else attr(x, "level")
+  if (!identical(level(a), level(b))) {
+    stop("own-memory readings at different levels: ", level(a), " vs ", level(b),
+         call. = FALSE)
+  }
+  as.numeric(b) - as.numeric(a)
+}
+
 # Hand this process's cached GPU memory back to the device before a child R
 # process starts. The async resource keeps freed pages for reuse (a pool never
 # gives them back), and a test that ran out of memory can leave it holding most
@@ -76,24 +94,36 @@ gpu_free_for_child <- function() {
   invisible(gpu_memory_state()$free_bytes)
 }
 
+# What the last gpu_child_r() saw before it started its child: `free_before`, the
+# device's free bytes after this process handed its cache back (NA without a
+# GPU). A record in an environment, so the child's value is returned as is; a
+# test reads it for its failure messages.
+gpu_child_state <- new.env(parent = emptyenv())
+
 # Run `func(...)` (the elements of `args`) in a fresh R process and return its
 # value. Every child R process in the tests starts here: this process first
-# frees its cached GPU memory (gpu_free_for_child()), and the child's global
-# environment has gpu_own_device_used_bytes() before `func` runs. `func` must
-# not rely on its defining environment (it is shipped with globalenv() as
-# parent); `env` adds environment variables for the child.
+# frees its cached GPU memory (once, gpu_free_for_child(); the bytes free
+# afterwards are kept in gpu_child_state$free_before), and the child's global
+# environment has gpu_own_device_used_bytes() and gpu_own_delta() before `func`
+# runs. `func` is re-homed to the child's global environment, so it can't rely
+# on its defining environment (functions inside `args` travel with a serialized
+# copy of theirs); `env` adds environment variables for the child.
 gpu_child_r <- function(func, args = list(), env = character(), timeout = 600) {
   skip_if_not_installed("callr")
-  gpu_free_for_child()
+  gpu_child_state$free_before <- gpu_free_for_child()
   environment(func) <- globalenv()
-  reader <- gpu_own_device_used_bytes
-  environment(reader) <- globalenv()
+  readers <- list(gpu_own_device_used_bytes = gpu_own_device_used_bytes,
+                  gpu_own_delta = gpu_own_delta)
+  readers <- lapply(readers, function(f) {
+    environment(f) <- globalenv()
+    f
+  })
   callr::r(
-    function(func, args, reader) {
-      assign("gpu_own_device_used_bytes", reader, envir = globalenv())
+    function(func, args, readers) {
+      list2env(readers, envir = globalenv())
       do.call(func, args)
     },
-    args = list(func = func, args = args, reader = reader),
+    args = list(func = func, args = args, readers = readers),
     env = c(callr::rcmd_safe_env(), env),
     timeout = timeout
   )

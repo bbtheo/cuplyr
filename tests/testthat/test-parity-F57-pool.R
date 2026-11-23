@@ -23,9 +23,10 @@ f57_pkg_root <- function() {
 }
 
 # Run `fn(state)` in a fresh R process that loads this worktree after setting
-# `opts` and env vars `env` (twice when `reload`). callr ships `fn` without its
-# environment, so `fn` only uses package functions and its `state` argument,
-# which is f57_state_fn() re-homed to the global environment.
+# `opts` and env vars `env` (twice when `reload`). `fn` travels as an argument,
+# so its defining environment goes along only as a serialized copy: it uses
+# package functions and its `state` argument, which is f57_state_fn() re-homed
+# to the global environment.
 f57_subprocess <- function(fn = function(state) state(), env = character(),
                            opts = list(), reload = FALSE) {
   skip_if_not_installed("pkgload")

@@ -65,13 +65,13 @@ test_that("large columns raise device usage even with half-used pages", {
     gc(full = TRUE)
     Sys.sleep(0.1)
     gc(full = TRUE)
-    used <- function() as.numeric(gpu_own_device_used_bytes())
+    used <- function() gpu_own_device_used_bytes()
 
     df <- as.data.frame(matrix(runif(1e6 * 5), ncol = 5))
     gc(full = TRUE)
     before <- used()
     g <- tbl_gpu(df)
-    list(diff = used() - before, survivors = length(tabs), rows = nrow(g))
+    list(diff = gpu_own_delta(before, used()), survivors = length(tabs), rows = nrow(g))
   })
 
   expect_true(out$diff >= 0.5 * 1000000 * 5 * 8,

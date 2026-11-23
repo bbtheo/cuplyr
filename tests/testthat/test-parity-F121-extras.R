@@ -282,7 +282,8 @@ test_that("the driver's rowwise steps check, probe, time and cap at a small scal
   sizes <- c(10000, 20000)
   cfg <- list(steps = "gen", sizes = sizes, tables = "wide", row_group_rows = 5000L, data_dir = file.path(d, "data"),
               out_dir = file.path(d, "out"), root = root, lib = f121_bench_lib(), busy_max = 1)
-  # the driver starts GPU child processes: give them this process's cached memory
+  # the driver can start GPU child processes (these steps start none): free this
+  # process's cached memory first, as every driver run does
   gpu_free_for_child()
   run(cfg)
   run(modifyList(cfg, list(steps = c("rowwise_check", "rowwise"), rowwise_sizes = sizes, rowwise_reps = 2L, cap = 1.5,
