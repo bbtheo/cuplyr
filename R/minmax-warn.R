@@ -449,6 +449,59 @@ minmax_dots_call <- function(dots) {
   FALSE
 }
 
+# TRUE iff every min()/max() call of the dots is `min(col)` / `max(col)` of a
+# bare column of the table whose GPU type is FLOAT64, STRING or a timestamp, and
+# no dot of the call makes a column of that name: such a call is the same type
+# whatever the data (an empty group gives Inf, or NA for a string, not another
+# type), so nothing needs to be known of the rows before the dots are parsed.
+# Any other shape (`max(a + 1L)`, `max(x, na.rm = TRUE)`, `.data$x`, a name an
+# earlier dot makes) is not known to be: FALSE. A dot with no call gives TRUE.
+# @param dots the (expanded) quosures of the verb call
+# @param schema the schema they are evaluated against
+# @keywords internal
+minmax_dots_type_fixed <- function(dots, schema) {
+  names_ok <- .subset2(schema, "names")
+  types <- .subset2(schema, "types")
+  made <- names(dots)
+  fixed_arg <- function(a) {
+    if (!is.symbol(a)) {
+      return(FALSE)
+    }
+    nm <- as.character(a)
+    pos <- which(names_ok == nm)
+    length(pos) == 1L && !(nm %in% made) &&
+      types[[pos]] %in% c("FLOAT64", "STRING", "TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS")
+  }
+  fixed <- function(x) {
+    if (!is.call(x)) {
+      return(TRUE)
+    }
+    head <- x[[1L]]
+    if (is.call(head) && length(head) == 3L && identical(head[[1L]], quote(`::`))) {
+      head <- head[[3L]]
+    }
+    if (is.symbol(head) && as.character(head) %in% c("min", "max")) {
+      return(length(x) == 2L && is.null(names(x)) && fixed_arg(x[[2L]]))
+    }
+    parts <- as.list(x)
+    for (i in seq_along(parts)) {
+      if (identical(parts[[i]], quote(expr = ))) next
+      a <- parts[[i]]
+      if (rlang::is_quosure(a)) a <- rlang::quo_get_expr(a)
+      if (!fixed(a)) {
+        return(FALSE)
+      }
+    }
+    TRUE
+  }
+  for (dot in dots) {
+    if (!fixed(rlang::quo_get_expr(dot))) {
+      return(FALSE)
+    }
+  }
+  TRUE
+}
+
 # The row count of a lazy table the pending steps cannot change (mutate,
 # select, rename, window, arrange: a walk of the plan), else NA. A plan that
 # ends in a parquet scan with nothing pushed into it has its footers' count (as
@@ -808,6 +861,25 @@ minmax_window_setup <- function(.data, by_given) {
        footer = footer && !is.null(facts))
 }
 
+# Run a facts query (minmax_scan_facts()) over a pending plan: quietly, and
+# reading only what the query reads. Every warning and message it could raise
+# comes from a step of the plan, which collect() runs again and reports then
+# (F80: a plan warns when it runs), so none is shown here; the mutates nothing
+# of the query reads are not computed (`prune_unread`, optimizer.R), so the
+# columns they read are not read.
+# @param x a lazy table, the query on top of the pending plan
+# @keywords internal
+minmax_facts_compute <- function(x) {
+  prev <- .optimizer_opts$prune_unread
+  .optimizer_opts$prune_unread <- TRUE
+  on.exit(.optimizer_opts$prune_unread <- prev, add = TRUE)
+  withCallingHandlers(
+    compute(x),
+    warning = function(w) invokeRestart("muffleWarning"),
+    message = function(m) invokeRestart("muffleMessage")
+  )
+}
+
 # The facts of a lazy plan over a parquet scan whose rows (or empty groups) the
 # verb could not read, by a query over the pending plan through the normal
 # compute path: the optimizer prunes it, so the scan reads only the columns the
@@ -820,7 +892,7 @@ minmax_window_setup <- function(.data, by_given) {
 # @keywords internal
 minmax_scan_facts <- function(.data, wants_empty) {
   if (wants_empty) {
-    keys <- compute(push_op(.data, ast_distinct(input_node(.data), .subset2(.data, "groups"))))
+    keys <- minmax_facts_compute(push_op(.data, ast_distinct(input_node(.data), .subset2(.data, "groups"))))
     if (!is.null(fixed <- .subset2(.data, "fixed_keys"))) {
       keys <- set_tbl_gpu_field(keys, "fixed_keys", fixed)
     }
@@ -832,7 +904,7 @@ minmax_scan_facts <- function(.data, wants_empty) {
     return(list(E = E, n_in = n_keys, id = g$id, keys = g$keys))
   }
   flat <- dplyr::ungroup(.data)
-  counted <- compute(push_op(flat, ast_summarise(
+  counted <- minmax_facts_compute(push_op(flat, ast_summarise(
     input_node(flat), list(make_aggregation(".n", NA_character_, "n")), character()
   )))
   minmax_window_facts(.data, as.integer(collect(counted)[[1L]]), FALSE)

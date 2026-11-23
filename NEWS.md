@@ -120,13 +120,21 @@
   `.drop = FALSE` table costs one distinct count when none is empty, and a table
   whose row count is known and not zero only pays a check of a few microseconds.
 
-* A lazy `read_parquet_gpu()` table is never read whole for a `min()`/`max()`:
-  the row count of a plan that keeps the rows comes from the file footers, and
-  when the rows or the empty groups of a filtered plan matter, a query that reads
-  only the columns it needs finds them, with the plan staying lazy (no plan
-  break). If the plan said a `min()`/`max()` result is an integer because the
-  file had rows, and the file has none when the plan runs, the run fails with a
-  `cuplyr_error_parquet_file_emptied` error: call `read_parquet_gpu()` again.
+* A `min()`/`max()` over a lazy `read_parquet_gpu()` table does not run the plan
+  early and does not read the file whole for its own sake: the row count of a
+  plan that keeps the rows comes from the file footers, and when the rows or the
+  empty groups of a filtered plan matter for the type of a result, a small
+  query over the plan answers it. It reads only the columns it needs (the
+  filter and grouping columns; a `mutate()` nothing reads is left out) and
+  raises no warning of its own: the plan's warnings fire once, when it runs.
+  The plan stays lazy (no plan break). A double `min()`/`max()` of a column
+  asks nothing at the verb. A `mutate()` that dplyr must run on the CPU still
+  collects its input, as it does for any lazy table. If the plan said a
+  `min()`/`max()` result is an integer because the file's footer had rows, and
+  the file has none when the plan runs, the run fails with a
+  `cuplyr_error_parquet_file_emptied` error: call `read_parquet_gpu()` again. A
+  type decided by the small query is not checked again: see "If the file
+  changes" in `?read_parquet_gpu`.
 
 * A `min()`/`max()` whose argument has one value per group (`max(n())`,
   `max(sum(x))`, the outer call of `max(max(x))`) keeps its type and does not

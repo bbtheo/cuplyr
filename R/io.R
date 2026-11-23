@@ -327,6 +327,17 @@ parquet_diff <- function(want, got) {
 #' footer at the time you ask. Reading one lazy table twice reads the file
 #' twice.
 #'
+#' A `min()` or `max()` over a lazy table can also look at the files at the verb,
+#' before `collect()`: it may read the footers (the row count of a plan that
+#' keeps its rows, one footer per file, so a missing file is an error at the
+#' verb), or run a small query over the filter and grouping columns of the plan
+#' to learn whether a result is empty, which decides whether an integer result
+#' is a double. The plan is not run early. If a file changes after that, the
+#' types such a plan promised can be stale: a file emptied after the verb stops
+#' the run with `cuplyr_error_parquet_file_emptied` when the type came from the
+#' footer, and gives the type the plan said (not dplyr's) when it came from the
+#' query. Make the table again after changing a file.
+#'
 #' ## Errors
 #' All errors have class `cuplyr_error_parquet` and a more specific one, and
 #' name the file: `cuplyr_error_parquet_not_found`, `_invalid` (not a parquet
