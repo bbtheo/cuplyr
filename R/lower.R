@@ -505,7 +505,7 @@ lower_slice <- function(ast, source_ptr) {
 
       result_ptr <- gpu_slice_rank(input_ptr, col_idx, ast$descending, ast$amount,
                                    ast$is_prop, ast$with_ties, ast$na_rm,
-                                   getOption("cuplyr.topk_path", "auto"))
+                                   cuplyr_opt("topk_path"))
       # which route ran is for the tests; it must not outlive the lowering
       attr(result_ptr, "topk") <- NULL
 

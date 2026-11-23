@@ -15,6 +15,7 @@ cuplyr_exec_modes <- c("lazy", "eager")
 cuplyr_roll_medians <- c("exact", "frollmedian")
 cuplyr_roll_paths <- c("auto", "scans", "cudf")
 cuplyr_check_env_on <- c("1", "true", "TRUE", "yes")
+cuplyr_topk_paths <- c("auto", "topk", "sort")
 
 # Returned by a `parse` function for a value that is not valid.
 cuplyr_invalid <- structure(list(), class = "cuplyr_invalid")
@@ -123,21 +124,29 @@ opt_parse_release <- function(x, env = FALSE) {
   if (is.numeric(x) || is.character(x)) opt_parse_bytes(x) else cuplyr_invalid
 }
 
+# TRUE or FALSE, nothing else (cuplyr.parquet_pushdown).
+opt_parse_flag <- function(x, env = FALSE) {
+  if (isTRUE(x) || isFALSE(x)) x else cuplyr_invalid
+}
+
 opt_parse_check <- function(x, env = FALSE) {
   if (env) x %in% cuplyr_check_env_on else isTRUE(x)
 }
 
 # `blank`: NULL, or a test for a set-but-empty option (see above).
+# `computed`: TRUE when an NA `default` stands for a value cuplyr works out at
+# run time (the initial pool size), not for "no value" (no release threshold);
+# diagnostics() reports the two differently.
 # `default_result` is what a lookup of an unset or blank option returns, built
 # once so that path allocates nothing.
 opt_new <- function(name, default, env, parse, unset, description, expect,
                     internal = FALSE, message = NULL, blank = NULL,
-                    default_label = NULL) {
+                    default_label = NULL, computed = FALSE) {
   list(
     name = name, option = paste0("cuplyr.", name), default = default, env = env,
     parse = parse, unset = unset, blank = blank, description = description,
     expect = expect, internal = internal, message = message,
-    default_label = default_label %||% opt_quote(default),
+    default_label = default_label %||% opt_quote(default), computed = computed,
     default_result = list(value = default, source = "default", bad = FALSE)
   )
 }
@@ -188,7 +197,7 @@ cuplyr_option_registry <- list(
     "Initial pool size in bytes (default: a quarter of free GPU memory, at most 1 GiB). Read at load.",
     "a number of bytes, 0 or more",
     blank = opt_blank_na,
-    default_label = "the default size"
+    default_label = "the default size", computed = TRUE
   ),
   release_threshold = opt_new(
     "release_threshold", NA_real_, "CUPLYR_RELEASE_THRESHOLD",
@@ -200,6 +209,13 @@ cuplyr_option_registry <- list(
                      "bytes, 0 or more); no automatic release."),
               opt_typed(r), opt_source_label(r))
     }
+  ),
+  parquet_pushdown = opt_new(
+    "parquet_pushdown", TRUE, NA_character_,
+    opt_parse_flag, opt_unset_null,
+    "Set FALSE to read Parquet files without projection and predicate pushdown.",
+    "TRUE or FALSE",
+    default_label = "the default (on)"
   ),
   roll_median = opt_new(
     "roll_median", "exact", "CUPLYR_ROLL_MEDIAN",
@@ -214,6 +230,13 @@ cuplyr_option_registry <- list(
     "Internal: force the rolling-window path (auto, scans or cudf).",
     paste0("one of ", opt_quote(cuplyr_roll_paths)),
     internal = TRUE, blank = opt_blank_empty
+  ),
+  topk_path = opt_new(
+    "topk_path", "auto", NA_character_,
+    opt_choice(cuplyr_topk_paths), opt_unset_null,
+    "Internal: force the slice_min()/slice_max() route (auto, topk or sort).",
+    paste0("one of ", opt_quote(cuplyr_topk_paths)),
+    internal = TRUE
   ),
   check_schema_cache = opt_new(
     "check_schema_cache", FALSE, "CUPLYR_CHECK_SCHEMA_CACHE",
@@ -456,6 +479,9 @@ opt_render <- function(x) {
 #' * `cuplyr.release_threshold` (`CUPLYR_RELEASE_THRESHOLD`): bytes the async
 #'   resource keeps before returning memory to the driver, 0 or more. Unset
 #'   (the default): no automatic release.
+#' * `cuplyr.parquet_pushdown`: `TRUE` (the default) or `FALSE`. `FALSE` reads
+#'   Parquet files without projection and predicate pushdown. See
+#'   [read_parquet_gpu()].
 #' * `cuplyr.roll_median` (`CUPLYR_ROLL_MEDIAN`): `"exact"` (the default) or
 #'   `"frollmedian"`, the engine of [roll_median()].
 #'
@@ -466,6 +492,9 @@ opt_render <- function(x) {
 #' Listed by `cuplyr_options(internal = TRUE)`; not for normal use.
 #' * `cuplyr.roll_path` (`CUPLYR_ROLL_PATH`): `"auto"` (the default),
 #'   `"scans"` or `"cudf"`; forces the path of rolling-window functions.
+#' * `cuplyr.topk_path`: `"auto"` (the default), `"topk"` or `"sort"`; forces
+#'   the route of `slice_min()` and `slice_max()` (a top-k selection or a full
+#'   sort).
 #' * `cuplyr.check_schema_cache` (`CUPLYR_CHECK_SCHEMA_CACHE`): `TRUE` or
 #'   `FALSE` (the default); checks the cached schema of every lazy table on use
 #'   (the environment variable is `1`, `true` or `yes`).
@@ -512,12 +541,12 @@ opt_render <- function(x) {
 #' @aliases cuplyr.exec_mode cuplyr.fallback cuplyr.plan_break
 #' @aliases cuplyr.memory_resource cuplyr.memory_pool cuplyr.pool_initial
 #' @aliases cuplyr.release_threshold cuplyr.roll_median cuplyr.roll_path
-#' @aliases cuplyr.check_schema_cache
+#' @aliases cuplyr.check_schema_cache cuplyr.parquet_pushdown cuplyr.topk_path
 NULL
 
 #' @rdname cuplyr-options
 #' @param internal Also list the internal switches (`cuplyr.roll_path`,
-#'   `cuplyr.check_schema_cache`).
+#'   `cuplyr.topk_path`, `cuplyr.check_schema_cache`).
 #' @return `cuplyr_options()` returns a data frame of class `cuplyr_options`
 #'   with one row per option and the character columns `option`, `value` (the
 #'   value cuplyr uses; `NA` for an unset one), `source` (`"option"`, `"env"`

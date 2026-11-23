@@ -1,5 +1,16 @@
 # cuplyr (development version)
 
+* `diagnostics()` now reports the libcudf and RMM versions cuplyr was built
+  against, the libcudf library loaded into the session and its version, the
+  active GPU memory resource and pool size, and every cuplyr option with its
+  value, source and default. `diagnostics(format = "json")` prints the same
+  information as one JSON object, and the libcudf path is redacted like the
+  other paths. `cuplyr.parquet_pushdown` and `cuplyr.topk_path` are now
+  registered options: an invalid value warns once and means the default.
+  `cuplyr.parquet_pushdown` is listed by `cuplyr_options()` and documented in
+  `?cuplyr-options`; `cuplyr.topk_path` is internal, so it is listed only by
+  `cuplyr_options(internal = TRUE)` (#14).
+
 * `filter()`, `arrange()`, `summarise()`, `count()`, `distinct()`,
   `group_by()`, `relocate()` and the joins raise dplyr's error for a column
   that doesn't exist: the same class, message and parent error, and the call
