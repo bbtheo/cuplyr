@@ -9,11 +9,15 @@
   present in the data." for a join, and rlang's own error for `.data$col`.
   `summarise()` no longer goes to the CPU for a missing column it is certain
   to read before anything else can fail, such as `mean(xx)`, `n() + xx` or
-  `round(sum(xx), 1)` (other dots keep their route, where dplyr's own error
-  comes out). `mutate()` no longer warns about an unnamed expression that
-  errors, and `arrange()` ignores a `NULL` name and sorts by any other object
-  that is not a column, as dplyr does. dplyr gives no "did you mean" hint, so
-  neither does cuplyr (#13).
+  `round(sum(xx), 1)`, also after dots that cannot fail, such as
+  `mean(y, na.rm = TRUE)`, `n_distinct(x)` or `first(x)`. The same goes for a
+  function argument left missing and a function that doesn't exist (other dots
+  keep their route, where dplyr's own error comes out). A `count()` or
+  `distinct()` key that recycles a vector from the environment, such as
+  `x + v`, is computed by dplyr instead of failing. `mutate()` no longer warns
+  about an unnamed expression that errors, and `arrange()` ignores a `NULL`
+  name and sorts by any other object that is not a column, as dplyr does.
+  dplyr gives no "did you mean" hint, so neither does cuplyr (#13).
 
 * A GPU step that runs out of device memory raises `cuplyr_error_gpu_oom` with
   the call the user made, the device's and the session's memory, what helps

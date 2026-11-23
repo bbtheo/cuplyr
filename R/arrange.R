@@ -143,8 +143,10 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
         # Not a column. A name bound in the dot's environment is a value dplyr
         # sorts by (or ignores, a NULL); anything else is dplyr's error.
         env <- rlang::quo_get_env(quo)
-        if (!exists(spec$col_name, envir = env, inherits = TRUE)) {
-          arrange_abort_missing(object_not_found_error(spec$col_name), quo, user_dots, if (isTRUE(.by_group)) length(.subset2(.data, "groups")) else 0L)
+        kind <- certain_binding_kind(spec$col_name, env)
+        if (identical(kind, "unbound") || identical(kind, "missing")) {
+          parent <- if (kind == "unbound") object_not_found_error(spec$col_name) else missing_arg_error(spec$col_name, env)
+          arrange_abort_missing(parent, quo, user_dots, if (isTRUE(.by_group)) length(.subset2(.data, "groups")) else 0L)
         }
         bound <- tryCatch(list(get(spec$col_name, envir = env, inherits = TRUE)), error = function(e) NULL)
         if (!is.null(bound) && is.null(bound[[1L]]) && !rlang::quo_is_call(quo, "-", n = 1L)) {

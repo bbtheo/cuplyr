@@ -172,14 +172,7 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
     new_name <- dot_names[i]
     expr <- dots[[i]]
 
-    # (a `&&` of a column is dplyr's to evaluate, as an unsupported key is)
-    ir <- tryCatch(
-      withCallingHandlers(
-        ir_parse_quo(expr, schema),
-        error = function(cnd) computed_key_error(cnd, expr, user_names[[i]], frame)
-      ),
-      cuplyr_error_short_circuit = function(e) NULL
-    )
+    ir <- parse_key_ir(expr, schema, user_names[[i]], frame)
 
     # Not in the expression IR (a user function, a column-free call that only
     # works inside the data mask, ...): dplyr evaluates it, or raises its own

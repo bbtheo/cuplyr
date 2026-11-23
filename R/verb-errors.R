@@ -99,12 +99,38 @@ object_not_found_error <- function(name) {
   simpleError(paste0("object '", name, "' not found"))
 }
 
-# The error a dot raises for what expr_first_certain_missing() found: R's "object
-# not found", or rlang's `.data$xx` error.
+# R's error for reading `nm` from `env` where it is an argument the caller left
+# missing ("argument "w" is missing, with no default"), raised by evaluating it
+# there. dplyr's mask evaluates the name with no call of its own, so neither has
+# this one.
+# @keywords internal
+missing_arg_error <- function(nm, env) {
+  cnd <- tryCatch(
+    {
+      eval(as.name(nm), env)
+      NULL
+    },
+    error = function(e) e
+  )
+  if (is.null(cnd)) {
+    rlang::abort(paste0("Reading `", nm, "` was expected to fail, as a missing argument."),
+                 class = "cuplyr_error_internal")
+  }
+  cnd$call <- NULL
+  cnd
+}
+
+# The error a dot raises for what certain_eval_walk() found: R's "object not
+# found", "could not find function" (with the call), the error of a missing
+# argument, or rlang's `.data$xx` error.
 # @param miss Its result (not NULL); `scope` the names it was looked up in
 # @keywords internal
 missing_name_error <- function(miss, scope) {
-  if (is.null(miss$pronoun)) {
+  if (!is.null(miss$nofun)) {
+    simpleError(paste0("could not find function \"", as.character(miss$nofun[[1L]]), "\""), call = miss$nofun)
+  } else if (!is.null(miss$missing)) {
+    missing_arg_error(miss$name, miss$missing)
+  } else if (is.null(miss$pronoun)) {
     object_not_found_error(miss$name)
   } else {
     tryCatch(stop_data_pronoun_missing(miss$pronoun, miss$env, scope, miss$name), error = function(e) e)
@@ -163,8 +189,8 @@ certain_head_rule <- c(
   n = "none",
   # dplyr's n_distinct(): `missing(...)` and check_dots_unnamed() look at the
   # dots without forcing them, then df_list(...) forces them in order; `na.rm`
-  # is read after. The walk reads the unnamed arguments when every named one is
-  # `na.rm`.
+  # is read after (isTRUE()). The walk reads the unnamed arguments when every
+  # named one is `na.rm`.
   n_distinct = "dots"
 )
 
@@ -179,11 +205,27 @@ certain_head_pkg <- c(
 # or logical vector, when every argument the walk read is one (and the call has the
 # shape below): the builtin operators and math functions (with the arity they
 # take and no argument names; any arguments for the Summary group), mean(),
-# median(), var(), sd() and mad() of `x` alone, and n(). quantile() fails on an
-# NA without `na.rm`, nth() checks `n`, and so on: those never complete.
+# median(), var(), sd() and mad() of `x` with at most an `na.rm` that is a
+# number or TRUE/FALSE (each reads it with `if ()` or isTRUE(); var()'s `y`,
+# mean()'s `trim` and the like can fail), n(), and n_distinct() of one unnamed
+# vector (one value, an integer; two may not recycle). first() and last() of
+# `x` alone give a value of x's kind, of any vector (the default is `x`'s
+# missing value). quantile() fails on an NA without `na.rm`, nth() checks `n`,
+# and so on: those never complete.
 certain_summary_heads <- c("sum", "min", "max", "prod", "any", "all")
 certain_unary_heads <- c("!", "(", "is.na", "abs", "sqrt", "exp")
 certain_complete_x_heads <- c("mean", "median", "var", "sd", "mad")
+certain_kind_x_heads <- c("first", "last")
+
+# Calls dplyr rewrites before R sees them (across(), if_any(), if_all() at the top
+# of a dot, pick() anywhere, arrange()'s desc()), and so never looks up; n(),
+# which count(wt =) reads as syntax.
+certain_syntax_heads <- c("across", "if_any", "if_all", "pick", "desc", "n")
+
+# A literal argument that `if ()` reads without an error.
+certain_flag_literal <- function(a) {
+  (is.numeric(a) || is.logical(a)) && length(a) == 1L && !is.na(a)
+}
 
 # GPU types a column is an atomic number or logical of, on dplyr's side too.
 certain_num_types <- c("BOOL8", "INT8", "INT16", "INT32", "UINT8", "UINT16", "FLOAT32", "FLOAT64")
@@ -197,17 +239,40 @@ certain_schema_kinds <- function(schema) {
   list(num = unique(nms[is_num]), any = unique(nms[!is_num]))
 }
 
-# The function a head of certain_head_rule stands for.
+# The function a head of certain_head_rule stands for (looked up once a session).
 # @keywords internal
 certain_head_fun <- function(h) {
-  pkg <- certain_head_pkg[h]
-  if (is.na(pkg)) get(h, envir = baseenv()) else getExportedValue(pkg, h)
+  fun <- certain_head_funs[[h]]
+  if (is.null(fun)) {
+    pkg <- certain_head_pkg[h]
+    fun <- if (is.na(pkg)) get(h, envir = baseenv()) else getExportedValue(pkg, h)
+    assign(h, fun, envir = certain_head_funs)
+  }
+  fun
+}
+certain_head_funs <- new.env(parent = emptyenv())
+
+# The kind of a value, as certain_eval_walk() counts it: "num" for a number or
+# logical with no class, "any" for any other vector, "null" for NULL (a dot of
+# it makes no column), "value" for the rest (a function, an environment: no
+# dot result dplyr accepts).
+# @keywords internal
+certain_value_kind <- function(v) {
+  if (is.null(v)) {
+    "null"
+  } else if ((is.numeric(v) || is.logical(v)) && !is.object(v)) {
+    "num"
+  } else if (vctrs::obj_is_vector(v)) {
+    "any"
+  } else {
+    "value"
+  }
 }
 
 # How the lookup of `nm` from `env` evaluates: "unbound" (R's "object not found"),
-# "num" for a number or logical with no class, "any" for any other value, NULL
-# for a binding whose lookup runs code (a promise not yet forced, an active
-# binding), which may fail first.
+# "missing" (an argument the caller left missing: R's error for it), the value's
+# kind (certain_value_kind()), or NULL for a binding whose lookup runs code (a
+# promise not yet forced, an active binding), which may fail first.
 # @keywords internal
 certain_binding_kind <- function(nm, env) {
   while (!identical(env, emptyenv())) {
@@ -215,8 +280,12 @@ certain_binding_kind <- function(nm, env) {
       if (bindingIsActive(nm, env) || isTRUE(rlang::env_binding_are_lazy(env, nm))) {
         return(NULL)
       }
-      v <- get(nm, envir = env, inherits = FALSE)
-      return(if ((is.numeric(v) || is.logical(v)) && !is.object(v)) "num" else "any")
+      # (mget() returns a missing argument where get() raises its error)
+      v <- mget(nm, envir = env)
+      if (identical(v[[1L]], quote(expr = ))) {
+        return("missing")
+      }
+      return(certain_value_kind(v[[1L]]))
     }
     env <- parent.env(env)
   }
@@ -226,123 +295,167 @@ certain_binding_kind <- function(nm, env) {
 # Walk `expr` in R's evaluation order for a name that is certain to be looked up
 # before anything else could fail or stop the walk, and that is no column of
 # the data (`num`, `any`: the columns as certain_schema_kinds() splits them) and
-# bound nowhere from `env` up. Nothing is evaluated.
+# bound nowhere from `env` up, or bound to an argument left missing; or for the
+# head of a call that names no function there (R looks a call's function up
+# before it evaluates an argument, and data columns are no functions to it).
+# Nothing is evaluated (a call's function is looked up as R does).
 #
 # Returns list(hit =, kind =). `hit` is the verdict: list(name =) for a bare
-# name, list(pronoun =, env =, name =) for a `.data$xx` of a column that is not
-# there, or NULL. `kind` is how `expr` itself evaluates, when that is certain:
-# "num" (without an error, to an atomic numeric or logical vector), "any" (without an
-# error, to a value of unknown kind: a lookup), or NULL (not certain: it may fail,
-# or the walk stopped).
+# name, list(name =, missing = <env>) for a missing argument, list(nofun =
+# <call>) for a call of a function that is not there, list(pronoun =, env =,
+# name =) for a `.data$xx` of a column that is not there, or NULL. `kind` is
+# how `expr` itself evaluates, when that is certain: "num" (without an error, to
+# an atomic numeric or logical vector), "any" (without an error, to some other
+# vector), "null" and "value" (a NULL or a non-vector, by a lookup or a literal;
+# certain_value_kind()), or NULL (not certain: it may fail, or the walk
+# stopped). Anything the walk itself fails on gives neither.
 # @keywords internal
 certain_eval_walk <- function(expr, env, num, any) {
-  hit <- NULL
-  walk <- function(e, env) {
-    if (rlang::is_quosure(e)) {
-      return(walk(rlang::quo_get_expr(e), rlang::quo_get_env(e)))
+  state <- new.env(parent = emptyenv())
+  state$hit <- NULL
+  # (a lookup R would make that fails here, a promise forced in a function's
+  # lookup, say: no verdict)
+  kind <- tryCatch(certain_walk(expr, env, num, any, state), error = function(e) {
+    state$hit <- NULL
+    NULL
+  })
+  list(hit = state$hit, kind = kind)
+}
+
+# The walk of certain_eval_walk() at `e`: returns the kind and records a verdict
+# in `state$hit`.
+# @keywords internal
+certain_walk <- function(e, env, num, any, state) {
+  if (rlang::is_quosure(e)) {
+    return(certain_walk(rlang::quo_get_expr(e), rlang::quo_get_env(e), num, any, state))
+  }
+  if (rlang::is_missing(e)) {
+    return(NULL)
+  }
+  if (is.symbol(e)) {
+    nm <- as.character(e)
+    if (nm %in% num) {
+      return("num")
     }
-    if (rlang::is_missing(e)) {
+    if (nm %in% any) {
+      return("any")
+    }
+    # (`...` and `..1` are read through the dots, which may hold anything)
+    if (nm %in% c(".data", ".env", "...") || grepl("^\\.\\.[0-9]+$", nm)) {
       return(NULL)
     }
-    if (is.symbol(e)) {
-      nm <- as.character(e)
-      if (nm %in% num) {
-        return("num")
-      }
-      if (nm %in% any) {
-        return("any")
-      }
-      # (`...` and `..1` are read through the dots, which may hold anything)
-      if (nm %in% c(".data", ".env", "...") || grepl("^\\.\\.[0-9]+$", nm)) {
-        return(NULL)
-      }
-      kind <- certain_binding_kind(nm, env)
-      if (identical(kind, "unbound")) {
-        hit <<- list(name = nm)
-        return(NULL)
-      }
-      return(kind)
-    }
-    if (!is.call(e)) {
-      return(if ((is.numeric(e) || is.logical(e)) && length(e) == 1L) "num" else "any")
-    }
-    if (is_data_pronoun_call(e)) {
-      nm <- pronoun_call_name(e, env, list(names = c(num, any)))
-      if (is.null(nm)) {
-        return(NULL)
-      }
-      if (nm %in% num) {
-        return("num")
-      }
-      if (nm %in% any) {
-        return("any")
-      }
-      hit <<- list(pronoun = e, env = env, name = nm)
+    kind <- certain_binding_kind(nm, env)
+    if (identical(kind, "unbound")) {
+      state$hit <- list(name = nm)
       return(NULL)
     }
-    # (`base::sum()` as count(wt =) writes it: the package must be the function's)
-    head <- e[[1L]]
-    qualified <- rlang::is_call(head, "::", n = 2L) && is.symbol(head[[2L]]) && is.symbol(head[[3L]])
-    if (qualified) {
-      h <- as.character(head[[3L]])
-    } else if (is.symbol(head)) {
-      h <- as.character(head)
+    if (identical(kind, "missing")) {
+      state$hit <- list(name = nm, missing = env)
+      return(NULL)
+    }
+    return(kind)
+  }
+  if (!is.call(e)) {
+    if ((is.numeric(e) || is.logical(e)) && length(e) == 1L && !is.object(e)) {
+      return("num")
+    }
+    return(if (is.null(e)) "null" else if (vctrs::obj_is_vector(e)) "any" else "value")
+  }
+  if (is_data_pronoun_call(e)) {
+    nm <- pronoun_call_name(e, env, list(names = c(num, any)))
+    if (is.null(nm)) {
+      return(NULL)
+    }
+    if (nm %in% num) {
+      return("num")
+    }
+    if (nm %in% any) {
+      return("any")
+    }
+    state$hit <- list(pronoun = e, env = env, name = nm)
+    return(NULL)
+  }
+  # (`base::sum()` as count(wt =) writes it: the package must be the function's)
+  head <- e[[1L]]
+  qualified <- rlang::is_call(head, "::", n = 2L) && is.symbol(head[[2L]]) && is.symbol(head[[3L]])
+  if (qualified) {
+    h <- as.character(head[[3L]])
+  } else if (is.symbol(head)) {
+    h <- as.character(head)
+    fun <- get0(h, envir = env, mode = "function")
+    if (is.null(fun)) {
+      if (!h %in% certain_syntax_heads) {
+        state$hit <- list(nofun = e)
+      }
+      return(NULL)
+    }
+  } else {
+    return(NULL)
+  }
+  rule <- unname(certain_head_rule[h])
+  if (is.na(rule)) {
+    return(NULL)
+  }
+  if (qualified) {
+    pkg <- unname(certain_head_pkg[h])
+    if (!identical(as.character(head[[2L]]), if (is.na(pkg)) "base" else pkg)) {
+      return(NULL)
+    }
+  } else if (!identical(fun, certain_head_fun(h))) {
+    return(NULL)
+  }
+  args <- as.list(e)[-1L]
+  arg_names <- names(args) %||% rep("", length(args))
+  if (identical(rule, "written")) {
+    kinds <- character(length(args))
+    for (k in seq_along(args)) {
+      kind <- certain_walk(args[[k]], env, num, any, state)
+      if (is.null(kind)) {
+        return(NULL)
+      }
+      kinds[k] <- kind
+    }
+    n <- length(args)
+    shape <- if (h %in% certain_summary_heads) {
+      TRUE
+    } else if (any(nzchar(arg_names))) {
+      FALSE
+    } else if (h %in% c("+", "-", "log", "round", "signif")) {
+      n %in% 1:2
+    } else if (h %in% certain_unary_heads) {
+      n == 1L
     } else {
+      n == 2L
+    }
+    return(if (shape && all(kinds == "num")) "num")
+  }
+  if (identical(rule, "none")) {
+    return(if (length(args) == 0L) "num")
+  }
+  if (identical(rule, "dots")) {
+    unnamed <- arg_names == ""
+    if (!any(unnamed) || !all(arg_names %in% c("", "na.rm"))) {
       return(NULL)
     }
-    rule <- unname(certain_head_rule[h])
-    if (is.na(rule)) {
-      return(NULL)
-    }
-    if (qualified) {
-      pkg <- unname(certain_head_pkg[h])
-      if (!identical(as.character(head[[2L]]), if (is.na(pkg)) "base" else pkg)) {
+    for (a in args[unnamed]) {
+      kind <- certain_walk(a, env, num, any, state)
+      if (is.null(kind)) {
         return(NULL)
       }
-    } else if (!identical(get0(h, envir = env, mode = "function"), certain_head_fun(h))) {
+    }
+    complete <- sum(unnamed) == 1L && kind %in% c("num", "any") &&
+      all(vapply(args[!unnamed], certain_flag_literal, logical(1)))
+    return(if (complete) "num")
+  }
+  # "x_first", "x_after_literals": the argument R matches to `x` (an empty or
+  # `...` argument, or a call R can't match, gives no verdict). Each of these
+  # functions has `x` first, so one unnamed argument is it.
+  if (length(args) == 1L && !nzchar(arg_names)) {
+    if (identical(args[[1L]], quote(...))) {
       return(NULL)
     }
-    args <- as.list(e)[-1L]
-    arg_names <- names(args) %||% rep("", length(args))
-    if (identical(rule, "written")) {
-      kinds <- character(length(args))
-      for (k in seq_along(args)) {
-        kind <- walk(args[[k]], env)
-        if (is.null(kind)) {
-          return(NULL)
-        }
-        kinds[k] <- kind
-      }
-      n <- length(args)
-      shape <- if (h %in% certain_summary_heads) {
-        TRUE
-      } else if (any(nzchar(arg_names))) {
-        FALSE
-      } else if (h %in% c("+", "-", "log", "round", "signif")) {
-        n %in% 1:2
-      } else if (h %in% certain_unary_heads) {
-        n == 1L
-      } else {
-        n == 2L
-      }
-      return(if (shape && all(kinds == "num")) "num")
-    }
-    if (identical(rule, "none")) {
-      return(if (length(args) == 0L) "num")
-    }
-    if (identical(rule, "dots")) {
-      if (!any(arg_names == "") || !all(arg_names %in% c("", "na.rm"))) {
-        return(NULL)
-      }
-      for (a in args[arg_names == ""]) {
-        if (is.null(walk(a, env))) {
-          return(NULL)
-        }
-      }
-      return(NULL)
-    }
-    # "x_first", "x_after_literals": the argument R matches to `x` (an empty or
-    # `...` argument, or a call R can't match, gives no verdict)
+    matched <- list(x = args[[1L]])
+  } else {
     if (any(vapply(args, function(a) rlang::is_missing(a) || identical(a, quote(...)), logical(1)))) {
       return(NULL)
     }
@@ -350,23 +463,26 @@ certain_eval_walk <- function(expr, env, num, any) {
     if (is.null(matched) || !"x" %in% names(matched)) {
       return(NULL)
     }
-    others <- matched[names(matched) != "x"]
-    if (identical(rule, "x_after_literals") &&
-        !all(vapply(others, function(a) {
-          (is.numeric(a) || is.logical(a)) && length(a) == 1L && !is.na(a)
-        }, logical(1)))) {
-      return(NULL)
-    }
-    kind <- walk(matched[["x"]], env)
-    if (identical(kind, "num") && length(args) == 1L && h %in% certain_complete_x_heads) "num"
   }
-  kind <- walk(expr, env)
-  list(hit = hit, kind = kind)
+  others <- matched[names(matched) != "x"]
+  flags <- all(vapply(others, certain_flag_literal, logical(1)))
+  if (identical(rule, "x_after_literals") && !flags) {
+    return(NULL)
+  }
+  kind <- certain_walk(matched[["x"]], env, num, any, state)
+  if (is.null(kind)) {
+    return(NULL)
+  }
+  if (h %in% certain_kind_x_heads) {
+    return(if (length(others) == 0L && kind %in% c("num", "any")) kind)
+  }
+  if (identical(kind, "num") && h %in% certain_complete_x_heads && flags && all(names(others) == "na.rm")) "num"
 }
 
 # The first name `expr` is certain to read that is no column of `schema` and bound
-# nowhere from `env` up (certain_eval_walk()'s verdict), or NULL. arrange()'s
-# check of a key it can't sort by natively.
+# nowhere from `env` up, or a missing argument, or a function that isn't there
+# (certain_eval_walk()'s verdict), or NULL. arrange()'s check of a key it can't
+# sort by natively.
 # @keywords internal
 expr_first_certain_missing <- function(expr, env, schema) {
   cols <- certain_schema_kinds(schema)
@@ -377,14 +493,16 @@ expr_first_certain_missing <- function(expr, env, schema) {
 # before any CPU fallback is decided (a missing column is the user's typo, not a
 # reason to run on the CPU, and under `cuplyr.fallback = "error"` it would be
 # reported as one): `object 'xx' not found` or rlang's `.data$xx` error as the
-# parent of "In argument: `<dot>`.". dplyr evaluates the dots in order, each
-# seeing the columns and the names the ones before it make, and reports the
-# first that fails. So a dot gives a verdict only for a name it is certain to
-# read first (certain_eval_walk()), and only when every dot before it is certain
-# to evaluate without an error and to make the columns the check then knows of:
-# its name, or, unnamed, its label when its value is certainly one atomic vector
-# (any other value may be a data frame, which dplyr unpacks into columns of its
-# own). The check ends at the first dot that is not. Anything uncertain leaves
+# parent of "In argument: `<dot>`." (or, for the other failures the walk is as
+# sure of, a missing argument's error or "could not find function"). dplyr
+# evaluates the dots in order, each seeing the columns and the names the ones
+# before it make, and reports the first that fails. So a dot gives a verdict only
+# for a name it is certain to read first (certain_eval_walk()), and only when
+# every dot before it is certain to evaluate without an error to a vector and to
+# make the columns the check then knows of: its name, or, unnamed, its label when
+# its value is certainly one atomic vector (any other value may be a data frame,
+# which dplyr unpacks into columns of its own); a dot certain to be NULL makes
+# none. The check ends at the first dot that is not. Anything uncertain leaves
 # the call to the route it takes anyway.
 # @param dots The user's quosures; `schema` the input's; `run` summarise_impl()'s
 #   frame (`.data`, `by_cols`, `by_given`)
@@ -411,8 +529,13 @@ summarise_missing_column_check <- function(dots, schema, run = parent.frame()) {
     if (!is.null(res$hit)) {
       abort_missing_in_dot(missing_name_error(res$hit, c(num, any)), i, "summarise", run, dots)
     }
-    if (i == last || is.null(res$kind)) {
+    # (a NULL makes no column: dplyr skips the dot; a value that is no vector is
+    # dplyr's error at this dot)
+    if (i == last || is.null(res$kind) || identical(res$kind, "value")) {
       break
+    }
+    if (identical(res$kind, "null")) {
+      next
     }
     new <- if (!is.na(nms[[i]]) && nzchar(nms[[i]])) {
       nms[[i]]
@@ -551,13 +674,13 @@ filter_dot_error <- function(cnd, handler) {
 # ungrouped data (add_computed_columns()), so what the parse raises for a key is
 # dplyr's `dplyr:::mutate_error` "In argument: `<key>`." (the key as the user
 # named it, no group bullet), with the error as parent and the user's call.
-# cuplyr's own runtime errors, and a `&&` of a column (the caller's to send to
-# dplyr), go on as they are.
+# cuplyr's own runtime errors, and the parser's signals of a key that dplyr
+# evaluates (computed_key_to_cpu, see parse_key_ir()), go on as they are.
 # @param cnd The error; `quo` the key; `name` the user's name for it ("" or NA when
 #   unnamed); `frame` the verb's frame
 # @keywords internal
 computed_key_error <- function(cnd, quo, name, frame) {
-  if (inherits(cnd, c(mutate_error_passthrough, "cuplyr_error_short_circuit"))) {
+  if (inherits(cnd, c(mutate_error_passthrough, computed_key_to_cpu))) {
     return(invisible(NULL))
   }
   expr <- rlang::quo_get_expr(quo)
@@ -566,6 +689,31 @@ computed_key_error <- function(cnd, quo, name, frame) {
     class = "dplyr:::mutate_error",
     parent = object_not_found_parent(cnd, expr, rlang::quo_get_env(quo)),
     call = verb_error_call(frame)
+  )
+}
+
+# The parser's errors that mean "dplyr evaluates this key" rather than "the key
+# fails": a `&&` of a column, and a vector constant inside a larger expression
+# (`x + v`, recycled by dplyr).
+computed_key_to_cpu <- c("cuplyr_error_short_circuit", "cuplyr_vector_literal")
+
+# ir_parse_quo() of a computed key of count()/add_count()/distinct(), with an
+# error the key raises turned into dplyr's (computed_key_error()). NULL for a key
+# dplyr evaluates (computed_key_to_cpu): the caller hands the call to dplyr.
+# @param quo The key; `schema` the table's; `name` the user's name for it;
+#   `frame` the verb's frame
+# @keywords internal
+parse_key_ir <- function(quo, schema, name, frame) {
+  tryCatch(
+    withCallingHandlers(
+      ir_parse_quo(quo, schema),
+      error = function(cnd) computed_key_error(cnd, quo, name, frame)
+    ),
+    cuplyr_error_short_circuit = function(e) NULL,
+    cuplyr_vector_literal = function(e) {
+      fallback_cause("a vector constant inside a larger expression is recycled by dplyr.")
+      NULL
+    }
   )
 }
 
