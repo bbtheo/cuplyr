@@ -270,7 +270,12 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
     comp_dots <- stats::setNames(dots[is_comp], ifelse(unbound_ref[is_comp], "", comp_names[is_comp]))
     # (spliced by mutate()'s own capture, so a raw `.data[[k]]` reads the
     # quosure's `k`, see the splice rule after pronoun_call_name(), R/ir.R)
-    working <- dplyr::mutate(dplyr::ungroup(working), !!!comp_dots)
+    # (its error names an unnamed dot as the user wrote it)
+    unnamed <- !is_named[is_comp] & !unbound_ref[is_comp]
+    working <- withCallingHandlers(
+      dplyr::mutate(dplyr::ungroup(working), !!!comp_dots),
+      `dplyr:::mutate_error` = function(cnd) group_by_mutate_error(cnd, comp_dots, unnamed)
+    )
     if (!is_tbl_gpu(working)) {
       return(group_by_fallback("the computed grouping columns could not be built on the GPU."))
     }
@@ -297,6 +302,14 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
       }
       new_groups <- c(new_groups, comp_names[i])
     } else if (kind[i] == "var") {
+      # In dplyr's mutate branch this dot is evaluated like the others, in order:
+      # a name no dot made (every earlier pick() was resolved here, and cuplyr
+      # names its computed dots, so none unpacks) and bound nowhere (a bound one
+      # after an unknown-columns dot fell back above) is that mutate's error.
+      if (needs_mutate && !var_name[i] %in% working_schema$names &&
+          (!is.symbol(rlang::quo_get_expr(dots[[i]])) || !quo_symbol_is_bound(dots[[i]], var_name[i]))) {
+        group_by_abort_unbound(dots[[i]], var_name[i], working_schema$names, environment())
+      }
       if (!var_name[i] %in% working_schema$names) {
         # (dplyr names every missing column; `c(x = glue(...))` of two or more is x1, x2, ...)
         missing <- unique(var_name[kind == "var" & !var_name %in% working_schema$names])

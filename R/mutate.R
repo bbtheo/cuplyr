@@ -1091,8 +1091,13 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
                                ungrouped = FALSE, evaluated = NULL, provenance = NULL) {
   # (the unnamed-expression warning waits until every dot ran: a dot that errors
   # is dplyr's error, with nothing said about its name first)
-  unnamed_dots <- if (warn_unnamed) dots
-  dots <- name_dots_silently(dots)
+  # (all named, the common case: nothing to name or warn about)
+  dot_nms <- names(dots)
+  unnamed_dots <- NULL
+  if (is.null(dot_nms) || anyNA(dot_nms) || !all(nzchar(dot_nms))) {
+    unnamed_dots <- if (warn_unnamed) dots
+    dots <- name_dots_silently(dots)
+  }
 
   expressions <- list()
   has_window <- FALSE

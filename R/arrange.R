@@ -161,7 +161,7 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
       # is dplyr's error, not a reason to run on the CPU
       key <- rlang::quo_get_expr(quo)
       if (rlang::quo_is_call(quo, "desc", n = 1L, ns = c("", "dplyr"))) key <- key[[2L]]
-      miss <- expr_first_certain_missing(key, rlang::quo_get_env(quo), schema$names)
+      miss <- expr_first_certain_missing(key, rlang::quo_get_env(quo), schema)
       if (!is.null(miss)) {
         arrange_abort_missing(missing_name_error(miss, schema$names), quo, user_dots,
                               if (isTRUE(.by_group)) length(.subset2(.data, "groups")) else 0L)
