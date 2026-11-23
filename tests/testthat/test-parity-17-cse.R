@@ -9,8 +9,12 @@
 # shows whether the sharing happened.
 
 cse_df <- function() {
+  # (-0 is made at run time: R's byte compiler pools constants with
+  # identical(), which treats -0 and 0 as equal)
+  zeros <- c(0, 0)
+  zeros[1] <- zeros[1] * -1
   data.frame(
-    x = c(-0, 0, 1.234, NA, NaN, -2.5, 0.75, 0.31, 0.5, 0.06),
+    x = c(zeros, 1.234, NA, NaN, -2.5, 0.75, 0.31, 0.5, 0.06),
     y = c(1, 2, 3, 4, 5, 6, 7, 8, NA, 10),
     i = c(1L, -3L, NA, 7L, 100L, 5L, 1L, 77L, -2L, 0L),
     j = c(2L, 3L, 4L, NA, -5L, 6L, 7L, 8L, 9L, 10L),
@@ -76,7 +80,7 @@ test_that("a repeated %in% inside if_else() is computed once", {
   skip_if_no_gpu()
   df <- cse_df()
   st <- c(1L, 5L, 77L)
-  p <- function(d) mutate(d, a = if_else(i %in% st, x, y), b = if_else(i %in% st, 1L, 0L))
+  p <- function(d) mutate(d, a = dplyr::if_else(i %in% st, x, y), b = dplyr::if_else(i %in% st, 1L, 0L))
   expect_same_as_dplyr(df, p)
   expect_same_as_dplyr_lazy(df, p)
   expect_equal(cse_reuses(collect(p(tbl_gpu(df, lazy = FALSE)))), 1)
@@ -177,8 +181,8 @@ test_that("grouped mutate() with a window shares the repeat", {
     d |>
       group_by(g) |>
       mutate(
-        a = round(x - mean(y, na.rm = TRUE), 2) + 1,
-        b = round(x - mean(y, na.rm = TRUE), 2) * 2
+        a = round(x - sum(y, na.rm = TRUE), 2) + 1,
+        b = round(x - sum(y, na.rm = TRUE), 2) * 2
       )
   }
   expect_same_as_dplyr(df, p)
