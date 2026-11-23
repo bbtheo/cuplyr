@@ -1525,6 +1525,8 @@ parse_filter_ir <- function(quo, schema) {
       if (grepl("scalar", msg, fixed = TRUE) && grepl("length", msg, fixed = TRUE)) {
         return(NULL)
       }
+      # dplyr's "In argument: `<dot>`." for the dot filter_run() is on
+      filter_dot_error(e, environment())
       stop(e)
     }
   )

@@ -771,3 +771,56 @@ gpu_alloc_tracking <- function(expr) {
 gpu_alloc_tracking_active <- function() {
   gpu_alloc_window_count()
 }
+
+# The error after an out-of-memory failure the retry did not cure (wrap_gpu_call()):
+# class `cuplyr_error_gpu_oom`, the original allocator error as its parent, the
+# memory state read now as `$memory`, the user's call as its call. The message
+# says what ran out, how much memory there is, and what helps; sizes are
+# formatted as the fallback notices format them.
+# @param op_name The GPU operation; `err` the OOM error of the retry; `frame` the
+#   frame wrap_gpu_call() was called from
+# @keywords internal
+gpu_oom_abort <- function(op_name, err, frame) {
+  state <- tryCatch(gpu_memory_state(), error = function(e) NULL)
+  rlang::abort(
+    gpu_oom_bullets(op_name, state),
+    class = "cuplyr_error_gpu_oom", parent = err, memory = state, op = op_name,
+    call = verb_error_call(frame)
+  )
+}
+
+# The message of gpu_oom_abort(): see there. `state` is gpu_memory_state() (or NULL).
+# @keywords internal
+gpu_oom_bullets <- function(op_name, state) {
+  size <- function(bytes) {
+    format(structure(bytes, class = "object_size"), units = "auto", standard = "SI")
+  }
+  known <- function(x) is.numeric(x) && length(x) == 1L && !is.na(x)
+  device <- if (isTRUE(state$available) && known(state$total_bytes) && known(state$free_bytes)) {
+    paste0("Device memory: ", size(state$total_bytes), " total, ", size(state$free_bytes), " free.")
+  } else {
+    "GPU memory state unavailable."
+  }
+  resource <- state$resource
+  session <- if (isTRUE(state$available) && is.character(resource) && length(resource) == 1L &&
+                   !identical(resource, "cuda") && known(state$pool_bytes) && known(state$pool_used_bytes)) {
+    paste0("This session: ", size(state$pool_used_bytes), " in use, ", size(state$pool_bytes),
+           " held by its \"", resource, "\" memory resource.")
+  }
+  pool <- if (identical(resource, "pool")) {
+    paste0("The \"pool\" resource keeps all the memory it grew to and can fragment; the default ",
+           "\"async\" resource (`options(cuplyr.memory_resource = \"async\")`, read when cuplyr loads) ",
+           "may fit more.")
+  }
+  c(
+    paste0("GPU operation `", op_name, "` ran out of device memory."),
+    i = "cuplyr freed unused memory (`gc()` and `gpu_gc()`) and retried once; the retry ran out too.",
+    i = device,
+    i = session,
+    i = paste0("To use less memory: filter rows and select columns early; keep tables lazy ",
+               "(`options(cuplyr.exec_mode = \"lazy\")`, the default) so a plan drops the columns it never ",
+               "reads; remove tables you no longer need and call `gpu_gc()`."),
+    i = pool,
+    i = "See `vignette(\"memory\", package = \"cuplyr\")`."
+  )
+}

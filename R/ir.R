@@ -370,43 +370,50 @@ expr_has_column_ref <- function(expr, schema) {
 # is looked up in its own environment. Nothing is evaluated. The walk is
 # syntactic, so a name the expression binds while it runs (`{ v <- f(); v }`)
 # or never reaches (`TRUE || nope`) counts too: ask only once the expression
-# has failed.
+# has failed. expr_first_unbound_symbol() is the first such name (in evaluation
+# order), or NULL.
 # @keywords internal
-expr_has_unbound_symbol <- function(expr, env, schema) {
+expr_first_unbound_symbol <- function(expr, env, schema) {
   unevaluated <- c("function", "~", "quote", "bquote", "expression", "substitute", "::", ":::")
   walk <- function(e, env) {
     if (rlang::is_missing(e)) {
-      return(FALSE)
+      return(NULL)
     }
     if (is.symbol(e)) {
       nm <- as.character(e)
-      return(!(nm %in% c(schema$names, ".data", ".env")) && !exists(nm, envir = env, inherits = TRUE))
+      return(if (!(nm %in% c(schema$names, ".data", ".env")) && !exists(nm, envir = env, inherits = TRUE)) nm)
     }
     if (rlang::is_quosure(e)) {
       return(walk(rlang::quo_get_expr(e), rlang::quo_get_env(e)))
     }
     if (!is.call(e)) {
-      return(FALSE)
+      return(NULL)
     }
     parts <- unclass(as.list(e))
     head <- parts[[1L]]
     if (is.symbol(head)) {
       if (as.character(head) %in% unevaluated) {
-        return(FALSE)
+        return(NULL)
       }
       if (as.character(head) %in% c("$", "@")) {
-        return(length(parts) > 1L && walk(parts[[2L]], env))
+        return(if (length(parts) > 1L) walk(parts[[2L]], env))
       }
       parts <- parts[-1L]
     }
     for (i in seq_along(parts)) {
-      if (walk(parts[[i]], env)) {
-        return(TRUE)
+      hit <- walk(parts[[i]], env)
+      if (!is.null(hit)) {
+        return(hit)
       }
     }
-    FALSE
+    NULL
   }
   walk(expr, env)
+}
+
+# @keywords internal
+expr_has_unbound_symbol <- function(expr, env, schema) {
+  !is.null(expr_first_unbound_symbol(expr, env, schema))
 }
 
 # The recursive walk behind expr_has_column_ref().
@@ -1714,9 +1721,7 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
         return(NULL)  # a subscript only dplyr can evaluate
       }
       if (!nm %in% schema$names) {
-        stop("Column '", nm, "' not found.\n",
-             "Available columns: ", paste(schema$names, collapse = ", "),
-             call. = FALSE)
+        stop_data_pronoun_missing(expr, env, schema$names, nm)
       }
       return(ir_col(nm))
     }

@@ -1089,7 +1089,10 @@ mutate_expr_fallback <- function(.data, dots, keep, before_quo, after_quo, by_qu
 parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
                                stop_on_unparseable = TRUE, vector_literals = FALSE,
                                ungrouped = FALSE, evaluated = NULL, provenance = NULL) {
-  dots <- if (warn_unnamed) auto_name_dots(dots, verb) else name_dots_silently(dots)
+  # (the unnamed-expression warning waits until every dot ran: a dot that errors
+  # is dplyr's error, with nothing said about its name first)
+  unnamed_dots <- if (warn_unnamed) dots
+  dots <- name_dots_silently(dots)
 
   expressions <- list()
   has_window <- FALSE
@@ -1365,6 +1368,9 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     mutate_dot_error(cnd, i, "eval", provenance, dot_names, verb)
   })
 
+  if (!is.null(unnamed_dots)) {
+    auto_name_dots(unnamed_dots, verb)
+  }
   attr(expressions, "has_window") <- has_window
   attr(expressions, "has_vec") <- has_vec
   attr(expressions, "dropped") <- dropped
@@ -1733,7 +1739,7 @@ mutate_keep_select_node <- function(result, orig_names, orig_groups,
     # A column dropped by `col = NULL` is already gone for .before/.after.
     full_names <- full_names[!full_names %in% dropped]
     name_vec <- stats::setNames(full_names, full_names)
-    loc <- tidyselect::eval_relocate(
+    loc <- eval_relocate_dplyr(
       expr = rlang::expr(c(!!!rlang::syms(new_cols))), data = name_vec,
       before = before_quo, after = after_quo,
       before_arg = ".before", after_arg = ".after",

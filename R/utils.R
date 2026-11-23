@@ -311,15 +311,7 @@ wrap_gpu_call <- function(op_name, expr, reword = TRUE) {
     gpu_scope_close(scope, NULL)
     scope <- NULL
     if (is_gpu_oom_error(err)) {
-      rlang::abort(
-        paste0(
-          "GPU operation '", op_name, "' ran out of device memory. A retry after garbage collection ",
-          "(gc() and gpu_gc()) was attempted and failed too.", gpu_oom_hint, "\n",
-          "Original error: ", conditionMessage(err)
-        ),
-        class = "cuplyr_error_gpu_oom",
-        call = NULL
-      )
+      gpu_oom_abort(op_name, err, env)
     }
   }
   if (!reword || !gpu_rewordable(err)) stop(err)

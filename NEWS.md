@@ -1,5 +1,20 @@
 # cuplyr (development version)
 
+* `filter()`, `arrange()`, `summarise()`, `count()`, `tally()`, `group_by()`,
+  `relocate()` and the joins raise dplyr's error for a column that doesn't
+  exist, with the call the user made (`filter()`, `count()`, `add_tally()`,
+  `nest_join()`, ...): "In argument: ..." with the group where dplyr gives
+  one, `..1 = ` for `arrange()`, "Join columns in `x` must be present in the
+  data." for a join, and rlang's own error for `.data$col`. The same holds
+  under `options(cuplyr.fallback = "error")`, and a missing column no longer
+  makes `summarise()` run on the CPU or `mutate()` warn about an unnamed
+  expression first. `arrange()` ignores a `NULL` name and sorts by any other
+  object that is not a column, as dplyr does. A GPU step that runs out of device
+  memory raises `cuplyr_error_gpu_oom` with the device and session memory, what
+  helps (`gpu_gc()`, lazy mode, the memory resource) and the allocator's error
+  as its parent. dplyr gives no "did you mean" hint for a missing column, so
+  neither does cuplyr (#13).
+
 * `mutate()` and `transmute()` raise dplyr's errors. An error in a dot, such as
   an unknown object or a missing `.data` column, is a `dplyr:::mutate_error`
   that names the argument ("In argument: ...") and, for a grouped table or

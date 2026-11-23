@@ -284,19 +284,19 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
           rlang::abort(c(
             "Must group by variables found in `.data`.",
             x = paste0("Column `", comp_names[i], "` is not found.")
-          ))
+          ), call = verb_error_call(environment()))
         }
         next
       }
       new_groups <- c(new_groups, comp_names[i])
     } else if (kind[i] == "var") {
       if (!var_name[i] %in% working_schema$names) {
+        # (dplyr names every missing column; `c(x = glue(...))` of two or more is x1, x2, ...)
+        missing <- unique(var_name[kind == "var" & !var_name %in% working_schema$names])
         rlang::abort(c(
           "Must group by variables found in `.data`.",
-          x = paste0("Column `", var_name[i], "` is not found."),
-          i = paste0("Available columns: ",
-                     paste(working_schema$names, collapse = ", "))
-        ))
+          x = paste0("Column `", missing, "` is not found.")
+        ), call = verb_error_call(environment()))
       }
       new_groups <- c(new_groups, var_name[i])
     } else {

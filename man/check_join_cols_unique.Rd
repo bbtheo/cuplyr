@@ -4,7 +4,13 @@
 \alias{check_join_cols_unique}
 \title{dplyr's "Join columns must be unique" check (\code{check_join_vars()})}
 \usage{
-check_join_cols_unique(by, x, keep = NULL, call = rlang::caller_env())
+check_join_cols_unique(
+  by,
+  x,
+  keep = NULL,
+  call = rlang::caller_env(),
+  y = NULL
+)
 }
 \arguments{
 \item{by}{The user's \verb{by=} (\code{NULL}, character, \code{join_by()})}
@@ -14,6 +20,8 @@ check_join_cols_unique(by, x, keep = NULL, call = rlang::caller_env())
 \item{keep}{The user's \verb{keep=} (\code{NULL} for filtering joins)}
 
 \item{call}{The verb's frame, reported as the error call}
+
+\item{y}{The right table, or \code{NULL} to leave its columns unchecked}
 }
 \description{
 Per side, equi columns plus the UNIQUE non-equi columns must not repeat: a
@@ -22,8 +30,8 @@ column may appear in several non-equi conditions
 an equi and a non-equi condition. dplyr raises a plain \code{rlang_error}; x is
 checked before y. Runs on the raw \code{by} at the verb call (before routing to
 the fallback), so eager, lazy and fallback joins all fail the same way.
-Also raises dplyr's \code{keep = FALSE} + non-equi error first, and stops after
-x's duplicate check when x lacks a join column, so that error (raised later
-by the join) precedes y's duplicates, as in dplyr's \code{join_cols()}.
+Also raises dplyr's \code{keep = FALSE} + non-equi error first, and, per side after
+its duplicates, dplyr's "Join columns in \code{x} must be present in the data." (so
+x's missing column precedes y's duplicates, as in dplyr's \code{join_cols()}).
 }
 \keyword{internal}
