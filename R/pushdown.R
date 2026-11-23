@@ -33,7 +33,7 @@
 # The pushdown option: `cuplyr.parquet_pushdown = FALSE` turns off both the
 # projection and the predicate pushdown.
 scan_pushdown_enabled <- function() {
-  !identical(getOption("cuplyr.parquet_pushdown", TRUE), FALSE)
+  cuplyr_opt("parquet_pushdown")
 }
 
 # File types the reader can be trusted to compare without any of our

@@ -2,27 +2,51 @@
 #'
 #' Collects comprehensive system information for debugging installation
 #' issues or filing bug reports. Includes cuplyr version, R/Rcpp versions,
-#' CUDA/cuDF paths, GPU info, and environment variables.
+#' CUDA/cuDF paths, libcudf versions, GPU info, the GPU memory resource, the
+#' cuplyr options in effect and environment variables.
 #'
 #' @param redact If `TRUE` (default), redact potentially sensitive paths
 #'   (home directory, usernames). Set to `FALSE` for local debugging.
+#' @param format `"text"` (default) prints a readable report. `"json"` prints
+#'   one JSON object instead (and nothing else), for tools and scripts; its
+#'   keys are the names of the returned list.
 #'
-#' @return Invisibly returns a list with all diagnostic information.
-#'   Also prints formatted output to the console.
+#' @return Invisibly returns a list with all diagnostic information, whichever
+#'   `format` is used. Also prints the report (or the JSON object) to the
+#'   console. Besides the package, system, CUDA and GPU fields, the list has:
+#'   * `libcudf_version` and `rmm_version`: the versions cuplyr was built
+#'     against, as `"26.02.0"`.
+#'   * `libcudf_path`: the libcudf library loaded into this R session (`NA` if
+#'     none), and `libcudf_loaded_version`, its version (`NA` when its headers
+#'     can't be found). A difference from `libcudf_version` means cuplyr runs
+#'     against another libcudf than it was built with.
+#'   * `memory`: a list with `available`, the memory `resource` (`"async"`,
+#'     `"pool"` or `"cuda"`), `pool_bytes` and `pool_used_bytes`. See
+#'     [gpu_memory_state()].
+#'   * `options`: a data frame with one row per cuplyr option, user and
+#'     internal: `option`, `value`, `default`, `source`, `env_var`, `internal`
+#'     and `description`. See [cuplyr_options()].
+#'
+#'   A lookup that fails gives `NA` for its field; `diagnostics()` itself does
+#'   not fail.
 #'
 #' @details
 #' The output includes:
 #' \itemize{
 #'   \item **Package versions**: cuplyr, R, Rcpp, dplyr
 #'   \item **CUDA info**: toolkit version, driver version, CUDA_HOME path
-#'   \item **libcudf info**: CONDA_PREFIX, CUDF_HOME, detected paths
+#'   \item **libcudf info**: CONDA_PREFIX, CUDF_HOME, the libcudf and RMM
+#'     versions cuplyr was built against, the libcudf loaded and its version
 #'   \item **GPU info**: device name, compute capability, memory
+#'   \item **GPU memory resource**: the active resource and its pool size
+#'   \item **Options**: every cuplyr option with its value, source and default
 #'   \item **Library paths**: LD_LIBRARY_PATH, RPATH of cuplyr.so
 #'   \item **Environment**: OS, distro, key environment variables
 #' }
 #'
 #' @seealso [check_deps()] for pre-install checks,
-#'   [verify_installation()] for post-install verification
+#'   [verify_installation()] for post-install verification,
+#'   [cuplyr_options()] for the options
 #'
 #' @importFrom cli col_green
 #' @export
@@ -35,7 +59,11 @@
 #'
 #' # Unredacted for local debugging
 #' diagnostics(redact = FALSE)
-diagnostics <- function(redact = TRUE) {
+#'
+#' # As JSON, for scripts
+#' diagnostics(format = "json")
+diagnostics <- function(redact = TRUE, format = c("text", "json")) {
+  format <- match.arg(format)
   info <- list()
 
   # -- Package versions --
@@ -94,6 +122,26 @@ diagnostics <- function(redact = TRUE) {
   info$conda_prefix <- Sys.getenv("CONDA_PREFIX", "")
   info$cudf_home <- Sys.getenv("CUDF_HOME", "")
 
+  # The versions cuplyr was compiled against (no GPU needed). Every lookup
+  # below is wrapped: diagnostics() is for broken installs, so it must not fail.
+  built <- tryCatch(cuplyr_build_versions(), error = function(e) NULL)
+  info$libcudf_version <- diag_chr(built[["libcudf"]])
+  info$rmm_version <- diag_chr(built[["rmm"]])
+
+  # The libcudf actually loaded, and the version its headers say it is. A
+  # libcudf from another environment (LD_LIBRARY_PATH) shows up as a mismatch.
+  info$libcudf_path <- diag_chr(tryCatch(loaded_libcudf_path(), error = function(e) NULL))
+  info$libcudf_loaded_version <- tryCatch({
+    if (is.na(info$libcudf_path)) {
+      NA_character_
+    } else {
+      prefix <- dirname(dirname(info$libcudf_path))
+      read_cudf_version_header(
+        file.path(prefix, "include", "cudf", "version_config.hpp")
+      )
+    }
+  }, error = function(e) NA_character_)
+
   # -- GPU info --
   info$gpu <- tryCatch({
     if (requireNamespace("cuplyr", quietly = TRUE)) {
@@ -102,6 +150,12 @@ diagnostics <- function(redact = TRUE) {
       list(available = FALSE, note = "cuplyr not loaded")
     }
   }, error = function(e) list(available = FALSE, error = conditionMessage(e)))
+
+  # -- GPU memory resource --
+  info$memory <- diag_memory()
+
+  # -- cuplyr options (user and internal) --
+  info$options <- diag_options()
 
   # -- Library paths --
   info$ld_library_path <- Sys.getenv("LD_LIBRARY_PATH", "")
@@ -141,6 +195,12 @@ diagnostics <- function(redact = TRUE) {
     info$ld_library_path <- redact_path(info$ld_library_path)
     info$cuplyr_so_path <- redact_path(info$cuplyr_so_path)
     info$cuplyr_runpath <- redact_path(info$cuplyr_runpath)
+    info$libcudf_path <- redact_path(info$libcudf_path)
+  }
+
+  if (format == "json") {
+    cat(to_json(info), "\n", sep = "")
+    return(invisible(info))
   }
 
   # -- Print --
@@ -168,6 +228,14 @@ diagnostics <- function(redact = TRUE) {
   cat("RAPIDS / libcudf\n")
   cat("  CONDA_PREFIX: ", if (nzchar(info$conda_prefix)) info$conda_prefix else "(not set)", "\n")
   cat("  CUDF_HOME:    ", if (nzchar(info$cudf_home)) info$cudf_home else "(not set)", "\n")
+  cat("  libcudf (built against): ", diag_show(info$libcudf_version), "\n", sep = "")
+  cat("  libcudf (loaded):        ", diag_show(info$libcudf_loaded_version),
+      "  ", diag_show(info$libcudf_path, "(no libcudf loaded)"), "\n", sep = "")
+  cat("  RMM (built against):     ", diag_show(info$rmm_version), "\n", sep = "")
+  if (!is.na(info$libcudf_version) && !is.na(info$libcudf_loaded_version) &&
+      info$libcudf_version != info$libcudf_loaded_version) {
+    cat("  WARNING: the loaded libcudf differs from the one cuplyr was built against\n")
+  }
   cat("\n")
 
   cat("GPU\n")
@@ -187,6 +255,27 @@ diagnostics <- function(redact = TRUE) {
   }
   cat("\n")
 
+  cat("Memory resource\n")
+  mem <- info$memory
+  if (isTRUE(mem$available)) {
+    cat("  Memory resource: ", diag_show(mem$resource), "\n", sep = "")
+    cat("  Pool held:       ", diag_gib(mem$pool_bytes), "\n", sep = "")
+    cat("  Pool in use:     ", diag_gib(mem$pool_used_bytes), "\n", sep = "")
+  } else {
+    cat("  Memory resource: unknown (no GPU memory information)\n")
+  }
+  cat("\n")
+
+  cat("Options\n")
+  opts <- info$options
+  for (i in seq_len(nrow(opts))) {
+    cat(sprintf("  %s = %s (%s; default %s)%s\n", opts$option[i],
+                diag_show(opts$value[i], "<unset>"), opts$source[i],
+                diag_show(opts$default[i], "computed"),
+                if (isTRUE(opts$internal[i])) " [internal]" else ""))
+  }
+  cat("\n")
+
   cat("Library Paths\n")
   cat("  LD_LIBRARY_PATH: ", if (nzchar(info$ld_library_path)) info$ld_library_path else "(not set)", "\n")
   cat("  cuplyr.so:       ", info$cuplyr_so_path, "\n")
@@ -198,4 +287,129 @@ diagnostics <- function(redact = TRUE) {
   cat("Paste this output in bug reports: https://github.com/bbtheo/cuplyr/issues\n")
 
   invisible(info)
+}
+
+# A character scalar from a lookup result: NA when the lookup gave nothing
+# usable.
+diag_chr <- function(x) {
+  if (is.character(x) && length(x) == 1L) unname(x) else NA_character_
+}
+
+# A value for the text report: `none` for NA.
+diag_show <- function(x, none = "unknown") {
+  if (length(x) != 1L || is.na(x)) none else as.character(x)
+}
+
+# Bytes as GiB for the text report, "n/a" when there is no pool.
+diag_gib <- function(bytes) {
+  if (length(bytes) != 1L || is.na(bytes)) "n/a" else paste(round(bytes / 1024^3, 2), "GiB")
+}
+
+# The GPU memory resource, from gpu_memory_state(). When it can't be read the
+# resource is NA and `available` is FALSE.
+diag_memory <- function() {
+  state <- tryCatch(gpu_memory_state(), error = function(e) NULL)
+  num <- function(x) if (is.numeric(x) && length(x) == 1L) as.numeric(x) else NA_real_
+  list(
+    available = isTRUE(state$available),
+    resource = diag_chr(state$resource),
+    pool_bytes = num(state$pool_bytes),
+    pool_used_bytes = num(state$pool_used_bytes)
+  )
+}
+
+# One row per cuplyr option, user and internal: the value in use and where it
+# came from (cuplyr_options()), plus the registry's default and whether the
+# option is internal. A default that is computed at run time is NA.
+diag_options <- function() {
+  tryCatch({
+    opts <- cuplyr_options(internal = TRUE)
+    reg <- cuplyr_option_registry[sub("^cuplyr\\.", "", opts$option)]
+    data.frame(
+      option = opts$option,
+      value = opts$value,
+      default = vapply(reg, function(e) opt_render(e$default), ""),
+      source = opts$source,
+      env_var = opts$env_var,
+      internal = vapply(reg, function(e) isTRUE(e$internal), NA),
+      description = opts$description,
+      stringsAsFactors = FALSE, row.names = NULL
+    )
+  }, error = function(e) {
+    data.frame(option = character(), value = character(), default = character(),
+               source = character(), env_var = character(), internal = logical(),
+               description = character(), stringsAsFactors = FALSE)
+  })
+}
+
+# The libcudf version in a version_config.hpp, formatted as RAPIDS (and
+# configure) write it: "MAJOR.MM.PATCH", e.g. "26.02.0". NA when the file is
+# missing or has no CUDF_VERSION_MAJOR and CUDF_VERSION_MINOR. A missing PATCH
+# means 0.
+read_cudf_version_header <- function(file) {
+  if (length(file) != 1L || is.na(file) || !file.exists(file)) {
+    return(NA_character_)
+  }
+  lines <- tryCatch(readLines(file, warn = FALSE), error = function(e) character())
+  # "#define CUDF_VERSION_<what> <number>", spaces and tabs allowed anywhere
+  find <- function(what) {
+    re <- paste0("^\\s*#\\s*define\\s+CUDF_VERSION_", what, "\\s+([0-9]+)")
+    hit <- regmatches(lines, regexec(re, lines))
+    hit <- Filter(length, hit)
+    if (length(hit) == 0L) NA_integer_ else as.integer(hit[[1L]][2L])
+  }
+  major <- find("MAJOR")
+  minor <- find("MINOR")
+  patch <- find("PATCH")
+  if (is.na(major) || is.na(minor)) {
+    return(NA_character_)
+  }
+  if (is.na(patch)) patch <- 0L
+  sprintf("%d.%02d.%d", major, minor, patch)
+}
+
+# A small JSON writer, so that diagnostics() needs no JSON package (it has to
+# work on a broken install). It handles what diagnostics() holds:
+#   NULL, NA, NaN, Inf  -> null
+#   logical             -> true / false
+#   number              -> up to 15 significant digits
+#   string              -> quoted and escaped
+#   named list          -> object
+#   unnamed list, or a vector that is not length 1 -> array
+#   data frame          -> array of one object per row
+to_json <- function(x) {
+  if (is.null(x)) {
+    return("null")
+  }
+  if (is.data.frame(x)) {
+    rows <- lapply(seq_len(nrow(x)), function(i) {
+      row <- lapply(x, function(col) col[[i]])
+      to_json(row)
+    })
+    return(paste0("[", paste(unlist(rows), collapse = ","), "]"))
+  }
+  if (is.list(x)) {
+    if (length(x) > 0L && !is.null(names(x)) && all(nzchar(names(x)))) {
+      keys <- paste0('"', json_escape(names(x)), '"')
+      vals <- vapply(x, to_json, "")
+      return(paste0("{", paste0(keys, ":", vals, collapse = ","), "}"))
+    }
+    return(paste0("[", paste(vapply(x, to_json, ""), collapse = ","), "]"))
+  }
+  if (is.factor(x)) {
+    x <- as.character(x)
+  }
+  if (length(x) != 1L) {
+    return(paste0("[", paste(vapply(as.list(x), to_json, ""), collapse = ","), "]"))
+  }
+  # one atomic value
+  if (is.na(x) || (is.numeric(x) && !is.finite(x))) {
+    "null"
+  } else if (is.logical(x)) {
+    if (x) "true" else "false"
+  } else if (is.numeric(x)) {
+    sprintf("%.15g", as.numeric(x))
+  } else {
+    paste0('"', json_escape(as.character(x)), '"')
+  }
 }

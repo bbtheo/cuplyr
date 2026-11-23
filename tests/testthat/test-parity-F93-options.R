@@ -28,9 +28,10 @@
 f93_user_opts <- c(
   "cuplyr.exec_mode", "cuplyr.fallback", "cuplyr.plan_break",
   "cuplyr.memory_resource", "cuplyr.memory_pool", "cuplyr.pool_initial",
-  "cuplyr.release_threshold", "cuplyr.roll_median"
+  "cuplyr.release_threshold", "cuplyr.parquet_pushdown", "cuplyr.roll_median"
 )
-f93_internal_opts <- c("cuplyr.roll_path", "cuplyr.check_schema_cache")
+f93_internal_opts <- c("cuplyr.roll_path", "cuplyr.topk_path",
+                       "cuplyr.check_schema_cache")
 
 f93_env_vars <- c(
   cuplyr.exec_mode = "CUPLYR_EXEC_MODE",
@@ -40,8 +41,10 @@ f93_env_vars <- c(
   cuplyr.memory_pool = "CUPLYR_MEMORY_POOL",
   cuplyr.pool_initial = "CUPLYR_POOL_INITIAL",
   cuplyr.release_threshold = "CUPLYR_RELEASE_THRESHOLD",
+  cuplyr.parquet_pushdown = NA,
   cuplyr.roll_median = "CUPLYR_ROLL_MEDIAN",
   cuplyr.roll_path = "CUPLYR_ROLL_PATH",
+  cuplyr.topk_path = NA,
   cuplyr.check_schema_cache = "CUPLYR_CHECK_SCHEMA_CACHE"
 )
 

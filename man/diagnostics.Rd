@@ -4,28 +4,54 @@
 \alias{diagnostics}
 \title{System diagnostics for cuplyr}
 \usage{
-diagnostics(redact = TRUE)
+diagnostics(redact = TRUE, format = c("text", "json"))
 }
 \arguments{
 \item{redact}{If \code{TRUE} (default), redact potentially sensitive paths
 (home directory, usernames). Set to \code{FALSE} for local debugging.}
+
+\item{format}{\code{"text"} (default) prints a readable report. \code{"json"} prints
+one JSON object instead (and nothing else), for tools and scripts; its
+keys are the names of the returned list.}
 }
 \value{
-Invisibly returns a list with all diagnostic information.
-Also prints formatted output to the console.
+Invisibly returns a list with all diagnostic information, whichever
+\code{format} is used. Also prints the report (or the JSON object) to the
+console. Besides the package, system, CUDA and GPU fields, the list has:
+\itemize{
+\item \code{libcudf_version} and \code{rmm_version}: the versions cuplyr was built
+against, as \code{"26.02.0"}.
+\item \code{libcudf_path}: the libcudf library loaded into this R session (\code{NA} if
+none), and \code{libcudf_loaded_version}, its version (\code{NA} when its headers
+can't be found). A difference from \code{libcudf_version} means cuplyr runs
+against another libcudf than it was built with.
+\item \code{memory}: a list with \code{available}, the memory \code{resource} (\code{"async"},
+\code{"pool"} or \code{"cuda"}), \code{pool_bytes} and \code{pool_used_bytes}. See
+\code{\link[=gpu_memory_state]{gpu_memory_state()}}.
+\item \code{options}: a data frame with one row per cuplyr option, user and
+internal: \code{option}, \code{value}, \code{default}, \code{source}, \code{env_var}, \code{internal}
+and \code{description}. See \code{\link[=cuplyr_options]{cuplyr_options()}}.
+}
+
+A lookup that fails gives \code{NA} for its field; \code{diagnostics()} itself does
+not fail.
 }
 \description{
 Collects comprehensive system information for debugging installation
 issues or filing bug reports. Includes cuplyr version, R/Rcpp versions,
-CUDA/cuDF paths, GPU info, and environment variables.
+CUDA/cuDF paths, libcudf versions, GPU info, the GPU memory resource, the
+cuplyr options in effect and environment variables.
 }
 \details{
 The output includes:
 \itemize{
 \item \strong{Package versions}: cuplyr, R, Rcpp, dplyr
 \item \strong{CUDA info}: toolkit version, driver version, CUDA_HOME path
-\item \strong{libcudf info}: CONDA_PREFIX, CUDF_HOME, detected paths
+\item \strong{libcudf info}: CONDA_PREFIX, CUDF_HOME, the libcudf and RMM
+versions cuplyr was built against, the libcudf loaded and its version
 \item \strong{GPU info}: device name, compute capability, memory
+\item \strong{GPU memory resource}: the active resource and its pool size
+\item \strong{Options}: every cuplyr option with its value, source and default
 \item \strong{Library paths}: LD_LIBRARY_PATH, RPATH of cuplyr.so
 \item \strong{Environment}: OS, distro, key environment variables
 }
@@ -39,8 +65,12 @@ diagnostics(redact = TRUE)
 
 # Unredacted for local debugging
 diagnostics(redact = FALSE)
+
+# As JSON, for scripts
+diagnostics(format = "json")
 }
 \seealso{
 \code{\link[=check_deps]{check_deps()}} for pre-install checks,
-\code{\link[=verify_installation]{verify_installation()}} for post-install verification
+\code{\link[=verify_installation]{verify_installation()}} for post-install verification,
+\code{\link[=cuplyr_options]{cuplyr_options()}} for the options
 }

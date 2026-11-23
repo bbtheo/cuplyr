@@ -329,3 +329,7 @@ gpu_collect_slice <- function(xptr, col_names, begin, end) {
     .Call(`_cuplyr_gpu_collect_slice`, xptr, col_names, begin, end)
 }
 
+cuplyr_build_versions <- function() {
+    .Call(`_cuplyr_cuplyr_build_versions`)
+}
+

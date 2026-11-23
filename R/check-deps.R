@@ -464,24 +464,28 @@ print_deps_text <- function(result, verbose = FALSE) {
   }
 }
 
-deps_to_json <- function(result) {
-  # Properly escape JSON strings
-  escape_json <- function(s) {
-    # Order matters: backslash first, then others
-    s <- gsub("\\", "\\\\", s, fixed = TRUE)   # \ -> \\
-    s <- gsub('"', '\\"', s, fixed = TRUE)     # " -> \"
-    s <- gsub("\n", "\\n", s, fixed = TRUE)    # newline -> \n
-    s <- gsub("\r", "\\r", s, fixed = TRUE)    # CR -> \r
-    s <- gsub("\t", "\\t", s, fixed = TRUE)    # tab -> \t
-    s
+# Escape a string for use inside JSON double quotes.
+json_escape <- function(s) {
+  # Order matters: backslash first, then others
+  s <- gsub("\\", "\\\\", s, fixed = TRUE)   # \ -> \\
+  s <- gsub('"', '\\"', s, fixed = TRUE)     # " -> \"
+  s <- gsub("\n", "\\n", s, fixed = TRUE)    # newline -> \n
+  s <- gsub("\r", "\\r", s, fixed = TRUE)    # CR -> \r
+  s <- gsub("\t", "\\t", s, fixed = TRUE)    # tab -> \t
+  # any other control character (JSON forbids them raw) -> \u00XX
+  for (code in setdiff(1:31, c(9L, 10L, 13L))) {
+    s <- gsub(intToUtf8(code), sprintf("\\u%04x", code), s, fixed = TRUE)
   }
+  s
+}
 
+deps_to_json <- function(result) {
   checks_json <- vapply(result$checks, function(c) {
-    val <- if (is.na(c$value)) "null" else paste0('"', escape_json(c$value), '"')
+    val <- if (is.na(c$value)) "null" else paste0('"', json_escape(c$value), '"')
     ok_str <- if (is.na(c$ok)) "null" else if (c$ok) "true" else "false"
     sprintf('    "%s": {"ok": %s, "value": %s, "message": "%s"}',
             gsub(" ", "_", tolower(c$name)),
-            ok_str, val, escape_json(c$message))
+            ok_str, val, json_escape(c$message))
   }, character(1))
 
   paste0('{\n  "ok": ', if (result$ok) "true" else "false",

@@ -7,7 +7,7 @@ Please briefly describe your problem and what output you expect. A result that d
 
 Please include a minimal reproducible example (AKA a reprex). If you've never heard of a [reprex](http://reprex.tidyverse.org/) before, start by reading <https://www.tidyverse.org/help/#reprex>. Build the data inside the example.
 
-For a bug, also paste the output of `cuplyr::diagnostics()`. It lists the GPU, driver, CUDA, libcudf and R package versions.
+For a bug, also paste the output of `cuplyr::diagnostics()`. It lists the GPU, driver, CUDA, libcudf and R package versions, the GPU memory resource and the cuplyr options in effect. Paths in it are redacted by default.
 
 For more advice on how to write a great issue, see <https://code-review.tidyverse.org/issues/>.
 
