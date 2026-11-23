@@ -5,7 +5,7 @@
 #   tools/merge-queue <name>              # branch feat/<name>, its open PR
 #   tools/merge-queue --no-merge <name>   # gate and report on the PR; don't merge
 #
-# Needs an open pull request from feat/<name> to main, and in
+# Needs an open, non-draft pull request from feat/<name> to main, and in
 # scratchpad/parity/features/:
 #   <name>.commit.txt   commit message (conventional-commit subject + body)
 #   <name>.protected    line 1: SHA of the PM's acceptance-test commit;
@@ -55,6 +55,13 @@ fi
 pr="$(gh pr list --head "$branch" --base "$trunk" --state open --json number --jq '.[0].number // empty')" ||
   { echo "can't list pull requests (gh failed)" >&2; exit 2; }
 [[ -n "$pr" ]] || { echo "no open pull request from $branch to $trunk; the PM opens it" >&2; exit 2; }
+# A draft is unfinished work: gate it only on request (--no-merge), never merge it.
+if [[ $do_merge -eq 1 ]]; then
+  draft="$(gh pr view "$pr" --json isDraft --jq .isDraft)" ||
+    { echo "can't read pull request #$pr (gh failed)" >&2; exit 2; }
+  [[ "$draft" == "false" ]] ||
+    { echo "pull request #$pr is a draft; the PM marks it ready (gh pr ready) at READY_TO_MERGE" >&2; exit 2; }
+fi
 
 pm_sha="$(head -n1 "$prot")"
 mapfile -t paths < <(tail -n +2 "$prot" | sed '/^\s*$/d')
@@ -104,7 +111,23 @@ if tools/gpu-run --gate --label "gate:$name" -- tools/merge-gate "$out"; then
     echo "GATE PASSED for $branch (pull request #$pr), not merged (--no-merge); artifacts: $out"
     exit 0
   fi
-  if ! gh pr merge "$pr" --squash --match-head-commit "$head_sha" --subject "$subject" --body "$body"; then
+  # GitHub takes a moment to register the gpu-gate status just posted (#90):
+  # wait while the required check is unseen (BLOCKED/UNKNOWN) on the gated
+  # head, then retry a refused merge a few times. A moved head fails each try.
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    state="$(gh pr view "$pr" --json headRefOid,mergeStateStatus --jq '.headRefOid + " " + .mergeStateStatus' 2>/dev/null)" || state=""
+    [[ "${state% *}" == "$head_sha" ]] || break
+    [[ "${state#* }" == BLOCKED || "${state#* }" == UNKNOWN ]] || break
+    sleep 10
+  done
+  merged=0
+  for try in 1 2 3; do
+    if gh pr merge "$pr" --squash --match-head-commit "$head_sha" --subject "$subject" --body "$body"; then
+      merged=1; break
+    fi
+    [[ $try == 3 ]] || sleep 20
+  done
+  if [[ $merged == 0 ]]; then
     echo "GATE PASSED for $branch but GitHub refused to merge pull request #$pr; $trunk unchanged; artifacts: $out" >&2
     exit 7
   fi

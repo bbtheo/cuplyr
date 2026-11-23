@@ -19,7 +19,7 @@ write the implementation. Read `.claude/CLAUDE.md` (rules, commands) and
 ## Inputs
 
 The orchestrator's prompt gives you:
-- `NAME`: the feature name, e.g. `F07` or `F07-a2` on a second attempt
+- `NAME`: the feature name, e.g. `142` or `142-a2` on a second attempt (the issue number; a few old features keep an `F<n>` id)
 - `ID` and `ATTEMPT`
 - `ISSUE`: the GitHub issue number this feature closes
 - the brief: `/home/theo/cuplr/scratchpad/parity/features/<NAME>.md`
@@ -63,7 +63,7 @@ Work only in `WT`. Call every tool by its absolute path inside `WT`.
 ## 2. Understand the gap, then design
 
 - Read the issue with `gh issue view <ISSUE> --comments`. Comments from
-  Theo or outside contributors can change the agreed approach; the brief
+  maintainers or outside contributors can change the agreed approach; the brief
   wins where they conflict, and you say so in your design note.
 - Read the gap entries the brief points to in
   `scratchpad/dplyr_feature_gaps.md` and the matching vendored dplyr tests in
@@ -98,6 +98,33 @@ Work only in `WT`. Call every tool by its absolute path inside `WT`.
 - Write `FDIR/<NAME>.protected`: line 1 is that commit's full SHA, then one
   repo-relative path per line. If you later revise the tests yourself, commit
   again and update line 1.
+
+## 3a. Open a draft pull request
+
+As soon as the acceptance tests are committed, push the branch and open a
+draft pull request, so the work can be followed on GitHub from the start:
+
+```
+git -C WT push -u origin feat/<NAME>
+gh pr create --draft --base main --head feat/<NAME> --title "<conventional-commit subject>" --body-file <file>
+```
+
+Write the body to `FDIR/<NAME>/pr-draft.md` first: `Fixes #<ISSUE>` on the
+first line, then two or three sentences on what the change will do for a
+user and how (the approach from your design, in plain words), then the
+checklist from `.github/PULL_REQUEST_TEMPLATE.md` left unticked, and the AI
+line. The rules for the final description apply here too (see 5.4): public,
+self-contained, no internal ids or round logs.
+
+On `RESUME` or attempt 2+, first check for an open pull request from the
+branch (`gh pr list --head feat/<NAME> --state open`) and keep using it.
+
+After each round's review, push the branch (the same `git push` command)
+and add one short comment to the pull request
+(`gh pr comment <n> --body-file <file>`) saying where it stands for an
+outside reader: what works now, what the review asked to change, what comes
+next. Two to four sentences; no agent names, round numbers, per-file test
+counts or local paths.
 
 ## 4. Rounds
 
@@ -164,20 +191,26 @@ Never weaken a test just to let the implementation pass.
    (`feat: ...`/`fix: ...`) and a body saying what changed and which
    conformance tests now pass. Don't add a trailer or the pull request
    number; the merge queue adds both.
-4. Push the branch and open the pull request:
+4. Push the branch, complete the draft's description and mark it ready
+   for review:
 
    ```
-   git -C WT push -u origin feat/<NAME>
-   gh pr create --base main --head feat/<NAME> --title "<the commit subject>" --body-file <file>
+   git -C WT push origin feat/<NAME>
+   gh pr edit <n> --title "<the commit subject>" --body-file <file>
+   gh pr ready <n>
    ```
 
-   Write the body to a file under `FDIR/<NAME>/` first. It follows
+   If there is no draft (a run that started before drafts were the rule),
+   open the pull request with `gh pr create` without `--draft`. Write the
+   body to a file under `FDIR/<NAME>/` first. It follows
    `.github/PULL_REQUEST_TEMPLATE.md`: `Fixes #<ISSUE>` on the first line,
    two or three sentences on what changed for the user, the checklist ticked
    honestly, and the AI line ("AI tools were used", Claude Code agents under
    the maintainer's direction). Add a short "How it was tested" paragraph
    with the tester's final counts (acceptance, suite, perf, conformance).
-   The pull request is public: no local paths, agent ids or round logs.
+   The pull request is public and self-contained for an outside reader: no
+   local paths, agent ids, internal ids (`F124`, `N6`, "round 3") or round
+   logs. Say what changed for a user and link related issues by number.
 5. If the branch changes after the pull request is open (a merge-queue
    failure, a conflict), push again with the same command. Never force-push.
 
@@ -208,8 +241,10 @@ or a failed gate; the gate's summary is also a comment on the pull request).
 That doesn't count as a round. Fix it with one coder pass plus a tester and
 reviewer check, push the branch, then report READY_TO_MERGE again.
 
-On `STATUS: FAILED` there is no pull request. If you opened one earlier,
-leave it open and name it in your report; the orchestrator decides.
+On `STATUS: FAILED`, leave the pull request open as a draft, add a comment
+saying the approach didn't work out and what is still open (public wording,
+as above), and name it in your report. The orchestrator closes it when a new
+attempt starts.
 
 Never merge a pull request, push anything other than your own
 `feat/<NAME>` branch, force-push, or touch other worktrees.

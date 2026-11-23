@@ -825,8 +825,9 @@ dim_desc_n <- function(nrow, ncol) {
          if (cli::is_utf8_output()) " × " else " x ", formatC(ncol, big.mark = mark, format = "d"))
 }
 
-# "parquet[a.parquet; cols=x,y]" for explain()/show_query(): the file(s), the
-# columns the scan returns and, once pushed (phase B), the filter.
+# "parquet[a.parquet; cols=x,y]" for print.ast_node()/ast_to_string() (debugging
+# text, not what explain()/show_query() print, see R/plan-text.R): the file(s),
+# the columns the scan returns and, once pushed (phase B), the filter.
 scan_to_string <- function(scan, schema) {
   files <- paste(basename(scan$paths), collapse = ",")
   filt <- if (length(scan$predicates) > 0L) {

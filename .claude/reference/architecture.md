@@ -23,6 +23,8 @@ list(
   lazy_ops = list()              # AST for lazy evaluation
   # rowwise = TRUE               # ONLY on a rowwise table (F49); `groups` then holds
   #                              # the rowwise vars -- see "Rowwise tables" below
+  # origin = list(...)           # ONLY on a lazy result of a CPU step (#10): plain text
+  #                              # history for explain(), see "Plan text (#10)" below
 )
 ```
 
@@ -133,7 +135,10 @@ the expression it was beside its siblings (a bare NA or `if_else(l, NA, NA)` tak
 type and is FLOAT64 on its own, which `gpu_filter_expr()` refuses), and this keeps what runs
 above the scan equal to the pushdown-off plan. A filter fully pushed has no node left above. Nothing is pushed from a `grouped` filter (`ast_filter(grouped =)`,
 set by `filter_run()` for grouped, `.by` and rowwise; the optimizer carries it, and
-`reorder_filters()` does not merge filters of different `grouped`), nor from a filter node
+`reorder_filters()` does not merge filters of different `grouped`; a rowwise filter also
+carries `rowwise = TRUE` (`ast_filter(rowwise =)`, field present only then, carried by
+`ast_filter_like()` and kept apart by `reorder_filters()` the same way; only the plan text
+reads it), nor from a filter node
 holding an F70 checked-integer predicate (every predicate of one filter() sees the same rows,
 and the overflow warning is about the rows its siblings would drop). The same F70 rule keeps
 a filter above a checked-integer `mutate()` (`id + 1L`) from moving to the scan.
@@ -172,7 +177,7 @@ reasoned, not observed (`scratchpad/parity/features/F85-a2/reviews/round-1.md`, 
 source rejects both with `CUDF_EXPECTS(stats_size == sizeof(T))`
 (`scratchpad/reference/cudf/cpp/src/io/parquet/stats_filter_helpers.hpp:70-75`). Theo chose to ship this documented in
 `?read_parquet_gpu` and NEWS, with `options(cuplyr.parquet_pushdown = FALSE)` as the way round
-it for untrusted files; validating footer statistics before trusting them is ledger row F129.
+it for untrusted files; validating footer statistics before trusting them is issue #33.
 The `&`s of a predicate
 are split only when every operand is
 logical (`ir_infer_type()`). The atoms reach `gpu_parquet_read()` as a list and become libcudf
@@ -725,7 +730,8 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
 | `R/bind.R` | `bind_rows()`, `bind_cols()` (plain functions, not S3 generics, so `!!!` splices work; errors cite the user's call; `bind_rows()` keeps the first input's groups/`.drop` and NA-pads zero-column inputs; `bind_cols()` follows vctrs' size rules: size-1 recycles, zero-column inputs give their size) with schema unification; `compute_unified_schema()` computes a factor level UNION (Phase 11 L2 Bug 2), `align_to_schema()`/`cast_column()` remap (`gpu_remap_codes()`) or decode (`gpu_decode_factor()`, Bug 3) factor columns as needed |
 | `R/collect.R` | pulls data to R, warns on INT64 precision loss. `collect_frame()` is the UNGROUPED tibble (what every internal caller that needs rows uses: fallbacks, pull, sets, joins, vctrs, `$`); `collect()` = `collect_frame()` + `dplyr::grouped_df()` with the table's `.drop` (dplyr/dbplyr contract: a grouped tbl_gpu collects grouped). `as.data.frame()`/`as_tibble()` (ungrouped)/`as.list()`/`as.matrix()` also go through `collect_frame()` |
 | `R/generics.R` | dplyr backend generics (`dplyr_col_modify()` etc.), `[`, and the base-R object contract (F04): `$`, `[[`, `$<-`, `[[<-`, `[<-`. For user code `gt$x` / `gt[["x"]]` fetch ONE column (ungroup + select + collect), `gt$x <- v` / `gt[[j]] <- v` are a GPU column modification (`gpu_assign_column()` -> `apply_col_changes()`: upload the new columns, `bind_cols()`, reorder; exec_mode and surviving groups kept), `[<-` and cell assignment are loud errors pointing at `mutate()`. Subscript checks, recycling and messages are tibble's own, run on a placeholder "stub" tibble; `[[`, `[[<-` and `$<-` take `(x, ...)` and forward the user's original promises to tibble (subscripts are evaluated once, in their own frame; labels in messages stay the user's expressions). A plain non-missing length-one `$<-`/`[[<-` value becomes a literal `mutate()` (a lazy plan is extended, not run); `x[[i, j]]` gathers one row on the GPU. **Internal fields**: a field name (`tbl_gpu_fields`) read/written by package code (caller's `topenv()` is the namespace, or its env chain below the global env holds the test marker `.cuplyr_internal_access` from `tests/testthat/helper-gpu.R`) is the raw list element; anything else (user code, other packages, global-env functions) gets the column. Code that must reach a field from elsewhere uses `unclass(x)$field` |
-| `R/compute.R` | `compute()`, `collapse()`, `as_lazy()`, `as_eager()`, `show_query()` — `compute()` (via `compute_plan()`, which `collect()` also uses) is the only caller of `optimize_ast()` |
+| `R/compute.R` | `compute()`, `collapse()`, `as_lazy()`, `as_eager()`, `show_query()`, `explain()` — `compute()` (via `compute_plan()`, which `collect()` also uses) is the only caller of `optimize_ast()` that runs a plan; the plan text (`plan_node_text()`) calls it too, to print what would run |
+| `R/plan-text.R` | the readable plan `show_query()`/`explain()` print, and the CPU-step history (`plan_origin()`): see "Plan text (#10)" |
 | `R/ast.R` | AST node constructors (`ast_source`, `ast_filter`, etc.), `infer_schema()` methods, `infer_schema_from()`/`infer_join_schema()` (schema from a known input schema) and the schema memo (`infer_schema_memo()`), see "Schemas of lazy plans" |
 | `R/optimizer.R` | AST optimization passes (projection, filter pushdown, fusion) — runs only via `compute()`, never on the eager single-op path |
 | `R/lower.R` | `lower_and_execute()` — the single execution path for every AST node in both eager and lazy modes |
@@ -846,8 +852,9 @@ that branches on `exec_mode`:
   `scratchpad/unification_design.md` if present).
 
 `optimize_ast()` (`R/optimizer.R`) only ever runs from `compute()`, which
-is invoked by `collect()`/`show_query()`/explicit `compute()` calls on a
-lazy table with pending ops. `R/lower.R::lower_and_execute()` is the single
+is invoked by `collect()`/explicit `compute()` calls on a
+lazy table with pending ops (`show_query()`/`explain()` optimize a plan only to
+print it). `R/lower.R::lower_and_execute()` is the single
 execution path for every AST node in both schedules — there are no
 separate eager/lazy implementations (`*_lazy()`/`*_one()` functions) per
 verb any more.
@@ -1412,6 +1419,15 @@ A `cuplyr_cpu_fallback` notice's `reason`/`expr` come from the decision that sen
 - `fallback_notice_as(verb, expr)` makes a verb built on another report as itself: count()/tally()/add_count() (for `wt`) and `mutate.tbl_gpu()` when its caller is dplyr's `add_tally()` (the `wt` quosure of that frame). Both `cuplyr_fallback_notify()` and `cuplyr_plan_break_notify()` read `fallback_reasons$as` (verb replaced, `expr` replaced when the notice names one); the caller restores the previous setting with `fallback_notice_restore()` in `on.exit()`.
 - summarise() with `cur_group_id()`: `summarise_group_id_split()` returns `NULL` only for an id inside a longer expression ("only as a whole expression", from `dots_need_fallback()`); every other decline is a `summarise_group_id_decline` (`reason`, `dot`) that `summarise_impl()` reports through `gpu_fallback()` with the user's dots and that dot's text (`user_dots[[dot]]`, not the rewritten dot, so `cur_group_rows()` shows as written). A dot that reads an id name is blamed as "a later dot" only when it follows the id dot. When the reduced call (without the id dots) itself reaches the CPU, `summarise_with_group_id()` returns a `summarise_group_id_cpu` object carrying that notice's reason/expr, which `summarise_impl()` reports for the whole original call.
 A new fallback path: claim at the decision with a specific reason, don't add a reason helper that re-reads the dots.
+
+### Plan text (#10)
+`show_query()` and `explain()` (`R/compute.R`) print the same text, from `R/plan-text.R`; nothing is read or run. `plan_show()` prints a header (`<cuplyr plan: optimized>` / `<cuplyr plan: as written>`; an eager table prints `<cuplyr plan>` and a line saying it has none) and `plan_node_block(plan_node_text(...))`. The format is pinned by `tests/testthat/_snaps/parity-10-explain.md`.
+- A rendered plan is a **block**: parallel `text`, `level` and `role` vectors. `level` is how many CPU-fallback blocks a line sits inside (0 = none); `role = "input"` marks a CPU block's `input (computed at ...)` line. `plan_apply_cap()` shows only lines of level <= 3 (the newest three CPU steps) and turns the input of a level-3 block that holds a deeper one into `input: not shown (older CPU steps)`; it finds that input by indentation.
+- `plan_node_block()` walks a plan iteratively (top-first chain to the source, then renders bottom-up); a join renders its left chain in the loop and its right plan recursively under `y:`. Joins are never wrapped (a step over 80 characters is split one argument per line, a join is not). A `select(pruned = TRUE)` directly on a non-scan source is folded into the source's `columns read:` line; on a parquet scan it stays a step (pushdown off).
+- Expressions come from the IR (`plan_ir()`): its own printer with a precedence table (`plan_infix_prec`), explicit `(` only where a child binds looser than its parent (`(x + 1) * 2`, `!(a & b)`), internal ops mapped back to user syntax: `ceil` -> `ceiling`, `cast_*`/`factor_*` -> `as.*`, the date/POSIXct shift ops -> `+`/`-`, and `plan_user_call()` for the ops whose IR has another order or form than the call (grepl/sub/gsub pattern first and `fixed = TRUE` only when set, `starts_with` -> `startsWith`, the 0-based `substr()` start, `paste_cols` -> `paste0`/`paste(sep =)`, `as_date`/`floor_date_hour` -> `as.Date(x, tz = "UTC")`/`floor_date(x, "hour")`, `as_posixct` -> `as.POSIXct(x)` (no `tz`: the GPU keeps a POSIXct's zone, and a Date becomes UTC midnight as in R), `trimws(x)` without the default `"both"`, rowwise `rw_agg_*` -> the operands as written (`meta$form`, recorded by `rowwise_operands()`: `max(a, b)`, `sum(c(a, b))`, `sum(c_across(c(a, b)))`; the `c_across()` selection prints resolved), `recode_lookup` -> `recode()` with every replacement up to `plan_recode_cap` (20), then `<k more>`, `replace_when` clauses as `cond ~ value`). A new IR op with an encoded form needs a case there: no internal op name may reach the text (test-plan-text.R checks one call of each mapped op and every `ir_internal_ops` name).
+- **Markers.** A filter prints `  # rowwise` when its node has `rowwise = TRUE` or a predicate holds an `rw_agg_*` call (only a rowwise table builds one), else `  # grouped` when `grouped`; a mutate holding an `rw_agg_*` call prints `  # rowwise` (`plan_has_rw_agg()`): `max(x, i)` in it is the per-row maximum, which the same text on a plain table is not. A rowwise mutate with no such aggregate has no marker (its expressions are elementwise, the same on any table). A parquet scan's `reader filter:` prints each pushed conjunct's `code` (written as code, stored on the predicate record in `scan_atom()` next to the reader's `text`). `print.ast_node()`, `ast_to_string()` and `ir_deparse()` are unchanged (internal debugging, error text, tests).
+- **CPU history.** A lazy CPU fallback computes its input at the verb and re-uploads, so the result is a fresh table. `gpu_fallback()` therefore sets `origin` on a lazy result (`fallback_record_origin()`, after the regroup, on both return paths that return a `tbl_gpu`): the `cuplyr_fallback_notify()` fields (verb/expr/reason, after the `fallback_reasons$as` remap; the function returns them invisibly), the result's column names, and the input plan rendered in both modes at fallback time. It is plain character/integer data only (no AST, external pointer, environment or quosure: a stored AST would keep a join side's GPU table alive) and cut at 3 nested CPU levels. A render error is caught and stored as one line, so a fallback never fails because of it. `input_node()` (lazy, nothing pending), `join_input_node()` and `collapse()` hand it to the `ast_source(..., origin = )` they build (field present only when non-NULL); `table_origin()` returns it only while `origin$names` equals the table's column names and `origin$ptr` (`obj_address()` of the result's GPU table) is the table's own. `group_by()` and `ungroup()` (which keep the GPU table and schema) hand it on with `carry_origin()`; `rowwise()` keeps it as a field copy; every other verb builds a new table and drops it. `compute()` of a table with pending steps starts a new plan with no history (a table with nothing pending is returned as it is, history included). `origin` is in `tbl_gpu_fields` (so `x$origin` is the raw field for package code, like `groups`).
+- Not recorded: plan breaks (`plan_run_now()`, run early on the GPU), CPU steps of an eager table, row counts.
 
 ### Join Ordering & Unmatched Rows
 - **cuDF join outputs are unordered**: We stable-sort join maps by left_map (then right_map) in `src/ops_join.cpp` to match dplyr

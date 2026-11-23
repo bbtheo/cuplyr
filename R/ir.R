@@ -5992,7 +5992,7 @@ ir_check_timespan_lit <- function(value) {
   invisible()
 }
 
-# F48: the typed allowlist. For each reducer/window op, the GPU types of its
+# F48: the typed allowlist. For each reducer/window op (and `!`), the GPU types of its
 # first (value) argument that give dplyr's result natively; any other
 # STRING/BOOL8/INT32/INT64/FLOAT64 argument goes to the CPU, where dplyr
 # gives its result, warning or error (a raw cuDF error never reaches the
@@ -6023,6 +6023,8 @@ ir_native_arg_types <- local({
       cummin = c("INT32", "FLOAT64"),
       any = "BOOL8", all = "BOOL8", cumall = "BOOL8", cumany = "BOOL8",
       min = num, max = num,
+      # `!` of a STRING is base R's "invalid argument type" error (#29)
+      "!" = num,
       # a STRING gets dplyr's "non-numeric argument" error from the CPU
       round = num
     )

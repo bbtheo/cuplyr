@@ -77,7 +77,7 @@ Column types:
 | POSIXct | TIMESTAMP_MICROSECONDS, time zone kept |
 | integer64 | FLOAT64, with a warning: values above 2^53 lose precision |
 
-Not supported: list columns, other column classes and more than one GPU. Uploading a `difftime`, `hms` or `ts` column raises an error. The [open issues](https://github.com/bbtheo/cuplyr/issues) track what is planned.
+Not supported: list columns, other column classes and more than one GPU. Uploading a `difftime`, `hms` or `ts` column raises an error. The [open issues](https://github.com/bbtheo/cuplyr/issues) track what is planned, in priority order on the [roadmap board](https://github.com/users/bbtheo/projects/1).
 
 ## Lazy by default
 
@@ -85,7 +85,7 @@ Not supported: list columns, other column classes and more than one GPU. Uploadi
 
 Printing a lazy table runs the plan to show the first rows and keeps nothing. Print it twice and it runs twice. `compute()` a table you want to look at often.
 
-`explain()` shows the recorded steps and the plan the optimizer will run:
+`explain()` prints the plan the optimizer will run as R code: the steps in order, the columns each source reads, and any step that fell back to the CPU, with the reason. `show_query(optimized = FALSE)` prints the steps as you wrote them. Neither runs anything:
 
 ```r
 tbl_gpu(mtcars) |>

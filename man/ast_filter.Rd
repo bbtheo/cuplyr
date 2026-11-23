@@ -4,7 +4,7 @@
 \alias{ast_filter}
 \title{Create a filter AST node}
 \usage{
-ast_filter(input, predicates, grouped = FALSE)
+ast_filter(input, predicates, grouped = FALSE, rowwise = FALSE)
 }
 \arguments{
 \item{input}{Input AST node}
@@ -14,6 +14,10 @@ ast_filter(input, predicates, grouped = FALSE)
 \item{grouped}{\code{TRUE} for a filter() on a grouped table, with \code{.by}, or on a
 rowwise table (\code{filter_run()} sets it; the optimizer carries it): nothing
 of such a filter is pushed into a parquet scan (R/pushdown.R)}
+
+\item{rowwise}{\code{TRUE} for a filter() on a rowwise table (then \code{grouped} is
+\code{TRUE} too); only the plan text reads it (#10). The field is present only
+when \code{TRUE}.}
 }
 \value{
 An ast_filter node
