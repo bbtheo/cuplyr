@@ -454,7 +454,7 @@ test_that("a missing column after dots that cannot fail is dplyr's error, with n
   pipelines <- list(
     function(d) summarise(d, a = mean(y, na.rm = TRUE), b = mean(xx)),
     function(d) summarise(group_by(d, g), n = n_distinct(x), s = sum(xx)),
-    function(d) summarise(d, a = sd(y, na.rm = TRUE), b = median(y, na.rm = TRUE), c = first(x), d = sum(xx))
+    function(d) summarise(d, a = sd(y, na.rm = TRUE), b = median(y, na.rm = TRUE), c = dplyr::first(x), d = sum(xx))
   )
   for (p in pipelines) {
     p13_same_error(df, p)
