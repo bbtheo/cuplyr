@@ -444,6 +444,27 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// gpu_cse_reuse_count
+double gpu_cse_reuse_count();
+RcppExport SEXP _cuplyr_gpu_cse_reuse_count() {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    rcpp_result_gen = Rcpp::wrap(gpu_cse_reuse_count());
+    return rcpp_result_gen;
+END_RCPP
+}
+// gpu_cse_enable
+bool gpu_cse_enable(bool on);
+RcppExport SEXP _cuplyr_gpu_cse_enable(SEXP onSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< bool >::type on(onSEXP);
+    rcpp_result_gen = Rcpp::wrap(gpu_cse_enable(on));
+    return rcpp_result_gen;
+END_RCPP
+}
 // gpu_compute_column
 SEXP gpu_compute_column(SEXP xptr, Rcpp::List ir);
 RcppExport SEXP _cuplyr_gpu_compute_column(SEXP xptrSEXP, SEXP irSEXP) {
@@ -1082,6 +1103,8 @@ static const R_CallMethodDef CallEntries[] = {
     {"_cuplyr_gpu_cast_to_string", (DL_FUNC) &_cuplyr_gpu_cast_to_string, 2},
     {"_cuplyr_gpu_column_type", (DL_FUNC) &_cuplyr_gpu_column_type, 2},
     {"_cuplyr_gpu_distinct", (DL_FUNC) &_cuplyr_gpu_distinct, 2},
+    {"_cuplyr_gpu_cse_reuse_count", (DL_FUNC) &_cuplyr_gpu_cse_reuse_count, 0},
+    {"_cuplyr_gpu_cse_enable", (DL_FUNC) &_cuplyr_gpu_cse_enable, 1},
     {"_cuplyr_gpu_compute_column", (DL_FUNC) &_cuplyr_gpu_compute_column, 2},
     {"_cuplyr_gpu_filter_expr", (DL_FUNC) &_cuplyr_gpu_filter_expr, 2},
     {"_cuplyr_gpu_mutate_expr", (DL_FUNC) &_cuplyr_gpu_mutate_expr, 5},
