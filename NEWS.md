@@ -107,8 +107,8 @@
   group no row belongs to), as in dplyr. Only the type changes: the groups that
   have rows keep their integer values, so integer overflow is still `NA` and
   `%/%`/`%%` by `0L` is still `NA` there, and a later `mutate()` dot reads the
-  double column. A lazy `mutate()` or `filter()` runs its earlier steps at the
-  verb (a plan break, like an integer `sum()`) only when it must: after a step
+  double column. A lazy `mutate()` or `filter()` over an in-memory table runs
+  its earlier steps at the verb (a plan break, like an integer `sum()`) only when it must: after a step
   that can change the row count, for a dot whose type depends on the data
   (`max(a)`, `max(a) + 1L`; not `a == max(a)`), and after any pending step on a
   grouping that keeps empty groups (`.drop = FALSE`, `.preserve = TRUE`), for any
@@ -120,8 +120,11 @@
   `.drop = FALSE` table costs one distinct count when none is empty, and a table
   whose row count is known and not zero only pays a check of a few microseconds.
 
-* A `min()`/`max()` over a lazy `read_parquet_gpu()` table does not run the plan
-  early and does not read the file whole for its own sake. The row count of a
+* A window `min()`/`max()` in `mutate()` or `filter()` over a lazy
+  `read_parquet_gpu()` table does not run the plan early and does not read the
+  file whole for its own sake. (An integer `min()`/`max()` in `summarise()` still
+  runs the plan at the verb, as before, reading only the columns the summary
+  needs.) The row count of a
   plan that keeps its rows comes from the file footers, read at the verb. When
   the type of a result, or the empty groups of a `.drop = FALSE` grouping,
   depend on rows the plan cannot count, a small query over the plan answers at
