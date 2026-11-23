@@ -310,3 +310,65 @@ test_that("a missing column signals no CPU fallback and no warning dplyr doesn't
     }
   }
 })
+
+# Added after the first review: names dplyr never evaluates are not missing
+# columns, the names earlier dots create (named or not) are visible to later
+# ones, and group_by() with a computed dot reports a missing bare name the way
+# dplyr's mutate step does.
+
+test_that("summarise() keeps working on dots whose unknown names dplyr never evaluates", {
+  skip_if_no_gpu()
+  df <- p13_df()
+  has_wt <- FALSE
+  kind <- "a"
+  k <- 10
+  v <- 3
+  pipelines <- list(
+    function(d) summarise(d, m = if (has_wt) weighted.mean(x, wt) else mean(x)),
+    function(d) summarise(d, m = tryCatch(mean(xx), error = function(e) NA_real_)),
+    function(d) summarise(d, v = switch(kind, a = mean(x), b = mean(zz))),
+    function(d) summarise(d, mean(x), b = `mean(x)` * 2),
+    function(d) summarise(group_by(d, g), m = mean(x) + k, n = .env$v, s = sum(y, na.rm = TRUE)),
+    function(d) summarise(d, across(c(x, y), ~ mean(.x, na.rm = TRUE) + k)),
+    function(d) summarise(d, m = base::mean(x), q = stats::median(x)),
+    function(d) summarise(d, x = mean(x), m = x * 2)
+  )
+  for (p in pipelines) {
+    expect_same_as_dplyr(df, p)
+    expect_same_as_dplyr_lazy(df, p)
+  }
+})
+
+test_that("summarise() reports a missing column after dots that create or reuse names", {
+  skip_if_no_gpu()
+  df <- p13_df()
+  p13_same_error(df, function(d) summarise(d, x = mean(x), m = sum(.data$xx)))
+  p13_same_error(df, function(d) summarise(d, x = mean(x), m = mean(xx)))
+  p13_same_error(df, function(d) summarise(d, mean(x), b = `mean(x)` + xx))
+  p13_same_error(df, function(d) summarise(d, across(c(x, y), ~ mean(.x) + xx)))
+})
+
+test_that("group_by() with a computed dot reports a missing column as dplyr's mutate step does", {
+  skip_if_no_gpu()
+  df <- p13_df()
+  cpu <- p13_same_error(df, function(d) group_by(d, a = x + 1, xx))
+  expect_true(inherits(cpu, "dplyr:::mutate_error"))
+  p13_same_error(df, function(d) group_by(d, xx, a = x + 1))
+  p13_same_error(df, function(d) group_by(d, x, a = xx + 1))
+})
+
+test_that("more filter()/arrange() shapes report a missing column as dplyr does", {
+  skip_if_no_gpu()
+  df <- p13_df()
+  p13_same_error(df, function(d) filter(d, if_any(c(x, y), ~ .x > xx)))
+  p13_same_error(df, function(d) filter_out(d, xx > 1))
+  p13_same_error(df, function(d) arrange(d, -xx))
+  strict <- list(cuplyr.fallback = "error")
+  p13_same_error(df, function(d) filter(d, if_any(c(x, xx), ~ .x > 1)), gpu_opts = strict)
+  p13_same_error(df, function(d) filter(d, .data$xx > 1), gpu_opts = strict)
+  p13_same_error(df, function(d) arrange(d, desc(xx)), gpu_opts = strict)
+  p13_same_error(df, function(d) arrange(d, .data$xx), gpu_opts = strict)
+  p13_same_error(df, function(d) summarise(d, across(xx, mean)), gpu_opts = strict)
+  p13_same_error(df, function(d) summarise(d, x = mean(x), m = sum(.data$xx)), gpu_opts = strict)
+  p13_same_error(df, function(d) group_by(d, a = x + 1, xx), gpu_opts = strict)
+})
