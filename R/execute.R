@@ -803,8 +803,12 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
   # wrong (F07).
   verb <- paste0(join_type, "_join")
   check_unique_join_inputs(x, y, rlang::caller_env())
-  check_zero_column_input(x, current_schema(x), verb)
-  check_zero_column_input(y, current_schema(y), verb)
+  if (length(current_schema(x)$names) == 0L || length(current_schema(y)$names) == 0L) {
+    return(push_join_zero_column(
+      join_type, x, y, join_spec, suffix, keep, na_matches, multiple, unmatched,
+      relationship, cross_by
+    ))
+  }
 
   # F71: a filtering join slices x's rows, so (dplyr_row_slice()) a grouped
   # `.drop = FALSE` x keeps its whole group structure, emptied groups included.
@@ -891,6 +895,48 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
     rowwise = is_rowwise_gpu(x)
   )
   row_slice_finish(carry_frame_meta(out, x), prep)
+}
+
+# A join with a zero-column side (a cross join, or `by = character()`): cudf
+# sees no rows in such a table, so a side with no columns is replaced by a
+# one-column stand-in of its row count under a name neither side has, the
+# ordinary join runs, and the stand-in column is dropped from the result. When
+# nothing is left the result is an n x 0 table of the joined row count.
+# Only reached when a side has no columns: other joins pay nothing.
+# @keywords internal
+push_join_zero_column <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
+                                  multiple, unmatched, relationship, cross_by) {
+  verb <- paste0(join_type, "_join")
+  taken <- c(current_schema(x)$names, current_schema(y)$names)
+  # one name per side: two stand-ins must not collide (and get suffixed)
+  base_name <- ".cuplyr_zero_column"
+  while (any(startsWith(taken, base_name))) {
+    base_name <- paste0(base_name, "_")
+  }
+  stand_ins <- paste0(base_name, c("x", "y"))
+  stand_in <- function(side, stand_in_name) {
+    if (length(current_schema(side)$names) > 0L) {
+      return(side)
+    }
+    n <- zero_column_nrow(side, verb)
+    col <- tibble::tibble(!!stand_in_name := rep.int(0L, n))
+    copy_frame_meta(
+      tbl_gpu(col, lazy = identical(.subset2(side, "exec_mode"), "lazy")), side
+    )
+  }
+  out <- push_join(
+    join_type, stand_in(x, stand_ins[[1L]]), stand_in(y, stand_ins[[2L]]), join_spec, suffix, keep, na_matches,
+    multiple, unmatched, relationship, cross_by
+  )
+  keep_names <- current_schema(out)$names
+  keep_names <- keep_names[!keep_names %in% stand_ins]
+  if (length(keep_names) == 0L) {
+    return(zero_column_result(out, verb))
+  }
+  if (length(keep_names) == length(current_schema(out)$names)) {
+    return(out)
+  }
+  push_op(out, ast_select(input_node(out), keep_names))
 }
 
 #' Auto-name unnamed dots, warning as dplyr's verbs do

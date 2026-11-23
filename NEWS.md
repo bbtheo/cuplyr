@@ -1,5 +1,13 @@
 # cuplyr (development version)
 
+* `mutate()`, `transmute()`, `filter()`, `filter_out()`, `cross_join()`, the
+  joins with `by = character()`, `intersect()`, `setdiff()`, `symdiff()`,
+  `setequal()`, `reframe()` and the vctrs functions (`vec_size()`,
+  `vec_slice()`, ...) now work on a table with rows but no columns, as dplyr
+  does, and keep its row count. This includes `mutate()` setting every column
+  to `NULL` (with or without `.by`) and `filter()` with `FALSE`, `NA`,
+  `row_number()` or `n()` (#19).
+
 * `diagnostics()` now reports the libcudf and RMM versions cuplyr was built
   against, the libcudf library loaded into the session and its version, the
   active GPU memory resource and pool size, and every cuplyr option with its

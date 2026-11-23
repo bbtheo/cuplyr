@@ -334,8 +334,13 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   if (!quo_is_null_fast(by_quo) && isTRUE(.preserve)) {
     return(cpu("`.by` together with `.preserve = TRUE` is checked by dplyr."))
   }
+  # A table with no columns has no cudf column to mask: dplyr runs the call
+  # (on a stand-in of the same height) and only the surviving count is kept.
   if (complement && length(current_schema(.data)$names) == 0L) {
     return(cpu("filter_out() of a table with no columns is evaluated by dplyr."))
+  }
+  if (length(current_schema(.data)$names) == 0L && !is.null(.subset2(.data, "nrow"))) {
+    return(cpu("a table with no columns is evaluated by dplyr."))
   }
 
   # F77: a call whose head resolves to a function of the user's rather than the

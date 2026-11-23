@@ -118,19 +118,23 @@ test_that("cross_join() with 1-row inputs matches dplyr", {
   compare_cross_join(x[1, , drop = FALSE], y[1, , drop = FALSE])
 })
 
-test_that("cross_join() errors clearly on 0-column inputs", {
+test_that("cross_join() works on 0-column inputs like dplyr", {
   skip_if_no_gpu()
 
   x <- data.frame(id = 1:2)
   y <- data.frame(id = 10:12)
 
-  expect_error(
-    dplyr::cross_join(tbl_gpu(x[, 0, drop = FALSE]), tbl_gpu(y)),
-    "at least one column"
+  expect_identical(
+    collect(dplyr::cross_join(tbl_gpu(x[, 0, drop = FALSE]), tbl_gpu(y))),
+    data.frame(id = rep(10:12, 2))
   )
-  expect_error(
-    dplyr::cross_join(tbl_gpu(x), tbl_gpu(y[, 0, drop = FALSE])),
-    "at least one column"
+  expect_identical(
+    collect(dplyr::cross_join(tbl_gpu(x), tbl_gpu(y[, 0, drop = FALSE]))),
+    data.frame(id = rep(1:2, each = 3))
+  )
+  expect_identical(
+    dim(dplyr::cross_join(tbl_gpu(x[, 0, drop = FALSE]), tbl_gpu(y[, 0, drop = FALSE]))),
+    c(6L, 0L)
   )
 })
 
