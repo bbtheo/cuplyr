@@ -6,9 +6,10 @@
   value, source and default. `diagnostics(format = "json")` prints the same
   information as one JSON object, and the libcudf path is redacted like the
   other paths. `cuplyr.parquet_pushdown` and `cuplyr.topk_path` are now
-  registered options: an invalid value warns once and means the default, and
-  they are listed by `cuplyr_options()` and documented in `?cuplyr-options`
-  (#14).
+  registered options: an invalid value warns once and means the default.
+  `cuplyr.parquet_pushdown` is listed by `cuplyr_options()` and documented in
+  `?cuplyr-options`; `cuplyr.topk_path` is internal, so it is listed only by
+  `cuplyr_options(internal = TRUE)` (#14).
 
 * `mutate()` and `transmute()` raise dplyr's errors. An error in a dot, such as
   an unknown object or a missing `.data` column, is a `dplyr:::mutate_error`

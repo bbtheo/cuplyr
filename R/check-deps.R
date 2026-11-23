@@ -466,15 +466,16 @@ print_deps_text <- function(result, verbose = FALSE) {
 
 # Escape a string for use inside JSON double quotes.
 json_escape <- function(s) {
-  # Order matters: backslash first, then others
-  s <- gsub("\\", "\\\\", s, fixed = TRUE)   # \ -> \\
-  s <- gsub('"', '\\"', s, fixed = TRUE)     # " -> \"
-  s <- gsub("\n", "\\n", s, fixed = TRUE)    # newline -> \n
-  s <- gsub("\r", "\\r", s, fixed = TRUE)    # CR -> \r
-  s <- gsub("\t", "\\t", s, fixed = TRUE)    # tab -> \t
+  # Order matters: backslash first, then others. useBytes everywhere: a string
+  # with non-UTF-8 bytes must not make gsub() fail.
+  s <- gsub("\\", "\\\\", s, fixed = TRUE, useBytes = TRUE)   # \ -> \\
+  s <- gsub('"', '\\"', s, fixed = TRUE, useBytes = TRUE)     # " -> \"
+  s <- gsub("\n", "\\n", s, fixed = TRUE, useBytes = TRUE)    # newline -> \n
+  s <- gsub("\r", "\\r", s, fixed = TRUE, useBytes = TRUE)    # CR -> \r
+  s <- gsub("\t", "\\t", s, fixed = TRUE, useBytes = TRUE)    # tab -> \t
   # any other control character (JSON forbids them raw) -> \u00XX
   for (code in setdiff(1:31, c(9L, 10L, 13L))) {
-    s <- gsub(intToUtf8(code), sprintf("\\u%04x", code), s, fixed = TRUE)
+    s <- gsub(intToUtf8(code), sprintf("\\u%04x", code), s, fixed = TRUE, useBytes = TRUE)
   }
   s
 }

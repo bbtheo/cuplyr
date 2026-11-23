@@ -5,9 +5,11 @@
 #   (or NA), allowed values / validator, description, internal flag.
 # - User options: cuplyr.exec_mode, cuplyr.fallback, cuplyr.plan_break,
 #   cuplyr.memory_resource, cuplyr.memory_pool, cuplyr.pool_initial,
-#   cuplyr.release_threshold, cuplyr.roll_median. Internal switches:
-#   cuplyr.roll_path, cuplyr.check_schema_cache. cuplyr.gpu_available is load
-#   state, not an option; cuplyr.lazy / cuplyr.verbose are gone.
+#   cuplyr.release_threshold, cuplyr.parquet_pushdown, cuplyr.roll_median.
+#   Internal switches: cuplyr.roll_path, cuplyr.topk_path,
+#   cuplyr.check_schema_cache (issue #14 added parquet_pushdown and topk_path).
+#   cuplyr.gpu_available is load state, not an option; cuplyr.lazy /
+#   cuplyr.verbose are gone.
 # - An invalid value (option or env var) warns once per session and value with
 #   class `cuplyr_warning_invalid_option` (fields `option` = the R option name,
 #   `value` = the value as given), the message names the allowed values (and

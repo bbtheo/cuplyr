@@ -20,7 +20,7 @@ Invisibly returns a list with all diagnostic information, whichever
 console. Besides the package, system, CUDA and GPU fields, the list has:
 \itemize{
 \item \code{libcudf_version} and \code{rmm_version}: the versions cuplyr was built
-against, as \code{"26.02.0"}.
+against, as \code{"25.12.0"}.
 \item \code{libcudf_path}: the libcudf library loaded into this R session (\code{NA} if
 none), and \code{libcudf_loaded_version}, its version (\code{NA} when its headers
 can't be found). A difference from \code{libcudf_version} means cuplyr runs

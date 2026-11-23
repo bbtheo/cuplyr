@@ -15,7 +15,7 @@
 #'   `format` is used. Also prints the report (or the JSON object) to the
 #'   console. Besides the package, system, CUDA and GPU fields, the list has:
 #'   * `libcudf_version` and `rmm_version`: the versions cuplyr was built
-#'     against, as `"26.02.0"`.
+#'     against, as `"25.12.0"`.
 #'   * `libcudf_path`: the libcudf library loaded into this R session (`NA` if
 #'     none), and `libcudf_loaded_version`, its version (`NA` when its headers
 #'     can't be found). A difference from `libcudf_version` means cuplyr runs
@@ -185,8 +185,9 @@ diagnostics <- function(redact = TRUE, format = c("text", "json")) {
     user <- Sys.info()[["user"]]
     redact_path <- function(x) {
       if (is.na(x) || !is.character(x)) return(x)
-      x <- gsub(home, "~", x, fixed = TRUE)
-      if (nzchar(user)) x <- gsub(user, "<user>", x, fixed = TRUE)
+      # useBytes: a path with non-UTF-8 bytes must not make gsub() fail
+      x <- gsub(home, "~", x, fixed = TRUE, useBytes = TRUE)
+      if (nzchar(user)) x <- gsub(user, "<user>", x, fixed = TRUE, useBytes = TRUE)
       x
     }
     info$cuda_home <- redact_path(info$cuda_home)
@@ -269,9 +270,12 @@ diagnostics <- function(redact = TRUE, format = c("text", "json")) {
   cat("Options\n")
   opts <- info$options
   for (i in seq_len(nrow(opts))) {
+    # An NA default is "unset" (no value, e.g. no automatic release), except
+    # for pool_initial, whose default really is computed at run time.
+    none <- if (opts$option[i] == "cuplyr.pool_initial") "computed" else "unset"
     cat(sprintf("  %s = %s (%s; default %s)%s\n", opts$option[i],
                 diag_show(opts$value[i], "<unset>"), opts$source[i],
-                diag_show(opts$default[i], "computed"),
+                diag_show(opts$default[i], none),
                 if (isTRUE(opts$internal[i])) " [internal]" else ""))
   }
   cat("\n")
@@ -305,14 +309,16 @@ diag_gib <- function(bytes) {
   if (length(bytes) != 1L || is.na(bytes)) "n/a" else paste(round(bytes / 1024^3, 2), "GiB")
 }
 
-# The GPU memory resource, from gpu_memory_state(). When it can't be read the
-# resource is NA and `available` is FALSE.
+# The GPU memory resource, from gpu_memory_state(). When it can't be read
+# (`available` is FALSE) the resource is unknown, so NA: gpu_memory_state()
+# then reports "cuda", which only means that nothing is installed.
 diag_memory <- function() {
   state <- tryCatch(gpu_memory_state(), error = function(e) NULL)
   num <- function(x) if (is.numeric(x) && length(x) == 1L) as.numeric(x) else NA_real_
+  available <- isTRUE(state$available)
   list(
-    available = isTRUE(state$available),
-    resource = diag_chr(state$resource),
+    available = available,
+    resource = if (available) diag_chr(state$resource) else NA_character_,
     pool_bytes = num(state$pool_bytes),
     pool_used_bytes = num(state$pool_used_bytes)
   )
@@ -322,6 +328,12 @@ diag_memory <- function() {
 # came from (cuplyr_options()), plus the registry's default and whether the
 # option is internal. A default that is computed at run time is NA.
 diag_options <- function() {
+  # cuplyr_options() warns about an invalid option and reports its default.
+  # With options(warn = 2) that warning would become an error and empty the
+  # table. diagnostics() is a report that must not fail, so keep the warning
+  # but don't let it be fatal here (cuplyr_options() itself stays strict).
+  old <- options(warn = min(getOption("warn"), 1))
+  on.exit(options(old))
   tryCatch({
     opts <- cuplyr_options(internal = TRUE)
     reg <- cuplyr_option_registry[sub("^cuplyr\\.", "", opts$option)]
