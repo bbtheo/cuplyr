@@ -145,6 +145,8 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
   if (is.null(dot_names)) {
     dot_names <- rep("", length(dots))
   }
+  # (the names the user gave, for an error in a key)
+  user_names <- dot_names
   for (i in seq_along(dots)) {
     if (is.na(dot_names[i]) || dot_names[i] == "") {
       dot_names[i] <- dot_label(dots[[i]])
@@ -164,12 +166,13 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
   expressions <- list()
   computed <- logical(length(dots))
   any_window <- FALSE
+  frame <- environment()
 
   for (i in seq_along(dots)) {
     new_name <- dot_names[i]
     expr <- dots[[i]]
 
-    ir <- ir_parse_quo(expr, schema)
+    ir <- parse_key_ir(expr, schema, user_names[[i]], frame)
 
     # Not in the expression IR (a user function, a column-free call that only
     # works inside the data mask, ...): dplyr evaluates it, or raises its own

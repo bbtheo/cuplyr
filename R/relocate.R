@@ -4,7 +4,7 @@
 # type needed for that part); relocate() can ALSO rename while relocating
 # (e.g. relocate(df, a = x) -- verified empirically against dplyr 1.2.1,
 # and mirrors dplyr's own relocate.data.frame(), which is built on the same
-# tidyselect::eval_relocate(..., allow_rename = TRUE) call used here), so
+# eval_relocate() (a copy of it, eval_relocate_dplyr()) used here), so
 # when the resolved positions carry a rename, an ast_rename node (R/ast.R,
 # R/rename.R) is stacked on top -- same pattern select.tbl_gpu() uses for
 # its own `new = old` rename fix (R/select.R).
@@ -63,7 +63,7 @@ relocate.tbl_gpu <- function(.data, ..., .before = NULL, .after = NULL) {
   sel <- resolve_selection(
     .data, schema, c(as.list(quos), list(before_quo, after_quo)), "relocate",
     function(data) {
-      tidyselect::eval_relocate(
+      eval_relocate_dplyr(
         expr = rlang::expr(c(!!!quos)), data = data,
         before = before_quo, after = after_quo,
         before_arg = ".before", after_arg = ".after", error_call = call

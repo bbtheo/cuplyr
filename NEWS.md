@@ -11,6 +11,23 @@
   `?cuplyr-options`; `cuplyr.topk_path` is internal, so it is listed only by
   `cuplyr_options(internal = TRUE)` (#14).
 
+* `filter()`, `arrange()`, `summarise()`, `count()`, `distinct()`,
+  `group_by()`, `relocate()` and the joins raise dplyr's error for a column
+  that doesn't exist: the same class, message and parent error, and the call
+  the user made (`filter()`, `count()`, `add_tally()`, ...) rather than an
+  internal one. `summarise()` reports a typo such as `mean(xx)` directly
+  instead of running the call on the CPU first, so
+  `options(cuplyr.fallback = "error")` no longer turns it into a fallback
+  error. `arrange()` ignores a `NULL` name and sorts by any other object that
+  is not a column, as dplyr does. dplyr gives no "did you mean" hint, so
+  neither does cuplyr (#13).
+
+* `cuplyr_error_gpu_oom`, raised when a GPU step still runs out of device
+  memory after cuplyr's retry, now shows the device's and the session's
+  memory, names what helps (`gpu_gc()`, lazy mode, the
+  `cuplyr.memory_resource` option under the "pool" resource), keeps the
+  allocator's error as its parent and reports the call the user made (#13).
+
 * `mutate()` and `transmute()` raise dplyr's errors. An error in a dot, such as
   an unknown object or a missing `.data` column, is a `dplyr:::mutate_error`
   that names the argument ("In argument: ...") and, for a grouped table or
@@ -101,6 +118,65 @@
 * `curl ... | bash` picks pixi when it is installed, and the system path finds
   a toolkit in `/opt/cuda` without `CUDA_HOME`. `check_deps()` looks for `nvcc`
   in the same places as `configure`.
+
+* A `min()`/`max()` with no non-missing value in `summarise()`, `reframe()`,
+  `mutate()` and `filter()` gives dplyr's warning: one condition per verb call
+  ("There was 1 warning in `summarise()`." / "There were N warnings in
+  `mutate()`.", with the first warning's argument, group and calling function),
+  not one per aggregation. The warning names the verb as it was called
+  (`summarize()`, `dplyr::mutate()`) and the dot as the user wrote it, also for
+  an `across()`/`if_any()` dot. A string or Date/POSIXct `min()`/`max()` of an
+  empty group, or of an all-`NA` group under `na.rm = TRUE`, warns too (it did
+  not). A Date/POSIXct result is `NA` on the GPU where dplyr has `Inf`; it also
+  gives a `cuplyr_warning_infinite_timestamp` (#28).
+
+* A window `min()`/`max()` of an integer or logical column in `mutate()` gives a
+  double column when a group is empty (a zero-row table, or a `.drop = FALSE`
+  group no row belongs to), as in dplyr. Only the type changes: the groups that
+  have rows keep their integer values, so integer overflow is still `NA` and
+  `%/%`/`%%` by `0L` is still `NA` there, and a later `mutate()` dot reads the
+  double column. A lazy `mutate()` or `filter()` over an in-memory table runs
+  its earlier steps at the verb (a plan break, like an integer `sum()`) only
+  when it must: after a step that can change the row count, for a dot whose type
+  depends on the data (`max(a)`, `max(a) + 1L`; not `a == max(a)`), and after
+  any pending step on a grouping that keeps empty groups (`.drop = FALSE`,
+  `.preserve = TRUE`), for any `min()`/`max()` (the warning names the empty
+  groups). A double, string or Date `min()`/`max()` over rows the plan cannot
+  count does not break it (the plan warns when it runs on an empty input),
+  unless the same `mutate()` has a column-free call not known to be pure
+  (`runif(1)`): then the earlier steps run first, so that call is evaluated
+  once. Finding the empty groups of a `.drop = FALSE` table costs one distinct
+  count when none is empty, and a table whose row count is known and not zero
+  only pays a check of a few microseconds (#28).
+
+* A window `min()`/`max()` in `mutate()` or `filter()` over a lazy
+  `read_parquet_gpu()` table does not run the plan early and does not read the
+  file whole for its own sake. (An integer or logical `min()`/`max()` in
+  `summarise()` still runs the plan at the verb, as before.) The row count of a
+  plan that keeps its rows comes from the file footers, read at the verb. When
+  the type of a result, or the empty groups of a `.drop = FALSE` grouping,
+  depend on rows the plan cannot count, a small query over the plan answers at
+  the verb. It reads the columns the pending steps need to give their rows
+  (filters, join keys, groupings, and the inputs of `summarise()`, window,
+  `arrange()` and `slice()` steps), but not those of a `mutate()` nothing reads;
+  an error in one of those steps comes at the verb. The plan stays lazy (no plan
+  break), and every warning, the pending steps' and the `min()`/`max()`'s own,
+  comes when the plan runs, in dplyr's order, each time it runs. A `mutate()` or
+  `filter()` that dplyr must run on the CPU still collects its input, as it does
+  for any lazy table. If the plan said a `min()`/`max()` result is an integer
+  because the file's footer had rows, and the file has none when the plan runs,
+  the run fails with a `cuplyr_error_parquet_file_emptied` error: call
+  `read_parquet_gpu()` again. A type or a warning decided by the small query is
+  not checked again: see "If the file changes" in `?read_parquet_gpu`. A grouped
+  `filter()` that keeps empty groups (`.drop = FALSE`, `.preserve = TRUE`) no
+  longer runs such a plan at the verb either: the same kind of query reads its
+  group keys, and the plan stays lazy (#28).
+
+* A `min()`/`max()` whose argument has one value per group (`max(n())`,
+  `max(sum(x))`, the outer call of `max(max(x))`) keeps its type and does not
+  warn, as in dplyr. A Date shifted by an integer amount made of `min()`/`max()`
+  calls (`d + max(a)`, `d + max(a) * 2L`) stays a Date on the GPU when a group
+  is empty (#28).
 
 ## Read and write parquet on the GPU (F85)
 

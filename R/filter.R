@@ -251,8 +251,10 @@ filter_impl <- function(.data, dots, by_quo, .preserve, complement, call) {
   }
   # dplyr keeps a `.drop = FALSE` table's whole group structure whatever
   # `.preserve` says, so those tables take the same route (row_slice_prepare()
-  # computes a lazy input first, so its plan runs once).
-  prep <- row_slice_prepare(.data, .preserve, eligible = quo_is_null_fast(by_quo))
+  # computes a lazy input first, so its plan runs once; a plan over a parquet
+  # scan stays lazy, and only its group keys are computed, from the columns
+  # they need).
+  prep <- row_slice_prepare(.data, .preserve, eligible = quo_is_null_fast(by_quo), lazy_keys = TRUE)
   .data <- prep$data
   out <- filter_run(.data, dots, by_quo, .preserve, complement, call)
   row_slice_finish(out, prep)
@@ -687,6 +689,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
   # every dot's (possibly rewritten) predicate, in original dot order.
   # (set when a lazy call runs at the verb, see the integer-sum rule below)
   back_to_lazy <- FALSE
+  mm <- NULL  # (F124: the window min()/max() state of the call)
   if (length(window_idx) > 0) {
     window_exprs <- stats::setNames(
       parsed[window_idx],
@@ -743,13 +746,49 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       eager <- TRUE
       back_to_lazy <- TRUE
     }
+    # F124: the empty groups of a call with window min()/max() (their warning
+    # is dplyr's; the predicate is the same whatever the type). A lazy table's
+    # plan carries the warning for an empty input; when the grouping keeps empty
+    # groups that pending steps may leave, the steps run now (the computed
+    # table is used from here on, nothing runs twice) and the result goes
+    # back to lazy; over a parquet scan a pruned query finds them instead.
+    # Nothing is built when no group can be empty (minmax_win_open() gives NULL).
+    if (minmax_dots_mention(dots)) {
+      # (the frame of filter.tbl_gpu(), the caller of filter_impl(), for the
+      # call head of the warning)
+      verb_frame <- sys.parent(2L)
+      mm <- minmax_win_open(.data, !quo_is_null_fast(by_quo),
+                            if (complement) "filter_out" else "filter", verb_frame,
+                            user_dots, dots, origin, typed = FALSE)
+      for (i in window_idx) {
+        minmax_record_dot(mm, i, parsed[[i]], schema)
+      }
+      if (minmax_win_needs_run(mm)) {
+        if (isTRUE(mm$scan)) {
+          # (a plan over a parquet scan is never run whole: the empty groups come
+          # from a pruned query over the pending plan)
+          minmax_scan_resolve(mm, .data, !quo_is_null_fast(by_quo))
+        } else {
+          .data <- plan_run_now(.data, if (complement) "filter_out" else "filter",
+                                "a min()/max() over groups that may be empty (their warning names them)",
+                                notice_data = if (mask_ran_plan) .data else fallback_data)
+          fallback_data <- if (isTRUE(cgid$used)) plan_now_columns(.data, real_orig_names) else .data
+          eager <- TRUE
+          back_to_lazy <- TRUE
+          minmax_win_set_setup(mm, minmax_window_setup(.data, !quo_is_null_fast(by_quo)))
+        }
+      }
+    }
+    minmax_prep <- minmax_win_lazy_prep(mm)
     push_stages <- function(d) {
       for (stage in plan$stages) {
         if (length(stage$pre) > 0) {
           d <- push_op(d, ast_mutate(input_node(d), stage$pre))
         }
         d <- push_op(d, ast_window(input_node(d), stage$specs, verb_groups,
-                                   on_sum_overflow = if (eager) "error" else "double"))
+                                   on_sum_overflow = if (eager) "error" else "double",
+                                   minmax_warn = minmax_prep))
+        minmax_prep <<- NULL
       }
       d
     }
@@ -879,6 +918,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     .data <- push_op(.data, ast_select(input_node(.data), real_orig_names))
   }
 
+  minmax_win_emit(mm)
   if (back_to_lazy) plan_back_to_lazy(.data) else .data
 }
 
@@ -1517,6 +1557,8 @@ rewrite_top_n_rank_dots <- function(dots, .data) {
 # @param schema The current schema (names/types) to parse against
 # @return An IR node, or NULL if unsupported
 # @keywords internal
+# Only filter_run() may call this: the error hook (filter_dot_error()) reads the
+# dot loop's `i`, `dots` and `user_dots` from the calling frame.
 parse_filter_ir <- function(quo, schema) {
   tryCatch(
     ir_parse_quo(quo, schema),
@@ -1525,6 +1567,8 @@ parse_filter_ir <- function(quo, schema) {
       if (grepl("scalar", msg, fixed = TRUE) && grepl("length", msg, fixed = TRUE)) {
         return(NULL)
       }
+      # dplyr's "In argument: `<dot>`." for the dot filter_run() is on
+      filter_dot_error(e, environment())
       stop(e)
     }
   )

@@ -786,7 +786,9 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 #
 #   row_slice_prepare(x, preserve)    before the slice: is x eligible? (a lazy
 #                                     x is computed first, its keys and null
-#                                     counts need the data)
+#                                     counts need the data; for filter(), a
+#                                     plan over a parquet scan stays lazy and
+#                                     only its keys are computed)
 #   row_slice_finish(result, prep)    on the result: fix the keys, if needed
 #
 # Fixed keys are a cost (a later summarise()/count()/tally() downloads the
@@ -796,13 +798,26 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 
 # @param x a `tbl_gpu`; @param preserve dplyr's `preserve`/`.preserve`
 # @param eligible FALSE for a call that never keeps groups (`.by`)
-# @return list(data = x (computed if keys may be taken), keep, preserve)
+# @param lazy_keys TRUE for a verb that works on a lazy `x` (filter()): a plan
+#   over a parquet scan is then not run at the verb (that reads the file whole,
+#   and its warnings would come at the verb, not when the plan runs, F80); only
+#   its group keys are, by a quiet pruned query (plan_group_keys()), which is
+#   all row_slice_keys() reads of it
+# @return list(data = x (computed if keys may be taken), keep, preserve, keys
+#   (NULL, or the computed keys of a lazy `x`))
 # @keywords internal
-row_slice_prepare <- function(x, preserve = FALSE, eligible = TRUE) {
+row_slice_prepare <- function(x, preserve = FALSE, eligible = TRUE, lazy_keys = FALSE) {
   keep <- eligible && (isTRUE(preserve) || isFALSE(.subset2(x, "group_drop"))) &&
     length(.subset2(x, "groups")) > 0L && !is_rowwise_gpu(x)
-  if (keep && has_pending_ops(x)) x <- compute(x)
-  list(data = x, keep = keep, preserve = isTRUE(preserve))
+  keys <- NULL
+  if (keep && has_pending_ops(x)) {
+    if (lazy_keys && plan_has_scan(.subset2(x, "lazy_ops"))) {
+      keys <- plan_group_keys(x)
+    } else {
+      x <- compute(x)
+    }
+  }
+  list(data = x, keep = keep, preserve = isTRUE(preserve), keys = keys)
 }
 
 # `result` with the keys of row_slice_keys() fixed on it, or with its fixed
@@ -811,7 +826,7 @@ row_slice_prepare <- function(x, preserve = FALSE, eligible = TRUE) {
 row_slice_finish <- function(result, prep) {
   if (!is_tbl_gpu(result)) return(result)
   keys <- if (prep$keep && identical(result$groups, prep$data$groups)) {
-    row_slice_keys(prep$data, result)
+    row_slice_keys(prep$keys %||% prep$data, result)
   }
   if (!is.null(keys)) {
     result$fixed_keys <- keys
@@ -822,8 +837,9 @@ row_slice_finish <- function(result, prep) {
 }
 
 # The group keys to fix on `result`, a row slice of `x` (computed, eligible per
-# row_slice_prepare()), or NULL when `result`'s own groups already match
-# dplyr's:
+# row_slice_prepare(); or the computed distinct keys of a lazy one, which have
+# its groups, `.drop`, fixed keys and key nulls), or NULL when `result`'s own
+# groups already match dplyr's:
 # - keys `x` already has are carried (they are its groups);
 # - `.drop = FALSE` with only factor keys and no NA: dplyr's groups are every
 #   level combination, which group_data() rebuilds for any subset of rows;
