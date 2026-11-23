@@ -427,3 +427,55 @@ test_that("summarise() reports a missing column inside other calls and on rowwis
   p13_same_error(df, function(d) summarise(rowwise(d), m = mean(xx)))
   p13_same_error(df[0, ], function(d) summarise(d, m = mean(xx), .by = g))
 })
+
+# Added after the third review: a missing function argument, a missing column
+# after common dots that cannot fail, and a vector from the environment in a
+# count()/distinct() key.
+
+test_that("a missing function argument in a dot is reported as dplyr does", {
+  skip_if_no_gpu()
+  df <- p13_df()
+  strict <- list(cuplyr.fallback = "error")
+  f_sum <- function(d, w) summarise(d, m = sum(x * w))
+  f_arr <- function(d, w) arrange(d, x + w)
+  f_flt <- function(d, w) filter(d, x > w)
+  f_mut <- function(d, w) mutate(d, z = x + w)
+  for (f in list(f_sum, f_arr, f_flt, f_mut)) {
+    p13_same_error(df, function(d) f(d))
+  }
+  # (summarise and arrange decide natively, so strict mode gives the same error)
+  p13_same_error(df, function(d) f_sum(d), gpu_opts = strict)
+})
+
+test_that("a missing column after dots that cannot fail is dplyr's error, with no CPU fallback", {
+  skip_if_no_gpu()
+  df <- p13_df()
+  strict <- list(cuplyr.fallback = "error")
+  pipelines <- list(
+    function(d) summarise(d, a = mean(y, na.rm = TRUE), b = mean(xx)),
+    function(d) summarise(group_by(d, g), n = n_distinct(x), s = sum(xx)),
+    function(d) summarise(d, a = sd(y, na.rm = TRUE), b = median(y, na.rm = TRUE), c = first(x), d = sum(xx))
+  )
+  for (p in pipelines) {
+    p13_same_error(df, p)
+    p13_same_error(df, p, gpu_opts = strict)
+    for (lazy in c(FALSE, TRUE)) {
+      fallbacks <- 0L
+      withCallingHandlers(
+        tryCatch(dplyr::collect(p(tbl_gpu(df, lazy = lazy))), error = function(e) NULL),
+        cuplyr_cpu_fallback = function(c) fallbacks <<- fallbacks + 1L
+      )
+      expect_identical(fallbacks, 0L, info = if (lazy) "lazy" else "eager")
+    }
+  }
+})
+
+test_that("count() and distinct() keys that read a vector from the environment give dplyr's result", {
+  skip_if_no_gpu()
+  df <- p13_df()
+  v <- c(1, 2, 3)
+  expect_same_as_dplyr(df, function(d) count(d, a = x + v))
+  expect_same_as_dplyr(df, function(d) distinct(d, a = x + v))
+  expect_same_as_dplyr_lazy(df, function(d) count(d, a = x + v))
+  expect_same_as_dplyr_lazy(df, function(d) distinct(d, a = x + v))
+})
