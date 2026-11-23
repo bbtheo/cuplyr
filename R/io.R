@@ -327,15 +327,16 @@ parquet_diff <- function(want, got) {
 #' footer at the time you ask. Reading one lazy table twice reads the file
 #' twice.
 #'
-#' A `min()` or `max()` over a lazy table can also look at the files at the verb,
-#' before `collect()`: it may read the footers (the row count of a plan that
+#' A window `min()` or `max()` in `mutate()` or `filter()` over a lazy table can
+#' also look at the files at the verb, before `collect()`: it may read the footers (the row count of a plan that
 #' keeps its rows, one footer per file, so a missing file is an error at the
 #' verb), or run a small query over the plan to learn whether a result or a
 #' `.drop = FALSE` group is empty, which decides whether an integer result is a
 #' double. The query reads only the columns the pending steps need to give
 #' their rows, and an error in one of those steps (a missing file included) is
 #' an error at the verb. The plan is not run early, and its warnings come when
-#' it runs. If a file changes after that, the types such a plan promised can be
+#' it runs. (An integer or logical `min()`/`max()` in `summarise()` runs the
+#' plan at the verb, as for any lazy table.) If a file changes after that, the types such a plan promised can be
 #' stale: a file emptied after the verb stops the run with
 #' `cuplyr_error_parquet_file_emptied` when the type came from the footer, and
 #' gives the type the plan said (not dplyr's) when it came from the query, whose
@@ -347,7 +348,9 @@ parquet_diff <- function(want, got) {
 #' name the file: `cuplyr_error_parquet_not_found`, `_invalid` (not a parquet
 #' file, corrupt footer), `_unsupported_type`, `_schema_changed`,
 #' `_schema_mismatch` (files that differ), `_unknown_column` and `_columns`
-#' (`columns =` names no column or is empty), `_write` and `_compression`.
+#' (`columns =` names no column or is empty), `_file_emptied` (a file emptied
+#' after a `min()`/`max()` typed a plan from its footer), `_write` and
+#' `_compression`.
 #' Several files are read by one libcudf call that doesn't say which file a
 #' problem is in, so those messages say "one of the parquet files". Running out
 #' of GPU memory is `cuplyr_error_gpu_oom`, with the file in the message.
