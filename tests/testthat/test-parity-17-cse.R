@@ -251,3 +251,63 @@ test_that("different digits are different subtrees", {
   expect_same_as_dplyr_lazy(df, p)
   expect_equal(cse_reuses(collect(p(tbl_gpu(df, lazy = FALSE)))), 0)
 })
+
+test_that("a -0 literal from the environment is not merged with 0", {
+  skip_if_no_gpu()
+  df <- cse_df()
+  mz <- 0
+  mz <- mz * -1
+  p <- function(d) mutate(d, a = 1 / round(x + 0, 2), b = 1 / round(x + mz, 2))
+  expect_same_as_dplyr(df, p)
+  expect_same_as_dplyr_lazy(df, p)
+  got <- collect(p(tbl_gpu(df, lazy = FALSE)))
+  expect_identical(got$b[1:2], c(-Inf, Inf))
+  expect_equal(cse_reuses(collect(p(tbl_gpu(df, lazy = FALSE)))), 0)
+})
+
+test_that("calls that differ only in their metadata are not merged", {
+  skip_if_no_gpu()
+  df <- data.frame(x = c(1, 5, NA, 2), y = c(3, 2, 4, NA))
+  p <- function(d) {
+    d |>
+      rowwise() |>
+      mutate(s = sum(x, y, na.rm = TRUE), m = max(x, y, na.rm = TRUE)) |>
+      ungroup()
+  }
+  expect_same_as_dplyr(df, p)
+  expect_same_as_dplyr_lazy(df, p)
+})
+
+test_that("case_when() conditions and values share a repeated round()", {
+  skip_if_no_gpu()
+  df <- cse_df()
+  p <- function(d) {
+    mutate(d, a = dplyr::case_when(
+      round(x, 1) > 0.5 ~ round(x, 1),
+      round(x, 1) < 0 ~ -round(x, 1),
+      .default = round(x, 1) * 2
+    ))
+  }
+  expect_same_as_dplyr(df, p)
+  expect_same_as_dplyr_lazy(df, p)
+  expect_equal(cse_reuses(collect(p(tbl_gpu(df, lazy = FALSE)))), 4)
+})
+
+test_that("between() of a handler shares it", {
+  skip_if_no_gpu()
+  df <- cse_df()
+  p <- function(d) filter(d, dplyr::between(round(x, 1), 0.2, 0.8))
+  expect_same_as_dplyr(df, p)
+  expect_same_as_dplyr_lazy(df, p)
+  expect_equal(cse_reuses(collect(p(tbl_gpu(df, lazy = FALSE)))), 1)
+})
+
+test_that("summarise() temp columns over a shared subtree give dplyr's result", {
+  skip_if_no_gpu()
+  df <- cse_df()
+  p <- function(d) {
+    summarise(d, s = sum(round(x, 1) > 0.3, na.rm = TRUE), a = any(round(x, 1) > 0.3, na.rm = TRUE))
+  }
+  expect_same_as_dplyr(df, p)
+  expect_same_as_dplyr_lazy(df, p)
+})
