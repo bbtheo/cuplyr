@@ -1,5 +1,14 @@
 # cuplyr (development version)
 
+* `summarise()` runs arithmetic around reducers on the GPU: dots such as
+  `mean(x) + 1`, `mean(x) - qnorm(.975) * sd(x) / sqrt(n())` and
+  `sum(x) / n()`, and a later dot that uses an earlier result (`m = s / n()`),
+  no longer fall back to the CPU. The reducers are aggregated first and the
+  arithmetic is then computed on the one-row-per-group result, with dplyr's
+  types, `NA`/`NaN` values, integer-overflow warnings and `.drop = FALSE`
+  empty groups. Shapes with no GPU form, such as `lag(mean(x))`, still run in
+  dplyr (#22).
+
 * `diagnostics()` now reports the libcudf and RMM versions cuplyr was built
   against, the libcudf library loaded into the session and its version, the
   active GPU memory resource and pool size, and every cuplyr option with its

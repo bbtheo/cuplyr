@@ -306,13 +306,15 @@ test_that("F88: a probe leaves the pending cause alone, and a new dot drops it",
 test_that("F88: summarise() shapes around reducers get summarise()'s rule, unknown reducers their name", {
   skip_if_no_gpu()
   withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = NULL)
+  # (arithmetic around reducers runs on the GPU since #22: what stays with dplyr is a
+  # function of the group's rows around one, such as lag())
   around <- list(
-    list(f = function(t) summarise(t, r = mean(x) * 100), expr = "mean(x) * 100"),
-    list(f = function(t) summarise(t, r = sum(x > 2) / n()), expr = "sum(x > 2) / n()"),
-    list(f = function(t) summarise(t, r = dplyr::first(x) + dplyr::last(x)),
-         expr = "dplyr::first(x) + dplyr::last(x)"),
-    list(f = function(t) group_by(t, g) |> summarise(id = dplyr::cur_group_id(), r = sqrt(mean(x))),
-         expr = "sqrt(mean(x))")
+    list(f = function(t) summarise(t, r = dplyr::lag(mean(x))), expr = "dplyr::lag(mean(x))"),
+    list(f = function(t) summarise(t, r = cumsum(sum(x > 2))), expr = "cumsum(sum(x > 2))"),
+    list(f = function(t) summarise(t, r = dplyr::lead(dplyr::first(x), 2)),
+         expr = "dplyr::lead(dplyr::first(x), 2)"),
+    list(f = function(t) group_by(t, g) |> summarise(id = dplyr::cur_group_id(), r = dplyr::lag(mean(x))),
+         expr = "dplyr::lag(mean(x))")
   )
   for (cs in around) {
     for (lazy in c(FALSE, TRUE)) {
