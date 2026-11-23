@@ -1496,6 +1496,7 @@ expect_data_on_gpu(x)      # Verify data is on GPU
 gc_gpu()                   # Force GPU garbage collection
 gpu_alloc_snapshot()       # Allocator-level state (pool_used_bytes), what memory tests should use
 gpu_own_device_used_bytes() # This process's own device memory (nvidia-smi), for claims about the device
+gpu_own_delta(a, b)        # b - a of two own readings; stops if one fell back to the device-wide level
 gpu_child_r(func, args)    # Start a child R process; frees this process's cached GPU memory first
 gpu_free_for_child()       # The freeing step alone, for children started another way (quarto, bench drivers)
 run_with_pool_off(fn)      # Run fn in a subprocess with the memory pool off (device-level claims)

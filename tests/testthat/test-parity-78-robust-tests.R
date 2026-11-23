@@ -347,7 +347,8 @@ test_that("a child from gpu_child_r() gets its own async resource and the own-me
   skip_if_not_installed("pkgload")
   root <- normalizePath(testthat::test_path("..", ".."), mustWork = TRUE)
   out <- gpu_child_r(function(root) {
-    has_reader <- exists("gpu_own_device_used_bytes", envir = globalenv(), inherits = FALSE)
+    has_reader <- exists("gpu_own_device_used_bytes", envir = globalenv(), inherits = FALSE) &&
+      exists("gpu_own_delta", envir = globalenv(), inherits = FALSE)
     suppressMessages(pkgload::load_all(root, quiet = TRUE, compile = FALSE, export_all = TRUE,
                                        helpers = FALSE, attach_testthat = FALSE))
     g <- tbl_gpu(data.frame(x = c(1, 2, NA)), lazy = FALSE)
@@ -380,13 +381,16 @@ test_that("gpu_own_device_used_bytes() follows this process's allocations up and
     gc(full = TRUE)
     gpu_sync()
     u2 <- gpu_own_device_used_bytes()
-    list(u0 = as.numeric(u0), u1 = as.numeric(u1), u2 = as.numeric(u2),
-         level = attr(u1, "level"), listed = pid_listed())
+    levels <- c(attr(u0, "level"), attr(u1, "level"), attr(u2, "level"))
+    list(up = gpu_own_delta(u0, u1), back = gpu_own_delta(u0, u2),
+         levels = levels, listed = pid_listed())
   })
-  expect_true(out$level %in% c("process", "device"))
+  # the three readings are at one level (gpu_own_delta() stops otherwise)
+  expect_length(unique(out$levels), 1L)
+  expect_true(out$levels[[1]] %in% c("process", "device"))
   # nvidia-smi lists this process: the reading is its own, not the device's
-  if (isTRUE(out$listed)) expect_identical(out$level, "process")
-  expect_gte(out$u1 - out$u0, 0.9 * 8e7)
-  expect_lt(out$u1 - out$u0, 2 * 8e7)
-  expect_lt(out$u2 - out$u0, 0.1 * 8e7)
+  if (isTRUE(out$listed)) expect_identical(out$levels[[1]], "process")
+  expect_gte(out$up, 0.9 * 8e7)
+  expect_lt(out$up, 2 * 8e7)
+  expect_lt(out$back, 0.1 * 8e7)
 })

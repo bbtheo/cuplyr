@@ -101,7 +101,8 @@ gpu_free_for_child <- function() {
 gpu_child_state <- new.env(parent = emptyenv())
 
 # Run `func(...)` (the elements of `args`) in a fresh R process and return its
-# value. Every child R process in the tests starts here: this process first
+# value. Every callr child in tests/testthat starts here (children that bench/
+# code or quarto start call gpu_free_for_child() themselves): this process first
 # frees its cached GPU memory (once, gpu_free_for_child(); the bytes free
 # afterwards are kept in gpu_child_state$free_before), and the child's global
 # environment has gpu_own_device_used_bytes() and gpu_own_delta() before `func`
