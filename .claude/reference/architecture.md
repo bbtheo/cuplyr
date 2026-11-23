@@ -38,7 +38,7 @@ list(
 | Date | TIMESTAMP_DAYS | |
 | POSIXct | TIMESTAMP_MICROSECONDS | |
 | factor | DICTIONARY32 (physical: INT32) | codes only, 1-based, `schema$factor_levels` holds labels |
-| integer64 | FLOAT64 | loses precision >2^53, warns |
+| integer64 | INT64 | exact (`gpu_type_from_r()`); collected as `bit64::integer64`, a double with a warning past 2^53 when bit64 is absent |
 
 #### Collecting every libcudf type (F105)
 
