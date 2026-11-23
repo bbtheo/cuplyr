@@ -1091,8 +1091,12 @@ lower_window <- function(ast, source_ptr) {
 
   # F124: a lazy mutate()/filter() with a min()/max() call that could not know
   # its row count at the verb: dplyr's warning for an empty input, every run.
-  if (!is.null(ast$minmax_warn) && gpu_dim(input_ptr)[[1L]] == 0L) {
-    minmax_signal_prepared(ast$minmax_warn)
+  # One whose empty groups a facts query found at the verb (a parquet plan,
+  # `always`) fires every run whatever the input: its count and group are the
+  # verb's.
+  mm_warn <- .subset2(ast, "minmax_warn")
+  if (!is.null(mm_warn) && (isTRUE(mm_warn$always) || gpu_dim(input_ptr)[[1L]] == 0L)) {
+    minmax_signal_prepared(mm_warn)
   }
 
   # F42: an integer/logical window sum() that left the integer range came

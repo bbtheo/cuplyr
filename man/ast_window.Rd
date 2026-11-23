@@ -35,7 +35,8 @@ a later stage consumes).}
 \item{minmax_warn}{(F124) \code{NULL}, or the prepared dplyr warning of a window
 \code{min()}/\code{max()} call whose verb could not know the input's row count
 (\code{minmax_win_lazy_prep()}): lowering signals it when the node's input has no
-rows.}
+rows, or every time it runs when it is \code{always} (a parquet plan whose empty
+groups a facts query found at the verb).}
 }
 \value{
 An ast_window node

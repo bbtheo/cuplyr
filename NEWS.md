@@ -121,20 +121,25 @@
   whose row count is known and not zero only pays a check of a few microseconds.
 
 * A `min()`/`max()` over a lazy `read_parquet_gpu()` table does not run the plan
-  early and does not read the file whole for its own sake: the row count of a
-  plan that keeps the rows comes from the file footers, and when the rows or the
-  empty groups of a filtered plan matter for the type of a result, a small
-  query over the plan answers it. It reads only the columns it needs (the
-  filter and grouping columns; a `mutate()` nothing reads is left out) and
-  raises no warning of its own: the plan's warnings fire once, when it runs.
-  The plan stays lazy (no plan break). A double `min()`/`max()` of a column
-  asks nothing at the verb. A `mutate()` that dplyr must run on the CPU still
-  collects its input, as it does for any lazy table. If the plan said a
-  `min()`/`max()` result is an integer because the file's footer had rows, and
-  the file has none when the plan runs, the run fails with a
-  `cuplyr_error_parquet_file_emptied` error: call `read_parquet_gpu()` again. A
-  type decided by the small query is not checked again: see "If the file
-  changes" in `?read_parquet_gpu`.
+  early and does not read the file whole for its own sake. The row count of a
+  plan that keeps its rows comes from the file footers, read at the verb. When
+  the type of a result, or the empty groups of a `.drop = FALSE` grouping,
+  depend on rows the plan cannot count, a small query over the plan answers at
+  the verb. It reads the columns the pending steps need to give their rows
+  (filters, join keys, groupings, and the inputs of `summarise()`, window,
+  `arrange()` and `slice()` steps), but not those of a `mutate()` nothing reads;
+  an error in one of those steps comes at the verb. The plan stays lazy (no
+  plan break), and every warning, the pending steps' and the `min()`/`max()`'s
+  own, comes when the plan runs, in dplyr's order, each time it runs. A
+  `mutate()` that dplyr must run on the CPU still collects its input, as it does
+  for any lazy table. If the plan said a `min()`/`max()` result is an integer
+  because the file's footer had rows, and the file has none when the plan runs,
+  the run fails with a `cuplyr_error_parquet_file_emptied` error: call
+  `read_parquet_gpu()` again. A type or a warning decided by the small query is
+  not checked again: see "If the file changes" in `?read_parquet_gpu`. A
+  grouped `filter()` that keeps empty groups (`.drop = FALSE`,
+  `.preserve = TRUE`) no longer runs such a plan at the verb either: the same
+  kind of query reads its group keys, and the plan stays lazy.
 
 * A `min()`/`max()` whose argument has one value per group (`max(n())`,
   `max(sum(x))`, the outer call of `max(max(x))`) keeps its type and does not

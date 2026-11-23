@@ -578,20 +578,19 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
     mm <- minmax_win_open(.data, by_given, "mutate", verb_frame,
                           user_dots, dots, provenance$origin)
     # A column-free call that is not known to be pure (`max(x + runif(1))` in
-    # an ungrouped call) must be evaluated once, so it is not parsed twice: the
-    # facts are found before the one parse (F75), by running the steps (an
-    # in-memory plan) or, for a plan over a parquet scan, which is never run
-    # whole, by a pruned query (minmax_scan_resolve()). Only a dot that calls
-    # min() or max() can need a second parse (a column named `max` does not), and
-    # on a parquet plan none that is the same type whatever the data (a double
-    # min()/max() of a column, minmax_dots_type_fixed(): its dot never needs a
-    # second parse, so nothing is asked at the verb), unless the grouping keeps
-    # empty groups the pending steps may leave (the warning names them).
+    # an ungrouped call; a grouped or `.by` one went to dplyr above, F75) must
+    # be evaluated once, so it is not parsed twice: the facts are found before
+    # the one parse, by running the steps (an in-memory plan) or, for a plan
+    # over a parquet scan, which is never run whole, by a pruned query
+    # (minmax_scan_resolve()). Only a dot that calls min() or max() can need a
+    # second parse (a column named `max` does not), and on a parquet plan none
+    # that is the same type whatever the data (a double min()/max() of a
+    # column, minmax_dots_type_fixed(): nothing is asked at the verb).
     if (!is.null(mm) && is.null(mm$facts) && identical(.subset2(.data, "exec_mode"), "lazy") &&
         !is.null(impure_const_call_text(dots, orig_schema, grouped = FALSE)) &&
         minmax_dots_call(dots)) {
       if (isTRUE(mm$scan)) {
-        if (isTRUE(mm$unknown_empty) || !minmax_dots_type_fixed(dots, orig_schema)) {
+        if (!minmax_dots_type_fixed(dots, orig_schema)) {
           minmax_scan_resolve(mm, .data, by_given)
         }
       } else {
@@ -644,8 +643,8 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
                           vector_literals = length(verb_groups) == 0 && !rowwise,
                           ungrouped = length(verb_groups) == 0 && !rowwise,
                           evaluated = evaluated, provenance = provenance, minmax = mm),
-        warning = function(w) invokeRestart("muffleWarning"),
-        message = function(m) invokeRestart("muffleMessage")
+        warning = function(w) tryInvokeRestart("muffleWarning"),
+        message = function(m) tryInvokeRestart("muffleMessage")
       )
     }
   }

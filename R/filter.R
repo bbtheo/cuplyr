@@ -251,8 +251,10 @@ filter_impl <- function(.data, dots, by_quo, .preserve, complement, call) {
   }
   # dplyr keeps a `.drop = FALSE` table's whole group structure whatever
   # `.preserve` says, so those tables take the same route (row_slice_prepare()
-  # computes a lazy input first, so its plan runs once).
-  prep <- row_slice_prepare(.data, .preserve, eligible = quo_is_null_fast(by_quo))
+  # computes a lazy input first, so its plan runs once; a plan over a parquet
+  # scan stays lazy, and only its group keys are computed, from the columns
+  # they need).
+  prep <- row_slice_prepare(.data, .preserve, eligible = quo_is_null_fast(by_quo), lazy_keys = TRUE)
   .data <- prep$data
   out <- filter_run(.data, dots, by_quo, .preserve, complement, call)
   row_slice_finish(out, prep)

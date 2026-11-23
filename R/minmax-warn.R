@@ -687,6 +687,7 @@ minmax_win_set_setup <- function(w, setup) {
   w$facts <- setup$facts
   # (nothing to warn about when no group is empty)
   w$carry <- isTRUE(setup$carry) && !(!is.null(setup$facts) && setup$facts$E == 0L)
+  w$fixed <- w$carry && isTRUE(setup$fixed)
   w$unknown_empty <- setup$unknown_empty
   w$scan <- isTRUE(setup$scan)
   w$footer <- isTRUE(setup$footer)
@@ -816,11 +817,21 @@ minmax_win_emit <- function(w) {
 
 # The warning a lazy plan carries when it cannot know its row count: it fires
 # when the node that holds it meets a zero-row input (one evaluation, no group
-# line). NULL when the verb has none or is not in that case.
+# line). A plan over a parquet scan whose empty groups a facts query found at
+# the verb (`fixed`, minmax_scan_resolve()) carries the verb's whole warning
+# instead (count, first empty group and its keys): `always`, it fires whenever
+# the node runs, whatever its input, so it comes at collect() after the
+# warnings of the steps below it, in dplyr's order. NULL when the verb has none
+# or is not in either case.
 # @keywords internal
 minmax_win_lazy_prep <- function(w) {
   if (is.null(w) || !isTRUE(w$carry)) {
     return(NULL)
+  }
+  if (isTRUE(w$fixed)) {
+    p <- minmax_win_warning(w)
+    if (!is.null(p)) p$always <- TRUE
+    return(p)
   }
   p <- minmax_win_warning(w, per_group = 1L)
   if (!is.null(p)) {
@@ -833,7 +844,7 @@ minmax_win_lazy_prep <- function(w) {
 # Fire a prepared warning (minmax_win_lazy_prep()).
 # @keywords internal
 minmax_signal_prepared <- function(p) {
-  minmax_signal(p$head, p$n, p$name, p$expr, p$op, p$type)
+  minmax_signal(p$head, p$n, p$name, p$expr, p$op, p$type, p$id %||% NA_integer_, p$keys)
 }
 
 # How the verb knows its row count and empty groups: `facts` (minmax_window_facts())
@@ -864,20 +875,42 @@ minmax_window_setup <- function(.data, by_given) {
 # Run a facts query (minmax_scan_facts()) over a pending plan: quietly, and
 # reading only what the query reads. Every warning and message it could raise
 # comes from a step of the plan, which collect() runs again and reports then
-# (F80: a plan warns when it runs), so none is shown here; the mutates nothing
-# of the query reads are not computed (`prune_unread`, optimizer.R), so the
-# columns they read are not read.
+# (F80: a plan warns when it runs), so none is shown here, except one said once
+# per session (an invalid option value, suppress_probe_warnings()'s rule; the
+# roll_median() engine note): muffled, it would be recorded as given and never
+# shown. The mutates nothing of the query reads are not computed
+# (`prune_unread`, keep_unread_mutates()), so the columns they read are not
+# read. The flag is restored however the query ends (its restore is registered
+# before it is set).
 # @param x a lazy table, the query on top of the pending plan
 # @keywords internal
 minmax_facts_compute <- function(x) {
   prev <- .optimizer_opts$prune_unread
-  .optimizer_opts$prune_unread <- TRUE
   on.exit(.optimizer_opts$prune_unread <- prev, add = TRUE)
+  .optimizer_opts$prune_unread <- TRUE
   withCallingHandlers(
-    compute(x),
-    warning = function(w) invokeRestart("muffleWarning"),
-    message = function(m) invokeRestart("muffleMessage")
+    suppress_probe_warnings(compute(x)),
+    message = function(m) {
+      if (!inherits(m, "cuplyr_message_roll_median_exact")) {
+        tryInvokeRestart("muffleMessage")
+      }
+    }
   )
+}
+
+# The observed group keys of a grouped lazy plan, as a computed table with the
+# plan's grouping (groups, `.drop`, fixed keys): one row per key, from a quiet
+# pruned query (minmax_facts_compute()), so the scan reads only the columns the
+# keys and the pending steps' rows need, and the plan is not run. For a plan
+# over a parquet scan, which is never run whole for its keys (minmax_scan_facts(),
+# row_slice_prepare()).
+# @keywords internal
+plan_group_keys <- function(.data) {
+  keys <- minmax_facts_compute(push_op(.data, ast_distinct(input_node(.data), .subset2(.data, "groups"))))
+  if (!is.null(fixed <- .subset2(.data, "fixed_keys"))) {
+    keys <- set_tbl_gpu_field(keys, "fixed_keys", fixed)
+  }
+  keys
 }
 
 # The facts of a lazy plan over a parquet scan whose rows (or empty groups) the
@@ -892,10 +925,7 @@ minmax_facts_compute <- function(x) {
 # @keywords internal
 minmax_scan_facts <- function(.data, wants_empty) {
   if (wants_empty) {
-    keys <- minmax_facts_compute(push_op(.data, ast_distinct(input_node(.data), .subset2(.data, "groups"))))
-    if (!is.null(fixed <- .subset2(.data, "fixed_keys"))) {
-      keys <- set_tbl_gpu_field(keys, "fixed_keys", fixed)
-    }
+    keys <- plan_group_keys(.data)
     n_keys <- gpu_dim(.subset2(keys, "ptr"))[[1L]]
     # (the rows are only asked for being none: the keys of an empty input are none)
     g <- minmax_empty_groups(keys, n_keys)
@@ -912,13 +942,16 @@ minmax_scan_facts <- function(.data, wants_empty) {
 
 # Answer the facts of the verb state `w` (a plan over a parquet scan) with a
 # pruned query, instead of running the plan (minmax_scan_facts()). The plan stays
-# lazy: its warning is carried unless the grouping keeps empty groups, which the
-# verb names.
+# lazy and carries the warning, so it comes when the plan runs, after the
+# warnings of the steps below (which the query does not show), every run: for
+# an empty input, as an in-memory plan's; for a grouping that keeps empty
+# groups, the verb's own warning, as the query found them (`fixed`: the type
+# was decided from them too).
 # @keywords internal
 minmax_scan_resolve <- function(w, .data, by_given) {
   wants_empty <- minmax_wants_empty(.data, by_given)
   facts <- minmax_scan_facts(.data, wants_empty)
-  minmax_win_set_setup(w, list(facts = facts, carry = !wants_empty, unknown_empty = FALSE,
-                               scan = TRUE, footer = FALSE))
+  minmax_win_set_setup(w, list(facts = facts, carry = TRUE, fixed = wants_empty,
+                               unknown_empty = FALSE, scan = TRUE, footer = FALSE))
   invisible(w)
 }

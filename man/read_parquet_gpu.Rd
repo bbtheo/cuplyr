@@ -111,13 +111,17 @@ twice.
 A \code{min()} or \code{max()} over a lazy table can also look at the files at the verb,
 before \code{collect()}: it may read the footers (the row count of a plan that
 keeps its rows, one footer per file, so a missing file is an error at the
-verb), or run a small query over the filter and grouping columns of the plan
-to learn whether a result is empty, which decides whether an integer result
-is a double. The plan is not run early. If a file changes after that, the
-types such a plan promised can be stale: a file emptied after the verb stops
-the run with \code{cuplyr_error_parquet_file_emptied} when the type came from the
-footer, and gives the type the plan said (not dplyr's) when it came from the
-query. Make the table again after changing a file.
+verb), or run a small query over the plan to learn whether a result or a
+\code{.drop = FALSE} group is empty, which decides whether an integer result is a
+double. The query reads only the columns the pending steps need to give
+their rows, and an error in one of those steps (a missing file included) is
+an error at the verb. The plan is not run early, and its warnings come when
+it runs. If a file changes after that, the types such a plan promised can be
+stale: a file emptied after the verb stops the run with
+\code{cuplyr_error_parquet_file_emptied} when the type came from the footer, and
+gives the type the plan said (not dplyr's) when it came from the query, whose
+warning also names the empty groups it found. Make the table again after
+changing a file.
 }
 
 \subsection{Errors}{

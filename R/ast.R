@@ -311,7 +311,8 @@ ast_slice <- function(input, mode, amount = NULL, is_prop = NULL,
 #' @param minmax_warn (F124) `NULL`, or the prepared dplyr warning of a window
 #'   `min()`/`max()` call whose verb could not know the input's row count
 #'   (`minmax_win_lazy_prep()`): lowering signals it when the node's input has no
-#'   rows.
+#'   rows, or every time it runs when it is `always` (a parquet plan whose empty
+#'   groups a facts query found at the verb).
 #' @return An ast_window node
 #' @keywords internal
 ast_window <- function(input, specs, group_cols = character(),
