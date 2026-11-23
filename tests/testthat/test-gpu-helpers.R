@@ -260,15 +260,17 @@ test_that("gpu_memory_state() reflects allocations", {
   skip_if_no_gpu()
 
   gc_gpu()  # From helper
-  before <- gpu_memory_state()
+  # Allocator level (bytes allocated from cuplyr's resource), which other
+  # processes on the GPU don't move.
+  before <- gpu_alloc_used_bytes()
 
   # Allocate GPU data
   gpu_df <- tbl_gpu(data.frame(matrix(runif(100000), ncol = 10)))
 
-  after <- gpu_memory_state()
+  after <- gpu_alloc_used_bytes()
 
-  # Used memory should increase
-  expect_true(after$used_bytes >= before$used_bytes)
+  # Used memory rises by the table's data: 100,000 doubles
+  expect_gte(after - before, 0.95 * 100000 * 8)
 })
 
 test_that("gpu_memory_state() returns NA values without GPU", {

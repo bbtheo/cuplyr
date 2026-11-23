@@ -194,13 +194,12 @@ test_that("F93x: the unset lookup of the per-group readers stays cheap", {
   f93x_clean()
   expect_identical(cuplyr_opt_read("roll_median"),
                    cuplyr_option_registry$roll_median$default_result)
-  # well under what the trimws() path cost (14 us per call); the best of five
-  # runs, so one slow window on a busy machine does not fail it
-  roll_median_engine()
-  t <- min(vapply(1:5, function(k) {
-    system.time(for (i in 1:20000) roll_median_engine())[["elapsed"]]
-  }, 0))
-  expect_lt(t / 20000, 1e-5)
+  # well under what the trimws() path cost (14 us per call): the median of
+  # batches of ~50 ms (timing_medians(), helper-timing.R; no GPU work, so no
+  # sync), so one slow window on a busy machine does not fail it
+  t <- timing_medians(list(engine = roll_median_engine), sync = FALSE,
+                      label = "F93x unset roll_median lookup")[["engine"]]
+  expect_lt(t, 1e-5)
 })
 
 test_that("F93x: the hot-path value sets are the registry's", {

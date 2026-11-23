@@ -32,10 +32,9 @@ test_that("gpu_sync() returns invisible NULL when idle and after GPU work", {
 
 test_that("gpu_sync() works with the memory pool off", {
   skip_if_no_gpu()
-  skip_if_not_installed("callr")
   skip_if_not_installed("pkgload")
   root <- normalizePath(testthat::test_path("..", ".."), mustWork = TRUE)
-  out <- callr::r(
+  out <- gpu_child_r(
     function(root) {
       suppressMessages(pkgload::load_all(root, quiet = TRUE, compile = FALSE,
                                          export_all = TRUE, helpers = FALSE,
@@ -47,8 +46,7 @@ test_that("gpu_sync() works with the memory pool off", {
            visible = v$visible, n = nrow(dplyr::collect(m)))
     },
     args = list(root = root),
-    env = c(callr::rcmd_safe_env(), CUPLYR_MEMORY_POOL = "0"),
-    timeout = 600
+    env = c(CUPLYR_MEMORY_POOL = "0")
   )
   expect_identical(out$resource, "cuda")
   expect_null(out$value)

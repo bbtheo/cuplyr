@@ -452,6 +452,7 @@ test_that("pp_first_call() loads this checkout's cuplyr in the child", {
   pp <- f121_load(c("arrow", "duckdb", "DBI", "data.table", "callr"))
   fx <- f121_fixture(pp)
   root <- normalizePath(testthat::test_path("..", ".."))
+  gpu_free_for_child()   # the child needs device memory of its own
   out <- pp$pp_first_call("cuplyr", "p3_push", fx$narrow, fx$dim, calls = 3L, root = root, lib = f121_bench_lib())
   expect_identical(out$call, 1:3)
   expect_true(all(out$secs > 0))

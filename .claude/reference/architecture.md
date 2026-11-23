@@ -1494,15 +1494,23 @@ skip_if_no_gpu()           # Skip test if no GPU available
 expect_valid_tbl_gpu(x)    # Check tbl_gpu structure (allows exec_mode field)
 expect_data_on_gpu(x)      # Verify data is on GPU
 gc_gpu()                   # Force GPU garbage collection
-gpu_memory_snapshot()      # Device-level memory state (a pool hides it; see "Memory resource")
 gpu_alloc_snapshot()       # Allocator-level state (pool_used_bytes), what memory tests should use
+gpu_own_device_used_bytes() # This process's own device memory (nvidia-smi), for claims about the device
+gpu_own_delta(a, b)        # b - a of two own readings; stops if one fell back to the device-wide level
+gpu_child_r(func, args)    # Start a child R process; frees this process's cached GPU memory first
+gpu_free_for_child()       # The freeing step alone, for children started another way (quarto, bench drivers)
 run_with_pool_off(fn)      # Run fn in a subprocess with the memory pool off (device-level claims)
 timing_now()               # Wall clock in seconds, sub-microsecond resolution (helper-timing.R)
 timing_spin(s)             # Busy-wait s seconds on the wall clock (a steadier stand-in for Sys.sleep())
 timing_medians(fns, ...)   # Median per-call seconds per closure: interleaved, fenced, ~50 ms batches
 timing_retry(measure, ok, retry_if)  # Re-measure near misses a bounded number of times; far misses fail at once
 ```
-New timing tests should use these rather than proc.time() loops.
+New timing tests should use these rather than proc.time() loops, and memory tests
+the allocator-level or own-process readers rather than device-wide free memory, which
+other processes on the GPU move. `test-parity-78-robust-tests.R` enforces both (by call and field
+names: it would not catch an alias of a timer or a renamed field), and that every
+`callr` child started from tests/testthat goes through `gpu_child_r()`; children the
+bench/ code starts are not scanned.
 
 ### Test Pattern
 ```r

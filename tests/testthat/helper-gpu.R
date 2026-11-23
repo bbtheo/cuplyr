@@ -44,31 +44,6 @@ skip_if_insufficient_gpu_memory <- function(required_bytes) {
 # GPU Memory Utilities
 # =============================================================================
 
-#' Get current GPU memory usage
-#'
-#' Returns a snapshot of GPU memory state
-#'
-#' @return A list with total_memory, free_memory, and used_memory in bytes
-gpu_memory_snapshot <- function() {
-
-  if (!has_gpu()) {
-    return(list(
-      total_memory = NA_real_,
-      free_memory = NA_real_,
-      used_memory = NA_real_,
-      available = FALSE
-    ))
-  }
-
-  info <- gpu_details()
-  list(
-    total_memory = info$total_memory,
-    free_memory = info$free_memory,
-    used_memory = info$total_memory - info$free_memory,
-    available = TRUE
-  )
-}
-
 #' Calculate memory difference between two snapshots
 #'
 #' @param before Snapshot taken before operation

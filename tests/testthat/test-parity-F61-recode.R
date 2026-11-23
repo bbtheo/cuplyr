@@ -196,18 +196,12 @@ test_that("shapes F30 sends to the CPU stay on the CPU with many keys", {
 })
 
 # --- timing -----------------------------------------------------------------
-# Median of 5 runs after 1 warmup; GPU work is fenced with a device sync.
+# timing_medians(): median of 5 runs after 1 warmup, each run timed whole with
+# a device fence around it. A reading within 1.25x of its bound is re-measured
+# (up to 3 times) and every attempt goes in the failure label.
 
-f61r_time <- function(f, reps = 5L) {
-  f()
-  cuplyr:::gpu_sync_device()
-  t <- vapply(seq_len(reps), function(i) {
-    s <- proc.time()[["elapsed"]]
-    f()
-    cuplyr:::gpu_sync_device()
-    proc.time()[["elapsed"]] - s
-  }, numeric(1))
-  stats::median(t)
+f61r_attempts <- function(runs, v) {
+  paste(sprintf("%.3f", vapply(runs, function(r) r[[v]], numeric(1))), collapse = " / ")
 }
 
 test_that("5000-key recode() on 1e3 rows is no slower than dplyr on a tibble", {
@@ -224,13 +218,31 @@ test_that("5000-key recode() on 1e3 rows is no slower than dplyr on a tibble", {
   gt <- tbl_gpu(df)
   tb <- tibble::as_tibble(df)
 
-  gpu_s <- f61r_time(function() dplyr::mutate(gt, z = recode(s, !!!lut_s)))
-  cpu_s <- f61r_time(function() dplyr::mutate(tb, z = recode(s, !!!lut_s)))
-  expect_lte(gpu_s, max(cpu_s, 0.05))
-
-  gpu_d <- f61r_time(function() dplyr::mutate(gt, z = recode(d, !!!lut_d, .default = -1)))
-  cpu_d <- f61r_time(function() dplyr::mutate(tb, z = recode(d, !!!lut_d, .default = -1)))
-  expect_lte(gpu_d, max(cpu_d, 0.05))
+  fns <- list(
+    gpu_s = function() dplyr::mutate(gt, z = recode(s, !!!lut_s)),
+    cpu_s = function() dplyr::mutate(tb, z = recode(s, !!!lut_s)),
+    gpu_d = function() dplyr::mutate(gt, z = recode(d, !!!lut_d, .default = -1)),
+    cpu_d = function() dplyr::mutate(tb, z = recode(d, !!!lut_d, .default = -1))
+  )
+  # worst ratio of gpu to its bound max(cpu, 0.05); <= 1 passes
+  rel <- function(m) c(s = m[["gpu_s"]] / max(m[["cpu_s"]], 0.05),
+                       d = m[["gpu_d"]] / max(m[["cpu_d"]], 0.05))
+  runs <- timing_retry(
+    function() {
+      m <- timing_medians(fns, samples = 5L, warmup = 1L, label = "F61 recode 5000 keys 1e3 rows")
+      list(m = m, rel = rel(m))
+    },
+    ok = function(r) all(r$rel <= 1),
+    retry_if = function(r) all(r$rel <= 1.25),
+    attempts = 3L
+  )
+  last <- runs[[length(runs)]]
+  for (v in c("s", "d")) {
+    expect_lte(last$m[[paste0("gpu_", v)]], max(last$m[[paste0("cpu_", v)]], 0.05),
+               label = sprintf("recode (%s) on gpu vs max(dplyr tibble, 0.05 s); gpu/bound over attempts: %s",
+                               v, paste(sprintf("%.2f", vapply(runs, function(r) r$rel[[v]], numeric(1))),
+                                        collapse = " / ")))
+  }
 })
 
 test_that("5000-key recode() on 1e6 rows takes well under a second", {
@@ -247,7 +259,19 @@ test_that("5000-key recode() on 1e6 rows takes well under a second", {
   lut_s <- stats::setNames(paste0("v", seq_len(K)), paste0("k", seq_len(K)))
   lut_d <- stats::setNames(as.double(seq_len(K)) / 2, seq_len(K))
   gt <- tbl_gpu(df)
-  expect_lt(f61r_time(function() dplyr::mutate(gt, z = recode(s, !!!lut_s)), reps = 3L), 0.5)
-  expect_lt(f61r_time(function() dplyr::mutate(gt, z = recode(d, !!!lut_d, .default = -1)),
-                      reps = 3L), 0.5)
+  fns <- list(
+    string = function() dplyr::mutate(gt, z = recode(s, !!!lut_s)),
+    double = function() dplyr::mutate(gt, z = recode(d, !!!lut_d, .default = -1))
+  )
+  runs <- timing_retry(
+    function() timing_medians(fns, samples = 5L, warmup = 1L, label = "F61 recode 5000 keys 1e6 rows"),
+    ok = function(m) all(m < 0.5),
+    retry_if = function(m) all(m < 0.5 * 1.25),
+    attempts = 3L
+  )
+  m <- runs[[length(runs)]]
+  for (v in names(fns)) {
+    expect_lt(m[[v]], 0.5, label = sprintf("recode (%s) median at 1e6 rows (attempts: %s s)", v,
+                                           f61r_attempts(runs, v)))
+  }
 })

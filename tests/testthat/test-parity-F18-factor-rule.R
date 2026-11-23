@@ -246,16 +246,19 @@ test_that("F18 rule: the factor check is linear in expression size (wide if_any)
   ir_cpu <- chain("f == 1")
   expect_identical(ir_factor_rule(ir_none, sch), "none")
   expect_identical(ir_factor_rule(ir_cpu, sch), "cpu")
-  t_none <- system.time(for (i in 1:3) ir_factor_rule(ir_none, sch))[["elapsed"]] / 3
-  t_cpu <- system.time(for (i in 1:3) ir_factor_rule(ir_cpu, sch))[["elapsed"]] / 3
-  expect_lt(t_none, 0.1)
-  expect_lt(t_cpu, 0.1)
-
-  # End to end: building the lazy filter must not be dominated by the check
-  t_verb <- system.time(
-    out <- dplyr::filter(g, dplyr::if_any(dplyr::starts_with("x"), ~ .x > 1.5))
-  )[["elapsed"]]
-  expect_lt(t_verb, 1.5)
+  # Medians of interleaved batches (timing_medians(), helper-timing.R); the
+  # rule and the lazy build run on the CPU, so no GPU sync. Five samples of a
+  # warmed-up call are plenty for bounds of 0.1 s against ~0.013 s.
+  tm <- timing_medians(list(
+    none = function() ir_factor_rule(ir_none, sch),
+    cpu = function() ir_factor_rule(ir_cpu, sch),
+    # End to end: building the lazy filter must not be dominated by the check
+    verb = function() dplyr::filter(g, dplyr::if_any(dplyr::starts_with("x"), ~ .x > 1.5))
+  ), samples = 5L, warmup = 1L, sync = FALSE, label = "F18 factor rule, wide if_any")
+  expect_lt(tm[["none"]], 0.1)
+  expect_lt(tm[["cpu"]], 0.1)
+  expect_lt(tm[["verb"]], 1.5)
+  out <- dplyr::filter(g, dplyr::if_any(dplyr::starts_with("x"), ~ .x > 1.5))
   expect_equal(
     tibble::as_tibble(dplyr::collect(out)),
     dplyr::filter(tibble::as_tibble(d), dplyr::if_any(dplyr::starts_with("x"), ~ .x > 1.5))

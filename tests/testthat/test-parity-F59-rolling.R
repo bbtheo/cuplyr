@@ -584,19 +584,6 @@ test_that("F59: huge values next to NA/NaN/Inf/group boundaries never leak into 
 # Width scaling: cost independent of the window width
 # =============================================================================
 
-f59_time <- function(f, reps = 9L) {
-  f()
-  gpu_sync()
-  t <- numeric(reps)
-  for (i in seq_len(reps)) {
-    t0 <- Sys.time()
-    f()
-    gpu_sync()
-    t[i] <- as.numeric(Sys.time() - t0, units = "secs")
-  }
-  stats::median(t)
-}
-
 # Bounds are in units of a same-run cumsum(x) (`tc`), so they follow the
 # machine. Calibrated on dev 5e30ef7 (scratchpad/parity/features/F59/runs/
 # profile/calib-dev.txt), cudf's rolling kernel at w = 11 cost:
@@ -621,32 +608,69 @@ test_that("F59: narrow windows are no slower than dev, and wide windows cost abo
     list(label = "grouped 2e6/100", n = 2e6, groups = 100L),
     list(label = "ungrouped 1e7, 1% NA", n = 1e7, groups = NULL, na = 0.01)
   )
+  ws <- c(11L, 101L, 1001L, 4001L)
   for (cell in cells) {
     df <- data.frame(g = sample.int(if (is.null(cell$groups)) 1L else cell$groups, cell$n, TRUE),
                      x = rnorm(cell$n))
     if (!is.null(cell$na)) df$x[sample.int(cell$n, cell$n * cell$na)] <- NA
     src <- tbl_gpu(df)
     if (!is.null(cell$groups)) src <- dplyr::group_by(src, g)
-    tc <- f59_time(function() dplyr::compute(dplyr::mutate(src, r = cumsum(x))))
+    # The frame isn't needed once it is uploaded; drop it. The untimed gc()
+    # before each batch (timing_medians() runs about 320 per cell) then also
+    # frees the previous batch's 80 MB of results.
+    rm(df)
+    gc()
     for (stat in c("mean", "sum", "min", "max", "sd")) {
       for (na_rm in c(FALSE, TRUE)) {
-        for (w in c(11L, 101L, 1001L, 4001L)) {
-          call <- f59_roll_call(stat, w, na_rm)
-          t <- f59_time(function() dplyr::compute(dplyr::mutate(src, r = !!call)))
-          lbl <- sprintf("%s roll_%s(w=%d, na.rm=%s): %.2f ms = %.2f x cumsum (%.2f ms)",
-                         cell$label, stat, w, na_rm, 1000 * t, t / tc, 1000 * tc)
-          if (w == 11L && stat != "sd") {
-            expect_lte(t, (if (na_rm) 2.5 else 1.6) * tc + 0.0003, label = lbl)
-          }
-          if (stat %in% c("mean", "sum")) expect_lte(t, 3.5 * tc + 0.0005, label = lbl)
-          if (stat == "sd") {
-            sd_cap <- if (!is.null(cell$na) && na_rm) 6.5 else 5
-            expect_lte(t, sd_cap * tc + 0.0005, label = lbl)
+        sd_cap <- if (!is.null(cell$na) && na_rm) 6.5 else 5
+        # The bound of each width, in seconds, given the cumsum time `tc`.
+        limit <- function(tc) {
+          vapply(ws, function(w) {
+            lim <- Inf
+            if (w == 11L && stat != "sd") lim <- min(lim, (if (na_rm) 2.5 else 1.6) * tc + 0.0003)
+            if (stat %in% c("mean", "sum")) lim <- min(lim, 3.5 * tc + 0.0005)
+            if (stat == "sd") lim <- min(lim, sd_cap * tc + 0.0005)
+            lim
+          }, numeric(1))
+        }
+        fns <- c(
+          list(cumsum = function() dplyr::compute(dplyr::mutate(src, r = cumsum(x)))),
+          lapply(ws, function(w) {
+            call <- f59_roll_call(stat, w, na_rm)
+            function() dplyr::compute(dplyr::mutate(src, r = !!call))
+          })
+        )
+        names(fns)[-1] <- paste0("w", ws)
+        # The cumsum reference is timed with the roll calls it bounds, in
+        # interleaved rounds, so drift in the machine's speed moves both. Five
+        # samples per closure, each a batch of about 10 ms (a single call where
+        # a call takes that long): about the 10 calls per closure of the earlier
+        # timings for the slow ones, a few more for the quick ones, which cost
+        # little time. A near miss is measured again (up to 3 attempts,
+        # timing_retry()); a real excess reads the same every time.
+        runs <- timing_retry(
+          function() {
+            timing_medians(fns, samples = 5L, target = 0.01, warmup = 1L,
+                           label = sprintf("F59 %s %s na.rm=%s", cell$label, stat, na_rm))
+          },
+          ok = function(t) all(t[-1] <= limit(t[["cumsum"]])),
+          retry_if = function(t) all(t[-1] <= 1.5 * limit(t[["cumsum"]]))
+        )
+        t <- runs[[length(runs)]]
+        tc <- t[["cumsum"]]
+        lim <- limit(tc)
+        for (k in seq_along(ws)) {
+          if (is.finite(lim[[k]])) {
+            lbl <- sprintf("%s roll_%s(w=%d, na.rm=%s): %.2f ms = %.2f x cumsum (%.2f ms); roll/cumsum over attempts: %s",
+                           cell$label, stat, ws[[k]], na_rm, 1000 * t[[k + 1L]], t[[k + 1L]] / tc, 1000 * tc,
+                           paste(sprintf("%.2f", vapply(runs, function(r) r[[k + 1L]] / r[["cumsum"]], numeric(1))),
+                                 collapse = " / "))
+            expect_lte(t[[k + 1L]], lim[[k]], label = lbl)
           }
         }
       }
     }
-    rm(src, df)
+    rm(src)
     gc()
   }
 })
