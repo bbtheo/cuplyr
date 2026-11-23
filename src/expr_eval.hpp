@@ -200,12 +200,23 @@ struct eval_ctx {
     };
     std::map<cudf::size_type, col_range> range_cache;
 
+    // F61 x #17: a checked chain that the interval proof covers leaves its
+    // bounds here for materialize_call() to file under the slot it pushes the
+    // result to, so a later chain that reads the slot (a shared `a + b`) needs
+    // no cudf::minmax() and host read of its own. Set by the handler as its
+    // last act, consumed (and cleared) by the push that follows.
+    bool has_fresh_range = false;
+    col_range fresh_range{0, 0};
+
     // #17: common subexpressions. IR call nodes the R side marked as repeated
-    // (`cse` = an id) map to the slot that holds their value; materialize()
+    // (`cse` = an id, set by cse::mark_list()/mark_one(), expr_cse.hpp) map to the slot that holds their value; materialize()
     // reuses it instead of evaluating the subtree again. Entries die with
     // their slot (release_from()). One memo per eval_ctx, i.e. per set of
     // rows: a context over different rows must not share it.
     std::map<int, cudf::size_type> cse_slots;
+    // False unless the marking pass tagged something for this evaluation, so
+    // an untagged one never looks for a tag in its nodes.
+    bool cse_on = false;
 
     // F57: slots of `cols` that alias another slot (a bare column copy in
     // gpu_mutate_expr()), ctx index -> the index it aliases. `owned` holds a
@@ -1578,7 +1589,7 @@ inline eval_ctx::col_range checked_col_range(eval_ctx& ctx, cudf::size_type idx)
 // #17: the node's common-subexpression id, or -1 (unmarked, or the memo is off
 // because FLOAT64 leaves are being read as NaN-as-null, F55).
 inline int ir_cse_id(Rcpp::List const& node, eval_ctx const& ctx) {
-    if (ctx.nan_leaves || !node.containsElementNamed("cse")) return -1;
+    if (!ctx.cse_on || ctx.nan_leaves || !node.containsElementNamed("cse")) return -1;
     return Rcpp::as<int>(node["cse"]);
 }
 
@@ -1696,9 +1707,15 @@ inline std::unique_ptr<cudf::column> apply_checked_int_add(Rcpp::List node, eval
     checked_vr top = fuse_checked(node, ct, ctx, /*is_root=*/true);
     // F61: every node's interval is inside the int32 range, so no row can
     // overflow: the INT32 value is the answer, with no range test and no
-    // reduction.
+    // reduction. The interval bounds the result's valid values (a superset of
+    // its minmax(): it can only send a later chain to the exact path).
     if (ct.proven) {
-        return cudf::compute_column(ctx.view(), *top.v);
+        auto value = cudf::compute_column(ctx.view(), *top.v);
+        if (top.known) {
+            ctx.fresh_range = {top.lo, top.hi};
+            ctx.has_fresh_range = true;
+        }
+        return value;
     }
     ast::expression const* ok = ct.oks[0];
     for (size_t i = 1; i < ct.oks.size(); ++i) {
@@ -3798,7 +3815,12 @@ inline cudf::size_type materialize_call(Rcpp::List node, eval_ctx& ctx) {
     }
 
     auto result = apply_handler(node, ctx);
-    return ctx.push(std::move(result));
+    cudf::size_type out = ctx.push(std::move(result));
+    if (ctx.has_fresh_range) {
+        ctx.range_cache[out] = ctx.fresh_range;
+        ctx.has_fresh_range = false;
+    }
+    return out;
 }
 
 // -----------------------------------------------------------------------------

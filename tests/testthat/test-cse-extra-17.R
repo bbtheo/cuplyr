@@ -1,5 +1,6 @@
 # #17: extra checks beside the acceptance file (qualified dplyr calls, windows
-# that run on the GPU, the memo staying off for rowwise-free edge shapes).
+# that run on the GPU, a repeat that must not be shared across mutate() calls
+# whose rows differ).
 
 cse_n <- function(expr) {
   n0 <- gpu_cse_reuse_count()
@@ -55,4 +56,42 @@ test_that("a repeat is only shared within one mutate() call's rows", {
   }
   expect_same_as_dplyr(df, p)
   expect_same_as_dplyr_lazy(df, p)
+  # each mutate() shares its own pair (the filter in between changes the rows,
+  # so a memo that outlived the first call would hand back a 3-row column)
+  expect_equal(cse_n(collect(p(tbl_gpu(df, lazy = FALSE)))), 2)
+})
+
+test_that("a shared checked chain's proven range does not hide a later overflow", {
+  skip_if_no_gpu()
+  # `q` is proven in range from the columns' ranges (its interval is filed under
+  # its slot), but `r = q * 1000000L` leaves the int range for the larger rows:
+  # the interval of `q`, not an assumption that it is small, must send `r` to
+  # the exact path.
+  df <- data.frame(
+    a = c(1L, 2L, 3L, NA, 1000L, 7L),
+    b = c(4L, NA, 6L, 7L, 900L, 1L),
+    c = c(1L, 1L, NA, 2L, 5L, 3L)
+  )
+  p <- function(d) {
+    dplyr::mutate(d, s = a + b, q = (a + b) * 2L - c, r = q * 1000000L)
+  }
+  expected <- suppressWarnings(p(df))
+  expect_warning(p(df), "NAs produced by integer overflow")
+  got <- NULL
+  expect_warning(got <- collect(p(tbl_gpu(df, lazy = FALSE))), "NAs produced by integer overflow")
+  expect_equal(tibble::as_tibble(got), tibble::as_tibble(expected))
+  expect_equal(cse_n(suppressWarnings(collect(p(tbl_gpu(df, lazy = FALSE))))), 1)
+})
+
+test_that("gpu_cse_enable(FALSE) turns the memo off and gives the same answer", {
+  skip_if_no_gpu()
+  df <- data.frame(x = c(0.123, 0.456, NA, 0.789))
+  p <- function(d) dplyr::mutate(d, a = round(x, 2) + 1, b = round(x, 2) * 2)
+  on <- collect(p(tbl_gpu(df, lazy = FALSE)))
+  prev <- gpu_cse_enable(FALSE)
+  withr::defer(gpu_cse_enable(prev))
+  n0 <- gpu_cse_reuse_count()
+  off <- collect(p(tbl_gpu(df, lazy = FALSE)))
+  expect_equal(gpu_cse_reuse_count() - n0, 0)
+  expect_equal(on, off)
 })
