@@ -7,9 +7,10 @@
   integer subexpression such as `(i + j)` is shared where it needs its own
   step anyway or where its overflow check is the expensive part (13-15%
   faster at 1e7 rows when its range could overflow). Plain double arithmetic
-  such as `(x + y)`, and integer arithmetic whose range can't overflow, is
-  left fused into each use, because the GPU computes it inline and sharing it
-  measured slower. Results, warnings and errors are unchanged (#17).
+  such as `(x + y)` is left fused into each use, and so is integer arithmetic
+  that every use folds into its own kernel and whose range can't overflow:
+  the GPU computes it inline, and sharing it measured slower. Results,
+  warnings and errors are unchanged (#17).
 
 * `diagnostics()` now reports the libcudf and RMM versions cuplyr was built
   against, the libcudf library loaded into the session and its version, the
