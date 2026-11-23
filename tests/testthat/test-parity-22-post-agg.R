@@ -162,8 +162,12 @@ test_that("#22: result types follow R's arithmetic on the aggregates", {
   # integer and double mix to double: mean(int) + 1L, sum(int) / n(), n()^2, median()
   f124_check(p22_df, function(d) {
     summarise(group_by(d, g), a = mean(x) + 1L, b = sum(x) / n(), c = n()^2,
-              e = median(x, na.rm = TRUE) + 1L, f = sqrt(n()))
+              e = median(y, na.rm = TRUE) + 1L, f = sqrt(n()))
   })
+  # median() of an integer is an integer for an odd count and a double for an
+  # even one (data-dependent, so it may stay with dplyr): only the result is held
+  p22_exact(p22_df, function(d) summarise(group_by(d, g), e = median(x, na.rm = TRUE) + 1L),
+            native = FALSE)
   # logical results and logical reducers
   f124_check(p22_df, function(d) {
     summarise(group_by(d, g), b = any(x > 3) & all(y > 0), p = mean(x > 2) * 100,
@@ -171,7 +175,7 @@ test_that("#22: result types follow R's arithmetic on the aggregates", {
   })
   # a string result, rounding and absolute values
   f124_check(p22_df, function(d) {
-    summarise(group_by(d, g), lab = if_else(mean(y) > 0, "pos", "neg"),
+    summarise(group_by(d, g), lab = dplyr::if_else(mean(y) > 0, "pos", "neg"),
               r = round(mean(y) * 3, 1), a = abs(min(y)))
   })
   # a Date aggregate plus days is a Date
@@ -353,9 +357,9 @@ test_that("#22: a function of the group's rows around an aggregate keeps dplyr's
   skip_if_no_gpu()
   # lag()/cumsum() of the one-value aggregate, within each group: NA and the value
   p22_exact(p22_full, function(d) {
-    summarise(group_by(d, g), l = lag(mean(y)), c = cumsum(mean(y)), .groups = "drop")
+    summarise(group_by(d, g), l = dplyr::lag(mean(y)), c = cumsum(mean(y)), .groups = "drop")
   }, native = FALSE)
-  p22_exact(p22_full, function(d) summarise(d, l = lag(sum(y)), c = cumsum(n())), native = FALSE)
+  p22_exact(p22_full, function(d) summarise(d, l = dplyr::lag(sum(y)), c = cumsum(n())), native = FALSE)
 })
 
 test_that("#22: shapes with no GPU form still give dplyr's result", {
