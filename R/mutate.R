@@ -613,7 +613,7 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   # may route differently (a double the GPU can't take there), and then takes
   # the CPU route below. Its warnings were the first parse's already (a fold
   # that warns, F83): dplyr evaluates each dot once.
-  if (!is.null(expressions) && minmax_win_needs_run(mm) && identical(.subset2(.data, "exec_mode"), "lazy")) {
+  if (!is.null(mm) && !is.null(expressions) && minmax_win_needs_run(mm) && identical(.subset2(.data, "exec_mode"), "lazy")) {
     if (isTRUE(mm$scan)) {
       minmax_scan_resolve(mm, .data, by_given)
     } else {
