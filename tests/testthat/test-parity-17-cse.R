@@ -147,13 +147,42 @@ test_that("filter() predicates share a repeated subtree", {
   expect_equal(cse_reuses(collect(p(tbl_gpu(df, lazy = TRUE)))), 1)
 })
 
-test_that("filter() with a repeated integer subtree keeps its rows", {
+test_that("an integer subtree that every use fuses and that can't overflow stays fused", {
   skip_if_no_gpu()
   df <- cse_df()
+  # (each use is one fused kernel on the proven-range path; a shared column
+  # would add a write and a read)
   p <- function(d) filter(d, (i + j) * 2L > 0L, (i + j) - 5L < 100L)
   expect_same_as_dplyr(df, p)
   expect_same_as_dplyr_lazy(df, p)
-  expect_equal(cse_reuses(collect(p(tbl_gpu(df, lazy = FALSE)))), 1)
+  expect_equal(cse_reuses(collect(p(tbl_gpu(df, lazy = FALSE)))), 0)
+  pm <- function(d) mutate(d, s = (i + j) * 2L, t = (i + j) - i)
+  expect_same_as_dplyr(df, pm)
+  expect_same_as_dplyr_lazy(df, pm)
+  expect_equal(cse_reuses(collect(pm(tbl_gpu(df, lazy = FALSE)))), 0)
+})
+
+test_that("filter() shares an integer subtree whose range can overflow", {
+  skip_if_no_gpu()
+  df <- big_df()
+  p <- function(d) filter(d, (bi + bj) * 1L > 0L, (bi + bj) - 5L < 100L)
+  want <- suppressWarnings(p(tibble::as_tibble(df)))
+  for (lazy in c(FALSE, TRUE)) {
+    msgs <- character()
+    n <- cse_reuses(
+      got <- withCallingHandlers(
+        collect(p(tbl_gpu(df, lazy = lazy))),
+        warning = function(w) {
+          msgs <<- c(msgs, conditionMessage(w))
+          invokeRestart("muffleWarning")
+        }
+      )
+    )
+    expect_equal(tibble::as_tibble(got), want, info = paste("lazy =", lazy))
+    expect_length(msgs, 1)
+    expect_match(msgs, "NAs produced by integer overflow", fixed = TRUE)
+    expect_equal(n, 1, info = paste("lazy =", lazy))
+  }
 })
 
 test_that("transmute() shares a repeated subtree", {
