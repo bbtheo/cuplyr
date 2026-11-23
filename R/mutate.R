@@ -563,10 +563,9 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   # more is done (minmax_win_open() gives NULL). A lazy table whose pending steps
   # change the rows is parsed as if none were empty, and runs them below if a
   # parsed call needs the answer (minmax_win_needs_run()). Every exit after a
-  # run goes back to lazy (done()).
+  # run goes back to lazy (mutate_done()).
   mm <- NULL
   back_to_lazy <- FALSE
-  done <- function(result) if (back_to_lazy) plan_back_to_lazy(result) else result
   if (!rowwise && (if (plain) scan == 1L else minmax_dots_mention(dots))) {
     # (the frame of mutate.tbl_gpu(), for the call head of the warning)
     verb_frame <- sys.parent()
@@ -596,13 +595,10 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   }
   # (A rowwise call evaluates each dot once per row: no vector literals, and
   # no constant is evaluated once for the CPU route to inline.)
-  parse_all <- function() {
-    parse_mutate_dots(dots, orig_schema, "mutate", stop_on_unparseable = FALSE,
-                      vector_literals = length(verb_groups) == 0 && !rowwise,
-                      ungrouped = length(verb_groups) == 0 && !rowwise,
-                      evaluated = evaluated, provenance = provenance, minmax = mm)
-  }
-  expressions <- parse_all()
+  expressions <- parse_mutate_dots(dots, orig_schema, "mutate", stop_on_unparseable = FALSE,
+                                   vector_literals = length(verb_groups) == 0 && !rowwise,
+                                   ungrouped = length(verb_groups) == 0 && !rowwise,
+                                   evaluated = evaluated, provenance = provenance, minmax = mm)
   if (rowwise && !rowwise_expressions_ok(expressions)) {
     rowwise_bail("a window call or vector literal in a rowwise mutate()")
   }
@@ -632,7 +628,10 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
     if (isTRUE(mm$double)) {
       mm$records <- list()
       expressions <- withCallingHandlers(
-        parse_all(),
+        parse_mutate_dots(dots, orig_schema, "mutate", stop_on_unparseable = FALSE,
+                          vector_literals = length(verb_groups) == 0 && !rowwise,
+                          ungrouped = length(verb_groups) == 0 && !rowwise,
+                          evaluated = evaluated, provenance = provenance, minmax = mm),
         warning = function(w) invokeRestart("muffleWarning"),
         message = function(m) invokeRestart("muffleMessage")
       )
@@ -645,17 +644,18 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
     .data <- minmax_mark_scan(.data)
   }
   if (is.null(expressions)) {
-    return(done(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
-                                     consts = evaluated$consts, provenance = provenance,
-                                     reason = fallback_failed_reason(
-                                       fallback_dots, "an expression has a form the GPU engine does not support."
-                                     ))))
+    return(mutate_done(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
+                                            consts = evaluated$consts, provenance = provenance,
+                                            reason = fallback_failed_reason(
+                                              fallback_dots, "an expression has a form the GPU engine does not support."
+                                            )), back_to_lazy))
   }
   # A vector literal next to a window call isn't planned together: let dplyr
   # run the whole call.
   if (isTRUE(attr(expressions, "has_window")) && isTRUE(attr(expressions, "has_vec"))) {
-    return(done(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
-                                     reason = "a vector literal next to a window call in one mutate() is not planned together.")))
+    return(mutate_done(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
+                                            reason = "a vector literal next to a window call in one mutate() is not planned together."),
+                       back_to_lazy))
   }
   .data <- check_vector_constant_sizes(.data, expressions, "mutate")
   dropped <- attr(expressions, "dropped")
@@ -675,11 +675,11 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   # below -- see that function's own docs and
   # scratchpad/phase5_window_design.md section 1.3.
   if (isTRUE(attr(expressions, "has_window"))) {
-    return(done(mutate_window(
+    return(mutate_done(mutate_window(
       .data, fallback_dots, expressions, orig_schema, orig_names, orig_groups,
       .keep, before_quo, after_quo, by_quo, fallback_data = fallback_data,
       drop = staged_temps, dropped = dropped, fractional = fractional, minmax = mm
-    )))
+    ), back_to_lazy))
   }
 
   # One ast_mutate node carries every expression from every dot -- lowered
@@ -719,7 +719,14 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
     })
   }
   warn_fractional_dates(fractional)
-  done(result)
+  if (back_to_lazy) plan_back_to_lazy(result) else result
+}
+
+# The result of a mutate() that ran its plan early (a min()/max() that needed the
+# data, F124) goes back to lazy.
+# @keywords internal
+mutate_done <- function(result, back_to_lazy) {
+  if (back_to_lazy) plan_back_to_lazy(result) else result
 }
 
 # A vector constant (`y = 1:4`) must be the table's row count (dplyr: "Can't
