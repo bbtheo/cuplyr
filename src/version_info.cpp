@@ -22,7 +22,9 @@
 
 // "MAJOR.MM.PATCH" with the minor zero-padded to two digits, as RAPIDS writes
 // it (26.02.0, not 26.2.0) and as configure formats it.
-static std::string format_version(int major, int minor, int patch) {
+// ([[maybe_unused]]: without either header nothing calls it, and -Wall would
+// say so.)
+[[maybe_unused]] static std::string format_version(int major, int minor, int patch) {
     char buf[64];
     std::snprintf(buf, sizeof(buf), "%d.%02d.%d", major, minor, patch);
     return buf;

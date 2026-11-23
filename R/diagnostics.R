@@ -25,7 +25,10 @@
 #'     [gpu_memory_state()].
 #'   * `options`: a data frame with one row per cuplyr option, user and
 #'     internal: `option`, `value`, `default`, `source`, `env_var`, `internal`
-#'     and `description`. See [cuplyr_options()].
+#'     and `description`. `default` is `NA` both for a default computed at run
+#'     time (the initial pool size) and for no value at all (no release
+#'     threshold); the text report says "computed" or "unset". See
+#'     [cuplyr_options()].
 #'
 #'   A lookup that fails gives `NA` for its field; `diagnostics()` itself does
 #'   not fail.
@@ -185,8 +188,12 @@ diagnostics <- function(redact = TRUE, format = c("text", "json")) {
     user <- Sys.info()[["user"]]
     redact_path <- function(x) {
       if (is.na(x) || !is.character(x)) return(x)
-      # useBytes: a path with non-UTF-8 bytes must not make gsub() fail
-      x <- gsub(home, "~", x, fixed = TRUE, useBytes = TRUE)
+      # useBytes: a path with non-UTF-8 bytes must not make gsub() fail.
+      # An empty HOME is skipped (gsub() refuses an empty pattern), and so is
+      # HOME = "/" (it would turn every "/" into "~").
+      if (nzchar(home) && home != "/") {
+        x <- gsub(home, "~", x, fixed = TRUE, useBytes = TRUE)
+      }
       if (nzchar(user)) x <- gsub(user, "<user>", x, fixed = TRUE, useBytes = TRUE)
       x
     }
@@ -270,9 +277,10 @@ diagnostics <- function(redact = TRUE, format = c("text", "json")) {
   cat("Options\n")
   opts <- info$options
   for (i in seq_len(nrow(opts))) {
-    # An NA default is "unset" (no value, e.g. no automatic release), except
-    # for pool_initial, whose default really is computed at run time.
-    none <- if (opts$option[i] == "cuplyr.pool_initial") "computed" else "unset"
+    # An NA default is "computed" when the registry says cuplyr works it out
+    # at run time, and "unset" otherwise (no value, e.g. no automatic release).
+    entry <- cuplyr_option_registry[[sub("^cuplyr\\.", "", opts$option[i])]]
+    none <- if (isTRUE(entry$computed)) "computed" else "unset"
     cat(sprintf("  %s = %s (%s; default %s)%s\n", opts$option[i],
                 diag_show(opts$value[i], "<unset>"), opts$source[i],
                 diag_show(opts$default[i], none),
@@ -326,16 +334,36 @@ diag_memory <- function() {
 
 # One row per cuplyr option, user and internal: the value in use and where it
 # came from (cuplyr_options()), plus the registry's default and whether the
-# option is internal. A default that is computed at run time is NA.
+# option is internal. The default is NA both when it is computed at run time
+# (the registry's `computed`) and when it is no value at all.
 diag_options <- function() {
   # cuplyr_options() warns about an invalid option and reports its default.
   # With options(warn = 2) that warning would become an error and empty the
-  # table. diagnostics() is a report that must not fail, so keep the warning
-  # but don't let it be fatal here (cuplyr_options() itself stays strict).
-  old <- options(warn = min(getOption("warn"), 1))
-  on.exit(options(old))
+  # table. diagnostics() is a report that must not fail, so here the warning is
+  # printed (warn = 1) instead of raised.
+  #
+  # But a warning that is printed counts as given, and cuplyr gives each one
+  # only once per session: under warn = 2 every later read would then stay
+  # quiet, while ?cuplyr-options promises that each one raises it again until
+  # the value is fixed. So, when the caller has warn = 2 or more, the invalid-
+  # option warnings seen here are forgotten again on the way out
+  # (opt_forget_warned(), as memory_resource_install() and opt_reraise() do).
+  # Under warn 0 or 1 nothing is forgotten: the user saw the warning, as with
+  # any other read. Only warnings signalled here are collected, so one given
+  # before diagnostics() stays given.
+  strict <- getOption("warn", 0) >= 2
+  seen <- list()
+  old <- options(warn = min(getOption("warn", 0), 1))
+  on.exit({
+    options(old)
+    if (strict) opt_forget_warned(seen)
+  })
   tryCatch({
-    opts <- cuplyr_options(internal = TRUE)
+    opts <- withCallingHandlers(
+      cuplyr_options(internal = TRUE),
+      # (collected only, not muffled: the warning still reaches the user)
+      cuplyr_warning_invalid_option = function(w) seen[[length(seen) + 1L]] <<- w
+    )
     reg <- cuplyr_option_registry[sub("^cuplyr\\.", "", opts$option)]
     data.frame(
       option = opts$option,

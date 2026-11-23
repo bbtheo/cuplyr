@@ -466,6 +466,14 @@ print_deps_text <- function(result, verbose = FALSE) {
 
 # Escape a string for use inside JSON double quotes.
 json_escape <- function(s) {
+  # JSON text is UTF-8. A string that isn't valid UTF-8 (a path with a stray
+  # byte, or text from a non-UTF-8 locale) is converted from the native
+  # encoding, and a byte that still doesn't fit is written as "<xx>" (its hex
+  # code). A valid UTF-8 string is left exactly as it is.
+  bad <- !is.na(s) & !validUTF8(s)
+  if (any(bad)) {
+    s[bad] <- iconv(s[bad], from = "", to = "UTF-8", sub = "byte")
+  }
   # Order matters: backslash first, then others. useBytes everywhere: a string
   # with non-UTF-8 bytes must not make gsub() fail.
   s <- gsub("\\", "\\\\", s, fixed = TRUE, useBytes = TRUE)   # \ -> \\

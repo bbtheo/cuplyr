@@ -134,16 +134,19 @@ opt_parse_check <- function(x, env = FALSE) {
 }
 
 # `blank`: NULL, or a test for a set-but-empty option (see above).
+# `computed`: TRUE when an NA `default` stands for a value cuplyr works out at
+# run time (the initial pool size), not for "no value" (no release threshold);
+# diagnostics() reports the two differently.
 # `default_result` is what a lookup of an unset or blank option returns, built
 # once so that path allocates nothing.
 opt_new <- function(name, default, env, parse, unset, description, expect,
                     internal = FALSE, message = NULL, blank = NULL,
-                    default_label = NULL) {
+                    default_label = NULL, computed = FALSE) {
   list(
     name = name, option = paste0("cuplyr.", name), default = default, env = env,
     parse = parse, unset = unset, blank = blank, description = description,
     expect = expect, internal = internal, message = message,
-    default_label = default_label %||% opt_quote(default),
+    default_label = default_label %||% opt_quote(default), computed = computed,
     default_result = list(value = default, source = "default", bad = FALSE)
   )
 }
@@ -194,7 +197,7 @@ cuplyr_option_registry <- list(
     "Initial pool size in bytes (default: a quarter of free GPU memory, at most 1 GiB). Read at load.",
     "a number of bytes, 0 or more",
     blank = opt_blank_na,
-    default_label = "the default size"
+    default_label = "the default size", computed = TRUE
   ),
   release_threshold = opt_new(
     "release_threshold", NA_real_, "CUPLYR_RELEASE_THRESHOLD",

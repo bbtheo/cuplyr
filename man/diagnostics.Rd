@@ -30,7 +30,10 @@ against another libcudf than it was built with.
 \code{\link[=gpu_memory_state]{gpu_memory_state()}}.
 \item \code{options}: a data frame with one row per cuplyr option, user and
 internal: \code{option}, \code{value}, \code{default}, \code{source}, \code{env_var}, \code{internal}
-and \code{description}. See \code{\link[=cuplyr_options]{cuplyr_options()}}.
+and \code{description}. \code{default} is \code{NA} both for a default computed at run
+time (the initial pool size) and for no value at all (no release
+threshold); the text report says "computed" or "unset". See
+\code{\link[=cuplyr_options]{cuplyr_options()}}.
 }
 
 A lookup that fails gives \code{NA} for its field; \code{diagnostics()} itself does
