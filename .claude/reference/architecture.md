@@ -1506,8 +1506,10 @@ timing_retry(measure, ok, retry_if)  # Re-measure near misses a bounded number o
 ```
 New timing tests should use these rather than proc.time() loops, and memory tests
 the allocator-level or own-process readers rather than device-wide free memory, which
-other processes on the GPU move. `test-parity-78-robust-tests.R` enforces both, and that
-every child R process starts through `gpu_child_r()`.
+other processes on the GPU move. `test-parity-78-robust-tests.R` enforces both (by call and field
+names: it would not catch an alias of a timer or a renamed field), and that every
+`callr` child started from tests/testthat goes through `gpu_child_r()`; children the
+bench/ code starts are not scanned.
 
 ### Test Pattern
 ```r

@@ -142,7 +142,7 @@ p78_timer_allow <- c(
   "test-parity-F49-rowwise-rewrites.R :: a 1e5-row rowwise sum/mean runs natively and in well under the CPU time" =
     "5 s bound; dplyr's per-row route takes ~20 s",
   "test-parity-F66-median-exact.R :: F66: the exact default stays fast at 1e6 rows for w = 11/101/1001" =
-    "0.14-0.21 s vs 2 s (measured 2026-11-22)",
+    "0.14-0.21 s vs 2 s, 9.8-14x (measured 2026-11-22): single-threaded code, just under the 10x rule",
   # not speed checks
   "helper-parity-F63.R :: f63_render" =
     "reports how long a render took; no bound",
