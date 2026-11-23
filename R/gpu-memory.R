@@ -812,8 +812,16 @@ gpu_oom_bullets <- function(op_name, state) {
            "\"async\" resource (`options(cuplyr.memory_resource = \"async\")`, read when cuplyr loads) ",
            "may fit more.")
   }
+  # (compute and collect are what the user calls; any other step has no name they know)
+  headline <- if (identical(op_name, "compute")) {
+    "Computing the plan ran out of device memory."
+  } else if (identical(op_name, "collect")) {
+    "Collecting the result ran out of device memory."
+  } else {
+    paste0("GPU operation `", op_name, "` ran out of device memory.")
+  }
   c(
-    paste0("GPU operation `", op_name, "` ran out of device memory."),
+    headline,
     i = "cuplyr freed unused memory (`gc()` and `gpu_gc()`) and retried once; the retry ran out too.",
     i = device,
     i = session,

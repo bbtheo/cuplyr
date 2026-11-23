@@ -6,7 +6,8 @@
 # as often as there is one. verb_error_call() is that walk, started at the
 # user-level call (gpu_entry_frame()), for every error cuplyr raises itself;
 # fallback_error_call() makes dplyr's own errors on a CPU route report the same.
-# Nothing here runs unless an error is raised or a call falls back to the CPU.
+# None of it runs on the success path of a verb, except the summarise() dot check
+# (a walk of dots that read a name no column has) and relocate()'s selection.
 
 # The user-level call whose frame `frame` belongs to, as dplyr reports errors
 # of it: the frame of that call, or the call a `.__dplyr_error_call__.` binding
@@ -65,11 +66,12 @@ fallback_error_call <- function(expr_fn, frame) {
 # The error rlang raises for `.data$xx` / `.data[["xx"]]` of a column the data has
 # not (class `rlang_error_data_pronoun_not_found`, message "Column `xx` not found
 # in `.data`.", call the pronoun as written), raised by rlang itself: `expr` is
-# evaluated against the pronoun of a mask holding `names`. Falls back to `stop()`
-# with the message if it evaluates anyway.
+# evaluated against the pronoun of a mask holding `names`. An internal error if it
+# evaluates anyway.
 # @param expr The `.data$xx` call; `env` where it was written; `names` the columns
 # @keywords internal
 stop_data_pronoun_missing <- function(expr, env, names, name = NULL) {
+  names <- unique(names)
   mask <- stats::setNames(vector("list", length(names)), names)
   cnd <- tryCatch(
     {
@@ -81,41 +83,10 @@ stop_data_pronoun_missing <- function(expr, env, names, name = NULL) {
   if (inherits(cnd, "rlang_error_data_pronoun_not_found")) {
     rlang::cnd_signal(cnd)
   }
-  stop("Column `", name %||% as.character(expr[[3L]]), "` not found in `.data`.", call. = FALSE)
-}
-
-# The first `.data$xx` / `.data[["xx"]]` of `expr` (in evaluation order) whose
-# column is in none of `names`, as the pronoun call, or NULL. Nothing is
-# evaluated; a subscript that is no string or symbol is not looked at, and neither
-# are function literals and formulas (their bodies run elsewhere).
-# @keywords internal
-expr_first_missing_pronoun <- function(expr, env, names) {
-  walk <- function(e, env) {
-    if (rlang::is_quosure(e)) {
-      return(walk(rlang::quo_get_expr(e), rlang::quo_get_env(e)))
-    }
-    if (!is.call(e)) {
-      return(NULL)
-    }
-    if (is_data_pronoun_call(e)) {
-      nm <- pronoun_call_name(e, env, list(names = names))
-      return(if (!is.null(nm) && !nm %in% names) list(call = e, env = env, name = nm))
-    }
-    head <- e[[1L]]
-    if (is.symbol(head) && as.character(head) %in% c("function", "~", "quote", "bquote", "expression", "substitute")) {
-      return(NULL)
-    }
-    for (a in as.list(e)) {
-      if (!rlang::is_missing(a)) {
-        hit <- walk(a, env)
-        if (!is.null(hit)) {
-          return(hit)
-        }
-      }
-    }
-    NULL
-  }
-  walk(expr, env)
+  rlang::abort(
+    paste0("Column `", name %||% as.character(expr[[3L]]), "` is missing from the data but evaluating `", rlang::expr_text(expr), "` did not fail."),
+    class = "cuplyr_error_internal"
+  )
 }
 
 # R's own "object not found" error, the parent of dplyr's "In argument: ..." of
@@ -123,6 +94,18 @@ expr_first_missing_pronoun <- function(expr, env, names) {
 # @keywords internal
 object_not_found_error <- function(name) {
   simpleError(paste0("object '", name, "' not found"))
+}
+
+# The error a dot raises for what expr_first_certain_missing() found: R's "object
+# not found", or rlang's `.data$xx` error.
+# @param miss Its result (not NULL); `scope` the names it was looked up in
+# @keywords internal
+missing_name_error <- function(miss, scope) {
+  if (is.null(miss$pronoun)) {
+    object_not_found_error(miss$name)
+  } else {
+    tryCatch(stop_data_pronoun_missing(miss$pronoun, miss$env, scope, miss$name), error = function(e) e)
+  }
 }
 
 # Raise dplyr's "In argument: `<dot>`." error for a dot of `verb` that reads a
@@ -141,33 +124,84 @@ abort_missing_in_dot <- function(parent, i, verb, run, user_dots) {
   )
 }
 
-# Names whose presence in a summarise() dot makes the missing-column check give
-# no verdict: they bind names the walk can't see (`<-`, `with()`, a magrittr
-# `.`), evaluate code in another scope, or splice columns of unknown names.
-summarise_check_skip <- c(
-  "<-", "<<-", "=", "->", "->>", ":=", "assign", "delayedAssign", "local", "with", "within",
-  "subset", "transform", "eval", "evalq", "parse", "str2lang", "attach", "%>%", "%<>%",
-  "%T>%", "%$%", ".", "across", "if_any", "if_all", "pick", "c_across", "cur_group",
-  "cur_data", "cur_data_all", "cur_column"
+# Calls whose arguments R evaluates all of, in order, whenever the call itself
+# runs: the reducers and operators the native path knows. A name read through
+# these is certain to be looked up; through any other call (`if`, `switch`,
+# `tryCatch()`, `&&`, a user function, ...) it may never be.
+summarise_eager_heads <- c(
+  "mean", "sum", "min", "max", "median", "sd", "var", "n_distinct", "prod", "any", "all",
+  "+", "-", "*", "/", "^", "%%", "%/%", "==", "!=", "<", ">", "<=", ">=", "&", "|", "!",
+  "(", "is.na", "abs", "sqrt", "exp", "log"
 )
 
-# Reducers that give one value, whose unnamed dot creates no columns of its own
-# names for the dots after it.
-summarise_scalar_heads <- c(
-  "mean", "sum", "n", "min", "max", "median", "sd", "var", "first", "last", "nth",
-  "n_distinct", "any", "all", "prod", "quantile", "IQR", "mad"
+# Calls whose value is one atomic vector, so an unnamed dot made of one creates a
+# single column (named by its label) for the dots after it.
+summarise_atomic_heads <- c(
+  summarise_eager_heads, "n", "first", "last", "nth", "quantile", "IQR", "mad"
 )
+
+# The first name `expr` is certain to read that is no column of `scope` and is
+# bound nowhere from `env` up: list(name =) for a bare name, list(pronoun =, env =,
+# name =) for a `.data$xx` of a column that is not there, or NULL. The walk goes
+# through calls in `summarise_eager_heads` only and stops (NULL) at the first other
+# call: whatever it would run first may fail with an error of its own, or never read
+# what is after it. Nothing is evaluated.
+# @keywords internal
+expr_first_certain_missing <- function(expr, env, scope) {
+  hit <- NULL
+  # TRUE: nothing wrong so far, go on; FALSE: stop (`hit` set when it is a verdict)
+  walk <- function(e, env) {
+    if (rlang::is_missing(e)) {
+      return(FALSE)
+    }
+    if (rlang::is_quosure(e)) {
+      return(walk(rlang::quo_get_expr(e), rlang::quo_get_env(e)))
+    }
+    if (is.symbol(e)) {
+      nm <- as.character(e)
+      if (nm %in% scope || nm %in% c(".data", ".env") || exists(nm, envir = env, inherits = TRUE)) {
+        return(TRUE)
+      }
+      hit <<- list(name = nm)
+      return(FALSE)
+    }
+    if (!is.call(e)) {
+      return(TRUE)
+    }
+    if (is_data_pronoun_call(e)) {
+      nm <- pronoun_call_name(e, env, list(names = scope))
+      if (is.null(nm)) {
+        return(FALSE)
+      }
+      if (nm %in% scope) {
+        return(TRUE)
+      }
+      hit <<- list(pronoun = e, env = env, name = nm)
+      return(FALSE)
+    }
+    if (!isTRUE(call_head_name(e) %in% summarise_eager_heads)) {
+      return(FALSE)
+    }
+    for (a in as.list(e)[-1L]) {
+      if (!walk(a, env)) {
+        return(FALSE)
+      }
+    }
+    TRUE
+  }
+  walk(expr, env)
+  hit
+}
 
 # dplyr's error for a summarise() dot that reads a column the data lacks, raised
 # before any CPU fallback is decided (a missing column is the user's typo, not a
 # reason to run on the CPU, and under `cuplyr.fallback = "error"` it would be
 # reported as one): `object 'xx' not found` or rlang's `.data$xx` error as the
-# parent of "In argument: `<dot>`.". A dot reads a name that is no column, bound
-# nowhere from its environment up, and made by no earlier dot (dplyr evaluates
-# them in order, each seeing the columns the ones before made). It gives no
-# verdict where the walk could be wrong: a name bound inside the dot, tidyselect
-# calls (their errors are the expansion's), a dot that may splice columns of
-# unknown names. The first dot in order that reads a missing name raises.
+# parent of "In argument: `<dot>`.". The dots go in order, each seeing the columns
+# and the names the ones before it make (named, or by their label when unnamed);
+# a dot gives a verdict only for a name it is certain to read (see
+# expr_first_certain_missing()), and an unnamed dot that may make columns of
+# unknown names ends the check.
 # @param dots The user's quosures; `schema` the input's; `run` summarise_impl()'s
 #   frame (`.data`, `by_cols`, `by_given`)
 # @keywords internal
@@ -181,34 +215,27 @@ summarise_missing_column_check <- function(dots, schema, run = parent.frame()) {
     # (a dot whose every name is a column, and with no `.data` pronoun, has nothing
     # to look up: the common case, settled by one C walk)
     vars <- all.vars(expr)
-    if (!all(vars %in% scope) || ".data" %in% vars) {
-      if (identical(env, emptyenv()) || any(all.names(expr) %in% summarise_check_skip)) {
-        return(invisible(NULL))
-      }
-      miss <- expr_first_unbound_symbol(expr, env, list(names = scope))
+    if (!identical(env, emptyenv()) && (!all(vars %in% scope) || ".data" %in% vars)) {
+      miss <- expr_first_certain_missing(expr, env, scope)
       if (!is.null(miss)) {
-        abort_missing_in_dot(object_not_found_error(miss), i, "summarise", run, dots)
-      }
-      pron <- expr_first_missing_pronoun(expr, env, scope)
-      if (!is.null(pron)) {
-        cnd <- tryCatch(stop_data_pronoun_missing(pron$call, pron$env, scope, pron$name), error = function(e) e)
-        abort_missing_in_dot(cnd, i, "summarise", run, dots)
+        abort_missing_in_dot(missing_name_error(miss, scope), i, "summarise", run, dots)
       }
     }
     if (i == length(dots)) {
       break
     }
-    named <- !is.null(nms) && !is.na(nms[[i]]) && nzchar(nms[[i]])
-    if (named) {
+    if (!is.null(nms) && !is.na(nms[[i]]) && nzchar(nms[[i]])) {
       scope <- c(scope, nms[[i]])
-    } else if (!(is.call(expr) && isTRUE(call_head_name(expr) %in% summarise_scalar_heads))) {
+    } else if (isTRUE(call_head_name(expr) %in% summarise_atomic_heads)) {
+      scope <- c(scope, dot_label(quo))
+    } else {
       return(invisible(NULL))
     }
   }
   invisible(NULL)
 }
 
-# dplyr's eval_relocate() (R/relocate.R): the positions of a relocate()
+# dplyr 1.2.1's eval_relocate() (R/relocate.R): the positions of a relocate()
 # selection, a named integer vector of every column. dplyr resolves the
 # selection, `.before` and `.after` with tidyselect::eval_select(), whose errors say
 # "Can't select columns that don't exist."; tidyselect's own eval_relocate() says

@@ -1517,6 +1517,8 @@ rewrite_top_n_rank_dots <- function(dots, .data) {
 # @param schema The current schema (names/types) to parse against
 # @return An IR node, or NULL if unsupported
 # @keywords internal
+# Only filter_run() may call this: the error hook (filter_dot_error()) reads the
+# dot loop's `i`, `dots` and `user_dots` from the calling frame.
 parse_filter_ir <- function(quo, schema) {
   tryCatch(
     ir_parse_quo(quo, schema),

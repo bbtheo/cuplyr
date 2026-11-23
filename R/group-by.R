@@ -189,6 +189,7 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   # computed too. A computed dot becomes a column called dot_label(expr).
   kind <- character(length(dots))     # "named", "var", "pick", "computed"
   var_name <- character(length(dots))
+  unbound_ref <- logical(length(dots))
   comp_names <- dot_names
   is_null_dot <- !is_named & vapply(dots, rlang::quo_is_null, logical(1), USE.NAMES = FALSE)
   # (decided over every dot: a NULL is not a variable reference either)
@@ -230,6 +231,12 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
         }
         computed_ref <- TRUE
       }
+      # A name nothing makes or binds goes through the mutate too, unnamed, in
+      # dot order: its error is the one dplyr raises for the dot (`xx`).
+      if (needs_mutate && !computed_ref && !unknown_columns && !var_name[i] %in% visible_names) {
+        computed_ref <- TRUE
+        unbound_ref[i] <- TRUE
+      }
       if (computed_ref) {
         kind[i] <- "computed"
         comp_names[i] <- var_name[i]
@@ -260,7 +267,7 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   # grouped, and later dots see earlier ones' columns.
   working <- .data
   if (any(is_comp)) {
-    comp_dots <- stats::setNames(dots[is_comp], comp_names[is_comp])
+    comp_dots <- stats::setNames(dots[is_comp], ifelse(unbound_ref[is_comp], "", comp_names[is_comp]))
     # (spliced by mutate()'s own capture, so a raw `.data[[k]]` reads the
     # quosure's `k`, see the splice rule after pronoun_call_name(), R/ir.R)
     working <- dplyr::mutate(dplyr::ungroup(working), !!!comp_dots)

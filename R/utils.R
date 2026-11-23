@@ -237,7 +237,7 @@ gpu_rewordable <- function(e) {
   inherits(e, "C++Error") || identical(class(e), c("simpleError", "error", "condition"))
 }
 
-# Only memory errors get the device-memory hint and the retry; anything else (a
+# Only memory errors get the OOM advice and the retry; anything else (a
 # cudf logic_error, a type mismatch) would be misdiagnosed by it. The message
 # test only applies to errors this wrapper owns: an R condition that merely
 # mentions "out of memory" is not retried.
@@ -246,8 +246,6 @@ is_gpu_oom_error <- function(e) {
     (gpu_rewordable(e) &&
        grepl("out[_ ]of[_ ]memory|bad_alloc|cudaErrorMemoryAllocation", conditionMessage(e)))
 }
-
-gpu_oom_hint <- " This is often caused by insufficient device memory. Try filtering inputs, calling gpu_gc(), or reducing the workload."
 
 wrap_gpu_call <- function(op_name, expr, reword = TRUE) {
   state <- gpu_wrap_state
@@ -315,13 +313,12 @@ wrap_gpu_call <- function(op_name, expr, reword = TRUE) {
     }
   }
   if (!reword || !gpu_rewordable(err)) stop(err)
-  hint <- if (is_gpu_oom_error(err)) gpu_oom_hint else ""
   # Classed so an enclosing wrapper (a multi-step verb around push_op() calls)
   # passes it through instead of wrapping the message twice.
   stop(structure(
     class = c("cuplyr_error_gpu", "simpleError", "error", "condition"),
     list(
-      message = paste0("GPU operation '", op_name, "' failed.", hint, "\n",
+      message = paste0("GPU operation '", op_name, "' failed.\n",
                        "Original error: ", conditionMessage(err)),
       call = NULL
     )

@@ -144,7 +144,7 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
         # sorts by (or ignores, a NULL); anything else is dplyr's error.
         env <- rlang::quo_get_env(quo)
         if (!exists(spec$col_name, envir = env, inherits = TRUE)) {
-          arrange_abort_missing(spec$col_name, quo, user_dots, if (isTRUE(.by_group)) length(.subset2(.data, "groups")) else 0L)
+          arrange_abort_missing(object_not_found_error(spec$col_name), quo, user_dots, if (isTRUE(.by_group)) length(.subset2(.data, "groups")) else 0L)
         }
         bound <- tryCatch(list(get(spec$col_name, envir = env, inherits = TRUE)), error = function(e) NULL)
         if (!is.null(bound) && is.null(bound[[1L]]) && !rlang::quo_is_call(quo, "-", n = 1L)) {
@@ -157,6 +157,15 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
       }
       sort_specs <- c(sort_specs, list(spec))
     } else {
+      # a key that certainly reads a column that is not there (`.data$xx`, `xx + 1`)
+      # is dplyr's error, not a reason to run on the CPU
+      key <- rlang::quo_get_expr(quo)
+      if (rlang::quo_is_call(quo, "desc", n = 1L, ns = c("", "dplyr"))) key <- key[[2L]]
+      miss <- expr_first_certain_missing(key, rlang::quo_get_env(quo), schema$names)
+      if (!is.null(miss)) {
+        arrange_abort_missing(missing_name_error(miss, schema$names), quo, user_dots,
+                              if (isTRUE(.by_group)) length(.subset2(.data, "groups")) else 0L)
+      }
       return(gpu_fallback("arrange", .data, function(tbl) {
         dplyr::arrange(tbl, !!!user_dots, .by_group = .by_group, .locale = .locale)
       }, reason = structure(arrange_key_reason(quo, schema), expr = notice_expr_text(quo))))
@@ -185,10 +194,10 @@ arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
 # (`desc()` stripped; a `.by_group` call's group columns come first), which
 # raises "object not found" wrapped as "In argument: `..<i> = <key>`.", with no
 # group (the data is a plain data frame there).
-# @param name The missing name; `quo` its dot; `user_dots` the call's dots;
+# @param parent The error the key raises; `quo` its dot; `user_dots` the call's dots;
 #   `n_groups` how many group columns `.by_group` puts before them
 # @keywords internal
-arrange_abort_missing <- function(name, quo, user_dots, n_groups) {
+arrange_abort_missing <- function(parent, quo, user_dots, n_groups) {
   expr <- rlang::quo_get_expr(quo)
   # (the dots as the user wrote them: a rewritten one is looked up by its expression)
   at <- which(vapply(user_dots, function(u) identical(rlang::quo_get_expr(u), expr), logical(1)))
@@ -199,7 +208,7 @@ arrange_abort_missing <- function(name, quo, user_dots, n_groups) {
   }
   rlang::abort(
     c(i = paste0("In argument: `..", i, " = ", mutate_error_expr_label(expr), "`.")),
-    class = "dplyr:::mutate_error", parent = object_not_found_error(name),
+    class = "dplyr:::mutate_error", parent = parent,
     call = verb_error_call(parent.frame())
   )
 }
