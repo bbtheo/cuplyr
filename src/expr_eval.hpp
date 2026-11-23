@@ -54,6 +54,7 @@
 #include "r_to_column.hpp"
 #include "r_strings.hpp"
 #include "factor_gather.hpp"
+#include "expr_cse.hpp"
 
 #include <cudf/ast/expressions.hpp>
 #include <cudf/binaryop.hpp>
@@ -97,6 +98,8 @@
 #include <Rcpp.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <memory>
@@ -193,30 +196,54 @@ struct eval_ctx {
 
     // F61: [min, max] of the valid values of an INT32 column (cudf::minmax()),
     // by ctx index; [0, 0] for an empty or all-null column. Used by the checked
-    // integer arithmetic to prove that a chain cannot overflow.
+    // integer arithmetic to prove that a chain cannot overflow. A checked chain
+    // the proof covers files its interval under its own slot (F61 x #17), so a
+    // chain that reads the slot runs no cudf::minmax() of its own.
     struct col_range {
         int64_t lo;
         int64_t hi;
     };
     std::map<cudf::size_type, col_range> range_cache;
 
-    // F61 x #17: a checked chain that the interval proof covers leaves its
-    // bounds here for materialize_call() to file under the slot it pushes the
-    // result to, so a later chain that reads the slot (a shared `a + b`) needs
-    // no cudf::minmax() and host read of its own. Set by the handler as its
-    // last act, consumed (and cleared) by the push that follows.
-    bool has_fresh_range = false;
-    col_range fresh_range{0, 0};
-
-    // #17: common subexpressions. IR call nodes the R side marked as repeated
-    // (`cse` = an id, set by cse::mark_list()/mark_one(), expr_cse.hpp) map to the slot that holds their value; materialize()
-    // reuses it instead of evaluating the subtree again. Entries die with
-    // their slot (release_from()). One memo per eval_ctx, i.e. per set of
-    // rows: a context over different rows must not share it.
+    // #17: common subexpressions. IR call nodes that cse::mark_list()/mark_one()
+    // (expr_cse.hpp) tagged as repeated (`cse` = an id) map to the slot that
+    // holds their value; materialize() reuses it instead of evaluating the
+    // subtree again. Entries die with their slot (release_from()). One memo
+    // per eval_ctx, i.e. per set of rows: a context over different rows must
+    // not share it.
     std::map<int, cudf::size_type> cse_slots;
     // False unless the marking pass tagged something for this evaluation, so
     // an untagged one never looks for a tag in its nodes.
     bool cse_on = false;
+    // The tagged trees of this evaluation (kept alive by the entry point; a
+    // list of trees, or one tree when `cse_single`) and, for gpu_mutate_expr(),
+    // the type of every index they bind (the input columns, then each dot's
+    // declared output type). cse_materialized_anyway() reads them once, the
+    // first time a fused checked chain meets a tagged subtree.
+    SEXP cse_roots = R_NilValue;
+    bool cse_single = false;
+    std::vector<cudf::data_type> cse_types;
+    bool cse_scanned = false;
+    // Ids of the tagged checked subtrees some occurrence materializes as its
+    // own chain (see cse_materialized_anyway()).
+    std::set<int> cse_materialized;
+    // Slots of tagged checked chains the F61 proof did not cover. A use that
+    // reads one as a shared leaf takes the exact path, as it would with the
+    // subtree fused, instead of a cudf::minmax() of it (a `col` that names the
+    // slot, a later dot, still gets its minmax).
+    std::set<cudf::size_type> cse_unbounded;
+    // A tagged checked chain that left the int range in some row: its wrapped
+    // values (a view of the result's data without its null mask) and its range
+    // tests (BOOL8), by id. A chain that shares it reads these and ANDs the
+    // tests into its own (cse_push_checked()).
+    struct cse_wrapped_cols {
+        cudf::size_type value;
+        cudf::size_type ok;
+    };
+    std::map<int, cse_wrapped_cols> cse_wrapped;
+    // While set, resolve_static_type() reads a `col` node's type from here
+    // (indices of IR that remap_virtual_col_indices() has not rewritten).
+    const std::vector<cudf::data_type>* static_types = nullptr;
 
     // F57: slots of `cols` that alias another slot (a bare column copy in
     // gpu_mutate_expr()), ctx index -> the index it aliases. `owned` holds a
@@ -239,6 +266,14 @@ struct eval_ctx {
     cudf::size_type push(std::unique_ptr<cudf::column> col) {
         cudf::column_view v = col->view();
         owned.push_back(std::move(col));
+        cols.push_back(v);
+        return static_cast<cudf::size_type>(cols.size() - 1);
+    }
+
+    // A fresh ctx index for a view of data another slot owns (pushed after it,
+    // so release_from() never keeps the view and frees its data).
+    cudf::size_type push_view(cudf::column_view v) {
+        owned.push_back(nullptr);
         cols.push_back(v);
         return static_cast<cudf::size_type>(cols.size() - 1);
     }
@@ -271,6 +306,12 @@ struct eval_ctx {
         }
         for (auto it = cse_slots.begin(); it != cse_slots.end();) {
             if (static_cast<size_t>(it->second) >= mark) it = cse_slots.erase(it);
+            else ++it;
+        }
+        cse_unbounded.erase(cse_unbounded.lower_bound(static_cast<cudf::size_type>(mark)),
+                            cse_unbounded.end());
+        for (auto it = cse_wrapped.begin(); it != cse_wrapped.end();) {
+            if (static_cast<size_t>(std::min(it->second.value, it->second.ok)) >= mark) it = cse_wrapped.erase(it);
             else ++it;
         }
     }
@@ -584,6 +625,9 @@ inline cudf::data_type resolve_static_type(Rcpp::List node, const eval_ctx& ctx)
 
     if (kind == "col") {
         int idx = Rcpp::as<int>(node["index"]);
+        if (ctx.static_types && static_cast<size_t>(idx) < ctx.static_types->size()) {
+            return (*ctx.static_types)[idx];
+        }
         return ctx.cols[idx].type();
     }
 
@@ -1567,7 +1611,8 @@ constexpr int64_t kIntMax = 2147483647;
 
 // F61: bounds of the valid values of ctx column `idx` (INT32), one cudf::minmax()
 // per column per evaluation. An empty or all-null column has no valid row to
-// overflow, so it is [0, 0].
+// overflow, so it is [0, 0]. A slot a checked chain landed in answers from what
+// the chain filed (materialize_call(), #17), without a minmax.
 inline eval_ctx::col_range checked_col_range(eval_ctx& ctx, cudf::size_type idx) {
     auto it = ctx.range_cache.find(idx);
     if (it != ctx.range_cache.end()) return it->second;
@@ -1600,6 +1645,310 @@ inline double& cse_reuse_counter() {
     return n;
 }
 
+// Would fuse_checked() fuse `node` into a chain (an integer +, -, * with no
+// null literal)?
+inline bool checked_fusable(Rcpp::List node, eval_ctx const& ctx) {
+    if (ir_kind(node) != "call") return false;
+    std::string op = Rcpp::as<std::string>(node["op"]);
+    return checked_int_kind(op, node, ctx) == 1 && !checked_has_null_literal(node);
+}
+
+// #17: the walks that decide whether a tagged checked subtree is shared run
+// on every evaluation that tags one, so they read the IR through the C API
+// (cse::scan()) rather than Rcpp's name lookups and List temporaries, which
+// cost about 1.5 us per node through checked_int_kind(). They type the common
+// operands themselves (a column, a literal, nested integer arithmetic) and
+// hand anything else to checked_fusable(), so the answer is the evaluator's.
+// (It only decides speed: a shared and a fused subtree give the same values.)
+
+// 1: `node`'s static type (resolve_static_type()) is INT32 or BOOL8; 0: it
+// is another type; -1: not typed here.
+inline int cse_int_typed(SEXP node, eval_ctx const& ctx) {
+    if (TYPEOF(node) != VECSXP) return -1;
+    cse::node_fields f = cse::scan(node);
+    if (cse::kind_is(f.kind, "col")) {
+        if ((TYPEOF(f.index) != INTSXP && TYPEOF(f.index) != REALSXP) || XLENGTH(f.index) != 1) return -1;
+        const int idx = Rf_asInteger(f.index);
+        if (idx < 0) return -1;
+        cudf::type_id t;
+        if (ctx.static_types && static_cast<size_t>(idx) < ctx.static_types->size()) {
+            t = (*ctx.static_types)[idx].id();
+        } else if (static_cast<size_t>(idx) < ctx.cols.size()) {
+            t = ctx.cols[idx].type().id();
+        } else {
+            return -1;
+        }
+        return t == cudf::type_id::INT32 || t == cudf::type_id::BOOL8;
+    }
+    if (cse::kind_is(f.kind, "lit")) {
+        if (f.type == R_NilValue) return 0;   // FLOAT64
+        if (TYPEOF(f.type) != STRSXP || XLENGTH(f.type) != 1) return -1;
+        const char* t = CHAR(STRING_ELT(f.type, 0));
+        return !std::strcmp(t, "INT32") || !std::strcmp(t, "BOOL8");
+    }
+    if (!cse::kind_is(f.kind, "call") || TYPEOF(f.args) != VECSXP) return -1;
+    if (TYPEOF(f.op) != STRSXP || XLENGTH(f.op) != 1) return -1;
+    const char* op = CHAR(STRING_ELT(f.op, 0));
+    const R_xlen_t n = XLENGTH(f.args);
+    // unary minus and abs() keep their operand's type
+    if (n == 1 && (!std::strcmp(op, "-") || !std::strcmp(op, "abs"))) {
+        return cse_int_typed(VECTOR_ELT(f.args, 0), ctx);
+    }
+    // +, -, *: INT32 when every operand but an untyped NA is INT32/BOOL8 (an
+    // all-BOOL8 one too), INT64 or FLOAT64 otherwise
+    if (op[1] == '\0' && (op[0] == '+' || op[0] == '-' || op[0] == '*')) {
+        int out = 0;
+        for (R_xlen_t i = 0; i < n; ++i) {
+            SEXP a = VECTOR_ELT(f.args, i);
+            cse::node_fields af = cse::scan(a);
+            if (cse::kind_is(af.kind, "lit") && af.type == R_NilValue && af.na != R_NilValue) {
+                // (ir_lit_is_na(): an untyped NA adopts its sibling's type)
+                if (TYPEOF(af.na) != LGLSXP || XLENGTH(af.na) != 1) return -1;
+                if (LOGICAL(af.na)[0] != 0) continue;
+            }
+            const int r = cse_int_typed(a, ctx);
+            if (r == 0) return 0;
+            if (r < 0) out = -1;
+            else if (out == 0) out = 1;
+        }
+        return out;
+    }
+    return -1;
+}
+
+// checked_lit_is_null() of a literal node: 1 or 0, -1 when not read here.
+inline int cse_lit_null(cse::node_fields const& f) {
+    if (f.na != R_NilValue) {
+        if (TYPEOF(f.na) != LGLSXP || XLENGTH(f.na) != 1) return -1;
+        if (LOGICAL(f.na)[0] != 0) return 1;
+    }
+    SEXP v = f.value;
+    if (v == R_NilValue) return 1;
+    if (XLENGTH(v) < 1 || Rf_inherits(v, "integer64")) return -1;
+    switch (TYPEOF(v)) {
+    case INTSXP: return INTEGER(v)[0] == NA_INTEGER;
+    case LGLSXP: return LOGICAL(v)[0] == NA_LOGICAL;
+    case REALSXP: return std::isnan(REAL(v)[0]) ? 1 : 0;
+    default: return -1;
+    }
+}
+
+// checked_fusable() of a node, read as above.
+inline bool cse_fusable(SEXP node, eval_ctx const& ctx) {
+    if (TYPEOF(node) != VECSXP) return false;
+    cse::node_fields f = cse::scan(node);
+    if (!cse::kind_is(f.kind, "call")) return false;
+    if (TYPEOF(f.op) != STRSXP || XLENGTH(f.op) != 1) return checked_fusable(Rcpp::List(node), ctx);
+    const char* op = CHAR(STRING_ELT(f.op, 0));
+    if (op[1] != '\0' || (op[0] != '+' && op[0] != '-' && op[0] != '*')) return false;
+    if (TYPEOF(f.args) != VECSXP) return checked_fusable(Rcpp::List(node), ctx);
+    if (XLENGTH(f.args) != 2) return false;
+    // checked_int_kind() == 1 (every operand INT32/BOOL8, an untyped NA
+    // skipped) and no operand is a null literal: any operand that isn't
+    // answers no
+    bool unsure = false;
+    for (R_xlen_t i = 0; i < 2; ++i) {
+        SEXP a = VECTOR_ELT(f.args, i);
+        cse::node_fields af = cse::scan(a);
+        if (cse::kind_is(af.kind, "lit")) {
+            const int null = cse_lit_null(af);
+            if (null == 1) return false;
+            if (null < 0) unsure = true;
+        }
+        const int t = cse_int_typed(a, ctx);
+        if (t == 0) return false;
+        if (t < 0) unsure = true;
+    }
+    return unsure ? checked_fusable(Rcpp::List(node), ctx) : true;
+}
+
+// #17: which tagged checked subtrees some occurrence evaluates as a chain of
+// its own (a top-level dot; the operand of anything but a fused +, -, *: an
+// AST op such as `/` or a comparison, a handler argument, a +, -, * that a
+// double operand or a null literal keeps off the checked path; or a node past
+// a chain's kMaxFusedChecked). This walks every tree of the evaluation the
+// way fuse_checked() charges its budget with sharing off, with each `col`
+// typed as it will be when its dot runs (`ctx.cse_types` for
+// gpu_mutate_expr(), whose later dots read earlier dots' outputs).
+inline void cse_scan_chains(SEXP node, int* chain, eval_ctx& ctx) {
+    if (TYPEOF(node) != VECSXP) return;
+    cse::node_fields f = cse::scan(node);
+    if (!cse::kind_is(f.kind, "call") || TYPEOF(f.args) != VECSXP) return;
+    int own = 1;
+    int* next = nullptr;
+    if (cse_fusable(node, ctx)) {
+        if (chain && *chain < kMaxFusedChecked) {
+            ++*chain;
+            next = chain;
+        } else {
+            next = &own;
+            if (f.cse != R_NilValue) ctx.cse_materialized.insert(Rf_asInteger(f.cse));
+        }
+    }
+    for (R_xlen_t i = 0; i < XLENGTH(f.args); ++i) cse_scan_chains(VECTOR_ELT(f.args, i), next, ctx);
+}
+
+inline bool cse_materialized_anyway(int id, eval_ctx& ctx) {
+    if (!ctx.cse_scanned) {
+        ctx.cse_scanned = true;
+        if (ctx.cse_roots != R_NilValue) {
+            const std::vector<cudf::data_type>* saved = ctx.static_types;
+            if (!ctx.cse_types.empty()) ctx.static_types = &ctx.cse_types;
+            try {
+                if (ctx.cse_single) {
+                    cse_scan_chains(ctx.cse_roots, nullptr, ctx);
+                } else {
+                    for (R_xlen_t i = 0; i < XLENGTH(ctx.cse_roots); ++i) {
+                        cse_scan_chains(VECTOR_ELT(ctx.cse_roots, i), nullptr, ctx);
+                    }
+                }
+            } catch (std::exception const&) {
+                // (a tree the evaluator can't type fails there with its own
+                // error; here it only means nothing is known)
+                ctx.cse_materialized.clear();
+            }
+            ctx.static_types = saved;
+        }
+    }
+    return ctx.cse_materialized.count(id) > 0;
+}
+
+// Does the fused chain under `node` (`node` included, nodes past the cap not
+// fused) fit in `room` more nodes?
+inline bool checked_chain_fits(SEXP node, eval_ctx const& ctx, int& room) {
+    if (!cse_fusable(node, ctx)) return true;
+    if (--room < 0) return false;
+    SEXP args = cse::scan(node).args;
+    for (R_xlen_t i = 0; i < XLENGTH(args); ++i) {
+        if (!checked_chain_fits(VECTOR_ELT(args, i), ctx, room)) return false;
+    }
+    return true;
+}
+
+// A materialized leaf of a chain: the column at `idx`, as INT32 and INT64.
+// `shared`: the leaf is a #17 common subexpression (see eval_ctx::cse_unbounded).
+inline checked_vr checked_leaf(cudf::size_type idx, checked_tree& ct, eval_ctx& ctx,
+                               bool shared = false) {
+    namespace ast = cudf::ast;
+    if (ctx.cols[idx].type().id() == cudf::type_id::BOOL8) {
+        // The AST has no cast to INT32.
+        idx = ctx.push(cudf::cast(ctx.cols[idx], cudf::data_type{cudf::type_id::INT32}));
+    }
+    ct.leaf_cols.push_back(idx);
+    ast::expression const& ref = ct.tree.emplace<ast::column_reference>(idx);
+    ast::expression const& wide = ct.tree.emplace<ast::operation>(ast::ast_operator::CAST_TO_INT64, ref);
+    if (ct.proven && ctx.cols[idx].type().id() == cudf::type_id::INT32 &&
+        !(shared && ctx.cse_unbounded.count(idx))) {
+        auto rg = checked_col_range(ctx, idx);
+        return {&ref, &wide, true, rg.lo, rg.hi};
+    }
+    ct.proven = false;
+    return {&ref, &wide};
+}
+
+// The range tests ct.oks[oks_from..] of a chain ANDed into one BOOL8 column
+// (see the comment above kMaxFusedChecked); `overflow`: some row whose
+// operands were valid left the int range (also signalled on ctx).
+inline std::unique_ptr<cudf::column> checked_tests(checked_tree& ct, size_t oks_from,
+                                                   eval_ctx& ctx, bool& overflow) {
+    namespace ast = cudf::ast;
+    ast::expression const* ok = ct.oks[oks_from];
+    for (size_t i = oks_from + 1; i < ct.oks.size(); ++i) {
+        ok = &ct.tree.emplace<ast::operation>(ast::ast_operator::NULL_LOGICAL_AND, *ok, *ct.oks[i]);
+    }
+    auto in_range = cudf::compute_column(ctx.view(), *ok);
+    auto all_ok = cudf::reduce(in_range->view(),
+                               *cudf::make_all_aggregation<cudf::reduce_aggregation>(),
+                               cudf::data_type{cudf::type_id::BOOL8});
+    auto* all_ok_s = static_cast<cudf::numeric_scalar<bool>*>(all_ok.get());
+    // Invalid when every row is null: nothing to report.
+    overflow = all_ok_s->is_valid() && !all_ok_s->value();
+    if (overflow) ctx.int_overflow = true;
+    return in_range;
+}
+
+// The column of the chain in `ct` whose root is `top`: proven, the INT32 value
+// alone; otherwise the value with the rows that left the range nulled.
+inline std::unique_ptr<cudf::column> checked_chain_column(checked_tree& ct, checked_vr const& top,
+                                                          bool proven, eval_ctx& ctx) {
+    auto value = cudf::compute_column(ctx.view(), *top.v);
+    if (proven) return value;
+    bool overflow = false;
+    auto in_range = checked_tests(ct, 0, ctx, overflow);
+    if (overflow) {
+        auto mask = cudf::bools_to_mask(in_range->view());
+        value->set_null_mask(std::move(*mask.first), mask.second);
+    }
+    return value;
+}
+
+// #17: pushes the result of the tagged checked chain `id` built in `ct`
+// (root `top`, its range tests ct.oks[oks_from..]) and returns its slot; the
+// caller files it in the memo. Proven: the value and its interval, as for any
+// chain. Otherwise the slot is unbounded for shared uses (eval_ctx::
+// cse_unbounded). Where some row left the range, the slot holds R's NA there
+// for every other reader, but the chains that share it read the wrapped values
+// (a view without the null mask) and AND its tests into their own (eval_ctx::
+// cse_wrapped): a null mask would put each of their kernels on libcudf's
+// slower nullable AST path, which the fused subtree never paid (sharing an
+// overflowing `bi + bj` between two chains measured 39% slower that way at
+// 1e7 rows). A wrapped value is harmless there for the reason given above
+// kMaxFusedChecked: its own test is false and nulls the row.
+inline cudf::size_type cse_push_checked(int id, checked_tree& ct, checked_vr const& top,
+                                        size_t oks_from, bool proven, eval_ctx& ctx) {
+    auto value = cudf::compute_column(ctx.view(), *top.v);
+    if (proven) {
+        cudf::size_type idx = ctx.push(std::move(value));
+        if (top.known) ctx.range_cache[idx] = eval_ctx::col_range{top.lo, top.hi};
+        return idx;
+    }
+    bool overflow = false;
+    auto in_range = checked_tests(ct, oks_from, ctx, overflow);
+    if (!overflow) {
+        cudf::size_type idx = ctx.push(std::move(value));
+        ctx.cse_unbounded.insert(idx);
+        return idx;
+    }
+    cudf::column_view v = value->view();
+    cudf::column_view wrapped(v.type(), v.size(), v.head(), nullptr, 0);
+    auto mask = cudf::bools_to_mask(in_range->view());
+    value->set_null_mask(std::move(*mask.first), mask.second);
+    cudf::size_type idx = ctx.push(std::move(value));
+    cudf::size_type w = ctx.push_view(wrapped);
+    cudf::size_type k = ctx.push(std::move(in_range));
+    ctx.cse_unbounded.insert(idx);
+    ctx.cse_unbounded.insert(w);
+    ctx.cse_wrapped[id] = {w, k};
+    return idx;
+}
+
+// A shared leaf: the slot `idx` the memo gave for tag `id`, or its wrapped
+// values and tests when it has them.
+inline checked_vr cse_checked_leaf(int id, cudf::size_type idx, checked_tree& ct, eval_ctx& ctx) {
+    auto w = ctx.cse_wrapped.find(id);
+    if (w == ctx.cse_wrapped.end()) return checked_leaf(idx, ct, ctx, /*shared=*/true);
+    checked_vr out = checked_leaf(w->second.value, ct, ctx, /*shared=*/true);
+    ct.oks.push_back(&ct.tree.emplace<cudf::ast::column_reference>(w->second.ok));
+    return out;
+}
+
+// #17: is a tagged checked subtree `node`, met inside a chain with room left,
+// a leaf (one column every use reads) instead of fused? Sharing it costs a
+// column written and read, which is a loss where every use would fuse it on
+// the F61 proven path (one AST kernel per use). So it is a leaf only where the
+// share can't lose: the memo holds it; some occurrence evaluates it as its
+// own chain anyway (cse_materialized_anyway()); or it doesn't fit the room
+// left in this chain (part of it would be its own chain anyway). The last
+// case, an interval the proof doesn't cover (the exact path, where each use
+// would pay the range tests of the whole subtree), is only known once the
+// subtree is built: fuse_checked() decides that after its walk.
+inline bool cse_checked_is_leaf(Rcpp::List node, int id, checked_tree const& ct, eval_ctx& ctx) {
+    if (ctx.cse_slots.count(id)) return true;
+    if (cse_materialized_anyway(id, ctx)) return true;
+    int room = kMaxFusedChecked - ct.fused;
+    return !checked_chain_fits(node, ctx, room);
+}
+
 // `is_root`: `node` is the checked chain materialize() is evaluating, so its
 // own cse id must not turn it into a leaf of itself.
 inline checked_vr fuse_checked(Rcpp::List node, checked_tree& ct, eval_ctx& ctx,
@@ -1621,32 +1970,27 @@ inline checked_vr fuse_checked(Rcpp::List node, checked_tree& ct, eval_ctx& ctx,
     // length. Past the cap a node is a leaf: materialize() evaluates it as its
     // own fused chain, with a fresh budget.
     bool fusable = false;
+    int cse = -1;
     if (kind == "call" && ct.fused < kMaxFusedChecked) {
         std::string op = Rcpp::as<std::string>(node["op"]);
         fusable = checked_int_kind(op, node, ctx) == 1 && !checked_has_null_literal(node);
-        // #17: a repeated checked subtree is a leaf, so its chain is computed
-        // once (materialize() memoizes it) and every user reads the column.
-        if (fusable && !is_root && ir_cse_id(node, ctx) >= 0) fusable = false;
+        if (fusable && !is_root) {
+            cse = ir_cse_id(node, ctx);
+            if (cse >= 0 && cse_checked_is_leaf(node, cse, ct, ctx)) fusable = false;
+        }
         if (fusable) ++ct.fused;
     }
 
     if (!fusable) {
         cudf::size_type idx = materialize(node, ctx);
-        if (ctx.cols[idx].type().id() == cudf::type_id::BOOL8) {
-            // The AST has no cast to INT32.
-            idx = ctx.push(cudf::cast(ctx.cols[idx], cudf::data_type{cudf::type_id::INT32}));
-        }
-        ct.leaf_cols.push_back(idx);
-        ast::expression const& ref = ct.tree.emplace<ast::column_reference>(idx);
-        ast::expression const& wide =
-            ct.tree.emplace<ast::operation>(ast::ast_operator::CAST_TO_INT64, ref);
-        if (ct.proven && ctx.cols[idx].type().id() == cudf::type_id::INT32) {
-            auto rg = checked_col_range(ctx, idx);
-            return {&ref, &wide, true, rg.lo, rg.hi};
-        }
-        ct.proven = false;
-        return {&ref, &wide};
+        return cse >= 0 ? cse_checked_leaf(cse, idx, ct, ctx) : checked_leaf(idx, ct, ctx);
     }
+
+    // (#17: where a tagged subtree's own chain starts, to undo it below)
+    const size_t oks_from = ct.oks.size();
+    const size_t leaves_from = ct.leaf_cols.size();
+    const int fused_from = ct.fused - 1;
+    const bool proven_from = ct.proven;
 
     std::string op = Rcpp::as<std::string>(node["op"]);
     Rcpp::List args = node["args"];
@@ -1685,11 +2029,28 @@ inline checked_vr fuse_checked(Rcpp::List node, checked_tree& ct, eval_ctx& ctx,
         }
     }
     if (!out.known) ct.proven = false;
+
+    // #17: a tagged subtree the proof doesn't cover is on the exact path, where
+    // every use pays its range tests: compute it once from what was just built
+    // (its value and its own tests), take its nodes back out of this chain, and
+    // read it as a shared leaf, which takes the exact path as it would with the
+    // subtree fused, and runs no minmax of it.
+    if (cse >= 0 && !out.known) {
+        cudf::size_type idx = cse_push_checked(cse, ct, out, oks_from, /*proven=*/false, ctx);
+        ct.oks.resize(oks_from);
+        ct.leaf_cols.resize(leaves_from);
+        ct.fused = fused_from;
+        ct.proven = proven_from;
+        ctx.cse_slots[cse] = idx;
+        return cse_checked_leaf(cse, idx, ct, ctx);
+    }
     return out;
 }
 
-inline std::unique_ptr<cudf::column> apply_checked_int_add(Rcpp::List node, eval_ctx& ctx) {
-    namespace ast = cudf::ast;
+// `range`, when given, receives the result's interval when the F61 proof
+// covers the chain (materialize_call() files it under the result's slot).
+inline std::unique_ptr<cudf::column> apply_checked_int_add(
+    Rcpp::List node, eval_ctx& ctx, std::optional<eval_ctx::col_range>* range = nullptr) {
     Rcpp::List args = node["args"];
 
     // R evaluates both operands even when one is NA: a nested node still
@@ -1709,32 +2070,8 @@ inline std::unique_ptr<cudf::column> apply_checked_int_add(Rcpp::List node, eval
     // overflow: the INT32 value is the answer, with no range test and no
     // reduction. The interval bounds the result's valid values (a superset of
     // its minmax(): it can only send a later chain to the exact path).
-    if (ct.proven) {
-        auto value = cudf::compute_column(ctx.view(), *top.v);
-        if (top.known) {
-            ctx.fresh_range = {top.lo, top.hi};
-            ctx.has_fresh_range = true;
-        }
-        return value;
-    }
-    ast::expression const* ok = ct.oks[0];
-    for (size_t i = 1; i < ct.oks.size(); ++i) {
-        ok = &ct.tree.emplace<ast::operation>(ast::ast_operator::NULL_LOGICAL_AND, *ok, *ct.oks[i]);
-    }
-
-    auto value = cudf::compute_column(ctx.view(), *top.v);
-    auto in_range = cudf::compute_column(ctx.view(), *ok);
-    auto all_ok = cudf::reduce(in_range->view(),
-                               *cudf::make_all_aggregation<cudf::reduce_aggregation>(),
-                               cudf::data_type{cudf::type_id::BOOL8});
-    auto* all_ok_s = static_cast<cudf::numeric_scalar<bool>*>(all_ok.get());
-    // Invalid when every row is null: nothing to report, `value` is all null.
-    if (all_ok_s->is_valid() && !all_ok_s->value()) {
-        ctx.int_overflow = true;
-        auto mask = cudf::bools_to_mask(in_range->view());
-        value->set_null_mask(std::move(*mask.first), mask.second);
-    }
-    return value;
+    if (ct.proven && range && top.known) *range = eval_ctx::col_range{top.lo, top.hi};
+    return checked_chain_column(ct, top, ct.proven, ctx);
 }
 
 inline std::unique_ptr<cudf::column> apply_checked_int_div(Rcpp::List node, eval_ctx& ctx) {
@@ -3814,13 +4151,25 @@ inline cudf::size_type materialize_call(Rcpp::List node, eval_ctx& ctx) {
         return ctx.push(std::move(result));
     }
 
-    auto result = apply_handler(node, ctx);
-    cudf::size_type out = ctx.push(std::move(result));
-    if (ctx.has_fresh_range) {
-        ctx.range_cache[out] = ctx.fresh_range;
-        ctx.has_fresh_range = false;
+    // F61 x #17: a checked +, -, * chain the proof covers files its interval
+    // under its slot, so a chain that reads the slot (a shared `a + b`) takes
+    // its bounds from the proof, with no cudf::minmax() and host read of its
+    // own. A tagged one leaves what its shared uses read (cse_push_checked()).
+    if (checked_int_kind(op, node, ctx) == 1) {
+        const int cse = ir_cse_id(node, ctx);
+        if (cse >= 0 && !checked_has_null_literal(node)) {
+            checked_tree ct;
+            checked_vr top = fuse_checked(node, ct, ctx, /*is_root=*/true);
+            return cse_push_checked(cse, ct, top, 0, ct.proven, ctx);
+        }
+        std::optional<eval_ctx::col_range> range;
+        cudf::size_type out = ctx.push(apply_checked_int_add(node, ctx, &range));
+        if (range) ctx.range_cache[out] = *range;
+        return out;
     }
-    return out;
+
+    auto result = apply_handler(node, ctx);
+    return ctx.push(std::move(result));
 }
 
 // -----------------------------------------------------------------------------

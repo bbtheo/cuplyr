@@ -101,6 +101,18 @@ static SEXP finish_expr_result(std::unique_ptr<cudf::table> tbl, bool int_overfl
     return out;
 }
 
+// #17: hand the marked trees of one evaluation to its context (they stay
+// alive in the caller for the whole evaluation). Returns whether anything is
+// tagged.
+static bool cse_begin(cuplyr::eval_ctx& ctx, Rcpp::List const& marked, bool tagged, bool single) {
+    ctx.cse_on = tagged;
+    if (tagged) {
+        ctx.cse_roots = marked;
+        ctx.cse_single = single;
+    }
+    return tagged;
+}
+
 // #17 test hook: how many times a memoized common subexpression was reused,
 // cumulative over the session.
 // [[Rcpp::export]]
@@ -131,7 +143,7 @@ SEXP gpu_compute_column(SEXP xptr, Rcpp::List ir) {
     }
 
     Rcpp::List marked = cse::mark_one(ir);
-    ctx.cse_on = SEXP(marked) != SEXP(ir);
+    cse_begin(ctx, marked, SEXP(marked) != SEXP(ir), /*single=*/true);
     cudf::size_type idx = materialize_top_level(marked, ctx);
     // materialize_top_level() always pushes a fresh entry, so idx is always
     // within ctx.owned's range (never a bare alias into the input view).
@@ -160,7 +172,7 @@ SEXP gpu_filter_expr(SEXP xptr, Rcpp::List ir) {
     }
 
     Rcpp::List marked = cse::mark_one(ir);
-    ctx.cse_on = SEXP(marked) != SEXP(ir);
+    cse_begin(ctx, marked, SEXP(marked) != SEXP(ir), /*single=*/true);
     cudf::size_type idx = materialize(marked, ctx);
     cudf::column_view mask = ctx.cols[idx];
 
@@ -222,9 +234,17 @@ SEXP gpu_mutate_expr(SEXP xptr,
     logical_to_real.reserve(static_cast<size_t>(n_expr));
 
     // #17: tag the call subtrees that repeat anywhere in `exprs`. The tag is on
-    // copies, and remap_virtual_col_indices() carries it into its clones.
+    // copies, and remap_virtual_col_indices() carries it into its clones. The
+    // types of the indices they bind are the input columns' and then the dots'
+    // declared output types (each dot's result is cast to it below).
     Rcpp::List marked = cse::mark_list(exprs);
-    ctx.cse_on = SEXP(marked) != SEXP(exprs);
+    if (cse_begin(ctx, marked, SEXP(marked) != SEXP(exprs), /*single=*/false)) {
+        ctx.cse_types.reserve(static_cast<size_t>(n_input + n_expr));
+        for (int i = 0; i < n_input; ++i) ctx.cse_types.push_back(view.column(i).type());
+        for (int i = 0; i < n_expr; ++i) {
+            ctx.cse_types.push_back(expr_type_from_str(Rcpp::as<std::string>(out_types[i])));
+        }
+    }
 
     for (int i = 0; i < n_expr; ++i) {
         Rcpp::List node = remap_virtual_col_indices(marked[i], n_input, logical_to_real);

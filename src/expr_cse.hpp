@@ -67,7 +67,9 @@ inline uint64_t hash_chars(const char* s) {
     return h;
 }
 
-// Equal for any two identical() objects (bitwise); unequal ones may collide.
+// Hashes the bytes: equal for two identical() objects whose strings have the
+// same encoding (bitwise numbers). Strings that are identical() in different
+// encodings hash apart, which only loses a share; unequal objects may collide.
 inline uint64_t hash_sexp(SEXP x, int depth = 0) {
     uint64_t h = mix(0, static_cast<uint64_t>(TYPEOF(x)));
     switch (TYPEOF(x)) {
@@ -128,6 +130,8 @@ inline uint64_t hash_sexp(SEXP x, int depth = 0) {
 struct node_fields {
     SEXP kind = R_NilValue, op = R_NilValue, args = R_NilValue, meta = R_NilValue;
     SEXP index = R_NilValue, value = R_NilValue, type = R_NilValue, na = R_NilValue;
+    SEXP cse = R_NilValue;
+    R_xlen_t args_at = -1;   // position of `args` in the node
 };
 
 inline node_fields scan(SEXP node) {
@@ -141,7 +145,8 @@ inline node_fields scan(SEXP node) {
         switch (s[0]) {
         case 'k': if (!std::strcmp(s, "kind")) f.kind = v; break;
         case 'o': if (!std::strcmp(s, "op")) f.op = v; break;
-        case 'a': if (!std::strcmp(s, "args")) f.args = v; break;
+        case 'a': if (!std::strcmp(s, "args")) { f.args = v; f.args_at = i; } break;
+        case 'c': if (!std::strcmp(s, "cse")) f.cse = v; break;
         case 'm': if (!std::strcmp(s, "meta")) f.meta = v; break;
         case 'i': if (!std::strcmp(s, "index")) f.index = v; break;
         case 'v': if (!std::strcmp(s, "value")) f.value = v; break;
@@ -352,7 +357,7 @@ private:
         for (R_xlen_t i = 0; i < len; ++i) {
             SEXP v = VECTOR_ELT(node, i);
             SET_STRING_ELT(names, i, STRING_ELT(old_names, i));
-            if (args_changed && v == f.args) v = new_args;
+            if (args_changed && i == f.args_at) v = new_args;
             SET_VECTOR_ELT(out, i, v);
         }
         if (tag > 0) {
