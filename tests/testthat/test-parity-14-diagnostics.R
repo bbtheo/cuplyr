@@ -100,7 +100,7 @@ test_that("#14: no loaded libcudf, or no readable header, gives NA and no error"
 })
 
 test_that("#14: read_cudf_version_header() formats versions as configure does", {
-  skip_if_no_gpu()
+  # pure R: runs without a GPU too
   check <- function(lines, expected) {
     f <- withr::local_tempfile()
     writeLines(lines, f)
@@ -286,7 +286,7 @@ test_that("#14: cuplyr.topk_path keeps its routes; an unknown value warns and me
 })
 
 test_that("#14: the new options are documented on ?cuplyr-options", {
-  skip_if_no_gpu()
+  # pure R: runs without a GPU too
   rd_file <- file.path(d14_root(), "man", "cuplyr-options.Rd")
   skip_if_not(file.exists(rd_file))
   txt <- paste(readLines(rd_file), collapse = "\n")
@@ -314,6 +314,65 @@ test_that("#14: the text report shows the libcudf version, the resource and ever
   expect_false(startsWith(trimws(out[1]), "{"))
 })
 
+test_that("#14: built and loaded versions are reported apart, and a mismatch is flagged", {
+  skip_if_no_gpu()
+  prefix <- d14_fake_prefix(d14_header(99, "04", 1))
+  lib <- file.path(prefix, "lib", "libcudf.so")
+  local_mocked_bindings(
+    cuplyr_build_versions = function(...) c(libcudf = "25.12.0", rmm = "25.10.3"),
+    loaded_libcudf_path = function(...) lib
+  )
+  out <- utils::capture.output(info <- diagnostics(redact = FALSE))
+  expect_identical(info$libcudf_version, "25.12.0")
+  expect_identical(info$rmm_version, "25.10.3")
+  expect_identical(info$libcudf_loaded_version, "99.04.1")
+  txt <- paste(out, collapse = "\n")
+  expect_match(txt, "25.10.3", fixed = TRUE)
+  expect_match(txt, "99.04.1", fixed = TRUE)
+  expect_match(txt, "differs", ignore.case = TRUE)
+
+  # matching versions: no mismatch line
+  same <- d14_fake_prefix(d14_header(25, 12, 0))
+  lib <- file.path(same, "lib", "libcudf.so")
+  out <- utils::capture.output(info <- diagnostics(redact = FALSE))
+  expect_identical(info$libcudf_loaded_version, "25.12.0")
+  expect_no_match(paste(out, collapse = "\n"), "differs", ignore.case = TRUE)
+})
+
+test_that("#14: only a computed default is called computed in the text report", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.release_threshold = NULL)
+  withr::local_envvar(CUPLYR_RELEASE_THRESHOLD = NA)
+  out <- utils::capture.output(diagnostics(redact = FALSE))
+  line <- grep("cuplyr.release_threshold", out, fixed = TRUE, value = TRUE)
+  expect_length(line, 1L)
+  # unset means "no automatic release", not a computed value
+  expect_no_match(line, "computed", fixed = TRUE)
+})
+
+test_that("#14: with warnings as errors, one invalid option doesn't empty the options", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "bogus-issue14-warn2", warn = 2)
+  expect_no_error(info <- d14_quiet(diagnostics(redact = FALSE)))
+  opts <- info$options
+  expect_setequal(opts$option, paste0("cuplyr.", names(cuplyr_option_registry)))
+  expect_identical(opts$default[opts$option == "cuplyr.fallback"], "silent")
+})
+
+test_that("#14: no GPU memory information means an unknown resource", {
+  skip_if_no_gpu()
+  local_mocked_bindings(gpu_memory_state = function(...) list(
+    available = FALSE, total_bytes = NA_real_, free_bytes = NA_real_,
+    used_bytes = NA_real_, total_gb = NA_real_, free_gb = NA_real_,
+    used_gb = NA_real_, resource = "cuda", pool_bytes = NA_real_,
+    pool_used_bytes = NA_real_
+  ))
+  info <- d14_quiet(diagnostics(redact = FALSE))
+  expect_false(info$memory$available)
+  expect_identical(info$memory$resource, NA_character_)
+  expect_identical(info$memory$pool_bytes, NA_real_)
+})
+
 # ---------------------------------------------------------------------------
 # Redaction
 
@@ -322,6 +381,9 @@ test_that("#14: redaction covers the libcudf path, in both formats", {
   home <- Sys.getenv("HOME", "")
   skip_if(!nzchar(home) || home == "/")
   lib <- file.path(home, "rapids-issue14", "lib", "libcudf.so")
+  # redaction also replaces the user name anywhere in a path
+  user <- Sys.info()[["user"]]
+  skip_if(nzchar(user) && grepl(user, "rapids-issue14/lib/libcudf.so", fixed = TRUE))
   local_mocked_bindings(loaded_libcudf_path = function(...) lib)
 
   info <- d14_quiet(diagnostics(redact = TRUE))
@@ -399,7 +461,7 @@ test_that("#14: JSON nulls stand in for NA fields", {
 })
 
 test_that("#14: to_json() writes valid JSON for every value diagnostics() holds", {
-  skip_if_no_gpu()
+  # pure R: runs without a GPU too
   skip_if_not_installed("jsonlite")
   rt <- function(x) {
     txt <- to_json(x)
@@ -454,7 +516,7 @@ test_that("#14: check_deps(format = 'json') still writes valid JSON", {
 # Bug report template and docs
 
 test_that("#14: the bug report template asks for diagnostics() output", {
-  skip_if_no_gpu()
+  # pure R: runs without a GPU too
   tdir <- file.path(d14_root(), ".github", "ISSUE_TEMPLATE")
   skip_if_not(dir.exists(tdir))
   files <- list.files(tdir, pattern = "\\.(md|ya?ml)$", full.names = TRUE)
@@ -467,7 +529,7 @@ test_that("#14: the bug report template asks for diagnostics() output", {
 })
 
 test_that("#14: ?diagnostics documents format and the new fields", {
-  skip_if_no_gpu()
+  # pure R: runs without a GPU too
   rd_file <- file.path(d14_root(), "man", "diagnostics.Rd")
   skip_if_not(file.exists(rd_file))
   txt <- paste(readLines(rd_file), collapse = "\n")
