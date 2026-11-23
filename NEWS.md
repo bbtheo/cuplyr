@@ -1,5 +1,22 @@
 # cuplyr (development version)
 
+* `filter()`, `arrange()`, `summarise()`, `count()`, `distinct()`,
+  `group_by()`, `relocate()` and the joins raise dplyr's error for a column
+  that doesn't exist: the same class, message and parent error, and the call
+  the user made (`filter()`, `count()`, `add_tally()`, ...) rather than an
+  internal one. `summarise()` reports a typo such as `mean(xx)` directly
+  instead of running the call on the CPU first, so
+  `options(cuplyr.fallback = "error")` no longer turns it into a fallback
+  error. `arrange()` ignores a `NULL` name and sorts by any other object that
+  is not a column, as dplyr does. dplyr gives no "did you mean" hint, so
+  neither does cuplyr (#13).
+
+* `cuplyr_error_gpu_oom`, raised when a GPU step still runs out of device
+  memory after cuplyr's retry, now shows the device's and the session's
+  memory, names what helps (`gpu_gc()`, lazy mode, the
+  `cuplyr.memory_resource` option under the "pool" resource), keeps the
+  allocator's error as its parent and reports the call the user made (#13).
+
 * `mutate()` and `transmute()` raise dplyr's errors. An error in a dot, such as
   an unknown object or a missing `.data` column, is a `dplyr:::mutate_error`
   that names the argument ("In argument: ...") and, for a grouped table or

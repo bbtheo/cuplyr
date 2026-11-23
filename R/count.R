@@ -124,6 +124,8 @@ resolve_grouping_dots <- function(.data, dots, call = rlang::caller_env(),
                 names = unique(variable_reference_names(dots, schema, distinct = FALSE,
                                                         call = call))))
   }
+  # (the names the user gave, for an error in a key)
+  user_names <- names(dots) %||% rep("", length(dots))
   dots <- name_dots_silently(dots)
   expressions <- list()
   names_out <- character(length(dots))
@@ -134,7 +136,7 @@ resolve_grouping_dots <- function(.data, dots, call = rlang::caller_env(),
     new_name <- names(dots)[i]
     expr <- dots[[i]]
 
-    ir <- ir_parse_quo(expr, schema)
+    ir <- parse_key_ir(expr, schema, user_names[[i]], call)
 
     # Not in the expression IR, or a factor outside the places F18's rule
     # allows (ir_factor_rule()): the caller hands the whole call to dplyr

@@ -1890,7 +1890,7 @@ expand_across_dots <- function(dots, schema, group_cols, verb) {
       if (track) run <- across_run_step(run, nm, quo, verb)
     }
   }, error = function(cnd) {
-    if (mutating) mutate_dot_error(cnd, i, "expand", NULL, NULL, verb)
+    mutate_dot_error(cnd, i, "expand", NULL, NULL, verb)
   })
 
   names(out_quos) <- out_names
