@@ -720,6 +720,7 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
 | `R/ir.R` | Expression IR shared by filter/mutate: `ir_parse_quo()`, `ir_cols()`, `ir_cost()`, `ir_is_const()`, `ir_bind()`, `ir_infer_type()`, `ir_call_registry` |
 | `R/filter.R` | filter verb — parses expressions via `ir_parse_quo()` into `make_predicate()` records, builds one `ast_filter` node via `push_op()`; constant expressions (TRUE/FALSE/vectors) are evaluated in R, not the GPU IR path; an ungrouped call's logical vectors (F79) are sized against the input, combined with `&` into one mask, and applied by `filter_eval_mask()` (mask-only call) or as one temp BOOL8 column (`ir_vec`) next to the other predicates, so every dot sees the same rows |
 | `R/mutate.R` | mutate verb — parses expressions into `make_mutate_expr()` structs, builds one `ast_mutate` node via `push_op()`; type inference lives in `R/ast.R::infer_mutate_output_type()` |
+| `R/mutate-errors.R` | dplyr's error context for `mutate()`/`transmute()` (#30), built like dplyr's own `dplyr_error_handler(i_sym = "i")`: `parse_mutate_dots()` (phase "eval") and `expand_across_dots()` (phase "expand") run their dot loop inside one `withCallingHandlers(error = )` whose handler (`mutate_dot_error()`) reads the loop's `i` from the loop frame, and the user's dots, table and groups from the frame of `mutate_run()`/`transmute_run()` (names `user_dots`, `.data`/`fallback_data`, `verb_groups`/`by_given`/`eff_groups`); nothing is recorded per call or per dot. It re-raises as `dplyr:::mutate_error` ("In argument: `<label>`.", the group bullet unless the dot is an unnamed `across()` without `...` being expanded or the table has no rows, parent = the error or, for an across()/if_any() that failed computing a column, dplyr's "Can't compute column" layer, call = the verb's method frame). cuplyr's own runtime errors (`mutate_error_passthrough`) and rowwise calls (whose native attempt abandons on any error) are not wrapped. CPU routes (`gpu_fallback()` closures, `mutate_vector_size_error()`) call dplyr through `cpu_verb_call()`, which binds dplyr's `.__dplyr_error_call__.` in the calling frame to the environment of the `mutate.tbl_gpu()`/`transmute.tbl_gpu()` frame on the stack (`cpu_verb_frame()`), so dplyr builds and signals its own errors and warnings with the user's call as written (`mutate()`, `dplyr::mutate()`); bound to a call object instead, dplyr's warning handler fails (`trace_back(bottom =)` takes a frame). With no verb frame on the stack (a plan run at `collect()`), an error naming `dplyr::mutate()` is re-signalled through `rlang::cnd_signal()` with `call(verb)`. The across() selection's "`.fns` first" check (`across_resolve_or_fns_first()`) and `resolve_across_cols()`'s "a dropped column broke it" check decide inside `withCallingHandlers()` and leave through a restart, so a selection error is never re-raised with base `stop()` (it keeps rlang's format and `last_error()`). |
 | `R/select.R` | select verb — parses tidyselect, builds one `ast_select` node via `push_op()` |
 | `R/arrange.R` | arrange verb — parses sort specs (incl. `.by_group`), builds one `ast_arrange` node via `push_op()` |
 | `R/group-by.R` | `group_by()`, `ungroup()`, `group_vars()` — metadata-only, no AST node |
@@ -1494,15 +1495,23 @@ skip_if_no_gpu()           # Skip test if no GPU available
 expect_valid_tbl_gpu(x)    # Check tbl_gpu structure (allows exec_mode field)
 expect_data_on_gpu(x)      # Verify data is on GPU
 gc_gpu()                   # Force GPU garbage collection
-gpu_memory_snapshot()      # Device-level memory state (a pool hides it; see "Memory resource")
 gpu_alloc_snapshot()       # Allocator-level state (pool_used_bytes), what memory tests should use
+gpu_own_device_used_bytes() # This process's own device memory (nvidia-smi), for claims about the device
+gpu_own_delta(a, b)        # b - a of two own readings; stops if one fell back to the device-wide level
+gpu_child_r(func, args)    # Start a child R process; frees this process's cached GPU memory first
+gpu_free_for_child()       # The freeing step alone, for children started another way (quarto, bench drivers)
 run_with_pool_off(fn)      # Run fn in a subprocess with the memory pool off (device-level claims)
 timing_now()               # Wall clock in seconds, sub-microsecond resolution (helper-timing.R)
 timing_spin(s)             # Busy-wait s seconds on the wall clock (a steadier stand-in for Sys.sleep())
 timing_medians(fns, ...)   # Median per-call seconds per closure: interleaved, fenced, ~50 ms batches
 timing_retry(measure, ok, retry_if)  # Re-measure near misses a bounded number of times; far misses fail at once
 ```
-New timing tests should use these rather than proc.time() loops.
+New timing tests should use these rather than proc.time() loops, and memory tests
+the allocator-level or own-process readers rather than device-wide free memory, which
+other processes on the GPU move. `test-parity-78-robust-tests.R` enforces both (by call and field
+names: it would not catch an alias of a timer or a renamed field), and that every
+`callr` child started from tests/testthat goes through `gpu_child_r()`; children the
+bench/ code starts are not scanned.
 
 ### Test Pattern
 ```r

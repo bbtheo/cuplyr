@@ -98,15 +98,42 @@ test_that("F59: roll_median() at 1e6 rows takes well under a second; the sorted 
   x <- rnorm(1e6)
   x[sample.int(1e6, 1e4)] <- NA
   sorted <- getFromNamespace("roll_median_sorted", "cuplyr")
+  has_dt <- requireNamespace("data.table", quietly = TRUE)
   r1 <- NULL
-  if (requireNamespace("data.table", quietly = TRUE)) {
+  if (has_dt) {
     withr::local_options(cuplyr.roll_median = "frollmedian")
-    t_dt <- system.time(r1 <- roll_median(x, 1001, na.rm = TRUE))[["elapsed"]]
-    expect_lt(t_dt, 1)
+    r1 <- roll_median(x, 1001, na.rm = TRUE)
   }
-  t_sorted <- system.time(r2 <- sorted(x, 1001, TRUE))[["elapsed"]]
-  expect_lt(t_sorted, 5)
+  r2 <- sorted(x, 1001, TRUE)
   if (!is.null(r1)) expect_identical(r1, r2)
+  # Timing: the median of 5 calls after 1 warmup, each call timed whole
+  # (0.2-0.8 s). This is CPU work, so no GPU fence. A reading within 1.25x of
+  # a bound is re-measured (up to 3 times); the last reading is asserted.
+  # frollmedian is data.table's multi-threaded code (data.table uses 12 threads
+  # by default on this machine). Measured 2026-11-22 at 1e6 rows, w = 1001:
+  # 0.40-0.74 s on a quiet machine; a median of 1.03 s under 12 busy CPU loops
+  # (run medians 0.99 and 1.30 s under 24); 6.9-7.0 s on one thread. A 1 s bound
+  # tested that the threads were free, not that cuplyr avoids an R loop (9.5-32
+  # s). 2 s keeps it 3.5x under single-threaded data.table and well under the R
+  # loop, and passes on a loaded machine.
+  fns <- list(sorted = function() sorted(x, 1001, TRUE))
+  bounds <- c(sorted = 5)
+  if (has_dt) {
+    fns <- c(list(frollmedian = function() roll_median(x, 1001, na.rm = TRUE)), fns)
+    bounds <- c(frollmedian = 2, bounds)
+  }
+  runs <- timing_retry(
+    function() timing_medians(fns, samples = 5L, warmup = 1L, sync = FALSE,
+                              label = "F59 roll_median 1e6 w=1001"),
+    ok = function(m) all(m[names(bounds)] < bounds),
+    retry_if = function(m) all(m[names(bounds)] < 1.25 * bounds),
+    attempts = 3L
+  )
+  m <- runs[[length(runs)]]
+  for (v in names(bounds)) {
+    seen <- paste(sprintf("%.3f", vapply(runs, function(r) r[[v]], numeric(1))), collapse = " / ")
+    expect_lt(m[[v]], bounds[[v]], label = sprintf("%s median at 1e6 rows, w = 1001 (attempts: %s s)", v, seen))
+  }
   # spot-check against the reference on a slice (the full reference takes ~30 s)
   idx <- 5000:6500
   expect_identical(r2[idx], f59m_ref(x[4000:6500], 1001, TRUE)[idx - 3999])

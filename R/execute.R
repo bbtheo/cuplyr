@@ -1071,7 +1071,7 @@ resolve_by <- function(.data, by_quo, arg_name = ".by", call = rlang::caller_env
   # real data (only the names come back, so the verb itself stays native).
   schema <- current_schema(.data)
   if (selection_is_type_only(by_quo, NULL, schema$names)) {
-    loc <- tidyselect::eval_select(by_quo, tidyselect_proxy(schema))
+    loc <- tidyselect::eval_select(by_quo, tidyselect_proxy(schema), error_call = call)
   } else {
     # (`verb`: the user's verb, when the caller's frame is an internal helper
     # such as mutate_run() whose name is not it)
@@ -1082,7 +1082,7 @@ resolve_by <- function(.data, by_quo, arg_name = ".by", call = rlang::caller_env
       verb %||% arg_name, reason = selection_fallback_reason,
       rows = size$rows, cols = size$cols, bytes = size$bytes
     )
-    loc <- tidyselect::eval_select(by_quo, collect_frame(data))
+    loc <- tidyselect::eval_select(by_quo, collect_frame(data), error_call = call)
   }
   names(loc)
 }

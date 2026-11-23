@@ -204,6 +204,8 @@ f63_quarto <- function() {
 }
 
 f63_render <- function(qmd, out_dir, params_file) {
+  # The report's R session uses the GPU: give it this process's cached memory.
+  gpu_free_for_child()
   t0 <- proc.time()[["elapsed"]]
   out <- suppressWarnings(system2(
     f63_quarto(),

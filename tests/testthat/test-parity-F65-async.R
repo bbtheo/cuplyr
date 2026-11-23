@@ -47,28 +47,25 @@ f65_local_clean <- function(env = parent.frame()) {
 
 
 # Run `fn()` in a fresh R process that loads this worktree with env `env` and
-# options `opts`. `fn` may only use package functions (callr ships it without
-# its environment); the load's warnings are in `.f65_load_warnings` in the
-# child's global environment.
+# options `opts`. `fn` is an argument of the child's function, so its defining
+# environment travels only as a serialized copy: it uses package functions and
+# gpu_own_device_used_bytes() / gpu_own_delta() (gpu_child_r() puts them in the
+# child's global environment); the load's warnings are in `.f65_load_warnings`
+# in the child's global environment.
 #
 # The child needs device memory of its own (a CUDA context, its resource), but
 # this test process caches what earlier tests freed: under async (or a pool)
 # that can be nearly the whole card after a test that ran out of memory, and
 # then the child can't even create its context (merge gate 2026-10-23: the
-# child reported total memory 0 and resource "cuda"). So hand the cache back
-# first with gpu_gc(), which trims an async resource. What the child saw is
-# kept for f65_info(), so a failing expectation explains itself.
+# child reported total memory 0 and resource "cuda"). So gpu_child_r() hands
+# the cache back first (once, in gpu_child_r(), which trims an async resource
+# and records the free bytes it saw). What the child saw is kept for f65_info(),
+# so a failing expectation explains itself.
 f65_state <- new.env(parent = emptyenv())
 
 f65_child <- function(fn, env = f65_env(), opts = list()) {
-  skip_if_not_installed("callr")
   skip_if_not_installed("pkgload")
-  parent_free <- NA_real_
-  if (has_gpu()) {
-    gpu_gc(aggressive = FALSE)
-    parent_free <- gpu_memory_state()$free_bytes
-  }
-  res <- callr::r(
+  res <- gpu_child_r(
     function(root, fn, opts) {
       if (length(opts)) options(opts)
       # Warnings raised while loading, for fn() to inspect.
@@ -88,11 +85,10 @@ f65_child <- function(fn, env = f65_env(), opts = list()) {
            free = st$free_bytes, total = st$total_bytes)
     },
     args = list(root = f65_root(), fn = fn, opts = opts),
-    env = c(callr::rcmd_safe_env(), env),
-    timeout = 600
+    env = env
   )
   f65_state$last <- c(res[c("warnings", "resource", "free", "total")],
-                      parent_free = parent_free)
+                      parent_free = gpu_child_state$free_before)
   res$value
 }
 
@@ -307,9 +303,11 @@ test_that("under async, a dropped 1 GB table goes back to the device after gpu_g
     host <- data.frame(a = runif(1.25e8))           # 1e9 bytes on the GPU
     gpu_gc()
     s0 <- gpu_memory_state()
+    own0 <- gpu_own_device_used_bytes()
     g <- tbl_gpu(host, lazy = FALSE)
     gpu_sync()
     s1 <- gpu_memory_state()
+    own1 <- gpu_own_device_used_bytes()
     rm(g)
     msgs <- character()
     res <- withCallingHandlers(gpu_gc(verbose = TRUE), message = function(m) {
@@ -317,19 +315,21 @@ test_that("under async, a dropped 1 GB table goes back to the device after gpu_g
       invokeRestart("muffleMessage")
     })
     s2 <- gpu_memory_state()
+    own2 <- gpu_own_device_used_bytes()
     list(resource = s0$resource,
-         free0 = s0$free_bytes, free1 = s1$free_bytes, free2 = s2$free_bytes,
+         up = gpu_own_delta(own0, own1), back = gpu_own_delta(own0, own2),
          pool0 = s0$pool_bytes, pool1 = s1$pool_bytes, pool2 = s2$pool_bytes,
          used1 = s1$pool_used_bytes, used2 = s2$pool_used_bytes,
          freed = res$freed_bytes, released = res$released_bytes, msgs = msgs)
   })
   expect_identical(out$resource, "async", info = f65_info())
-  # The table really came from the device ...
-  expect_gte(out$free0 - out$free1, 0.9e9)
+  # The table really came from the device (this process's own device memory,
+  # which other GPU users don't move) ...
+  expect_gte(out$up, 0.9e9)
   expect_gte(out$used1 - out$used2, 1e9)
-  # ... and gpu_gc() gave it back: device free memory and the async pool's
-  # reservation are where they were before the table existed.
-  expect_gte(out$free2, out$free0 - 64 * 2^20)
+  # ... and gpu_gc() gave it back: the process's device memory and the async
+  # pool's reservation are where they were before the table existed.
+  expect_lte(out$back, 64 * 2^20)
   expect_lte(out$pool2, out$pool0 + 64 * 2^20)
   expect_gte(out$freed, 1e9)
   expect_gte(out$released, 0.9e9)
@@ -377,22 +377,27 @@ test_that("with cuplyr.release_threshold set, async gives memory back at the nex
     gc()
     gpu_sync()
     s0 <- gpu_memory_state()
+    own0 <- gpu_own_device_used_bytes()
     g <- tbl_gpu(host, lazy = FALSE)
     gpu_sync()
     s1 <- gpu_memory_state()
+    own1 <- gpu_own_device_used_bytes()
     rm(g)
     gc(); gc()
     gpu_sync()
     s2 <- gpu_memory_state()
-    list(resource = s0$resource, free0 = s0$free_bytes, free1 = s1$free_bytes,
-         free2 = s2$free_bytes, pool1 = s1$pool_bytes, pool2 = s2$pool_bytes)
+    own2 <- gpu_own_device_used_bytes()
+    list(resource = s0$resource, up = gpu_own_delta(own0, own1),
+         back = gpu_own_delta(own0, own2), pool1 = s1$pool_bytes, pool2 = s2$pool_bytes)
   }, env = f65_env(threshold = format(256 * 2^20, scientific = FALSE)))
   expect_identical(out$resource, "async", info = f65_info())
-  expect_gte(out$free0 - out$free1, 0.6e9)
+  # The table came from the device: this process's own device memory, which
+  # other GPU users don't move.
+  expect_gte(out$up, 0.6e9)
   expect_gte(out$pool1, 1e9)
   # After the sync the reservation is back at or under the threshold.
   expect_lte(out$pool2, 256 * 2^20 + 64 * 2^20)
-  expect_gte(out$free2, out$free0 - 64 * 2^20)
+  expect_lte(out$back, 64 * 2^20)
 
   # The threshold caps the whole reservation, in-use memory included: with a
   # 1.6 GB table held, a dropped 400 MB table is not kept.
@@ -460,6 +465,7 @@ test_that("under pool, gpu_gc() frees at the allocator but the pool keeps its pa
     g <- tbl_gpu(host, lazy = FALSE)
     gpu_sync()
     s1 <- gpu_memory_state()
+    own1 <- gpu_own_device_used_bytes()
     rm(g)
     msgs <- character()
     res <- withCallingHandlers(gpu_gc(verbose = TRUE), message = function(m) {
@@ -467,7 +473,8 @@ test_that("under pool, gpu_gc() frees at the allocator but the pool keeps its pa
       invokeRestart("muffleMessage")
     })
     s2 <- gpu_memory_state()
-    list(resource = s1$resource, free1 = s1$free_bytes, free2 = s2$free_bytes,
+    own2 <- gpu_own_device_used_bytes()
+    list(resource = s1$resource, own_moved = gpu_own_delta(own1, own2),
          pool1 = s1$pool_bytes, pool2 = s2$pool_bytes,
          freed = res$freed_bytes, released = res$released_bytes, msgs = msgs)
   }, env = f65_env(kind = "pool", initial = format(256 * 2^20, scientific = FALSE)))
@@ -476,7 +483,8 @@ test_that("under pool, gpu_gc() frees at the allocator but the pool keeps its pa
   expect_identical(out$pool2, out$pool1)
   expect_gte(out$freed, 1e9)
   expect_identical(out$released, 0)
-  expect_lte(abs(out$free2 - out$free1), 64 * 2^20)
+  # the process's own device memory doesn't move either
+  expect_lte(abs(out$own_moved), 64 * 2^20)
   expect_true(any(grepl("the pool keeps the pages", out$msgs, fixed = TRUE)),
               info = paste(out$msgs, collapse = " | "))
 })

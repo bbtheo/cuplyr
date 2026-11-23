@@ -352,7 +352,8 @@ notify_materialization <- function(verb, reason, expr = NA_character_, data) {
 # Internal: summarise_impl() with `.by=` resolved from its quosure.
 # @keywords internal
 summarise_impl_dots <- function(.data, dots, .groups, by_quo, caller_env) {
-  by_cols <- resolve_by(.data, by_quo, ".by", verb = "summarise")
+  # (its errors report summarise(), the method's frame, as dplyr's do)
+  by_cols <- resolve_by(.data, by_quo, ".by", call = parent.frame(), verb = "summarise")
   by_given <- !quo_is_null_fast(by_quo)
   summarise_impl(.data, dots, .groups, by_quo, by_cols, by_given, caller_env)
 }

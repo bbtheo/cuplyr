@@ -249,9 +249,9 @@ lower_mutate <- function(ast, source_ptr) {
 # on an empty-column tibble of that height with the original dot, so the error
 # (class, "must be size N or 1, not K", the "Inlined constant" variant) is
 # dplyr's own.
-mutate_vector_size_error <- function(n_rows, vec) {
+mutate_vector_size_error <- function(n_rows, vec, verb = "mutate") {
   tb <- tibble::new_tibble(list(), nrow = n_rows)
-  rlang::inject(dplyr::mutate(tb, !!vec$name := !!vec$quo))
+  cpu_verb_call(rlang::inject(dplyr::mutate(tb, !!vec$name := !!vec$quo)), verb)
   stop("Can't recycle `", vec$name, "` (size ", length(vec$value), ") to size ", n_rows, ".",
        call. = FALSE)
 }

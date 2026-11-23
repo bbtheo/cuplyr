@@ -126,7 +126,8 @@ test_that("tbl_gpu() allocates GPU memory", {
 test_that("tbl_gpu() raises device-level GPU memory use", {
   skip_if_no_gpu()
 
-  # Device-level check that the data really occupies device memory. Columns
+  # Device-level check that the data really occupies device memory, read as
+  # this process's own device memory so other GPU users don't move it. Columns
   # are 7.6 MiB each: the CUDA driver maps fresh pages for every allocation
   # above 1 MiB, so memory the process already holds cannot absorb them
   # (unlike the sub-1 MiB columns of the test above; see F56).
@@ -137,12 +138,10 @@ test_that("tbl_gpu() raises device-level GPU memory use", {
   out <- run_with_pool_off(function() {
     df <- as.data.frame(matrix(runif(1e6 * 5), ncol = 5))
     gc(full = TRUE)
-    info0 <- gpu_details()
+    own0 <- gpu_own_device_used_bytes()
     gpu_df <- tbl_gpu(df)
-    info1 <- gpu_details()
-    list(diff = (info1$total_memory - info1$free_memory) -
-           (info0$total_memory - info0$free_memory),
-         dim = dim(gpu_df))
+    own1 <- gpu_own_device_used_bytes()
+    list(diff = gpu_own_delta(own0, own1), dim = dim(gpu_df))
   })
 
   expected_min <- 1000000 * 5 * 8
@@ -250,11 +249,8 @@ test_that("filter() creates new GPU allocation", {
   withr::local_options(cuplyr.exec_mode = "eager")  # about the eager path
 
   gpu_df <- tbl_gpu(create_large_test_data(nrow = 10000, ncol = 5))
-  before <- gpu_memory_snapshot()
 
   filtered <- dplyr::filter(gpu_df, col1 > 0.5)
-
-  after <- gpu_memory_snapshot()
 
   # New memory should be allocated for filtered result
   expect_false(identical(gpu_df$ptr, filtered$ptr))
