@@ -405,7 +405,7 @@ test_that("summarise() keeps working on arguments R doesn't force and on data-fr
   pipelines <- list(
     function(d) f(d, 5),
     function(d) summarise(d, m = mean(x, foo = zz)),
-    function(d) summarise(d, first(tibble::tibble(a = x)), b = mean(a)),
+    function(d) summarise(d, dplyr::first(tibble::tibble(a = x)), b = mean(a)),
     function(d) suppressWarnings(summarise(d, m = mean(g, na.rm = zz)))
   )
   for (p in pipelines) {
