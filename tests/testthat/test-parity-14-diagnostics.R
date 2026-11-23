@@ -348,6 +348,13 @@ test_that("#14: only a computed default is called computed in the text report", 
   expect_length(line, 1L)
   # unset means "no automatic release", not a computed value
   expect_no_match(line, "computed", fixed = TRUE)
+  # the initial pool size is computed at load (a quarter of free memory)
+  withr::local_options(cuplyr.pool_initial = NULL)
+  withr::local_envvar(CUPLYR_POOL_INITIAL = NA)
+  out <- utils::capture.output(diagnostics(redact = FALSE))
+  line <- grep("cuplyr.pool_initial", out, fixed = TRUE, value = TRUE)
+  expect_length(line, 1L)
+  expect_match(line, "computed", fixed = TRUE)
 })
 
 test_that("#14: with warnings as errors, one invalid option doesn't empty the options", {
@@ -357,6 +364,29 @@ test_that("#14: with warnings as errors, one invalid option doesn't empty the op
   opts <- info$options
   expect_setequal(opts$option, paste0("cuplyr.", names(cuplyr_option_registry)))
   expect_identical(opts$default[opts$option == "cuplyr.fallback"], "silent")
+  # and diagnostics() must not use up the warning: with warn = 2 every later
+  # read still raises it until the value is fixed (?cuplyr-options)
+  expect_error(cuplyr_options(internal = TRUE), "bogus-issue14-warn2", fixed = TRUE)
+  expect_error(cuplyr_options(internal = TRUE), "bogus-issue14-warn2", fixed = TRUE)
+})
+
+test_that("#14: an empty HOME doesn't stop a redacted report", {
+  skip_if_no_gpu()
+  withr::local_envvar(HOME = "")
+  expect_no_error(d14_quiet(diagnostics(redact = TRUE)))
+  expect_no_error(d14_json(redact = TRUE))
+})
+
+test_that("#14: a path with a non-UTF-8 byte still gives valid JSON", {
+  skip_if_no_gpu()
+  skip_if_not_installed("jsonlite")
+  skip_if(!l10n_info()[["UTF-8"]])
+  withr::local_envvar(CONDA_PREFIX = "/opt/caf\xff-issue14")
+  for (redact in c(FALSE, TRUE)) {
+    expect_no_error(js <- d14_json(redact = redact))
+    expect_true(jsonlite::validate(js$text), info = redact)
+    expect_no_error(d14_quiet(diagnostics(redact = redact)))
+  }
 })
 
 test_that("#14: no GPU memory information means an unknown resource", {
