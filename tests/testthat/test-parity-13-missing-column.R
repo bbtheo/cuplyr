@@ -102,7 +102,7 @@ test_that("filter() reports a missing column as dplyr does", {
   p13_same_error(df, function(d) filter(d, x > 1, xx > 1))
   p13_same_error(df, function(d) filter(d, xx))
   p13_same_error(df, function(d) filter(d, .data$xx > 1))
-  p13_same_error(df, function(d) filter(d, if_else(xx > 1, TRUE, FALSE)))
+  p13_same_error(df, function(d) filter(d, dplyr::if_else(xx > 1, TRUE, FALSE)))
   p13_same_error(df, function(d) filter(d, is.na(xx)))
   p13_same_error(df, function(d) filter(d, if_any(c(x, xx), ~ .x > 1)))
   p13_same_error(df, function(d) filter(rowwise(d), xx > 1))
