@@ -700,6 +700,10 @@ cf_make_shim_env <- function(state, upload = TRUE) {
       (!!cf_compute_lazy)(!!rlang::quo_get_expr(quo))
     ), env = rlang::quo_get_env(quo))
   }
+  # (compute() returns a computed copy that is dropped: the test's object stays
+  # lazy, so a later collect() of it runs the plan again and raises its warning
+  # again, outside the expectation. testthat records that as a warning, not a
+  # failure.)
   cf_compute_lazy <- function(value) {
     if (inherits(value, "tbl_gpu") && identical(.subset2(value, "exec_mode"), "lazy")) {
       dplyr::compute(value)

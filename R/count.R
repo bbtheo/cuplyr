@@ -238,6 +238,10 @@ regroup_for_keys <- function(.data, dot_names) {
 #
 # @param name Character or `NULL` (the user's `name=` argument)
 # @param vars Character vector to avoid colliding with
+# @param arg,call The argument name and the call (or environment) a bad `name`
+#   is reported against. The default is the calling verb's frame (`tally()`);
+#   count() and add_count() pass the call dplyr reports, `tally()` and
+#   `add_tally()`, because dplyr checks `name` inside those.
 # @return Character, the resolved column name
 # @keywords internal
 resolve_agg_name <- function(name, vars, arg = rlang::caller_arg(name),
@@ -385,7 +389,9 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
     working
   }
 
-  agg_name <- resolve_agg_name(name, grouped$groups)
+  # dplyr's count.data.frame() hands over to tally(), whose check_n_name()
+  # raises the error: "Error in `tally()`"
+  agg_name <- resolve_agg_name(name, grouped$groups, call = quote(tally()))
   agg_call <- build_count_agg_call(wt_quo, current_schema(grouped))
   # (F88: a fallback of the summarise() below is count()'s, for `wt`)
   if (!rlang::quo_is_null(wt_quo)) {
@@ -578,7 +584,8 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
   }
 
   all_cols <- current_schema(grouped)$names
-  agg_name <- resolve_agg_name(name, all_cols)
+  # (dplyr's add_count() hands over to add_tally(), as count() does to tally())
+  agg_name <- resolve_agg_name(name, all_cols, call = quote(add_tally()))
   agg_call <- build_count_agg_call(wt_quo, current_schema(grouped), for_mutate = TRUE)
   # (F88: a fallback of the mutate() below is add_count()'s, for `wt`)
   if (!rlang::quo_is_null(wt_quo)) {

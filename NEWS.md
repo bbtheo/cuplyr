@@ -5,10 +5,13 @@
   `character()`, ...) is an error with dplyr's message, raised at the verb
   call. `name = NA_character_` no longer creates a column called `NA` (#20).
 
-* `bind_cols()` with a list or a vector first, such as
-  `bind_cols(list(a = 1:3), gpu)` or `bind_cols(x = 1:3, gpu)`, collects to a
-  data frame of the type dplyr gives: a plain `data.frame` when every table
-  input is one, a tibble otherwise (#20).
+* `bind_cols()` collects to the class dplyr gives. With a list or a vector
+  first, such as `bind_cols(list(a = 1:3), gpu)` or `bind_cols(x = 1:3, gpu)`,
+  the result is a plain `data.frame` when every table input is one, a
+  `rowwise_df` when any of them is rowwise (computed on the CPU, with the usual
+  fallback notice), and a tibble otherwise. With a grouped data frame first,
+  such as `bind_cols(group_by(df, g), gpu)`, the result keeps its grouping
+  (#20).
 
 * `mutate()`, `filter()`, `cross_join()`, the joins with `by = character()`,
   `intersect()`, `setdiff()`, `symdiff()`, `setequal()`, `reframe()` and the
