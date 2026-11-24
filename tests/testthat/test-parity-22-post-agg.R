@@ -233,6 +233,54 @@ test_that("#22: a later dot can read an earlier result outside a reducer", {
   f124_check(p22_full, function(d) summarise(group_by(d, g), y = mean(y), z = y + 1))
 })
 
+test_that("#22: a name that a later dot assigns is still the caller's variable", {
+  skip_if_no_gpu()
+  k <- 10
+  n <- 100
+  df <- tibble::tibble(g = c(1L, 1L, 2L), x = c(1, 2, 3), y = c(4, 5, 6))
+  # when `m` is evaluated, `k` and `n` are not results yet: dplyr reads the variables
+  f124_check(df, function(d) summarise(group_by(d, g), m = mean(x) + k, k = sum(y)), native = FALSE)
+  f124_check(df, function(d) summarise(group_by(d, g), share = sum(x) / n, n = n()), native = FALSE)
+  f124_check(df, function(d) summarise(d, share = sum(x) / n, n = n(), r = n / 2), native = FALSE)
+})
+
+test_that("#22: a reducer passed in with {{ }} or !! keeps its own environment", {
+  skip_if_no_gpu()
+  k <- 2
+  df <- tibble::tibble(x = c(1, 2, 3), g = c(1L, 2L, 1L))
+  f <- function(d, stat) {
+    k <- 100
+    summarise(d, m = {{ stat }} + 1)
+  }
+  h <- function(d, stat) summarise(group_by(d, g), m = {{ stat }} * 2, s = sum(x) + {{ stat }})
+  w_caller <- function(d) {
+    w <- 3
+    h(d, mean(x * w))
+  }
+  f124_check(df, function(d) f(d, mean(x * k)), native = FALSE)
+  f124_check(df, function(d) w_caller(d), native = FALSE)
+  q <- rlang::quo(mean(x * k))
+  f124_check(df, function(d) {
+    k <- 50
+    summarise(d, m = !!q / 2, n = n())
+  }, native = FALSE)
+})
+
+test_that("#22: a timestamp result read by a later dot keeps its time zone", {
+  skip_if_no_gpu()
+  df <- tibble::tibble(g = c(1L, 1L, 2L),
+                       t = as.POSIXct(c("2024-01-01 10:00:00", "2024-01-02 11:30:00",
+                                        "2024-03-01 00:00:00"), tz = "America/New_York"),
+                       y = c(1, 2, 3))
+  f124_check(df, function(d) summarise(group_by(d, g), mx = max(t), m2 = mx, m = mean(y) + 1))
+})
+
+test_that("#22: a factor reducer next to a composite dot gives dplyr's result", {
+  skip_if_no_gpu()
+  df <- tibble::tibble(g = c(1L, 1L, 2L), f = factor(c("b", "a", "c")), y = c(1, 2, 3))
+  f124_check(df, function(d) summarise(group_by(d, g), f1 = dplyr::first(f), m = mean(y) + 1), native = FALSE)
+})
+
 test_that("#22: an earlier result read inside a reducer, or redefined, keeps dplyr's meaning", {
   skip_if_no_gpu()
   # dplyr reduces the one-value earlier result, not the input column
