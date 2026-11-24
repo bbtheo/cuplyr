@@ -176,6 +176,9 @@ struct eval_ctx {
     // F42: set when a checked integer +, -, * left R's integer range somewhere
     // (the value became NA). The entry points hand it to R, which warns.
     bool int_overflow = false;
+    // as.POSIXct() of a Date beyond the int64-microsecond range: those rows
+    // became null. The entry points hand it to R, which warns.
+    bool ts_out_of_range = false;
     // F49: flags the rowwise horizontal aggregates (rw_agg_*) raise, one bit
     // each: 1 an integer sum left R's integer range, 2 an integer min()/max()
     // (na.rm = TRUE) had an all-NA row (the result would be +-Inf, a double),
@@ -3159,6 +3162,31 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
                                                 : cudf::type_id::TIMESTAMP_MICROSECONDS};
         if (x_col.type().id() == target.id()) {
             return std::make_unique<cudf::column>(x_col);
+        }
+        // A Date holds int32 days; a POSIXct int64 microseconds only reaches
+        // +-106751991 days (R's double never overflows). A Date beyond that is
+        // NA, flagged for R's warning, never a wrapped value. One reduction on
+        // in-range data, no allocation.
+        if (op == "as_posixct" && x_col.type().id() == cudf::type_id::TIMESTAMP_DAYS &&
+            x_col.size() > x_col.null_count()) {
+            constexpr int32_t kMaxDays = 106751991;
+            auto days = cudf::bit_cast(x_col, cudf::data_type{cudf::type_id::INT32});
+            auto mm = cudf::minmax(days);
+            auto* lo = static_cast<cudf::numeric_scalar<int32_t>*>(mm.first.get());
+            auto* hi = static_cast<cudf::numeric_scalar<int32_t>*>(mm.second.get());
+            if (lo->is_valid() && hi->is_valid() && (lo->value() < -kMaxDays || hi->value() > kMaxDays)) {
+                ctx.ts_out_of_range = true;
+                cudf::numeric_scalar<int32_t> neg(-kMaxDays), pos(kMaxDays);
+                auto ge = cudf::binary_operation(days, neg, cudf::binary_operator::GREATER_EQUAL,
+                                                 cudf::data_type{cudf::type_id::BOOL8});
+                auto le = cudf::binary_operation(days, pos, cudf::binary_operator::LESS_EQUAL,
+                                                 cudf::data_type{cudf::type_id::BOOL8});
+                auto ok = cudf::binary_operation(ge->view(), le->view(), cudf::binary_operator::LOGICAL_AND,
+                                                 cudf::data_type{cudf::type_id::BOOL8});
+                cudf::timestamp_scalar<cudf::timestamp_D> none(cudf::timestamp_D{}, false);
+                auto kept = cudf::copy_if_else(x_col, none, ok->view());
+                return cudf::cast(kept->view(), target);
+            }
         }
         return cudf::cast(x_col, target);
     }
