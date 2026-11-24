@@ -56,6 +56,9 @@ bind_cols_flat <- function(dots, args, .name_repair, call) {
     if (bind_first_is_rowwise(dots)) {
       return(bind_rowwise_first("bind_cols", dots, .name_repair = .name_repair))
     }
+    if (bind_later_is_rowwise(dots)) {
+      return(bind_rowwise_later("bind_cols", dots, .name_repair = .name_repair))
+    }
     return(bind_cols_gpu(dots, .name_repair = .name_repair, call = call))
   }
   dplyr::bind_cols(!!!args, .name_repair = .name_repair)
@@ -362,7 +365,7 @@ bind_cols_gpu_run <- function(dots, .name_repair, call) {
   if (length(keep) == 0L) {
     # Zero-column inputs only: the result is just the common size.
     out <- tbl_gpu(tibble::tibble(.rows = n), lazy = FALSE)
-    return(if (bind_has_meta(first)) carry_frame_meta(out, first) else out)
+    return(bind_finish_meta(out, first, dots))
   }
 
   # Column names and their repair come first: an upload's warnings (fractional
@@ -382,7 +385,8 @@ bind_cols_gpu_run <- function(dots, .name_repair, call) {
   # dplyr regroups the output with tibble, which refuses duplicated names.
   # Checked before the uploads, whose warnings would describe a table that
   # never exists.
-  if (is_tbl_gpu(first) && length(first$groups) > 0L && anyDuplicated(repaired_names) > 0L) {
+  first_grouping <- bind_first_grouping(first)
+  if (length(first_grouping$groups) > 0L && anyDuplicated(repaired_names) > 0L) {
     dups <- unique(repaired_names[duplicated(repaired_names)])
     rlang::abort(
       c(paste0("Column names ", paste0("`", dups, "`", collapse = ", "),
@@ -436,21 +440,58 @@ bind_cols_gpu_run <- function(dots, .name_repair, call) {
   # Call C++ function
   new_ptr <- wrap_gpu_call("bind_cols", gpu_bind_cols_impl(ptrs))
 
-  # Preserve groups (and their `.drop`) from the first input. dplyr regroups
-  # the output by name, so a group column renamed by repair (`bind_cols(g, g)`)
-  # no longer groups it.
-  groups <- if (is_tbl_gpu(first)) intersect(first$groups, repaired_names) else character()
+  # Preserve groups (and their `.drop`) from the first input, a tbl_gpu or a
+  # grouped data frame. dplyr regroups the output by name, so a group column
+  # renamed by repair (`bind_cols(g, g)`) no longer groups it.
+  groups <- intersect(first_grouping$groups, repaired_names)
 
   out <- new_tbl_gpu(
     ptr = new_ptr,
     schema = list(names = repaired_names, types = all_types,
                   factor_levels = factor_levels, tz = tz),
     groups = groups,
-    group_drop = if (length(groups) > 0L) first$group_drop %||% TRUE else TRUE,
+    group_drop = if (length(groups) > 0L) first_grouping$drop else TRUE,
     exec_mode = "eager"
   )
-  # the first input's attributes and class (F31); a bare vector has none
-  if (bind_has_meta(first)) carry_frame_meta(out, first) else out
+  bind_finish_meta(out, first, dots)
+}
+
+# The grouping a bind_cols() result takes from its first input: `groups` and
+# `.drop` of a tbl_gpu or of a grouped data frame (as bind_rows_gpu_run()
+# reads them); none for anything else.
+bind_first_grouping <- function(first) {
+  if (is_tbl_gpu(first)) {
+    list(groups = first$groups, drop = first$group_drop %||% TRUE)
+  } else if (dplyr::is_grouped_df(first)) {
+    list(groups = dplyr::group_vars(first), drop = dplyr::group_by_drop_default(first))
+  } else {
+    list(groups = character(), drop = TRUE)
+  }
+}
+
+# The result's frame class: the first input's attributes and class when it is
+# a table (F31). A list or a bare vector first has none, so dplyr gives
+# vec_cbind()'s type of the data frame inputs: a bare data.frame when every
+# one is a bare data.frame (a plain one, or a tbl_gpu that collects to one), a
+# tibble otherwise.
+bind_finish_meta <- function(out, first, dots) {
+  if (bind_has_meta(first)) {
+    return(carry_frame_meta(out, first))
+  }
+  all_bare <- all(vapply(dots, function(x) {
+    if (is_tbl_gpu(x)) {
+      isTRUE(.subset2(x, "bare_df")) && length(.subset2(x, "groups")) == 0L &&
+        !is_rowwise_gpu(x)
+    } else if (is.data.frame(x)) {
+      identical(class(x), "data.frame")
+    } else {
+      TRUE
+    }
+  }, logical(1)))
+  if (all_bare && length(.subset2(out, "groups")) == 0L && !is_rowwise_gpu(out)) {
+    out <- set_tbl_gpu_field(out, "bare_df", TRUE)
+  }
+  out
 }
 
 # A rowwise first input (a host rowwise_df, or a rowwise tbl_gpu, F49) decides
@@ -461,6 +502,15 @@ bind_first_is_rowwise <- function(dots) {
   length(dots) > 0L && (inherits(dots[[1L]], "rowwise_df") || is_rowwise_gpu(dots[[1L]]))
 }
 
+# bind_cols() with a vector first (a list is spliced into vectors before this)
+# takes vec_cbind()'s type of the data frame inputs, which is a rowwise_df as
+# soon as one of them is rowwise. A table first decides the class itself
+# (dplyr_reconstruct(out, first)), so a later rowwise input changes nothing.
+bind_later_is_rowwise <- function(dots) {
+  length(dots) > 1L && !bind_has_meta(dots[[1L]]) &&
+    any(vapply(dots[-1L], function(x) inherits(x, "rowwise_df") || is_rowwise_gpu(x), logical(1)))
+}
+
 # `dots` with each tbl_gpu's pending plan computed (the collect that follows
 # would run it anyway), so a fallback notice can size what it collects.
 # @keywords internal
@@ -469,22 +519,43 @@ bind_materialize_inputs <- function(dots) {
 }
 
 bind_rowwise_first <- function(verb, dots, ...) {
+  bind_on_cpu(verb, dots, ...,
+    reason = "a rowwise data frame as the first input makes dplyr's result a rowwise_df.",
+    # a rowwise tbl_gpu first goes back up, a host rowwise_df stays on the host
+    reupload = is_rowwise_gpu(dots[[1L]]), rowwise_from = 1L
+  )
+}
+
+# The rowwise_df of bind_cols(<vector>, <rowwise>) goes back up as a rowwise
+# tbl_gpu (a tbl_gpu is among the inputs).
+bind_rowwise_later <- function(verb, dots, ...) {
+  bind_on_cpu(verb, dots, ...,
+    reason = "a rowwise data frame next to a vector as the first input makes dplyr's result a rowwise_df.",
+    reupload = TRUE, rowwise_from = seq_along(dots)
+  )
+}
+
+# Bind `dots` with dplyr on the CPU. `reupload`: put a data frame result back
+# on the GPU, lazy when a tbl_gpu input was (as the table comes back from any
+# fallback). `rowwise_from`: the positions whose rowwise tbl_gpu collects as a
+# rowwise_df; any other tbl_gpu hands over its columns only.
+bind_on_cpu <- function(verb, dots, ..., reason, reupload, rowwise_from) {
   dots <- bind_materialize_inputs(dots)
   size <- do.call(fallback_size, unname(dots))
-  cuplyr_fallback_notify(
-    verb, reason = "a rowwise data frame as the first input makes dplyr's result a rowwise_df.",
-    rows = size$rows, cols = size$cols, bytes = size$bytes
-  )
-  first_gpu <- is_rowwise_gpu(dots[[1L]])
-  was_lazy <- first_gpu && identical(dots[[1L]]$exec_mode, "lazy")
-  dots[-1L] <- lapply(dots[-1L], collect_other_side)
-  dots[[1L]] <- if (first_gpu) collect(dots[[1L]]) else dots[[1L]]
+  cuplyr_fallback_notify(verb, reason = reason,
+                         rows = size$rows, cols = size$cols, bytes = size$bytes)
+  was_lazy <- reupload && any(vapply(dots, function(d) is_tbl_gpu(d) && identical(d$exec_mode, "lazy"),
+                                     logical(1)))
+  dots[] <- lapply(seq_along(dots), function(i) {
+    d <- dots[[i]]
+    if (i %in% rowwise_from && is_rowwise_gpu(d)) collect(d) else collect_other_side(d)
+  })
   # Called by name so dplyr's errors read `bind_rows()` / `bind_cols()`.
   out <- switch(verb,
     bind_rows = rlang::inject(dplyr::bind_rows(!!!dots, ...)),
     bind_cols = rlang::inject(dplyr::bind_cols(!!!dots, ...))
   )
-  if (first_gpu && is.data.frame(out) && !has_list_column(out)) {
+  if (reupload && is.data.frame(out) && !has_list_column(out)) {
     out <- tbl_gpu(out, lazy = was_lazy)
   }
   out
