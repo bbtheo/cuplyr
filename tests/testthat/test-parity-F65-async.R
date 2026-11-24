@@ -503,16 +503,13 @@ test_that("state readings, allocation tracking and gpu_gc() are meaningful under
     s1 <- gpu_memory_state()
     tr <- gpu_alloc_tracking(tbl_gpu(data.frame(y = runif(1e6)), lazy = FALSE))
     tracked <- c(tr$allocated_bytes, tr$held_bytes, tr$peak_bytes)
-    # (an automatic R collection may free both tables between rm() and
-    # gpu_gc()'s own first reading, and where it lands depends on the heap: so
-    # the drop is measured from a reading taken while both are still held)
-    s_held <- gpu_memory_state()
+    # (collect while both tables are still referenced: an automatic collection
+    # between rm() and gpu_gc() would free them before gpu_gc()'s first reading)
+    invisible(gc(full = TRUE))
     rm(g, tr)
     res <- gpu_gc()
-    s_after <- gpu_memory_state()
     list(resource = s0$resource, s0 = s0, s1 = s1, a0 = a0,
-         gc = res[c("freed_bytes", "released_bytes")], tracked = tracked,
-         dropped = s_held$pool_used_bytes - s_after$pool_used_bytes)
+         gc = res[c("freed_bytes", "released_bytes")], tracked = tracked)
   })
   expect_identical(out$resource, "async", info = f65_info())
   s0 <- out$s0
@@ -533,13 +530,8 @@ test_that("state readings, allocation tracking and gpu_gc() are meaningful under
   expect_gte(out$tracked[[1]], 8e6)
   expect_gte(out$tracked[[2]], 8e6)
   expect_gte(out$tracked[[3]], 8e6)
-  # gpu_gc() frees what was held (both tables, 16e6 bytes) and reports both
-  # levels; what it reports as freed is only what was still held at its own
-  # first reading.
-  expect_gte(out$dropped, 16e6)
-  expect_true(is.numeric(out$gc$freed_bytes) && !is.na(out$gc$freed_bytes))
-  expect_gte(out$gc$freed_bytes, 0)
-  expect_lte(out$gc$freed_bytes, out$dropped + 1e6)
+  # gpu_gc() reports both levels.
+  expect_gte(out$gc$freed_bytes, 16e6)
   expect_true(is.numeric(out$gc$released_bytes) && !is.na(out$gc$released_bytes))
   expect_gte(out$gc$released_bytes, 0)
 })
