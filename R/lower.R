@@ -628,6 +628,7 @@ lower_join <- function(ast, source_ptr) {
     cond_right_schema <- plan$right_schema
   }
   finish <- function(ptr) {
+    if (!is.null(ast$by$key_casts)) check_unspecified_key_result(ast, ptr)
     if (is.null(temps)) ptr else drop_join_key_temps(ptr, temps)
   }
 
@@ -786,6 +787,72 @@ cast_join_key_column <- function(ptr, idx, from_type, to_type, levels) {
   }
 }
 
+#' Cast an all-NA logical join key to the other side's type (#70)
+#'
+#' dplyr gives a logical key that is all `NA` (vctrs "unspecified") the type of
+#' the key it is joined to. Whether the column is one is a matter of its
+#' values, so it is checked here, when the join runs: all null with rows, or a
+#' `vctrs::unspecified()` column (`cast$marker`), becomes a null column of the
+#' other side's physical type; anything else has no common type and raises the
+#' incompatible-type error. The column is replaced in place.
+#' @keywords internal
+cast_unspecified_join_key <- function(ptr, idx, cast, by) {
+  n_rows <- gpu_dim(ptr)[1]
+  if (!isTRUE(cast$marker) &&
+      (n_rows == 0L || gpu_null_counts(ptr, idx)[[1]] != n_rows)) {
+    abort_join_incompatible_type(by$left[cast$idx], by$right[cast$idx],
+                                 cast$left_type, cast$right_type,
+                                 cast$left_levels, cast$right_levels)
+  }
+  n_col <- gpu_dim(ptr)[2]
+  bound <- gpu_bind_cols_impl(list(
+    ptr, gpu_make_null_column(n_rows, gpu_physical_type(cast$type))
+  ))
+  order <- seq_len(n_col) - 1L
+  order[idx + 1L] <- n_col
+  gpu_select(bound, order)
+}
+
+# One side of a key-cast pair, cast to the pair's common type.
+# @keywords internal
+cast_join_key_side <- function(ptr, idx, side, cast, by) {
+  if (isTRUE(cast$unspecified)) {
+    return(cast_unspecified_join_key(ptr, idx, cast, by))
+  }
+  cast_join_key_column(ptr, idx, cast[[paste0(side, "_type")]], cast$type,
+                       cast[[paste0(side, "_levels")]])
+}
+
+#' After a mutating join: dplyr's error for a merged all-NA x key and no rows
+#'
+#' `join_mutate()` casts the merged key of x's ORIGINAL (sliced) column to the
+#' common type; an empty slice of a plain logical column is no longer
+#' unspecified, so dplyr raises `vctrs_error_cast` when the join returns no
+#' rows. A `vctrs::unspecified()` key, `keep = TRUE`, a non-equi pair and the
+#' unspecified side being y do not.
+#' @keywords internal
+check_unspecified_key_result <- function(ast, ptr) {
+  if (!(ast$join_type %in% c("left", "inner", "full", "right")) || isTRUE(ast$keep)) {
+    return(invisible())
+  }
+  for (cast in ast$by$key_casts) {
+    if (!isTRUE(cast$unspecified) || !isTRUE(cast$cast_left) || isTRUE(cast$marker) ||
+        ast$by$op[cast$idx] != "==") {
+      next
+    }
+    if (gpu_dim(ptr)[1] == 0L) {
+      key <- ast$by$left[cast$idx]
+      rlang::abort(
+        sprintf("Can't convert `out[merge]$%s` <logical> to match type of `%s` <%s>.",
+                key, key, join_key_type_label(cast$type, cast$right_levels)),
+        class = c("vctrs_error_cast", "vctrs_error_incompatible_type",
+                  "vctrs_error_incompatible", "vctrs_error")
+      )
+    }
+  }
+  invisible()
+}
+
 #' Apply a join's key-cast plan (`by$key_casts`, see `resolve_join_key_types()`)
 #'
 #' Merged equi keys (`keep != TRUE`, mutating joins): cast IN PLACE on both
@@ -843,12 +910,10 @@ apply_join_key_casts <- function(ast, left_ptr, right_ptr, left_schema, right_sc
     }
     if (in_place && ast$by$op[i] == "==") {
       if (cast$cast_left) {
-        left_ptr <- cast_join_key_column(left_ptr, left_pair_idx[i], cast$left_type,
-                                         cast$type, cast$left_levels)
+        left_ptr <- cast_join_key_side(left_ptr, left_pair_idx[i], "left", cast, ast$by)
       }
       if (cast$cast_right) {
-        right_ptr <- cast_join_key_column(right_ptr, right_pair_idx[i], cast$right_type,
-                                          cast$type, cast$right_levels)
+        right_ptr <- cast_join_key_side(right_ptr, right_pair_idx[i], "right", cast, ast$by)
       }
       next
     }
@@ -882,8 +947,7 @@ apply_join_key_casts <- function(ast, left_ptr, right_ptr, left_schema, right_sc
     ptr <- gpu_select(ptr, c(seq_len(n) - 1L, srcs))
     for (k in seq_along(temps)) {
       cast <- temps[[k]]$cast
-      ptr <- cast_join_key_column(ptr, n + k - 1L, cast[[paste0(side, "_type")]],
-                                  cast$type, cast[[paste0(side, "_levels")]])
+      ptr <- cast_join_key_side(ptr, n + k - 1L, side, cast, ast$by)
     }
     schema$names <- c(schema$names, temp_names)
     schema$types <- c(schema$types, vapply(temps, function(t) t$cast$type, character(1)))

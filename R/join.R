@@ -105,6 +105,13 @@ join_by_fallback_reason <- function(by, x, y) {
 # Date against a POSIXct), or NULL (F88).
 # @keywords internal
 join_key_fallback_reason <- function(x_schema, y_schema, join_spec) {
+  # An unspecified (all-NA logical) key in a non-equi or rolling condition: dplyr decides.
+  for (cast in join_spec$key_casts) {
+    if (isTRUE(cast$unspecified) &&
+        (join_spec$op[cast$idx] != "==" || join_spec$filter[cast$idx] != "none")) {
+      return("an all-NA logical key in a non-equi join_by() condition takes the type of the other side's key in dplyr.")
+    }
+  }
   if (join_factor_key_levels_conflict(x_schema, y_schema, join_spec)) {
     return("factor join keys with different levels are combined by dplyr.")
   }
@@ -524,6 +531,10 @@ abort_join_incompatible_type <- function(x_name, y_name, x_type, y_type,
   )
 }
 
+# Types an all-NA logical ("unspecified") key can take from the other side.
+join_unspecified_partner_types <- c("STRING", "DICTIONARY32", "TIMESTAMP_DAYS",
+                                    "TIMESTAMP_MICROSECONDS")
+
 # Numeric types the join-condition AST evaluator widens by itself
 # (src/expr_eval.hpp, `ast_cast_op_for_type()`).
 join_ast_numeric_types <- c("INT32", "INT64", "FLOAT64")
@@ -546,13 +557,24 @@ join_ast_numeric_types <- c("INT32", "INT64", "FLOAT64")
 #' pair is recorded (it is searched, not evaluated) and so is a non-equi
 #' STRING pair (`string_codes = TRUE`, see below).
 #'
+#' A BOOL8 key against a STRING, factor, Date or POSIXct key is not an error
+#' here: dplyr (vctrs) gives an all-`NA` logical the other side's type, but
+#' only the data can say whether the column is one. Such a pair is recorded
+#' with `unspecified = TRUE`; `apply_join_key_casts()` checks the values at
+#' execution and raises the incompatible-type error then. `marker` is `TRUE`
+#' for a `vctrs::unspecified()` column (named in the tbl's `$unspecified`):
+#' known all-`NA`, no data check.
+#'
 #' `lower_join()` applies the plan; `build_join_output_info()` reads it for
 #' the merged key's output type.
 #' @param x_schema,y_schema Schemas of the two inputs
+#' @param x_unspecified,y_unspecified Names of each side's `vctrs::unspecified()`
+#'   columns (the tbls' `$unspecified`)
 #' @param join_spec A join spec from [parse_join_by()]
 #' @return `join_spec`, with `key_casts` set when any equi pair needs a cast
 #' @keywords internal
-resolve_join_key_types <- function(x_schema, y_schema, join_spec) {
+resolve_join_key_types <- function(x_schema, y_schema, join_spec,
+                                   x_unspecified = NULL, y_unspecified = NULL) {
   lt <- unname(x_schema$types[match(join_spec$left, x_schema$names)])
   rt <- unname(y_schema$types[match(join_spec$right, y_schema$names)])
   mismatch <- which(lt != rt)
@@ -583,6 +605,27 @@ resolve_join_key_types <- function(x_schema, y_schema, join_spec) {
     lvls_y <- if (fy) y_schema$factor_levels[[join_spec$right[i]]]
     res <- resolve_common_col_type(lt[i], rt[i], fx, fy, lvls_x, lvls_y)
     if (!isTRUE(res$ok)) {
+      # A logical key against a string / Date / POSIXct / factor key: dplyr
+      # joins it when the logical side is all NA ("unspecified" to vctrs, which
+      # is a matter of the VALUES). That is decided at execution
+      # (`apply_join_key_casts()`); a `vctrs::unspecified()` column is known to
+      # be one.
+      other <- if (identical(lt[i], "BOOL8")) rt[i] else if (identical(rt[i], "BOOL8")) lt[i]
+      if (!is.null(other) && other %in% join_unspecified_partner_types &&
+          !(identical(other, "DICTIONARY32") &&
+            is.null(if (fx) lvls_x else lvls_y))) {
+        left_unspec <- identical(lt[i], "BOOL8")
+        casts[[length(casts) + 1L]] <- list(
+          idx = i, type = other,
+          left_type = lt[i], right_type = rt[i],
+          cast_left = left_unspec, cast_right = !left_unspec,
+          left_levels = lvls_x, right_levels = lvls_y,
+          unspecified = TRUE,
+          marker = if (left_unspec) join_spec$left[i] %in% x_unspecified
+                   else join_spec$right[i] %in% y_unspecified
+        )
+        next
+      }
       abort_join_incompatible_type(join_spec$left[i], join_spec$right[i],
                                    lt[i], rt[i], lvls_x, lvls_y)
     }
@@ -738,6 +781,10 @@ build_join_output_info <- function(left_schema, right_schema, join_spec,
       cast_keys <- c(cast_keys, left_out_names[pos])
       if (!identical(cast$type, "DICTIONARY32")) {
         factor_levels[[left_out_names[pos]]] <- NULL
+      } else if (isTRUE(cast$unspecified)) {
+        # the factor side's levels, whichever side that is
+        if (is.null(factor_levels)) factor_levels <- list()
+        factor_levels[[left_out_names[pos]]] <- cast$left_levels %||% cast$right_levels
       }
     }
     if (length(factor_levels) == 0) factor_levels <- NULL
@@ -1549,7 +1596,8 @@ mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
   }
   validate_join_cols(join_spec$left, x, "Left")
   validate_join_cols(join_spec$right, y, "Right")
-  join_spec <- resolve_join_key_types(x$schema, y$schema, join_spec)
+  join_spec <- resolve_join_key_types(x$schema, y$schema, join_spec,
+                                        x$unspecified, y$unspecified)
 
   key_reason <- join_key_fallback_reason(x$schema, y$schema, join_spec)
   if (!is.null(key_reason)) {
@@ -1597,7 +1645,8 @@ filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
   join_spec <- if (cross_by) join_cross_spec() else parse_join_by(by, x, y)
   validate_join_cols(join_spec$left, x, "Left")
   validate_join_cols(join_spec$right, y, "Right")
-  join_spec <- resolve_join_key_types(x$schema, y$schema, join_spec)
+  join_spec <- resolve_join_key_types(x$schema, y$schema, join_spec,
+                                        x$unspecified, y$unspecified)
 
   key_reason <- join_key_fallback_reason(x$schema, y$schema, join_spec)
   if (!is.null(key_reason)) {

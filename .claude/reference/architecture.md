@@ -1048,6 +1048,18 @@ filter node with N predicates is already exactly one fused kernel.
   evaluator never sees mismatched operand types. `cast_join_key_column()`
   errors clearly on a factor key whose levels are unknown (NULL).
   Factor -> STRING uses `gpu_decode_factor()`, never `gpu_cast_column()`.
+  An all-NA logical key against a STRING/factor/Date/POSIXct key (#70) is not a
+  verb-time error: `resolve_join_key_types()` records an `unspecified = TRUE`
+  cast (with `marker` for a `vctrs::unspecified()` column, from the tbls'
+  `$unspecified`), and `cast_unspecified_join_key()` checks the values when the
+  join runs (all null with rows, else the same incompatible-type error; eager
+  raises at the verb, lazy at collect), replacing the column with a null column
+  of the other side's physical type. `check_unspecified_key_result()` reproduces
+  dplyr's `vctrs_error_cast` for a merged x-side key without marker when the
+  join returns no rows. Non-equi/rolling pairs with such a key go to the CPU
+  (`join_key_fallback_reason()`); the optimizer pushes no filter below such a
+  join. The output key takes the cast type, the factor side's levels (either
+  side) and the POSIXct side's zone.
 - Rolling joins (F24): `join_by(<== keys>, closest(x$t <op> y$s))` with exactly
   one `closest()` (`>=`, `>`, `<=`, `<`) is native when the rolling pair is one
   type in `join_rolling_types` (INT32, FLOAT64, Date, POSIXct, STRING) or an
@@ -1125,6 +1137,14 @@ filter node with N predicates is already exactly one fused kernel.
 - `nest_join()` is still a CPU fallback; its default `name` is
   `as_label(enexpr(y))` and it warns for `by = character()` from the verb.
 - Ensure desired column names exist before calling `gpu_select`
+
+- Matrix / list / data frame columns (#70): `unsupported_column_labels()`
+  (R/tbl-gpu.R) is the one rule for "no GPU form" -- a class with no GPU type,
+  a matrix with ncol != 1 (or > 2 dims), a list or a data frame column. A
+  one-column matrix uploads as a plain column. `tbl_gpu()` raises
+  `cuplyr_error_unsupported_class`; `gpu_fallback()` raises the
+  `..._result_class` subclass for a CPU result, except a result with a list /
+  data frame column, which stays a plain tibble (`has_list_column()` first).
 
 ### Optimizer Barriers
 - Barrier reattachment uses a helper to avoid R copy-on-modify pitfalls

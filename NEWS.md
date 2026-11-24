@@ -1,5 +1,18 @@
 # cuplyr (development version)
 
+* `left_join()`, `right_join()`, `inner_join()`, `full_join()`, `semi_join()`
+  and `anti_join()` join a key column that is all `NA` (a logical, or
+  `vctrs::unspecified()`) to a character, `Date`, `POSIXct` or factor key, as
+  dplyr does. The key takes the other side's type (and a factor's levels). A
+  logical key with a value in it, or with no rows, still raises dplyr's
+  incompatible-type error, and an `inner_join()` that returns no rows on such
+  a merged `x` key raises dplyr's `vctrs_error_cast` (#70).
+
+* `tbl_gpu()` and the verbs that run on the CPU raise a classed error that
+  names the column when a column is a matrix with more than one column, an
+  array, a list or a data frame, instead of a raw GPU error or, for
+  `transmute()`, `summarise()` and `reframe()`, a result with extra rows (#70).
+
 * `count()`, `tally()` and `add_count()` check `name` the way dplyr does: a
   `name` that is not a single string (`1`, `letters`, `NA_character_`, `TRUE`,
   `character()`, ...) is an error with dplyr's message, raised at the verb

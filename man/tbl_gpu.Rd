@@ -88,8 +88,15 @@ It collects back as \code{vctrs::unspecified()} only while it passes through
 column of \code{x}, as in dplyr); every other verb (\code{select()}, \code{mutate()},
 \code{group_by()} with computed expressions, \code{slice_min()}/\code{slice_max()}, a
 mutating join, \code{vctrs::vec_slice()}) returns it as a plain logical column.
-An unspecified column joined against a string, \code{Date} or factor key, or
-bound to a character column in \code{bind_rows()}, still errors.
+An all-\code{NA} logical or unspecified column joins a string, \code{Date}, \code{POSIXct}
+or factor key and takes that key's type, as in dplyr; a logical key with a
+value in it still errors. Bound to a character column in \code{bind_rows()}, an
+unspecified column still errors.
+
+A matrix column with more than one column (or more than two dimensions), a
+list column and a data frame column have no GPU form: \code{tbl_gpu()} raises
+\code{cuplyr_error_unsupported_class} naming the column, and so does a verb that
+ran on the CPU and returned one (\code{cuplyr_error_unsupported_result_class}).
 
 Column type mappings from R to GPU:
 \itemize{

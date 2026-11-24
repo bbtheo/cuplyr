@@ -69,8 +69,15 @@
 #' column of `x`, as in dplyr); every other verb (`select()`, `mutate()`,
 #' `group_by()` with computed expressions, `slice_min()`/`slice_max()`, a
 #' mutating join, `vctrs::vec_slice()`) returns it as a plain logical column.
-#' An unspecified column joined against a string, `Date` or factor key, or
-#' bound to a character column in `bind_rows()`, still errors.
+#' An all-`NA` logical or unspecified column joins a string, `Date`, `POSIXct`
+#' or factor key and takes that key's type, as in dplyr; a logical key with a
+#' value in it still errors. Bound to a character column in `bind_rows()`, an
+#' unspecified column still errors.
+#'
+#' A matrix column with more than one column (or more than two dimensions), a
+#' list column and a data frame column have no GPU form: `tbl_gpu()` raises
+#' `cuplyr_error_unsupported_class` naming the column, and so does a verb that
+#' ran on the CPU and returned one (`cuplyr_error_unsupported_result_class`).
 #'
 #' Column type mappings from R to GPU:
 #' \itemize{
@@ -435,7 +442,8 @@ check_supported_column_classes <- function(data) {
       paste0("Can't upload column(s) with a class that has no GPU representation: ",
              paste(bad, collapse = ", "), "."),
       i = paste0("Convert them first, e.g. `unclass()` / `as.numeric()` / `as.character()`, ",
-                 "or `as.POSIXct()` for POSIXlt.")
+                 "or `as.POSIXct()` for POSIXlt; a matrix, list or data frame column needs one ",
+                 "plain column per matrix column or element.")
     ),
     class = "cuplyr_error_unsupported_class",
     call = NULL
@@ -453,14 +461,23 @@ unsupported_column_labels <- function(data) {
   for (j in seq_along(data)) {
     col <- data[[j]]
     cls <- oldClass(col)
+    dims <- dim(col)
     if (identical(cls, "vctrs_unspecified")) {
       next # tbl_gpu.data.frame() uploads it as logical and remembers the class
     } else if (isS4(col)) {
       cls <- class(col)
+    } else if (length(dims) >= 2L && !is.data.frame(col) &&
+               !(length(dims) == 2L && dims[[2L]] == 1L)) {
+      # (a matrix of one column uploads as a plain column, its dim dropped)
+      cls <- if (length(dims) == 2L) "matrix" else "array"
+    } else if (is.data.frame(col)) {
+      # no GPU form (gpu_fallback() keeps such a result as a tibble)
+    } else if (is.null(cls) && is.list(col)) {
+      cls <- "list"
     } else if (is.null(cls) || any(vapply(ok, identical, logical(1), cls))) {
       next
     } else if (!is.atomic(col) && !inherits(col, "POSIXlt")) {
-      next # list / data-frame columns keep their existing errors
+      cls <- class(col) # a list subclass (vctrs rcrd, ...) has none either
     }
     bad <- c(bad, sprintf("`%s` <%s>", names(data)[j], paste(cls, collapse = "/")))
   }
