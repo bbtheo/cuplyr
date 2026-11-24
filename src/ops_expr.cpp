@@ -5,6 +5,7 @@
 // arrive as nested Rcpp::List with `col` nodes carrying 0-based `index`
 // fields -- ir_bind() is expected to have already run on the R side (T3/T5
 // wire this up; T2's tests hand-build already-bound IR directly).
+#include "expr_cse.hpp"
 #include "expr_eval.hpp"
 #include "gpu_table.hpp"
 
@@ -100,6 +101,35 @@ static SEXP finish_expr_result(std::unique_ptr<cudf::table> tbl, bool int_overfl
     return out;
 }
 
+// #17: hand the marked trees of one evaluation to its context (they stay
+// alive in the caller for the whole evaluation). Returns whether anything is
+// tagged.
+static bool cse_begin(cuplyr::eval_ctx& ctx, Rcpp::List const& marked, bool tagged, bool single) {
+    ctx.cse_on = tagged;
+    if (tagged) {
+        ctx.cse_roots = marked;
+        ctx.cse_single = single;
+    }
+    return tagged;
+}
+
+// #17 test hook: how many times a memoized common subexpression was reused,
+// cumulative over the session.
+// [[Rcpp::export]]
+double gpu_cse_reuse_count() {
+    return cuplyr::cse_reuse_counter();
+}
+
+// #17 measurement hook: switch the memo off (nothing is tagged) to time a
+// build without it. Returns the previous setting.
+// [[Rcpp::export]]
+bool gpu_cse_enable(bool on) {
+    bool& flag = cuplyr::cse::enabled();
+    bool previous = flag;
+    flag = on;
+    return previous;
+}
+
 // [[Rcpp::export]]
 SEXP gpu_compute_column(SEXP xptr, Rcpp::List ir) {
     using namespace cuplyr;
@@ -112,7 +142,9 @@ SEXP gpu_compute_column(SEXP xptr, Rcpp::List ir) {
         ctx.cols.push_back(view.column(i));
     }
 
-    cudf::size_type idx = materialize_top_level(ir, ctx);
+    Rcpp::List marked = cse::mark_one(ir);
+    cse_begin(ctx, marked, SEXP(marked) != SEXP(ir), /*single=*/true);
+    cudf::size_type idx = materialize_top_level(marked, ctx);
     // materialize_top_level() always pushes a fresh entry, so idx is always
     // within ctx.owned's range (never a bare alias into the input view).
     size_t owned_idx = static_cast<size_t>(idx - view.num_columns());
@@ -139,7 +171,9 @@ SEXP gpu_filter_expr(SEXP xptr, Rcpp::List ir) {
         ctx.cols.push_back(view.column(i));
     }
 
-    cudf::size_type idx = materialize(ir, ctx);
+    Rcpp::List marked = cse::mark_one(ir);
+    cse_begin(ctx, marked, SEXP(marked) != SEXP(ir), /*single=*/true);
+    cudf::size_type idx = materialize(marked, ctx);
     cudf::column_view mask = ctx.cols[idx];
 
     if (mask.type().id() != cudf::type_id::BOOL8) {
@@ -199,8 +233,21 @@ SEXP gpu_mutate_expr(SEXP xptr,
     std::vector<cudf::size_type> logical_to_real;
     logical_to_real.reserve(static_cast<size_t>(n_expr));
 
+    // #17: tag the call subtrees that repeat anywhere in `exprs`. The tag is on
+    // copies, and remap_virtual_col_indices() carries it into its clones. The
+    // types of the indices they bind are the input columns' and then the dots'
+    // declared output types (each dot's result is cast to it below).
+    Rcpp::List marked = cse::mark_list(exprs);
+    if (cse_begin(ctx, marked, SEXP(marked) != SEXP(exprs), /*single=*/false)) {
+        ctx.cse_types.reserve(static_cast<size_t>(n_input + n_expr));
+        for (int i = 0; i < n_input; ++i) ctx.cse_types.push_back(view.column(i).type());
+        for (int i = 0; i < n_expr; ++i) {
+            ctx.cse_types.push_back(expr_type_from_str(Rcpp::as<std::string>(out_types[i])));
+        }
+    }
+
     for (int i = 0; i < n_expr; ++i) {
-        Rcpp::List node = remap_virtual_col_indices(exprs[i], n_input, logical_to_real);
+        Rcpp::List node = remap_virtual_col_indices(marked[i], n_input, logical_to_real);
         cudf::size_type idx = materialize_top_level(node, ctx, /*alias_ok=*/true);
 
         std::string out_type_str = Rcpp::as<std::string>(out_types[i]);

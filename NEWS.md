@@ -9,6 +9,18 @@
   empty groups. Shapes with no GPU form, such as `lag(mean(x))`, still run in
   dplyr (#22).
 
+* `mutate()`, `transmute()` and `filter()` compute a repeated `round()`,
+  `%in%`, string function or any other subexpression that needs its own GPU
+  step once per call instead of once per use, so
+  `mutate(a = round(x, 2) + 1, b = round(x, 2) * 2)` rounds once. A repeated
+  integer subexpression such as `(i + j)` is shared where it needs its own
+  step anyway or where its overflow check is the expensive part (13-15%
+  faster at 1e7 rows when its range could overflow). Plain double arithmetic
+  such as `(x + y)` is left fused into each use, and so is integer arithmetic
+  that every use folds into its own kernel and whose range can't overflow:
+  the GPU computes it inline, and sharing it measured slower. Results,
+  warnings and errors are unchanged (#17).
+
 * `diagnostics()` now reports the libcudf and RMM versions cuplyr was built
   against, the libcudf library loaded into the session and its version, the
   active GPU memory resource and pool size, and every cuplyr option with its
