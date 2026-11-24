@@ -327,6 +327,28 @@ test_that("#22: empty groups of a .drop = FALSE grouping", {
   f124_check(fdf, function(d) summarise(group_by(d, f, .drop = FALSE), mx = max(x) + 1L))
 })
 
+test_that("#22: a power next to a reducer follows R's NA rules", {
+  skip_if_no_gpu()
+  df <- tibble::tibble(g = c(1L, 1L, 2L), y = c(NA, 1, 2))
+  # R: NA^0 and 1^NA are 1
+  f124_check(df, function(d) {
+    summarise(group_by(d, g), p = mean(y)^0, q = 1^mean(y), .groups = "drop")
+  }, native = FALSE)
+  k <- 0
+  f124_check(df, function(d) summarise(group_by(d, g), p = mean(y)^k, r = sum(y)^NA), native = FALSE)
+  # a literal exponent that is neither 0 nor NA keeps R's value on the GPU
+  f124_check(df, function(d) summarise(group_by(d, g), p = mean(y)^2, n2 = n()^2, h = sd(y)^0.5))
+})
+
+test_that("#22: .groups = \"rowwise\" and fixed group keys with an arithmetic dot", {
+  skip_if_no_gpu()
+  f124_check(p22_full, function(d) summarise(group_by(d, g), m = mean(y) + 1, .groups = "rowwise"))
+  # filter(.preserve = TRUE) keeps the group it empties (g = 1): its row has the empty-group values
+  f124_check(p22_full, function(d) {
+    d |> group_by(g) |> filter(y > 2.5, .preserve = TRUE) |> summarise(avg = sum(x) / n(), m = mean(y) * 2)
+  })
+})
+
 test_that("#22: the sign of a zero survives the arithmetic", {
   skip_if_no_gpu()
   df <- tibble::tibble(g = 1:3, y = c(0, -0.5, 2))
