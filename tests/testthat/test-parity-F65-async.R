@@ -503,6 +503,9 @@ test_that("state readings, allocation tracking and gpu_gc() are meaningful under
     s1 <- gpu_memory_state()
     tr <- gpu_alloc_tracking(tbl_gpu(data.frame(y = runif(1e6)), lazy = FALSE))
     tracked <- c(tr$allocated_bytes, tr$held_bytes, tr$peak_bytes)
+    # (collect while both tables are still referenced: an automatic collection
+    # between rm() and gpu_gc() would free them before gpu_gc()'s first reading)
+    invisible(gc(full = TRUE))
     rm(g, tr)
     res <- gpu_gc()
     list(resource = s0$resource, s0 = s0, s1 = s1, a0 = a0,
