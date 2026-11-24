@@ -598,7 +598,7 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
       if (is.null(res)) {
         # A dot that reaches the data mask by name (`exists("x")`, `get("ok")`)
         # has no value outside it: dplyr evaluates the call, as mutate() does.
-        if (expr_reaches_mask(rlang::quo_get_expr(dots[[i]]))) {
+        if (expr_reaches_mask(rlang::quo_get_expr(dots[[i]]), schema)) {
           fallback_dot_failed(origin[[i]], mask_reaching_reason)
           return(filter_expr_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement,
                                       inline = inline))
@@ -1101,7 +1101,7 @@ filter_dot_is_column_free <- function(quo, schema) {
   }
   expr <- rlang::quo_get_expr(quo)
   (is.symbol(expr) || is.call(expr)) && !expr_has_column_ref(expr, schema) &&
-    !expr_has_mask_only_call(expr) && !expr_reaches_mask(expr)
+    !expr_has_mask_only_call(expr) && !expr_reaches_mask(expr, schema)
 }
 
 # A column-free predicate evaluated once, with no data mask: `list(value = )`,

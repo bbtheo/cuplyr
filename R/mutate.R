@@ -744,10 +744,12 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
     if (no_columns) {
       # rows never change in mutate(): an n x 0 result (dplyr's, ungrouped)
       warn_fractional_dates(fractional)
+      if (isTRUE(attr(expressions, "has_vec"))) warn_vector_constant_timestamps(expressions, staged_temps)
       return(mutate_done(zero_column_result(result, "mutate"), back_to_lazy))
     }
   }
   warn_fractional_dates(fractional)
+  if (isTRUE(attr(expressions, "has_vec"))) warn_vector_constant_timestamps(expressions, staged_temps)
   if (back_to_lazy) plan_back_to_lazy(result) else result
 }
 
@@ -1384,12 +1386,12 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
         stop(verb, "() can't use a vector literal here.\n",
              "Expression: ", rlang::quo_text(expr), call. = FALSE)
       }
-      ir <- ir_vec(const$value, gpu_type_from_r(const$value), expr, new_name)
+      loss <- timestamp_vector_loss(const$value)
+      ir <- ir_vec(const$value, gpu_type_from_r(const$value), expr, new_name, loss = loss)
       has_vec <- TRUE
-      floored_vec <- inherits(const$value, "Date") && {
-        v <- as.double(unclass(const$value))
-        any(is.finite(v) & v != floor(v))
-      }
+      # a lossy Date/POSIXct vector (fractional, +-Inf, out of range) is
+      # stored floored or NA, so a later reader needs dplyr's value: CPU route
+      floored_vec <- loss$lossy
     } else if (identical(const$kind, "attributed")) {
       fallback_cause("a constant with names or attributes, which dplyr keeps on the column.")
       ir <- NULL
@@ -1564,7 +1566,7 @@ mutate_constant_value <- function(quo, schema) {
 
   if (is.symbol(expr) || is.call(expr)) {
     if (expr_has_column_ref(expr, schema) || expr_has_mask_only_call(expr) ||
-          expr_reaches_mask(expr)) {
+          expr_reaches_mask(expr, schema)) {
       return(none)
     }
     got <- ir_fold_eval(rlang::eval_tidy(quo, data = list()))
@@ -1729,6 +1731,24 @@ mask_call_head_name <- function(e) {
   call_head_name(e)
 }
 
+# `get("thr")`, `get0("thr")` and `exists("thr")`, given the running schema: one
+# unnamed string literal and no other argument, naming something that is not a
+# column of the schema (nor a mask binding such as `.data`, `.env`). dplyr
+# looks the name up in the mask first, so it finds the environment's value:
+# the call reaches no mask column and folds like any column-free call. Without
+# a schema (the callers that don't know the running columns) the answer is
+# FALSE, the conservative one.
+# @keywords internal
+is_env_lookup_of_non_column <- function(e, head, schema) {
+  if (is.null(schema) || !head %in% c("get", "get0", "exists") || length(e) != 2L ||
+      !is.null(names(e)) && any(nzchar(names(e)))) {
+    return(FALSE)
+  }
+  name <- e[[2L]]
+  is.character(name) && length(name) == 1L && !is.na(name) && nzchar(name) &&
+    !startsWith(name, ".") && !name %in% schema$names
+}
+
 # TRUE iff `expr` calls something that can reach dplyr's data mask without
 # naming a column as a symbol: pick(), a nested across() and friends,
 # cur_data(), get()/mget()/exists(), eval(), environment()... Such a dot's
@@ -1741,7 +1761,7 @@ mask_call_head_name <- function(e) {
 # as a value, and a user function that makes such a call itself; those still
 # run without a mask wherever a column-free piece is evaluated.
 # @keywords internal
-expr_reaches_mask <- function(expr) {
+expr_reaches_mask <- function(expr, schema = NULL) {
   # (all.names() is a C walk over every symbol, call heads and embedded
   # quosures included, so a dot with none of the names costs no R-level walk)
   if (rlang::is_missing(expr) || !is.call(expr) || !any(all.names(expr) %in% mask_wide_fns)) {
@@ -1753,7 +1773,7 @@ expr_reaches_mask <- function(expr) {
     }
     head <- mask_call_head_name(e)
     if (!is.null(head) && head %in% mask_wide_fns) {
-      return(TRUE)
+      return(!is_env_lookup_of_non_column(e, head, schema))
     }
     for (part in as.list(e)) {
       if (walk(part)) {
@@ -2283,6 +2303,7 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
   # As in mutate.tbl_gpu(): floored fractional Date constants, warned now
   # that the call is native.
   warn_fractional_dates(set_diff(attr(expressions, "fractional_dates"), staged_temps))
+  if (isTRUE(attr(expressions, "has_vec"))) warn_vector_constant_timestamps(expressions, staged_temps)
   result
 }
 

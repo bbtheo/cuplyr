@@ -1599,6 +1599,24 @@ check_across_predicate_piece <- function(piece, col, env, schema) {
   TRUE
 }
 
+# TRUE iff an if_any()/if_all() piece is NULL: the literal, or a column-free
+# expression that evaluates to NULL. The caller has already run
+# check_across_predicate_piece(), so a call here is pure and reads no active
+# binding; an error while evaluating is not NULL.
+# @keywords internal
+across_piece_is_null <- function(piece, env, schema) {
+  if (is.null(piece)) {
+    return(TRUE)
+  }
+  if (!is.call(piece) && !is.symbol(piece)) {
+    return(FALSE)
+  }
+  if (any(all.vars(piece) %in% schema$names) || expr_contains_zero_arg_call(piece, "cur_group_id")) {
+    return(FALSE)
+  }
+  is.null(tryCatch(eval(piece, env), error = function(e) 0L))
+}
+
 # Expand a top-level `if_any(.cols, .fns, ..., .names=)` / `if_all(...)`
 # dot into a SINGLE quosure: the OR-fold (`if_any`) or AND-fold (`if_all`)
 # of each selected column's own instantiated predicate -- exactly dplyr's
@@ -1679,14 +1697,25 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filte
   piece_env <- envs[[1]]
 
   # Every function of a list contributes one piece per column
+  # (`first`, not is.null(combined): a NULL piece must never read as "no piece
+  # yet" and be swallowed)
   combined <- NULL
+  first <- TRUE
   for (col in cols) {
     for (spec in parsed$specs) {
       piece <- spec$build(as.name(col), col)
       if (check_across_predicate_piece(piece, col, piece_env, schema)) {
         return(fallback())
       }
-      combined <- if (is.null(combined)) piece else as.call(list(fold_op, combined, piece))
+      # dplyr's combine raises for a NULL piece (also on zero rows), with its own
+      # classes: a literal NULL, or a column-free pure expression (already
+      # screened by the check above) that evaluates to NULL
+      if (across_piece_is_null(piece, piece_env, schema)) {
+        fallback_cause("a predicate of this call is NULL, which dplyr rejects with its own error.")
+        return(fallback())
+      }
+      combined <- if (first) piece else as.call(list(fold_op, combined, piece))
+      first <- FALSE
     }
   }
 

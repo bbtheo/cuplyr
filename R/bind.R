@@ -403,22 +403,19 @@ bind_cols_gpu_run <- function(dots, .name_repair, call) {
   })
   # (use.names = FALSE: a named input would otherwise name `schema$names`.)
   all_names <- unlist(col_names, use.names = FALSE)
-  repaired_names <- repair_names(all_names, .name_repair)
+  repaired_names <- vctrs::vec_as_names(all_names, repair = .name_repair, call = call)
   at <- cumsum(c(0L, lengths(col_names)))
 
-  # dplyr regroups the output with tibble, which refuses duplicated names.
-  # Checked before the uploads, whose warnings would describe a table that
-  # never exists.
+  # dplyr regroups the output with tibble (`dplyr_reconstruct(out, first)`),
+  # which refuses blank and duplicated names, blanks first. Checked before the
+  # uploads, whose warnings would describe a table that never exists, and by
+  # tibble itself so the error is dplyr's.
   first_grouping <- bind_first_grouping(first)
-  if (length(first_grouping$groups) > 0L && anyDuplicated(repaired_names) > 0L) {
-    dups <- unique(repaired_names[duplicated(repaired_names)])
-    rlang::abort(
-      c(paste0("Column names ", paste0("`", dups, "`", collapse = ", "),
-               " must not be duplicated."),
-        "Use `.name_repair` to specify repair."),
-      class = c("tibble_error_column_names_must_be_unique", "tibble_error"),
-      call = call
-    )
+  if (length(first_grouping$groups) > 0L &&
+        (anyDuplicated(repaired_names) > 0L || !all(nzchar(repaired_names)))) {
+    tibble::as_tibble(vctrs::new_data_frame(
+      rlang::set_names(rep(list(logical()), length(repaired_names)), repaired_names), n = 0L
+    ))
   }
 
   # Convert data frames and vectors to tbl_gpu and recycle size-1 inputs.
@@ -779,37 +776,6 @@ bind_rows_gpu_run <- function(dots, .id, call) {
 # =============================================================================
 # Helper functions
 # =============================================================================
-
-#' Repair duplicate column names
-#' @param names Character vector of column names
-#' @param method Repair method
-#' @return Character vector with repaired names
-#' @keywords internal
-repair_names <- function(names, method = "unique") {
-  if (method == "minimal") {
-    return(names)
-  }
-
-  if (method == "check_unique") {
-    if (anyDuplicated(names)) {
-      dups <- names[duplicated(names)]
-      stop("Column names must be unique. Duplicates: ",
-           paste(unique(dups), collapse = ", "), call. = FALSE)
-    }
-    return(names)
-  }
-
-  if (method == "unique" || method == "universal") {
-    # Use vctrs if available for better name repair
-    if (requireNamespace("vctrs", quietly = TRUE)) {
-      return(vctrs::vec_as_names(names, repair = method))
-    }
-    # Fallback: add numeric suffixes to duplicates
-    make.unique(names, sep = "_")
-  } else {
-    names
-  }
-}
 
 #' Resolve the common GPU type for one column across a bind/set operation
 #' (Phase 11 L4)
