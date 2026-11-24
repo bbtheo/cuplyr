@@ -362,7 +362,7 @@ bind_cols_gpu_run <- function(dots, .name_repair, call) {
   if (length(keep) == 0L) {
     # Zero-column inputs only: the result is just the common size.
     out <- tbl_gpu(tibble::tibble(.rows = n), lazy = FALSE)
-    return(if (bind_has_meta(first)) carry_frame_meta(out, first) else out)
+    return(bind_finish_meta(out, first, dots))
   }
 
   # Column names and their repair come first: an upload's warnings (fractional
@@ -449,8 +449,32 @@ bind_cols_gpu_run <- function(dots, .name_repair, call) {
     group_drop = if (length(groups) > 0L) first$group_drop %||% TRUE else TRUE,
     exec_mode = "eager"
   )
-  # the first input's attributes and class (F31); a bare vector has none
-  if (bind_has_meta(first)) carry_frame_meta(out, first) else out
+  bind_finish_meta(out, first, dots)
+}
+
+# The result's frame class: the first input's attributes and class when it is
+# a table (F31). A list or a bare vector first has none, so dplyr gives
+# vec_cbind()'s type of the data frame inputs: a bare data.frame when every
+# one is a bare data.frame (a plain one, or a tbl_gpu that collects to one), a
+# tibble otherwise.
+bind_finish_meta <- function(out, first, dots) {
+  if (bind_has_meta(first)) {
+    return(carry_frame_meta(out, first))
+  }
+  all_bare <- all(vapply(dots, function(x) {
+    if (is_tbl_gpu(x)) {
+      isTRUE(.subset2(x, "bare_df")) && length(.subset2(x, "groups")) == 0L &&
+        !is_rowwise_gpu(x)
+    } else if (is.data.frame(x)) {
+      identical(class(x), "data.frame")
+    } else {
+      TRUE
+    }
+  }, logical(1)))
+  if (all_bare && length(.subset2(out, "groups")) == 0L && !is_rowwise_gpu(out)) {
+    out <- set_tbl_gpu_field(out, "bare_df", TRUE)
+  }
+  out
 }
 
 # A rowwise first input (a host rowwise_df, or a rowwise tbl_gpu, F49) decides

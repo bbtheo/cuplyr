@@ -79,14 +79,19 @@
 # data.frame fixture into a tbl_gpu; the tibble class is its artifact). Data,
 # names, types, row count and grouping are always compared.
 # expect_s3_class(<tbl_gpu result>, "data.frame", exact = TRUE) follows the same
-# rule (review N6): it is a HARNESS RELAXATION, since cuplyr always collects a
-# tibble, and it turns e.g. arrange's "preserves input class" into a pass.
+# rule (review N6): it is a HARNESS RELAXATION, and it turns e.g. arrange's
+# "preserves input class" into a pass.
 #
-# class() in the shim env reports a tbl_gpu's collected class (tibble, plus
-# grouped_df when grouped), or the class of the fixture for the uploaded object
-# itself, so `expect_s3_class(out, class(df), exact = TRUE)` keeps its meaning.
-# A bare data.frame fixture still reports "data.frame" and cuplyr hands back a
-# tibble, so such tests fail honestly instead of being waved through.
+# class() in the shim env reports the class collect() gives a tbl_gpu (a bare
+# data.frame stays one; grouped_df when grouped), or the class of the fixture for
+# the uploaded object itself, so `expect_s3_class(out, class(df), exact = TRUE)`
+# keeps its meaning. A result that collects to a tibble from a bare data.frame
+# fixture fails such a test honestly.
+#
+# expect_warning()/expect_no_warning() compute a lazy tbl_gpu value inside the
+# expectation, so a warning raised when the result is computed (the many-to-many
+# join warning) is seen. The run uses testthat's package = "dplyr", so
+# TESTTHAT_PKG is "dplyr" in test bodies as in dplyr's own run.
 #
 # Snapshots (C4): the run is pinned to CRAN-mode snapshot semantics
 # (NOT_CRAN=false) and testthat edition 3, whatever the caller's environment
@@ -644,11 +649,11 @@ cf_make_shim_env <- function(state, upload = TRUE) {
     res
   }
 
-  # class() of a tbl_gpu reports the class its collected form has (derived from
-  # the collected object), or the class of the fixture it was uploaded from (tests write expect_s3_class(out,
+  # class() of a tbl_gpu reports the class collect() gives it, or the class of
+  # the fixture it was uploaded from (tests write expect_s3_class(out,
   # class(df), exact = TRUE) and class(df) would otherwise be c("tbl_gpu",
-  # "tbl")). A data.frame fixture therefore still reports "data.frame", and
-  # since cuplyr collects a tibble the test fails, as it should.
+  # "tbl")). A data.frame fixture reports "data.frame", and so does a result
+  # that collects to one.
   env$class <- function(x) {
     if (inherits(x, "tbl_gpu")) {
       fixture <- cf_fixture_class(state, x)
@@ -657,7 +662,10 @@ cf_make_shim_env <- function(state, upload = TRUE) {
       if (is_fixture) {
         return(fixture)
       }
-      return(base::class(cf_collect(x)))
+      # what collect() gives it: it restores grouping, rowwise and the bare
+      # data.frame class (cf_collect() is for comparisons and always a tibble)
+      got <- tryCatch(dplyr::collect(x), error = function(e) NULL)
+      return(base::class(if (is.null(got)) cf_collect(x) else got))
     }
     base::class(x)
   }
@@ -678,6 +686,35 @@ cf_make_shim_env <- function(state, upload = TRUE) {
   dplyr_df_n_col <- env$df_n_col
   env$df_n_col <- function(x) {
     dplyr_df_n_col(if (inherits(x, "tbl_gpu")) cf_collect(x) else x)
+  }
+
+  # A lazy tbl_gpu raises the warnings that depend on the data (many-to-many
+  # join) when it is computed, which a test that never collects can't see. Inside
+  # expect_warning()/expect_no_warning() the value is computed too; the
+  # expression is evaluated where testthat would, so `out <- ...` still binds.
+  # (the value goes through a function argument: a promise is evaluated in the
+  # quosure's env, so an assignment inside binds there and no helper is left
+  # behind in the test's env)
+  cf_computing <- function(quo) {
+    rlang::new_quosure(rlang::expr(
+      (!!cf_compute_lazy)(!!rlang::quo_get_expr(quo))
+    ), env = rlang::quo_get_env(quo))
+  }
+  cf_compute_lazy <- function(value) {
+    if (inherits(value, "tbl_gpu") && identical(.subset2(value, "exec_mode"), "lazy")) {
+      dplyr::compute(value)
+    }
+    value
+  }
+  env$expect_warning <- function(object, ..., label = NULL) {
+    quo <- rlang::enquo(object)
+    label <- label %||% rlang::as_label(rlang::quo_get_expr(quo))
+    testthat::expect_warning(!!cf_computing(quo), ..., label = label)
+  }
+  env$expect_no_warning <- function(object, ..., label = NULL) {
+    quo <- rlang::enquo(object)
+    label <- label %||% rlang::as_label(rlang::quo_get_expr(quo))
+    testthat::expect_no_warning(!!cf_computing(quo), ..., label = label)
   }
 
   env$expect_s3_class <- function(object, class, ..., exact = FALSE) {
@@ -1023,7 +1060,10 @@ conformance_run_file <- function(path, exclusions = NULL, upload = TRUE) {
   res <- tryCatch(
     # The snapshot reporter announces cleaning up the staged _snaps copy.
     withCallingHandlers(
-      testthat::test_file(stage$path, reporter = reporter, env = env),
+      # package = "dplyr": TESTTHAT_PKG is "dplyr" in the test bodies, as in
+      # dplyr's own test_check("dplyr"); code in a test file is then a direct
+      # caller for is_direct() and lifecycle. (test_file sets and restores it.)
+      testthat::test_file(stage$path, reporter = reporter, env = env, package = "dplyr"),
       message = function(m) {
         if (grepl("unused snapshot", conditionMessage(m))) invokeRestart("muffleMessage")
       }
@@ -1371,7 +1411,7 @@ conformance_classify_reason <- function(msg) {
     return("genuine cuplyr gap: verb/function missing for tbl_gpu (snapshot error is a missing-method error)")
   }
   if (grepl("to have class \"data.frame\"|to have class \"tbl_df\"", msg)) {
-    return("genuine cuplyr design gap: bare data.frame input comes back as a tibble (collect() always returns tibbles)")
+    return("genuine cuplyr design gap: bare data.frame input comes back as a tibble (a result that collects to a tibble where dplyr keeps the data.frame)")
   }
   if (grepl("did not throw an error|did not throw the expected error|Expected .* to throw", msg, ignore.case = TRUE)) {
     return("genuine cuplyr gap: expected error not raised")

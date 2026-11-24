@@ -240,8 +240,11 @@ regroup_for_keys <- function(.data, dot_names) {
 # @param vars Character vector to avoid colliding with
 # @return Character, the resolved column name
 # @keywords internal
-resolve_agg_name <- function(name, vars) {
+resolve_agg_name <- function(name, vars, arg = rlang::caller_arg(name),
+                             call = rlang::caller_env()) {
   if (!is.null(name)) {
+    # dplyr's check_n_name(): a single string, with rlang's standalone message
+    check_string(name, arg = arg, call = call)
     return(name)
   }
   candidate <- "n"

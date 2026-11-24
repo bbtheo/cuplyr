@@ -1,5 +1,15 @@
 # cuplyr (development version)
 
+* `count()`, `tally()` and `add_count()` check `name` the way dplyr does: a
+  `name` that is not a single string (`1`, `letters`, `NA_character_`, `TRUE`,
+  `character()`, ...) is an error with dplyr's message, raised at the verb
+  call. `name = NA_character_` no longer creates a column called `NA` (#20).
+
+* `bind_cols()` with a list or a vector first, such as
+  `bind_cols(list(a = 1:3), gpu)` or `bind_cols(x = 1:3, gpu)`, collects to a
+  data frame of the type dplyr gives: a plain `data.frame` when every table
+  input is one, a tibble otherwise (#20).
+
 * `mutate()`, `filter()`, `cross_join()`, the joins with `by = character()`,
   `intersect()`, `setdiff()`, `symdiff()`, `setequal()`, `reframe()` and the
   vctrs functions (`vec_size()`, `vec_slice()`, ...) now work on a table with
