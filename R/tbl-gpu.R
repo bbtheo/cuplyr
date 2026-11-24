@@ -400,14 +400,26 @@ warn_fractional_dates <- function(cols) {
 # passes the real ones).
 # @keywords internal
 warn_unrepresentable_timestamps <- function(col_names, ptr) {
+  warn_timestamp_counts(
+    col_names,
+    attr(ptr, "infinite_timestamps"), attr(attr(ptr, "infinite_timestamps"), "n"),
+    attr(ptr, "out_of_range_timestamps"), attr(attr(ptr, "out_of_range_timestamps"), "n")
+  )
+}
+
+# The warnings of warn_unrepresentable_timestamps() from the counts: `inf` and
+# `oor` are the (1-based) indices into `col_names` of the columns with +-Inf /
+# out-of-range values (`NULL` for none), `inf_n` and `oor_n` their counts.
+# @keywords internal
+warn_timestamp_counts <- function(col_names, inf, inf_n, oor, oor_n) {
   kinds <- list(
-    list(attr = "infinite_timestamps", class = "cuplyr_warning_infinite_timestamp"),
-    list(attr = "out_of_range_timestamps", class = "cuplyr_warning_timestamp_out_of_range")
+    list(idx = inf, n = inf_n, attr = "infinite_timestamps", class = "cuplyr_warning_infinite_timestamp"),
+    list(idx = oor, n = oor_n, attr = "out_of_range_timestamps", class = "cuplyr_warning_timestamp_out_of_range")
   )
   for (k in kinds) {
-    idx <- attr(ptr, k$attr)
+    idx <- k$idx
     if (is.null(idx)) next
-    n <- attr(idx, "n")
+    n <- k$n
     listed <- paste0("`", col_names[as.integer(idx)], "` (", format(n, scientific = FALSE, trim = TRUE),
                      ifelse(n == 1, " value)", " values)"), collapse = ", ")
     msg <- if (identical(k$attr, "infinite_timestamps")) {
@@ -421,6 +433,89 @@ warn_unrepresentable_timestamps <- function(col_names, ptr) {
     )
   }
   invisible()
+}
+
+# What the upload would change in a Date/POSIXct vector (the tests of
+# date_to_gpu()/posixct_to_gpu(), src/transfer_io.cpp): `frac` (a Date with a
+# fractional day in range, floored), `inf` (+-Inf) and `oor` (finite, beyond
+# int32 days / int64 microseconds) counts. NA and NaN are not lossy: they are NA
+# on the GPU, as in R. `lossy` is TRUE for any of them. A vector of another
+# class loses nothing.
+# @keywords internal
+timestamp_vector_loss <- function(value) {
+  none <- list(lossy = FALSE, frac = FALSE, inf = 0, oor = 0)
+  is_date <- inherits(value, "Date")
+  if (!is_date && !inherits(value, "POSIXct")) {
+    return(none)
+  }
+  v <- as.double(unclass(value))
+  if (is_date) {
+    in_range <- !is.na(v) & v >= -2147483648 & v < 2147483648
+  } else {
+    s <- v * 1e6
+    in_range <- !is.na(s) & s >= -9223372036854775808 & s < 9223372036854775808
+  }
+  inf <- sum(is.infinite(v))
+  oor <- sum(!is.na(v) & !in_range) - inf
+  frac <- is_date && any(in_range & v != floor(v))
+  list(lossy = frac || inf > 0 || oor > 0, frac = frac, inf = inf, oor = oor)
+}
+
+# The warnings for the Date/POSIXct vector constants of a mutate()/transmute()
+# call that the GPU can't hold exactly (the same ones, in the same order, as
+# the upload gives), raised once for the call, when it is made. The caller
+# checks `attr(expressions, "has_vec")` first. lower_mutate() uploads them and
+# mutes its own, so a lazy plan doesn't repeat them at every run. A vector
+# staged by across() (`skip`: the temp names) is warned for under the user
+# column the temp is copied to.
+# @keywords internal
+warn_vector_constant_timestamps <- function(expressions, skip = character()) {
+  nms <- character()
+  loss <- list()
+  copy_of <- NULL
+  for (e in expressions) {
+    ir <- .subset2(e, "ir")
+    if (!identical(.subset2(ir, "kind"), "vec")) next
+    l <- .subset2(ir, "loss")
+    if (is.null(l) || !l$lossy) next
+    out <- .subset2(e, "output_col")
+    if (out %in% skip) {
+      # the first bare copy of the temp names the user's column
+      if (is.null(copy_of)) {
+        copy_of <- staged_copy_names(expressions, skip)
+      }
+      out <- copy_of[out]
+      if (is.na(out)) next
+    }
+    nms <- c(nms, unname(out))
+    loss[[length(loss) + 1L]] <- l
+  }
+  if (length(loss) == 0L) {
+    return(invisible())
+  }
+  col <- function(field) vapply(loss, `[[`, numeric(1), field)
+  idx <- function(counts) if (any(counts > 0)) structure(which(counts > 0), n = counts[counts > 0])
+  warn_fractional_dates(nms[vapply(loss, `[[`, logical(1), "frac")])
+  inf <- idx(col("inf"))
+  oor <- idx(col("oor"))
+  warn_timestamp_counts(nms, inf, attr(inf, "n"), oor, attr(oor, "n"))
+  invisible()
+}
+
+# For each staged temp of a mutate()/transmute() (across() computes into temps
+# and then copies them): the output column that is a bare copy of it, named by
+# the temp. A temp nothing copies is `NA`.
+# @keywords internal
+staged_copy_names <- function(expressions, temps) {
+  out <- stats::setNames(rep(NA_character_, length(temps)), temps)
+  for (e in expressions) {
+    ir <- .subset2(e, "ir")
+    if (identical(.subset2(ir, "kind"), "col") && .subset2(ir, "name") %in% temps &&
+        is.na(out[[.subset2(ir, "name")]])) {
+      out[[.subset2(ir, "name")]] <- .subset2(e, "output_col")
+    }
+  }
+  out
 }
 
 # Drop the flags warn_unrepresentable_timestamps() reads from the pointer.

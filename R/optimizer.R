@@ -1008,7 +1008,10 @@ prune_dead_columns <- function(ast, required_cols = NULL, group_cols = character
         }
         # Likewise a checked integer expression (F70): its overflow warning
         # does not depend on the column being used. Its inputs stay required.
-        if (record_checked_int(expr) && !isTRUE(.optimizer_opts$prune_unread)) {
+        # A rowwise min()/max() is the same: dplyr warns for an all-NA row
+        # whether or not a later select() drops the column (F49).
+        if ((record_checked_int(expr) || ir_has_rw_flag_agg(expr$ir)) &&
+              !isTRUE(.optimizer_opts$prune_unread)) {
           keep[i] <- TRUE
           required <- opt_union(required, expr$input_cols)
         }

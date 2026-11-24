@@ -266,11 +266,16 @@ levels_by_position <- function(schema) {
   if (is.null(fl)) {
     return(vector("list", length(nms)))
   }
-  if (!anyDuplicated(nms)) {
+  # A blank name can't be looked up by name (no empty name matches), so a
+  # table with blank names goes by position once its levels are tracked that
+  # way. One whose levels came through a by-name node keeps the by-name lookup
+  # (its blank-named factors have no levels there).
+  by_pos <- isTRUE(attr(fl, "by_position"))
+  if (!anyDuplicated(nms) && !(by_pos && any(nms == ""))) {
     return(unname(fl[nms]))
   }
   dict <- which(unname(schema$types) == "DICTIONARY32")
-  if (!isTRUE(attr(fl, "by_position")) || length(fl) != length(dict)) {
+  if (!by_pos || length(fl) != length(dict)) {
     rlang::abort(c(
       "Internal error: factor levels of duplicated column names are not tracked by position.",
       i = "Please report this to the cuplyr maintainers."
@@ -278,11 +283,13 @@ levels_by_position <- function(schema) {
   }
   out <- vector("list", length(nms))
   fl_names <- names(fl)
-  seen <- list()
-  for (i in dict) {
-    nm <- nms[[i]]
-    k <- (seen[[nm]] %||% 0L) + 1L
-    seen[[nm]] <- k
+  # (the k-th factor column of a name takes that name's k-th entry; counted
+  # by position, since `seen[[nm]]` finds no blank name)
+  dict_names <- nms[dict]
+  for (j in seq_along(dict)) {
+    i <- dict[[j]]
+    nm <- dict_names[[j]]
+    k <- sum(dict_names[seq_len(j)] == nm)
     hit <- which(fl_names == nm)[k]
     if (is.na(hit)) {
       rlang::abort(c(
@@ -311,7 +318,7 @@ levels_from_positions <- function(names, by_pos) {
     return(NULL)
   }
   out <- stats::setNames(by_pos[keep], names[keep])
-  if (anyDuplicated(names) > 0L) {
+  if (names_need_position(names)) {
     attr(out, "by_position") <- TRUE
   }
   out
@@ -345,9 +352,10 @@ propagate_factor_levels <- function(node, input_schema, surviving_names) {
   # slice and barrier keep every column in place.
   # A select always goes by position: `select(x = y)` drops the old `x`, and a
   # by-name filter would hand the new `x` the dropped factor's levels.
+  # A blank name goes the same way (levels_by_position()).
   if (identical(node$type, "select") ||
       (node$type %in% c("rename", "distinct", "slice", "barrier") &&
-       (anyDuplicated(input_schema$names) > 0L || anyDuplicated(surviving_names) > 0L))) {
+       (names_need_position(input_schema$names) || names_need_position(surviving_names)))) {
     by_pos <- levels_by_position(input_schema)
     idx <- switch(node$type,
       select = node$positions %||% match(node$columns, input_schema$names),
@@ -398,6 +406,12 @@ propagate_factor_levels <- function(node, input_schema, surviving_names) {
   }
 
   factor_levels
+}
+
+# TRUE when levels can only be followed by position: a duplicated or blank name.
+# @keywords internal
+names_need_position <- function(nms) {
+  anyDuplicated(nms) > 0L || any(nms == "")
 }
 
 #' Propagate group columns across an AST node
@@ -590,8 +604,11 @@ push_op <- function(.data, node, input_schema = current_schema(.data), carry = T
   # to the default once the table is ungrouped (a later group_by() starts over).
   new_group_drop <- if (length(new_groups) > 0L) .subset2(.data, "group_drop") %||% TRUE else TRUE
   new_keys <- carry_fixed_keys(node, .data, new_groups)
-  new_unspec <- if (type %in% c("filter", "arrange", "slice", "barrier")) {
-    .subset2(.data, "unspecified")
+  new_unspec <- .subset2(.data, "unspecified")
+  if (!is.null(new_unspec) && !type %in% c("filter", "arrange", "slice", "barrier")) {
+    new_unspec <- if (type %in% c("select", "rename", "mutate", "window")) {
+      carry_unspecified(node, new_unspec, input_schema$names, new_schema$names)
+    }
   }
   # F49: a rowwise table stays rowwise through every node but the ones that
   # rebuild the rows or their grouping (their verbs never reach push_op() with a
@@ -643,6 +660,43 @@ push_op <- function(.data, node, input_schema = current_schema(.data), carry = T
     rowwise = new_rowwise
   )
   if (plain_frame) out else carry_frame_meta(out, .data, attrs = keep_attrs)
+}
+
+# The names of a node's output that are still vctrs::unspecified(): the
+# columns select/rename/mutate/window pass through unchanged, under their new names.
+# A mutate keeps the columns no expression overwrites, plus a bare copy of an
+# unspecified column (read in expression order). A name that comes out
+# duplicated can't be addressed, so it loses the marker (as `names<-` does).
+# @keywords internal
+carry_unspecified <- function(node, unspecified, old_names, new_names) {
+  type <- .subset2(node, "type")
+  if (type == "window") {
+    # (a window node only adds its spec outputs: temps no user column shares)
+    out <- setdiff(unspecified, vapply(.subset2(node, "specs"), .subset2, "", "output_col"))
+  } else if (type == "mutate") {
+    keep <- unspecified
+    for (e in .subset2(node, "expressions")) {
+      ir <- .subset2(e, "ir")
+      out <- .subset2(e, "output_col")
+      is_copy <- identical(.subset2(ir, "kind"), "col") && .subset2(ir, "name") %in% keep
+      keep <- if (is_copy) union(keep, out) else setdiff(keep, out)
+    }
+    out <- keep
+  } else {
+    # the output name of each input column, by position
+    pos <- .subset2(node, "positions")
+    if (type == "select") {
+      # a select keeps its columns' names
+      out <- new_names[new_names %in% unspecified]
+    } else {
+      mapped <- old_names
+      idx <- if (is.null(pos)) match(.subset2(node, "old_names"), old_names) else pos
+      mapped[idx] <- .subset2(node, "new_names")
+      out <- mapped[old_names %in% unspecified]
+    }
+  }
+  out <- set_diff(set_intersect(out, new_names), new_names[duplicated(new_names)])
+  if (length(out) > 0L) out
 }
 
 #' Run a verb's node chain as ONE eager execution
