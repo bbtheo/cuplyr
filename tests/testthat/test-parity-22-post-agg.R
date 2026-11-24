@@ -51,7 +51,8 @@ p22_diff <- function(got, want) {
     b <- unclass(b)
     if (is.double(a)) {
       both <- !is.na(a) & !is.na(b)
-      close <- both & (a == b | abs(a - b) <= 1e-9 * pmax(1, abs(b)))
+      # (the tolerance only between finite values: an infinity must match exactly)
+      close <- both & (a == b | (is.finite(a) & is.finite(b) & abs(a - b) <= 1e-9 * pmax(1, abs(b))))
       close[both & a == 0 & b == 0] <- ((1 / a > 0) == (1 / b > 0))[both & a == 0 & b == 0]
       same <- (is.na(a) & is.na(b) & is.nan(a) == is.nan(b)) | close
     } else {
@@ -340,6 +341,33 @@ test_that("#22: a power next to a reducer follows R's NA rules", {
   f124_check(df, function(d) summarise(group_by(d, g), p = mean(y)^2, n2 = n()^2, h = sd(y)^0.5))
 })
 
+test_that("#22: a power of a -Inf or -0 aggregate follows R's rules", {
+  skip_if_no_gpu()
+  # max() of an all-NA group (na.rm = TRUE), of an empty group or of zero rows is
+  # -Inf: R gives NaN for a non-integer power of it
+  df <- tibble::tibble(g = c(1L, 1L, 2L), y = c(4, 9, NA))
+  f124_check(df, function(d) {
+    summarise(group_by(d, g), r = max(y, na.rm = TRUE)^0.5, s = max(y, na.rm = TRUE)^-0.5,
+              t = max(y, na.rm = TRUE)^(1 / 3), u = max(y, na.rm = TRUE)^-3, .groups = "drop")
+  }, native = FALSE)
+  fdf <- tibble::tibble(f = factor(c("a", "a", "b"), levels = c("a", "b", "c")), x = c(1, 4, 9))
+  f124_check(fdf, function(d) summarise(group_by(d, f, .drop = FALSE), r = max(x)^0.5, .groups = "drop"),
+             native = FALSE)
+  f124_check(tibble::tibble(y = numeric(0)), function(d) summarise(d, r = max(y)^0.5), native = FALSE)
+  # -mean(y) is -0 for a zero mean: R gives +Inf for a negative odd power and +0 for a
+  # positive odd one (read through 1 / v)
+  dz <- tibble::tibble(g = c(1L, 1L, 2L, 2L), y = c(-1, 1, -0, 2))
+  p22_exact(dz, function(d) {
+    summarise(group_by(d, g), a = (-mean(y))^-1, b = min(y)^-1, c3 = (-mean(y))^3,
+              inv_c3 = 1 / (-mean(y))^3, .groups = "drop")
+  }, native = FALSE)
+  # an even power is exact for every base, and a count's or a spread's power too
+  f124_check(df, function(d) {
+    summarise(group_by(d, g), e = max(y, na.rm = TRUE)^2, n3 = n()^0.5, v = var(y)^1.5,
+              .groups = "drop")
+  })
+})
+
 test_that("#22: .groups = \"rowwise\" and fixed group keys with an arithmetic dot", {
   skip_if_no_gpu()
   f124_check(p22_full, function(d) summarise(group_by(d, g), m = mean(y) + 1, .groups = "rowwise"))
@@ -453,4 +481,9 @@ test_that("#22: dplyr's errors for composite dots", {
   # R's own error from the arithmetic
   p22_same_error(p22_df, function(d) summarise(group_by(d, g), m = mean(x) + "a"),
                  "non-numeric argument to binary operator")
+  # `&`/`|` of a string aggregate
+  p22_same_error(p22_df, function(d) summarise(group_by(d, g), r = dplyr::first(s) & TRUE),
+                 "operations are possible only for numeric, logical or complex types")
+  p22_same_error(p22_df, function(d) summarise(group_by(d, g), r = dplyr::first(s) | FALSE),
+                 "operations are possible only for numeric, logical or complex types")
 })
