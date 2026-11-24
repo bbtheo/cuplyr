@@ -5,10 +5,11 @@
 #'
 #' @param .data A grouped `tbl_gpu` object created by [group_by()].
 #' @param ... Name-value pairs of summary functions. The name will be the
-#'   name of the variable in the result. The value must be a single aggregation
+#'   name of the variable in the result. The value is an aggregation
 #'   expression in the form `fun(column)`, where `column` can also be any
 #'   expression the internal expression IR understands (see "Aggregation
-#'   sub-expressions" below).
+#'   sub-expressions" below), or arithmetic around such calls and the results
+#'   of earlier expressions (see "Arithmetic around reducers" below).
 #' @param .groups Controls grouping structure of the result (Phase 6, task
 #'   3; matches `dplyr::summarise()`'s own contract exactly, verified
 #'   empirically against dplyr 1.2.1). One of:
@@ -119,10 +120,27 @@
 #' window-decomposition engine [mutate.tbl_gpu()] uses), and the
 #' aggregation then reduces that per-row window result -- matching dplyr's
 #' own two-step semantics exactly. Only ONE aggregation's own argument tree
-#' is decomposed this way: combining TWO SEPARATE aggregation calls at the
-#' dot level (`sum(cumsum(x)) - mean(y)`) is not supported (the same
-#' "Invalid aggregation expression" error as any other dot that isn't a
-#' bare `fn(single_arg)` shape).
+#' is decomposed this way; several aggregation calls in one dot are combined
+#' by the next section.
+#'
+#' ## Arithmetic around reducers
+#' An expression may combine reducer calls with arithmetic, comparisons, math
+#' functions and constants, and may read the result of an earlier expression:
+#' `mean(x) + 1`, `sum(x) / n()`, `max(x) - min(x)`,
+#' `mean(x) - qnorm(.975) * sd(x) / sqrt(n())`, `sum(cumsum(x)) - mean(y)`,
+#' `s = sum(x), m = s / n()`. Each reducer call is aggregated as above (a
+#' repeated call once), and the rest is computed on the one-row-per-group
+#' result with [mutate.tbl_gpu()]'s expressions, so the result has dplyr's
+#' types and `NA` values. These stay with dplyr, for the reason named in the
+#' fallback notice: a function of the group's rows around a reducer
+#' (`lag(mean(x))`, `cumsum(sum(x))`); a column of the input outside a reducer
+#' (`mean(x) + x`, dplyr's "must be size 1" error); a reducer that reads a
+#' name an earlier expression assigned (`x = sum(x), t = sum(x)`); an
+#' expression that reads the name of a LATER expression (`mean(x) + k, k =
+#' sum(y)`: dplyr still sees the variable `k` there); `count()` inside an
+#' expression; a name assigned twice. A reducer inside a quosure spliced into
+#' the expression (`{{ stat }}`, `!!quo`) is computed in the quosure's own
+#' environment.
 #'
 #' ## NA handling
 #' `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()`/`median()` all match R's
@@ -211,8 +229,10 @@
 #' An expression named like a grouping column replaces that key in place
 #' (same position, the expression's type; the table stays grouped by that
 #' name). An expression that mentions a name an earlier expression created
-#' (or a name created twice) sees the new value, as in dplyr; such calls run
-#' through the CPU fallback.
+#' (or a name created twice) sees the new value, as in dplyr. When that
+#' expression is arithmetic around reducers and earlier results (`m = s / n()`)
+#' it runs on the GPU (see above); a reducer that reads the name (`x =
+#' sum(x), t = sum(x)`) or a repeated name runs through the CPU fallback.
 #'
 #' ## Group order
 #' `group_by(g) |> summarise(...)` returns groups in dplyr's `group_by()`
@@ -548,13 +568,11 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   }
 
   # #22: the arithmetic around the reducers is judged before any GPU work too. A
-  # post step that can't run on the GPU leaves the call to dplyr, for the reason the
-  # call had before it was split.
+  # post step that can't run on the GPU leaves the call to dplyr; the screen claims
+  # the user's dot it stopped at (and why) for the notice.
   if (!is.null(post)) {
     post <- summarise_post_screen(post, in_schema, ir_cache, simple_aggs)
     if (is.null(post)) {
-      summarise_dots_parseable(name_dots_silently(expanded), in_schema)
-      fallback_failed_remap(attr(expanded, "provenance")$origin)
       return(gpu_fallback("summarise", .data, function(tbl) {
         dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo)
       }, reason = fallback_failed_reason(orig_dots, "an aggregation has a form the GPU engine does not support.")))
@@ -1498,6 +1516,8 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   # to their aggregations (summarise_simple_aggregations()); anything else
   # takes the general steps below.
   aggregations <- simple_aggs %||% summarise_simple_aggregations(dots, current_schema(.data))
+  dot_names <- names(dots)
+  dot_labels <- attr(dots, "provenance")$label  # (#22: set on a split call's temp aggregates)
   working_data <- .data
   bool_temps <- character()
   user_dots <- NULL  # the dots as written, for a verb-time notice's expression
@@ -1577,6 +1597,11 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   if (any(min_max_now | sum_now)) {
     # (the notice names the user's columns that need it, never an internal one)
     named <- vapply(aggregations[min_max_now | sum_now], `[[`, character(1), "output_col")
+    # (a leaf of a dot with arithmetic around reducers is named by that dot)
+    if (!is.null(dot_labels)) {
+      hit <- match(named, dot_names)
+      named <- unique(ifelse(is.na(hit), named, dot_labels[hit]))
+    }
     reason <- paste0(
       "an integer ", paste(c(if (any(min_max_now)) "min()/max()", if (any(sum_now)) "sum()"), collapse = " or "),
       " (result type depends on the data): ", paste(named, collapse = ", ")
@@ -1983,14 +2008,14 @@ decompose_agg_call <- function(expr) {
 # Internal (F88): why summarise() leaves dot `expr`, whose head `head` is not
 # one of its reducers, to dplyr. A head with no GPU handler anywhere is said to
 # have none (cor(), weighted.mean()); any other breaks summarise()'s own rule:
-# one reducer call per expression, optionally of a GPU expression of columns
-# (`max(x) - min(x)` combines reducers, `sqrt(mean(x))` wraps one).
+# reducer calls, with GPU arithmetic on their results (#22) and GPU expressions of
+# columns inside them (`max(x) - min(x)`, `sqrt(mean(x))`, `mean(x * y)`).
 # @keywords internal
 summarise_shape_reason <- function(expr, head) {
-  rule <- "summarise() runs one reducer call per expression on the GPU (such as `mean(x * y)`)"
+  rule <- "summarise() runs reducer calls on the GPU, with arithmetic around them or inside them (such as `mean(x * y) + 1`)"
   inner <- unlist(lapply(as.list(expr)[-1L], rowwise_call_heads), use.names = FALSE)
   shape <- if (any(match(inner, agg_functions, 0L) > 0L)) {
-    sprintf("%s, not `%s()` around reducers; dplyr evaluates this one.", rule, head)
+    sprintf("%s, not a `%s()` call around reducers in this form; dplyr evaluates this one.", rule, head)
   } else {
     sprintf("%s, and this one calls no reducer; dplyr evaluates it.", rule)
   }

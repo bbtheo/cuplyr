@@ -50,9 +50,10 @@ summarise_post_reads <- function(expr) {
 # @return NULL (the call has no composite dot, or one the plan can't classify), or
 #   `list(agg_dots, post, out_names, n_keys)`: `agg_dots` the quosures to
 #   aggregate (the plain reducer dots under their own names, the leaves as
-#   `.post_agg<k>`), carrying the `provenance` that maps each to its user dot;
-#   `post` the post dots `list(name, quo)` in dot order; `out_names` the result's
-#   dot names in order.
+#   `.post_agg<k>`), carrying the `provenance` that maps each to its user dot (and
+#   the name of the dot it is part of, `label`); `post` the post dots
+#   `list(name, quo, origin)` in dot order; `out_names` the result's dot names in
+#   order.
 # @keywords internal
 summarise_post_split <- function(dots, expanded, in_schema, groups) {
   nms <- names(dots)
@@ -60,6 +61,20 @@ summarise_post_split <- function(dots, expanded, in_schema, groups) {
   if (n == 0L || anyNA(nms) || anyDuplicated(nms) > 0L || any(nms %in% groups)) {
     return(NULL)
   }
+  # The heads alone say whether any dot is composite. A call whose dots are all
+  # reducer calls (`m = mean(z), n = n()`) is not ours, and pays only this.
+  composite <- FALSE
+  for (i in seq_len(n)) {
+    head <- summarise_post_head(.subset2(.subset2(dots, i), 2L))
+    if (is.null(head) || match(head, agg_functions, 0L) == 0L) {
+      composite <- TRUE
+      break
+    }
+  }
+  if (!composite) {
+    return(NULL)
+  }
+
   col_names <- in_schema$names
   origin_of <- attr(expanded, "provenance")$origin
   if (length(origin_of) != n) {
@@ -70,22 +85,24 @@ summarise_post_split <- function(dots, expanded, in_schema, groups) {
   agg_quos <- list()
   agg_names <- character()
   agg_origin <- integer()
-  leaves <- list()  # shared leaves: list(expr, env, name)
+  agg_label <- character()
+  leaves <- new.env(parent = emptyenv())  # shared leaves, by the text of the call: list(expr, env, name)
   post <- list()
   bail <- FALSE
-  has_composite <- FALSE
 
-  add_agg <- function(name, quo, origin) {
+  add_agg <- function(name, quo, origin, label) {
     agg_quos[[length(agg_quos) + 1L]] <<- quo
     agg_names[[length(agg_names) + 1L]] <<- name
     agg_origin[[length(agg_origin) + 1L]] <<- origin
+    agg_label[[length(agg_label) + 1L]] <<- label
   }
 
   for (i in seq_len(n)) {
-    quo <- dots[[i]]
+    quo <- .subset2(dots, i)
     expr <- rlang::quo_get_expr(quo)
     env <- rlang::quo_get_env(quo)
     earlier <- nms[seq_len(i - 1L)]
+    later <- nms[-seq_len(i)]
     reads_earlier <- function(e) {
       r <- summarise_post_reads(e)
       anyNA(r) || any(r %in% earlier)
@@ -97,15 +114,25 @@ summarise_post_split <- function(dots, expanded, in_schema, groups) {
       if (identical(head, "count") || reads_earlier(expr)) {
         return(NULL)
       }
-      add_agg(nms[[i]], quo, origin_of[[i]])
+      add_agg(nms[[i]], quo, origin_of[[i]], nms[[i]])
       next
     }
 
-    has_composite <- TRUE
-    # replace each maximal reducer call by a temp symbol
-    walk <- function(e) {
+    # replace each maximal reducer call by a temp symbol. `env` is the
+    # environment the code under `e` is written in: an embedded quosure
+    # (`{{ arg }}`, `!!quo`) brings its own.
+    walk <- function(e, env) {
       if (!is.call(e)) {
         return(e)
+      }
+      if (rlang::is_quosure(e)) {
+        inner <- rlang::quo_get_expr(e)
+        new_inner <- walk(inner, rlang::quo_get_env(e))
+        if (identical(new_inner, inner)) {
+          return(e)
+        }
+        # (a quosure that was one reducer call is its leaf)
+        return(if (is.symbol(new_inner)) new_inner else rlang::quo_set_expr(e, new_inner))
       }
       h <- summarise_post_head(e)
       if (!is.null(h) && h %in% agg_functions) {
@@ -113,51 +140,63 @@ summarise_post_split <- function(dots, expanded, in_schema, groups) {
           bail <<- TRUE
           return(e)
         }
-        share <- if (!h %in% c("min", "max")) {
-          # (min()/max() warn per call, as dplyr evaluates each: never shared)
-          Find(function(l) identical(l$expr, e, num.eq = FALSE) && identical(l$env, env), leaves)
+        # (min()/max() warn per call, as dplyr evaluates each: never shared)
+        key <- if (!h %in% c("min", "max")) paste(deparse(e, width.cutoff = 500L), collapse = "\n")
+        share <- NULL
+        for (l in if (!is.null(key)) leaves[[key]]) {
+          if (identical(l$expr, e, num.eq = FALSE) && identical(l$env, env)) {
+            share <- l
+            break
+          }
         }
         if (!is.null(share)) {
           return(as.name(share$name))
         }
         name <- unique_temp_name(paste0(".post_agg", length(agg_quos) + 1L), taken)
         taken <<- c(taken, name)
-        leaves[[length(leaves) + 1L]] <<- list(expr = e, env = env, name = name)
-        add_agg(name, rlang::new_quosure(e, env), origin_of[[i]])
+        if (!is.null(key)) {
+          leaves[[key]] <- c(leaves[[key]], list(list(expr = e, env = env, name = name)))
+        }
+        add_agg(name, rlang::new_quosure(e, env), origin_of[[i]], nms[[i]])
         return(as.name(name))
       }
       for (k in seq_along(e)[-1L]) {
-        e[[k]] <- walk(e[[k]])
+        e[[k]] <- walk(e[[k]], env)
       }
       e
     }
-    new_expr <- tryCatch(walk(expr), error = function(cnd) {
+    new_expr <- tryCatch(walk(expr, env), error = function(cnd) {
       bail <<- TRUE
       expr
     })
     if (bail) {
       return(NULL)
     }
-    # outside a reducer a column of the input is the group's chunk (dplyr's "must be
-    # size 1"); only results of earlier dots are one value
+    # Outside a reducer a column of the input is the group's chunk (dplyr's "must be
+    # size 1"); only results of earlier dots are one value. The name of a later dot
+    # is not one yet: the table the post step reads holds every plain reducer dot,
+    # later ones included, which would shadow the variable or column dplyr reads.
     reads <- summarise_post_reads(new_expr)
-    if (anyNA(reads) || any(reads %in% col_names & !reads %in% earlier)) {
+    if (anyNA(reads) || any(reads %in% later) || any(reads %in% col_names & !reads %in% earlier)) {
       return(NULL)
     }
-    post[[length(post) + 1L]] <- list(name = nms[[i]], quo = rlang::new_quosure(new_expr, env))
+    post[[length(post) + 1L]] <- list(name = nms[[i]], quo = rlang::new_quosure(new_expr, env),
+                                      origin = origin_of[[i]])
   }
 
-  if (!has_composite || length(agg_quos) == 0L) {
+  if (length(post) == 0L || length(agg_quos) == 0L) {
     return(NULL)
   }
   agg_dots <- rlang::new_quosures(stats::setNames(agg_quos, agg_names))
-  attr(agg_dots, "provenance") <- list(origin = agg_origin, kind = rep("dot", length(agg_quos)))
+  attr(agg_dots, "provenance") <- list(origin = agg_origin, kind = rep("dot", length(agg_quos)),
+                                       label = agg_label)
   list(agg_dots = agg_dots, post = post, out_names = nms, n_keys = length(groups))
 }
 
 # Judge the post expressions of a split before any GPU work: each must parse, with
 # no window, against the schema the aggregated table will have (the keys are
-# unreadable, so it holds the aggregates and the earlier post results only).
+# unreadable, so it holds the aggregates and the earlier post results only). A
+# dot it declines is claimed for the F88 notice, by the user's dot it comes from.
 #
 # @param post The result of summarise_post_split()
 # @param simple_aggs The aggregations of the agg dots when they are all simple
@@ -165,20 +204,26 @@ summarise_post_split <- function(dots, expanded, in_schema, groups) {
 # @keywords internal
 summarise_post_screen <- function(post, in_schema, ir_cache, simple_aggs = NULL) {
   dots <- post$agg_dots
+  origin <- attr(dots, "provenance")$origin
+  no <- function(dot, reason = fallback_cause_take()) {
+    fallback_dot_failed(dot, reason)
+    NULL
+  }
   types <- character(length(dots))
   for (j in seq_along(dots)) {
     if (!is.null(simple_aggs)) {
       types[[j]] <- unname(.subset2(simple_aggs[[j]], "output_type"))
       next
     }
+    fallback_dot_begin()
     parts <- tryCatch(agg_dot_parts(ir_cache, j, dots[[j]], in_schema), error = function(e) NULL)
     if (is.null(parts)) {
-      return(NULL)
+      return(no(origin[[j]]))
     }
     expr <- rlang::quo_get_expr(parts$quo)
     decomposed <- decompose_agg_call(expr)
     if (is.null(decomposed) || !decomposed$fn_name %in% names(agg_fn_map)) {
-      return(NULL)
+      return(no(origin[[j]]))
     }
     fn <- decomposed$fn_name
     arg <- decomposed$arg
@@ -192,7 +237,7 @@ summarise_post_screen <- function(post, in_schema, ir_cache, simple_aggs = NULL)
           if (is.null(ir)) NA_character_ else ir_infer_type(ir, in_schema)
         }, error = function(e) NA_character_)
         if (is.na(arg_type)) {
-          return(NULL)
+          return(no(origin[[j]]))
         }
         # (a logical argument is an integer for every reducer that doesn't keep it)
         if (identical(arg_type, "BOOL8") && !agg_keeps_bool(fn)) {
@@ -205,17 +250,27 @@ summarise_post_screen <- function(post, in_schema, ir_cache, simple_aggs = NULL)
 
   schema <- list(names = names(dots), types = types)
   for (p in post$post) {
+    fallback_dot_begin()
     ir <- tryCatch(
       ir_parse_quo(p$quo, schema),
-      cuplyr_vector_literal = function(e) NULL,
+      cuplyr_vector_literal = function(e) {
+        fallback_cause("a vector constant inside a larger expression is recycled by dplyr.")
+        NULL
+      },
       error = function(e) NULL
     )
-    if (is.null(ir) || ir_has_window(ir)) {
-      return(NULL)
+    if (is.null(ir)) {
+      return(no(p$origin))
+    }
+    if (ir_has_window(ir)) {
+      return(no(p$origin, paste0(
+        "a function of the group's rows around a reducer (such as `lag()` or `cumsum()`) ",
+        "is evaluated per group by dplyr."
+      )))
     }
     type <- tryCatch(ir_infer_type(ir, schema), error = function(e) NA_character_)
     if (is.na(type) || type %in% c("DICTIONARY32", "LIST", "STRUCT")) {
-      return(NULL)
+      return(no(p$origin, "the result of the arithmetic around the reducers has a type the GPU engine does not take here."))
     }
     schema$names <- c(schema$names, p$name)
     schema$types <- c(schema$types, type)

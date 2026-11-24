@@ -5,9 +5,9 @@
   `sum(x) / n()`, and a later dot that uses an earlier result (`m = s / n()`),
   no longer fall back to the CPU. The reducers are aggregated first and the
   arithmetic is then computed on the one-row-per-group result, with dplyr's
-  types, `NA`/`NaN` values, integer-overflow warnings and `.drop = FALSE`
-  empty groups. Shapes with no GPU form, such as `lag(mean(x))`, still run in
-  dplyr (#22).
+  types, `NA`/`NaN` values and `.drop = FALSE` empty groups (an integer
+  overflow gives `NA` with R's warning). Shapes with no GPU form, such as
+  `lag(mean(x))`, still run in dplyr (#22).
 
 * `mutate()`, `transmute()` and `filter()` compute a repeated `round()`,
   `%in%`, string function or any other subexpression that needs its own GPU

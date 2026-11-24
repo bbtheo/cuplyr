@@ -13,10 +13,11 @@
 \item{.data}{A grouped \code{tbl_gpu} object created by \code{\link[dplyr:group_by]{group_by()}}.}
 
 \item{...}{Name-value pairs of summary functions. The name will be the
-name of the variable in the result. The value must be a single aggregation
+name of the variable in the result. The value is an aggregation
 expression in the form \code{fun(column)}, where \code{column} can also be any
 expression the internal expression IR understands (see "Aggregation
-sub-expressions" below).}
+sub-expressions" below), or arithmetic around such calls and the results
+of earlier expressions (see "Arithmetic around reducers" below).}
 
 \item{.groups}{Controls grouping structure of the result (Phase 6, task
 3; matches \code{dplyr::summarise()}'s own contract exactly, verified
@@ -138,10 +139,28 @@ GROUP first (over each group's own row order, using the same
 window-decomposition engine \code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}} uses), and the
 aggregation then reduces that per-row window result -- matching dplyr's
 own two-step semantics exactly. Only ONE aggregation's own argument tree
-is decomposed this way: combining TWO SEPARATE aggregation calls at the
-dot level (\code{sum(cumsum(x)) - mean(y)}) is not supported (the same
-"Invalid aggregation expression" error as any other dot that isn't a
-bare \code{fn(single_arg)} shape).
+is decomposed this way; several aggregation calls in one dot are combined
+by the next section.
+}
+
+\subsection{Arithmetic around reducers}{
+
+An expression may combine reducer calls with arithmetic, comparisons, math
+functions and constants, and may read the result of an earlier expression:
+\code{mean(x) + 1}, \code{sum(x) / n()}, \code{max(x) - min(x)},
+\code{mean(x) - qnorm(.975) * sd(x) / sqrt(n())}, \code{sum(cumsum(x)) - mean(y)},
+\verb{s = sum(x), m = s / n()}. Each reducer call is aggregated as above (a
+repeated call once), and the rest is computed on the one-row-per-group
+result with \code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}}'s expressions, so the result has dplyr's
+types and \code{NA} values. These stay with dplyr, for the reason named in the
+fallback notice: a function of the group's rows around a reducer
+(\code{lag(mean(x))}, \code{cumsum(sum(x))}); a column of the input outside a reducer
+(\code{mean(x) + x}, dplyr's "must be size 1" error); a reducer that reads a
+name an earlier expression assigned (\verb{x = sum(x), t = sum(x)}); an
+expression that reads the name of a LATER expression (\verb{mean(x) + k, k = sum(y)}: dplyr still sees the variable \code{k} there); \code{count()} inside an
+expression; a name assigned twice. A reducer inside a quosure spliced into
+the expression (\code{{{ stat }}}, \code{!!quo}) is computed in the quosure's own
+environment.
 }
 
 \subsection{NA handling}{
@@ -240,8 +259,9 @@ of returning a wrong row count (full support is F14).
 An expression named like a grouping column replaces that key in place
 (same position, the expression's type; the table stays grouped by that
 name). An expression that mentions a name an earlier expression created
-(or a name created twice) sees the new value, as in dplyr; such calls run
-through the CPU fallback.
+(or a name created twice) sees the new value, as in dplyr. When that
+expression is arithmetic around reducers and earlier results (\code{m = s / n()})
+it runs on the GPU (see above); a reducer that reads the name (\verb{x = sum(x), t = sum(x)}) or a repeated name runs through the CPU fallback.
 }
 
 \subsection{Group order}{

@@ -321,7 +321,7 @@ test_that("F88: summarise() shapes around reducers get summarise()'s rule, unkno
       got <- f88r_run(cs$f, lazy)
       expect_length(got, 1L)
       expect_identical(got[[1L]]$expr, cs$expr)
-      expect_match(got[[1L]]$reason, "one reducer call per expression", fixed = TRUE)
+      expect_match(got[[1L]]$reason, "a function of the group's rows around a reducer", fixed = TRUE)
     }
   }
   got <- f88r_run(function(t) summarise(t, r = cor(x, y)))
