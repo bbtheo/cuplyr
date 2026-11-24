@@ -303,7 +303,7 @@ test_that("F88: a probe leaves the pending cause alone, and a new dot drops it",
   expect_null(fallback_cause_take())
 })
 
-test_that("F88: summarise() shapes around reducers get summarise()'s rule, unknown reducers their name", {
+test_that("F88: a window around a reducer, a column beside one and an unknown reducer get their reasons", {
   skip_if_no_gpu()
   withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = NULL)
   # (arithmetic around reducers runs on the GPU since #22: what stays with dplyr is a
@@ -323,6 +323,15 @@ test_that("F88: summarise() shapes around reducers get summarise()'s rule, unkno
       expect_identical(got[[1L]]$expr, cs$expr)
       expect_match(got[[1L]]$reason, "a function of the group's rows around a reducer", fixed = TRUE)
     }
+  }
+  # a column beside a reducer is no arithmetic around it (dplyr's "must be size 1"):
+  # summarise()'s own rule (summarise_shape_reason())
+  for (lazy in c(FALSE, TRUE)) {
+    got <- f88r_cpu(tryCatch(collect(summarise(group_by(tbl_gpu(f88r_df(), lazy = lazy), g), r = mean(x) + x)),
+                             error = function(e) NULL))
+    expect_length(got, 1L)
+    expect_identical(got[[1L]]$expr, "mean(x) + x")
+    expect_match(got[[1L]]$reason, "not a `+()` call around reducers in this form", fixed = TRUE)
   }
   got <- f88r_run(function(t) summarise(t, r = cor(x, y)))
   expect_identical(got[[1L]]$reason, "`cor()` has no GPU implementation.")

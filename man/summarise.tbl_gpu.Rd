@@ -152,15 +152,28 @@ functions and constants, and may read the result of an earlier expression:
 \verb{s = sum(x), m = s / n()}. Each reducer call is aggregated as above (a
 repeated call once), and the rest is computed on the one-row-per-group
 result with \code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}}'s expressions, so the result has dplyr's
-types and \code{NA} values. These stay with dplyr, for the reason named in the
-fallback notice: a function of the group's rows around a reducer
-(\code{lag(mean(x))}, \code{cumsum(sum(x))}); a column of the input outside a reducer
-(\code{mean(x) + x}, dplyr's "must be size 1" error); a reducer that reads a
-name an earlier expression assigned (\verb{x = sum(x), t = sum(x)}); an
-expression that reads the name of a LATER expression (\verb{mean(x) + k, k = sum(y)}: dplyr still sees the variable \code{k} there); \code{count()} inside an
-expression; a name assigned twice. A reducer inside a quosure spliced into
-the expression (\code{{{ stat }}}, \code{!!quo}) is computed in the quosure's own
-environment.
+types and \code{NA} values, with three exceptions. Math with no real value
+(\code{sqrt(mean(x))} of a negative mean) is \code{NaN} without R's "NaNs produced"
+warning. A power with a constant exponent follows R except for a \code{-Inf}
+base with a non-integer exponent (\code{Inf} or \code{0} where R gives \code{NaN}), a
+\code{-0} base with an odd exponent and a \code{-Inf} base with a negative odd one
+(a zero or an infinity of the other sign).
+An integer \code{sum()} that leaves the integer range in some group is a double
+in every group, so \code{sum(x) + 1L} gives a value in a group whose sum still
+is an integer where dplyr warns about the overflow and gives \code{NA}.
+
+These stay with dplyr, for the reason named in the fallback notice: a
+function of the group's rows around a reducer (\code{lag(mean(x))},
+\code{cumsum(sum(x))}); \code{^} whose exponent is not a constant other than 0, \code{NA}
+and an infinity (R's \code{NA^0} and \code{1^NA} are 1, the GPU's are \code{NA}); \code{&}, \code{|}
+or \code{!} of a double (R reads \code{NaN} there as \code{NA}); \code{if_else()} or
+\code{case_when()} with a condition that is not a logical expression; a column
+of the input outside a reducer (\code{mean(x) + x}, dplyr's "must be size 1"
+error); a reducer that reads a name an earlier expression assigned (\verb{x = sum(x), t = sum(x)}); an expression that reads the name of a LATER
+expression (\verb{mean(x) + k, k = sum(y)}: dplyr still sees the variable \code{k}
+there); \code{count()} inside an expression; a name assigned twice. A reducer
+inside a quosure spliced into the expression (\code{{{ stat }}}, \code{!!quo}) is
+computed in the quosure's own environment.
 }
 
 \subsection{NA handling}{

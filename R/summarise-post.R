@@ -50,10 +50,12 @@ summarise_post_reads <- function(expr) {
 # @return NULL (the call has no composite dot, or one the plan can't classify), or
 #   `list(agg_dots, post, out_names, n_keys)`: `agg_dots` the quosures to
 #   aggregate (the plain reducer dots under their own names, the leaves as
-#   `.post_agg<k>`), carrying the `provenance` that maps each to its user dot (and
-#   the name of the dot it is part of, `label`); `post` the post dots
+#   `.post_agg<k>`), carrying the `provenance` that maps each to its user dot
+#   (`origin`), the name of the dot it is part of (`label`) and, for a leaf, that
+#   dot's quosure (`dot`, NULL for a plain reducer dot); `post` the post dots
 #   `list(name, quo, origin)` in dot order; `out_names` the result's dot names in
-#   order.
+#   order; `why` an environment where summarise_post_apply() leaves the reason a
+#   rerun on the CPU has.
 # @keywords internal
 summarise_post_split <- function(dots, expanded, in_schema, groups) {
   nms <- names(dots)
@@ -80,21 +82,27 @@ summarise_post_split <- function(dots, expanded, in_schema, groups) {
   if (length(origin_of) != n) {
     origin_of <- seq_len(n)
   }
-  taken <- c(nms, col_names, groups)
+  # (a temp name must not hide a variable a dot reads: `mean(x) + .post_agg2`)
+  taken <- c(nms, col_names, groups,
+             unlist(lapply(dots, function(q) all.vars(rlang::quo_get_expr(q))), use.names = FALSE))
 
   agg_quos <- list()
   agg_names <- character()
   agg_origin <- integer()
   agg_label <- character()
-  leaves <- new.env(parent = emptyenv())  # shared leaves, by the text of the call: list(expr, env, name)
+  agg_src <- list()
+  # shared leaves, by the reducer and its first argument when that is a name (no
+  # deparse: a large constant inside a call costs nothing): list(expr, env, name)
+  leaves <- new.env(parent = emptyenv())
   post <- list()
   bail <- FALSE
 
-  add_agg <- function(name, quo, origin, label) {
+  add_agg <- function(name, quo, origin, label, src = NULL) {
     agg_quos[[length(agg_quos) + 1L]] <<- quo
     agg_names[[length(agg_names) + 1L]] <<- name
     agg_origin[[length(agg_origin) + 1L]] <<- origin
     agg_label[[length(agg_label) + 1L]] <<- label
+    agg_src[length(agg_src) + 1L] <<- list(src)
   }
 
   for (i in seq_len(n)) {
@@ -141,7 +149,11 @@ summarise_post_split <- function(dots, expanded, in_schema, groups) {
           return(e)
         }
         # (min()/max() warn per call, as dplyr evaluates each: never shared)
-        key <- if (!h %in% c("min", "max")) paste(deparse(e, width.cutoff = 500L), collapse = "\n")
+        key <- NULL
+        if (!h %in% c("min", "max")) {
+          a <- if (length(e) >= 2L) .subset2(e, 2L)
+          key <- if (is.symbol(a)) paste0(h, "(", as.character(a)) else h
+        }
         share <- NULL
         for (l in if (!is.null(key)) leaves[[key]]) {
           if (identical(l$expr, e, num.eq = FALSE) && identical(l$env, env)) {
@@ -157,11 +169,14 @@ summarise_post_split <- function(dots, expanded, in_schema, groups) {
         if (!is.null(key)) {
           leaves[[key]] <- c(leaves[[key]], list(list(expr = e, env = env, name = name)))
         }
-        add_agg(name, rlang::new_quosure(e, env), origin_of[[i]], nms[[i]])
+        add_agg(name, rlang::new_quosure(e, env), origin_of[[i]], nms[[i]], quo)
         return(as.name(name))
       }
+      # (only calls change; `e[k] <- list()` keeps a NULL argument, `round(m, NULL)`)
       for (k in seq_along(e)[-1L]) {
-        e[[k]] <- walk(e[[k]], env)
+        if (is.call(e[[k]])) {
+          e[k] <- list(walk(e[[k]], env))
+        }
       }
       e
     }
@@ -189,8 +204,84 @@ summarise_post_split <- function(dots, expanded, in_schema, groups) {
   }
   agg_dots <- rlang::new_quosures(stats::setNames(agg_quos, agg_names))
   attr(agg_dots, "provenance") <- list(origin = agg_origin, kind = rep("dot", length(agg_quos)),
-                                       label = agg_label)
-  list(agg_dots = agg_dots, post = post, out_names = nms, n_keys = length(groups))
+                                       label = agg_label, dot = agg_src)
+  list(agg_dots = agg_dots, post = post, out_names = nms, n_keys = length(groups),
+       why = new.env(parent = emptyenv()))
+}
+
+# Why the GPU engine would give a value R does not, for a value an aggregate can
+# take (NA, or NaN: `mean()` of an empty group), in post expression `ir`; NULL
+# when it gives R's. A reducer's result is NA or NaN where a column is rarely
+# either, so these, which mutate() shares, are kept off the post step:
+# - `^`: R's `NA^0` and `1^NA` are 1, the engine's pow is NA when either side is
+#   (and R's `(-1)^Inf` is NaN). A constant exponent other than 0, NA and an
+#   infinity is R's, except with a `-Inf` or `-0` base (R_pow() special-cases
+#   them: `(-Inf)^0.5` is NaN, `(-0)^-1` Inf; the engine's pow gives Inf, -Inf),
+#   which a reducer gives far less often (documented in summarise()'s help).
+# - `&`, `|`, `!` of a double: R reads NaN as NA, the engine as TRUE.
+# - `if_else()`/`case_when()` with a condition that is not a logical expression:
+#   dplyr's error, or for a bare NA dplyr's NA, where the engine fails at execution.
+# @keywords internal
+summarise_post_na_rule <- function(ir, schema) {
+  if (!inherits(ir, "cuplyr_ir") || !identical(.subset2(ir, "kind"), "call")) {
+    return(NULL)
+  }
+  op <- .subset2(ir, "op")
+  args <- .subset2(ir, "args")
+  # (a bare NA literal adopts its sibling's type: never a double here)
+  type_of <- function(a) {
+    if (identical(.subset2(a, "kind"), "lit") && isTRUE(.subset2(a, "na"))) {
+      return("BOOL8")
+    }
+    tryCatch(unname(ir_infer_type(a, schema)), error = function(e) NA_character_)
+  }
+  if (identical(op, "^")) {
+    # (the exponent's value: a literal, under a unary minus or parentheses)
+    ex <- .subset2(args, 2L)
+    sign <- 1
+    while (identical(.subset2(ex, "kind"), "call") && length(.subset2(ex, "args")) == 1L &&
+           match(.subset2(ex, "op"), c("-", "("), 0L) > 0L) {
+      if (identical(.subset2(ex, "op"), "-")) sign <- -sign
+      ex <- .subset2(.subset2(ex, "args"), 1L)
+    }
+    v <- if (identical(.subset2(ex, "kind"), "lit") && !isTRUE(.subset2(ex, "na"))) .subset2(ex, "value")
+    if (is.numeric(v) || is.logical(v)) v <- sign * v
+    if (!((is.numeric(v) || is.logical(v)) && length(v) == 1L && is.finite(v) && v != 0)) {
+      return(paste0(
+        "`^` around a reducer runs on the GPU only with a constant exponent other than 0, NA or an ",
+        "infinity: R's `NA^0` and `1^NA` are 1, where the GPU engine gives NA."
+      ))
+    }
+  } else if (match(op, c("&", "|", "!"), 0L) > 0L) {
+    for (a in args) {
+      t <- type_of(a)
+      if (is.na(t) || identical(t, "FLOAT64")) {
+        return(paste0("`&`, `|` and `!` of a double around a reducer read NaN as TRUE on the GPU, ",
+                      "where R gives NA; dplyr evaluates it."))
+      }
+    }
+  } else if (identical(op, "if_else") || identical(op, "case_when")) {
+    conds <- if (identical(op, "if_else")) {
+      args[1L]
+    } else {
+      args[seq(1L, by = 2L, length.out = .subset2(.subset2(ir, "meta"), "n_when"))]
+    }
+    # (a bare NA condition too: the engine takes it for a double, dplyr for logical)
+    for (a in conds) {
+      if ((identical(.subset2(a, "kind"), "lit") && isTRUE(.subset2(a, "na"))) ||
+          !identical(tryCatch(unname(ir_infer_type(a, schema)), error = function(e) NA_character_), "BOOL8")) {
+        return(sprintf("a condition of `%s()` that is not a logical expression has no GPU form; dplyr evaluates it.",
+                       op))
+      }
+    }
+  }
+  for (a in args) {
+    why <- summarise_post_na_rule(a, schema)
+    if (!is.null(why)) {
+      return(why)
+    }
+  }
+  NULL
 }
 
 # Judge the post expressions of a split before any GPU work: each must parse, with
@@ -260,13 +351,22 @@ summarise_post_screen <- function(post, in_schema, ir_cache, simple_aggs = NULL)
       error = function(e) NULL
     )
     if (is.null(ir)) {
-      return(no(p$origin))
+      cause <- fallback_cause_take()
+      # (the expression engine's type text names mutate(); the dot is summarise()'s)
+      if (is.character(cause)) {
+        cause <- sub("mutate() does not support", "the GPU engine does not support", cause, fixed = TRUE)
+      }
+      return(no(p$origin, cause))
     }
     if (ir_has_window(ir)) {
       return(no(p$origin, paste0(
         "a function of the group's rows around a reducer (such as `lag()` or `cumsum()`) ",
         "is evaluated per group by dplyr."
       )))
+    }
+    why <- summarise_post_na_rule(ir, schema)
+    if (!is.null(why)) {
+      return(no(p$origin, why))
     }
     type <- tryCatch(ir_infer_type(ir, schema), error = function(e) NA_character_)
     if (is.na(type) || type %in% c("DICTIONARY32", "LIST", "STRUCT")) {
@@ -283,11 +383,16 @@ summarise_post_screen <- function(post, in_schema, ir_cache, simple_aggs = NULL)
 # expressions of one mutate node do), then a select of the keys and the user's dot
 # names, which drops the temp aggregates. The expressions are parsed against the
 # real result (an INT32 sum that left the integer range is a double there). A
-# parse that fails now reruns the call on the CPU, as an integer overflow does.
+# parse that fails now reruns the call on the CPU, as an integer overflow does,
+# with its own reason (left in `post$why` for the caller's CPU route).
 # @keywords internal
 summarise_post_apply <- function(res, post) {
   schema <- current_schema(res)
-  rerun <- function(e = NULL) {
+  rerun <- function() {
+    if (is.environment(post$why)) {
+      post$why$reason <- paste0("the arithmetic around the reducers has no GPU form for the types ",
+                                "the aggregates came out with; dplyr evaluates it.")
+    }
     rlang::abort("The arithmetic around the aggregates has no GPU form here.",
                  class = "cuplyr_summarise_rerun")
   }

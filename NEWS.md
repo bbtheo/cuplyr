@@ -7,7 +7,9 @@
   arithmetic is then computed on the one-row-per-group result, with dplyr's
   types, `NA`/`NaN` values and `.drop = FALSE` empty groups (an integer
   overflow gives `NA` with R's warning). Shapes with no GPU form, such as
-  `lag(mean(x))`, still run in dplyr (#22).
+  `lag(mean(x))`, and shapes where the GPU's missing-value rules differ from
+  R's, such as `mean(x)^0` (1 in R for a missing mean) or `!mean(x)`, still
+  run in dplyr (#22).
 
 * `mutate()`, `filter()`, `cross_join()`, the joins with `by = character()`,
   `intersect()`, `setdiff()`, `symdiff()`, `setequal()`, `reframe()` and the

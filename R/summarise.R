@@ -131,16 +131,29 @@
 #' `s = sum(x), m = s / n()`. Each reducer call is aggregated as above (a
 #' repeated call once), and the rest is computed on the one-row-per-group
 #' result with [mutate.tbl_gpu()]'s expressions, so the result has dplyr's
-#' types and `NA` values. These stay with dplyr, for the reason named in the
-#' fallback notice: a function of the group's rows around a reducer
-#' (`lag(mean(x))`, `cumsum(sum(x))`); a column of the input outside a reducer
-#' (`mean(x) + x`, dplyr's "must be size 1" error); a reducer that reads a
-#' name an earlier expression assigned (`x = sum(x), t = sum(x)`); an
-#' expression that reads the name of a LATER expression (`mean(x) + k, k =
-#' sum(y)`: dplyr still sees the variable `k` there); `count()` inside an
-#' expression; a name assigned twice. A reducer inside a quosure spliced into
-#' the expression (`{{ stat }}`, `!!quo`) is computed in the quosure's own
-#' environment.
+#' types and `NA` values, with three exceptions. Math with no real value
+#' (`sqrt(mean(x))` of a negative mean) is `NaN` without R's "NaNs produced"
+#' warning. A power with a constant exponent follows R except for a `-Inf`
+#' base with a non-integer exponent (`Inf` or `0` where R gives `NaN`), a
+#' `-0` base with an odd exponent and a `-Inf` base with a negative odd one
+#' (a zero or an infinity of the other sign).
+#' An integer `sum()` that leaves the integer range in some group is a double
+#' in every group, so `sum(x) + 1L` gives a value in a group whose sum still
+#' is an integer where dplyr warns about the overflow and gives `NA`.
+#'
+#' These stay with dplyr, for the reason named in the fallback notice: a
+#' function of the group's rows around a reducer (`lag(mean(x))`,
+#' `cumsum(sum(x))`); `^` whose exponent is not a constant other than 0, `NA`
+#' and an infinity (R's `NA^0` and `1^NA` are 1, the GPU's are `NA`); `&`, `|`
+#' or `!` of a double (R reads `NaN` there as `NA`); `if_else()` or
+#' `case_when()` with a condition that is not a logical expression; a column
+#' of the input outside a reducer (`mean(x) + x`, dplyr's "must be size 1"
+#' error); a reducer that reads a name an earlier expression assigned (`x =
+#' sum(x), t = sum(x)`); an expression that reads the name of a LATER
+#' expression (`mean(x) + k, k = sum(y)`: dplyr still sees the variable `k`
+#' there); `count()` inside an expression; a name assigned twice. A reducer
+#' inside a quosure spliced into the expression (`{{ stat }}`, `!!quo`) is
+#' computed in the quosure's own environment.
 #'
 #' ## NA handling
 #' `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()`/`median()` all match R's
@@ -588,8 +601,10 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   if (is.null(post)) auto_name_dots(expanded, "summarise")
 
   # (`tbl`: the table to run on; the empty-group path hands over the pending
-  # ops it has already computed)
-  cpu <- function(tbl = .data, reason = "an integer sum() inside an aggregation overflowed in some group; dplyr widens only those.") {
+  # ops it has already computed. A post step that failed on the real result
+  # left its own reason, #22.)
+  cpu <- function(tbl = .data, reason = .subset2(.subset2(post, "why"), "reason") %||%
+                    "an integer sum() inside an aggregation overflowed in some group; dplyr widens only those.") {
     gpu_fallback("summarise", tbl, function(tbl) {
       # (the bare name: dplyr's warnings name the call as written, F124)
       summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo)
@@ -1521,7 +1536,10 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   # takes the general steps below.
   aggregations <- simple_aggs %||% summarise_simple_aggregations(dots, current_schema(.data))
   dot_names <- names(dots)
-  dot_labels <- attr(dots, "provenance")$label  # (#22: set on a split call's temp aggregates)
+  # (#22: set on a split call's temp aggregates: the name and the quosure of the
+  # user's dot each leaf comes from)
+  provenance <- attr(dots, "provenance")
+  dot_labels <- provenance$label
   working_data <- .data
   bool_temps <- character()
   user_dots <- NULL  # the dots as written, for a verb-time notice's expression
@@ -1610,7 +1628,7 @@ summarise_core <- function(.data, dots, retained_groups = character(),
       "an integer ", paste(c(if (any(min_max_now)) "min()/max()", if (any(sum_now)) "sum()"), collapse = " or "),
       " (result type depends on the data): ", paste(named, collapse = ", ")
     )
-    expr <- summarise_notice_expr(dots, user_dots, which(min_max_now | sum_now))
+    expr <- summarise_notice_expr(dots, user_dots, which(min_max_now | sum_now), provenance$dot)
     return(summarise_run_now(working_data, aggregations, retained_groups, group_order, reason,
                              notice_data = notice_data, expr = expr))
   }
@@ -1628,12 +1646,18 @@ summarise_core <- function(.data, dots, retained_groups = character(),
 
 # Internal: the text a verb-time notice shows: the first of the `forcing` dots
 # whose argument is an expression (`fn(<expression>)`), as the user wrote it,
-# flags included; NA when `user_dots` is NULL or none is. Called only when a
-# notice can fire, so a call that never notifies deparses nothing.
+# flags included; NA when `user_dots` is NULL or none is. A leaf of a dot with
+# arithmetic around its reducers (#22, `sources[[i]]` its user dot) is always an
+# expression the user wrote: that dot. Called only when a notice can fire, so a
+# call that never notifies deparses nothing.
 # @keywords internal
-summarise_notice_expr <- function(dots, user_dots, forcing) {
-  if (is.null(user_dots)) return(NA_character_)
+summarise_notice_expr <- function(dots, user_dots, forcing, sources = NULL) {
   for (i in forcing) {
+    src <- if (i <= length(sources)) sources[[i]]
+    if (!is.null(src)) {
+      return(notice_expr_text(src))
+    }
+    if (is.null(user_dots)) next
     e <- rlang::quo_get_expr(dots[[i]])
     if (is.call(e) && length(e) >= 2L && !is.symbol(e[[2L]])) {
       return(notice_expr_text(user_dots[[i]]))

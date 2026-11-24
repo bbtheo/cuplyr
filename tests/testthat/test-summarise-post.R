@@ -111,3 +111,144 @@ test_that("many repeated reducers in one dot share one leaf each", {
     summarise(group_by(d, g), r = (sum(x) + sum(y)) / (sum(x) - sum(y)) + sum(x) * sum(y))
   })
 })
+
+# The fallback notice of a call, eager or lazy (NULL when it ran natively)
+sp_fallback <- function(f, df, lazy) {
+  got <- sp_notices(collect(f(tbl_gpu(df, lazy = lazy))), "cuplyr_cpu_fallback")
+  if (length(got) > 0L) got[[1L]]
+}
+
+test_that("a power around a reducer runs on the GPU only with a constant exponent R and the GPU agree on", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = NULL)
+  df <- tibble::tibble(g = c(1L, 1L, 2L, 3L), y = c(NA, 1, 2, -1))
+  k <- 0
+  # (R: NA^0, 1^NA and NA^FALSE are 1; (-1)^Inf is NaN. The GPU engine's pow gives NA and 1.)
+  declined <- list(
+    list(f = function(d) summarise(group_by(d, g), p = mean(y)^0), expr = "mean(y)^0"),
+    list(f = function(d) summarise(group_by(d, g), p = mean(y)^k), expr = "mean(y)^k"),
+    list(f = function(d) summarise(group_by(d, g), p = mean(y)^FALSE), expr = "mean(y)^FALSE"),
+    list(f = function(d) summarise(group_by(d, g), p = 1^mean(y)), expr = "1^mean(y)"),
+    list(f = function(d) summarise(group_by(d, g), p = 2^n()), expr = "2^n()"),
+    list(f = function(d) summarise(group_by(d, g), p = mean(y)^Inf), expr = "mean(y)^Inf"),
+    list(f = function(d) summarise(group_by(d, g), p = mean(y)^NA_real_), expr = "mean(y)^NA_real_"),
+    list(f = function(d) summarise(group_by(d, g), s = sum(y), p = (s + 1)^0), expr = "(s + 1)^0")
+  )
+  for (cs in declined) {
+    f124_check(df, cs$f, native = FALSE)
+    for (lazy in c(FALSE, TRUE)) {
+      got <- sp_fallback(cs$f, df, lazy)
+      expect_identical(got$expr, cs$expr)
+      expect_match(got$reason, "`^` around a reducer runs on the GPU only with a constant exponent", fixed = TRUE)
+    }
+  }
+  f124_check(df, function(d) summarise(group_by(d, g), a = mean(y)^-1, b = n()^3L, c = mean(y)^TRUE))
+})
+
+test_that("`&`, `|` and `!` of a double around a reducer read NaN as dplyr does", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = NULL)
+  # group 2: mean(y, na.rm = TRUE) is NaN, which R's `|`, `&` and `!` read as NA
+  df <- tibble::tibble(g = c(1L, 1L, 2L, 3L), y = c(NA, 1, NA, 0), b = c(TRUE, NA, FALSE, TRUE))
+  declined <- list(
+    list(f = function(d) summarise(group_by(d, g), r = mean(y, na.rm = TRUE) | FALSE),
+         expr = "mean(y, na.rm = TRUE) | FALSE"),
+    list(f = function(d) summarise(group_by(d, g), r = any(b) & mean(y, na.rm = TRUE)),
+         expr = "any(b) & mean(y, na.rm = TRUE)"),
+    list(f = function(d) summarise(group_by(d, g), r = !mean(y, na.rm = TRUE)), expr = "!mean(y, na.rm = TRUE)")
+  )
+  for (cs in declined) {
+    f124_check(df, cs$f, native = FALSE)
+    for (lazy in c(FALSE, TRUE)) {
+      got <- sp_fallback(cs$f, df, lazy)
+      expect_identical(got$expr, cs$expr)
+      expect_match(got$reason, "of a double", fixed = TRUE)
+    }
+  }
+  # logical and integer operands keep R's NA rules on the GPU
+  f124_check(df, function(d) {
+    summarise(group_by(d, g), a = any(b) & all(b), o = sum(b) > 0 | NA, n = !n(), m = mean(y) > 0 & FALSE)
+  })
+})
+
+test_that("if_else() and case_when() with a double condition around a reducer give dplyr's error", {
+  skip_if_no_gpu()
+  df <- tibble::tibble(g = c(1L, 1L, 2L), x = c(1, 2, 3))
+  withr::local_options(cuplyr.fallback = "silent")
+  for (lazy in c(FALSE, TRUE)) {
+    expect_error(collect(summarise(group_by(tbl_gpu(df, lazy = lazy), g), m = dplyr::if_else(mean(x), 1, 0))),
+                 "`condition` must be a logical vector")
+    expect_error(collect(summarise(group_by(tbl_gpu(df, lazy = lazy), g),
+                                   m = dplyr::case_when(mean(x) ~ 1, .default = 0))),
+                 "must be a logical vector")
+  }
+  # a bare NA condition is dplyr's NA (the GPU engine would take it for a double)
+  f124_check(df, function(d) summarise(group_by(d, g), m = dplyr::if_else(NA, 1, mean(x))), native = FALSE)
+})
+
+test_that("a variable named like a temp aggregate is read from the environment", {
+  skip_if_no_gpu()
+  .post_agg2 <- 100
+  df <- tibble::tibble(g = c(1L, 1L, 2L), x = c(1, 2, 3), y = c(5, 6, 7))
+  f124_check(df, function(d) summarise(group_by(d, g), m = mean(x) + .post_agg2, s = sum(y) + 1))
+})
+
+test_that("a literal NULL argument around a reducer is kept", {
+  skip_if_no_gpu()
+  df <- tibble::tibble(g = c(1L, 1L, 2L), x = c(1, 2, 3))
+  withr::local_options(cuplyr.fallback = "silent")
+  for (lazy in c(FALSE, TRUE)) {
+    expect_error(collect(summarise(group_by(tbl_gpu(df, lazy = lazy), g), m = round(mean(x), NULL))),
+                 "invalid second argument of length 0")
+  }
+})
+
+test_that("a large constant inside a reducer splits and shares its leaf at little cost", {
+  v <- stats::runif(2e5)
+  q <- rlang::quo(sum(x %in% !!v) + mean(x %in% !!v) + sum(x %in% !!v))
+  dots <- rlang::quos(m = !!q)
+  schema <- list(names = c("g", "x"), types = c("INT32", "FLOAT64"))
+  elapsed <- system.time(split <- summarise_post_split(dots, dots, schema, "g"))[["elapsed"]]
+  expect_length(split$agg_dots, 2L)
+  expect_lt(elapsed, 0.1)
+})
+
+test_that("a post step that fails on the real result reruns on the CPU with a true reason", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = NULL)
+  df <- tibble::tibble(g = c(1L, 1L, 2L), x = c(1, 2, 3))
+  # (no shape fails only there today: the parse on the real result is made to fail)
+  local_mocked_bindings(make_mutate_expr = function(...) stop("no GPU form"))
+  for (lazy in c(FALSE, TRUE)) {
+    got <- sp_fallback(function(d) summarise(group_by(d, g), m = mean(x) + 1), df, lazy)
+    expect_false(is.null(got))
+    expect_no_match(got$reason, "integer sum()", fixed = TRUE)
+    expect_match(got$reason, "arithmetic around the reducers", fixed = TRUE)
+  }
+  expect_equal(collect(summarise(group_by(tbl_gpu(df), g), m = mean(x) + 1)),
+               summarise(group_by(df, g), m = mean(x) + 1))
+})
+
+test_that("the plan-break notice of a split call shows the user's dot", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = NULL)
+  df <- tibble::tibble(g = c(1L, 1L, 2L), x = c(1L, 2L, 3L))
+  for (cs in list(list(f = function(t) summarise(t, m = mean(x), s = sum(x * 2L) + 1L), expr = "sum(x * 2L) + 1L"),
+                  list(f = function(t) summarise(t, m = mean(x), s = sum(x) + 1L), expr = "sum(x) + 1L"))) {
+    got <- sp_notices(
+      tbl_gpu(df, lazy = TRUE) |> filter(x > 0L) |> group_by(g) |> cs$f() |> collect(),
+      "cuplyr_plan_break"
+    )
+    expect_length(got, 1L)
+    expect_identical(got[[1L]]$expr, cs$expr)
+  }
+})
+
+test_that("a timestamp sum around a reducer is not blamed on mutate()", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = NULL)
+  df <- tibble::tibble(g = c(1L, 1L, 2L), t = as.POSIXct("2024-01-02 10:00:00", tz = "UTC") + c(0, 60, 120))
+  got <- sp_fallback(function(d) summarise(group_by(d, g), m = max(t) + 3600), df, FALSE)
+  expect_identical(got$expr, "max(t) + 3600")
+  expect_no_match(got$reason, "mutate()", fixed = TRUE)
+})
