@@ -231,3 +231,67 @@ test_that("a merged all-NA x key errors like dplyr when the join returns no rows
   p70j_both(p70j_na, function(d) left_join(d, p70j_like(d, tibble::tibble(k = character(), b = integer())), by = "k"))
   p70j_both(p70j_na, function(d) full_join(d, p70j_like(d, tibble::tibble(k = character(), b = integer())), by = "k"))
 })
+
+# Added after the first review (dplyr behaviour checked in probe p6).
+
+test_that("a lazy join raises at the verb call, like dplyr", {
+  skip_if_no_gpu()
+  bad <- tibble::tibble(k = c(NA, TRUE), a = 1:2)
+  expect_error(left_join(tbl_gpu(bad, lazy = TRUE), tbl_gpu(p70j_chr, lazy = TRUE), by = "k"),
+               class = "dplyr_error_join_incompatible_type")
+  expect_error(left_join(mutate(tbl_gpu(tibble::tibble(a = 1:2), lazy = TRUE), k = c(NA, TRUE)),
+                         tbl_gpu(p70j_chr, lazy = TRUE), by = "k"),
+               class = "dplyr_error_join_incompatible_type")
+  expect_error(inner_join(tbl_gpu(p70j_na, lazy = TRUE),
+                          tbl_gpu(tibble::tibble(k = "u", b = 2L), lazy = TRUE), by = "k"),
+               class = "vctrs_error_cast")
+})
+
+test_that("with several incompatible keys the error names the first, in `by` order", {
+  skip_if_no_gpu()
+  y <- tibble::tibble(k1 = c("a", "b"), k2 = c("1", "2"))
+  p70j_expect_error(tibble::tibble(k1 = c(TRUE, NA), k2 = 1:2), y,
+                    function(x, y) left_join(x, y, by = c("k1", "k2")),
+                    class = "dplyr_error_join_incompatible_type",
+                    regexp = "Can't join `x$k1` with `y$k1` due to incompatible types.")
+  p70j_expect_error(tibble::tibble(k1 = c(NA, NA), k2 = 1:2), y,
+                    function(x, y) left_join(x, y, by = c("k1", "k2")),
+                    class = "dplyr_error_join_incompatible_type",
+                    regexp = "Can't join `x$k2` with `y$k2` due to incompatible types.")
+  p70j_expect_error(tibble::tibble(k2 = 1:2, k1 = c(TRUE, NA)), y,
+                    function(x, y) left_join(x, y, by = c("k2", "k1")),
+                    class = "dplyr_error_join_incompatible_type",
+                    regexp = "Can't join `x$k2` with `y$k2` due to incompatible types.")
+})
+
+test_that("type labels in the errors carry the POSIXct zone and the factor", {
+  skip_if_no_gpu()
+  ny <- tibble::tibble(k = as.POSIXct("2020-01-01", tz = "America/New_York"), b = 2L)
+  p70j_expect_error(p70j_na, ny, function(x, y) inner_join(x, y, by = "k"),
+                    class = "vctrs_error_cast",
+                    regexp = "Can't convert `out[merge]$k` <logical> to match type of `k` <datetime<America/New_York>>.")
+  p70j_expect_error(tibble::tibble(k = c(TRUE, NA), a = 1), ny,
+                    function(x, y) left_join(x, y, by = "k"),
+                    class = "dplyr_error_join_incompatible_type",
+                    regexp = "`y$k` is a <datetime<America/New_York>>.")
+  fct <- tibble::tibble(k = factor("u"), b = 2L)
+  expected <- tryCatch(inner_join(p70j_na, fct, by = "k"), error = conditionMessage)
+  p70j_expect_error(p70j_na, fct, function(x, y) inner_join(x, y, by = "k"),
+                    class = "vctrs_error_cast", regexp = expected)
+})
+
+test_that("inequality and rolling conditions against Date, factor and POSIXct keys", {
+  skip_if_no_gpu()
+  dates <- tibble::tibble(k = as.Date(c("2020-01-01", NA)), b = 1:2)
+  fct <- tibble::tibble(k = factor(c("u", NA), levels = c("v", "u")), b = 1:2)
+  ny <- tibble::tibble(k = as.POSIXct(c("2020-01-01", NA), tz = "America/New_York"), b = 1:2)
+  p70j_both(p70j_na, function(d) left_join(d, p70j_like(d, dates), by = dplyr::join_by(k >= k)))
+  p70j_both(p70j_na, function(d) left_join(d, p70j_like(d, fct), by = dplyr::join_by(k <= k)))
+  p70j_both(p70j_na, function(d) left_join(d, p70j_like(d, ny), by = dplyr::join_by(closest(k >= k))))
+  p70j_both(p70j_na, function(d) left_join(d, p70j_like(d, fct), by = "k", keep = TRUE))
+  # an equi key next to an inequality / rolling one
+  x <- tibble::tibble(k = c(NA, NA), t = c(1, 5), a = 1:2)
+  y <- tibble::tibble(k = c("u", NA, NA), t = c(0, 2, 4), b = 1:3)
+  p70j_both(x, function(d) left_join(d, p70j_like(d, y), by = dplyr::join_by(k, t >= t)))
+  p70j_both(x, function(d) left_join(d, p70j_like(d, y), by = dplyr::join_by(k, closest(t >= t))))
+})
