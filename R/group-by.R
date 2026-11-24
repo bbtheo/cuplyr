@@ -153,7 +153,8 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
       group_drop = new_drop,
       exec_mode = .subset2(.data, "exec_mode"),
       nrow = .data[["nrow"]],
-      unspecified = .data[["unspecified"]]
+      unspecified = .data[["unspecified"]],
+      col_attrs = .data[["col_attrs"]]
     ), .data, attrs = keep_attrs, bare = FALSE), .data))
   }
 
@@ -362,7 +363,8 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
     group_drop = if (length(new_groups) > 0L) .drop else TRUE,
     exec_mode = .subset2(working, "exec_mode"),
     nrow = working[["nrow"]],
-    unspecified = working[["unspecified"]]
+    unspecified = working[["unspecified"]],
+    col_attrs = working[["col_attrs"]]
   ), .data, attrs = keep_attrs, bare = FALSE), working)
 }
 
@@ -433,7 +435,7 @@ ungroup.tbl_gpu <- function(x, ...) {
     rlang::check_dots_empty()
     return(carry_origin(new_tbl_gpu(
       ptr = .subset2(x, "ptr"), schema = .subset2(x, "schema"), lazy_ops = .subset2(x, "lazy_ops"), exec_mode = .subset2(x, "exec_mode"),
-      nrow = x[["nrow"]], unspecified = x[["unspecified"]]
+      nrow = x[["nrow"]], unspecified = x[["unspecified"]], col_attrs = x[["col_attrs"]]
     ), x))
   }
   if (...length() > 0L) {
@@ -472,7 +474,8 @@ ungroup.tbl_gpu <- function(x, ...) {
     group_drop = drop,
     exec_mode = .subset2(x, "exec_mode"),
     nrow = x[["nrow"]],
-    unspecified = x[["unspecified"]]
+    unspecified = x[["unspecified"]],
+    col_attrs = x[["col_attrs"]]
   )
   out <- if (length(.subset2(x, "groups")) > 0L && length(groups) > 0L) {
     copy_frame_meta(out, x, bare = FALSE)

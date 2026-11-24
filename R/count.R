@@ -212,7 +212,8 @@ mutate_keys_ungrouped <- function(.data, comp_dots, verb) {
     exec_mode = .subset2(out, "exec_mode"),
     nrow = out[["nrow"]],
     fixed_keys = .subset2(.data, "fixed_keys"),
-    unspecified = out[["unspecified"]]
+    unspecified = out[["unspecified"]],
+    col_attrs = out[["col_attrs"]]
   ), .data, bare = FALSE)
 }
 
@@ -427,7 +428,8 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
     lazy_ops = result$lazy_ops,
     groups = out_groups,
     group_drop = if (length(out_groups) > 0L) x$group_drop %||% TRUE else TRUE,
-    exec_mode = result$exec_mode
+    exec_mode = result$exec_mode,
+    col_attrs = result[["col_attrs"]]
   ), x)
 }
 
@@ -608,6 +610,7 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
     lazy_ops = result$lazy_ops,
     groups = out_groups,
     group_drop = if (length(out_groups) > 0L) x$group_drop %||% TRUE else TRUE,
-    exec_mode = result$exec_mode
+    exec_mode = result$exec_mode,
+    col_attrs = result[["col_attrs"]]
   ), x)
 }

@@ -204,6 +204,9 @@
 #'     collect()
 #' }
 filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
+  if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
+    return(col_cpu_route(.data, "filter"))
+  }
   # (an argument that wasn't given is the NULL quosure, which skips an enquo())
   by_quo <- if (missing(.by) && is.null(substitute(.by))) null_quo else rlang::enquo(.by)
   filter_impl(.data, rlang::quos(..., .ignore_empty = "all"), by_quo, .preserve,
@@ -228,6 +231,9 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 #' @export
 #' @importFrom dplyr filter_out
 filter_out.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
+  if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
+    return(col_cpu_route(.data, "filter_out"))
+  }
   by_quo <- if (missing(.by) && is.null(substitute(.by))) null_quo else rlang::enquo(.by)
   filter_impl(.data, rlang::quos(..., .ignore_empty = "all"), by_quo, .preserve,
               complement = TRUE, call = rlang::current_env())
@@ -1626,7 +1632,8 @@ filter_eval_mask <- function(.data, quo, keep) {
     schema = .subset2(.data, "schema"),
     groups = .subset2(.data, "groups"),
     group_drop = .subset2(.data, "group_drop") %||% TRUE,
-    exec_mode = .subset2(.data, "exec_mode")
+    exec_mode = .subset2(.data, "exec_mode"),
+    col_attrs = col_attrs_without_names(.subset2(.data, "col_attrs"))
   ), .data)
 }
 

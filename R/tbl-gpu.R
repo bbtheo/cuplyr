@@ -263,7 +263,8 @@ tbl_gpu.data.frame <- function(data, ..., lazy = NULL) {
                      nrow = if (ncol(data) == 0L) nrow(data) else NULL,
                      unspecified = unspec_names,
                      bare_df = identical(class(data), "data.frame"),
-                     rowwise = is_rowwise)
+                     rowwise = is_rowwise,
+                     col_attrs = col_attrs_extract(data))
   with_frame_attrs(out, frame_attrs(orig))
 }
 
@@ -573,7 +574,8 @@ new_tbl_gpu <- function(ptr = NULL,
                         fixed_keys = NULL,
                         unspecified = NULL,
                         bare_df = FALSE,
-                        rowwise = FALSE) {
+                        rowwise = FALSE,
+                        col_attrs = NULL) {
   if (is.list(lazy_ops) && length(lazy_ops) == 0) {
     lazy_ops <- NULL
   }
@@ -605,6 +607,13 @@ new_tbl_gpu <- function(ptr = NULL,
     unspecified <- set_intersect(unspecified, schema$names[schema$types == "BOOL8"])
     if (length(unspecified) > 0L) {
       out$unspecified <- unspecified
+    }
+  }
+  if (length(col_attrs) > 0L) {
+    # (entries of columns the table no longer has can't be restored)
+    col_attrs <- col_attrs[names(col_attrs) %in% schema$names]
+    if (length(col_attrs) > 0L) {
+      out$col_attrs <- col_attrs
     }
   }
   if (isTRUE(rowwise)) {
@@ -903,6 +912,17 @@ called_from_vctrs <- function(p) {
   if (length(x[["unspecified"]]) > 0L) {
     new_unspec <- set_diff(value[match(x[["unspecified"]], old)], value[duplicated(value)])
     x[["unspecified"]] <- if (length(new_unspec) > 0L) new_unspec
+  }
+  # and so is the column metadata (R/col-attrs.R)
+  if (!is.null(x[["col_attrs"]])) {
+    ca <- x[["col_attrs"]]
+    if (anyDuplicated(value) > 0L || anyDuplicated(old) > 0L) {
+      ca <- NULL
+    } else {
+      names(ca) <- value[match(names(ca), old)]
+      ca <- ca[!is.na(names(ca)) & nzchar(names(ca))]
+    }
+    x[["col_attrs"]] <- if (length(ca) > 0L) ca
   }
   x$schema$names <- value
   x

@@ -45,7 +45,7 @@ string column under a C collation. Sizes above 1 must agree, and no
 expression may read an earlier one's result.
 
 Anything else runs dplyr's \code{reframe()} on the CPU (see \link{cuplyr-fallback}).
-One divergence remains on both paths: \code{quantile()}'s element names (\code{"10\%"})
-are dropped.
+One divergence remains on the native path: \code{quantile()}'s element names
+(\code{"10\%"}) are dropped. The CPU path keeps them, as dplyr does.
 }
 

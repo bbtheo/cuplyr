@@ -661,9 +661,19 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
                                               fallback_dots, "an expression has a form the GPU engine does not support."
                                             )), back_to_lazy))
   }
+  # a dot that reads a column with names or attributes: R decides what its
+  # result keeps (#21)
+  if (!is.null(.subset2(.data, "col_attrs")) &&
+      !is.null(reason <- col_attrs_read_reason(names(.subset2(.data, "col_attrs")), expressions))) {
+    return(mutate_done(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
+                                            consts = evaluated$consts, provenance = provenance,
+                                            reason = reason), back_to_lazy))
+  }
   # A vector literal next to a window call isn't planned together: let dplyr
-  # run the whole call.
-  if (isTRUE(attr(expressions, "has_window")) && isTRUE(attr(expressions, "has_vec"))) {
+  # run the whole call. So does a constant with names (#21): the window stages
+  # rebuild the table in batches.
+  if (isTRUE(attr(expressions, "has_window")) &&
+      (isTRUE(attr(expressions, "has_vec")) || isTRUE(attr(expressions, "const_names")))) {
     return(mutate_done(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
                                             reason = "a vector literal next to a window call in one mutate() is not planned together."),
                        back_to_lazy))
@@ -1227,6 +1237,7 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
   expressions <- list()
   has_window <- FALSE
   has_vec <- FALSE
+  has_const_names <- FALSE
   dropped <- character()
   # dplyr places a new column where its name first appears, even when that
   # dot is `col = NULL` (and a later dot fills it in).
@@ -1379,6 +1390,9 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
         v <- as.double(unclass(const$value))
         any(is.finite(v) & v != floor(v))
       }
+    } else if (identical(const$kind, "attributed")) {
+      fallback_cause("a constant with names or attributes, which dplyr keeps on the column.")
+      ir <- NULL
     } else if (identical(const$kind, "failed")) {
       fallback_cause(if (isTRUE(const$declined)) {
         ir_fold_declined_text
@@ -1462,6 +1476,11 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     }
 
     step <- make_mutate_expr(new_name, ir, schema)
+    # a constant's names go with its column (R/col-attrs.R)
+    if (!is.null(const$names)) {
+      step$const_names <- const$names
+      has_const_names <- TRUE
+    }
 
     # The GPU holds a factor as bare INT32 codes, so only a bare copy of a
     # factor column can stay native (its levels follow it, see
@@ -1513,6 +1532,7 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
   }
   attr(expressions, "has_window") <- has_window
   attr(expressions, "has_vec") <- has_vec
+  if (has_const_names) attr(expressions, "const_names") <- TRUE
   attr(expressions, "dropped") <- dropped
   attr(expressions, "dot_order") <- dot_order
   attr(expressions, "fractional_dates") <- frac[!frac_vec]
@@ -1576,9 +1596,21 @@ mutate_constant_value <- function(quo, schema) {
   if (!is.atomic(value)) {
     return(none)
   }
+  # Names stay on the column (the entry follows the table, R/col-attrs.R) and so
+  # do other attributes, which the GPU can't hold: dplyr's (#21)
+  nms <- if (ran) names(value)
+  if (ran && col_value_has_attrs(value)) {
+    return(list(kind = "attributed"))
+  }
+  if (!is.null(nms)) {
+    # (one name repeated needs a name that exists)
+    if (length(value) == 1L && is.na(nms)) return(list(kind = "attributed"))
+    value_raw <- value
+    value <- unname(value)
+  }
   if (length(value) == 1L) {
     # A bare literal (no evaluation happened) takes the ordinary parse path.
-    return(if (ran) list(kind = "scalar", value = value) else none)
+    return(if (ran) list(kind = "scalar", value = value, raw = if (!is.null(nms)) value_raw, names = nms) else none)
   }
 
   supported <- (is.logical(value) || is.integer(value) || is.double(value) || is.character(value)) &&
@@ -1586,8 +1618,8 @@ mutate_constant_value <- function(quo, schema) {
     is.null(dim(value))
   # `value` is unnamed for ir_vec(); `raw` keeps the names a CPU-route
   # recorded constant (record_const()) must still carry (`names(v)`).
-  list(kind = "vector", value = if (supported) unname(value) else value, raw = value,
-       supported = supported)
+  list(kind = "vector", value = if (supported) unname(value) else value,
+       raw = if (!is.null(nms)) value_raw else value, supported = supported, names = nms)
 }
 
 # The CPU route must not evaluate again a column-free dot that
@@ -2194,6 +2226,16 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
   # without this the call died at lowering ("window op reached lowering").
   if (rowwise && !rowwise_expressions_ok(expressions)) {
     rowwise_bail("a window call or vector literal in a rowwise transmute()")
+  }
+  # a dot that reads a column with names or attributes: R decides what it keeps (#21)
+  attrs_reason <- if (!is.null(expressions) && !is.null(.subset2(.data, "col_attrs"))) {
+    col_attrs_read_reason(names(.subset2(.data, "col_attrs")), expressions)
+  }
+  if (!is.null(attrs_reason)) {
+    return(gpu_fallback("transmute", fallback_data, function(tbl) {
+      dots_cpu <- inline_evaluated_dots(fallback_dots, evaluated$consts, provenance, nrow(tbl))
+      cpu_verb_call(dplyr::transmute(.data = tbl, !!!dots_cpu), "transmute")
+    }, reason = attrs_reason))
   }
   if (is.null(expressions) || isTRUE(attr(expressions, "has_window"))) {
     return(gpu_fallback("transmute", fallback_data, function(tbl) {

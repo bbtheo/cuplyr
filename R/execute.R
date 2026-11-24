@@ -590,6 +590,10 @@ push_op <- function(.data, node, input_schema = current_schema(.data), carry = T
   # to the default once the table is ungrouped (a later group_by() starts over).
   new_group_drop <- if (length(new_groups) > 0L) .subset2(.data, "group_drop") %||% TRUE else TRUE
   new_keys <- carry_fixed_keys(node, .data, new_groups)
+  new_col_attrs <- if (!is.null(.subset2(.data, "col_attrs")) || identical(type, "summarise") ||
+                       (identical(type, "mutate") && isTRUE(attr(.subset2(node, "expressions"), "const_names")))) {
+    carry_col_attrs(node, .subset2(.data, "col_attrs"), input_schema$names, new_schema$names)
+  }
   new_unspec <- if (type %in% c("filter", "arrange", "slice", "barrier")) {
     .subset2(.data, "unspecified")
   }
@@ -622,7 +626,8 @@ push_op <- function(.data, node, input_schema = current_schema(.data), carry = T
       fixed_keys = new_keys,
       unspecified = new_unspec,
       bare_df = bare_df,
-      rowwise = new_rowwise
+      rowwise = new_rowwise,
+      col_attrs = new_col_attrs
     )
     return(if (carry && !plain_frame) carry_frame_meta(out, .data, attrs = keep_attrs) else out)
   }
@@ -640,7 +645,8 @@ push_op <- function(.data, node, input_schema = current_schema(.data), carry = T
     fixed_keys = new_keys,
     unspecified = new_unspec,
     bare_df = bare_df,
-    rowwise = new_rowwise
+    rowwise = new_rowwise,
+    col_attrs = new_col_attrs
   )
   if (plain_frame) out else carry_frame_meta(out, .data, attrs = keep_attrs)
 }
@@ -845,6 +851,9 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
 
   # Filtering joins return x verbatim, so its unspecified() columns survive.
   join_unspec <- if (join_type %in% c("semi", "anti")) x[["unspecified"]]
+  join_attrs <- if (!is.null(x[["col_attrs"]]) || !is.null(y[["col_attrs"]])) {
+    join_col_attrs(join_type, x, y, join_spec, suffix, keep, new_schema)
+  }
 
   # F31: x's attributes and class win (dplyr_reconstruct(out, x)).
   if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
@@ -863,7 +872,8 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
       exec_mode = "lazy",
       group_drop = new_group_drop,
       unspecified = join_unspec,
-      rowwise = is_rowwise_gpu(x)
+      rowwise = is_rowwise_gpu(x),
+      col_attrs = join_attrs
     )
     out <- row_slice_finish(carry_frame_meta(out, x), prep)
     # `unmatched = "error"` and a one-to-one / one-to-many / many-to-one
@@ -905,7 +915,8 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
     exec_mode = "eager",
     group_drop = new_group_drop,
     unspecified = join_unspec,
-    rowwise = is_rowwise_gpu(x)
+    rowwise = is_rowwise_gpu(x),
+    col_attrs = join_attrs
   )
   row_slice_finish(carry_frame_meta(out, x), prep)
 }

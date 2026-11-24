@@ -199,6 +199,12 @@ collect_frame <- function(x, call = rlang::caller_env()) {
 
   result <- int64_columns_to_r(result, final_schema)
 
+  # element names, extra attributes and one-column matrices (#21)
+  col_attrs <- .subset2(x, "col_attrs")
+  if (!is.null(col_attrs)) {
+    result <- col_attrs_restore(result, col_attrs)
+  }
+
   result
 }
 

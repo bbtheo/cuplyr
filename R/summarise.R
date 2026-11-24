@@ -370,6 +370,12 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   by_cols <- resolve_by(.data, by_quo, ".by", verb = "summarise")
   by_given <- !quo_is_null_fast(by_quo)
 
+  # a group key's names (those of its group's first row) are dplyr's to pick
+  if (!is.null(.subset2(.data, "col_attrs")) &&
+      col_names_move(.data, if (by_given) by_cols else .subset2(.data, "groups"))) {
+    return(col_cpu_route(.data, "summarise"))
+  }
+
   dots <- rlang::quos(..., .ignore_empty = "all")
   summarise_impl(.data, dots, .groups, by_quo, by_cols, by_given, caller_env)
 }
@@ -526,6 +532,18 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # `fn(<column>)` dots (summarise_simple_aggregations()) read a column, so they
   # are no constant reducers; summarise_core() reuses the aggregations built here.
   simple_plan <- summarise_simple_plan(dots, in_schema)
+  # quantile() names its result, and R decides what arithmetic around it keeps
+  # (#21): a bare quantile() dot keeps its name natively, anything else goes to
+  # dplyr. (A `fn(<column>)` dot is never a quantile(): it takes a `probs`.)
+  quantile_reason <- if (is.null(simple_plan) && !isTRUE(reframe_state$wide) &&
+                         dots_mention(dots, "quantile")) {
+    summarise_quantile_names_reason(dots)
+  }
+  if (!is.null(quantile_reason)) {
+    return(gpu_fallback("summarise", .data, function(tbl) {
+      dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo)
+    }, reason = quantile_reason))
+  }
   # #22: a dot with arithmetic around reducers (`mean(x) + 1`, `sum(x) / n()`, a later
   # dot reading an earlier result) splits into the reducer calls, aggregated as
   # temp aggregates, and a mutate on the result (R/summarise-post.R). The split
@@ -1591,6 +1609,11 @@ summarise_core <- function(.data, dots, retained_groups = character(),
     # lazy sd()/var(), which used to reach C++ as "sd"/"var" and error out).
     aggregations <- parse_aggregations(current_schema(working_data), processed_dots,
                                        na_rm_flags, agg_extra)
+    # quantile()'s names ride on its output column (R/col-attrs.R)
+    for (i in seq_along(aggregations)) {
+      qn <- .subset2(.subset2(parts, i), "qnames")
+      if (!is.null(qn)) aggregations[[i]]$qnames <- qn
+    }
   }
 
   # F124: dplyr's warning for an empty min()/max() names the dot it came from
@@ -1793,6 +1816,25 @@ extract_na_rm <- function(quo, schema) {
   list(quo = rlang::new_quosure(expr[-flag_pos], env), na_rm = na_rm_val)
 }
 
+# Internal (#21): why a summarise() with `quantile()` in a dot that is not the
+# whole dot, or read by a later dot, runs on dplyr: R's own rules decide whether
+# the result keeps quantile()'s name (`quantile(x, .5) + 1` does, `[[1]]` doesn't).
+# NULL when every dot that mentions it is a bare `quantile(...)` that no other
+# dot reads.
+# @keywords internal
+summarise_quantile_names_reason <- function(dots) {
+  exprs <- lapply(dots, rlang::quo_get_expr)
+  mentions <- vapply(exprs, function(e) "quantile" %in% all.names(e), logical(1))
+  bare <- vapply(exprs, function(e) identical(call_head_name(e), "quantile"), logical(1))
+  if (any(mentions & !bare)) {
+    return("an expression around quantile() keeps or drops its names by R's own rules, which dplyr applies.")
+  }
+  if (any(!bare & vapply(exprs, function(e) any(all.vars(e) %in% names(dots)[bare]), logical(1)))) {
+    return("an expression reads a quantile() result, whose names R's own rules carry.")
+  }
+  NULL
+}
+
 # Internal: Extract and strip `quantile()`'s `probs=` / `nth()`'s `n=`
 # scalar shape parameter from a single summarise() aggregation dot (Phase
 # 6, task 6.2)
@@ -1896,9 +1938,26 @@ extract_quantile_probs <- function(expr, env, quo) {
          rlang::quo_text(quo), call. = FALSE)
   }
 
+  # quantile() names its result ("50%"): the name of the output (#21). A
+  # `names`/`digits` that isn't a plain value is dplyr's to evaluate.
+  qnames <- NULL
+  names_val <- if (is.null(present_args$names)) TRUE else
+    ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(present_args$names, env)))$value
+  digits_val <- if (is.null(present_args$digits)) 7 else
+    ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(present_args$digits, env)))$value
+  if (!(isTRUE(names_val) || isFALSE(names_val)) ||
+      !(is.numeric(digits_val) && length(digits_val) == 1L && !is.na(digits_val))) {
+    stop("summarise()'s quantile() takes a plain `names` and `digits`: ",
+         rlang::quo_text(quo), call. = FALSE)
+  }
+  if (isTRUE(names_val)) {
+    qnames <- names(stats::quantile(0, probs_val, digits = digits_val))
+  }
+
   list(
     quo = rlang::new_quosure(rlang::call2("quantile", present_args$x), env),
-    extra = as.double(probs_val)
+    extra = as.double(probs_val),
+    qnames = qnames
   )
 }
 
@@ -1977,7 +2036,8 @@ summarise_by_desugar <- function(.data, dots, by_cols, ir_cache = NULL, simple_a
     schema = .subset2(.data, "schema"),
     lazy_ops = .subset2(.data, "lazy_ops"),
     groups = by_cols,
-    exec_mode = .subset2(.data, "exec_mode")
+    exec_mode = .subset2(.data, "exec_mode"),
+    col_attrs = .subset2(.data, "col_attrs")
   )
 
   result <- summarise_core(grouped, dots, group_order = "first", simple_aggs = simple_aggs,
@@ -2091,7 +2151,8 @@ agg_dot_parts <- function(ir_cache, i, dot, schema) {
     return(NULL)
   }
   shaped <- extract_agg_shape_param(stripped$quo)
-  parts <- list(quo = shaped$quo, na_rm = stripped$na_rm, extra = shaped$extra)
+  parts <- list(quo = shaped$quo, na_rm = stripped$na_rm, extra = shaped$extra,
+                qnames = shaped$qnames)
   if (!is.null(ir_cache)) {
     ir_cache[[key]] <- list(dot = dot, parts = parts)
   }
@@ -2625,7 +2686,8 @@ create_temp_column <- function(.data, col_name, ir, keep_bool = FALSE) {
     lazy_ops = .subset2(.data, "lazy_ops"),
     groups = .subset2(.data, "groups"),
     group_drop = .subset2(.data, "group_drop") %||% TRUE,
-    exec_mode = .subset2(.data, "exec_mode")
+    exec_mode = .subset2(.data, "exec_mode"),
+    col_attrs = .subset2(.data, "col_attrs")
   ), .data)
 }
 
