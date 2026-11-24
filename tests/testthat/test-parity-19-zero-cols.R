@@ -442,3 +442,63 @@ test_that("distinct() of a zero-column table has no columns (dplyr #1437)", {
     p19_expect_shape(ddf, 1)
   }
 })
+
+# =============================================================================
+# Rowwise inputs keep their class (dplyr keeps rowwise_df on every zero-column
+# result), and edge cases added after review
+# =============================================================================
+
+# `pipeline` on the plain tibble (dplyr) and on a tbl_gpu (eager and lazy):
+# same class (rowwise_df or not), dim and rowwise vars after collect().
+p19_rowwise_parity <- function(df, pipeline) {
+  oracle <- pipeline(tibble::as_tibble(df))
+  for (lazy in c(FALSE, TRUE)) {
+    gpu <- collect(pipeline(tbl_gpu(df, lazy = lazy)))
+    info <- paste("lazy =", lazy)
+    expect_identical(inherits(gpu, "rowwise_df"), inherits(oracle, "rowwise_df"), info = info)
+    expect_identical(dim(gpu), dim(oracle), info = info)
+    expect_identical(dplyr::group_vars(gpu), dplyr::group_vars(oracle), info = info)
+    expect_equal(tibble::as_tibble(dplyr::ungroup(gpu)), tibble::as_tibble(dplyr::ungroup(oracle)),
+                 info = info)
+  }
+}
+
+test_that("a rowwise table stays rowwise when no column is left", {
+  skip_if_no_gpu()
+  df <- p19_df()
+  p19_rowwise_parity(df, function(d) rowwise(d) |> mutate(x = NULL, g = NULL, v = NULL))
+  p19_rowwise_parity(df, function(d) rowwise(d) |> mutate(.keep = "none"))
+  p19_rowwise_parity(df, function(d) rowwise(d) |> mutate(x = NULL, g = NULL, v = NULL) |>
+    summarise(n = n()))
+  p19_rowwise_parity(df, function(d) rowwise(d) |> select(-everything()))
+  p19_rowwise_parity(df, function(d) rowwise(d) |> transmute(x = NULL))
+  p19_rowwise_parity(df, function(d) rowwise(d, g) |> mutate(x = NULL, v = NULL))
+})
+
+test_that("joins and verbs on a rowwise zero-column table stay rowwise", {
+  skip_if_no_gpu()
+  z <- p19_zero(2)
+  y <- tibble::tibble(k = 1:3)
+  p19_rowwise_parity(z, function(d) cross_join(rowwise(d), p19_like(d, y)))
+  p19_rowwise_parity(z, function(d) suppressWarnings(semi_join(rowwise(d), p19_like(d, y), by = character())))
+  p19_rowwise_parity(z, function(d) filter(rowwise(d), TRUE))
+  p19_rowwise_parity(z, function(d) distinct(rowwise(d)))
+  p19_rowwise_parity(p19_df(), function(d) cross_join(rowwise(d), p19_like(d, z)))
+})
+
+test_that("`by = character()` joins with an empty zero-column side match dplyr", {
+  skip_if_no_gpu()
+  df <- p19_df()
+  p19_parity(df, function(d) suppressWarnings(left_join(d, p19_like(d, p19_zero(0)), by = character())))
+  p19_parity(df, function(d) suppressWarnings(right_join(p19_like(d, p19_zero(0)), d, by = character())))
+  p19_parity(p19_zero(3), function(d) suppressWarnings(full_join(d, p19_like(d, p19_zero(0)), by = character())))
+})
+
+test_that("vctrs combines and NA-slices zero-column tables by their row counts", {
+  skip_if_no_gpu()
+  for (lazy in c(FALSE, TRUE)) {
+    z <- tbl_gpu(p19_zero(3), lazy = lazy)
+    expect_identical(collect(vctrs::vec_c(z, z)), vctrs::vec_c(p19_zero(3), p19_zero(3)))
+    expect_identical(collect(vctrs::vec_slice(z, NA)), vctrs::vec_slice(p19_zero(3), NA))
+  }
+})
