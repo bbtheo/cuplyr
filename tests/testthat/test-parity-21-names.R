@@ -41,7 +41,7 @@ test_that("names survive the round trip through the GPU", {
     expect_identical(names(out$d), c("a", NA, "c", "c", ""))
     expect_null(names(out$g))
     expect_identical(as_tibble(tbl_gpu(df, lazy = lazy))$b, df$b)
-    expect_identical(as.data.frame(tbl_gpu(df, lazy = lazy))$b, df$b)
+    expect_identical(as.data.frame(tbl_gpu(df, lazy = lazy))$b, as.data.frame(df)$b)
     expect_identical(collect(compute(tbl_gpu(df, lazy = lazy)))$b, df$b)
   }
   # a zero-row named column
@@ -85,8 +85,8 @@ test_that("mutate() expressions that read a named column keep R's names", {
   p21_both(df, function(x) mutate(x, b2 = b * 2L, d2 = sqrt(d)))
   p21_both(df, function(x) mutate(x, gt = b > 2L))
   p21_both(df, function(x) mutate(x, m = mean(b)))
-  p21_both(df, function(x) mutate(x, l = lag(b)))
-  p21_both(df, function(x) mutate(x, z = if_else(b > 2L, b, 0L)))
+  p21_both(df, function(x) mutate(x, l = dplyr::lag(b)))
+  p21_both(df, function(x) mutate(x, z = dplyr::if_else(b > 2L, b, 0L)))
   p21_both(df, function(x) mutate(group_by(x, g), b2 = b + 1L))
   p21_both(df, function(x) mutate(group_by(x, g), m = mean(b)))
   p21_both(df, function(x) mutate(x, b2 = b - 1L, .by = g))
