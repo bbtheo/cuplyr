@@ -1316,7 +1316,8 @@ push_down_filters <- function(ast) {
   if (input$type == "join") {
     # An all-NA logical key joined to a string/Date/factor key is checked on the
     # data when the join runs (and decides whether a no-row result is an error
-    # in dplyr): a pushed predicate would change what the join sees.
+    # in dplyr): a pushed predicate would change what the join sees. push_join()
+    # runs such a join at the verb, so this is a guard for a hand-built plan.
     if (any(vapply(input$by$key_casts, function(cast) isTRUE(cast$unspecified), logical(1)))) {
       return(ast)
     }

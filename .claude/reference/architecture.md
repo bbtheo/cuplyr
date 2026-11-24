@@ -916,7 +916,7 @@ pipeline of any length costs the same per verb:
 
 ### Lazy by default (F80)
 `resolve_exec_mode()` gives `"lazy"` unless the `lazy` argument, `options(cuplyr.exec_mode)` or `CUPLYR_EXEC_MODE` (in that order) says `"eager"`. Every verb result carries its input's mode; a multi-input verb's result is lazy when any gibble input is (`push_join()`'s rule, applied to `bind_rows()`/`bind_cols()`/the set operations by `result_mode_of_inputs()` (R/bind.R, `set_op_mode()` in R/sets.R) and to a rowwise `x` that leaves through `rowwise_cpu()`); a data-frame input never decides it. `print()`/`glimpse()` of a lazy table with pending steps run the plan once into a local (`compute()`), render it like an eager table under `# A gibble [lazy]:` and keep nothing; a failing plan is reported, never raised. The plan can't know three things before it runs, and a lazy verb that meets one runs at the verb, as an eager table would, instead of recording a step the schema can't describe. Each is a plan break (`cuplyr_plan_break_notify()`, only when steps are pending) that computes the pending plan, runs the verb on it as an eager table and hands back a lazy table (`plan_run_now()`/`plan_back_to_lazy()`, R/execute.R):
-- **A restrictive join** (`join_check_reads_data()`: `unmatched = "error"`, or a `relationship` of one-to-one/one-to-many/many-to-one). dplyr raises those checks at the verb, so `push_join()` records the join and computes it at once (the result has nothing pending, and is not run twice). The notice says the join ran at the verb (`own_step = TRUE`), not that it ran steps early. The optimizer's "push nothing below such a join" rule stays as a guard for a hand-built plan; no verb reaches it. Declaring `relationship =`/`unmatched =` is therefore a cost on a lazy table: the join's memory is held and nothing is pruned across it. With nothing pending on either side `warn_if_join_too_large()` still runs in the lazy branch (the row counts come from `base_dim()`); with pending steps there is no row count to read, so it is skipped. Its memory read is `gpu_memory_state()`, which uses `gpu_mem_info()` (src/gpu_info.cpp: `cudaMemGetInfo()` only, ~0.02 ms); `gpu_info()`/`gpu_details()` also call `cudaGetDeviceProperties()` (~0.7 ms) and must stay out of per-verb paths.
+- **A restrictive join** (`join_check_reads_data()`: `unmatched = "error"`, or a `relationship` of one-to-one/one-to-many/many-to-one). dplyr raises those checks at the verb, so `push_join()` records the join and computes it at once (the result has nothing pending, and is not run twice). The notice says the join ran at the verb (`own_step = TRUE`), not that it ran steps early. The optimizer's "push nothing below such a join" rule stays as a guard for a hand-built plan; no verb reaches it. A logical key joined to a string/Date/POSIXct/factor key (an all-NA check on the data, #70) breaks the same way (`join_key_check_reads_data()`). Declaring `relationship =`/`unmatched =` is therefore a cost on a lazy table: the join's memory is held and nothing is pruned across it. With nothing pending on either side `warn_if_join_too_large()` still runs in the lazy branch (the row counts come from `base_dim()`); with pending steps there is no row count to read, so it is skipped. Its memory read is `gpu_memory_state()`, which uses `gpu_mem_info()` (src/gpu_info.cpp: `cudaMemGetInfo()` only, ~0.02 ms); `gpu_info()`/`gpu_details()` also call `cudaGetDeviceProperties()` (~0.7 ms) and must stay out of per-verb paths.
 - **A vector constant** (`mutate(y = 1:4)`, `group_by(k = c(...))`, an ungrouped table): its length must be the row count (dplyr: "Can't recycle"). `check_vector_constant_sizes()` (R/mutate.R) checks it at the verb against `base_dim()` when nothing is pending, and otherwise computes the pending plan first (a plan break), so the error is dplyr's, at the verb. Grouped and rowwise calls already decide it per group.
 - **An integer sum()** (below). A value the GPU can't type (an environment, a function, a list, a complex or POSIXlt value) never reaches the IR: `ir_lit_or_unsupported()` (R/ir.R) returns `NULL` for a literal typed `"UNKNOWN"`, so the whole call takes the verb's CPU route and dplyr gives its own result or error at the verb in both modes.
 
@@ -1048,18 +1048,25 @@ filter node with N predicates is already exactly one fused kernel.
   evaluator never sees mismatched operand types. `cast_join_key_column()`
   errors clearly on a factor key whose levels are unknown (NULL).
   Factor -> STRING uses `gpu_decode_factor()`, never `gpu_cast_column()`.
-  An all-NA logical key against a STRING/factor/Date/POSIXct key (#70) is not a
-  verb-time error: `resolve_join_key_types()` records an `unspecified = TRUE`
-  cast (with `marker` for a `vctrs::unspecified()` column, from the tbls'
-  `$unspecified`), and `cast_unspecified_join_key()` checks the values when the
-  join runs (all null with rows, else the same incompatible-type error; eager
-  raises at the verb, lazy at collect), replacing the column with a null column
-  of the other side's physical type. `check_unspecified_key_result()` reproduces
+  An all-NA logical key against a STRING/factor/Date/POSIXct key (#70) is not
+  rejected by the schema: `resolve_join_key_types()` records an
+  `unspecified = TRUE` cast (with `marker` for a `vctrs::unspecified()` column,
+  from the tbls' `$unspecified`; the partner's zone and levels ride in the
+  entry), and `cast_unspecified_join_key()` checks the values when the join runs
+  (all null with rows, else the incompatible-type error), replacing the column
+  with a null column of the other side's physical type. Whether the column is
+  all NA is the data's, and dplyr raises that error at the verb, so a lazy
+  `push_join()` that holds an unmarked cast (`join_key_check_reads_data()`)
+  is a plan break like a restrictive join: it records the join and computes it
+  at once. A pair with no common type after such an unchecked pair is stored as
+  `join_spec$key_abort` (dplyr names the first bad pair in `by` order, and the
+  earlier pair is only known from the data); `apply_join_key_casts()` raises it
+  after the earlier pairs' checks. `check_unspecified_key_result()` reproduces
   dplyr's `vctrs_error_cast` for a merged x-side key without marker when the
   join returns no rows. Non-equi/rolling pairs with such a key go to the CPU
-  (`join_key_fallback_reason()`); the optimizer pushes no filter below such a
-  join. The output key takes the cast type, the factor side's levels (either
-  side) and the POSIXct side's zone.
+  (`join_key_fallback_reason()`); the optimizer's "push no filter below such a
+  join" rule is a guard, as for a restrictive join. The output key takes the
+  cast type, the factor side's levels (either side) and the POSIXct side's zone.
 - Rolling joins (F24): `join_by(<== keys>, closest(x$t <op> y$s))` with exactly
   one `closest()` (`>=`, `>`, `<=`, `<`) is native when the rolling pair is one
   type in `join_rolling_types` (INT32, FLOAT64, Date, POSIXct, STRING) or an

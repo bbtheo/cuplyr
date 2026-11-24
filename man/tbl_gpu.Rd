@@ -94,9 +94,11 @@ value in it still errors. Bound to a character column in \code{bind_rows()}, an
 unspecified column still errors.
 
 A matrix column with more than one column (or more than two dimensions), a
-list column and a data frame column have no GPU form: \code{tbl_gpu()} raises
-\code{cuplyr_error_unsupported_class} naming the column, and so does a verb that
-ran on the CPU and returned one (\code{cuplyr_error_unsupported_result_class}).
+list column, a data frame column and a complex or raw column have no GPU
+form: \code{tbl_gpu()} raises \code{cuplyr_error_unsupported_class} naming the column.
+A verb that ran on the CPU and returned a matrix or array raises
+\code{cuplyr_error_unsupported_result_class} the same way; one that returned a
+list or data frame column hands back a plain tibble.
 
 Column type mappings from R to GPU:
 \itemize{

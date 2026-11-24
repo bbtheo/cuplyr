@@ -802,7 +802,8 @@ cast_unspecified_join_key <- function(ptr, idx, cast, by) {
       (n_rows == 0L || gpu_null_counts(ptr, idx)[[1]] != n_rows)) {
     abort_join_incompatible_type(by$left[cast$idx], by$right[cast$idx],
                                  cast$left_type, cast$right_type,
-                                 cast$left_levels, cast$right_levels)
+                                 cast$left_levels, cast$right_levels,
+                                 cast$left_tz %||% "UTC", cast$right_tz %||% "UTC")
   }
   n_col <- gpu_dim(ptr)[2]
   bound <- gpu_bind_cols_impl(list(
@@ -844,9 +845,11 @@ check_unspecified_key_result <- function(ast, ptr) {
       key <- ast$by$left[cast$idx]
       rlang::abort(
         sprintf("Can't convert `out[merge]$%s` <logical> to match type of `%s` <%s>.",
-                key, key, join_key_type_label(cast$type, cast$right_levels)),
+                key, key,
+                join_key_type_label(cast$type, cast$right_levels, cast$right_tz %||% "UTC")),
         class = c("vctrs_error_cast", "vctrs_error_incompatible_type",
-                  "vctrs_error_incompatible", "vctrs_error")
+                  "vctrs_error_incompatible", "vctrs_error"),
+        call = NULL
       )
     }
   }
@@ -932,7 +935,16 @@ apply_join_key_casts <- function(ast, left_ptr, right_ptr, left_schema, right_sc
     }
   }
 
+  # A later pair with no common type (`resolve_join_key_types()`): raised once
+  # every earlier pair's values have been checked.
+  raise_key_abort <- function() {
+    if (!is.null(ast$by$key_abort)) {
+      do.call(abort_join_incompatible_type, ast$by$key_abort)
+    }
+  }
+
   if (length(left_temps) == 0L && length(right_temps) == 0L && length(code_casts) == 0L) {
+    raise_key_abort()
     return(list(left_ptr = left_ptr, right_ptr = right_ptr,
                 left_pair_idx = left_pair_idx, right_pair_idx = right_pair_idx,
                 temps = NULL, cond_by = cond_by,
@@ -955,6 +967,7 @@ apply_join_key_casts <- function(ast, left_ptr, right_ptr, left_schema, right_sc
   }
   left <- append_temps(left_ptr, left_schema, left_temps, n_left, "left", left_temp_names)
   right <- append_temps(right_ptr, right_schema, right_temps, n_right, "right", right_temp_names)
+  raise_key_abort()
 
   # Non-equi STRING pairs (F24): one INT32 code column per side in a shared
   # order, appended after the numeric copies.

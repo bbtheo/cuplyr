@@ -1,17 +1,22 @@
 # cuplyr (development version)
 
-* `left_join()`, `right_join()`, `inner_join()`, `full_join()`, `semi_join()`
-  and `anti_join()` join a key column that is all `NA` (a logical, or
-  `vctrs::unspecified()`) to a character, `Date`, `POSIXct` or factor key, as
-  dplyr does. The key takes the other side's type (and a factor's levels). A
-  logical key with a value in it, or with no rows, still raises dplyr's
-  incompatible-type error, and an `inner_join()` that returns no rows on such
-  a merged `x` key raises dplyr's `vctrs_error_cast` (#70).
+* The mutating joins and `semi_join()`/`anti_join()` join a key column that
+  is all `NA` (a logical, or `vctrs::unspecified()`) to a character, `Date`,
+  `POSIXct` or factor key, as dplyr does. A merged key takes the other side's
+  type (and a factor's levels); with `keep = TRUE`, in a filtering join or
+  in an inequality condition each key keeps its own type. A logical key with a
+  value in it, or with no rows, still raises dplyr's incompatible-type error,
+  and an `inner_join()` that returns no rows, or a `right_join()` with an empty
+  `y`, on such a merged `x` key raises dplyr's `vctrs_error_cast`. Both errors are raised
+  when the join is called, also on a lazy table (the join then runs at once)
+  (#70).
 
-* `tbl_gpu()` and the verbs that run on the CPU raise a classed error that
-  names the column when a column is a matrix with more than one column, an
-  array, a list or a data frame, instead of a raw GPU error or, for
-  `transmute()`, `summarise()` and `reframe()`, a result with extra rows (#70).
+* `tbl_gpu()` raises a classed error that names the column for a matrix with
+  more than one column, an array, a list, a data frame, a complex or a raw
+  column, instead of a raw GPU error. A verb that runs on the CPU and returns a
+  matrix or array does the same, instead of a result with extra rows for
+  `transmute()`, `summarise()` and `reframe()`; a list or data frame column
+  still comes back as a plain tibble (#70).
 
 * `summarise()` runs arithmetic around reducers on the GPU: dots such as
   `mean(x) + 1`, `mean(x) - qnorm(.975) * sd(x) / sqrt(n())` and

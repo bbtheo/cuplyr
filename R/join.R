@@ -101,15 +101,28 @@ join_by_fallback_reason <- function(by, x, y) {
   "a non-equi join_by() compares a string column with a column of another type."
 }
 
+# Does the join have to read its data to be right (an all-NA check on a logical
+# key against a string/Date/POSIXct/factor one), so dplyr's error is the verb's?
+# A `vctrs::unspecified()` key is known all-NA and needs none.
+# @keywords internal
+join_key_check_reads_data <- function(join_spec) {
+  !is.null(join_spec$key_abort) ||
+    any(vapply(join_spec$key_casts, function(cast) {
+      isTRUE(cast$unspecified) && !isTRUE(cast$marker)
+    }, logical(1)))
+}
+
 # The reason a join's resolved keys go to the CPU (factor levels that differ, a
 # Date against a POSIXct), or NULL (F88).
 # @keywords internal
 join_key_fallback_reason <- function(x_schema, y_schema, join_spec) {
-  # An unspecified (all-NA logical) key in a non-equi or rolling condition: dplyr decides.
+  # A logical key against a string/Date/POSIXct/factor key in a non-equi or
+  # rolling condition: whether it is "unspecified" (all NA) is a matter of its
+  # values, which dplyr decides.
   for (cast in join_spec$key_casts) {
     if (isTRUE(cast$unspecified) &&
         (join_spec$op[cast$idx] != "==" || join_spec$filter[cast$idx] != "none")) {
-      return("an all-NA logical key in a non-equi join_by() condition takes the type of the other side's key in dplyr.")
+      return("a logical key in a non-equi join_by() condition is joined to a key of another type only when it is all NA, which dplyr decides.")
     }
   }
   if (join_factor_key_levels_conflict(x_schema, y_schema, join_spec)) {
@@ -492,8 +505,9 @@ warn_join_cross_by <- function(user_env) {
 #'
 #' Built from `vctrs::vec_ptype_full()` on a zero-length prototype so labels
 #' (including the levels hash in `<factor<4d52a>>`) match dplyr's exactly.
+#' `tz` is a POSIXct key's zone (`""` is local time, as vctrs labels it).
 #' @keywords internal
-join_key_type_label <- function(type, levels = NULL) {
+join_key_type_label <- function(type, levels = NULL, tz = "UTC") {
   if (identical(type, "INT64")) {
     return("integer64")  # vctrs' label for bit64::integer64()
   }
@@ -507,7 +521,7 @@ join_key_type_label <- function(type, levels = NULL) {
     TIMESTAMP_SECONDS = ,
     TIMESTAMP_MILLISECONDS = ,
     TIMESTAMP_MICROSECONDS = ,
-    TIMESTAMP_NANOSECONDS = as.POSIXct(character(), tz = "UTC"),
+    TIMESTAMP_NANOSECONDS = as.POSIXct(character(), tz = tz_localize(tz %||% "UTC")),
     NULL
   )
   if (is.null(proto)) {
@@ -519,13 +533,14 @@ join_key_type_label <- function(type, levels = NULL) {
 #' Raise dplyr's `dplyr_error_join_incompatible_type`
 #' @keywords internal
 abort_join_incompatible_type <- function(x_name, y_name, x_type, y_type,
-                                         x_levels = NULL, y_levels = NULL) {
+                                         x_levels = NULL, y_levels = NULL,
+                                         x_tz = "UTC", y_tz = "UTC") {
   abort_join(
     c(
       sprintf("Can't join `x$%s` with `y$%s` due to incompatible types.",
               x_name, y_name),
-      i = sprintf("`x$%s` is a <%s>.", x_name, join_key_type_label(x_type, x_levels)),
-      i = sprintf("`y$%s` is a <%s>.", y_name, join_key_type_label(y_type, y_levels))
+      i = sprintf("`x$%s` is a <%s>.", x_name, join_key_type_label(x_type, x_levels, x_tz)),
+      i = sprintf("`y$%s` is a <%s>.", y_name, join_key_type_label(y_type, y_levels, y_tz))
     ),
     class = "dplyr_error_join_incompatible_type"
   )
@@ -560,10 +575,18 @@ join_ast_numeric_types <- c("INT32", "INT64", "FLOAT64")
 #' A BOOL8 key against a STRING, factor, Date or POSIXct key is not an error
 #' here: dplyr (vctrs) gives an all-`NA` logical the other side's type, but
 #' only the data can say whether the column is one. Such a pair is recorded
-#' with `unspecified = TRUE`; `apply_join_key_casts()` checks the values at
-#' execution and raises the incompatible-type error then. `marker` is `TRUE`
-#' for a `vctrs::unspecified()` column (named in the tbl's `$unspecified`):
-#' known all-`NA`, no data check.
+#' with `unspecified = TRUE`; `apply_join_key_casts()` checks the values when
+#' the join runs and raises the incompatible-type error then. A verb that
+#' records one without `marker` computes the join at once (a plan break in
+#' lazy mode, see `join_key_check_reads_data()`), so dplyr's error is raised
+#' at the verb. `marker` is `TRUE` for a `vctrs::unspecified()` column (named
+#' in the tbl's `$unspecified`): known all-`NA`, no data check.
+#'
+#' A pair that has no common type and comes after such an unchecked pair is
+#' not raised at once: dplyr names the first bad pair in `by` order, and the
+#' earlier one is only known from the data. The resolver stores it as
+#' `join_spec$key_abort` (the arguments of the error) and stops; the join
+#' raises it after the earlier pairs' checks.
 #'
 #' `lower_join()` applies the plan; `build_join_output_info()` reads it for
 #' the merged key's output type.
@@ -572,6 +595,7 @@ join_ast_numeric_types <- c("INT32", "INT64", "FLOAT64")
 #'   columns (the tbls' `$unspecified`)
 #' @param join_spec A join spec from [parse_join_by()]
 #' @return `join_spec`, with `key_casts` set when any equi pair needs a cast
+#'   (and `key_abort`, see above)
 #' @keywords internal
 resolve_join_key_types <- function(x_schema, y_schema, join_spec,
                                    x_unspecified = NULL, y_unspecified = NULL) {
@@ -598,6 +622,14 @@ resolve_join_key_types <- function(x_schema, y_schema, join_spec,
     return(join_spec)
   }
 
+  zone_of <- function(schema, types, name) {
+    if (identical(types, "TIMESTAMP_MICROSECONDS")) {
+      tz_by_position(schema)[[match(name, schema$names)]]
+    } else {
+      "UTC"
+    }
+  }
+  unchecked <- FALSE # an unspecified pair whose values are not known yet
   for (i in mismatch) {
     fx <- identical(lt[i], "DICTIONARY32")
     fy <- identical(rt[i], "DICTIONARY32")
@@ -607,27 +639,37 @@ resolve_join_key_types <- function(x_schema, y_schema, join_spec,
     if (!isTRUE(res$ok)) {
       # A logical key against a string / Date / POSIXct / factor key: dplyr
       # joins it when the logical side is all NA ("unspecified" to vctrs, which
-      # is a matter of the VALUES). That is decided at execution
+      # is a matter of the VALUES). That is decided when the join runs
       # (`apply_join_key_casts()`); a `vctrs::unspecified()` column is known to
       # be one.
       other <- if (identical(lt[i], "BOOL8")) rt[i] else if (identical(rt[i], "BOOL8")) lt[i]
+      tz_x <- zone_of(x_schema, lt[i], join_spec$left[i])
+      tz_y <- zone_of(y_schema, rt[i], join_spec$right[i])
       if (!is.null(other) && other %in% join_unspecified_partner_types &&
           !(identical(other, "DICTIONARY32") &&
             is.null(if (fx) lvls_x else lvls_y))) {
         left_unspec <- identical(lt[i], "BOOL8")
+        marker <- if (left_unspec) join_spec$left[i] %in% x_unspecified
+                  else join_spec$right[i] %in% y_unspecified
         casts[[length(casts) + 1L]] <- list(
           idx = i, type = other,
           left_type = lt[i], right_type = rt[i],
           cast_left = left_unspec, cast_right = !left_unspec,
           left_levels = lvls_x, right_levels = lvls_y,
-          unspecified = TRUE,
-          marker = if (left_unspec) join_spec$left[i] %in% x_unspecified
-                   else join_spec$right[i] %in% y_unspecified
+          left_tz = tz_x, right_tz = tz_y,
+          unspecified = TRUE, marker = marker
         )
+        unchecked <- unchecked || !marker
         next
       }
-      abort_join_incompatible_type(join_spec$left[i], join_spec$right[i],
-                                   lt[i], rt[i], lvls_x, lvls_y)
+      args <- list(join_spec$left[i], join_spec$right[i], lt[i], rt[i],
+                   lvls_x, lvls_y, tz_x, tz_y)
+      if (!unchecked) {
+        do.call(abort_join_incompatible_type, args)
+      }
+      # an earlier pair may fail first: raised after its check
+      join_spec$key_abort <- args
+      break
     }
     # (A rolling pair is searched, not evaluated as an AST: it needs the copy.)
     if (join_spec$op[i] != "==" && join_spec$filter[i] == "none" &&

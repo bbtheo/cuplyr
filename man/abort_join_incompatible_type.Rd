@@ -10,7 +10,9 @@ abort_join_incompatible_type(
   x_type,
   y_type,
   x_levels = NULL,
-  y_levels = NULL
+  y_levels = NULL,
+  x_tz = "UTC",
+  y_tz = "UTC"
 )
 }
 \description{

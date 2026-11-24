@@ -4,10 +4,11 @@
 \alias{join_key_type_label}
 \title{vctrs-style type label for a join key, as in dplyr's incompatible-type error}
 \usage{
-join_key_type_label(type, levels = NULL)
+join_key_type_label(type, levels = NULL, tz = "UTC")
 }
 \description{
 Built from \code{vctrs::vec_ptype_full()} on a zero-length prototype so labels
 (including the levels hash in \verb{<factor<4d52a>>}) match dplyr's exactly.
+\code{tz} is a POSIXct key's zone (\code{""} is local time, as vctrs labels it).
 }
 \keyword{internal}
