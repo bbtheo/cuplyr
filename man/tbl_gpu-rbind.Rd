@@ -17,7 +17,8 @@
 \item{deparse.level}{Ignored.}
 }
 \value{
-A \code{tbl_gpu}.
+A \code{tbl_gpu}; a data frame when an input has a list or data frame
+column (see \code{\link[=bind_rows]{bind_rows()}}).
 }
 \description{
 \code{rbind(gt, ...)} is \code{\link[=bind_rows]{bind_rows()}} (keeping the first table's groups) and

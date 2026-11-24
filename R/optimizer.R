@@ -1314,6 +1314,17 @@ push_down_filters <- function(ast) {
   }
 
   if (input$type == "join") {
+    # An all-NA logical key joined to a string/Date/factor key is checked on the
+    # data when the join runs (and decides whether a no-row result is an error
+    # in dplyr): a pushed predicate would change what the join sees. push_join()
+    # runs such a join at the verb, so this is a guard for a hand-built plan.
+    # A `vctrs::unspecified()` key (`marker`) has no data check; predicates on
+    # its merged key stay above the join (`cast_keys` below).
+    if (any(vapply(input$by$key_casts, function(cast) {
+      isTRUE(cast$unspecified) && !isTRUE(cast$marker)
+    }, logical(1)))) {
+      return(ast)
+    }
     if (input$join_type %in% c("semi", "anti")) {
       # semi/anti (Phase 7 J2, design section 1.2): behave like "left" for
       # filter pushdown, but even more permissively -- the join's OUTPUT

@@ -69,8 +69,19 @@
 #' column of `x`, as in dplyr); every other verb (`select()`, `mutate()`,
 #' `group_by()` with computed expressions, `slice_min()`/`slice_max()`, a
 #' mutating join, `vctrs::vec_slice()`) returns it as a plain logical column.
-#' An unspecified column joined against a string, `Date` or factor key, or
-#' bound to a character column in `bind_rows()`, still errors.
+#' An all-`NA` logical or unspecified column joins a string, `Date`, `POSIXct`
+#' or factor key, as in dplyr: a merged key takes that key's type; with
+#' `keep = TRUE`, in a non-equi condition and in `semi_join()`/`anti_join()`
+#' each key column keeps its own type. A logical key with a value in it still
+#' errors. Bound to a character column in `bind_rows()`, an unspecified column
+#' still errors.
+#'
+#' A matrix column with more than one column (or more than two dimensions), a
+#' list column, a data frame column and a complex or raw column have no GPU
+#' form: `tbl_gpu()` raises `cuplyr_error_unsupported_class` naming the column.
+#' A verb that ran on the CPU and returned a matrix or array raises
+#' `cuplyr_error_unsupported_result_class` the same way; one that returned a
+#' list or data frame column hands back a plain tibble.
 #'
 #' Column type mappings from R to GPU:
 #' \itemize{
@@ -434,8 +445,7 @@ check_supported_column_classes <- function(data) {
     c(
       paste0("Can't upload column(s) with a class that has no GPU representation: ",
              paste(bad, collapse = ", "), "."),
-      i = paste0("Convert them first, e.g. `unclass()` / `as.numeric()` / `as.character()`, ",
-                 "or `as.POSIXct()` for POSIXlt.")
+      i = unsupported_column_hint(bad)
     ),
     class = "cuplyr_error_unsupported_class",
     call = NULL
@@ -450,21 +460,59 @@ check_supported_column_classes <- function(data) {
 unsupported_column_labels <- function(data) {
   ok <- list(c("factor"), c("ordered", "factor"), "Date", c("POSIXct", "POSIXt"), "integer64")
   bad <- character()
+  kinds <- character()
   for (j in seq_along(data)) {
     col <- data[[j]]
     cls <- oldClass(col)
+    dims <- dim(col)
     if (identical(cls, "vctrs_unspecified")) {
       next # tbl_gpu.data.frame() uploads it as logical and remembers the class
     } else if (isS4(col)) {
       cls <- class(col)
+      kind <- "other"
+    } else if (length(dims) >= 2L && !is.data.frame(col) &&
+               !(length(dims) == 2L && dims[[2L]] == 1L)) {
+      # (a matrix of one column uploads as a plain column, its dim dropped)
+      cls <- if (length(dims) == 2L) "matrix" else "array"
+      kind <- "matrix"
+    } else if (is.data.frame(col)) {
+      # no GPU form (gpu_fallback() keeps such a result as a tibble)
+      kind <- "data frame"
+    } else if (is.null(cls) && is.list(col)) {
+      cls <- "list"
+      kind <- "list"
+    } else if (typeof(col) %in% c("complex", "raw")) {
+      cls <- typeof(col)
+      kind <- "complex or raw"
     } else if (is.null(cls) || any(vapply(ok, identical, logical(1), cls))) {
       next
     } else if (!is.atomic(col) && !inherits(col, "POSIXlt")) {
-      next # list / data-frame columns keep their existing errors
+      cls <- class(col) # a list subclass (vctrs rcrd, ...) has none either
+      kind <- "list"
+    } else {
+      kind <- "other"
     }
     bad <- c(bad, sprintf("`%s` <%s>", names(data)[j], paste(cls, collapse = "/")))
+    kinds <- c(kinds, kind)
   }
+  attr(bad, "kinds") <- kinds
   bad
+}
+
+# The fix to suggest for the labels `unsupported_column_labels()` returned,
+# one sentence per kind of column present.
+# @keywords internal
+unsupported_column_hint <- function(bad) {
+  kinds <- unique(attr(bad, "kinds"))
+  hint <- c(
+    other = paste0("Convert them first, e.g. `unclass()` / `as.numeric()` / `as.character()`, ",
+                   "or `as.POSIXct()` for POSIXlt."),
+    matrix = "Split a matrix or array column into one plain column per matrix column.",
+    "data frame" = "Spread a data frame column into plain columns with `tidyr::unpack()`.",
+    list = "Make a list column atomic, or keep the table on the CPU.",
+    "complex or raw" = "Complex and raw columns have no GPU type; convert them, e.g. with `Re()` or `as.integer()`."
+  )
+  paste(hint[intersect(names(hint), kinds)], collapse = " ")
 }
 
 #' @rdname tbl_gpu
