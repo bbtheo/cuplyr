@@ -144,6 +144,16 @@ rowwise_state$depth <- 0L
 # F80: set by rowwise_agg_call() when a lazy table's dots hold an integer sum()
 # (see rowwise_exact_sums())
 rowwise_state$int_sum <- FALSE
+# Depth of rowwise_rewrite_dots() calls in progress (see rowwise_in_progress())
+rowwise_state$rewriting <- 0L
+
+# TRUE while a rowwise verb rewrites its dots or runs its native attempt: each
+# group is one row there, so a column value has one value per group (the
+# if_else() size check of the parse reads this, only when it would decline).
+# @keywords internal
+rowwise_in_progress <- function() {
+  rowwise_state$depth > 0L || rowwise_state$rewriting > 0L
+}
 
 # Abandon the native attempt in progress (it is always inside rowwise_attempt()).
 # @keywords internal
@@ -324,6 +334,8 @@ rowwise_pure_fns <- c(
 # @param named Whether a rewritten dot needs a name
 # @keywords internal
 rowwise_rewrite_dots <- function(.data, dots, named = TRUE) {
+  rowwise_state$rewriting <- rowwise_state$rewriting + 1L
+  on.exit(rowwise_state$rewriting <- rowwise_state$rewriting - 1L, add = TRUE)
   col <- fallback_reasons$cur
   if (!is.null(col)) {
     col$attempt <- NULL

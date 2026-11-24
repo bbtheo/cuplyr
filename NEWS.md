@@ -4,9 +4,14 @@
   and whose values are columns, `lag()`, `lead()`, `first()`, `last()` and
   `nth()` with an argument written `= NULL` that is not NULL by default (`n`,
   `na_rm`), `paste()` with `sep = NULL`, `nchar()` with `type = NULL`,
+  `trimws(whitespace = NULL)`, `grepl()`, `sub()` and `gsub()` with
+  `ignore.case`, `perl` or `useBytes` written `= NULL`,
   `sum(na.rm = x)` in `mutate()` and `filter()`, and `arrange(-x)` on a
   character, `Date` or `POSIXct` column now run through dplyr and raise its
-  error (or give its result), instead of returning a different result (#69).
+  error (or give its result), instead of returning a different result. An
+  `if_else()` condition that is not logical now raises dplyr's error instead
+  of a GPU error, and `if_else(NA, <constant or aggregate>, ...)` gives `NA`
+  (or `missing`) on the GPU (#69).
 
 * `left_join()`, `inner_join()`, `right_join()`, `full_join()`, `semi_join()`
   and `anti_join()` accept a key that is all `NA` (a logical column, or

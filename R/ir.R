@@ -6317,7 +6317,13 @@ ir_unify_types <- function(types, op_name) {
   names(ranks)[which.max(ranks)]
 }
 
+# A condition that is not logical is dplyr's error ("`condition` must be a
+# logical vector"), raised on the CPU route. Every internal if_else() desugar
+# builds a BOOL8 condition.
 type_if_else <- function(arg_types) {
+  if (arg_types[[1L]] != "BOOL8") {
+    stop_type_needs_cpu("an `if_else()` condition of type ", arg_types[[1L]], " (dplyr requires a logical one)")
+  }
   ir_unify_types(arg_types[-1], "if_else")  # drop cond's own (BOOL8) type
 }
 
@@ -7327,13 +7333,20 @@ ir_call_registry <- list(
         return(NULL)  # wrong arg count: not this shape, fall back
       }
       cond <- args[[1]]
+      # dplyr reads a bare `NA` condition as a logical NA (NA, or `missing`, on
+      # every row); typed here, the inference can't give it a value's type
+      if (identical(.subset2(cond, "kind"), "lit") && ir_is_untyped_na(cond)) {
+        cond$type <- "BOOL8"
+      }
       values <- ir_resolve_value_nas(args[-1], schema)
       # A condition with one value (a constant, `n()`, an aggregate, ...) is not
       # recycled to column values: dplyr errors, or gives its result on a size-1
       # input, so the CPU route runs it. With one-value values too, every size
-      # is 1 and the call stays native.
+      # is 1 and the call stays native, and so does a rowwise verb's call, whose
+      # every group is one row.
       if (ir_is_group_scalar(cond, TRUE) &&
-          !all(vapply(values, ir_is_group_scalar, logical(1), post = TRUE))) {
+          !all(vapply(values, ir_is_group_scalar, logical(1), post = TRUE)) &&
+          !rowwise_in_progress()) {
         fallback_cause("dplyr cannot recycle the values of this `if_else()` to the size of its one-value condition.")
         return(NULL)
       }
