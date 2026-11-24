@@ -237,8 +237,20 @@ arrange_dot_is_native <- function(quo, schema) {
   # `-x` is arithmetic: on a factor column dplyr warns and keeps the input
   # order (F18's rule), so only `desc(x)` / `x` sort a factor natively
   if (identical(as.character(head), "-")) {
-    neg <- ir_call("-", list(ir_col(as.character(expr[[2]]))))
-    return(ir_factor_rule(neg, schema) != "cpu")
+    col <- as.character(expr[[2]])
+    type <- unname(schema$types[match(col, schema$names)])
+    if (length(type) == 1L && !is.na(type)) {
+      if (type == "DICTIONARY32") {
+        neg <- ir_call("-", list(ir_col(col)))
+        return(ir_factor_rule(neg, schema) != "cpu")
+      }
+      # unary minus is an error in R for a string, Date/POSIXct or duration:
+      # the CPU route lets dplyr raise it
+      if (type == "STRING" || startsWith(type, "TIMESTAMP_") || startsWith(type, "DURATION_")) {
+        return(FALSE)
+      }
+    }
+    return(TRUE)
   }
   TRUE
 }

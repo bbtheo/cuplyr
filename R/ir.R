@@ -3169,7 +3169,8 @@ ir_parse_shift_call <- function(expr, env, schema, fn_name) {
   }
 
   n_value <- 1L
-  if (!is.null(present_args$n)) {
+  # presence by name: `n = NULL` is dplyr's error, not the default
+  if ("n" %in% names(present_args)) {
     n_eval <- ir_eval_constant(present_args$n, env)
     n_val <- n_eval$value
     # A Period/Duration `n` is dplyr's error to raise (F48): CPU
@@ -4155,6 +4156,9 @@ ir_parse_sum_call <- function(expr, env, schema) {
   }
 
   if (length(args_raw) == 1) {
+    if (nzchar(names(args_raw) %||% "")) {
+      return(NULL)  # `sum(na.rm = x)` is not `sum(x)`
+    }
     return(ir_call("sum", list(x_ir)))
   }
 
@@ -7295,6 +7299,13 @@ ir_call_registry <- list(
       }
       cond <- args[[1]]
       values <- ir_resolve_value_nas(args[-1], schema)
+      # A size-1 condition is not recycled to the values (an all-literal call is
+      # folded before `parse`): dplyr's error, or its result on one row, so CPU
+      if (identical(cond$kind, "lit") &&
+          !all(vapply(values, function(v) identical(v$kind, "lit"), logical(1)))) {
+        fallback_cause("a size-1 `if_else()` condition: dplyr recycles the values to its size")
+        return(NULL)
+      }
       ir_call("if_else", c(list(cond), values))
     },
     type = type_if_else,

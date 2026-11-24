@@ -1,5 +1,11 @@
 # cuplyr (development version)
 
+* `if_else()` with a single-value condition and column values, `lag()` and
+  `lead()` with `n = NULL`, `sum(na.rm = x)` in `mutate()` and `filter()`, and
+  `arrange(-x)` on a character, `Date` or `POSIXct` column now run through
+  dplyr and raise its error (or give its result), instead of returning a
+  different result (#69).
+
 * `left_join()`, `inner_join()`, `right_join()`, `full_join()`, `semi_join()`
   and `anti_join()` accept a key that is all `NA` (a logical column, or
   `vctrs::unspecified()`) against a character, `Date`, `POSIXct` or factor
