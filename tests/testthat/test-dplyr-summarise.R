@@ -1303,21 +1303,18 @@ test_that("summarise() window-inside-aggregation works with .by=", {
   expect_same_as_dplyr(df, pipeline, arrange_by = "z")
 })
 
-test_that("combining two SEPARATE aggregation calls at the dot level falls back and works end-to-end (Phase 11, task L1)", {
+test_that("combining two SEPARATE aggregation calls at the dot level runs on the GPU (#22)", {
   skip_if_no_gpu()
-  withr::local_options(cuplyr.fallback = "warn")
+  withr::local_options(cuplyr.fallback = "error")
 
-  # sum(cumsum(x)) - mean(y): the dot itself is not a bare fn(single_arg)
-  # shape (decompose_agg_call() only recognizes ONE top-level call), so this
-  # never reaches resolve_agg_window_arg() at all -- this used to be
-  # summarise()'s own "Invalid aggregation expression" hard error (a
-  # cuplyr-only message real dplyr never emits); Phase 11, task L1
-  # (universal expression-level CPU fallback) means it now transparently
-  # falls back to real dplyr::summarise() and succeeds.
+  # sum(cumsum(x)) - mean(y): the dot is cut into its two reducer calls (each its
+  # own aggregate, the first over a window argument) and the subtraction runs on
+  # the aggregated table (summarise_post_split()). It used to fall back to dplyr.
   df <- oracle_window_agg_df()
   pipeline <- function(d) {
     d |> dplyr::group_by(g) |> dplyr::summarise(z = sum(cumsum(v)) - mean(v), .groups = "drop")
   }
 
-  expect_warning(expect_same_as_dplyr(df, pipeline, arrange_by = "g"), "fell back to CPU evaluation")
+  expect_same_as_dplyr(df, pipeline, arrange_by = "g")
+  expect_same_as_dplyr_lazy(df, pipeline, arrange_by = "g")
 })

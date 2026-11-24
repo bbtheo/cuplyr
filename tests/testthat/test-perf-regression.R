@@ -256,6 +256,35 @@ test_that("perf: summarise_grouped_lazy", {
   }, calibration = "kernel")
 })
 
+# #22: arithmetic around reducers (the issue's three examples). The reducers are
+# aggregated and the arithmetic is one mutate on the 20-row result; before #22
+# these dots ran on the CPU.
+test_that("perf: summarise_post_agg_eager", {
+  skip_if_no_gpu()
+  gpu_df <- tbl_gpu(perf_big_df, lazy = FALSE)
+
+  expect_no_perf_regression("summarise_post_agg_eager", function() {
+    gpu_df |>
+      dplyr::group_by(grp) |>
+      dplyr::summarise(m = mean(x) + 1, lo = mean(x) - qnorm(.975) * sd(x) / sqrt(n()),
+                       avg = sum(y) / n(), .groups = "drop") |>
+      collect()
+  }, calibration = "kernel")
+})
+
+test_that("perf: summarise_post_agg_lazy", {
+  skip_if_no_gpu()
+  gpu_df <- tbl_gpu(perf_big_df, lazy = TRUE)
+
+  expect_no_perf_regression("summarise_post_agg_lazy", function() {
+    gpu_df |>
+      dplyr::group_by(grp) |>
+      dplyr::summarise(m = mean(x) + 1, lo = mean(x) - qnorm(.975) * sd(x) / sqrt(n()),
+                       avg = sum(y) / n(), .groups = "drop") |>
+      collect()
+  }, calibration = "kernel")
+})
+
 # #50: summarise(.by =), groups in order of first appearance. Same data and
 # dots as summarise_grouped_*.
 test_that("perf: summarise_by_eager", {

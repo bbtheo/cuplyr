@@ -729,9 +729,10 @@ test_that("F88: summarise() never says a function it has a GPU handler for has n
   withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = NULL)
   df <- tibble::tibble(x = c(1, 2, 3, 4, 5, 6), y = c(2, 3, 4, 5, 6, 7))
   cases <- list(
-    list(f = function(t) summarise(t, r = max(x) - min(x)), expr = "max(x) - min(x)"),
-    list(f = function(t) summarise(t, m = sqrt(mean(x))), expr = "sqrt(mean(x))"),
-    list(f = function(t) summarise(t, m = round(mean(x), 1)), expr = "round(mean(x), 1)")
+    # (arithmetic around reducers runs on the GPU since #22; a window function of one doesn't)
+    list(f = function(t) summarise(t, r = dplyr::lag(max(x))), expr = "dplyr::lag(max(x))"),
+    list(f = function(t) summarise(t, m = cumsum(mean(x))), expr = "cumsum(mean(x))"),
+    list(f = function(t) summarise(t, m = dplyr::lead(mean(x), 1)), expr = "dplyr::lead(mean(x), 1)")
   )
   for (cs in cases) {
     for (lazy in c(FALSE, TRUE)) {
