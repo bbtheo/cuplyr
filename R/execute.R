@@ -669,39 +669,16 @@ push_op <- function(.data, node, input_schema = current_schema(.data), carry = T
 }
 
 # The names of a node's output that are still vctrs::unspecified(): the
-# columns select/rename/mutate/window pass through unchanged, under their new names.
-# A mutate keeps the columns no expression overwrites, plus a bare copy of an
-# unspecified column (read in expression order). A name that comes out
-# duplicated can't be addressed, so it loses the marker (as `names<-` does).
+# columns select/rename/mutate/window pass through unchanged, under their new
+# names (the column-origin map of R/col-attrs.R: a mutate keeps the columns no
+# expression overwrites, plus a bare copy of an unspecified column, read in
+# expression order). A name that comes out duplicated can't be addressed, so it
+# loses the marker (as `names<-` does).
 # @keywords internal
 carry_unspecified <- function(node, unspecified, old_names, new_names) {
-  type <- .subset2(node, "type")
-  if (type == "window") {
-    # (a window node only adds its spec outputs: temps no user column shares)
-    out <- setdiff(unspecified, vapply(.subset2(node, "specs"), .subset2, "", "output_col"))
-  } else if (type == "mutate") {
-    keep <- unspecified
-    for (e in .subset2(node, "expressions")) {
-      ir <- .subset2(e, "ir")
-      out <- .subset2(e, "output_col")
-      is_copy <- identical(.subset2(ir, "kind"), "col") && .subset2(ir, "name") %in% keep
-      keep <- if (is_copy) union(keep, out) else setdiff(keep, out)
-    }
-    out <- keep
-  } else {
-    # the output name of each input column, by position
-    pos <- .subset2(node, "positions")
-    if (type == "select") {
-      # a select keeps its columns' names
-      out <- new_names[new_names %in% unspecified]
-    } else {
-      mapped <- old_names
-      idx <- if (is.null(pos)) match(.subset2(node, "old_names"), old_names) else pos
-      mapped[idx] <- .subset2(node, "new_names")
-      out <- mapped[old_names %in% unspecified]
-    }
-  }
-  out <- set_diff(set_intersect(out, new_names), new_names[duplicated(new_names)])
+  origin <- col_origin(node, old_names, new_names)
+  out <- new_names[old_names[origin] %in% unspecified]
+  out <- set_diff(out, new_names[duplicated(new_names)])
   if (length(out) > 0L) out
 }
 

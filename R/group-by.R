@@ -763,6 +763,11 @@ compute_group_data <- function(.data) {
     gd <- expand_dropped_groups(gd, group_names, keys_schema$factor_levels)
   }
 
+  # the keys' attributes, and the names of each group's first row (#21)
+  if (!is.null(.subset2(materialized, "col_attrs"))) {
+    gd <- group_keys_col_attrs(gd, materialized, observed_only = is.null(fixed) && isTRUE(materialized$group_drop %||% TRUE))
+  }
+
   # dplyr's grouped_df group_data() carries `.drop` as an attribute
   attr(gd, ".drop") <- isTRUE(materialized$group_drop %||% TRUE)
 

@@ -72,7 +72,7 @@ with_reframe_wide <- function(expr) {
 #' @importFrom dplyr reframe
 reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
   if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
-    return(col_cpu_route(.data, "reframe"))
+    return(rowwise_cpu(.data, "reframe", reason = col_names_reason(.data)))
   }
   if (is_rowwise_gpu(.data)) {
     return(rowwise_cpu(.data, "reframe"))

@@ -371,9 +371,11 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   by_given <- !quo_is_null_fast(by_quo)
 
   # a group key's names (those of its group's first row) are dplyr's to pick
-  if (!is.null(.subset2(.data, "col_attrs")) &&
-      col_names_move(.data, if (by_given) by_cols else .subset2(.data, "groups"))) {
-    return(col_cpu_route(.data, "summarise"))
+  if (!is.null(.subset2(.data, "col_attrs"))) {
+    keys <- if (by_given) by_cols else .subset2(.data, "groups")
+    if (col_names_move(.data, keys)) {
+      return(rowwise_cpu(.data, "summarise", reason = col_names_reason(.data, keys)))
+    }
   }
 
   dots <- rlang::quos(..., .ignore_empty = "all")

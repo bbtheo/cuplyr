@@ -205,7 +205,7 @@
 #' }
 filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
-    return(col_cpu_route(.data, "filter"))
+    return(rowwise_cpu(.data, "filter", reason = col_names_reason(.data)))
   }
   # (an argument that wasn't given is the NULL quosure, which skips an enquo())
   by_quo <- if (missing(.by) && is.null(substitute(.by))) null_quo else rlang::enquo(.by)
@@ -232,7 +232,7 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
 #' @importFrom dplyr filter_out
 filter_out.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
-    return(col_cpu_route(.data, "filter_out"))
+    return(rowwise_cpu(.data, "filter_out", reason = col_names_reason(.data)))
   }
   by_quo <- if (missing(.by) && is.null(substitute(.by))) null_quo else rlang::enquo(.by)
   filter_impl(.data, rlang::quos(..., .ignore_empty = "all"), by_quo, .preserve,

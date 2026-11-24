@@ -82,7 +82,7 @@
 #' }
 arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
   if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
-    return(col_cpu_route(.data, "arrange"))
+    return(rowwise_cpu(.data, "arrange", reason = col_names_reason(.data)))
   }
   dots <- rlang::enquos(...)
   if (length(dots) > 0L) check_unique_input_names(.data)

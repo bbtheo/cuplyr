@@ -1,17 +1,21 @@
 # cuplyr (development version)
 
-* `tbl_gpu()`, `collect()`, `filter()`, `arrange()`, `slice()`, `distinct()`,
-  `mutate()`, `transmute()`, `summarise()`, `count()`, `group_by()`, `select()`,
-  `rename()`, the joins, `bind_rows()` and `bind_cols()` keep a column's element
-  names, its extra attributes (a `label`, `scale()`'s `scaled:center`) and the
-  shape of a one-column matrix, as dplyr does. Attributes go with a column
-  through every verb on the GPU; element names follow their rows, which a verb
-  that moves rows does by running dplyr on the CPU when a column has names.
-  `mutate()` keeps the names and attributes of columns it does not touch and
-  of bare copies (`b2 = b`), and runs a dot that computes from such a column on
-  the CPU, where R decides what the result keeps. `summarise()` keeps the
+* A column keeps its element names, its extra attributes (a `label`,
+  `scale()`'s `scaled:center`) and the shape of a one-column matrix from
+  `tbl_gpu()` to `collect()`, as dplyr keeps them, through `filter()`,
+  `arrange()`, `slice()`, `distinct()`, `mutate()`, `transmute()`,
+  `summarise()`, `count()`, `group_by()`, `group_keys()`, `select()`,
+  `rename()`, the joins, `bind_rows()` and `bind_cols()`. Extra attributes
+  stay on the GPU through the verbs that keep rows or columns as they are.
+  Element names follow their rows, which a verb that moves rows does by
+  running dplyr on the CPU when a column has names, and `bind_rows()` and the
+  set operations do when any input has names or a matrix column. `mutate()`
+  keeps the names and attributes of columns it does not touch and of bare
+  copies (`b2 = b`), and runs a dot that computes from such a column on the
+  CPU, where R decides what the result keeps. `summarise()` keeps the
   attributes of its group keys, and `quantile()` in `summarise()` names its
-  result (`"50%"`) as dplyr does (#21, #56).
+  result (`"50%"`) as dplyr does (#21, #56). A few paths still drop them (see
+  the "Column names and attributes" notes in the developer reference).
 
 * `left_join()`, `inner_join()`, `right_join()`, `full_join()`, `semi_join()`
   and `anti_join()` accept a key that is all `NA` (a logical column, or

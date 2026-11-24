@@ -1611,7 +1611,7 @@ mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
 
   # element names follow dplyr's row gathering (`""` for unmatched rows)
   if (join_names_need_cpu(x, y)) {
-    return(fallback_args(col_names_reason(x, join_names_cols(x, y))))
+    return(fallback_args(join_names_reason(x, y)))
   }
 
   # `multiple = "error"`/`"warning"` are undocumented (defunct in dplyr's NEWS)
@@ -1685,7 +1685,7 @@ filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
 
   # x's rows are gathered, and so are the names
   if (!is.null(.subset2(x, "col_attrs")) && col_names_any(x)) {
-    return(fallback_args(col_names_reason(x, join_names_cols(x, NULL))))
+    return(fallback_args(join_names_reason(x, NULL)))
   }
 
   if (!join_by_natively_supported(by, x, y)) {
@@ -1994,7 +1994,7 @@ cross_join.tbl_gpu <- function(x, y, ..., copy = FALSE, suffix = c(".x", ".y")) 
 
   if (join_names_need_cpu(x, y)) {
     return(join_route_to_fallback("cross_join", dplyr::cross_join, x, y, list(suffix = suffix),
-                                  reason = col_names_reason(x, join_names_cols(x, y))))
+                                  reason = join_names_reason(x, y)))
   }
 
   suffix <- validate_join_suffix(suffix)

@@ -395,8 +395,9 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
   agg_name <- resolve_agg_name(name, grouped$groups, call = quote(tally()))
   agg_call <- build_count_agg_call(wt_quo, current_schema(grouped))
   # (F88: a fallback of the summarise() below is count()'s, for `wt`)
-  if (!rlang::quo_is_null(wt_quo)) {
-    prev_as <- fallback_notice_as("count", notice_expr_text(wt_quo))
+  # (and of a CPU route for column names, which has no expression to name)
+  if (!rlang::quo_is_null(wt_quo) || !is.null(.subset2(x, "col_attrs"))) {
+    prev_as <- fallback_notice_as("count", if (!rlang::quo_is_null(wt_quo)) notice_expr_text(wt_quo) else NA_character_)
     on.exit(fallback_notice_restore(prev_as), add = TRUE)
   }
 
@@ -477,8 +478,9 @@ tally.tbl_gpu <- function(x, wt = NULL, sort = FALSE, name = NULL) {
   agg_name <- resolve_agg_name(name, orig_groups)
   agg_call <- build_count_agg_call(wt_quo, current_schema(x))
   # (F88: a fallback of the summarise() below is tally()'s, for `wt`)
-  if (!rlang::quo_is_null(wt_quo)) {
-    prev_as <- fallback_notice_as("tally", notice_expr_text(wt_quo))
+  # (and of a CPU route for column names, which has no expression to name)
+  if (!rlang::quo_is_null(wt_quo) || !is.null(.subset2(x, "col_attrs"))) {
+    prev_as <- fallback_notice_as("tally", if (!rlang::quo_is_null(wt_quo)) notice_expr_text(wt_quo) else NA_character_)
     on.exit(fallback_notice_restore(prev_as), add = TRUE)
   }
 
@@ -590,8 +592,9 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
   agg_name <- resolve_agg_name(name, all_cols, call = quote(add_tally()))
   agg_call <- build_count_agg_call(wt_quo, current_schema(grouped), for_mutate = TRUE)
   # (F88: a fallback of the mutate() below is add_count()'s, for `wt`)
-  if (!rlang::quo_is_null(wt_quo)) {
-    prev_as <- fallback_notice_as("add_count", notice_expr_text(wt_quo))
+  # (and of a CPU route for column names, which has no expression to name)
+  if (!rlang::quo_is_null(wt_quo) || !is.null(.subset2(x, "col_attrs"))) {
+    prev_as <- fallback_notice_as("add_count", if (!rlang::quo_is_null(wt_quo)) notice_expr_text(wt_quo) else NA_character_)
     on.exit(fallback_notice_restore(prev_as), add = TRUE)
   }
 

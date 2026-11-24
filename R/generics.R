@@ -393,10 +393,13 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
     return(zero_column_result(x, "[", n = n_rows))
   }
 
-  if (!i_missing && !isTRUE(i) && !is.null(.subset2(x, "col_attrs")) && col_names_move(x)) {
-    # element names move with the rows: tibble's own subsetting does it
+  if (!i_missing && !isTRUE(i) && !is.null(.subset2(x, "col_attrs")) &&
+      (col_names_move(x) || (col_names_any(x) && bracket_may_pad(i, n_known)))) {
+    # element names move with the rows, and a row the subscript adds has none:
+    # tibble's own subsetting does it
     drop_flag <- x$group_drop %||% TRUE
-    x <- gpu_fallback("[", x, function(tbl) tbl[i, , drop = FALSE], reason = col_names_reason(x))
+    reason <- if (col_names_move(x)) col_names_reason(x) else col_names_pad_reason(x)
+    x <- gpu_fallback("[", x, function(tbl) tbl[i, , drop = FALSE], reason = reason)
     x$group_drop <- drop_flag
   } else if (!i_missing && !isTRUE(i)) {
     drop_flag <- x$group_drop %||% TRUE

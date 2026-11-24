@@ -663,7 +663,7 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   }
   # a dot that reads a column with names or attributes: R decides what its
   # result keeps (#21)
-  if (!is.null(.subset2(.data, "col_attrs")) &&
+  if ((!is.null(.subset2(.data, "col_attrs")) || isTRUE(attr(expressions, "const_names"))) &&
       !is.null(reason <- col_attrs_read_reason(names(.subset2(.data, "col_attrs")), expressions))) {
     return(mutate_done(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
                                             consts = evaluated$consts, provenance = provenance,
@@ -2248,7 +2248,8 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
     rowwise_bail("a window call or vector literal in a rowwise transmute()")
   }
   # a dot that reads a column with names or attributes: R decides what it keeps (#21)
-  attrs_reason <- if (!is.null(expressions) && !is.null(.subset2(.data, "col_attrs"))) {
+  attrs_reason <- if (!is.null(expressions) &&
+                      (!is.null(.subset2(.data, "col_attrs")) || isTRUE(attr(expressions, "const_names")))) {
     col_attrs_read_reason(names(.subset2(.data, "col_attrs")), expressions)
   }
   if (!is.null(attrs_reason)) {

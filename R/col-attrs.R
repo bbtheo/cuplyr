@@ -18,7 +18,7 @@
 # (vec_restore_default()), so `names` is the only part tied to rows. The safety
 # rule: row-aligned `names` are carried only through nodes that cannot move rows
 # (select, rename, mutate, window, barrier); a verb that moves rows and should
-# keep them takes its CPU route first (`col_names_move()`/`col_cpu_route()`). A
+# keep them takes its CPU route first (`col_names_move()` and `rowwise_cpu()` with a `reason`). A
 # node that forgets this loses the names, it never puts them on the wrong rows.
 
 # The entries for the columns of `data` that have metadata, as `$col_attrs`
@@ -52,7 +52,10 @@ col_attrs_entry <- function(col) {
   if (inherits(col, "POSIXct")) drop <- c(drop, "tzone")
   attrs <- a[!names(a) %in% drop]
   entry <- list()
-  if (length(attrs) > 0L) entry$attrs <- attrs
+  if (length(attrs) > 0L) {
+    entry$attrs <- attrs
+    entry$ptype <- col_attrs_ptype(col)
+  }
   dims <- a[["dim"]]
   dn <- a[["dimnames"]]
   nm <- a[["names"]]
@@ -73,6 +76,36 @@ col_attrs_entry <- function(col) {
   if (length(entry) > 0L) entry
 }
 
+# A zero-length copy of `col` that holds its constant attributes (no names,
+# shape, class, levels or zone: the type owns those). vctrs copies attributes
+# onto a result without checking them, which `attr<-` can't do for one R
+# validates against the length (`tsp`); this is what col_attrs_restore() copies
+# from. NULL when vctrs can't slice the column.
+# @keywords internal
+col_attrs_ptype <- function(col) {
+  p <- tryCatch(vctrs::vec_slice(col, 0L), error = function(e) NULL)
+  if (is.null(p)) {
+    return(NULL)
+  }
+  for (a in c("names", "dim", "dimnames", "class", "levels", "tzone")) attr(p, a) <- NULL
+  p
+}
+
+# `col` with the constant attributes of entry `e` on it, as vec_slice() would
+# leave them; what the type owns (class, levels, zone) stays the column's own.
+# @keywords internal
+col_attrs_put <- function(col, e) {
+  ptype <- .subset2(e, "ptype")
+  if (is.null(ptype)) {
+    for (a in names(e$attrs)) attr(col, a) <- e$attrs[[a]]
+    return(col)
+  }
+  own <- attributes(col)
+  out <- vctrs::vec_restore(col, ptype)
+  for (a in c("class", "levels", "tzone")) attr(out, a) <- own[[a]]
+  out
+}
+
 # Put the metadata back on a collected frame (`result`, a tibble).
 # @keywords internal
 col_attrs_restore <- function(result, col_attrs) {
@@ -88,7 +121,7 @@ col_attrs_restore <- function(result, col_attrs) {
     if (is.na(j)) next
     e <- col_attrs[[nm]]
     col <- cols[[j]]
-    for (a in names(e$attrs)) attr(col, a) <- e$attrs[[a]]
+    if (!is.null(e$attrs)) col <- col_attrs_put(col, e)
     row_names <- e[["names"]]
     if (is.null(row_names) && !is.null(e$names_const)) row_names <- rep(e$names_const, n)
     if (!is.null(row_names) && length(row_names) != n) row_names <- NULL # (never wrong rows)
@@ -106,22 +139,75 @@ col_attrs_restore <- function(result, col_attrs) {
   cols
 }
 
-# Does any column carry row-aligned names (`names`: one per row, which a verb
-# that moves rows has to move with them)?
+# Does any of `cols` (default: every column with an entry) carry row-aligned
+# names (`names`: one per row, which a verb that moves rows has to move with
+# them)? `cols = NULL` is no column.
 # @keywords internal
-col_names_move <- function(x, cols = NULL) {
-  for (nm in (cols %||% names(.subset2(x, "col_attrs")))) {
-    if (!is.null(.subset2(.subset2(.subset2(x, "col_attrs"), nm), "names"))) return(TRUE)
+col_names_move <- function(x, cols = names(.subset2(x, "col_attrs"))) {
+  ca <- .subset2(x, "col_attrs")
+  for (nm in cols) {
+    if (!is.null(.subset2(.subset2(ca, nm), "names"))) return(TRUE)
   }
   FALSE
 }
 
-# The CPU-route reason for a table whose columns have row-aligned names.
+# "column `b` has" / "columns `b`, `d` have", for the reasons below.
 # @keywords internal
-col_names_reason <- function(x, cols = NULL) {
-  nms <- cols %||% names(Filter(function(e) !is.null(.subset2(e, "names")), .subset2(x, "col_attrs")))
-  paste0("column ", paste0("`", nms, "`", collapse = ", "),
-         " has element names, which dplyr moves with the rows.")
+col_list_phrase <- function(cols) {
+  paste0(if (length(cols) == 1L) "column " else "columns ",
+         paste0("`", cols, "`", collapse = ", "),
+         if (length(cols) == 1L) " has" else " have")
+}
+
+# Can the row subscript `i` of `[` add rows (an NA or out-of-range position,
+# which gets NA for a name), on a table of `n` rows (NA: not known yet)?
+# @keywords internal
+bracket_may_pad <- function(i, n) {
+  is.na(n) || is.character(i) || anyNA(i) || (is.numeric(i) && any(i > n))
+}
+
+# The CPU-route reason for a `[` that may add rows to a table whose columns
+# have element names: the added rows' names are NA, which no entry says.
+# @keywords internal
+col_names_pad_reason <- function(x) {
+  nms <- names(Filter(function(e) !is.null(.subset2(e, "names_const")), .subset2(x, "col_attrs")))
+  paste0(col_list_phrase(nms), " element names, which are NA on a row the subscript adds.")
+}
+
+# The CPU-route reason for a table whose columns have row-aligned names: the
+# columns of `cols` (default: all) that do.
+# @keywords internal
+col_names_reason <- function(x, cols = names(.subset2(x, "col_attrs"))) {
+  ca <- .subset2(x, "col_attrs")
+  nms <- cols[vapply(cols, function(nm) !is.null(.subset2(.subset2(ca, nm), "names")), logical(1))]
+  paste0(col_list_phrase(nms), " element names, which dplyr moves with the rows.")
+}
+
+# The CPU-route reason of a join whose inputs have element names of any kind.
+# @keywords internal
+join_names_reason <- function(x, y) {
+  paste0(col_list_phrase(join_names_cols(x, y)), " element names, which dplyr gathers with the rows.")
+}
+
+# The group data `gd` of `x` (a table with `$col_attrs`) with the attributes of
+# its key columns on them. A key's names are those of its group's first row;
+# groups with no row (a `.drop = FALSE` level, a fixed key) have none to take,
+# so a table with those gets no names.
+# @keywords internal
+group_keys_col_attrs <- function(gd, x, observed_only) {
+  ca <- .subset2(x, "col_attrs")[.subset2(x, "groups")]
+  ca <- ca[!vapply(ca, is.null, logical(1))]
+  if (length(ca) == 0L) {
+    return(gd)
+  }
+  first <- vapply(gd$.rows, function(r) if (length(r) > 0L) r[[1L]] else NA_integer_, integer(1))
+  for (nm in names(ca)) {
+    e <- ca[[nm]]
+    if (!observed_only) e$names_const <- NULL
+    e$names <- if (observed_only) e[["names"]][first]
+    ca[[nm]] <- e
+  }
+  col_attrs_restore(gd, ca)
 }
 
 # Does a join of `x` and `y` (a tbl_gpu) meet element names of any kind in
@@ -168,8 +254,8 @@ col_bind_reason <- function(dots) {
       next
     }
     if (length(cols) > 0L) {
-      return(paste0("column ", paste0("`", cols, "`", collapse = ", "),
-                    " has element names or a matrix shape, which dplyr combines by its own rules."))
+      return(paste0(col_list_phrase(cols),
+                    " element names or a matrix shape, which dplyr combines by its own rules."))
     }
   }
   NULL
@@ -218,18 +304,25 @@ join_col_attrs <- function(join_type, x, y, join_spec, suffix, keep, new_schema)
 
 # Has a constant value (a mutate() dot that read no column) attributes besides
 # names that its column would keep in dplyr? (Its names go with the column,
-# see the `const_names` of the mutate expression.)
+# see the `const_names` of the mutate expression.) Only a class a column can
+# hold counts: the `units` of a difftime belong to its class, and a value of
+# a class the GPU has no type for is the type check's to report.
 # @keywords internal
 col_value_has_attrs <- function(value) {
   a <- attributes(value)
-  !is.null(a) && any(!names(a) %in% c("names", "class", "levels", "tzone"))
+  if (is.null(a)) {
+    return(FALSE)
+  }
+  holdable <- c("factor", "ordered", "Date", "POSIXct", "POSIXt", "integer64")
+  all(oldClass(value) %in% holdable) && any(!names(a) %in% c("names", "class", "levels", "tzone"))
 }
 
 # Why a mutate()/transmute() whose `expressions` (the parsed dots) read a
 # column of `attributed` (the names of columns with `$col_attrs` entries) in
 # anything but a bare copy runs on dplyr: R's own rules decide what the result
 # keeps. NULL when none does. A bare copy keeps the entry, so its output is
-# attributed too; any other output isn't.
+# attributed too; so is a constant with names (`const_names`), for the dots
+# after it; any other output isn't.
 # @keywords internal
 col_attrs_read_reason <- function(attributed, expressions) {
   for (e in expressions) {
@@ -239,10 +332,14 @@ col_attrs_read_reason <- function(attributed, expressions) {
       attributed <- if (.subset2(ir, "name") %in% attributed) union(attributed, out) else setdiff(attributed, out)
       next
     }
+    if (!is.null(.subset2(e, "const_names"))) {
+      attributed <- union(attributed, out)
+      next
+    }
     hit <- intersect(ir_cols(ir), attributed)
     if (length(hit) > 0L) {
-      return(paste0("column ", paste0("`", hit, "`", collapse = ", "),
-                    " has names or attributes, which R carries through an expression by its own rules."))
+      return(paste0(col_list_phrase(hit),
+                    " names or attributes, which R carries through an expression by its own rules."))
     }
     attributed <- setdiff(attributed, out)
   }
@@ -272,10 +369,13 @@ col_attrs_without_names <- function(col_attrs) {
   if (length(col_attrs) > 0L) col_attrs
 }
 
-# For each output column of `node`, the position of the input column it is an
-# unchanged copy of (NA: a new or recomputed column, or a node that gives no
-# column its input's values). The one column-origin map the per-column metadata
-# rides on.
+# For each output column of `node`, which entry it takes: the position of the
+# input column it is an unchanged copy of (a bare `b = a` copy included), or,
+# for a mutate dot that makes a constant with names, `length(old_names)` plus
+# that dot's index (the entry the node builds itself, `col_attrs_made()`); NA
+# for a new or recomputed column, or a node that gives no column its input's
+# values. The one column-origin map the per-column metadata and
+# `$unspecified` ride on.
 # @keywords internal
 col_origin <- function(node, old_names, new_names) {
   none <- rep(NA_integer_, length(new_names))
@@ -285,19 +385,16 @@ col_origin <- function(node, old_names, new_names) {
       if (length(pos) == length(new_names)) as.integer(pos) else none
     },
     rename = {
-      # select(x = y) is one rename node over a fresh select node: the select's
-      # columns are the table's own names, where a select already in the plan
-      # has the names the table has now
-      input <- .subset2(node, "input")
-      sel <- if (identical(.subset2(input, "type"), "select") &&
-                 !identical(.subset2(input, "columns"), old_names)) input
-      if (!is.null(sel)) {
-        pos <- .subset2(sel, "positions") %||% match(.subset2(sel, "columns"), old_names)
-        if (length(pos) == length(new_names)) as.integer(pos) else none
-      } else if (length(old_names) == length(new_names)) {
-        seq_along(new_names)
+      # the columns keep their places; the node's new names map back to its old
+      # ones (select(x = y) is one rename node over a fresh select, where `y`
+      # is the column the output `x` is). A positional rename (duplicated
+      # names) renames in place.
+      if (!is.null(.subset2(node, "positions"))) {
+        if (length(old_names) == length(new_names)) seq_along(new_names) else none
       } else {
-        none
+        before <- new_names
+        before[match(.subset2(node, "new_names"), new_names)] <- .subset2(node, "old_names")
+        match(before, old_names)
       }
     },
     barrier = , filter = , arrange = , slice = {
@@ -311,18 +408,30 @@ col_origin <- function(node, old_names, new_names) {
     },
     mutate = {
       cur <- as.list(stats::setNames(seq_along(old_names), old_names))
+      k <- 0L
       for (e in .subset2(node, "expressions")) {
+        k <- k + 1L
         ir <- .subset2(e, "ir")
-        src <- if (identical(.subset2(ir, "kind"), "col")) cur[[.subset2(ir, "name")]]
+        src <- if (identical(.subset2(ir, "kind"), "col")) {
+          cur[[.subset2(ir, "name")]]
+        } else if (!is.null(.subset2(e, "const_names"))) {
+          length(old_names) + k
+        }
         cur[.subset2(e, "output_col")] <- list(src)
       }
-      vapply(new_names, function(nm) cur[[nm]] %||% NA_integer_, integer(1), USE.NAMES = FALSE)
+      vapply(new_names, function(nm) as.integer(cur[[nm]] %||% NA_integer_), integer(1), USE.NAMES = FALSE)
     },
     distinct = match(new_names, old_names),
     summarise = {
       keys <- setdiff(.subset2(node, "groups"), summarise_output_names(node))
       origin <- match(new_names, keys)
       ifelse(is.na(origin), NA_integer_, match(new_names, old_names))
+    },
+    reframe = {
+      # the group keys, repeated to the new size
+      outs <- .subset2(node, "outputs")
+      src <- vapply(outs, function(o) if (identical(.subset2(o, "kind"), "rep")) .subset2(o, "src") else NA_character_, "")
+      match(src[match(new_names, vapply(outs, .subset2, "", "name"))], old_names)
     },
     none
   )
@@ -334,86 +443,60 @@ summarise_output_names <- function(node) {
   vapply(.subset2(node, "aggregations"), function(a) .subset2(a, "output_col") %||% NA_character_, "")
 }
 
-# `$col_attrs` of the output of `node`: each output column that is an unchanged
-# copy of an input column takes that column's entry; the row-aligned names go
-# only through the nodes that cannot move rows.
+# The entry a mutate dot that makes a constant with names gives its column:
+# one name for every row when the constant is a scalar literal, one per row
+# otherwise (a vector constant is the table's length). NULL for any other dot.
+# @keywords internal
+const_names_entry <- function(e) {
+  cn <- .subset2(e, "const_names")
+  if (is.null(cn)) {
+    return(NULL)
+  }
+  if (length(cn) == 1L && identical(.subset2(.subset2(e, "ir"), "kind"), "lit")) {
+    list(names_const = cn[[1L]])
+  } else {
+    list(names = cn)
+  }
+}
+
+# `$col_attrs` of the output of `node`: each output column takes the entry of
+# the column it is an unchanged copy of (`col_origin()`); the row-aligned names
+# go only through the nodes that cannot move rows. A mutate adds the entries of
+# its constants with names, a summarise those of quantile()'s names.
 # @keywords internal
 carry_col_attrs <- function(node, col_attrs, old_names, new_names) {
   type <- .subset2(node, "type")
-  # summarise: quantile() names its output (R/summarise.R)
-  new_entries <- list()
-  if (identical(type, "mutate")) {
-    # a constant with names (`b = c(p = 1)`, `b = setNames(1:3, letters[1:3])`):
-    # one name for every row, or one per row (a vector constant is the table's
-    # length); a later dot of the same name replaces it
-    for (e in .subset2(node, "expressions")) {
-      out_col <- .subset2(e, "output_col")
-      cn <- .subset2(e, "const_names")
-      new_entries[out_col] <- list(if (is.null(cn)) NULL else if (length(cn) == 1L && identical(.subset2(.subset2(e, "ir"), "kind"), "lit")) {
-        list(names_const = cn[[1L]])
-      } else {
-        list(names = cn)
-      })
+  made <- switch(type,
+    mutate = lapply(.subset2(node, "expressions"), const_names_entry),
+    summarise = {
+      q <- list()
+      for (agg in .subset2(node, "aggregations")) {
+        qn <- .subset2(agg, "qnames")
+        if (!is.null(qn)) q[[.subset2(agg, "output_col")]] <- list(names_const = qn[[1L]])
+      }
+      q
     }
-    new_entries <- new_entries[!vapply(new_entries, is.null, logical(1))]
-  }
-  if (identical(type, "summarise")) {
-    for (agg in .subset2(node, "aggregations")) {
-      qn <- .subset2(agg, "qnames")
-      if (!is.null(qn)) new_entries[[.subset2(agg, "output_col")]] <- list(names_const = qn[[1L]])
-    }
-  }
-  if (is.null(col_attrs) && length(new_entries) == 0L) {
+  )
+  if (is.null(col_attrs) && !any(!vapply(made, is.null, logical(1)))) {
     return(NULL)
   }
   if (anyDuplicated(old_names) > 0L || anyDuplicated(new_names) > 0L) {
     return(NULL)
   }
   out <- list()
-  if (!is.null(col_attrs)) {
+  if (!is.null(col_attrs) || identical(type, "mutate")) {
     origin <- col_origin(node, old_names, new_names)
-    out <- col_attrs[old_names[origin]]
+    have <- if (is.null(col_attrs)) vector("list", length(old_names)) else unname(col_attrs[old_names])
+    pool <- c(have, if (identical(type, "mutate")) unname(made))
+    out <- pool[origin]
     names(out) <- new_names
     out <- out[!vapply(out, is.null, logical(1))]
     if (!type %in% c("select", "rename", "mutate", "window", "barrier")) {
       out <- col_attrs_without_names(out)
     }
   }
-  out[names(new_entries)] <- new_entries
-  if (length(out) > 0L) out
-}
-
-# Run the verb that called this on the CPU: dplyr's own verb on the collected
-# table, with the arguments exactly as the user wrote them (rowwise_cpu()'s
-# mechanism: the call is rebuilt from the method's call and evaluated in the
-# caller's environment). The route of a row-moving verb whose table has names
-# that dplyr moves with the rows. Called first thing in a method, as
-# `return(col_cpu_route(.data, "filter"))`; `tables` names the arguments that
-# hold another table (a join's `y`), collected here.
-# @keywords internal
-col_cpu_route <- function(.data, verb, tables = character(),
-                          reason = col_names_reason(.data)) {
-  idx <- sys.parent()
-  fn <- sys.function(idx)
-  call <- sys.call(idx)
-  caller <- parent.frame(2)
-  mc <- match.call(fn, call, expand.dots = TRUE, envir = caller)
-  first <- names(formals(fn))[[1L]]
-  also <- list()
-  for (nm in set_intersect(tables, names(mc))) {
-    val <- rlang::eval_bare(mc[[nm]], caller)
-    if (is_tbl_gpu(val)) {
-      val <- fallback_materialize(val)
-      also[[length(also) + 1L]] <- val
-      val <- collect_other_side(val)
-    }
-    mc[[nm]] <- val
+  if (identical(type, "summarise")) {
+    out[names(made)] <- made
   }
-  verb_fn <- rlang::call2("::", quote(dplyr), rlang::sym(verb))
-  res <- gpu_fallback(verb, .data, function(tbl) {
-    mc[[first]] <- tbl
-    mc[[1L]] <- verb_fn
-    rlang::eval_bare(mc, caller)
-  }, reason = reason, also = also)
-  result_mode_of_inputs(res, c(list(.data), also))
+  if (length(out) > 0L) out
 }
