@@ -4,15 +4,25 @@
 \alias{resolve_join_key_types}
 \title{Resolve every join key pair's common type (gap A3)}
 \usage{
-resolve_join_key_types(x_schema, y_schema, join_spec)
+resolve_join_key_types(
+  x_schema,
+  y_schema,
+  join_spec,
+  x_unspecified = NULL,
+  y_unspecified = NULL
+)
 }
 \arguments{
 \item{x_schema, y_schema}{Schemas of the two inputs}
 
 \item{join_spec}{A join spec from \code{\link[=parse_join_by]{parse_join_by()}}}
+
+\item{x_unspecified, y_unspecified}{Names of each side's \code{vctrs::unspecified()}
+columns (the tbls' \verb{$unspecified})}
 }
 \value{
 \code{join_spec}, with \code{key_casts} set when any equi pair needs a cast
+(and \code{key_abort}, see above)
 }
 \description{
 Schema-only (no GPU work). dplyr casts each key pair to its common type
@@ -31,6 +41,22 @@ decode it to \code{STRING}). Non-equi numeric pairs are only validated (the
 expression evaluator widens their operands itself); a rolling INT32/FLOAT64
 pair is recorded (it is searched, not evaluated) and so is a non-equi
 STRING pair (\code{string_codes = TRUE}, see below).
+
+A BOOL8 key against a STRING, factor, Date or POSIXct key is not an error
+here: dplyr (vctrs) gives an all-\code{NA} logical the other side's type, but
+only the data can say whether the column is one. Such a pair is recorded
+with \code{unspecified = TRUE}; \code{apply_join_key_casts()} checks the values when
+the join runs and raises the incompatible-type error then. A verb that
+records one without \code{marker} computes the join at once (a plan break in
+lazy mode, see \code{join_key_check_reads_data()}), so dplyr's error is raised
+at the verb. \code{marker} is \code{TRUE} for a \code{vctrs::unspecified()} column (named
+in the tbl's \verb{$unspecified}): known all-\code{NA}, no data check.
+
+A pair that has no common type and comes after such an unchecked pair is
+not raised at once: dplyr names the first bad pair in \code{by} order, and the
+earlier one is only known from the data. The resolver stores it as
+\code{join_spec$key_abort} (the arguments of the error) and stops; the join
+raises it after the earlier pairs' checks.
 
 \code{lower_join()} applies the plan; \code{build_join_output_info()} reads it for
 the merged key's output type.

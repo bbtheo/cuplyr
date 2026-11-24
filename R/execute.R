@@ -930,6 +930,15 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
         data = out, own_step = TRUE
       )
       out <- compute(out)
+    } else if (join_key_check_reads_data(join_spec)) {
+      # A logical key joined to a string/Date/POSIXct/factor key is typed by its
+      # values (all NA or not), and dplyr raises its error at the verb: it runs
+      # now, like the restrictive join above.
+      cuplyr_plan_break_notify(
+        verb, "a logical join key against a key of another type is only joinable when it is all NA, which dplyr checks at the verb",
+        data = out, own_step = TRUE
+      )
+      out <- compute(out)
     }
     return(out)
   }

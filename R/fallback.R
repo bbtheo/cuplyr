@@ -180,7 +180,7 @@ check_result_column_classes <- function(result, verb_name) {
       paste0("`", verb_name, "()` ran on the CPU and returned column(s) ",
              paste(bad, collapse = ", "), ", which have no GPU type."),
       i = paste0("Convert them in the same call, e.g. wrap the expression in `as.numeric()` ",
-                 "(`as.numeric(x, units = \"days\")` for a difftime).")
+                 "(`as.numeric(x, units = \"days\")` for a difftime), or return one column per matrix column.")
     ),
     class = c("cuplyr_error_unsupported_result_class", "cuplyr_error_unsupported_class"),
     call = NULL
