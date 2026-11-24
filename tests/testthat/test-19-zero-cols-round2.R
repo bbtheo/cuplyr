@@ -1,4 +1,4 @@
-# Issue #19, round 2: rowwise class on every zero-column result, the
+# Issue #19, follow-up cases: rowwise class on every zero-column result, the
 # filter() identity, joins of two zero-column tables answered from counts, and
 # the join stand-in.
 
