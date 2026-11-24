@@ -244,14 +244,18 @@ the distinct \code{.by} combinations in first-appearance order.
 cudf cannot hold rows without columns, so a zero-column \code{tbl_gpu} keeps its
 row count on the R side. What that covers: \code{tbl_gpu()}, \code{dim()},
 \code{collect()}/\code{as_tibble()}, \code{compute()}/\code{collapse()},
-\code{group_by()}/\code{ungroup()}, zero-dot \code{summarise()} (1 x 0), \code{summarise()}
-with dots (a CPU fallback, so \code{n()} counts correctly), ungrouped
-\code{slice()}/\code{slice_head()}/\code{slice_tail()}, \code{bind_rows()}/\code{bind_cols()} of
-zero-column tables only, a literal-mask \code{filter()}, \code{dplyr_row_slice()},
-and adding a column with \verb{$<-}/\verb{[[<-}. Every other verb, joins with a zero-column side,
-vctrs operations (\code{vec_size()}, \code{vec_slice()}, ...), and binding a
-zero-column table that has rows to one with columns raise an error instead
-of returning a wrong row count (full support is F14).
+\code{group_by()}/\code{ungroup()}, \code{select()}/\code{relocate()}, \code{distinct()}, zero-dot
+\code{summarise()} (1 x 0), \code{summarise()} with dots (a CPU fallback, so \code{n()}
+counts correctly), \code{slice()} and its helpers, \code{bind_rows()}/\code{bind_cols()}
+of zero-column tables only, \code{filter()}/\code{filter_out()} (dplyr runs the call
+on a table of the same height, so \code{row_number()} and \code{n()} see its rows),
+\code{mutate()}/\code{transmute()} that leave no column (every column set to \code{NULL}),
+\code{cross_join()} and joins with \code{by = character()} where a side has no
+columns, the set operations of two zero-column tables, vctrs operations
+(\code{vec_size()}, \code{vec_slice()}, ...), \code{reframe()} with a zero-column data
+frame result, \code{dplyr_row_slice()}, and adding a column with
+\verb{$<-}/\verb{[[<-}. Binding a zero-column table that has rows to one with columns
+raises an error instead of returning a wrong row count.
 }
 
 \subsection{Redefining columns}{

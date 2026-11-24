@@ -249,6 +249,14 @@ test_that("N6 skipped test stays skip", {
   skip("not today")
 })
 
+test_that("U4 df_n_col() counts the columns of a tbl_gpu", {
+  df <- tibble(x = 1:3, y = 4:6)
+  expect_true(inherits(df, "tbl_gpu"))
+  expect_equal(df_n_col(df), 2L)
+  expect_equal(df_n_col(select(df, x)[0]), 0L)
+  expect_equal(df_n_col(list(1, 2, 3)), 3L)
+})
+
 test_that("dup", {
   expect_true(TRUE)
 })
@@ -272,7 +280,7 @@ test_that("F01: harness runs a test file and reports one row per test", {
   ids <- res$ids
   expect_true(all(c("file", "test", "status", "raw_status", "exercised", "uploads", "item") %in% names(ids)))
   expect_equal(unique(ids$file), "test-fake.R")
-  expect_equal(nrow(ids), 32L)
+  expect_equal(nrow(ids), 33L)
   expect_true(all(ids$status %in% c("pass", "fail", "error", "skip", "not_exercised", "excluded")))
   expect_true(all(ids$raw_status %in% c("pass", "fail", "error", "skip")))
   # Repeated test names keep the stable " #k" suffix the merge gate relies on.
@@ -285,7 +293,8 @@ test_that("F01 C1: fixtures assigned at test-body level are uploaded", {
   res <- f01_res_a()
   for (t in c(
     "U1 tibble assignment uploads", "U1 data.frame assignment uploads",
-    "U1 tribble assignment uploads", "U1 assignment inside braces uploads"
+    "U1 tribble assignment uploads", "U1 assignment inside braces uploads",
+    "U4 df_n_col() counts the columns of a tbl_gpu"
   )) {
     expect_equal(f01_raw(res, t), "pass", info = t)
     expect_equal(f01_status(res, t), "pass", info = t)

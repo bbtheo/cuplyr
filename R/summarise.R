@@ -216,14 +216,18 @@
 #' cudf cannot hold rows without columns, so a zero-column `tbl_gpu` keeps its
 #' row count on the R side. What that covers: `tbl_gpu()`, `dim()`,
 #' `collect()`/`as_tibble()`, `compute()`/`collapse()`,
-#' `group_by()`/`ungroup()`, zero-dot `summarise()` (1 x 0), `summarise()`
-#' with dots (a CPU fallback, so `n()` counts correctly), ungrouped
-#' `slice()`/`slice_head()`/`slice_tail()`, `bind_rows()`/`bind_cols()` of
-#' zero-column tables only, a literal-mask `filter()`, `dplyr_row_slice()`,
-#' and adding a column with `$<-`/`[[<-`. Every other verb, joins with a zero-column side,
-#' vctrs operations (`vec_size()`, `vec_slice()`, ...), and binding a
-#' zero-column table that has rows to one with columns raise an error instead
-#' of returning a wrong row count (full support is F14).
+#' `group_by()`/`ungroup()`, `select()`/`relocate()`, `distinct()`, zero-dot
+#' `summarise()` (1 x 0), `summarise()` with dots (a CPU fallback, so `n()`
+#' counts correctly), `slice()` and its helpers, `bind_rows()`/`bind_cols()`
+#' of zero-column tables only, `filter()`/`filter_out()` (dplyr runs the call
+#' on a table of the same height, so `row_number()` and `n()` see its rows),
+#' `mutate()`/`transmute()` that leave no column (every column set to `NULL`),
+#' `cross_join()` and joins with `by = character()` where a side has no
+#' columns, the set operations of two zero-column tables, vctrs operations
+#' (`vec_size()`, `vec_slice()`, ...), `reframe()` with a zero-column data
+#' frame result, `dplyr_row_slice()`, and adding a column with
+#' `$<-`/`[[<-`. Binding a zero-column table that has rows to one with columns
+#' raises an error instead of returning a wrong row count.
 #'
 #' ## Redefining columns
 #' An expression named like a grouping column replaces that key in place

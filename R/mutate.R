@@ -711,6 +711,7 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
       result <- push_op(.data, ast_mutate(input_node(.data), expressions), input_schema = orig_schema)
     }
   } else {
+    no_columns <- FALSE
     result <- push_chain(.data, function(x) {
       result <- x
       if (length(expressions) > 0) {
@@ -722,12 +723,19 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
         drop = staged_temps, dropped = dropped,
         result_names = if (length(expressions) > 0) .subset2(result, "schema")$names else orig_names
       )
-      if (!is.null(select_node)) {
+      if (identical(select_node, "zero_columns")) {
+        no_columns <<- TRUE
+      } else if (!is.null(select_node)) {
         result <- push_op(result, select_node, input_schema = .subset2(result, "schema"),
                           carry = FALSE)
       }
       result
     })
+    if (no_columns) {
+      # rows never change in mutate(): an n x 0 result (dplyr's, ungrouped)
+      warn_fractional_dates(fractional)
+      return(mutate_done(zero_column_result(result, "mutate"), back_to_lazy))
+    }
   }
   warn_fractional_dates(fractional)
   if (back_to_lazy) plan_back_to_lazy(result) else result
@@ -891,6 +899,12 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
 
   # Each push is handed the schema the previous one produced, so none of them
   # re-derives it from the pending chain.
+  no_columns <- FALSE
+  # (a result that keeps no column is n x 0 with the input's count)
+  chain <- function(data) {
+    res <- push_chain(data, emit)
+    if (no_columns) zero_column_result(res, "mutate") else res
+  }
   emit <- function(result) {
     sch <- orig_schema
     for (batch_plan in plan$batch_plans) {
@@ -915,7 +929,9 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
       result, orig_names, orig_groups, expressions, keep, before_quo, after_quo,
       drop = drop, dropped = dropped, result_names = sch$names
     )
-    if (!is.null(select_node)) {
+    if (identical(select_node, "zero_columns")) {
+      no_columns <<- TRUE
+    } else if (!is.null(select_node)) {
       result <- push_op(result, select_node, input_schema = sch, carry = FALSE)
     }
     result
@@ -935,7 +951,7 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
       function() {
         # The whole chain (window stages, mutates, trailing select) runs as one
         # execution and builds one table.
-        result <- push_chain(.data, emit)
+        result <- chain(.data)
         warn_fractional_dates(fractional)
         minmax_win_emit(minmax)
         result
@@ -946,7 +962,7 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
       )
     ))
   }
-  result <- push_chain(.data, emit)
+  result <- chain(.data)
   warn_fractional_dates(fractional)
   minmax_win_emit(minmax)
   result
@@ -1820,7 +1836,8 @@ name_dots_silently <- function(dots) {
 # @param drop Temp columns (staged across() expansions) the result must not
 #   keep: they are not new columns, but their inputs still count as used
 # @param dropped Columns a dot set to `NULL` (and no later dot re-added)
-# @return An ast_select node to stack on `result` via push_op(), or `NULL`
+# @return An ast_select node to stack on `result` via push_op(), the string
+#   `"zero_columns"` when no column is kept, or `NULL`
 #   if no select node is needed (the "all", no `.before`/`.after` case is
 #   always a pure identity and is skipped to avoid an unnecessary AST node)
 # @keywords internal
@@ -1874,8 +1891,10 @@ mutate_keep_select_node <- function(result, orig_names, orig_groups,
 
   final_order <- full_names[full_names %in% set_union(kept_orig_names, new_cols)]
   final_order <- final_order[!final_order %in% dropped]
-  if (length(dropped) > 0 && length(final_order) == 0) {
-    stop("Can't drop every column of a tbl_gpu.", call. = FALSE)
+  if (length(final_order) == 0L) {
+    # nothing is kept (every column set to NULL, or `.keep` leaving none): the
+    # caller builds the n x 0 result with zero_column_result()
+    return("zero_columns")
   }
 
   if (identical(final_order, result_names)) {

@@ -495,7 +495,8 @@ check_zero_column_input <- function(.data, input_schema, verb) {
 #'
 #' The one place verbs that end with no columns (`select()`, `transmute()`,
 #' `[`, `distinct()`) build their result: an ungrouped zero-column `tbl_gpu`
-#' of `n` rows in the input's exec_mode. `n` defaults to the input's row
+#' of `n` rows in the input's exec_mode (rowwise, with no vars, for a rowwise
+#' input). `n` defaults to the input's row
 #' count; pending lazy operations are computed first to get it (a
 #' materialization point, as for `summarise()` with no expressions).
 #'
@@ -507,10 +508,13 @@ zero_column_result <- function(.data, verb, n = NULL) {
   if (is.null(n)) {
     n <- zero_column_nrow(.data, verb)
   }
-  carry_frame_meta(
+  out <- carry_frame_meta(
     tbl_gpu(tibble::tibble(.rows = n), lazy = identical(.subset2(.data, "exec_mode"), "lazy")),
     .data
   )
+  # a rowwise input stays rowwise (dplyr keeps the class on every zero-column
+  # result); with no columns it has no rowwise vars
+  if (is_rowwise_gpu(.data)) rowwise_mark(out, character()) else out
 }
 
 # Row count of `.data`, computing pending lazy operations to get it.
@@ -803,8 +807,12 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
   # wrong (F07).
   verb <- paste0(join_type, "_join")
   check_unique_join_inputs(x, y, rlang::caller_env())
-  check_zero_column_input(x, current_schema(x), verb)
-  check_zero_column_input(y, current_schema(y), verb)
+  if (length(current_schema(x)$names) == 0L || length(current_schema(y)$names) == 0L) {
+    return(push_join_zero_column(
+      join_type, x, y, join_spec, suffix, keep, na_matches, multiple, unmatched,
+      relationship, cross_by
+    ))
+  }
 
   # F71: a filtering join slices x's rows, so (dplyr_row_slice()) a grouped
   # `.drop = FALSE` x keeps its whole group structure, emptied groups included.
@@ -891,6 +899,81 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
     rowwise = is_rowwise_gpu(x)
   )
   row_slice_finish(carry_frame_meta(out, x), prep)
+}
+
+# A join with a zero-column side (a cross join, or `by = character()`): cudf
+# sees no rows in such a table, so a side with no columns is replaced by a
+# one-column stand-in of its row count under a name neither side has, the
+# ordinary join runs, and the stand-in column is dropped from the result. When
+# nothing is left the result is an n x 0 table of the joined row count.
+# Only reached when a side has no columns: other joins pay nothing.
+# @keywords internal
+push_join_zero_column <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
+                                  multiple, unmatched, relationship, cross_by) {
+  verb <- paste0(join_type, "_join")
+
+  # Two zero-column sides: the answer is a row count, no GPU join needed. The
+  # cross-product kinds (cross, `by = character()` mutating joins) skip it when
+  # a cardinality argument could raise an error or change the row count; filtering
+  # joins have no such arguments.
+  if (length(current_schema(x)$names) == 0L && length(current_schema(y)$names) == 0L) {
+    nx <- zero_column_nrow(x, verb)
+    ny <- zero_column_nrow(y, verb)
+    # the outer kinds keep an unmatched side's rows (lower_cross_by_join())
+    n <- switch(
+      join_type,
+      semi = if (ny > 0L) nx else 0L,
+      anti = if (ny > 0L) 0L else nx,
+      if (identical(join_type, "cross") ||
+          (identical(multiple, "all") && identical(unmatched, "drop") &&
+           (is.null(relationship) || identical(relationship, "many-to-many")))) {
+        keep_x <- join_type %in% c("left", "full") && ny == 0L
+        keep_y <- join_type %in% c("right", "full") && nx == 0L
+        if (keep_x) nx else if (keep_y) ny else as.numeric(nx) * ny
+      }
+    )
+    if (!is.null(n) && n <= .Machine$integer.max) {
+      return(result_mode_of_inputs(zero_column_result(x, verb, n = as.integer(n)), list(x, y)))
+    }
+  }
+
+  taken <- c(current_schema(x)$names, current_schema(y)$names)
+  # one name per side: two stand-ins must not collide (and get suffixed)
+  base_name <- ".cuplyr_zero_column"
+  while (any(startsWith(taken, base_name))) {
+    base_name <- paste0(base_name, "_")
+  }
+  stand_ins <- paste0(base_name, c("x", "y"))
+  # The stand-in is an all-null INT32 column made on the device: it is no join
+  # key (a cross join has none) and is dropped from the result. It keeps the
+  # side's rowwise marker, so the join result stays rowwise.
+  stand_in <- function(side, stand_in_name) {
+    if (length(current_schema(side)$names) > 0L) {
+      return(side)
+    }
+    n <- zero_column_nrow(side, verb)
+    ptr <- wrap_gpu_call("join", gpu_make_null_column(n, "INT32"))
+    col <- new_tbl_gpu(
+      ptr = ptr,
+      schema = list(names = stand_in_name, types = "INT32"),
+      exec_mode = .subset2(side, "exec_mode"),
+      rowwise = is_rowwise_gpu(side)
+    )
+    copy_frame_meta(col, side)
+  }
+  out <- push_join(
+    join_type, stand_in(x, stand_ins[[1L]]), stand_in(y, stand_ins[[2L]]), join_spec, suffix, keep, na_matches,
+    multiple, unmatched, relationship, cross_by
+  )
+  keep_names <- current_schema(out)$names
+  keep_names <- keep_names[!keep_names %in% stand_ins]
+  if (length(keep_names) == 0L) {
+    return(zero_column_result(out, verb))
+  }
+  if (length(keep_names) == length(current_schema(out)$names)) {
+    return(out)
+  }
+  push_op(out, ast_select(input_node(out), keep_names))
 }
 
 #' Auto-name unnamed dots, warning as dplyr's verbs do

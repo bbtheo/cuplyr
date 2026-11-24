@@ -9,6 +9,15 @@
   overflow gives `NA` with R's warning). Shapes with no GPU form, such as
   `lag(mean(x))`, still run in dplyr (#22).
 
+* `mutate()`, `filter()`, `cross_join()`, the joins with `by = character()`,
+  `intersect()`, `setdiff()`, `symdiff()`, `setequal()`, `reframe()` and the
+  vctrs functions (`vec_size()`, `vec_slice()`, ...) now work on a table with
+  rows but no columns, as dplyr does, and keep its row count. This includes
+  `mutate()` setting every column to `NULL` (with or without `.by`) and
+  `filter()` with `FALSE`, `NA`, `row_number()` or `n()`. A `rowwise()` table
+  that `mutate()`, `select()`, `transmute()` or `[` leaves with no columns
+  stays rowwise, as in dplyr (#19).
+
 * `mutate()`, `transmute()` and `filter()` compute a repeated `round()`,
   `%in%`, string function or any other subexpression that needs its own GPU
   step once per call instead of once per use, so

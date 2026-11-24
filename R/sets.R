@@ -348,6 +348,25 @@ set_op_mode <- function(result, x, y) {
   result_mode_of_inputs(result, list(x, y))
 }
 
+# Two zero-column tables: the rows are all the same (empty) row, so every
+# answer follows from whether each side has any row. `NULL` unless BOTH sides
+# have no columns (a zero-column and a wider table fail the compatibility check
+# first). Only the counts are read; no semi/anti join runs, which would be
+# dplyr's deprecated `by = character()` join.
+# @keywords internal
+zero_set_op_has_rows <- function(x, y, verb) {
+  if (length(current_schema(x)$names) > 0L || length(current_schema(y)$names) > 0L) {
+    return(NULL)
+  }
+  c(x = zero_column_nrow(x, verb) > 0L, y = zero_column_nrow(y, verb) > 0L)
+}
+
+# The 1 x 0 or 0 x 0 result of a set operation of two zero-column tables.
+# @keywords internal
+zero_set_op_result <- function(x, y, verb, keep_one) {
+  set_op_mode(zero_column_result(x, verb, n = as.integer(keep_one)), x, y)
+}
+
 #' Set operations on `tbl_gpu` tables
 #'
 #' GPU-native implementations of dplyr's row-set operations, composed
@@ -470,6 +489,11 @@ intersect.tbl_gpu <- function(x, y, ...) {
     }, reason = chk$fallback_reason, also = y), x, y))
   }
 
+  rows <- zero_set_op_has_rows(x, y, "intersect")
+  if (!is.null(rows)) {
+    return(zero_set_op_result(x, y, "intersect", rows[["x"]] && rows[["y"]]))
+  }
+
   target_names <- chk$target_schema$names
   # set operations regroup (dplyr_reconstruct()): the filtering join runs on
   # ungrouped rows, so it takes no group keys (F71), and x's groups are put back
@@ -501,6 +525,11 @@ setdiff.tbl_gpu <- function(x, y, ...) {
     }, reason = chk$fallback_reason, also = y), x, y))
   }
 
+  rows <- zero_set_op_has_rows(x, y, "setdiff")
+  if (!is.null(rows)) {
+    return(zero_set_op_result(x, y, "setdiff", rows[["x"]] && !rows[["y"]]))
+  }
+
   target_names <- chk$target_schema$names
   x_aligned <- align_set_op_side(x, chk$target_schema, groups = character())
   y_aligned <- align_set_op_side(y, chk$target_schema, groups = character())
@@ -528,6 +557,11 @@ symdiff.tbl_gpu <- function(x, y, ...) {
     return(set_op_mode(gpu_fallback("symdiff", x, function(tbl) {
       dplyr::symdiff(tbl, collect_other_side(y))
     }, reason = chk$fallback_reason, also = y), x, y))
+  }
+
+  rows <- zero_set_op_has_rows(x, y, "symdiff")
+  if (!is.null(rows)) {
+    return(zero_set_op_result(x, y, "symdiff", rows[["x"]] != rows[["y"]]))
   }
 
   target_names <- chk$target_schema$names
@@ -566,6 +600,11 @@ setequal.tbl_gpu <- function(x, y, ...) {
     return(gpu_fallback("setequal", x, function(tbl) {
       dplyr::setequal(tbl, collect_other_side(y))
     }, as_is = TRUE, reason = chk$fallback_reason, also = y))
+  }
+
+  rows <- zero_set_op_has_rows(x, y, "setequal")
+  if (!is.null(rows)) {
+    return(rows[["x"]] == rows[["y"]])
   }
 
   target_names <- chk$target_schema$names
