@@ -86,12 +86,16 @@ static Rcpp::List remap_virtual_col_indices(Rcpp::List node,
 // signals the warning (never from here: a warning turned into an error by
 // options(warn = 2) would longjmp past C++ destructors).
 static SEXP finish_expr_result(std::unique_ptr<cudf::table> tbl, bool int_overflow,
-                               int rw_flags = 0) {
+                               int rw_flags = 0, bool ts_out_of_range = false) {
     SEXP out = cuplyr::make_gpu_table_xptr(std::move(tbl));
     Rcpp::Shield<SEXP> keep(out);
     if (int_overflow) {
         Rcpp::LogicalVector flag(1, true);
         Rf_setAttrib(out, Rf_install("int_overflow"), flag);
+    }
+    if (ts_out_of_range) {
+        Rcpp::LogicalVector flag(1, true);
+        Rf_setAttrib(out, Rf_install("ts_out_of_range"), flag);
     }
     // F49: the rowwise horizontal aggregates' flags (rw_agg_* in expr_eval.hpp).
     if (rw_flags != 0) {
@@ -156,7 +160,7 @@ SEXP gpu_compute_column(SEXP xptr, Rcpp::List ir) {
     std::vector<std::unique_ptr<cudf::column>> cols;
     cols.push_back(std::move(result_col));
     auto tbl = std::make_unique<cudf::table>(std::move(cols));
-    return finish_expr_result(std::move(tbl), ctx.int_overflow, ctx.rw_flags);
+    return finish_expr_result(std::move(tbl), ctx.int_overflow, ctx.rw_flags, ctx.ts_out_of_range);
 }
 
 // [[Rcpp::export]]
@@ -181,7 +185,7 @@ SEXP gpu_filter_expr(SEXP xptr, Rcpp::List ir) {
     }
 
     auto result = cudf::apply_boolean_mask(view, mask);
-    return finish_expr_result(std::move(result), ctx.int_overflow, ctx.rw_flags);
+    return finish_expr_result(std::move(result), ctx.int_overflow, ctx.rw_flags, ctx.ts_out_of_range);
 }
 
 // [[Rcpp::export]]
@@ -318,6 +322,10 @@ SEXP gpu_mutate_expr(SEXP xptr,
     if (ctx.int_overflow) {
         Rcpp::LogicalVector flag(1, true);
         Rf_setAttrib(out, Rf_install("int_overflow"), flag);
+    }
+    if (ctx.ts_out_of_range) {
+        Rcpp::LogicalVector flag(1, true);
+        Rf_setAttrib(out, Rf_install("ts_out_of_range"), flag);
     }
     if (ctx.rw_flags != 0) {
         Rcpp::IntegerVector flags(1, ctx.rw_flags);

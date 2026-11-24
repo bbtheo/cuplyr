@@ -1435,7 +1435,7 @@ ir_parse_pre_registry <- function(expr, env, schema, allow_vector, fn_name, head
   # evaluation error outside the data mask also means "not constant").
   if (fn_name %in% ir_foldable_window_fns && length(expr) > 1 &&
       !any(vapply(as.list(expr)[-1], expr_has_column_ref, logical(1), schema = schema))) {
-    if (ir_fold_reaches_mask(expr)) {
+    if (ir_fold_reaches_mask(expr, schema)) {
       return(NULL)
     }
     folded <- ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(expr, env), data = list()))
@@ -1598,7 +1598,7 @@ ir_parse_pre_registry <- function(expr, env, schema, allow_vector, fn_name, head
   if (fn_name %in% c("as.Date", "as.POSIXct", "floor_date", "ceiling_date",
                       "round_date") &&
       length(expr) > 1 && !expr_has_column_ref(expr, schema)) {
-    if (ir_fold_reaches_mask(expr)) {
+    if (ir_fold_reaches_mask(expr, schema)) {
       return(NULL)
     }
     folded <- ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(expr, env)))
@@ -1883,7 +1883,7 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
     if (!expr_has_column_ref(expr, schema)) {
       # A call that reaches the mask by name has no value out here, and is not
       # run: `exists("ok")` would write FALSE into the dot for a column `ok`.
-      if (ir_fold_reaches_mask(expr)) {
+      if (ir_fold_reaches_mask(expr, schema)) {
         return(NULL)
       }
       # An error here is NOT proof of a user error: dplyr evaluates the call
@@ -1920,8 +1920,8 @@ mask_reaching_reason <- paste0(
 # such evaluation in the parser asks first: the caller gives up on the call
 # without running it, and dplyr evaluates it.
 # @keywords internal
-ir_fold_reaches_mask <- function(expr) {
-  if (!expr_reaches_mask(expr)) {
+ir_fold_reaches_mask <- function(expr, schema = NULL) {
+  if (!expr_reaches_mask(expr, schema)) {
     return(FALSE)
   }
   fallback_cause(mask_reaching_reason)
@@ -3559,7 +3559,7 @@ ir_parse_with_order <- function(order_ref, head, a1, rest, env, schema) {
   # column reference before anything is evaluated, so a call that goes to the
   # CPU for that reason has run nothing here.
   for (arg in rest) {
-    if (expr_has_column_ref(arg, schema) || ir_fold_reaches_mask(arg)) {
+    if (expr_has_column_ref(arg, schema) || ir_fold_reaches_mask(arg, schema)) {
       return(NULL)
     }
   }

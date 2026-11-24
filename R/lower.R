@@ -84,6 +84,15 @@ warn_int_overflow <- function(ptr, in_filter = FALSE) {
   if (isTRUE(attr(ptr, "int_overflow"))) {
     warning("NAs produced by integer overflow", call. = FALSE)
   }
+  # as.POSIXct() of a Date beyond what int64 microseconds hold: NA, as the
+  # upload of such a value gives
+  if (isTRUE(attr(ptr, "ts_out_of_range"))) {
+    rlang::warn(
+      paste0("A GPU POSIXct holds int64 microseconds: as.POSIXct() of a Date beyond ",
+             "+-106751991 days was replaced with NA."),
+      class = c("cuplyr_warning_timestamp_out_of_range", "cuplyr_warning_timestamp_unrepresentable")
+    )
+  }
   check_rowwise_flags(attr(ptr, "rw_flags"), in_filter)
   ptr
 }
@@ -190,11 +199,16 @@ lower_mutate <- function(ast, source_ptr) {
       tmp_cols[[tmp_names[k]]] <- vec$value
       expressions[[vec_idx[k]]]$ir <- ir_col(tmp_names[k])
     }
-    # The upload's names only matter for its warnings (fractional / +-Inf /
-    # out-of-range Dates), which should name the user's output columns, not
-    # the temps; the pointer and types are positional.
+    # The upload's names only matter for the warnings it muffles below; the
+    # pointer and types are positional.
     names(tmp_cols) <- out_names[vec_idx]
-    upload <- tbl_gpu(tibble::as_tibble(tmp_cols, .name_repair = "minimal"), lazy = FALSE)
+    # (mutate()/transmute() warned for these when the call was made, once:
+    # muting here keeps a lazy plan from repeating it at every run)
+    upload <- withCallingHandlers(
+      tbl_gpu(tibble::as_tibble(tmp_cols, .name_repair = "minimal"), lazy = FALSE),
+      cuplyr_warning_timestamp_unrepresentable = function(w) invokeRestart("muffleWarning"),
+      cuplyr_warning_fractional_date = function(w) invokeRestart("muffleWarning")
+    )
     input_ptr <- gpu_bind_cols_impl(list(input_ptr, upload$ptr))
     input_schema$names <- c(input_schema$names, tmp_names)
     input_schema$types <- c(input_schema$types, upload$schema$types)

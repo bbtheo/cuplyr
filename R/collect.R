@@ -169,8 +169,9 @@ collect_frame <- function(x, call = rlang::caller_env()) {
   result <- tibble::as_tibble(df, .name_repair = "minimal")
 
   # Restore factor columns using stored levels
-  if (!is.null(final_schema$factor_levels) && anyDuplicated(final_schema$names) > 0L) {
-    # duplicated names: by position, and only the columns that are factors
+  if (!is.null(final_schema$factor_levels) &&
+        (anyDuplicated(final_schema$names) > 0L || any(final_schema$names == ""))) {
+    # duplicated or blank names: by position, and only the columns that are factors
     by_pos <- levels_by_position(final_schema)
     for (i in which(!vapply(by_pos, is.null, logical(1)))) {
       lvls <- by_pos[[i]]

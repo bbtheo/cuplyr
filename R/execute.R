@@ -266,7 +266,8 @@ levels_by_position <- function(schema) {
   if (is.null(fl)) {
     return(vector("list", length(nms)))
   }
-  if (!anyDuplicated(nms)) {
+  # (a blank name can't be looked up by name, so it takes the positional path)
+  if (!anyDuplicated(nms) && !any(nms == "")) {
     return(unname(fl[nms]))
   }
   dict <- which(unname(schema$types) == "DICTIONARY32")
@@ -311,7 +312,7 @@ levels_from_positions <- function(names, by_pos) {
     return(NULL)
   }
   out <- stats::setNames(by_pos[keep], names[keep])
-  if (anyDuplicated(names) > 0L) {
+  if (anyDuplicated(names) > 0L || any(names == "")) {
     attr(out, "by_position") <- TRUE
   }
   out
@@ -592,6 +593,8 @@ push_op <- function(.data, node, input_schema = current_schema(.data), carry = T
   new_keys <- carry_fixed_keys(node, .data, new_groups)
   new_unspec <- if (type %in% c("filter", "arrange", "slice", "barrier")) {
     .subset2(.data, "unspecified")
+  } else if (length(.subset2(.data, "unspecified")) > 0L && type %in% c("select", "rename", "mutate")) {
+    carry_unspecified(node, .subset2(.data, "unspecified"), input_schema$names, new_schema$names)
   }
   # F49: a rowwise table stays rowwise through every node but the ones that
   # rebuild the rows or their grouping (their verbs never reach push_op() with a
@@ -643,6 +646,40 @@ push_op <- function(.data, node, input_schema = current_schema(.data), carry = T
     rowwise = new_rowwise
   )
   if (plain_frame) out else carry_frame_meta(out, .data, attrs = keep_attrs)
+}
+
+# The names of a node's output that are still vctrs::unspecified(): the
+# columns select/rename/mutate pass through unchanged, under their new names.
+# A mutate keeps the columns no expression overwrites, plus a bare copy of an
+# unspecified column (read in expression order). A name that comes out
+# duplicated can't be addressed, so it loses the marker (as `names<-` does).
+# @keywords internal
+carry_unspecified <- function(node, unspecified, old_names, new_names) {
+  type <- .subset2(node, "type")
+  if (type == "mutate") {
+    keep <- unspecified
+    for (e in .subset2(node, "expressions")) {
+      ir <- .subset2(e, "ir")
+      out <- .subset2(e, "output_col")
+      is_copy <- identical(.subset2(ir, "kind"), "col") && .subset2(ir, "name") %in% keep
+      keep <- if (is_copy) union(keep, out) else setdiff(keep, out)
+    }
+    out <- keep
+  } else {
+    # the output name of each input column, by position
+    pos <- .subset2(node, "positions")
+    if (type == "select") {
+      # a select keeps its columns' names
+      out <- new_names[new_names %in% unspecified]
+    } else {
+      mapped <- old_names
+      idx <- if (is.null(pos)) match(.subset2(node, "old_names"), old_names) else pos
+      mapped[idx] <- .subset2(node, "new_names")
+      out <- mapped[old_names %in% unspecified]
+    }
+  }
+  out <- set_diff(set_intersect(out, new_names), new_names[duplicated(new_names)])
+  if (length(out) > 0L) out
 }
 
 #' Run a verb's node chain as ONE eager execution
