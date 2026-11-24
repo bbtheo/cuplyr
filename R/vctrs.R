@@ -499,9 +499,10 @@ vec_restore.tbl_gpu <- function(x, to, ...) {
   if (length(schema$names) == 0L) {
     # no column to gather: only the row count is restored
     n <- length(x[[1L]])
-    return(copy_frame_meta(
-      tbl_gpu(tibble::tibble(.rows = n), lazy = identical(to$exec_mode, "lazy")), to
-    ))
+    out <- tbl_gpu(tibble::tibble(.rows = n), lazy = identical(to$exec_mode, "lazy"))
+    # a rowwise `to` stays rowwise, with no vars (it has no columns)
+    if (is_rowwise_gpu(to)) out <- rowwise_mark(out, character())
+    return(copy_frame_meta(out, to))
   }
   schema <- list(
     names = schema$names,

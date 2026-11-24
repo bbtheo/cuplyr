@@ -59,7 +59,7 @@ special-casing needed.
 \item A side with rows but no columns works as in dplyr: \code{x} by \code{y} repeats
 each row of \code{x} once per row of \code{y}, whichever side has no columns, and
 two such tables give a table of \code{nrow(x) * nrow(y)} rows and no columns.
-libcudf's cross join refuses a table with no columns, so \code{push_join()}
-stands a one-column table in for it and drops that column afterwards.
+libcudf's cross join refuses a table with no columns, so a one-column
+table stands in for it and that column is dropped afterwards.
 }
 }

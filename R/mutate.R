@@ -734,7 +734,7 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
     if (no_columns) {
       # rows never change in mutate(): an n x 0 result (dplyr's, ungrouped)
       warn_fractional_dates(fractional)
-      return(zero_column_result(result, "mutate"))
+      return(mutate_done(zero_column_result(result, "mutate"), back_to_lazy))
     }
   }
   warn_fractional_dates(fractional)

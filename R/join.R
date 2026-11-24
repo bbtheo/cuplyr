@@ -1867,8 +1867,8 @@ anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
 #' - A side with rows but no columns works as in dplyr: `x` by `y` repeats
 #'   each row of `x` once per row of `y`, whichever side has no columns, and
 #'   two such tables give a table of `nrow(x) * nrow(y)` rows and no columns.
-#'   libcudf's cross join refuses a table with no columns, so `push_join()`
-#'   stands a one-column table in for it and drops that column afterwards.
+#'   libcudf's cross join refuses a table with no columns, so a one-column
+#'   table stands in for it and that column is dropped afterwards.
 #'
 #' @param x,y `tbl_gpu` objects. If `y` is not a `tbl_gpu`, set
 #'   `copy = TRUE` to upload it automatically.

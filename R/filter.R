@@ -340,6 +340,8 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
     return(cpu("filter_out() of a table with no columns is evaluated by dplyr."))
   }
   if (length(current_schema(.data)$names) == 0L && !is.null(.subset2(.data, "nrow"))) {
+    # no predicate keeps every row: the table itself, nothing to evaluate
+    if (length(dots) == 0L) return(.data)
     return(cpu("a table with no columns is evaluated by dplyr."))
   }
 
@@ -1596,15 +1598,12 @@ filter_mask_notify <- function(quo, rows) {
 
 # Internal: apply the one combined row mask of a filter() call whose dots are
 # all constants (no native predicate, no window dot; filter_run()'s mask-only
-# route). A table with no columns gets here only with a logical vector and no
-# window or cur_group_id() dot: scalars alone take the constant-predicate route
-# (which can't run with no columns), and that helper column makes a call mixed.
+# route). A table with no columns never gets here: dplyr runs its filter().
 #
 # The caller evaluated the dots (once, with no data mask), sized every vector
 # against the table, combined them with `&` and turned NA into FALSE: `keep` is
 # a logical vector of the table's row count with no NA. `.data` has no pending
-# steps. A table with no columns has no cudf column to mask, so only its row
-# count changes. Notifies via filter_mask_notify() (D4: silent by default).
+# steps. Notifies via filter_mask_notify() (D4: silent by default).
 #
 # @param .data A tbl_gpu object with a known row count and nothing pending
 # @param quo The first dot of the mask, named in the notification
@@ -1613,16 +1612,6 @@ filter_mask_notify <- function(quo, rows) {
 # @keywords internal
 filter_eval_mask <- function(.data, quo, keep) {
   filter_mask_notify(quo, max(0, dim(.data)[1], na.rm = TRUE))
-
-  if (length(.subset2(.data, "schema")$names) == 0L) {
-    return(carry_frame_meta(new_tbl_gpu(
-      ptr = .subset2(.data, "ptr"),
-      schema = .subset2(.data, "schema"),
-      groups = .subset2(.data, "groups"),
-      exec_mode = .subset2(.data, "exec_mode"),
-      nrow = sum(keep)
-    ), .data))
-  }
 
   new_ptr <- if (all(keep)) {
     wrap_gpu_call("filter_bool_all_true", gpu_filter_bool(.subset2(.data, "ptr"), TRUE))
