@@ -675,7 +675,11 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
   if (isTRUE(attr(expressions, "has_window")) &&
       (isTRUE(attr(expressions, "has_vec")) || isTRUE(attr(expressions, "const_names")))) {
     return(mutate_done(mutate_expr_fallback(fallback_data, fallback_dots, .keep, before_quo, after_quo, by_quo,
-                                            reason = "a vector literal next to a window call in one mutate() is not planned together."),
+                                            reason = if (isTRUE(attr(expressions, "has_vec"))) {
+                                              "a vector literal next to a window call in one mutate() is not planned together."
+                                            } else {
+                                              "a constant with element names next to a window call in one mutate() is not planned together."
+                                            }),
                        back_to_lazy))
   }
   .data <- check_vector_constant_sizes(.data, expressions, "mutate")

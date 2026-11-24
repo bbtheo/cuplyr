@@ -13,9 +13,13 @@
   keeps the names and attributes of columns it does not touch and of bare
   copies (`b2 = b`), and runs a dot that computes from such a column on the
   CPU, where R decides what the result keeps. `summarise()` keeps the
-  attributes of its group keys, and `quantile()` in `summarise()` names its
-  result (`"50%"`) as dplyr does (#21, #56). A few paths still drop them (see
-  the "Column names and attributes" notes in the developer reference).
+  attributes of its group keys by dplyr's rules (a `.drop = FALSE` factor key
+  keeps only its levels), `quantile()` in `summarise()` names its result
+  (`"50%"`) as dplyr does, and that name stays on the GPU through the joins
+  that keep every row of its column; a summary of a plain data frame has no
+  element names, as in dplyr (#21, #56). Some paths still drop names or
+  attributes rather than keep them: `group_split()`, `group_trim()`,
+  `slice_sample()` and grouped `head()`/`tail()`, among others.
 
 * `left_join()`, `inner_join()`, `right_join()`, `full_join()`, `semi_join()`
   and `anti_join()` accept a key that is all `NA` (a logical column, or

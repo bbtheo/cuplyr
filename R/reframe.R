@@ -163,6 +163,8 @@ reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
     result <- push_op(wide, ast_reframe(input_node(wide), c(keys, plan$outputs), plan$k,
                                         plan$first_k_name))
   }
+  # (a plain data.frame's result is as.data.frame()d by dplyr: no element names)
+  if (isTRUE(.subset2(.data, "bare_df"))) result <- col_attrs_drop_names(result)
   result
 }
 

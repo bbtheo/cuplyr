@@ -183,49 +183,157 @@ col_names_reason <- function(x, cols = names(.subset2(x, "col_attrs"))) {
   paste0(col_list_phrase(nms), " element names, which dplyr moves with the rows.")
 }
 
-# The CPU-route reason of a join whose inputs have element names of any kind.
+# The CPU-route reason of a join of type `join_type` whose inputs have element
+# names it can't give (`join_names_need_cpu()`).
 # @keywords internal
-join_names_reason <- function(x, y) {
-  paste0(col_list_phrase(join_names_cols(x, y)), " element names, which dplyr gathers with the rows.")
+join_names_reason <- function(x, y, join_type) {
+  paste0(col_list_phrase(join_names_cols(x, y, join_type)), " element names, which dplyr gathers with the rows.")
 }
 
-# The group data `gd` of `x` (a table with `$col_attrs`) with the attributes of
-# its key columns on them. A key's names are those of its group's first row;
-# groups with no row (a `.drop = FALSE` level, a fixed key) have none to take,
-# so a table with those gets no names.
+# Does dplyr rebuild the group keys of `x` (compute_groups(), for group_data(),
+# group_keys(), summarise() and count())? Only for a `.drop = FALSE` grouping
+# with a factor key: a factor key is then made from its codes and levels alone
+# (no other attribute, no names), any other key from its unique values
+# (attributes kept, the names of the first group in key order with that value;
+# `""` on a row under a parent key with no rows, which slices it with NA).
+# Without a factor key, `.drop = FALSE` keys are those of `.drop = TRUE`.
 # @keywords internal
-group_keys_col_attrs <- function(gd, x, observed_only) {
-  ca <- .subset2(x, "col_attrs")[.subset2(x, "groups")]
+group_keys_rebuilt <- function(x, schema = current_schema(x)) {
+  isFALSE(.subset2(x, "group_drop")) &&
+    any(match(.subset2(x, "groups"), names(.subset2(schema, "factor_levels")), 0L) > 0L)
+}
+
+# The group data `gd` of `x` (a table with `$col_attrs`, no pending steps) with
+# the attributes of its key columns on them. A key's names are those of its
+# group's first row (`group_keys_rebuilt()`: dplyr's rebuilt keys). Fixed keys
+# (`fixed`, slice(.preserve = TRUE)) get no names.
+# @keywords internal
+group_keys_col_attrs <- function(gd, x, fixed) {
+  keys <- .subset2(x, "groups")
+  ca <- .subset2(x, "col_attrs")[keys]
   ca <- ca[!vapply(ca, is.null, logical(1))]
+  rebuilt <- !fixed && group_keys_rebuilt(x)
+  if (rebuilt) {
+    ca <- ca[!names(ca) %in% names(.subset2(x, "schema")$factor_levels)]
+  }
   if (length(ca) == 0L) {
     return(gd)
   }
-  first <- vapply(gd$.rows, function(r) if (length(r) > 0L) r[[1L]] else NA_integer_, integer(1))
+  named <- vapply(ca, function(e) !is.null(e[["names"]]) || (rebuilt && !is.null(e$names_const)), logical(1))
+  first <- if (!fixed && any(named)) {
+    vapply(gd$.rows, function(r) if (length(r) > 0L) r[[1L]] else NA_integer_, integer(1))
+  }
   for (nm in names(ca)) {
     e <- ca[[nm]]
-    if (!observed_only) e$names_const <- NULL
-    e$names <- if (observed_only) e[["names"]][first]
-    ca[[nm]] <- e
+    if (fixed) {
+      e$names <- NULL
+      e$names_const <- NULL
+    } else if (rebuilt && named[[nm]]) {
+      e <- group_key_rebuilt_names(e, gd, match(nm, keys), keys, first)
+    } else if (!is.null(e[["names"]])) {
+      e$names <- e[["names"]][first]
+    }
+    ca[nm] <- list(e)
   }
   col_attrs_restore(gd, ca)
 }
 
-# Does a join of `x` and `y` (a tbl_gpu) meet element names of any kind in
-# either? dplyr gathers them with the rows, null-extended rows included.
+# The entry `e` of the key at position `p` of `keys` (not a factor) as dplyr's
+# rebuilt keys name it (`group_keys_rebuilt()`): each row takes the names of the
+# first row of the first observed group (in key order) with its value, and a row
+# under a parent key with no rows `""`. `first` is each group's first row (NA
+# for an empty group).
 # @keywords internal
-join_names_need_cpu <- function(x, y) {
-  (!is.null(.subset2(x, "col_attrs")) && col_names_any(x)) ||
-    (is_tbl_gpu(y) && !is.null(.subset2(y, "col_attrs")) && col_names_any(y))
+group_key_rebuilt_names <- function(e, gd, p, keys, first) {
+  obs <- !is.na(first)
+  n <- length(first)
+  if (!is.null(e[["names"]])) {
+    id <- vctrs::vec_group_id(gd[[keys[[p]]]])
+    src <- first[obs][match(seq_len(attr(id, "n")), id[obs])]
+    out <- e[["names"]][src[id]]
+  } else {
+    out <- rep(e$names_const, n)
+  }
+  under_rows <- if (p == 1L) {
+    rep(any(obs), n)
+  } else {
+    pid <- vctrs::vec_group_id(gd[keys[seq_len(p - 1L)]])
+    (tabulate(pid[obs], nbins = attr(pid, "n")) > 0L)[pid]
+  }
+  out[!under_rows] <- ""
+  e$names_const <- NULL
+  e$names <- out
+  e
 }
 
-# The columns of `x` and `y` that have names of any kind.
+# `col_attrs` (a summarise's result) without the entries of the factor keys
+# among `keys` when dplyr rebuilds them (`group_keys_rebuilt()` of `x`, the
+# summarise's input): a rebuilt factor has no attributes beyond its levels.
 # @keywords internal
-join_names_cols <- function(x, y) {
-  named <- function(t) {
-    if (!is_tbl_gpu(t)) return(character())
-    names(Filter(function(e) !is.null(e[["names"]]) || !is.null(e$names_const), .subset2(t, "col_attrs")))
+col_attrs_rebuilt_keys <- function(col_attrs, x, keys, schema) {
+  if (!group_keys_rebuilt(x, schema)) {
+    return(col_attrs)
   }
-  unique(c(named(x), named(y)))
+  out <- col_attrs[!names(col_attrs) %in% intersect(keys, names(schema$factor_levels))]
+  if (length(out) > 0L) out
+}
+
+# The keys among `keys` whose names a summarise() of `x` can't give natively:
+# row-aligned names (a group's first row is dplyr's to pick), and, with keys
+# dplyr rebuilds (`group_keys_rebuilt()`), a constant name on a key that isn't a
+# factor (the rows under an empty parent get `""`).
+# @keywords internal
+summarise_key_names_cols <- function(x, keys) {
+  ca <- .subset2(x, "col_attrs")
+  rebuilt <- group_keys_rebuilt(x)
+  fl <- names(current_schema(x)$factor_levels)
+  keys[vapply(keys, function(nm) {
+    e <- .subset2(ca, nm)
+    !is.null(.subset2(e, "names")) ||
+      (rebuilt && !is.null(.subset2(e, "names_const")) && !nm %in% fl)
+  }, logical(1))]
+}
+
+# `out` (a summarise() or reframe() result of a plain data.frame) without any
+# element names: dplyr's methods for a data.frame end with as.data.frame(),
+# which drops them (a matrix's rownames too) and keeps the other attributes.
+# @keywords internal
+col_attrs_drop_names <- function(out) {
+  ca <- .subset2(out, "col_attrs")
+  if (is.null(ca)) {
+    return(out)
+  }
+  for (nm in names(ca)) {
+    e <- ca[[nm]]
+    e$names <- NULL
+    e$names_const <- NULL
+    ca[nm] <- list(if (length(e) > 0L) e)
+  }
+  ca <- ca[!vapply(ca, is.null, logical(1))]
+  set_tbl_gpu_field(out, "col_attrs", if (length(ca) > 0L) ca)
+}
+
+# Does a join of type `join_type` of `x` and `y` (a tbl_gpu) meet element names
+# the GPU join can't give? Row-aligned names on either side (dplyr gathers them
+# with the rows); a constant name (`names_const`) only on a side whose rows the
+# join can null-extend (y's in left and full joins, x's in right and full
+# joins), where dplyr gives the added rows `""`. Elsewhere every row of the
+# column comes from a row of its side, which has the one name.
+# @keywords internal
+join_names_need_cpu <- function(x, y, join_type) {
+  length(join_names_cols(x, y, join_type)) > 0L
+}
+
+# The columns of `x` and `y` whose names send a join of type `join_type` to
+# dplyr (`join_names_need_cpu()`).
+# @keywords internal
+join_names_cols <- function(x, y, join_type) {
+  named <- function(t, null_extended) {
+    ca <- if (is_tbl_gpu(t)) .subset2(t, "col_attrs")
+    if (is.null(ca)) return(character())
+    names(Filter(function(e) !is.null(e[["names"]]) || (null_extended && !is.null(e$names_const)), ca))
+  }
+  unique(c(named(x, join_type %in% c("right", "full")), named(y, join_type %in% c("left", "full"))))
 }
 
 # Does a column hold what a row bind must combine by dplyr's own rules (names

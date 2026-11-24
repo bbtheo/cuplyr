@@ -608,6 +608,11 @@ push_op <- function(.data, node, input_schema = current_schema(.data), carry = T
                        (identical(type, "mutate") && isTRUE(attr(.subset2(node, "expressions"), "const_names")))) {
     carry_col_attrs(node, .subset2(.data, "col_attrs"), input_schema$names, new_schema$names)
   }
+  if (!is.null(new_col_attrs) && identical(type, "summarise") && isFALSE(.subset2(.data, "group_drop"))) {
+    new_col_attrs <- col_attrs_rebuilt_keys(new_col_attrs, .data,
+                                            setdiff(.subset2(node, "groups"), summarise_output_names(node)),
+                                            input_schema)
+  }
   new_unspec <- .subset2(.data, "unspecified")
   if (!is.null(new_unspec) && !type %in% c("filter", "arrange", "slice", "barrier")) {
     new_unspec <- if (type %in% c("select", "rename", "mutate", "window")) {

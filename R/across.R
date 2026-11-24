@@ -254,6 +254,34 @@ dots_mention <- function(dots, fns) {
   FALSE
 }
 
+# TRUE iff `x` calls one of the functions `fns` (`fn(...)` or `pkg::fn(...)`, at
+# any depth, inside a nested quosure too); a symbol of that name is no call.
+# @keywords internal
+expr_calls_any <- function(x, fns) {
+  if (!is.call(x)) {
+    return(FALSE)
+  }
+  head <- x[[1L]]
+  if (is.call(head) && length(head) == 3L && identical(head[[1L]], quote(`::`))) {
+    head <- head[[3L]]
+  }
+  if (is.symbol(head) && as.character(head) %in% fns) {
+    return(TRUE)
+  }
+  # (by index: an empty argument, `m[, 1]` or `switch(x, a = , 1)`, is never
+  # bound to a variable, whose evaluation would be R's missing-argument error)
+  parts <- as.list(x)
+  for (i in seq_along(parts)) {
+    if (identical(parts[[i]], quote(expr = ))) next
+    a <- parts[[i]]
+    if (rlang::is_quosure(a)) a <- rlang::quo_get_expr(a)
+    if (expr_calls_any(a, fns)) {
+      return(TRUE)
+    }
+  }
+  FALSE
+}
+
 # TRUE iff any dot in `dots` needs the whole-call CPU fallback.
 #
 # @param dots A list of quosures (as captured by `rlang::enquos(...)`,

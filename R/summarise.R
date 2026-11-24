@@ -372,14 +372,19 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
 
   # a group key's names (those of its group's first row) are dplyr's to pick
   if (!is.null(.subset2(.data, "col_attrs"))) {
-    keys <- if (by_given) by_cols else .subset2(.data, "groups")
-    if (col_names_move(.data, keys)) {
-      return(rowwise_cpu(.data, "summarise", reason = col_names_reason(.data, keys)))
+    keys <- summarise_key_names_cols(.data, if (by_given) by_cols else .subset2(.data, "groups"))
+    if (length(keys) > 0L) {
+      return(rowwise_cpu(.data, "summarise", reason = paste0(
+        col_list_phrase(keys), " element names, which dplyr gives the group keys by its own rules."
+      )))
     }
   }
 
   dots <- rlang::quos(..., .ignore_empty = "all")
-  summarise_impl(.data, dots, .groups, by_quo, by_cols, by_given, caller_env)
+  out <- summarise_impl(.data, dots, .groups, by_quo, by_cols, by_given, caller_env)
+  # (a plain data.frame's summary is as.data.frame()d by dplyr: no element names)
+  if (isTRUE(.subset2(.data, "bare_df"))) out <- col_attrs_drop_names(out)
+  out
 }
 
 # Internal: the notice for a summarise step that computes the pending lazy ops
@@ -862,7 +867,7 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, 
   finish(new_tbl_gpu(
     ptr = wrap_gpu_call("summarise", gpu_bind_cols_impl(list(key_tbl$ptr, agg_ptr))),
     schema = schema, groups = retained_groups, group_drop = out_drop,
-    exec_mode = "eager"
+    exec_mode = "eager", col_attrs = .subset2(observed, "col_attrs")
   ))
 }
 
@@ -1826,7 +1831,8 @@ extract_na_rm <- function(quo, schema) {
 # @keywords internal
 summarise_quantile_names_reason <- function(dots) {
   exprs <- lapply(dots, rlang::quo_get_expr)
-  mentions <- vapply(exprs, function(e) "quantile" %in% all.names(e), logical(1))
+  # (a call: a column named `quantile` is no reason)
+  mentions <- vapply(exprs, expr_calls_any, logical(1), fns = "quantile")
   bare <- vapply(exprs, function(e) identical(call_head_name(e), "quantile"), logical(1))
   if (any(mentions & !bare)) {
     return("an expression around quantile() keeps or drops its names by R's own rules, which dplyr applies.")

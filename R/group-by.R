@@ -765,7 +765,7 @@ compute_group_data <- function(.data) {
 
   # the keys' attributes, and the names of each group's first row (#21)
   if (!is.null(.subset2(materialized, "col_attrs"))) {
-    gd <- group_keys_col_attrs(gd, materialized, observed_only = is.null(fixed) && isTRUE(materialized$group_drop %||% TRUE))
+    gd <- group_keys_col_attrs(gd, materialized, fixed = !is.null(fixed))
   }
 
   # dplyr's grouped_df group_data() carries `.drop` as an attribute
