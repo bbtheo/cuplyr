@@ -283,12 +283,23 @@ vec_proxy.tbl_gpu <- function(x, ...) {
   }
 
   m <- if (has_pending_ops(x)) vctrs_computed(x, entry) else x
+  if (length(m$schema$names) == 0L) {
+    # cudf's row count of a zero-column table is 0 whatever its R-side `$nrow`
+    # says: the proxy is sized by `$nrow`, and holds no source (a restore of a
+    # zero-column table gathers nothing, vec_restore.tbl_gpu()). A table of
+    # unknown height still errors.
+    n <- .subset2(m, "nrow")
+    if (is.null(n)) {
+      stop("`vctrs::vec_proxy()` is not supported on a tbl_gpu with no columns ",
+           "and an unknown number of rows.", call. = FALSE)
+    }
+    return(vctrs::new_data_frame(
+      list(.src = rep.int(1L, n), .row = seq_len(n)), n = n
+    ))
+  }
   if (is.null(m$ptr)) {
     rlang::abort("Cannot take the vctrs proxy of a tbl_gpu with no GPU table.")
   }
-  # The proxy's size is cudf's row count, which is 0 for a zero-column table
-  # whatever its R-side `$nrow` says (F07; full support is F14).
-  check_zero_column_input(m, m$schema, "vctrs::vec_proxy")
   n <- gpu_dim(m$ptr)[[1L]]
   id <- vctrs_register_source(m)
   if (entry > 0L) {
@@ -485,6 +496,14 @@ vec_restore.tbl_gpu <- function(x, to, ...) {
   }
 
   schema <- current_schema(to)
+  if (length(schema$names) == 0L) {
+    # no column to gather: only the row count is restored
+    n <- length(x[[1L]])
+    out <- tbl_gpu(tibble::tibble(.rows = n), lazy = identical(to$exec_mode, "lazy"))
+    # a rowwise `to` stays rowwise, with no vars (it has no columns)
+    if (is_rowwise_gpu(to)) out <- rowwise_mark(out, character())
+    return(copy_frame_meta(out, to))
+  }
   schema <- list(
     names = schema$names,
     types = schema$types,

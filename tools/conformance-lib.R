@@ -671,6 +671,15 @@ cf_make_shim_env <- function(state, upload = TRUE) {
     tibble::as_tibble(dplyr::collect(x))[[i, ...]]
   }
 
+  # dplyr's df_n_col() is `length(unclass(x))`, which counts the R fields of a
+  # tbl_gpu (ptr, schema, groups, ...) instead of its columns. A tbl_gpu is
+  # collected and dplyr's own df_n_col() applied to the collected frame;
+  # everything else goes straight to dplyr's.
+  dplyr_df_n_col <- env$df_n_col
+  env$df_n_col <- function(x) {
+    dplyr_df_n_col(if (inherits(x, "tbl_gpu")) cf_collect(x) else x)
+  }
+
   env$expect_s3_class <- function(object, class, ..., exact = FALSE) {
     # The one thing checked on the raw object: that it is a tbl_gpu.
     o <- if (inherits(object, "tbl_gpu") && all(class == "tbl_gpu")) object else cf_normalize(object)
