@@ -16,7 +16,8 @@ zero_column_result(.data, verb, n = NULL)
 \description{
 The one place verbs that end with no columns (\code{select()}, \code{transmute()},
 \code{[}, \code{distinct()}) build their result: an ungrouped zero-column \code{tbl_gpu}
-of \code{n} rows in the input's exec_mode. \code{n} defaults to the input's row
+of \code{n} rows in the input's exec_mode (rowwise, with no vars, for a rowwise
+input). \code{n} defaults to the input's row
 count; pending lazy operations are computed first to get it (a
 materialization point, as for \code{summarise()} with no expressions).
 }

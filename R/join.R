@@ -1864,12 +1864,11 @@ anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
 #'   special-casing needed.
 #' - `copy = TRUE` with a plain `data.frame` `y` works like every other join.
 #'
-#' `gpu_cross_join()` (`src/ops_join.cpp`) throws if either side has 0
-#' *columns* (verified in the `cudf/join/join.hpp` doc comment: "throw
-#' cudf::logic_error if the number of columns in either left or right table
-#' is 0") -- guarded here with a clearer, dplyr-flavored message before ever
-#' reaching the GPU call, for both the eager and lazy schedules (the 0-column
-#' case is knowable from the schemas alone, no execution needed).
+#' - A side with rows but no columns works as in dplyr: `x` by `y` repeats
+#'   each row of `x` once per row of `y`, whichever side has no columns, and
+#'   two such tables give a table of `nrow(x) * nrow(y)` rows and no columns.
+#'   libcudf's cross join refuses a table with no columns, so a one-column
+#'   table stands in for it and that column is dropped afterwards.
 #'
 #' @param x,y `tbl_gpu` objects. If `y` is not a `tbl_gpu`, set
 #'   `copy = TRUE` to upload it automatically.
@@ -1890,11 +1889,6 @@ cross_join.tbl_gpu <- function(x, y, ..., copy = FALSE, suffix = c(".x", ".y")) 
   rlang::check_dots_empty0(...)
   y <- join_coerce_y(x, y, copy)
   check_unique_join_inputs(x, y)
-
-  if (length(x$schema$names) == 0 || length(y$schema$names) == 0) {
-    stop("cross_join() requires both tables to have at least one column.",
-         call. = FALSE)
-  }
 
   suffix <- validate_join_suffix(suffix)
 
