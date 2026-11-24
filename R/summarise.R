@@ -133,10 +133,9 @@
 #' result with [mutate.tbl_gpu()]'s expressions, so the result has dplyr's
 #' types and `NA` values, with three exceptions. Math with no real value
 #' (`sqrt(mean(x))` of a negative mean) is `NaN` without R's "NaNs produced"
-#' warning. A power with a constant exponent follows R except for a `-Inf`
-#' base with a non-integer exponent (`Inf` or `0` where R gives `NaN`), a
-#' `-0` base with an odd exponent and a `-Inf` base with a negative odd one
-#' (a zero or an infinity of the other sign).
+#' warning. A power can differ from R's in the last bit (`var(x)^0.5` of 9
+#' is 2.9999999999999996, where R computes 3 in extended precision), as in
+#' [mutate.tbl_gpu()].
 #' An integer `sum()` that leaves the integer range in some group is a double
 #' in every group, so `sum(x) + 1L` gives a value in a group whose sum still
 #' is an integer where dplyr warns about the overflow and gives `NA`.
@@ -144,8 +143,13 @@
 #' These stay with dplyr, for the reason named in the fallback notice: a
 #' function of the group's rows around a reducer (`lag(mean(x))`,
 #' `cumsum(sum(x))`); `^` whose exponent is not a constant other than 0, `NA`
-#' and an infinity (R's `NA^0` and `1^NA` are 1, the GPU's are `NA`); `&`, `|`
-#' or `!` of a double (R reads `NaN` there as `NA`); `if_else()` or
+#' and an infinity (R's `NA^0` and `1^NA` are 1, the GPU's are `NA`); `^` with
+#' an odd or non-integer exponent (`mean(x)^3`, `max(x)^0.5`, `(-mean(x))^-1`)
+#' unless its base is `n()`, `n_distinct()`, `sd()` or `var()` (R's power of a
+#' `-Inf` or `-0`, which `max()` of an empty group or `-mean(x)` of a zero
+#' mean gives, is not the GPU's: `(-Inf)^0.5` is `NaN` in R, `Inf` on the
+#' GPU); `&`, `|` or `!` of anything but a logical or an integer (R reads a
+#' double's `NaN` there as `NA`, and a string is R's error); `if_else()` or
 #' `case_when()` with a condition that is not a logical expression; a column
 #' of the input outside a reducer (`mean(x) + x`, dplyr's "must be size 1"
 #' error); a reducer that reads a name an earlier expression assigned (`x =
@@ -1576,7 +1580,7 @@ summarise_core <- function(.data, dots, retained_groups = character(),
     # mutate (F101), so nothing computes here, except that a window argument
     # holding an integer sum() makes the call compute its pending ops and every
     # window stage.
-    preprocess_result <- preprocess_agg_expressions(.data, dots, ir_cache, notice_data)
+    preprocess_result <- preprocess_agg_expressions(.data, dots, ir_cache, notice_data, provenance$dot)
     working_data <- preprocess_result$data
     processed_dots <- preprocess_result$dots
     bool_temps <- preprocess_result$bool_temps
@@ -2118,13 +2122,16 @@ agg_dot_parts <- function(ir_cache, i, dot, schema) {
 # @param dots Quosures from summarise()
 # @param notice_data The table a notice counts the pending steps of (see
 #   summarise_core())
+# @param sources NULL, or per dot the user's dot it is a leaf of (#22: a split
+#   call's provenance `dot`; NULL entries for plain dots), for a notice's expression
 # @return List with modified data, simplified dots, `bool_temps`: the names
 #   of the temp columns built from a logical expression (declared INT32), whose
 #   sum() cannot change type (summarise_core()), and `notice_data`: the table
 #   later notices count the pending steps of (the input after a compute here,
 #   which ran the user's steps)
 # @keywords internal
-preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL, notice_data = .data) {
+preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL, notice_data = .data,
+                                       sources = NULL) {
   working_data <- .data
   new_dots <- vector("list", length(dots))
   names(new_dots) <- names(dots)
@@ -2281,7 +2288,8 @@ preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL, notice_data
 
   if (lazy) {
     if (length(window_args) > 0L) {
-      resolved <- resolve_deferred_agg_windows(working_data, window_args, dots, notice_data, reserved)
+      resolved <- resolve_deferred_agg_windows(working_data, window_args, dots, notice_data, reserved,
+                                                sources)
       working_data <- resolved$data
       notice_data <- resolved$notice_data
       plain_temps <- c(plain_temps, resolved$temps)
@@ -2315,11 +2323,13 @@ agg_temp_dot <- function(fn_name, col_name) {
 # @param dots The dots, for the notice's expression
 # @param notice_data The table a notice counts the pending steps of
 # @param reserved Temp names already taken by the call's plain temps
+# @param sources As preprocess_agg_expressions()'s
 # @return `list(data, notice_data, cols, temps)`: `cols` is each argument's
 #   column; `temps` is `list(name, ir, keep_bool)` for the arguments that are not
 #   a bare window output and still need a temp column
 # @keywords internal
-resolve_deferred_agg_windows <- function(working_data, window_args, dots, notice_data, reserved) {
+resolve_deferred_agg_windows <- function(working_data, window_args, dots, notice_data, reserved,
+                                         sources = NULL) {
   schema <- current_schema(working_data)
   groups <- .subset2(working_data, "groups")
   # (not a name a window call could read, which would start a new batch)
@@ -2335,8 +2345,10 @@ resolve_deferred_agg_windows <- function(working_data, window_args, dots, notice
   if (int_sum && has_pending_ops(working_data)) {
     if (has_pending_ops(notice_data)) {
       first <- first_agg_int_sum_dot(window_args, schema, groups)
+      # (a leaf of a dot with arithmetic around its reducers shows that dot)
+      src <- if (first <= length(sources)) sources[[first]]
       notify_materialization("summarise", "a window call inside an aggregation needs its input computed",
-                             notice_expr_text(dots[[first]]), data = notice_data)
+                             notice_expr_text(src %||% dots[[first]]), data = notice_data)
     }
     working_data <- compute(working_data)
     # (the user's steps have run: a later site counts none of them)

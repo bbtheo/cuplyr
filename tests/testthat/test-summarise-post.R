@@ -142,7 +142,79 @@ test_that("a power around a reducer runs on the GPU only with a constant exponen
       expect_match(got$reason, "`^` around a reducer runs on the GPU only with a constant exponent", fixed = TRUE)
     }
   }
-  f124_check(df, function(d) summarise(group_by(d, g), a = mean(y)^-1, b = n()^3L, c = mean(y)^TRUE))
+  f124_check(df, function(d) summarise(group_by(d, g), a = mean(y)^-2, b = n()^3L, c = sd(y)^TRUE))
+})
+
+test_that("a power around a reducer that may be -Inf or -0 runs on the GPU only when R and the GPU agree", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = NULL)
+  # group 2: max(y, na.rm = TRUE) is -Inf; group 3: -mean(y) is -0
+  df <- tibble::tibble(g = c(1L, 1L, 2L, 3L, 3L), y = c(4, 9, NA, -1, 1))
+  declined <- list(
+    list(f = function(d) summarise(group_by(d, g), p = max(y, na.rm = TRUE)^0.5),
+         expr = "max(y, na.rm = TRUE)^0.5"),
+    list(f = function(d) summarise(group_by(d, g), p = (-mean(y))^-1), expr = "(-mean(y))^(-1)"),
+    list(f = function(d) summarise(group_by(d, g), p = mean(y)^TRUE), expr = "mean(y)^TRUE"),
+    list(f = function(d) summarise(group_by(d, g), p = (-sd(y))^3), expr = "(-sd(y))^3"),
+    list(f = function(d) summarise(group_by(d, g), m = max(y, na.rm = TRUE), p = m^-3), expr = "m^(-3)")
+  )
+  for (cs in declined) {
+    f124_check(df, cs$f, native = FALSE)
+    for (lazy in c(FALSE, TRUE)) {
+      got <- sp_fallback(cs$f, df, lazy)
+      expect_identical(got$expr, cs$expr)
+      expect_match(got$reason, "with an even exponent, or over `n()`", fixed = TRUE)
+    }
+  }
+  # an even exponent for any base; any exponent for a count's or a spread's base, an
+  # earlier dot's too
+  f124_check(df, function(d) {
+    summarise(group_by(d, g), a = max(y, na.rm = TRUE)^-2, b = (-mean(y))^4, c = n()^-0.5,
+              d = n_distinct(y)^1.5, e = var(y)^3, v = sd(y), w = v^(1 / 3), .groups = "drop")
+  })
+})
+
+test_that("`&` and `|` of a string reducer give R's error, with a true reason", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = NULL)
+  df <- tibble::tibble(g = c(1L, 1L, 2L), s = c("a", "b", "c"))
+  f <- function(d) summarise(group_by(d, g), r = dplyr::first(s) & TRUE)
+  for (lazy in c(FALSE, TRUE)) {
+    notes <- list()
+    err <- tryCatch(
+      withCallingHandlers(collect(f(tbl_gpu(df, lazy = lazy))), cuplyr_cpu_fallback = function(c) {
+        notes[[length(notes) + 1L]] <<- c
+      }),
+      error = function(e) e
+    )
+    expect_s3_class(err, "error")
+    expect_match(conditionMessage(err), "operations are possible only for numeric, logical or complex types")
+    expect_length(notes, 1L)
+    expect_identical(notes[[1L]]$expr, "dplyr::first(s) & TRUE")
+    expect_match(notes[[1L]]$reason, "only on logical or integer values", fixed = TRUE)
+  }
+})
+
+test_that("leaves whose argument is not a name share by the call, in a bucket of their own", {
+  dots <- rlang::quos(m = sum(x > 1) / n() + sum(x > 1), k = mean(x > 2) - sum(x > 1) + mean(x > 2))
+  schema <- list(names = c("g", "x"), types = c("INT32", "FLOAT64"))
+  split <- summarise_post_split(dots, dots, schema, "g")
+  expect_identical(vapply(split$agg_dots, rlang::quo_text, character(1), USE.NAMES = FALSE),
+                   c("sum(x > 1)", "n()", "mean(x > 2)"))
+})
+
+test_that("the window-sum compute notice of a split call shows the user's dot", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = NULL, cuplyr.plan_break = NULL)
+  df <- tibble::tibble(g = c(1L, 1L, 2L), x = c(1L, 2L, 3L))
+  got <- sp_notices(
+    tbl_gpu(df, lazy = TRUE) |> filter(x > 0L) |> group_by(g) |>
+      summarise(s = mean(x / sum(x)) + 1) |> collect(),
+    "cuplyr_plan_break"
+  )
+  expect_length(got, 1L)
+  expect_identical(got[[1L]]$reason, "a window call inside an aggregation needs its input computed")
+  expect_identical(got[[1L]]$expr, "mean(x / sum(x)) + 1")
 })
 
 test_that("`&`, `|` and `!` of a double around a reducer read NaN as dplyr does", {

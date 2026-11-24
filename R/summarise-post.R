@@ -91,8 +91,10 @@ summarise_post_split <- function(dots, expanded, in_schema, groups) {
   agg_origin <- integer()
   agg_label <- character()
   agg_src <- list()
-  # shared leaves, by the reducer and its first argument when that is a name (no
-  # deparse: a large constant inside a call costs nothing): list(expr, env, name)
+  # shared leaves, by the reducer and its first argument when that is a name, else
+  # by the call's hash (no deparse: a large constant inside a call costs little;
+  # embedded quosures squashed, so no environment is serialized). A bucket holds
+  # the leaves its key can't tell apart: list(expr, env, name)
   leaves <- new.env(parent = emptyenv())
   post <- list()
   bail <- FALSE
@@ -152,7 +154,11 @@ summarise_post_split <- function(dots, expanded, in_schema, groups) {
         key <- NULL
         if (!h %in% c("min", "max")) {
           a <- if (length(e) >= 2L) .subset2(e, 2L)
-          key <- if (is.symbol(a)) paste0(h, "(", as.character(a)) else h
+          key <- if (is.symbol(a)) {
+            paste0(h, "(", as.character(a))
+          } else {
+            paste0(h, "#", rlang::hash(rlang::quo_squash(e)))
+          }
         }
         share <- NULL
         for (l in if (!is.null(key)) leaves[[key]]) {
@@ -210,19 +216,26 @@ summarise_post_split <- function(dots, expanded, in_schema, groups) {
 }
 
 # Why the GPU engine would give a value R does not, for a value an aggregate can
-# take (NA, or NaN: `mean()` of an empty group), in post expression `ir`; NULL
-# when it gives R's. A reducer's result is NA or NaN where a column is rarely
-# either, so these, which mutate() shares, are kept off the post step:
+# take (NA, or NaN: `mean()` of an empty group; -Inf: `max()` of one; -0), in post
+# expression `ir`; NULL when it gives R's. A reducer's result is one of these far
+# more often than a column value is, so these, which mutate() shares, are kept off
+# the post step:
 # - `^`: R's `NA^0` and `1^NA` are 1, the engine's pow is NA when either side is
-#   (and R's `(-1)^Inf` is NaN). A constant exponent other than 0, NA and an
-#   infinity is R's, except with a `-Inf` or `-0` base (R_pow() special-cases
-#   them: `(-Inf)^0.5` is NaN, `(-0)^-1` Inf; the engine's pow gives Inf, -Inf),
-#   which a reducer gives far less often (documented in summarise()'s help).
-# - `&`, `|`, `!` of a double: R reads NaN as NA, the engine as TRUE.
+#   (and R's `(-1)^Inf` is NaN): the exponent must be a constant other than 0, NA
+#   and an infinity. R_pow() also special-cases a `-Inf` or `-0` base, where C's
+#   pow() differs: `(-Inf)^0.5` is NaN in R, Inf in pow; `(-0)^-1` Inf, -Inf;
+#   `(-0)^3` 0, -0; `(-Inf)^-3` 0, -0. Both agree for an even integer exponent,
+#   and for any base that can be neither: `nonneg`, the aggregates that are n(),
+#   n_distinct(), sd() or var() (a base computed from them may be -0: `-sd(x)`).
+#   (Finite values also differ in the last bit where R uses powl(): `9^0.5` is
+#   3 in R, 2.9999999999999996 on the GPU, as in mutate().)
+# - `&`, `|`, `!` of anything but a logical or an integer: of a double R reads
+#   NaN as NA, the engine as TRUE; of a string R's error, the engine's failure.
 # - `if_else()`/`case_when()` with a condition that is not a logical expression:
 #   dplyr's error, or for a bare NA dplyr's NA, where the engine fails at execution.
+# @param nonneg The names in `schema` that are never -Inf or -0
 # @keywords internal
-summarise_post_na_rule <- function(ir, schema) {
+summarise_post_na_rule <- function(ir, schema, nonneg = character()) {
   if (!inherits(ir, "cuplyr_ir") || !identical(.subset2(ir, "kind"), "call")) {
     return(NULL)
   }
@@ -252,12 +265,26 @@ summarise_post_na_rule <- function(ir, schema) {
         "infinity: R's `NA^0` and `1^NA` are 1, where the GPU engine gives NA."
       ))
     }
+    base <- .subset2(args, 1L)
+    if (v %% 2 != 0 &&
+        !(identical(.subset2(base, "kind"), "col") && match(.subset2(base, "name"), nonneg, 0L) > 0L)) {
+      return(paste0(
+        "`^` around a reducer runs on the GPU only with an even exponent, or over `n()`, ",
+        "`n_distinct()`, `sd()` or `var()`: R's power of a `-Inf` or `-0` (`max()` of an empty ",
+        "group, `-mean(x)` of a zero mean) differs from the GPU engine's, such as `(-Inf)^0.5`, ",
+        "NaN in R and Inf on the GPU."
+      ))
+    }
   } else if (match(op, c("&", "|", "!"), 0L) > 0L) {
     for (a in args) {
       t <- type_of(a)
-      if (is.na(t) || identical(t, "FLOAT64")) {
+      if (identical(t, "FLOAT64")) {
         return(paste0("`&`, `|` and `!` of a double around a reducer read NaN as TRUE on the GPU, ",
                       "where R gives NA; dplyr evaluates it."))
+      }
+      if (is.na(t) || match(t, c("BOOL8", "INT32"), 0L) == 0L) {
+        return(paste0("`&`, `|` and `!` around a reducer run on the GPU only on logical or integer ",
+                      "values; dplyr evaluates it."))
       }
     }
   } else if (identical(op, "if_else") || identical(op, "case_when")) {
@@ -276,7 +303,7 @@ summarise_post_na_rule <- function(ir, schema) {
     }
   }
   for (a in args) {
-    why <- summarise_post_na_rule(a, schema)
+    why <- summarise_post_na_rule(a, schema, nonneg)
     if (!is.null(why)) {
       return(why)
     }
@@ -340,6 +367,11 @@ summarise_post_screen <- function(post, in_schema, ir_cache, simple_aggs = NULL)
   }
 
   schema <- list(names = names(dots), types = types)
+  # (the aggregates that are never -Inf or -0, for a power's base)
+  nonneg <- names(dots)[vapply(dots, function(q) {
+    h <- summarise_post_head(rlang::quo_get_expr(q))
+    !is.null(h) && match(h, c("n", "n_distinct", "sd", "var"), 0L) > 0L
+  }, logical(1))]
   for (p in post$post) {
     fallback_dot_begin()
     ir <- tryCatch(
@@ -364,7 +396,7 @@ summarise_post_screen <- function(post, in_schema, ir_cache, simple_aggs = NULL)
         "is evaluated per group by dplyr."
       )))
     }
-    why <- summarise_post_na_rule(ir, schema)
+    why <- summarise_post_na_rule(ir, schema, nonneg)
     if (!is.null(why)) {
       return(no(p$origin, why))
     }
