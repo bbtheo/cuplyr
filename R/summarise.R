@@ -5,10 +5,11 @@
 #'
 #' @param .data A grouped `tbl_gpu` object created by [group_by()].
 #' @param ... Name-value pairs of summary functions. The name will be the
-#'   name of the variable in the result. The value must be a single aggregation
+#'   name of the variable in the result. The value is an aggregation
 #'   expression in the form `fun(column)`, where `column` can also be any
 #'   expression the internal expression IR understands (see "Aggregation
-#'   sub-expressions" below).
+#'   sub-expressions" below), or arithmetic around such calls and the results
+#'   of earlier expressions (see "Arithmetic around reducers" below).
 #' @param .groups Controls grouping structure of the result (Phase 6, task
 #'   3; matches `dplyr::summarise()`'s own contract exactly, verified
 #'   empirically against dplyr 1.2.1). One of:
@@ -119,10 +120,44 @@
 #' window-decomposition engine [mutate.tbl_gpu()] uses), and the
 #' aggregation then reduces that per-row window result -- matching dplyr's
 #' own two-step semantics exactly. Only ONE aggregation's own argument tree
-#' is decomposed this way: combining TWO SEPARATE aggregation calls at the
-#' dot level (`sum(cumsum(x)) - mean(y)`) is not supported (the same
-#' "Invalid aggregation expression" error as any other dot that isn't a
-#' bare `fn(single_arg)` shape).
+#' is decomposed this way; several aggregation calls in one dot are combined
+#' by the next section.
+#'
+#' ## Arithmetic around reducers
+#' An expression may combine reducer calls with arithmetic, comparisons, math
+#' functions and constants, and may read the result of an earlier expression:
+#' `mean(x) + 1`, `sum(x) / n()`, `max(x) - min(x)`,
+#' `mean(x) - qnorm(.975) * sd(x) / sqrt(n())`, `sum(cumsum(x)) - mean(y)`,
+#' `s = sum(x), m = s / n()`. Each reducer call is aggregated as above (a
+#' repeated call once), and the rest is computed on the one-row-per-group
+#' result with [mutate.tbl_gpu()]'s expressions, so the result has dplyr's
+#' types and `NA` values, with three exceptions. Math with no real value
+#' (`sqrt(mean(x))` of a negative mean) is `NaN` without R's "NaNs produced"
+#' warning. A power can differ from R's in the last bit (`var(x)^0.5` of 9
+#' is 2.9999999999999996, where R computes 3 in extended precision), as in
+#' [mutate.tbl_gpu()].
+#' An integer `sum()` that leaves the integer range in some group is a double
+#' in every group, so `sum(x) + 1L` gives a value in a group whose sum still
+#' is an integer where dplyr warns about the overflow and gives `NA`.
+#'
+#' These stay with dplyr, for the reason named in the fallback notice: a
+#' function of the group's rows around a reducer (`lag(mean(x))`,
+#' `cumsum(sum(x))`); `^` whose exponent is not a constant other than 0, `NA`
+#' and an infinity (R's `NA^0` and `1^NA` are 1, the GPU's are `NA`); `^` with
+#' an odd or non-integer exponent (`mean(x)^3`, `max(x)^0.5`, `(-mean(x))^-1`)
+#' unless its base is `n()`, `n_distinct()`, `sd()` or `var()` (R's power of a
+#' `-Inf` or `-0`, which `max()` of an empty group or `-mean(x)` of a zero
+#' mean gives, is not the GPU's: `(-Inf)^0.5` is `NaN` in R, `Inf` on the
+#' GPU); `&`, `|` or `!` of anything but a logical or an integer (R reads a
+#' double's `NaN` there as `NA`, and a string is R's error); `if_else()` or
+#' `case_when()` with a condition that is not a logical expression; a column
+#' of the input outside a reducer (`mean(x) + x`, dplyr's "must be size 1"
+#' error); a reducer that reads a name an earlier expression assigned (`x =
+#' sum(x), t = sum(x)`); an expression that reads the name of a LATER
+#' expression (`mean(x) + k, k = sum(y)`: dplyr still sees the variable `k`
+#' there); `count()` inside an expression; a name assigned twice. A reducer
+#' inside a quosure spliced into the expression (`{{ stat }}`, `!!quo`) is
+#' computed in the quosure's own environment.
 #'
 #' ## NA handling
 #' `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()`/`median()` all match R's
@@ -215,8 +250,10 @@
 #' An expression named like a grouping column replaces that key in place
 #' (same position, the expression's type; the table stays grouped by that
 #' name). An expression that mentions a name an earlier expression created
-#' (or a name created twice) sees the new value, as in dplyr; such calls run
-#' through the CPU fallback.
+#' (or a name created twice) sees the new value, as in dplyr. When that
+#' expression is arithmetic around reducers and earlier results (`m = s / n()`)
+#' it runs on the GPU (see above); a reducer that reads the name (`x =
+#' sum(x), t = sum(x)`) or a repeated name runs through the CPU fallback.
 #'
 #' ## Group order
 #' `group_by(g) |> summarise(...)` returns groups in dplyr's `group_by()`
@@ -489,6 +526,18 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # `fn(<column>)` dots (summarise_simple_aggregations()) read a column, so they
   # are no constant reducers; summarise_core() reuses the aggregations built here.
   simple_plan <- summarise_simple_plan(dots, in_schema)
+  # #22: a dot with arithmetic around reducers (`mean(x) + 1`, `sum(x) / n()`, a later
+  # dot reading an earlier result) splits into the reducer calls, aggregated as
+  # temp aggregates, and a mutate on the result (R/summarise-post.R). The split
+  # only reads the syntax; what it can't classify leaves the call as it was.
+  post <- NULL
+  if (is.null(simple_plan) && !isTRUE(reframe_state$wide)) {
+    post <- summarise_post_split(dots, expanded, in_schema, summarise_groups)
+    if (!is.null(post)) {
+      dots <- post$agg_dots
+      simple_plan <- summarise_simple_plan(dots, in_schema)
+    }
+  }
   simple_aggs <- .subset2(simple_plan, "aggregations")
   if (is.null(simple_aggs) && summarise_has_constant_agg(dots, in_schema)) {
     return(gpu_fallback("summarise", .data, function(tbl) {
@@ -520,14 +569,15 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # Built only when an aggregation can hit, minmax_dot_info(); the frame is the
   # method's, for the verb's call head.)
   verb_frame <- sys.parent()
-  ir_cache$.minmax_src <- list(minmax_source, user_dots, expanded, verb_frame)
+  # (a split call's aggregations map to the user's dots through the split's provenance)
+  ir_cache$.minmax_src <- list(minmax_source, user_dots, if (is.null(post)) expanded else dots, verb_frame)
   sequential <- summarise_dots_are_sequential(dots)
   if (sequential ||
       !(if (is.null(simple_plan)) summarise_dots_parseable(dots, in_schema, ir_cache) else simple_plan$parseable)) {
     # (F88: the judge claimed the expanded dot that is not parseable; the notice
     # names the user's dot it comes from)
     if (!sequential) {
-      fallback_failed_remap(attr(expanded, "provenance")$origin)
+      fallback_failed_remap(attr(if (is.null(post)) expanded else dots, "provenance")$origin)
     }
     return(gpu_fallback("summarise", .data, function(tbl) {
       dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo)
@@ -538,11 +588,27 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
     }))
   }
 
-  auto_name_dots(expanded, "summarise")  # only for its unnamed-expression warning
+  # #22: the arithmetic around the reducers is judged before any GPU work too. A
+  # post step that can't run on the GPU leaves the call to dplyr; the screen claims
+  # the user's dot it stopped at (and why) for the notice.
+  if (!is.null(post)) {
+    post <- summarise_post_screen(post, in_schema, ir_cache, simple_aggs)
+    if (is.null(post)) {
+      return(gpu_fallback("summarise", .data, function(tbl) {
+        dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo)
+      }, reason = fallback_failed_reason(orig_dots, "an aggregation has a form the GPU engine does not support.")))
+    }
+  }
+
+  # (only for its unnamed-expression warning. A split call gives none, as it gave none
+  # when dplyr ran it: dplyr doesn't warn for an unnamed expression)
+  if (is.null(post)) auto_name_dots(expanded, "summarise")
 
   # (`tbl`: the table to run on; the empty-group path hands over the pending
-  # ops it has already computed)
-  cpu <- function(tbl = .data, reason = "an integer sum() inside an aggregation overflowed in some group; dplyr widens only those.") {
+  # ops it has already computed. A post step that failed on the real result
+  # left its own reason, #22.)
+  cpu <- function(tbl = .data, reason = .subset2(.subset2(post, "why"), "reason") %||%
+                    "an integer sum() inside an aggregation overflowed in some group; dplyr widens only those.") {
     gpu_fallback("summarise", tbl, function(tbl) {
       # (the bare name: dplyr's warnings name the call as written, F124)
       summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo)
@@ -563,7 +629,10 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
     # `.by=` summarise is always ungrouped (Phase 5, task W9); `.groups=`
     # can never reach here alongside `.by=` (dplyr's own generic already
     # rejects that combination before this method is even dispatched to).
-    return(gpu_or_cpu(function() summarise_by_desugar(.data, dots, by_cols, ir_cache, simple_aggs)))
+    return(gpu_or_cpu(function() {
+      res <- summarise_by_desugar(.data, dots, by_cols, ir_cache, simple_aggs)
+      if (is.null(post)) res else summarise_post_apply(res, post)
+    }))
   }
 
   retained_groups <- resolve_summarise_groups(.subset2(.data, "groups"), .groups, caller_env)
@@ -575,11 +644,13 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
     if (any(names(dots) %in% .subset2(.data, "groups"))) {
       return(cpu(reason = "an output column has the name of a group column; dplyr resolves the clash."))
     }
-    return(gpu_or_cpu(function() summarise_with_empty_groups(.data, dots, retained_groups, cpu, ir_cache)))
+    return(gpu_or_cpu(function() summarise_with_empty_groups(.data, dots, retained_groups, cpu, ir_cache, post)))
   }
 
-  retry_on_sum_overflow(function() summarise_core(.data, dots, retained_groups, simple_aggs = simple_aggs, ir_cache = ir_cache),
-                        cpu, class = "cuplyr_summarise_rerun")
+  retry_on_sum_overflow(function() {
+    res <- summarise_core(.data, dots, retained_groups, simple_aggs = simple_aggs, ir_cache = ir_cache)
+    if (is.null(post)) res else summarise_post_apply(res, post)
+  }, cpu, class = "cuplyr_summarise_rerun")
 }
 
 # Internal (F53): TRUE iff some dot is a reducer call (`sum(1L)`, `max(th)`)
@@ -637,8 +708,12 @@ summarise_wants_empty_groups <- function(.data) {
 # @param fallback Function taking the computed table and running the whole call
 #   on the CPU, for the aggregates whose empty-group value the identity row
 #   can't give exactly
+# @param post NULL, or the split of a call with arithmetic around its reducers
+#   (summarise_post_split(), #22): applied once to the table of every group, so the
+#   empty groups' aggregate values feed the arithmetic
 # @keywords internal
-summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, ir_cache = NULL) {
+summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, ir_cache = NULL,
+                                        post = NULL) {
   was_lazy <- identical(.subset2(.data, "exec_mode"), "lazy")
   # A GPU materialization of the pending ops, not a CPU fallback: no notice.
   base <- compute(.data)
@@ -647,13 +722,18 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, 
   # dplyr regroups with group_by_drop_default(.data) while a group is retained
   out_drop <- if (length(retained_groups) > 0L) .subset2(base, "group_drop") %||% TRUE else TRUE
 
-  finish <- function(result) {
+  # (`post` is applied to a GPU result only: the CPU route already has the user's dots)
+  finish_cpu <- function(result) {
     if (was_lazy) result$exec_mode <- "lazy"
     result
   }
+  finish <- function(result) {
+    if (!is.null(post)) result <- summarise_post_apply(result, post)
+    finish_cpu(result)
+  }
   cpu_route <- function(reason = paste0("an empty group of a `.drop = FALSE` grouping meets an aggregate ",
                                         "with no exact empty-group value (a string or timestamp min()/max(), ...).")) {
-    finish(fallback(base, reason))
+    finish_cpu(fallback(base, reason))
   }
 
   # Every group of group_data(), keys only (no `.rows` needed): the fixed keys
@@ -1459,6 +1539,11 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   # to their aggregations (summarise_simple_aggregations()); anything else
   # takes the general steps below.
   aggregations <- simple_aggs %||% summarise_simple_aggregations(dots, current_schema(.data))
+  dot_names <- names(dots)
+  # (#22: set on a split call's temp aggregates: the name and the quosure of the
+  # user's dot each leaf comes from)
+  provenance <- attr(dots, "provenance")
+  dot_labels <- provenance$label
   working_data <- .data
   bool_temps <- character()
   user_dots <- NULL  # the dots as written, for a verb-time notice's expression
@@ -1495,7 +1580,7 @@ summarise_core <- function(.data, dots, retained_groups = character(),
     # mutate (F101), so nothing computes here, except that a window argument
     # holding an integer sum() makes the call compute its pending ops and every
     # window stage.
-    preprocess_result <- preprocess_agg_expressions(.data, dots, ir_cache, notice_data)
+    preprocess_result <- preprocess_agg_expressions(.data, dots, ir_cache, notice_data, provenance$dot)
     working_data <- preprocess_result$data
     processed_dots <- preprocess_result$dots
     bool_temps <- preprocess_result$bool_temps
@@ -1538,11 +1623,16 @@ summarise_core <- function(.data, dots, retained_groups = character(),
   if (any(min_max_now | sum_now)) {
     # (the notice names the user's columns that need it, never an internal one)
     named <- vapply(aggregations[min_max_now | sum_now], `[[`, character(1), "output_col")
+    # (a leaf of a dot with arithmetic around reducers is named by that dot)
+    if (!is.null(dot_labels)) {
+      hit <- match(named, dot_names)
+      named <- unique(ifelse(is.na(hit), named, dot_labels[hit]))
+    }
     reason <- paste0(
       "an integer ", paste(c(if (any(min_max_now)) "min()/max()", if (any(sum_now)) "sum()"), collapse = " or "),
       " (result type depends on the data): ", paste(named, collapse = ", ")
     )
-    expr <- summarise_notice_expr(dots, user_dots, which(min_max_now | sum_now))
+    expr <- summarise_notice_expr(dots, user_dots, which(min_max_now | sum_now), provenance$dot)
     return(summarise_run_now(working_data, aggregations, retained_groups, group_order, reason,
                              notice_data = notice_data, expr = expr))
   }
@@ -1560,12 +1650,18 @@ summarise_core <- function(.data, dots, retained_groups = character(),
 
 # Internal: the text a verb-time notice shows: the first of the `forcing` dots
 # whose argument is an expression (`fn(<expression>)`), as the user wrote it,
-# flags included; NA when `user_dots` is NULL or none is. Called only when a
-# notice can fire, so a call that never notifies deparses nothing.
+# flags included; NA when `user_dots` is NULL or none is. A leaf of a dot with
+# arithmetic around its reducers (#22, `sources[[i]]` its user dot) is always an
+# expression the user wrote: that dot. Called only when a notice can fire, so a
+# call that never notifies deparses nothing.
 # @keywords internal
-summarise_notice_expr <- function(dots, user_dots, forcing) {
-  if (is.null(user_dots)) return(NA_character_)
+summarise_notice_expr <- function(dots, user_dots, forcing, sources = NULL) {
   for (i in forcing) {
+    src <- if (i <= length(sources)) sources[[i]]
+    if (!is.null(src)) {
+      return(notice_expr_text(src))
+    }
+    if (is.null(user_dots)) next
     e <- rlang::quo_get_expr(dots[[i]])
     if (is.call(e) && length(e) >= 2L && !is.symbol(e[[2L]])) {
       return(notice_expr_text(user_dots[[i]]))
@@ -1944,14 +2040,14 @@ decompose_agg_call <- function(expr) {
 # Internal (F88): why summarise() leaves dot `expr`, whose head `head` is not
 # one of its reducers, to dplyr. A head with no GPU handler anywhere is said to
 # have none (cor(), weighted.mean()); any other breaks summarise()'s own rule:
-# one reducer call per expression, optionally of a GPU expression of columns
-# (`max(x) - min(x)` combines reducers, `sqrt(mean(x))` wraps one).
+# reducer calls, with GPU arithmetic on their results (#22) and GPU expressions of
+# columns inside them (`max(x) - min(x)`, `sqrt(mean(x))`, `mean(x * y)`).
 # @keywords internal
 summarise_shape_reason <- function(expr, head) {
-  rule <- "summarise() runs one reducer call per expression on the GPU (such as `mean(x * y)`)"
+  rule <- "summarise() runs reducer calls on the GPU, with arithmetic around them or inside them (such as `mean(x * y) + 1`)"
   inner <- unlist(lapply(as.list(expr)[-1L], rowwise_call_heads), use.names = FALSE)
   shape <- if (any(match(inner, agg_functions, 0L) > 0L)) {
-    sprintf("%s, not `%s()` around reducers; dplyr evaluates this one.", rule, head)
+    sprintf("%s, not a `%s()` call around reducers in this form; dplyr evaluates this one.", rule, head)
   } else {
     sprintf("%s, and this one calls no reducer; dplyr evaluates it.", rule)
   }
@@ -2026,13 +2122,16 @@ agg_dot_parts <- function(ir_cache, i, dot, schema) {
 # @param dots Quosures from summarise()
 # @param notice_data The table a notice counts the pending steps of (see
 #   summarise_core())
+# @param sources NULL, or per dot the user's dot it is a leaf of (#22: a split
+#   call's provenance `dot`; NULL entries for plain dots), for a notice's expression
 # @return List with modified data, simplified dots, `bool_temps`: the names
 #   of the temp columns built from a logical expression (declared INT32), whose
 #   sum() cannot change type (summarise_core()), and `notice_data`: the table
 #   later notices count the pending steps of (the input after a compute here,
 #   which ran the user's steps)
 # @keywords internal
-preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL, notice_data = .data) {
+preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL, notice_data = .data,
+                                       sources = NULL) {
   working_data <- .data
   new_dots <- vector("list", length(dots))
   names(new_dots) <- names(dots)
@@ -2189,7 +2288,8 @@ preprocess_agg_expressions <- function(.data, dots, ir_cache = NULL, notice_data
 
   if (lazy) {
     if (length(window_args) > 0L) {
-      resolved <- resolve_deferred_agg_windows(working_data, window_args, dots, notice_data, reserved)
+      resolved <- resolve_deferred_agg_windows(working_data, window_args, dots, notice_data, reserved,
+                                                sources)
       working_data <- resolved$data
       notice_data <- resolved$notice_data
       plain_temps <- c(plain_temps, resolved$temps)
@@ -2223,11 +2323,13 @@ agg_temp_dot <- function(fn_name, col_name) {
 # @param dots The dots, for the notice's expression
 # @param notice_data The table a notice counts the pending steps of
 # @param reserved Temp names already taken by the call's plain temps
+# @param sources As preprocess_agg_expressions()'s
 # @return `list(data, notice_data, cols, temps)`: `cols` is each argument's
 #   column; `temps` is `list(name, ir, keep_bool)` for the arguments that are not
 #   a bare window output and still need a temp column
 # @keywords internal
-resolve_deferred_agg_windows <- function(working_data, window_args, dots, notice_data, reserved) {
+resolve_deferred_agg_windows <- function(working_data, window_args, dots, notice_data, reserved,
+                                         sources = NULL) {
   schema <- current_schema(working_data)
   groups <- .subset2(working_data, "groups")
   # (not a name a window call could read, which would start a new batch)
@@ -2243,8 +2345,10 @@ resolve_deferred_agg_windows <- function(working_data, window_args, dots, notice
   if (int_sum && has_pending_ops(working_data)) {
     if (has_pending_ops(notice_data)) {
       first <- first_agg_int_sum_dot(window_args, schema, groups)
+      # (a leaf of a dot with arithmetic around its reducers shows that dot)
+      src <- if (first <= length(sources)) sources[[first]]
       notify_materialization("summarise", "a window call inside an aggregation needs its input computed",
-                             notice_expr_text(dots[[first]]), data = notice_data)
+                             notice_expr_text(src %||% dots[[first]]), data = notice_data)
     }
     working_data <- compute(working_data)
     # (the user's steps have run: a later site counts none of them)
@@ -2336,13 +2440,11 @@ push_agg_temps <- function(working_data, temps) {
 # 0))`, `mean(cumsum(v) - lag(cumsum(v)))` (two window calls sharing a
 # CSE'd subexpression, deduplicated by `ir_extract_windows()`'s own hash-
 # keyed cache) all work. Combining TWO SEPARATE aggregation calls at the
-# DOT level (`summarise(z = sum(cumsum(x)) - mean(y))`) is explicitly not
-# attempted: `decompose_agg_call()` only ever recognizes a bare
-# `fn(single_arg)` dot shape in the first place, so a dot like that never
-# even reaches this function -- it falls straight through to
-# `parse_aggregations()`'s pre-existing "Invalid aggregation expression"
-# error, unchanged (summarise() has no CPU fallback at all, per this file's
-# module docs, so there is nowhere else for such a dot to go).
+# DOT level (`summarise(z = sum(cumsum(x)) - mean(y))`) is not done here
+# either: summarise_post_split() (R/summarise-post.R, #22) cuts such a dot
+# into its reducer calls first, each of which comes here as a dot of its own
+# (a temp aggregate), and the arithmetic around them runs on the aggregated
+# table afterwards.
 #
 # An unlowerable window spec inside the argument (currently only
 # `roll_median()`, per `window_spec_lowerable()`) is rejected with a clear,
