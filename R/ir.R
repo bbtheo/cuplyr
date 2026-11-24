@@ -69,11 +69,17 @@ ir_call <- function(op, args, meta = list()) {
 #' @param quo The named quosure of the dot, used to raise dplyr's own error
 #'   when the length doesn't fit
 #' @param name Output column name
+#' @param loss What the upload would change in a Date/POSIXct `value`
+#'   (`timestamp_vector_loss()`), or `NULL` (any other vector). The caller that
+#'   records it also warns for it when the call is made, so it is marked
+#'   `warned`: `lower_mutate()` mutes the upload's own warning for such a vector
+#'   only (a plan would repeat it at every run).
 #' @return A `cuplyr_ir_vec` node
 #' @keywords internal
-ir_vec <- function(value, type, quo, name) {
+ir_vec <- function(value, type, quo, name, loss = NULL) {
   structure(
-    list(kind = "vec", value = value, type = type, quo = quo, name = name),
+    list(kind = "vec", value = value, type = type, quo = quo, name = name,
+         loss = loss, warned = !is.null(loss) && loss$lossy),
     class = c("cuplyr_ir_vec", "cuplyr_ir")
   )
 }

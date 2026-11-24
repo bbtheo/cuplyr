@@ -3,17 +3,21 @@
 * `if_any()` and `if_all()` with a `NULL` body or a `NULL` function anywhere in
   a `.fns` list (also the first one) now give dplyr's own error instead of a
   silent result; `rename()`, `rename_with()`, `select()`, `relocate()` and
-  `mutate()` keep a `vctrs::unspecified()` column; a rowwise `min()`/`max()`
-  that a later `select()` drops still warns on a lazy table; `get("name")`,
-  `get0("name")` and `exists("name")` of a name that is not a column no longer
-  send `mutate()` and `filter()` to the CPU (#24).
+  `mutate()` (also with a window function such as `cumsum()`) and `filter()`
+  with a window predicate keep a `vctrs::unspecified()` column; a rowwise
+  `min()`/`max()` that a later `select()` drops still warns on a lazy table;
+  in ungrouped calls, `get("name")`, `get0("name")` and `exists("name")` of a
+  name that is not a column no longer send `mutate()` and `filter()` to the
+  CPU (#24).
 
 * `mutate()` and `transmute()` give the same values as dplyr when a later
   expression reads a `Date` or `POSIXct` vector constant the GPU can't hold
   (`+-Inf`, out of range), and warn about such a constant once, when the call
   is made, not at every `collect()`. `as.POSIXct()` of a `Date` beyond the
   `POSIXct` range gives `NA` with a `cuplyr_warning_timestamp_out_of_range`
-  warning instead of a wrapped date (#24).
+  warning instead of a wrapped date. A GPU `POSIXct` can't hold such a date, so
+  a later expression, a `filter()` or a summary reads it as `NA` too, where
+  dplyr reads the date (#24).
 
 * `bind_cols()` with `.name_repair = "check_unique"` raises vctrs' errors, a
   grouped first input with blank names raises tibble's error at the call, and

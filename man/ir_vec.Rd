@@ -4,7 +4,7 @@
 \alias{ir_vec}
 \title{Create an IR vector-literal node (mutate()/transmute() only)}
 \usage{
-ir_vec(value, type, quo, name)
+ir_vec(value, type, quo, name, loss = NULL)
 }
 \arguments{
 \item{value}{Atomic vector (names stripped), length != 1}
@@ -15,6 +15,12 @@ ir_vec(value, type, quo, name)
 when the length doesn't fit}
 
 \item{name}{Output column name}
+
+\item{loss}{What the upload would change in a Date/POSIXct \code{value}
+(\code{timestamp_vector_loss()}), or \code{NULL} (any other vector). The caller that
+records it also warns for it when the call is made, so it is marked
+\code{warned}: \code{lower_mutate()} mutes the upload's own warning for such a vector
+only (a plan would repeat it at every run).}
 }
 \value{
 A \code{cuplyr_ir_vec} node

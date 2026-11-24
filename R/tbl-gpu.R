@@ -452,24 +452,32 @@ timestamp_vector_loss <- function(value) {
 
 # The warnings for the Date/POSIXct vector constants of a mutate()/transmute()
 # call that the GPU can't hold exactly (the same ones, in the same order, as
-# the upload gives), raised once for the call, when it is made. lower_mutate()
-# uploads them and mutes its own, so a lazy plan doesn't repeat them at every
-# run. `skip` are staged temp names, not output columns.
+# the upload gives), raised once for the call, when it is made. The caller
+# checks `attr(expressions, "has_vec")` first. lower_mutate() uploads them and
+# mutes its own, so a lazy plan doesn't repeat them at every run. A vector
+# staged by across() (`skip`: the temp names) is warned for under the user
+# column the temp is copied to.
 # @keywords internal
 warn_vector_constant_timestamps <- function(expressions, skip = character()) {
-  if (!isTRUE(attr(expressions, "has_vec"))) {
-    return(invisible())
-  }
   nms <- character()
   loss <- list()
+  copy_of <- NULL
   for (e in expressions) {
     ir <- .subset2(e, "ir")
-    if (!identical(.subset2(ir, "kind"), "vec") || .subset2(e, "output_col") %in% skip) next
-    l <- timestamp_vector_loss(.subset2(ir, "value"))
-    if (l$lossy) {
-      nms <- c(nms, .subset2(e, "output_col"))
-      loss[[length(loss) + 1L]] <- l
+    if (!identical(.subset2(ir, "kind"), "vec")) next
+    l <- .subset2(ir, "loss")
+    if (is.null(l) || !l$lossy) next
+    out <- .subset2(e, "output_col")
+    if (out %in% skip) {
+      # the first bare copy of the temp names the user's column
+      if (is.null(copy_of)) {
+        copy_of <- staged_copy_names(expressions, skip)
+      }
+      out <- copy_of[out]
+      if (is.na(out)) next
     }
+    nms <- c(nms, unname(out))
+    loss[[length(loss) + 1L]] <- l
   }
   if (length(loss) == 0L) {
     return(invisible())
@@ -481,6 +489,22 @@ warn_vector_constant_timestamps <- function(expressions, skip = character()) {
   oor <- idx(col("oor"))
   warn_timestamp_counts(nms, inf, attr(inf, "n"), oor, attr(oor, "n"))
   invisible()
+}
+
+# For each staged temp of a mutate()/transmute() (across() computes into temps
+# and then copies them): the output column that is a bare copy of it, named by
+# the temp. A temp nothing copies is `NA`.
+# @keywords internal
+staged_copy_names <- function(expressions, temps) {
+  out <- stats::setNames(rep(NA_character_, length(temps)), temps)
+  for (e in expressions) {
+    ir <- .subset2(e, "ir")
+    if (identical(.subset2(ir, "kind"), "col") && .subset2(ir, "name") %in% temps &&
+        is.na(out[[.subset2(ir, "name")]])) {
+      out[[.subset2(ir, "name")]] <- .subset2(e, "output_col")
+    }
+  }
+  out
 }
 
 # Drop the flags warn_unrepresentable_timestamps() reads from the pointer.

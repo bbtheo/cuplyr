@@ -250,6 +250,16 @@ STRING levels column) using the physical codes as the index -- see
 `src/ops_bind.cpp` for the null-sanitization details (codes are 1-based
 and cudf's `gather()` needs a non-nullable, 0-based index).
 
+Factor levels follow their column by position too when a name is duplicated
+or blank (`names_need_position()`): `levels_from_positions()` tags the list
+`by_position`, and `levels_by_position()` reads the k-th factor column of a
+name from the k-th entry of that name, counted by position (a blank name never
+matches in a by-name lookup). `propagate_factor_levels()` takes that path for
+select, and for rename/distinct/slice/barrier when either side has such a name
+(dplyr refuses filter/arrange/mutate on blank names, so those never get there). A
+table whose levels came through any other by-name node has no levels for its
+blank-named factors (they collect as codes).
+
 #### POSIXct time zones (F32)
 
 The GPU holds every POSIXct as UTC microseconds (cudf has no tz-aware type);
@@ -372,7 +382,7 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
   slot; a fractional Date in the result is then floored at upload. The one
   exception is a whole column-free mutate()/transmute() dot, see
   "Evaluate-once" below.
-- **Unrepresentable timestamps at upload (F81)**: `date_to_gpu()` and `posixct_to_gpu()` (`src/transfer_io.cpp`) take a `TimestampUpload` (`src/r_to_column.hpp`) and make one range test per element (Date: `v >= -2^31 && v < 2^31` before the floor; POSIXct: `x * 1e6` in `[-2^63, 2^63)`), false for NA/NaN/+-Inf, so no undefined cast. Only the rare branch separates +-Inf (`infinite`), finite out of range (`out_of_range`) and NA/NaN (silent null). `df_to_gpu()` flags the columns and counts as `infinite_timestamps` / `out_of_range_timestamps` attributes (column indices carrying an `n` attribute) on the pointer; `tbl_gpu.data.frame()` warns through `warn_unrepresentable_timestamps()` (`R/tbl-gpu.R`): one warning per class per upload listing every column with its count, classes `cuplyr_warning_infinite_timestamp` / `cuplyr_warning_timestamp_out_of_range`, both also `cuplyr_warning_timestamp_unrepresentable`. The `%in%` set upload ignores the counts. Every CPU fallback result re-uploads through `tbl_gpu()`, so it warns the same; `lower_mutate()`'s vector-constant upload passes the user's output names (not the `..vecN..` temps) but muffles the timestamp warnings: `mutate()`/`transmute()` raise them once for the call, when it is made (`warn_vector_constant_timestamps()`, R/tbl-gpu.R, from the IR's `vec` values with the upload's own tests, `timestamp_vector_loss()`), so a lazy plan doesn't repeat them at every `collect()`/`compute()`/print/join. A later dot reading a lossy vector constant (fractional, +-Inf, out of range; `timestamp_vector_loss()$lossy`) takes the CPU route (the `floored_vec` reader rule of `parse_mutate_dots()`), where dplyr sees the real value.
+- **Unrepresentable timestamps at upload (F81)**: `date_to_gpu()` and `posixct_to_gpu()` (`src/transfer_io.cpp`) take a `TimestampUpload` (`src/r_to_column.hpp`) and make one range test per element (Date: `v >= -2^31 && v < 2^31` before the floor; POSIXct: `x * 1e6` in `[-2^63, 2^63)`), false for NA/NaN/+-Inf, so no undefined cast. Only the rare branch separates +-Inf (`infinite`), finite out of range (`out_of_range`) and NA/NaN (silent null). `df_to_gpu()` flags the columns and counts as `infinite_timestamps` / `out_of_range_timestamps` attributes (column indices carrying an `n` attribute) on the pointer; `tbl_gpu.data.frame()` warns through `warn_unrepresentable_timestamps()` (`R/tbl-gpu.R`): one warning per class per upload listing every column with its count, classes `cuplyr_warning_infinite_timestamp` / `cuplyr_warning_timestamp_out_of_range`, both also `cuplyr_warning_timestamp_unrepresentable`. The `%in%` set upload ignores the counts. Every CPU fallback result re-uploads through `tbl_gpu()`, so it warns the same; `lower_mutate()`'s vector-constant upload passes the user's output names (not the `..vecN..` temps) but muffles the timestamp warnings of the vectors marked `warned`: `parse_mutate_dots()` computes `timestamp_vector_loss()` once per Date/POSIXct vector constant (the upload's own tests) and stores it on the `ir_vec()` (`loss`, with `warned = loss$lossy`), and `mutate()`/`transmute()` raise the warnings once for the call, when it is made (`warn_vector_constant_timestamps()`, R/tbl-gpu.R, behind a `has_vec` check), so a lazy plan doesn't repeat them at every `collect()`/`compute()`/print/join. `lower_mutate()` mutes nothing when a Date/POSIXct vector isn't marked (another producer of `ir_vec()`), so that warning isn't lost. A vector staged by across() (computed into an `..across_k..` temp, then copied) is warned for under the user column that copies the temp (`staged_copy_names()`). A later dot reading a lossy vector constant (fractional, +-Inf, out of range; `timestamp_vector_loss()$lossy`) takes the CPU route (the `floored_vec` reader rule of `parse_mutate_dots()`), where dplyr sees the real value.
 - **`as.POSIXct()` of a Date beyond int64 microseconds**: a GPU POSIXct holds +-106751991 days; the `as_posixct` cast in `src/expr_eval.hpp` (TIMESTAMP_DAYS source only) runs one `cudf::minmax()` of the days, and only when a value is outside that range nulls those rows before the cast and sets `ctx.ts_out_of_range`, which `finish_expr_result()`/`gpu_mutate_expr()` hand to R as a `ts_out_of_range` pointer attribute (as F42's `int_overflow`). `warn_int_overflow()` (R/lower.R) raises `cuplyr_warning_timestamp_out_of_range` (also `..._unrepresentable`) once per verb call (at the verb when eager, at `collect()` when lazy). A filter predicate on such a value is NA, so the row is dropped.
 - **Timestamp literals (F37, F81)**: `ir_check_ts_lit()` (`R/ir.R`) sends a Date literal that is not a whole int32 day, and a POSIXct literal that is +-Inf or outside int64 microseconds (the upload's range test), to the CPU, so `filter()` gets dplyr's result and a `mutate()` re-uploads with the F81 warning. `build_scalar()` (`src/expr_eval.hpp`) additionally makes any such literal a null scalar rather than an undefined cast; R routes them away first.
 - **Fractional Dates at upload**: a TIMESTAMP_DAYS column holds whole days, so
@@ -1115,9 +1125,11 @@ filter node with N predicates is already exactly one fused kernel.
   `push_op()` row-only nodes (filter/arrange/slice/barrier), group_by/ungroup,
   compute and semi/anti joins (`push_join()`, x side) carry it, and
   `collect_frame()` restores the class for still-BOOL8 all-NA columns. `select`,
-  `rename` (also rename_with(), relocate()) and `mutate` nodes carry it too
-  (`carry_unspecified()`, R/execute.R, from the node's name map): a mutate keeps
-  the names no expression overwrites plus a bare copy of an unspecified column.
+  `rename` (also rename_with(), relocate()), `mutate` and `window` nodes carry it too
+  (`carry_unspecified()`, R/execute.R, from the node's name map; a table with no
+  marker returns at once): a mutate keeps the names no expression overwrites plus
+  a bare copy of an unspecified column; a window node (the first step of a window
+  mutate()/filter()) keeps all of them, its outputs being temps.
   Every other verb drops it (plain logical). The two places that bypass `push_op()`
   keep it honest: `names<-.tbl_gpu` remaps it by position (dropping a name
   that ends up duplicated), and the same-layout shortcut of

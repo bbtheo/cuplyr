@@ -734,12 +734,12 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
     if (no_columns) {
       # rows never change in mutate(): an n x 0 result (dplyr's, ungrouped)
       warn_fractional_dates(fractional)
-      warn_vector_constant_timestamps(expressions, staged_temps)
+      if (isTRUE(attr(expressions, "has_vec"))) warn_vector_constant_timestamps(expressions, staged_temps)
       return(mutate_done(zero_column_result(result, "mutate"), back_to_lazy))
     }
   }
   warn_fractional_dates(fractional)
-  warn_vector_constant_timestamps(expressions, staged_temps)
+  if (isTRUE(attr(expressions, "has_vec"))) warn_vector_constant_timestamps(expressions, staged_temps)
   if (back_to_lazy) plan_back_to_lazy(result) else result
 }
 
@@ -1375,11 +1375,12 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
         stop(verb, "() can't use a vector literal here.\n",
              "Expression: ", rlang::quo_text(expr), call. = FALSE)
       }
-      ir <- ir_vec(const$value, gpu_type_from_r(const$value), expr, new_name)
+      loss <- timestamp_vector_loss(const$value)
+      ir <- ir_vec(const$value, gpu_type_from_r(const$value), expr, new_name, loss = loss)
       has_vec <- TRUE
       # a lossy Date/POSIXct vector (fractional, +-Inf, out of range) is
       # stored floored or NA, so a later reader needs dplyr's value: CPU route
-      floored_vec <- timestamp_vector_loss(const$value)$lossy
+      floored_vec <- loss$lossy
     } else if (identical(const$kind, "failed")) {
       fallback_cause(if (isTRUE(const$declined)) {
         ir_fold_declined_text
@@ -2260,7 +2261,7 @@ transmute_run <- function(.data, dots, rowwise = FALSE) {
   # As in mutate.tbl_gpu(): floored fractional Date constants, warned now
   # that the call is native.
   warn_fractional_dates(set_diff(attr(expressions, "fractional_dates"), staged_temps))
-  warn_vector_constant_timestamps(expressions, staged_temps)
+  if (isTRUE(attr(expressions, "has_vec"))) warn_vector_constant_timestamps(expressions, staged_temps)
   result
 }
 
