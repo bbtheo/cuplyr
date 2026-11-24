@@ -8,6 +8,10 @@
 # - A lossy Date vector constant inside a staged across() (one whose output
 #   names collide with inputs) warns once per call, naming the user's columns.
 
+# The dplyr side evaluates `lag` by name, as in a session with dplyr attached
+# (stats::lag otherwise); cuplyr reads the call by name.
+lag <- dplyr::lag
+
 p24_modes <- c(eager = FALSE, lazy = TRUE)
 
 p24_count_ts <- function(expr) {
