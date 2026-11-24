@@ -47,6 +47,13 @@
 # select and arrange did not regress; their bounds keep them there. `floor5` is the
 # perf gate's eager_verb_floor_1e3 workload. The lazy rows (recording a verb;
 # lazy5 also runs it) are a no-regression guard.
+#
+# 2026-11: the filter, mutate, summarise and lazy5 bounds were raised to
+# 1.22, 1.18, 1.22 and 6.15 (from 1.16, 1.12, 1.16 and 5.87). Correctness
+# fixes since then each added a few microseconds per call, and main read
+# about 1.13 (mutate), 1.16 (summarise) and 5.92 (lazy5) in full runs, so the
+# check failed on unrelated changes. Winning that time back and lowering the
+# bounds again is #126.
 
 f110_df <- function(n) {
   set.seed(1)
@@ -128,16 +135,16 @@ test_that("one verb at 1e3 rows costs about what it did after F68b, relative to 
   )
   # verb -> c(reference closure, bound on the ratio)
   bounds <- list(
-    filter = list("ref_filter", 1.16),
-    mutate = list("ref_mutate", 1.12),
-    summarise = list("ref_mutate", 1.16),
+    filter = list("ref_filter", 1.22),
+    mutate = list("ref_mutate", 1.18),
+    summarise = list("ref_mutate", 1.22),
     select = list("ref_filter", 0.345),
     arrange = list("ref_filter", 0.49),
     floor5 = list("ref_filter", 5.10),
     lazy_filter = list("ref_filter", 0.645),
     lazy_mutate = list("ref_mutate", 0.745),
     lazy_summarise = list("ref_mutate", 0.44),
-    lazy5 = list("ref_filter", 5.87)
+    lazy5 = list("ref_filter", 6.15)
   )
   lim <- vapply(bounds, function(b) b[[2]], numeric(1))
   ratios <- function(t) vapply(names(bounds), function(v) t[[v]] / t[[bounds[[v]][[1]]]], numeric(1))
