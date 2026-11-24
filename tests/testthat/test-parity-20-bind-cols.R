@@ -94,6 +94,63 @@ test_that("bind_cols() of tbl_gpu uploaded from data frames collects to a data.f
   }
 })
 
+# collect(out) must be what dplyr::bind_cols() gives for `cpu`: class, groups
+# (rowwise vars included) and data.
+p20b_expect_bind_like_dplyr <- function(cpu, gpu, info) {
+  want <- suppressMessages(dplyr::bind_cols(!!!cpu))
+  out <- suppressMessages(bind_cols(!!!gpu))
+  expect_s3_class(out, "tbl_gpu")
+  got <- collect(out)
+  expect_identical(class(got), class(want), info = info)
+  expect_identical(dplyr::group_vars(got), dplyr::group_vars(want), info = info)
+  expect_equal(tibble::as_tibble(dplyr::ungroup(got)), tibble::as_tibble(dplyr::ungroup(want)),
+               info = info)
+  if (dplyr::is_grouped_df(want)) {
+    expect_identical(lengths(dplyr::group_rows(got)), lengths(dplyr::group_rows(want)), info = info)
+  }
+}
+
+test_that("bind_cols() with a grouped data frame first and a tbl_gpu later keeps the grouping", {
+  skip_if_no_gpu()
+  for (lazy in c(FALSE, TRUE)) {
+    lbl <- if (lazy) "lazy" else "eager"
+    p20b_expect_bind_like_dplyr(
+      list(group_by(p20b_d2, d), p20b_d1),
+      list(group_by(p20b_d2, d), tbl_gpu(p20b_d1, lazy = lazy)), paste("grouped df first", lbl)
+    )
+    # a grouping column renamed by name repair no longer groups (dplyr_reconstruct())
+    p20b_expect_bind_like_dplyr(
+      list(group_by(p20b_d2, d), p20b_d2),
+      list(group_by(p20b_d2, d), tbl_gpu(p20b_d2, lazy = lazy)), paste("repaired group column", lbl)
+    )
+  }
+})
+
+test_that("bind_cols() with a vector or list first follows dplyr for grouped and rowwise inputs later", {
+  skip_if_no_gpu()
+  e <- 11:20
+  d5 <- list(e = 1:10, f = rep(1:2, each = 5))
+  for (lazy in c(FALSE, TRUE)) {
+    lbl <- if (lazy) "lazy" else "eager"
+    up <- function(x) tbl_gpu(x, lazy = lazy)
+    # a rowwise input makes vec_cbind()'s result a rowwise_df
+    p20b_expect_bind_like_dplyr(list(e = e, rowwise(p20b_d1)),
+                                list(e = e, rowwise(up(p20b_d1))), paste("vector, rowwise", lbl))
+    p20b_expect_bind_like_dplyr(list(e = e, rowwise(p20b_d1, a)),
+                                list(e = e, rowwise(up(p20b_d1), a)), paste("vector, rowwise(a)", lbl))
+    p20b_expect_bind_like_dplyr(list(d5, rowwise(p20b_d1, a)),
+                                list(d5, rowwise(up(p20b_d1), a)), paste("list, rowwise(a)", lbl))
+    p20b_expect_bind_like_dplyr(list(e = e, p20b_d1, rowwise(p20b_d2)),
+                                list(e = e, up(p20b_d1), rowwise(up(p20b_d2))), paste("vector, df, rowwise", lbl))
+    # ... a grouped one does not
+    p20b_expect_bind_like_dplyr(list(e = e, group_by(p20b_d1, b)),
+                                list(e = e, group_by(up(p20b_d1), b)), paste("vector, grouped", lbl))
+    # a data frame first decides the class (rowwise later is dropped)
+    p20b_expect_bind_like_dplyr(list(p20b_d1, rowwise(p20b_d2)),
+                                list(p20b_d1, rowwise(up(p20b_d2))), paste("df, rowwise", lbl))
+  }
+})
+
 test_that("bind_cols() of plain data frames is still dplyr's", {
   skip_if_no_gpu()
   d5 <- list(c = 1:10, d = rep(1:2, each = 5))

@@ -1,6 +1,7 @@
 # Acceptance tests for #20: count()/tally()/add_count()/add_tally() check
 # `name` the way dplyr's check_n_name() does (a single string), and raise
-# dplyr's own error (same class and message) at the verb call, eager and lazy.
+# dplyr's own error (same class, message and call) at the verb call, eager and
+# lazy.
 # Before the fix a non-string `name` reached `:=` and failed with rlang's
 # "The LHS of `:=` must be a string" instead.
 
@@ -26,6 +27,10 @@ p20_expect_same_error <- function(df, pipeline) {
     expect_identical(class(got), class(want), label = paste(label, "error class"))
     expect_identical(conditionMessage(got), conditionMessage(want),
                      label = paste(label, "error message"))
+    # the call dplyr names in "Error in": tally() for count(), add_tally() for
+    # add_count() (dplyr's check_n_name() runs there)
+    expect_identical(rlang::format_error_call(got$call), rlang::format_error_call(want$call),
+                     label = paste(label, "error call"))
   }
 }
 
