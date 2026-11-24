@@ -1052,9 +1052,12 @@ filter node with N predicates is already exactly one fused kernel.
   rejected by the schema: `resolve_join_key_types()` records an
   `unspecified = TRUE` cast (with `marker` for a `vctrs::unspecified()` column,
   from the tbls' `$unspecified`; the partner's zone and levels ride in the
-  entry), and `cast_unspecified_join_key()` checks the values when the join runs
-  (all null with rows, else the incompatible-type error), replacing the column
-  with a null column of the other side's physical type. Whether the column is
+  entry). When the join runs, `apply_join_key_casts()` first checks the values
+  of every such pair in `by` order on its source column
+  (`check_unspecified_join_key()`: all null with rows, else the
+  incompatible-type error), whichever side holds it and before any temp copy
+  is made, so the first bad pair is named; `cast_unspecified_join_key()` then
+  replaces the column with a null column of the other side's physical type. Whether the column is
   all NA is the data's, and dplyr raises that error at the verb, so a lazy
   `push_join()` that holds an unmarked cast (`join_key_check_reads_data()`)
   is a plan break like a restrictive join: it records the join and computes it
@@ -1065,7 +1068,8 @@ filter node with N predicates is already exactly one fused kernel.
   dplyr's `vctrs_error_cast` for a merged x-side key without marker when the
   join returns no rows. Non-equi/rolling pairs with such a key go to the CPU
   (`join_key_fallback_reason()`); the optimizer's "push no filter below such a
-  join" rule is a guard, as for a restrictive join. The output key takes the
+  join" rule (unmarked casts only: a marker key has no data check) is a guard,
+  as for a restrictive join. The output key takes the
   cast type, the factor side's levels (either side) and the POSIXct side's zone.
 - Rolling joins (F24): `join_by(<== keys>, closest(x$t <op> y$s))` with exactly
   one `closest()` (`>=`, `>`, `<=`, `<`) is native when the rolling pair is one
@@ -1515,6 +1519,7 @@ Arithmetic around reducers (#22, `R/summarise-post.R`):
 - Missing columns filled with nulls via `gpu_make_null_column()`
 - `bind_cols()` uses `vctrs::vec_as_names()` for name repair when available
 - Both operations materialize lazy tables before binding
+- A data frame input with a list or data frame column (#70, `bind_list_column_reason()`, checked in `bind_rows_flat()` / `bind_cols_flat()`, so `dplyr::bind_rows()` takes the same route) sends the whole call to `bind_on_cpu(reupload = TRUE)`: dplyr binds it and the result stays a plain tibble (`has_list_column()`). `bind_on_cpu()` collects a tbl_gpu FIRST input with its groups (dplyr's result takes the first input's class and groups) and every later one as columns only. Other columns with no GPU form (a matrix, a difftime) keep the GPU route, whose upload raises `cuplyr_error_unsupported_class` naming them
 - Result mode (F80): the result is lazy when any gibble input is lazy (a data-frame input never decides it), eager otherwise, as `push_join()` decides for joins; the code builds results from eager helper tables, so `result_mode_of_inputs()` (R/bind.R) puts the mode back on the way out. The set operations do the same through `set_op_mode()` (R/sets.R), including the ones that leave through `gpu_fallback()`, and a rowwise `x` (`rowwise_cpu()` applies the rule to the result of every two-table verb it runs on the CPU)
 
 ## Debugging Build Failures

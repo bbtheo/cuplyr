@@ -2,16 +2,12 @@
 % Please edit documentation in R/lower.R
 \name{cast_unspecified_join_key}
 \alias{cast_unspecified_join_key}
-\title{Cast an all-NA logical join key to the other side's type (#70)}
+\title{Cast a checked all-NA logical join key to the other side's type (#70)}
 \usage{
-cast_unspecified_join_key(ptr, idx, cast, by)
+cast_unspecified_join_key(ptr, idx, cast)
 }
 \description{
-dplyr gives a logical key that is all \code{NA} (vctrs "unspecified") the type of
-the key it is joined to. Whether the column is one is a matter of its
-values, so it is checked here, when the join runs: all null with rows, or a
-\code{vctrs::unspecified()} column (\code{cast$marker}), becomes a null column of the
-other side's physical type; anything else has no common type and raises the
-incompatible-type error. The column is replaced in place.
+Replaces the column (see \code{check_unspecified_join_key()}) in place with a
+null column of the other side's physical type.
 }
 \keyword{internal}

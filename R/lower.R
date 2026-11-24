@@ -787,24 +787,38 @@ cast_join_key_column <- function(ptr, idx, from_type, to_type, levels) {
   }
 }
 
-#' Cast an all-NA logical join key to the other side's type (#70)
+#' Check that a logical join key is all `NA` (#70)
 #'
 #' dplyr gives a logical key that is all `NA` (vctrs "unspecified") the type of
 #' the key it is joined to. Whether the column is one is a matter of its
-#' values, so it is checked here, when the join runs: all null with rows, or a
-#' `vctrs::unspecified()` column (`cast$marker`), becomes a null column of the
-#' other side's physical type; anything else has no common type and raises the
-#' incompatible-type error. The column is replaced in place.
+#' values, so it is checked when the join runs: all null with rows, or a
+#' `vctrs::unspecified()` column (`cast$marker`), passes; anything else has no
+#' common type and raises the incompatible-type error.
+#' `apply_join_key_casts()` checks the pairs in `by` order, each on its
+#' source column before any temp copy is made, so the first bad pair is the
+#' one named.
 #' @keywords internal
-cast_unspecified_join_key <- function(ptr, idx, cast, by) {
+check_unspecified_join_key <- function(ptr, idx, cast, by) {
+  if (isTRUE(cast$marker)) {
+    return(invisible())
+  }
   n_rows <- gpu_dim(ptr)[1]
-  if (!isTRUE(cast$marker) &&
-      (n_rows == 0L || gpu_null_counts(ptr, idx)[[1]] != n_rows)) {
+  if (n_rows == 0L || gpu_null_counts(ptr, idx)[[1]] != n_rows) {
     abort_join_incompatible_type(by$left[cast$idx], by$right[cast$idx],
                                  cast$left_type, cast$right_type,
                                  cast$left_levels, cast$right_levels,
                                  cast$left_tz %||% "UTC", cast$right_tz %||% "UTC")
   }
+  invisible()
+}
+
+#' Cast a checked all-NA logical join key to the other side's type (#70)
+#'
+#' Replaces the column (see `check_unspecified_join_key()`) in place with a
+#' null column of the other side's physical type.
+#' @keywords internal
+cast_unspecified_join_key <- function(ptr, idx, cast) {
+  n_rows <- gpu_dim(ptr)[1]
   n_col <- gpu_dim(ptr)[2]
   bound <- gpu_bind_cols_impl(list(
     ptr, gpu_make_null_column(n_rows, gpu_physical_type(cast$type))
@@ -818,7 +832,7 @@ cast_unspecified_join_key <- function(ptr, idx, cast, by) {
 # @keywords internal
 cast_join_key_side <- function(ptr, idx, side, cast, by) {
   if (isTRUE(cast$unspecified)) {
-    return(cast_unspecified_join_key(ptr, idx, cast, by))
+    return(cast_unspecified_join_key(ptr, idx, cast))
   }
   cast_join_key_column(ptr, idx, cast[[paste0(side, "_type")]], cast$type,
                        cast[[paste0(side, "_levels")]])
@@ -849,7 +863,9 @@ check_unspecified_key_result <- function(ast, ptr) {
                 join_key_type_label(cast$type, cast$right_levels, cast$right_tz %||% "UTC")),
         class = c("vctrs_error_cast", "vctrs_error_incompatible_type",
                   "vctrs_error_incompatible", "vctrs_error"),
-        call = NULL
+        call = NULL,
+        # vctrs' own message is one plain line; cuplyr's cli opt-in would wrap it
+        use_cli_format = FALSE
       )
     }
   }
@@ -907,6 +923,16 @@ apply_join_key_casts <- function(ast, left_ptr, right_ptr, left_schema, right_sc
   cond_by <- ast$by
   for (cast in ast$by$key_casts) {
     i <- cast$idx
+    # An all-NA logical key's values are checked on its source column before
+    # any temp copy is made; `key_casts` holds these pairs in `by` order, so
+    # the first bad pair is named whichever side holds it, as in dplyr.
+    if (isTRUE(cast$unspecified)) {
+      if (cast$cast_left) {
+        check_unspecified_join_key(left_ptr, left_pair_idx[i], cast, ast$by)
+      } else {
+        check_unspecified_join_key(right_ptr, right_pair_idx[i], cast, ast$by)
+      }
+    }
     if (isTRUE(cast$string_codes)) {
       code_casts[[length(code_casts) + 1L]] <- cast
       next
@@ -937,14 +963,11 @@ apply_join_key_casts <- function(ast, left_ptr, right_ptr, left_schema, right_sc
 
   # A later pair with no common type (`resolve_join_key_types()`): raised once
   # every earlier pair's values have been checked.
-  raise_key_abort <- function() {
-    if (!is.null(ast$by$key_abort)) {
-      do.call(abort_join_incompatible_type, ast$by$key_abort)
-    }
+  if (!is.null(ast$by$key_abort)) {
+    do.call(abort_join_incompatible_type, ast$by$key_abort)
   }
 
   if (length(left_temps) == 0L && length(right_temps) == 0L && length(code_casts) == 0L) {
-    raise_key_abort()
     return(list(left_ptr = left_ptr, right_ptr = right_ptr,
                 left_pair_idx = left_pair_idx, right_pair_idx = right_pair_idx,
                 temps = NULL, cond_by = cond_by,
@@ -967,7 +990,6 @@ apply_join_key_casts <- function(ast, left_ptr, right_ptr, left_schema, right_sc
   }
   left <- append_temps(left_ptr, left_schema, left_temps, n_left, "left", left_temp_names)
   right <- append_temps(right_ptr, right_schema, right_temps, n_right, "right", right_temp_names)
-  raise_key_abort()
 
   # Non-equi STRING pairs (F24): one INT32 code column per side in a shared
   # order, appended after the numeric copies.

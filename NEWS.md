@@ -18,6 +18,12 @@
   `transmute()`, `summarise()` and `reframe()`; a list or data frame column
   still comes back as a plain tibble (#70).
 
+* `bind_rows()`, `bind_cols()`, `rbind()` and `dplyr::bind_rows()` bind a
+  `tbl_gpu` to a data frame that has a list or data frame column, as dplyr
+  does: the inputs are bound on the CPU and the result is a plain tibble that
+  keeps the first input's groups and the `.id` column. A matrix column still
+  raises the classed error that names it (#70).
+
 * `summarise()` runs arithmetic around reducers on the GPU: dots such as
   `mean(x) + 1`, `mean(x) - qnorm(.975) * sd(x) / sqrt(n())` and
   `sum(x) / n()`, and a later dot that uses an earlier result (`m = s / n()`),

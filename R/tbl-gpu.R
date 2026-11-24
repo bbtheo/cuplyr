@@ -70,9 +70,11 @@
 #' `group_by()` with computed expressions, `slice_min()`/`slice_max()`, a
 #' mutating join, `vctrs::vec_slice()`) returns it as a plain logical column.
 #' An all-`NA` logical or unspecified column joins a string, `Date`, `POSIXct`
-#' or factor key and takes that key's type, as in dplyr; a logical key with a
-#' value in it still errors. Bound to a character column in `bind_rows()`, an
-#' unspecified column still errors.
+#' or factor key, as in dplyr: a merged key takes that key's type; with
+#' `keep = TRUE`, in a non-equi condition and in `semi_join()`/`anti_join()`
+#' each key column keeps its own type. A logical key with a value in it still
+#' errors. Bound to a character column in `bind_rows()`, an unspecified column
+#' still errors.
 #'
 #' A matrix column with more than one column (or more than two dimensions), a
 #' list column, a data frame column and a complex or raw column have no GPU

@@ -89,9 +89,11 @@ column of \code{x}, as in dplyr); every other verb (\code{select()}, \code{mutat
 \code{group_by()} with computed expressions, \code{slice_min()}/\code{slice_max()}, a
 mutating join, \code{vctrs::vec_slice()}) returns it as a plain logical column.
 An all-\code{NA} logical or unspecified column joins a string, \code{Date}, \code{POSIXct}
-or factor key and takes that key's type, as in dplyr; a logical key with a
-value in it still errors. Bound to a character column in \code{bind_rows()}, an
-unspecified column still errors.
+or factor key, as in dplyr: a merged key takes that key's type; with
+\code{keep = TRUE}, in a non-equi condition and in \code{semi_join()}/\code{anti_join()}
+each key column keeps its own type. A logical key with a value in it still
+errors. Bound to a character column in \code{bind_rows()}, an unspecified column
+still errors.
 
 A matrix column with more than one column (or more than two dimensions), a
 list column, a data frame column and a complex or raw column have no GPU

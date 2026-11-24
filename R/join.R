@@ -512,7 +512,8 @@ join_key_type_label <- function(type, levels = NULL, tz = "UTC") {
     return("integer64")  # vctrs' label for bit64::integer64()
   }
   proto <- switch(type,
-    DICTIONARY32 = factor(character(), levels = levels),
+    DICTIONARY32 = factor(character(), levels = levels,
+                          ordered = isTRUE(attr(levels, "ordered"))),
     BOOL8 = logical(),
     INT32 = integer(),
     FLOAT64 = double(),
