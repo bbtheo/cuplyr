@@ -200,6 +200,35 @@ test_that("perf: arrange_multikey_lazy", {
 })
 
 # =============================================================================
+# mutate() with repeated handler subtrees (#17)
+#
+# round() is evaluated by its own kernel, so `round(x, 2)` in four dots is
+# computed once and read three times. The benchmark times the mutate itself
+# (gpu_sync(), no collect or CPU step) and fails on the CPU fallback, so a loss
+# of the sharing is the only thing that moves it. At 1e6 rows the mutate took
+# 2.0 ms with the sharing and 4.2 ms without (cuplyr:::gpu_cse_enable(FALSE)),
+# a ratio of 2.1 against the 1.5 the gate allows.
+# =============================================================================
+
+test_that("perf: mutate_repeated_handler_eager", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  gpu_df <- tbl_gpu(perf_big_df, lazy = FALSE)
+
+  expect_no_perf_regression("mutate_repeated_handler_eager", function() {
+    out <- dplyr::mutate(
+      gpu_df,
+      a = round(x, 2) + 1,
+      b = round(x, 2) * z,
+      c = round(x, 2) - y,
+      d = round(x, 2) / 3
+    )
+    gpu_sync()
+    out
+  }, calibration = "kernel")
+})
+
+# =============================================================================
 # group_by() |> summarise()
 # =============================================================================
 
