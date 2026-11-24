@@ -26,6 +26,9 @@ quosure. \code{origin} is the index of the input dot it came from; \code{kind} i
 expansion of an unnamed \code{across()} dot, staged or not) or \code{"combined"}
 (an \code{if_any()}/\code{if_all()} dot). mutate()/transmute() use it to tell
 which original dot a value computed from the expanded dots belongs to.
+When an expansion names a column, \code{col} is the column each one stands for
+(a staged one's, not its temp's; an \code{if_any()}/\code{if_all()}'s first; \code{""} for
+a plain dot), which the errors name (#30).
 }
 \description{
 Walks \code{dots} in order; a top-level, unnamed \code{across(...)} dot is
