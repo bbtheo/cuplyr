@@ -19,7 +19,10 @@
 #'
 #' @details
 #' If any input (including one inside a list) is a `tbl_gpu`, the result is a
-#' `tbl_gpu`, wherever the `tbl_gpu` sits in the arguments. `dplyr::bind_cols()`
+#' `tbl_gpu`, wherever the `tbl_gpu` sits in the arguments. The exception is a
+#' data frame input with a list or data frame column, which has no GPU form:
+#' then dplyr binds the inputs on the CPU and the result is its data frame,
+#' with the first input's class and groups. `dplyr::bind_cols()`
 #' on a `tbl_gpu` input is handed to this function and gives the same result for the
 #' four `.name_repair` strings above; any other `.name_repair` (a `*_quiet`
 #' string, a function or a formula) is an error for a `tbl_gpu`.
@@ -59,6 +62,7 @@ bind_cols_flat <- function(dots, args, .name_repair, call) {
     if (bind_later_is_rowwise(dots)) {
       return(bind_rowwise_later("bind_cols", dots, .name_repair = .name_repair))
     }
+    # (the result keeps the list column, so it stays on the host)
     reason <- bind_list_column_reason(dots)
     if (!is.null(reason)) {
       return(bind_on_cpu("bind_cols", dots, .name_repair = .name_repair,
@@ -81,7 +85,12 @@ bind_cols_flat <- function(dots, args, .name_repair, call) {
 #'
 #' @details
 #' If any input (including one inside a list) is a `tbl_gpu`, the result is a
-#' `tbl_gpu`, wherever the `tbl_gpu` sits in the arguments. `dplyr::bind_rows()`
+#' `tbl_gpu`, wherever the `tbl_gpu` sits in the arguments. The exception is a
+#' data frame input with a list or data frame column, which has no GPU form:
+#' then dplyr binds the inputs on the CPU and the result is its data frame,
+#' with the first input's class and groups and the `.id` column. A matrix
+#' column with more than one column raises an error that names it.
+#' `dplyr::bind_rows()`
 #' and `purrr::map_dfr()` on a `tbl_gpu` input are handed to this function and
 #' give the same result; `vctrs::vec_rbind()` and `purrr::list_rbind()` can't
 #' be intercepted and raise an error for a `tbl_gpu` (use
@@ -105,7 +114,8 @@ bind_rows <- function(..., .id = NULL) {
 #' @param ... `tbl_gpu`s, data frames and vectors, as for [bind_rows()] /
 #'   [bind_cols()].
 #' @param deparse.level Ignored.
-#' @return A `tbl_gpu`.
+#' @return A `tbl_gpu`; a data frame when an input has a list or data frame
+#'   column (see [bind_rows()]).
 #' @name tbl_gpu-rbind
 #' @export
 rbind.tbl_gpu <- function(..., deparse.level = 1) {
@@ -172,7 +182,9 @@ bind_rows_flat <- function(dots, args, .id, call) {
     dots[[i]] <- bind_rows_repair_names(dots[[i]], call)
   }
 
-  # dplyr checks `.id` and names the inputs itself on this route
+  # dplyr checks `.id` and names the inputs itself on this route. The result
+  # keeps the list or data frame column, so has_list_column() keeps it on the
+  # host: `reupload` never uploads here.
   reason <- bind_list_column_reason(dots)
   if (!is.null(reason)) {
     return(bind_on_cpu("bind_rows", dots, .id = .id,

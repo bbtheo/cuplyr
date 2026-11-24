@@ -21,7 +21,12 @@ operations are performed on the GPU. For other objects, delegates to dplyr.
 }
 \details{
 If any input (including one inside a list) is a \code{tbl_gpu}, the result is a
-\code{tbl_gpu}, wherever the \code{tbl_gpu} sits in the arguments. \code{dplyr::bind_rows()}
+\code{tbl_gpu}, wherever the \code{tbl_gpu} sits in the arguments. The exception is a
+data frame input with a list or data frame column, which has no GPU form:
+then dplyr binds the inputs on the CPU and the result is its data frame,
+with the first input's class and groups and the \code{.id} column. A matrix
+column with more than one column raises an error that names it.
+\code{dplyr::bind_rows()}
 and \code{purrr::map_dfr()} on a \code{tbl_gpu} input are handed to this function and
 give the same result; \code{vctrs::vec_rbind()} and \code{purrr::list_rbind()} can't
 be intercepted and raise an error for a \code{tbl_gpu} (use

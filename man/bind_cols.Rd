@@ -26,7 +26,10 @@ operations are performed on the GPU. For other objects, delegates to dplyr.
 }
 \details{
 If any input (including one inside a list) is a \code{tbl_gpu}, the result is a
-\code{tbl_gpu}, wherever the \code{tbl_gpu} sits in the arguments. \code{dplyr::bind_cols()}
+\code{tbl_gpu}, wherever the \code{tbl_gpu} sits in the arguments. The exception is a
+data frame input with a list or data frame column, which has no GPU form:
+then dplyr binds the inputs on the CPU and the result is its data frame,
+with the first input's class and groups. \code{dplyr::bind_cols()}
 on a \code{tbl_gpu} input is handed to this function and gives the same result for the
 four \code{.name_repair} strings above; any other \code{.name_repair} (a \verb{*_quiet}
 string, a function or a formula) is an error for a \code{tbl_gpu}.
