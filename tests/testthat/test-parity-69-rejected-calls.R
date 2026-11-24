@@ -18,7 +18,7 @@
 # - arrange() of an environment variable sorts by its value (size n), ignores
 #   a size-1 value or NULL, and errors on any other size.
 
-for (p69_fn in c("if_else", "lag", "lead", "desc", "case_when")) {
+for (p69_fn in c("if_else", "lag", "lead", "desc", "case_when", "between", "first", "last", "nth")) {
   assign(p69_fn, getExportedValue("dplyr", p69_fn))
 }
 rm(p69_fn)
@@ -143,6 +143,39 @@ test_that("if_else() with a column condition or all-constant arguments stays nat
   p69_native(df, function(d) mutate(d, z = case_when(x > 2 ~ 1, TRUE ~ x)))
 })
 
+test_that("if_else() with a one-value condition that is not a literal is dplyr's error", {
+  skip_if_no_gpu()
+  df <- p69_df()
+  th <- 0
+  # constant conditions the parser does not fold to a literal
+  p69_same_error(df, function(d) mutate(d, z = if_else(th > -1, x, y)))
+  p69_same_error(df, function(d) mutate(d, z = if_else(th %in% c(0, 1), x, y)))
+  p69_same_error(df, function(d) mutate(d, z = if_else(between(th, -1, 1), x, y)))
+  # one value per group: n(), an aggregate
+  p69_same_error(df, function(d) mutate(d, z = if_else(n() > 2, x, y)))
+  p69_same_error(df, function(d) mutate(d, z = if_else(sum(x) > 0, x, y)))
+  p69_same_error(df, function(d) d |> group_by(g) |> mutate(z = if_else(n() > 1, x, y)))
+  p69_same_error(df, function(d) filter(d, if_else(n() > 2, x > 1, FALSE)))
+  p69_same_error(df, function(d) summarise(d, m = sum(if_else(n() > 2, x, 0))))
+})
+
+test_that("if_else() with a one-value condition and one-value values stays native", {
+  skip_if_no_gpu()
+  df <- p69_df()
+  flag <- TRUE
+  th <- 0
+  # a literal-condition if_else() inside an expression that reads a column
+  p69_native(df, function(d) mutate(d, z = x + if_else(flag, 1, 0)))
+  p69_native(df, function(d) mutate(d, z = x + if_else(th > -1, 1, 0)))
+  # size-1 values: aggregates
+  p69_native(df, function(d) mutate(d, z = if_else(flag, mean(x), median(x))))
+  p69_native(df, function(d) d |> group_by(g) |> mutate(z = if_else(n() > 1, mean(x), 0)))
+  p69_native(df, function(d) d |> group_by(g) |> summarise(m = if_else(flag, mean(x), median(x))),
+             arrange_by = "g")
+  # a rowwise table: every row is its own group of size 1 (any route)
+  p69_same(df, function(d) d |> rowwise() |> mutate(z = if_else(flag, x, y)))
+})
+
 # ---------------------------------------------------------------------------
 # 2. lag()/lead() with `n = NULL`
 # ---------------------------------------------------------------------------
@@ -168,6 +201,27 @@ test_that("lag()/lead() with a valid or absent `n`, and NULL defaults, stay nati
   p69_native(df, function(d) mutate(d, z = lag(x, 1L, default = NULL)))
   p69_native(df, function(d) mutate(d, z = lag(x, order_by = NULL)))
   p69_native(df, function(d) d |> group_by(g) |> mutate(z = lead(x, n = 1L)))
+})
+
+test_that("an argument written `= NULL` whose default is not NULL is R's error", {
+  skip_if_no_gpu()
+  df <- p69_df()
+  # first()/last()/nth() check_bool(na_rm)
+  p69_same_error(df, function(d) mutate(d, z = first(x, na_rm = NULL)))
+  p69_same_error(df, function(d) mutate(d, z = last(x, na_rm = NULL)))
+  p69_same_error(df, function(d) mutate(d, z = nth(x, 2, na_rm = NULL)))
+  # base R: paste()'s sep, nchar()'s type
+  p69_same_error(df, function(d) mutate(d, z = paste(s, s, sep = NULL)))
+  p69_same_error(df, function(d) mutate(d, z = nchar(s, type = NULL)))
+})
+
+test_that("arguments written `= NULL` that are NULL by default stay native", {
+  skip_if_no_gpu()
+  df <- p69_df()
+  p69_native(df, function(d) mutate(d, z = first(x, default = NULL)))
+  p69_native(df, function(d) mutate(d, z = nth(x, 2, order_by = NULL)))
+  p69_native(df, function(d) mutate(d, z = paste(s, s, collapse = NULL)))
+  p69_native(df, function(d) mutate(d, z = paste0(s, "_", collapse = NULL)))
 })
 
 # ---------------------------------------------------------------------------
