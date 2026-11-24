@@ -375,7 +375,7 @@ summarise_post_screen <- function(post, in_schema, ir_cache, simple_aggs = NULL)
   for (p in post$post) {
     fallback_dot_begin()
     ir <- tryCatch(
-      ir_parse_quo(p$quo, schema),
+      ir_with_post_agg_cols(schema$names, ir_parse_quo(p$quo, schema)),
       cuplyr_vector_literal = function(e) {
         fallback_cause("a vector constant inside a larger expression is recycled by dplyr.")
         NULL
@@ -432,7 +432,7 @@ summarise_post_apply <- function(res, post) {
   for (k in seq_along(post$post)) {
     p <- post$post[[k]]
     expr <- tryCatch({
-      ir <- ir_parse_quo(p$quo, schema)
+      ir <- ir_with_post_agg_cols(schema$names[seq_along(schema$names) > post$n_keys], ir_parse_quo(p$quo, schema))
       if (is.null(ir) || ir_has_window(ir)) NULL else make_mutate_expr(p$name, ir, schema)
     }, error = function(e) NULL)
     if (is.null(expr)) {
