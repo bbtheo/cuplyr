@@ -172,8 +172,42 @@ test_that("if_else() with a one-value condition and one-value values stays nativ
   p69_native(df, function(d) d |> group_by(g) |> mutate(z = if_else(n() > 1, mean(x), 0)))
   p69_native(df, function(d) d |> group_by(g) |> summarise(m = if_else(flag, mean(x), median(x))),
              arrange_by = "g")
-  # a rowwise table: every row is its own group of size 1 (any route)
-  p69_same(df, function(d) d |> rowwise() |> mutate(z = if_else(flag, x, y)))
+  # a rowwise table: every row is its own group of size 1, so dplyr recycles
+  # (native on the GPU before the size-1 check existed)
+  p69_native(df, function(d) d |> rowwise() |> mutate(z = if_else(flag, x, y)))
+})
+
+test_that("more one-value if_else() conditions are dplyr's error", {
+  skip_if_no_gpu()
+  df <- p69_df()
+  p69_same_error(df, function(d) d |> group_by(g) |> mutate(z = if_else(cur_group_id() == 1L, x, y)))
+  p69_same_error(df, function(d) mutate(d, z = if_else(n() > 1, x, y), .by = g))
+  p69_same_error(df, function(d) mutate(d, dplyr::across(c(x, y), ~ if_else(n() > 2, .x, 0))))
+  p69_same_error(df, function(d) mutate(d, z = if_else(first(x) > 1, x, y)))
+})
+
+test_that("an if_else() condition that is not logical is dplyr's error", {
+  skip_if_no_gpu()
+  df <- p69_df()
+  p69_same_error(df, function(d) mutate(d, z = if_else(1, mean(x), 0)))
+  p69_same_error(df, function(d) mutate(d, z = if_else("a", mean(x), 0)))
+  p69_same_error(df, function(d) filter(d, if_else(1, n() > 2, TRUE)))
+  # a double column as the condition
+  p69_same_error(df, function(d) mutate(d, z = if_else(x, x, 0)))
+})
+
+test_that("an NA if_else() condition with one-value values gives dplyr's NA or `missing`", {
+  skip_if_no_gpu()
+  df <- p69_df()
+  flag <- NA
+  p69_same(df, function(d) mutate(d, z = if_else(NA, mean(x), 0)))
+  p69_same(df, function(d) mutate(d, z = x + if_else(NA, 1, 0)))
+  p69_same(df, function(d) d |> group_by(g) |> mutate(z = if_else(NA, n(), 0L)))
+  p69_same(df, function(d) filter(d, if_else(NA, n() > 2, TRUE)))
+  p69_same(df, function(d) mutate(d, z = if_else(NA, mean(x), 0, missing = -1)))
+  p69_same(df, function(d) mutate(d, z = if_else(flag, mean(x), median(x))))
+  p69_same(df, function(d) d |> group_by(g) |> summarise(m = if_else(flag, mean(x), median(x))),
+           arrange_by = "g")
 })
 
 # ---------------------------------------------------------------------------
@@ -213,6 +247,9 @@ test_that("an argument written `= NULL` whose default is not NULL is R's error",
   # base R: paste()'s sep, nchar()'s type
   p69_same_error(df, function(d) mutate(d, z = paste(s, s, sep = NULL)))
   p69_same_error(df, function(d) mutate(d, z = nchar(s, type = NULL)))
+  p69_same_error(df, function(d) mutate(d, z = trimws(s, whitespace = NULL)))
+  p69_same_error(df, function(d) mutate(d, z = grepl("a", s, ignore.case = NULL)))
+  p69_same_error(df, function(d) mutate(d, z = sub("a", "b", s, perl = NULL)))
 })
 
 test_that("arguments written `= NULL` that are NULL by default stay native", {
@@ -222,6 +259,8 @@ test_that("arguments written `= NULL` that are NULL by default stay native", {
   p69_native(df, function(d) mutate(d, z = nth(x, 2, order_by = NULL)))
   p69_native(df, function(d) mutate(d, z = paste(s, s, collapse = NULL)))
   p69_native(df, function(d) mutate(d, z = paste0(s, "_", collapse = NULL)))
+  # base nchar() accepts `allowNA = NULL` (any route)
+  p69_same(df, function(d) mutate(d, z = nchar(s, allowNA = NULL)))
 })
 
 # ---------------------------------------------------------------------------
