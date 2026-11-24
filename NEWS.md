@@ -13,6 +13,19 @@
   array, a list or a data frame, instead of a raw GPU error or, for
   `transmute()`, `summarise()` and `reframe()`, a result with extra rows (#70).
 
+* `summarise()` runs arithmetic around reducers on the GPU: dots such as
+  `mean(x) + 1`, `mean(x) - qnorm(.975) * sd(x) / sqrt(n())` and
+  `sum(x) / n()`, and a later dot that uses an earlier result (`m = s / n()`),
+  no longer fall back to the CPU. The reducers are aggregated first and the
+  arithmetic is then computed on the one-row-per-group result, with dplyr's
+  types, `NA`/`NaN` values and `.drop = FALSE` empty groups (an integer
+  overflow gives `NA` with R's warning). Shapes with no GPU form, such as
+  `lag(mean(x))`, and shapes where the GPU's rules for missing, infinite or
+  signed-zero values differ from R's, such as `mean(x)^0` (1 in R for a
+  missing mean), `!mean(x)`, or an odd or fractional power such as
+  `max(x)^0.5` (`NaN` in R for the `-Inf` of an empty group) of anything but
+  `n()`, `n_distinct()`, `sd()` or `var()`, still run in dplyr (#22).
+
 * `count()`, `tally()` and `add_count()` check `name` the way dplyr does: a
   `name` that is not a single string (`1`, `letters`, `NA_character_`, `TRUE`,
   `character()`, ...) is an error with dplyr's message, raised at the verb
