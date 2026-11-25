@@ -4,7 +4,11 @@
 \alias{ir_is_group_scalar}
 \title{Does \code{node} have one value per group in dplyr?}
 \usage{
-ir_is_group_scalar(node)
+ir_is_group_scalar(node, post = FALSE)
+}
+\arguments{
+\item{post}{Also count the aggregate temp columns of a summarise() post step
+(ir_with_post_agg_cols()) as one-value.}
 }
 \description{
 TRUE for a scalar literal, \code{n()}, \code{cur_group_id()} (the helper column

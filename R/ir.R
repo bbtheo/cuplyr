@@ -2097,6 +2097,18 @@ ir_cgid_helper_scope <- function(helper_name, frame) {
   invisible()
 }
 
+# Evaluate `code` with `cols` known as the aggregates of a summarise() post step
+# (temp columns, one value per group), then restore the previous set. Only
+# `ir_is_group_scalar(post = TRUE)` reads them: the if_else() hook needs to know
+# that `if_else(flag, .post_agg1, .post_agg2)` has no column-sized value, while
+# the shift/scan rewrites keep treating these as columns, as they always have.
+ir_with_post_agg_cols <- function(cols, code) {
+  prev <- ir_group_scalar_state$post_cols
+  ir_group_scalar_state$post_cols <- c(prev, cols)
+  on.exit(ir_group_scalar_state$post_cols <- prev)
+  code
+}
+
 #' Does `node` have one value per group in dplyr?
 #'
 #' TRUE for a scalar literal, `n()`, `cur_group_id()` (the helper column
@@ -2106,14 +2118,18 @@ ir_cgid_helper_scope <- function(helper_name, frame) {
 #' whose value argument is. FALSE for a bare column (a stored column has n
 #' rows in dplyr), bare `row_number()`, and an elementwise call with a column
 #' or `row_number()` among its arguments.
+#' @param post Also count the aggregate temp columns of a summarise() post step
+#'   (ir_with_post_agg_cols()) as one-value.
 #' @keywords internal
-ir_is_group_scalar <- function(node) {
+ir_is_group_scalar <- function(node, post = FALSE) {
   kind <- .subset2(node, "kind")
   if (identical(kind, "lit")) {
     return(TRUE)
   }
   if (identical(kind, "col")) {
-    return(match(.subset2(node, "name"), ir_group_scalar_state$cols, 0L) > 0L)
+    name <- .subset2(node, "name")
+    return(match(name, ir_group_scalar_state$cols, 0L) > 0L ||
+             (post && match(name, ir_group_scalar_state$post_cols, 0L) > 0L))
   }
   if (!identical(kind, "call")) {
     return(FALSE)
@@ -2125,10 +2141,10 @@ ir_is_group_scalar <- function(node) {
     if (op %in% ir_group_scalar_aggs) {
       return(TRUE)
     }
-    return(length(args) > 0L && ir_is_group_scalar(args[[1L]]))
+    return(length(args) > 0L && ir_is_group_scalar(args[[1L]], post))
   }
   for (a in args) {
-    if (!identical(.subset2(a, "kind"), "lit") && !ir_is_group_scalar(a)) {
+    if (!identical(.subset2(a, "kind"), "lit") && !ir_is_group_scalar(a, post)) {
       return(FALSE)
     }
   }
@@ -3129,6 +3145,13 @@ ir_na_flag_value <- function(raw_expr, env, schema) {
   as.vector(value)
 }
 
+# Was `name` written in the call? By name, not by value: `f(x, na_rm = NULL)` is
+# the argument given as NULL, which R and dplyr reject where the default is not
+# NULL, and `present_args$na_rm` alone cannot tell it from an absent one.
+ir_arg_supplied <- function(present_args, name) {
+  name %in% names(present_args)
+}
+
 #' Parse `lag(x, n = 1L, default = NULL, order_by = NULL)` / `lead(...)`
 #'
 #' Builds a window-class `ir_call(fn_name, list(x_ir), meta = list(n = ,
@@ -3175,7 +3198,8 @@ ir_parse_shift_call <- function(expr, env, schema, fn_name) {
   }
 
   n_value <- 1L
-  if (!is.null(present_args$n)) {
+  # presence by name: `n = NULL` is dplyr's error, not the default
+  if (ir_arg_supplied(present_args, "n")) {
     n_eval <- ir_eval_constant(present_args$n, env)
     n_val <- n_eval$value
     # A Period/Duration `n` is dplyr's error to raise (F48): CPU
@@ -3247,8 +3271,8 @@ ir_parse_first_last_nth <- function(expr, env, schema, fn_name) {
   }
   present_args <- as.list(present)[-1]
 
-  if (!is.null(present_args$default) || !is.null(present_args$na_rm)) {
-    return(NULL)  # not implemented this wave
+  if (!is.null(present_args$default) || ir_arg_supplied(present_args, "na_rm")) {
+    return(NULL)  # not implemented this wave (`na_rm = NULL` is dplyr's error)
   }
   if (is.null(present_args$x)) {
     return(NULL)
@@ -4161,6 +4185,9 @@ ir_parse_sum_call <- function(expr, env, schema) {
   }
 
   if (length(args_raw) == 1) {
+    if (nzchar(names(args_raw) %||% "")) {
+      return(NULL)  # `sum(na.rm = x)` is not `sum(x)`
+    }
     return(ir_call("sum", list(x_ir)))
   }
 
@@ -6290,7 +6317,13 @@ ir_unify_types <- function(types, op_name) {
   names(ranks)[which.max(ranks)]
 }
 
+# A condition that is not logical is dplyr's error ("`condition` must be a
+# logical vector"), raised on the CPU route. Every internal if_else() desugar
+# builds a BOOL8 condition.
 type_if_else <- function(arg_types) {
+  if (arg_types[[1L]] != "BOOL8") {
+    stop_type_needs_cpu("an `if_else()` condition of type ", arg_types[[1L]], " (dplyr requires a logical one)")
+  }
   ir_unify_types(arg_types[-1], "if_else")  # drop cond's own (BOOL8) type
 }
 
@@ -6574,10 +6607,10 @@ ir_parse_nchar <- function(expr, env, schema) {
   }
   present_args <- as.list(present)[-1]
 
-  if (!is.null(present_args$allowNA) || !is.null(present_args$keepNA)) {
+  if (ir_arg_supplied(present_args, "allowNA") || ir_arg_supplied(present_args, "keepNA")) {
     return(NULL)
   }
-  if (!is.null(present_args$type)) {
+  if (ir_arg_supplied(present_args, "type")) {
     type_eval <- ir_eval_constant(present_args$type, env)
     if (!type_eval$ok || !identical(type_eval$value, "chars")) {
       return(NULL)  # type = "bytes"/"width": not implemented this wave
@@ -6663,7 +6696,7 @@ ir_parse_trimws <- function(expr, env, schema) {
   }
   present_args <- as.list(present)[-1]
 
-  if (!is.null(present_args$whitespace)) {
+  if (ir_arg_supplied(present_args, "whitespace")) {
     return(NULL)
   }
   if (is.null(present_args$x)) {
@@ -6725,7 +6758,7 @@ ir_parse_paste_call <- function(expr, env, schema, fn_name) {
   }
 
   sep_val <- if (identical(fn_name, "paste0")) "" else " "
-  if (!is.null(present_args$sep)) {
+  if (ir_arg_supplied(present_args, "sep")) {
     sep_eval <- ir_eval_constant(present_args$sep, env)
     if (!sep_eval$ok || !is.character(sep_eval$value) || length(sep_eval$value) != 1 ||
         is.na(sep_eval$value)) {
@@ -6780,8 +6813,8 @@ ir_parse_grepl <- function(expr, env, schema) {
   }
   present_args <- as.list(present)[-1]
 
-  if (!is.null(present_args[["ignore.case"]]) || !is.null(present_args$perl) ||
-      !is.null(present_args$useBytes)) {
+  if (ir_arg_supplied(present_args, "ignore.case") || ir_arg_supplied(present_args, "perl") ||
+      ir_arg_supplied(present_args, "useBytes")) {
     return(NULL)
   }
   if (is.null(present_args$pattern) || is.null(present_args$x)) {
@@ -6834,8 +6867,8 @@ ir_parse_sub_gsub <- function(expr, env, schema, fn_name) {
   }
   present_args <- as.list(present)[-1]
 
-  if (!is.null(present_args[["ignore.case"]]) || !is.null(present_args$perl) ||
-      !is.null(present_args$useBytes)) {
+  if (ir_arg_supplied(present_args, "ignore.case") || ir_arg_supplied(present_args, "perl") ||
+      ir_arg_supplied(present_args, "useBytes")) {
     return(NULL)
   }
   if (is.null(present_args$pattern) || is.null(present_args$replacement) ||
@@ -7300,7 +7333,31 @@ ir_call_registry <- list(
         return(NULL)  # wrong arg count: not this shape, fall back
       }
       cond <- args[[1]]
+      # dplyr reads a bare `NA` condition as a logical NA (NA, or `missing`, on
+      # every row); typed here, the inference can't give it a value's type
+      if (identical(.subset2(cond, "kind"), "lit") && ir_is_untyped_na(cond)) {
+        cond$type <- "BOOL8"
+      }
+      # a constant that is not logical is dplyr's error whatever the values'
+      # sizes (the reason type_if_else() gives a column condition)
+      ctype <- .subset2(cond, "type")
+      if (identical(.subset2(cond, "kind"), "lit") && !is.null(ctype) && ctype != "BOOL8") {
+        fallback_cause(paste0("unsupported type: an `if_else()` condition of type ", ctype,
+                              " (dplyr requires a logical one)."))
+        return(NULL)
+      }
       values <- ir_resolve_value_nas(args[-1], schema)
+      # A condition with one value (a constant, `n()`, an aggregate, ...) is not
+      # recycled to column values: dplyr errors, or gives its result on a size-1
+      # input, so the CPU route runs it. With one-value values too, every size
+      # is 1 and the call stays native, and so does the call of a rowwise verb
+      # on an input known to have rows, whose every group is one row.
+      if (ir_is_group_scalar(cond, TRUE) &&
+          !all(vapply(values, ir_is_group_scalar, logical(1), post = TRUE)) &&
+          !rowwise_groups_are_rows()) {
+        fallback_cause("dplyr cannot recycle the values of this `if_else()` to the size of its one-value condition.")
+        return(NULL)
+      }
       ir_call("if_else", c(list(cond), values))
     },
     type = type_if_else,
