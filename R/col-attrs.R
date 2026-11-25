@@ -206,21 +206,24 @@ group_keys_rebuilt <- function(x, schema = current_schema(x)) {
 # The group data `gd` of `x` (a table with `$col_attrs`, no pending steps) with
 # the attributes of its key columns on them. A key's names are those of its
 # group's first row (`group_keys_rebuilt()`: dplyr's rebuilt keys). Fixed keys
-# (`fixed`, slice(.preserve = TRUE)) get no names.
+# (`fixed`: a `.drop = FALSE` table that lost a group, slice(.preserve = TRUE))
+# get no names; a rebuilt factor key no attributes, fixed or not (dplyr's
+# row slice keeps the group data group_by() rebuilt).
 # @keywords internal
 group_keys_col_attrs <- function(gd, x, fixed) {
   keys <- .subset2(x, "groups")
   ca <- .subset2(x, "col_attrs")[keys]
   ca <- ca[!vapply(ca, is.null, logical(1))]
-  rebuilt <- !fixed && group_keys_rebuilt(x)
+  rebuilt <- group_keys_rebuilt(x)
   if (rebuilt) {
     ca <- ca[!names(ca) %in% names(.subset2(x, "schema")$factor_levels)]
   }
   if (length(ca) == 0L) {
     return(gd)
   }
-  named <- vapply(ca, function(e) !is.null(e[["names"]]) || (rebuilt && !is.null(e$names_const)), logical(1))
-  first <- if (!fixed && any(named)) {
+  named <- !fixed &
+    vapply(ca, function(e) !is.null(e[["names"]]) || (rebuilt && !is.null(e$names_const)), logical(1))
+  first <- if (any(named)) {
     vapply(gd$.rows, function(r) if (length(r) > 0L) r[[1L]] else NA_integer_, integer(1))
   }
   for (nm in names(ca)) {
@@ -266,15 +269,26 @@ group_key_rebuilt_names <- function(e, gd, p, keys, first) {
   e
 }
 
-# `col_attrs` (a summarise's result) without the entries of the factor keys
-# among `keys` when dplyr rebuilds them (`group_keys_rebuilt()` of `x`, the
-# summarise's input): a rebuilt factor has no attributes beyond its levels.
+# `col_attrs` (a summarise's result) as dplyr's rebuilt keys have them
+# (`group_keys_rebuilt()` of `x`, the summarise's input), for the keys among
+# `keys`: a rebuilt factor has no attributes beyond its levels, and any other
+# key loses a constant name, which dplyr leaves `""` on a row under an empty
+# parent key. (summarise() and reframe() send such a key to the CPU first
+# (`summarise_key_names_cols()`); a path that misses that loses the name, it
+# never puts it on the wrong rows.)
 # @keywords internal
 col_attrs_rebuilt_keys <- function(col_attrs, x, keys, schema) {
   if (!group_keys_rebuilt(x, schema)) {
     return(col_attrs)
   }
-  out <- col_attrs[!names(col_attrs) %in% intersect(keys, names(schema$factor_levels))]
+  fl <- names(schema$factor_levels)
+  out <- col_attrs[!names(col_attrs) %in% intersect(keys, fl)]
+  for (nm in intersect(setdiff(keys, fl), names(out))) {
+    e <- out[[nm]]
+    e$names_const <- NULL
+    out[nm] <- list(if (length(e) > 0L) e)
+  }
+  out <- out[!vapply(out, is.null, logical(1))]
   if (length(out) > 0L) out
 }
 
@@ -294,12 +308,19 @@ summarise_key_names_cols <- function(x, keys) {
   }, logical(1))]
 }
 
+# The CPU-route reason for the keys `summarise_key_names_cols()` found.
+# @keywords internal
+key_names_reason <- function(keys) {
+  paste0(col_list_phrase(keys), " element names, which dplyr gives the group keys by its own rules.")
+}
+
 # `out` (a summarise() or reframe() result of a plain data.frame) without any
 # element names: dplyr's methods for a data.frame end with as.data.frame(),
 # which drops them (a matrix's rownames too) and keeps the other attributes.
 # @keywords internal
 col_attrs_drop_names <- function(out) {
-  ca <- .subset2(out, "col_attrs")
+  # (a CPU result that stays on the host, a list column's, is dplyr's own)
+  ca <- if (is_tbl_gpu(out)) .subset2(out, "col_attrs")
   if (is.null(ca)) {
     return(out)
   }
@@ -321,6 +342,10 @@ col_attrs_drop_names <- function(out) {
 # column comes from a row of its side, which has the one name.
 # @keywords internal
 join_names_need_cpu <- function(x, y, join_type) {
+  if ((!is_tbl_gpu(x) || is.null(.subset2(x, "col_attrs"))) &&
+      (!is_tbl_gpu(y) || is.null(.subset2(y, "col_attrs")))) {
+    return(FALSE)
+  }
   length(join_names_cols(x, y, join_type)) > 0L
 }
 
@@ -386,9 +411,12 @@ bind_cols_col_attrs <- function(pieces, repaired_names, at) {
 }
 
 # A join's `$col_attrs`: x's columns keep x's constant entries, y's kept
-# columns y's, a merged key takes x's (never one that was cast to a common
-# type). A join with names of any kind is routed to the CPU before it gets
-# here, so the names are dropped, never carried.
+# columns y's. A merged key is dplyr's vec_cast() of x's key to the common
+# type: it keeps x's entry when x's key already has that type (only y's side
+# was cast), and has none when x's key was cast or is a factor (vctrs makes
+# a new factor, even with the same levels). A join with row-aligned names,
+# or a constant name on a side it null-extends, is routed to the CPU before
+# it gets here (`join_names_need_cpu()`), so those are dropped, never carried.
 # @keywords internal
 join_col_attrs <- function(join_type, x, y, join_spec, suffix, keep, new_schema) {
   xa <- col_attrs_without_names(.subset2(x, "col_attrs"))
@@ -396,14 +424,28 @@ join_col_attrs <- function(join_type, x, y, join_spec, suffix, keep, new_schema)
     return(xa)
   }
   ya <- col_attrs_without_names(.subset2(y, "col_attrs"))
-  info <- build_join_output_info(current_schema(x), current_schema(y), join_spec,
+  x_schema <- current_schema(x)
+  info <- build_join_output_info(x_schema, current_schema(y), join_spec,
                                  suffix = suffix, keep = keep)
   if (anyDuplicated(info$names) > 0L) {
     return(NULL)
   }
+  # x's merged keys that come out without x's entry
+  bare_keys <- character()
+  if (!isTRUE(keep) && !is.null(xa)) {
+    merged <- join_spec$left[join_spec$op == "=="]
+    bare_keys <- intersect(merged, names(x_schema$factor_levels))
+    for (cast in join_spec$key_casts) {
+      if (isTRUE(cast$cast_left)) bare_keys <- c(bare_keys, join_spec$left[[cast$idx]])
+    }
+    bare_keys <- intersect(bare_keys, merged)
+  }
   out <- lapply(seq_along(info$names), function(i) {
-    if (info$names[[i]] %in% info$cast_keys) return(NULL)
-    (if (identical(info$origin[[i]], "left")) xa else ya)[[info$source_names[[i]]]]
+    if (identical(info$origin[[i]], "left")) {
+      if (info$source_names[[i]] %in% bare_keys) return(NULL)
+      return(xa[[info$source_names[[i]]]])
+    }
+    ya[[info$source_names[[i]]]]
   })
   names(out) <- info$names
   out <- out[!vapply(out, is.null, logical(1))]

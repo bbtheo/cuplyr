@@ -116,6 +116,11 @@ gpu_fallback <- function(verb_name, .data, expr_fn, ..., as_is = FALSE, detail =
     tbl <- if (is.null(keys)) {
       dplyr::group_by(tbl, !!!rlang::syms(materialized$groups), .drop = drop)
     } else {
+      # (the fixed keys with their columns' attributes, as dplyr's group data
+      # has them; no names, #21)
+      if (!is.null(.subset2(materialized, "col_attrs"))) {
+        keys <- group_keys_col_attrs(keys, materialized, fixed = TRUE)
+      }
       with_fixed_groups(tbl, keys, drop)
     }
   }

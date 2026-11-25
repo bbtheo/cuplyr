@@ -13,11 +13,14 @@
   keeps the names and attributes of columns it does not touch and of bare
   copies (`b2 = b`), and runs a dot that computes from such a column on the
   CPU, where R decides what the result keeps. `summarise()` keeps the
-  attributes of its group keys by dplyr's rules (a `.drop = FALSE` factor key
-  keeps only its levels), `quantile()` in `summarise()` names its result
-  (`"50%"`) as dplyr does, and that name stays on the GPU through the joins
-  that keep every row of its column; a summary of a plain data frame has no
-  element names, as in dplyr (#21, #56). Some paths still drop names or
+  attributes of its group keys by dplyr's rules (a factor key of a
+  `.drop = FALSE` grouping keeps only its levels, also after `filter()`),
+  `quantile()` in `summarise()` names its result (`"50%"`) as dplyr does,
+  and that name stays on the GPU through the joins that keep every row of
+  its column (a join key keeps the first table's names and attributes unless
+  that key is converted to the other's type or is a factor, as in dplyr); a
+  summary of a plain data frame has no element names, as in dplyr (#21,
+  #56). Some paths still drop names or
   attributes rather than keep them: `group_split()`, `group_trim()`,
   `slice_sample()` and grouped `head()`/`tail()`, among others.
 

@@ -292,8 +292,12 @@ names are equal, and quantile()'s `"50%"`, which needs no row count),
   (`col_attrs_without_names()`): a summarise group key keeps its attributes, a
   reducer's output none, and a `quantile()` output gets `names_const` from the
   aggregation's `qnames`. Joins (`push_join()` -> `join_col_attrs()`): x's columns
-  keep x's, y's kept columns y's, a merged key x's, a cast key none (vctrs' cast
-  drops them too); a `names_const` rides along (below). `group_by()`,
+  keep x's, y's kept columns y's. A merged key is dplyr's `vec_cast()` of x's key
+  to the common type: it keeps x's entry when only y's key was cast (`key_casts`
+  with `cast_left = FALSE`: a double x against an integer y, a character x against
+  a factor or all-`NA` y), and has none when x's key was cast or is a factor (vctrs
+  makes a new factor, same levels or not); `keep = TRUE` keeps both columns as
+  they are. A `names_const` rides along (below). `group_by()`,
   `ungroup()`, `compute()`, `names<-`, `count()`, `bind_cols()` copy or re-key the
   field; every other `new_tbl_gpu()` call that rebuilds a table leaves it out, which
   drops the metadata (wrong never, only absent).
@@ -304,7 +308,9 @@ names are equal, and quantile()'s `"50%"`, which needs no row count),
   rows_*() that already forced `y` passes `values = list(y = y)`, so `y` is never
   evaluated twice) at the top of filter/filter_out,
   arrange, slice and its family, distinct, reframe, summarise (only when a group
-  key has names), and `dplyr_row_slice()`; joins use their `fallback_args()`
+  key has names: `summarise_key_names_cols()`, before any other path of
+  `summarise.tbl_gpu()`, `.groups = "rowwise"` included, and in `reframe.tbl_gpu()`
+  for rebuilt keys), and `dplyr_row_slice()`; joins use their `fallback_args()`
   (`join_names_need_cpu()`: row-aligned names on either side, for a filtering join
   x's only; a `names_const` only on a side the join null-extends, y's in left/full
   joins and x's in right/full ones, where dplyr names the added rows `""`; on every
@@ -340,20 +346,30 @@ names are equal, and quantile()'s `"50%"`, which needs no row count),
   `new_factor(codes, levels)` (no other attribute, no names), any other key
   `vec_slice(vec_unique(key), index)`: attributes kept, each row named like the
   first row of the first group (key order) with its value, `""` under a parent key
-  with no rows. `group_keys_col_attrs()` does this for `group_data()`/`group_keys()`
-  (and the zero-dot summarise, which uploads those keys); a summarise drops the
-  factor keys' entries (`col_attrs_rebuilt_keys()` in `push_op()`; the empty-group
-  rebuild takes the observed result's entries), and a rebuilt key with a
-  `names_const` sends it to dplyr (`summarise_key_names_cols()`). Without a factor
-  key, `.drop = FALSE` keys are those of `.drop = TRUE`.
+  with no rows. `group_keys_col_attrs()` does this for `group_data()`/`group_keys()`;
+  a summarise drops the factor keys' entries and a non-factor key's `names_const`
+  (`col_attrs_rebuilt_keys()` in `push_op()`; the empty-group rebuild takes the
+  observed result's entries, the zero-dot `summarise_group_keys()` the input's
+  through the same function), and a rebuilt key with a `names_const` sends
+  summarise() and reframe() to dplyr first (`summarise_key_names_cols()`), so the
+  drop only guards a path that misses the check. Without a factor key,
+  `.drop = FALSE` keys are those of `.drop = TRUE`. Fixed keys (`$fixed_keys`: a
+  `.drop = FALSE` table after a `filter()`/`slice()`/`semi_join()` that lost a
+  group, or `slice(.preserve = TRUE)`) hold values only. dplyr's row slice keeps
+  the group data `group_by()` built, so `group_keys_col_attrs(fixed = TRUE)` gives
+  them the keys' attributes by the same rebuilt-key rule and no names; the zero-dot
+  summarise and `gpu_fallback()`'s regroup (`with_fixed_groups()`) use it too.
 - Not carried (names/attributes lost, as before #21; lost, never misplaced):
   `vec_ptype2`/vctrs paths, `group_split()`, `group_trim()`, a grouped
   `head()`/`tail()`, `slice_sample()`'s internal gather, a grouped
-  `slice_sample()`, zero-column joins, `summarise(.groups = "rowwise")` and
-  rowwise summarise (their key names skip the CPU route), and the key names of
-  fixed-key group data (`group_data()`/`group_keys()` after `filter()`/`slice()`
-  with `.preserve = TRUE`: dplyr keeps the names the keys had, here they are
-  dropped). A `[` that may add rows (an NA or out-of-range position) goes
+  `slice_sample()`, zero-column joins, and the key names of fixed-key group data
+  (`group_data()`/`group_keys()`, a zero-dot or CPU-route summarise over fixed
+  keys: dplyr keeps the names the keys had at `group_by()`, here they are
+  dropped). A one-column matrix with rownames and no colnames as a `.by` key of a
+  plain data.frame comes back without dimnames, where dplyr's `as.data.frame()`
+  leaves `dimnames = list(NULL, NULL)` (R's `dimnames<-` turns that list into
+  `NULL`). A rowwise table's summarise keeps its vars' names: its rows stay in
+  place (`summarise_rowwise()` is a transmute). A `[` that may add rows (an NA or out-of-range position) goes
   to dplyr when a column has `names_const`, since the added rows' names are `NA`.
   `reframe()`'s native quantile drops quantile()'s names while its CPU route keeps
   them. Row-aligned names (accidental ones included: `mutate(n = sapply(s, nchar))`)

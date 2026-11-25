@@ -71,8 +71,16 @@ with_reframe_wide <- function(expr) {
 #' @export
 #' @importFrom dplyr reframe
 reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
-  if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
-    return(rowwise_cpu(.data, "reframe", reason = col_names_reason(.data)))
+  if (!is.null(.subset2(.data, "col_attrs"))) {
+    if (col_names_move(.data)) {
+      return(rowwise_cpu(.data, "reframe", reason = col_names_reason(.data)))
+    }
+    # (a key's names on dplyr's rebuilt keys, as for summarise(); `.by` keys are
+    # never rebuilt, and `.by` on a grouped table is dplyr's error)
+    keys <- summarise_key_names_cols(.data, .subset2(.data, "groups"))
+    if (length(keys) > 0L) {
+      return(rowwise_cpu(.data, "reframe", reason = key_names_reason(keys)))
+    }
   }
   if (is_rowwise_gpu(.data)) {
     return(rowwise_cpu(.data, "reframe"))
