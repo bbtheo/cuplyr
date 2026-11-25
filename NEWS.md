@@ -1,17 +1,20 @@
 # cuplyr (development version)
 
-* `if_else()` whose condition has one value (a constant, `n()` or an aggregate)
-  and whose values are columns, `lag()`, `lead()`, `first()`, `last()` and
-  `nth()` with an argument written `= NULL` that is not NULL by default (`n`,
-  `na_rm`), `paste()` with `sep = NULL`, `nchar()` with `type = NULL`,
-  `trimws(whitespace = NULL)`, `grepl()`, `sub()` and `gsub()` with
-  `ignore.case`, `perl` or `useBytes` written `= NULL`,
-  `sum(na.rm = x)` in `mutate()` and `filter()`, and `arrange(-x)` on a
-  character, `Date` or `POSIXct` column now run through dplyr and raise its
-  error (or give its result), instead of returning a different result. An
-  `if_else()` condition that is not logical now raises dplyr's error instead
-  of a GPU error, and `if_else(NA, <constant or aggregate>, ...)` in `mutate()`
-  gives `NA` (or `missing`) on the GPU (#69).
+* `if_else()`, `lag()`, `lead()`, `first()`, `last()`, `nth()`, `sum()`,
+  `paste()`, `nchar()`, `trimws()`, `grepl()`, `sub()`, `gsub()` and
+  `arrange()` raise dplyr's error for calls that dplyr rejects, instead of
+  returning a result on a `tbl_gpu` (#69):
+
+  - `if_else()` whose condition has one value (a constant, `n()` or an
+    aggregate) and whose values are columns, or whose condition is not
+    logical. `if_else(NA, <constant or aggregate>, ...)` in `mutate()` now
+    gives `NA` (or `missing`) on the GPU instead of a GPU error.
+  - An argument written `= NULL` that is not `NULL` by default: `n` in
+    `lag()`/`lead()`, `na_rm` in `first()`/`last()`/`nth()`, `sep` in
+    `paste()`, `type` in `nchar()`, `whitespace` in `trimws()`, and
+    `ignore.case`, `perl` or `useBytes` in `grepl()`/`sub()`/`gsub()`.
+  - `sum(na.rm = x)` in `mutate()` and `filter()`.
+  - `arrange(-x)` on a character, `Date` or `POSIXct` column.
 
 * `left_join()`, `inner_join()`, `right_join()`, `full_join()`, `semi_join()`
   and `anti_join()` accept a key that is all `NA` (a logical column, or
