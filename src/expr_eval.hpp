@@ -3032,44 +3032,55 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
             digits = Rcpp::as<double>(places_node["value"]);
         }
 
-        // R coerces integer/logical x to double
+        // R coerces integer/logical x to double. The staged trees below read
+        // x through a cast node instead, so a non-double x costs no column.
+        const bool x_is_f64 = x_in.type().id() == cudf::type_id::FLOAT64;
         std::unique_ptr<cudf::column> x_cast;
-        if (x_in.type().id() != cudf::type_id::FLOAT64) {
-            x_cast = cudf::cast(x_in, cudf::data_type{cudf::type_id::FLOAT64});
-        }
-        cudf::column_view x = x_cast ? x_cast->view() : x_in;
+        auto x_f64 = [&]() -> cudf::column_view {
+            if (x_is_f64) return x_in;
+            if (!x_cast) x_cast = cudf::cast(x_in, cudf::data_type{cudf::type_id::FLOAT64});
+            return x_cast->view();
+        };
         const double dmax = std::numeric_limits<double>::max();
 
         constexpr int kMaxDigits = 323;  // DBL_MAX_10_EXP + DBL_DIG
         constexpr int kMax10e = 308;     // DBL_MAX_10_EXP
         if (digits > kMaxDigits) {
-            return std::make_unique<cudf::column>(x);  // nothing to round
+            return std::make_unique<cudf::column>(x_f64());  // nothing to round
         }
         // an integer or logical x is whole: it is its own rounding at digits >= 0
-        if (x_cast && digits >= 0.0) return std::move(x_cast);
+        if (!x_is_f64 && digits >= 0.0) return std::move(x_cast = cudf::cast(x_in, cudf::data_type{cudf::type_id::FLOAT64}));
 
         // The arithmetic is cudf's AST interpreter (compute_column()): each AST
         // op is evaluated on its own, so R's operation order and rounding are
-        // kept, and a stage's temporaries never exist as columns. The stages
-        // keep at most three FLOAT64 columns alive besides x (round() once
-        // held 21 temporaries at once and ran out of memory on large tables).
+        // kept, and a stage's temporaries never exist as columns. Its cost is
+        // per op (a division is worth three adds, and a node used twice in a
+        // tree is evaluated twice), so the stages are cut where a value is
+        // used more than once. Peak: at most four FLOAT64 columns besides x
+        // (round() once held 21 temporaries at once and ran out of memory on
+        // large tables).
         using AO = cudf::ast::ast_operator;
         auto xtab = [&](std::vector<cudf::column_view> cols) {
-            cols.insert(cols.begin(), x);
+            cols.insert(cols.begin(), x_in);
             return cudf::table_view(cols);
         };
+        auto X = [&](f64_ast& a) -> const cudf::ast::expression& {
+            return x_is_f64 ? a.col(0) : a.op1(AO::CAST_TO_FLOAT64, a.col(0));
+        };
+        auto abs_x = [&](f64_ast& a) -> const cudf::ast::expression& { return a.op1(AO::ABS, X(a)); };
 
         if (digits < -kMax10e) {
             // +0 for every finite nonzero x; 0, +-Inf and NaN stay
+            auto x = x_f64();
             f64_ast a;
-            const auto& ax = a.op1(AO::ABS, a.col(0));
             auto change = cudf::compute_column(
-                xtab({}), a.op2(AO::LOGICAL_AND, a.op2(AO::NOT_EQUAL, a.col(0), a.lit(0.0)),
-                                a.op2(AO::LESS_EQUAL, ax, a.lit(dmax))));
+                cudf::table_view({x}),
+                a.op2(AO::LOGICAL_AND, a.op2(AO::NOT_EQUAL, a.col(0), a.lit(0.0)),
+                      a.op2(AO::LESS_EQUAL, a.op1(AO::ABS, a.col(0)), a.lit(dmax))));
             return cudf::copy_if_else(cudf::numeric_scalar<double>(0.0), x, change->view());
         }
         if (digits == 0.0) {
-            return cudf::unary_operation(x, cudf::unary_operator::RINT);  // nearbyint(): half-even
+            return cudf::unary_operation(x_f64(), cudf::unary_operator::RINT);  // nearbyint(): half-even
         }
 
         const int dig = static_cast<int>(std::floor(digits + 0.5));
@@ -3096,63 +3107,105 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
             return big ? a.op2(AO::TRUE_DIV, q, a.lit(p10)) : q;
         };
 
-        // Stage 1: i10 = floor(|x| * 10^dig). The candidates are xd = i10 / p
-        // and xu = ceil(x10) / p, and ceil(x10) = i10 + (x10 > i10).
-        auto i10 = [&] {
+        // Stages 1-2: the two candidates, xd = floor(|x| * 10^dig) / 10^dig and
+        // xu = ceil(|x| * 10^dig) / 10^dig (equal where the scaled value is whole).
+        auto xd = [&] {
             f64_ast a;
             return cudf::compute_column(
-                xtab({}), a.op1(AO::FLOOR, x10_of(a, a.op1(AO::ABS, a.col(0)))));
+                xtab({}), down(a, a.op1(AO::FLOOR, x10_of(a, abs_x(a)))));
+        }();
+        auto xu = [&] {
+            f64_ast a;
+            return cudf::compute_column(
+                xtab({}), down(a, a.op1(AO::CEIL, x10_of(a, abs_x(a)))));
         }();
 
-        // Stage 2: dif = (xu - |x|) - (|x| - xd). Its sign is exactly the order
-        // of du and dd (a - b is 0 only when a == b), so du < dd is dif < 0
-        // and du == dd is dif == 0.
+        // Stage 3: dif = (xu - |x|) - (|x| - xd). Its sign is exactly the order
+        // of du and dd (a - b is 0 only when a == b): du < dd is dif < 0, a tie
+        // is dif == 0. Where xd == xu the row has no choice to make, so 1 is
+        // added to keep it off 0 (it then reads "not less", and the pick below
+        // gives xd, which is xu).
         auto dif = [&] {
             f64_ast a;
-            const auto& ax = a.op1(AO::ABS, a.col(0));
-            const auto& i = a.col(1);
-            const auto& k = a.op1(AO::CAST_TO_FLOAT64, a.op2(AO::GREATER, x10_of(a, ax), i));
-            const auto& xu = down(a, a.op2(AO::ADD, i, k));
-            const auto& xd = down(a, i);
+            const auto& ax = abs_x(a);
+            const auto& d = a.op2(AO::SUB, a.op2(AO::SUB, a.col(2), ax), a.op2(AO::SUB, abs_x(a), a.col(1)));
             return cudf::compute_column(
-                xtab({i10->view()}),
-                a.op2(AO::SUB, a.op2(AO::SUB, xu, ax), a.op2(AO::SUB, ax, xd)));
+                xtab({xd->view(), xu->view()}),
+                a.op2(AO::ADD, d, a.op1(AO::CAST_TO_FLOAT64, a.op2(AO::EQUAL, a.col(1), a.col(2)))));
         }();
 
-        // Stage 3: sgn * (xu if du < dd, or du == dd with i10 odd; else xd).
-        // That select is (i10 + up * k) / p, exactly xu or xd: i10 + 1 is the
-        // double ceil(x10), and k is 0 where xu == xd.
-        auto rounded = [&] {
-            f64_ast a;
-            const auto& ax = a.op1(AO::ABS, a.col(0));
-            const auto& i = a.col(1);
-            const auto& d = a.col(2);
+        // Stage 4: the magnitude, xd + (xu - xd) * up. xu - xd is exact (the two
+        // are within a factor 2, Sterbenz) and so is the sum, so this is xd or
+        // xu to the bit. up is "dif < 0", plus the tie rule of fround(): on
+        // du == dd the candidate whose scaled value i10 is even. A tie needs
+        // its own test of i10's parity, so that goes into the tree only when
+        // some row is a tie (rare: a value exactly halfway in double arithmetic).
+        const bool has_tie = cudf::contains(dif->view(), cudf::numeric_scalar<double>(0.0));
+        auto up_of = [&](f64_ast& a) -> const cudf::ast::expression& {
+            const auto& lt = a.op2(AO::LESS, a.col(3), a.lit(0.0));
+            if (!has_tie) return lt;
             // i10 odd: half of it is not whole (i10 < 2^53 wherever it matters)
-            const auto& half = a.op2(AO::MUL, i, a.lit(0.5));
-            const auto& odd_tie = a.op2(AO::LOGICAL_AND,
-                                        a.op2(AO::NOT_EQUAL, half, a.op1(AO::FLOOR, half)),
-                                        a.op2(AO::EQUAL, d, a.lit(0.0)));
-            const auto& up = a.op2(AO::LOGICAL_OR, a.op2(AO::LESS, d, a.lit(0.0)), odd_tie);
-            const auto& inc = a.op1(AO::CAST_TO_FLOAT64,
-                                    a.op2(AO::LOGICAL_AND, up, a.op2(AO::GREATER, x10_of(a, ax), i)));
-            const auto& mag = down(a, a.op2(AO::ADD, i, inc));
-            const auto& sgn = a.op2(AO::TRUE_DIV, a.col(0), ax);  // +-1 (x == 0 keeps x)
-            return cudf::compute_column(xtab({i10->view(), dif->view()}), a.op2(AO::MUL, sgn, mag));
-        }();
-        i10.reset();
+            const auto& half = a.op2(AO::MUL, a.op1(AO::FLOOR, x10_of(a, abs_x(a))), a.lit(0.5));
+            return a.op2(AO::LOGICAL_OR, lt,
+                         a.op2(AO::LOGICAL_AND, a.op2(AO::NOT_EQUAL, half, a.op1(AO::FLOOR, half)),
+                               a.op2(AO::EQUAL, a.col(3), a.lit(0.0))));
+        };
+        // xu is Inf where xd + 1/10^dig overflows (digits near -308); then
+        // xu - xd is Inf and 0 * Inf is NaN, so the pick is a copy_if_else.
+        const bool xu_may_overflow = dig <= -290;
+        std::unique_ptr<cudf::column> mag;
+        if (xu_may_overflow) {
+            f64_ast a;
+            auto up = cudf::compute_column(xtab({xd->view(), xu->view(), dif->view()}), up_of(a));
+            mag = cudf::copy_if_else(xu->view(), xd->view(), up->view());
+        } else {
+            f64_ast a;
+            const auto& up = a.op1(AO::CAST_TO_FLOAT64, up_of(a));
+            mag = cudf::compute_column(
+                xtab({xd->view(), xu->view(), dif->view()}),
+                a.op2(AO::ADD, a.col(1), a.op2(AO::MUL, a.op2(AO::SUB, a.col(2), a.col(1)), up)));
+        }
+        xd.reset();
+        xu.reset();
         dif.reset();
 
-        // rows that are rounded: nonzero (zero keeps its sign), finite (so not
-        // NaN) and below the size at which a double holds no more digits;
-        // the others keep x
-        f64_ast a;
-        const auto& ax = a.op1(AO::ABS, a.col(0));
-        auto ok = cudf::compute_column(
-            xtab({}),
-            a.op2(AO::LOGICAL_AND, a.op2(AO::GREATER, ax, a.lit(0.0)),
-                  std::isfinite(emin_d) ? a.op2(AO::LESS, ax, a.lit(emin_d))
-                                        : a.op2(AO::LESS_EQUAL, ax, a.lit(dmax))));
-        return cudf::copy_if_else(rounded->view(), x, ok->view());
+        // Sign and the rows that are not rounded, in the bits of the double (an
+        // integer AST costs the same per op but needs no division or cast):
+        // out = mag | sign(x), so zero keeps its sign and a NaN keeps its
+        // payload; rows are rounded when |x| < 2^emin (bits order like the
+        // values; Inf and NaN sort above every finite one), the others keep x.
+        auto x = x_f64();
+        const cudf::data_type i64{cudf::type_id::INT64};
+        auto xbits = cudf::bit_cast(x, i64);
+        auto mbits = cudf::bit_cast(mag->view(), i64);
+        std::deque<cudf::numeric_scalar<int64_t>> lits;
+        auto i64lit = [&](cudf::ast::tree& t, int64_t v) -> const cudf::ast::expression& {
+            lits.emplace_back(v, true);
+            return t.emplace<cudf::ast::literal>(lits.back());
+        };
+        int64_t emin_bits;
+        const double emin_cmp = std::isfinite(emin_d) ? emin_d : std::numeric_limits<double>::infinity();
+        std::memcpy(&emin_bits, &emin_cmp, sizeof emin_bits);
+        constexpr int64_t kAbsMask = 0x7fffffffffffffffLL;
+        auto signed_mag = [&] {
+            cudf::ast::tree t;
+            const auto& s = t.emplace<cudf::ast::operation>(
+                AO::BITWISE_AND, t.emplace<cudf::ast::column_reference>(1),
+                i64lit(t, std::numeric_limits<int64_t>::min()));
+            return cudf::compute_column(
+                cudf::table_view({mbits, xbits}),
+                t.emplace<cudf::ast::operation>(AO::BITWISE_OR, t.emplace<cudf::ast::column_reference>(0), s));
+        }();
+        mag.reset();
+        auto ok = [&] {
+            cudf::ast::tree t;
+            const auto& m = t.emplace<cudf::ast::operation>(
+                AO::BITWISE_AND, t.emplace<cudf::ast::column_reference>(0), i64lit(t, kAbsMask));
+            return cudf::compute_column(
+                cudf::table_view({xbits}),
+                t.emplace<cudf::ast::operation>(AO::LESS, m, i64lit(t, emin_bits)));
+        }();
+        return cudf::copy_if_else(cudf::bit_cast(signed_mag->view(), x.type()), x, ok->view());
     }
 
     // ---- as_date(x) / as_posixct(x): TIMESTAMP_* -> TIMESTAMP_* cast
