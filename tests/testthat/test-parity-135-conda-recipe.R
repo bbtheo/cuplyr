@@ -258,6 +258,33 @@ test_that("libcudf, librmm and libkvikio follow the rapids_version variant in ho
     host <- p135_reqs(recipe, "host")
     expect_match(host[["cuda-version"]] %||% "", "^(=<cuda_version>|<cuda_version>\\.\\*)$",
                  info = paste(nm, "host cuda-version"))
+    # the stub libcuda that is linked, the CUDA headers and libcudart, and the
+    # nvcc configure reads the CUDA version from
+    expect_true("cuda-driver-dev" %in% names(host), info = nm)
+    expect_true("cuda-cudart-dev" %in% names(host), info = nm)
+    expect_true(any(c("cuda-nvcc", "cuda-nvcc-tools") %in% names(host)), info = nm)
+    # none of them is a run requirement: the user's driver is their own
+    run <- p135_reqs(recipe, "run")
+    expect_false(any(c("cuda-driver-dev", "cuda-nvcc", "cuda-nvcc-tools") %in% names(run)), info = nm)
+  }
+})
+
+test_that("variants.yaml pins the C standard library to libcudf's glibc floor", {
+  p135_skip_if_no_conda()
+  variants <- yaml::read_yaml(p135_file("conda", "variants.yaml"))
+
+  # stdlib("c") has no default in rattler-build, and an unpinned sysroot would
+  # follow the build machine's glibc and raise the package's __glibc floor
+  # above libcudf's (RAPIDS 26.x builds with sysroot 2.28)
+  expect_identical(variants$c_stdlib, "sysroot")
+  expect_type(variants$c_stdlib_version, "character")
+  expect_true(length(variants$c_stdlib_version) >= 1L)
+  for (v in variants$c_stdlib_version) {
+    expect_true(package_version(v) <= package_version("2.28"), info = v)
+  }
+  for (nm in names(p135_recipes())) {
+    build <- p135_reqs(p135_recipes()[[nm]], "build")
+    expect_true("<stdlib('c')>" %in% gsub("\"", "'", names(build)), info = nm)
   }
 })
 

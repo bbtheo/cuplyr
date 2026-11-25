@@ -18,6 +18,11 @@
 #   only, whatever CONDA_PREFIX, CUDA_HOME or CUDF_HOME the caller's shell
 #   has; removes compiled objects copied from a development checkout; forces
 #   the stub; installs with $R CMD INSTALL; and stops when configure fails.
+# - R, as build.sh starts it, reads none of the user's startup files
+#   (R_ENVIRON_USER, R_PROFILE_USER) and no personal Makevars
+#   (R_MAKEVARS_USER): conda-build passes HOME on, and R CMD INSTALL runs
+#   configure again from an R process, which would otherwise pick up a
+#   CUDA_HOME or CUDF_HOME set in ~/.Renviron, and compile with ~/.R/Makevars.
 #
 # These tests need neither a GPU nor a CUDA install: configure and build.sh
 # run against fake prefixes in a scratch copy of the package (as
@@ -72,9 +77,44 @@ p135b_fake_prefix <- function(root, stub = TRUE, cudf_version = c(26, 10, 0)) {
   for (lib in c("libcudf.so", "librmm.so", "libkvikio.so")) {
     p135b_touch(file.path(root, "lib", lib))
   }
-  p135b_script(file.path(root, "bin", "R"),
-               "printf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/../r-calls.txt\"")
+  # The fake R does what `R CMD INSTALL` does before compiling: R reads the
+  # user's Renviron (R_ENVIRON_USER, else ~/.Renviron), then INSTALL runs
+  # ./configure unless --no-configure is given. It records its arguments and
+  # environment.
+  p135b_script(file.path(root, "bin", "R"), c(
+    "here=\"$(cd \"$(dirname \"$0\")/..\" && pwd)\"",
+    "printf '%s\\n' \"$*\" >> \"$here/r-calls.txt\"",
+    "env > \"$here/r-env.txt\"",
+    "renv=\"${R_ENVIRON_USER:-$HOME/.Renviron}\"",
+    "if [ -f \"$renv\" ]; then set -a; . \"$renv\"; set +a; fi",
+    "case \" $* \" in",
+    "  *\" --no-configure \"*) ;;",
+    "  *) if [ -x ./configure ]; then ./configure > \"$here/r-configure.log\" 2>&1 || exit 1; fi ;;",
+    "esac"
+  ))
   root
+}
+
+# A user's R startup files, as a maintainer's HOME may hold them: an
+# .Renviron pointing CUDA_HOME and CUDF_HOME elsewhere and a personal
+# ~/.R/Makevars with its own LDFLAGS.
+p135b_fake_home <- function(root, cuda_home, cudf_home) {
+  root <- normalizePath(root)
+  writeLines(c(sprintf("CUDA_HOME=%s", cuda_home), sprintf("CUDF_HOME=%s", cudf_home)),
+             file.path(root, ".Renviron"))
+  dir.create(file.path(root, ".R"))
+  writeLines("LDFLAGS = -L/usr/lib", file.path(root, ".R", "Makevars"))
+  writeLines("Sys.setenv(CUDA_HOME = 'from-Rprofile')", file.path(root, ".Rprofile"))
+  root
+}
+
+# TRUE when the environment variable in `env_lines` (output of `env`) points
+# R at no file: /dev/null, an empty file or a file that doesn't exist.
+p135b_points_nowhere <- function(env_lines, name) {
+  hit <- grep(sprintf("^%s=", name), env_lines, value = TRUE)
+  if (length(hit) != 1L) return(FALSE)
+  path <- sub("^[^=]*=", "", hit)
+  nzchar(path) && (path == "/dev/null" || !file.exists(path) || file.size(path) == 0)
 }
 
 # A system toolkit: everything under one CUDA_HOME.
@@ -240,6 +280,9 @@ test_that("without CUPLYR_FORCE_CUDA_STUBS, a source install still links the ins
     expect_identical(res$status, 0L, info = res$output)
     expect_false(grepl("stubs", res$vars[["CUDA_DRIVER_LIB"]]), info = res$output)
     expect_match(res$vars[["CUDA_DRIVER_RPATH_FLAG"]], "-rpath", fixed = TRUE, info = res$makevars)
+    # libcuda is linked as before, not --as-needed
+    expect_false(isTRUE(p135b_cuda_as_needed(p135b_expand(res$vars, "PKG_LIBS"))), info = res$makevars)
+    expect_no_match(res$makevars, "as-needed", fixed = TRUE)
   }
 })
 
@@ -247,8 +290,9 @@ test_that("without CUPLYR_FORCE_CUDA_STUBS, a source install still links the ins
 # conda/build.sh
 # ---------------------------------------------------------------------------
 
-p135b_build_env <- function(pkg, host, build) {
+p135b_build_env <- function(pkg, host, build, home) {
   c(
+    HOME = home,
     PREFIX = host,
     BUILD_PREFIX = build,
     SRC_DIR = pkg,
@@ -276,7 +320,8 @@ test_that("conda/build.sh configures against the host prefix only and installs w
   for (f in c("stale.o", "cuplyr.so")) p135b_touch(file.path(pkg, "src", f))
   writeLines("CUDF_INCLUDE=/somewhere/else", file.path(pkg, "src", "Makevars"))
 
-  env <- c(p135b_build_env(pkg, host, build),
+  home <- normalizePath(withr::local_tempdir("home-"))
+  env <- c(p135b_build_env(pkg, host, build, home),
            CONDA_PREFIX = other_env, CUDF_HOME = other_env, CUDA_HOME = system_cuda)
   res <- p135b_run(pkg, file.path("conda", "build.sh"), env = env,
                    unset = c("CUPLYR_ALLOW_CUDA_STUBS", "CUPLYR_FORCE_CUDA_STUBS"))
@@ -306,6 +351,43 @@ test_that("conda/build.sh configures against the host prefix only and installs w
   }
 })
 
+test_that("conda/build.sh keeps the user's R startup files and ~/.R/Makevars out of the build", {
+  p135b_skip_if_no_sources()
+  host <- p135b_fake_prefix(withr::local_tempdir("host-env-"))
+  build <- normalizePath(withr::local_tempdir("build-env-"))
+  dir.create(file.path(build, "bin"))
+  other_env <- p135b_fake_prefix(withr::local_tempdir("active-env-"), cudf_version = c(26, 2, 0))
+  system_cuda <- p135b_fake_system_cuda(withr::local_tempdir("system-cuda-"))
+  # conda-build (and rattler-build outside strict isolation) passes HOME on
+  home <- p135b_fake_home(withr::local_tempdir("home-"), system_cuda, other_env)
+  pkg <- p135b_scratch_pkg()
+
+  env <- p135b_build_env(pkg, host, build, home)
+  res <- p135b_run(pkg, file.path("conda", "build.sh"), env = env,
+                   unset = c("CONDA_PREFIX", "CUDA_HOME", "CUDF_HOME", "R_ENVIRON_USER",
+                             "R_PROFILE_USER", "R_MAKEVARS_USER",
+                             "CUPLYR_ALLOW_CUDA_STUBS", "CUPLYR_FORCE_CUDA_STUBS"))
+
+  expect_identical(res$status, 0L, info = res$output)
+  r_configure <- file.path(host, "r-configure.log")
+  info <- paste(c(res$output, if (file.exists(r_configure)) readLines(r_configure)), collapse = "\n")
+
+  # the Makevars the compile uses is the host prefix's, whatever R ran
+  expect_identical(res$vars[["CUDA_INCLUDE"]] %||% "",
+                   file.path(host, "targets", "x86_64-linux", "include"), info = info)
+  expect_identical(res$vars[["CUDF_INCLUDE"]] %||% "", file.path(host, "include"), info = info)
+  expect_false(grepl(system_cuda, res$makevars, fixed = TRUE), info = res$makevars)
+  expect_false(grepl(other_env, res$makevars, fixed = TRUE), info = res$makevars)
+
+  # R itself reads no user startup file and no personal Makevars
+  env_file <- file.path(host, "r-env.txt")
+  expect_true(file.exists(env_file), info = res$output)
+  r_env <- if (file.exists(env_file)) readLines(env_file) else character()
+  for (var in c("R_ENVIRON_USER", "R_PROFILE_USER", "R_MAKEVARS_USER")) {
+    expect_true(p135b_points_nowhere(r_env, var), info = paste(var, "in R's environment"))
+  }
+})
+
 test_that("conda/build.sh stops when configure fails", {
   p135b_skip_if_no_sources()
   host <- p135b_fake_prefix(withr::local_tempdir("host-env-"), stub = FALSE)
@@ -313,8 +395,9 @@ test_that("conda/build.sh stops when configure fails", {
   dir.create(file.path(build, "bin"))
   pkg <- p135b_scratch_pkg()
 
+  home <- normalizePath(withr::local_tempdir("home-"))
   res <- p135b_run(pkg, file.path("conda", "build.sh"),
-                   env = p135b_build_env(pkg, host, build),
+                   env = p135b_build_env(pkg, host, build, home),
                    unset = c("CONDA_PREFIX", "CUDA_HOME", "CUDF_HOME",
                              "CUPLYR_ALLOW_CUDA_STUBS", "CUPLYR_FORCE_CUDA_STUBS"))
 
