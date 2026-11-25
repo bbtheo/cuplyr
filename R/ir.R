@@ -3799,7 +3799,7 @@ ir_parse_with_order_call <- function(expr, env, schema) {
 # cudf too, and the notes below describe the min_periods scheme of that path.
 #
 # Empirically verified (a standalone probe against this environment's
-# installed cudf 25.12, NOT re-derived from the header comments alone,
+# installed cudf (25.12 when written; the MEDIAN gap below was rechecked on 26.10), NOT re-derived from the header comments alone,
 # since "min_periods" is ambiguous between "row count in window" and
 # "valid (non-null) count in window" until tested):
 #   * `cudf::rolling_window(x, preceding = w, following = 0, min_periods =
@@ -3847,7 +3847,7 @@ ir_parse_with_order_call <- function(expr, env, schema) {
 #     make_median_aggregation`: only `aggregation`/`reduce_aggregation`/
 #     `groupby_aggregation` instantiations exist) -- MEDIAN is genuinely
 #     unsupported by `cudf::rolling_window`/`grouped_rolling_window` in
-#     cudf 25.12, not merely undocumented. `roll_median()` is therefore
+#     cudf (checked on 26.10), not merely undocumented. `roll_median()` is therefore
 #     registered (so it parses, types, and participates in window
 #     decomposition identically to its five siblings) but
 #     `window_spec_lowerable()` (R/lower.R) explicitly excludes it, routing

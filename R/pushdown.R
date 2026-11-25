@@ -22,12 +22,14 @@
 # to the literal has the literal's bits.
 #
 # Only integer, integer64, Date and POSIXct columns are pushed; doubles and
-# strings run above the scan. libcudf 25.12 takes a NaN in a row group's footer
-# min or max for a bound and skips the group, losing its rows (the Parquet spec
-# says to ignore such a statistic), so no FLOAT64 comparison is pushed. For a
-# string column it takes the footer's deprecated min/max fields, which hold
-# signed byte order, as byte-order bounds, so a row group can be skipped wrongly
-# for a string comparison too. Both filters give the same rows above the scan;
+# strings run above the scan. libcudf (checked on 26.10) takes a NaN in a row
+# group's footer min or max for a bound and skips the group, losing its rows (the
+# Parquet spec says to ignore such a statistic), so no FLOAT64 comparison is
+# pushed. For a string column it takes the footer's deprecated min/max fields,
+# which hold signed byte order, as byte-order bounds, so a row group could be
+# skipped wrongly for a string comparison too (the probes on 26.10 returned the
+# right rows, but string pushdown stays off until it is proved on more files).
+# Both filters give the same rows above the scan;
 # only the row-group skipping is given up.
 
 # The pushdown option: `cuplyr.parquet_pushdown = FALSE` turns off both the

@@ -11,6 +11,8 @@ CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 CUDA_INCLUDE=""
 CUDF_HOME="${CUDF_HOME:-}"
 CONDA_PREFIX="${CONDA_PREFIX:-}"
+# The oldest CUDA toolkit configure accepts. RAPIDS 26.x is tested with CUDA 13
+# (what the installers and pixi install); this is a floor, not the tested one.
 CUDA_MIN_VERSION="${CUPLYR_CUDA_MIN_VERSION:-12.2}"
 # Supported libcudf: CUDF_MIN_VERSION and later, with no upper bound. cuplyr
 # uses RMM's cuda::mr::resource_ref model (RMM 26.02 and later); 25.12 and
@@ -192,6 +194,7 @@ fi
 if ! version_at_least "$CUDA_VERSION" "$CUDA_MIN_VERSION"; then
     echo "ERROR: CUDA $CUDA_VERSION found, but cuplyr requires CUDA >= $CUDA_MIN_VERSION"
     echo "       with RAPIDS libcudf >=$CUDF_MIN_VERSION."
+    echo "       (RAPIDS 26.x is tested with CUDA 13.)"
     exit 1
 fi
 

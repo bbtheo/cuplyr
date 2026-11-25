@@ -25,33 +25,33 @@ mkdir -p "$CUPLYR_LOCK_DIR"
 # pixi.toml, default environment (what every worktree and the merge gate use).
 #   CUPLYR_PIXI_MANIFEST  path to a pixi.toml       (default: $CUPLYR_MAIN/pixi.toml)
 #   CUPLYR_PIXI_ENV       environment name in it    (default: default)
-# A worktree can pin both in an untracked .cuplyr-env file at its root
-# (KEY=VALUE lines); variables set in the caller's environment win over it.
-# Run under `pixi run`/`pixi shell` with neither set, the tools stay in the
-# environment pixi activated (below).
+# Each of the two is taken from the first of these that sets it:
+#   1. the variable itself, in the caller's environment;
+#   2. the environment pixi activated, when the tools run under `pixi run -e X`
+#      or `pixi shell -e X` (PIXI_PROJECT_MANIFEST and PIXI_ENVIRONMENT_NAME,
+#      only when BOTH are set: half a pair is not something pixi activated), so
+#      `pixi run -e rapids2602 conformance` runs on 26.02;
+#   3. a worktree's untracked .cuplyr-env file at its root (KEY=VALUE lines),
+#      which pins a worktree to an environment when nothing above says otherwise;
+#   4. the default above.
+_file_manifest=""
+_file_env=""
 if [[ -f "$CUPLYR_WT_ROOT/.cuplyr-env" ]]; then
   while IFS='=' read -r _k _v; do
     case "$_k" in
-      CUPLYR_PIXI_MANIFEST|CUPLYR_PIXI_ENV)
-        [[ -n "${!_k:-}" ]] || export "$_k=$_v" ;;
+      CUPLYR_PIXI_MANIFEST) _file_manifest="$_v" ;;
+      CUPLYR_PIXI_ENV) _file_env="$_v" ;;
     esac
   done < "$CUPLYR_WT_ROOT/.cuplyr-env"
 fi
-# Inside `pixi run -e <env> <task>` (or `pixi shell -e <env>`) with nothing
-# selected above, keep the environment pixi activated, so
-# `pixi run -e rapids2602 conformance` runs the conformance suite on 26.02.
-if [[ -z "${CUPLYR_PIXI_MANIFEST:-}" && -z "${CUPLYR_PIXI_ENV:-}" ]]; then
-  CUPLYR_PIXI_MANIFEST="${PIXI_PROJECT_MANIFEST:-}"
-  CUPLYR_PIXI_ENV="${PIXI_ENVIRONMENT_NAME:-}"
-  # both or neither: a manifest without its environment (or the reverse) is not
-  # something pixi activated
-  if [[ -z "$CUPLYR_PIXI_MANIFEST" || -z "$CUPLYR_PIXI_ENV" ]]; then
-    CUPLYR_PIXI_MANIFEST=""
-    CUPLYR_PIXI_ENV=""
-  fi
+_pixi_manifest=""
+_pixi_env=""
+if [[ -n "${PIXI_PROJECT_MANIFEST:-}" && -n "${PIXI_ENVIRONMENT_NAME:-}" ]]; then
+  _pixi_manifest="$PIXI_PROJECT_MANIFEST"
+  _pixi_env="$PIXI_ENVIRONMENT_NAME"
 fi
-CUPLYR_PIXI_MANIFEST="${CUPLYR_PIXI_MANIFEST:-$CUPLYR_MAIN/pixi.toml}"
-CUPLYR_PIXI_ENV="${CUPLYR_PIXI_ENV:-default}"
+CUPLYR_PIXI_MANIFEST="${CUPLYR_PIXI_MANIFEST:-${_pixi_manifest:-${_file_manifest:-$CUPLYR_MAIN/pixi.toml}}}"
+CUPLYR_PIXI_ENV="${CUPLYR_PIXI_ENV:-${_pixi_env:-${_file_env:-default}}}"
 export CUPLYR_PIXI_MANIFEST CUPLYR_PIXI_ENV
 
 cuplyr_activate_env() {

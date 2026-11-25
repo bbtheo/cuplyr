@@ -145,8 +145,10 @@ runs the tests for you. This takes longer.
 
 ## Developer setup
 
-You need Linux, an NVIDIA GPU (Volta or newer), a system CUDA toolkit (13 or
-newer; `./configure` finds it through `CUDA_HOME` or `/usr/local/cuda`), and
+You need Linux, an NVIDIA GPU (Volta or newer), a system CUDA toolkit
+(`./configure` accepts 12.2 or newer, but RAPIDS 26.x is tested with CUDA 13,
+which pixi and the installers use; it finds the toolkit through `CUDA_HOME` or
+`/usr/local/cuda`), and
 [pixi](https://pixi.sh). pixi installs R, RAPIDS libcudf and every R package
 into the project directory. The default pixi environment is RAPIDS 26.10, the
 series cuplyr is developed, tested and gated on. It carries no CUDA compiler:
@@ -182,6 +184,12 @@ pixi run -e rapids2602 conformance
 ```
 
 or select it for one command with `CUPLYR_PIXI_ENV=rapids2602 tools/conformance`.
+The `tools/` scripts pick their environment (`CUPLYR_PIXI_MANIFEST` and
+`CUPLYR_PIXI_ENV`) from the first of these that sets it: the `CUPLYR_PIXI_*`
+variable itself; the environment `pixi run -e <env>` or `pixi shell -e <env>`
+activated; a worktree's untracked `.cuplyr-env` file (`KEY=VALUE` lines); the
+main checkout's `pixi.toml` and its default environment. So `pixi run -e
+rapids2602 ...` wins over a `.cuplyr-env` that pins another series.
 The tools rebuild the C++ when the active RAPIDS changes (they record what
 `src/` was built against in `src/.cuplyr-build-env`), so you can switch back and
 forth in one checkout. The release check runs the dplyr conformance suite on

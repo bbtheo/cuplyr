@@ -88,19 +88,17 @@ cuplyr_read_build_stamp <- function(root) {
   stats::setNames(vapply(kv, `[`, "", 3L), vapply(kv, `[`, "", 2L))
 }
 
-cuplyr_write_build_stamp <- function(root) {
-  env <- cuplyr_current_build_env(root)
+cuplyr_write_build_stamp <- function(root, env) {
   writeLines(paste0(names(env), "=", env), cuplyr_build_stamp_file(root))
 }
 
-# TRUE when the objects in src/ were not built against the environment that is
-# active now (or can't be shown to have been).
-cuplyr_build_env_changed <- function(root) {
+# TRUE when the objects in src/ were not built against the environment `now`
+# (from cuplyr_current_build_env()), or can't be shown to have been.
+cuplyr_build_env_changed <- function(root, now) {
   if (!any(file.exists(file.path(root, "src", c("cuplyr.so", list.files(file.path(root, "src"), "\\.o$")))))) {
     return(FALSE)  # nothing built yet
   }
   stamp <- cuplyr_read_build_stamp(root)
-  now <- cuplyr_current_build_env(root)
   is.null(stamp) || !identical(unname(stamp[names(now)]), unname(now))
 }
 
@@ -116,7 +114,10 @@ cuplyr_ensure_optimized_dll <- function(root = ".", quiet = TRUE) {
   root <- normalizePath(root)
   Sys.setenv(PKG_BUILD_EXTRA_FLAGS = "false")
 
-  if (cuplyr_build_env_changed(root)) {
+  # configure runs once per call: the environment is what the build below uses,
+  # and what the stamp records once it has compiled.
+  env <- cuplyr_current_build_env(root)
+  if (cuplyr_build_env_changed(root, env)) {
     message("cuplyr: src/ was built against another libcudf/RMM than the active environment (",
             Sys.getenv("CONDA_PREFIX", ""), "); rebuilding")
     pkgbuild::clean_dll(root)
@@ -126,7 +127,7 @@ cuplyr_ensure_optimized_dll <- function(root = ".", quiet = TRUE) {
     pkgbuild::clean_dll(root)
   }
   pkgbuild::compile_dll(root, debug = FALSE, quiet = quiet)
-  cuplyr_write_build_stamp(root)
+  cuplyr_write_build_stamp(root, env)
 
   state <- cuplyr_so_build_state(root)
   if (identical(state, "unoptimized")) {

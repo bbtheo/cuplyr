@@ -9,7 +9,7 @@
 # (lag(), cumsum(), row_number(), ...) already uses, so no verb-specific
 # wiring was needed in R/mutate.R/R/filter.R at all.
 #
-# roll_median() is NOT GPU-native: cudf 25.12's rolling_window()/
+# roll_median() is NOT GPU-native: libcudf's rolling_window()/
 # grouped_rolling_window() have no MEDIAN aggregation instantiation in
 # this environment (verified via `nm -DC libcudf.so`), so
 # window_spec_lowerable() (R/lower.R) routes it through the existing
@@ -58,7 +58,7 @@
 #' (segmented scans; cudf's own rolling kernel is kept for
 #' narrow windows, where it is faster, and for min/max of timestamps and
 #' logicals) -- these R implementations are the CPU semantics reference and
-#' the engine for standalone use. cudf 25.12 has
+#' the engine for standalone use. libcudf (checked on 26.10 and 26.02) has
 #' no MEDIAN rolling aggregation, so `roll_median()` always runs on the CPU
 #' (see "Median engines").
 #' `data.table::frollmean(x, n)` (and its five siblings) work as

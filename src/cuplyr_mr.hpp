@@ -49,8 +49,10 @@
 #include <rmm/mr/pool_memory_resource.hpp>
 #include <rmm/resource_ref.hpp>
 #if !CUPLYR_RMM_NEW_API
+// RMM 26.02 legacy-map bridge: begin
 #include <cudf/utilities/memory_resource.hpp>
 #include <rmm/mr/callback_memory_resource.hpp>
+// RMM 26.02 legacy-map bridge: end
 #endif
 #include <rmm/version_config.hpp>
 
@@ -97,11 +99,6 @@ inline rmm::cuda_stream_view upstream_stream(cuda::stream_ref s) {
   return rmm::cuda_stream_view{s.get()};
 }
 
-// The type of the legacy per-device pointer RMM 26.02 still keeps next to its
-// resource_ref map, and which libcudf 26.02 reads for its default resource.
-// Named by decltype so no source line spells the legacy base class.
-using legacy_ptr = decltype(cudf::set_current_device_resource(nullptr));
-
 #endif
 
 // An owning copy of the resource that is current on this copy of the library.
@@ -121,9 +118,12 @@ class Node {
                           std::size_t align) noexcept = 0;
 
 #if !CUPLYR_RMM_NEW_API
-  // RMM 26.02 only; see make_current().
+  // RMM 26.02 legacy-map bridge: begin
+  // RMM 26.02 only; see make_current(). `prev_legacy` is what RMM's legacy
+  // per-device pointer map held before this node was installed there.
   std::unique_ptr<rmm::mr::callback_memory_resource> bridge;
-  legacy_ptr prev_legacy = nullptr;
+  rmm::mr::device_memory_resource* prev_legacy = nullptr;
+  // RMM 26.02 legacy-map bridge: end
 #endif
 };
 
@@ -208,6 +208,7 @@ inline bool is_current(Node* node) { return current_copy() == as_any(node); }
 
 #else
 
+// RMM 26.02 legacy-map bridge: begin
 // RMM 26.02 keeps two per-device maps: the resource_ref one, and a legacy
 // pointer one that libcudf 26.02's cudf::get_current_device_resource_ref()
 // reads, so a resource installed through the ref map alone is invisible to
@@ -241,6 +242,7 @@ inline bool is_current(Node* node) {
   any_mr mine{static_cast<any_mr>(rmm::device_async_resource_ref{*node->bridge})};
   return current_copy() == mine;
 }
+// RMM 26.02 legacy-map bridge: end
 
 #endif
 
