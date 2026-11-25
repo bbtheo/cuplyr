@@ -142,18 +142,34 @@ return one row per remaining `cyl`.
 ## Upload
 
 Once the smoke test passes, a maintainer uploads the package to the `bbtheo`
-channel with rattler-build itself (no anaconda-client is needed):
+channel with rattler-build itself (no anaconda-client is needed).
+
+Log in once, which keeps the token out of the shell history:
 
 ```bash
-export ANACONDA_API_KEY=<token>
+read -rs T && rattler-build auth login anaconda.org --conda-token "$T"; unset T
+```
+
+`read -rs` reads the anaconda.org token (an API token allowed to upload to
+`bbtheo`) without echoing it, and rattler-build stores it in its keychain/auth
+file.
+
+After that, the upload reads the token from the stored login:
+
+```bash
 rattler-build upload anaconda --owner bbtheo \
   <dir>/linux-64/r-cuplyr-<version>-<build>.conda
 ```
 
-The token is an anaconda.org API token allowed to upload to `bbtheo`; pass it
-with `--api-key` instead of `ANACONDA_API_KEY` if you prefer. anaconda.org
-refuses a file that is already on the channel; add `--force` to replace it,
-for example after rebuilding with the same build number. Raise
+For a single command instead of the login, set `ANACONDA_API_KEY` (or pass
+`--api-key`) for that command.
+
+The host key rattler-build looks up for the token (`anaconda.org` or
+`api.anaconda.org`) is unverified. If the first upload reports a missing
+token, log in again with the other host name, `api.anaconda.org`.
+
+anaconda.org refuses a file that is already on the channel; add `--force` to
+replace it, for example after rebuilding with the same build number. Raise
 `build.number` in `recipe.yaml` instead when the new build should reach users
 who already have the old one.
 
