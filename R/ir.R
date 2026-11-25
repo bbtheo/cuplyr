@@ -5582,7 +5582,7 @@ ir_parse_factor_conversion <- function(expr, schema, fn_name) {
   )
 }
 
-# xor(): BITWISE_XOR needs BOOL8 operands, but R's xor() coerces numbers and
+# xor(): lowered to NOT_EQUAL, which needs BOOL8 operands, but R's xor() coerces numbers and
 # strings. Anything that is not logical on both sides is left to dplyr.
 ir_parse_xor <- function(args, schema) {
   bool <- vapply(args, function(a) {
@@ -7222,7 +7222,7 @@ ir_call_registry <- list(
   "&" = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(ast_op = "NULL_LOGICAL_AND")),
   "|" = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(ast_op = "NULL_LOGICAL_OR")),
   "!" = list(arity = 1L, parse = NULL, type = type_bool8, lower = list(ast_op = "NOT")),
-  "xor" = list(arity = 2L, parse = ir_parse_xor, type = type_bool8, lower = list(ast_op = "BITWISE_XOR")),
+  "xor" = list(arity = 2L, parse = ir_parse_xor, type = type_bool8, lower = list(ast_op = "NOT_EQUAL")),
 
   "is.na" = list(arity = 1L, parse = NULL, type = type_bool8, lower = list(ast_op = "IS_NULL")),
 
