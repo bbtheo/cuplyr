@@ -12,6 +12,8 @@
 
 #include <rmm/cuda_stream_view.hpp>
 
+#include <cuda_runtime.h>
+
 #include <memory>
 
 // libcudf 26.10 moved distinct_count() out of cudf/stream_compaction.hpp into
@@ -26,6 +28,17 @@
 #endif
 
 namespace cuplyr {
+
+// The raw CUDA stream behind what cudf::get_default_stream() returns:
+// rmm::cuda_stream_view on 26.02 (`value()`), cuda::stream_ref on 26.10 (`get()`).
+template <class Stream>
+inline cudaStream_t raw_stream(Stream const& stream) {
+  if constexpr (requires { stream.get(); }) {
+    return stream.get();
+  } else {
+    return stream.value();
+  }
+}
 
 // A filtered_join whose hash set is built from `build` (probed with semi_join()
 // / anti_join()). 26.02 takes a set_as_build_table argument (cuplyr always

@@ -57,8 +57,7 @@ int gpu_alloc_window_push() {
   auto owned = std::make_unique<StatsNode>(cuplyr::mr::current_copy());
   StatsNode* node = owned.get();
   g_owned.push_back(std::move(owned));
-  auto handle = cuplyr::mr::as_any(node);
-  cuplyr::mr::set_current(handle);
+  cuplyr::mr::make_current(node);
   int id = ++g_next_id;
   g_stack.push_back({id, node});
   return id;
@@ -72,7 +71,7 @@ Rcpp::NumericVector gpu_alloc_window_pop(int id) {
   }
   Window w = g_stack.back();
   g_stack.pop_back();
-  cuplyr::mr::set_current(*w.node->upstream_copy());
+  cuplyr::mr::make_current_prev(w.node);
   auto b = w.node->bytes();
   return Rcpp::NumericVector::create(static_cast<double>(b.total),
                                      static_cast<double>(b.value),

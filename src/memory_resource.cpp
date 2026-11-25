@@ -218,8 +218,7 @@ std::string gpu_mr_install(bool enabled, std::string kind, double initial,
     Installed* found = find_in_other_copies();
     if (found == nullptr && !enabled) return "cuda";
     g_inst = found != nullptr ? found : create(kind, initial, release_threshold);
-    auto handle = cuplyr::mr::as_any(g_inst->stats);
-    cuplyr::mr::set_current(handle);
+    cuplyr::mr::make_current(g_inst->stats);
   }
   return g_inst->kind;
 }

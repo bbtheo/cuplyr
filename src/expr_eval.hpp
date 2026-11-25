@@ -58,6 +58,7 @@
 #include "expr_cse.hpp"
 
 #include <cudf/ast/expressions.hpp>
+#include "cuplyr_compat.hpp"
 #include <cudf/binaryop.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
@@ -840,7 +841,7 @@ inline std::unique_ptr<cudf::numeric_scalar<double>> make_f64_scalar(double v, b
         auto s = std::make_unique<cudf::numeric_scalar<double>>(1.0, true);
         cuplyr::check_cuda(cudaMemcpyAsync(s->data(), &neg_zero, sizeof(double),
                                            cudaMemcpyHostToDevice,
-                                           cudf::get_default_stream().get()),
+                                           cuplyr::raw_stream(cudf::get_default_stream())),
                            "negative zero scalar");
         return s;
     }

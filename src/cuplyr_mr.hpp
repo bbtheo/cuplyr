@@ -1,8 +1,8 @@
 // src/cuplyr_mr.hpp
 //
 // cuplyr's own device memory resources, on RMM's `cuda::mr::resource_ref`
-// model (RMM 26.02 and later; there is no legacy `device_memory_resource`
-// here). The same source builds against RMM 26.02 and 26.10, whose APIs differ
+// model (RMM 26.02 and later). The same source builds against RMM 26.02 and
+// 26.10, whose APIs differ
 // in how a resource is installed and what the stock adaptors look like, so the
 // resources cuplyr needs are written once here instead of using RMM's adaptors:
 //
@@ -21,17 +21,26 @@
 // base pool/async resource, owned by memory_resource.cpp's `Installed`) or as
 // an owning `any_mr` copy of whatever was current when the node was made.
 //
-// The compat block below is the one place that knows how the two RMM
-// generations install a resource:
-//   26.02: set_current_device_resource_ref(ref) stores a copy of the resource
-//          the ref refers to; pool_memory_resource<Upstream> is a template.
-//   26.10: set_current_device_resource(any_resource) takes it by value;
-//          pool_memory_resource is a refcounted, non-template class.
+// The two compat blocks are the places that know how the RMM generations
+// build and install a resource:
+//   26.02: pool_memory_resource<Upstream> is a template over a ref. libcudf
+//          26.02's default resource still comes from RMM's legacy per-device
+//          pointer map, which the ref setters do not touch, so a node is
+//          installed through a stock callback_memory_resource bridge and the
+//          legacy setter (the only call that updates both maps); see
+//          make_current().
+//   26.10: set_current_device_resource(any_resource) takes it by value (one
+//          map); pool_memory_resource is a refcounted, non-template class.
 // (The boundary is the 26.06 release, where RMM removed the legacy
 // rmm::mr::device_memory_resource; releases between 26.02 and 26.10 are not
 // tested.) libcudf's own API differences are in cuplyr_compat.hpp.
 #pragma once
 
+#include <rmm/version_config.hpp>
+
+#define CUPLYR_RMM_NEW_API (RMM_VERSION_MAJOR > 26 || (RMM_VERSION_MAJOR == 26 && RMM_VERSION_MINOR >= 6))
+
+#include <rmm/aligned.hpp>
 #include <rmm/cuda_device.hpp>
 #include <rmm/error.hpp>
 #include <rmm/mr/cuda_async_memory_resource.hpp>
@@ -39,6 +48,10 @@
 #include <rmm/mr/per_device_resource.hpp>
 #include <rmm/mr/pool_memory_resource.hpp>
 #include <rmm/resource_ref.hpp>
+#if !CUPLYR_RMM_NEW_API
+#include <cudf/utilities/memory_resource.hpp>
+#include <rmm/mr/callback_memory_resource.hpp>
+#endif
 #include <rmm/version_config.hpp>
 
 #include <cuda/memory_resource>
@@ -51,22 +64,16 @@
 #include <optional>
 #include <utility>
 
-#define CUPLYR_RMM_NEW_API (RMM_VERSION_MAJOR > 26 || (RMM_VERSION_MAJOR == 26 && RMM_VERSION_MINOR >= 6))
-
 namespace cuplyr::mr {
 
 // An owning, type-erased copy of a resource (what RMM's per-device map holds).
 using any_mr = cuda::mr::any_resource<cuda::mr::device_accessible>;
 
-// ---- compat: how the two RMM generations install and build resources ------
+// ---- compat (1/2): building resources -------------------------------------
 
 #if CUPLYR_RMM_NEW_API
 
 using pool_mr = rmm::mr::pool_memory_resource;
-
-// Make `r` the current device resource. The map takes its own copy; the
-// previous resource (returned) is released.
-inline void set_current(any_mr& r) { (void)rmm::mr::set_current_device_resource(r); }
 
 inline std::unique_ptr<pool_mr> make_pool(rmm::mr::cuda_memory_resource& upstream,
                                           std::size_t initial) {
@@ -80,12 +87,6 @@ inline cuda::stream_ref upstream_stream(cuda::stream_ref s) { return s; }
 
 using pool_mr = rmm::mr::pool_memory_resource<rmm::mr::cuda_memory_resource>;
 
-// Make `r` the current device resource. The map stores a copy of what the ref
-// refers to, so `r` need not outlive the call.
-inline void set_current(any_mr& r) {
-  (void)rmm::mr::set_current_device_resource_ref(rmm::device_async_resource_ref{r});
-}
-
 // `upstream` must outlive the pool (memory_resource.cpp's Installed owns both).
 inline std::unique_ptr<pool_mr> make_pool(rmm::mr::cuda_memory_resource& upstream,
                                           std::size_t initial) {
@@ -95,6 +96,11 @@ inline std::unique_ptr<pool_mr> make_pool(rmm::mr::cuda_memory_resource& upstrea
 inline rmm::cuda_stream_view upstream_stream(cuda::stream_ref s) {
   return rmm::cuda_stream_view{s.get()};
 }
+
+// The type of the legacy per-device pointer RMM 26.02 still keeps next to its
+// resource_ref map, and which libcudf 26.02 reads for its default resource.
+// Named by decltype so no source line spells the legacy base class.
+using legacy_ptr = decltype(cudf::set_current_device_resource(nullptr));
 
 #endif
 
@@ -113,6 +119,12 @@ class Node {
   virtual void* allocate(cuda::stream_ref stream, std::size_t bytes, std::size_t align) = 0;
   virtual void deallocate(cuda::stream_ref stream, void* ptr, std::size_t bytes,
                           std::size_t align) noexcept = 0;
+
+#if !CUPLYR_RMM_NEW_API
+  // RMM 26.02 only; see make_current().
+  std::unique_ptr<rmm::mr::callback_memory_resource> bridge;
+  legacy_ptr prev_legacy = nullptr;
+#endif
 };
 
 // What RMM holds and passes around for a Node. Copies are interchangeable;
@@ -152,9 +164,6 @@ static_assert(cuda::mr::resource_with<Handle, cuda::mr::device_accessible>,
 
 inline any_mr as_any(Node* node) { return any_mr{Handle{node}}; }
 
-// Whether `node` is the resource that is current on this copy of the library.
-inline bool is_current(Node* node) { return current_copy() == as_any(node); }
-
 // A node that passes everything to an upstream.
 class Forwarder : public Node {
  public:
@@ -180,6 +189,60 @@ class Forwarder : public Node {
   std::optional<any_mr> keep_;  // declared before up_: up_ may refer into it
   rmm::device_async_resource_ref up_;
 };
+
+// ---- compat (2/2): making a node current -----------------------------------
+
+#if CUPLYR_RMM_NEW_API
+
+// RMM 26.10 keeps one per-device map of owning any_resource values; the map
+// takes its own copy of the handle and releases the previous resource.
+inline void make_current(Node* node) { (void)rmm::mr::set_current_device_resource(as_any(node)); }
+
+// Put back what `node` forwards to (it must hold an owning upstream copy).
+inline void make_current_prev(Forwarder* node) {
+  (void)rmm::mr::set_current_device_resource(*node->upstream_copy());
+}
+
+// Whether `node` is the resource that is current on this copy of the library.
+inline bool is_current(Node* node) { return current_copy() == as_any(node); }
+
+#else
+
+// RMM 26.02 keeps two per-device maps: the resource_ref one, and a legacy
+// pointer one that libcudf 26.02's cudf::get_current_device_resource_ref()
+// reads, so a resource installed through the ref map alone is invisible to
+// libcudf's own default allocations (they would go to plain cudaMalloc, past
+// the pool, the statistics and any tracking window). Only the legacy setter
+// updates both. Its argument is RMM's callback_memory_resource, a stock adaptor
+// that forwards to the node; the node's bridge is made on first use and never
+// freed, like the node.
+inline void make_current(Node* node) {
+  if (!node->bridge) {
+    node->bridge = std::make_unique<rmm::mr::callback_memory_resource>(
+        [](std::size_t bytes, rmm::cuda_stream_view stream, void* arg) -> void* {
+          return static_cast<Node*>(arg)->allocate(cuda::stream_ref{stream.value()}, bytes,
+                                                   rmm::CUDA_ALLOCATION_ALIGNMENT);
+        },
+        [](void* ptr, std::size_t bytes, rmm::cuda_stream_view stream, void* arg) {
+          static_cast<Node*>(arg)->deallocate(cuda::stream_ref{stream.value()}, ptr, bytes,
+                                              rmm::CUDA_ALLOCATION_ALIGNMENT);
+        },
+        node, node);
+  }
+  node->prev_legacy = cudf::set_current_device_resource(node->bridge.get());
+}
+
+inline void make_current_prev(Forwarder* node) {
+  (void)cudf::set_current_device_resource(node->prev_legacy);
+}
+
+inline bool is_current(Node* node) {
+  if (!node->bridge) return false;
+  any_mr mine{static_cast<any_mr>(rmm::device_async_resource_ref{*node->bridge})};
+  return current_copy() == mine;
+}
+
+#endif
 
 // Counts what passes through. One relaxed atomic add per allocation and per
 // free (plus a CAS only when a new peak is set): cheap enough for the async

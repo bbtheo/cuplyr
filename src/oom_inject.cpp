@@ -48,14 +48,13 @@ void gpu_oom_inject(int n) {
   if (n > 0) {
     if (g_top == nullptr || !cuplyr::mr::is_current(g_top)) {
       g_top = new OomNode(cuplyr::mr::current_copy());  // never destroyed
-      auto handle = cuplyr::mr::as_any(g_top);
-      cuplyr::mr::set_current(handle);
+      cuplyr::mr::make_current(g_top);
     }
   } else if (g_top != nullptr) {
     // Pop only if nothing was pushed on top meanwhile; otherwise it stays in
     // the chain as a pass-through.
     if (cuplyr::mr::is_current(g_top)) {
-      cuplyr::mr::set_current(*g_top->upstream_copy());
+      cuplyr::mr::make_current_prev(g_top);
     }
     g_top = nullptr;
   }
