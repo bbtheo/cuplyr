@@ -5597,8 +5597,9 @@ ir_parse_xor <- function(args, schema) {
 }
 
 # R gives a logical operand a numeric type the GPU evaluator doesn't: window
-# max()/min() and unary `-` of a logical are integers, round() of a logical is
-# a double (and cuDF's round rejects a BOOL8 column). The parse hooks of those
+# max()/min(), abs() and unary `-` of a logical are integers, round() of a
+# logical is a double (and cuDF's round rejects a BOOL8 column, libcudf 26.x's
+# ABS a BOOL8 operand). The parse hooks of those
 # ops wrap a BOOL8 first argument in `cast_to` (`cast_int32`/`cast_float64`,
 # nulls kept), so the node's inferred type and the evaluated column are R's
 # type, for the plain verbs and everything that rewrites into them
@@ -7304,7 +7305,8 @@ ir_call_registry <- list(
   ),
 
   "exp" = list(arity = 1L, parse = NULL, type = type_float64, lower = list(ast_op = "EXP")),
-  "abs" = list(arity = 1L, parse = NULL, type = type_abs, lower = list(ast_op = "ABS")),
+  "abs" = list(arity = 1L, parse = ir_parse_bool8_cast("abs", "cast_int32"), type = type_abs,
+               lower = list(ast_op = "ABS")),
   "floor" = list(arity = 1L, parse = NULL, type = type_float64, lower = list(ast_op = "FLOOR")),
   "ceil" = list(arity = 1L, parse = NULL, type = type_float64, lower = list(ast_op = "CEIL")),
   "sin" = list(arity = 1L, parse = NULL, type = type_float64, lower = list(ast_op = "SIN")),

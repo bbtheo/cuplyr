@@ -1253,17 +1253,17 @@ inline cudf::ast::expression const& build_ast(Rcpp::List node,
         target = resolved[1];
     }
 
-    // libcudf 26.x's AST math functors accept only the operand types they are
-    // defined for (25.12 let C++ convert an integer operand silently): the
-    // floating-point functions need a FLOAT64 operand, and abs() a signed one,
-    // so BOOL8 becomes INT32 (R's abs(TRUE) is the integer 1). The result types
-    // are unchanged (resolve_static_type()).
+    // libcudf 26.x's floating-point AST functors accept only a floating-point
+    // operand (25.12 let C++ convert an integer one silently), so the operand
+    // is cast to FLOAT64. The node's own type is FLOAT64 already
+    // (resolve_static_type()), so no parent sees a different type. abs() of a
+    // logical needs a signed operand too, but that cast is made in R (the "abs"
+    // parse hook wraps a BOOL8 argument in cast_int32), so the IR type, the
+    // static type here and the computed column all agree.
     if (args.size() == 1 && !is_unresolved_na[0]) {
         if (op == "sqrt" || op == "exp" || op == "log" || op == "sin" || op == "cos" ||
             op == "tan" || op == "floor" || op == "ceil") {
             target = cudf::data_type{cudf::type_id::FLOAT64};
-        } else if (op == "abs" && resolved[0].id() == cudf::type_id::BOOL8) {
-            target = cudf::data_type{cudf::type_id::INT32};
         }
     }
     // `^` is always computed in doubles (R's integer ^ integer is a double):
