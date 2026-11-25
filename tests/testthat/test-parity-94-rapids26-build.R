@@ -67,8 +67,8 @@ test_that("DESCRIPTION requires libcudf >= 26.02 with no upper bound", {
 })
 
 # conda/recipe.yaml: see test-parity-135-conda-recipe.R
-# (each binary is pinned to the series it is built against, and the recipes
-# build nothing older than configure's minimum).
+# (each binary is pinned to the series it is built against, and the recipe
+# builds nothing older than configure's minimum).
 
 test_that("pixi.toml pins 26.10 for the default environment and 26.02 for rapids2602", {
   p94_skip_if_no_file("pixi.toml")

@@ -509,6 +509,30 @@ test_that("conda/build.sh checks every path in the generated Makevars, not a fix
                              "CUPLYR_ALLOW_CUDA_STUBS", "CUPLYR_FORCE_CUDA_STUBS"))
 
   expect_false(identical(res$status, 0L), info = res$output)
-  expect_match(res$output, "EXTRA_LIB_DIR", fixed = TRUE)
+  # configure prints the Makevars, so look for build.sh's own message
+  expect_match(res$output, sprintf("EXTRA_LIB_DIR: %s/lib", elsewhere), fixed = TRUE)
+  expect_false(file.exists(file.path(host, "r-calls.txt")), info = res$output)
+})
+
+test_that("conda/build.sh checks every word of a multi-word Makevars value", {
+  p135b_skip_if_no_sources()
+  host <- p135b_fake_prefix(withr::local_tempdir("host-env-"))
+  build <- normalizePath(withr::local_tempdir("build-env-"))
+  dir.create(file.path(build, "bin"))
+  home <- normalizePath(withr::local_tempdir("home-"))
+  elsewhere <- normalizePath(withr::local_tempdir("elsewhere-"))
+  pkg <- p135b_scratch_pkg()
+  # the first word is inside the host env (configure fills in @CUDF_LIB@),
+  # the second is not
+  cat(sprintf("EXTRA_FLAGS=-L@CUDF_LIB@ -L%s/lib2\n", elsewhere),
+      file = file.path(pkg, "src", "Makevars.in"), append = TRUE)
+
+  res <- p135b_run(pkg, file.path("conda", "build.sh"),
+                   env = p135b_build_env(pkg, host, build, home),
+                   unset = c("CONDA_PREFIX", "CUDA_HOME", "CUDF_HOME",
+                             "CUPLYR_ALLOW_CUDA_STUBS", "CUPLYR_FORCE_CUDA_STUBS"))
+
+  expect_false(identical(res$status, 0L), info = res$output)
+  expect_match(res$output, sprintf("EXTRA_FLAGS: %s/lib2", elsewhere), fixed = TRUE)
   expect_false(file.exists(file.path(host, "r-calls.txt")), info = res$output)
 })

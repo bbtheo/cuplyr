@@ -40,7 +40,7 @@ p135_skip_if_no_conda <- function() {
   skip_if_not_installed("yaml")
 }
 
-# `${{ x }}` (rattler-build) and `{{ x }}` (conda-build) both become `<x>`.
+# `${{ x }}` (rattler-build's Jinja) becomes `<x>`.
 p135_norm <- function(x) {
   gsub("\\$?\\{\\{\\s*(.*?)\\s*\\}\\}", "<\\1>", x, perl = TRUE)
 }
@@ -155,7 +155,6 @@ test_that("the recipe is r-cuplyr at the version in DESCRIPTION", {
     p135_norm(as.character(v1$package$version)) %in% c("<version>", version),
     info = paste("recipe.yaml package.version:", v1$package$version)
   )
-
 })
 
 test_that("rattler-build is the one build tool: there is no conda-build meta.yaml", {
@@ -165,10 +164,8 @@ test_that("rattler-build is the one build tool: there is no conda-build meta.yam
 
 test_that("the recipe no longer says it is not a distribution channel", {
   p135_skip_if_no_conda()
-  for (f in c("recipe.yaml")) {
-    text <- paste(readLines(p135_file("conda", f), warn = FALSE), collapse = "\n")
-    expect_no_match(text, "not the primary end-user distribution channel", fixed = TRUE)
-  }
+  text <- paste(readLines(p135_file("conda", "recipe.yaml"), warn = FALSE), collapse = "\n")
+  expect_no_match(text, "not the primary end-user distribution channel", fixed = TRUE)
 })
 
 # ---------------------------------------------------------------------------
@@ -222,6 +219,16 @@ test_that("r-base follows DESCRIPTION's Depends: R", {
       "r-base" %in% names(run) || any(grepl("pin_compatible\\(\\s*[\"']r-base[\"']", names(run))),
       info = nm
     )
+    # no floor at the build's patch release: an R 4.5.0 env must not need an
+    # R upgrade for a package built on 4.5.3 (r-base's own run_export pins
+    # the minor). A pin_compatible() needs lower_bound = "x.x".
+    pins <- grep("pin_compatible\\(\\s*[\"']r-base[\"']", names(run), value = TRUE)
+    for (pin in pins) {
+      expect_match(pin, "lower_bound\\s*=\\s*[\"']x\\.x[\"']", info = pin)
+    }
+    if ("r-base" %in% names(run)) {
+      expect_identical(run[["r-base"]], "", info = paste(nm, "run r-base spec"))
+    }
   }
 })
 
@@ -382,9 +389,12 @@ test_that("conda/README.md gives the maintainer procedure", {
   expect_match(text, "--owner bbtheo", fixed = TRUE)
   expect_match(text, "ANACONDA_API_KEY", fixed = TRUE)
   # a one-time login that keeps the token out of the shell history
-  expect_match(text, "read -rs T && rattler-build auth login anaconda.org --conda-token \"$T\"; unset T",
+  # (stored under api.anaconda.org, the host `rattler-build upload anaconda`
+  # looks the token up under)
+  expect_match(text, "read -rs T && rattler-build auth login api.anaconda.org --conda-token \"$T\"; unset T",
                fixed = TRUE)
-  expect_match(text, "api.anaconda.org", fixed = TRUE)  # the other host name to try
+  expect_match(text, "rattler-build auth status", fixed = TRUE)  # shows the stored host
+  expect_no_match(text, "auth login anaconda\\.org")
   expect_match(text, "conda-forge can follow|conda-forge[^\n]{0,80}(later|follow)", ignore.case = TRUE)
   expect_match(text, "variants.yaml", fixed = TRUE)
   expect_match(text, "create")  # a fresh environment

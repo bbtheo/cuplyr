@@ -38,9 +38,9 @@ test_that("pixi.toml pins libcudf, librmm and libkvikio to the 26.10 and 26.02 s
   }
 })
 
-# The conda recipes pin the RAPIDS series a binary is built against (a binary
+# The conda recipe pins the RAPIDS series a binary is built against (a binary
 # can't run on another series); test-parity-135-conda-recipe.R checks that the
-# series they build is no older than configure's minimum.
+# series it builds is no older than configure's minimum.
 
 test_that("DESCRIPTION SystemRequirements gives libcudf a lower bound and no upper bound", {
   skip_if_no_pkg_file("DESCRIPTION")
