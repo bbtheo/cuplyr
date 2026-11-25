@@ -43,6 +43,14 @@ p94_code_lines <- function(f) {
   sub("//.*$", "", lines)
 }
 
+# The same, after `filter(f, lines)` blanked exempt regions (it sees the raw
+# lines, comments included, so it can find marker comments).
+p94_code_lines_keep <- function(f, filter) {
+  lines <- filter(f, readLines(f, warn = FALSE))
+  lines[grepl("^\\s*(/\\*|\\*)", lines)] <- ""
+  sub("//.*$", "", lines)
+}
+
 # ---------------------------------------------------------------------------
 # Declared ranges
 # ---------------------------------------------------------------------------
@@ -146,9 +154,29 @@ test_that("no C++ source uses rmm::mr::device_memory_resource or get_current_dev
   files <- files[!grepl("RcppExports", files)]
   expect_gt(length(files), 0L)
 
+  # One exemption: libcudf 26.02's cudf::get_current_device_resource_ref()
+  # returns RMM's legacy pointer-map resource, so on 26.02 cuplyr's resource must
+  # also be installed there. That bridge lives in src/cuplyr_mr.hpp between the
+  # marker comments `RMM 26.02 legacy-map bridge: begin` / `: end`, inside
+  # `#if !CUPLYR_RMM_NEW_API` (the 26.10 build, which has no
+  # device_memory_resource at all, would fail if it leaked out).
+  drop_bridge <- function(f, lines) {
+    if (basename(f) != "cuplyr_mr.hpp") return(lines)
+    b <- grep("RMM 26.02 legacy-map bridge: begin", lines, fixed = TRUE)
+    e <- grep("RMM 26.02 legacy-map bridge: end", lines, fixed = TRUE)
+    if (length(b) != length(e) || length(b) == 0L) return(lines)
+    keep <- rep(TRUE, length(lines))
+    for (i in seq_along(b)) {
+      expect_lt(b[[i]], e[[i]])
+      keep[b[[i]]:e[[i]]] <- FALSE
+    }
+    lines[!keep] <- ""
+    lines
+  }
+
   offenders <- character()
   for (f in files) {
-    code <- p94_code_lines(f)
+    code <- p94_code_lines_keep(f, drop_bridge)
     hit <- grep(paste0("device_memory_resource|",
                        "get_current_device_resource\\s*\\(|",
                        "RMM_ENABLE_LEGACY_MR_INTERFACE"), code)
