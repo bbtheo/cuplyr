@@ -83,3 +83,61 @@ test_that("an empty call argument in a many-dot mutate() is dplyr's", {
   expect_identical(msg(function() collect(mutate(tbl_gpu(df, lazy = FALSE), !!!dots[c(1, 25)]))),
                    msg(function() dplyr::mutate(df, !!!dots[c(1, 25)])))
 })
+
+test_that("order_by() and with_order() over a computed argument in a many-dot mutate() are dplyr's", {
+  skip_if_no_gpu()
+  df <- data.frame(
+    x = c(1, 2, 3, 4), o = c(4, 3, 2, 1),
+    d = as.Date("2024-01-01") + c(3, 0, 2, 1),
+    t = as.POSIXct("2024-01-01 12:00:00", tz = "America/New_York") + c(0, 60, 30, 90)
+  )
+  # (the computed first argument is parsed through a placeholder column that
+  # only the call's own schema has)
+  p75d_same(df, z = dplyr::order_by(o, cumsum(x * 2)))
+  p75d_same(df, z = dplyr::with_order(o, cumsum, x * 2))
+  p75d_same(df, z = dplyr::order_by(o, cumsum(x * 2)), w = z + v1)
+  p75d_same(df, z = dplyr::order_by(-o, cummax(x + o)), y = dplyr::with_order(x, dplyr::lag, o * 3))
+  p75d_same(df, z = dplyr::order_by(o, dplyr::lag(d + 1)), w = dplyr::order_by(x, dplyr::lead(t + 60)))
+  # a bare column still is the column
+  p75d_same(df, z = dplyr::order_by(o, cumsum(x)))
+})
+
+test_that("a many-dot schema's hash is not trusted on a copy it doesn't describe", {
+  s <- schema_hash_new(list(names = c("a", "b"), types = c("FLOAT64", "INT32")))
+  # a copy that grows without the hash (as a callee's placeholder does)
+  grown <- s
+  grown$names <- c(grown$names, "p")
+  grown$types <- c(grown$types, "INT64")
+  expect_identical(ir_schema_pos(grown, "p"), 3L)
+  expect_true(ir_schema_has_type(grown, "INT64"))
+  expect_identical(ir_schema_pos(s, "p"), NA_integer_)
+  expect_false(ir_schema_has_type(s, "INT64"))
+  # the original grows on (the hash with it) while a copy of the earlier
+  # schema is kept: the copy is still read right
+  kept <- s
+  s$names[[3L]] <- "q"
+  s$types[[3L]] <- "STRING"
+  schema_hash_append(s, "q", "STRING")
+  expect_identical(ir_schema_pos(s, "q"), 3L)
+  expect_identical(ir_schema_pos(kept, "q"), NA_integer_)
+  expect_identical(ir_schema_pos(kept, "b"), 2L)
+  # two copies that grew apart, both written through the hash
+  other <- kept
+  other$names[[3L]] <- "r"
+  other$types[[3L]] <- "BOOL8"
+  schema_hash_append(other, "r", "BOOL8")
+  expect_identical(ir_schema_pos(s, "q"), 3L)
+  expect_identical(ir_schema_pos(s, "r"), NA_integer_)
+  expect_identical(ir_schema_pos(other, "r"), 3L)
+  expect_identical(ir_schema_pos(other, "q"), NA_integer_)
+  # a retype never makes a type look absent that a column still has
+  schema_hash_retype(s, 2L, "FLOAT64")
+  s$types[[2L]] <- "FLOAT64"
+  expect_true(ir_schema_has_type(s, "FLOAT64"))
+  # a mutate record's schema holds no hash
+  dots <- rlang::quos(!!!stats::setNames(lapply(1:30, function(i) rlang::expr(a + !!i)), paste0("v", 1:30)))
+  recs <- parse_mutate_dots(dots, list(names = c("a", "b"), types = c("FLOAT64", "INT32")), "mutate")
+  expect_length(recs, 30L)
+  for (r in recs) expect_null(r$checked_int$schema$.hash)
+  expect_identical(recs[[30]]$checked_int$schema$names, c("a", "b", paste0("v", 1:29)))
+})

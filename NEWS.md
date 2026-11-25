@@ -19,6 +19,11 @@
   once, and builds its argument list faster. It interpolates as R does, from
   the two neighbouring values, so its values are R's to the bit (#75).
 
+* A `summarise()` `quantile()` whose `probs`, `names`, `digits` or `type`
+  reads a column (`quantile(x, p)` with a column `p`) is evaluated by dplyr,
+  in the data mask. Before, a variable of that name outside the data was used
+  instead (#75).
+
 * RAPIDS 25.12 is no longer supported: cuplyr needs RAPIDS 26.02 or later, is tested on 26.10, and installs 26.10 for CUDA 13 (#94).
 
   It builds against libcudf and RMM `>=26.02` with no upper bound, and uses

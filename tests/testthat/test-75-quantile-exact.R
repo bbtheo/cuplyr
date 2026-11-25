@@ -128,6 +128,21 @@ test_that("a grouped quantile() over more (group, probability) pairs than rows i
   for (lazy in c(FALSE, TRUE)) p75q_bits(df, p, by = "k", lazy = lazy)
 })
 
+test_that("a chunked grouped quantile() with all-NA groups under na.rm is R's, to the bit", {
+  skip_if_no_gpu()
+  withr::local_options(dplyr.summarise.inform = FALSE, cuplyr.fallback = "error")
+  set.seed(7514)
+  # 201 probabilities over 5000 groups are two chunks (2608 groups, 2^19 %/%
+  # 201, then the rest): all-NA groups at both ends and on either side of the
+  # boundary
+  n <- 20000
+  df <- data.frame(k = c(1:5000, sample.int(5000L, n - 5000L, TRUE)), x = rnorm(n))
+  df$x[df$k %in% c(1L, 2608L, 2609L, 5000L)] <- NA
+  df$x[sample.int(n, 500)] <- NA
+  p <- seq(0, 1, by = 0.005)
+  for (lazy in c(FALSE, TRUE)) p75q_bits(df, p, by = "k", na_rm = TRUE, lazy = lazy)
+})
+
 test_that("quantile() names follow options(OutDec) at every call", {
   skip_if_no_gpu()
   withr::local_options(dplyr.summarise.inform = FALSE, cuplyr.fallback = "error")
@@ -156,9 +171,18 @@ test_that("quantile() names follow options(OutDec) at every call", {
 })
 
 test_that("the label worked out for a probability is quantile()'s own", {
-  probs <- c(0, 1, 0.5, 0.125, 1 / 3, 2 / 3, 0.001, 0.999, 0.12345678, 1e-9, 0.1 + 0.2, 0.95, 0.975)
+  probs <- c(0, 1, 0.5, 0.125, 1 / 3, 2 / 3, 0.001, 0.999, 0.12345678, 1e-9, 0.1 + 0.2, 0.95, 0.975,
+             1e-7, 0.999999, 1e-15, 1 - 1e-15, 5e-324, 0.123456789012)
   for (dec in c(".", ",")) {
     withr::local_options(OutDec = dec)
+    # the default digits, written out (by position, by name, with more arguments)
+    for (p in probs) {
+      for (expr in list(rlang::expr(quantile(x, !!p)), rlang::expr(quantile(x, probs = !!p)),
+                        rlang::expr(quantile(x, probs = !!p, type = 7)))) {
+        got <- extract_quantile_probs(expr, globalenv(), rlang::new_quosure(expr))$qnames
+        expect_identical(got, names(stats::quantile(0, p)))
+      }
+    }
     for (digits in c(1, 2, 3, 7, 10, 15, 17)) {
       for (p in probs) {
         expr <- rlang::expr(quantile(x, !!p, digits = !!digits))

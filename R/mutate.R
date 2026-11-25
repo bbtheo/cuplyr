@@ -1350,7 +1350,7 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
       keep_idx <- schema$names != new_name
       schema$names <- schema$names[keep_idx]
       schema$types <- schema$types[keep_idx]
-      if (!is.null(.subset2(schema, ".pos"))) schema <- schema_hash_new(schema)  # (positions moved)
+      if (!is.null(.subset2(schema, ".hash"))) schema <- schema_hash_new(schema)  # (positions moved)
       schema <- set_schema_factor_levels(schema, new_name, NULL)
       forget_frac(new_name)
       next
@@ -1528,11 +1528,11 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     }
 
     # Update the running schema so subsequent dots see this dot's output.
-    # (#75) A many-dot call's simple step is done here, on this frame's own
-    # `schema`: through a call, each dot would copy the whole `names`/`types`
-    # (a call shares them with this frame), where an append in place grows
-    # them in amortized constant time. update_schema_for_expr() is the rule.
-    if (!is.null(.subset2(schema, ".pos")) && is.null(.subset2(schema, "factor_levels")) &&
+    # (#75) A many-dot call's simple step is done here, without the call and
+    # the c() of update_schema_for_expr(), which is the rule. The append still
+    # copies `names`/`types` (the step's checked-int cell and the type memo
+    # hold the schema it was typed against), a plain copy per dot.
+    if (!is.null(.subset2(schema, ".hash")) && is.null(.subset2(schema, "factor_levels")) &&
           is.null(.subset2(schema, "tz")) &&
           !(unname(step$output_type) %in% c("TIMESTAMP_MICROSECONDS", "DICTIONARY32"))) {
       existing_idx <- ir_schema_pos(schema, step$output_col)
@@ -2023,7 +2023,7 @@ update_schema_for_expr <- function(schema, expr) {
   # a factor nor a POSIXct: only the name and type change.
   if (is.null(schema$factor_levels) && is.null(schema$tz) &&
       !(unname(expr$output_type) %in% c("TIMESTAMP_MICROSECONDS", "DICTIONARY32"))) {
-    hashed <- !is.null(.subset2(schema, ".pos"))
+    hashed <- !is.null(.subset2(schema, ".hash"))
     existing_idx <- if (hashed) ir_schema_pos(schema, expr$output_col) else match(expr$output_col, schema$names)
     if (!is.na(existing_idx)) {
       if (hashed) schema_hash_retype(schema, existing_idx, expr$output_type)

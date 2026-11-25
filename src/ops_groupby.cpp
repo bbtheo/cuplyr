@@ -609,6 +609,15 @@ struct QuantileRequests {
                                          cudf::binary_operator::NULL_MAX, f64);
         minus1.reset();
 
+        // The probabilities on the device, once for every chunk.
+        std::unique_ptr<cudf::column> ps;
+        if (K > 1) {
+            ps = cudf::make_numeric_column(f64, K);
+            check_cuda(cudaMemcpy(ps->mutable_view().data<double>(), b.probs.data(),
+                                  sizeof(double) * K, cudaMemcpyHostToDevice),
+                       "quantile probabilities");
+        }
+
         // The values of groups [g0, g1), flat. Only the output, `lower` and
         // `higher` are G * K long at once: the temporaries (n1 and p laid out
         // like the values, the comparisons, the interpolation) are a chunk's.
@@ -620,10 +629,6 @@ struct QuantileRequests {
             std::unique_ptr<cudf::column> n1_flat, p_flat;
             if (K > 1) {
                 n1_flat = std::move(cudf::repeat(cudf::table_view({n1_c}), K)->release()[0]);
-                auto ps = cudf::make_numeric_column(f64, K);
-                check_cuda(cudaMemcpy(ps->mutable_view().data<double>(), b.probs.data(),
-                                      sizeof(double) * K, cudaMemcpyHostToDevice),
-                           "quantile probabilities");
                 p_flat = std::move(cudf::tile(cudf::table_view({ps->view()}), Gc)->release()[0]);
             } else {
                 p_flat = cudf::make_column_from_scalar(cudf::numeric_scalar<double>(b.probs[0], true), Gc);
@@ -691,19 +696,25 @@ struct QuantileRequests {
             return cudf::copy_if_else(at_index->view(), picked->view(), whole->view());
         };
 
-        // (a null in `lower` makes the output nullable, which the chunks are not
-        // copied into: such a result is made whole)
+        // A null in `lower`/`higher` (an all-NA group under na.rm = TRUE) is
+        // null in its chunk's values: the output then has a mask, all valid to
+        // begin with, that each chunk's copy writes, and its count is taken last.
         constexpr cudf::size_type kChunkRows = 1 << 19;
         const cudf::size_type per_chunk = std::max<cudf::size_type>(1, kChunkRows / K);
         std::unique_ptr<cudf::column> out;
-        if (G <= per_chunk || lower.has_nulls() || higher.has_nulls()) {
+        if (G <= per_chunk) {
             out = compute_groups(0, G);
         } else {
-            out = cudf::make_numeric_column(f64, G * K);
+            const bool nulls = lower.has_nulls() || higher.has_nulls();
+            out = cudf::make_numeric_column(f64, G * K,
+                                            nulls ? cudf::mask_state::ALL_VALID : cudf::mask_state::UNALLOCATED);
             auto mv = out->mutable_view();
             for (cudf::size_type g0 = 0; g0 < G; g0 += per_chunk) {
                 auto c = compute_groups(g0, std::min(G, g0 + per_chunk));
                 cudf::copy_range_in_place(c->view(), mv, 0, c->size(), g0 * K);
+            }
+            if (nulls) {
+                out->set_null_count(cudf::null_count(out->view().null_mask(), 0, out->size()));
             }
         }
         res.results[b.lo].reset();

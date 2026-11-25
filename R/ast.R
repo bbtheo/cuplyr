@@ -493,7 +493,11 @@ make_mutate_expr <- function(output_col, ir, schema) {
     ir = ir,
     input_cols = ir_cols(ir),
     output_type = ir_infer_type_memo(ir, schema),
-    checked_int = new_checked_int_cell(ir, schema)
+    # (#75) the record keeps a many-dot mutate()'s running schema without its
+    # hash, which later dots go on writing (schema_hash_new())
+    checked_int = new_checked_int_cell(
+      ir, if (is.null(.subset2(schema, ".hash"))) schema else schema_unhash(schema)
+    )
   )
 }
 
