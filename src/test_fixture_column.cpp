@@ -8,6 +8,7 @@
 // list [v, v + 1]; a STRUCT has one INT32 field. "DICTIONARY32_INT32" is a
 // dictionary with INT32 keys. Not used by the package itself.
 
+#include <rmm/cuda_stream_view.hpp>
 #include "gpu_table.hpp"
 
 #include <cudf/column/column.hpp>

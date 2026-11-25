@@ -1,5 +1,7 @@
 // src/ops_join.cpp
 // GPU join implementations using cuDF
+#include <variant>  // libcudf 26.10's cudf/ast/expressions.hpp uses std::variant without including it
+#include <rmm/cuda_stream_view.hpp>
 #include <Rcpp.h>
 
 #include "cuda_utils.hpp"
@@ -14,6 +16,7 @@
 #error "cuDF join headers not found (expected cudf/join/join.hpp or cudf/join.hpp)"
 #endif
 #include <cudf/join/filtered_join.hpp>
+#include "cuplyr_compat.hpp"
 #include <cudf/join/mixed_join.hpp>
 #include <cudf/join/conditional_join.hpp>
 #include <cudf/aggregation.hpp>
@@ -130,7 +133,7 @@ std::unique_ptr<cudf::column> sanitize_join_map(
     const cudf::column_view& map_col,
     cudf::size_type nrows,
     rmm::cuda_stream_view stream,
-    rmm::mr::device_memory_resource* mr) {
+    rmm::device_async_resource_ref mr) {
 
     cudf::numeric_scalar<cudf::size_type> zero_scalar(0, true, stream);
     cudf::numeric_scalar<cudf::size_type> nrows_scalar(nrows, true, stream);
@@ -181,7 +184,7 @@ Rcpp::List join_map_stats(
     cudf::size_type n_left,
     cudf::size_type n_right,
     rmm::cuda_stream_view stream,
-    rmm::mr::device_memory_resource* mr) {
+    rmm::device_async_resource_ref mr) {
 
     // Smallest value that appears more than once in `map_col`'s entries
     // that are NOT equal to `sentinel` (i.e. among real matches only).
@@ -247,10 +250,9 @@ Rcpp::List join_map_stats(
         auto seq = cudf::sequence(n, zero_scalar, stream, mr);
 
         cudf::table_view build_tbl({valid_col});
-        cudf::filtered_join joiner(build_tbl, cudf::null_equality::EQUAL,
-                                   cudf::set_as_build_table::RIGHT, stream);
+        auto joiner = cuplyr::make_filtered_join(build_tbl, cudf::null_equality::EQUAL, stream);
         cudf::table_view probe_tbl({seq->view()});
-        auto unmatched_idx = joiner.anti_join(probe_tbl, stream, mr);
+        auto unmatched_idx = joiner->anti_join(probe_tbl, stream, mr);
         if (unmatched_idx->size() == 0) return -1;
 
         cudf::column_view idx_view(cudf::device_span<cudf::size_type const>(
@@ -313,7 +315,7 @@ std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>> apply_mu
     cudf::size_type n_left,
     bool reclassify_excess,
     rmm::cuda_stream_view stream,
-    rmm::mr::device_memory_resource* mr) {
+    rmm::device_async_resource_ref mr) {
 
     // "any" behaves like "first" in this backend -- verified empirically
     // against dplyr 1.2.1 (both pick the smallest matching right-row index
@@ -382,9 +384,8 @@ std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>> apply_mu
                                           cudf::null_equality::EQUAL,
                                           cudf::nan_equality::ALL_EQUAL, stream, mr);
     cudf::table_view kept_right({kept->view().column(1)});
-    cudf::filtered_join used(kept_right, cudf::null_equality::EQUAL,
-                             cudf::set_as_build_table::RIGHT, stream);
-    auto unused_idx = used.anti_join(distinct_excess->view(), stream, mr);
+    auto used = cuplyr::make_filtered_join(kept_right, cudf::null_equality::EQUAL, stream);
+    auto unused_idx = used->anti_join(distinct_excess->view(), stream, mr);
     cudf::column_view unused_idx_view(cudf::device_span<cudf::size_type const>(
         unused_idx->data(), unused_idx->size()));
     auto tail_right = cudf::gather(distinct_excess->view(), unused_idx_view,
@@ -438,7 +439,7 @@ JoinBuildResult build_join_result(
     bool reclassify_excess = false) {
 
     auto stream = cudf::get_default_stream();
-    auto mr = rmm::mr::get_current_device_resource();
+    auto mr = rmm::mr::get_current_device_resource_ref();
 
     // Step 1: device-side sanitize (replaces the old host round-trip;
     // fixes the latent >= nrows sentinel gap). Every join map downstream of
@@ -786,7 +787,7 @@ SEXP gpu_right_join(SEXP xptr_left,
                                      : cudf::null_equality::UNEQUAL;
 
     auto stream = cudf::get_default_stream();
-    auto mr = rmm::mr::get_current_device_resource();
+    auto mr = rmm::mr::get_current_device_resource_ref();
 
     auto [inner_left_map, inner_right_map] = cudf::inner_join(
         left_key_view, right_key_view, null_equality);
@@ -797,20 +798,20 @@ SEXP gpu_right_join(SEXP xptr_left,
     // build=right/probe=left arrangement above (there, build=y/probe=x
     // returns x-side unmatched/matched indices; here it's flipped).
     //
-    // `reuse_tbl` is passed RIGHT here even though x (this call's build
-    // table) is NOT this join's right-hand table -- verified empirically
-    // (this cudf build's filtered_join.cu) that `set_as_build_table::LEFT`
+    // libcudf 26.02's `set_as_build_table` is passed RIGHT here even though x
+    // (this call's build table) is NOT this join's right-hand table --
+    // verified empirically (filtered_join.cu) that `set_as_build_table::LEFT`
     // is simply unimplemented ("Left table reuse is yet to be implemented.
     // Filtered join requires the right table to be the build table"), so
     // RIGHT is the only supported value regardless of which real table is
-    // passed as `build`. It only selects the underlying hash structure
+    // passed as `build` (26.10 dropped the argument; make_filtered_join()
+    // hides the difference). It only selects the underlying hash structure
     // (`cuco::static_set`, a plain membership set -- exactly what an
     // anti-join's "is this key present at all" check needs); it does not
     // change which table is `build` vs which is the `probe` argument to
     // anti_join() below.
-    cudf::filtered_join x_filter(left_key_view, null_equality,
-                                cudf::set_as_build_table::RIGHT, stream);
-    auto unmatched_y = x_filter.anti_join(right_key_view, stream, mr);
+    auto x_filter = cuplyr::make_filtered_join(left_key_view, null_equality, stream);
+    auto unmatched_y = x_filter->anti_join(right_key_view, stream, mr);
 
     cudf::size_type n_left = left_view.num_rows();
 
@@ -898,18 +899,17 @@ SEXP gpu_semi_anti_join(SEXP xptr_left,
                                      : cudf::null_equality::UNEQUAL;
 
     auto stream = cudf::get_default_stream();
-    auto mr = rmm::mr::get_current_device_resource();
+    auto mr = rmm::mr::get_current_device_resource_ref();
 
     // Build the hash table from the right/filter table (scratchpad/
     // phase7_joins_design.md J2's verified fact); probe with the left table.
     // Returned indices are UNORDERED left-table row indices with no
     // duplication -- even when multiple right rows match the same left key,
     // a left row appears at most once.
-    cudf::filtered_join joiner(right_key_view, null_equality,
-                               cudf::set_as_build_table::RIGHT, stream);
+    auto joiner = cuplyr::make_filtered_join(right_key_view, null_equality, stream);
 
-    auto indices = is_anti ? joiner.anti_join(left_key_view, stream, mr)
-                           : joiner.semi_join(left_key_view, stream, mr);
+    auto indices = is_anti ? joiner->anti_join(left_key_view, stream, mr)
+                           : joiner->semi_join(left_key_view, stream, mr);
 
     // Sort the index vector ascending before gathering, to reproduce dplyr's
     // left-row-order contract (filtered_join's result order is unspecified).
@@ -1037,7 +1037,7 @@ SEXP gpu_cond_join(SEXP xptr_left,
                                      : cudf::null_equality::UNEQUAL;
 
     auto stream = cudf::get_default_stream();
-    auto mr = rmm::mr::get_current_device_resource();
+    auto mr = rmm::mr::get_current_device_resource_ref();
 
     if (join_kind == "right") {
         // See this function's own file-level comment for the full
@@ -1230,19 +1230,19 @@ namespace {
 using ColPtr = std::unique_ptr<cudf::column>;
 
 ColPtr roll_i32_const(cudf::size_type v, cudf::size_type n,
-                      rmm::cuda_stream_view stream, rmm::mr::device_memory_resource* mr) {
+                      rmm::cuda_stream_view stream, rmm::device_async_resource_ref mr) {
     cudf::numeric_scalar<cudf::size_type> s(v, true, stream);
     return cudf::make_column_from_scalar(s, n, stream, mr);
 }
 
 ColPtr roll_bool_const(bool v, cudf::size_type n,
-                       rmm::cuda_stream_view stream, rmm::mr::device_memory_resource* mr) {
+                       rmm::cuda_stream_view stream, rmm::device_async_resource_ref mr) {
     cudf::numeric_scalar<bool> s(v, true, stream);
     return cudf::make_column_from_scalar(s, n, stream, mr);
 }
 
 ColPtr roll_seq(cudf::size_type n, rmm::cuda_stream_view stream,
-                rmm::mr::device_memory_resource* mr) {
+                rmm::device_async_resource_ref mr) {
     if (n == 0) {
         return cudf::make_numeric_column(cudf::data_type(cudf::type_id::INT32), 0,
                                          cudf::mask_state::UNALLOCATED, stream, mr);
@@ -1253,24 +1253,24 @@ ColPtr roll_seq(cudf::size_type n, rmm::cuda_stream_view stream,
 
 ColPtr roll_binop(const cudf::column_view& a, const cudf::column_view& b,
                   cudf::binary_operator op, cudf::type_id out,
-                  rmm::cuda_stream_view stream, rmm::mr::device_memory_resource* mr) {
+                  rmm::cuda_stream_view stream, rmm::device_async_resource_ref mr) {
     return cudf::binary_operation(a, b, op, cudf::data_type(out), stream, mr);
 }
 
 ColPtr roll_binop_s(const cudf::column_view& a, cudf::size_type v, cudf::binary_operator op,
                     cudf::type_id out, rmm::cuda_stream_view stream,
-                    rmm::mr::device_memory_resource* mr) {
+                    rmm::device_async_resource_ref mr) {
     cudf::numeric_scalar<cudf::size_type> s(v, true, stream);
     return cudf::binary_operation(a, s, op, cudf::data_type(out), stream, mr);
 }
 
 ColPtr roll_and(const cudf::column_view& a, const cudf::column_view& b,
-                rmm::cuda_stream_view stream, rmm::mr::device_memory_resource* mr) {
+                rmm::cuda_stream_view stream, rmm::device_async_resource_ref mr) {
     return roll_binop(a, b, cudf::binary_operator::LOGICAL_AND, cudf::type_id::BOOL8, stream, mr);
 }
 
 ColPtr roll_not(const cudf::column_view& a, rmm::cuda_stream_view stream,
-                rmm::mr::device_memory_resource* mr) {
+                rmm::device_async_resource_ref mr) {
     return cudf::unary_operation(a, cudf::unary_operator::NOT, stream, mr);
 }
 
@@ -1281,7 +1281,7 @@ bool roll_is_float(const cudf::column_view& col) {
 // BOOL8, true where a floating-point value is NaN. A null is not NaN (the data
 // under a null slot can hold NA_real_'s NaN payload, so is_nan alone is wrong).
 ColPtr roll_is_nan(const cudf::column_view& col, rmm::cuda_stream_view stream,
-                   rmm::mr::device_memory_resource* mr) {
+                   rmm::device_async_resource_ref mr) {
     auto nan = cudf::is_nan(col, stream, mr);
     auto valid = cudf::is_valid(col, stream, mr);
     return roll_and(nan->view(), valid->view(), stream, mr);
@@ -1327,7 +1327,7 @@ SEXP gpu_rolling_join(SEXP xptr_left,
     const bool use_upper = (below == inclusive);
 
     auto stream = cudf::get_default_stream();
-    auto mr = rmm::mr::get_current_device_resource();
+    auto mr = rmm::mr::get_current_device_resource_ref();
 
     const cudf::size_type nx = left_view.num_rows();
     const cudf::size_type ny = right_view.num_rows();
@@ -1585,7 +1585,7 @@ SEXP gpu_string_codes(SEXP xptr_left, int left_idx, SEXP xptr_right, int right_i
     }
 
     auto stream = cudf::get_default_stream();
-    auto mr = rmm::mr::get_current_device_resource();
+    auto mr = rmm::mr::get_current_device_resource_ref();
 
     auto lcol = left_view.column(left_idx);
     auto rcol = right_view.column(right_idx);

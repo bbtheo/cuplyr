@@ -52,6 +52,7 @@
 //   "topk" attribute: the route shows as a slice node of mode "rank_grouped" in
 //   the plan. See the comment above it for the algorithm.
 
+#include <rmm/cuda_stream_view.hpp>
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
 #include "ops_common.hpp"
@@ -187,7 +188,7 @@ SEXP gpu_slice_indices(SEXP xptr, NumericVector raw_indices) {
     }
 
     auto stream = cudf::get_default_stream();
-    auto mr = rmm::mr::get_current_device_resource();
+    auto mr = rmm::mr::get_current_device_resource_ref();
 
     rmm::device_uvector<cudf::size_type> d_idx(keep.size(), stream);
     check_cuda(
@@ -240,7 +241,7 @@ Rcpp::List gpu_split_rows(SEXP xptr, IntegerVector idx0, IntegerVector sizes) {
                 Rcpp::stop("group_split(): row index out of range");
         }
         auto stream = cudf::get_default_stream();
-        auto mr = rmm::mr::get_current_device_resource();
+        auto mr = rmm::mr::get_current_device_resource_ref();
         rmm::device_uvector<cudf::size_type> d_idx(idx0.size(), stream);
         check_cuda(
             cudaMemcpy(d_idx.data(), &idx0[0], idx0.size() * sizeof(cudf::size_type),
@@ -453,7 +454,7 @@ SEXP gpu_slice_rank(SEXP xptr, int order_col_idx, bool descending, double amount
     cudf::size_type size = compute_slice_size(amount, is_prop, nrow);
 
     auto stream = cudf::get_default_stream();
-    auto mr = rmm::mr::get_current_device_resource();
+    auto mr = rmm::mr::get_current_device_resource_ref();
 
     cudf::order col_order = descending ? cudf::order::DESCENDING : cudf::order::ASCENDING;
 
@@ -660,7 +661,7 @@ SEXP gpu_slice_rank_grouped(SEXP xptr, IntegerVector group_idx, int order_col_id
     }
 
     auto stream = cudf::get_default_stream();
-    auto mr = rmm::mr::get_current_device_resource();
+    auto mr = rmm::mr::get_current_device_resource_ref();
 
     const cudf::size_type m = view.num_rows();
     if (m == 0) {

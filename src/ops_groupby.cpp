@@ -1,4 +1,5 @@
 // src/ops_groupby.cpp
+#include <rmm/cuda_stream_view.hpp>
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
 #include "int_sum.hpp"
@@ -14,6 +15,7 @@
 #include <cudf/null_mask.hpp>
 #include <cudf/sorting.hpp>
 #include <cudf/stream_compaction.hpp>
+#include "cuplyr_compat.hpp"  // distinct_count() header differs by libcudf version
 #include <cudf/reduction.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/table/table.hpp>

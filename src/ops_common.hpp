@@ -1,6 +1,7 @@
 #ifndef CUPLYR_OPS_COMMON_HPP
 #define CUPLYR_OPS_COMMON_HPP
 
+#include <variant>  // libcudf 26.10's cudf/ast/expressions.hpp (via cudf/transform.hpp) uses std::variant without including it
 #include <Rcpp.h>
 #include <cudf/binaryop.hpp>
 #include <cudf/column/column.hpp>

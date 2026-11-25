@@ -48,6 +48,7 @@
 #ifndef CUPLYR_EXPR_EVAL_HPP
 #define CUPLYR_EXPR_EVAL_HPP
 
+#include <variant>  // libcudf 26.10's cudf/ast/expressions.hpp uses std::variant without including it
 #include "cuda_utils.hpp"
 #include "gpu_table.hpp"
 #include "ops_common.hpp"
@@ -839,7 +840,7 @@ inline std::unique_ptr<cudf::numeric_scalar<double>> make_f64_scalar(double v, b
         auto s = std::make_unique<cudf::numeric_scalar<double>>(1.0, true);
         cuplyr::check_cuda(cudaMemcpyAsync(s->data(), &neg_zero, sizeof(double),
                                            cudaMemcpyHostToDevice,
-                                           cudf::get_default_stream().value()),
+                                           cudf::get_default_stream().get()),
                            "negative zero scalar");
         return s;
     }

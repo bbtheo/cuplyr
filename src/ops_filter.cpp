@@ -7,6 +7,7 @@
 // gpu_filter_expr() (src/ops_expr.cpp) instead -- gpu_filter_scalar()/
 // gpu_filter_col() were deleted in Phase 1 T8 once that cutover left them
 // with no remaining R callers.
+#include <rmm/cuda_stream_view.hpp>
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
 
