@@ -13,15 +13,16 @@
 #   back to the build machine's driver.
 # - Without the switch a source install behaves as before: a driver found on
 #   the machine is linked and its directory is on RUNPATH.
-# - conda/build.sh (run by rattler-build and conda-build in the source
+# - conda/build.sh (run by rattler-build in the source
 #   directory, with PREFIX = the host environment) configures against PREFIX
 #   only, whatever CONDA_PREFIX, CUDA_HOME or CUDF_HOME the caller's shell
 #   has; removes compiled objects copied from a development checkout; forces
 #   the stub; installs with $R CMD INSTALL; and stops when configure fails.
 # - R, as build.sh starts it, reads none of the user's startup files
 #   (R_ENVIRON_USER, R_PROFILE_USER) and no personal Makevars
-#   (R_MAKEVARS_USER): conda-build passes HOME on, and R CMD INSTALL runs
-#   configure again from an R process, which would otherwise pick up a
+#   (R_MAKEVARS_USER): rattler-build outside strict isolation passes HOME
+#   on, and R CMD INSTALL runs configure again from an R process, which
+#   would otherwise pick up a
 #   CUDA_HOME or CUDF_HOME set in ~/.Renviron, and compile with ~/.R/Makevars.
 #
 # These tests need neither a GPU nor a CUDA install: configure and build.sh
@@ -375,7 +376,7 @@ test_that("conda/build.sh keeps the user's R startup files and ~/.R/Makevars out
   dir.create(file.path(build, "bin"))
   other_env <- p135b_fake_prefix(withr::local_tempdir("active-env-"), cudf_version = c(26, 2, 0))
   system_cuda <- p135b_fake_system_cuda(withr::local_tempdir("system-cuda-"))
-  # conda-build (and rattler-build outside strict isolation) passes HOME on
+  # rattler-build outside strict isolation passes HOME on
   home <- p135b_fake_home(withr::local_tempdir("home-"), system_cuda, other_env)
   pkg <- p135b_scratch_pkg()
 

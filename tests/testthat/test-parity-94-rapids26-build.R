@@ -66,7 +66,7 @@ test_that("DESCRIPTION requires libcudf >= 26.02 with no upper bound", {
   expect_no_match(sysreq, "libcudf[^)]*<")
 })
 
-# conda/meta.yaml and conda/recipe.yaml: see test-parity-135-conda-recipe.R
+# conda/recipe.yaml: see test-parity-135-conda-recipe.R
 # (each binary is pinned to the series it is built against, and the recipes
 # build nothing older than configure's minimum).
 

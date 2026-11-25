@@ -381,6 +381,10 @@ test_that("conda/README.md gives the maintainer procedure", {
   expect_match(text, "rattler-build upload anaconda", fixed = TRUE)
   expect_match(text, "--owner bbtheo", fixed = TRUE)
   expect_match(text, "ANACONDA_API_KEY", fixed = TRUE)
+  # a one-time login that keeps the token out of the shell history
+  expect_match(text, "read -rs T && rattler-build auth login anaconda.org --conda-token \"$T\"; unset T",
+               fixed = TRUE)
+  expect_match(text, "api.anaconda.org", fixed = TRUE)  # the other host name to try
   expect_match(text, "conda-forge can follow|conda-forge[^\n]{0,80}(later|follow)", ignore.case = TRUE)
   expect_match(text, "variants.yaml", fixed = TRUE)
   expect_match(text, "create")  # a fresh environment
