@@ -61,8 +61,9 @@ with_reframe_wide <- function(expr) {
 #' expression may read an earlier one's result.
 #'
 #' Anything else runs dplyr's `reframe()` on the CPU (see [cuplyr-fallback]).
-#' One divergence remains on the native path: `quantile()`'s element names
-#' (`"10%"`) are dropped. The CPU path keeps them, as dplyr does.
+#' One divergence remains on the native path: `quantile()` with more than one
+#' probability drops its element names (`"10%"`, `"90%"`). The CPU path keeps
+#' them, as dplyr does.
 #'
 #' @param .data A `tbl_gpu`.
 #' @param ... Name-value pairs, as in [dplyr::reframe()].

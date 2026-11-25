@@ -1,28 +1,24 @@
 # cuplyr (development version)
 
-* A column keeps its element names, its extra attributes (a `label`,
-  `scale()`'s `scaled:center`) and the shape of a one-column matrix from
-  `tbl_gpu()` to `collect()`, as dplyr keeps them, through `filter()`,
-  `arrange()`, `slice()`, `distinct()`, `mutate()`, `transmute()`,
-  `summarise()`, `count()`, `group_by()`, `group_keys()`, `select()`,
-  `rename()`, the joins, `bind_rows()` and `bind_cols()`. Extra attributes
-  stay on the GPU through the verbs that keep rows or columns as they are.
-  Element names follow their rows, which a verb that moves rows does by
-  running dplyr on the CPU when a column has names, and `bind_rows()` and the
-  set operations do when any input has names or a matrix column. `mutate()`
-  keeps the names and attributes of columns it does not touch and of bare
-  copies (`b2 = b`), and runs a dot that computes from such a column on the
-  CPU, where R decides what the result keeps. `summarise()` keeps the
-  attributes of its group keys by dplyr's rules (a factor key of a
-  `.drop = FALSE` grouping keeps only its levels, also after `filter()`),
-  `quantile()` in `summarise()` names its result (`"50%"`) as dplyr does,
-  and that name stays on the GPU through the joins that keep every row of
-  its column (a join key keeps the first table's names and attributes unless
-  that key is converted to the other's type or is a factor, as in dplyr); a
-  summary of a plain data frame has no element names, as in dplyr (#21,
-  #56). Some paths still drop names or
-  attributes rather than keep them: `group_split()`, `group_trim()`,
-  `slice_sample()` and grouped `head()`/`tail()`, among others.
+* A column keeps its element names, its other attributes (such as a `label`
+  or `scale()`'s `scaled:center`) and the shape of a one-column matrix from
+  `tbl_gpu()` to `collect()`, `pull()` and `$`, by dplyr's rules, through
+  `filter()`, `arrange()`, `slice()`, `distinct()`, `mutate()`, `transmute()`,
+  `summarise()`, `reframe()`, `count()`, `group_by()`, `group_keys()`,
+  `select()`, `rename()`, the joins, `bind_rows()` and `bind_cols()` (#21).
+  Attributes stay on the GPU through the verbs that keep rows or columns as
+  they are. Element names move with their rows: a verb that moves rows runs on
+  the CPU when a column has element names, as do `bind_rows()` and the set
+  operations when an input has names or a matrix column, and a `mutate()`
+  expression that computes from a column with names or attributes (a bare
+  copy such as `b2 = b` stays on the GPU). A summary of a plain data frame has
+  no element names, as in dplyr. Some paths still drop names or attributes
+  instead of keeping them, among them `group_split()`, `group_trim()`,
+  `slice_sample()`, grouped `head()`/`tail()` and some merged join keys.
+
+* `summarise()` keeps the name `quantile()` gives its result (`"50%"`), as
+  dplyr does, and the name stays on the GPU through the joins that keep every
+  row of its column (#56).
 
 * `left_join()`, `inner_join()`, `right_join()`, `full_join()`, `semi_join()`
   and `anti_join()` accept a key that is all `NA` (a logical column, or

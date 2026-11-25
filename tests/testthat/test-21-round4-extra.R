@@ -78,7 +78,7 @@ test_that("summarise(.groups = \"rowwise\") takes the key check of every summari
   d <- tibble::tibble(b = stats::setNames(c(2L, 1L, 2L), c("x", "y", "z")), v = c(1, 2, 3))
   p21x4_both(d, function(t) summarise(group_by(t, b), n = n(), .groups = "rowwise"))
   p21x4_both(d, function(t) summarise(t, n = n(), .by = b, .groups = NULL))
-  # a rowwise result of a plain data.frame through the CPU route: no names
+  # a rowwise result of a plain data.frame: no names
   df <- data.frame(b = stats::setNames(c(2L, 1L, 2L), c("x", "y", "z")), v = c(1, 2, 3))
   expected <- as.list(dplyr::ungroup(summarise(df, q = quantile(v, 0.5), .groups = "rowwise")))
   for (lazy in c(FALSE, TRUE)) {

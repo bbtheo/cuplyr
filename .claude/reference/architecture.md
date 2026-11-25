@@ -295,9 +295,11 @@ names are equal, and quantile()'s `"50%"`, which needs no row count),
   keep x's, y's kept columns y's. A merged key is dplyr's `vec_cast()` of x's key
   to the common type: it keeps x's entry when only y's key was cast (`key_casts`
   with `cast_left = FALSE`: a double x against an integer y, a character x against
-  a factor or all-`NA` y), and has none when x's key was cast or is a factor (vctrs
-  makes a new factor, same levels or not); `keep = TRUE` keeps both columns as
-  they are. A `names_const` rides along (below). `group_by()`,
+  a factor or all-`NA` y), and has none when x's key was cast or is a factor;
+  `keep = TRUE` keeps both columns as they are. Two cases where dplyr keeps more
+  (lost here, never misplaced): vctrs skips the factor rebuild when both keys share
+  one levels vector (a self-join, a summary of x joined back), so dplyr keeps x's
+  attributes there; and a Date key cast to POSIXct keeps its names in dplyr. A `names_const` rides along (below). `group_by()`,
   `ungroup()`, `compute()`, `names<-`, `count()`, `bind_cols()` copy or re-key the
   field; every other `new_tbl_gpu()` call that rebuilds a table leaves it out, which
   drops the metadata (wrong never, only absent).
@@ -363,8 +365,7 @@ names are equal, and quantile()'s `"50%"`, which needs no row count),
   `vec_ptype2`/vctrs paths, `group_split()`, `group_trim()`, a grouped
   `head()`/`tail()`, `slice_sample()`'s internal gather, a grouped
   `slice_sample()`, zero-column joins, and the key names of fixed-key group data
-  (`group_data()`/`group_keys()`, a zero-dot or CPU-route summarise over fixed
-  keys: dplyr keeps the names the keys had at `group_by()`, here they are
+  (`group_data()`/`group_keys()`, a CPU-route summarise over fixed keys: dplyr keeps the names the keys had at `group_by()`, here they are
   dropped). A one-column matrix with rownames and no colnames as a `.by` key of a
   plain data.frame comes back without dimnames, where dplyr's `as.data.frame()`
   leaves `dimnames = list(NULL, NULL)` (R's `dimnames<-` turns that list into
