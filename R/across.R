@@ -572,6 +572,8 @@ substitute_cur_group_id <- function(.data, dots, group_cols, by = FALSE, rowwise
     new_data <- set_tbl_gpu_field(new_data, "schema", joined$schema)
     new_data <- set_tbl_gpu_field(new_data, "lazy_ops", NULL)
     new_data <- set_tbl_gpu_field(new_data, "exec_mode", joined$exec_mode)
+    # the join's rows (and so the names' rows) are the join's own
+    new_data <- set_tbl_gpu_field(new_data, "col_attrs", joined[["col_attrs"]])
   }
 
   new_dots <- lapply(dots, function(q) {

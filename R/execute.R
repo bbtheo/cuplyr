@@ -604,6 +604,15 @@ push_op <- function(.data, node, input_schema = current_schema(.data), carry = T
   # to the default once the table is ungrouped (a later group_by() starts over).
   new_group_drop <- if (length(new_groups) > 0L) .subset2(.data, "group_drop") %||% TRUE else TRUE
   new_keys <- carry_fixed_keys(node, .data, new_groups)
+  new_col_attrs <- if (!is.null(.subset2(.data, "col_attrs")) || identical(type, "summarise") ||
+                       (identical(type, "mutate") && isTRUE(attr(.subset2(node, "expressions"), "const_names")))) {
+    carry_col_attrs(node, .subset2(.data, "col_attrs"), input_schema$names, new_schema$names)
+  }
+  if (!is.null(new_col_attrs) && identical(type, "summarise") && isFALSE(.subset2(.data, "group_drop"))) {
+    new_col_attrs <- col_attrs_rebuilt_keys(new_col_attrs, .data,
+                                            setdiff(.subset2(node, "groups"), summarise_output_names(node)),
+                                            input_schema)
+  }
   new_unspec <- .subset2(.data, "unspecified")
   if (!is.null(new_unspec) && !type %in% c("filter", "arrange", "slice", "barrier")) {
     new_unspec <- if (type %in% c("select", "rename", "mutate", "window")) {
@@ -639,7 +648,8 @@ push_op <- function(.data, node, input_schema = current_schema(.data), carry = T
       fixed_keys = new_keys,
       unspecified = new_unspec,
       bare_df = bare_df,
-      rowwise = new_rowwise
+      rowwise = new_rowwise,
+      col_attrs = new_col_attrs
     )
     return(if (carry && !plain_frame) carry_frame_meta(out, .data, attrs = keep_attrs) else out)
   }
@@ -657,45 +667,23 @@ push_op <- function(.data, node, input_schema = current_schema(.data), carry = T
     fixed_keys = new_keys,
     unspecified = new_unspec,
     bare_df = bare_df,
-    rowwise = new_rowwise
+    rowwise = new_rowwise,
+    col_attrs = new_col_attrs
   )
   if (plain_frame) out else carry_frame_meta(out, .data, attrs = keep_attrs)
 }
 
 # The names of a node's output that are still vctrs::unspecified(): the
-# columns select/rename/mutate/window pass through unchanged, under their new names.
-# A mutate keeps the columns no expression overwrites, plus a bare copy of an
-# unspecified column (read in expression order). A name that comes out
-# duplicated can't be addressed, so it loses the marker (as `names<-` does).
+# columns select/rename/mutate/window pass through unchanged, under their new
+# names (the column-origin map of R/col-attrs.R: a mutate keeps the columns no
+# expression overwrites, plus a bare copy of an unspecified column, read in
+# expression order). A name that comes out duplicated can't be addressed, so it
+# loses the marker (as `names<-` does).
 # @keywords internal
 carry_unspecified <- function(node, unspecified, old_names, new_names) {
-  type <- .subset2(node, "type")
-  if (type == "window") {
-    # (a window node only adds its spec outputs: temps no user column shares)
-    out <- setdiff(unspecified, vapply(.subset2(node, "specs"), .subset2, "", "output_col"))
-  } else if (type == "mutate") {
-    keep <- unspecified
-    for (e in .subset2(node, "expressions")) {
-      ir <- .subset2(e, "ir")
-      out <- .subset2(e, "output_col")
-      is_copy <- identical(.subset2(ir, "kind"), "col") && .subset2(ir, "name") %in% keep
-      keep <- if (is_copy) union(keep, out) else setdiff(keep, out)
-    }
-    out <- keep
-  } else {
-    # the output name of each input column, by position
-    pos <- .subset2(node, "positions")
-    if (type == "select") {
-      # a select keeps its columns' names
-      out <- new_names[new_names %in% unspecified]
-    } else {
-      mapped <- old_names
-      idx <- if (is.null(pos)) match(.subset2(node, "old_names"), old_names) else pos
-      mapped[idx] <- .subset2(node, "new_names")
-      out <- mapped[old_names %in% unspecified]
-    }
-  }
-  out <- set_diff(set_intersect(out, new_names), new_names[duplicated(new_names)])
+  origin <- col_origin(node, old_names, new_names)
+  out <- new_names[old_names[origin] %in% unspecified]
+  out <- set_diff(out, new_names[duplicated(new_names)])
   if (length(out) > 0L) out
 }
 
@@ -899,6 +887,9 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
 
   # Filtering joins return x verbatim, so its unspecified() columns survive.
   join_unspec <- if (join_type %in% c("semi", "anti")) x[["unspecified"]]
+  join_attrs <- if (!is.null(x[["col_attrs"]]) || !is.null(y[["col_attrs"]])) {
+    join_col_attrs(join_type, x, y, join_spec, suffix, keep, new_schema)
+  }
 
   # F31: x's attributes and class win (dplyr_reconstruct(out, x)).
   if (identical(x$exec_mode, "lazy") || identical(y$exec_mode, "lazy")) {
@@ -917,7 +908,8 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
       exec_mode = "lazy",
       group_drop = new_group_drop,
       unspecified = join_unspec,
-      rowwise = is_rowwise_gpu(x)
+      rowwise = is_rowwise_gpu(x),
+      col_attrs = join_attrs
     )
     out <- row_slice_finish(carry_frame_meta(out, x), prep)
     # `unmatched = "error"` and a one-to-one / one-to-many / many-to-one
@@ -959,7 +951,8 @@ push_join <- function(join_type, x, y, join_spec, suffix, keep, na_matches,
     exec_mode = "eager",
     group_drop = new_group_drop,
     unspecified = join_unspec,
-    rowwise = is_rowwise_gpu(x)
+    rowwise = is_rowwise_gpu(x),
+    col_attrs = join_attrs
   )
   row_slice_finish(carry_frame_meta(out, x), prep)
 }

@@ -407,6 +407,9 @@ union.tbl_gpu <- function(x, y, ...) {
   if (is_rowwise_gpu(x)) {
     return(rowwise_cpu(x, "union", tables = "y"))
   }
+  if (!is.null(reason <- col_bind_reason(list(x, y)))) {
+    return(rowwise_cpu(x, "union", tables = "y", reason = reason, values = list(y = y)))
+  }
   rlang::check_dots_empty()
   y <- resolve_set_op_other_side(y)
   chk <- check_set_op_compatible(current_schema(x), current_schema(y))
@@ -437,6 +440,9 @@ union.tbl_gpu <- function(x, y, ...) {
 union_all.tbl_gpu <- function(x, y, ...) {
   if (is_rowwise_gpu(x)) {
     return(rowwise_cpu(x, "union_all", tables = "y"))
+  }
+  if (!is.null(reason <- col_bind_reason(list(x, y)))) {
+    return(rowwise_cpu(x, "union_all", tables = "y", reason = reason, values = list(y = y)))
   }
   rlang::check_dots_empty()
   y <- resolve_set_op_other_side(y)
@@ -478,6 +484,9 @@ intersect.tbl_gpu <- function(x, y, ...) {
   if (is_rowwise_gpu(x)) {
     return(rowwise_cpu(x, "intersect", tables = "y"))
   }
+  if (!is.null(reason <- col_bind_reason(list(x, y)))) {
+    return(rowwise_cpu(x, "intersect", tables = "y", reason = reason, values = list(y = y)))
+  }
   rlang::check_dots_empty()
   y <- resolve_set_op_other_side(y)
   chk <- check_set_op_compatible(current_schema(x), current_schema(y))
@@ -514,6 +523,9 @@ setdiff.tbl_gpu <- function(x, y, ...) {
   if (is_rowwise_gpu(x)) {
     return(rowwise_cpu(x, "setdiff", tables = "y"))
   }
+  if (!is.null(reason <- col_bind_reason(list(x, y)))) {
+    return(rowwise_cpu(x, "setdiff", tables = "y", reason = reason, values = list(y = y)))
+  }
   rlang::check_dots_empty()
   y <- resolve_set_op_other_side(y)
   chk <- check_set_op_compatible(current_schema(x), current_schema(y))
@@ -547,6 +559,9 @@ setdiff.tbl_gpu <- function(x, y, ...) {
 symdiff.tbl_gpu <- function(x, y, ...) {
   if (is_rowwise_gpu(x)) {
     return(rowwise_cpu(x, "symdiff", tables = "y"))
+  }
+  if (!is.null(reason <- col_bind_reason(list(x, y)))) {
+    return(rowwise_cpu(x, "symdiff", tables = "y", reason = reason, values = list(y = y)))
   }
   rlang::check_dots_empty()
   y <- resolve_set_op_other_side(y)

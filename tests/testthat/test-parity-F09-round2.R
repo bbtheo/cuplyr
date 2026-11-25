@@ -37,10 +37,11 @@ test_that("namespaced values: only the IR's own function is native", {
   df <- tibble::tibble(x = c(1, 4, 9))
   r2_native(df, function(d) dplyr::mutate(d, dplyr::across(x, base::sqrt)))
   r2_native(df, function(d) dplyr::mutate(d, dplyr::across(x, dplyr::lag)))
-  # dplyr's stats::lag() leaves a `tsp` attribute on the column, which a GPU
-  # column can't carry, so compare the values
-  expect_equal(collect(dplyr::mutate(tbl_gpu(df), dplyr::across(x, stats::lag)))$x, c(1, 4, 9))
-  expect_equal(collect(dplyr::mutate(as_lazy(tbl_gpu(df)), dplyr::across(x, stats::lag)))$x, c(1, 4, 9))
+  # dplyr's stats::lag() leaves a `tsp` attribute on the column, which the
+  # collected column keeps (#21)
+  expected_lag <- dplyr::mutate(df, dplyr::across(x, stats::lag))$x
+  expect_equal(collect(dplyr::mutate(tbl_gpu(df), dplyr::across(x, stats::lag)))$x, expected_lag)
+  expect_equal(collect(dplyr::mutate(as_lazy(tbl_gpu(df)), dplyr::across(x, stats::lag)))$x, expected_lag)
   r2_both(df, function(d) dplyr::summarise(d, dplyr::across(x, stats::median)))
 })
 

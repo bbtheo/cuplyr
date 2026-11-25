@@ -243,7 +243,6 @@ test_that("F37: an inlined vector constant keeps its element names for later dot
 
   expected <- dplyr::mutate(df, v = c(a = 1.5, b = 2.5, c = 3.5), w = names(v))
   expect_equal(expected$w, c("a", "b", "c"))
-  expected$v <- unname(expected$v)
 
   for (lazy in c(FALSE, TRUE)) {
     res <- collect(dplyr::mutate(tbl_gpu(df, lazy = lazy), v = c(a = 1.5, b = 2.5, c = 3.5), w = names(v)))

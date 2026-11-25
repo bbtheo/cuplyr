@@ -87,7 +87,8 @@ compute.tbl_gpu <- function(x, ..., name = NULL) {
     nrow = .subset2(x, "nrow"),
     fixed_keys = .subset2(x, "fixed_keys"),
     unspecified = .subset2(x, "unspecified"),
-    rowwise = is_rowwise_gpu(x)
+    rowwise = is_rowwise_gpu(x),
+    col_attrs = .subset2(x, "col_attrs")
   ), x)
 }
 

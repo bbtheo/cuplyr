@@ -1,5 +1,25 @@
 # cuplyr (development version)
 
+* A column keeps its element names, its other attributes (such as a `label`
+  or `scale()`'s `scaled:center`) and the shape of a one-column matrix from
+  `tbl_gpu()` to `collect()`, `pull()` and `$`, by dplyr's rules, through
+  `filter()`, `arrange()`, `slice()`, `distinct()`, `mutate()`, `transmute()`,
+  `summarise()`, `reframe()`, `count()`, `group_by()`, `group_keys()`,
+  `select()`, `rename()`, the joins, `bind_rows()` and `bind_cols()` (#21).
+  Attributes stay on the GPU through the verbs that keep rows or columns as
+  they are. Element names move with their rows: a verb that moves rows runs on
+  the CPU when a column has element names, as do `bind_rows()` and the set
+  operations when an input has names or a matrix column, and a `mutate()`
+  expression that computes from a column with names or attributes (a bare
+  copy such as `b2 = b` stays on the GPU). A summary of a plain data frame has
+  no element names, as in dplyr. Some paths still drop names or attributes
+  instead of keeping them, among them `group_split()`, `group_trim()`,
+  `slice_sample()`, grouped `head()`/`tail()` and some merged join keys.
+
+* `summarise()` keeps the name `quantile()` gives its result (`"50%"`), as
+  dplyr does, and the name stays on the GPU through the joins that keep every
+  row of its column (#56).
+
 * `if_else()`, `lag()`, `lead()`, `first()`, `last()`, `nth()`, `sum()`,
   `paste()`, `nchar()`, `trimws()`, `grepl()`, `sub()`, `gsub()` and
   `arrange()` raise dplyr's error for calls that dplyr rejects, instead of

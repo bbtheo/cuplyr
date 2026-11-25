@@ -736,6 +736,9 @@ slice.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   # splice hides the names from dplyr's own (the splice rule after
   # pronoun_call_name(), R/ir.R)
   rlang::check_dots_unnamed()
+  if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
+    return(rowwise_cpu(.data, "slice", reason = col_names_reason(.data)))
+  }
   if (is_rowwise_gpu(.data)) {
     return(rowwise_cpu(.data, "slice"))
   }
@@ -937,6 +940,9 @@ slice_group_keys_of <- function(gd) {
 #' @export
 #' @importFrom dplyr slice_head
 slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
+  if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
+    return(rowwise_cpu(.data, "slice_head", reason = col_names_reason(.data)))
+  }
   if (is_rowwise_gpu(.data)) {
     return(rowwise_cpu(.data, "slice_head"))
   }
@@ -987,6 +993,9 @@ slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
 #' @export
 #' @importFrom dplyr slice_tail
 slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
+  if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
+    return(rowwise_cpu(.data, "slice_tail", reason = col_names_reason(.data)))
+  }
   if (is_rowwise_gpu(.data)) {
     return(rowwise_cpu(.data, "slice_tail"))
   }
@@ -1062,6 +1071,9 @@ slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
 #' @importFrom dplyr slice_min
 slice_min.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
                                with_ties = TRUE, na_rm = FALSE) {
+  if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
+    return(rowwise_cpu(.data, "slice_min", reason = col_names_reason(.data)))
+  }
   if (is_rowwise_gpu(.data)) {
     return(rowwise_cpu(.data, "slice_min"))
   }
@@ -1122,6 +1134,9 @@ slice_min.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
 #' @importFrom dplyr slice_max
 slice_max.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
                                with_ties = TRUE, na_rm = FALSE) {
+  if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
+    return(rowwise_cpu(.data, "slice_max", reason = col_names_reason(.data)))
+  }
   if (is_rowwise_gpu(.data)) {
     return(rowwise_cpu(.data, "slice_max"))
   }
@@ -1323,7 +1338,8 @@ head_tail_ungrouped <- function(x, n, slicer) {
     groups = groups,
     group_drop = drop,
     exec_mode = out$exec_mode,
-    nrow = out[["nrow"]]
+    nrow = out[["nrow"]],
+    col_attrs = out[["col_attrs"]]
   ), x, bare = FALSE)
 }
 
@@ -1513,7 +1529,8 @@ slice_sample_gather <- function(materialized, gm, groups, draw) {
   carry_frame_meta(
     new_tbl_gpu(ptr = new_ptr, schema = materialized$schema, groups = out_groups,
                 group_drop = group_drop,
-                fixed_keys = if (emptied && isFALSE(group_drop)) groups$keys),
+                fixed_keys = if (emptied && isFALSE(group_drop)) groups$keys,
+                col_attrs = col_attrs_without_names(materialized[["col_attrs"]])),
     materialized
   )
 }
@@ -1607,6 +1624,9 @@ sample_rows_impl <- function(tbl, size_quo, replace, weight_quo, env, frac, fall
 #' @importFrom dplyr sample_n
 sample_n.tbl_gpu <- function(tbl, size, replace = FALSE, weight = NULL,
                               .env = NULL, ...) {
+  if (!is.null(.subset2(tbl, "col_attrs")) && col_names_move(tbl)) {
+    return(rowwise_cpu(tbl, "sample_n", reason = col_names_reason(tbl)))
+  }
   if (is_rowwise_gpu(tbl)) {
     return(rowwise_cpu(tbl, "sample_n"))
   }
@@ -1622,6 +1642,9 @@ sample_n.tbl_gpu <- function(tbl, size, replace = FALSE, weight = NULL,
 #' @importFrom dplyr sample_frac
 sample_frac.tbl_gpu <- function(tbl, size = 1, replace = FALSE, weight = NULL,
                                  .env = NULL, ...) {
+  if (!is.null(.subset2(tbl, "col_attrs")) && col_names_move(tbl)) {
+    return(rowwise_cpu(tbl, "sample_frac", reason = col_names_reason(tbl)))
+  }
   if (is_rowwise_gpu(tbl)) {
     return(rowwise_cpu(tbl, "sample_frac"))
   }
@@ -1671,6 +1694,9 @@ sample_frac.tbl_gpu <- function(tbl, size = 1, replace = FALSE, weight = NULL,
 #' @importFrom dplyr slice_sample
 slice_sample.tbl_gpu <- function(.data, ..., n, prop, by = NULL,
                                   weight_by = NULL, replace = FALSE) {
+  if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
+    return(rowwise_cpu(.data, "slice_sample", reason = col_names_reason(.data)))
+  }
   if (is_rowwise_gpu(.data)) {
     return(rowwise_cpu(.data, "slice_sample"))
   }

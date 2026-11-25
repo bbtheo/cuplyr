@@ -68,6 +68,9 @@
 #'   result <- gpu_mtcars |> distinct(cyl, .keep_all = TRUE) |> collect()
 #' }
 distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
+  if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
+    return(rowwise_cpu(.data, "distinct", reason = col_names_reason(.data)))
+  }
   if (is_rowwise_gpu(.data)) {
     return(rowwise_cpu(.data, "distinct"))
   }

@@ -417,32 +417,8 @@ minmax_dots_mention <- function(dots) {
 # TRUE iff a dot CALLS min() or max() (a column named `max` is not a call).
 # @keywords internal
 minmax_dots_call <- function(dots) {
-  calls <- function(x) {
-    if (!is.call(x)) {
-      return(FALSE)
-    }
-    head <- x[[1L]]
-    if (is.call(head) && length(head) == 3L && identical(head[[1L]], quote(`::`))) {
-      head <- head[[3L]]
-    }
-    if (is.symbol(head) && as.character(head) %in% c("min", "max")) {
-      return(TRUE)
-    }
-    # (by index: an empty argument, `m[, 1]` or `switch(x, a = , 1)`, is never
-    # bound to a variable, whose evaluation would be R's missing-argument error)
-    parts <- as.list(x)
-    for (i in seq_along(parts)) {
-      if (identical(parts[[i]], quote(expr = ))) next
-      a <- parts[[i]]
-      if (rlang::is_quosure(a)) a <- rlang::quo_get_expr(a)
-      if (calls(a)) {
-        return(TRUE)
-      }
-    }
-    FALSE
-  }
   for (dot in dots) {
-    if (calls(rlang::quo_get_expr(dot))) {
+    if (expr_calls_any(rlang::quo_get_expr(dot), c("min", "max"))) {
       return(TRUE)
     }
   }
