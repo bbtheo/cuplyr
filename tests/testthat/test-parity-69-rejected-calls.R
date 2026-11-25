@@ -175,6 +175,23 @@ test_that("if_else() with a one-value condition and one-value values stays nativ
   # a rowwise table: every row is its own group of size 1, so dplyr recycles
   # (native on the GPU before the size-1 check existed)
   p69_native(df, function(d) d |> rowwise() |> mutate(z = if_else(flag, x, y)))
+  p69_native(df, function(d) d |> rowwise() |> mutate(z = if_else(NA, x, y)))
+  p69_native(df, function(d) d |> rowwise() |> mutate(z = if_else(NA, x, y, missing = y)))
+  # rowwise after a pending step that keeps rows (any route)
+  p69_same(df, function(d) d |> filter(x > 1) |> rowwise() |> mutate(z = if_else(flag, x, y)))
+})
+
+test_that("on a zero-row rowwise table a one-value if_else() condition is dplyr's error", {
+  skip_if_no_gpu()
+  df <- p69_df()
+  flag <- TRUE
+  # dplyr evaluates the expression once on the empty columns: size 0 can't
+  # recycle to the condition's size 1
+  p69_same_error(df, function(d) d |> filter(x > 100) |> rowwise() |> mutate(z = if_else(NA, x, y)))
+  p69_same_error(df, function(d) d |> filter(x > 100) |> rowwise() |> mutate(z = if_else(flag, x, y)))
+  p69_same_error(df[0, , drop = FALSE], function(d) d |> rowwise() |> mutate(z = if_else(NA, x, y)))
+  p69_same_error(df[0, , drop = FALSE], function(d) d |> rowwise() |> mutate(z = if_else(flag, x, y)))
+  p69_same_error(df[0, , drop = FALSE], function(d) d |> rowwise() |> transmute(z = if_else(flag, x, y)))
 })
 
 test_that("more one-value if_else() conditions are dplyr's error", {
