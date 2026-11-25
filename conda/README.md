@@ -9,8 +9,8 @@ the main README.
 |---|---|
 | `recipe.yaml` | The recipe for rattler-build (preferred). |
 | `meta.yaml` | The same recipe for conda-build. Keep the two in step. |
-| `variants.yaml` | The RAPIDS series (`rapids_version`) and CUDA major (`cuda_version`) to build. |
-| `build.sh` | Build script shared by both recipes. Uses no network. |
+| `variants.yaml` | The RAPIDS series (`rapids_version`), the CUDA major (`cuda_version`), and the C standard library and compiler versions to build with. |
+| `build.sh` | Build script shared by both recipes. Uses no network and ignores the builder's R startup files. |
 | `test-package.R` | The package test: loads cuplyr and checks that libcudf and librmm resolve. Needs no GPU. |
 
 ## What the package contains
@@ -27,6 +27,15 @@ older series.
 The version comes from the recipe (`context.version` in `recipe.yaml`,
 `{% set version %}` in `meta.yaml`); a test keeps both equal to `Version` in
 `DESCRIPTION`, so change them together when the version changes.
+
+### Glibc floor
+
+`variants.yaml` pins the C standard library to `sysroot` 2.28 and the
+compilers to version 14, as libcudf is built. The pin matters: rattler-build
+has no default for `stdlib("c")`, and an unpinned sysroot follows the newest
+one on the build machine, which would raise the package's glibc requirement
+above libcudf's and make it uninstallable on systems such as Debian 12, RHEL 9
+and Colab.
 
 ### How libcuda is linked
 
@@ -51,9 +60,14 @@ to revisit this.
 
 ## Build
 
-From a clean checkout (both tools copy the source directory, including any
-compiled objects from a development build; `build.sh` removes `src/*.o`,
-`src/*.so` and `src/Makevars`). The channels are the ones `pixi.toml` uses.
+From a fresh `git clone`, not a development checkout. conda-build copies the
+whole directory, including a checkout's `.pixi/` environment (gigabytes) and
+any compiled objects; rattler-build honours `.gitignore`, but a clone is still
+the safest way to build exactly what is committed. `build.sh` removes
+`src/*.o`, `src/*.so` and `src/Makevars` from the copy, and the `inst/` paths
+that `.Rbuildignore` excludes (such as the vendored dplyr tests), so the binary
+holds what the source package holds. The channels are the ones `pixi.toml`
+uses.
 
 With rattler-build:
 
@@ -72,8 +86,13 @@ conda build conda/ -m conda/variants.yaml \
 
 Neither needs a GPU. The package test runs at the end of the build.
 
-If your conda configuration sets strict channel priority and the solve fails,
-add `--no-channel-priority` (as `install.sh` does).
+`build.sh` sets `R_ENVIRON_USER`, `R_PROFILE_USER` and `R_MAKEVARS_USER` to
+`/dev/null`, so R reads no `~/.Renviron`, `~/.Rprofile` or `~/.R/Makevars`.
+conda-build passes `HOME` on (rattler-build does outside strict isolation), and
+a `CUDA_HOME` or `CUDF_HOME` in `~/.Renviron` would send `configure` to a
+system toolkit, while a personal `LDFLAGS` would replace the toolchain's and
+search the system libraries first. It runs `configure` once itself and calls
+`R CMD INSTALL --no-configure`, so that run is the one the compile uses.
 
 ## Install into a fresh environment
 
@@ -83,9 +102,12 @@ mamba create -n cuplyr-test --no-channel-priority \
 mamba activate cuplyr-test
 ```
 
-`<dir>` is the output directory of the build. `rattler-build` writes the
-channel there; with conda-build, run `conda index <dir>` first if it has not
-been indexed.
+`<dir>` is the output directory of the build, as an absolute path
+(`file://` needs one). `rattler-build` writes the channel there; with
+conda-build, run `conda index <dir>` first if it has not been indexed.
+
+`--no-channel-priority` is for configurations that set strict channel priority,
+where the solve would otherwise fail (as `install.sh` does).
 
 ## Smoke test (needs a GPU)
 

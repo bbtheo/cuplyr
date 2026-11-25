@@ -9,9 +9,10 @@
 #   conda build conda/ -m conda/variants.yaml \
 #     -c rapidsai -c conda-forge -c nvidia --output-folder <dir>
 #
-# rapids_version and cuda_version come from conda/variants.yaml, which
-# conda-build does not read on its own: pass it with -m. Each value is a
-# separate binary (RAPIDS has no ABI across series). The version above is
+# rapids_version, cuda_version and the C standard library and compiler
+# versions come from conda/variants.yaml, which conda-build does not read on
+# its own: pass it with -m. Each rapids_version is a separate binary (RAPIDS
+# has no ABI across series). The version above is
 # kept equal to Version in DESCRIPTION (a test checks it).
 
 package:
@@ -52,10 +53,12 @@ requirements:
     - librmm {{ rapids_version }}.*
     - libkvikio {{ rapids_version }}.*
     # CUDA. configure needs nvcc and the CUDA headers in one prefix, so
-    # cuda-nvcc is a host requirement, not a build one. cuda-driver-dev
-    # provides the stub libcuda that is linked (see conda/README.md).
+    # cuda-nvcc-tools (bin/nvcc, without cuda-nvcc's host compiler and its
+    # activation scripts) is a host requirement, not a build one.
+    # cuda-driver-dev provides the stub libcuda that is linked (see
+    # conda/README.md).
     - cuda-version {{ cuda_version }}.*
-    - cuda-nvcc
+    - cuda-nvcc-tools
     - cuda-cudart-dev
     - cuda-driver-dev
   run:

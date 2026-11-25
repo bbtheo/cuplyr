@@ -153,11 +153,11 @@ A conda package, `r-cuplyr`, is being prepared. It is not yet published and its 
 mamba create -n cuplyr --no-channel-priority -c <channel TBD> -c rapidsai -c conda-forge -c nvidia r-cuplyr
 ```
 
-Maintainers can build the package from a checkout; the steps are in [conda/README.md](conda/README.md).
+Maintainers can build the package from a checkout; the steps are in [conda/README.md](https://github.com/bbtheo/cuplyr/blob/main/conda/README.md).
 
 ### Check the installation
 
-Then check the installation from R:
+Check the installation from R:
 
 ```r
 library(cuplyr)

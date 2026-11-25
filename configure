@@ -629,6 +629,16 @@ sed "${LINK_CUDA_EXPR[@]}" \
     -e "s|@RAPIDS_RPATHS@|$RAPIDS_RPATHS|g" \
     src/Makevars.in > src/Makevars
 
+# The substitution above matches the spacing around -lcuda in the template. If
+# the template is reformatted, forced mode would silently link libcuda
+# normally, so fail rather than build a package that needs a driver to load.
+if force_cuda_stubs && ! grep -q -- '--as-needed -lcuda' src/Makevars; then
+    rm -f src/Makevars
+    echo "ERROR: CUPLYR_FORCE_CUDA_STUBS is set, but src/Makevars.in has no ' -lcuda ' to link --as-needed."
+    echo "       Update the substitution in configure to match the template."
+    exit 1
+fi
+
 echo ""
 echo "Configuration complete. Generated src/Makevars:"
 cat src/Makevars

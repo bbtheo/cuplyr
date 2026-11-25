@@ -11,9 +11,11 @@
 #   rattler-build build --recipe conda/recipe.yaml -m conda/variants.yaml \
 #     -c rapidsai -c conda-forge -c nvidia --output-dir <dir>
 #
-# The RAPIDS series (rapids_version) and CUDA major (cuda_version) come from
-# conda/variants.yaml. RAPIDS has no ABI across series, so each value is a
-# separate binary pinned to its own libcudf series.
+# The RAPIDS series (rapids_version), CUDA major (cuda_version) and the C
+# standard library and compiler versions (c_stdlib and friends, which
+# stdlib("c") needs) come from conda/variants.yaml. RAPIDS has no ABI across
+# series, so each rapids_version is a separate binary pinned to its own libcudf
+# series.
 
 context:
   # Kept equal to Version in DESCRIPTION (a test checks it).
@@ -61,10 +63,12 @@ requirements:
     - librmm ${{ rapids_version }}.*
     - libkvikio ${{ rapids_version }}.*
     # CUDA. configure needs nvcc and the CUDA headers in one prefix, so
-    # cuda-nvcc is a host requirement, not a build one. cuda-driver-dev
-    # provides the stub libcuda that is linked (see conda/README.md).
+    # cuda-nvcc-tools (bin/nvcc, without cuda-nvcc's host compiler and its
+    # activation scripts) is a host requirement, not a build one.
+    # cuda-driver-dev provides the stub libcuda that is linked (see
+    # conda/README.md).
     - cuda-version ${{ cuda_version }}.*
-    - cuda-nvcc
+    - cuda-nvcc-tools
     - cuda-cudart-dev
     - cuda-driver-dev
   run:
