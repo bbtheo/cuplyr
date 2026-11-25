@@ -2,8 +2,9 @@
 # is not logical goes to dplyr (its error); a bare NA condition is a logical NA
 # on the GPU; a logical condition built by any op stays native, and so do the
 # internal if_else() desugars (cumall(), consecutive_id(), ntile(), slice_*()).
-# On a rowwise table each group is one row, so the size-1 check never declines
-# there, and that scope ends with the rowwise call.
+# On a rowwise table with rows each group is one row, so the size-1 check never
+# declines there, and that scope ends with the rowwise call; on zero rows, or
+# rows only the pending steps can count, it declines and dplyr decides.
 
 for (p69c_fn in c("if_else", "between", "consecutive_id", "ntile", "cumall")) {
   assign(p69c_fn, getExportedValue("dplyr", p69c_fn))
@@ -51,7 +52,13 @@ test_that("the internal if_else() desugars stay native", {
   p69c_native(df, function(d) mutate(d, z = cumall(x > 1)))
   p69c_native(df, function(d) mutate(d, z = consecutive_id(g)))
   p69c_native(df, function(d) mutate(d, z = ntile(x, 2)))
+  # (the grouped slice_*() desugars: a numeric slice_max() takes its own GPU
+  # path unless the option says "sort")
+  withr::local_options(cuplyr.topk_path = "sort")
   p69c_native(df, function(d) d |> group_by(g) |> slice_max(x, n = 1), arrange_by = "g")
+  p69c_native(df, function(d) d |> group_by(g) |> slice_max(x, prop = 0.5), arrange_by = "g")
+  p69c_native(df, function(d) d |> group_by(g) |> slice_min(s, n = -1), arrange_by = "g")
+  p69c_native(df, function(d) d |> group_by(g) |> slice_head(prop = 0.5), arrange_by = "g")
 })
 
 test_that("a typed NA condition and an NA condition in summarise() give dplyr's value", {
@@ -75,6 +82,10 @@ test_that("a non-logical one-value condition is dplyr's error, whatever its type
     expect_identical(conditionMessage(gpu), conditionMessage(cpu))
     expect_identical(conditionMessage(gpu$parent), conditionMessage(cpu$parent))
   }
+  # the notice gives the type as the reason, not the size
+  withr::local_options(cuplyr.fallback = "warn")
+  expect_warning(try(collect(mutate(tbl_gpu(df), z = if_else(1, x, y))), silent = TRUE),
+                 "condition of type FLOAT64")
 })
 
 test_that("rowwise verbs keep a one-value condition native, and the scope ends with them", {
@@ -98,4 +109,39 @@ test_that("rowwise verbs keep a one-value condition native, and the scope ends w
   expect_s3_class(cpu$parent, "vctrs_error_incompatible_size")
   expect_identical(class(gpu), class(cpu))
   expect_identical(conditionMessage(gpu$parent), conditionMessage(cpu$parent))
+})
+
+p69c_same_error <- function(df, pipeline) {
+  run <- function(x) {
+    tryCatch({
+      out <- pipeline(x)
+      if (inherits(out, "tbl_gpu")) out <- collect(out)
+      NULL
+    }, error = function(e) e)
+  }
+  cpu <- run(tibble::as_tibble(df))
+  expect_s3_class(cpu, "error")
+  for (lazy in c(FALSE, TRUE)) {
+    gpu <- run(tbl_gpu(df, lazy = lazy))
+    expect_s3_class(gpu, "error")
+    expect_identical(class(gpu), class(cpu))
+    expect_identical(rlang::format_error_call(gpu$call), rlang::format_error_call(cpu$call))
+    expect_identical(class(gpu$parent), class(cpu$parent))
+    expect_identical(conditionMessage(gpu), conditionMessage(cpu))
+  }
+}
+
+test_that("every rowwise verb on zero rows gives dplyr's recycling error", {
+  skip_if_no_gpu()
+  df <- p69c_df()
+  d0 <- df[0, , drop = FALSE]
+  p69c_same_error(d0, function(d) d |> rowwise() |> filter(if_else(TRUE, x > 1, FALSE)))
+  p69c_same_error(d0, function(d) d |> rowwise() |> summarise(z = if_else(NA, x, y)))
+  p69c_same_error(d0, function(d) d |> rowwise(g) |> mutate(z = if_else(TRUE, x, y)))
+  p69c_same_error(df, function(d) d |> filter(x > 100) |> rowwise() |> filter(if_else(TRUE, x > 1, FALSE)))
+  p69c_same_error(df, function(d) d |> filter(x > 100) |> rowwise() |> summarise(z = if_else(NA, x, y)))
+  # on rows, the same calls stay native
+  p69c_native(df, function(d) d |> rowwise() |> summarise(z = if_else(NA, x, y)))
+  p69c_native(df, function(d) d |> rowwise() |> transmute(z = if_else(TRUE, x, y)))
+  p69c_native(df, function(d) d |> rowwise() |> filter(if_else(NA, x > 1, TRUE)))
 })

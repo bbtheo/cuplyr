@@ -7338,15 +7338,23 @@ ir_call_registry <- list(
       if (identical(.subset2(cond, "kind"), "lit") && ir_is_untyped_na(cond)) {
         cond$type <- "BOOL8"
       }
+      # a constant that is not logical is dplyr's error whatever the values'
+      # sizes (the reason type_if_else() gives a column condition)
+      ctype <- .subset2(cond, "type")
+      if (identical(.subset2(cond, "kind"), "lit") && !is.null(ctype) && ctype != "BOOL8") {
+        fallback_cause(paste0("unsupported type: an `if_else()` condition of type ", ctype,
+                              " (dplyr requires a logical one)."))
+        return(NULL)
+      }
       values <- ir_resolve_value_nas(args[-1], schema)
       # A condition with one value (a constant, `n()`, an aggregate, ...) is not
       # recycled to column values: dplyr errors, or gives its result on a size-1
       # input, so the CPU route runs it. With one-value values too, every size
-      # is 1 and the call stays native, and so does a rowwise verb's call, whose
-      # every group is one row.
+      # is 1 and the call stays native, and so does the call of a rowwise verb
+      # on an input known to have rows, whose every group is one row.
       if (ir_is_group_scalar(cond, TRUE) &&
           !all(vapply(values, ir_is_group_scalar, logical(1), post = TRUE)) &&
-          !rowwise_in_progress()) {
+          !rowwise_groups_are_rows()) {
         fallback_cause("dplyr cannot recycle the values of this `if_else()` to the size of its one-value condition.")
         return(NULL)
       }

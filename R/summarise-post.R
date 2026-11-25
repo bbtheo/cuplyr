@@ -232,7 +232,9 @@ summarise_post_split <- function(dots, expanded, in_schema, groups) {
 # - `&`, `|`, `!` of anything but a logical or an integer: of a double R reads
 #   NaN as NA, the engine as TRUE; of a string R's error, the engine's failure.
 # - `if_else()`/`case_when()` with a condition that is not a logical expression:
-#   dplyr's error, or for a bare NA dplyr's NA, where the engine fails at execution.
+#   dplyr's error, where the engine fails at execution. An NA constant condition
+#   is dplyr's NA: kept on dplyr's route too (case_when() leaves a bare NA
+#   untyped, which the engine can't take as a condition).
 # @param nonneg The names in `schema` that are never -Inf or -0
 # @keywords internal
 summarise_post_na_rule <- function(ir, schema, nonneg = character()) {
@@ -293,7 +295,7 @@ summarise_post_na_rule <- function(ir, schema, nonneg = character()) {
     } else {
       args[seq(1L, by = 2L, length.out = .subset2(.subset2(ir, "meta"), "n_when"))]
     }
-    # (a bare NA condition too: the engine takes it for a double, dplyr for logical)
+    # (an NA constant condition too, though if_else()'s parse types it logical)
     for (a in conds) {
       if ((identical(.subset2(a, "kind"), "lit") && isTRUE(.subset2(a, "na"))) ||
           !identical(tryCatch(unname(ir_infer_type(a, schema)), error = function(e) NA_character_), "BOOL8")) {
