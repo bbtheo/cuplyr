@@ -1,5 +1,24 @@
 # cuplyr (development version)
 
+* `round(x, digits)` is about a third faster on the GPU: the two candidates of
+  R's rounding rule are each computed once, and the sign and the rows that
+  need no rounding are handled on the bits of the double. Results are
+  unchanged, bit for bit (#75).
+
+* `summarise()` with no expressions on a `.drop = FALSE` grouping reads only
+  the group keys and, when no group is empty, takes the same plain GPU path as
+  `.drop = TRUE`, instead of downloading every group's row indices (#75).
+
+* `mutate()` with hundreds of expressions in one call no longer slows down
+  with every expression added: names and types are looked up in hashes, and
+  the GPU evaluates each expression on just the columns it reads (#75).
+
+* `quantile()` with many probabilities over many groups (`reframe()` of a
+  vector of `probs`, or a `summarise()` of many `quantile()` calls) asks cudf
+  for all the probabilities of a column at once, does the index arithmetic
+  once, and builds its argument list faster. It interpolates as R does, from
+  the two neighbouring values, so its values are R's to the bit (#75).
+
 * RAPIDS 25.12 is no longer supported: cuplyr needs RAPIDS 26.02 or later, is tested on 26.10, and installs 26.10 for CUDA 13 (#94).
 
   It builds against libcudf and RMM `>=26.02` with no upper bound, and uses

@@ -6,7 +6,10 @@
 #include "zero_sign.hpp"
 #include "ts_agg.hpp"
 
+#include <variant>  // libcudf 26.10's ast/expressions.hpp uses std::variant without including it
 #include <cudf/aggregation.hpp>
+#include <cudf/ast/expressions.hpp>
+#include <cudf/reshape.hpp>
 #include <cudf/binaryop.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/filling.hpp>
@@ -24,7 +27,9 @@
 #include <rmm/device_buffer.hpp>
 #include <rmm/mr/per_device_resource.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <deque>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -497,21 +502,38 @@ bool agg_reads_nan_as_null(const std::string& agg_type, bool na_rm) {
 // value column ride in ONE groupby request, so cudf sorts that column once
 // however many there are (a reframe() of 101 percentiles is 101 aggregations
 // of one column). Each aggregation is R's type 7, which cudf's LINEAR is not
-// exactly: LINEAR interpolates (1 - f) * lo + f * hi even when f == 0 (0 * Inf
-// = NaN, and 0 * 1e300 next to a far neighbour is noise), where R's
-// stats:::quantile.default takes "x[lo]" at a whole position. And R's index
+// exactly: LINEAR interpolates even when f == 0 (0 * Inf = NaN, and 0 * 1e300
+// next to a far neighbour is noise), where R's stats:::quantile.default takes
+// "x[lo]" at a whole position. And R's index
 // 1 + (n - 1) * p is computed in two roundings, so it can be exactly whole where
 // cudf's position p * (n - 1) keeps a 1e-16 fraction. So every quantile also
 // asks for LOWER and HIGHER (and its request counts the valid values once), and
 // take() recomputes R's index: a whole one names the element itself, otherwise
 // the lower value is used wherever LOWER and HIGHER agree.
+//
+// (#75) A request asks for its K distinct probabilities in ONE aggregation per
+// interpolation (LOWER, HIGHER), not K of each: cudf then returns a column of
+// G * K values per aggregation, group-major (group g's value for the k-th
+// probability at row g * K + k). The type-7 arithmetic below runs once over
+// those flat columns, and each slot's column is a slice of their
+// probability-major reordering. R's own interpolation, (1 - h) * x[lo] + h *
+// x[hi] with h = index - lo, is written out from LOWER and HIGHER, each step
+// its own operation, so it is R's value to the bit; cudf's LINEAR (lo + (hi -
+// lo) * f, a few ulps off) is no longer asked for.
 struct QuantileRequests {
-    struct Slot { int req = -1; int pos = -1; int lo = -1; int hi = -1; int cnt = -1; double p = 0; };
+    struct Slot { int req = -1; int k = -1; double p = 0; };
+    // One value column's request.
+    struct Batch {
+        std::vector<double> probs;  // the distinct probabilities, in first-asked order
+        int lo = -1, hi = -1, cnt = -1;  // positions in the request's aggregations
+        int pending = 0;            // slots still to take
+        bool done = false;          // type7() ran
+        std::unique_ptr<cudf::column> flat;  // the type-7 value of every (group, probability)
+        std::unique_ptr<cudf::column> by_prob;  // the same, probability-major
+    };
     std::vector<Slot> slot;
     std::map<int, int> request_of_key;
-    std::map<int, int> count_of_key;  // position of COUNT_VALID in the request
-    // max(count - 1, 0) per request, shared by every probability (take()).
-    std::map<int, std::unique_ptr<cudf::column>> n1_of_request;
+    std::map<int, Batch> batch;  // by request
 
     explicit QuantileRequests(int num_aggs) : slot(num_aggs) {}
 
@@ -525,82 +547,184 @@ struct QuantileRequests {
             requests.emplace_back();
             requests[r].values = values;
             request_of_key[key] = r;
-            count_of_key[key] = static_cast<int>(requests[r].aggregations.size());
+            batch[r].cnt = static_cast<int>(requests[r].aggregations.size());
             requests[r].aggregations.push_back(
                 cudf::make_count_aggregation<cudf::groupby_aggregation>(
                     cudf::null_policy::EXCLUDE));
         } else {
             r = found->second;
         }
-        auto& aggs = requests[r].aggregations;
-        Slot s;
-        s.req = r;
-        s.p = p;
-        s.pos = static_cast<int>(aggs.size());
-        aggs.push_back(cudf::make_quantile_aggregation<cudf::groupby_aggregation>(
-            {p}, cudf::interpolation::LINEAR));
-        s.lo = static_cast<int>(aggs.size());
-        aggs.push_back(cudf::make_quantile_aggregation<cudf::groupby_aggregation>(
-            {p}, cudf::interpolation::LOWER));
-        s.hi = static_cast<int>(aggs.size());
-        aggs.push_back(cudf::make_quantile_aggregation<cudf::groupby_aggregation>(
-            {p}, cudf::interpolation::HIGHER));
-        s.cnt = count_of_key.at(key);
-        slot[i] = s;
+        Batch& b = batch[r];
+        auto at = std::find(b.probs.begin(), b.probs.end(), p);
+        if (at == b.probs.end()) {
+            b.probs.push_back(p);
+            at = b.probs.end() - 1;
+        }
+        slot[i].req = r;
+        slot[i].p = p;
+        slot[i].k = static_cast<int>(at - b.probs.begin());
+        ++b.pending;
+    }
+
+    // Once every slot is added: the three quantile aggregations of each request.
+    void finish_requests(std::vector<cudf::groupby::aggregation_request>& requests) {
+        for (auto& [r, b] : batch) {
+            auto& aggs = requests[r].aggregations;
+            b.lo = static_cast<int>(aggs.size());
+            aggs.push_back(cudf::make_quantile_aggregation<cudf::groupby_aggregation>(
+                b.probs, cudf::interpolation::LOWER));
+            b.hi = static_cast<int>(aggs.size());
+            aggs.push_back(cudf::make_quantile_aggregation<cudf::groupby_aggregation>(
+                b.probs, cudf::interpolation::HIGHER));
+        }
     }
 
     bool has(int i) const { return slot[i].req >= 0; }
 
+    // The type-7 value of every (group, probability) of request `r`, flat.
+    std::unique_ptr<cudf::column> type7(cudf::groupby::aggregation_result& res, Batch& b) {
+        const cudf::data_type f64{cudf::type_id::FLOAT64};
+        const cudf::data_type b8{cudf::type_id::BOOL8};
+        const cudf::size_type K = static_cast<cudf::size_type>(b.probs.size());
+        const cudf::size_type G = res.results[b.cnt]->size();
+        if (res.results[b.lo]->size() != G * K || res.results[b.hi]->size() != G * K) {
+            Rcpp::stop("internal error: unexpected quantile result layout");
+        }
+        // LOWER/HIGHER keep the value column's type (INT32 for an integer
+        // column): the arithmetic is R's, on doubles.
+        auto as_f64 = [&](std::unique_ptr<cudf::column>& c) {
+            if (c->type() != f64) c = cudf::cast(c->view(), f64);
+        };
+        as_f64(res.results[b.lo]);
+        as_f64(res.results[b.hi]);
+        cudf::column_view lower = res.results[b.lo]->view();
+        cudf::column_view higher = res.results[b.hi]->view();
+
+        // n1 = max(count - 1, 0) per group, and p, laid out like the values.
+        auto n = cudf::cast(res.results[b.cnt]->view(), f64);
+        auto minus1 = cudf::binary_operation(n->view(), cudf::numeric_scalar<double>(1.0, true),
+                                             cudf::binary_operator::SUB, f64);
+        n.reset();
+        auto n1 = cudf::binary_operation(minus1->view(), cudf::numeric_scalar<double>(0.0, true),
+                                         cudf::binary_operator::NULL_MAX, f64);
+        minus1.reset();
+        std::unique_ptr<cudf::column> n1_flat, p_flat;
+        if (K > 1) {
+            n1_flat = std::move(cudf::repeat(cudf::table_view({n1->view()}), K)->release()[0]);
+            auto ps = cudf::make_numeric_column(f64, K);
+            check_cuda(cudaMemcpy(ps->mutable_view().data<double>(), b.probs.data(),
+                                  sizeof(double) * K, cudaMemcpyHostToDevice),
+                       "quantile probabilities");
+            p_flat = std::move(cudf::tile(cudf::table_view({ps->view()}), G)->release()[0]);
+        } else {
+            n1_flat = std::move(n1);
+            p_flat = cudf::make_column_from_scalar(cudf::numeric_scalar<double>(b.probs[0], true), G);
+        }
+        n1.reset();
+
+        // The type-7 index of stats:::quantile.default, each step its own AST
+        // operation (evaluated one at a time, so a fused multiply-add cannot
+        // form): it rounds the product and the +1 separately, and the
+        // interpolation (1 - h) * x[lo] + h * x[hi] rounds each product.
+        namespace ast = cudf::ast;
+        enum class Out { Whole, OnLower, Interp };
+        auto compute = [&](Out what) {
+            ast::tree t;
+            std::deque<cudf::numeric_scalar<double>> lits;
+            auto lit = [&](double v) -> const ast::expression& {
+                lits.emplace_back(v, true);
+                return t.emplace<ast::literal>(lits.back());
+            };
+            auto col = [&](int i) -> const ast::expression& { return t.emplace<ast::column_reference>(i); };
+            auto op = [&](ast::ast_operator o, const ast::expression& l, const ast::expression& r)
+                -> const ast::expression& { return t.emplace<ast::operation>(o, l, r); };
+            auto prod = [&]() -> const ast::expression& { return op(ast::ast_operator::MUL, col(0), col(1)); };
+            auto idx = [&]() -> const ast::expression& { return op(ast::ast_operator::ADD, prod(), lit(1.0)); };
+            auto fl = [&](const ast::expression& e) -> const ast::expression& {
+                return t.emplace<ast::operation>(ast::ast_operator::FLOOR, e);
+            };
+            const ast::expression* e;
+            switch (what) {
+            case Out::Whole:
+                e = &op(ast::ast_operator::EQUAL, idx(), fl(idx()));
+                break;
+            case Out::OnLower:
+                // A whole index names the element at 0-based idx - 1: cudf's
+                // LOWER (floor of the position) where that is floor(prod),
+                // else HIGHER.
+                e = &op(ast::ast_operator::EQUAL, op(ast::ast_operator::SUB, idx(), lit(1.0)), fl(prod()));
+                break;
+            default: {
+                const auto& h = [&]() -> const ast::expression& {
+                    return op(ast::ast_operator::SUB, idx(), fl(idx()));
+                };
+                e = &op(ast::ast_operator::ADD,
+                        op(ast::ast_operator::MUL, op(ast::ast_operator::SUB, lit(1.0), h()), col(2)),
+                        op(ast::ast_operator::MUL, h(), col(3)));
+            }
+            }
+            return cudf::compute_column(
+                cudf::table_view({n1_flat->view(), p_flat->view(), lower, higher}), *e);
+        };
+        auto whole = compute(Out::Whole);
+        auto on_lower = compute(Out::OnLower);
+        auto interp = compute(Out::Interp);
+        n1_flat.reset();
+        p_flat.reset();
+
+        // A null (an all-NA group under na.rm = TRUE) compares to null, which
+        // copy_if_else treats as false: it keeps `interp`, itself null there.
+        auto same = cudf::binary_operation(lower, higher, cudf::binary_operator::EQUAL, b8);
+        auto at_index = cudf::copy_if_else(lower, higher, on_lower->view());
+        on_lower.reset();
+        auto picked = cudf::copy_if_else(lower, interp->view(), same->view());
+        same.reset();
+        interp.reset();
+        res.results[b.lo].reset();
+        res.results[b.hi].reset();
+        return cudf::copy_if_else(at_index->view(), picked->view(), whole->view());
+    }
+
     std::unique_ptr<cudf::column> take(std::vector<cudf::groupby::aggregation_result>& results,
                                        int i) {
         const Slot& s = slot[i];
-        const cudf::data_type f64{cudf::type_id::FLOAT64};
-        const cudf::data_type b8{cudf::type_id::BOOL8};
-        auto linear = std::move(results[s.req].results[s.pos]);
-        // LOWER/HIGHER keep the value column's type (INT32 for an integer
-        // column), LINEAR is FLOAT64: bring them to the result's type.
-        auto as_result_type = [&](const std::unique_ptr<cudf::column>& c)
-            -> std::unique_ptr<cudf::column> {
-            if (c->type() == linear->type()) return nullptr;
-            return cudf::cast(c->view(), linear->type());
-        };
-        auto lower_cast = as_result_type(results[s.req].results[s.lo]);
-        auto higher_cast = as_result_type(results[s.req].results[s.hi]);
-        cudf::column_view lower = lower_cast ? lower_cast->view() : results[s.req].results[s.lo]->view();
-        cudf::column_view higher = higher_cast ? higher_cast->view() : results[s.req].results[s.hi]->view();
-        // A null (an all-NA group under na.rm = TRUE) compares to null, which
-        // copy_if_else treats as false: it keeps `linear`, itself null there.
-        auto same = cudf::binary_operation(lower, higher, cudf::binary_operator::EQUAL, b8);
-        auto picked = cudf::copy_if_else(lower, linear->view(), same->view());
-
-        // The type-7 index of stats:::quantile.default, each step its own
-        // operation: it rounds the product and the +1 separately, and a fused
-        // expression could contract into an FMA. n1 = max(count - 1, 0) is the
-        // same for every probability of the request.
-        auto& n1 = n1_of_request[s.req];
-        if (!n1) {
-            auto n = cudf::cast(results[s.req].results[s.cnt]->view(), f64);
-            auto minus1 = cudf::binary_operation(n->view(), cudf::numeric_scalar<double>(1.0, true),
-                                                 cudf::binary_operator::SUB, f64);
-            n1 = cudf::binary_operation(minus1->view(), cudf::numeric_scalar<double>(0.0, true),
-                                        cudf::binary_operator::NULL_MAX, f64);
+        Batch& b = batch[s.req];
+        if (!b.done) { b.flat = type7(results[s.req], b); b.done = true; }
+        const cudf::size_type K = static_cast<cudf::size_type>(b.probs.size());
+        std::unique_ptr<cudf::column> out;
+        if (K == 1) {
+            out = b.pending == 1 ? std::move(b.flat) : std::make_unique<cudf::column>(b.flat->view());
+        } else {
+            const cudf::size_type G = (b.flat ? b.flat : b.by_prob)->size() / K;
+            if (!b.by_prob) {
+                // one gather puts the values probability-major: row k * G + g
+                // takes the value at g * K + k
+                namespace ast = cudf::ast;
+                auto r = cudf::sequence(G * K, cudf::numeric_scalar<int32_t>(0, true),
+                                        cudf::numeric_scalar<int32_t>(1, true));
+                cudf::numeric_scalar<int32_t> g_lit(G, true), k_lit(K, true);
+                ast::tree t;
+                const auto& row = t.emplace<ast::column_reference>(0);
+                const auto& g = t.emplace<ast::operation>(
+                    ast::ast_operator::MOD, row, t.emplace<ast::literal>(g_lit));
+                const auto& kk = t.emplace<ast::operation>(
+                    ast::ast_operator::DIV, row, t.emplace<ast::literal>(g_lit));
+                const auto& map = t.emplace<ast::operation>(
+                    ast::ast_operator::ADD,
+                    t.emplace<ast::operation>(ast::ast_operator::MUL, g, t.emplace<ast::literal>(k_lit)),
+                    kk);
+                auto rows = cudf::compute_column(cudf::table_view({r->view()}), map);
+                r.reset();
+                b.by_prob = std::move(cudf::gather(cudf::table_view({b.flat->view()}), rows->view(),
+                                                   cudf::out_of_bounds_policy::DONT_CHECK)->release()[0]);
+                b.flat.reset();
+            }
+            auto part = cudf::slice(b.by_prob->view(), {s.k * G, (s.k + 1) * G})[0];
+            out = std::make_unique<cudf::column>(part);
         }
-        auto prod = cudf::binary_operation(n1->view(), cudf::numeric_scalar<double>(s.p, true),
-                                           cudf::binary_operator::MUL, f64);
-        auto idx = cudf::binary_operation(prod->view(), cudf::numeric_scalar<double>(1.0, true),
-                                          cudf::binary_operator::ADD, f64);
-        auto idx_floor = cudf::unary_operation(idx->view(), cudf::unary_operator::FLOOR);
-        auto whole = cudf::binary_operation(idx->view(), idx_floor->view(),
-                                            cudf::binary_operator::EQUAL, b8);
-        // A whole index names the element at 0-based idx - 1: cudf's LOWER
-        // (floor of the position) where that is floor(prod), else HIGHER.
-        auto pos = cudf::binary_operation(idx->view(), cudf::numeric_scalar<double>(1.0, true),
-                                          cudf::binary_operator::SUB, f64);
-        auto prod_floor = cudf::unary_operation(prod->view(), cudf::unary_operator::FLOOR);
-        auto on_lower = cudf::binary_operation(pos->view(), prod_floor->view(),
-                                               cudf::binary_operator::EQUAL, b8);
-        auto at_index = cudf::copy_if_else(lower, higher, on_lower->view());
-        return cudf::copy_if_else(at_index->view(), picked->view(), whole->view());
+        // a slot that shares its probability with another needs the column again
+        if (--b.pending == 0) { b.flat.reset(); b.by_prob.reset(); }
+        return out;
     }
 };
 
@@ -878,6 +1002,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                               median_q[i] ? 0.5 : agg_extra[i]);
             }
             if (!q_requests.empty()) {
+                quantiles.finish_requests(q_requests);
                 auto [result_keys, result_aggs] = whole_table_groupby().aggregate(q_requests);
                 for (int i = 0; i < num_aggs; ++i) {
                     if (quantiles.has(i)) quantile_cols[i] = quantiles.take(result_aggs, i);
@@ -1066,7 +1191,8 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
     // F124: the aggregations whose hit mask is a trailing column of `result`
     std::vector<int> mask_agg;
     {
-        cudf::groupby::groupby gb(keys_table, cudf::null_policy::INCLUDE);
+        auto gb_owner = std::make_unique<cudf::groupby::groupby>(keys_table, cudf::null_policy::INCLUDE);
+        cudf::groupby::groupby& gb = *gb_owner;
 
         std::vector<cudf::groupby::aggregation_request> requests;
         // Phase 6, task 6.1 (Fix A): for every aggregation needing na.rm=FALSE
@@ -1236,7 +1362,12 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
             requests.push_back(std::move(first_req));
         }
 
+        quantiles.finish_requests(requests);
         auto [result_keys, result_aggs] = gb.aggregate(requests);
+        // (#75) the groupby keeps the keys' sort and the sorted values alive: not needed
+        // from here, and the type-7 arithmetic of a wide quantile() holds several
+        // columns of G * K values
+        gb_owner.reset();
         // the n-row sequence is not needed again. `requests` still holds a view
         // of the freed column: it must not be read after this line.
         row_position.reset();

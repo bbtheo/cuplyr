@@ -236,20 +236,39 @@ lower_mutate <- function(ast, source_ptr) {
   index_types <- input_schema$types
   bound_exprs <- vector("list", length(expressions))
 
+  # (#75) many dots: a name -> index environment (the latest slot of a name
+  # wins, as the NA-ing of a replaced name below does) instead of vectors
+  # scanned and grown per dot
+  pos <- NULL
+  if (n_expr >= MUTATE_HASH_MIN && !anyNA(index_names) && all(nzchar(index_names))) {
+    pos <- new.env(hash = TRUE, parent = emptyenv(), size = max(2L * (length(index_names) + n_expr), 29L))
+    for (j in rev(seq_along(index_names))) assign(index_names[[j]], j, envir = pos)
+  }
+  n_slots <- length(index_names)
+
   for (i in seq_along(expressions)) {
     expr <- expressions[[i]]
 
-    lookup_schema <- list(names = index_names, types = index_types)
-    bound_exprs[[i]] <- ir_bind(expr$ir, lookup_schema)
+    if (is.null(pos)) {
+      lookup_schema <- list(names = index_names, types = index_types)
+      bound_exprs[[i]] <- ir_bind(expr$ir, lookup_schema)
+    } else {
+      bound_exprs[[i]] <- ir_bind(expr$ir, list(names = index_names), pos)
+    }
 
     # (the index map is read by the next expression only)
     if (i < n_expr) {
-      stale <- which(index_names == expr$output_col)
-      if (length(stale) > 0) {
-        index_names[stale] <- NA_character_
+      if (is.null(pos)) {
+        stale <- which(index_names == expr$output_col)
+        if (length(stale) > 0) {
+          index_names[stale] <- NA_character_
+        }
+        index_names <- c(index_names, expr$output_col)
+        index_types <- c(index_types, expr$output_type)
+      } else {
+        n_slots <- n_slots + 1L
+        assign(expr$output_col, n_slots, envir = pos)
       }
-      index_names <- c(index_names, expr$output_col)
-      index_types <- c(index_types, expr$output_type)
     }
   }
 

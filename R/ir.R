@@ -326,6 +326,104 @@ pronoun_call_name <- function(expr, env = NULL, schema = NULL) {
 # `name = !!.dots[[i]]` argument per dot instead would turn a spliced name into
 # a written one, which dplyr rejects or matches where it would not.
 
+# (#75) A schema that a many-dot mutate() parses against carries two
+# environments next to `names`/`types`, so that no step of a dot scans the whole
+# schema: `.pos` (name -> index of its first occurrence) and `.tcount` (type ->
+# number of columns of it). parse_mutate_dots() creates them for a call of
+# MUTATE_HASH_MIN dots or more and update_schema_for_expr() keeps them in step;
+# a schema without them (every other caller, and a call of a few dots) is read
+# with match() as before.
+# @keywords internal
+MUTATE_HASH_MIN <- 24L
+
+schema_hash_new <- function(schema) {
+  nms <- .subset2(schema, "names")
+  # (an NA or empty name can't key an environment)
+  if (anyNA(nms) || !all(nzchar(nms))) {
+    schema$.pos <- NULL
+    schema$.tcount <- NULL
+    return(schema)
+  }
+  pos <- new.env(hash = TRUE, parent = emptyenv(), size = max(2L * length(nms), 29L))
+  # (the first occurrence wins, as match() does)
+  for (i in rev(seq_along(nms))) assign(nms[[i]], i, envir = pos)
+  tcount <- new.env(hash = TRUE, parent = emptyenv())
+  types <- as.character(unname(.subset2(schema, "types")))
+  for (ty in unique(types)) assign(ty, sum(types == ty), envir = tcount)
+  schema$.pos <- pos
+  schema$.tcount <- tcount
+  # (a named vector makes every append a copy of its names too)
+  schema$types <- unname(.subset2(schema, "types"))
+  schema
+}
+
+# Keep a schema's hashes (schema_hash_new()) in step with `names`/`types`: the
+# column at `idx` takes type `type`, or a column `name` of `type` is appended
+# (call after the vectors changed, for the append). No-ops without hashes.
+# @keywords internal
+schema_hash_retype <- function(schema, idx, type) {
+  tcount <- .subset2(schema, ".tcount")
+  if (is.null(tcount)) return(invisible())
+  old <- as.character(unname(.subset2(schema, "types")[[idx]]))
+  tcount[[old]] <- tcount[[old]] - 1L
+  type <- as.character(unname(type))
+  tcount[[type]] <- (tcount[[type]] %||% 0L) + 1L
+  invisible()
+}
+
+schema_hash_append <- function(schema, name, type) {
+  pos <- .subset2(schema, ".pos")
+  if (is.null(pos)) return(invisible())
+  pos[[name]] <- length(.subset2(schema, "names"))
+  tcount <- .subset2(schema, ".tcount")
+  type <- as.character(unname(type))
+  tcount[[type]] <- (tcount[[type]] %||% 0L) + 1L
+  invisible()
+}
+
+# `name`'s index in a name -> index environment (NA if absent).
+# @keywords internal
+ir_pos_lookup <- function(pos, name) {
+  idx <- pos[[name]]
+  if (is.null(idx)) NA_integer_ else idx
+}
+
+# The index of `name` in `schema$names` (NA if there is none), like match().
+# @keywords internal
+ir_schema_pos <- function(schema, name) {
+  pos <- .subset2(schema, ".pos")
+  if (is.null(pos)) {
+    return(match(name, .subset2(schema, "names")))
+  }
+  idx <- pos[[name]]
+  if (is.null(idx)) NA_integer_ else idx
+}
+
+# Does any column of `schema` have GPU type `type`?
+# @keywords internal
+ir_schema_has_type <- function(schema, type) {
+  tcount <- .subset2(schema, ".tcount")
+  if (is.null(tcount)) {
+    return(match(type, .subset2(schema, "types"), 0L) > 0L)
+  }
+  n <- tcount[[type]]
+  !is.null(n) && n > 0L
+}
+
+# Does any column of `schema` have one of the timestamp types?
+# @keywords internal
+ir_schema_has_timestamp <- function(schema) {
+  tcount <- .subset2(schema, ".tcount")
+  if (is.null(tcount)) {
+    return(any(match(.subset2(schema, "types"), cuplyr_timestamp_types, 0L) > 0L))
+  }
+  for (ty in cuplyr_timestamp_types) {
+    n <- tcount[[ty]]
+    if (!is.null(n) && n > 0L) return(TRUE)
+  }
+  FALSE
+}
+
 # F110: TRUE only when the call in quosure `quo` provably reads a column, by
 # expr_has_column_ref()'s second shortcut alone (no `.data`/`.env` pronoun,
 # function literal or formula in it, and a non-head symbol that is a column);
@@ -336,7 +434,19 @@ quo_reads_column_fast <- function(quo, schema) {
     return(FALSE)
   }
   !any(match(ir_pronoun_syntax_names, all.names(.subset2(quo, 2L)), 0L) > 0L) &&
-    any(match(all.vars(.subset2(quo, 2L)), .subset2(schema, "names"), 0L) > 0L)
+    if (is.null(.subset2(schema, ".pos"))) {
+      any(match(all.vars(.subset2(quo, 2L)), .subset2(schema, "names"), 0L) > 0L)
+    } else {
+      pos <- .subset2(schema, ".pos")
+      found <- FALSE
+      for (v in all.vars(.subset2(quo, 2L))) {
+        if (!is.null(pos[[v]])) {
+          found <- TRUE
+          break
+        }
+      }
+      found
+    }
 }
 ir_pronoun_syntax_names <- c(".data", ".env", "function", "~")
 
@@ -1640,7 +1750,9 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
   # it applies to one): a bare symbol. Columns shadow the environment.
   if (is.symbol(expr)) {
     nm <- as.character(expr)
-    if (match(nm, schema$names, 0L) > 0L) {
+    # (a many-dot mutate()'s schema answers from its name hash, see schema_hash_new())
+    if (is.null(.subset2(schema, ".pos")) && match(nm, .subset2(schema, "names"), 0L) > 0L ||
+          !is.null(.subset2(schema, ".pos")) && !is.na(ir_schema_pos(schema, nm))) {
       return(ir_col(nm))
     }
     # (a name that is bound but cannot be read, a missing argument or a
@@ -1873,7 +1985,9 @@ ir_parse_expr <- function(expr, env, schema, allow_vector = FALSE) {
         }
       }
 
-      if (length(parsed_args) == 2L && match("INT64", schema$types, 0L) > 0L &&
+      if (length(parsed_args) == 2L &&
+            (if (is.null(.subset2(schema, ".tcount"))) match("INT64", .subset2(schema, "types"), 0L) > 0L
+             else ir_schema_has_type(schema, "INT64")) &&
             match(canonical, ir_int64_cmp_ops, 0L) > 0L) {
         parsed_args <- ir_int64_retype_cmp(parsed_args, schema)
       }
@@ -2303,7 +2417,9 @@ ir_parse_quo <- function(quo, schema) {
       }
       # (a factor_labels call is built only for a DICTIONARY32 column,
       # ir_parse_factor_conversion(): none of those, none to find)
-      if (!is.null(ir) && match("DICTIONARY32", .subset2(schema, "types"), 0L) > 0L &&
+      if (!is.null(ir) &&
+            (if (is.null(.subset2(schema, ".tcount"))) match("DICTIONARY32", .subset2(schema, "types"), 0L) > 0L
+             else ir_schema_has_type(schema, "DICTIONARY32")) &&
             ir_decode_meets_non_utf8(ir)) {
         ir <- NULL
       }
@@ -3134,6 +3250,10 @@ ir_eval_constant <- function(raw_expr, env) {
 # summarise()'s extract_na_rm() and the IR parsers that take a flag.
 # @keywords internal
 ir_na_flag_value <- function(raw_expr, env, schema) {
+  # (a written TRUE/FALSE needs no evaluation)
+  if (is.logical(raw_expr) && length(raw_expr) == 1L && !is.na(raw_expr) && is.null(attributes(raw_expr))) {
+    return(as.vector(raw_expr))
+  }
   if (expr_has_column_ref(raw_expr, schema)) {
     return(NULL)
   }
@@ -4615,14 +4735,14 @@ ir_has_window <- function(ir) {
 #'   against
 #' @return The IR tree with `index` filled in on every `col` node
 #' @keywords internal
-ir_bind <- function(ir, schema) {
+ir_bind <- function(ir, schema, pos = NULL) {
   if (is.null(ir)) {
     return(ir)
   }
 
   kind <- .subset2(ir, "kind")
   if (kind == "col") {
-    idx <- match(ir$name, schema$names)
+    idx <- if (is.null(pos)) match(ir$name, schema$names) else ir_pos_lookup(pos, ir$name)
     if (is.na(idx)) {
       stop("Column '", ir$name, "' not found.\n",
            "Available columns: ", paste(schema$names, collapse = ", "),
@@ -4657,7 +4777,7 @@ ir_bind <- function(ir, schema) {
   # F50: a factor column already IS its INT32 codes, so factor_codes(f) binds
   # to the column itself (a comparison on it stays one cudf AST kernel).
   if (identical(op, "factor_codes")) {
-    return(ir_bind(.subset2(ir, "args")[[1]], schema))
+    return(ir_bind(.subset2(ir, "args")[[1]], schema, pos))
   }
 
   args <- .subset2(ir, "args")
@@ -4670,7 +4790,7 @@ ir_bind <- function(ir, schema) {
       next
     }
     if (identical(arg_kind, "col")) {
-      idx <- match(.subset2(arg, "name"), schema$names)
+      idx <- if (is.null(pos)) match(.subset2(arg, "name"), schema$names) else ir_pos_lookup(pos, .subset2(arg, "name"))
       if (is.na(idx)) {
         stop("Column '", .subset2(arg, "name"), "' not found.\n",
              "Available columns: ", paste(schema$names, collapse = ", "),
@@ -4679,7 +4799,7 @@ ir_bind <- function(ir, schema) {
       arg$index <- idx - 1L
       args[i] <- list(arg)
     } else {
-      args[i] <- list(ir_bind(arg, schema))
+      args[i] <- list(ir_bind(arg, schema, pos))
     }
   }
   ir$args <- args
@@ -4830,7 +4950,8 @@ ir_deparse <- function(ir) {
 ir_factor_rule <- function(ir, schema) {
   # no DICTIONARY32 column and no such literal: nothing in the tree is "bare" or
   # "cpu", so every node is "none"
-  if (!"DICTIONARY32" %in% schema$types && !ir_has_dictionary_value(ir)) {
+  if (!(if (is.null(.subset2(schema, ".tcount"))) match("DICTIONARY32", .subset2(schema, "types"), 0L) > 0L
+        else ir_schema_has_type(schema, "DICTIONARY32")) && !ir_has_dictionary_value(ir)) {
     return("none")
   }
   dup <- anyDuplicated(schema$names) > 0L
@@ -4941,13 +5062,13 @@ ir_infer_type <- function(ir, schema) {
   # .subset2(): the nodes are classed lists, `$` would dispatch on them
   kind <- .subset2(ir, "kind")
   if (kind == "col") {
-    idx <- match(.subset2(ir, "name"), schema$names)
+    idx <- if (is.null(.subset2(schema, ".pos"))) match(.subset2(ir, "name"), .subset2(schema, "names")) else ir_schema_pos(schema, .subset2(ir, "name"))
     if (is.na(idx)) {
       stop("Column '", .subset2(ir, "name"), "' not found.\n",
            "Available columns: ", paste(schema$names, collapse = ", "),
            call. = FALSE)
     }
-    return(schema$types[idx])
+    return(.subset2(schema, "types")[idx])
   }
 
   if (kind == "vec") {
@@ -4995,13 +5116,13 @@ ir_infer_type <- function(ir, schema) {
     a_kind <- .subset2(a, "kind")
     # (a column's type is read here, without a call per leaf)
     t <- if (identical(a_kind, "col")) {
-      idx <- match(.subset2(a, "name"), schema$names)
+      idx <- if (is.null(.subset2(schema, ".pos"))) match(.subset2(a, "name"), .subset2(schema, "names")) else ir_schema_pos(schema, .subset2(a, "name"))
       if (is.na(idx)) {
         stop("Column '", .subset2(a, "name"), "' not found.\n",
              "Available columns: ", paste(schema$names, collapse = ", "),
              call. = FALSE)
       }
-      schema$types[idx]
+      .subset2(schema, "types")[idx]
     } else {
       ir_infer_type(a, schema)
     }
@@ -5265,7 +5386,8 @@ ir_tz_of <- function(ir, schema) {
 # column in the schema (constant subtrees are already folded in R).
 # @keywords internal
 ir_check_tz_rules <- function(ir, schema) {
-  if (!any(unname(schema$types) == "TIMESTAMP_MICROSECONDS")) {
+  if (!(if (is.null(.subset2(schema, ".tcount"))) any(unname(.subset2(schema, "types")) == "TIMESTAMP_MICROSECONDS")
+        else ir_schema_has_type(schema, "TIMESTAMP_MICROSECONDS"))) {
     return(invisible())
   }
   visit <- function(node) {
@@ -5828,7 +5950,8 @@ ir_posixct_shift <- function(ir, schema) {
 # and a bare NA, infer_mutate_output_type() for a shift and `ts - ts`).
 # @keywords internal
 ir_args_may_be_timestamp <- function(args, schema) {
-  if (any(match(schema$types, cuplyr_timestamp_types, 0L) > 0L)) {
+  if (if (is.null(.subset2(schema, ".tcount"))) any(match(.subset2(schema, "types"), cuplyr_timestamp_types, 0L) > 0L)
+      else ir_schema_has_timestamp(schema)) {
     return(TRUE)
   }
   for (i in seq_along(args)) {

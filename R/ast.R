@@ -779,6 +779,24 @@ infer_schema_from <- function(node, input_schema) {
       result_names <- input_schema$names
       result_types <- input_schema$types
 
+      exprs <- node$expressions
+      if (length(exprs) >= MUTATE_HASH_MIN) {
+        # (#75) many dots at once: a name's column is its first appearance, its
+        # type the last dot's, which is what the loop below arrives at
+        outs <- vapply(exprs, .subset2, character(1), "output_col", USE.NAMES = FALSE)
+        otypes <- unname(vapply(exprs, .subset2, character(1), "output_type", USE.NAMES = FALSE))
+        new_names <- unique(outs[!outs %in% result_names])
+        n_old <- length(result_names)
+        if (length(new_names) > 0L) {
+          result_names <- c(result_names, new_names)
+          # (the appended entries are unnamed, as `c(types, type)` leaves them)
+          result_types <- c(result_types, rep(NA_character_, length(new_names)))
+        }
+        last <- !duplicated(outs, fromLast = TRUE)
+        result_types[match(outs[last], result_names)] <- otypes[last]
+        return(list(names = result_names, types = result_types))
+      }
+
       for (expr in node$expressions) {
         existing_idx <- match(expr$output_col, result_names)
         if (!is.na(existing_idx)) {

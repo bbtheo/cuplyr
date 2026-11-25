@@ -1048,12 +1048,29 @@ summarise_dots_are_sequential <- function(dots) {
   if (anyDuplicated(nms) > 0) {
     return(TRUE)
   }
+  # (#75) the names assigned so far in an environment, so a call of many dots
+  # (a wide quantile()) doesn't search a growing vector per dot
+  seen <- NULL
+  if (length(dots) > 16L && !anyNA(nms) && all(nzchar(nms))) {
+    seen <- new.env(hash = TRUE, parent = emptyenv(), size = 2L * length(nms))
+    assign(nms[[1L]], TRUE, envir = seen)
+  }
   for (i in seq_along(dots)[-1]) {
     expr <- rlang::quo_get_expr(dots[[i]])
-    pn <- expr_data_pronoun_names(expr)
+    # (a `.data[[...]]` read is the only thing the walk looks for)
+    pn <- if (!is.call(expr) || ".data" %in% all.names(expr)) expr_data_pronoun_names(expr) else character()
     # an unresolvable `.data[[k]]` subscript (NA) may name any earlier dot
-    if (anyNA(pn) || any(c(all.vars(expr), pn) %in% nms[seq_len(i - 1)])) {
+    if (anyNA(pn)) {
       return(TRUE)
+    }
+    vars <- c(all.vars(expr), pn)
+    if (is.null(seen)) {
+      if (any(vars %in% nms[seq_len(i - 1)])) return(TRUE)
+    } else {
+      for (v in vars) {
+        if (nzchar(v) && !is.null(seen[[v]])) return(TRUE)
+      }
+      assign(nms[[i]], TRUE, envir = seen)
     }
   }
   FALSE
@@ -1951,15 +1968,25 @@ extract_agg_shape_param <- function(quo) {
 # itself), so both are accepted and ignored.
 #
 # @keywords internal
+quantile_names_cache <- new.env(parent = emptyenv())
+
 extract_quantile_probs <- function(expr, env, quo) {
-  proto <- function(x, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = FALSE,
-                     names = TRUE, type = 7, digits = 7) NULL
-  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
-  if (is.null(present)) {
-    stop("Invalid quantile() call in aggregation expression: ",
-         rlang::quo_text(quo), call. = FALSE)
+  # (#75) `quantile(x, <number>)`, the shape a wide quantile() expands to, is
+  # matched by position: no call_match(), and a literal probability needs no
+  # evaluation.
+  plain <- length(expr) == 3L && is.null(names(expr))
+  if (plain) {
+    present_args <- list(x = expr[[2L]], probs = expr[[3L]])
+  } else {
+    proto <- function(x, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = FALSE,
+                       names = TRUE, type = 7, digits = 7) NULL
+    present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+    if (is.null(present)) {
+      stop("Invalid quantile() call in aggregation expression: ",
+           rlang::quo_text(quo), call. = FALSE)
+    }
+    present_args <- as.list(present)[-1]
   }
-  present_args <- as.list(present)[-1]
 
   if (is.null(present_args$x)) {
     stop("quantile() requires an `x` argument: ", rlang::quo_text(quo), call. = FALSE)
@@ -1984,7 +2011,12 @@ extract_quantile_probs <- function(expr, env, quo) {
     stop("summarise()'s quantile() requires a single `probs` value: ",
          rlang::quo_text(quo), call. = FALSE)
   }
-  probs_val <- ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(present_args$probs, env)))$value
+  probs_val <- if (plain && is.double(present_args$probs) && length(present_args$probs) == 1L &&
+                   is.null(attributes(present_args$probs))) {
+    present_args$probs
+  } else {
+    ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(present_args$probs, env)))$value
+  }
   ir_check_timespan_lit(probs_val)  # F48: a Period/Duration `probs`: CPU
   if (is.null(probs_val) || !is.numeric(probs_val) || inherits(probs_val, "integer64") ||
       length(probs_val) != 1 || is.na(probs_val) || probs_val < 0 || probs_val > 1) {
@@ -2005,7 +2037,13 @@ extract_quantile_probs <- function(expr, env, quo) {
          rlang::quo_text(quo), call. = FALSE)
   }
   if (isTRUE(names_val)) {
-    qnames <- names(stats::quantile(0, probs_val, digits = digits_val))
+    # (the label of a probability does not change: asked once per session)
+    key <- paste(if (digits_val > 15) format(probs_val, digits = 17) else probs_val, digits_val)
+    qnames <- quantile_names_cache[[key]]
+    if (is.null(qnames)) {
+      qnames <- names(stats::quantile(0, probs_val, digits = digits_val))
+      quantile_names_cache[[key]] <- qnames
+    }
   }
 
   list(

@@ -1240,6 +1240,9 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
   # counted per dot, and with an empty group a dot whose type depends on the
   # data gets its root cast to the double dplyr gives it (minmax_dot_root()).
 
+  # (#75) a call of many dots looks names and types up in hashes, not by scanning
+  if (length(dots) >= MUTATE_HASH_MIN) schema <- schema_hash_new(schema)
+
   expressions <- list()
   has_window <- FALSE
   has_vec <- FALSE
@@ -1346,6 +1349,7 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
       keep_idx <- schema$names != new_name
       schema$names <- schema$names[keep_idx]
       schema$types <- schema$types[keep_idx]
+      if (!is.null(.subset2(schema, ".pos"))) schema <- schema_hash_new(schema)  # (positions moved)
       schema <- set_schema_factor_levels(schema, new_name, NULL)
       forget_frac(new_name)
       next
@@ -1999,12 +2003,15 @@ update_schema_for_expr <- function(schema, expr) {
   # a factor nor a POSIXct: only the name and type change.
   if (is.null(schema$factor_levels) && is.null(schema$tz) &&
       !(unname(expr$output_type) %in% c("TIMESTAMP_MICROSECONDS", "DICTIONARY32"))) {
-    existing_idx <- match(expr$output_col, schema$names)
+    hashed <- !is.null(.subset2(schema, ".pos"))
+    existing_idx <- if (hashed) ir_schema_pos(schema, expr$output_col) else match(expr$output_col, schema$names)
     if (!is.na(existing_idx)) {
+      if (hashed) schema_hash_retype(schema, existing_idx, expr$output_type)
       schema$types[existing_idx] <- expr$output_type
     } else {
       schema$names <- c(schema$names, expr$output_col)
       schema$types <- c(schema$types, expr$output_type)
+      if (hashed) schema_hash_append(schema, expr$output_col, expr$output_type)
     }
     return(schema)
   }
@@ -2024,13 +2031,15 @@ update_schema_for_expr <- function(schema, expr) {
     "UTC"
   }
 
-  existing_idx <- match(expr$output_col, schema$names)
+  existing_idx <- ir_schema_pos(schema, expr$output_col)
 
   if (!is.na(existing_idx)) {
+    schema_hash_retype(schema, existing_idx, expr$output_type)
     schema$types[existing_idx] <- expr$output_type
   } else {
     schema$names <- c(schema$names, expr$output_col)
     schema$types <- c(schema$types, expr$output_type)
+    schema_hash_append(schema, expr$output_col, expr$output_type)
   }
 
   set_schema_tz(schema, expr$output_col, zone)

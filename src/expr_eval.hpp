@@ -48,6 +48,7 @@
 #ifndef CUPLYR_EXPR_EVAL_HPP
 #define CUPLYR_EXPR_EVAL_HPP
 
+#include <unordered_map>
 #include <variant>  // libcudf 26.10's cudf/ast/expressions.hpp uses std::variant without including it
 #include "cuda_utils.hpp"
 #include "gpu_table.hpp"
@@ -257,6 +258,31 @@ struct eval_ctx {
     std::map<cudf::size_type, cudf::size_type> alias_of;
 
     cudf::table_view view() const { return cudf::table_view(cols); }
+
+    cudf::size_type num_rows() const { return cols.empty() ? 0 : cols[0].size(); }
+
+    // (#75) The columns the AST under construction reads, numbered by first
+    // use. libcudf prepares every column of the table an AST runs on (a device
+    // view each, copied to the device), so a tree evaluated on all of `cols`
+    // costs O(columns) however few it reads, and a mutate() of k dots was
+    // quadratic. While `ast_refs` is set, build_ast() records its column
+    // references here (ast_col_ref()) and the tree runs on just those columns
+    // (ast_refs_view()).
+    struct ast_cols {
+        std::vector<cudf::size_type> used;
+        std::unordered_map<cudf::size_type, int> pos;
+    };
+    ast_cols* ast_refs = nullptr;
+
+    // The table of the columns recorded in `refs` (the first one if none: a
+    // tree of literals still needs the row count).
+    cudf::table_view ast_refs_view(const ast_cols& refs) const {
+        std::vector<cudf::column_view> sel;
+        sel.reserve(refs.used.size());
+        for (auto i : refs.used) sel.push_back(cols[i]);
+        if (sel.empty()) sel.push_back(cols[0]);
+        return cudf::table_view(sel);
+    }
 
     // A fresh ctx index whose view is column `idx` itself (no copy).
     cudf::size_type push_alias(cudf::size_type idx) {
@@ -1146,6 +1172,20 @@ inline bool nan_only_from_leaves(Rcpp::List node) {
     return false;
 }
 
+// A column reference of the AST under construction: the column `idx` of ctx, or
+// its number among the columns recorded so far when ctx.ast_refs is set.
+inline cudf::ast::expression const& ast_col_ref(cudf::ast::tree& tree, eval_ctx& ctx, cudf::size_type idx) {
+    if (ctx.ast_refs) {
+        auto it = ctx.ast_refs->pos.find(idx);
+        if (it == ctx.ast_refs->pos.end()) {
+            it = ctx.ast_refs->pos.emplace(idx, static_cast<int>(ctx.ast_refs->used.size())).first;
+            ctx.ast_refs->used.push_back(idx);
+        }
+        return tree.emplace<cudf::ast::column_reference>(it->second);
+    }
+    return ast_col_ref(tree, ctx, idx);
+}
+
 // -----------------------------------------------------------------------------
 // build_ast(): builds `node` (assumed ast_expressible(), possibly with
 // non-expressible descendants that get materialize()'d and referenced by
@@ -1162,7 +1202,7 @@ inline cudf::ast::expression const& build_ast(Rcpp::List node,
     if (kind == "col") {
         int idx = Rcpp::as<int>(node["index"]);
         if (ctx.nan_leaves) idx = ctx.nan_as_null(idx);  // F55
-        return tree.emplace<cudf::ast::column_reference>(idx);
+        return ast_col_ref(tree, ctx, idx);
     }
 
     if (kind == "lit") {
@@ -1192,13 +1232,13 @@ inline cudf::ast::expression const& build_ast(Rcpp::List node,
         // Not actually ast-native (shouldn't happen if the caller checked
         // ast_expressible() first) -- fall back to materializing it whole.
         cudf::size_type idx = materialize(node, ctx);
-        return tree.emplace<cudf::ast::column_reference>(idx);
+        return ast_col_ref(tree, ctx, idx);
     }
     if (checked_int_kind(op, node, ctx) != 0) {
         // F42: a checked integer op is its own kernel (apply_handler()); the
         // parent references the materialized column.
         cudf::size_type idx = materialize(node, ctx);
-        return tree.emplace<cudf::ast::column_reference>(idx);
+        return ast_col_ref(tree, ctx, idx);
     }
 
     // --- AST operand type matching ---
@@ -1320,10 +1360,10 @@ inline cudf::ast::expression const& build_ast(Rcpp::List node,
                   return build_ast(a, tree, scalars, ctx, hint);
               }()
             : nan_operand
-                ? tree.emplace<cudf::ast::column_reference>(ctx.nan_as_null(materialize(a, ctx)))
+                ? ast_col_ref(tree, ctx, ctx.nan_as_null(materialize(a, ctx)))
                 : ast_expressible(a, ctx)
                     ? build_ast(a, tree, scalars, ctx, hint)
-                    : tree.emplace<cudf::ast::column_reference>(materialize(a, ctx));
+                    : ast_col_ref(tree, ctx, materialize(a, ctx));
 
         if (!needs_cast) {
             operand_refs.push_back(built);
@@ -1341,7 +1381,7 @@ inline cudf::ast::expression const& build_ast(Rcpp::List node,
             cudf::size_type idx = materialize(a, ctx);
             auto casted = cudf::cast(ctx.cols[idx], target);
             cudf::size_type casted_idx = ctx.push(std::move(casted));
-            operand_refs.push_back(tree.emplace<cudf::ast::column_reference>(casted_idx));
+            operand_refs.push_back(ast_col_ref(tree, ctx, casted_idx));
         }
     }
 
@@ -2089,7 +2129,7 @@ inline std::unique_ptr<cudf::column> apply_checked_int_add(
             if (ir_kind(a) != "lit") materialize(a, ctx);
         }
         cudf::numeric_scalar<int32_t> na(0, false);
-        return cudf::make_column_from_scalar(na, ctx.view().num_rows());
+        return cudf::make_column_from_scalar(na, ctx.num_rows());
     }
 
     checked_tree ct;
@@ -2255,7 +2295,7 @@ inline std::unique_ptr<cudf::column> apply_double_mod(Rcpp::List node, eval_ctx&
     operand yo = make_operand(1);
     expr const& x = *xo.e;
     expr const& y = *yo.e;
-    cudf::size_type nrows = ctx.view().num_rows();
+    cudf::size_type nrows = ctx.num_rows();
 
     // x %% 0 is NaN whatever x is, NA included.
     if (is_mod && yo.is_lit && !yo.lit_null && yo.lit_value == 0.0) {
@@ -3689,7 +3729,7 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
                 bool na = ir_lit_is_na(a);
                 std::string v = na ? std::string() : r_scalar_utf8(Rcpp::as<SEXP>(a["value"]));
                 cudf::string_scalar sc(v, !na);
-                auto col = cudf::make_column_from_scalar(sc, ctx.view().num_rows());
+                auto col = cudf::make_column_from_scalar(sc, ctx.num_rows());
                 str_cols.push_back(col->view());
                 owned_broadcasts.push_back(std::move(col));
             } else {
@@ -3947,7 +3987,7 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         auto value_as_column = [&](Rcpp::List node) -> cudf::column_view {
             if (ir_kind(node) == "lit") {
                 auto s = build_scalar(target_str, node["value"], ir_lit_is_na(node));
-                auto col = cudf::make_column_from_scalar(*s, ctx.view().num_rows());
+                auto col = cudf::make_column_from_scalar(*s, ctx.num_rows());
                 return ctx.cols[ctx.push(std::move(col))];
             }
             cudf::size_type idx = materialize(node, ctx);
@@ -3992,7 +4032,7 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
             if (ir_kind(node) == "lit") {
                 auto s = build_scalar(target_str, node["value"],
                                       ir_lit_is_na(node) || ir_lit_is_nan(node));
-                auto col = cudf::make_column_from_scalar(*s, ctx.view().num_rows());
+                auto col = cudf::make_column_from_scalar(*s, ctx.num_rows());
                 return ctx.cols[ctx.push(std::move(col))];
             }
             cudf::size_type idx = materialize(node, ctx);
@@ -4106,7 +4146,7 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         auto value_as_column = [&](Rcpp::List node) -> cudf::column_view {
             if (ir_kind(node) == "lit") {
                 auto s = build_scalar(target_str, node["value"], ir_lit_is_na(node));
-                auto col = cudf::make_column_from_scalar(*s, ctx.view().num_rows());
+                auto col = cudf::make_column_from_scalar(*s, ctx.num_rows());
                 return ctx.cols[ctx.push(std::move(col))];
             }
             cudf::size_type idx = materialize(node, ctx);
@@ -4208,7 +4248,7 @@ inline cudf::size_type materialize(Rcpp::List node, eval_ctx& ctx) {
         SEXP type_sexp = node["type"];
         std::string type_str = Rf_isNull(type_sexp) ? "FLOAT64" : Rcpp::as<std::string>(type_sexp);
         auto s = build_scalar(type_str, node["value"], na);
-        auto col = cudf::make_column_from_scalar(*s, ctx.view().num_rows());
+        auto col = cudf::make_column_from_scalar(*s, ctx.num_rows());
         return ctx.push(std::move(col));
     }
 
@@ -4228,12 +4268,23 @@ inline cudf::size_type materialize(Rcpp::List node, eval_ctx& ctx) {
 }
 
 inline cudf::size_type materialize_call(Rcpp::List node, eval_ctx& ctx) {
+    // A call evaluated inside build_ast() numbers its own AST's columns, and
+    // nothing but an AST built right here may see an outer one's numbering.
+    struct refs_guard {
+        eval_ctx& c;
+        eval_ctx::ast_cols* saved;
+        explicit refs_guard(eval_ctx& c_) : c(c_), saved(c_.ast_refs) { c.ast_refs = nullptr; }
+        ~refs_guard() { c.ast_refs = saved; }
+    } guard(ctx);
     std::string op = Rcpp::as<std::string>(node["op"]);
     if (op_dispatches_to_ast(op, node, ctx)) {
         cudf::ast::tree tree;
         std::vector<std::unique_ptr<cudf::scalar>> scalars;
-        cudf::ast::expression const& root = build_ast(node, tree, scalars, ctx, "");
-        auto result = cudf::compute_column(ctx.view(), root);
+        eval_ctx::ast_cols refs;
+        ctx.ast_refs = &refs;  // (the guard above puts the outer one back)
+        cudf::ast::expression const* root_ptr = &build_ast(node, tree, scalars, ctx, "");
+        ctx.ast_refs = nullptr;
+        auto result = cudf::compute_column(ctx.ast_refs_view(refs), *root_ptr);
 
         // xor() lowers to NOT_EQUAL on its two BOOL8 operands (ir_parse_xor()
         // guarantees them): for booleans `a != b` is `xor(a, b)`, a null operand
