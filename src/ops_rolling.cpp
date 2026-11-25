@@ -105,6 +105,7 @@
 //
 // Memory: each N-row temporary is freed after its last use.
 
+#include <variant>  // libcudf 26.10's cudf/ast/expressions.hpp uses std::variant without including it
 #include "ops_rolling.hpp"
 
 #include <cudf/aggregation.hpp>

@@ -180,7 +180,7 @@ test_that("system install leaves the CUDA search to configure", {
   expect_match(res$output, "configure-ran", fixed = TRUE)
 })
 
-test_that("conda install pins RAPIDS 25.12 on CUDA 12 whatever the channel priority", {
+test_that("conda install pins RAPIDS 26.10 on CUDA 13 whatever the channel priority", {
   res <- run_install_script(
     c("--method=conda", "--dry-run"),
     env = c(HOME = withr::local_tempdir("fake-home-"))
@@ -188,8 +188,8 @@ test_that("conda install pins RAPIDS 25.12 on CUDA 12 whatever the channel prior
 
   expect_equal(res$status, 0L, info = res$output)
   expect_match(res$output, "--no-channel-priority", fixed = TRUE)
-  expect_match(res$output, "libcudf=25.12", fixed = TRUE)
-  expect_match(res$output, "cuda-version>=12.2,<13", fixed = TRUE)
+  expect_match(res$output, "libcudf=26.10", fixed = TRUE)
+  expect_match(res$output, "cuda-version>=13,<14", fixed = TRUE)
 })
 
 test_that("a failed conda solve stops instead of installing an unpinned RAPIDS", {
@@ -209,5 +209,5 @@ test_that("a failed conda solve stops instead of installing an unpinned RAPIDS",
 
   expect_false(res$status == 0L, info = res$output)
   calls <- readLines(log)
-  expect_true(all(grepl("libcudf=25.12", calls, fixed = TRUE)), info = paste(calls, collapse = "\n"))
+  expect_true(all(grepl("libcudf=26.10", calls, fixed = TRUE)), info = paste(calls, collapse = "\n"))
 })

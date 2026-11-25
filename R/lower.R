@@ -1281,7 +1281,7 @@ lower_window <- function(ast, source_ptr) {
 #'
 #' The rolling-window task (scratchpad/todo.md) adds a sixth kind,
 #' `"rolling"`, lowerable for every `fn` EXCEPT `"roll_median"`: cudf
-#' 25.12's `rolling_window()`/`grouped_rolling_window()` have no MEDIAN
+#' libcudf's (checked on 26.10) `rolling_window()`/`grouped_rolling_window()` have no MEDIAN
 #' aggregation instantiation at all in this environment (verified via `nm
 #' -DC libcudf.so`, see the file-level comment above
 #' `ir_parse_roll_call()`, R/ir.R) -- a genuine cudf capability gap, not a

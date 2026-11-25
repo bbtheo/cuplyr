@@ -6,15 +6,30 @@ channels = ["rapidsai", "conda-forge", "nvidia"]
 platforms = ["linux-64"]
 
 [dependencies]
-# RAPIDS C++ libraries (from conda - includes headers)
-libcudf = ">=25.12,<26.02"
-librmm = ">=25.12,<26.02"
-libkvikio = ">=25.12,<26.02"
-
-# CUDA toolkit
-cuda-toolkit = ">=12.2,<13"
-cuda-nvcc = ">=12.2,<13"
 pandoc = ">=3.0"
+
+# RAPIDS C++ libraries (from conda, with headers). Two series, one environment
+# each: `default` is the one cuplyr is developed, tested and gated on (26.10);
+# `rapids2602` is the declared minimum, checked at release time with
+# `pixi run -e rapids2602 conformance` or CUPLYR_PIXI_ENV=rapids2602 tools/conformance.
+# The CUDA toolkit (nvcc, headers) comes from the system install that
+# ./configure finds through CUDA_HOME; the environments carry only the runtime
+# libraries.
+[feature.rapids2610.dependencies]
+libcudf = "26.10.*"
+librmm = "26.10.*"
+libkvikio = "26.10.*"
+cuda-version = "13.*"
+
+[feature.rapids2602.dependencies]
+libcudf = "26.02.*"
+librmm = "26.02.*"
+libkvikio = "26.02.*"
+cuda-version = "13.*"
+
+[environments]
+default = ["rapids2610"]
+rapids2602 = ["rapids2602"]
 
 [tasks]
 configure = { cmd = "./configure", description = "Detect paths, generate Makevars" }

@@ -36,7 +36,7 @@
 #' **pixi**: Runs `pixi run install` which handles everything.
 #' Requires [pixi](https://pixi.sh) to be installed.
 #'
-#' **conda**: Installs RAPIDS 25.12 for CUDA 12, with the CUDA compiler and
+#' **conda**: Installs RAPIDS 26.10 for CUDA 13, with the CUDA compiler and
 #' headers, into a conda environment, then configures and builds cuplyr
 #' against it. Requires `mamba` or `conda`.
 #'
@@ -270,17 +270,18 @@ install_via_conda <- function(src_dir, conda_prefix, configure_args,
     file.exists(header) && any(file.exists(lib))
   }
 
-  # RAPIDS 25.12 on CUDA 12, as in pixi.toml. configure needs cuda.h and nvcc,
-  # which libcudf alone doesn't bring. Strict channel priority, which many
-  # .condarc files set, makes the 25.12 solve fail, so it is turned off here.
+  # RAPIDS 26.10 on CUDA 13, the series cuplyr is tested on (pixi.toml's default
+  # environment). configure needs cuda.h and nvcc, which libcudf alone doesn't
+  # bring. Strict channel priority, which many .condarc files set, makes the
+  # pinned solve fail, so it is turned off here.
   channel_args <- c("--no-channel-priority", "-c", "rapidsai", "-c", "conda-forge", "-c", "nvidia")
-  rapids_pkgs <- c("libcudf=25.12", "librmm=25.12", "libkvikio=25.12", "cuda-version>=12.2,<13")
+  rapids_pkgs <- c("libcudf=26.10", "librmm=26.10", "libkvikio=26.10", "cuda-version>=13,<14")
   cuda_pkgs <- c("cuda-nvcc", "cuda-cudart-dev")
 
   # `create -y` on an existing environment replaces it; add to it instead.
   verb <- if (dir.exists(file.path(conda_prefix, "conda-meta"))) "install" else "create"
 
-  # system2() goes through the shell: quote specs like "cuda-version>=12.2,<13".
+  # system2() goes through the shell: quote specs like "cuda-version>=13,<14".
   run_conda <- function(args) {
     as.integer(system2(conda_cmd, shQuote(args),
                        stdout = if (verbose) "" else FALSE,
@@ -297,12 +298,12 @@ install_via_conda <- function(src_dir, conda_prefix, configure_args,
     if (dry_run) {
       message("[dry-run] Would run: ", conda_cmd, " ", paste(conda_args, collapse = " "))
     } else {
-      # No unpinned fallback: an older RAPIDS solves but cuplyr can't build
-      # against it.
+      # No unpinned fallback: an older RAPIDS (25.12 or before) solves but
+      # cuplyr can't build against it.
       status <- run_conda(conda_args)
       if (!isTRUE(status == 0L) || !prefix_has_cudf(conda_prefix)) {
         stop(
-          conda_cmd, " could not install RAPIDS 25.12 for CUDA 12 with usable libcudf",
+          conda_cmd, " could not install RAPIDS 26.10 for CUDA 13 with usable libcudf",
           " headers/libraries under ", conda_prefix, " (exit code ", status, ").\n",
           "Expected files:\n",
           "  ", file.path(conda_prefix, "include", "cudf", "types.hpp"), "\n",

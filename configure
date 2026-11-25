@@ -11,20 +11,21 @@ CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 CUDA_INCLUDE=""
 CUDF_HOME="${CUDF_HOME:-}"
 CONDA_PREFIX="${CONDA_PREFIX:-}"
+# The oldest CUDA toolkit configure accepts. RAPIDS 26.x is tested with CUDA 13
+# (what the installers and pixi install); this is a floor, not the tested one.
 CUDA_MIN_VERSION="${CUPLYR_CUDA_MIN_VERSION:-12.2}"
-# Supported libcudf range: CUDF_MIN_VERSION <= version < CUDF_MAX_VERSION.
-# cuplyr still uses RMM's legacy allocate(bytes, stream) memory-resource
-# interface (src/oom_inject.cpp and -DRMM_ENABLE_LEGACY_MR_INTERFACE in
-# src/Makevars.in). RMM 26.02 removed it (rmm#2150) and 26.06 removed
-# rmm::mr::device_memory_resource, so 26.02 and later don't compile.
-CUDF_MIN_VERSION="25.12"
-CUDF_MAX_VERSION="26.02"
+# Supported libcudf: CUDF_MIN_VERSION and later, with no upper bound. cuplyr
+# uses RMM's cuda::mr::resource_ref model (RMM 26.02 and later); 25.12 and
+# older are rejected below, before the compiler runs. CUDF_INSTALL_VERSION is
+# the series cuplyr is developed and tested on, and the one install hints name.
+CUDF_MIN_VERSION="26.02"
+CUDF_INSTALL_VERSION="26.10"
 
-# The conda command that installs the supported series. One definition, so the
+# The conda command that installs the tested series. One definition, so the
 # "not found" and "unsupported version" messages can't drift. Strict channel
 # priority makes the pinned solve fail, so it is turned off; the cuda-version
-# pin keeps the solve on CUDA 12 builds (the spec is quoted for the shell).
-CONDA_INSTALL_CMD="mamba install --no-channel-priority -c rapidsai -c conda-forge -c nvidia libcudf=$CUDF_MIN_VERSION librmm=$CUDF_MIN_VERSION libkvikio=$CUDF_MIN_VERSION \"cuda-version>=12.2,<13\""
+# pin selects the CUDA 13 builds (the spec is quoted for the shell).
+CONDA_INSTALL_CMD="mamba install --no-channel-priority -c rapidsai -c conda-forge -c nvidia libcudf=$CUDF_INSTALL_VERSION librmm=$CUDF_INSTALL_VERSION libkvikio=$CUDF_INSTALL_VERSION \"cuda-version>=13,<14\""
 
 # Allow CUDA stub linking in non-GPU builder environments.
 # Modes:
@@ -192,7 +193,8 @@ fi
 
 if ! version_at_least "$CUDA_VERSION" "$CUDA_MIN_VERSION"; then
     echo "ERROR: CUDA $CUDA_VERSION found, but cuplyr requires CUDA >= $CUDA_MIN_VERSION"
-    echo "       with RAPIDS libcudf >=$CUDF_MIN_VERSION,<$CUDF_MAX_VERSION."
+    echo "       with RAPIDS libcudf >=$CUDF_MIN_VERSION."
+    echo "       (RAPIDS 26.x is tested with CUDA 13.)"
     exit 1
 fi
 
@@ -408,7 +410,7 @@ read_cudf_version() {
     printf '%d.%02d.%d\n' "$((10#$major))" "$((10#$minor))" "$((10#${patch:-0}))"
 }
 
-# major.minor as one integer (25.12 -> 25012), safe for zero-padded minors
+# major.minor as one integer (26.02 -> 26002), safe for zero-padded minors
 series_key() {
     local major="${1%%.*}" minor="${1#*.}"
     echo "$((10#$major * 1000 + 10#$minor))"
@@ -417,39 +419,38 @@ series_key() {
 CUDF_VERSION_HEADER="$CUDF_PREFIX/include/cudf/version_config.hpp"
 if CUDF_VERSION=$(read_cudf_version "$CUDF_VERSION_HEADER"); then
     CUDF_SERIES="${CUDF_VERSION%.*}"
-    if [ "$(series_key "$CUDF_SERIES")" -ge "$(series_key "$CUDF_MIN_VERSION")" ] && \
-       [ "$(series_key "$CUDF_SERIES")" -lt "$(series_key "$CUDF_MAX_VERSION")" ]; then
+    if [ "$(series_key "$CUDF_SERIES")" -ge "$(series_key "$CUDF_MIN_VERSION")" ]; then
         echo "Found libcudf version: $CUDF_VERSION"
     else
         # On stderr: install.sh hides a step's stdout unless --verbose
         {
-            echo "ERROR: libcudf $CUDF_VERSION found at $CUDF_PREFIX, but cuplyr supports"
-            echo "       RAPIDS libcudf >=$CUDF_MIN_VERSION,<$CUDF_MAX_VERSION only."
+            echo "ERROR: libcudf $CUDF_VERSION found at $CUDF_PREFIX, but cuplyr needs"
+            echo "       RAPIDS libcudf >=$CUDF_MIN_VERSION."
             echo ""
-            echo "Newer RAPIDS releases removed RMM interfaces that cuplyr uses,"
-            echo "and older ones lack the cuDF API it needs, so the build would fail."
+            echo "RAPIDS 25.12 and older use RMM's legacy memory-resource interface, which"
+            echo "cuplyr no longer supports, so the build would fail."
             echo ""
             if [ -n "$CONDA_PREFIX" ]; then
-                echo "To fix, install RAPIDS $CUDF_MIN_VERSION into the active conda environment:"
+                echo "To fix, install RAPIDS $CUDF_INSTALL_VERSION into the active conda environment:"
                 echo "  $CONDA_INSTALL_CMD"
-                echo "Or activate another conda environment that has RAPIDS $CUDF_MIN_VERSION,"
+                echo "Or activate another conda environment that has RAPIDS $CUDF_MIN_VERSION or later,"
                 echo "then re-run."
                 echo ""
                 # The active env's lib comes first on the runtime search path and
                 # libcudf.so has no versioned soname, so CUDF_HOME must be used
                 # outside conda or the build and the loaded library would differ.
-                echo "For a RAPIDS $CUDF_MIN_VERSION install outside conda (a pip wheel or a system"
+                echo "For a RAPIDS $CUDF_INSTALL_VERSION install outside conda (a pip wheel or a system"
                 echo "install), run \`conda deactivate\` until no environment is active, then"
                 echo "point CUDF_HOME at that prefix. Otherwise the active environment's libcudf"
                 echo "would be loaded instead of the one in CUDF_HOME:"
-                echo "  export CUDF_HOME=/path/to/rapids-$CUDF_MIN_VERSION"
+                echo "  export CUDF_HOME=/path/to/rapids-$CUDF_INSTALL_VERSION"
             else
                 echo "To fix, activate (or create) a conda environment, install RAPIDS"
-                echo "$CUDF_MIN_VERSION into it, and re-run:"
+                echo "$CUDF_INSTALL_VERSION into it, and re-run:"
                 echo "  $CONDA_INSTALL_CMD"
                 echo ""
-                echo "Or point CUDF_HOME at an existing RAPIDS $CUDF_MIN_VERSION prefix:"
-                echo "  export CUDF_HOME=/path/to/rapids-$CUDF_MIN_VERSION"
+                echo "Or point CUDF_HOME at an existing RAPIDS $CUDF_MIN_VERSION (or later) prefix:"
+                echo "  export CUDF_HOME=/path/to/rapids-$CUDF_INSTALL_VERSION"
             fi
             # Only when CUDF_HOME supplied this prefix and it isn't the active env
             # (-ef: the same directory, however the two paths are spelled).
@@ -460,11 +461,11 @@ if CUDF_VERSION=$(read_cudf_version "$CUDF_VERSION_HEADER"); then
                     echo "CUDF_HOME=$CUDF_HOME is set and takes precedence over CONDA_PREFIX, so"
                     echo "installing into the active environment won't change this. Unset"
                     echo "CUDF_HOME, or run \`conda deactivate\` until no environment is active and"
-                    echo "point it at a RAPIDS $CUDF_MIN_VERSION prefix."
+                    echo "point it at a RAPIDS $CUDF_MIN_VERSION (or later) prefix."
                 else
                     echo "CUDF_HOME=$CUDF_HOME is set and takes precedence, so installing"
-                    echo "RAPIDS $CUDF_MIN_VERSION elsewhere won't change this. Unset CUDF_HOME, or"
-                    echo "point it at a RAPIDS $CUDF_MIN_VERSION prefix."
+                    echo "RAPIDS elsewhere won't change this. Unset CUDF_HOME, or"
+                    echo "point it at a RAPIDS $CUDF_MIN_VERSION (or later) prefix."
                 fi
             fi
         } >&2
@@ -474,7 +475,7 @@ else
     {
         echo "WARNING: could not read the libcudf version from $CUDF_VERSION_HEADER"
         echo "         (version_config.hpp is missing or unparseable), so the version"
-        echo "         was not checked. cuplyr supports libcudf >=$CUDF_MIN_VERSION,<$CUDF_MAX_VERSION."
+        echo "         was not checked. cuplyr needs libcudf >=$CUDF_MIN_VERSION."
     } >&2
 fi
 

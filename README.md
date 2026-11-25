@@ -133,11 +133,11 @@ You need Linux x86_64 and:
 | | |
 |---|---|
 | NVIDIA GPU | compute capability 7.0 (Volta) or newer |
-| CUDA Toolkit | 12.2 or newer |
-| RAPIDS libcudf | 25.12 (26.02 and newer are not supported yet) |
+| CUDA Toolkit | 12.2 or newer (RAPIDS 26.x is tested with CUDA 13, which the installers and pixi use) |
+| RAPIDS libcudf | 26.02 or newer (developed and tested on 26.10) |
 | R | 4.3 or newer |
 
-The install script clones cuplyr, finds CUDA and libcudf through pixi, conda or your system (in that order), and builds the package:
+The install script clones cuplyr, finds libcudf through pixi, conda or your system (in that order), and builds the package. The pixi environment carries libcudf but no compiler, so `--method=pixi` needs a system CUDA toolkit (`nvcc` and the CUDA headers, found through `CUDA_HOME` or `/usr/local/cuda`); the conda method installs `cuda-nvcc` into its environment itself:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bbtheo/cuplyr/main/install.sh | bash

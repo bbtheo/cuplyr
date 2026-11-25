@@ -1,4 +1,4 @@
-FROM rapidsai/base:25.12-cuda12-py3.11
+FROM rapidsai/base:26.10-cuda13-py3.11
 
 LABEL maintainer="your@email.com"
 LABEL description="cuplyr development environment with RAPIDS libcudf"

@@ -16,6 +16,7 @@
 #ifndef CUPLYR_TS_AGG_HPP
 #define CUPLYR_TS_AGG_HPP
 
+#include <variant>  // libcudf 26.10's cudf/ast/expressions.hpp (via cudf/transform.hpp) uses std::variant without including it
 #include <cudf/binaryop.hpp>
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_view.hpp>

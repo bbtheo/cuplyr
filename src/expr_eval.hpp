@@ -48,6 +48,7 @@
 #ifndef CUPLYR_EXPR_EVAL_HPP
 #define CUPLYR_EXPR_EVAL_HPP
 
+#include <variant>  // libcudf 26.10's cudf/ast/expressions.hpp uses std::variant without including it
 #include "cuda_utils.hpp"
 #include "gpu_table.hpp"
 #include "ops_common.hpp"
@@ -57,6 +58,7 @@
 #include "expr_cse.hpp"
 
 #include <cudf/ast/expressions.hpp>
+#include "cuplyr_compat.hpp"
 #include <cudf/binaryop.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
@@ -434,7 +436,7 @@ inline bool ast_op_from_name(const std::string& op, cudf::ast::ast_operator& out
         {"&", cudf::ast::ast_operator::NULL_LOGICAL_AND},
         {"|", cudf::ast::ast_operator::NULL_LOGICAL_OR},
         {"!", cudf::ast::ast_operator::NOT},
-        {"xor", cudf::ast::ast_operator::BITWISE_XOR},
+        {"xor", cudf::ast::ast_operator::NOT_EQUAL},  // BOOL8 operands only (ir_parse_xor); see materialize_call()
         {"is.na", cudf::ast::ast_operator::IS_NULL},
         {"sqrt", cudf::ast::ast_operator::SQRT},
         {"log", cudf::ast::ast_operator::LOG},
@@ -839,7 +841,7 @@ inline std::unique_ptr<cudf::numeric_scalar<double>> make_f64_scalar(double v, b
         auto s = std::make_unique<cudf::numeric_scalar<double>>(1.0, true);
         cuplyr::check_cuda(cudaMemcpyAsync(s->data(), &neg_zero, sizeof(double),
                                            cudaMemcpyHostToDevice,
-                                           cudf::get_default_stream().value()),
+                                           cuplyr::raw_stream(cudf::get_default_stream())),
                            "negative zero scalar");
         return s;
     }
@@ -1251,6 +1253,28 @@ inline cudf::ast::expression const& build_ast(Rcpp::List node,
         target = resolved[1];
     }
 
+    // libcudf 26.x's floating-point AST functors accept only a floating-point
+    // operand (25.12 let C++ convert an integer one silently), so the operand
+    // is cast to FLOAT64. The node's own type is FLOAT64 already
+    // (resolve_static_type()), so no parent sees a different type. abs() of a
+    // logical needs a signed operand too, but that cast is made in R (the "abs"
+    // parse hook wraps a BOOL8 argument in cast_int32), so the IR type, the
+    // static type here and the computed column all agree.
+    if (args.size() == 1 && !is_unresolved_na[0]) {
+        if (op == "sqrt" || op == "exp" || op == "log" || op == "sin" || op == "cos" ||
+            op == "tan" || op == "floor" || op == "ceil") {
+            target = cudf::data_type{cudf::type_id::FLOAT64};
+        }
+    }
+    // `^` is always computed in doubles (R's integer ^ integer is a double):
+    // libcudf 26.x's POW on two integers is an integer power, which truncates a
+    // negative exponent's result to 0 and is not defined for BOOL8 at all.
+    if (op == "^") {
+        target = cudf::data_type{cudf::type_id::FLOAT64};
+    }
+    const bool retype_unary = args.size() == 1 && !is_unresolved_na[0] &&
+                              resolved[0].id() != target.id();
+
     // F55: the missingness-sensitive consumers (is.na() and the six comparisons)
     // read a FLOAT64 operand with NaN as null, as R does (`NaN > 1` is NA,
     // `is.na(NaN)` is TRUE). A FLOAT64 column goes through nan_as_null(); a
@@ -1264,7 +1288,8 @@ inline cudf::ast::expression const& build_ast(Rcpp::List node,
     operand_refs.reserve(args.size());
     for (int i = 0; i < args.size(); ++i) {
         Rcpp::List a = args[i];
-        bool needs_cast = is_binary && !is_unresolved_na[i] && resolved[i].id() != target.id();
+        bool needs_cast = (is_binary || retype_unary) && !is_unresolved_na[i] &&
+                          resolved[i].id() != target.id();
         std::string hint = is_unresolved_na[i] || (needs_cast && ir_kind(a) == "lit")
                                 ? expr_type_to_str(target)
                                 : std::string();
@@ -4157,25 +4182,13 @@ inline cudf::size_type materialize_call(Rcpp::List node, eval_ctx& ctx) {
         cudf::ast::expression const& root = build_ast(node, tree, scalars, ctx, "");
         auto result = cudf::compute_column(ctx.view(), root);
 
-        // xor() output-type surprise (T4 finding, not covered by T2's
-        // empirical checks): "xor" lowers to BITWISE_XOR (section 2.3), and
-        // libcudf's AST evaluator derives BITWISE_XOR's output type via
-        // `decltype(lhs ^ rhs)` on the operand's native C++ type -- for
-        // `bool` operands, `^` integer-promotes both sides to `int` before
-        // applying it, so the *declared* AST return type for BOOL8 ^ BOOL8
-        // is INT32, not BOOL8, even though ir_call_registry's "xor" entry
-        // (correctly) declares BOOL8. Every other bool_ops entry
-        // (comparisons, &, |, !, is.na) comes back genuine BOOL8 already,
-        // so this cast is scoped to "xor" only -- the 0/1 INT32 values are
-        // a faithful bitwise encoding of the boolean result (with the null
-        // mask preserved by compute_column's own null propagation), so a
-        // plain value cast (no semantic reinterpretation) is all that's
-        // needed. Without this, `gpu_filter_expr()`'s "mask must be BOOL8"
-        // check rejects any predicate built from `xor()` outright.
-        if (op == "xor" && result->type().id() != cudf::type_id::BOOL8) {
-            result = cudf::cast(result->view(), cudf::data_type{cudf::type_id::BOOL8});
-        }
-
+        // xor() lowers to NOT_EQUAL on its two BOOL8 operands (ir_parse_xor()
+        // guarantees them): for booleans `a != b` is `xor(a, b)`, a null operand
+        // makes the result null in both, and the output is BOOL8. It used to
+        // lower to BITWISE_XOR, whose AST output type was INT32 for two BOOL8
+        // operands (C++ integer-promotes bool before `^`), so the result was cast
+        // back to BOOL8; libcudf 26.x rejects BITWISE_XOR on BOOL8 operands
+        // altogether ("Invalid binary operation").
         return ctx.push(std::move(result));
     }
 

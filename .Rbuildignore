@@ -25,6 +25,7 @@
 ^\.github$
 ^\.github/
 ^src/Makevars$
+^src/\.cuplyr-build-env$
 ^install\.sh$
 ^notebooks$
 ^notebooks/

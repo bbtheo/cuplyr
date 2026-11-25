@@ -1,4 +1,5 @@
 // src/transfer_io.cpp
+#include <rmm/cuda_stream_view.hpp>
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
 #include "r_strings.hpp"

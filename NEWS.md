@@ -1,5 +1,20 @@
 # cuplyr (development version)
 
+* RAPIDS 25.12 is no longer supported: cuplyr needs RAPIDS 26.02 or later, is tested on 26.10, and installs 26.10 for CUDA 13 (#94).
+
+  It builds against libcudf and RMM `>=26.02` with no upper bound, and uses
+  RMM's `cuda::mr::resource_ref` memory-resource model instead of the legacy
+  `device_memory_resource` interface, which RMM 26.10 no longer has. On 26.02,
+  whose libcudf still reads RMM's pointer-based current resource, cuplyr
+  also installs its resource there, through RMM's callback adaptor, so
+  libcudf's own allocations are tracked too; 26.10 uses `resource_ref` only.
+  `configure` rejects an
+  older libcudf with a message naming 26.02, and `check_deps()`,
+  `diagnostics()` and `verify_installation()` report the version they find and
+  flag one below 26.02. `install.sh` and `install_cuplyr()` install RAPIDS
+  26.10 for CUDA 13, and the pixi environment moves to 26.10, with a second
+  environment, `rapids2602`, for the minimum.
+
 * A column keeps its element names, its other attributes (such as a `label`
   or `scale()`'s `scaled:center`) and the shape of a one-column matrix from
   `tbl_gpu()` to `collect()`, `pull()` and `$`, by dplyr's rules, through

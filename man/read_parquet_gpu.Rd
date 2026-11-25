@@ -158,9 +158,10 @@ comparison of a column with a literal that converts to the column's file
 type without change (\code{==}, \code{!=}, \code{<}, \code{<=}, \code{>}, \code{>=}) on an integer,
 \code{integer64}, \code{Date} or \code{POSIXct} column, or \code{!is.na()} of an \code{integer} or \code{integer64} column;
 the \code{&}s of a condition are split. Comparisons on double and string columns
-are not pushed: libcudf 25.12 can skip a row group wrongly from a double
-column's \code{NaN} statistics or a string column's deprecated min/max statistics
-(signed byte order), which would lose rows. They are applied after the read, so a filter on doubles or
+are not pushed: libcudf (checked on 26.10) can skip a row group wrongly from a
+double column's \code{NaN} statistics, and a string column's deprecated min/max
+statistics (signed byte order) are not proved safe, and either would lose rows.
+They are applied after the read, so a filter on doubles or
 strings gives the same rows but skips no row groups. A factor written by
 \code{arrow::write_parquet()} reads as a string (see above), so it is not pushed
 either.

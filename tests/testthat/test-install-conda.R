@@ -47,7 +47,7 @@ run_install_via_conda <- function(conda_prefix = NULL, dry_run = FALSE) {
   )
 }
 
-test_that("install_via_conda() pins RAPIDS 25.12 on CUDA 12 and adds nvcc", {
+test_that("install_via_conda() pins RAPIDS 26.10 on CUDA 13 and adds nvcc", {
   skip_on_os("windows")
   log_file <- local_fake_mamba()
   local_installer_mocks()
@@ -57,8 +57,8 @@ test_that("install_via_conda() pins RAPIDS 25.12 on CUDA 12 and adds nvcc", {
   calls <- readLines(log_file, warn = FALSE)
   expect_length(calls, 1)
   expect_match(calls, "--no-channel-priority", fixed = TRUE)
-  expect_match(calls, "libcudf=25.12", fixed = TRUE)
-  expect_match(calls, "cuda-version>=12.2,<13", fixed = TRUE)
+  expect_match(calls, "libcudf=26.10", fixed = TRUE)
+  expect_match(calls, "cuda-version>=13,<14", fixed = TRUE)
   expect_match(calls, "cuda-nvcc", fixed = TRUE)
   expect_match(calls, "cuda-cudart-dev", fixed = TRUE)
 })
@@ -72,7 +72,7 @@ test_that("install_via_conda() does not fall back to an unpinned RAPIDS", {
 
   calls <- readLines(log_file, warn = FALSE)
   expect_true(
-    all(grepl("libcudf=25.12", calls, fixed = TRUE)),
+    all(grepl("libcudf=26.10", calls, fixed = TRUE)),
     info = paste(calls, collapse = "\n")
   )
 })

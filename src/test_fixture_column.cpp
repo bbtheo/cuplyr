@@ -8,12 +8,20 @@
 // list [v, v + 1]; a STRUCT has one INT32 field. "DICTIONARY32_INT32" is a
 // dictionary with INT32 keys. Not used by the package itself.
 
+#include <rmm/cuda_stream_view.hpp>
 #include "gpu_table.hpp"
 
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_factories.hpp>
+#include <cudf/copying.hpp>
+#include <cudf/dictionary/dictionary_column_view.hpp>
+#include <cudf/dictionary/dictionary_factories.hpp>
 #include <cudf/dictionary/encode.hpp>
 #include <cudf/null_mask.hpp>
+#include <cudf/replace.hpp>
+#include <cudf/scalar/scalar.hpp>
+#include <cudf/sorting.hpp>
+#include <cudf/unary.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/types.hpp>
 
@@ -107,6 +115,31 @@ std::unique_ptr<cudf::column> struct_column(const Parsed& p) {
     return cudf::make_structs_column(n, std::move(children), p.null_count, null_mask_of(p));
 }
 
+// libcudf 26.10's dictionary::encode() returns its keys in order of first
+// appearance, not in the strict order its documentation promises (25.12 and
+// 26.02 sort them), and the F105 tests read the keys as factor levels. Sort the
+// keys and re-map the indices, so the fixture is the same on every series (a
+// no-op where encode() already sorted).
+std::unique_ptr<cudf::column> with_sorted_keys(std::unique_ptr<cudf::column> encoded) {
+    cudf::dictionary_column_view dv(encoded->view());
+    const cudf::data_type index_type = dv.indices().type();
+    const cudf::table_view keys({dv.keys()});
+    auto order = cudf::sorted_order(keys, {cudf::order::ASCENDING}, {cudf::null_order::AFTER});
+    auto new_keys = std::move(
+        cudf::gather(keys, order->view(), cudf::out_of_bounds_policy::DONT_CHECK)->release().front());
+    // order[new position] = old key; its inverse sends an old key to its new position
+    auto inverse = cudf::sorted_order(cudf::table_view({order->view()}),
+                                      {cudf::order::ASCENDING}, {cudf::null_order::AFTER});
+    auto old_index = cudf::cast(dv.indices(), cudf::data_type{cudf::type_id::INT32});
+    auto moved = std::move(cudf::gather(cudf::table_view({inverse->view()}), old_index->view(),
+                                        cudf::out_of_bounds_policy::NULLIFY)->release().front());
+    // a null row's index is never read; keep it in range
+    auto filled = cudf::replace_nulls(moved->view(), cudf::numeric_scalar<int32_t>(0));
+    auto new_index = cudf::cast(filled->view(), index_type);
+    return cudf::make_dictionary_column(std::move(new_keys), std::move(new_index),
+                                        cudf::copy_bitmask(encoded->view()), encoded->null_count());
+}
+
 }  // namespace
 
 // [[Rcpp::export]]
@@ -117,10 +150,10 @@ SEXP gpu_test_make_column(std::string type, Rcpp::CharacterVector values, int sc
     std::unique_ptr<cudf::column> col;
     if (type == "DICTIONARY32") {
         auto strings = cuplyr::character_to_gpu(values, "x");
-        col = cudf::dictionary::encode(strings->view());
+        col = with_sorted_keys(cudf::dictionary::encode(strings->view()));
     } else if (type == "DICTIONARY32_INT8_INDICES") {
         auto strings = cuplyr::character_to_gpu(values, "x");
-        col = cudf::dictionary::encode(strings->view(), data_type{type_id::INT8});
+        col = with_sorted_keys(cudf::dictionary::encode(strings->view(), data_type{type_id::INT8}));
     } else {
         const Parsed p = parse_values(values);
         if (type == "INT8") col = fixed_column<int8_t>(data_type{type_id::INT8}, p);
@@ -144,7 +177,7 @@ SEXP gpu_test_make_column(std::string type, Rcpp::CharacterVector values, int sc
         else if (type == "STRUCT") col = struct_column(p);
         else if (type == "DICTIONARY32_INT32") {
             auto keys = fixed_column<int32_t>(data_type{type_id::INT32}, p);
-            col = cudf::dictionary::encode(keys->view());
+            col = with_sorted_keys(cudf::dictionary::encode(keys->view()));
         } else Rcpp::stop("gpu_test_make_column: unknown type %s", type.c_str());
     }
 

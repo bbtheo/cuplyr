@@ -3,6 +3,7 @@ src/*.o
 src/*.so
 src/*.dll
 src/Makevars
+src/.cuplyr-build-env
 *.html
 */libs/*
 
@@ -32,3 +33,4 @@ scratchpad/
 benchmark_data/
 /.quarto/
 docs
+.cuplyr-env

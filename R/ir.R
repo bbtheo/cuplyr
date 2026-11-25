@@ -3799,7 +3799,7 @@ ir_parse_with_order_call <- function(expr, env, schema) {
 # cudf too, and the notes below describe the min_periods scheme of that path.
 #
 # Empirically verified (a standalone probe against this environment's
-# installed cudf 25.12, NOT re-derived from the header comments alone,
+# installed cudf (25.12 when written; the MEDIAN gap below was rechecked on 26.10), NOT re-derived from the header comments alone,
 # since "min_periods" is ambiguous between "row count in window" and
 # "valid (non-null) count in window" until tested):
 #   * `cudf::rolling_window(x, preceding = w, following = 0, min_periods =
@@ -3847,7 +3847,7 @@ ir_parse_with_order_call <- function(expr, env, schema) {
 #     make_median_aggregation`: only `aggregation`/`reduce_aggregation`/
 #     `groupby_aggregation` instantiations exist) -- MEDIAN is genuinely
 #     unsupported by `cudf::rolling_window`/`grouped_rolling_window` in
-#     cudf 25.12, not merely undocumented. `roll_median()` is therefore
+#     cudf (checked on 26.10), not merely undocumented. `roll_median()` is therefore
 #     registered (so it parses, types, and participates in window
 #     decomposition identically to its five siblings) but
 #     `window_spec_lowerable()` (R/lower.R) explicitly excludes it, routing
@@ -5582,7 +5582,7 @@ ir_parse_factor_conversion <- function(expr, schema, fn_name) {
   )
 }
 
-# xor(): BITWISE_XOR needs BOOL8 operands, but R's xor() coerces numbers and
+# xor(): lowered to NOT_EQUAL, which needs BOOL8 operands, but R's xor() coerces numbers and
 # strings. Anything that is not logical on both sides is left to dplyr.
 ir_parse_xor <- function(args, schema) {
   bool <- vapply(args, function(a) {
@@ -5597,8 +5597,9 @@ ir_parse_xor <- function(args, schema) {
 }
 
 # R gives a logical operand a numeric type the GPU evaluator doesn't: window
-# max()/min() and unary `-` of a logical are integers, round() of a logical is
-# a double (and cuDF's round rejects a BOOL8 column). The parse hooks of those
+# max()/min(), abs() and unary `-` of a logical are integers, round() of a
+# logical is a double (and cuDF's round rejects a BOOL8 column, libcudf 26.x's
+# ABS a BOOL8 operand). The parse hooks of those
 # ops wrap a BOOL8 first argument in `cast_to` (`cast_int32`/`cast_float64`,
 # nulls kept), so the node's inferred type and the evaluated column are R's
 # type, for the plain verbs and everything that rewrites into them
@@ -7222,7 +7223,7 @@ ir_call_registry <- list(
   "&" = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(ast_op = "NULL_LOGICAL_AND")),
   "|" = list(arity = 2L, parse = NULL, type = type_bool8, lower = list(ast_op = "NULL_LOGICAL_OR")),
   "!" = list(arity = 1L, parse = NULL, type = type_bool8, lower = list(ast_op = "NOT")),
-  "xor" = list(arity = 2L, parse = ir_parse_xor, type = type_bool8, lower = list(ast_op = "BITWISE_XOR")),
+  "xor" = list(arity = 2L, parse = ir_parse_xor, type = type_bool8, lower = list(ast_op = "NOT_EQUAL")),
 
   "is.na" = list(arity = 1L, parse = NULL, type = type_bool8, lower = list(ast_op = "IS_NULL")),
 
@@ -7304,7 +7305,8 @@ ir_call_registry <- list(
   ),
 
   "exp" = list(arity = 1L, parse = NULL, type = type_float64, lower = list(ast_op = "EXP")),
-  "abs" = list(arity = 1L, parse = NULL, type = type_abs, lower = list(ast_op = "ABS")),
+  "abs" = list(arity = 1L, parse = ir_parse_bool8_cast("abs", "cast_int32"), type = type_abs,
+               lower = list(ast_op = "ABS")),
   "floor" = list(arity = 1L, parse = NULL, type = type_float64, lower = list(ast_op = "FLOOR")),
   "ceil" = list(arity = 1L, parse = NULL, type = type_float64, lower = list(ast_op = "CEIL")),
   "sin" = list(arity = 1L, parse = NULL, type = type_float64, lower = list(ast_op = "SIN")),

@@ -1,5 +1,6 @@
 // src/ops_bind.cpp
 // GPU bind_rows and bind_cols implementations using cuDF
+#include <rmm/cuda_stream_view.hpp>
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
 #include "r_to_column.hpp"

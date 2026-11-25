@@ -1,7 +1,8 @@
-# cuplyr builds against RAPIDS 25.12 only: 26.02 removed the
-# rmm/mr/device/*.hpp forwarding headers and RMM's legacy allocate(bytes,
-# stream) interface, and 26.06 removed rmm::mr::device_memory_resource. The declared ranges must say so, and
-# configure must reject an unsupported libcudf before the compiler does.
+# cuplyr builds against RAPIDS 26.02 and later (#61 declared 25.12 only; #94
+# moved to RMM's resource_ref model and dropped 25.12). The declared ranges must
+# say so, and configure must reject an unsupported libcudf before the compiler
+# does. test-parity-94-rapids26-build.R covers the same ground from the other
+# side; this file keeps the configure behaviour #61 introduced.
 #
 # None of these tests need a GPU. The configure tests run configure against
 # fake prefixes in a scratch copy of the package (as test-configure.R does).
@@ -21,25 +22,25 @@ skip_if_no_pkg_file <- function(...) {
   )
 }
 
-supported_range <- ">=25.12,<26.02"
+supported_range <- ">=26.02"
 
 # ---------------------------------------------------------------------------
 # Declared ranges
 # ---------------------------------------------------------------------------
 
-test_that("pixi.toml bounds libcudf, librmm and libkvikio to >=25.12,<26.02", {
+test_that("pixi.toml pins libcudf, librmm and libkvikio to the 26.10 and 26.02 series", {
   skip_if_no_pkg_file("pixi.toml")
   lines <- readLines(pkg_file("pixi.toml"))
 
   for (pkg in c("libcudf", "librmm", "libkvikio")) {
     hit <- grep(sprintf("^\\s*%s\\s*=", pkg), lines, value = TRUE)
-    expect_length(hit, 1L)
+    expect_length(hit, 2L)  # one per RAPIDS environment
     spec <- gsub("\\s|\"|'", "", sub("^[^=]*=", "", hit))
-    expect_identical(spec, supported_range, info = paste("pixi.toml:", pkg))
+    expect_setequal(spec, c("26.10.*", "26.02.*"))
   }
 })
 
-test_that("conda/meta.yaml bounds libcudf, librmm and libkvikio in host and run", {
+test_that("conda/meta.yaml requires libcudf, librmm and libkvikio >=26.02 in host and run", {
   skip_if_no_pkg_file("conda", "meta.yaml")
   lines <- readLines(pkg_file("conda", "meta.yaml"))
 
@@ -52,27 +53,26 @@ test_that("conda/meta.yaml bounds libcudf, librmm and libkvikio in host and run"
   }
 })
 
-test_that("DESCRIPTION SystemRequirements gives libcudf an upper bound", {
+test_that("DESCRIPTION SystemRequirements gives libcudf a lower bound and no upper bound", {
   skip_if_no_pkg_file("DESCRIPTION")
   sysreq <- read.dcf(pkg_file("DESCRIPTION"), fields = "SystemRequirements")[[1]]
   sysreq <- gsub("\\s+", " ", sysreq)
 
-  expect_match(sysreq, "libcudf[^,]*>=\\s*25\\.12")
-  expect_match(sysreq, "libcudf[^)]*<\\s*26\\.02")
+  expect_match(sysreq, "libcudf[^,]*>=\\s*26\\.02")
+  expect_no_match(sysreq, "libcudf[^)]*<")
 })
 
-test_that("the README requirements table states both bounds for libcudf", {
+test_that("the README requirements table states the lower bound for libcudf", {
   skip_if_no_pkg_file("README.md")
   lines <- readLines(pkg_file("README.md"), warn = FALSE)
   row <- grep("^\\|\\s*RAPIDS libcudf\\s*\\|", lines, value = TRUE)
 
   expect_length(row, 1L)
-  expect_match(row, "25\\.12")
   expect_match(row, "26\\.02")
-  expect_no_match(row, "or newer")
+  expect_no_match(row, "25\\.12")
 })
 
-test_that("README and the articles never state an open-ended RAPIDS requirement", {
+test_that("README and the articles never name RAPIDS 25.12 as supported", {
   docs <- c(
     pkg_file("README.md"),
     list.files(pkg_file("vignettes"), pattern = "\\.(Rmd|qmd|md)$", full.names = TRUE)
@@ -80,40 +80,37 @@ test_that("README and the articles never state an open-ended RAPIDS requirement"
   docs <- docs[file.exists(docs)]
   skip_if(length(docs) == 0L, message = "README/vignettes not available in this test context")
 
-  open_ended <- character()
+  stale <- character()
   for (f in docs) {
     lines <- readLines(f, warn = FALSE)
-    hit <- grep(
-      "(cudf|rapids)[^\n]*25\\.12[^\n]*(or later|or newer|and later|and newer|\\+)",
-      lines,
-      ignore.case = TRUE
-    )
-    hit <- hit[!grepl("26\\.02", lines[hit])]
+    hit <- grep("(cudf|rapids)[^\n]*25\\.12", lines, ignore.case = TRUE)
+    hit <- hit[!grepl("no longer|not supported", lines[hit])]
     if (length(hit) > 0L) {
-      open_ended <- c(open_ended, sprintf("%s:%d: %s", basename(f), hit, lines[hit]))
+      stale <- c(stale, sprintf("%s:%d: %s", basename(f), hit, lines[hit]))
     }
   }
 
-  expect_identical(open_ended, character())
+  expect_identical(stale, character())
 })
 
-test_that("the getting-started article's RAPIDS requirement names both bounds", {
+test_that("the getting-started article's RAPIDS requirement names the lower bound", {
   skip_if_no_pkg_file("vignettes", "getting-started.Rmd")
   lines <- readLines(pkg_file("vignettes", "getting-started.Rmd"), warn = FALSE)
   row <- grep("^\\s*[-*]\\s*RAPIDS", lines, value = TRUE)
 
   expect_length(row, 1L)
-  expect_match(row, "25\\.12")
   expect_match(row, "26\\.02")
+  expect_no_match(row, "25\\.12")
 })
 
-test_that("configure never states an open-ended libcudf requirement", {
+test_that("configure states a lower bound only", {
   skip_if_no_pkg_file("configure")
   lines <- readLines(pkg_file("configure"))
-  open_ended <- grep(">=\\s*25\\.12", lines, value = TRUE)
-  open_ended <- open_ended[!grepl("26\\.02", open_ended)]
+  lines <- lines[!grepl("^\\s*#", lines)]
 
-  expect_identical(open_ended, character())
+  expect_false(any(grepl("CUDF_MAX_VERSION", lines, fixed = TRUE)))
+  expect_false(any(grepl("<\\s*26\\.|,<\\$CUDF", lines)))
+  expect_true(any(grepl('^CUDF_MIN_VERSION="26\\.02"', lines)))
 })
 
 # ---------------------------------------------------------------------------
@@ -158,7 +155,7 @@ touch <- function(path) {
   file.create(path)
 }
 
-fake_nvcc <- function(path, release = "12.9") {
+fake_nvcc <- function(path, release = "13.4") {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   writeLines(
     c(
@@ -173,7 +170,7 @@ fake_nvcc <- function(path, release = "12.9") {
 # A conda/pixi environment holding CUDA and libcudf. `cudf_version` is
 # c(major, minor, patch) as strings, written to include/cudf/version_config.hpp
 # in the layout libcudf ships; NULL leaves the header out.
-fake_prefix <- function(root, cudf_version = c("25", "12", "0")) {
+fake_prefix <- function(root, cudf_version = c("26", "10", "2")) {
   touch(file.path(root, "targets", "x86_64-linux", "include", "cuda.h"))
   touch(file.path(root, "targets", "x86_64-linux", "lib", "stubs", "libcuda.so"))
   fake_nvcc(file.path(root, "bin", "nvcc"))
@@ -239,8 +236,8 @@ run_configure_with <- function(prefix, cudf_home = NULL, stderr_only = FALSE,
 # Shell errors that would mean the check crashed instead of reporting.
 shell_error <- "syntax error|value too great for base|integer expression expected|unbound variable|command not found"
 
-# Any conda/mamba command configure prints must install the supported series
-# with the recipe install.sh and install_cuplyr() use: pinned to 25.12, CUDA 12
+# Any conda/mamba command configure prints must install the tested series
+# with the recipe install.sh and install_cuplyr() use: pinned to 26.10, CUDA 13
 # builds, and no channel priority (the pinned solve fails under strict channel
 # priority, see #47). The cuda-version spec must be quoted for the shell.
 expect_pinned_install_hint <- function(output) {
@@ -248,14 +245,14 @@ expect_pinned_install_hint <- function(output) {
   hint <- grep("(mamba|conda)\\s+install", lines, value = TRUE)
   expect_gt(length(hint), 0L)
   for (h in hint) {
-    expect_match(h, "libcudf=25\\.12", info = h)
-    expect_match(h, "librmm=25\\.12", info = h)
-    expect_match(h, "libkvikio=25\\.12", info = h)
+    expect_match(h, "libcudf=26\\.10", info = h)
+    expect_match(h, "librmm=26\\.10", info = h)
+    expect_match(h, "libkvikio=26\\.10", info = h)
     expect_match(h, "--no-channel-priority", fixed = TRUE, info = h)
     expect_match(h, "-c rapidsai", fixed = TRUE, info = h)
     expect_match(h, "-c conda-forge", fixed = TRUE, info = h)
     expect_match(h, "-c nvidia", fixed = TRUE, info = h)
-    expect_match(h, "[\"']cuda-version>=12\\.2,<13[\"']", info = h)
+    expect_match(h, "[\"']cuda-version>=13,<14[\"']", info = h)
   }
 }
 
@@ -264,7 +261,6 @@ expect_rejected <- function(res, found) {
   expect_false(res$makevars, info = res$output)
   expect_match(res$output, "libcudf", info = res$output)
   expect_match(res$output, found, info = res$output)
-  expect_match(res$output, "25\\.12", info = res$output)
   expect_match(res$output, "26\\.02", info = res$output)
   expect_no_match(res$output, shell_error)
   expect_pinned_install_hint(res$output)
@@ -276,54 +272,44 @@ expect_accepted <- function(res) {
   expect_no_match(res$output, shell_error)
 }
 
-test_that("configure accepts libcudf 25.12", {
+test_that("configure accepts libcudf 26.02, the minimum", {
+  skip_if_no_configure()
+  prefix <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "02", "0"))
+
+  res <- run_configure_with(prefix)
+
+  expect_accepted(res)
+  # configure reports the version it found
+  expect_match(res$output, "libcudf[^\n]*26\\.02", info = res$output)
+  expect_no_match(res$output, "WARNING[^\n]*version", ignore.case = TRUE)
+})
+
+test_that("configure accepts a 26.02 patch release and the tested 26.10", {
+  skip_if_no_configure()
+  for (v in list(c("26", "02", "1"), c("26", "10", "2"))) {
+    prefix <- fake_prefix(withr::local_tempdir("conda-env-"), v)
+    expect_accepted(run_configure_with(prefix))
+  }
+})
+
+test_that("configure rejects libcudf 25.12 early with a clear message", {
   skip_if_no_configure()
   prefix <- fake_prefix(withr::local_tempdir("conda-env-"), c("25", "12", "0"))
 
   res <- run_configure_with(prefix)
 
-  expect_accepted(res)
-  # configure reports the version it found (the generated Makevars it echoes
-  # also mentions 25.12, but never on a line naming libcudf)
-  expect_match(res$output, "libcudf[^\n]*25\\.12", info = res$output)
-  expect_no_match(res$output, "WARNING[^\n]*version", ignore.case = TRUE)
-})
-
-test_that("configure accepts a 25.12 patch release", {
-  skip_if_no_configure()
-  prefix <- fake_prefix(withr::local_tempdir("conda-env-"), c("25", "12", "1"))
-
-  res <- run_configure_with(prefix)
-
-  expect_accepted(res)
-})
-
-test_that("configure rejects libcudf 26.06 early with a clear message", {
-  skip_if_no_configure()
-  prefix <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "06", "0"))
-
-  res <- run_configure_with(prefix)
-
-  expect_rejected(res, "26\\.0?6")
-})
-
-test_that("configure rejects libcudf 26.02, the first release without the old RMM headers", {
-  skip_if_no_configure()
-  prefix <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "2", "0"))
-
-  res <- run_configure_with(prefix)
-
-  expect_rejected(res, "26\\.0?2")
+  expect_rejected(res, "25\\.12")
 })
 
 test_that("configure reads zero-padded minor versions without shell arithmetic errors", {
   skip_if_no_configure()
   # "08" and "09" are invalid octal in shell arithmetic.
-  prefix <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "08", "0"))
-
-  res <- run_configure_with(prefix)
-
-  expect_rejected(res, "26\\.0?8")
+  for (v in list(c("26", "08", "0"), c("26", "09", "0"))) {
+    prefix <- fake_prefix(withr::local_tempdir("conda-env-"), v)
+    expect_accepted(run_configure_with(prefix))
+  }
+  prefix <- fake_prefix(withr::local_tempdir("conda-env-"), c("25", "08", "0"))
+  expect_rejected(run_configure_with(prefix), "25\\.0?8")
 })
 
 test_that("configure rejects a libcudf older than 25.12", {
@@ -345,13 +331,12 @@ test_that("configure rejects an older libcudf whose minor has one digit", {
   expect_rejected(res, "25\\.0?8")
 })
 
-test_that("configure rejects a far newer libcudf (major bump)", {
+test_that("configure accepts a newer libcudf, including a major bump (no upper bound)", {
   skip_if_no_configure()
-  prefix <- fake_prefix(withr::local_tempdir("conda-env-"), c("27", "0", "0"))
-
-  res <- run_configure_with(prefix)
-
-  expect_rejected(res, "27\\.0")
+  for (v in list(c("26", "06", "0"), c("27", "0", "0"))) {
+    prefix <- fake_prefix(withr::local_tempdir("conda-env-"), v)
+    expect_accepted(run_configure_with(prefix))
+  }
 })
 
 test_that("configure warns and continues when the libcudf version header is missing", {
@@ -379,7 +364,7 @@ test_that("configure warns and continues when the version header is unparseable"
   expect_match(res$output, "version_config\\.hpp", info = res$output)
 })
 
-test_that("configure's libcudf-not-found hint installs the supported series", {
+test_that("configure's libcudf-not-found hint installs the tested series", {
   skip_if_no_configure()
   # CUDA but no libcudf in the environment
   prefix <- fake_prefix(withr::local_tempdir("conda-env-"))
@@ -426,20 +411,20 @@ expect_cudf_home_note <- function(res, cudf_home, present) {
 
 test_that("a rejected libcudf from CUDF_HOME tells the user CUDF_HOME wins", {
   skip_if_no_configure()
-  # the active env has a supported libcudf; CUDF_HOME points elsewhere at 26.06
-  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("25", "12", "0"))
-  cudf_home <- fake_prefix(withr::local_tempdir("cudf-home-"), c("26", "06", "0"))
+  # the active env has a supported libcudf; CUDF_HOME points elsewhere at 25.12
+  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "10", "2"))
+  cudf_home <- fake_prefix(withr::local_tempdir("cudf-home-"), c("25", "12", "0"))
 
   res <- run_configure_with(env, cudf_home = cudf_home)
 
-  expect_rejected(res, "26\\.0?6")
+  expect_rejected(res, "25\\.12")
   expect_match(res$output, paste0("Found libcudf at: ", cudf_home), fixed = TRUE)
   expect_cudf_home_note(res, cudf_home, present = TRUE)
 })
 
 test_that("a stale pip CUDF_HOME that configure skipped gets no CUDF_HOME note", {
   skip_if_no_configure()
-  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "06", "0"))
+  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("25", "12", "0"))
   stale <- file.path(
     withr::local_tempdir("gone-"),
     "lib", "python3.12", "site-packages", "libcudf"
@@ -447,7 +432,7 @@ test_that("a stale pip CUDF_HOME that configure skipped gets no CUDF_HOME note",
 
   res <- run_configure_with(env, cudf_home = stale)
 
-  expect_rejected(res, "26\\.0?6")
+  expect_rejected(res, "25\\.12")
   expect_match(res$output, paste0("Found libcudf at: ", env), fixed = TRUE)
   expect_cudf_home_note(res, stale, present = FALSE)
 })
@@ -455,11 +440,11 @@ test_that("a stale pip CUDF_HOME that configure skipped gets no CUDF_HOME note",
 test_that("CUDF_HOME equal to the active env gets no CUDF_HOME note", {
   skip_if_no_configure()
   # as inst/docker/Dockerfile does: CUDF_HOME=/opt/conda, the active env
-  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "06", "0"))
+  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("25", "12", "0"))
 
   res <- run_configure_with(env, cudf_home = env)
 
-  expect_rejected(res, "26\\.0?6")
+  expect_rejected(res, "25\\.12")
   expect_cudf_home_note(res, env, present = FALSE)
 })
 
@@ -467,11 +452,11 @@ test_that("the rejection never sends the user to an install.sh run that would sk
   skip_if_no_configure()
   # install.sh reuses an active env that already has libcudf, so it only helps
   # with a fresh --conda-prefix
-  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "06", "0"))
+  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("25", "12", "0"))
 
   res <- run_configure_with(env)
 
-  expect_rejected(res, "26\\.0?6")
+  expect_rejected(res, "25\\.12")
   lines <- strsplit(res$output, "\n", fixed = TRUE)[[1]]
   for (l in grep("install\\.sh", lines, value = TRUE)) {
     expect_match(l, "--conda-prefix", fixed = TRUE, info = l)
@@ -485,11 +470,11 @@ test_that("the rejection never sends the user to an install.sh run that would sk
 test_that("configure prints the rejection on stderr", {
   skip_if_no_configure()
   # install.sh without --verbose discards configure's stdout and keeps stderr
-  prefix <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "06", "0"))
+  prefix <- fake_prefix(withr::local_tempdir("conda-env-"), c("25", "12", "0"))
 
   res <- run_configure_with(prefix, stderr_only = TRUE)
 
-  expect_rejected(res, "26\\.0?6")
+  expect_rejected(res, "25\\.12")
   expect_match(res$output, "ERROR", info = res$output)
 })
 
@@ -497,8 +482,8 @@ test_that("install.sh without --verbose shows why configure rejected libcudf", {
   skip_if_no_configure()
   skip_if_no_pkg_file("install.sh")
 
-  # the issue's case: an active conda env that resolved a newer RAPIDS
-  env_dir <- fake_prefix(withr::local_tempdir("user-env-"), c("26", "06", "0"))
+  # an active conda env that resolved an older RAPIDS
+  env_dir <- fake_prefix(withr::local_tempdir("user-env-"), c("25", "12", "0"))
   dir.create(file.path(env_dir, "conda-meta"))
 
   # fake mamba records calls; fake R passes install.sh's dependency check
@@ -546,7 +531,7 @@ test_that("install.sh without --verbose shows why configure rejected libcudf", {
   )
   expect_false(is.null(status) || status == 0L, info = output)
   expect_no_match(output, "FAKE-BUILD-RAN", fixed = TRUE)
-  expect_match(output, "libcudf[^\n]*26\\.0?6", info = output)
+  expect_match(output, "libcudf[^\n]*25\\.12", info = output)
   expect_match(output, "26\\.02", info = output)
   expect_pinned_install_hint(output)
 })
@@ -573,14 +558,14 @@ rejection_paragraphs <- function(output) {
 # own libcudf loads the environment's libcudf at run time: configure puts
 # $CONDA_PREFIX/lib first on the runtime search path, and libcudf.so has no
 # versioned soname. So every paragraph that tells the user where to point
-# CUDF_HOME (it names 25.12, exports CUDF_HOME or says to point it somewhere)
+# CUDF_HOME (it names a RAPIDS series, exports CUDF_HOME or says to point it somewhere)
 # must also tell them to leave the environment with `conda deactivate`.
 expect_cudf_home_advice_leaves_env <- function(res) {
   paras <- rejection_paragraphs(res$output)
   expect_gt(length(paras), 0L)
   advice <- paras[
     grepl("CUDF_HOME", paras, fixed = TRUE) &
-      grepl("25\\.12|export CUDF_HOME|point", paras)
+      grepl("26\\.|export CUDF_HOME|point", paras)
   ]
   for (p in advice) {
     expect_match(p, "conda deactivate", fixed = TRUE, info = p)
@@ -589,53 +574,53 @@ expect_cudf_home_advice_leaves_env <- function(res) {
 
 test_that("with the rejected libcudf in the active env, CUDF_HOME advice says to leave it first", {
   skip_if_no_configure()
-  # the issue's case: the active conda env resolved RAPIDS 26.06
-  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "06", "0"))
+  # the active conda env resolved RAPIDS 25.12
+  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("25", "12", "0"))
 
   res <- run_configure_with(env, stderr_only = TRUE)
 
-  expect_rejected(res, "26\\.0?6")
+  expect_rejected(res, "25\\.12")
   expect_cudf_home_advice_leaves_env(res)
 })
 
 test_that("CUDF_HOME advice says to leave the env when CUDF_HOME names the active env", {
   skip_if_no_configure()
-  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "06", "0"))
+  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("25", "12", "0"))
 
   res <- run_configure_with(env, cudf_home = env, stderr_only = TRUE)
 
-  expect_rejected(res, "26\\.0?6")
+  expect_rejected(res, "25\\.12")
   expect_cudf_home_advice_leaves_env(res)
 })
 
 test_that("the CUDF_HOME note says to leave an active env that holds a libcudf too", {
   skip_if_no_configure()
-  # CUDF_HOME supplied the rejected 26.06 prefix, and the active env holds
-  # another newer libcudf
-  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "06", "0"))
-  cudf_home <- fake_prefix(withr::local_tempdir("cudf-home-"), c("26", "06", "0"))
+  # CUDF_HOME supplied the rejected 25.12 prefix, and the active env holds
+  # another libcudf
+  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("25", "12", "0"))
+  cudf_home <- fake_prefix(withr::local_tempdir("cudf-home-"), c("25", "12", "0"))
 
   res <- run_configure_with(env, cudf_home = cudf_home, stderr_only = TRUE)
 
-  expect_rejected(res, "26\\.0?6")
+  expect_rejected(res, "25\\.12")
   expect_cudf_home_note(res, cudf_home, present = TRUE)
   expect_cudf_home_advice_leaves_env(res)
 })
 
 test_that("with no active conda env the rejection doesn't refer to one", {
   skip_if_no_configure()
-  # a system CUDA and a CUDF_HOME prefix at 26.06, no conda environment
+  # a system CUDA and a CUDF_HOME prefix at 25.12, no conda environment
   cuda <- withr::local_tempdir("system-cuda-")
   touch(file.path(cuda, "include", "cuda.h"))
   touch(file.path(cuda, "lib64", "stubs", "libcuda.so"))
   touch(file.path(cuda, "lib64", "libcudart.so"))
   fake_nvcc(file.path(cuda, "bin", "nvcc"))
-  cudf_home <- fake_prefix(withr::local_tempdir("cudf-home-"), c("26", "06", "0"))
+  cudf_home <- fake_prefix(withr::local_tempdir("cudf-home-"), c("25", "12", "0"))
 
   res <- run_configure_with(NULL, cudf_home = cudf_home, cuda_home = cuda,
                             stderr_only = TRUE)
 
-  expect_rejected(res, "26\\.0?6")
+  expect_rejected(res, "25\\.12")
   expect_cudf_home_note(res, cudf_home, present = TRUE)
   expect_no_match(
     after_error(res$output),

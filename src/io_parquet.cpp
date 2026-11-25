@@ -17,6 +17,7 @@
 // returned pointer, like the collect path (F105's marker rule). libcudf's own
 // exceptions pass through as C++ errors and R maps them.
 
+#include <variant>  // libcudf 26.10's cudf/ast/expressions.hpp uses std::variant without including it
 #include "cuda_utils.hpp"
 #include "gpu_table.hpp"
 #include "r_strings.hpp"

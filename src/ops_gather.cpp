@@ -153,7 +153,7 @@ SEXP gpu_gather_rows(List table_ptrs, NumericVector idx) {
     }
 
     auto stream = cudf::get_default_stream();
-    auto mr = rmm::mr::get_current_device_resource();
+    auto mr = rmm::mr::get_current_device_resource_ref();
 
     rmm::device_uvector<cudf::size_type> d_idx(host.size(), stream);
     check_cuda(

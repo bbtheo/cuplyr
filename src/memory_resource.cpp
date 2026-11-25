@@ -8,8 +8,10 @@
 // columns per call, so .onLoad installs either
 //   "pool":  pool_memory_resource over a cuplyr-owned cuda_memory_resource, or
 //   "async": cuda_async_memory_resource (cudaMallocAsync's own pool; the default),
-// wrapped in a statistics_resource_adaptor so `used` (bytes currently
-// allocated from it) is exact and cheap to read.
+// wrapped in a counting node (cuplyr_mr.hpp's StatsNode) so `used` (bytes
+// currently allocated from it) is exact and cheap to read. cuplyr's resources
+// follow RMM's resource_ref model, on RMM 26.02 and later; cuplyr_mr.hpp
+// explains the handle/node scheme and how the two RMM generations differ.
 //
 // Lifetime: one resource per process, never freed. device_buffer deallocates
 // through the resource it came from, long after the call that allocated it, and
@@ -24,7 +26,7 @@
 // Every later load makes that same resource current in its own copy's map, so
 // its allocations go through it. It finds the resource through the copies
 // already loaded, not through R state: each copy exports
-// cuplyr_process_mr_v2(), which returns the resource it uses, and a new copy
+// cuplyr_process_mr_v3(), which returns the resource it uses, and a new copy
 // walks the loaded objects (dl_iterate_phdr()) for other `cuplyr.so` files and
 // asks them. What it gets back is checked by magic number, layout version and
 // size before use (a copy built from other sources may be loaded too). Nothing
@@ -35,7 +37,10 @@
 // Every copy of the library is pinned (RTLD_NODELETE) at its first install
 // call: the resource's vtables, the map libcudf is bound to, and the finalizers
 // of every column a copy created live in that copy's code and data, so a
-// dyn.unload() (pkgload::unload()) must not unmap it.
+// dyn.unload() (pkgload::unload()) must not unmap it. On RMM 26.10 the
+// per-device map holds an owning type-erased resource (cuda::mr::any_resource)
+// whose vtable is code in the copy that installed it, so the pinning is what
+// keeps that map entry callable from every other copy and at process exit.
 //
 // The switches (enabled, kind, initial size, release threshold) are read by the
 // first load that creates the resource; a later load reuses whatever exists
@@ -57,13 +62,11 @@
 // threshold of 0 must be an explicit optional(0), since nullopt means "the whole
 // card". The initial size only primes the pool (allocate and free that much once).
 
+#include "cuplyr_mr.hpp"
+
 #include <rmm/cuda_device.hpp>
 #include <rmm/mr/cuda_async_memory_resource.hpp>
 #include <rmm/mr/cuda_memory_resource.hpp>
-#include <rmm/mr/device_memory_resource.hpp>
-#include <rmm/mr/per_device_resource.hpp>
-#include <rmm/mr/pool_memory_resource.hpp>
-#include <rmm/mr/statistics_resource_adaptor.hpp>
 
 #include <cuda_runtime.h>
 #include <dlfcn.h>
@@ -82,15 +85,14 @@
 
 namespace {
 
-using base_mr = rmm::mr::device_memory_resource;
-using pool_mr = rmm::mr::pool_memory_resource<base_mr>;
-using stats_mr = rmm::mr::statistics_resource_adaptor<base_mr>;
+using cuplyr::mr::pool_mr;
+using cuplyr::mr::StatsNode;
 
 constexpr std::uint64_t kMagic = 0x52'4d'72'79'6c'70'75'63ULL;  // "cuplyrMR"
 // Layout version of Installed. Bump it, and the version in the name of
-// cuplyr_process_mr_v2(), when the struct changes: a resource from a copy with
+// cuplyr_process_mr_v3(), when the struct changes: a resource from a copy with
 // another layout is not used.
-constexpr std::uint32_t kAbi = 2;
+constexpr std::uint32_t kAbi = 3;
 
 struct Installed {
   // Keep these three first: they are read before trusting the rest.
@@ -101,7 +103,7 @@ struct Installed {
   std::unique_ptr<rmm::mr::cuda_memory_resource> cuda;    // the pool's upstream
   std::unique_ptr<pool_mr> pool;
   std::unique_ptr<rmm::mr::cuda_async_memory_resource> async;
-  std::unique_ptr<stats_mr> stats;                        // the installed (current) resource
+  StatsNode* stats = nullptr;                             // the installed (current) resource; never freed
 };
 
 // The process's resource as seen by this copy of the library (nullptr: none
@@ -145,7 +147,7 @@ Installed* find_in_other_copies() {
   for (const auto& path : paths) {
     void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_NOLOAD);
     if (handle == nullptr) continue;
-    auto* fn = reinterpret_cast<void* (*)()>(dlsym(handle, "cuplyr_process_mr_v2"));
+    auto* fn = reinterpret_cast<void* (*)()>(dlsym(handle, "cuplyr_process_mr_v3"));
     auto* inst = fn != nullptr ? static_cast<Installed*>(fn()) : nullptr;
     dlclose(handle);  // drops only the reference dlopen() just added
     if (valid(inst)) return inst;
@@ -170,11 +172,11 @@ Installed* create(const std::string& kind, double initial, double release_thresh
   inst->size = sizeof(Installed);
   inst->kind = kind;
   try {
-    base_mr* top = nullptr;
+    std::optional<rmm::device_async_resource_ref> top;
     if (kind == "pool") {
       inst->cuda = std::make_unique<rmm::mr::cuda_memory_resource>();
-      inst->pool = std::make_unique<pool_mr>(inst->cuda.get(), init);
-      top = inst->pool.get();
+      inst->pool = cuplyr::mr::make_pool(*inst->cuda, init);
+      top.emplace(*inst->pool);
     } else {
       // The initial size only primes the pool (0: no priming). The release
       // threshold is nullopt (RMM: the device total, no automatic release)
@@ -185,9 +187,9 @@ Installed* create(const std::string& kind, double initial, double release_thresh
       }
       inst->async = std::make_unique<rmm::mr::cuda_async_memory_resource>(
           init > 0 ? std::optional<std::size_t>(init) : std::nullopt, threshold);
-      top = inst->async.get();
+      top.emplace(*inst->async);
     }
-    inst->stats = std::make_unique<stats_mr>(top);
+    inst->stats = new StatsNode(*top);  // never destroyed (see the file comment)
   } catch (const std::exception& e) {
     Rcpp::stop("could not create the %s memory resource: %s", kind.c_str(), e.what());
   }
@@ -197,7 +199,7 @@ Installed* create(const std::string& kind, double initial, double release_thresh
 }  // namespace
 
 // The resource this copy uses, for later copies (see the file comment).
-extern "C" __attribute__((visibility("default"))) void* cuplyr_process_mr_v2() {
+extern "C" __attribute__((visibility("default"))) void* cuplyr_process_mr_v3() {
   return g_inst;
 }
 
@@ -216,7 +218,7 @@ std::string gpu_mr_install(bool enabled, std::string kind, double initial,
     Installed* found = find_in_other_copies();
     if (found == nullptr && !enabled) return "cuda";
     g_inst = found != nullptr ? found : create(kind, initial, release_threshold);
-    rmm::mr::set_current_device_resource(g_inst->stats.get());
+    cuplyr::mr::make_current(g_inst->stats);
   }
   return g_inst->kind;
 }
@@ -240,7 +242,7 @@ Rcpp::NumericVector gpu_mr_state() {
       held = static_cast<double>(reserved);
     }
   }
-  double used = static_cast<double>(g_inst->stats->get_bytes_counter().value);
+  double used = static_cast<double>(g_inst->stats->bytes().value);
   return Rcpp::NumericVector::create(held, used);
 }
 

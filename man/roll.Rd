@@ -56,7 +56,7 @@ run GPU-natively, in time that does not depend on the window width
 (segmented scans; cudf's own rolling kernel is kept for
 narrow windows, where it is faster, and for min/max of timestamps and
 logicals) -- these R implementations are the CPU semantics reference and
-the engine for standalone use. cudf 25.12 has
+the engine for standalone use. libcudf (checked on 26.10 and 26.02) has
 no MEDIAN rolling aggregation, so \code{roll_median()} always runs on the CPU
 (see "Median engines").
 \code{data.table::frollmean(x, n)} (and its five siblings) work as
