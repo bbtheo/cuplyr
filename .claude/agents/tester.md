@@ -40,6 +40,10 @@ wait can be minutes if another feature's gate is running.
 If `test-memory-regression.R` is the only failure, rerun just that file once
 and report both results. Don't rerun anything else.
 
+Run exactly the runs the prompt lists. For a documentation-only round the PM
+lists only test files; don't add the full suite, perf or conformance. Report
+`SUITE`, `PERF` and `CONFORMANCE` as `not run (documentation-only round)`.
+
 ## Report
 
 Read the logs and TSVs, then reply in exactly this shape, with numbers taken

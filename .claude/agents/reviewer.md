@@ -66,8 +66,10 @@ expensive, so budget them:
   suspicion that needs checking). Pick the probes most likely to turn a
   reasoned blocker into a verified one.
 - Don't re-run the full suite, perf or conformance; the PM's tester already
-  did. If you believe a gate result is wrong, say so as a finding and
-  ask the PM to re-run it.
+  did, or skipped them in a documentation-only round (see pm.md). If you
+  believe a gate result is wrong, or that a round the PM called
+  documentation-only changed behaviour, say so as a finding and ask the PM
+  to re-run it as a full round.
 - Anything you couldn't probe within the budget goes in as **reasoned**,
   with your argument.
 

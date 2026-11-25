@@ -143,12 +143,32 @@ sequential.
 paths, and for round 2+ the reviewer's unresolved blocking findings verbatim.
 
 **Tester prompt** must include: `WT`, the round number, the run directory
-`FDIR/<NAME>/runs/round-<N>/`, and what to run:
+`FDIR/<NAME>/runs/round-<N>/`, the kind of round (below) and what to run.
+
+A **full round** runs:
 1. `tools/test-file` on the acceptance tests
 2. `tools/test` (full suite)
 3. `tools/perf`
 4. `tools/conformance <files>` for the conformance files named in the design,
    with `--ids` into the run dir
+
+A **documentation-only round** runs only `tools/test-file` on the acceptance
+tests plus the test files the change touched or that check the changed text,
+and skips the full suite, perf and conformance. A round is documentation-only
+when every change since the last full round (`git -C WT diff --stat
+<last-full-round-head>..HEAD`) is in: Markdown files, `vignettes/`, `NEWS.md`,
+`man/`, roxygen comments in `R/` (lines starting with `#'`, nothing else in the
+file), `DESCRIPTION` text fields (not `Imports`, `Depends`, `LinkingTo`,
+`Suggests`, `Version` or `SystemRequirements` used by `configure`),
+`tests/testthat/` files, `conda/`, `.github/` or `.claude/`. When roxygen
+changed, run `tools/document` first and commit its `man/` output; if
+`NAMESPACE` changes, the round is not documentation-only. Anything else, including
+`R/` code, `src/`, `configure`, `tools/`, `NAMESPACE` or package dependencies,
+needs a full round. The first round after a coder writes code is always full.
+The merge gate runs the full suite, perf and conformance before anything
+reaches `main`, so a documentation-only round loses no check. Say in the
+tester prompt which kind of round it is and why, and record it in the round's
+log line.
 
 **Reviewer prompt** must include: `WT`, the brief path, the base
 (`git -C WT merge-base origin/main HEAD`) and head SHAs, the protected file and its
