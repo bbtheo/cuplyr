@@ -13,6 +13,8 @@ Invisibly returns a list with:
 \item{package_loaded}{Logical: package loads without error}
 \item{gpu_available}{Logical: GPU detected and accessible}
 \item{gpu_name}{Character: GPU model name, or \code{NA}}
+\item{libcudf_version}{Character: the libcudf version cuplyr was built
+against (such as \code{"26.10.2"}), or \code{NA} when it is unknown}
 \item{roundtrip_ok}{Logical: data round-trip succeeded}
 \item{time_seconds}{Numeric: time for the round-trip test}
 }
@@ -24,9 +26,11 @@ to R. This confirms that the package loads, GPU is accessible, and
 basic operations work.
 }
 \details{
-This function runs three checks in sequence:
+This function runs four checks in sequence:
 \enumerate{
 \item \strong{Package load}: \code{library(cuplyr)} succeeds
+\item \strong{libcudf version}: the libcudf cuplyr was built against is
+26.02 or newer (an unknown version passes)
 \item \strong{GPU detection}: \code{gpu_details()} shows an available GPU
 \item \strong{Round-trip}: \code{tbl_gpu(mtcars) |> filter(mpg > 20) |> collect()}
 returns correct results

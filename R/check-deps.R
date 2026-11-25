@@ -31,7 +31,9 @@
 #'     `CONDA_PREFIX`, the pixi environment (`PIXI_PROJECT_ROOT`, or `.pixi`
 #'     in the working directory) and standard paths. A `CUDF_HOME` or
 #'     `CONDA_PREFIX` that points to a missing directory is named in the
-#'     message but does not fail the check by itself.
+#'     message but does not fail the check by itself. The check reports the
+#'     libcudf version it finds (from `cudf/version_config.hpp`) and fails for
+#'     a libcudf older than 26.02; a version it can't read is not a failure.
 #'   \item **R Version**: Checks R >= 4.3.0
 #'   \item **R Packages**: Verifies required R packages are installed
 #'   \item **GPU Access**: Tests if a GPU device is accessible (if cuplyr
@@ -279,6 +281,47 @@ default_cudf_search_paths <- function() {
   unique(paths[nzchar(paths)])
 }
 
+# The oldest libcudf cuplyr builds against and runs on (RAPIDS 26.02; 25.12 and
+# older use RMM's legacy memory-resource interface, which cuplyr no longer
+# supports). Used by check_deps(), diagnostics() and verify_installation(),
+# and mirrored by configure.
+cuplyr_min_libcudf <- "26.02"
+
+# Whether a libcudf version such as "26.10.2" is new enough. An unknown version
+# (NA: no version_config.hpp to read) is not a failure.
+libcudf_version_ok <- function(version) {
+  if (length(version) != 1L || is.na(version)) {
+    return(TRUE)
+  }
+  numeric_version(version, strict = FALSE) >= numeric_version(cuplyr_min_libcudf)
+}
+
+# The version of the libcudf under `prefix`, from its headers.
+libcudf_version_in <- function(prefix) {
+  read_cudf_version_header(file.path(prefix, "include", "cudf", "version_config.hpp"))
+}
+
+# `res` (a libcudf check result for `prefix`) with the version found: `$version`,
+# the version in the message, and ok = FALSE when it is older than the minimum.
+with_libcudf_version <- function(res, prefix) {
+  version <- libcudf_version_in(prefix)
+  res$version <- version
+  if (is.na(version)) {
+    return(res)
+  }
+  base <- sub("\\.$", "", res$message)
+  if (libcudf_version_ok(version)) {
+    res$message <- paste0(base, " (libcudf ", version, ")")
+  } else {
+    res$ok <- FALSE
+    res$message <- paste0(
+      base, ": libcudf ", version, " is too old, cuplyr needs libcudf >= ",
+      cuplyr_min_libcudf, ". Use RAPIDS 26.10 (see ?install_cuplyr)."
+    )
+  }
+  res
+}
+
 check_libcudf <- function(search_paths = NULL) {
   if (!is.null(search_paths)) {
     return(find_libcudf_in(search_paths))
@@ -294,12 +337,12 @@ check_libcudf <- function(search_paths = NULL) {
 
   lib <- loaded_libcudf_path()
   res <- if (!is.na(lib)) {
-    list(
+    with_libcudf_version(list(
       ok = TRUE,
       name = "libcudf",
       value = dirname(dirname(lib)),
       message = paste0("libcudf loaded by cuplyr from ", lib)
-    )
+    ), dirname(dirname(lib)))
   } else {
     find_libcudf_in(default_cudf_search_paths())
   }
@@ -326,12 +369,12 @@ find_libcudf_in <- function(search_paths) {
     has_library <- any(file.exists(libcudf))
 
     if (has_header && has_library) {
-      return(list(
+      return(with_libcudf_version(list(
         ok = TRUE,
         name = "libcudf",
         value = path,
         message = paste0("Found headers and libcudf.so at ", path)
-      ))
+      ), path))
     }
 
     if (has_header && !has_library) {

@@ -230,11 +230,12 @@ install_conda() {
     verb="install"
   fi
 
-  # RAPIDS 25.12 on CUDA 12, as in pixi.toml. configure needs cuda.h and nvcc,
-  # which libcudf alone doesn't bring. Strict channel priority, which many
-  # .condarc files set, makes the 25.12 solve fail, so it is turned off here.
+  # RAPIDS 26.10 on CUDA 13, the series cuplyr is tested on (pixi.toml's
+  # default environment). configure needs cuda.h and nvcc, which libcudf alone
+  # doesn't bring. Strict channel priority, which many .condarc files set, makes
+  # the pinned solve fail, so it is turned off here.
   local channel_args=(--no-channel-priority -c rapidsai -c conda-forge -c nvidia)
-  local rapids_pkgs=("libcudf=25.12" "librmm=25.12" "libkvikio=25.12" "cuda-version>=12.2,<13")
+  local rapids_pkgs=("libcudf=26.10" "librmm=26.10" "libkvikio=26.10" "cuda-version>=13,<14")
   local cuda_pkgs=(cuda-nvcc cuda-cudart-dev)
 
   # Dry-run path: print intended commands and exit before filesystem checks.
@@ -257,11 +258,11 @@ install_conda() {
   if [ ! -f "$prefix/include/cudf/types.hpp" ]; then
     log "Installing RAPIDS packages into $prefix ..."
 
-    # No unpinned fallback: an older RAPIDS solves but cuplyr can't build
-    # against it.
+    # No unpinned fallback: an older RAPIDS (25.12 or before) solves but cuplyr
+    # can't build against it.
     if ! run "$conda_cmd" "$verb" -y -p "$prefix" "${channel_args[@]}" \
       "${rapids_pkgs[@]}" "${cuda_pkgs[@]}"; then
-      echo "ERROR: Could not install RAPIDS 25.12 for CUDA 12 into $prefix" >&2
+      echo "ERROR: Could not install RAPIDS 26.10 for CUDA 13 into $prefix" >&2
       echo "Rerun with --verbose to see the solver output." >&2
       exit 1
     fi

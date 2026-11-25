@@ -20,11 +20,13 @@ Invisibly returns a list with all diagnostic information, whichever
 console. Besides the package, system, CUDA and GPU fields, the list has:
 \itemize{
 \item \code{libcudf_version} and \code{rmm_version}: the versions cuplyr was built
-against, as \code{"25.12.0"}.
+against, as \code{"26.10.2"}.
 \item \code{libcudf_path}: the libcudf library loaded into this R session (\code{NA} if
 none), and \code{libcudf_loaded_version}, its version (\code{NA} when its headers
 can't be found). A difference from \code{libcudf_version} means cuplyr runs
-against another libcudf than it was built with.
+against another libcudf than it was built with. The printed report adds
+a \code{WARNING} line when either version is older than 26.02, the oldest
+libcudf cuplyr supports.
 \item \code{memory}: a list with \code{available}, the memory \code{resource} (\code{"async"},
 \code{"pool"} or \code{"cuda"}), \code{pool_bytes} and \code{pool_used_bytes}. See
 \code{\link[=gpu_memory_state]{gpu_memory_state()}}.

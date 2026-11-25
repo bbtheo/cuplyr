@@ -134,7 +134,7 @@ You need Linux x86_64 and:
 |---|---|
 | NVIDIA GPU | compute capability 7.0 (Volta) or newer |
 | CUDA Toolkit | 12.2 or newer |
-| RAPIDS libcudf | 25.12 (26.02 and newer are not supported yet) |
+| RAPIDS libcudf | 26.02 or newer (developed and tested on 26.10) |
 | R | 4.3 or newer |
 
 The install script clones cuplyr, finds CUDA and libcudf through pixi, conda or your system (in that order), and builds the package:

@@ -76,8 +76,8 @@ after_error <- function(output) {
 
 test_that("a pip-layout CUDF_HOME that supplied the rejected libcudf gets the note", {
   skip_if_no_configure()
-  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("25", "12", "0"))
-  pip_env <- fake_prefix(withr::local_tempdir("pip-env-"), c("26", "06", "0"))
+  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "10", "2"))
+  pip_env <- fake_prefix(withr::local_tempdir("pip-env-"), c("25", "12", "0"))
   cudf_home <- file.path(pip_env, "lib", "python3.12", "site-packages", "libcudf")
   dir.create(cudf_home, recursive = TRUE)
 
@@ -90,12 +90,12 @@ test_that("a pip-layout CUDF_HOME that supplied the rejected libcudf gets the no
 
 test_that("CUDF_HOME naming the active env with a trailing slash gets no note", {
   skip_if_no_configure()
-  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("26", "06", "0"))
+  env <- fake_prefix(withr::local_tempdir("conda-env-"), c("25", "12", "0"))
   cudf_home <- paste0(env, "/")
 
   res <- run_configure(env, cudf_home)
 
   expect_false(res$status == 0L, info = res$output)
-  expect_match(res$output, "26.06", fixed = TRUE)
+  expect_match(res$output, "25.12", fixed = TRUE)
   expect_no_match(after_error(res$output), paste0("CUDF_HOME=", cudf_home), fixed = TRUE)
 })

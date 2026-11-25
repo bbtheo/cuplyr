@@ -145,9 +145,12 @@ runs the tests for you. This takes longer.
 
 ## Developer setup
 
-You need Linux, an NVIDIA GPU (Volta or newer), CUDA 12.2 or newer, and
+You need Linux, an NVIDIA GPU (Volta or newer), a system CUDA toolkit (13 or
+newer; `./configure` finds it through `CUDA_HOME` or `/usr/local/cuda`), and
 [pixi](https://pixi.sh). pixi installs R, RAPIDS libcudf and every R package
-into the project directory.
+into the project directory. The default pixi environment is RAPIDS 26.10, the
+series cuplyr is developed, tested and gated on. It carries no CUDA compiler:
+`nvcc` and the CUDA headers come from the system toolkit.
 
 ```bash
 curl -fsSL https://pixi.sh/install.sh | bash   # once
@@ -167,6 +170,22 @@ Daily commands:
 | Regenerate `NAMESPACE`, `man/` and the Rcpp exports | `pixi run document` |
 | Start R with the package environment | `pixi run r`, then `pkgload::load_all()` |
 | Build the pkgdown site into `docs/` | `pixi run pkgdown` |
+
+### Checking against RAPIDS 26.02
+
+cuplyr supports RAPIDS 26.02 and later, with 26.02 as the minimum. A second
+pixi environment, `rapids2602`, pins that series. Run any task in it by name:
+
+```bash
+pixi run -e rapids2602 test-file tests/testthat/test-filter.R
+pixi run -e rapids2602 conformance
+```
+
+or select it for one command with `CUPLYR_PIXI_ENV=rapids2602 tools/conformance`.
+The tools rebuild the C++ when the active RAPIDS changes (they record what
+`src/` was built against in `src/.cuplyr-build-env`), so you can switch back and
+forth in one checkout. The release check runs the dplyr conformance suite on
+26.02 as well as 26.10; see the release checklist.
 
 The test commands load the package from the source tree with
 `pkgload::load_all()`, so you don't need to install it. They also take a file
@@ -240,7 +259,9 @@ A release is a pull request that sets the version in `DESCRIPTION` and tidies
 - returns the version to `.9000`
 
 Release notes name the RAPIDS version the release was built and tested
-against.
+against. Before a release, run the dplyr conformance suite on the minimum
+supported RAPIDS too (`pixi run -e rapids2602 conformance`, see
+[Checking against RAPIDS 26.02](#checking-against-rapids-2602)).
 
 ## Website
 

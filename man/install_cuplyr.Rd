@@ -61,7 +61,7 @@ for providing CUDA/cuDF dependencies.
 \strong{pixi}: Runs \verb{pixi run install} which handles everything.
 Requires \href{https://pixi.sh}{pixi} to be installed.
 
-\strong{conda}: Installs RAPIDS 25.12 for CUDA 12, with the CUDA compiler and
+\strong{conda}: Installs RAPIDS 26.10 for CUDA 13, with the CUDA compiler and
 headers, into a conda environment, then configures and builds cuplyr
 against it. Requires \code{mamba} or \code{conda}.
 

@@ -17,7 +17,7 @@ Roxygen: list(markdown = TRUE)
 SystemRequirements:
     NVIDIA GPU with Compute Capability >= 7.0 (Volta or newer),
     CUDA Toolkit >= 12.2,
-    RAPIDS libcudf (>= 25.12, < 26.02)
+    RAPIDS libcudf (>= 26.02)
 Depends:
     R (>= 4.3.0)
 Imports:

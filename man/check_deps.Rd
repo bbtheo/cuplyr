@@ -41,7 +41,9 @@ Otherwise looks for cudf headers and \code{libcudf.so} under \code{CUDF_HOME},
 \code{CONDA_PREFIX}, the pixi environment (\code{PIXI_PROJECT_ROOT}, or \code{.pixi}
 in the working directory) and standard paths. A \code{CUDF_HOME} or
 \code{CONDA_PREFIX} that points to a missing directory is named in the
-message but does not fail the check by itself.
+message but does not fail the check by itself. The check reports the
+libcudf version it finds (from \code{cudf/version_config.hpp}) and fails for
+a libcudf older than 26.02; a version it can't read is not a failure.
 \item \strong{R Version}: Checks R >= 4.3.0
 \item \strong{R Packages}: Verifies required R packages are installed
 \item \strong{GPU Access}: Tests if a GPU device is accessible (if cuplyr

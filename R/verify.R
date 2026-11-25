@@ -11,14 +11,18 @@
 #'   \item{package_loaded}{Logical: package loads without error}
 #'   \item{gpu_available}{Logical: GPU detected and accessible}
 #'   \item{gpu_name}{Character: GPU model name, or `NA`}
+#'   \item{libcudf_version}{Character: the libcudf version cuplyr was built
+#'     against (such as `"26.10.2"`), or `NA` when it is unknown}
 #'   \item{roundtrip_ok}{Logical: data round-trip succeeded}
 #'   \item{time_seconds}{Numeric: time for the round-trip test}
 #' }
 #'
 #' @details
-#' This function runs three checks in sequence:
+#' This function runs four checks in sequence:
 #' \enumerate{
 #'   \item **Package load**: `library(cuplyr)` succeeds
+#'   \item **libcudf version**: the libcudf cuplyr was built against is
+#'     26.02 or newer (an unknown version passes)
 #'   \item **GPU detection**: `gpu_details()` shows an available GPU
 #'   \item **Round-trip**: `tbl_gpu(mtcars) |> filter(mpg > 20) |> collect()`
 #'     returns correct results
@@ -42,6 +46,7 @@ verify_installation <- function() {
     package_loaded = FALSE,
     gpu_available = FALSE,
     gpu_name = NA_character_,
+    libcudf_version = NA_character_,
     roundtrip_ok = FALSE,
     time_seconds = NA_real_
   )
@@ -71,7 +76,22 @@ verify_installation <- function() {
   result$package_loaded <- TRUE
   cat(cli::col_green("OK"), "\n")
 
-  # 2. GPU detection
+  # 2. The libcudf cuplyr was built against
+  cat("Checking libcudf version... ")
+  built <- tryCatch(cuplyr_build_versions(), error = function(e) NULL)
+  result$libcudf_version <- if (is.null(built)) NA_character_ else unname(built[["libcudf"]])
+  if (!libcudf_version_ok(result$libcudf_version)) {
+    cat(cli::col_red("FAILED"), "\n")
+    cat("cuplyr was built against libcudf ", result$libcudf_version,
+        ", but it needs libcudf >= ", cuplyr_min_libcudf, ".\n", sep = "")
+    cat("Rebuild against RAPIDS 26.10 (see ?install_cuplyr).\n")
+    return(invisible(result))
+  }
+  cat(cli::col_green("OK"),
+      if (!is.na(result$libcudf_version)) paste0(" (", result$libcudf_version, ")"),
+      "\n", sep = "")
+
+  # 3. GPU detection
   cat("Checking GPU access... ")
   gpu_info <- tryCatch(gpu_details(), error = function(e) list(available = FALSE))
 
@@ -88,7 +108,7 @@ verify_installation <- function() {
   result$gpu_name <- gpu_info$name %||% "unknown"
   cat(cli::col_green("OK"), " (", result$gpu_name, ")\n", sep = "")
 
-  # 3. Round-trip test
+  # 4. Round-trip test
   cat("Running round-trip test... ")
   start <- proc.time()
 

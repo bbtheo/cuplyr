@@ -15,11 +15,13 @@
 #'   `format` is used. Also prints the report (or the JSON object) to the
 #'   console. Besides the package, system, CUDA and GPU fields, the list has:
 #'   * `libcudf_version` and `rmm_version`: the versions cuplyr was built
-#'     against, as `"25.12.0"`.
+#'     against, as `"26.10.2"`.
 #'   * `libcudf_path`: the libcudf library loaded into this R session (`NA` if
 #'     none), and `libcudf_loaded_version`, its version (`NA` when its headers
 #'     can't be found). A difference from `libcudf_version` means cuplyr runs
-#'     against another libcudf than it was built with.
+#'     against another libcudf than it was built with. The printed report adds
+#'     a `WARNING` line when either version is older than 26.02, the oldest
+#'     libcudf cuplyr supports.
 #'   * `memory`: a list with `available`, the memory `resource` (`"async"`,
 #'     `"pool"` or `"cuda"`), `pool_bytes` and `pool_used_bytes`. See
 #'     [gpu_memory_state()].
@@ -243,6 +245,12 @@ diagnostics <- function(redact = TRUE, format = c("text", "json")) {
   if (!is.na(info$libcudf_version) && !is.na(info$libcudf_loaded_version) &&
       info$libcudf_version != info$libcudf_loaded_version) {
     cat("  WARNING: the loaded libcudf differs from the one cuplyr was built against\n")
+  }
+  for (v in unique(stats::na.omit(c(info$libcudf_loaded_version, info$libcudf_version)))) {
+    if (!libcudf_version_ok(v)) {
+      cat("  WARNING: libcudf ", v, " is older than the minimum cuplyr supports (",
+          cuplyr_min_libcudf, ")\n", sep = "")
+    }
   }
   cat("\n")
 

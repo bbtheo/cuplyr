@@ -36,11 +36,11 @@ requirements:
     - r-cli >=3.6
     - r-tidyselect >=1.2
     - r-tibble >=3.2
-    - libcudf >=25.12,<26.02
-    - librmm >=25.12,<26.02
-    - libkvikio >=25.12,<26.02
-    - cuda-toolkit >=12.2,<13
-    - cuda-nvcc >=12.2,<13
+    - libcudf >=26.02
+    - librmm >=26.02
+    - libkvikio >=26.02
+    - cuda-toolkit >=12.2
+    - cuda-nvcc >=12.2
   run:
     - r-base >=4.3
     - r-rcpp >=1.0.12
@@ -50,10 +50,10 @@ requirements:
     - r-cli >=3.6
     - r-tidyselect >=1.2
     - r-tibble >=3.2
-    - libcudf >=25.12,<26.02
-    - librmm >=25.12,<26.02
-    - libkvikio >=25.12,<26.02
-    - cuda-toolkit >=12.2,<13
+    - libcudf >=26.02
+    - librmm >=26.02
+    - libkvikio >=26.02
+    - cuda-toolkit >=12.2
 
 test:
   commands:
