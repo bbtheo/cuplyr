@@ -55,7 +55,8 @@ has_gpu <- function() {
 #' ## Compute capability
 #' The compute capability indicates the GPU architecture and supported features:
 #' \itemize{
-#'   \item 7.x - Volta/Turing (V100, RTX 20 series)
+#'   \item 7.0 - Volta (V100): not supported (CUDA 13 has no Volta code)
+#'   \item 7.5 - Turing (T4, RTX 20 series): the oldest supported
 #'   \item 8.x - Ampere (A100, RTX 30 series)
 #'   \item 8.9 - Ada Lovelace (RTX 40 series)
 #'   \item 9.x - Hopper (H100)

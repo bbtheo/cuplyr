@@ -1,0 +1,32 @@
+# Build variants for the r-cuplyr conda package (recipe.yaml). Pass this file
+# to rattler-build with -m / --variant-config.
+#
+# Each value gives a separate binary. RAPIDS has no ABI across series: a
+# cuplyr built against libcudf 26.10 needs libcudf 26.10, so there is one
+# package per RAPIDS series. The series are quoted: unquoted, 26.10 is read
+# as the number 26.1.
+#
+# To also build the oldest supported series, add "26.02" to rapids_version
+# (or pass --variant rapids_version=26.02 to rattler-build). configure
+# rejects a series older than 26.02.
+rapids_version:
+  - "26.10"
+
+# CUDA major version of the toolkit and of the libcudf build.
+cuda_version:
+  - "13"
+
+# The C and C++ toolchain, as libcudf is built. rattler-build has no default
+# for stdlib("c"), and an unpinned sysroot follows the newest one on the build
+# machine (2.39 today), which would make the package require glibc 2.39 and
+# fail to install on Debian 12, RHEL 9 and Colab. The sysroot version sets the
+# package's glibc floor; 2.28 is libcudf's own. The compiler version matches
+# libcudf's build.
+c_stdlib:
+  - "sysroot"
+c_stdlib_version:
+  - "2.28"
+c_compiler_version:
+  - "14"
+cxx_compiler_version:
+  - "14"

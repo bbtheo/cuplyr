@@ -119,8 +119,9 @@ test_that("GPU compute capability meets minimum requirements", {
   major <- parts[1]
   minor <- parts[2]
 
-  # Package requires compute capability >= 6.0 (Pascal)
-  expect_true(major >= 6, info = paste("Compute capability", cc, "is below 6.0"))
+  # Package requires compute capability >= 7.5 (Turing)
+  expect_true(major > 7 || (major == 7 && minor >= 5),
+              info = paste("Compute capability", cc, "is below 7.5"))
 })
 
 test_that("GPU memory values are sensible", {
