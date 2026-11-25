@@ -10,7 +10,9 @@
 # - each states compute capability 7.5 as the minimum;
 # - none states a lower floor (7.0, "Volta or newer");
 # - Volta is mentioned, if at all, only to say it isn't supported, or that
-#   it needs a source build against a CUDA 12 RAPIDS.
+#   it needs a source build against a CUDA 12 RAPIDS; README says so;
+# - the same holds for the compute-capability list in ?gpu_details
+#   (R/gpu.R), and the GPU test checks for 7.5, not a lower floor.
 #
 # None of these tests need a GPU. Files absent from the test context (an
 # installed package has no conda/ or .github/) are skipped.
@@ -39,6 +41,24 @@ p150_docs <- function() {
 
 p150_floor <- "compute capability\\s*(of\\s*)?(>=\\s*)?7\\.5"
 
+p150_unsupported <- "CUDA 12|not supported|unsupported|isn't supported|no longer"
+
+# Lines joined into paragraphs (split at blank lines and list items).
+p150_paragraphs <- function(lines) {
+  out <- character()
+  cur <- character()
+  for (l in lines) {
+    if (!nzchar(trimws(l)) || grepl("^\\s*([-*]|[0-9]+\\.)\\s", l)) {
+      if (length(cur)) out <- c(out, paste(cur, collapse = " "))
+      cur <- if (nzchar(trimws(l))) l else character()
+    } else {
+      cur <- c(cur, l)
+    }
+  }
+  if (length(cur)) out <- c(out, paste(cur, collapse = " "))
+  out
+}
+
 test_that("every document states compute capability 7.5 as the minimum GPU", {
   docs <- p150_docs()
   skip_if(length(docs) == 0L, "no documents in this test context")
@@ -59,11 +79,40 @@ test_that("no document states a lower GPU floor", {
     newer <- grep("Volta\\)? or (newer|higher|later)", lines, ignore.case = TRUE, value = TRUE)
     expect_length(newer, 0L)
     # Volta only to say it isn't supported or needs a CUDA 12 source build
-    volta <- grep("Volta", lines, ignore.case = TRUE, value = TRUE)
-    ok <- grepl("CUDA 12|not supported|unsupported|isn't supported|no longer", volta,
-                ignore.case = TRUE)
+    # (per paragraph, so a wrapped sentence counts as one)
+    volta <- grep("Volta", p150_paragraphs(lines), ignore.case = TRUE, value = TRUE)
+    ok <- grepl(p150_unsupported, volta, ignore.case = TRUE)
     expect_true(all(ok), info = paste(nm, paste(volta[!ok], collapse = "\n"), sep = ": "))
   }
+})
+
+test_that("README says plainly that Volta GPUs are not supported", {
+  readme <- file.path(p150_root(), "README.md")
+  skip_if_not(file.exists(readme), "README.md not available")
+  paras <- p150_paragraphs(readLines(readme, warn = FALSE))
+  volta <- grep("Volta", paras, value = TRUE)
+  expect_true(any(grepl("not supported|unsupported|isn't supported", volta, ignore.case = TRUE)),
+              info = paste(volta, collapse = "\n"))
+})
+
+test_that("?gpu_details lists Volta only as unsupported", {
+  src <- file.path(p150_root(), "R", "gpu.R")
+  skip_if_not(file.exists(src), "R/gpu.R not available")
+  lines <- grep("^#'", readLines(src, warn = FALSE), value = TRUE)
+  volta <- grep("Volta", lines, ignore.case = TRUE, value = TRUE)
+  expect_true(all(grepl(p150_unsupported, volta, ignore.case = TRUE)),
+              info = paste(volta, collapse = "\n"))
+  # Turing (7.5) is listed as the oldest supported architecture
+  expect_true(any(grepl("7\\.5.*Turing|Turing.*7\\.5", lines)), info = paste(lines, collapse = "\n"))
+})
+
+test_that("the GPU test checks for compute capability 7.5", {
+  f <- file.path(p150_root(), "tests", "testthat", "test-gpu-info.R")
+  skip_if_not(file.exists(f), "test-gpu-info.R not available")
+  code <- sub("#.*$", "", readLines(f, warn = FALSE))
+  code <- paste(code, collapse = "\n")
+  expect_no_match(code, "major\\s*>=\\s*6")
+  expect_match(code, "minor\\s*>=\\s*5")
 })
 
 test_that("DESCRIPTION and the README requirements table give 7.5", {
