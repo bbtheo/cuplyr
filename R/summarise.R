@@ -996,8 +996,30 @@ summarise_group_keys <- function(.data, retained_groups) {
   was_lazy <- identical(.subset2(.data, "exec_mode"), "lazy")
   base <- compute(.data)
   base$exec_mode <- "eager"
-  # (group_data() carries a `.drop` attribute, which is not the table's)
-  all_keys <- fixed_keys_of(base) %||% compute_group_data(base)[base$groups]
+  # The keys of every group: the fixed keys, else the observed ones (the keys
+  # of the plain GPU summarise, k rows; no row indices) with the factor levels
+  # of a `.drop = FALSE` grouping added.
+  all_keys <- fixed_keys_of(base)
+  if (is.null(all_keys)) {
+    observed <- push_op(base, ast_summarise(input_node(base), list(), .subset2(base, "groups"), retained_groups))
+    keys_schema <- group_keys_schema(base)
+    gd <- group_keys_frame(.subset2(observed, "ptr"), keys_schema)
+    n_observed <- nrow(gd)
+    groups <- .subset2(base, "groups")
+    lv <- keys_schema$factor_levels
+    # one factor key: its levels, plus NA where NA is observed
+    n_all <- if (length(groups) == 1L && !is.null(lv[[groups]])) length(lv[[groups]]) + anyNA(gd[[1L]])
+    if (is.null(n_all) || n_observed != n_all) {
+      gd$.rows <- vctrs::new_list_of(rep(list(integer()), n_observed), ptype = integer())
+      all_keys <- slice_group_keys_of(expand_dropped_groups(gd, groups, lv))
+      n_all <- nrow(all_keys)
+    }
+    if (n_observed == n_all) {
+      # no group is empty: the observed summarise is the answer
+      if (was_lazy) observed$exec_mode <- "lazy"
+      return(observed)
+    }
+  }
   keys <- tbl_gpu(strip_frame_attrs(tibble::as_tibble(all_keys)), lazy = FALSE)
   # the keys' constant attributes as dplyr's group data has them (#21): no
   # row-aligned names (a key with them took the CPU route), and none of a
