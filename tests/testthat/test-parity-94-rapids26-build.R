@@ -3,7 +3,8 @@
 #
 # Contract:
 # - Supported libcudf range everywhere it is declared (configure, DESCRIPTION,
-#   the conda recipe, the install docs): >= 26.02, no upper bound. 25.12 and
+#   the install docs): >= 26.02, no upper bound. (A conda binary is pinned to
+#   the series it was built against; test-parity-135-conda-recipe.R.) 25.12 and
 #   older are rejected by configure before the compiler runs.
 # - Development and the gates run on RAPIDS 26.10: pixi.toml's default
 #   environment pins the 26.10 series (CUDA 13), and a second environment,
@@ -65,17 +66,9 @@ test_that("DESCRIPTION requires libcudf >= 26.02 with no upper bound", {
   expect_no_match(sysreq, "libcudf[^)]*<")
 })
 
-test_that("conda/meta.yaml requires libcudf, librmm and libkvikio >=26.02 in host and run", {
-  p94_skip_if_no_file("conda", "meta.yaml")
-  lines <- readLines(p94_file("conda", "meta.yaml"))
-
-  for (pkg in c("libcudf", "librmm", "libkvikio")) {
-    hit <- grep(sprintf("^\\s*-\\s*%s(\\s|$)", pkg), lines, value = TRUE)
-    expect_length(hit, 2L)
-    spec <- gsub("\\s", "", sub(sprintf("^\\s*-\\s*%s", pkg), "", hit))
-    expect_identical(spec, rep(">=26.02", 2L), info = paste("meta.yaml:", pkg))
-  }
-})
+# conda/meta.yaml and conda/recipe.yaml: see test-parity-135-conda-recipe.R
+# (each binary is pinned to the series it is built against, and the recipes
+# build nothing older than configure's minimum).
 
 test_that("pixi.toml pins 26.10 for the default environment and 26.02 for rapids2602", {
   p94_skip_if_no_file("pixi.toml")
