@@ -144,6 +144,21 @@ rowwise_state$depth <- 0L
 # F80: set by rowwise_agg_call() when a lazy table's dots hold an integer sum()
 # (see rowwise_exact_sums())
 rowwise_state$int_sum <- FALSE
+# Depth of rowwise_rewrite_dots() calls in progress (see rowwise_groups_are_rows())
+rowwise_state$rewriting <- 0L
+
+# TRUE while a rowwise verb whose input is known to have rows rewrites its dots
+# or runs its native attempt: each group is one row there, so a column value has
+# one value per group (the if_else() size check of the parse reads this, only
+# when it would decline). With no rows dplyr still evaluates each dot once, on
+# the empty columns, so a zero-row input, or one whose row count only running
+# its pending steps can tell, is not one (rowwise_rewrite_dots() records which,
+# on the verb call's collector).
+# @keywords internal
+rowwise_groups_are_rows <- function() {
+  (rowwise_state$depth > 0L || rowwise_state$rewriting > 0L) &&
+    isTRUE(.subset2(fallback_reasons$cur, "rowwise_has_rows"))
+}
 
 # Abandon the native attempt in progress (it is always inside rowwise_attempt()).
 # @keywords internal
@@ -330,10 +345,15 @@ rowwise_pure_fns <- c(
 # @param named Whether a rewritten dot needs a name
 # @keywords internal
 rowwise_rewrite_dots <- function(.data, dots, named = TRUE) {
+  rowwise_state$rewriting <- rowwise_state$rewriting + 1L
+  on.exit(rowwise_state$rewriting <- rowwise_state$rewriting - 1L, add = TRUE)
   col <- fallback_reasons$cur
   if (!is.null(col)) {
     col$attempt <- NULL
     col$failed <- NULL
+    # (rowwise_groups_are_rows(): the rows the input has, without running a plan;
+    # the native attempt that follows reads the same answer)
+    col$rowwise_has_rows <- !has_pending_ops(.data) && isTRUE(base_dim(.data)[[1L]] > 0L)
   }
   tryCatch(
     rowwise_rewrite_dots_(.data, dots, named),

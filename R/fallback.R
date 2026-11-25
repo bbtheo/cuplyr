@@ -258,7 +258,7 @@ has_list_column <- function(df) {
 # it found it. "`f()` has no GPU implementation." is built only by
 # fallback_no_gpu_text(), which says it only of a head cuplyr has no GPU
 # handler for anywhere (fallback_has_gpu_handler()).
-# The collector holds strings and integers only (no quosure, no environment),
+# The collector holds strings, integers and flags only (no quosure, no environment),
 # and nothing is left of it once the verb returns. Recording happens only on
 # failure paths; a native call pays the open/close.
 # -----------------------------------------------------------------------------

@@ -240,8 +240,20 @@ arrange_dot_is_native <- function(quo, schema) {
   # `-x` is arithmetic: on a factor column dplyr warns and keeps the input
   # order (F18's rule), so only `desc(x)` / `x` sort a factor natively
   if (identical(as.character(head), "-")) {
-    neg <- ir_call("-", list(ir_col(as.character(expr[[2]]))))
-    return(ir_factor_rule(neg, schema) != "cpu")
+    col <- as.character(expr[[2]])
+    type <- unname(schema$types[match(col, schema$names)])
+    if (length(type) == 1L && !is.na(type)) {
+      if (type == "DICTIONARY32") {
+        neg <- ir_call("-", list(ir_col(col)))
+        return(ir_factor_rule(neg, schema) != "cpu")
+      }
+      # unary minus is an error in R for a string or a Date/POSIXct: the CPU
+      # route lets dplyr raise it
+      if (type == "STRING" || startsWith(type, "TIMESTAMP_")) {
+        return(FALSE)
+      }
+    }
+    return(TRUE)
   }
   TRUE
 }
@@ -256,6 +268,16 @@ arrange_dot_is_native <- function(quo, schema) {
 # @keywords internal
 arrange_key_reason <- function(quo, schema) {
   rule <- "sort key must be a column, `desc()` of one or `-` of one on the GPU"
+  # `-<string/date>`: a `-` of a column, which R does not define for the type
+  expr <- rlang::quo_get_expr(quo)
+  if (rlang::is_call(expr, "-", n = 1L) && is.symbol(expr[[2L]])) {
+    type <- unname(schema$types[match(as.character(expr[[2L]]), schema$names)])
+    if (length(type) == 1L && !is.na(type) && (type == "STRING" || startsWith(type, "TIMESTAMP_"))) {
+      label <- switch(type, STRING = "character", TIMESTAMP_DAYS = "Date",
+                      TIMESTAMP_MICROSECONDS = "POSIXct", "date-time")
+      return(sprintf("`-` is not defined for a %s column in R; dplyr raises the error.", label))
+    }
+  }
   missing_fn <- function(e) {
     if (inherits(e, "quosure")) {
       e <- rlang::quo_get_expr(e)
