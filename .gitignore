@@ -32,3 +32,4 @@ scratchpad/
 benchmark_data/
 /.quarto/
 docs
+.cuplyr-env

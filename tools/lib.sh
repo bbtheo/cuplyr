@@ -21,11 +21,29 @@ CUPLYR_WT_PARENT="$(dirname "$CUPLYR_MAIN")/cuplr-wt"
 CUPLYR_TRUNK="main"
 mkdir -p "$CUPLYR_LOCK_DIR"
 
+# Which pixi environment the tools run in. Default: the main checkout's
+# pixi.toml, default environment (what every worktree and the merge gate use).
+#   CUPLYR_PIXI_MANIFEST  path to a pixi.toml       (default: $CUPLYR_MAIN/pixi.toml)
+#   CUPLYR_PIXI_ENV       environment name in it    (default: default)
+# A worktree can pin both in an untracked .cuplyr-env file at its root
+# (KEY=VALUE lines); variables set in the caller's environment win over it.
+if [[ -f "$CUPLYR_WT_ROOT/.cuplyr-env" ]]; then
+  while IFS='=' read -r _k _v; do
+    case "$_k" in
+      CUPLYR_PIXI_MANIFEST|CUPLYR_PIXI_ENV)
+        [[ -n "${!_k:-}" ]] || export "$_k=$_v" ;;
+    esac
+  done < "$CUPLYR_WT_ROOT/.cuplyr-env"
+fi
+CUPLYR_PIXI_MANIFEST="${CUPLYR_PIXI_MANIFEST:-$CUPLYR_MAIN/pixi.toml}"
+CUPLYR_PIXI_ENV="${CUPLYR_PIXI_ENV:-default}"
+export CUPLYR_PIXI_MANIFEST CUPLYR_PIXI_ENV
+
 cuplyr_activate_env() {
   if [[ -z "${CUPLYR_ENV_ACTIVE:-}" ]]; then
     # conda activation scripts reference unset variables; relax -u for them.
     set +u
-    eval "$(pixi shell-hook --manifest-path "$CUPLYR_MAIN/pixi.toml")"
+    eval "$(pixi shell-hook --manifest-path "$CUPLYR_PIXI_MANIFEST" -e "$CUPLYR_PIXI_ENV")"
     set -u
     export CUPLYR_ENV_ACTIVE=1
   fi
