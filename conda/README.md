@@ -123,6 +123,8 @@ where the solve would otherwise fail (as `install.sh` does).
 
 ## Smoke test (needs a GPU)
 
+The package needs an NVIDIA GPU with compute capability 7.5 (Turing) or newer and a driver that supports CUDA 13.
+
 On a machine with an NVIDIA driver, in the new environment:
 
 ```r

@@ -128,16 +128,18 @@ cuplyr's tables are called gibbles. They print as `# A gibble:`, or `# A gibble 
 
 ## Installation
 
-The conda and pixi package below needs only Linux x86_64, an NVIDIA GPU with compute capability 7.5 (Turing) or newer (Volta GPUs need a source build against a CUDA 12 RAPIDS) and a driver that supports CUDA 13. It brings its own R and libraries, and needs no CUDA toolkit or compiler.
+The conda and pixi package below needs only Linux x86_64, an NVIDIA GPU with compute capability 7.5 (Turing) or newer and a driver that supports CUDA 13. It brings its own R and libraries, and needs no CUDA toolkit or compiler.
 
 To build from source (the install script), you need Linux x86_64 and:
 
 | | |
 |---|---|
-| NVIDIA GPU | compute capability 7.0 (Volta) or newer |
+| NVIDIA GPU | compute capability 7.5 (Turing) or newer |
 | CUDA Toolkit | 12.2 or newer (RAPIDS 26.x is tested with CUDA 13, which the installers and pixi use) |
 | RAPIDS libcudf | 26.02 or newer (developed and tested on 26.10) |
 | R | 4.3 or newer |
+
+Volta (7.0) GPUs are not supported: that would need a source build against a CUDA 12 RAPIDS, which no install route provides.
 
 The install script clones cuplyr, finds libcudf through pixi, conda or your system (in that order), and builds the package. The pixi environment carries libcudf but no compiler, so `--method=pixi` needs a system CUDA toolkit (`nvcc` and the CUDA headers, found through `CUDA_HOME` or `/usr/local/cuda`); the conda method installs `cuda-nvcc` into its environment itself:
 

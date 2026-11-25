@@ -145,7 +145,7 @@ runs the tests for you. This takes longer.
 
 ## Developer setup
 
-You need Linux, an NVIDIA GPU (Volta or newer), a system CUDA toolkit
+You need Linux, an NVIDIA GPU with compute capability 7.5 (Turing) or newer, a system CUDA toolkit
 (`./configure` accepts 12.2 or newer, but RAPIDS 26.x is tested with CUDA 13,
 which pixi and the installers use; it finds the toolkit through `CUDA_HOME` or
 `/usr/local/cuda`), and
