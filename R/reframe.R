@@ -61,8 +61,9 @@ with_reframe_wide <- function(expr) {
 #' expression may read an earlier one's result.
 #'
 #' Anything else runs dplyr's `reframe()` on the CPU (see [cuplyr-fallback]).
-#' One divergence remains on both paths: `quantile()`'s element names (`"10%"`)
-#' are dropped.
+#' One divergence remains on the native path: `quantile()` with more than one
+#' probability drops its element names (`"10%"`, `"90%"`). The CPU path keeps
+#' them, as dplyr does.
 #'
 #' @param .data A `tbl_gpu`.
 #' @param ... Name-value pairs, as in [dplyr::reframe()].
@@ -71,6 +72,17 @@ with_reframe_wide <- function(expr) {
 #' @export
 #' @importFrom dplyr reframe
 reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
+  if (!is.null(.subset2(.data, "col_attrs"))) {
+    if (col_names_move(.data)) {
+      return(rowwise_cpu(.data, "reframe", reason = col_names_reason(.data)))
+    }
+    # (a key's names on dplyr's rebuilt keys, as for summarise(); `.by` keys are
+    # never rebuilt, and `.by` on a grouped table is dplyr's error)
+    keys <- summarise_key_names_cols(.data, .subset2(.data, "groups"))
+    if (length(keys) > 0L) {
+      return(rowwise_cpu(.data, "reframe", reason = key_names_reason(keys)))
+    }
+  }
   if (is_rowwise_gpu(.data)) {
     return(rowwise_cpu(.data, "reframe"))
   }
@@ -160,6 +172,8 @@ reframe.tbl_gpu <- function(.data, ..., .by = NULL) {
     result <- push_op(wide, ast_reframe(input_node(wide), c(keys, plan$outputs), plan$k,
                                         plan$first_k_name))
   }
+  # (a plain data.frame's result is as.data.frame()d by dplyr: no element names)
+  if (isTRUE(.subset2(.data, "bare_df"))) result <- col_attrs_drop_names(result)
   result
 }
 

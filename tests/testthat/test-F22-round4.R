@@ -10,23 +10,31 @@ f22r4_unname <- function(df) {
 }
 
 # Like the acceptance file's f22_check(): eager and lazy against dplyr,
-# warning presence included; `native = TRUE` forbids the CPU fallback.
-f22r4_check <- function(df, pipeline, native = TRUE) {
+# warning presence included; `native = TRUE` forbids the CPU fallback. The
+# native reframe() drops quantile()'s element names (a natively made result is
+# compared without them); a CPU run, and a native summarise() (`keep_names`),
+# keep them, as dplyr does. Both sides start from a tibble: on a plain
+# data.frame dplyr's `.by` drops the names itself.
+f22r4_check <- function(df, pipeline, native = TRUE, keep_names = FALSE) {
   warned <- FALSE
   oracle <- withCallingHandlers(pipeline(tibble::as_tibble(df)), warning = function(w) {
     warned <<- TRUE
     invokeRestart("muffleWarning")
   })
-  expected <- f22r4_unname(oracle)
   for (lazy in c(FALSE, TRUE)) {
     gpu_warned <- FALSE
+    cpu_ran <- FALSE
     got <- withr::with_options(
       list(cuplyr.fallback = if (native) "error" else "silent"),
-      withCallingHandlers(collect(pipeline(tbl_gpu(df, lazy = lazy))), warning = function(w) {
-        gpu_warned <<- TRUE
-        invokeRestart("muffleWarning")
-      })
+      withCallingHandlers(collect(pipeline(tbl_gpu(tibble::as_tibble(df), lazy = lazy))),
+        warning = function(w) {
+          gpu_warned <<- TRUE
+          invokeRestart("muffleWarning")
+        },
+        cuplyr_cpu_fallback = function(c) cpu_ran <<- TRUE
+      )
     )
+    expected <- if (keep_names || cpu_ran) tibble::as_tibble(oracle) else f22r4_unname(oracle)
     label <- if (lazy) "lazy" else "eager"
     expect_equal(tibble::as_tibble(got), expected, info = label)
     expect_identical(gpu_warned, warned, info = label)

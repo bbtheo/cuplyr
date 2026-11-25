@@ -185,7 +185,7 @@ bind_rows_flat <- function(dots, args, .id, call) {
   # dplyr checks `.id` and names the inputs itself on this route. The result
   # keeps the list or data frame column, so has_list_column() keeps it on the
   # host: `reupload` never uploads here.
-  reason <- bind_list_column_reason(dots)
+  reason <- bind_list_column_reason(dots) %||% col_bind_reason(dots)
   if (!is.null(reason)) {
     return(bind_on_cpu("bind_rows", dots, .id = .id,
                        reason = reason, reupload = TRUE, rowwise_from = integer()))
@@ -472,7 +472,8 @@ bind_cols_gpu_run <- function(dots, .name_repair, call) {
                   factor_levels = factor_levels, tz = tz),
     groups = groups,
     group_drop = if (length(groups) > 0L) first_grouping$drop else TRUE,
-    exec_mode = "eager"
+    exec_mode = "eager",
+    col_attrs = bind_cols_col_attrs(pieces, repaired_names, at)
   )
   bind_finish_meta(out, first, dots)
 }

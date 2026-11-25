@@ -1609,6 +1609,11 @@ mutating_join <- function(join_type, x, y, by, copy, suffix, keep, na_matches,
     join_route_to_fallback(verb, verb_fn, x, y, args, user_env = user_env, reason = reason)
   }
 
+  # element names follow dplyr's row gathering (`""` for null-extended rows)
+  if (join_names_need_cpu(x, y, join_type)) {
+    return(fallback_args(join_names_reason(x, y, join_type)))
+  }
+
   # `multiple = "error"`/`"warning"` are undocumented (defunct in dplyr's NEWS)
   # but still reach vctrs and work: dplyr's CPU path is exact for every join
   # shape, so the native code only ever sees all/any/first/last.
@@ -1676,6 +1681,11 @@ filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
   fallback_args <- function(reason) {
     join_route_to_fallback(verb, verb_fn, x, y, list(by = by, na_matches = na_matches),
                            user_env = user_env, reason = reason)
+  }
+
+  # x's rows are gathered, and so are their names (a constant name stays)
+  if (!is.null(.subset2(x, "col_attrs")) && col_names_move(x)) {
+    return(fallback_args(join_names_reason(x, NULL, join_type)))
   }
 
   if (!join_by_natively_supported(by, x, y)) {
@@ -1981,6 +1991,11 @@ cross_join.tbl_gpu <- function(x, y, ..., copy = FALSE, suffix = c(".x", ".y")) 
   rlang::check_dots_empty0(...)
   y <- join_coerce_y(x, y, copy)
   check_unique_join_inputs(x, y)
+
+  if (join_names_need_cpu(x, y, "cross")) {
+    return(join_route_to_fallback("cross_join", dplyr::cross_join, x, y, list(suffix = suffix),
+                                  reason = join_names_reason(x, y, "cross")))
+  }
 
   suffix <- validate_join_suffix(suffix)
 

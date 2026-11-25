@@ -59,7 +59,7 @@ f74_capture <- function(f) {
 # "There were N warnings ... The first warning was:", so only the first is
 # visible in its text). With `native = TRUE` the GPU pipeline (verb and
 # collect) must not fall back to the CPU. Names on result columns (quantile()'s
-# "25%") are not compared: no tbl_gpu column carries names.
+# "25%") are compared too (#21).
 f74_strict <- function(pipeline, df = f74_df, warns = character(), native = FALSE,
                        modes = c("eager", "lazy")) {
   exp_cap <- f74_capture(function() pipeline(tibble::as_tibble(df)))
@@ -105,7 +105,6 @@ f74_strict <- function(pipeline, df = f74_df, warns = character(), native = FALS
     }
     g <- dplyr::ungroup(tibble::as_tibble(got))
     e <- dplyr::ungroup(tibble::as_tibble(expected))
-    e[] <- lapply(e, function(v) if (is.atomic(v)) unname(v) else v)
     expect_identical(names(g), names(e), info = paste(mode, "names"))
     expect_identical(lapply(g, class), lapply(e, class),
                      info = paste(mode, "column classes"))

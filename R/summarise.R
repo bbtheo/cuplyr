@@ -345,18 +345,6 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
     return(summarise_rowwise(.data, rlang::quos(..., .ignore_empty = "all"), .groups, rlang::enquo(.by), caller_env))
   }
 
-  # `.groups = "rowwise"`: summarise keeping every group, then the result is
-  # rowwise by those groups (F49: a rowwise tbl_gpu; collect() gives dplyr's
-  # rowwise_df). The host rowwise_df of a CPU route is rowwise already.
-  if (identical(.groups, "rowwise")) {
-    res <- summarise_impl_dots(.data, rlang::quos(..., .ignore_empty = "all"), "keep", rlang::enquo(.by),
-                               caller_env)
-    if (is_tbl_gpu(res)) {
-      return(rowwise_mark(res, res$groups))
-    }
-    return(dplyr::rowwise(dplyr::ungroup(res), dplyr::all_of(dplyr::group_vars(res))))
-  }
-
   # (an argument that wasn't given is the NULL quosure, which skips an enquo(); a
   # `.by` forwarded from a caller's missing one is not NULL here and takes it)
   by_quo <- if (missing(.by) && is.null(substitute(.by))) null_quo else rlang::enquo(.by)
@@ -370,8 +358,30 @@ summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   by_cols <- resolve_by(.data, by_quo, ".by", verb = "summarise")
   by_given <- !quo_is_null_fast(by_quo)
 
+  # a group key's names (those of its group's first row) are dplyr's to pick
+  if (!is.null(.subset2(.data, "col_attrs"))) {
+    keys <- summarise_key_names_cols(.data, if (by_given) by_cols else .subset2(.data, "groups"))
+    if (length(keys) > 0L) {
+      return(rowwise_cpu(.data, "summarise", reason = key_names_reason(keys)))
+    }
+  }
+
   dots <- rlang::quos(..., .ignore_empty = "all")
-  summarise_impl(.data, dots, .groups, by_quo, by_cols, by_given, caller_env)
+  # `.groups = "rowwise"`: summarise keeping every group, then the result is
+  # rowwise by those groups (F49: a rowwise tbl_gpu; collect() gives dplyr's
+  # rowwise_df). The host rowwise_df of a CPU route is rowwise already.
+  rowwise <- identical(.groups, "rowwise")
+  out <- summarise_impl(.data, dots, if (rowwise) "keep" else .groups, by_quo, by_cols, by_given, caller_env)
+  # (a plain data.frame's summary is as.data.frame()d by dplyr, before
+  # rowwise_df(): no element names)
+  if (isTRUE(.subset2(.data, "bare_df"))) out <- col_attrs_drop_names(out)
+  if (!rowwise) {
+    return(out)
+  }
+  if (is_tbl_gpu(out)) {
+    return(rowwise_mark(out, out$groups))
+  }
+  dplyr::rowwise(dplyr::ungroup(out), dplyr::all_of(dplyr::group_vars(out)))
 }
 
 # Internal: the notice for a summarise step that computes the pending lazy ops
@@ -388,15 +398,6 @@ notify_materialization <- function(verb, reason, expr = NA_character_, data) {
     cuplyr_plan_break_notify(verb, reason, expr, data)
   }
   invisible(NULL)
-}
-
-# Internal: summarise_impl() with `.by=` resolved from its quosure.
-# @keywords internal
-summarise_impl_dots <- function(.data, dots, .groups, by_quo, caller_env) {
-  # (its errors report summarise(), the method's frame, as dplyr's do)
-  by_cols <- resolve_by(.data, by_quo, ".by", call = parent.frame(), verb = "summarise")
-  by_given <- !quo_is_null_fast(by_quo)
-  summarise_impl(.data, dots, .groups, by_quo, by_cols, by_given, caller_env)
 }
 
 # Internal: the body of summarise.tbl_gpu() on captured dots, so the
@@ -526,6 +527,18 @@ summarise_impl <- function(.data, dots, .groups, by_quo, by_cols, by_given, call
   # `fn(<column>)` dots (summarise_simple_aggregations()) read a column, so they
   # are no constant reducers; summarise_core() reuses the aggregations built here.
   simple_plan <- summarise_simple_plan(dots, in_schema)
+  # quantile() names its result, and R decides what arithmetic around it keeps
+  # (#21): a bare quantile() dot keeps its name natively, anything else goes to
+  # dplyr. (A `fn(<column>)` dot is never a quantile(): it takes a `probs`.)
+  quantile_reason <- if (is.null(simple_plan) && !isTRUE(reframe_state$wide) &&
+                         dots_mention(dots, "quantile")) {
+    summarise_quantile_names_reason(dots)
+  }
+  if (!is.null(quantile_reason)) {
+    return(gpu_fallback("summarise", .data, function(tbl) {
+      dplyr::summarise(.data = tbl, !!!orig_dots, .groups = .groups, .by = !!by_quo)
+    }, reason = quantile_reason))
+  }
   # #22: a dot with arithmetic around reducers (`mean(x) + 1`, `sum(x) / n()`, a later
   # dot reading an earlier result) splits into the reducer calls, aggregated as
   # temp aggregates, and a mutate on the result (R/summarise-post.R). The split
@@ -842,7 +855,7 @@ summarise_with_empty_groups <- function(.data, dots, retained_groups, fallback, 
   finish(new_tbl_gpu(
     ptr = wrap_gpu_call("summarise", gpu_bind_cols_impl(list(key_tbl$ptr, agg_ptr))),
     schema = schema, groups = retained_groups, group_drop = out_drop,
-    exec_mode = "eager"
+    exec_mode = "eager", col_attrs = .subset2(observed, "col_attrs")
   ))
 }
 
@@ -986,6 +999,14 @@ summarise_group_keys <- function(.data, retained_groups) {
   # (group_data() carries a `.drop` attribute, which is not the table's)
   all_keys <- fixed_keys_of(base) %||% compute_group_data(base)[base$groups]
   keys <- tbl_gpu(strip_frame_attrs(tibble::as_tibble(all_keys)), lazy = FALSE)
+  # the keys' constant attributes as dplyr's group data has them (#21): no
+  # row-aligned names (a key with them took the CPU route), and none of a
+  # rebuilt key's (col_attrs_rebuilt_keys())
+  ca <- .subset2(base, "col_attrs")
+  ca <- col_attrs_without_names(ca[intersect(base$groups, names(ca))])
+  if (!is.null(ca)) {
+    keys <- set_tbl_gpu_field(keys, "col_attrs", col_attrs_rebuilt_keys(ca, base, base$groups, current_schema(base)))
+  }
   keys$groups <- retained_groups
   keys$group_drop <- if (length(retained_groups) > 0L) base$group_drop %||% TRUE else TRUE
   if (was_lazy) keys$exec_mode <- "lazy"
@@ -1591,6 +1612,11 @@ summarise_core <- function(.data, dots, retained_groups = character(),
     # lazy sd()/var(), which used to reach C++ as "sd"/"var" and error out).
     aggregations <- parse_aggregations(current_schema(working_data), processed_dots,
                                        na_rm_flags, agg_extra)
+    # quantile()'s names ride on its output column (R/col-attrs.R)
+    for (i in seq_along(aggregations)) {
+      qn <- .subset2(.subset2(parts, i), "qnames")
+      if (!is.null(qn)) aggregations[[i]]$qnames <- qn
+    }
   }
 
   # F124: dplyr's warning for an empty min()/max() names the dot it came from
@@ -1793,6 +1819,54 @@ extract_na_rm <- function(quo, schema) {
   list(quo = rlang::new_quosure(expr[-flag_pos], env), na_rm = na_rm_val)
 }
 
+# TRUE iff `x` calls one of the functions `fns` (`fn(...)` or `pkg::fn(...)`, at
+# any depth, inside a nested quosure too); a symbol of that name is no call.
+# @keywords internal
+expr_calls_any <- function(x, fns) {
+  if (!is.call(x)) {
+    return(FALSE)
+  }
+  head <- x[[1L]]
+  if (is.call(head) && length(head) == 3L && identical(head[[1L]], quote(`::`))) {
+    head <- head[[3L]]
+  }
+  if (is.symbol(head) && as.character(head) %in% fns) {
+    return(TRUE)
+  }
+  # (by index: an empty argument, `m[, 1]` or `switch(x, a = , 1)`, is never
+  # bound to a variable, whose evaluation would be R's missing-argument error)
+  parts <- as.list(x)
+  for (i in seq_along(parts)) {
+    if (identical(parts[[i]], quote(expr = ))) next
+    a <- parts[[i]]
+    if (rlang::is_quosure(a)) a <- rlang::quo_get_expr(a)
+    if (expr_calls_any(a, fns)) {
+      return(TRUE)
+    }
+  }
+  FALSE
+}
+
+# Internal (#21): why a summarise() with `quantile()` in a dot that is not the
+# whole dot, or read by a later dot, runs on dplyr: R's own rules decide whether
+# the result keeps quantile()'s name (`quantile(x, .5) + 1` does, `[[1]]` doesn't).
+# NULL when every dot that mentions it is a bare `quantile(...)` that no other
+# dot reads.
+# @keywords internal
+summarise_quantile_names_reason <- function(dots) {
+  exprs <- lapply(dots, rlang::quo_get_expr)
+  # (a call: a column named `quantile` is no reason)
+  mentions <- vapply(exprs, expr_calls_any, logical(1), fns = "quantile")
+  bare <- vapply(exprs, function(e) identical(call_head_name(e), "quantile"), logical(1))
+  if (any(mentions & !bare)) {
+    return("an expression around quantile() keeps or drops its names by R's own rules, which dplyr applies.")
+  }
+  if (any(!bare & vapply(exprs, function(e) any(all.vars(e) %in% names(dots)[bare]), logical(1)))) {
+    return("an expression reads a quantile() result, whose names R's own rules carry.")
+  }
+  NULL
+}
+
 # Internal: Extract and strip `quantile()`'s `probs=` / `nth()`'s `n=`
 # scalar shape parameter from a single summarise() aggregation dot (Phase
 # 6, task 6.2)
@@ -1896,9 +1970,26 @@ extract_quantile_probs <- function(expr, env, quo) {
          rlang::quo_text(quo), call. = FALSE)
   }
 
+  # quantile() names its result ("50%"): the name of the output (#21). A
+  # `names`/`digits` that isn't a plain value is dplyr's to evaluate.
+  qnames <- NULL
+  names_val <- if (is.null(present_args$names)) TRUE else
+    ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(present_args$names, env)))$value
+  digits_val <- if (is.null(present_args$digits)) 7 else
+    ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(present_args$digits, env)))$value
+  if (!(isTRUE(names_val) || isFALSE(names_val)) ||
+      !(is.numeric(digits_val) && length(digits_val) == 1L && !is.na(digits_val))) {
+    stop("summarise()'s quantile() takes a plain `names` and `digits`: ",
+         rlang::quo_text(quo), call. = FALSE)
+  }
+  if (isTRUE(names_val)) {
+    qnames <- names(stats::quantile(0, probs_val, digits = digits_val))
+  }
+
   list(
     quo = rlang::new_quosure(rlang::call2("quantile", present_args$x), env),
-    extra = as.double(probs_val)
+    extra = as.double(probs_val),
+    qnames = qnames
   )
 }
 
@@ -1977,7 +2068,8 @@ summarise_by_desugar <- function(.data, dots, by_cols, ir_cache = NULL, simple_a
     schema = .subset2(.data, "schema"),
     lazy_ops = .subset2(.data, "lazy_ops"),
     groups = by_cols,
-    exec_mode = .subset2(.data, "exec_mode")
+    exec_mode = .subset2(.data, "exec_mode"),
+    col_attrs = .subset2(.data, "col_attrs")
   )
 
   result <- summarise_core(grouped, dots, group_order = "first", simple_aggs = simple_aggs,
@@ -2091,7 +2183,8 @@ agg_dot_parts <- function(ir_cache, i, dot, schema) {
     return(NULL)
   }
   shaped <- extract_agg_shape_param(stripped$quo)
-  parts <- list(quo = shaped$quo, na_rm = stripped$na_rm, extra = shaped$extra)
+  parts <- list(quo = shaped$quo, na_rm = stripped$na_rm, extra = shaped$extra,
+                qnames = shaped$qnames)
   if (!is.null(ir_cache)) {
     ir_cache[[key]] <- list(dot = dot, parts = parts)
   }
@@ -2625,7 +2718,8 @@ create_temp_column <- function(.data, col_name, ir, keep_bool = FALSE) {
     lazy_ops = .subset2(.data, "lazy_ops"),
     groups = .subset2(.data, "groups"),
     group_drop = .subset2(.data, "group_drop") %||% TRUE,
-    exec_mode = .subset2(.data, "exec_mode")
+    exec_mode = .subset2(.data, "exec_mode"),
+    col_attrs = .subset2(.data, "col_attrs")
   ), .data)
 }
 

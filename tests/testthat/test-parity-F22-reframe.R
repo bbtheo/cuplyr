@@ -18,9 +18,11 @@
 # - Mismatched sizes (2 vs 3) error ("Can't recycle").
 #
 # One documented divergence: dplyr keeps quantile()'s element names on the
-# result column ("10%", "90%", ...). A tbl_gpu column can't carry per-element
-# names (the CPU fallback's re-upload already drops them), so the oracle side
-# is compared with the column names stripped (f22_unname()).
+# result column ("10%", "90%", ...), and the native reframe() drops them. A
+# result the GPU made natively is compared with the oracle's names stripped
+# (f22_unname()); one that ran on the CPU, and a native summarise()
+# (`keep_names`), keep them, as dplyr does. Both sides start from a tibble: on a
+# plain data.frame dplyr's `.by` drops the names itself.
 #
 # The native shapes run with options(cuplyr.fallback = "error"), in eager and
 # lazy mode, so a CPU fallback fails the test. Shapes outside the native
@@ -61,22 +63,27 @@ f22_with_warnings <- function(expr) {
 # Checks: values/types/names, ungrouped result, lazy stays lazy with pending
 # ops (native only, unless `deferred = FALSE`: a `.drop = FALSE` summarise
 # computes its input up front), and that the GPU warns iff dplyr warns.
-f22_check <- function(df, pipeline, native = TRUE, deferred = TRUE) {
+f22_check <- function(df, pipeline, native = TRUE, deferred = TRUE, keep_names = FALSE) {
   oracle <- f22_with_warnings(pipeline(tibble::as_tibble(df)))
-  expected <- f22_unname(tibble::as_tibble(oracle$value))
+  with_names <- tibble::as_tibble(oracle$value)
 
   for (lazy in c(FALSE, TRUE)) {
     mode <- if (native) "error" else "silent"
+    cpu_ran <- FALSE
     got <- withr::with_options(list(cuplyr.fallback = mode), {
-      f22_with_warnings({
-        res <- pipeline(tbl_gpu(df, lazy = lazy))
-        expect_true(is_tbl_gpu(res))
-        expect_identical(dplyr::group_vars(res), character(0))
-        expect_identical(is_lazy(res), lazy)
-        if (native && lazy && deferred) expect_true(has_pending_ops(res))
-        collect(res)
-      })
+      withCallingHandlers(
+        f22_with_warnings({
+          res <- pipeline(tbl_gpu(tibble::as_tibble(df), lazy = lazy))
+          expect_true(is_tbl_gpu(res))
+          expect_identical(dplyr::group_vars(res), character(0))
+          expect_identical(is_lazy(res), lazy)
+          if (native && lazy && deferred) expect_true(has_pending_ops(res))
+          collect(res)
+        }),
+        cuplyr_cpu_fallback = function(c) cpu_ran <<- TRUE
+      )
     })
+    expected <- if (keep_names || cpu_ran) with_names else f22_unname(with_names)
     label <- if (lazy) "lazy" else "eager"
     expect_equal(tibble::as_tibble(got$value), expected,
                  info = sprintf("reframe result differs from dplyr (%s)", label))
@@ -447,9 +454,8 @@ test_that("summarise() quantile() at a whole type-7 index next to Inf takes that
   skip_if_no_gpu()
   df <- data.frame(g = rep(1:2, each = 11), x = c(0:7, Inf, Inf, Inf, 0:10))
   p <- seq(0, 1, 0.1)[8]
-  # dplyr's summarise() keeps quantile()'s "70%" names too; f22_check() strips
-  # them (the documented divergence, see the header)
-  f22_check(df, function(d) summarise(d, q = quantile(x, p), m = median(x), .by = g))
+  # dplyr's summarise() keeps quantile()'s "70%" names, and so does the GPU's
+  f22_check(df, function(d) summarise(d, q = quantile(x, p), m = median(x), .by = g), keep_names = TRUE)
 })
 
 test_that("lazy reframe() with an integer sum() past the integer range gives a double", {
@@ -480,7 +486,8 @@ test_that("quantile() at a whole type-7 index takes that element next to a far n
     reframe(d, q = quantile(x, seq(0, 1, 0.1)), qi = quantile(i, seq(0, 1, 0.1)), .by = g)
   })
   p <- seq(0, 1, 0.1)[8]
-  f22_check(df, function(d) summarise(d, q = quantile(x, p), qi = quantile(i, p), .by = g))
+  f22_check(df, function(d) summarise(d, q = quantile(x, p), qi = quantile(i, p), .by = g),
+            keep_names = TRUE)
 })
 
 test_that("lazy reframe() with a computed integer sum() past the integer range gives a double", {

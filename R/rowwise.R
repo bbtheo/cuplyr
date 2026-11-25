@@ -233,19 +233,25 @@ rowwise_rerun <- function(cpu, dots = NULL) {
   cpu(fallback_failed_reason(dots, attempt$message %||% "this call has no native rowwise form."))
 }
 
-# Run the verb that called this on the CPU: dplyr's own verb on a rowwise_df of
-# the input, with the arguments exactly as the user wrote them (the call is
-# rebuilt from the method's call and evaluated in the caller's environment, so
-# tidy evaluation, `!!`, `{{ }}` and defaults behave as for a direct call). The
-# whole-call route of every verb that has no rowwise-aware native form.
+# Run the verb that called this on the CPU: dplyr's own verb on the collected
+# table (a rowwise_df of the input for a rowwise table), with the arguments
+# exactly as the user wrote them (the call is rebuilt from the method's call and
+# evaluated in the caller's environment, so tidy evaluation, `!!`, `{{ }}` and
+# defaults behave as for a direct call). The whole-call route of every verb that
+# has no rowwise-aware native form, and of a verb whose table has column names
+# dplyr moves with the rows (`reason`, #21).
 #
 # Called first thing in a method, before any argument but the first is
 # evaluated. `tables` names arguments holding another table (a join/set-op `y`):
-# they are collected to data frames here.
-# @param .data The rowwise tbl_gpu (the method's first argument)
+# they are collected to data frames here. A method that had to read one of them
+# first passes the value it read in `values` (`list(y = y)`), so it is never
+# evaluated twice.
+# @param .data The tbl_gpu (the method's first argument)
 # @param verb The dplyr function name
+# @param reason Why the call runs on the CPU, for the notice (`NULL`: no reason
+#   beyond the route itself)
 # @keywords internal
-rowwise_cpu <- function(.data, verb, tables = character()) {
+rowwise_cpu <- function(.data, verb, tables = character(), reason = NULL, values = list()) {
   idx <- sys.parent()
   fn <- sys.function(idx)
   call <- sys.call(idx)
@@ -255,7 +261,7 @@ rowwise_cpu <- function(.data, verb, tables = character()) {
   # (a tbl_gpu is computed first, so the notice can size it too)
   also <- list()
   for (nm in set_intersect(tables, names(mc))) {
-    val <- rlang::eval_bare(mc[[nm]], caller)
+    val <- if (nm %in% names(values)) values[[nm]] else rlang::eval_bare(mc[[nm]], caller)
     if (is_tbl_gpu(val)) {
       val <- fallback_materialize(val)
       also[[length(also) + 1L]] <- val
@@ -268,7 +274,7 @@ rowwise_cpu <- function(.data, verb, tables = character()) {
     mc[[first]] <- tbl
     mc[[1L]] <- verb_fn
     rlang::eval_bare(mc, caller)
-  }, also = also)
+  }, reason = reason, also = also)
   # (F80) a two-table verb is lazy when either table is, as push_join() and the
   # set operations decide; the result is in `.data`'s mode otherwise
   result_mode_of_inputs(res, c(list(.data), also))

@@ -49,6 +49,10 @@ dplyr_row_slice.tbl_gpu <- function(data, i, ..., preserve = FALSE) {
   if (is.logical(i)) {
     i <- which(i)
   }
+  if (!is.null(.subset2(data, "col_attrs")) && col_names_move(data)) {
+    return(gpu_fallback("dplyr_row_slice", data, function(d) dplyr::dplyr_row_slice(d, i, preserve = preserve),
+                        reason = col_names_reason(data)))
+  }
 
   prep <- row_slice_prepare(data, preserve)
   data <- prep$data
@@ -84,7 +88,8 @@ dplyr_row_slice.tbl_gpu <- function(data, i, ..., preserve = FALSE) {
     groups = materialized$groups,
     group_drop = materialized$group_drop,
     exec_mode = materialized$exec_mode,
-    rowwise = is_rowwise_gpu(materialized)
+    rowwise = is_rowwise_gpu(materialized),
+    col_attrs = col_attrs_without_names(materialized[["col_attrs"]])
   ), materialized), prep)
 }
 
@@ -236,7 +241,7 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
 
   # (`nrow` is only present on a zero-column table, `fixed_keys` on a table
   # whose group keys were fixed, `bare_df` on a table from a plain data.frame)
-  optional <- c("nrow", "fixed_keys", "unspecified", "bare_df", "rowwise", "origin")
+  optional <- c("nrow", "fixed_keys", "unspecified", "bare_df", "rowwise", "origin", "col_attrs")
   if (is.data.frame(data) &&
       identical(set_diff(names(data), optional), set_diff(tbl_gpu_fields, optional))) {
     # dplyr_reconstruct.grouped_df()/.data.frame(): the template's groups
@@ -248,7 +253,8 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
       group_drop = if (length(groups) > 0L) template$group_drop %||% TRUE else TRUE,
       nrow = data[["nrow"]], fixed_keys = data[["fixed_keys"]],
       unspecified = data[["unspecified"]],
-      rowwise = is_rowwise_gpu(template)
+      rowwise = is_rowwise_gpu(template),
+      col_attrs = data[["col_attrs"]]
     )
     return(carry_frame_meta(out, template))
   }
@@ -387,7 +393,15 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
     return(zero_column_result(x, "[", n = n_rows))
   }
 
-  if (!i_missing && !isTRUE(i)) {
+  if (!i_missing && !isTRUE(i) && !is.null(.subset2(x, "col_attrs")) &&
+      (col_names_move(x) || (col_names_any(x) && bracket_may_pad(i, n_known)))) {
+    # element names move with the rows, and a row the subscript adds has none:
+    # tibble's own subsetting does it
+    drop_flag <- x$group_drop %||% TRUE
+    reason <- if (col_names_move(x)) col_names_reason(x) else col_names_pad_reason(x)
+    x <- gpu_fallback("[", x, function(tbl) tbl[i, , drop = FALSE], reason = reason)
+    x$group_drop <- drop_flag
+  } else if (!i_missing && !isTRUE(i)) {
     drop_flag <- x$group_drop %||% TRUE
     node <- if (is.na(n_known)) {
       # nrow unknown until the plan runs: resolve (and validate) at lowering,
@@ -497,8 +511,10 @@ bracket_row_positions <- function(i, n, i_arg, call) {
 # data.frame (F31), `rowwise` that it is a rowwise table (F49); all four only
 # present when set. `origin` (#10) is the plain-text history of the CPU step
 # that produced a lazy table (`plan_origin()`, R/plan-text.R), also only when set.
+# `col_attrs` (#21) holds the names and extra attributes of columns (R/col-attrs.R),
+# present only when some column has any.
 tbl_gpu_fields <- c("ptr", "schema", "lazy_ops", "groups", "exec_mode", "group_drop", "nrow",
-                    "fixed_keys", "unspecified", "bare_df", "rowwise", "origin")
+                    "fixed_keys", "unspecified", "bare_df", "rowwise", "origin", "col_attrs")
 
 # The cuplyr namespace (this file is evaluated in it).
 cuplyr_ns <- environment()
@@ -531,7 +547,7 @@ is_tbl_gpu_field <- function(name) {
 #' @export
 `$.tbl_gpu` <- function(x, name) {
   if (switch(name, ptr = , schema = , lazy_ops = , groups = , exec_mode = ,
-             group_drop = , nrow = , fixed_keys = , unspecified = , bare_df = , rowwise = , origin = TRUE, FALSE) &&
+             group_drop = , nrow = , fixed_keys = , unspecified = , bare_df = , rowwise = , origin = , col_attrs = TRUE, FALSE) &&
       internal_caller(parent.frame())) {
     return(.subset2(x, name))
   }
@@ -632,7 +648,7 @@ select_one_column <- function(x, col) {
 #' @export
 `$<-.tbl_gpu` <- function(x, name, value) {
   if (switch(name, ptr = , schema = , lazy_ops = , groups = , exec_mode = ,
-             group_drop = , nrow = , fixed_keys = , unspecified = , bare_df = , rowwise = , origin = TRUE, FALSE) &&
+             group_drop = , nrow = , fixed_keys = , unspecified = , bare_df = , rowwise = , origin = , col_attrs = TRUE, FALSE) &&
       internal_caller(parent.frame())) {
     return(set_tbl_gpu_field(x, name, value))
   }

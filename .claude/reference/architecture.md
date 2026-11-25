@@ -25,6 +25,8 @@ list(
   #                              # the rowwise vars -- see "Rowwise tables" below
   # origin = list(...)           # ONLY on a lazy result of a CPU step (#10): plain text
   #                              # history for explain(), see "Plan text (#10)" below
+  # col_attrs = list(...)        # ONLY when a column has element names, extra attributes
+  #                              # or is a one-column matrix (#21): "Column names and attributes"
 )
 ```
 
@@ -259,6 +261,127 @@ select, and for rename/distinct/slice/barrier when either side has such a name
 (dplyr refuses filter/arrange/mutate on blank names, so those never get there). A
 table whose levels came through any other by-name node has no levels for its
 blank-named factors (they collect as codes).
+
+#### Column names and attributes (#21)
+
+The GPU holds values only. What R puts on a column besides its class (element
+names, `label`, `scaled:center`, a one-column matrix's shape) rides on the table
+as `$col_attrs` (`R/col-attrs.R`), a named list keyed by column name that exists
+only when some column has any, like `$unspecified`: a table without them pays
+one `NULL` test per verb, `push_op()` and `collect_frame()`. One entry per column:
+`attrs` (the constant attributes, everything but names/dim/dimnames/class/levels/
+tzone, which the type owns), `names` (row-aligned element names, or a matrix's
+rownames), `names_const` (ONE name on every row: what an upload stores when all
+names are equal, and quantile()'s `"50%"`, which needs no row count),
+`matrix`/`colnames` (the shape; `dim` is `c(nrow, 1)` again at collect).
+
+- **Upload** (`tbl_gpu.data.frame()` -> `col_attrs_extract()`): O(ncol), nothing per
+  element; a column whose name can't key an entry (blank, `NA`, duplicated) gets
+  none. The GPU copy is untouched (it ignores attributes). **Collect**
+  (`collect_frame()` -> `col_attrs_restore()`, the one hub for `collect()`,
+  `pull()`, `$`, `[[`, `as_tibble()` and every CPU route) puts them back;
+  a `names` vector whose length isn't the row count is skipped, never misplaced.
+  Every CPU route re-uploads through `tbl_gpu()`, so a CPU result keeps dplyr's
+  names and attributes with no per-verb work.
+- **Carry**: `push_op()` calls `carry_col_attrs()` once, on the column-origin map
+  `col_origin(node, old_names, new_names)` (output column -> the input column it is
+  an unchanged copy of, or the entry the node makes itself; `carry_unspecified()`
+  reads the same map). select/rename/relocate/barrier/window and mutate (an untouched column and a
+  bare copy `b2 = b`; an overwritten one loses its entry) carry the whole entry.
+  filter/arrange/slice/distinct/summarise carry the **constant** parts only
+  (`col_attrs_without_names()`): a summarise group key keeps its attributes, a
+  reducer's output none, and a `quantile()` output gets `names_const` from the
+  aggregation's `qnames`. Joins (`push_join()` -> `join_col_attrs()`): x's columns
+  keep x's, y's kept columns y's. A merged key is dplyr's `vec_cast()` of x's key
+  to the common type: it keeps x's entry when only y's key was cast (`key_casts`
+  with `cast_left = FALSE`: a double x against an integer y, a character x against
+  a factor or all-`NA` y), and has none when x's key was cast or is a factor;
+  `keep = TRUE` keeps both columns as they are. Two cases where dplyr keeps more
+  (lost here, never misplaced): vctrs skips the factor rebuild when both keys share
+  one levels vector (a self-join, a summary of x joined back), so dplyr keeps x's
+  attributes there; and a Date key cast to POSIXct keeps its names in dplyr. A `names_const` rides along (below). `group_by()`,
+  `ungroup()`, `compute()`, `names<-`, `count()`, `bind_cols()` copy or re-key the
+  field; every other `new_tbl_gpu()` call that rebuilds a table leaves it out, which
+  drops the metadata (wrong never, only absent).
+- **Safety rule**: row-aligned `names` are never carried through a node that can
+  move rows. A verb that must keep them takes its CPU route first:
+  `rowwise_cpu(.data, verb, reason = col_names_reason(.data))` (dplyr's own verb on
+  the collected frame, the call rebuilt from the method's call; a set operation or
+  rows_*() that already forced `y` passes `values = list(y = y)`, so `y` is never
+  evaluated twice) at the top of filter/filter_out,
+  arrange, slice and its family, distinct, reframe, summarise (only when a group
+  key has names: `summarise_key_names_cols()`, before any other path of
+  `summarise.tbl_gpu()`, `.groups = "rowwise"` included, and in `reframe.tbl_gpu()`
+  for rebuilt keys), and `dplyr_row_slice()`; joins use their `fallback_args()`
+  (`join_names_need_cpu()`: row-aligned names on either side, for a filtering join
+  x's only; a `names_const` only on a side the join null-extends, y's in left/full
+  joins and x's in right/full ones, where dplyr names the added rows `""`; on every
+  other side each output row comes from a row of its side, so the one name holds
+  and the join stays on the GPU, cross joins included);
+  bind_rows(), the set operations and rows_*() when an input has names of any kind
+  or a one-column matrix (`col_bind_reason()`: dplyr concatenates names with `""`
+  for an unnamed input and stacks matrices); constant attributes are dropped by a
+  bind and a set operation, as in dplyr.
+- **mutate()/transmute()**: a dot that reads a column with an entry in anything but a
+  bare copy goes to dplyr (`col_attrs_read_reason()`: R's attribute rules are per
+  function: `f + 1` keeps them, `f > 1` drops them), and so does a constant with
+  attributes besides names (`col_value_has_attrs()`, `mutate_constant_value()` kind
+  `"attributed"`). A constant's own names are native: the expression carries
+  `const_names` (`names_const` for a scalar, `names` for a vector the length of the
+  table), `push_op()` turns them into the output's entry; a window mutate with one
+  goes to dplyr (its stages rebuild the table in batches). A dot that doesn't read an
+  attributed column stays native whatever else the table holds. A later dot reads
+  the output of a constant with names like any attributed column (a bare copy
+  keeps the entry, anything else goes to dplyr).
+- **summarise()**: a bare `quantile(x, p)` dot is native and its output column
+  carries `names_const` (`extract_quantile_probs()` evaluates `names=` and `digits=`
+  to `qnames`); `quantile()` inside a larger expression, or a dot reading its
+  result, goes to dplyr (R's rules decide what survives). `reframe()`'s native
+  quantile still drops the names. On a plain data.frame (`$bare_df`, so ungrouped
+  or `.by`) dplyr's `summarise.data.frame()`/`reframe.data.frame()` end with
+  `as.data.frame()`, which drops every element name and keeps the other
+  attributes: `summarise.tbl_gpu()`/`reframe.tbl_gpu()` end with
+  `col_attrs_drop_names()` there (a `group_by()` table is a tibble in dplyr and
+  keeps them).
+- **`.drop = FALSE` keys** (`group_keys_rebuilt()`): dplyr's `compute_groups()`
+  rebuilds the keys only when some key is a factor. A factor key is then
+  `new_factor(codes, levels)` (no other attribute, no names), any other key
+  `vec_slice(vec_unique(key), index)`: attributes kept, each row named like the
+  first row of the first group (key order) with its value, `""` under a parent key
+  with no rows. `group_keys_col_attrs()` does this for `group_data()`/`group_keys()`;
+  a summarise drops the factor keys' entries and a non-factor key's `names_const`
+  (`col_attrs_rebuilt_keys()` in `push_op()`; the empty-group rebuild takes the
+  observed result's entries, the zero-dot `summarise_group_keys()` the input's
+  through the same function), and a rebuilt key with a `names_const` sends
+  summarise() and reframe() to dplyr first (`summarise_key_names_cols()`), so the
+  drop only guards a path that misses the check. Without a factor key,
+  `.drop = FALSE` keys are those of `.drop = TRUE`. Fixed keys (`$fixed_keys`: a
+  `.drop = FALSE` table after a `filter()`/`slice()`/`semi_join()` that lost a
+  group, or `slice(.preserve = TRUE)`) hold values only. dplyr's row slice keeps
+  the group data `group_by()` built, so `group_keys_col_attrs(fixed = TRUE)` gives
+  them the keys' attributes by the same rebuilt-key rule and no names; the zero-dot
+  summarise and `gpu_fallback()`'s regroup (`with_fixed_groups()`) use it too.
+- Not carried (names/attributes lost, as before #21; lost, never misplaced):
+  `vec_ptype2`/vctrs paths, `group_split()`, `group_trim()`, a grouped
+  `head()`/`tail()`, `slice_sample()`'s internal gather, a grouped
+  `slice_sample()`, zero-column joins, and the key names of fixed-key group data
+  (`group_data()`/`group_keys()`, a CPU-route summarise over fixed keys: dplyr keeps the names the keys had at `group_by()`, here they are
+  dropped). A one-column matrix with rownames and no colnames as a `.by` key of a
+  plain data.frame comes back without dimnames, where dplyr's `as.data.frame()`
+  leaves `dimnames = list(NULL, NULL)` (R's `dimnames<-` turns that list into
+  `NULL`). A rowwise table's summarise keeps its vars' names: its rows stay in
+  place (`summarise_rowwise()` is a transmute). A `[` that may add rows (an NA or out-of-range position) goes
+  to dplyr when a column has `names_const`, since the added rows' names are `NA`.
+  `reframe()`'s native quantile drops quantile()'s names while its CPU route keeps
+  them. Row-aligned names (accidental ones included: `mutate(n = sapply(s, nchar))`)
+  send every later row-moving verb to the CPU; tracking them natively through a
+  row-index gather is a follow-up, as is native attribute propagation through
+  arithmetic in `mutate()`.
+- **Restore**: a column's constant attributes are put back with `vctrs::vec_restore()`
+  from a zero-length prototype made at upload (`col_attrs_ptype()`), as `vec_slice()`
+  does, so an attribute R checks against the length (`tsp`) never fails a collect.
+  `group_data()`/`group_keys()` give the keys their attributes and the names of each
+  group's first row (`group_keys_col_attrs()`).
 
 #### POSIXct time zones (F32)
 
@@ -729,6 +852,7 @@ the column's `tzone` is R-side metadata in `schema$tz`, the sibling of
 | `R/utils.R` | `gpu_type_from_r()`, `col_index()` |
 | `R/io.R`, `R/pushdown.R` | F85: `read_parquet_gpu()`/`write_parquet_gpu()`, the scan record, `lower_scan()`, previews; the scan's projection and predicate pushdown (see "Parquet scans") |
 | `R/tz.R` | POSIXct time zone metadata (F32): `tz_is_utc()`, `tz_fold()`, `tz_by_position()`/`tz_from_positions()`, `propagate_tz()`, `propagate_schema_meta()`, `restore_tz()`; see "POSIXct time zones" above |
+| `R/col-attrs.R` | #21: `$col_attrs` (element names, extra attributes, one-column matrices): `col_attrs_extract()`, `col_attrs_restore()`, `col_origin()`, `carry_col_attrs()`; see "Column names and attributes" above |
 | `R/execute.R` | unified execution helpers: `push_op()` (the sole exec_mode branch point; carries `groups` and `.drop` -- `.drop` only while a group column survives; `input_schema=` skips re-deriving a schema the caller has, `carry = FALSE` leaves the frame metadata to the caller), `push_chain()` (an eager verb's several nodes as one execution, see "Eager chains"), `input_node()`, `current_schema()` (the stored `$schema`, see "Schemas of lazy plans"), `infer_schema_full()`, `infer_push_schema()`, `propagate_groups()`, `propagate_factor_levels()`, `auto_name_dots()`, `dot_label()` (the one naming rule for an unnamed dot: dplyr's `as_label()` with infix labelling off; every auto-naming site uses it), `quo_is_variable_reference()`/`dots_need_mutate()`/`variable_reference_names()` (dplyr's two-branch `add_computed_columns()` rule, used by `distinct()`, `count()`/`add_count()` and `group_by()`), `cuplyr_fallback_notify()`, join analogues `join_input_node()`/`push_join()` |
 | `R/ir.R` | Expression IR shared by filter/mutate: `ir_parse_quo()`, `ir_cols()`, `ir_cost()`, `ir_is_const()`, `ir_bind()`, `ir_infer_type()`, `ir_call_registry` |
 | `R/filter.R` | filter verb — parses expressions via `ir_parse_quo()` into `make_predicate()` records, builds one `ast_filter` node via `push_op()`; constant expressions (TRUE/FALSE/vectors) are evaluated in R, not the GPU IR path; an ungrouped call's logical vectors (F79) are sized against the input, combined with `&` into one mask, and applied by `filter_eval_mask()` (mask-only call) or as one temp BOOL8 column (`ir_vec`) next to the other predicates, so every dot sees the same rows |
