@@ -1,6 +1,6 @@
 # cuplyr (development version)
 
-* `round(x, digits)` is about a third faster on the GPU: the two candidates of
+* `round(x, digits)` is about a quarter faster on the GPU: the two candidates of
   R's rounding rule are each computed once, and the sign and the rows that
   need no rounding are handled on the bits of the double. Results are
   unchanged, bit for bit (#75).
