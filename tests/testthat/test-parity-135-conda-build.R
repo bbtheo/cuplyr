@@ -56,14 +56,18 @@ p135b_script <- function(path, lines) {
 # A conda host environment with RAPIDS `cudf_version` and a CUDA 13 toolkit
 # (cuda-nvcc, cuda-cudart-dev, cuda-driver-dev), and a fake R that records
 # how it was called.
-p135b_fake_prefix <- function(root, stub = TRUE, cudf_version = c(26, 10, 0)) {
+p135b_fake_prefix <- function(root, stub = TRUE, nvcc = TRUE, cudf_version = c(26, 10, 0)) {
   root <- normalizePath(root)
   p135b_touch(file.path(root, "targets", "x86_64-linux", "include", "cuda.h"))
+  # what cuda-crt-dev ships (cuda_runtime.h includes it)
+  p135b_touch(file.path(root, "targets", "x86_64-linux", "include", "crt", "host_config.h"))
   if (stub) {
     p135b_touch(file.path(root, "targets", "x86_64-linux", "lib", "stubs", "libcuda.so"))
   }
-  p135b_script(file.path(root, "bin", "nvcc"),
-               "echo 'Cuda compilation tools, release 13.0, V13.0.0'")
+  if (nvcc) {
+    p135b_script(file.path(root, "bin", "nvcc"),
+                 "echo 'Cuda compilation tools, release 13.0, V13.0.0'")
+  }
   p135b_touch(file.path(root, "lib", "libcudart.so"))
   p135b_touch(file.path(root, "include", "cudf", "types.hpp"))
   p135b_touch(file.path(root, "include", "rmm", "rmm.hpp"))
@@ -128,8 +132,11 @@ p135b_fake_system_cuda <- function(root) {
   root
 }
 
-# A scratch copy of what configure and build.sh read.
-p135b_scratch_pkg <- function(envir = parent.frame()) {
+# A scratch copy of what configure and build.sh read. With `inst = TRUE` it
+# also has the package's .Rbuildignore and an inst/ holding a directory
+# .Rbuildignore excludes (dplyr-conformance, with `n_excluded` directories of
+# long names) and one it keeps (docker).
+p135b_scratch_pkg <- function(envir = parent.frame(), inst = FALSE, n_excluded = 4000L) {
   pkg <- normalizePath(withr::local_tempdir("cuplyr-conda-", .local_envir = envir))
   dir.create(file.path(pkg, "src"))
   dir.create(file.path(pkg, "conda"))
@@ -138,6 +145,16 @@ p135b_scratch_pkg <- function(envir = parent.frame()) {
   file.copy(p135b_file("src", "Makevars.in"), file.path(pkg, "src"))
   if (file.exists(p135b_file("conda", "build.sh"))) {
     file.copy(p135b_file("conda", "build.sh"), file.path(pkg, "conda"))
+  }
+  if (inst) {
+    file.copy(p135b_file(".Rbuildignore"), pkg)
+    # one directory per file: find opens each one as it walks, so a cleanup
+    # that deletes while find is still listing would make it fail
+    excluded <- file.path(pkg, "inst", "dplyr-conformance",
+                          sprintf("tests-%s-%05d", strrep("x", 80), seq_len(n_excluded)))
+    for (d in excluded) dir.create(d, recursive = TRUE)
+    file.create(file.path(excluded, "test.R"))
+    p135b_touch(file.path(pkg, "inst", "docker", "Dockerfile"))
   }
   pkg
 }
@@ -362,7 +379,8 @@ test_that("conda/build.sh keeps the user's R startup files and ~/.R/Makevars out
   home <- p135b_fake_home(withr::local_tempdir("home-"), system_cuda, other_env)
   pkg <- p135b_scratch_pkg()
 
-  env <- p135b_build_env(pkg, host, build, home)
+  user_lib <- normalizePath(withr::local_tempdir("user-lib-"))
+  env <- c(p135b_build_env(pkg, host, build, home), R_LIBS = user_lib)
   res <- p135b_run(pkg, file.path("conda", "build.sh"), env = env,
                    unset = c("CONDA_PREFIX", "CUDA_HOME", "CUDF_HOME", "R_ENVIRON_USER",
                              "R_PROFILE_USER", "R_MAKEVARS_USER",
@@ -386,6 +404,8 @@ test_that("conda/build.sh keeps the user's R startup files and ~/.R/Makevars out
   for (var in c("R_ENVIRON_USER", "R_PROFILE_USER", "R_MAKEVARS_USER")) {
     expect_true(p135b_points_nowhere(r_env, var), info = paste(var, "in R's environment"))
   }
+  # and no library from the caller's shell
+  expect_false(any(grepl(user_lib, r_env, fixed = TRUE)), info = paste(r_env, collapse = "\n"))
 })
 
 test_that("conda/build.sh stops when configure fails", {
@@ -396,6 +416,71 @@ test_that("conda/build.sh stops when configure fails", {
   pkg <- p135b_scratch_pkg()
 
   home <- normalizePath(withr::local_tempdir("home-"))
+  res <- p135b_run(pkg, file.path("conda", "build.sh"),
+                   env = p135b_build_env(pkg, host, build, home),
+                   unset = c("CONDA_PREFIX", "CUDA_HOME", "CUDF_HOME",
+                             "CUPLYR_ALLOW_CUDA_STUBS", "CUPLYR_FORCE_CUDA_STUBS"))
+
+  expect_false(identical(res$status, 0L), info = res$output)
+  expect_false(file.exists(file.path(host, "r-calls.txt")), info = res$output)
+})
+
+test_that("conda/build.sh leaves out of inst/ what .Rbuildignore excludes, and keeps the rest", {
+  p135b_skip_if_no_sources()
+  host <- p135b_fake_prefix(withr::local_tempdir("host-env-"))
+  build <- normalizePath(withr::local_tempdir("build-env-"))
+  dir.create(file.path(build, "bin"))
+  home <- normalizePath(withr::local_tempdir("home-"))
+  # many excluded files: deleting them while they are still being listed
+  # must not fail the build
+  pkg <- p135b_scratch_pkg(inst = TRUE)
+
+  res <- p135b_run(pkg, file.path("conda", "build.sh"),
+                   env = p135b_build_env(pkg, host, build, home),
+                   unset = c("CONDA_PREFIX", "CUDA_HOME", "CUDF_HOME",
+                             "CUPLYR_ALLOW_CUDA_STUBS", "CUPLYR_FORCE_CUDA_STUBS"))
+
+  expect_identical(res$status, 0L, info = substr(res$output, 1, 4000))
+  expect_false(dir.exists(file.path(pkg, "inst", "dplyr-conformance")))
+  expect_true(file.exists(file.path(pkg, "inst", "docker", "Dockerfile")))
+  expect_true(file.exists(file.path(host, "r-calls.txt")))
+})
+
+test_that("conda/build.sh run outside a conda build changes nothing", {
+  p135b_skip_if_no_sources()
+  host <- p135b_fake_prefix(withr::local_tempdir("host-env-"))
+  build <- normalizePath(withr::local_tempdir("build-env-"))
+  dir.create(file.path(build, "bin"))
+  home <- normalizePath(withr::local_tempdir("home-"))
+
+  # without PREFIX, or without SRC_DIR, it stops before touching the tree
+  for (missing in c("PREFIX", "SRC_DIR")) {
+    pkg <- p135b_scratch_pkg(inst = TRUE, n_excluded = 3L)
+    p135b_touch(file.path(pkg, "src", "keep.o"))
+    env <- p135b_build_env(pkg, host, build, home)
+    env <- env[names(env) != missing]
+    res <- p135b_run(pkg, file.path("conda", "build.sh"), env = env,
+                     unset = c(missing, "CONDA_PREFIX", "CUDA_HOME", "CUDF_HOME",
+                               "CUPLYR_ALLOW_CUDA_STUBS", "CUPLYR_FORCE_CUDA_STUBS"))
+
+    expect_false(identical(res$status, 0L), info = paste(missing, res$output))
+    expect_true(dir.exists(file.path(pkg, "inst", "dplyr-conformance")), info = missing)
+    expect_true(file.exists(file.path(pkg, "src", "keep.o")), info = missing)
+    expect_match(res$output, missing, fixed = TRUE, info = missing)
+  }
+  expect_false(file.exists(file.path(host, "r-calls.txt")))
+})
+
+test_that("conda/build.sh fails when configure finds the toolkit outside the host prefix", {
+  p135b_skip_if_no_sources()
+  # no nvcc in the host environment: configure falls back to a system toolkit
+  # when the machine has one (and fails when it has none)
+  host <- p135b_fake_prefix(withr::local_tempdir("host-env-"), nvcc = FALSE)
+  build <- normalizePath(withr::local_tempdir("build-env-"))
+  dir.create(file.path(build, "bin"))
+  home <- normalizePath(withr::local_tempdir("home-"))
+  pkg <- p135b_scratch_pkg()
+
   res <- p135b_run(pkg, file.path("conda", "build.sh"),
                    env = p135b_build_env(pkg, host, build, home),
                    unset = c("CONDA_PREFIX", "CUDA_HOME", "CUDF_HOME",

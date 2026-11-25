@@ -263,9 +263,14 @@ test_that("libcudf, librmm and libkvikio follow the rapids_version variant in ho
     expect_true("cuda-driver-dev" %in% names(host), info = nm)
     expect_true("cuda-cudart-dev" %in% names(host), info = nm)
     expect_true(any(c("cuda-nvcc", "cuda-nvcc-tools") %in% names(host)), info = nm)
+    # cuda_runtime.h includes crt/ headers: cuda-nvcc brings them, with
+    # cuda-nvcc-tools they need cuda-crt-dev for the target platform
+    crt <- grepl("^cuda-crt-dev_(<target_platform>|linux-64)$", names(host))
+    expect_true("cuda-nvcc" %in% names(host) || any(crt), info = paste(nm, "crt headers"))
     # none of them is a run requirement: the user's driver is their own
     run <- p135_reqs(recipe, "run")
     expect_false(any(c("cuda-driver-dev", "cuda-nvcc", "cuda-nvcc-tools") %in% names(run)), info = nm)
+    expect_false(any(grepl("^cuda-crt-dev", names(run))), info = nm)
   }
 })
 
@@ -361,6 +366,8 @@ test_that("the package test loads cuplyr and checks libcudf and librmm resolve, 
   for (nm in names(tests)) {
     text <- tests[[nm]]
     expect_match(text, "library\\(\\s*[\"']?cuplyr", info = nm)
+    # the test reads none of the builder's R startup files either
+    expect_match(text, "Rscript\\s+--vanilla", info = nm)
     expect_match(text, "\\bldd\\b", info = nm)
     expect_match(text, "libcudf", info = nm)
     expect_match(text, "librmm", info = nm)
