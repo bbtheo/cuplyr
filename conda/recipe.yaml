@@ -65,11 +65,14 @@ requirements:
     # CUDA. configure needs nvcc and the CUDA headers in one prefix, so
     # cuda-nvcc-tools (bin/nvcc, without cuda-nvcc's host compiler and its
     # activation scripts) is a host requirement, not a build one.
-    # cuda-driver-dev provides the stub libcuda that is linked (see
-    # conda/README.md).
+    # cuda_runtime.h includes the crt/ headers (crt/host_config.h), which
+    # cuda-nvcc used to bring and cuda-nvcc-tools doesn't: cuda-crt-dev for
+    # the target platform ships them. cuda-driver-dev provides the stub
+    # libcuda that is linked (see conda/README.md).
     - cuda-version ${{ cuda_version }}.*
     - cuda-nvcc-tools
     - cuda-cudart-dev
+    - cuda-crt-dev_${{ target_platform }}
     - cuda-driver-dev
   run:
     - ${{ pin_compatible("r-base", upper_bound="x.x") }}
@@ -92,9 +95,10 @@ requirements:
 
 tests:
   # Needs no GPU: loads the package and checks that libcudf and librmm
-  # resolve inside the environment (see conda/test-package.R).
+  # resolve inside the environment (see conda/test-package.R). --vanilla:
+  # the builder's R startup files stay out of the test too.
   - script:
-      - Rscript test-package.R
+      - Rscript --vanilla test-package.R
     files:
       recipe:
         - test-package.R

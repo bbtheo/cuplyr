@@ -66,8 +66,8 @@ any compiled objects; rattler-build honours `.gitignore`, but a clone is still
 the safest way to build exactly what is committed. `build.sh` removes
 `src/*.o`, `src/*.so` and `src/Makevars` from the copy, and the `inst/` paths
 that `.Rbuildignore` excludes (such as the vendored dplyr tests), so the binary
-holds what the source package holds. The channels are the ones `pixi.toml`
-uses.
+leaves out what the source package leaves out. The channels are the ones
+`pixi.toml` uses.
 
 With rattler-build:
 
@@ -93,6 +93,15 @@ a `CUDA_HOME` or `CUDF_HOME` in `~/.Renviron` would send `configure` to a
 system toolkit, while a personal `LDFLAGS` would replace the toolchain's and
 search the system libraries first. It runs `configure` once itself and calls
 `R CMD INSTALL --no-configure`, so that run is the one the compile uses.
+
+After `configure`, `build.sh` checks the paths it wrote into `src/Makevars`.
+If the host environment lacks part of the toolkit (`nvcc`, for one),
+`configure` would fall back to a toolkit elsewhere on the build machine, such
+as `/usr/local/cuda`; `build.sh` then stops and lists the paths outside the
+host environment. It also stops if the CUDA `crt/` headers, which
+`cuda_runtime.h` includes and `cuda-crt-dev_<platform>` ships, are missing.
+`build.sh` refuses to run without `SRC_DIR` and `PREFIX`, which both build
+tools set, so running it by hand in a checkout deletes nothing.
 
 ## Install into a fresh environment
 

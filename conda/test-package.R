@@ -1,6 +1,6 @@
 # Package test for the r-cuplyr conda package, run by both recipes with
-# Rscript inside the test environment. It needs no GPU: build machines have
-# none. It checks that the package loads and that the compiled library finds
+# `Rscript --vanilla` inside the test environment. It needs no GPU: build
+# machines have none. It checks that the package loads and that the compiled library finds
 # libcudf and librmm inside this environment.
 
 library(cuplyr)
