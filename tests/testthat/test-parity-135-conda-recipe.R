@@ -1,9 +1,10 @@
 # #135: the conda recipe (r-cuplyr) and its documentation.
 #
 # Contract (static checks, so the recipe can't drift from the package):
-# - Two recipes describe the same package: conda/recipe.yaml (rattler-build,
-#   schema v1, the preferred tool) and conda/meta.yaml (conda-build). Both are
-#   named r-cuplyr and carry the version in DESCRIPTION.
+# - One recipe, conda/recipe.yaml (rattler-build, schema v1): maintainers
+#   build and upload with rattler-build only, so there is no conda-build
+#   meta.yaml to keep in step. It is named r-cuplyr and carries the version in
+#   DESCRIPTION.
 # - Every non-base package in DESCRIPTION Imports is an `r-` requirement in
 #   host and run with DESCRIPTION's minimum; LinkingTo packages are in host;
 #   Suggests are not requirements. r-base follows Depends: R.
@@ -14,12 +15,13 @@
 #   configure (CUDF_INSTALL_VERSION) and nothing older than configure's
 #   minimum (CUDF_MIN_VERSION). CUDA follows the `cuda_version` variant, which
 #   includes the CUDA major pixi's default environment uses.
-# - Both recipes build from the local checkout with the shared conda/build.sh,
-#   which uses no network.
+# - The recipe builds the local checkout with conda/build.sh, which uses no
+#   network.
 # - The package test loads cuplyr and checks that libcudf and librmm resolve,
 #   with no GPU call (build machines have no GPU).
-# - conda/README.md gives the maintainer procedure; README.md shows the conda
-#   route with a not-yet-published note; R CMD build leaves conda/ out.
+# - conda/README.md gives the maintainer procedure (install rattler-build,
+#   build, test, upload to the `bbtheo` anaconda.org channel); README.md shows
+#   the install command from that channel; R CMD build leaves conda/ out.
 #
 # None of these tests need a GPU. test-parity-135-conda-build.R runs
 # configure and conda/build.sh against fake prefixes.
@@ -47,16 +49,8 @@ p135_recipe_v1 <- function() {
   yaml::read_yaml(p135_file("conda", "recipe.yaml"))
 }
 
-# meta.yaml is Jinja over YAML: drop `{% ... %}` lines, turn `{{ x }}` into
-# `<x>` and parse the rest (selectors are YAML comments).
-p135_recipe_meta <- function() {
-  lines <- readLines(p135_file("conda", "meta.yaml"), warn = FALSE)
-  lines <- lines[!grepl("^\\s*\\{%.*%\\}\\s*$", lines)]
-  yaml::yaml.load(paste(p135_norm(lines), collapse = "\n"))
-}
-
 p135_recipes <- function() {
-  list(recipe.yaml = p135_recipe_v1(), meta.yaml = p135_recipe_meta())
+  list(recipe.yaml = p135_recipe_v1())
 }
 
 # Requirement strings of one section, `if:`/`then:` blocks flattened.
@@ -150,7 +144,7 @@ p135_test_text <- function(section) {
 # Package identity
 # ---------------------------------------------------------------------------
 
-test_that("both recipes are r-cuplyr at the version in DESCRIPTION", {
+test_that("the recipe is r-cuplyr at the version in DESCRIPTION", {
   p135_skip_if_no_conda()
   version <- read.dcf(p135_file("DESCRIPTION"), fields = "Version")[[1]]
 
@@ -162,23 +156,16 @@ test_that("both recipes are r-cuplyr at the version in DESCRIPTION", {
     info = paste("recipe.yaml package.version:", v1$package$version)
   )
 
-  meta_lines <- readLines(p135_file("conda", "meta.yaml"), warn = FALSE)
-  set_version <- regmatches(
-    meta_lines,
-    regexec("^\\s*\\{%-?\\s*set\\s+version\\s*=\\s*[\"']([^\"']+)[\"']\\s*-?%\\}", meta_lines)
-  )
-  set_version <- unlist(lapply(set_version, `[`, 2L))
-  set_version <- set_version[!is.na(set_version)]
-  expect_identical(set_version, version, info = "meta.yaml: {% set version = \"...\" %}")
-
-  meta <- p135_recipe_meta()
-  expect_identical(meta$package$name, "r-cuplyr")
-  expect_identical(as.character(meta$package$version), "<version>")
 })
 
-test_that("the recipes no longer say they are not a distribution channel", {
+test_that("rattler-build is the one build tool: there is no conda-build meta.yaml", {
   p135_skip_if_no_conda()
-  for (f in c("recipe.yaml", "meta.yaml")) {
+  expect_false(file.exists(p135_file("conda", "meta.yaml")))
+})
+
+test_that("the recipe no longer says it is not a distribution channel", {
+  p135_skip_if_no_conda()
+  for (f in c("recipe.yaml")) {
     text <- paste(readLines(p135_file("conda", f), warn = FALSE), collapse = "\n")
     expect_no_match(text, "not the primary end-user distribution channel", fixed = TRUE)
   }
@@ -321,7 +308,7 @@ test_that("variants.yaml builds the tested RAPIDS series and nothing older than 
 # Source, build script, platform
 # ---------------------------------------------------------------------------
 
-test_that("both recipes build the local checkout with conda/build.sh, on Linux only", {
+test_that("the recipe builds the local checkout with conda/build.sh, on Linux only", {
   p135_skip_if_no_conda()
   expect_true(file.exists(p135_file("conda", "build.sh")))
 
@@ -336,13 +323,6 @@ test_that("both recipes build the local checkout with conda/build.sh, on Linux o
   )
   expect_match(paste(p135_strings(v1$build$skip), collapse = " "), "not\\s+linux|win|osx")
 
-  meta <- p135_recipe_meta()
-  expect_identical(meta$source$path, "..")
-  expect_null(meta$source$url)
-  expect_null(meta$source$git_url)
-  expect_null(meta$build$script)  # conda-build then runs build.sh
-  meta_lines <- readLines(p135_file("conda", "meta.yaml"), warn = FALSE)
-  expect_true(any(grepl("^\\s*skip:\\s*true\\s*#\\s*\\[\\s*not linux", meta_lines)))
 })
 
 test_that("conda/build.sh downloads nothing", {
@@ -359,15 +339,17 @@ test_that("conda/build.sh downloads nothing", {
 
 test_that("the package test loads cuplyr and checks libcudf and librmm resolve, without the GPU", {
   p135_skip_if_no_conda()
-  tests <- list(
-    recipe.yaml = p135_test_text(p135_recipe_v1()$tests),
-    meta.yaml = p135_test_text(p135_recipe_meta()$test)
-  )
+  section <- p135_recipe_v1()$tests
+  tests <- list(recipe.yaml = p135_test_text(section))
   for (nm in names(tests)) {
     text <- tests[[nm]]
     expect_match(text, "library\\(\\s*[\"']?cuplyr", info = nm)
-    # the test reads none of the builder's R startup files either
-    expect_match(text, "Rscript\\s+--vanilla", info = nm)
+    # the test reads none of the builder's R startup files either (the
+    # command itself, not a comment in the script)
+    expect_true(any(grepl("Rscript\\s+--vanilla", p135_strings(section))), info = nm)
+    # and checks it tests the cuplyr installed in the environment, not one
+    # from a library the caller's R_LIBS points at
+    expect_match(text, "find.package(", fixed = TRUE, info = nm)
     expect_match(text, "\\bldd\\b", info = nm)
     expect_match(text, "libcudf", info = nm)
     expect_match(text, "librmm", info = nm)
@@ -392,9 +374,14 @@ test_that("conda/README.md gives the maintainer procedure", {
   channels <- gsub("\"", "", channels)
   channel_args <- paste(sprintf("-c %s", channels), collapse = " ")
 
+  expect_match(text, "pixi global install rattler-build", fixed = TRUE)
   expect_match(text, "rattler-build build", fixed = TRUE)
-  expect_match(text, "conda build|conda-build")
   expect_match(text, channel_args, fixed = TRUE)
+  # upload, by a maintainer, to the project's anaconda.org channel
+  expect_match(text, "rattler-build upload anaconda", fixed = TRUE)
+  expect_match(text, "--owner bbtheo", fixed = TRUE)
+  expect_match(text, "ANACONDA_API_KEY", fixed = TRUE)
+  expect_match(text, "conda-forge can follow|conda-forge[^\n]{0,80}(later|follow)", ignore.case = TRUE)
   expect_match(text, "variants.yaml", fixed = TRUE)
   expect_match(text, "create")  # a fresh environment
   expect_match(text, "r-cuplyr", fixed = TRUE)
@@ -404,7 +391,7 @@ test_that("conda/README.md gives the maintainer procedure", {
   expect_match(text, "stub", ignore.case = TRUE)
 })
 
-test_that("README.md shows the conda route with a not-yet-published note", {
+test_that("README.md shows the conda install from the bbtheo channel", {
   p135_skip_if_no_conda()
   lines <- readLines(p135_file("README.md"), warn = FALSE)
   start <- grep("^## Installation", lines)
@@ -413,12 +400,10 @@ test_that("README.md shows the conda route with a not-yet-published note", {
   end <- c(grep("^## ", rest), length(rest) + 1L)[[1]]
   section <- paste(rest[seq_len(end - 1L)], collapse = "\n")
 
-  expect_match(section, "r-cuplyr", fixed = TRUE)
-  expect_match(
-    section,
-    "not (yet )?(been )?published|coming soon|not yet (available|on)|channel[^\n]{0,60}(TBD|to be decided|not yet)",
-    ignore.case = TRUE
-  )
+  expect_match(section, "conda install -c bbtheo -c rapidsai -c conda-forge -c nvidia r-cuplyr",
+               fixed = TRUE)
+  expect_match(section, "pixi", fixed = TRUE)
+  expect_no_match(section, "TBD|to be decided", ignore.case = TRUE)
 })
 
 test_that("R CMD build leaves conda/ out of the source package", {

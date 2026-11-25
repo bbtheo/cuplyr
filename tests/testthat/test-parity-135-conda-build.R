@@ -489,3 +489,25 @@ test_that("conda/build.sh fails when configure finds the toolkit outside the hos
   expect_false(identical(res$status, 0L), info = res$output)
   expect_false(file.exists(file.path(host, "r-calls.txt")), info = res$output)
 })
+
+test_that("conda/build.sh checks every path in the generated Makevars, not a fixed list", {
+  p135b_skip_if_no_sources()
+  host <- p135b_fake_prefix(withr::local_tempdir("host-env-"))
+  build <- normalizePath(withr::local_tempdir("build-env-"))
+  dir.create(file.path(build, "bin"))
+  home <- normalizePath(withr::local_tempdir("home-"))
+  elsewhere <- normalizePath(withr::local_tempdir("elsewhere-"))
+  pkg <- p135b_scratch_pkg()
+  # a path variable a later template could add, pointing outside the host env
+  cat(sprintf("EXTRA_LIB_DIR=%s/lib\n", elsewhere),
+      file = file.path(pkg, "src", "Makevars.in"), append = TRUE)
+
+  res <- p135b_run(pkg, file.path("conda", "build.sh"),
+                   env = p135b_build_env(pkg, host, build, home),
+                   unset = c("CONDA_PREFIX", "CUDA_HOME", "CUDF_HOME",
+                             "CUPLYR_ALLOW_CUDA_STUBS", "CUPLYR_FORCE_CUDA_STUBS"))
+
+  expect_false(identical(res$status, 0L), info = res$output)
+  expect_match(res$output, "EXTRA_LIB_DIR", fixed = TRUE)
+  expect_false(file.exists(file.path(host, "r-calls.txt")), info = res$output)
+})
