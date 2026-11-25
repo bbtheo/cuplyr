@@ -1,11 +1,8 @@
 # r-cuplyr: the conda package of cuplyr (dplyr on the GPU via RAPIDS libcudf).
 #
-# This is the recipe for rattler-build (recipe schema v1), the preferred tool.
-# conda/meta.yaml describes the same package for conda-build; keep the two in
-# step. Maintainers build the package for the project's channel from a
-# checkout; the recipe is written so that it can move to conda-forge later
-# (no private channel is assumed beyond the channel list in the build
-# command). The build and test steps are in conda/README.md.
+# The recipe for rattler-build (recipe schema v1), which maintainers use to
+# build the package from a checkout and upload it to the bbtheo channel on
+# anaconda.org. The build, test and upload steps are in conda/README.md.
 #
 # Build (from the repository root):
 #   rattler-build build --recipe conda/recipe.yaml -m conda/variants.yaml \
@@ -66,9 +63,9 @@ requirements:
     # cuda-nvcc-tools (bin/nvcc, without cuda-nvcc's host compiler and its
     # activation scripts) is a host requirement, not a build one.
     # cuda_runtime.h includes the crt/ headers (crt/host_config.h), which
-    # cuda-nvcc used to bring and cuda-nvcc-tools doesn't: cuda-crt-dev for
-    # the target platform ships them. cuda-driver-dev provides the stub
-    # libcuda that is linked (see conda/README.md).
+    # cuda-nvcc brings and cuda-nvcc-tools doesn't: cuda-crt-dev for the
+    # target platform ships them. cuda-driver-dev provides the stub libcuda
+    # that is linked (see conda/README.md).
     - cuda-version ${{ cuda_version }}.*
     - cuda-nvcc-tools
     - cuda-cudart-dev
@@ -90,8 +87,9 @@ requirements:
     - libcudf ${{ rapids_version }}.*
     - librmm ${{ rapids_version }}.*
     - libkvikio ${{ rapids_version }}.*
-    # The CUDA runtime comes from cuda-cudart-dev's run_exports, and
-    # cuda-version from libcudf. The NVIDIA driver is the user's own.
+    # The CUDA runtime comes from cuda-cudart-dev's run_exports (at least the
+    # CUDA 13 minor the package was built with), and cuda-version from
+    # libcudf. The NVIDIA driver is the user's own.
 
 tests:
   # Needs no GPU: loads the package and checks that libcudf and librmm

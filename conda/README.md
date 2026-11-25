@@ -1,16 +1,23 @@
 # Building the r-cuplyr conda package
 
-This directory holds the recipe for `r-cuplyr`, the conda package of cuplyr.
-It is for maintainers: the package is not published yet (the channel is still
-to be decided). Users who want conda today follow the Installation section of
-the main README.
+This directory holds the recipe for `r-cuplyr`, the conda package of cuplyr,
+which is published on the [`bbtheo`](https://anaconda.org/bbtheo) channel on
+anaconda.org. It is for maintainers: users install the package as the
+Installation section of the main README shows.
+
+Maintainers build and upload the package with
+[rattler-build](https://rattler.build), the only build tool the recipe
+supports. Install it once with pixi (it is on conda-forge):
+
+```bash
+pixi global install rattler-build
+```
 
 | File | Purpose |
 |---|---|
-| `recipe.yaml` | The recipe for rattler-build (preferred). |
-| `meta.yaml` | The same recipe for conda-build. Keep the two in step. |
+| `recipe.yaml` | The recipe (rattler-build, recipe schema v1). |
 | `variants.yaml` | The RAPIDS series (`rapids_version`), the CUDA major (`cuda_version`), and the C standard library and compiler versions to build with. |
-| `build.sh` | Build script shared by both recipes. Uses no network and ignores the builder's R startup files. |
+| `build.sh` | The recipe's build script. Uses no network and ignores the builder's R startup files. |
 | `test-package.R` | The package test: loads cuplyr and checks that libcudf and librmm resolve. Needs no GPU. |
 
 ## What the package contains
@@ -24,9 +31,16 @@ build 26.02, add `"26.02"` to `rapids_version` (quoted: unquoted, 26.10 is the
 number 26.1) or pass `--variant rapids_version=26.02`. `configure` rejects an
 older series.
 
-The version comes from the recipe (`context.version` in `recipe.yaml`,
-`{% set version %}` in `meta.yaml`); a test keeps both equal to `Version` in
-`DESCRIPTION`, so change them together when the version changes.
+The version comes from `context.version` in `recipe.yaml`; a test keeps it
+equal to `Version` in `DESCRIPTION`, so change them together when the version
+changes.
+
+### CUDA floor
+
+`cuda_version: "13"` builds against the newest CUDA 13.x the channels have.
+`cuda-cudart-dev` exports a run requirement on the CUDA runtime of at least
+the version it was built with, so the CUDA 13 minor of the build becomes the
+users' floor: an environment can't install the package with an older 13.x.
 
 ### Glibc floor
 
@@ -60,48 +74,38 @@ to revisit this.
 
 ## Build
 
-From a fresh `git clone`, not a development checkout. conda-build copies the
-whole directory, including a checkout's `.pixi/` environment (gigabytes) and
-any compiled objects; rattler-build honours `.gitignore`, but a clone is still
-the safest way to build exactly what is committed. `build.sh` removes
-`src/*.o`, `src/*.so` and `src/Makevars` from the copy, and the `inst/` paths
-that `.Rbuildignore` excludes (such as the vendored dplyr tests), so the binary
-leaves out what the source package leaves out. The channels are the ones
-`pixi.toml` uses.
-
-With rattler-build:
+From a fresh `git clone`, not a development checkout. rattler-build honours
+`.gitignore`, but a clone is still the safest way to build exactly what is
+committed. `build.sh` removes `src/*.o`, `src/*.so` and `src/Makevars` from
+the copy, and the `inst/` paths that `.Rbuildignore` excludes (such as the
+vendored dplyr tests), so the binary leaves out what the source package leaves
+out. The channels are the ones `pixi.toml` uses.
 
 ```bash
 rattler-build build --recipe conda/recipe.yaml -m conda/variants.yaml \
   -c rapidsai -c conda-forge -c nvidia --output-dir <dir>
 ```
 
-With conda-build (it does not read `variants.yaml` on its own, so `-m` is
-needed):
-
-```bash
-conda build conda/ -m conda/variants.yaml \
-  -c rapidsai -c conda-forge -c nvidia --output-folder <dir>
-```
-
-Neither needs a GPU. The package test runs at the end of the build.
+No GPU is needed. The package test runs at the end of the build, and the
+package is written to `<dir>/linux-64/`.
 
 `build.sh` sets `R_ENVIRON_USER`, `R_PROFILE_USER` and `R_MAKEVARS_USER` to
 `/dev/null`, so R reads no `~/.Renviron`, `~/.Rprofile` or `~/.R/Makevars`.
-conda-build passes `HOME` on (rattler-build does outside strict isolation), and
-a `CUDA_HOME` or `CUDF_HOME` in `~/.Renviron` would send `configure` to a
-system toolkit, while a personal `LDFLAGS` would replace the toolchain's and
-search the system libraries first. It runs `configure` once itself and calls
+rattler-build passes `HOME` on outside strict isolation, and a `CUDA_HOME` or
+`CUDF_HOME` in `~/.Renviron` would send `configure` to a system toolkit, while
+a personal `LDFLAGS` would replace the toolchain's and search the system
+libraries first. It runs `configure` once itself and calls
 `R CMD INSTALL --no-configure`, so that run is the one the compile uses.
 
-After `configure`, `build.sh` checks the paths it wrote into `src/Makevars`.
-If the host environment lacks part of the toolkit (`nvcc`, for one),
-`configure` would fall back to a toolkit elsewhere on the build machine, such
-as `/usr/local/cuda`; `build.sh` then stops and lists the paths outside the
-host environment. It also stops if the CUDA `crt/` headers, which
-`cuda_runtime.h` includes and `cuda-crt-dev_<platform>` ships, are missing.
-`build.sh` refuses to run without `SRC_DIR` and `PREFIX`, which both build
-tools set, so running it by hand in a checkout deletes nothing.
+After `configure`, `build.sh` checks every absolute path it wrote into
+`src/Makevars`. If the host environment lacks part of the toolkit (`nvcc`, for
+one), `configure` would fall back to a toolkit elsewhere on the build machine,
+such as `/usr/local/cuda`; `build.sh` then stops and lists the paths outside
+the host environment, with the variable that holds each. It also stops if the
+CUDA `crt/` headers, which `cuda_runtime.h` includes and
+`cuda-crt-dev_<platform>` ships, are missing. `build.sh` refuses to run
+without `SRC_DIR` and `PREFIX`, which rattler-build sets, so running it by
+hand in a checkout deletes nothing.
 
 ## Install into a fresh environment
 
@@ -112,8 +116,7 @@ mamba activate cuplyr-test
 ```
 
 `<dir>` is the output directory of the build, as an absolute path
-(`file://` needs one). `rattler-build` writes the channel there; with
-conda-build, run `conda index <dir>` first if it has not been indexed.
+(`file://` needs one); rattler-build writes the channel index there.
 
 `--no-channel-priority` is for configurations that set strict channel priority,
 where the solve would otherwise fail (as `install.sh` does).
@@ -136,14 +139,30 @@ tbl_gpu(mtcars) |>
 `verify_installation()` should report no failures, and the pipeline should
 return one row per remaining `cyl`.
 
-## Publishing
+## Upload
 
-Where the package is published is not decided yet. The plan is the project's
-own channel first, conda-forge later. The recipe assumes no private channel.
-For conda-forge it would additionally need:
+Once the smoke test passes, a maintainer uploads the package to the `bbtheo`
+channel with rattler-build itself (no anaconda-client is needed):
 
-- libcudf, librmm and libkvikio from conda-forge itself (today they come from
-  the `rapidsai` channel);
-- a feedstock and its review;
-- the conda-forge global pinning for `r-base` and CUDA in place of the
-  `rapids_version` and `cuda_version` variants.
+```bash
+export ANACONDA_API_KEY=<token>
+rattler-build upload anaconda --owner bbtheo \
+  <dir>/linux-64/r-cuplyr-<version>-<build>.conda
+```
+
+The token is an anaconda.org API token allowed to upload to `bbtheo`; pass it
+with `--api-key` instead of `ANACONDA_API_KEY` if you prefer. anaconda.org
+refuses a file that is already on the channel; add `--force` to replace it,
+for example after rebuilding with the same build number. Raise
+`build.number` in `recipe.yaml` instead when the new build should reach users
+who already have the old one.
+
+## conda-forge
+
+The package is not on conda-forge, because the libraries it links are not:
+conda-forge has no libcudf or libkvikio, and its librmm stops at 24.04. The
+recipe assumes no private channel beyond the channel list in the build
+command, so conda-forge can follow if the RAPIDS libraries arrive there. It
+would then also need a feedstock and its review, and the conda-forge global
+pinning for `r-base` and CUDA in place of the `rapids_version` and
+`cuda_version` variants.

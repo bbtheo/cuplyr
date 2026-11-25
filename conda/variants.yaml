@@ -1,5 +1,5 @@
-# Build variants for the r-cuplyr conda package (recipe.yaml and meta.yaml).
-# Pass this file to the build tool with -m / --variant-config.
+# Build variants for the r-cuplyr conda package (recipe.yaml). Pass this file
+# to rattler-build with -m / --variant-config.
 #
 # Each value gives a separate binary. RAPIDS has no ABI across series: a
 # cuplyr built against libcudf 26.10 needs libcudf 26.10, so there is one

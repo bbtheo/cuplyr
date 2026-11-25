@@ -145,15 +145,25 @@ curl -fsSL https://raw.githubusercontent.com/bbtheo/cuplyr/main/install.sh | bas
 
 To pick the method yourself, pass `--method=pixi`, `--method=conda` or `--method=system`. `--dry-run` shows what the script would do. From a clone, run `./install.sh` with the same options.
 
-### conda (coming soon)
+### conda and pixi
 
-A conda package, `r-cuplyr`, is being prepared. It is not yet published and its channel is still to be decided, so for now use the script above. Once it is published, the install will look like this (`<channel TBD>` is a placeholder):
+The conda package `r-cuplyr` is published on the `bbtheo` channel on anaconda.org. It is a binary built against RAPIDS libcudf 26.10 and CUDA 13, so it needs no compiler or CUDA toolkit on your machine, only an NVIDIA driver that supports CUDA 13. Install it into an active conda environment (for a new one, run `conda create -n cuplyr` and `conda activate cuplyr` first):
 
 ```bash
-mamba create -n cuplyr --no-channel-priority -c <channel TBD> -c rapidsai -c conda-forge -c nvidia r-cuplyr
+conda install -c bbtheo -c rapidsai -c conda-forge -c nvidia r-cuplyr
 ```
 
-Maintainers can build the package from a checkout; the steps are in [conda/README.md](https://github.com/bbtheo/cuplyr/blob/main/conda/README.md).
+`mamba` takes the same arguments. If your conda configuration sets strict channel priority and the solve fails, add `--no-channel-priority`.
+
+With pixi, create a project with the same channels and add the package:
+
+```bash
+pixi init -c bbtheo -c rapidsai -c conda-forge -c nvidia cuplyr-project
+cd cuplyr-project
+pixi add r-cuplyr
+```
+
+How the package is built and published is described in [conda/README.md](https://github.com/bbtheo/cuplyr/blob/main/conda/README.md).
 
 ### Check the installation
 

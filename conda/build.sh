@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# Build script shared by conda/recipe.yaml (rattler-build) and conda/meta.yaml
-# (conda-build). Both run it from the source directory with SRC_DIR set to
-# that directory, PREFIX set to the host environment and R set to the host
-# environment's R.
+# Build script of conda/recipe.yaml. rattler-build runs it from the source
+# directory with SRC_DIR set to that directory, PREFIX set to the host
+# environment and R set to the host environment's R.
 #
 # Nothing is downloaded here: every dependency comes from the host environment.
 set -euo pipefail
 
-# Stop before anything is touched unless both build tools' variables are set.
+# Stop before anything is touched unless the build tool's variables are set.
 # Run by hand in a checkout, the cleanup below would delete tracked files.
 : "${SRC_DIR:?is not set: build.sh is run by the recipe build tool, not by hand}"
 : "${PREFIX:?is not set: build.sh is run by the recipe build tool, not by hand}"
@@ -53,11 +52,11 @@ if [ -d inst ] && [ -f .Rbuildignore ]; then
     fi
 fi
 
-# Keep the builder's own R setup out of the build. conda-build passes HOME on
-# (so does rattler-build outside strict isolation), and R reads
-# ~/.Renviron, ~/.Rprofile and ~/.R/Makevars from it: a CUDA_HOME or CUDF_HOME
-# set there would redirect configure to a system toolkit, and a personal
-# LDFLAGS would replace the toolchain's and search the system libraries first.
+# Keep the builder's own R setup out of the build. rattler-build passes HOME
+# on outside strict isolation, and R reads ~/.Renviron, ~/.Rprofile and
+# ~/.R/Makevars from it: a CUDA_HOME or CUDF_HOME set there would redirect
+# configure to a system toolkit, and a personal LDFLAGS would replace the
+# toolchain's and search the system libraries first.
 # R_LIBS_USER, and no R_LIBS, keep the caller's libraries out of the package's
 # load test.
 export R_ENVIRON_USER=/dev/null
@@ -84,7 +83,8 @@ export CUPLYR_FORCE_CUDA_STUBS=1
 # configure falls back to a toolkit elsewhere on the machine (/usr/local/cuda,
 # /opt/cuda) when the host environment lacks one, for example without nvcc.
 # The binary must be built from the host environment alone, so check every
-# path configure wrote into src/Makevars before compiling anything.
+# absolute path in src/Makevars before compiling anything, whichever variable
+# holds it.
 
 # The value of one variable in src/Makevars ("" when absent or empty).
 makevar() {
@@ -102,24 +102,32 @@ in_host_prefix() {
 }
 
 problems=()
-for var in CUDA_HOME CUDA_INCLUDE CUDA_DRIVER_LIB CUDA_RUNTIME_LIB CUDF_INCLUDE CUDF_LIB RMM_INCLUDE CCCL_INCLUDE; do
-    value="$(makevar "$var")"
-    if [ -z "$value" ]; then
-        # empty when libcudf's prefix has no CCCL copy (the toolkit's is used)
-        [ "$var" = CCCL_INCLUDE ] || problems+=("$var is empty")
-    elif ! in_host_prefix "$value"; then
-        problems+=("$var=$value")
-    fi
+# The paths the compile and link can't do without. CCCL_INCLUDE may be empty:
+# it is when libcudf's prefix has no CCCL copy (the toolkit's is used).
+for var in CUDA_HOME CUDA_INCLUDE CUDA_DRIVER_LIB CUDA_RUNTIME_LIB CUDF_INCLUDE CUDF_LIB RMM_INCLUDE RAPIDS_RPATHS; do
+    [ -n "$(makevar "$var")" ] || problems+=("$var is empty")
 done
-rapids_rpaths="$(makevar RAPIDS_RPATHS)"
-if [ -z "$rapids_rpaths" ]; then
-    problems+=("RAPIDS_RPATHS is empty")
-else
-    IFS=: read -r -a rpath_dirs <<< "$rapids_rpaths"
-    for dir in "${rpath_dirs[@]}"; do
-        in_host_prefix "$dir" || problems+=("RAPIDS_RPATHS entry $dir")
+
+# Every absolute path on a NAME=value line. Values are split on spaces,
+# colons (RAPIDS_RPATHS is a search path) and commas (-Wl,-rpath,<dir>), and
+# a -L or -I prefix is dropped. References such as $(CUDF_LIB) in PKG_LIBS
+# are not paths: the variable they name is checked on its own line.
+assignment='^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*[:+?]?=(.*)$'
+while IFS= read -r line; do
+    [[ "$line" =~ $assignment ]] || continue
+    name="${BASH_REMATCH[1]}"
+    IFS=$' \t:,' read -r -a words <<< "${BASH_REMATCH[2]}"
+    for word in ${words[@]+"${words[@]}"}; do
+        case "$word" in
+            -L* | -I*) word="${word#-?}" ;;
+            -rpath=* | --rpath=*) word="${word#*=}" ;;
+        esac
+        case "$word" in
+            /*) in_host_prefix "$word" || problems+=("$name: $word") ;;
+        esac
     done
-fi
+done < src/Makevars
+
 # forced-stub mode records no driver directory in the library
 driver_rpath="$(makevar CUDA_DRIVER_RPATH_FLAG)"
 [ -z "$driver_rpath" ] || problems+=("CUDA_DRIVER_RPATH_FLAG=$driver_rpath")
