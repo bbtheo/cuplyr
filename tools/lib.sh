@@ -27,6 +27,8 @@ mkdir -p "$CUPLYR_LOCK_DIR"
 #   CUPLYR_PIXI_ENV       environment name in it    (default: default)
 # A worktree can pin both in an untracked .cuplyr-env file at its root
 # (KEY=VALUE lines); variables set in the caller's environment win over it.
+# Run under `pixi run`/`pixi shell` with neither set, the tools stay in the
+# environment pixi activated (below).
 if [[ -f "$CUPLYR_WT_ROOT/.cuplyr-env" ]]; then
   while IFS='=' read -r _k _v; do
     case "$_k" in
@@ -34,6 +36,19 @@ if [[ -f "$CUPLYR_WT_ROOT/.cuplyr-env" ]]; then
         [[ -n "${!_k:-}" ]] || export "$_k=$_v" ;;
     esac
   done < "$CUPLYR_WT_ROOT/.cuplyr-env"
+fi
+# Inside `pixi run -e <env> <task>` (or `pixi shell -e <env>`) with nothing
+# selected above, keep the environment pixi activated, so
+# `pixi run -e rapids2602 conformance` runs the conformance suite on 26.02.
+if [[ -z "${CUPLYR_PIXI_MANIFEST:-}" && -z "${CUPLYR_PIXI_ENV:-}" ]]; then
+  CUPLYR_PIXI_MANIFEST="${PIXI_PROJECT_MANIFEST:-}"
+  CUPLYR_PIXI_ENV="${PIXI_ENVIRONMENT_NAME:-}"
+  # both or neither: a manifest without its environment (or the reverse) is not
+  # something pixi activated
+  if [[ -z "$CUPLYR_PIXI_MANIFEST" || -z "$CUPLYR_PIXI_ENV" ]]; then
+    CUPLYR_PIXI_MANIFEST=""
+    CUPLYR_PIXI_ENV=""
+  fi
 fi
 CUPLYR_PIXI_MANIFEST="${CUPLYR_PIXI_MANIFEST:-$CUPLYR_MAIN/pixi.toml}"
 CUPLYR_PIXI_ENV="${CUPLYR_PIXI_ENV:-default}"
