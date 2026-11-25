@@ -1183,7 +1183,7 @@ inline cudf::ast::expression const& ast_col_ref(cudf::ast::tree& tree, eval_ctx&
         }
         return tree.emplace<cudf::ast::column_reference>(it->second);
     }
-    return ast_col_ref(tree, ctx, idx);
+    return tree.emplace<cudf::ast::column_reference>(idx);
 }
 
 // -----------------------------------------------------------------------------
@@ -3057,10 +3057,11 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
     // `M_LOG10_2 * (0.5 + logb(x)) + dig > DBL_DIG` test: that test is
     // monotone in logb(x) = floor(log2(x)) (exact, subnormals included), so
     // "no rounding needed" is exactly |x| >= 2^emin.
-    // Device side: three compute_column() AST stages (i10 = floor(|x| *
-    // 10^dig); the sign of du - dd; the chosen candidate with x's sign), then
-    // one copy_if_else. Rows that need no rounding (0, +-Inf, NaN, |x| >=
-    // 2^emin) take x itself, so -0 survives; nulls stay null.
+    // Device side, as compute_column() AST stages (each op is evaluated on its
+    // own): the candidates xd and xu; dif = (xu - |x|) - (|x| - xd), whose sign
+    // is the order of the two distances; the magnitude, xd or xu; then x's sign
+    // (so -0 survives) is or-ed in from the bits, and the rows that need no
+    // rounding (+-Inf, NaN, |x| >= 2^emin) take x itself. Nulls stay null.
     if (op == "round") {
         Rcpp::List x_node = args[0];
         cudf::size_type x_idx = materialize(x_node, ctx);

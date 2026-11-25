@@ -240,7 +240,8 @@ lower_mutate <- function(ast, source_ptr) {
   # wins, as the NA-ing of a replaced name below does) instead of vectors
   # scanned and grown per dot
   pos <- NULL
-  if (n_expr >= MUTATE_HASH_MIN && !anyNA(index_names) && all(nzchar(index_names))) {
+  if (n_expr >= MUTATE_HASH_MIN && names_hashable(index_names) &&
+        names_hashable(vapply(expressions, function(e) e$output_col, ""))) {
     pos <- new.env(hash = TRUE, parent = emptyenv(), size = max(2L * (length(index_names) + n_expr), 29L))
     for (j in rev(seq_along(index_names))) assign(index_names[[j]], j, envir = pos)
   }

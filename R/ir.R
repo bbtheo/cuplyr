@@ -336,10 +336,23 @@ pronoun_call_name <- function(expr, env = NULL, schema = NULL) {
 # @keywords internal
 MUTATE_HASH_MIN <- 24L
 
+# TRUE when every name can key an environment: an environment key is a symbol,
+# so an NA name, "" and a name past R's 10000-byte symbol limit can't.
+# @keywords internal
+names_hashable <- function(nms) {
+  !anyNA(nms) && all(nzchar(nms)) && (length(nms) == 0L || max(nchar(nms, "bytes")) <= 10000L)
+}
+
+# Whether the one name `name` can be looked up in (or assigned to) such an
+# environment; one that can't is never in it (match() can't find "" either).
+# @keywords internal
+pos_key_ok <- function(name) {
+  !is.na(name) && nzchar(name) && nchar(name, "bytes") <= 10000L
+}
+
 schema_hash_new <- function(schema) {
   nms <- .subset2(schema, "names")
-  # (an NA or empty name can't key an environment)
-  if (anyNA(nms) || !all(nzchar(nms))) {
+  if (!names_hashable(nms)) {
     schema$.pos <- NULL
     schema$.tcount <- NULL
     return(schema)
@@ -384,6 +397,7 @@ schema_hash_append <- function(schema, name, type) {
 # `name`'s index in a name -> index environment (NA if absent).
 # @keywords internal
 ir_pos_lookup <- function(pos, name) {
+  if (!pos_key_ok(name)) return(NA_integer_)
   idx <- pos[[name]]
   if (is.null(idx)) NA_integer_ else idx
 }
@@ -395,6 +409,7 @@ ir_schema_pos <- function(schema, name) {
   if (is.null(pos)) {
     return(match(name, .subset2(schema, "names")))
   }
+  if (!pos_key_ok(name)) return(match(name, .subset2(schema, "names")))
   idx <- pos[[name]]
   if (is.null(idx)) NA_integer_ else idx
 }
@@ -440,7 +455,7 @@ quo_reads_column_fast <- function(quo, schema) {
       pos <- .subset2(schema, ".pos")
       found <- FALSE
       for (v in all.vars(.subset2(quo, 2L))) {
-        if (!is.null(pos[[v]])) {
+        if (pos_key_ok(v) && !is.null(pos[[v]])) {
           found <- TRUE
           break
         }

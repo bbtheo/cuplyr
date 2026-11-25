@@ -1958,25 +1958,28 @@ extract_agg_shape_param <- function(quo) {
 # Only a SINGLE probability is supported (scratchpad/todo.md's explicit
 # scope cut for this wave): `probs=` must evaluate to one value in `[0,
 # 1]`. `type=` (R's own quantile "algorithm" selector, default `7`) is
-# validated but never threaded through -- cuplyr always computes cudf's
-# `interpolation::LINEAR`, which is bit-for-bit R's own default `type = 7`
-# for a plain (non-discrete) sample (verified empirically, see
-# `gpu_summarise()`'s own docs and `test-dplyr-summarise.R`) -- so a
-# `type=` OTHER than `7` is rejected outright (no silent divergence)
-# rather than silently computing the wrong thing. `names=`/`digits=` only
+# validated but never threaded through -- cuplyr computes R's own default
+# `type = 7` (the order statistics and R's own interpolation arithmetic,
+# `type7()` in `src/ops_groupby.cpp`) -- so a `type=` OTHER than `7` is
+# rejected outright (no silent divergence) rather than silently computing the
+# wrong thing. `names=`/`digits=` only
 # affect the OUTPUT NAME's label/rounding in real R (never the value
 # itself), so both are accepted and ignored.
 #
 # @keywords internal
-quantile_names_cache <- new.env(parent = emptyenv())
-
 extract_quantile_probs <- function(expr, env, quo) {
   # (#75) `quantile(x, <number>)`, the shape a wide quantile() expands to, is
   # matched by position: no call_match(), and a literal probability needs no
   # evaluation.
+  # (reframe() writes `quantile(x, probs = p, names = FALSE)`, na.rm taken, by
+  # position too)
   plain <- length(expr) == 3L && is.null(names(expr))
+  no_names <- !plain && length(expr) == 4L && identical(names(expr), c("", "", "probs", "names")) &&
+    identical(expr[[4L]], FALSE)
   if (plain) {
     present_args <- list(x = expr[[2L]], probs = expr[[3L]])
+  } else if (no_names) {
+    present_args <- list(x = expr[[2L]], probs = expr[[3L]], names = FALSE)
   } else {
     proto <- function(x, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = FALSE,
                        names = TRUE, type = 7, digits = 7) NULL
@@ -2011,7 +2014,7 @@ extract_quantile_probs <- function(expr, env, quo) {
     stop("summarise()'s quantile() requires a single `probs` value: ",
          rlang::quo_text(quo), call. = FALSE)
   }
-  probs_val <- if (plain && is.double(present_args$probs) && length(present_args$probs) == 1L &&
+  probs_val <- if ((plain || no_names) && is.double(present_args$probs) && length(present_args$probs) == 1L &&
                    is.null(attributes(present_args$probs))) {
     present_args$probs
   } else {
@@ -2028,6 +2031,7 @@ extract_quantile_probs <- function(expr, env, quo) {
   # `names`/`digits` that isn't a plain value is dplyr's to evaluate.
   qnames <- NULL
   names_val <- if (is.null(present_args$names)) TRUE else
+    if (is.logical(present_args$names) && length(present_args$names) == 1L) present_args$names else
     ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(present_args$names, env)))$value
   digits_val <- if (is.null(present_args$digits)) 7 else
     ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(present_args$digits, env)))$value
@@ -2037,13 +2041,9 @@ extract_quantile_probs <- function(expr, env, quo) {
          rlang::quo_text(quo), call. = FALSE)
   }
   if (isTRUE(names_val)) {
-    # (the label of a probability does not change: asked once per session)
-    key <- paste(if (digits_val > 15) format(probs_val, digits = 17) else probs_val, digits_val)
-    qnames <- quantile_names_cache[[key]]
-    if (is.null(qnames)) {
-      qnames <- names(stats::quantile(0, probs_val, digits = digits_val))
-      quantile_names_cache[[key]] <- qnames
-    }
+    # quantile()'s own label (stats:::format_perc() of one probability),
+    # worked out on every call: it follows getOption("OutDec"), so none is kept
+    qnames <- paste0(formatC(100 * probs_val, format = "fg", width = 1, digits = digits_val), "%")
   }
 
   list(

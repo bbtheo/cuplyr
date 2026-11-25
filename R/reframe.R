@@ -416,7 +416,7 @@ reframe_agg_parts <- function(expr, env, verified) {
   }
   nms <- names(args) %||% rep("", length(args))
   named <- nms[nzchar(nms)]
-  allowed <- c("na.rm", if (identical(fn, "quantile")) "probs")
+  allowed <- c("na.rm", if (identical(fn, "quantile")) c("probs", "names"))
   if (sum(!nzchar(nms)) != 1L || anyDuplicated(named) > 0L || !all(named %in% allowed)) {
     return(NULL)
   }
@@ -426,6 +426,9 @@ reframe_agg_parts <- function(expr, env, verified) {
   if (identical(fn, "quantile")) {
     p <- args[["probs"]]
     if (!is.numeric(p) || length(p) != 1L || is.na(p) || p < 0 || p > 1) {
+      return(NULL)
+    }
+    if ("names" %in% named && !identical(args[["names"]], FALSE)) {
       return(NULL)
     }
   }
@@ -711,7 +714,9 @@ reframe_native_plan <- function(dots, schema) {
         return(no(i, "`quantile()` is on the GPU only with constant `probs`, a literal `na.rm` and `type = 7`."))
       }
       calls <- lapply(parsed$probs, function(p) {
-        rlang::call2("quantile", parsed$x, probs = p, na.rm = parsed$na_rm)
+        # (names = FALSE: a reframe() result carries no quantile() names, so
+        # their labels are not worked out for each of the k dots)
+        rlang::call2("quantile", parsed$x, probs = p, na.rm = parsed$na_rm, names = FALSE)
       })
     } else if (is_range) {
       parsed <- reframe_parse_range(expr)

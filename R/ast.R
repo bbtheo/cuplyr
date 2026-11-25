@@ -786,7 +786,6 @@ infer_schema_from <- function(node, input_schema) {
         outs <- vapply(exprs, .subset2, character(1), "output_col", USE.NAMES = FALSE)
         otypes <- unname(vapply(exprs, .subset2, character(1), "output_type", USE.NAMES = FALSE))
         new_names <- unique(outs[!outs %in% result_names])
-        n_old <- length(result_names)
         if (length(new_names) > 0L) {
           result_names <- c(result_names, new_names)
           # (the appended entries are unnamed, as `c(types, type)` leaves them)

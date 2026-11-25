@@ -600,7 +600,7 @@ struct QuantileRequests {
         cudf::column_view lower = res.results[b.lo]->view();
         cudf::column_view higher = res.results[b.hi]->view();
 
-        // n1 = max(count - 1, 0) per group, and p, laid out like the values.
+        // n1 = max(count - 1, 0) per group
         auto n = cudf::cast(res.results[b.cnt]->view(), f64);
         auto minus1 = cudf::binary_operation(n->view(), cudf::numeric_scalar<double>(1.0, true),
                                              cudf::binary_operator::SUB, f64);
@@ -608,81 +608,107 @@ struct QuantileRequests {
         auto n1 = cudf::binary_operation(minus1->view(), cudf::numeric_scalar<double>(0.0, true),
                                          cudf::binary_operator::NULL_MAX, f64);
         minus1.reset();
-        std::unique_ptr<cudf::column> n1_flat, p_flat;
-        if (K > 1) {
-            n1_flat = std::move(cudf::repeat(cudf::table_view({n1->view()}), K)->release()[0]);
-            auto ps = cudf::make_numeric_column(f64, K);
-            check_cuda(cudaMemcpy(ps->mutable_view().data<double>(), b.probs.data(),
-                                  sizeof(double) * K, cudaMemcpyHostToDevice),
-                       "quantile probabilities");
-            p_flat = std::move(cudf::tile(cudf::table_view({ps->view()}), G)->release()[0]);
-        } else {
-            n1_flat = std::move(n1);
-            p_flat = cudf::make_column_from_scalar(cudf::numeric_scalar<double>(b.probs[0], true), G);
-        }
-        n1.reset();
 
-        // The type-7 index of stats:::quantile.default, each step its own AST
-        // operation (evaluated one at a time, so a fused multiply-add cannot
-        // form): it rounds the product and the +1 separately, and the
-        // interpolation (1 - h) * x[lo] + h * x[hi] rounds each product.
-        namespace ast = cudf::ast;
-        enum class Out { Whole, OnLower, Interp };
-        auto compute = [&](Out what) {
-            ast::tree t;
-            std::deque<cudf::numeric_scalar<double>> lits;
-            auto lit = [&](double v) -> const ast::expression& {
-                lits.emplace_back(v, true);
-                return t.emplace<ast::literal>(lits.back());
-            };
-            auto col = [&](int i) -> const ast::expression& { return t.emplace<ast::column_reference>(i); };
-            auto op = [&](ast::ast_operator o, const ast::expression& l, const ast::expression& r)
-                -> const ast::expression& { return t.emplace<ast::operation>(o, l, r); };
-            auto prod = [&]() -> const ast::expression& { return op(ast::ast_operator::MUL, col(0), col(1)); };
-            auto idx = [&]() -> const ast::expression& { return op(ast::ast_operator::ADD, prod(), lit(1.0)); };
-            auto fl = [&](const ast::expression& e) -> const ast::expression& {
-                return t.emplace<ast::operation>(ast::ast_operator::FLOOR, e);
-            };
-            const ast::expression* e;
-            switch (what) {
-            case Out::Whole:
-                e = &op(ast::ast_operator::EQUAL, idx(), fl(idx()));
-                break;
-            case Out::OnLower:
-                // A whole index names the element at 0-based idx - 1: cudf's
-                // LOWER (floor of the position) where that is floor(prod),
-                // else HIGHER.
-                e = &op(ast::ast_operator::EQUAL, op(ast::ast_operator::SUB, idx(), lit(1.0)), fl(prod()));
-                break;
-            default: {
-                const auto& h = [&]() -> const ast::expression& {
-                    return op(ast::ast_operator::SUB, idx(), fl(idx()));
+        // The values of groups [g0, g1), flat. Only the output, `lower` and
+        // `higher` are G * K long at once: the temporaries (n1 and p laid out
+        // like the values, the comparisons, the interpolation) are a chunk's.
+        auto compute_groups = [&](cudf::size_type g0, cudf::size_type g1) {
+            const cudf::size_type Gc = g1 - g0;
+            auto lower_c = cudf::slice(lower, {g0 * K, g1 * K})[0];
+            auto higher_c = cudf::slice(higher, {g0 * K, g1 * K})[0];
+            auto n1_c = cudf::slice(n1->view(), {g0, g1})[0];
+            std::unique_ptr<cudf::column> n1_flat, p_flat;
+            if (K > 1) {
+                n1_flat = std::move(cudf::repeat(cudf::table_view({n1_c}), K)->release()[0]);
+                auto ps = cudf::make_numeric_column(f64, K);
+                check_cuda(cudaMemcpy(ps->mutable_view().data<double>(), b.probs.data(),
+                                      sizeof(double) * K, cudaMemcpyHostToDevice),
+                           "quantile probabilities");
+                p_flat = std::move(cudf::tile(cudf::table_view({ps->view()}), Gc)->release()[0]);
+            } else {
+                p_flat = cudf::make_column_from_scalar(cudf::numeric_scalar<double>(b.probs[0], true), Gc);
+            }
+            cudf::column_view n1_v = n1_flat ? n1_flat->view() : n1_c;
+
+            // The type-7 index of stats:::quantile.default, each step its own AST
+            // operation (evaluated one at a time, so a fused multiply-add cannot
+            // form): it rounds the product and the +1 separately, and the
+            // interpolation (1 - h) * x[lo] + h * x[hi] rounds each product.
+            namespace ast = cudf::ast;
+            enum class Out { Whole, OnLower, Interp };
+            auto compute = [&](Out what) {
+                ast::tree t;
+                std::deque<cudf::numeric_scalar<double>> lits;
+                auto lit = [&](double v) -> const ast::expression& {
+                    lits.emplace_back(v, true);
+                    return t.emplace<ast::literal>(lits.back());
                 };
-                e = &op(ast::ast_operator::ADD,
-                        op(ast::ast_operator::MUL, op(ast::ast_operator::SUB, lit(1.0), h()), col(2)),
-                        op(ast::ast_operator::MUL, h(), col(3)));
-            }
-            }
-            return cudf::compute_column(
-                cudf::table_view({n1_flat->view(), p_flat->view(), lower, higher}), *e);
-        };
-        auto whole = compute(Out::Whole);
-        auto on_lower = compute(Out::OnLower);
-        auto interp = compute(Out::Interp);
-        n1_flat.reset();
-        p_flat.reset();
+                auto col = [&](int i) -> const ast::expression& { return t.emplace<ast::column_reference>(i); };
+                auto op = [&](ast::ast_operator o, const ast::expression& l, const ast::expression& r)
+                    -> const ast::expression& { return t.emplace<ast::operation>(o, l, r); };
+                auto prod = [&]() -> const ast::expression& { return op(ast::ast_operator::MUL, col(0), col(1)); };
+                auto idx = [&]() -> const ast::expression& { return op(ast::ast_operator::ADD, prod(), lit(1.0)); };
+                auto fl = [&](const ast::expression& e) -> const ast::expression& {
+                    return t.emplace<ast::operation>(ast::ast_operator::FLOOR, e);
+                };
+                const ast::expression* e;
+                switch (what) {
+                case Out::Whole:
+                    e = &op(ast::ast_operator::EQUAL, idx(), fl(idx()));
+                    break;
+                case Out::OnLower:
+                    // A whole index names the element at 0-based idx - 1: cudf's
+                    // LOWER (floor of the position) where that is floor(prod),
+                    // else HIGHER.
+                    e = &op(ast::ast_operator::EQUAL, op(ast::ast_operator::SUB, idx(), lit(1.0)), fl(prod()));
+                    break;
+                default: {
+                    const auto& h = [&]() -> const ast::expression& {
+                        return op(ast::ast_operator::SUB, idx(), fl(idx()));
+                    };
+                    e = &op(ast::ast_operator::ADD,
+                            op(ast::ast_operator::MUL, op(ast::ast_operator::SUB, lit(1.0), h()), col(2)),
+                            op(ast::ast_operator::MUL, h(), col(3)));
+                }
+                }
+                return cudf::compute_column(
+                    cudf::table_view({n1_v, p_flat->view(), lower_c, higher_c}), *e);
+            };
+            auto whole = compute(Out::Whole);
+            auto on_lower = compute(Out::OnLower);
+            auto interp = compute(Out::Interp);
+            n1_flat.reset();
+            p_flat.reset();
 
-        // A null (an all-NA group under na.rm = TRUE) compares to null, which
-        // copy_if_else treats as false: it keeps `interp`, itself null there.
-        auto same = cudf::binary_operation(lower, higher, cudf::binary_operator::EQUAL, b8);
-        auto at_index = cudf::copy_if_else(lower, higher, on_lower->view());
-        on_lower.reset();
-        auto picked = cudf::copy_if_else(lower, interp->view(), same->view());
-        same.reset();
-        interp.reset();
+            // A null (an all-NA group under na.rm = TRUE) compares to null, which
+            // copy_if_else treats as false: it keeps `interp`, itself null there.
+            auto same = cudf::binary_operation(lower_c, higher_c, cudf::binary_operator::EQUAL, b8);
+            auto at_index = cudf::copy_if_else(lower_c, higher_c, on_lower->view());
+            on_lower.reset();
+            auto picked = cudf::copy_if_else(lower_c, interp->view(), same->view());
+            same.reset();
+            interp.reset();
+            return cudf::copy_if_else(at_index->view(), picked->view(), whole->view());
+        };
+
+        // (a null in `lower` makes the output nullable, which the chunks are not
+        // copied into: such a result is made whole)
+        constexpr cudf::size_type kChunkRows = 1 << 19;
+        const cudf::size_type per_chunk = std::max<cudf::size_type>(1, kChunkRows / K);
+        std::unique_ptr<cudf::column> out;
+        if (G <= per_chunk || lower.has_nulls() || higher.has_nulls()) {
+            out = compute_groups(0, G);
+        } else {
+            out = cudf::make_numeric_column(f64, G * K);
+            auto mv = out->mutable_view();
+            for (cudf::size_type g0 = 0; g0 < G; g0 += per_chunk) {
+                auto c = compute_groups(g0, std::min(G, g0 + per_chunk));
+                cudf::copy_range_in_place(c->view(), mv, 0, c->size(), g0 * K);
+            }
+        }
         res.results[b.lo].reset();
         res.results[b.hi].reset();
-        return cudf::copy_if_else(at_index->view(), picked->view(), whole->view());
+        return out;
     }
 
     std::unique_ptr<cudf::column> take(std::vector<cudf::groupby::aggregation_result>& results,

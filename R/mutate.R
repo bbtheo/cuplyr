@@ -1241,7 +1241,8 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
   # data gets its root cast to the double dplyr gives it (minmax_dot_root()).
 
   # (#75) a call of many dots looks names and types up in hashes, not by scanning
-  if (length(dots) >= MUTATE_HASH_MIN) schema <- schema_hash_new(schema)
+  # (an output name that can't key an environment is not hashed either)
+  if (length(dots) >= MUTATE_HASH_MIN && names_hashable(names(dots))) schema <- schema_hash_new(schema)
 
   expressions <- list()
   has_window <- FALSE
@@ -1527,7 +1528,26 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     }
 
     # Update the running schema so subsequent dots see this dot's output.
-    schema <- update_schema_for_expr(schema, step)
+    # (#75) A many-dot call's simple step is done here, on this frame's own
+    # `schema`: through a call, each dot would copy the whole `names`/`types`
+    # (a call shares them with this frame), where an append in place grows
+    # them in amortized constant time. update_schema_for_expr() is the rule.
+    if (!is.null(.subset2(schema, ".pos")) && is.null(.subset2(schema, "factor_levels")) &&
+          is.null(.subset2(schema, "tz")) &&
+          !(unname(step$output_type) %in% c("TIMESTAMP_MICROSECONDS", "DICTIONARY32"))) {
+      existing_idx <- ir_schema_pos(schema, step$output_col)
+      if (!is.na(existing_idx)) {
+        schema_hash_retype(schema, existing_idx, step$output_type)
+        schema$types[[existing_idx]] <- unname(step$output_type)
+      } else {
+        n_cols <- length(.subset2(schema, "names")) + 1L
+        schema$names[[n_cols]] <- step$output_col
+        schema$types[[n_cols]] <- unname(step$output_type)
+        schema_hash_append(schema, step$output_col, step$output_type)
+      }
+    } else {
+      schema <- update_schema_for_expr(schema, step)
+    }
   }, error = function(cnd) {
     # `&&`/`||` of a column: one value per call, so dplyr gives the result of a
     # length-one one and its own error for a vector. Its to evaluate, whole.
