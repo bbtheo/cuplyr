@@ -222,12 +222,15 @@ test_that("r-base follows DESCRIPTION's Depends: R", {
     # no floor at the build's patch release: an R 4.5.0 env must not need an
     # R upgrade for a package built on 4.5.3 (r-base's own run_export pins
     # the minor). A pin_compatible() needs lower_bound = "x.x".
-    pins <- grep("pin_compatible\\(\\s*[\"']r-base[\"']", names(run), value = TRUE)
+    # (p135_reqs() splits a requirement at its first space, so a Jinja pin
+    # is read back whole from name and spec)
+    whole <- paste(names(run), run)
+    pins <- grep("pin_compatible\\(\\s*[\"']r-base[\"']", whole, value = TRUE)
     for (pin in pins) {
       expect_match(pin, "lower_bound\\s*=\\s*[\"']x\\.x[\"']", info = pin)
     }
-    if ("r-base" %in% names(run)) {
-      expect_identical(run[["r-base"]], "", info = paste(nm, "run r-base spec"))
+    for (spec in run[names(run) == "r-base"]) {
+      expect_identical(unname(spec), "", info = paste(nm, "run r-base spec"))
     }
   }
 })
@@ -417,6 +420,11 @@ test_that("README.md shows the conda install from the bbtheo channel", {
   expect_match(section, "conda install -c bbtheo -c rapidsai -c conda-forge -c nvidia r-cuplyr",
                fixed = TRUE)
   expect_match(section, "pixi", fixed = TRUE)
+  # what the conda package needs: the CUDA 13 libcudf it installs has no code
+  # for compute capability 7.0 (Volta), so its floor is 7.5 (Turing)
+  conda_part <- sub("To build from source.*$", "", section)
+  expect_match(conda_part, "compute capability 7\\.5", info = conda_part)
+  expect_no_match(conda_part, "7\\.0", info = conda_part)
   expect_no_match(section, "TBD|to be decided", ignore.case = TRUE)
 })
 

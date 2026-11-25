@@ -522,9 +522,9 @@ test_that("conda/build.sh checks every word of a multi-word Makevars value", {
   home <- normalizePath(withr::local_tempdir("home-"))
   elsewhere <- normalizePath(withr::local_tempdir("elsewhere-"))
   pkg <- p135b_scratch_pkg()
-  # the first word is inside the host env (configure fills in @CUDF_LIB@),
-  # the second is not
-  cat(sprintf("EXTRA_FLAGS=-L@CUDF_LIB@ -L%s/lib2\n", elsewhere),
+  # the first word is outside the host env, the second inside it (configure
+  # fills in @CUDF_LIB@): every word is checked, not only the last
+  cat(sprintf("EXTRA_FLAGS=-L%s/lib2 -L@CUDF_LIB@\n", elsewhere),
       file = file.path(pkg, "src", "Makevars.in"), append = TRUE)
 
   res <- p135b_run(pkg, file.path("conda", "build.sh"),
