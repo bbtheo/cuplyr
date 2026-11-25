@@ -46,6 +46,16 @@ allow_cuda_stubs() {
     return 1
 }
 
+# Force the CUDA stub libcuda (CUPLYR_FORCE_CUDA_STUBS=1/true/yes/on), for
+# building a binary package. Unlike CUPLYR_ALLOW_CUDA_STUBS it never falls back
+# to, or prefers, a driver found on the machine; with no stub it is an error.
+force_cuda_stubs() {
+    case "${CUPLYR_FORCE_CUDA_STUBS:-}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    esac
+    return 1
+}
+
 # Compare semantic versions (major.minor), returns true if current >= required.
 version_at_least() {
     local current="$1"
@@ -291,8 +301,28 @@ find_cuda_runtime_lib() {
     return 1
 }
 
-CUDA_DRIVER_LIB=$(find_cuda_driver_lib)
-CUDA_DRIVER_RPATH="$CUDA_DRIVER_LIB"
+if force_cuda_stubs; then
+    # Binary packaging (the conda recipe): link the toolkit's stub even when
+    # this machine has a driver, so the build does not depend on the builder's
+    # driver. No directory goes on RUNPATH and libcuda is linked --as-needed
+    # (see the sed below), so the package finds the user's driver at run time.
+    CUDA_DRIVER_LIB=$(find_cuda_stub_lib)
+    CUDA_DRIVER_RPATH=""
+    if [ -z "$CUDA_DRIVER_LIB" ]; then
+        echo "ERROR: CUPLYR_FORCE_CUDA_STUBS is set, but no CUDA stub libcuda.so was found."
+        echo ""
+        echo "Searched the stubs directories under CUDA_HOME=$CUDA_HOME"
+        echo "and CONDA_PREFIX=${CONDA_PREFIX:-(unset)}."
+        echo "The stub comes with the CUDA toolkit. In a conda environment, install"
+        echo "the cuda-driver-dev package (cuda-version 13 or later)."
+        echo "Unset CUPLYR_FORCE_CUDA_STUBS to link the installed NVIDIA driver instead."
+        exit 1
+    fi
+    echo "CUPLYR_FORCE_CUDA_STUBS is set: linking the CUDA stub libcuda, as needed only."
+else
+    CUDA_DRIVER_LIB=$(find_cuda_driver_lib)
+    CUDA_DRIVER_RPATH="$CUDA_DRIVER_LIB"
+fi
 if [ -z "$CUDA_DRIVER_LIB" ]; then
     if allow_cuda_stubs; then
         CUDA_DRIVER_LIB=$(find_cuda_stub_lib)
@@ -574,8 +604,20 @@ if [ -n "$CUDA_DRIVER_RPATH" ]; then
     CUDA_DRIVER_RPATH_FLAG="-Wl,-rpath,$CUDA_DRIVER_RPATH"
 fi
 
+# In forced-stub mode libcuda is linked --as-needed, for -lcuda only
+# (--push-state/--pop-state restore the default for the libraries after it).
+# cuplyr calls only the CUDA runtime API, so libcuda.so.1 is then not NEEDED
+# and the package loads on a machine without a driver; libcudart finds the
+# user's driver at run time. The template is not touched: the default Makevars
+# is unchanged.
+LINK_CUDA_EXPR=()
+if force_cuda_stubs; then
+    LINK_CUDA_EXPR=(-e "s| -lcuda | -Wl,--push-state,--as-needed -lcuda -Wl,--pop-state |")
+fi
+
 # Generate Makevars from template
-sed -e "s|@CUDA_HOME@|$CUDA_HOME|g" \
+sed "${LINK_CUDA_EXPR[@]}" \
+    -e "s|@CUDA_HOME@|$CUDA_HOME|g" \
     -e "s|@CUDA_INCLUDE@|$CUDA_INCLUDE|g" \
     -e "s|@CUDA_DRIVER_LIB@|$CUDA_DRIVER_LIB|g" \
     -e "s|@CUDA_DRIVER_RPATH_FLAG@|$CUDA_DRIVER_RPATH_FLAG|g" \

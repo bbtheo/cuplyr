@@ -1,5 +1,7 @@
 # cuplyr (development version)
 
+* cuplyr has a conda recipe, `r-cuplyr`, for rattler-build (`conda/recipe.yaml`) and conda-build (`conda/meta.yaml`), with the maintainer steps in `conda/README.md`. The package is not published yet. It is built against one RAPIDS series (26.10 by default; 26.02 and later can be built) and links the CUDA stub for libcuda only as needed, so it builds and loads without a GPU and uses the user's driver at run time. For this, `configure` accepts `CUPLYR_FORCE_CUDA_STUBS=1`, which always links the toolkit's stub and fails if there is none; a normal source install is unchanged (#135).
+
 * RAPIDS 25.12 is no longer supported: cuplyr needs RAPIDS 26.02 or later, is tested on 26.10, and installs 26.10 for CUDA 13 (#94).
 
   It builds against libcudf and RMM `>=26.02` with no upper bound, and uses

@@ -1,0 +1,108 @@
+# r-cuplyr: the conda package of cuplyr (dplyr on the GPU via RAPIDS libcudf).
+#
+# This is the recipe for rattler-build (recipe schema v1), the preferred tool.
+# conda/meta.yaml describes the same package for conda-build; keep the two in
+# step. Maintainers build the package for the project's channel from a
+# checkout; the recipe is written so that it can move to conda-forge later
+# (no private channel is assumed beyond the channel list in the build
+# command). The build and test steps are in conda/README.md.
+#
+# Build (from the repository root):
+#   rattler-build build --recipe conda/recipe.yaml -m conda/variants.yaml \
+#     -c rapidsai -c conda-forge -c nvidia --output-dir <dir>
+#
+# The RAPIDS series (rapids_version) and CUDA major (cuda_version) come from
+# conda/variants.yaml. RAPIDS has no ABI across series, so each value is a
+# separate binary pinned to its own libcudf series.
+
+context:
+  # Kept equal to Version in DESCRIPTION (a test checks it).
+  version: "0.1.1.9000"
+
+package:
+  name: r-cuplyr
+  version: ${{ version }}
+
+source:
+  # The local checkout (relative to this recipe), so the package built is the
+  # one being released. Nothing is downloaded.
+  path: ..
+
+build:
+  number: 0
+  # libcudf is built for Linux only.
+  skip:
+    - not linux
+  # conda/build.sh: configure against the host environment, link the CUDA stub
+  # as needed, R CMD INSTALL.
+  script: build.sh
+
+requirements:
+  build:
+    - ${{ compiler("c") }}
+    - ${{ compiler("cxx") }}
+    - ${{ stdlib("c") }}
+    - make
+  host:
+    # R and the packages cuplyr imports (DESCRIPTION Imports), with the same
+    # minimum versions. Rcpp is also in LinkingTo.
+    - r-base >=4.3.0
+    - r-rcpp >=1.0.12
+    - r-dplyr >=1.1.0
+    - r-rlang >=1.1.0
+    - r-vctrs >=0.6.0
+    - r-cli >=3.6.0
+    - r-lifecycle >=1.0.5
+    - r-tidyselect >=1.2.0
+    - r-tibble >=3.2.0
+    - r-pillar
+    # RAPIDS, all on the same series.
+    - libcudf ${{ rapids_version }}.*
+    - librmm ${{ rapids_version }}.*
+    - libkvikio ${{ rapids_version }}.*
+    # CUDA. configure needs nvcc and the CUDA headers in one prefix, so
+    # cuda-nvcc is a host requirement, not a build one. cuda-driver-dev
+    # provides the stub libcuda that is linked (see conda/README.md).
+    - cuda-version ${{ cuda_version }}.*
+    - cuda-nvcc
+    - cuda-cudart-dev
+    - cuda-driver-dev
+  run:
+    - ${{ pin_compatible("r-base", upper_bound="x.x") }}
+    - r-rcpp >=1.0.12
+    - r-dplyr >=1.1.0
+    - r-rlang >=1.1.0
+    - r-vctrs >=0.6.0
+    - r-cli >=3.6.0
+    - r-lifecycle >=1.0.5
+    - r-tidyselect >=1.2.0
+    - r-tibble >=3.2.0
+    - r-pillar
+    # The binary needs the libcudf series it was built against (libcudf's own
+    # run_exports pin it too), and its RMM and KvikIO.
+    - libcudf ${{ rapids_version }}.*
+    - librmm ${{ rapids_version }}.*
+    - libkvikio ${{ rapids_version }}.*
+    # The CUDA runtime comes from cuda-cudart-dev's run_exports, and
+    # cuda-version from libcudf. The NVIDIA driver is the user's own.
+
+tests:
+  # Needs no GPU: loads the package and checks that libcudf and librmm
+  # resolve inside the environment (see conda/test-package.R).
+  - script:
+      - Rscript test-package.R
+    files:
+      recipe:
+        - test-package.R
+
+about:
+  homepage: https://github.com/bbtheo/cuplyr
+  repository: https://github.com/bbtheo/cuplyr
+  documentation: https://bbtheo.github.io/cuplyr/
+  summary: GPU-accelerated data manipulation with dplyr syntax via RAPIDS libcudf.
+  license: Apache-2.0
+  license_file: LICENSE.md
+
+extra:
+  recipe-maintainers:
+    - bbtheo

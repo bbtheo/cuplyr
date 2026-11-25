@@ -145,6 +145,18 @@ curl -fsSL https://raw.githubusercontent.com/bbtheo/cuplyr/main/install.sh | bas
 
 To pick the method yourself, pass `--method=pixi`, `--method=conda` or `--method=system`. `--dry-run` shows what the script would do. From a clone, run `./install.sh` with the same options.
 
+### conda (coming soon)
+
+A conda package, `r-cuplyr`, is being prepared. It is not yet published and its channel is still to be decided, so for now use the script above. Once it is published, the install will look like this (`<channel TBD>` is a placeholder):
+
+```bash
+mamba create -n cuplyr --no-channel-priority -c <channel TBD> -c rapidsai -c conda-forge -c nvidia r-cuplyr
+```
+
+Maintainers can build the package from a checkout; the steps are in [conda/README.md](conda/README.md).
+
+### Check the installation
+
 Then check the installation from R:
 
 ```r
