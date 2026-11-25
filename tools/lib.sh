@@ -37,7 +37,7 @@ mkdir -p "$CUPLYR_LOCK_DIR"
 _file_manifest=""
 _file_env=""
 if [[ -f "$CUPLYR_WT_ROOT/.cuplyr-env" ]]; then
-  while IFS='=' read -r _k _v; do
+  while IFS='=' read -r _k _v || [[ -n "$_k" ]]; do
     case "$_k" in
       CUPLYR_PIXI_MANIFEST) _file_manifest="$_v" ;;
       CUPLYR_PIXI_ENV) _file_env="$_v" ;;
