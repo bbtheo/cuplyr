@@ -72,7 +72,10 @@ requirements:
     - cuda-crt-dev_${{ target_platform }}
     - cuda-driver-dev
   run:
-    - ${{ pin_compatible("r-base", upper_bound="x.x") }}
+    # Plain r-base: r-base's own run_export already pins the R minor of the
+    # build (>=4.5,<4.6 for 4.5). pin_compatible() would also floor users at
+    # the build's patch release (4.5.3).
+    - r-base
     - r-rcpp >=1.0.12
     - r-dplyr >=1.1.0
     - r-rlang >=1.1.0

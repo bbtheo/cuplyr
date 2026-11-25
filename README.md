@@ -128,7 +128,9 @@ cuplyr's tables are called gibbles. They print as `# A gibble:`, or `# A gibble 
 
 ## Installation
 
-You need Linux x86_64 and:
+The conda and pixi package below needs only Linux x86_64, an NVIDIA GPU with compute capability 7.0 or newer and a driver that supports CUDA 13. It brings its own R and libraries, and needs no CUDA toolkit or compiler.
+
+To build from source (the install script), you need Linux x86_64 and:
 
 | | |
 |---|---|
@@ -162,6 +164,8 @@ pixi init -c bbtheo -c rapidsai -c conda-forge -c nvidia cuplyr-project
 cd cuplyr-project
 pixi add r-cuplyr
 ```
+
+Then start R in the project with `pixi run R` (or `pixi shell`, then `R`).
 
 How the package is built and published is described in [conda/README.md](https://github.com/bbtheo/cuplyr/blob/main/conda/README.md).
 

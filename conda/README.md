@@ -147,12 +147,14 @@ channel with rattler-build itself (no anaconda-client is needed).
 Log in once, which keeps the token out of the shell history:
 
 ```bash
-read -rs T && rattler-build auth login anaconda.org --conda-token "$T"; unset T
+read -rs T && rattler-build auth login api.anaconda.org --conda-token "$T"; unset T
 ```
 
 `read -rs` reads the anaconda.org token (an API token allowed to upload to
 `bbtheo`) without echoing it, and rattler-build stores it in its keychain/auth
-file.
+file. The host is `api.anaconda.org` because that is where
+`rattler-build upload anaconda` looks the token up. `rattler-build auth status`
+shows which host a stored token is under.
 
 After that, the upload reads the token from the stored login:
 
@@ -164,9 +166,10 @@ rattler-build upload anaconda --owner bbtheo \
 For a single command instead of the login, set `ANACONDA_API_KEY` (or pass
 `--api-key`) for that command.
 
-The host key rattler-build looks up for the token (`anaconda.org` or
-`api.anaconda.org`) is unverified. If the first upload reports a missing
-token, log in again with the other host name, `api.anaconda.org`.
+Upload nothing but `r-cuplyr` to `bbtheo`. pixi uses strict channel priority
+(and conda, unless it is disabled, also takes a package from the first channel
+that has it), and `bbtheo` comes first in the install commands, so any other
+package on it would shadow the conda-forge package of the same name.
 
 anaconda.org refuses a file that is already on the channel; add `--force` to
 replace it, for example after rebuilding with the same build number. Raise
