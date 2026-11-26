@@ -99,15 +99,26 @@ inline std::unique_ptr<cudf::table> apply_retention_mask(
 // (26.02) is deprecated in 26.04; its replacement, column_nans_to_nulls(),
 // returns a whole copy of the column (all of it thrown away when only the mask
 // is wanted: 8 B per row on every double comparison), so on 26.10 the mask is
-// built from the 1-byte is_not_nan() column. The data under a null can be NaN
-// (R's NA_real_ payload), so a column holding nulls has its own mask ANDed in.
+// built from the 1-byte is_not_nan() column by bools_to_mask(), which reads a
+// null as false. is_not_nan() is true under a null, and the data under a null
+// can be NaN (R's NA_real_ payload), so the flags are read under `col`'s own
+// null mask: through a view when `col` starts at row 0 (bools_to_mask() then
+// ANDs it in, with no bitmask_and() pass), bitmask_and() otherwise. Against
+// nans_to_nulls()'s single pass this costs one is_not_nan() pass; measured at
+// 1e3-1e6 rows, column_nans_to_nulls() is no faster at any size (its copy
+// costs about what that pass does).
 inline std::pair<std::unique_ptr<rmm::device_buffer>, cudf::size_type> nan_null_mask(
     cudf::column_view const& col) {
 #if CUPLYR_CUDF_NEW_API
   if (col.is_empty()) return {std::make_unique<rmm::device_buffer>(), 0};
   auto not_nan = cudf::is_not_nan(col);
+  if (col.null_count() == 0) return cudf::bools_to_mask(not_nan->view());
+  if (col.offset() == 0) {
+    cudf::column_view flags(not_nan->type(), col.size(), not_nan->view().head(), col.null_mask(),
+                            col.null_count());
+    return cudf::bools_to_mask(flags);
+  }
   auto mask = cudf::bools_to_mask(not_nan->view());
-  if (col.null_count() == 0) return mask;
   not_nan.reset();
   std::vector<cudf::bitmask_type const*> masks{
       static_cast<cudf::bitmask_type const*>(mask.first->data()), col.null_mask()};
