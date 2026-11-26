@@ -147,7 +147,7 @@ join_rolling_types <- c("INT32", "FLOAT64", "TIMESTAMP_DAYS", "TIMESTAMP_MICROSE
 #'   * exactly one condition has `filter != "none"`, its operator is one of
 #'     `>=`, `>`, `<=`, `<`, and every other condition is `==` with
 #'     `filter == "none"`;
-#'   * the rolling pair is two columns of one type in [join_rolling_types], or
+#'   * the rolling pair is two columns of one type in `join_rolling_types`, or
 #'     INT32 against FLOAT64 (compared as FLOAT64 through `key_casts`).
 #' A column missing from a schema is left to `validate_join_cols()`.
 #' @keywords internal

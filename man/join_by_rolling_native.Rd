@@ -14,7 +14,7 @@ POSIXct rolling keys) takes the CPU fallback:
 \item exactly one condition has \code{filter != "none"}, its operator is one of
 \code{>=}, \code{>}, \code{<=}, \code{<}, and every other condition is \code{==} with
 \code{filter == "none"};
-\item the rolling pair is two columns of one type in \link{join_rolling_types}, or
+\item the rolling pair is two columns of one type in \code{join_rolling_types}, or
 INT32 against FLOAT64 (compared as FLOAT64 through \code{key_casts}).
 A column missing from a schema is left to \code{validate_join_cols()}.
 }

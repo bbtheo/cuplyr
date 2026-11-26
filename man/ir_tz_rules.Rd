@@ -36,6 +36,6 @@ Not listed, so CPU: unary \code{-}, \code{abs()}, \code{cummax()}/\code{cummin()
 \code{Math.POSIXt} rejects them, so dplyr errors). A bare \verb{t +/- n} never
 reaches here: its type check sends it to the CPU
 (\code{\link[=infer_mutate_output_type]{infer_mutate_output_type()}}); only the rounding calls rewrite it
-(\code{\link[=ir_posixct_shift]{ir_posixct_shift()}}).
+(\code{ir_posixct_shift()}).
 }
 \keyword{internal}

@@ -841,7 +841,7 @@ scan_preview_table <- function(x, n) {
 dim_desc_n <- function(nrow, ncol) {
   mark <- if (identical(getOption("OutDec"), ",")) "." else ","
   paste0(formatC(nrow, big.mark = mark, format = "d"),
-         if (cli::is_utf8_output()) " × " else " x ", formatC(ncol, big.mark = mark, format = "d"))
+         if (cli::is_utf8_output()) " \u00d7 " else " x ", formatC(ncol, big.mark = mark, format = "d"))
 }
 
 # "parquet[a.parquet; cols=x,y]" for print.ast_node()/ast_to_string() (debugging

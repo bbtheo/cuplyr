@@ -90,7 +90,7 @@ ir_vec <- function(value, type, quo, name, loss = NULL) {
 #' (the logical `NA` constant) becomes `na = TRUE` with `type = NULL`
 #' (adopts the sibling operand's type later; [ir_infer_type()] defaults it
 #' to `FLOAT64` when asked in isolation). Any other length-1 atomic value is
-#' typed via [gpu_type_from_r()]. Length != 1 is only legal when
+#' typed via `gpu_type_from_r()`. Length != 1 is only legal when
 #' `allow_vector = TRUE` (the `%in%` RHS set-argument position); otherwise
 #' it's a diagnosable user error.
 #'
@@ -4811,6 +4811,9 @@ ir_has_window <- function(ir) {
 #' @param ir An IR node (or `NULL`)
 #' @param schema List with `names`/`types` to resolve column positions
 #'   against
+#' @param pos `NULL` (look names up in `schema$names`), or an environment
+#'   mapping column names to their positions in `schema`, which a caller binding many
+#'   expressions against one schema builds once
 #' @return The IR tree with `index` filled in on every `col` node
 #' @keywords internal
 ir_bind <- function(ir, schema, pos = NULL) {
@@ -5381,7 +5384,7 @@ ir_round_ops <- as.vector(outer(
 #' `Math.POSIXt` rejects them, so dplyr errors). A bare `t +/- n` never
 #' reaches here: its type check sends it to the CPU
 #' ([infer_mutate_output_type()]); only the rounding calls rewrite it
-#' ([ir_posixct_shift()]).
+#' (`ir_posixct_shift()`).
 #'
 #' @format A named list of op names per rule
 #' @keywords internal
@@ -6213,7 +6216,7 @@ ir_check_ts_lit <- function(ir) {
 is_timespan_value <- function(v) {
   (isS4(v) || inherits(v, "difftime")) &&
     any(vapply(c("Period", "Duration", "Interval", "difftime"),
-               function(cl) methods::is(v, cl), logical(1)))
+               function(cl) inherits(v, cl), logical(1)))
 }
 
 # The literal half of F48's rule, run by ir_infer_type() on every literal.

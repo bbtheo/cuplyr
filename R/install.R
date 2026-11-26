@@ -884,12 +884,12 @@ diagnose_loader <- function(verbose = FALSE) {
   # Find cuplyr.so
   so_path <- find_installed_cuplyr_so()
   if (is.null(so_path)) {
-    cat("✗ cuplyr shared library not found\n")
+    cat("\u2717 cuplyr shared library not found\n")
     cat("  Expected under: ", paste(.libPaths(), collapse = ", "), "\n")
     cat("  Run install_cuplyr() first.\n")
     return(invisible(list(found = FALSE)))
   }
-  cat("✓ cuplyr.so found:\n")
+  cat("\u2713 cuplyr.so found:\n")
   cat("  ", so_path, "\n\n")
 
   # Check RUNPATH/RPATH
@@ -927,7 +927,7 @@ diagnose_loader <- function(verbose = FALSE) {
     # Check for issues
     unresolved <- grep("not found", ldd_out, value = TRUE)
     if (length(unresolved) > 0) {
-      cat("✗ Unresolved dependencies:\n")
+      cat("\u2717 Unresolved dependencies:\n")
       cat("  ", paste(unresolved, collapse = "\n  "), "\n\n")
     }
   }
@@ -941,9 +941,9 @@ diagnose_loader <- function(verbose = FALSE) {
     glibcxx <- system2("strings", conda_stdc, stdout = TRUE, stderr = TRUE)
     has_3_4_31 <- any(grepl("GLIBCXX_3\\.4\\.31", glibcxx))
     if (has_3_4_31) {
-      cat("  ✓ Contains GLIBCXX_3.4.31\n")
+      cat("  \u2713 Contains GLIBCXX_3.4.31\n")
     } else {
-      cat("  ✗ GLIBCXX_3.4.31 NOT found (RAPIDS may be outdated)\n")
+      cat("  \u2717 GLIBCXX_3.4.31 NOT found (RAPIDS may be outdated)\n")
     }
     cat("\n")
   }

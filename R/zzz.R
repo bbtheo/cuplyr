@@ -14,6 +14,9 @@
 #' @importFrom rlang abort caller_arg caller_env is_call is_character is_closure
 #' @importFrom rlang is_environment is_formula is_function is_list is_logical
 #' @importFrom rlang is_missing is_na is_null is_string is_symbol is_vector
+#' @importFrom rlang .data
+#' @importFrom rlang :=
+#' @importFrom utils head tail
 #' @importFrom rlang env_get_list
 #' @importFrom rlang na_chr ffi_standalone_is_bool_1.0.7 ffi_standalone_check_number_1.0.7
 #' @importFrom dplyr n group_cols n_distinct

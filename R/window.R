@@ -286,7 +286,7 @@ extract_one_window_call <- function(node, schema, state, key = NULL) {
 #' Any window call argument that isn't already a bare column reference
 #' (e.g. `mean(x + y)`) is hoisted into its own pre-mutate step first (an
 #' `..winarg{k}..` temp column, added to `state$pre`) -- see
-#' [extract_one_window_call()].
+#' `extract_one_window_call()`.
 #'
 #' @param ir An IR node (typically an entire mutate/filter expression)
 #' @param schema The schema this pass starts from (list(names=, types=)) --
@@ -298,7 +298,7 @@ extract_one_window_call <- function(node, schema, state, key = NULL) {
 #'   construction -- callers advance to a new schema between passes, see
 #'   [plan_window_stages()])
 #' @param state A mutable environment as described in
-#'   [extract_one_window_call()]'s docs; the caller creates a fresh one per
+#'   `extract_one_window_call()`'s docs; the caller creates a fresh one per
 #'   pass and inspects `state$pre`/`state$specs` afterward
 #' @return The IR tree with every innermost window call (this pass)
 #'   replaced by an `ir_col()` reference; identical (by structure) to `ir`
@@ -377,7 +377,7 @@ ir_nested_window_sum_keys <- function(ir) {
 #' isolation from [plan_window_stages()]'s own stage-building loop, so a
 #' verb's own AST-emission wiring (`R/mutate.R`'s `mutate_window()`, and the
 #' analogous `R/filter.R`/`R/slice.R` wiring from W5/W6/W7 onward) can drive
-#' [decompose_window_group()] batch-by-batch itself -- interleaving each
+#' `decompose_window_group()` batch-by-batch itself -- interleaving each
 #' batch's own materializing verb node between batches, which
 #' [plan_window_stages()]'s single flat call cannot do (see that function's
 #' docs: it folds each batch's dot outputs into its *own* running schema
@@ -388,7 +388,7 @@ ir_nested_window_sum_keys <- function(ir) {
 #'
 #' Dots are processed in order and batched together UNLESS a later dot's
 #' window-call arguments reference an earlier dot's OWN output column name
-#' (from the *current* batch) -- see [window_arg_cols()].
+#' (from the *current* batch) -- see `window_arg_cols()`.
 #'
 #' @param exprs A *named* list of IR nodes, one per dot, in verb-call order
 #'   (see [plan_window_stages()]'s own `exprs` parameter docs for the naming
