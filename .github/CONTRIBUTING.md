@@ -145,10 +145,10 @@ runs the tests for you. This takes longer.
 
 ## Developer setup
 
-You need Linux, an NVIDIA GPU (Volta or newer), a system CUDA toolkit
-(`./configure` accepts 12.2 or newer, but RAPIDS 26.x is tested with CUDA 13,
-which pixi and the installers use; it finds the toolkit through `CUDA_HOME` or
-`/usr/local/cuda`), and
+You need Linux, an NVIDIA GPU with compute capability 7.5 (Turing) or
+newer, a system CUDA toolkit (`./configure` accepts 12.2 or newer, but
+RAPIDS 26.x is tested with CUDA 13, which pixi and the installers use; it
+finds the toolkit through `CUDA_HOME` or `/usr/local/cuda`), and
 [pixi](https://pixi.sh). pixi installs R, RAPIDS libcudf and every R package
 into the project directory. The default pixi environment is RAPIDS 26.10, the
 series cuplyr is developed, tested and gated on. It carries no CUDA compiler:

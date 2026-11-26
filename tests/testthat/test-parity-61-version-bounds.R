@@ -22,8 +22,6 @@ skip_if_no_pkg_file <- function(...) {
   )
 }
 
-supported_range <- ">=26.02"
-
 # ---------------------------------------------------------------------------
 # Declared ranges
 # ---------------------------------------------------------------------------
@@ -40,18 +38,9 @@ test_that("pixi.toml pins libcudf, librmm and libkvikio to the 26.10 and 26.02 s
   }
 })
 
-test_that("conda/meta.yaml requires libcudf, librmm and libkvikio >=26.02 in host and run", {
-  skip_if_no_pkg_file("conda", "meta.yaml")
-  lines <- readLines(pkg_file("conda", "meta.yaml"))
-
-  for (pkg in c("libcudf", "librmm", "libkvikio")) {
-    hit <- grep(sprintf("^\\s*-\\s*%s(\\s|$)", pkg), lines, value = TRUE)
-    # one entry under requirements/host, one under requirements/run
-    expect_length(hit, 2L)
-    spec <- gsub("\\s", "", sub(sprintf("^\\s*-\\s*%s", pkg), "", hit))
-    expect_identical(spec, rep(supported_range, 2L), info = paste("meta.yaml:", pkg))
-  }
-})
+# The conda recipe pins the RAPIDS series a binary is built against (a binary
+# can't run on another series); test-parity-135-conda-recipe.R checks that the
+# series it builds is no older than configure's minimum.
 
 test_that("DESCRIPTION SystemRequirements gives libcudf a lower bound and no upper bound", {
   skip_if_no_pkg_file("DESCRIPTION")
