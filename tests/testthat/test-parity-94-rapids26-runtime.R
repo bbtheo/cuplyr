@@ -77,38 +77,38 @@ test_that("the installed resource counts what is allocated through it and gives 
 
 # Each kind in a fresh process: the kind is reported, the counter is exact, a
 # table survives a second load_all() (the resource is reused, not replaced),
-# and memory comes back.
-p94_kind_probe <- function(kind) {
-  skip_if_no_source_tree()   # reloads the package with pkgload in the child
-  skip_if_not_installed("pkgload")
+# and memory comes back. The child loads this worktree, or the installed
+# package outside a source tree (cuplyr_child_loader()). The second load is
+# pkgload's, so it runs only when `reload` (a source tree): without it, `kind2`
+# and `after_reload` are NULL and the rest of the contract is still checked.
+p94_kind_probe <- function(kind, reload = !is.null(cuplyr_source_root())) {
+  if (reload) skip_if_not_installed("pkgload")
   root <- normalizePath(testthat::test_path("..", ".."), mustWork = TRUE)
   gpu_child_r(
-    function(root, n) {
-      load <- function() {
-        suppressMessages(pkgload::load_all(root, quiet = TRUE, compile = FALSE,
-                                           export_all = TRUE, helpers = FALSE,
-                                           attach_testthat = FALSE))
-      }
-      load()
+    function(root, load, reload, n) {
+      load(root)
       st0 <- gpu_memory_state()
       g <- tbl_gpu(data.frame(x = as.double(seq_len(n))), lazy = FALSE)
       st1 <- gpu_memory_state()
-      load()
-      st2 <- gpu_memory_state()
+      st2 <- NULL
+      if (reload) {
+        load(root)
+        st2 <- gpu_memory_state()
+      }
       y <- dplyr::collect(dplyr::mutate(g, y = x * 2))$y
       tr <- gpu_alloc_tracking(tbl_gpu(data.frame(z = as.double(seq_len(n))), lazy = FALSE))
       tracked <- tr$allocated_bytes
       rm(g, tr)
       gc()
       st3 <- gpu_memory_state()
-      list(kind0 = st0$resource, kind2 = st2$resource,
+      list(kind0 = st0$resource, reloaded = reload, kind2 = st2$resource,
            delta = st1$pool_used_bytes - st0$pool_used_bytes,
-           after_reload = st2$pool_used_bytes - st0$pool_used_bytes,
+           after_reload = if (reload) st2$pool_used_bytes - st0$pool_used_bytes,
            back = st3$pool_used_bytes - st0$pool_used_bytes,
            y_ok = identical(y, 2 * as.double(seq_len(n))),
            tracked = tracked)
     },
-    args = list(root = root, n = p94_n),
+    args = list(root = root, load = cuplyr_child_loader(), reload = reload, n = p94_n),
     env = c(CUPLYR_MEMORY_RESOURCE = kind)
   )
 }
@@ -117,24 +117,28 @@ test_that("the async resource keeps its contract in a fresh process", {
   skip_if_no_gpu()
   r <- p94_kind_probe("async")
   expect_identical(r$kind0, "async")
-  expect_identical(r$kind2, "async")
   expect_gte(r$delta, 8 * p94_n)
-  expect_gte(r$after_reload, 8 * p94_n)
   expect_true(r$y_ok)
   expect_gte(r$tracked, 8 * p94_n)
   expect_lt(r$back, 2^20)
+  if (r$reloaded) {
+    expect_identical(r$kind2, "async")
+    expect_gte(r$after_reload, 8 * p94_n)
+  }
 })
 
 test_that("the pool resource keeps its contract in a fresh process", {
   skip_if_no_gpu()
   r <- p94_kind_probe("pool")
   expect_identical(r$kind0, "pool")
-  expect_identical(r$kind2, "pool")
   expect_gte(r$delta, 8 * p94_n)
-  expect_gte(r$after_reload, 8 * p94_n)
   expect_true(r$y_ok)
   expect_gte(r$tracked, 8 * p94_n)
   expect_lt(r$back, 2^20)
+  if (r$reloaded) {
+    expect_identical(r$kind2, "pool")
+    expect_gte(r$after_reload, 8 * p94_n)
+  }
 })
 
 # ---------------------------------------------------------------------------
