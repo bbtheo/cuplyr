@@ -26,7 +26,7 @@ A \code{tbl_gpu} with the rows reordered and the groups of \code{.data}. The
 sorted result is new GPU memory (about twice the table size at peak).
 }
 \description{
-\code{arrange()} orders the rows of a gibble by the values of the columns you
+\code{arrange()} orders the rows of a GPU table by the values of the columns you
 name, as \code{dplyr::arrange()} does. The sort runs on the GPU.
 }
 \details{
@@ -59,7 +59,7 @@ For very large tables, consider filtering to reduce size before sorting.
 
 \subsection{Supported column types}{
 
-Every column type a gibble holds can be a sort key: double, integer,
+Every column type a GPU table holds can be a sort key: double, integer,
 integer64, character, logical, factor, \code{Date} and \code{POSIXct}. A factor sorts
 by the order of its levels, as in dplyr.
 

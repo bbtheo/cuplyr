@@ -25,7 +25,7 @@
 # expression (not the quosure, so a plan does not hold the environment), the
 # verb's call head and `ctx`, the environment that routes the hits of
 # summarise_with_empty_groups() to its collector (minmax_collect()). Nothing is
-# package-global: a verb run while another one builds its dots (a gibble verb
+# package-global: a verb run while another one builds its dots (a tbl_gpu verb
 # called inside a dot) cannot see or emit the outer verb's records.
 
 # The user's dots (`user_dots`, quosures) behind the aggregations or dots of

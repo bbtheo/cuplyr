@@ -1804,7 +1804,7 @@ filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
 #' - `suffix = c("", ...)` when it would still produce a genuine duplicate
 #'   output column name.
 #' - `nest_join()` (not one of the four verbs documented here) always runs
-#'   on the CPU: its result holds a list column, which a gibble can't hold.
+#'   on the CPU: its result holds a list column, which a GPU table can't hold.
 #'
 #' @name mutating-joins
 #' @rdname mutating-joins

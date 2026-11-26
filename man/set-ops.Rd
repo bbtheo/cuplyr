@@ -35,7 +35,7 @@ the order described above, except \code{setequal()}, which returns \code{TRUE} o
 \code{FALSE}.
 }
 \description{
-dplyr's row-set operations on gibbles, run on the GPU:
+dplyr's row-set operations on GPU tables, run on the GPU:
 \itemize{
 \item \code{union()}: the distinct rows of \code{x}, in \code{x}'s order, then the rows
 of \code{y} not already in \code{x}, in \code{y}'s order.

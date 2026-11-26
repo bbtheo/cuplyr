@@ -31,7 +31,7 @@ A \code{tbl_gpu} object containing only rows where all conditions are TRUE.
 The GPU memory for the filtered result is newly allocated.
 }
 \description{
-\code{filter()} keeps the rows of a gibble where every condition is \code{TRUE}, as
+\code{filter()} keeps the rows of a GPU table where every condition is \code{TRUE}, as
 \code{dplyr::filter()} does. The conditions listed under "Supported
 expressions" run on the GPU, with dplyr's rules for which rows are kept
 and for \code{NA} (see "NA semantics" below). Other conditions run in dplyr on

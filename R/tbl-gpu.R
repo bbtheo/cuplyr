@@ -1,10 +1,10 @@
-#' Create a gibble: a data frame in GPU memory
+#' Create a GPU table: a data frame in GPU memory
 #'
-#' `tbl_gpu()` copies an R data frame to GPU memory and returns a gibble,
-#' cuplyr's GPU table. `gibble()` is another name for it. You work with a
-#' gibble as with a tibble: pipe it through dplyr verbs such as `filter()`,
-#' `mutate()`, `summarise()` or `left_join()`, which run on the GPU, and
-#' bring the result back to R with `collect()`.
+#' `tbl_gpu()` copies an R data frame to GPU memory and returns a
+#' `tbl_gpu`, cuplyr's GPU table. You work with it as with a tibble: pipe it
+#' through dplyr verbs such as `filter()`, `mutate()`, `summarise()` or
+#' `left_join()`, which run on the GPU, and bring the result back to R with
+#' `collect()`.
 #'
 #' @param data A data frame or tibble to transfer to GPU memory. Supported
 #'   column types are double, integer, `bit64::integer64`, character,
@@ -22,7 +22,7 @@
 #'   the option, which beats the variable. An invalid option value warns once
 #'   and the default is used. All options are listed on [cuplyr-options].
 #'
-#' @return A gibble: an object of class `tbl_gpu` that holds the data in GPU
+#' @return A GPU table: an object of class `tbl_gpu` that holds the data in GPU
 #'   memory and works with dplyr verbs. Use `collect()` to get a tibble back.
 #'
 #' @details
@@ -30,16 +30,16 @@
 #' in lazy mode; only the verbs are deferred). The GPU memory is freed when
 #' the R object is garbage collected.
 #'
-#' ## Working with a gibble
-#' A gibble works with the dplyr verbs. What the GPU can't do, dplyr does on
-#' the CPU, and the result comes back to the GPU as a gibble (see
+#' ## Working with a GPU table
+#' A `tbl_gpu` works with the dplyr verbs. What the GPU can't do, dplyr does on
+#' the CPU, and the result comes back to the GPU as a `tbl_gpu` (see
 #' [cuplyr-fallback] to be told when that happens).
 #' \itemize{
 #'   \item [collect()][collect.tbl_gpu] runs the pending steps and brings the
 #'     result back to R as a tibble (a plain `data.frame` if you uploaded
 #'     one).
 #'   \item [compute()][compute.tbl_gpu] runs the pending steps and keeps the
-#'     result on the GPU, as a gibble with nothing pending: use it for a
+#'     result on the GPU, as a `tbl_gpu` with nothing pending: use it for a
 #'     result you use more than once.
 #'   \item [explain()][explain.tbl_gpu] and [show_query()][show_query.tbl_gpu]
 #'     print the pending plan, one dplyr call per step, without running it.
@@ -48,7 +48,7 @@
 #' }
 #'
 #' ## Lazy and eager execution
-#' A gibble is lazy by default: each verb adds a step to a plan, and the
+#' A `tbl_gpu` is lazy by default: each verb adds a step to a plan, and the
 #' GPU does the work only when you `collect()`, `compute()` or print the
 #' result. Before the plan runs, cuplyr optimizes it: columns no later step
 #' reads are dropped early, consecutive `mutate()` calls are combined,
@@ -59,7 +59,7 @@
 #' Errors in a verb's arguments (a missing column, a type error) are still
 #' raised when the verb is called. Printing a lazy table with pending
 #' operations (or calling `glimpse()` on it) runs the plan to show its first
-#' rows, under a `# A gibble [lazy]:` header; the table itself is unchanged and
+#' rows, under a `# A tbl_gpu [lazy]:` header; the table itself is unchanged and
 #' nothing is kept, so printing it twice runs the plan twice (`compute()` it
 #' first to look at it repeatedly). If the plan fails (an error, out of GPU
 #' memory), the print shows the schema and the message instead of raising.
@@ -67,14 +67,14 @@
 #' In eager mode (`tbl_gpu(df, lazy = FALSE)`), each dplyr verb runs on the
 #' GPU at once. This is simple but can lead to unnecessary intermediate
 #' allocations. `options(cuplyr.exec_mode = "eager")` (or the environment
-#' variable `CUPLYR_EXEC_MODE=eager`) makes every new gibble eager, and
-#' [as_eager()] and [as_lazy()] switch one gibble.
+#' variable `CUPLYR_EXEC_MODE=eager`) makes every new `tbl_gpu` eager, and
+#' [as_eager()] and [as_lazy()] switch one table.
 #'
 #' For measured timings and memory use of the two modes, see
 #' `vignette("performance", package = "cuplyr")`.
 #'
 #' ## Column types
-#' Each R column type is stored as a GPU type, the type the gibble's schema
+#' Each R column type is stored as a GPU type, the type the table's schema
 #' shows:
 #' \itemize{
 #'   \item `numeric` (double) -> FLOAT64
@@ -133,18 +133,6 @@
 #' that ran on the CPU. A fractional `Date` is floored with its own warning,
 #' `cuplyr_warning_fractional_date`.
 #'
-#' ## Gibbles
-#'
-#' "Gibble" is the user-facing name of a `tbl_gpu`: `print()` starts
-#' with `# A gibble:` and the dimensions, and `gibble()`, `as_gibble()` and
-#' `is_gibble()` are aliases of `tbl_gpu()`, `as_tbl_gpu()` and
-#' `is_tbl_gpu()`. The class is `tbl_gpu`, and `tbl_sum()` returns dplyr's
-#' values.
-#'
-#' The CRAN package gibble (geometry decomposition, Michael Sumner) also
-#' exports a function called `gibble()`. When both packages are attached, the
-#' one attached last masks the other; `cuplyr::gibble()` always works.
-#'
 #' @seealso
 #' \code{\link{collect.tbl_gpu}} to transfer data back to R,
 #' \code{\link{compute.tbl_gpu}} to execute and keep on GPU,
@@ -176,10 +164,6 @@
 tbl_gpu <- function(data, ..., lazy = NULL) {
   UseMethod("tbl_gpu")
 }
-
-#' @rdname tbl_gpu
-#' @export
-gibble <- tbl_gpu
 
 # With libcudf's large strings disabled (LIBCUDF_LARGE_STRINGS_ENABLED not "1"),
 # a column whose characters reach the INT64-offsets threshold cannot be stored.
@@ -798,10 +782,6 @@ is_tbl_gpu <- function(x) {
   inherits(x, "tbl_gpu")
 }
 
-#' @rdname is_tbl_gpu
-#' @export
-is_gibble <- is_tbl_gpu
-
 #' Coerce to a GPU table
 #'
 #' Converts a data frame or compatible object to a `tbl_gpu` object,
@@ -823,10 +803,6 @@ is_gibble <- is_tbl_gpu
 as_tbl_gpu <- function(x, ...) {
   tbl_gpu(x, ...)
 }
-
-#' @rdname as_tbl_gpu
-#' @export
-as_gibble <- as_tbl_gpu
 
 #' Get dimensions of a GPU table
 #'

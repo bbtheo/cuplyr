@@ -329,7 +329,7 @@ restore_set_op_factor_levels <- function(result, target_schema) {
   result
 }
 
-# A set operation's result is lazy when `x` or `y` is a lazy gibble (the
+# A set operation's result is lazy when `x` or `y` is a lazy GPU table (the
 # push_join() rule), eager otherwise. The verbs built from bind_rows() and
 # align_to_schema() materialize their inputs, whose helpers return eager
 # tables, so the mode is put back here.
@@ -359,7 +359,7 @@ zero_set_op_result <- function(x, y, verb, keep_one) {
 
 #' Set operations on `tbl_gpu` tables
 #'
-#' dplyr's row-set operations on gibbles, run on the GPU:
+#' dplyr's row-set operations on GPU tables, run on the GPU:
 #' \itemize{
 #'   \item `union()`: the distinct rows of `x`, in `x`'s order, then the rows
 #'     of `y` not already in `x`, in `y`'s order.

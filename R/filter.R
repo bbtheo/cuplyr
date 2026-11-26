@@ -1,6 +1,6 @@
 #' Keep rows that match a condition
 #'
-#' `filter()` keeps the rows of a gibble where every condition is `TRUE`, as
+#' `filter()` keeps the rows of a GPU table where every condition is `TRUE`, as
 #' `dplyr::filter()` does. The conditions listed under "Supported
 #' expressions" run on the GPU, with dplyr's rules for which rows are kept
 #' and for `NA` (see "NA semantics" below). Other conditions run in dplyr on

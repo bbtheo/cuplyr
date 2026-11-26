@@ -65,7 +65,7 @@ A \code{tbl_gpu} object with one row per group containing the grouping
 columns and computed aggregations.
 }
 \description{
-\code{summarise()} computes one row per group of a gibble (or one row in all,
+\code{summarise()} computes one row per group of a GPU table (or one row in all,
 when it is ungrouped), as \code{dplyr::summarise()} does. The aggregations
 listed below run on the GPU; any other expression is evaluated by dplyr on
 the CPU, with a fallback notice that names the reason.

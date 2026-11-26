@@ -181,7 +181,7 @@ rolling keys that are factors, logicals or a Date against a POSIXct.
 \item \code{suffix = c("", ...)} when it would still produce a genuine duplicate
 output column name.
 \item \code{nest_join()} (not one of the four verbs documented here) always runs
-on the CPU: its result holds a list column, which a gibble can't hold.
+on the CPU: its result holds a list column, which a GPU table can't hold.
 }
 }
 }

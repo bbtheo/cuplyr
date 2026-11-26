@@ -1,6 +1,6 @@
 #' Summarise each group down to one row
 #'
-#' `summarise()` computes one row per group of a gibble (or one row in all,
+#' `summarise()` computes one row per group of a GPU table (or one row in all,
 #' when it is ungrouped), as `dplyr::summarise()` does. The aggregations
 #' listed below run on the GPU; any other expression is evaluated by dplyr on
 #' the CPU, with a fallback notice that names the reason.

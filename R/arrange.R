@@ -1,6 +1,6 @@
 #' Order rows using column values
 #'
-#' `arrange()` orders the rows of a gibble by the values of the columns you
+#' `arrange()` orders the rows of a GPU table by the values of the columns you
 #' name, as `dplyr::arrange()` does. The sort runs on the GPU.
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
@@ -37,7 +37,7 @@
 #' For very large tables, consider filtering to reduce size before sorting.
 #'
 #' ## Supported column types
-#' Every column type a gibble holds can be a sort key: double, integer,
+#' Every column type a GPU table holds can be a sort key: double, integer,
 #' integer64, character, logical, factor, `Date` and `POSIXct`. A factor sorts
 #' by the order of its levels, as in dplyr.
 #'
