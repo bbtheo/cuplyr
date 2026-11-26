@@ -52,8 +52,9 @@ inline cudf::size_type compute_slice_size(double amount, bool is_prop, cudf::siz
 // F55: a floating column read with NaN as null (the evaluator's
 // eval_ctx::nan_as_null() has a cheaper view route over the same mask; every
 // other site uses this copy). If `col` is FLOAT64/
-// FLOAT32 and holds a NaN (the NaN-nulled mask grew the null count), returns
-// a copy that owns the NaN-nulled mask; otherwise nullptr, so the caller keeps
+// FLOAT32 and holds a NaN (the mask from cuplyr::nan_null_mask(), built
+// without copying the column, grew the null count), returns a copy that owns
+// the NaN-nulled mask; otherwise nullptr (no copy is made), so the caller keeps
 // `col` (and a non-nullable column stays non-nullable). The data is untouched:
 // only the mask differs, so the NaN value survives wherever the original column
 // is gathered or returned.

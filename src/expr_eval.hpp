@@ -3492,7 +3492,7 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
     //                   gives +-Inf and raises flag 4 / 8 (R's warning).
     //                   Zero rows raise 16 / 32 (INT32) or 4 / 8 (FLOAT64).
     // FLOAT64 operands add R's NaN rules: under na.rm = TRUE a NaN is missing
-    // too (nans_to_nulls first); under na.rm = FALSE min/max give NaN for a
+    // too (the NaN-as-null mask first); under na.rm = FALSE min/max give NaN for a
     // NaN operand unless an NA is present (NA wins), whatever the operand
     // order, and sum/mean/prod propagate NaN arithmetically.
     // An INT32 sum accumulates in INT64 and raises flag 1 when a row leaves

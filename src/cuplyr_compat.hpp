@@ -3,7 +3,9 @@
 // The few places where libcudf 26.02 and 26.10 differ in a way no single call
 // spelling covers (the memory-resource differences live in cuplyr_mr.hpp).
 // Everything else builds unchanged on both. 26.10 is the development series;
-// 26.02 is the supported minimum.
+// 26.02 is the supported minimum. The blocks below call the 26.10 spelling of
+// an API that 26.10 deprecated or moved, and the 26.02 one otherwise; the rest
+// of the source calls the wrappers, never the deprecated names.
 #pragma once
 
 #include <variant>  // libcudf 26.10 headers using std::variant (cudf/ast/expressions.hpp) do not include it
@@ -19,7 +21,6 @@
 #include <cudf/types.hpp>
 
 #include <cudf/utilities/default_stream.hpp>
-#include <rmm/cuda_stream_view.hpp>
 
 #include <cuda_runtime.h>
 
@@ -31,7 +32,12 @@
 
 // libcudf 26.10 moved distinct_count() out of cudf/stream_compaction.hpp into
 // its own header; 26.02 still declares it in stream_compaction.hpp. The new
-// header is also the marker for the 26.10 filtered_join constructor below.
+// header is also the marker for CUPLYR_CUDF_NEW_API, the one macro for every
+// 26.02/26.10 difference below: filtered_join's constructor, apply_retention_mask(),
+// the NaN-as-null mask, slice_strings() and the parquet reader's column_names().
+// The two series are the only ones supported (26.02 is the declared minimum, 26.10
+// the default), so one marker is enough; a series that splits these APIs apart
+// would need one macro per API.
 #if __has_include(<cudf/reduction/distinct_count.hpp>)
 #include <cudf/reduction/distinct_count.hpp>
 #define CUPLYR_CUDF_NEW_API 1

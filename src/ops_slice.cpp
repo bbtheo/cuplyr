@@ -41,7 +41,7 @@
 //     positions, and gather; na_rm drops NA rows among them afterwards.
 //   - with_ties = TRUE otherwise: stable-sort, build a keep mask from
 //     `cudf::rank()` (MIN method == SQL RANK()), gather the mask into sorted
-//     order and apply_boolean_mask(), which preserves the sorted order.
+//     order and apply_retention_mask(), which preserves the sorted order.
 //   Every route returns the kept rows in sorted order, with no CPU round-trip.
 //   The "cuplyr.topk_path" option ("auto", "topk", "sort") forces a route and
 //   the result pointer's "topk" attribute records which one ran.
@@ -383,7 +383,7 @@ std::unique_ptr<cudf::column> topk_positions(cudf::column_view key, cudf::size_t
         key.type(), stream, mr);
     best_keys.reset();
 
-    // A null or NaN key compares to null, which apply_boolean_mask() drops
+    // A null or NaN key compares to null, which apply_retention_mask() drops
     std::unique_ptr<cudf::column> within = cudf::binary_operation(
         key, *cut,
         descending ? cudf::binary_operator::GREATER_EQUAL : cudf::binary_operator::LESS_EQUAL,
