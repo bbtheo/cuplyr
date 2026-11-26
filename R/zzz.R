@@ -8,6 +8,9 @@
 # `na_chr` and the two `ffi_standalone_*` symbols are what the vendored rlang
 # standalone files (import-standalone-types-check.R) reference unqualified:
 # check_bool(), check_number_whole() and check_string(allow_na = TRUE) need them.
+# `if_else` is the same for the expressions rows_patch()/rows_update() hand to a
+# dplyr::mutate() that runs on the CPU (R/rows.R), `row_number` for the unevaluated
+# prototype of ir_parse_ntile()'s call_match().
 #' @useDynLib cuplyr, .registration = TRUE
 #' @importFrom Rcpp sourceCpp
 #' @importFrom rlang %||% obj_address is_reference
@@ -19,7 +22,7 @@
 #' @importFrom utils head tail
 #' @importFrom rlang env_get_list
 #' @importFrom rlang na_chr ffi_standalone_is_bool_1.0.7 ffi_standalone_check_number_1.0.7
-#' @importFrom dplyr n group_cols n_distinct
+#' @importFrom dplyr n group_cols n_distinct if_else row_number
 NULL
 
 # Opt this package's namespace into {cli}-formatted rlang conditions

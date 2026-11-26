@@ -126,11 +126,6 @@ detect_install_method <- function(src_dir = ".", verbose = FALSE) {
   }
 
   # 3. System dependencies present?
-  # Suppress console output from check_deps (we only need the result)
-  deps <- suppressMessages(capture.output(
-    check_deps(format = "text", verbose = FALSE),
-    type = "output"
-  ))
   deps <- check_deps(format = "text", verbose = FALSE)
   if (isTRUE(deps$checks$cuda$ok) && isTRUE(deps$checks$cudf$ok)) {
     if (verbose) message("CUDA and cuDF found on system")
