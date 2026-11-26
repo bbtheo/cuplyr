@@ -118,10 +118,20 @@ test_that("NEWS records that RAPIDS 25.12 is no longer supported", {
   lines <- readLines(p94_file("NEWS.md"), warn = FALSE)
   heads <- grep("^# ", lines)
   expect_gt(length(heads), 0L)
-  dev <- lines[seq(heads[1], if (length(heads) > 1L) heads[2] - 1L else length(lines))]
-  expect_match(dev[1], "development version", ignore.case = TRUE)
+  # The change shipped in 0.2.0; before the release its section was the
+  # development version.
+  start <- grep("^# cuplyr 0\\.2\\.0\\s*$", lines)
+  if (length(start) == 0L) {
+    start <- grep("^# cuplyr \\(development version\\)", lines)
+  }
+  expect_length(start, 1L)
+  end <- c(heads[heads > start], length(lines) + 1L)[1] - 1L
+  section <- lines[seq(start, end)]
 
-  hit <- grep("25\\.12", dev, value = TRUE)
+  # One bullet (its wrapped lines joined) names 25.12, 26.02 and #94.
+  bullets <- split(section, cumsum(grepl("^\\s*[*-] ", section)))
+  text <- vapply(bullets, paste, "", collapse = " ")
+  hit <- text[grepl("25\\.12", text)]
   expect_gt(length(hit), 0L)
   expect_true(any(grepl("26\\.02", hit) & grepl("#94", hit, fixed = TRUE)),
               info = paste(hit, collapse = "\n"))

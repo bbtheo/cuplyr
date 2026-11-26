@@ -709,7 +709,13 @@ test_that("?gpu_memory_state links the vignette and NEWS documents the change", 
   expect_match(rd_txt, "async", fixed = TRUE)
 
   news <- paste(readLines(file.path(f65_root(), "NEWS.md"), warn = FALSE), collapse = "\n")
-  first <- sub("(?s)\n# cuplyr [0-9].*$", "", news, perl = TRUE)  # development section only
+  # The 0.2.0 section (the development section before the release).
+  first <- if (grepl("(?m)^# cuplyr 0\\.2\\.0\\s*$", news, perl = TRUE)) {
+    sub("(?s)^.*?\n?# cuplyr 0\\.2\\.0\\s*\n", "", news, perl = TRUE)
+  } else {
+    news
+  }
+  first <- sub("(?s)\n# cuplyr [0-9].*$", "", first, perl = TRUE)
   expect_match(first, "cuplyr.memory_resource", fixed = TRUE)
   expect_match(first, "cuplyr.release_threshold", fixed = TRUE)
   expect_match(first, "async", fixed = TRUE)
