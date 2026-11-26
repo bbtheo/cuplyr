@@ -12,20 +12,31 @@ pandoc = ">=3.0"
 # each: `default` is the one cuplyr is developed, tested and gated on (26.10);
 # `rapids2602` is the declared minimum, checked at release time with
 # `pixi run -e rapids2602 conformance` or CUPLYR_PIXI_ENV=rapids2602 tools/conformance.
-# The CUDA toolkit (nvcc, headers) comes from the system install that
-# ./configure finds through CUDA_HOME; the environments carry only the runtime
-# libraries.
+# Each environment also carries the CUDA 13 build tools (nvcc, the runtime and
+# crt headers, the libcuda stub), so a machine without a system CUDA toolkit can
+# build cuplyr. They are the same packages as the conda recipe's: cuda-nvcc-tools
+# rather than cuda-nvcc, which would also bring conda's own host compiler.
+# ./configure prefers CUDA_HOME when it is set, so a system toolkit still wins
+# where one is configured.
 [feature.rapids2610.dependencies]
 libcudf = "26.10.*"
 librmm = "26.10.*"
 libkvikio = "26.10.*"
 cuda-version = "13.*"
+cuda-nvcc-tools = "13.*"
+cuda-cudart-dev = "13.*"
+cuda-crt-dev_linux-64 = "13.*"
+cuda-driver-dev = "13.*"
 
 [feature.rapids2602.dependencies]
 libcudf = "26.02.*"
 librmm = "26.02.*"
 libkvikio = "26.02.*"
 cuda-version = "13.*"
+cuda-nvcc-tools = "13.*"
+cuda-cudart-dev = "13.*"
+cuda-crt-dev_linux-64 = "13.*"
+cuda-driver-dev = "13.*"
 
 [environments]
 default = ["rapids2610"]
