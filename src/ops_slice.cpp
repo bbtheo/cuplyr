@@ -444,9 +444,10 @@ SEXP gpu_slice_rank(SEXP xptr, int order_col_idx, bool descending, double amount
     std::unique_ptr<cudf::column> nan_nulled;
     if (order_col.type().id() == cudf::type_id::FLOAT64 ||
         order_col.type().id() == cudf::type_id::FLOAT32) {
-        auto nulled = cuplyr::nan_to_null_column(order_col);
-        if (nulled->null_count() > order_col.null_count()) {
-            nan_nulled = std::move(nulled);
+        auto mask = cuplyr::nan_null_mask(order_col);
+        if (mask.second > order_col.null_count()) {
+            nan_nulled = std::make_unique<cudf::column>(order_col);
+            nan_nulled->set_null_mask(std::move(*mask.first), mask.second);
             order_col = nan_nulled->view();
         }
     }

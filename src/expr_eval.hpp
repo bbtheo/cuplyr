@@ -3577,8 +3577,10 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
                 // a GPU-computed NaN is a missing value to R's na.rm = TRUE
                 // (cuplyr's summarise() agrees, F22): make it null, so the
                 // neutral fill, the mean's count and the min/max fold skip it
-                auto nn = cuplyr::nan_to_null_column(x->view());
-                if (nn->null_count() > 0 || x->null_count() > 0) x = std::move(nn);
+                auto nn = cuplyr::nan_null_mask(x->view());
+                if (nn.second > 0 || x->null_count() > 0) {
+                    x->set_null_mask(std::move(*nn.first), nn.second);
+                }
             }
             if (fn == "mean" && na_rm) {
                 auto valid = cudf::cast(cudf::is_valid(x->view())->view(), f64);

@@ -476,7 +476,9 @@ FloatColumnInfo inspect_float_column(cudf::column_view col) {
     auto* flag = static_cast<cudf::numeric_scalar<bool>*>(any_nan.get());
     info.has_nan = flag->is_valid() && flag->value();
     if (info.has_nan) {
-        info.nan_nulled = cuplyr::nan_to_null_column(col);
+        info.nan_nulled = std::make_unique<cudf::column>(col);
+        auto mask = cuplyr::nan_null_mask(col);
+        info.nan_nulled->set_null_mask(std::move(*mask.first), mask.second);
     }
     return info;
 }

@@ -54,9 +54,12 @@ inline std::unique_ptr<cudf::column> ts_to_float64(const cudf::column_view& col)
 inline std::unique_ptr<cudf::column> float64_to_ts(std::unique_ptr<cudf::column> f,
                                                    cudf::type_id target, bool& fractional) {
     fractional = false;
-    f = cuplyr::nan_to_null_column(f->view());
     if (f->size() == 0) {
         return cudf::make_empty_column(cudf::data_type{target});
+    }
+    {
+        auto mask = cuplyr::nan_null_mask(f->view());
+        f->set_null_mask(std::move(*mask.first), mask.second);
     }
 
     std::unique_ptr<cudf::column> whole;

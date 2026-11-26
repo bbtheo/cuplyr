@@ -63,8 +63,10 @@ inline std::unique_ptr<cudf::column> nan_nulled_copy(cudf::column_view col) {
         return nullptr;
     }
     if (col.size() == 0) return nullptr;
-    auto copy = cuplyr::nan_to_null_column(col);
-    if (copy->null_count() <= col.null_count()) return nullptr;
+    auto mask = cuplyr::nan_null_mask(col);
+    if (mask.second <= col.null_count()) return nullptr;
+    auto copy = std::make_unique<cudf::column>(col);
+    copy->set_null_mask(std::move(*mask.first), mask.second);
     return copy;
 }
 

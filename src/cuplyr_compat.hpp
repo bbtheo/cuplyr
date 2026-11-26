@@ -12,7 +12,9 @@
 #include <cudf/join/filtered_join.hpp>
 #include <cudf/stream_compaction.hpp>
 #include <cudf/strings/slice.hpp>
+#include <cudf/null_mask.hpp>
 #include <cudf/transform.hpp>
+#include <cudf/unary.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/types.hpp>
 
@@ -84,30 +86,28 @@ inline std::unique_ptr<cudf::table> apply_retention_mask(
 #endif
 }
 
-// A copy of the floating column `col` whose null mask also marks NaN as null
-// (cudf::column_nans_to_nulls() on 26.10; the deprecated mask-only
-// cudf::nans_to_nulls() plus a copy on 26.02).
-inline std::unique_ptr<cudf::column> nan_to_null_column(cudf::column_view const& col) {
-#if CUPLYR_CUDF_NEW_API
-  return cudf::column_nans_to_nulls(col);
-#else
-  auto mask = cudf::nans_to_nulls(col);
-  auto out = std::make_unique<cudf::column>(col);
-  out->set_null_mask(std::move(*mask.first), mask.second);
-  return out;
-#endif
-}
-
-// Only the NaN-as-null mask of `col` and its null count, for callers that
-// build a view over the original data. On 26.10 this releases the mask of
-// column_nans_to_nulls()'s result (the data copy is freed).
+// The NaN-as-null mask of the floating column `col`: valid where `col` is valid
+// and not NaN, with its null count. Only the mask is built, never a copy of the
+// data, so a caller keeps the original data under a view or sets the mask on a
+// column it owns, and copies only when a NaN is present. cudf::nans_to_nulls()
+// (26.02) is deprecated in 26.04; its replacement, column_nans_to_nulls(),
+// returns a whole copy of the column (all of it thrown away when only the mask
+// is wanted: 8 B per row on every double comparison), so on 26.10 the mask is
+// built from the 1-byte is_not_nan() column. The data under a null can be NaN
+// (R's NA_real_ payload), so a column holding nulls has its own mask ANDed in.
 inline std::pair<std::unique_ptr<rmm::device_buffer>, cudf::size_type> nan_null_mask(
     cudf::column_view const& col) {
 #if CUPLYR_CUDF_NEW_API
-  auto out = cudf::column_nans_to_nulls(col);
-  auto count = out->null_count();
-  auto contents = out->release();
-  return {std::move(contents.null_mask), count};
+  if (col.is_empty()) return {std::make_unique<rmm::device_buffer>(), 0};
+  auto not_nan = cudf::is_not_nan(col);
+  auto mask = cudf::bools_to_mask(not_nan->view());
+  if (col.null_count() == 0) return mask;
+  not_nan.reset();
+  std::vector<cudf::bitmask_type const*> masks{
+      static_cast<cudf::bitmask_type const*>(mask.first->data()), col.null_mask()};
+  std::vector<cudf::size_type> begin_bits{0, col.offset()};
+  auto both = cudf::bitmask_and(masks, begin_bits, col.size());
+  return {std::make_unique<rmm::device_buffer>(std::move(both.first)), both.second};
 #else
   return cudf::nans_to_nulls(col);
 #endif
