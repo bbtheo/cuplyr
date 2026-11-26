@@ -1,9 +1,9 @@
 # cuplyr 0.2.0
 
 cuplyr 0.2.0 brings most of dplyr to the GPU. Nearly every dplyr verb now
-works on a gibble, cuplyr's GPU table. Most run on the GPU, and the rest run
-in dplyr on the CPU with the same result. Gibbles are lazy by default, so an
-optimizer runs the whole pipeline at `collect()`. Also new: `join_by()`
+works on a `tbl_gpu`, cuplyr's GPU table. Most run on the GPU, and the rest
+run in dplyr on the CPU with the same result. GPU tables are lazy by default,
+so an optimizer runs the whole pipeline at `collect()`. Also new: `join_by()`
 joins, window and rolling functions, `across()`, `rowwise()`, set operations,
 Parquet files on the GPU, exact `integer64` columns and a conda package.
 cuplyr now needs RAPIDS libcudf 26.02 or later and a GPU with compute
@@ -11,14 +11,14 @@ capability 7.5 or higher.
 
 ## Breaking changes
 
-* Gibbles are lazy by default. `tbl_gpu()` returns a lazy gibble, each verb
+* GPU tables are lazy by default. `tbl_gpu()` returns a lazy table, each verb
   records a step, and `collect()`, `compute()` or `print()` run the plan.
   Errors in a verb's arguments are still raised by that verb, but dplyr's
   warnings, such as integer overflow or a many-to-many join, come when the
   plan runs, at every `print()` too. For eager tables, set
   `options(cuplyr.exec_mode = "eager")` or pass `lazy = FALSE`.
 
-* On a lazy gibble with pending steps, `nrow()` and `dim()` run the plan,
+* On a lazy table with pending steps, `nrow()` and `dim()` run the plan,
   while `gpu_object_info()` and `gpu_memory_usage()` count the rows of the
   table it was made from and `verify_gpu_data()` can return `FALSE`. Call
   `compute()` first.
@@ -65,7 +65,7 @@ capability 7.5 or higher.
   - `integer64` columns are exact and collect to `bit64::integer64`; they used
     to be uploaded as doubles, which corrupted them.
   - `POSIXct` columns keep their time zone instead of coming back in UTC.
-  - A gibble made from a `data.frame` collects to a `data.frame`, with its
+  - A GPU table made from a `data.frame` collects to a `data.frame`, with its
     attributes.
   - Factor columns stay factors after `select()`, joins, `bind_rows()`,
     `bind_cols()`, a lazy `mutate()` and as `summarise()` group keys, and
@@ -79,18 +79,18 @@ capability 7.5 or higher.
   on the CPU, such as `end - start` on dates. Returning such columns is an
   open issue (#65).
 
-* `print()` uses a tibble-style `# A gibble: n x m` header, R type labels and
+* `print()` uses a tibble-style `# A tbl_gpu: n x m` header, R type labels and
   factor labels.
 
 * `show_query()` is now a method for dplyr's generic. Its argument is `x`, and
   it prints the plan as R code and returns `x` invisibly.
 
-* `$`, `[[` and `length()` of a gibble give its columns, as for a data frame,
-  and `names<-` accepts `NA` and empty names. In 0.1.1, `$`, `[[` and
+* `$`, `[[` and `length()` of a GPU table give its columns, as for a data
+  frame, and `names<-` accepts `NA` and empty names. In 0.1.1, `$`, `[[` and
   `length()` gave the object's internal fields, such as `x$schema` and
   `x$ptr`, and `names<-` refused those names (#4). `split()`, `with()`,
-  `subset()`, `t()`, `as.environment()`, `is.na()` and `anyNA()` of a gibble
-  raise an error; they used to act on the internal fields.
+  `subset()`, `t()`, `as.environment()`, `is.na()` and `anyNA()` of a GPU
+  table raise an error; they used to act on the internal fields.
 
 ## Installation and requirements
 
@@ -142,10 +142,7 @@ capability 7.5 or higher.
 * `[`, `[<-` for whole columns, `as.data.frame()`, `as_tibble()`,
   `glimpse()`, `head()`, `rbind()`, `cbind()`, `vctrs::vec_slice()`,
   `vctrs::vec_size()`, `dplyr::bind_rows()` and `purrr::map_dfr()` work on
-  gibbles.
-
-* `gibble()`, `as_gibble()` and `is_gibble()` are aliases of `tbl_gpu()`,
-  `as_tbl_gpu()` and `is_tbl_gpu()`.
+  GPU tables.
 
 ### Lazy plans
 
@@ -156,7 +153,7 @@ capability 7.5 or higher.
   including the columns a Parquet scan reads and the reason for each CPU
   fallback (#10).
 
-* Printing a lazy gibble runs the whole plan to show the first rows and keeps
+* Printing a lazy table runs the whole plan to show the first rows and keeps
   nothing; a plan over a Parquet file prints its schema unless it only selects
   or renames columns.
 
@@ -202,7 +199,7 @@ capability 7.5 or higher.
 * `union()`, `union_all()`, `intersect()`, `setdiff()`, `symdiff()` and
   `setequal()` run on the GPU. `bind_rows()` follows vctrs' type rules and
   binds factors to the union of their levels. Binds and set operations return
-  a lazy gibble when any input is lazy (#20, #70).
+  a lazy table when any input is lazy (#20, #70).
 
 ### Parquet
 
@@ -278,7 +275,7 @@ capability 7.5 or higher.
 
 ## Performance
 
-* Recording a `mutate()` on a lazy gibble no longer slows down as the plan
+* Recording a `mutate()` on a lazy table no longer slows down as the plan
   grows, and a column passed through a verb is shared instead of copied.
 
 * Each `filter()` or `mutate()` call runs as one fused GPU kernel where it can,

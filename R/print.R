@@ -61,7 +61,7 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
       } else if (inherits(res, "error")) {
         print_lazy_failure(x, res, width)
       } else {
-        print_gibble_body(res$table, width, body_w, "A gibble [lazy]",
+        print_tbl_gpu_body(res$table, width, body_w, "A tbl_gpu [lazy]",
                           dims = dim_desc_n(res$nrow, length(res$table$schema$names)))
         cat(lazy_footer(), "\n", sep = "")
       }
@@ -71,7 +71,7 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
     if (inherits(res, "error")) {
       print_lazy_failure(x, res, width)
     } else {
-      print_gibble_body(res, width, body_w, "A gibble [lazy]")
+      print_tbl_gpu_body(res, width, body_w, "A tbl_gpu [lazy]")
       cat(lazy_footer(), "\n", sep = "")
     }
     return(invisible(x))
@@ -83,19 +83,19 @@ print.tbl_gpu <- function(x, ..., width = NULL) {
     return(invisible(x))
   }
 
-  print_gibble_body(x, width, body_w, "A gibble")
+  print_tbl_gpu_body(x, width, body_w, "A tbl_gpu")
   invisible(x)
 }
 
 # The schema of a lazy table that is not run (no data to show, or a plan over
 # a file that printing must not read).
 print_unmaterialized <- function(x, width) {
-  cat("# A gibble [lazy, not materialized]\n")
+  cat("# A tbl_gpu [lazy, not materialized]\n")
   cat(schema_line(.subset2(x, "schema"), width, .subset2(x, "unspecified")), sep = "\n")
   cat("# Operations pending: ", ast_count_ops(.subset2(x, "lazy_ops")), "\n", sep = "")
   grouping <- lazy_grouping_sum(x)
   if (length(grouping) > 0L) {
-    cat(gibble_header(x, width, c("A gibble" = "", grouping))[-1L], sep = "\n")
+    cat(tbl_gpu_header(x, width, c("A tbl_gpu" = "", grouping))[-1L], sep = "\n")
   }
   cat(lazy_footer(), "\n", sep = "")
 }
@@ -107,7 +107,7 @@ print_lazy_failure <- function(x, err, width) {
   ncols <- length(.subset2(x, "schema")$names)
   dims <- sub("^1", "??", pillar::dim_desc(matrix(0L, 1L, ncols)))
   sum <- c(dims, lazy_grouping_sum(x))
-  cat(gibble_header(x, width, sum, name = "A gibble [lazy]"), sep = "\n")
+  cat(tbl_gpu_header(x, width, sum, name = "A tbl_gpu [lazy]"), sep = "\n")
   cat(schema_line(.subset2(x, "schema"), width, .subset2(x, "unspecified")), sep = "\n")
   cat("# Operations pending: ", ast_count_ops(.subset2(x, "lazy_ops")), "\n", sep = "")
   msg <- strsplit(conditionMessage(err), "\n", fixed = TRUE)[[1L]]
@@ -199,10 +199,10 @@ preview_type_abbr <- function(types, preview, lvls) {
 }
 
 # The header and the glimpse-style body of a table with GPU data and nothing
-# pending, `name` being the header's first name ("A gibble").
+# pending, `name` being the header's first name ("A tbl_gpu").
 # `dims` replaces the dimensions in the header (a preview of a file knows its
 # row count from the footer, not from the rows it holds).
-print_gibble_body <- function(x, width, body_w, name, dims = NULL) {
+print_tbl_gpu_body <- function(x, width, body_w, name, dims = NULL) {
   ptr <- .subset2(x, "ptr")
   schema <- .subset2(x, "schema")
   lvls <- levels_by_position(schema)
@@ -210,11 +210,11 @@ print_gibble_body <- function(x, width, body_w, name, dims = NULL) {
   col_names <- display_names(schema$names)
 
   if (is.null(dims)) {
-    cat(gibble_header(x, width, name = name), sep = "\n")
+    cat(tbl_gpu_header(x, width, name = name), sep = "\n")
   } else {
     sum <- tbl_sum(x)
     sum[[1L]] <- dims
-    cat(gibble_header(x, width, sum, name = name), sep = "\n")
+    cat(tbl_gpu_header(x, width, sum, name = name), sep = "\n")
   }
 
   # Get preview data (first 10 rows for value display)
@@ -311,18 +311,18 @@ body_width <- function(width = NULL) {
 }
 
 # tibble's header lines for `sum` (default tbl_sum(x)) with the first name
-# ("A tibble" / "A data frame") renamed "A gibble": pillar's own
+# ("A tibble" / "A data frame") renamed "A tbl_gpu": pillar's own
 # tbl_format_header(), so the "name:" padding, wrapping at `width` with "#   "
 # continuation lines and subtle styling are exactly tibble's. `setup` carries
 # the fields that method reads (tbl_sum, width; see ?pillar::tbl_format_setup).
 # `width` is the resolved print width (print_width()). A different `name`
-# ("A gibble [lazy]") only replaces the text of the first line, after the
+# ("A tbl_gpu [lazy]") only replaces the text of the first line, after the
 # padding, so the other lines stay those of an eager table.
-gibble_header <- function(x, width, sum = tbl_sum(x), name = "A gibble") {
-  names(sum)[1] <- "A gibble"
+tbl_gpu_header <- function(x, width, sum = tbl_sum(x), name = "A tbl_gpu") {
+  names(sum)[1] <- "A tbl_gpu"
   out <- pillar::tbl_format_header(x, list(tbl_sum = sum, width = width))
-  if (!identical(name, "A gibble")) {
-    out[1L] <- sub("A gibble", name, out[1L], fixed = TRUE)
+  if (!identical(name, "A tbl_gpu")) {
+    out[1L] <- sub("A tbl_gpu", name, out[1L], fixed = TRUE)
   }
   out
 }

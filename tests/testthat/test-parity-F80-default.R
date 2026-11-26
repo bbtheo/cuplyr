@@ -1,10 +1,10 @@
-# F80: gibbles are lazy by default.
+# F80: GPU tables are lazy by default.
 #
 # Contract (scratchpad/parity/features/F80.md):
 # - resolve_exec_mode() defaults to "lazy"; `lazy =` > options(cuplyr.exec_mode)
 #   > CUPLYR_EXEC_MODE > default, as before.
-# - Every way a gibble is born follows that rule, and a verb's result keeps its
-#   input's mode (a multi-input verb is lazy when any gibble input is lazy, as
+# - Every way a GPU table is born follows that rule, and a verb's result keeps its
+#   input's mode (a multi-input verb is lazy when any GPU-table input is lazy, as
 #   joins already are). An eager input stays eager everywhere, including a
 #   join whose `y` is uploaded by `copy = TRUE`.
 # - Errors stay at the verb on the lazy default (F68a's guarantee).
@@ -68,20 +68,17 @@ test_that("resolve_exec_mode() defaults to lazy, with the old precedence", {
   expect_identical(resolve_exec_mode("eager"), "eager")
 })
 
-test_that("tbl_gpu(), gibble(), as_gibble() and as_tbl_gpu() make lazy tables by default", {
+test_that("tbl_gpu() and as_tbl_gpu() make lazy tables by default", {
   skip_if_no_gpu()
   f80_local_default()
   df <- f80_df()
   expect_identical(f80_mode(tbl_gpu(df)), "lazy")
-  expect_identical(f80_mode(gibble(df)), "lazy")
-  expect_identical(f80_mode(as_gibble(df)), "lazy")
   expect_identical(f80_mode(as_tbl_gpu(df)), "lazy")
   # a grouped_df and a rowwise_df upload lazy too
   expect_identical(f80_mode(tbl_gpu(dplyr::group_by(df, g))), "lazy")
   expect_identical(f80_mode(tbl_gpu(dplyr::rowwise(df))), "lazy")
 
   expect_identical(f80_mode(tbl_gpu(df, lazy = FALSE)), "eager")
-  expect_identical(f80_mode(gibble(df, lazy = FALSE)), "eager")
   withr::with_options(list(cuplyr.exec_mode = "eager"),
                       expect_identical(f80_mode(tbl_gpu(df)), "eager"))
   withr::with_envvar(c(CUPLYR_EXEC_MODE = "eager"),
@@ -108,7 +105,7 @@ test_that("a verb on a default table records a plan and collects dplyr's result"
   expect_true(has_pending_ops(res))
 })
 
-test_that("tbl_gpu() of a gibble, as_lazy() and as_eager() keep their documented behaviour", {
+test_that("tbl_gpu() of a tbl_gpu, as_lazy() and as_eager() keep their documented behaviour", {
   skip_if_no_gpu()
   f80_local_default()
   df <- f80_df()
@@ -147,7 +144,7 @@ test_that("compute() and collapse() of a lazy pipeline keep it lazy with nothing
 # ---------------------------------------------------------------------------
 
 # Each entry: function(d, yy, ydf) of the main table `d`, a second table `yy`
-# of the same kind (gibble or tibble) and the plain tibble `ydf`.
+# of the same kind (tbl_gpu or tibble) and the plain tibble `ydf`.
 f80_verbs <- list(
   filter        = function(d, yy, ydf) dplyr::filter(d, x > 0),
   mutate        = function(d, yy, ydf) dplyr::mutate(d, z = x * 2),
@@ -198,7 +195,7 @@ f80_verbs <- list(
   rows_append   = function(d, yy, ydf) dplyr::rows_append(d, dplyr::filter(d, g == 3L))
 )
 
-# `bind_rows()`/`bind_cols()` are cuplyr's (dplyr's refuse a gibble); a tibble
+# `bind_rows()`/`bind_cols()` are cuplyr's (dplyr's refuse a tbl_gpu); a tibble
 # goes through them to dplyr unchanged.
 f80_run_verbs <- function(make, mode) {
   df <- f80_df()
@@ -229,7 +226,7 @@ test_that("every verb on an eager table returns an eager table with dplyr's rows
   f80_run_verbs(function(d) tbl_gpu(d, lazy = FALSE), "eager")
 })
 
-test_that("a multi-input verb is lazy when any gibble input is lazy", {
+test_that("a multi-input verb is lazy when any GPU-table input is lazy", {
   skip_if_no_gpu()
   f80_local_default()
   df <- f80_df()

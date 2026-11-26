@@ -122,10 +122,6 @@ The GPU loses when you upload a table, run one cheap verb and collect it. Upload
 
 `vignette("performance")` has the method, eager timings, memory per call and the other cases where dplyr wins. `vignette("memory")` explains how cuplyr allocates GPU memory and when `gpu_gc()` gives it back.
 
-## Gibbles
-
-cuplyr's tables are called gibbles. They print as `# A gibble:`, or `# A gibble [lazy]:` with pending steps. `gibble()`, `as_gibble()` and `is_gibble()` are aliases of `tbl_gpu()`, `as_tbl_gpu()` and `is_tbl_gpu()`. The CRAN package gibble also has a `gibble()` function. `?gibble` explains which one wins when both are attached.
-
 ## Installation
 
 The conda and pixi package below needs only Linux x86_64, an NVIDIA GPU with compute capability 7.5 (Turing) or newer and a driver that supports CUDA 13. It brings its own R and libraries, and needs no CUDA toolkit or compiler.

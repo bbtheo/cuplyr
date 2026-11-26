@@ -1,11 +1,9 @@
 #' Create a GPU-backed data frame
 #'
-#' cuplyr's GPU tables, called gibbles, live in GPU memory. `gibble()` is
-#' another name for `tbl_gpu()`. It transfers an R data frame to GPU memory
-#' using NVIDIA's libcudf library, enabling high-performance data manipulation
-#' operations. The resulting `tbl_gpu` object can be used with dplyr verbs
-#' like `filter()`, `mutate()`, `select()`, and collected back to R with
-#' `collect()`.
+#' `tbl_gpu()` transfers an R data frame to GPU memory using NVIDIA's libcudf
+#' library, enabling high-performance data manipulation operations. The
+#' resulting `tbl_gpu` object can be used with dplyr verbs like `filter()`,
+#' `mutate()`, `select()`, and collected back to R with `collect()`.
 #'
 #' @param data A data frame or tibble to transfer to GPU memory. Supported
 #'   column types include: numeric (double), integer, character, and logical.
@@ -51,7 +49,7 @@
 #' Errors in a verb's arguments (a missing column, a type error) are still
 #' raised when the verb is called. Printing a lazy table with pending
 #' operations (or calling `glimpse()` on it) runs the plan to show its first
-#' rows, under a `# A gibble [lazy]:` header; the table itself is unchanged and
+#' rows, under a `# A tbl_gpu [lazy]:` header; the table itself is unchanged and
 #' nothing is kept, so printing it twice runs the plan twice (`compute()` it
 #' first to look at it repeatedly). If the plan fails (an error, out of GPU
 #' memory), the print shows the schema and the message instead of raising.
@@ -113,18 +111,6 @@
 #' that ran on the CPU. A fractional `Date` is floored with its own warning,
 #' `cuplyr_warning_fractional_date`.
 #'
-#' ## Gibbles
-#'
-#' "Gibble" is the user-facing name of a `tbl_gpu`: `print()` starts
-#' with `# A gibble:` and the dimensions, and `gibble()`, `as_gibble()` and
-#' `is_gibble()` are aliases of `tbl_gpu()`, `as_tbl_gpu()` and
-#' `is_tbl_gpu()`. The class stays `tbl_gpu`, and `tbl_sum()` still returns
-#' dplyr's values.
-#'
-#' The CRAN package gibble (geometry decomposition, Michael Sumner) also
-#' exports a function called `gibble()`. When both packages are attached, the
-#' one attached last masks the other; `cuplyr::gibble()` always works.
-#'
 #' @seealso
 #' \code{\link{collect.tbl_gpu}} to transfer data back to R,
 #' \code{\link{compute.tbl_gpu}} to execute and keep on GPU,
@@ -154,10 +140,6 @@
 tbl_gpu <- function(data, ..., lazy = NULL) {
   UseMethod("tbl_gpu")
 }
-
-#' @rdname tbl_gpu
-#' @export
-gibble <- tbl_gpu
 
 # With libcudf's large strings disabled (LIBCUDF_LARGE_STRINGS_ENABLED not "1"),
 # a column whose characters reach the INT64-offsets threshold cannot be stored.
@@ -776,10 +758,6 @@ is_tbl_gpu <- function(x) {
   inherits(x, "tbl_gpu")
 }
 
-#' @rdname is_tbl_gpu
-#' @export
-is_gibble <- is_tbl_gpu
-
 #' Coerce to a GPU table
 #'
 #' Converts a data frame or compatible object to a `tbl_gpu` object,
@@ -801,10 +779,6 @@ is_gibble <- is_tbl_gpu
 as_tbl_gpu <- function(x, ...) {
   tbl_gpu(x, ...)
 }
-
-#' @rdname as_tbl_gpu
-#' @export
-as_gibble <- as_tbl_gpu
 
 #' Get dimensions of a GPU table
 #'
