@@ -7,7 +7,7 @@ optimizer runs the whole pipeline at `collect()`. Also new: `join_by()`
 joins, window and rolling functions, `across()`, `rowwise()`, set operations,
 Parquet files on the GPU, exact `integer64` columns and a conda package.
 cuplyr now needs RAPIDS libcudf 26.02 or later and a GPU with compute
-capability 7.5.
+capability 7.5 or higher.
 
 ## Breaking changes
 
@@ -21,22 +21,25 @@ capability 7.5.
 * cuplyr needs RAPIDS libcudf 26.02 or later and is tested on 26.10. RAPIDS
   25.12 is no longer supported (#94).
 
-* The minimum GPU is compute capability 7.5 (Turing). Every install route
-  installs a CUDA 13 build of RAPIDS, which has no code for Volta (#150).
+* The minimum GPU is compute capability 7.5 (Turing). The conda package and
+  the pixi and conda install routes use a CUDA 13 build of RAPIDS, which has
+  no code for Volta (#150).
 
 * Results that differed from dplyr now match it:
   - Grouping follows dplyr. `summarise()` drops only the last grouping column
-    by default (`.groups = "drop_last"`, with dplyr's message), `select()`
+    by default (`.groups = "drop_last"`, with a message like dplyr's), `select()`
     keeps the grouping columns, joins keep `x`'s groups, `collect()` returns
     a `grouped_df`, and `tbl_gpu()` keeps the groups of a `grouped_df`. In
     0.1.1 each of these dropped the groups.
   - `summarise()` aggregates follow R's `na.rm = FALSE` default, so a group
     with an `NA` gives `NA`.
   - `arrange(desc(x))` puts `NA` last.
-  - Grouped `summarise()` and `count()` return groups sorted by their keys,
-    not in hash order.
-  - Integer `+`, `-`, `*`, `%/%` and `%%` return integers, not doubles. An
-    overflow gives `NA` with R's warning.
+  - Grouped `summarise()` returns groups sorted by their keys, not in hash
+    order.
+  - Integer `+`, `-` and `*` return integers, not doubles. An overflow gives
+    `NA` with R's warning.
+  - In `summarise()`, `sum()` of an integer column and an ungrouped `n()`
+    return integers, not doubles.
   - `NaN` stays `NaN`; it used to become `NA` on upload.
   - `integer64` columns are exact and collect to `bit64::integer64`; they used
     to be uploaded as doubles, which could corrupt their values.
@@ -47,7 +50,8 @@ capability 7.5.
 * Uploading a column with no GPU type (`difftime`, `hms`, `ts`, `POSIXlt`, a
   list, a matrix with several columns, ...) raises an error that names the
   column, instead of losing its class. So does a verb that makes a `difftime`
-  on the CPU, such as `end - start` on dates (#65).
+  on the CPU, such as `end - start` on dates; returning such columns is
+  planned (#65).
 
 * `print()` uses a tibble-style `# A gibble: n x m` header, R type labels and
   factor labels.
@@ -75,8 +79,8 @@ capability 7.5.
 * New `check_deps()` checks the driver, CUDA toolkit, libcudf and R packages,
   `verify_installation()` runs a small GPU round trip, and `diagnostics()`
   reports versions, the GPU, the memory resource and every option for a bug
-  report, as text or JSON (#14, #49). `diagnose_loader()` shows how cuplyr's
-  shared library resolves libstdc++, libcudf and libcuda.
+  report, as text or JSON. `diagnose_loader()` shows how cuplyr's shared
+  library resolves libstdc++, libcudf and libcuda (#14, #49).
 
 ## New features
 
@@ -101,8 +105,8 @@ capability 7.5.
   takes computed keys and `.drop = FALSE`.
 
 * `rowwise()` runs elementwise expressions and row aggregates such as
-  `sum(c_across(a:e))` on the GPU. On 1e5 rows that takes milliseconds
-  instead of about twenty seconds.
+  `sum(c_across(a:e))` on the GPU. On 1e5 rows that takes milliseconds,
+  where dplyr takes about twenty seconds.
 
 * `$`, `[[`, `[`, `[<-` for whole columns, `as.data.frame()`, `head()`,
   `rbind()`, `cbind()`, `vctrs::vec_slice()`, `vctrs::vec_size()`,
@@ -114,16 +118,15 @@ capability 7.5.
 ### Lazy plans
 
 * The optimizer now also prunes unused columns below `summarise()`,
-  `arrange()` and other barriers, and keeps dplyr's integer-overflow warnings
-  when it moves a filter.
+  `arrange()` and other barriers.
 
 * `explain()` and `show_query()` print the plan as R code without running it,
   including the columns a Parquet scan reads and the reason for each CPU
   fallback (#10).
 
-* Printing a lazy gibble runs the plan to show the first rows and keeps
-  nothing; a plan over a Parquet file prints its schema unless it is a bare
-  scan.
+* Printing a lazy gibble runs the whole plan to show the first rows and keeps
+  nothing; a plan over a Parquet file prints its schema unless it only selects
+  or renames columns.
 
 * A step whose result type or error depends on the data (an integer `sum()`,
   a join with `unmatched = "error"`) runs at the verb, as in eager mode;
@@ -166,8 +169,8 @@ capability 7.5.
 
 * `union()`, `union_all()`, `intersect()`, `setdiff()`, `symdiff()` and
   `setequal()` run on the GPU. `bind_rows()` follows vctrs' type rules and
-  binds factors to the union of their levels (#20, #70). Binds and set
-  operations return a lazy gibble when any input is lazy.
+  binds factors to the union of their levels. Binds and set operations return
+  a lazy gibble when any input is lazy (#20, #70).
 
 ### Parquet
 
@@ -225,9 +228,9 @@ capability 7.5.
   `pool_used_bytes`. `used_bytes` counts the memory the resource holds, so it
   no longer falls when a table is freed.
 
-* A step that runs out of GPU memory is retried once after garbage
-  collection, and the final error says what helps (#13). New `gpu_sync()`
-  waits for queued GPU work, for timing.
+* New `gpu_sync()` waits for queued GPU work, for timing. A step that runs out
+  of GPU memory is retried once after garbage collection, and the final error
+  says what helps (#13).
 
 * Loading cuplyr sets the environment variable
   `LIBCUDF_USE_DEBUG_STREAM_POOL` unless it is set, so that Parquet reads
@@ -250,11 +253,7 @@ capability 7.5.
   `slice_min()`/`slice_max()` (grouped too), use a top-k selection instead of
   a full sort.
 
-* `summarise(.by = )` runs as one grouped summary, and grouped `summarise()`
-  needs less memory with many groups (#50).
-
-* Faster `round(x, digits)`, `quantile()` with many probabilities, very long
-  `mutate()` calls and `summarise()` with `.drop = FALSE` (#75).
+* Grouped `summarise()` needs less GPU memory with many groups (#50).
 
 ## Minor improvements and bug fixes
 
@@ -263,9 +262,8 @@ capability 7.5.
 
 * Eager `select()` keeps factor columns as factors.
 
-* `summarise()` accepts `dplyr::n()` and `stats::sd()`, returns `n()` as an
-  integer, names an unnamed expression after its text, and works lazily with
-  `sd()` and `var()`.
+* `summarise()` accepts `dplyr::n()` and `stats::sd()`, names an unnamed
+  expression after its text, and works lazily with `sd()` and `var()`.
 
 * `arrange(.by_group = TRUE)` sorts the group columns ascending, as dplyr
   does.
