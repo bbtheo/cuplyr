@@ -17,7 +17,7 @@ A \code{tbl_gpu} without the incomplete rows.
 \description{
 \code{stats::na.omit()} for a \code{tbl_gpu}: keeps the rows where no column is
 \code{NA} (\code{NaN} counts as missing, as in \code{is.na()}; an \code{addNA()} factor level is
-a value, not a missing one). It is an ordinary native \code{\link[dplyr:filter]{dplyr::filter()}}, so
+a value, not a missing one). It runs as a \code{\link[dplyr:filter]{dplyr::filter()}} on the GPU, so
 the table keeps its execution mode, grouping and attributes, and lazy stays
 lazy.
 }

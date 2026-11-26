@@ -7,10 +7,9 @@
 join_equi_spec(spec)
 }
 \description{
-Every current spec is 100\% equi (Phase 7 J1); this returns \code{spec}
-unchanged in that case. Kept as a named subsetting helper (rather than
-inlining \code{spec$op == "=="} at call sites) so the future non-equi callers
-(Phase 7 J7's hash-join key selection) have one place to read the equi
-subset from.
+The \code{==} entries of \code{spec} (all of it for a plain equi join): the
+hash-join keys of a mixed join. Kept as a named subsetting helper (rather
+than inlining \code{spec$op == "=="} at call sites) so the hash-join key
+selection has one place to read the equi subset from.
 }
 \keyword{internal}

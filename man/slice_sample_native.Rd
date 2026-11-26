@@ -2,15 +2,14 @@
 % Please edit documentation in R/slice.R
 \name{slice_sample_native}
 \alias{slice_sample_native}
-\title{GPU-native \code{slice_sample()} (Phase 5, task W8)}
+\title{GPU \code{slice_sample()}: indices drawn in R, rows gathered on the GPU}
 \usage{
 slice_sample_native(.data, gm, amount, is_prop, replace, fallback)
 }
 \arguments{
-\item{.data}{A \code{tbl_gpu} object (already materialized if it had pending
-lazy ops -- the caller is responsible for calling \code{compute()} first,
-since CPU-side index generation needs a real row count/grouping,
-which a lazy AST doesn't have)}
+\item{.data}{A \code{tbl_gpu} object. Pending lazy ops are computed first:
+the CPU-side index generation needs a real row count/grouping, which a
+lazy AST doesn't have.}
 
 \item{gm}{A \code{list(mode, group_cols)} as returned by \code{slice_group_mode()}}
 
@@ -30,64 +29,49 @@ A new (always eager) \code{tbl_gpu}, or \code{fallback()}'s result
 Reproduces dplyr's own RNG stream bit-for-bit by generating row indices
 on the CPU with the exact same \code{sample.int()} call sequence real dplyr
 makes, then gathering those indices on the GPU via the existing
-\code{gpu_slice_indices()} primitive (Phase 3.2) -- there is no AST node for
+\code{gpu_slice_indices()} primitive -- there is no AST node for
 \code{slice_sample()} at all, unlike every other verb in this package: the
 index vector is the whole point (it must be generated on the CPU to
 consume R's global RNG state the same way real dplyr does), so there is
 nothing left for a lazy AST/optimizer to defer.
 }
 \details{
-Semantics verified empirically against dplyr 1.2.1 before implementing
-(\code{dplyr:::slice_sample.data.frame}, \code{dplyr:::sample_int},
-\code{dplyr:::get_slice_size}, \code{dplyr:::compute_by_groups}, source read via
-\code{getAnywhere()}/\code{print()}):
+Semantics checked against dplyr 1.2.1 (\code{dplyr:::slice_sample.data.frame},
+\code{dplyr:::sample_int}, \code{dplyr:::get_slice_size},
+\code{dplyr:::compute_by_groups}):
 \itemize{
 \item Ungrouped: exactly one \code{sample.int(nrow, size, replace = replace)}
 call (\code{dplyr:::sample_int}'s own body: \code{if (size == 0L) integer(0) else sample.int(n, size, prob = wt, replace = replace)}, \code{wt} always
 \code{NULL} here since \verb{weight_by=} never reaches this function -- see
 below).
-\item \code{group_by()}-grouped: dplyr iterates groups in ASCENDING GROUP-KEY
+\item \code{group_by()}-grouped: dplyr iterates groups in ascending group-key
 order (NA-key group last) -- the same order \code{dplyr::group_by()}
-itself produces (confirmed by literally calling
-\code{dplyr::group_by()}/\code{dplyr::group_rows()} on the collected group
-columns here, so this can never drift from real dplyr's own
+itself produces (taken from \code{dplyr::group_by()}/\code{dplyr::group_rows()}
+on the collected group columns, so it can't drift from dplyr's
 ordering). One \code{sample.int()} call per group, in that order,
 consuming the RNG stream in that same order; the resulting rows are
-concatenated in the SAME order (group-key order), matching real
-dplyr's own output row order exactly (confirmed empirically: this
-is genuinely a reordering relative to input row order, same as the
-other grouped \verb{slice_*()} verbs' W7 finding). Output stays grouped
-by the same columns, matching real dplyr.
+concatenated in the same (group-key) order, as dplyr's output is: a
+reordering relative to input row order, as for the other grouped
+\verb{slice_*()} verbs. Output stays grouped by the same columns.
 \item \verb{by=}: dplyr's own \code{compute_by_groups()} groups via
-\code{vctrs::vec_group_loc()}, which orders groups by FIRST-APPEARANCE
-position in the input -- NOT ascending group-key order (confirmed
-empirically with a case where ascending-key order and
-first-appearance order differ: the RNG draw order AND the output
-row order both follow first-appearance order, not ascending key,
-and NOT a final sort-by-original-row-position either). This
-CORRECTS \code{scratchpad/phase5_window_design.md} §7's own text ("\verb{by=}
-=> sort() final indices (original row order)"), which was written
-before this empirical check and turns out to describe neither the
-RNG order nor the output order dplyr actually uses -- the real rule
-is exactly the grouped case's rule, just with a different (first-
-appearance, not ascending-key) group ordering source, i.e. exactly
-analogous to \code{summarise(.by=)}'s and W7's grouped-\code{slice()}'s
-already-documented first-appearance rule. Implemented here via
-\code{vctrs::vec_group_loc()} directly (the identical function
-\code{compute_by_groups()} itself calls), rather than reimplementing
-first-appearance grouping by hand, to remove any group-order
-divergence risk. Output is always ungrouped, matching \verb{by=}'s
-general contract.
+\code{vctrs::vec_group_loc()}, which orders groups by first-appearance
+position in the input, not ascending group-key order: the RNG draw
+order and the output row order both follow first-appearance order
+(not ascending key, and not a final sort by original row position
+either), as for \code{summarise(.by=)} and the grouped \code{slice()} desugar.
+Implemented with \code{vctrs::vec_group_loc()} directly (the function
+\code{compute_by_groups()} itself calls), so the group order can't
+diverge. Output is always ungrouped, as \verb{by=} always is.
 \item \verb{n=}/\verb{prop=} resolution: see \code{compute_slice_sample_size()}'s own
 docs for the exact (and slightly asymmetric) \verb{replace=}-dependent
-clamp rule, verified against \code{dplyr:::get_slice_size()}'s source.
-Oversampling \code{n} without \code{replace} does NOT error -- it silently
+clamp rule, checked against \code{dplyr:::get_slice_size()}'s source.
+Oversampling \code{n} without \code{replace} does not error -- it silently
 clamps to the table's (or group's) own row count, same as
 \code{slice_head()}/\code{slice_tail()}.
-\item \verb{weight_by=} always falls back to CPU (see \code{slice_sample.tbl_gpu()}
-below) -- \code{gpu_fallback()} re-runs the real \code{dplyr::slice_sample()}
+\item \verb{weight_by=} always falls back to CPU (see \code{slice_sample.tbl_gpu()})
+-- \code{gpu_fallback()} re-runs the real \code{dplyr::slice_sample()}
 call, which already reproduces the identical \code{sample.int(..., prob = wt)} behavior, so there is nothing to gain (and real
-complexity to lose, since \code{wt} needs the ACTUAL data values, not
+complexity to lose, since \code{wt} needs the actual data values, not
 just group columns) from a native path for this case.
 }
 }

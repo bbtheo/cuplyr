@@ -2,7 +2,7 @@
 % Please edit documentation in R/join.R
 \name{resolve_join_key_types}
 \alias{resolve_join_key_types}
-\title{Resolve every join key pair's common type (gap A3)}
+\title{Resolve every join key pair's common type}
 \usage{
 resolve_join_key_types(
   x_schema,

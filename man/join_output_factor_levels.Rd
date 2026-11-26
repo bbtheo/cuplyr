@@ -18,11 +18,10 @@ column's post-suffix NAME and which side's SOURCE column it came from
 (\code{origin}/\code{source_names}, parallel to \code{names}) -- this reattaches
 \code{factor_levels}, keyed by that post-suffix output name, by looking up
 each output column's own origin schema's \code{factor_levels} under its
-PRE-suffix source name. This is the Bug 1 fix (Phase 11 L2): before this,
-\code{build_join_schema()} returned only \code{names}/\code{types}, so every mutating
-join (\code{left_join()}/\code{inner_join()}/\code{full_join()}/\code{right_join()}, and
-\code{cross_join()}) silently dropped factor metadata entirely -- \code{collect()}
-would then present a factor column as raw integer codes.
+pre-suffix source name. Without it, \code{build_join_schema()} returns only
+\code{names}/\code{types}, so every mutating join (\code{left_join()}/\code{inner_join()}/
+\code{full_join()}/\code{right_join()}, and \code{cross_join()}) would drop the factor
+metadata and \code{collect()} would show a factor column as raw integer codes.
 }
 \details{
 A coalesced equi-join KEY column (kept unsuffixed under \code{keep = FALSE},

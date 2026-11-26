@@ -2,7 +2,7 @@
 % Please edit documentation in R/distinct.R
 \name{distinct.tbl_gpu}
 \alias{distinct.tbl_gpu}
-\title{Keep only distinct/unique rows of a GPU table}
+\title{Keep distinct rows}
 \usage{
 \method{distinct}{tbl_gpu}(.data, ..., .keep_all = FALSE)
 }
@@ -12,54 +12,47 @@
 \item{...}{Optional variables to use when determining uniqueness. When
 every dot is an unnamed column reference (\code{distinct(df, x, .data$y)}) the
 keys are those columns, looked up by name without evaluating anything.
-When any dot is named or computed (\code{distinct(df, z = x + 1)}), every dot
-is parsed through the same expression IR \code{mutate()} uses (see \code{R/ir.R})
-and any computed expressions are evaluated once via an internal
-\code{mutate()} step before the dedup runs. If omitted, uniqueness is
-determined using all columns.}
+When any dot is named or computed (\code{distinct(df, z = x + 1)}), the
+computed keys are added as in \code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}} before the duplicates
+are dropped; a key expression the GPU can't compute runs the whole call
+in dplyr on the CPU. If omitted, uniqueness is determined using all
+columns.}
 
 \item{.keep_all}{If \code{TRUE}, keeps all columns (in their original order,
-with any newly computed key columns appended at the end, matching
-\code{mutate()}'s own append/replace rule). If \code{FALSE} (the default), only
-the columns used for the uniqueness check are kept, in the order given
-in \code{...}.}
+with any newly computed key columns appended at the end, as \code{mutate()}
+adds them). If \code{FALSE} (the default), only the columns used for the
+uniqueness check are kept, in the order given in \code{...}.}
 }
 \value{
 A \code{tbl_gpu} object with duplicate rows removed.
 }
 \description{
-Removes duplicate rows from a GPU table, similar to \code{dplyr::distinct()}.
-Runs entirely on the GPU (\code{cudf::stable_distinct()}), keeping the first
-occurrence of each distinct key and preserving original row order,
-matching dplyr's contract exactly.
+\code{distinct()} keeps the first row of each distinct combination of values,
+in their original order, as \code{dplyr::distinct()} does. It runs on the GPU.
 }
 \details{
 \subsection{Column selection and order}{
 
-With no \code{...}, every column is the dedup key and every column is kept
-(\code{.keep_all} has no effect in this case -- it's already equivalent).
+With no \code{...}, every column is the key and every column is kept
+(\code{.keep_all} makes no difference then).
 With \code{...}, the output's columns (when \code{.keep_all = FALSE}) are exactly
-the named/deparsed \code{...} expressions, in the order given -- e.g.
-\code{distinct(df, y, x)} returns columns \verb{y, x}, not \verb{x, y}.
+the \code{...} expressions, in the order given: \code{distinct(df, y, x)} returns
+columns \verb{y, x}, not \verb{x, y}.
 }
 
 \subsection{Grouped tables}{
 
-If \code{.data} is grouped, the group columns are always part of the dedup key
-and always appear in the result, even if not named in \code{...} -- dplyr
-prepends any group columns missing from \code{...} ahead of the \code{...} columns
-(a group column already present in \code{...} keeps its given position rather
-than being duplicated at the front). Grouping metadata (\verb{$groups}) is
-preserved on the result.
+If \code{.data} is grouped, the grouping columns are always part of the key
+and always appear in the result, even if not named in \code{...}: as in dplyr,
+grouping columns missing from \code{...} come first, ahead of the \code{...}
+columns (a grouping column already in \code{...} keeps its position). The
+result keeps the grouping of \code{.data}.
 }
 
 \subsection{NA and NaN}{
 
-Two \code{NA} key values are considered equal (one \code{NA} row survives), and two
-(computed) \code{NaN} key values are likewise considered equal -- both match
-\code{dplyr::distinct()}'s behavior, and are cudf's own defaults for
-\code{stable_distinct()} (\code{null_equality::EQUAL}, \code{nan_equality::ALL_EQUAL}),
-so no special-casing is needed here.
+Two \code{NA} key values are equal (one \code{NA} row survives), and so are two
+\code{NaN} key values, as in \code{dplyr::distinct()}.
 }
 }
 \examples{

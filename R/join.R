@@ -26,7 +26,7 @@ join_by_is_non_equi <- function(by) {
     (any(by$condition != "==") || any(by$filter != "none"))
 }
 
-#' The non-equi operators J7's native `mixed_join`/`conditional_join`
+#' The non-equi operators the native `mixed_join`/`conditional_join`
 #' lowering understands
 #'
 #' `join_by()`'s own infix parser only ever produces one of these five for
@@ -39,19 +39,19 @@ join_by_is_non_equi <- function(by) {
 #' @keywords internal
 join_native_non_equi_ops <- c("==", "!=", ">=", ">", "<=", "<")
 
-#' Is this `by=` spec natively lowerable end to end (Phase 7 J7, F24)?
+#' Is this `by=` spec natively lowerable end to end?
 #'
 #' `TRUE` for everything [join_by_is_non_equi()] already called equi (no
-#' change there -- J6 native hash-join path). For a genuinely non-equi
+#' change there -- the native hash-join path). For a genuinely non-equi
 #' `join_by()` object, native lowering additionally requires one of:
 #'   * A plain non-equi join (every condition's `filter` is `"none"`): every
 #'     operator is one this package's AST lowering understands
 #'     ([join_native_non_equi_ops]). A non-equi condition comparing two STRING
-#'     columns is native too (F24): `lower_join()` maps both sides onto INT32
+#'     columns is native too: `lower_join()` maps both sides onto INT32
 #'     codes of one shared order (`apply_join_key_casts()`), because cudf's
 #'     AST evaluator can't compare strings. A STRING against anything else
 #'     stays on the CPU fallback.
-#'   * A rolling join ([join_by_rolling_native()], F24): exactly one
+#'   * A rolling join ([join_by_rolling_native()]): exactly one
 #'     `closest()` condition plus `==` conditions.
 #' A missing/misspelled column name is NOT checked here -- left to
 #' `validate_join_cols()`'s own proper error downstream on the native path
@@ -139,7 +139,7 @@ join_key_fallback_reason <- function(x_schema, y_schema, join_spec) {
 join_rolling_types <- c("INT32", "FLOAT64", "TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS",
                         "STRING")
 
-#' Can this `closest()` join run on `gpu_rolling_join()` (F24)?
+#' Can this `closest()` join run on `gpu_rolling_join()`?
 #'
 #' A POSITIVE allowlist; everything else (several `closest()`, `closest()`
 #' next to another inequality, an unknown operator, factor/logical/Date-vs-
@@ -147,7 +147,7 @@ join_rolling_types <- c("INT32", "FLOAT64", "TIMESTAMP_DAYS", "TIMESTAMP_MICROSE
 #'   * exactly one condition has `filter != "none"`, its operator is one of
 #'     `>=`, `>`, `<=`, `<`, and every other condition is `==` with
 #'     `filter == "none"`;
-#'   * the rolling pair is two columns of one type in [join_rolling_types], or
+#'   * the rolling pair is two columns of one type in `join_rolling_types`, or
 #'     INT32 against FLOAT64 (compared as FLOAT64 through `key_casts`).
 #' A column missing from a schema is left to `validate_join_cols()`.
 #' @keywords internal
@@ -175,7 +175,7 @@ join_by_rolling_native <- function(by, x, y) {
 #' Returns `list(left, right, op, filter)`: four parallel character vectors,
 #' one entry per key/condition pair. `op` is each condition's operator
 #' (`"=="` for every key of a character/`NULL` `by`), `filter` its `join_by()`
-#' filter: `"none"`, or `"max"`/`"min"` for a `closest()` condition (F24).
+#' filter: `"none"`, or `"max"`/`"min"` for a `closest()` condition.
 #' Callers run [join_by_natively_supported()] first, so a `join_by()` that
 #' reaches here is one the native lowering handles: [join_equi_spec()] and
 #' [join_cond_spec()] split it into its equi/non-equi halves at lowering time
@@ -231,11 +231,10 @@ join_is_equi <- function(spec) {
 
 #' The equi (`==`) subset of a join spec
 #'
-#' Every current spec is 100% equi (Phase 7 J1); this returns `spec`
-#' unchanged in that case. Kept as a named subsetting helper (rather than
-#' inlining `spec$op == "=="` at call sites) so the future non-equi callers
-#' (Phase 7 J7's hash-join key selection) have one place to read the equi
-#' subset from.
+#' The `==` entries of `spec` (all of it for a plain equi join): the
+#' hash-join keys of a mixed join. Kept as a named subsetting helper (rather
+#' than inlining `spec$op == "=="` at call sites) so the hash-join key
+#' selection has one place to read the equi subset from.
 #' @keywords internal
 join_equi_spec <- function(spec) {
   is_eq <- spec$op == "=="
@@ -259,7 +258,7 @@ join_cond_spec <- function(spec) {
 }
 
 #' Build a single, `&`-folded IR condition tree from a join spec's non-equi
-#' subset (Phase 7 J7)
+#' subset
 #'
 #' One `ir_call(op, list(x_col, y_col))` comparison node per condition
 #' entry (`cond_spec$left[i] <op> cond_spec$right[i]`), each column tagged
@@ -292,23 +291,19 @@ join_cond_ir_from_spec <- function(cond_spec) {
 
 #' Resolve `keep`'s `NULL` default against a join spec
 #'
-#' Ported directly from `dplyr:::join_cols()` (verified via `body()` against
-#' dplyr 1.2.1, Phase 7 J7 finding): `keep = NULL`'s real resolution is NOT
-#' a single whole-join TRUE/FALSE decision -- it is PER CONDITION.
+#' Ported directly from `dplyr:::join_cols()` (checked via `body()` against
+#' dplyr 1.2.1): `keep = NULL`'s real resolution is not a single whole-join
+#' TRUE/FALSE decision -- it is per condition.
 #' `join_cols()`'s own `is_null(keep)` branch drops the right key column
 #' (and coalesces, no suffix distinction) only for conditions whose
 #' `by$condition == "=="`; a genuinely non-equi condition (`join_by(a >=
 #' b)`) always keeps BOTH sides' key columns, suffixed like any other
-#' colliding column -- verified empirically: `join_by(c == d, a >= b)`
-#' drops `d` (the equi pair) but keeps both `a` and `b` (the non-equi
-#' pair). An all-equi spec's per-condition resolution collapses to
-#' "drop every right key" (this package's historical `FALSE` behavior,
-#' unchanged); an all-non-equi spec's per-condition resolution collapses to
-#' "keep every column, suffixed uniformly" (this package's historical
-#' `TRUE`-forced behavior for a pure non-equi join, also unchanged) -- only
-#' a MIXED equi/non-equi spec actually needs the per-condition machinery to
-#' differ from either extreme, which is why this was never caught before
-#' J7 (no spec was ever both equi and non-equi at once).
+#' colliding column: `join_by(c == d, a >= b)` drops `d` (the equi pair)
+#' but keeps both `a` and `b` (the non-equi pair). An all-equi spec's
+#' per-condition resolution collapses to "drop every right key" (the `FALSE`
+#' result); an all-non-equi spec's collapses to "keep every column, suffixed
+#' uniformly" (the `TRUE` result) -- only a mixed equi/non-equi spec needs
+#' the per-condition machinery to differ from either extreme.
 #'
 #' Both `NULL` and a *legal* explicit `FALSE` resolve to the same
 #' `FALSE` return value here: `build_join_output_info()`'s own `keep !=
@@ -318,7 +313,7 @@ join_cond_ir_from_spec <- function(cond_spec) {
 #' (i.e. an all-equi spec, where `by$x[equi] == by$x` and `by$y[equi] ==
 #' by$y` make the two branches' cross-sets identical); explicit `keep =
 #' FALSE` on any spec with a genuinely non-equi condition is a hard error
-#' with dplyr's own text, exactly as before.
+#' with dplyr's own text.
 #' @param keep `NULL`, `TRUE`, or `FALSE`, as passed by the user
 #' @param spec A join spec as returned by [parse_join_by()]
 #' @return `TRUE`/`FALSE`
@@ -338,15 +333,14 @@ resolve_join_keep <- function(keep, spec) {
 
 #' Validate a join spec's per-side column list exists in that side's schema
 #'
-#' Deliberately does NOT require `cols` to be unique (Phase 7 J7 finding): a
+#' Deliberately does not require `cols` to be unique: a
 #' repeated column IS a legitimate non-equi shape --
 #' `join_by(between(a, lo, hi))` compares the SAME left column `a` against
 #' TWO different right columns (`lo` via `>=`, `hi` via `<=`), so
 #' `join_spec$left` is `c("a", "a")` by construction (`within()`/
 #' `overlaps()` similarly duplicate a column across their pre-expanded
 #' condition pairs) -- this is exactly what `between()`/`within()`/
-#' `overlaps()` need to keep working once J7 routes them off the CPU
-#' fallback, not a user error to reject.
+#' `overlaps()` need on the native path, not a user error to reject.
 #' @keywords internal
 validate_join_cols <- function(cols, tbl, side) {
   missing <- setdiff(cols, tbl$schema$names)
@@ -555,7 +549,7 @@ join_unspecified_partner_types <- c("STRING", "DICTIONARY32", "TIMESTAMP_DAYS",
 # (src/expr_eval.hpp, `ast_cast_op_for_type()`).
 join_ast_numeric_types <- c("INT32", "INT64", "FLOAT64")
 
-#' Resolve every join key pair's common type (gap A3)
+#' Resolve every join key pair's common type
 #'
 #' Schema-only (no GPU work). dplyr casts each key pair to its common type
 #' (`vctrs::vec_ptype2()`) before matching and errors when a pair has none;
@@ -695,8 +689,8 @@ resolve_join_key_types <- function(x_schema, y_schema, join_spec,
 #'
 #' The real column-naming primitive behind every dplyr join's suffix
 #' handling (verified via `body(dplyr:::add_suffixes)` against dplyr 1.2.1)
-#' -- NOT a one-shot "does this name collide with the other side" check like
-#' `build_join_output_info()` used before Phase 7 J6. `x` is the set of
+#' -- not a one-shot "does this name collide with the other side" check.
+#' `x` is the set of
 #' names to (maybe) suffix; `y` is the "cross" name set to disambiguate
 #' against (the other side's names, plus, for the ignore-aware caller below,
 #' this side's own ignored/key names); `suffix` is appended to any entry of
@@ -737,12 +731,12 @@ add_suffixes <- function(x, y, suffix) {
 }
 
 #' Compute a join's output column names/types/origin, mirroring
-#' `dplyr:::join_cols()` exactly (Phase 7 J6/J7)
+#' `dplyr:::join_cols()` exactly
 #'
 #' Ported directly from dplyr 1.2.1's own `join_cols()` (verified via
 #' `body(dplyr:::join_cols)`), specialized to this package's always-resolved
 #' `keep` (never `NULL` here -- every join verb calls `resolve_join_keep()`
-#' first, which -- Phase 7 J7 finding -- returns `FALSE` for BOTH the real
+#' first, which returns `FALSE` for both the real
 #' `NULL` default AND a legal explicit `FALSE`; see its own roxygen for why
 #' those two collapse to one value here).
 #'
@@ -753,10 +747,9 @@ add_suffixes <- function(x, y, suffix) {
 #'
 #' `keep != TRUE` (the `NULL`-default/legal-`FALSE` case): PER CONDITION,
 #' mirroring `dplyr:::join_cols()`'s own `is_null(keep)` branch exactly
-#' (Phase 7 J7 finding -- verified empirically against dplyr 1.2.1 that this
-#' branch, not a whole-join TRUE/FALSE collapse, governs the real `keep =
-#' NULL` default: `join_by(c == d, a >= b)` drops `d` but keeps BOTH `a` and
-#' `b`). `is_eq <- join_spec$op == "=="` selects which condition PAIRS
+#' (this branch, not a whole-join TRUE/FALSE collapse, governs the real
+#' `keep = NULL` default in dplyr 1.2.1: `join_by(c == d, a >= b)` drops `d`
+#' but keeps both `a` and `b`). `is_eq <- join_spec$op == "=="` selects which condition PAIRS
 #' collapse to one coalesced column (the join KEY columns for those pairs
 #' specifically are excluded from suffixing -- they keep their bare
 #' original name -- and the right table's key column for that pair is
@@ -764,8 +757,8 @@ add_suffixes <- function(x, y, suffix) {
 #' sides, suffixed like any other colliding column (a genuinely non-equi
 #' condition, e.g. `join_by(a >= b)`, has no single shared key value to
 #' collapse to -- there IS no "coalesced" column for it). An all-equi spec
-#' (`is_eq` all `TRUE`) collapses to this package's historical `keep =
-#' FALSE` behavior exactly; an all-non-equi spec (`is_eq` all `FALSE`)
+#' (`is_eq` all `TRUE`) collapses to the `keep = FALSE` output exactly; an
+#' all-non-equi spec (`is_eq` all `FALSE`)
 #' collapses to byte-identical output to the `keep = TRUE` branch above
 #' (every column suffixed against the full cross set, nothing dropped) --
 #' verified algebraically: `x_ignore`/`y_ignore` are both `character(0)`,
@@ -870,11 +863,10 @@ build_join_output_info <- function(left_schema, right_schema, join_spec,
 #' (`origin`/`source_names`, parallel to `names`) -- this reattaches
 #' `factor_levels`, keyed by that post-suffix output name, by looking up
 #' each output column's own origin schema's `factor_levels` under its
-#' PRE-suffix source name. This is the Bug 1 fix (Phase 11 L2): before this,
-#' `build_join_schema()` returned only `names`/`types`, so every mutating
-#' join (`left_join()`/`inner_join()`/`full_join()`/`right_join()`, and
-#' `cross_join()`) silently dropped factor metadata entirely -- `collect()`
-#' would then present a factor column as raw integer codes.
+#' pre-suffix source name. Without it, `build_join_schema()` returns only
+#' `names`/`types`, so every mutating join (`left_join()`/`inner_join()`/
+#' `full_join()`/`right_join()`, and `cross_join()`) would drop the factor
+#' metadata and `collect()` would show a factor column as raw integer codes.
 #'
 #' A coalesced equi-join KEY column (kept unsuffixed under `keep = FALSE`,
 #' see `build_join_output_info()`'s `is_eq` branch) always has `origin ==
@@ -917,9 +909,7 @@ join_output_factor_levels <- function(left_schema, right_schema, out_names, orig
 #' `inner_join()`/`full_join()`/`right_join()`/`semi_join()`/`anti_join()`)
 #' calls this right after `resolve_join_key_types()` and routes the WHOLE join
 #' to the CPU fallback when it's `TRUE`, mirroring
-#' `join_output_would_collide()`'s existing pattern (Phase 8 sets.R
-#' precedent: `check_set_op_compatible()` uses the identical
-#' identical-levels-vs-not split to decide native vs. fallback).
+#' `join_output_would_collide()`'s existing pattern.
 #' Both-factor-with-IDENTICAL-levels keys compare correctly natively (same
 #' code domain) and are not flagged here.
 #' @keywords internal
@@ -946,7 +936,7 @@ join_factor_key_levels_conflict <- function(x_schema, y_schema, join_spec) {
   FALSE
 }
 
-#' Does a key pair unify a Date with a non-UTC POSIXct? (F32)
+#' Does a key pair unify a Date with a non-UTC POSIXct?
 #'
 #' dplyr casts such a Date to local midnight of the POSIXct's zone
 #' (`vec_cast(<Date>, <POSIXct tz>)`), which moves with DST. The native cast
@@ -1436,7 +1426,7 @@ resolve_unmatched_sides <- function(unmatched) {
 
 #' Raise dplyr's exact `multiple=`/`relationship=`/`unmatched=` conditions
 #'
-#' The Phase 7 J5 activation point: called from `lower_join()` (R/lower.R)
+#' Called from `lower_join()` (R/lower.R)
 #' immediately after a mutating join (`left`/`inner`/`full`/`right`) returns
 #' its `list(ptr, diag)` result, using the `diag` from `join_map_stats()`
 #' (`src/ops_join.cpp`), computed after the `multiple=` filter. Never called for
@@ -1508,17 +1498,15 @@ check_join_cardinality <- function(diag, join_type, multiple, relationship, unma
   invisible(NULL)
 }
 
-#' Route a join call to the transparent CPU fallback (Phase 7 J6)
+#' Route a join call to the transparent CPU fallback
 #'
-#' Shared by every mutating/semi/anti join verb below for the two shapes the
-#' native GPU path can't (yet, or ever) handle:
-#'   1. A non-equi `join_by()` object (`join_by_is_non_equi()` is `TRUE`) --
-#'      Phase 7 J7 replaces this with a native `mixed_join`/`conditional_join`
-#'      lowering; until then this keeps user code working exactly like every
-#'      other not-yet-native verb (mirrors `nest_join()`'s two-table fallback
-#'      shape, `R/fallback.R`: collect the OTHER table, then run the real
-#'      dplyr verb on `.data`'s own materialized/grouped tibble via
-#'      `gpu_fallback()`).
+#' Shared by every join verb for the shapes the native GPU path doesn't
+#' handle, among them:
+#'   1. A `join_by()` that [join_by_natively_supported()] rejects (several
+#'      `closest()` conditions, a string compared with a non-string, ...):
+#'      collect the other table, then run the real dplyr verb on `.data`'s
+#'      own materialized/grouped tibble via `gpu_fallback()` (the same
+#'      two-table shape as `nest_join()`'s fallback, `R/fallback.R`).
 #'   2. The `suffix = c("", ...)` degenerate name-collision case detected by
 #'      `join_output_would_collide()` -- dplyr resolves this via a
 #'      name-keyed column overwrite this package's fixed-column-count gather
@@ -1589,7 +1577,7 @@ join_coerce_y <- function(x, y, copy) {
 #' and the node gets `"drop"`.
 #'
 #' Order of checks: the unsupported-`by` CPU fallback; argument validation;
-#' key-type resolution (raises `dplyr_error_join_incompatible_type`, A3);
+#' key-type resolution (raises `dplyr_error_join_incompatible_type`);
 #' the factor-level-conflict and suffix-collision fallbacks; then, for
 #' `by = character()` only, dplyr's deprecation warning (emitted last so a
 #' fallback, whose dplyr call warns by itself, never warns twice).
@@ -1717,12 +1705,11 @@ filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
 #' Mutating joins for `tbl_gpu` (`left_join()`, `inner_join()`, `full_join()`,
 #' `right_join()`)
 #'
-#' GPU-native equi and non-equi joins mirroring `dplyr::left_join()`'s own
-#' `by=`/`keep=`/`na_matches=`/`multiple=`/`unmatched=`/`relationship=`
-#' semantics (Phase 7). Row order, key coalescing, suffixing, and every
-#' cardinality check reproduce dplyr's own contract exactly -- see "Details"
-#' below for what runs natively on the GPU versus what transparently falls
-#' back to CPU (`dplyr`) evaluation.
+#' Equi and non-equi joins on the GPU, with dplyr's `by=`/`keep=`/
+#' `na_matches=`/`multiple=`/`unmatched=`/`relationship=` semantics. Row
+#' order, key coalescing, suffixing and every cardinality check follow
+#' `dplyr::left_join()` and friends. See "Details" for what runs on the GPU
+#' and what runs in dplyr on the CPU.
 #'
 #' @param x,y `tbl_gpu` objects to join. If `y` is not a `tbl_gpu`, set
 #'   `copy = TRUE` to upload it automatically (`tbl_gpu(y)`).
@@ -1735,58 +1722,53 @@ filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
 #'   with no common type raises `dplyr_error_join_incompatible_type` when the
 #'   verb is called. `by = character()` (deprecated in dplyr 1.1.0, warns
 #'   once) is a cross join with the usual `multiple=`/`relationship=`/
-#'   `unmatched=` rules. `join_by()`
-#'   supports both equi conditions (`a`, `a == b`) and non-equi conditions
-#'   (`>=`, `>`, `<=`, `<`, and the `between()`/`within()`/`overlaps()`
-#'   helpers that pre-expand to pairs of them) -- all GPU-native (Phase 7
-#'   J6/J7). A `closest()` rolling condition (one per call, next to any
-#'   number of `==` conditions) and non-equi conditions comparing two `STRING`
-#'   columns are GPU-native too (F24). Two `closest()` conditions, `closest()`
-#'   next to another inequality, and factor/logical/Date-vs-POSIXct rolling
-#'   keys transparently fall back to CPU evaluation (a `cuplyr.fallback`
-#'   notification fires; see `options(cuplyr.fallback = )`), still with a
-#'   result that matches `dplyr` exactly.
+#'   `unmatched=` rules. `join_by()` conditions run on the GPU: equality
+#'   (`a`, `a == b`), inequality (`>=`, `>`, `<=`, `<`, and the
+#'   `between()`/`within()`/`overlaps()` helpers built from them), one
+#'   `closest()` rolling condition next to any number of `==` conditions,
+#'   and inequalities between two string columns. Two `closest()`
+#'   conditions, `closest()` next to another inequality, and
+#'   factor/logical/Date-vs-POSIXct rolling keys run in dplyr on the CPU
+#'   (see `options(cuplyr.fallback = )` to be told), with the same result
+#'   as dplyr.
 #' @param copy Whether to upload a non-`tbl_gpu` `y` via `tbl_gpu()`.
 #' @param suffix Length-2 character vector used to disambiguate colliding
-#'   non-key column names (default `c(".x", ".y")`). Ported from
-#'   `dplyr:::add_suffixes()`: an already-taken suffixed name gets suffixed
-#'   again (`val.y.y`) rather than silently colliding. `suffix = c("", "")`
-#'   (or any element set to `""`) that still collides with a genuine
-#'   duplicate name reproduces dplyr's name-keyed column-overwrite semantics
-#'   via a CPU fallback -- this package's fixed-column-count gather has no
-#'   native way to express "the right column's data silently replaces the
-#'   left's, and the output has one fewer column than the naive merge".
+#'   non-key column names (default `c(".x", ".y")`). As in dplyr, an
+#'   already-taken suffixed name gets suffixed again (`val.y.y`) rather than
+#'   silently colliding. A `suffix` with an empty element (`c("", "")`)
+#'   that still leaves two columns with the same name runs in dplyr on the
+#'   CPU, which gives dplyr's result (the right column replaces the left
+#'   one, and the output has one column fewer).
 #' @param ... Not used; dplyr itself requires these to be empty.
 #' @param keep Whether to keep both sides' join key columns in the output.
-#'   `NULL` (the default) resolves *per condition*, exactly like
-#'   `dplyr:::join_cols()`: an equi condition's key columns coalesce to one
-#'   (the right-side copy is dropped), while a non-equi condition's columns
-#'   are always kept on both sides (there is no single "coalesced" value for
-#'   an inequality). Explicit `keep = FALSE` is only legal when every
-#'   condition is equi (errors with dplyr's own text otherwise); explicit
-#'   `keep = TRUE` keeps and suffixes every column on both sides uniformly.
+#'   `NULL` (the default) resolves per condition, as in dplyr: an equi
+#'   condition's key columns coalesce to one (the right-side copy is
+#'   dropped), while a non-equi condition's columns are always kept on both
+#'   sides (there is no single coalesced value for an inequality). Explicit
+#'   `keep = FALSE` is only allowed when every condition is equi (otherwise
+#'   it is dplyr's error); explicit `keep = TRUE` keeps and suffixes every
+#'   key column on both sides.
 #' @param na_matches `"na"` (default): an `NA` key matches another `NA` key,
 #'   like `base::merge()`. `"never"`: `NA` keys never match anything,
-#'   including another `NA` (`cudf::null_equality::UNEQUAL` on the GPU).
+#'   including another `NA`.
 #' @param multiple How to resolve a left/right row matching more than one row
 #'   on the other side: `"all"` (default, every match kept), `"any"`,
-#'   `"first"`, or `"last"` (the undocumented `"error"` and `"warning"` run on
-#'   the CPU fallback). Filtering runs device-side against the
-#'   already-sorted join maps (Phase 7 J5) -- `"all"`, the default used by
-#'   every performance benchmark, costs nothing extra. Under right/full joins
-#'   a y row that no kept pair uses is listed once as unmatched.
+#'   `"first"`, or `"last"`, all on the GPU (the undocumented `"error"` and
+#'   `"warning"` run in dplyr on the CPU). The default `"all"` costs nothing
+#'   extra. Under right/full joins a y row that no kept pair uses is listed
+#'   once as unmatched.
 #' @param unmatched How to handle rows with no match: `"drop"` (default) or
-#'   `"error"` (raises dplyr's exact `dplyr_error_join_matches_nothing`/
+#'   `"error"` (raises dplyr's `dplyr_error_join_matches_nothing`/
 #'   `dplyr_error_join_matches_remaining` conditions, including the
-#'   offending row number). `full_join()` has no `unmatched=` parameter at
-#'   all, matching dplyr's own signature (it never drops a row).
+#'   offending row number). `full_join()` has no `unmatched=` parameter,
+#'   as in dplyr (it never drops a row).
 #' @param relationship Optional cardinality assertion: `NULL` (default --
 #'   emits dplyr's own many-to-many advisory warning whenever *both* sides
 #'   have a genuine duplicate, for equality joins called directly; never for
 #'   inequality/overlap joins or indirect calls, as in dplyr), `"one-to-one"`, `"one-to-many"`,
 #'   `"many-to-one"`, or `"many-to-many"` (silences the advisory warning).
-#'   A violation raises dplyr's exact `dplyr_error_join_relationship_*`
-#'   condition, including the class vector and first-offending-row bullet.
+#'   A violation raises dplyr's `dplyr_error_join_relationship_*`
+#'   condition, with its class vector and first-offending-row bullet.
 #'   Known limitation: with the default `relationship`, a lazy pipeline whose
 #'   `filter()` the optimizer pushes below the join may not emit the advisory
 #'   many-to-many warning, or may report different row numbers in it (the
@@ -1796,37 +1778,33 @@ filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
 #'   order) followed by any unmatched `y` rows appended last.
 #'
 #' @details
-#' ## GPU-native coverage (Phase 7)
-#' - Equi joins (`join_by(a)`, `by = "col"`, `by = c(a = "b")`): a hash join
-#'   (`cudf::inner_join()`/`left_join()`/`full_join()`), stable-sorted to
-#'   reproduce dplyr's row order (Phase 7 J1/J4/J6).
-#' - Non-equi/mixed `join_by()` conditions (`>=`, `>`, `<=`, `<`, and their
-#'   `between()`/`within()`/`overlaps()` derivations): `cudf::mixed_join()`
-#'   when at least one equi condition is present, `cudf::conditional_join()`
-#'   otherwise (Phase 7 J7).
-#' - `na_matches=`, `multiple=`, `unmatched=`, `relationship=` are fully
-#'   GPU-native/checked, with dplyr's exact condition classes and message
-#'   text (Phase 7 J1/J5).
-#' - `join_by(closest(...))` rolling joins (F24): exactly one `closest()`
+#' ## On the GPU
+#' - Equi joins (`join_by(a)`, `by = "col"`, `by = c(a = "b")`): a hash
+#'   join, with the rows put in dplyr's order.
+#' - Non-equi and mixed `join_by()` conditions (`>=`, `>`, `<=`, `<`, and
+#'   their `between()`/`within()`/`overlaps()` forms).
+#' - `na_matches=`, `multiple=`, `unmatched=` and `relationship=`, with
+#'   dplyr's condition classes and message text.
+#' - `join_by(closest(...))` rolling joins: exactly one `closest()`
 #'   condition (`>=`, `>`, `<=`, `<`) plus `==` conditions, on integer,
-#'   double, Date or POSIXct (or `STRING`) rolling keys: y is sorted by
-#'   (equi keys, rolling key) and each x row finds its closest rows by binary
-#'   search (`gpu_rolling_join()`), so a rolling join never materialises the
-#'   inequality join. Every y row tied at the closest value is returned, and
+#'   double, Date, POSIXct or string rolling keys. Each row of `x` finds its
+#'   closest rows of `y` without building the whole inequality join. Every
+#'   y row tied at the closest value is returned, and
 #'   `multiple=`/`unmatched=`/`relationship=` act on those matches, as in
 #'   dplyr.
-#' - A non-equi condition comparing two `STRING` columns (F24): both sides
-#'   are replaced by INT32 codes of one shared bytewise (C-locale) order
-#'   before the AST evaluator runs.
+#' - A non-equi condition comparing two string columns: strings compare in
+#'   byte (C locale) order.
 #'
-#' ## Falls back to CPU (transparent, notified)
+#' ## In dplyr on the CPU
+#' These run in dplyr and the result comes back to the GPU (with a notice
+#' under `options(cuplyr.fallback = "warn")`):
 #' - Two `closest()` conditions, `closest()` next to another inequality, and
 #'   rolling keys that are factors, logicals or a Date against a POSIXct.
-#' - A non-equi condition comparing a `STRING` with a non-`STRING` column.
+#' - A non-equi condition comparing a string with a non-string column.
 #' - `suffix = c("", ...)` when it would still produce a genuine duplicate
 #'   output column name.
-#' - `nest_join()` stays CPU-only entirely (needs list-column support,
-#'   Phase 11) -- it is not one of the four verbs documented here.
+#' - `nest_join()` (not one of the four verbs documented here) always runs
+#'   on the CPU: its result holds a list column, which a gibble can't hold.
 #'
 #' @name mutating-joins
 #' @rdname mutating-joins
@@ -1885,25 +1863,22 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
                 unmatched, relationship, user_env = rlang::caller_env())
 }
 
-#' `semi_join()`/`anti_join()`: native via `cudf::filtered_join`
+#' Filtering joins for `tbl_gpu` (`semi_join()`, `anti_join()`)
 #'
-#' Native GPU implementation via `cudf::filtered_join` (Phase 7 J2). Unlike
-#' the mutating joins, dplyr's own `semi_join()`/`anti_join()` signature has
-#' no `suffix`/`keep`/`multiple`/`unmatched`/`relationship` arguments at all
-#' (verified via `args(dplyr:::semi_join.data.frame)`: `x, y, by, copy, ...,
-#' na_matches`) -- there's nothing to merge, so no column-collision handling
-#' is needed. The result is x's own schema verbatim (a row subset of x),
-#' and x's `group_by()` grouping is preserved (as for every join type,
-#' see `push_join()`, `R/execute.R`).
+#' `semi_join()` keeps the rows of `x` that have a match in `y`, and
+#' `anti_join()` the rows that have none, as in dplyr. Both run on the GPU.
+#' As in dplyr, they take no `suffix`/`keep`/`multiple`/`unmatched`/
+#' `relationship` arguments: nothing from `y` is added, so the result has
+#' `x`'s columns and a subset of its rows (each kept row once, duplicates of
+#' `x` included), and keeps `x`'s `group_by()` grouping.
 #'
 #' `by` accepts the same forms as the mutating joins (see `?mutating-joins`):
 #' `NULL`, a character vector, or a [dplyr::join_by()] spec, including
 #' non-equi conditions (`>=`, `>`, `<=`, `<`, `between()`/`within()`/
-#' `overlaps()`) via `cudf::conditional_join`/`mixed_join` (Phase 7 J7).
-#' A single `closest()` condition is native (it asks whether an x row has a
-#' closest match), as are non-equi conditions over two `STRING` columns;
-#' shapes outside that fall back to CPU evaluation transparently (with a
-#' `cuplyr.fallback` notification), same as the mutating joins.
+#' `overlaps()`). A single `closest()` condition runs on the GPU (it asks
+#' whether an x row has a closest match), as do non-equi conditions over two
+#' string columns; other shapes run in dplyr on the CPU (with a
+#' `cuplyr.fallback` notification), as for the mutating joins.
 #'
 #' @param x,y `tbl_gpu` objects to join. If `y` is not a `tbl_gpu`, set
 #'   `copy = TRUE` to upload it automatically.
@@ -1926,9 +1901,8 @@ semi_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
   filtering_join("semi", x, y, by, copy, na_matches, user_env = rlang::caller_env())
 }
 
-#' `is_anti = TRUE` in the shared `gpu_semi_anti_join()` C++ entry point --
-#' same native `filtered_join`-based implementation and
-#' grouping-preservation rationale as `semi_join()`, see `?semi-anti-joins`.
+#' `anti_join()` keeps the rows of `x` with no match in `y`; see
+#' `?semi-anti-joins`.
 #' @rdname semi-anti-joins
 #' @export
 #' @importFrom dplyr anti_join
@@ -1938,39 +1912,25 @@ anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
   filtering_join("anti", x, y, by, copy, na_matches, user_env = rlang::caller_env())
 }
 
-#' `cross_join()`: native via `cudf::cross_join`
+#' Cross join for `tbl_gpu`
 #'
-#' Native GPU implementation (Phase 7 J3). Unlike every other join verb,
-#' dplyr's own `cross_join()` signature has no `by`/`keep`/`na_matches`/
-#' `multiple`/`unmatched`/`relationship` at all (verified via
-#' `args(dplyr::cross_join)`: `x, y, ..., copy, suffix`) -- there are no keys
-#' to match, every row of `x` is paired with every row of `y`. Verified
-#' empirically against dplyr 1.2.1:
-#' - Output column order is left-major: all of `x`'s columns (in their
-#'   original order), then all of `y`'s (in their original order).
-#' - Every COMMON column name (not just would-be join keys, since there are
-#'   none) gets BOTH suffixes -- e.g. two tables both having `id`/`val`
-#'   produces `id.x`/`val.x`/`id.y`/`val.y`, never a bare shared name. This
-#'   is exactly `build_join_output_info()`'s own behavior for an all-common
-#'   spec with `keep = TRUE` (its `drop_right` is always `character(0)` when
-#'   `keep = TRUE`, regardless of what the spec's `left`/`right` contain), so
-#'   an empty join spec (no keys at all) plus `keep = TRUE` reproduces it
-#'   exactly -- see `ast_join()`'s `by`/`keep` fields below.
-#' - Grouping follows the rule shared by every join (`push_join()`,
-#'   `R/execute.R`): `x`'s groups that survive in the output keep grouping
-#'   (dplyr's `cross_join.data.frame()` ends with `dplyr_reconstruct(x_out,
-#'   x)`); a group column whose name collides with `y`'s and gets suffixed
-#'   away (`"g"` -> `"g.x"`) drops out. `y`'s grouping is irrelevant.
-#' - 0-row `x` or `y` produces a 0-row result with the correct (merged)
-#'   schema -- cudf's `cross_join()` handles this natively, no R-side
-#'   special-casing needed.
+#' `cross_join()` pairs every row of `x` with every row of `y`, on the GPU,
+#' as `dplyr::cross_join()` does. As in dplyr, there are no keys, so it takes
+#' no `by`/`keep`/`na_matches`/`multiple`/`unmatched`/`relationship`
+#' arguments. Also as in dplyr:
+#' - All of `x`'s columns come first (in their original order), then all of
+#'   `y`'s.
+#' - Every column name the two tables share gets both suffixes: two tables
+#'   that both have `id` and `val` give `id.x`, `val.x`, `id.y`, `val.y`,
+#'   never a bare shared name.
+#' - `x`'s grouping columns keep grouping the result, except a grouping
+#'   column whose name gets a suffix (`"g"` -> `"g.x"`), which drops out.
+#'   `y`'s grouping is ignored.
+#' - A 0-row `x` or `y` gives a 0-row result with the merged columns.
 #' - `copy = TRUE` with a plain `data.frame` `y` works like every other join.
-#'
-#' - A side with rows but no columns works as in dplyr: `x` by `y` repeats
-#'   each row of `x` once per row of `y`, whichever side has no columns, and
-#'   two such tables give a table of `nrow(x) * nrow(y)` rows and no columns.
-#'   libcudf's cross join refuses a table with no columns, so a one-column
-#'   table stands in for it and that column is dropped afterwards.
+#' - A side with rows but no columns repeats each row of the other side once
+#'   per row it has, and two such tables give a table of
+#'   `nrow(x) * nrow(y)` rows and no columns.
 #'
 #' @param x,y `tbl_gpu` objects. If `y` is not a `tbl_gpu`, set
 #'   `copy = TRUE` to upload it automatically.
@@ -1978,9 +1938,9 @@ anti_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, ...,
 #' @param copy Whether to upload a non-`tbl_gpu` `y` via `tbl_gpu()`.
 #' @param suffix Length-2 character vector disambiguating every common
 #'   column name (every shared name gets both suffixes, since there are no
-#'   join keys to coalesce). `suffix = c("", ...)` colliding with a genuine
-#'   duplicate name falls back to CPU evaluation, same as the mutating
-#'   joins' degenerate-suffix case.
+#'   join keys to coalesce). A `suffix = c("", ...)` that still leaves two
+#'   columns with the same name runs in dplyr on the CPU, as for the
+#'   mutating joins.
 #' @return A `tbl_gpu` with every row of `x` paired with every row of `y`
 #'   (`nrow(x) * nrow(y)` rows), columns from `x` first then `y`. `x`'s
 #'   `group_by()` grouping is preserved for any group column whose name

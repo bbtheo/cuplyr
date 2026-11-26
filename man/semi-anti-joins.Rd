@@ -4,7 +4,7 @@
 \alias{semi-anti-joins}
 \alias{semi_join.tbl_gpu}
 \alias{anti_join.tbl_gpu}
-\title{\code{semi_join()}/\code{anti_join()}: native via \code{cudf::filtered_join}}
+\title{Filtering joins for \code{tbl_gpu} (\code{semi_join()}, \code{anti_join()})}
 \usage{
 \method{semi_join}{tbl_gpu}(x, y, by = NULL, copy = FALSE, ..., na_matches = "na")
 
@@ -30,21 +30,19 @@ A \code{tbl_gpu} with \code{x}'s own schema, filtered to the rows that
 of \code{x} is kept, including the ones the join empties, like dplyr.
 }
 \description{
-Native GPU implementation via \code{cudf::filtered_join} (Phase 7 J2). Unlike
-the mutating joins, dplyr's own \code{semi_join()}/\code{anti_join()} signature has
-no \code{suffix}/\code{keep}/\code{multiple}/\code{unmatched}/\code{relationship} arguments at all
-(verified via \code{args(dplyr:::semi_join.data.frame)}: \verb{x, y, by, copy, ..., na_matches}) -- there's nothing to merge, so no column-collision handling
-is needed. The result is x's own schema verbatim (a row subset of x),
-and x's \code{group_by()} grouping is preserved (as for every join type,
-see \code{push_join()}, \code{R/execute.R}).
+\code{semi_join()} keeps the rows of \code{x} that have a match in \code{y}, and
+\code{anti_join()} the rows that have none, as in dplyr. Both run on the GPU.
+As in dplyr, they take no \code{suffix}/\code{keep}/\code{multiple}/\code{unmatched}/
+\code{relationship} arguments: nothing from \code{y} is added, so the result has
+\code{x}'s columns and a subset of its rows (each kept row once, duplicates of
+\code{x} included), and keeps \code{x}'s \code{group_by()} grouping.
 }
 \details{
 \code{by} accepts the same forms as the mutating joins (see \code{?mutating-joins}):
 \code{NULL}, a character vector, or a \code{\link[dplyr:join_by]{dplyr::join_by()}} spec, including
 non-equi conditions (\code{>=}, \code{>}, \code{<=}, \code{<}, \code{between()}/\code{within()}/
-\code{overlaps()}) via \code{cudf::conditional_join}/\code{mixed_join} (Phase 7 J7).
-A single \code{closest()} condition is native (it asks whether an x row has a
-closest match), as are non-equi conditions over two \code{STRING} columns;
-shapes outside that fall back to CPU evaluation transparently (with a
-\code{cuplyr.fallback} notification), same as the mutating joins.
+\code{overlaps()}). A single \code{closest()} condition runs on the GPU (it asks
+whether an x row has a closest match), as do non-equi conditions over two
+string columns; other shapes run in dplyr on the CPU (with a
+\code{cuplyr.fallback} notification), as for the mutating joins.
 }

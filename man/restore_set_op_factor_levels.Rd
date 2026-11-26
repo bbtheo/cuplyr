@@ -7,16 +7,15 @@
 restore_set_op_factor_levels(result, target_schema)
 }
 \description{
-As of Phase 11 L2, \code{bind_rows()} (R/bind.R) already computes and attaches
-the correct unioned \code{schema$factor_levels} on its own result (Bug 2
-fix) -- since \code{x_aligned}/\code{y_aligned} are already aligned to the exact
-same \code{target_schema}, \code{bind_rows_gpu()}'s own internal
-\code{compute_unified_schema()} call trivially recomputes the identical
-schema \code{check_set_op_compatible()} already computed here, so this is now
-a belt-and-braces no-op re-assignment (kept for defensiveness/clarity
-rather than trusting that invariant to hold silently at a distance).
-\code{intersect()}/\code{setdiff()} (built from \code{semi_join()}/\code{anti_join()} +
-\code{distinct()}, which already preserve \code{factor_levels} via
+\code{bind_rows()} (R/bind.R) already computes and attaches the unioned
+\code{schema$factor_levels} on its own result -- since \code{x_aligned}/\code{y_aligned}
+are already aligned to the exact same \code{target_schema},
+\code{bind_rows_gpu()}'s own internal \code{compute_unified_schema()} call
+recomputes the identical schema \code{check_set_op_compatible()} already
+computed here, so this is a belt-and-braces re-assignment (kept for
+clarity rather than trusting that invariant to hold silently at a
+distance). \code{intersect()}/\code{setdiff()} (built from \code{semi_join()}/
+\code{anti_join()} + \code{distinct()}, which already preserve \code{factor_levels} via
 \code{propagate_factor_levels()}, R/execute.R) don't need this at all.
 }
 \keyword{internal}

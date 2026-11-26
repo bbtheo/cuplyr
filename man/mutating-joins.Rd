@@ -77,66 +77,61 @@ types differ are cast to their common type for matching, as in dplyr
 with no common type raises \code{dplyr_error_join_incompatible_type} when the
 verb is called. \code{by = character()} (deprecated in dplyr 1.1.0, warns
 once) is a cross join with the usual \verb{multiple=}/\verb{relationship=}/
-\verb{unmatched=} rules. \code{join_by()}
-supports both equi conditions (\code{a}, \code{a == b}) and non-equi conditions
-(\code{>=}, \code{>}, \code{<=}, \code{<}, and the \code{between()}/\code{within()}/\code{overlaps()}
-helpers that pre-expand to pairs of them) -- all GPU-native (Phase 7
-J6/J7). A \code{closest()} rolling condition (one per call, next to any
-number of \code{==} conditions) and non-equi conditions comparing two \code{STRING}
-columns are GPU-native too (F24). Two \code{closest()} conditions, \code{closest()}
-next to another inequality, and factor/logical/Date-vs-POSIXct rolling
-keys transparently fall back to CPU evaluation (a \code{cuplyr.fallback}
-notification fires; see \code{options(cuplyr.fallback = )}), still with a
-result that matches \code{dplyr} exactly.}
+\verb{unmatched=} rules. \code{join_by()} conditions run on the GPU: equality
+(\code{a}, \code{a == b}), inequality (\code{>=}, \code{>}, \code{<=}, \code{<}, and the
+\code{between()}/\code{within()}/\code{overlaps()} helpers built from them), one
+\code{closest()} rolling condition next to any number of \code{==} conditions,
+and inequalities between two string columns. Two \code{closest()}
+conditions, \code{closest()} next to another inequality, and
+factor/logical/Date-vs-POSIXct rolling keys run in dplyr on the CPU
+(see \code{options(cuplyr.fallback = )} to be told), with the same result
+as dplyr.}
 
 \item{copy}{Whether to upload a non-\code{tbl_gpu} \code{y} via \code{tbl_gpu()}.}
 
 \item{suffix}{Length-2 character vector used to disambiguate colliding
-non-key column names (default \code{c(".x", ".y")}). Ported from
-\code{dplyr:::add_suffixes()}: an already-taken suffixed name gets suffixed
-again (\code{val.y.y}) rather than silently colliding. \code{suffix = c("", "")}
-(or any element set to \code{""}) that still collides with a genuine
-duplicate name reproduces dplyr's name-keyed column-overwrite semantics
-via a CPU fallback -- this package's fixed-column-count gather has no
-native way to express "the right column's data silently replaces the
-left's, and the output has one fewer column than the naive merge".}
+non-key column names (default \code{c(".x", ".y")}). As in dplyr, an
+already-taken suffixed name gets suffixed again (\code{val.y.y}) rather than
+silently colliding. A \code{suffix} with an empty element (\code{c("", "")})
+that still leaves two columns with the same name runs in dplyr on the
+CPU, which gives dplyr's result (the right column replaces the left
+one, and the output has one column fewer).}
 
 \item{...}{Not used; dplyr itself requires these to be empty.}
 
 \item{keep}{Whether to keep both sides' join key columns in the output.
-\code{NULL} (the default) resolves \emph{per condition}, exactly like
-\code{dplyr:::join_cols()}: an equi condition's key columns coalesce to one
-(the right-side copy is dropped), while a non-equi condition's columns
-are always kept on both sides (there is no single "coalesced" value for
-an inequality). Explicit \code{keep = FALSE} is only legal when every
-condition is equi (errors with dplyr's own text otherwise); explicit
-\code{keep = TRUE} keeps and suffixes every column on both sides uniformly.}
+\code{NULL} (the default) resolves per condition, as in dplyr: an equi
+condition's key columns coalesce to one (the right-side copy is
+dropped), while a non-equi condition's columns are always kept on both
+sides (there is no single coalesced value for an inequality). Explicit
+\code{keep = FALSE} is only allowed when every condition is equi (otherwise
+it is dplyr's error); explicit \code{keep = TRUE} keeps and suffixes every
+key column on both sides.}
 
 \item{na_matches}{\code{"na"} (default): an \code{NA} key matches another \code{NA} key,
 like \code{base::merge()}. \code{"never"}: \code{NA} keys never match anything,
-including another \code{NA} (\verb{cudf::null_equality::UNEQUAL} on the GPU).}
+including another \code{NA}.}
 
 \item{multiple}{How to resolve a left/right row matching more than one row
 on the other side: \code{"all"} (default, every match kept), \code{"any"},
-\code{"first"}, or \code{"last"} (the undocumented \code{"error"} and \code{"warning"} run on
-the CPU fallback). Filtering runs device-side against the
-already-sorted join maps (Phase 7 J5) -- \code{"all"}, the default used by
-every performance benchmark, costs nothing extra. Under right/full joins
-a y row that no kept pair uses is listed once as unmatched.}
+\code{"first"}, or \code{"last"}, all on the GPU (the undocumented \code{"error"} and
+\code{"warning"} run in dplyr on the CPU). The default \code{"all"} costs nothing
+extra. Under right/full joins a y row that no kept pair uses is listed
+once as unmatched.}
 
 \item{unmatched}{How to handle rows with no match: \code{"drop"} (default) or
-\code{"error"} (raises dplyr's exact \code{dplyr_error_join_matches_nothing}/
+\code{"error"} (raises dplyr's \code{dplyr_error_join_matches_nothing}/
 \code{dplyr_error_join_matches_remaining} conditions, including the
-offending row number). \code{full_join()} has no \verb{unmatched=} parameter at
-all, matching dplyr's own signature (it never drops a row).}
+offending row number). \code{full_join()} has no \verb{unmatched=} parameter,
+as in dplyr (it never drops a row).}
 
 \item{relationship}{Optional cardinality assertion: \code{NULL} (default --
 emits dplyr's own many-to-many advisory warning whenever \emph{both} sides
 have a genuine duplicate, for equality joins called directly; never for
 inequality/overlap joins or indirect calls, as in dplyr), \code{"one-to-one"}, \code{"one-to-many"},
 \code{"many-to-one"}, or \code{"many-to-many"} (silences the advisory warning).
-A violation raises dplyr's exact \verb{dplyr_error_join_relationship_*}
-condition, including the class vector and first-offending-row bullet.
+A violation raises dplyr's \verb{dplyr_error_join_relationship_*}
+condition, with its class vector and first-offending-row bullet.
 Known limitation: with the default \code{relationship}, a lazy pipeline whose
 \code{filter()} the optimizer pushes below the join may not emit the advisory
 many-to-many warning, or may report different row numbers in it (the
@@ -148,49 +143,45 @@ join type. \code{right_join()}'s row order is x-matched rows (in \code{x}'s own
 order) followed by any unmatched \code{y} rows appended last.
 }
 \description{
-GPU-native equi and non-equi joins mirroring \code{dplyr::left_join()}'s own
-\verb{by=}/\verb{keep=}/\verb{na_matches=}/\verb{multiple=}/\verb{unmatched=}/\verb{relationship=}
-semantics (Phase 7). Row order, key coalescing, suffixing, and every
-cardinality check reproduce dplyr's own contract exactly -- see "Details"
-below for what runs natively on the GPU versus what transparently falls
-back to CPU (\code{dplyr}) evaluation.
+Equi and non-equi joins on the GPU, with dplyr's \verb{by=}/\verb{keep=}/
+\verb{na_matches=}/\verb{multiple=}/\verb{unmatched=}/\verb{relationship=} semantics. Row
+order, key coalescing, suffixing and every cardinality check follow
+\code{dplyr::left_join()} and friends. See "Details" for what runs on the GPU
+and what runs in dplyr on the CPU.
 }
 \details{
-\subsection{GPU-native coverage (Phase 7)}{
+\subsection{On the GPU}{
 \itemize{
-\item Equi joins (\code{join_by(a)}, \code{by = "col"}, \code{by = c(a = "b")}): a hash join
-(\code{cudf::inner_join()}/\code{left_join()}/\code{full_join()}), stable-sorted to
-reproduce dplyr's row order (Phase 7 J1/J4/J6).
-\item Non-equi/mixed \code{join_by()} conditions (\code{>=}, \code{>}, \code{<=}, \code{<}, and their
-\code{between()}/\code{within()}/\code{overlaps()} derivations): \code{cudf::mixed_join()}
-when at least one equi condition is present, \code{cudf::conditional_join()}
-otherwise (Phase 7 J7).
-\item \verb{na_matches=}, \verb{multiple=}, \verb{unmatched=}, \verb{relationship=} are fully
-GPU-native/checked, with dplyr's exact condition classes and message
-text (Phase 7 J1/J5).
-\item \code{join_by(closest(...))} rolling joins (F24): exactly one \code{closest()}
+\item Equi joins (\code{join_by(a)}, \code{by = "col"}, \code{by = c(a = "b")}): a hash
+join, with the rows put in dplyr's order.
+\item Non-equi and mixed \code{join_by()} conditions (\code{>=}, \code{>}, \code{<=}, \code{<}, and
+their \code{between()}/\code{within()}/\code{overlaps()} forms).
+\item \verb{na_matches=}, \verb{multiple=}, \verb{unmatched=} and \verb{relationship=}, with
+dplyr's condition classes and message text.
+\item \code{join_by(closest(...))} rolling joins: exactly one \code{closest()}
 condition (\code{>=}, \code{>}, \code{<=}, \code{<}) plus \code{==} conditions, on integer,
-double, Date or POSIXct (or \code{STRING}) rolling keys: y is sorted by
-(equi keys, rolling key) and each x row finds its closest rows by binary
-search (\code{gpu_rolling_join()}), so a rolling join never materialises the
-inequality join. Every y row tied at the closest value is returned, and
+double, Date, POSIXct or string rolling keys. Each row of \code{x} finds its
+closest rows of \code{y} without building the whole inequality join. Every
+y row tied at the closest value is returned, and
 \verb{multiple=}/\verb{unmatched=}/\verb{relationship=} act on those matches, as in
 dplyr.
-\item A non-equi condition comparing two \code{STRING} columns (F24): both sides
-are replaced by INT32 codes of one shared bytewise (C-locale) order
-before the AST evaluator runs.
+\item A non-equi condition comparing two string columns: strings compare in
+byte (C locale) order.
 }
 }
 
-\subsection{Falls back to CPU (transparent, notified)}{
+\subsection{In dplyr on the CPU}{
+
+These run in dplyr and the result comes back to the GPU (with a notice
+under \code{options(cuplyr.fallback = "warn")}):
 \itemize{
 \item Two \code{closest()} conditions, \code{closest()} next to another inequality, and
 rolling keys that are factors, logicals or a Date against a POSIXct.
-\item A non-equi condition comparing a \code{STRING} with a non-\code{STRING} column.
+\item A non-equi condition comparing a string with a non-string column.
 \item \code{suffix = c("", ...)} when it would still produce a genuine duplicate
 output column name.
-\item \code{nest_join()} stays CPU-only entirely (needs list-column support,
-Phase 11) -- it is not one of the four verbs documented here.
+\item \code{nest_join()} (not one of the four verbs documented here) always runs
+on the CPU: its result holds a list column, which a gibble can't hold.
 }
 }
 }

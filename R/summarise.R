@@ -1,29 +1,28 @@
-#' Summarise groups in a GPU table
+#' Summarise each group down to one row
 #'
-#' Computes aggregations on groups defined by [group_by()]. Operations are
-#' performed entirely on the GPU for maximum performance.
+#' `summarise()` computes one row per group of a gibble (or one row in all,
+#' when it is ungrouped), as `dplyr::summarise()` does. The aggregations
+#' listed below run on the GPU; any other expression is evaluated by dplyr on
+#' the CPU, with a fallback notice that names the reason.
 #'
-#' @param .data A grouped `tbl_gpu` object created by [group_by()].
+#' @param .data A `tbl_gpu`, usually grouped with [group_by()].
 #' @param ... Name-value pairs of summary functions. The name will be the
 #'   name of the variable in the result. The value is an aggregation
-#'   expression in the form `fun(column)`, where `column` can also be any
-#'   expression the internal expression IR understands (see "Aggregation
-#'   sub-expressions" below), or arithmetic around such calls and the results
-#'   of earlier expressions (see "Arithmetic around reducers" below).
-#' @param .groups Controls grouping structure of the result (Phase 6, task
-#'   3; matches `dplyr::summarise()`'s own contract exactly, verified
-#'   empirically against dplyr 1.2.1). One of:
+#'   expression in the form `fun(column)`, where `column` can also be an
+#'   expression of columns (see "Aggregation sub-expressions" below), or
+#'   arithmetic around such calls and the results of earlier expressions (see
+#'   "Arithmetic around reducers" below).
+#' @param .groups Grouping structure of the result, as in
+#'   `dplyr::summarise()`. One of:
 #'   \itemize{
-#'     \item `NULL` (default) -- `"drop_last"` (see below), PLUS an
-#'       informational message when the result is still grouped (see
-#'       "The regroup message" below).
-#'     \item `"drop_last"` -- drop the LAST grouping variable, keeping the
-#'       rest (e.g. `group_by(a, b, c)` -> result grouped by `a, b`); with
-#'       only one grouping variable, the result is ungrouped. Same as the
-#'       default, minus the message.
-#'     \item `"drop"` -- the result is always ungrouped.
-#'     \item `"keep"` -- every original grouping variable is retained.
-#'     \item `"rowwise"` -- the summary runs on the GPU keeping every
+#'     \item `NULL` (default): `"drop_last"`, with a message when the result
+#'       is still grouped (see "The regroup message" below).
+#'     \item `"drop_last"`: drop the last grouping variable and keep the
+#'       rest (`group_by(a, b, c)` gives a result grouped by `a, b`); with
+#'       only one grouping variable, the result is ungrouped.
+#'     \item `"drop"`: the result is ungrouped.
+#'     \item `"keep"`: every grouping variable is kept.
+#'     \item `"rowwise"`: the summary runs on the GPU keeping every
 #'       grouping variable, and the result is a rowwise `tbl_gpu` by those
 #'       variables ([dplyr::rowwise()]); `collect()` returns dplyr's own
 #'       `rowwise_df`.
@@ -33,36 +32,24 @@
 #'   `"keep"`) groups the result by those variables (with dplyr's message
 #'   when `.groups` is not given), `"drop"` ungroups it, `"rowwise"` keeps it
 #'   rowwise; `"drop_last"` is an error, as in dplyr.
-#'   `.groups=` is only validated against an already-grouped `.data` --
-#'   matching a genuine (if surprising) dplyr quirk verified empirically:
-#'   any value other than `"rowwise"` (including a typo) is silently a no-op on an
-#'   UNGROUPED `.data`, since there is nothing to drop/keep/peel from an
-#'   empty group set.
+#'   On an ungrouped `.data`, as in dplyr, `.groups` is not checked: any value
+#'   other than `"rowwise"` (a typo included) is ignored.
 #'
 #'   ## The regroup message
-#'   When `.groups` is left `NULL` (the default) and the pre-summarise
-#'   `.data` has MORE THAN ONE grouping variable, an informational message
-#'   is emitted (loosely matching dplyr's own wording -- this is
-#'   informational, not a value under parity test). It is suppressed by
-#'   `options(dplyr.summarise.inform = FALSE)` (an explicit `TRUE`/`FALSE`
-#'   value for this option always wins outright); with the option unset,
-#'   dplyr's own rule applies: the message only fires when the CALLING
-#'   code's top environment is the global environment (i.e. top-level/
-#'   interactive use) -- it is silent when `summarise()` is called from
-#'   inside a function/package (as in a `testthat` test, or one verb
-#'   calling another, e.g. [tally.tbl_gpu()]).
-#' @param .by Optional on-the-fly grouping columns (tidyselect), GPU-native
-#'   (Phase 5, task W9). Unlike `mutate()`/`filter()`'s `.by=` (which behave
-#'   exactly like `group_by()`), `summarise(.by=)` has one genuinely
-#'   different rule verified empirically against dplyr 1.2.1: groups are
-#'   emitted in FIRST-APPEARANCE order (the order each distinct `.by`
-#'   combination first appears in `.data`), not sorted group-key order --
-#'   see "`.by` group order" below. The result is always ungrouped -- unlike
-#'   a `group_by()`-driven `summarise()`, whose result's grouping now
-#'   depends on `.groups=` (Phase 6, task 3); `.groups=` can't be combined
-#'   with `.by=` at all (rejected by dplyr's own `summarise()` generic).
-#'   Supplying `.by` when `.data` is already grouped (via `group_by()`) is
-#'   an error, matching dplyr exactly.
+#'   When `.groups` is `NULL` and `.data` has more than one grouping
+#'   variable, `summarise()` tells you how the result is grouped, in words
+#'   close to dplyr's. `options(dplyr.summarise.inform = FALSE)` silences it
+#'   (an explicit `TRUE` or `FALSE` always wins). With the option unset,
+#'   dplyr's rule applies: the message appears only when `summarise()` is
+#'   called from the global environment (top-level or interactive use), not
+#'   from inside a function or package (a `testthat` test, or a verb such as
+#'   [tally.tbl_gpu()] that calls `summarise()`).
+#' @param .by Optional grouping columns for this call only (tidyselect), run
+#'   on the GPU. Groups come out in the order each `.by` combination first
+#'   appears in `.data`, not sorted as after `group_by()` (see "`.by` group
+#'   order" below). The result is always ungrouped. `.groups` can't be
+#'   combined with `.by`, and supplying `.by` when `.data` is already grouped
+#'   is an error, as in dplyr.
 #'
 #' @return A `tbl_gpu` object with one row per group containing the grouping
 #'   columns and computed aggregations.
@@ -75,7 +62,7 @@
 #'     (`+-(2^31 - 1)`) dplyr returns a double, and so does `tbl_gpu`. Which
 #'     one it is depends on the data, which a lazy plan (its schema is fixed
 #'     before it runs) can't know, so a lazy `summarise()` of an integer
-#'     (INT32) `sum(x)` runs at the verb, like an eager one: the pending steps
+#'     `sum(x)` runs at the verb, like an eager one: the pending steps
 #'     run first (a plan break, see `cuplyr.plan_break`) and the result is a
 #'     lazy table with nothing pending. The same goes for a lazy `min()`/`max()`
 #'     of an integer. A `sum()` of a logical `x` stays in the plan: it can
@@ -87,41 +74,38 @@
 #'   \item `n()` - Count of rows in each group
 #'   \item `sd(x)` - Standard deviation
 #'   \item `var(x)` - Variance
-#'   \item `median(x)` - Median value (Phase 6, task 6.2)
-#'   \item `quantile(x, probs)` - A single quantile, `probs` a scalar in
-#'     `[0, 1]` (Phase 6, task 6.2; only one probability per call is
-#'     supported)
+#'   \item `median(x)` - Median value
+#'   \item `quantile(x, probs)` - A single quantile, `probs` one number in
+#'     `[0, 1]`, with R's default `type = 7`. Other forms run in dplyr on the
+#'     CPU.
 #'   \item `n_distinct(x)` - Count of distinct values, `NA` counted as its
-#'     own distinct value by default (Phase 6, task 6.2)
+#'     own distinct value by default
 #'   \item `first(x)` / `last(x)` / `nth(x, n)` - The first/last/nth value
-#'     in the group's current row order (Phase 6, task 6.2)
-#'   \item `any(x)` / `all(x)` - Logical reductions with R's own
-#'     three-valued logic (Phase 6, task 6.2; `x` must be logical)
+#'     in the group's current row order
+#'   \item `any(x)` / `all(x)` - Logical reductions with R's three-valued
+#'     logic
 #' }
 #'
 #' ## Aggregation sub-expressions
-#' `column` is not limited to a bare column name: any expression the same
-#' expression IR that powers [filter.tbl_gpu()]/[mutate.tbl_gpu()] understands
-#' is computed as a hidden temporary column first, then aggregated. This
-#' covers comparisons and logic (`sum(carb > 3 & wt < 4)`, `any(carb > 3)`),
-#' arithmetic (`mean(hp / wt)`), and math functions (`mean(sqrt(hp))`,
-#' `sum(carb %% 2 == 0)`), arbitrarily nested -- the same surface documented
-#' in \code{\link{mutate.tbl_gpu}}. A comparison/logical sub-expression is
-#' summed as `TRUE`/`FALSE` -> `1`/`0`, matching R's own coercion
-#' (`sum(c(TRUE, TRUE))` is `2L`) -- except inside `any()`/`all()`, which
-#' keep it logical. An expression shape the IR doesn't recognize raises the
-#' same "Invalid aggregation expression" error as any other unsupported
-#' aggregation shape.
+#' `column` is not limited to a bare column name: any expression that
+#' [filter.tbl_gpu()] and [mutate.tbl_gpu()] run on the GPU is computed as a
+#' hidden temporary column first, then aggregated. This covers comparisons
+#' and logic (`sum(carb > 3 & wt < 4)`, `any(carb > 3)`), arithmetic
+#' (`mean(hp / wt)`), and math functions (`mean(sqrt(hp))`,
+#' `sum(carb %% 2 == 0)`), nested to any depth: the same functions listed
+#' in \code{\link{mutate.tbl_gpu}}. A comparison or logical sub-expression is
+#' summed as `TRUE`/`FALSE` -> `1`/`0`, as in R (`sum(c(TRUE, TRUE))` is
+#' `2L`), and stays logical inside `any()`/`all()`. Any other expression is
+#' evaluated by dplyr on the CPU.
 #'
-#' `column` may also be (or contain) a WINDOW-function call (Phase 6, task
-#' 4), e.g. `last(cumsum(v))`, `sum(v - lag(v, default = 0))`,
-#' `mean(cumsum(v) - lag(cumsum(v)))`: the window function is computed PER
-#' GROUP first (over each group's own row order, using the same
-#' window-decomposition engine [mutate.tbl_gpu()] uses), and the
-#' aggregation then reduces that per-row window result -- matching dplyr's
-#' own two-step semantics exactly. Only ONE aggregation's own argument tree
-#' is decomposed this way; several aggregation calls in one dot are combined
-#' by the next section.
+#' `column` may also be (or contain) a window function call, e.g.
+#' `last(cumsum(v))`, `sum(v - lag(v, default = 0))`,
+#' `mean(cumsum(v) - lag(cumsum(v)))`: the window function is computed per
+#' group first (over each group's own row order, with the same window
+#' functions [mutate.tbl_gpu()] runs on the GPU), and the aggregation then
+#' reduces that per-row result, as dplyr does. This applies to the argument
+#' of one aggregation; several aggregation calls in one expression are
+#' combined as described in the next section.
 #'
 #' ## Arithmetic around reducers
 #' An expression may combine reducer calls with arithmetic, comparisons, math
@@ -153,70 +137,61 @@
 #' `case_when()` with a condition that is not a logical expression; a column
 #' of the input outside a reducer (`mean(x) + x`, dplyr's "must be size 1"
 #' error); a reducer that reads a name an earlier expression assigned (`x =
-#' sum(x), t = sum(x)`); an expression that reads the name of a LATER
+#' sum(x), t = sum(x)`); an expression that reads the name of a later
 #' expression (`mean(x) + k, k = sum(y)`: dplyr still sees the variable `k`
 #' there); `count()` inside an expression; a name assigned twice. A reducer
 #' inside a quosure spliced into the expression (`{{ stat }}`, `!!quo`) is
 #' computed in the quosure's own environment.
 #'
 #' ## NA handling
-#' `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()`/`median()` all match R's
-#' own `na.rm = FALSE` default (Phase 6, tasks 6.1/6.2): if a group contains
-#' ANY `NA` in the aggregated column, the WHOLE group's result is `NA` for
-#' that aggregation -- e.g. `summarise(m = mean(x))` is `NA` for a group
-#' with even one `NA` value of `x`, matching real dplyr exactly. Pass
-#' `na.rm = TRUE` explicitly (e.g. `sum(x, na.rm = TRUE)`) to exclude `NA`
-#' values instead (cudf's own native aggregation behavior). `n()` is
-#' unaffected by `na.rm=` (it counts every row regardless of nulls, like
-#' dplyr's own `n()`).
+#' `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()`/`median()` follow R's
+#' `na.rm = FALSE` default: if a group holds any `NA` in the aggregated
+#' column, that group's result is `NA` (`summarise(m = mean(x))` is `NA` for
+#' a group with one `NA` in `x`), as in dplyr. Pass `na.rm = TRUE` (e.g.
+#' `sum(x, na.rm = TRUE)`) to leave the `NA` values out. `n()` counts every
+#' row, `NA` or not, as dplyr's `n()` does.
 #'
-#' When `na.rm = TRUE` and a group's aggregated column is ENTIRELY `NA`
-#' (Phase 6, task 4), the result matches base R's own empty-vector
-#' reduction identity, exactly like real dplyr: `sum()` -> `0`, `mean()` ->
-#' `NaN`, `min()` -> `Inf`, `max()` -> `-Inf` (with base R's warning "no
-#' non-missing arguments to min; returning Inf" / "... max; returning -Inf",
-#' as dplyr surfaces it, for double and integer input alike; it is only
-#' raised when some group actually hits the identity), `sd()`/`var()`/
-#' `median()` -> `NA` (their natural result already, no special-casing
-#' needed).
+#' When `na.rm = TRUE` and a group's aggregated column is entirely `NA`, the
+#' result is base R's value for an empty vector, as in dplyr: `sum()` -> `0`,
+#' `mean()` -> `NaN`, `min()` -> `Inf`, `max()` -> `-Inf` (with base R's
+#' warning "no non-missing arguments to min; returning Inf" / "... max;
+#' returning -Inf", as dplyr shows it, for double and integer input alike;
+#' only when some group meets it), `sd()`/`var()`/`median()` -> `NA`.
 #'
-#' Over an INTEGER column, dplyr promotes the WHOLE `min()`/`max()` result
-#' column to double the instant any group needs the identity, and keeps it
-#' integer otherwise; cuplyr does the same. Because that type depends on the
-#' data, a `summarise()` with an integer `min()`/`max()` runs immediately even
-#' on a lazy table (pending operations are computed first), and the result's
-#' schema reflects the real type. A 0-row input also counts as an empty
-#' group: ungrouped, `summarise()` returns one row of empty-vector reductions
-#' (`n()` 0, `mean()` `NaN`, `sum()` 0, `min()` `Inf`, ...); grouped, the
-#' result has no rows but an integer `min()`/`max()` is typed double, as in
-#' dplyr.
+#' Over an integer column, dplyr makes the whole `min()`/`max()` result
+#' column a double as soon as any group needs that empty-vector value, and
+#' keeps it integer otherwise; cuplyr does the same. Because that type
+#' depends on the data, a `summarise()` with an integer `min()`/`max()` runs
+#' immediately even on a lazy table (pending operations are computed first),
+#' and the result's schema reflects the real type. A 0-row input also counts
+#' as an empty group: ungrouped, `summarise()` returns one row of empty-vector
+#' reductions (`n()` 0, `mean()` `NaN`, `sum()` 0, `min()` `Inf`, ...);
+#' grouped, the result has no rows but an integer `min()`/`max()` is typed
+#' double, as in dplyr.
 #'
-#' `quantile()` diverges from the mean/sum/.../median family: matching base
-#' R's own `quantile.default()` exactly, `na.rm = FALSE` (the default) with
-#' an actual `NA` present is a hard ERROR ("missing values and NaN's not
-#' allowed if 'na.rm' is FALSE"), not a `NA` result -- pass
-#' `na.rm = TRUE` to compute the quantile over the non-`NA` values instead.
+#' `quantile()` is different, as in base R's `quantile()`: with
+#' `na.rm = FALSE` (the default), an `NA` in the group is an error ("missing
+#' values and NaN's not allowed if 'na.rm' is FALSE"), not an `NA` result.
+#' Pass `na.rm = TRUE` to compute the quantile over the non-`NA` values.
 #'
 #' `n_distinct()` counts `NA` as its own distinct value when
-#' `na.rm = FALSE` (the default, matching dplyr's own `n_distinct()`
-#' exactly) -- e.g. `n_distinct(c(1, 2, NA, 2))` is `3`. Pass
-#' `na.rm = TRUE` to exclude `NA` from the distinct count instead.
+#' `na.rm = FALSE` (the default, as dplyr's `n_distinct()` does):
+#' `n_distinct(c(1, 2, NA, 2))` is `3`. Pass `na.rm = TRUE` to leave `NA`
+#' out of the count.
 #'
-#' `first()`/`last()`/`nth()` use dplyr's own `na_rm=` spelling
-#' (underscore, not `na.rm`): `na_rm = FALSE` (the default) never skips a
-#' `NA` when picking the first/last/nth value (so the result can itself be
-#' `NA`); `na_rm = TRUE` skips `NA` values, returning the first/last/nth
-#' non-`NA` value in the group (or `NA` if the group has none).
+#' `first()`/`last()`/`nth()` use dplyr's `na_rm=` spelling (underscore, not
+#' `na.rm`): `na_rm = FALSE` (the default) never skips an `NA` when picking
+#' the first/last/nth value (so the result can itself be `NA`);
+#' `na_rm = TRUE` skips `NA` values, returning the first/last/nth non-`NA`
+#' value in the group (or `NA` if the group has none).
 #'
-#' `any()`/`all()` implement R's exact three-valued logic: `any(x)` is
-#' `TRUE` if any element is `TRUE` (regardless of `NA`s present), `NA` if
-#' there's no `TRUE` but at least one `NA` (with `na.rm = FALSE`, the
-#' default), else `FALSE`; `all(x)` is `FALSE` if any element is `FALSE`
-#' (regardless of `NA`s present), `NA` if there's no `FALSE` but at least
-#' one `NA` (with `na.rm = FALSE`), else `TRUE`. `na.rm = TRUE` drops `NA`
-#' values first, matching base R's `any()`/`all()` exactly (an all-`NA`
-#' group with `na.rm = TRUE` is `FALSE` for `any()`, `TRUE` for `all()`,
-#' the empty-vector identity in both cases).
+#' `any()`/`all()` follow R's three-valued logic: `any(x)` is `TRUE` if any
+#' element is `TRUE` (whatever `NA`s there are), `NA` if there's no `TRUE`
+#' but at least one `NA` (with `na.rm = FALSE`, the default), else `FALSE`;
+#' `all(x)` is `FALSE` if any element is `FALSE`, `NA` if there's no `FALSE`
+#' but at least one `NA` (with `na.rm = FALSE`), else `TRUE`. `na.rm = TRUE`
+#' drops `NA` values first, as base R's `any()`/`all()` do (an all-`NA`
+#' group with `na.rm = TRUE` is `FALSE` for `any()` and `TRUE` for `all()`).
 #'
 #' ## Ungrouped summarise
 #' If `.data` is not grouped, summarise will compute aggregations over all
@@ -230,21 +205,22 @@
 #' the distinct `.by` combinations in first-appearance order.
 #'
 #' ## Tables with no columns
-#' cudf cannot hold rows without columns, so a zero-column `tbl_gpu` keeps its
-#' row count on the R side. What that covers: `tbl_gpu()`, `dim()`,
+#' A GPU table can't hold rows without columns, so a zero-column `tbl_gpu`
+#' keeps its row count in R. What that covers: `tbl_gpu()`, `dim()`,
 #' `collect()`/`as_tibble()`, `compute()`/`collapse()`,
 #' `group_by()`/`ungroup()`, `select()`/`relocate()`, `distinct()`, zero-dot
-#' `summarise()` (1 x 0), `summarise()` with dots (a CPU fallback, so `n()`
-#' counts correctly), `slice()` and its helpers, `bind_rows()`/`bind_cols()`
-#' of zero-column tables only, `filter()`/`filter_out()` (dplyr runs the call
-#' on a table of the same height, so `row_number()` and `n()` see its rows),
-#' `mutate()`/`transmute()` that leave no column (every column set to `NULL`),
-#' `cross_join()` and joins with `by = character()` where a side has no
-#' columns, the set operations of two zero-column tables, vctrs operations
-#' (`vec_size()`, `vec_slice()`, ...), `reframe()` with a zero-column data
-#' frame result, `dplyr_row_slice()`, and adding a column with
-#' `$<-`/`[[<-`. Binding a zero-column table that has rows to one with columns
-#' raises an error instead of returning a wrong row count.
+#' `summarise()` (1 x 0), `summarise()` with dots (in dplyr on the CPU, so
+#' `n()` counts correctly), `slice()` and its helpers,
+#' `bind_rows()`/`bind_cols()` of zero-column tables only,
+#' `filter()`/`filter_out()` (dplyr runs the call on a table of the same
+#' height, so `row_number()` and `n()` see its rows), `mutate()`/`transmute()`
+#' that leave no column (every column set to `NULL`), `cross_join()` and
+#' joins with `by = character()` where a side has no columns, the set
+#' operations of two zero-column tables, vctrs operations (`vec_size()`,
+#' `vec_slice()`, ...), `reframe()` with a zero-column data frame result,
+#' `dplyr_row_slice()`, and adding a column with `$<-`/`[[<-`. Binding a
+#' zero-column table that has rows to one with columns raises an error
+#' instead of returning a wrong row count.
 #'
 #' ## Redefining columns
 #' An expression named like a grouping column replaces that key in place
@@ -253,13 +229,12 @@
 #' (or a name created twice) sees the new value, as in dplyr. When that
 #' expression is arithmetic around reducers and earlier results (`m = s / n()`)
 #' it runs on the GPU (see above); a reducer that reads the name (`x =
-#' sum(x), t = sum(x)`) or a repeated name runs through the CPU fallback.
+#' sum(x), t = sum(x)`) or a repeated name runs in dplyr on the CPU.
 #'
 #' ## Group order
 #' `group_by(g) |> summarise(...)` returns groups in dplyr's `group_by()`
 #' order: ascending, `NA` last, strings in the C locale, `FALSE < TRUE`,
-#' factors in level order (`gpu_summarise()` sorts the small aggregated result
-#' by the keys). `count()`/`tally()` inherit it.
+#' factors in level order. `count()` and `tally()` give the same order.
 #'
 #' ## `.drop = FALSE`
 #' On a `group_by(.drop = FALSE)` grouping with a factor key, or on a table
@@ -279,15 +254,12 @@
 #' of a character column runs the whole call on the CPU when a group is empty.
 #'
 #' ## `.by` group order
-#' Verified empirically against dplyr 1.2.1: `summarise(.by=)` emits one row
-#' per distinct `.by` combination in the order that combination FIRST
-#' appears in `.data` -- e.g. `summarise(tibble(g = c("b","a","b")), n =
-#' n(), .by = g)` returns `g` in the order `c("b", "a")`, not `c("a", "b")`.
-#' This differs from `group_by(g) |> summarise(...)`, whose groups are
-#' sorted. The GPU does one grouped summarise and puts the groups in
-#' first-appearance order inside it (`summarise_by_desugar()`): no row-number
-#' column and no extra verbs. Its peak GPU memory is that of the `group_by()`
-#' form plus up to 12 bytes a row.
+#' `summarise(.by = )` gives one row per distinct `.by` combination, in the
+#' order that combination first appears in `.data`, as dplyr does:
+#' `summarise(tibble(g = c("b", "a", "b")), n = n(), .by = g)` returns `g` in
+#' the order `c("b", "a")`, not `c("a", "b")`. `group_by(g) |> summarise(...)`
+#' sorts its groups instead. On the GPU this is one grouped summary, and its
+#' peak GPU memory is that of the `group_by()` form plus up to 12 bytes a row.
 #'
 #' @seealso
 #' \code{\link{group_by.tbl_gpu}} for grouping data,

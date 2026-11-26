@@ -10,46 +10,37 @@ check_set_op_compatible(x_schema, y_schema)
 \item{x_schema, y_schema}{Schemas (\code{current_schema()}) of \code{x}/\code{y}.}
 }
 \value{
-A list with \verb{$target_schema} (unified schema, x's names/order)
-and \verb{$needs_fallback} (logical: \code{TRUE} only for duplicated column names).
+A list with \verb{$target_schema} (unified schema, x's names/order),
+\verb{$needs_fallback} (logical: \code{TRUE} for duplicated column names, or a
+\code{Date} next to a non-UTC \code{POSIXct}) and \verb{$fallback_reason}.
 }
 \description{
-Mirrors \code{dplyr:::is_compatible()} (verified empirically against dplyr
-1.2.1 + vctrs \code{vec_ptype2()}): same column count, same column name SET
-(order tolerated), and a per-column common type, via
-\code{resolve_common_col_type()} (R/bind.R). As of Phase 11 L4 this is
-EXACTLY the same ladder \code{bind_rows()}'s own \code{compute_unified_schema()}
-uses -- the two used to diverge (this function reimplemented vctrs'
-stricter common-type ladder from scratch because \code{bind_rows()}'s old
-\code{promote_types()} treated \code{STRING} as a universal widest type, silently
-coercing a numeric/date column against a character one, which real
-vctrs' \code{vec_ptype2()} REFUSES -- verified: \code{vec_ptype2(1L, "a")} errors).
-\code{promote_types()} is gone; both verbs now share one strict ladder.
+Mirrors \code{dplyr:::is_compatible()} (checked against dplyr 1.2.1 + vctrs
+\code{vec_ptype2()}): same column count, same column name set (order
+tolerated), and a per-column common type, via
+\code{resolve_common_col_type()} (R/bind.R), the same ladder \code{bind_rows()}'s
+own \code{compute_unified_schema()} uses. That ladder follows vctrs'
+\code{vec_ptype2()}, which refuses a numeric/date column against a character
+one (\code{vec_ptype2(1L, "a")} errors), so neither verb coerces such a pair
+to a string.
 }
 \details{
-Factor columns get a four-way split (verified against real
-\code{vec_ptype2()} behavior for factors, see inline comments): both-factor
-with IDENTICAL levels is native (same underlying INT32 codes, safe to
-compare/concatenate directly); both-factor with DIFFERING levels is ALSO
-native as of Phase 11 L2 (\code{gpu_remap_codes()}, \code{src/ops_bind.cpp},
-remaps each side's codes onto the level UNION, mirroring \code{bind_rows()}'s
-own Bug 2 fix); factor-vs-character is ALSO native as of Phase 11 L2
-(\code{gpu_decode_factor()} decodes the factor side to its labels, mirroring
-\code{bind_rows()}'s own Bug 3 fix) -- both used to route through
-\verb{$needs_fallback} before these two GPU primitives existed. Factor vs.
-anything else (numeric, date, ...) is a genuine vctrs error, reproduced
-here directly.
+Factor columns get a four-way split (as \code{vec_ptype2()} treats factors,
+see inline comments): both-factor with identical levels runs on the GPU
+as is (same underlying INT32 codes, safe to compare/concatenate
+directly); both-factor with differing levels runs on the GPU through
+\code{gpu_remap_codes()} (\code{src/ops_bind.cpp}), which remaps each side's codes
+onto the level union, as \code{bind_rows()} does; factor-vs-character runs on
+the GPU through \code{gpu_decode_factor()}, which decodes the factor side to
+its labels, as \code{bind_rows()} does. Factor vs. anything else (numeric,
+date, ...) is a genuine vctrs error, reproduced here directly.
 
-Phase 11 L4: the per-column ladder itself is now
-\code{resolve_common_col_type()} (R/bind.R), shared verbatim with
-\code{bind_rows()}'s own \code{compute_unified_schema()} -- this function now only
-adds the column-count/name-SET checks and its own verb-specific
-("\code{x} and \code{y} are not compatible.", bulleted) error formatting on top.
-The \code{Date}-vs-\code{POSIXct} timestamp promotion that used to require
-\verb{$needs_fallback} (no native \code{TIMESTAMP_DAYS} -> \code{TIMESTAMP_MICROSECONDS}
-cast existed yet) is now unconditionally native as of Phase 11 L3
-(\code{gpu_cast_column()} gained the 5 timestamp targets) -- \verb{$needs_fallback}
-is now ALWAYS \code{FALSE} and kept only for call-site compatibility (every
-caller in this file still checks it).
+This function adds the column-count/name-set checks and its own
+verb-specific ("\code{x} and \code{y} are not compatible.", bulleted) error
+formatting on top of the shared ladder. A \code{Date}-vs-\code{POSIXct} column
+promotes to \code{POSIXct} on the GPU (\code{gpu_cast_column()}'s timestamp
+targets), except next to a non-UTC \code{POSIXct}, where the \code{Date} becomes
+local midnight of that zone: \verb{$needs_fallback} is then \code{TRUE}, as it is
+for duplicated column names.
 }
 \keyword{internal}

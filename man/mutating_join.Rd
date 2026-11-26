@@ -26,7 +26,7 @@ and the node gets \code{"drop"}.
 }
 \details{
 Order of checks: the unsupported-\code{by} CPU fallback; argument validation;
-key-type resolution (raises \code{dplyr_error_join_incompatible_type}, A3);
+key-type resolution (raises \code{dplyr_error_join_incompatible_type});
 the factor-level-conflict and suffix-collision fallbacks; then, for
 \code{by = character()} only, dplyr's deprecation warning (emitted last so a
 fallback, whose dplyr call warns by itself, never warns twice).

@@ -2,7 +2,7 @@
 % Please edit documentation in R/join.R
 \name{join_native_non_equi_ops}
 \alias{join_native_non_equi_ops}
-\title{The non-equi operators J7's native \code{mixed_join}/\code{conditional_join}
+\title{The non-equi operators the native \code{mixed_join}/\code{conditional_join}
 lowering understands}
 \usage{
 join_native_non_equi_ops

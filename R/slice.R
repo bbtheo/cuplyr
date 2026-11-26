@@ -131,7 +131,7 @@
 
 #' Classify a call's effective grouping for the slice() family
 #'
-#' Shared by all five verbs (Phase 5, task W7): resolves `by=`/`.by=` via
+#' Shared by the slice() verbs: resolves `by=`/`.by=` via
 #' `resolve_by()` (which itself raises dplyr's own "Can't supply `by`..."
 #' error when `.data` is already grouped) and returns which of three
 #' dispatch paths applies.
@@ -142,7 +142,7 @@
 #'   `resolve_by()`'s grouped-`.data` error message, see its own docs)
 #' @return `list(mode = "none"|"group_by"|"by", group_cols = <chr>)`:
 #'   `"none"` when `.data` is ungrouped and no `by=`/`.by=` was supplied
-#'   (the existing Phase 3.2 ungrouped native path applies); `"group_by"`
+#'   (the ungrouped GPU kernels apply); `"group_by"`
 #'   when `.data` is `group_by()`-grouped; `"by"` when `by=`/`.by=` was
 #'   supplied (which implies `.data` itself is ungrouped, since
 #'   `resolve_by()` would otherwise have already errored)
@@ -389,14 +389,15 @@ classify_slice_indices <- function(raw_indices) {
   list(kind = "positive", vals = as.integer(vals))
 }
 
-#' GPU-native grouped/`by=` slice() family desugar (Phase 5, task W7)
+#' Grouped/`by=` slice() family desugar on the GPU
 #'
-#' Implements every `group_by()`-grouped or `by=`/`.by=` on-the-fly-grouped
+#' Implements a `group_by()`-grouped or `by=`/`.by=` on-the-fly-grouped
 #' `slice()`/`slice_head()`/`slice_tail()`/`slice_min()`/`slice_max()` call
 #' by composing the existing window/mutate/filter/arrange/select AST
-#' machinery (Phase 5 W1-W6) -- ZERO new GPU primitives. See this file's
-#' module docs for the empirically-verified semantics this reproduces
-#' (group order, NA handling, `by=`'s first-appearance rule).
+#' machinery, with no GPU primitive of its own. (Grouped `slice_min()`/
+#' `slice_max()` on a key in `topk_key_types` takes `slice_rank_grouped()`
+#' instead.) It reproduces dplyr's group order, NA handling and `by=`'s
+#' first-appearance rule (see the comment at the top of the file).
 #'
 #' The node sequence, in order (only the parts relevant to `mode`/
 #' `group_mode` are actually emitted):
@@ -404,8 +405,9 @@ classify_slice_indices <- function(raw_indices) {
 #'   \item (`mode == "rank"`, computed `order_by`) `ast_mutate`: materialize
 #'     the computed `order_by` expression under a temp name.
 #'   \item (`mode == "rank"`) `ast_mutate`: `..slice_na.. = is.na(order_col)`
-#'     -- the NA-last sort key `order_by` needs (see module docs on why a
-#'     plain `desc(order_col)` arrange can't be used here).
+#'     -- an NA-last sort key for `order_by` (redundant for the order, since
+#'     `gpu_arrange()` already sorts NA last in both directions, but still
+#'     needed to build `..slice_valid..`/`..slice_nn..` below).
 #'   \item (`group_mode == "by"`) `ast_window` (UNGROUPED): `..slice_rowid..
 #'     = row_number()` over the whole table, then `ast_window` (grouped):
 #'     `..slice_first.. = min(..slice_rowid..)` -- each group's own
@@ -428,8 +430,8 @@ classify_slice_indices <- function(raw_indices) {
 #'     `n=`/`prop=` clamp rule `compute_slice_size()` (C++) uses for the
 #'     ungrouped path, expressed as IR (`gs` is a real per-group column
 #'     here, not a compile-time scalar).
-#'   \item `ast_filter`: the mode-specific predicate (see module docs'
-#'     desugar table).
+#'   \item `ast_filter`: the mode-specific predicate over the temp
+#'     columns above.
 #'   \item `ast_select`: back down to the ORIGINAL column set (captured
 #'     before any of the above), dropping every `..slice_*..`/computed-
 #'     `order_by` temp column in one step.
@@ -692,39 +694,41 @@ slice_zero_column <- function(.data, fn) {
 
 #' Select rows by position
 #'
-#' Keeps rows of a GPU table by integer position, similar to
-#' `dplyr::slice()`. Ungrouped, `group_by()`-grouped, and `.by=` calls with
-#' plain, data-independent index expressions all run entirely on the GPU
-#' (Phase 5, task W7): ungrouped via a direct `cudf::gather()`; grouped/
-#' `.by=` via a per-group `row_number()` desugar (R/slice.R's module docs),
-#' restricted to a strictly increasing positive index vector or any set of
-#' negative indices (arbitrary duplication/reordering is ungrouped-only --
-#' see `...`'s docs below). Everything else (an index expression the
-#' GPU-native path can't evaluate without a data mask, e.g. one that
-#' references a column or `n()`, or a grouped/`.by=` index vector with
-#' duplicates/reordering) transparently falls back to CPU evaluation (see
-#' [gpu_fallback()]).
+#' Keeps rows of a GPU table by integer position, as `dplyr::slice()` does.
+#' Constant positions run on the GPU, ungrouped, after `group_by()` and with
+#' `.by`. With groups, only a strictly increasing positive index vector or a
+#' set of negative indices runs on the GPU (an ungrouped table also takes
+#' duplicated and reordered positions; see `...` below). Anything else runs
+#' in dplyr on the CPU (see [cuplyr-fallback]): an index expression that
+#' needs the data, e.g. one that reads a column or `n()`, or a grouped or
+#' `.by` index vector with duplicated or reordered positions.
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
 #' @param ... Integer row positions, e.g. `slice(df, 1:3)`. Duplicates and
 #'   reordering are allowed for positive indices when `.data` is ungrouped
-#'   and `.by=` isn't supplied (`slice(df, c(3, 1, 1))`); grouped/`.by=`
-#'   calls only run natively for a strictly increasing, duplicate-free
-#'   positive index vector (falling back to CPU otherwise); negative
+#'   and `.by=` isn't supplied (`slice(df, c(3, 1, 1))`); grouped or `.by`
+#'   calls run on the GPU only for a strictly increasing, duplicate-free
+#'   positive index vector (and on the CPU otherwise); negative
 #'   indices drop those rows instead (order/duplicates never matter here,
 #'   grouped or not); `0`/`NA` are silently dropped; out-of-range positions
 #'   are silently dropped; positive and negative indices cannot be mixed.
-#' @param .by Optional on-the-fly grouping columns, GPU-native (Phase 5,
-#'   task W7): result rows are ordered by each group's FIRST-APPEARANCE
-#'   position in `.data` (see module docs), and the result is always
-#'   ungrouped. Supplying `.by` when `.data` is already grouped (via
-#'   `group_by()`) is an error, matching dplyr.
+#' @param .by Optional grouping columns for this call only, run on the GPU.
+#'   As in dplyr, the result has the groups in the order each one first
+#'   appears in `.data`, and it is ungrouped. Supplying `.by` when `.data` is
+#'   already grouped (via `group_by()`) is an error, as in dplyr.
 #' @param .preserve Whether to keep the groups the slice emptied. With `TRUE`,
 #'   a `group_by()`-grouped result keeps the input's group keys (empty groups
 #'   included) for `group_data()`, `collect()` and `summarise()`, like dplyr
 #'   (see [group_by.tbl_gpu()] for what carries them on). On a `.drop = FALSE`
 #'   table every group is kept whatever `.preserve` says, as in dplyr (also for
 #'   `slice_head()`, `slice_tail()`, `slice_min()` and `slice_max()`).
+#'
+#' @details
+#' ## Row order
+#' As in dplyr: ungrouped, the rows come in the order of the positions. After
+#' `group_by()` the result comes group by group, in ascending group-key order
+#' (an `NA` key last), and each group's rows keep their order. With `.by` the
+#' groups come in the order each first appears in `.data`.
 #'
 #' @return A `tbl_gpu` object with the selected rows.
 #'
@@ -914,11 +918,11 @@ slice_group_keys_of <- function(gd) {
 
 #' Select the first rows
 #'
-#' Keeps the first `n` (or `prop` fraction of) rows of a GPU table, similar
-#' to `dplyr::slice_head()`. Ungrouped, `group_by()`-grouped, and `by=`
-#' calls all run entirely on the GPU (Phase 5, task W7): ungrouped via
-#' `cudf::slice()`; grouped/`by=` via a per-group window desugar (see
-#' R/slice.R's module docs for the exact group-ordering/NA-handling rules).
+#' Keeps the first `n` (or `prop` fraction of) rows of a GPU table, as
+#' `dplyr::slice_head()` does. It runs on the GPU, ungrouped, after
+#' `group_by()` and with `by`. Grouped results come group by group, as in
+#' dplyr: in ascending group-key order (an `NA` key last) after `group_by()`,
+#' and in the order each group first appears in `.data` with `by`.
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
 #' @param ... Not used; for extensibility, must be empty.
@@ -929,11 +933,10 @@ slice_group_keys_of <- function(gd) {
 #' @param prop Proportion of rows to keep (`floor(prop * nrow(.data))`,
 #'   clamped like `n`; grouped: `floor(prop * group_size)`, per group).
 #'   Exactly one of `n`/`prop` may be supplied.
-#' @param by Optional on-the-fly grouping columns, GPU-native (Phase 5,
-#'   task W7): result rows are ordered by each group's FIRST-APPEARANCE
-#'   position in `.data` (see module docs), and the result is always
-#'   ungrouped. Supplying `by` when `.data` is already grouped (via
-#'   `group_by()`) is an error, matching dplyr.
+#' @param by Optional grouping columns for this call only, run on the GPU.
+#'   As in dplyr, the result has the groups in the order each one first
+#'   appears in `.data`, and it is ungrouped. Supplying `by` when `.data` is
+#'   already grouped (via `group_by()`) is an error, as in dplyr.
 #'
 #' @return A `tbl_gpu` object with the first rows selected.
 #'
@@ -981,10 +984,10 @@ slice_head.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
 
 #' Select the last rows
 #'
-#' Keeps the last `n` (or `prop` fraction of) rows of a GPU table, similar
-#' to `dplyr::slice_tail()`. Ungrouped, `group_by()`-grouped, and `by=`
-#' calls all run entirely on the GPU (Phase 5, task W7) -- see
-#' [slice_head.tbl_gpu()] for the shared dispatch/grouping semantics.
+#' Keeps the last `n` (or `prop` fraction of) rows of a GPU table, as
+#' `dplyr::slice_tail()` does. It runs on the GPU, ungrouped, after
+#' `group_by()` and with `by`; see [slice_head.tbl_gpu()] for the order of
+#' the groups in the result.
 #'
 #' @inheritParams slice_head.tbl_gpu
 #'
@@ -1035,25 +1038,20 @@ slice_tail.tbl_gpu <- function(.data, ..., n, prop, by = NULL) {
 #' Select rows with the smallest values of a variable
 #'
 #' Keeps the `n` (or `prop` fraction of) rows with the smallest `order_by`
-#' values, similar to `dplyr::slice_min()`. Ungrouped, `group_by()`-grouped,
-#' and `by=` calls with a plain `order_by` (a bare column, or an expression
-#' the mutate/filter IR recognizes) all run entirely on the GPU (Phase 5,
-#' task W7): ungrouped via a top-k cut plus a sort of the survivors when the
-#' key is numeric or a date and `n` is a small share of the rows, otherwise a
-#' stable sort (with `cudf::rank()` for ties); grouped/`by=` on such a key
-#' by stable radix sorts of the row positions and per-group ranks, other
-#' grouped/`by=` keys via a per-group window desugar (see R/slice.R's module docs for the
-#' exact group-ordering rules, including `by=`'s first-appearance-order
-#' rule, which applies here too, not just to the positional slice_*()s).
-#' An unsupported `order_by` expression (one the IR can't parse) still
-#' transparently falls back to CPU evaluation (see [gpu_fallback()]).
+#' values, as `dplyr::slice_min()` does. It runs on the GPU, ungrouped,
+#' after `group_by()` and with `by`, when `order_by` is a column or an
+#' expression [mutate.tbl_gpu()] runs on the GPU; any other `order_by` runs
+#' in dplyr on the CPU (see [cuplyr-fallback]). Grouped results come group by
+#' group, as for [slice_head.tbl_gpu()]: in ascending group-key order after
+#' `group_by()`, and in the order each group first appears in `.data` with
+#' `by`.
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
-#' @param order_by Column (or IR-supported expression) to rank by.
+#' @param order_by Column, or expression of columns, to rank by.
 #' @param ... Not used; for extensibility, must be empty.
 #' @param n,prop As for [slice_head.tbl_gpu()].
-#' @param by Optional on-the-fly grouping columns, GPU-native (Phase 5,
-#'   task W7) -- see [slice_head.tbl_gpu()]'s `by` docs.
+#' @param by Optional grouping columns for this call only, run on the GPU;
+#'   see [slice_head.tbl_gpu()]'s `by`.
 #' @param with_ties If `TRUE` (the default), ties at the cutoff are all
 #'   kept (the result can have more than `n` rows); if `FALSE`, ties are
 #'   broken by original row position and the result has exactly `n` rows
@@ -1120,10 +1118,10 @@ slice_min.tbl_gpu <- function(.data, order_by, ..., n, prop, by = NULL,
 #' Select rows with the largest values of a variable
 #'
 #' Keeps the `n` (or `prop` fraction of) rows with the largest `order_by`
-#' values, similar to `dplyr::slice_max()`. See [slice_min.tbl_gpu()] for
-#' the shared native-vs-fallback dispatch and `order_by`/`with_ties`/
-#' `na_rm` semantics (identical, except the ranking direction and the
-#' result's row order, which is descending here).
+#' values, as `dplyr::slice_max()` does. It works as [slice_min.tbl_gpu()]
+#' does (what runs on the GPU, `order_by`, `with_ties`, `na_rm`), except for
+#' the ranking direction and the result's row order, which is descending
+#' here.
 #'
 #' @inheritParams slice_min.tbl_gpu
 #'
@@ -1254,8 +1252,8 @@ slice_rank_native <- function(.data, order_quo, amt, descending, with_ties, na_r
 #'
 #' `utils::head()` method for `tbl_gpu`. Keeps the same rows as
 #' `utils::head.data.frame()`: implemented as `slice_head(n = floor(n))` on the
-#' ungrouped table (see [slice_head.tbl_gpu()] for the native-vs-fallback
-#' dispatch), with the grouping put back on the result.
+#' ungrouped table (see [slice_head.tbl_gpu()]), with the grouping put back
+#' on the result.
 #'
 #' @param x A `tbl_gpu` object.
 #' @param n Number of rows to keep (default `6`, matching `utils::head()`).
@@ -1278,8 +1276,8 @@ head.tbl_gpu <- function(x, n = 6L, ...) {
 #'
 #' `utils::tail()` method for `tbl_gpu`. Keeps the same rows as
 #' `utils::tail.data.frame()`: implemented as `slice_tail(n = ceiling(n))` on
-#' the ungrouped table (see [slice_tail.tbl_gpu()] for the native-vs-fallback
-#' dispatch), with the grouping put back on the result.
+#' the ungrouped table (see [slice_tail.tbl_gpu()]), with the grouping put
+#' back on the result.
 #'
 #' @param x A `tbl_gpu` object.
 #' @param n Number of rows to keep (default `6`, matching `utils::tail()`).
@@ -1381,75 +1379,59 @@ compute_slice_sample_size <- function(amount, is_prop, n, replace) {
   }
 }
 
-#' GPU-native `slice_sample()` (Phase 5, task W8)
+#' GPU `slice_sample()`: indices drawn in R, rows gathered on the GPU
 #'
 #' Reproduces dplyr's own RNG stream bit-for-bit by generating row indices
 #' on the CPU with the exact same `sample.int()` call sequence real dplyr
 #' makes, then gathering those indices on the GPU via the existing
-#' `gpu_slice_indices()` primitive (Phase 3.2) -- there is no AST node for
+#' `gpu_slice_indices()` primitive -- there is no AST node for
 #' `slice_sample()` at all, unlike every other verb in this package: the
 #' index vector is the whole point (it must be generated on the CPU to
 #' consume R's global RNG state the same way real dplyr does), so there is
 #' nothing left for a lazy AST/optimizer to defer.
 #'
-#' Semantics verified empirically against dplyr 1.2.1 before implementing
-#' (`dplyr:::slice_sample.data.frame`, `dplyr:::sample_int`,
-#' `dplyr:::get_slice_size`, `dplyr:::compute_by_groups`, source read via
-#' `getAnywhere()`/`print()`):
+#' Semantics checked against dplyr 1.2.1 (`dplyr:::slice_sample.data.frame`,
+#' `dplyr:::sample_int`, `dplyr:::get_slice_size`,
+#' `dplyr:::compute_by_groups`):
 #'   - Ungrouped: exactly one `sample.int(nrow, size, replace = replace)`
 #'     call (`dplyr:::sample_int`'s own body: `if (size == 0L) integer(0)
 #'     else sample.int(n, size, prob = wt, replace = replace)`, `wt` always
 #'     `NULL` here since `weight_by=` never reaches this function -- see
 #'     below).
-#'   - `group_by()`-grouped: dplyr iterates groups in ASCENDING GROUP-KEY
+#'   - `group_by()`-grouped: dplyr iterates groups in ascending group-key
 #'     order (NA-key group last) -- the same order `dplyr::group_by()`
-#'     itself produces (confirmed by literally calling
-#'     `dplyr::group_by()`/`dplyr::group_rows()` on the collected group
-#'     columns here, so this can never drift from real dplyr's own
+#'     itself produces (taken from `dplyr::group_by()`/`dplyr::group_rows()`
+#'     on the collected group columns, so it can't drift from dplyr's
 #'     ordering). One `sample.int()` call per group, in that order,
 #'     consuming the RNG stream in that same order; the resulting rows are
-#'     concatenated in the SAME order (group-key order), matching real
-#'     dplyr's own output row order exactly (confirmed empirically: this
-#'     is genuinely a reordering relative to input row order, same as the
-#'     other grouped `slice_*()` verbs' W7 finding). Output stays grouped
-#'     by the same columns, matching real dplyr.
+#'     concatenated in the same (group-key) order, as dplyr's output is: a
+#'     reordering relative to input row order, as for the other grouped
+#'     `slice_*()` verbs. Output stays grouped by the same columns.
 #'   - `by=`: dplyr's own `compute_by_groups()` groups via
-#'     `vctrs::vec_group_loc()`, which orders groups by FIRST-APPEARANCE
-#'     position in the input -- NOT ascending group-key order (confirmed
-#'     empirically with a case where ascending-key order and
-#'     first-appearance order differ: the RNG draw order AND the output
-#'     row order both follow first-appearance order, not ascending key,
-#'     and NOT a final sort-by-original-row-position either). This
-#'     CORRECTS `scratchpad/phase5_window_design.md` §7's own text ("`by=`
-#'     => sort() final indices (original row order)"), which was written
-#'     before this empirical check and turns out to describe neither the
-#'     RNG order nor the output order dplyr actually uses -- the real rule
-#'     is exactly the grouped case's rule, just with a different (first-
-#'     appearance, not ascending-key) group ordering source, i.e. exactly
-#'     analogous to `summarise(.by=)`'s and W7's grouped-`slice()`'s
-#'     already-documented first-appearance rule. Implemented here via
-#'     `vctrs::vec_group_loc()` directly (the identical function
-#'     `compute_by_groups()` itself calls), rather than reimplementing
-#'     first-appearance grouping by hand, to remove any group-order
-#'     divergence risk. Output is always ungrouped, matching `by=`'s
-#'     general contract.
+#'     `vctrs::vec_group_loc()`, which orders groups by first-appearance
+#'     position in the input, not ascending group-key order: the RNG draw
+#'     order and the output row order both follow first-appearance order
+#'     (not ascending key, and not a final sort by original row position
+#'     either), as for `summarise(.by=)` and the grouped `slice()` desugar.
+#'     Implemented with `vctrs::vec_group_loc()` directly (the function
+#'     `compute_by_groups()` itself calls), so the group order can't
+#'     diverge. Output is always ungrouped, as `by=` always is.
 #'   - `n=`/`prop=` resolution: see `compute_slice_sample_size()`'s own
 #'     docs for the exact (and slightly asymmetric) `replace=`-dependent
-#'     clamp rule, verified against `dplyr:::get_slice_size()`'s source.
-#'     Oversampling `n` without `replace` does NOT error -- it silently
+#'     clamp rule, checked against `dplyr:::get_slice_size()`'s source.
+#'     Oversampling `n` without `replace` does not error -- it silently
 #'     clamps to the table's (or group's) own row count, same as
 #'     `slice_head()`/`slice_tail()`.
-#'   - `weight_by=` always falls back to CPU (see `slice_sample.tbl_gpu()`
-#'     below) -- `gpu_fallback()` re-runs the real `dplyr::slice_sample()`
+#'   - `weight_by=` always falls back to CPU (see `slice_sample.tbl_gpu()`)
+#'     -- `gpu_fallback()` re-runs the real `dplyr::slice_sample()`
 #'     call, which already reproduces the identical `sample.int(...,
 #'     prob = wt)` behavior, so there is nothing to gain (and real
-#'     complexity to lose, since `wt` needs the ACTUAL data values, not
+#'     complexity to lose, since `wt` needs the actual data values, not
 #'     just group columns) from a native path for this case.
 #'
-#' @param .data A `tbl_gpu` object (already materialized if it had pending
-#'   lazy ops -- the caller is responsible for calling `compute()` first,
-#'   since CPU-side index generation needs a real row count/grouping,
-#'   which a lazy AST doesn't have)
+#' @param .data A `tbl_gpu` object. Pending lazy ops are computed first:
+#'   the CPU-side index generation needs a real row count/grouping, which a
+#'   lazy AST doesn't have.
 #' @param gm A `list(mode, group_cols)` as returned by `slice_group_mode()`
 #' @param amount,is_prop As resolved by `resolve_slice_amount()`
 #' @param replace Logical scalar, `slice_sample()`'s own `replace=`
@@ -1608,7 +1590,7 @@ sample_rows_impl <- function(tbl, size_quo, replace, weight_quo, env, frac, fall
 #' same rows, and gather them on the GPU like [slice_sample.tbl_gpu()]. A
 #' `weight`, a `size` that reads the data (a column, `n()`) or draws random
 #' numbers, and any call dplyr would raise an error for (e.g. a `size` larger
-#' than a group without `replace`) run on the CPU through [gpu_fallback()],
+#' than a group without `replace`) run in dplyr on the CPU (see [cuplyr-fallback]),
 #' where dplyr raises the error and consumes the RNG itself.
 #'
 #' @param tbl A `tbl_gpu` object.
@@ -1657,35 +1639,31 @@ sample_frac.tbl_gpu <- function(tbl, size = 1, replace = FALSE, weight = NULL,
 
 #' Sample rows
 #'
-#' Keeps a random sample of rows of a GPU table, similar to
-#' `dplyr::slice_sample()`. Ungrouped, `group_by()`-grouped, and `by=`
-#' calls all run entirely on the GPU for the actual row gather (Phase 5,
-#' task W8): row indices are generated on the CPU (to reproduce dplyr's
-#' own RNG stream bit-for-bit, see `slice_sample_native()`'s own docs for
-#' the full recipe/group-ordering rules), then gathered via
-#' `gpu_slice_indices()`. `weight_by=` still transparently falls back to
-#' CPU evaluation (see [gpu_fallback()]) -- weighted sampling needs the
-#' actual (potentially computed) column values, not just row counts/group
-#' columns.
+#' Keeps a random sample of rows of a GPU table, as `dplyr::slice_sample()`
+#' does. The row numbers are drawn in R with the same `sample.int()` calls
+#' dplyr makes, so the same `set.seed()` gives the same rows as dplyr; the
+#' rows are then gathered on the GPU. This works ungrouped, after
+#' `group_by()` and with `by`. A lazy table's pending steps run first, since
+#' the draw needs the row count. `weight_by` runs in dplyr on the CPU (see
+#' [cuplyr-fallback]), since the weights are values of the data.
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
 #' @param ... Not used; for extensibility, must be empty.
 #' @param n Number of rows to sample. Default `1` if neither `n` nor
 #'   `prop` is supplied. Negative values are clamped like
 #'   [slice_head.tbl_gpu()]'s `n`. With `replace = TRUE`, a non-negative
-#'   `n`/`prop` is NOT clamped to the table's (or group's) row count --
-#'   oversampling with replacement is allowed and produces a larger
-#'   result; without `replace`, oversampling silently clamps (no error).
+#'   `n`/`prop` is not clamped to the table's (or group's) row count:
+#'   oversampling with replacement is allowed and gives a larger result;
+#'   without `replace`, oversampling silently clamps (no error).
 #' @param prop Proportion of rows to sample (`n = prop * nrow(.data)`,
 #'   subject to the same clamp rule as `n`).
-#' @param by Optional on-the-fly grouping columns, GPU-native (Phase 5,
-#'   task W8): row indices are drawn (and the result ordered) by each
-#'   group's FIRST-APPEARANCE position in `.data` (see
-#'   `slice_sample_native()`'s own docs), and the result is always
-#'   ungrouped. Supplying `by` when `.data` is already grouped (via
-#'   `group_by()`) is an error, matching dplyr.
-#' @param weight_by Sampling weights. Always falls back to CPU evaluation
-#'   (see [gpu_fallback()]) -- not GPU-native.
+#' @param by Optional grouping columns for this call only, run on the GPU.
+#'   As in dplyr, the groups are drawn (and appear in the result) in the
+#'   order each one first appears in `.data`, and the result is ungrouped.
+#'   Supplying `by` when `.data` is already grouped (via `group_by()`) is an
+#'   error, as in dplyr.
+#' @param weight_by Sampling weights. A call with `weight_by` runs in dplyr
+#'   on the CPU.
 #' @param replace Whether to sample with replacement.
 #'
 #' @return A `tbl_gpu` object with the sampled rows.

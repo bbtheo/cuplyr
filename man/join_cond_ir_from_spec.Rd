@@ -3,7 +3,7 @@
 \name{join_cond_ir_from_spec}
 \alias{join_cond_ir_from_spec}
 \title{Build a single, \code{&}-folded IR condition tree from a join spec's non-equi
-subset (Phase 7 J7)}
+subset}
 \usage{
 join_cond_ir_from_spec(cond_spec)
 }

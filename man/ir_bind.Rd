@@ -4,7 +4,7 @@
 \alias{ir_bind}
 \title{Bind 0-based column indices onto every \code{col} node in an IR tree}
 \usage{
-ir_bind(ir, schema)
+ir_bind(ir, schema, pos = NULL)
 }
 \arguments{
 \item{ir}{An IR node (or \code{NULL})}

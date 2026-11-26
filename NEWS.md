@@ -299,6 +299,12 @@ capability 7.5 or higher.
 * Lazy plans with chained joins, or a `mutate()` that overwrites a column,
   give the right result.
 
+* `?tbl_gpu` explains what a gibble is and how to work with one: lazy by
+  default, `collect()`, `compute()`, `explain()`, eager mode and the column
+  types. The verbs' help pages say what runs on the GPU, what runs in dplyr
+  on the CPU and where the result differs from dplyr, without internal
+  development notes (#159).
+
 # cuplyr 0.1.1
 
 ## Bug fixes

@@ -2,7 +2,7 @@
 % Please edit documentation in R/join.R
 \name{join_route_to_fallback}
 \alias{join_route_to_fallback}
-\title{Route a join call to the transparent CPU fallback (Phase 7 J6)}
+\title{Route a join call to the transparent CPU fallback}
 \usage{
 join_route_to_fallback(
   verb_name,
@@ -15,16 +15,14 @@ join_route_to_fallback(
 )
 }
 \description{
-Shared by every mutating/semi/anti join verb below for the two shapes the
-native GPU path can't (yet, or ever) handle:
+Shared by every join verb for the shapes the native GPU path doesn't
+handle, among them:
 \enumerate{
-\item A non-equi \code{join_by()} object (\code{join_by_is_non_equi()} is \code{TRUE}) --
-Phase 7 J7 replaces this with a native \code{mixed_join}/\code{conditional_join}
-lowering; until then this keeps user code working exactly like every
-other not-yet-native verb (mirrors \code{nest_join()}'s two-table fallback
-shape, \code{R/fallback.R}: collect the OTHER table, then run the real
-dplyr verb on \code{.data}'s own materialized/grouped tibble via
-\code{gpu_fallback()}).
+\item A \code{join_by()} that \code{\link[=join_by_natively_supported]{join_by_natively_supported()}} rejects (several
+\code{closest()} conditions, a string compared with a non-string, ...):
+collect the other table, then run the real dplyr verb on \code{.data}'s
+own materialized/grouped tibble via \code{gpu_fallback()} (the same
+two-table shape as \code{nest_join()}'s fallback, \code{R/fallback.R}).
 \item The \code{suffix = c("", ...)} degenerate name-collision case detected by
 \code{join_output_would_collide()} -- dplyr resolves this via a
 name-keyed column overwrite this package's fixed-column-count gather

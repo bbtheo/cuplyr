@@ -22,6 +22,6 @@ A \code{tbl_gpu} object with the first \code{n} rows.
 \description{
 \code{utils::head()} method for \code{tbl_gpu}. Keeps the same rows as
 \code{utils::head.data.frame()}: implemented as \code{slice_head(n = floor(n))} on the
-ungrouped table (see \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}} for the native-vs-fallback
-dispatch), with the grouping put back on the result.
+ungrouped table (see \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}}), with the grouping put back
+on the result.
 }

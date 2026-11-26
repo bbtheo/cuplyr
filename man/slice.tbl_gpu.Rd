@@ -11,18 +11,17 @@
 
 \item{...}{Integer row positions, e.g. \code{slice(df, 1:3)}. Duplicates and
 reordering are allowed for positive indices when \code{.data} is ungrouped
-and \verb{.by=} isn't supplied (\code{slice(df, c(3, 1, 1))}); grouped/\verb{.by=}
-calls only run natively for a strictly increasing, duplicate-free
-positive index vector (falling back to CPU otherwise); negative
+and \verb{.by=} isn't supplied (\code{slice(df, c(3, 1, 1))}); grouped or \code{.by}
+calls run on the GPU only for a strictly increasing, duplicate-free
+positive index vector (and on the CPU otherwise); negative
 indices drop those rows instead (order/duplicates never matter here,
 grouped or not); \code{0}/\code{NA} are silently dropped; out-of-range positions
 are silently dropped; positive and negative indices cannot be mixed.}
 
-\item{.by}{Optional on-the-fly grouping columns, GPU-native (Phase 5,
-task W7): result rows are ordered by each group's FIRST-APPEARANCE
-position in \code{.data} (see module docs), and the result is always
-ungrouped. Supplying \code{.by} when \code{.data} is already grouped (via
-\code{group_by()}) is an error, matching dplyr.}
+\item{.by}{Optional grouping columns for this call only, run on the GPU.
+As in dplyr, the result has the groups in the order each one first
+appears in \code{.data}, and it is ungrouped. Supplying \code{.by} when \code{.data} is
+already grouped (via \code{group_by()}) is an error, as in dplyr.}
 
 \item{.preserve}{Whether to keep the groups the slice emptied. With \code{TRUE},
 a \code{group_by()}-grouped result keeps the input's group keys (empty groups
@@ -35,16 +34,21 @@ table every group is kept whatever \code{.preserve} says, as in dplyr (also for
 A \code{tbl_gpu} object with the selected rows.
 }
 \description{
-Keeps rows of a GPU table by integer position, similar to
-\code{dplyr::slice()}. Ungrouped, \code{group_by()}-grouped, and \verb{.by=} calls with
-plain, data-independent index expressions all run entirely on the GPU
-(Phase 5, task W7): ungrouped via a direct \code{cudf::gather()}; grouped/
-\verb{.by=} via a per-group \code{row_number()} desugar (R/slice.R's module docs),
-restricted to a strictly increasing positive index vector or any set of
-negative indices (arbitrary duplication/reordering is ungrouped-only --
-see \code{...}'s docs below). Everything else (an index expression the
-GPU-native path can't evaluate without a data mask, e.g. one that
-references a column or \code{n()}, or a grouped/\verb{.by=} index vector with
-duplicates/reordering) transparently falls back to CPU evaluation (see
-\code{\link[=gpu_fallback]{gpu_fallback()}}).
+Keeps rows of a GPU table by integer position, as \code{dplyr::slice()} does.
+Constant positions run on the GPU, ungrouped, after \code{group_by()} and with
+\code{.by}. With groups, only a strictly increasing positive index vector or a
+set of negative indices runs on the GPU (an ungrouped table also takes
+duplicated and reordered positions; see \code{...} below). Anything else runs
+in dplyr on the CPU (see \link{cuplyr-fallback}): an index expression that
+needs the data, e.g. one that reads a column or \code{n()}, or a grouped or
+\code{.by} index vector with duplicated or reordered positions.
+}
+\details{
+\subsection{Row order}{
+
+As in dplyr: ungrouped, the rows come in the order of the positions. After
+\code{group_by()} the result comes group by group, in ascending group-key order
+(an \code{NA} key last), and each group's rows keep their order. With \code{.by} the
+groups come in the order each first appears in \code{.data}.
+}
 }

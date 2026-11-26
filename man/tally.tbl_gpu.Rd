@@ -9,28 +9,26 @@
 \arguments{
 \item{x}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
 
-\item{wt}{Optional weight column/expression -- as \code{\link[=count.tbl_gpu]{count.tbl_gpu()}}.}
+\item{wt}{Optional weight column/expression, as \code{\link[=count.tbl_gpu]{count.tbl_gpu()}}.}
 
 \item{sort}{If \code{TRUE}, sorts the result in descending order of the count
 column.}
 
 \item{name}{The name of the count column. If \code{NULL} (default), uses
-\code{"n"}, or \code{"nn"}/\code{"nnn"}/... if \code{"n"} already names one of \code{x}'s group
-columns (note: unlike \code{\link[=add_count.tbl_gpu]{add_count.tbl_gpu()}}/\code{dplyr::add_tally()}, this
-check is against the GROUP columns only, not every column -- verified
-empirically against dplyr 1.2.1, see this file's header comment).}
+\code{"n"}, or \code{"nn"}/\code{"nnn"}/... if \code{"n"} already names one of \code{x}'s
+grouping columns. As in dplyr, only the grouping columns are checked,
+where \code{\link[=add_count.tbl_gpu]{add_count.tbl_gpu()}} and \code{dplyr::add_tally()} check every column.}
 }
 \value{
-A \code{tbl_gpu} with the count column appended. If \code{x} was grouped by
-more than one column, the result's grouping drops only the LAST
-grouping column (matching \code{summarise()}'s default \code{.groups = "drop_last"} behavior for a real \code{grouped_df} -- this is \code{tally()}'s
-own rule, and is NOT the same as \code{\link[=count.tbl_gpu]{count.tbl_gpu()}}'s "restore original
-grouping in full" rule; see this file's header comment).
+A \code{tbl_gpu} with one row per group: the grouping columns and the
+count column. As after \code{summarise()}, the result drops the last
+grouping column and keeps the others; this differs from
+\code{\link[=count.tbl_gpu]{count.tbl_gpu()}}, which keeps \code{x}'s grouping in full.
 }
 \description{
-Like \code{\link[=count.tbl_gpu]{count.tbl_gpu()}}, but without any \code{...}: aggregates exactly the
-groups \code{x} already has (or all rows, if ungrouped). Sugar over
-\code{\link[=summarise.tbl_gpu]{summarise.tbl_gpu()}}.
+Like \code{\link[=count.tbl_gpu]{count.tbl_gpu()}}, but without any \code{...}: counts the rows of the
+groups \code{x} already has (or of the whole table, if it is ungrouped). It is
+one \code{\link[=summarise.tbl_gpu]{summarise.tbl_gpu()}} call and runs on the GPU.
 }
 \examples{
 library(dplyr)

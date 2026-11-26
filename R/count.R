@@ -309,35 +309,34 @@ build_count_agg_call <- function(wt_quo, schema, for_mutate = FALSE) {
 #' Count observations by group
 #'
 #' Counts the number of rows (or sums a weight column) for each combination
-#' of `...`, similar to `dplyr::count()`. Sugar over [group_by.tbl_gpu()],
-#' [summarise.tbl_gpu()], and [arrange.tbl_gpu()] -- runs on the GPU. The one
-#' exception is a `.drop = FALSE` grouping with a factor key, or a table with
-#' fixed group keys (after `filter()`, `semi_join()`, ... on a `.drop = FALSE`
-#' table), which also collects the (small) group keys to add the empty groups.
+#' of `...`, as `dplyr::count()` does. It is [group_by.tbl_gpu()] followed by
+#' [summarise.tbl_gpu()] (and [arrange.tbl_gpu()] with `sort = TRUE`), and
+#' runs on the GPU. A grouping expression the GPU can't compute runs the whole
+#' call in dplyr on the CPU. A `.drop = FALSE` grouping with a factor key, or
+#' a table with fixed group keys (after `filter()`, `semi_join()`, ... on a
+#' `.drop = FALSE` table), also reads the (small) set of group keys back into
+#' R to add the empty groups.
 #'
 #' @param x A `tbl_gpu` object created by [tbl_gpu()].
 #' @param ... Column names or expressions to group by (e.g. `count(df, x)`
-#'   or `count(df, g = x %/% 10)`), parsed through the same expression IR
-#'   [mutate.tbl_gpu()] uses for any computed expression. If `x` is already
-#'   grouped, these are added to the existing grouping (matching
-#'   `group_by(x, ..., .add = TRUE)`).
+#'   or `count(df, g = x %/% 10)`). A computed expression is evaluated as in
+#'   [mutate.tbl_gpu()]. If `x` is already grouped, these are added to the
+#'   existing grouping (as `group_by(x, ..., .add = TRUE)`).
 #' @param wt Optional weight column/expression. If supplied, each group's
-#'   count is `sum(wt)` (NA-excluding) instead of the row count.
+#'   count is `sum(wt, na.rm = TRUE)` instead of the row count.
 #' @param sort If `TRUE`, sorts the result in descending order of the count
 #'   column.
 #' @param name The name of the count column in the output. If `NULL`
 #'   (default), uses `"n"`, or `"nn"`/`"nnn"`/... if `"n"` already names one
-#'   of the (post-`...`) grouping columns.
+#'   of the grouping columns (those of `x` and those in `...`).
 #' @param .drop Passed to [group_by.tbl_gpu()]; with `.drop = FALSE` the result
 #'   has a zero-count row for every empty factor-level group, in `group_data()`
 #'   order. Defaults to `group_by_drop_default(x)`.
 #'
 #' @return A `tbl_gpu` object with one row per group, containing the
-#'   grouping columns and the count column. Grouping: if `x` was ungrouped,
-#'   the result is ungrouped; if `x` was grouped, the result's grouping is
-#'   restored to `x`'s ORIGINAL grouping in full (verified against dplyr
-#'   1.2.1 -- see this file's header comment for why this is not simply
-#'   "drop the last grouping level").
+#'   grouping columns and the count column. If `x` was ungrouped, the result
+#'   is ungrouped; if `x` was grouped, the result keeps all of `x`'s grouping,
+#'   as in dplyr (not one level less, as after `summarise()`).
 #'
 #' @seealso
 #' \code{\link{tally.tbl_gpu}}, \code{\link{group_by.tbl_gpu}},
@@ -436,26 +435,23 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
 
 #' Count the rows in each group (no additional grouping)
 #'
-#' Like [count.tbl_gpu()], but without any `...`: aggregates exactly the
-#' groups `x` already has (or all rows, if ungrouped). Sugar over
-#' [summarise.tbl_gpu()].
+#' Like [count.tbl_gpu()], but without any `...`: counts the rows of the
+#' groups `x` already has (or of the whole table, if it is ungrouped). It is
+#' one [summarise.tbl_gpu()] call and runs on the GPU.
 #'
 #' @param x A `tbl_gpu` object created by [tbl_gpu()].
-#' @param wt Optional weight column/expression -- as [count.tbl_gpu()].
+#' @param wt Optional weight column/expression, as [count.tbl_gpu()].
 #' @param sort If `TRUE`, sorts the result in descending order of the count
 #'   column.
 #' @param name The name of the count column. If `NULL` (default), uses
-#'   `"n"`, or `"nn"`/`"nnn"`/... if `"n"` already names one of `x`'s group
-#'   columns (note: unlike [add_count.tbl_gpu()]/`dplyr::add_tally()`, this
-#'   check is against the GROUP columns only, not every column -- verified
-#'   empirically against dplyr 1.2.1, see this file's header comment).
+#'   `"n"`, or `"nn"`/`"nnn"`/... if `"n"` already names one of `x`'s
+#'   grouping columns. As in dplyr, only the grouping columns are checked,
+#'   where [add_count.tbl_gpu()] and `dplyr::add_tally()` check every column.
 #'
-#' @return A `tbl_gpu` with the count column appended. If `x` was grouped by
-#'   more than one column, the result's grouping drops only the LAST
-#'   grouping column (matching `summarise()`'s default `.groups =
-#'   "drop_last"` behavior for a real `grouped_df` -- this is `tally()`'s
-#'   own rule, and is NOT the same as [count.tbl_gpu()]'s "restore original
-#'   grouping in full" rule; see this file's header comment).
+#' @return A `tbl_gpu` with one row per group: the grouping columns and the
+#'   count column. As after `summarise()`, the result drops the last
+#'   grouping column and keeps the others; this differs from
+#'   [count.tbl_gpu()], which keeps `x`'s grouping in full.
 #'
 #' @seealso \code{\link{count.tbl_gpu}}
 #'
@@ -510,34 +506,28 @@ tally.tbl_gpu <- function(x, wt = NULL, sort = FALSE, name = NULL) {
 
 #' Add a count column without collapsing rows
 #'
-#' Like [count.tbl_gpu()], but keeps every row and column of `x`, appending
-#' the per-group count as a new column (broadcast to every row in the
-#' group) instead of collapsing to one row per group. Sugar over
-#' [group_by.tbl_gpu()] and a grouped-aggregate [mutate.tbl_gpu()] (which
-#' natively broadcasts the per-group count/sum to every row via `mutate()`'s
-#' general window/aggregate machinery, Phase 5 -- NA keys are grouped
-#' together correctly and original row order is preserved, see
-#' `R/window.R`/`src/ops_window.cpp`).
+#' Like [count.tbl_gpu()], but keeps every row and column of `x` and adds
+#' the group's count (or weighted sum) as a new column on every row of the
+#' group, as `dplyr::add_count()` does. It runs on the GPU: rows keep their
+#' original order, and `NA` keys form one group, as in dplyr.
 #'
 #' @param x A `tbl_gpu` object created by [tbl_gpu()].
 #' @param ... Column names or expressions to group by, as
-#'   [count.tbl_gpu()]. If `x` is already grouped, these are added to the
-#'   existing grouping for computing the count, but the OUTPUT's grouping
-#'   is restored to `x`'s original grouping (matching [count.tbl_gpu()]'s
-#'   own reconstruction rule).
+#'   [count.tbl_gpu()]. If `x` is already grouped, they are added to its
+#'   grouping for the count; the result keeps `x`'s own grouping.
 #' @param wt Optional weight column/expression, as [count.tbl_gpu()].
 #' @param sort If `TRUE`, sorts the result in descending order of the count
-#'   column (note: since no rows are collapsed, ties -- and non-tied rows
-#'   within the same group -- are far more common than in `count()`).
+#'   column. No rows are collapsed, so every row of a group ties with the
+#'   others; the sort is stable and keeps their order.
 #' @param name The name of the count column. If `NULL` (default), uses
-#'   `"n"`, or `"nn"`/`"nnn"`/... if `"n"` already names ANY existing
-#'   column of `x` (not just a group column -- verified empirically against
-#'   dplyr 1.2.1 to differ from `count()`'s own narrower check; see this
-#'   file's header comment).
-#' @param .drop Deprecated in dplyr 1.0.0 (and here); errors if supplied.
+#'   `"n"`, or `"nn"`/`"nnn"`/... if `"n"` already names any column of `x`
+#'   (where [count.tbl_gpu()] and [tally.tbl_gpu()] look at the grouping
+#'   columns only), as in dplyr.
+#' @param .drop Deprecated in dplyr 1.0.0; supplying it is an error, as in
+#'   dplyr.
 #'
 #' @return A `tbl_gpu` with the same rows as `x`, plus the count column,
-#'   grouped the same as `x` was originally.
+#'   grouped as `x` is.
 #'
 #' @seealso \code{\link{count.tbl_gpu}}
 #'

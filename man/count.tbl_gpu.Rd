@@ -17,20 +17,19 @@
 \item{x}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
 
 \item{...}{Column names or expressions to group by (e.g. \code{count(df, x)}
-or \code{count(df, g = x \%/\% 10)}), parsed through the same expression IR
-\code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}} uses for any computed expression. If \code{x} is already
-grouped, these are added to the existing grouping (matching
-\code{group_by(x, ..., .add = TRUE)}).}
+or \code{count(df, g = x \%/\% 10)}). A computed expression is evaluated as in
+\code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}}. If \code{x} is already grouped, these are added to the
+existing grouping (as \code{group_by(x, ..., .add = TRUE)}).}
 
 \item{wt}{Optional weight column/expression. If supplied, each group's
-count is \code{sum(wt)} (NA-excluding) instead of the row count.}
+count is \code{sum(wt, na.rm = TRUE)} instead of the row count.}
 
 \item{sort}{If \code{TRUE}, sorts the result in descending order of the count
 column.}
 
 \item{name}{The name of the count column in the output. If \code{NULL}
 (default), uses \code{"n"}, or \code{"nn"}/\code{"nnn"}/... if \code{"n"} already names one
-of the (post-\code{...}) grouping columns.}
+of the grouping columns (those of \code{x} and those in \code{...}).}
 
 \item{.drop}{Passed to \code{\link[=group_by.tbl_gpu]{group_by.tbl_gpu()}}; with \code{.drop = FALSE} the result
 has a zero-count row for every empty factor-level group, in \code{group_data()}
@@ -38,19 +37,19 @@ order. Defaults to \code{group_by_drop_default(x)}.}
 }
 \value{
 A \code{tbl_gpu} object with one row per group, containing the
-grouping columns and the count column. Grouping: if \code{x} was ungrouped,
-the result is ungrouped; if \code{x} was grouped, the result's grouping is
-restored to \code{x}'s ORIGINAL grouping in full (verified against dplyr
-1.2.1 -- see this file's header comment for why this is not simply
-"drop the last grouping level").
+grouping columns and the count column. If \code{x} was ungrouped, the result
+is ungrouped; if \code{x} was grouped, the result keeps all of \code{x}'s grouping,
+as in dplyr (not one level less, as after \code{summarise()}).
 }
 \description{
 Counts the number of rows (or sums a weight column) for each combination
-of \code{...}, similar to \code{dplyr::count()}. Sugar over \code{\link[=group_by.tbl_gpu]{group_by.tbl_gpu()}},
-\code{\link[=summarise.tbl_gpu]{summarise.tbl_gpu()}}, and \code{\link[=arrange.tbl_gpu]{arrange.tbl_gpu()}} -- runs on the GPU. The one
-exception is a \code{.drop = FALSE} grouping with a factor key, or a table with
-fixed group keys (after \code{filter()}, \code{semi_join()}, ... on a \code{.drop = FALSE}
-table), which also collects the (small) group keys to add the empty groups.
+of \code{...}, as \code{dplyr::count()} does. It is \code{\link[=group_by.tbl_gpu]{group_by.tbl_gpu()}} followed by
+\code{\link[=summarise.tbl_gpu]{summarise.tbl_gpu()}} (and \code{\link[=arrange.tbl_gpu]{arrange.tbl_gpu()}} with \code{sort = TRUE}), and
+runs on the GPU. A grouping expression the GPU can't compute runs the whole
+call in dplyr on the CPU. A \code{.drop = FALSE} grouping with a factor key, or
+a table with fixed group keys (after \code{filter()}, \code{semi_join()}, ... on a
+\code{.drop = FALSE} table), also reads the (small) set of group keys back into
+R to add the empty groups.
 }
 \examples{
 library(dplyr)
