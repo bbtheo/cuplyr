@@ -79,6 +79,7 @@ test_that("the installed resource counts what is allocated through it and gives 
 # table survives a second load_all() (the resource is reused, not replaced),
 # and memory comes back.
 p94_kind_probe <- function(kind) {
+  skip_if_no_source_tree()   # reloads the package with pkgload in the child
   skip_if_not_installed("pkgload")
   root <- normalizePath(testthat::test_path("..", ".."), mustWork = TRUE)
   gpu_child_r(

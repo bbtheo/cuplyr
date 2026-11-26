@@ -344,17 +344,15 @@ test_that("memory the async resource cached is back on the device when the child
 
 test_that("a child from gpu_child_r() gets its own async resource and the own-memory reader", {
   skip_if_no_gpu()
-  skip_if_not_installed("pkgload")
   root <- normalizePath(testthat::test_path("..", ".."), mustWork = TRUE)
-  out <- gpu_child_r(function(root) {
+  out <- gpu_child_r(function(root, load) {
     has_reader <- exists("gpu_own_device_used_bytes", envir = globalenv(), inherits = FALSE) &&
       exists("gpu_own_delta", envir = globalenv(), inherits = FALSE)
-    suppressMessages(pkgload::load_all(root, quiet = TRUE, compile = FALSE, export_all = TRUE,
-                                       helpers = FALSE, attach_testthat = FALSE))
+    load(root)
     g <- tbl_gpu(data.frame(x = c(1, 2, NA)), lazy = FALSE)
     list(has_reader = has_reader, resource = gpu_memory_state()$resource,
          x = dplyr::collect(dplyr::mutate(g, y = x * 2))$y)
-  }, args = list(root = root))
+  }, args = list(root = root, load = cuplyr_child_loader()))
   expect_true(out$has_reader)
   expect_identical(out$resource, "async")
   expect_identical(out$x, c(2, 4, NA))

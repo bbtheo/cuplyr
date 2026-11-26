@@ -169,6 +169,7 @@ test_that("Multiple calls to gpu_details() return consistent info",
 })
 
 test_that("GPU detection is fast", {
+  skip_timing_under_check()
   # has_gpu() should be quick (under 1 second)
   time <- system.time(result <- has_gpu())
   expect_true(time["elapsed"] < 1,

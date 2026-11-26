@@ -496,6 +496,7 @@ test_that("a wide filter |> summarise costs about what the hand-pruned plan does
   plan <- f99_plan(gt |> filter(c1 > 0.5) |> summarise(m = mean(c2)))
   expect_setequal(f99_reach(plan, "filter"), c("c1", "c2"))
 
+  skip_timing_under_check()
   runs <- timing_retry(
     function() timing_medians(list(auto = auto, hand = hand), samples = 11L, label = "F99 wide"),
     ok = function(v) v[["auto"]] <= 1.5 * v[["hand"]],

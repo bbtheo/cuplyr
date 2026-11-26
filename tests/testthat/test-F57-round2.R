@@ -23,6 +23,8 @@
 # The process starts through gpu_child_r(), which frees this process's cached
 # GPU memory first.
 f57r2_subprocess <- function(fn, env = character(), globals = list()) {
+  # every test here reloads the package with pkgload in the child
+  skip_if_no_source_tree()
   skip_if_not_installed("pkgload")
   root <- normalizePath(testthat::test_path("..", ".."), mustWork = TRUE)
   # Functions in `globals` are re-homed to the subprocess's global environment.

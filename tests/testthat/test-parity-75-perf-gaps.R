@@ -76,6 +76,7 @@ test_that("the perf gate has a benchmark for each gap fixed in #75", {
 # algorithm's floor is ~11x round(x). 12.5x holds the gain over main (15.6-15.9x
 # in this test) without new machinery (a JIT kernel or a subset fix-up path).
 test_that("round(x, digits) costs at most 12.5x round(x) at 1e7 rows", {
+  skip_timing_under_check()
   skip_if_no_gpu()
   withr::local_options(cuplyr.fallback = "error")
   set.seed(75)
@@ -168,6 +169,7 @@ test_that("summarise() with no expressions on a .drop = FALSE grouping matches d
 })
 
 test_that("summarise() with no expressions on a .drop = FALSE factor grouping costs at most 3x .drop = TRUE", {
+  skip_timing_under_check()
   skip_if_no_gpu()
   withr::local_options(dplyr.summarise.inform = FALSE)
   set.seed(7502)
@@ -201,6 +203,7 @@ p75_exprs <- function(k) {
 }
 
 test_that("mutate() time grows about linearly with the number of expressions", {
+  skip_timing_under_check()
   skip_if_no_gpu()
   withr::local_options(cuplyr.fallback = "error")
   set.seed(7503)
@@ -239,6 +242,7 @@ test_that("mutate() with many expressions matches dplyr, eager and lazy", {
 # ---------------------------------------------------------------------------
 
 test_that("101 quantile() probabilities over 1e4 groups cost at most 5x one", {
+  skip_timing_under_check()
   skip_if_no_gpu()
   withr::local_options(dplyr.summarise.inform = FALSE, cuplyr.fallback = "error")
   set.seed(7505)

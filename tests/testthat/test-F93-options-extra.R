@@ -194,6 +194,7 @@ test_that("F93x: the unset lookup of the per-group readers stays cheap", {
   f93x_clean()
   expect_identical(cuplyr_opt_read("roll_median"),
                    cuplyr_option_registry$roll_median$default_result)
+  skip_timing_under_check()
   # well under what the trimws() path cost (14 us per call): the median of
   # batches of ~50 ms (timing_medians(), helper-timing.R; no GPU work, so no
   # sync), so one slow window on a busy machine does not fail it

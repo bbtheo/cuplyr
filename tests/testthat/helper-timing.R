@@ -125,3 +125,21 @@ timing_retry <- function(measure, ok, retry_if, attempts = 3L, pause = 0) {
   }
   out
 }
+
+#' Timing tests do not run under R CMD check.
+#'
+#' A ratio or duration bound is only as good as the machine's quiet: the check
+#' runs the tests next to its own load, and a failure there says nothing about
+#' the package. The runners in tools/ are not "a check" to
+#' testthat::is_checking(), so the timing tests run there. Not
+#' skip_on_cran(): the runners in tools/ don't set NOT_CRAN, so it would skip
+#' these tests there too.
+#'
+#' `timing_enabled()` is for a loop or a block whose correctness expectations
+#' must keep running under the check; `skip_timing_under_check()` for the
+#' point from which a test only times.
+timing_enabled <- function() !testthat::is_checking()
+
+skip_timing_under_check <- function() {
+  testthat::skip_if(testthat::is_checking(), "timing test: not run under R CMD check")
+}

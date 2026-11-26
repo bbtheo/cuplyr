@@ -393,8 +393,13 @@ test_that("#22: .groups, the regroup message and unnamed dots match dplyr", {
   skip_if_no_gpu()
   df <- tibble::tibble(a = c(1, 1, 2), b = c(1, 2, 2), x = 1:3)
   # default drop_last, with dplyr's message on both sides
-  expect_message(summarise(group_by(df, a, b), m = mean(x) + 1), "regrouped")
-  expect_message(summarise(group_by(tbl_gpu(df, lazy = FALSE), a, b), m = mean(x) + 1), "regrouped")
+  # dplyr only informs when the caller's top environment is the global one
+  # (summarise_verbose()); the check evaluates the tests in the package
+  # namespace's child, so ask for the message
+  withr::with_options(list(dplyr.summarise.inform = TRUE), {
+    expect_message(summarise(group_by(df, a, b), m = mean(x) + 1), "regrouped")
+    expect_message(summarise(group_by(tbl_gpu(df, lazy = FALSE), a, b), m = mean(x) + 1), "regrouped")
+  })
   suppressMessages(f124_check(df, function(d) summarise(group_by(d, a, b), m = mean(x) + 1)))
   f124_check(df, function(d) summarise(group_by(d, a, b), m = mean(x) + 1, .groups = "keep"))
   f124_check(df, function(d) summarise(group_by(d, a, b), m = mean(x) + 1, .groups = "drop"))

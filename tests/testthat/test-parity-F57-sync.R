@@ -7,6 +7,7 @@
 test_that("gpu_sync() is exported and documented", {
   skip_if_no_gpu()
   expect_true("gpu_sync" %in% getNamespaceExports("cuplyr"))
+  skip_if_no_source_tree()
   root <- normalizePath(testthat::test_path("..", ".."), mustWork = TRUE)
   expect_true(file.exists(file.path(root, "man", "gpu_sync.Rd")))
 })
@@ -32,20 +33,17 @@ test_that("gpu_sync() returns invisible NULL when idle and after GPU work", {
 
 test_that("gpu_sync() works with the memory pool off", {
   skip_if_no_gpu()
-  skip_if_not_installed("pkgload")
   root <- normalizePath(testthat::test_path("..", ".."), mustWork = TRUE)
   out <- gpu_child_r(
-    function(root) {
-      suppressMessages(pkgload::load_all(root, quiet = TRUE, compile = FALSE,
-                                         export_all = TRUE, helpers = FALSE,
-                                         attach_testthat = FALSE))
+    function(root, load) {
+      load(root)
       g <- tbl_gpu(data.frame(x = runif(1e5)), lazy = FALSE)
       m <- dplyr::mutate(g, r = cumsum(x))
       v <- withVisible(gpu_sync())
       list(resource = gpu_memory_state()$resource, value = v$value,
            visible = v$visible, n = nrow(dplyr::collect(m)))
     },
-    args = list(root = root),
+    args = list(root = root, load = cuplyr_child_loader()),
     env = c(CUPLYR_MEMORY_POOL = "0")
   )
   expect_identical(out$resource, "cuda")

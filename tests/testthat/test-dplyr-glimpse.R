@@ -108,6 +108,7 @@ test_that("glimpse() never calls gpu_collect() (no full-table collect)", {
 })
 
 test_that("glimpse() stays fast on a large lazy table (no full materialize of preview data)", {
+  skip_timing_under_check()
   skip_if_no_gpu()
   big <- tbl_gpu(data.frame(x = seq_len(2e6)))
   lazy_big <- as_lazy(big) |> dplyr::filter(x > 10)

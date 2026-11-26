@@ -58,7 +58,7 @@ test_that("rw_polars_child() does not busy-wait while the child has an unfinishe
     expect_gte(d[["elapsed"]], 2)
     # this process's own CPU time: a spinning drain loop costs about the child's
     # 2 s sleep, a waiting one a small fraction of it
-    expect_lt(d[["user.self"]] + d[["sys.self"]], 0.5)
+    if (timing_enabled()) expect_lt(d[["user.self"]] + d[["sys.self"]], 0.5)
   }
 })
 

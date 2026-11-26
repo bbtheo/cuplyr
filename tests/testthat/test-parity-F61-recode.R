@@ -205,6 +205,7 @@ f61r_attempts <- function(runs, v) {
 }
 
 test_that("5000-key recode() on 1e3 rows is no slower than dplyr on a tibble", {
+  skip_timing_under_check()
   skip_if_no_gpu()
   withr::local_options(cuplyr.fallback = "error")
   K <- 5000L
@@ -246,6 +247,7 @@ test_that("5000-key recode() on 1e3 rows is no slower than dplyr on a tibble", {
 })
 
 test_that("5000-key recode() on 1e6 rows takes well under a second", {
+  skip_timing_under_check()
   # dplyr itself needs 24-60 s here (one pass per key), so the reference is
   # absolute: dev took 2.1 s (STRING) and 4.6 s (FLOAT64 with .default).
   skip_if_no_gpu()

@@ -29,22 +29,17 @@ f57_pkg_root <- function() {
 # to the global environment.
 f57_subprocess <- function(fn = function(state) state(), env = character(),
                            opts = list(), reload = FALSE) {
-  skip_if_not_installed("pkgload")
+  if (reload) skip_if_no_source_tree()   # a reload is pkgload's
   state <- f57_state_fn
   environment(state) <- globalenv()
   gpu_child_r(
-    function(root, opts, fn, reload, state) {
+    function(root, load, opts, fn, reload, state) {
       if (length(opts)) options(opts)
-      load <- function() {
-        suppressMessages(pkgload::load_all(root, quiet = TRUE, compile = FALSE,
-                                           export_all = TRUE, helpers = FALSE,
-                                           attach_testthat = FALSE))
-      }
-      load()
-      if (reload) load()
+      load(root)
+      if (reload) load(root)
       fn(state)
     },
-    args = list(root = f57_pkg_root(), opts = opts, fn = fn, reload = reload,
+    args = list(root = f57_pkg_root(), load = cuplyr_child_loader(), opts = opts, fn = fn, reload = reload,
                 state = state),
     env = env
   )

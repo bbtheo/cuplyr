@@ -235,11 +235,15 @@ test_that("rowwise summarise matches dplyr's grouped/rowwise result and message"
   expect_same_rowwise(df, function(x) {
     x |> dplyr::rowwise() |> dplyr::summarise(t = a + c)
   })
-  # rowwise -> grouped_df conversion message, as dplyr emits it.
-  expect_message(
-    tbl_gpu(df) |> dplyr::rowwise(g) |> dplyr::summarise(t = a + c),
-    "converted the output from a rowwise data frame to a grouped"
-  )
+  # rowwise -> grouped_df conversion message, as dplyr emits it (asked for:
+  # dplyr only informs on its own when the caller's top environment is the
+  # global one, which it isn't under the check).
+  withr::with_options(list(dplyr.summarise.inform = TRUE), {
+    expect_message(
+      tbl_gpu(df) |> dplyr::rowwise(g) |> dplyr::summarise(t = a + c),
+      "converted the output from a rowwise data frame to a grouped"
+    )
+  })
   expect_same_rowwise(df, function(x) {
     suppressMessages(x |> dplyr::rowwise(f) |> dplyr::summarise(dd = d + 1))
   }, lazy = TRUE)

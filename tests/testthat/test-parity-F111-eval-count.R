@@ -214,7 +214,7 @@ test_that("F111 item 5: a binding that is active but not read in the piece chang
     1
   }, e)
   v <- 2
-  fn <- function(t) filter(t, if_any(c(x, y2), ~ .x > v))
+  fn <- function(t) dplyr::filter(t, dplyr::if_any(c(x, y2), ~ .x > v))
   environment(fn) <- list2env(list(v = 2), parent = e)
   withr::local_options(cuplyr.fallback = "error")
   expect_same_as_dplyr(df, fn)

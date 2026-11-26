@@ -158,6 +158,7 @@ test_that("a copy grown by the same length as the hashed schema is read with mat
 })
 
 test_that("many NULL dots on a wide table are dplyr's, and mixed with other dots", {
+  skip_timing_under_check()
   skip_if_no_gpu()
   df <- as.data.frame(matrix(c(1, 2, NA, 4), nrow = 4L, ncol = 60L, dimnames = list(NULL, paste0("c", 1:60))))
   nulls <- rlang::rep_named(paste0("c", 1:40), list(NULL))
