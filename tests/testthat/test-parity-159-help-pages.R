@@ -86,13 +86,40 @@ test_that("exported help pages don't point at source files or libcudf functions"
                 paste(utils::head(bad, 40L), collapse = "\n")))
 })
 
+test_that("exported help pages don't name cuplyr's internal functions", {
+  p159_skip_if_no_dir("man")
+  ns_file <- file.path(p159_root(), "NAMESPACE")
+  skip_if_not(file.exists(ns_file), "NAMESPACE not available in this test context")
+  ns_lines <- readLines(ns_file, warn = FALSE)
+  exports <- sub("^export\\((.*)\\)$", "\\1", grep("^export\\(", ns_lines, value = TRUE))
+  exports <- gsub("^\"|\"$|`", "", exports)
+  ns <- asNamespace("cuplyr")
+  fns <- Filter(function(nm) is.function(get(nm, envir = ns)), ls(ns))
+  # S3 methods (print.tbl_gpu()) are fine to name; so is anything another
+  # package a user knows also defines
+  others <- unlist(lapply(c("base", "stats", "utils", "methods", "dplyr", "tibble",
+                            "vctrs", "rlang", "tidyselect"),
+                          function(p) if (requireNamespace(p, quietly = TRUE)) getNamespaceExports(p)))
+  internal <- setdiff(fns, c(exports, others))
+  internal <- internal[grepl("^[A-Za-z][A-Za-z0-9_]*$", internal)]
+  expect_gt(length(internal), 50L)
+  pattern <- paste0("(?<![A-Za-z0-9_.])(", paste(internal, collapse = "|"), ")\\(")
+  files <- Filter(Negate(p159_is_internal), p159_rd_files())
+  body <- function(lines) !grepl("^%", lines)
+  bad <- p159_offenders(files, c(internal_function = pattern), keep = body)
+  expect(length(bad) == 0L,
+         paste0(length(bad), " exported Rd line(s) name an internal function:\n",
+                paste(utils::head(bad, 40L), collapse = "\n")))
+})
+
 test_that("exported help pages carry no development history", {
   p159_skip_if_no_dir("man")
   files <- Filter(Negate(p159_is_internal), p159_rd_files())
   patterns <- c(
     history = paste0("(?i)\\b(fixed in|older versions of this package|now-removed|",
                      "previously (a |CPU )?fallback|planned for a later phase|",
-                     "as of (this|the) (phase|wave|task)|this wave)\\b")
+                     "as of (this|the) (phase|wave|task)|this wave|",
+                     "historical(ly)?|verified empirically|not assumed|checked on \\d)\\b")
   )
   body <- function(lines) !grepl("^%", lines)
   bad <- p159_offenders(files, patterns, keep = body)
@@ -101,7 +128,7 @@ test_that("exported help pages carry no development history", {
                 paste(utils::head(bad, 40L), collapse = "\n")))
 })
 
-test_that("?tbl_gpu describes what a user can do with a gibble, not its fields", {
+test_that("?tbl_gpu describes what a user can do with a GPU table, not its fields", {
   p159_skip_if_no_dir("man")
   rd_file <- file.path(p159_root(), "man", "tbl_gpu.Rd")
   expect_true(file.exists(rd_file))
@@ -133,9 +160,11 @@ test_that("NEWS has a bullet for the help-page cleanup under 0.2.0", {
   news_file <- file.path(p159_root(), "NEWS.md")
   skip_if_not(file.exists(news_file), "NEWS.md not available in this test context")
   lines <- readLines(news_file, warn = FALSE, encoding = "UTF-8")
-  top <- grep("^# ", lines)
-  expect_match(lines[top[1]], "^# cuplyr 0\\.2\\.0")
-  section <- lines[seq(top[1], if (length(top) > 1L) top[2] - 1L else length(lines))]
+  heads <- grep("^# ", lines)
+  start <- grep("^# cuplyr 0\\.2\\.0\\s*$", lines)
+  expect_length(start, 1L)
+  after <- heads[heads > start]
+  section <- lines[seq(start, if (length(after)) after[1] - 1L else length(lines))]
   sub_heads <- grep("^## ", section)
   minor <- grep("^## Minor improvements and bug fixes", section)
   expect_length(minor, 1L)
