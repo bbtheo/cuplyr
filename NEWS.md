@@ -29,23 +29,29 @@ capability 7.5 or higher.
   - Grouping follows dplyr. `summarise()` drops only the last grouping column
     by default (`.groups = "drop_last"`, with a message like dplyr's),
     `select()` keeps the grouping columns, joins keep `x`'s groups,
-    `collect()` returns a `grouped_df`, and `tbl_gpu()` keeps the groups of a
-    `grouped_df`. In 0.1.1 each of these dropped the groups.
+    `bind_rows()` keeps the first input's groups, `collect()` returns a
+    `grouped_df`, and `tbl_gpu()` keeps the groups of a `grouped_df`. In 0.1.1
+    each of these dropped the groups.
   - `summarise()` aggregates follow R's `na.rm = FALSE` default, so a group
     with an `NA` gives `NA`.
   - `arrange(desc(x))` puts `NA` last.
   - Grouped `summarise()` returns groups sorted by their keys, not in hash
-    order.
+    order, and keeps rows whose key is `NA` as a last group; 0.1.1 dropped
+    those rows.
   - Integer `+`, `-` and `*` return integers, not doubles. An overflow gives
     `NA` with R's warning.
   - In `summarise()`, `sum()` of integers or logicals, such as `sum(x > 0)`,
-    and an ungrouped `n()` return integers, not doubles.
+    and an ungrouped `n()` return integers, not doubles. A `sum()` too large
+    for an integer is a double, as in R.
   - `NaN` stays `NaN`; it used to become `NA` on upload.
   - `integer64` columns are exact and collect to `bit64::integer64`; they used
     to be uploaded as doubles, which could corrupt their values.
   - `POSIXct` columns keep their time zone instead of coming back in UTC.
   - A gibble made from a `data.frame` collects to a `data.frame`, with its
     attributes.
+  - Factor columns stay factors after `select()`, joins, `bind_rows()`,
+    `bind_cols()`, a lazy `mutate()` and as `summarise()` group keys; 0.1.1
+    returned their integer codes.
 
 * Uploading a column with no GPU type (`difftime`, `hms`, `ts`, `POSIXlt`, a
   list, a matrix with several columns, ...) raises an error that names the
@@ -258,8 +264,6 @@ capability 7.5 or higher.
 
 * `right_join()` works (it failed on every call) and returns dplyr's row
   order; `right_join()` and `full_join()` fill the keys of unmatched rows.
-
-* Eager `select()` keeps factor columns as factors.
 
 * `summarise()` accepts `dplyr::n()` and `stats::sd()`, names an unnamed
   expression after its text, and works lazily with `sd()` and `var()`.
