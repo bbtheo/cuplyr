@@ -601,6 +601,7 @@ test_that("F59: huge values next to NA/NaN/Inf/group boundaries never leak into 
 # needs its own reference and counts). On dev (calib-na-dev.txt) cudf at
 # w = 11 was 0.88-1.48 tc there; round 2's sd was 7.05 tc at every width.
 test_that("F59: narrow windows are no slower than dev, and wide windows cost about the same (ungrouped 1e7, grouped 2e6)", {
+  skip_timing_under_check()
   skip_if_no_gpu()
   set.seed(5908)
   cells <- list(

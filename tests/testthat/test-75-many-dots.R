@@ -183,6 +183,7 @@ test_that("many NULL dots on a wide table are dplyr's, and mixed with other dots
 # reference is a call of 23 NULL dots, which is read with match() as before
 # (MUTATE_HASH_MIN): per dot, the hashed call must cost no more than 1.5x it.
 test_that("many NULL dots on a wide table cost per dot what a few do", {
+  skip_timing_under_check()
   skip_if_no_gpu()
   n_col <- 1200L
   df <- as.data.frame(matrix(1, nrow = 100L, ncol = n_col, dimnames = list(NULL, paste0("c", seq_len(n_col)))))

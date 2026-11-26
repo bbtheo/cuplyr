@@ -121,7 +121,7 @@ verify_installation <- function() {
     gpu_df <- tbl_gpu(test_df)
     # Simple filter without tidy eval complexity - we're testing GPU path, not rlang
     result_df <- gpu_df |>
-      dplyr::filter(x > 2) |>
+      dplyr::filter(.data$x > 2) |>
       dplyr::collect()
 
     # Verify results

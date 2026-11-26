@@ -32,9 +32,9 @@ a plain dot), which the errors name (#30).
 }
 \description{
 Walks \code{dots} in order; a top-level, unnamed \code{across(...)} dot is
-replaced by \code{\link[=expand_one_across]{expand_one_across()}}'s (possibly multi-element, possibly
+replaced by \code{expand_one_across()}'s (possibly multi-element, possibly
 empty) result, a top-level \code{if_any(...)}/\code{if_all(...)} dot is replaced
-by \code{\link[=expand_if_any_all]{expand_if_any_all()}}'s single folded quosure (keeping the ORIGINAL
+by \code{expand_if_any_all()}'s single folded quosure (keeping the ORIGINAL
 dot's own name, if any -- e.g. \code{mutate(flag = if_any(...))}), and every
 other dot is passed through unchanged. \code{across()} is disallowed as a
 top-level \code{filter()} dot (matching real dplyr 1.2.1 exactly, verified
@@ -43,7 +43,7 @@ the message ("must be a logical vector... use if_any()/if_all()
 instead") is the same either way, so raising it up front here is
 equivalent and cheaper). A NAMED top-level \code{across()} dot (e.g.
 \code{mutate(z = across(x, y))}) packs a data-frame column and never gets
-here: \code{\link[=dots_need_fallback]{dots_need_fallback()}} sends the whole call to the CPU fallback.
+here: \code{dots_need_fallback()} sends the whole call to the CPU fallback.
 }
 \details{
 Expansion stops at the first dot that needs dplyr (the result is then partial
@@ -56,7 +56,7 @@ value whose free variables are columns, ...), duplicate output names, or,
 in \code{summarise()}/\code{filter()}, an \code{across()} that renames onto a column that a
 later expansion of the same \code{across()} reads (\code{across(c(y = x, z = y), ...)}): dplyr evaluates every function against the pre-\code{across()} data,
 while the expanded dots would run in sequence. That needs the schema, so
-\code{\link[=dots_need_fallback]{dots_need_fallback()}} can't see it; the verb calls then re-run the
+\code{dots_need_fallback()} can't see it; the verb calls then re-run the
 ORIGINAL dots on the CPU. In \code{mutate()}/\code{transmute()} the same hazard is
 staged instead: the expansions are computed into temp columns first and
 assigned afterwards, and the \code{"staged_temps"} attribute names the temps the

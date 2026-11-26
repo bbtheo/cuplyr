@@ -1734,9 +1734,9 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filte
 #' Expand `across()`/`if_any()`/`if_all()` dots at the quosure level
 #'
 #' Walks `dots` in order; a top-level, unnamed `across(...)` dot is
-#' replaced by [expand_one_across()]'s (possibly multi-element, possibly
+#' replaced by `expand_one_across()`'s (possibly multi-element, possibly
 #' empty) result, a top-level `if_any(...)`/`if_all(...)` dot is replaced
-#' by [expand_if_any_all()]'s single folded quosure (keeping the ORIGINAL
+#' by `expand_if_any_all()`'s single folded quosure (keeping the ORIGINAL
 #' dot's own name, if any -- e.g. `mutate(flag = if_any(...))`), and every
 #' other dot is passed through unchanged. `across()` is disallowed as a
 #' top-level `filter()` dot (matching real dplyr 1.2.1 exactly, verified
@@ -1745,7 +1745,7 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filte
 #' instead") is the same either way, so raising it up front here is
 #' equivalent and cheaper). A NAMED top-level `across()` dot (e.g.
 #' `mutate(z = across(x, y))`) packs a data-frame column and never gets
-#' here: [dots_need_fallback()] sends the whole call to the CPU fallback.
+#' here: `dots_need_fallback()` sends the whole call to the CPU fallback.
 #'
 #' Expansion stops at the first dot that needs dplyr (the result is then partial
 #' and only its `"needs_fallback"` attribute is meaningful).
@@ -1758,7 +1758,7 @@ expand_if_any_all <- function(expr, env, schema, group_cols, mode, verb = "filte
 #' later expansion of the same `across()` reads (`across(c(y = x, z = y),
 #' ...)`): dplyr evaluates every function against the pre-`across()` data,
 #' while the expanded dots would run in sequence. That needs the schema, so
-#' [dots_need_fallback()] can't see it; the verb calls then re-run the
+#' `dots_need_fallback()` can't see it; the verb calls then re-run the
 #' ORIGINAL dots on the CPU. In `mutate()`/`transmute()` the same hazard is
 #' staged instead: the expansions are computed into temp columns first and
 #' assigned afterwards, and the `"staged_temps"` attribute names the temps the

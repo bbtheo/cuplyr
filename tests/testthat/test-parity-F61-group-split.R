@@ -108,6 +108,7 @@ f61s_ratios <- function(runs) {
 }
 
 test_that("native group_split() at 10,000 groups on 1e6 rows reaches CPU parity", {
+  skip_timing_under_check()
   skip_if_no_gpu()
   withr::local_options(cuplyr.fallback = "error")
   set.seed(613)

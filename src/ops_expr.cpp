@@ -5,6 +5,7 @@
 // arrive as nested Rcpp::List with `col` nodes carrying 0-based `index`
 // fields -- ir_bind() is expected to have already run on the R side (T3/T5
 // wire this up; T2's tests hand-build already-bound IR directly).
+#include "cuplyr_compat.hpp"
 #include "expr_cse.hpp"
 #include "expr_eval.hpp"
 #include "gpu_table.hpp"
@@ -184,7 +185,7 @@ SEXP gpu_filter_expr(SEXP xptr, Rcpp::List ir) {
         Rcpp::stop("filter() expressions must be logical");
     }
 
-    auto result = cudf::apply_boolean_mask(view, mask);
+    auto result = cuplyr::apply_retention_mask(view, mask);
     return finish_expr_result(std::move(result), ctx.int_overflow, ctx.rw_flags, ctx.ts_out_of_range);
 }
 

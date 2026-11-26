@@ -171,7 +171,7 @@ check_set_op_compatible <- function(x_schema, y_schema) {
   ny <- length(y_schema$names)
   if (nx != ny) {
     abort_set_op_incompatible(sprintf(
-      "✖ Different number of columns: %d vs %d.", nx, ny
+      "\u2716 Different number of columns: %d vs %d.", nx, ny
     ))
   }
 
@@ -183,13 +183,13 @@ check_set_op_compatible <- function(x_schema, y_schema) {
     bullets <- character()
     if (length(y_not_in_x) > 0) {
       bullets <- c(bullets, sprintf(
-        "✖ Cols in `y` but not `x`: %s.",
+        "\u2716 Cols in `y` but not `x`: %s.",
         paste(sprintf("`%s`", y_not_in_x), collapse = ", ")
       ))
     }
     if (length(x_not_in_y) > 0) {
       bullets <- c(bullets, sprintf(
-        "✖ Cols in `x` but not `y`: %s.",
+        "\u2716 Cols in `x` but not `y`: %s.",
         paste(sprintf("`%s`", x_not_in_y), collapse = ", ")
       ))
     }
@@ -216,7 +216,7 @@ check_set_op_compatible <- function(x_schema, y_schema) {
     res <- resolve_common_col_type(tx, ty, fx, fy, lvls_x, lvls_y)
     if (!isTRUE(res$ok)) {
       abort_set_op_incompatible(sprintf(
-        "✖ Incompatible types for column `%s`: %s vs %s.",
+        "\u2716 Incompatible types for column `%s`: %s vs %s.",
         nm, set_op_type_label(tx, fx), set_op_type_label(ty, fy)
       ))
     }

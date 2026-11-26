@@ -49,6 +49,7 @@ test_that("one eager verb on 1e3 rows takes under 0.5 ms", {
   same(select(eg, g, x), select(tb, g, x))
   same(arrange(eg, x), arrange(tb, x))
   same(summarise(geg, m = mean(x)), summarise(group_by(tb, g), m = mean(x)))
+  skip_timing_under_check()
   fns <- list(
     filter = function() filter(eg, x > 0.5),
     mutate = function() mutate(eg, z = x * 2 + y),
@@ -78,6 +79,7 @@ test_that("F62's 5-verb pipeline is faster than before in both modes", {
     ref <- f68b_pipeline(tibble::as_tibble(df))
     expect_equal(tibble::as_tibble(collect(f68b_pipeline(eg))), ref)
     expect_equal(tibble::as_tibble(collect(f68b_pipeline(lz))), ref)
+    if (!timing_enabled()) next
     runs <- timing_retry(
       function() {
         timing_medians(list(

@@ -20,7 +20,7 @@ Length/NA rules: a bare, untyped \code{NA}
 (the logical \code{NA} constant) becomes \code{na = TRUE} with \code{type = NULL}
 (adopts the sibling operand's type later; \code{\link[=ir_infer_type]{ir_infer_type()}} defaults it
 to \code{FLOAT64} when asked in isolation). Any other length-1 atomic value is
-typed via \code{\link[=gpu_type_from_r]{gpu_type_from_r()}}. Length != 1 is only legal when
+typed via \code{gpu_type_from_r()}. Length != 1 is only legal when
 \code{allow_vector = TRUE} (the \code{\%in\%} RHS set-argument position); otherwise
 it's a diagnosable user error.
 }

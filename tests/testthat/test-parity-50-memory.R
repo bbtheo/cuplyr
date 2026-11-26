@@ -225,6 +225,7 @@ test_that("an ungrouped row_number() allocates about one INT32 column", {
 })
 
 test_that("summarise(.by) costs about what group_by() |> summarise() costs", {
+  skip_timing_under_check()
   skip_if_no_gpu()
   testthat::skip_on_ci()
 
@@ -263,6 +264,7 @@ test_that("summarise(.by) costs about what group_by() |> summarise() costs", {
 })
 
 test_that("summarise(.by) on input sorted by the key costs no more than it used to", {
+  skip_timing_under_check()
   skip_if_no_gpu()
   testthat::skip_on_ci()
   skip_if_insufficient_gpu_memory(1024^3)
@@ -325,6 +327,7 @@ test_that("summarise(.by) on input sorted by the key costs no more than it used 
 })
 
 test_that("summarise(.by) with high-cardinality string keys costs less than group_by()", {
+  skip_timing_under_check()
   skip_if_no_gpu()
   testthat::skip_on_ci()
   skip_if_insufficient_gpu_memory(1024^3)
@@ -386,6 +389,7 @@ test_that("summarise(.by) with high-cardinality string keys costs less than grou
 })
 
 test_that("summarise(.by) with shuffled keys is no slower than before #50", {
+  skip_timing_under_check()
   skip_if_no_gpu()
   testthat::skip_on_ci()
   skip_if_insufficient_gpu_memory(1024^3)

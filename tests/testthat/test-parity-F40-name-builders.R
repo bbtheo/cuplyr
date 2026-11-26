@@ -74,7 +74,9 @@ test_that("select(all_of(sort(names()))) on 1e6 rows is metadata-only", {
                    function() select(g, sort(names(g))),
                    function() select(g, paste0(c("a", "b"), ""), rev(names(g))[1]))) {
     built <- perf_time(sel, iterations = 5)
-    expect_lt(as.numeric(built), max(5 * as.numeric(plain), as.numeric(plain) + 0.002))
+    if (timing_enabled()) {
+      expect_lt(as.numeric(built), max(5 * as.numeric(plain), as.numeric(plain) + 0.002))
+    }
   }
   expect_identical(names(select(g, all_of(sort(names(g))))), c("a", "b", "c"))
 })

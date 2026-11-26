@@ -402,7 +402,7 @@ test_that("a 1e5-row rowwise sum/mean runs natively and in well under the CPU ti
       dplyr::mutate(s = sum(dplyr::c_across(a:e)), m = mean(c(a, b, c), na.rm = TRUE)) |>
       collect()
   })[["elapsed"]]
-  expect_lt(elapsed, 5)
+  if (timing_enabled()) expect_lt(elapsed, 5)
   expect_s3_class(out, "rowwise_df")
   expect_equal(out$s, df$a + df$b + df$c + df$d + df$e)
   cnt <- (!is.na(df$a)) + (!is.na(df$b)) + (!is.na(df$c))

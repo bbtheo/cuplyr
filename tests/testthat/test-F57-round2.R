@@ -14,8 +14,11 @@
 # - pkgload::unload() followed by load_all() leaves old tables and libcudf working
 
 # Run `fn(load)` in a fresh R process that has loaded this worktree (no compile,
-# the library is already built) with the environment variables `env` set.
-# `load()` loads it again (a reload). `fn` travels as an argument, so its
+# the library is already built), or the installed package when the tests run
+# outside a source tree (cuplyr_child_loader()), with the environment variables
+# `env` set. `load()` loads the package again (a reload); it is pkgload's, so
+# `load` is NULL outside a source tree, and a test whose claim needs a reload
+# calls skip_if_no_source_tree() first. `fn` travels as an argument, so its
 # defining environment goes along only as a serialized copy: it uses package
 # functions (export_all = TRUE), `load`, and gpu_own_device_used_bytes() and
 # gpu_own_delta() (this process's own device memory), which gpu_child_r() puts in
@@ -23,7 +26,8 @@
 # The process starts through gpu_child_r(), which frees this process's cached
 # GPU memory first.
 f57r2_subprocess <- function(fn, env = character(), globals = list()) {
-  skip_if_not_installed("pkgload")
+  reloadable <- !is.null(cuplyr_source_root())
+  if (reloadable) skip_if_not_installed("pkgload")
   root <- normalizePath(testthat::test_path("..", ".."), mustWork = TRUE)
   # Functions in `globals` are re-homed to the subprocess's global environment.
   globals <- lapply(globals, function(f) {
@@ -31,17 +35,13 @@ f57r2_subprocess <- function(fn, env = character(), globals = list()) {
     f
   })
   gpu_child_r(
-    function(root, fn, globals) {
+    function(root, load, reloadable, fn, globals) {
       list2env(globals, envir = globalenv())
-      load <- function() {
-        suppressMessages(pkgload::load_all(root, quiet = TRUE, compile = FALSE,
-                                           export_all = TRUE, helpers = FALSE,
-                                           attach_testthat = FALSE))
-      }
-      load()
-      fn(load)
+      load(root)
+      fn(if (reloadable) function() load(root) else NULL)
     },
-    args = list(root = root, fn = fn, globals = globals),
+    args = list(root = root, load = cuplyr_child_loader(), reloadable = reloadable,
+                fn = fn, globals = globals),
     env = env
   )
 }
@@ -119,6 +119,7 @@ test_that("a join does not warn about free memory the pool holds (real pool)", {
 
 test_that("reloading with live tables reuses the memory resource instead of orphaning a pool", {
   skip_if_no_gpu()
+  skip_if_no_source_tree()   # every claim here is about a reload
   out <- f57r2_subprocess(function(load) {
     s0 <- gpu_memory_state()
     own0 <- gpu_own_device_used_bytes()
@@ -175,9 +176,12 @@ test_that("CUPLYR_MEMORY_RESOURCE=async runs a pipeline and reports its allocati
       dplyr::mutate(r = cumsum(x), m = mean(x)) |>
       dplyr::arrange(dplyr::desc(x)) |>
       dplyr::collect()
-    load()
+    # A reload needs the source tree (`load` is NULL without one).
+    reloaded <- !is.null(load)
+    if (reloaded) load()
     list(resource = s0$resource, s0 = s0, s_live = s_live, s_freed = s_freed,
-         res = as.data.frame(res), after_reload = gpu_memory_state()$resource,
+         res = as.data.frame(res), reloaded = reloaded,
+         after_reload = gpu_memory_state()$resource,
          allocatable = gpu_allocatable_bytes(s_live))
   }, env = c(CUPLYR_MEMORY_POOL = "true", CUPLYR_MEMORY_RESOURCE = "async"))
   expect_identical(out$resource, "async")
@@ -190,7 +194,9 @@ test_that("CUPLYR_MEMORY_RESOURCE=async runs a pipeline and reports its allocati
   expect_gte(out$s_live$pool_used_bytes - out$s0$pool_used_bytes, 8e6)
   expect_lt(out$s_freed$pool_used_bytes - out$s0$pool_used_bytes, 1e6)
   expect_gte(out$allocatable, out$s_live$free_bytes)
-  expect_identical(out$after_reload, "async")
+  # Under R CMD check (installed package, no source tree) only this needs the
+  # reload; the rest of the test runs there too.
+  if (out$reloaded) expect_identical(out$after_reload, "async")
 })
 
 test_that("mutate() treats a forwarded missing .by/.before/.after as an error, an absent one as absent", {
@@ -261,6 +267,9 @@ test_that("after any reload, new tables are allocated from the one memory resour
   out <- f57r2_subprocess(function(load) {
     probe <- get("f57r3_probe_shipped", envir = globalenv())
     a <- probe()                               # first load
+    # Stages b-d reload, which needs the source tree (`load` is NULL without
+    # one): under R CMD check only the first load's stage runs.
+    if (is.null(load)) return(list(a = a, reloaded = FALSE))
     load()
     b <- probe()                               # reload, no live table
     x <- tbl_gpu(data.frame(a = runif(1e5)), lazy = FALSE)
@@ -269,17 +278,21 @@ test_that("after any reload, new tables are allocated from the one memory resour
     options(cuplyr.memory_pool = FALSE)
     load()
     d <- probe()                               # reload with the switch off
-    list(a = a, b = b, c = c, d = d, x = nrow(dplyr::collect(x)))
+    list(a = a, b = b, c = c, d = d, x = nrow(dplyr::collect(x)), reloaded = TRUE)
   }, env = c(CUPLYR_MEMORY_POOL = "true", CUPLYR_MEMORY_RESOURCE = "pool"),
   globals = list(f57r3_probe_shipped = f57r3_probe))
-  expect_identical(out$x, 100000L)
-  for (stage in c("a", "b", "c", "d")) expect_f57r3_pooled(out[[stage]], stage)
-  # One resource: every stage reports the same pool.
-  expect_identical(out$d$pool_bytes, out$a$pool_bytes)
+  expect_f57r3_pooled(out$a, "a")
+  if (out$reloaded) {
+    expect_identical(out$x, 100000L)
+    for (stage in c("b", "c", "d")) expect_f57r3_pooled(out[[stage]], stage)
+    # One resource: every stage reports the same pool.
+    expect_identical(out$d$pool_bytes, out$a$pool_bytes)
+  }
 })
 
 test_that("no value of the old hand-over option crashes a load or adds a resource", {
   skip_if_no_gpu()
+  skip_if_no_source_tree()   # every claim here is about a reload
   out <- f57r2_subprocess(function(load) {
     probe <- get("f57r3_probe_shipped", envir = globalenv())
     df <- data.frame(g = c(1L, 2L, 1L, 2L, 3L), x = c(5, 1, 4, 2, 3))
@@ -329,6 +342,7 @@ test_that("no value of the old hand-over option crashes a load or adds a resourc
 
 test_that("pkgload::unload() then load_all() keeps old tables and libcudf working", {
   skip_if_no_gpu()
+  skip_if_no_source_tree()   # every claim here is about a reload
   # `first_pool`: whether the first load in the process has the pool. With it
   # off, the second load (a fresh copy of the library) creates the resource, and
   # it is that copy pkgload::unload() later dyn.unload()s.

@@ -128,6 +128,7 @@ test_that("0-row wide inputs give dplyr's results", {
 # 1.375-1.412 with the two modes apart, and timing_medians()'s default 0.05 s (one
 # or two calls per batch) read 1.37-1.53 over all ten suites. The limit stays 1.45.
 test_that("warm colwise verbs on 200 columns cost about what across() costs", {
+  skip_timing_under_check()
   skip_if_no_gpu()
   num <- f60_wide(n = 1000L, w = 200L, na = FALSE)[-1L]
   g <- tbl_gpu(num, lazy = FALSE)

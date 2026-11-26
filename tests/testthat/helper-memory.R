@@ -108,11 +108,13 @@ gpu_child_state <- new.env(parent = emptyenv())
 # environment has gpu_own_device_used_bytes() and gpu_own_delta() before `func`
 # runs. `func` is re-homed to the child's global environment, so it can't rely
 # on its defining environment (functions inside `args` travel with a serialized
-# copy of theirs); `env` adds environment variables for the child.
+# copy of theirs, except those whose environment reaches a namespace: see
+# child_defer_closures()); `env` adds environment variables for the child.
 gpu_child_r <- function(func, args = list(), env = character(), timeout = 600) {
   skip_if_not_installed("callr")
   gpu_child_state$free_before <- gpu_free_for_child()
   environment(func) <- globalenv()
+  args <- child_defer_closures(args)
   readers <- list(gpu_own_device_used_bytes = gpu_own_device_used_bytes,
                   gpu_own_delta = gpu_own_delta)
   readers <- lapply(readers, function(f) {
@@ -130,22 +132,110 @@ gpu_child_r <- function(func, args = list(), env = character(), timeout = 600) {
   )
 }
 
+# Does the environment chain of `f` reach a namespace (other than base) before
+# the global environment? The tests' environment is rooted at
+# asNamespace("cuplyr") when the package's own test runner (test_check()) runs
+# them, so a function made in a test does.
+child_chain_has_namespace <- function(f) {
+  e <- environment(f)
+  while (!is.null(e) && !identical(e, emptyenv())) {
+    if (identical(e, globalenv()) || identical(e, baseenv()) || identical(e, .BaseNamespaceEnv)) {
+      return(FALSE)
+    }
+    if (isNamespace(e)) return(TRUE)
+    e <- parent.env(e)
+  }
+  FALSE
+}
+
+# A function that reaches the child through `args` is serialized with its
+# environment chain, and R writes a namespace in that chain as a reference: the
+# child reads the payload by running loadNamespace("cuplyr"), before the child
+# function has set its options or loaded the package under test. .onLoad then
+# installs the memory resource from the environment variables alone and its
+# warnings fire outside the child's handlers. Under tools/test the tests'
+# environment descends from the global environment, so nothing shows there;
+# under test_check() it does. So a function with a namespace in its chain
+# travels as its serialized bytes inside a stub that reads them on first call,
+# when the child has loaded the package and the namespace is found, not loaded.
+# Plain lists are searched for such functions; the chain still travels by value.
+child_defer_closures <- function(x) {
+  if (is.function(x)) {
+    if (is.primitive(x) || !child_chain_has_namespace(x)) return(x)
+    payload <- serialize(x, NULL)
+    stub <- function(...) {
+      if (is.null(fn)) {
+        fn <<- unserialize(payload)
+        payload <<- NULL
+      }
+      fn(...)
+    }
+    environment(stub) <- list2env(list(payload = payload, fn = NULL), parent = globalenv())
+    return(stub)
+  }
+  if (is.list(x) && !is.object(x)) {
+    for (i in seq_along(x)) x[i] <- list(child_defer_closures(x[[i]]))
+  }
+  x
+}
+
+# The root of the package source tree these tests run in, or NULL when they run
+# elsewhere (the check runs them from <pkg>.Rcheck/tests/testthat, with the
+# package installed and no R/, man/, src/ or vignettes/ around).
+cuplyr_source_root <- function() {
+  root <- normalizePath(testthat::test_path("..", ".."), mustWork = FALSE)
+  if (file.exists(file.path(root, "DESCRIPTION")) && dir.exists(file.path(root, "R")) &&
+      dir.exists(file.path(root, "man")) && dir.exists(file.path(root, "src"))) {
+    root
+  } else {
+    NULL
+  }
+}
+
+# Skip a test that reads the source tree (man/, vignettes/, NEWS.md) or reloads
+# the package with pkgload, which only exist in a checkout.
+skip_if_no_source_tree <- function() {
+  skip_if(is.null(cuplyr_source_root()), "package source tree not available in this test context")
+}
+
+# The loader a callr child runs first: load_all() of the source tree when
+# `root` is one (no compile: the library is already built), else the installed
+# package (callr children get this process's library paths) with its internals
+# attached, so the child's code calls them unqualified like under load_all().
+# Re-homed to the child's global environment like every function that travels
+# to a child.
+cuplyr_child_loader <- function() {
+  load <- function(root) {
+    if (file.exists(file.path(root, "DESCRIPTION")) && dir.exists(file.path(root, "src"))) {
+      suppressMessages(pkgload::load_all(root, quiet = TRUE, compile = FALSE,
+                                         export_all = TRUE, helpers = FALSE,
+                                         attach_testthat = FALSE))
+    } else {
+      suppressMessages(library(cuplyr))
+      if (!"cuplyr-internals" %in% search()) {
+        attach(as.list(asNamespace("cuplyr"), all.names = TRUE), name = "cuplyr-internals",
+               warn.conflicts = FALSE)
+      }
+    }
+    invisible(NULL)
+  }
+  environment(load) <- globalenv()
+  load
+}
+
 # Run `fn(...)` in a fresh R process with cuplyr's memory pool switched off,
 # which loads this worktree (no compile, the library is already built). For the
 # tests whose claim is about the CUDA driver (device-level memory), which a pool
 # in the test process would hide.
 run_with_pool_off <- function(fn, ...) {
-  skip_if_not_installed("pkgload")
   root <- normalizePath(testthat::test_path("..", ".."), mustWork = TRUE)
   gpu_child_r(
-    function(root, fn, args) {
-      suppressMessages(pkgload::load_all(root, quiet = TRUE, compile = FALSE,
-                                         export_all = TRUE, helpers = FALSE,
-                                         attach_testthat = FALSE))
+    function(root, load, fn, args) {
+      load(root)
       stopifnot(identical(gpu_memory_state()$resource, "cuda"))
       do.call(fn, args)
     },
-    args = list(root = root, fn = fn, args = list(...)),
+    args = list(root = root, load = cuplyr_child_loader(), fn = fn, args = list(...)),
     env = c(CUPLYR_MEMORY_POOL = "0")
   )
 }

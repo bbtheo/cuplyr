@@ -106,6 +106,10 @@ test_that("F59: roll_median() at 1e6 rows takes well under a second; the sorted 
   }
   r2 <- sorted(x, 1001, TRUE)
   if (!is.null(r1)) expect_identical(r1, r2)
+  # spot-check against the reference on a slice (the full reference takes ~30 s)
+  idx <- 5000:6500
+  expect_identical(r2[idx], f59m_ref(x[4000:6500], 1001, TRUE)[idx - 3999])
+  skip_timing_under_check()
   # Timing: the median of 5 calls after 1 warmup, each call timed whole
   # (0.2-0.8 s). This is CPU work, so no GPU fence. A reading within 1.25x of
   # a bound is re-measured (up to 3 times); the last reading is asserted.
@@ -134,9 +138,6 @@ test_that("F59: roll_median() at 1e6 rows takes well under a second; the sorted 
     seen <- paste(sprintf("%.3f", vapply(runs, function(r) r[[v]], numeric(1))), collapse = " / ")
     expect_lt(m[[v]], bounds[[v]], label = sprintf("%s median at 1e6 rows, w = 1001 (attempts: %s s)", v, seen))
   }
-  # spot-check against the reference on a slice (the full reference takes ~30 s)
-  idx <- 5000:6500
-  expect_identical(r2[idx], f59m_ref(x[4000:6500], 1001, TRUE)[idx - 3999])
 })
 
 test_that("F59: roll_median() inside tbl_gpu pipelines (grouped, NA keys, eager and lazy) matches the reference", {

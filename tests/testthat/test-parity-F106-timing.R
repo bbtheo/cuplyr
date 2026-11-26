@@ -36,12 +36,12 @@ test_that("timing_now() resolves well below a millisecond", {
     b <- timing_now()
     if (b > a) break
   }
-  expect_lt(b - a, 1e-4)
+  if (timing_enabled()) expect_lt(b - a, 1e-4)
   a <- timing_now()
   timing_spin(0.002)
   b <- timing_now()
   expect_gte(b - a, 0.002)
-  expect_lt(b - a, 0.05)
+  if (timing_enabled()) expect_lt(b - a, 0.05)
 })
 
 test_that("timing_medians() returns one median per closure with its batch sizes and samples", {
@@ -62,6 +62,7 @@ test_that("timing_medians() returns one median per closure with its batch sizes 
 
 test_that("timing_medians() resolves a 0.05 ms difference with 5 ms batches", {
   # With proc.time() a 5 ms batch of 0.2 ms calls reads in steps of 0.04 ms.
+  skip_timing_under_check()
   skip_if_no_gpu()
   t <- timing_medians(list(a = function() timing_spin(2e-4), b = function() timing_spin(2.5e-4)),
                       samples = 9L, target = 0.005)
@@ -75,6 +76,7 @@ test_that("timing_medians() sizes batches to their target despite slow first cal
   # The first 6 calls take 20 ms, later ones 0.2 ms (a GC or a descheduling
   # during warm-up/probing). Sizing from those calls gives 1-call batches of
   # 0.2 ms, read by any clock with poor relative precision.
+  skip_timing_under_check()
   skip_if_no_gpu()
   calls <- 0L
   slow_start <- function() {

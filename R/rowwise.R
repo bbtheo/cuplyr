@@ -89,23 +89,23 @@ rowwise_to_grouped <- function(x, vars) {
 #' that needs the row as a vector, list-columns, window functions, `.by`) runs
 #' the whole call in dplyr on the CPU and comes back as a rowwise `tbl_gpu`.
 #'
-#' @param .data A `tbl_gpu`.
+#' @param data A `tbl_gpu`.
 #' @param ... <[`tidy-select`][dplyr::dplyr_tidy_select]> Columns to keep as
 #'   identifying variables in `summarise()`. A grouped table takes its group
 #'   variables (naming others is an error, as in dplyr).
 #' @return A rowwise `tbl_gpu`.
 #' @export
 #' @importFrom dplyr rowwise
-rowwise.tbl_gpu <- function(.data, ...) {
+rowwise.tbl_gpu <- function(data, ...) {
   dots <- rlang::enquos(...)
   cpu <- function() {
-    gpu_fallback("rowwise", .data, function(tbl) rlang::inject(dplyr::rowwise(tbl, !!!dots)),
+    gpu_fallback("rowwise", data, function(tbl) rlang::inject(dplyr::rowwise(tbl, !!!dots)),
                  reason = "a rowwise() selection that reads column values, or duplicated column names, is resolved by dplyr.")
   }
-  schema <- current_schema(.data)
-  groups <- .subset2(.data, "groups")
+  schema <- current_schema(data)
+  groups <- .subset2(data, "groups")
 
-  if (length(groups) > 0L && !is_rowwise_gpu(.data)) {
+  if (length(groups) > 0L && !is_rowwise_gpu(data)) {
     # rowwise.grouped_df(): the group vars, and nothing else may be named
     if (length(dots) > 0L) {
       rlang::abort(c(
@@ -127,7 +127,7 @@ rowwise.tbl_gpu <- function(.data, ...) {
     vars <- schema$names[loc]
   }
   check_dup_names_ungrouped(schema$names, vars)
-  rowwise_mark(.data, vars)
+  rowwise_mark(data, vars)
 }
 
 # =============================================================================

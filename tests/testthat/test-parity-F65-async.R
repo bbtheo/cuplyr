@@ -64,16 +64,13 @@ f65_local_clean <- function(env = parent.frame()) {
 f65_state <- new.env(parent = emptyenv())
 
 f65_child <- function(fn, env = f65_env(), opts = list()) {
-  skip_if_not_installed("pkgload")
   res <- gpu_child_r(
-    function(root, fn, opts) {
+    function(root, load, fn, opts) {
       if (length(opts)) options(opts)
       # Warnings raised while loading, for fn() to inspect.
       w <- character()
       withCallingHandlers(
-        suppressMessages(pkgload::load_all(root, quiet = TRUE, compile = FALSE,
-                                           export_all = TRUE, helpers = FALSE,
-                                           attach_testthat = FALSE)),
+        load(root),
         warning = function(cnd) {
           w <<- c(w, conditionMessage(cnd))
           invokeRestart("muffleWarning")
@@ -84,7 +81,7 @@ f65_child <- function(fn, env = f65_env(), opts = list()) {
       list(value = fn(), warnings = w, resource = st$resource,
            free = st$free_bytes, total = st$total_bytes)
     },
-    args = list(root = f65_root(), fn = fn, opts = opts),
+    args = list(root = f65_root(), load = cuplyr_child_loader(), fn = fn, opts = opts),
     env = env
   )
   f65_state$last <- c(res[c("warnings", "resource", "free", "total")],
@@ -646,6 +643,7 @@ test_that("with the off switch set, a bad cuplyr.memory_resource does not claim 
 
 test_that("a reload that reuses the existing resource does not validate the switches", {
   skip_if_no_gpu()
+  skip_if_no_source_tree()   # a reload is pkgload's
   out <- f65_child(function() {
     options(cuplyr.memory_resource = "bogus", cuplyr.release_threshold = "1GB")
     w <- character()
@@ -686,6 +684,7 @@ test_that("an NA or empty cuplyr.release_threshold option counts as unset", {
 # ---------------------------------------------------------------------------
 
 test_that("the memory vignette exists and covers the resources", {
+  skip_if_no_source_tree()
   path <- file.path(f65_root(), "vignettes", "memory.Rmd")
   expect_true(file.exists(path))
   txt <- paste(readLines(path, warn = FALSE), collapse = "\n")
@@ -703,6 +702,7 @@ test_that("the memory vignette exists and covers the resources", {
 })
 
 test_that("?gpu_memory_state links the vignette and NEWS documents the change", {
+  skip_if_no_source_tree()
   rd <- file.path(f65_root(), "man", "gpu_memory_state.Rd")
   rd_txt <- paste(readLines(rd, warn = FALSE), collapse = "\n")
   expect_match(rd_txt, "vignette(\"memory\"", fixed = TRUE)

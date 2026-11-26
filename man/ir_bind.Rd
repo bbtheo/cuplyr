@@ -11,6 +11,10 @@ ir_bind(ir, schema, pos = NULL)
 
 \item{schema}{List with \code{names}/\code{types} to resolve column positions
 against}
+
+\item{pos}{\code{NULL} (look names up in \code{schema$names}), or an environment
+mapping column names to their positions in \code{schema}, which a caller binding many
+expressions against one schema builds once}
 }
 \value{
 The IR tree with \code{index} filled in on every \code{col} node

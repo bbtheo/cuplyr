@@ -1,5 +1,5 @@
 // src/ops_groupby.cpp
-#include <rmm/cuda_stream_view.hpp>
+#include <cudf/utilities/default_stream.hpp>
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
 #include "int_sum.hpp"
@@ -477,7 +477,7 @@ FloatColumnInfo inspect_float_column(cudf::column_view col) {
     info.has_nan = flag->is_valid() && flag->value();
     if (info.has_nan) {
         info.nan_nulled = std::make_unique<cudf::column>(col);
-        auto mask = cudf::nans_to_nulls(col);
+        auto mask = cuplyr::nan_null_mask(col);
         info.nan_nulled->set_null_mask(std::move(*mask.first), mask.second);
     }
     return info;
@@ -1065,7 +1065,7 @@ SEXP gpu_summarise(SEXP xptr, IntegerVector group_indices,
                 // grouped and ungrouped paths.
                 int32_t count = view.num_rows();
                 rmm::device_buffer data(sizeof(int32_t),
-                                       rmm::cuda_stream_view(),
+                                       cudf::get_default_stream(),
                                        rmm::mr::get_current_device_resource_ref());
                 check_cuda(cudaMemcpy(data.data(), &count, sizeof(int32_t), cudaMemcpyHostToDevice),
                            "gpu_summarise count memcpy");
@@ -1631,7 +1631,7 @@ List gpu_group_info(SEXP xptr, IntegerVector group_col_indices) {
     std::iota(row_idx_data.begin(), row_idx_data.end(), 0);
 
     rmm::device_buffer row_idx_buf(row_idx_data.size() * sizeof(int32_t),
-                                    rmm::cuda_stream_view(),
+                                    cudf::get_default_stream(),
                                     rmm::mr::get_current_device_resource_ref());
     if (!row_idx_data.empty()) {
         check_cuda(cudaMemcpy(row_idx_buf.data(), row_idx_data.data(),
@@ -1667,7 +1667,7 @@ List gpu_group_info(SEXP xptr, IntegerVector group_col_indices) {
         }
 
         rmm::device_buffer first_rows_buf(first_rows.size() * sizeof(int32_t),
-                                           rmm::cuda_stream_view(),
+                                           cudf::get_default_stream(),
                                            rmm::mr::get_current_device_resource_ref());
         check_cuda(cudaMemcpy(first_rows_buf.data(), first_rows.data(),
                                first_rows.size() * sizeof(int32_t), cudaMemcpyHostToDevice),
@@ -1798,7 +1798,7 @@ SEXP gpu_group_keys(SEXP xptr, IntegerVector group_col_indices) {
             static_cast<int32_t>(groups_result.offsets[static_cast<size_t>(i)]);
     }
     rmm::device_buffer first_rows_buf(first_rows.size() * sizeof(int32_t),
-                                       rmm::cuda_stream_view(),
+                                       cudf::get_default_stream(),
                                        rmm::mr::get_current_device_resource_ref());
     check_cuda(cudaMemcpy(first_rows_buf.data(), first_rows.data(),
                            first_rows.size() * sizeof(int32_t), cudaMemcpyHostToDevice),
