@@ -23,6 +23,7 @@ f52_slow_start <- function(n_slow, slow_s, fast_s) {
 }
 
 test_that("perf_time() keeps samples >= ~min_sample_s when the probe overestimates the call", {
+  skip_timing_under_check()
   # warmup (1 call) and the doubling probe (1 + 2 calls) all land in the slow
   # phase: the probe reads ~8 ms per call while steady calls take ~2.6 ms.
   fn <- f52_slow_start(n_slow = 4L, slow_s = 0.008, fast_s = 0.0025)
@@ -37,6 +38,7 @@ test_that("perf_time() keeps samples >= ~min_sample_s when the probe overestimat
 })
 
 test_that("perf_time() keeps samples >= ~min_sample_s for a longer slow start", {
+  skip_timing_under_check()
   # Slow phase covers warmup, the whole probe and more: whatever the probe
   # reads, the reported samples must be sized for the steady per-call time.
   fn <- f52_slow_start(n_slow = 12L, slow_s = 0.006, fast_s = 0.0025)
@@ -47,12 +49,14 @@ test_that("perf_time() keeps samples >= ~min_sample_s for a longer slow start", 
 })
 
 test_that("perf_time() honours a non-default min_sample_s", {
+  skip_timing_under_check()
   fn <- f52_slow_start(n_slow = 4L, slow_s = 0.008, fast_s = 0.0025)
   t <- perf_time(fn, iterations = 3, warmup = 1, min_sample_s = 0.03)
   expect_gte(attr(t, "reps") * as.numeric(t), 0.027)
 })
 
 test_that("perf_time() still times slow calls one per sample", {
+  skip_timing_under_check()
   # The probe reads >= min_sample_s, so the call is not batched; it stays
   # unbatched even if later calls come in faster (slow benchmarks must time
   # exactly as before).
@@ -64,6 +68,7 @@ test_that("perf_time() still times slow calls one per sample", {
 })
 
 test_that("perf_time(batch = FALSE) never batches", {
+  skip_timing_under_check()
   fn <- f52_slow_start(n_slow = 1L, slow_s = 0.008, fast_s = 0.0025)
   t <- perf_time(fn, iterations = 3, warmup = 1, batch = FALSE)
   expect_equal(attr(t, "reps"), 1)
