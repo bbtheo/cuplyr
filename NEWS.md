@@ -18,6 +18,11 @@ capability 7.5 or higher.
   plan runs, at every `print()` too. For eager tables, set
   `options(cuplyr.exec_mode = "eager")` or pass `lazy = FALSE`.
 
+* On a lazy gibble with pending steps, `nrow()` and `dim()` run the plan,
+  while `gpu_object_info()` and `gpu_memory_usage()` count the rows of the
+  table it was made from and `verify_gpu_data()` can return `FALSE`. Call
+  `compute()` first.
+
 * cuplyr needs RAPIDS libcudf 26.02 or later and is tested on 26.10. RAPIDS
   25.12 is no longer supported (#94).
 
@@ -31,27 +36,42 @@ capability 7.5 or higher.
     `select()` keeps the grouping columns, joins keep `x`'s groups,
     `bind_rows()` keeps the first input's groups, `collect()` returns a
     `grouped_df`, and `tbl_gpu()` keeps the groups of a `grouped_df`. In 0.1.1
-    each of these dropped the groups.
+    each of these dropped the groups. `ungroup(x, col)` removes only `col`;
+    0.1.1 removed every group.
+  - `group_by()` evaluates its arguments as dplyr does. A tidyselect helper
+    needs `pick()`, as in `group_by(pick(all_of(cols)))`, and a string such as
+    `group_by("x")` makes one constant group; 0.1.1 took both as column names.
+    `group_by()` with no arguments removes the grouping; 0.1.1 kept it.
+  - `select(new = old)` renames the column; 0.1.1 kept the old name.
   - `summarise()` aggregates follow R's `na.rm = FALSE` default, so a group
     with an `NA` gives `NA`.
-  - `arrange(desc(x))` puts `NA` last.
+  - An ungrouped `summarise()` of zero rows, such as after a `filter()` that
+    keeps none, returns one row, where `sum()` gives 0; 0.1.1 returned no
+    rows.
+  - `arrange(desc(x))` puts `NA` last, and `arrange(.by_group = TRUE)` sorts
+    the group columns ascending, as dplyr does.
   - Grouped `summarise()` returns groups sorted by their keys, not in hash
     order, and keeps rows whose key is `NA` as a last group; 0.1.1 dropped
     those rows.
+  - `full_join()` fills the keys of rows found only in `y`; 0.1.1 left them
+    `NA`.
   - Integer `+`, `-` and `*` return integers, not doubles. An overflow gives
     `NA` with R's warning.
   - In `summarise()`, `sum()` of integers or logicals, such as `sum(x > 0)`,
-    and an ungrouped `n()` return integers, not doubles. A `sum()` too large
-    for an integer is a double, as in R.
+    and an ungrouped `n()` return integers, not doubles, and `min()` and
+    `max()` of a logical column return integers, not logicals. A `sum()` too
+    large for an integer is a double, as in R.
   - `NaN` stays `NaN`; it used to become `NA` on upload.
   - `integer64` columns are exact and collect to `bit64::integer64`; they used
-    to be uploaded as doubles, which could corrupt their values.
+    to be uploaded as doubles, which corrupted them.
   - `POSIXct` columns keep their time zone instead of coming back in UTC.
   - A gibble made from a `data.frame` collects to a `data.frame`, with its
     attributes.
   - Factor columns stay factors after `select()`, joins, `bind_rows()`,
-    `bind_cols()`, a lazy `mutate()` and as `summarise()` group keys; 0.1.1
-    returned their integer codes.
+    `bind_cols()`, a lazy `mutate()` and as `summarise()` group keys, and
+    ordered factors stay ordered; 0.1.1 returned integer codes, or plain
+    factors. Joins match factor keys by their labels; 0.1.1 matched the codes,
+    which paired the wrong rows when the two tables' levels differed.
 
 * Uploading a column with no GPU type (`difftime`, `hms`, `ts`, `POSIXlt`, a
   list, a matrix with several columns, ...) raises an error that names the
@@ -65,9 +85,12 @@ capability 7.5 or higher.
 * `show_query()` is now a method for dplyr's generic. Its argument is `x`, and
   it prints the plan as R code and returns `x` invisibly.
 
-* `split()`, `with()`, `subset()`, `t()`, `as.environment()`, `is.na()` and
-  `anyNA()` of a gibble raise an error; they used to act on the object's
-  internal fields.
+* `$`, `[[` and `length()` of a gibble give its columns, as for a data frame,
+  and `names<-` accepts `NA` and empty names. In 0.1.1, `$`, `[[` and
+  `length()` gave the object's internal fields, such as `x$schema` and
+  `x$ptr`, and `names<-` refused those names (#4). `split()`, `with()`,
+  `subset()`, `t()`, `as.environment()`, `is.na()` and `anyNA()` of a gibble
+  raise an error; they used to act on the internal fields.
 
 ## Installation and requirements
 
@@ -115,7 +138,7 @@ capability 7.5 or higher.
   `sum(c_across(a:e))` on the GPU. On 1e5 rows that takes milliseconds,
   where dplyr takes about twenty seconds.
 
-* `$`, `[[`, `[`, `[<-` for whole columns, `as.data.frame()`, `as_tibble()`,
+* `[`, `[<-` for whole columns, `as.data.frame()`, `as_tibble()`,
   `glimpse()`, `head()`, `rbind()`, `cbind()`, `vctrs::vec_slice()`,
   `vctrs::vec_size()`, `dplyr::bind_rows()` and `purrr::map_dfr()` work on
   gibbles.
@@ -221,20 +244,24 @@ capability 7.5 or higher.
   from; `?"cuplyr-options"` documents them. An invalid value warns once, with
   class `cuplyr_warning_invalid_option`, and the default is used.
 
-* Errors and warnings have dplyr's class, message and call: missing columns,
-  errors in `mutate()`, calls dplyr rejects, and the `min()` and `max()`
-  warnings for empty groups (#13, #20, #24, #28, #30, #69).
+* Errors and warnings have dplyr's class, message and call for missing
+  columns, calls dplyr rejects and the `min()` and `max()` warnings for empty
+  groups. Errors in `mutate()` carry dplyr's class and its `In argument:`
+  context (#13, #20, #24, #28, #30, #69).
 
 * cuplyr installs CUDA's stream-ordered (`"async"`) memory resource when it
-  loads, and each call frees its temporary GPU tables when it returns.
-  `gpu_gc()` gives unused memory back to the device and reports it in
-  `released_bytes`. Set `options(cuplyr.memory_resource = "pool")` before
-  loading for RMM's pool, or `cuplyr.release_threshold` to release memory
-  automatically (`vignette("memory")`).
+  loads. It reserves a quarter of the free GPU memory, at most 1 GiB, and
+  keeps the memory of freed tables for reuse, so other processes see it as
+  used until `gpu_gc()` returns it to the device and reports it in
+  `released_bytes`. Each call frees its temporary GPU tables when it returns.
+  Before loading, set `options(cuplyr.memory_resource = "pool")` for RMM's
+  pool, `cuplyr.pool_initial` to reserve less, or `cuplyr.release_threshold`
+  to release memory automatically (`vignette("memory")`).
 
 * `gpu_memory_state()` reports the memory resource, `pool_bytes` and
   `pool_used_bytes`. `used_bytes` counts the memory the resource holds, so it
-  no longer falls when a table is freed.
+  no longer falls when a table is freed, and the `freed_bytes` of `gpu_gc()`
+  counts memory freed inside the resource.
 
 * New `gpu_sync()` waits for queued GPU work, for timing. A step that runs out
   of GPU memory is retried once after garbage collection, and the final error
@@ -263,13 +290,10 @@ capability 7.5 or higher.
 ## Minor improvements and bug fixes
 
 * `right_join()` works (it failed on every call) and returns dplyr's row
-  order; `right_join()` and `full_join()` fill the keys of unmatched rows.
+  order and keys.
 
 * `summarise()` accepts `dplyr::n()` and `stats::sd()`, names an unnamed
   expression after its text, and works lazily with `sd()` and `var()`.
-
-* `arrange(.by_group = TRUE)` sorts the group columns ascending, as dplyr
-  does.
 
 * Lazy plans with chained joins, or a `mutate()` that overwrites a column,
   give the right result.
