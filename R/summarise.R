@@ -996,8 +996,30 @@ summarise_group_keys <- function(.data, retained_groups) {
   was_lazy <- identical(.subset2(.data, "exec_mode"), "lazy")
   base <- compute(.data)
   base$exec_mode <- "eager"
-  # (group_data() carries a `.drop` attribute, which is not the table's)
-  all_keys <- fixed_keys_of(base) %||% compute_group_data(base)[base$groups]
+  # The keys of every group: the fixed keys, else the observed ones (the keys
+  # of the plain GPU summarise, k rows; no row indices) with the factor levels
+  # of a `.drop = FALSE` grouping added.
+  all_keys <- fixed_keys_of(base)
+  if (is.null(all_keys)) {
+    observed <- push_op(base, ast_summarise(input_node(base), list(), .subset2(base, "groups"), retained_groups))
+    keys_schema <- group_keys_schema(base)
+    gd <- group_keys_frame(.subset2(observed, "ptr"), keys_schema)
+    n_observed <- nrow(gd)
+    groups <- .subset2(base, "groups")
+    lv <- keys_schema$factor_levels
+    # one factor key: its levels, plus NA where NA is observed
+    n_all <- if (length(groups) == 1L && !is.null(lv[[groups]])) length(lv[[groups]]) + anyNA(gd[[1L]])
+    if (is.null(n_all) || n_observed != n_all) {
+      gd$.rows <- vctrs::new_list_of(rep(list(integer()), n_observed), ptype = integer())
+      all_keys <- slice_group_keys_of(expand_dropped_groups(gd, groups, lv))
+      n_all <- nrow(all_keys)
+    }
+    if (n_observed == n_all) {
+      # no group is empty: the observed summarise is the answer
+      if (was_lazy) observed$exec_mode <- "lazy"
+      return(observed)
+    }
+  }
   keys <- tbl_gpu(strip_frame_attrs(tibble::as_tibble(all_keys)), lazy = FALSE)
   # the keys' constant attributes as dplyr's group data has them (#21): no
   # row-aligned names (a key with them took the CPU route), and none of a
@@ -1026,12 +1048,31 @@ summarise_dots_are_sequential <- function(dots) {
   if (anyDuplicated(nms) > 0) {
     return(TRUE)
   }
+  # (#75) the names assigned so far in an environment, so a call of many dots
+  # (a wide quantile()) doesn't search a growing vector per dot
+  seen <- NULL
+  # (only names an environment can key, names_hashable(); a read name that
+  # can't is never an assigned one, pos_key_ok())
+  if (length(dots) > 16L && names_hashable(nms)) {
+    seen <- new.env(hash = TRUE, parent = emptyenv(), size = 2L * length(nms))
+    assign(nms[[1L]], TRUE, envir = seen)
+  }
   for (i in seq_along(dots)[-1]) {
     expr <- rlang::quo_get_expr(dots[[i]])
-    pn <- expr_data_pronoun_names(expr)
+    # (a `.data[[...]]` read is the only thing the walk looks for)
+    pn <- if (!is.call(expr) || ".data" %in% all.names(expr)) expr_data_pronoun_names(expr) else character()
     # an unresolvable `.data[[k]]` subscript (NA) may name any earlier dot
-    if (anyNA(pn) || any(c(all.vars(expr), pn) %in% nms[seq_len(i - 1)])) {
+    if (anyNA(pn)) {
       return(TRUE)
+    }
+    vars <- c(all.vars(expr), pn)
+    if (is.null(seen)) {
+      if (any(vars %in% nms[seq_len(i - 1)])) return(TRUE)
+    } else {
+      for (v in vars) {
+        if (pos_key_ok(v) && !is.null(seen[[v]])) return(TRUE)
+      }
+      assign(nms[[i]], TRUE, envir = seen)
     }
   }
   FALSE
@@ -1883,10 +1924,12 @@ summarise_quantile_names_reason <- function(dots) {
 # quantile()/nth()-specific handling at all past this point.
 #
 # @param quo A quosure, one summarise() dot (post `extract_na_rm()`)
+# @param schema The input's schema: a shape argument that reads one of its
+#   columns is dplyr's (NULL: not checked)
 # @return `list(quo = <possibly rewritten quosure>, extra = <numeric
 #   scalar, NA_real_ if not applicable>)`
 # @keywords internal
-extract_agg_shape_param <- function(quo) {
+extract_agg_shape_param <- function(quo, schema = NULL) {
   expr <- rlang::quo_get_expr(quo)
   env <- rlang::quo_get_env(quo)
 
@@ -1904,7 +1947,7 @@ extract_agg_shape_param <- function(quo) {
   fn_name <- as.character(head)
 
   if (identical(fn_name, "quantile")) {
-    return(extract_quantile_probs(expr, env, quo))
+    return(extract_quantile_probs(expr, env, quo, schema))
   }
   if (identical(fn_name, "nth")) {
     return(extract_nth_position(expr, env, quo))
@@ -1919,25 +1962,38 @@ extract_agg_shape_param <- function(quo) {
 # Only a SINGLE probability is supported (scratchpad/todo.md's explicit
 # scope cut for this wave): `probs=` must evaluate to one value in `[0,
 # 1]`. `type=` (R's own quantile "algorithm" selector, default `7`) is
-# validated but never threaded through -- cuplyr always computes cudf's
-# `interpolation::LINEAR`, which is bit-for-bit R's own default `type = 7`
-# for a plain (non-discrete) sample (verified empirically, see
-# `gpu_summarise()`'s own docs and `test-dplyr-summarise.R`) -- so a
-# `type=` OTHER than `7` is rejected outright (no silent divergence)
-# rather than silently computing the wrong thing. `names=`/`digits=` only
+# validated but never threaded through -- cuplyr computes R's own default
+# `type = 7` (the order statistics and R's own interpolation arithmetic,
+# `type7()` in `src/ops_groupby.cpp`) -- so a `type=` OTHER than `7` is
+# rejected outright (no silent divergence) rather than silently computing the
+# wrong thing. `names=`/`digits=` only
 # affect the OUTPUT NAME's label/rounding in real R (never the value
 # itself), so both are accepted and ignored.
 #
 # @keywords internal
-extract_quantile_probs <- function(expr, env, quo) {
-  proto <- function(x, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = FALSE,
-                     names = TRUE, type = 7, digits = 7) NULL
-  present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
-  if (is.null(present)) {
-    stop("Invalid quantile() call in aggregation expression: ",
-         rlang::quo_text(quo), call. = FALSE)
+extract_quantile_probs <- function(expr, env, quo, schema = NULL) {
+  # (#75) `quantile(x, <number>)`, the shape a wide quantile() expands to, is
+  # matched by position: no call_match(), and a literal probability needs no
+  # evaluation.
+  # (reframe() writes `quantile(x, probs = p, names = FALSE)`, na.rm taken, by
+  # position too)
+  plain <- length(expr) == 3L && is.null(names(expr))
+  no_names <- !plain && length(expr) == 4L && identical(names(expr), c("", "", "probs", "names")) &&
+    identical(expr[[4L]], FALSE)
+  if (plain) {
+    present_args <- list(x = expr[[2L]], probs = expr[[3L]])
+  } else if (no_names) {
+    present_args <- list(x = expr[[2L]], probs = expr[[3L]], names = FALSE)
+  } else {
+    proto <- function(x, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = FALSE,
+                       names = TRUE, type = 7, digits = 7) NULL
+    present <- tryCatch(rlang::call_match(expr, proto, defaults = FALSE), error = function(e) NULL)
+    if (is.null(present)) {
+      stop("Invalid quantile() call in aggregation expression: ",
+           rlang::quo_text(quo), call. = FALSE)
+    }
+    present_args <- as.list(present)[-1]
   }
-  present_args <- as.list(present)[-1]
 
   if (is.null(present_args$x)) {
     stop("quantile() requires an `x` argument: ", rlang::quo_text(quo), call. = FALSE)
@@ -1947,6 +2003,17 @@ extract_quantile_probs <- function(expr, env, quo) {
   if (!is.null(present_args[["na.rm"]])) {
     stop("summarise()'s quantile() takes na.rm only by its full name: ",
          rlang::quo_text(quo), call. = FALSE)
+  }
+  # (#75) `probs`, `names`, `digits` and `type` are evaluated here, outside the
+  # data mask: one that reads a column (`quantile(x, p)` with a column `p`) is
+  # dplyr's to evaluate, per group, in the mask.
+  if (!is.null(schema)) {
+    for (a in present_args[c("probs", "names", "type", "digits")]) {
+      if (is.language(a) && expr_has_column_ref(a, schema)) {
+        stop("summarise()'s quantile() takes no column in `probs`, `names`, `digits` or `type`: ",
+             rlang::quo_text(quo), call. = FALSE)
+      }
+    }
   }
 
   if (!is.null(present_args$type)) {
@@ -1962,7 +2029,12 @@ extract_quantile_probs <- function(expr, env, quo) {
     stop("summarise()'s quantile() requires a single `probs` value: ",
          rlang::quo_text(quo), call. = FALSE)
   }
-  probs_val <- ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(present_args$probs, env)))$value
+  probs_val <- if ((plain || no_names) && is.double(present_args$probs) && length(present_args$probs) == 1L &&
+                   is.null(attributes(present_args$probs))) {
+    present_args$probs
+  } else {
+    ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(present_args$probs, env)))$value
+  }
   ir_check_timespan_lit(probs_val)  # F48: a Period/Duration `probs`: CPU
   if (is.null(probs_val) || !is.numeric(probs_val) || inherits(probs_val, "integer64") ||
       length(probs_val) != 1 || is.na(probs_val) || probs_val < 0 || probs_val > 1) {
@@ -1974,6 +2046,7 @@ extract_quantile_probs <- function(expr, env, quo) {
   # `names`/`digits` that isn't a plain value is dplyr's to evaluate.
   qnames <- NULL
   names_val <- if (is.null(present_args$names)) TRUE else
+    if (is.logical(present_args$names) && length(present_args$names) == 1L) present_args$names else
     ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(present_args$names, env)))$value
   digits_val <- if (is.null(present_args$digits)) 7 else
     ir_fold_eval(rlang::eval_tidy(rlang::new_quosure(present_args$digits, env)))$value
@@ -1983,7 +2056,22 @@ extract_quantile_probs <- function(expr, env, quo) {
          rlang::quo_text(quo), call. = FALSE)
   }
   if (isTRUE(names_val)) {
-    qnames <- names(stats::quantile(0, probs_val, digits = digits_val))
+    # quantile()'s own label, worked out on every call (it follows
+    # getOption("OutDec"), so none is kept). With the default digits it is
+    # stats:::format_perc() of one probability, written out; a given `digits`
+    # goes through quantile() itself, whose checks (`digits >= 1`) then raise
+    # the error that sends the call to dplyr, which raises its own; so does a
+    # warning (`digits` past 50), which dplyr then gives.
+    qnames <- if (is.null(present_args$digits)) {
+      paste0(formatC(100 * probs_val, format = "fg", width = 1, digits = 7), "%")
+    } else {
+      names(withCallingHandlers(
+        stats::quantile(0, probs_val, digits = digits_val),
+        warning = function(w) {
+          stop("summarise()'s quantile() label warns: ", rlang::quo_text(quo), call. = FALSE)
+        }
+      ))
+    }
   }
 
   list(
@@ -2182,7 +2270,7 @@ agg_dot_parts <- function(ir_cache, i, dot, schema) {
   if (is.null(stripped)) {
     return(NULL)
   }
-  shaped <- extract_agg_shape_param(stripped$quo)
+  shaped <- extract_agg_shape_param(stripped$quo, schema)
   parts <- list(quo = shaped$quo, na_rm = stripped$na_rm, extra = shaped$extra,
                 qnames = shaped$qnames)
   if (!is.null(ir_cache)) {

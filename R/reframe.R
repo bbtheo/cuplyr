@@ -291,9 +291,9 @@ reframe_lgl_literal <- function(expr) {
 
 # Internal: the arguments of `quantile(x, probs, na.rm, names, type)` when the
 # call is one the rewrite is exact for, else NULL: `x`, the probabilities (a
-# column-free constant in [0, 1], no NA), a literal `na.rm`, an ignorable
-# `names`, `type` absent or 7 (cudf's LINEAR is R's type 7).
-# @return `list(x, probs, na_rm)` or NULL
+# column-free constant in [0, 1], no NA), a literal `na.rm`, a literal
+# `names` (a single probability keeps its label), `type` absent or 7.
+# @return `list(x, probs, na_rm, names)` or NULL
 # @keywords internal
 reframe_parse_quantile <- function(expr, env, col_names) {
   proto <- function(x, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = FALSE,
@@ -330,7 +330,8 @@ reframe_parse_quantile <- function(expr, env, col_names) {
   if (is.null(probs) || !is.numeric(probs) || anyNA(probs) || any(probs < 0 | probs > 1)) {
     return(NULL)
   }
-  list(x = args[["x"]], probs = as.double(probs), na_rm = na_rm)
+  names <- if (is.null(args[["names"]])) TRUE else reframe_lgl_literal(args[["names"]])
+  list(x = args[["x"]], probs = as.double(probs), na_rm = na_rm, names = names)
 }
 
 # Internal: the argument of `range(x, na.rm =)` (one data argument, `finite=`
@@ -416,7 +417,7 @@ reframe_agg_parts <- function(expr, env, verified) {
   }
   nms <- names(args) %||% rep("", length(args))
   named <- nms[nzchar(nms)]
-  allowed <- c("na.rm", if (identical(fn, "quantile")) "probs")
+  allowed <- c("na.rm", if (identical(fn, "quantile")) c("probs", "names"))
   if (sum(!nzchar(nms)) != 1L || anyDuplicated(named) > 0L || !all(named %in% allowed)) {
     return(NULL)
   }
@@ -426,6 +427,9 @@ reframe_agg_parts <- function(expr, env, verified) {
   if (identical(fn, "quantile")) {
     p <- args[["probs"]]
     if (!is.numeric(p) || length(p) != 1L || is.na(p) || p < 0 || p > 1) {
+      return(NULL)
+    }
+    if ("names" %in% named && !identical(args[["names"]], FALSE)) {
       return(NULL)
     }
   }
@@ -710,8 +714,16 @@ reframe_native_plan <- function(dots, schema) {
       if (is.null(parsed)) {
         return(no(i, "`quantile()` is on the GPU only with constant `probs`, a literal `na.rm` and `type = 7`."))
       }
+      # One probability keeps quantile()'s name (`names =` as given): the wide
+      # summarise can be the answer, with it. Two or more lose theirs in the
+      # reshape (see above), so their labels are not worked out (names = FALSE).
+      no_names <- length(parsed$probs) > 1L || isFALSE(parsed$names)
       calls <- lapply(parsed$probs, function(p) {
-        rlang::call2("quantile", parsed$x, probs = p, na.rm = parsed$na_rm)
+        if (no_names) {
+          rlang::call2("quantile", parsed$x, probs = p, na.rm = parsed$na_rm, names = FALSE)
+        } else {
+          rlang::call2("quantile", parsed$x, probs = p, na.rm = parsed$na_rm)
+        }
       })
     } else if (is_range) {
       parsed <- reframe_parse_range(expr)

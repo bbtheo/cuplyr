@@ -780,3 +780,73 @@ test_that("perf: topk_slice_min_grouped_eager", {
       collect()
   }, calibration = "kernel")
 })
+
+# #75: round(x, 2): the R-exact rule's arithmetic on the device, x of perf_big_df
+test_that("perf: round_digits_eager", {
+  skip_if_no_gpu()
+  gpu_df <- tbl_gpu(perf_big_df, lazy = FALSE)
+
+  expect_no_perf_regression("round_digits_eager", function() {
+    out <- dplyr::mutate(gpu_df, r = round(x, 2))
+    gpu_sync()
+    out
+  }, calibration = "kernel")
+})
+
+# #75: summarise() with no expressions on a `.drop = FALSE` factor grouping with
+# no empty group (keys only, no row indices)
+perf_drop_false_df <- local({
+  set.seed(20261125)
+  n <- 1e6
+  data.frame(f = factor(sample(letters, n, replace = TRUE), levels = letters), x = runif(n))
+})
+
+test_that("perf: summarise_zero_dots_drop_false_eager", {
+  skip_if_no_gpu()
+  withr::local_options(dplyr.summarise.inform = FALSE)
+  gpu_df <- dplyr::group_by(tbl_gpu(perf_drop_false_df, lazy = FALSE), f, .drop = FALSE)
+
+  expect_no_perf_regression("summarise_zero_dots_drop_false_eager", function() {
+    out <- dplyr::summarise(gpu_df)
+    gpu_sync()
+    out
+  }, calibration = "kernel")
+})
+
+# #75: a few hundred chained expressions in one mutate() (the cost per dot must
+# not grow with the number of dots)
+test_that("perf: mutate_many_exprs_eager", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  set.seed(20261126)
+  gpu_df <- tbl_gpu(data.frame(x = runif(1e3), y = runif(1e3)), lazy = FALSE)
+  k <- 400L
+  dots <- lapply(seq_len(k), function(i) {
+    if (i == 1L) rlang::expr(x * 2 + y) else rlang::expr(!!rlang::sym(paste0("v", i - 1L)) + x * !!i)
+  })
+  names(dots) <- paste0("v", seq_len(k))
+
+  expect_no_perf_regression("mutate_many_exprs_eager", function() {
+    out <- dplyr::mutate(gpu_df, !!!dots)
+    gpu_sync()
+    out
+  }, calibration = "kernel")
+})
+
+# #75: 101 quantile() probabilities over 1e4 groups in one reframe()
+test_that("perf: quantile_many_probs_grouped_eager", {
+  skip_if_no_gpu()
+  withr::local_options(cuplyr.fallback = "error")
+  set.seed(20261127)
+  n <- 1e6
+  gpu_df <- dplyr::group_by(
+    tbl_gpu(data.frame(k = sample.int(1e4, n, replace = TRUE), x = runif(n)), lazy = FALSE), k
+  )
+  probs <- seq(0, 1, by = 0.01)
+
+  expect_no_perf_regression("quantile_many_probs_grouped_eager", function() {
+    out <- dplyr::reframe(gpu_df, q = quantile(x, probs))
+    gpu_sync()
+    out
+  }, calibration = "kernel")
+})
