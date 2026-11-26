@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{ir_parse_value_match_clauses}
 \alias{ir_parse_value_match_clauses}
-\title{Shared clause-parsing helper for case_match()/recode_values() (Phase 4 wave 2)}
+\title{Shared clause-parsing helper for case_match()/recode_values()}
 \usage{
 ir_parse_value_match_clauses(expr, env, schema, default_key)
 }
@@ -14,7 +14,7 @@ ir_parse_value_match_clauses(expr, env, schema, default_key)
 \item{schema}{List with \code{names}/\code{types}}
 
 \item{default_key}{\code{".default"} (case_match) or \code{"default"}
-(recode_values) -- the one named control argument this wave supports}
+(recode_values) -- the one named control argument supported}
 }
 \value{
 An \code{ir_call("case_when", ...)} node, or \code{NULL} if unsupported
@@ -27,15 +27,15 @@ semantics) and hands the interleaved cond/value list to \code{ir_call( "case_whe
 IR level, indistinguishable from case_when() once desugared this way.
 }
 \details{
-Only the two-sided-formula clause interface is implemented this wave:
+Only the two-sided-formula clause interface is supported:
 recode_values()'s \verb{from=}/\verb{to=}/\verb{unmatched=}/\verb{ptype=} vector-lookup-table
-interface, and case_match()'s \verb{.ptype=}, are NOT implemented -- ANY named
+interface, and case_match()'s \verb{.ptype=}, are NOT supported -- ANY named
 argument other than \code{default_key} present in the call makes this return
 \code{NULL} (caller falls back).
 
 A clause's LHS ("old value(s)") must resolve to a literal (a constant, a
 \code{c(...)} vector, or an environment lookup) -- an LHS referencing a column
-is unsupported this wave (mirrors \code{\%in\%}'s own RHS restriction, since
+is unsupported (mirrors \code{\%in\%}'s own RHS restriction, since
 that's exactly the op this desugars into). A STRING-vs-non-STRING type
 mismatch between \code{x} and a clause's LHS is diagnosed here (mirroring
 \code{na_if()}'s own STRING compatibility check) rather than surfacing as a

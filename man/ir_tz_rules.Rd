@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{ir_tz_rules}
 \alias{ir_tz_rules}
-\title{How each POSIXct-valued op gets its zone (F32)}
+\title{How each POSIXct-valued op gets its zone}
 \format{
 A named list of op names per rule
 }
@@ -19,16 +19,16 @@ absent, UTC and New York operands:
 \code{x}'s type (\code{vec_cast(y, x)}), so it has \code{x}'s zone (absent becomes
 \code{""}): \code{na_if()}, \code{replace_when()} (also \code{replace_values()}), \code{lag()}/
 \code{lead()} (with \verb{default = }), \code{first()}/\code{last()}/\code{nth()}, \code{min()}/
-\code{max()}, \code{mean()}/\code{median()} (F41), and cuplyr's \code{roll_min()}/\code{roll_max()}.
+\code{max()}, \code{mean()}/\code{median()}, and cuplyr's \code{roll_min()}/\code{roll_max()}.
 \item \code{common}: vctrs' common type of the value operands in order
 (\code{\link[=tz_fold]{tz_fold()}}), then absent becomes \code{""}: \code{if_else()} (true, false,
 missing), \code{case_when()} (values in order, then \code{.default}),
 \code{coalesce()}.
 \item \code{as_posixct}: a POSIXct keeps its zone as is, a Date becomes UTC
 midnight (R's \code{as.POSIXct.Date}).
-\item \code{shift} (F46): \code{ts_add_us}/\code{ts_sub_us} keep \code{x}'s zone attribute as is
+\item \code{shift}: \code{ts_add_us}/\code{ts_sub_us} keep \code{x}'s zone attribute as is
 (an absent one stays absent).
-\item \code{round_date} (F46): \code{round_date()} of a local or absent zone returns the
+\item \code{round_date}: \code{round_date()} of a local or absent zone returns the
 session zone's name; floor_date()/ceiling_date() (in \code{x}) keep \code{""}.
 }
 

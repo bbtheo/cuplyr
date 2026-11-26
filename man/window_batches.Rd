@@ -17,10 +17,10 @@ indices into \code{exprs} forming one batch, in order; \code{list()} if \code{ex
 is empty
 }
 \description{
-Pure index-partitioning: implements section 1.2's chunking rule in
-isolation from \code{\link[=plan_window_stages]{plan_window_stages()}}'s own stage-building loop, so a
+Pure index-partitioning: implements the chunking rule below in
+isolation from \code{plan_window_stages()}'s own stage-building loop, so a
 verb's own AST-emission wiring (\code{R/mutate.R}'s \code{mutate_window()}, and the
-analogous \code{R/filter.R}/\code{R/slice.R} wiring from W5/W6/W7 onward) can drive
+analogous wiring in \code{R/filter.R}/\code{R/slice.R}) can drive
 \code{\link[=decompose_window_group]{decompose_window_group()}} batch-by-batch itself -- interleaving each
 batch's own materializing verb node between batches, which
 \code{\link[=plan_window_stages]{plan_window_stages()}}'s single flat call cannot do (see that function's

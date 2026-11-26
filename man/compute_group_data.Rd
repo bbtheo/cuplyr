@@ -31,9 +31,8 @@ rather than duplicating it), and \code{.rows} is sliced out of the returned
 post-hoc R-side expansion over the (small, group-count-sized) result --
 never over the underlying GPU data -- via \code{expand_dropped_groups()}.
 
-Not cached across calls (each call re-runs the GPU query): correctness
-first, per this task's own scope -- see scratchpad/workflow_state.md's
-Phase 9 kickoff note. The query itself is already a single GPU groupby,
-so repeated calls are cheap relative to any actual aggregation.
+Not cached across calls (each call re-runs the GPU query). The query
+itself is a single GPU groupby, so repeated calls are cheap relative to
+any actual aggregation.
 }
 \keyword{internal}

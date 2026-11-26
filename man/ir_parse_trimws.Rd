@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{ir_parse_trimws}
 \alias{ir_parse_trimws}
-\title{Parse \code{trimws(x, which = "both", whitespace = "[ \\\\t\\\\r\\\\n]")} (Phase 11 L5)}
+\title{Parse \code{trimws(x, which = "both", whitespace = "[ \\\\t\\\\r\\\\n]")}}
 \usage{
 ir_parse_trimws(expr, env, schema)
 }

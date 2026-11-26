@@ -13,8 +13,8 @@
 #' Infer a node's output schema, INCLUDING `factor_levels`
 #'
 #' `infer_schema()` (R/ast.R) computes `names`/`types` recursively via each
-#' node type's own S3 method, but only `infer_schema.ast_join` (Phase 11 L2,
-#' Bug 1) threads `factor_levels` through on its own -- every other node
+#' node type's own S3 method, but only `infer_schema.ast_join` threads
+#' `factor_levels` through on its own -- every other node
 #' type (filter/mutate/select/arrange/summarise/distinct/slice/rename/
 #' window/barrier) relies entirely on `push_op()`'s separate
 #' `propagate_factor_levels()` step, which only ever ran at op-construction
@@ -214,8 +214,7 @@ node_is_position_safe <- function(node) {
 #'
 #' - lazy + pending ops: returns `.data$lazy_ops` as-is.
 #' - lazy + no pending ops: returns a fresh `ast_source(.data$schema)`,
-#'   matching the historical lazy-verb convention (e.g. the now-deleted
-#'   `filter_lazy()`, `select_lazy()`) of leaving the source pointer unset; `compute()`/
+#'   leaving the source pointer unset; `compute()`/
 #'   `collect()` supply `.data$ptr` as the lowering fallback `source_ptr`. A table
 #'   that is the result of a CPU step (`.data$origin`, #10) hands its history to
 #'   the source, for `explain()`.
@@ -326,11 +325,10 @@ levels_from_positions <- function(names, by_pos) {
 
 #' Restrict factor level metadata to columns that survive an op
 #'
-#' Implements the factor_levels half of D3: `schema$factor_levels` is
-#' always recomputed from the *input* schema's factor_levels, filtered to
-#' the names present in the node's output schema. This fixes the bug where
-#' eager `select()` of a factor column dropped `factor_levels`, causing
-#' `collect()` to return integer codes instead of a factor.
+#' `schema$factor_levels` is always recomputed from the *input* schema's
+#' factor_levels, filtered to the names present in the node's output schema.
+#' So an eager `select()` of a factor column keeps its `factor_levels`, and
+#' `collect()` returns a factor rather than integer codes.
 #'
 #' @param node The AST node being applied (used to translate factor_levels
 #'   keys through a `rename` node's name map, see `ast_rename()`,
@@ -418,7 +416,7 @@ names_need_position <- function(nms) {
 #'
 #' A `join` keeps `x`'s groups that survive in its output (`push_join()`
 #' computes that itself; this branch is only the defensive default). `summarise`
-#' yields whatever `node$result_groups` says (Phase 6, task 3 -- computed by
+#' yields whatever `node$result_groups` says (computed by
 #' `resolve_summarise_groups()`, R/summarise.R, from the node's `.groups=`
 #' semantics; `character()` for `.groups = "drop"`/an ungrouped input, all
 #' pre-summarise groups for `"keep"`, all-but-the-last for the default/
@@ -574,10 +572,10 @@ infer_push_schema <- function(node, input_schema, base) {
 
 #' Apply an AST node to a tbl_gpu, dispatching on exec_mode
 #'
-#' The only exec_mode branch point (D1). Lazy mode stores `node` as the new
+#' The only exec_mode branch point. Lazy mode stores `node` as the new
 #' `$lazy_ops` and does no GPU work; eager mode lowers and executes `node`
 #' immediately. Both modes uniformly compute `schema` from `input_schema` alone
-#' (via `infer_schema_from()`, with factor_levels reattached per D3) and `groups` (via
+#' (via `infer_schema_from()`, with factor_levels reattached) and `groups` (via
 #' `propagate_groups()`).
 #'
 #' @param .data A `tbl_gpu` object
@@ -806,14 +804,14 @@ join_check_reads_data <- function(unmatched, relationship) {
 
 #' Apply a two-input join AST node, dispatching on exec_mode
 #'
-#' The join analogue of `push_op()` (D1). Joins can't reuse `push_op()`
+#' The join analogue of `push_op()`. Joins can't reuse `push_op()`
 #' as-is because it is built around a single `.data` input: it reads exactly
 #' one `exec_mode`/`ptr`/`schema` to decide the schedule. A join has two
 #' independent inputs (`x`/`y`) whose *either* side being lazy forces the
 #' whole join lazy (mirroring the pre-unification behavior), and whose eager
 #' execution needs both sides' pointers anchored -- see `join_input_node()`.
 #'
-#' Groups (F06): every dplyr join ends with `dplyr_reconstruct(out, x)`, so
+#' Groups: every dplyr join ends with `dplyr_reconstruct(out, x)`, so
 #' for EVERY join type the result is grouped by `intersect(x$groups,
 #' names(out))` and keeps `x`'s `.drop` setting (`x$group_drop`); `y`'s
 #' grouping is irrelevant. A group column that gets suffixed away (a name
@@ -1034,14 +1032,12 @@ push_join_zero_column <- function(join_type, x, y, join_spec, suffix, keep, na_m
 
 #' Auto-name unnamed dots, warning as dplyr's verbs do
 #'
-#' `mutate()` and `summarise()` both accept unnamed expressions (e.g.
+#' Verbs such as `mutate()` and `summarise()` accept unnamed expressions (e.g.
 #' `mutate(mpg * 2)`) and, matching dplyr, fall back to the expression's
 #' deparsed text as the output column name -- while warning that an explicit
-#' name would be clearer. Historically this logic was duplicated verbatim
-#' inside both `mutate.tbl_gpu()` (twice -- once for its since-deleted eager
-#' path, once for its since-deleted lazy path) and `summarise_lazy()` (now
-#' also deleted); this is the single shared implementation, parameterized by
-#' `verb` so each caller's warning names itself correctly.
+#' name would be clearer. This is the single shared implementation for
+#' `mutate()` and `summarise()`, parameterized by `verb` so each caller's
+#' warning names itself correctly.
 #'
 #' @param dots A list of quosures, as returned by `rlang::enquos(...)`
 #' @param verb Character, the verb name to use in the warning text (e.g.
@@ -1168,9 +1164,8 @@ variable_reference_names <- function(dots, schema, distinct, call = rlang::calle
 
 #' Resolve a verb's `.by=`/`by=` quosure into group column names
 #'
-#' Implements `scratchpad/phase5_window_design.md` section 6: the shared
-#' resolution logic for on-the-fly grouping across `mutate()`/`filter()`
-#' (and, from task W7 onward, the `slice()` family). `.by=`/`by=` is
+#' The shared resolution logic for on-the-fly grouping across
+#' `mutate()`/`filter()` and the `slice()` family. `.by=`/`by=` is
 #' mutually exclusive with an already-grouped `.data` -- verified
 #' empirically against dplyr 1.2.1, both `mutate()` and `filter()` raise
 #' the identical message below verbatim (including the backticks) when
@@ -1178,7 +1173,7 @@ variable_reference_names <- function(dots, schema, distinct, call = rlang::calle
 #'
 #' @param .data A `tbl_gpu` object
 #' @param by_quo A quosure for the verb's `.by=`/`by=` argument, as
-#'   returned by `rlang::enquo(.by)` -- NOT yet evaluated
+#'   returned by `rlang::enquo(.by)` -- NOT evaluated
 #' @param arg_name Character scalar, the argument's name as written in the
 #'   verb's own signature (`".by"` for `mutate()`/`filter()`/`slice()`,
 #'   `"by"` for the `slice_*()` family) -- interpolated into the

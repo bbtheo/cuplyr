@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{ir_parse_sub_gsub}
 \alias{ir_parse_sub_gsub}
-\title{Parse \code{sub(pattern, replacement, x, ignore.case=, perl=, fixed=, useBytes=)} / \code{gsub(...)} (Phase 11 L5)}
+\title{Parse \code{sub(pattern, replacement, x, ignore.case=, perl=, fixed=, useBytes=)} / \code{gsub(...)}}
 \usage{
 ir_parse_sub_gsub(expr, env, schema, fn_name)
 }

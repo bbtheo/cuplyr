@@ -21,27 +21,25 @@ factored out so \code{mutate()}'s window wiring (\code{R/mutate.R},
 user-facing shape) must fall back to \code{gpu_fallback()} cleanly, never
 surface \code{validate_window_spec()}'s internal-error text to a user, and
 never partially push GPU ops before discovering the need to fall back
-(see \code{scratchpad/phase5_window_design.md} section 1.3's "Never
-half-lower").
+(never half-lower).
 }
 \details{
-As of Phase 5 task W4, every window \code{fn} with a registry \code{window} entry
-is lowerable (\code{"shift"}, \code{"rank"}, \code{"scan"}, and \code{"agg"} kinds all have
-C++ support in \code{gpu_window()}) -- this predicate now only guards against
+Every window \code{fn} with a registry \code{window} entry is lowerable (\code{"shift"},
+\code{"rank"}, \code{"scan"}, and \code{"agg"} kinds all have C++ support in
+\code{gpu_window()}) -- this predicate only guards against
 an \code{fn} with NO registry entry at all, or a registry entry whose
 \code{window} field is \code{NULL} (not a window-class op), which should be
 unreachable in practice (nothing in \code{R/window.R}'s decomposition
 machinery can produce such a spec) but is checked defensively so a
 bug surfaces as a clear internal error instead of silently mis-executing.
 
-The rolling-window task (scratchpad/todo.md) adds a sixth kind,
-\code{"rolling"}, lowerable for every \code{fn} EXCEPT \code{"roll_median"}: cudf
-libcudf's (checked on 26.10) \code{rolling_window()}/\code{grouped_rolling_window()} have no MEDIAN
-aggregation instantiation at all in this environment (verified via \verb{nm -DC libcudf.so}, see the file-level comment above
+The \code{"rolling"} kind is lowerable for every \code{fn} EXCEPT \code{"roll_median"}:
+libcudf's (checked on 26.10) \code{rolling_window()}/\code{grouped_rolling_window()}
+have no MEDIAN aggregation instantiation at all in this environment (verified via \verb{nm -DC libcudf.so}, see the file-level comment above
 \code{ir_parse_roll_call()}, R/ir.R) -- a genuine cudf capability gap, not a
 cuplyr bug, so \code{roll_median()}/\code{data.table::frollmedian()} mutate()
 calls route through \code{mutate_window_fallback()} exactly like the
-not-yet-implemented-kind case below, needing \code{R/roll.R}'s real
+an unsupported-kind case below, needing \code{R/roll.R}'s real
 \code{roll_median()} R function to make that CPU re-run work.
 }
 \keyword{internal}

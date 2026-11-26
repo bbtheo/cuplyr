@@ -16,7 +16,7 @@ ir_lit_from_r(value, allow_vector = FALSE)
 A \code{cuplyr_ir_lit} node
 }
 \description{
-Implements the length/NA rules from section 1.2: a bare, untyped \code{NA}
+Length/NA rules: a bare, untyped \code{NA}
 (the logical \code{NA} constant) becomes \code{na = TRUE} with \code{type = NULL}
 (adopts the sibling operand's type later; \code{\link[=ir_infer_type]{ir_infer_type()}} defaults it
 to \code{FLOAT64} when asked in isolation). Any other length-1 atomic value is
@@ -28,10 +28,8 @@ it's a diagnosable user error.
 A length-0 vector is legal in the \code{allow_vector = TRUE} position too:
 \code{x \%in\% numeric(0)} (or \code{character(0)}, etc.) is well-defined, ordinary R
 -- always \code{FALSE}, for every element including \code{NA} -- not a user error,
-so it must not be rejected here (T4 correctness finding: this used to
-\code{stop()} for \emph{any} length-0 vector, \code{allow_vector} or not, which broke
-\verb{filter(x \%in\% <empty vector>)} parity with dplyr; the \code{\%in\%} handler in
+so it must not be rejected here (the \code{\%in\%} handler in
 \code{src/expr_eval.hpp} special-cases an empty/\code{NULL} RHS set to "always
-FALSE" to match).
+FALSE").
 }
 \keyword{internal}

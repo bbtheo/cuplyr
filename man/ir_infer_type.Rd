@@ -16,9 +16,9 @@ GPU type string
 }
 \description{
 Recurses; for arithmetic call nodes this delegates to the existing
-\code{\link[=infer_mutate_output_type]{infer_mutate_output_type()}} unchanged, so D5's rules (and its pinned
-STRING/DICTIONARY32/TIMESTAMP_* error messages) survive verbatim. Every
+\code{\link[=infer_mutate_output_type]{infer_mutate_output_type()}} unchanged, so its rules (and its pinned
+STRING/DICTIONARY32/TIMESTAMP_* error messages) apply verbatim. Every
 other op class is resolved via its \link{ir_call_registry} entry's \code{type}
-function (section 1.3).
+function.
 }
 \keyword{internal}

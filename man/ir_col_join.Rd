@@ -3,7 +3,7 @@
 \name{ir_col_join}
 \alias{ir_col_join}
 \title{Create a side-tagged IR column reference for a non-equi \code{join_by()}
-condition (Phase 7 J7)}
+condition}
 \usage{
 ir_col_join(name, side)
 }

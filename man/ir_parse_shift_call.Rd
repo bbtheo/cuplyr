@@ -14,16 +14,16 @@ non-negative whole-number constant (dplyr itself requires this);
 \code{\link[=ir_eval_constant]{ir_eval_constant()}} with no data mask, so \code{default = -1}, `default = 2L
 \itemize{
 \item 3L\verb{, or any other column-free expression all work (not just a bare literal token), but }default = first(x)` (a real, column-referencing
-dplyr default) is not implemented this wave.
+dplyr default) is not supported.
 }
 }
 \details{
 \verb{order_by=}, when supplied, must resolve via \code{\link[=ir_parse_order_ref]{ir_parse_order_ref()}} (a
 bare column, \code{desc(column)}, or \code{-column}); anything else (a general
-expression) is not implemented this wave and returns \code{NULL} (Phase 5
-W4: \verb{order_by=} re-frames this spec's own frame exactly like
-\code{order_by()}/\code{with_order()} would if wrapped around the same call --
-see \code{\link[=ir_parse_with_order]{ir_parse_with_order()}}'s docs -- so \code{lag(x, order_by = y)} and
-\code{order_by(y, lag(x))} produce the same \code{meta$order_override}).
+expression) is not supported and returns \code{NULL}. \verb{order_by=} re-frames
+this spec's own frame exactly like \code{order_by()}/\code{with_order()} would if
+wrapped around the same call -- see \code{\link[=ir_parse_with_order]{ir_parse_with_order()}}'s docs -- so
+\code{lag(x, order_by = y)} and \code{order_by(y, lag(x))} produce the same
+\code{meta$order_override}.
 }
 \keyword{internal}

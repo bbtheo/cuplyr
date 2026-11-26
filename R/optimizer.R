@@ -92,7 +92,7 @@ keep_unread_mutates <- function(required) {
 #' A plan is optimized one segment at a time: the nodes above a barrier (down
 #' to it), then the barrier, then what is below it as a plan of its own. Each
 #' segment is told what its consumer reads of its output, so the columns a
-#' barrier does not need are pruned below it as well (F99).
+#' barrier does not need are pruned below it as well.
 #'
 #' @param ast Root AST node
 #' @param required Columns the consumer of `ast` reads from its output
@@ -309,7 +309,7 @@ segment_stub_requirement <- function(segment) {
 #' @param required_cols Columns required by whatever consumes this
 #'   segment's output (`NULL` means all of `ast`'s own output columns)
 #' @param keep_mutates `TRUE` when `required_cols` is a barrier's narrower
-#'   requirement (F99): that pruning removes columns only, so a mutate
+#'   requirement: that pruning removes columns only, so a mutate
 #'   expression nothing reads stays and is computed (it can warn, as in dplyr),
 #'   and `prune_dead_columns()` does not run. Its inputs stay required
 #'   (`push_down_projections()` keeps them).
@@ -452,7 +452,7 @@ segment_features <- function(ast) {
 #' and is settled like any other. Only output column NAMES are needed, as sets,
 #' so they are built bottom-up without inferring types.
 #'
-#' A narrower `required_cols` (F99: what a barrier above reads) is settled when
+#' A narrower `required_cols` (what a barrier above reads) is settled when
 #' the requirement walked down the chain needs no select above a filter, finds
 #' no dead mutate expression and keeps every source column. One set does for
 #' both passes: a mutate's new outputs, the only names projection pushdown
@@ -1210,8 +1210,7 @@ join_source_predicate <- function(pred, info, side) {
 
 #' Push filters below mutates when predicates do not depend on mutate outputs
 #'
-#' Phase 12 audit -- filter-pushdown-across-`distinct()` (flagged as a known,
-#' unimplemented opportunity back in section 3.1 of the design notes):
+#' Pushing a filter across `distinct()` is deliberately not implemented.
 #' `filter(distinct(df, k), k > 1)` COULD safely push the filter below
 #' `distinct()` when the predicate only references surviving key columns (or,
 #' when `.keep_all = TRUE`, any column at all) -- a predicate that's a pure
@@ -1235,8 +1234,8 @@ join_source_predicate <- function(pred, info, side) {
 #' filter with only-key-column predicates"), not a `push_down_filters()`
 #' switch case -- meaningfully more invasive than the analogous mutate/
 #' select pushdown cases below, and with a real correctness footgun if the
-#' key-vs-non-key-column safety check is ever gotten wrong. Left for a future
-#' phase; the two-line summary above is the reason it isn't attempted now.
+#' key-vs-non-key-column safety check is ever gotten wrong. That risk is why
+#' it isn't attempted.
 #'
 #' @param ast Root AST node
 #' @return AST with filters pushed down across mutates where safe

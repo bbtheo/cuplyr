@@ -44,7 +44,7 @@ an ordinary \code{join_type} join over a constant key (see
 A new \code{tbl_gpu}
 }
 \description{
-The join analogue of \code{push_op()} (D1). Joins can't reuse \code{push_op()}
+The join analogue of \code{push_op()}. Joins can't reuse \code{push_op()}
 as-is because it is built around a single \code{.data} input: it reads exactly
 one \code{exec_mode}/\code{ptr}/\code{schema} to decide the schedule. A join has two
 independent inputs (\code{x}/\code{y}) whose \emph{either} side being lazy forces the
@@ -52,7 +52,7 @@ whole join lazy (mirroring the pre-unification behavior), and whose eager
 execution needs both sides' pointers anchored -- see \code{join_input_node()}.
 }
 \details{
-Groups (F06): every dplyr join ends with \code{dplyr_reconstruct(out, x)}, so
+Groups: every dplyr join ends with \code{dplyr_reconstruct(out, x)}, so
 for EVERY join type the result is grouped by \code{intersect(x$groups, names(out))} and keeps \code{x}'s \code{.drop} setting (\code{x$group_drop}); \code{y}'s
 grouping is irrelevant. A group column that gets suffixed away (a name
 collision, or the key under \code{keep = TRUE}) simply drops out of the

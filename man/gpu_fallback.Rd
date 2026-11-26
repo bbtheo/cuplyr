@@ -31,10 +31,9 @@ returns its result.}
 returned unchanged, never re-uploaded -- for a verb that returns
 metadata \emph{about} the grouping/data rather than a transformed dataset,
 even when that metadata happens to be a small data frame (dplyr's own
-grouping-metadata queries, e.g. \code{group_data()}/\code{group_keys()}, used to
-be implemented this way -- Phase 9 task 1 made them GPU-native instead,
-see R/group-by.R -- but the parameter stays for any future fallback
-verb with the same "always a plain R object" shape).}
+grouping-metadata queries, e.g. \code{group_data()}/\code{group_keys()}, are
+GPU-native and don't use it, see R/group-by.R; the parameter is for any
+fallback verb with the same "always a plain R object" shape).}
 
 \item{detail}{Older spelling of \code{reason}.}
 
@@ -68,11 +67,11 @@ returned \code{tbl_gpu} carries those keys as \verb{$fixed_keys} (see
 \code{fixed_keys_of()}); verbs that regroup get none.
 }
 \description{
-The core Phase-2 fallback primitive. Materializes any pending lazy
+The core CPU fallback primitive. Materializes any pending lazy
 operations, collects \code{.data} to a tibble (restoring \code{group_by()} structure
 from \code{.data$groups} so grouped semantics apply on the CPU exactly as they
 would on a real \code{grouped_df}; a rowwise table becomes dplyr's \code{rowwise_df}
-of its rowwise vars, F49), applies \code{expr_fn} (which should call the
+of its rowwise vars), applies \code{expr_fn} (which should call the
 real dplyr verb), and re-uploads the result via \code{\link[=tbl_gpu]{tbl_gpu()}} (a \code{rowwise_df}
 result goes back up as a rowwise table).
 }

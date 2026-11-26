@@ -13,8 +13,8 @@ that produced it -- see \link{ir_call_registry} and \code{ir_op_alias()}, e.g.
 
 \item{args}{List of IR nodes (the call's arguments, already parsed)}
 
-\item{meta}{Forward-compatibility slot for future lowering metadata
-(e.g. window-function args); unused in Phase 1}
+\item{meta}{Slot for lowering metadata (e.g. a window call's \verb{order_by=}
+override, or a \code{case_when} node's \code{n_when})}
 }
 \value{
 A \code{cuplyr_ir_call} node

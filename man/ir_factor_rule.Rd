@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{ir_factor_rule}
 \alias{ir_factor_rule}
-\title{Where may a factor stay on the GPU? (F18's rule, one bottom-up pass)}
+\title{Where may a factor stay on the GPU? (one bottom-up pass)}
 \usage{
 ir_factor_rule(ir, schema)
 }
@@ -25,7 +25,7 @@ the environment). It may stay on the GPU only
 \enumerate{
 \item as a bare column reference (plain copy, key, or sort key on its own);
 \item directly inside \code{is.na()} / \code{n_distinct()};
-\item as the column of F50's \code{factor_codes()}/\code{factor_labels()} (the parse
+\item as the column of \code{factor_codes()}/\code{factor_labels()} (the parse
 hooks turn a label comparison or \code{as.character(f)} into these);
 \item as both operands of \code{==}/\code{!=} when both are factor \emph{columns} with
 identical level vectors (labels, order and \code{ordered} flag); \code{<}/\code{<=}/

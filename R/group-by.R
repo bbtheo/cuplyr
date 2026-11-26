@@ -556,7 +556,7 @@ groups.tbl_gpu <- function(x) {
 #' `tbl_gpu` object, and the generic's own `tbl_vars.default` doesn't apply
 #' since `tbl_gpu` isn't a data.frame subclass).
 #'
-#' `dplyr::tbl_nongroup_vars()` (Phase 9, task 1) is a plain, non-generic
+#' `dplyr::tbl_nongroup_vars()` is a plain, non-generic
 #' function defined purely in terms of `setdiff(tbl_vars(x),
 #' group_vars(x))` -- it works transparently for `tbl_gpu` via this method
 #' plus `group_vars.tbl_gpu()`, with no `tbl_gpu`-specific code of its own.
@@ -706,10 +706,9 @@ group_trim.tbl_gpu <- function(.tbl, .drop = dplyr::group_by_drop_default(.tbl))
 #' post-hoc R-side expansion over the (small, group-count-sized) result --
 #' never over the underlying GPU data -- via `expand_dropped_groups()`.
 #'
-#' Not cached across calls (each call re-runs the GPU query): correctness
-#' first, per this task's own scope -- see scratchpad/workflow_state.md's
-#' Phase 9 kickoff note. The query itself is already a single GPU groupby,
-#' so repeated calls are cheap relative to any actual aggregation.
+#' Not cached across calls (each call re-runs the GPU query). The query
+#' itself is a single GPU groupby, so repeated calls are cheap relative to
+#' any actual aggregation.
 #'
 #' @param .data A `tbl_gpu` object
 #' @return A tibble: grouping columns (if grouped) plus a `.rows` list-of
@@ -988,7 +987,7 @@ expand_dropped_groups <- function(gd, group_names, factor_levels) {
 #' *grouping structure* dplyr's own `grouped_df` carries as an attribute --
 #' `cuplyr` computes it on demand via one native GPU groupby instead
 #' (`compute_group_data()`, above), since `tbl_gpu` has no such attribute to
-#' read. All are GPU-native (Phase 9, task 1) -- previously CPU fallbacks.
+#' read. All are GPU-native.
 #'
 #' `group_data()` returns a tibble of the grouping columns (in ascending key
 #' order, `NA` sorted last -- cudf's own default sort-groupby order, which

@@ -24,7 +24,7 @@ the column in dplyr's "Can't recycle" error for an empty table}
 An ast_reframe node
 }
 \description{
-The LONG step of a native \code{reframe()} (F22, \code{R/reframe.R}): reshapes the
+The LONG step of a native \code{reframe()} (\code{R/reframe.R}): reshapes the
 wide one-row-per-group table \code{input} into \code{k} rows per group.
 }
 \keyword{internal}

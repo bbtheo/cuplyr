@@ -47,8 +47,8 @@ ir_lit <- function(value, type, na = FALSE) {
 #'   that produced it -- see [ir_call_registry] and `ir_op_alias()`, e.g.
 #'   `ceiling` normalizes to `ceil`)
 #' @param args List of IR nodes (the call's arguments, already parsed)
-#' @param meta Forward-compatibility slot for future lowering metadata
-#'   (e.g. window-function args); unused in Phase 1
+#' @param meta Slot for lowering metadata (e.g. a window call's `order_by=`
+#'   override, or a `case_when` node's `n_when`)
 #' @return A `cuplyr_ir_call` node
 #' @keywords internal
 ir_call <- function(op, args, meta = list()) {
@@ -86,7 +86,7 @@ ir_vec <- function(value, type, quo, name, loss = NULL) {
 
 #' Build an IR literal node from an already-evaluated R value
 #'
-#' Implements the length/NA rules from section 1.2: a bare, untyped `NA`
+#' Length/NA rules: a bare, untyped `NA`
 #' (the logical `NA` constant) becomes `na = TRUE` with `type = NULL`
 #' (adopts the sibling operand's type later; [ir_infer_type()] defaults it
 #' to `FLOAT64` when asked in isolation). Any other length-1 atomic value is
@@ -97,11 +97,9 @@ ir_vec <- function(value, type, quo, name, loss = NULL) {
 #' A length-0 vector is legal in the `allow_vector = TRUE` position too:
 #' `x %in% numeric(0)` (or `character(0)`, etc.) is well-defined, ordinary R
 #' -- always `FALSE`, for every element including `NA` -- not a user error,
-#' so it must not be rejected here (T4 correctness finding: this used to
-#' `stop()` for *any* length-0 vector, `allow_vector` or not, which broke
-#' `filter(x %in% <empty vector>)` parity with dplyr; the `%in%` handler in
+#' so it must not be rejected here (the `%in%` handler in
 #' `src/expr_eval.hpp` special-cases an empty/`NULL` RHS set to "always
-#' FALSE" to match).
+#' FALSE").
 #'
 #' @param value An R value (atomic length 1, an atomic vector, or `NULL`)
 #' @param allow_vector `TRUE` iff a length != 1 vector is acceptable here
@@ -2437,7 +2435,7 @@ ir_group_scalar_call <- function(node, schema) {
   )
 }
 
-#' Rewrite window calls over one-value-per-group arguments (F123)
+#' Rewrite window calls over one-value-per-group arguments
 #'
 #' Bottom-up over a parsed expression; see the section comment above.
 #' @param ir An IR node that contains a window call
@@ -2456,11 +2454,10 @@ ir_rewrite_group_scalar <- function(ir, schema) {
 
 #' Parse an rlang quosure into cuplyr IR
 #'
-#' Implements the parse rule of section 1.2: columns shadow the
-#' environment; any subtree with no column reference is constant-folded by
-#' evaluating it in the quosure's environment. Returns `NULL` for anything
-#' the IR doesn't (yet) understand -- callers (filter/mutate parsers, from
-#' T3/T5 onward) fall back to the pre-existing CPU-eval or error path.
+#' Columns shadow the environment; any subtree with no column reference is
+#' constant-folded by evaluating it in the quosure's environment. Returns
+#' `NULL` for anything the IR doesn't understand -- callers (filter/mutate
+#' parsers) fall back to the CPU-eval or error path.
 #'
 #' A parse-time type check that fails only because a factor (DICTIONARY32)
 #' operand is involved signals `cuplyr_factor_needs_cpu` (see
@@ -2534,7 +2531,7 @@ ir_parse_quo <- function(quo, schema) {
   ir
 }
 
-#' Parse a `case_when()` call into IR (Phase 4)
+#' Parse a `case_when()` call into IR
 #'
 #' `case_when(cond1 ~ val1, cond2 ~ val2, ..., .default = val)` dots are
 #' two-sided formulas (`~` calls), not ordinary expressions -- so unlike
@@ -2544,7 +2541,7 @@ ir_parse_quo <- function(quo, schema) {
 #' generic per-arg parse loop. Recognizes exactly: any number of two-sided
 #' `cond ~ value` clauses, plus an optional `.default = value` named
 #' argument. Returns `NULL` (unsupported, caller falls back per the normal
-#' contract) for anything else this Phase-4 wave doesn't implement yet:
+#' contract) for anything else, which isn't supported:
 #' `.ptype=`, `.size=`, `.unmatched=`, one-sided formulas, non-formula dots,
 #' or zero clauses.
 #'
@@ -2722,7 +2719,7 @@ ir_value_match_lossy <- function(x_type, lhs_ir) {
   inherits(tryCatch(vctrs::vec_cast(lhs_ir$value, proto), error = identity), "error")
 }
 
-#' Shared clause-parsing helper for case_match()/recode_values() (Phase 4 wave 2)
+#' Shared clause-parsing helper for case_match()/recode_values()
 #'
 #' Both functions share an identical clause shape once "match by value" is
 #' expressed as `%in%`: `f(x, old_values_1 ~ new_value_1, ..., <default_key>
@@ -2732,15 +2729,15 @@ ir_value_match_lossy <- function(x_type, lhs_ir) {
 #' "case_when", ...)` directly -- case_match()/recode_values() are, at the
 #' IR level, indistinguishable from case_when() once desugared this way.
 #'
-#' Only the two-sided-formula clause interface is implemented this wave:
+#' Only the two-sided-formula clause interface is supported:
 #' recode_values()'s `from=`/`to=`/`unmatched=`/`ptype=` vector-lookup-table
-#' interface, and case_match()'s `.ptype=`, are NOT implemented -- ANY named
+#' interface, and case_match()'s `.ptype=`, are NOT supported -- ANY named
 #' argument other than `default_key` present in the call makes this return
 #' `NULL` (caller falls back).
 #'
 #' A clause's LHS ("old value(s)") must resolve to a literal (a constant, a
 #' `c(...)` vector, or an environment lookup) -- an LHS referencing a column
-#' is unsupported this wave (mirrors `%in%`'s own RHS restriction, since
+#' is unsupported (mirrors `%in%`'s own RHS restriction, since
 #' that's exactly the op this desugars into). A STRING-vs-non-STRING type
 #' mismatch between `x` and a clause's LHS is diagnosed here (mirroring
 #' `na_if()`'s own STRING compatibility check) rather than surfacing as a
@@ -2750,7 +2747,7 @@ ir_value_match_lossy <- function(x_type, lhs_ir) {
 #' @param env The quosure's environment
 #' @param schema List with `names`/`types`
 #' @param default_key `".default"` (case_match) or `"default"`
-#'   (recode_values) -- the one named control argument this wave supports
+#'   (recode_values) -- the one named control argument supported
 #' @return An `ir_call("case_when", ...)` node, or `NULL` if unsupported
 #' @keywords internal
 ir_parse_value_match_clauses <- function(expr, env, schema, default_key) {
@@ -2848,7 +2845,7 @@ ir_parse_value_match_clauses <- function(expr, env, schema, default_key) {
 
 #' One scalar `recode()` value, by shape
 #'
-#' Accepts only what the F30 allowlist means to: a length-1, attribute-free
+#' Accepts only what the allowlist admits: a length-1, attribute-free
 #' atomic of typeof character/integer/double/logical (doubles finite or
 #' `NA_real_`; R parses `NA`, `NA_character_`, ... as such constants, so a
 #' symbol is never accepted), or unary `-` on a numeric literal. Nothing is
@@ -2879,7 +2876,7 @@ ir_recode_scalar <- function(a, env, schema) {
 
 #' Parse `dplyr::recode(.x, old = new, ..., .default =, .missing =)`
 #'
-#' A POSITIVE allowlist (F30): anything that doesn't match exactly returns
+#' A POSITIVE allowlist: anything that doesn't match exactly returns
 #' `NULL`, i.e. the CPU fallback, which already reproduces dplyr's results,
 #' warnings and errors. Accepted: head resolving to `dplyr::recode`; `.x` a
 #' bare STRING/INT32/FLOAT64 (non-factor) column; scalar-literal values of one
@@ -2887,9 +2884,9 @@ ir_recode_scalar <- function(a, env, schema) {
 #' int32 for an INT32 `.x`) or positions; no duplicate keys; and, without
 #' `.default`, a value type equal to `.x`'s (otherwise dplyr's data-dependent
 #' "Unreplaced values treated as NA" warning must stay on the CPU). Lowers to
-#' one `recode_lookup(x, keys, values, default, missing)` node (F61: the keys
+#' one `recode_lookup(x, keys, values, default, missing)` node (the keys
 #' and values are two vector literals, one hash lookup on the GPU instead of
-#' a clause per key), every literal explicitly typed. See `features/F30.md`.
+#' a clause per key), every literal explicitly typed.
 #' @keywords internal
 ir_parse_recode <- function(expr, env, schema) {
   head <- expr[[1]]
@@ -3024,8 +3021,7 @@ ir_parse_recode <- function(expr, env, schema) {
 #' See [ir_parse_value_match_clauses()] -- `case_match()` is deprecated in
 #' dplyr 1.2.1 in favor of `recode_values()`/`replace_values()` (verified:
 #' calling it emits a lifecycle warning), but is still exported and
-#' functional, and is explicitly in this wave's scope, so it's implemented
-#' identically to `recode_values()`'s formula interface, just with `.default`
+#' functional, so it's implemented identically to `recode_values()`'s formula interface, just with `.default`
 #' as the named key instead of `default`.
 #'
 #' @keywords internal
@@ -3036,7 +3032,7 @@ ir_parse_case_match <- function(expr, env, schema) {
 #' Parse `recode_values(x, old_values ~ new_value, ..., default=, unmatched=, ptype=)`
 #'
 #' See [ir_parse_value_match_clauses()]. `from=`/`to=`/`unmatched=`/`ptype=`
-#' are not implemented this wave.
+#' are not supported.
 #'
 #' @keywords internal
 ir_parse_recode_values <- function(expr, env, schema) {
@@ -3053,7 +3049,7 @@ ir_parse_recode_values <- function(expr, env, schema) {
 #' above) rather than reusing `case_when`'s node, since case_when's own
 #' common-type-unify rule is wrong here.
 #'
-#' Only the two-sided-formula clause interface is implemented this wave:
+#' Only the two-sided-formula clause interface is supported:
 #' `from=`/`to=` (the vector-lookup-table interface) being present at all
 #' makes this return `NULL` (fall back).
 #'
@@ -3136,7 +3132,7 @@ ir_parse_replace_values <- function(expr, env, schema) {
 #' Lowered via the same dedicated "replace_when" op as
 #' [ir_parse_replace_values()].
 #'
-#' No named arguments are supported this wave (the real `replace_when()`
+#' No named arguments are supported (the real `replace_when()`
 #' signature is just `replace_when(x, ...)` anyway) -- any named dot present
 #' makes this return `NULL` (fall back).
 #'
@@ -3203,8 +3199,8 @@ ir_parse_replace_when <- function(expr, env, schema) {
 #' Fully desugars at parse time into a right-folded chain of the existing
 #' `|`/`&` ops -- no new IR op, registry entry, or C++ handler needed.
 #'
-#' `size=` (only meaningful for the zero-input edge case) is NOT implemented
-#' this wave -- its presence, or zero dots, makes this return `NULL`.
+#' `size=` (only meaningful for the zero-input edge case) is NOT supported
+#' -- its presence, or zero dots, makes this return `NULL`.
 #'
 #' @param fn_name `"when_all"` or `"when_any"`
 #' @keywords internal
@@ -3291,9 +3287,9 @@ ir_parse_when_reduce <- function(expr, env, schema, fn_name) {
 #' error, caught here and reported as "not a constant" (`ok = FALSE`)
 #' rather than propagating -- the same "no data mask" trick
 #' `resolve_slice_dots()` (`R/slice.R`) already relies on to distinguish
-#' plain R values from column references. An integer64 value is `ok = FALSE`
-#' (F96), and so, unevaluated, is a call that reaches the data mask by name
-#' (F79, `expr_reaches_mask()`).
+#' plain R values from column references. An integer64 value is `ok = FALSE`,
+#' and so, unevaluated, is a call that reaches the data mask by name
+#' (`expr_reaches_mask()`).
 #'
 #' @param raw_expr A language object (not a quosure)
 #' @param env The environment to evaluate against
@@ -3359,15 +3355,15 @@ ir_arg_supplied <- function(present_args, name) {
 #' [ir_eval_constant()] with no data mask, so `default = -1`, `default = 2L
 #' + 3L`, or any other column-free expression all work (not just a bare
 #' literal token), but `default = first(x)` (a real, column-referencing
-#' dplyr default) is not implemented this wave.
+#' dplyr default) is not supported.
 #'
 #' `order_by=`, when supplied, must resolve via [ir_parse_order_ref()] (a
 #' bare column, `desc(column)`, or `-column`); anything else (a general
-#' expression) is not implemented this wave and returns `NULL` (Phase 5
-#' W4: `order_by=` re-frames this spec's own frame exactly like
-#' `order_by()`/`with_order()` would if wrapped around the same call --
-#' see [ir_parse_with_order()]'s docs -- so `lag(x, order_by = y)` and
-#' `order_by(y, lag(x))` produce the same `meta$order_override`).
+#' expression) is not supported and returns `NULL`. `order_by=` re-frames
+#' this spec's own frame exactly like `order_by()`/`with_order()` would if
+#' wrapped around the same call -- see [ir_parse_with_order()]'s docs -- so
+#' `lag(x, order_by = y)` and `order_by(y, lag(x))` produce the same
+#' `meta$order_override`.
 #'
 #' @keywords internal
 ir_parse_shift_call <- function(expr, env, schema, fn_name) {
@@ -3443,14 +3439,14 @@ ir_parse_shift_call <- function(expr, env, schema, fn_name) {
 #' Parse `first(x, ...)` / `last(x, ...)` / `nth(x, n, ...)`
 #'
 #' The bare `x` (and, for `nth()`, a constant-integer `n`) shape, plus
-#' `order_by=` (Phase 5 W4: see [ir_parse_order_ref()]/
+#' `order_by=` (see [ir_parse_order_ref()]/
 #' [ir_parse_with_order()] -- `first(x, order_by = y)` re-frames this
 #' spec's frame to be ordered by `y`, matching dplyr's own
 #' "first/last/nth row of the group IN `order_by`'s ORDER, not the
 #' group's current order" semantics, verified empirically against dplyr
 #' 1.2.1). `default=`/`na_rm=` being present at all -- even at their own
-#' default value -- still makes this return `NULL` (not implemented this
-#' wave). Builds a window-class `ir_call(fn_name, list(x_ir), meta =
+#' default value -- still makes this return `NULL` (not supported).
+#' Builds a window-class `ir_call(fn_name, list(x_ir), meta =
 #' list(order_override = ))` node (`nth()` additionally carries `n = <int>`,
 #' the (1-based, possibly negative) element position).
 #'
@@ -3553,9 +3549,8 @@ ir_unwrap_desc <- function(expr) {
 #' `-column` (dplyr's own `desc()` shorthand, also usable directly as an
 #' `arrange()`/`order_by()` sort key) and resolves it against `schema`.
 #' Anything else -- a general expression such as `order_by(a + b, ...)` --
-#' is not implemented this wave (mirroring `R/window.R`'s rank-family
-#' design note: only a bare, already-existing column doubles as an order
-#' key so far, no `..winarg..`-style hoisting for order columns yet) and
+#' is not supported (only a bare, already-existing column doubles as an
+#' order key; there is no `..winarg..`-style hoisting for order columns) and
 #' returns `NULL`, same as any other unsupported IR shape (callers fall
 #' back).
 #'
@@ -4107,7 +4102,7 @@ ir_parse_roll_call <- function(expr, env, schema, fn_name) {
 #'
 #' See the file-level comment above this section: only the default
 #' `align = "right"`, `fill = NA`, `adaptive = FALSE`, `partial = FALSE`,
-#' `give.names = FALSE` are supported this wave (a non-default value
+#' `give.names = FALSE` are supported (a non-default value
 #' returns `NULL`, i.e. "not implemented, fall back" -- mutate()'s usual
 #' contract for an unrecognized shape: `partial = TRUE` changes windowing
 #' semantics entirely -- allows a genuinely incomplete window to produce a
@@ -4341,7 +4336,7 @@ ir_parse_ntile <- function(expr, env, schema) {
   ))))
 }
 
-#' Parse `sum(x)` / `sum(x, na.rm = <literal>)` (Phase 5, task W9)
+#' Parse `sum(x)` / `sum(x, na.rm = <literal>)`
 #'
 #' `sum()`'s ordinary registry entry (`arity = 1L`, agg-family window kind)
 #' only accepts the bare single-argument form -- the overwhelmingly common
@@ -4352,10 +4347,7 @@ ir_parse_ntile <- function(expr, env, schema) {
 #' function we don't control -- `dplyr:::tally_n()`) UNCONDITIONALLY emits
 #' `base::sum(<wt>, na.rm = TRUE)` as its internal `mutate()` dot,
 #' regardless of whether the weight column actually has any NAs -- so this
-#' 2-arg shape must parse too, or `add_tally(wt = )` hard-errors. (This is
-#' the Phase 5 task W9 fix-forward found while deleting
-#' `grouped_aggregate_mutate()`, which used to accept this exact shape via
-#' a real NA-excluding `summarise()`-then-join-back call.)
+#' 2-arg shape must parse too, or `add_tally(wt = )` hard-errors.
 #'
 #' `na.rm = TRUE` desugars `x` to `coalesce(x, 0)` before the window `sum`
 #' call: replacing every `NA` with the additive identity is exactly
@@ -4522,16 +4514,16 @@ ir_cost <- function(ir) {
   )
 }
 
-#' Does an IR subtree hold an F42 checked integer node?
+#' Does an IR subtree hold a checked integer node?
 #'
 #' A checked node is a binary `+`, `-` or `*` whose operands are all
 #' INT32/BOOL8 (a bare untyped NA literal adopts its sibling's type): the
 #' rule of `checked_int_kind()` kind 1 in `src/expr_eval.hpp`. Such a node can
 #' warn "NAs produced by integer overflow", and dplyr's warning depends on the
-#' rows its verb receives, so the optimizer must not change them (F70).
+#' rows its verb receives, so the optimizer must not change them.
 #' `%/%` and `%%` never warn and are not checked, nor is a node with a null
 #' literal operand (`a + NA`; its other operand is still walked). Asked through
-#' `record_checked_int()`, once per record and only by the optimizer (F110).
+#' `record_checked_int()`, once per record and only by the optimizer.
 #'
 #' One walk visits each node once and stops at the first checked node. Column,
 #' literal and vector operands are typed off the schema/IR (both first, so a
@@ -4747,13 +4739,12 @@ ir_is_const <- function(ir) {
 
 #' Does an IR (sub)tree contain a window-function call anywhere?
 #'
-#' Phase 5 (window functions, `scratchpad/phase5_window_design.md` section
-#' 1.1): `TRUE` iff any `call` node in the subtree has a non-`NULL` `window`
+#' `TRUE` iff any `call` node in the subtree has a non-`NULL` `window`
 #' field in its [ir_call_registry] entry. Used by [ir_bind()]'s window
 #' guard, by the decomposition machinery in `R/window.R`
-#' (`ir_extract_windows()`/`plan_window_stages()`), and will be used by the
-#' as-yet-unwired grouped `mutate()`/`filter()` (W3/W5) to detect when a
-#' parsed expression needs the window decomposition path at all.
+#' (`ir_extract_windows()`/`plan_window_stages()`), and by verbs such as
+#' `filter()` and `slice()` to detect when a parsed expression needs the
+#' window decomposition path at all.
 #'
 #' Accepts either a single IR node (identified by the `cuplyr_ir` class
 #' every [ir_col()]/[ir_lit()]/[ir_call()] node carries) or a plain
@@ -4802,7 +4793,7 @@ ir_has_window <- function(ir) {
 
 #' Bind 0-based column indices onto every `col` node in an IR tree
 #'
-#' Per section 2.1's decision, indices are resolved against a schema only
+#' Indices are resolved against a schema only
 #' at lowering time (never at parse time), since projection pushdown can
 #' shift column positions in between. Returns a new tree (does not mutate
 #' in place, matching R's copy-on-modify semantics) with an `index` field
@@ -4885,7 +4876,7 @@ ir_bind <- function(ir, schema, pos = NULL) {
 }
 
 #' Create a side-tagged IR column reference for a non-equi `join_by()`
-#' condition (Phase 7 J7)
+#' condition
 #'
 #' A plain [ir_col()] node is resolved against a *single* schema by name
 #' ([ir_bind()]) -- fine for `filter()`/`mutate()`, which only ever see one
@@ -4914,7 +4905,7 @@ ir_col_join <- function(name, side) {
 }
 
 #' Bind 0-based, per-side column indices onto a non-equi join condition IR
-#' tree (Phase 7 J7)
+#' tree
 #'
 #' The join-condition analogue of [ir_bind()]. Every `col` node in a
 #' condition IR built by `join_cond_ir_from_spec()` (R/join.R) already
@@ -4994,7 +4985,7 @@ ir_deparse <- function(ir) {
   )
 }
 
-#' Where may a factor stay on the GPU? (F18's rule, one bottom-up pass)
+#' Where may a factor stay on the GPU? (one bottom-up pass)
 #'
 #' The GPU holds only a factor's integer codes, while dplyr/base R resolve a
 #' factor through its labels. A *factor operand* is a DICTIONARY32 column
@@ -5003,7 +4994,7 @@ ir_deparse <- function(ir) {
 #'
 #' 1. as a bare column reference (plain copy, key, or sort key on its own);
 #' 2. directly inside `is.na()` / `n_distinct()`;
-#' 3. as the column of F50's `factor_codes()`/`factor_labels()` (the parse
+#' 3. as the column of `factor_codes()`/`factor_labels()` (the parse
 #'    hooks turn a label comparison or `as.character(f)` into these);
 #' 4. as both operands of `==`/`!=` when both are factor *columns* with
 #'    identical level vectors (labels, order and `ordered` flag); `<`/`<=`/
@@ -5127,10 +5118,10 @@ ir_has_dictionary_value <- function(node) {
 #' Infer the GPU output type of an IR node
 #'
 #' Recurses; for arithmetic call nodes this delegates to the existing
-#' [infer_mutate_output_type()] unchanged, so D5's rules (and its pinned
-#' STRING/DICTIONARY32/TIMESTAMP_* error messages) survive verbatim. Every
+#' [infer_mutate_output_type()] unchanged, so its rules (and its pinned
+#' STRING/DICTIONARY32/TIMESTAMP_* error messages) apply verbatim. Every
 #' other op class is resolved via its [ir_call_registry] entry's `type`
-#' function (section 1.3).
+#' function.
 #'
 #' @param ir An IR node
 #' @param schema List with `names`/`types` to resolve column types against
@@ -5326,7 +5317,7 @@ ir_call_type <- function(ir, entry, arg_types, is_isolated_na) {
   entry$type(arg_types)
 }
 
-#' Infer the time zone of a POSIXct-valued IR node (F32)
+#' Infer the time zone of a POSIXct-valued IR node
 #'
 #' The sibling of [ir_infer_type()] for the `tzone` attribute the result
 #' would carry in R. Only meaningful for a TIMESTAMP_MICROSECONDS result (it
@@ -5356,7 +5347,7 @@ ir_round_ops <- as.vector(outer(
   paste, sep = "_"
 ))
 
-#' How each POSIXct-valued op gets its zone (F32)
+#' How each POSIXct-valued op gets its zone
 #'
 #' Verified against dplyr 1.2 / vctrs 0.7 on plain tibbles, for local,
 #' absent, UTC and New York operands:
@@ -5365,16 +5356,16 @@ ir_round_ops <- as.vector(outer(
 #'   `x`'s type (`vec_cast(y, x)`), so it has `x`'s zone (absent becomes
 #'   `""`): `na_if()`, `replace_when()` (also `replace_values()`), `lag()`/
 #'   `lead()` (with `default = `), `first()`/`last()`/`nth()`, `min()`/
-#'   `max()`, `mean()`/`median()` (F41), and cuplyr's `roll_min()`/`roll_max()`.
+#'   `max()`, `mean()`/`median()`, and cuplyr's `roll_min()`/`roll_max()`.
 #' - `common`: vctrs' common type of the value operands in order
 #'   ([tz_fold()]), then absent becomes `""`: `if_else()` (true, false,
 #'   missing), `case_when()` (values in order, then `.default`),
 #'   `coalesce()`.
 #' - `as_posixct`: a POSIXct keeps its zone as is, a Date becomes UTC
 #'   midnight (R's `as.POSIXct.Date`).
-#' - `shift` (F46): `ts_add_us`/`ts_sub_us` keep `x`'s zone attribute as is
+#' - `shift`: `ts_add_us`/`ts_sub_us` keep `x`'s zone attribute as is
 #'   (an absent one stays absent).
-#' - `round_date` (F46): `round_date()` of a local or absent zone returns the
+#' - `round_date`: `round_date()` of a local or absent zone returns the
 #'   session zone's name; floor_date()/ceiling_date() (in `x`) keep `""`.
 #'
 #' Not listed, so CPU: unary `-`, `abs()`, `cummax()`/`cummin()` (R's
@@ -6424,7 +6415,7 @@ type_minus <- function(arg_types) {
 
 ir_value_type_rank <- c(BOOL8 = 1L, INT32 = 2L, INT64 = 3L, FLOAT64 = 4L)
 
-#' Signal a type error caused by a factor operand (F18)
+#' Signal a type error caused by a factor operand
 #'
 #' The GPU types a factor as DICTIONARY32 and can't combine it with anything
 #' else, but dplyr can (vctrs makes `factor` + `character` a character), so a
@@ -6442,7 +6433,7 @@ stop_factor_needs_cpu <- function(...) {
   ))
 }
 
-#' Signal a type error dplyr resolves for a timestamp operand (F32)
+#' Signal a type error dplyr resolves for a timestamp operand
 #'
 #' The timestamp sibling of [stop_factor_needs_cpu()]: `t + 3600` (a POSIXct in
 #' `t`'s zone) and a Date mixed with a POSIXct in `if_else()`/`case_when()`/
@@ -6460,7 +6451,7 @@ stop_timestamp_needs_cpu <- function(...) {
   ))
 }
 
-#' Signal a type combination the GPU does not compute like dplyr (F48)
+#' Signal a type combination the GPU does not compute like dplyr
 #'
 #' Same shape as [stop_timestamp_needs_cpu()] (a subclass of
 #' `cuplyr_factor_needs_cpu`, so [ir_parse_quo()] turns it into `NULL`): a
@@ -6554,8 +6545,7 @@ type_na_if <- function(arg_types) {
 #' yes/no/missing; case_when's val_i's + default; coalesce's whole arg list;
 #' na_if's x/y). A bare, untyped `NA` in one of those slots (e.g. `if_else(
 #' cond, x, NA)`) must adopt a *sibling* value-position arg's type -- exactly
-#' like arithmetic's `1L + NA` being integer, generalized from 2 args to N
-#' (section 1.2/1.3).
+#' like arithmetic's `1L + NA` being integer, generalized from 2 args to N.
 #'
 #' This is done here, at PARSE time (mutating each isolated node's own
 #' `type` field directly, in place), rather than relying on
@@ -6619,9 +6609,8 @@ ir_resolve_value_nas <- function(nodes, schema) {
 #' Desugar `cummean(x)` into `cumsum(x) / row_number()`
 #'
 #' Verified against dplyr 1.2.1: `cummean(c(1,2,NA,4))` is `1, 1.5, NA, NA`
-#' -- i.e. cummean inherits cumsum()'s own (sticky, once cudf's scan gets
-#' its Phase-5 sticky-NA fix in W2 -- see phase5_window_design.md section
-#' 4) NA propagation for free, simply by dividing by row_number() (which is
+#' -- i.e. cummean inherits cumsum()'s own (sticky) NA propagation for
+#' free, simply by dividing by row_number() (which is
 #' never NA), with no special-casing needed here.
 #'
 #' @keywords internal
@@ -6651,9 +6640,7 @@ ir_parse_cummean <- function(args, schema) {
 #' Verified against dplyr 1.2.1: `cumall(c(T,T,NA,T,F,T))` is `T,T,NA,NA,
 #' F,F`; `cumany(c(F,NA,T,F))` is `F,NA,T,T` -- both are exactly `cummin`/
 #' `cummax` (respectively) over the tri-state encoding FALSE=0, NA=1,
-#' TRUE=2, then decoded back to BOOL8 (`scratchpad/phase5_window_design.md`
-#' section 0's ground truth table, cross-checked directly here rather than
-#' taken on faith).
+#' TRUE=2, then decoded back to BOOL8.
 #'
 #' `if_else()`'s bare-NA value-position adoption (`ir_resolve_value_nas()`)
 #' is applied explicitly to the decode step's `yes`/`no` pair here, exactly
@@ -6692,7 +6679,7 @@ ir_parse_cumall_cumany <- function(args, schema, scan_op) {
 #' Desugar single-column `consecutive_id(x)` into a two-stage `lag`/
 #' `row_number`/`cumsum` formula
 #'
-#' Multi-column `consecutive_id(a, b, ...)` is not implemented this wave
+#' Multi-column `consecutive_id(a, b, ...)` is not supported
 #' (returns `NULL`, i.e. falls back) -- this is enforced for free by the
 #' registry entry's `arity = 1L` (a 2+-arg call fails the generic arity
 #' check in `ir_parse_expr()` before `parse` is ever invoked), so this
@@ -6791,7 +6778,7 @@ ir_is_string_type <- function(ir_node, schema) {
   identical(unname(ir_infer_type(ir_node, schema)), "STRING")
 }
 
-#' Parse `nchar(x, type = "chars", allowNA = FALSE, keepNA = NA)` (Phase 11 L5)
+#' Parse `nchar(x, type = "chars", allowNA = FALSE, keepNA = NA)`
 #'
 #' Only the default `type = "chars"` shape is implemented -- `allowNA=`/
 #' `keepNA=` present at all, or an explicit `type=` other than `"chars"`,
@@ -6830,7 +6817,7 @@ ir_parse_nchar <- function(expr, env, schema) {
   ir_call("nchar", list(x_ir))
 }
 
-#' Parse `substr(x, start, stop)` (Phase 11 L5)
+#' Parse `substr(x, start, stop)`
 #'
 #' `start`/`stop` must be constant (non-column) whole numbers -- resolved
 #' via [ir_eval_constant()] with no data mask, exactly like `lag()`'s `n=`.
@@ -6880,7 +6867,7 @@ ir_parse_substr <- function(expr, env, schema) {
   ir_call("substr", list(x_ir, ir_lit_from_r(start0), ir_lit_from_r(stop0)))
 }
 
-#' Parse `trimws(x, which = "both", whitespace = "[ \\t\\r\\n]")` (Phase 11 L5)
+#' Parse `trimws(x, which = "both", whitespace = "[ \\t\\r\\n]")`
 #'
 #' Only the default `whitespace=` (space/tab/CR/LF -- cuDF `strip()`'s
 #' (`strings/strip.hpp`) own "empty `to_strip` means strip whitespace"
@@ -6927,17 +6914,16 @@ ir_parse_trimws <- function(expr, env, schema) {
 }
 
 #' Parse `paste0(..., collapse = NULL)` / `paste(..., sep = " ", collapse =
-#' NULL)` (Phase 11 L5)
+#' NULL)`
 #'
-#' `collapse=` (reduce-to-one-string) is not implemented this wave -- its
+#' `collapse=` (reduce-to-one-string) is not supported -- its
 #' presence at all falls back. `sep=` (`paste()` only; `paste0()` is always
 #' `sep = ""`) must be a constant string. Every dot must resolve to a
 #' STRING-typed IR node -- ANY non-STRING dot (numeric, logical, ...) falls
 #' back rather than replicating R's `as.character()` formatting rules
 #' (verified empirically: `paste0("x", 4)` is `"x4"`, NOT `"x4.0"` --
 #' faithfully reproducing `as.character()`'s numeric-formatting edge cases
-#' for every type is explicitly out of scope, per the design doc's own
-#' "x4 vs 4.0 trap" note). The lowered `ir_call("paste_cols", ...)` node's
+#' for every type is explicitly out of scope). The lowered `ir_call("paste_cols", ...)` node's
 #' LAST argument is always a STRING literal carrying the separator (never a
 #' per-row value) -- `apply_handler()`'s `narep = "NA"` reproduces R's own
 #' "a genuine NA argument becomes the literal two-character string `\"NA\"`"
@@ -6991,7 +6977,7 @@ ir_parse_paste_call <- function(expr, env, schema, fn_name) {
 }
 
 #' Parse `grepl(pattern, x, ignore.case = FALSE, perl = FALSE, fixed =
-#' FALSE, useBytes = FALSE)` (Phase 11 L5)
+#' FALSE, useBytes = FALSE)`
 #'
 #' `pattern` must be a constant (non-column) string -- resolved via
 #' [ir_eval_constant()]. `ignore.case=`/`perl=`/`useBytes=` present at all
@@ -7048,7 +7034,7 @@ ir_parse_grepl <- function(expr, env, schema) {
 }
 
 #' Parse `sub(pattern, replacement, x, ignore.case=, perl=, fixed=,
-#' useBytes=)` / `gsub(...)` (Phase 11 L5)
+#' useBytes=)` / `gsub(...)`
 #'
 #' Same restrictions as [ir_parse_grepl()]: `pattern`/`replacement` must be
 #' constant strings, `ignore.case=`/`perl=`/`useBytes=` present at all
@@ -7108,12 +7094,12 @@ ir_parse_sub_gsub <- function(expr, env, schema, fn_name) {
                         ir_lit_from_r(repl_eval$value), ir_lit_from_r(fixed_val)))
 }
 
-#' Parse `startsWith(x, prefix)` / `endsWith(x, suffix)` (Phase 11 L5)
+#' Parse `startsWith(x, prefix)` / `endsWith(x, suffix)`
 #'
 #' `prefix`/`suffix` must be a constant (non-column, non-`NA`) string --
 #' matching a per-row column-valued target (`starts_with()`/`ends_with()`'s
-#' `targets` column overload, `strings/find.hpp`) is not implemented this
-#' wave. NA propagation needs no special handling in the C++ handler: cuDF's
+#' `targets` column overload, `strings/find.hpp`) is not supported. NA
+#' propagation needs no special handling in the C++ handler: cuDF's
 #' `starts_with()`/`ends_with()` already null-propagate exactly like R's own
 #' `startsWith()`/`endsWith()` (verified empirically: `startsWith(c("abc",
 #' NA), "a")` is `TRUE, NA`, not `TRUE, FALSE`) -- unlike `grepl()` above,
@@ -7195,13 +7181,13 @@ resolve_call_fn <- function(head, env) {
   NULL
 }
 
-#' The Phase 11 L6 namespace guard: TRUE iff a call's function symbol
+#' The namespace guard: TRUE iff a call's function symbol
 #' resolves to exactly `lubridate::<name>`
 #'
 #' `FALSE` (never an error) whenever lubridate isn't installed, `name` isn't
 #' one of its exports, or the call's own function symbol resolves to
 #' anything else (including simply not resolving at all) -- every one of
-#' those cases must fall back to L1's CPU path, never hard-error here.
+#' those cases must fall back to the CPU path, never hard-error here.
 #' @keywords internal
 ir_require_lubridate_fn <- function(head, env, name) {
   if (!requireNamespace("lubridate", quietly = TRUE)) {
@@ -7227,14 +7213,14 @@ ir_needs_cpu_tz <- function(ir, schema) {
   !is.null(zone) && !tz_is_utc(zone)
 }
 
-#' Parse a lubridate accessor call (Phase 11 L6), once
+#' Parse a lubridate accessor call, once
 #' [ir_require_lubridate_fn()] has already confirmed the call really
 #' invokes lubridate's own function
 #'
 #' Every one of these 9 functions takes `x` as its sole required argument;
 #' each also has 1-4 OPTIONAL controls (`label=`/`abbr=`/`locale=`
 #' (month()/wday()), `week_start=` (wday() only), `with_year=`/
-#' `fiscal_start=` (quarter() only)) that are NOT implemented this wave --
+#' `fiscal_start=` (quarter() only)) that are NOT supported --
 #' any of them present at all (even at its own default value) falls back,
 #' matched via `rlang::call_match()` against a prototype mirroring each
 #' function's REAL lubridate signature (so `year(x)`/`year(x = d)` both
@@ -7242,7 +7228,7 @@ ir_needs_cpu_tz <- function(ir, schema) {
 #'
 #' `x` must already be one of the 5 TIMESTAMP_* granularities (a STRING or
 #' numeric `x` is not attempted natively, mirroring `as.Date()`/
-#' `as.POSIXct()`'s own scope cut in L3).
+#' `as.POSIXct()`'s own scope).
 #'
 #' `wday()`'s own default depends on the GLOBAL `lubridate.week.start`
 #' option (`getOption("lubridate.week.start", 7)`) -- verified empirically
@@ -7257,7 +7243,7 @@ ir_needs_cpu_tz <- function(ir, schema) {
 #' checks the CURRENT option value at parse time and falls back if it isn't
 #' the default 7.
 #'
-#' KNOWN, DOCUMENTED DIVERGENCE (not fixed this wave, see
+#' KNOWN, DOCUMENTED DIVERGENCE (see
 #' `test-dplyr-datetime.R`): `lubridate::second()` returns a FRACTIONAL
 #' value for a POSIXct with sub-second precision (e.g. `second(x)` where
 #' `x` is `13:45:30.75` is `30.75`, not `30`) -- cuDF's `SECOND` component
@@ -7313,7 +7299,7 @@ ir_parse_lubridate_accessor <- function(expr, env, schema, fn_name) {
   ir_call(fn_name, list(x_ir))
 }
 
-#' Parse a lubridate floor_date()/ceiling_date()/round_date() call (F46)
+#' Parse a lubridate floor_date()/ceiling_date()/round_date() call
 #'
 #' Native only for a UTC-equivalent POSIXct with unit second/minute/hour/day
 #' and a Date with day/week (week starting Sunday, the default
@@ -7378,13 +7364,10 @@ ir_parse_lubridate_rounding <- function(expr, env, schema, fn_name) {
 
 #' Registry of supported expression-IR operations
 #'
-#' See the module-level comment above and section 6 of
-#' `scratchpad/phase1_expression_engine.md` for the extension contract this
-#' implements. Each entry: `list(arity, parse, type, lower)`.
-#'
-#' Phase 5 (`scratchpad/phase5_window_design.md` section 1.1) adds a fifth
-#' field, `window`: `NULL` for every pre-Phase-5 entry (unchanged), or
-#' `list(kind = "shift"|"rank"|"scan"|"agg")` for a window-class op. `window`
+#' See the module-level comment above for the extension contract. Each
+#' entry: `list(arity, parse, type, lower)`, plus a fifth field, `window`:
+#' `NULL` for an ordinary entry, or
+#' `list(kind = "shift"|"rank"|"scan"|"agg"|"rolling")` for a window-class op. `window`
 #' non-`NULL` and `lower` non-`NULL` are mutually exclusive -- a window-class
 #' entry always has `lower = NULL` (window ops are never `ir_call` handlers
 #' in `src/expr_eval.hpp`, see this file's own module comment for that

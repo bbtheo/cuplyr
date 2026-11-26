@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{ir_rewrite_group_scalar}
 \alias{ir_rewrite_group_scalar}
-\title{Rewrite window calls over one-value-per-group arguments (F123)}
+\title{Rewrite window calls over one-value-per-group arguments}
 \usage{
 ir_rewrite_group_scalar(ir, schema)
 }

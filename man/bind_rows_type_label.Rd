@@ -3,7 +3,7 @@
 \name{bind_rows_type_label}
 \alias{bind_rows_type_label}
 \title{Friendly, \code{vctrs}-bracket-style type label for a \code{bind_rows()}
-incompatible-type error (Phase 11 L4)}
+incompatible-type error}
 \usage{
 bind_rows_type_label(type, is_factor = FALSE)
 }

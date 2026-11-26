@@ -137,19 +137,18 @@ ast_arrange <- function(input, sort_specs, groups = character()) {
 #'   (drives the actual groupby op -- always the full pre-summarise group
 #'   set, regardless of `.groups=`)
 #' @param result_groups Character vector of group columns RETAINED on the
-#'   summarise's *output* (Phase 6, task 3): a subset of `groups`, computed
+#'   summarise's *output*: a subset of `groups`, computed
 #'   from `.groups=` semantics by `resolve_summarise_groups()`
 #'   (R/summarise.R) -- `character()` for `.groups = "drop"`/ungrouped
 #'   input, all of `groups` for `"keep"`, all-but-the-last for the default/
-#'   `"drop_last"`. Read by `propagate_groups()` (R/execute.R) instead of
-#'   the old hardcoded "summarise always drops all groups" rule.
-#' @param on_sum_overflow (F34) What to do when an integer/logical `sum()`
+#'   `"drop_last"`. Read by `propagate_groups()` (R/execute.R).
+#' @param on_sum_overflow What to do when an integer/logical `sum()`
 #'   leaves R's integer range at execution. `"double"`: the column comes back
 #'   FLOAT64, as in dplyr (eager mode reconciles the schema from the result).
 #'   `"error"` (lazy plans, whose schema was declared INT32 statically): raise
 #'   `cuplyr_error_sum_overflow`. A lazy `summarise()` plans only a sum of a
-#'   logical this way (F80): an INT32 sum runs at the verb with `"double"`.
-#' @param group_order Row order of a grouped result: `"keys"` (F33) sorts by the
+#'   logical this way: an INT32 sum runs at the verb with `"double"`.
+#' @param group_order Row order of a grouped result: `"keys"` sorts by the
 #'   group keys (ascending, `NA` last), dplyr's `group_by()` order; `"first"`
 #'   (#50) orders groups by first appearance, dplyr's `.by =` order, and is
 #'   what `summarise_by_desugar()` asks for.
@@ -164,7 +163,7 @@ ast_summarise <- function(input, aggregations, groups, result_groups = character
 
 #' Create a reframe AST node
 #'
-#' The LONG step of a native `reframe()` (F22, `R/reframe.R`): reshapes the
+#' The LONG step of a native `reframe()` (`R/reframe.R`): reshapes the
 #' wide one-row-per-group table `input` into `k` rows per group.
 #'
 #' @param input Input AST node (the wide table)
@@ -222,9 +221,9 @@ ast_distinct <- function(input, key_cols, keep_all = FALSE, key_positions = NULL
 #' from a single input" shape and (mostly) the same `n=`/`prop=` sizing
 #' rule, so one node with a mode-specific field set avoids several
 #' near-identical constructors/lowering functions/optimizer barrier
-#' entries. `slice_sample()` and every *grouped* variant are out of scope
-#' for this node (Phase 3 scope decision, see `R/slice.R`) and keep using
-#' the CPU fallback (`R/fallback.R`) instead.
+#' entries. `slice_sample()` isn't built on this node (see
+#' `slice_sample_native()` in `R/slice.R`), and a slice the GPU path doesn't
+#' cover is run by the CPU fallback (`R/fallback.R`) instead.
 #'
 #' @param input Input AST node
 #' @param mode One of `"head"`, `"tail"`, `"index"`, `"rank"`, `"rank_grouped"`,
@@ -260,7 +259,7 @@ ast_distinct <- function(input, key_cols, keep_all = FALSE, key_positions = NULL
 #' @param top_k For `mode` `"rank"`: `TRUE` on a node the optimizer made from
 #'   `arrange(x) |> head(n)` (`rewrite_slice_over_arrange()`); the node is then
 #'   `slice_min(x, n, with_ties = FALSE)` and nothing else
-#' @param group_cols,by_first For `mode == "rank_grouped"` (F115, a grouped
+#' @param group_cols,by_first For `mode == "rank_grouped"` (a grouped
 #'   `slice_min()`/`slice_max()` on a numeric or date key, run by
 #'   `gpu_slice_rank_grouped()`): the grouping columns, and whether the groups
 #'   come out in order of their first row (`by=`/`.by=`) rather than sorted by
@@ -286,29 +285,29 @@ ast_slice <- function(input, mode, amount = NULL, is_prop = NULL,
 
 #' Create a window AST node
 #'
-#' One node per window-decomposition "stage" (`scratchpad/phase5_window_design.md`
-#' section 2): evaluates every `window_spec()` in `specs` (`R/window.R`)
+#' One node per window-decomposition "stage": evaluates every `window_spec()`
+#' in `specs` (`R/window.R`)
 #' against `input`'s current row set/order and APPENDS one new column per
 #' spec (never replaces an existing column -- temp names guarantee this).
-#' Built by a verb's own window-wiring (`R/mutate.R`/`R/filter.R`/`R/slice.R`,
-#' from W3/W5/W6/W7 onward) or, in W2, by hand for `test-window-native.R`.
+#' Built by a verb's own window-wiring (`R/mutate.R`/`R/filter.R`/`R/slice.R`)
+#' or by hand in `test-window-native.R`.
 #'
 #' @param input Input AST node
 #' @param specs List of `window_spec()` structures (`R/window.R`)
 #' @param group_cols Character vector of group-by column names --
-#'   `character()` for an ungrouped window (section 3: lowering substitutes
+#'   `character()` for an ungrouped window (lowering substitutes
 #'   a constant key column and skips the sort when there's also no
 #'   `order_cols` on every spec)
-#' @param on_sum_overflow (F42) What to do when an integer/logical window
+#' @param on_sum_overflow What to do when an integer/logical window
 #'   `sum()` (declared INT32) leaves R's integer range at execution. `"error"`:
 #'   raise `cuplyr_error_sum_overflow` (mutate() and eager filter(): eager
 #'   reruns the call on the CPU; a lazy `mutate()` only plans a sum of a
-#'   logical, an INT32 sum runs at the verb, F80). `"double"`: the column
+#'   logical, an INT32 sum runs at the verb). `"double"`: the column
 #'   comes back FLOAT64, as in dplyr, for a consumer that reads the real column
 #'   type (lazy `filter()`'s predicate). A spec's own `on_sum_overflow` field,
 #'   when set, overrides this for that spec (`filter()` sets `"error"` on a sum
 #'   a later stage consumes).
-#' @param minmax_warn (F124) `NULL`, or the prepared dplyr warning of a window
+#' @param minmax_warn `NULL`, or the prepared dplyr warning of a window
 #'   `min()`/`max()` call whose verb could not know the input's row count
 #'   (`minmax_win_lazy_prep()`): lowering signals it when the node's input has no
 #'   rows, or every time it runs when it is `always` (a parquet plan whose empty
@@ -376,12 +375,11 @@ ast_rename <- function(input, old_names, new_names, positions = NULL) {
 #' @param keep Logical, keep both key columns when names match
 #' @param suffix Character vector of length 2
 #' @param na_matches Character, "na" or "never"
-#' @param multiple Character, one of "all"/"any"/"first"/"last" (dormant --
-#'   only "all" is honored until Phase 7 J5)
-#' @param unmatched Character, one or two of "drop"/"error" (dormant --
-#'   only "drop" is honored until Phase 7 J5)
+#' @param multiple Character, one of "all"/"any"/"first"/"last"
+#' @param unmatched Character, one or two of "drop"/"error"
 #' @param relationship `NULL` or one of the four cardinality strings
-#'   (dormant -- not enforced until Phase 7 J5)
+#'   (`multiple`, `unmatched` and `relationship` are applied/checked at
+#'   execution, see `check_join_cardinality()` in `R/join.R`)
 #' @param cross_by `TRUE` for dplyr's deprecated `by = character()` cross
 #'   spelling (`by` is then the empty spec; see `lower_cross_by_join()`)
 #' @return An ast_join node
@@ -402,8 +400,7 @@ ast_join <- function(type, left, right, by, keep = FALSE,
 
 #' Create a filter predicate structure
 #'
-#' Section 3 of `scratchpad/phase1_expression_engine.md`: the IR cutover's
-#' predicate record. `ir` is the parsed expression IR (see `R/ir.R`); `cols`
+#' The predicate record. `ir` is the parsed expression IR (see `R/ir.R`); `cols`
 #' is cached from `ir_cols()` since every optimizer filter pass needs it and
 #' none of them need to walk the IR tree themselves.
 #'
@@ -411,9 +408,9 @@ ast_join <- function(type, left, right, by, keep = FALSE,
 #' @param schema List with `names`/`types` the IR is bound against; read only
 #'   by [ir_has_checked_int()] for `checked_int`
 #' @return A predicate list structure: `list(ir, cols, estimated_cost,
-#'   is_deterministic, na_sensitive, checked_int)`; `checked_int` (F70) is
-#'   the cell of new_checked_int_cell(): read whether the predicate holds an
-#'   F42 checked integer node with record_checked_int()
+#'   is_deterministic, na_sensitive, checked_int)`; `checked_int` is
+#'   the cell of new_checked_int_cell(): read whether the predicate holds a
+#'   checked integer node with record_checked_int()
 #' @keywords internal
 make_predicate <- function(ir, schema) {
   list(
@@ -467,24 +464,22 @@ record_checked_int <- function(record) {
 
 #' Create a mutate expression structure
 #'
-#' Section 3 of `scratchpad/phase1_expression_engine.md`: the IR cutover's
-#' mutate expression record. `ir` is the parsed expression IR (see
+#' The mutate expression record. `ir` is the parsed expression IR (see
 #' `R/ir.R`); `input_cols`/`output_type` are cached from `ir_cols()`/
 #' `ir_infer_type()` since every optimizer pass
 #' (`fuse_mutates`/`try_fuse_mutate_pair`/
 #' `prune_dead_columns`/`push_down_projections`) reads only those two fields
-#' plus `output_col` -- none of them walk the IR tree themselves. `op`/
-#' `scalar`/`input_types` are gone: only `lower_mutate()` (via
-#' `gpu_mutate_expr()`) ever needed them, and it now reads `ir` directly.
+#' plus `output_col` -- none of them walk the IR tree themselves. Only
+#' `lower_mutate()` (via `gpu_mutate_expr()`) reads `ir` directly.
 #'
 #' @param output_col Output column name
 #' @param ir An IR node (the parsed mutate expression)
 #' @param schema List with `names`/`types`, used to resolve `output_type`
 #'   via [ir_infer_type()] (which delegates to [infer_mutate_output_type()]
-#'   unchanged for arithmetic ops, per section 1.3)
+#'   unchanged for arithmetic ops)
 #' @return An expression list structure: `list(output_col, ir, input_cols,
-#'   output_type, checked_int)`; `checked_int` (F70) is the cell of
-#'   new_checked_int_cell(): read whether the expression holds an F42 checked
+#'   output_type, checked_int)`; `checked_int` is the cell of
+#'   new_checked_int_cell(): read whether the expression holds a checked
 #'   integer node with record_checked_int()
 #' @keywords internal
 make_mutate_expr <- function(output_col, ir, schema) {
@@ -503,8 +498,7 @@ make_mutate_expr <- function(output_col, ir, schema) {
 
 #' Infer output type for a mutate expression
 #'
-#' Implements D5's ordered promotion rules (see
-#' `scratchpad/unification_design.md`). Note this deliberately mirrors R's own
+#' Applies ordered type-promotion rules. Note this deliberately mirrors R's own
 #' arithmetic promotion, not SQL/cudf defaults: `2L^2L` is a double in R, and
 #' `TRUE+TRUE` is an integer, and dplyr agrees with both.
 #'
@@ -601,8 +595,7 @@ infer_mutate_output_type <- function(op, input_types, scalar) {
 #' @param fn Aggregation function name (sum, mean, min, max, n, sd, var,
 #'   median, quantile, n_distinct, first, last, nth, any, all)
 #' @param input_type Input column type
-#' @param na_rm Logical scalar (Phase 6, task 6.1; extended Phase 6, task
-#'   6.2). `FALSE` (the default, matching R's own `na.rm = FALSE` default
+#' @param na_rm Logical scalar. `FALSE` (the default, matching R's own `na.rm = FALSE` default
 #'   for `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()`/`median()`) means a
 #'   group with ANY null input value must produce a NULL aggregation result
 #'   for the WHOLE group -- cudf's own groupby MEAN/SUM/MIN/MAX/STD/
@@ -610,7 +603,7 @@ infer_mutate_output_type <- function(op, input_types, scalar) {
 #'   `gpu_summarise()` (`src/ops_groupby.cpp`) applies an extra
 #'   whole-group-null propagation step when this is `FALSE` and the input
 #'   column actually has nulls (same technique as the window-aggregate
-#'   path, `src/ops_window.cpp`, W4). `TRUE` means "use cudf's native
+#'   path, `src/ops_window.cpp`). `TRUE` means "use cudf's native
 #'   null-excluding behavior as-is" -- no extra step. Meaningless for `n()`
 #'   (counts rows regardless of nulls, matching dplyr already). For
 #'   `quantile()`, `na_rm = FALSE` with an actual null present is a hard
@@ -628,12 +621,12 @@ infer_mutate_output_type <- function(op, input_types, scalar) {
 #' @param extra Numeric scalar, `NA_real_` unless `fn` needs an extra
 #'   scalar parameter beyond the input column: `quantile()`'s probability
 #'   (`[0, 1]`) or `nth()`'s (possibly negative) element position.
-#' @param identity Logical scalar (F07). `TRUE` (the default) lets a
+#' @param identity Logical scalar. `TRUE` (the default) lets a
 #'   `min()`/`max()` over an INT32/FLOAT64 column apply base R's empty-vector
 #'   identity (`Inf`/`-Inf`, with dplyr's warning) for an empty group, which
 #'   promotes an INT32 result column to FLOAT64 when it happens; see
 #'   `gpu_summarise()` (`src/ops_groupby.cpp`). A STRING or Date/POSIXct one
-#'   (F124) keeps its null value but is counted the same way, for dplyr's
+#'   keeps its null value but is counted the same way, for dplyr's
 #'   warning. `FALSE` would keep the result INT32 and never warn, but nothing
 #'   calls it with `FALSE` today. Only meaningful for `min`/`max` over
 #'   INT32/FLOAT64/STRING/timestamps; stored as `FALSE` for everything else.
@@ -1084,13 +1077,13 @@ is_opaque_expression <- function(expr_text) {
 #' need to translate column references through its name map for anything
 #' pushed across it.
 #'
-#' `window` (`scratchpad/phase5_window_design.md` section 2.1) is a barrier:
+#' `window` is a barrier:
 #' every window spec's result depends on the FULL row set (which rows exist)
 #' and the current row order (frames are built from a stable sort of
 #' group+order columns) -- nothing may be pushed across it, the same
 #' reasoning as `arrange`/`slice`.
 #'
-#' Phase 12 audit note: barrier classification only matters for node TYPES
+#' Barrier classification only matters for node TYPES
 #' that actually appear in an AST at all. `do()`/`rows_insert()`/
 #' `rows_append()`/`rows_update()`/`rows_patch()`/`rows_upsert()`/
 #' `rows_delete()`, and every colwise/pick-bearing call (`mutate_at()`,
@@ -1209,8 +1202,8 @@ set_ast_source_ptr <- function(node, ptr) {
 
 #' Describe a join's `by` spec as "left op right, ..." condition pairs
 #'
-#' Shared by `print.ast_node()`/`ast_to_string()` (Phase 12, `show_query()`
-#' coverage audit): renders every condition, not just the equi ones, so a
+#' Shared by `print.ast_node()`/`ast_to_string()` (used by `show_query()`):
+#' renders every condition, not just the equi ones, so a
 #' non-equi/mixed `join_by()` (`op` other than `"=="`) is visible in the
 #' rendered query -- e.g. `join_by(a == b, x >= y)` shows as
 #' `"a == b, x >= y"`. A `closest()` condition shows as `closest(x >= y)`.

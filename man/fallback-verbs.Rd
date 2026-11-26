@@ -40,8 +40,7 @@ optionally a plain \code{data.frame}).}
 }
 \description{
 \code{cuplyr} implements every dplyr generic on \code{tbl_gpu}, but not every one of
-them runs natively on the GPU yet (see \code{scratchpad/todo.md} for the
-phase-by-phase rollout). The methods documented here provide a
+them runs natively on the GPU. The methods documented here provide a
 \emph{transparent CPU fallback}: they materialize any pending lazy operations,
 \code{\link[dplyr:collect]{collect()}} \code{.data} to a tibble (restoring \code{group_by()} structure from
 \code{.data}'s grouping so grouped semantics apply exactly as on a real

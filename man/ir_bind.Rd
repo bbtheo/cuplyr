@@ -16,7 +16,7 @@ against}
 The IR tree with \code{index} filled in on every \code{col} node
 }
 \description{
-Per section 2.1's decision, indices are resolved against a schema only
+Indices are resolved against a schema only
 at lowering time (never at parse time), since projection pushdown can
 shift column positions in between. Returns a new tree (does not mutate
 in place, matching R's copy-on-modify semantics) with an \code{index} field

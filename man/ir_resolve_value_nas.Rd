@@ -22,8 +22,7 @@ unchanged if none, or all, of \code{nodes} are isolated)
 position" argument slots that must share a common output type (if_else's
 yes/no/missing; case_when's val_i's + default; coalesce's whole arg list;
 na_if's x/y). A bare, untyped \code{NA} in one of those slots (e.g. \code{if_else( cond, x, NA)}) must adopt a \emph{sibling} value-position arg's type -- exactly
-like arithmetic's \code{1L + NA} being integer, generalized from 2 args to N
-(section 1.2/1.3).
+like arithmetic's \code{1L + NA} being integer, generalized from 2 args to N.
 }
 \details{
 This is done here, at PARSE time (mutating each isolated node's own

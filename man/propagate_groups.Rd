@@ -19,7 +19,7 @@ Character vector of group columns to carry forward
 \description{
 A \code{join} keeps \code{x}'s groups that survive in its output (\code{push_join()}
 computes that itself; this branch is only the defensive default). \code{summarise}
-yields whatever \code{node$result_groups} says (Phase 6, task 3 -- computed by
+yields whatever \code{node$result_groups} says (computed by
 \code{resolve_summarise_groups()}, R/summarise.R, from the node's \verb{.groups=}
 semantics; \code{character()} for \code{.groups = "drop"}/an ungrouped input, all
 pre-summarise groups for \code{"keep"}, all-but-the-last for the default/

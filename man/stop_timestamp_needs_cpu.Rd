@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{stop_timestamp_needs_cpu}
 \alias{stop_timestamp_needs_cpu}
-\title{Signal a type error dplyr resolves for a timestamp operand (F32)}
+\title{Signal a type error dplyr resolves for a timestamp operand}
 \usage{
 stop_timestamp_needs_cpu(...)
 }

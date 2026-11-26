@@ -69,7 +69,7 @@ raised when it is resolved at lowering}
 \code{arrange(x) |> head(n)} (\code{rewrite_slice_over_arrange()}); the node is then
 \code{slice_min(x, n, with_ties = FALSE)} and nothing else}
 
-\item{group_cols, by_first}{For \code{mode == "rank_grouped"} (F115, a grouped
+\item{group_cols, by_first}{For \code{mode == "rank_grouped"} (a grouped
 \code{slice_min()}/\code{slice_max()} on a numeric or date key, run by
 \code{gpu_slice_rank_grouped()}): the grouping columns, and whether the groups
 come out in order of their first row (\verb{by=}/\verb{.by=}) rather than sorted by
@@ -87,8 +87,8 @@ these five share the same "select a subset of rows, in some order,
 from a single input" shape and (mostly) the same \verb{n=}/\verb{prop=} sizing
 rule, so one node with a mode-specific field set avoids several
 near-identical constructors/lowering functions/optimizer barrier
-entries. \code{slice_sample()} and every \emph{grouped} variant are out of scope
-for this node (Phase 3 scope decision, see \code{R/slice.R}) and keep using
-the CPU fallback (\code{R/fallback.R}) instead.
+entries. \code{slice_sample()} isn't built on this node (see
+\code{slice_sample_native()} in \code{R/slice.R}), and a slice the GPU path doesn't
+cover is run by the CPU fallback (\code{R/fallback.R}) instead.
 }
 \keyword{internal}

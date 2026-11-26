@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{ir_parse_nchar}
 \alias{ir_parse_nchar}
-\title{Parse \code{nchar(x, type = "chars", allowNA = FALSE, keepNA = NA)} (Phase 11 L5)}
+\title{Parse \code{nchar(x, type = "chars", allowNA = FALSE, keepNA = NA)}}
 \usage{
 ir_parse_nchar(expr, env, schema)
 }

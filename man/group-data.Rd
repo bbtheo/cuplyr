@@ -31,7 +31,7 @@ deprecated then made defunct -- passing anything here is an error).}
 \emph{grouping structure} dplyr's own \code{grouped_df} carries as an attribute --
 \code{cuplyr} computes it on demand via one native GPU groupby instead
 (\code{compute_group_data()}, above), since \code{tbl_gpu} has no such attribute to
-read. All are GPU-native (Phase 9, task 1) -- previously CPU fallbacks.
+read. All are GPU-native.
 }
 \details{
 \code{group_data()} returns a tibble of the grouping columns (in ascending key

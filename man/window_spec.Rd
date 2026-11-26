@@ -33,7 +33,7 @@ column) name of the window function's "value" argument, or
 spec's frame: rank-family calls with a value argument default this to
 \code{value_col} itself (ranking a column inherently orders by that same
 column), UNLESS an explicit \verb{order_by=}/\code{order_by()}/\code{with_order()}
-override (Phase 5 W4, \code{R/ir.R}'s \code{ir_parse_with_order()}) is
+override (\code{R/ir.R}'s \code{ir_parse_with_order()}) is
 present, in which case that wins for ANY window kind (shift/rank/agg)}
 
 \item{order_desc}{Logical vector, parallel to \code{order_cols}, \code{TRUE} for
@@ -48,10 +48,10 @@ applicable}
 \item{default}{An IR literal node (the op's constant fill/default
 value), or \code{NULL} if not applicable/not supplied}
 
-\item{na_rm}{Logical scalar, \code{FALSE} unless a future wave adds an
-\verb{na_rm=}-aware window op}
+\item{na_rm}{Logical scalar, the call's \verb{na_rm=} setting (\code{FALSE} unless
+the call sets it)}
 
-\item{input_type}{(F80) GPU type string of an integer \code{sum()}'s argument
+\item{input_type}{GPU type string of an integer \code{sum()}'s argument
 (\code{"INT32"} or \code{"BOOL8"}), \code{NA_character_} for every other call; a lazy
 \code{mutate()} runs a call holding an INT32 sum at the verb (see
 \code{window_spec_int_sum()})}
@@ -61,8 +61,8 @@ A list with exactly these named fields
 }
 \description{
 One record per window-function call extracted by \code{\link[=ir_extract_windows]{ir_extract_windows()}}.
-This is the exact shape section 2 of \code{scratchpad/phase5_window_design.md}
-documents for \code{ast_window()}'s specs (W2), produced here so W2 can
-consume a finished plan's specs directly with no reshaping.
+This is the exact shape \code{ast_window()}'s specs take, produced here so
+\code{ast_window()} can consume a finished plan's specs directly with no
+reshaping.
 }
 \keyword{internal}

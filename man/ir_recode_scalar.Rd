@@ -10,7 +10,7 @@ ir_recode_scalar(a, env, schema)
 \code{list(value =, type =)} (\code{type} is the R typeof), or \code{NULL}
 }
 \description{
-Accepts only what the F30 allowlist means to: a length-1, attribute-free
+Accepts only what the allowlist admits: a length-1, attribute-free
 atomic of typeof character/integer/double/logical (doubles finite or
 \code{NA_real_}; R parses \code{NA}, \code{NA_character_}, ... as such constants, so a
 symbol is never accepted), or unary \code{-} on a numeric literal. Nothing is

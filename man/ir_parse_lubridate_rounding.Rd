@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{ir_parse_lubridate_rounding}
 \alias{ir_parse_lubridate_rounding}
-\title{Parse a lubridate floor_date()/ceiling_date()/round_date() call (F46)}
+\title{Parse a lubridate floor_date()/ceiling_date()/round_date() call}
 \usage{
 ir_parse_lubridate_rounding(expr, env, schema, fn_name)
 }

@@ -3,7 +3,7 @@
 \name{ir_bind_join}
 \alias{ir_bind_join}
 \title{Bind 0-based, per-side column indices onto a non-equi join condition IR
-tree (Phase 7 J7)}
+tree}
 \usage{
 ir_bind_join(ir, left_schema, right_schema)
 }

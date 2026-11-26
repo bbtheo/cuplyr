@@ -2,7 +2,7 @@
 % Please edit documentation in R/lower.R
 \name{lower_cross_by_join}
 \alias{lower_cross_by_join}
-\title{Lower a \code{by = character()} join (gap A4)}
+\title{Lower a \code{by = character()} join}
 \usage{
 lower_cross_by_join(ast, left_ptr, right_ptr, left_schema, right_schema)
 }

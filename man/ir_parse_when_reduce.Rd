@@ -15,7 +15,7 @@ Fully desugars at parse time into a right-folded chain of the existing
 \code{|}/\code{&} ops -- no new IR op, registry entry, or C++ handler needed.
 }
 \details{
-\verb{size=} (only meaningful for the zero-input edge case) is NOT implemented
-this wave -- its presence, or zero dots, makes this return \code{NULL}.
+\verb{size=} (only meaningful for the zero-input edge case) is NOT supported
+-- its presence, or zero dots, makes this return \code{NULL}.
 }
 \keyword{internal}

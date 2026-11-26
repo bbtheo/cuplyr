@@ -34,13 +34,13 @@ above: the simplest safe choice for a schema-only rename, avoiding the
 need to translate column references through its name map for anything
 pushed across it.
 
-\code{window} (\code{scratchpad/phase5_window_design.md} section 2.1) is a barrier:
+\code{window} is a barrier:
 every window spec's result depends on the FULL row set (which rows exist)
 and the current row order (frames are built from a stable sort of
 group+order columns) -- nothing may be pushed across it, the same
 reasoning as \code{arrange}/\code{slice}.
 
-Phase 12 audit note: barrier classification only matters for node TYPES
+Barrier classification only matters for node TYPES
 that actually appear in an AST at all. \code{do()}/\code{rows_insert()}/
 \code{rows_append()}/\code{rows_update()}/\code{rows_patch()}/\code{rows_upsert()}/
 \code{rows_delete()}, and every colwise/pick-bearing call (\code{mutate_at()},

@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{stop_factor_needs_cpu}
 \alias{stop_factor_needs_cpu}
-\title{Signal a type error caused by a factor operand (F18)}
+\title{Signal a type error caused by a factor operand}
 \usage{
 stop_factor_needs_cpu(...)
 }

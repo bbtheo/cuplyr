@@ -13,7 +13,7 @@ gpu_physical_type(type)
 \code{"INT32"} for \code{"DICTIONARY32"}, \code{type} unchanged otherwise
 }
 \description{
-Phase 11 L2 design decision: cuplyr keeps factor columns as plain INT32
+cuplyr keeps factor columns as plain INT32
 codes physically on the GPU rather than adopting cudf's real
 \code{DICTIONARY32} column type (a dictionary-encoded keys+indices structure).
 \code{"DICTIONARY32"} is therefore a LOGICAL type only, in \code{gpu_type_from_r()}

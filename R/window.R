@@ -17,9 +17,9 @@
 #' Create a window-spec structure
 #'
 #' One record per window-function call extracted by [ir_extract_windows()].
-#' This is the exact shape section 2 of `scratchpad/phase5_window_design.md`
-#' documents for `ast_window()`'s specs (W2), produced here so W2 can
-#' consume a finished plan's specs directly with no reshaping.
+#' This is the exact shape `ast_window()`'s specs take, produced here so
+#' `ast_window()` can consume a finished plan's specs directly with no
+#' reshaping.
 #'
 #' @param output_col Character scalar, the synthetic temp column name this
 #'   spec's result will be materialized under (e.g. `"..win1.."`)
@@ -33,7 +33,7 @@
 #'   spec's frame: rank-family calls with a value argument default this to
 #'   `value_col` itself (ranking a column inherently orders by that same
 #'   column), UNLESS an explicit `order_by=`/`order_by()`/`with_order()`
-#'   override (Phase 5 W4, `R/ir.R`'s `ir_parse_with_order()`) is
+#'   override (`R/ir.R`'s `ir_parse_with_order()`) is
 #'   present, in which case that wins for ANY window kind (shift/rank/agg)
 #' @param order_desc Logical vector, parallel to `order_cols`, `TRUE` for
 #'   descending
@@ -43,9 +43,9 @@
 #'   applicable
 #' @param default An IR literal node (the op's constant fill/default
 #'   value), or `NULL` if not applicable/not supplied
-#' @param na_rm Logical scalar, `FALSE` unless a future wave adds an
-#'   `na_rm=`-aware window op
-#' @param input_type (F80) GPU type string of an integer `sum()`'s argument
+#' @param na_rm Logical scalar, the call's `na_rm=` setting (`FALSE` unless
+#'   the call sets it)
+#' @param input_type GPU type string of an integer `sum()`'s argument
 #'   (`"INT32"` or `"BOOL8"`), `NA_character_` for every other call; a lazy
 #'   `mutate()` runs a call holding an INT32 sum at the verb (see
 #'   `window_spec_int_sum()`)
@@ -257,11 +257,11 @@ extract_one_window_call <- function(node, schema, state, key = NULL) {
 
 #' Extract innermost window calls from an IR tree (one decomposition pass)
 #'
-#' Implements section 1.2's decomposition algorithm: a single bottom-up
+#' The decomposition algorithm: a single bottom-up
 #' walk that replaces every window-class call node whose OWN arguments
 #' contain no (nested) window call anywhere -- i.e. every *innermost*
 #' window call -- with an `ir_col()` reference to a freshly materialized
-#' (or, on a cache hit, previously materialized) temp column, leaving any
+#' (or, on a cache hit, already materialized) temp column, leaving any
 #' window call that is NOT yet innermost (its arguments still contain a
 #' deeper window call) untouched under its own op name for a later pass
 #' (see [plan_window_stages()]'s driving loop) once that deeper call has
@@ -373,10 +373,10 @@ ir_nested_window_sum_keys <- function(ir) {
 
 #' Split a named list of per-dot expressions into window-decomposition batches
 #'
-#' Pure index-partitioning: implements section 1.2's chunking rule in
-#' isolation from [plan_window_stages()]'s own stage-building loop, so a
+#' Pure index-partitioning: implements the chunking rule below in
+#' isolation from `plan_window_stages()`'s own stage-building loop, so a
 #' verb's own AST-emission wiring (`R/mutate.R`'s `mutate_window()`, and the
-#' analogous `R/filter.R`/`R/slice.R` wiring from W5/W6/W7 onward) can drive
+#' analogous wiring in `R/filter.R`/`R/slice.R`) can drive
 #' [decompose_window_group()] batch-by-batch itself -- interleaving each
 #' batch's own materializing verb node between batches, which
 #' [plan_window_stages()]'s single flat call cannot do (see that function's
@@ -531,9 +531,8 @@ decompose_window_group <- function(exprs, schema, win_n = 0L, winarg_n = 0L,
 #'
 #' Drives [ir_extract_windows()] to full fixed point (every window call
 #' resolved) for each verb-level "dot" in `exprs`, applying the multi-dot
-#' chunking rule from `scratchpad/phase5_window_design.md` section 1.2:
-#' dots are processed in order and batched together (decomposed jointly,
-#' sharing CSE and stage passes) UNLESS a later dot's window-call
+#' chunking rule: dots are processed in order and batched together
+#' (decomposed jointly, sharing CSE and stage passes) UNLESS a later dot's window-call
 #' arguments reference an earlier dot's OWN output column name (from the
 #' *current* batch) -- in which case that later dot starts a new batch,
 #' after the finished batch's own dot outputs are folded into the running
@@ -541,8 +540,7 @@ decompose_window_group <- function(exprs, schema, win_n = 0L, winarg_n = 0L,
 #'
 #' This is a pure planning function: it builds the stage/spec/pre-mutate
 #' structures a verb will later turn into actual `ast_mutate`/`ast_window`
-#' nodes (section 1.3; not implemented until W2/W3) -- no AST node is
-#' built here, and nothing is pushed onto any `tbl_gpu`.
+#' nodes -- no AST node is built here, and nothing is pushed onto any `tbl_gpu`.
 #'
 #' @param exprs A *named* list of IR nodes, one per dot, in verb-call
 #'   order; `names(exprs)` are the dots' intended output column names
@@ -550,9 +548,9 @@ decompose_window_group <- function(exprs, schema, win_n = 0L, winarg_n = 0L,
 #' @param schema The schema `exprs` were parsed against (list(names=,
 #'   types=))
 #' @param group_cols Character vector of group-by column names (passed
-#'   through unchanged for a future `ast_window()` to consume -- W1's own
-#'   decomposition logic doesn't need to inspect these at all)
-#' @param sums (F42) How an integer/logical window `sum()` is typed. `"int"`
+#'   through unchanged for `ast_window()` to consume -- the decomposition
+#'   logic doesn't need to inspect these at all)
+#' @param sums How an integer/logical window `sum()` is typed. `"int"`
 #'   (default): INT32, as dplyr's integer sum. `"lenient"` (lazy `filter()`,
 #'   whose window nodes are flagged `on_sum_overflow = "double"`): INT32 too, and a
 #'   top-level sum may come back FLOAT64 when it overflows; one that feeds a

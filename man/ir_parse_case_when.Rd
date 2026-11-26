@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{ir_parse_case_when}
 \alias{ir_parse_case_when}
-\title{Parse a \code{case_when()} call into IR (Phase 4)}
+\title{Parse a \code{case_when()} call into IR}
 \usage{
 ir_parse_case_when(expr, env, schema)
 }
@@ -25,7 +25,7 @@ every other \code{ir_call_registry} entry, this is invoked directly from
 generic per-arg parse loop. Recognizes exactly: any number of two-sided
 \code{cond ~ value} clauses, plus an optional \code{.default = value} named
 argument. Returns \code{NULL} (unsupported, caller falls back per the normal
-contract) for anything else this Phase-4 wave doesn't implement yet:
+contract) for anything else, which isn't supported:
 \verb{.ptype=}, \verb{.size=}, \verb{.unmatched=}, one-sided formulas, non-formula dots,
 or zero clauses.
 }

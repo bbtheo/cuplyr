@@ -14,8 +14,8 @@ List with \code{names}, \code{types}, and (if any survive) \code{factor_levels}
 }
 \description{
 \code{infer_schema()} (R/ast.R) computes \code{names}/\code{types} recursively via each
-node type's own S3 method, but only \code{infer_schema.ast_join} (Phase 11 L2,
-Bug 1) threads \code{factor_levels} through on its own -- every other node
+node type's own S3 method, but only \code{infer_schema.ast_join} threads
+\code{factor_levels} through on its own -- every other node
 type (filter/mutate/select/arrange/summarise/distinct/slice/rename/
 window/barrier) relies entirely on \code{push_op()}'s separate
 \code{propagate_factor_levels()} step, which only ever ran at op-construction

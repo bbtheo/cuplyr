@@ -13,11 +13,11 @@
 
 #' Run a dplyr verb on the CPU and re-upload the result
 #'
-#' The core Phase-2 fallback primitive. Materializes any pending lazy
+#' The core CPU fallback primitive. Materializes any pending lazy
 #' operations, collects `.data` to a tibble (restoring `group_by()` structure
 #' from `.data$groups` so grouped semantics apply on the CPU exactly as they
 #' would on a real `grouped_df`; a rowwise table becomes dplyr's `rowwise_df`
-#' of its rowwise vars, F49), applies `expr_fn` (which should call the
+#' of its rowwise vars), applies `expr_fn` (which should call the
 #' real dplyr verb), and re-uploads the result via [tbl_gpu()] (a `rowwise_df`
 #' result goes back up as a rowwise table).
 #'
@@ -47,10 +47,9 @@
 #'   returned unchanged, never re-uploaded -- for a verb that returns
 #'   metadata *about* the grouping/data rather than a transformed dataset,
 #'   even when that metadata happens to be a small data frame (dplyr's own
-#'   grouping-metadata queries, e.g. `group_data()`/`group_keys()`, used to
-#'   be implemented this way -- Phase 9 task 1 made them GPU-native instead,
-#'   see R/group-by.R -- but the parameter stays for any future fallback
-#'   verb with the same "always a plain R object" shape).
+#'   grouping-metadata queries, e.g. `group_data()`/`group_keys()`, are
+#'   GPU-native and don't use it, see R/group-by.R; the parameter is for any
+#'   fallback verb with the same "always a plain R object" shape).
 #' @return Either a new `tbl_gpu` (grouping, execution mode, and factor
 #'   levels restored/round-tripped), or `expr_fn`'s raw return value
 #'   unchanged when: `as_is = TRUE`; the result isn't a data frame at all
@@ -407,7 +406,7 @@ fallback_failed_remap <- function(origin) {
   invisible(NULL)
 }
 
-#' The reason a verb call's dot goes to the CPU (F88)
+#' The reason a verb call's dot goes to the CPU
 #'
 #' Reads what the call's own decision recorded (see the collector notes in
 #' `R/fallback.R`): the reason claimed for the failing dot, with that dot's text
@@ -511,8 +510,7 @@ collect_other_side <- function(y) {
 #' CPU fallback methods for dplyr verbs without a GPU-native implementation
 #'
 #' `cuplyr` implements every dplyr generic on `tbl_gpu`, but not every one of
-#' them runs natively on the GPU yet (see `scratchpad/todo.md` for the
-#' phase-by-phase rollout). The methods documented here provide a
+#' them runs natively on the GPU. The methods documented here provide a
 #' *transparent CPU fallback*: they materialize any pending lazy operations,
 #' [collect()] `.data` to a tibble (restoring `group_by()` structure from
 #' `.data`'s grouping so grouped semantics apply exactly as on a real

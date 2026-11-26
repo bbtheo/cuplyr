@@ -14,7 +14,7 @@ above) rather than reusing \code{case_when}'s node, since case_when's own
 common-type-unify rule is wrong here.
 }
 \details{
-Only the two-sided-formula clause interface is implemented this wave:
+Only the two-sided-formula clause interface is supported:
 \verb{from=}/\verb{to=} (the vector-lookup-table interface) being present at all
 makes this return \code{NULL} (fall back).
 }

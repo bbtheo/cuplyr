@@ -14,8 +14,8 @@ cast_column(tbl, col_name, target_type, source_levels = NULL)
 \item{target_type}{Target type string}
 
 \item{source_levels}{For a \code{DICTIONARY32} source column being cast to
-\code{STRING} (dplyr's factor + character -> character contract, Bug 3 of
-Phase 11 L2): this column's OWN level vector, decoded via
+\code{STRING} (dplyr's factor + character -> character contract): this
+column's OWN level vector, decoded via
 \code{gpu_decode_factor()} instead of \code{gpu_cast_to_string()}'s numeric-only
 path (which only ever sees the PHYSICAL INT32 column and would
 silently emit its raw codes as strings, e.g. \code{"2"} instead of \code{"m"}).

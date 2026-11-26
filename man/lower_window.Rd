@@ -7,13 +7,12 @@
 lower_window(ast, source_ptr)
 }
 \description{
-Phase 5, task W2 (\code{scratchpad/phase5_window_design.md} section 2.1):
-binds every spec's \code{value_col}/\code{order_cols} (and the node's own
+Binds every spec's \code{value_col}/\code{order_cols} (and the node's own
 \code{group_cols}) to 0-based indices against \code{ast$input}'s schema, groups the
 specs into "frames" keyed by \verb{(order_cols, order_desc)}, and hands ONE
 \code{gpu_window()} call (\code{src/ops_window.cpp}) to the C++ side: the
 six-step stable-sort / gather / groupby-scan-or-shift / scatter-back
-algorithm (section 2.2).
+algorithm.
 }
 \details{
 \code{out_pos} (each spec's 0-based position among the node's own appended
@@ -22,14 +21,13 @@ columns) is simply the spec's position in \code{ast$specs} -- the same order
 the two always agree on where a given spec's result lands in the final
 schema.
 
-As of Phase 5 task W4, every window kind is lowerable: the "shift"
+Every window kind is lowerable: the "shift"
 family (\code{lag()}/\code{lead()}), the "scan" family (\code{cumsum()}/\code{cummax()}/
 \code{cummin()}/\code{cumprod()}, plus bare \code{row_number()}'s no-order COUNT_ALL
 form), the "rank" family (\code{row_number(x)}/\code{min_rank()}/\code{dense_rank()}/
 \code{percent_rank()}/\code{cume_dist()}), and the "agg" family
 (\code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{n()}/\code{sd()}/\code{var()}/\code{first()}/
-\code{last()}/\code{nth()}) -- see \code{validate_window_spec()}. A later task (the
-rolling-window benchmark, scratchpad/todo.md) adds a sixth, "rolling"
+\code{last()}/\code{nth()}) -- see \code{validate_window_spec()} -- plus the "rolling" family
 (\code{roll_mean()}/\code{roll_sum()}/\code{roll_min()}/\code{roll_max()}/\code{roll_sd()}, but
 NOT \code{roll_median()} -- see \code{window_spec_lowerable()}'s own docs). A spec
 whose \code{fn} isn't recognized AT ALL (no registry entry, or a registry

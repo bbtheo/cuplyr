@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{ir_parse_grepl}
 \alias{ir_parse_grepl}
-\title{Parse \code{grepl(pattern, x, ignore.case = FALSE, perl = FALSE, fixed = FALSE, useBytes = FALSE)} (Phase 11 L5)}
+\title{Parse \code{grepl(pattern, x, ignore.case = FALSE, perl = FALSE, fixed = FALSE, useBytes = FALSE)}}
 \usage{
 ir_parse_grepl(expr, env, schema)
 }

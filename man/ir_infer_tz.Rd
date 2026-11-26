@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{ir_infer_tz}
 \alias{ir_infer_tz}
-\title{Infer the time zone of a POSIXct-valued IR node (F32)}
+\title{Infer the time zone of a POSIXct-valued IR node}
 \usage{
 ir_infer_tz(ir, schema)
 }
