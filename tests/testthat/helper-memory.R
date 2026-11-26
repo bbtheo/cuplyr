@@ -108,11 +108,13 @@ gpu_child_state <- new.env(parent = emptyenv())
 # environment has gpu_own_device_used_bytes() and gpu_own_delta() before `func`
 # runs. `func` is re-homed to the child's global environment, so it can't rely
 # on its defining environment (functions inside `args` travel with a serialized
-# copy of theirs); `env` adds environment variables for the child.
+# copy of theirs, except those whose environment reaches a namespace: see
+# child_defer_closures()); `env` adds environment variables for the child.
 gpu_child_r <- function(func, args = list(), env = character(), timeout = 600) {
   skip_if_not_installed("callr")
   gpu_child_state$free_before <- gpu_free_for_child()
   environment(func) <- globalenv()
+  args <- child_defer_closures(args)
   readers <- list(gpu_own_device_used_bytes = gpu_own_device_used_bytes,
                   gpu_own_delta = gpu_own_delta)
   readers <- lapply(readers, function(f) {
@@ -128,6 +130,47 @@ gpu_child_r <- function(func, args = list(), env = character(), timeout = 600) {
     env = c(callr::rcmd_safe_env(), env),
     timeout = timeout
   )
+}
+
+# Does the environment chain of `f` reach a namespace (other than base) before
+# the global environment? The tests' environment is rooted at
+# asNamespace("cuplyr") when the package's own test runner (test_check()) runs
+# them, so a function made in a test does.
+child_chain_has_namespace <- function(f) {
+  e <- environment(f)
+  while (!is.null(e) && !identical(e, emptyenv())) {
+    if (identical(e, globalenv()) || identical(e, baseenv()) || identical(e, .BaseNamespaceEnv)) {
+      return(FALSE)
+    }
+    if (isNamespace(e)) return(TRUE)
+    e <- parent.env(e)
+  }
+  FALSE
+}
+
+# A function that reaches the child through `args` is serialized with its
+# environment chain, and R writes a namespace in that chain as a reference: the
+# child reads the payload by running loadNamespace("cuplyr"), before the child
+# function has set its options or loaded the package under test. .onLoad then
+# installs the memory resource from the environment variables alone and its
+# warnings fire outside the child's handlers. Under tools/test the tests'
+# environment descends from the global environment, so nothing shows there;
+# under test_check() it does. So a function with a namespace in its chain
+# travels as its serialized bytes inside a stub that reads them on first call,
+# when the child has loaded the package and the namespace is found, not loaded.
+# Plain lists are searched for such functions; the chain still travels by value.
+child_defer_closures <- function(x) {
+  if (is.function(x)) {
+    if (is.primitive(x) || !child_chain_has_namespace(x)) return(x)
+    payload <- serialize(x, NULL)
+    stub <- function(...) unserialize(payload)(...)
+    environment(stub) <- list2env(list(payload = payload), parent = globalenv())
+    return(stub)
+  }
+  if (is.list(x) && !is.object(x)) {
+    for (i in seq_along(x)) x[i] <- list(child_defer_closures(x[[i]]))
+  }
+  x
 }
 
 # The root of the package source tree these tests run in, or NULL when they run
