@@ -1,5 +1,33 @@
 # cuplyr (development version)
 
+* `round(x, digits)` is about a quarter faster on the GPU: the two candidates of
+  R's rounding rule are each computed once, and the sign and the rows that
+  need no rounding are handled on the bits of the double. Results are
+  unchanged, bit for bit (#75).
+
+* `summarise()` with no expressions on a `.drop = FALSE` grouping reads only
+  the group keys and, when no group is empty, takes the same plain GPU path as
+  `.drop = TRUE`, instead of downloading every group's row indices (#75).
+
+* `mutate()` with hundreds of expressions in one call no longer slows down
+  with every expression added: names and types are looked up in hashes, and
+  the GPU evaluates each expression on just the columns it reads (#75).
+
+* `quantile()` with many probabilities over many groups (`reframe()` of a
+  vector of `probs`, or a `summarise()` of many `quantile()` calls) asks cudf
+  for all the probabilities of a column at once, does the index arithmetic
+  once, and builds its argument list faster. It interpolates as R does, from
+  the two neighbouring values, so its values are R's to the bit (#75).
+
+* A `summarise()` `quantile()` whose `probs`, `names`, `digits` or `type`
+  reads a column (`quantile(x, p)` with a column `p`) is evaluated by dplyr,
+  in the data mask. Before, a variable of that name outside the data was used
+  instead (#75).
+
+* `reframe()` of a single-probability `quantile(x, p, names = FALSE)` returns
+  an unnamed column, as dplyr does. Before, the `names = FALSE` was dropped and
+  the values came back with `"50%"`-style names (#75).
+
 * The minimum GPU is now stated as compute capability 7.5 (Turing): every install route installs a RAPIDS built for CUDA 13, which has no code for Volta (7.0) GPUs (#150).
 
 * cuplyr is available as a conda package: users can install `r-cuplyr` from the `bbtheo` channel on anaconda.org with conda, mamba or pixi (see the README). The recipe (`conda/recipe.yaml`) is built and uploaded with rattler-build, with the maintainer steps in `conda/README.md`. The package is built against one RAPIDS series (26.10 by default; 26.02 and later can be built) and links the CUDA stub for libcuda only as needed, so it builds and loads without a GPU and uses the user's driver at run time. For this, `configure` accepts `CUPLYR_FORCE_CUDA_STUBS=1`, which always links the toolkit's stub and fails if there is none; a normal source install is unchanged (#135).

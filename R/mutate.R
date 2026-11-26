@@ -1240,6 +1240,12 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
   # counted per dot, and with an empty group a dot whose type depends on the
   # data gets its root cast to the double dplyr gives it (minmax_dot_root()).
 
+  # (#75) a call of many dots looks names and types up in hashes, not by scanning
+  # (an output name that can't key an environment is not hashed either)
+  if (length(dots) >= MUTATE_HASH_MIN && names_hashable(names(dots))) schema <- schema_hash_new(schema)
+  # (the type counts of a hash a NULL dot dropped, while a rebuild is due)
+  rehash <- NULL
+
   expressions <- list()
   has_window <- FALSE
   has_vec <- FALSE
@@ -1344,11 +1350,23 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     if (identical(const$kind, "null")) {
       dropped <- set_union(dropped, new_name)
       keep_idx <- schema$names != new_name
-      schema$names <- schema$names[keep_idx]
-      schema$types <- schema$types[keep_idx]
+      if (!isTRUE(all(keep_idx))) {
+        schema$names <- schema$names[keep_idx]
+        schema$types <- schema$types[keep_idx]
+        # (#75: positions moved; the hash is built again before the next dot
+        # that isn't NULL, so a run of NULL dots costs one build)
+        if (!is.null(.subset2(schema, ".hash"))) {
+          rehash <- .subset2(schema, ".hash")[["tcount"]]
+          schema$.hash <- NULL
+        }
+      }
       schema <- set_schema_factor_levels(schema, new_name, NULL)
       forget_frac(new_name)
       next
+    }
+    if (!is.null(rehash)) {
+      schema <- schema_hash_new(schema, rehash)
+      rehash <- NULL
     }
 
     floored <- NULL
@@ -1523,7 +1541,26 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     }
 
     # Update the running schema so subsequent dots see this dot's output.
-    schema <- update_schema_for_expr(schema, step)
+    # (#75) A many-dot call's simple step is done here, without the call and
+    # the c() of update_schema_for_expr(), which is the rule. The append still
+    # copies `names`/`types` (the step's checked-int cell and the type memo
+    # hold the schema it was typed against), a plain copy per dot.
+    if (!is.null(.subset2(schema, ".hash")) && is.null(.subset2(schema, "factor_levels")) &&
+          is.null(.subset2(schema, "tz")) &&
+          !(unname(step$output_type) %in% c("TIMESTAMP_MICROSECONDS", "DICTIONARY32"))) {
+      existing_idx <- ir_schema_pos(schema, step$output_col)
+      if (!is.na(existing_idx)) {
+        schema_hash_retype(schema, existing_idx, step$output_type)
+        schema$types[[existing_idx]] <- unname(step$output_type)
+      } else {
+        n_cols <- length(.subset2(schema, "names")) + 1L
+        schema$names[[n_cols]] <- step$output_col
+        schema$types[[n_cols]] <- unname(step$output_type)
+        schema_hash_append(schema, step$output_col, step$output_type)
+      }
+    } else {
+      schema <- update_schema_for_expr(schema, step)
+    }
   }, error = function(cnd) {
     # `&&`/`||` of a column: one value per call, so dplyr gives the result of a
     # length-one one and its own error for a vector. Its to evaluate, whole.
@@ -1999,12 +2036,15 @@ update_schema_for_expr <- function(schema, expr) {
   # a factor nor a POSIXct: only the name and type change.
   if (is.null(schema$factor_levels) && is.null(schema$tz) &&
       !(unname(expr$output_type) %in% c("TIMESTAMP_MICROSECONDS", "DICTIONARY32"))) {
-    existing_idx <- match(expr$output_col, schema$names)
+    hashed <- !is.null(.subset2(schema, ".hash"))
+    existing_idx <- if (hashed) ir_schema_pos(schema, expr$output_col) else match(expr$output_col, schema$names)
     if (!is.na(existing_idx)) {
+      if (hashed) schema_hash_retype(schema, existing_idx, expr$output_type)
       schema$types[existing_idx] <- expr$output_type
     } else {
       schema$names <- c(schema$names, expr$output_col)
       schema$types <- c(schema$types, expr$output_type)
+      if (hashed) schema_hash_append(schema, expr$output_col, expr$output_type)
     }
     return(schema)
   }
@@ -2024,13 +2064,15 @@ update_schema_for_expr <- function(schema, expr) {
     "UTC"
   }
 
-  existing_idx <- match(expr$output_col, schema$names)
+  existing_idx <- ir_schema_pos(schema, expr$output_col)
 
   if (!is.na(existing_idx)) {
+    schema_hash_retype(schema, existing_idx, expr$output_type)
     schema$types[existing_idx] <- expr$output_type
   } else {
     schema$names <- c(schema$names, expr$output_col)
     schema$types <- c(schema$types, expr$output_type)
+    schema_hash_append(schema, expr$output_col, expr$output_type)
   }
 
   set_schema_tz(schema, expr$output_col, zone)
