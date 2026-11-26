@@ -27,10 +27,10 @@ capability 7.5 or higher.
 
 * Results that differed from dplyr now match it:
   - Grouping follows dplyr. `summarise()` drops only the last grouping column
-    by default (`.groups = "drop_last"`, with a message like dplyr's), `select()`
-    keeps the grouping columns, joins keep `x`'s groups, `collect()` returns
-    a `grouped_df`, and `tbl_gpu()` keeps the groups of a `grouped_df`. In
-    0.1.1 each of these dropped the groups.
+    by default (`.groups = "drop_last"`, with a message like dplyr's),
+    `select()` keeps the grouping columns, joins keep `x`'s groups,
+    `collect()` returns a `grouped_df`, and `tbl_gpu()` keeps the groups of a
+    `grouped_df`. In 0.1.1 each of these dropped the groups.
   - `summarise()` aggregates follow R's `na.rm = FALSE` default, so a group
     with an `NA` gives `NA`.
   - `arrange(desc(x))` puts `NA` last.
