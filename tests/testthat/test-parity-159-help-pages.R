@@ -86,7 +86,7 @@ test_that("exported help pages don't point at source files or libcudf functions"
                 paste(utils::head(bad, 40L), collapse = "\n")))
 })
 
-test_that("exported help pages don't name cuplyr's internal functions", {
+test_that("exported help pages don't name cuplyr's internal functions or fields", {
   p159_skip_if_no_dir("man")
   ns_file <- file.path(p159_root(), "NAMESPACE")
   skip_if_not(file.exists(ns_file), "NAMESPACE not available in this test context")
@@ -103,10 +103,16 @@ test_that("exported help pages don't name cuplyr's internal functions", {
   internal <- setdiff(fns, c(exports, others))
   internal <- internal[grepl("^[A-Za-z][A-Za-z0-9_]*$", internal)]
   expect_gt(length(internal), 50L)
-  pattern <- paste0("(?<![A-Za-z0-9_.])(", paste(internal, collapse = "|"), ")\\(")
+  alts <- paste(internal, collapse = "|")
+  # a call `fn()`, or a link `\\link[=fn]{...}`
+  call_pattern <- paste0("(?<![A-Za-z0-9_.])(", alts, ")\\(")
+  link_pattern <- paste0("\\[=(", alts, ")\\]")
   files <- Filter(Negate(p159_is_internal), p159_rd_files())
   body <- function(lines) !grepl("^%", lines)
-  bad <- p159_offenders(files, c(internal_function = pattern), keep = body)
+  fields <- "lazy_ops|(?<![.\\w])exec_mode\\b|\\$group_drop|\\$fixed_keys"
+  bad <- p159_offenders(files, c(internal_function = call_pattern, internal_link = link_pattern,
+                          internal_field = fields),
+                        keep = body)
   expect(length(bad) == 0L,
          paste0(length(bad), " exported Rd line(s) name an internal function:\n",
                 paste(utils::head(bad, 40L), collapse = "\n")))
@@ -119,7 +125,7 @@ test_that("exported help pages carry no development history", {
     history = paste0("(?i)\\b(fixed in|older versions of this package|now-removed|",
                      "previously (a |CPU )?fallback|planned for a later phase|",
                      "as of (this|the) (phase|wave|task)|this wave|",
-                     "historical(ly)?|verified empirically|not assumed|checked on \\d)\\b")
+                     "historical(ly)?|verified empirically|not assumed|checked on \\d+)\\b")
   )
   body <- function(lines) !grepl("^%", lines)
   bad <- p159_offenders(files, patterns, keep = body)
