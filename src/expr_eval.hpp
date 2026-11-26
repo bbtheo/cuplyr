@@ -360,7 +360,7 @@ struct eval_ctx {
         cudf::column_view col = cols[idx];
         if (col.type().id() == cudf::type_id::FLOAT64 && col.size() > 0) {
             if (col.offset() == 0) {
-                auto mask = cudf::nans_to_nulls(col);
+                auto mask = cuplyr::nan_null_mask(col);
                 if (mask.second > col.null_count()) {
                     cudf::column_view v(col.type(), col.size(), col.head(),
                                         static_cast<cudf::bitmask_type const*>(mask.first->data()),
@@ -2681,7 +2681,7 @@ inline std::unique_ptr<cudf::column> apply_double_mod(Rcpp::List node, eval_ctx&
         std::vector<cudf::column_view> src;
         if (xo.col_idx >= 0) src.push_back(ctx.cols[xo.col_idx]);
         if (yo.col_idx >= 0) src.push_back(ctx.cols[yo.col_idx]);
-        auto rows = cudf::apply_boolean_mask(cudf::table_view(src), flagged->view())->release();
+        auto rows = cuplyr::apply_retention_mask(cudf::table_view(src), flagged->view())->release();
         // (the gathered columns are the sub-context's inputs, owned here, so
         // that its release_from() frees what `fix` pushes)
         eval_ctx sub;
@@ -3492,7 +3492,7 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
     //                   gives +-Inf and raises flag 4 / 8 (R's warning).
     //                   Zero rows raise 16 / 32 (INT32) or 4 / 8 (FLOAT64).
     // FLOAT64 operands add R's NaN rules: under na.rm = TRUE a NaN is missing
-    // too (nans_to_nulls first); under na.rm = FALSE min/max give NaN for a
+    // too (the NaN-as-null mask first); under na.rm = FALSE min/max give NaN for a
     // NaN operand unless an NA is present (NA wins), whatever the operand
     // order, and sum/mean/prod propagate NaN arithmetically.
     // An INT32 sum accumulates in INT64 and raises flag 1 when a row leaves
@@ -3577,7 +3577,7 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
                 // a GPU-computed NaN is a missing value to R's na.rm = TRUE
                 // (cuplyr's summarise() agrees, F22): make it null, so the
                 // neutral fill, the mean's count and the min/max fold skip it
-                auto nn = cudf::nans_to_nulls(x->view());
+                auto nn = cuplyr::nan_null_mask(x->view());
                 if (nn.second > 0 || x->null_count() > 0) {
                     x->set_null_mask(std::move(*nn.first), nn.second);
                 }
@@ -3693,9 +3693,7 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
         Rcpp::List stop_node = args[2];
         int32_t start0 = Rcpp::as<int32_t>(start_node["value"]);
         int32_t stop0 = Rcpp::as<int32_t>(stop_node["value"]);
-        cudf::numeric_scalar<cudf::size_type> start_scalar(start0, true);
-        cudf::numeric_scalar<cudf::size_type> stop_scalar(stop0, true);
-        return cudf::strings::slice_strings(sv, start_scalar, stop_scalar);
+        return cuplyr::slice_strings_range(sv, start0, stop0);
     }
 
     // ---- trimws(x, which): strip.hpp (Phase 11 L5) ----

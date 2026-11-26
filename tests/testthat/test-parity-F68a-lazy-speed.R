@@ -43,6 +43,7 @@ f68s_chain <- function(d, k) {
 }
 
 test_that("recording a verb costs the same on a deep pending plan as on a shallow one", {
+  skip_timing_under_check()
   skip_if_no_gpu()
   lz <- tbl_gpu(f68s_df(1000L), lazy = TRUE)
   shallow <- f68s_chain(lz, 1L)   # 3 pending nodes
@@ -82,6 +83,7 @@ test_that("collecting a plan costs time linear in its depth", {
   p40 <- f68s_chain(lz, 40L)   # 120 pending nodes
   expect_equal(collect(p40), collect(f68s_chain(tbl_gpu(f68s_df(1000L), lazy = FALSE), 40L)))
   # 4x the nodes: linear work is ~4x; the quadratic schema re-inference was far more.
+  skip_timing_under_check()
   runs <- timing_retry(
     function() {
       timing_medians(list(c10 = function() collect(p10), c40 = function() collect(p40)),
@@ -102,6 +104,7 @@ test_that("F62's 5-verb pipeline is no slower lazy than eager at 1e3 and 1e6 row
     eg <- tbl_gpu(df, lazy = FALSE)
     lz <- tbl_gpu(df, lazy = TRUE)
     expect_equal(collect(f68s_pipeline(lz)), collect(f68s_pipeline(eg)))
+    if (!timing_enabled()) next
     runs <- timing_retry(
       function() {
         timing_medians(list(

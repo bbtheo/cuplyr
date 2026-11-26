@@ -296,6 +296,11 @@ capability 7.5 or higher.
 * Lazy plans with chained joins, or a `mutate()` that overwrites a column,
   give the right result.
 
+* The namespace loads with only its stated dependencies (it failed when utils
+  was not attached, which `R CMD check` reports), `rowwise()`'s method takes
+  `data` like the generic, and the C++ code no longer uses the APIs libcudf
+  26.10 deprecates (#166).
+
 # cuplyr 0.1.1
 
 ## Bug fixes

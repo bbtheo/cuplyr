@@ -21,7 +21,7 @@ Pure index-partitioning: implements section 1.2's chunking rule in
 isolation from \code{\link[=plan_window_stages]{plan_window_stages()}}'s own stage-building loop, so a
 verb's own AST-emission wiring (\code{R/mutate.R}'s \code{mutate_window()}, and the
 analogous \code{R/filter.R}/\code{R/slice.R} wiring from W5/W6/W7 onward) can drive
-\code{\link[=decompose_window_group]{decompose_window_group()}} batch-by-batch itself -- interleaving each
+\code{decompose_window_group()} batch-by-batch itself -- interleaving each
 batch's own materializing verb node between batches, which
 \code{\link[=plan_window_stages]{plan_window_stages()}}'s single flat call cannot do (see that function's
 docs: it folds each batch's dot outputs into its \emph{own} running schema
@@ -33,6 +33,6 @@ bookkeeping only, it never emits or knows about AST nodes) -- while
 \details{
 Dots are processed in order and batched together UNLESS a later dot's
 window-call arguments reference an earlier dot's OWN output column name
-(from the \emph{current} batch) -- see \code{\link[=window_arg_cols]{window_arg_cols()}}.
+(from the \emph{current} batch) -- see \code{window_arg_cols()}.
 }
 \keyword{internal}

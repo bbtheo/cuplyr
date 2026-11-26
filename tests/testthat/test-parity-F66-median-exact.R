@@ -297,7 +297,7 @@ test_that("F66: the exact default stays fast at 1e6 rows for w = 11/101/1001", {
   for (w in c(11L, 101L, 1001L)) {
     for (na_rm in c(FALSE, TRUE)) {
       t <- system.time(r <- roll_median(x, w, na.rm = na_rm))[["elapsed"]]
-      expect_lt(t, 2)
+      if (timing_enabled()) expect_lt(t, 2)
       idx <- 20000:20400
       expect_identical(r[idx], f66_ref(x[(20000 - w + 1):20400], w, na_rm)[-(1:(w - 1))],
                        info = sprintf("w=%d na.rm=%s", w, na_rm))

@@ -7,7 +7,8 @@
 // gpu_filter_expr() (src/ops_expr.cpp) instead -- gpu_filter_scalar()/
 // gpu_filter_col() were deleted in Phase 1 T8 once that cutover left them
 // with no remaining R callers.
-#include <rmm/cuda_stream_view.hpp>
+#include "cuplyr_compat.hpp"
+#include <cudf/utilities/default_stream.hpp>
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
 
@@ -68,7 +69,7 @@ SEXP gpu_filter_mask(SEXP xptr, LogicalVector mask) {
     }
 
     rmm::device_buffer data(n * sizeof(int8_t),
-                           rmm::cuda_stream_view(),
+                           cudf::get_default_stream(),
                            rmm::mr::get_current_device_resource_ref());
     if (n > 0) {
         check_cuda(cudaMemcpy(data.data(), bool_data.data(), n * sizeof(int8_t), cudaMemcpyHostToDevice),
@@ -78,7 +79,7 @@ SEXP gpu_filter_mask(SEXP xptr, LogicalVector mask) {
     rmm::device_buffer null_mask;
     if (null_count > 0) {
         null_mask = rmm::device_buffer(validity.data(), validity.size(),
-                                       rmm::cuda_stream_view(),
+                                       cudf::get_default_stream(),
                                        rmm::mr::get_current_device_resource_ref());
     }
 
@@ -90,6 +91,6 @@ SEXP gpu_filter_mask(SEXP xptr, LogicalVector mask) {
         null_count
     );
 
-    auto result = cudf::apply_boolean_mask(view, mask_col->view());
+    auto result = cuplyr::apply_retention_mask(view, mask_col->view());
     return make_gpu_table_xptr(std::move(result));
 }

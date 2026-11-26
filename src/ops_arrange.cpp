@@ -62,12 +62,18 @@ SEXP gpu_arrange(SEXP xptr, IntegerVector col_indices, LogicalVector descending)
     // F55: a floating NaN sorts as NA (vctrs ties NaN with NA, both last in
     // either direction, original order kept); cudf would order it above +Inf.
     // Only the sort key is nulled, the gather below takes the original rows.
+    // An ascending key without nulls needs no nulling: libcudf sorts NaN after
+    // every number (+Inf included) and ties NaN with NaN, so the stable sort
+    // already puts the NaN rows last in their original order, where nulls
+    // would go. A descending key (NaN would sort first) or one holding nulls
+    // (NaN would sort before the nulls instead of tying with them) is nulled.
     std::vector<cudf::column_view> key_views;
     std::vector<std::unique_ptr<cudf::column>> nan_nulled_keys;
     key_views.reserve(num_keys);
     for (int i = 0; i < num_keys; ++i) {
         cudf::column_view key = view.column(col_indices[i]);
-        if (auto nulled = nan_nulled_copy(key)) {
+        const bool nan_sorts_last = !descending[i] && key.null_count() == 0;
+        if (auto nulled = nan_sorts_last ? nullptr : nan_nulled_copy(key)) {
             nan_nulled_keys.push_back(std::move(nulled));
             key = nan_nulled_keys.back()->view();
         }

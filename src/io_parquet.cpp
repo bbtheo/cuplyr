@@ -17,6 +17,7 @@
 // returned pointer, like the collect path (F105's marker rule). libcudf's own
 // exceptions pass through as C++ errors and R maps them.
 
+#include "cuplyr_compat.hpp"
 #include <variant>  // libcudf 26.10's cudf/ast/expressions.hpp uses std::variant without including it
 #include "cuda_utils.hpp"
 #include "gpu_table.hpp"
@@ -524,7 +525,7 @@ SEXP gpu_parquet_read(CharacterVector paths, SEXP columns, double num_rows,
         CharacterVector cv(columns);
         std::vector<std::string> cols;
         for (R_xlen_t i = 0; i < cv.size(); ++i) cols.push_back(path_at(cv, i));
-        builder.columns(cols);
+        cuplyr::parquet_builder_column_names(builder, std::move(cols));
     }
     if (num_rows >= 0) builder.num_rows(static_cast<int64_t>(num_rows));
     if (filter.root) builder.filter(*filter.root);

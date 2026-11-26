@@ -42,6 +42,7 @@
 
 #include <rmm/aligned.hpp>
 #include <rmm/cuda_device.hpp>
+#include <rmm/cuda_stream_view.hpp>  // upstream_stream() and the 26.02 bridge name it
 #include <rmm/error.hpp>
 #include <rmm/mr/cuda_async_memory_resource.hpp>
 #include <rmm/mr/cuda_memory_resource.hpp>

@@ -28,7 +28,7 @@ few values -- similar to \code{dplyr::glimpse()}.
 Unlike the (now-removed) Phase 2 CPU-fallback \code{glimpse()}, this
 implementation never collects the whole table to R: any pending lazy
 operations are materialized (via \code{\link[dplyr:compute]{compute()}}), but the actual preview data comes
-from a small, capped row sample (like \code{\link[=print.tbl_gpu]{print.tbl_gpu()}}), and row/column
+from a small, capped row sample (like \code{print.tbl_gpu()}), and row/column
 counts/types come from lightweight metadata calls -- never a full
 \code{collect()}.
 

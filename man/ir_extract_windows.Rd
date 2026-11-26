@@ -19,7 +19,7 @@ construction -- callers advance to a new schema between passes, see
 \code{\link[=plan_window_stages]{plan_window_stages()}})}
 
 \item{state}{A mutable environment as described in
-\code{\link[=extract_one_window_call]{extract_one_window_call()}}'s docs; the caller creates a fresh one per
+\code{extract_one_window_call()}'s docs; the caller creates a fresh one per
 pass and inspects \code{state$pre}/\code{state$specs} afterward}
 }
 \value{
@@ -58,6 +58,6 @@ single-pass lookup. \code{state$seen} is the cache, keyed by that hash.
 Any window call argument that isn't already a bare column reference
 (e.g. \code{mean(x + y)}) is hoisted into its own pre-mutate step first (an
 \verb{..winarg\{k\}..} temp column, added to \code{state$pre}) -- see
-\code{\link[=extract_one_window_call]{extract_one_window_call()}}.
+\code{extract_one_window_call()}.
 }
 \keyword{internal}

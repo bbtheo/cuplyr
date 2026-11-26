@@ -246,6 +246,12 @@ test_that("F18 rule: the factor check is linear in expression size (wide if_any)
   ir_cpu <- chain("f == 1")
   expect_identical(ir_factor_rule(ir_none, sch), "none")
   expect_identical(ir_factor_rule(ir_cpu, sch), "cpu")
+  out <- dplyr::filter(g, dplyr::if_any(dplyr::starts_with("x"), ~ .x > 1.5))
+  expect_equal(
+    tibble::as_tibble(dplyr::collect(out)),
+    dplyr::filter(tibble::as_tibble(d), dplyr::if_any(dplyr::starts_with("x"), ~ .x > 1.5))
+  )
+  skip_timing_under_check()
   # Medians of interleaved batches (timing_medians(), helper-timing.R); the
   # rule and the lazy build run on the CPU, so no GPU sync. Five samples of a
   # warmed-up call are plenty for bounds of 0.1 s against ~0.013 s.
@@ -258,11 +264,6 @@ test_that("F18 rule: the factor check is linear in expression size (wide if_any)
   expect_lt(tm[["none"]], 0.1)
   expect_lt(tm[["cpu"]], 0.1)
   expect_lt(tm[["verb"]], 1.5)
-  out <- dplyr::filter(g, dplyr::if_any(dplyr::starts_with("x"), ~ .x > 1.5))
-  expect_equal(
-    tibble::as_tibble(dplyr::collect(out)),
-    dplyr::filter(tibble::as_tibble(d), dplyr::if_any(dplyr::starts_with("x"), ~ .x > 1.5))
-  )
 })
 
 # ---------------------------------------------------------------------------

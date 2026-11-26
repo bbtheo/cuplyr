@@ -116,7 +116,7 @@ test_that("a subtree shared many times in a returned value is walked once", {
   shared <- list(p)
   for (i in 1:30) shared <- list(shared, shared)
   elapsed <- system.time(cuplyr:::gpu_scope_close(id, shared))[["elapsed"]]
-  expect_lt(elapsed, 1)
+  if (timing_enabled()) expect_lt(elapsed, 1)
   expect_equal(f58_raw_values(p), 1:5)
   expect_error(f58_raw_values(dropped), "released")
 })

@@ -4,10 +4,10 @@
 \alias{rowwise.tbl_gpu}
 \title{Group a GPU table by rows}
 \usage{
-\method{rowwise}{tbl_gpu}(.data, ...)
+\method{rowwise}{tbl_gpu}(data, ...)
 }
 \arguments{
-\item{.data}{A \code{tbl_gpu}.}
+\item{data}{A \code{tbl_gpu}.}
 
 \item{...}{<\code{\link[dplyr:dplyr_tidy_select]{tidy-select}}> Columns to keep as
 identifying variables in \code{summarise()}. A grouped table takes its group

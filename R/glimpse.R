@@ -34,7 +34,7 @@
 #' Unlike the (now-removed) Phase 2 CPU-fallback `glimpse()`, this
 #' implementation never collects the whole table to R: any pending lazy
 #' operations are materialized (via [compute()]), but the actual preview data comes
-#' from a small, capped row sample (like [print.tbl_gpu()]), and row/column
+#' from a small, capped row sample (like `print.tbl_gpu()`), and row/column
 #' counts/types come from lightweight metadata calls -- never a full
 #' `collect()`.
 #'

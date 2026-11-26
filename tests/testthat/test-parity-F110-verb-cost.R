@@ -111,6 +111,7 @@ test_that("one verb at 1e3 rows costs about what it did after F68b, relative to 
   same(summarise(glz, m = mean(x)), summarise(gtb, m = mean(x)))
   same(pipe5(lz), pipe5(tb))
 
+  skip_timing_under_check()
   fns <- list(
     filter = function() filter(eg, x > 0.5),
     mutate = function() mutate(eg, z = x * 2 + y),
