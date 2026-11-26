@@ -32,7 +32,7 @@ Imports:
     pillar,
     stats
 Suggests:
-    testthat (>= 3.0.0),
+    testthat (>= 3.2.0),
     bench,
     arrow,
     nanoarrow,

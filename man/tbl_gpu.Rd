@@ -2,14 +2,11 @@
 % Please edit documentation in R/tbl-gpu.R
 \name{tbl_gpu}
 \alias{tbl_gpu}
-\alias{gibble}
 \alias{tbl_gpu.data.frame}
 \alias{tbl_gpu.tbl_gpu}
 \title{Create a GPU-backed data frame}
 \usage{
 tbl_gpu(data, ..., lazy = NULL)
-
-gibble(data, ..., lazy = NULL)
 
 \method{tbl_gpu}{data.frame}(data, ..., lazy = NULL)
 
@@ -44,12 +41,10 @@ A \code{tbl_gpu} object containing:
 }
 }
 \description{
-cuplyr's GPU tables, called gibbles, live in GPU memory. \code{gibble()} is
-another name for \code{tbl_gpu()}. It transfers an R data frame to GPU memory
-using NVIDIA's libcudf library, enabling high-performance data manipulation
-operations. The resulting \code{tbl_gpu} object can be used with dplyr verbs
-like \code{filter()}, \code{mutate()}, \code{select()}, and collected back to R with
-\code{collect()}.
+\code{tbl_gpu()} transfers an R data frame to GPU memory using NVIDIA's libcudf
+library, enabling high-performance data manipulation operations. The
+resulting \code{tbl_gpu} object can be used with dplyr verbs like \code{filter()},
+\code{mutate()}, \code{select()}, and collected back to R with \code{collect()}.
 }
 \details{
 The data is immediately copied to GPU memory when \code{tbl_gpu()} is called
@@ -70,7 +65,7 @@ This enables optimizations like:
 Errors in a verb's arguments (a missing column, a type error) are still
 raised when the verb is called. Printing a lazy table with pending
 operations (or calling \code{glimpse()} on it) runs the plan to show its first
-rows, under a \verb{# A gibble [lazy]:} header; the table itself is unchanged and
+rows, under a \verb{# A tbl_gpu [lazy]:} header; the table itself is unchanged and
 nothing is kept, so printing it twice runs the plan twice (\code{compute()} it
 first to look at it repeatedly). If the plan fails (an error, out of GPU
 memory), the print shows the schema and the message instead of raising.
@@ -132,19 +127,6 @@ to every other way values reach the GPU: \code{copy = TRUE} joins,
 \code{bind_rows()}, \verb{$<-}, a constant in \code{mutate()}, and the result of a verb
 that ran on the CPU. A fractional \code{Date} is floored with its own warning,
 \code{cuplyr_warning_fractional_date}.
-}
-
-\subsection{Gibbles}{
-
-"Gibble" is the user-facing name of a \code{tbl_gpu}: \code{print()} starts
-with \verb{# A gibble:} and the dimensions, and \code{gibble()}, \code{as_gibble()} and
-\code{is_gibble()} are aliases of \code{tbl_gpu()}, \code{as_tbl_gpu()} and
-\code{is_tbl_gpu()}. The class stays \code{tbl_gpu}, and \code{tbl_sum()} still returns
-dplyr's values.
-
-The CRAN package gibble (geometry decomposition, Michael Sumner) also
-exports a function called \code{gibble()}. When both packages are attached, the
-one attached last masks the other; \code{cuplyr::gibble()} always works.
 }
 }
 \examples{

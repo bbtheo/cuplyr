@@ -1,8 +1,8 @@
-# F80: printing a lazy gibble (Theo, 2026-10-27).
+# F80: printing a lazy tbl_gpu (Theo, 2026-10-27).
 #
 # - A lazy table with pending ops: print() runs the plan and shows exactly what
 #   the eager print of the same pipeline shows, except that the first header
-#   line reads "# A gibble [lazy]: ..." instead of "# A gibble: ...". The row
+#   line reads "# A tbl_gpu [lazy]: ..." instead of "# A tbl_gpu: ...". The row
 #   count is the real one (the whole plan ran).
 # - Nothing is cached: the object is unchanged, still lazy with its plan,
 #   holds no GPU memory after print() returns, and a second print runs the
@@ -37,9 +37,9 @@ f80p_expect_lazy_print <- function(df, pipeline, label) {
   eg <- pipeline(tbl_gpu(df, lazy = FALSE))
   out_lazy <- f80p_print(lz)
   out_eager <- f80p_print(eg)
-  expect_match(out_eager[1], "^# A gibble: ", info = label)
+  expect_match(out_eager[1], "^# A tbl_gpu: ", info = label)
   expected <- out_eager
-  expected[1] <- sub("^# A gibble: ", "# A gibble [lazy]: ", expected[1])
+  expected[1] <- sub("^# A tbl_gpu: ", "# A tbl_gpu [lazy]: ", expected[1])
   n <- length(out_lazy)
   expect_match(out_lazy[n], "^# .*collect\\(\\).*explain\\(\\)", info = label)
   expect_identical(out_lazy[-n], expected, info = label)
@@ -68,7 +68,7 @@ test_that("the lazy header carries the real row count and the group count", {
   f80p_local_default()
   df <- f80p_df()
   out <- f80p_print(tbl_gpu(df) |> dplyr::filter(x > 0) |> dplyr::group_by(g))
-  expect_match(out[1], "^# A gibble \\[lazy\\]: 4 . 4$")
+  expect_match(out[1], "^# A tbl_gpu \\[lazy\\]: 4 . 4$")
   expect_true(any(grepl("^# Groups:\\s+g \\[3\\]$", out)))
 })
 
@@ -143,7 +143,7 @@ test_that("a plan that fails prints the schema and the error instead of erroring
   )
   out <- NULL
   expect_no_error(out <- f80p_print(lz))
-  expect_match(out[1], "^# A gibble \\[lazy\\]")
+  expect_match(out[1], "^# A tbl_gpu \\[lazy\\]")
   for (col in c("g", "x", "s", "dt", "y")) {
     expect_true(any(grepl(paste0("\\b", col, "\\b"), out[-1])), info = col)
   }
@@ -167,7 +167,7 @@ test_that("a plan that runs out of GPU memory prints instead of erroring", {
   out <- NULL
   expect_no_error(out <- f80p_print(lz))
   gpu_oom_inject(0L)
-  expect_match(out[1], "^# A gibble \\[lazy\\]")
+  expect_match(out[1], "^# A tbl_gpu \\[lazy\\]")
   expect_true(any(grepl("memory", out, ignore.case = TRUE)))
   # the table still works afterwards
   expect_equal(

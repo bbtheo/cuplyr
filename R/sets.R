@@ -339,7 +339,7 @@ restore_set_op_factor_levels <- function(result, target_schema) {
   result
 }
 
-# A set operation's result is lazy when `x` or `y` is a lazy gibble (the
+# A set operation's result is lazy when `x` or `y` is a lazy GPU table (the
 # push_join() rule), eager otherwise. The verbs built from bind_rows() and
 # align_to_schema() materialize their inputs, whose helpers return eager
 # tables, so the mode is put back here.

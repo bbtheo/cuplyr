@@ -1,6 +1,6 @@
 # F124: min()/max() over empty or all-NA input, compared with dplyr.
 #
-# f124_check() runs `pipeline` on a tibble (dplyr, the oracle) and on a gibble,
+# f124_check() runs `pipeline` on a tibble (dplyr, the oracle) and on a tbl_gpu,
 # eager and lazy, and compares:
 #   - the collected values and column types (exactly);
 #   - the group vars;

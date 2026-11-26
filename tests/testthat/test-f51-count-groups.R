@@ -111,9 +111,9 @@ test_that("an infinite width option prints the header like tibble and keeps the 
   for (opt in c("pillar.width", "tibble.width")) {
     withr::with_options(stats::setNames(list(80, Inf), c("width", opt)), {
       out <- utils::capture.output(print(gg))
-      want <- utils::capture.output(print(tg))
+      want <- tibble_print_as_tbl_gpu(tg)
       k <- match(FALSE, startsWith(want, "#")) - 1L
-      expect_identical(out[seq_len(k)], sub("^# A tibble:", "# A gibble:", want[seq_len(k)]))
+      expect_identical(out[seq_len(k)], want[seq_len(k)])
       body <- out[startsWith(out, "$ ")]
       expect_length(body, 2L)
       expect_true(all(nchar(body) <= 80L), info = opt)

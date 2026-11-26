@@ -1,22 +1,20 @@
-# F51: "gibble" is the user-facing name of cuplyr's GPU tables.
+# F51: print() of a tbl_gpu uses tibble's header, named "A tbl_gpu".
 #
-# Contract (scratchpad/parity/features/F51.md, ## Design):
+# Contract (scratchpad/parity/features/F51.md, ## Design; the name was
+# "A tbl_gpu" until it was retired so as not to clash with the CRAN package
+# gibble):
 # - print() of an eager table (or a lazy one with nothing pending) shows
 #   tibble's header for the same tbl_sum(), with "A tibble" renamed
-#   "A gibble" (padding, the x/× symbol and big marks exactly as pillar
+#   "A tbl_gpu" (padding, the x/× symbol and big marks exactly as pillar
 #   prints them). The glimpse-style "$ col <type> values" body stays.
 # - print() of a lazy table with pending operations runs the plan once and
-#   shows the eager print of the result with "# A gibble [lazy]: ..." (F80);
-#   if the plan fails it shows "# A gibble [lazy]: ?? x k", the grouping, the
+#   shows the eager print of the result with "# A tbl_gpu [lazy]: ..." (F80);
+#   if the plan fails it shows "# A tbl_gpu [lazy]: ?? x k", the grouping, the
 #   result's schema, the number of pending (non-source) operations and the
 #   condition message. The precise preview contract is in
 #   test-parity-F80-print.R.
 # - pillar::tbl_sum() is unchanged: it still returns dplyr's own values.
-# - gibble()/as_gibble()/is_gibble() are exported aliases of
-#   tbl_gpu()/as_tbl_gpu()/is_tbl_gpu(); the class stays c("tbl_gpu", "tbl").
-# - gibble() is not a generic named "gibble" and cuplyr has no gibble.<class>
-#   methods, so the CRAN package gibble (an S3 generic gibble()) can only
-#   mask the name, never cross-dispatch.
+# - cuplyr exports no gibble(), as_gibble() or is_gibble().
 
 # Make every plan fail, so print() shows its failure view: the schema,
 # grouping and pending-step count of the table, with nothing run.
@@ -44,10 +42,10 @@ f51_gpu_header <- function(x) {
 # Groups/Rowwise element spans several), stopping before the body or before
 # a footer line ("# \u2139 ..." / "# i ..." when there is no body).
 f51_tibble_header <- function(tib, ...) {
-  out <- utils::capture.output(print(tib, ...))
+  out <- tibble_print_as_tbl_gpu(tib, ...)
   is_header <- startsWith(out, "#") & !grepl("^# (\u2139|i) ", out)
   k <- match(FALSE, is_header, nomatch = length(out) + 1L) - 1L
-  sub("^# A tibble:", "# A gibble:", out[seq_len(k)])
+  out[seq_len(k)]
 }
 
 f51_expect_header <- function(gpu, tib) {
@@ -58,12 +56,12 @@ f51_expect_header <- function(gpu, tib) {
 # 1. Header: eager tables
 # ---------------------------------------------------------------------------
 
-test_that("an ungrouped tbl_gpu prints '# A gibble: n x m' like tibble's header", {
+test_that("an ungrouped tbl_gpu prints '# A tbl_gpu: n x m' like tibble's header", {
   skip_if_no_gpu()
   df <- f51_df()
   gpu <- tbl_gpu(df)
   out <- utils::capture.output(print(gpu))
-  expect_identical(out[1], "# A gibble: 3 x 2")
+  expect_identical(out[1], "# A tbl_gpu: 3 x 2")
   f51_expect_header(gpu, df)
   # the old glimpse-style header lines are gone, the body stays
   expect_false(any(grepl("^Rows:", out)))
@@ -72,7 +70,7 @@ test_that("an ungrouped tbl_gpu prints '# A gibble: n x m' like tibble's header"
   expect_true(any(grepl("^\\$ x\\s+<chr>", out)))
 })
 
-test_that("a bare data.frame upload also prints 'A gibble', while tbl_sum() keeps 'A data frame'", {
+test_that("a bare data.frame upload also prints 'A tbl_gpu', while tbl_sum() keeps 'A data frame'", {
   skip_if_no_gpu()
   df <- as.data.frame(f51_df())
   gpu <- tbl_gpu(df)
@@ -88,7 +86,7 @@ test_that("grouped tables keep the '# Groups:' line, formatted like tibble", {
   # NA key forms its own group
   f51_expect_header(dplyr::group_by(tbl_gpu(df), x), dplyr::group_by(df, x))
   out <- utils::capture.output(print(dplyr::group_by(tbl_gpu(df), g)))
-  expect_identical(out[1:2], c("# A gibble: 3 x 2", "# Groups:   g [2]"))
+  expect_identical(out[1:2], c("# A tbl_gpu: 3 x 2", "# Groups:    g [2]"))
   expect_false(any(grepl("^Groups:", out)))
 })
 
@@ -110,7 +108,7 @@ test_that("zero rows, zero columns and big row counts format like tibble", {
   f51_expect_header(tbl_gpu(tibble::tibble()), tibble::tibble())
   big <- tibble::tibble(a = seq_len(12345L), k = rep(1:5, length.out = 12345L))
   f51_expect_header(tbl_gpu(big), big)
-  expect_identical(f51_gpu_header(tbl_gpu(big))[1], "# A gibble: 12,345 x 2")
+  expect_identical(f51_gpu_header(tbl_gpu(big))[1], "# A tbl_gpu: 12,345 x 2")
   f51_expect_header(dplyr::group_by(tbl_gpu(big), a), dplyr::group_by(big, a))
   f51_expect_header(dplyr::group_by(tbl_gpu(big), k), dplyr::group_by(big, k))
 })
@@ -121,7 +119,7 @@ test_that("the header follows pillar's unicode setting", {
   skip_if_no_gpu()
   withr::local_options(cli.unicode = TRUE)
   df <- f51_df()
-  expect_identical(f51_gpu_header(tbl_gpu(df))[1], "# A gibble: 3 \u00d7 2")
+  expect_identical(f51_gpu_header(tbl_gpu(df))[1], "# A tbl_gpu: 3 \u00d7 2")
   f51_expect_header(tbl_gpu(df), df)
   f51_expect_header(dplyr::group_by(tbl_gpu(df), g), dplyr::group_by(df, g))
 })
@@ -155,7 +153,7 @@ test_that("a lazy table with pending operations prints its computed rows under a
     dplyr::filter(g > 1) |>
     dplyr::mutate(y = g * 2)
   out <- utils::capture.output(print(lz))
-  expect_match(out[1], "^# A gibble \\[lazy\\]: 1 . 3$")
+  expect_match(out[1], "^# A tbl_gpu \\[lazy\\]: 1 . 3$")
   expect_true(any(grepl("^\\$ y\\s+<dbl> 4", out)))
   expect_false(any(grepl("not materialized|^# Schema|^# Operations", out)))
   expect_true(has_pending_ops(lz))
@@ -169,12 +167,12 @@ test_that("a lazy table whose plan fails prints the lazy block with the schema a
     dplyr::mutate(y = g * 2)
   f51_local_failing_plan()
   out <- utils::capture.output(print(lz))
-  expect_match(out[1], "^# A gibble \\[lazy\\]: \\?\\? . 3$")
+  expect_match(out[1], "^# A tbl_gpu \\[lazy\\]: \\?\\? . 3$")
   expect_true(any(grepl("^# Schema:\\s+g <dbl>, x <chr>, y <dbl>\\s*$", out)))
   expect_true(any(grepl("^# Operations pending:\\s+2\\s*$", out)))
   expect_true(any(grepl("^# Plan failed: f51: plan not run$", out)))
   # no source-dims glimpse of the un-run table
-  expect_false(any(grepl("^Rows:|^Columns:|preview unavailable|A gibble:", out)))
+  expect_false(any(grepl("^Rows:|^Columns:|preview unavailable|A tbl_gpu:", out)))
 })
 
 test_that("a pending lazy join prints its result, and the lazy block with the result schema if the plan fails", {
@@ -183,11 +181,11 @@ test_that("a pending lazy join prints its result, and the lazy block with the re
   keys <- tibble::tibble(g = c(1, 2), lab = c("one", "two"))
   lz <- dplyr::left_join(tbl_gpu(df, lazy = TRUE), tbl_gpu(keys, lazy = TRUE), by = "g")
   out <- utils::capture.output(print(lz))
-  expect_match(out[1], "^# A gibble \\[lazy\\]: 3 . 3$")
+  expect_match(out[1], "^# A tbl_gpu \\[lazy\\]: 3 . 3$")
   expect_true(any(grepl("^\\$ lab\\s+<chr>", out)))
   f51_local_failing_plan()
   out <- utils::capture.output(print(lz))
-  expect_match(out[1], "^# A gibble \\[lazy\\]: \\?\\? . 3$")
+  expect_match(out[1], "^# A tbl_gpu \\[lazy\\]: \\?\\? . 3$")
   expect_true(any(grepl("^# Schema:\\s+g <dbl>, x <chr>, lab <chr>\\s*$", out)))
   expect_true(any(grepl("^# Operations pending:\\s+1\\s*$", out)))
   expect_false(any(grepl("GPU tibble", out)))
@@ -200,8 +198,8 @@ test_that("a grouped lazy table with pending operations prints its groups under 
     dplyr::mutate(y = g + 1) |>
     dplyr::group_by(g)
   out <- utils::capture.output(print(lz))
-  expect_match(out[1], "^# A gibble \\[lazy\\]: 3 . 3$")
-  expect_identical(out[2], "# Groups:   g [2]")
+  expect_match(out[1], "^# A tbl_gpu \\[lazy\\]: 3 . 3$")
+  expect_identical(out[2], "# Groups:    g [2]")
   # printing does not change what the pipeline returns
   expect_identical(
     tibble::as_tibble(collect(lz)),
@@ -231,124 +229,13 @@ test_that("pillar::tbl_sum() still matches dplyr exactly", {
 })
 
 # ---------------------------------------------------------------------------
-# 4. Aliases
+# 4. No gibble names
 # ---------------------------------------------------------------------------
 
-test_that("gibble(), as_gibble() and is_gibble() are exported", {
+test_that("cuplyr exports no gibble(), as_gibble() or is_gibble()", {
   exports <- getNamespaceExports("cuplyr")
-  expect_true(all(c("gibble", "as_gibble", "is_gibble") %in% exports))
-  expect_true(is.function(cuplyr::gibble))
-  expect_true(is.function(cuplyr::as_gibble))
-  expect_true(is.function(cuplyr::is_gibble))
-})
-
-test_that("gibble() has tbl_gpu()'s arguments and gives identical tables", {
-  skip_if_no_gpu()
-  df <- f51_df()
-  expect_identical(formals(gibble), formals(tbl_gpu))
-
-  a <- gibble(df, lazy = FALSE)
-  b <- tbl_gpu(df, lazy = FALSE)
-  expect_identical(class(a), class(b))
-  expect_identical(class(a), c("tbl_gpu", "tbl"))
-  expect_identical(collect(a), collect(b))
-  expect_identical(.subset2(a, "schema"), .subset2(b, "schema"))
-  expect_identical(.subset2(a, "exec_mode"), "eager")
-
-  # bare data.frame class is remembered the same way
-  d <- as.data.frame(df)
-  expect_identical(collect(gibble(d)), collect(tbl_gpu(d)))
-
-  # lazy argument and the session option
-  lz <- gibble(df, lazy = TRUE)
-  expect_identical(.subset2(lz, "exec_mode"), "lazy")
-  withr::with_options(list(cuplyr.exec_mode = "lazy"), {
-    expect_identical(.subset2(gibble(df), "exec_mode"), "lazy")
-  })
-
-  # grouped and rowwise inputs, and a tbl_gpu input (tbl_gpu.tbl_gpu)
-  g <- dplyr::group_by(df, g)
-  expect_identical(dplyr::group_vars(gibble(g)), dplyr::group_vars(tbl_gpu(g)))
-  expect_identical(class(gibble(g)), class(tbl_gpu(g)))
-  rw <- dplyr::rowwise(df, x)
-  expect_identical(collect(gibble(rw)), collect(tbl_gpu(rw)))
-  expect_identical(.subset2(gibble(b, lazy = TRUE), "exec_mode"), "lazy")
-  expect_identical(collect(gibble(b)), collect(b))
-
-  # verbs work on it as on any tbl_gpu
-  for (lazy in c(FALSE, TRUE)) {
-    got <- gibble(df, lazy = lazy) |>
-      dplyr::group_by(g) |>
-      dplyr::summarise(n = dplyr::n()) |>
-      collect()
-    want <- dplyr::summarise(dplyr::group_by(df, g), n = dplyr::n())
-    expect_identical(tibble::as_tibble(got), tibble::as_tibble(want))
-  }
-})
-
-test_that("gibble() fails exactly like tbl_gpu() on unsupported input", {
-  skip_if_no_gpu()
-  for (bad in list(1:3, list(a = 1))) {
-    e1 <- tryCatch(tbl_gpu(bad), error = identity)
-    e2 <- tryCatch(gibble(bad), error = identity)
-    expect_s3_class(e2, "error")
-    expect_identical(class(e2), class(e1))
-    expect_identical(conditionMessage(e2), conditionMessage(e1))
-  }
-})
-
-test_that("as_gibble() is as_tbl_gpu()", {
-  skip_if_no_gpu()
-  df <- f51_df()
-  expect_identical(formals(as_gibble), formals(as_tbl_gpu))
-  a <- as_gibble(df)
-  expect_identical(class(a), c("tbl_gpu", "tbl"))
-  expect_identical(collect(a), collect(as_tbl_gpu(df)))
-  expect_identical(.subset2(as_gibble(df, lazy = TRUE), "exec_mode"), "lazy")
-  d <- as.data.frame(df)
-  expect_identical(collect(as_gibble(d)), collect(as_tbl_gpu(d)))
-  expect_identical(collect(as_gibble(a)), collect(a))
-})
-
-test_that("is_gibble() is TRUE for every GPU table and FALSE otherwise", {
-  skip_if_no_gpu()
-  df <- f51_df()
-  gpu_objs <- list(
-    tbl_gpu(df),
-    tbl_gpu(df, lazy = TRUE),
-    dplyr::filter(tbl_gpu(df, lazy = TRUE), g > 1),
-    dplyr::group_by(tbl_gpu(df), g),
-    dplyr::rowwise(tbl_gpu(df), g),
-    dplyr::left_join(tbl_gpu(df, lazy = TRUE), tbl_gpu(df[1, ], lazy = TRUE), by = c("g", "x"))
-  )
-  for (o in gpu_objs) {
-    expect_true(is_gibble(o))
-    expect_identical(is_gibble(o), is_tbl_gpu(o))
-  }
-  other <- list(
-    df, as.data.frame(df), dplyr::group_by(df, g), NULL, 1:3, "gibble",
-    list(a = 1), structure(list(), class = "gibble"), structure(list(), class = "tbl")
-  )
-  for (o in other) {
-    expect_false(is_gibble(o))
-    expect_identical(is_gibble(o), is_tbl_gpu(o))
-  }
-})
-
-test_that("gibble() cannot cross-dispatch with the CRAN gibble package's generic", {
-  ns <- asNamespace("cuplyr")
-  # no gibble.<class> S3 method defined or registered by cuplyr
-  expect_false(any(grepl("^gibble\\.", ls(ns, all.names = TRUE))))
-  s3 <- ls(get(".__S3MethodsTable__.", envir = ns), all.names = TRUE)
-  expect_false(any(grepl("^gibble\\.", s3)))
-  # and gibble() never dispatches on a generic named "gibble"
-  expect_false(any(grepl('UseMethod("gibble"', deparse(body(gibble)), fixed = TRUE)))
-  # a class that only the CRAN package knows gets tbl_gpu()'s error, not a method
-  skip_if_no_gpu()
-  fake_geom <- structure(list(1), class = "POINT")
-  e <- tryCatch(gibble(fake_geom), error = identity)
-  expect_s3_class(e, "error")
-  expect_match(conditionMessage(e), "tbl_gpu", fixed = TRUE)
+  expect_false(any(grepl("gibble", exports, fixed = TRUE)))
+  expect_false(any(grepl("gibble", ls(asNamespace("cuplyr"), all.names = TRUE), fixed = TRUE)))
 })
 
 # ---------------------------------------------------------------------------
@@ -379,10 +266,9 @@ test_that("long Groups/Rowwise headers wrap like tibble's, and print(width =) is
   g2 <- dplyr::group_by(tbl_gpu(df), customer_identifier, transaction_category)
   t2 <- dplyr::group_by(df, customer_identifier, transaction_category)
   got <- utils::capture.output(print(g2, width = 40))
-  want <- utils::capture.output(print(t2, width = 40))
+  want <- tibble_print_as_tbl_gpu(t2, width = 40)
   k <- match(FALSE, startsWith(want, "#")) - 1L
-  want_header <- sub("^# A tibble:", "# A gibble:", want[seq_len(k)])
-  expect_identical(got[seq_len(k)], want_header)
+  expect_identical(got[seq_len(k)], want[seq_len(k)])
   expect_false(startsWith(got[k + 1L], "#"))
 })
 
@@ -398,12 +284,12 @@ test_that("a failed lazy plan still shows its group or rowwise vars, nothing run
   plain <- tbl_gpu(df, lazy = TRUE) |> dplyr::filter(x > 0)
   f51_local_failing_plan()
   out <- utils::capture.output(print(grouped))
-  expect_match(out[1], "^# A gibble \\[lazy\\]: \\?\\? . 3$")
+  expect_match(out[1], "^# A tbl_gpu \\[lazy\\]: \\?\\? . 3$")
   expect_true(any(grepl("^# Groups:\\s+g\\s*$", out)))
   expect_false(any(grepl("Rowwise", out)))
 
   out <- utils::capture.output(print(rw))
-  expect_match(out[1], "^# A gibble \\[lazy\\]: \\?\\? . 3$")
+  expect_match(out[1], "^# A tbl_gpu \\[lazy\\]: \\?\\? . 3$")
   expect_true(any(grepl("^# Rowwise:\\s+g, id\\s*$", out)))
   expect_false(any(grepl("Groups", out)))
 
