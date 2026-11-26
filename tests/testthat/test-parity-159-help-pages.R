@@ -2,11 +2,13 @@
 # ("Phase 5, task W6", "F24", "Phase 7 J2"), no pointers into design notes,
 # and the exported pages don't send a reader to source files or libcudf
 # function names. The checks read the source tree (R/, man/, NEWS.md), so
-# they skip where it isn't there (an installed package under R CMD check).
+# they skip where it isn't there (an installed package under R CMD check),
+# through skip_if_no_source_tree() (helper-memory.R).
 
 p159_root <- function() testthat::test_path("..", "..")
 
 p159_skip_if_no_dir <- function(...) {
+  skip_if_no_source_tree()
   skip_if_not(dir.exists(file.path(p159_root(), ...)),
               paste(file.path(...), "not available in this test context"))
 }
@@ -114,7 +116,7 @@ test_that("exported help pages don't name cuplyr's internal functions or fields"
                           internal_field = fields),
                         keep = body)
   expect(length(bad) == 0L,
-         paste0(length(bad), " exported Rd line(s) name an internal function:\n",
+         paste0(length(bad), " exported Rd line(s) name an internal function, field or link:\n",
                 paste(utils::head(bad, 40L), collapse = "\n")))
 })
 
@@ -164,6 +166,7 @@ test_that("?tbl_gpu describes what a user can do with a GPU table, not its field
 
 test_that("NEWS has a bullet for the help-page cleanup under 0.2.0", {
   news_file <- file.path(p159_root(), "NEWS.md")
+  skip_if_no_source_tree()
   skip_if_not(file.exists(news_file), "NEWS.md not available in this test context")
   lines <- readLines(news_file, warn = FALSE, encoding = "UTF-8")
   heads <- grep("^# ", lines)
