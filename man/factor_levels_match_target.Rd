@@ -15,7 +15,7 @@ factor_levels_match_target(
 Helper for \code{align_to_schema()}'s already-aligned fast path: \code{identical()}
 on \code{names}/\code{types} alone isn't enough for a \code{DICTIONARY32} column -- two
 tables can agree on the type string while their actual level VECTORS
-differ (Bug 2, Phase 11 L2), which still needs a code remap even though
+differ, which still needs a code remap even though
 no type-string cast is triggered.
 }
 \keyword{internal}

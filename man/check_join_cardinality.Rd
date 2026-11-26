@@ -19,7 +19,7 @@ check_join_cardinality(diag, join_type, multiple, relationship, unmatched)
 \code{invisible(NULL)}; called for its error/warning side effects only
 }
 \description{
-The Phase 7 J5 activation point: called from \code{lower_join()} (R/lower.R)
+Called from \code{lower_join()} (R/lower.R)
 immediately after a mutating join (\code{left}/\code{inner}/\code{full}/\code{right}) returns
 its \code{list(ptr, diag)} result, using the \code{diag} from \code{join_map_stats()}
 (\code{src/ops_join.cpp}), computed after the \verb{multiple=} filter. Never called for

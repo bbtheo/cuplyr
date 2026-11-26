@@ -19,9 +19,7 @@ alone, before any GPU op runs -- every join verb (\code{left_join()}/
 \code{inner_join()}/\code{full_join()}/\code{right_join()}/\code{semi_join()}/\code{anti_join()})
 calls this right after \code{resolve_join_key_types()} and routes the WHOLE join
 to the CPU fallback when it's \code{TRUE}, mirroring
-\code{join_output_would_collide()}'s existing pattern (Phase 8 sets.R
-precedent: \code{check_set_op_compatible()} uses the identical
-identical-levels-vs-not split to decide native vs. fallback).
+\code{join_output_would_collide()}'s existing pattern.
 Both-factor-with-IDENTICAL-levels keys compare correctly natively (same
 code domain) and are not flagged here.
 }

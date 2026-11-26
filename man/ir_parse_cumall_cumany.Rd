@@ -12,9 +12,7 @@ ir_parse_cumall_cumany(args, schema, scan_op)
 \description{
 Verified against dplyr 1.2.1: \code{cumall(c(T,T,NA,T,F,T))} is \verb{T,T,NA,NA, F,F}; \code{cumany(c(F,NA,T,F))} is \verb{F,NA,T,T} -- both are exactly \code{cummin}/
 \code{cummax} (respectively) over the tri-state encoding FALSE=0, NA=1,
-TRUE=2, then decoded back to BOOL8 (\code{scratchpad/phase5_window_design.md}
-section 0's ground truth table, cross-checked directly here rather than
-taken on faith).
+TRUE=2, then decoded back to BOOL8.
 }
 \details{
 \code{if_else()}'s bare-NA value-position adoption (\code{ir_resolve_value_nas()})

@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{ir_has_checked_int}
 \alias{ir_has_checked_int}
-\title{Does an IR subtree hold an F42 checked integer node?}
+\title{Does an IR subtree hold a checked integer node?}
 \usage{
 ir_has_checked_int(ir, schema)
 }
@@ -19,10 +19,10 @@ A checked node is a binary \code{+}, \code{-} or \code{*} whose operands are all
 INT32/BOOL8 (a bare untyped NA literal adopts its sibling's type): the
 rule of \code{checked_int_kind()} kind 1 in \code{src/expr_eval.hpp}. Such a node can
 warn "NAs produced by integer overflow", and dplyr's warning depends on the
-rows its verb receives, so the optimizer must not change them (F70).
+rows its verb receives, so the optimizer must not change them.
 \code{\%/\%} and \code{\%\%} never warn and are not checked, nor is a node with a null
 literal operand (\code{a + NA}; its other operand is still walked). Asked through
-\code{record_checked_int()}, once per record and only by the optimizer (F110).
+\code{record_checked_int()}, once per record and only by the optimizer.
 }
 \details{
 One walk visits each node once and stops at the first checked node. Column,

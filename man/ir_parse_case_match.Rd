@@ -10,8 +10,7 @@ ir_parse_case_match(expr, env, schema)
 See \code{\link[=ir_parse_value_match_clauses]{ir_parse_value_match_clauses()}} -- \code{case_match()} is deprecated in
 dplyr 1.2.1 in favor of \code{recode_values()}/\code{replace_values()} (verified:
 calling it emits a lifecycle warning), but is still exported and
-functional, and is explicitly in this wave's scope, so it's implemented
-identically to \code{recode_values()}'s formula interface, just with \code{.default}
+functional, so it's implemented identically to \code{recode_values()}'s formula interface, just with \code{.default}
 as the named key instead of \code{default}.
 }
 \keyword{internal}

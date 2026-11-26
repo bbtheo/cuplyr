@@ -1,23 +1,21 @@
-#' Filter rows of a GPU table
+#' Keep rows that match a condition
 #'
-#' Selects rows from a GPU table where conditions are TRUE, similar to
-#' `dplyr::filter()`. Filtering is performed entirely on the GPU for
-#' maximum performance on large datasets, and matches dplyr's row-keeping
-#' and three-valued-logic (`NA`) semantics exactly (see "NA semantics"
-#' below).
+#' `filter()` keeps the rows of a GPU table where every condition is `TRUE`, as
+#' `dplyr::filter()` does. The conditions listed under "Supported
+#' expressions" run on the GPU, within the limits stated there, with dplyr's
+#' rules for which rows are kept and for `NA` (see "NA semantics" below).
+#' Other conditions run in dplyr on the CPU.
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
 #' @param ... Logical expressions to filter by (see "Supported expressions"
-#'   below for the full surface). Multiple expressions, whether passed as
-#'   separate dots or combined with `&` within one dot, are always combined
-#'   with AND (a row is kept only if every expression is TRUE for it).
-#' @param .by Optional on-the-fly grouping columns (tidyselect), GPU-native
-#'   (Phase 5, task W6): `filter(df, x > mean(x), .by = g)` behaves
-#'   identically to `df |> group_by(g) |> filter(x > mean(x)) |> ungroup()`
-#'   -- same window/aggregate-predicate machinery as `group_by()`-driven
-#'   filtering, and the result is always ungrouped. Supplying `.by` when
-#'   `.data` is already grouped (via `group_by()`) is an error, matching
-#'   dplyr exactly.
+#'   below). Multiple expressions, whether passed as separate dots or
+#'   combined with `&` within one dot, are combined with AND (a row is kept
+#'   only if every expression is `TRUE` for it).
+#' @param .by Optional grouping columns for this call only (tidyselect), run
+#'   on the GPU: `filter(df, x > mean(x), .by = g)` gives the same rows as
+#'   `df |> group_by(g) |> filter(x > mean(x)) |> ungroup()`, and the result
+#'   is ungrouped. Supplying `.by` when `.data` is already grouped (via
+#'   `group_by()`) is an error, as in dplyr.
 #' @param .preserve Whether to keep the groups the filter emptied. With `TRUE`,
 #'   a `group_by()`-grouped result keeps the input's group keys (empty groups
 #'   included) for `group_data()`, `collect()` and `summarise()`, like dplyr
@@ -29,28 +27,31 @@
 #'
 #' @details
 #' ## Supported expressions
-#' `filter()` parses its arguments through an internal expression IR (see
-#' `R/ir.R`) that lowers every predicate in the call to a **single fused GPU
-#' kernel** (`cudf::compute_column()` under the hood) -- one kernel per
-#' `filter()` call, no matter how many dots or how deeply the predicate is
-#' nested. The IR understands:
+#' All the conditions of one `filter()` call are combined into a single
+#' predicate and evaluated together on the GPU, however many dots there are
+#' and however deeply they nest. These run on the GPU:
 #' \itemize{
 #'   \item Comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=` -- against a
-#'     literal, another column, an environment variable, or an arithmetic
-#'     expression (`(x - y) > 0`)
-#'   \item Logic: `&`, `|`, `!`, `xor()`, arbitrarily nested
-#'     (`x > 2 & (y < 5 | z == 1)`); `&&`/`||` are rejected with a message
-#'     pointing at `&`/`|` (matching dplyr 1.1+)
+#'     literal, another column, an R variable, or an arithmetic
+#'     expression (`(x - y) > 0`); for strings, see the string item below
+#'   \item Logic: `&`, `|`, `!`, `xor()`, nested to any depth
+#'     (`x > 2 & (y < 5 | z == 1)`); `&&`/`||` are an error that points at
+#'     `&`/`|`
 #'   \item `is.na()`
-#'   \item `%in%`, including a set containing `NA` (R's never-NA rule: a
-#'     value that itself is `NA` is TRUE for `%in%` iff the set contains
-#'     `NA`, never `NA` itself) and an empty set (`character(0)`, `c()`,
-#'     etc. -- always FALSE, for every row, including `NA` rows)
+#'   \item `%in%`, including a set containing `NA` (as in R, `%in%` is never
+#'     `NA`: an `NA` value is `TRUE` when the set contains `NA` and `FALSE`
+#'     otherwise) and an empty set (`character(0)`, `c()`, etc.: `FALSE` for
+#'     every row, `NA` rows included)
 #'   \item `between(x, lo, hi)` (dplyr's definition: `x >= lo & x <= hi`,
-#'     including its `NA` propagation), `near(x, y, tol = )`
-#'     (`abs(x - y) < tol`, matching `dplyr::near()` exactly)
-#'   \item String-column comparisons (`==`/`!=`/`<`/`<=`/`>`/`>=`), against
-#'     a literal or another string column
+#'     with its `NA` propagation), `near(x, y, tol = )`
+#'     (`abs(x - y) < tol`, as `dplyr::near()`)
+#'   \item String comparisons, against a literal or another string column.
+#'     `==`, `!=`, `%in%` and `between()` always run on the GPU. `<`, `<=`,
+#'     `>` and `>=` compare strings in byte order on the GPU, while R uses
+#'     the session's collation, so they run on the GPU only when
+#'     `Sys.getlocale("LC_COLLATE")` is `"C"` or `"POSIX"`; under any other
+#'     collation (`"en_US.UTF-8"`, say) the call runs in dplyr on the CPU.
+#'     The same holds for `min()` and `max()` of a string column.
 #'   \item Column-vs-column comparisons for every operator above
 #'   \item Math on columns inside a predicate (`+ - * / %% %/% ^`, `sqrt`,
 #'     `log`, `abs`, etc. -- the same set `mutate()` supports)
@@ -64,12 +65,12 @@
 #'     `filter()` to combine several comma-separated conditions with `|`
 #'     instead of `&` (e.g. `filter(when_any(x > 10, y < 0))`)
 #'   \item The `.data`/`.env` pronouns, and ordinary R symbols (a bare name
-#'     that matches a column resolves to that column; otherwise it's
-#'     evaluated as an environment variable -- "columns shadow the
-#'     environment")
-#'   \item Window/aggregate functions (Phase 5, task W5), usable anywhere
-#'     inside a predicate, including combined with plain column
-#'     comparisons in the same dot (`filter(x > mean(x) & y < 5)`):
+#'     that matches a column resolves to that column; otherwise it is
+#'     looked up as an R variable: columns shadow the environment, as in
+#'     dplyr)
+#'   \item Window and aggregate functions, anywhere inside a predicate,
+#'     also next to plain column comparisons in the same dot
+#'     (`filter(x > mean(x) & y < 5)`):
 #'     `row_number()`/`row_number(x)`, `min_rank()`/`dense_rank()`/
 #'     `percent_rank()`/`cume_dist()`, `lag()`/`lead()`,
 #'     `cumsum()`/`cummax()`/`cummin()`/`cumprod()`/`cummean()`/
@@ -77,67 +78,46 @@
 #'     `mean()`/`sum()`/`min()`/`max()`/`n()`/`sd()`/`var()`/`median()`/
 #'     `n_distinct()`/`first()`/`last()`/`nth()` -- the same set `mutate()`
 #'     supports (see its own docs for exact semantics/argument support),
-#'     evaluated per group when
-#'     `.data` is grouped (via `group_by()` or the on-the-fly `.by=`
-#'     argument, Phase 5 task W6 -- identical semantics either way). A
-#'     grouped filter -- like dplyr's own -- preserves the ORIGINAL row
-#'     order in the result, it does not reorder into group-key order.
+#'     evaluated per group when `.data` is grouped (with `group_by()` or
+#'     `.by`, which behave the same). As in dplyr, a grouped filter keeps
+#'     the original row order; it does not reorder rows by group.
 #' }
-#' Comparing a column against a literal of an incompatible type (e.g. a
-#' numeric column against a character literal) errors immediately, naming
-#' the column and its type, rather than silently falling back or producing
-#' a raw GPU-side type error.
+#' Comparing a number with a string (`filter(mpg > "2")`) compares them as
+#' strings, as R does; that call runs in dplyr on the CPU.
 #'
 #' ## Multi-dot semantics with window/aggregate predicates
 #' Multiple dots (or multiple `&`-joined predicates within one dot) are
-#' always combined with AND, and -- confirmed empirically against real
-#' dplyr, since this is easy to get wrong -- every dot's predicate is
-#' evaluated against the SAME, ORIGINAL (pre-`filter()`) data, never
-#' against a progressively-narrowed intermediate result. Concretely,
+#' combined with AND, and, as in dplyr, every dot is evaluated against the
+#' same input rows, never against the rows an earlier dot left. So
 #' `filter(x > 0, cumsum(x) < 10)` computes `cumsum(x)` over every row of
-#' the original table, then ANDs that mask with `x > 0` -- it does NOT
-#' filter to `x > 0` first and then compute `cumsum()` only over the
-#' surviving rows (which would generally give a different, smaller
-#' cumulative sum and therefore a different result). `cuplyr` reproduces
-#' this exactly: every window-bearing dot's temp columns are computed
-#' against the table as it stood when `filter()` was called, before any
-#' dot's predicate (window-derived or plain) has removed a single row.
+#' the input, then combines that with `x > 0`; it does not keep `x > 0`
+#' first and compute `cumsum()` over the remaining rows (which would usually
+#' give a smaller cumulative sum and a different result).
 #'
 #' ## NA semantics
-#' `filter()` keeps a row iff its combined predicate is non-missing *and*
-#' TRUE -- identical to dplyr (`cudf::apply_boolean_mask()`'s "non-null AND
-#' true" rule matches `dplyr::filter()`'s own row-keeping rule exactly).
-#' Concretely:
+#' `filter()` keeps a row only if its combined predicate is `TRUE` (not
+#' `FALSE` and not `NA`), as in dplyr:
 #' \itemize{
 #'   \item `filter(x > 5)` drops rows where `x` is `NA` (the comparison is
-#'     `NA`, and `NA` isn't kept), same as dplyr
-#'   \item `&`/`|` use R's three-valued logic, not C's: `NA & FALSE` is
+#'     `NA`, and `NA` isn't kept)
+#'   \item `&`/`|` use R's three-valued logic: `NA & FALSE` is
 #'     `FALSE`, `NA | TRUE` is `TRUE`, `NA & TRUE`/`NA | FALSE`/`NA & NA`/
-#'     `NA | NA` are all `NA` (`cudf::ast_operator::NULL_LOGICAL_AND`/
-#'     `NULL_LOGICAL_OR`, chosen specifically because they match)
-#'   \item `filter(x > 2 | is.na(x))` is the idiom for "keep NA rows too"
-#'     -- works exactly as it does in dplyr
-#'   \item `%in%` never produces `NA` (see "Supported expressions" above) --
-#'     this is R's `%in%`/`match()` semantics, not null-propagating
-#'   \item `filter(TRUE)` is a no-op (returns `.data` unchanged, no GPU
-#'     work); `filter(FALSE)` and `filter(NA)` both return a zero-row
-#'     result (a bare `NA` predicate is `FALSE`-equivalent for row-keeping,
-#'     same as dplyr)
+#'     `NA | NA` are all `NA`
+#'   \item `filter(x > 2 | is.na(x))` is the idiom for "keep NA rows too",
+#'     as in dplyr
+#'   \item `%in%` never gives `NA` (see "Supported expressions" above), as
+#'     R's `%in%` and `match()`
+#'   \item `filter(TRUE)` returns `.data` unchanged, with no GPU work;
+#'     `filter(FALSE)` and `filter(NA)` both return zero rows
 #' }
 #' A floating `NaN` (e.g. a computed `0/0`) stays a value on the GPU, but
 #' `is.na()`, the six comparisons and `coalesce()` read it as missing, as in
 #' R: `NaN > 1` is `NA` (the row is dropped) and `is.na(NaN)` is `TRUE`.
 #' `is.nan()` runs on the GPU too.
 #'
-#' ## Not yet supported
-#' \itemize{
-#'   \item Arbitrary R functions with no cuDF equivalent -- these fall back
-#'     to CPU evaluation, see below
-#' }
-#'
-#' ## Expressions the IR doesn't understand (CPU fallback)
-#' An expression shape the IR doesn't recognize (see `R/ir.R`'s
-#' `ir_parse_quo()`) is handled in one of two ways. A dot that reads no table
+#' ## Conditions that run on the CPU
+#' A condition outside the list above (an R function with no GPU version,
+#' for example) is handled in one of two ways. A dot that reads no table
 #' column (a pre-computed logical vector, `rep(TRUE, n)`) is evaluated once in
 #' R, with no data mask: a logical scalar is a constant predicate. On an
 #' ungrouped `filter()` a logical vector is a row mask: all the vectors of one
@@ -145,8 +125,7 @@
 #' and combined with `&` with the call's other predicates, which see the same
 #' input rows. On a grouped, `.by` or rowwise table, or in `filter_out()`, a
 #' logical vector runs the whole call in dplyr. A dot that reads a table
-#' column but doesn't parse (a rare shape given how much of
-#' dplyr's filter surface the IR now covers), or that visibly calls something
+#' column but can't run on the GPU, or that visibly calls something
 #' reaching the data mask by name (`exists("x")`, `get("ok")`), runs the whole
 #' call in dplyr on the CPU (see `getOption("cuplyr.fallback")` below to be
 #' notified when it does). The check reads the dot's syntax, so an alias of
@@ -169,10 +148,9 @@
 #' `options(cuplyr.plan_break = )` instead. See [cuplyr-fallback].
 #'
 #' ## Performance
-#' Filtering on GPU is highly parallel and can process billions of rows
-#' per second. For best performance, prefer expressions the IR parses
-#' directly into a GPU predicate (the entire "Supported expressions" list
-#' above) over expressions that require the CPU fallback.
+#' Filtering on the GPU is highly parallel. For the best performance, use
+#' the conditions listed under "Supported expressions", which run on the
+#' GPU, rather than ones that run in dplyr on the CPU.
 #'
 #' @seealso
 #' \code{\link{mutate.tbl_gpu}} for creating new columns,
@@ -213,15 +191,15 @@ filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
               complement = FALSE, call = rlang::current_env())
 }
 
-#' Drop rows of a GPU table where conditions are TRUE
+#' Drop rows that match a condition
 #'
 #' The complement of [filter.tbl_gpu()], like `dplyr::filter_out()`: all
 #' conditions are combined with AND first, then the rows where that
 #' combination is `TRUE` are dropped. Rows where it is `FALSE` or `NA` are
 #' kept (so this is not `filter(!cond)`). With no conditions every row is
-#' dropped. It runs on the same engine as `filter()` (same expression
-#' surface, window predicates, `.by`, CPU fallbacks, eager and lazy): the
-#' predicate pushed to the GPU is `is.na(P) | !P` for the combined `P`.
+#' dropped. It runs like `filter()`: the same conditions run on the GPU,
+#' with the same window predicates, `.by`, CPU fallbacks, and eager and lazy
+#' modes.
 #'
 #' @inheritParams filter.tbl_gpu
 #' @param ... Logical expressions; rows where all of them are `TRUE` are
@@ -1641,7 +1619,7 @@ filter_eval_mask <- function(.data, quo, keep) {
 #'
 #' `stats::na.omit()` for a `tbl_gpu`: keeps the rows where no column is
 #' `NA` (`NaN` counts as missing, as in `is.na()`; an `addNA()` factor level is
-#' a value, not a missing one). It is an ordinary native [dplyr::filter()], so
+#' a value, not a missing one). It runs as a [dplyr::filter()] on the GPU, so
 #' the table keeps its execution mode, grouping and attributes, and lazy stays
 #' lazy.
 #'

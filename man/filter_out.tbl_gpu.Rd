@@ -2,7 +2,7 @@
 % Please edit documentation in R/filter.R
 \name{filter_out.tbl_gpu}
 \alias{filter_out.tbl_gpu}
-\title{Drop rows of a GPU table where conditions are TRUE}
+\title{Drop rows that match a condition}
 \usage{
 \method{filter_out}{tbl_gpu}(.data, ..., .by = NULL, .preserve = FALSE)
 }
@@ -12,13 +12,11 @@
 \item{...}{Logical expressions; rows where all of them are \code{TRUE} are
 dropped.}
 
-\item{.by}{Optional on-the-fly grouping columns (tidyselect), GPU-native
-(Phase 5, task W6): \code{filter(df, x > mean(x), .by = g)} behaves
-identically to \code{df |> group_by(g) |> filter(x > mean(x)) |> ungroup()}
--- same window/aggregate-predicate machinery as \code{group_by()}-driven
-filtering, and the result is always ungrouped. Supplying \code{.by} when
-\code{.data} is already grouped (via \code{group_by()}) is an error, matching
-dplyr exactly.}
+\item{.by}{Optional grouping columns for this call only (tidyselect), run
+on the GPU: \code{filter(df, x > mean(x), .by = g)} gives the same rows as
+\code{df |> group_by(g) |> filter(x > mean(x)) |> ungroup()}, and the result
+is ungrouped. Supplying \code{.by} when \code{.data} is already grouped (via
+\code{group_by()}) is an error, as in dplyr.}
 
 \item{.preserve}{Whether to keep the groups the filter emptied. With \code{TRUE},
 a \code{group_by()}-grouped result keeps the input's group keys (empty groups
@@ -34,7 +32,7 @@ The complement of \code{\link[=filter.tbl_gpu]{filter.tbl_gpu()}}, like \code{dp
 conditions are combined with AND first, then the rows where that
 combination is \code{TRUE} are dropped. Rows where it is \code{FALSE} or \code{NA} are
 kept (so this is not \code{filter(!cond)}). With no conditions every row is
-dropped. It runs on the same engine as \code{filter()} (same expression
-surface, window predicates, \code{.by}, CPU fallbacks, eager and lazy): the
-predicate pushed to the GPU is \code{is.na(P) | !P} for the combined \code{P}.
+dropped. It runs like \code{filter()}: the same conditions run on the GPU,
+with the same window predicates, \code{.by}, CPU fallbacks, and eager and lazy
+modes.
 }

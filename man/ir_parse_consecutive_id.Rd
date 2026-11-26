@@ -8,7 +8,7 @@
 ir_parse_consecutive_id(args, schema)
 }
 \description{
-Multi-column \code{consecutive_id(a, b, ...)} is not implemented this wave
+Multi-column \code{consecutive_id(a, b, ...)} is not supported
 (returns \code{NULL}, i.e. falls back) -- this is enforced for free by the
 registry entry's \code{arity = 1L} (a 2+-arg call fails the generic arity
 check in \code{ir_parse_expr()} before \code{parse} is ever invoked), so this

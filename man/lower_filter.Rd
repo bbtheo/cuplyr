@@ -7,12 +7,10 @@
 lower_filter(ast, source_ptr)
 }
 \description{
-Task T3 (Phase 1 expression-engine cutover, \code{scratchpad/phase1_expression_engine.md}
-section 5): every predicate in the node is a \code{cuplyr_ir} node (see
-\code{R/ir.R}, \code{R/ast.R::make_predicate()}). All of them are folded together
-with \code{&} into a single expression -- one filter node is always exactly
-one fused GPU kernel now, regardless of how many predicates it holds, so
-there is no separate "fused vs sequential" branch (and no \code{ast$fused}
-flag) to check.
+Every predicate in the node is a \code{cuplyr_ir} node (see \code{R/ir.R},
+\code{R/ast.R::make_predicate()}). All of them are folded together with \code{&}
+into a single expression -- one filter node is always exactly one fused
+GPU kernel, regardless of how many predicates it holds, so there is no
+separate "fused vs sequential" branch to check.
 }
 \keyword{internal}

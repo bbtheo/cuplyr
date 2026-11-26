@@ -3,7 +3,7 @@
 \name{build_join_output_info}
 \alias{build_join_output_info}
 \title{Compute a join's output column names/types/origin, mirroring
-\code{dplyr:::join_cols()} exactly (Phase 7 J6/J7)}
+\code{dplyr:::join_cols()} exactly}
 \usage{
 build_join_output_info(
   left_schema,
@@ -17,7 +17,7 @@ build_join_output_info(
 Ported directly from dplyr 1.2.1's own \code{join_cols()} (verified via
 \code{body(dplyr:::join_cols)}), specialized to this package's always-resolved
 \code{keep} (never \code{NULL} here -- every join verb calls \code{resolve_join_keep()}
-first, which -- Phase 7 J7 finding -- returns \code{FALSE} for BOTH the real
+first, which returns \code{FALSE} for both the real
 \code{NULL} default AND a legal explicit \code{FALSE}; see its own roxygen for why
 those two collapse to one value here).
 }
@@ -29,9 +29,9 @@ the right table -- reproduces e.g. \code{join_by(a)} + \code{keep = TRUE} giving
 
 \code{keep != TRUE} (the \code{NULL}-default/legal-\code{FALSE} case): PER CONDITION,
 mirroring \code{dplyr:::join_cols()}'s own \code{is_null(keep)} branch exactly
-(Phase 7 J7 finding -- verified empirically against dplyr 1.2.1 that this
-branch, not a whole-join TRUE/FALSE collapse, governs the real \code{keep = NULL} default: \code{join_by(c == d, a >= b)} drops \code{d} but keeps BOTH \code{a} and
-\code{b}). \code{is_eq <- join_spec$op == "=="} selects which condition PAIRS
+(this branch, not a whole-join TRUE/FALSE collapse, governs the real
+\code{keep = NULL} default in dplyr 1.2.1: \code{join_by(c == d, a >= b)} drops \code{d}
+but keeps both \code{a} and \code{b}). \code{is_eq <- join_spec$op == "=="} selects which condition PAIRS
 collapse to one coalesced column (the join KEY columns for those pairs
 specifically are excluded from suffixing -- they keep their bare
 original name -- and the right table's key column for that pair is
@@ -39,7 +39,8 @@ dropped from the output) versus which pairs are kept verbatim on BOTH
 sides, suffixed like any other colliding column (a genuinely non-equi
 condition, e.g. \code{join_by(a >= b)}, has no single shared key value to
 collapse to -- there IS no "coalesced" column for it). An all-equi spec
-(\code{is_eq} all \code{TRUE}) collapses to this package's historical \code{keep = FALSE} behavior exactly; an all-non-equi spec (\code{is_eq} all \code{FALSE})
+(\code{is_eq} all \code{TRUE}) collapses to the \code{keep = FALSE} output exactly; an
+all-non-equi spec (\code{is_eq} all \code{FALSE})
 collapses to byte-identical output to the \code{keep = TRUE} branch above
 (every column suffixed against the full cross set, nothing dropped) --
 verified algebraically: \code{x_ignore}/\code{y_ignore} are both \code{character(0)},

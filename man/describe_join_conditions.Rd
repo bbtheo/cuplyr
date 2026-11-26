@@ -13,8 +13,8 @@ describe_join_conditions(by)
 Character scalar, \code{""} if \code{by} has no conditions
 }
 \description{
-Shared by \code{print.ast_node()}/\code{ast_to_string()} (Phase 12, \code{show_query()}
-coverage audit): renders every condition, not just the equi ones, so a
+Shared by \code{print.ast_node()}/\code{ast_to_string()} (used by \code{show_query()}):
+renders every condition, not just the equi ones, so a
 non-equi/mixed \code{join_by()} (\code{op} other than \code{"=="}) is visible in the
 rendered query -- e.g. \code{join_by(a == b, x >= y)} shows as
 \code{"a == b, x >= y"}. A \code{closest()} condition shows as \code{closest(x >= y)}.

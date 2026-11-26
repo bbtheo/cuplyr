@@ -21,10 +21,10 @@ the result: a step of a \code{push_chain()}, which carries it once at the end}
 A new \code{tbl_gpu} object
 }
 \description{
-The only exec_mode branch point (D1). Lazy mode stores \code{node} as the new
+The only exec_mode branch point. Lazy mode stores \code{node} as the new
 \verb{$lazy_ops} and does no GPU work; eager mode lowers and executes \code{node}
 immediately. Both modes uniformly compute \code{schema} from \code{input_schema} alone
-(via \code{infer_schema_from()}, with factor_levels reattached per D3) and \code{groups} (via
+(via \code{infer_schema_from()}, with factor_levels reattached) and \code{groups} (via
 \code{propagate_groups()}).
 }
 \keyword{internal}

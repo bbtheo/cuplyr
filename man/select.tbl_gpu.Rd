@@ -23,7 +23,8 @@ column types. Any other predicate (\code{where(~ anyNA(.x))},
 \code{lubridate::is.Date}), and any call that is not a tidyselect helper
 or a base name builder (\code{sort(names(x))}, \code{paste0()}, \code{rev()},
 \code{setdiff()}, \code{.data$x}, ... with safe arguments), is resolved on the
-data: a notified CPU fallback that collects the table
+data: the table is collected and the selection runs in dplyr on
+the CPU (see \link{cuplyr-fallback} to be told when)
 \item Helpers: \code{starts_with()}, \code{ends_with()}, \code{contains()}, etc.
 \item Renaming while selecting: \code{select(new_name = old_name)}
 }}
@@ -42,11 +43,9 @@ Column selection creates a new GPU table with only the selected columns.
 The original data remains in GPU memory until garbage collected.
 \subsection{Renaming}{
 
-\code{select(new_name = old_name)} both selects and renames \code{old_name}. This
-is schema-only (see \code{\link[=rename.tbl_gpu]{rename.tbl_gpu()}}): the underlying selection still
-runs as one \code{gpu_select()} gather, with the rename applied on top of it
-as a separate, schema-only \code{\link[=ast_rename]{ast_rename()}} step whenever the tidyselect
-resolution renamed a column.
+\code{select(new_name = old_name)} both selects and renames \code{old_name}. The
+selection runs on the GPU as usual; the rename only changes the column
+names, as \code{\link[=rename.tbl_gpu]{rename.tbl_gpu()}} does.
 }
 
 \subsection{Grouped tables}{

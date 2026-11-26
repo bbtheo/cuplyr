@@ -40,7 +40,7 @@ so they are built bottom-up without inferring types.
 }
 }
 \details{
-A narrower \code{required_cols} (F99: what a barrier above reads) is settled when
+A narrower \code{required_cols} (what a barrier above reads) is settled when
 the requirement walked down the chain needs no select above a filter, finds
 no dead mutate expression and keeps every source column. One set does for
 both passes: a mutate's new outputs, the only names projection pushdown

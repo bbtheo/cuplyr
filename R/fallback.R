@@ -13,11 +13,11 @@
 
 #' Run a dplyr verb on the CPU and re-upload the result
 #'
-#' The core Phase-2 fallback primitive. Materializes any pending lazy
+#' The core CPU fallback primitive. Materializes any pending lazy
 #' operations, collects `.data` to a tibble (restoring `group_by()` structure
 #' from `.data$groups` so grouped semantics apply on the CPU exactly as they
 #' would on a real `grouped_df`; a rowwise table becomes dplyr's `rowwise_df`
-#' of its rowwise vars, F49), applies `expr_fn` (which should call the
+#' of its rowwise vars), applies `expr_fn` (which should call the
 #' real dplyr verb), and re-uploads the result via [tbl_gpu()] (a `rowwise_df`
 #' result goes back up as a rowwise table).
 #'
@@ -47,14 +47,13 @@
 #'   returned unchanged, never re-uploaded -- for a verb that returns
 #'   metadata *about* the grouping/data rather than a transformed dataset,
 #'   even when that metadata happens to be a small data frame (dplyr's own
-#'   grouping-metadata queries, e.g. `group_data()`/`group_keys()`, used to
-#'   be implemented this way -- Phase 9 task 1 made them GPU-native instead,
-#'   see R/group-by.R -- but the parameter stays for any future fallback
-#'   verb with the same "always a plain R object" shape).
+#'   grouping-metadata queries, e.g. `group_data()`/`group_keys()`, are
+#'   GPU-native and don't use it; the parameter is for any
+#'   fallback verb with the same "always a plain R object" shape).
 #' @return Either a new `tbl_gpu` (grouping, execution mode, and factor
 #'   levels restored/round-tripped), or `expr_fn`'s raw return value
 #'   unchanged when: `as_is = TRUE`; the result isn't a data frame at all
-#'   (e.g. `pull()`'s vector, `group_split()`'s list); or the result is a
+#'   (e.g. `group_map()`'s list); or the result is a
 #'   data frame that contains list-columns (e.g. `nest_by()`/`group_nest()`/
 #'   `nest_join()`'s nested-tibble columns), which have no GPU representation.
 #'
@@ -407,7 +406,7 @@ fallback_failed_remap <- function(origin) {
   invisible(NULL)
 }
 
-#' The reason a verb call's dot goes to the CPU (F88)
+#' The reason a verb call's dot goes to the CPU
 #'
 #' Reads what the call's own decision recorded (see the collector notes in
 #' `R/fallback.R`): the reason claimed for the failing dot, with that dot's text
@@ -511,8 +510,7 @@ collect_other_side <- function(y) {
 #' CPU fallback methods for dplyr verbs without a GPU-native implementation
 #'
 #' `cuplyr` implements every dplyr generic on `tbl_gpu`, but not every one of
-#' them runs natively on the GPU yet (see `scratchpad/todo.md` for the
-#' phase-by-phase rollout). The methods documented here provide a
+#' them runs natively on the GPU. The methods documented here provide a
 #' *transparent CPU fallback*: they materialize any pending lazy operations,
 #' [collect()] `.data` to a tibble (restoring `group_by()` structure from
 #' `.data`'s grouping so grouped semantics apply exactly as on a real
@@ -521,8 +519,8 @@ collect_other_side <- function(y) {
 #' actual result, since some verbs change it), execution mode (lazy stays
 #' lazy), and factor levels.
 #'
-#' Verbs whose result isn't a data frame at all (e.g. [dplyr::pull()]'s
-#' vector, [dplyr::group_split()]'s list), or whose result is a data frame
+#' Verbs whose result isn't a data frame at all (e.g. [dplyr::group_map()]'s
+#' list), or whose result is a data frame
 #' containing list-columns with no GPU representation (e.g.
 #' [dplyr::nest_by()], [dplyr::group_nest()], [dplyr::nest_join()]'s nested
 #' match column), are returned as plain R objects rather than re-uploaded.
@@ -692,15 +690,14 @@ nest_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE, keep = NULL,
 
 #' Split a GPU table into one GPU table per group (dplyr backend method)
 #'
-#' Native: [dplyr::group_split()] on a `tbl_gpu` groups by `...` (or uses the
-#' existing groups), computes the group row indices on the GPU
-#' (`compute_group_data()`: sorted keys, NA last, `.drop = FALSE` and
-#' preserved empty groups), gathers the rows into group order and cuts the
-#' table at the group sizes (`gpu_split_rows()`). The chunks are `tbl_gpu`
-#' tables, as dplyr's chunks have the class of the ungrouped input, and the
-#' `list_of` ptype is a 0-row `tbl_gpu`. A table left with no columns (every
-#' column dropped by `.keep = FALSE`) is the one case that still goes through
-#' the CPU fallback.
+#' [dplyr::group_split()] on a `tbl_gpu` runs on the GPU. It groups by `...`
+#' (or uses the existing groups), finds the rows of each group (groups in
+#' sorted key order, `NA` last, as [group_data()] gives them, empty groups
+#' included), puts the rows in group order and cuts the table into one piece
+#' per group. The pieces are `tbl_gpu` tables, as dplyr's pieces have the
+#' class of the ungrouped input, and the `list_of` prototype is a 0-row
+#' `tbl_gpu`. A table left with no columns (every column dropped by `.keep =
+#' FALSE`) runs in dplyr on the CPU.
 #'
 #' @inheritParams dplyr::group_split
 #' @param keep Defunct, use `.keep`.

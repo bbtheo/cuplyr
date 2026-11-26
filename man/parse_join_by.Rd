@@ -10,7 +10,7 @@ parse_join_by(by, x, y)
 Returns \code{list(left, right, op, filter)}: four parallel character vectors,
 one entry per key/condition pair. \code{op} is each condition's operator
 (\code{"=="} for every key of a character/\code{NULL} \code{by}), \code{filter} its \code{join_by()}
-filter: \code{"none"}, or \code{"max"}/\code{"min"} for a \code{closest()} condition (F24).
+filter: \code{"none"}, or \code{"max"}/\code{"min"} for a \code{closest()} condition.
 Callers run \code{\link[=join_by_natively_supported]{join_by_natively_supported()}} first, so a \code{join_by()} that
 reaches here is one the native lowering handles: \code{\link[=join_equi_spec]{join_equi_spec()}} and
 \code{\link[=join_cond_spec]{join_cond_spec()}} split it into its equi/non-equi halves at lowering time

@@ -19,18 +19,17 @@ supplied.}
 clamped like \code{n}; grouped: \code{floor(prop * group_size)}, per group).
 Exactly one of \code{n}/\code{prop} may be supplied.}
 
-\item{by}{Optional on-the-fly grouping columns, GPU-native (Phase 5,
-task W7): result rows are ordered by each group's FIRST-APPEARANCE
-position in \code{.data} (see module docs), and the result is always
-ungrouped. Supplying \code{by} when \code{.data} is already grouped (via
-\code{group_by()}) is an error, matching dplyr.}
+\item{by}{Optional grouping columns for this call only, run on the GPU.
+As in dplyr, the result has the groups in the order each one first
+appears in \code{.data}, and it is ungrouped. Supplying \code{by} when \code{.data} is
+already grouped (via \code{group_by()}) is an error, as in dplyr.}
 }
 \value{
 A \code{tbl_gpu} object with the last rows selected.
 }
 \description{
-Keeps the last \code{n} (or \code{prop} fraction of) rows of a GPU table, similar
-to \code{dplyr::slice_tail()}. Ungrouped, \code{group_by()}-grouped, and \verb{by=}
-calls all run entirely on the GPU (Phase 5, task W7) -- see
-\code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}} for the shared dispatch/grouping semantics.
+Keeps the last \code{n} (or \code{prop} fraction of) rows of a GPU table, as
+\code{dplyr::slice_tail()} does. It runs on the GPU, ungrouped, after
+\code{group_by()} and with \code{by}; see \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}} for the order of
+the groups in the result.
 }

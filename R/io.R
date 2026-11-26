@@ -371,7 +371,7 @@ parquet_diff <- function(want, got) {
 #' type without change (`==`, `!=`, `<`, `<=`, `>`, `>=`) on an integer,
 #' `integer64`, `Date` or `POSIXct` column, or `!is.na()` of an `integer` or `integer64` column;
 #' the `&`s of a condition are split. Comparisons on double and string columns
-#' are not pushed: libcudf (checked on 26.10) can skip a row group wrongly from a
+#' are not pushed: libcudf can skip a row group wrongly from a
 #' double column's `NaN` statistics, and a string column's deprecated min/max
 #' statistics (signed byte order) are not proved safe, and either would lose rows.
 #' They are applied after the read, so a filter on doubles or

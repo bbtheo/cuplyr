@@ -2,7 +2,7 @@
 % Please edit documentation in R/bind.R
 \name{abort_bind_rows_incompatible}
 \alias{abort_bind_rows_incompatible}
-\title{Raise dplyr's own \code{bind_rows()} incompatible-type error (Phase 11 L4)}
+\title{Raise dplyr's own \code{bind_rows()} incompatible-type error}
 \usage{
 abort_bind_rows_incompatible(
   other_idx,

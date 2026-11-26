@@ -128,46 +128,37 @@ resolve_set_op_other_side <- function(y) {
 
 #' Check column-set/type compatibility for a set operation, dplyr-style
 #'
-#' Mirrors `dplyr:::is_compatible()` (verified empirically against dplyr
-#' 1.2.1 + vctrs `vec_ptype2()`): same column count, same column name SET
-#' (order tolerated), and a per-column common type, via
-#' `resolve_common_col_type()` (R/bind.R). As of Phase 11 L4 this is
-#' EXACTLY the same ladder `bind_rows()`'s own `compute_unified_schema()`
-#' uses -- the two used to diverge (this function reimplemented vctrs'
-#' stricter common-type ladder from scratch because `bind_rows()`'s old
-#' `promote_types()` treated `STRING` as a universal widest type, silently
-#' coercing a numeric/date column against a character one, which real
-#' vctrs' `vec_ptype2()` REFUSES -- verified: `vec_ptype2(1L, "a")` errors).
-#' `promote_types()` is gone; both verbs now share one strict ladder.
+#' Mirrors `dplyr:::is_compatible()` (checked against dplyr 1.2.1 + vctrs
+#' `vec_ptype2()`): same column count, same column name set (order
+#' tolerated), and a per-column common type, via
+#' `resolve_common_col_type()` (R/bind.R), the same ladder `bind_rows()`'s
+#' own `compute_unified_schema()` uses. That ladder follows vctrs'
+#' `vec_ptype2()`, which refuses a numeric/date column against a character
+#' one (`vec_ptype2(1L, "a")` errors), so neither verb coerces such a pair
+#' to a string.
 #'
-#' Factor columns get a four-way split (verified against real
-#' `vec_ptype2()` behavior for factors, see inline comments): both-factor
-#' with IDENTICAL levels is native (same underlying INT32 codes, safe to
-#' compare/concatenate directly); both-factor with DIFFERING levels is ALSO
-#' native as of Phase 11 L2 (`gpu_remap_codes()`, `src/ops_bind.cpp`,
-#' remaps each side's codes onto the level UNION, mirroring `bind_rows()`'s
-#' own Bug 2 fix); factor-vs-character is ALSO native as of Phase 11 L2
-#' (`gpu_decode_factor()` decodes the factor side to its labels, mirroring
-#' `bind_rows()`'s own Bug 3 fix) -- both used to route through
-#' `$needs_fallback` before these two GPU primitives existed. Factor vs.
-#' anything else (numeric, date, ...) is a genuine vctrs error, reproduced
-#' here directly.
+#' Factor columns get a four-way split (as `vec_ptype2()` treats factors,
+#' see inline comments): both-factor with identical levels runs on the GPU
+#' as is (same underlying INT32 codes, safe to compare/concatenate
+#' directly); both-factor with differing levels runs on the GPU through
+#' `gpu_remap_codes()` (`src/ops_bind.cpp`), which remaps each side's codes
+#' onto the level union, as `bind_rows()` does; factor-vs-character runs on
+#' the GPU through `gpu_decode_factor()`, which decodes the factor side to
+#' its labels, as `bind_rows()` does. Factor vs. anything else (numeric,
+#' date, ...) is a genuine vctrs error, reproduced here directly.
 #'
-#' Phase 11 L4: the per-column ladder itself is now
-#' `resolve_common_col_type()` (R/bind.R), shared verbatim with
-#' `bind_rows()`'s own `compute_unified_schema()` -- this function now only
-#' adds the column-count/name-SET checks and its own verb-specific
-#' ("`x` and `y` are not compatible.", bulleted) error formatting on top.
-#' The `Date`-vs-`POSIXct` timestamp promotion that used to require
-#' `$needs_fallback` (no native `TIMESTAMP_DAYS` -> `TIMESTAMP_MICROSECONDS`
-#' cast existed yet) is now unconditionally native as of Phase 11 L3
-#' (`gpu_cast_column()` gained the 5 timestamp targets) -- `$needs_fallback`
-#' is now ALWAYS `FALSE` and kept only for call-site compatibility (every
-#' caller in this file still checks it).
+#' This function adds the column-count/name-set checks and its own
+#' verb-specific ("`x` and `y` are not compatible.", bulleted) error
+#' formatting on top of the shared ladder. A `Date`-vs-`POSIXct` column
+#' promotes to `POSIXct` on the GPU (`gpu_cast_column()`'s timestamp
+#' targets), except next to a non-UTC `POSIXct`, where the `Date` becomes
+#' local midnight of that zone: `$needs_fallback` is then `TRUE`, as it is
+#' for duplicated column names.
 #'
 #' @param x_schema,y_schema Schemas (`current_schema()`) of `x`/`y`.
-#' @return A list with `$target_schema` (unified schema, x's names/order)
-#'   and `$needs_fallback` (logical: `TRUE` only for duplicated column names).
+#' @return A list with `$target_schema` (unified schema, x's names/order),
+#'   `$needs_fallback` (logical: `TRUE` for duplicated column names, or a
+#'   `Date` next to a non-UTC `POSIXct`) and `$fallback_reason`.
 #' @keywords internal
 check_set_op_compatible <- function(x_schema, y_schema) {
   # Duplicated names: the GPU paths match columns by name, so dplyr runs the
@@ -272,8 +263,8 @@ check_set_op_compatible <- function(x_schema, y_schema) {
 #' common case (x/y already schema-identical) skips both entirely,
 #' preserving whatever laziness `tbl` already had. Names/types alone don't
 #' catch every case that needs a real align pass: two `DICTIONARY32`
-#' columns can share the type string while their level VECTORS differ
-#' (Bug 2's native remap path), so `factor_levels_match_target()`
+#' columns can share the type string while their level vectors differ
+#' (the level-union remap path), so `factor_levels_match_target()`
 #' (R/bind.R) is checked too. `align_to_schema()`'s own return also
 #' resets `$groups` to `character()` -- restored here from the
 #' caller-supplied `groups`; its `$schema$factor_levels` is reset to
@@ -321,16 +312,15 @@ align_set_op_side <- function(tbl, target_schema, groups = character()) {
 
 #' Reattach factor levels after `bind_rows()`
 #'
-#' As of Phase 11 L2, `bind_rows()` (R/bind.R) already computes and attaches
-#' the correct unioned `schema$factor_levels` on its own result (Bug 2
-#' fix) -- since `x_aligned`/`y_aligned` are already aligned to the exact
-#' same `target_schema`, `bind_rows_gpu()`'s own internal
-#' `compute_unified_schema()` call trivially recomputes the identical
-#' schema `check_set_op_compatible()` already computed here, so this is now
-#' a belt-and-braces no-op re-assignment (kept for defensiveness/clarity
-#' rather than trusting that invariant to hold silently at a distance).
-#' `intersect()`/`setdiff()` (built from `semi_join()`/`anti_join()` +
-#' `distinct()`, which already preserve `factor_levels` via
+#' `bind_rows()` (R/bind.R) already computes and attaches the unioned
+#' `schema$factor_levels` on its own result -- since `x_aligned`/`y_aligned`
+#' are already aligned to the exact same `target_schema`,
+#' `bind_rows_gpu()`'s own internal `compute_unified_schema()` call
+#' recomputes the identical schema `check_set_op_compatible()` already
+#' computed here, so this is a belt-and-braces re-assignment (kept for
+#' clarity rather than trusting that invariant to hold silently at a
+#' distance). `intersect()`/`setdiff()` (built from `semi_join()`/
+#' `anti_join()` + `distinct()`, which already preserve `factor_levels` via
 #' `propagate_factor_levels()`, R/execute.R) don't need this at all.
 #' @keywords internal
 restore_set_op_factor_levels <- function(result, target_schema) {
@@ -369,33 +359,43 @@ zero_set_op_result <- function(x, y, verb, keep_one) {
 
 #' Set operations on `tbl_gpu` tables
 #'
-#' GPU-native implementations of dplyr's row-set operations, composed
-#' entirely from existing verbs (`bind_rows()`/`distinct()`/`semi_join()`/
-#' `anti_join()`) -- see the file header comment in `R/sets.R` for the
-#' exact composition and the empirically-verified row-order/column-
-#' compatibility contracts (mirroring `dplyr:::is_compatible()` /
-#' `check_compatible()`).
+#' dplyr's row-set operations on GPU tables, run on the GPU:
+#' \itemize{
+#'   \item `union()`: the distinct rows of `x`, in `x`'s order, then the rows
+#'     of `y` not already in `x`, in `y`'s order.
+#'   \item `union_all()`: the rows of `x` (duplicates kept), then those of
+#'     `y`.
+#'   \item `intersect()` and `setdiff()`: distinct rows of `x`, in `x`'s
+#'     order, that are (or are not) in `y`.
+#'   \item `symdiff()`: the rows of `setdiff(x, y)`, then those of
+#'     `setdiff(y, x)`.
+#'   \item `setequal()`: `TRUE` or `FALSE`, ignoring row order and duplicates
+#'     on both sides.
+#' }
+#' As in dplyr, `x` and `y` must have the same column names (the order may
+#' differ: `y` is reordered to `x`'s), and each column must have a common
+#' type: logical, integer and double columns combine to the wider type, a
+#' logical or integer column with an integer64 one gives integer64 (integer64
+#' and double have no common type: an error, as in dplyr), a `Date` and a
+#' `POSIXct` combine to `POSIXct`, two factors
+#' with different levels combine to a factor with the union of the levels,
+#' and a factor next to a character column gives a character column. A
+#' column-type mix that dplyr refuses (integer vs. character, factor vs.
+#' integer, ...) is an error naming the column and both types.
 #'
-#' Two factor columns with different level sets (level-union remap,
-#' `gpu_remap_codes()`) and a factor column vs. a character column (decode
-#' to labels, `gpu_decode_factor()`) are both GPU-native as of Phase 11 L2.
-#' A `Date` column vs. a `POSIXct` column (dplyr promotes to `POSIXct`) is
-#' ALSO GPU-native as of Phase 11 L3 (`gpu_cast_column()` gained the
-#' `TIMESTAMP_DAYS` -> `TIMESTAMP_MICROSECONDS` cast, among the other 4
-#' timestamp-granularity targets) -- no column-type combination that real
-#' dplyr accepts still needs the CPU fallback (`$needs_fallback` is always
-#' `FALSE`, see `check_set_op_compatible()`). Every column-type mismatch
-#' that's a genuine error in real dplyr (e.g. integer vs. character, or
-#' factor vs. integer) errors here too, naming the offending column and
-#' both types.
+#' These run in dplyr on the CPU: tables with duplicated column names; a
+#' `Date` column next to a `POSIXct` column in a zone other than UTC (the
+#' `Date` becomes local midnight of that zone); a column with element names
+#' or a one-column matrix column, which dplyr combines by its own rules
+#' (except in `setequal()`); and a rowwise `x`.
 #'
 #' @param x,y `tbl_gpu` objects. `y` may also be a plain `data.frame`
 #'   (uploaded automatically via [tbl_gpu()]) -- unlike the join verbs,
 #'   these generics have no `copy=` argument.
 #' @param ... Not used; must be empty (dplyr itself requires this too).
-#' @return A `tbl_gpu` with `x`'s column order/grouping (see the file
-#'   header comment for the exact row-order contract per verb), except
-#'   `setequal()` which returns a plain `TRUE`/`FALSE`.
+#' @return A `tbl_gpu` with `x`'s column order and grouping, with the rows in
+#'   the order described above, except `setequal()`, which returns `TRUE` or
+#'   `FALSE`.
 #' @name set-ops
 #' @rdname set-ops
 NULL

@@ -15,7 +15,8 @@
 #' @param ... Additional arguments (unused, for compatibility).
 #' @param name Ignored (included for dplyr compatibility).
 #'
-#' @return A `tbl_gpu` with all operations materialized and `lazy_ops` cleared.
+#' @return A `tbl_gpu` whose pending steps have all run, holding the result in
+#'   GPU memory. It keeps its execution mode, so a lazy table stays lazy.
 #'
 #' @details
 #' Use `compute()` when you want to:
@@ -149,7 +150,9 @@ compute_plan <- function(x, ops = .subset2(x, "lazy_ops")) {
 #' @param x A `tbl_gpu` object.
 #' @param ... Additional arguments (unused).
 #'
-#' @return A `tbl_gpu` with a barrier marker in its lazy_ops.
+#' @return A lazy `tbl_gpu` with the same columns and nothing run yet. The
+#'   optimizer does not move or merge the steps added after it with the steps
+#'   before it. An eager table is returned unchanged.
 #'
 #' @details
 #' Use `collapse()` when you want to prevent certain optimizations from

@@ -28,15 +28,13 @@ deprecated then made defunct -- passing anything here is an error).}
 }
 \description{
 \code{group_data()} (and the queries derived from it below) report the
-\emph{grouping structure} dplyr's own \code{grouped_df} carries as an attribute --
-\code{cuplyr} computes it on demand via one native GPU groupby instead
-(\code{compute_group_data()}, above), since \code{tbl_gpu} has no such attribute to
-read. All are GPU-native (Phase 9, task 1) -- previously CPU fallbacks.
+\emph{grouping structure} that dplyr's \code{grouped_df} carries as an attribute.
+A \code{tbl_gpu} has no such attribute, so \code{cuplyr} computes it on demand with
+one GPU groupby. All of them run on the GPU.
 }
 \details{
 \code{group_data()} returns a tibble of the grouping columns (in ascending key
-order, \code{NA} sorted last -- cudf's own default sort-groupby order, which
-is exactly dplyr's own convention, verified empirically) plus a \code{.rows}
+order, \code{NA} sorted last, as in dplyr) plus a \code{.rows}
 list-of column of 1-based row indices; called on an ungrouped table it
 returns a single row whose \code{.rows} holds every row, in original order.
 \code{group_keys()} is \code{group_data()} minus \code{.rows}; \code{group_rows()} is just

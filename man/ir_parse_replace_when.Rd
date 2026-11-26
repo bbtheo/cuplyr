@@ -15,7 +15,7 @@ Lowered via the same dedicated "replace_when" op as
 \code{\link[=ir_parse_replace_values]{ir_parse_replace_values()}}.
 }
 \details{
-No named arguments are supported this wave (the real \code{replace_when()}
+No named arguments are supported (the real \code{replace_when()}
 signature is just \code{replace_when(x, ...)} anyway) -- any named dot present
 makes this return \code{NULL} (fall back).
 }

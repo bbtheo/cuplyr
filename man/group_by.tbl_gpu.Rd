@@ -33,58 +33,45 @@ The grouping is stored as metadata and does not perform any computation
 until an aggregation is requested.
 }
 \details{
-Unlike operations like \code{\link[dplyr:filter]{dplyr::filter()}} or \code{\link[dplyr:mutate]{mutate()}}, \code{group_by()} does not
-perform any expensive GPU aggregation itself. It simply records which
-columns should be used for grouping in subsequent aggregation operations
-(computed group columns, see below, DO run a real \code{mutate()}).
-
-The actual groupby computation happens when you call \code{\link[dplyr:summarise]{summarise()}} (or
-one of the \code{\link[dplyr:group_data]{group_data()}} family) on the grouped table. This lazy
-approach allows you to chain multiple operations before executing the
-expensive groupby operation.
+\code{group_by()} itself does no GPU work: it records the grouping columns, and
+the verbs that follow (\code{\link[dplyr:summarise]{summarise()}}, \code{\link[dplyr:mutate]{mutate()}}, \code{\link[dplyr:filter]{dplyr::filter()}}, the
+\code{\link[dplyr:group_data]{group_data()}} family, ...) then work group by group. Computed group
+columns (see below) are the exception: they run a \code{mutate()} first.
 \subsection{Computed groups}{
 
-Verified empirically against dplyr 1.2.1: a \strong{named} argument (e.g.
-\code{group_by(df, g = x \%/\% 2)}, or even a bare-symbol rename like
-\code{group_by(df, g = x)}) is ALWAYS treated as a \code{mutate()} expression --
-the original column (if any) is kept, a new (or overwritten) column is
-added under the given name, and the table is then grouped by that name.
-Later dots may reference earlier dots' newly-computed columns, exactly
-like \code{mutate()}'s own chain semantics (e.g. \code{group_by(df, g = x \%/\% 2, h = g * 10)}). An \strong{unnamed} argument is a column reference (\code{x},
-\code{.data$x}, \code{.data[["x"]]}), which names an existing column, a top-level
-\code{pick()}, which adds the columns it selects, or -- anything else -- a
-data-masking expression computed into a new column named
-\code{rlang::as_label()} of the expression (\code{group_by(df, a + 1)} makes a column
-called \code{a + 1}). As soon as one dot is named or is not a column reference
-(a \code{pick()} or a \code{NULL} counts), every dot is data-masking, so a bare name
-that is not a column (a variable in the calling environment) is computed
-too, as in \code{mutate()}. All computed dots (named and unnamed) run as one
-\code{mutate()} on the ungrouped data, in argument order. Every dot's resulting
-group column name(s) are combined in the order the arguments were written.
-The old \verb{add =} and \verb{.dots =} arguments are defunct and error.
+As in dplyr, a \strong{named} argument (\code{group_by(df, g = x \%/\% 2)}, or even a
+plain rename such as \code{group_by(df, g = x)}) is always computed like a
+\code{mutate()} expression: the original column (if any) is kept, a new (or
+overwritten) column is added under the given name, and the table is then
+grouped by that name. A later argument may use the column of an earlier
+one, as in \code{mutate()} (\code{group_by(df, g = x \%/\% 2, h = g * 10)}). An
+\strong{unnamed} argument is a column reference (\code{x}, \code{.data$x},
+\code{.data[["x"]]}), which names an existing column, a top-level \code{pick()},
+which adds the columns it selects, or any other expression, which is
+computed into a new column named after the expression (\code{group_by(df, a + 1)} makes a column called \code{a + 1}). As soon as one argument is named or is
+not a column reference (a \code{pick()} or a \code{NULL} counts), every argument is
+data-masking, so a bare name that is not a column (a variable in the
+calling environment) is computed too, as in \code{mutate()}. All computed
+arguments run as one \code{mutate()} on the ungrouped data, in argument order,
+and the group columns come in the order the arguments were written. The
+old \verb{add =} and \verb{.dots =} arguments are defunct and error.
 
-Calling \code{group_by()} with \strong{no} arguments and \code{.add = FALSE} (the
-default) clears any existing grouping entirely (verified empirically --
-this differs from simply returning \code{.data} unchanged, which was this
-function's historical, incorrect behavior for that case).
+Calling \code{group_by()} with no arguments and \code{.add = FALSE} (the default)
+removes any grouping, as in dplyr.
 }
 
 \subsection{\code{.drop} semantics}{
 
-\code{.drop = FALSE} (verified empirically against dplyr 1.2.1) adds one
-placeholder row (\code{.rows = integer(0)}) to \code{\link[dplyr:group_data]{group_data()}}'s output for
-every declared \emph{factor level combination} of the FACTOR grouping columns
-that has no observed row, expanded recursively like dplyr: under each
-parent group a factor column takes all its levels (plus \code{NA} if observed
-there) and a non-factor column the values observed under that parent (a
-single \code{NA} under an empty parent); see \code{expand_dropped_groups()}.
+With \code{.drop = FALSE}, \code{\link[dplyr:group_data]{group_data()}} (and so \code{\link[dplyr:group_keys]{group_keys()}}, \code{\link[dplyr:n_groups]{n_groups()}}
+and the verbs that work per group) also has an empty group (\code{.rows = integer(0)}) for every combination of factor levels of the factor
+grouping columns that has no row. The combinations are expanded as in
+dplyr: under each parent group a factor column takes all its levels (plus
+\code{NA} if it occurs there) and a non-factor column the values that occur
+under that parent (a single \code{NA} under an empty parent).
 
-\code{.drop} is stored as a single boolean on the returned \code{tbl_gpu}
-(\verb{$group_drop}) and carried by \code{push_op()}/\code{push_join()} through every verb
-that keeps a group column (and by \code{count()}, \code{add_count()} and
-\code{slice_sample()}, which build their result directly); it is reset to \code{TRUE}
-once no group column is left. Like dplyr, \code{.drop} defaults to the table's
-current setting, so regrouping a \code{.drop = FALSE} table keeps it.
+The setting stays with the table through every verb that keeps a group
+column, and is reset to \code{TRUE} once no group column is left. As in dplyr,
+\code{.drop} defaults to the table's current setting, so regrouping a \code{.drop = FALSE} table keeps it.
 
 Groups are recomputed from the data each time, and empty factor-level
 groups are re-added from the declared levels. Row-subsetting verbs also
@@ -93,17 +80,14 @@ table, \code{filter()}, \code{filter_out()}, \code{slice()}, \code{slice_head()}
 \code{slice_tail()}, \code{slice_min()}, \code{slice_max()}, \code{slice_sample()},
 \code{semi_join()}, \code{anti_join()} and \code{rows_delete()} keep every group,
 emptied ones included. \code{.preserve = TRUE} does the same for \code{slice()} and
-\code{filter()} on a \code{.drop = TRUE} table. The result fixes the input's
-group-keys table (\verb{$fixed_keys}), only when a group can have been lost,
-which \code{group_data()} and friends, \code{collect()}, \code{summarise()}/\code{count()}/
-\code{tally()} (on the GPU, with a row for each emptied group) and the CPU
-fallbacks honour.
-\code{mutate()}, \code{select()}, \code{rename()} and \code{relocate()} carry it as long as
-they leave the group columns alone, and a CPU fallback result carries
-whatever empty groups dplyr's own result kept (see \code{gpu_fallback()}: a
-fallback \code{mutate()} keeps them, a fallback \code{arrange()} on a \code{.drop = TRUE}
-table drops them); every
-other verb, and any change of grouping, drops it.
+\code{filter()} on a \code{.drop = TRUE} table. The kept groups then show in
+\code{group_data()} and friends, \code{collect()}, and \code{summarise()}, \code{count()} and
+\code{tally()} (on the GPU, with a row for each emptied group). \code{mutate()},
+\code{select()}, \code{rename()} and \code{relocate()} keep them as long as they leave
+the group columns alone. A verb that runs in dplyr on the CPU keeps
+whichever empty groups dplyr's own result kept (such a \code{mutate()} keeps
+them, such an \code{arrange()} on a \code{.drop = TRUE} table drops them). Every
+other verb, and any change of grouping, drops them.
 }
 }
 \examples{

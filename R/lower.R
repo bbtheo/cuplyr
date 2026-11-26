@@ -49,13 +49,11 @@ lower_select <- function(ast, source_ptr) {
 
 #' Lower filter node
 #'
-#' Task T3 (Phase 1 expression-engine cutover, `scratchpad/phase1_expression_engine.md`
-#' section 5): every predicate in the node is a `cuplyr_ir` node (see
-#' `R/ir.R`, `R/ast.R::make_predicate()`). All of them are folded together
-#' with `&` into a single expression -- one filter node is always exactly
-#' one fused GPU kernel now, regardless of how many predicates it holds, so
-#' there is no separate "fused vs sequential" branch (and no `ast$fused`
-#' flag) to check.
+#' Every predicate in the node is a `cuplyr_ir` node (see `R/ir.R`,
+#' `R/ast.R::make_predicate()`). All of them are folded together with `&`
+#' into a single expression -- one filter node is always exactly one fused
+#' GPU kernel, regardless of how many predicates it holds, so there is no
+#' separate "fused vs sequential" branch to check.
 #' @keywords internal
 lower_filter <- function(ast, source_ptr) {
   input_ptr <- lower_and_execute(.subset2(ast, "input"), source_ptr)
@@ -142,8 +140,7 @@ check_rowwise_flags <- function(flags, in_filter = FALSE) {
 
 #' Lower mutate node
 #'
-#' Task T5 (Phase 1 expression-engine cutover, `scratchpad/phase1_expression_engine.md`
-#' section 5): each expression's IR is bound (`ir_bind()`) against a running
+#' Each expression's IR is bound (`ir_bind()`) against a running
 #' index map that mirrors `gpu_mutate_expr()`'s contract (`src/ops_expr.cpp`):
 #' expression `i`'s top-level result always lands at ctx index `n_input + i`,
 #' so a `col` node referencing an *earlier* expression's output (however many
@@ -607,18 +604,14 @@ lower_rename <- function(ast, source_ptr) {
 #' share the same C++ calling convention -- `left_key_idx`/`right_key_idx`/
 #' `right_drop_idx`/`nulls_equal` -- and their GPU entry points
 #' (`gpu_left_join()`/`gpu_inner_join()`/`gpu_full_join()`/`gpu_right_join()`,
-#' `src/ops_join.cpp`) all return `list(ptr, diag)` (Phase 7 J4's map-pipeline
-#' restructure): `ptr` is the result table's external pointer, `diag` is a
-#' first-offender diagnostics list consumed by `check_join_cardinality()`
-#' below (multiple=/unmatched=/relationship=, Phase 7 J5). `right_join()`
-#' used to be lowered via a swapped `left_join(y, x)` plus a column
-#' reorder/select (`build_right_join_via_left()`/
-#' `resolve_right_join_select_idx()`, since removed) -- `gpu_right_join()` is
-#' now native and takes exactly the same argument shape as the other three,
-#' so no special-casing is needed here beyond the switch itself.
+#' `src/ops_join.cpp`) all return `list(ptr, diag)`: `ptr` is the result
+#' table's external pointer, `diag` is a first-offender diagnostics list
+#' consumed by `check_join_cardinality()` below
+#' (multiple=/unmatched=/relationship=). `gpu_right_join()` is native and
+#' takes exactly the same argument shape as the other three, so no
+#' special-casing is needed here beyond the switch itself.
 #'
-#' Non-equi `join_by()` (Phase 7 J7, `scratchpad/phase7_joins_design.md`
-#' section 1.4/2): `ast$by$op` carries each condition's real operator (not
+#' Non-equi `join_by()`: `ast$by$op` carries each condition's real operator (not
 #' just `"=="`) whenever `join_by_natively_supported()` (R/join.R) let the
 #' join reach this AST shape at all -- [join_equi_spec()]/[join_cond_spec()]
 #' split it back into an equality-key subset (routed through the same
@@ -818,7 +811,7 @@ lower_join <- function(ast, source_ptr) {
   )
 }
 
-#' Cast one join key column to its common type (A3)
+#' Cast one join key column to its common type
 #'
 #' A factor key meeting a character key is decoded to its labels with
 #' `gpu_decode_factor()` -- never `gpu_cast_column()`, which would only see
@@ -1086,7 +1079,7 @@ drop_join_key_temps <- function(ptr, temps) {
   gpu_select(ptr, set_diff(seq_len(n_cols) - 1L, c(left_temp, right_temp)))
 }
 
-#' Lower a `by = character()` join (gap A4)
+#' Lower a `by = character()` join
 #'
 #' dplyr runs its ordinary join machinery with a constant key
 #' (`join_rows(cross = TRUE)`), so every x row matches every y row. That is a
@@ -1162,13 +1155,12 @@ lower_cross_by_join <- function(ast, left_ptr, right_ptr, left_schema, right_sch
 
 #' Lower window node
 #'
-#' Phase 5, task W2 (`scratchpad/phase5_window_design.md` section 2.1):
-#' binds every spec's `value_col`/`order_cols` (and the node's own
+#' Binds every spec's `value_col`/`order_cols` (and the node's own
 #' `group_cols`) to 0-based indices against `ast$input`'s schema, groups the
 #' specs into "frames" keyed by `(order_cols, order_desc)`, and hands ONE
 #' `gpu_window()` call (`src/ops_window.cpp`) to the C++ side: the
 #' six-step stable-sort / gather / groupby-scan-or-shift / scatter-back
-#' algorithm (section 2.2).
+#' algorithm.
 #'
 #' `out_pos` (each spec's 0-based position among the node's own appended
 #' columns) is simply the spec's position in `ast$specs` -- the same order
@@ -1176,14 +1168,13 @@ lower_cross_by_join <- function(ast, left_ptr, right_ptr, left_schema, right_sch
 #' the two always agree on where a given spec's result lands in the final
 #' schema.
 #'
-#' As of Phase 5 task W4, every window kind is lowerable: the "shift"
+#' Every window kind is lowerable: the "shift"
 #' family (`lag()`/`lead()`), the "scan" family (`cumsum()`/`cummax()`/
 #' `cummin()`/`cumprod()`, plus bare `row_number()`'s no-order COUNT_ALL
 #' form), the "rank" family (`row_number(x)`/`min_rank()`/`dense_rank()`/
 #' `percent_rank()`/`cume_dist()`), and the "agg" family
 #' (`mean()`/`sum()`/`min()`/`max()`/`n()`/`sd()`/`var()`/`first()`/
-#' `last()`/`nth()`) -- see `validate_window_spec()`. A later task (the
-#' rolling-window benchmark, scratchpad/todo.md) adds a sixth, "rolling"
+#' `last()`/`nth()`) -- see `validate_window_spec()` -- plus the "rolling" family
 #' (`roll_mean()`/`roll_sum()`/`roll_min()`/`roll_max()`/`roll_sd()`, but
 #' NOT `roll_median()` -- see `window_spec_lowerable()`'s own docs). A spec
 #' whose `fn` isn't recognized AT ALL (no registry entry, or a registry
@@ -1286,28 +1277,24 @@ lower_window <- function(ast, source_ptr) {
 #' user-facing shape) must fall back to `gpu_fallback()` cleanly, never
 #' surface `validate_window_spec()`'s internal-error text to a user, and
 #' never partially push GPU ops before discovering the need to fall back
-#' (see `scratchpad/phase5_window_design.md` section 1.3's "Never
-#' half-lower").
+#' (never half-lower).
 #'
-#' As of Phase 5 task W4, every window `fn` with a registry `window` entry
-#' is lowerable (`"shift"`, `"rank"`, `"scan"`, and `"agg"` kinds all have
-#' C++ support in `gpu_window()`) -- this predicate now only guards against
-#' an `fn` with NO registry entry at all, or a registry entry whose
-#' `window` field is `NULL` (not a window-class op), which should be
-#' unreachable in practice (nothing in `R/window.R`'s decomposition
-#' machinery can produce such a spec) but is checked defensively so a
-#' bug surfaces as a clear internal error instead of silently mis-executing.
+#' Every window `fn` whose registry `window` entry has kind `"shift"`,
+#' `"rank"`, `"scan"` or `"agg"` is lowerable (all four have C++ support in
+#' `gpu_window()`), and so is every `"rolling"` `fn` except `"roll_median"`
+#' (below). Otherwise the predicate is `FALSE`: an `fn` with no registry
+#' entry at all, or a registry entry whose `window` field is `NULL` (not a
+#' window-class op), should be unreachable (nothing in `R/window.R`'s
+#' decomposition machinery produces such a spec) but is checked defensively
+#' so a bug surfaces as a clear internal error instead of silently
+#' mis-executing.
 #'
-#' The rolling-window task (scratchpad/todo.md) adds a sixth kind,
-#' `"rolling"`, lowerable for every `fn` EXCEPT `"roll_median"`: cudf
-#' libcudf's (checked on 26.10) `rolling_window()`/`grouped_rolling_window()` have no MEDIAN
-#' aggregation instantiation at all in this environment (verified via `nm
-#' -DC libcudf.so`, see the file-level comment above
-#' `ir_parse_roll_call()`, R/ir.R) -- a genuine cudf capability gap, not a
-#' cuplyr bug, so `roll_median()`/`data.table::frollmedian()` mutate()
-#' calls route through `mutate_window_fallback()` exactly like the
-#' not-yet-implemented-kind case below, needing `R/roll.R`'s real
-#' `roll_median()` R function to make that CPU re-run work.
+#' `"roll_median"` is not lowerable: libcudf's `rolling_window()`/
+#' `grouped_rolling_window()` have no MEDIAN aggregation (see the
+#' file-level comment above `ir_parse_roll_call()`, R/ir.R). So
+#' `roll_median()`/`data.table::frollmedian()` mutate() calls go through
+#' `mutate_window_fallback()`, the same whole-call CPU re-run as any other
+#' unlowerable spec, which calls `R/roll.R`'s `roll_median()` R function.
 #'
 #' @param spec A `window_spec()` structure (`R/window.R`)
 #' @return `TRUE`/`FALSE`

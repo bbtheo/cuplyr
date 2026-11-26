@@ -17,7 +17,7 @@ table whose row count was never recorded.
 }
 \description{
 Returns the number of rows and columns in a GPU table. For a lazy table
-with pending operations the row count is that of the RESULT, so the plan is
+with pending operations the row count is that of the result, so the plan is
 run on the GPU (\code{compute()}, nothing is copied to R and \code{x} itself is not
 changed). \code{ncol()}/\code{NCOL()} only need the column count, so they are answered
 from the schema without running anything.

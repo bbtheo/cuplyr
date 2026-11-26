@@ -9,8 +9,8 @@ add_suffixes(x, y, suffix)
 \description{
 The real column-naming primitive behind every dplyr join's suffix
 handling (verified via \code{body(dplyr:::add_suffixes)} against dplyr 1.2.1)
--- NOT a one-shot "does this name collide with the other side" check like
-\code{build_join_output_info()} used before Phase 7 J6. \code{x} is the set of
+-- not a one-shot "does this name collide with the other side" check.
+\code{x} is the set of
 names to (maybe) suffix; \code{y} is the "cross" name set to disambiguate
 against (the other side's names, plus, for the ignore-aware caller below,
 this side's own ignored/key names); \code{suffix} is appended to any entry of

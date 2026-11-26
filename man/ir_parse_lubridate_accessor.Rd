@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{ir_parse_lubridate_accessor}
 \alias{ir_parse_lubridate_accessor}
-\title{Parse a lubridate accessor call (Phase 11 L6), once
+\title{Parse a lubridate accessor call, once
 \code{\link[=ir_require_lubridate_fn]{ir_require_lubridate_fn()}} has already confirmed the call really
 invokes lubridate's own function}
 \usage{
@@ -12,7 +12,7 @@ ir_parse_lubridate_accessor(expr, env, schema, fn_name)
 Every one of these 9 functions takes \code{x} as its sole required argument;
 each also has 1-4 OPTIONAL controls (\verb{label=}/\verb{abbr=}/\verb{locale=}
 (month()/wday()), \verb{week_start=} (wday() only), \verb{with_year=}/
-\verb{fiscal_start=} (quarter() only)) that are NOT implemented this wave --
+\verb{fiscal_start=} (quarter() only)) that are NOT supported --
 any of them present at all (even at its own default value) falls back,
 matched via \code{rlang::call_match()} against a prototype mirroring each
 function's REAL lubridate signature (so \code{year(x)}/\code{year(x = d)} both
@@ -21,7 +21,7 @@ match, but e.g. \code{month(x, label = TRUE)} does not).
 \details{
 \code{x} must already be one of the 5 TIMESTAMP_* granularities (a STRING or
 numeric \code{x} is not attempted natively, mirroring \code{as.Date()}/
-\code{as.POSIXct()}'s own scope cut in L3).
+\code{as.POSIXct()}'s own scope).
 
 \code{wday()}'s own default depends on the GLOBAL \code{lubridate.week.start}
 option (\code{getOption("lubridate.week.start", 7)}) -- verified empirically
@@ -35,7 +35,7 @@ from its own default, this remap would be wrong, so \code{wday()} additionally
 checks the CURRENT option value at parse time and falls back if it isn't
 the default 7.
 
-KNOWN, DOCUMENTED DIVERGENCE (not fixed this wave, see
+KNOWN, DOCUMENTED DIVERGENCE (see
 \code{test-dplyr-datetime.R}): \code{lubridate::second()} returns a FRACTIONAL
 value for a POSIXct with sub-second precision (e.g. \code{second(x)} where
 \code{x} is \code{13:45:30.75} is \code{30.75}, not \code{30}) -- cuDF's \code{SECOND} component

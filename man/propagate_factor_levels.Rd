@@ -21,10 +21,9 @@ is the OLD name, which no longer appears in \code{surviving_names})}
 A named list of factor levels, or \code{NULL} if none survive
 }
 \description{
-Implements the factor_levels half of D3: \code{schema$factor_levels} is
-always recomputed from the \emph{input} schema's factor_levels, filtered to
-the names present in the node's output schema. This fixes the bug where
-eager \code{select()} of a factor column dropped \code{factor_levels}, causing
-\code{collect()} to return integer codes instead of a factor.
+\code{schema$factor_levels} is always recomputed from the \emph{input} schema's
+factor_levels, filtered to the names present in the node's output schema.
+So an eager \code{select()} of a factor column keeps its \code{factor_levels}, and
+\code{collect()} returns a factor rather than integer codes.
 }
 \keyword{internal}

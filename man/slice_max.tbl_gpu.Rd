@@ -18,14 +18,14 @@
 \arguments{
 \item{.data}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
 
-\item{order_by}{Column (or IR-supported expression) to rank by.}
+\item{order_by}{Column, or expression of columns, to rank by.}
 
 \item{...}{Not used; for extensibility, must be empty.}
 
 \item{n, prop}{As for \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}}.}
 
-\item{by}{Optional on-the-fly grouping columns, GPU-native (Phase 5,
-task W7) -- see \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}}'s \code{by} docs.}
+\item{by}{Optional grouping columns for this call only, run on the GPU;
+see \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}}'s \code{by}.}
 
 \item{with_ties}{If \code{TRUE} (the default), ties at the cutoff are all
 kept (the result can have more than \code{n} rows); if \code{FALSE}, ties are
@@ -43,8 +43,8 @@ A \code{tbl_gpu} object with the selected rows, in descending
 }
 \description{
 Keeps the \code{n} (or \code{prop} fraction of) rows with the largest \code{order_by}
-values, similar to \code{dplyr::slice_max()}. See \code{\link[=slice_min.tbl_gpu]{slice_min.tbl_gpu()}} for
-the shared native-vs-fallback dispatch and \code{order_by}/\code{with_ties}/
-\code{na_rm} semantics (identical, except the ranking direction and the
-result's row order, which is descending here).
+values, as \code{dplyr::slice_max()} does. It works as \code{\link[=slice_min.tbl_gpu]{slice_min.tbl_gpu()}}
+does (what runs on the GPU, \code{order_by}, \code{with_ties}, \code{na_rm}), except for
+the ranking direction and the result's row order, which is descending
+here.
 }

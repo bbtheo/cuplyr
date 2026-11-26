@@ -24,8 +24,7 @@ median, quantile, n_distinct, first, last, nth, any, all)}
 
 \item{input_type}{Input column type}
 
-\item{na_rm}{Logical scalar (Phase 6, task 6.1; extended Phase 6, task
-6.2). \code{FALSE} (the default, matching R's own \code{na.rm = FALSE} default
+\item{na_rm}{Logical scalar. \code{FALSE} (the default, matching R's own \code{na.rm = FALSE} default
 for \code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{sd()}/\code{var()}/\code{median()}) means a
 group with ANY null input value must produce a NULL aggregation result
 for the WHOLE group -- cudf's own groupby MEAN/SUM/MIN/MAX/STD/
@@ -33,7 +32,7 @@ VARIANCE/MEDIAN aggregations always exclude nulls, so
 \code{gpu_summarise()} (\code{src/ops_groupby.cpp}) applies an extra
 whole-group-null propagation step when this is \code{FALSE} and the input
 column actually has nulls (same technique as the window-aggregate
-path, \code{src/ops_window.cpp}, W4). \code{TRUE} means "use cudf's native
+path, \code{src/ops_window.cpp}). \code{TRUE} means "use cudf's native
 null-excluding behavior as-is" -- no extra step. Meaningless for \code{n()}
 (counts rows regardless of nulls, matching dplyr already). For
 \code{quantile()}, \code{na_rm = FALSE} with an actual null present is a hard
@@ -53,12 +52,12 @@ position (may return NA), \code{TRUE} skips NA values when picking. For
 scalar parameter beyond the input column: \code{quantile()}'s probability
 (\verb{[0, 1]}) or \code{nth()}'s (possibly negative) element position.}
 
-\item{identity}{Logical scalar (F07). \code{TRUE} (the default) lets a
+\item{identity}{Logical scalar. \code{TRUE} (the default) lets a
 \code{min()}/\code{max()} over an INT32/FLOAT64 column apply base R's empty-vector
 identity (\code{Inf}/\code{-Inf}, with dplyr's warning) for an empty group, which
 promotes an INT32 result column to FLOAT64 when it happens; see
 \code{gpu_summarise()} (\code{src/ops_groupby.cpp}). A STRING or Date/POSIXct one
-(F124) keeps its null value but is counted the same way, for dplyr's
+keeps its null value but is counted the same way, for dplyr's
 warning. \code{FALSE} would keep the result INT32 and never warn, but nothing
 calls it with \code{FALSE} today. Only meaningful for \code{min}/\code{max} over
 INT32/FLOAT64/STRING/timestamps; stored as \code{FALSE} for everything else.}

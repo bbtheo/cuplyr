@@ -45,25 +45,26 @@ produces \code{NA} for that position ("NA poisoning").
 \code{na.rm = TRUE}: a window is only ever \code{NA} because it doesn't yet have
 \code{n} physical elements available (the leading \code{n - 1} positions,
 always). Once a window has \code{n} elements, \code{NA}s within it are dropped
-before computing (an all-\code{NA} window still yields \code{NA}). This
-\code{na.rm = TRUE} behavior was verified empirically against
-\code{data.table::frollmean(x, n, na.rm = TRUE)} (not assumed): the leading
-incomplete positions stay \code{NA} even though na.rm is set.
+before computing (an all-\code{NA} window still yields \code{NA}). This is what
+\code{data.table::frollmean(x, n, na.rm = TRUE)} does: the leading
+incomplete positions stay \code{NA} even with \code{na.rm = TRUE}.
 
 Inside \code{mutate()}/\code{filter()} on a \code{tbl_gpu}, \code{roll_mean()}/\code{roll_sum()}/
 \code{roll_min()}/\code{roll_max()}/\code{roll_sd()} (not \code{roll_median()}, see below)
-run GPU-natively, in time that does not depend on the window width
-(segmented scans; cudf's own rolling kernel is kept for
-narrow windows, where it is faster, and for min/max of timestamps and
-logicals) -- these R implementations are the CPU semantics reference and
-the engine for standalone use. libcudf (checked on 26.10 and 26.02) has
-no MEDIAN rolling aggregation, so \code{roll_median()} always runs on the CPU
-(see "Median engines").
-\code{data.table::frollmean(x, n)} (and its five siblings) work as
-equivalent GPU-native aliases inside \code{mutate()}/\code{filter()} too, as long
-as \code{align}/\code{fill}/\code{adaptive} are left at their defaults (\code{"right"},
-\code{NA}, \code{FALSE}) -- any other value falls back / errors, matching this
-task's explicit "right-aligned only" scope.
+run on the GPU, and per group on a grouped table; on an integer or double
+column they take time that does not depend on the window width. Called on
+an ordinary R vector, these functions run in R and give the same values.
+The result types differ in one place: \code{roll_min()} and \code{roll_max()} of an
+integer, logical, \code{Date} or \code{POSIXct} column keep that type on the GPU,
+while the R functions return a double, and so do dplyr on a data frame and
+a \code{mutate()} on a \code{tbl_gpu} that runs on the CPU. The GPU library has no
+rolling median, so a \code{mutate()} or \code{filter()} with \code{roll_median()} runs in
+dplyr on the CPU (see "Median engines").
+\code{data.table::frollmean(x, n)} (and its siblings \code{frollsum()},
+\code{frollmin()}, \code{frollmax()} and \code{frollsd()}) run on the GPU inside
+\code{mutate()}/\code{filter()} too, as long as \code{align}, \code{fill}, \code{adaptive},
+\code{partial} and \code{give.names} keep their defaults (\code{"right"}, \code{NA}, \code{FALSE},
+\code{FALSE}, \code{FALSE}); any other value runs in dplyr on the CPU.
 
 \strong{Median engines.} By default \code{roll_median()} uses a built-in exact
 engine that returns exactly \code{stats::median()} of each window converted to
@@ -88,8 +89,11 @@ other value of the option warns once (class \code{cuplyr_warning_invalid_option}
 and the exact engine is used; see \link{cuplyr-options}. \code{data.table::frollmedian()} written
 inside \code{mutate()} keeps data.table's own result.
 
-The internal option \code{cuplyr.roll_path} (else the environment variable
-\code{CUPLYR_ROLL_PATH}), one of \code{"auto"} (the default), \code{"scans"} or \code{"cudf"},
-forces one of the two GPU paths. It exists for tests and benchmarks and
-changes speed, not results.
+The GPU computes these windows in one of two ways: with scans, whose time
+does not depend on the window width, or with a direct rolling kernel,
+which is faster on narrow windows (and also used for \code{roll_min()} and
+\code{roll_max()} of dates, date-times and logicals). The internal option
+\code{cuplyr.roll_path} (else the environment variable \code{CUPLYR_ROLL_PATH}), one
+of \code{"auto"} (the default), \code{"scans"} or \code{"cudf"}, forces one of them. It
+exists for tests and benchmarks and changes speed, not results.
 }

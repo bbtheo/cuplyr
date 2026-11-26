@@ -2,23 +2,23 @@
 % Please edit documentation in R/join.R
 \name{join_by_natively_supported}
 \alias{join_by_natively_supported}
-\title{Is this \verb{by=} spec natively lowerable end to end (Phase 7 J7, F24)?}
+\title{Is this \verb{by=} spec natively lowerable end to end?}
 \usage{
 join_by_natively_supported(by, x, y)
 }
 \description{
 \code{TRUE} for everything \code{\link[=join_by_is_non_equi]{join_by_is_non_equi()}} already called equi (no
-change there -- J6 native hash-join path). For a genuinely non-equi
+change there -- the native hash-join path). For a genuinely non-equi
 \code{join_by()} object, native lowering additionally requires one of:
 \itemize{
 \item A plain non-equi join (every condition's \code{filter} is \code{"none"}): every
 operator is one this package's AST lowering understands
 (\link{join_native_non_equi_ops}). A non-equi condition comparing two STRING
-columns is native too (F24): \code{lower_join()} maps both sides onto INT32
+columns is native too: \code{lower_join()} maps both sides onto INT32
 codes of one shared order (\code{apply_join_key_casts()}), because cudf's
 AST evaluator can't compare strings. A STRING against anything else
 stays on the CPU fallback.
-\item A rolling join (\code{\link[=join_by_rolling_native]{join_by_rolling_native()}}, F24): exactly one
+\item A rolling join (\code{\link[=join_by_rolling_native]{join_by_rolling_native()}}): exactly one
 \code{closest()} condition plus \code{==} conditions.
 A missing/misspelled column name is NOT checked here -- left to
 \code{validate_join_cols()}'s own proper error downstream on the native path

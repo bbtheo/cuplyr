@@ -2,7 +2,7 @@
 % Please edit documentation in R/join.R
 \name{join_date_posixct_needs_cpu}
 \alias{join_date_posixct_needs_cpu}
-\title{Does a key pair unify a Date with a non-UTC POSIXct? (F32)}
+\title{Does a key pair unify a Date with a non-UTC POSIXct?}
 \usage{
 join_date_posixct_needs_cpu(x_schema, y_schema, join_spec)
 }

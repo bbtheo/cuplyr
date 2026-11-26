@@ -301,6 +301,12 @@ capability 7.5 or higher.
   `data` like the generic, and the C++ code no longer uses the APIs libcudf
   26.10 deprecates (#166).
 
+* `?tbl_gpu` explains what a GPU table is and how to work with one: lazy by
+  default, `collect()`, `compute()`, `explain()`, eager mode and the column
+  types. The verbs' help pages say what runs on the GPU, what runs in dplyr
+  on the CPU and where the result differs from dplyr, without internal
+  development notes (#159).
+
 # cuplyr 0.1.1
 
 ## Bug fixes

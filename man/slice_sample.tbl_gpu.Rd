@@ -14,22 +14,21 @@
 \item{n}{Number of rows to sample. Default \code{1} if neither \code{n} nor
 \code{prop} is supplied. Negative values are clamped like
 \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}}'s \code{n}. With \code{replace = TRUE}, a non-negative
-\code{n}/\code{prop} is NOT clamped to the table's (or group's) row count --
-oversampling with replacement is allowed and produces a larger
-result; without \code{replace}, oversampling silently clamps (no error).}
+\code{n}/\code{prop} is not clamped to the table's (or group's) row count:
+oversampling with replacement is allowed and gives a larger result;
+without \code{replace}, oversampling silently clamps (no error).}
 
 \item{prop}{Proportion of rows to sample (\code{n = prop * nrow(.data)},
 subject to the same clamp rule as \code{n}).}
 
-\item{by}{Optional on-the-fly grouping columns, GPU-native (Phase 5,
-task W8): row indices are drawn (and the result ordered) by each
-group's FIRST-APPEARANCE position in \code{.data} (see
-\code{slice_sample_native()}'s own docs), and the result is always
-ungrouped. Supplying \code{by} when \code{.data} is already grouped (via
-\code{group_by()}) is an error, matching dplyr.}
+\item{by}{Optional grouping columns for this call only, run on the GPU.
+As in dplyr, the groups are drawn (and appear in the result) in the
+order each one first appears in \code{.data}, and the result is ungrouped.
+Supplying \code{by} when \code{.data} is already grouped (via \code{group_by()}) is an
+error, as in dplyr.}
 
-\item{weight_by}{Sampling weights. Always falls back to CPU evaluation
-(see \code{\link[=gpu_fallback]{gpu_fallback()}}) -- not GPU-native.}
+\item{weight_by}{Sampling weights. A call with \code{weight_by} runs in dplyr
+on the CPU.}
 
 \item{replace}{Whether to sample with replacement.}
 }
@@ -37,14 +36,11 @@ ungrouped. Supplying \code{by} when \code{.data} is already grouped (via
 A \code{tbl_gpu} object with the sampled rows.
 }
 \description{
-Keeps a random sample of rows of a GPU table, similar to
-\code{dplyr::slice_sample()}. Ungrouped, \code{group_by()}-grouped, and \verb{by=}
-calls all run entirely on the GPU for the actual row gather (Phase 5,
-task W8): row indices are generated on the CPU (to reproduce dplyr's
-own RNG stream bit-for-bit, see \code{slice_sample_native()}'s own docs for
-the full recipe/group-ordering rules), then gathered via
-\code{gpu_slice_indices()}. \verb{weight_by=} still transparently falls back to
-CPU evaluation (see \code{\link[=gpu_fallback]{gpu_fallback()}}) -- weighted sampling needs the
-actual (potentially computed) column values, not just row counts/group
-columns.
+Keeps a random sample of rows of a GPU table, as \code{dplyr::slice_sample()}
+does. The row numbers are drawn in R with the same \code{sample.int()} calls
+dplyr makes, so the same \code{set.seed()} gives the same rows as dplyr; the
+rows are then gathered on the GPU. This works ungrouped, after
+\code{group_by()} and with \code{by}. A lazy table's pending steps run first, since
+the draw needs the row count. \code{weight_by} runs in dplyr on the CPU (see
+\link{cuplyr-fallback}), since the weights are values of the data.
 }

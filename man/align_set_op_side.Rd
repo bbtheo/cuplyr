@@ -17,8 +17,8 @@ schema, unlike \code{tbl$schema}) actually differs from the target -- the
 common case (x/y already schema-identical) skips both entirely,
 preserving whatever laziness \code{tbl} already had. Names/types alone don't
 catch every case that needs a real align pass: two \code{DICTIONARY32}
-columns can share the type string while their level VECTORS differ
-(Bug 2's native remap path), so \code{factor_levels_match_target()}
+columns can share the type string while their level vectors differ
+(the level-union remap path), so \code{factor_levels_match_target()}
 (R/bind.R) is checked too. \code{align_to_schema()}'s own return also
 resets \verb{$groups} to \code{character()} -- restored here from the
 caller-supplied \code{groups}; its \verb{$schema$factor_levels} is reset to

@@ -7,8 +7,7 @@
 lower_mutate(ast, source_ptr)
 }
 \description{
-Task T5 (Phase 1 expression-engine cutover, \code{scratchpad/phase1_expression_engine.md}
-section 5): each expression's IR is bound (\code{ir_bind()}) against a running
+Each expression's IR is bound (\code{ir_bind()}) against a running
 index map that mirrors \code{gpu_mutate_expr()}'s contract (\code{src/ops_expr.cpp}):
 expression \code{i}'s top-level result always lands at ctx index \code{n_input + i},
 so a \code{col} node referencing an \emph{earlier} expression's output (however many

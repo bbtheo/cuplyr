@@ -3,7 +3,7 @@
 \name{ir_bind_join}
 \alias{ir_bind_join}
 \title{Bind 0-based, per-side column indices onto a non-equi join condition IR
-tree (Phase 7 J7)}
+tree}
 \usage{
 ir_bind_join(ir, left_schema, right_schema)
 }
@@ -20,8 +20,8 @@ The IR tree with \code{index} filled in on every \code{col} node
 \description{
 The join-condition analogue of \code{\link[=ir_bind]{ir_bind()}}. Every \code{col} node in a
 condition IR built by \code{join_cond_ir_from_spec()} (R/join.R) already
-carries an explicit \code{side} tag (see \code{\link[=ir_col_join]{ir_col_join()}}'s docs for why this
-package deviates from the design doc's lookup-order sketch: a self-join
+carries an explicit \code{side} tag (see \code{\link[=ir_col_join]{ir_col_join()}}'s docs for why sides
+are not resolved by lookup order: a self-join
 has identical left/right schemas, so name-based resolution against
 \code{left_schema} first would silently mis-bind a right-only column, or
 bind a same-named column to the wrong side entirely). This function

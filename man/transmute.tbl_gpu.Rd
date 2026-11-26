@@ -19,21 +19,19 @@ plus any group columns not otherwise mentioned.
 }
 \description{
 Computes new columns (or replaces existing ones) from expressions, like
-\code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}}, but keeps ONLY the columns named/created by \code{...}
-(plus group columns), similar to \code{dplyr::transmute()}. \code{transmute()} is
-superseded in dplyr (in favor of \code{mutate(.keep = "none")}) but still
-fully supported, and its column-ordering rule is subtly different from
-\code{mutate(.keep = "none")}'s -- see "Details" below.
+\code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}}, but keeps only the columns named or created by \code{...}
+(plus grouping columns), as \code{dplyr::transmute()} does. dplyr supersedes
+\code{transmute()} in favor of \code{mutate(.keep = "none")}; it still works here,
+and its column order differs from \code{mutate(.keep = "none")}'s (see
+"Details" below).
 }
 \details{
-Verified empirically against dplyr 1.2.1: unlike \code{mutate()} (whose output
-order keeps existing columns in their original relative position and
-appends new ones at the end, see \code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}}'s docs),
-\code{transmute()}'s output order is simply the literal \code{...} dot order --
-whether a dot is a bare existing column or a brand-new expression. Group
-columns NOT explicitly mentioned in \code{...} are prepended at the very
-front (in \code{group_vars()} order); a group column that IS explicitly
-mentioned in \code{...} takes its dot position instead of being prepended.
+As in dplyr, and unlike \code{mutate()} (which keeps existing columns where
+they are and appends new ones at the end, see \code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}}),
+\code{transmute()}'s output order is the order of the dots, whether a dot is a
+bare existing column or a new expression. Grouping columns not mentioned
+in \code{...} come first (in \code{group_vars()} order); a grouping column that is
+mentioned in \code{...} takes its dot's position instead.
 }
 \examples{
 library(dplyr)

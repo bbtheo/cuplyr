@@ -28,11 +28,11 @@ replaced by an \code{ir_col()} reference; identical (by structure) to \code{ir}
 if it contained no window calls at all
 }
 \description{
-Implements section 1.2's decomposition algorithm: a single bottom-up
+The decomposition algorithm: a single bottom-up
 walk that replaces every window-class call node whose OWN arguments
 contain no (nested) window call anywhere -- i.e. every \emph{innermost}
 window call -- with an \code{ir_col()} reference to a freshly materialized
-(or, on a cache hit, previously materialized) temp column, leaving any
+(or, on a cache hit, already materialized) temp column, leaving any
 window call that is NOT yet innermost (its arguments still contain a
 deeper window call) untouched under its own op name for a later pass
 (see \code{\link[=plan_window_stages]{plan_window_stages()}}'s driving loop) once that deeper call has

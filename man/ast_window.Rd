@@ -18,21 +18,21 @@ ast_window(
 \item{specs}{List of \code{window_spec()} structures (\code{R/window.R})}
 
 \item{group_cols}{Character vector of group-by column names --
-\code{character()} for an ungrouped window (section 3: lowering substitutes
+\code{character()} for an ungrouped window (lowering substitutes
 a constant key column and skips the sort when there's also no
 \code{order_cols} on every spec)}
 
-\item{on_sum_overflow}{(F42) What to do when an integer/logical window
+\item{on_sum_overflow}{What to do when an integer/logical window
 \code{sum()} (declared INT32) leaves R's integer range at execution. \code{"error"}:
 raise \code{cuplyr_error_sum_overflow} (mutate() and eager filter(): eager
 reruns the call on the CPU; a lazy \code{mutate()} only plans a sum of a
-logical, an INT32 sum runs at the verb, F80). \code{"double"}: the column
+logical, an INT32 sum runs at the verb). \code{"double"}: the column
 comes back FLOAT64, as in dplyr, for a consumer that reads the real column
 type (lazy \code{filter()}'s predicate). A spec's own \code{on_sum_overflow} field,
 when set, overrides this for that spec (\code{filter()} sets \code{"error"} on a sum
 a later stage consumes).}
 
-\item{minmax_warn}{(F124) \code{NULL}, or the prepared dplyr warning of a window
+\item{minmax_warn}{\code{NULL}, or the prepared dplyr warning of a window
 \code{min()}/\code{max()} call whose verb could not know the input's row count
 (\code{minmax_win_lazy_prep()}): lowering signals it when the node's input has no
 rows, or every time it runs when it is \code{always} (a parquet plan whose empty
@@ -42,11 +42,11 @@ groups a facts query found at the verb).}
 An ast_window node
 }
 \description{
-One node per window-decomposition "stage" (\code{scratchpad/phase5_window_design.md}
-section 2): evaluates every \code{window_spec()} in \code{specs} (\code{R/window.R})
+One node per window-decomposition "stage": evaluates every \code{window_spec()}
+in \code{specs} (\code{R/window.R})
 against \code{input}'s current row set/order and APPENDS one new column per
 spec (never replaces an existing column -- temp names guarantee this).
-Built by a verb's own window-wiring (\code{R/mutate.R}/\code{R/filter.R}/\code{R/slice.R},
-from W3/W5/W6/W7 onward) or, in W2, by hand for \code{test-window-native.R}.
+Built by a verb's own window-wiring (\code{R/mutate.R}/\code{R/filter.R}/\code{R/slice.R})
+or by hand in \code{test-window-native.R}.
 }
 \keyword{internal}

@@ -13,7 +13,7 @@ ir_parse_froll_call(expr, env, schema, dt_fn_name)
 \description{
 See the file-level comment above this section: only the default
 \code{align = "right"}, \code{fill = NA}, \code{adaptive = FALSE}, \code{partial = FALSE},
-\code{give.names = FALSE} are supported this wave (a non-default value
+\code{give.names = FALSE} are supported (a non-default value
 returns \code{NULL}, i.e. "not implemented, fall back" -- mutate()'s usual
 contract for an unrecognized shape: \code{partial = TRUE} changes windowing
 semantics entirely -- allows a genuinely incomplete window to produce a

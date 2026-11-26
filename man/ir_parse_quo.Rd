@@ -15,11 +15,10 @@ ir_parse_quo(quo, schema)
 An IR node, or \code{NULL} if unsupported
 }
 \description{
-Implements the parse rule of section 1.2: columns shadow the
-environment; any subtree with no column reference is constant-folded by
-evaluating it in the quosure's environment. Returns \code{NULL} for anything
-the IR doesn't (yet) understand -- callers (filter/mutate parsers, from
-T3/T5 onward) fall back to the pre-existing CPU-eval or error path.
+Columns shadow the environment; any subtree with no column reference is
+constant-folded by evaluating it in the quosure's environment. Returns
+\code{NULL} for anything the IR doesn't understand -- callers (filter/mutate
+parsers) fall back to the CPU-eval or error path.
 }
 \details{
 A parse-time type check that fails only because a factor (DICTIONARY32)

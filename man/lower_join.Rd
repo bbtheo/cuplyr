@@ -11,19 +11,15 @@ The four "mutating" join types (\code{"left"}/\code{"inner"}/\code{"full"}/\code
 share the same C++ calling convention -- \code{left_key_idx}/\code{right_key_idx}/
 \code{right_drop_idx}/\code{nulls_equal} -- and their GPU entry points
 (\code{gpu_left_join()}/\code{gpu_inner_join()}/\code{gpu_full_join()}/\code{gpu_right_join()},
-\code{src/ops_join.cpp}) all return \code{list(ptr, diag)} (Phase 7 J4's map-pipeline
-restructure): \code{ptr} is the result table's external pointer, \code{diag} is a
-first-offender diagnostics list consumed by \code{check_join_cardinality()}
-below (multiple=/unmatched=/relationship=, Phase 7 J5). \code{right_join()}
-used to be lowered via a swapped \code{left_join(y, x)} plus a column
-reorder/select (\code{build_right_join_via_left()}/
-\code{resolve_right_join_select_idx()}, since removed) -- \code{gpu_right_join()} is
-now native and takes exactly the same argument shape as the other three,
-so no special-casing is needed here beyond the switch itself.
+\code{src/ops_join.cpp}) all return \code{list(ptr, diag)}: \code{ptr} is the result
+table's external pointer, \code{diag} is a first-offender diagnostics list
+consumed by \code{check_join_cardinality()} below
+(multiple=/unmatched=/relationship=). \code{gpu_right_join()} is native and
+takes exactly the same argument shape as the other three, so no
+special-casing is needed here beyond the switch itself.
 }
 \details{
-Non-equi \code{join_by()} (Phase 7 J7, \code{scratchpad/phase7_joins_design.md}
-section 1.4/2): \code{ast$by$op} carries each condition's real operator (not
+Non-equi \code{join_by()}: \code{ast$by$op} carries each condition's real operator (not
 just \code{"=="}) whenever \code{join_by_natively_supported()} (R/join.R) let the
 join reach this AST shape at all -- \code{\link[=join_equi_spec]{join_equi_spec()}}/\code{\link[=join_cond_spec]{join_cond_spec()}}
 split it back into an equality-key subset (routed through the same

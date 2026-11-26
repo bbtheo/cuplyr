@@ -2,50 +2,49 @@
 % Please edit documentation in R/arrange.R
 \name{arrange.tbl_gpu}
 \alias{arrange.tbl_gpu}
-\title{Arrange rows of a GPU table by column values}
+\title{Order rows using column values}
 \usage{
 \method{arrange}{tbl_gpu}(.data, ..., .by_group = FALSE, .locale = NULL)
 }
 \arguments{
 \item{.data}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
 
-\item{...}{Column names or expressions to sort by. Use \code{desc(column)} or
-\code{-column} for descending order. Multiple columns are sorted in order
-of precedence (first column is primary sort key).}
+\item{...}{Columns to sort by. A bare column, \code{desc(column)}, \code{pick()} of
+columns, and \code{-column} of a numeric or logical column sort on the GPU.
+Any other expression, such as \code{arrange(x + y)} or \code{-column} of a factor,
+string or date column (where R's \code{-} warns or errors), is evaluated by
+dplyr on the CPU. The first key is the
+primary sort key, the second breaks its ties, and so on.}
 
-\item{.by_group}{If \code{TRUE} and \code{.data} is grouped, sort within groups by
-prepending group columns to the sort specification. Default is \code{FALSE}.}
+\item{.by_group}{If \code{TRUE} and \code{.data} is grouped, sort by the grouping
+columns first (ascending), then by \code{...}. Default is \code{FALSE}.}
 
 \item{.locale}{The locale to sort character vectors in. \code{NULL} (the default)
 and \code{"C"} sort by byte order on the GPU; any other locale is sorted by
-dplyr on the CPU (via stringi) through the usual fallback.}
+dplyr on the CPU (with stringi).}
 }
 \value{
-A \code{tbl_gpu} object with rows reordered. The GPU memory for the
-sorted result is newly allocated (approximately 2x table size peak memory).
+A \code{tbl_gpu} with the rows reordered and the groups of \code{.data}. The
+sorted result is new GPU memory (about twice the table size at peak).
 }
 \description{
-Orders the rows of a GPU table by the values of specified columns,
-similar to \code{dplyr::arrange()}. Sorting is performed entirely on the GPU
-using a memory-efficient two-phase algorithm.
+\code{arrange()} orders the rows of a GPU table by the values of the columns you
+name, as \code{dplyr::arrange()} does. The sort runs on the GPU.
 }
 \details{
 \subsection{Sort order}{
 \itemize{
-\item Default is ascending order
-\item Use \code{desc(column)} or \code{-column} for descending order
-\item Multiple columns: first column is primary key, second is tiebreaker, etc.
-\item Sorting is stable: ties preserve their original relative order
+\item Ascending by default; \code{desc(column)} or \code{-column} sorts descending.
+\item With several keys, the first is the primary key, the second breaks its
+ties, and so on.
+\item The sort is stable: rows that tie keep their original order.
 }
 }
 
-\subsection{NA handling}{
-\itemize{
-\item \code{NA} values are always placed last, for both ascending order and
-\code{desc()}/descending order, matching dplyr exactly (verified empirically
-against dplyr 1.2.1; fixed in Phase 6 -- older versions of this package
-placed \code{NA} first for descending sorts, a divergence from dplyr)
-}
+\subsection{Missing values}{
+
+\code{NA} and \code{NaN} sort last, in ascending and in descending order, as in
+dplyr.
 }
 
 \subsection{Memory usage}{
@@ -62,11 +61,13 @@ For very large tables, consider filtering to reduce size before sorting.
 
 \subsection{Supported column types}{
 
-All column types supported by \code{tbl_gpu} can be sorted:
-numeric, integer, character, logical, Date, POSIXct.
+Every column type a GPU table holds can be a sort key: double, integer,
+integer64, character, logical, factor, \code{Date} and \code{POSIXct}. A factor sorts
+by the order of its levels, as in dplyr.
 
-Note: Character sorting on the GPU uses binary/UTF-8 ordering (dplyr's
-\code{"C"} locale). A non-\code{"C"} \code{.locale} falls back to dplyr.
+Character columns sort by byte (UTF-8) order, which is dplyr's default
+\code{"C"} locale. Another \code{.locale}, or \code{options(dplyr.legacy_locale = TRUE)},
+sorts in dplyr on the CPU.
 }
 }
 \examples{

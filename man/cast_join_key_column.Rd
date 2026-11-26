@@ -2,7 +2,7 @@
 % Please edit documentation in R/lower.R
 \name{cast_join_key_column}
 \alias{cast_join_key_column}
-\title{Cast one join key column to its common type (A3)}
+\title{Cast one join key column to its common type}
 \usage{
 cast_join_key_column(ptr, idx, from_type, to_type, levels)
 }

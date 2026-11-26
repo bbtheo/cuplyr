@@ -21,57 +21,46 @@
 #'   grouping columns recorded for use by [summarise()].
 #'
 #' @details
-#' Unlike operations like [dplyr::filter()] or [mutate()], `group_by()` does not
-#' perform any expensive GPU aggregation itself. It simply records which
-#' columns should be used for grouping in subsequent aggregation operations
-#' (computed group columns, see below, DO run a real `mutate()`).
-#'
-#' The actual groupby computation happens when you call [summarise()] (or
-#' one of the [group_data()] family) on the grouped table. This lazy
-#' approach allows you to chain multiple operations before executing the
-#' expensive groupby operation.
+#' `group_by()` itself does no GPU work: it records the grouping columns, and
+#' the verbs that follow ([summarise()], [mutate()], [dplyr::filter()], the
+#' [group_data()] family, ...) then work group by group. Computed group
+#' columns (see below) are the exception: they run a `mutate()` first.
 #'
 #' ## Computed groups
-#' Verified empirically against dplyr 1.2.1: a **named** argument (e.g.
-#' `group_by(df, g = x %/% 2)`, or even a bare-symbol rename like
-#' `group_by(df, g = x)`) is ALWAYS treated as a `mutate()` expression --
-#' the original column (if any) is kept, a new (or overwritten) column is
-#' added under the given name, and the table is then grouped by that name.
-#' Later dots may reference earlier dots' newly-computed columns, exactly
-#' like `mutate()`'s own chain semantics (e.g. `group_by(df, g = x %/% 2, h
-#' = g * 10)`). An **unnamed** argument is a column reference (`x`,
-#' `.data$x`, `.data[["x"]]`), which names an existing column, a top-level
-#' `pick()`, which adds the columns it selects, or -- anything else -- a
-#' data-masking expression computed into a new column named
-#' `rlang::as_label()` of the expression (`group_by(df, a + 1)` makes a column
-#' called `a + 1`). As soon as one dot is named or is not a column reference
-#' (a `pick()` or a `NULL` counts), every dot is data-masking, so a bare name
-#' that is not a column (a variable in the calling environment) is computed
-#' too, as in `mutate()`. All computed dots (named and unnamed) run as one
-#' `mutate()` on the ungrouped data, in argument order. Every dot's resulting
-#' group column name(s) are combined in the order the arguments were written.
-#' The old `add =` and `.dots =` arguments are defunct and error.
+#' As in dplyr, a **named** argument (`group_by(df, g = x %/% 2)`, or even a
+#' plain rename such as `group_by(df, g = x)`) is always computed like a
+#' `mutate()` expression: the original column (if any) is kept, a new (or
+#' overwritten) column is added under the given name, and the table is then
+#' grouped by that name. A later argument may use the column of an earlier
+#' one, as in `mutate()` (`group_by(df, g = x %/% 2, h = g * 10)`). An
+#' **unnamed** argument is a column reference (`x`, `.data$x`,
+#' `.data[["x"]]`), which names an existing column, a top-level `pick()`,
+#' which adds the columns it selects, or any other expression, which is
+#' computed into a new column named after the expression (`group_by(df, a +
+#' 1)` makes a column called `a + 1`). As soon as one argument is named or is
+#' not a column reference (a `pick()` or a `NULL` counts), every argument is
+#' data-masking, so a bare name that is not a column (a variable in the
+#' calling environment) is computed too, as in `mutate()`. All computed
+#' arguments run as one `mutate()` on the ungrouped data, in argument order,
+#' and the group columns come in the order the arguments were written. The
+#' old `add =` and `.dots =` arguments are defunct and error.
 #'
-#' Calling `group_by()` with **no** arguments and `.add = FALSE` (the
-#' default) clears any existing grouping entirely (verified empirically --
-#' this differs from simply returning `.data` unchanged, which was this
-#' function's historical, incorrect behavior for that case).
+#' Calling `group_by()` with no arguments and `.add = FALSE` (the default)
+#' removes any grouping, as in dplyr.
 #'
 #' ## `.drop` semantics
-#' `.drop = FALSE` (verified empirically against dplyr 1.2.1) adds one
-#' placeholder row (`.rows = integer(0)`) to [group_data()]'s output for
-#' every declared *factor level combination* of the FACTOR grouping columns
-#' that has no observed row, expanded recursively like dplyr: under each
-#' parent group a factor column takes all its levels (plus `NA` if observed
-#' there) and a non-factor column the values observed under that parent (a
-#' single `NA` under an empty parent); see `expand_dropped_groups()`.
+#' With `.drop = FALSE`, [group_data()] (and so [group_keys()], [n_groups()]
+#' and the verbs that work per group) also has an empty group (`.rows =
+#' integer(0)`) for every combination of factor levels of the factor
+#' grouping columns that has no row. The combinations are expanded as in
+#' dplyr: under each parent group a factor column takes all its levels (plus
+#' `NA` if it occurs there) and a non-factor column the values that occur
+#' under that parent (a single `NA` under an empty parent).
 #'
-#' `.drop` is stored as a single boolean on the returned `tbl_gpu`
-#' (`$group_drop`) and carried by `push_op()`/`push_join()` through every verb
-#' that keeps a group column (and by `count()`, `add_count()` and
-#' `slice_sample()`, which build their result directly); it is reset to `TRUE`
-#' once no group column is left. Like dplyr, `.drop` defaults to the table's
-#' current setting, so regrouping a `.drop = FALSE` table keeps it.
+#' The setting stays with the table through every verb that keeps a group
+#' column, and is reset to `TRUE` once no group column is left. As in dplyr,
+#' `.drop` defaults to the table's current setting, so regrouping a `.drop =
+#' FALSE` table keeps it.
 #'
 #' Groups are recomputed from the data each time, and empty factor-level
 #' groups are re-added from the declared levels. Row-subsetting verbs also
@@ -80,17 +69,14 @@
 #' `slice_tail()`, `slice_min()`, `slice_max()`, `slice_sample()`,
 #' `semi_join()`, `anti_join()` and `rows_delete()` keep every group,
 #' emptied ones included. `.preserve = TRUE` does the same for `slice()` and
-#' `filter()` on a `.drop = TRUE` table. The result fixes the input's
-#' group-keys table (`$fixed_keys`), only when a group can have been lost,
-#' which `group_data()` and friends, `collect()`, `summarise()`/`count()`/
-#' `tally()` (on the GPU, with a row for each emptied group) and the CPU
-#' fallbacks honour.
-#' `mutate()`, `select()`, `rename()` and `relocate()` carry it as long as
-#' they leave the group columns alone, and a CPU fallback result carries
-#' whatever empty groups dplyr's own result kept (see `gpu_fallback()`: a
-#' fallback `mutate()` keeps them, a fallback `arrange()` on a `.drop = TRUE`
-#' table drops them); every
-#' other verb, and any change of grouping, drops it.
+#' `filter()` on a `.drop = TRUE` table. The kept groups then show in
+#' `group_data()` and friends, `collect()`, and `summarise()`, `count()` and
+#' `tally()` (on the GPU, with a row for each emptied group). `mutate()`,
+#' `select()`, `rename()` and `relocate()` keep them as long as they leave
+#' the group columns alone. A verb that runs in dplyr on the CPU keeps
+#' whichever empty groups dplyr's own result kept (such a `mutate()` keeps
+#' them, such an `arrange()` on a `.drop = TRUE` table drops them). Every
+#' other verb, and any change of grouping, drops them.
 #'
 #' @seealso
 #' \code{\link{summarise.tbl_gpu}} for aggregating grouped data,
@@ -556,7 +542,7 @@ groups.tbl_gpu <- function(x) {
 #' `tbl_gpu` object, and the generic's own `tbl_vars.default` doesn't apply
 #' since `tbl_gpu` isn't a data.frame subclass).
 #'
-#' `dplyr::tbl_nongroup_vars()` (Phase 9, task 1) is a plain, non-generic
+#' `dplyr::tbl_nongroup_vars()` is a plain, non-generic
 #' function defined purely in terms of `setdiff(tbl_vars(x),
 #' group_vars(x))` -- it works transparently for `tbl_gpu` via this method
 #' plus `group_vars.tbl_gpu()`, with no `tbl_gpu`-specific code of its own.
@@ -600,16 +586,15 @@ group_by_drop_default.tbl_gpu <- function(.tbl) {
 
 #' Drop unused levels of the factor group columns (dplyr backend method)
 #'
-#' Native: [dplyr::group_trim()] on a grouped `tbl_gpu` finds the codes still
-#' used by each factor group column on the GPU (a distinct over that one
-#' column; only the at most `n_levels + 1` distinct codes reach R), keeps the
-#' used levels in their original order (an ordered factor stays ordered),
-#' remaps the codes with `gpu_remap_codes()` and regroups with
-#' `ungroup()` + `group_by(.drop = )`, which also drops any `fixed_keys` left
-#' by `.preserve = TRUE`. Pending ops are computed first (the new level set
-#' depends on the data). An ungrouped table is returned unchanged, without
-#' looking at `.drop`, like dplyr. Shapes outside the allowlist (duplicated
-#' names, a factor group column without known levels) use the CPU fallback.
+#' [dplyr::group_trim()] on a grouped `tbl_gpu` runs on the GPU. For each
+#' factor group column it finds the levels still in use (only those distinct
+#' codes come back to R), keeps them in their original order (an ordered
+#' factor stays ordered), recodes the column on the GPU and regroups with
+#' `.drop`. Empty groups kept by `.preserve = TRUE` are dropped too. Pending
+#' operations of a lazy table run first, because the new levels depend on
+#' the data. An ungrouped table is returned unchanged, without looking at
+#' `.drop`, as in dplyr. A table with duplicated column names runs in dplyr
+#' on the CPU.
 #'
 #' @param .tbl A `tbl_gpu` object.
 #' @param .drop Whether the regroup drops empty groups.
@@ -692,9 +677,9 @@ group_trim.tbl_gpu <- function(.tbl, .drop = dplyr::group_by_drop_default(.tbl))
 #' Compute the grouping-metadata tibble shared by the whole query family
 #'
 #' Materializes `.data` if needed, then either builds the trivial
-#' single-row ungrouped `.rows` tibble (verified empirically against dplyr
-#' 1.2.1: `group_data()` on an ungrouped table is one row, `.rows` holding
-#' every row 1:n in original order -- no GPU work needed at all), or calls
+#' single-row ungrouped `.rows` tibble (as in dplyr, `group_data()` on an
+#' ungrouped table is one row, `.rows` holding every row 1:n in original
+#' order -- no GPU work needed at all), or calls
 #' `gpu_group_info()` (src/ops_groupby.cpp) once and assembles the result:
 #' the small distinct-keys table is collected via the ordinary
 #' `collect.tbl_gpu()` path (reusing its factor-level/INT64 handling
@@ -706,10 +691,9 @@ group_trim.tbl_gpu <- function(.tbl, .drop = dplyr::group_by_drop_default(.tbl))
 #' post-hoc R-side expansion over the (small, group-count-sized) result --
 #' never over the underlying GPU data -- via `expand_dropped_groups()`.
 #'
-#' Not cached across calls (each call re-runs the GPU query): correctness
-#' first, per this task's own scope -- see scratchpad/workflow_state.md's
-#' Phase 9 kickoff note. The query itself is already a single GPU groupby,
-#' so repeated calls are cheap relative to any actual aggregation.
+#' Not cached across calls (each call re-runs the GPU query). The query
+#' itself is a single GPU groupby, so repeated calls are cheap relative to
+#' any actual aggregation.
 #'
 #' @param .data A `tbl_gpu` object
 #' @return A tibble: grouping columns (if grouped) plus a `.rows` list-of
@@ -985,14 +969,12 @@ expand_dropped_groups <- function(gd, group_names, factor_levels) {
 #' Grouping metadata: keys, row indices, per-row group id, sizes, and count
 #'
 #' `group_data()` (and the queries derived from it below) report the
-#' *grouping structure* dplyr's own `grouped_df` carries as an attribute --
-#' `cuplyr` computes it on demand via one native GPU groupby instead
-#' (`compute_group_data()`, above), since `tbl_gpu` has no such attribute to
-#' read. All are GPU-native (Phase 9, task 1) -- previously CPU fallbacks.
+#' *grouping structure* that dplyr's `grouped_df` carries as an attribute.
+#' A `tbl_gpu` has no such attribute, so `cuplyr` computes it on demand with
+#' one GPU groupby. All of them run on the GPU.
 #'
 #' `group_data()` returns a tibble of the grouping columns (in ascending key
-#' order, `NA` sorted last -- cudf's own default sort-groupby order, which
-#' is exactly dplyr's own convention, verified empirically) plus a `.rows`
+#' order, `NA` sorted last, as in dplyr) plus a `.rows`
 #' list-of column of 1-based row indices; called on an ungrouped table it
 #' returns a single row whose `.rows` holds every row, in original order.
 #' `group_keys()` is `group_data()` minus `.rows`; `group_rows()` is just

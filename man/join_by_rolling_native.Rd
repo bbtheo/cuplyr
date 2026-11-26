@@ -2,7 +2,7 @@
 % Please edit documentation in R/join.R
 \name{join_by_rolling_native}
 \alias{join_by_rolling_native}
-\title{Can this \code{closest()} join run on \code{gpu_rolling_join()} (F24)?}
+\title{Can this \code{closest()} join run on \code{gpu_rolling_join()}?}
 \usage{
 join_by_rolling_native(by, x, y)
 }

@@ -2,7 +2,7 @@
 % Please edit documentation in R/fallback.R
 \name{fallback_failed_reason}
 \alias{fallback_failed_reason}
-\title{The reason a verb call's dot goes to the CPU (F88)}
+\title{The reason a verb call's dot goes to the CPU}
 \usage{
 fallback_failed_reason(dots, default)
 }

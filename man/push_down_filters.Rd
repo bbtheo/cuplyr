@@ -13,8 +13,7 @@ push_down_filters(ast)
 AST with filters pushed down across mutates where safe
 }
 \description{
-Phase 12 audit -- filter-pushdown-across-\code{distinct()} (flagged as a known,
-unimplemented opportunity back in section 3.1 of the design notes):
+Pushing a filter across \code{distinct()} is deliberately not implemented.
 \code{filter(distinct(df, k), k > 1)} COULD safely push the filter below
 \code{distinct()} when the predicate only references surviving key columns (or,
 when \code{.keep_all = TRUE}, any column at all) -- a predicate that's a pure
@@ -39,7 +38,7 @@ a distinct node, and is the segment's bottom node specifically a single
 filter with only-key-column predicates"), not a \code{push_down_filters()}
 switch case -- meaningfully more invasive than the analogous mutate/
 select pushdown cases below, and with a real correctness footgun if the
-key-vs-non-key-column safety check is ever gotten wrong. Left for a future
-phase; the two-line summary above is the reason it isn't attempted now.
+key-vs-non-key-column safety check is ever gotten wrong. That risk is why
+it isn't attempted.
 }
 \keyword{internal}

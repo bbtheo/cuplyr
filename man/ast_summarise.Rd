@@ -23,21 +23,20 @@ ast_summarise(
 set, regardless of \verb{.groups=})}
 
 \item{result_groups}{Character vector of group columns RETAINED on the
-summarise's \emph{output} (Phase 6, task 3): a subset of \code{groups}, computed
+summarise's \emph{output}: a subset of \code{groups}, computed
 from \verb{.groups=} semantics by \code{resolve_summarise_groups()}
 (R/summarise.R) -- \code{character()} for \code{.groups = "drop"}/ungrouped
 input, all of \code{groups} for \code{"keep"}, all-but-the-last for the default/
-\code{"drop_last"}. Read by \code{propagate_groups()} (R/execute.R) instead of
-the old hardcoded "summarise always drops all groups" rule.}
+\code{"drop_last"}. Read by \code{propagate_groups()} (R/execute.R).}
 
-\item{on_sum_overflow}{(F34) What to do when an integer/logical \code{sum()}
+\item{on_sum_overflow}{What to do when an integer/logical \code{sum()}
 leaves R's integer range at execution. \code{"double"}: the column comes back
 FLOAT64, as in dplyr (eager mode reconciles the schema from the result).
 \code{"error"} (lazy plans, whose schema was declared INT32 statically): raise
 \code{cuplyr_error_sum_overflow}. A lazy \code{summarise()} plans only a sum of a
-logical this way (F80): an INT32 sum runs at the verb with \code{"double"}.}
+logical this way: an INT32 sum runs at the verb with \code{"double"}.}
 
-\item{group_order}{Row order of a grouped result: \code{"keys"} (F33) sorts by the
+\item{group_order}{Row order of a grouped result: \code{"keys"} sorts by the
 group keys (ascending, \code{NA} last), dplyr's \code{group_by()} order; \code{"first"}
 (#50) orders groups by first appearance, dplyr's \verb{.by =} order, and is
 what \code{summarise_by_desugar()} asks for.}

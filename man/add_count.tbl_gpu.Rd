@@ -10,38 +10,32 @@
 \item{x}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
 
 \item{...}{Column names or expressions to group by, as
-\code{\link[=count.tbl_gpu]{count.tbl_gpu()}}. If \code{x} is already grouped, these are added to the
-existing grouping for computing the count, but the OUTPUT's grouping
-is restored to \code{x}'s original grouping (matching \code{\link[=count.tbl_gpu]{count.tbl_gpu()}}'s
-own reconstruction rule).}
+\code{\link[=count.tbl_gpu]{count.tbl_gpu()}}. If \code{x} is already grouped, they are added to its
+grouping for the count; the result keeps \code{x}'s own grouping.}
 
 \item{wt}{Optional weight column/expression, as \code{\link[=count.tbl_gpu]{count.tbl_gpu()}}.}
 
 \item{sort}{If \code{TRUE}, sorts the result in descending order of the count
-column (note: since no rows are collapsed, ties -- and non-tied rows
-within the same group -- are far more common than in \code{count()}).}
+column. No rows are collapsed, so every row of a group ties with the
+others; the sort is stable and keeps their order.}
 
 \item{name}{The name of the count column. If \code{NULL} (default), uses
-\code{"n"}, or \code{"nn"}/\code{"nnn"}/... if \code{"n"} already names ANY existing
-column of \code{x} (not just a group column -- verified empirically against
-dplyr 1.2.1 to differ from \code{count()}'s own narrower check; see this
-file's header comment).}
+\code{"n"}, or \code{"nn"}/\code{"nnn"}/... if \code{"n"} already names any column of \code{x}
+(where \code{\link[=count.tbl_gpu]{count.tbl_gpu()}} and \code{\link[=tally.tbl_gpu]{tally.tbl_gpu()}} look at the grouping
+columns only), as in dplyr.}
 
-\item{.drop}{Deprecated in dplyr 1.0.0 (and here); errors if supplied.}
+\item{.drop}{Deprecated in dplyr 1.0.0; supplying it is an error, as in
+dplyr.}
 }
 \value{
 A \code{tbl_gpu} with the same rows as \code{x}, plus the count column,
-grouped the same as \code{x} was originally.
+grouped as \code{x} is.
 }
 \description{
-Like \code{\link[=count.tbl_gpu]{count.tbl_gpu()}}, but keeps every row and column of \code{x}, appending
-the per-group count as a new column (broadcast to every row in the
-group) instead of collapsing to one row per group. Sugar over
-\code{\link[=group_by.tbl_gpu]{group_by.tbl_gpu()}} and a grouped-aggregate \code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}} (which
-natively broadcasts the per-group count/sum to every row via \code{mutate()}'s
-general window/aggregate machinery, Phase 5 -- NA keys are grouped
-together correctly and original row order is preserved, see
-\code{R/window.R}/\code{src/ops_window.cpp}).
+Like \code{\link[=count.tbl_gpu]{count.tbl_gpu()}}, but keeps every row and column of \code{x} and adds
+the group's count (or weighted sum) as a new column on every row of the
+group, as \code{dplyr::add_count()} does. It runs on the GPU: rows keep their
+original order, and \code{NA} keys form one group, as in dplyr.
 }
 \examples{
 library(dplyr)

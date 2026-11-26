@@ -19,10 +19,8 @@
 A \code{tbl_gpu}, or a vector when \code{drop = TRUE} selects one column.
 }
 \description{
-\code{tbl_gpu} is a plain classed \code{list}, not a \code{data.frame} subclass, so a
-\code{[} method is needed (base R's list \code{[} would leak the raw \code{ptr}).
-Follows the \code{[} method of tibble (\verb{tibble:::[.tbl_df}), and for a grouped
-table dplyr's \verb{[.grouped_df}:
+\code{x[i, j]} on a \code{tbl_gpu} follows tibble's \code{[} rules, and for a grouped
+table dplyr's rules for a grouped data frame:
 \itemize{
 \item \code{x[j]} selects columns; \code{x[i, j]}, \code{x[i, ]}, \code{x[, j]}, \code{x[]} are the
 2-d forms. \code{j} is resolved first (names, positions, negative, logical)
@@ -40,9 +38,10 @@ is still ungrouped, as in dplyr).
 }
 }
 \details{
-Row selection is one GPU gather (an \code{ast_slice(mode = "bracket")} node,
-lazy or eager); column selection is the ordinary select node. Groups are
-the original group variables that survive, \code{.drop} is kept.
+Row selection runs on the GPU as one gather, and is added to the plan of a
+lazy table like any verb; column selection works as \code{\link[=select.tbl_gpu]{select.tbl_gpu()}}
+does. The result keeps the group variables that survive, and the table's
+\code{.drop} setting.
 
 Row subscripts are validated against the real row count at call time
 whenever that is known without executing anything (an eager table, or a

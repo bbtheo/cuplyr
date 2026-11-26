@@ -14,7 +14,8 @@
 \item{name}{Ignored (included for dplyr compatibility).}
 }
 \value{
-A \code{tbl_gpu} with all operations materialized and \code{lazy_ops} cleared.
+A \code{tbl_gpu} whose pending steps have all run, holding the result in
+GPU memory. It keeps its execution mode, so a lazy table stays lazy.
 }
 \description{
 Executes any pending lazy operations and stores the result in a new GPU

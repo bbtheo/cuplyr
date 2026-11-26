@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{ir_parse_substr}
 \alias{ir_parse_substr}
-\title{Parse \code{substr(x, start, stop)} (Phase 11 L5)}
+\title{Parse \code{substr(x, start, stop)}}
 \usage{
 ir_parse_substr(expr, env, schema)
 }

@@ -13,7 +13,7 @@ optimize_segment(ast, required_cols = NULL, keep_mutates = FALSE)
 segment's output (\code{NULL} means all of \code{ast}'s own output columns)}
 
 \item{keep_mutates}{\code{TRUE} when \code{required_cols} is a barrier's narrower
-requirement (F99): that pruning removes columns only, so a mutate
+requirement: that pruning removes columns only, so a mutate
 expression nothing reads stays and is computed (it can warn, as in dplyr),
 and \code{prune_dead_columns()} does not run. Its inputs stay required
 (\code{push_down_projections()} keeps them).}

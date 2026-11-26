@@ -21,9 +21,8 @@ Recognizes a bare column name, \code{desc(column)}/\code{dplyr::desc(column)}, o
 \code{-column} (dplyr's own \code{desc()} shorthand, also usable directly as an
 \code{arrange()}/\code{order_by()} sort key) and resolves it against \code{schema}.
 Anything else -- a general expression such as \code{order_by(a + b, ...)} --
-is not implemented this wave (mirroring \code{R/window.R}'s rank-family
-design note: only a bare, already-existing column doubles as an order
-key so far, no \code{..winarg..}-style hoisting for order columns yet) and
+is not supported (only a bare, already-existing column doubles as an
+order key; there is no \code{..winarg..}-style hoisting for order columns) and
 returns \code{NULL}, same as any other unsupported IR shape (callers fall
 back).
 }

@@ -12,7 +12,9 @@
 \item{...}{Additional arguments (unused).}
 }
 \value{
-A \code{tbl_gpu} with a barrier marker in its lazy_ops.
+A lazy \code{tbl_gpu} with the same columns and nothing run yet. The
+optimizer does not move or merge the steps added after it with the steps
+before it. An eager table is returned unchanged.
 }
 \description{
 Marks the current point in the pipeline as an optimization barrier.

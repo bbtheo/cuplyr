@@ -13,13 +13,12 @@ ir_has_window(ir)
 Logical scalar
 }
 \description{
-Phase 5 (window functions, \code{scratchpad/phase5_window_design.md} section
-1.1): \code{TRUE} iff any \code{call} node in the subtree has a non-\code{NULL} \code{window}
+\code{TRUE} iff any \code{call} node in the subtree has a non-\code{NULL} \code{window}
 field in its \link{ir_call_registry} entry. Used by \code{\link[=ir_bind]{ir_bind()}}'s window
 guard, by the decomposition machinery in \code{R/window.R}
-(\code{ir_extract_windows()}/\code{plan_window_stages()}), and will be used by the
-as-yet-unwired grouped \code{mutate()}/\code{filter()} (W3/W5) to detect when a
-parsed expression needs the window decomposition path at all.
+(\code{ir_extract_windows()}/\code{plan_window_stages()}), and by verbs such as
+\code{filter()} and \code{slice()} to detect when a parsed expression needs the
+window decomposition path at all.
 }
 \details{
 Accepts either a single IR node (identified by the \code{cuplyr_ir} class

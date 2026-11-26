@@ -778,17 +778,14 @@ bind_rows_gpu_run <- function(dots, .id, call) {
 # =============================================================================
 
 #' Resolve the common GPU type for one column across a bind/set operation
-#' (Phase 11 L4)
 #'
-#' The type-compatibility ladder extracted out of `check_set_op_compatible()`
-#' (R/sets.R, Phase 8) so `bind_rows()`'s `compute_unified_schema()` and the
-#' set-op verbs share EXACTLY one promotion rule, instead of `bind_rows()`
-#' having its own looser one (the old `promote_types()`'s unconditional
-#' "STRING is widest" rule, which silently coerced e.g. a numeric column
-#' against a character column of the same name -- a real bug: real dplyr's
-#' own `vctrs::vec_ptype2()`-backed `bind_rows()` has never allowed this,
-#' it's a hard `vctrs_error_incompatible_type`, see
-#' `abort_bind_rows_incompatible()` below).
+#' The type-compatibility ladder shared by `check_set_op_compatible()`
+#' (R/sets.R) and `bind_rows()`'s `compute_unified_schema()`, so the set-op
+#' verbs and `bind_rows()` use EXACTLY one promotion rule. A numeric column
+#' against a character column of the same name is not coerced to STRING: as
+#' in real dplyr (`vctrs::vec_ptype2()`-backed `bind_rows()`), it's a hard
+#' `vctrs_error_incompatible_type`, see `abort_bind_rows_incompatible()`
+#' below.
 #'
 #' Four cases, all pinned via oracle-verified `dplyr`/`vctrs` behavior:
 #' \itemize{
@@ -804,13 +801,9 @@ bind_rows_gpu_run <- function(dots, .id, call) {
 #'     that INT64 (integer64) and FLOAT64 have no common type) or
 #'     both in the timestamp ladder (`TIMESTAMP_DAYS < ... <
 #'     TIMESTAMP_NANOSECONDS`): promotes to the wider member. The timestamp
-#'     cast (Date <-> POSIXct, etc.) is genuinely native as of Phase 11 L3
-#'     (`gpu_cast_column()`, `src/ops_bind.cpp`, gained the 5 TIMESTAMP_*
-#'     targets) -- this ladder used to require `check_set_op_compatible()`'s
-#'     own caller to set a `$needs_fallback` flag for exactly this case
-#'     (no native `TIMESTAMP_DAYS` -> `TIMESTAMP_MICROSECONDS` cast existed
-#'     yet); that flag is retired, this ladder is now unconditionally native
-#'     for both callers.
+#'     cast (Date <-> POSIXct, etc.) is native (`gpu_cast_column()`,
+#'     `src/ops_bind.cpp`, handles the TIMESTAMP_* targets), so this ladder
+#'     is native for both callers.
 #'   \item Anything else (e.g. numeric vs. character, factor vs. numeric,
 #'     numeric vs. timestamp): `$ok = FALSE` -- the caller reports its own
 #'     verb-specific incompatibility error (sets.R's `"`x` and `y` are not
@@ -871,7 +864,7 @@ resolve_common_col_type <- function(tx, ty, fx = FALSE, fy = FALSE,
 }
 
 #' Friendly, `vctrs`-bracket-style type label for a `bind_rows()`
-#' incompatible-type error (Phase 11 L4)
+#' incompatible-type error
 #'
 #' Mirrors real dplyr/vctrs' own `<double>`/`<character>`/`<date>`/
 #' `<datetime<UTC>>` labels (verified empirically: `bind_rows(data.frame(x =
@@ -901,7 +894,7 @@ bind_rows_type_label <- function(type, is_factor = FALSE) {
   )
 }
 
-#' Raise dplyr's own `bind_rows()` incompatible-type error (Phase 11 L4)
+#' Raise dplyr's own `bind_rows()` incompatible-type error
 #'
 #' Reproduces `vctrs`' exact message shape, verified empirically against
 #' dplyr 1.2.1/vctrs 0.7.3 across 2-, 3-, and 4-table `bind_rows()` calls,
@@ -943,14 +936,12 @@ abort_bind_rows_incompatible <- function(other_idx, col_name, type1, type2,
 
 #' Compute unified schema from multiple tables
 #'
-#' Phase 11 L4: shares `resolve_common_col_type()`'s type ladder with the
-#' set-op verbs (R/sets.R) -- the old `promote_types()`'s unconditional
-#' "STRING is widest" rule is RETIRED; a numeric-vs-character (or any other
-#' non-ladder) mismatch is now a hard error matching real dplyr/vctrs'
-#' `vctrs_error_incompatible_type` text (`abort_bind_rows_incompatible()`),
-#' not a silent STRING coercion.
+#' Shares `resolve_common_col_type()`'s type ladder with the set-op verbs
+#' (R/sets.R); a numeric-vs-character (or any other non-ladder) mismatch is
+#' a hard error matching real dplyr/vctrs' `vctrs_error_incompatible_type`
+#' text (`abort_bind_rows_incompatible()`), not a silent STRING coercion.
 #'
-#' Factor columns (Phase 11 L2, Bug 2/3, unchanged by L4): a column present
+#' Factor columns: a column present
 #' as `DICTIONARY32` in every table that has it unifies to `DICTIONARY32`
 #' with `factor_levels` set to the LEVEL UNION across every occurrence
 #' (`base::union()`, first-occurrence order -- verified empirically against
@@ -960,9 +951,8 @@ abort_bind_rows_incompatible <- function(other_idx, col_name, type1, type2,
 #' (dplyr's own factor + character -> character contract) --
 #' `align_to_schema()` decodes each factor occurrence to its labels via
 #' `gpu_decode_factor()` (`cast_column()`, below). A factor column against
-#' any OTHER type (numeric, timestamp, ...) is now a hard error too (real
-#' dplyr's own behavior -- verified empirically), where it used to silently
-#' fall through `promote_types()`'s STRING-is-widest rule.
+#' any OTHER type (numeric, timestamp, ...) is a hard error too (real
+#' dplyr's own behavior -- verified empirically).
 #'
 #' @param tables List of tbl_gpu objects
 #' @param positions Each table's position among the user's inputs (for the
@@ -1051,7 +1041,7 @@ compute_unified_schema <- function(tables, positions = seq_along(tables),
 #' Helper for `align_to_schema()`'s already-aligned fast path: `identical()`
 #' on `names`/`types` alone isn't enough for a `DICTIONARY32` column -- two
 #' tables can agree on the type string while their actual level VECTORS
-#' differ (Bug 2, Phase 11 L2), which still needs a code remap even though
+#' differ, which still needs a code remap even though
 #' no type-string cast is triggered.
 #' @keywords internal
 factor_levels_match_target <- function(source_factor_levels, target_factor_levels,
@@ -1069,11 +1059,11 @@ factor_levels_match_target <- function(source_factor_levels, target_factor_level
 #' Remap a factor column's physical codes onto a different level ordering
 #'
 #' Used by `align_to_schema()` when unifying two `DICTIONARY32` columns
-#' under the same name whose level VECTORS differ (Bug 2, Phase 11 L2):
+#' under the same name whose level VECTORS differ:
 #' dplyr's own `bind_rows()`/`vctrs::vec_c()` contract for two factors is a
 #' LEVEL UNION, not a raw code concatenation -- naively concatenating this
-#' table's codes as-is (the pre-fix behavior) would silently misinterpret
-#' them once the union's code assignment differs from this table's own.
+#' table's codes as-is would silently misinterpret them once the union's
+#' code assignment differs from this table's own.
 #' `match(current_levels, target_levels)` gives, for each of this table's
 #' OLD (1-based) levels in order, its NEW 1-based code in `target_levels`
 #' (always found -- `target_levels` is always a superset, see
@@ -1256,8 +1246,8 @@ add_null_columns <- function(tbl, col_names, col_types) {
 #' @param col_name Name of column to cast
 #' @param target_type Target type string
 #' @param source_levels For a `DICTIONARY32` source column being cast to
-#'   `STRING` (dplyr's factor + character -> character contract, Bug 3 of
-#'   Phase 11 L2): this column's OWN level vector, decoded via
+#'   `STRING` (dplyr's factor + character -> character contract): this
+#'   column's OWN level vector, decoded via
 #'   `gpu_decode_factor()` instead of `gpu_cast_to_string()`'s numeric-only
 #'   path (which only ever sees the PHYSICAL INT32 column and would
 #'   silently emit its raw codes as strings, e.g. `"2"` instead of `"m"`).

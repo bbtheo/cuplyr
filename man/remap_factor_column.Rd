@@ -21,11 +21,11 @@ otherwise unchanged)
 }
 \description{
 Used by \code{align_to_schema()} when unifying two \code{DICTIONARY32} columns
-under the same name whose level VECTORS differ (Bug 2, Phase 11 L2):
+under the same name whose level VECTORS differ:
 dplyr's own \code{bind_rows()}/\code{vctrs::vec_c()} contract for two factors is a
 LEVEL UNION, not a raw code concatenation -- naively concatenating this
-table's codes as-is (the pre-fix behavior) would silently misinterpret
-them once the union's code assignment differs from this table's own.
+table's codes as-is would silently misinterpret them once the union's
+code assignment differs from this table's own.
 \code{match(current_levels, target_levels)} gives, for each of this table's
 OLD (1-based) levels in order, its NEW 1-based code in \code{target_levels}
 (always found -- \code{target_levels} is always a superset, see

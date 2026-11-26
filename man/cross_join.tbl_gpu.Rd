@@ -2,7 +2,7 @@
 % Please edit documentation in R/join.R
 \name{cross_join.tbl_gpu}
 \alias{cross_join.tbl_gpu}
-\title{\code{cross_join()}: native via \code{cudf::cross_join}}
+\title{Cross join for \code{tbl_gpu}}
 \usage{
 \method{cross_join}{tbl_gpu}(x, y, ..., copy = FALSE, suffix = c(".x", ".y"))
 }
@@ -16,9 +16,9 @@
 
 \item{suffix}{Length-2 character vector disambiguating every common
 column name (every shared name gets both suffixes, since there are no
-join keys to coalesce). \code{suffix = c("", ...)} colliding with a genuine
-duplicate name falls back to CPU evaluation, same as the mutating
-joins' degenerate-suffix case.}
+join keys to coalesce). A \code{suffix = c("", ...)} that still leaves two
+columns with the same name runs in dplyr on the CPU, as for the
+mutating joins.}
 }
 \value{
 A \code{tbl_gpu} with every row of \code{x} paired with every row of \code{y}
@@ -27,39 +27,23 @@ A \code{tbl_gpu} with every row of \code{x} paired with every row of \code{y}
 survives suffixing unchanged.
 }
 \description{
-Native GPU implementation (Phase 7 J3). Unlike every other join verb,
-dplyr's own \code{cross_join()} signature has no \code{by}/\code{keep}/\code{na_matches}/
-\code{multiple}/\code{unmatched}/\code{relationship} at all (verified via
-\code{args(dplyr::cross_join)}: \verb{x, y, ..., copy, suffix}) -- there are no keys
-to match, every row of \code{x} is paired with every row of \code{y}. Verified
-empirically against dplyr 1.2.1:
+\code{cross_join()} pairs every row of \code{x} with every row of \code{y}, on the GPU,
+as \code{dplyr::cross_join()} does. As in dplyr, there are no keys, so it takes
+no \code{by}/\code{keep}/\code{na_matches}/\code{multiple}/\code{unmatched}/\code{relationship}
+arguments. Also as in dplyr:
 \itemize{
-\item Output column order is left-major: all of \code{x}'s columns (in their
-original order), then all of \code{y}'s (in their original order).
-\item Every COMMON column name (not just would-be join keys, since there are
-none) gets BOTH suffixes -- e.g. two tables both having \code{id}/\code{val}
-produces \code{id.x}/\code{val.x}/\code{id.y}/\code{val.y}, never a bare shared name. This
-is exactly \code{build_join_output_info()}'s own behavior for an all-common
-spec with \code{keep = TRUE} (its \code{drop_right} is always \code{character(0)} when
-\code{keep = TRUE}, regardless of what the spec's \code{left}/\code{right} contain), so
-an empty join spec (no keys at all) plus \code{keep = TRUE} reproduces it
-exactly -- see \code{ast_join()}'s \code{by}/\code{keep} fields below.
-\item Grouping follows the rule shared by every join (\code{push_join()},
-\code{R/execute.R}): \code{x}'s groups that survive in the output keep grouping
-(dplyr's \code{cross_join.data.frame()} ends with \code{dplyr_reconstruct(x_out, x)}); a group column whose name collides with \code{y}'s and gets suffixed
-away (\code{"g"} -> \code{"g.x"}) drops out. \code{y}'s grouping is irrelevant.
-\item 0-row \code{x} or \code{y} produces a 0-row result with the correct (merged)
-schema -- cudf's \code{cross_join()} handles this natively, no R-side
-special-casing needed.
+\item All of \code{x}'s columns come first (in their original order), then all of
+\code{y}'s.
+\item Every column name the two tables share gets both suffixes: two tables
+that both have \code{id} and \code{val} give \code{id.x}, \code{val.x}, \code{id.y}, \code{val.y},
+never a bare shared name.
+\item \code{x}'s grouping columns keep grouping the result, except a grouping
+column whose name gets a suffix (\code{"g"} -> \code{"g.x"}), which drops out.
+\code{y}'s grouping is ignored.
+\item A 0-row \code{x} or \code{y} gives a 0-row result with the merged columns.
 \item \code{copy = TRUE} with a plain \code{data.frame} \code{y} works like every other join.
-}
-}
-\details{
-\itemize{
-\item A side with rows but no columns works as in dplyr: \code{x} by \code{y} repeats
-each row of \code{x} once per row of \code{y}, whichever side has no columns, and
-two such tables give a table of \code{nrow(x) * nrow(y)} rows and no columns.
-libcudf's cross join refuses a table with no columns, so a one-column
-table stands in for it and that column is dropped afterwards.
+\item A side with rows but no columns repeats each row of the other side once
+per row it has, and two such tables give a table of
+\code{nrow(x) * nrow(y)} rows and no columns.
 }
 }

@@ -18,14 +18,14 @@
 \arguments{
 \item{.data}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
 
-\item{order_by}{Column (or IR-supported expression) to rank by.}
+\item{order_by}{Column, or expression of columns, to rank by.}
 
 \item{...}{Not used; for extensibility, must be empty.}
 
 \item{n, prop}{As for \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}}.}
 
-\item{by}{Optional on-the-fly grouping columns, GPU-native (Phase 5,
-task W7) -- see \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}}'s \code{by} docs.}
+\item{by}{Optional grouping columns for this call only, run on the GPU;
+see \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}}'s \code{by}.}
 
 \item{with_ties}{If \code{TRUE} (the default), ties at the cutoff are all
 kept (the result can have more than \code{n} rows); if \code{FALSE}, ties are
@@ -44,16 +44,11 @@ group's own block).
 }
 \description{
 Keeps the \code{n} (or \code{prop} fraction of) rows with the smallest \code{order_by}
-values, similar to \code{dplyr::slice_min()}. Ungrouped, \code{group_by()}-grouped,
-and \verb{by=} calls with a plain \code{order_by} (a bare column, or an expression
-the mutate/filter IR recognizes) all run entirely on the GPU (Phase 5,
-task W7): ungrouped via a top-k cut plus a sort of the survivors when the
-key is numeric or a date and \code{n} is a small share of the rows, otherwise a
-stable sort (with \code{cudf::rank()} for ties); grouped/\verb{by=} on such a key
-by stable radix sorts of the row positions and per-group ranks, other
-grouped/\verb{by=} keys via a per-group window desugar (see R/slice.R's module docs for the
-exact group-ordering rules, including \verb{by=}'s first-appearance-order
-rule, which applies here too, not just to the positional slice_*()s).
-An unsupported \code{order_by} expression (one the IR can't parse) still
-transparently falls back to CPU evaluation (see \code{\link[=gpu_fallback]{gpu_fallback()}}).
+values, as \code{dplyr::slice_min()} does. It runs on the GPU, ungrouped,
+after \code{group_by()} and with \code{by}, when \code{order_by} is a column or an
+expression \code{\link[=mutate.tbl_gpu]{mutate.tbl_gpu()}} runs on the GPU; any other \code{order_by} runs
+in dplyr on the CPU (see \link{cuplyr-fallback}). Grouped results come group by
+group, as for \code{\link[=slice_head.tbl_gpu]{slice_head.tbl_gpu()}}: in ascending group-key order after
+\code{group_by()}, and in the order each group first appears in \code{.data} with
+\code{by}.
 }

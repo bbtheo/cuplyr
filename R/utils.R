@@ -22,7 +22,7 @@ gpu_type_from_r <- function(x) {
 
 #' Physical GPU storage type for a logical schema type
 #'
-#' Phase 11 L2 design decision: cuplyr keeps factor columns as plain INT32
+#' cuplyr keeps factor columns as plain INT32
 #' codes physically on the GPU rather than adopting cudf's real
 #' `DICTIONARY32` column type (a dictionary-encoded keys+indices structure).
 #' `"DICTIONARY32"` is therefore a LOGICAL type only, in `gpu_type_from_r()`

@@ -19,13 +19,13 @@ slice_group_mode(.data, by_quo, arg_name, call = rlang::caller_env())
 \value{
 \verb{list(mode = "none"|"group_by"|"by", group_cols = <chr>)}:
 \code{"none"} when \code{.data} is ungrouped and no \verb{by=}/\verb{.by=} was supplied
-(the existing Phase 3.2 ungrouped native path applies); \code{"group_by"}
+(the ungrouped GPU kernels apply); \code{"group_by"}
 when \code{.data} is \code{group_by()}-grouped; \code{"by"} when \verb{by=}/\verb{.by=} was
 supplied (which implies \code{.data} itself is ungrouped, since
 \code{resolve_by()} would otherwise have already errored)
 }
 \description{
-Shared by all five verbs (Phase 5, task W7): resolves \verb{by=}/\verb{.by=} via
+Shared by the slice() verbs: resolves \verb{by=}/\verb{.by=} via
 \code{resolve_by()} (which itself raises dplyr's own "Can't supply \code{by}..."
 error when \code{.data} is already grouped) and returns which of three
 dispatch paths applies.

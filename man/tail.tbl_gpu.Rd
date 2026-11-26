@@ -23,6 +23,6 @@ A \code{tbl_gpu} object with the last \code{n} rows.
 \description{
 \code{utils::tail()} method for \code{tbl_gpu}. Keeps the same rows as
 \code{utils::tail.data.frame()}: implemented as \code{slice_tail(n = ceiling(n))} on
-the ungrouped table (see \code{\link[=slice_tail.tbl_gpu]{slice_tail.tbl_gpu()}} for the native-vs-fallback
-dispatch), with the grouping put back on the result.
+the ungrouped table (see \code{\link[=slice_tail.tbl_gpu]{slice_tail.tbl_gpu()}}), with the grouping put
+back on the result.
 }

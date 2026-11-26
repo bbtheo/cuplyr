@@ -30,29 +30,39 @@ these generics have no \verb{copy=} argument.}
 \item{...}{Not used; must be empty (dplyr itself requires this too).}
 }
 \value{
-A \code{tbl_gpu} with \code{x}'s column order/grouping (see the file
-header comment for the exact row-order contract per verb), except
-\code{setequal()} which returns a plain \code{TRUE}/\code{FALSE}.
+A \code{tbl_gpu} with \code{x}'s column order and grouping, with the rows in
+the order described above, except \code{setequal()}, which returns \code{TRUE} or
+\code{FALSE}.
 }
 \description{
-GPU-native implementations of dplyr's row-set operations, composed
-entirely from existing verbs (\code{bind_rows()}/\code{distinct()}/\code{semi_join()}/
-\code{anti_join()}) -- see the file header comment in \code{R/sets.R} for the
-exact composition and the empirically-verified row-order/column-
-compatibility contracts (mirroring \code{dplyr:::is_compatible()} /
-\code{check_compatible()}).
+dplyr's row-set operations on GPU tables, run on the GPU:
+\itemize{
+\item \code{union()}: the distinct rows of \code{x}, in \code{x}'s order, then the rows
+of \code{y} not already in \code{x}, in \code{y}'s order.
+\item \code{union_all()}: the rows of \code{x} (duplicates kept), then those of
+\code{y}.
+\item \code{intersect()} and \code{setdiff()}: distinct rows of \code{x}, in \code{x}'s
+order, that are (or are not) in \code{y}.
+\item \code{symdiff()}: the rows of \code{setdiff(x, y)}, then those of
+\code{setdiff(y, x)}.
+\item \code{setequal()}: \code{TRUE} or \code{FALSE}, ignoring row order and duplicates
+on both sides.
+}
+As in dplyr, \code{x} and \code{y} must have the same column names (the order may
+differ: \code{y} is reordered to \code{x}'s), and each column must have a common
+type: logical, integer and double columns combine to the wider type, a
+logical or integer column with an integer64 one gives integer64 (integer64
+and double have no common type: an error, as in dplyr), a \code{Date} and a
+\code{POSIXct} combine to \code{POSIXct}, two factors
+with different levels combine to a factor with the union of the levels,
+and a factor next to a character column gives a character column. A
+column-type mix that dplyr refuses (integer vs. character, factor vs.
+integer, ...) is an error naming the column and both types.
 }
 \details{
-Two factor columns with different level sets (level-union remap,
-\code{gpu_remap_codes()}) and a factor column vs. a character column (decode
-to labels, \code{gpu_decode_factor()}) are both GPU-native as of Phase 11 L2.
-A \code{Date} column vs. a \code{POSIXct} column (dplyr promotes to \code{POSIXct}) is
-ALSO GPU-native as of Phase 11 L3 (\code{gpu_cast_column()} gained the
-\code{TIMESTAMP_DAYS} -> \code{TIMESTAMP_MICROSECONDS} cast, among the other 4
-timestamp-granularity targets) -- no column-type combination that real
-dplyr accepts still needs the CPU fallback (\verb{$needs_fallback} is always
-\code{FALSE}, see \code{check_set_op_compatible()}). Every column-type mismatch
-that's a genuine error in real dplyr (e.g. integer vs. character, or
-factor vs. integer) errors here too, naming the offending column and
-both types.
+These run in dplyr on the CPU: tables with duplicated column names; a
+\code{Date} column next to a \code{POSIXct} column in a zone other than UTC (the
+\code{Date} becomes local midnight of that zone); a column with element names
+or a one-column matrix column, which dplyr combines by its own rules
+(except in \code{setequal()}); and a rowwise \code{x}.
 }

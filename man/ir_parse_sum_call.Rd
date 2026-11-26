@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{ir_parse_sum_call}
 \alias{ir_parse_sum_call}
-\title{Parse \code{sum(x)} / \verb{sum(x, na.rm = <literal>)} (Phase 5, task W9)}
+\title{Parse \code{sum(x)} / \verb{sum(x, na.rm = <literal>)}}
 \usage{
 ir_parse_sum_call(expr, env, schema)
 }
@@ -16,10 +16,7 @@ unmodified \code{dplyr::add_tally(wt = )} (a plain, non-generic dplyr
 function we don't control -- \code{dplyr:::tally_n()}) UNCONDITIONALLY emits
 \verb{base::sum(<wt>, na.rm = TRUE)} as its internal \code{mutate()} dot,
 regardless of whether the weight column actually has any NAs -- so this
-2-arg shape must parse too, or \code{add_tally(wt = )} hard-errors. (This is
-the Phase 5 task W9 fix-forward found while deleting
-\code{grouped_aggregate_mutate()}, which used to accept this exact shape via
-a real NA-excluding \code{summarise()}-then-join-back call.)
+2-arg shape must parse too, or \code{add_tally(wt = )} hard-errors.
 }
 \details{
 \code{na.rm = TRUE} desugars \code{x} to \code{coalesce(x, 0)} before the window \code{sum}

@@ -2,7 +2,7 @@
 % Please edit documentation in R/ir.R
 \name{stop_type_needs_cpu}
 \alias{stop_type_needs_cpu}
-\title{Signal a type combination the GPU does not compute like dplyr (F48)}
+\title{Signal a type combination the GPU does not compute like dplyr}
 \usage{
 stop_type_needs_cpu(...)
 }

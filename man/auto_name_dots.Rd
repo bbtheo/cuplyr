@@ -16,13 +16,11 @@ auto_name_dots(dots, verb)
 \code{dots}, with \code{names(dots)} filled in for any unnamed entries
 }
 \description{
-\code{mutate()} and \code{summarise()} both accept unnamed expressions (e.g.
+Verbs such as \code{mutate()} and \code{summarise()} accept unnamed expressions (e.g.
 \code{mutate(mpg * 2)}) and, matching dplyr, fall back to the expression's
 deparsed text as the output column name -- while warning that an explicit
-name would be clearer. Historically this logic was duplicated verbatim
-inside both \code{mutate.tbl_gpu()} (twice -- once for its since-deleted eager
-path, once for its since-deleted lazy path) and \code{summarise_lazy()} (now
-also deleted); this is the single shared implementation, parameterized by
-\code{verb} so each caller's warning names itself correctly.
+name would be clearer. This is the single shared implementation for
+\code{mutate()} and \code{summarise()}, parameterized by \code{verb} so each caller's
+warning names itself correctly.
 }
 \keyword{internal}

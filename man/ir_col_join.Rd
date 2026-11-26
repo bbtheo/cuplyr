@@ -3,7 +3,7 @@
 \name{ir_col_join}
 \alias{ir_col_join}
 \title{Create a side-tagged IR column reference for a non-equi \code{join_by()}
-condition (Phase 7 J7)}
+condition}
 \usage{
 ir_col_join(name, side)
 }
@@ -27,9 +27,9 @@ right-table column for condition \code{i} (see \code{join_by_is_non_equi()}'s ow
 roxygen, R/join.R). \code{join_cond_ir_from_spec()} (R/join.R) uses that
 knowledge directly when building each condition's IR, tagging every
 \code{col} node with an explicit \code{side} (\code{0L} = left/x, \code{1L} = right/y) at
-construction time -- deliberately NOT the design doc's original
-"resolve left-first-then-right by lookup order" sketch, which silently
-breaks on a self-join. \code{\link[=ir_bind_join]{ir_bind_join()}} then resolves \verb{$index} against
+construction time, rather than resolving a name left-first-then-right by
+lookup order, which silently breaks on a self-join. \code{\link[=ir_bind_join]{ir_bind_join()}}
+then resolves \verb{$index} against
 the correct side's schema using this tag, never by cross-schema lookup.
 }
 \keyword{internal}

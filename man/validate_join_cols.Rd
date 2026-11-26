@@ -7,14 +7,13 @@
 validate_join_cols(cols, tbl, side)
 }
 \description{
-Deliberately does NOT require \code{cols} to be unique (Phase 7 J7 finding): a
+Deliberately does not require \code{cols} to be unique: a
 repeated column IS a legitimate non-equi shape --
 \code{join_by(between(a, lo, hi))} compares the SAME left column \code{a} against
 TWO different right columns (\code{lo} via \code{>=}, \code{hi} via \code{<=}), so
 \code{join_spec$left} is \code{c("a", "a")} by construction (\code{within()}/
 \code{overlaps()} similarly duplicate a column across their pre-expanded
 condition pairs) -- this is exactly what \code{between()}/\code{within()}/
-\code{overlaps()} need to keep working once J7 routes them off the CPU
-fallback, not a user error to reject.
+\code{overlaps()} need on the native path, not a user error to reject.
 }
 \keyword{internal}

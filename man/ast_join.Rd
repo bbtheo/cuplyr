@@ -35,14 +35,13 @@ by \code{\link[=parse_join_by]{parse_join_by()}}}
 
 \item{na_matches}{Character, "na" or "never"}
 
-\item{multiple}{Character, one of "all"/"any"/"first"/"last" (dormant --
-only "all" is honored until Phase 7 J5)}
+\item{multiple}{Character, one of "all"/"any"/"first"/"last"}
 
-\item{unmatched}{Character, one or two of "drop"/"error" (dormant --
-only "drop" is honored until Phase 7 J5)}
+\item{unmatched}{Character, one or two of "drop"/"error"}
 
 \item{relationship}{\code{NULL} or one of the four cardinality strings
-(dormant -- not enforced until Phase 7 J5)}
+(\code{multiple}, \code{unmatched} and \code{relationship} are applied/checked at
+execution, see \code{check_join_cardinality()} in \code{R/join.R})}
 
 \item{cross_by}{\code{TRUE} for dplyr's deprecated \code{by = character()} cross
 spelling (\code{by} is then the empty spec; see \code{lower_cross_by_join()})}

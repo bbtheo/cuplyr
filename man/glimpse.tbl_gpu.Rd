@@ -25,18 +25,18 @@ grouping (if any), and each column's type with a preview of its first
 few values -- similar to \code{dplyr::glimpse()}.
 }
 \details{
-Unlike the (now-removed) Phase 2 CPU-fallback \code{glimpse()}, this
-implementation never collects the whole table to R: any pending lazy
-operations are materialized (via \code{\link[dplyr:compute]{compute()}}), but the actual preview data comes
-from a small, capped row sample (like \code{print.tbl_gpu()}), and row/column
-counts/types come from lightweight metadata calls -- never a full
-\code{collect()}.
+\code{glimpse()} never collects the whole table to R. The preview values come
+from a small sample of the first rows, copied from the GPU as
+\code{print.tbl_gpu()} does, and the row and column counts and types come from
+the table's metadata.
 
 A lazy table with pending operations runs its plan once for the preview
 (the result is freed when \code{glimpse()} returns; the table itself is
 unchanged), and one extra line starting \verb{Lazy:} follows \verb{Columns:}. If the
 plan fails (an error, out of GPU memory), \code{glimpse()} prints \verb{Rows: ??}, the
-\verb{Lazy:} line, the message and the stored schema instead of raising.
+\verb{Lazy:} line, the message and the stored schema instead of raising. A plan
+over a parquet file that does more than select or rename columns is not
+run for the preview.
 
 Column value/type formatting does not attempt to reproduce dplyr's own
 \code{glimpse()} output (which is formatted via \code{pillar}) byte-for-byte --

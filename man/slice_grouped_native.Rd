@@ -2,7 +2,7 @@
 % Please edit documentation in R/slice.R
 \name{slice_grouped_native}
 \alias{slice_grouped_native}
-\title{GPU-native grouped/\verb{by=} slice() family desugar (Phase 5, task W7)}
+\title{Grouped/\verb{by=} slice() family desugar on the GPU}
 \usage{
 slice_grouped_native(
   .data,
@@ -48,12 +48,13 @@ A new \code{tbl_gpu}, or \code{NULL} if this call needs the CPU fallback
 (caller's responsibility to re-run the real dplyr verb)
 }
 \description{
-Implements every \code{group_by()}-grouped or \verb{by=}/\verb{.by=} on-the-fly-grouped
+Implements a \code{group_by()}-grouped or \verb{by=}/\verb{.by=} on-the-fly-grouped
 \code{slice()}/\code{slice_head()}/\code{slice_tail()}/\code{slice_min()}/\code{slice_max()} call
 by composing the existing window/mutate/filter/arrange/select AST
-machinery (Phase 5 W1-W6) -- ZERO new GPU primitives. See this file's
-module docs for the empirically-verified semantics this reproduces
-(group order, NA handling, \verb{by=}'s first-appearance rule).
+machinery, with no GPU primitive of its own. (Grouped \code{slice_min()}/
+\code{slice_max()} on a key in \code{topk_key_types} takes \code{slice_rank_grouped()}
+instead.) It reproduces dplyr's group order, NA handling and \verb{by=}'s
+first-appearance rule (see the comment at the top of the file).
 }
 \details{
 The node sequence, in order (only the parts relevant to \code{mode}/
@@ -62,8 +63,9 @@ The node sequence, in order (only the parts relevant to \code{mode}/
 \item (\code{mode == "rank"}, computed \code{order_by}) \code{ast_mutate}: materialize
 the computed \code{order_by} expression under a temp name.
 \item (\code{mode == "rank"}) \code{ast_mutate}: \code{..slice_na.. = is.na(order_col)}
--- the NA-last sort key \code{order_by} needs (see module docs on why a
-plain \code{desc(order_col)} arrange can't be used here).
+-- an NA-last sort key for \code{order_by} (redundant for the order, since
+\code{gpu_arrange()} already sorts NA last in both directions, but still
+needed to build \code{..slice_valid..}/\code{..slice_nn..} below).
 \item (\code{group_mode == "by"}) \code{ast_window} (UNGROUPED): \code{..slice_rowid.. = row_number()} over the whole table, then \code{ast_window} (grouped):
 \code{..slice_first.. = min(..slice_rowid..)} -- each group's own
 first-appearance position, broadcast to every row of that group.
@@ -84,8 +86,8 @@ combination.
 \verb{n=}/\verb{prop=} clamp rule \code{compute_slice_size()} (C++) uses for the
 ungrouped path, expressed as IR (\code{gs} is a real per-group column
 here, not a compile-time scalar).
-\item \code{ast_filter}: the mode-specific predicate (see module docs'
-desugar table).
+\item \code{ast_filter}: the mode-specific predicate over the temp
+columns above.
 \item \code{ast_select}: back down to the ORIGINAL column set (captured
 before any of the above), dropping every \code{..slice_*..}/computed-
 \code{order_by} temp column in one step.

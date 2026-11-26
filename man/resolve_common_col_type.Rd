@@ -2,8 +2,7 @@
 % Please edit documentation in R/bind.R
 \name{resolve_common_col_type}
 \alias{resolve_common_col_type}
-\title{Resolve the common GPU type for one column across a bind/set operation
-(Phase 11 L4)}
+\title{Resolve the common GPU type for one column across a bind/set operation}
 \usage{
 resolve_common_col_type(
   tx,
@@ -29,15 +28,13 @@ type string) and \verb{$factor_levels} (level vector, or \code{NULL} when the
 result isn't \code{DICTIONARY32})
 }
 \description{
-The type-compatibility ladder extracted out of \code{check_set_op_compatible()}
-(R/sets.R, Phase 8) so \code{bind_rows()}'s \code{compute_unified_schema()} and the
-set-op verbs share EXACTLY one promotion rule, instead of \code{bind_rows()}
-having its own looser one (the old \code{promote_types()}'s unconditional
-"STRING is widest" rule, which silently coerced e.g. a numeric column
-against a character column of the same name -- a real bug: real dplyr's
-own \code{vctrs::vec_ptype2()}-backed \code{bind_rows()} has never allowed this,
-it's a hard \code{vctrs_error_incompatible_type}, see
-\code{abort_bind_rows_incompatible()} below).
+The type-compatibility ladder shared by \code{check_set_op_compatible()}
+(R/sets.R) and \code{bind_rows()}'s \code{compute_unified_schema()}, so the set-op
+verbs and \code{bind_rows()} use EXACTLY one promotion rule. A numeric column
+against a character column of the same name is not coerced to STRING: as
+in real dplyr (\code{vctrs::vec_ptype2()}-backed \code{bind_rows()}), it's a hard
+\code{vctrs_error_incompatible_type}, see \code{abort_bind_rows_incompatible()}
+below.
 }
 \details{
 Four cases, all pinned via oracle-verified \code{dplyr}/\code{vctrs} behavior:
@@ -53,13 +50,9 @@ this too.
 \item Both in the numeric ladder (\verb{BOOL8 < INT32 < INT64 < FLOAT64}, except
 that INT64 (integer64) and FLOAT64 have no common type) or
 both in the timestamp ladder (\verb{TIMESTAMP_DAYS < ... < TIMESTAMP_NANOSECONDS}): promotes to the wider member. The timestamp
-cast (Date <-> POSIXct, etc.) is genuinely native as of Phase 11 L3
-(\code{gpu_cast_column()}, \code{src/ops_bind.cpp}, gained the 5 TIMESTAMP_*
-targets) -- this ladder used to require \code{check_set_op_compatible()}'s
-own caller to set a \verb{$needs_fallback} flag for exactly this case
-(no native \code{TIMESTAMP_DAYS} -> \code{TIMESTAMP_MICROSECONDS} cast existed
-yet); that flag is retired, this ladder is now unconditionally native
-for both callers.
+cast (Date <-> POSIXct, etc.) is native (\code{gpu_cast_column()},
+\code{src/ops_bind.cpp}, handles the TIMESTAMP_* targets), so this ladder
+is native for both callers.
 \item Anything else (e.g. numeric vs. character, factor vs. numeric,
 numeric vs. timestamp): \verb{$ok = FALSE} -- the caller reports its own
 verb-specific incompatibility error (sets.R's \verb{"}x\code{and}y\verb{ are not compatible."} bulleted form vs. bind.R's \code{vctrs}-style \verb{"Can't combine ...}"\verb{form, see}abort_bind_rows_incompatible()`).

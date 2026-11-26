@@ -16,7 +16,7 @@ resolve_by(
 \item{.data}{A \code{tbl_gpu} object}
 
 \item{by_quo}{A quosure for the verb's \verb{.by=}/\verb{by=} argument, as
-returned by \code{rlang::enquo(.by)} -- NOT yet evaluated}
+returned by \code{rlang::enquo(.by)} -- NOT evaluated}
 
 \item{arg_name}{Character scalar, the argument's name as written in the
 verb's own signature (\code{".by"} for \code{mutate()}/\code{filter()}/\code{slice()},
@@ -39,9 +39,8 @@ tidyselect-resolved column names in selection order (via
 dplyr's own \verb{.by=})
 }
 \description{
-Implements \code{scratchpad/phase5_window_design.md} section 6: the shared
-resolution logic for on-the-fly grouping across \code{mutate()}/\code{filter()}
-(and, from task W7 onward, the \code{slice()} family). \verb{.by=}/\verb{by=} is
+The shared resolution logic for on-the-fly grouping across
+\code{mutate()}/\code{filter()} and the \code{slice()} family. \verb{.by=}/\verb{by=} is
 mutually exclusive with an already-grouped \code{.data} -- verified
 empirically against dplyr 1.2.1, both \code{mutate()} and \code{filter()} raise
 the identical message below verbatim (including the backticks) when

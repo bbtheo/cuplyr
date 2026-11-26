@@ -8,6 +8,6 @@ ir_parse_recode_values(expr, env, schema)
 }
 \description{
 See \code{\link[=ir_parse_value_match_clauses]{ir_parse_value_match_clauses()}}. \verb{from=}/\verb{to=}/\verb{unmatched=}/\verb{ptype=}
-are not implemented this wave.
+are not supported.
 }
 \keyword{internal}

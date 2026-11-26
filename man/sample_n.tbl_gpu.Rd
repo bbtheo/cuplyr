@@ -33,6 +33,6 @@ exact \code{sample.int()} calls dplyr makes, so the same \code{set.seed()} gives
 same rows, and gather them on the GPU like \code{\link[=slice_sample.tbl_gpu]{slice_sample.tbl_gpu()}}. A
 \code{weight}, a \code{size} that reads the data (a column, \code{n()}) or draws random
 numbers, and any call dplyr would raise an error for (e.g. a \code{size} larger
-than a group without \code{replace}) run on the CPU through \code{\link[=gpu_fallback]{gpu_fallback()}},
+than a group without \code{replace}) run in dplyr on the CPU (see \link{cuplyr-fallback}),
 where dplyr raises the error and consumes the RNG itself.
 }

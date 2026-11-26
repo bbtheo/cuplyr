@@ -18,7 +18,8 @@
 #'       `lubridate::is.Date`), and any call that is not a tidyselect helper
 #'       or a base name builder (`sort(names(x))`, `paste0()`, `rev()`,
 #'       `setdiff()`, `.data$x`, ... with safe arguments), is resolved on the
-#'       data: a notified CPU fallback that collects the table
+#'       data: the table is collected and the selection runs in dplyr on
+#'       the CPU (see [cuplyr-fallback] to be told when)
 #'     \item Helpers: `starts_with()`, `ends_with()`, `contains()`, etc.
 #'     \item Renaming while selecting: `select(new_name = old_name)`
 #'   }
@@ -32,11 +33,9 @@
 #' The original data remains in GPU memory until garbage collected.
 #'
 #' ## Renaming
-#' `select(new_name = old_name)` both selects and renames `old_name`. This
-#' is schema-only (see [rename.tbl_gpu()]): the underlying selection still
-#' runs as one `gpu_select()` gather, with the rename applied on top of it
-#' as a separate, schema-only [ast_rename()] step whenever the tidyselect
-#' resolution renamed a column.
+#' `select(new_name = old_name)` both selects and renames `old_name`. The
+#' selection runs on the GPU as usual; the rename only changes the column
+#' names, as [rename.tbl_gpu()] does.
 #'
 #' ## Grouped tables
 #' Grouping columns that the selection leaves out are added in front, with

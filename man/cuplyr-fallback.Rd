@@ -80,5 +80,6 @@ options(cuplyr.fallback = "warn", cuplyr.plan_break = "warn")
 }
 }
 \seealso{
-\link{cuplyr-options}, \code{\link[=cuplyr_fallback_notify]{cuplyr_fallback_notify()}}, \link{fallback-verbs}
+\link{cuplyr-options} for every cuplyr option, and \link{fallback-verbs}
+for the verbs that have no GPU implementation.
 }

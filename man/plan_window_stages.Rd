@@ -20,10 +20,10 @@ order; \code{names(exprs)} are the dots' intended output column names
 types=))}
 
 \item{group_cols}{Character vector of group-by column names (passed
-through unchanged for a future \code{ast_window()} to consume -- W1's own
-decomposition logic doesn't need to inspect these at all)}
+through unchanged for \code{ast_window()} to consume -- the decomposition
+logic doesn't need to inspect these at all)}
 
-\item{sums}{(F42) How an integer/logical window \code{sum()} is typed. \code{"int"}
+\item{sums}{How an integer/logical window \code{sum()} is typed. \code{"int"}
 (default): INT32, as dplyr's integer sum. \code{"lenient"} (lazy \code{filter()},
 whose window nodes are flagged \code{on_sum_overflow = "double"}): INT32 too, and a
 top-level sum may come back FLOAT64 when it overflows; one that feeds a
@@ -48,9 +48,8 @@ dot's own output column, have been appended (in dot order)
 \description{
 Drives \code{\link[=ir_extract_windows]{ir_extract_windows()}} to full fixed point (every window call
 resolved) for each verb-level "dot" in \code{exprs}, applying the multi-dot
-chunking rule from \code{scratchpad/phase5_window_design.md} section 1.2:
-dots are processed in order and batched together (decomposed jointly,
-sharing CSE and stage passes) UNLESS a later dot's window-call
+chunking rule: dots are processed in order and batched together
+(decomposed jointly, sharing CSE and stage passes) UNLESS a later dot's window-call
 arguments reference an earlier dot's OWN output column name (from the
 \emph{current} batch) -- in which case that later dot starts a new batch,
 after the finished batch's own dot outputs are folded into the running
@@ -59,7 +58,6 @@ schema as real columns (so the new batch can reference them).
 \details{
 This is a pure planning function: it builds the stage/spec/pre-mutate
 structures a verb will later turn into actual \code{ast_mutate}/\code{ast_window}
-nodes (section 1.3; not implemented until W2/W3) -- no AST node is
-built here, and nothing is pushed onto any \code{tbl_gpu}.
+nodes -- no AST node is built here, and nothing is pushed onto any \code{tbl_gpu}.
 }
 \keyword{internal}

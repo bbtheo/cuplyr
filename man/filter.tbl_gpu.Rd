@@ -2,7 +2,7 @@
 % Please edit documentation in R/filter.R
 \name{filter.tbl_gpu}
 \alias{filter.tbl_gpu}
-\title{Filter rows of a GPU table}
+\title{Keep rows that match a condition}
 \usage{
 \method{filter}{tbl_gpu}(.data, ..., .by = NULL, .preserve = FALSE)
 }
@@ -10,17 +10,15 @@
 \item{.data}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
 
 \item{...}{Logical expressions to filter by (see "Supported expressions"
-below for the full surface). Multiple expressions, whether passed as
-separate dots or combined with \code{&} within one dot, are always combined
-with AND (a row is kept only if every expression is TRUE for it).}
+below). Multiple expressions, whether passed as separate dots or
+combined with \code{&} within one dot, are combined with AND (a row is kept
+only if every expression is \code{TRUE} for it).}
 
-\item{.by}{Optional on-the-fly grouping columns (tidyselect), GPU-native
-(Phase 5, task W6): \code{filter(df, x > mean(x), .by = g)} behaves
-identically to \code{df |> group_by(g) |> filter(x > mean(x)) |> ungroup()}
--- same window/aggregate-predicate machinery as \code{group_by()}-driven
-filtering, and the result is always ungrouped. Supplying \code{.by} when
-\code{.data} is already grouped (via \code{group_by()}) is an error, matching
-dplyr exactly.}
+\item{.by}{Optional grouping columns for this call only (tidyselect), run
+on the GPU: \code{filter(df, x > mean(x), .by = g)} gives the same rows as
+\code{df |> group_by(g) |> filter(x > mean(x)) |> ungroup()}, and the result
+is ungrouped. Supplying \code{.by} when \code{.data} is already grouped (via
+\code{group_by()}) is an error, as in dplyr.}
 
 \item{.preserve}{Whether to keep the groups the filter emptied. With \code{TRUE},
 a \code{group_by()}-grouped result keeps the input's group keys (empty groups
@@ -33,37 +31,40 @@ A \code{tbl_gpu} object containing only rows where all conditions are TRUE.
 The GPU memory for the filtered result is newly allocated.
 }
 \description{
-Selects rows from a GPU table where conditions are TRUE, similar to
-\code{dplyr::filter()}. Filtering is performed entirely on the GPU for
-maximum performance on large datasets, and matches dplyr's row-keeping
-and three-valued-logic (\code{NA}) semantics exactly (see "NA semantics"
-below).
+\code{filter()} keeps the rows of a GPU table where every condition is \code{TRUE}, as
+\code{dplyr::filter()} does. The conditions listed under "Supported
+expressions" run on the GPU, within the limits stated there, with dplyr's
+rules for which rows are kept and for \code{NA} (see "NA semantics" below).
+Other conditions run in dplyr on the CPU.
 }
 \details{
 \subsection{Supported expressions}{
 
-\code{filter()} parses its arguments through an internal expression IR (see
-\code{R/ir.R}) that lowers every predicate in the call to a \strong{single fused GPU
-kernel} (\code{cudf::compute_column()} under the hood) -- one kernel per
-\code{filter()} call, no matter how many dots or how deeply the predicate is
-nested. The IR understands:
+All the conditions of one \code{filter()} call are combined into a single
+predicate and evaluated together on the GPU, however many dots there are
+and however deeply they nest. These run on the GPU:
 \itemize{
 \item Comparisons: \code{==}, \code{!=}, \code{<}, \code{<=}, \code{>}, \code{>=} -- against a
-literal, another column, an environment variable, or an arithmetic
-expression (\code{(x - y) > 0})
-\item Logic: \code{&}, \code{|}, \code{!}, \code{xor()}, arbitrarily nested
-(\code{x > 2 & (y < 5 | z == 1)}); \code{&&}/\code{||} are rejected with a message
-pointing at \code{&}/\code{|} (matching dplyr 1.1+)
+literal, another column, an R variable, or an arithmetic
+expression (\code{(x - y) > 0}); for strings, see the string item below
+\item Logic: \code{&}, \code{|}, \code{!}, \code{xor()}, nested to any depth
+(\code{x > 2 & (y < 5 | z == 1)}); \code{&&}/\code{||} are an error that points at
+\code{&}/\code{|}
 \item \code{is.na()}
-\item \code{\%in\%}, including a set containing \code{NA} (R's never-NA rule: a
-value that itself is \code{NA} is TRUE for \code{\%in\%} iff the set contains
-\code{NA}, never \code{NA} itself) and an empty set (\code{character(0)}, \code{c()},
-etc. -- always FALSE, for every row, including \code{NA} rows)
+\item \code{\%in\%}, including a set containing \code{NA} (as in R, \code{\%in\%} is never
+\code{NA}: an \code{NA} value is \code{TRUE} when the set contains \code{NA} and \code{FALSE}
+otherwise) and an empty set (\code{character(0)}, \code{c()}, etc.: \code{FALSE} for
+every row, \code{NA} rows included)
 \item \code{between(x, lo, hi)} (dplyr's definition: \code{x >= lo & x <= hi},
-including its \code{NA} propagation), \code{near(x, y, tol = )}
-(\code{abs(x - y) < tol}, matching \code{dplyr::near()} exactly)
-\item String-column comparisons (\code{==}/\code{!=}/\code{<}/\code{<=}/\code{>}/\code{>=}), against
-a literal or another string column
+with its \code{NA} propagation), \code{near(x, y, tol = )}
+(\code{abs(x - y) < tol}, as \code{dplyr::near()})
+\item String comparisons, against a literal or another string column.
+\code{==}, \code{!=}, \code{\%in\%} and \code{between()} always run on the GPU. \code{<}, \code{<=},
+\code{>} and \code{>=} compare strings in byte order on the GPU, while R uses
+the session's collation, so they run on the GPU only when
+\code{Sys.getlocale("LC_COLLATE")} is \code{"C"} or \code{"POSIX"}; under any other
+collation (\code{"en_US.UTF-8"}, say) the call runs in dplyr on the CPU.
+The same holds for \code{min()} and \code{max()} of a string column.
 \item Column-vs-column comparisons for every operator above
 \item Math on columns inside a predicate (\verb{+ - * / \%\% \%/\% ^}, \code{sqrt},
 \code{log}, \code{abs}, etc. -- the same set \code{mutate()} supports)
@@ -77,12 +78,12 @@ itself (e.g. \code{filter(case_when(x > 1 ~ TRUE, .default = FALSE))})
 \code{filter()} to combine several comma-separated conditions with \code{|}
 instead of \code{&} (e.g. \code{filter(when_any(x > 10, y < 0))})
 \item The \code{.data}/\code{.env} pronouns, and ordinary R symbols (a bare name
-that matches a column resolves to that column; otherwise it's
-evaluated as an environment variable -- "columns shadow the
-environment")
-\item Window/aggregate functions (Phase 5, task W5), usable anywhere
-inside a predicate, including combined with plain column
-comparisons in the same dot (\code{filter(x > mean(x) & y < 5)}):
+that matches a column resolves to that column; otherwise it is
+looked up as an R variable: columns shadow the environment, as in
+dplyr)
+\item Window and aggregate functions, anywhere inside a predicate,
+also next to plain column comparisons in the same dot
+(\code{filter(x > mean(x) & y < 5)}):
 \code{row_number()}/\code{row_number(x)}, \code{min_rank()}/\code{dense_rank()}/
 \code{percent_rank()}/\code{cume_dist()}, \code{lag()}/\code{lead()},
 \code{cumsum()}/\code{cummax()}/\code{cummin()}/\code{cumprod()}/\code{cummean()}/
@@ -90,56 +91,41 @@ comparisons in the same dot (\code{filter(x > mean(x) & y < 5)}):
 \code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{n()}/\code{sd()}/\code{var()}/\code{median()}/
 \code{n_distinct()}/\code{first()}/\code{last()}/\code{nth()} -- the same set \code{mutate()}
 supports (see its own docs for exact semantics/argument support),
-evaluated per group when
-\code{.data} is grouped (via \code{group_by()} or the on-the-fly \verb{.by=}
-argument, Phase 5 task W6 -- identical semantics either way). A
-grouped filter -- like dplyr's own -- preserves the ORIGINAL row
-order in the result, it does not reorder into group-key order.
+evaluated per group when \code{.data} is grouped (with \code{group_by()} or
+\code{.by}, which behave the same). As in dplyr, a grouped filter keeps
+the original row order; it does not reorder rows by group.
 }
-Comparing a column against a literal of an incompatible type (e.g. a
-numeric column against a character literal) errors immediately, naming
-the column and its type, rather than silently falling back or producing
-a raw GPU-side type error.
+Comparing a number with a string (\code{filter(mpg > "2")}) compares them as
+strings, as R does; that call runs in dplyr on the CPU.
 }
 
 \subsection{Multi-dot semantics with window/aggregate predicates}{
 
 Multiple dots (or multiple \code{&}-joined predicates within one dot) are
-always combined with AND, and -- confirmed empirically against real
-dplyr, since this is easy to get wrong -- every dot's predicate is
-evaluated against the SAME, ORIGINAL (pre-\code{filter()}) data, never
-against a progressively-narrowed intermediate result. Concretely,
+combined with AND, and, as in dplyr, every dot is evaluated against the
+same input rows, never against the rows an earlier dot left. So
 \code{filter(x > 0, cumsum(x) < 10)} computes \code{cumsum(x)} over every row of
-the original table, then ANDs that mask with \code{x > 0} -- it does NOT
-filter to \code{x > 0} first and then compute \code{cumsum()} only over the
-surviving rows (which would generally give a different, smaller
-cumulative sum and therefore a different result). \code{cuplyr} reproduces
-this exactly: every window-bearing dot's temp columns are computed
-against the table as it stood when \code{filter()} was called, before any
-dot's predicate (window-derived or plain) has removed a single row.
+the input, then combines that with \code{x > 0}; it does not keep \code{x > 0}
+first and compute \code{cumsum()} over the remaining rows (which would usually
+give a smaller cumulative sum and a different result).
 }
 
 \subsection{NA semantics}{
 
-\code{filter()} keeps a row iff its combined predicate is non-missing \emph{and}
-TRUE -- identical to dplyr (\code{cudf::apply_boolean_mask()}'s "non-null AND
-true" rule matches \code{dplyr::filter()}'s own row-keeping rule exactly).
-Concretely:
+\code{filter()} keeps a row only if its combined predicate is \code{TRUE} (not
+\code{FALSE} and not \code{NA}), as in dplyr:
 \itemize{
 \item \code{filter(x > 5)} drops rows where \code{x} is \code{NA} (the comparison is
-\code{NA}, and \code{NA} isn't kept), same as dplyr
-\item \code{&}/\code{|} use R's three-valued logic, not C's: \code{NA & FALSE} is
+\code{NA}, and \code{NA} isn't kept)
+\item \code{&}/\code{|} use R's three-valued logic: \code{NA & FALSE} is
 \code{FALSE}, \code{NA | TRUE} is \code{TRUE}, \code{NA & TRUE}/\code{NA | FALSE}/\code{NA & NA}/
-\code{NA | NA} are all \code{NA} (\verb{cudf::ast_operator::NULL_LOGICAL_AND}/
-\code{NULL_LOGICAL_OR}, chosen specifically because they match)
-\item \code{filter(x > 2 | is.na(x))} is the idiom for "keep NA rows too"
--- works exactly as it does in dplyr
-\item \code{\%in\%} never produces \code{NA} (see "Supported expressions" above) --
-this is R's \code{\%in\%}/\code{match()} semantics, not null-propagating
-\item \code{filter(TRUE)} is a no-op (returns \code{.data} unchanged, no GPU
-work); \code{filter(FALSE)} and \code{filter(NA)} both return a zero-row
-result (a bare \code{NA} predicate is \code{FALSE}-equivalent for row-keeping,
-same as dplyr)
+\code{NA | NA} are all \code{NA}
+\item \code{filter(x > 2 | is.na(x))} is the idiom for "keep NA rows too",
+as in dplyr
+\item \code{\%in\%} never gives \code{NA} (see "Supported expressions" above), as
+R's \code{\%in\%} and \code{match()}
+\item \code{filter(TRUE)} returns \code{.data} unchanged, with no GPU work;
+\code{filter(FALSE)} and \code{filter(NA)} both return zero rows
 }
 A floating \code{NaN} (e.g. a computed \code{0/0}) stays a value on the GPU, but
 \code{is.na()}, the six comparisons and \code{coalesce()} read it as missing, as in
@@ -147,18 +133,10 @@ R: \code{NaN > 1} is \code{NA} (the row is dropped) and \code{is.na(NaN)} is \co
 \code{is.nan()} runs on the GPU too.
 }
 
-\subsection{Not yet supported}{
+\subsection{Conditions that run on the CPU}{
 
-\itemize{
-\item Arbitrary R functions with no cuDF equivalent -- these fall back
-to CPU evaluation, see below
-}
-}
-
-\subsection{Expressions the IR doesn't understand (CPU fallback)}{
-
-An expression shape the IR doesn't recognize (see \code{R/ir.R}'s
-\code{ir_parse_quo()}) is handled in one of two ways. A dot that reads no table
+A condition outside the list above (an R function with no GPU version,
+for example) is handled in one of two ways. A dot that reads no table
 column (a pre-computed logical vector, \code{rep(TRUE, n)}) is evaluated once in
 R, with no data mask: a logical scalar is a constant predicate. On an
 ungrouped \code{filter()} a logical vector is a row mask: all the vectors of one
@@ -166,8 +144,7 @@ call are sized against the input table (a wrong size is dplyr's own error)
 and combined with \code{&} with the call's other predicates, which see the same
 input rows. On a grouped, \code{.by} or rowwise table, or in \code{filter_out()}, a
 logical vector runs the whole call in dplyr. A dot that reads a table
-column but doesn't parse (a rare shape given how much of
-dplyr's filter surface the IR now covers), or that visibly calls something
+column but can't run on the GPU, or that visibly calls something
 reaching the data mask by name (\code{exists("x")}, \code{get("ok")}), runs the whole
 call in dplyr on the CPU (see \code{getOption("cuplyr.fallback")} below to be
 notified when it does). The check reads the dot's syntax, so an alias of
@@ -194,10 +171,9 @@ A lazy plan that only runs early on the GPU is a plan break, reported under
 
 \subsection{Performance}{
 
-Filtering on GPU is highly parallel and can process billions of rows
-per second. For best performance, prefer expressions the IR parses
-directly into a GPU predicate (the entire "Supported expressions" list
-above) over expressions that require the CPU fallback.
+Filtering on the GPU is highly parallel. For the best performance, use
+the conditions listed under "Supported expressions", which run on the
+GPU, rather than ones that run in dplyr on the CPU.
 }
 }
 \examples{
