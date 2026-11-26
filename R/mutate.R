@@ -1243,6 +1243,8 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
   # (#75) a call of many dots looks names and types up in hashes, not by scanning
   # (an output name that can't key an environment is not hashed either)
   if (length(dots) >= MUTATE_HASH_MIN && names_hashable(names(dots))) schema <- schema_hash_new(schema)
+  # (the type counts of a hash a NULL dot dropped, while a rebuild is due)
+  rehash <- NULL
 
   expressions <- list()
   has_window <- FALSE
@@ -1348,12 +1350,23 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     if (identical(const$kind, "null")) {
       dropped <- set_union(dropped, new_name)
       keep_idx <- schema$names != new_name
-      schema$names <- schema$names[keep_idx]
-      schema$types <- schema$types[keep_idx]
-      if (!is.null(.subset2(schema, ".hash"))) schema <- schema_hash_new(schema)  # (positions moved)
+      if (!isTRUE(all(keep_idx))) {
+        schema$names <- schema$names[keep_idx]
+        schema$types <- schema$types[keep_idx]
+        # (#75: positions moved; the hash is built again before the next dot
+        # that isn't NULL, so a run of NULL dots costs one build)
+        if (!is.null(.subset2(schema, ".hash"))) {
+          rehash <- .subset2(schema, ".hash")[["tcount"]]
+          schema$.hash <- NULL
+        }
+      }
       schema <- set_schema_factor_levels(schema, new_name, NULL)
       forget_frac(new_name)
       next
+    }
+    if (!is.null(rehash)) {
+      schema <- schema_hash_new(schema, rehash)
+      rehash <- NULL
     }
 
     floored <- NULL

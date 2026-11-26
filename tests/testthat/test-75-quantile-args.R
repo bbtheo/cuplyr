@@ -144,15 +144,21 @@ test_that("summarise() quantile() arguments that read a column are evaluated by 
   d <- p75a_df()
   d$p <- c(0.1, 0.2, 0.3, 0.4)
   d$k <- c(2, 2, 3, 3)
+  d$ty <- c(7, 7, 1, 1)
   # a variable of the same name outside the data is not what dplyr reads
   p <- 0.5
   k <- 7
+  ty <- 6
   p75a_same_error(d, function(t) summarise(group_by(t, y), q = quantile(x, p)))
   p75a_same_error(d, function(t) summarise(group_by(t, y), q = quantile(x, probs = p, type = 7)))
   p75a_same_error(d, function(t) summarise(group_by(t, y), q = quantile(x, 0.5, names = p > 0)))
   p75a_same_names(d, function(t) summarise(group_by(t, y), q = quantile(x, mean(p))))
-  p75a_same_names(d, function(t) summarise(group_by(t, y), q = quantile(x, 0.5, digits = min(k))))
-  p75a_same_names(d, function(t) summarise(group_by(t, y), q = quantile(x, 0.5, digits = .env$k)))
+  # (1/3's label depends on digits, "33%" and "33.3%" by group, where 0.5's is "50%")
+  p75a_same_names(d, function(t) summarise(group_by(t, y), q = quantile(x, 1 / 3, digits = min(k))))
+  p75a_same_names(d, function(t) summarise(group_by(t, y), q = quantile(x, 1 / 3, digits = .env$k)))
+  # type 7 in one group, 1 in the other (6 outside the data)
+  p75a_same_names(d, function(t) summarise(group_by(t, y), q = quantile(x, 1 / 3, type = min(ty))))
+  p75a_same_names(d, function(t) summarise(group_by(t, y), q = quantile(x, 1 / 3, type = .env$ty)))
   p75a_same_names(d, function(t) summarise(group_by(t, y), q = quantile(x, .env$p)))
   p75a_same_names(d, function(t) summarise(group_by(t, y), q = quantile(x, .data$p[[1L]])))
 })

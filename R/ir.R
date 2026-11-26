@@ -329,23 +329,29 @@ pronoun_call_name <- function(expr, env = NULL, schema = NULL) {
 # (#75) A schema that a many-dot mutate() parses against carries `.hash`, an
 # environment next to `names`/`types`, so that no step of a dot scans the whole
 # schema: `pos` (name -> index of its first occurrence), `tcount` (type -> a
-# count that is positive for every type a column has had) and `n` (the length
-# of `names` it describes). parse_mutate_dots() creates it for a call of
-# MUTATE_HASH_MIN dots or more and keeps it in step (update_schema_for_expr(),
-# schema_hash_append()); a schema without one (every other caller, and a call
-# of a few dots) is read with match() as before.
+# count that is positive for every type a column has had), and `n` and `last`
+# (the length and the last name of the `names` it describes). parse_mutate_dots()
+# creates it for a call of MUTATE_HASH_MIN dots or more and keeps it in step
+# (update_schema_for_expr(), schema_hash_append()). A `col = NULL` dot that
+# drops a column moves the positions after it: the loop drops the hash and
+# builds a new one before the next dot that isn't NULL, so a run of NULL dots
+# costs one build. A schema without one (every other caller, a call of a few
+# dots) is read with match() as before.
 #
 # The environment is shared by every copy of the schema, so a copy changed
 # without it can't be told apart by the environment alone. The readers below
 # therefore trust it only for what it can't get wrong:
 # * a copy whose `names` grew or shrank (ir_parse_with_order()'s placeholder, a
-#   record holding an earlier schema) has `n != length(names)`: no hash, match();
+#   record holding an earlier schema) has `n != length(names)`, or, when the
+#   schema it was copied from has since grown to the same length, a last name
+#   other than `last` (schema_hash_of()): no hash, match();
 # * a name the hash places is checked against `names` at that index, else
-#   match() (two copies that grew apart write the same environment);
+#   match() (two copies that grew apart by the same name write one environment);
 # * `tcount` only ever goes up, so a type it lacks no column has; one it has is
 #   a "maybe", and every reader treats it so (it then looks at the IR).
-# What it can't see is a same-length rename or retype done on a copy without
-# it; no reader of a hashed schema does one (the #75 audit).
+# What it can't see is a same-length change before the last name, or a retype,
+# done on a copy without it; no reader of a hashed schema does one (the #75
+# audit).
 # @keywords internal
 MUTATE_HASH_MIN <- 24L
 
@@ -363,25 +369,38 @@ pos_key_ok <- function(name) {
   !is.na(name) && nzchar(name) && nchar(name, "bytes") <= 10000L
 }
 
-schema_hash_new <- function(schema) {
+# A name -> index environment for `nms` (names_hashable()), the first
+# occurrence of a name winning as in match(); `extra` slots are sized in for
+# names assigned later. One C-level build (list2env()), not an assign() per name.
+# @keywords internal
+pos_env_new <- function(nms, extra = 0L) {
+  pos <- new.env(hash = TRUE, parent = emptyenv(), size = max(2L * (length(nms) + extra), 29L))
+  idx <- which(!duplicated(nms))
+  list2env(stats::setNames(as.list(idx), .subset(nms, idx)), envir = pos)
+}
+
+# `tcount`: the type counts of the hash this schema had before a NULL dot
+# dropped columns from it (its names were hashable then, and counts that only
+# go up stay right); the rebuild keeps them and builds the positions only.
+schema_hash_new <- function(schema, tcount = NULL) {
   nms <- .subset2(schema, "names")
   schema$.hash <- NULL
-  if (!names_hashable(nms)) {
-    return(schema)
+  if (is.null(tcount)) {
+    if (!names_hashable(nms)) {
+      return(schema)
+    }
+    tcount <- new.env(hash = TRUE, parent = emptyenv())
+    types <- as.character(unname(.subset2(schema, "types")))
+    for (ty in unique(types)) assign(ty, sum(types == ty), envir = tcount)
+    # (a named vector makes every append a copy of its names too)
+    schema$types <- unname(.subset2(schema, "types"))
   }
-  pos <- new.env(hash = TRUE, parent = emptyenv(), size = max(2L * length(nms), 29L))
-  # (the first occurrence wins, as match() does)
-  for (i in rev(seq_along(nms))) assign(nms[[i]], i, envir = pos)
-  tcount <- new.env(hash = TRUE, parent = emptyenv())
-  types <- as.character(unname(.subset2(schema, "types")))
-  for (ty in unique(types)) assign(ty, sum(types == ty), envir = tcount)
   h <- new.env(hash = FALSE, parent = emptyenv())
-  h$pos <- pos
+  h$pos <- pos_env_new(nms)
   h$tcount <- tcount
   h$n <- length(nms)
+  h$last <- if (length(nms) > 0L) .subset2(nms, length(nms))
   schema$.hash <- h
-  # (a named vector makes every append a copy of its names too)
-  schema$types <- unname(.subset2(schema, "types"))
   schema
 }
 
@@ -397,7 +416,10 @@ schema_unhash <- function(schema) {
 # @keywords internal
 schema_hash_of <- function(schema) {
   h <- .subset2(schema, ".hash")
-  if (is.null(h) || h[["n"]] != length(.subset2(schema, "names"))) NULL else h
+  if (is.null(h)) return(NULL)
+  nms <- .subset2(schema, "names")
+  n <- length(nms)
+  if (h[["n"]] != n || (n > 0L && !identical(.subset2(nms, n), h[["last"]]))) NULL else h
 }
 
 # Keep a schema's hash (schema_hash_new()) in step with `names`/`types`: the
@@ -421,6 +443,7 @@ schema_hash_append <- function(schema, name, type) {
   # (a name that can't key it is looked up with match(), ir_schema_pos())
   if (pos_key_ok(name)) assign(name, n, envir = h[["pos"]])
   h$n <- n
+  h$last <- .subset2(.subset2(schema, "names"), n)
   tcount <- h[["tcount"]]
   type <- as.character(unname(type))
   tcount[[type]] <- (tcount[[type]] %||% 0L) + 1L

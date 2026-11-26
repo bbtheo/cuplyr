@@ -24,6 +24,10 @@
   in the data mask. Before, a variable of that name outside the data was used
   instead (#75).
 
+* `reframe()` of a single-probability `quantile(x, p, names = FALSE)` returns
+  an unnamed column, as dplyr does. Before, the `names = FALSE` was dropped and
+  the values came back with `"50%"`-style names (#75).
+
 * RAPIDS 25.12 is no longer supported: cuplyr needs RAPIDS 26.02 or later, is tested on 26.10, and installs 26.10 for CUDA 13 (#94).
 
   It builds against libcudf and RMM `>=26.02` with no upper bound, and uses

@@ -143,6 +143,62 @@ test_that("a chunked grouped quantile() with all-NA groups under na.rm is R's, t
   for (lazy in c(FALSE, TRUE)) p75q_bits(df, p, by = "k", na_rm = TRUE, lazy = lazy)
 })
 
+# R's median() of `x` by integer key `k` in 1..G, without a call per group
+# (dplyr takes ~20 s on the 530000 groups below): the middle value, or the
+# halved sum of the two middle values, which is the correctly rounded midpoint
+# that R's mean() of the two gives. Checked against median() on a sample.
+p75q_median_by <- function(k, x, G, na_rm) {
+  o <- order(k, x)
+  ks <- k[o]
+  xs <- x[o]
+  ok <- !is.na(xs)
+  xx <- xs[ok]
+  cnt <- tabulate(ks[ok], G)
+  start <- c(0L, cumsum(cnt))[seq_len(G)]
+  lo <- start + (cnt + 1L) %/% 2L
+  hi <- start + cnt %/% 2L + 1L
+  lo[cnt == 0L] <- 1L
+  hi[cnt == 0L] <- 1L
+  res <- (xx[lo] + xx[hi]) / 2
+  res[cnt == 0L] <- NA_real_
+  if (!na_rm) res[tabulate(ks[!ok], G) > 0L] <- NA_real_
+  res
+}
+
+test_that("a median() over more groups than one chunk, with all-NA groups at the boundary, is R's, to the bit", {
+  skip_if_no_gpu()
+  withr::local_options(dplyr.summarise.inform = FALSE, cuplyr.fallback = "error")
+  set.seed(7531)
+  # one probability: 2^19 groups a chunk, so 530000 groups are two
+  G <- 530000L
+  n <- 700000L
+  df <- data.frame(k = c(seq_len(G), sample.int(G, n - G, TRUE)), x = rnorm(n), y = rnorm(n))
+  edge <- c(1L, 524288L, 524289L, G)
+  df$x[df$k %in% edge] <- NA
+  df$x[sample.int(n, 3000L)] <- NA
+  want_m <- p75q_median_by(df$k, df$x, G, na_rm = TRUE)
+  want_m0 <- p75q_median_by(df$k, df$x, G, na_rm = FALSE)
+  want_my <- p75q_median_by(df$k, df$y, G, na_rm = FALSE)
+  # the reference is R's median() on the boundary groups and a sample
+  chk <- c(edge, 524287L, 524290L, sample.int(G, 3000L))
+  sel <- df$k %in% chk
+  sp_x <- split(df$x[sel], df$k[sel])
+  sp_y <- split(df$y[sel], df$k[sel])
+  at <- as.integer(names(sp_x))
+  expect_identical(want_m[at], unname(vapply(sp_x, median, 0, na.rm = TRUE)))
+  expect_identical(want_m0[at], unname(vapply(sp_x, median, 0)))
+  expect_identical(want_my[at], unname(vapply(sp_y, median, 0)))
+  expect_true(all(is.na(want_m[edge])))
+  for (lazy in c(FALSE, TRUE)) {
+    got <- collect(summarise(group_by(tbl_gpu(df, lazy = lazy), k),
+                             m = median(x, na.rm = TRUE), m0 = median(x), my = median(y)))
+    expect_identical(got$k, seq_len(G))
+    expect_identical(got$m, want_m)
+    expect_identical(got$m0, want_m0)
+    expect_identical(got$my, want_my)
+  }
+})
+
 test_that("quantile() names follow options(OutDec) at every call", {
   skip_if_no_gpu()
   withr::local_options(dplyr.summarise.inform = FALSE, cuplyr.fallback = "error")

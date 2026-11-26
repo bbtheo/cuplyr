@@ -242,8 +242,7 @@ lower_mutate <- function(ast, source_ptr) {
   pos <- NULL
   if (n_expr >= MUTATE_HASH_MIN && names_hashable(index_names) &&
         names_hashable(vapply(expressions, function(e) e$output_col, ""))) {
-    pos <- new.env(hash = TRUE, parent = emptyenv(), size = max(2L * (length(index_names) + n_expr), 29L))
-    for (j in rev(seq_along(index_names))) assign(index_names[[j]], j, envir = pos)
+    pos <- pos_env_new(index_names, extra = n_expr)
   }
   n_slots <- length(index_names)
 

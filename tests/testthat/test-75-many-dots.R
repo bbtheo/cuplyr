@@ -141,3 +141,92 @@ test_that("a many-dot schema's hash is not trusted on a copy it doesn't describe
   for (r in recs) expect_null(r$checked_int$schema$.hash)
   expect_identical(recs[[30]]$checked_int$schema$names, c("a", "b", paste0("v", 1:29)))
 })
+
+test_that("a copy grown by the same length as the hashed schema is read with match()", {
+  s <- schema_hash_new(list(names = c("a", "b"), types = c("FLOAT64", "INT32")))
+  cp <- s
+  cp$names <- c(cp$names, "p")
+  cp$types <- c(cp$types, "INT64")
+  # the original grows by one through the hash: `n` is now cp's length too
+  s$names[[3L]] <- "q"
+  s$types[[3L]] <- "STRING"
+  schema_hash_append(s, "q", "STRING")
+  expect_identical(ir_schema_pos(cp, "p"), 3L)
+  expect_true(ir_schema_has_type(cp, "INT64"))
+  expect_identical(ir_schema_pos(s, "q"), 3L)
+  expect_identical(ir_schema_pos(s, "p"), NA_integer_)
+})
+
+test_that("many NULL dots on a wide table are dplyr's, and mixed with other dots", {
+  skip_if_no_gpu()
+  df <- as.data.frame(matrix(c(1, 2, NA, 4), nrow = 4L, ncol = 60L, dimnames = list(NULL, paste0("c", 1:60))))
+  nulls <- rlang::rep_named(paste0("c", 1:40), list(NULL))
+  expect_same_as_dplyr(df, function(d) mutate(d, !!!nulls))
+  expect_same_as_dplyr_lazy(df, function(d) mutate(d, !!!nulls))
+  # NULL, a new column, an overwrite and a reader of an earlier dot, in turn;
+  # a NULL dot of a name the table has never had; a dropped name made again
+  mix <- list()
+  for (i in 1:10) {
+    mix <- c(mix, stats::setNames(list(NULL), paste0("c", i)))
+    mix[[paste0("m", i)]] <- rlang::expr(!!rlang::sym(paste0("c", 30 + i)) + 1)
+    mix[[paste0("c", 50 + i)]] <- rlang::expr(!!rlang::sym(paste0("c", 50 + i)) * 3)
+    mix[[paste0("q", i)]] <- rlang::expr(!!rlang::sym(paste0("m", i)) - c60)
+  }
+  mix <- c(mix, list(zz = NULL, c3 = rlang::expr(m2 + c51), m4 = NULL, r = rlang::expr(c3 * 2)))
+  expect_gte(length(mix), MUTATE_HASH_MIN)
+  expect_same_as_dplyr(df, function(d) mutate(d, !!!mix))
+  expect_same_as_dplyr_lazy(df, function(d) mutate(d, !!!mix))
+})
+
+# A NULL dot moves the positions after the dropped column. Rebuilding the name
+# hash on each one made 800 NULL dots on 1200 columns ~17x main's time. The
+# reference is a call of 23 NULL dots, which is read with match() as before
+# (MUTATE_HASH_MIN): per dot, the hashed call must cost no more than 1.5x it.
+test_that("many NULL dots on a wide table cost per dot what a few do", {
+  skip_if_no_gpu()
+  n_col <- 1200L
+  df <- as.data.frame(matrix(1, nrow = 100L, ncol = n_col, dimnames = list(NULL, paste0("c", seq_len(n_col)))))
+  g <- tbl_gpu(df, lazy = FALSE)
+  few <- rlang::rep_named(paste0("c", seq_len(MUTATE_HASH_MIN - 1L)), list(NULL))
+  many <- rlang::rep_named(paste0("c", seq_len(800L)), list(NULL))
+  alt <- list()
+  for (i in seq_len(400L)) {
+    alt <- c(alt, stats::setNames(list(NULL, rlang::expr(c1200 + 1)), c(paste0("c", i), paste0("a", i))))
+  }
+  alt_few <- alt[seq_len(MUTATE_HASH_MIN - 1L)]
+  fns <- list(
+    few = function() mutate(g, !!!few),
+    many = function() mutate(g, !!!many),
+    alt_few = function() mutate(g, !!!alt_few),
+    alt = function() mutate(g, !!!alt)
+  )
+  scale <- 800 / (MUTATE_HASH_MIN - 1L)
+  runs <- timing_retry(
+    function() timing_medians(fns, samples = 7L, label = "NULL dots, wide"),
+    ok = function(m) m[["many"]] / m[["few"]] <= 1.5 * scale && m[["alt"]] / m[["alt_few"]] <= 1.5 * scale,
+    retry_if = function(m) m[["many"]] / m[["few"]] <= 2.5 * scale && m[["alt"]] / m[["alt_few"]] <= 2.5 * scale,
+    attempts = 3L, pause = 1
+  )
+  last <- runs[[length(runs)]]
+  expect_lte(last[["many"]] / last[["few"]], 1.5 * scale,
+             label = sprintf("800 NULL dots / 23 [%.3g s / %.3g s]", last[["many"]], last[["few"]]))
+  expect_lte(last[["alt"]] / last[["alt_few"]], 1.5 * scale,
+             label = sprintf("800 NULL/new dots / 23 [%.3g s / %.3g s]", last[["alt"]], last[["alt_few"]]))
+})
+
+test_that("the name hash places a name at its first column, as match() does", {
+  nms <- c("a", "b", "a", "c", "b")
+  pos <- pos_env_new(nms)
+  for (nm in unique(nms)) expect_identical(pos[[nm]], match(nm, nms))
+  expect_length(ls(pos_env_new(character())), 0L)
+  s <- schema_hash_new(list(names = nms, types = c("INT32", "FLOAT64", "INT32", "STRING", "BOOL8")))
+  for (nm in unique(nms)) expect_identical(ir_schema_pos(s, nm), match(nm, nms))
+  # a rebuild after a drop keeps the type counts it is given
+  keep <- s$names != "b"
+  s2 <- list(names = s$names[keep], types = s$types[keep])
+  s2 <- schema_hash_new(s2, s$.hash$tcount)
+  expect_identical(ir_schema_pos(s2, "c"), 3L)
+  expect_identical(ir_schema_pos(s2, "b"), NA_integer_)
+  expect_true(ir_schema_has_type(s2, "STRING"))
+  expect_false(ir_schema_has_type(s2, "INT64"))
+})
