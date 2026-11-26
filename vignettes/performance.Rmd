@@ -130,9 +130,8 @@ passes run on each side of them but not across.
 The tables below are static. Nothing is timed when this vignette builds. The
 code is at the end.
 
-- Date and version: 2026-10-26, cuplyr 0.1.1.9000, at the version from the NEWS
-  entry "Faster eager verb calls". Some figures from earlier versions are quoted
-  for comparison.
+- Date and version: 2026-10-26, cuplyr 0.1.1.9000 (a development version
+  before 0.2.0). Some figures from earlier versions are quoted for comparison.
 - Hardware and software: NVIDIA GeForce RTX 5070 (12 GB), driver 615.78.08,
   R 4.6.1, dplyr 1.2.1, the default `async` memory resource.
 - Method: data already on the GPU, so uploads are not in the pipeline timings.
@@ -216,8 +215,8 @@ below the mutate, and dropping `b` and `c`.
   1.75 to 1.76 ms against 1.87 to 1.88 at 1e3 rows, and 1.95 to 1.98 ms against
   2.05 to 2.08 at 1e6, 4 to 6% less. At 1e7 rows lazy is 0.67 ms behind (5.00
   against 4.33 ms, 15%) and at 5e7 rows 1.0 ms behind (18.5 against 17.5 ms,
-  6%). Before the NEWS entry "Faster lazy verb calls" those two gaps were 1.2
-  and 1.5 ms.
+  6%). Earlier in the 0.2.0 development cycle those two gaps were 1.2 and
+  1.5 ms.
 - At 1e3 rows, in two profiling runs, recording the five-verb lazy plan took
   1.0 ms, all of it in R. `collect()` took 0.66 ms: 0.04 ms to optimize, 0.43 ms
   to lower and run, 0.09 ms to copy the result to R, and the rest bookkeeping.
