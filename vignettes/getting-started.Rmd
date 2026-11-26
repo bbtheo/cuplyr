@@ -176,6 +176,27 @@ final result is copied back to R.
 - `vignette("memory")` covers GPU memory resources and when memory is freed.
 - See also `?tbl_gpu`, `?compute` and `?gpu_memory_state`.
 
+## Installation
+
+The conda package `r-cuplyr` on the `bbtheo` channel is a binary for RAPIDS
+26.10 and CUDA 13. It needs an NVIDIA driver but no CUDA toolkit or compiler:
+
+```bash
+conda install -c bbtheo -c rapidsai -c conda-forge -c nvidia r-cuplyr
+```
+
+With pixi, run `pixi add r-cuplyr` in a project with the same channels. To
+build from source, use the install script; the
+[README](https://github.com/bbtheo/cuplyr#installation) has both routes. Then
+check the installation from R:
+
+```r
+library(cuplyr)
+verify_installation()  # runs a small GPU round trip
+check_deps()           # lists anything missing
+diagnostics()          # system details for a bug report
+```
+
 ## System requirements
 
 - NVIDIA GPU with compute capability 7.5 (Turing) or newer

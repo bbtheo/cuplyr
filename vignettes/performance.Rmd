@@ -130,9 +130,8 @@ passes run on each side of them but not across.
 The tables below are static. Nothing is timed when this vignette builds. The
 code is at the end.
 
-- Date and version: 2026-10-26, cuplyr 0.1.1.9000, at the version from the NEWS
-  entry "Faster eager verb calls". Some figures from earlier versions are quoted
-  for comparison.
+- Date and version: 2026-10-26, cuplyr 0.1.1.9000 (a development version
+  before 0.2.0). Some figures from earlier versions are quoted for comparison.
 - Hardware and software: NVIDIA GeForce RTX 5070 (12 GB), driver 615.78.08,
   R 4.6.1, dplyr 1.2.1, the default `async` memory resource.
 - Method: data already on the GPU, so uploads are not in the pipeline timings.
