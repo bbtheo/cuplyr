@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# R CMD check of this worktree under the GPU lock.
+#
+#   tools/check [--out DIR] [R CMD check args...]
+#
+# Builds the source tarball with scripts/build-tarball.sh, then runs
+# R CMD check on it with the same settings as `pixi run check`
+# (_R_CHECK_FORCE_SUGGESTS_=false, --no-manual --ignore-vignettes); extra
+# arguments go to R CMD check (e.g. --as-cran). The check installs the package
+# only into its own DIR/cuplyr.Rcheck/ library, never into a user or site
+# library. DIR defaults to scratchpad/check/ in this worktree (gitignored); the
+# log is DIR/cuplyr.Rcheck/00check.log and the tests' output
+# DIR/cuplyr.Rcheck/tests/testthat.Rout(.fail).
+source "$(dirname "$0")/lib.sh"
+cd "$CUPLYR_WT_ROOT"
+
+out="$CUPLYR_WT_ROOT/scratchpad/check"
+if [[ "${1:-}" == "--out" ]]; then
+  out="$2"
+  shift 2
+fi
+mkdir -p "$out"
+out="$(cd "$out" && pwd)"
+
+exec "$(dirname "$0")/gpu-run" --label check -- bash -c '
+  set -euo pipefail
+  out="$1"; shift
+  rm -f "$out"/cuplyr_*.tar.gz
+  scripts/build-tarball.sh --out-dir "$out"
+  cd "$out"
+  _R_CHECK_FORCE_SUGGESTS_=false R CMD check --no-manual --ignore-vignettes "$@" cuplyr_*.tar.gz
+' check "$out" "$@"
