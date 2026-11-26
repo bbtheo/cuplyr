@@ -183,7 +183,7 @@ test_that("a lazy print with pending operations ends with one collect()/explain(
     eg <- f91_print(pipelines[[nm]](tbl_gpu(df, lazy = FALSE)))
     expect_false(any(grepl("explain()", eg, fixed = TRUE)), info = nm)
     expected <- eg
-    expected[1] <- sub("^# A gibble: ", "# A gibble [lazy]: ", expected[1])
+    expected[1] <- sub("^# A tbl_gpu: ", "# A tbl_gpu [lazy]: ", expected[1])
     expect_identical(out[-length(out)], expected, info = nm)
   }
   # nothing pending: no footer
@@ -198,15 +198,15 @@ test_that("grouped and rowwise headers are unchanged", {
   skip_if_no_gpu()
   df <- f91_df()
   out <- f91_print(dplyr::group_by(tbl_gpu(df, lazy = FALSE), f))
-  expect_match(out[1], "^# A gibble: 3 . 8$")
+  expect_match(out[1], "^# A tbl_gpu: 3 . 8$")
   expect_match(out[2], "^# Groups:\\s+f \\[3\\]$")
   expect_match(out[3], "^\\$ ")
   out <- f91_print(dplyr::rowwise(tbl_gpu(df, lazy = FALSE), i))
-  expect_match(out[1], "^# A gibble: 3 . 8$")
+  expect_match(out[1], "^# A tbl_gpu: 3 . 8$")
   expect_match(out[2], "^# Rowwise:\\s+i$")
   expect_match(out[3], "^\\$ ")
   out <- f91_print(dplyr::group_by(dplyr::mutate(tbl_gpu(df, lazy = TRUE), z = d), o))
-  expect_match(out[1], "^# A gibble \\[lazy\\]: 3 . 9$")
+  expect_match(out[1], "^# A tbl_gpu \\[lazy\\]: 3 . 9$")
   expect_match(out[2], "^# Groups:\\s+o \\[3\\]$")
 })
 
@@ -223,7 +223,7 @@ test_that("a failed plan lists every column with its type and ends with the foot
   )
   out <- NULL
   expect_no_error(out <- f91_print(lz))
-  expect_match(out[1], "^# A gibble \\[lazy\\]: \\?\\? . 10$")
+  expect_match(out[1], "^# A tbl_gpu \\[lazy\\]: \\?\\? . 10$")
   expect_true(any(grepl("f91: plan not run", out, fixed = TRUE)))
   txt <- paste(out, collapse = "\n")
   for (nm in names(want)) {

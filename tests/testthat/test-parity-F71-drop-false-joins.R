@@ -337,7 +337,7 @@ test_that("printing a filtering join result reports dplyr's group count", {
       group_by(g, .drop = FALSE) |>
       anti_join(tbl_gpu(f71_y), by = "g")
     out <- utils::capture.output(print(got))
-    expect_true(any(grepl("# Groups:   g [5]", out, fixed = TRUE)),
+    expect_true(any(grepl("# Groups:    g [5]", out, fixed = TRUE)),
                 info = paste("lazy", lazy, paste(out, collapse = "\n")))
   }
 })

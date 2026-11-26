@@ -1524,7 +1524,7 @@ plan_now_columns <- function(now, names) {
 }
 
 # The lazy form of `plan_run_now()`'s eager result (anything that is not a
-# gibble, such as a CPU route's data frame, is returned as it is).
+# tbl_gpu, such as a CPU route's data frame, is returned as it is).
 # @keywords internal
 plan_back_to_lazy <- function(result) {
   if (is_tbl_gpu(result) && identical(.subset2(result, "exec_mode"), "eager") &&

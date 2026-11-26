@@ -609,7 +609,7 @@ bind_on_cpu <- function(verb, dots, ..., reason, reupload, rowwise_from) {
   out
 }
 
-# The mode of a multi-input verb's result: lazy when any gibble input is lazy
+# The mode of a multi-input verb's result: lazy when any GPU-table input is lazy
 # (push_join()'s rule), else the result's own. The bind and set-operation code
 # computes its inputs and builds results from eager helper tables, so the
 # mode is put back on the way out. A data-frame input never decides it.
