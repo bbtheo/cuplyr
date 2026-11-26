@@ -38,8 +38,8 @@ capability 7.5 or higher.
     order.
   - Integer `+`, `-` and `*` return integers, not doubles. An overflow gives
     `NA` with R's warning.
-  - In `summarise()`, `sum()` of an integer column and an ungrouped `n()`
-    return integers, not doubles.
+  - In `summarise()`, `sum()` of integers or logicals, such as `sum(x > 0)`,
+    and an ungrouped `n()` return integers, not doubles.
   - `NaN` stays `NaN`; it used to become `NA` on upload.
   - `integer64` columns are exact and collect to `bit64::integer64`; they used
     to be uploaded as doubles, which could corrupt their values.
@@ -50,8 +50,8 @@ capability 7.5 or higher.
 * Uploading a column with no GPU type (`difftime`, `hms`, `ts`, `POSIXlt`, a
   list, a matrix with several columns, ...) raises an error that names the
   column, instead of losing its class. So does a verb that makes a `difftime`
-  on the CPU, such as `end - start` on dates; returning such columns is
-  planned (#65).
+  on the CPU, such as `end - start` on dates. Returning such columns is an
+  open issue (#65).
 
 * `print()` uses a tibble-style `# A gibble: n x m` header, R type labels and
   factor labels.
@@ -59,8 +59,9 @@ capability 7.5 or higher.
 * `show_query()` is now a method for dplyr's generic. Its argument is `x`, and
   it prints the plan as R code and returns `x` invisibly.
 
-* `split()`, `with()`, `subset()`, `t()`, `is.na()` and `anyNA()` of a gibble
-  raise an error; they used to act on the object's internal fields.
+* `split()`, `with()`, `subset()`, `t()`, `as.environment()`, `is.na()` and
+  `anyNA()` of a gibble raise an error; they used to act on the object's
+  internal fields.
 
 ## Installation and requirements
 
@@ -108,9 +109,10 @@ capability 7.5 or higher.
   `sum(c_across(a:e))` on the GPU. On 1e5 rows that takes milliseconds,
   where dplyr takes about twenty seconds.
 
-* `$`, `[[`, `[`, `[<-` for whole columns, `as.data.frame()`, `head()`,
-  `rbind()`, `cbind()`, `vctrs::vec_slice()`, `vctrs::vec_size()`,
-  `dplyr::bind_rows()` and `purrr::map_dfr()` work on gibbles.
+* `$`, `[[`, `[`, `[<-` for whole columns, `as.data.frame()`, `as_tibble()`,
+  `glimpse()`, `head()`, `rbind()`, `cbind()`, `vctrs::vec_slice()`,
+  `vctrs::vec_size()`, `dplyr::bind_rows()` and `purrr::map_dfr()` work on
+  gibbles.
 
 * `gibble()`, `as_gibble()` and `is_gibble()` are aliases of `tbl_gpu()`,
   `as_tbl_gpu()` and `is_tbl_gpu()`.
@@ -242,9 +244,8 @@ capability 7.5 or higher.
 
 ## Performance
 
-* Eager verb calls spend less time in R, recording a `filter()` or `mutate()`
-  on a lazy gibble no longer slows down as the plan grows, and a column passed
-  through a verb is shared instead of copied.
+* Recording a `mutate()` on a lazy gibble no longer slows down as the plan
+  grows, and a column passed through a verb is shared instead of copied.
 
 * Each `filter()` or `mutate()` call runs as one fused GPU kernel where it can,
   and computes a repeated `round()`, `%in%` or string call once (#17).
@@ -252,8 +253,6 @@ capability 7.5 or higher.
 * A lazy `arrange(x) |> head(n)` on one numeric or date key, and
   `slice_min()`/`slice_max()` (grouped too), use a top-k selection instead of
   a full sort.
-
-* Grouped `summarise()` needs less GPU memory with many groups (#50).
 
 ## Minor improvements and bug fixes
 
