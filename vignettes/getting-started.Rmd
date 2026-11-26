@@ -179,7 +179,8 @@ final result is copied back to R.
 ## Installation
 
 The conda package `r-cuplyr` on the `bbtheo` channel is a binary for RAPIDS
-26.10 and CUDA 13. It needs an NVIDIA driver but no CUDA toolkit or compiler:
+26.10 and CUDA 13. It needs an NVIDIA driver that supports CUDA 13, but no
+CUDA toolkit or compiler:
 
 ```bash
 conda install -c bbtheo -c rapidsai -c conda-forge -c nvidia r-cuplyr

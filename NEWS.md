@@ -11,18 +11,25 @@ capability 7.5.
 
 ## Breaking changes
 
-* Gibbles are lazy by default. `tbl_gpu()` records each verb as a step, and
-  `collect()`, `compute()` or `print()` run the plan; errors in a verb's
-  arguments are still raised by that verb. For eager tables, set
+* Gibbles are lazy by default. `tbl_gpu()` returns a lazy gibble, each verb
+  records a step, and `collect()`, `compute()` or `print()` run the plan.
+  Errors in a verb's arguments are still raised by that verb, but dplyr's
+  warnings, such as integer overflow or a many-to-many join, come when the
+  plan runs, at every `print()` too. For eager tables, set
   `options(cuplyr.exec_mode = "eager")` or pass `lazy = FALSE`.
 
 * cuplyr needs RAPIDS libcudf 26.02 or later and is tested on 26.10. RAPIDS
   25.12 is no longer supported (#94).
 
 * The minimum GPU is compute capability 7.5 (Turing). Every install route
-  uses a CUDA 13 build of RAPIDS, which has no code for Volta (#150).
+  installs a CUDA 13 build of RAPIDS, which has no code for Volta (#150).
 
 * Results that differed from dplyr now match it:
+  - Grouping follows dplyr. `summarise()` drops only the last grouping column
+    by default (`.groups = "drop_last"`, with dplyr's message), `select()`
+    keeps the grouping columns, joins keep `x`'s groups, `collect()` returns
+    a `grouped_df`, and `tbl_gpu()` keeps the groups of a `grouped_df`. In
+    0.1.1 each of these dropped the groups.
   - `summarise()` aggregates follow R's `na.rm = FALSE` default, so a group
     with an `NA` gives `NA`.
   - `arrange(desc(x))` puts `NA` last.
@@ -39,7 +46,8 @@ capability 7.5.
 
 * Uploading a column with no GPU type (`difftime`, `hms`, `ts`, `POSIXlt`, a
   list, a matrix with several columns, ...) raises an error that names the
-  column, instead of losing its class.
+  column, instead of losing its class. So does a verb that makes a `difftime`
+  on the CPU, such as `end - start` on dates (#65).
 
 * `print()` uses a tibble-style `# A gibble: n x m` header, R type labels and
   factor labels.
@@ -54,8 +62,8 @@ capability 7.5.
 
 * cuplyr is available as a conda package, `r-cuplyr`, on the `bbtheo` channel
   on anaconda.org. It is a binary for RAPIDS 26.10 and CUDA 13 that needs an
-  NVIDIA driver but no CUDA toolkit or compiler. Install it with conda, mamba
-  or pixi; the README has the commands (#135).
+  NVIDIA driver for CUDA 13 but no CUDA toolkit or compiler. Install it with
+  conda, mamba or pixi; the README has the commands (#135).
 
 * `install.sh` and `install_cuplyr()` build cuplyr against libcudf from pixi,
   conda or the system (`--method=` picks one). The conda route installs
@@ -67,29 +75,16 @@ capability 7.5.
 * New `check_deps()` checks the driver, CUDA toolkit, libcudf and R packages,
   `verify_installation()` runs a small GPU round trip, and `diagnostics()`
   reports versions, the GPU, the memory resource and every option for a bug
-  report, as text or JSON (#14, #49). `diagnose_loader()` helps when
-  `library(cuplyr)` fails to find its libraries.
+  report, as text or JSON (#14, #49). `diagnose_loader()` shows how cuplyr's
+  shared library resolves libstdc++, libcudf and libcuda.
 
 ## New features
 
-### Lazy plans
-
-* The optimizer drops columns the result never reads, fuses consecutive
-  `mutate()` calls and moves filters below mutates, selects and some joins.
-
-* `explain()` and `show_query()` print the plan as R code without running it,
-  including the columns a Parquet scan reads and the reason for each CPU
-  fallback (#10). Printing a lazy gibble runs the plan and keeps nothing.
-
-* A step whose result type depends on the data (an integer `sum()`, a join
-  with `unmatched = "error"`) runs at the verb, as in eager mode;
-  `options(cuplyr.plan_break = "warn")` reports it.
+### Verbs
 
 * Anything with no GPU form runs in dplyr on the CPU instead of failing.
   `options(cuplyr.fallback = "warn")` reports each fallback with its reason
   and the data moved; `"error"` forbids them.
-
-### Verbs
 
 * Newly on the GPU: `filter_out()`, `transmute()`, `rename()`,
   `rename_with()`, `relocate()`, `distinct()`, `pull()`, `count()`,
@@ -110,11 +105,29 @@ capability 7.5.
   instead of about twenty seconds.
 
 * `$`, `[[`, `[`, `[<-` for whole columns, `as.data.frame()`, `head()`,
-  `rbind()`, `cbind()`, vctrs functions, `dplyr::bind_rows()` and
-  `purrr::map_dfr()` work on gibbles.
+  `rbind()`, `cbind()`, `vctrs::vec_slice()`, `vctrs::vec_size()`,
+  `dplyr::bind_rows()` and `purrr::map_dfr()` work on gibbles.
 
 * `gibble()`, `as_gibble()` and `is_gibble()` are aliases of `tbl_gpu()`,
   `as_tbl_gpu()` and `is_tbl_gpu()`.
+
+### Lazy plans
+
+* The optimizer now also prunes unused columns below `summarise()`,
+  `arrange()` and other barriers, and keeps dplyr's integer-overflow warnings
+  when it moves a filter.
+
+* `explain()` and `show_query()` print the plan as R code without running it,
+  including the columns a Parquet scan reads and the reason for each CPU
+  fallback (#10).
+
+* Printing a lazy gibble runs the plan to show the first rows and keeps
+  nothing; a plan over a Parquet file prints its schema unless it is a bare
+  scan.
+
+* A step whose result type or error depends on the data (an integer `sum()`,
+  a join with `unmatched = "error"`) runs at the verb, as in eager mode;
+  `options(cuplyr.plan_break = "warn")` reports it.
 
 ### Expressions
 
@@ -148,14 +161,13 @@ capability 7.5.
 * The mutating joins, `semi_join()`, `anti_join()` and `cross_join()` run on
   the GPU, with `join_by()` equality, inequality, `between()`, `within()`,
   `overlaps()` and `closest()` conditions. `multiple`, `unmatched`,
-  `relationship`, `na_matches`, `keep` and `suffix` follow dplyr.
-
-* Keys of different types combine by vctrs' rules, an all-`NA` key included
-  (#70).
+  `relationship`, `na_matches`, `keep` and `suffix` follow dplyr, and keys of
+  different types combine by vctrs' rules, an all-`NA` key included (#70).
 
 * `union()`, `union_all()`, `intersect()`, `setdiff()`, `symdiff()` and
   `setequal()` run on the GPU. `bind_rows()` follows vctrs' type rules and
-  binds factors to the union of their levels (#20, #70).
+  binds factors to the union of their levels (#20, #70). Binds and set
+  operations return a lazy gibble when any input is lazy.
 
 ### Parquet
 
@@ -179,9 +191,7 @@ capability 7.5.
   becomes `NA`; it used to give `NA` or a wrong date silently.
 
 * Columns keep their element names, attributes and one-column matrix shape
-  by dplyr's rules (#21, #56).
-
-* Tables with rows but no columns work like dplyr's (#19).
+  by dplyr's rules, and tables with rows but no columns work (#19, #21, #56).
 
 * Strings go to the GPU as UTF-8, and columns with more than 2 GiB of
   characters work.
@@ -191,14 +201,13 @@ capability 7.5.
 * New `roll_mean()`, `roll_sum()`, `roll_min()`, `roll_max()` and `roll_sd()`
   run on the GPU in `mutate()` and `filter()`, grouped or not, in time that
   doesn't depend on the window width. `data.table::frollmean()` and its
-  siblings work as aliases.
-
-* New `roll_median()` matches `stats::median()` exactly and runs on the CPU.
+  siblings work as aliases. New `roll_median()` matches `stats::median()`
+  exactly and runs on the CPU.
 
 ### Options, errors and memory
 
 * New `cuplyr_options()` lists every option with its value and where it came
-  from; `?cuplyr-options` documents them. An invalid value warns once, with
+  from; `?"cuplyr-options"` documents them. An invalid value warns once, with
   class `cuplyr_warning_invalid_option`, and the default is used.
 
 * Errors and warnings have dplyr's class, message and call: missing columns,
@@ -207,14 +216,22 @@ capability 7.5.
 
 * cuplyr installs CUDA's stream-ordered (`"async"`) memory resource when it
   loads, and each call frees its temporary GPU tables when it returns.
-  `gpu_gc()` gives unused memory back to the device. Set
-  `options(cuplyr.memory_resource = "pool")` before loading for RMM's pool, or
-  `cuplyr.release_threshold` to release memory automatically
-  (`vignette("memory")`).
+  `gpu_gc()` gives unused memory back to the device and reports it in
+  `released_bytes`. Set `options(cuplyr.memory_resource = "pool")` before
+  loading for RMM's pool, or `cuplyr.release_threshold` to release memory
+  automatically (`vignette("memory")`).
+
+* `gpu_memory_state()` reports the memory resource, `pool_bytes` and
+  `pool_used_bytes`. `used_bytes` counts the memory the resource holds, so it
+  no longer falls when a table is freed.
 
 * A step that runs out of GPU memory is retried once after garbage
   collection, and the final error says what helps (#13). New `gpu_sync()`
   waits for queued GPU work, for timing.
+
+* Loading cuplyr sets the environment variable
+  `LIBCUDF_USE_DEBUG_STREAM_POOL` unless it is set, so that Parquet reads
+  don't slow later verbs (`?read_parquet_gpu`).
 
 * New `vignette("performance")` and `vignette("memory")`, and
   `vignette("query-optimization")` matches the optimizer. Help-page examples
@@ -222,21 +239,19 @@ capability 7.5.
 
 ## Performance
 
-* Eager verb calls spend less time in R. Recording a lazy verb costs the same
-  however long the plan is, and a column passed through a verb is shared
-  instead of copied.
+* Eager verb calls spend less time in R, recording a `filter()` or `mutate()`
+  on a lazy gibble no longer slows down as the plan grows, and a column passed
+  through a verb is shared instead of copied.
 
 * Each `filter()` or `mutate()` call runs as one fused GPU kernel where it can,
-  and computes a repeated subexpression once (#17).
+  and computes a repeated `round()`, `%in%` or string call once (#17).
 
-* `arrange() |> head()` and `slice_min()`/`slice_max()`, grouped too, use a
-  top-k selection instead of a full sort.
+* A lazy `arrange(x) |> head(n)` on one numeric or date key, and
+  `slice_min()`/`slice_max()` (grouped too), use a top-k selection instead of
+  a full sort.
 
 * `summarise(.by = )` runs as one grouped summary, and grouped `summarise()`
   needs less memory with many groups (#50).
-
-* Faster `recode()` with many keys, `group_split()` with many groups and the
-  `_all()` verbs on wide tables.
 
 * Faster `round(x, digits)`, `quantile()` with many probabilities, very long
   `mutate()` calls and `summarise()` with `.drop = FALSE` (#75).
@@ -255,31 +270,8 @@ capability 7.5.
 * `arrange(.by_group = TRUE)` sorts the group columns ascending, as dplyr
   does.
 
-* `first()`, `last()` and `nth()` of a logical expression return a logical.
-
-* `distinct()` and `count()` accept window functions in computed keys (#29).
-
-* An unnamed `.data$x` in `distinct()`, `count()` or `group_by()` names the
-  column `x`.
-
-* `.env[[name]]` reads the variable `name` holds, and a column-free filter
-  condition is evaluated once.
-
-* `%in%` compares in the common type, as base R does (`1L %in% 1.5` is
-  `FALSE`), and `sum(n())` and other windows over one value per group give
-  dplyr's result.
-
-* `semi_join()` and `anti_join()` keep the empty groups of a `.drop = FALSE`
-  table.
-
-* A `difftime` made on the CPU raises an error naming the column; native
-  `difftime` columns are planned (#65).
-
 * Lazy plans with chained joins, or a `mutate()` that overwrites a column,
   give the right result.
-
-* `check_deps()` passes on a working pixi install and reads newer
-  `nvidia-smi` output (#49).
 
 # cuplyr 0.1.1
 
