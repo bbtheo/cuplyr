@@ -28,6 +28,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/round.hpp>
+#include "cuplyr_compat.hpp"
 
 #include <memory>
 #include <string>
@@ -53,10 +54,7 @@ inline std::unique_ptr<cudf::column> ts_to_float64(const cudf::column_view& col)
 inline std::unique_ptr<cudf::column> float64_to_ts(std::unique_ptr<cudf::column> f,
                                                    cudf::type_id target, bool& fractional) {
     fractional = false;
-    {
-        auto mask = cudf::nans_to_nulls(f->view());
-        f->set_null_mask(std::move(*mask.first), mask.second);
-    }
+    f = cuplyr::nan_to_null_column(f->view());
     if (f->size() == 0) {
         return cudf::make_empty_column(cudf::data_type{target});
     }

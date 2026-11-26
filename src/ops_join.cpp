@@ -1,7 +1,7 @@
 // src/ops_join.cpp
 // GPU join implementations using cuDF
 #include <variant>  // libcudf 26.10's cudf/ast/expressions.hpp uses std::variant without including it
-#include <rmm/cuda_stream_view.hpp>
+#include <cudf/utilities/default_stream.hpp>
 #include <Rcpp.h>
 
 #include "cuda_utils.hpp"
@@ -132,7 +132,7 @@ cudf::column_view map_as_column_view(const rmm::device_uvector<cudf::size_type>&
 std::unique_ptr<cudf::column> sanitize_join_map(
     const cudf::column_view& map_col,
     cudf::size_type nrows,
-    rmm::cuda_stream_view stream,
+    cuda::stream_ref stream,
     rmm::device_async_resource_ref mr) {
 
     cudf::numeric_scalar<cudf::size_type> zero_scalar(0, true, stream);
@@ -183,7 +183,7 @@ Rcpp::List join_map_stats(
     const cudf::column_view& right_map,
     cudf::size_type n_left,
     cudf::size_type n_right,
-    rmm::cuda_stream_view stream,
+    cuda::stream_ref stream,
     rmm::device_async_resource_ref mr) {
 
     // Smallest value that appears more than once in `map_col`'s entries
@@ -197,7 +197,7 @@ Rcpp::List join_map_stats(
             cudf::data_type(cudf::type_id::BOOL8), stream, mr);
 
         cudf::table_view map_tbl({map_col});
-        auto valid_tbl = cudf::apply_boolean_mask(map_tbl, valid_mask->view(), stream, mr);
+        auto valid_tbl = cuplyr::apply_retention_mask(map_tbl, valid_mask->view(), stream, mr);
         auto valid_col = valid_tbl->view().column(0);
         if (valid_col.size() == 0) return -1;
 
@@ -218,7 +218,7 @@ Rcpp::List join_map_stats(
             cudf::data_type(cudf::type_id::BOOL8), stream, mr);
 
         cudf::table_view keys_view({keys_tbl->view().column(0)});
-        auto dup_keys_tbl = cudf::apply_boolean_mask(keys_view, dup_mask->view(), stream, mr);
+        auto dup_keys_tbl = cuplyr::apply_retention_mask(keys_view, dup_mask->view(), stream, mr);
         auto dup_keys = dup_keys_tbl->view().column(0);
         if (dup_keys.size() == 0) return -1;
 
@@ -243,7 +243,7 @@ Rcpp::List join_map_stats(
             map_col, sentinel_scalar, cudf::binary_operator::NOT_EQUAL,
             cudf::data_type(cudf::type_id::BOOL8), stream, mr);
         cudf::table_view map_tbl({map_col});
-        auto valid_tbl = cudf::apply_boolean_mask(map_tbl, valid_mask->view(), stream, mr);
+        auto valid_tbl = cuplyr::apply_retention_mask(map_tbl, valid_mask->view(), stream, mr);
         auto valid_col = valid_tbl->view().column(0);
 
         cudf::numeric_scalar<cudf::size_type> zero_scalar(0, true, stream);
@@ -314,7 +314,7 @@ std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>> apply_mu
     const std::string& multiple,
     cudf::size_type n_left,
     bool reclassify_excess,
-    rmm::cuda_stream_view stream,
+    cuda::stream_ref stream,
     rmm::device_async_resource_ref mr) {
 
     // "any" behaves like "first" in this backend -- verified empirically
@@ -360,7 +360,7 @@ std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>> apply_mu
 
     if (!reclassify_excess) {
         cudf::table_view map_tbl({left_map_view, right_map_view});
-        auto filtered = cudf::apply_boolean_mask(map_tbl, keep_mask->view(), stream, mr);
+        auto filtered = cuplyr::apply_retention_mask(map_tbl, keep_mask->view(), stream, mr);
         auto cols = filtered->release();
         return {std::move(cols[0]), std::move(cols[1])};
     }
@@ -372,9 +372,9 @@ std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>> apply_mu
     // reappear once per capped-out pair).
     auto excess_mask = cudf::unary_operation(keep_mask->view(), cudf::unary_operator::NOT, stream, mr);
     cudf::table_view map_tbl({left_map_view, right_map_view});
-    auto kept = cudf::apply_boolean_mask(map_tbl, keep_mask->view(), stream, mr);
+    auto kept = cuplyr::apply_retention_mask(map_tbl, keep_mask->view(), stream, mr);
     cudf::table_view excess_right_in({right_map_view});
-    auto excess_right = cudf::apply_boolean_mask(excess_right_in, excess_mask->view(), stream, mr);
+    auto excess_right = cuplyr::apply_retention_mask(excess_right_in, excess_mask->view(), stream, mr);
     if (excess_right->num_rows() == 0) {
         auto cols = kept->release();
         return {std::move(cols[0]), std::move(cols[1])};
@@ -1230,18 +1230,18 @@ namespace {
 using ColPtr = std::unique_ptr<cudf::column>;
 
 ColPtr roll_i32_const(cudf::size_type v, cudf::size_type n,
-                      rmm::cuda_stream_view stream, rmm::device_async_resource_ref mr) {
+                      cuda::stream_ref stream, rmm::device_async_resource_ref mr) {
     cudf::numeric_scalar<cudf::size_type> s(v, true, stream);
     return cudf::make_column_from_scalar(s, n, stream, mr);
 }
 
 ColPtr roll_bool_const(bool v, cudf::size_type n,
-                       rmm::cuda_stream_view stream, rmm::device_async_resource_ref mr) {
+                       cuda::stream_ref stream, rmm::device_async_resource_ref mr) {
     cudf::numeric_scalar<bool> s(v, true, stream);
     return cudf::make_column_from_scalar(s, n, stream, mr);
 }
 
-ColPtr roll_seq(cudf::size_type n, rmm::cuda_stream_view stream,
+ColPtr roll_seq(cudf::size_type n, cuda::stream_ref stream,
                 rmm::device_async_resource_ref mr) {
     if (n == 0) {
         return cudf::make_numeric_column(cudf::data_type(cudf::type_id::INT32), 0,
@@ -1253,23 +1253,23 @@ ColPtr roll_seq(cudf::size_type n, rmm::cuda_stream_view stream,
 
 ColPtr roll_binop(const cudf::column_view& a, const cudf::column_view& b,
                   cudf::binary_operator op, cudf::type_id out,
-                  rmm::cuda_stream_view stream, rmm::device_async_resource_ref mr) {
+                  cuda::stream_ref stream, rmm::device_async_resource_ref mr) {
     return cudf::binary_operation(a, b, op, cudf::data_type(out), stream, mr);
 }
 
 ColPtr roll_binop_s(const cudf::column_view& a, cudf::size_type v, cudf::binary_operator op,
-                    cudf::type_id out, rmm::cuda_stream_view stream,
+                    cudf::type_id out, cuda::stream_ref stream,
                     rmm::device_async_resource_ref mr) {
     cudf::numeric_scalar<cudf::size_type> s(v, true, stream);
     return cudf::binary_operation(a, s, op, cudf::data_type(out), stream, mr);
 }
 
 ColPtr roll_and(const cudf::column_view& a, const cudf::column_view& b,
-                rmm::cuda_stream_view stream, rmm::device_async_resource_ref mr) {
+                cuda::stream_ref stream, rmm::device_async_resource_ref mr) {
     return roll_binop(a, b, cudf::binary_operator::LOGICAL_AND, cudf::type_id::BOOL8, stream, mr);
 }
 
-ColPtr roll_not(const cudf::column_view& a, rmm::cuda_stream_view stream,
+ColPtr roll_not(const cudf::column_view& a, cuda::stream_ref stream,
                 rmm::device_async_resource_ref mr) {
     return cudf::unary_operation(a, cudf::unary_operator::NOT, stream, mr);
 }
@@ -1280,7 +1280,7 @@ bool roll_is_float(const cudf::column_view& col) {
 
 // BOOL8, true where a floating-point value is NaN. A null is not NaN (the data
 // under a null slot can hold NA_real_'s NaN payload, so is_nan alone is wrong).
-ColPtr roll_is_nan(const cudf::column_view& col, rmm::cuda_stream_view stream,
+ColPtr roll_is_nan(const cudf::column_view& col, cuda::stream_ref stream,
                    rmm::device_async_resource_ref mr) {
     auto nan = cudf::is_nan(col, stream, mr);
     auto valid = cudf::is_valid(col, stream, mr);
@@ -1459,7 +1459,7 @@ SEXP gpu_rolling_join(SEXP xptr_left,
             : roll_not(valid->view(), stream, mr);
         auto xseq = roll_seq(nx, stream, mr);
         cudf::table_view seq_tbl({xseq->view()});
-        auto kept = cudf::apply_boolean_mask(seq_tbl, mask->view(), stream, mr);
+        auto kept = cuplyr::apply_retention_mask(seq_tbl, mask->view(), stream, mr);
         auto result = cudf::gather(left_view, kept->view().column(0),
                                    cudf::out_of_bounds_policy::DONT_CHECK, stream, mr);
         return make_gpu_table_xptr(std::move(result));
@@ -1540,7 +1540,7 @@ SEXP gpu_rolling_join(SEXP xptr_left,
         auto miss = roll_not(hit_y, stream, mr);
         auto pos_seq = roll_seq(ny, stream, mr);
         cudf::table_view pos_tbl({pos_seq->view()});
-        auto miss_pos = cudf::apply_boolean_mask(pos_tbl, miss->view(), stream, mr);
+        auto miss_pos = cuplyr::apply_retention_mask(pos_tbl, miss->view(), stream, mr);
         if (miss_pos->num_rows() > 0) {
             cudf::table_view yo_only({yo->view()});
             auto miss_y = roll_one_col(cudf::gather(yo_only, miss_pos->view().column(0),

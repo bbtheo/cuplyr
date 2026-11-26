@@ -8,7 +8,7 @@
 // list [v, v + 1]; a STRUCT has one INT32 field. "DICTIONARY32_INT32" is a
 // dictionary with INT32 keys. Not used by the package itself.
 
-#include <rmm/cuda_stream_view.hpp>
+#include <cudf/utilities/default_stream.hpp>
 #include "gpu_table.hpp"
 
 #include <cudf/column/column.hpp>
@@ -74,7 +74,7 @@ Parsed parse_values(Rcpp::CharacterVector values) {
 
 rmm::device_buffer null_mask_of(const Parsed& p) {
     if (p.null_count == 0) return rmm::device_buffer{};
-    return rmm::device_buffer(p.validity.data(), p.validity.size(), rmm::cuda_stream_view(),
+    return rmm::device_buffer(p.validity.data(), p.validity.size(), cudf::get_default_stream(),
                               rmm::mr::get_current_device_resource_ref());
 }
 
@@ -84,7 +84,7 @@ std::unique_ptr<cudf::column> fixed_column(cudf::data_type type, const Parsed& p
     std::vector<T> host(n);
     for (cudf::size_type i = 0; i < n; ++i) host[i] = static_cast<T>(p.vals[i]);
     rmm::device_buffer data = n == 0 ? rmm::device_buffer{}
-                                     : rmm::device_buffer(host.data(), n * sizeof(T), rmm::cuda_stream_view(),
+                                     : rmm::device_buffer(host.data(), n * sizeof(T), cudf::get_default_stream(),
                                                           rmm::mr::get_current_device_resource_ref());
     return std::make_unique<cudf::column>(type, n, std::move(data), null_mask_of(p), p.null_count);
 }

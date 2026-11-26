@@ -1,5 +1,5 @@
 // src/transfer_io.cpp
-#include <rmm/cuda_stream_view.hpp>
+#include <cudf/utilities/default_stream.hpp>
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
 #include "r_strings.hpp"
@@ -39,7 +39,7 @@ std::unique_ptr<column> numeric_to_gpu(NumericVector x) {
 
     // Allocate device memory
     rmm::device_buffer data(n * sizeof(double),
-                            rmm::cuda_stream_view(),
+                            cudf::get_default_stream(),
                             rmm::mr::get_current_device_resource_ref());
 
     // Copy from host to device
@@ -64,7 +64,7 @@ std::unique_ptr<column> numeric_to_gpu(NumericVector x) {
 
     if (null_count > 0) {
         null_mask = rmm::device_buffer(validity.data(), validity.size(),
-                                       rmm::cuda_stream_view(),
+                                       cudf::get_default_stream(),
                                        rmm::mr::get_current_device_resource_ref());
     }
 
@@ -86,7 +86,7 @@ std::unique_ptr<column> int64_to_gpu(SEXP x) {
     const int64_t* src = reinterpret_cast<const int64_t*>(REAL(x));
 
     rmm::device_buffer data(n * sizeof(int64_t),
-                            rmm::cuda_stream_view(),
+                            cudf::get_default_stream(),
                             rmm::mr::get_current_device_resource_ref());
     if (n > 0) {
         check_cuda(cudaMemcpy(data.data(), src, n * sizeof(int64_t), cudaMemcpyHostToDevice),
@@ -104,7 +104,7 @@ std::unique_ptr<column> int64_to_gpu(SEXP x) {
     }
     if (null_count > 0) {
         null_mask = rmm::device_buffer(validity.data(), validity.size(),
-                                       rmm::cuda_stream_view(),
+                                       cudf::get_default_stream(),
                                        rmm::mr::get_current_device_resource_ref());
     }
 
@@ -117,7 +117,7 @@ std::unique_ptr<column> integer_to_gpu(IntegerVector x) {
     size_type n = x.size();
 
     rmm::device_buffer data(n * sizeof(int32_t),
-                            rmm::cuda_stream_view(),
+                            cudf::get_default_stream(),
                             rmm::mr::get_current_device_resource_ref());
 
     if (n > 0) {
@@ -139,7 +139,7 @@ std::unique_ptr<column> integer_to_gpu(IntegerVector x) {
 
     if (null_count > 0) {
         null_mask = rmm::device_buffer(validity.data(), validity.size(),
-                                       rmm::cuda_stream_view(),
+                                       cudf::get_default_stream(),
                                        rmm::mr::get_current_device_resource_ref());
     }
 
@@ -165,7 +165,7 @@ static std::unique_ptr<column> make_offsets_column(const std::vector<std::string
         offsets.push_back(acc);
     }
     rmm::device_buffer buf(offsets.data(), offsets.size() * sizeof(OffT),
-                           rmm::cuda_stream_view(),
+                           cudf::get_default_stream(),
                            rmm::mr::get_current_device_resource_ref());
     return std::make_unique<column>(data_type{id}, static_cast<size_type>(offsets.size()),
                                     std::move(buf), rmm::device_buffer{}, 0);
@@ -209,7 +209,7 @@ std::unique_ptr<column> character_to_gpu(CharacterVector x, const char* col_name
 
     // Copy data to device
     rmm::device_buffer data(concatenated.size(),
-                            rmm::cuda_stream_view(),
+                            cudf::get_default_stream(),
                             rmm::mr::get_current_device_resource_ref());
     if (!concatenated.empty()) {
         check_cuda(cudaMemcpy(data.data(), concatenated.data(), concatenated.size(), cudaMemcpyHostToDevice),
@@ -234,7 +234,7 @@ std::unique_ptr<column> character_to_gpu(CharacterVector x, const char* col_name
 
     if (null_count > 0) {
         null_mask = rmm::device_buffer(validity.data(), validity.size(),
-                                       rmm::cuda_stream_view(),
+                                       cudf::get_default_stream(),
                                        rmm::mr::get_current_device_resource_ref());
     }
 
@@ -257,7 +257,7 @@ std::unique_ptr<column> logical_to_gpu(LogicalVector x) {
     size_type n = x.size();
 
     rmm::device_buffer data(n * sizeof(int8_t),
-                            rmm::cuda_stream_view(),
+                            cudf::get_default_stream(),
                             rmm::mr::get_current_device_resource_ref());
 
     std::vector<int8_t> bool_data(n);
@@ -282,7 +282,7 @@ std::unique_ptr<column> logical_to_gpu(LogicalVector x) {
     rmm::device_buffer null_mask;
     if (null_count > 0) {
         null_mask = rmm::device_buffer(validity.data(), validity.size(),
-                                       rmm::cuda_stream_view(),
+                                       cudf::get_default_stream(),
                                        rmm::mr::get_current_device_resource_ref());
     }
 
@@ -305,7 +305,7 @@ std::unique_ptr<column> date_to_gpu(NumericVector x, TimestampUpload& up) {
     size_type n = x.size();
 
     rmm::device_buffer data(n * sizeof(int32_t),
-                            rmm::cuda_stream_view(),
+                            cudf::get_default_stream(),
                             rmm::mr::get_current_device_resource_ref());
 
     std::vector<int32_t> days(n);
@@ -345,7 +345,7 @@ std::unique_ptr<column> date_to_gpu(NumericVector x, TimestampUpload& up) {
     rmm::device_buffer null_mask;
     if (null_count > 0) {
         null_mask = rmm::device_buffer(validity.data(), validity.size(),
-                                       rmm::cuda_stream_view(),
+                                       cudf::get_default_stream(),
                                        rmm::mr::get_current_device_resource_ref());
     }
 
@@ -364,7 +364,7 @@ std::unique_ptr<column> posixct_to_gpu(NumericVector x, TimestampUpload& up) {
     size_type n = x.size();
 
     rmm::device_buffer data(n * sizeof(int64_t),
-                            rmm::cuda_stream_view(),
+                            cudf::get_default_stream(),
                             rmm::mr::get_current_device_resource_ref());
 
     std::vector<int64_t> micros(n);
@@ -393,7 +393,7 @@ std::unique_ptr<column> posixct_to_gpu(NumericVector x, TimestampUpload& up) {
     rmm::device_buffer null_mask;
     if (null_count > 0) {
         null_mask = rmm::device_buffer(validity.data(), validity.size(),
-                                       rmm::cuda_stream_view(),
+                                       cudf::get_default_stream(),
                                        rmm::mr::get_current_device_resource_ref());
     }
 

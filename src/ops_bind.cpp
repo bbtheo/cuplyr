@@ -1,6 +1,6 @@
 // src/ops_bind.cpp
 // GPU bind_rows and bind_cols implementations using cuDF
-#include <rmm/cuda_stream_view.hpp>
+#include <cudf/utilities/default_stream.hpp>
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
 #include "r_to_column.hpp"
@@ -146,7 +146,7 @@ SEXP gpu_make_null_column(int nrows, std::string type_str) {
         // Create offsets: n+1 zeros (each string has zero length)
         std::vector<int32_t> offsets(n + 1, 0);
         rmm::device_buffer offsets_buf(offsets.data(), offsets.size() * sizeof(int32_t),
-                                       rmm::cuda_stream_view(),
+                                       cudf::get_default_stream(),
                                        rmm::mr::get_current_device_resource_ref());
 
         auto offsets_col = std::make_unique<cudf::column>(
@@ -158,13 +158,13 @@ SEXP gpu_make_null_column(int nrows, std::string type_str) {
         );
 
         // Empty char data
-        rmm::device_buffer char_data(0, rmm::cuda_stream_view(),
+        rmm::device_buffer char_data(0, cudf::get_default_stream(),
                                      rmm::mr::get_current_device_resource_ref());
 
         // Create null mask - all nulls
         std::vector<uint8_t> validity(cudf::bitmask_allocation_size_bytes(n), 0x00);
         rmm::device_buffer null_mask(validity.data(), validity.size(),
-                                     rmm::cuda_stream_view(),
+                                     cudf::get_default_stream(),
                                      rmm::mr::get_current_device_resource_ref());
 
         std::vector<std::unique_ptr<cudf::column>> children;

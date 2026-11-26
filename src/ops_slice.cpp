@@ -52,7 +52,8 @@
 //   "topk" attribute: the route shows as a slice node of mode "rank_grouped" in
 //   the plan. See the comment above it for the algorithm.
 
-#include <rmm/cuda_stream_view.hpp>
+#include "cuplyr_compat.hpp"
+#include <cudf/utilities/default_stream.hpp>
 #include "gpu_table.hpp"
 #include "cuda_utils.hpp"
 #include "ops_common.hpp"
@@ -321,7 +322,7 @@ bool topk_key_type(cudf::type_id id) {
 // other 63 bits reverses their order. -0 lands below +0 here, which is why the
 // cut value is compared in the original domain.
 std::unique_ptr<cudf::column> sortable_int64(cudf::column_view key,
-                                             rmm::cuda_stream_view stream,
+                                             cuda::stream_ref stream,
                                              rmm::device_async_resource_ref mr) {
     std::unique_ptr<cudf::column> wide;
     if (key.type().id() == cudf::type_id::FLOAT32) {
@@ -348,7 +349,7 @@ std::unique_ptr<cudf::column> sortable_int64(cudf::column_view key,
 // survivors, not the table.
 std::unique_ptr<cudf::column> topk_positions(cudf::column_view key, cudf::size_type size,
                                              bool descending, bool with_ties,
-                                             rmm::cuda_stream_view stream,
+                                             cuda::stream_ref stream,
                                              rmm::device_async_resource_ref mr) {
     const cudf::order col_order = descending ? cudf::order::DESCENDING : cudf::order::ASCENDING;
     const bool is_float = key.type().id() == cudf::type_id::FLOAT64 ||
@@ -391,7 +392,7 @@ std::unique_ptr<cudf::column> topk_positions(cudf::column_view key, cudf::size_t
     std::unique_ptr<cudf::column> seq = cudf::sequence(
         key.size(), cudf::numeric_scalar<int32_t>(0, true), cudf::numeric_scalar<int32_t>(1, true),
         stream, mr);
-    std::unique_ptr<cudf::table> survivors = cudf::apply_boolean_mask(
+    std::unique_ptr<cudf::table> survivors = cuplyr::apply_retention_mask(
         cudf::table_view({seq->view(), key}), within->view(), stream, mr);
     seq.reset();
     within.reset();
@@ -443,10 +444,9 @@ SEXP gpu_slice_rank(SEXP xptr, int order_col_idx, bool descending, double amount
     std::unique_ptr<cudf::column> nan_nulled;
     if (order_col.type().id() == cudf::type_id::FLOAT64 ||
         order_col.type().id() == cudf::type_id::FLOAT32) {
-        auto mask = cudf::nans_to_nulls(order_col);
-        if (mask.second > order_col.null_count()) {
-            nan_nulled = std::make_unique<cudf::column>(order_col);
-            nan_nulled->set_null_mask(std::move(*mask.first), mask.second);
+        auto nulled = cuplyr::nan_to_null_column(order_col);
+        if (nulled->null_count() > order_col.null_count()) {
+            nan_nulled = std::move(nulled);
             order_col = nan_nulled->view();
         }
     }
@@ -506,7 +506,7 @@ SEXP gpu_slice_rank(SEXP xptr, int order_col_idx, bool descending, double amount
                 cudf::table_view({order_col}), first->view(),
                 cudf::out_of_bounds_policy::DONT_CHECK, stream, mr);
             std::unique_ptr<cudf::column> present = cudf::is_valid(keys->view().column(0), stream, mr);
-            std::unique_ptr<cudf::table> kept = cudf::apply_boolean_mask(
+            std::unique_ptr<cudf::table> kept = cuplyr::apply_retention_mask(
                 cudf::table_view({first->view()}), present->view(), stream, mr);
             first = std::move(kept->release().front());
         }
@@ -545,7 +545,7 @@ SEXP gpu_slice_rank(SEXP xptr, int order_col_idx, bool descending, double amount
         cudf::table_view({keep_mask->view()}), sort_indices->view(),
         cudf::out_of_bounds_policy::DONT_CHECK, stream, mr);
 
-    std::unique_ptr<cudf::table> result = cudf::apply_boolean_mask(
+    std::unique_ptr<cudf::table> result = cuplyr::apply_retention_mask(
         sorted_table->view(), sorted_mask_tbl->view().column(0), stream, mr);
 
     auto out = make_gpu_table_xptr(std::move(result));
@@ -577,13 +577,13 @@ using ColumnPtr = std::unique_ptr<cudf::column>;
 
 // rows of `cols` picked by `perm` (DONT_CHECK: perm is a sort result)
 std::unique_ptr<cudf::table> gather_rows(const cudf::table_view& cols, cudf::column_view perm,
-                                         rmm::cuda_stream_view stream,
+                                         cuda::stream_ref stream,
                                          rmm::device_async_resource_ref mr) {
     return cudf::gather(cols, perm, cudf::out_of_bounds_policy::DONT_CHECK, stream, mr);
 }
 
 // The composed permutation: element i is inner[outer[i]]
-ColumnPtr compose(cudf::column_view inner, cudf::column_view outer, rmm::cuda_stream_view stream,
+ColumnPtr compose(cudf::column_view inner, cudf::column_view outer, cuda::stream_ref stream,
                   rmm::device_async_resource_ref mr) {
     auto t = gather_rows(cudf::table_view({inner}), outer, stream, mr);
     return std::move(t->release().front());
@@ -593,7 +593,7 @@ ColumnPtr compose(cudf::column_view inner, cudf::column_view outer, rmm::cuda_st
 // no nulls and -0 equal to 0 (sort passes need a dense, comparable column).
 // Missing rows (null or NaN-nulled) take 0; they are put last by their own pass.
 // New columns are owned by `keep`.
-cudf::column_view dense_sort_key(cudf::column_view key, rmm::cuda_stream_view stream,
+cudf::column_view dense_sort_key(cudf::column_view key, cuda::stream_ref stream,
                                  rmm::device_async_resource_ref mr, std::vector<ColumnPtr>& keep) {
     if (key.type().id() == cudf::type_id::FLOAT32) {
         keep.push_back(cudf::cast(key, cudf::data_type(cudf::type_id::FLOAT64), stream, mr));
@@ -627,7 +627,7 @@ cudf::column_view dense_sort_key(cudf::column_view key, rmm::cuda_stream_view st
 }
 
 // 0, 1, ..., n-1 as INT32
-ColumnPtr iota(cudf::size_type n, rmm::cuda_stream_view stream, rmm::device_async_resource_ref mr) {
+ColumnPtr iota(cudf::size_type n, cuda::stream_ref stream, rmm::device_async_resource_ref mr) {
     return cudf::sequence(n, cudf::numeric_scalar<int32_t>(0, true, stream, mr),
                           cudf::numeric_scalar<int32_t>(1, true, stream, mr), stream, mr);
 }
@@ -859,7 +859,7 @@ SEXP gpu_slice_rank_grouped(SEXP xptr, IntegerVector group_idx, int order_col_id
     std::vector<cudf::column_view> carried = {order->view()};
     if (by_first) carried.push_back(group_first->view());
     std::unique_ptr<cudf::table> kept =
-        cudf::apply_boolean_mask(cudf::table_view(carried), keep->view(), stream, mr);
+        cuplyr::apply_retention_mask(cudf::table_view(carried), keep->view(), stream, mr);
     std::vector<ColumnPtr> kept_cols = kept->release();
     ColumnPtr positions = std::move(kept_cols[0]);
     if (by_first && positions->size() > 1) {
