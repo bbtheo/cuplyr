@@ -70,7 +70,10 @@ test_that("a double column read as NaN-is-missing keeps nulls null and turns NaN
   }
 })
 
-test_that("a sliced double column (a view with an offset) is read the same way", {
+# slice_head()/slice_tail() copy the rows they keep into a new table, so this
+# reads columns that start at row 0; no verb hands nan_null_mask() a column view
+# with an offset.
+test_that("a double column cut by slice_head()/slice_tail() is read the same way", {
   skip_if_no_gpu()
   for (nm in c("nan", "na", "both", "neither")) {
     df <- n166_df()[[nm]]

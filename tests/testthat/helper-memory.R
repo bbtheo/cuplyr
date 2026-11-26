@@ -163,8 +163,14 @@ child_defer_closures <- function(x) {
   if (is.function(x)) {
     if (is.primitive(x) || !child_chain_has_namespace(x)) return(x)
     payload <- serialize(x, NULL)
-    stub <- function(...) unserialize(payload)(...)
-    environment(stub) <- list2env(list(payload = payload), parent = globalenv())
+    stub <- function(...) {
+      if (is.null(fn)) {
+        fn <<- unserialize(payload)
+        payload <<- NULL
+      }
+      fn(...)
+    }
+    environment(stub) <- list2env(list(payload = payload, fn = NULL), parent = globalenv())
     return(stub)
   }
   if (is.list(x) && !is.object(x)) {

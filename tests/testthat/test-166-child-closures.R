@@ -76,7 +76,11 @@ test_that("a deferred function behaves as the original after a round trip", {
     list(fn = eval(quote(function(x, ...) x + offset + sum(...)), env), n = 2)
   })
   back <- unserialize(serialize(sent$args, NULL))
+  expect_true(is.raw(environment(back$fn)$payload))
   expect_identical(back$fn(1, 2, 3), 16)
+  # The bytes are read on the first call and the function is kept.
+  expect_null(environment(back$fn)$payload)
+  expect_true(is.function(environment(back$fn)$fn))
   expect_identical(do.call(back$fn, list(1, 2, 3)), 16)
   expect_identical(back$n, 2)
 })
