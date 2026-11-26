@@ -78,6 +78,11 @@ rsync -a --delete \
   --exclude 'scratchpad' \
   "${REPO_ROOT}/" "${STAGE_PKG_DIR}/"
 
+# A symlink into an excluded directory (AGENTS.md -> .claude/CLAUDE.md) dangles
+# in the staged copy, and R CMD build's copy step fails on it before it applies
+# .Rbuildignore. Drop dangling links; none of them can be part of the package.
+find "${STAGE_PKG_DIR}" -xtype l -delete
+
 (
   cd "${STAGE_ROOT}"
   R CMD build --no-build-vignettes --no-manual "${REPO_BASENAME}"
