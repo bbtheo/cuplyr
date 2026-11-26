@@ -1376,7 +1376,9 @@ with NaN as null, via `nan_nulled_copy()` (`src/ops_common.hpp`) and
 `eval_ctx::nan_as_null()` (`src/expr_eval.hpp`, cached per ctx index, a no-op
 when the column holds no NaN so the AST kernel stays non-nullable): `is.na()`
 and the six comparisons (`build_ast()`; a NaN literal there is a null scalar),
-every `coalesce()` argument, `arrange()` keys, `cummax()`/`cummin()` input,
+every `coalesce()` argument, `arrange()` keys (descending or holding nulls; an
+ascending null-free key relies on libcudf sorting NaN last and tying NaN with
+NaN, pinned by `test-166-arrange-nan-ascending.R`), `cummax()`/`cummin()` input,
 equi-join keys under `na_matches = "never"`. Don't add an in-AST NaN guard:
 it forces the nullable kernel (+50-90% on comparisons). `is.nan()` is an
 `apply_handler()` op (valid and NaN).

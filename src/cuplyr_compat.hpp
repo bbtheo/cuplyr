@@ -104,9 +104,9 @@ inline std::unique_ptr<cudf::table> apply_retention_mask(
 // can be NaN (R's NA_real_ payload), so the flags are read under `col`'s own
 // null mask: through a view when `col` starts at row 0 (bools_to_mask() then
 // ANDs it in, with no bitmask_and() pass), bitmask_and() otherwise. Against
-// nans_to_nulls()'s single pass this costs one is_not_nan() pass; measured at
-// 1e3-1e6 rows, column_nans_to_nulls() is no faster at any size (its copy
-// costs about what that pass does).
+// nans_to_nulls()'s single pass this costs one is_not_nan() pass (plus the
+// bitmask_and() pass at an offset); measured at 1e3-1e6 rows,
+// column_nans_to_nulls() is about as fast but needs 8 B per row more memory.
 inline std::pair<std::unique_ptr<rmm::device_buffer>, cudf::size_type> nan_null_mask(
     cudf::column_view const& col) {
 #if CUPLYR_CUDF_NEW_API
