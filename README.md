@@ -141,7 +141,7 @@ To build from source (the install script), you need Linux x86_64 and:
 
 Volta (7.0) GPUs are not supported: that would need a source build against a CUDA 12 RAPIDS, which no install route provides.
 
-The install script clones cuplyr, finds libcudf through pixi, conda or your system (in that order), and builds the package. The pixi environment carries libcudf but no compiler, so `--method=pixi` needs a system CUDA toolkit (`nvcc` and the CUDA headers, found through `CUDA_HOME` or `/usr/local/cuda`); the conda method installs `cuda-nvcc` into its environment itself:
+The install script clones cuplyr, finds libcudf through pixi, conda or your system (in that order), and builds the package. The pixi environment carries libcudf and the CUDA 13 build tools (`nvcc` and the CUDA headers), so `--method=pixi` needs only a system C++ compiler; a system toolkit set through `CUDA_HOME` still wins. The conda method installs `cuda-nvcc` into its environment itself:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bbtheo/cuplyr/main/install.sh | bash

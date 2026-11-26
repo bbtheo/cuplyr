@@ -101,7 +101,8 @@ capability 7.5 or higher.
 
 * `install.sh` and `install_cuplyr()` build cuplyr against libcudf from pixi,
   conda or the system (`--method=` picks one). The conda route installs
-  RAPIDS 26.10 for CUDA 13 with the CUDA compiler.
+  RAPIDS 26.10 for CUDA 13 with the CUDA compiler, and the pixi environments
+  carry the CUDA 13 build tools, so neither needs a system toolkit (#157).
 
 * `./configure` stops with a clear message when libcudf is older than 26.02,
   and prefers the CUDA toolkit of a conda or pixi environment (#38, #94).
