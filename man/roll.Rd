@@ -51,11 +51,15 @@ incomplete positions stay \code{NA} even with \code{na.rm = TRUE}.
 
 Inside \code{mutate()}/\code{filter()} on a \code{tbl_gpu}, \code{roll_mean()}/\code{roll_sum()}/
 \code{roll_min()}/\code{roll_max()}/\code{roll_sd()} (not \code{roll_median()}, see below)
-run on the GPU, in time that does not depend on the window width, and per
-group on a grouped table. Called on an ordinary R vector, these functions
-run in R, with the same results. The GPU library has no rolling median,
-so a \code{mutate()} or \code{filter()} with \code{roll_median()} runs in dplyr on the
-CPU (see "Median engines").
+run on the GPU, and per group on a grouped table; on an integer or double
+column they take time that does not depend on the window width. Called on
+an ordinary R vector, these functions run in R and give the same values.
+The result types differ in one place: \code{roll_min()} and \code{roll_max()} of an
+integer, logical, \code{Date} or \code{POSIXct} column keep that type on the GPU,
+while the R functions return a double, and so do dplyr on a data frame and
+a \code{mutate()} on a \code{tbl_gpu} that runs on the CPU. The GPU library has no
+rolling median, so a \code{mutate()} or \code{filter()} with \code{roll_median()} runs in
+dplyr on the CPU (see "Median engines").
 \code{data.table::frollmean(x, n)} (and its siblings \code{frollsum()},
 \code{frollmin()}, \code{frollmax()} and \code{frollsd()}) run on the GPU inside
 \code{mutate()}/\code{filter()} too, as long as \code{align}, \code{fill}, \code{adaptive},

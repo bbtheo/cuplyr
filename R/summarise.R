@@ -79,8 +79,9 @@
 #'   \item `sd(x)` - Standard deviation
 #'   \item `var(x)` - Variance
 #'   \item `median(x)` - Median value, of a double, `Date` or `POSIXct`
-#'     column. The median of an integer or logical column is an integer or a
-#'     double depending on each group's count, and runs in dplyr on the CPU.
+#'     column. The median of an integer or logical column is of the column's
+#'     type or a double depending on each group's count, and runs in dplyr on
+#'     the CPU.
 #'   \item `quantile(x, probs)` - A single quantile, `probs` one number in
 #'     `[0, 1]`, with R's default `type = 7`. Other forms run in dplyr on the
 #'     CPU.
@@ -91,9 +92,17 @@
 #'   \item `any(x)` / `all(x)` - Logical reductions with R's three-valued
 #'     logic
 #' }
-#' Some argument types run in dplyr on the CPU whatever the function, for
-#' example a factor column under any aggregation but `n_distinct()`, and
-#' `sum()`, `mean()`, `min()` or `max()` of an integer64 column.
+#' On the GPU, `mean()` and `median()` of a `Date` are floored to whole days
+#' with a `cuplyr_warning_fractional_date` warning, where dplyr keeps the
+#' fractional `Date`.
+#'
+#' Some argument types run in dplyr on the CPU: a factor column under any
+#' aggregation but `n_distinct()`; an integer64 column under `sum()`,
+#' `mean()`, `min()`, `max()`, `sd()`, `var()`, `median()`, `quantile()`,
+#' `any()` and `all()` (its `n_distinct()`, `first()`, `last()` and `nth()`
+#' run on the GPU); and a `Date` or `POSIXct` column under any aggregation
+#' but `min()`, `max()`, `mean()`, `median()`, `first()`, `last()`, `nth()`
+#' and `n_distinct()`.
 #'
 #' ## Aggregation sub-expressions
 #' `column` is not limited to a bare column name: any expression that

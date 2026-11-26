@@ -207,7 +207,10 @@ rank; \code{percent_rank()} is \code{(min_rank(x) - 1) / (n_non_NA - 1)},
 \item \code{\link[=roll_mean]{roll_mean()}}, \code{roll_sum()}, \code{roll_min()}, \code{roll_max()} and
 \code{roll_sd()}, and data.table's \code{frollmean()}, \code{frollsum()},
 \code{frollmin()}, \code{frollmax()} and \code{frollsd()} with their default
-\code{align}, \code{fill} and \code{adaptive}; \code{roll_median()} runs on the CPU
+\code{align}, \code{fill}, \code{adaptive}, \code{partial} and \code{give.names};
+\code{roll_median()} runs on the CPU. \code{roll_min()}/\code{roll_max()} of an
+integer, logical, \code{Date} or \code{POSIXct} column keep its type, where
+dplyr returns a double
 \item \code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{n()}/\code{sd()}/\code{var()}/
 \code{median()}/\code{n_distinct()} -- one aggregate broadcast to every row
 of its group (or the whole table, ungrouped);
@@ -215,9 +218,12 @@ of its group (or the whole table, ungrouped);
 follow R's \code{na.rm = FALSE} default (any \code{NA} in the group
 makes that group's result \code{NA}); \code{n()} always counts every
 row regardless of \code{NA}s, and \code{n_distinct()} counts \code{NA} as a
-value. \code{median()} runs on the GPU for a double column (of an
-integer or logical one, on the CPU), and \code{min()}/\code{max()} of a
-string column under the collation rule of the comparisons above.
+value. \code{median()} runs on the GPU for a double, \code{Date} or
+\code{POSIXct} column (of an integer or logical one, on the CPU), and
+\code{min()}/\code{max()} of a string column under the collation rule of the
+comparisons above. On the GPU, \code{mean()} and \code{median()} of a \code{Date}
+are floored to whole days with a \code{cuplyr_warning_fractional_date}
+warning, where dplyr keeps the fractional \code{Date}.
 \code{sum()} of an integer or logical is an
 integer, as in dplyr. When a sum leaves the integer range dplyr
 returns a double (for the whole column, and for any expression

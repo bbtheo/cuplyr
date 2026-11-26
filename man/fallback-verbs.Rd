@@ -50,8 +50,8 @@ actual result, since some verbs change it), execution mode (lazy stays
 lazy), and factor levels.
 }
 \details{
-Verbs whose result isn't a data frame at all (e.g. \code{\link[dplyr:pull]{dplyr::pull()}}'s
-vector, \code{\link[dplyr:group_split]{dplyr::group_split()}}'s list), or whose result is a data frame
+Verbs whose result isn't a data frame at all (e.g. \code{\link[dplyr:group_map]{dplyr::group_map()}}'s
+list), or whose result is a data frame
 containing list-columns with no GPU representation (e.g.
 \code{\link[dplyr:nest_by]{dplyr::nest_by()}}, \code{\link[dplyr:group_nest]{dplyr::group_nest()}}, \code{\link[dplyr:nest_join]{dplyr::nest_join()}}'s nested
 match column), are returned as plain R objects rather than re-uploaded.

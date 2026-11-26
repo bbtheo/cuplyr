@@ -677,9 +677,9 @@ group_trim.tbl_gpu <- function(.tbl, .drop = dplyr::group_by_drop_default(.tbl))
 #' Compute the grouping-metadata tibble shared by the whole query family
 #'
 #' Materializes `.data` if needed, then either builds the trivial
-#' single-row ungrouped `.rows` tibble (verified empirically against dplyr
-#' 1.2.1: `group_data()` on an ungrouped table is one row, `.rows` holding
-#' every row 1:n in original order -- no GPU work needed at all), or calls
+#' single-row ungrouped `.rows` tibble (as in dplyr, `group_data()` on an
+#' ungrouped table is one row, `.rows` holding every row 1:n in original
+#' order -- no GPU work needed at all), or calls
 #' `gpu_group_info()` (src/ops_groupby.cpp) once and assembles the result:
 #' the small distinct-keys table is collected via the ordinary
 #' `collect.tbl_gpu()` path (reusing its factor-level/INT64 handling
@@ -969,14 +969,12 @@ expand_dropped_groups <- function(gd, group_names, factor_levels) {
 #' Grouping metadata: keys, row indices, per-row group id, sizes, and count
 #'
 #' `group_data()` (and the queries derived from it below) report the
-#' *grouping structure* dplyr's own `grouped_df` carries as an attribute --
-#' `cuplyr` computes it on demand via one native GPU groupby instead
-#' (`compute_group_data()`, above), since `tbl_gpu` has no such attribute to
-#' read. All are GPU-native.
+#' *grouping structure* that dplyr's `grouped_df` carries as an attribute.
+#' A `tbl_gpu` has no such attribute, so `cuplyr` computes it on demand with
+#' one GPU groupby. All of them run on the GPU.
 #'
 #' `group_data()` returns a tibble of the grouping columns (in ascending key
-#' order, `NA` sorted last -- cudf's own default sort-groupby order, which
-#' is exactly dplyr's own convention, verified empirically) plus a `.rows`
+#' order, `NA` sorted last, as in dplyr) plus a `.rows`
 #' list-of column of 1-based row indices; called on an ungrouped table it
 #' returns a single row whose `.rows` holds every row, in original order.
 #' `group_keys()` is `group_data()` minus `.rows`; `group_rows()` is just

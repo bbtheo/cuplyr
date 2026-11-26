@@ -32,7 +32,7 @@ returned unchanged, never re-uploaded -- for a verb that returns
 metadata \emph{about} the grouping/data rather than a transformed dataset,
 even when that metadata happens to be a small data frame (dplyr's own
 grouping-metadata queries, e.g. \code{group_data()}/\code{group_keys()}, are
-GPU-native and don't use it, see R/group-by.R; the parameter is for any
+GPU-native and don't use it; the parameter is for any
 fallback verb with the same "always a plain R object" shape).}
 
 \item{detail}{Older spelling of \code{reason}.}
@@ -55,7 +55,7 @@ to the notice. It must not have pending operations (compute it first).}
 Either a new \code{tbl_gpu} (grouping, execution mode, and factor
 levels restored/round-tripped), or \code{expr_fn}'s raw return value
 unchanged when: \code{as_is = TRUE}; the result isn't a data frame at all
-(e.g. \code{pull()}'s vector, \code{group_split()}'s list); or the result is a
+(e.g. \code{group_map()}'s list); or the result is a
 data frame that contains list-columns (e.g. \code{nest_by()}/\code{group_nest()}/
 \code{nest_join()}'s nested-tibble columns), which have no GPU representation.
 

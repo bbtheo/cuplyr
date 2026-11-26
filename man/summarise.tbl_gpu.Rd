@@ -96,8 +96,9 @@ collation, so under any other collation they run in dplyr on the CPU.
 \item \code{sd(x)} - Standard deviation
 \item \code{var(x)} - Variance
 \item \code{median(x)} - Median value, of a double, \code{Date} or \code{POSIXct}
-column. The median of an integer or logical column is an integer or a
-double depending on each group's count, and runs in dplyr on the CPU.
+column. The median of an integer or logical column is of the column's
+type or a double depending on each group's count, and runs in dplyr on
+the CPU.
 \item \code{quantile(x, probs)} - A single quantile, \code{probs} one number in
 \verb{[0, 1]}, with R's default \code{type = 7}. Other forms run in dplyr on the
 CPU.
@@ -108,9 +109,17 @@ in the group's current row order
 \item \code{any(x)} / \code{all(x)} - Logical reductions with R's three-valued
 logic
 }
-Some argument types run in dplyr on the CPU whatever the function, for
-example a factor column under any aggregation but \code{n_distinct()}, and
-\code{sum()}, \code{mean()}, \code{min()} or \code{max()} of an integer64 column.
+On the GPU, \code{mean()} and \code{median()} of a \code{Date} are floored to whole days
+with a \code{cuplyr_warning_fractional_date} warning, where dplyr keeps the
+fractional \code{Date}.
+
+Some argument types run in dplyr on the CPU: a factor column under any
+aggregation but \code{n_distinct()}; an integer64 column under \code{sum()},
+\code{mean()}, \code{min()}, \code{max()}, \code{sd()}, \code{var()}, \code{median()}, \code{quantile()},
+\code{any()} and \code{all()} (its \code{n_distinct()}, \code{first()}, \code{last()} and \code{nth()}
+run on the GPU); and a \code{Date} or \code{POSIXct} column under any aggregation
+but \code{min()}, \code{max()}, \code{mean()}, \code{median()}, \code{first()}, \code{last()}, \code{nth()}
+and \code{n_distinct()}.
 }
 
 \subsection{Aggregation sub-expressions}{

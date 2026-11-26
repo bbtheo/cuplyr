@@ -48,12 +48,12 @@
 #'   metadata *about* the grouping/data rather than a transformed dataset,
 #'   even when that metadata happens to be a small data frame (dplyr's own
 #'   grouping-metadata queries, e.g. `group_data()`/`group_keys()`, are
-#'   GPU-native and don't use it, see R/group-by.R; the parameter is for any
+#'   GPU-native and don't use it; the parameter is for any
 #'   fallback verb with the same "always a plain R object" shape).
 #' @return Either a new `tbl_gpu` (grouping, execution mode, and factor
 #'   levels restored/round-tripped), or `expr_fn`'s raw return value
 #'   unchanged when: `as_is = TRUE`; the result isn't a data frame at all
-#'   (e.g. `pull()`'s vector, `group_split()`'s list); or the result is a
+#'   (e.g. `group_map()`'s list); or the result is a
 #'   data frame that contains list-columns (e.g. `nest_by()`/`group_nest()`/
 #'   `nest_join()`'s nested-tibble columns), which have no GPU representation.
 #'
@@ -519,8 +519,8 @@ collect_other_side <- function(y) {
 #' actual result, since some verbs change it), execution mode (lazy stays
 #' lazy), and factor levels.
 #'
-#' Verbs whose result isn't a data frame at all (e.g. [dplyr::pull()]'s
-#' vector, [dplyr::group_split()]'s list), or whose result is a data frame
+#' Verbs whose result isn't a data frame at all (e.g. [dplyr::group_map()]'s
+#' list), or whose result is a data frame
 #' containing list-columns with no GPU representation (e.g.
 #' [dplyr::nest_by()], [dplyr::group_nest()], [dplyr::nest_join()]'s nested
 #' match column), are returned as plain R objects rather than re-uploaded.

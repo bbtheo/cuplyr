@@ -53,11 +53,15 @@
 #'
 #' Inside `mutate()`/`filter()` on a `tbl_gpu`, `roll_mean()`/`roll_sum()`/
 #' `roll_min()`/`roll_max()`/`roll_sd()` (not `roll_median()`, see below)
-#' run on the GPU, in time that does not depend on the window width, and per
-#' group on a grouped table. Called on an ordinary R vector, these functions
-#' run in R, with the same results. The GPU library has no rolling median,
-#' so a `mutate()` or `filter()` with `roll_median()` runs in dplyr on the
-#' CPU (see "Median engines").
+#' run on the GPU, and per group on a grouped table; on an integer or double
+#' column they take time that does not depend on the window width. Called on
+#' an ordinary R vector, these functions run in R and give the same values.
+#' The result types differ in one place: `roll_min()` and `roll_max()` of an
+#' integer, logical, `Date` or `POSIXct` column keep that type on the GPU,
+#' while the R functions return a double, and so do dplyr on a data frame and
+#' a `mutate()` on a `tbl_gpu` that runs on the CPU. The GPU library has no
+#' rolling median, so a `mutate()` or `filter()` with `roll_median()` runs in
+#' dplyr on the CPU (see "Median engines").
 #' `data.table::frollmean(x, n)` (and its siblings `frollsum()`,
 #' `frollmin()`, `frollmax()` and `frollsd()`) run on the GPU inside
 #' `mutate()`/`filter()` too, as long as `align`, `fill`, `adaptive`,

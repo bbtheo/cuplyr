@@ -16,9 +16,9 @@ whole table if ungrouped)
 }
 \description{
 Materializes \code{.data} if needed, then either builds the trivial
-single-row ungrouped \code{.rows} tibble (verified empirically against dplyr
-1.2.1: \code{group_data()} on an ungrouped table is one row, \code{.rows} holding
-every row 1:n in original order -- no GPU work needed at all), or calls
+single-row ungrouped \code{.rows} tibble (as in dplyr, \code{group_data()} on an
+ungrouped table is one row, \code{.rows} holding every row 1:n in original
+order -- no GPU work needed at all), or calls
 \code{gpu_group_info()} (src/ops_groupby.cpp) once and assembles the result:
 the small distinct-keys table is collected via the ordinary
 \code{collect.tbl_gpu()} path (reusing its factor-level/INT64 handling

@@ -185,7 +185,10 @@
 #'       \item [roll_mean()], `roll_sum()`, `roll_min()`, `roll_max()` and
 #'         `roll_sd()`, and data.table's `frollmean()`, `frollsum()`,
 #'         `frollmin()`, `frollmax()` and `frollsd()` with their default
-#'         `align`, `fill` and `adaptive`; `roll_median()` runs on the CPU
+#'         `align`, `fill`, `adaptive`, `partial` and `give.names`;
+#'         `roll_median()` runs on the CPU. `roll_min()`/`roll_max()` of an
+#'         integer, logical, `Date` or `POSIXct` column keep its type, where
+#'         dplyr returns a double
 #'       \item `mean()`/`sum()`/`min()`/`max()`/`n()`/`sd()`/`var()`/
 #'         `median()`/`n_distinct()` -- one aggregate broadcast to every row
 #'         of its group (or the whole table, ungrouped);
@@ -193,9 +196,12 @@
 #'         follow R's `na.rm = FALSE` default (any `NA` in the group
 #'         makes that group's result `NA`); `n()` always counts every
 #'         row regardless of `NA`s, and `n_distinct()` counts `NA` as a
-#'         value. `median()` runs on the GPU for a double column (of an
-#'         integer or logical one, on the CPU), and `min()`/`max()` of a
-#'         string column under the collation rule of the comparisons above.
+#'         value. `median()` runs on the GPU for a double, `Date` or
+#'         `POSIXct` column (of an integer or logical one, on the CPU), and
+#'         `min()`/`max()` of a string column under the collation rule of the
+#'         comparisons above. On the GPU, `mean()` and `median()` of a `Date`
+#'         are floored to whole days with a `cuplyr_warning_fractional_date`
+#'         warning, where dplyr keeps the fractional `Date`.
 #'         `sum()` of an integer or logical is an
 #'         integer, as in dplyr. When a sum leaves the integer range dplyr
 #'         returns a double (for the whole column, and for any expression
