@@ -466,11 +466,12 @@ record_checked_int <- function(record) {
 #'
 #' The mutate expression record. `ir` is the parsed expression IR (see
 #' `R/ir.R`); `input_cols`/`output_type` are cached from `ir_cols()`/
-#' `ir_infer_type()` since every optimizer pass
-#' (`fuse_mutates`/`try_fuse_mutate_pair`/
-#' `prune_dead_columns`/`push_down_projections`) reads only those two fields
-#' plus `output_col` -- none of them walk the IR tree themselves. Only
-#' `lower_mutate()` (via `gpu_mutate_expr()`) reads `ir` directly.
+#' `ir_infer_type()` so the optimizer passes (`fuse_mutates`/
+#' `try_fuse_mutate_pair`/`prune_dead_columns`/`push_down_projections`)
+#' mostly need only those two fields plus `output_col`. `lower_mutate()` (via
+#' `gpu_mutate_expr()`) reads `ir` for execution, and some optimizer checks
+#' look at it too (a vector literal, a checked integer node, a rowwise
+#' aggregate flag) to keep a dot or stop a rewrite.
 #'
 #' @param output_col Output column name
 #' @param ir An IR node (the parsed mutate expression)

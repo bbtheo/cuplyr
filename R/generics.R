@@ -280,10 +280,8 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
 
 #' Subset a GPU table with tibble's `[` semantics
 #'
-#' `tbl_gpu` is a plain classed `list`, not a `data.frame` subclass, so a
-#' `[` method is needed (base R's list `[` would leak the raw `ptr`).
-#' Follows the `[` method of tibble (`tibble:::[.tbl_df`), and for a grouped
-#' table dplyr's `[.grouped_df`:
+#' `x[i, j]` on a `tbl_gpu` follows tibble's `[` rules, and for a grouped
+#' table dplyr's rules for a grouped data frame:
 #' - `x[j]` selects columns; `x[i, j]`, `x[i, ]`, `x[, j]`, `x[]` are the
 #'   2-d forms. `j` is resolved first (names, positions, negative, logical)
 #'   with tibble's `vctrs_error_subscript_*` errors, messages and calls.
@@ -298,9 +296,10 @@ dplyr_reconstruct.tbl_gpu <- function(data, template) {
 #'   ungrouped. In the 1-d form `drop=` warns and is ignored (a grouped table
 #'   is still ungrouped, as in dplyr).
 #'
-#' Row selection is one GPU gather (an `ast_slice(mode = "bracket")` node,
-#' lazy or eager); column selection is the ordinary select node. Groups are
-#' the original group variables that survive, `.drop` is kept.
+#' Row selection runs on the GPU as one gather, and is added to the plan of a
+#' lazy table like any verb; column selection works as [select.tbl_gpu()]
+#' does. The result keeps the group variables that survive, and the table's
+#' `.drop` setting.
 #'
 #' Row subscripts are validated against the real row count at call time
 #' whenever that is known without executing anything (an eager table, or a

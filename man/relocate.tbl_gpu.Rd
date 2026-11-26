@@ -23,11 +23,9 @@ columns renamed).
 }
 \description{
 Moves columns of a GPU table to a new position, similar to
-\code{dplyr::relocate()}. The reorder itself runs via \code{\link[=ast_select]{ast_select()}} (schema
-\itemize{
-\item a \code{gpu_select()} gather, no new C++ binding needed); a rename
-(\code{relocate(df, a = x)}) is schema-only, like \code{\link[=rename.tbl_gpu]{rename.tbl_gpu()}}.
-}
+\code{dplyr::relocate()}. The reorder runs on the GPU as a column selection,
+like \code{\link[=select.tbl_gpu]{select.tbl_gpu()}}; a rename (\code{relocate(df, a = x)}) only changes the
+column names, like \code{\link[=rename.tbl_gpu]{rename.tbl_gpu()}}.
 }
 \examples{
 library(dplyr)

@@ -24,22 +24,21 @@ never partially push GPU ops before discovering the need to fall back
 (never half-lower).
 }
 \details{
-Every window \code{fn} with a registry \code{window} entry is lowerable (\code{"shift"},
-\code{"rank"}, \code{"scan"}, and \code{"agg"} kinds all have C++ support in
-\code{gpu_window()}) -- this predicate only guards against
-an \code{fn} with NO registry entry at all, or a registry entry whose
-\code{window} field is \code{NULL} (not a window-class op), which should be
-unreachable in practice (nothing in \code{R/window.R}'s decomposition
-machinery can produce such a spec) but is checked defensively so a
-bug surfaces as a clear internal error instead of silently mis-executing.
+Every window \code{fn} whose registry \code{window} entry has kind \code{"shift"},
+\code{"rank"}, \code{"scan"} or \code{"agg"} is lowerable (all four have C++ support in
+\code{gpu_window()}), and so is every \code{"rolling"} \code{fn} except \code{"roll_median"}
+(below). Otherwise the predicate is \code{FALSE}: an \code{fn} with no registry
+entry at all, or a registry entry whose \code{window} field is \code{NULL} (not a
+window-class op), should be unreachable (nothing in \code{R/window.R}'s
+decomposition machinery produces such a spec) but is checked defensively
+so a bug surfaces as a clear internal error instead of silently
+mis-executing.
 
-The \code{"rolling"} kind is lowerable for every \code{fn} EXCEPT \code{"roll_median"}:
-libcudf's (checked on 26.10) \code{rolling_window()}/\code{grouped_rolling_window()}
-have no MEDIAN aggregation instantiation at all in this environment (verified via \verb{nm -DC libcudf.so}, see the file-level comment above
-\code{ir_parse_roll_call()}, R/ir.R) -- a genuine cudf capability gap, not a
-cuplyr bug, so \code{roll_median()}/\code{data.table::frollmedian()} mutate()
-calls route through \code{mutate_window_fallback()} exactly like the
-an unsupported-kind case below, needing \code{R/roll.R}'s real
-\code{roll_median()} R function to make that CPU re-run work.
+\code{"roll_median"} is not lowerable: libcudf's \code{rolling_window()}/
+\code{grouped_rolling_window()} have no MEDIAN aggregation (see the
+file-level comment above \code{ir_parse_roll_call()}, R/ir.R). So
+\code{roll_median()}/\code{data.table::frollmedian()} mutate() calls go through
+\code{mutate_window_fallback()}, the same whole-call CPU re-run as any other
+unlowerable spec, which calls \code{R/roll.R}'s \code{roll_median()} R function.
 }
 \keyword{internal}

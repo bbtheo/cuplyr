@@ -2,9 +2,9 @@
 #'
 #' `filter()` keeps the rows of a GPU table where every condition is `TRUE`, as
 #' `dplyr::filter()` does. The conditions listed under "Supported
-#' expressions" run on the GPU, with dplyr's rules for which rows are kept
-#' and for `NA` (see "NA semantics" below). Other conditions run in dplyr on
-#' the CPU.
+#' expressions" run on the GPU, within the limits stated there, with dplyr's
+#' rules for which rows are kept and for `NA` (see "NA semantics" below).
+#' Other conditions run in dplyr on the CPU.
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
 #' @param ... Logical expressions to filter by (see "Supported expressions"
@@ -33,7 +33,7 @@
 #' \itemize{
 #'   \item Comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=` -- against a
 #'     literal, another column, an R variable, or an arithmetic
-#'     expression (`(x - y) > 0`)
+#'     expression (`(x - y) > 0`); for strings, see the string item below
 #'   \item Logic: `&`, `|`, `!`, `xor()`, nested to any depth
 #'     (`x > 2 & (y < 5 | z == 1)`); `&&`/`||` are an error that points at
 #'     `&`/`|`
@@ -45,8 +45,13 @@
 #'   \item `between(x, lo, hi)` (dplyr's definition: `x >= lo & x <= hi`,
 #'     with its `NA` propagation), `near(x, y, tol = )`
 #'     (`abs(x - y) < tol`, as `dplyr::near()`)
-#'   \item String comparisons (`==`/`!=`/`<`/`<=`/`>`/`>=`), against
-#'     a literal or another string column
+#'   \item String comparisons, against a literal or another string column.
+#'     `==`, `!=`, `%in%` and `between()` always run on the GPU. `<`, `<=`,
+#'     `>` and `>=` compare strings in byte order on the GPU, while R uses
+#'     the session's collation, so they run on the GPU only when
+#'     `Sys.getlocale("LC_COLLATE")` is `"C"` or `"POSIX"`; under any other
+#'     collation (`"en_US.UTF-8"`, say) the call runs in dplyr on the CPU.
+#'     The same holds for `min()` and `max()` of a string column.
 #'   \item Column-vs-column comparisons for every operator above
 #'   \item Math on columns inside a predicate (`+ - * / %% %/% ^`, `sqrt`,
 #'     `log`, `abs`, etc. -- the same set `mutate()` supports)

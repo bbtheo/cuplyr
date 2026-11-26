@@ -131,11 +131,7 @@ have a genuine duplicate, for equality joins called directly; never for
 inequality/overlap joins or indirect calls, as in dplyr), \code{"one-to-one"}, \code{"one-to-many"},
 \code{"many-to-one"}, or \code{"many-to-many"} (silences the advisory warning).
 A violation raises dplyr's \verb{dplyr_error_join_relationship_*}
-condition, with its class vector and first-offending-row bullet.
-Known limitation: with the default \code{relationship}, a lazy pipeline whose
-\code{filter()} the optimizer pushes below the join may not emit the advisory
-many-to-many warning, or may report different row numbers in it (the
-rows returned are identical).}
+condition, with its class vector and first-offending-row bullet.}
 }
 \value{
 A \code{tbl_gpu} with dplyr's own row/column contract for the given
@@ -172,12 +168,15 @@ byte (C locale) order.
 
 \subsection{In dplyr on the CPU}{
 
-These run in dplyr and the result comes back to the GPU (with a notice
-under \code{options(cuplyr.fallback = "warn")}):
+These, among others, run in dplyr and the result comes back to the GPU
+(with a notice under \code{options(cuplyr.fallback = "warn")}):
 \itemize{
 \item Two \code{closest()} conditions, \code{closest()} next to another inequality, and
 rolling keys that are factors, logicals or a Date against a POSIXct.
 \item A non-equi condition comparing a string with a non-string column.
+\item Factor keys whose levels differ between \code{x} and \code{y}.
+\item A \code{Date} key joined to a \code{POSIXct} key in a zone other than UTC (dplyr
+compares the date as local midnight of that zone).
 \item \code{suffix = c("", ...)} when it would still produce a genuine duplicate
 output column name.
 \item \code{nest_join()} (not one of the four verbs documented here) always runs

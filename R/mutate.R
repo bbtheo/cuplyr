@@ -2,8 +2,8 @@
 #'
 #' `mutate()` adds new columns or changes existing ones, as `dplyr::mutate()`
 #' does. The expressions listed under "Supported expressions" are computed on
-#' the GPU. A call with any other expression runs in dplyr on the CPU, and its
-#' result comes back to the GPU.
+#' the GPU, within the limits stated there. A call with any other expression
+#' runs in dplyr on the CPU, and its result comes back to the GPU.
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
 #' @param ... Name-value pairs of expressions. The name gives the column name
@@ -65,7 +65,13 @@
 #'     (`mutate(y = 10 - x)`)
 #'   \item Comparisons and logic: `==`, `!=`, `<`, `<=`, `>`, `>=`, `&`,
 #'     `|`, `!`, `xor()` -- these produce a logical column, e.g.
-#'     `mutate(is_big = x > 100)`
+#'     `mutate(is_big = x > 100)`. Two strings compare with `==`, `!=`,
+#'     `%in%` and `between()` on the GPU whatever the session's collation.
+#'     `<`, `<=`, `>` and `>=` of strings compare bytes on the GPU, while R
+#'     uses the session's collation, so they run on the GPU only when
+#'     `Sys.getlocale("LC_COLLATE")` is `"C"` or `"POSIX"`, and in dplyr on
+#'     the CPU otherwise. A string compared with a number runs on the CPU
+#'     (R compares them as strings).
 #'   \item `is.na()`, `is.nan()`, `between(x, lo, hi)`, `near(x, y, tol = )`
 #'     (`abs(x - y) < tol`, as `dplyr::near()` defines it), `%in%`
 #'     (including a bare `NA` on the right-hand side, e.g. `x %in% NA`, as
@@ -74,9 +80,11 @@
 #'     `log2()`, `log10()`, `exp()`, `abs()`, `floor()`, `ceiling()`,
 #'     `sin()`, `cos()`, `tan()`, `round(x)`/`round(x, digits)` (banker's
 #'     rounding, as in R)
-#'   \item String functions, among them `paste()`, `paste0()`, `nchar()`,
-#'     `toupper()`, `tolower()`, `substr()`, `trimws()`, `startsWith()`,
-#'     `endsWith()`, and `grepl()`, `sub()` and `gsub()` with a constant
+#'   \item String functions, among them `nchar()`, `toupper()`,
+#'     `tolower()`, `substr()`, `trimws()`, `startsWith()`, `endsWith()`;
+#'     `paste()` and `paste0()` when every argument is a string (a number or
+#'     a logical argument runs on the CPU), with a constant `sep` and no
+#'     `collapse`; and `grepl()`, `sub()` and `gsub()` with a constant
 #'     pattern (`ignore.case`, `perl` and `useBytes` run on the CPU)
 #'   \item Dates and date-times: a `Date` plus or minus a whole number of
 #'     days, lubridate's `year()`, `month()`, `day()`, `hour()`, `minute()`,
@@ -178,12 +186,17 @@
 #'         `roll_sd()`, and data.table's `frollmean()`, `frollsum()`,
 #'         `frollmin()`, `frollmax()` and `frollsd()` with their default
 #'         `align`, `fill` and `adaptive`; `roll_median()` runs on the CPU
-#'       \item `mean()`/`sum()`/`min()`/`max()`/`n()`/`sd()`/`var()` --
-#'         one aggregate broadcast to every row of its group (or the whole
-#'         table, ungrouped); `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()`
+#'       \item `mean()`/`sum()`/`min()`/`max()`/`n()`/`sd()`/`var()`/
+#'         `median()`/`n_distinct()` -- one aggregate broadcast to every row
+#'         of its group (or the whole table, ungrouped);
+#'         `mean()`/`sum()`/`min()`/`max()`/`sd()`/`var()`/`median()`
 #'         follow R's `na.rm = FALSE` default (any `NA` in the group
 #'         makes that group's result `NA`); `n()` always counts every
-#'         row regardless of `NA`s. `sum()` of an integer or logical is an
+#'         row regardless of `NA`s, and `n_distinct()` counts `NA` as a
+#'         value. `median()` runs on the GPU for a double column (of an
+#'         integer or logical one, on the CPU), and `min()`/`max()` of a
+#'         string column under the collation rule of the comparisons above.
+#'         `sum()` of an integer or logical is an
 #'         integer, as in dplyr. When a sum leaves the integer range dplyr
 #'         returns a double (for the whole column, and for any expression
 #'         on it): the call is then rerun by dplyr on the CPU. A lazy table
@@ -276,9 +289,13 @@
 #' }
 #'
 #' ## Runs on the CPU
-#' Any expression outside the list above runs the whole `mutate()` call in
-#' dplyr on the CPU (set `options(cuplyr.fallback = "warn")` to be told when;
-#' see [cuplyr-fallback]). Among them:
+#' An expression that is not in the list above, or that uses a form the list
+#' sends to the CPU, runs the whole `mutate()` call in dplyr on the CPU (set
+#' `options(cuplyr.fallback = "warn")` to be told when; see
+#' [cuplyr-fallback]). So does an argument type for which the GPU would not
+#' give R's result, for example `cummax()` of a logical column, or `sum()`,
+#' `mean()`, `min()` or `max()` of an integer64 column. Among the other
+#' cases:
 #' \itemize{
 #'   \item `order_by()`/`with_order()` with a general expression as the
 #'     ordering argument (only a bare column, `desc(column)`, or `-column`

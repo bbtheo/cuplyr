@@ -4,9 +4,11 @@
 #' name, as `dplyr::arrange()` does. The sort runs on the GPU.
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
-#' @param ... Columns to sort by. A bare column, `desc(column)`, `-column` and
-#'   `pick()` of columns sort on the GPU. Any other expression, such as
-#'   `arrange(x + y)`, is evaluated by dplyr on the CPU. The first key is the
+#' @param ... Columns to sort by. A bare column, `desc(column)`, `pick()` of
+#'   columns, and `-column` of a numeric or logical column sort on the GPU.
+#'   Any other expression, such as `arrange(x + y)` or `-column` of a factor,
+#'   string or date column (where R's `-` warns or errors), is evaluated by
+#'   dplyr on the CPU. The first key is the
 #'   primary sort key, the second breaks its ties, and so on.
 #' @param .by_group If `TRUE` and `.data` is grouped, sort by the grouping
 #'   columns first (ascending), then by `...`. Default is `FALSE`.

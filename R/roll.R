@@ -47,25 +47,22 @@
 #' `na.rm = TRUE`: a window is only ever `NA` because it doesn't yet have
 #'   `n` physical elements available (the leading `n - 1` positions,
 #'   always). Once a window has `n` elements, `NA`s within it are dropped
-#'   before computing (an all-`NA` window still yields `NA`). This
-#'   `na.rm = TRUE` behavior was verified empirically against
-#'   `data.table::frollmean(x, n, na.rm = TRUE)` (not assumed): the leading
-#'   incomplete positions stay `NA` even though na.rm is set.
+#'   before computing (an all-`NA` window still yields `NA`). This is what
+#'   `data.table::frollmean(x, n, na.rm = TRUE)` does: the leading
+#'   incomplete positions stay `NA` even with `na.rm = TRUE`.
 #'
 #' Inside `mutate()`/`filter()` on a `tbl_gpu`, `roll_mean()`/`roll_sum()`/
 #' `roll_min()`/`roll_max()`/`roll_sd()` (not `roll_median()`, see below)
-#' run GPU-natively, in time that does not depend on the window width
-#' (segmented scans; cudf's own rolling kernel is kept for
-#' narrow windows, where it is faster, and for min/max of timestamps and
-#' logicals) -- these R implementations are the CPU semantics reference and
-#' the engine for standalone use. libcudf (checked on 26.10 and 26.02) has
-#' no MEDIAN rolling aggregation, so `roll_median()` always runs on the CPU
-#' (see "Median engines").
-#' `data.table::frollmean(x, n)` (and its five siblings) work as
-#' equivalent GPU-native aliases inside `mutate()`/`filter()` too, as long
-#' as `align`/`fill`/`adaptive` are left at their defaults (`"right"`,
-#' `NA`, `FALSE`) -- any other value falls back / errors, matching this
-#' task's explicit "right-aligned only" scope.
+#' run on the GPU, in time that does not depend on the window width, and per
+#' group on a grouped table. Called on an ordinary R vector, these functions
+#' run in R, with the same results. The GPU library has no rolling median,
+#' so a `mutate()` or `filter()` with `roll_median()` runs in dplyr on the
+#' CPU (see "Median engines").
+#' `data.table::frollmean(x, n)` (and its siblings `frollsum()`,
+#' `frollmin()`, `frollmax()` and `frollsd()`) run on the GPU inside
+#' `mutate()`/`filter()` too, as long as `align`, `fill`, `adaptive`,
+#' `partial` and `give.names` keep their defaults (`"right"`, `NA`, `FALSE`,
+#' `FALSE`, `FALSE`); any other value runs in dplyr on the CPU.
 #'
 #' **Median engines.** By default `roll_median()` uses a built-in exact
 #' engine that returns exactly `stats::median()` of each window converted to
@@ -90,10 +87,13 @@
 #' and the exact engine is used; see [cuplyr-options]. `data.table::frollmedian()` written
 #' inside `mutate()` keeps data.table's own result.
 #'
-#' The internal option `cuplyr.roll_path` (else the environment variable
-#' `CUPLYR_ROLL_PATH`), one of `"auto"` (the default), `"scans"` or `"cudf"`,
-#' forces one of the two GPU paths. It exists for tests and benchmarks and
-#' changes speed, not results.
+#' The GPU computes these windows in one of two ways: with scans, whose time
+#' does not depend on the window width, or with a direct rolling kernel,
+#' which is faster on narrow windows (and also used for `roll_min()` and
+#' `roll_max()` of dates, date-times and logicals). The internal option
+#' `cuplyr.roll_path` (else the environment variable `CUPLYR_ROLL_PATH`), one
+#' of `"auto"` (the default), `"scans"` or `"cudf"`, forces one of them. It
+#' exists for tests and benchmarks and changes speed, not results.
 #'
 #' @param x A numeric vector.
 #' @param n A single positive whole number: the window width.

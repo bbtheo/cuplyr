@@ -4890,9 +4890,9 @@ ir_bind <- function(ir, schema, pos = NULL) {
 #' roxygen, R/join.R). `join_cond_ir_from_spec()` (R/join.R) uses that
 #' knowledge directly when building each condition's IR, tagging every
 #' `col` node with an explicit `side` (`0L` = left/x, `1L` = right/y) at
-#' construction time -- deliberately NOT the design doc's original
-#' "resolve left-first-then-right by lookup order" sketch, which silently
-#' breaks on a self-join. [ir_bind_join()] then resolves `$index` against
+#' construction time, rather than resolving a name left-first-then-right by
+#' lookup order, which silently breaks on a self-join. [ir_bind_join()]
+#' then resolves `$index` against
 #' the correct side's schema using this tag, never by cross-schema lookup.
 #' @param name Character scalar, the column name
 #' @param side `0L` (left/x) or `1L` (right/y)
@@ -4909,8 +4909,8 @@ ir_col_join <- function(name, side) {
 #'
 #' The join-condition analogue of [ir_bind()]. Every `col` node in a
 #' condition IR built by `join_cond_ir_from_spec()` (R/join.R) already
-#' carries an explicit `side` tag (see [ir_col_join()]'s docs for why this
-#' package deviates from the design doc's lookup-order sketch: a self-join
+#' carries an explicit `side` tag (see [ir_col_join()]'s docs for why sides
+#' are not resolved by lookup order: a self-join
 #' has identical left/right schemas, so name-based resolution against
 #' `left_schema` first would silently mis-bind a right-only column, or
 #' bind a same-named column to the wrong side entirely). This function
@@ -6984,8 +6984,8 @@ ir_parse_paste_call <- function(expr, env, schema, fn_name) {
 #' falls back (cuDF's `regex_flags` -- `strings/regex/flags.hpp` -- has no
 #' case-insensitive flag to map `ignore.case=TRUE` onto, and PCRE
 #' (`perl=TRUE`) is a materially different regex dialect from cuDF's own --
-#' cuDF-regex-vs-R divergence is scoped to simple ASCII patterns only, per
-#' the design doc). `fixed=TRUE` routes to a literal substring search
+#' only simple ASCII patterns are expected to match R's regex results).
+#' `fixed=TRUE` routes to a literal substring search
 #' (`contains()`, `strings/find.hpp`) instead of regex (`contains_re()`,
 #' `strings/contains.hpp`). The lowered node's 3rd argument is always a
 #' BOOL8 literal carrying `fixed`. Result is always non-NA: R's `grepl()`

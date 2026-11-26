@@ -15,14 +15,13 @@
 A \code{tbl_gpu}.
 }
 \description{
-Native: \code{\link[dplyr:group_trim]{dplyr::group_trim()}} on a grouped \code{tbl_gpu} finds the codes still
-used by each factor group column on the GPU (a distinct over that one
-column; only the at most \code{n_levels + 1} distinct codes reach R), keeps the
-used levels in their original order (an ordered factor stays ordered),
-remaps the codes with \code{gpu_remap_codes()} and regroups with
-\code{ungroup()} + \code{group_by(.drop = )}, which also drops any \code{fixed_keys} left
-by \code{.preserve = TRUE}. Pending ops are computed first (the new level set
-depends on the data). An ungrouped table is returned unchanged, without
-looking at \code{.drop}, like dplyr. Shapes outside the allowlist (duplicated
-names, a factor group column without known levels) use the CPU fallback.
+\code{\link[dplyr:group_trim]{dplyr::group_trim()}} on a grouped \code{tbl_gpu} runs on the GPU. For each
+factor group column it finds the levels still in use (only those distinct
+codes come back to R), keeps them in their original order (an ordered
+factor stays ordered), recodes the column on the GPU and regroups with
+\code{.drop}. Empty groups kept by \code{.preserve = TRUE} are dropped too. Pending
+operations of a lazy table run first, because the new levels depend on
+the data. An ungrouped table is returned unchanged, without looking at
+\code{.drop}, as in dplyr. A table with duplicated column names runs in dplyr
+on the CPU.
 }

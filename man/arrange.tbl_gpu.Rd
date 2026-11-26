@@ -9,9 +9,11 @@
 \arguments{
 \item{.data}{A \code{tbl_gpu} object created by \code{\link[=tbl_gpu]{tbl_gpu()}}.}
 
-\item{...}{Columns to sort by. A bare column, \code{desc(column)}, \code{-column} and
-\code{pick()} of columns sort on the GPU. Any other expression, such as
-\code{arrange(x + y)}, is evaluated by dplyr on the CPU. The first key is the
+\item{...}{Columns to sort by. A bare column, \code{desc(column)}, \code{pick()} of
+columns, and \code{-column} of a numeric or logical column sort on the GPU.
+Any other expression, such as \code{arrange(x + y)} or \code{-column} of a factor,
+string or date column (where R's \code{-} warns or errors), is evaluated by
+dplyr on the CPU. The first key is the
 primary sort key, the second breaks its ties, and so on.}
 
 \item{.by_group}{If \code{TRUE} and \code{.data} is grouped, sort by the grouping

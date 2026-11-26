@@ -23,10 +23,11 @@ integer node with record_checked_int()
 \description{
 The mutate expression record. \code{ir} is the parsed expression IR (see
 \code{R/ir.R}); \code{input_cols}/\code{output_type} are cached from \code{ir_cols()}/
-\code{ir_infer_type()} since every optimizer pass
-(\code{fuse_mutates}/\code{try_fuse_mutate_pair}/
-\code{prune_dead_columns}/\code{push_down_projections}) reads only those two fields
-plus \code{output_col} -- none of them walk the IR tree themselves. Only
-\code{lower_mutate()} (via \code{gpu_mutate_expr()}) reads \code{ir} directly.
+\code{ir_infer_type()} so the optimizer passes (\code{fuse_mutates}/
+\code{try_fuse_mutate_pair}/\code{prune_dead_columns}/\code{push_down_projections})
+mostly need only those two fields plus \code{output_col}. \code{lower_mutate()} (via
+\code{gpu_mutate_expr()}) reads \code{ir} for execution, and some optimizer checks
+look at it too (a vector literal, a checked integer node, a rowwise
+aggregate flag) to keep a dot or stop a rewrite.
 }
 \keyword{internal}

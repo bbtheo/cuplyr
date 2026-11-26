@@ -48,8 +48,8 @@ applicable}
 \item{default}{An IR literal node (the op's constant fill/default
 value), or \code{NULL} if not applicable/not supplied}
 
-\item{na_rm}{Logical scalar, the call's \verb{na_rm=} setting (\code{FALSE} unless
-the call sets it)}
+\item{na_rm}{Logical scalar, the call's \verb{na.rm =} argument (\verb{roll_*()},
+and \code{mean()}/\code{median()} of a date); \code{FALSE} unless the call sets it}
 
 \item{input_type}{GPU type string of an integer \code{sum()}'s argument
 (\code{"INT32"} or \code{"BOOL8"}), \code{NA_character_} for every other call; a lazy

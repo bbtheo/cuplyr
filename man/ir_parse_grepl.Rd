@@ -12,8 +12,8 @@ ir_parse_grepl(expr, env, schema)
 falls back (cuDF's \code{regex_flags} -- \code{strings/regex/flags.hpp} -- has no
 case-insensitive flag to map \code{ignore.case=TRUE} onto, and PCRE
 (\code{perl=TRUE}) is a materially different regex dialect from cuDF's own --
-cuDF-regex-vs-R divergence is scoped to simple ASCII patterns only, per
-the design doc). \code{fixed=TRUE} routes to a literal substring search
+only simple ASCII patterns are expected to match R's regex results).
+\code{fixed=TRUE} routes to a literal substring search
 (\code{contains()}, \code{strings/find.hpp}) instead of regex (\code{contains_re()},
 \code{strings/contains.hpp}). The lowered node's 3rd argument is always a
 BOOL8 literal carrying \code{fixed}. Result is always non-NA: R's \code{grepl()}

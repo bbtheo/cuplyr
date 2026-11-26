@@ -46,8 +46,8 @@ per \code{.keep}.
 \description{
 \code{mutate()} adds new columns or changes existing ones, as \code{dplyr::mutate()}
 does. The expressions listed under "Supported expressions" are computed on
-the GPU. A call with any other expression runs in dplyr on the CPU, and its
-result comes back to the GPU.
+the GPU, within the limits stated there. A call with any other expression
+runs in dplyr on the CPU, and its result comes back to the GPU.
 }
 \details{
 \subsection{\code{.keep} semantics}{
@@ -88,7 +88,13 @@ nested to any depth (\code{(x + y) * z - 1}), with a scalar on either side
 (\code{mutate(y = 10 - x)})
 \item Comparisons and logic: \code{==}, \code{!=}, \code{<}, \code{<=}, \code{>}, \code{>=}, \code{&},
 \code{|}, \code{!}, \code{xor()} -- these produce a logical column, e.g.
-\code{mutate(is_big = x > 100)}
+\code{mutate(is_big = x > 100)}. Two strings compare with \code{==}, \code{!=},
+\code{\%in\%} and \code{between()} on the GPU whatever the session's collation.
+\code{<}, \code{<=}, \code{>} and \code{>=} of strings compare bytes on the GPU, while R
+uses the session's collation, so they run on the GPU only when
+\code{Sys.getlocale("LC_COLLATE")} is \code{"C"} or \code{"POSIX"}, and in dplyr on
+the CPU otherwise. A string compared with a number runs on the CPU
+(R compares them as strings).
 \item \code{is.na()}, \code{is.nan()}, \code{between(x, lo, hi)}, \code{near(x, y, tol = )}
 (\code{abs(x - y) < tol}, as \code{dplyr::near()} defines it), \code{\%in\%}
 (including a bare \code{NA} on the right-hand side, e.g. \code{x \%in\% NA}, as
@@ -97,9 +103,11 @@ nested to any depth (\code{(x + y) * z - 1}), with a scalar on either side
 \code{log2()}, \code{log10()}, \code{exp()}, \code{abs()}, \code{floor()}, \code{ceiling()},
 \code{sin()}, \code{cos()}, \code{tan()}, \code{round(x)}/\code{round(x, digits)} (banker's
 rounding, as in R)
-\item String functions, among them \code{paste()}, \code{paste0()}, \code{nchar()},
-\code{toupper()}, \code{tolower()}, \code{substr()}, \code{trimws()}, \code{startsWith()},
-\code{endsWith()}, and \code{grepl()}, \code{sub()} and \code{gsub()} with a constant
+\item String functions, among them \code{nchar()}, \code{toupper()},
+\code{tolower()}, \code{substr()}, \code{trimws()}, \code{startsWith()}, \code{endsWith()};
+\code{paste()} and \code{paste0()} when every argument is a string (a number or
+a logical argument runs on the CPU), with a constant \code{sep} and no
+\code{collapse}; and \code{grepl()}, \code{sub()} and \code{gsub()} with a constant
 pattern (\code{ignore.case}, \code{perl} and \code{useBytes} run on the CPU)
 \item Dates and date-times: a \code{Date} plus or minus a whole number of
 days, lubridate's \code{year()}, \code{month()}, \code{day()}, \code{hour()}, \code{minute()},
@@ -200,12 +208,17 @@ rank; \code{percent_rank()} is \code{(min_rank(x) - 1) / (n_non_NA - 1)},
 \code{roll_sd()}, and data.table's \code{frollmean()}, \code{frollsum()},
 \code{frollmin()}, \code{frollmax()} and \code{frollsd()} with their default
 \code{align}, \code{fill} and \code{adaptive}; \code{roll_median()} runs on the CPU
-\item \code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{n()}/\code{sd()}/\code{var()} --
-one aggregate broadcast to every row of its group (or the whole
-table, ungrouped); \code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{sd()}/\code{var()}
+\item \code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{n()}/\code{sd()}/\code{var()}/
+\code{median()}/\code{n_distinct()} -- one aggregate broadcast to every row
+of its group (or the whole table, ungrouped);
+\code{mean()}/\code{sum()}/\code{min()}/\code{max()}/\code{sd()}/\code{var()}/\code{median()}
 follow R's \code{na.rm = FALSE} default (any \code{NA} in the group
 makes that group's result \code{NA}); \code{n()} always counts every
-row regardless of \code{NA}s. \code{sum()} of an integer or logical is an
+row regardless of \code{NA}s, and \code{n_distinct()} counts \code{NA} as a
+value. \code{median()} runs on the GPU for a double column (of an
+integer or logical one, on the CPU), and \code{min()}/\code{max()} of a
+string column under the collation rule of the comparisons above.
+\code{sum()} of an integer or logical is an
 integer, as in dplyr. When a sum leaves the integer range dplyr
 returns a double (for the whole column, and for any expression
 on it): the call is then rerun by dplyr on the CPU. A lazy table
@@ -304,9 +317,13 @@ always keeps its own type.
 
 \subsection{Runs on the CPU}{
 
-Any expression outside the list above runs the whole \code{mutate()} call in
-dplyr on the CPU (set \code{options(cuplyr.fallback = "warn")} to be told when;
-see \link{cuplyr-fallback}). Among them:
+An expression that is not in the list above, or that uses a form the list
+sends to the CPU, runs the whole \code{mutate()} call in dplyr on the CPU (set
+\code{options(cuplyr.fallback = "warn")} to be told when; see
+\link{cuplyr-fallback}). So does an argument type for which the GPU would not
+give R's result, for example \code{cummax()} of a logical column, or \code{sum()},
+\code{mean()}, \code{min()} or \code{max()} of an integer64 column. Among the other
+cases:
 \itemize{
 \item \code{order_by()}/\code{with_order()} with a general expression as the
 ordering argument (only a bare column, \code{desc(column)}, or \code{-column}

@@ -33,9 +33,9 @@ The GPU memory for the filtered result is newly allocated.
 \description{
 \code{filter()} keeps the rows of a GPU table where every condition is \code{TRUE}, as
 \code{dplyr::filter()} does. The conditions listed under "Supported
-expressions" run on the GPU, with dplyr's rules for which rows are kept
-and for \code{NA} (see "NA semantics" below). Other conditions run in dplyr on
-the CPU.
+expressions" run on the GPU, within the limits stated there, with dplyr's
+rules for which rows are kept and for \code{NA} (see "NA semantics" below).
+Other conditions run in dplyr on the CPU.
 }
 \details{
 \subsection{Supported expressions}{
@@ -46,7 +46,7 @@ and however deeply they nest. These run on the GPU:
 \itemize{
 \item Comparisons: \code{==}, \code{!=}, \code{<}, \code{<=}, \code{>}, \code{>=} -- against a
 literal, another column, an R variable, or an arithmetic
-expression (\code{(x - y) > 0})
+expression (\code{(x - y) > 0}); for strings, see the string item below
 \item Logic: \code{&}, \code{|}, \code{!}, \code{xor()}, nested to any depth
 (\code{x > 2 & (y < 5 | z == 1)}); \code{&&}/\code{||} are an error that points at
 \code{&}/\code{|}
@@ -58,8 +58,13 @@ every row, \code{NA} rows included)
 \item \code{between(x, lo, hi)} (dplyr's definition: \code{x >= lo & x <= hi},
 with its \code{NA} propagation), \code{near(x, y, tol = )}
 (\code{abs(x - y) < tol}, as \code{dplyr::near()})
-\item String comparisons (\code{==}/\code{!=}/\code{<}/\code{<=}/\code{>}/\code{>=}), against
-a literal or another string column
+\item String comparisons, against a literal or another string column.
+\code{==}, \code{!=}, \code{\%in\%} and \code{between()} always run on the GPU. \code{<}, \code{<=},
+\code{>} and \code{>=} compare strings in byte order on the GPU, while R uses
+the session's collation, so they run on the GPU only when
+\code{Sys.getlocale("LC_COLLATE")} is \code{"C"} or \code{"POSIX"}; under any other
+collation (\code{"en_US.UTF-8"}, say) the call runs in dplyr on the CPU.
+The same holds for \code{min()} and \code{max()} of a string column.
 \item Column-vs-column comparisons for every operator above
 \item Math on columns inside a predicate (\verb{+ - * / \%\% \%/\% ^}, \code{sqrt},
 \code{log}, \code{abs}, etc. -- the same set \code{mutate()} supports)

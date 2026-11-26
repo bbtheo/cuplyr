@@ -25,9 +25,9 @@
 #' Reorder columns of a GPU table
 #'
 #' Moves columns of a GPU table to a new position, similar to
-#' `dplyr::relocate()`. The reorder itself runs via [ast_select()] (schema
-#' + a `gpu_select()` gather, no new C++ binding needed); a rename
-#' (`relocate(df, a = x)`) is schema-only, like [rename.tbl_gpu()].
+#' `dplyr::relocate()`. The reorder runs on the GPU as a column selection,
+#' like [select.tbl_gpu()]; a rename (`relocate(df, a = x)`) only changes the
+#' column names, like [rename.tbl_gpu()].
 #'
 #' @param .data A `tbl_gpu` object created by [tbl_gpu()].
 #' @param ... Columns to move (tidyselect syntax; may include `new = old`

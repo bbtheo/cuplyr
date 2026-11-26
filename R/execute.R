@@ -1346,7 +1346,8 @@ retry_on_sum_overflow <- function(attempt, on_overflow, class = "cuplyr_error_su
 #' }
 #' @name cuplyr-fallback
 #' @aliases cuplyr-fallback
-#' @seealso [cuplyr-options], [cuplyr_fallback_notify()], [fallback-verbs]
+#' @seealso [cuplyr-options] for every cuplyr option, and [fallback-verbs]
+#'   for the verbs that have no GPU implementation.
 NULL
 
 # The mode `option` ("cuplyr.fallback" or "cuplyr.plan_break") asks for:

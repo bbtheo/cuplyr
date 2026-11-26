@@ -1769,10 +1769,6 @@ filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
 #'   `"many-to-one"`, or `"many-to-many"` (silences the advisory warning).
 #'   A violation raises dplyr's `dplyr_error_join_relationship_*`
 #'   condition, with its class vector and first-offending-row bullet.
-#'   Known limitation: with the default `relationship`, a lazy pipeline whose
-#'   `filter()` the optimizer pushes below the join may not emit the advisory
-#'   many-to-many warning, or may report different row numbers in it (the
-#'   rows returned are identical).
 #' @return A `tbl_gpu` with dplyr's own row/column contract for the given
 #'   join type. `right_join()`'s row order is x-matched rows (in `x`'s own
 #'   order) followed by any unmatched `y` rows appended last.
@@ -1796,11 +1792,14 @@ filtering_join <- function(join_type, x, y, by, copy, na_matches, user_env) {
 #'   byte (C locale) order.
 #'
 #' ## In dplyr on the CPU
-#' These run in dplyr and the result comes back to the GPU (with a notice
-#' under `options(cuplyr.fallback = "warn")`):
+#' These, among others, run in dplyr and the result comes back to the GPU
+#' (with a notice under `options(cuplyr.fallback = "warn")`):
 #' - Two `closest()` conditions, `closest()` next to another inequality, and
 #'   rolling keys that are factors, logicals or a Date against a POSIXct.
 #' - A non-equi condition comparing a string with a non-string column.
+#' - Factor keys whose levels differ between `x` and `y`.
+#' - A `Date` key joined to a `POSIXct` key in a zone other than UTC (dplyr
+#'   compares the date as local midnight of that zone).
 #' - `suffix = c("", ...)` when it would still produce a genuine duplicate
 #'   output column name.
 #' - `nest_join()` (not one of the four verbs documented here) always runs
@@ -1877,8 +1876,9 @@ right_join.tbl_gpu <- function(x, y, by = NULL, copy = FALSE,
 #' non-equi conditions (`>=`, `>`, `<=`, `<`, `between()`/`within()`/
 #' `overlaps()`). A single `closest()` condition runs on the GPU (it asks
 #' whether an x row has a closest match), as do non-equi conditions over two
-#' string columns; other shapes run in dplyr on the CPU (with a
-#' `cuplyr.fallback` notification), as for the mutating joins.
+#' string columns; other shapes run in dplyr on the CPU, as for the mutating
+#' joins (set `options(cuplyr.fallback = "warn")` to be told when; see
+#' [cuplyr-fallback]).
 #'
 #' @param x,y `tbl_gpu` objects to join. If `y` is not a `tbl_gpu`, set
 #'   `copy = TRUE` to upload it automatically.

@@ -1279,24 +1279,22 @@ lower_window <- function(ast, source_ptr) {
 #' never partially push GPU ops before discovering the need to fall back
 #' (never half-lower).
 #'
-#' Every window `fn` with a registry `window` entry is lowerable (`"shift"`,
-#' `"rank"`, `"scan"`, and `"agg"` kinds all have C++ support in
-#' `gpu_window()`) -- this predicate only guards against
-#' an `fn` with NO registry entry at all, or a registry entry whose
-#' `window` field is `NULL` (not a window-class op), which should be
-#' unreachable in practice (nothing in `R/window.R`'s decomposition
-#' machinery can produce such a spec) but is checked defensively so a
-#' bug surfaces as a clear internal error instead of silently mis-executing.
+#' Every window `fn` whose registry `window` entry has kind `"shift"`,
+#' `"rank"`, `"scan"` or `"agg"` is lowerable (all four have C++ support in
+#' `gpu_window()`), and so is every `"rolling"` `fn` except `"roll_median"`
+#' (below). Otherwise the predicate is `FALSE`: an `fn` with no registry
+#' entry at all, or a registry entry whose `window` field is `NULL` (not a
+#' window-class op), should be unreachable (nothing in `R/window.R`'s
+#' decomposition machinery produces such a spec) but is checked defensively
+#' so a bug surfaces as a clear internal error instead of silently
+#' mis-executing.
 #'
-#' The `"rolling"` kind is lowerable for every `fn` EXCEPT `"roll_median"`:
-#' libcudf's (checked on 26.10) `rolling_window()`/`grouped_rolling_window()`
-#' have no MEDIAN aggregation instantiation at all in this environment (verified via `nm
-#' -DC libcudf.so`, see the file-level comment above
-#' `ir_parse_roll_call()`, R/ir.R) -- a genuine cudf capability gap, not a
-#' cuplyr bug, so `roll_median()`/`data.table::frollmedian()` mutate()
-#' calls route through `mutate_window_fallback()` exactly like the
-#' an unsupported-kind case below, needing `R/roll.R`'s real
-#' `roll_median()` R function to make that CPU re-run work.
+#' `"roll_median"` is not lowerable: libcudf's `rolling_window()`/
+#' `grouped_rolling_window()` have no MEDIAN aggregation (see the
+#' file-level comment above `ir_parse_roll_call()`, R/ir.R). So
+#' `roll_median()`/`data.table::frollmedian()` mutate() calls go through
+#' `mutate_window_fallback()`, the same whole-call CPU re-run as any other
+#' unlowerable spec, which calls `R/roll.R`'s `roll_median()` R function.
 #'
 #' @param spec A `window_spec()` structure (`R/window.R`)
 #' @return `TRUE`/`FALSE`

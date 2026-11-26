@@ -68,11 +68,16 @@ and the first rows.
 \subsection{Lazy and eager execution}{
 
 A \code{tbl_gpu} is lazy by default: each verb adds a step to a plan, and the
-GPU does the work only when you \code{collect()}, \code{compute()} or print the
-result. Before the plan runs, cuplyr optimizes it: columns no later step
+GPU does the work when a result is needed: \code{collect()}, \code{compute()},
+printing, \code{nrow()}/\code{dim()}, \code{pull()} or \code{$}. A few steps need the result
+of the pending plan as soon as they are called, and run it then, on the
+GPU (see "Plan breaks" in \link{cuplyr-fallback}). Before a plan runs,
+cuplyr optimizes it: columns no later step
 reads are dropped early, consecutive \code{mutate()} calls are combined,
 \code{filter()} conditions move closer to the data (below a \code{mutate()} they
-don't depend on, or into one input of a join), and of several \code{filter()}
+don't depend on, or into an input of a join when that can't change the
+join's result, errors or warnings, for example below a cross join or a
+join with \code{relationship = "many-to-many"}), and of several \code{filter()}
 calls in a row the cheaper conditions run first.
 
 Errors in a verb's arguments (a missing column, a type error) are still

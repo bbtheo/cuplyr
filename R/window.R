@@ -43,8 +43,8 @@
 #'   applicable
 #' @param default An IR literal node (the op's constant fill/default
 #'   value), or `NULL` if not applicable/not supplied
-#' @param na_rm Logical scalar, the call's `na_rm=` setting (`FALSE` unless
-#'   the call sets it)
+#' @param na_rm Logical scalar, the call's `na.rm =` argument (`roll_*()`,
+#'   and `mean()`/`median()` of a date); `FALSE` unless the call sets it
 #' @param input_type GPU type string of an integer `sum()`'s argument
 #'   (`"INT32"` or `"BOOL8"`), `NA_character_` for every other call; a lazy
 #'   `mutate()` runs a call holding an INT32 sum at the verb (see

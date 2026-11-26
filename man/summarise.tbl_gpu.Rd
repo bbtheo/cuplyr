@@ -68,7 +68,8 @@ columns and computed aggregations.
 \code{summarise()} computes one row per group of a GPU table (or one row in all,
 when it is ungrouped), as \code{dplyr::summarise()} does. The aggregations
 listed below run on the GPU; any other expression is evaluated by dplyr on
-the CPU, with a fallback notice that names the reason.
+the CPU (set \code{options(cuplyr.fallback = "warn")} to be told when and why;
+see \link{cuplyr-fallback}).
 }
 \details{
 \subsection{Supported aggregation functions}{
@@ -87,11 +88,16 @@ only overflow with more than 2^31 \code{TRUE} rows in a group, and then raises a
 \code{cuplyr_error_sum_overflow} error at \code{collect()}.
 \item \code{mean(x)} - Arithmetic mean
 \item \code{min(x)} - Minimum value
-\item \code{max(x)} - Maximum value
+\item \code{max(x)} - Maximum value. \code{min()} and \code{max()} of a string column
+run on the GPU only when \code{Sys.getlocale("LC_COLLATE")} is \code{"C"} or
+\code{"POSIX"}: the GPU compares bytes, while R uses the session's
+collation, so under any other collation they run in dplyr on the CPU.
 \item \code{n()} - Count of rows in each group
 \item \code{sd(x)} - Standard deviation
 \item \code{var(x)} - Variance
-\item \code{median(x)} - Median value
+\item \code{median(x)} - Median value, of a double, \code{Date} or \code{POSIXct}
+column. The median of an integer or logical column is an integer or a
+double depending on each group's count, and runs in dplyr on the CPU.
 \item \code{quantile(x, probs)} - A single quantile, \code{probs} one number in
 \verb{[0, 1]}, with R's default \code{type = 7}. Other forms run in dplyr on the
 CPU.
@@ -102,6 +108,9 @@ in the group's current row order
 \item \code{any(x)} / \code{all(x)} - Logical reductions with R's three-valued
 logic
 }
+Some argument types run in dplyr on the CPU whatever the function, for
+example a factor column under any aggregation but \code{n_distinct()}, and
+\code{sum()}, \code{mean()}, \code{min()} or \code{max()} of an integer64 column.
 }
 
 \subsection{Aggregation sub-expressions}{
@@ -145,7 +154,8 @@ An integer \code{sum()} that leaves the integer range in some group is a double
 in every group, so \code{sum(x) + 1L} gives a value in a group whose sum still
 is an integer where dplyr warns about the overflow and gives \code{NA}.
 
-These stay with dplyr, for the reason named in the fallback notice: a
+These stay with dplyr (the fallback notice names the reason, see
+\link{cuplyr-fallback}): a
 function of the group's rows around a reducer (\code{lag(mean(x))},
 \code{cumsum(sum(x))}); \code{^} whose exponent is not a constant other than 0, \code{NA}
 and an infinity (R's \code{NA^0} and \code{1^NA} are 1, the GPU's are \code{NA}); \code{^} with

@@ -3,7 +3,8 @@
 #' `summarise()` computes one row per group of a GPU table (or one row in all,
 #' when it is ungrouped), as `dplyr::summarise()` does. The aggregations
 #' listed below run on the GPU; any other expression is evaluated by dplyr on
-#' the CPU, with a fallback notice that names the reason.
+#' the CPU (set `options(cuplyr.fallback = "warn")` to be told when and why;
+#' see [cuplyr-fallback]).
 #'
 #' @param .data A `tbl_gpu`, usually grouped with [group_by()].
 #' @param ... Name-value pairs of summary functions. The name will be the
@@ -70,11 +71,16 @@
 #'     `cuplyr_error_sum_overflow` error at `collect()`.
 #'   \item `mean(x)` - Arithmetic mean
 #'   \item `min(x)` - Minimum value
-#'   \item `max(x)` - Maximum value
+#'   \item `max(x)` - Maximum value. `min()` and `max()` of a string column
+#'     run on the GPU only when `Sys.getlocale("LC_COLLATE")` is `"C"` or
+#'     `"POSIX"`: the GPU compares bytes, while R uses the session's
+#'     collation, so under any other collation they run in dplyr on the CPU.
 #'   \item `n()` - Count of rows in each group
 #'   \item `sd(x)` - Standard deviation
 #'   \item `var(x)` - Variance
-#'   \item `median(x)` - Median value
+#'   \item `median(x)` - Median value, of a double, `Date` or `POSIXct`
+#'     column. The median of an integer or logical column is an integer or a
+#'     double depending on each group's count, and runs in dplyr on the CPU.
 #'   \item `quantile(x, probs)` - A single quantile, `probs` one number in
 #'     `[0, 1]`, with R's default `type = 7`. Other forms run in dplyr on the
 #'     CPU.
@@ -85,6 +91,9 @@
 #'   \item `any(x)` / `all(x)` - Logical reductions with R's three-valued
 #'     logic
 #' }
+#' Some argument types run in dplyr on the CPU whatever the function, for
+#' example a factor column under any aggregation but `n_distinct()`, and
+#' `sum()`, `mean()`, `min()` or `max()` of an integer64 column.
 #'
 #' ## Aggregation sub-expressions
 #' `column` is not limited to a bare column name: any expression that
@@ -124,7 +133,8 @@
 #' in every group, so `sum(x) + 1L` gives a value in a group whose sum still
 #' is an integer where dplyr warns about the overflow and gives `NA`.
 #'
-#' These stay with dplyr, for the reason named in the fallback notice: a
+#' These stay with dplyr (the fallback notice names the reason, see
+#' [cuplyr-fallback]): a
 #' function of the group's rows around a reducer (`lag(mean(x))`,
 #' `cumsum(sum(x))`); `^` whose exponent is not a constant other than 0, `NA`
 #' and an infinity (R's `NA^0` and `1^NA` are 1, the GPU's are `NA`); `^` with

@@ -43,6 +43,7 @@ As in dplyr, they take no \code{suffix}/\code{keep}/\code{multiple}/\code{unmatc
 non-equi conditions (\code{>=}, \code{>}, \code{<=}, \code{<}, \code{between()}/\code{within()}/
 \code{overlaps()}). A single \code{closest()} condition runs on the GPU (it asks
 whether an x row has a closest match), as do non-equi conditions over two
-string columns; other shapes run in dplyr on the CPU (with a
-\code{cuplyr.fallback} notification), as for the mutating joins.
+string columns; other shapes run in dplyr on the CPU, as for the mutating
+joins (set \code{options(cuplyr.fallback = "warn")} to be told when; see
+\link{cuplyr-fallback}).
 }

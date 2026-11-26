@@ -374,17 +374,20 @@ zero_set_op_result <- function(x, y, verb, keep_one) {
 #' }
 #' As in dplyr, `x` and `y` must have the same column names (the order may
 #' differ: `y` is reordered to `x`'s), and each column must have a common
-#' type: a logical, integer, integer64 and double column combine to the
-#' wider type, a `Date` and a `POSIXct` combine to `POSIXct`, two factors
+#' type: logical, integer and double columns combine to the wider type, a
+#' logical or integer column with an integer64 one gives integer64 (integer64
+#' and double have no common type: an error, as in dplyr), a `Date` and a
+#' `POSIXct` combine to `POSIXct`, two factors
 #' with different levels combine to a factor with the union of the levels,
 #' and a factor next to a character column gives a character column. A
 #' column-type mix that dplyr refuses (integer vs. character, factor vs.
 #' integer, ...) is an error naming the column and both types.
 #'
-#' Two cases run in dplyr on the CPU: tables with duplicated column names,
-#' and a `Date` column next to a `POSIXct` column in a zone other than UTC
-#' (the `Date` becomes local midnight of that zone). A rowwise `x` also runs
-#' on the CPU.
+#' These run in dplyr on the CPU: tables with duplicated column names; a
+#' `Date` column next to a `POSIXct` column in a zone other than UTC (the
+#' `Date` becomes local midnight of that zone); a column with element names
+#' or a one-column matrix column, which dplyr combines by its own rules
+#' (except in `setequal()`); and a rowwise `x`.
 #'
 #' @param x,y `tbl_gpu` objects. `y` may also be a plain `data.frame`
 #'   (uploaded automatically via [tbl_gpu()]) -- unlike the join verbs,
