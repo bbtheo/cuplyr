@@ -12,8 +12,8 @@
 # log is DIR/cuplyr.Rcheck/00check.log and the tests' output
 # DIR/cuplyr.Rcheck/tests/testthat.Rout(.fail).
 #
-# The install compiles with CUPLYR_WERROR_DEPRECATED=1 (deprecated libcudf/RMM
-# calls are errors); set it to 0 to check without.
+# The install compiles with CUPLYR_WERROR_DEPRECATED=1 (deprecated declarations
+# are errors); set it to 0 to check without.
 source "$(dirname "$0")/lib.sh"
 cd "$CUPLYR_WT_ROOT"
 

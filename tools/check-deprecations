@@ -1,27 +1,48 @@
 #!/usr/bin/env bash
-# Fail if the C++ sources call a deprecated libcudf/RMM API (no GPU, no lock).
+# Fail if the C++ sources call a deprecated declaration (no GPU, no lock).
 #
 #   tools/check-deprecations [--src DIR] [--log FILE]
 #
-# Copies DIR's package sources (default: this worktree) to a temp dir, runs
-# configure there with CUPLYR_WERROR_DEPRECATED=1 and compiles every translation
-# unit from scratch, so a call to a deprecated declaration is a compile error
-# with its file:line. Nothing is installed and nothing is written into DIR.
-# Other deprecation warnings (e.g. a deprecated RAPIDS header) are shown, not
-# fatal. Runs in the pixi environment CUPLYR_PIXI_ENV selects, so
+# Copies DIR's package sources (default: this worktree) to a temp dir and
+# compiles every translation unit from scratch with CUPLYR_WERROR_DEPRECATED=1,
+# so a call to a deprecated declaration is a compile error with its file:line.
+# Nothing is installed and nothing is written into DIR. make runs with -k, so
+# one run lists every call site.
+#
+# The check fails on ANY deprecated declaration reached from a non-system
+# header, not only libcudf/RMM ones: an R, Rcpp or CUDA deprecation turns it
+# red too. Port the call (src/cuplyr_compat.hpp holds the version-dependent
+# ones); never silence it. A deprecated *header* (#pragma GCC warning, as
+# RMM 26.02's is) is shown in the summary but is not fatal.
+#
+# The summary after the build output lists the compiler's deprecation warnings
+# and errors. --log FILE also gets the full compiler output. Runs in the pixi
+# environment CUPLYR_PIXI_ENV selects, so
 # `CUPLYR_PIXI_ENV=rapids2602 tools/check-deprecations` checks RAPIDS 26.02.
-# --log FILE gets the full compiler output. The pre-merge gate runs this.
+# The pre-merge gate runs this.
 source "$(dirname "$0")/lib.sh"
-src="$CUPLYR_WT_ROOT"; log=/dev/null
+
+usage() { echo "usage: tools/check-deprecations [--src DIR] [--log FILE]" >&2; exit 2; }
+# Bad input: say so in the verdict's own words, and exit 2.
+bad_input() { echo "deprecations: FAIL ($1)"; exit 2; }
+
+src="$CUPLYR_WT_ROOT"; log=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --src) src="$2"; shift 2 ;;
-    --log) log="$2"; shift 2 ;;
-    *) echo "usage: tools/check-deprecations [--src DIR] [--log FILE]" >&2; exit 2 ;;
+    --src) [[ $# -ge 2 ]] || usage; src="$2"; shift 2 ;;
+    --log) [[ $# -ge 2 ]] || usage; log="$2"; shift 2 ;;
+    *) usage ;;
   esac
 done
+[[ -d "$src" ]] || bad_input "--src $src is not a directory"
 src="$(cd "$src" && pwd)"
-log="$(realpath -m "$log")"
+for need in DESCRIPTION NAMESPACE configure src; do
+  [[ -e "$src/$need" ]] || bad_input "$src has no $need: not a package source tree"
+done
+if [[ -n "$log" ]]; then
+  log="$(realpath -m "$log")"
+  : > "$log" || bad_input "cannot write --log $log"
+fi
 cuplyr_activate_env
 
 tmp="$(mktemp -d)"
@@ -29,19 +50,45 @@ trap 'rm -rf "$tmp"' EXIT
 tar -C "$src" -cf - --exclude='*.o' --exclude='*.so' --exclude=src/Makevars \
   --exclude=src/.cuplyr-build-env DESCRIPTION NAMESPACE configure src | tar -C "$tmp" -xf -
 
-cd "$tmp"
+# R CMD INSTALL (inside compile_dll) runs ./configure itself, with this switch.
 export CUPLYR_WERROR_DEPRECATED=1
-rc=0
-{
-  ./configure
-  Rscript -e 'pkgbuild::compile_dll(".", debug = FALSE, quiet = FALSE)'
-} 2>&1 | tee "$log" || rc=$?
-# pipefail makes rc the first failing stage; show what was found either way.
-echo "--- deprecation lines ---"
-grep -n 'deprecated' "$log" || echo "(none)"
-if [[ $rc -eq 0 ]]; then
-  echo "deprecations: PASS (no deprecated libcudf/RMM declarations are called)"
-else
-  echo "deprecations: FAIL (see the errors above)"
+export MAKEFLAGS="$MAKEFLAGS -k"
+build_log="$tmp/build.log"
+
+cd "$tmp"
+# The build output is shown as it comes, kept in $build_log for the summary
+# and copied to --log. rc is the build's own exit status, not tee's.
+set +e
+Rscript -e 'pkgbuild::compile_dll(".", debug = FALSE, quiet = FALSE)' 2>&1 \
+  | tee "$build_log" ${log:+"$log"}
+rc=${PIPESTATUS[0]}
+set -e
+
+# What the compiler said about deprecations: warning and error lines only, once
+# each (a header's own line repeats for every translation unit that includes it).
+echo "--- deprecation diagnostics ---"
+diagnostics="$(grep -iE ': (warning|error): .*deprecated' "$build_log" | awk '!seen[$0]++' || true)"
+if [[ -n "$diagnostics" ]]; then echo "$diagnostics"; else echo "(none)"; fi
+
+if [[ $rc -ne 0 ]]; then
+  if grep -qiE ': error: .*deprecated' "$build_log"; then
+    echo "deprecations: FAIL (deprecated declarations are called, listed above)"
+  else
+    echo "deprecations: FAIL (the build failed; see the output above)"
+  fi
+  exit "$rc"
 fi
-exit "$rc"
+
+# A PASS must mean the flag was on. Every compile line has to carry it; if one
+# doesn't (configure or Makevars.in lost the switch, or a user Makevars
+# overrides the flags), the run proved nothing.
+compile_lines="$(grep -E ' -c [^ ]+\.(cpp|cc|cxx) ' "$build_log" || true)"
+if [[ -z "$compile_lines" ]]; then
+  echo "deprecations: FAIL (no compile command in the build output, so nothing was checked)"
+  exit 1
+fi
+if grep -qvF -- '-Werror=deprecated-declarations' <<< "$compile_lines"; then
+  echo "deprecations: FAIL (a compile command lacks -Werror=deprecated-declarations: configure, src/Makevars.in or a user Makevars dropped the switch)"
+  exit 1
+fi
+echo "deprecations: PASS (no deprecated declaration is called)"

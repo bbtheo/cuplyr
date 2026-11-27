@@ -38,7 +38,7 @@ ok=1
 summary="$out/summary.txt"
 : > "$summary"
 
-if tools/check-deprecations --log "$out/deprecations.log" > "$out/deprecations.out" 2>&1; then
+if tools/check-deprecations > "$out/deprecations.log" 2>&1; then
   echo "deprecations: PASS" >> "$summary"
 else
   echo "deprecations: FAIL" >> "$summary"; ok=0

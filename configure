@@ -57,9 +57,10 @@ force_cuda_stubs() {
 }
 
 # Opt-in: compile with -Werror=deprecated-declarations
-# (CUPLYR_WERROR_DEPRECATED=1/true/yes/on), so a call to a deprecated libcudf or
-# RMM API fails the build. Off by default: a new RAPIDS release must not break
-# an install. Used by tools/check-deprecations, the pre-merge gate and tools/check.
+# (CUPLYR_WERROR_DEPRECATED=1/true/yes/on), so a call to a deprecated
+# declaration (libcudf, RMM, ...) fails the build. Off by default: a new RAPIDS
+# release must not break an install. Used by tools/check-deprecations, the
+# pre-merge gate and tools/check.
 werror_deprecated() {
     case "${CUPLYR_WERROR_DEPRECATED:-}" in
         1|true|TRUE|yes|YES|on|ON) return 0 ;;

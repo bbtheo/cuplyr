@@ -128,10 +128,11 @@ issue before you start so two people don't do the same work (see
 
 Every test needs a CUDA GPU, and GitHub's free runners have none. A
 maintainer runs the gate on a workstation GPU instead, against your branch
-merged into the current default branch. All three parts must pass:
+merged into the current default branch. All four parts must pass:
 
 | Part | What it checks | Run it yourself |
 |---|---|---|
+| Deprecations | The C++ compiles with deprecated declarations as errors (no GPU needed) | `tools/check-deprecations` |
 | Test suite | Every testthat file, no failures or errors | `pixi run test` |
 | Performance | No benchmark is more than 1.5x slower than the recorded baseline | `pixi run perf` |
 | dplyr conformance | dplyr's own test suite, run against GPU tables. A test that passes today must still pass | `pixi run conformance` |
@@ -213,18 +214,32 @@ RAPIDS deprecates APIs a release or two before it removes them. Setting
 `CUPLYR_WERROR_DEPRECATED=1` (also `true`, `yes`, `on`) when `./configure`
 runs adds `-Werror=deprecated-declarations` to the compile flags, so a call to
 a deprecated declaration fails the build with its file and line. It is off by
-default, so a new RAPIDS release never breaks an ordinary install, and
-deprecation warnings are never silenced.
+default, so a new RAPIDS release never breaks an ordinary install. cuplyr's
+sources never silence a deprecation (no `#pragma GCC diagnostic ignored`, no
+`-Wno-deprecated`); a test fails on either. Port the call instead, with a
+wrapper in `src/cuplyr_compat.hpp` when 26.02 lacks the replacement.
 
 `tools/check-deprecations` compiles a fresh copy of the sources with the switch
 on, with no GPU, no lock and nothing installed or written into your checkout.
-It shows other deprecation warnings (such as a deprecated RAPIDS header) without
-failing on them. Run it on either series:
+It builds with `make -k`, so one run lists every call site, and it ends with a
+summary of the compiler's deprecation warnings and errors. Run it on either
+series:
 
 ```bash
 tools/check-deprecations
 CUPLYR_PIXI_ENV=rapids2602 tools/check-deprecations
 ```
+
+Two things to know about what it reports:
+
+- It fails on any deprecated declaration reached from a non-system header, not
+  only libcudf and RMM ones: an R, Rcpp or CUDA header deprecating something
+  cuplyr calls turns it red as well. The fix is the same, move to the
+  replacement (or, if only one RAPIDS series has it, a wrapper in
+  `src/cuplyr_compat.hpp`).
+- A deprecated *header* (a `#pragma GCC warning`, as RMM 26.02's
+  `cuda_stream_view.hpp` raises) is listed in the summary but does not fail the
+  check: it is RAPIDS's own include, not a call cuplyr makes.
 
 The pre-merge gate runs it first, and `tools/check` builds with the switch on.
 
