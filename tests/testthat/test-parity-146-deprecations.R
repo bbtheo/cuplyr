@@ -119,14 +119,30 @@ test_that("#146: deprecations are detected, never suppressed", {
   expect_false(any(grepl("-Wno-error", makevars, fixed = TRUE)))
 })
 
+# The check's summary: the lines between its "--- deprecation ..." marker and
+# its "deprecations: PASS|FAIL" verdict.
+p146_summary <- function(output) {
+  first <- grep("^--- deprecation", output)
+  last <- grep("^deprecations: (PASS|FAIL)", output)
+  if (length(first) == 0L || length(last) == 0L || max(last) <= first[1L]) {
+    return(NA_character_)
+  }
+  output[seq.int(first[1L] + 1L, length.out = max(last) - first[1L] - 1L)]
+}
+
 test_that("#146: the check fails on a call to a deprecated API and names the call site", {
   p146_skip_if_no_source_tree()
+  # One deprecated call in a header the .cpp includes, one in the .cpp.
+  calls <- c(
+    '#pragma once',
+    '[[deprecated("probe146: use cuplyr_probe_new_api()")]] inline int cuplyr_probe_old_api() { return 1; }',
+    'inline int cuplyr_probe_from_header() { return cuplyr_probe_old_api(); }'
+  )
   probe <- c(
     '#include "cuplyr_compat.hpp"',
+    '#include "probe_calls.hpp"',
     '',
-    '[[deprecated("probe146: use cuplyr_probe_new_api()")]] inline int cuplyr_probe_old_api() { return 1; }',
-    '',
-    'extern "C" int cuplyr_probe_self() { return cuplyr_probe_old_api(); }',
+    'extern "C" int cuplyr_probe_self() { return cuplyr_probe_old_api() + cuplyr_probe_from_header(); }',
     '',
     '#if CUPLYR_CUDF_NEW_API',
     '// Deprecated in libcudf 26.10 in favour of apply_retention_mask().',
@@ -136,17 +152,27 @@ test_that("#146: the check fails on a call to a deprecated API and names the cal
     '}',
     '#endif'
   )
-  dir <- p146_mini_pkg(list(probe.cpp = probe))
+  dir <- p146_mini_pkg(list(probe.cpp = probe, probe_calls.hpp = calls))
   res <- p146_run_check(dir)
   out <- paste(res$output, collapse = "\n")
 
   expect_false(identical(res$status, 0L), label = "check exit status is non-zero")
-  expect_match(out, "probe\\.cpp:[0-9]+", label = "check output names the file and line")
-  expect_match(out, "cuplyr_probe_old_api", fixed = TRUE)
-  expect_match(out, "deprecated-declarations", fixed = TRUE)
+  expect_match(out, "deprecations: FAIL", fixed = TRUE)
+  # The summary lists the compiler's diagnostics with file:line, and only them
+  # (no compile command lines, which all carry the flag).
+  summary <- p146_summary(res$output)
+  expect_false(anyNA(summary), label = paste("the check prints a summary section\n", out))
+  diag <- "\\[-Werror=deprecated-declarations\\]"
+  expect_true(any(grepl(paste0("probe\\.cpp:[0-9]+:[0-9]+: error: .*cuplyr_probe_old_api.*", diag), summary)),
+              label = paste("summary names the call in probe.cpp\n", paste(summary, collapse = "\n")))
+  expect_true(any(grepl(paste0("probe_calls\\.hpp:[0-9]+:[0-9]+: error: .*cuplyr_probe_old_api.*", diag), summary)),
+              label = paste("summary names the call in probe_calls.hpp\n", paste(summary, collapse = "\n")))
   if (p146_cudf_has_new_api()) {
-    expect_match(out, "apply_boolean_mask", fixed = TRUE)
+    expect_true(any(grepl(paste0("probe\\.cpp:[0-9]+:[0-9]+: error: .*apply_boolean_mask.*", diag), summary)),
+                label = paste("summary names the libcudf call\n", paste(summary, collapse = "\n")))
   }
+  expect_false(any(grepl("-fpic|-c probe\\.cpp", summary)),
+               label = "summary holds no compile command lines")
   # The sources are compiled in a copy: nothing is written next to them.
   expect_identical(
     list.files(file.path(dir, "src"), pattern = "(\\.o|\\.so)$|^Makevars$"),
@@ -177,8 +203,63 @@ test_that("#146: code using only current APIs passes the check, header deprecati
   out <- paste(res$output, collapse = "\n")
 
   expect_identical(res$status, 0L, label = paste("check exit status\n", out))
-  # Shown, not hidden.
-  expect_match(out, "probe146: this header is deprecated", fixed = TRUE)
+  expect_match(out, "deprecations: PASS", fixed = TRUE)
+  # Shown in the summary, not hidden.
+  summary <- p146_summary(res$output)
+  expect_true(any(grepl("probe_old_header\\.hpp:[0-9]+.*warning: .*probe146: this header is deprecated", summary)),
+              label = paste("summary shows the header deprecation\n", paste(summary, collapse = "\n")))
+  expect_false(any(grepl("-fpic|-c probe\\.cpp", summary)),
+               label = "summary holds no compile command lines")
+})
+
+test_that("#146: cuplyr's sources never silence a deprecation", {
+  p146_skip_if_no_source_tree()
+  # The check is only as good as the sources it compiles: a
+  # `#pragma GCC diagnostic ignored "-Wdeprecated-declarations"` around a call
+  # makes it pass silently (GCC's `ignored` beats -Werror=). No exceptions.
+  src <- file.path(p146_root(), "src")
+  files <- list.files(src, pattern = "\\.(c|cc|cpp|h|hpp|cu|cuh)$|^Makevars", full.names = TRUE)
+  files <- files[basename(files) != "Makevars"]  # generated; Makevars.in is checked
+  pattern <- paste(
+    c('diagnostic\\s+(ignored|warning)\\s+"-Wdeprecated',
+      "-Wno-deprecated", "-Wno-error", "IGNORE_DEPRECATED", "DISABLE_DEPRECATION",
+      "_SILENCE_[A-Z_]*DEPRECAT"),
+    collapse = "|"
+  )
+  hits <- unlist(lapply(files, function(f) {
+    lines <- readLines(f, warn = FALSE)
+    i <- grep(pattern, lines, perl = TRUE)
+    if (length(i)) paste0(basename(f), ":", i, ": ", trimws(lines[i])) else character()
+  }))
+  expect_identical(hits, character())
+})
+
+test_that("#146: a POSIXct mean still rounds half away from zero, eager, lazy, grouped and windowed", {
+  skip_if_no_gpu()
+  # Half-microsecond means either side of the epoch, and at +-2e15 microseconds
+  # (2033 / 1906), where the double mean is still exact.
+  ties <- tibble::tibble(
+    g = rep(1:6, each = 2),
+    t = .POSIXct(c(0, 1e-6, -1e-6, 0, 2e-6, 3e-6, -3e-6, -2e-6,
+                   2e9, 2e9 + 1e-6, -2e9 - 1e-6, -2e9), tz = "UTC")
+  )
+  want_us <- c(1, -1, 3, -3, 2e15 + 1, -2e15 - 1)
+  # What collect() gives for those microsecond counts.
+  want <- as.numeric(collect(tbl_gpu(tibble::tibble(t = .POSIXct(want_us / 1e6, tz = "UTC"))))$t)
+  for (lazy in c(FALSE, TRUE)) {
+    gt <- tbl_gpu(ties, lazy = lazy)
+    got <- collect(summarise(gt, m = mean(t), .by = g))
+    expect_identical(as.numeric(got$m), want, label = paste("summarise, lazy =", lazy))
+    got <- collect(mutate(gt, m = mean(t), .by = g))
+    expect_identical(as.numeric(got$m), rep(want, each = 2), label = paste("mutate, lazy =", lazy))
+    got <- collect(summarise(group_by(gt, g), m = median(t)))
+    expect_identical(as.numeric(got$m), want, label = paste("median, lazy =", lazy))
+  }
+  # NA and an all-NA group stay NA.
+  na <- tibble::tibble(g = c(1L, 1L, 2L), t = .POSIXct(c(1e-6, NA, NA), tz = "UTC"))
+  got <- collect(summarise(tbl_gpu(na), m = mean(t, na.rm = TRUE), n = mean(t), .by = g))
+  expect_identical(is.na(got$m), c(FALSE, TRUE))
+  expect_identical(is.na(got$n), c(TRUE, TRUE))
 })
 
 test_that("#146: the merge gate and the release check run with deprecations as errors", {
