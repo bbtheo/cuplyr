@@ -88,6 +88,15 @@
 # keeps its meaning. A result that collects to a tibble from a bare data.frame
 # fixture fails such a test honestly.
 #
+# `class<-` in the shim env is the inverse of that class(): a test that writes
+# `class(x) <- c("myclass", class(x))` on a tbl_gpu means "add a subclass", so
+# the classes in front of what class() reported go in front of the tbl_gpu's own
+# class (c("myclass", "tbl_gpu", "tbl")), and class() then reports them in front
+# of its previous report. Without it the assignment would write the collected
+# class (grouped_df, ...) onto the tbl_gpu and corrupt it. Any other assignment
+# (a plain object, NULL, a value that doesn't end with the reported class) is
+# base R's.
+#
 # expect_warning()/expect_no_warning() compute a lazy tbl_gpu value inside the
 # expectation, so a warning raised when the result is computed (the many-to-many
 # join warning) is seen. The run uses testthat's package = "dplyr", so
@@ -659,15 +668,31 @@ cf_make_shim_env <- function(state, upload = TRUE) {
       fixture <- cf_fixture_class(state, x)
       is_fixture <- !is.null(fixture) &&
         length(.subset2(x, "groups")) == 0L && is.null(.subset2(x, "lazy_ops"))
+      # classes the tbl_gpu carries in front of "tbl_gpu" (see `class<-`)
+      own <- base::class(x)
+      extra <- own[seq_len(match("tbl_gpu", own) - 1L)]
       if (is_fixture) {
-        return(fixture)
+        return(c(extra, fixture))
       }
       # what collect() gives it: it restores grouping, rowwise and the bare
       # data.frame class (cf_collect() is for comparisons and always a tibble)
       got <- tryCatch(dplyr::collect(x), error = function(e) NULL)
-      return(base::class(if (is.null(got)) cf_collect(x) else got))
+      return(c(extra, base::class(if (is.null(got)) cf_collect(x) else got)))
     }
     base::class(x)
+  }
+
+  # The inverse of `class` above, for `class(x) <- c("sub", class(x))`.
+  env$`class<-` <- function(x, value) {
+    if (inherits(x, "tbl_gpu")) {
+      reported <- env$class(x)
+      n <- length(reported)
+      k <- length(value)
+      if (k >= n && identical(as.character(value[(k - n + 1L):k]), reported)) {
+        value <- c(value[seq_len(k - n)], base::class(x))
+      }
+    }
+    base::`class<-`(x, value)
   }
 
   # Harness-only column accessors (dplyr tests extract columns with `$`/`[[`
