@@ -16,7 +16,7 @@
 
 context:
   # Kept equal to Version in DESCRIPTION (a test checks it).
-  version: "0.2.0"
+  version: "0.2.0.9000"
 
 package:
   name: r-cuplyr

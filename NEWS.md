@@ -1,3 +1,5 @@
+# cuplyr (development version)
+
 # cuplyr 0.2.0
 
 cuplyr 0.2.0 brings most of dplyr to the GPU. Nearly every dplyr verb now
