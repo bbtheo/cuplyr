@@ -56,6 +56,17 @@ force_cuda_stubs() {
     return 1
 }
 
+# Opt-in: compile with -Werror=deprecated-declarations
+# (CUPLYR_WERROR_DEPRECATED=1/true/yes/on), so a call to a deprecated libcudf or
+# RMM API fails the build. Off by default: a new RAPIDS release must not break
+# an install. Used by tools/check-deprecations, the pre-merge gate and tools/check.
+werror_deprecated() {
+    case "${CUPLYR_WERROR_DEPRECATED:-}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    esac
+    return 1
+}
+
 # Compare semantic versions (major.minor), returns true if current >= required.
 version_at_least() {
     local current="$1"
@@ -615,6 +626,12 @@ if force_cuda_stubs; then
     LINK_CUDA_EXPR=(-e "s| -lcuda | -Wl,--push-state,--as-needed -lcuda -Wl,--pop-state |")
 fi
 
+WERROR_DEPRECATED_FLAG=""
+if werror_deprecated; then
+    WERROR_DEPRECATED_FLAG="-Werror=deprecated-declarations"
+    echo "CUPLYR_WERROR_DEPRECATED is set: deprecated declarations are compile errors."
+fi
+
 # Generate Makevars from template
 sed "${LINK_CUDA_EXPR[@]}" \
     -e "s|@CUDA_HOME@|$CUDA_HOME|g" \
@@ -627,6 +644,7 @@ sed "${LINK_CUDA_EXPR[@]}" \
     -e "s|@RMM_INCLUDE@|$RMM_INCLUDE|g" \
     -e "s|@CCCL_INCLUDE@|$CCCL_INCLUDE|g" \
     -e "s|@RAPIDS_RPATHS@|$RAPIDS_RPATHS|g" \
+    -e "s|@WERROR_DEPRECATED_FLAG@|$WERROR_DEPRECATED_FLAG|g" \
     src/Makevars.in > src/Makevars
 
 # The substitution above matches the spacing around -lcuda in the template. If

@@ -5,6 +5,8 @@
 #   tools/merge-gate <out-dir>
 #
 # Passes only if ALL of:
+#   0. tools/check-deprecations: a fresh build with deprecated libcudf/RMM
+#      calls as errors compiles (CPU-only, runs first)
 #   1. the testthat suite has no fail/error
 #   2. the perf gate passes against the main checkout's perf_baseline.json
 #      (each benchmark's calibrated median goes to $out/perf_observations.tsv,
@@ -35,6 +37,12 @@ baseline="$CUPLYR_PARITY_DIR/conformance_baseline.tsv"
 ok=1
 summary="$out/summary.txt"
 : > "$summary"
+
+if tools/check-deprecations --log "$out/deprecations.log" > "$out/deprecations.out" 2>&1; then
+  echo "deprecations: PASS" >> "$summary"
+else
+  echo "deprecations: FAIL" >> "$summary"; ok=0
+fi
 
 if Rscript tools/run-tests.R suite --out "$out/suite.tsv" > "$out/suite.log" 2>&1; then
   echo "suite: PASS" >> "$summary"

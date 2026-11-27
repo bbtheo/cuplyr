@@ -207,6 +207,27 @@ try cuplyr as a user would.
 optimizer, joins, factors and the libcudf calls to be careful with. Read it
 before a larger change.
 
+### Deprecated libcudf and RMM calls
+
+RAPIDS deprecates APIs a release or two before it removes them. Setting
+`CUPLYR_WERROR_DEPRECATED=1` (also `true`, `yes`, `on`) when `./configure`
+runs adds `-Werror=deprecated-declarations` to the compile flags, so a call to
+a deprecated declaration fails the build with its file and line. It is off by
+default, so a new RAPIDS release never breaks an ordinary install, and
+deprecation warnings are never silenced.
+
+`tools/check-deprecations` compiles a fresh copy of the sources with the switch
+on, with no GPU, no lock and nothing installed or written into your checkout.
+It shows other deprecation warnings (such as a deprecated RAPIDS header) without
+failing on them. Run it on either series:
+
+```bash
+tools/check-deprecations
+CUPLYR_PIXI_ENV=rapids2602 tools/check-deprecations
+```
+
+The pre-merge gate runs it first, and `tools/check` builds with the switch on.
+
 ## Code guidelines
 
 ### Exports

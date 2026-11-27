@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Fail if the C++ sources call a deprecated libcudf/RMM API (no GPU, no lock).
+#
+#   tools/check-deprecations [--src DIR] [--log FILE]
+#
+# Copies DIR's package sources (default: this worktree) to a temp dir, runs
+# configure there with CUPLYR_WERROR_DEPRECATED=1 and compiles every translation
+# unit from scratch, so a call to a deprecated declaration is a compile error
+# with its file:line. Nothing is installed and nothing is written into DIR.
+# Other deprecation warnings (e.g. a deprecated RAPIDS header) are shown, not
+# fatal. Runs in the pixi environment CUPLYR_PIXI_ENV selects, so
+# `CUPLYR_PIXI_ENV=rapids2602 tools/check-deprecations` checks RAPIDS 26.02.
+# --log FILE gets the full compiler output. The pre-merge gate runs this.
+source "$(dirname "$0")/lib.sh"
+src="$CUPLYR_WT_ROOT"; log=/dev/null
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --src) src="$2"; shift 2 ;;
+    --log) log="$2"; shift 2 ;;
+    *) echo "usage: tools/check-deprecations [--src DIR] [--log FILE]" >&2; exit 2 ;;
+  esac
+done
+src="$(cd "$src" && pwd)"
+log="$(realpath -m "$log")"
+cuplyr_activate_env
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+tar -C "$src" -cf - --exclude='*.o' --exclude='*.so' --exclude=src/Makevars \
+  --exclude=src/.cuplyr-build-env DESCRIPTION NAMESPACE configure src | tar -C "$tmp" -xf -
+
+cd "$tmp"
+export CUPLYR_WERROR_DEPRECATED=1
+rc=0
+{
+  ./configure
+  Rscript -e 'pkgbuild::compile_dll(".", debug = FALSE, quiet = FALSE)'
+} 2>&1 | tee "$log" || rc=$?
+# pipefail makes rc the first failing stage; show what was found either way.
+echo "--- deprecation lines ---"
+grep -n 'deprecated' "$log" || echo "(none)"
+if [[ $rc -eq 0 ]]; then
+  echo "deprecations: PASS (no deprecated libcudf/RMM declarations are called)"
+else
+  echo "deprecations: FAIL (see the errors above)"
+fi
+exit "$rc"

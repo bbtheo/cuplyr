@@ -89,6 +89,7 @@ work around a block; if a rule stops legitimate work, say so in your report.
 | Command | Lock | Use |
 |---|---|---|
 | `tools/build` | no | Compile this worktree's C++ (runs `./configure` first if needed). Do this after C++ edits so locked runs don't compile. |
+| `tools/check-deprecations [--src DIR] [--log f]` | no | Compile a fresh copy of the sources with `CUPLYR_WERROR_DEPRECATED=1` (deprecated libcudf/RMM calls are errors). The merge gate runs it. |
 | `tools/test-file <file>... [--out f.tsv]` | yes | Run specific test files. |
 | `tools/r '<R expr>'` | yes | Ad-hoc R with the package loaded and dplyr attached. |
 | `tools/document` | yes | Regenerate NAMESPACE, man/, Rcpp exports. |
